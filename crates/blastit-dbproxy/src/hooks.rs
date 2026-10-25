@@ -48,8 +48,9 @@ const TOO_MANY_MESSAGE: &str =
 
 /// What a view is told when the upstream database cannot be reached. It names
 /// neither the host nor the database: a sandboxed view has no business knowing
-/// where the real database lives.
-const UPSTREAM_MESSAGE: &str = "the upstream database is unreachable";
+/// where the real database lives, and the same fixed message is what a view
+/// gets for *every* upstream-side setup failure — dial, TLS or authentication.
+pub(crate) const UPSTREAM_MESSAGE: &str = "the upstream database could not be reached";
 
 /// What a view is told when the function-call sub-protocol is used. The
 /// sub-protocol carries no SQL text, so there is nothing an allowlist could
@@ -86,6 +87,7 @@ impl AuthHook for DbproxyAuth {
             None => {
                 // Unreachable in practice: dbproxy tags every listener it
                 // serves itself. Refuse loudly rather than pick a default.
+                self.shared.note_refusal(ctx.connection.id);
                 self.shared.emit_pg_refused(
                     None,
                     "unknown",
@@ -99,10 +101,12 @@ impl AuthHook for DbproxyAuth {
         };
         let route = listener.spec.route.as_str();
         let proxy = Arc::clone(&listener.proxy);
+        let connection = ctx.connection.id;
 
         let credentials = ctx.connection.transport.message_credentials();
         if !credentials_match(listener.spec.uid, credentials) {
-            self.shared.emit_pg_refused(
+            self.refuse(
+                connection,
                 Some(route),
                 &proxy.name,
                 PgRefuseReason::CredentialsMismatch,
@@ -110,28 +114,34 @@ impl AuthHook for DbproxyAuth {
             return Err(AuthError::new(CREDENTIALS_SQLSTATE, CREDENTIALS_MESSAGE));
         }
 
-        if proxy.needs_probe() {
-            if !proxy.upstream_answers().await {
-                proxy.mark_reachable(false);
-                self.shared.emit_pg_refused(
+        // The connection slot comes first: a probe is a connection to the
+        // upstream and counts against the proxy's cap, and the permit is kept
+        // for the session's lifetime once the session is committed.
+        let slot = match proxy.take_slot() {
+            Some(slot) => slot,
+            None => {
+                self.refuse(
+                    connection,
                     Some(route),
                     &proxy.name,
-                    PgRefuseReason::UpstreamUnreachable,
+                    PgRefuseReason::TooManyConnections,
                 );
-                return Err(AuthError::new(UPSTREAM_SQLSTATE, UPSTREAM_MESSAGE));
+                return Err(AuthError::new(TOO_MANY_SQLSTATE, TOO_MANY_MESSAGE));
             }
-            proxy.mark_reachable(true);
-        }
+        };
 
-        if !proxy.acquire(ctx.connection.id) {
-            self.shared.emit_pg_refused(
+        if !proxy.upstream_answers().await {
+            self.refuse(
+                connection,
                 Some(route),
                 &proxy.name,
-                PgRefuseReason::TooManyConnections,
+                PgRefuseReason::UpstreamUnreachable,
             );
-            return Err(AuthError::new(TOO_MANY_SQLSTATE, TOO_MANY_MESSAGE));
+            // `slot` is dropped here: a refused connection costs no slot.
+            return Err(AuthError::new(UPSTREAM_SQLSTATE, UPSTREAM_MESSAGE));
         }
 
+        proxy.store_slot(connection, slot);
         let (user, password) = proxy.credentials();
         Ok(UpstreamTarget {
             endpoint: Endpoint::tcp(proxy.host.clone(), proxy.port),
@@ -155,6 +165,14 @@ impl DbproxyAuth {
     ) -> Option<&'a crate::state::ListenerRuntime> {
         let index = connection.listener_tag()?.parse::<usize>().ok()?;
         self.shared.listener(index)
+    }
+
+    /// Logs a refusal and marks the connection, so the setup gate delivers the
+    /// `FATAL` pregresql is about to write — dbproxy's own message — instead of
+    /// treating every setup-phase error as an upstream failure.
+    fn refuse(&self, connection: u64, route: Option<&str>, proxy: &str, reason: PgRefuseReason) {
+        self.shared.note_refusal(connection);
+        self.shared.emit_pg_refused(route, proxy, reason);
     }
 }
 
@@ -208,6 +226,11 @@ impl QueryHook for DbproxyQuery {
                 match listener.allowlist.check(ctx.sql) {
                     Decision::Allowed => QueryDecision::Allow,
                     Decision::Denied { normalized } => {
+                        let kind = if is_copy(&normalized) {
+                            SqlKind::Copy
+                        } else {
+                            kind
+                        };
                         self.shared.emit_sql_denied(
                             route,
                             pid,
@@ -229,27 +252,33 @@ impl QueryHook for DbproxyQuery {
                     ),
                 }
             }
-            QueryKind::Bind | QueryKind::Execute => {
+            // `Parse` and `Query` are the gates, because they are the only
+            // messages that carry SQL: a statement is authorised when it is
+            // parsed or run. `Bind` is the safety net for the case where
+            // pregresql is asked about a statement it never saw, which cannot
+            // have been authorised.
+            QueryKind::Bind => {
                 if ctx.statement_known {
                     return QueryDecision::Allow;
                 }
-                let kind = match ctx.kind {
-                    QueryKind::Execute => SqlKind::Other("execute".to_string()),
-                    _ => SqlKind::Other("bind".to_string()),
+                let sql = normalize(ctx.sql);
+                let kind = if is_copy(&sql) {
+                    SqlKind::Copy
+                } else {
+                    SqlKind::Other("bind".to_string())
                 };
-                self.shared.emit_sql_denied(
-                    route,
-                    pid,
-                    proxy,
-                    kind,
-                    normalize(ctx.sql),
-                    in_transaction,
-                );
+                self.shared
+                    .emit_sql_denied(route, pid, proxy, kind, sql, in_transaction);
                 QueryDecision::deny_with(
                     DENIED_SQLSTATE,
                     format!("statement denied for route {route}"),
                 )
             }
+            // pregresql never asks about an `Execute` (it relays the message,
+            // and the `Bind` before it was already authorised), but a hook must
+            // answer something: an `Execute` runs a statement that was
+            // authorised when it was parsed.
+            QueryKind::Execute => QueryDecision::Allow,
             QueryKind::FunctionCall => {
                 self.shared.emit_sql_denied(
                     route,
@@ -262,6 +291,35 @@ impl QueryHook for DbproxyQuery {
                 QueryDecision::deny_with(DENIED_SQLSTATE, FUNCTION_CALL_MESSAGE)
             }
         }
+    }
+}
+
+/// Whether a normalised statement is a `COPY`.
+///
+/// This is a keyword check, not a parser: blastit deliberately does not parse
+/// SQL, and the only thing this decides is which `kind` a *denied* statement
+/// reports. Only the text's first word is looked at, and only when it is
+/// separated from the rest by a delimiter, so `COPYING` is not a `COPY`.
+fn is_copy(normalized_sql: &str) -> bool {
+    let mut chars = normalized_sql.char_indices();
+    let mut end = 0;
+    for (index, character) in chars.by_ref() {
+        if character.is_ascii_alphabetic() || character == '_' {
+            end = index + character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return false;
+    }
+    let (word, rest) = normalized_sql.split_at(end);
+    if !word.eq_ignore_ascii_case("copy") {
+        return false;
+    }
+    match rest.chars().next() {
+        None => true,
+        Some(character) => character.is_whitespace() || character == '(' || character == ';',
     }
 }
 
@@ -454,19 +512,33 @@ mod tests {
         );
 
         // The first session ends: its slot comes back.
-        shared.finish(0, 1, &Ok(()));
+        let runtime = shared.listener(0).expect("the listener");
+        runtime.proxy.release_slot(1);
         let third = resolve(&shared, &connection(3, "0", uid)).await;
         assert!(third.is_ok(), "{third:?}");
 
-        // A failed session that never reached the upstream does not leak a
-        // slot either.
-        shared.finish(
-            0,
-            3,
-            &Err(pregresql::Error::other("cannot connect to upstream")),
-        );
+        // ... and a refused session released its slot too.
+        runtime.proxy.release_slot(3);
         let fourth = resolve(&shared, &connection(4, "0", uid)).await;
         assert!(fourth.is_ok(), "{fourth:?}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_probe_costs_no_slot() {
+        let uid = 21_000;
+        // One slot, and an upstream that never answers: every connection is
+        // refused by the probe, and the slot must stay free for the next try.
+        let (shared, _events) = state(proxy(closed_port(), 1), vec![listener(uid, &[], false)]);
+        for id in 1..=4 {
+            let error = resolve(&shared, &connection(id, "0", uid))
+                .await
+                .expect_err("the upstream never answers");
+            assert_eq!(error.sqlstate, UPSTREAM_SQLSTATE);
+        }
+        // The slot is free: a session on a reachable upstream is admitted.
+        let port = reachable_port();
+        let (shared, _events) = state(proxy(port, 1), vec![listener(uid, &[], false)]);
+        assert!(resolve(&shared, &connection(1, "0", uid)).await.is_ok());
     }
 
     #[tokio::test]

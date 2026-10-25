@@ -13,7 +13,6 @@ workspace = true
 [dependencies]
 async-trait = "0.1.92"
 blastit-events = { version = "0.1.0", path = "../blastit-events" }
-blastit-manifest = { version = "0.1.0", path = "../blastit-manifest" }
 blastit-sqlpolicy = { version = "0.1.0", path = "../blastit-sqlpolicy" }
 pregresql = { git = "https://github.com/OffworldNexus/pregresql", rev = "e00e74751605193b249db31b6ea546c1522ad76a" }
 rustix = { version = "1.1.5", features = ["net", "fs"] }

@@ -99,15 +99,22 @@ impl SslPlan {
 ///
 /// pregresql's [`TlsClientOptions::ca_file`] is a path, so a CA that only
 /// exists as PEM text in the configuration has to be written somewhere before
-/// the upstream TLS handshake can verify against it. The bundles live in a
-/// per-process directory (`<tmp>/blastit-dbproxy-<pid>`, `0700`) as `0600`
-/// files named after their proxy. A certificate is public material, not a
-/// credential, and the files are not removed on shutdown: a container restart
-/// replaces the directory, and there is no shutdown step whose failure could
-/// matter.
+/// the upstream TLS handshake can verify against it.
+///
+/// The bundles live in a **fresh** directory per process —
+/// `<tmp>/blastit-dbproxy-<pid>-<nonce>`, created with `mkdir(0700)` so its
+/// permissions are right from the first instant and an existing path is never
+/// reused — and each file is created with `O_CREAT|O_EXCL|O_NOFOLLOW` and mode
+/// `0600`, so a symlink or a pre-existing file at the path is an error rather
+/// than something dbproxy would write through. A certificate is public
+/// material, not a credential, and the files are not removed on shutdown: a
+/// container restart replaces the directory, and there is no shutdown step
+/// whose failure could matter.
 #[derive(Debug, Default)]
 pub struct CaBundles {
     directory: Option<PathBuf>,
+    /// Distinguishes the bundles of proxies whose names sanitise alike.
+    written: usize,
 }
 
 impl CaBundles {
@@ -118,45 +125,82 @@ impl CaBundles {
     }
 
     /// Materialises one proxy's CA bundle and returns its path.
-    ///
-    /// Writes `<tmp>/blastit-dbproxy-<pid>/<proxy>.pem`, creating the
-    /// directory with mode `0700` on first use and the file with mode `0600`.
     pub fn write(&mut self, proxy: &str, pem: &Zeroizing<String>) -> Result<PathBuf, DbproxyError> {
         let directory = match &self.directory {
             Some(directory) => directory.clone(),
             None => {
-                let directory =
-                    std::env::temp_dir().join(format!("blastit-dbproxy-{}", std::process::id()));
-                create_private_directory(&directory)?;
+                let directory = create_private_directory()?;
                 self.directory = Some(directory.clone());
                 directory
             }
         };
-        let path = directory.join(format!("{}.pem", sanitise(proxy)));
+        // Every bundle gets its own file: two proxy names can sanitise to the
+        // same file name, and `O_EXCL` would then fail the boot.
+        let path = directory.join(format!("{}-{}.pem", sanitise(proxy), self.written));
         write_private_file(&path, pem.as_bytes())?;
+        self.written += 1;
         Ok(path)
     }
 }
 
-/// Creates `directory` (and its parents) with mode `0700`.
-fn create_private_directory(directory: &Path) -> Result<(), DbproxyError> {
-    use std::os::unix::fs::PermissionsExt;
+/// Creates a directory only this process can read, atomically.
+///
+/// `mkdir` with mode `0700` never widens an existing directory's permissions,
+/// and a colliding path (a leftover from a recycled pid) is retried with
+/// another nonce rather than reused.
+fn create_private_directory() -> Result<PathBuf, DbproxyError> {
+    use std::os::unix::fs::DirBuilderExt;
 
-    std::fs::create_dir_all(directory)?;
-    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
-    Ok(())
+    let base = std::env::temp_dir();
+    for _ in 0..8 {
+        let path = base.join(format!(
+            "blastit-dbproxy-{}-{}",
+            std::process::id(),
+            nonce()
+        ));
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(DbproxyError::Config(
+        "could not create a private directory for the CA bundles".to_string(),
+    ))
 }
 
-/// Writes `contents` to `path` with mode `0600`.
+/// A short, unpredictable name component.
+fn nonce() -> String {
+    let mut bytes = [0u8; 8];
+    let random = std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut bytes))
+        .is_ok();
+    if random {
+        let mut hex = String::with_capacity(16);
+        for byte in bytes {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        return hex;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}")
+}
+
+/// Writes `contents` to a **new** `path` with mode `0600`.
 fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), DbproxyError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
     let mut file = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        // `O_CREAT|O_EXCL`: never write through an existing file.
+        .create_new(true)
         .mode(0o600)
+        // ... and never follow a symlink that appeared at the path.
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(path)?;
     file.write_all(contents)?;
     file.flush()?;
@@ -303,7 +347,7 @@ mod tests {
         let path = bundles.write("../weird name", &pem).expect("written");
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
-            Some(".._weird_name.pem")
+            Some(".._weird_name-0.pem")
         );
         assert_eq!(
             std::fs::read_to_string(&path).expect("readable"),
