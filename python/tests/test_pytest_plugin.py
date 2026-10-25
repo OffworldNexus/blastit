@@ -911,12 +911,22 @@ def test_every_statement_of_the_route_is_covered_not_only_the_missing_ones(
     assert baseline.proxy("note-in")["missing"] == []
 
 
-def test_a_function_the_safe_set_lacks_is_reported_with_the_tables(baseline: Outcome) -> None:
-    """psycopg's type lookup: `pg_type` and `to_regtype`."""
+def test_a_catalogue_lookup_cannot_be_a_table_grant(baseline: Outcome) -> None:
+    """psycopg's type lookup touches `pg_type`, which no table grant may name.
+
+    `pg_catalog` is first on the search path, so an unqualified `pg_type` *is*
+    the catalogue: the analysis refuses it, the plugin never suggests a key for
+    it, and the statement has to be granted as an exact query instead.
+    """
     grants = baseline.proxy("note-types")["table_grants"]
-    assert "pg_type" in grants["tables"]
-    assert grants["functions"] == ["to_regtype"]
-    assert '[route.db]\nfunctions = ["to_regtype"]' in grants["toml"]
+    assert grants["tables"] == {}, grants["tables"]
+    assert grants["functions"] == [], grants["functions"]
+    reasons = grants["unanalysable"]
+    assert any("pg_type" in entry["sql"] for entry in reasons), reasons
+    assert all("system catalogues" in entry["reason"] for entry in reasons), reasons
+    # The statement text is still reported, so it can be listed in `queries`.
+    missing = baseline.missing_sql("note-types")
+    assert any("pg_type" in sql and "to_regtype($?)" in sql for sql in missing), missing
 
 
 def test_prefer_tables_prints_the_snippet(project: Path, tmp_path: Path) -> None:

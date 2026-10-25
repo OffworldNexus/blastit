@@ -1885,3 +1885,73 @@ async fn table_grants_run_a_django_shaped_join_and_refuse_a_column() {
         .expect_err("another table is not granted");
     assert_eq!(sqlstate(&error).as_deref(), Some("42501"));
 }
+
+/// A locking clause hidden behind a derived relation reaches the base table
+/// (D7): `SELECT 1 FROM (SELECT 1 FROM t) s FOR UPDATE` locks `t`'s rows even
+/// though the outer statement reads no column of `t`, so a grant without
+/// `update` on `t` must refuse it — and one with `update` must let it run.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_grants_refuse_a_lock_hidden_behind_a_subquery() {
+    let Some(url) = pg_url() else { return };
+    let upstream = upstream(&url);
+    let table = table_for("d7_locked");
+    let client = direct(&upstream).await;
+    client
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {table}; \
+             CREATE TABLE {table} (id int primary key, name text); \
+             INSERT INTO {table} VALUES (1, 'alpha'), (2, 'beta')"
+        ))
+        .await
+        .expect("the fixture table is created");
+
+    let read_only = TableGrants::new(
+        [(
+            table.clone(),
+            TableGrant {
+                select: Some(Columns::All),
+                ..TableGrant::default()
+            },
+        )],
+        [],
+    );
+    let mut locking = read_only.clone();
+    locking.tables.entry(table.clone()).or_default().update = Some(Columns::All);
+
+    let directory = scratch("lock");
+    let listener = bind(&directory, 5432);
+    let other = bind(&directory, 5433);
+    let proxy = start(
+        directory.clone(),
+        vec![proxy_spec("db", &upstream, 4)],
+        vec![
+            (listener, table_listener(current_uid(), read_only)),
+            (other, table_listener(current_uid(), locking)),
+        ],
+    );
+
+    let sql = format!("SELECT 1 FROM (SELECT 1 FROM {table}) s FOR UPDATE");
+
+    // Without `update`, the statement is refused before it reaches the server.
+    let client = connect(&directory, 5432).await.expect("connects");
+    let error = client
+        .query(&sql, &[])
+        .await
+        .expect_err("a lock through a subquery needs update");
+    assert_eq!(sqlstate(&error).as_deref(), Some("42501"));
+    let event = proxy.event(
+        |event| matches!(event.kind(), EventKind::SqlDenied(denied) if denied.sql() == sql),
+        "the denied lock",
+    );
+    let EventKind::SqlDenied(denied) = event.kind() else {
+        unreachable!("filtered for sql.denied")
+    };
+    assert_eq!(denied.reason(), format!("update on {table}.* not granted"));
+
+    // With `update`, it reaches PostgreSQL and takes the lock.
+    let client = connect(&directory, 5433).await.expect("connects");
+    client
+        .query(&sql, &[])
+        .await
+        .expect("the grant's update covers the lock");
+}

@@ -27,6 +27,13 @@
 //!   all is not granted;
 //! * a `*` read, an `INSERT` with no column list and a `DELETE` need the
 //!   whole-table form (`select = "*"`, `insert = "*"`, `delete = true`);
+//! * naming a table is touching it: `SELECT count(*) FROM t`, `SELECT 1 FROM t`
+//!   and `EXISTS (SELECT 1 FROM t)` read no column but still learn that the
+//!   table exists, so they need a `select` entry — any columns. The entry a
+//!   covering grant writes for a table only ever counted is `select = []`, and a
+//!   written operation counts even when its list is empty (so the route keeps its
+//!   listener); a write target (`INSERT INTO t`, `UPDATE t`, `DELETE FROM t`) is
+//!   named by its own operation instead;
 //! * names are compared exactly as PostgreSQL resolved them. An unquoted
 //!   identifier in SQL arrives lowercased (`SELECT ID` is `id`), so a grant for
 //!   it is written `id`; `"Id"` in the SQL is the different name `Id`.
@@ -40,7 +47,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::analysis::{Access, Analysis, Op, is_safe_function};
+use crate::analysis::{Access, Analysis, Extent, Op, is_safe_function};
 
 /// The columns one operation of one table grant may touch.
 ///
@@ -156,7 +163,7 @@ pub struct TableGrant {
 
 impl TableGrant {
     /// Whether this grant covers one access.
-    fn allows(&self, op: Op, column: Option<&str>) -> bool {
+    fn allows(&self, op: Op, extent: &Extent) -> bool {
         let granted = match op {
             Op::Select => &self.select,
             Op::Insert => &self.insert,
@@ -164,12 +171,19 @@ impl TableGrant {
             // `delete` is about rows, not columns: it takes the whole table.
             Op::Delete => return self.delete,
         };
-        match (granted, column) {
-            (Some(Columns::All), _) => true,
-            (Some(Columns::List(columns)), Some(column)) => columns.contains(column),
+        match extent {
+            // The table is only *named*: any `select` entry covers it, even an
+            // empty list. What the statement learns is that the table exists,
+            // not any column of it.
+            Extent::Named => granted.is_some(),
             // A whole-row access (`*`, an `INSERT` with no column list) is not
             // covered by a list of columns: it reads or writes them all.
-            _ => false,
+            Extent::Whole => matches!(granted, Some(Columns::All)),
+            Extent::Column(column) => match granted {
+                Some(Columns::All) => true,
+                Some(Columns::List(columns)) => columns.contains(column),
+                None => false,
+            },
         }
     }
 
@@ -191,11 +205,12 @@ impl TableGrant {
     }
 
     /// Whether the grant allows nothing at all.
+    ///
+    /// A written operation counts even when its column list is empty: `select =
+    /// []` grants *naming* the table (a `count(*)`, an `EXISTS`), which is
+    /// exactly what a covering grant writes for a table a route only counts.
     fn is_empty(&self) -> bool {
-        !self.delete
-            && self.select.as_ref().is_none_or(Columns::is_empty)
-            && self.insert.as_ref().is_none_or(Columns::is_empty)
-            && self.update.as_ref().is_none_or(Columns::is_empty)
+        !self.delete && self.select.is_none() && self.insert.is_none() && self.update.is_none()
     }
 }
 
@@ -290,7 +305,7 @@ impl TableGrants {
             let allowed = self
                 .tables
                 .get(access.table())
-                .is_some_and(|grant| grant.allows(access.op(), access.column()));
+                .is_some_and(|grant| grant.allows(access.op(), access.extent()));
             if !allowed {
                 return Err(Denied::new(format!("{access} not granted")));
             }
@@ -336,14 +351,18 @@ impl TableGrants {
             Op::Update => &mut grant.update,
             Op::Delete => return,
         };
-        *slot = Some(match (slot.take(), access.column()) {
+        *slot = Some(match (slot.take(), access.extent()) {
             // A whole-row access covers every column, so it absorbs a list.
-            (Some(Columns::All), _) | (_, None) => Columns::All,
-            (Some(Columns::List(mut columns)), Some(column)) => {
+            (Some(Columns::All), _) | (_, Extent::Whole) => Columns::All,
+            // A written list — even an empty one — already covers naming the
+            // table; an empty one is exactly what a table only counted gets.
+            (Some(columns @ Columns::List(_)), Extent::Named) => columns,
+            (None, Extent::Named) => Columns::List(BTreeSet::new()),
+            (Some(Columns::List(mut columns)), Extent::Column(column)) => {
                 columns.insert(column.to_string());
                 Columns::List(columns)
             }
-            (None, Some(column)) => Columns::list([column]),
+            (None, Extent::Column(column)) => Columns::list([column]),
         });
     }
 
@@ -653,19 +672,15 @@ mod tests {
 
     #[test]
     fn the_system_catalogues_are_never_grantable() {
-        let grants = TableGrants::new(
-            [(
-                "pg_class".to_string(),
-                TableGrant {
-                    select: Some(Columns::All),
-                    ..TableGrant::default()
-                },
-            )],
-            [],
-        );
-        assert!(checked(&grants, "SELECT * FROM pg_class").is_ok());
+        // A qualified name is refused by the analysis itself, so the statement
+        // cannot be granted by any grant.
         assert!(analyze("SELECT * FROM pg_catalog.pg_class").is_err());
         assert!(analyze("SELECT * FROM information_schema.tables").is_err());
+        // ... and so is an unqualified `pg_*` name, which resolves into
+        // `pg_catalog`; a grant key for it can never be written at all.
+        assert!(analyze("SELECT * FROM pg_class").is_err());
+        assert!(analyze("SELECT count(*) FROM pg_type").is_err());
+        assert!(analyze("SELECT count(*) FROM tables").is_err());
     }
 
     #[test]
@@ -841,5 +856,136 @@ mod tests {
         assert!(grants.table("public.t").is_some(), "looked up canonically");
         assert!(grants.functions().any(|name| name == "lower"));
         assert!(!grants.is_empty());
+    }
+
+    //
+    // D7 review round: the rules the first round missed.
+    //
+
+    #[test]
+    fn a_table_named_without_a_column_read_needs_a_select_entry() {
+        // A table with no grant at all refuses even a `count(*)`.
+        let denied =
+            checked(&TableGrants::default(), "SELECT count(*) FROM t").expect_err("denied");
+        assert_eq!(denied.reason(), "select on t not granted");
+        // A grant with only an `insert` does too: naming the table is a read.
+        let insert_only = TableGrants::new(
+            [(
+                "t".to_string(),
+                TableGrant {
+                    insert: Some(Columns::All),
+                    ..TableGrant::default()
+                },
+            )],
+            [],
+        );
+        assert!(checked(&insert_only, "SELECT count(*) FROM t").is_err());
+        // Any `select` entry is enough: a column list, even an empty one, or
+        // `"*"`.
+        assert!(checked(&selecting("t", &["id"]), "SELECT count(*) FROM t").is_ok());
+        let mut empty = TableGrants::default();
+        empty.tables.insert(
+            "t".to_string(),
+            TableGrant {
+                select: Some(Columns::List(BTreeSet::new())),
+                ..TableGrant::default()
+            },
+        );
+        assert!(checked(&empty, "SELECT count(*) FROM t").is_ok());
+        // ... but an empty list reads no column.
+        let denied = checked(&empty, "SELECT id FROM t").expect_err("denied");
+        assert_eq!(denied.reason(), "select on t.id not granted");
+    }
+
+    #[test]
+    fn a_select_with_an_empty_list_is_not_an_empty_grant() {
+        // `select = []` grants naming the table, so the route still needs its
+        // listener: the grant is not empty.
+        let mut grants = TableGrants::default();
+        grants.tables.insert(
+            "t".to_string(),
+            TableGrant {
+                select: Some(Columns::List(BTreeSet::new())),
+                ..TableGrant::default()
+            },
+        );
+        assert!(!grants.is_empty());
+    }
+
+    #[test]
+    fn covering_a_count_only_table_asks_for_an_empty_select() {
+        let analyses = [
+            analyze("SELECT count(*) FROM t").unwrap(),
+            analyze("SELECT id FROM t").unwrap(),
+        ];
+        // The column read absorbs the naming: `select = ["id"]` covers both.
+        assert_eq!(
+            TableGrants::covering(analyses.iter()).to_toml("route.db"),
+            "[route.db.tables]\n\
+             t = { select = [\"id\"] }\n"
+        );
+        let covering = TableGrants::covering(analyses.iter());
+        for analysis in &analyses {
+            assert!(covering.check(analysis).is_ok(), "{analysis:?}");
+        }
+
+        // A table only ever counted gets the naming grant, and still a listener.
+        let counted = [analyze("SELECT count(*) FROM t").unwrap()];
+        let covering = TableGrants::covering(counted.iter());
+        assert_eq!(
+            covering.to_toml("route.db"),
+            "[route.db.tables]\n\
+             t = { select = [] }\n"
+        );
+        assert!(!covering.is_empty());
+        assert!(covering.check(&counted[0]).is_ok());
+    }
+
+    #[test]
+    fn locking_a_derived_relation_needs_update_on_its_base_table() {
+        let grants = selecting("auth_user", &["id"]);
+        // A plain lock already needed `update`.
+        let denied = checked(&grants, "SELECT id FROM auth_user FOR UPDATE").expect_err("denied");
+        assert_eq!(denied.reason(), "update on auth_user.* not granted");
+        // Through a subquery, too: the statement reads no column of the table,
+        // but PostgreSQL locks its rows.
+        let denied = checked(
+            &grants,
+            "SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR UPDATE",
+        )
+        .expect_err("denied");
+        assert_eq!(denied.reason(), "update on auth_user.* not granted");
+        // With the `update` grant, both are allowed.
+        let mut with_update = grants.clone();
+        with_update
+            .tables
+            .entry("auth_user".to_string())
+            .or_default()
+            .update = Some(Columns::All);
+        assert!(
+            checked(
+                &with_update,
+                "SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR UPDATE"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_cast_that_can_run_code_is_denied_unless_granted() {
+        let grants = selecting("t", &["a"]);
+        assert!(checked(&grants, "SELECT a::text FROM t").is_ok());
+        let denied = checked(&grants, "SELECT a::regclass FROM t").expect_err("denied");
+        assert_eq!(denied.reason(), "the function regclass is not granted");
+        let denied = checked(&grants, "SELECT a::myschema.mytype FROM t").expect_err("denied");
+        assert_eq!(
+            denied.reason(),
+            "the function myschema.mytype is not granted"
+        );
+
+        let mut with_type = grants.clone();
+        with_type.functions.insert("regclass".to_string());
+        assert!(checked(&with_type, "SELECT a::regclass FROM t").is_ok());
+        assert!(checked(&with_type, "SELECT a::regclass[] FROM t").is_ok());
     }
 }

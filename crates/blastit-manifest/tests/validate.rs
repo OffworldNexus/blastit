@@ -690,6 +690,13 @@ fn a_system_catalogue_table_grant_is_refused() {
         "information_schema.tables",
         "pg_catalog",
         "information_schema",
+        // An unqualified `pg_*` name resolves into `pg_catalog` (which is
+        // always first on the search path), so a key for it is refused too.
+        "pg_class",
+        "pg_type",
+        // ... and a key that is one of the `information_schema` views.
+        "tables",
+        "columns",
     ] {
         let errors = validate_errors(
             &notes_with(&format!("[route.db.tables.\"{table}\"]\nselect = \"*\"\n")),
@@ -701,6 +708,15 @@ fn a_system_catalogue_table_grant_is_refused() {
             "{table}: {errors}"
         );
     }
+    // A qualified name in a schema of the app's own is a table like any other:
+    // it keeps its schema and a grant can spell it out.
+    let warnings = validate_warnings(
+        "version = 1\n\
+         [proxy.db]\nprotocol = \"postgresql\"\n\
+         [[route]]\nname = \"notes\"\npath = ['/notes/']\n\
+         [route.db.tables.\"audit.pg_class\"]\nselect = \"*\"\n",
+    );
+    assert_eq!(warnings, vec![]);
     // A group's table grants are checked too.
     let errors = validate_errors(
         "version = 1\n\

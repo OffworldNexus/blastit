@@ -32,16 +32,22 @@
 //! * `*` and `t.*` need `select = "*"` on every base table they expand to,
 //!   through derived relations; `count(*)` reads no column at all;
 //! * a function call this build does not know is denied unless the grant lists
-//!   it ([`SAFE_FUNCTIONS`] is the built-in set).
+//!   it ([`SAFE_FUNCTIONS`] is the built-in set), and a cast to a type that can
+//!   run code — a `reg*` type, a domain, any type outside the built-in scalar
+//!   set — is denied the same way, under the type's name;
+//! * every base table a statement *names* needs a `select` grant, even when it
+//!   reads no column of it: `SELECT count(*) FROM t` and `SELECT 1 FROM t` both
+//!   leak the row count, and `EXISTS (SELECT 1 FROM t …)` its emptiness, so
+//!   naming `t` is touching it (`select on t` in a denial, covered by any
+//!   `select = […]` entry). A write target (`INSERT INTO t`, `UPDATE t`,
+//!   `DELETE FROM t`) is named by its own `insert`/`update`/`delete` grant, not
+//!   by this rule.
 //!
-//! One consequence of reading the analysis as a list of *columns* is worth
-//! spelling out: a statement that names a table without reading any column of it
-//! — `SELECT count(*) FROM t`, `SELECT 1 FROM t` — counts no table and no column
-//! (`count(*)` is not a `*` read; §6 says so explicitly), so a table grant
-//! allows it without naming `t`. What leaks there is the row count, not a
-//! column; a manifest that has to gate that too would need a rule of its own
-//! ("every base table in scope must appear in the grant"), which §6 does not
-//! ask for.
+//! A derived relation carries the base tables its definition **names**, not only
+//! the ones it read a column from: that is what makes a locking clause require
+//! `update` on the tables under a subquery or a CTE — `SELECT 1 FROM (SELECT 1
+//! FROM auth_user) s FOR UPDATE` locks `auth_user` rows, so the grant has to say
+//! `update` on `auth_user`.
 //!
 //! Two mechanisms keep that honest as the code grows. Every node type the
 //! resolver handles explicitly (and consumes itself, like a `JOIN` or an
@@ -188,6 +194,35 @@ pub const SAFE_FUNCTIONS: &[&str] = &[
     "dense_rank",
     "rank",
     "row_number",
+    // Window and ordered-set functions: they read their arguments and the
+    // window, and nothing else.
+    "lag",
+    "lead",
+    "ntile",
+    "cume_dist",
+    "percent_rank",
+    "first_value",
+    "last_value",
+    "nth_value",
+    "stddev",
+    "stddev_pop",
+    "stddev_samp",
+    "variance",
+    "var_pop",
+    "var_samp",
+    "mode",
+    "percentile_cont",
+    "percentile_disc",
+    // Full-text search and JSON extraction: pure functions of their arguments.
+    // (`unaccent` is deliberately absent: it reads a rule file, so a grant has
+    // to name it in `functions`.)
+    "to_tsvector",
+    "plainto_tsquery",
+    "websearch_to_tsquery",
+    "ts_rank",
+    "jsonb_extract_path_text",
+    "json_extract_path_text",
+    "jsonb_array_length",
 ];
 
 /// Whether a function call needs no entry in a grant's `functions` list.
@@ -269,20 +304,62 @@ impl fmt::Display for Op {
 /// column list, a `DELETE`, or the `FOR UPDATE` lock of a table. The table is
 /// spelled the way a grant has to spell it: `public.t` is `t`, any other schema
 /// keeps its qualified name.
+///
+/// There is a third, weaker shape: a table the statement only *names* —
+/// `SELECT count(*) FROM t` — needs some `select` entry, but no particular
+/// column. [`Access::named`] is that access, and it is what
+/// [`Op::Select`] on a table with no column read turns into.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Access {
     op: Op,
     table: String,
-    column: Option<String>,
+    extent: Extent,
+}
+
+/// How much of a table one [`Access`] needs.
+///
+/// Ordered so that a `Named` access sorts before a whole-row one and a column
+/// one: the first access a denial reports is the first thing a grant author
+/// would have to add.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Extent {
+    /// The table is named, but no column of it is read: any `select` entry
+    /// covers it.
+    Named,
+    /// Every column: `select = "*"`, `insert = "*"`, a `DELETE`.
+    Whole,
+    /// One column, by the name PostgreSQL resolved.
+    Column(String),
 }
 
 impl Access {
     /// One access of a statement.
+    ///
+    /// `column` of `None` is a whole-row access (`select on t.*`), `Some` a
+    /// column one (`select on t.id`); [`Access::named`] is the table-only form.
     pub fn new(op: Op, table: impl Into<String>, column: Option<&str>) -> Self {
+        let extent = match column {
+            Some(column) => Extent::Column(column.to_string()),
+            None => Extent::Whole,
+        };
         Self {
             op,
             table: table.into(),
-            column: column.map(str::to_string),
+            extent,
+        }
+    }
+
+    /// An access that only *names* a table: no column of it is read, so any
+    /// `select` entry covers it (D7).
+    ///
+    /// `SELECT count(*) FROM t`, `SELECT 1 FROM t` and `EXISTS (SELECT 1 FROM t)`
+    /// all read no column, but they tell the statement whether `t` exists and how
+    /// few or many rows it has, so a grant has to name `t`.
+    pub fn named(op: Op, table: impl Into<String>) -> Self {
+        Self {
+            op,
+            table: table.into(),
+            extent: Extent::Named,
         }
     }
 
@@ -296,21 +373,31 @@ impl Access {
         &self.table
     }
 
-    /// The column, or `None` for a whole-table access.
+    /// The column, or `None` for a whole-table or table-only access.
     pub fn column(&self) -> Option<&str> {
-        self.column.as_deref()
+        match &self.extent {
+            Extent::Column(column) => Some(column),
+            Extent::Named | Extent::Whole => None,
+        }
+    }
+
+    /// How much of the table the access needs, for the grant check.
+    pub(crate) fn extent(&self) -> &Extent {
+        &self.extent
     }
 }
 
 impl fmt::Display for Access {
-    /// `select on auth_user.password`, `delete on orders_order`: the form a
-    /// denial's `reason` uses, and the one a human reads in a log. A whole-table
-    /// access is spelled `t.*`, which is what a grant has to say.
+    /// `select on auth_user.password`, `delete on orders_order`, `select on
+    /// auth_user`: the form a denial's `reason` uses, and the one a human reads
+    /// in a log. A whole-table access is spelled `t.*`, which is what a grant has
+    /// to say; a table-only access is spelled by the table's name alone.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.column, self.op) {
-            (Some(column), _) => write!(f, "{} on {}.{}", self.op, self.table, column),
-            (None, Op::Delete) => write!(f, "delete on {}", self.table),
-            (None, _) => write!(f, "{} on {}.*", self.op, self.table),
+        match (&self.extent, self.op) {
+            (Extent::Column(column), _) => write!(f, "{} on {}.{}", self.op, self.table, column),
+            (_, Op::Delete) => write!(f, "delete on {}", self.table),
+            (Extent::Named, _) => write!(f, "{} on {}", self.op, self.table),
+            (Extent::Whole, _) => write!(f, "{} on {}.*", self.op, self.table),
         }
     }
 }
@@ -496,6 +583,21 @@ fn resolve(sql: &str) -> Result<Analysis, AnalysisError> {
     let mut resolver = Resolver::default();
     resolver.statement(&tree, &Scope::default())?;
     resolver.check_coverage(&tree)?;
+    // A table the statement names but reads no column of — `SELECT count(*) FROM
+    // t`, `EXISTS (SELECT 1 FROM t)` — still tells the statement whether the
+    // table exists and roughly how many rows it has, so naming it needs a grant
+    // (§6, D7). A table with a `select` access already needs one, so only the
+    // tables left without any get the weaker, table-only access.
+    let named = std::mem::take(&mut resolver.named);
+    for table in named {
+        let read = resolver
+            .accesses
+            .iter()
+            .any(|access| access.op() == Op::Select && access.table() == table);
+        if !read {
+            resolver.accesses.insert(Access::named(Op::Select, table));
+        }
+    }
     Ok(Analysis {
         kind,
         accesses: resolver.accesses,
@@ -570,6 +672,7 @@ fn statement_label(kind: &str) -> &str {
 /// type somewhere the walker does not look is a bug, and a bug in a security
 /// boundary has to fail closed.
 const HANDLED: &[&str] = &[
+    "CoalesceExpr",
     "ColumnRef",
     "CommonTableExpr",
     "DeleteStmt",
@@ -577,30 +680,57 @@ const HANDLED: &[&str] = &[
     "InsertStmt",
     "IntoClause",
     "JoinExpr",
+    "JsonAggConstructor",
+    "JsonArgument",
+    "JsonArrayAgg",
+    "JsonArrayConstructor",
+    "JsonArrayQueryConstructor",
+    "JsonBehavior",
+    "JsonConstructorExpr",
+    "JsonExpr",
+    "JsonFuncExpr",
+    "JsonIsPredicate",
+    "JsonKeyValue",
+    "JsonObjectAgg",
+    "JsonObjectConstructor",
+    "JsonParseExpr",
+    "JsonScalarExpr",
+    "JsonSerializeExpr",
+    "JsonValueExpr",
     "LockingClause",
     "MergeStmt",
+    "MinMaxExpr",
     "OnConflictClause",
     "RangeFunction",
     "RangeSubselect",
     "RangeTableSample",
     "RangeVar",
     "SelectStmt",
+    "SqlvalueFunction",
     "SubLink",
+    "TypeCast",
     "UpdateStmt",
     "WithClause",
+    "XmlExpr",
+    "XmlSerialize",
 ];
 
 /// What reading a column (or every column) of a relation needs.
 ///
-/// The two parts are what makes `*` through a derived relation work: a named
-/// column is an exact `(table, column)` pair, while a table in `wildcard` stands
-/// for whichever column the statement asked for.
+/// The three parts are what makes `*` through a derived relation work: a named
+/// column is an exact `(table, column)` pair, a table in `whole` is read
+/// entirely whatever the statement asked for (`t.*`), and a table in `wildcard`
+/// stands for whichever column the statement asked for — how a column read
+/// through a derived relation whose output nobody can name is recorded.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Reads {
     /// `(table, column)` pairs the statement reads by name.
     columns: BTreeSet<(String, String)>,
-    /// Tables where the column is not known: a `*` expansion, or a part of a
-    /// derived relation whose names come from a branch nobody can name.
+    /// Tables read entirely: `*`, a whole-row reference to a relation, or a
+    /// part of a derived relation whose columns come from a `*`.
+    whole: BTreeSet<String>,
+    /// Tables where the column is not known: a part of a derived relation whose
+    /// names come from a branch nobody can name.
     wildcard: BTreeSet<String>,
 }
 
@@ -610,27 +740,49 @@ impl Reads {
         self.columns.insert((table.to_string(), column.to_string()));
     }
 
-    /// Counts one "any column of `table`" read.
-    fn any_column(&mut self, table: &str) {
-        self.wildcard.insert(table.to_string());
+    /// Counts one "read every column of `table`" (`t.*`).
+    fn whole_table(&mut self, table: &str) {
+        self.whole.insert(table.to_string());
     }
 
     /// Merges another reading (the two branches of a `UNION`, say).
     fn merge(&mut self, other: &Self) {
         self.columns.extend(other.columns.iter().cloned());
+        self.whole.extend(other.whole.iter().cloned());
         self.wildcard.extend(other.wildcard.iter().cloned());
     }
 
-    /// The accesses this needs, read either as a named column or as a whole row
-    /// (`*`): a wildcard stands for the name the statement used, or for every
-    /// column of the table.
+    /// The same read, but where every wholly-read table becomes "the column the
+    /// statement asked for".
+    ///
+    /// Reading a named column of a derived relation whose output is open (`s.x`
+    /// where `s` is `SELECT * FROM t`) has to touch every table that output
+    /// could come from; the column the statement named is the only one it can be
+    /// held to, so the whole-table reads become wildcards — the `t.*` the
+    /// definition itself needed is recorded there, not here.
+    fn as_unknown_column(&self) -> Self {
+        let mut reads = self.clone();
+        reads.wildcard.extend(reads.whole.iter().cloned());
+        reads.whole.clear();
+        reads
+    }
+
+    /// The accesses this needs, read either as named columns, as whole rows
+    /// (`*`) or, for a wildcard, as the name the statement used.
     fn accesses(&self, name: Option<&str>) -> Vec<Access> {
-        let mut accesses = Vec::with_capacity(self.columns.len() + self.wildcard.len());
+        let mut accesses =
+            Vec::with_capacity(self.columns.len() + self.whole.len() + self.wildcard.len());
         for (table, column) in &self.columns {
             accesses.push(Access::new(Op::Select, table.clone(), Some(column)));
         }
+        for table in &self.whole {
+            accesses.push(Access::new(Op::Select, table.clone(), None));
+        }
         for table in &self.wildcard {
-            accesses.push(Access::new(Op::Select, table.clone(), name));
+            match name {
+                Some(column) => accesses.push(Access::new(Op::Select, table.clone(), Some(column))),
+                None => accesses.push(Access::new(Op::Select, table.clone(), None)),
+            }
         }
         accesses
     }
@@ -656,6 +808,11 @@ struct Derived {
     /// expansion, whose column count is not known. Used to apply an
     /// `AS alias(a, b)` column list.
     positions: Option<Vec<(Option<String>, Reads)>>,
+    /// The base tables the relation's definition **names**, whether or not it
+    /// reads a column of them (§6, D7). That is what a locking clause has to
+    /// cover: `SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR UPDATE` locks
+    /// `auth_user` rows even though the outer statement reads no column at all.
+    names: BTreeSet<String>,
 }
 
 impl Derived {
@@ -665,6 +822,7 @@ impl Derived {
             named: BTreeMap::new(),
             open: None,
             positions: Some(Vec::new()),
+            names: BTreeSet::new(),
         }
     }
 
@@ -675,6 +833,7 @@ impl Derived {
             named: BTreeMap::new(),
             open: Some(Reads::default()),
             positions: None,
+            names: BTreeSet::new(),
         }
     }
 
@@ -689,6 +848,11 @@ impl Derived {
         if let Some(positions) = &mut self.positions {
             positions.push((name, reads));
         }
+    }
+
+    /// The base tables the relation's definition names.
+    fn named_tables(&self) -> &BTreeSet<String> {
+        &self.names
     }
 
     /// Forgets that the output's columns can be counted: a `*` expansion stands
@@ -717,6 +881,7 @@ impl Derived {
             return None;
         }
         let mut renamed = Self::new();
+        renamed.names = self.names.clone();
         for (name, (_, reads)) in names.iter().zip(positions) {
             renamed.push(Some(name.clone()), reads.clone());
         }
@@ -775,10 +940,22 @@ impl Named {
         match &self.rel {
             Rel::Base { table } => {
                 let mut reads = Reads::default();
-                reads.any_column(table);
+                reads.whole_table(table);
                 reads
             }
             Rel::Derived(derived) => derived.whole_row(),
+        }
+    }
+
+    /// The base tables this relation's definition names, whether or not it
+    /// reads a column of them.
+    ///
+    /// A base table is itself; a derived relation carries the set its definition
+    /// collected. This is what a locking clause covers.
+    fn named_tables(&self) -> BTreeSet<String> {
+        match &self.rel {
+            Rel::Base { table } => BTreeSet::from([table.clone()]),
+            Rel::Derived(derived) => derived.named_tables().clone(),
         }
     }
 }
@@ -844,6 +1021,11 @@ impl Scope {
 struct Resolver {
     accesses: BTreeSet<Access>,
     functions: BTreeSet<String>,
+    /// Every base table the statement names, whether or not it reads a column
+    /// of it. A table in here with no `select` access gets a
+    /// [`Access::named`] one, so naming a table is enough to need a grant for it
+    /// (§6, D7).
+    named: BTreeSet<String>,
     /// The nodes of [`HANDLED`] types the walk actually handled, by address, so
     /// that [`Resolver::check_coverage`] can prove nothing was skipped.
     visited: HashSet<usize>,
@@ -855,6 +1037,12 @@ impl Resolver {
     fn access(&mut self, op: Op, table: &str, column: Option<&str>) {
         self.accesses
             .insert(Access::new(op, table.to_string(), column));
+    }
+
+    /// Remembers that the statement names a base table, even if it reads no
+    /// column of it.
+    fn name_table(&mut self, table: &str) {
+        self.named.insert(table.to_string());
     }
 
     /// Counts every access a reading needs.
@@ -936,6 +1124,52 @@ impl Resolver {
             "FuncCall" => {
                 self.mark(node);
                 self.func_call(body, scope)
+            }
+            "TypeCast" => {
+                self.mark(node);
+                self.type_cast(body, scope)
+            }
+            // PostgreSQL's parser builds these nodes for SQL that is not a
+            // `FuncCall`: `CURRENT_TIMESTAMP`, `greatest`/`least`, `coalesce`,
+            // `JSON_OBJECT`, `xmlelement`. They are classified here by hand, so
+            // that a node whose operation nobody looked at is a refusal instead
+            // of a silently-walked hole.
+            //
+            // `SqlvalueFunction` (a session value), `MinMaxExpr`
+            // (`greatest`/`least`), `CoalesceExpr` and the SQL/JSON family are
+            // pure: they read their arguments and nothing else, so walking their
+            // children is the whole of their check.
+            "SqlvalueFunction"
+            | "MinMaxExpr"
+            | "CoalesceExpr"
+            | "JsonExpr"
+            | "JsonConstructorExpr"
+            | "JsonValueExpr"
+            | "JsonKeyValue"
+            | "JsonObjectConstructor"
+            | "JsonArrayConstructor"
+            | "JsonArrayQueryConstructor"
+            | "JsonAggConstructor"
+            | "JsonObjectAgg"
+            | "JsonArrayAgg"
+            | "JsonFuncExpr"
+            | "JsonParseExpr"
+            | "JsonScalarExpr"
+            | "JsonSerializeExpr"
+            | "JsonIsPredicate"
+            | "JsonArgument"
+            | "JsonBehavior" => {
+                self.mark(node);
+                self.walk(body, scope)
+            }
+            // XML is denied by default: this build does not model what
+            // `xmlelement`, `xpath` or `IS DOCUMENT` do with their arguments, so
+            // a grant cannot say what it is allowing.
+            "XmlExpr" | "XmlSerialize" => {
+                self.mark(node);
+                Err(AnalysisError::NotUnderstood(
+                    "an XML expression".to_string(),
+                ))
             }
             "SubLink" => {
                 self.mark(node);
@@ -1134,6 +1368,10 @@ impl Resolver {
         }
 
         let rels = self.collect_from(body, "from_clause", &scope)?;
+        // The base tables the statement names, from its range table: what a
+        // locking clause over this query has to cover, and what a derived
+        // relation built from it carries (§6, D7).
+        let names: BTreeSet<String> = rels.iter().flat_map(Named::named_tables).collect();
         let scope = scope.push(Frame {
             rels,
             ctes: BTreeMap::new(),
@@ -1142,6 +1380,7 @@ impl Resolver {
         self.expressions(body, "distinct_clause", &scope)?;
 
         let mut output = Derived::new();
+        output.names = names;
         for target in node_list(body, "target_list") {
             let (name, reads) = self.target(target, &scope)?;
             // A `*` expansion stands for as many columns as the table has, so
@@ -1321,12 +1560,20 @@ impl Resolver {
                 reads.merge(&rel.whole_row());
                 reads
             });
-            rels.push(Named::derived(alias, Derived::passthrough_named(reads)));
+            // The alias also stands for both sides' tables: a `FOR UPDATE OF j`
+            // locks them, and a derived relation carries the tables it names.
+            let names = rels.iter().flat_map(Named::named_tables).collect();
+            let mut derived = Derived::passthrough_named(reads);
+            derived.names = names;
+            rels.push(Named::derived(alias, derived));
         }
         Ok(rels)
     }
 
     /// A `RangeVar`: a CTE's name, or a base table.
+    ///
+    /// A base table is *named* whatever the statement does with it, so it is
+    /// recorded even when the statement reads no column of it.
     fn range_var(&mut self, body: &Value, scope: &Scope) -> Result<Named, AnalysisError> {
         let name = text(body, "relname").unwrap_or_default().to_string();
         let schema = text(body, "schemaname").unwrap_or_default();
@@ -1342,7 +1589,12 @@ impl Resolver {
         {
             return Ok(Named::derived(used, cte.clone()));
         }
-        Ok(Named::base(used, table_key(schema, &name)?))
+        let table = table_key(schema, &name)?;
+        // The statement names this table, whether or not it reads a column of
+        // it: a `count(*)`, a bare `SELECT 1` or an `EXISTS` still tells the
+        // statement whether the table exists (§6, D7).
+        self.name_table(&table);
+        Ok(Named::base(used, table))
     }
 
     /// Applies a `FROM` item's `AS alias(a, b)` column list to its output.
@@ -1396,7 +1648,9 @@ impl Resolver {
             self.mark(clause);
             self.on_conflict(clause, &scope, &target, &relation)?;
         }
-        self.returning(body, &scope)
+        let mut output = self.returning(body, &scope)?;
+        output.names.insert(target);
+        Ok(output)
     }
 
     /// The `ON CONFLICT` clause: the conflict target, and what `DO UPDATE`
@@ -1474,7 +1728,9 @@ impl Resolver {
             self.expression(assignment, "val", &scope)?;
         }
         self.expression(body, "where_clause", &scope)?;
-        self.returning(body, &scope)
+        let mut output = self.returning(body, &scope)?;
+        output.names.insert(target);
+        Ok(output)
     }
 
     /// A `DELETE`: the table it empties, and what it reads to find the rows.
@@ -1493,7 +1749,9 @@ impl Resolver {
             ctes: BTreeMap::new(),
         });
         self.expression(body, "where_clause", &scope)?;
-        self.returning(body, &scope)
+        let mut output = self.returning(body, &scope)?;
+        output.names.insert(target);
+        Ok(output)
     }
 
     /// The base table a statement writes to.
@@ -1528,6 +1786,12 @@ impl Resolver {
 
     /// `FOR UPDATE`/`FOR SHARE`: locking a row is reading it to change it, so the
     /// locked tables need `update` (§6).
+    ///
+    /// A relation can be derived — a subquery, a CTE, a join — and PostgreSQL
+    /// still locks the base tables under it, so the requirement follows the set
+    /// of tables the relation's definition *names*, not the columns the outer
+    /// statement happened to read: `SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR
+    /// UPDATE` locks `auth_user` rows and needs `update` on `auth_user`.
     fn locking(&mut self, body: &Value, scope: &Scope) -> Result<(), AnalysisError> {
         for clause in node_list(body, "locking_clause") {
             self.mark(clause);
@@ -1550,7 +1814,7 @@ impl Resolver {
                 rels
             };
             for rel in locked {
-                for table in read_tables(&rel) {
+                for table in rel.named_tables() {
                     self.access(Op::Update, &table, None);
                 }
             }
@@ -1745,7 +2009,12 @@ impl Resolver {
             Rel::Derived(derived) => match derived.named.get(column) {
                 Some(reads) => Ok(reads.clone()),
                 None => match &derived.open {
-                    Some(reads) => Ok(reads.clone()),
+                    // The output's names are not known, so reading `column` of
+                    // it touches whatever column of the base tables the
+                    // definition read: an open part that was a `*` becomes "the
+                    // column the statement named", which is as specific as this
+                    // build can be.
+                    Some(reads) => Ok(reads.as_unknown_column()),
                     None => Err(AnalysisError::NotUnderstood(format!(
                         "this statement: `{}` has no column `{column}`",
                         rel.name
@@ -1796,6 +2065,38 @@ impl Resolver {
         self.expression(body, "over", scope)?;
         Ok(())
     }
+
+    /// A cast: what its argument reads, and whether its *target type* is one
+    /// that can run code (§6, D7).
+    ///
+    /// A cast is a function call PostgreSQL writes for you: `x::int4` parses
+    /// like `int4(x)`, and a domain or a `reg*` type can run arbitrary code — or
+    /// read the catalogue — at input. The built-in scalar types below have no
+    /// such input function, so a cast to one stays free; every other type is
+    /// reported like a function call under its own name, so a grant has to list
+    /// it in `functions`.
+    fn type_cast(&mut self, body: &Value, scope: &Scope) -> Result<(), AnalysisError> {
+        self.expression(body, "arg", scope)?;
+        let Some(type_name) = node_field(body, "type_name") else {
+            return Err(AnalysisError::NotUnderstood(
+                "a cast with no target type".to_string(),
+            ));
+        };
+        let names = names_of(type_name.get("names"));
+        if names.is_empty() {
+            return Err(AnalysisError::NotUnderstood(
+                "a cast to an unnamed type".to_string(),
+            ));
+        }
+        let name = match names.len() {
+            2.. if names[names.len() - 2] == "pg_catalog" => names[names.len() - 1].clone(),
+            _ => names.join("."),
+        };
+        if !is_safe_cast_type(&name) {
+            self.functions.insert(name);
+        }
+        Ok(())
+    }
 }
 
 impl Derived {
@@ -1805,23 +2106,139 @@ impl Derived {
             named: BTreeMap::new(),
             open: Some(reads),
             positions: None,
+            names: BTreeSet::new(),
         }
     }
 }
 
-/// The base tables a `FOR UPDATE OF` target stands for.
-fn read_tables(rel: &Named) -> Vec<String> {
-    match &rel.rel {
-        Rel::Base { table } => vec![table.clone()],
-        Rel::Derived(derived) => {
-            let mut tables: BTreeSet<String> = BTreeSet::new();
-            for reads in derived.named.values().chain(derived.open.as_ref()) {
-                tables.extend(reads.columns.iter().map(|(table, _)| table.clone()));
-                tables.extend(reads.wildcard.iter().cloned());
-            }
-            tables.into_iter().collect()
-        }
-    }
+/// The built-in scalar types a cast to which runs no user code (§6, D7).
+///
+/// An array of one of these is safe too: `int[]::text[]` has the same element
+/// input functions, and the parse tree gives one name either way. Every other
+/// type — a `reg*` type (which looks a name up in the catalogue), a domain, a
+/// user type, a type with a C input function — is reported like a function call
+/// under its own name, so a grant has to list it in `functions`.
+const SAFE_CAST_TYPES: &[&str] = &[
+    // Integers and floating point.
+    "int2",
+    "int4",
+    "int8",
+    "float4",
+    "float8",
+    "numeric",
+    // Strings.
+    "text",
+    "varchar",
+    "bpchar",
+    // Booleans, dates and times.
+    "bool",
+    "date",
+    "timestamp",
+    "timestamptz",
+    // Identifiers and JSON.
+    "uuid",
+    "json",
+    "jsonb",
+    // PostGIS's own types: pure, and the ones a real app casts geometry to.
+    "geometry",
+    "geography",
+];
+
+/// Whether a cast to `name` needs no entry in a grant's `functions` list.
+fn is_safe_cast_type(name: &str) -> bool {
+    SAFE_CAST_TYPES.contains(&name)
+}
+
+/// The `information_schema` views PostgreSQL defines, by name.
+///
+/// They describe everything else in the database, so a table grant naming one
+/// (unqualified) could only read as a capability it is not; the list is the one
+/// `information_schema.tables` reports for its own schema.
+const INFORMATION_SCHEMA_VIEWS: &[&str] = &[
+    "_pg_foreign_data_wrappers",
+    "_pg_foreign_servers",
+    "_pg_foreign_table_columns",
+    "_pg_foreign_tables",
+    "_pg_user_mappings",
+    "administrable_role_authorizations",
+    "applicable_roles",
+    "attributes",
+    "character_sets",
+    "check_constraint_routine_usage",
+    "check_constraints",
+    "collation_character_set_applicability",
+    "collations",
+    "column_column_usage",
+    "column_domain_usage",
+    "column_options",
+    "column_privileges",
+    "column_udt_usage",
+    "columns",
+    "constraint_column_usage",
+    "constraint_table_usage",
+    "data_type_privileges",
+    "domain_constraints",
+    "domain_udt_usage",
+    "domains",
+    "element_types",
+    "enabled_roles",
+    "foreign_data_wrapper_options",
+    "foreign_data_wrappers",
+    "foreign_server_options",
+    "foreign_servers",
+    "foreign_table_options",
+    "foreign_tables",
+    "information_schema_catalog_name",
+    "key_column_usage",
+    "parameters",
+    "referential_constraints",
+    "role_column_grants",
+    "role_routine_grants",
+    "role_table_grants",
+    "role_udt_grants",
+    "role_usage_grants",
+    "routine_column_usage",
+    "routine_privileges",
+    "routine_routine_usage",
+    "routine_sequence_usage",
+    "routine_table_usage",
+    "routines",
+    "schemata",
+    "sequences",
+    "sql_features",
+    "sql_implementation_info",
+    "sql_parts",
+    "sql_sizing",
+    "table_constraints",
+    "table_privileges",
+    "tables",
+    "transforms",
+    "triggered_update_columns",
+    "triggers",
+    "udt_privileges",
+    "usage_privileges",
+    "user_defined_types",
+    "user_mapping_options",
+    "user_mappings",
+    "view_column_usage",
+    "view_routine_usage",
+    "view_table_usage",
+    "views",
+];
+
+/// Whether a bare relation name could be one of PostgreSQL's system catalogues.
+///
+/// `pg_catalog` is always first on the search path, so an unqualified name
+/// starting with `pg_` resolves into it — into `pg_class`, `pg_proc` or one of
+/// their views — and a relation the statement reaches is a relation a grant
+/// cannot describe. A name that is one of the `information_schema` views is
+/// refused too: a table grant for it could only read as a capability it is not.
+///
+/// Called with the **key** a table grant would carry, so it is only ever asked
+/// about an unqualified name: `audit.users` keeps its schema and is a table like
+/// any other. (§6, D7.)
+pub fn is_system_table(name: &str) -> bool {
+    name.starts_with("pg_") || INFORMATION_SCHEMA_VIEWS.contains(&name)
 }
 
 /// The table key a grant uses for a schema-qualified name (§6).
@@ -1829,10 +2246,15 @@ fn read_tables(rel: &Named) -> Vec<String> {
 /// `public.t` is `t`, because `public` is on every search path a view has; any
 /// other schema keeps its name, so `audit.auth_user` can only be read through a
 /// grant that spells it out. `pg_catalog` and `information_schema` are never
-/// readable through a table grant: their contents describe everything else in
-/// the database.
+/// readable through a table grant — their contents describe everything else in
+/// the database — and neither is an unqualified name that would resolve into
+/// them (`pg_class`, `tables`), because `pg_catalog` is always first on the
+/// search path and an unqualified name is a name a grant cannot pin down.
 fn table_key(schema: &str, table: &str) -> Result<String, AnalysisError> {
     match schema {
+        "" | "public" if is_system_table(table) => Err(AnalysisError::NotUnderstood(format!(
+            "{table}: the system catalogues are never readable through a table grant"
+        ))),
         "" | "public" => Ok(table.to_string()),
         "pg_catalog" | "information_schema" => Err(AnalysisError::NotUnderstood(format!(
             "{schema}.{table}: the system catalogues are never readable through a table grant"
@@ -1850,6 +2272,7 @@ fn merge_outputs(left: Derived, right: Derived) -> Derived {
     if left_positions.len() != right_positions.len() {
         return union_of(&[left, right]);
     }
+    let names: BTreeSet<String> = left.names.union(&right.names).cloned().collect();
     let mut output = Derived::new();
     for ((name, left_reads), (_, right_reads)) in left_positions.iter().zip(right_positions) {
         let mut reads = left_reads.clone();
@@ -1857,12 +2280,14 @@ fn merge_outputs(left: Derived, right: Derived) -> Derived {
         // The first branch names the output column, as PostgreSQL does.
         output.push(name.clone(), reads);
     }
+    output.names = names;
     output
 }
 
 /// Every column of every branch, as one open output.
 fn union_of(branches: &[Derived]) -> Derived {
     let mut reads = Reads::default();
+    let mut names = BTreeSet::new();
     for derived in branches {
         for column in derived.named.values() {
             reads.merge(column);
@@ -1870,8 +2295,11 @@ fn union_of(branches: &[Derived]) -> Derived {
         if let Some(open) = &derived.open {
             reads.merge(open);
         }
+        names.extend(derived.names.iter().cloned());
     }
-    Derived::passthrough_named(reads)
+    let mut output = Derived::passthrough_named(reads);
+    output.names = names;
+    output
 }
 
 /// The name of the last `String` field of a `ColumnRef`.

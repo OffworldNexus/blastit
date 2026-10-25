@@ -55,9 +55,10 @@ fn a_select_reads_its_columns() {
         analyze("SELECT 1 FROM t").unwrap().kind(),
         StatementKind::Select
     );
-    assert!(
-        analyze("SELECT 1 FROM t").unwrap().touches_nothing(),
-        "a target list of constants reads no column"
+    assert_eq!(
+        covered("SELECT 1 FROM t"),
+        ["select on t"],
+        "naming a table needs a grant for it, even with a constant target list"
     );
 }
 
@@ -287,12 +288,27 @@ fn the_system_catalogues_are_never_readable() {
         "SELECT * FROM pg_catalog.pg_class",
         "SELECT * FROM information_schema.tables",
         "SELECT c.relname FROM t, pg_catalog.pg_class c",
+        // `pg_catalog` is always first on the search path, so an unqualified
+        // `pg_*` name resolves into it: it is the catalogue, not a table.
+        "SELECT * FROM pg_class",
+        "SELECT count(*) FROM pg_type",
+        "SELECT * FROM pg_catalog.pg_type",
+        // ... and a name that is one of the `information_schema` views is
+        // refused too, so a grant key for it could never read as a capability.
+        "SELECT count(*) FROM tables",
+        "SELECT * FROM columns",
+        // A schema of the app's own keeps its name: `audit.t` is a table like
+        // any other and a grant can spell it out.
+        "SELECT 1 FROM audit.users",
     ] {
+        let name = sql.split_whitespace().last().unwrap_or(sql);
+        if name == "audit.users" {
+            assert_eq!(covered(sql), ["select on audit.users"], "{sql}");
+            continue;
+        }
         let reason = refused(sql);
         assert!(reason.contains("system catalogues"), "{sql}: {reason}");
     }
-    // An unqualified name is a table like any other: the grant author decides.
-    assert_eq!(covered("SELECT * FROM pg_class"), ["select on pg_class.*"]);
 }
 
 #[test]
@@ -532,7 +548,11 @@ fn an_unqualified_column_needs_every_relation_that_could_provide_it() {
         covered("SELECT name FROM t, u"),
         ["select on t.name", "select on u.name"]
     );
-    assert_eq!(covered("SELECT t.name FROM t, u"), ["select on t.name"]);
+    assert_eq!(
+        covered("SELECT t.name FROM t, u"),
+        ["select on t.name", "select on u"],
+        "u is named even though no column of it is read"
+    );
     // The innermost scope that provides it wins: the outer one is not read.
     assert_eq!(
         covered("SELECT id FROM (SELECT id FROM u) s, t"),
@@ -557,7 +577,8 @@ fn a_join_reads_its_condition_and_its_using_columns() {
     );
     assert_eq!(
         covered("SELECT 1 FROM t CROSS JOIN u WHERE t.id = 1"),
-        ["select on t.id"]
+        ["select on t.id", "select on u"],
+        "a CROSS JOIN names u without reading a column of it"
     );
 }
 
@@ -583,40 +604,60 @@ fn a_window_clause_reads_its_partition_and_order() {
 }
 
 #[test]
-fn count_star_reads_no_column() {
-    assert_eq!(covered("SELECT count(*) FROM t"), Vec::<String>::new());
+fn count_star_reads_no_column_but_names_the_table() {
+    // `count(*)` reads no column (§6), but the statement still asks after the
+    // table: it learns that it exists and how many rows it has, so naming it
+    // needs a grant (D7).
+    assert_eq!(covered("SELECT count(*) FROM t"), ["select on t"]);
     assert_eq!(
         covered("SELECT count(*) FROM auth_user"),
-        Vec::<String>::new()
+        ["select on auth_user"]
     );
 }
 
 #[test]
-fn a_table_named_without_a_column_read_needs_nothing() {
-    // §6 is explicit that `count(*)` reads no column, and the analysis is a list
-    // of columns: what such a statement needs is nothing, not `select = "*"` and
-    // not an entry for the table. (The row count is then not gated; see the
-    // module documentation.)
+fn a_table_named_without_a_column_read_still_needs_a_select_grant() {
+    // A statement that names a table reads no column of it, but it tells the
+    // statement whether the table exists and roughly how many rows it has:
+    // `SELECT count(*) FROM auth_user`, `SELECT 1 FROM t`, `EXISTS (SELECT 1
+    // FROM t …)` all need a `select` entry for the table (D7).
     assert!(
-        analyze("SELECT count(*) FROM auth_user")
+        !analyze("SELECT count(*) FROM auth_user")
             .unwrap()
-            .touches_nothing()
+            .touches_nothing(),
+        "naming auth_user is touching it"
     );
-    assert!(
-        analyze("SELECT 1 FROM auth_user WHERE true")
-            .unwrap()
-            .touches_nothing()
+    assert_eq!(
+        covered("SELECT count(*) FROM auth_user"),
+        ["select on auth_user"]
+    );
+    assert_eq!(
+        covered("SELECT 1 FROM t WHERE true"),
+        ["select on t"],
+        "a target list of constants still names t"
+    );
+    assert_eq!(
+        covered("SELECT 1 FROM t WHERE EXISTS (SELECT 1 FROM u)"),
+        ["select on t", "select on u"],
+        "a subquery names its table too"
     );
     assert_eq!(
         covered("SELECT count(*) FROM t JOIN u ON t.id = u.tid"),
         ["select on t.id", "select on u.tid"],
-        "the join condition is still read"
+        "the join condition reads both columns, which already covers the tables"
+    );
+    assert_eq!(
+        covered("SELECT count(*) FROM t, u"),
+        ["select on t", "select on u"],
+        "a cross join names both tables without reading a column"
     );
     assert_eq!(
         covered("SELECT count(*) FROM auth_user WHERE password = $1"),
         ["select on auth_user.password"],
-        "... and so is a filter"
+        "... and a filter is read as well (which names the table too)"
     );
+    // Without a table, there is still nothing to grant.
+    assert!(analyze("SELECT 1").unwrap().touches_nothing());
 }
 
 #[test]
@@ -862,4 +903,243 @@ fn an_alias_shadows_a_cte_name() {
 fn a_cte_is_visible_inside_its_own_statement_only() {
     // A name no CTE defines is a table like any other.
     assert_eq!(covered("SELECT a FROM x"), ["select on x.a"]);
+}
+
+//
+// D7 review round: the rules the first round missed.
+//
+
+#[test]
+fn a_named_table_needs_a_select_grant_even_without_a_column_read() {
+    // What the statement learns is that the table exists and roughly how many
+    // rows it has; naming it is touching it (D7).
+    assert_eq!(covered("SELECT 1 FROM t"), ["select on t"]);
+    assert_eq!(covered("SELECT count(*) FROM t"), ["select on t"]);
+    assert_eq!(covered("SELECT EXISTS (SELECT 1 FROM t)"), ["select on t"]);
+    // Through a derived relation too: the inner statement is the one that names
+    // `t`, and the derived relation carries that.
+    assert_eq!(
+        covered("SELECT 1 FROM (SELECT 1 FROM t) s"),
+        ["select on t"]
+    );
+    assert_eq!(
+        covered("WITH x AS (SELECT 1 FROM t) SELECT 1 FROM x"),
+        ["select on t"]
+    );
+    assert_eq!(
+        covered("SELECT 1 FROM t JOIN u ON true"),
+        ["select on t", "select on u"],
+        "a join with no column condition names both tables"
+    );
+    // A table a column is read from already needs a `select` entry, so the
+    // weaker access is not reported on top of it.
+    assert_eq!(
+        covered("SELECT count(id) FROM t"),
+        ["select on t.id"],
+        "a column read is already more than naming the table"
+    );
+    assert!(
+        analyze("SELECT 1").unwrap().touches_nothing(),
+        "a statement with no table still touches nothing"
+    );
+}
+
+#[test]
+fn a_write_target_is_named_by_its_own_grant() {
+    // `INSERT INTO t` names `t`, but the `insert` grant is what allows it: a
+    // pure-insert grant is enough, with no `select` entry.
+    assert_eq!(covered("INSERT INTO t (a) VALUES (1)"), ["insert on t.a"]);
+    assert_eq!(covered("UPDATE t SET a = 1"), ["update on t.a"]);
+    assert_eq!(covered("DELETE FROM t"), ["delete on t"]);
+}
+
+#[test]
+fn locking_a_derived_relation_locks_the_tables_it_names() {
+    // The statement reads no column of `auth_user`, but PostgreSQL locks its
+    // rows through the subquery, so `update` is required.
+    assert_eq!(
+        covered("SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR UPDATE"),
+        ["select on auth_user", "update on auth_user.*"]
+    );
+    assert_eq!(
+        covered("SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR SHARE"),
+        ["select on auth_user", "update on auth_user.*"]
+    );
+    assert_eq!(
+        covered("WITH x AS (SELECT 1 FROM auth_user) SELECT 1 FROM x FOR UPDATE"),
+        ["select on auth_user", "update on auth_user.*"]
+    );
+    // `OF s` locks only `s`; `s` stands for `auth_user`.
+    assert_eq!(
+        covered("SELECT 1 FROM t, (SELECT 1 FROM auth_user) s FOR UPDATE OF s"),
+        [
+            "select on auth_user",
+            "select on t",
+            "update on auth_user.*"
+        ]
+    );
+    // ... and a join alias stands for both of its sides.
+    assert_eq!(
+        covered("SELECT 1 FROM t JOIN u ON true FOR UPDATE OF t"),
+        ["select on t", "select on u", "update on t.*"]
+    );
+}
+
+#[test]
+fn an_unqualified_catalogue_name_is_refused() {
+    for sql in [
+        "SELECT * FROM pg_class",
+        "SELECT count(*) FROM pg_type",
+        "SELECT * FROM pg_catalog.pg_class",
+        "SELECT * FROM information_schema.tables",
+        "SELECT count(*) FROM tables",
+        "SELECT * FROM columns",
+    ] {
+        let reason = refused(sql);
+        assert!(reason.contains("system catalogues"), "{sql}: {reason}");
+    }
+    // Another schema keeps its name: `audit.pg_class` is the app's table, not
+    // the catalogue, and a grant can spell it out.
+    assert_eq!(
+        covered("SELECT 1 FROM audit.pg_class"),
+        ["select on audit.pg_class"]
+    );
+}
+
+#[test]
+fn a_whole_row_reference_to_a_relation_is_a_whole_table_read() {
+    // The relation name, or its alias, is not a column: the statement reads
+    // every column of the table, so the grant has to say `select = "*"`.
+    for sql in [
+        "SELECT x FROM t x",
+        "SELECT t FROM t",
+        "SELECT ROW(x) FROM t x",
+        "SELECT to_jsonb(x) FROM t x",
+        "SELECT x::text FROM t x",
+        "SELECT (x).a FROM t x",
+        "SELECT x['a'] FROM t x",
+        "SELECT count(x) FROM t x",
+    ] {
+        assert_eq!(covered(sql), ["select on t.*"], "{sql}");
+    }
+    // A name that is not a relation in scope is a column like any other.
+    assert_eq!(
+        covered("SELECT x FROM t"),
+        ["select on t.x"],
+        "without an alias, x is a column of t"
+    );
+}
+
+#[test]
+fn a_cast_that_can_run_code_is_reported_like_a_function() {
+    // Ordinary casts of the built-in scalar types, including arrays of them,
+    // run no user code.
+    for sql in [
+        "SELECT a::int, a::integer, a::bigint, a::smallint FROM t",
+        "SELECT a::text, a::varchar, a::char FROM t",
+        "SELECT a::numeric, a::decimal, a::real, a::float8 FROM t",
+        "SELECT a::timestamp, a::timestamptz, a::date FROM t",
+        "SELECT a::boolean, a::uuid FROM t",
+        "SELECT a::json, a::jsonb FROM t",
+        "SELECT a::int[], a::text[] FROM t",
+        "SELECT a::geometry, a::geography FROM t",
+    ] {
+        assert_eq!(functions(sql), Vec::<String>::new(), "{sql}");
+    }
+    // A `reg*` type looks a name up in the catalogue; a domain or a user type
+    // can run code at input; any other type is simply not one this build knows.
+    // Each is reported under its own name, so a grant has to list it.
+    for (sql, name) in [
+        ("SELECT a::regclass FROM t", "regclass"),
+        ("SELECT a::regtype FROM t", "regtype"),
+        ("SELECT a::regproc FROM t", "regproc"),
+        ("SELECT a::regprocedure FROM t", "regprocedure"),
+        ("SELECT a::regnamespace FROM t", "regnamespace"),
+        ("SELECT a::regcollation FROM t", "regcollation"),
+        ("SELECT a::regoper FROM t", "regoper"),
+        ("SELECT a::regoperator FROM t", "regoperator"),
+        ("SELECT a::regconfig FROM t", "regconfig"),
+        ("SELECT a::regdictionary FROM t", "regdictionary"),
+        ("SELECT a::regrole FROM t", "regrole"),
+        ("SELECT a::regclass[] FROM t", "regclass"),
+        ("SELECT a::myschema.mytype FROM t", "myschema.mytype"),
+        ("SELECT a::money FROM t", "money"),
+    ] {
+        assert_eq!(functions(sql), [name], "{sql}");
+        assert!(!is_safe_function(name), "{sql}");
+    }
+    // The cast's argument is still read.
+    assert_eq!(covered("SELECT a::regclass FROM t"), ["select on t.a"]);
+}
+
+#[test]
+fn the_pure_parser_nodes_are_allowed_and_xml_is_refused() {
+    for sql in [
+        "SELECT CURRENT_TIMESTAMP",
+        "SELECT CURRENT_DATE, LOCALTIME",
+        "SELECT CURRENT_USER, SESSION_USER",
+        "SELECT greatest(1, 2), least(3, 4)",
+        "SELECT coalesce(a, b) FROM t",
+        "SELECT json_object('a': 1), json_array(1, 2)",
+        "SELECT json_query('{}', '$.a')",
+    ] {
+        assert!(analyze(sql).is_ok(), "{sql}: {}", refused(sql));
+    }
+    for sql in [
+        "SELECT xmlelement(name foo)",
+        "SELECT xmlparse(document '<a/>')",
+        "SELECT a IS DOCUMENT FROM t",
+    ] {
+        let reason = refused(sql);
+        assert!(reason.contains("XML"), "{sql}: {reason}");
+    }
+}
+
+#[test]
+fn the_pure_window_and_text_functions_are_safe() {
+    for name in [
+        "lag",
+        "lead",
+        "ntile",
+        "cume_dist",
+        "percent_rank",
+        "first_value",
+        "last_value",
+        "nth_value",
+        "stddev",
+        "stddev_pop",
+        "stddev_samp",
+        "variance",
+        "var_pop",
+        "var_samp",
+        "mode",
+        "percentile_cont",
+        "percentile_disc",
+        "to_tsvector",
+        "plainto_tsquery",
+        "websearch_to_tsquery",
+        "ts_rank",
+        "jsonb_extract_path_text",
+        "json_extract_path_text",
+        "jsonb_array_length",
+    ] {
+        assert!(is_safe_function(name), "{name} should be safe");
+    }
+    // `unaccent` reads a rule file, so it stays out of the safe set and a grant
+    // has to name it in `functions`.
+    assert!(!is_safe_function("unaccent"));
+    for sql in [
+        "SELECT lag(id) OVER (ORDER BY id) FROM t",
+        "SELECT stddev(x), variance(x) FROM t",
+        "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM t",
+        "SELECT mode() WITHIN GROUP (ORDER BY x) FROM t",
+        "SELECT to_tsvector(body), ts_rank(body, plainto_tsquery($1)) FROM t",
+        "SELECT jsonb_extract_path_text(data, 'a'), jsonb_array_length(data) FROM t",
+    ] {
+        let called = functions(sql);
+        assert!(
+            called.iter().all(|name| is_safe_function(name)),
+            "{sql}: {called:?}"
+        );
+    }
 }

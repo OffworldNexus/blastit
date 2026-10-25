@@ -8,6 +8,8 @@ use crate::model::{Manifest, PgGrant, ProxyName};
 use crate::routing::compile_pattern;
 use crate::uid::UidLayout;
 
+use blastit_sqlpolicy::is_system_table;
+
 /// Validates a manifest and collects its warnings.
 pub(crate) fn validate(
     manifest: &Manifest,
@@ -133,16 +135,23 @@ fn check_unrestricted(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
     }
 }
 
-/// A table grant may name any table except a system catalogue (§6, D7): the
-/// analysis refuses `pg_catalog` and `information_schema` outright, so an entry
-/// naming one could only read as a capability it is not.
+/// A table grant may name any table except a system catalogue (§6, D7).
+///
+/// The analysis refuses a qualified `pg_catalog`/`information_schema` name and
+/// any **unqualified** name that resolves into one — `pg_class` (because
+/// `pg_catalog` is first on the search path) and the `information_schema` views
+/// — so an entry naming one could only read as a capability it is not.
 fn check_table_grants(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
     let mut check = |location: &Location, proxy: &ProxyName, grant: &PgGrant| {
         for table in grant.tables().tables().keys() {
+            let qualified = table.contains('.');
             let system = table.starts_with("pg_catalog.")
                 || table.starts_with("information_schema.")
                 || table == "pg_catalog"
-                || table == "information_schema";
+                || table == "information_schema"
+                // An unqualified key is the one the analysis would refuse: the
+                // name a statement names cannot keep a schema.
+                || (!qualified && is_system_table(table));
             if system {
                 errors.push(ManifestError::UnusableTable {
                     location: location.clone(),
