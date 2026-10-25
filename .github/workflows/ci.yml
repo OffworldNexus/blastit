@@ -72,6 +72,18 @@ jobs:
   smoke:
     name: smoke (root)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: blastit
+          POSTGRES_PASSWORD: ci-not-secret
+          POSTGRES_DB: blastit
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U blastit" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      BLASTIT_TEST_PG_URL: postgresql://blastit:ci-not-secret@127.0.0.1:5432/blastit
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
