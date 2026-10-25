@@ -11,16 +11,31 @@ use crate::pid::{Pid, impossible};
 /// [`fork`] uses this to enforce init's invariant: it is single-threaded at
 /// every `fork()` (ARCHITECTURE.md §2.1). A thread that exists for any reason —
 /// a tokio runtime, a BLAS pool, a `std::thread::spawn` — makes the check fail.
+///
+/// **The check is advisory.** It reads a file and then forks, so a thread born
+/// in between is not caught, and `/proc` is the only place the number comes
+/// from. What it catches is the mistake the invariant is usually broken by —
+/// code that starts a runtime, or spawns a thread, and forks afterwards — not a
+/// deliberate race. When the count cannot be read at all the answer is
+/// [`Error::ThreadCount`], and the C1b binary treats that as fatal: if the
+/// invariant cannot be *checked*, init does not fork.
 pub fn thread_count() -> io::Result<usize> {
     let status = std::fs::read_to_string("/proc/self/status")?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("Threads:") {
-            return rest.trim().parse::<usize>().map_err(|_| {
-                io::Error::other("/proc/self/status has an unparsable Threads: line")
-            });
+            return match rest.trim().parse::<usize>() {
+                Ok(threads) => Ok(threads),
+                Err(_) => Err(Error::ThreadCount {
+                    detail: "the Threads: line of /proc/self/status is not a number",
+                }
+                .into()),
+            };
         }
     }
-    Err(io::Error::other("/proc/self/status has no Threads: line"))
+    Err(Error::ThreadCount {
+        detail: "/proc/self/status has no Threads: line",
+    }
+    .into())
 }
 
 /// The result of a successful [`fork`].

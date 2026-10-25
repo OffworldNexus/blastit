@@ -47,6 +47,19 @@ pub enum Error {
         count: usize,
     },
 
+    /// [`crate::send_with_fd`] was called with nothing to send.
+    #[error(
+        "send_with_fd needs at least one byte: a control message attached to a zero-length write may be dropped"
+    )]
+    EmptyPayload,
+
+    /// A path that must hold a socket holds something else.
+    #[error("{}: exists, but is not a socket", path.display())]
+    NotASocket {
+        /// The offending path.
+        path: PathBuf,
+    },
+
     /// The control message did not fit in the receive buffer, so the set of
     /// received descriptors is unknown; whatever the kernel did copy is closed.
     #[error("control message was truncated; the received file descriptor set is unknown")]
@@ -76,6 +89,14 @@ pub enum Error {
         call: &'static str,
         /// The value it returned.
         value: i64,
+    },
+
+    /// The thread count could not be read, so the single-threaded invariant
+    /// cannot be checked before a fork.
+    #[error("cannot count the threads of this process: {detail}")]
+    ThreadCount {
+        /// What `/proc/self/status` looked like instead.
+        detail: &'static str,
     },
 }
 

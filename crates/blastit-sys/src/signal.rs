@@ -7,6 +7,83 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use crate::Signal;
 use crate::pid::{ExitStatus, Pid, impossible};
 
+/// A saved signal mask.
+///
+/// [`SignalFd::new`] changes the calling thread's mask; this is the value it
+/// remembers, handed out so a freshly forked child can put it back with
+/// [`restore_signal_mask_in_child`] without needing the `SignalFd` itself.
+#[derive(Clone, Copy)]
+pub struct SignalMask(libc::sigset_t);
+
+impl SignalMask {
+    /// Whether `signal` is blocked in this mask.
+    pub fn blocks(&self, signal: Signal) -> bool {
+        // SAFETY: `sigismember` only reads bits of an initialised set.
+        unsafe { libc::sigismember(&self.0, signal.as_raw()) == 1 }
+    }
+}
+
+impl std::fmt::Debug for SignalMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut blocked = Vec::new();
+        for signal in [
+            Signal::HUP,
+            Signal::INT,
+            Signal::QUIT,
+            Signal::TERM,
+            Signal::CHILD,
+            Signal::USR1,
+            Signal::USR2,
+            Signal::PIPE,
+        ] {
+            if self.blocks(signal) {
+                blocked.push(format!("{signal:?}"));
+            }
+        }
+        f.debug_tuple("SignalMask").field(&blocked).finish()
+    }
+}
+
+/// The calling thread's current signal mask.
+pub fn current_signal_mask() -> io::Result<SignalMask> {
+    let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: a null set means "change nothing, only read the current mask into
+    // the valid storage we pass".
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), mask.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call above filled the set in.
+    Ok(SignalMask(unsafe { mask.assume_init() }))
+}
+
+/// Restore a mask saved by [`SignalFd::new`], in a freshly forked child.
+///
+/// `fork` copies the signal mask into the child, so a child of init starts with
+/// `SIGCHLD`, `SIGTERM`, `SIGINT` and `SIGHUP` blocked — the mask init set up
+/// for its own `signalfd`, which the child neither has (the descriptor is
+/// close-on-exec) nor wants. `execve` does **not** clear the mask either: it
+/// resets handlers to their defaults but leaves blocked signals blocked. So the
+/// child has to put the mask back itself, and this is how:
+///
+/// ```text
+/// // in init, once:
+/// let events = SignalFd::new(&[Signal::CHILD, Signal::TERM, Signal::INT, Signal::HUP])?;
+/// let mask = events.previous_mask();
+/// // in the child, after the fork:
+/// restore_signal_mask_in_child(mask)?;      // or events.unblock_in_child()
+/// ```
+///
+/// The mask is per-thread, so this only restores the calling thread — which is
+/// the whole process in a child that has just been forked.
+pub fn restore_signal_mask_in_child(mask: SignalMask) -> io::Result<()> {
+    // SAFETY: `SIG_SETMASK` replaces the calling thread's mask with the
+    // initialised set we hold; no pointer is written to.
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &mask.0, std::ptr::null_mut()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// A `signalfd` for the signals a supervisor cares about.
 ///
 /// init wants to be woken by `SIGCHLD` (a child exited), `SIGTERM` and `SIGINT`
@@ -18,10 +95,12 @@ use crate::pid::{ExitStatus, Pid, impossible};
 /// non-blocking and close-on-exec.
 ///
 /// Blocking is per-thread. init blocks before it forks its children, so the
-/// mask is inherited by every child, which is why the child helper
-/// [`SignalFd::unblock_in_child`] exists: a fresh image should start with the
-/// mask it would have had, since it does not own the `signalfd` (the descriptor
-/// is close-on-exec and the child closes it anyway).
+/// mask is inherited by every child — and `execve` does not clear it either —
+/// which is why [`SignalFd::previous_mask`] hands out the mask that was in
+/// effect before, and why [`restore_signal_mask_in_child`] is in the child
+/// sequence: a fresh image should start with the mask it would have had, since
+/// it does not own the `signalfd` (the descriptor is close-on-exec and the
+/// child closes it anyway).
 pub struct SignalFd {
     fd: OwnedFd,
     previous_mask: libc::sigset_t,
@@ -31,8 +110,10 @@ impl SignalFd {
     /// Block `signals` and return a non-blocking, close-on-exec `signalfd` for them.
     ///
     /// The mask in effect before this call is remembered, so a child can put it
-    /// back with [`SignalFd::unblock_in_child`]. A signal that is already
-    /// pending when it is blocked becomes readable immediately.
+    /// back with [`SignalFd::unblock_in_child`] or, without the descriptor,
+    /// [`restore_signal_mask_in_child`] — see [`SignalFd::previous_mask`]. A
+    /// signal that is already pending when it is blocked becomes readable
+    /// immediately.
     pub fn new(signals: &[Signal]) -> io::Result<Self> {
         let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
         // SAFETY: `sigemptyset` initialises the set it is given, which is
@@ -120,16 +201,21 @@ impl SignalFd {
     /// program, and the descriptors it owns are the ones its parent chose for
     /// it. The name says where it is meant to be called, not what it does:
     /// the call itself is per-thread and does not care who the caller is.
+    ///
+    /// [`SignalFd::previous_mask`] plus [`restore_signal_mask_in_child`] is the
+    /// same thing when the child does not have — or should not have — the
+    /// `SignalFd` value in scope.
     pub fn unblock_in_child(&self) -> io::Result<()> {
-        // SAFETY: `SIG_SETMASK` replaces the calling thread's mask with the
-        // initialised set stored in this struct; no pointer is written to.
-        if unsafe {
-            libc::sigprocmask(libc::SIG_SETMASK, &self.previous_mask, std::ptr::null_mut())
-        } == -1
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        restore_signal_mask_in_child(self.previous_mask())
+    }
+
+    /// The mask that was in effect before this call blocked `signals`.
+    ///
+    /// This is the value a forked child restores, and the one the documented
+    /// child sequence hands to [`restore_signal_mask_in_child`]: keep it
+    /// somewhere the fork path can reach, because nothing else can recreate it.
+    pub fn previous_mask(&self) -> SignalMask {
+        SignalMask(self.previous_mask)
     }
 
     /// The underlying descriptor, for a poller.
@@ -205,16 +291,52 @@ mod tests {
 
     /// Whether the calling thread currently blocks `signal`.
     fn mask_blocks(signal: Signal) -> bool {
-        let mut current = MaybeUninit::<libc::sigset_t>::uninit();
-        // SAFETY: `SIG_SETMASK` with a null set only reads the current mask into
-        // the valid storage we pass.
-        let ret =
-            unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), current.as_mut_ptr()) };
-        assert_eq!(ret, 0, "sigprocmask does not fail here");
-        // SAFETY: the call above filled the set in.
-        let current = unsafe { current.assume_init() };
-        // SAFETY: `sigismember` only reads bits of an initialised set.
-        unsafe { libc::sigismember(&current, signal.as_raw()) == 1 }
+        must(current_signal_mask()).blocks(signal)
+    }
+
+    #[test]
+    fn previous_mask_is_the_mask_before_the_signalfd() {
+        let before = must(current_signal_mask());
+        assert!(!before.blocks(Signal::TERM), "the harness blocks nothing");
+        let events = must(SignalFd::new(&[Signal::CHILD, Signal::TERM]));
+        assert!(must(current_signal_mask()).blocks(Signal::TERM));
+
+        let saved = events.previous_mask();
+        assert!(!saved.blocks(Signal::TERM));
+        assert!(!saved.blocks(Signal::CHILD));
+        // The free function and the method both put the saved mask back.
+        must(restore_signal_mask_in_child(saved));
+        assert!(!mask_blocks(Signal::TERM));
+
+        let events = must(SignalFd::new(&[Signal::TERM]));
+        must(events.unblock_in_child());
+        assert!(!mask_blocks(Signal::TERM));
+        // Leave the thread as we found it: other tests run in this process.
+        must(restore_signal_mask_in_child(before));
+    }
+
+    #[test]
+    fn a_forked_child_inherits_the_blocked_mask_and_can_put_it_back() {
+        let events = must(SignalFd::new(&[Signal::TERM]));
+        let saved = events.previous_mask();
+        let code = in_child(move || {
+            // `fork` copies the mask, and `execve` does not clear it either...
+            match current_signal_mask() {
+                Ok(mask) if mask.blocks(Signal::TERM) => {}
+                _ => return 1,
+            }
+            // ... which is why a child restores it itself.
+            if restore_signal_mask_in_child(saved).is_err() {
+                return 2;
+            }
+            match current_signal_mask() {
+                Ok(mask) if !mask.blocks(Signal::TERM) => 0,
+                _ => 3,
+            }
+        });
+        assert_eq!(code, 0, "child failure code {code}");
+        // This thread blocked SIGTERM for the test; give it back.
+        must(events.unblock_in_child());
     }
 
     #[test]

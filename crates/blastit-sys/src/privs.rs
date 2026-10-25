@@ -24,6 +24,10 @@ use crate::error::Error;
 /// This is process-wide, not thread-local: glibc's `setresuid` applies the
 /// change to every thread, which is one more reason init must be
 /// single-threaded when it calls it. `uid` must not be 0.
+///
+/// Note for callers: `setresgid` and `setresuid` **clear
+/// `PR_SET_PDEATHSIG`**, so [`harden_child`] has to run *after* this, not
+/// before. See [`harden_child`] for the full story.
 pub fn drop_privileges(uid: u32) -> io::Result<()> {
     if uid == 0 {
         return Err(Error::PrivilegeCheck {
@@ -167,9 +171,17 @@ pub fn set_umask(mask: u32) -> u32 {
 /// survive its parent. `PR_SET_NO_NEW_PRIVS` is also what allows a seccomp
 /// filter to be installed without any capability (§7.3).
 ///
-/// The death signal is not inherited across `fork`, so this runs in each child,
-/// after the fork. Calling it with a signal that is blocked in the child is
-/// fine — the kernel delivers it anyway.
+/// **Call this after [`drop_privileges`], never before.** `prctl(2)` lists
+/// `set*gid` and `set*uid` — so `setresgid` and `setresuid` — among the calls
+/// that *clear* the parent-death signal, and `drop_privileges` makes all of
+/// them. A child hardened first and dropped afterwards comes back up with its
+/// death signal silently gone. The order in the crate-level sequence is the one
+/// that holds: drop privileges, then harden.
+///
+/// The death signal is also not inherited across `fork`, and `execve` clears it
+/// too, so this runs in each child (again, in dbproxy's case, *after* its
+/// `execve` if the child execs). Calling it with a signal that is blocked in
+/// the child is fine — the kernel delivers it anyway.
 pub fn harden_child(pdeathsig: Signal) -> io::Result<()> {
     // SAFETY: `PR_SET_PDEATHSIG` takes one integer, the signal number.
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, pdeathsig.as_raw()) } == -1 {
@@ -266,22 +278,76 @@ mod tests {
             if harden_child(Signal::KILL).is_err() {
                 return 1;
             }
-            let mut pdeathsig = 0;
-            // SAFETY: `PR_GET_PDEATHSIG` writes one `c_int` into the valid
-            // storage `pdeathsig` points at.
-            if unsafe { libc::prctl(libc::PR_GET_PDEATHSIG, &mut pdeathsig) } == -1 {
+            if pdeathsig() != Signal::KILL.as_raw() {
                 return 2;
-            }
-            if pdeathsig != Signal::KILL.as_raw() {
-                return 3;
             }
             // SAFETY: `PR_GET_NO_NEW_PRIVS` takes no pointer and returns 1 when
             // the flag is set.
             if unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) } != 1 {
-                return 4;
+                return 3;
             }
             0
         });
+    }
+
+    /// `PR_SET_PDEATHSIG`, read back.
+    fn pdeathsig() -> i32 {
+        let mut signal = 0;
+        // SAFETY: `PR_GET_PDEATHSIG` writes one `c_int` into the valid storage
+        // `signal` points at.
+        if unsafe { libc::prctl(libc::PR_GET_PDEATHSIG, &mut signal) } == -1 {
+            return -1;
+        }
+        signal
+    }
+
+    #[test]
+    fn harden_child_after_drop_privileges_keeps_the_death_signal() {
+        if !root_only() {
+            return;
+        }
+        // The order the crate documents: drop first, harden second.
+        let uid = 20_500;
+        let code = in_child(move || {
+            if drop_privileges(uid).is_err() {
+                return 1;
+            }
+            if harden_child(Signal::KILL).is_err() {
+                return 2;
+            }
+            match pdeathsig() == Signal::KILL.as_raw() {
+                true => 0,
+                false => 3,
+            }
+        });
+        assert_eq!(code, 0, "child failure code {code}");
+    }
+
+    #[test]
+    fn dropping_privileges_after_hardening_loses_the_death_signal() {
+        if !root_only() {
+            return;
+        }
+        // `setresgid` and `setresuid` clear `PR_SET_PDEATHSIG` (prctl(2) lists
+        // `set*gid`/`set*uid`), which is why the sequence in the crate docs
+        // hardens *after* the drop. This is that hazard, on purpose.
+        let uid = 20_500;
+        let code = in_child(move || {
+            if harden_child(Signal::KILL).is_err() {
+                return 1;
+            }
+            if pdeathsig() != Signal::KILL.as_raw() {
+                return 2;
+            }
+            if drop_privileges(uid).is_err() {
+                return 3;
+            }
+            match pdeathsig() {
+                0 => 0,
+                _ => 4,
+            }
+        });
+        assert_eq!(code, 0, "child failure code {code}");
     }
 
     #[test]

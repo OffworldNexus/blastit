@@ -38,6 +38,46 @@ pub fn set_cloexec(fd: BorrowedFd<'_>, cloexec: bool) -> io::Result<bool> {
     Ok(flags & libc::FD_CLOEXEC != 0)
 }
 
+/// `dup2(fd, target)`: put a copy of `fd` on descriptor number `target`,
+/// **without** `FD_CLOEXEC`.
+///
+/// This is the one place in blastit where a descriptor deliberately does not
+/// carry `FD_CLOEXEC`, and it exists for descriptors 0, 1 and 2 only: a child's
+/// stdin, stdout and stderr are the log pipes (§8.1) and, for dbproxy, the
+/// secrets pipe, and every one of those has to survive the child's own
+/// `execve`. Handing them over with `dup_onto(pipe_write_end, 1)` puts them
+/// where a program expects to find them and leaves the flag clear, so the
+/// `execve` does not take them away.
+///
+/// Whatever was on `target` is closed first — that is how a child replaces the
+/// stdin it inherited from init. `target` must be a valid descriptor number;
+/// `fd` and `target` may be the same number, in which case nothing happens.
+///
+/// Nothing else in the child should keep a descriptor without `FD_CLOEXEC`:
+/// every other descriptor a child owns is either inherited deliberately by
+/// number or closed with [`close_fds_except`].
+pub fn dup_onto(fd: BorrowedFd<'_>, target: RawFd) -> io::Result<()> {
+    if target < 0 {
+        return Err(io::Error::from_raw_os_error(libc::EBADF));
+    }
+    // SAFETY: `dup2` takes two descriptor numbers. It closes `target` first if
+    // it happens to be open, and returns it; no memory is touched.
+    if unsafe { libc::dup2(fd.as_raw_fd(), target) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // `dup2` clears `FD_CLOEXEC` on the new descriptor, and clearing it again is
+    // free; the point is that the caller can rely on the flag being absent.
+    // SAFETY: `dup2` just returned `target`, so it is a live descriptor.
+    let target = unsafe { BorrowedFd::borrow_raw(target) };
+    set_cloexec(target, false)?;
+    if fd_is_cloexec(target)? {
+        return Err(io::Error::other(
+            "dup_onto left FD_CLOEXEC set on the target descriptor",
+        ));
+    }
+    Ok(())
+}
+
 /// Close every descriptor at or above 3 that is not listed in `keep`.
 ///
 /// Newly forked children must close everything they do not own — a view
@@ -180,6 +220,72 @@ mod tests {
         assert!(must(fd_is_cloexec(duped.as_fd())));
         assert!(must(set_cloexec(duped.as_fd(), false)));
         assert!(!must(fd_is_cloexec(duped.as_fd())));
+    }
+
+    #[test]
+    fn dup_onto_leaves_a_usable_descriptor_without_cloexec() {
+        let (log_read, log_write) = must(crate::pipe());
+        // A target the harness is not using: descriptors are handed out
+        // lowest-first, so nothing here is anywhere near 250.
+        let target = 250;
+        must(dup_onto(log_write.as_fd(), target));
+        // SAFETY: `dup_onto` just put a live descriptor on `target`.
+        let target_fd = unsafe { BorrowedFd::borrow_raw(target) };
+        assert!(
+            !must(fd_is_cloexec(target_fd)),
+            "the whole point of dup_onto is that the child's 0/1/2 survive execve"
+        );
+
+        crate::testutil::write_all(target_fd, b"to the log pipe");
+        drop(log_write);
+        // SAFETY: `target` is ours for this test; closing it here lets the read
+        // end see end-of-file.
+        assert_eq!(unsafe { libc::close(target) }, 0);
+        assert_eq!(crate::testutil::read_to_end(log_read), b"to the log pipe");
+    }
+
+    #[test]
+    fn dup_onto_onto_itself_only_clears_the_flag() {
+        let (_read, write_end) = must(crate::pipe());
+        assert!(must(fd_is_cloexec(write_end.as_fd())));
+        must(dup_onto(write_end.as_fd(), write_end.as_raw_fd()));
+        assert!(!must(fd_is_cloexec(write_end.as_fd())));
+    }
+
+    #[test]
+    fn dup_onto_replaces_whatever_was_on_the_target() {
+        let (first_read, first_write) = must(crate::pipe());
+        let (_second_read, second_write) = must(crate::pipe());
+        let target = second_write.as_raw_fd();
+        must(dup_onto(first_read.as_fd(), target));
+
+        // `target` is now a copy of the first pipe's *read* end, so the byte
+        // written to the write end comes back through it...
+        crate::testutil::write_all(first_write.as_fd(), b"copied");
+        let mut buf = [0_u8; 8];
+        // SAFETY: `read` writes at most `buf.len()` bytes into a valid buffer.
+        let read =
+            unsafe { libc::read(target, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        assert_eq!(read, 6);
+        assert_eq!(&buf[..6], b"copied");
+
+        // ... and the descriptor that was there before is gone rather than
+        // duplicated: writing to a read end fails.
+        // SAFETY: `write` reads one byte from a valid pointer.
+        let written = unsafe { libc::write(target, b"x".as_ptr().cast::<libc::c_void>(), 1) };
+        assert_eq!(written, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
+        drop(second_write);
+    }
+
+    #[test]
+    fn dup_onto_refuses_a_negative_target() {
+        let (_read, write_end) = must(crate::pipe());
+        let err = crate::testutil::must_err(dup_onto(write_end.as_fd(), -1));
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
     }
 
     #[test]

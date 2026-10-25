@@ -30,6 +30,25 @@ pub fn exe_path() -> &'static Path {
 ///
 /// `argv` is passed as given, with no implicit `argv[0]`; callers pass at least
 /// one argument.
+///
+/// # What this call needs from its caller
+///
+/// * **It allocates.** Building the `argv` and `envp` pointer arrays means
+///   `Vec`s, so this may only be called in a child of a process that was
+///   single-threaded at `fork` time: in a child forked from a multi-threaded
+///   process, taking a lock that another thread held at fork time deadlocks
+///   forever. That is the same rule that makes init single-threaded at every
+///   `fork()` (§2.1), and it is why the C1b binary forks only from init.
+/// * **`execve` keeps the signal mask.** Handlers are reset to their default
+///   dispositions, but a blocked signal stays blocked across the `execve`, and
+///   so does an ignored one. A child that inherited init's `signalfd` mask must
+///   put it back itself, with
+///   [`restore_signal_mask_in_child`](crate::restore_signal_mask_in_child),
+///   before calling this — otherwise the new program starts with `SIGCHLD`,
+///   `SIGTERM`, `SIGINT` and `SIGHUP` blocked and no handler for them.
+/// * It does not touch descriptors. Whatever a child means to inherit is
+///   arranged before the call (`dup_onto`, `close_fds_except`), because the
+///   descriptors without `FD_CLOEXEC` are exactly the ones that survive.
 pub fn exec(path: &CStr, argv: &[CString], env: &[(String, String)]) -> io::Error {
     let mut argv_ptrs: Vec<*const libc::c_char> = Vec::with_capacity(argv.len() + 1);
     for arg in argv {
