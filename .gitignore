@@ -1,2 +1,4 @@
 /target
 /.worktrees
+/e2e/app.log
+__pycache__/

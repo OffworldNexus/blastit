@@ -1,0 +1,34 @@
+# End-to-end test: the demo app under blastit, against a real PostgreSQL.
+# Driven by e2e/run.py; see e2e/README.md.
+name: blastit-e2e
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://demo:${E2E_DB_PASSWORD:?}@db:5432/demo?sslmode=disable
+  DJANGO_SECRET_KEY: e2e-not-secret
+  BLASTIT_LOG_FORMAT: json
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: ${E2E_DB_PASSWORD:?}
+      POSTGRES_DB: demo
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "demo"]
+      interval: 1s
+      retries: 60
+
+  # Schema and users, with the real credentials, outside blastit.
+  migrate:
+    build: { context: .., dockerfile: e2e/Dockerfile }
+    image: blastit-e2e
+    environment: *app-env
+    command: ["sh", "-c", "python manage.py migrate -v0 && python manage.py seed"]
+    depends_on: { db: { condition: service_healthy } }
+
+  app:
+    image: blastit-e2e
+    environment: *app-env
+    ports: ["127.0.0.1:${E2E_PORT:-18080}:8080"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
