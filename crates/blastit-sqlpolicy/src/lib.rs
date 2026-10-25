@@ -162,12 +162,13 @@ impl Allowlist {
 
     /// Decides whether `sql` is allowed.
     ///
-    /// The text is allowed when the allowlist is unrestricted, when its
-    /// normalised form is exactly one of the allowlisted queries, or — with
-    /// `transaction_control` — when it is a single transaction-control
-    /// statement.
-    ///
-    /// Empty or whitespace-only text is always denied.
+    /// An [`Allowlist::unrestricted`] one allows everything without looking at
+    /// the text at all, empty text included: PostgreSQL answers an empty
+    /// statement with an `EmptyQueryResponse` and runs nothing. Every other
+    /// allowlist allows the text when its normalised form is exactly one of the
+    /// allowlisted queries, or — with `transaction_control` — when it is a
+    /// single transaction-control statement, and denies empty or
+    /// whitespace-only text.
     pub fn check(&self, sql: &str) -> Decision {
         if self.unrestricted {
             return Decision::Allowed;
@@ -206,11 +207,14 @@ impl Allowlist {
         self.queries.len()
     }
 
-    /// Whether the allowlist holds no query at all. It can then only allow
-    /// transaction-control statements, if those are enabled — unless it is
-    /// [`Allowlist::unrestricted`], which allows everything.
+    /// Whether the allowlist holds no listed query at all. It can then only
+    /// allow transaction-control statements, if those are enabled.
+    ///
+    /// An [`Allowlist::unrestricted`] one is never empty: it allows everything,
+    /// which is the opposite of allowing nothing, and it reads the same way on
+    /// both sides of the policy (`PgGrant::is_empty` in `blastit-manifest`).
     pub fn is_empty(&self) -> bool {
-        self.queries.is_empty()
+        !self.unrestricted && self.queries.is_empty()
     }
 }
 
@@ -977,7 +981,10 @@ mod tests {
     fn an_unrestricted_allowlist_reports_itself_and_holds_no_queries() {
         let allow = Allowlist::unrestricted();
         assert!(allow.is_unrestricted());
-        assert!(allow.is_empty(), "it holds no listed query");
+        assert!(
+            !allow.is_empty(),
+            "it lists no query, but it allows everything: that is not an empty allowlist"
+        );
         assert_eq!(allow.len(), 0);
         assert_eq!(allow.queries().count(), 0);
         assert!(
@@ -988,6 +995,24 @@ mod tests {
         let listed = allowlist(&["SELECT 1"], true);
         assert!(!listed.is_unrestricted());
         assert!(!listed.is_empty());
+    }
+
+    #[test]
+    fn an_unrestricted_allowlist_allows_even_an_empty_text() {
+        // It does not look at the statement at all, so the "empty text is
+        // denied" rule of every other allowlist cannot apply to it. PostgreSQL
+        // answers an empty statement with `EmptyQueryResponse` and runs
+        // nothing, so nothing is opened by allowing it.
+        let allow = Allowlist::unrestricted();
+        assert_eq!(allow.check(""), Decision::Allowed);
+        assert_eq!(allow.check("  \t\n "), Decision::Allowed);
+        // ... while an ordinary allowlist still refuses it, whatever it lists.
+        for allow in [allowlist(&[], false), allowlist(&["SELECT 1"], true)] {
+            for sql in ["", " ", ";", " ;; "] {
+                let decision = allow.check(sql);
+                assert!(!decision.is_allowed(), "should deny {sql:?}");
+            }
+        }
     }
 
     #[test]

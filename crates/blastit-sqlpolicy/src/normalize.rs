@@ -22,6 +22,18 @@
 //!
 //! Both rules are applied to the grant and to the statement, by this one
 //! function, so neither side can be shaped differently from the other.
+//!
+//! A keyword is only read as one where a keyword can be: `in` is reserved in
+//! PostgreSQL, so a bare `in` in front of a list is the `IN` keyword, while
+//! `s.in(…)` and `s.values(…)` are qualified names whose parentheses are an
+//! argument list. Apart from the inside of an `IN` list that collapses — whose
+//! whole point is that any list of the same shape matches — the pass only
+//! deletes what it replaces and never re-spaces what it leaves alone: the
+//! whitespace in front of a `(` or a `)` stays where it was written.
+//!
+//! Neither rule makes the pass cost more than the text it reads: it walks the
+//! text once, keeps one frame per open parenthesis, and writes the result once,
+//! however deeply the statement nests.
 
 use crate::lexer::{RegionKind, code_token_end, is_ident_start, is_space, lex, placeholder_end};
 
@@ -49,12 +61,15 @@ use crate::lexer::{RegionKind, code_token_end, is_ident_start, is_space, lex, pl
 /// * a parenthesised list right after `IN` or `NOT IN` that holds nothing but
 ///   placeholders becomes `IN ($?, ...)`, whatever its length: `prefetch_related`
 ///   sends `IN ($1, $2, …, $n)`. A list with anything else in it (a string, a
-///   subquery, a nested tuple) is left alone;
+///   subquery, a nested tuple) is left alone, and so is a qualified name that
+///   merely looks like one — `s.in(…)` is the function `in` of schema `s`, whose
+///   argument list is an argument list;
 /// * after `VALUES`, a run of two or more *identical* rows `(…), (…), …`
 ///   becomes the single row followed by `, ...`, because `bulk_create` sends a
 ///   varying number of identical rows. A single row is left as it is, rows that
-///   differ from each other do not collapse, and a function call's argument
-///   list is never collapsed — its arity picks the overload;
+///   differ from each other do not collapse, and neither a function call's
+///   argument list nor a qualified `s.values(…)` is ever read as a row list —
+///   their arity picks the overload;
 /// * quoted regions are kept verbatim: single-quoted strings (`'it''s'`),
 ///   E-strings (`E'a\'b  c'`, where a backslash escapes the next character),
 ///   bit and hex strings (`B'1010'`, `X'1F'`, with no escape at all),
@@ -64,7 +79,11 @@ use crate::lexer::{RegionKind, code_token_end, is_ident_start, is_space, lex, pl
 ///   ordinary text;
 /// * an unterminated quote is kept verbatim to the end of the text; the text is
 ///   trimmed before scanning, so trailing whitespace is gone even inside an
-///   unterminated quote. This function never panics.
+///   unterminated quote. This function never panics;
+/// * nothing else changes: the whitespace in front of a `(` or a `)` is kept,
+///   and the pass costs one walk over the text whatever it contains. Only the
+///   contents of an `IN` list that collapses are rewritten as a whole, because
+///   the point of that rule is that any list of the same shape matches.
 ///
 /// Strings are read as if `standard_conforming_strings` were `on` (see the
 /// crate documentation).
@@ -144,34 +163,49 @@ pub fn normalize(sql: &str) -> String {
 /// The shape rules, applied to the already-normalised text: `IN` lists of
 /// placeholders and `VALUES` row runs, as the module documentation describes.
 ///
-/// The text is walked token by token, with one frame per open parenthesis, so
-/// the pass is linear in the length of the text and needs no recursion: a
-/// hostile statement with thousands of nested parentheses cannot exhaust the
-/// stack. Parentheses that never close are left as ordinary text, exactly as
+/// The text is built once, as a flat list of [`Piece`]s in output order, and a
+/// rule that rewrites a group *deletes* the pieces it replaces instead of
+/// copying them anywhere, so the pass is linear in the length of the text
+/// however deeply the parentheses nest: `SELECT ` followed by a million `(`
+/// and a million `)` is one pass over two million pieces, not a million
+/// rebuilds of the text inside them.
+///
+/// The pieces are walked with one frame per open parenthesis and the frames
+/// live on a `Vec`, so the pass needs no recursion either: a hostile statement
+/// cannot exhaust the stack, and it cannot stall `dbproxy` for long enough to
+/// matter. Parentheses that never close are left as ordinary text, exactly as
 /// the lexer leaves an unterminated quote alone.
 fn reshape(sql: &str) -> String {
     let chars: Vec<char> = sql.chars().collect();
-    let mut outer = Frame::new(String::new());
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut outer = Frame::new(0);
     let mut stack: Vec<Frame> = Vec::new();
 
     for token in tokenize(&chars) {
         match token.kind {
             Kind::Comma => {
                 let frame = current(&mut outer, &mut stack);
-                flush_comma(frame);
-                frame.comma = Some(token.text);
+                push_piece(&mut pieces, frame, Kind::Comma, token.text);
             }
-            Kind::Open => stack.push(Frame::new(token.leading_space().to_string())),
+            Kind::Open => {
+                let start = pieces.len();
+                pieces.push(Piece::new(Kind::Other, token.text));
+                stack.push(Frame::new(start));
+            }
             Kind::Close if !stack.is_empty() => {
                 if let Some(child) = stack.pop() {
+                    // The `)` keeps the whitespace in front of it: the shape
+                    // rules never touch the whitespace of a text they leave
+                    // alone.
+                    pieces.push(Piece::new(Kind::Other, token.text));
                     let parent = current(&mut outer, &mut stack);
-                    close_group(parent, child, true);
+                    close_group(&mut pieces, parent, child, true);
                 }
             }
             // A `)` with no `(` in front of it is ordinary text.
             _ => {
                 let frame = current(&mut outer, &mut stack);
-                push_token(frame, token);
+                push_token(&mut pieces, frame, token);
             }
         }
     }
@@ -179,15 +213,12 @@ fn reshape(sql: &str) -> String {
     // An unterminated group runs to the end of the text.
     while let Some(child) = stack.pop() {
         let parent = current(&mut outer, &mut stack);
-        close_group(parent, child, false);
+        close_group(&mut pieces, parent, child, false);
     }
 
     let mut text = String::with_capacity(sql.len());
-    for node in outer.nodes {
-        text.push_str(&node.text);
-    }
-    if let Some(comma) = outer.comma {
-        text.push_str(&comma);
+    for piece in &pieces {
+        text.push_str(&piece.text);
     }
     text
 }
@@ -217,22 +248,46 @@ enum Kind {
     Other,
 }
 
-/// One piece of text, with the whitespace that precedes it, so that
-/// concatenating a frame's nodes reproduces the text they were built from.
-#[derive(Debug, Clone)]
-struct Node {
+/// One piece of the text being built, with the whitespace that precedes it.
+///
+/// The pieces render in order, one after the other: a rule that rewrites a
+/// group deletes the pieces it replaces and writes its own, so no text is ever
+/// copied from a group to its parent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Piece {
+    /// What the piece is. An item is read through the kind of its first piece,
+    /// so this is the token's kind for a token, and [`Kind::Other`] for
+    /// punctuation and for text a rule wrote.
     kind: Kind,
+    /// The text, with the whitespace that precedes it.
     text: String,
 }
 
-impl Node {
-    /// A piece of text the rules themselves produced.
-    fn other(text: String) -> Self {
+impl Piece {
+    /// A piece of kind `kind` that stands for `text`.
+    fn new(kind: Kind, text: impl Into<String>) -> Self {
         Self {
-            kind: Kind::Other,
-            text,
+            kind,
+            text: text.into(),
         }
     }
+
+    /// The piece's text without the whitespace in front of it.
+    fn word(&self) -> &str {
+        leading_word(&self.text)
+    }
+}
+
+/// One top-level item of an open parenthesis: a token, or a whole group.
+///
+/// Items are contiguous ranges of [`Piece`]s, in output order, which is what
+/// lets a rule replace one by truncating the pieces and writing its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Item {
+    /// Index of the item's first piece.
+    start: usize,
+    /// Index just past the item's last piece. An item is never empty.
+    end: usize,
 }
 
 /// Splits the normalised text into tokens.
@@ -321,24 +376,17 @@ impl Token {
 
     /// The token's text without the whitespace in front of it.
     fn word(&self) -> &str {
-        self.text.trim_start_matches(is_space)
-    }
-
-    /// The whitespace in front of the token, which is all a group needs to
-    /// keep: the `(` itself is written by the shape rules.
-    fn leading_space(&self) -> &str {
-        let rest = self.word();
-        &self.text[..self.text.len() - rest.len()]
+        leading_word(&self.text)
     }
 }
 
 /// One open parenthesis level, while [`reshape`] walks the tokens.
 struct Frame {
-    /// The text placed so far, in order.
-    nodes: Vec<Node>,
-    /// A comma whose node has not been placed yet: whether it survives depends
-    /// on what follows it.
-    comma: Option<String>,
+    /// Index in the pieces of the `(` that opened this group: where a rewrite of
+    /// the whole group starts truncating.
+    open: usize,
+    /// The group's top-level items, in order.
+    items: Vec<Item>,
     /// The rows after `VALUES` that this frame has placed, while the list is
     /// still open: any other token ends it.
     rows: Option<Rows>,
@@ -349,20 +397,17 @@ struct Frame {
     /// how many statements the text has, and the transaction-control grammar
     /// counts statements.
     separator: bool,
-    /// The whitespace that preceded the `(` that opened this frame.
-    lead: String,
 }
 
 impl Frame {
-    /// An empty frame whose group was opened by the token carrying `lead`.
-    fn new(lead: String) -> Self {
+    /// An empty frame whose group was opened by the piece at `open`.
+    fn new(open: usize) -> Self {
         Self {
-            nodes: Vec::new(),
-            comma: None,
+            open,
+            items: Vec::new(),
             rows: None,
             after_values: false,
             separator: false,
-            lead,
         }
     }
 }
@@ -371,165 +416,270 @@ impl Frame {
 ///
 /// Only the last row is remembered, because only a row that repeats it can
 /// join it: two rows that are identical collapse into one, and the rows that
-/// follow them may still repeat them in their turn.
+/// follow them may still repeat the last one in their turn.
 struct Rows {
-    /// Text of the last row of the list.
-    last: String,
-    /// Index in the frame's nodes of the last row, or of the `...` that stands
-    /// for the rows repeating it.
-    at: usize,
+    /// The row as it is written out: a row only joins the list when its own
+    /// text is this one.
+    row: String,
+    /// The pieces of the list's last row, or of the `...` that stands for the
+    /// rows repeating it. A comma continues the list only right after this.
+    tail: Item,
     /// Whether the list's last row has already been written as `row, ...`.
     collapsed: bool,
 }
 
-/// Places a comma that was held back.
-fn flush_comma(frame: &mut Frame) {
-    if let Some(comma) = frame.comma.take() {
-        frame.nodes.push(Node {
-            kind: Kind::Comma,
-            text: comma,
-        });
-    }
+/// Places one piece at the end of the text and records it as an item of
+/// `frame`.
+fn push_piece(pieces: &mut Vec<Piece>, frame: &mut Frame, kind: Kind, text: String) {
+    let item = Item {
+        start: pieces.len(),
+        end: pieces.len() + 1,
+    };
+    pieces.push(Piece::new(kind, text));
+    frame.items.push(item);
 }
 
 /// Places one ordinary token: a word, a placeholder, an operator, a stray `)`.
-fn push_token(frame: &mut Frame, token: Token) {
-    flush_comma(frame);
-    frame.after_values = token.kind == Kind::Word && token.word().eq_ignore_ascii_case("values");
+fn push_token(pieces: &mut Vec<Piece>, frame: &mut Frame, token: Token) {
+    // `values` is the keyword only where it is not part of a qualified name:
+    // `SELECT s.values(1), (2)` calls the function `values` of schema `s`, and
+    // its argument list must not be read as a list of rows.
+    frame.after_values = token.kind == Kind::Word
+        && token.word().eq_ignore_ascii_case("values")
+        && !is_dot(pieces, frame.items.last());
     // Anything but another row ends the `VALUES` row list.
     frame.rows = None;
     if token.kind == Kind::Other && token.word() == ";" {
         frame.separator = true;
     }
-    frame.nodes.push(Node {
-        kind: token.kind,
-        text: token.text,
-    });
+    push_piece(pieces, frame, token.kind, token.text);
 }
 
 /// Places a group in its parent frame, applying the shape rules.
 ///
 /// `closed` is false for a `(` that never closed; such a group is ordinary
 /// text, because the text after it is not the group the rules would have seen.
-fn close_group(parent: &mut Frame, child: Frame, closed: bool) {
-    let Frame {
-        mut nodes,
-        comma,
-        rows: _,
-        after_values: _,
-        separator,
-        lead,
-    } = child;
-    if let Some(comma) = comma {
-        nodes.push(Node {
-            kind: Kind::Comma,
-            text: comma,
-        });
-    }
-    let list = is_placeholder_list(&nodes);
-    let inner: String = nodes.iter().map(|node| node.text.as_str()).collect();
-    parent.separator |= separator;
+fn close_group(pieces: &mut Vec<Piece>, parent: &mut Frame, child: Frame, closed: bool) {
+    let group = Item {
+        start: child.open,
+        end: pieces.len(),
+    };
+    parent.separator |= child.separator;
 
     if !closed {
-        flush_comma(parent);
         parent.after_values = false;
         parent.rows = None;
-        parent.nodes.push(Node::other(format!("{lead}({inner}")));
+        parent.items.push(group);
         return;
     }
 
-    let text = format!("({inner})");
-
-    // The row tuple right after `VALUES` opens the row list.
+    // The row right after `VALUES`: it opens the row list.
     if parent.after_values {
-        flush_comma(parent);
         parent.after_values = false;
-        parent.nodes.push(Node::other(format!("{lead}{text}")));
-        let at = parent.nodes.len() - 1;
+        parent.items.push(group);
         parent.rows = Some(Rows {
-            last: text,
-            at,
+            row: group_text(pieces, group),
+            tail: group,
             collapsed: false,
         });
         return;
     }
 
-    // Another row of the row list. It only counts when a comma sits between the
-    // two rows and nothing has been placed since the list's last row, so
-    // `VALUES (…), x, (…)` is never a list of rows.
-    let in_rows = parent.comma.is_some()
-        && parent
-            .rows
-            .as_ref()
-            .is_some_and(|rows| rows.at + 1 == parent.nodes.len());
-    if in_rows {
-        let previous = parent
-            .rows
-            .as_ref()
-            .map(|rows| (rows.last.clone(), rows.collapsed));
-        if let Some((last, collapsed)) = previous {
-            if last == text && !separator {
-                if let Some(comma) = parent.comma.take()
-                    && !collapsed
-                {
-                    // The identical row after the list's first one: write
-                    // `row, ...` in its place, and drop the rows that repeat it.
-                    let marker = format!("{comma}{lead}...");
-                    parent.nodes.push(Node::other(marker));
-                    let at = parent.nodes.len() - 1;
-                    if let Some(rows) = parent.rows.as_mut() {
-                        rows.at = at;
-                        rows.collapsed = true;
-                    }
-                }
-                return;
-            }
-            // A different row: it becomes the row list's new last row, and a
-            // later repeat of it collapses in its own turn.
-            if let Some(comma) = parent.comma.take() {
-                parent.nodes.push(Node::other(comma));
-                parent.nodes.push(Node::other(format!("{lead}{text}")));
-                let at = parent.nodes.len() - 1;
-                if let Some(rows) = parent.rows.as_mut() {
-                    rows.last = text;
-                    rows.at = at;
-                    rows.collapsed = false;
-                }
+    match joined_row(pieces, parent, group, child.separator) {
+        // The row repeats the list's last row: the two are written as
+        // `row, ...`, and every row after them simply joins the `...`.
+        Joined::Repeat(comma) => {
+            let marker = format!(
+                "{}{}...",
+                pieces[comma.start].text,
+                group_lead(&pieces[group.start].text)
+            );
+            pieces.truncate(comma.start);
+            pieces.push(Piece::new(Kind::Other, marker));
+            let marker = Item {
+                start: comma.start,
+                end: pieces.len(),
+            };
+            parent.items.pop();
+            parent.items.push(marker);
+            if let Some(rows) = parent.rows.as_mut() {
+                rows.tail = marker;
+                rows.collapsed = true;
             }
             return;
         }
+        // ... and the list is already written as `row, ...`: the comma and the
+        // row go away with it.
+        Joined::RepeatCollapsed(comma) => {
+            pieces.truncate(comma.start);
+            parent.items.pop();
+            return;
+        }
+        // A different row: it becomes the list's new last row, and a later
+        // repeat of *it* collapses in its own turn.
+        Joined::Other => {
+            parent.items.push(group);
+            let row = group_text(pieces, group);
+            if let Some(rows) = parent.rows.as_mut() {
+                rows.row = row;
+                rows.tail = group;
+                rows.collapsed = false;
+            }
+            return;
+        }
+        Joined::None => {}
     }
 
-    // A list of placeholders right after `IN` or `NOT IN`, whatever its length.
-    if parent.comma.is_none() && list {
-        let keyword = parent.nodes.last().and_then(|node| {
-            split_keyword(&node.text, "in").map(|(lead, word)| (lead.to_string(), word.to_string()))
+    // A list of placeholders right after the keyword `IN` or `NOT IN`, whatever
+    // its length: `prefetch_related` and `__in` grow it per request.
+    if let Some((item, replacement)) = in_list(pieces, parent, &child.items) {
+        pieces.truncate(item.start);
+        pieces.push(Piece::new(Kind::Other, replacement));
+        parent.items.pop();
+        parent.items.push(Item {
+            start: item.start,
+            end: pieces.len(),
         });
-        if let Some((word_lead, word)) = keyword {
-            parent.nodes.pop();
-            parent
-                .nodes
-                .push(Node::other(format!("{word_lead}{word} ($?, ...)")));
-            return;
-        }
+        return;
     }
 
     // Anything else: the group as written.
-    flush_comma(parent);
     parent.after_values = false;
     parent.rows = None;
-    parent.nodes.push(Node::other(format!("{lead}{text}")));
+    parent.items.push(group);
+}
+
+/// What an open `VALUES` row list makes of a row that has just closed.
+enum Joined {
+    /// Not a row of any open list.
+    None,
+    /// The row repeats the list's last row, which is still written out in full.
+    Repeat(Item),
+    /// The row repeats the list's last row, already written as `row, ...`.
+    RepeatCollapsed(Item),
+    /// The row differs from the list's last one, so it becomes the new last row.
+    Other,
+}
+
+/// How the open row list of `parent` reads the row that has just closed.
+fn joined_row(pieces: &[Piece], parent: &Frame, group: Item, separator: bool) -> Joined {
+    let Some(rows) = parent.rows.as_ref() else {
+        return Joined::None;
+    };
+    let Some(comma) = trailing_comma(pieces, parent, rows) else {
+        return Joined::None;
+    };
+    if separator || group_text(pieces, group) != rows.row {
+        return Joined::Other;
+    }
+    if rows.collapsed {
+        Joined::RepeatCollapsed(comma)
+    } else {
+        Joined::Repeat(comma)
+    }
+}
+
+/// The `IN` keyword and the canonical list that replaces it, when the group
+/// that has just closed is a list of placeholders right after `IN`/`NOT IN`.
+///
+/// `in` is a reserved word in PostgreSQL, so a bare `in` in front of a
+/// parenthesised list is the keyword — except after a `.`, where it names a
+/// member of a qualified name: `s.in(…)` is the function `in` of the schema
+/// `s`, and its argument list is not a list of values. (`"s"."in"(…)` is
+/// spelled with quoted identifiers, which are never bare words, so it could
+/// not match in the first place.)
+fn in_list(pieces: &[Piece], parent: &Frame, items: &[Item]) -> Option<(Item, String)> {
+    if !is_placeholder_list(pieces, items) || is_dot(pieces, before_last(&parent.items)) {
+        return None;
+    }
+    let (item, word) = trailing_word(pieces, parent)?;
+    if !word.eq_ignore_ascii_case("in") {
+        return None;
+    }
+    let lead = leading_space(&pieces[item.start].text);
+    Some((item, format!("{lead}{word} ($?, ...)")))
+}
+
+/// The last item of `parent`, when it is a bare word.
+fn trailing_word<'a>(pieces: &'a [Piece], parent: &Frame) -> Option<(Item, &'a str)> {
+    let item = *parent.items.last()?;
+    let piece = pieces.get(item.start)?;
+    (item.end == item.start + 1 && piece.kind == Kind::Word).then(|| (item, piece.word()))
+}
+
+/// The comma right in front of the row that has just closed, when it also
+/// follows the row list's last row: `VALUES (…), x, (…)` is not a list of rows.
+fn trailing_comma(pieces: &[Piece], parent: &Frame, rows: &Rows) -> Option<Item> {
+    let comma = *parent.items.last()?;
+    if kind_of(pieces, comma) != Kind::Comma {
+        return None;
+    }
+    (before_last(&parent.items) == Some(&rows.tail)).then_some(comma)
+}
+
+/// The item before the last one, when there is one.
+fn before_last(items: &[Item]) -> Option<&Item> {
+    items
+        .len()
+        .checked_sub(2)
+        .and_then(|index| items.get(index))
+}
+
+/// Whether an item is a `.`, which makes the word after it part of a qualified
+/// name rather than a keyword.
+fn is_dot(pieces: &[Piece], item: Option<&Item>) -> bool {
+    item.and_then(|item| pieces.get(item.start))
+        .is_some_and(|piece| piece.kind == Kind::Other && piece.word() == ".")
+}
+
+/// The kind of an item: the kind of its first piece, because a group starts
+/// with its `(` and a token is one piece.
+fn kind_of(pieces: &[Piece], item: Item) -> Kind {
+    pieces
+        .get(item.start)
+        .map_or(Kind::Other, |piece| piece.kind)
+}
+
+/// The text of a group the row rules compare: the `(` and what is inside it,
+/// without the whitespace in front of the `(`.
+///
+/// Two rows of a `VALUES` list are the same row even when the first one carries
+/// the space that separates it from the keyword and the next one follows a
+/// comma instead: `VALUES (…), (…)` is one row repeated. The whitespace itself
+/// is not lost — it stays where it was written, in the first row and in the
+/// marker of a collapsed one.
+fn group_text(pieces: &[Piece], group: Item) -> String {
+    let mut text = String::new();
+    for (index, piece) in pieces
+        .get(group.start..group.end)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        if index == 0 {
+            text.push_str(piece.word());
+        } else {
+            text.push_str(&piece.text);
+        }
+    }
+    text
+}
+
+/// The whitespace in front of a group's `(`, which the marker of a collapsed
+/// row keeps.
+fn group_lead(text: &str) -> &str {
+    text.strip_suffix('(').unwrap_or(text)
 }
 
 /// Whether a group holds placeholders separated by commas and nothing else:
 /// `($?)`, `($?, $?)`, … A trailing comma, anything that is not a placeholder,
 /// and an empty list all fail.
-fn is_placeholder_list(nodes: &[Node]) -> bool {
-    nodes
+fn is_placeholder_list(pieces: &[Piece], items: &[Item]) -> bool {
+    items
         .last()
-        .is_some_and(|last| last.kind == Kind::Placeholder)
-        && nodes.iter().enumerate().all(|(index, node)| {
-            node.kind
+        .is_some_and(|item| kind_of(pieces, *item) == Kind::Placeholder)
+        && items.iter().enumerate().all(|(index, item)| {
+            kind_of(pieces, *item)
                 == if index % 2 == 0 {
                     Kind::Placeholder
                 } else {
@@ -538,12 +688,15 @@ fn is_placeholder_list(nodes: &[Node]) -> bool {
         })
 }
 
-/// Splits `text` into the whitespace in front of it and its spelling, when the
-/// text spells `word` (ASCII case-insensitively) and nothing else.
-fn split_keyword<'a>(text: &'a str, word: &str) -> Option<(&'a str, &'a str)> {
-    let rest = text.trim_start_matches(is_space);
-    let lead = &text[..text.len() - rest.len()];
-    (!rest.is_empty() && rest.eq_ignore_ascii_case(word)).then_some((lead, rest))
+/// `text` without the whitespace in front of it.
+fn leading_word(text: &str) -> &str {
+    text.trim_start_matches(is_space)
+}
+
+/// The whitespace in front of `text`.
+fn leading_space(text: &str) -> &str {
+    let rest = leading_word(text);
+    &text[..text.len() - rest.len()]
 }
 
 /// Output under construction, with a parallel flag per character telling
@@ -596,6 +749,8 @@ impl Output {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     fn case(input: &str, expected: &str) {
@@ -1149,6 +1304,118 @@ mod tests {
     }
 
     #[test]
+    fn a_qualified_name_is_not_the_in_keyword() {
+        // `in` is reserved in PostgreSQL, so a bare `in` in front of a
+        // parenthesised list is the keyword. After a `.` it is not a keyword
+        // but a member of a qualified name: `s.in(…)` is the function `in` of
+        // schema `s`, and its argument list is not a list of values. A grant
+        // for one call must not cover a call with more arguments — the arity
+        // picks the overload.
+        case("SELECT probe_s.in($1)", "SELECT probe_s.in($?)");
+        case("SELECT probe_s.in($1, $2)", "SELECT probe_s.in($?, $?)");
+        case(r#"SELECT "s".in($1, $2)"#, r#"SELECT "s".in($?, $?)"#);
+        case(r#"SELECT "s"."in"($1, $2)"#, r#"SELECT "s"."in"($?, $?)"#);
+        case("SELECT s.in ($1, $2)", "SELECT s.in ($?, $?)");
+        case("SELECT s . in($1, $2)", "SELECT s . in($?, $?)");
+        case("SELECT s.IN($1, $2)", "SELECT s.IN($?, $?)");
+        assert_ne!(
+            normalize("SELECT s.in($1)"),
+            normalize("SELECT s.in($1, $2)"),
+            "two calls of different arity stay two statements"
+        );
+        // The guard only rejects a `.`: a group, a quoted identifier or
+        // anything else in front of `IN` is the expression the keyword applies
+        // to, and its list still collapses.
+        case(
+            "SELECT id FROM t WHERE (a, b) IN ($1, $2)",
+            "SELECT id FROM t WHERE (a, b) IN ($?, ...)",
+        );
+        case(
+            r#"SELECT id FROM t WHERE t."x" IN ($1, $2)"#,
+            r#"SELECT id FROM t WHERE t."x" IN ($?, ...)"#,
+        );
+        case(
+            "SELECT id FROM t WHERE (a) IN (SELECT b FROM u WHERE u.c IN ($1))",
+            "SELECT id FROM t WHERE (a) IN (SELECT b FROM u WHERE u.c IN ($?, ...))",
+        );
+        // ... while a real `IN` list still collapses, a qualified column or not,
+        // and so does `NOT IN`.
+        case(
+            "SELECT id FROM s.t WHERE s.t.id IN ($1, $2)",
+            "SELECT id FROM s.t WHERE s.t.id IN ($?, ...)",
+        );
+        case("WHERE id NOT IN ($1, $2)", "WHERE id NOT IN ($?, ...)");
+        assert_eq!(
+            normalize("SELECT id FROM t WHERE t.x IN ($1)"),
+            normalize("SELECT id FROM t WHERE t.x IN ($1, $2, $3)"),
+        );
+    }
+
+    #[test]
+    fn a_qualified_name_is_not_the_values_keyword() {
+        // `values` cannot be a function name on its own (PostgreSQL rejects
+        // `select values(1)`), but a schema-qualified call parses: its argument
+        // list is an argument list, not a row list.
+        case("SELECT s.values(1), (2)", "SELECT s.values(1), (2)");
+        case(
+            "SELECT s.values($1), ($2), ($2), ($2)",
+            "SELECT s.values($?), ($?), ($?), ($?)",
+        );
+        assert_ne!(
+            normalize("SELECT s.values($1), ($1)"),
+            normalize("SELECT s.values($1), ($1), ($1)"),
+        );
+        // A real row list still collapses, in front of a qualified table too.
+        case(
+            "INSERT INTO s.values (a) VALUES (1), (1)",
+            "INSERT INTO s.values (a) VALUES (1), ...",
+        );
+        case(
+            "INSERT INTO s.t VALUES ($1), ($2), ($3)",
+            "INSERT INTO s.t VALUES ($?), ...",
+        );
+        // A column named `values` in front of the keyword is not the keyword.
+        case(
+            "INSERT INTO t (values) VALUES (1), (1)",
+            "INSERT INTO t (values) VALUES (1), ...",
+        );
+        case(
+            "INSERT INTO t (values, x) VALUES ($1, $2), ($3, $4)",
+            "INSERT INTO t (values, x) VALUES ($?, $?), ...",
+        );
+    }
+
+    #[test]
+    fn a_group_keeps_the_whitespace_in_front_of_its_parentheses() {
+        // The shape rules add and remove tokens; they never re-space a text
+        // they leave alone, so a space before a `)` survives exactly as the
+        // text rules leave it.
+        case("SELECT ( 1 )", "SELECT ( 1 )");
+        case("SELECT f( 1 )", "SELECT f( 1 )");
+        case("SELECT f(1 )", "SELECT f(1 )");
+        case("SELECT f( 1)", "SELECT f( 1)");
+        case("SELECT f( 1 , 2 )", "SELECT f( 1 , 2 )");
+        case("SELECT ( ( 1 ) )", "SELECT ( ( 1 ) )");
+        case("SELECT f( 1 ", "SELECT f( 1");
+        case("VALUES ($1, $2 )", "VALUES ($?, $? )");
+        // Two rows are the same row whether or not the whitespace that
+        // separates the first one from the keyword is there: that whitespace is
+        // not part of the row, and it is kept where it was written.
+        case("VALUES (1), (1)", "VALUES (1), ...");
+        case("VALUES (1 ), (1 )", "VALUES (1 ), ...");
+        // ... but whitespace *inside* a row is part of it, so two rows that
+        // differ in it are two different rows.
+        case("VALUES (1), (1 )", "VALUES (1), (1 )");
+        case("VALUES (1), ( 1)", "VALUES (1), ( 1)");
+        // An `IN` list that collapses *is* canonicalised: the marker stands for
+        // a list of any length, so the spacing inside it is not part of the
+        // shape. Its whitespace is the one thing the pass rewrites.
+        case("WHERE id IN ( $1 )", "WHERE id IN ($?, ...)");
+        case("WHERE id IN($1)", "WHERE id IN ($?, ...)");
+        case("WHERE id IN  ($1 , $2 )", "WHERE id IN ($?, ...)");
+    }
+
+    #[test]
     fn a_values_run_is_only_collapsed_after_the_keyword() {
         // A tuple list somewhere else is left alone.
         case("SELECT (1), (1)", "SELECT (1), (1)");
@@ -1169,13 +1436,42 @@ mod tests {
 
     #[test]
     fn a_deeply_nested_text_does_not_exhaust_the_stack() {
-        let deep = format!("SELECT {}1{}", "(".repeat(5_000), ")".repeat(5_000));
+        let deep = format!("SELECT {}1{}", "(".repeat(200_000), ")".repeat(200_000));
         let once = normalize(&deep);
         assert_eq!(normalize(&once), once);
-        assert!(once.contains("SELECT ("));
+        assert!(once.starts_with("SELECT ("));
         // Unbalanced, and still no panic.
-        let open = format!("SELECT {}1", "(".repeat(5_000));
+        let open = format!("SELECT {}1", "(".repeat(200_000));
         assert_eq!(normalize(&normalize(&open)), normalize(&open));
+        let close = format!("SELECT 1{}", ")".repeat(200_000));
+        assert_eq!(normalize(&normalize(&close)), normalize(&close));
+        let closed = format!("{}1{}", "(".repeat(200_000), ")".repeat(100_000));
+        assert_eq!(normalize(&normalize(&closed)), normalize(&closed));
+    }
+
+    #[test]
+    fn a_deeply_nested_text_is_normalised_in_linear_time() {
+        // Rebuilding the text inside a group every time it closed made this
+        // quadratic: a statement like the one below took minutes, and a view
+        // that sent it would have stalled the shared dbproxy for every other
+        // view. Each size is bounded on its own, so a quadratic pass fails on
+        // the smallest one within seconds instead of hanging the suite.
+        const BOUND: Duration = Duration::from_secs(2);
+        for depth in [50_000, 100_000, 200_000] {
+            let sql = format!("SELECT {}1{};", "(".repeat(depth), ")".repeat(depth));
+            let start = Instant::now();
+            let once = normalize(&sql);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < BOUND,
+                "{depth} nested parentheses took {elapsed:?}, more than {BOUND:?}"
+            );
+            assert!(
+                once.starts_with("SELECT (") && once.ends_with(')'),
+                "{depth}"
+            );
+            assert_eq!(normalize(&once), once, "{depth}");
+        }
     }
 
     #[test]
