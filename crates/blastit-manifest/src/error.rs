@@ -267,6 +267,33 @@ pub enum ManifestError {
         /// Exclusive upper bound of the uid range.
         max: u32,
     },
+    /// A group carries `unrestricted = true` (§6). It is only accepted inline on
+    /// a route, so that it can never be attached to routes by accident.
+    #[error(
+        "{location}: unrestricted is only allowed inline on a route (grant on proxy {})",
+        quoted(.proxy)
+    )]
+    UnrestrictedGroup {
+        /// Where the grant is written.
+        location: Location,
+        /// The proxy the group's grant names.
+        proxy: ProxyName,
+    },
+    /// A grant carries both `unrestricted = true` and a list of queries (§6).
+    ///
+    /// The list would read as a restriction and is not one: the route may run
+    /// anything on that proxy either way, so rather than leave a manifest that
+    /// claims more than it does, the boot is refused.
+    #[error(
+        "{location}: unrestricted grants take no queries (grant on proxy {})",
+        quoted(.proxy)
+    )]
+    UnrestrictedWithQueries {
+        /// Where the grant is written.
+        location: Location,
+        /// The proxy the grant names.
+        proxy: ProxyName,
+    },
 }
 
 /// Something suspicious that does not stop the server from starting (§6).
@@ -287,6 +314,20 @@ pub enum ManifestWarning {
     #[error("proxy {} has no grant in any route or group: it is unusable", quoted(.proxy))]
     UngrantedProxy {
         /// The proxy's name.
+        proxy: ProxyName,
+    },
+    /// A route that may run any statement on one proxy (§6,
+    /// `unrestricted = true`). Reported once per (route, proxy), at boot, so the
+    /// grant is never invisible in the logs.
+    #[error(
+        "route {} may run any statement on proxy {} (unrestricted = true)",
+        quoted(.route),
+        quoted(.proxy)
+    )]
+    UnrestrictedRoute {
+        /// The route's name.
+        route: String,
+        /// The proxy the route is unrestricted on.
         proxy: ProxyName,
     },
 }

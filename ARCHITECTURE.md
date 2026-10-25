@@ -700,6 +700,12 @@ queries = [
 ]
 
 [[route]]
+name = "admin"                      # staff-only back-office: its SQL is too varied to list
+path = ['/admin/.*']
+[route.db]
+unrestricted = true                 # any statement on "db"; flagged at boot
+
+[[route]]
 name = "about"
 path = ['/about/']
 [route.db]                          # inline only: no group involved
@@ -713,11 +719,29 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
 
 * **Effective grants.** A route's allowlist for a database is the union of
   its inline queries, its groups' queries and the global groups' queries, for
-  that database. `transaction_control` is on if any of them turns it on. A route with no
-  grant for a database gets no listener for it at all (§2.2).
-* **Validation at boot.** An unknown group, a duplicate route name or an
-  invalid regex aborts the boot. A group that is attached nowhere is reported
-  as a warning event.
+  that database. `transaction_control` is on if any of them turns it on;
+  `unrestricted` is on if any of them turns it on, but a *group* that turns it
+  on aborts the boot (below), so in practice it is only ever inline. A route
+  with no grant for a database gets no listener for it at all (§2.2).
+* **`unrestricted = true`** in a route's own grant (`[route.<db>]`) means
+  exactly what it says: that route may run any statement on that proxy,
+  transaction control included. It is still a sandbox — the listener, the uid
+  check, the other proxies' grants and the credential barrier all stay — it
+  simply has nothing left to check on this one, so dbproxy logs no statement
+  for it. It is accepted **inline on a route only**: a group can be attached
+  to every route at once, which would turn the whole manifest into one
+  sandbox, so `unrestricted` in a group is a boot error, and every
+  unrestricted (route, proxy) is reported as a `manifest.warning` at boot.
+  Its user is a staff-only back-office (Django's admin) whose SQL is too
+  varied to list, where the guarantee that remains is that the process still
+  never sees the credentials.
+  A grant that lists `queries` next to `unrestricted = true` is a boot error
+  too (`unrestricted grants take no queries`): the list would read as a
+  restriction, and it isn't one.
+* **Validation at boot.** An unknown group, a duplicate route name, an
+  invalid regex or `unrestricted` in a group aborts the boot. A group that is
+  attached nowhere, and a route that is unrestricted on a proxy, are reported
+  as warning events.
 * **Routing.**
   * Routes are tried in manifest order, and the first one whose `path` (and
     `methods`, if set) matches wins.
@@ -733,11 +757,28 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
   the table to dbproxy. uids only live as long as the container, so reordering
   the manifest between deploys doesn't matter.
 * **Matching** is exact, on the normalised SQL text: trimmed, trailing `;`
-  removed, whitespace collapsed (the pregresql demo's rule). A `Parse` that
-  matches authorises the `Bind`/`Execute` that follow it, and pregresql tracks
-  this. Simple-protocol `Query` messages go through the same check, so a route
-  can't get around the policy by switching protocols. `COPY`, `LISTEN` and the
-  function-call sub-protocol are denied unless they are listed.
+  removed, whitespace collapsed (the pregresql demo's rule), and — because a
+  real app's SQL is not the same bytes twice — with the *shape* of the text
+  normalised too, by the same rules for a grant and for the text on the wire:
+  * every bind placeholder `$<digits>` outside quoted regions and comments
+    becomes `$?`. The numbering carries no meaning for the policy (values
+    always travel separately) and it shifts whenever a statement is assembled
+    dynamically, so one template means one grant.
+  * a parenthesised list right after `IN`/`NOT IN` that holds nothing but
+    placeholders becomes `IN ($?, ...)`, whatever its length, so
+    `prefetch_related` and `__in` match one grant for every page size. A list
+    with anything else in it — a string, a subquery, a nested tuple — is left
+    alone.
+  * after `VALUES`, a run of identical rows `(…), (…), …` becomes the single
+    row followed by `, ...`, so `bulk_create` matches one grant for every
+    number of objects. A single row is left as it is, rows that differ from
+    each other do not collapse, and a function call's argument list never
+    collapses: its arity picks the overload.
+  A `Parse` that matches authorises the `Bind`/`Execute` that follow it, and
+  pregresql tracks this. Simple-protocol `Query` messages go through the same
+  check, so a route can't get around the policy by switching protocols. `COPY`,
+  `LISTEN` and the function-call sub-protocol are denied unless they are
+  listed.
 * **What the app must do.** blastit can't check these, because it doesn't
   look inside the app; violations show up as `sql.denied` events.
   * **Send parameters separately from the SQL.** psycopg2, or Django's
@@ -918,7 +959,7 @@ human-readable lines, for running blastit by hand. Both carry the same fields.
 
 ```json
 {"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","request_id":"01JB9…","method":"GET","path":"/products/42/","route":"product-detail","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_out":5120,"remote_addr":"203.0.113.7"}
-{"ts":"2026-10-25T14:02:12.007Z","level":"warn","event":"sql.denied","component":"dbproxy","route":"product-detail","pid":57,"proxy":"db","kind":"parse","sqlstate":"42501","in_transaction":false,"sql":"SELECT \"shop_product\".\"price\" FROM \"shop_product\" WHERE \"shop_product\".\"id\" = $1"}
+{"ts":"2026-10-25T14:02:12.007Z","level":"warn","event":"sql.denied","component":"dbproxy","route":"product-detail","pid":57,"proxy":"db","kind":"parse","sqlstate":"42501","in_transaction":false,"sql":"SELECT \"shop_product\".\"price\" FROM \"shop_product\" WHERE \"shop_product\".\"id\" = $?"}
 ```
 
 ```text

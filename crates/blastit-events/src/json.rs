@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(value["in_transaction"], false);
         assert_eq!(
             value["sql"],
-            r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $1"#
+            r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?"#
         );
         assert!(value.get("request_id").is_none());
         assert!(value.get("truncated").is_none());
