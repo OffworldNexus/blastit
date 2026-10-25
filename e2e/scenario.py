@@ -46,9 +46,9 @@ class Client:
             req.add_header("Content-Type", "application/x-www-form-urlencoded")
         try:
             with self.opener.open(req, timeout=30) as r:
-                return r.status, dict(r.headers), r.read().decode("utf-8", "replace")
+                return r.status, r.headers, r.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            return e.code, dict(e.headers), e.read().decode("utf-8", "replace")
+            return e.code, e.headers, e.read().decode("utf-8", "replace")
 
     def csrf(self):
         for c in self.jar:
