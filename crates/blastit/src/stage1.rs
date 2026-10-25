@@ -42,11 +42,12 @@ use blastit_scheduler::{
 };
 use blastit_sys::mem;
 use blastit_sys::{
-    Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, fork,
-    harden_child, pipe, restore_signal_mask_in_child, set_dumpable, socketpair_stream,
+    Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, harden_child,
+    pipe, restore_signal_mask_in_child, set_dumpable, socketpair_stream,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
@@ -131,6 +132,9 @@ gc.freeze()
 /// binary) or is the interpreter this process already runs on (a wheel install,
 /// §4, §9.3).
 pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
+    // Whether a live interpreter is in this image, which decides how the forks
+    // below behave (§9.3) and how stage 1 finds the application's modules.
+    let hosted = interpreter.is_hosted();
     // The configuration itself is not known yet, so a failure here is JSON.
     let boot = Emitter::stdout(LogFormat::Json, Level::Info);
     let config = read_config(&boot, options.config_fd);
@@ -221,6 +225,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         layout.http(),
         mask,
         config.seccomp,
+        hosted,
     );
     // The parent keeps only the read ends, and never the listening socket.
     drop(http_end);
@@ -252,6 +257,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         layout.scheduler(),
         mask,
         config.seccomp,
+        hosted,
     );
     drop(sched_http_end);
     drop(sched_ctl_end);
@@ -474,6 +480,10 @@ fn read_memory(emitter: &Emitter) -> Option<mem::Sample> {
 }
 
 /// Forks the http process, which drops to `uid` and serves (§4).
+///
+/// `hosted` runs the fork under CPython's protocol when an interpreter is live
+/// in this image (§9.3, [`crate::forking`]).
+#[allow(clippy::too_many_arguments)]
 fn fork_http(
     emitter: &Emitter,
     child: ChildIo,
@@ -482,8 +492,9 @@ fn fork_http(
     uid: u32,
     mask: SignalMask,
     seccomp: bool,
+    hosted: bool,
 ) -> Pid {
-    match fork() {
+    match crate::forking::fork(hosted) {
         Ok(Fork::Parent(pid)) => pid,
         Ok(Fork::Child) => {
             if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Http, seccomp) {
@@ -509,8 +520,9 @@ fn fork_scheduler(
     uid: u32,
     mask: SignalMask,
     seccomp: bool,
+    hosted: bool,
 ) -> Pid {
-    match fork() {
+    match crate::forking::fork(hosted) {
         Ok(Fork::Parent(pid)) => pid,
         Ok(Fork::Child) => {
             if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Scheduler, seccomp) {
@@ -611,22 +623,27 @@ fn load(
 ///
 /// A wheel's stage 1 runs with `-I` — the same interpreter, but no `PYTHONPATH`
 /// and no working directory on `sys.path`. The entries the user's interpreter
-/// had are re-inserted in front, in their original order, skipping the ones
-/// `-I` already provides: the result is exactly the `sys.path` the console
-/// script saw, which is where the application's modules are found.
+/// had — bytes, as stage 0 recorded them with `os.fsencode` — are re-inserted in
+/// front, in their original order, skipping the ones `-I` already provides: the
+/// result is exactly the `sys.path` the console script saw, which is where the
+/// application's modules are found. `os.fsdecode` is what turns those bytes back
+/// into the text `sys.path` is made of, without dropping a path that is not
+/// valid UTF-8.
 ///
 /// # Errors
 ///
 /// Whatever the interpreter raises when `sys.path` is not what CPython promises
 /// it is.
-fn restore_sys_path(py: Python<'_>, entries: &[String]) -> PyResult<()> {
+fn restore_sys_path(py: Python<'_>, entries: &[Vec<u8>]) -> PyResult<()> {
     if entries.is_empty() {
         return Ok(());
     }
+    let fsdecode = py.import("os")?.getattr("fsdecode")?;
     let path = py.import("sys")?.getattr("path")?;
     for entry in entries.iter().rev() {
-        if !path.contains(entry.as_str())? {
-            path.call_method1("insert", (0, entry.as_str()))?;
+        let decoded = fsdecode.call1((PyBytes::new(py, entry),))?;
+        if !path.contains(decoded.clone())? {
+            path.call_method1("insert", (0, decoded))?;
         }
     }
     Ok(())

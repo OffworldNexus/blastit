@@ -113,7 +113,7 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
     }
 
     match args.stage {
-        None | Some(0) => stage0::run(host),
+        None | Some(0) => stage0::run(host, py.is_some()),
         Some(1) => {
             let Some(config_fd) = args.config_fd else {
                 eprintln!("blastit: --stage=1 needs --config-fd");

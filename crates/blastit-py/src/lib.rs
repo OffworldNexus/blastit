@@ -64,21 +64,26 @@ fn main(py: Python<'_>, argv: Vec<String>, executable: String, dbproxy: String) 
     ))
 }
 
-/// The interpreter's `sys.path`, for stage 1 to restore (§4).
+/// The interpreter's `sys.path`, as bytes, for stage 1 to restore (§4).
 ///
-/// `sys.path` is a list of strings by construction, so anything else in it is
-/// not worth failing a boot over: entries that are not text are skipped, and the
-/// ones that are travel with the configuration document into stage 1, which puts
-/// them back in front of the path `-I` computes.
+/// `os.fsencode` is what makes this exact: a path is bytes, and one that is not
+/// valid UTF-8 — a home directory in a legacy encoding, say — is a path like any
+/// other. Reading Python's text `sys.path` through Rust would drop it.
 ///
 /// # Errors
 ///
 /// Whatever the interpreter raises while reading `sys.path`.
-fn interpreter_path(py: Python<'_>) -> PyResult<Vec<String>> {
+fn interpreter_path(py: Python<'_>) -> PyResult<Vec<Vec<u8>>> {
+    let fsencode = py.import("os")?.getattr("fsencode")?;
     let mut entries = Vec::new();
     for entry in py.import("sys")?.getattr("path")?.try_iter()?.flatten() {
-        if let Ok(text) = entry.extract::<String>() {
-            entries.push(text);
+        // One entry that `fsencode` refuses — an `int`, an object that is not a
+        // path — is not worth failing a boot over.
+        if let Ok(bytes) = fsencode
+            .call1((entry,))
+            .and_then(|bytes| bytes.extract::<Vec<u8>>())
+        {
+            entries.push(bytes);
         }
     }
     Ok(entries)

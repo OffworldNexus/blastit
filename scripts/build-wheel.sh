@@ -6,9 +6,11 @@
 #   1. `blastit-dbproxy`, the Python-free binary that holds the real credentials
 #      (§2.2, §4). It is built from this workspace and copied into the wheel's
 #      Python package at `blastit/_bin/blastit-dbproxy`, mode 0755, because that
-#      is where stage 0 `execve`s it from. It is a plain Rust binary, so it must
-#      be built wherever the *target* glibc lives: CI runs this script inside the
-#      manylinux_2_28 container, where the wheel has to be built anyway.
+#      is where stage 0 `execve`s it from. It is a plain Rust binary linked
+#      against the system glibc, so build it wherever the wheel's *target* glibc
+#      lives: a runner (ci.yml) is fine for a wheel that stays on that runner's
+#      distribution, and `release.yml` builds the published manylinux wheels
+#      inside the manylinux_2_28 container instead of calling this script.
 #   2. the `blastit._blastit` extension, with `pyo3/extension-module` enabled, so
 #      it does not link `libpython` — the interpreter that loads it already has
 #      it, and an auditwheel-compliant wheel may not depend on it.
@@ -17,16 +19,9 @@
 # `--interpreter` does the same); it must be the interpreter the wheel will be
 # installed into, because the extension is not abi3.
 #
-# Development versions. Every commit needs a distinct wheel version, and the
-# version comes from Cargo (§ `dynamic = ["version"]`). One command, from the
-# repository root:
-#
-#   sed -i '0,/^version = "0.1.0"$/s//version = "0.1.0.dev'"$N"'"/' Cargo.toml
-#   cargo update --workspace
-#
-# The first line rewrites `[workspace.package] version`; the second brings
-# `Cargo.lock`, which records every workspace member's version, back in sync —
-# without it, a build with `--locked` fails.
+# Every commit that publishes a wheel needs its own version, from Cargo:
+# `scripts/dev-version.sh <build number>` moves the workspace version and
+# everything that depends on it, and this script is happy to run after it.
 #
 # Usage: scripts/build-wheel.sh [extra arguments for `maturin build`]
 set -euo pipefail

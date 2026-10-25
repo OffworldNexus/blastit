@@ -55,9 +55,10 @@ impl Reexec {
 pub struct Host {
     stage1: Reexec,
     dbproxy: Reexec,
-    /// The interpreter's `sys.path` as the console script found it: empty for
-    /// the standalone binary, whose stage 1 embeds CPython.
-    sys_path: Vec<String>,
+    /// The interpreter's `sys.path` as the console script found it, in bytes
+    /// (`os.fsencode`): empty for the standalone binary, whose stage 1 embeds
+    /// CPython.
+    sys_path: Vec<Vec<u8>>,
 }
 
 impl Host {
@@ -76,9 +77,10 @@ impl Host {
     ///
     /// `sys_path` is the interpreter's import path at the moment the console
     /// script started — `PYTHONPATH`, the working directory, the venv's
-    /// `site-packages`. Stage 1 is re-executed with `-I`, which drops the first
+    /// `site-packages` — as bytes (`os.fsencode`, so a path that is not valid
+    /// UTF-8 survives). Stage 1 is re-executed with `-I`, which drops the first
     /// two, so stage 0 records them here and stage 1 puts them back (§4).
-    pub fn wheel(executable: PathBuf, dbproxy: PathBuf, sys_path: Vec<String>) -> Self {
+    pub fn wheel(executable: PathBuf, dbproxy: PathBuf, sys_path: Vec<Vec<u8>>) -> Self {
         Self {
             stage1: Reexec {
                 program: executable,
@@ -109,7 +111,7 @@ impl Host {
     }
 
     /// The interpreter's import path, for stage 1 to restore (§4).
-    pub fn sys_path(&self) -> &[String] {
+    pub fn sys_path(&self) -> &[Vec<u8>] {
         &self.sys_path
     }
 }
@@ -135,7 +137,7 @@ mod tests {
         let host = Host::wheel(
             PathBuf::from("/app/.venv/bin/python"),
             PathBuf::from(format!("{site_packages}/_bin/blastit-dbproxy")),
-            vec!["/app".to_string()],
+            vec![b"/app".to_vec(), vec![b'/', b'a', 0xff, b'p']],
         );
         assert_eq!(
             host.stage1().program,
@@ -156,6 +158,10 @@ mod tests {
             "dbproxy runs no interpreter"
         );
         assert!(host.dbproxy().prefix.is_empty());
-        assert_eq!(host.sys_path(), ["/app".to_string()]);
+        assert_eq!(
+            host.sys_path(),
+            [b"/app".to_vec(), vec![b'/', b'a', 0xff, b'p']],
+            "the import path travels as bytes, invalid UTF-8 included"
+        );
     }
 }

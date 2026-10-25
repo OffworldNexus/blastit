@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use blastit_frame::Limits;
 use blastit_scheduler::RouteInfo;
 use blastit_sys::{
-    Fork, Pid, Rlimits, SeccompRole, Signal, drop_privileges, fork, harden_child, pipe,
+    Fork, Pid, Rlimits, SeccompRole, Signal, drop_privileges, harden_child, pipe,
     restore_signal_mask_in_child, set_dumpable, socketpair_stream,
 };
 use blastit_view::ViewConfig;
@@ -109,43 +109,24 @@ pub fn fork_view(
     };
 
     let started = std::time::Instant::now();
-    // SAFETY: init is single-threaded and holds the GIL, which is exactly what
-    // CPython's fork protocol needs (§9.3).
-    unsafe { pyo3::ffi::PyOS_BeforeFork() };
-    let outcome = fork();
-    // CPython stops the world in `PyOS_BeforeFork` and restarts it in either
-    // of the two `AfterFork` calls, whichever side of the fork we are on.
-    let fork = match outcome {
-        Ok(fork) => fork,
-        Err(err) => {
-            // SAFETY: `PyOS_BeforeFork` was called just above; this is its
-            // matching call when no child was created.
-            unsafe { pyo3::ffi::PyOS_AfterFork_Parent() };
-            return Err(err);
-        }
-    };
+    // The fork runs CPython's protocol — `PyOS_BeforeFork()` here,
+    // `PyOS_AfterFork_Parent()` / `PyOS_AfterFork_Child()` in [`crate::forking`]
+    // — because an interpreter is always live by the time a view is forked
+    // (§9.3): its three calls are the matching halves of one protocol.
+    let fork = crate::forking::fork(true)?;
     let fork_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     match fork {
-        Fork::Parent(pid) => {
-            // SAFETY: we are in the parent of the fork above.
-            unsafe { pyo3::ffi::PyOS_AfterFork_Parent() };
-            Ok(ForkedView {
-                pid,
-                scheduler_end,
-                stdout: stdout_read,
-                stderr: stderr_read,
-                fork_ms,
-            })
-        }
-        Fork::Child => {
-            // SAFETY: we are in the child of the fork above, and the GIL is
-            // held. Nothing before this call has touched an allocator lock.
-            unsafe { pyo3::ffi::PyOS_AfterFork_Child() };
-            child_main(
-                py, cfg, limits, info, app, mask, child, view_end, dir, egress,
-            )
-        }
+        Fork::Parent(pid) => Ok(ForkedView {
+            pid,
+            scheduler_end,
+            stdout: stdout_read,
+            stderr: stderr_read,
+            fork_ms,
+        }),
+        Fork::Child => child_main(
+            py, cfg, limits, info, app, mask, child, view_end, dir, egress,
+        ),
     }
 }
 
