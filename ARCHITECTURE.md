@@ -1023,10 +1023,12 @@ is written up in
    views hung with multi-threaded BLAS, on Linux and under gVisor alike.
    Hence the single-threaded-at-fork invariant and the forced
    `*_NUM_THREADS=1`.
-10. **Fork and GIL ordering with pyo3.** Load everything in a
-    `Python::attach` that returns, so the fork happens with the GIL released.
-    Each child re-attaches and calls `PyOS_AfterFork_Child()` *while holding
-    the GIL*; otherwise CPython aborts.
+10. **Fork and GIL ordering with pyo3.** `PyOS_AfterFork_Child()` must run
+    *while holding the GIL*; otherwise CPython aborts. init's stage 1 is the
+    only thread and holds the GIL for its whole supervision loop, so it forks
+    between `PyOS_BeforeFork()` and `PyOS_AfterFork_Parent()`, and the child
+    inherits the GIL, calls `PyOS_AfterFork_Child()`, and then only calls
+    `blastit_view::serve`, which releases it for its I/O loop.
 11. **Embedded CPython can't find the distro's `site-packages` by itself.**
     Append them to `sys.path` before the first import.
 

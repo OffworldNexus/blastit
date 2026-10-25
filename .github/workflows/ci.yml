@@ -109,3 +109,27 @@ jobs:
       # init must be root (PID 1 in the container); the smoke tests start the real binary.
       - run: cargo build -p blastit --tests --locked
       - run: sudo -E env "PATH=$PATH" cargo test -p blastit --locked -- --test-threads=1
+
+  e2e:
+    name: e2e (Django under blastit, Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p blastit --locked
+      - name: Run the scenario under blastit
+        run: python e2e/run.py
+        env:
+          E2E_DOCKERFILE: Dockerfile.prebuilt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-app-log
+          path: e2e/app.log
+          if-no-files-found: ignore
