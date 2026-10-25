@@ -109,6 +109,16 @@ pub enum Error {
         source: io::Error,
     },
 
+    /// [`crate::install`] was called from a process that had more than one
+    /// thread (ARCHITECTURE.md §7.3).
+    #[error(
+        "refusing to install a seccomp filter: {threads} threads are alive, and a filter applies to every thread that already exists"
+    )]
+    NotSingleThreadedSeccomp {
+        /// How many threads the process had, as reported by `/proc/self/status`.
+        threads: usize,
+    },
+
     /// This platform has no `AUDIT_ARCH_*` value to check a filter's
     /// `seccomp_data.arch` against (ARCHITECTURE.md §7.3).
     #[error("{arch} has no AUDIT_ARCH value, so no seccomp filter can be installed")]

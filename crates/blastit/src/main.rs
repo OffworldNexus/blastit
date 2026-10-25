@@ -141,6 +141,12 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
+    // `--seccomp` is how §7.3's `BLASTIT_SECCOMP` reaches the one role that is
+    // `execve`'d with an empty environment; every other role is a `fork` of a
+    // process that still has the variable.
+    if args.seccomp.is_some() && args.role.as_deref() != Some("dbproxy") {
+        return Err("`--seccomp` is only for `--role=dbproxy`".to_string());
+    }
     Ok(args)
 }
 
@@ -224,9 +230,19 @@ mod tests {
         assert!(parse(&["--config-fd=-1".to_string()]).is_err());
         assert!(parse(&["--seccomp=2".to_string()]).is_err());
         assert!(parse(&["--seccomp=yes".to_string()]).is_err());
-        assert_eq!(
-            parse(&["--seccomp=1".to_string()]).unwrap().seccomp,
-            Some(true)
+        // The flag belongs to one role only: everything else reads
+        // `BLASTIT_SECCOMP` from its own environment.
+        assert!(parse(&["--seccomp=1".to_string()]).is_err());
+        assert!(parse(&["--stage=1".to_string(), "--seccomp=0".to_string()]).is_err());
+        assert!(
+            parse(&[
+                "--role=dbproxy".to_string(),
+                "--secrets-fd=3".to_string(),
+                "--events-fd=4".to_string(),
+                "--ready-fd=5".to_string(),
+                "--seccomp=1".to_string(),
+            ])
+            .is_ok()
         );
     }
 }

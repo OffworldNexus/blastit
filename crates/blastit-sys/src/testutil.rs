@@ -69,6 +69,18 @@ pub fn root_only() -> bool {
 /// so a panic in a child body is a `SIGABRT` the parent sees as a failed
 /// assertion rather than a test.
 pub fn in_child(body: impl FnOnce() -> i32) -> i32 {
+    match child_status(body) {
+        ExitStatus::Code(code) => code,
+        other => panic!("the forked child did not exit normally: {other}"),
+    }
+}
+
+/// Run `body` in a forked child and return **how it ended**.
+///
+/// [`in_child`] insists on a normal exit, so it turns a child that died from a
+/// signal into a failed test. This is the raw form, for the tests where dying
+/// from a signal is the answer: a seccomp kill is `SIGSYS`.
+pub fn child_status(body: impl FnOnce() -> i32) -> ExitStatus {
     // SAFETY: the harness is multi-threaded, so the checked `fork()` would
     // refuse. The child body is a short, syscall-shaped function that ends in
     // `_exit`, which is the case `fork_unchecked` exists for.
@@ -80,10 +92,7 @@ pub fn in_child(body: impl FnOnce() -> i32) -> i32 {
             // nor destructors, so nothing in the child is finalised twice.
             unsafe { libc::_exit(code) }
         }
-        Fork::Parent(pid) => match wait_for(pid) {
-            ExitStatus::Code(code) => code,
-            other => panic!("the forked child did not exit normally: {other}"),
-        },
+        Fork::Parent(pid) => wait_for(pid),
     }
 }
 

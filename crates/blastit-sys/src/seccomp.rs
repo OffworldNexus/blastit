@@ -14,11 +14,11 @@
 //!   be what breaks a request. What it refuses, it refuses with `EPERM`, which
 //!   every caller reports as "not permitted" rather than as a crash.
 //! * **A foreign architecture is fatal.** `seccomp_data.arch` has to be the one
-//!   this filter was written for, and on x86_64 an x32 syscall number (`nr &
-//!   __X32_SYSCALL_BIT`) is refused too: a syscall number from another ABI
-//!   means a number-to-syscall mapping unlike the one the filter's list is
-//!   written in, so the only safe answer is to kill the process. Nothing
-//!   legitimate reaches either branch.
+//!   this filter was written for, and an x32 syscall number on x86_64 (`nr &
+//!   __X32_SYSCALL_BIT`) is killed the same way: a syscall number from another
+//!   ABI means a number-to-syscall mapping unlike the one the filter's list is
+//!   written in, so there is nothing to compare it against. Nothing legitimate
+//!   reaches either branch.
 //! * **The filter is a refusal list of numbers, not of names.** `socket` and
 //!   `socketpair` are the only syscalls whose arguments matter: `args[0]` is
 //!   the address family, and the family is what allows egress (§7.3).
@@ -26,7 +26,8 @@
 //! The filter cannot be removed once installed, and it applies to every thread
 //! that exists when it is installed as well as every thread created later, so
 //! it has to go on while the process is still single-threaded and before the
-//! runtime or any request thread exists (§4).
+//! runtime or any request thread exists (§4) — which is why [`install`] refuses
+//! a process that has more than one thread.
 
 use std::io;
 
@@ -81,14 +82,15 @@ impl SeccompRole {
 
 /// Installs the filter for `role` on the calling process (ARCHITECTURE.md §7.3).
 ///
-/// What every role refuses: `ptrace`, `process_vm_readv`, `process_vm_writev`,
-/// `bpf`, `keyctl`, `add_key`, `request_key`, `perf_event_open`, `userfaultfd`,
-/// the `io_uring` calls, `kexec_load`, `kexec_file_load`, `init_module`,
-/// `finit_module`, `delete_module`, `mount`, `umount2`, `pivot_root`, `swapon`,
-/// `swapoff`, `reboot`, `setns`, `unshare` and `open_by_handle_at`. They are
-/// the calls with which one process reads another's memory, loads code into the
-/// kernel, or moves between namespaces, mounts and namespaces; none of them is
-/// part of serving a request.
+/// What every role refuses: `ptrace`, `pidfd_getfd`, `kcmp`, `process_vm_readv`,
+/// `process_vm_writev`, `process_madvise`, `bpf`, `keyctl`, `add_key`,
+/// `request_key`, `perf_event_open`, `userfaultfd`, the `io_uring` calls,
+/// `kexec_load`, `kexec_file_load`, `init_module`, `finit_module`,
+/// `delete_module`, `mount`, `umount2`, `pivot_root`, `open_tree`, `move_mount`,
+/// `fsopen`, `fsconfig`, `fsmount`, `fspick`, `swapon`, `swapoff`, `reboot`,
+/// `setns`, `unshare` and `open_by_handle_at`. They are the calls with which one
+/// process reads or writes another's memory, loads code into the kernel, or
+/// reaches for namespaces and mounts; none of them is part of serving a request.
 ///
 /// What each role additionally refuses:
 ///
@@ -105,9 +107,10 @@ impl SeccompRole {
 ///
 /// # Errors
 ///
-/// [`std::io::Error`] when `PR_SET_NO_NEW_PRIVS` or the filter installation
-/// fails, or on a platform without an `AUDIT_ARCH_*` value. The filter itself
-/// can no longer fail once the kernel has accepted it.
+/// [`std::io::Error`] when the process has more than one thread, when
+/// `PR_SET_NO_NEW_PRIVS` or the filter installation fails, or on a platform
+/// without an `AUDIT_ARCH_*` value. The filter itself can no longer fail once
+/// the kernel has accepted it.
 pub fn install(role: SeccompRole) -> io::Result<()> {
     if AUDIT_ARCH == 0 {
         return Err(Error::UnsupportedArchitecture {
@@ -116,16 +119,36 @@ pub fn install(role: SeccompRole) -> io::Result<()> {
         .into());
     }
 
-    // §7.3: this, and nothing else, is what allows an unprivileged process to
-    // install a filter. It also means no child of this one may gain privileges.
+    // The filter applies to every thread that already exists as well as every
+    // one created later, and it cannot be removed, so installing it from a
+    // process that has already started a thread would race with that thread's
+    // own syscalls. init forks every role while it is single-threaded for
+    // exactly this reason (§4), and this is where a mistake in that order
+    // becomes a failed boot instead of a half-sandboxed process.
+    match crate::thread_count() {
+        Ok(1) => {}
+        Ok(threads) => return Err(Error::NotSingleThreadedSeccomp { threads }.into()),
+        Err(err) => return Err(step("counting threads", err)),
+    }
+
+    let mut program = Program::new();
+    build(role, &mut program)?;
+    install_program(&program)
+}
+
+/// Hands `program` to the kernel: the BPF half of [`install`], separate so that
+/// a test can install a program it built itself.
+///
+/// This sets `PR_SET_NO_NEW_PRIVS` itself — §7.3: that, and nothing else, is
+/// what allows an unprivileged process to install a filter, and it also means
+/// no child of this one may gain privileges.
+fn install_program(program: &Program) -> io::Result<()> {
     // SAFETY: `PR_SET_NO_NEW_PRIVS` takes one integer, 1 to enable it, and
     // ignores the remaining arguments.
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
         return Err(step("PR_SET_NO_NEW_PRIVS", io::Error::last_os_error()));
     }
 
-    let mut program = Program::new();
-    build(role, &mut program)?;
     let (mut bytes, len) = program.resolve()?;
     let mut descriptor = libc::sock_fprog {
         len,
@@ -181,11 +204,16 @@ const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 /// The syscalls every role refuses, with the name of each for documentation.
 ///
 /// The names are not part of the filter — a filter compares numbers — but they
-/// are what makes this list readable and testable.
+/// are what makes this list readable and testable. Every name is spelled by
+/// libc for `x86_64` and `aarch64`, the two architectures this module has an
+/// `AUDIT_ARCH_*` for.
 const DENIED: &[(&str, libc::c_long)] = &[
     ("ptrace", libc::SYS_ptrace),
+    ("pidfd_getfd", libc::SYS_pidfd_getfd),
+    ("kcmp", libc::SYS_kcmp),
     ("process_vm_readv", libc::SYS_process_vm_readv),
     ("process_vm_writev", libc::SYS_process_vm_writev),
+    ("process_madvise", libc::SYS_process_madvise),
     ("bpf", libc::SYS_bpf),
     ("keyctl", libc::SYS_keyctl),
     ("add_key", libc::SYS_add_key),
@@ -203,6 +231,12 @@ const DENIED: &[(&str, libc::c_long)] = &[
     ("mount", libc::SYS_mount),
     ("umount2", libc::SYS_umount2),
     ("pivot_root", libc::SYS_pivot_root),
+    ("open_tree", libc::SYS_open_tree),
+    ("move_mount", libc::SYS_move_mount),
+    ("fsopen", libc::SYS_fsopen),
+    ("fsconfig", libc::SYS_fsconfig),
+    ("fsmount", libc::SYS_fsmount),
+    ("fspick", libc::SYS_fspick),
     ("swapon", libc::SYS_swapon),
     ("swapoff", libc::SYS_swapoff),
     ("reboot", libc::SYS_reboot),
@@ -243,9 +277,9 @@ const RET: u16 = (libc::BPF_RET | libc::BPF_K) as u16;
 /// The longest program [`program`] builds, in instructions.
 ///
 /// `install` runs in a freshly forked child, where allocating is not safe, so
-/// the program lives on the stack; the current worst case is 42 instructions
+/// the program lives on the stack; the current worst case is 54 instructions
 /// (`View { egress: true }`) and there is room for the list to grow.
-const MAX_PROGRAM: usize = 64;
+const MAX_PROGRAM: usize = 96;
 
 /// Where a branch goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -270,6 +304,8 @@ enum Label {
     Allow,
     /// `SECCOMP_RET_ERRNO(EPERM)`.
     Deny,
+    /// `SECCOMP_RET_KILL_PROCESS`.
+    Kill,
 }
 
 /// One instruction, before its label is turned into an offset.
@@ -329,7 +365,7 @@ impl Program {
     ///
     /// Returns the instruction array and how much of it is used. Classic BPF
     /// offsets are unsigned bytes, so a jump is at most 255 instructions long —
-    /// the longest one here is about 30 — and can only go forward.
+    /// the longest one here is about 50 — and can only go forward.
     fn resolve(&self) -> io::Result<([libc::sock_filter; MAX_PROGRAM], u16)> {
         let mut filter = [libc::sock_filter {
             code: 0,
@@ -424,16 +460,21 @@ fn labelled(label: Label, step: Step) -> Step {
 ///
 /// The shape is: check the architecture, then the syscall number against the
 /// refusal list, then the address family for the two socket calls, and finally
-/// the two shared actions. Every branch is forward, which is all classic BPF
-/// has.
+/// the shared actions. Every branch is forward, which is all classic BPF has.
 fn build(role: SeccompRole, program: &mut Program) -> io::Result<()> {
+    build_for(role, AUDIT_ARCH, program)
+}
+
+/// [`build`] with the architecture the filter expects spelled out, so a test
+/// can build one that has to kill.
+fn build_for(role: SeccompRole, arch: u32, program: &mut Program) -> io::Result<()> {
     // A filter written for one architecture's syscall table means nothing on
     // another, so a foreign `arch` kills the process (§7.3). Nothing
     // legitimate gets here: blastit's children are all this same image.
     program.push(load(data::ARCH))?;
     program.push(compare(
         JEQ,
-        AUDIT_ARCH,
+        arch,
         Target::Label(Label::AfterArch),
         Target::Next,
     ))?;
@@ -441,11 +482,15 @@ fn build(role: SeccompRole, program: &mut Program) -> io::Result<()> {
 
     // From here on A holds the syscall number.
     program.push(labelled(Label::AfterArch, load(data::NR)))?;
+    // An x32 syscall number is not one of the numbers below: x32 shares the
+    // syscall instruction with x86_64 but not its table, so the same number
+    // means something else there. Nothing legitimate makes one, and the
+    // process dies exactly as it does on a foreign architecture (§7.3).
     #[cfg(target_arch = "x86_64")]
     program.push(compare(
         JSET,
         X32_SYSCALL_BIT,
-        Target::Label(Label::Deny),
+        Target::Label(Label::Kill),
         Target::Next,
     ))?;
 
@@ -514,6 +559,12 @@ fn build(role: SeccompRole, program: &mut Program) -> io::Result<()> {
         // process reports as "not permitted" instead of dying.
         action(libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
     ))?;
+    // A syscall number from another ABI is not something a refusal can answer:
+    // the process that made one is not running the code blastit thinks it is.
+    program.push(labelled(
+        Label::Kill,
+        action(libc::SECCOMP_RET_KILL_PROCESS),
+    ))?;
     Ok(())
 }
 
@@ -538,7 +589,8 @@ fn bad_program(detail: &'static str) -> io::Error {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::testutil::child_ok;
+    use crate::error::Error;
+    use crate::testutil::{child_ok, child_status};
 
     /// Every role, so the tests cannot forget one.
     const ROLES: &[SeccompRole] = &[
@@ -563,13 +615,12 @@ mod tests {
         None
     }
 
-    /// `socketpair(AF_UNIX, SOCK_STREAM, 0, sv)`, closing what it created.
-    fn try_socketpair_unix() -> Option<i32> {
+    /// `socketpair(domain, SOCK_STREAM, 0, sv)`, closing what it created.
+    fn try_socketpair(domain: libc::c_int) -> Option<i32> {
         let mut fds = [0 as libc::c_int; 2];
         // SAFETY: `socketpair` writes two descriptors into the two-element
         // array, which is exactly the storage it needs.
-        let created =
-            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        let created = unsafe { libc::socketpair(domain, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         if created == -1 {
             return io::Error::last_os_error().raw_os_error();
         }
@@ -621,11 +672,36 @@ mod tests {
                 _ => return 5,
             }
             // A pair of descriptors this process owns stays available.
-            match try_socketpair_unix() {
+            match try_socketpair(libc::AF_UNIX) {
                 None => 0,
                 _ => 6,
             }
         });
+    }
+
+    #[test]
+    fn socketpair_is_unix_only_for_every_role() {
+        for (label, role) in [
+            ("view socketpair", SeccompRole::View { egress: false }),
+            ("egress view socketpair", SeccompRole::View { egress: true }),
+            ("http socketpair", SeccompRole::Http),
+            ("dbproxy socketpair", SeccompRole::DbProxy),
+        ] {
+            child_ok(label, move || {
+                if install(role).is_err() {
+                    return 1;
+                }
+                if try_socketpair(libc::AF_UNIX).is_some() {
+                    return 2;
+                }
+                // `EPERM`, not the `EOPNOTSUPP` the kernel itself returns for a
+                // family `socketpair` does not support.
+                match try_socketpair(libc::AF_INET) {
+                    Some(libc::EPERM) => 0,
+                    _ => 3,
+                }
+            });
+        }
     }
 
     #[test]
@@ -668,7 +744,7 @@ mod tests {
                         _ => return 2,
                     }
                 }
-                match try_socketpair_unix() {
+                match try_socketpair(libc::AF_UNIX) {
                     None => 0,
                     _ => 3,
                 }
@@ -719,8 +795,11 @@ mod tests {
         let names: Vec<&str> = DENIED.iter().map(|(name, _)| *name).collect();
         for expected in [
             "ptrace",
+            "pidfd_getfd",
+            "kcmp",
             "process_vm_readv",
             "process_vm_writev",
+            "process_madvise",
             "bpf",
             "keyctl",
             "add_key",
@@ -738,6 +817,12 @@ mod tests {
             "mount",
             "umount2",
             "pivot_root",
+            "open_tree",
+            "move_mount",
+            "fsopen",
+            "fsconfig",
+            "fsmount",
+            "fspick",
             "swapon",
             "swapoff",
             "reboot",
@@ -747,6 +832,13 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "{expected} is not refused");
         }
+        // No duplicates: two entries for one number would only make the chain
+        // longer.
+        let mut numbers: Vec<libc::c_long> = DENIED.iter().map(|(_, number)| *number).collect();
+        numbers.sort_unstable();
+        let unique = numbers.len();
+        numbers.dedup();
+        assert_eq!(numbers.len(), unique, "the refusal list repeats a syscall");
     }
 
     #[test]
@@ -761,13 +853,24 @@ mod tests {
             );
             let (filter, len) = program.resolve().unwrap();
             assert_eq!(usize::from(len), program.len);
-            // The last instruction is the refusal, and the one before it the
-            // allow: a program that lost its actions would refuse everything.
+            // The tail is the refusal, then the allow, then the kill: a program
+            // that lost an action would either refuse everything or lose the
+            // architecture check.
             assert_eq!(
                 filter[program.len - 1].k,
-                libc::SECCOMP_RET_ERRNO | libc::EPERM as u32
+                libc::SECCOMP_RET_KILL_PROCESS,
+                "{role:?}"
             );
-            assert_eq!(filter[program.len - 2].k, libc::SECCOMP_RET_ALLOW);
+            assert_eq!(
+                filter[program.len - 2].k,
+                libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+                "{role:?}"
+            );
+            assert_eq!(
+                filter[program.len - 3].k,
+                libc::SECCOMP_RET_ALLOW,
+                "{role:?}"
+            );
             // The architecture check comes first, and the kill is right behind
             // the branch that fails it.
             assert_eq!(filter[0].k, data::ARCH);
@@ -776,27 +879,64 @@ mod tests {
     }
 
     #[test]
-    fn an_x32_syscall_number_is_refused() {
-        // The x32 table shares x86_64's syscall instruction but not its
-        // numbers, so a number with that bit set is refused rather than
-        // interpreted (§7.3). `getpid` is the number that means something else
-        // entirely in the x32 table.
-        #[cfg(target_arch = "x86_64")]
-        child_ok("x32", || {
-            if install(SeccompRole::View { egress: false }).is_err() {
+    fn the_widest_program_is_the_size_the_comment_claims() {
+        // `MAX_PROGRAM` and its doc name a number, and a program that grew past
+        // that buffer would otherwise only fail inside a forked child. This is
+        // the one place that keeps the two honest.
+        let widest = ROLES
+            .iter()
+            .map(|role| {
+                let mut program = Program::new();
+                build(*role, &mut program).unwrap();
+                program.len
+            })
+            .max()
+            .unwrap();
+        assert_eq!(widest, 54, "the widest filter changed size");
+    }
+
+    #[test]
+    fn a_foreign_architecture_kills_the_process() {
+        // `build_for` with an architecture nothing produces: the filter falls
+        // through to the kill on its very first pair of instructions, so the
+        // child dies on its first syscall. This is the branch that makes an
+        // x32 syscall number fatal too, and this is the only way to watch a
+        // `SECCOMP_RET_KILL_PROCESS` happen without an x32 userland.
+        let mut program = Program::new();
+        build_for(SeccompRole::Http, 0xc000_ffff, &mut program).unwrap();
+        let status = child_status(|| {
+            if install_program(&program).is_err() {
                 return 1;
             }
-            // SAFETY: `syscall` takes a number and up to six word arguments;
-            // `getpid` takes none.
-            let called = unsafe { libc::syscall((X32_SYSCALL_BIT | 39) as libc::c_long) };
-            if called != -1 {
-                return 2;
-            }
-            match io::Error::last_os_error().raw_os_error() {
-                Some(libc::EPERM) => 0,
-                _ => 3,
-            }
+            // SAFETY: `getpid` takes no arguments and cannot fail. The child
+            // dies here, so nothing after this line runs.
+            unsafe { libc::getpid() };
+            2
         });
+        assert_eq!(status.raw_signal(), Some(libc::SIGSYS), "{status}");
+    }
+
+    #[test]
+    fn an_x32_syscall_number_kills_the_process() {
+        // x32 shares x86_64's syscall instruction but not its table, so a
+        // number with that bit set is not one of the numbers the refusal list
+        // is written in. Refusing it with `EPERM` would mean answering a
+        // syscall blastit cannot name, so the process dies, exactly as it does
+        // on a foreign architecture (§7.3).
+        #[cfg(target_arch = "x86_64")]
+        {
+            let status = child_status(|| {
+                if install(SeccompRole::View { egress: false }).is_err() {
+                    return 1;
+                }
+                // SAFETY: `syscall` takes a number and up to six word
+                // arguments; the x32 `getpid` takes none. The child dies here,
+                // so nothing after this line runs.
+                unsafe { libc::syscall((X32_SYSCALL_BIT | 39) as libc::c_long) };
+                2
+            });
+            assert_eq!(status.raw_signal(), Some(libc::SIGSYS), "{status}");
+        }
     }
 
     #[test]
@@ -814,6 +954,38 @@ mod tests {
                 }
             });
         }
+    }
+
+    #[test]
+    fn install_refuses_a_process_that_is_not_single_threaded() {
+        // The check is what turns a wrong fork order into a failed boot instead
+        // of a half-sandboxed process, so it has to fire before the kernel sees
+        // anything. A forked child of the harness is one thread; this one adds
+        // a second and parks it, so the count is stable while `install` reads
+        // `/proc/self/status`.
+        child_ok("threads", || {
+            let worker = std::thread::spawn(std::thread::park);
+            for _ in 0..100_000 {
+                match crate::thread_count() {
+                    Ok(threads) if threads >= 2 => break,
+                    _ => std::thread::yield_now(),
+                }
+            }
+            match install(SeccompRole::View { egress: false }) {
+                Err(err) => match Error::from_io(&err) {
+                    Some(Error::NotSingleThreadedSeccomp { threads }) if *threads >= 2 => {}
+                    _ => return 2,
+                },
+                Ok(()) => return 1,
+            }
+            // The refusal happened before the filter could be installed: a
+            // socket the filter would have refused still works.
+            if try_socket(libc::AF_INET).is_some() {
+                return 3;
+            }
+            worker.thread().unpark();
+            0
+        });
     }
 
     #[test]

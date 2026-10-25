@@ -242,3 +242,39 @@ pub fn child_exit(message: &str, code: i32) -> ! {
     // SAFETY: `_exit` never returns and runs no handler.
     unsafe { libc::_exit(code) }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// An `AF_INET` stream socket, created and closed again.
+    ///
+    /// `false` is what the §7.3 filter answers: `socket(AF_INET)` is exactly
+    /// what a view without egress may not do.
+    fn inet_socket() -> bool {
+        // SAFETY: `socket` takes three integers and returns a descriptor.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        if fd == -1 {
+            return false;
+        }
+        // SAFETY: the descriptor was just created here and nothing else owns it.
+        unsafe { libc::close(fd) };
+        true
+    }
+
+    #[test]
+    fn the_off_switch_installs_no_filter() {
+        // `BLASTIT_SECCOMP=0` has to leave every process's system calls alone.
+        // A filter can never be removed, so this runs in the harness's own
+        // process — and that is the proof: if `install_filter` installed one
+        // anyway, the socket below would come back `EPERM` and stay that way.
+        // The enabled half is `blastit-sys`'s own tests, which fork a child per
+        // role.
+        install_filter(false, SeccompRole::View { egress: false }).unwrap();
+        assert!(
+            inet_socket(),
+            "AF_INET must still work when the filters are off"
+        );
+    }
+}
