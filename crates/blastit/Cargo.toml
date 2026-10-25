@@ -15,6 +15,7 @@ name = "blastit"
 path = "src/main.rs"
 
 [dependencies]
+blastit-dbproxy = { version = "0.1.0", path = "../blastit-dbproxy" }
 blastit-env = { version = "0.1.0", path = "../blastit-env" }
 blastit-events = { version = "0.1.0", path = "../blastit-events" }
 blastit-frame = { version = "0.1.0", path = "../blastit-frame" }
