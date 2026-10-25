@@ -62,6 +62,36 @@ impl SpawnMode {
     }
 }
 
+/// When §9.2 #7's heap immortalisation runs (`BLASTIT_IMMORTALIZE`).
+///
+/// The marker §9.2 #7 writes is safe on CPython 3.12 and 3.13 and unsafe on
+/// 3.14, where some decrefs do not check it, so the default is to run it where
+/// it is known to be safe and to leave the heap alone elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Immortalize {
+    /// Immortalise on the interpreters §9.2 #7 is known to hold on — CPython
+    /// 3.12 and 3.13 — and skip it everywhere else. The default.
+    Auto,
+    /// Immortalise wherever the marker is known at all — CPython 3.12 to 3.14,
+    /// as `crate::immortal::supported` decides — including 3.14, whose heap is
+    /// not safe to mark, for experiments.
+    On,
+    /// Never immortalise, whatever the interpreter.
+    Off,
+}
+
+impl Immortalize {
+    /// The `BLASTIT_IMMORTALIZE` spelling, which is also the stage 1
+    /// document's.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
 /// One problem with the configuration.
 ///
 /// Every variant names the variable (or JSON field) involved. No variant ever
@@ -147,6 +177,8 @@ pub struct Config {
     pub view_mem_estimate: u64,
     /// `BLASTIT_MEM_HIGH_WATERMARK`, as a percentage of `MemTotal`.
     pub mem_high_watermark_percent: f64,
+    /// `BLASTIT_IMMORTALIZE`: when §9.2 #7's heap immortalisation runs.
+    pub immortalize: Immortalize,
     /// `BLASTIT_MAX_HEADER_BYTES`.
     pub max_header_bytes: usize,
     /// `BLASTIT_MAX_BODY_BYTES`.
@@ -226,6 +258,7 @@ impl Default for Config {
             max_view_processes: None,
             view_mem_estimate: 32 * 1024 * 1024,
             mem_high_watermark_percent: 85.0,
+            immortalize: Immortalize::Auto,
             max_header_bytes: 64 * 1024,
             max_body_bytes: 100 * 1024 * 1024,
             header_timeout: Duration::from_secs(10),
@@ -369,6 +402,12 @@ impl Config {
             .map(|value| parse_percent("BLASTIT_MEM_HIGH_WATERMARK", &value))
             .transpose()?
             .unwrap_or(config.mem_high_watermark_percent);
+        config.immortalize = defaulted(
+            variable("BLASTIT_IMMORTALIZE")?,
+            "BLASTIT_IMMORTALIZE",
+            config.immortalize,
+            parse_immortalize,
+        )?;
         config.max_header_bytes = defaulted(
             variable("BLASTIT_MAX_HEADER_BYTES")?,
             "BLASTIT_MAX_HEADER_BYTES",
@@ -625,6 +664,7 @@ impl Config {
             "mem_high_watermark_percent".into(),
             Value::from(self.mem_high_watermark_percent),
         );
+        object.insert("immortalize".into(), Value::from(self.immortalize.as_str()));
         object.insert(
             "max_header_bytes".into(),
             Value::from(self.max_header_bytes as u64),
@@ -729,6 +769,17 @@ impl Config {
         config.max_view_processes = json_opt_u32(value, "max_view_processes")?;
         config.view_mem_estimate = json_u64(value, "view_mem_estimate")?;
         config.mem_high_watermark_percent = json_f64(value, "mem_high_watermark_percent")?;
+        config.immortalize = match json_string(value, "immortalize")?.as_str() {
+            "auto" => Immortalize::Auto,
+            "on" => Immortalize::On,
+            "off" => Immortalize::Off,
+            other => {
+                return Err(document(
+                    "immortalize",
+                    format!("unknown setting `{other}`"),
+                ));
+            }
+        };
         config.max_header_bytes = json_usize(value, "max_header_bytes")?;
         config.max_body_bytes = json_u64(value, "max_body_bytes")?;
         config.header_timeout = json_duration(value, "header_timeout_ms")?;
@@ -917,6 +968,25 @@ fn parse_bool(name: &str, value: &str) -> Result<bool, ConfigError> {
         "1" | "true" | "yes" | "on" => Ok(true),
         "0" | "false" | "no" | "off" => Ok(false),
         other => Err(invalid(name, format!("expected 0 or 1, not `{other}`"))),
+    }
+}
+
+/// Parses `auto`, or any [`parse_bool`] spelling, as [`Immortalize`] (§8.2
+/// writes the booleans as `1` and `0`).
+fn parse_immortalize(name: &str, value: &str) -> Result<Immortalize, ConfigError> {
+    let text = value.trim();
+    if text.eq_ignore_ascii_case("auto") {
+        return Ok(Immortalize::Auto);
+    }
+    match parse_bool(name, text) {
+        Ok(true) => Ok(Immortalize::On),
+        Ok(false) => Ok(Immortalize::Off),
+        // `parse_bool` names the spellings it knows; `auto` is the one it does
+        // not, so the message here is this variable's own.
+        Err(_) => Err(invalid(
+            name,
+            format!("expected auto, 0 or 1, not `{text}`"),
+        )),
     }
 }
 
@@ -1170,7 +1240,20 @@ fn json_duration(value: &Value, name: &'static str) -> Result<Duration, ConfigEr
     clippy::field_reassign_with_default
 )]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
     use super::*;
+
+    /// Serialises the tests that read or write the process environment.
+    ///
+    /// [`Config::from_env`] reads every `BLASTIT_*` variable at once, so a test
+    /// that calls it must not run while another test is changing one.
+    static ENV: Mutex<()> = Mutex::new(());
+
+    /// The lock described on [`ENV`]; a poisoned lock still runs the next test.
+    fn env() -> MutexGuard<'static, ()> {
+        ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn durations_accept_the_documented_spellings() {
@@ -1221,9 +1304,59 @@ mod tests {
     }
 
     #[test]
+    fn the_immortalisation_setting_takes_auto_and_the_booleans() {
+        assert_eq!(parse_immortalize("V", "auto").unwrap(), Immortalize::Auto);
+        assert_eq!(parse_immortalize("V", " AUTO ").unwrap(), Immortalize::Auto);
+        assert_eq!(parse_immortalize("V", "1").unwrap(), Immortalize::On);
+        assert_eq!(parse_immortalize("V", "on").unwrap(), Immortalize::On);
+        assert_eq!(parse_immortalize("V", "true").unwrap(), Immortalize::On);
+        assert_eq!(parse_immortalize("V", "0").unwrap(), Immortalize::Off);
+        assert_eq!(parse_immortalize("V", "off").unwrap(), Immortalize::Off);
+        assert_eq!(parse_immortalize("V", "false").unwrap(), Immortalize::Off);
+        let err = parse_immortalize("BLASTIT_IMMORTALIZE", "sometimes").unwrap_err();
+        assert!(err.to_string().contains("BLASTIT_IMMORTALIZE"), "{err}");
+        assert!(err.to_string().contains("auto, 0 or 1"), "{err}");
+    }
+
+    #[test]
+    fn the_immortalisation_setting_is_read_from_the_environment() {
+        let _env = env();
+        // SAFETY: `env()` is held for the whole test, so no other test reads or
+        // writes the environment while this one runs.
+        unsafe {
+            std::env::remove_var("BLASTIT_IMMORTALIZE");
+            assert_eq!(
+                Config::from_env().unwrap().immortalize,
+                Immortalize::Auto,
+                "the default is auto"
+            );
+            for (value, expected) in [
+                ("1", Immortalize::On),
+                ("on", Immortalize::On),
+                ("0", Immortalize::Off),
+                ("off", Immortalize::Off),
+                ("auto", Immortalize::Auto),
+            ] {
+                std::env::set_var("BLASTIT_IMMORTALIZE", value);
+                assert_eq!(
+                    Config::from_env().unwrap().immortalize,
+                    expected,
+                    "BLASTIT_IMMORTALIZE={value}"
+                );
+            }
+            std::env::set_var("BLASTIT_IMMORTALIZE", "sometimes");
+            let err = Config::from_env().unwrap_err();
+            assert!(err.to_string().contains("BLASTIT_IMMORTALIZE"), "{err}");
+            std::env::remove_var("BLASTIT_IMMORTALIZE");
+        }
+    }
+
+    #[test]
     fn the_boot_seccomp_flag_uses_the_configuration_spellings() {
-        // SAFETY: this is the only test that touches `BLASTIT_SECCOMP`, and it
-        // puts the variable back before it returns.
+        let _env = env();
+        // SAFETY: `env()` is held for the whole test, so no other test reads or
+        // writes the environment while this one runs; the variable is put back
+        // before it returns.
         unsafe {
             // The `boot` event is printed before the configuration is parsed,
             // so the flag is read on its own — but through `parse_bool`, so it
@@ -1269,6 +1402,7 @@ mod tests {
         config.max_body_bytes = 1 << 20;
         config.health_path = "/health".to_string();
         config.warmup = Some("web.warmup:run".to_string());
+        config.immortalize = Immortalize::Off;
         config.sys_path = vec![
             b"/app".to_vec(),
             b"/app/.venv/lib/python3.14/site-packages".to_vec(),
@@ -1279,8 +1413,18 @@ mod tests {
         let json = config.to_json();
         let text = serde_json::to_string(&json).unwrap();
         assert!(!text.contains("BLASTIT_"), "{text}");
+        assert_eq!(json["immortalize"], serde_json::json!("off"));
         let back = Config::from_json(&json).unwrap();
         assert_eq!(back, config);
+    }
+
+    #[test]
+    fn an_immortalisation_setting_the_document_cannot_carry_names_the_field() {
+        let mut json = Config::default().to_json();
+        assert_eq!(json["immortalize"], serde_json::json!("auto"));
+        json["immortalize"] = serde_json::json!("sometimes");
+        let err = Config::from_json(&json).unwrap_err();
+        assert!(err.to_string().contains("immortalize"), "{err}");
     }
 
     #[test]

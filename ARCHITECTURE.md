@@ -1034,6 +1034,7 @@ with `request` events.
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | live view process cap (LRU retirement) |
 | `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | expected cost per view process, used for the cap |
 | `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total` (the smaller of `MemTotal` and the cgroup limit); above it, one idle view process per 2 s check is retired |
+| `BLASTIT_IMMORTALIZE` | `auto` | `auto` \| `1` \| `0`: mark the preloaded heap immortal before the fork (§9.2 #7). `auto` does it on CPython 3.12 and 3.13 only, because 3.14's decrefs corrupt a marked heap; `1` forces it wherever the marker is known (3.12–3.14); `0` never |
 | `BLASTIT_MAX_HEADER_BYTES` / `BLASTIT_MAX_BODY_BYTES` | `64 KiB` / `100 MiB` | HTTP limits |
 | `BLASTIT_HEADER_TIMEOUT` / `BLASTIT_KEEPALIVE_TIMEOUT` | `10s` / `75s` | HTTP timeouts (keep-alive above the LB's) |
 | `BLASTIT_TRUST_FORWARDED` | `1` | trust `X-Forwarded-*` from the LB |
@@ -1109,10 +1110,28 @@ is written up in
    Immortalizing 1.6 M objects took 1.8 s on DO. What remains is real writes:
    in-place mutation of shared dicts and lists, caches (URL resolver,
    templates, `lru_cache`), and bytecode specialization of code that wasn't
-   warmed up. That's why `BLASTIT_WARMUP` exists. The marker depends on the
-   CPython version, so blastit refuses to start on a version it doesn't know.
-   Immortal objects are never freed, which is fine for a heap that lives as
-   long as the container.
+   warmed up. That's why `BLASTIT_WARMUP` exists.
+
+   **3.14 must not be immortalised.** The marker means the same thing there
+   (`_Py_IsImmortal` is `(int32_t)refcnt < 0`), but not every decref checks it:
+   paths that only handle mortal objects count an immortal one down,
+   `0xFFFFFFFF` → `0xFFFFFFFE` → …, and a later decref frees or corrupts the
+   object. On a real Django + Wagtail app under CPython 3.14, views segfault in
+   `_PyObject_Malloc` on their first request; bisecting showed that marking the
+   instances of one class is enough, and the same crash is reproducible without
+   blastit by writing the marker with ctypes. So `BLASTIT_IMMORTALIZE=auto`
+   (the default) marks the heap on 3.12 and 3.13 only, and on 3.14 the server
+   starts with the pass skipped, warning `CPython 3.14: heap immortalisation is
+   unsafe on this version, views will copy more of the preloaded heap`.
+   `BLASTIT_IMMORTALIZE=1` forces it (3.12–3.14) for experiments, and
+   `BLASTIT_IMMORTALIZE=0` turns it off everywhere.
+
+   The marker also depends on the CPython version, so any other interpreter —
+   32-bit, big-endian, outside 3.12–3.14, free-threaded, `Py_TRACE_REFS` — is
+   skipped the same way, with the reason in the `boot` event, rather than
+   refusing to start. Immortal objects are never freed, which is fine for a
+   heap that lives as long as the container.
+
 8. **Measure memory on aggregates only.** gVisor has no `smaps_rollup`, and
    `VmRSS` doesn't change after allocations. On DO, `/proc/meminfo` reports
    the instance (`MemTotal` = 1 GiB), and cgroup v1
