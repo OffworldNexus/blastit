@@ -1,0 +1,1019 @@
+{
+ "environment": {
+  "uname": {
+   "system": "Linux",
+   "node": "<redacted>",
+   "release": "4.4.0",
+   "version": "#1 SMP Sun Jan 10 15:06:54 PST 2016",
+   "machine": "x86_64",
+   "processor": ""
+  },
+  "python": "3.12.15 (main, Oct 21 2026, 01:08:20) [GCC 14.2.0]",
+  "pid": 1,
+  "ppid": 0,
+  "uid": 0,
+  "euid": 0,
+  "gid": 0,
+  "groups": [
+   0
+  ],
+  "caps": {
+   "CapEff": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "FSETID",
+    "KILL",
+    "SETGID",
+    "SETUID",
+    "SETPCAP",
+    "NET_BIND_SERVICE",
+    "SYS_CHROOT",
+    "MKNOD",
+    "AUDIT_WRITE",
+    "SETFCAP"
+   ],
+   "CapPrm": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "FSETID",
+    "KILL",
+    "SETGID",
+    "SETUID",
+    "SETPCAP",
+    "NET_BIND_SERVICE",
+    "SYS_CHROOT",
+    "MKNOD",
+    "AUDIT_WRITE",
+    "SETFCAP"
+   ],
+   "CapBnd": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "FSETID",
+    "KILL",
+    "SETGID",
+    "SETUID",
+    "SETPCAP",
+    "NET_BIND_SERVICE",
+    "SYS_CHROOT",
+    "MKNOD",
+    "AUDIT_WRITE",
+    "SETFCAP"
+   ],
+   "CapInh": [],
+   "CapAmb": null,
+   "NoNewPrivs": null,
+   "Seccomp": "0"
+  },
+  "uid_map": "         0          0 4294967295\n",
+  "gid_map": "         0          0 4294967295\n",
+  "cpu_count": 8,
+  "sched_affinity": 8,
+  "meminfo_head": {
+   "MemTotal": "1048576 kB",
+   "MemFree": "1013328 kB",
+   "MemAvailable": "1013328 kB",
+   "Buffers": "0 kB",
+   "Cached": "17100 kB"
+  },
+  "cgroup": "7:pids:/dbab6d8f5bc67dd05e63eb21598cf2108a90675f37e67448848d735d5ad5d3b0\n6:memory:/dbab6d8f5bc67dd05e63eb21598cf2108a90675f37e67448848d735d5ad5d3b0\n5:job:/dbab6d8f5bc67dd05e63eb21598cf2108a90675f37e67448848d735d5ad5d3b0\n4:devices:/dbab6d8f5bc67dd05e63eb21598cf2108a90675f37e67448848d735d5ad5d3b0\n3:cpuset:/dbab6d8f5bc67dd05e63eb21598cf2108a90675f37e67448848d735d5ad5d3b0\n2:cpuacct:/dbab6d8f5bc67dd05e63eb21598cf2108a90675f37e67448848d735d5ad5d3b0\n1:cpu:/dbab6d8f5bc67dd05e63eb21598cf2108a90675f37e67448848d735d5ad5d3b0\n",
+  "cgroup_memory_max": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory.max'>",
+  "cgroup_memory_current": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'>",
+  "cgroup_v1_limit": "9223372036854775807\n",
+  "mounts": "none / 9p rw,trans=fd,rfdno=46,wfdno=46,aname=/,dfltuid=4294967294,dfltgid=4294967294,cache=fscache,disable_fifo_open,overlayfs_stale_read 0 0\nnone /dev tmpfs rw,mode=0755 0 0\nnone /sys sysfs ro,noexec,dentry_cache_limit=1000 0 0\nnone /proc proc rw,noexec,dentry_cache_limit=1000 0 0\nnone /dev/pts devpts rw,noexec 0 0\nnone /dev/shm tmpfs rw 0 0\nnone /etc/hosts 9p rw,trans=fd,rfdno=47,wfdno=47,aname=/,dfltuid=4294967294,dfltgid=4294967294,cache=remote_revalidating,disable_fifo_open 0 0\nnone /etc/hostname 9p rw,trans=fd,rfdno=49,wfdno=49,aname=/,dfltuid=4294967294,dfltgid=4294967294,cache=remote_revalidating,disable_fifo_open 0 0\nnone /sys/fs/cgroup tmpfs ro,noexec 0 0\nnone /sys/fs/cgroup/cpu cgroup rw,cpu 0 0\nnone /sys/fs/cgroup/cpuacct cgroup rw,cpuacct 0 0\nnone /sys/fs/cgroup/cpuset cgroup rw,cpuset 0 0\nnone /sys/fs/cgroup/devices cgroup rw,devices 0 0\nnone /sys/fs/cgroup/job cgroup rw,job 0 0\nnone /sys/fs/cgroup/memory cgroup rw,memory 0 0\nnone /sys/fs/cgroup/pids cgroup rw,pids 0 0\nnone /etc/resolv.conf 9p rw,trans=fd,rfdno=50,wfdno=50,aname=/,dfltuid=4294967294,dfltgid=4294967294,cache=remote_revalidating,disable_fifo_open 0 0\nnone /dev/termination-log 9p rw,trans=fd,rfdno=48,wfdno=48,aname=/,dfltuid=4294967294,dfltgid=4294967294,cache=remote_revalidating,disable_fifo_open 0 0\nnone /tmp tmpfs rw,mode=01777 0 0\n",
+  "rlimits": {
+   "RLIMIT_NPROC": [
+    -1,
+    -1
+   ],
+   "RLIMIT_NOFILE": [
+    1048576,
+    1048576
+   ],
+   "RLIMIT_AS": [
+    -1,
+    -1
+   ],
+   "RLIMIT_CORE": [
+    -1,
+    -1
+   ],
+   "RLIMIT_STACK": [
+    8388608,
+    -1
+   ]
+  },
+  "smaps_rollup_self": "<FileNotFoundError: [Errno 2] No such file or directory: '/proc/self/smaps_rollup'>",
+  "env_keys": [
+   "GPG_KEY",
+   "HOME",
+   "HOSTNAME",
+   "KUBERNETES_PORT",
+   "KUBERNETES_PORT_443_TCP",
+   "KUBERNETES_PORT_443_TCP_ADDR",
+   "KUBERNETES_PORT_443_TCP_PORT",
+   "KUBERNETES_PORT_443_TCP_PROTO",
+   "KUBERNETES_SERVICE_HOST",
+   "KUBERNETES_SERVICE_PORT",
+   "KUBERNETES_SERVICE_PORT_HTTPS",
+   "LANG",
+   "PATH",
+   "PORT",
+   "PYTHONUNBUFFERED",
+   "PYTHON_SHA256",
+   "PYTHON_VERSION"
+  ],
+  "port": "8080",
+  "tmp_mode": "0o41777",
+  "dev_shm": "0o41777",
+  "interfaces": [
+   [
+    1,
+    "lo"
+   ],
+   [
+    2,
+    "eth0"
+   ]
+  ],
+  "pid_max": "<FileNotFoundError: [Errno 2] No such file or directory: '/proc/sys/kernel/pid_max'>",
+  "threads_max": "<FileNotFoundError: [Errno 2] No such file or directory: '/proc/sys/kernel/threads-max'>"
+ },
+ "S1_setuid": {
+  "ok": true,
+  "result": {
+   "uid": 20000,
+   "euid": 20000,
+   "gid": 20000,
+   "groups": [],
+   "caps_before": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "FSETID",
+    "KILL",
+    "SETGID",
+    "SETUID",
+    "SETPCAP",
+    "NET_BIND_SERVICE",
+    "SYS_CHROOT",
+    "MKNOD",
+    "AUDIT_WRITE",
+    "SETFCAP"
+   ],
+   "caps_after": {
+    "CapEff": [],
+    "CapPrm": [],
+    "CapBnd": [
+     "CHOWN",
+     "DAC_OVERRIDE",
+     "FOWNER",
+     "FSETID",
+     "KILL",
+     "SETGID",
+     "SETUID",
+     "SETPCAP",
+     "NET_BIND_SERVICE",
+     "SYS_CHROOT",
+     "MKNOD",
+     "AUDIT_WRITE",
+     "SETFCAP"
+    ],
+    "CapInh": [],
+    "CapAmb": null,
+    "NoNewPrivs": null,
+    "Seccomp": "0"
+   },
+   "setuid_back_to_0": "EPERM: Operation not permitted"
+  },
+  "elapsed_ms": 35.1
+ },
+ "S4_uid_range": {
+  "1000": {
+   "ok": true,
+   "result": {
+    "uid": 1000
+   },
+   "elapsed_ms": 34.5
+  },
+  "20000": {
+   "ok": true,
+   "result": {
+    "uid": 20000
+   },
+   "elapsed_ms": 27.4
+  },
+  "21000": {
+   "ok": true,
+   "result": {
+    "uid": 21000
+   },
+   "elapsed_ms": 72.2
+  },
+  "65534": {
+   "ok": true,
+   "result": {
+    "uid": 65534
+   },
+   "elapsed_ms": 24.9
+  },
+  "65535": {
+   "ok": true,
+   "result": {
+    "uid": 65535
+   },
+   "elapsed_ms": 65.6
+  },
+  "65536": {
+   "ok": true,
+   "result": {
+    "uid": 65536
+   },
+   "elapsed_ms": 35.3
+  },
+  "100000": {
+   "ok": true,
+   "result": {
+    "uid": 100000
+   },
+   "elapsed_ms": 49.2
+  },
+  "1000000": {
+   "ok": true,
+   "result": {
+    "uid": 1000000
+   },
+   "elapsed_ms": 28.5
+  },
+  "2147483646": {
+   "ok": true,
+   "result": {
+    "uid": 2147483646
+   },
+   "elapsed_ms": 26.5
+  },
+  "4294967294": {
+   "ok": true,
+   "result": {
+    "uid": 4294967294
+   },
+   "elapsed_ms": 54.6
+  }
+ },
+ "S2_peercred": {
+  "process_uid21000": {
+   "expected_uid": 21000,
+   "child_pid": 15,
+   "peer_pid": 1,
+   "peer_uid": 0,
+   "peer_gid": 0,
+   "match": false
+  },
+  "thread_uid21001": {
+   "expected_uid": 21001,
+   "child_pid": 16,
+   "peer_pid": 1,
+   "peer_uid": 0,
+   "peer_gid": 0,
+   "match": false
+  },
+  "socketpair_after_child_setuid": {
+   "peer_uid": 0,
+   "note": "socketpair creds are fixed at creation (expect 0 on Linux)"
+  }
+ },
+ "S3_seccomp": {
+  "ok": true,
+  "result": {
+   "status_seccomp": "2",
+   "status_nnp": null,
+   "af_unix": "ok",
+   "af_inet": "EPERM: Operation not permitted",
+   "af_inet6": "EPERM: Operation not permitted",
+   "enforced": true
+  },
+  "elapsed_ms": 60.8
+ },
+ "S5_rlimit_nproc": {
+  "alone": {
+   "ok": true,
+   "result": {
+    "threads_created_with_limit_16": 16,
+    "error": "RuntimeError: can't start new thread"
+   },
+   "elapsed_ms": 45.0
+  },
+  "with_sibling": {
+   "ok": true,
+   "result": {
+    "threads_created_with_limit_16_and_sibling_holding_8": 7,
+    "error": "RuntimeError: can't start new thread"
+   },
+   "elapsed_ms": 164.3
+  },
+  "forks": {
+   "ok": true,
+   "result": {
+    "forks_with_limit_16": 16,
+    "error": "BlockingIOError: [Errno 11] Resource temporarily unavailable"
+   },
+   "elapsed_ms": 718.7
+  },
+  "no_limit": {
+   "ok": true,
+   "result": {
+    "threads_created_default_limit": 500,
+    "error": null
+   },
+   "elapsed_ms": 803.0
+  }
+ },
+ "S6_memory": {
+  "before": {
+   "VmRSS": "37056 kB",
+   "cgroup_current": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'>",
+   "MemAvailable": "1012692 kB"
+  },
+  "after_alloc": {
+   "VmRSS": "182340 kB",
+   "cgroup_current": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'>",
+   "MemAvailable": "868004 kB"
+  },
+  "buf_mib": 128,
+  "n_objects": 200000,
+  "runs": {
+   "read_buffer_only": {
+    "children": 20,
+    "fork_ms_avg": 126.9,
+    "fork_ms_max": 401.57,
+    "uids_ok": true,
+    "child_VmRSS_sample": [
+     "172160 kB",
+     "172160 kB",
+     "172160 kB"
+    ],
+    "child_smaps_rollup_sample": "<FileNotFoundError: [Errno 2] No such file or directory: '/proc/self/smaps_rollup'>",
+    "snapshot_with_children_alive": {
+     "VmRSS": "182340 kB",
+     "cgroup_current": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'>",
+     "MemAvailable": "563424 kB"
+    },
+    "after_release": {
+     "VmRSS": "182340 kB",
+     "cgroup_current": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'>",
+     "MemAvailable": "674704 kB"
+    }
+   },
+   "iterate_python_objects": {
+    "children": 20,
+    "fork_ms_avg": 138.89,
+    "fork_ms_max": 289.32,
+    "uids_ok": true,
+    "child_VmRSS_sample": [
+     "172160 kB",
+     "172160 kB",
+     "172160 kB"
+    ],
+    "child_smaps_rollup_sample": "<FileNotFoundError: [Errno 2] No such file or directory: '/proc/self/smaps_rollup'>",
+    "snapshot_with_children_alive": {
+     "VmRSS": "182340 kB",
+     "cgroup_current": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'>",
+     "MemAvailable": "317104 kB"
+    },
+    "after_release": {
+     "VmRSS": "182340 kB",
+     "cgroup_current": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'>",
+     "MemAvailable": "454456 kB"
+    }
+   }
+  }
+ },
+ "ipc_primitives": {
+  "seqpacket": {
+   "ok": true,
+   "send_sizes": {
+    "65536": 65536,
+    "204800": 204800,
+    "1048576": "EMSGSIZE: Message too long"
+   },
+   "sndbuf": 212992
+  },
+  "scm_rights": {
+   "reply": "ok",
+   "data": "hello-from-passed-fd"
+  },
+  "exec_proc_self_exe": {
+   "rc": 0,
+   "out": "613 2 /proc/self/exe",
+   "err": ""
+  },
+  "pidfd_open": "ENOSYS: Function not implemented",
+  "loopback_bind": "ok :28070",
+  "any_bind": "ok :16769"
+ },
+ "isolation": {
+  "attacker_uid20030": {
+   "ok": true,
+   "result": {
+    "kill_other_uid": "EPERM: Operation not permitted",
+    "read_environ": "<redacted: raw /proc content>",
+    "read_mem": "EACCES: Permission denied",
+    "read_cmdline": "<redacted: raw /proc content>",
+    "read_init_environ": "<redacted: raw /proc content>",
+    "ptrace_attach": "Operation not permitted"
+   },
+   "elapsed_ms": 36.0
+  },
+  "chown_dir": "ok",
+  "owner_can_write": {
+   "ok": true,
+   "result": 1,
+   "elapsed_ms": 28.3
+  },
+  "other_can_list": {
+   "ok": false,
+   "error": "PermissionError: [Errno 13] Permission denied: '/tmp/blastit-spike-priv'",
+   "tb": "Traceback (most recent call last):\n  File \"/app/probe.py\", line 116, in in_child\n    res = {\"ok\": True, \"result\": fn()}\n                                 ^^^^\n  File \"/app/probe.py\", line 474, in <lambda>\n    out[\"other_can_list\"] = in_child(lambda: os.listdir(d), uid=20041)\n                                             ^^^^^^^^^^^^^\nPermissionError: [Errno 13] Permission denied: '/tmp/blastit-spike-priv'\n",
+   "elapsed_ms": 64.6
+  },
+  "set_dumpable_0": {
+   "ok": true,
+   "result": 0,
+   "elapsed_ms": 54.3
+  },
+  "pdeathsig": {
+   "grandchild_reaped_by_us": true,
+   "signaled": true,
+   "signal": 9
+  },
+  "subreaper": "ok"
+ },
+ "R2_peer_identity": {
+  "listener_uid20050_client_uid20051": {
+   "ok": true,
+   "result": {
+    "listener_uid": 20050,
+    "listener_pid": 622,
+    "accepted_SO_PEERCRED": {
+     "pid": 622,
+     "uid": 20050,
+     "gid": 20050
+    },
+    "messages": [
+     {
+      "data": "plain",
+      "creds": {
+       "pid": 621,
+       "uid": 20051,
+       "gid": 20051
+      }
+     },
+     {
+      "data": "true!",
+      "creds": {
+       "pid": 621,
+       "uid": 20051,
+       "gid": 20051
+      }
+     },
+     {
+      "data": "{\"client_uid\": 20051, \"client_pid\": 621, \"client_sees_server\": {\"pid\": 621, \"uid\": 20051, \"gid\": 20051}, \"send_true_creds\": 5, \"send_forged_uid0\": \"EPERM: Operation not permitted\"}",
+      "creds": {
+       "pid": 621,
+       "uid": 20051,
+       "gid": 20051
+      }
+     }
+    ]
+   },
+   "elapsed_ms": 741.4
+  },
+  "root_listener_stream_client_uid20052": {
+   "SO_PEERCRED": {
+    "pid": 1,
+    "uid": 0,
+    "gid": 0
+   },
+   "SO_PASSCRED_auto_creds": {
+    "pid": 623,
+    "uid": 20052,
+    "gid": 20052
+   },
+   "client_pid": 623
+  },
+  "root_listener_seqpacket_client_uid20052": {
+   "SO_PEERCRED": {
+    "pid": 1,
+    "uid": 0,
+    "gid": 0
+   },
+   "SO_PASSCRED_auto_creds": {
+    "pid": 624,
+    "uid": 20052,
+    "gid": 20052
+   },
+   "client_pid": 624
+  }
+ },
+ "R2_socket_dac": {
+  "owner_uid20060_connect": {
+   "ok": true,
+   "result": "connected (b'k')",
+   "elapsed_ms": 23.6
+  },
+  "other_uid20061_connect": {
+   "ok": false,
+   "error": "PermissionError: [Errno 13] Permission denied",
+   "tb": "Traceback (most recent call last):\n  File \"/app/probe.py\", line 116, in in_child\n    res = {\"ok\": True, \"result\": fn()}\n                                 ^^^^\n  File \"/app/probe.py\", line 831, in fn\n    s.connect(path)\nPermissionError: [Errno 13] Permission denied\n",
+   "elapsed_ms": 49.9
+  },
+  "accepts_0600": [
+   "accepted",
+   "timeout"
+  ],
+  "dir_owner_uid20062_connect": {
+   "ok": true,
+   "result": "connected (b'k')",
+   "elapsed_ms": 30.3
+  },
+  "other_uid20063_connect_via_dir0700": {
+   "ok": false,
+   "error": "PermissionError: [Errno 13] Permission denied",
+   "tb": "Traceback (most recent call last):\n  File \"/app/probe.py\", line 116, in in_child\n    res = {\"ok\": True, \"result\": fn()}\n                                 ^^^^\n  File \"/app/probe.py\", line 831, in fn\n    s.connect(path)\nPermissionError: [Errno 13] Permission denied\n",
+   "elapsed_ms": 91.6
+  },
+  "accepts_dir0700": [
+   "accepted",
+   "timeout"
+  ],
+  "accepts_proc_self_cwd": [
+   "accepted"
+  ],
+  "proc_self_cwd_connect_uid20070": {
+   "ok": true,
+   "result": "connected (b'k')",
+   "elapsed_ms": 29.7
+  },
+  "proc_self_cwd_readlink": {
+   "ok": true,
+   "result": "/tmp/spike-dac/v20070",
+   "elapsed_ms": 29.8
+  }
+ },
+ "R2_proc_leaks": {
+  "normal": {
+   "ok": true,
+   "result": {
+    "environ": "<redacted: raw /proc content>",
+    "cmdline": "<redacted: raw /proc content>",
+    "maps": "b'00064000-00069000 r-xp 00000000 00:00 0                                  [usertrap]\\n555bd438c000-555bd438d000 r--p 00000'",
+    "status": "b'Name:\\tpython3\\nState:\\tS (sleeping)\\nTgid:\\t634\\nPid:\\t634\\nPPid:\\t1\\nTracerPid:\\t0\\nUid:\\t20081\\t20081\\t20081\\t20081\\nGid:\\t20081\\t20081\\t'",
+    "stat": "b'634 (python3) S 1 1 1 0 0 0 0 0 0 0 9 0 0 0 20 0 1 0 2429 22315008 3668 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 '",
+    "io": "EACCES: Permission denied",
+    "mem": "EACCES: Permission denied",
+    "auxv": "b'\\x03\\x00\\x00\\x00\\x00\\x00\\x00\\x00@\\xc08\\xd4[U\\x00\\x00\\x04\\x00\\x00\\x00\\x00\\x00\\x00\\x008\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x05\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x0e\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\t\\x00\\x00\\x00\\x00\\x00\\x00\\x00P\\xd08\\xd4[U\\x00\\x00\\x07\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00@~\\x88\\xeb~\\x00\\x00\\x0b\\x00\\x00\\x00\\x00\\x00\\x00\\x00qN\\x00\\x00\\x00\\x00\\x00\\x00\\x0c\\x00\\x00\\x00\\x00\\x00\\x00\\x00qN\\x00\\x00\\x00\\x00\\x00\\x00\\r\\x00\\x00\\x00\\x00\\x00\\x00\\x00'",
+    "stack": "ENOENT: No such file or directory",
+    "syscall": "ENOENT: No such file or directory",
+    "fd_list": [
+     "0",
+     "1",
+     "2",
+     "3",
+     "8"
+    ],
+    "fd3_readlink": "/etc/hostname",
+    "cwd_readlink": "EACCES: Permission denied",
+    "root_list": "EACCES: Permission denied",
+    "status_uid_line": [
+     "Uid:\t20081\t20081\t20081\t20081"
+    ],
+    "proc_owner": [
+     20081,
+     20081,
+     "0o100444"
+    ]
+   },
+   "elapsed_ms": 32.3
+  },
+  "dumpable0": {
+   "ok": true,
+   "result": {
+    "environ": "<redacted: raw /proc content>",
+    "cmdline": "<redacted: raw /proc content>",
+    "maps": "b'00060000-00065000 r-xp 00000000 00:00 0                                  [usertrap]\\n55d7e5c3c000-55d7e5c3d000 r--p 00000'",
+    "status": "b'Name:\\tpython3\\nState:\\tS (sleeping)\\nTgid:\\t636\\nPid:\\t636\\nPPid:\\t1\\nTracerPid:\\t0\\nUid:\\t20081\\t20081\\t20081\\t20081\\nGid:\\t20081\\t20081\\t'",
+    "stat": "b'636 (python3) S 1 1 1 0 0 0 0 0 0 0 4 5 0 0 20 0 1 0 2462 22315008 3323 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 '",
+    "io": "EACCES: Permission denied",
+    "mem": "EACCES: Permission denied",
+    "auxv": "b'\\x03\\x00\\x00\\x00\\x00\\x00\\x00\\x00@\\xc0\\xc3\\xe5\\xd7U\\x00\\x00\\x04\\x00\\x00\\x00\\x00\\x00\\x00\\x008\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x05\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x0e\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\t\\x00\\x00\\x00\\x00\\x00\\x00\\x00P\\xd0\\xc3\\xe5\\xd7U\\x00\\x00\\x07\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00 \\x11\\xc4\\xdb~\\x00\\x00\\x0b\\x00\\x00\\x00\\x00\\x00\\x00\\x00qN\\x00\\x00\\x00\\x00\\x00\\x00\\x0c\\x00\\x00\\x00\\x00\\x00\\x00\\x00qN\\x00\\x00\\x00\\x00\\x00\\x00\\r\\x00\\x00\\x00\\x00\\x00\\x00\\x00'",
+    "stack": "ENOENT: No such file or directory",
+    "syscall": "ENOENT: No such file or directory",
+    "fd_list": [
+     "0",
+     "1",
+     "2",
+     "3",
+     "8"
+    ],
+    "fd3_readlink": "/etc/hostname",
+    "cwd_readlink": "EACCES: Permission denied",
+    "root_list": "EACCES: Permission denied",
+    "status_uid_line": [
+     "Uid:\t20081\t20081\t20081\t20081"
+    ],
+    "proc_owner": [
+     20081,
+     0,
+     "0o100444"
+    ]
+   },
+   "elapsed_ms": 45.4
+  },
+  "forked_child_environ_shows_runtime_changes": false,
+  "forked_child_environ_head": "<redacted: raw /proc content>"
+ },
+ "R2_memory_scaling": {
+  "cgroup_v1": {
+   "memory.limit_in_bytes": "9223372036854775807",
+   "memory.usage_in_bytes": "39219200",
+   "memory.max_usage_in_bytes": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory/memory.max_usage_in_bytes'>"
+  },
+  "cgroup_v1_stat_head": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory/memory.stat'>",
+  "parent_plus_0MiB": {
+   "memavail_kb": {
+    "base": 1009500,
+    "after_alloc": 1009500,
+    "with_children": 857284,
+    "after_release_2s": 1009500,
+    "after_free_2s": 1009500
+   },
+   "alloc_cost_kb": 0,
+   "per_child_kb": [
+    15220,
+    15220,
+    15236,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220
+   ],
+   "per_child_avg_kb": 15222,
+   "fork_ms": [
+    14.6,
+    11.7,
+    44.8,
+    12.3,
+    13.0,
+    53.1,
+    12.6,
+    8.8,
+    14.0,
+    11.5
+   ],
+   "cgroup_usage_with_children": "195088384",
+   "parent_VmRSS": "40212 kB"
+  },
+  "parent_plus_64MiB": {
+   "memavail_kb": {
+    "base": 1009500,
+    "after_alloc": 943960,
+    "with_children": 791760,
+    "after_release_2s": 943960,
+    "after_free_2s": 1009500
+   },
+   "alloc_cost_kb": 65540,
+   "per_child_kb": [
+    15220,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220
+   ],
+   "per_child_avg_kb": 15220,
+   "fork_ms": [
+    20.3,
+    13.6,
+    11.3,
+    18.6,
+    13.6,
+    20.2,
+    31.3,
+    25.6,
+    18.1,
+    18.5
+   ],
+   "cgroup_usage_with_children": "262184960",
+   "parent_VmRSS": "40212 kB"
+  },
+  "parent_plus_256MiB": {
+   "memavail_kb": {
+    "base": 1009500,
+    "after_alloc": 747352,
+    "with_children": 595136,
+    "after_release_2s": 747352,
+    "after_free_2s": 1009500
+   },
+   "alloc_cost_kb": 262148,
+   "per_child_kb": [
+    15220,
+    15220,
+    15236,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220,
+    15220
+   ],
+   "per_child_avg_kb": 15222,
+   "fork_ms": [
+    31.0,
+    15.1,
+    13.7,
+    12.1,
+    10.8,
+    27.5,
+    14.5,
+    13.3,
+    11.5,
+    21.1
+   ],
+   "cgroup_usage_with_children": "463527936",
+   "parent_VmRSS": "40212 kB"
+  }
+ },
+ "R3_exec_barrier": {
+  "before_exec": {
+   "ok": true,
+   "result": "b'SECRET=hunter2\\x00STAGE=0\\x00'",
+   "elapsed_ms": 49.3
+  },
+  "after_exec": {
+   "ok": true,
+   "result": "b'STAGE=1\\x00'",
+   "elapsed_ms": 32.0
+  },
+  "pid_unchanged": true,
+  "barrier_works": true
+ },
+ "R3_python_heap_cow": {
+  "runs": {
+   "touch_none": {
+    "objects_touched": 0,
+    "per_child_mib": 17.84
+   },
+   "touch_0.1pct_random": {
+    "objects_touched": 250,
+    "per_child_mib": 87.16
+   },
+   "touch_1pct_random": {
+    "objects_touched": 2500,
+    "per_child_mib": 88.76
+   },
+   "touch_10pct_contiguous": {
+    "objects_touched": 25000,
+    "per_child_mib": 27.76
+   },
+   "touch_100pct": {
+    "objects_touched": 250000,
+    "per_child_mib": 93.76
+   },
+   "call_1pct_functions": {
+    "objects_touched": "30 functions x100 calls",
+    "per_child_mib": 20.76
+   }
+  },
+  "heap_cost_mib": 92.4
+ },
+ "R4_python_heap_cow_immortal": {
+  "ok": true,
+  "result": {
+   "runs": {
+    "touch_none": {
+     "objects_touched": 0,
+     "per_child_mib": 17.84
+    },
+    "touch_0.1pct_random": {
+     "objects_touched": 250,
+     "per_child_mib": 18.82
+    },
+    "touch_1pct_random": {
+     "objects_touched": 2500,
+     "per_child_mib": 18.82
+    },
+    "touch_10pct_contiguous": {
+     "objects_touched": 25000,
+     "per_child_mib": 19.82
+    },
+    "touch_100pct": {
+     "objects_touched": 250000,
+     "per_child_mib": 26.43
+    },
+    "call_1pct_functions": {
+     "objects_touched": "30 functions x100 calls",
+     "per_child_mib": 21.62
+    }
+   },
+   "immortalized_objects": 1607526,
+   "immortalize_ms": 1785,
+   "refcount_after": 4294967295,
+   "heap_cost_mib": 198.9
+  },
+  "elapsed_ms": 9757.3
+ },
+ "summary": {
+  "S1_setuid": true,
+  "S1_caps_root": [
+   "CHOWN",
+   "DAC_OVERRIDE",
+   "FOWNER",
+   "FSETID",
+   "KILL",
+   "SETGID",
+   "SETUID",
+   "SETPCAP",
+   "NET_BIND_SERVICE",
+   "SYS_CHROOT",
+   "MKNOD",
+   "AUDIT_WRITE",
+   "SETFCAP"
+  ],
+  "S2_peercred": {
+   "process_uid21000": false,
+   "thread_uid21001": false
+  },
+  "S3_seccomp_enforced": true,
+  "S4_uids_ok": [
+   "1000",
+   "20000",
+   "21000",
+   "65534",
+   "65535",
+   "65536",
+   "100000",
+   "1000000",
+   "2147483646",
+   "4294967294"
+  ],
+  "S4_uids_failed": {},
+  "S5": {
+   "alone": 16,
+   "with_sibling_8": 7,
+   "forks": 16,
+   "no_limit": 500
+  },
+  "S6": {
+   "read_buffer_only": {
+    "fork_ms_avg": 126.9,
+    "uids_ok": true,
+    "cgroup_current": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'>"
+   },
+   "iterate_python_objects": {
+    "fork_ms_avg": 138.89,
+    "uids_ok": true,
+    "cgroup_current": "<FileNotFoundError: [Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'>"
+   }
+  },
+  "R2_peer_identity": {
+   "root_listener_stream_client_uid20052": {
+    "SO_PEERCRED": 0,
+    "SO_PASSCRED_auto_creds": 20052
+   },
+   "root_listener_seqpacket_client_uid20052": {
+    "SO_PEERCRED": 0,
+    "SO_PASSCRED_auto_creds": 20052
+   }
+  },
+  "R2_socket_dac": {
+   "owner_uid20060_connect": "connected (b'k')",
+   "other_uid20061_connect": "PermissionError: [Errno 13] Permission denied",
+   "dir_owner_uid20062_connect": "connected (b'k')",
+   "other_uid20063_connect_via_dir0700": "PermissionError: [Errno 13] Permission denied",
+   "proc_self_cwd_connect_uid20070": "connected (b'k')"
+  },
+  "R2_environ_readable_cross_uid": {
+   "normal": "b'SECRET=hunter2\\x00'",
+   "dumpable0": "b'SECRET=hunter2\\x00'"
+  },
+  "R2_forked_child_environ_shows_runtime_changes": false,
+  "R2_memory_per_child_kb": {
+   "parent_plus_0MiB": 15222,
+   "parent_plus_64MiB": 15220,
+   "parent_plus_256MiB": 15222
+  },
+  "R2_fork_ms": {
+   "parent_plus_0MiB": [
+    14.6,
+    11.7,
+    44.8,
+    12.3,
+    13.0,
+    53.1,
+    12.6,
+    8.8,
+    14.0,
+    11.5
+   ],
+   "parent_plus_64MiB": [
+    20.3,
+    13.6,
+    11.3,
+    18.6,
+    13.6,
+    20.2,
+    31.3,
+    25.6,
+    18.1,
+    18.5
+   ],
+   "parent_plus_256MiB": [
+    31.0,
+    15.1,
+    13.7,
+    12.1,
+    10.8,
+    27.5,
+    14.5,
+    13.3,
+    11.5,
+    21.1
+   ]
+  },
+  "R3_exec_barrier_works": true,
+  "R3_python_heap_cow": {
+   "runs": {
+    "touch_none": {
+     "objects_touched": 0,
+     "per_child_mib": 17.84
+    },
+    "touch_0.1pct_random": {
+     "objects_touched": 250,
+     "per_child_mib": 87.16
+    },
+    "touch_1pct_random": {
+     "objects_touched": 2500,
+     "per_child_mib": 88.76
+    },
+    "touch_10pct_contiguous": {
+     "objects_touched": 25000,
+     "per_child_mib": 27.76
+    },
+    "touch_100pct": {
+     "objects_touched": 250000,
+     "per_child_mib": 93.76
+    },
+    "call_1pct_functions": {
+     "objects_touched": "30 functions x100 calls",
+     "per_child_mib": 20.76
+    }
+   },
+   "heap_cost_mib": 92.4
+  },
+  "R4_python_heap_cow_immortal": {
+   "runs": {
+    "touch_none": {
+     "objects_touched": 0,
+     "per_child_mib": 17.84
+    },
+    "touch_0.1pct_random": {
+     "objects_touched": 250,
+     "per_child_mib": 18.82
+    },
+    "touch_1pct_random": {
+     "objects_touched": 2500,
+     "per_child_mib": 18.82
+    },
+    "touch_10pct_contiguous": {
+     "objects_touched": 25000,
+     "per_child_mib": 19.82
+    },
+    "touch_100pct": {
+     "objects_touched": 250000,
+     "per_child_mib": 26.43
+    },
+    "call_1pct_functions": {
+     "objects_touched": "30 functions x100 calls",
+     "per_child_mib": 21.62
+    }
+   },
+   "immortalized_objects": 1607526,
+   "immortalize_ms": 1785,
+   "refcount_after": 4294967295,
+   "heap_cost_mib": 198.9
+  },
+  "pid1": true,
+  "kernel": "4.4.0"
+ }
+}
