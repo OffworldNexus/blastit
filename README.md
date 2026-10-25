@@ -94,21 +94,37 @@ statement it was refused:
 
 ### 1. Install
 
-blastit is a wheel: a compiled extension plus a `blastit` command written in
-Python, so it runs on the interpreter of the environment you install it into.
-That is the whole trick — your app's dependencies are importable because they
-are in the same virtualenv, and the server's stage 1 *is* that interpreter.
+blastit isn't on PyPI yet. Wheels (Linux x86_64, CPython 3.13 and 3.14) are
+built from every commit to `develop` and published on
+[blastit's own package index](https://offworldnexus.github.io/blastit/simple/).
+With uv:
 
-Wheels (Linux x86_64, CPython 3.13 and 3.14) are built for every commit to
-`develop` and published on blastit's own package index; this section will point
-`uv add` at it as soon as it exists. Until then, build one from a checkout
-(Rust 1.88+, and `uv` for maturin):
+```toml
+# pyproject.toml
+[[tool.uv.index]]
+name = "blastit"
+url = "https://offworldnexus.github.io/blastit/simple/"
+explicit = true
+
+[tool.uv.sources]
+blastit = { index = "blastit" }
+```
 
 ```console
-$ scripts/build-wheel.sh          # dist/blastit-0.1.0-cp3xx-cp3xx-manylinux_2_34_x86_64.whl
-$ uv add dist/blastit-0.1.0-*.whl # or: pip install dist/blastit-0.1.0-*.whl
-$ uv run blastit                  # or: .venv/bin/blastit, or: python -m blastit
+$ uv add --prerelease allow blastit
+$ uv run blastit                     # or .venv/bin/blastit, or python -m blastit
 ```
+
+With pip:
+
+```console
+$ pip install --pre blastit --extra-index-url https://offworldnexus.github.io/blastit/simple/
+```
+
+Like granian, blastit is a compiled extension plus a `blastit` command written
+in Python, so it runs on the interpreter of the environment it's installed in:
+your virtualenv and its packages are simply there. To build a wheel yourself,
+run `scripts/build-wheel.sh` (Rust 1.88+ and uv).
 
 Configuration is still environment variables only (`BLASTIT_APP`,
 `BLASTIT_MANIFEST`, `PORT`, …), and it still wants to be PID 1 in the
@@ -145,11 +161,7 @@ WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
 
-# The wheel from the install step above (`scripts/build-wheel.sh` against
-# CPython 3.13), or `pip install blastit` once the index publishes it. It lands
-# in the same environment as the app, which is the point.
-COPY dist/blastit-0.1.0-cp313-*.whl /tmp/
-RUN pip install /tmp/*.whl
+RUN pip install --pre blastit --extra-index-url https://offworldnexus.github.io/blastit/simple/
 
 ENV BLASTIT_APP=myproject.wsgi:application \
     BLASTIT_MANIFEST=/app/blastit.toml \

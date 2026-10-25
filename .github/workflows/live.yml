@@ -52,7 +52,8 @@ jobs:
       - name: Build the image
         if: steps.token.outputs.present == 'true'
         run: |
-          cargo build --release -p blastit --locked
+          pipx install maturin
+          MATURIN=maturin scripts/build-wheel.sh
           IMAGE="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')-e2e:${GITHUB_SHA}"
           docker build -f e2e/Dockerfile.prebuilt -t "$IMAGE" .
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
