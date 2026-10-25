@@ -22,14 +22,17 @@ blastit serves the same app, unchanged, but splits it up:
   read products; it can't read password hashes, and it can't `DROP TABLE`. A
   route that doesn't need the network can't open an outbound connection.
 
-```text
-                    ┌──────────────┐  only its own statements   ┌──────────┐
- GET /products/42 ─▶│ route        │──────────────────────────▶│          │
-                    │ "catalog"    │                            │  proxy   │──▶ PostgreSQL
- POST /login/ ─────▶│ route        │──────────────────────────▶│ (holds   │    (real
-                    │ "login"      │  only its own statements   │ the URL) │    credentials)
-                    └──────────────┘                            └──────────┘
-                     one process and one uid per route
+```mermaid
+flowchart LR
+    c1(["GET /products/42/"]) --> catalog
+    c2(["POST /login/"]) --> login
+    subgraph sandboxes["one process and one Unix user per route"]
+        catalog["route <b>catalog</b>"]
+        login["route <b>login</b>"]
+    end
+    catalog -- "only the statements<br/>catalog is granted" --> proxy
+    login -- "only the statements<br/>login is granted" --> proxy
+    proxy["blastit's proxy<br/>holds the real URL"] -- "real credentials" --> pg[("PostgreSQL")]
 ```
 
 Your framework doesn't know any of this happens. It gets ordinary WSGI
