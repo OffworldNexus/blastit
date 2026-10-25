@@ -9,6 +9,10 @@ each request sends is the SQL the views write and nothing more.
 `BLASTIT_TEST_ATOMIC=1` turns `ATOMIC_REQUESTS` on for the alias, for the test
 that checks the plugin notices a transaction even when pytest-django's own
 transaction swallows the `BEGIN`.
+
+`BLASTIT_TEST_CLIENT_BINDING=1` leaves `server_side_binding` out of `OPTIONS`,
+which is Django's default: psycopg then inlines the parameters, and the report
+is about text dbproxy would never see — the plugin says so.
 """
 
 import os
@@ -41,8 +45,9 @@ DATABASES = {
         "HOST": _url.hostname or "",
         "PORT": str(_url.port or 5432),
         # §6: without this, psycopg inlines the literals and no allowlist could
-        # ever match a statement.
-        "OPTIONS": {"server_side_binding": True},
+        # ever match a statement. `BLASTIT_TEST_CLIENT_BINDING` leaves it out, to
+        # check that the plugin says so instead of reporting invented SQL.
+        "OPTIONS": ({} if os.environ.get("BLASTIT_TEST_CLIENT_BINDING") else {"server_side_binding": True}),
         # §6: request threads are thrown away after every request, so a
         # persistent connection would be orphaned.
         "CONN_MAX_AGE": 0,

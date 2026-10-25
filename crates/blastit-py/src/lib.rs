@@ -91,14 +91,14 @@ fn normalize(sql: &str) -> String {
 ///
 /// `manifest_toml` is the whole `blastit.toml`; `observations_json` is the
 /// document the pytest plugin writes (the [`audit`] module documents its shape
-/// and the shape of the report); `script_name` is a `BLASTIT_SCRIPT_NAME` mount
-/// prefix to strip before routing, or `None` when the observations already carry
-/// the `PATH_INFO` the app saw.
+/// and the shape of the report). The observations carry the `PATH_INFO` the app
+/// saw, which is what the scheduler routed on, so no mount prefix is involved.
 ///
 /// Routing is blastit's own: [`blastit_manifest::RoutingTable`] on the
 /// method and path, [`blastit_manifest::Manifest::effective_grants`] per
-/// `(route, proxy)`, and [`blastit_sqlpolicy::Allowlist::check`] on the
-/// normalised SQL. Nothing about the manifest is re-implemented here.
+/// `(route, proxy)`, [`blastit_sqlpolicy::Allowlist::check`] on the
+/// normalised SQL, and [`blastit_manifest::Route::egress`] for what a route may
+/// reach on the network. Nothing about the manifest is re-implemented here.
 ///
 /// # Errors
 ///
@@ -112,13 +112,8 @@ fn normalize(sql: &str) -> String {
 /// The report, pretty-printed JSON.
 #[pyfunction]
 #[pyo3(name = "audit")]
-#[pyo3(signature = (manifest_toml, observations_json, script_name=None))]
-fn audit_report(
-    manifest_toml: &str,
-    observations_json: &str,
-    script_name: Option<&str>,
-) -> PyResult<String> {
-    audit::audit(manifest_toml, observations_json, script_name)
+fn audit_report(manifest_toml: &str, observations_json: &str) -> PyResult<String> {
+    audit::audit(manifest_toml, observations_json)
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 

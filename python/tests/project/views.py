@@ -18,8 +18,17 @@
   its parameter count — two shapes, and both have to be granted;
 * `note_types` looks a type's OID up the way the postgis and hstore backends do
   at connect, through psycopg itself — a statement no Django cursor of the
-  request sees.
+  request sees;
+* `note_stream` walks the table with `QuerySet.iterator()`, which Django gives a
+  named (server-side) cursor: what goes on the wire is a `DECLARE … CURSOR FOR …`
+  and a `FETCH`, not the `SELECT` the code reads;
+* `note_atomic_live` is the same `UPDATE`-in-`atomic()` as `note_atomic`, but
+  run from a `transaction=True` test over the live server, so psycopg sends the
+  `BEGIN`/`COMMIT` itself;
+* `note_egress` opens a TCP connection, the way a cache or a queue client does.
 """
+
+import socket
 
 from django.db import connection, transaction
 from django.http import HttpResponse
@@ -52,6 +61,18 @@ def note_atomic(request):
     """`POST /notes/atomic/`: an `UPDATE` inside a nested transaction."""
     with transaction.atomic():
         Note.objects.filter(owner_id=OWNER).update(body="touched")
+    return HttpResponse("ok")
+
+
+def note_atomic_live(request):
+    """`POST /notes/atomic-live/`: an `UPDATE` in a transaction of its own.
+
+    Used from a `transaction=True` test over the live server, where no test
+    transaction is around the request: psycopg sends the `BEGIN` and the
+    `COMMIT` itself, so this route is the one that proves the plugin sees them.
+    """
+    with transaction.atomic():
+        Note.objects.filter(owner_id=OWNER).update(body="live")
     return HttpResponse("ok")
 
 
@@ -95,6 +116,32 @@ def note_types(request):
     """`GET /notes/types/`: a type lookup through psycopg, as postgis does it."""
     info = TypeInfo.fetch(connection.connection, "text")
     return HttpResponse(str(info.oid) if info is not None else "unknown")
+
+
+def note_stream(request):
+    """`GET /notes/stream/`: `QuerySet.iterator()`, i.e. a named cursor.
+
+    Django hands the queryset a `chunked_cursor()`, so what PostgreSQL receives
+    is `DECLARE … CURSOR FOR …` and a `FETCH`, not the `SELECT` in this file.
+    """
+    notes = 0
+    for _ in Note.objects.iterator():
+        notes += 1
+    return HttpResponse(f"{notes} notes")
+
+
+def note_egress(request):
+    """`GET /notes/cache/`: opens a TCP connection, as a cache client does.
+
+    Nothing listens on the discard port, so the attempt fails — which is still
+    an attempt, and `egress = true` is exactly about being allowed to make one.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", 9), timeout=0.05):
+            pass
+    except OSError:
+        pass
+    return HttpResponse("tried")
 
 
 def oops(request):

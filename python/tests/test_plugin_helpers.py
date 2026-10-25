@@ -8,6 +8,7 @@ SQL.
 import contextlib
 import functools
 import json
+import threading
 from typing import Any, Iterator
 
 import pytest
@@ -164,6 +165,28 @@ class TestStatementCapture:
         assert len(first.statements) == 1
         assert len(second.statements) == 1
 
+    def test_a_connection_that_would_inline_its_parameters_is_named(self, session: _FakeSession) -> None:
+        """The `$n` text is invented when Django does not bind on the server."""
+        connection = _FakeConnection()
+        connection.settings_dict = {"OPTIONS": {}}
+        plugin._wrap_connection(connection)
+        assert len(session.warnings) == 1
+        assert "server_side_binding" in session.warnings[0]
+        assert "'default'" in session.warnings[0], session.warnings[0]
+        plugin._wrap_connection(connection)
+        assert len(session.warnings) == 1, "said once per alias, not once per connect"
+
+    def test_a_cursor_factory_that_binds_client_side_is_named(self, session: _FakeSession) -> None:
+        from psycopg import ClientCursor
+
+        connection = _FakeConnection()
+        connection.settings_dict = {
+            "OPTIONS": {"server_side_binding": True, "cursor_factory": ClientCursor}
+        }
+        plugin._wrap_connection(connection)
+        assert len(session.warnings) == 1
+        assert "cursor_factory" in session.warnings[0], session.warnings[0]
+
     def test_the_outermost_layer_records_each_statement_once(self) -> None:
         """psycopg's layer sees the same statement as Django's: only one line."""
         connection = _FakeConnection()
@@ -212,21 +235,31 @@ class TestStatementCapture:
 
 
 class _FakeConnection:
-    """The two attributes `_wrap_connection` touches on a Django connection."""
+    """The attributes `_wrap_connection` touches on a Django connection."""
 
     def __init__(self, alias: str = "default") -> None:
         self.alias = alias
         self.execute_wrappers: list[Any] = []
+        # Server-side binding, which is what blastit needs; the tests that check
+        # the warning change this.
+        self.settings_dict: dict[str, Any] = {"OPTIONS": {"server_side_binding": True}}
+        self.connection = None
 
 
 class _FakeSession:
-    """The one thing the capture asks of a session."""
+    """The parts of a session the capture asks for."""
 
     def __init__(self) -> None:
         self.setup: list[tuple[str | None, str]] = []
+        self.warnings: list[str] = []
+        self.reported_bindings: set[str] = set()
+        self.lock = threading.Lock()
 
     def record_connection_setup(self, alias: str | None, sql: str) -> None:
         self.setup.append((alias, sql))
+
+    def record_unrecognised(self, alias: str | None, query: str) -> None:
+        self.setup.append((alias, query))
 
 
 @contextlib.contextmanager
@@ -262,6 +295,7 @@ class TestObservationDocument:
             nodeid="tests/test_app.py::test_it",
             transaction_control=True,
             statements=[("default", "SELECT 1"), ("replica", "SELECT 2")],
+            egress=[("AF_INET", "redis", 6379)],
         )
         assert request.as_json(lambda alias: {"default": "db"}.get(alias)) == {
             "method": "POST",
@@ -272,6 +306,7 @@ class TestObservationDocument:
                 {"alias": "default", "proxy": "db", "sql": "SELECT 1"},
                 {"alias": "replica", "proxy": None, "sql": "SELECT 2"},
             ],
+            "egress": [{"family": "AF_INET", "host": "redis", "port": 6379}],
         }
 
     def test_the_document_is_json_serialisable(self) -> None:
@@ -281,6 +316,7 @@ class TestObservationDocument:
             nodeid=None,
             transaction_control=False,
             statements=[],
+            egress=[],
         )
         assert json.loads(json.dumps({"version": 1, "requests": [request.as_json(lambda _: "db")]}))[
             "version"
@@ -291,3 +327,9 @@ class TestObservationDocument:
         context.add("default", "SELECT 1")
         context.add("replica", "SELECT 2")
         assert context.statements == [("default", "SELECT 1"), ("replica", "SELECT 2")]
+        assert context.manages_transactions is False, "nothing asked for a transaction"
+
+    def test_the_context_records_egress(self) -> None:
+        context = plugin._RequestContext()
+        context.add_egress("AF_INET", "redis", 6379)
+        assert context.egress == [("AF_INET", "redis", 6379)]

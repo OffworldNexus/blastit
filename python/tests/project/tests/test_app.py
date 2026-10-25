@@ -13,8 +13,10 @@ through a browser, and the one a plugin that kept per-request state in a global
 would get wrong.
 """
 
-from urllib.request import urlopen
+import socket
+from urllib.request import Request, urlopen
 
+import psycopg
 import pytest
 from django.db import connection
 
@@ -78,6 +80,21 @@ def test_type_info_fetch(client):
 
 
 @pytest.mark.django_db
+def test_named_cursor_stream(client):
+    """`iterator()`: Django gives the queryset a named (server-side) cursor."""
+    response = client.get("/notes/stream/")
+    assert response.status_code == 200
+    assert b"notes" in response.content
+
+
+@pytest.mark.django_db
+def test_egress_routes(client):
+    """Two routes that open a TCP connection, one of them allowed to."""
+    assert client.get("/notes/cache/").status_code == 200
+    assert client.get("/notes/queue/").status_code == 200
+
+
+@pytest.mark.django_db
 def test_unrouted_path(client):
     """A path blastit has no route for: it would answer 404 before Django."""
     response = client.get("/oops/")
@@ -99,3 +116,40 @@ def test_notes_over_live_server(live_server):
     """The same granted SELECT, served over HTTP from another thread."""
     with urlopen(f"{live_server.url}/notes/") as response:  # noqa: S310 - 127.0.0.1
         assert response.status == 200
+
+
+# `transaction=True` and the live server together, deliberately: nothing wraps
+# the request, so psycopg sends the `BEGIN` and the `COMMIT` of this view's
+# `atomic()` itself instead of a savepoint inside a test transaction.
+@pytest.mark.django_db(transaction=True)
+def test_atomic_over_live_server(live_server):
+    """An `atomic()` request with no test transaction around it."""
+    request = Request(f"{live_server.url}/notes/atomic-live/", data=b"")
+    with urlopen(request) as response:  # noqa: S310 - 127.0.0.1
+        assert response.status == 200
+
+
+def test_the_plugin_is_inert(request):
+    """Without a manifest the plugin patches nothing and records nothing.
+
+    Run through `python/tests/test_pytest_plugin.py`, which runs this suite once
+    with and once without `--blastit-manifest`; with the manifest this test skips.
+    """
+    if request.config.getoption("blastit_manifest", None):
+        pytest.skip("the plugin is active in this run")
+
+    from django.core.handlers.base import BaseHandler
+
+    from blastit import pytest_plugin
+
+    assert pytest_plugin._SESSION is None, "no session without a manifest"
+    assert not getattr(BaseHandler.get_response, "_blastit_patched", False), (
+        "BaseHandler.get_response is untouched"
+    )
+    assert not getattr(psycopg.Cursor.execute, "_blastit_patched", False), (
+        "psycopg is untouched"
+    )
+    assert not getattr(psycopg.Connection._exec_command, "_blastit_patched", False)
+    assert not getattr(socket.socket.connect, "_blastit_patched", False), (
+        "sockets are untouched"
+    )

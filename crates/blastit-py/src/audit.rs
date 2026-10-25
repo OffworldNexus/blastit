@@ -31,12 +31,17 @@
 //!       "transaction_control": false,
 //!       "statements": [
 //!         {"alias": "default", "proxy": "db", "sql": "SELECT \"notes\".\"id\" FROM \"notes\" WHERE \"notes\".\"owner_id\" = $1"}
-//!       ]
+//!       ],
+//!       "egress": [{"family": "AF_INET", "host": "redis", "port": 6379}]
 //!     }
 //!   ],
 //!   "connection_setup": [
 //!     {"alias": "default", "proxy": "db", "sql": "SET application_name = 'app'", "count": 2}
-//!   ]
+//!   ],
+//!   "unrecognised": [
+//!     {"alias": "default", "query": "Template('SELECT ...')", "count": 1}
+//!   ],
+//!   "warnings": ["the database alias 'default' does not use server-side binding"]
 //! }
 //! ```
 //!
@@ -50,13 +55,23 @@
 //!   included, with the database alias they came from in `alias` (informational)
 //!   and the manifest proxy they belong to in `proxy` (absent: the manifest has
 //!   to declare exactly one `postgresql` proxy);
+//! * `egress` is every outbound connection the request tried to open, as the
+//!   socket named it — one entry per attempt, so a repeated destination is a
+//!   count (§7.3);
 //! * `sql` is what counts: it is normalised with [`blastit_sqlpolicy::normalize`]
 //!   before it is compared to a grant, exactly like the text on the wire;
 //! * `connection_setup` is what psycopg ran on its own while a Django connection
 //!   was being established — its `SET`s, the type lookups a backend does at
 //!   connect, anything a `connection_created` receiver sends. They belong to no
 //!   request, so they can appear with no request at all, and `count` says how
-//!   often they ran.
+//!   often they ran;
+//! * `unrecognised` is what the plugin could not read: a psycopg t-string
+//!   `Template` has no text before it is rendered with its values, and inventing
+//!   one would be worse than saying so. The report counts them instead of
+//!   dropping them, because they do go on the wire;
+//! * `warnings` is what the plugin itself could not do — a connection that would
+//!   inline its parameters, so the recorded text is not the text dbproxy checks.
+//!   The report carries them, and they are part of `clean`.
 //!
 //! # The report
 //!
@@ -64,13 +79,18 @@
 //! {
 //!   "version": 1,
 //!   "manifest": {"routes": 1, "proxies": {"db": "postgresql"}, "warnings": []},
-//!   "script_name": null,
 //!   "routes": [
 //!     {
 //!       "name": "notes",
 //!       "path": ["/notes/.*"],
 //!       "requests": 2,
 //!       "needs_transaction_control": false,
+//!       "egress": {
+//!         "observed": [{"target": "redis:6379", "host": "redis", "port": 6379,
+//!                       "family": "AF_INET", "count": 2,
+//!                       "tests": ["tests/test_notes.py::test_cache"]}],
+//!         "needed": true
+//!       },
 //!       "proxies": [
 //!         {
 //!           "name": "db",
@@ -103,11 +123,16 @@
 //!     ],
 //!     "ungranted": 1
 //!   },
+//!   "unrecognised": {"statements": [{"query": "Template('SELECT ...')",
+//!                                    "alias": "default", "count": 1}],
+//!                    "count": 1},
+//!   "plugin_warnings": [],
 //!   "totals": {
 //!     "requests": 2, "routed": 2, "unrouted": 0, "routes": 1,
 //!     "routes_exercised": 1, "statements": 3, "missing": 1,
 //!     "missing_distinct": 1, "unused": 1, "needs_transaction_control": [],
-//!     "connection_setup": 1, "connection_setup_ungranted": 1, "clean": false
+//!     "connection_setup": 1, "connection_setup_ungranted": 1, "egress": 1,
+//!     "unrecognised": 1, "plugin_warnings": 0, "clean": false
 //!   }
 //! }
 //! ```
@@ -121,6 +146,9 @@
 //!   matched, in manifest order. A route that no request reached reports no
 //!   proxy at all: `unexercised_routes` names it, so listing grants as unused
 //!   would be noise;
+//! * `egress.observed` is what the route reached for, most attempted first, and
+//!   `egress.needed` is true when it did and the route has no `egress = true`
+//!   (§7.3): a route that may not open connections would have them refused;
 //! * `connection_setup` is the other half of the same job: those statements are
 //!   not a route's, so what matters is not which route ran them but which routes
 //!   do not allow them. `ungranted_in` names those (a route with no grant on the
@@ -128,9 +156,10 @@
 //!   way), and `granted_in` counts the routes that already do — the fix is a
 //!   group attached to every route, `groups = ["connection"]` (§6);
 //! * `totals.clean` is true when nothing is missing, nothing is unrouted, no
-//!   route needs transaction control it was not granted and no connection-setup
-//!   statement is ungranted in a route — what `--blastit-strict` fails a session
-//!   over.
+//!   route needs transaction control it was not granted, no
+//!   connection-setup statement is ungranted in a route, no route opens
+//!   connections it may not, nothing was unreadable and the plugin itself
+//!   reported nothing — what `--blastit-strict` fails a session over.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -218,12 +247,13 @@ pub(crate) fn normalize_sql(sql: &str) -> String {
 
 /// Diffs the observations of a test suite against a manifest (§6).
 ///
-/// `script_name` is a `BLASTIT_SCRIPT_NAME` mount prefix: when it is set, the
-/// observed paths are treated as mounted ones, the prefix is stripped at a
-/// segment boundary before routing and a path outside the mount is reported as
-/// unrouted, exactly as the scheduler would answer it (§2.4). The pytest plugin
-/// records the `PATH_INFO` the app saw — the view already stripped the prefix
-/// before WSGI (§2.5) — so it passes `None`.
+/// The observations carry the `PATH_INFO` the app saw, which is the string the
+/// scheduler routed on — the view strips `BLASTIT_SCRIPT_NAME` before WSGI
+/// (§2.5) — so no mount prefix is involved here. A caller that recorded mounted
+/// paths has to strip its own prefix before calling: the scheduler's
+/// `strip_script_name` is crate-private, and reimplementing it here would be a
+/// second router to keep in step (`blastit-py` cannot see the private module
+/// the mount normalisation lives in).
 ///
 /// Returns the report as pretty-printed JSON; see the module documentation for
 /// its shape.
@@ -232,11 +262,7 @@ pub(crate) fn normalize_sql(sql: &str) -> String {
 ///
 /// [`AuditError`] when the manifest is invalid, the observations do not have the
 /// documented shape, or a statement cannot be attributed to a proxy.
-pub(crate) fn audit(
-    manifest_toml: &str,
-    observations_json: &str,
-    script_name: Option<&str>,
-) -> Result<String, AuditError> {
+pub(crate) fn audit(manifest_toml: &str, observations_json: &str) -> Result<String, AuditError> {
     let manifest =
         Manifest::from_toml_str(manifest_toml).map_err(|errors| AuditError::manifest(&errors))?;
     let warnings = manifest
@@ -245,7 +271,6 @@ pub(crate) fn audit(
     let table = RoutingTable::new(&manifest).map_err(|errors| AuditError::manifest(&errors))?;
     let observations = parse_observations(observations_json)?;
     let requests = &observations.requests;
-    let mount = Mount::new(script_name);
     let probe = TcProbe::new();
 
     let mut traces: BTreeMap<usize, RouteTrace> = BTreeMap::new();
@@ -254,10 +279,7 @@ pub(crate) fn audit(
     let mut routed_statements = 0usize;
 
     for request in requests {
-        let matched = mount
-            .strip(&request.path_info)
-            .and_then(|path| table.route(&request.method, path));
-        let Some(matched) = matched else {
+        let Some(matched) = table.route(&request.method, &request.path_info) else {
             let entry = unrouted
                 .entry((request.method.clone(), request.path_info.clone()))
                 .or_insert_with(|| UnroutedTrace::new(&request.method, &request.path_info));
@@ -268,6 +290,14 @@ pub(crate) fn audit(
         let trace = traces.entry(matched.route).or_default();
         trace.requests += 1;
         routed_requests += 1;
+
+        for attempt in &request.egress {
+            trace
+                .egress
+                .entry(attempt.key())
+                .or_default()
+                .record(attempt, request.nodeid.as_deref());
+        }
 
         for statement in &request.statements {
             let proxy = resolve_proxy(&manifest, statement.proxy.as_deref())?;
@@ -299,10 +329,9 @@ pub(crate) fn audit(
     let report = assemble(
         &manifest,
         &warnings,
-        &mount,
+        &observations,
         &traces,
         &unrouted,
-        &observations.connection_setup,
         Summary {
             requests: requests.len(),
             routed: routed_requests,
@@ -323,15 +352,15 @@ struct Summary {
 fn assemble(
     manifest: &Manifest,
     warnings: &[blastit_manifest::ManifestWarning],
-    mount: &Mount,
+    observations: &Observations,
     traces: &BTreeMap<usize, RouteTrace>,
     unrouted: &BTreeMap<(String, String), UnroutedTrace>,
-    connection_setup: &[ObservedSetup],
     summary: Summary,
 ) -> Result<Value, AuditError> {
     let mut routes = Vec::with_capacity(manifest.route_count());
     let mut unexercised = Vec::new();
     let mut needs_transaction_control = Vec::new();
+    let mut needs_egress = Vec::new();
     let mut exercised = 0usize;
     let mut missing = 0usize;
     let mut missing_distinct = 0usize;
@@ -351,11 +380,37 @@ fn assemble(
                 "path": route.path(),
                 "requests": 0,
                 "needs_transaction_control": false,
+                "egress": {"observed": [], "needed": false},
                 "proxies": [],
             }));
             continue;
         }
         exercised += 1;
+
+        let mut egress: Vec<Value> = Vec::new();
+        let mut attempts: Vec<(&(String, u16), &EgressTrace)> = trace
+            .map(|trace| trace.egress.iter().collect())
+            .unwrap_or_default();
+        attempts.sort_by(|(left, left_trace), (right, right_trace)| {
+            right_trace
+                .count
+                .cmp(&left_trace.count)
+                .then_with(|| left.cmp(right))
+        });
+        for ((host, port), attempt) in attempts {
+            egress.push(json!({
+                "target": format!("{host}:{port}"),
+                "host": host,
+                "port": port,
+                "family": attempt.family,
+                "count": attempt.count,
+                "tests": attempt.tests,
+            }));
+        }
+        let egress_needed = !egress.is_empty() && !route.egress();
+        if egress_needed {
+            needs_egress.push(json!(route.name()));
+        }
 
         let mut proxies = Vec::new();
         let mut route_needs_transaction_control = false;
@@ -422,6 +477,7 @@ fn assemble(
             "path": route.path(),
             "requests": requests,
             "needs_transaction_control": route_needs_transaction_control,
+            "egress": {"observed": egress, "needed": egress_needed},
             "proxies": proxies,
         }));
     }
@@ -457,11 +513,30 @@ fn assemble(
         .iter()
         .map(|warning| json!(warning.to_string()))
         .collect();
-    let setup = setup_section(manifest, connection_setup)?;
+    let setup = setup_section(manifest, &observations.connection_setup)?;
+    let unrecognised_total: u64 = observations
+        .unrecognised
+        .iter()
+        .map(|entry| entry.count)
+        .sum();
+    let unrecognised: Vec<Value> = observations
+        .unrecognised
+        .iter()
+        .map(|entry| {
+            json!({
+                "query": entry.query,
+                "alias": entry.alias,
+                "count": entry.count,
+            })
+        })
+        .collect();
     let clean = missing == 0
         && unrouted_count == 0
         && needs_transaction_control.is_empty()
-        && setup.ungranted == 0;
+        && setup.ungranted == 0
+        && needs_egress.is_empty()
+        && unrecognised_total == 0
+        && observations.warnings.is_empty();
 
     Ok(json!({
         "version": VERSION,
@@ -470,11 +545,15 @@ fn assemble(
             "proxies": proxies,
             "warnings": warnings,
         },
-        "script_name": mount.as_str(),
         "routes": routes,
         "unrouted": unrouted_entries,
         "unexercised_routes": unexercised,
         "connection_setup": setup.value,
+        "unrecognised": {
+            "statements": unrecognised,
+            "count": unrecognised_total,
+        },
+        "plugin_warnings": observations.warnings,
         "totals": {
             "requests": summary.requests,
             "routed": summary.routed,
@@ -488,6 +567,9 @@ fn assemble(
             "needs_transaction_control": needs_transaction_control,
             "connection_setup": setup.statements,
             "connection_setup_ungranted": setup.ungranted,
+            "egress": needs_egress.len(),
+            "unrecognised": unrecognised_total,
+            "plugin_warnings": observations.warnings.len(),
             "clean": clean,
         },
     }))
@@ -726,57 +808,12 @@ impl TcProbe {
     }
 }
 
-/// The `BLASTIT_SCRIPT_NAME` mount prefix, or none (§6, §8.2).
-struct Mount {
-    prefix: Option<String>,
-}
-
-impl Mount {
-    /// Normalises a mount prefix the way the scheduler does: it starts with `/`
-    /// and never ends with one, and anything that is only slashes means "no
-    /// mount".
-    fn new(script_name: Option<&str>) -> Self {
-        let prefix = script_name
-            .map(|value| value.trim_end_matches('/'))
-            .filter(|value| !value.is_empty())
-            .map(|value| {
-                if value.starts_with('/') {
-                    value.to_string()
-                } else {
-                    format!("/{value}")
-                }
-            });
-        Self { prefix }
-    }
-
-    /// The path the routing table may match, or `None` when blastit would answer
-    /// `404` because the request is not inside the mount.
-    fn strip<'a>(&self, path: &'a str) -> Option<&'a str> {
-        let Some(prefix) = self.prefix.as_deref() else {
-            return Some(path);
-        };
-        let rest = path.strip_prefix(prefix)?;
-        if rest.is_empty() {
-            return Some("/");
-        }
-        if rest.starts_with('/') {
-            Some(rest)
-        } else {
-            None
-        }
-    }
-
-    /// The prefix as reported, or `None` when no prefix was given.
-    fn as_str(&self) -> Option<&str> {
-        self.prefix.as_deref()
-    }
-}
-
 /// What one route did in the observed requests.
 #[derive(Default)]
 struct RouteTrace {
     requests: usize,
     proxies: BTreeMap<String, ProxyTrace>,
+    egress: BTreeMap<(String, u16), EgressTrace>,
 }
 
 /// What one `(route, proxy)` pair did.
@@ -790,6 +827,33 @@ struct ProxyTrace {
     /// Whether a transaction-control statement, or a whole request that needs
     /// one, was observed.
     transaction_control: bool,
+}
+
+/// What one route did on the network (§7.3).
+#[derive(Default)]
+struct EgressTrace {
+    /// `AF_INET`, `AF_INET6`… of the first attempt seen.
+    family: String,
+    /// How many times the route tried to reach it.
+    count: usize,
+    /// Up to [`EXAMPLES`] tests that made the attempt.
+    tests: Vec<String>,
+    seen_tests: BTreeSet<String>,
+}
+
+impl EgressTrace {
+    /// Counts one attempt and keeps an example of who made it.
+    fn record(&mut self, attempt: &ObservedEgress, nodeid: Option<&str>) {
+        self.count += 1;
+        if self.family.is_empty() {
+            self.family = attempt.family.clone();
+        }
+        let test = nodeid.unwrap_or("").trim();
+        let test = if test.is_empty() { NO_TEST } else { test };
+        if self.tests.len() < EXAMPLES && self.seen_tests.insert(test.to_string()) {
+            self.tests.push(test.to_string());
+        }
+    }
 }
 
 /// A set that is always empty, to borrow instead of allocating for an
@@ -864,6 +928,16 @@ struct ObservedRequest {
     nodeid: Option<String>,
     transaction_control: bool,
     statements: Vec<ObservedStatement>,
+    /// The outbound connections the request tried to open (§7.3).
+    egress: Vec<ObservedEgress>,
+}
+
+/// One outbound connection attempt.
+struct ObservedEgress {
+    /// `AF_INET`, `AF_INET6`… as the socket named it.
+    family: String,
+    host: String,
+    port: u16,
 }
 
 /// One statement, as it went on the wire.
@@ -873,6 +947,13 @@ struct ObservedStatement {
     /// The wire SQL: `$n` placeholders, as psycopg sends it with server-side
     /// binding.
     sql: String,
+}
+
+impl ObservedEgress {
+    /// What the attempt is keyed by: one destination, one line.
+    fn key(&self) -> (String, u16) {
+        (self.host.clone(), self.port)
+    }
 }
 
 /// A statement psycopg itself ran: what goes on the wire as a connection is
@@ -886,11 +967,27 @@ struct ObservedSetup {
     count: u64,
 }
 
-/// Everything one pytest session recorded: the requests, and the statements
-/// psycopg ran on its own to set a connection up.
+/// A statement the plugin could not read — a t-string `Template`, which has no
+/// text before it is rendered with its values — counted rather than dropped.
+struct ObservedUnrecognised {
+    /// The alias it came from, when the plugin could tell.
+    alias: Option<String>,
+    /// What the plugin saw, as a Python repr, for a human to recognise.
+    query: String,
+    /// How many times it ran. Defaults to one.
+    count: u64,
+}
+
+/// Everything one pytest session recorded: the requests, the statements psycopg
+/// ran on its own to set a connection up, and what could not be read.
 struct Observations {
     requests: Vec<ObservedRequest>,
     connection_setup: Vec<ObservedSetup>,
+    unrecognised: Vec<ObservedUnrecognised>,
+    /// What the plugin itself could not do — a connection that would inline its
+    /// parameters, a worker report it did not understand. The report carries them
+    /// so a reader of the JSON sees them too.
+    warnings: Vec<String>,
 }
 
 /// Reads the observations document the plugin writes.
@@ -937,9 +1034,63 @@ fn parse_observations(source: &str) -> Result<Observations, AuditError> {
         }
     };
 
+    let unrecognised = match object.get("unrecognised") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(entries) => {
+            let list = entries
+                .as_array()
+                .ok_or_else(|| bad("unrecognised", "expected an array"))?;
+            let mut out = Vec::with_capacity(list.len());
+            for (index, entry) in list.iter().enumerate() {
+                out.push(parse_unrecognised(entry, index)?);
+            }
+            out
+        }
+    };
+
+    let warnings = match object.get("warnings") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(entries) => {
+            let list = entries
+                .as_array()
+                .ok_or_else(|| bad("warnings", "expected an array"))?;
+            let mut out = Vec::with_capacity(list.len());
+            for (index, entry) in list.iter().enumerate() {
+                out.push(
+                    entry
+                        .as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| bad(&format!("warnings[{index}]"), "expected a string"))?,
+                );
+            }
+            out
+        }
+    };
+
     Ok(Observations {
         requests: out,
         connection_setup: setup,
+        unrecognised,
+        warnings,
+    })
+}
+
+/// Reads one `unrecognised[]` entry.
+fn parse_unrecognised(value: &Value, index: usize) -> Result<ObservedUnrecognised, AuditError> {
+    let at = format!("unrecognised[{index}]");
+    let object = value
+        .as_object()
+        .ok_or_else(|| bad(&at, "expected an object"))?;
+    let count = match object.get("count") {
+        None | Some(Value::Null) => 1,
+        Some(count) => count
+            .as_u64()
+            .ok_or_else(|| bad(&at, "count: expected a non-negative integer"))?,
+    };
+    Ok(ObservedUnrecognised {
+        alias: optional_string(object, "alias", &at)?,
+        query: required_string(object, "query", &at)?,
+        count,
     })
 }
 
@@ -992,12 +1143,47 @@ fn parse_request(value: &Value, index: usize) -> Result<ObservedRequest, AuditEr
             out
         }
     };
+    let egress = match object.get("egress") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(attempts) => {
+            let list = attempts
+                .as_array()
+                .ok_or_else(|| bad(&at, "egress: expected an array"))?;
+            let mut out = Vec::with_capacity(list.len());
+            for (index, attempt) in list.iter().enumerate() {
+                out.push(parse_egress(attempt, index, &at)?);
+            }
+            out
+        }
+    };
     Ok(ObservedRequest {
         method,
         path_info,
         nodeid,
         transaction_control,
         statements,
+        egress,
+    })
+}
+
+/// Reads one `egress[]` entry of a request.
+fn parse_egress(value: &Value, index: usize, at: &str) -> Result<ObservedEgress, AuditError> {
+    let at = format!("{at}.egress[{index}]");
+    let object = value
+        .as_object()
+        .ok_or_else(|| bad(&at, "expected an object"))?;
+    let host = required_string(object, "host", &at)?;
+    let port = match object.get("port") {
+        None => return Err(bad(&at, "missing `port`")),
+        Some(port) => port
+            .as_u64()
+            .filter(|port| *port <= u64::from(u16::MAX))
+            .ok_or_else(|| bad(&at, "port: expected an integer between 0 and 65535"))?,
+    };
+    Ok(ObservedEgress {
+        family: optional_string(object, "family", &at)?.unwrap_or_else(|| "AF_INET".to_string()),
+        host,
+        port: port as u16,
     })
 }
 
@@ -1102,19 +1288,21 @@ mod tests {
 
     /// Runs the audit on a report and returns the parsed JSON.
     fn run(manifest: &str, observations: &str) -> Value {
-        let json = audit(manifest, observations, None).expect("the audit runs");
-        serde_json::from_str(&json).expect("the report is JSON")
-    }
-
-    /// Runs the audit, with a mount prefix.
-    fn report_mounted(manifest: &str, observations: &str, script_name: &str) -> Value {
-        let json = audit(manifest, observations, Some(script_name)).expect("the audit runs");
+        let json = audit(manifest, observations).expect("the audit runs");
         serde_json::from_str(&json).expect("the report is JSON")
     }
 
     /// The observations document for one request.
     fn document(requests: &str) -> String {
         format!(r#"{{"version": 1, "requests": [{requests}]}}"#)
+    }
+
+    /// The observations document for a request that opened connections.
+    fn document_with_egress(requests: &str, egress: &str) -> String {
+        format!(
+            r#"{{"version": 1, "requests": [{{"method": "GET", "path_info": "{requests}",
+                "nodeid": "tests/test_app.py::test_it", "statements": [], "egress": [{egress}]}}]}}"#
+        )
     }
 
     /// One observed request.
@@ -1503,66 +1691,6 @@ mod tests {
     }
 
     #[test]
-    fn the_mount_prefix_is_stripped_before_matching() {
-        let report = report_mounted(
-            SIMPLE,
-            &document(&request("GET", "/app/notes/", &statement("SELECT 1"))),
-            "/app",
-        );
-        assert_eq!(report["script_name"], "/app");
-        assert_eq!(report["totals"]["routed"], 1);
-        assert_eq!(missing_sql(&report, "notes"), ["SELECT 1"]);
-    }
-
-    #[test]
-    fn a_request_outside_the_mount_is_unrouted() {
-        for path in ["/notes/", "/appendix/notes/", "/"] {
-            let report = report_mounted(SIMPLE, &document(&request("GET", path, "")), "/app");
-            assert_eq!(
-                report["totals"]["unrouted"], 1,
-                "{path} is not inside the mount"
-            );
-        }
-        // The mount point itself is `/`, as WSGI has it.
-        let report = report_mounted(
-            r#"
-                version = 1
-                [proxy.db]
-                protocol = "postgresql"
-                input = { url = "DATABASE_URL" }
-                [[route]]
-                name = "root"
-                path = ['/']
-            "#,
-            &document(&request("GET", "/app/", "")),
-            "/app",
-        );
-        assert_eq!(report["totals"]["routed"], 1);
-        assert_eq!(report["unrouted"].as_array().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn a_slash_only_mount_prefix_strips_nothing() {
-        for script_name in ["", "/", "///"] {
-            let report = report_mounted(
-                SIMPLE,
-                &document(&request("GET", "/notes/", "")),
-                script_name,
-            );
-            assert_eq!(report["script_name"], Value::Null, "{script_name:?}");
-            assert_eq!(report["totals"]["routed"], 1);
-        }
-        // ... and a prefix without a leading slash is normalised, like §8.2.
-        let report = report_mounted(
-            SIMPLE,
-            &document(&request("GET", "/app/notes/", "")),
-            "app/",
-        );
-        assert_eq!(report["script_name"], "/app");
-        assert_eq!(report["totals"]["routed"], 1);
-    }
-
-    #[test]
     fn the_only_postgresql_proxy_is_inferred() {
         let observations = document(&request(
             "GET",
@@ -1581,7 +1709,7 @@ mod tests {
             "/notes/",
             r#"{"proxy": "nope", "sql": "SELECT 1"}"#,
         ));
-        let error = audit(SIMPLE, &observations, None).expect_err("unknown proxy");
+        let error = audit(SIMPLE, &observations).expect_err("unknown proxy");
         assert!(matches!(error, AuditError::UnknownProxy(ref name) if name == "nope"));
         assert!(error.to_string().contains("nope"), "{error}");
     }
@@ -1607,7 +1735,7 @@ mod tests {
             "/notes/",
             r#"{"alias": "default", "sql": "SELECT 1"}"#,
         ));
-        let error = audit(manifest, &observations, None).expect_err("ambiguous");
+        let error = audit(manifest, &observations).expect_err("ambiguous");
         assert!(
             matches!(error, AuditError::AmbiguousProxy(ref names) if names == &["db", "warehouse"])
         );
@@ -1656,7 +1784,7 @@ mod tests {
             name = "notes"
             path = ['/notes/.*']
         "#;
-        let error = audit(no_proxy, &observation, None).expect_err("no proxy");
+        let error = audit(no_proxy, &observation).expect_err("no proxy");
         assert!(matches!(error, AuditError::NoProxy));
     }
 
@@ -1673,7 +1801,7 @@ mod tests {
             name = "notes"
             path = ['/notes/.*']
         "#;
-        let error = audit(manifest, &document(""), None).expect_err("unknown protocol");
+        let error = audit(manifest, &document("")).expect_err("unknown protocol");
         assert!(matches!(error, AuditError::Manifest(_)), "{error}");
     }
 
@@ -1684,7 +1812,7 @@ mod tests {
             "version = 1\n[[route]]\nname = \"a\"\npath = ['(']\n",
             "version = 1\n[[route]]\nname = \"a\"\npath = ['/']\n[route.db]\nqueries = ['SELECT 1']\n",
         ] {
-            let error = audit(manifest, &document(""), None).expect_err("invalid manifest");
+            let error = audit(manifest, &document("")).expect_err("invalid manifest");
             assert!(matches!(error, AuditError::Manifest(_)), "{error}");
         }
     }
@@ -1755,7 +1883,7 @@ mod tests {
             ),
         ];
         for (source, expected) in cases {
-            let error = audit(SIMPLE, source, None).expect_err("invalid observations");
+            let error = audit(SIMPLE, source).expect_err("invalid observations");
             let message = error.to_string();
             assert!(
                 message.contains(expected),
@@ -1881,8 +2009,8 @@ mod tests {
             request("GET", "/notes/", &statement("SELECT 1")),
             request("GET", "/oops/", "")
         ));
-        let first = audit(MANIFEST, &observations, None).expect("runs");
-        let second = audit(MANIFEST, &observations, None).expect("runs");
+        let first = audit(MANIFEST, &observations).expect("runs");
+        let second = audit(MANIFEST, &observations).expect("runs");
         assert_eq!(first, second, "the same observations give the same report");
         assert!(first.ends_with('}'));
     }
@@ -2249,5 +2377,126 @@ mod tests {
             false
         );
         assert_eq!(report["totals"]["missing"], 0);
+    }
+
+    /// One `egress` entry.
+    fn attempt(host: &str, port: u16) -> String {
+        format!(r#"{{"family": "AF_INET", "host": "{host}", "port": {port}}}"#)
+    }
+
+    #[test]
+    fn a_route_that_opens_connections_without_egress_is_reported() {
+        // A route without `egress = true` may not open outbound connections
+        // (§7.3): the seccomp filter, or the egress grant, is what allows it.
+        let report = run(
+            SETUP,
+            &document_with_egress(
+                "/notes/",
+                &format!(
+                    "{}, {}, {}",
+                    attempt("redis", 6379),
+                    attempt("redis", 6379),
+                    attempt("example.com", 443)
+                ),
+            ),
+        );
+        let egress = &route(&report, "notes")["egress"];
+        assert_eq!(egress["needed"], true);
+        let observed = egress["observed"].as_array().expect("a list");
+        assert_eq!(observed.len(), 2, "one line per destination");
+        assert_eq!(
+            observed[0]["target"], "redis:6379",
+            "the most attempted first"
+        );
+        assert_eq!(observed[0]["host"], "redis");
+        assert_eq!(observed[0]["port"], 6379);
+        assert_eq!(observed[0]["family"], "AF_INET");
+        assert_eq!(observed[0]["count"], 2);
+        assert_eq!(observed[0]["tests"], json!(["tests/test_app.py::test_it"]));
+        assert_eq!(observed[1]["target"], "example.com:443");
+        assert_eq!(observed[1]["count"], 1);
+        assert_eq!(report["totals"]["egress"], 1);
+        assert_eq!(report["totals"]["clean"], false);
+    }
+
+    #[test]
+    fn a_route_that_may_reach_the_network_is_not_asking_for_anything() {
+        let manifest = format!("{SETUP}\n# the route that runs it may open connections\n");
+        let report = run(
+            &manifest.replace(
+                "name = \"notes\"\n        path = ['/notes/.*']",
+                "name = \"notes\"\n        path = ['/notes/.*']\n        egress = true",
+            ),
+            &document_with_egress("/notes/", &attempt("redis", 6379)),
+        );
+        let egress = &route(&report, "notes")["egress"];
+        assert_eq!(egress["observed"].as_array().unwrap().len(), 1);
+        assert_eq!(egress["needed"], false, "the route grants egress already");
+        assert_eq!(report["totals"]["egress"], 0);
+    }
+
+    #[test]
+    fn a_route_that_opens_nothing_reports_no_egress() {
+        let report = run(SETUP, &document(&request("GET", "/notes/", "")));
+        assert_eq!(
+            route(&report, "notes")["egress"],
+            json!({"observed": [], "needed": false})
+        );
+        assert_eq!(route(&report, "static")["egress"]["observed"], json!([]));
+        assert_eq!(report["totals"]["egress"], 0);
+    }
+
+    #[test]
+    fn statements_the_plugin_could_not_read_are_counted_not_dropped() {
+        let observations = r#"{"version": 1, "requests": [], "unrecognised": [
+            {"alias": "default", "query": "Template('SELECT ...')", "count": 3},
+            {"query": "Template('BEGIN')"}
+        ]}"#;
+        let report = run(SETUP, observations);
+        assert_eq!(report["unrecognised"]["count"], 4);
+        let statements = report["unrecognised"]["statements"]
+            .as_array()
+            .expect("a list");
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0]["query"], "Template('SELECT ...')");
+        assert_eq!(statements[0]["alias"], "default");
+        assert_eq!(statements[0]["count"], 3);
+        assert_eq!(statements[1]["count"], 1, "a missing count means one");
+        assert_eq!(statements[1]["alias"], Value::Null);
+        assert_eq!(report["totals"]["unrecognised"], 4);
+        assert_eq!(report["totals"]["clean"], false, "the report is incomplete");
+    }
+
+    #[test]
+    fn a_plugin_warning_is_carried_into_the_report() {
+        let observations = r#"{"version": 1, "requests": [], "warnings": [
+            "the database alias 'default' does not use server-side binding"
+        ]}"#;
+        let report = run(SETUP, observations);
+        assert_eq!(
+            report["plugin_warnings"],
+            json!(["the database alias 'default' does not use server-side binding"])
+        );
+        assert_eq!(report["totals"]["plugin_warnings"], 1);
+        assert_eq!(report["totals"]["clean"], false, "a warning is not clean");
+    }
+
+    #[test]
+    fn an_empty_session_is_clean_with_the_new_sections() {
+        let report = run(SETUP, &document(""));
+        assert_eq!(
+            report["unrecognised"],
+            json!({"statements": [], "count": 0})
+        );
+        assert_eq!(report["plugin_warnings"], json!([]));
+        assert_eq!(
+            route(&report, "notes")["egress"],
+            json!({"observed": [], "needed": false})
+        );
+        assert_eq!(report["totals"]["clean"], true);
+        assert!(
+            report.get("script_name").is_none(),
+            "no mount prefix to report"
+        );
     }
 }

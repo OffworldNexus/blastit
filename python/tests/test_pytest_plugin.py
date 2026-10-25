@@ -159,7 +159,7 @@ def strict(project: Path, tmp_path_factory: pytest.TempPathFactory) -> Outcome:
 def test_the_suite_itself_passes(baseline: Outcome) -> None:
     """The plugin records requests; it does not change what the tests do."""
     assert baseline.returncode == 0, baseline.stdout + baseline.stderr
-    assert "11 passed" in baseline.stdout, baseline.stdout
+    assert "14 passed, 1 skipped" in baseline.stdout, baseline.stdout
 
 
 def test_a_granted_route_is_clean(baseline: Outcome) -> None:
@@ -180,8 +180,10 @@ def test_a_missing_grant_names_the_statement_the_test_and_the_path(baseline: Out
     assert entry["wire_sql"] == 'DELETE FROM "notes_note" WHERE "notes_note"."id" = $1'
     assert entry["tests"] == ["tests/test_app.py::test_delete_note"]
     assert entry["paths"] == ["/notes/4/delete/"]
-    assert baseline.report["totals"]["missing"] == 6, (
-        "the DELETE, the two savepoints, bulk_create's two shapes, and the type lookup"
+    assert baseline.report["totals"]["missing"] == 12, (
+        "the DELETE, the savepoints and psycopg's BEGIN, bulk_create's two shapes, "
+        "the type lookup, the named cursor's three statements and the live "
+        "server's BEGIN/COMMIT"
     )
 
 
@@ -208,9 +210,12 @@ def test_a_savepoint_needs_transaction_control(baseline: Outcome) -> None:
     missing = baseline.missing_sql("note-atomic")
     assert missing, "the savepoint statements are denied"
     for sql in missing:
-        assert sql.startswith(("SAVEPOINT ", "RELEASE SAVEPOINT ")), sql
+        assert sql.startswith(("SAVEPOINT ", "RELEASE SAVEPOINT ", "BEGIN")), sql
     assert "UPDATE" not in " ".join(missing), "the UPDATE it sends is granted"
-    assert baseline.report["totals"]["needs_transaction_control"] == ["note-atomic"]
+    assert baseline.report["totals"]["needs_transaction_control"] == [
+        "note-atomic",
+        "note-atomic-live",
+    ]
 
 
 def test_an_id_list_of_any_length_is_one_grant(baseline: Outcome) -> None:
@@ -265,6 +270,68 @@ def test_a_statement_psycopg_runs_itself_is_reported(baseline: Outcome) -> None:
     assert baseline.proxy("note-types")["observed"] == 1
 
 
+def test_a_named_cursor_is_reported_as_the_declare_it_sends(baseline: Outcome) -> None:
+    """`iterator()` gets a server-side cursor: the wire text is not the SELECT.
+
+    Django hands `QuerySet.iterator()` a `chunked_cursor()`, i.e. psycopg's
+    `ServerCursor`, so PostgreSQL receives a `DECLARE … CURSOR FOR …`, then a
+    `FETCH`, then a `CLOSE` — and a grant has to hold those, not the query the
+    view reads.
+    """
+    missing = baseline.missing_sql("note-stream")
+    assert len(missing) == 3, missing
+    declare = [sql for sql in missing if sql.startswith("DECLARE ")]
+    assert len(declare) == 1, missing
+    assert 'CURSOR FOR SELECT "notes_note"."id"' in declare[0], declare
+    assert any(sql.startswith("FETCH FORWARD ") for sql in missing), missing
+    assert any(sql.startswith("CLOSE ") for sql in missing), missing
+    assert all(not sql.startswith("SELECT") for sql in missing), (
+        "the plain SELECT never went on the wire"
+    )
+    entry = baseline.proxy("note-stream")["missing"][0]
+    assert entry["tests"] == ["tests/test_app.py::test_named_cursor_stream"]
+
+
+def test_psycopg_own_transaction_commands_are_reported(baseline: Outcome) -> None:
+    """With no test transaction around it, psycopg sends the BEGIN and COMMIT.
+
+    `transaction=True` and the live server together: Django's `atomic()` calls
+    `set_autocommit(False)` and `commit()`, and psycopg answers with a `BEGIN`
+    and a `COMMIT` of its own — statements no Django cursor sees, and the only
+    hint that the route needs `transaction_control` in production.
+    """
+    route = baseline.route("note-atomic-live")
+    assert route["requests"] == 1
+    assert route["needs_transaction_control"] is True
+    assert baseline.missing_sql("note-atomic-live") == ["BEGIN", "COMMIT"]
+    assert baseline.report["totals"]["needs_transaction_control"] == [
+        "note-atomic",
+        "note-atomic-live",
+    ], "the savepoint route and the psycopg-BEGIN route"
+
+
+def test_a_route_that_opens_connections_needs_egress(baseline: Outcome) -> None:
+    """`socket.connect` is where every TCP client ends up, so it is all seen."""
+    queue = baseline.route("note-queue")["egress"]
+    assert queue["needed"] is True, "no egress = true on this route"
+    assert queue["observed"] == [
+        {
+            "target": "127.0.0.1:9",
+            "host": "127.0.0.1",
+            "port": 9,
+            "family": "AF_INET",
+            "count": 1,
+            "tests": ["tests/test_app.py::test_egress_routes"],
+        }
+    ]
+    cache = baseline.route("note-cache")["egress"]
+    assert cache["observed"] == queue["observed"], "the same view, the same attempt"
+    assert cache["needed"] is False, "this route has egress = true"
+    assert baseline.report["totals"]["egress"] == 1
+    for name in ("notes", "note-delete", "orders"):
+        assert baseline.route(name)["egress"] == {"observed": [], "needed": False}, name
+
+
 def test_connection_setup_names_the_routes_that_do_not_grant_it(baseline: Outcome) -> None:
     """The statements every connection runs are reported apart from the requests.
 
@@ -284,8 +351,9 @@ def test_connection_setup_names_the_routes_that_do_not_grant_it(baseline: Outcom
         "note-atomic",
         "note-in",
         "note-multi",
+        "note-atomic-live",
         "orders",
-    ], "every route with a listener, and not the two with no grant at all"
+    ], "every route with a listener, and not the ones with no grant at all"
     assert django_setup["granted_in"] == 0
 
     app_setup = baseline.setup("application_name")
@@ -312,41 +380,52 @@ def test_a_route_no_request_reached_is_named(baseline: Outcome) -> None:
     assert baseline.report["unexercised_routes"] == ["orders"]
     assert baseline.route("orders")["requests"] == 0
     assert baseline.route("orders")["proxies"] == []
-    assert baseline.report["totals"]["routes_exercised"] == 8
+    assert baseline.route("orders")["egress"] == {"observed": [], "needed": False}
+    assert baseline.report["totals"]["routes_exercised"] == 12
 
 
 def test_sql_outside_a_request_is_ignored(baseline: Outcome) -> None:
     """The plugin records requests, not statements: pytest-django's own SQL is invisible."""
     assert "4242" not in baseline.report_path.read_text(encoding="utf-8")
-    assert baseline.report["totals"]["statements"] == 14, (
-        "one per request, plus the two savepoints and bulk_create's second shape"
+    assert baseline.report["totals"]["statements"] == 21, (
+        "one per request, plus the savepoints, psycopg's BEGIN, bulk_create's "
+        "second shape, the type lookup and the named cursor's three statements"
     )
 
 
 def test_the_report_counts_what_the_manifest_does_not_cover(baseline: Outcome) -> None:
     """The totals are the summary a human reads first."""
     totals = baseline.report["totals"]
-    assert totals["requests"] == 13
-    assert totals["routed"] == 12
+    assert totals["requests"] == 17
+    assert totals["routed"] == 16
     assert totals["unrouted"] == 1
-    assert totals["routes"] == 9
-    assert totals["missing_distinct"] == 6
+    assert totals["routes"] == 13
+    assert totals["missing_distinct"] == 12
+    assert totals["egress"] == 1
+    assert totals["unrecognised"] == 0
+    assert totals["plugin_warnings"] == 0
     assert totals["clean"] is False
     assert baseline.report["version"] == 1
     assert baseline.report["manifest"] == {
-        "routes": 9,
+        "routes": 13,
         "proxies": {"db": "postgresql"},
         "warnings": [],
     }
-    assert baseline.report["script_name"] is None
+    assert baseline.report["unrecognised"] == {"statements": [], "count": 0}
+    assert baseline.report["plugin_warnings"] == []
 
 
 def test_the_terminal_summary_is_short_and_actionable(baseline: Outcome) -> None:
     """What the developer sees without opening the JSON."""
-    assert "blastit: 13 requests, 14 statements, 8/9 routes exercised" in baseline.stdout
+    assert "blastit: 17 requests, 21 statements, 12/13 routes exercised" in baseline.stdout
     assert "blastit: route note-delete: 1 statement(s) missing" in baseline.stdout
     assert "blastit: route note-bulk: 2 statement(s) missing" in baseline.stdout
+    assert "blastit: route note-atomic-live: 2 statement(s) missing" in baseline.stdout
     assert "blastit: route note-atomic: needs transaction_control = true" in baseline.stdout
+    assert (
+        "blastit: route note-queue opens outbound connections (127.0.0.1:9) "
+        "but has no egress = true" in baseline.stdout
+    )
     assert "blastit: 1 unrouted request(s): GET /oops/" in baseline.stdout
     assert (
         "blastit: 2 connection-setup statement(s) some routes do not grant: "
@@ -359,11 +438,28 @@ def test_strict_fails_the_session(strict: Outcome) -> None:
     """`--blastit-strict` is the exit code a CI job can watch."""
     assert strict.returncode == 1, strict.stdout + strict.stderr
     assert (
-        "blastit: --blastit-strict: 6 statement execution(s) missing, 1 unrouted "
-        "request(s) and 2 connection-setup statement(s) not granted in every route"
-        in strict.stdout
+        "blastit: --blastit-strict: 12 statement execution(s) missing, 1 unrouted "
+        "request(s), 2 connection-setup statement(s) not granted in every route, "
+        "1 route(s) opening connections without egress = true, 0 unreadable "
+        "statement(s) and 0 warning(s)" in strict.stdout
     )
     assert strict.report["totals"]["clean"] is False
+
+
+def test_the_plugin_is_inert_without_a_manifest(project: Path, tmp_path: Path) -> None:
+    """No manifest, no patching, no report, nothing printed — a plain test run.
+
+    The inner suite carries a test of its own (`test_the_plugin_is_inert`) that
+    only runs here: it asserts that `BaseHandler.get_response`, psycopg and
+    `socket.socket.connect` are all untouched.
+    """
+    copy = copy_project(project, tmp_path)
+    outcome = run(copy, report="never-written.json")
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+    assert "15 passed" in outcome.stdout, "its own inert test runs here, and passes"
+    assert "blastit:" not in outcome.stdout, outcome.stdout
+    assert not outcome.report_path.exists(), "a report with no manifest to diff against"
+    assert not list(copy.glob("never-written.json.*"))
 
 
 def test_the_report_is_enough_to_fill_the_manifest_in(
@@ -373,11 +469,12 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
 
     Applying the report happens twice, which is the honest shape of the loop: the
     first pass adds the statements of the routes that ran — including the two
-    `bulk_create` shapes and the type lookup psycopg sends — puts the
-    connection-setup statements in a group attached to every route, and gives the
-    unrouted path a route of its own. Only then do that route's own statements
-    show up as missing, because until it existed nothing could attribute them to
-    it.
+    `bulk_create` shapes, the type lookup psycopg sends and the named cursor's
+    three statements — sets `egress = true` where a route opened connections,
+    puts the connection-setup statements in a group attached to every route, and
+    gives the unrouted path a route of its own. Only then do that route's own
+    statements show up as missing, because until it existed nothing could
+    attribute them to it.
     """
     assert baseline.report["totals"]["clean"] is False
     copy = copy_project(project, tmp_path)
@@ -387,6 +484,7 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     assert "SELECT set_config('TimeZone', $?, false)" in repaired, (
         "the connection-setup statement is in the repair"
     )
+    assert 'egress = true' in repaired, "and so is the route that opens connections"
     (copy / "blastit-repaired.toml").write_text(repaired, encoding="utf-8")
     second = run(
         copy,
@@ -397,12 +495,24 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     assert second.returncode == 0, second.stdout + second.stderr
     assert second.report["totals"]["unrouted"] == 0, "the path has a route now"
     assert second.report["totals"]["needs_transaction_control"] == []
+    assert second.report["totals"]["egress"] == 0, "egress = true is in the manifest"
     assert second.report["connection_setup"]["ungranted"] == 0, (
         "the group attached to every route covers the connection setup"
     )
     assert second.missing_sql("fallback") == ["SELECT 1"], "the new route's own SQL"
-    assert second.report["totals"]["missing"] == 1
+    named_cursor = second.missing_sql("note-stream")
+    assert second.report["totals"]["missing"] == 1 + len(named_cursor), (
+        "everything the first report listed is granted, except the named cursor"
+    )
+    assert len(named_cursor) == 3, named_cursor
+    assert all(
+        sql.startswith(("DECLARE ", "FETCH ", "CLOSE ")) for sql in named_cursor
+    ), named_cursor
 
+    # A named cursor's `DECLARE`/`FETCH`/`CLOSE` carry a name Django generates
+    # for each run — `_django_curs_<id>_sync_<n>` — so no grant can ever match
+    # them (the README says what to do instead: turn server-side cursors off).
+    # Everything else converges, which is what this third run checks.
     (copy / "blastit-repaired.toml").write_text(
         repaired_manifest(repaired, second), encoding="utf-8"
     )
@@ -411,6 +521,8 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
         "--blastit-manifest",
         "blastit-repaired.toml",
         "--blastit-strict",
+        "-k",
+        "not named_cursor",
         report="third-report.json",
     )
     assert third.returncode == 0, third.stdout + third.stderr
@@ -516,15 +628,73 @@ def test_xdist_workers_are_merged(project: Path, tmp_path: Path) -> None:
         report="xdist-report.json",
     )
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
-    assert "11 passed" in outcome.stdout
+    assert "14 passed, 1 skipped" in outcome.stdout
     totals = outcome.report["totals"]
-    assert totals["requests"] == 13, "every request, from both workers"
-    assert totals["statements"] == 14
-    assert totals["routes_exercised"] == 8
-    assert totals["missing"] == 6
+    assert totals["requests"] == 17, "every request, from both workers"
+    assert totals["statements"] == 21
+    assert totals["routes_exercised"] == 12
+    assert totals["missing"] == 12
     assert totals["connection_setup_ungranted"] == 2, "counted once, not once per worker"
     assert not list(copy.glob("xdist-report.json.gw*")), "the worker files are cleaned up"
     assert "blastit: route note-delete: 1 statement(s) missing" in outcome.stdout
+
+
+def test_an_alias_without_server_side_binding_is_reported(
+    project: Path, tmp_path: Path
+) -> None:
+    """Django's default inlines the parameters: the `$n` text would be invented.
+
+    blastit needs `OPTIONS["server_side_binding"] = True` (§6), and the plugin
+    says so instead of quietly reporting text dbproxy would never see. It is a
+    warning, so a run still passes — `--blastit-strict` is what fails.
+    """
+    copy = copy_project(project, tmp_path)
+    outcome = run(
+        copy,
+        "--blastit-manifest",
+        "blastit.toml",
+        "-k",
+        "test_list_notes",
+        env={"BLASTIT_TEST_CLIENT_BINDING": "1"},
+    )
+    assert outcome.returncode == 0, "a warning, and the tests still run"
+    assert "blastit: the database alias 'default' does not use server-side binding" in (
+        outcome.stdout
+    ), outcome.stdout
+    assert "server_side_binding" in outcome.stdout
+    assert outcome.report["plugin_warnings"], outcome.report["plugin_warnings"]
+    assert outcome.report["totals"]["plugin_warnings"] >= 1
+    assert outcome.report["totals"]["clean"] is False
+
+    strict = run(
+        copy,
+        "--blastit-manifest",
+        "blastit.toml",
+        "--blastit-strict",
+        "-k",
+        "test_list_notes",
+        report="strict-binding.json",
+        env={"BLASTIT_TEST_CLIENT_BINDING": "1"},
+    )
+    assert strict.returncode == 1, "strict fails over a report that cannot be trusted"
+    assert "warning(s)" in strict.stdout
+
+
+def test_a_stray_file_next_to_the_report_is_not_merged(project: Path, tmp_path: Path) -> None:
+    """Only worker reports of this version are merged; anything else is reported."""
+    copy = copy_project(project, tmp_path)
+    stray = copy / "stray.json.old"
+    stray.write_text(
+        '{"version": 1, "requests": [{"method": "GET", "path_info": "/strange/"}]}',
+        encoding="utf-8",
+    )
+    outcome = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="stray.json")
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+    assert "stray.json.old is not a blastit worker report" in outcome.stdout
+    assert stray.is_file(), "left where it was"
+    assert outcome.report["totals"]["requests"] == 17, "the workers were merged, nothing else"
+    assert outcome.report["totals"]["unrouted"] == 1, "no /strange/ request in the report"
+    assert outcome.report["plugin_warnings"], outcome.report["plugin_warnings"]
 
 
 def test_xdist_reports_are_not_merged_twice(project: Path, tmp_path: Path) -> None:
@@ -533,7 +703,7 @@ def test_xdist_reports_are_not_merged_twice(project: Path, tmp_path: Path) -> No
     first = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json")
     second = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json")
     assert first.returncode == second.returncode == 0
-    assert first.report["totals"]["requests"] == second.report["totals"]["requests"] == 13
+    assert first.report["totals"]["requests"] == second.report["totals"]["requests"] == 17
     assert second.report["connection_setup"]["ungranted"] == 2
     assert not list(copy.glob("twice.json.gw*"))
 
@@ -563,6 +733,8 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
       (`groups = ["connection"]`), which is what the report's
       `ungranted_in` is telling you to do: they run on every route in
       production, so they cannot belong to one;
+    * a route whose `egress.needed` is true gets `egress = true`, because it
+      opened connections and the manifest does not let it;
     * a path the report calls `unrouted` gets a route of its own: blastit would
       have answered 404 before Django saw it. That route's statements were not
       attributed to anything (they could not be), so the next run is the one that
@@ -581,6 +753,8 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
                     queries.append(entry["sql"])
             if block["transaction_control"]["needed"]:
                 route[block["name"]]["transaction_control"] = True
+        if reported["egress"]["needed"]:
+            route["egress"] = True
 
     setup = [
         entry["sql"]

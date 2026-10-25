@@ -230,10 +230,28 @@ blastit: 412 requests, 977 statements, 38/41 routes exercised — report in blas
 blastit: route product-list: 3 statement(s) missing (see blastit-report.json)
 blastit: route checkout: needs transaction_control = true
 blastit: route search: 2 grant(s) unused
+blastit: route queue opens outbound connections (redis:6379, amqp:5672) but has no egress = true
 blastit: 4 unrouted request(s): GET /robots.txt, GET /favicon.ico (see blastit-report.json)
 blastit: 2 connection-setup statement(s) some routes do not grant: put them in a group attached to every route (see blastit-report.json)
 blastit: 2 route(s) never exercised: webhooks, admin
 ======================= 1513 passed, 12 skipped in 84.20s =======================
+```
+
+The options, when the defaults do not fit:
+
+```
+--blastit-manifest PATH        the blastit.toml to diff against; without it the
+                               plugin does nothing at all (or `blastit_manifest`
+                               in pytest.ini / pyproject.toml)
+--blastit-report PATH          where the JSON report goes (default
+                               blastit-report.json, relative to where pytest runs)
+--blastit-proxy ALIAS=PROXY    maps a database alias to a manifest proxy, when
+                               the manifest declares more than one postgresql
+                               proxy (repeat it per alias)
+--blastit-strict               fail the session when anything is missing,
+                               unrouted, needing transaction_control or egress,
+                               not granted in every route, unreadable, or worth a
+                               warning from the plugin itself
 ```
 
 The plugin is inert unless you ask for it, and it needs
@@ -255,6 +273,13 @@ blastit_manifest = blastit.toml
   "name": "product-list",
   "requests": 26,
   "needs_transaction_control": false,
+  "egress": {
+    "observed": [
+      {"target": "redis:6379", "host": "redis", "port": 6379, "family": "AF_INET",
+       "count": 26, "tests": ["shop/tests/test_catalog.py::test_on_sale"]}
+    ],
+    "needed": false
+  },
   "proxies": [
     {
       "name": "db",
@@ -305,12 +330,21 @@ How to read it:
   savepoint (a nested `transaction.atomic()`, or `ATOMIC_REQUESTS` on the
   alias) and the route's grant does not allow transaction control. Add
   `transaction_control = true`; do *not* try to grant a savepoint, its name
-  changes on every request.
+  changes on every request. psycopg's own `BEGIN`/`COMMIT` are captured too, so
+  this is seen even when no cursor of the request sends one — a transaction that
+  was already open when the request began (pytest-django's `django_db`, an outer
+  `atomic()`) is not the route's and is not counted.
 * **`unrouted`** — paths blastit would answer `404` for before Django ever saw
   them. Either add a route for them (a catch-all `path = ['.*']` is the usual
   answer, so the app renders its own 404s) or stop requesting them.
 * **`unexercised_routes`** — routes nothing hit: their grants are unproven, not
   proven wrong.
+* **`egress`** — the outbound connections the route tried to open, with the
+  destination, how often and an example test, and `needed` when the route has no
+  `egress = true` (§7.3), which is what the seccomp filter would refuse. Mocked
+  HTTP clients — pytest-httpx, `responses`, a stub transport — never open a
+  socket, so the list is a **lower bound**: a route it says nothing about can
+  still need `egress = true` in production.
 * **`connection_setup`** — the statements psycopg runs as a connection is
   established: `SET`s of your own (a `connection_created` receiver, a
   middleware), Django's `set_config('TimeZone', …)`, a `TypeInfo.fetch` a
@@ -319,12 +353,29 @@ How to read it:
   so they run on every route in production — put them in a group attached to
   every route (`groups = ["connection"]` at the top level). `ungranted_in` names
   the routes that would refuse them today; a route with no grant for that proxy
-  gets no listener and never runs them, so it is not listed. Statements psycopg
-  sends itself (not only Django's cursors) are captured, so a type lookup or a
-  server-side cursor's `DECLARE` shows up like any other statement.
-* `--blastit-strict` fails the run when anything is missing, unrouted, or not
-  granted in every route, for a CI job that keeps the manifest from rotting.
-  Add the `missing` statements, re-run until it is clean, and deploy.
+  gets no listener and never runs them, so it is not listed.
+* **`unrecognised`** — statements the plugin could not read, counted rather than
+  dropped. psycopg's t-string queries (`t"SELECT {name}"`) have no text before
+  they are rendered, so nothing can be compared to a grant; report them to
+  whoever wrote the query.
+* **`plugin_warnings`** — what the plugin itself could not do, most importantly
+  an alias that does not set `server_side_binding = True`: psycopg then inlines
+  the parameters and the `$n` text in the report is one the plugin made up,
+  not the text dbproxy would check.
+* `--blastit-strict` fails the run on any of the above, for a CI job that keeps
+  the manifest from rotting. Add the `missing` statements, re-run until it is
+  clean, and deploy.
+
+Two statements cannot be granted, and the report cannot hide it:
+
+* a savepoint's name (`SAVEPOINT "s140234_x1"`) is made per request: the fix is
+  `transaction_control = true` on the route, not a grant;
+* a named cursor — `QuerySet.iterator()`, i.e. Django's `chunked_cursor()` — sends
+  `DECLARE "_django_curs_140234_sync_1" CURSOR FOR …`, then `FETCH` and `CLOSE`
+  with the same generated name, so no grant can match them. Turn server-side
+  cursors off for the routes that use them
+  (`DATABASES[...]["DISABLE_SERVER_SIDE_CURSORS"] = True`) or accept that they
+  will be denied under blastit.
 
 Read the report, add the grants, repeat until
 `blastit: the manifest covers every request that was made`. The denial logs stay

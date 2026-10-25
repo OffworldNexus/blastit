@@ -90,6 +90,37 @@ name = "note-types"
 path = ['/notes/types/']
 methods = ["GET"]
 
+# No grant either, because what this route sends is not the SELECT in the view:
+# a named cursor is a `DECLARE … CURSOR FOR …`, plus the `FETCH` that reads it.
+[[route]]
+name = "note-stream"
+path = ['/notes/stream/']
+methods = ["GET"]
+
+# psycopg sends the BEGIN and the COMMIT of this route's `atomic()` itself, and
+# neither is granted here: the route needs transaction_control.
+[[route]]
+name = "note-atomic-live"
+path = ['/notes/atomic-live/']
+methods = ["POST"]
+[route.db]
+queries = [
+  "UPDATE \"notes_note\" SET \"body\" = $1 WHERE \"notes_note\".\"owner_id\" = $2"
+]
+
+# This one may open outbound connections.
+[[route]]
+name = "note-cache"
+path = ['/notes/cache/']
+methods = ["GET"]
+egress = true
+
+# This one does too, and says nothing about it: the report is where that shows.
+[[route]]
+name = "note-queue"
+path = ['/notes/queue/']
+methods = ["GET"]
+
 # No test reaches this one: it is reported as never exercised, not as missing.
 [[route]]
 name = "orders"

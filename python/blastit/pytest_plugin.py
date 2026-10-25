@@ -46,31 +46,57 @@ Statements psycopg runs by itself
 
 Django's ``execute_wrapper`` only sees the statements that go through its own
 cursors, and those are not all of them: psycopg sends ``SET``s of its own while
-a connection opens, and a backend looks a type's OID up at connect with
+a connection opens; a backend looks a type's OID up at connect with
 ``TypeInfo.fetch`` (postgis, hstore — psycopg's ``Connection.execute``, which no
-Django cursor of that request sees). Under blastit every request opens its own
-connection (``CONN_MAX_AGE = 0``, §6), so in production those statements run on
-**every** route, once per request; in a test suite the connection is reused and
-they run once, usually outside any request at all.
+Django cursor of that request sees); and, most importantly, with
+``autocommit = False`` **psycopg sends the ``BEGIN`` and the ``COMMIT``** through
+``Connection._exec_command``, so a request that runs an ``atomic()`` — Django's
+``ATOMIC_REQUESTS``, or a handler that wraps its work in one — would otherwise
+look like it never needed ``transaction_control``.
 
-So the plugin also wraps ``psycopg.Cursor.execute``/``executemany``/``stream``
-and ``psycopg.Connection.execute`` — the outermost wrapper records and the inner
-ones stay quiet, so a statement is counted once — and it records what runs while
+So the plugin also wraps ``psycopg.Cursor.execute``/``executemany``/``stream``/
+``copy``, ``Connection.execute``/``copy``, ``ServerCursor.execute`` (whose
+statement is the ``DECLARE`` psycopg really sends) and ``_exec_command`` (the
+internal command channel, whose ``BEGIN``/``COMMIT``/``FETCH`` are recorded even
+in the middle of a statement the caller wrote). One statement is recorded once:
+each capture layer marks the call it is recording, and the inner layers skip a
+*statement they have already seen* — the gate is per call, so a third-party
+``execute_wrapper`` that runs a statement of its own is recorded too.
+
+Under blastit every request opens its own connection (``CONN_MAX_AGE = 0``,
+§6), so connection-setup statements run on **every** route, once per request; in
+a test suite the connection is reused and they run once, usually outside any
+request at all. The plugin records what runs while
 ``DatabaseWrapper.connect()`` is in progress as a separate ``connection_setup``
-set. They are not a route's statements, so the report does not diff them against
-one route: it lists the routes that do **not** grant them, and the fix is a
-group attached to every route (``groups = ["connection"]`` at the top level,
-§6). ``--blastit-strict`` fails while one is missing.
+set, and the report does not diff it against one route: it lists the routes that
+do **not** grant it, and the fix is a group attached to every route
+(``groups = ["connection"]`` at the top level, §6).
+
+Egress
+------
+
+A route that opens outbound connections needs ``egress = true`` (§7.3); without
+it the seccomp filter refuses them. The plugin wraps ``socket.socket.connect``
+(and ``connect_ex``, which ``socket.create_connection`` goes through), so every
+outbound connection a request tries is reported per route, with the destination,
+how often, and an example test. A unix socket is not egress: under blastit the
+database itself is one.
+
+Mocked HTTP clients — pytest-httpx, responses, a stub transport — never open a
+socket, so the list is a **lower bound**: a route the report says nothing about
+may still need ``egress = true`` in production.
 
 Options
 -------
 
 ``--blastit-manifest PATH``
     The ``blastit.toml`` to diff against. Without it (and without the
-    ``blastit_manifest`` ini option) the plugin does nothing at all.
+    ``blastit_manifest`` ini option) the plugin does nothing at all: nothing is
+    patched, nothing is written, no test sees a difference.
 
 ``--blastit-report PATH``
-    Where to write the JSON report. Default ``blastit-report.json``.
+    Where to write the JSON report. Default ``blastit-report.json``, relative to
+    the working directory (like pytest's own ``--junitxml``).
 
 ``--blastit-proxy ALIAS=PROXY``
     Maps a Django database alias to a manifest proxy. Needed when the manifest
@@ -78,13 +104,18 @@ Options
     is that one and the option is not needed.
 
 ``--blastit-strict``
-    Fails the session (non-zero exit code) when anything is missing or
-    unrouted: the manifest is not finished yet.
+    Fails the session (non-zero exit code) when anything is missing, unrouted, a
+    route needs ``transaction_control`` it was not granted, a route opens
+    connections without ``egress = true``, a connection-setup statement is not
+    granted in every route, a statement could not be read, or the plugin itself
+    had to warn about something.
 
 `pytest-xdist <https://pytest-xdist.readthedocs.io/>`_ works: each worker writes
 the requests it saw next to the report path, and the controller merges them and
 reports once, so ``pytest -n auto --blastit-manifest blastit.toml`` gives one
-report for the whole run.
+report for the whole run. Only files that say which worker wrote them *and*
+carry the version this build knows are merged; anything else is left alone and
+reported.
 
 Transaction control
 -------------------
@@ -107,9 +138,11 @@ are::
 
     {"version": 1,
      "manifest": {"routes": N, "proxies": {...}, "warnings": [...]},
-     "script_name": null,
      "routes": [{"name": ..., "path": [...], "requests": N,
-                 "needs_transaction_control": bool,
+                 "egress": {"observed": [{"target": ..., "host": ..., "port": N,
+                                          "family": ..., "count": N,
+                                          "tests": [...]}],
+                            "needed": bool},
                  "proxies": [{"name": ..., "observed": N,
                               "missing": [{"sql": ..., "count": N,
                                            "wire_sql": ..., "tests": [...],
@@ -126,11 +159,15 @@ are::
                                           "ungranted_in": [...],
                                           "granted_in": N}],
                           "ungranted": N},
+     "unrecognised": {"statements": [{"query": ..., "alias": ..., "count": N}],
+                      "count": N},
+     "plugin_warnings": [...],
      "totals": {"requests": N, "routed": N, "unrouted": N, "routes": N,
                 "routes_exercised": N, "statements": N, "missing": N,
                 "missing_distinct": N, "unused": N,
                 "needs_transaction_control": [...], "connection_setup": N,
-                "connection_setup_ungranted": N, "clean": bool}}
+                "connection_setup_ungranted": N, "egress": N, "unrecognised": N,
+                "plugin_warnings": N, "clean": bool}}
 
 ``missing[].sql`` is the *normalised* text: it is what a grant has to contain,
 so it can be pasted into the manifest as it is. ``wire_sql`` is one raw
@@ -141,6 +178,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import sys
 import threading
 from contextvars import ContextVar
@@ -246,10 +284,20 @@ class _RequestContext:
     """What one request did, kept per thread and per request."""
 
     statements: list[tuple[str, str]] = field(default_factory=list)
+    egress: list[tuple[str, str, int]] = field(default_factory=list)
+    #: Whether this request went through Django's transaction API itself —
+    #: `set_autocommit`, `commit`, `rollback`, a savepoint. A transaction that
+    #: was already open when the request began is someone else's (in a test
+    #: suite, pytest-django's), and under blastit there is no such thing.
+    manages_transactions: bool = False
 
     def add(self, alias: str, sql: str) -> None:
         """Records one statement as executed by `alias`."""
         self.statements.append((alias, sql))
+
+    def add_egress(self, family: str, host: str, port: int) -> None:
+        """Records one outbound connection attempt."""
+        self.egress.append((family, host, port))
 
 
 #: The request being handled in this thread, or `None` outside a request.
@@ -264,13 +312,16 @@ _CURRENT: ContextVar[_RequestContext | None] = ContextVar("blastit_request", def
 #: which routes do not grant them.
 _CONNECTING: ContextVar[str | None] = ContextVar("blastit_connecting", default=None)
 
-#: How many capture wrappers are on the stack for the statement being run.
+#: The statement the outermost capture layer is recording right now, as
+#: `(text, id(params))`, or `None`.
 #:
-#: Django's cursor wrapper and psycopg's own methods see the same statement, and
-#: `Connection.execute` delegates to `Cursor.execute`: the outermost wrapper
-#: records it, the inner ones see a non-zero depth and stay quiet, so one
-#: statement is one line however many layers saw it.
-_DEPTH: ContextVar[int] = ContextVar("blastit_depth", default=0)
+#: Django's cursor wrapper, psycopg's own methods and `Connection.execute`
+#: delegating to `Cursor.execute` all see the *same* call, and only one of them
+#: may record it. The gate is per call, not a counter: another layer — a
+#: third-party `execute_wrapper`, a `ServerCursor`'s `DECLARE`, psycopg's own
+#: `BEGIN` — runs a *different* statement inside the marked call, and that
+#: statement is recorded like any other.
+_MARK: ContextVar[tuple[str, int] | None] = ContextVar("blastit_mark", default=None)
 
 
 @dataclass
@@ -282,6 +333,7 @@ class _ObservedRequest:
     nodeid: str | None
     transaction_control: bool
     statements: list[tuple[str, str]]
+    egress: list[tuple[str, str, int]]
 
     def as_json(self, proxy_for: Callable[[str], str | None]) -> dict[str, Any]:
         """The request as JSON, with every statement's proxy resolved."""
@@ -293,6 +345,10 @@ class _ObservedRequest:
             "statements": [
                 {"alias": alias, "proxy": proxy_for(alias), "sql": sql}
                 for alias, sql in self.statements
+            ],
+            "egress": [
+                {"family": family, "host": host, "port": port}
+                for family, host, port in self.egress
             ],
         }
 
@@ -313,12 +369,15 @@ class _Session:
         _check_proxy_mapping(self)
         self.observations: list[_ObservedRequest] = []
         self.connection_setup: dict[tuple[str, str], int] = {}
+        self.unrecognised: dict[tuple[str, str], int] = {}
         self.lock = threading.Lock()
         self.nodeid: str | None = None
         self.installed = False
         self.deferred: str | None = None
         self.unmapped: set[str] = set()
         self.problems: list[str] = []
+        self.warnings: list[str] = []
+        self.reported_bindings: set[str] = set()
 
     def proxy_for(self, alias: str) -> str | None:
         """The manifest proxy a Django database alias talks to.
@@ -345,6 +404,7 @@ class _Session:
             nodeid=self.nodeid,
             transaction_control=transaction_control,
             statements=list(context.statements),
+            egress=list(context.egress),
         )
         with self.lock:
             self.observations.append(observed)
@@ -360,11 +420,25 @@ class _Session:
         with self.lock:
             self.connection_setup[key] = self.connection_setup.get(key, 0) + 1
 
+    def record_unrecognised(self, alias: str | None, query: str) -> None:
+        """Counts one statement whose text could not be read.
+
+        psycopg takes `sql.Composable` objects and t-string `Template`s, and a
+        `Template` has no text until it is rendered with values the plugin does
+        not have. Inventing one would be worse than saying so, and dropping it
+        silently would hide a statement that goes on the wire.
+        """
+        key = (alias or "", query)
+        with self.lock:
+            self.unrecognised[key] = self.unrecognised.get(key, 0) + 1
+
     def document(self) -> dict[str, Any]:
         """The observations document the extension reads."""
         with self.lock:
             requests = [observed.as_json(self.proxy_for) for observed in self.observations]
             setup = sorted(self.connection_setup.items())
+            unrecognised = sorted(self.unrecognised.items())
+            warnings = list(self.warnings)
         return {
             "version": _OBSERVATIONS_VERSION,
             "requests": requests,
@@ -377,6 +451,11 @@ class _Session:
                 }
                 for (alias, sql), count in setup
             ],
+            "unrecognised": [
+                {"alias": alias or None, "query": query, "count": count}
+                for (alias, query), count in unrecognised
+            ],
+            "warnings": warnings,
         }
 
 
@@ -561,23 +640,29 @@ def _patch_connect() -> None:
     BaseDatabaseWrapper.connect = connect
 
 
-def _capture(alias: str | None, sql: Any, params: Any, connection: Any = None) -> None:
+def _capture(alias: str | None, sql: Any, params: Any, connection: Any = None) -> str | None:
     """Records one statement, wherever it came from.
 
-    Called by both capture layers, outermost first; only the outermost one
-    records. A statement run while a connection is being established goes to the
-    session's connection-setup set — whether or not a request is in flight,
-    because it is not the request's — and any other statement goes to the request
-    that is running, or nowhere when none is.
+    Called by every capture layer; the outermost one records, and the inner ones
+    see the mark it left. A statement run while a connection is being
+    established goes to the session's connection-setup set — whether or not a
+    request is in flight, because it is not the request's — and any other
+    statement goes to the request that is running, or nowhere when none is.
+
+    Returns the rendered text, so the caller can mark it as the call the inner
+    layers will see, or `None` when the statement could not be read — which is
+    counted as `unrecognised` rather than dropped.
     """
-    if _DEPTH.get():
-        return
     session = _SESSION
     if session is None:
-        return
+        return None
     text = _sql_text(sql, connection)
     if text is None:
-        return
+        if _CONNECTING.get() is not None or _CURRENT.get() is not None:
+            session.record_unrecognised(alias, query_repr(sql))
+        return None
+    if _already_recorded(text, params):
+        return text
     wire = to_wire_sql(text) if params is not None else text
 
     connecting = _CONNECTING.get()
@@ -585,33 +670,104 @@ def _capture(alias: str | None, sql: Any, params: Any, connection: Any = None) -
         # Django opens one connection *without* a database to create the test
         # database. It is test machinery, it never runs under blastit (the
         # database is already there), and its alias names no proxy.
-        return
+        return text
     if connecting is not None:
         session.record_connection_setup(connecting or alias, wire)
-        return
+        return text
     current = _CURRENT.get()
     if current is not None:
         current.add(alias or "", wire)
+    return text
+
+
+def query_repr(sql: Any) -> str:
+    """A short, honest rendering of a query the plugin could not read."""
+    text = repr(sql)
+    return text if len(text) <= 200 else text[:197] + "..."
+
+
+def _already_recorded(text: str, params: Any) -> bool:
+    """Whether the outermost layer is recording this very call right now."""
+    mark = _MARK.get()
+    return mark is not None and mark == (text, id(params))
+
+
+def _capture_egress(sock: Any, address: Any) -> None:
+    """Records one outbound connection attempt, for the route's `egress` (§7.3).
+
+    `socket.socket.connect` is where every TCP client ends up
+    (`socket.create_connection` calls it), so whatever opens the socket —
+    redis, httpx, a queue client — is seen. A unix socket is not egress under
+    blastit: the database itself is one, and dbproxy's database socket is not a
+    network destination.
+    """
+    session = _SESSION
+    current = _CURRENT.get()
+    if session is None or current is None:
+        return
+    target = _egress_target(sock, address)
+    if target is None:
+        return
+    family, host, port = target
+    if (host, port) in _database_addresses():
+        # The connection to the database itself: under blastit it is dbproxy's
+        # unix socket, and the database is not an egress destination.
+        return
+    current.add_egress(family, host, port)
+
+
+def _egress_target(sock: Any, address: Any) -> tuple[str, str, int] | None:
+    """`(family, host, port)` of a connect attempt, or `None` when it is not one."""
+    family = getattr(getattr(sock, "family", None), "name", None)
+    if family is None or "AF_UNIX" in family:
+        return None
+    if not isinstance(address, tuple) or len(address) < 2:
+        # AF_UNIX addresses are paths, AF_NETLINK ones a pid: neither is egress.
+        return None
+    host, port = address[0], address[1]
+    if not isinstance(host, str) or not isinstance(port, int):
+        return None
+    return family, host, port
+
+
+def _database_addresses() -> set[tuple[str, int]]:
+    """Every `(host, port)` a Django database of this process is configured with."""
+    try:
+        from django.db import connections
+
+        addresses = set()
+        for wrapper in connections.all():
+            settings_dict = wrapper.settings_dict
+            host = str(settings_dict.get("HOST") or "")
+            port = settings_dict.get("PORT") or 5432
+            if host:
+                addresses.add((host, int(port)))
+        return addresses
+    except Exception:  # noqa: BLE001 - no Django, or Django without settings
+        return set()
 
 
 def _sql_text(sql: Any, connection: Any) -> str | None:
     """The text of a query, whichever form it came in.
 
-    A `str` is what Django and most application code pass. psycopg also accepts
-    `sql.Composable` objects, and renders them against the connection — which is
-    what psycopg itself does before it converts the placeholders; the result
-    still has its `%s`, so the same conversion and the same grant comparison
-    apply. Anything else (a `Template`) has no text to compare: it is left alone
-    rather than guessed at.
+    A `str` is what Django and most application code pass, and `bytes` is what
+    psycopg's own internal commands are. psycopg also accepts `sql.Composable`
+    objects, and renders them against the connection — which is what psycopg
+    itself does before it converts the placeholders; the result still has its
+    `%s`, so the same conversion and the same grant comparison apply. Anything
+    else (a t-string `Template`, which has no text without the values it was
+    built for) is reported as unrecognised rather than guessed at.
     """
     if isinstance(sql, str):
         return sql
+    if isinstance(sql, bytes):
+        return sql.decode("utf-8", "replace")
     render = getattr(sql, "as_string", None)
     if render is None or connection is None:
         return None
     try:
         return str(render(connection))
-    except Exception:  # noqa: BLE001 - a query we cannot render is one we skip
+    except Exception:  # noqa: BLE001 - a query we cannot render is one we report
         return None
 
 
@@ -619,26 +775,104 @@ def _wrap_connection(connection: Any) -> None:
     """Records every statement executed on one database connection.
 
     The wrapper is installed permanently (`connection.execute_wrappers`), so it
-    covers the whole lifetime of the connection, reconnects included.
+    covers the whole lifetime of the connection, reconnects included. It is also
+    where a connection that would inline its parameters is noticed: the SQL such
+    a connection sends is not the text a grant holds, so the report cannot be
+    trusted and says so.
     """
     if getattr(connection, "_blastit_wrapped", False):
         return
     alias = str(connection.alias)
+    _warn_if_binding_is_client_side(connection)
 
     def wrapper(execute: Any, sql: str, params: Any, many: bool, context: Any) -> Any:
         # `params is None` means there is nothing to bind, and psycopg sends the
         # text as it is; with parameters, the text that goes on the wire has
         # `$n` placeholders, which is what a grant has to match. `executemany`
         # is one statement, however many rows it carries.
-        _capture(alias, sql, params, getattr(connection, "connection", None))
-        token = _DEPTH.set(_DEPTH.get() + 1)
+        dbapi = getattr(context.get("cursor"), "cursor", None)
+        statement = sql
+        if _is_server_cursor(dbapi):
+            # A named cursor does not send `SELECT …`: it sends one `DECLARE …
+            # CURSOR FOR …`, which is what dbproxy sees and what a grant has to
+            # hold.
+            statement = _declared_statement(dbapi, sql, _psycopg_connection(dbapi))
+        text = _capture(alias, statement, params, getattr(connection, "connection", None))
+        token = _MARK.set((text, id(params)) if text is not None else None)
         try:
             return execute(sql, params, many, context)
         finally:
-            _DEPTH.reset(token)
+            _MARK.reset(token)
 
     connection.execute_wrappers.append(wrapper)
     connection._blastit_wrapped = True  # type: ignore[attr-defined]
+
+
+def _is_server_cursor(cursor: Any) -> bool:
+    """Whether a DBAPI cursor is one of psycopg's named (server-side) ones."""
+    if cursor is None:
+        return False
+    try:
+        import psycopg
+
+        return isinstance(cursor, psycopg.ServerCursor)
+    except Exception:  # noqa: BLE001 - no psycopg, no psycopg cursors
+        return False
+
+
+def _warn_if_binding_is_client_side(connection: Any) -> None:
+    """Says so when an alias would inline its parameters into the SQL (§6).
+
+    With `OPTIONS["server_side_binding"] = True` psycopg sends the query and its
+    parameters separately, which is the only way an allowlist can match
+    anything. Django's default is client-side binding, and a `cursor_factory` a
+    project sets itself can turn it back on; the `$n` text the report shows
+    would then be one the plugin made up, so it is reported as a session problem
+    — and `--blastit-strict` fails over it.
+    """
+    session = _SESSION
+    if session is None:
+        return
+    alias = str(connection.alias)
+    with session.lock:
+        if alias in session.reported_bindings:
+            return
+        session.reported_bindings.add(alias)
+    problem = _binding_problem(connection, alias)
+    if problem is not None:
+        with session.lock:
+            session.warnings.append(problem)
+
+
+def _binding_problem(connection: Any, alias: str) -> str | None:
+    """Why this connection's parameters would be inlined, or `None`."""
+    options = connection.settings_dict.get("OPTIONS") or {}
+    if options.get("server_side_binding") is not True:
+        return (
+            f"the database alias {alias!r} does not use server-side binding: set "
+            f'DATABASES[{alias!r}]["OPTIONS"]["server_side_binding"] = True, or the '
+            "statements in this report are not the text dbproxy would check "
+            '(ARCHITECTURE.md §6, "What the app must do")'
+        )
+    factory = options.get("cursor_factory") or getattr(
+        getattr(connection, "connection", None), "cursor_factory", None
+    )
+    if factory is not None and _binds_client_side(factory):
+        return (
+            f"the database alias {alias!r} uses a cursor factory that binds parameters "
+            "client-side: remove cursor_factory from the alias' OPTIONS, or the "
+            "statements in this report are not the text dbproxy would check"
+        )
+    return None
+
+
+def _binds_client_side(factory: Any) -> bool:
+    """Whether a psycopg cursor class inlines the parameters into the SQL."""
+    try:
+        from psycopg.client_cursor import ClientCursorMixin
+    except ImportError:  # pragma: no cover - psycopg 3 always has it
+        return False
+    return isinstance(factory, type) and issubclass(factory, ClientCursorMixin)
 
 
 def _psycopg_connection(target: Any) -> Any:
@@ -689,42 +923,58 @@ def _wrap_psycopg_method(
     target: Any,
     name: str,
     *,
-    streaming: bool = False,
     statement: Any = None,
+    command: bool = False,
 ) -> None:
-    """Wraps one psycopg method so a statement is recorded as it is sent."""
+    """Wraps one psycopg method so a statement is recorded as it is sent.
+
+    Recorded when the method is *called*, not when its result is consumed, so
+    `stream` and `copy` — which return iterators — are not lost when a caller
+    asks for the first row lazily. `command` marks psycopg's own command channel
+    (`_exec_command`), whose `BEGIN`/`COMMIT`/`FETCH` are never the statement the
+    caller wrote and are recorded even in the middle of one — with
+    [`_capture_command`] deciding what a transaction command means.
+    """
     original = getattr(target, name, None)
     if original is None or getattr(original, "_blastit_patched", False):
         return
 
-    if streaming:
-
-        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-            connection = _psycopg_connection(self)
-            query, params = query_params(args, kwargs)
-            if statement is not None:
-                query = statement(self, query, connection)
-            _capture(_alias_of(connection), query, params, connection)
-            yield from original(self, *args, **kwargs)
-
-    else:
-
-        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-            connection = _psycopg_connection(self)
-            query, params = query_params(args, kwargs)
-            if statement is not None:
-                query = statement(self, query, connection)
-            _capture(_alias_of(connection), query, params, connection)
-            token = _DEPTH.set(_DEPTH.get() + 1)
-            try:
-                return original(self, *args, **kwargs)
-            finally:
-                _DEPTH.reset(token)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        connection = _psycopg_connection(self)
+        query, params = query_params(args, kwargs)
+        if statement is not None:
+            query = statement(self, query, connection)
+        if command:
+            _capture_command(_alias_of(connection), query, params, connection)
+            token = None
+        else:
+            text = _capture(_alias_of(connection), query, params, connection)
+            token = _MARK.set((text, id(params)) if text is not None else None)
+        try:
+            return original(self, *args, **kwargs)
+        finally:
+            if token is not None:
+                _MARK.reset(token)
 
     wrapper._blastit_patched = True  # type: ignore[attr-defined]
     wrapper.__doc__ = original.__doc__
     wrapper.__wrapped__ = original  # type: ignore[attr-defined]
     setattr(target, name, wrapper)
+
+
+def _capture_unconditionally(alias: str | None, sql: Any, params: Any, connection: Any) -> None:
+    """Records a statement even when the outermost layer marked this call.
+
+    Used for the commands psycopg sends by itself: `BEGIN`, `COMMIT`,
+    `ROLLBACK`, the `FETCH`/`CLOSE`/`MOVE` of a named cursor. They go on the wire
+    in the middle of a statement the caller *did* write, and a manifest has to
+    grant them.
+    """
+    token = _MARK.set(None)
+    try:
+        _capture(alias, sql, params, connection)
+    finally:
+        _MARK.reset(token)
 
 
 def query_params(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, Any]:
@@ -745,16 +995,18 @@ def _patch_psycopg() -> None:
 
     Django's `execute_wrapper` only sees statements that go through its own
     cursors. psycopg runs some of its own: `TypeInfo.fetch`, which the PostGIS
-    and hstore backends use to look up a type's OID at connect, and the
-    connection's own `SET`s. Those are exactly the statements a manifest has to
-    grant — they go on the wire, so dbproxy checks them — and the plugin could
-    not see them before.
+    and hstore backends use to look up a type's OID at connect; the `SET`s of a
+    connection; and, crucially, the transaction commands — with
+    `autocommit = False`, psycopg sends the `BEGIN` and the `COMMIT` through
+    `Connection._exec_command`, so a route that runs an `atomic()` or uses
+    `ATOMIC_REQUESTS` would otherwise look like it never needed transaction
+    control.
 
-    `Cursor.execute`, `executemany` and `stream` are short methods with stable
-    signatures; the wrapper reads the query and the parameters positionally and
-    leaves the call itself alone. `ServerCursor` inherits from `Cursor`, and
-    `Connection.execute` delegates to a cursor, so the outermost wrapper records
-    and the inner ones stay quiet.
+    `Cursor.execute`, `executemany`, `stream` and `copy`, and
+    `Connection.execute`/`copy`, are the public entry points;
+    `ServerCursor.execute` sends its own `DECLARE`; `_exec_command` is psycopg's
+    internal command channel, and what it sends is recorded unconditionally,
+    because those commands are never the statement the caller wrote.
     """
     try:
         import psycopg
@@ -762,11 +1014,109 @@ def _patch_psycopg() -> None:
         return
     _wrap_psycopg_method(psycopg.Cursor, "execute")
     _wrap_psycopg_method(psycopg.Cursor, "executemany")
-    _wrap_psycopg_method(psycopg.Cursor, "stream", streaming=True)
+    _wrap_psycopg_method(psycopg.Cursor, "stream")
+    _wrap_psycopg_method(psycopg.Cursor, "copy")
     _wrap_psycopg_method(psycopg.Connection, "execute")
+    _wrap_psycopg_method(psycopg.Connection, "copy")
     server_cursor = getattr(psycopg, "ServerCursor", None)
     if server_cursor is not None:
         _wrap_psycopg_method(server_cursor, "execute", statement=_declared_statement)
+    _wrap_psycopg_method(
+        getattr(psycopg, "Connection", psycopg.Connection), "_exec_command", command=True
+    )
+
+
+def _capture_command(alias: str | None, sql: Any, params: Any, connection: Any) -> None:
+    """Records a command psycopg sent through its own command channel.
+
+    `BEGIN`, `COMMIT` and `ROLLBACK` are what make a route need
+    `transaction_control`, but they are also how *someone else's* transaction
+    shows up: pytest-django wraps every test in one, and psycopg only sends its
+    `BEGIN` when the first statement runs — which is usually the request's.
+    Under blastit each request gets a connection of its own and no test
+    transaction exists, so a transaction command counts only when the request
+    went through Django's transaction API itself (`atomic()`,
+    `ATOMIC_REQUESTS`, an explicit `commit()`), and the rest of the channel
+    (`FETCH`, `CLOSE`, `MOVE`, `DEALLOCATE`…) always counts.
+    """
+    text = _sql_text(sql, connection)
+    if isinstance(text, str) and _TRANSACTION_COMMAND.match(text):
+        current = _CURRENT.get()
+        if _CONNECTING.get() is None and (current is None or not current.manages_transactions):
+            return
+    _capture_unconditionally(alias, sql, params, connection)
+
+
+#: A transaction-control command, as §5.2 spells them out — the same list the
+#: policy accepts with `transaction_control = true`.
+_TRANSACTION_COMMAND = re.compile(
+    r"^\s*(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b",
+    re.IGNORECASE,
+)
+
+
+def _patch_transactions() -> None:
+    """Notes the requests that use Django's transaction API themselves.
+
+    `atomic()` and `ATOMIC_REQUESTS` go through `set_autocommit`, `commit`,
+    `rollback` and the savepoint methods; a transaction that is already open
+    when the request starts was opened elsewhere (pytest-django's `django_db`,
+    an outer `atomic()`), and the plugin does not put it on the route's account.
+    """
+    from django.db.backends.base.base import BaseDatabaseWrapper
+
+    names = (
+        "set_autocommit",
+        "commit",
+        "rollback",
+        "savepoint",
+        "savepoint_commit",
+        "savepoint_rollback",
+    )
+    for name in names:
+        original = getattr(BaseDatabaseWrapper, name, None)
+        if original is None or getattr(original, "_blastit_patched", False):
+            continue
+
+        def wrapper(self: Any, *args: Any, _original: Any = original, **kwargs: Any) -> Any:
+            current = _CURRENT.get()
+            if current is not None:
+                current.manages_transactions = True
+            return _original(self, *args, **kwargs)
+
+        wrapper._blastit_patched = True  # type: ignore[attr-defined]
+        wrapper.__doc__ = original.__doc__
+        wrapper.__wrapped__ = original  # type: ignore[attr-defined]
+        setattr(BaseDatabaseWrapper, name, wrapper)
+
+
+def _patch_sockets() -> None:
+    """Records outbound connection attempts, which `egress = true` is about (§7.3).
+
+    `socket.socket.connect` is the one place every TCP client ends up —
+    `socket.create_connection`, and therefore requests, httpx, redis and friends,
+    go through it — so whatever opens the socket is seen. A unix socket is not
+    egress: under blastit the database itself is one.
+    """
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    if getattr(original_connect, "_blastit_patched", False):
+        return
+
+    def connect(self: Any, address: Any) -> Any:
+        _capture_egress(self, address)
+        return original_connect(self, address)
+
+    def connect_ex(self: Any, address: Any) -> Any:
+        _capture_egress(self, address)
+        return original_connect_ex(self, address)
+
+    for wrapper, original in ((connect, original_connect), (connect_ex, original_connect_ex)):
+        wrapper._blastit_patched = True  # type: ignore[attr-defined]
+        wrapper.__doc__ = original.__doc__
+        wrapper.__wrapped__ = original  # type: ignore[attr-defined]
+    socket.socket.connect = connect  # type: ignore[method-assign]
+    socket.socket.connect_ex = connect_ex  # type: ignore[method-assign]
 
 
 def _on_connection_created(sender: Any = None, connection: Any = None, **_: Any) -> None:
@@ -805,8 +1155,10 @@ def _install(session: _Session) -> None:
 
     try:
         _patch_handler()
+        _patch_transactions()
         _patch_connect()
         _patch_psycopg()
+        _patch_sockets()
         connection_created.connect(
             _on_connection_created, dispatch_uid="blastit_pytest_plugin"
         )
@@ -943,29 +1295,52 @@ def _write_worker_observations(session: _Session) -> None:
 def _merged_observations(session: _Session) -> dict[str, Any]:
     """This process's observations, plus every xdist worker's, merged.
 
-    Workers write next to the report (`<report>.<workerid>`); they are read,
-    deleted, and their requests appended in worker order, so the controller
-    reports once for the whole run.
+    Workers write next to the report (`<report>.<workerid>`, the convention
+    pytest-xdist's own `--junitxml` uses). A file is only merged when it says
+    which worker wrote it and carries the document version this build knows:
+    anything else in that directory belongs to someone else, and is left where
+    it is and reported.
     """
     document = session.document()
     report = session.report_path
     workers = sorted(path for path in report.parent.glob(f"{report.name}.*"))
+    merged = []
     for path in workers:
         try:
             theirs = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
-            session.problems.append(f"could not read the worker report {path}: {error!r}")
+            session.warnings.append(
+                f"{path.name} is not a blastit worker report ({error!r}): left in place"
+            )
+            continue
+        if not isinstance(theirs, dict) or not theirs.get("worker"):
+            session.warnings.append(
+                f"{path.name} is not a blastit worker report (no `worker` key): left in place"
+            )
+            continue
+        if theirs.get("version") != _OBSERVATIONS_VERSION:
+            session.warnings.append(
+                f"{path.name} is a blastit worker report of version "
+                f"{theirs.get('version')!r}, this build writes "
+                f"{_OBSERVATIONS_VERSION}: left in place"
+            )
             continue
         for request in theirs.get("requests", []):
             document["requests"].append(request)
         for statement in theirs.get("connection_setup", []):
             document["connection_setup"].append(statement)
-    for path in workers:
+        for entry in theirs.get("unrecognised", []):
+            document["unrecognised"].append(entry)
+        for warning in theirs.get("warnings", []):
+            document["warnings"].append(warning)
+        merged.append(path)
+    for path in merged:
         try:
             path.unlink()
         except OSError as error:  # pragma: no cover - best effort cleanup
-            session.problems.append(f"could not remove the worker report {path}: {error!r}")
-    document["workers"] = [path.name for path in workers]
+            session.warnings.append(f"could not remove the worker report {path}: {error!r}")
+    document["workers"] = [path.name for path in merged]
+    document["warnings"] = list(dict.fromkeys(session.warnings))
     return document
 
 
@@ -979,14 +1354,14 @@ def _write_json(path: Path, document: dict[str, Any]) -> None:
 def _audit(session: _Session, document: dict[str, Any]) -> dict[str, Any]:
     """Runs blastit's own audit, in the compiled extension.
 
-    The mount prefix is left to the report: the observations carry the
-    `PATH_INFO` the app saw, and blastit's view already stripped
-    `BLASTIT_SCRIPT_NAME` from it before WSGI (§2.5), so it is the same string
-    the scheduler routed on.
+    The observations carry the `PATH_INFO` the app saw, and blastit's view had
+    already stripped `BLASTIT_SCRIPT_NAME` from it before WSGI (§2.5), so it is
+    the same string the scheduler routed on and there is no mount prefix to hand
+    over.
     """
     from blastit import _blastit
 
-    report = _blastit.audit(session.manifest, json.dumps(document), None)
+    report = _blastit.audit(session.manifest, json.dumps(document))
     return json.loads(report)
 
 
@@ -1015,6 +1390,8 @@ def _finish(session: pytest.Session, state: _Session) -> None:
     if report is not None:
         _write_json(state.report_path, report)
         lines = _summary(report, str(state.report_path))
+    for warning in state.warnings:
+        lines.append((f"blastit: {warning}", True))
     for problem in state.problems:
         lines.append((f"blastit: {problem}", True))
 
@@ -1025,9 +1402,12 @@ def _finish(session: pytest.Session, state: _Session) -> None:
             (
                 "blastit: --blastit-strict: "
                 f"{totals['missing']} statement execution(s) missing, "
-                f"{totals['unrouted']} unrouted request(s) and "
+                f"{totals['unrouted']} unrouted request(s), "
                 f"{totals['connection_setup_ungranted']} connection-setup "
-                "statement(s) not granted in every route",
+                f"statement(s) not granted in every route, "
+                f"{totals['egress']} route(s) opening connections without egress = true, "
+                f"{totals['unrecognised']} unreadable statement(s) and "
+                f"{totals['plugin_warnings']} warning(s)",
                 True,
             )
         )
@@ -1102,6 +1482,26 @@ def _summary(report: dict[str, Any], path: str) -> list[tuple[str, bool]]:
                 f"blastit: {setup['ungranted']} connection-setup statement(s) some "
                 "routes do not grant: put them in a group attached to every route "
                 f"(see {path})",
+                True,
+            )
+        )
+    for route in report["routes"]:
+        egress = route["egress"]
+        if egress["needed"]:
+            targets = ", ".join(entry["target"] for entry in egress["observed"][:3])
+            lines.append(
+                (
+                    f"blastit: route {route['name']} opens outbound connections "
+                    f"({targets}) but has no egress = true",
+                    True,
+                )
+            )
+    if report["unrecognised"]["count"]:
+        lines.append(
+            (
+                f"blastit: {report['unrecognised']['count']} statement(s) could not be "
+                f"read (a psycopg template has no text before it is rendered): "
+                f"see {path}",
                 True,
             )
         )

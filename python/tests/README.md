@@ -15,11 +15,12 @@
   tiny Django app with an unfinished `blastit.toml` next to it. That is the only
   honest way to test a pytest plugin: the options, the hooks, the terminal
   summary, the exit code and the xdist merge are all things only a session has.
-* `project/` — the Django project those sessions run: ten views, one model, a
+* `project/` — the Django project those sessions run: a dozen views, one model, a
   `connection_created` receiver that runs a `SET`, and a manifest that is missing
   grants, needs `transaction_control`, has stale grants, has a route nothing
-  exercises, has no route at all for one path a test asks for, and grants none of
-  the statements psycopg runs as a connection is established.
+  exercises, has no route at all for one path a test asks for, grants none of the
+  statements psycopg runs as a connection is established, and lets only one of
+  the two routes that open a socket say `egress = true`.
 
 They need two things `cargo test` does not give them: the compiled extension
 (`blastit._blastit`) plus the plugin entry point, installed in a virtualenv, and
