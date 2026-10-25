@@ -3,7 +3,7 @@ description: Cheap read-only reviewer for one blastit roadmap PR (DeepSeek V4.1 
 mode: subagent
 model: openrouter/deepseek/deepseek-v4.1-flash#high
 color: "#e0a84d"
-steps: 80
+steps: 150
 permissions:
   - action: edit
     resource: "*"

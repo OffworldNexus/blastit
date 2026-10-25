@@ -75,7 +75,7 @@ pub use crate::ctl::{Ctl, ExitStatus, MAX_SIGNAL, MIN_SIGNAL};
 pub use crate::decoder::Decoder;
 pub use crate::error::FrameError;
 pub use crate::frame::{
-    DoneOutcome, Frame, MAX_STATUS, MIN_STATUS, ReqHead, RespHead, Scheme, TypeCode,
+    DoneOutcome, Frame, INITIAL_WINDOW, MAX_STATUS, MIN_STATUS, ReqHead, RespHead, Scheme, TypeCode,
 };
 pub use crate::limits::{BodyChunks, Limits, MAX_FRAME_CEILING, MAX_FRAME_DEFAULT, MIN_FRAME};
 pub use crate::raw::RawFrame;
@@ -149,6 +149,8 @@ mod tests {
                 outcome: DoneOutcome::Errored,
             },
             Frame::Ready,
+            Frame::Window { bytes: 1 },
+            Frame::Window { bytes: u32::MAX },
             Frame::Ctl(Ctl::Spawn { route: 0 }),
             Frame::Ctl(Ctl::Spawn { route: u32::MAX }),
             Frame::Ctl(Ctl::Spawned {
@@ -888,5 +890,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_window_of_zero_bytes_is_refused_both_ways() {
+        let mut out = Vec::new();
+        assert!(encode(&Frame::Window { bytes: 0 }, 3, &mut out).is_err());
+        assert!(out.is_empty());
+        let mut wire = Vec::new();
+        encode(&Frame::Window { bytes: 7 }, 3, &mut wire).unwrap();
+        let n = wire.len();
+        wire[n - 4..].copy_from_slice(&0u32.to_le_bytes());
+        let mut decoder = Decoder::new(Limits::default());
+        decoder.push(&wire);
+        assert!(decoder.next_frame().is_err());
     }
 }
