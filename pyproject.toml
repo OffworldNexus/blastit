@@ -43,7 +43,10 @@ Homepage = "https://github.com/OffworldNexus/blastit"
 manifest-path = "crates/blastit-py/Cargo.toml"
 module-name = "blastit._blastit"
 python-source = "python"
-# The wheel carries `blastit/_bin/blastit-dbproxy`, a Python-free binary built by
-# `scripts/build-wheel.sh` before this one runs (gitignored in the source tree).
-# It is part of the `python-source` tree, so maturin includes it as package data;
-# the file has to keep mode 0755, because stage 0 `execve`s it (§4).
+# The wheel carries `blastit/_bin/blastit-dbproxy`, the Python-free binary stage 0
+# `execve`s for the credentials-holding role (§4, D2). `scripts/build-wheel.sh`
+# builds it and puts it in the package before maturin runs, and it is gitignored
+# there — which maturin's walk of `python-source` *does* respect, so the path is
+# named explicitly. Without this line the wheel has no dbproxy binary in it and
+# blastit refuses to start.
+include = [{ path = "python/blastit/_bin/blastit-dbproxy", format = "wheel" }]

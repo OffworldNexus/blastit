@@ -47,3 +47,13 @@ install -D -m 0755 target/release/blastit-dbproxy python/blastit/_bin/blastit-db
 # `blastit-py/extension-module` is deliberately not a default feature of that
 # crate: it must be on for this build alone (see `crates/blastit-py/Cargo.toml`).
 "${maturin[@]}" build --release --out dist --features blastit-py/extension-module "$@"
+
+# The wheel is useless without the dbproxy binary — a blastit started from it
+# refuses to boot — and maturin only puts it in because `pyproject.toml` names it
+# in `include`. Fail here rather than at the pilot's first request: the file
+# names are stored uncompressed in a wheel, so this needs no zip tool.
+wheel=$(ls -t dist/blastit-*.whl | head -1)
+if ! grep -qa "blastit/_bin/blastit-dbproxy" "$wheel"; then
+    echo "the wheel has no dbproxy binary in it: $wheel" >&2
+    exit 1
+fi

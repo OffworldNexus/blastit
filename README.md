@@ -94,16 +94,34 @@ statement it was refused:
 
 ### 1. Install
 
-blastit isn't on PyPI yet. Pre-built wheels (Linux x86_64, CPython 3.13 and
-3.14), published from every commit to `develop` on blastit's own package
-index, are the next roadmap step ([D2](ROADMAP.md#phase-d-adoption)); this
-section will then show how to `uv add` them. Until then, build it from a
-checkout (Rust 1.88+ and a CPython with its shared library):
+blastit is a wheel: a compiled extension plus a `blastit` command written in
+Python, so it runs on the interpreter of the environment you install it into.
+That is the whole trick — your app's dependencies are importable because they
+are in the same virtualenv, and the server's stage 1 *is* that interpreter.
+
+Wheels (Linux x86_64, CPython 3.13 and 3.14) are built for every commit to
+`develop` and published on blastit's own package index; this section will point
+`uv add` at it as soon as it exists. Until then, build one from a checkout
+(Rust 1.88+, and `uv` for maturin):
 
 ```console
-$ cargo build --release
-$ sudo install target/release/blastit /usr/local/bin/blastit
+$ scripts/build-wheel.sh          # dist/blastit-0.1.0-cp3xx-cp3xx-manylinux_2_34_x86_64.whl
+$ uv add dist/blastit-0.1.0-*.whl # or: pip install dist/blastit-0.1.0-*.whl
+$ uv run blastit                  # or: .venv/bin/blastit, or: python -m blastit
 ```
+
+Configuration is still environment variables only (`BLASTIT_APP`,
+`BLASTIT_MANIFEST`, `PORT`, …), and it still wants to be PID 1 in the
+container. Two things to know before you start it:
+
+* it has to run as **root**: init binds the port, then drops every other
+  process to its own unprivileged user (see the Dockerfile below);
+* the project directory — and therefore the `.venv` with blastit and the app's
+  dependencies in it — has to stay **readable by the sandbox users**. Routes run
+  as `BLASTIT_UID_BASE + 1000 + i`, and blastit drops to `UID_BASE + 3` before
+  it `execve`s its own database proxy, so a project inside a `0700` directory
+  hides both from those users. `/app`, `/srv/app` or an ordinary checkout are
+  fine.
 
 ### 2. Django
 
@@ -122,17 +140,16 @@ in the container. It binds the port and then drops every process to its own
 unprivileged user:
 
 ```dockerfile
-FROM python:3.13-slim AS blastit
-RUN apt-get update && apt-get install -y --no-install-recommends curl build-essential git \
- && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-RUN git clone --depth 1 -b develop https://github.com/OffworldNexus/blastit /src \
- && cd /src && PYO3_PYTHON=/usr/local/bin/python3.13 /root/.cargo/bin/cargo build --release
-
 FROM python:3.13-slim
 WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
-COPY --from=blastit /src/target/release/blastit /usr/local/bin/blastit
+
+# The wheel from the install step above (`scripts/build-wheel.sh` against
+# CPython 3.13), or `pip install blastit` once the index publishes it. It lands
+# in the same environment as the app, which is the point.
+COPY dist/blastit-0.1.0-cp313-*.whl /tmp/
+RUN pip install /tmp/*.whl
 
 ENV BLASTIT_APP=myproject.wsgi:application \
     BLASTIT_MANIFEST=/app/blastit.toml \
