@@ -114,8 +114,8 @@ grants on (§5), created in that view's private directory:
 
 ```
 /run/blastit/views/<uid>/            0700, owned by the view uid
-    .s.PGSQL.5432                    0600, owned by the view uid (proxy "db")
-    .s.PGSQL.5433                    0600, owned by the view uid (proxy "analytics")
+    .s.PGSQL.5432                    0600, owned by the view uid (proxy "analytics")
+    .s.PGSQL.5433                    0600, owned by the view uid (proxy "db")
 ```
 
 init binds all of these in stage 0 (it is root, and the set of views is known
@@ -325,7 +325,7 @@ payload`, in little-endian, with a hard maximum frame size of
 |---|---|
 | towards the app | `REQ_HEAD {method, target, headers, remote_addr, scheme, server_name/port}`, `REQ_BODY {bytes}`, `REQ_END`, `CANCEL` |
 | towards the client | `RESP_HEAD {status, reason, headers}`, `RESP_BODY {bytes}`, `RESP_END`, `RESP_ABORT {reason}` |
-| view → scheduler only | `DONE {req_id, outcome}`, which releases the worker slot |
+| view → scheduler only | `DONE {req_id, outcome}`, which releases the worker slot; `READY` (id 0), once, when the view can take requests |
 
 The scheduler rewrites ids between ① and ③. A view only ever sees its own
 `req_id`s and cannot address any other stream. Bodies stream in both
@@ -521,9 +521,9 @@ With DO's environment, the app ends up seeing:
 platform: DATABASE_URL=postgresql://doadmin:s3cr3t@db-xyz.db.ondigitalocean.com:25060/defaultdb?sslmode=require
           DATABASE_CA_CERT=-----BEGIN CERTIFICATE-----…
           ANALYTICS_URL=postgresql://reader:t0ps3cr3t@db-abc.db.ondigitalocean.com:25060/analytics?sslmode=require
-app:      DATABASE_URL=postgresql://blastit@%2Fproc%2Fself%2Fcwd:5432/defaultdb
+app:      DATABASE_URL=postgresql://blastit@%2Fproc%2Fself%2Fcwd:5433/defaultdb
           ANALYTICS_DB_HOST=/proc/self/cwd
-          ANALYTICS_DB_PORT=5433
+          ANALYTICS_DB_PORT=5432
           ANALYTICS_DB_NAME=analytics
           ANALYTICS_DB_USER=blastit
 ```
@@ -559,8 +559,8 @@ them.
 
 Served by dbproxy (§2.2). One listener per (route, proxy) for routes that
 have a grant on that proxy. Each `postgresql` proxy gets its own local port:
-`5432 + k`, *k* being the proxy's index among the `postgresql` proxies in the
-manifest.
+`5432 + k`, *k* being the proxy's index among the `postgresql` proxies sorted
+by name (so the order of `[proxy.*]` sections doesn't matter).
 
 | Input slot | Content | Notes |
 |---|---|---|
