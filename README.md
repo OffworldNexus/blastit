@@ -214,6 +214,96 @@ the `sql.denied` lines: each one is a statement a route ran and wasn't granted
 yet. If it belongs there, copy it into the route. If it doesn't, you just
 found a route that does more than you thought.
 
+#### Fill in the grants with your test suite
+
+Denials in production are the truth — that's what actually ran. But each pass
+only reveals the *first* denial of each request, because a denied statement
+aborts the request, so filling the manifest in that way is one deploy per
+statement. Your test suite already makes most of those requests. blastit ships
+a pytest plugin that watches it and tells you the difference, **before** the
+deploy:
+
+```console
+$ uv run pytest --blastit-manifest blastit.toml
+...
+blastit: 412 requests, 977 statements, 38/41 routes exercised — report in blastit-report.json
+blastit: route product-list: 3 statement(s) missing (see blastit-report.json)
+blastit: route checkout: needs transaction_control = true
+blastit: route search: 2 grant(s) unused
+blastit: 4 unrouted request(s): GET /robots.txt, GET /favicon.ico (see blastit-report.json)
+blastit: 2 route(s) never exercised: webhooks, admin
+======================= 1513 passed, 12 skipped in 84.20s =======================
+```
+
+The plugin is inert unless you ask for it, and it needs
+[pytest-django](https://pytest-django.readthedocs.io/) and psycopg 3 with
+server-side binding (`DATABASES[...]["OPTIONS"]["server_side_binding"] = True`,
+§6). It works under pytest-xdist too: every worker reports what it saw, and the
+controller merges them into one report. Set the manifest in `pytest.ini` or
+`pyproject.toml` if you would rather not repeat the option:
+
+```ini
+[pytest]
+blastit_manifest = blastit.toml
+```
+
+`blastit-report.json` has the detail the summary only counts, per route:
+
+```json
+{
+  "name": "product-list",
+  "requests": 26,
+  "needs_transaction_control": false,
+  "proxies": [
+    {
+      "name": "db",
+      "observed": 51,
+      "missing": [
+        {
+          "sql": "SELECT \"shop_product\".\"id\", \"shop_product\".\"name\" FROM \"shop_product\" WHERE \"shop_product\".\"on_sale\" = $1 LIMIT 21",
+          "count": 9,
+          "wire_sql": "SELECT \"shop_product\".\"id\", \"shop_product\".\"name\" FROM \"shop_product\" WHERE \"shop_product\".\"on_sale\" = $1 LIMIT 21",
+          "tests": ["shop/tests/test_catalog.py::test_on_sale"],
+          "paths": ["/products/on-sale/"]
+        }
+      ],
+      "unused": ["SELECT \"shop_product\".\"id\" FROM \"shop_product\" LIMIT 21"],
+      "transaction_control": {"observed": false, "granted": false, "needed": false}
+    }
+  ]
+}
+```
+
+How to read it:
+
+* **`missing`** — statements the suite executed that no grant allows. `sql` is
+  the *normalised* text (the exact form the manifest comparison reads), so you
+  can paste it into the route's `queries` as it is; `wire_sql` is one raw
+  occurrence with its `$1`, `$2`… placeholders; `tests` and `paths` name up to
+  five examples, so you can find the code that sent it. A statement the tests
+  never sent can still be missing in production — the report is a lower bound.
+* **`unused`** — grants that nothing matched. Either dead code, or a request
+  your suite doesn't make yet.
+* **`needs_transaction_control`** — the route ran `BEGIN`/`COMMIT` or a
+  savepoint (a nested `transaction.atomic()`, or `ATOMIC_REQUESTS` on the
+  alias) and the route's grant does not allow transaction control. Add
+  `transaction_control = true`; do *not* try to grant a savepoint, its name
+  changes on every request.
+* **`unrouted`** — paths blastit would answer `404` for before Django ever saw
+  them. Either add a route for them (a catch-all `path = ['.*']` is the usual
+  answer, so the app renders its own 404s) or stop requesting them.
+* **`unexercised_routes`** — routes nothing hit: their grants are unproven, not
+  proven wrong.
+* `--blastit-strict` fails the run when anything is missing or unrouted, for a
+  CI job that keeps the manifest from rotting. Add the `missing` statements,
+  re-run until it is clean, and deploy.
+
+Read the report, add the grants, repeat until
+`blastit: the manifest covers every request that was made`. The denial logs stay
+the source of truth in production — the tests only make the requests they make —
+but by the time the app is deployed the manifest is already most of the way
+there instead of a deploy per statement.
+
 ## What you get, and what you don't
 
 | If this is compromised… | …the attacker gets | …and cannot |

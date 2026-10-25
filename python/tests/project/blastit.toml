@@ -1,0 +1,63 @@
+# The manifest the plugin's tests diff against (D3b).
+#
+# It is deliberately *not* finished: one route is missing a grant, one needs
+# transaction control, one has a stale grant, one is never exercised, and one
+# path the tests use has no route at all. Every one of those is a line in the
+# report the plugin writes.
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+# Complete: the single SELECT this view sends is granted.
+[[route]]
+name = "notes"
+path = ['/notes/']
+methods = ["GET"]
+[route.db]
+queries = [
+  "SELECT \"notes_note\".\"id\" AS \"id\" FROM \"notes_note\" WHERE \"notes_note\".\"owner_id\" = $1"
+]
+
+# Its own grant, plus one that no code path runs any more: an `unused` line.
+[[route]]
+name = "note-create"
+path = ['/notes/create/']
+methods = ["POST"]
+[route.db]
+queries = [
+  "INSERT INTO \"notes_note\" (\"owner_id\", \"body\") VALUES ($1, $2) RETURNING \"notes_note\".\"id\"",
+  "SELECT \"notes_note\".\"body\" FROM \"notes_note\" WHERE \"notes_note\".\"id\" = $1"
+]
+
+# The view sends a DELETE; the manifest grants something else entirely.
+[[route]]
+name = "note-delete"
+path = ['/notes/[0-9]+/delete/']
+methods = ["POST"]
+[route.db]
+queries = [
+  "SELECT \"notes_note\".\"id\" FROM \"notes_note\" ORDER BY \"notes_note\".\"id\" DESC LIMIT 1"
+]
+
+# A nested `atomic` is a SAVEPOINT: the route needs transaction_control, and
+# the UPDATE it sends is granted.
+[[route]]
+name = "note-atomic"
+path = ['/notes/atomic/']
+methods = ["POST"]
+[route.db]
+queries = [
+  "UPDATE \"notes_note\" SET \"body\" = $1 WHERE \"notes_note\".\"owner_id\" = $2"
+]
+
+# No test reaches this one: it is reported as never exercised, not as missing.
+[[route]]
+name = "orders"
+path = ['/orders/']
+methods = ["GET"]
+[route.db]
+queries = [
+  "SELECT \"orders_order\".\"id\" FROM \"orders_order\" LIMIT 21"
+]

@@ -17,6 +17,13 @@
 //! touched until the `main` function is called. Tools that never serve anything
 //! (`pip`, `uv`, `python -c 'import blastit'`) run on such a wheel, and stage 1
 //! must find the process exactly as its parent left it.
+//!
+//! Two more functions serve the pytest plugin (D3b): `normalize`, blastit's own
+//! SQL normalisation, and `audit`, which diffs what a test suite observed
+//! against what a manifest grants. Both are pure: they parse, they compare, they
+//! return — no file, no connection, nothing to clean up.
+
+mod audit;
 
 use std::path::PathBuf;
 
@@ -64,6 +71,58 @@ fn main(py: Python<'_>, argv: Vec<String>, executable: String, dbproxy: String) 
     ))
 }
 
+/// Normalises one SQL text the way blastit compares it to a grant (§6).
+///
+/// The rules are [`blastit_sqlpolicy::normalize`]'s: trim, drop trailing `;`,
+/// replace every comment by a single space, collapse whitespace outside quoted
+/// regions, and keep quoted strings, identifiers and dollar-quoted text exactly
+/// as written. The manifest's text and the text on the wire go through the same
+/// function, so this is what a test-suite report means when it says a statement
+/// is not granted.
+///
+/// # Returns
+///
+/// The normalised text, which is what an allowlist stores and compares.
+#[pyfunction]
+fn normalize(sql: &str) -> String {
+    audit::normalize_sql(sql)
+}
+
+/// Diffs what a test suite observed against what a manifest grants (D3b, §6).
+///
+/// `manifest_toml` is the whole `blastit.toml`; `observations_json` is the
+/// document the pytest plugin writes (the [`audit`] module documents its shape
+/// and the shape of the report); `script_name` is a `BLASTIT_SCRIPT_NAME` mount
+/// prefix to strip before routing, or `None` when the observations already carry
+/// the `PATH_INFO` the app saw.
+///
+/// Routing is blastit's own: [`blastit_manifest::RoutingTable`] on the
+/// method and path, [`blastit_manifest::Manifest::effective_grants`] per
+/// `(route, proxy)`, and [`blastit_sqlpolicy::Allowlist::check`] on the
+/// normalised SQL. Nothing about the manifest is re-implemented here.
+///
+/// # Errors
+///
+/// [`PyValueError`] when the manifest is invalid, when the observations do not
+/// have the documented shape, or when a statement cannot be attributed to a
+/// proxy the manifest declares. A failure is a problem with what was handed
+/// over, never a partially written report.
+///
+/// # Returns
+///
+/// The report, pretty-printed JSON.
+#[pyfunction]
+#[pyo3(name = "audit")]
+#[pyo3(signature = (manifest_toml, observations_json, script_name=None))]
+fn audit_report(
+    manifest_toml: &str,
+    observations_json: &str,
+    script_name: Option<&str>,
+) -> PyResult<String> {
+    audit::audit(manifest_toml, observations_json, script_name)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// The interpreter's `sys.path`, for stage 1 to restore (§4).
 ///
 /// `sys.path` is a list of strings by construction, so anything else in it is
@@ -84,7 +143,8 @@ fn interpreter_path(py: Python<'_>) -> PyResult<Vec<String>> {
     Ok(entries)
 }
 
-/// The `blastit._blastit` module: one function, [`main`].
+/// The `blastit._blastit` module: the console script's `main`, and the two
+/// functions the pytest plugin calls (D3b).
 ///
 /// # Errors
 ///
@@ -93,5 +153,7 @@ fn interpreter_path(py: Python<'_>) -> PyResult<Vec<String>> {
 #[pymodule]
 fn _blastit(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(main, module)?)?;
+    module.add_function(wrap_pyfunction!(normalize, module)?)?;
+    module.add_function(wrap_pyfunction!(audit_report, module)?)?;
     Ok(())
 }

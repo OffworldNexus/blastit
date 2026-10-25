@@ -176,7 +176,10 @@ name = "blastit-py"
 version = "0.1.0"
 dependencies = [
  "blastit",
+ "blastit-manifest",
+ "blastit-sqlpolicy",
  "pyo3",
+ "serde_json",
 ]
 
 [[package]]

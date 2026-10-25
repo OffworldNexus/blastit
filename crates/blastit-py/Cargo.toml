@@ -31,4 +31,15 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 blastit = { version = "0.1.0", path = "../blastit" }
+# The audit behind the pytest plugin (D3b) is thrown together by Python and
+# answered by blastit itself: the manifest decides what a route may do, and
+# sqlpolicy's normaliser decides how a statement is compared to a grant. Both
+# are already in this workspace, so the wheel gains no new dependency.
+blastit-manifest = { version = "0.1.0", path = "../blastit-manifest" }
+blastit-sqlpolicy = { version = "0.1.0", path = "../blastit-sqlpolicy" }
 pyo3 = { version = "0.30.1" }
+# The observations come in as JSON and the report goes out as JSON: whatever
+# writes the plugin's reports is not Rust, and a hand-rolled encoder is one
+# escaping bug away from writing a broken report. `serde_json` is already part
+# of this workspace at this version.
+serde_json = "1.0.154"
