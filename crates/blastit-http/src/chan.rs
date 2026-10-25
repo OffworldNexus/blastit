@@ -60,6 +60,12 @@ struct Entry {
     buffered: usize,
     /// Set when the stream failed and its connection has to stop.
     abort: watch::Sender<bool>,
+    /// Request-body credit granted so far, `INITIAL_WINDOW` plus every
+    /// `WINDOW` the scheduler has forwarded. Additive: a grant never has to be
+    /// remembered separately.
+    granted: u64,
+    /// The same number, as the connection sees it.
+    credit: watch::Sender<u64>,
 }
 
 impl Entry {
@@ -127,6 +133,7 @@ impl Shared {
         &self,
         sender: mpsc::UnboundedSender<Frame>,
         abort: watch::Sender<bool>,
+        credit: watch::Sender<u64>,
     ) -> Option<u32> {
         let mut streams = self.streams();
         let attempts = streams.len() + 1;
@@ -137,6 +144,8 @@ impl Shared {
                 sender,
                 buffered: 0,
                 abort,
+                granted: u64::from(blastit_frame::INITIAL_WINDOW),
+                credit,
             },
         );
         Some(id)
@@ -156,6 +165,20 @@ impl Shared {
         self.streams().remove(&id);
         // Prompt: a cancel goes out even while the writer is busy.
         let _ = self.cancels.send((id, Frame::Cancel));
+    }
+
+    /// Add request-body credit to one stream.
+    ///
+    /// Runs from the reader task, so it never awaits: the connection is woken
+    /// through the watch it is already waiting on.
+    fn grant_credit(&self, id: u32, bytes: u32) {
+        let mut streams = self.streams();
+        let Some(entry) = streams.get_mut(&id) else {
+            // Unknown or already finished stream: a late grant, dropped.
+            return;
+        };
+        entry.granted = entry.granted.saturating_add(u64::from(bytes));
+        entry.credit.send_replace(entry.granted);
     }
 }
 
@@ -233,13 +256,15 @@ impl Chan {
     pub fn open(&self) -> Option<Stream> {
         let (sender, incoming) = mpsc::unbounded_channel();
         let (abort, aborted) = watch::channel(false);
-        let id = self.shared.allocate(sender, abort.clone())?;
+        let (credit, credited) = watch::channel(u64::from(blastit_frame::INITIAL_WINDOW));
+        let id = self.shared.allocate(sender, abort.clone(), credit)?;
         Some(Stream {
             shared: self.shared.clone(),
             id,
             incoming,
             abort,
             aborted,
+            credit: credited,
         })
     }
 
@@ -277,6 +302,9 @@ pub struct Stream {
     /// stream does: "not aborted yet" must never be mistaken for "aborted".
     abort: watch::Sender<bool>,
     aborted: watch::Receiver<bool>,
+    /// Total request-body credit granted for this stream, `INITIAL_WINDOW`
+    /// plus every `WINDOW` the scheduler has forwarded.
+    credit: watch::Receiver<u64>,
 }
 
 impl Stream {
@@ -312,6 +340,52 @@ impl Stream {
             .cancels
             .send((self.id, Frame::Cancel))
             .map_err(|_| HttpError::ChannelClosed)
+    }
+
+    /// Grant the scheduler `bytes` more response-body credit for this stream.
+    ///
+    /// A window is a control frame, so it does not wait behind body frames on
+    /// the writer's queue; it cannot block at all.
+    ///
+    /// # Errors
+    ///
+    /// [`HttpError::ChannelClosed`] once the scheduler end is gone.
+    pub fn send_window(&self, bytes: u32) -> Result<(), HttpError> {
+        debug_assert!(bytes > 0, "a window grants at least one byte");
+        if !self.shared.is_alive() {
+            return Err(HttpError::ChannelClosed);
+        }
+        self.shared
+            .cancels
+            .send((self.id, Frame::Window { bytes }))
+            .map_err(|_| HttpError::ChannelClosed)
+    }
+
+    /// Total request-body credit granted for this stream so far.
+    ///
+    /// A connection subtracts what it has already sent to know what is left.
+    pub fn credit(&self) -> u64 {
+        *self.credit.borrow()
+    }
+
+    /// Wait until more request-body credit is granted.
+    ///
+    /// Returns `true` once the total changes, so the caller re-reads
+    /// [`Stream::credit`]. `false` means no credit can ever arrive: the stream
+    /// failed, or the scheduler end is gone.
+    pub async fn more_credit(&mut self) -> bool {
+        self.credit.changed().await.is_ok()
+    }
+
+    /// Response bytes received but not yet handed to the client.
+    ///
+    /// Zero means nothing of this stream is waiting in the queue, so a sender
+    /// that has stopped is stopping for credit rather than for work.
+    pub fn queued_bytes(&self) -> usize {
+        self.shared
+            .streams()
+            .get(&self.id)
+            .map_or(0, |entry| entry.buffered)
     }
 
     /// The next frame of this stream's response.
@@ -497,7 +571,17 @@ where
 /// Route one frame from the scheduler to the connection that owns its stream.
 fn dispatch(shared: &Shared, id: u32, frame: Frame) {
     // Id 0 carries `READY` and `ctl.chan` traffic, neither of which is ours.
-    if id == 0 || !is_response(&frame) {
+    if id == 0 {
+        return;
+    }
+    // A window is request-body credit, not a response frame: it wakes the
+    // connection through the watch instead of the queue, so it can never be
+    // mistaken for a body.
+    if let Frame::Window { bytes } = frame {
+        shared.grant_credit(id, bytes);
+        return;
+    }
+    if !is_response(&frame) {
         return;
     }
     let weight = Entry::weight(&frame);
@@ -507,8 +591,9 @@ fn dispatch(shared: &Shared, id: u32, frame: Frame) {
         return;
     };
     if entry.buffered.saturating_add(weight) > shared.stream_buffer_bytes {
-        // This client is not reading its response. Fail this stream alone and
-        // let the scheduler know, without holding up anybody else's.
+        // A peer that sends past its credit has broken the protocol. Fail this
+        // stream alone and let the scheduler know, without holding up anybody
+        // else's.
         drop(streams);
         shared.fail_stream(id);
         return;
@@ -524,7 +609,7 @@ fn dispatch(shared: &Shared, id: u32, frame: Frame) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blastit_frame::{RespHead, Scheme};
+    use blastit_frame::{INITIAL_WINDOW, RespHead, Scheme};
     use std::time::Duration;
     use tokio::io::duplex;
 
@@ -834,6 +919,127 @@ mod tests {
             assert_eq!(frame, Frame::RespBody(vec![byte; 8]));
             stream.release(&frame);
         }
+    }
+
+    #[tokio::test]
+    async fn a_stream_starts_with_one_window_of_credit() {
+        let (client, _peer) = duplex(4096);
+        let chan = Chan::new(client, Limits::default());
+        let stream = open(&chan);
+        assert_eq!(stream.credit(), u64::from(INITIAL_WINDOW));
+    }
+
+    #[tokio::test]
+    async fn a_window_adds_credit_and_wakes_the_waiter() {
+        let (client, mut peer) = duplex(64 * 1024);
+        let chan = Chan::new(client, Limits::default());
+        let mut stream = open(&chan);
+        let id = stream.id();
+
+        // Nothing has been granted yet, so this waits.
+        let waiting = tokio::time::timeout(Duration::from_millis(50), stream.more_credit()).await;
+        assert!(waiting.is_err(), "there was no grant to wake on");
+
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&Frame::Window { bytes: 4096 }, id, &mut wire)
+            .unwrap();
+        // A window for somebody else must not wake this stream.
+        Limits::default()
+            .encode(&Frame::Window { bytes: 99 }, id + 7, &mut wire)
+            .unwrap();
+        peer.write_all(&wire).await.unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), stream.more_credit())
+                .await
+                .expect("the grant must wake the stream")
+        );
+        assert_eq!(stream.credit(), u64::from(INITIAL_WINDOW) + 4096);
+    }
+
+    #[tokio::test]
+    async fn a_window_is_credited_only_while_the_stream_lives() {
+        let (client, mut peer) = duplex(64 * 1024);
+        let chan = Chan::new(client, Limits::default());
+        let stream = open(&chan);
+        let id = stream.id();
+        drop(stream);
+
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&Frame::Window { bytes: 4096 }, id, &mut wire)
+            .unwrap();
+        peer.write_all(&wire).await.unwrap();
+        // A grant for a stream nobody owns is dropped: the next one, for a
+        // fresh stream, is what proves the reader kept going.
+        let fresh = open(&chan);
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&Frame::Window { bytes: 1 }, fresh.id(), &mut wire)
+            .unwrap();
+        peer.write_all(&wire).await.unwrap();
+        assert_eq!(chan.shared.streams().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn more_credit_reports_a_channel_that_can_grant_nothing() {
+        let (client, peer) = duplex(4096);
+        let chan = Chan::new(client, Limits::default());
+        let mut stream = open(&chan);
+        drop(peer);
+        assert!(
+            !stream.more_credit().await,
+            "a dead channel cannot grant more credit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grant_does_not_wait_behind_request_frames() {
+        let (client, mut peer) = duplex(64 * 1024);
+        let chan = Chan::new(client, Limits::default());
+        let mut stream = open(&chan);
+        let id = stream.id();
+
+        // A body frame is queued but the writer has not drained it yet, because
+        // nothing is reading the peer.
+        stream.send_body(vec![b'b'; 4096]).await.unwrap();
+        // A window is a control frame: it goes out ahead of it.
+        stream.send_window(64 * 1024).unwrap();
+
+        let mut decoder = Decoder::new(Limits::default());
+        let mut buf = vec![0u8; 8192];
+        let read = tokio::time::timeout(Duration::from_secs(5), peer.read(&mut buf))
+            .await
+            .expect("the writer must send something")
+            .expect("read");
+        decoder.push(&buf[..read]);
+        let first = decoder.next_frame().unwrap().expect("a frame");
+        assert_eq!(
+            first,
+            (id, Frame::Window { bytes: 64 * 1024 }),
+            "the grant must not wait behind the body"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_bytes_track_what_the_connection_has_not_taken() {
+        let (client, mut peer) = duplex(64 * 1024);
+        let chan = Chan::with_stream_buffer(client, Limits::default(), 1 << 20);
+        let mut stream = open(&chan);
+        let id = stream.id();
+        assert_eq!(stream.queued_bytes(), 0);
+
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&Frame::RespBody(vec![b'q'; 1000]), id, &mut wire)
+            .unwrap();
+        peer.write_all(&wire).await.unwrap();
+        let frame = stream.recv().await.unwrap().expect("the frame");
+        assert_eq!(stream.queued_bytes(), 1000);
+
+        stream.release(&frame);
+        assert_eq!(stream.queued_bytes(), 0);
     }
 
     #[tokio::test]

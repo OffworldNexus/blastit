@@ -25,6 +25,14 @@ use crate::response::{self, Framing};
 /// Most bytes read from the client in one go.
 const READ_CHUNK: usize = 16 * 1024;
 
+/// Response-body bytes written before a `WINDOW` grant is batched up.
+///
+/// Grants are what keep a view from running out of credit, so they are sent as
+/// soon as this much has been written — and once more whenever the response
+/// goes quiet, because a view that is *waiting* for credit would otherwise wait
+/// for the next byte to arrive, which is the byte it is not allowed to send.
+const WINDOW_GRANT: u64 = 64 * 1024;
+
 /// Consumed bytes below this mark are not worth moving to the front of the
 /// buffer; above it, the buffer is compacted once the read cursor is past
 /// halfway.
@@ -67,6 +75,53 @@ enum BodyFill {
     Closed,
     /// The scheduler channel failed while the body was still arriving.
     ChannelClosed,
+}
+
+/// What ended a wait for more request-body credit.
+enum CreditWait {
+    /// A `WINDOW` arrived; there may be credit to spend now.
+    Granted,
+    /// `body_timeout` ran out while waiting.
+    Expired,
+    /// No credit can arrive any more: the stream failed, or the channel did.
+    ChannelClosed,
+}
+
+/// The request-body credit of the stream in flight.
+///
+/// Bodies start with `INITIAL_WINDOW` bytes and may not be sent faster than the
+/// scheduler grants more: a slow app slows its own client down, and nothing
+/// else.
+struct Credit {
+    /// Total credit granted so far, as the channel last reported it.
+    granted: u64,
+    /// Body bytes already sent on this stream.
+    sent: u64,
+}
+
+impl Credit {
+    /// The credit a fresh stream starts with.
+    fn new(stream: &Stream) -> Self {
+        Self {
+            granted: stream.credit(),
+            sent: 0,
+        }
+    }
+
+    /// Body bytes that may still be sent.
+    fn available(&self) -> u64 {
+        self.granted.saturating_sub(self.sent)
+    }
+
+    /// Remember that `bytes` were sent.
+    fn spend(&mut self, bytes: u64) {
+        self.sent = self.sent.saturating_add(bytes);
+    }
+
+    /// Take the channel's latest grant into account.
+    fn refresh(&mut self, stream: &Stream) {
+        self.granted = stream.credit();
+    }
 }
 
 /// The result of waiting for more of a request head.
@@ -118,6 +173,9 @@ pub(crate) struct Conn<'a, IO> {
     buf: Vec<u8>,
     pos: usize,
     scratch: Vec<u8>,
+    /// De-chunked body bytes that are decoded but not yet sent, because the
+    /// stream has no credit left for them.
+    pending: Vec<u8>,
     started: Instant,
     requests: u64,
 }
@@ -143,6 +201,7 @@ where
             buf: Vec::new(),
             pos: 0,
             scratch: Vec::new(),
+            pending: Vec::new(),
             started: Instant::now(),
             requests: 0,
         }
@@ -300,7 +359,11 @@ where
             return Ok(false);
         }
 
-        match self.stream_body(&mut stream, &head, body_deadline).await {
+        let mut credit = Credit::new(&stream);
+        match self
+            .stream_body(&mut stream, &head, body_deadline, &mut credit)
+            .await
+        {
             BodyOutcome::Sent => {}
             BodyOutcome::ClientGone => {
                 let _ = stream.send_cancel().await;
@@ -340,20 +403,27 @@ where
         }
     }
 
-    /// Stream the request body to the scheduler, framed as it arrived.
+    /// Stream the request body to the scheduler, framed as it arrived, and no
+    /// faster than its credit allows.
     async fn stream_body(
         &mut self,
         stream: &mut Stream,
         head: &RequestHead,
         deadline: Instant,
+        credit: &mut Credit,
     ) -> BodyOutcome {
         match head.body {
             BodyFraming::None | BodyFraming::ContentLength(0) => match stream.send_end().await {
                 Ok(()) => BodyOutcome::Sent,
                 Err(_) => BodyOutcome::ChannelClosed,
             },
-            BodyFraming::ContentLength(len) => self.stream_fixed_body(stream, len, deadline).await,
-            BodyFraming::Chunked => self.stream_chunked_body(stream, head, deadline).await,
+            BodyFraming::ContentLength(len) => {
+                self.stream_fixed_body(stream, len, deadline, credit).await
+            }
+            BodyFraming::Chunked => {
+                self.stream_chunked_body(stream, head, deadline, credit)
+                    .await
+            }
         }
     }
 
@@ -363,9 +433,19 @@ where
         stream: &mut Stream,
         len: u64,
         deadline: Instant,
+        credit: &mut Credit,
     ) -> BodyOutcome {
         let mut remaining = len;
         while remaining > 0 {
+            // Out of credit: stop reading this client's socket until the app
+            // has consumed some of what it already has.
+            if credit.available() == 0 {
+                match self.wait_for_credit(stream, deadline, credit).await {
+                    CreditWait::Granted => continue,
+                    CreditWait::Expired => return BodyOutcome::TimedOut,
+                    CreditWait::ChannelClosed => return BodyOutcome::ChannelClosed,
+                }
+            }
             if self.pos == self.buf.len() {
                 match self.fill_body(stream, deadline).await {
                     BodyFill::Bytes => {}
@@ -374,11 +454,15 @@ where
                     BodyFill::ChannelClosed => return BodyOutcome::ChannelClosed,
                 }
             }
-            let available = (self.buf.len() - self.pos) as u64;
-            let take = remaining.min(available) as usize;
+            let buffered = (self.buf.len() - self.pos) as u64;
+            let take = remaining.min(credit.available()).min(buffered) as usize;
+            if take == 0 {
+                continue;
+            }
             let body = self.buf[self.pos..self.pos + take].to_vec();
             self.pos += take;
             remaining -= take as u64;
+            credit.spend(take as u64);
             if stream.send_body(body).await.is_err() {
                 return BodyOutcome::ChannelClosed;
             }
@@ -389,16 +473,48 @@ where
         }
     }
 
-    /// De-chunk a body as it arrives and stream it on.
+    /// De-chunk a body as it arrives and stream it on, no faster than its
+    /// credit allows.
     async fn stream_chunked_body(
         &mut self,
         stream: &mut Stream,
         head: &RequestHead,
         deadline: Instant,
+        credit: &mut Credit,
     ) -> BodyOutcome {
         let mut dechunker = Dechunker::new(self.cfg.max_body_bytes);
         self.scratch.clear();
+        self.pending.clear();
+        let mut done = false;
         loop {
+            // 1. Hand over what is decoded and already paid for.
+            if credit.available() > 0 && !self.pending.is_empty() {
+                let take = (self.pending.len() as u64).min(credit.available()) as usize;
+                let body: Vec<u8> = self.pending.drain(..take).collect();
+                credit.spend(take as u64);
+                if stream.send_body(body).await.is_err() {
+                    return BodyOutcome::ChannelClosed;
+                }
+                continue;
+            }
+            // 2. The body is over and everything decoded has been sent.
+            if done && self.pending.is_empty() {
+                return match stream.send_end().await {
+                    Ok(()) => BodyOutcome::Sent,
+                    Err(_) => BodyOutcome::ChannelClosed,
+                };
+            }
+            // 3. Out of credit: stop reading this client's socket until the app
+            //    has consumed some of what it already has.
+            if credit.available() == 0 {
+                match self.wait_for_credit(stream, deadline, credit).await {
+                    CreditWait::Granted => continue,
+                    CreditWait::Expired => return BodyOutcome::TimedOut,
+                    CreditWait::ChannelClosed => return BodyOutcome::ChannelClosed,
+                }
+            }
+            // 4. Decode more, reading from the client only when there is
+            //    nothing buffered to work on.
             let pushed = dechunker.push(&self.buf[self.pos..], &mut self.scratch);
             let (used, step) = match pushed {
                 Ok((0, _)) => {
@@ -427,18 +543,35 @@ where
                 }
             };
             self.pos += used;
-            if !self.scratch.is_empty() {
-                let body = std::mem::take(&mut self.scratch);
-                if stream.send_body(body).await.is_err() {
-                    return BodyOutcome::ChannelClosed;
+            self.pending.append(&mut self.scratch);
+            done = step == Step::Done;
+        }
+    }
+
+    /// Wait for request-body credit, bounded by `body_timeout` and by the
+    /// channel itself.
+    ///
+    /// The per-read idle bound deliberately does not apply: while waiting, the
+    /// client is not supposed to be sending anything, so going quiet says
+    /// nothing about whether it is still there.
+    async fn wait_for_credit(
+        &mut self,
+        stream: &mut Stream,
+        deadline: Instant,
+        credit: &mut Credit,
+    ) -> CreditWait {
+        let chan = self.chan;
+        tokio::select! {
+            granted = stream.more_credit() => {
+                credit.refresh(stream);
+                if granted {
+                    CreditWait::Granted
+                } else {
+                    CreditWait::ChannelClosed
                 }
             }
-            if step == Step::Done {
-                return match stream.send_end().await {
-                    Ok(()) => BodyOutcome::Sent,
-                    Err(_) => BodyOutcome::ChannelClosed,
-                };
-            }
+            () = tokio::time::sleep_until(deadline) => CreditWait::Expired,
+            () = chan.closed() => CreditWait::ChannelClosed,
         }
     }
 
@@ -449,7 +582,18 @@ where
         request: &RequestHead,
     ) -> Result<Relay, HttpError> {
         let mut resp = Resp::new();
+        // Response-body bytes the client has taken, not yet turned into a
+        // `WINDOW` back to the scheduler.
+        let mut grant: u64 = 0;
         loop {
+            // Return credit in batches, and always before waiting: a view that
+            // blocked on credit has nothing left to send, so waiting for the
+            // next frame here would wait for the grant itself.
+            let bytes = grant.min(u64::from(u32::MAX)) as u32;
+            if bytes > 0 && (grant >= WINDOW_GRANT || stream.queued_bytes() == 0) {
+                let _ = stream.send_window(bytes);
+                grant -= u64::from(bytes);
+            }
             let Some(frame) = stream.recv().await? else {
                 // No answer can arrive any more.
                 return Ok(self.fail(&mut resp, 502).await);
@@ -490,6 +634,10 @@ where
                     if !self.write_body(stream, &mut resp, chunk).await {
                         return Ok(Relay::Abort);
                     }
+                    // Credit is owed for every body byte the connection has
+                    // dealt with, written or knowingly dropped: the view may
+                    // send that much again.
+                    grant = grant.saturating_add(chunk.len() as u64);
                 }
                 Frame::RespEnd => {
                     if !resp.head_written {
