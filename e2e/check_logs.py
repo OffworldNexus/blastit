@@ -46,12 +46,16 @@ def main():
     sqls = [e.get("sql", "") for e in denied]
     check(any(e.get("route") == "notes" and '"auth_user"."password"' in e.get("sql", "") for e in denied),
           "the password-hash read from the notes route was denied and logged")
-    check(any(e.get("route") == "notes" and sql.strip().startswith("DROP TABLE") for sql in sqls),
+    check(any(e.get("route") == "notes" and sql.strip().startswith("DROP TABLE") for e, sql in zip(denied, sqls)),
           "the destructive statement was refused and logged")
     check(any("auth_user" in sql and "count" in sql.lower() for sql in sqls),
           "the users table couldn't be counted from the route that wasn't granted it")
-    check(not any(sql.strip() == "SELECT count(*) FROM notes_note" for sql in sqls),
-          "the statement the sql route was granted was never refused")
+    refusals = {(e.get("route"), sql.strip()) for e, sql in zip(denied, sqls)}
+    granted_text = "SELECT count(*) FROM notes_note"
+    check(("notes", granted_text) in refusals,
+          "the very statement the other route was granted is refused here")
+    check(not any(route == "sql" and sql == granted_text for route, sql in refusals),
+          "the route that was granted the statement was never refused it")
     routes = {e.get("route") for e in denied}
     check(routes <= {"notes", "debug", "sql"}, f"every refusal names its own route ({routes})")
 

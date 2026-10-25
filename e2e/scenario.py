@@ -148,6 +148,8 @@ def main():
         check(facts.get("has_password") is True, "baseline: the app holds the database password")
 
     print("raw SQL, from two processes")
+    # One note to count, so "unchanged" cannot pass on an empty table.
+    alice.post("/notes/", {"text": "keep-me"})
     granted = "SELECT count(*) FROM notes_note"
     other = "SELECT count(*) FROM auth_user"
     destructive = "DROP TABLE notes_note"
@@ -163,6 +165,7 @@ def main():
     status, body = raw(alice, "/debug/sql/", granted)
     before = int(body.get("rows", [["0"]])[0][0]) if body.get("ok") else None
     check(status == 200 and body.get("ok") is True, "raw SQL runs where it was granted")
+    check(before is not None and before >= 1, "the row to protect is really there")
     if under_blastit:
         check(body.get("route") == "sql", "and it ran in the sql route's own process")
 
@@ -192,8 +195,10 @@ def main():
         # And the routes still work: their own grants were never affected.
         status, _, body = alice.request("GET", "/notes/")
         check(status == 200, "the notes route still works")
-        status, _, body = alice.post("/login/", {"username": "alice", "password": args.password})
-        check(status == 302, "alice can still log in")
+        fresh = Client(args.base)
+        fresh.request("GET", "/login/")
+        status, _, _ = fresh.post("/login/", {"username": "alice", "password": args.password})
+        check(status == 302, "the users table is intact: a new client still logs in")
 
     print("log out")
     status, _, _ = alice.post("/logout/")
