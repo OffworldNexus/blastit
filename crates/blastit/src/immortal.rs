@@ -744,6 +744,14 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let version = py.version_info();
+            // A fresh object, created while this test holds the heap lock: no
+            // pass another test ran can have marked it, so it says whether
+            // *this* one walked. (The count cannot: a heap a previous test
+            // immortalised is walked and matches nothing.)
+            let globals = namespace(py, c"HELD = {'marker': 'blastit' * 32}\n");
+            let marker = globals.get_item("HELD").unwrap().unwrap();
+            assert!(!is_immortal(marker.as_ptr()), "immortal before the pass");
+
             // On this interpreter, `auto` runs the walk exactly when the pure
             // decision says it should; on 3.14 that is "no walk", which is the
             // point of the whole exercise.
@@ -759,11 +767,13 @@ mod tests {
                     version.major,
                     version.minor
                 );
-                assert!(outcome.objects() > 0, "nothing was immortalised");
+                assert!(is_immortal(marker.as_ptr()), "the heap was not walked");
                 let millis = outcome.millis().unwrap();
                 assert!(millis >= 0.0 && millis.is_finite(), "{millis}");
             } else {
                 assert_eq!(outcome.objects(), 0);
+                assert_eq!(outcome.millis(), None);
+                assert!(!is_immortal(marker.as_ptr()), "the heap was walked");
                 let reason = outcome.decision.reason().unwrap();
                 assert!(reason.contains("views will copy"), "{reason}");
             }
