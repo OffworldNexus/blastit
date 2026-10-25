@@ -7,16 +7,20 @@
 
 use std::future::Future;
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use blastit_events::RejectReason;
 use blastit_frame::Limits;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::Emit;
 use crate::chan::Chan;
 use crate::config::HttpConfig;
-use crate::conn::Conn;
+use crate::conn::{Conn, emit_rejected};
 use crate::error::HttpError;
+use crate::response;
 
 /// Something that hands out accepted client connections.
 ///
@@ -82,6 +86,8 @@ pub struct Server {
     chan: Chan,
     cfg: HttpConfig,
     emit: Emit,
+    /// Connections currently being served, for `max_connections`.
+    live: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -94,8 +100,13 @@ impl Server {
     where
         C: AsyncRead + AsyncWrite + Send + 'static,
     {
-        let chan = Chan::new(channel, cfg.frame_limits);
-        Self { chan, cfg, emit }
+        let chan = Chan::with_stream_buffer(channel, cfg.frame_limits, cfg.stream_buffer_bytes);
+        Self {
+            chan,
+            cfg,
+            emit,
+            live: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// The configuration this server was built with.
@@ -149,18 +160,47 @@ impl Server {
             };
             match accepted {
                 Ok((io, peer)) => {
+                    // Above the cap, one more client is still *answered* — a
+                    // load balancer that gets a 503 can retry elsewhere, while
+                    // one that gets a timeout can only count errors. The
+                    // counting happens here so no connection is ever queued.
+                    if self.live.fetch_add(1, Ordering::AcqRel) >= self.cfg.max_connections {
+                        self.live.fetch_sub(1, Ordering::AcqRel);
+                        let emit = self.emit.clone();
+                        tokio::spawn(async move { refuse_over_capacity(io, &peer, &emit).await });
+                        continue;
+                    }
                     let cfg = self.cfg.clone();
                     let emit = self.emit.clone();
                     let chan = self.chan.clone();
+                    let live = Arc::clone(&self.live);
                     tokio::spawn(async move {
                         let conn = Conn::new(io, peer, &cfg, &emit, &chan);
                         let _ = conn.run().await;
+                        live.fetch_sub(1, Ordering::AcqRel);
                     });
                 }
                 Err(err) => return Err(HttpError::Accept(err)),
             }
         }
     }
+}
+
+/// Answer one connection the server has no room for, and close it.
+async fn refuse_over_capacity<IO>(mut io: IO, peer: &str, emit: &Emit)
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    emit_rejected(
+        emit,
+        peer,
+        503,
+        RejectReason::Other("too_many_connections".into()),
+    );
+    let _ = io.write_all(&response::simple(503)).await;
+    // Half-close as well, so the client sees the answer end rather than waiting
+    // on a connection this server will never use.
+    let _ = io.shutdown().await;
 }
 
 /// Serve HTTP/1.1 on the inherited listener until `http.chan` fails (§2.3).

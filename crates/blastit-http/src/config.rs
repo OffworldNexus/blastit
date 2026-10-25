@@ -48,6 +48,24 @@ pub struct HttpConfig {
     /// `SERVER_PORT` as the app sees it: the port the load balancer published,
     /// not the one this process is bound to.
     pub server_port: u16,
+    /// Most response bytes one request may have queued for a client that is not
+    /// reading them yet.
+    ///
+    /// Each request buffers on its own: a client that stops reading its
+    /// response can fill this much and no more, and then only its own stream
+    /// fails. The shared channel reader never waits for a client, so no stream
+    /// can delay another.
+    pub stream_buffer_bytes: usize,
+    /// Most client connections served at once.
+    ///
+    /// Above it, connections are accepted and answered with `503` straight
+    /// away, so the load balancer gets a reply instead of a timeout.
+    pub max_connections: usize,
+    /// How long a request body may take in total, from the end of its head.
+    ///
+    /// App Platform closes uploads at 600 s, so waiting longer than that only
+    /// ties up a connection for a request that can never complete.
+    pub body_timeout: Duration,
 }
 
 impl Default for HttpConfig {
@@ -60,6 +78,9 @@ impl Default for HttpConfig {
             trust_forwarded: true,
             frame_limits: Limits::default(),
             server_port: 8080,
+            stream_buffer_bytes: 4 * MIB as usize,
+            max_connections: 1024,
+            body_timeout: Duration::from_secs(600),
         }
     }
 }
@@ -75,6 +96,9 @@ mod tests {
         assert_eq!(cfg.max_body_bytes, 100 * 1024 * 1024);
         assert_eq!(cfg.header_timeout, Duration::from_secs(10));
         assert_eq!(cfg.keepalive_timeout, Duration::from_secs(75));
+        assert_eq!(cfg.stream_buffer_bytes, 4 * 1024 * 1024);
+        assert_eq!(cfg.max_connections, 1024);
+        assert_eq!(cfg.body_timeout, Duration::from_secs(600));
         assert!(cfg.trust_forwarded, "§8.2 defaults trust_forwarded to 1");
         assert_eq!(cfg.frame_limits, Limits::default());
         assert_eq!(cfg.server_port, 8080);

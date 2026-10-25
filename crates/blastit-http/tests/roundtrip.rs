@@ -197,8 +197,9 @@ async fn http_1_0_keep_alive_is_answered_explicitly() {
         .respond(id, 204, &[("Content-Length", "0")], b"")
         .await;
     assert_eq!(
-        h.client.read_response().await,
-        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        h.client.read_to_end().await,
+        b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
+        "a 204 has no body, so it carries no length"
     );
 }
 
@@ -295,6 +296,41 @@ async fn head_requests_get_a_head_and_no_body() {
             .read_response()
             .await
             .starts_with(b"HTTP/1.1 200 OK\r\n")
+    );
+}
+
+#[tokio::test]
+async fn a_304_keeps_its_length_and_a_204_loses_it() {
+    // A 304 is describing the cached `GET`, so its length is meaningful; a 204
+    // can never have a body, so a length on it is a lie.
+    let mut h = harness();
+    h.client.write(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n").await;
+    let (id, _) = h.scheduler.head().await;
+    assert_eq!(h.scheduler.end().await, id);
+    h.scheduler
+        .respond(
+            id,
+            304,
+            &[("Content-Length", "42"), ("ETag", "\"v1\"")],
+            b"",
+        )
+        .await;
+    assert_eq!(
+        h.client.read_head().await,
+        b"HTTP/1.1 304 Not Modified\r\nContent-Length: 42\r\nETag: \"v1\"\r\n\r\n"
+    );
+
+    h.client
+        .write(b"GET /again HTTP/1.1\r\nHost: h\r\n\r\n")
+        .await;
+    let (id, _) = h.scheduler.head().await;
+    assert_eq!(h.scheduler.end().await, id);
+    h.scheduler
+        .respond(id, 204, &[("Content-Length", "42")], b"")
+        .await;
+    assert_eq!(
+        h.client.read_head().await,
+        b"HTTP/1.1 204 No Content\r\n\r\n"
     );
 }
 

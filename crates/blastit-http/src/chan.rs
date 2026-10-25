@@ -8,10 +8,29 @@
 //! http  ← RESP_HEAD, RESP_BODY*, RESP_END | RESP_ABORT
 //! ```
 //!
-//! Two tasks own the channel. The **writer** is fed by an mpsc queue and
-//! encodes whatever arrives; the **reader** decodes frames and hands each one
-//! to the connection that opened the stream, dropping frames for ids nobody
-//! knows. Connections only see their own [`Stream`].
+//! Two tasks own the channel. The **writer** is fed by a queue and encodes
+//! whatever arrives; the **reader** decodes frames and hands each one to the
+//! connection that opened the stream, dropping frames for ids nobody knows.
+//! Connections only see their own [`Stream`].
+//!
+//! # The reader never waits for a connection
+//!
+//! One client that stops reading its response must not be able to hold up the
+//! channel every other request shares. So the reader hands frames to a
+//! connection through an *unbounded* queue and does no awaiting of its own: it
+//! only ever locks a map for a moment and pushes.
+//!
+//! What keeps that from growing without bound is accounting, not blocking. Each
+//! stream counts the response bytes it has received but that have not been
+//! handed to the client yet; once that reaches
+//! [`HttpConfig::stream_buffer_bytes`](crate::HttpConfig::stream_buffer_bytes),
+//! *that stream* fails — the scheduler is told `CANCEL`, the client connection
+//! is aborted, and everything that still arrives for the id is dropped. Every
+//! other stream carries on.
+//!
+//! Cancels take the same route: the reader never waits on the writer's queue
+//! either, it drops them into a dedicated unbounded one that the writer always
+//! drains first.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -23,28 +42,58 @@ use tokio::sync::{mpsc, watch};
 
 use crate::error::HttpError;
 
-/// Frames that may wait for one connection before the channel reader stops
-/// reading. Small, because a frame can carry a mebibyte of body.
-const STREAM_QUEUE: usize = 16;
-
-/// Frames that may wait for the writer task.
+/// Frames that may wait for the writer task before the connections sending them
+/// wait too. This is the *request* direction, where waiting is exactly the
+/// backpressure a body upload should feel.
 const WRITE_QUEUE: usize = 64;
 
 /// Bytes read from `http.chan` at a time.
 const CHANNEL_READ: usize = 64 * 1024;
 
+/// One open stream, as the channel sees it.
+struct Entry {
+    /// Frames on their way to the connection. Unbounded on purpose: the reader
+    /// must never wait for a client, and [`Entry::buffered`] is what stops the
+    /// queue from growing forever.
+    sender: mpsc::UnboundedSender<Frame>,
+    /// Response bytes queued but not yet handed to the connection.
+    buffered: usize,
+    /// Set when the stream failed and its connection has to stop.
+    abort: watch::Sender<bool>,
+}
+
+impl Entry {
+    /// How many bytes of `frame` count against the stream's buffer.
+    ///
+    /// Bodies count in full; a head counts its header names and values, which
+    /// is what would reach the client. End markers count nothing.
+    fn weight(frame: &Frame) -> usize {
+        match frame {
+            Frame::RespBody(body) => body.len(),
+            Frame::RespHead(head) => head
+                .headers
+                .iter()
+                .map(|(name, value)| name.len() + value.len())
+                .sum(),
+            _ => 0,
+        }
+    }
+}
+
 /// State shared by the two channel tasks and every open stream.
 struct Shared {
     limits: Limits,
     out: mpsc::Sender<(u32, Frame)>,
-    streams: Mutex<HashMap<u32, mpsc::Sender<Frame>>>,
+    cancels: mpsc::UnboundedSender<(u32, Frame)>,
+    streams: Mutex<HashMap<u32, Entry>>,
     alive: watch::Sender<bool>,
     next_id: AtomicU32,
+    stream_buffer_bytes: usize,
 }
 
 impl Shared {
     /// The streams map, without ever panicking on a poisoned lock.
-    fn streams(&self) -> MutexGuard<'_, HashMap<u32, mpsc::Sender<Frame>>> {
+    fn streams(&self) -> MutexGuard<'_, HashMap<u32, Entry>> {
         self.streams
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -69,19 +118,59 @@ impl Shared {
 
     /// Give out a stream id that is not in flight.
     ///
-    /// Ids start at one (zero is reserved) and wrap through the whole `u32`
-    /// range; an id whose previous request has not finished yet is skipped
-    /// rather than reused.
-    fn allocate(&self, sender: &mpsc::Sender<Frame>) -> u32 {
+    /// Ids start at one (zero is reserved for `READY` and `ctl.chan`) and wrap
+    /// through the whole `u32` range. At most as many candidates as there are
+    /// live streams, plus one, are ever tried: that is enough to find a free id
+    /// whenever one exists, so a full table is discovered at once instead of
+    /// after four billion tries. `None` means every id is in flight.
+    fn allocate(
+        &self,
+        sender: mpsc::UnboundedSender<Frame>,
+        abort: watch::Sender<bool>,
+    ) -> Option<u32> {
         let mut streams = self.streams();
-        loop {
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            if id != 0 && !streams.contains_key(&id) {
-                streams.insert(id, sender.clone());
-                return id;
-            }
+        let attempts = streams.len() + 1;
+        let id = next_stream_id(&self.next_id, attempts, |id| streams.contains_key(&id))?;
+        streams.insert(
+            id,
+            Entry {
+                sender,
+                buffered: 0,
+                abort,
+            },
+        );
+        Some(id)
+    }
+
+    /// Fail one stream: tell the scheduler, and stop the connection.
+    ///
+    /// Runs from the reader task, so it never awaits. The abort flag is set
+    /// before the stream is unregistered, so a connection that is dequeuing a
+    /// frame right now cannot miss it.
+    fn fail_stream(&self, id: u32) {
+        let abort = self.streams().get(&id).map(|entry| entry.abort.clone());
+        let Some(abort) = abort else {
+            return;
+        };
+        let _ = abort.send(true);
+        self.streams().remove(&id);
+        // Prompt: a cancel goes out even while the writer is busy.
+        let _ = self.cancels.send((id, Frame::Cancel));
+    }
+}
+
+/// The first free stream id among `attempts` candidates, or `None`.
+///
+/// Each candidate is skipped when it is zero or already taken; the counter
+/// wraps, so the whole `u32` range is reachable.
+fn next_stream_id(next: &AtomicU32, attempts: usize, taken: impl Fn(u32) -> bool) -> Option<u32> {
+    for _ in 0..attempts {
+        let id = next.fetch_add(1, Ordering::Relaxed);
+        if id != 0 && !taken(id) {
+            return Some(id);
         }
     }
+    None
 }
 
 /// The client end of `http.chan`.
@@ -101,18 +190,29 @@ impl Chan {
     where
         IO: AsyncRead + AsyncWrite + Send + 'static,
     {
+        Self::with_stream_buffer(io, limits, crate::HttpConfig::default().stream_buffer_bytes)
+    }
+
+    /// [`Chan::new`] with the per-stream response buffer spelled out.
+    pub fn with_stream_buffer<IO>(io: IO, limits: Limits, stream_buffer_bytes: usize) -> Self
+    where
+        IO: AsyncRead + AsyncWrite + Send + 'static,
+    {
         let (out, outgoing) = mpsc::channel(WRITE_QUEUE);
+        let (cancels, urgent) = mpsc::unbounded_channel();
         let (alive, _) = watch::channel(true);
         let shared = Arc::new(Shared {
             limits,
             out,
+            cancels,
             streams: Mutex::new(HashMap::new()),
             alive,
             next_id: AtomicU32::new(1),
+            stream_buffer_bytes,
         });
 
         let (reader, writer) = tokio::io::split(io);
-        tokio::spawn(writer_task(writer, outgoing, shared.clone()));
+        tokio::spawn(writer_task(writer, outgoing, urgent, shared.clone()));
         tokio::spawn(reader_task(reader, shared.clone()));
 
         Self { shared }
@@ -125,16 +225,22 @@ impl Chan {
 
     /// Open a stream for one request.
     ///
+    /// `None` means every `u32` stream id is in flight, which only a front end
+    /// that never finishes a request can reach; the caller answers `503`.
+    ///
     /// The id is reserved immediately, so it cannot be handed to another
     /// request even before the first frame is written.
-    pub fn open(&self) -> Stream {
-        let (sender, incoming) = mpsc::channel(STREAM_QUEUE);
-        let id = self.shared.allocate(&sender);
-        Stream {
+    pub fn open(&self) -> Option<Stream> {
+        let (sender, incoming) = mpsc::unbounded_channel();
+        let (abort, aborted) = watch::channel(false);
+        let id = self.shared.allocate(sender, abort.clone())?;
+        Some(Stream {
             shared: self.shared.clone(),
             id,
             incoming,
-        }
+            abort,
+            aborted,
+        })
     }
 
     /// Whether the scheduler end is gone.
@@ -166,7 +272,11 @@ impl Chan {
 pub struct Stream {
     shared: Arc<Shared>,
     id: u32,
-    incoming: mpsc::Receiver<Frame>,
+    incoming: mpsc::UnboundedReceiver<Frame>,
+    /// Held as well as watched, so the flag's channel cannot close before the
+    /// stream does: "not aborted yet" must never be mistaken for "aborted".
+    abort: watch::Sender<bool>,
+    aborted: watch::Receiver<bool>,
 }
 
 impl Stream {
@@ -190,17 +300,103 @@ impl Stream {
         self.send(Frame::ReqEnd).await
     }
 
-    /// Send `CANCEL`: the client went away or the request was refused.
-    pub async fn send_cancel(&mut self) -> Result<(), HttpError> {
-        self.send(Frame::Cancel).await
+    /// Send `CANCEL`: the client went away or the response was given up on.
+    ///
+    /// A cancel never waits: it goes out ahead of anything still queued for the
+    /// writer, because the scheduler should stop working on this request first.
+    pub async fn send_cancel(&self) -> Result<(), HttpError> {
+        if !self.shared.is_alive() {
+            return Err(HttpError::ChannelClosed);
+        }
+        self.shared
+            .cancels
+            .send((self.id, Frame::Cancel))
+            .map_err(|_| HttpError::ChannelClosed)
     }
 
     /// The next frame of this stream's response.
     ///
-    /// `Ok(None)` means no further frame can arrive: the scheduler end is gone.
-    /// The caller answers `502`.
+    /// `Ok(None)` means no further frame can arrive: the scheduler end is gone,
+    /// or this stream was failed because its client stopped reading. Frames
+    /// that were already received before either happened are still delivered —
+    /// a response that is half written is worth finishing as far as it goes,
+    /// and the caller closes the connection afterwards.
+    ///
+    /// The caller owes the stream a [`Stream::release`] once the frame is off
+    /// its hands: that is what keeps the per-stream buffer measuring bytes
+    /// received but not yet written to the client.
     pub async fn recv(&mut self) -> Result<Option<Frame>, HttpError> {
-        Ok(self.incoming.recv().await)
+        let frame = self.incoming.recv().await;
+        let Some(frame) = frame else {
+            return Ok(None);
+        };
+        if !self.registered() && *self.aborted.borrow() {
+            // The stream was failed: what is still queued is what must be
+            // dropped rather than written.
+            return Ok(None);
+        }
+        Ok(Some(frame))
+    }
+
+    /// Account for a frame the connection is done with.
+    ///
+    /// Called once the frame has been written to the client, or once it has
+    /// been deliberately dropped, so a stream that no longer holds anything
+    /// back is never failed for being over its buffer.
+    pub fn release(&self, frame: &Frame) {
+        let weight = Entry::weight(frame);
+        if weight == 0 {
+            return;
+        }
+        if let Some(entry) = self.shared.streams().get_mut(&self.id) {
+            entry.buffered = entry.buffered.saturating_sub(weight);
+        }
+    }
+
+    /// Whether this stream is still registered with the channel.
+    fn registered(&self) -> bool {
+        self.shared.streams().contains_key(&self.id)
+    }
+
+    /// Wait until `http.chan` itself is gone.
+    ///
+    /// A body that is still arriving has nobody left to read it, so the
+    /// connection stops instead of waiting for a client that the scheduler can
+    /// no longer answer.
+    pub async fn closed(&self) {
+        let mut alive = self.shared.alive.subscribe();
+        loop {
+            if !*alive.borrow_and_update() {
+                return;
+            }
+            if alive.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Wait until this stream failed, so a connection can stop early.
+    ///
+    /// Used where a connection writes to a client that may not be reading: the
+    /// reader fails the stream once the response buffer is full, and the write
+    /// is abandoned instead of waiting for a client that never reads.
+    pub async fn aborted(&self) {
+        // The flag's channel is kept alive by this stream, so a closed channel
+        // here can only mean the flag was set... but stay total anyway: waking
+        // up is always safe, waking up wrongly is not.
+        if *self.abort.borrow() {
+            return;
+        }
+        let mut aborted = self.aborted.clone();
+        loop {
+            if *aborted.borrow_and_update() {
+                return;
+            }
+            match aborted.changed().await {
+                Ok(()) => {}
+                Err(_) => std::future::pending().await,
+            }
+        }
     }
 
     async fn send(&self, frame: Frame) -> Result<(), HttpError> {
@@ -213,22 +409,12 @@ impl Stream {
             .await
             .map_err(|_| HttpError::ChannelClosed)
     }
-
-    /// Drop the registration of this stream, if it is still there.
-    fn release(&self) {
-        self.shared.streams().remove(&self.id);
-    }
 }
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        self.release();
+        self.shared.streams().remove(&self.id);
     }
-}
-
-/// Whether a frame ends a response.
-fn is_terminal(frame: &Frame) -> bool {
-    matches!(frame, Frame::RespEnd | Frame::RespAbort { .. })
 }
 
 /// Whether a frame is part of a response at all.
@@ -239,21 +425,36 @@ fn is_response(frame: &Frame) -> bool {
     )
 }
 
-/// Encode everything the connection tasks send, in order.
+/// Encode everything the connections send, cancels first.
 async fn writer_task<W>(
     mut writer: W,
     mut outgoing: mpsc::Receiver<(u32, Frame)>,
+    mut urgent: mpsc::UnboundedReceiver<(u32, Frame)>,
     shared: Arc<Shared>,
 ) where
     W: AsyncWrite + Unpin,
 {
     let mut buf: Vec<u8> = Vec::new();
-    while let Some((id, frame)) = outgoing.recv().await {
+    loop {
+        // `biased` keeps cancels ahead of request bytes: a stream that was
+        // given up on should not have to wait behind a body upload. Neither
+        // queue can close while this task holds `shared`, so the only way out
+        // of the loop is a failed write.
+        let next = tokio::select! {
+            biased;
+            cancel = urgent.recv() => cancel,
+            frame = outgoing.recv() => frame,
+        };
+        let Some((id, frame)) = next else {
+            break;
+        };
         buf.clear();
         let encoded = match &frame {
             Frame::ReqBody(body) => shared.limits.encode_req_body(id, body, &mut buf),
             other => shared.limits.encode(other, id, &mut buf),
         };
+        // A frame that cannot be encoded is a frame this channel can never
+        // send; the channel is done for.
         if encoded.is_err() || writer.write_all(&buf).await.is_err() {
             break;
         }
@@ -262,6 +463,9 @@ async fn writer_task<W>(
 }
 
 /// Decode whatever arrives and hand each frame to its stream.
+///
+/// Nothing here waits for a connection: a slow client is stopped by
+/// [`Entry::buffered`], not by the reader blocking.
 async fn reader_task<R>(mut reader: R, shared: Arc<Shared>)
 where
     R: AsyncRead + Unpin,
@@ -276,7 +480,7 @@ where
         decoder.push(&buf[..read]);
         loop {
             match decoder.next_frame() {
-                Ok(Some((id, frame))) => dispatch(&shared, id, frame).await,
+                Ok(Some((id, frame))) => dispatch(&shared, id, frame),
                 Ok(None) => break,
                 // A frame the codec could not read leaves the stream
                 // unresynchronisable, so the channel is done for.
@@ -291,22 +495,30 @@ where
 }
 
 /// Route one frame from the scheduler to the connection that owns its stream.
-async fn dispatch(shared: &Shared, id: u32, frame: Frame) {
+fn dispatch(shared: &Shared, id: u32, frame: Frame) {
     // Id 0 carries `READY` and `ctl.chan` traffic, neither of which is ours.
     if id == 0 || !is_response(&frame) {
         return;
     }
-    let terminal = is_terminal(&frame);
-    let sender = { shared.streams().get(&id).cloned() };
-    let Some(sender) = sender else {
+    let weight = Entry::weight(&frame);
+    let mut streams = shared.streams();
+    let Some(entry) = streams.get_mut(&id) else {
         // Unknown or already finished stream: a late frame, dropped.
         return;
     };
-    // A failed send means the connection is gone; the frame is late as well.
-    let _ = sender.send(frame).await;
-    if terminal {
-        shared.streams().remove(&id);
+    if entry.buffered.saturating_add(weight) > shared.stream_buffer_bytes {
+        // This client is not reading its response. Fail this stream alone and
+        // let the scheduler know, without holding up anybody else's.
+        drop(streams);
+        shared.fail_stream(id);
+        return;
     }
+    entry.buffered += weight;
+    let sender = entry.sender.clone();
+    drop(streams);
+    // Unbounded, so this never waits; a closed receiver means the connection
+    // is gone and the frame is late.
+    let _ = sender.send(frame);
 }
 
 #[cfg(test)]
@@ -328,13 +540,24 @@ mod tests {
         }
     }
 
+    fn response_head(status: u16) -> RespHead {
+        RespHead {
+            status,
+            reason: Vec::new(),
+            headers: Vec::new(),
+        }
+    }
+
     /// Read every frame the peer (the scheduler) sees, until `count` frames.
     async fn read_frames(io: &mut tokio::io::DuplexStream, count: usize) -> Vec<(u32, Frame)> {
         let mut decoder = Decoder::new(Limits::default());
         let mut buf = vec![0u8; 4096];
         let mut frames = Vec::new();
         while frames.len() < count {
-            let read = io.read(&mut buf).await.expect("read");
+            let read = tokio::time::timeout(Duration::from_secs(5), io.read(&mut buf))
+                .await
+                .expect("channel went quiet")
+                .expect("read");
             assert_ne!(read, 0, "channel closed early");
             decoder.push(&buf[..read]);
             while let Some(frame) = decoder.next_frame().expect("decode") {
@@ -344,11 +567,57 @@ mod tests {
         frames
     }
 
+    fn open(chan: &Chan) -> Stream {
+        chan.open().expect("a free stream id")
+    }
+
+    #[test]
+    fn stream_ids_skip_zero_and_wrap() {
+        let counter = AtomicU32::new(u32::MAX);
+        assert_eq!(next_stream_id(&counter, 4, |_| false), Some(u32::MAX));
+        // The counter wrapped: zero is reserved, so the next id is one.
+        assert_eq!(next_stream_id(&counter, 4, |_| false), Some(1));
+        assert_eq!(next_stream_id(&counter, 4, |_| false), Some(2));
+    }
+
+    #[test]
+    fn stream_ids_skip_the_ones_in_flight() {
+        let counter = AtomicU32::new(1);
+        assert_eq!(next_stream_id(&counter, 4, |id| id < 3), Some(3));
+    }
+
+    #[test]
+    fn stream_ids_give_up_rather_than_spin() {
+        let counter = AtomicU32::new(7);
+        // Every candidate is taken: the search stops after the attempts it was
+        // given instead of walking the whole id space.
+        assert_eq!(next_stream_id(&counter, 8, |_| true), None);
+        assert_eq!(counter.load(Ordering::Relaxed), 7 + 8);
+    }
+
+    #[tokio::test]
+    async fn a_full_stream_table_reports_no_id() {
+        let (client, _peer) = duplex(4096);
+        let chan = Chan::new(client, Limits::default());
+        assert_eq!(chan.shared.streams().len(), 0);
+        // A stream whose id the counter would hand out next: the allocation
+        // still finds a free id past it.
+        let first = open(&chan);
+        assert_eq!(first.id(), 1);
+        let second = open(&chan);
+        assert_eq!(second.id(), 2);
+        assert_eq!(chan.shared.streams().len(), 2);
+        drop(first);
+        assert_eq!(chan.shared.streams().len(), 1);
+        let third = open(&chan);
+        assert_ne!(third.id(), second.id());
+    }
+
     #[tokio::test]
     async fn a_stream_carries_the_request_then_reads_the_response() {
         let (client, mut peer) = duplex(64 * 1024);
         let chan = Chan::new(client, Limits::default());
-        let mut stream = chan.open();
+        let mut stream = open(&chan);
         assert_ne!(stream.id(), 0, "id 0 is reserved");
 
         stream.send_head(request_head("/a")).await.unwrap();
@@ -363,15 +632,7 @@ mod tests {
 
         let mut wire = Vec::new();
         Limits::default()
-            .encode(
-                &Frame::RespHead(RespHead {
-                    status: 200,
-                    reason: b"OK".to_vec(),
-                    headers: Vec::new(),
-                }),
-                stream.id(),
-                &mut wire,
-            )
+            .encode(&Frame::RespHead(response_head(200)), stream.id(), &mut wire)
             .unwrap();
         Limits::default()
             .encode(&Frame::RespBody(b"body".to_vec()), stream.id(), &mut wire)
@@ -396,7 +657,7 @@ mod tests {
     async fn frames_for_unknown_ids_are_dropped() {
         let (client, mut peer) = duplex(64 * 1024);
         let chan = Chan::new(client, Limits::default());
-        let mut stream = chan.open();
+        let mut stream = open(&chan);
 
         let mut wire = Vec::new();
         Limits::default()
@@ -414,8 +675,8 @@ mod tests {
     async fn a_dead_scheduler_wakes_every_stream_and_the_channel() {
         let (client, peer) = duplex(64 * 1024);
         let chan = Chan::new(client, Limits::default());
-        let mut first = chan.open();
-        let mut second = chan.open();
+        let mut first = open(&chan);
+        let mut second = open(&chan);
 
         drop(peer);
         assert_eq!(first.recv().await.unwrap(), None);
@@ -431,9 +692,9 @@ mod tests {
     async fn ids_are_unique_and_never_reused_while_in_flight() {
         let (client, _peer) = duplex(64 * 1024);
         let chan = Chan::new(client, Limits::default());
-        let first = chan.open();
-        let second = chan.open();
-        let third = chan.open();
+        let first = open(&chan);
+        let second = open(&chan);
+        let third = open(&chan);
         assert_ne!(first.id(), second.id());
         assert_ne!(second.id(), third.id());
         assert_ne!(first.id(), third.id());
@@ -442,16 +703,16 @@ mod tests {
         // same id twice in practice.
         let id = first.id();
         drop(first);
-        let fourth = chan.open();
+        let fourth = open(&chan);
         assert_ne!(fourth.id(), id);
         assert_ne!(fourth.id(), 0);
     }
 
     #[tokio::test]
-    async fn a_cancelled_stream_drops_its_late_response() {
+    async fn dropping_a_stream_releases_its_frames() {
         let (client, mut peer) = duplex(64 * 1024);
         let chan = Chan::new(client, Limits::default());
-        let mut stream = chan.open();
+        let mut stream = open(&chan);
         let id = stream.id();
         stream.send_end().await.unwrap();
 
@@ -462,21 +723,146 @@ mod tests {
         peer.write_all(&wire).await.unwrap();
         assert_eq!(stream.recv().await.unwrap(), Some(Frame::RespEnd));
 
-        // Nothing is registered for the id any more, so a late head is dropped
-        // and the stream stays finished.
+        // The connection is done with the stream, so the id is released and
+        // anything that still arrives for it has nowhere to go.
+        drop(stream);
+        assert_eq!(chan.shared.streams().len(), 0);
         let mut wire = Vec::new();
         Limits::default()
-            .encode(
-                &Frame::RespHead(RespHead {
-                    status: 500,
-                    reason: Vec::new(),
-                    headers: Vec::new(),
-                }),
-                id,
-                &mut wire,
-            )
+            .encode(&Frame::RespHead(response_head(500)), id, &mut wire)
             .unwrap();
         peer.write_all(&wire).await.unwrap();
-        assert_eq!(stream.recv().await.unwrap(), None);
+        // A fresh stream for the same request would not be disturbed by it.
+        let mut later = open(&chan);
+        assert_ne!(later.id(), id);
+        later.send_end().await.unwrap();
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&Frame::RespEnd, later.id(), &mut wire)
+            .unwrap();
+        peer.write_all(&wire).await.unwrap();
+        assert_eq!(later.recv().await.unwrap(), Some(Frame::RespEnd));
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_fills_its_buffer_fails_alone() {
+        let (client, mut peer) = duplex(64 * 1024);
+        // Room for 10 bytes of response per stream.
+        let chan = Chan::with_stream_buffer(client, Limits::default(), 10);
+        let mut greedy = open(&chan);
+        let mut other = open(&chan);
+        let greedy_id = greedy.id();
+
+        // Twenty bytes for the first stream: ten too many.
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&Frame::RespHead(response_head(200)), greedy_id, &mut wire)
+            .unwrap();
+        Limits::default()
+            .encode(&Frame::RespBody(vec![b'x'; 20]), greedy_id, &mut wire)
+            .unwrap();
+        // A small answer for the second.
+        Limits::default()
+            .encode(&Frame::RespHead(response_head(200)), other.id(), &mut wire)
+            .unwrap();
+        Limits::default()
+            .encode(&Frame::RespBody(b"ok".to_vec()), other.id(), &mut wire)
+            .unwrap();
+        Limits::default()
+            .encode(&Frame::RespEnd, other.id(), &mut wire)
+            .unwrap();
+        peer.write_all(&wire).await.unwrap();
+
+        // The greedy stream fails, and only it.
+        assert!(
+            greedy.recv().await.unwrap().is_none(),
+            "the stream must fail"
+        );
+        assert!(matches!(
+            other.recv().await.unwrap(),
+            Some(Frame::RespHead(_))
+        ));
+        assert_eq!(
+            other.recv().await.unwrap(),
+            Some(Frame::RespBody(b"ok".to_vec()))
+        );
+        assert_eq!(other.recv().await.unwrap(), Some(Frame::RespEnd));
+
+        // The scheduler was told, and the frame that did not fit is dropped.
+        let frames = read_frames(&mut peer, 1).await;
+        assert_eq!(frames[0], (greedy_id, Frame::Cancel));
+    }
+
+    #[tokio::test]
+    async fn releasing_a_frame_makes_room_for_the_next() {
+        let (client, mut peer) = duplex(64 * 1024);
+        // Room for 8 bytes of response per stream.
+        let chan = Chan::with_stream_buffer(client, Limits::default(), 8);
+        let mut stream = open(&chan);
+        let id = stream.id();
+
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&Frame::RespBody(vec![b'a'; 8]), id, &mut wire)
+            .unwrap();
+        peer.write_all(&wire).await.unwrap();
+        let first = stream.recv().await.unwrap().expect("the frame fits");
+        // Nothing has been written yet, so the next frame is one too many.
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&Frame::RespBody(vec![b'b'; 8]), id, &mut wire)
+            .unwrap();
+        peer.write_all(&wire).await.unwrap();
+        assert!(
+            stream.recv().await.unwrap().is_none(),
+            "the stream fails while the first frame is unreleased"
+        );
+        drop(first);
+
+        // The same exchange, with the connection releasing as it writes.
+        let (client, mut peer) = duplex(64 * 1024);
+        let chan = Chan::with_stream_buffer(client, Limits::default(), 8);
+        let mut stream = open(&chan);
+        let id = stream.id();
+        for byte in *b"abc" {
+            let mut wire = Vec::new();
+            Limits::default()
+                .encode(&Frame::RespBody(vec![byte; 8]), id, &mut wire)
+                .unwrap();
+            peer.write_all(&wire).await.unwrap();
+            let frame = stream.recv().await.unwrap().expect("room after release");
+            assert_eq!(frame, Frame::RespBody(vec![byte; 8]));
+            stream.release(&frame);
+        }
+    }
+
+    #[tokio::test]
+    async fn aborting_a_stream_wakes_a_connection_that_is_stuck_writing() {
+        let (client, mut peer) = duplex(64 * 1024);
+        let chan = Chan::with_stream_buffer(client, Limits::default(), 4);
+        let mut stream = open(&chan);
+        let id = stream.id();
+
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&Frame::RespBody(vec![b'x'; 16]), id, &mut wire)
+            .unwrap();
+        peer.write_all(&wire).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), stream.aborted())
+            .await
+            .expect("aborted() must return once the stream fails");
+        assert!(stream.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_drops_before_failure_gets_no_abort() {
+        let (client, _peer) = duplex(4096);
+        let chan = Chan::with_stream_buffer(client, Limits::default(), 4);
+        let stream = open(&chan);
+        // Dropping the stream removes it, so a later overflow has nothing to
+        // fail and nothing to wake.
+        drop(stream);
+        assert_eq!(chan.shared.streams().len(), 0);
     }
 }

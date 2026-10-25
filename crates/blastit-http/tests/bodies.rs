@@ -110,8 +110,9 @@ async fn a_content_length_of_zero_sends_no_body_frame() {
         .respond(id, 204, &[("Content-Length", "0")], b"")
         .await;
     assert_eq!(
-        h.client.read_response().await,
-        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+        h.client.read_head().await,
+        b"HTTP/1.1 204 No Content\r\n\r\n",
+        "a 204 cannot carry a body, so its length is dropped"
     );
 }
 

@@ -21,8 +21,11 @@ const HOP_BY_HOP: [&str; 7] = [
     "upgrade",
 ];
 
-/// The longest field value list still worth walking, as a sanity bound for
-/// `Connection`-style values.
+/// Most bytes of `Connection`-style header values we are willing to walk.
+///
+/// The head as a whole is already bounded, so this only keeps one absurdly
+/// long list from costing more than it is worth: once the budget is spent, the
+/// remaining values are not looked at.
 const MAX_TOKEN_BYTES: usize = 8 * 1024;
 
 /// Whether a header name equals `expected`, ignoring ASCII case.
@@ -98,13 +101,20 @@ pub(crate) fn values<'a>(
 /// The comma-separated tokens of every header called `name`, trimmed.
 ///
 /// `Connection: close, TE` yields `close` and `TE`, which is exactly how RFC
-/// 7230 defines the value.
+/// 7230 defines the value. At most [`MAX_TOKEN_BYTES`] bytes of values are
+/// walked; a list longer than that is truncated rather than followed, and no
+/// caller depends on seeing the tail of one.
 pub(crate) fn tokens<'a>(
     headers: &'a [(Vec<u8>, Vec<u8>)],
     name: &'a str,
 ) -> impl Iterator<Item = &'a [u8]> {
+    let mut budget = MAX_TOKEN_BYTES;
     values(headers, name)
-        .take(MAX_TOKEN_BYTES)
+        .take_while(move |value| {
+            let fits = value.len() <= budget;
+            budget = budget.saturating_sub(value.len());
+            fits
+        })
         .flat_map(|value| value.split(|byte| *byte == b','))
         .map(trim)
         .filter(|token| !token.is_empty())
@@ -276,6 +286,25 @@ mod tests {
         let seen: Vec<&[u8]> = tokens(&list, "X-F").collect();
         assert_eq!(seen, [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]);
         assert!(values(&list, "missing").next().is_none());
+    }
+
+    #[test]
+    fn a_huge_token_list_is_bounded_in_bytes() {
+        // One value of half the budget, then two more that cannot fit.
+        let filler = "x".repeat(MAX_TOKEN_BYTES / 2);
+        let list = headers(&[
+            ("Connection", &filler),
+            ("Connection", &filler),
+            ("Connection", "keep-alive"),
+        ]);
+        let seen: Vec<&[u8]> = tokens(&list, "connection").collect();
+        assert_eq!(seen.len(), 2, "the third value is past the budget");
+        assert!(!has_token(&list, "connection", "keep-alive"));
+
+        // A value larger than the whole budget is not walked at all.
+        let huge = "y".repeat(MAX_TOKEN_BYTES * 2);
+        let list = headers(&[("Connection", &huge)]);
+        assert_eq!(tokens(&list, "connection").count(), 0);
     }
 
     #[test]

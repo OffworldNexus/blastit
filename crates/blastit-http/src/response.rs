@@ -118,6 +118,11 @@ pub fn prepare(
     if matches!(framing, Framing::Chunked | Framing::Close) {
         out.retain(|(name, _)| !headers::is(name, "content-length"));
     }
+    // 1xx and 204 can never carry a body, so a length on them is a lie. A 304
+    // keeps it: it is reporting what the cached `GET` would have returned.
+    if matches!(head.status, 100..=199 | 204) {
+        out.retain(|(name, _)| !headers::is(name, "content-length"));
+    }
     if framing == Framing::Chunked {
         out.push((b"Transfer-Encoding".to_vec(), b"chunked".to_vec()));
     }
@@ -333,10 +338,25 @@ mod tests {
     }
 
     #[test]
-    fn bodyless_responses_keep_the_views_length_but_lose_their_own_framing() {
-        let prepared = prepare(&head(204, &[("Content-Length", "0")]), true, true, true).unwrap();
+    fn bodyless_responses_drop_a_length_that_could_never_be_true() {
+        // A `HEAD` answer reports what the `GET` would have returned, so its
+        // length is kept, as is a 304's.
+        let prepared = prepare(&head(200, &[("Content-Length", "5")]), true, true, true).unwrap();
         assert_eq!(prepared.framing, Framing::None);
         assert_eq!(names(&prepared), ["Content-Length"]);
+
+        let prepared = prepare(&head(304, &[("Content-Length", "5")]), true, true, true).unwrap();
+        assert_eq!(prepared.framing, Framing::None);
+        assert_eq!(names(&prepared), ["Content-Length"]);
+
+        // 1xx and 204 can never carry a body at all, so a length on them is a
+        // lie the client would act on.
+        for status in [100u16, 102, 199, 204] {
+            let prepared =
+                prepare(&head(status, &[("Content-Length", "5")]), true, true, true).unwrap();
+            assert_eq!(prepared.framing, Framing::None, "status {status}");
+            assert!(prepared.headers.is_empty(), "status {status}: {prepared:?}");
+        }
     }
 
     #[test]

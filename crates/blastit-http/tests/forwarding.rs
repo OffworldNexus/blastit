@@ -90,9 +90,10 @@ async fn forwarded_headers_alone_are_still_forwarded_to_the_app() {
 }
 
 #[tokio::test]
-async fn a_missing_host_falls_back_to_localhost() {
+async fn a_missing_host_falls_back_to_localhost_on_http_1_0() {
     let mut h = Harness::start(config(true));
-    h.client.write(b"GET / HTTP/1.1\r\n\r\n").await;
+    // HTTP/1.1 requires a `Host`; HTTP/1.0 does not, and gets the default.
+    h.client.write(b"GET / HTTP/1.0\r\n\r\n").await;
     let (id, head) = h.scheduler.head().await;
     assert_eq!(head.server_name, "localhost");
     assert_eq!(head.server_port, 8443);

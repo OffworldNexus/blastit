@@ -49,6 +49,34 @@ enum BodyOutcome {
     /// The body was refused; the request may already have reached the
     /// scheduler, so `CANCEL` is due as well.
     Refused(Reject),
+    /// The body took longer than `body_timeout`; `CANCEL` is due.
+    TimedOut,
+    /// The scheduler channel failed while the body was still arriving.
+    ChannelClosed,
+}
+
+/// The result of waiting for more of a request body.
+enum BodyFill {
+    /// At least one byte arrived.
+    Bytes,
+    /// The client went quiet for `keepalive_timeout`.
+    Idle,
+    /// `body_timeout` ran out for the request as a whole.
+    Expired,
+    /// The client is gone, or the read failed.
+    Closed,
+    /// The scheduler channel failed while the body was still arriving.
+    ChannelClosed,
+}
+
+/// The result of waiting for more of a request head.
+enum Filled {
+    /// At least one byte arrived.
+    Bytes,
+    /// Nothing arrived before the deadline.
+    Idle,
+    /// The client is gone, or the read failed.
+    Closed,
 }
 
 /// What to do once a response is finished.
@@ -59,16 +87,6 @@ enum Relay {
     Close,
     /// The client can no longer be served: close without finishing.
     Abort,
-}
-
-/// The result of waiting for more bytes.
-enum Filled {
-    /// At least one byte arrived.
-    Bytes,
-    /// Nothing arrived before the deadline.
-    Idle,
-    /// The client is gone, or the read failed.
-    Closed,
 }
 
 /// The response being written for the request in flight.
@@ -165,7 +183,7 @@ where
             } else {
                 Instant::now() + self.cfg.keepalive_timeout
             };
-            match self.fill_until(deadline).await {
+            match self.fill_head(deadline).await {
                 Filled::Bytes => {}
                 Filled::Idle | Filled::Closed => return HeadOutcome::Close,
             }
@@ -196,7 +214,7 @@ where
                     }
                 }
             }
-            match self.fill_until(deadline).await {
+            match self.fill_head(deadline).await {
                 Filled::Bytes => {}
                 Filled::Idle => {
                     // Bytes did arrive, so the client is owed an answer.
@@ -215,7 +233,17 @@ where
     ///
     /// Returns whether the connection may carry another request.
     async fn serve(&mut self, head: RequestHead) -> Result<bool, HttpError> {
-        let mut stream = self.chan.open();
+        let Some(mut stream) = self.chan.open() else {
+            // Every stream id is in flight: nothing can be forwarded until one
+            // finishes, which a front end that is serving at all will do soon.
+            self.refuse(
+                &head.remote_addr.clone(),
+                503,
+                RejectReason::Other("stream_ids_exhausted".into()),
+            )
+            .await;
+            return Ok(false);
+        };
         let request = ReqHead {
             method: head.method.clone(),
             target: head.target.clone(),
@@ -256,6 +284,11 @@ where
             }
         }
 
+        // The body has to be in by `body_timeout` after the head, whatever
+        // else happens, because nothing will answer a request whose upload is
+        // still trickling when the client gives up.
+        let body_deadline = Instant::now() + self.cfg.body_timeout;
+
         // `100 Continue` goes out as soon as the head is on its way, and not
         // one step earlier: a client is allowed to wait for it before sending
         // a single body byte.
@@ -267,7 +300,7 @@ where
             return Ok(false);
         }
 
-        match self.stream_body(&mut stream, &head).await? {
+        match self.stream_body(&mut stream, &head, body_deadline).await {
             BodyOutcome::Sent => {}
             BodyOutcome::ClientGone => {
                 let _ = stream.send_cancel().await;
@@ -276,6 +309,23 @@ where
             BodyOutcome::Refused(reject) => {
                 let _ = stream.send_cancel().await;
                 self.reject(reject).await;
+                return Ok(false);
+            }
+            // The body took too long: the request is cancelled, and since
+            // nothing of a response has been written, the client gets a 408.
+            BodyOutcome::TimedOut => {
+                let _ = stream.send_cancel().await;
+                self.refuse(
+                    &head.remote_addr.clone(),
+                    408,
+                    RejectReason::Other("body_timeout".into()),
+                )
+                .await;
+                return Ok(false);
+            }
+            // The scheduler went away while the body was still arriving.
+            BodyOutcome::ChannelClosed => {
+                let _ = self.io.write_all(&response::simple(502)).await;
                 return Ok(false);
             }
         }
@@ -295,14 +345,15 @@ where
         &mut self,
         stream: &mut Stream,
         head: &RequestHead,
-    ) -> Result<BodyOutcome, HttpError> {
+        deadline: Instant,
+    ) -> BodyOutcome {
         match head.body {
-            BodyFraming::None | BodyFraming::ContentLength(0) => {
-                stream.send_end().await?;
-                Ok(BodyOutcome::Sent)
-            }
-            BodyFraming::ContentLength(len) => self.stream_fixed_body(stream, len).await,
-            BodyFraming::Chunked => self.stream_chunked_body(stream, head).await,
+            BodyFraming::None | BodyFraming::ContentLength(0) => match stream.send_end().await {
+                Ok(()) => BodyOutcome::Sent,
+                Err(_) => BodyOutcome::ChannelClosed,
+            },
+            BodyFraming::ContentLength(len) => self.stream_fixed_body(stream, len, deadline).await,
+            BodyFraming::Chunked => self.stream_chunked_body(stream, head, deadline).await,
         }
     }
 
@@ -311,21 +362,31 @@ where
         &mut self,
         stream: &mut Stream,
         len: u64,
-    ) -> Result<BodyOutcome, HttpError> {
+        deadline: Instant,
+    ) -> BodyOutcome {
         let mut remaining = len;
         while remaining > 0 {
-            if self.pos == self.buf.len() && !self.fill_idle().await.arrived() {
-                return Ok(BodyOutcome::ClientGone);
+            if self.pos == self.buf.len() {
+                match self.fill_body(stream, deadline).await {
+                    BodyFill::Bytes => {}
+                    BodyFill::Idle | BodyFill::Closed => return BodyOutcome::ClientGone,
+                    BodyFill::Expired => return BodyOutcome::TimedOut,
+                    BodyFill::ChannelClosed => return BodyOutcome::ChannelClosed,
+                }
             }
             let available = (self.buf.len() - self.pos) as u64;
             let take = remaining.min(available) as usize;
             let body = self.buf[self.pos..self.pos + take].to_vec();
             self.pos += take;
             remaining -= take as u64;
-            stream.send_body(body).await?;
+            if stream.send_body(body).await.is_err() {
+                return BodyOutcome::ChannelClosed;
+            }
         }
-        stream.send_end().await?;
-        Ok(BodyOutcome::Sent)
+        match stream.send_end().await {
+            Ok(()) => BodyOutcome::Sent,
+            Err(_) => BodyOutcome::ChannelClosed,
+        }
     }
 
     /// De-chunk a body as it arrives and stream it on.
@@ -333,7 +394,8 @@ where
         &mut self,
         stream: &mut Stream,
         head: &RequestHead,
-    ) -> Result<BodyOutcome, HttpError> {
+        deadline: Instant,
+    ) -> BodyOutcome {
         let mut dechunker = Dechunker::new(self.cfg.max_body_bytes);
         self.scratch.clear();
         loop {
@@ -341,35 +403,41 @@ where
             let (used, step) = match pushed {
                 Ok((0, _)) => {
                     // Not even half a chunk line: read more and try again.
-                    if self.fill_idle().await.arrived() {
-                        continue;
+                    match self.fill_body(stream, deadline).await {
+                        BodyFill::Bytes => continue,
+                        BodyFill::Idle | BodyFill::Closed => return BodyOutcome::ClientGone,
+                        BodyFill::Expired => return BodyOutcome::TimedOut,
+                        BodyFill::ChannelClosed => return BodyOutcome::ChannelClosed,
                     }
-                    return Ok(BodyOutcome::ClientGone);
                 }
                 Ok(progress) => progress,
                 Err(ChunkError::TooLarge) => {
-                    return Ok(BodyOutcome::Refused(refuse_body(
+                    return BodyOutcome::Refused(refuse_body(
                         head,
                         413,
                         RejectReason::BodyTooLarge,
-                    )));
+                    ));
                 }
                 Err(ChunkError::Malformed) => {
-                    return Ok(BodyOutcome::Refused(refuse_body(
+                    return BodyOutcome::Refused(refuse_body(
                         head,
                         400,
                         RejectReason::MalformedRequest,
-                    )));
+                    ));
                 }
             };
             self.pos += used;
             if !self.scratch.is_empty() {
                 let body = std::mem::take(&mut self.scratch);
-                stream.send_body(body).await?;
+                if stream.send_body(body).await.is_err() {
+                    return BodyOutcome::ChannelClosed;
+                }
             }
             if step == Step::Done {
-                stream.send_end().await?;
-                return Ok(BodyOutcome::Sent);
+                return match stream.send_end().await {
+                    Ok(()) => BodyOutcome::Sent,
+                    Err(_) => BodyOutcome::ChannelClosed,
+                };
             }
         }
     }
@@ -386,7 +454,7 @@ where
                 // No answer can arrive any more.
                 return Ok(self.fail(&mut resp, 502).await);
             };
-            match frame {
+            match &frame {
                 Frame::RespHead(head) => {
                     if resp.head_written {
                         // A second head would be a second response.
@@ -399,7 +467,7 @@ where
                     let may_keep_alive = request.keep_alive
                         && !crate::headers::has_token(&head.headers, "connection", "close");
                     let prepared = match response::prepare(
-                        &head,
+                        head,
                         no_body,
                         request.version == Version::Http11,
                         may_keep_alive,
@@ -411,7 +479,7 @@ where
                     };
                     let mut out = Vec::new();
                     response::encode_head(&prepared, &mut out);
-                    if self.io.write_all(&out).await.is_err() {
+                    if !self.write_client(stream, &out).await {
                         return Ok(Relay::Abort);
                     }
                     resp.framing = prepared.framing;
@@ -419,7 +487,7 @@ where
                     resp.head_written = true;
                 }
                 Frame::RespBody(chunk) => {
-                    if self.write_body(&mut resp, &chunk).await.is_err() {
+                    if !self.write_body(stream, &mut resp, chunk).await {
                         return Ok(Relay::Abort);
                     }
                 }
@@ -429,7 +497,7 @@ where
                     }
                     match resp.framing {
                         Framing::Chunked => {
-                            if self.io.write_all(response::LAST_CHUNK).await.is_err() {
+                            if !self.write_client(stream, response::LAST_CHUNK).await {
                                 return Ok(Relay::Abort);
                             }
                         }
@@ -451,6 +519,9 @@ where
                 Frame::RespAbort { .. } => return Ok(self.fail(&mut resp, 502).await),
                 _ => {}
             }
+            // The frame is off the connection's hands, so a client that is
+            // keeping up never counts against its own buffer.
+            stream.release(&frame);
         }
     }
 
@@ -468,43 +539,52 @@ where
     }
 
     /// Write one body chunk, honouring the framing already announced.
-    async fn write_body(&mut self, resp: &mut Resp, chunk: &[u8]) -> io::Result<()> {
+    ///
+    /// Returns whether the client still has the bytes; `false` means the write
+    /// failed or the stream was failed underneath it.
+    async fn write_body(&mut self, stream: &Stream, resp: &mut Resp, chunk: &[u8]) -> bool {
         if !resp.head_written {
             // A body before the head is a view bug; ignore it and wait for the
             // head or an abort.
-            return Ok(());
+            return true;
         }
         match resp.framing {
-            Framing::None => Ok(()),
+            Framing::None => true,
             Framing::Length(len) => {
                 let left = len.saturating_sub(resp.written);
                 if left == 0 {
                     // Longer than advertised: truncate and close.
                     resp.close = true;
-                    return Ok(());
+                    return true;
                 }
                 let take = left.min(chunk.len() as u64) as usize;
                 if take < chunk.len() {
                     resp.close = true;
                 }
-                self.io.write_all(&chunk[..take]).await?;
+                if !self.write_client(stream, &chunk[..take]).await {
+                    return false;
+                }
                 resp.written += take as u64;
-                Ok(())
+                true
             }
             Framing::Chunked => {
                 // An empty chunk would terminate the body.
                 if chunk.is_empty() {
-                    return Ok(());
+                    return true;
                 }
                 let framed = response::chunk(chunk);
-                self.io.write_all(&framed).await?;
+                if !self.write_client(stream, &framed).await {
+                    return false;
+                }
                 resp.written += chunk.len() as u64;
-                Ok(())
+                true
             }
             Framing::Close => {
-                self.io.write_all(chunk).await?;
+                if !self.write_client(stream, chunk).await {
+                    return false;
+                }
                 resp.written += chunk.len() as u64;
-                Ok(())
+                true
             }
         }
     }
@@ -520,18 +600,34 @@ where
 
     /// Emit `http.rejected` for `remote`, then write the refusal.
     async fn refuse(&mut self, remote: &str, status: u16, reason: RejectReason) {
-        self.emit_rejected(remote, status, reason);
+        emit_rejected(self.emit, remote, status, reason);
         let _ = self.io.write_all(&response::simple(status)).await;
     }
+}
 
-    /// Publish one `http.rejected` event (§8.1).
-    ///
-    /// The event carries the address, the status and a fixed label. It never
-    /// carries a header value, a query string or a body byte, because none of
-    /// them are arguments here.
-    fn emit_rejected(&self, remote_addr: &str, status: u16, reason: RejectReason) {
-        let kind = EventKind::HttpRejected(HttpRejected::new(remote_addr, status, reason));
-        (self.emit)(Event::now(Component::Http, kind));
+/// Publish one `http.rejected` event (§8.1).
+///
+/// The event carries the address, the status and a fixed label. It never
+/// carries a header value, a query string or a body byte, because none of them
+/// are arguments here.
+pub(crate) fn emit_rejected(emit: &Emit, remote_addr: &str, status: u16, reason: RejectReason) {
+    let kind = EventKind::HttpRejected(HttpRejected::new(remote_addr, status, reason));
+    (emit)(Event::now(Component::Http, kind));
+}
+
+impl<IO> Conn<'_, IO>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Read more bytes, giving up at `deadline`, and stop early once
+    /// `http.chan` is gone: there is no point taking a request nobody can
+    /// route.
+    async fn fill_head(&mut self, deadline: Instant) -> Filled {
+        let chan = self.chan;
+        tokio::select! {
+            filled = self.fill_until(deadline) => filled,
+            () = chan.closed() => Filled::Closed,
+        }
     }
 
     /// Read more bytes, giving up at `deadline`.
@@ -546,12 +642,27 @@ where
     /// Read more bytes, giving up after `keepalive_timeout` with nothing
     /// arriving.
     ///
-    /// §8.2 has no separate body timeout, so a body that stops mid-upload is
-    /// treated exactly like an idle connection: the client is gone, and the
-    /// request is cancelled.
-    async fn fill_idle(&mut self) -> Filled {
-        self.fill_until(Instant::now() + self.cfg.keepalive_timeout)
-            .await
+    /// Two bounds apply to a body: no byte for `keepalive_timeout` means the
+    /// client is gone, and `body_timeout` caps the upload as a whole no matter
+    /// how steadily it trickles in. Whichever comes first wins — and a channel
+    /// that has failed cuts the wait short, because nobody would read the body
+    /// anyway.
+    async fn fill_body(&mut self, stream: &Stream, deadline: Instant) -> BodyFill {
+        let idle_deadline = Instant::now() + self.cfg.keepalive_timeout;
+        let (filled, expired) = if idle_deadline < deadline {
+            (self.fill_until(idle_deadline), false)
+        } else {
+            (self.fill_until(deadline), true)
+        };
+        tokio::select! {
+            filled = filled => match (filled, expired) {
+                (Filled::Bytes, _) => BodyFill::Bytes,
+                (Filled::Closed, _) => BodyFill::Closed,
+                (Filled::Idle, false) => BodyFill::Idle,
+                (Filled::Idle, true) => BodyFill::Expired,
+            },
+            () = stream.closed() => BodyFill::ChannelClosed,
+        }
     }
 
     /// One read into the buffer, compacting it first when that pays off.
@@ -569,12 +680,17 @@ where
         self.buf.extend_from_slice(&chunk[..read]);
         Ok(read)
     }
-}
 
-impl Filled {
-    /// Whether at least one byte arrived.
-    const fn arrived(&self) -> bool {
-        matches!(self, Self::Bytes)
+    /// Write bytes to the client, giving up as soon as the stream fails.
+    ///
+    /// The channel reader fails a stream whose client has stopped reading, so
+    /// this returns `false` rather than waiting for a client that may never
+    /// read again. `true` means the bytes are on their way.
+    async fn write_client(&mut self, stream: &Stream, bytes: &[u8]) -> bool {
+        tokio::select! {
+            result = self.io.write_all(bytes) => result.is_ok(),
+            () = stream.aborted() => false,
+        }
     }
 }
 

@@ -304,6 +304,170 @@ async fn a_head_too_large_for_one_frame_is_431() {
 }
 
 #[tokio::test]
+async fn a_bare_lf_in_the_head_is_400() {
+    for request in [
+        // The request line itself.
+        &b"GET / HTTP/1.1\nHost: h\r\n\r\n"[..],
+        // A header line.
+        b"GET / HTTP/1.1\r\nHost: h\nAccept: */*\r\n\r\n",
+        // The blank line that ends the head.
+        b"GET / HTTP/1.1\r\nHost: h\r\n\n",
+        // A body that is only reachable if the head was accepted.
+        b"GET / HTTP/1.1\nHost: h\r\nX-A: 1\n\r\n",
+    ] {
+        refusal_for(
+            HttpConfig::default(),
+            request,
+            400,
+            "Bad Request",
+            "malformed_request",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn a_body_may_contain_any_bytes_it_likes() {
+    // The bare-LF check stops at the end of the head: a body is not a request.
+    let mut h = Harness::start(HttpConfig::default());
+    h.client
+        .write(b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 7\r\n\r\na\nb\nc\r\n")
+        .await;
+    let (id, _) = h.scheduler.head().await;
+    assert_eq!(h.scheduler.whole_body(id).await, b"a\nb\nc\r\n");
+    h.scheduler.respond(id, 200, &[], b"ok").await;
+    let response = h.client.read_response().await;
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"), "{response:?}");
+    assert!(h.events.is_empty(), "a body is never a rejection");
+}
+
+#[tokio::test]
+async fn connect_is_refused_with_501() {
+    refusal_for(
+        HttpConfig::default(),
+        b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
+        501,
+        "Not Implemented",
+        "connect_unsupported",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_absolute_form_target_is_400() {
+    for request in [
+        &b"GET http://example.com/x HTTP/1.1\r\nHost: h\r\n\r\n"[..],
+        b"GET https://example.com HTTP/1.1\r\nHost: h\r\n\r\n",
+        // Authority form, which only `CONNECT` uses.
+        b"GET example.com:443 HTTP/1.1\r\nHost: h\r\n\r\n",
+    ] {
+        refusal_for(
+            HttpConfig::default(),
+            request,
+            400,
+            "Bad Request",
+            "absolute_form_target",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn a_target_that_is_not_a_path_is_400() {
+    for request in [
+        &b"GET foo HTTP/1.1\r\nHost: h\r\n\r\n"[..],
+        b"GET * HTTP/1.1\r\nHost: h\r\n\r\n",
+        b"POST * HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n",
+    ] {
+        refusal_for(
+            HttpConfig::default(),
+            request,
+            400,
+            "Bad Request",
+            "invalid_target",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn options_asterisk_is_forwarded_as_it_is() {
+    let mut h = Harness::start(HttpConfig::default());
+    h.client
+        .write(b"OPTIONS * HTTP/1.1\r\nHost: h\r\n\r\n")
+        .await;
+    let (id, head) = h.scheduler.head().await;
+    assert_eq!(head.method, b"OPTIONS");
+    assert_eq!(head.target, b"*", "the app decides what to do with it");
+    assert_eq!(h.scheduler.end().await, id);
+    h.scheduler.respond(id, 204, &[], b"").await;
+    let _ = h.client.read_head().await;
+    assert!(h.events.is_empty());
+}
+
+#[tokio::test]
+async fn transfer_encoding_on_http_1_0_is_400() {
+    for request in [
+        &b"POST / HTTP/1.0\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+        b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n",
+        b"POST / HTTP/1.0\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n",
+    ] {
+        refusal_for(
+            HttpConfig::default(),
+            request,
+            400,
+            "Bad Request",
+            "transfer_encoding_on_http_1_0",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn an_http_1_1_request_without_a_host_is_400() {
+    refusal_for(
+        HttpConfig::default(),
+        b"GET / HTTP/1.1\r\n\r\n",
+        400,
+        "Bad Request",
+        "missing_host",
+    )
+    .await;
+    refusal_for(
+        HttpConfig::default(),
+        b"GET / HTTP/1.1\r\nHost: \r\n\r\n",
+        400,
+        "Bad Request",
+        "invalid_host",
+    )
+    .await;
+    refusal_for(
+        HttpConfig::default(),
+        b"GET / HTTP/1.1\r\nHost: a b\r\n\r\n",
+        400,
+        "Bad Request",
+        "invalid_host",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn more_than_one_host_is_400_on_any_version() {
+    for request in [
+        &b"GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"[..],
+        b"GET / HTTP/1.0\r\nHost: a\r\nHost: b\r\n\r\n",
+    ] {
+        refusal_for(
+            HttpConfig::default(),
+            request,
+            400,
+            "Bad Request",
+            "duplicate_host",
+        )
+        .await;
+    }
+}
+#[tokio::test]
 async fn a_rejection_is_logged_before_it_is_written() {
     let mut h = harness();
     h.client.write(b"GET / HTTP/2.0\r\n\r\n").await;

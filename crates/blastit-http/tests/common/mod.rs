@@ -247,6 +247,18 @@ where
             .expect("write to the front end");
     }
 
+    /// Send raw bytes, reporting whether the front end was still reading.
+    ///
+    /// Used where the connection may already have been closed on purpose: a
+    /// client that keeps uploading to a server that has given up sees a broken
+    /// pipe, which is not a test failure.
+    pub async fn write_or_gone(&mut self, bytes: &[u8]) -> bool {
+        match tokio::time::timeout(PATIENCE, self.io.write_all(bytes)).await {
+            Ok(result) => result.is_ok(),
+            Err(_) => false,
+        }
+    }
+
     /// Read more bytes into the buffer; `0` means the connection closed.
     async fn fill(&mut self) -> usize {
         let mut buf = vec![0u8; 4096];

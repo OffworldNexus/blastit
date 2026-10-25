@@ -149,7 +149,15 @@ pub fn parse(available: &[u8], cfg: &HttpConfig, peer: &str) -> Parsed {
     let mut request = HttparseRequest::new(&mut fields);
     let used = match request.parse(available) {
         Ok(Status::Complete(used)) => used,
-        Ok(Status::Partial) => return Parsed::Partial,
+        Ok(Status::Partial) => {
+            // A bare LF in what has arrived so far is inside the head, because
+            // the head is not complete yet: refuse it now rather than wait for
+            // a timeout on a request that can never be served.
+            if has_bare_lf(available) {
+                return Parsed::Reject(Reject::new(400, RejectReason::MalformedRequest));
+            }
+            return Parsed::Partial;
+        }
         Err(httparse::Error::Version) => {
             // A missing or exotic version, including the HTTP/2 preface, which
             // starts with `PRI * HTTP/2.0`.
@@ -163,6 +171,14 @@ pub fn parse(available: &[u8], cfg: &HttpConfig, peer: &str) -> Parsed {
         }
         Err(_) => return Parsed::Reject(Reject::new(400, RejectReason::MalformedRequest)),
     };
+
+    // `httparse` accepts a bare LF as a line ending, and a front end that does
+    // the same can be made to disagree with the peer in front of it about where
+    // one request ends and the next begins. The head is exactly the first
+    // `used` bytes, so only they are checked: a body may contain any LF.
+    if has_bare_lf(&available[..used]) {
+        return Parsed::Reject(Reject::new(400, RejectReason::MalformedRequest));
+    }
 
     let version = match request.version {
         Some(0) => Version::Http10,
@@ -194,6 +210,10 @@ pub fn parse(available: &[u8], cfg: &HttpConfig, peer: &str) -> Parsed {
         .map(|header| (header.name.as_bytes().to_vec(), header.value.to_vec()))
         .collect();
 
+    if let Err(reject) = check_target(method.as_bytes(), target.as_bytes()) {
+        return Parsed::Reject(reject.for_client(client_addr(&raw, cfg, peer)));
+    }
+
     match classify(&raw, version, cfg) {
         Ok((body, expect_continue, keep_alive)) => {
             let head = RequestHead {
@@ -218,6 +238,55 @@ pub fn parse(available: &[u8], cfg: &HttpConfig, peer: &str) -> Parsed {
     }
 }
 
+/// Whether any `LF` is not part of a `CRLF`.
+fn has_bare_lf(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(index, byte)| *byte == b'\n' && (index == 0 || bytes[index - 1] != b'\r'))
+}
+
+/// Whether the request line asks for something this front end can route.
+///
+/// The load balancer in front of us writes origin-form targets, and a view
+/// expects to parse one: anything else is refused rather than guessed at.
+fn check_target(method: &[u8], target: &[u8]) -> Result<(), Reject> {
+    // `CONNECT` would ask this process to become a tunnel, which it is not.
+    if method.eq_ignore_ascii_case(b"CONNECT") {
+        return Err(Reject::new(
+            501,
+            RejectReason::Other("connect_unsupported".into()),
+        ));
+    }
+    // Origin form: the only shape a WSGI `PATH_INFO` can come from.
+    if target.starts_with(b"/") {
+        return Ok(());
+    }
+    // Asterisk form is defined for `OPTIONS` and nothing else; it is forwarded
+    // as it is, so the app can answer it itself.
+    if target == b"*" {
+        return if method.eq_ignore_ascii_case(b"OPTIONS") {
+            Ok(())
+        } else {
+            Err(Reject::new(
+                400,
+                RejectReason::Other("invalid_target".into()),
+            ))
+        };
+    }
+    if target.contains(&b':') || target.contains(&b'?') {
+        // `scheme://host/path` (absolute form) or `host:port` (authority form).
+        return Err(Reject::new(
+            400,
+            RejectReason::Other("absolute_form_target".into()),
+        ));
+    }
+    Err(Reject::new(
+        400,
+        RejectReason::Other("invalid_target".into()),
+    ))
+}
+
 /// Decide the framing and the connection options, or refuse the request.
 fn classify(
     raw: &[(Vec<u8>, Vec<u8>)],
@@ -230,8 +299,38 @@ fn classify(
         return Err(Reject::new(501, RejectReason::UpgradeUnsupported));
     }
 
+    // `Host` is what the app is told about the request, and WSGI has one place
+    // for it. RFC 9112 wants exactly one, and an HTTP/1.1 request without one
+    // has no authority at all to report.
+    let hosts: Vec<&[u8]> = headers::values(raw, "host").collect();
+    if hosts.len() > 1 {
+        return Err(Reject::new(
+            400,
+            RejectReason::Other("duplicate_host".into()),
+        ));
+    }
+    if version == Version::Http11 {
+        match hosts.first() {
+            Some(host) if valid_host(headers::trim(host)) => {}
+            Some(_) => {
+                return Err(Reject::new(400, RejectReason::Other("invalid_host".into())));
+            }
+            None => {
+                return Err(Reject::new(400, RejectReason::Other("missing_host".into())));
+            }
+        }
+    }
+
     let has_transfer_encoding = headers::values(raw, "transfer-encoding").next().is_some();
     let has_content_length = headers::values(raw, "content-length").next().is_some();
+    // HTTP/1.0 has no chunked encoding: a `Transfer-Encoding` on one is either
+    // a mistake or an attempt to smuggle a second framing past us.
+    if has_transfer_encoding && version == Version::Http10 {
+        return Err(Reject::new(
+            400,
+            RejectReason::Other("transfer_encoding_on_http_1_0".into()),
+        ));
+    }
     let body = if has_transfer_encoding {
         // Request smuggling starts here: two framings, two possible readings.
         if has_content_length {
@@ -293,6 +392,20 @@ fn classify(
     };
 
     Ok((body, expect_continue, keep_alive))
+}
+
+/// Whether a `Host` value is one this front end will report as `server_name`.
+///
+/// It must not be empty, and it must not contain anything that would change how
+/// the field is read: whitespace, a comma (which would make it a list) or a
+/// delimiter that belongs to a request target rather than a host.
+fn valid_host(host: &[u8]) -> bool {
+    !host.is_empty()
+        && host.iter().all(|byte| {
+            !byte.is_ascii_whitespace()
+                && !byte.is_ascii_control()
+                && !matches!(byte, b',' | b'/' | b'\\' | b'@' | b'?' | b'#')
+        })
 }
 
 /// The client address to report, from `X-Forwarded-For` when it may be trusted.
@@ -662,18 +775,19 @@ mod tests {
             parse_head("GET / HTTP/1.1\r\nHost: [::1]\r\n\r\n").server_name,
             "::1"
         );
-        assert_eq!(
-            parse_head("GET / HTTP/1.1\r\nHost: \r\n\r\n").server_name,
-            "localhost"
-        );
-        assert_eq!(
-            parse_head("GET / HTTP/1.1\r\n\r\n").server_name,
-            "localhost"
-        );
         // Something that only looks like a port is kept whole.
         assert_eq!(
             parse_head("GET / HTTP/1.1\r\nHost: example.com:http\r\n\r\n").server_name,
             "example.com:http"
+        );
+        // HTTP/1.0 has no `Host` to report, and none is required.
+        assert_eq!(
+            parse_head("GET / HTTP/1.0\r\n\r\n").server_name,
+            "localhost"
+        );
+        assert_eq!(
+            parse_head("GET / HTTP/1.0\r\nHost: \r\n\r\n").server_name,
+            "localhost"
         );
     }
 
@@ -694,6 +808,120 @@ mod tests {
     fn leading_empty_lines_are_tolerated() {
         let head = parse_head("\r\n\r\nGET / HTTP/1.1\r\nHost: h\r\n\r\n");
         assert_eq!(head.method, b"GET");
+    }
+
+    #[test]
+    fn a_bare_lf_line_ending_is_refused() {
+        // Each of these is a head `httparse` accepts, so the check that fires
+        // is the one for LF without CR.
+        for raw in [
+            "GET / HTTP/1.1\nHost: h\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: h\n\r\n",
+            "GET / HTTP/1.1\r\nHost: h\r\n\n",
+            "GET / HTTP/1.1\r\nHost: h\r\nX-A: 1\nX-B: 2\r\n\r\n",
+        ] {
+            let reject = parse_reject(raw);
+            assert_eq!(reject.status, 400, "{raw:?}");
+            assert_eq!(reject.reason, RejectReason::MalformedRequest, "{raw:?}");
+        }
+
+        // The same head with CRLF everywhere is fine, so it is the line ending
+        // that decides.
+        let head = parse_head("GET / HTTP/1.1\r\nHost: h\r\nX-A: 1\r\nX-B: 2\r\n\r\n");
+        assert_eq!(head.headers.len(), 3);
+
+        // A bare LF in the body is not part of the head and never refused,
+        // even when it arrives in the same read as the head.
+        let raw = b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\na\nb";
+        match parse(raw, &cfg(), "p") {
+            Parsed::Complete(head, used) => {
+                assert_eq!(used, raw.len() - 3, "only the head was consumed");
+                assert_eq!(head.body, BodyFraming::ContentLength(3));
+            }
+            other => panic!("expected a complete head, got {other:?}"),
+        }
+
+        // An incomplete head with a bare LF inside it is refused at once.
+        assert!(matches!(
+            parse(b"GET / HTTP/1.1\nHost: h\r\n", &cfg(), "p"),
+            Parsed::Reject(_)
+        ));
+    }
+
+    #[test]
+    fn targets_are_checked_against_the_forms_a_view_can_route() {
+        assert_eq!(
+            parse_head("GET /x HTTP/1.1\r\nHost: h\r\n\r\n").target,
+            b"/x"
+        );
+        assert_eq!(
+            parse_head("OPTIONS * HTTP/1.1\r\nHost: h\r\n\r\n").target,
+            b"*"
+        );
+
+        for (raw, status) in [
+            ("CONNECT example.com:443 HTTP/1.1\r\nHost: h\r\n\r\n", 501),
+            ("connect example.com:443 HTTP/1.1\r\nHost: h\r\n\r\n", 501),
+            ("GET http://example.com/x HTTP/1.1\r\nHost: h\r\n\r\n", 400),
+            ("GET example.com:443 HTTP/1.1\r\nHost: h\r\n\r\n", 400),
+            ("GET * HTTP/1.1\r\nHost: h\r\n\r\n", 400),
+            ("GET foo HTTP/1.1\r\nHost: h\r\n\r\n", 400),
+            ("GET ?a=b HTTP/1.1\r\nHost: h\r\n\r\n", 400),
+        ] {
+            let reject = parse_reject(raw);
+            assert_eq!(reject.status, status, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn transfer_encoding_needs_http_1_1() {
+        let reject =
+            parse_reject("POST / HTTP/1.0\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n");
+        assert_eq!(reject.status, 400);
+        assert_eq!(
+            reject.reason,
+            RejectReason::Other("transfer_encoding_on_http_1_0".into())
+        );
+
+        // HTTP/1.1 with the same header is fine.
+        let head = parse_head("POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n");
+        assert_eq!(head.body, BodyFraming::Chunked);
+    }
+
+    #[test]
+    fn http_1_1_needs_exactly_one_usable_host() {
+        for (raw, reason) in [
+            ("GET / HTTP/1.1\r\n\r\n", "missing_host"),
+            ("GET / HTTP/1.1\r\nHost: \r\n\r\n", "invalid_host"),
+            ("GET / HTTP/1.1\r\nHost:   \r\n\r\n", "invalid_host"),
+            ("GET / HTTP/1.1\r\nHost: a b\r\n\r\n", "invalid_host"),
+            ("GET / HTTP/1.1\r\nHost: a,b\r\n\r\n", "invalid_host"),
+            ("GET / HTTP/1.1\r\nHost: /x\r\n\r\n", "invalid_host"),
+            (
+                "GET / HTTP/1.1\r\nHost: a\r\nHost: a\r\n\r\n",
+                "duplicate_host",
+            ),
+        ] {
+            let reject = parse_reject(raw);
+            assert_eq!(reject.status, 400, "{raw:?}");
+            assert_eq!(reject.reason, RejectReason::Other(reason.into()), "{raw:?}");
+        }
+
+        // HTTP/1.0 may leave it out; it then has no name to report.
+        let head = parse_head("GET / HTTP/1.0\r\n\r\n");
+        assert_eq!(head.server_name, "localhost");
+
+        // A bracketed IPv6 literal and a name with a dot are both fine.
+        for raw in [
+            "GET / HTTP/1.1\r\nHost: [2001:db8::1]:8080\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: shop.example.com\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: localhost:8000\r\n\r\n",
+        ] {
+            assert!(matches!(
+                parse(raw.as_bytes(), &cfg(), "p"),
+                Parsed::Complete(..)
+            ));
+        }
     }
 
     #[test]
