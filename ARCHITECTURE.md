@@ -982,8 +982,11 @@ writes to gets copied (§9.2). So:
   replaced by the cost the scheduler **measures**: after each view process
   reports `READY` it samples aggregate usage, keeps a moving average of the
   rise per view process and re-derives the cap from it. That matters because a
-  view copies most of the preloaded heap — about 135 MiB under gVisor on
-  CPython 3.14, where nothing is immortalised, against the 32 MiB default — so
+  view copies most of the preloaded heap — about 140 MiB under gVisor for a
+  Django + Wagtail app on CPython 3.14, immortalised or not (marking saves
+  ~40 % per view on native Linux, but under gVisor's 2 MiB copy-on-write
+  chunks such an app writes to nearly every chunk anyway), against the 32 MiB
+  default — so
   a cap derived from the configured estimate (≈45 on a 2 GiB instance) bounds
   nothing. The measurement only ever replaces the *derived* default;
   `BLASTIT_MAX_VIEW_PROCESSES` still wins, and an estimate that is never
@@ -1104,7 +1107,7 @@ with `request` events.
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | live view process cap (LRU retirement) |
 | `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | expected cost per view process: the starting divisor of the derived cap, and the floor of the measured one |
 | `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total` (the smaller of `MemTotal` and the cgroup limit); above it, one idle view process per 2 s check is retired |
-| `BLASTIT_IMMORTALIZE` | `auto` | `auto` \| `1` \| `0`: mark the preloaded heap immortal before the fork (§9.2 #7). `auto` does it on CPython 3.12 and 3.13 only, because 3.14's decrefs corrupt a marked heap; `1` forces it wherever the marker is known (3.12–3.14); `0` never |
+| `BLASTIT_IMMORTALIZE` | `auto` | `auto` \| `1` \| `0`: mark the preloaded heap immortal before the fork (§9.2 #7), each version with the marker CPython itself writes there. `auto` and `1` both do it on 3.12–3.14 and skip any interpreter whose marker blastit does not know (32-bit, big-endian, free-threaded, `Py_TRACE_REFS`, or a version outside that range), with the reason in the `boot` event; `0` never |
 | `BLASTIT_MAX_HEADER_BYTES` / `BLASTIT_MAX_BODY_BYTES` | `64 KiB` / `100 MiB` | HTTP limits |
 | `BLASTIT_HEADER_TIMEOUT` / `BLASTIT_KEEPALIVE_TIMEOUT` | `10s` / `75s` | HTTP timeouts (keep-alive above the LB's) |
 | `BLASTIT_TRUST_FORWARDED` | `1` | trust `X-Forwarded-*` from the LB |
@@ -1166,9 +1169,12 @@ is written up in
    the preloaded heap.
 7. **Immortalizing the preloaded heap fixes it.** Before `gc.freeze()`, init
    walks every reachable object (`gc.get_objects()` plus `gc.get_referents()`)
-   and sets the low 32 bits of `ob_refcnt` to `0xFFFFFFFF`, which is CPython
-   3.12–3.14's immortal marker on 64-bit (PEP 683). Incref and decref then
-   never write to those objects. Measured on DO:
+   and writes CPython's own immortal marker over its reference count, the pair
+   `_Py_SetImmortalUntracked` writes: the low 32 bits of `ob_refcnt` —
+   `0xFFFFFFFF` on 3.12 and 3.13, where `Py_INCREF` adds one to that half and
+   skips the write when it wraps — and, on 3.14, `0xC0000000` plus
+   `_Py_IMMORTAL_FLAGS` in the `u16` `ob_flags` at offset 6 (PEP 683). Incref
+   and decref then never write to those objects. Measured on DO:
 
    | per-child cost on DO | plain | immortalized |
    |---|---:|---:|
@@ -1182,18 +1188,28 @@ is written up in
    templates, `lru_cache`), and bytecode specialization of code that wasn't
    warmed up. That's why `BLASTIT_WARMUP` exists.
 
-   **3.14 must not be immortalised.** The marker means the same thing there
-   (`_Py_IsImmortal` is `(int32_t)refcnt < 0`), but not every decref checks it:
-   paths that only handle mortal objects count an immortal one down,
-   `0xFFFFFFFF` → `0xFFFFFFFE` → …, and a later decref frees or corrupts the
-   object. On a real Django + Wagtail app under CPython 3.14, views segfault in
-   `_PyObject_Malloc` on their first request; bisecting showed that marking the
-   instances of one class is enough, and the same crash is reproducible without
-   blastit by writing the marker with ctypes. So `BLASTIT_IMMORTALIZE=auto`
-   (the default) marks the heap on 3.12 and 3.13 only, and on 3.14 the server
-   starts with the pass skipped, warning `CPython 3.14: heap immortalisation is
-   unsafe on this version, views will copy more of the preloaded heap`.
-   `BLASTIT_IMMORTALIZE=1` forces it (3.12–3.14) for experiments, and
+   **3.14 needs its own marker.** The count alone is not enough there, because
+   3.14 has incref and decref paths that do not test immortality at all.
+   `_Py_INCREF_MORTAL` — behind `LOAD_CONST_MORTAL`, `PyStackRef_DUP`
+   (`LOAD_FAST`, `COPY`, `FOR_ITER`, …) and `PyStackRef_FromPyObjectNewMortal` —
+   is a bare `ob_refcnt++` on the low half, so `0xFFFFFFFF` wraps to `0` under
+   ordinary traffic, `_Py_IsImmortal` then says "mortal", and a later decref frees
+   an object that is still referenced. On a real Django + Wagtail app under
+   CPython 3.14, views segfault in `_PyObject_Malloc` on their first request, 5 of
+   5 processes; bisecting showed that marking the instances of one class is
+   enough, and the same crash is reproducible without blastit by writing
+   `0xFFFFFFFF` with ctypes. `PyStackRef_FromPyObjectSteal` also decides whether a
+   reference is already immortal by `ob_flags & _Py_IMMORTAL_FLAGS`
+   (`Py_TAG_REFCNT`), not by the count, and `PyStackRef_CLOSE` on an untagged
+   reference goes through `_Py_DECREF_MORTAL`, equally unchecked.
+   `0xC0000000` with the flag answers both: it leaves 2^30 of headroom in each
+   direction, so no mortal-only path can wrap it inside a container's life, and
+   the flag is what tells 3.14's stack that the object is already immortal. On
+   that pair a 3.14 app served 3,000 requests across 5 processes with no drift and
+   no crash — and the immortalised heap numbers above are unchanged, because the
+   marker is never written to on either version. So `BLASTIT_IMMORTALIZE=auto`
+   (the default) marks 3.12, 3.13 **and** 3.14; `BLASTIT_IMMORTALIZE=1` asks for
+   the same interpreters, and differs only in who asked; and
    `BLASTIT_IMMORTALIZE=0` turns it off everywhere.
 
    The marker also depends on the CPython version, so any other interpreter —
