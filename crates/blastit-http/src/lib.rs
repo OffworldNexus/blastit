@@ -60,12 +60,25 @@
 //! connection: frames go into a per-stream queue that does not block, and
 //! `CANCEL` takes a queue of its own that the writer always drains first.
 //!
-//! What stops that from growing is accounting. Each stream counts the response
-//! bytes it has received but not yet written to its client, capped at
-//! [`HttpConfig::stream_buffer_bytes`]. A client that stops reading fills its
-//! own buffer and no more: that one stream is cancelled, its connection is
-//! aborted and everything still arriving for it is dropped. Every other
-//! connection carries on, because the reader was never waiting for it.
+//! What bounds those buffers is credit, not blocking (§3.1). Each body, in each
+//! direction, starts with [`INITIAL_WINDOW`] bytes of it:
+//!
+//! * **Request bodies.** The front end sends at most the credit it has. When it
+//!   runs out it stops reading that client's socket — and only that client's —
+//!   until the scheduler forwards a `WINDOW` for the stream. A slow app slows
+//!   its own client down, over TCP; `body_timeout` still applies while the
+//!   upload waits, so a stalled app cannot hold a connection forever.
+//! * **Response bodies.** The front end grants credit back as it writes to the
+//!   client socket: batched in 64 KiB worth of writes, and once more whenever
+//!   the response goes quiet, because a view that is *waiting* for credit has
+//!   nothing left to send. A slow client slows its own request thread down.
+//!
+//! The per-stream buffer cap ([`HttpConfig::stream_buffer_bytes`], the window
+//! plus one frame by default) is therefore the *protocol-violation* guard: a
+//! peer that sends past its credit has broken the protocol, and that one stream
+//! is cancelled, its connection aborted and everything still arriving for it
+//! dropped. Every other connection carries on, because the reader was never
+//! waiting for it.
 //!
 //! # What it never logs
 //!
@@ -111,6 +124,7 @@ pub use crate::reason::canonical_reason;
 #[cfg(unix)]
 pub use crate::server::serve;
 pub use crate::server::{Acceptor, Server, TcpAcceptor, serve_with};
+pub use blastit_frame::INITIAL_WINDOW;
 
 /// Where the front end sends its structured events (ARCHITECTURE.md §8.1).
 ///

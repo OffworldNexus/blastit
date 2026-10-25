@@ -47,15 +47,47 @@ impl Scheduler {
         }
     }
 
-    /// The next frame the front end sent.
+    /// The next frame the front end sent, ignoring flow control.
     pub async fn next(&mut self) -> (u32, Frame) {
-        self.next_within(PATIENCE)
-            .await
-            .expect("http.chan went quiet")
+        loop {
+            let frame = self.raw_next(PATIENCE).await.expect("http.chan went quiet");
+            if !matches!(frame.1, Frame::Window { .. }) {
+                return frame;
+            }
+        }
     }
 
     /// The next frame, or `None` when nothing arrives within `wait`.
+    ///
+    /// `WINDOW` frames are flow control rather than request traffic, so they
+    /// are skipped here; use [`Scheduler::window_within`] to watch them.
     pub async fn next_within(&mut self, wait: Duration) -> Option<(u32, Frame)> {
+        loop {
+            let frame = self.raw_next(wait).await?;
+            if !matches!(frame.1, Frame::Window { .. }) {
+                return Some(frame);
+            }
+        }
+    }
+
+    /// The next response-body credit the front end granted, with its stream.
+    pub async fn window(&mut self) -> (u32, u32) {
+        match self.raw_next(PATIENCE).await.expect("http.chan went quiet") {
+            (id, Frame::Window { bytes }) => (id, bytes),
+            other => panic!("expected WINDOW, got {other:?}"),
+        }
+    }
+
+    /// The next `WINDOW`, or `None` when none arrives within `wait`.
+    pub async fn window_within(&mut self, wait: Duration) -> Option<(u32, u32)> {
+        match self.raw_next(wait).await? {
+            (id, Frame::Window { bytes }) => Some((id, bytes)),
+            other => panic!("expected WINDOW, got {other:?}"),
+        }
+    }
+
+    /// The next frame of any kind, `WINDOW` included.
+    pub async fn raw_next(&mut self, wait: Duration) -> Option<(u32, Frame)> {
         loop {
             if let Some(frame) = self.decoder.next_frame().expect("frame on http.chan") {
                 return Some(frame);
@@ -284,12 +316,21 @@ where
     }
 
     /// Read until `needle` has been seen, returning everything up to it.
+    ///
+    /// Only the newly arrived bytes are searched: a needle that was not in the
+    /// buffer before cannot appear anywhere but the tail, and re-scanning a
+    /// megabyte per read would make a large response quadratic.
     pub async fn read_until(&mut self, needle: &[u8]) -> Vec<u8> {
+        let mut scanned = 0usize;
         loop {
-            if let Some(index) = find(&self.pending, needle) {
-                let end = index + needle.len();
+            // Back up by one needle's worth, so a needle that straddles the
+            // boundary between two reads is still found.
+            let from = scanned.saturating_sub(needle.len().saturating_sub(1));
+            if let Some(index) = find(&self.pending[from..], needle) {
+                let end = from + index + needle.len();
                 return self.pending.drain(..end).collect();
             }
+            scanned = self.pending.len();
             if self.fill().await == 0 {
                 panic!("the connection closed before {needle:?}");
             }
@@ -494,7 +535,26 @@ impl Rig {
 
     /// Open a client connection accepted from `peer`.
     pub fn connect_from(&self, peer: &str) -> (Client, JoinHandle<Result<(), HttpError>>) {
-        let (server_side, client_side) = tokio::io::duplex(1 << 20);
+        self.connect_with(peer, 1 << 20)
+    }
+
+    /// A connection whose client-side buffer holds `capacity` bytes.
+    ///
+    /// A small buffer is how a test makes the front end's writes block, which
+    /// is what a client that is not reading looks like from the inside.
+    pub fn connect_with_capacity(
+        &self,
+        capacity: usize,
+    ) -> (Client, JoinHandle<Result<(), HttpError>>) {
+        self.connect_with(PEER, capacity)
+    }
+
+    fn connect_with(
+        &self,
+        peer: &str,
+        capacity: usize,
+    ) -> (Client, JoinHandle<Result<(), HttpError>>) {
+        let (server_side, client_side) = tokio::io::duplex(capacity);
         let server = Arc::clone(&self.server);
         let peer = peer.to_string();
         let task = tokio::spawn(async move { server.serve_connection(server_side, peer).await });
