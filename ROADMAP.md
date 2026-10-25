@@ -62,3 +62,13 @@ CI grows with the code, never ahead of it:
 | **C3** memory | `blastit` | C1 | §8 sizing, §9.2 | heap immortalisation before fork, `BLASTIT_MAX_VIEW_PROCESSES` LRU cap, memory high-watermark retirement | ⬜ |
 | **C4** seccomp | `blastit` | C1 | §7.3 | per-role filters, `egress` grants | ✅ |
 | **C5** DO | — | C2 | §10, §11 | deploy the e2e app on App Platform; re-run the spike checks against the real binary; measure a real app's memory | ✅ |
+
+## Phase D: adoption
+
+| Step | Where | Depends on | Done when | Status |
+|---|---|---|---|---|
+| **D1** README | `README.md` | — | a friendly README: the idea (keep the blast radius of a security issue small by sandboxing each view, letting it use private resources without knowing their secrets, and giving it only the privileges it needs over them), then a quick start for a Django and a FastAPI project; every later step of this phase updates it | ⬜ |
+| **D2** packaging | `pyproject.toml`, `python/`, `crates/blastit-py`, CI | C | installable like granian: a maturin-built pyo3 extension plus a `blastit` command written in Python, so blastit runs on the interpreter of the environment it is installed in and finds its virtualenv for free; dbproxy ships in the wheel as a separate binary without Python; CI builds manylinux wheels for CPython 3.13 and 3.14 on every push to `develop` and publishes them on a GitHub release listed by a PEP 503 index on GitHub Pages | ⬜ |
+| **D3** pytest plugin | `python/blastit/pytest_plugin.py` | D2 | with pytest-django, records each request a test makes (method, path, the route blastit would pick, the SQL as it goes on the wire) and diffs it against `blastit.toml` with blastit's own routing and SQL matching: unrouted paths, routes never exercised, statements executed but not granted (with the test that ran them), grants never used; text and JSON reports, meant for a human or an agent filling in the manifest | ⬜ |
+| **D4** pilot | a pilot project | D2, D3 | a real Django project runs under blastit on App Platform, with a manifest written from its test suite through D3 | ⬜ |
+| **D5** fair queuing | `blastit-scheduler` | D4 | the scheduler's admission queue is fair between clients, so one client's burst can't starve the others (reference: granian's HTTP fair queuing) | ⬜ |
