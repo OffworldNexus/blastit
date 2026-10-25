@@ -10,6 +10,7 @@
 //! with an in-memory init and never fork anything. [`UnixCtl`] is the real
 //! thing, over a `socketpair(AF_UNIX, SOCK_STREAM)`.
 
+use std::future::Future;
 use std::io::IoSlice;
 use std::io::IoSliceMut;
 use std::mem::MaybeUninit;
@@ -32,30 +33,32 @@ const READ_CHUNK: usize = 64;
 
 /// The `ctl.chan` end the scheduler holds.
 ///
-/// Implementations must be *cancel safe* in [`CtlChannel::recv`]: the scheduler
-/// polls it inside a `select!` and drops the future whenever another channel is
-/// ready, then polls it again. [`UnixCtl`] keeps every byte it has read in its
-/// own buffer, so a cancelled read loses nothing.
+/// Implementations must be *cancel safe* in [`CtlChannel::recv`]: the ctl task
+/// polls it inside a `select!` and drops the future whenever the outbound queue
+/// is ready, then polls it again. [`UnixCtl`] keeps every byte it has read in
+/// its own buffer, so a cancelled read loses nothing.
 ///
-/// The trait uses `async fn` and is therefore not object safe; the scheduler
-/// takes it as a generic parameter instead (§2.4's "pure Rust" end of the
-/// process tree has no need for `dyn`).
-#[allow(async_fn_in_trait)]
+/// Both futures are `Send`, because the scheduler runs the channel on a task of
+/// its own — the loop itself never awaits it. The trait is generic rather than
+/// `dyn` on purpose (§2.4's "pure Rust" end of the process tree has no need for
+/// it).
 pub trait CtlChannel {
     /// Sends one `ctl.chan` message, with no file descriptor.
     ///
     /// The scheduler only ever sends `SPAWN`, `RETIRE` and `DRAIN`; the
     /// descriptor side of the protocol belongs to init, which answers
     /// `SPAWNED`.
-    async fn send(&mut self, msg: Ctl) -> Result<(), SchedulerError>;
+    fn send(&mut self, msg: Ctl) -> impl Future<Output = Result<(), SchedulerError>> + Send;
 
     /// Receives the next `ctl.chan` message and the descriptor that travelled
     /// with it, if any.
     ///
     /// Only `SPAWNED` carries one, and it carries exactly one: a message with
     /// the wrong number of descriptors is a protocol error, and the extras are
-    /// closed (§3).
-    async fn recv(&mut self) -> Result<(Ctl, Option<OwnedFd>), SchedulerError>;
+    /// closed (§3). Must be cancel safe.
+    fn recv(
+        &mut self,
+    ) -> impl Future<Output = Result<(Ctl, Option<OwnedFd>), SchedulerError>> + Send;
 }
 
 /// A [`CtlChannel`] over a raw Unix socket, moving file descriptors with

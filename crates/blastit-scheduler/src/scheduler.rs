@@ -7,51 +7,64 @@
 //! retirement — lives in [`Scheduler`] and runs on that one task, so there are
 //! no locks anywhere.
 //!
+//! # The loop never waits for a peer
+//!
+//! A shared channel carries many streams, so nothing on the scheduler's task
+//! may wait for one slow stream, one slow client or one slow view to catch up
+//! (§3.1, "Flow control"). Two rules follow, and both hold here:
+//!
+//! * **Every peer has its own writer task**, fed by a queue that
+//!   [`crate::task::Outbound::push`] fills without awaiting. The byte
+//!   accounting keeps that queue bounded: a view whose queue passes
+//!   `4 × INITIAL_WINDOW` plus slack is *recycled* instead of buffered, and
+//!   `http.chan` passing 64 MiB is fatal for the scheduler.
+//! * **Every reader always keeps reading.** Bodies are bounded by per-stream
+//!   credit instead of by stopping a channel: each body starts with
+//!   `INITIAL_WINDOW` bytes of credit, `WINDOW` frames extend it, and a peer
+//!   that sends beyond its credit has broken the protocol.
+//!
+//! The [`Emit`] callback is the one thing that runs inline: it must not block.
+//!
 //! # Where the decisions differ from §2.4, and why
 //!
-//! * The `request` event's `path` is the request target without its query
-//!   string, as the brief asks, not the *decoded* `PATH_INFO` of §8.1.
+//! * The `request` event's `path` is the routed `PATH_INFO`: percent-decoded,
+//!   `SCRIPT_NAME` stripped, and never a query string (§8.1). A request the
+//!   scheduler answers before routing (a `400`) has no `PATH_INFO`, so it
+//!   reports the target with its query string removed instead.
 //! * `request_timeout` is measured from dispatch, not from arrival: a request
 //!   that waited in the queue then gets its full time on a worker thread, and
 //!   the wait itself is reported separately in `queued_ms`.
-//! * Percent-decoding and `SCRIPT_NAME` failures reuse the `unmatched`
-//!   outcome: no view was involved, and §8.1's outcome list is closed.
+//! * Percent-decoding, control-byte and `SCRIPT_NAME` failures reuse the
+//!   `unmatched` outcome: no view was involved, and §8.1's outcome list is
+//!   closed.
 //! * The health path is matched against the decoded path *before*
 //!   `BLASTIT_SCRIPT_NAME` is stripped, so it is the absolute path the
-//!   operator configured.
+//!   operator configured, and only `GET` and `HEAD` reach it.
+//! * A view that exceeds its response credit, or one whose outbound queue
+//!   overflows, is retired with `credit_overflow`, a
+//!   [`RetireReason::Other`] (§8.1's reasons are init's: idle, max_requests,
+//!   stuck_threads, memory_pressure, lru_cap).
 //! * A `RESP_ABORT` from a view is reported with the `view_died` outcome, and
 //!   a `DRAIN` rejects new requests with `503`/`queue_full` (the closest of the
 //!   seven outcomes, which §8.1 closes).
-//! * `process.retired` carries `uid: 0`: the uid table lives in init (§4, §6)
-//!   and [`RouteInfo`] has no uid.
-//! * Frames from a view that name a request it was never given are counted and
-//!   dropped. §8.1's vocabulary has no event for a protocol violation inside
-//!   the scheduler, so the count is not reported anywhere yet.
 //! * A scheduler-written body is sent even for a `HEAD` request: deciding not
 //!   to is http's business, not the scheduler's (§2.3).
 //! * Two settings exist that §8.2 does not name, because §2.4 asks for the
 //!   behaviour without giving it a variable: [`SchedulerConfig::spawn_backoff`]
-//!   ("don't spin") and [`SchedulerConfig::body_buffer_limit`] (the bound on
-//!   the body of a queued request).
-//!
-//! # Backpressure
-//!
-//! Every channel gets a bounded queue, so a peer that stops reading is a peer
-//! that stops being written to. The one case where a request body has to be
-//! held is a request waiting in the admission queue: it is buffered up to
-//! [`SchedulerConfig::body_buffer_limit`], and once the queued bodies together
-//! reach that bound the scheduler stops reading `http.chan` altogether, which
-//! pushes back on http and the client. Nothing here buffers without a bound.
+//!   ("don't spin") and the per-peer byte caps in this module.
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use blastit_events::{
     Component, Event, EventKind, Outcome, ProcessRetired, RequestInfo, RetireReason,
 };
-use blastit_frame::{Ctl, DoneOutcome, Frame, ReqHead, RespHead};
+use blastit_frame::{
+    Ctl, DoneOutcome, Frame, FrameError, INITIAL_WINDOW, Limits, ReqHead, RespHead,
+};
 use blastit_manifest::RoutingTable;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -60,32 +73,50 @@ use tokio::time::Instant;
 use crate::config::SchedulerConfig;
 use crate::ctl::CtlChannel;
 use crate::error::SchedulerError;
-use crate::path::{path_of_target, percent_decode, strip_script_name};
+use crate::path::{
+    is_control_byte, normalize_script_name, path_of_target, percent_decode, strip_script_name,
+};
 use crate::route::RouteInfo;
-use crate::task::{read_frames, write_frames};
+use crate::task::{
+    OutFrame, Outbound, PushError, ctl_frame_size, read_frames, release, write_peer,
+};
 
-/// How many `http.chan` frames may pile up before http is made to wait.
+/// How many `http.chan` frames may pile up before its reader task waits.
 const HTTP_IN_CAPACITY: usize = 64;
 /// How many frames may be queued towards one view before its reader waits.
 const VIEW_IN_CAPACITY: usize = 256;
-/// How many frames may be queued towards http or a view before we wait.
-const OUT_CAPACITY: usize = 64;
-
-/// Frames towards one view process.
-type ViewSink = mpsc::Sender<(u32, Frame)>;
+/// How many `ctl.chan` messages may pile up before its task waits.
+const CTL_IN_CAPACITY: usize = 64;
+/// Bytes that may be queued towards http before the scheduler stops: nothing
+/// on this path may buffer more than a handful of response windows.
+const HTTP_OUTBOUND_CAP: usize = 64 * 1024 * 1024;
+/// Bytes that may be queued towards one view: four windows plus room for a
+/// head and a few small frames. Past it the view is recycled, not buffered.
+const VIEW_OUTBOUND_CAP: usize = 4 * INITIAL_WINDOW as usize + 64 * 1024;
+/// Bytes that may be queued towards init. `ctl.chan` traffic is tiny; a queue
+/// this deep means init stopped reading, which is fatal anyway.
+const CTL_OUTBOUND_CAP: usize = 1024 * 1024;
+/// The `reason` a view is retired with when it breaks flow control, or when
+/// its outbound queue overflows (§8.1's reasons are init's).
+const CREDIT_OVERFLOW: &str = "credit_overflow";
 
 /// Where a `request` or `process.retired` event goes.
 ///
 /// init owns stdout (§8.1): the scheduler hands every event to this closure,
-/// which writes it to the events pipe.
+/// which writes it to the events pipe. **It must not block**: it is called
+/// inline from the scheduler's loop, and a blocking callback would stop every
+/// stream on every channel.
 pub type Emit = Arc<dyn Fn(Event) + Send + Sync>;
 
-/// A frame from `http.chan`, or its end.
+/// A frame from `http.chan`, or the end of that channel.
 enum HttpIn {
     /// One frame, muxed by the stream id http allocated.
     Frame { id: u32, frame: Frame },
     /// http closed its end of the channel.
     Closed,
+    /// http sent bytes that are not a frame. This is blastit's own code on the
+    /// other end (§3.1), so it is fatal rather than a view's problem.
+    Failed(FrameError),
 }
 
 /// Which view process a message came from: the route index plus the pid init
@@ -100,12 +131,20 @@ struct ViewKey {
     pid: u32,
 }
 
-/// A frame from one `view.chan`, or its end.
+/// A frame from one `view.chan`, or the end of that channel.
 enum ViewIn {
     /// One frame, muxed by the request id the scheduler allocated for that view.
     Frame { key: ViewKey, id: u32, frame: Frame },
     /// The view's end of the channel closed (or its process died).
     Closed { key: ViewKey },
+}
+
+/// A message from `ctl.chan`, or its failure.
+enum CtlIn {
+    /// One message and the descriptor that travelled with it, if any.
+    Message(Ctl, Option<OwnedFd>),
+    /// `ctl.chan` failed: the scheduler cannot run without init.
+    Failed(SchedulerError),
 }
 
 /// One live view process (or one whose `SPAWNED` has not arrived yet).
@@ -128,9 +167,8 @@ struct View {
     idle_since: Option<Instant>,
     /// Last time this view was dispatched to, for the LRU cap.
     last_used: u64,
-    /// Frames towards this view. Dropping it ends the writer task and closes
-    /// the scheduler's end of `view.chan`.
-    out: Option<mpsc::Sender<(u32, Frame)>>,
+    /// Frames towards this view, with its own writer task behind them.
+    out: Option<Outbound>,
 }
 
 impl View {
@@ -173,6 +211,9 @@ struct Request {
     route: Option<usize>,
     /// Index of the matching path regex in the route (§8.1 `rule`).
     rule: Option<u32>,
+    /// The routed `PATH_INFO`: decoded and `SCRIPT_NAME`-stripped (§8.1).
+    /// `None` when the target could not be decoded at all.
+    path_info: Option<String>,
     arrived: Instant,
     /// Set while the request waits in the admission queue.
     queued_since: Option<Instant>,
@@ -184,10 +225,9 @@ struct Request {
     outcome: Outcome,
     bytes_in: u64,
     bytes_out: u64,
-    /// Body chunks held while the request is queued.
+    /// Body chunks held while the request is queued. Credit bounds them: http
+    /// may not send more than [`Request::upload_credit`] allows (§3.1).
     body: Vec<Vec<u8>>,
-    /// How many bytes `body` holds, for the backpressure bound.
-    body_bytes: usize,
     /// `REQ_END` arrived.
     end_seen: bool,
     /// A `CANCEL` arrived from http.
@@ -205,6 +245,10 @@ struct Request {
     timed_out: bool,
     /// This request holds one of the global worker slots.
     slots: bool,
+    /// Request-body bytes http may still send before the view grants more.
+    upload_credit: u32,
+    /// Response-body bytes the view may still send before http grants more.
+    download_credit: u32,
 }
 
 /// What routing a request target produced.
@@ -215,8 +259,15 @@ enum Resolution {
     Health,
     /// Nothing matched: a `404` (§2.4).
     Unrouted,
-    /// A route and one of its rules.
-    Routed { route: usize, rule: u32 },
+    /// A route, one of its rules, and the `PATH_INFO` that matched.
+    Routed {
+        /// Route index.
+        route: usize,
+        /// Index of the matching path regex.
+        rule: u32,
+        /// The decoded, stripped path.
+        path_info: String,
+    },
 }
 
 /// The scheduler's whole state.
@@ -225,10 +276,14 @@ struct Scheduler {
     routes: Vec<RouteInfo>,
     table: RoutingTable,
     emit: Emit,
-    /// Frames towards http.
-    http_out: mpsc::Sender<(u32, Frame)>,
+    /// Frames towards http, with its own writer task behind them.
+    http_out: Outbound,
     /// The sender every view reader task clones.
     view_in: mpsc::Sender<ViewIn>,
+    /// `ctl.chan` messages towards init, with its own task behind them.
+    ctl_out: Outbound,
+    /// The normalised `BLASTIT_SCRIPT_NAME` mount prefix (§6), if any.
+    script_name: Option<String>,
     started: Instant,
     counter: u64,
     /// Every request that has not been released yet, by http stream id.
@@ -245,30 +300,30 @@ struct Scheduler {
     backoff: HashMap<usize, Instant>,
     /// Monotonic counter behind the LRU cap.
     lru: u64,
-    /// Total body bytes buffered for queued requests.
-    buffered_bytes: usize,
-    /// http is not being read, because those bodies reached the bound.
-    http_paused: bool,
     /// A `DRAIN` arrived: no new admission, no new spawns.
     draining: bool,
     /// When draining gives up on the requests that are left.
     drain_deadline: Option<Instant>,
     /// http closed `http.chan`.
     http_closed: bool,
-    /// Frames dropped because they named an unknown stream or request.
+    /// Frames dropped because they named an unknown stream or request, or
+    /// because a peer sent one the protocol does not allow there.
     dropped: u64,
 }
 
 impl Scheduler {
     /// A scheduler with nothing in flight.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         cfg: SchedulerConfig,
         routes: Vec<RouteInfo>,
         table: RoutingTable,
         emit: Emit,
-        http_out: mpsc::Sender<(u32, Frame)>,
+        http_out: Outbound,
         view_in: mpsc::Sender<ViewIn>,
+        ctl_out: Outbound,
     ) -> Self {
+        let script_name = cfg.script_name.as_deref().and_then(normalize_script_name);
         Self {
             cfg,
             routes,
@@ -276,6 +331,8 @@ impl Scheduler {
             emit,
             http_out,
             view_in,
+            ctl_out,
+            script_name,
             started: Instant::now(),
             counter: 0,
             requests: HashMap::new(),
@@ -285,8 +342,6 @@ impl Scheduler {
             slots: 0,
             backoff: HashMap::new(),
             lru: 0,
-            buffered_bytes: 0,
-            http_paused: false,
             draining: false,
             drain_deadline: None,
             http_closed: false,
@@ -310,12 +365,12 @@ impl Scheduler {
 
     /// Spawns the views that must exist at startup: every preforked route, and
     /// every route when `BLASTIT_VIEW_SPAWN=eager` (§2.4, §6).
-    async fn start<C: CtlChannel>(&mut self, ctl: &mut C) -> Result<(), SchedulerError> {
+    fn start(&mut self) -> Result<(), SchedulerError> {
         let wanted: Vec<usize> = (0..self.routes.len())
             .filter(|route| self.cfg.eager_spawn || self.routes[*route].prefork)
             .collect();
         for route in wanted {
-            self.try_spawn(route, ctl).await?;
+            self.try_spawn(route)?;
         }
         Ok(())
     }
@@ -387,66 +442,79 @@ impl Scheduler {
 
     /// Everything that is time-based, after any event: queue timeouts, work to
     /// dispatch, request timeouts, and retirements.
-    async fn pump<C: CtlChannel>(&mut self, ctl: &mut C) -> Result<(), SchedulerError> {
+    fn pump(&mut self) -> Result<(), SchedulerError> {
         let now = Instant::now();
         self.backoff.retain(|_, until| *until > now);
-        self.expire_queue().await;
-        self.dispatch_queued(ctl).await?;
-        self.expire_requests(ctl).await?;
-        self.retire_finished_views(ctl).await?;
+        self.expire_queue()?;
+        self.dispatch_queued()?;
+        self.expire_requests()?;
+        self.retire_finished_views()?;
         Ok(())
     }
 
     /// Handles one `http.chan` frame.
-    async fn on_http(&mut self, event: HttpIn) {
+    fn on_http(&mut self, event: HttpIn) -> Result<(), SchedulerError> {
         let (id, frame) = match event {
             HttpIn::Closed => {
                 self.http_closed = true;
-                return;
+                return Ok(());
             }
+            // http is blastit's own code: bytes that are not frames mean the
+            // build is broken, not that a peer misbehaved (§3.1).
+            HttpIn::Failed(error) => return Err(SchedulerError::Frame(error)),
             HttpIn::Frame { id, frame } => (id, frame),
         };
         match frame {
-            Frame::ReqHead(head) => self.begin(id, head).await,
-            Frame::ReqBody(body) => self.request_body(id, body).await,
-            Frame::ReqEnd => self.request_end(id).await,
-            Frame::Cancel => self.client_cancel(id).await,
+            Frame::ReqHead(head) => self.begin(id, head),
+            Frame::ReqBody(body) => self.request_body(id, body),
+            Frame::ReqEnd => self.request_end(id),
+            Frame::Cancel => self.client_cancel(id),
+            Frame::Window { bytes } => self.client_window(id, bytes),
             // http never sends a response frame; count it and move on.
-            _ => self.dropped += 1,
+            _ => {
+                self.dropped += 1;
+                Ok(())
+            }
         }
     }
 
     /// Handles one `view.chan` frame, or the loss of a view process.
-    async fn on_view(&mut self, event: ViewIn) {
+    fn on_view(&mut self, event: ViewIn) -> Result<(), SchedulerError> {
         let (key, id, frame) = match event {
             ViewIn::Closed { key } => {
-                self.view_gone(key).await;
-                return;
+                self.view_gone(key);
+                return Ok(());
             }
             ViewIn::Frame { key, id, frame } => (key, id, frame),
         };
         match frame {
-            Frame::Ready => self.view_ready(key),
-            Frame::Done { outcome } => self.view_done(key, id, outcome).await,
-            Frame::RespHead(head) => self.view_head(key, id, head).await,
-            Frame::RespBody(body) => self.view_body(key, id, body).await,
-            Frame::RespEnd => self.view_end(key, id).await,
-            Frame::RespAbort { reason } => self.view_abort(key, id, &reason).await,
+            Frame::Ready => {
+                self.view_ready(key);
+                Ok(())
+            }
+            Frame::Done { outcome } => self.view_done(key, id, outcome),
+            Frame::RespHead(head) => self.view_head(key, id, head),
+            Frame::RespBody(body) => self.view_body(key, id, body),
+            Frame::RespEnd => self.view_end(key, id),
+            Frame::RespAbort { reason } => self.view_abort(key, id, &reason),
+            Frame::Window { bytes } => self.view_window(key, id, bytes),
             // A view may only address its own requests: drop anything else.
-            _ => self.dropped += 1,
+            _ => {
+                self.dropped += 1;
+                Ok(())
+            }
         }
     }
 
     /// Handles one `ctl.chan` message from init.
-    async fn on_ctl(&mut self, message: Ctl, fd: Option<OwnedFd>) -> Result<(), SchedulerError> {
+    fn on_ctl(&mut self, message: Ctl, fd: Option<OwnedFd>) -> Result<(), SchedulerError> {
         match message {
             Ctl::Spawned { route, pid } => self.view_spawned(route as usize, pid, fd),
             Ctl::Exited { route, pid, .. } => {
                 self.view_gone(ViewKey {
                     route: route as usize,
                     pid,
-                })
-                .await;
+                });
                 Ok(())
             }
             Ctl::Drain => {
@@ -462,15 +530,67 @@ impl Scheduler {
         }
     }
 
+    // --------------------------------------------------------------- pushes
+
+    /// Queues a frame towards http.
+    fn http_push(&mut self, id: u32, frame: Frame) -> Result<(), SchedulerError> {
+        match self.http_out.push(id, frame) {
+            Ok(()) => Ok(()),
+            Err(PushError::Overflow { bytes, cap }) => {
+                Err(SchedulerError::overflow("http.chan", bytes, cap))
+            }
+            Err(PushError::Closed) => {
+                // The writer is gone: http has closed its end.
+                self.http_closed = true;
+                Ok(())
+            }
+            Err(PushError::Frame(error)) => Err(SchedulerError::Frame(error)),
+        }
+    }
+
+    /// Queues a control message towards init.
+    fn ctl_push(&mut self, message: Ctl) -> Result<(), SchedulerError> {
+        match self.ctl_out.push(0, Frame::Ctl(message)) {
+            Ok(()) => Ok(()),
+            Err(PushError::Overflow { bytes, cap }) => {
+                Err(SchedulerError::overflow("ctl.chan", bytes, cap))
+            }
+            Err(PushError::Closed) => Err(SchedulerError::closed()),
+            Err(PushError::Frame(error)) => Err(SchedulerError::Frame(error)),
+        }
+    }
+
+    /// Queues a frame towards one view.
+    ///
+    /// A view whose queue is full is not worth waiting for: it is recycled, and
+    /// its requests fail, rather than letting one process hold up the loop.
+    fn view_push(&mut self, key: ViewKey, id: u32, frame: Frame) -> Result<(), SchedulerError> {
+        let Some(out) = self.view_out(key) else {
+            return Ok(());
+        };
+        match out.push(id, frame) {
+            Ok(()) => Ok(()),
+            Err(PushError::Closed) => {
+                self.view_gone(key);
+                Ok(())
+            }
+            Err(PushError::Overflow { .. }) | Err(PushError::Frame(_)) => {
+                self.retire(key, RetireReason::Other(CREDIT_OVERFLOW.to_string()))
+            }
+        }
+    }
+
     // --------------------------------------------------------------- request
 
     /// Routes a new request and either dispatches it or queues it (§2.4).
-    async fn begin(&mut self, stream_id: u32, head: ReqHead) {
+    fn begin(&mut self, stream_id: u32, head: ReqHead) -> Result<(), SchedulerError> {
         if self.requests.contains_key(&stream_id) {
-            // A stream id is only reused once its response is over; anything
-            // else would let one request inherit another's worker slot.
-            self.dropped += 1;
-            return;
+            // http's contract is that a stream id is not reused while it is in
+            // flight; anything else would let one request inherit another's
+            // worker slot, so it is fatal rather than guessed at.
+            return Err(SchedulerError::protocol(format!(
+                "http.chan reused stream id {stream_id} while it was still in flight"
+            )));
         }
         let request_id = self.next_request_id();
         let mut request = Request {
@@ -479,6 +599,7 @@ impl Scheduler {
             head,
             route: None,
             rule: None,
+            path_info: None,
             arrived: Instant::now(),
             queued_since: None,
             dispatched_at: None,
@@ -488,7 +609,6 @@ impl Scheduler {
             bytes_in: 0,
             bytes_out: 0,
             body: Vec::new(),
-            body_bytes: 0,
             end_seen: false,
             cancelled: false,
             view: None,
@@ -497,6 +617,8 @@ impl Scheduler {
             emitted: false,
             timed_out: false,
             slots: false,
+            upload_credit: INITIAL_WINDOW,
+            download_credit: INITIAL_WINDOW,
         };
         let resolution = self.resolve(&request);
         match resolution {
@@ -509,12 +631,11 @@ impl Scheduler {
                     "bad request\n",
                     Outcome::Unmatched,
                 )
-                .await;
             }
             Resolution::Health => {
                 self.requests.insert(stream_id, request);
-                self.respond(stream_id, 200, "OK", "ok").await;
-                self.finish_immediately(stream_id, Outcome::Ok).await;
+                self.respond(stream_id, 200, "OK", "ok")?;
+                self.finish_immediately(stream_id, Outcome::Ok)
             }
             Resolution::Unrouted => {
                 self.requests.insert(stream_id, request);
@@ -525,11 +646,15 @@ impl Scheduler {
                     "not found\n",
                     Outcome::Unmatched,
                 )
-                .await;
             }
-            Resolution::Routed { route, rule } => {
+            Resolution::Routed {
+                route,
+                rule,
+                path_info,
+            } => {
                 request.route = Some(route);
                 request.rule = Some(rule);
+                request.path_info = Some(path_info);
                 self.requests.insert(stream_id, request);
                 if self.draining {
                     self.reject(
@@ -539,9 +664,8 @@ impl Scheduler {
                         "draining\n",
                         Outcome::QueueFull,
                     )
-                    .await;
                 } else if self.can_dispatch(route) {
-                    self.dispatch(stream_id).await;
+                    self.dispatch(stream_id)
                 } else if self.queue.len() >= self.cfg.queue_size {
                     self.reject(
                         stream_id,
@@ -550,9 +674,9 @@ impl Scheduler {
                         "queue full\n",
                         Outcome::QueueFull,
                     )
-                    .await;
                 } else {
                     self.enqueue(stream_id);
+                    Ok(())
                 }
             }
         }
@@ -567,26 +691,34 @@ impl Scheduler {
         if !decoded.starts_with(b"/") {
             return Resolution::Bad;
         }
+        // NUL and the C0 controls cannot be routed on (and must never reach an
+        // event), so they are a `400` like any other unusable target.
+        if decoded.iter().any(|byte| is_control_byte(*byte)) {
+            return Resolution::Bad;
+        }
         let Ok(path) = std::str::from_utf8(&decoded) else {
             return Resolution::Bad;
         };
-        if path == self.cfg.health_path {
+        let Ok(method) = std::str::from_utf8(&request.head.method) else {
+            return Resolution::Bad;
+        };
+        // Only a GET or a HEAD is a health check; anything else is a request
+        // the app may well want to see (§2.4).
+        if path == self.cfg.health_path && (method == "GET" || method == "HEAD") {
             return Resolution::Health;
         }
-        let path = match self.cfg.script_name.as_deref() {
+        let path = match self.script_name.as_deref() {
             Some(prefix) => match strip_script_name(path, prefix) {
                 Some(rest) => rest,
                 None => return Resolution::Unrouted,
             },
             None => path,
         };
-        let Ok(method) = std::str::from_utf8(&request.head.method) else {
-            return Resolution::Bad;
-        };
         match self.table.route(method, path) {
             Some(matched) => Resolution::Routed {
                 route: matched.route,
                 rule: u32::try_from(matched.rule).unwrap_or(u32::MAX),
+                path_info: path.to_string(),
             },
             None => Resolution::Unrouted,
         }
@@ -601,49 +733,54 @@ impl Scheduler {
     }
 
     /// Records request body bytes: forwards them when the request is
-    /// dispatched, holds them (bounded) while it waits.
-    async fn request_body(&mut self, stream_id: u32, body: Vec<u8>) {
+    /// dispatched, holds them while it waits.
+    ///
+    /// Credit is what bounds the held bytes: http may not send more than the
+    /// view has granted (§3.1), so a queued request can hold at most
+    /// `INITIAL_WINDOW` bytes and other streams keep flowing.
+    fn request_body(&mut self, stream_id: u32, body: Vec<u8>) -> Result<(), SchedulerError> {
         let Some(request) = self.requests.get(&stream_id) else {
             self.dropped += 1;
-            return;
+            return Ok(());
         };
         if request.complete {
-            return;
+            return Ok(());
         }
         let view = request.view;
+        let allowed = request.upload_credit as u64;
+        if body.len() as u64 > allowed {
+            return self.http_credit_violation(stream_id);
+        }
         let count = body.len() as u64;
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.bytes_in += count;
+            request.upload_credit -= body.len() as u32;
         }
-        if let Some((key, id)) = view {
-            if let Some(out) = self.view_out(key) {
-                let _ = out.send((id, Frame::ReqBody(body))).await;
+        match view {
+            Some((key, id)) => self.view_push(key, id, Frame::ReqBody(body)),
+            None => {
+                if let Some(request) = self.requests.get_mut(&stream_id) {
+                    request.body.push(body);
+                }
+                Ok(())
             }
-            return;
         }
-        let held = body.len();
-        if let Some(request) = self.requests.get_mut(&stream_id) {
-            request.body_bytes += held;
-            request.body.push(body);
-        }
-        self.recount_buffered();
     }
 
     /// Forwards `REQ_END`, or remembers it for a queued request.
-    async fn request_end(&mut self, stream_id: u32) {
+    fn request_end(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         let Some(request) = self.requests.get_mut(&stream_id) else {
             self.dropped += 1;
-            return;
+            return Ok(());
         };
         if request.complete {
-            return;
+            return Ok(());
         }
         request.end_seen = true;
         let view = request.view;
-        if let Some((key, id)) = view
-            && let Some(out) = self.view_out(key)
-        {
-            let _ = out.send((id, Frame::ReqEnd)).await;
+        match view {
+            Some((key, id)) => self.view_push(key, id, Frame::ReqEnd),
+            None => Ok(()),
         }
     }
 
@@ -651,19 +788,17 @@ impl Scheduler {
     ///
     /// The request reports the status it had reached — `0` when the response
     /// never started — with the `client_gone` outcome (§8.1).
-    async fn client_cancel(&mut self, stream_id: u32) {
+    fn client_cancel(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         let Some(request) = self.requests.get(&stream_id) else {
             self.dropped += 1;
-            return;
+            return Ok(());
         };
         if request.complete {
-            return;
+            return Ok(());
         }
         let view = request.view;
-        if let Some((key, id)) = view
-            && let Some(out) = self.view_out(key)
-        {
-            let _ = out.send((id, Frame::Cancel)).await;
+        if let Some((key, id)) = view {
+            self.view_push(key, id, Frame::Cancel)?;
         }
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.cancelled = true;
@@ -675,6 +810,43 @@ impl Scheduler {
             // Never dispatched: it leaves the queue, and no slot was ever held.
             self.release(stream_id);
         }
+        Ok(())
+    }
+
+    /// http granted the stream more response-body credit (§3.1): the view gets
+    /// to send that much more.
+    fn client_window(&mut self, stream_id: u32, bytes: u32) -> Result<(), SchedulerError> {
+        let Some(request) = self.requests.get(&stream_id) else {
+            self.dropped += 1;
+            return Ok(());
+        };
+        if request.complete {
+            return Ok(());
+        }
+        let view = request.view;
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.download_credit = request.download_credit.saturating_add(bytes);
+        }
+        match view {
+            Some((key, id)) => self.view_push(key, id, Frame::Window { bytes }),
+            None => Ok(()),
+        }
+    }
+
+    /// http sent more request-body bytes than its credit allowed (§3.1): the
+    /// stream is failed on both sides.
+    fn http_credit_violation(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        let view = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.view);
+        if let Some((key, id)) = view {
+            self.view_push(key, id, Frame::Cancel)?;
+        }
+        self.fail_request(stream_id, Outcome::ViewDied, 502)?;
+        // The stream is over on both sides: http stops reading this client's
+        // socket for a stream the scheduler will not answer.
+        self.http_push(stream_id, Frame::Cancel)
     }
 
     // -------------------------------------------------------------- dispatch
@@ -689,15 +861,15 @@ impl Scheduler {
                 view.ready
                     && !view.spawning
                     && !view.stopping
-                    && view.out.is_some()
                     && view.inflight < self.cfg.view_worker_cap()
+                    && view.out.as_ref().map(Outbound::is_open).unwrap_or(false)
             }
             None => false,
         }
     }
 
     /// Dispatches every queued request it can, spawning views as needed.
-    async fn dispatch_queued<C: CtlChannel>(&mut self, ctl: &mut C) -> Result<(), SchedulerError> {
+    fn dispatch_queued(&mut self) -> Result<(), SchedulerError> {
         let queued: Vec<u32> = self.queue.iter().copied().collect();
         for stream_id in queued {
             if !self.queue.contains(&stream_id) {
@@ -714,81 +886,77 @@ impl Scheduler {
                 return Ok(());
             }
             if self.can_dispatch(route) {
-                self.dispatch(stream_id).await;
+                self.dispatch(stream_id)?;
                 continue;
             }
             if !self.views.contains_key(&route) && !self.draining {
-                self.try_spawn(route, ctl).await?;
+                self.try_spawn(route)?;
             }
         }
         Ok(())
     }
 
     /// Hands one request to its view, rewriting its id (§3.1).
-    async fn dispatch(&mut self, stream_id: u32) {
-        let Some((key, id, out)) = self.reserve(stream_id) else {
-            return;
+    fn dispatch(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        let Some((key, id, _out)) = self.reserve(stream_id) else {
+            return Ok(());
         };
         let now = Instant::now();
-        let (head, body, end) = {
+        let (head, body, end, extra_credit) = {
             let Some(request) = self.requests.get_mut(&stream_id) else {
-                return;
+                return Ok(());
             };
             request.queued_since = None;
             request.dispatched_at = Some(now);
             request.deadline = Some(now + self.cfg.request_timeout);
             request.view = Some((key, id));
             request.slots = true;
-            // The body moves to the view, so it no longer counts against the
-            // queued-body bound: reading http.chan resumes.
-            request.body_bytes = 0;
             (
                 request.head.clone(),
                 std::mem::take(&mut request.body),
                 request.end_seen,
+                // A view starts with `INITIAL_WINDOW` of response credit, so
+                // anything http granted on top of that has to be handed over.
+                request.download_credit.saturating_sub(INITIAL_WINDOW),
             )
         };
-        self.recount_buffered();
         self.queue.retain(|queued_id| *queued_id != stream_id);
         self.dispatch.insert((key, id), stream_id);
         self.slots += 1;
 
-        let mut alive = true;
-        if out.send((id, Frame::ReqHead(head))).await.is_err() {
-            alive = false;
+        self.view_push(key, id, Frame::ReqHead(head))?;
+        if extra_credit > 0 {
+            self.view_push(
+                key,
+                id,
+                Frame::Window {
+                    bytes: extra_credit,
+                },
+            )?;
         }
-        if alive {
-            for chunk in body {
-                if out.send((id, Frame::ReqBody(chunk))).await.is_err() {
-                    alive = false;
-                    break;
-                }
-            }
+        for chunk in body {
+            self.view_push(key, id, Frame::ReqBody(chunk))?;
         }
-        if alive && end && out.send((id, Frame::ReqEnd)).await.is_err() {
-            alive = false;
+        if end {
+            self.view_push(key, id, Frame::ReqEnd)?;
         }
-        if !alive {
-            self.view_gone(key).await;
-        }
+        Ok(())
     }
 
     /// Takes a worker slot and a request id for `stream_id`, if its view can
     /// take one.
-    fn reserve(&mut self, stream_id: u32) -> Option<(ViewKey, u32, ViewSink)> {
+    fn reserve(&mut self, stream_id: u32) -> Option<(ViewKey, u32, Outbound)> {
         let route = self.requests.get(&stream_id)?.route?;
         let cap = self.cfg.view_worker_cap();
         let last_used = self.lru;
         let view = self.views.get_mut(&route)?;
-        if !view.ready
-            || view.spawning
-            || view.stopping
-            || view.inflight >= cap
-            || view.out.is_none()
-        {
+        if !view.ready || view.spawning || view.stopping || view.inflight >= cap {
             return None;
         }
         let out = view.out.clone()?;
+        if !out.is_open() {
+            return None;
+        }
         let id = view.allocate_request_id();
         view.inflight += 1;
         view.sent += 1;
@@ -801,8 +969,8 @@ impl Scheduler {
         Some((view.key, id, out))
     }
 
-    /// The sender towards a view, if that view is still the live one.
-    fn view_out(&self, key: ViewKey) -> Option<ViewSink> {
+    /// The queue towards a view, if that view is still the live one.
+    fn view_out(&self, key: ViewKey) -> Option<Outbound> {
         self.views
             .get(&key.route)
             .filter(|view| view.key == key)
@@ -812,7 +980,7 @@ impl Scheduler {
     // ---------------------------------------------------------------- timers
 
     /// Rejects queued requests whose wait exceeded `BLASTIT_QUEUE_TIMEOUT`.
-    async fn expire_queue(&mut self) {
+    fn expire_queue(&mut self) -> Result<(), SchedulerError> {
         let now = Instant::now();
         let timeout = self.cfg.queue_timeout;
         let expired: Vec<u32> = self
@@ -835,17 +1003,22 @@ impl Scheduler {
                 "Service Unavailable",
                 "queue timeout\n",
                 Outcome::QueueTimeout,
-            )
-            .await;
+            )?;
         }
+        Ok(())
     }
 
-    /// Gives a `504` to every dispatched request past its timeout, tells its
-    /// view to cancel the thread, and recycles a view with too many of them
-    /// (§2.4).
-    async fn expire_requests<C: CtlChannel>(&mut self, ctl: &mut C) -> Result<(), SchedulerError> {
+    /// Gives a `504` to every dispatched request past its timeout, and recycles
+    /// a view with too many overdue threads (§2.4).
+    ///
+    /// A request whose response is already over — answered or cancelled — is
+    /// only *marked* overdue: its answer has been sent, its outcome is final,
+    /// and writing another frame for it would corrupt the stream. It still
+    /// counts towards the view's stuck threads, because its thread is still
+    /// alive.
+    fn expire_requests(&mut self) -> Result<(), SchedulerError> {
         let now = Instant::now();
-        let expired: Vec<(u32, ViewKey, u32)> = self
+        let expired: Vec<(u32, Option<(ViewKey, u32)>)> = self
             .requests
             .values()
             .filter_map(|request| {
@@ -855,42 +1028,42 @@ impl Scheduler {
                 if now < request.deadline? {
                     return None;
                 }
-                let (key, id) = request.view?;
-                Some((request.stream_id, key, id))
+                Some((request.stream_id, request.view))
             })
             .collect();
         let mut affected: Vec<ViewKey> = Vec::new();
-        for (stream_id, key, id) in expired {
-            let head_sent = match self.requests.get(&stream_id) {
-                Some(request) => request.head_sent,
+        for (stream_id, view) in expired {
+            let (complete, head_sent) = match self.requests.get(&stream_id) {
+                Some(request) => (request.complete, request.head_sent),
                 None => continue,
             };
             if let Some(request) = self.requests.get_mut(&stream_id) {
                 request.timed_out = true;
             }
+            if let Some((key, _)) = view {
+                affected.push(key);
+            }
+            if complete {
+                continue;
+            }
             if head_sent {
-                let _ = self
-                    .http_out
-                    .send((
-                        stream_id,
-                        Frame::RespAbort {
-                            reason: "request timeout".to_string(),
-                        },
-                    ))
-                    .await;
+                self.http_push(
+                    stream_id,
+                    Frame::RespAbort {
+                        reason: "request timeout".to_string(),
+                    },
+                )?;
             } else {
-                self.respond(stream_id, 504, "Gateway Timeout", "gateway timeout\n")
-                    .await;
+                self.respond(stream_id, 504, "Gateway Timeout", "gateway timeout\n")?;
             }
             if let Some(request) = self.requests.get_mut(&stream_id) {
                 request.complete = true;
                 request.outcome = Outcome::Timeout;
             }
             self.emit_request(stream_id);
-            if let Some(out) = self.view_out(key) {
-                let _ = out.send((id, Frame::Cancel)).await;
+            if let Some((key, id)) = view {
+                self.view_push(key, id, Frame::Cancel)?;
             }
-            affected.push(key);
         }
         for key in affected {
             let overdue = self
@@ -901,7 +1074,7 @@ impl Scheduler {
                 })
                 .count() as u32;
             if overdue > self.cfg.stuck_threads {
-                self.retire(key, RetireReason::StuckThreads, ctl).await?;
+                self.retire(key, RetireReason::StuckThreads)?;
             }
         }
         Ok(())
@@ -909,10 +1082,7 @@ impl Scheduler {
 
     /// Retires what is finished: a view over `BLASTIT_VIEW_MAX_REQUESTS` with
     /// nothing in flight, or one idle for `BLASTIT_VIEW_IDLE_TIMEOUT` (§2.4).
-    async fn retire_finished_views<C: CtlChannel>(
-        &mut self,
-        ctl: &mut C,
-    ) -> Result<(), SchedulerError> {
+    fn retire_finished_views(&mut self) -> Result<(), SchedulerError> {
         let now = Instant::now();
         let mut victims: Vec<(ViewKey, RetireReason)> = Vec::new();
         for view in self.views.values() {
@@ -931,7 +1101,7 @@ impl Scheduler {
             }
         }
         for (key, reason) in victims {
-            self.retire(key, reason, ctl).await?;
+            self.retire(key, reason)?;
         }
         Ok(())
     }
@@ -939,11 +1109,7 @@ impl Scheduler {
     // ------------------------------------------------------------- lifecycle
 
     /// Asks init for a view process, respecting the LRU cap (§2.4).
-    async fn try_spawn<C: CtlChannel>(
-        &mut self,
-        route: usize,
-        ctl: &mut C,
-    ) -> Result<(), SchedulerError> {
+    fn try_spawn(&mut self, route: usize) -> Result<(), SchedulerError> {
         if self.views.contains_key(&route) {
             return Ok(());
         }
@@ -961,11 +1127,11 @@ impl Scheduler {
             let Some(victim) = self.least_recently_used_idle(route) else {
                 return Ok(());
             };
-            self.retire(victim, RetireReason::LruCap, ctl).await?;
+            self.retire(victim, RetireReason::LruCap)?;
         }
         self.views.insert(route, View::spawning(route));
         let route_id = u32::try_from(route).unwrap_or(u32::MAX);
-        if let Err(error) = ctl.send(Ctl::Spawn { route: route_id }).await {
+        if let Err(error) = self.ctl_push(Ctl::Spawn { route: route_id }) {
             self.views.remove(&route);
             return Err(error);
         }
@@ -985,12 +1151,7 @@ impl Scheduler {
 
     /// Retires one view process: fail what it owes, ask init to kill it, and
     /// keep its slots until it is gone (§2.4).
-    async fn retire<C: CtlChannel>(
-        &mut self,
-        key: ViewKey,
-        reason: RetireReason,
-        ctl: &mut C,
-    ) -> Result<(), SchedulerError> {
+    fn retire(&mut self, key: ViewKey, reason: RetireReason) -> Result<(), SchedulerError> {
         if self
             .views
             .get(&key.route)
@@ -1006,21 +1167,20 @@ impl Scheduler {
             .map(|(_, stream_id)| *stream_id)
             .collect();
         for stream_id in &affected {
-            self.fail_request(*stream_id, Outcome::ViewDied, 502).await;
+            self.fail_request(*stream_id, Outcome::ViewDied, 502)?;
         }
         let Some(view) = self.views.remove(&key.route) else {
             return Ok(());
         };
-        // Dropping the sender ends the writer task, which closes the
+        // Dropping the queue ends the writer task, which closes the
         // scheduler's end of this view's channel.
         drop(view.out);
         let route_id = u32::try_from(key.route).unwrap_or(u32::MAX);
-        ctl.send(Ctl::Retire {
+        self.ctl_push(Ctl::Retire {
             route: route_id,
             pid: key.pid,
             reason: reason.as_str().to_string(),
-        })
-        .await?;
+        })?;
         self.emit_retired(key, &reason);
         Ok(())
     }
@@ -1043,9 +1203,17 @@ impl Scheduler {
             .map(|view| view.spawning)
             .unwrap_or(false);
         if !expecting {
-            // Nothing asked for this process: close our end and ignore it.
+            // Nothing asked for this process: close our end and have init reap
+            // it, so an unknown view cannot linger holding a uid.
             drop(fd);
-            return Ok(());
+            self.dropped += 1;
+            return self.ctl_push(Ctl::Retire {
+                route: u32::try_from(route).unwrap_or(u32::MAX),
+                pid,
+                reason: RetireReason::Other("unexpected_spawn".to_string())
+                    .as_str()
+                    .to_string(),
+            });
         }
         let std_stream = std::os::unix::net::UnixStream::from(fd);
         std_stream
@@ -1054,16 +1222,16 @@ impl Scheduler {
         let stream = UnixStream::from_std(std_stream).map_err(SchedulerError::io)?;
         let (read, write) = stream.into_split();
         let key = ViewKey { route, pid };
-        let (out, incoming) = mpsc::channel(OUT_CAPACITY);
+        let (out, outgoing, pending) = Outbound::new(self.cfg.frame_limits, VIEW_OUTBOUND_CAP);
         let limits = self.cfg.frame_limits;
         tokio::spawn(read_frames(
             read,
             limits,
             self.view_in.clone(),
             move |id, frame| ViewIn::Frame { key, id, frame },
-            move || ViewIn::Closed { key },
+            move |_| ViewIn::Closed { key },
         ));
-        tokio::spawn(write_frames(write, limits, incoming));
+        tokio::spawn(write_peer(write, limits, outgoing, pending));
         if let Some(view) = self.views.get_mut(&route) {
             view.key = key;
             view.spawning = false;
@@ -1090,7 +1258,7 @@ impl Scheduler {
 
     /// A view process is gone: fail its requests, free their slots, and let
     /// the next request for its route spawn a new one (§2.4).
-    async fn view_gone(&mut self, key: ViewKey) {
+    fn view_gone(&mut self, key: ViewKey) {
         // Whether this was still the live process for its route. A retired
         // view's channel also closes, and that is not a spawn failure.
         let live = self
@@ -1114,7 +1282,7 @@ impl Scheduler {
             .map(|(_, stream_id)| *stream_id)
             .collect();
         for stream_id in affected {
-            self.fail_request(stream_id, Outcome::ViewDied, 502).await;
+            let _ = self.fail_request(stream_id, Outcome::ViewDied, 502);
             // The threads died with the process, so their slots are free even
             // though no `DONE` will ever arrive.
             self.release(stream_id);
@@ -1135,7 +1303,7 @@ impl Scheduler {
                 .collect();
             for stream_id in waiting {
                 self.queue.retain(|queued_id| *queued_id != stream_id);
-                self.fail_request(stream_id, Outcome::ViewDied, 502).await;
+                let _ = self.fail_request(stream_id, Outcome::ViewDied, 502);
                 self.release(stream_id);
             }
             self.backoff
@@ -1146,7 +1314,13 @@ impl Scheduler {
     // --------------------------------------------------------------- replies
 
     /// Sends a small `text/plain` response the scheduler wrote itself.
-    async fn respond(&mut self, stream_id: u32, status: u16, reason: &str, body: &str) {
+    fn respond(
+        &mut self,
+        stream_id: u32,
+        status: u16,
+        reason: &str,
+        body: &str,
+    ) -> Result<(), SchedulerError> {
         let head = RespHead {
             status,
             reason: reason.as_bytes().to_vec(),
@@ -1161,78 +1335,85 @@ impl Scheduler {
                 ),
             ],
         };
-        let _ = self.http_out.send((stream_id, Frame::RespHead(head))).await;
+        self.http_push(stream_id, Frame::RespHead(head))?;
         if !body.is_empty() {
-            let _ = self
-                .http_out
-                .send((stream_id, Frame::RespBody(body.as_bytes().to_vec())))
-                .await;
+            self.http_push(stream_id, Frame::RespBody(body.as_bytes().to_vec()))?;
         }
-        let _ = self.http_out.send((stream_id, Frame::RespEnd)).await;
+        self.http_push(stream_id, Frame::RespEnd)?;
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.head_sent = true;
             request.status = status;
             request.bytes_out = body.len() as u64;
         }
+        Ok(())
     }
 
     /// Answers a request the scheduler refused, and logs it.
-    async fn reject(
+    fn reject(
         &mut self,
         stream_id: u32,
         status: u16,
         reason: &str,
         body: &str,
         outcome: Outcome,
-    ) {
-        self.respond(stream_id, status, reason, body).await;
+    ) -> Result<(), SchedulerError> {
+        self.respond(stream_id, status, reason, body)?;
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.outcome = outcome;
             request.complete = true;
         }
         self.emit_request(stream_id);
         self.release(stream_id);
+        Ok(())
     }
 
     /// Marks an answer the scheduler just wrote as complete, and logs it.
-    async fn finish_immediately(&mut self, stream_id: u32, outcome: Outcome) {
+    fn finish_immediately(
+        &mut self,
+        stream_id: u32,
+        outcome: Outcome,
+    ) -> Result<(), SchedulerError> {
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.outcome = outcome;
             request.complete = true;
         }
         self.emit_request(stream_id);
         self.release(stream_id);
+        Ok(())
     }
 
     /// Fails a request to http: a `502` when nothing was sent yet, a
     /// `RESP_ABORT` once the head is out.
-    async fn fail_request(&mut self, stream_id: u32, outcome: Outcome, status: u16) {
+    fn fail_request(
+        &mut self,
+        stream_id: u32,
+        outcome: Outcome,
+        status: u16,
+    ) -> Result<(), SchedulerError> {
         let (head_sent, complete) = match self.requests.get(&stream_id) {
             Some(request) => (request.head_sent, request.complete),
-            None => return,
+            None => return Ok(()),
         };
         if complete {
-            return;
+            return Ok(());
         }
         if head_sent {
-            let _ = self
-                .http_out
-                .send((
-                    stream_id,
-                    Frame::RespAbort {
-                        reason: outcome.as_str().to_string(),
-                    },
-                ))
-                .await;
+            self.http_push(
+                stream_id,
+                Frame::RespAbort {
+                    reason: outcome.as_str().to_string(),
+                },
+            )?;
         } else {
             let (reason, body) = canned(status);
-            self.respond(stream_id, status, reason, body).await;
+            self.respond(stream_id, status, reason, body)?;
         }
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.complete = true;
             request.outcome = outcome;
         }
         self.emit_request(stream_id);
+        Ok(())
     }
 
     /// Releases a request: its worker slot, its view id and its memory.
@@ -1256,18 +1437,6 @@ impl Scheduler {
             self.slots = self.slots.saturating_sub(1);
         }
         self.queue.retain(|queued_id| *queued_id != stream_id);
-        self.recount_buffered();
-    }
-
-    /// Recomputes the buffered-body total and the backpressure flag.
-    fn recount_buffered(&mut self) {
-        self.buffered_bytes = self
-            .requests
-            .values()
-            .map(|request| request.body_bytes)
-            .sum();
-        self.http_paused =
-            self.cfg.body_buffer_limit != 0 && self.buffered_bytes >= self.cfg.body_buffer_limit;
     }
 
     /// Emits the one `request` event a request gets, once (§8.1).
@@ -1282,9 +1451,16 @@ impl Scheduler {
         let queued_until = request.dispatched_at.unwrap_or(now);
         let queued_ms = millis(queued_until.duration_since(request.arrived));
         let duration_ms = millis(now.duration_since(request.arrived));
+        // §8.1: the `path` is the routed `PATH_INFO`, and never a query
+        // string. A target the scheduler could not decode has no `PATH_INFO`
+        // at all, so it reports the target with its query string removed.
+        let path = match &request.path_info {
+            Some(path_info) => path_info.clone(),
+            None => String::from_utf8_lossy(path_of_target(&request.head.target)).into_owned(),
+        };
         let mut info = RequestInfo::from_target(
             String::from_utf8_lossy(&request.head.method).into_owned(),
-            &String::from_utf8_lossy(&request.head.target),
+            &path,
         )
         .with_status(request.status)
         .with_outcome(request.outcome)
@@ -1308,14 +1484,15 @@ impl Scheduler {
     }
 
     /// Emits `process.retired` for a view the scheduler retired (§8.1).
-    ///
-    /// The uid is `0`: the uid table is init's (§4, §6) and the scheduler only
-    /// knows route indices. init's own `process.spawned` / `process.exited`
-    /// events carry the real one.
     fn emit_retired(&mut self, key: ViewKey, reason: &RetireReason) {
+        let uid = self
+            .routes
+            .get(key.route)
+            .map(|route| route.uid)
+            .unwrap_or(0);
         let mut event = Event::now(
             Component::Scheduler,
-            EventKind::ProcessRetired(ProcessRetired::new(key.pid, 0, reason.clone())),
+            EventKind::ProcessRetired(ProcessRetired::new(key.pid, uid, reason.clone())),
         );
         if let Some(route) = self.routes.get(key.route) {
             event = event.with_route(route.name.clone());
@@ -1326,10 +1503,19 @@ impl Scheduler {
     // ----------------------------------------------------------- view frames
 
     /// `DONE` from a view: the thread exited, so the slot is free (§2.4).
-    async fn view_done(&mut self, key: ViewKey, id: u32, outcome: DoneOutcome) {
+    ///
+    /// A `DONE` that arrives twice, or one that arrives after the response was
+    /// already answered by a timeout, finds no stream to release the first
+    /// time and is simply dropped the second.
+    fn view_done(
+        &mut self,
+        key: ViewKey,
+        id: u32,
+        outcome: DoneOutcome,
+    ) -> Result<(), SchedulerError> {
         let Some(&stream_id) = self.dispatch.get(&(key, id)) else {
             self.dropped += 1;
-            return;
+            return Ok(());
         };
         let (complete, head_sent, cancelled, status) = match self.requests.get(&stream_id) {
             Some(request) => (
@@ -1338,13 +1524,13 @@ impl Scheduler {
                 request.cancelled,
                 request.status,
             ),
-            None => return,
+            None => return Ok(()),
         };
         if !complete {
             match outcome {
                 DoneOutcome::Completed if head_sent => {
                     // The thread finished; only its `RESP_END` is missing.
-                    let _ = self.http_out.send((stream_id, Frame::RespEnd)).await;
+                    self.http_push(stream_id, Frame::RespEnd)?;
                     if let Some(request) = self.requests.get_mut(&stream_id) {
                         request.complete = true;
                         if !request.cancelled {
@@ -1354,7 +1540,7 @@ impl Scheduler {
                     self.emit_request(stream_id);
                 }
                 DoneOutcome::Completed | DoneOutcome::Errored => {
-                    self.fail_request(stream_id, Outcome::ViewDied, 502).await;
+                    self.fail_request(stream_id, Outcome::ViewDied, 502)?;
                 }
                 DoneOutcome::Aborted => {
                     let outcome = if cancelled {
@@ -1363,66 +1549,75 @@ impl Scheduler {
                         Outcome::ViewDied
                     };
                     let status = if head_sent { status } else { 502 };
-                    self.fail_request(stream_id, outcome, status).await;
+                    self.fail_request(stream_id, outcome, status)?;
                 }
             }
         }
         self.release(stream_id);
+        Ok(())
     }
 
     /// `RESP_HEAD` from a view.
-    async fn view_head(&mut self, key: ViewKey, id: u32, head: RespHead) {
+    fn view_head(&mut self, key: ViewKey, id: u32, head: RespHead) -> Result<(), SchedulerError> {
         let Some(&stream_id) = self.dispatch.get(&(key, id)) else {
             self.dropped += 1;
-            return;
+            return Ok(());
         };
         let forward = match self.requests.get(&stream_id) {
             Some(request) => !request.complete && !request.head_sent,
             None => false,
         };
         if !forward {
-            return;
+            return Ok(());
         }
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.status = head.status;
             request.head_sent = true;
         }
-        let _ = self.http_out.send((stream_id, Frame::RespHead(head))).await;
+        self.http_push(stream_id, Frame::RespHead(head))
     }
 
-    /// `RESP_BODY` from a view.
-    async fn view_body(&mut self, key: ViewKey, id: u32, body: Vec<u8>) {
+    /// `RESP_BODY` from a view, which may not exceed the credit http granted.
+    fn view_body(&mut self, key: ViewKey, id: u32, body: Vec<u8>) -> Result<(), SchedulerError> {
         let Some(&stream_id) = self.dispatch.get(&(key, id)) else {
             self.dropped += 1;
-            return;
+            return Ok(());
         };
-        let forward = match self.requests.get(&stream_id) {
-            Some(request) => !request.complete && request.head_sent,
-            None => false,
+        let (forward, credit) = match self.requests.get(&stream_id) {
+            Some(request) => (
+                !request.complete && request.head_sent,
+                request.download_credit,
+            ),
+            None => (false, 0),
         };
         if !forward {
-            return;
+            return Ok(());
+        }
+        if body.len() as u64 > credit as u64 {
+            // The view sent more than http allowed (§3.1): recycle it.
+            return self.retire(key, RetireReason::Other(CREDIT_OVERFLOW.to_string()));
         }
         if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.download_credit -= body.len() as u32;
             request.bytes_out += body.len() as u64;
         }
-        let _ = self.http_out.send((stream_id, Frame::RespBody(body))).await;
+        self.http_push(stream_id, Frame::RespBody(body))
     }
 
     /// `RESP_END` from a view: the response is complete, the slot is not.
-    async fn view_end(&mut self, key: ViewKey, id: u32) {
+    fn view_end(&mut self, key: ViewKey, id: u32) -> Result<(), SchedulerError> {
         let Some(&stream_id) = self.dispatch.get(&(key, id)) else {
             self.dropped += 1;
-            return;
+            return Ok(());
         };
         let forward = match self.requests.get(&stream_id) {
             Some(request) => !request.complete && request.head_sent,
             None => false,
         };
         if !forward {
-            return;
+            return Ok(());
         }
-        let _ = self.http_out.send((stream_id, Frame::RespEnd)).await;
+        self.http_push(stream_id, Frame::RespEnd)?;
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.complete = true;
             if !request.cancelled {
@@ -1430,40 +1625,55 @@ impl Scheduler {
             }
         }
         self.emit_request(stream_id);
+        Ok(())
     }
 
     /// `RESP_ABORT` from a view: the thread gave up, with or without a head.
     ///
     /// §8.1's outcomes have no "the app raised", so this is reported as
     /// `view_died`, the same as a process that went away mid-response.
-    async fn view_abort(&mut self, key: ViewKey, id: u32, reason: &str) {
+    fn view_abort(&mut self, key: ViewKey, id: u32, reason: &str) -> Result<(), SchedulerError> {
         let Some(&stream_id) = self.dispatch.get(&(key, id)) else {
             self.dropped += 1;
-            return;
+            return Ok(());
         };
         let head_sent = match self.requests.get(&stream_id) {
             Some(request) if !request.complete => request.head_sent,
-            _ => return,
+            _ => return Ok(()),
         };
         if head_sent {
-            let _ = self
-                .http_out
-                .send((
-                    stream_id,
-                    Frame::RespAbort {
-                        reason: reason.to_string(),
-                    },
-                ))
-                .await;
+            self.http_push(
+                stream_id,
+                Frame::RespAbort {
+                    reason: reason.to_string(),
+                },
+            )?;
         } else {
-            self.respond(stream_id, 502, "Bad Gateway", "bad gateway\n")
-                .await;
+            self.respond(stream_id, 502, "Bad Gateway", "bad gateway\n")?;
         }
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.complete = true;
             request.outcome = Outcome::ViewDied;
         }
         self.emit_request(stream_id);
+        Ok(())
+    }
+
+    /// `WINDOW` from a view: the app consumed that much of the request body,
+    /// which extends the credit http may send under (§3.1).
+    fn view_window(&mut self, key: ViewKey, id: u32, bytes: u32) -> Result<(), SchedulerError> {
+        let Some(&stream_id) = self.dispatch.get(&(key, id)) else {
+            self.dropped += 1;
+            return Ok(());
+        };
+        match self.requests.get(&stream_id) {
+            Some(request) if !request.complete => {}
+            _ => return Ok(()),
+        }
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.upload_credit = request.upload_credit.saturating_add(bytes);
+        }
+        self.http_push(stream_id, Frame::Window { bytes })
     }
 }
 
@@ -1492,60 +1702,118 @@ async fn sleep_until(deadline: Option<Instant>) {
     }
 }
 
+/// Owns `ctl.chan` for the whole run: reads init's messages into the
+/// scheduler, and writes the scheduler's messages out.
+///
+/// The two directions share one task because the channel is one object. Only
+/// the *scheduler's* loop matters for the "never wait for a peer" rule: it is
+/// this task that would wait for init, and by then every message is already in
+/// the unbounded queue.
+async fn ctl_task<C: CtlChannel>(
+    mut ctl: C,
+    inbound: mpsc::Sender<CtlIn>,
+    mut outbound: mpsc::UnboundedReceiver<OutFrame>,
+    pending: Arc<AtomicUsize>,
+    limits: Limits,
+) {
+    loop {
+        tokio::select! {
+            message = ctl.recv() => match message {
+                Ok((message, fd)) => {
+                    if inbound.send(CtlIn::Message(message, fd)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = inbound.send(CtlIn::Failed(error)).await;
+                    return;
+                }
+            },
+            // Only `Ctl` frames are ever pushed here, and dropping the queue
+            // means the run is over.
+            outgoing = outbound.recv() => {
+                let Some(OutFrame::Frame { frame: Frame::Ctl(message), .. }) = outgoing else {
+                    return;
+                };
+                let size = ctl_frame_size(&message, limits);
+                if ctl.send(message).await.is_err() {
+                    let _ = inbound.send(CtlIn::Failed(SchedulerError::closed())).await;
+                    return;
+                }
+                release(&pending, size);
+            }
+        }
+    }
+}
+
 /// Serves `http.chan` from `ctl.chan` and one `view.chan` per route.
 ///
 /// Returns when init sends `DRAIN` (once the in-flight requests are done, or
 /// `BLASTIT_REQUEST_TIMEOUT` after the message) or when `http.chan` closes. It
-/// fails only when `ctl.chan` fails: a view that dies, a client that
-/// disappears and a queue that overflows are all ordinary answers (§2.4).
+/// fails on a broken `ctl.chan`, on a `ctl.chan` message the protocol does not
+/// allow, and on a `request`/`response` frame from http that does not decode.
+///
+/// # Contract with http
+///
+/// http never reuses a stream id while that stream is still in flight: the
+/// scheduler tracks a request by its stream id until the view reports `DONE`
+/// for it, and a second `REQ_HEAD` for a live id is a protocol error that ends
+/// the run rather than letting one request inherit another's worker slot.
 ///
 /// # Errors
 ///
-/// [`SchedulerError`] for a broken `ctl.chan`, or a message on it that the
-/// protocol does not allow.
-pub async fn run<C: CtlChannel>(
+/// [`SchedulerError`] for a broken `ctl.chan`, a message on it that the
+/// protocol does not allow, a frame from http that does not decode, or one of
+/// the byte-capped peer queues overflowing.
+pub async fn run<C: CtlChannel + Send + 'static>(
     cfg: SchedulerConfig,
     routes: Vec<RouteInfo>,
     table: RoutingTable,
     http: UnixStream,
-    mut ctl: C,
+    ctl: C,
     emit: Emit,
 ) -> Result<(), SchedulerError> {
     let limits = cfg.frame_limits;
     let (http_read, http_write) = http.into_split();
     let (http_in_tx, mut http_in_rx) = mpsc::channel(HTTP_IN_CAPACITY);
-    let (http_out_tx, http_out_rx) = mpsc::channel(OUT_CAPACITY);
+    let (http_out, http_out_rx, http_pending) = Outbound::new(limits, HTTP_OUTBOUND_CAP);
     let (view_in_tx, mut view_in_rx) = mpsc::channel(VIEW_IN_CAPACITY);
+    let (ctl_out, ctl_out_rx, ctl_pending) = Outbound::new(limits, CTL_OUTBOUND_CAP);
 
     tokio::spawn(read_frames(
         http_read,
         limits,
         http_in_tx.clone(),
         |id, frame| HttpIn::Frame { id, frame },
-        || HttpIn::Closed,
+        |failure| match failure {
+            Some(error) => HttpIn::Failed(error),
+            None => HttpIn::Closed,
+        },
     ));
-    tokio::spawn(write_frames(http_write, limits, http_out_rx));
+    tokio::spawn(write_peer(http_write, limits, http_out_rx, http_pending));
+
+    let (ctl_in_tx, mut ctl_in_rx) = mpsc::channel(CTL_IN_CAPACITY);
+    tokio::spawn(ctl_task(ctl, ctl_in_tx, ctl_out_rx, ctl_pending, limits));
 
     // Held for the whole run, so `http_in_rx` only ever ends with an explicit
     // `HttpIn::Closed`.
     let _keepalive = http_in_tx;
-    let mut scheduler = Scheduler::new(cfg, routes, table, emit, http_out_tx, view_in_tx);
-    scheduler.start(&mut ctl).await?;
+    let mut scheduler = Scheduler::new(cfg, routes, table, emit, http_out, view_in_tx, ctl_out);
+    scheduler.start()?;
 
     loop {
         let deadline = scheduler.next_deadline();
-        let paused = scheduler.http_paused;
         tokio::select! {
-            biased;
-            message = ctl.recv() => {
-                let (message, fd) = message?;
-                scheduler.on_ctl(message, fd).await?;
-            }
-            Some(event) = http_in_rx.recv(), if !paused => scheduler.on_http(event).await,
-            Some(event) = view_in_rx.recv() => scheduler.on_view(event).await,
+            message = ctl_in_rx.recv() => match message {
+                Some(CtlIn::Message(message, fd)) => scheduler.on_ctl(message, fd)?,
+                Some(CtlIn::Failed(error)) => return Err(error),
+                None => return Err(SchedulerError::closed()),
+            },
+            Some(event) = http_in_rx.recv() => scheduler.on_http(event)?,
+            Some(event) = view_in_rx.recv() => scheduler.on_view(event)?,
             () = sleep_until(deadline) => {}
         }
-        scheduler.pump(&mut ctl).await?;
+        scheduler.pump()?;
         if scheduler.done() {
             return Ok(());
         }

@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use blastit_events::Event;
 use blastit_frame::{
-    Ctl, Decoder, DoneOutcome, ExitStatus, Frame, Limits, ReqHead, RespHead, Scheme,
+    Ctl, Decoder, DoneOutcome, ExitStatus, Frame, INITIAL_WINDOW, Limits, ReqHead, RespHead, Scheme,
 };
-use blastit_manifest::{Manifest, RoutingTable};
+use blastit_manifest::{Manifest, RoutingTable, UidLayout};
 use blastit_scheduler::{
     CtlChannel, Emit, SchedulerConfig, SchedulerError, routes_from_manifest, run,
 };
@@ -63,6 +63,20 @@ pub enum Script {
     AbortAfterHead,
     /// `READY`, then a `RESP_ABORT` and `DONE`, with no head at all.
     AbortWithoutHead,
+    /// `READY`, then: every `REQ_BODY` is consumed and granted back with a
+    /// `WINDOW`, and the request is answered when `REQ_END` arrives.
+    Consume { body: Vec<u8> },
+    /// `READY`, then the answer, and `DONE` twice.
+    DoubleDone { body: Vec<u8> },
+    /// `READY`, then `DONE` after a delay, with no response at all.
+    DelayedDone { after: Duration },
+    /// `READY`, then a head and `count` body frames of `chunk` bytes, ignoring
+    /// any credit: it breaks flow control on purpose (§3.1).
+    OverCredit { chunk: usize, count: usize },
+    /// `READY`, then it grants `window` bytes of request-body credit per
+    /// request and stops reading altogether: the scheduler's queue towards it
+    /// is what has to stay bounded.
+    Deaf { window: u32 },
 }
 
 /// What a script wants the view task to do after handling a frame.
@@ -86,6 +100,8 @@ pub struct Log {
     pub spawns: Vec<usize>,
     /// `RETIRE` messages init received, as `(route, reason)`.
     pub retires: Vec<(usize, String)>,
+    /// Every process init forked, as `(route, pid)`.
+    pub pids: Vec<(usize, u32)>,
 }
 
 impl Log {
@@ -116,11 +132,21 @@ impl Log {
 }
 
 /// The fake client's end of `http.chan`.
+///
+/// It tracks flow control the way a real front end does (§3.1): it never sends
+/// more request-body bytes than the credit it has, and it grants response-body
+/// credit as it "writes" the body out.
 pub struct Http {
     stream: UnixStream,
     decoder: Decoder,
     inbox: VecDeque<(u32, Frame)>,
     closed: bool,
+    /// Request-body bytes this client may still send per stream.
+    upload: HashMap<u32, u32>,
+    /// Response-body bytes this client has granted per stream.
+    download: HashMap<u32, u32>,
+    /// Total request-body credit granted back per stream, for tests.
+    granted: HashMap<u32, u64>,
 }
 
 impl Http {
@@ -130,6 +156,27 @@ impl Http {
             decoder: Decoder::new(Limits::default()),
             inbox: VecDeque::new(),
             closed: false,
+            upload: HashMap::new(),
+            download: HashMap::new(),
+            granted: HashMap::new(),
+        }
+    }
+
+    /// Decodes whatever arrived, keeping the client's credit up to date.
+    ///
+    /// A `WINDOW` is pure flow control: it is accounted for and never queued,
+    /// so a test that looks at a stream's response sees only the response.
+    fn ingest(&mut self, bytes: &[u8]) {
+        self.decoder.push(bytes);
+        while let Ok(Some((id, frame))) = self.decoder.next_frame() {
+            if let Frame::Window { bytes } = frame {
+                let credit = self.upload.entry(id).or_insert(INITIAL_WINDOW);
+                *credit = credit.saturating_add(bytes);
+                let granted = self.granted.entry(id).or_insert(0);
+                *granted = granted.saturating_add(u64::from(bytes));
+                continue;
+            }
+            self.inbox.push_back((id, frame));
         }
     }
 
@@ -140,18 +187,99 @@ impl Http {
         self.stream.write_all(&wire).await.unwrap();
     }
 
-    /// Sends a request head.
+    /// Sends a request head, which is what starts a stream's credit.
     pub async fn send_head(&mut self, id: u32, head: ReqHead) {
+        self.upload.entry(id).or_insert(INITIAL_WINDOW);
+        self.download.entry(id).or_insert(INITIAL_WINDOW);
         self.send(id, &Frame::ReqHead(head)).await;
+    }
+
+    /// Writes a body, chunked, under the credit the scheduler granted.
+    pub async fn send_body(&mut self, id: u32, body: &[u8]) {
+        self.send_body_inner(id, body, false).await;
+    }
+
+    /// Writes a body *ignoring* credit, which breaks the protocol on purpose.
+    pub async fn send_body_forced(&mut self, id: u32, body: &[u8]) {
+        self.send_body_inner(id, body, true).await;
+    }
+
+    async fn send_body_inner(&mut self, id: u32, body: &[u8], ignore_credit: bool) {
+        let mut offset = 0;
+        let mut reads = 0;
+        while offset < body.len() {
+            self.poll();
+            if !ignore_credit {
+                let credit = *self.upload.entry(id).or_insert(INITIAL_WINDOW);
+                if credit == 0 {
+                    // Wait for the view to consume some of what it has, which
+                    // is what a real front end does.
+                    assert!(
+                        !self.stream_over(id),
+                        "stream {id} ended while waiting for body credit"
+                    );
+                    assert!(reads < 64, "no credit for stream {id} after {reads} reads");
+                    reads += 1;
+                    let mut buf = [0u8; 8192];
+                    let read = self.stream.read(&mut buf).await.unwrap();
+                    assert!(read > 0, "http.chan closed while uploading");
+                    self.ingest(&buf[..read]);
+                    continue;
+                }
+                let take = (credit as usize).min(body.len() - offset).min(16 * 1024);
+                self.send(id, &Frame::ReqBody(body[offset..offset + take].to_vec()))
+                    .await;
+                *self.upload.get_mut(&id).unwrap() -= take as u32;
+                offset += take;
+            } else {
+                let take = (body.len() - offset).min(64 * 1024);
+                self.send(id, &Frame::ReqBody(body[offset..offset + take].to_vec()))
+                    .await;
+                offset += take;
+            }
+        }
+    }
+
+    /// Sends raw bytes on `http.chan`, which a real http would never do.
+    pub async fn send_raw(&mut self, bytes: &[u8]) {
+        self.stream.write_all(bytes).await.unwrap();
     }
 
     /// Sends a whole request: head, body and end.
     pub async fn send_request(&mut self, id: u32, head: ReqHead, body: &[u8]) {
         self.send_head(id, head).await;
-        for chunk in body.chunks(16) {
-            self.send(id, &Frame::ReqBody(chunk.to_vec())).await;
-        }
+        self.send_body(id, body).await;
         self.send(id, &Frame::ReqEnd).await;
+    }
+
+    /// Whether this stream already ended: a response terminator or a `CANCEL`.
+    fn stream_over(&mut self, id: u32) -> bool {
+        self.inbox.iter().any(|(stream, frame)| {
+            *stream == id
+                && matches!(
+                    frame,
+                    Frame::RespEnd | Frame::RespAbort { .. } | Frame::Cancel
+                )
+        })
+    }
+
+    /// Grants the view more response-body credit (§3.1).
+    pub async fn grant(&mut self, id: u32, bytes: u32) {
+        let credit = self.download.entry(id).or_insert(INITIAL_WINDOW);
+        *credit = credit.saturating_add(bytes);
+        self.send(id, &Frame::Window { bytes }).await;
+    }
+
+    /// Total request-body credit the view has granted back on a stream.
+    pub fn granted_bytes(&mut self, id: u32) -> u64 {
+        self.poll();
+        self.granted.get(&id).copied().unwrap_or(0)
+    }
+
+    /// How much request-body credit this client has left on a stream.
+    pub fn upload_credit(&mut self, id: u32) -> u32 {
+        self.poll();
+        *self.upload.entry(id).or_insert(INITIAL_WINDOW)
     }
 
     /// Writes whatever the scheduler sent, without waiting.
@@ -163,12 +291,7 @@ impl Http {
                     self.closed = true;
                     return;
                 }
-                Ok(read) => {
-                    self.decoder.push(&buf[..read]);
-                    while let Ok(Some((id, frame))) = self.decoder.next_frame() {
-                        self.inbox.push_back((id, frame));
-                    }
-                }
+                Ok(read) => self.ingest(&buf[..read]),
                 Err(_) => return,
             }
         }
@@ -225,10 +348,7 @@ impl Http {
                 .await
                 .expect("http.chan stayed open");
             assert!(read > 0, "http.chan closed while waiting for stream {id}");
-            self.decoder.push(&buf[..read]);
-            while let Ok(Some((id, frame))) = self.decoder.next_frame() {
-                self.inbox.push_back((id, frame));
-            }
+            self.ingest(&buf[..read]);
         }
     }
 
@@ -241,6 +361,12 @@ impl Http {
     /// Closes the client's end of `http.chan`, which ends the scheduler's run.
     pub async fn close(&mut self) {
         let _ = self.stream.shutdown().await;
+    }
+
+    /// Every frame buffered so far, leaving the inbox empty.
+    pub fn take_all(&mut self) -> Vec<(u32, Frame)> {
+        self.poll();
+        self.inbox.drain(..).collect()
     }
 
     /// Frames still buffered that no test has taken yet.
@@ -319,7 +445,7 @@ impl World {
     pub fn start(options: Options) -> Self {
         let manifest = Manifest::from_toml_str(&options.manifest).expect("valid manifest");
         let table = RoutingTable::new(&manifest).expect("valid routing table");
-        let routes = routes_from_manifest(&manifest);
+        let routes = routes_from_manifest(&manifest, &UidLayout::default());
         let (scheduler_end, client_end) = UnixStream::pair().expect("http socketpair");
         let (to_init, mut from_scheduler) = mpsc::unbounded_channel::<Ctl>();
         let (to_scheduler, from_init) = mpsc::unbounded_channel::<(Ctl, Option<OwnedFd>)>();
@@ -363,6 +489,7 @@ impl World {
                                 body: b"hello".to_vec(),
                             });
                         init_log.lock().expect("log lock").spawns.push(route);
+                        init_log.lock().expect("log lock").pids.push((route, pid));
                         tokio::spawn(view_task(route, for_view, script, init_log.clone()));
                         let std_stream: StdUnixStream =
                             for_scheduler.into_std().expect("std UnixStream");
@@ -423,6 +550,22 @@ impl World {
     /// Sends a `ctl.chan` message to the scheduler, as init would.
     pub fn ctl_send(&self, message: Ctl) {
         let _ = self.ctl.send((message, None));
+    }
+
+    /// Sends a `ctl.chan` message with a descriptor, as init does for
+    /// `SPAWNED`.
+    pub fn ctl_send_fd(&self, message: Ctl, fd: OwnedFd) {
+        let _ = self.ctl.send((message, Some(fd)));
+    }
+
+    /// Tells init the view for `route` is gone, the way a crashed process
+    /// would be reaped.
+    pub fn ctl_exit(&self, route: usize, pid: u32) {
+        self.ctl_send(Ctl::Exited {
+            route: route as u32,
+            pid,
+            status: ExitStatus::Signal(9),
+        });
     }
 
     /// Moves the paused clock forward, then lets the scheduler settle.
@@ -728,6 +871,68 @@ impl Script {
                         },
                     )
                     .await;
+                }
+            }
+            Script::Consume { body } => match frame {
+                // The app read this much of `wsgi.input`, so the client may
+                // send that much more (§3.1).
+                Frame::ReqBody(chunk) => {
+                    let bytes = u32::try_from(chunk.len()).unwrap_or(u32::MAX);
+                    send_frame(write, id, &Frame::Window { bytes }).await;
+                }
+                Frame::ReqEnd => {
+                    let body = body.clone();
+                    answer(write, id, &body, true).await;
+                }
+                _ => {}
+            },
+            Script::DoubleDone { body } => {
+                if head {
+                    answer(write, id, body, true).await;
+                    // A second `DONE` for the same request id: the slot was
+                    // already released, so nothing may happen.
+                    send_frame(
+                        write,
+                        id,
+                        &Frame::Done {
+                            outcome: DoneOutcome::Completed,
+                        },
+                    )
+                    .await;
+                }
+            }
+            Script::DelayedDone { after } => {
+                if head {
+                    let after = *after;
+                    tokio::time::sleep(after).await;
+                    send_frame(
+                        write,
+                        id,
+                        &Frame::Done {
+                            outcome: DoneOutcome::Completed,
+                        },
+                    )
+                    .await;
+                }
+            }
+            Script::OverCredit { chunk, count } => {
+                if head {
+                    let (chunk, count) = (*chunk, *count);
+                    send_frame(write, id, &resp_head(200, chunk * count)).await;
+                    let payload = vec![b'x'; chunk];
+                    for _ in 0..count {
+                        send_frame(write, id, &Frame::RespBody(payload.clone())).await;
+                    }
+                    send_frame(write, id, &Frame::RespEnd).await;
+                }
+            }
+            Script::Deaf { window } => {
+                if head {
+                    // Hand out credit and then never read again: the process is
+                    // alive, it is simply not keeping up.
+                    let window = *window;
+                    send_frame(write, id, &Frame::Window { bytes: window }).await;
+                    std::future::pending::<()>().await;
                 }
             }
         }

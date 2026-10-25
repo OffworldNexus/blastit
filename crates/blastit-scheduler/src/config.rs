@@ -9,14 +9,6 @@ use std::time::Duration;
 
 use blastit_frame::Limits;
 
-/// Largest request body the scheduler buffers for a request that is waiting in
-/// the admission queue, in bytes.
-///
-/// A queued request's body cannot be forwarded yet, so it is held in memory —
-/// but only up to this bound. Past it the scheduler stops reading `http.chan`,
-/// which pushes back on http and, through it, on the client (§2.4, §3.2).
-pub const BODY_BUFFER_LIMIT: usize = 1024 * 1024;
-
 /// How long the scheduler waits before asking init for a view it just lost
 /// (§2.4: "don't spin: back off before respawning the same route").
 pub const SPAWN_BACKOFF: Duration = Duration::from_secs(1);
@@ -57,8 +49,6 @@ pub struct SchedulerConfig {
     pub frame_limits: Limits,
     /// How long to wait before respawning a route whose last spawn failed.
     pub spawn_backoff: Duration,
-    /// Bound on the request body buffered for a queued request.
-    pub body_buffer_limit: usize,
 }
 
 impl Default for SchedulerConfig {
@@ -78,7 +68,6 @@ impl Default for SchedulerConfig {
             script_name: None,
             frame_limits: Limits::default(),
             spawn_backoff: SPAWN_BACKOFF,
-            body_buffer_limit: BODY_BUFFER_LIMIT,
         }
     }
 }

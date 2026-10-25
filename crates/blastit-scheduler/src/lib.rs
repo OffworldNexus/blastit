@@ -28,7 +28,7 @@
 //! ```no_run
 //! use std::sync::Arc;
 //! use blastit_events::Event;
-//! use blastit_manifest::{Manifest, RoutingTable};
+//! use blastit_manifest::{Manifest, RoutingTable, UidLayout};
 //! use blastit_scheduler::{SchedulerConfig, UnixCtl, run, routes_from_manifest};
 //! use tokio::net::UnixStream;
 //!
@@ -37,7 +37,7 @@
 //!     "version = 1\n[[route]]\nname = \"about\"\npath = ['/about/']\n",
 //! )?;
 //! let table = RoutingTable::new(&manifest)?;
-//! let routes = routes_from_manifest(&manifest);
+//! let routes = routes_from_manifest(&manifest, &UidLayout::default());
 //! let emit = Arc::new(|event: Event| println!("{event:?}"));
 //! // `http` and `ctl` are the scheduler's ends of the two socketpairs init
 //! // made before the fork (§4).
@@ -64,7 +64,7 @@ mod route;
 mod scheduler;
 mod task;
 
-pub use crate::config::{BODY_BUFFER_LIMIT, SPAWN_BACKOFF, SchedulerConfig};
+pub use crate::config::{SPAWN_BACKOFF, SchedulerConfig};
 pub use crate::ctl::{CtlChannel, UnixCtl};
 pub use crate::error::SchedulerError;
 pub use crate::route::{RouteInfo, routes_from_manifest};

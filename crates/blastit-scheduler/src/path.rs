@@ -80,6 +80,31 @@ pub(crate) fn strip_script_name<'a>(path: &'a str, prefix: &str) -> Option<&'a s
     None
 }
 
+/// Normalises a `BLASTIT_SCRIPT_NAME` value (§8.2).
+///
+/// The prefix always starts with `/` and never ends with one, so stripping is
+/// a plain prefix test at a segment boundary. An empty value, `/`, and
+/// anything that is only slashes all mean "no mount prefix", which is `None`.
+pub fn normalize_script_name(prefix: &str) -> Option<String> {
+    let trimmed = prefix.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('/') {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!("/{trimmed}"))
+    }
+}
+
+/// Whether a decoded path byte is NUL or a C0 control byte.
+///
+/// A request path carrying one of those cannot be routed (and must not reach
+/// an event): §3.2 answers `400`.
+pub(crate) fn is_control_byte(byte: u8) -> bool {
+    byte < 0x20
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -117,6 +142,33 @@ mod tests {
         // Non-ASCII passes through untouched.
         assert_eq!(percent_decode(b"/\xc3\xa9").unwrap(), b"/\xc3\xa9");
         assert_eq!(percent_decode(b"/%C3%A9").unwrap(), b"/\xc3\xa9");
+    }
+
+    #[test]
+    fn script_name_is_normalised_once() {
+        assert_eq!(normalize_script_name("/app"), Some("/app".to_string()));
+        assert_eq!(normalize_script_name("app"), Some("/app".to_string()));
+        assert_eq!(normalize_script_name("/app/"), Some("/app".to_string()));
+        assert_eq!(normalize_script_name("app///"), Some("/app".to_string()));
+        assert_eq!(
+            normalize_script_name("/app/sub/"),
+            Some("/app/sub".to_string())
+        );
+        // Nothing to strip.
+        assert_eq!(normalize_script_name(""), None);
+        assert_eq!(normalize_script_name("/"), None);
+        assert_eq!(normalize_script_name("///"), None);
+    }
+
+    #[test]
+    fn control_bytes_are_recognised() {
+        assert!(is_control_byte(0));
+        assert!(is_control_byte(b'\n'));
+        assert!(is_control_byte(0x1f));
+        assert!(!is_control_byte(b' '));
+        assert!(!is_control_byte(b'/'));
+        assert!(!is_control_byte(0x7f));
+        assert!(!is_control_byte(0xc3));
     }
 
     #[test]
