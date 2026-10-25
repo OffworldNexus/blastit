@@ -41,6 +41,9 @@ struct Args {
     secrets_fd: Option<RawFd>,
     events_fd: Option<RawFd>,
     ready_fd: Option<RawFd>,
+    /// `--seccomp=0|1`: §7.3's filters, for the one role that is `execve`'d and
+    /// so cannot read `BLASTIT_SECCOMP` from the environment (§4).
+    seccomp: Option<bool>,
 }
 
 /// How to use the binary, printed with a command-line error.
@@ -50,7 +53,7 @@ usage:
   blastit --stage=1 --config-fd=N \\
           [--dbproxy-pid=P --dbproxy-events-fd=N \\
            --dbproxy-stdout-fd=N --dbproxy-stderr-fd=N]   stage 1
-  blastit --role=dbproxy --secrets-fd=N --events-fd=N --ready-fd=N";
+  blastit --role=dbproxy --secrets-fd=N --events-fd=N --ready-fd=N [--seccomp=0|1]";
 
 /// Where the exit code comes from: init's own status.
 fn main() -> ExitCode {
@@ -77,7 +80,10 @@ fn dispatch(args: Args) -> ExitCode {
                     );
                     return ExitCode::FAILURE;
                 };
-                let code = roles::dbproxy(secrets_fd, events_fd, ready_fd);
+                // Absent means on: `BLASTIT_SECCOMP` defaults to on (§8.2), and
+                // a dbproxy started by hand is no reason to run unfiltered.
+                let seccomp = args.seccomp.unwrap_or(true);
+                let code = roles::dbproxy(secrets_fd, events_fd, ready_fd, seccomp);
                 ExitCode::from(u8::try_from(code).unwrap_or(1))
             }
             other => {
@@ -131,8 +137,15 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
             "--secrets-fd" => args.secrets_fd = Some(descriptor(value, key)?),
             "--events-fd" => args.events_fd = Some(descriptor(value, key)?),
             "--ready-fd" => args.ready_fd = Some(descriptor(value, key)?),
+            "--seccomp" => args.seccomp = Some(flag(value, key)?),
             other => return Err(format!("unknown argument `{other}`")),
         }
+    }
+    // `--seccomp` is how §7.3's `BLASTIT_SECCOMP` reaches the one role that is
+    // `execve`'d with an empty environment; every other role is a `fork` of a
+    // process that still has the variable.
+    if args.seccomp.is_some() && args.role.as_deref() != Some("dbproxy") {
+        return Err("`--seccomp` is only for `--role=dbproxy`".to_string());
     }
     Ok(args)
 }
@@ -151,6 +164,16 @@ fn descriptor(value: &str, key: &str) -> Result<RawFd, String> {
         return Err(format!("`{key}` wants a descriptor number, not `{value}`"));
     }
     Ok(fd)
+}
+
+/// A `0`/`1` argument, the spelling every boolean the command line carries
+/// uses.
+fn flag(value: &str, key: &str) -> Result<bool, String> {
+    match value {
+        "1" => Ok(true),
+        "0" => Ok(false),
+        other => Err(format!("`{key}` wants 0 or 1, not `{other}`")),
+    }
 }
 
 #[cfg(test)]
@@ -172,12 +195,14 @@ mod tests {
             "--secrets-fd=3".to_string(),
             "--events-fd=4".to_string(),
             "--ready-fd=5".to_string(),
+            "--seccomp=0".to_string(),
         ])
         .unwrap();
         assert_eq!(args.role.as_deref(), Some("dbproxy"));
         assert_eq!(args.secrets_fd, Some(3));
         assert_eq!(args.events_fd, Some(4));
         assert_eq!(args.ready_fd, Some(5));
+        assert_eq!(args.seccomp, Some(false));
     }
 
     #[test]
@@ -203,5 +228,21 @@ mod tests {
         assert!(parse(&["--stage".to_string()]).is_err());
         assert!(parse(&["--stage=x".to_string()]).is_err());
         assert!(parse(&["--config-fd=-1".to_string()]).is_err());
+        assert!(parse(&["--seccomp=2".to_string()]).is_err());
+        assert!(parse(&["--seccomp=yes".to_string()]).is_err());
+        // The flag belongs to one role only: everything else reads
+        // `BLASTIT_SECCOMP` from its own environment.
+        assert!(parse(&["--seccomp=1".to_string()]).is_err());
+        assert!(parse(&["--stage=1".to_string(), "--seccomp=0".to_string()]).is_err());
+        assert!(
+            parse(&[
+                "--role=dbproxy".to_string(),
+                "--secrets-fd=3".to_string(),
+                "--events-fd=4".to_string(),
+                "--ready-fd=5".to_string(),
+                "--seccomp=1".to_string(),
+            ])
+            .is_ok()
+        );
     }
 }

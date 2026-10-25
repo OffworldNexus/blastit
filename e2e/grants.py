@@ -14,13 +14,22 @@ import re
 import sys
 
 ROUTES = [
-    # name, path regexes, methods, transaction_control
-    ("login", [r"/login/"], ["GET", "POST"], True),
-    ("logout", [r"/logout/"], ["POST"], True),
-    ("notes", [r"/notes/", r"/notes/[0-9]+/delete/", r"/notes/peek/", r"/notes/sql/"], None, True),
-    ("debug", [r"/debug/env/"], ["GET"], False),
-    ("sql", [r"/debug/sql/"], ["GET"], False),
-    ("fallback", [r".*"], None, False),
+    # name, path regexes, methods, transaction_control, egress
+    ("login", [r"/login/"], ["GET", "POST"], True, False),
+    ("logout", [r"/logout/"], ["POST"], True, False),
+    (
+        "notes",
+        [r"/notes/", r"/notes/[0-9]+/delete/", r"/notes/peek/", r"/notes/sql/"],
+        None,
+        True,
+        False,
+    ),
+    ("debug", [r"/debug/env/", r"/debug/egress/"], ["GET"], False, False),
+    ("sql", [r"/debug/sql/"], ["GET"], False, False),
+    # The only route that may reach the network (§7.3), and it has no grants:
+    # the probe opens no database connection at all.
+    ("egress", [r"/egress/probe/"], ["GET"], False, True),
+    ("fallback", [r".*"], None, False, False),
 ]
 DENY_PATHS = {"/notes/peek/", "/notes/sql/", "/debug/sql/"}
 # Granted by hand: the raw-SQL probe's route may run exactly this statement.
@@ -44,7 +53,7 @@ queries = ["SELECT set_config('TimeZone', $1, false)", "SELECT 1"]
 
 
 def route_of(method, path):
-    for name, patterns, methods, _ in ROUTES:
+    for name, patterns, methods, _, _ in ROUTES:
         if methods and method not in methods:
             continue
         if any(re.fullmatch(p, path) for p in patterns):
@@ -77,7 +86,7 @@ def main():
     if shared:
         out.append("# Statements several routes share: session and user lookups.")
         out.append(f"[group.session.db]\nqueries = {toml_list(shared)}\n")
-    for name, patterns, methods, tx in ROUTES:
+    for name, patterns, methods, tx, egress in ROUTES:
         out.append("[[route]]")
         out.append(f'name = "{name}"')
         out.append("path = [" + ", ".join(f"'{p}'" for p in patterns) + "]")
@@ -85,6 +94,8 @@ def main():
             out.append("methods = [" + ", ".join(f'"{m}"' for m in methods) + "]")
         if any(q in shared for q in granted[name]):
             out.append('groups = ["session"]')
+        if egress:
+            out.append("egress = true")
         inline = [q for q in granted[name] if q not in shared] + EXTRA.get(name, [])
         if inline or tx:
             out.append("[route.db]")

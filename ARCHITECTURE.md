@@ -801,18 +801,53 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
 ### 7.3 seccomp
 
 Unless `BLASTIT_SECCOMP=0`, each child installs a BPF filter after dropping
-privileges. This needs only `PR_SET_NO_NEW_PRIVS`, no capability.
+privileges. This needs only `PR_SET_NO_NEW_PRIVS`, no capability — which is
+what makes it work on DO, where the spike measured `socket(AF_INET)` and
+`socket(AF_INET6)` going to `EPERM` while `AF_UNIX` kept working. Because of
+that it is the default rather than an option, and the `boot` event says
+whether the filters are on.
 
-* **views:** `socket()` is restricted to `AF_UNIX`. A view whose manifest entry
-  has `egress = true` may also use `AF_INET`/`AF_INET6`. `ptrace`,
-  `process_vm_*`, `bpf`, `keyctl` and similar are denied.
-* **http, scheduler:** no `socket()` at all. They only use inherited fds.
-* **dbproxy:** `AF_UNIX` and `AF_INET`.
+The filter is a **refusal list**: the default action is allow, and what it
+refuses it refuses with `EPERM`, so a syscall it says nothing about cannot be
+what breaks a request. It is installed while the child is still
+single-threaded — in the zygote before a view serves anything, and in http,
+scheduler and dbproxy before their runtime exists — because it cannot be
+removed and applies to every thread, present or future.
 
-This is our only lever for egress control. **It works on DO**: in the spike,
-a filter installed by an unprivileged process made `socket(AF_INET)` and
-`socket(AF_INET6)` fail with `EPERM` while `AF_UNIX` kept working. Because of
-that, it should become the default rather than an option.
+* **Every role** refuses `ptrace`, `process_vm_readv`, `process_vm_writev`,
+  `bpf`, `keyctl`, `add_key`, `request_key`, `perf_event_open`, `userfaultfd`,
+  the three `io_uring` calls, `kexec_load`, `kexec_file_load`, `init_module`,
+  `finit_module`, `delete_module`, `mount`, `umount2`, `pivot_root`, `swapon`,
+  `swapoff`, `reboot`, `setns`, `unshare`, `open_by_handle_at`, `pidfd_getfd`,
+  `kcmp`, `process_madvise` and the new mount API (`open_tree`, `move_mount`,
+  `fsopen`, `fsconfig`, `fsmount`, `fspick`). They are the calls that read or
+  steer another process, load code into the kernel, or move between namespaces
+  and mounts; none is part of serving a request.
+* **`socket()`** is checked on the address family in `args[0]`:
+  * **views:** `AF_UNIX` only. A view whose manifest entry has
+    `egress = true` may also use `AF_INET`/`AF_INET6`. Every other family —
+    `AF_NETLINK` and the rest — is `EPERM`.
+  * **http, scheduler:** no `socket()` at all. They only use inherited fds:
+    both run on an inherited listener, an inherited `AF_UNIX` channel pair and
+    pipes, and nothing they do calls one.
+  * **dbproxy:** `AF_UNIX`, `AF_INET` and `AF_INET6`. It adopts the pg
+    listeners init bound and connects to the real PostgreSQL over TCP, so it
+    needs both; a host *name* is resolved by `getaddrinfo`, which falls back
+    to `/proc` when its `AF_NETLINK` socket is refused.
+* **`socketpair()`** stays `AF_UNIX`-only for every role, http and scheduler
+  included: a pair of descriptors the process already owns is not a new way
+  out of it, and std and tokio create one internally on some platforms.
+* **A foreign architecture is fatal.** The filter compares
+  `seccomp_data.arch` against the build's `AUDIT_ARCH_*`
+  (`AUDIT_ARCH_X86_64`/`AUDIT_ARCH_AARCH64`) and kills the process when it
+  does not match, and on x86_64 an x32 syscall number
+  (`nr & __X32_SYSCALL_BIT`) is refused the same way. A syscall number from
+  another ABI means a number-to-syscall mapping unlike the one the refusal
+  list is written in, so there is nothing safe to compare it against; no
+  legitimate caller produces either.
+
+This is our only lever for egress control, and it is what `egress` in the
+manifest buys.
 
 ---
 

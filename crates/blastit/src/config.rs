@@ -163,7 +163,7 @@ pub struct Config {
     pub proxy_max_connections: BTreeMap<String, u32>,
     /// `BLASTIT_ENV_STRIP`.
     pub env_strip: Option<String>,
-    /// `BLASTIT_SECCOMP`; the §7.3 filters are C4.
+    /// `BLASTIT_SECCOMP`: the §7.3 per-role filters.
     pub seccomp: bool,
     /// `BLASTIT_GRACEFUL_TIMEOUT`.
     pub graceful_timeout: Duration,
@@ -732,6 +732,21 @@ pub fn view_dir(uid: u32) -> PathBuf {
     PathBuf::from(format!("/run/blastit/views/{uid}"))
 }
 
+/// Whether `BLASTIT_SECCOMP` asks for the §7.3 filters, as the `boot` event
+/// needs it (§8.1).
+///
+/// [`Config::from_env`] parses the same variable a moment later, but stage 0
+/// prints `boot` before it parses anything, so this reads the variable on its
+/// own — through the same [`parse_bool`] the rest of the configuration uses, so
+/// the two cannot drift apart. A value that is not a boolean at all means on
+/// here; [`Config::from_env`] rejects it a moment later, naming the variable.
+pub fn seccomp_requested() -> bool {
+    let Ok(Some(value)) = variable("BLASTIT_SECCOMP") else {
+        return true;
+    };
+    parse_bool("BLASTIT_SECCOMP", &value).unwrap_or(true)
+}
+
 /// Reads one environment variable, or `None` when it is unset.
 fn variable(name: &str) -> Result<Option<String>, ConfigError> {
     match std::env::var(name) {
@@ -1129,6 +1144,33 @@ mod tests {
         assert!(parse_bool("V", "yes").unwrap());
         assert!(!parse_bool("V", "no").unwrap());
         assert!(parse_bool("V", "maybe").is_err());
+    }
+
+    #[test]
+    fn the_boot_seccomp_flag_uses_the_configuration_spellings() {
+        // SAFETY: this is the only test that touches `BLASTIT_SECCOMP`, and it
+        // puts the variable back before it returns.
+        unsafe {
+            // The `boot` event is printed before the configuration is parsed,
+            // so the flag is read on its own — but through `parse_bool`, so it
+            // cannot accept anything `Config::from_env` would reject.
+            for value in ["0", "off", "false", "no", "False", " 0 "] {
+                std::env::set_var("BLASTIT_SECCOMP", value);
+                assert!(!seccomp_requested(), "{value} means off");
+            }
+            for value in ["1", "on", "yes", "true", "TRUE"] {
+                std::env::set_var("BLASTIT_SECCOMP", value);
+                assert!(seccomp_requested(), "{value} means on");
+            }
+            // Unset, and a value that is not a boolean at all: on here, and
+            // `Config::from_env` rejects the second one right after.
+            std::env::remove_var("BLASTIT_SECCOMP");
+            assert!(seccomp_requested());
+            std::env::set_var("BLASTIT_SECCOMP", "maybe");
+            assert!(seccomp_requested());
+            assert!(parse_bool("BLASTIT_SECCOMP", "maybe").is_err());
+            std::env::remove_var("BLASTIT_SECCOMP");
+        }
     }
 
     #[test]

@@ -60,7 +60,7 @@ CI grows with the code, never ahead of it:
 | **C1** init (C1a `blastit-sys` ✅, C1b binary) | `blastit` (binary) | all of A and B | §2.1, §4, §7.2 | stage 0 / `execve` barrier / stage 1, dbproxy fork + exec with empty env, listener binding and `chown`, privilege drop, single-threaded forks, preload + `gc.freeze`, zygote over `ctl.chan`, log collection (single stdout writer), supervision and graceful shutdown | ✅ |
 | **C2** e2e | `e2e/` | C1 | all | Docker-based end-to-end test in CI: a small Django app + PostgreSQL; routing, denials, logs, secret barrier (the spike's R5 scan, as a test) | ✅ |
 | **C3** memory | `blastit` | C1 | §8 sizing, §9.2 | heap immortalisation before fork, `BLASTIT_MAX_VIEW_PROCESSES` LRU cap, memory high-watermark retirement | 🟦 [#25](https://github.com/OffworldNexus/blastit/pull/25) |
-| **C4** seccomp | `blastit` | C1 | §7.3 | per-role filters, `egress` grants | 🟦 [#24](https://github.com/OffworldNexus/blastit/pull/24) |
+| **C4** seccomp | `blastit` | C1 | §7.3 | per-role filters, `egress` grants | ✅ |
 | **C5** DO | — | C2 | §10, §11 | deploy the e2e app on App Platform; re-run the spike checks against the real binary; measure a real app's memory | ✅ |
 
 ## Phase D: adoption

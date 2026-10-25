@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use blastit_sys::{
-    Rlimits, chdir, close_fds_except, dup_onto, set_cloexec, set_rlimits, set_umask,
+    Rlimits, SeccompRole, chdir, close_fds_except, dup_onto, set_cloexec, set_rlimits, set_umask,
 };
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::process::Resource;
@@ -124,6 +124,26 @@ fn clamp_nofile(requested: u64) -> Option<u64> {
     }
 }
 
+/// Installs `role`'s seccomp filter when `BLASTIT_SECCOMP` asks for it (§7.3).
+///
+/// This is the step right before a child starts anything of its own: the filter
+/// cannot be removed, applies to every thread that exists or is created later,
+/// and has to be on while the child is still single-threaded — before a view
+/// serves its first request and before http, scheduler or dbproxy build their
+/// runtime (§4).
+///
+/// # Errors
+///
+/// [`std::io::Error`] when the filter cannot be installed. There is no
+/// recovery in a child: the caller exits non-zero, and init treats a component
+/// that did that as fatal (§8).
+pub fn install_filter(enabled: bool, role: SeccompRole) -> io::Result<()> {
+    if enabled {
+        blastit_sys::install(role)?;
+    }
+    Ok(())
+}
+
 /// `poll(2)` for readability, with a timeout.
 ///
 /// Returns `false` when the timeout expired. Used by stage 0 to wait for
@@ -221,4 +241,40 @@ pub fn child_exit(message: &str, code: i32) -> ! {
     }
     // SAFETY: `_exit` never returns and runs no handler.
     unsafe { libc::_exit(code) }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// An `AF_INET` stream socket, created and closed again.
+    ///
+    /// `false` is what the §7.3 filter answers: `socket(AF_INET)` is exactly
+    /// what a view without egress may not do.
+    fn inet_socket() -> bool {
+        // SAFETY: `socket` takes three integers and returns a descriptor.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        if fd == -1 {
+            return false;
+        }
+        // SAFETY: the descriptor was just created here and nothing else owns it.
+        unsafe { libc::close(fd) };
+        true
+    }
+
+    #[test]
+    fn the_off_switch_installs_no_filter() {
+        // `BLASTIT_SECCOMP=0` has to leave every process's system calls alone.
+        // A filter can never be removed, so this runs in the harness's own
+        // process — and that is the proof: if `install_filter` installed one
+        // anyway, the socket below would come back `EPERM` and stay that way.
+        // The enabled half is `blastit-sys`'s own tests, which fork a child per
+        // role.
+        install_filter(false, SeccompRole::View { egress: false }).unwrap();
+        assert!(
+            inet_socket(),
+            "AF_INET must still work when the filters are off"
+        );
+    }
 }

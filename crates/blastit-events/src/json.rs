@@ -188,6 +188,9 @@ fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static
     if let Some(duration_ms) = lifecycle.duration_ms {
         push_member(out, "duration_ms", &json_f64(duration_ms));
     }
+    if let Some(seccomp) = lifecycle.seccomp {
+        push_member(out, "seccomp", &json_bool(seccomp));
+    }
     // `outputs` is written even when it was emptied, so that a `truncated`
     // entry always refers to a member that is there.
     if !lifecycle.outputs.is_empty() || truncated.contains(&"outputs") {
@@ -603,6 +606,7 @@ mod tests {
                 .with_routes(3)
                 .with_workers(16)
                 .with_duration_ms(1.0)
+                .with_seccomp(false)
                 .with_output("db", "DATABASE_URL"),
         ));
         let json = encode_json(&boot);
@@ -617,10 +621,12 @@ mod tests {
                 "routes",
                 "workers",
                 "duration_ms",
+                "seccomp",
                 "outputs",
             ]
         );
         let value = parse(&json);
+        assert_eq!(value["seccomp"], serde_json::json!(false));
         assert_eq!(value["outputs"]["db"][0], "DATABASE_URL");
 
         let output = fixture::event(EventKind::AppOutput(AppOutput::new(Stream::Stdout, "hi")));

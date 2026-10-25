@@ -98,6 +98,34 @@ pub enum Error {
         /// What `/proc/self/status` looked like instead.
         detail: &'static str,
     },
+
+    /// A step of [`crate::install`] failed.
+    #[error("the seccomp filter failed at `{stage}`: {source}")]
+    Seccomp {
+        /// The call that failed.
+        stage: &'static str,
+        /// The `errno` it reported.
+        #[source]
+        source: io::Error,
+    },
+
+    /// [`crate::install`] was called from a process that had more than one
+    /// thread (ARCHITECTURE.md §7.3).
+    #[error(
+        "refusing to install a seccomp filter: {threads} threads are alive, and a filter applies to every thread that already exists"
+    )]
+    NotSingleThreadedSeccomp {
+        /// How many threads the process had, as reported by `/proc/self/status`.
+        threads: usize,
+    },
+
+    /// This platform has no `AUDIT_ARCH_*` value to check a filter's
+    /// `seccomp_data.arch` against (ARCHITECTURE.md §7.3).
+    #[error("{arch} has no AUDIT_ARCH value, so no seccomp filter can be installed")]
+    UnsupportedArchitecture {
+        /// The architecture, from `std::env::consts::ARCH`.
+        arch: &'static str,
+    },
 }
 
 impl Error {

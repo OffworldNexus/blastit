@@ -18,9 +18,10 @@ use blastit_frame::Limits;
 use blastit_http::HttpConfig;
 use blastit_manifest::RoutingTable;
 use blastit_scheduler::{RouteInfo, SchedulerConfig, UnixCtl};
-use blastit_sys::Signal;
+use blastit_sys::{SeccompRole, Signal};
 use tokio::runtime::{Builder, Runtime};
 
+use crate::child::{child_exit, install_filter};
 use crate::logs::write_line;
 
 /// The descriptors the http role owns.
@@ -122,13 +123,15 @@ pub fn scheduler(
 /// the policy — arrives over `secrets.pipe` and is closed as soon as it has been
 /// read (§4). dbproxy is `execve`'d with an empty environment, which clears
 /// `PR_SET_PDEATHSIG` and the dumpable flag, so both are re-applied here before
-/// anything else. The ready byte goes out once the listeners are adopted, which
-/// is before `run_with_listeners` checks `SO_PASSCRED` and switches them to
-/// non-blocking: that work cannot fail for a socket [`blastit_sys::bind_unix_listener`]
-/// made, and waiting for it would mean inventing a hook the crate does not have.
+/// anything else. `seccomp` is §7.3's `BLASTIT_SECCOMP`, which cannot come from
+/// the environment for this one role and arrives as `--seccomp=0|1` instead.
+/// The ready byte goes out once the listeners are adopted, which is before
+/// `run_with_listeners` checks `SO_PASSCRED` and switches them to non-blocking:
+/// that work cannot fail for a socket [`blastit_sys::bind_unix_listener`] made,
+/// and waiting for it would mean inventing a hook the crate does not have.
 ///
 /// Returns the process exit code.
-pub fn dbproxy(secrets_fd: RawFd, events_fd: RawFd, ready_fd: RawFd) -> i32 {
+pub fn dbproxy(secrets_fd: RawFd, events_fd: RawFd, ready_fd: RawFd, seccomp: bool) -> i32 {
     // SAFETY: the descriptor was created for dbproxy by init and is owned by it
     // from here on; nothing else refers to the number.
     let secrets = unsafe { std::fs::File::from_raw_fd(secrets_fd) };
@@ -137,6 +140,11 @@ pub fn dbproxy(secrets_fd: RawFd, events_fd: RawFd, ready_fd: RawFd) -> i32 {
     };
     let _ = blastit_sys::harden_child(Signal::KILL);
     let _ = blastit_sys::set_dumpable(false);
+    // §7.3, and before the ready byte: a filter that cannot be installed has to
+    // fail the boot rather than leave dbproxy serving unfiltered.
+    if let Err(err) = install_filter(seccomp, SeccompRole::DbProxy) {
+        child_exit(&format!("dbproxy: {err}"), 1);
+    }
 
     let mut listeners = Vec::with_capacity(config.listeners.len());
     for spec in &config.listeners {
