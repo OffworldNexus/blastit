@@ -5,9 +5,12 @@
 //! texts the app may send, and dbproxy compares them **exactly**, after
 //! normalising both the manifest's text and the text on the wire with the same
 //! rules (§6, "Matching"): trim, drop trailing `;`, replace every comment by a
-//! single space, and collapse every run of whitespace outside quoted strings to
-//! one space. Matching the whole normalised text is what makes a listed query
-//! followed by a second statement fail to match.
+//! single space, collapse every run of whitespace outside quoted strings to
+//! one space, and rewrite the *shapes* a real app can never keep still — every
+//! bind placeholder becomes `$?`, a list of placeholders after `IN` becomes
+//! `IN ($?, ...)`, and a run of identical `VALUES` rows becomes
+//! `(row), ...`. Matching the whole normalised text is what makes a listed
+//! query followed by a second statement fail to match.
 //!
 //! # Agreement with PostgreSQL
 //!
@@ -33,6 +36,10 @@
 //! `SAVEPOINT <ident>`, `RELEASE [SAVEPOINT] <ident>` and
 //! `ROLLBACK [WORK|TRANSACTION] TO [SAVEPOINT] <ident>`.
 //!
+//! [`Allowlist::unrestricted`] is the other extreme: a route a manifest marks
+//! `unrestricted = true` may run any statement on one proxy (§6), and its
+//! allowlist allows everything without normalising or comparing anything.
+//!
 //! ```
 //! use blastit_sqlpolicy::{Allowlist, Decision};
 //!
@@ -46,6 +53,13 @@
 //! assert_eq!(
 //!     allow.check("BEGIN; DROP TABLE t"),
 //!     Decision::Denied { normalized: "BEGIN; DROP TABLE t".to_string() },
+//! );
+//!
+//! // A grant survives the shapes a Django app produces.
+//! let allow = Allowlist::new(["SELECT id FROM t WHERE owner_id IN ($1)"], false);
+//! assert_eq!(
+//!     allow.check("SELECT id FROM t WHERE owner_id IN ($1, $2, $3)"),
+//!     Decision::Allowed,
 //! );
 //! ```
 
@@ -86,11 +100,14 @@ impl Decision {
 /// The SQL one `postgresql` grant allows on one (route, proxy) pair.
 ///
 /// Built from the effective queries of a route (§6, "Effective grants") plus
-/// the route's `transaction_control` flag.
+/// the route's `transaction_control` flag, or with
+/// [`Allowlist::unrestricted`] for a route a manifest marked
+/// `unrestricted = true`.
 #[derive(Debug, Clone, Default)]
 pub struct Allowlist {
     queries: HashSet<String>,
     transaction_control: bool,
+    unrestricted: bool,
 }
 
 impl Allowlist {
@@ -115,23 +132,47 @@ impl Allowlist {
         Self {
             queries: set,
             transaction_control,
+            unrestricted: false,
+        }
+    }
+
+    /// An allowlist that allows every statement.
+    ///
+    /// This is what a manifest's `unrestricted = true` means for one
+    /// (route, proxy) pair (§6): the route may run anything on that proxy,
+    /// still through dbproxy and still without ever seeing the credentials.
+    /// [`Allowlist::check`] then allows without normalising anything, and
+    /// dbproxy logs no denial — there is nothing to deny.
+    pub fn unrestricted() -> Self {
+        Self {
+            queries: HashSet::new(),
+            transaction_control: false,
+            unrestricted: true,
         }
     }
 
     /// The distinct normalised queries the allowlist holds, in no particular
     /// order.
+    ///
+    /// Always empty for an [`Allowlist::unrestricted`] one, which allows by
+    /// not comparing.
     pub fn queries(&self) -> impl Iterator<Item = &str> {
         self.queries.iter().map(String::as_str)
     }
 
     /// Decides whether `sql` is allowed.
     ///
-    /// The text is allowed when its normalised form is exactly one of the
+    /// An [`Allowlist::unrestricted`] one allows everything without looking at
+    /// the text at all, empty text included: PostgreSQL answers an empty
+    /// statement with an `EmptyQueryResponse` and runs nothing. Every other
+    /// allowlist allows the text when its normalised form is exactly one of the
     /// allowlisted queries, or — with `transaction_control` — when it is a
-    /// single transaction-control statement.
-    ///
-    /// Empty or whitespace-only text is always denied.
+    /// single transaction-control statement, and denies empty or
+    /// whitespace-only text.
     pub fn check(&self, sql: &str) -> Decision {
+        if self.unrestricted {
+            return Decision::Allowed;
+        }
         let normalized = normalize(sql);
         if normalized.is_empty() {
             return Decision::Denied { normalized };
@@ -148,8 +189,16 @@ impl Allowlist {
 
     /// Whether this allowlist also accepts single transaction-control
     /// statements.
+    ///
+    /// Always false for an [`Allowlist::unrestricted`] one, which needs no
+    /// such flag: it allows transaction control along with everything else.
     pub fn transaction_control(&self) -> bool {
         self.transaction_control
+    }
+
+    /// Whether every statement is allowed, whatever it is.
+    pub fn is_unrestricted(&self) -> bool {
+        self.unrestricted
     }
 
     /// How many **distinct normalised** queries the allowlist holds: two
@@ -158,10 +207,14 @@ impl Allowlist {
         self.queries.len()
     }
 
-    /// Whether the allowlist holds no query at all. It can then only allow
-    /// transaction-control statements, if those are enabled.
+    /// Whether the allowlist holds no listed query at all. It can then only
+    /// allow transaction-control statements, if those are enabled.
+    ///
+    /// An [`Allowlist::unrestricted`] one is never empty: it allows everything,
+    /// which is the opposite of allowing nothing, and it reads the same way on
+    /// both sides of the policy (`PgGrant::is_empty` in `blastit-manifest`).
     pub fn is_empty(&self) -> bool {
-        self.queries.is_empty()
+        !self.unrestricted && self.queries.is_empty()
     }
 }
 
@@ -714,5 +767,275 @@ mod tests {
                 let _ = allow.check(&once);
             }
         }
+    }
+
+    #[test]
+    fn exhaustive_short_shape_inputs_never_panic() {
+        // The same, over the characters the two shape rules are built from:
+        // brackets, commas, placeholders and the letters of `IN`.
+        let alphabet = ['(', ')', ',', '$', '1', ' ', 'I', 'N', 'n', ';'];
+        let allow = allowlist(&["SELECT 1", "BEGIN"], true);
+        for len in 0..=5 {
+            let combos = alphabet.len().pow(len);
+            for n in 0..combos {
+                let mut sql = String::new();
+                let mut rest = n;
+                for _ in 0..len {
+                    sql.push(alphabet[rest % alphabet.len()]);
+                    rest /= alphabet.len();
+                }
+                let once = normalize(&sql);
+                assert_eq!(normalize(&once), once, "not idempotent for {sql:?}");
+                assert_eq!(
+                    crate::statements::statement_count_hint(&once),
+                    crate::statements::statement_count_hint(&sql),
+                    "statement count changed by normalisation for {sql:?}"
+                );
+                let _ = allow.check(&sql);
+                let _ = allow.check(&once);
+            }
+        }
+    }
+
+    #[test]
+    fn every_sequence_of_statement_fragments_is_stable() {
+        // Statement fragments, combined four at a time: `VALUES` and `IN` sit
+        // next to brackets, commas, comments, quotes and a second statement,
+        // which is where a shape rule could lose or invent one.
+        let fragments = [
+            "VALUES",
+            "IN",
+            "NOT",
+            "(",
+            ")",
+            ",",
+            "$1",
+            "1",
+            "'a'",
+            "-- c\n",
+            ";",
+            "SELECT",
+            "VALUES ($1), ($1)",
+            "IN ($1, 'x')",
+            "f($1, $2)",
+        ];
+        let allow = allowlist(&["SELECT 1", "BEGIN"], true);
+        for a in fragments {
+            for b in fragments {
+                for c in fragments {
+                    for d in fragments {
+                        let sql = format!("{a} {b} {c} {d}");
+                        let once = normalize(&sql);
+                        assert_eq!(normalize(&once), once, "not idempotent for {sql:?}");
+                        assert_eq!(
+                            crate::statements::statement_count_hint(&once),
+                            crate::statements::statement_count_hint(&sql),
+                            "statement count changed by normalisation for {sql:?}"
+                        );
+                        let _ = allow.check(&sql);
+                    }
+                }
+            }
+        }
+    }
+
+    //
+    // Shapes that a real Django app produces (§6).
+    //
+
+    /// The `notes` route's statement from the e2e manifest, as a grant.
+    const NOTES_INSERT: &str = r#"INSERT INTO "notes_note" ("owner_id", "text") VALUES ($1, $2) RETURNING "notes_note"."id""#;
+    /// The session lookup the e2e manifest grants.
+    const SESSION_DELETE: &str =
+        r#"DELETE FROM "django_session" WHERE "django_session"."session_key" IN ($1)"#;
+
+    #[test]
+    fn an_in_list_of_any_length_matches_a_one_placeholder_grant() {
+        let allow = allowlist(&[SESSION_DELETE], false);
+        assert_eq!(allow.check(SESSION_DELETE), Decision::Allowed);
+        for n in 1..=8 {
+            let list: Vec<String> = (1..=n).map(|i| format!("${i}")).collect();
+            let sql = format!(
+                r#"DELETE FROM "django_session" WHERE "django_session"."session_key" IN ({})"#,
+                list.join(", ")
+            );
+            assert_eq!(allow.check(&sql), Decision::Allowed, "n = {n}");
+        }
+        // A list of something else is still a different statement.
+        assert!(
+            !allow
+                .check(
+                    r#"DELETE FROM "django_session" WHERE "django_session"."session_key" IN ('x')"#
+                )
+                .is_allowed()
+        );
+    }
+
+    #[test]
+    fn a_bulk_insert_matches_a_grant_with_one_more_row() {
+        let grant = r#"INSERT INTO "notes_note" ("owner_id", "text") VALUES ($1, $2), ($3, $4) RETURNING "notes_note"."id""#;
+        let allow = allowlist(&[grant], false);
+        assert_eq!(allow.check(grant), Decision::Allowed);
+        for rows in 2..=10 {
+            let mut next = 1;
+            let mut tuples = Vec::new();
+            for _ in 0..rows {
+                tuples.push(format!("(${next}, ${})", next + 1));
+                next += 2;
+            }
+            let sql = format!(
+                r#"INSERT INTO "notes_note" ("owner_id", "text") VALUES {} RETURNING "notes_note"."id""#,
+                tuples.join(", ")
+            );
+            assert_eq!(allow.check(&sql), Decision::Allowed, "rows = {rows}");
+        }
+        // A single row is its own shape: the grant lists two, so it does not
+        // cover it, and the other way round either.
+        let single = r#"INSERT INTO "notes_note" ("owner_id", "text") VALUES ($1, $2) RETURNING "notes_note"."id""#;
+        assert!(
+            !allow.check(single).is_allowed(),
+            "a two-row grant is not a one-row grant"
+        );
+        let allow = allowlist(&[single], false);
+        assert_eq!(allow.check(single), Decision::Allowed);
+        assert_eq!(allow.check(NOTES_INSERT), Decision::Allowed);
+    }
+
+    #[test]
+    fn a_grant_still_has_to_be_the_same_statement() {
+        // The shape rules are not a licence to run anything else.
+        let allow = allowlist(&[NOTES_INSERT, SESSION_DELETE], true);
+        for sql in [
+            r#"INSERT INTO "notes_note" ("owner_id", "text") VALUES ($1, $2) RETURNING "notes_note"."id"; DROP TABLE "notes_note""#,
+            r#"INSERT INTO "notes_note" ("owner_id", "text") VALUES ($1, $2, $3) RETURNING "notes_note"."id""#,
+            r#"INSERT INTO "notes_note" ("owner_id", "text") VALUES ($1, 'x') RETURNING "notes_note"."id""#,
+            r#"SELECT "auth_user"."password" FROM "auth_user" WHERE "auth_user"."id" IN ($1, $2)"#,
+        ] {
+            assert!(!allow.check(sql).is_allowed(), "should deny {sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_grant_that_mixes_literals_and_placeholders_is_not_widened() {
+        // `IN ($1, 'x')` keeps its literal: a run of placeholders is one shape,
+        // a mixed list is a statement of its own.
+        let allow = allowlist(&["SELECT id FROM t WHERE name IN ($1, 'x')"], false);
+        assert_eq!(
+            allow.check("SELECT id FROM t WHERE name IN ($1, 'x')"),
+            Decision::Allowed
+        );
+        assert!(
+            !allow
+                .check("SELECT id FROM t WHERE name IN ($1, $2, 'x')")
+                .is_allowed()
+        );
+        assert!(
+            !allow
+                .check("SELECT id FROM t WHERE name IN ('y')")
+                .is_allowed()
+        );
+    }
+
+    #[test]
+    fn a_grant_with_a_denied_statement_is_still_logged_normalised() {
+        // The event carries the *shape* form, so a logged statement can be
+        // pasted into the manifest and match the next time.
+        let allow = allowlist(&[NOTES_INSERT], false);
+        let decision = allow.check(
+            r#"INSERT INTO "auth_user" ("username") VALUES ($1), ($2), ($3) RETURNING "auth_user"."id""#,
+        );
+        assert_eq!(
+            decision,
+            Decision::Denied {
+                normalized:
+                    r#"INSERT INTO "auth_user" ("username") VALUES ($?), ... RETURNING "auth_user"."id""#
+                        .to_string(),
+            }
+        );
+    }
+
+    //
+    // An unrestricted allowlist (§6, `unrestricted = true`).
+    //
+
+    #[test]
+    fn an_unrestricted_allowlist_allows_every_statement() {
+        let allow = Allowlist::unrestricted();
+        for sql in [
+            "SELECT 1",
+            "DROP TABLE t",
+            "BEGIN",
+            "COMMIT",
+            "SET search_path = public",
+            "COPY (SELECT 1) TO STDOUT",
+            "CREATE TABLE t (a int)",
+            "SELECT 'a; b'; DROP TABLE t",
+            "",
+            "   ",
+        ] {
+            assert_eq!(allow.check(sql), Decision::Allowed, "should allow {sql:?}");
+        }
+    }
+
+    #[test]
+    fn an_unrestricted_allowlist_reports_itself_and_holds_no_queries() {
+        let allow = Allowlist::unrestricted();
+        assert!(allow.is_unrestricted());
+        assert!(
+            !allow.is_empty(),
+            "it lists no query, but it allows everything: that is not an empty allowlist"
+        );
+        assert_eq!(allow.len(), 0);
+        assert_eq!(allow.queries().count(), 0);
+        assert!(
+            !allow.transaction_control(),
+            "there is nothing left to turn on"
+        );
+
+        let listed = allowlist(&["SELECT 1"], true);
+        assert!(!listed.is_unrestricted());
+        assert!(!listed.is_empty());
+    }
+
+    #[test]
+    fn an_unrestricted_allowlist_allows_even_an_empty_text() {
+        // It does not look at the statement at all, so the "empty text is
+        // denied" rule of every other allowlist cannot apply to it. PostgreSQL
+        // answers an empty statement with `EmptyQueryResponse` and runs
+        // nothing, so nothing is opened by allowing it.
+        let allow = Allowlist::unrestricted();
+        assert_eq!(allow.check(""), Decision::Allowed);
+        assert_eq!(allow.check("  \t\n "), Decision::Allowed);
+        // ... while an ordinary allowlist still refuses it, whatever it lists.
+        for allow in [allowlist(&[], false), allowlist(&["SELECT 1"], true)] {
+            for sql in ["", " ", ";", " ;; "] {
+                let decision = allow.check(sql);
+                assert!(!decision.is_allowed(), "should deny {sql:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_unrestricted_constructor_widens_an_allowlist() {
+        // An empty grant allows nothing, which is where the line sits between
+        // it and `unrestricted`.
+        let empty = allowlist(&[], true);
+        assert!(!empty.is_unrestricted());
+        assert!(!empty.check("SELECT 1").is_allowed());
+        assert!(
+            empty.check("BEGIN").is_allowed(),
+            "transaction control only"
+        );
+        assert!(Allowlist::unrestricted().check("SELECT 1").is_allowed());
+    }
+
+    #[test]
+    fn the_default_allowlist_allows_nothing() {
+        // `Default` is the empty listed grant, not an unrestricted one: an
+        // accidental default can never open a route.
+        let allow = Allowlist::default();
+        assert!(!allow.is_unrestricted());
+        assert!(!allow.check("SELECT 1").is_allowed());
+        assert!(!allow.check("BEGIN").is_allowed());
     }
 }

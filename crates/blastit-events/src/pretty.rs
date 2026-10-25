@@ -243,7 +243,7 @@ mod tests {
             line,
             concat!(
                 "14:02:12.007 WARN  sql.denied  product-detail  db  parse  ",
-                r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $1"#
+                r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?"#
             )
         );
     }

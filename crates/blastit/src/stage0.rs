@@ -181,6 +181,7 @@ fn bind_view_sockets(
                     uid,
                     queries: pg.queries().to_vec(),
                     transaction_control: pg.transaction_control(),
+                    unrestricted: pg.is_unrestricted(),
                 },
             ));
         }

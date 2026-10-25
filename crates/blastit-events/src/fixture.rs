@@ -43,7 +43,7 @@ pub(crate) fn sql_denied_event() -> Event {
         57,
         "db",
         SqlKind::Parse,
-        r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $1"#,
+        r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?"#,
         "42501",
         false,
     );

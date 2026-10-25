@@ -386,11 +386,12 @@ impl Parser {
         }
     }
 
-    /// `queries` and `transaction_control`, the grant contents of `postgresql`
-    /// (§5.2).
+    /// `queries`, `transaction_control` and `unrestricted`, the grant contents
+    /// of `postgresql` (§5.2, §6).
     fn pg_grant(&mut self, table: &toml::Table, path: &str) -> PgGrant {
         let mut queries = Vec::new();
         let mut transaction_control = false;
+        let mut unrestricted = false;
         for (key, value) in table {
             let key_path = format!("{path}.{}", escape_control(key));
             match key.as_str() {
@@ -404,10 +405,17 @@ impl Parser {
                         transaction_control = value;
                     }
                 }
+                // Whether a *group* is allowed to carry it is decided by
+                // validation, not here: the parser only reads the document.
+                "unrestricted" => {
+                    if let Some(value) = self.as_bool(value, &key_path) {
+                        unrestricted = value;
+                    }
+                }
                 _ => self.error(ManifestError::UnknownKey { path: key_path }),
             }
         }
-        PgGrant::new(queries, transaction_control)
+        PgGrant::new(queries, transaction_control).with_unrestricted(unrestricted)
     }
 
     /// A TOML list of strings, such as `groups`, `methods` or `path`.

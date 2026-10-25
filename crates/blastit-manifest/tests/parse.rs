@@ -556,3 +556,86 @@ fn the_fixtures_are_the_documented_text() {
     assert!(SECTION_6.starts_with("version = 1"));
     assert!(SECTION_5_1.contains("[proxy.analytics.output]"));
 }
+
+#[test]
+fn an_inline_unrestricted_grant_parses() {
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [[route]]\nname = \"admin\"\npath = ['/admin/']\n\
+                  [route.db]\nunrestricted = true\ntransaction_control = true\n";
+    let manifest = Manifest::from_toml_str(source).expect("parses");
+    let route = manifest.route(0).expect("route 0");
+    let grant = route
+        .grant(&ProxyName::from("db"))
+        .expect("an inline grant")
+        .as_postgresql()
+        .expect("a postgresql grant");
+    assert!(grant.is_unrestricted());
+    assert!(grant.transaction_control());
+    assert!(grant.queries().is_empty());
+    assert!(!grant.is_empty(), "it allows everything, so it grants");
+
+    // Without the key, the same grant is an ordinary, empty one.
+    let source = source.replace("unrestricted = true\n", "");
+    let manifest = Manifest::from_toml_str(&source).expect("parses");
+    let grant = manifest
+        .route(0)
+        .and_then(|route| route.grant(&ProxyName::from("db")))
+        .and_then(|grant| grant.as_postgresql())
+        .expect("the grant");
+    assert!(!grant.is_unrestricted());
+
+    // `unrestricted = false` is the same as leaving it out.
+    let source = source.replace(
+        "transaction_control = true",
+        "transaction_control = true\nunrestricted = false",
+    );
+    let manifest = Manifest::from_toml_str(&source).expect("parses");
+    let grant = manifest
+        .route(0)
+        .and_then(|route| route.grant(&ProxyName::from("db")))
+        .and_then(|grant| grant.as_postgresql())
+        .expect("the grant");
+    assert!(!grant.is_unrestricted());
+}
+
+#[test]
+fn a_group_may_be_parsed_with_unrestricted_because_validation_refuses_it() {
+    // The parser only reads the document; the rule that a group must not carry
+    // it is a cross-reference check (see tests/validate.rs).
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [group.backoffice.db]\nunrestricted = true\n\
+                  [[route]]\nname = \"admin\"\npath = ['/admin/']\ngroups = [\"backoffice\"]\n";
+    let manifest = Manifest::from_toml_str(source).expect("parses");
+    let grant = manifest
+        .group("backoffice")
+        .and_then(|group| group.grant(&ProxyName::from("db")))
+        .and_then(|grant| grant.as_postgresql())
+        .expect("the group's grant");
+    assert!(grant.is_unrestricted());
+}
+
+#[test]
+fn unrestricted_must_be_a_boolean() {
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [[route]]\nname = \"admin\"\npath = ['/admin/']\n\
+                  [route.db]\nunrestricted = \"yes\"\n";
+    assert_eq!(
+        parse_errors(source),
+        ManifestErrors::from(ManifestError::WrongType {
+            path: "route[0].db.unrestricted".to_string(),
+            expected: "a boolean",
+            found: "a string",
+        })
+    );
+    // ... and an unknown key next to it is still an error.
+    let source = source.replace("unrestricted = \"yes\"", "unrestrictedt = true");
+    assert_eq!(
+        parse_errors(&source),
+        ManifestErrors::from(ManifestError::UnknownKey {
+            path: "route[0].db.unrestrictedt".to_string(),
+        })
+    );
+}

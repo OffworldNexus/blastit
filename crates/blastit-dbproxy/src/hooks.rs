@@ -366,6 +366,15 @@ mod tests {
             uid,
             queries: queries.iter().map(|query| query.to_string()).collect(),
             transaction_control,
+            unrestricted: false,
+        }
+    }
+
+    /// The listener of a route a manifest marked `unrestricted = true`.
+    fn unrestricted_listener(uid: u32) -> ListenerSpec {
+        ListenerSpec {
+            unrestricted: true,
+            ..listener(uid, &[], false)
         }
     }
 
@@ -671,6 +680,95 @@ mod tests {
             QueryDecision::deny_with(DENIED_SQLSTATE, "statement denied for route product-detail")
         );
         assert_eq!(events.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unrestricted_listener_allows_any_statement_and_logs_nothing() {
+        let uid = 21_000;
+        let (shared, events) = state(proxy(reachable_port(), 4), vec![unrestricted_listener(uid)]);
+        let connection = connection(1, "0", uid);
+        let hook = DbproxyQuery::new(Arc::clone(&shared));
+
+        // Everything a listed grant could not cover, on both protocols, and
+        // including the statements that are refused outright elsewhere.
+        for (kind, sql) in [
+            (QueryKind::Simple, "DROP TABLE t"),
+            (QueryKind::Simple, "BEGIN"),
+            (
+                QueryKind::Parse,
+                "INSERT INTO t (a, b) VALUES ($1, $2), ($3, $4)",
+            ),
+            (QueryKind::Parse, "COPY (SELECT 1) TO STDOUT"),
+            (QueryKind::Parse, "  SELECT   *   FROM   t  ; "),
+            (QueryKind::Bind, "SELECT secret FROM somewhere"),
+            (QueryKind::Execute, "CREATE TABLE t (a int)"),
+        ] {
+            assert_eq!(
+                hook.authorize(query_context(&connection, kind, sql, true))
+                    .await,
+                QueryDecision::Allow,
+                "{kind:?} {sql:?}"
+            );
+        }
+
+        // The function-call sub-protocol carries no SQL for any allowlist to
+        // match, so it is the one thing that is still refused (§2.2, §6).
+        assert_eq!(
+            hook.authorize(query_context(
+                &connection,
+                QueryKind::FunctionCall,
+                "",
+                false
+            ))
+            .await,
+            QueryDecision::deny_with(DENIED_SQLSTATE, FUNCTION_CALL_MESSAGE)
+        );
+
+        // Nothing is logged per statement: only the function-call refusal is.
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "{events:#?}");
+        assert_eq!(events[0].route(), Some("product-detail"));
+        let EventKind::SqlDenied(denied) = events[0].kind() else {
+            panic!("want a sql.denied event");
+        };
+        assert_eq!(denied.kind(), &SqlKind::FunctionCall);
+    }
+
+    #[tokio::test]
+    async fn an_unrestricted_route_does_not_widen_its_neighbours() {
+        let uid = 21_000;
+        let (shared, events) = state(
+            proxy(reachable_port(), 4),
+            vec![
+                unrestricted_listener(uid),
+                listener(uid, &["SELECT 1"], false),
+            ],
+        );
+        let hook = DbproxyQuery::new(Arc::clone(&shared));
+
+        assert_eq!(
+            hook.authorize(query_context(
+                &connection(1, "0", uid),
+                QueryKind::Simple,
+                "DROP TABLE t",
+                true
+            ))
+            .await,
+            QueryDecision::Allow,
+            "listener 0 is unrestricted"
+        );
+        assert_eq!(
+            hook.authorize(query_context(
+                &connection(2, "1", uid),
+                QueryKind::Simple,
+                "DROP TABLE t",
+                true
+            ))
+            .await,
+            QueryDecision::deny_with(DENIED_SQLSTATE, "statement denied for route product-detail"),
+            "listener 1 still has its list"
+        );
+        assert_eq!(events.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

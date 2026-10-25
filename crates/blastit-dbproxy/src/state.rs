@@ -117,7 +117,13 @@ impl Shared {
             runtimes.push(ListenerRuntime {
                 spec: spec.clone(),
                 tag: Arc::from(index.to_string().as_str()),
-                allowlist: Allowlist::new(&spec.queries, spec.transaction_control),
+                allowlist: if spec.unrestricted {
+                    // `unrestricted = true` (§6): the route may run anything
+                    // here, so the policy has nothing to compare.
+                    Allowlist::unrestricted()
+                } else {
+                    Allowlist::new(&spec.queries, spec.transaction_control)
+                },
                 proxy: Arc::clone(proxy),
                 // One registry per listener: a view can only cancel the sessions
                 // that were opened on its own socket.
@@ -478,6 +484,7 @@ mod tests {
             uid: 21_000,
             queries: vec![],
             transaction_control: false,
+            unrestricted: false,
         };
         let listeners = vec![listener("a"), listener("b")];
         let config = DbproxyConfig {
@@ -529,6 +536,7 @@ mod tests {
             uid: 21_000,
             queries: vec![],
             transaction_control: false,
+            unrestricted: false,
         };
         let config = DbproxyConfig {
             proxies: vec![proxy],

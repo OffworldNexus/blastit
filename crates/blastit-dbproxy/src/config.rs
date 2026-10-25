@@ -170,6 +170,11 @@ pub struct ListenerSpec {
     pub queries: Vec<String>,
     /// Whether the route may also run single transaction-control statements.
     pub transaction_control: bool,
+    /// Whether the route may run *any* statement on this proxy (§6,
+    /// `unrestricted = true`). The route still reaches the database through
+    /// dbproxy, and still never sees the credentials.
+    #[serde(default)]
+    pub unrestricted: bool,
 }
 
 /// Writes `cfg` as a length-prefixed JSON document.
@@ -448,6 +453,7 @@ mod tests {
                     uid: 21_000,
                     queries: vec!["SELECT 1".to_string()],
                     transaction_control: false,
+                    unrestricted: false,
                 },
                 ListenerSpec {
                     fd: 4,
@@ -456,6 +462,7 @@ mod tests {
                     uid: 21_001,
                     queries: vec![],
                     transaction_control: true,
+                    unrestricted: false,
                 },
             ],
         }
