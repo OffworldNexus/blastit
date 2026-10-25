@@ -124,7 +124,8 @@ pub fn run(options: Options) -> ! {
     // §8 Sizing: the machine's memory decides how many view processes fit.
     // `total` is a constant, so it can be read before the fork and handed to
     // the scheduler; `used` is only meaningful after the app is preloaded, so
-    // that half is read in `load` (and by the scheduler itself, on its timer).
+    // `load` takes a fresh reading of it. This is the one that warns when
+    // memory cannot be read at all.
     let memory = read_memory(&emitter);
     let layout = UidLayout::new(config.uid_base);
     let routes = routes_from_manifest(&manifest, &layout);
@@ -273,7 +274,7 @@ pub fn run(options: Options) -> ! {
 
     Python::initialize();
     Python::attach(|py| {
-        let app = load(py, &config, &emitter);
+        let app = load(py, &config, &emitter, memory);
         emit_ready(&emitter, &config, routes.len());
         let mut supervisor = Supervisor::new(
             Parts {
@@ -471,7 +472,15 @@ fn prepare_child(
 }
 
 /// Imports and prepares the application, and returns the WSGI callable (§4).
-fn load(py: Python<'_>, config: &Config, emitter: &Emitter) -> Py<PyAny> {
+///
+/// `memory` is the reading `run` took before the fork: it is the one that
+/// warned, once, when the machine's memory cannot be read at all (§8 Sizing).
+fn load(
+    py: Python<'_>,
+    config: &Config,
+    emitter: &Emitter,
+    memory: Option<mem::Sample>,
+) -> Py<PyAny> {
     // §9.3: an embedded interpreter does not find the distribution's
     // site-packages on its own. Best effort — a system without sysconfig is not
     // a reason to refuse to start.
@@ -506,7 +515,7 @@ fn load(py: Python<'_>, config: &Config, emitter: &Emitter) -> Py<PyAny> {
     if let Err(err) = py.run(FREEZE, None, None) {
         python_fail(py, emitter, "gc.freeze", &err);
     }
-    emit_preload(emitter, config, stats);
+    emit_preload(emitter, config, stats, refresh_memory(memory));
     app
 }
 
@@ -526,20 +535,30 @@ fn immortalize(py: Python<'_>, emitter: &Emitter) -> Stats {
     }
 }
 
+/// The reading §8 Sizing's `boot` event reports, taken now that the app is
+/// preloaded.
+///
+/// `before` is the reading from before the fork, and it is also the *proof*
+/// that memory can be read: when it is `None` the machine has already said so
+/// at `warn`, and re-reading here would say it twice. When the second reading
+/// fails but the first succeeded, `before` is still a usable figure.
+fn refresh_memory(before: Option<mem::Sample>) -> Option<mem::Sample> {
+    let before = before?;
+    Some(mem::Reader::new("/").sample().unwrap_or(before))
+}
+
 /// §8 Sizing and §9.2 #7: what the preload cost, and the view process cap the
 /// memory that is left buys.
 ///
 /// This runs after the app was imported and immortalised, so `mem_used` is the
 /// number §8 asks for ("usage after preload") and the derived cap is the one
 /// the scheduler measures for itself, from the same function.
-fn emit_preload(emitter: &Emitter, config: &Config, stats: Stats) {
+fn emit_preload(emitter: &Emitter, config: &Config, stats: Stats, memory: Option<mem::Sample>) {
     let mut lifecycle = Lifecycle::default()
         .with_stage("preload")
         .with_immortalized(stats.objects)
         .with_immortalize_ms(stats.elapsed.as_secs_f64() * 1000.0);
-    // §8: memory that cannot be read leaves the cap uncapped, and
-    // `read_memory` has already said so at `warn`.
-    if let Some(sample) = read_memory(emitter) {
+    if let Some(sample) = memory {
         lifecycle = lifecycle
             .with_mem_total(sample.total())
             .with_mem_used(sample.used())

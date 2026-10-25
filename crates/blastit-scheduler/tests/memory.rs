@@ -230,6 +230,39 @@ async fn the_derived_cap_replaces_an_unset_max_view_processes() {
 }
 
 #[tokio::test]
+async fn the_derived_cap_bounds_the_initial_prefork_burst() {
+    tokio::time::pause();
+    // Three preforked routes, and room for exactly one view process.
+    let manifest = "version = 1\n\
+        [[route]]\nname = \"a\"\npath = ['/a/']\nprefork = true\n\
+        [[route]]\nname = \"b\"\npath = ['/b/']\nprefork = true\n\
+        [[route]]\nname = \"c\"\npath = ['/c/']\nprefork = true\n";
+    let usage = Arc::new(AtomicU64::new(900 * MIB));
+    let probe = usage.clone();
+    let mut options = Options::new().manifest(manifest);
+    options.cfg.memory_usage = Some(MemoryProbe::new(move || {
+        Some(probe.load(Ordering::Relaxed))
+    }));
+    options.cfg.mem_total_bytes = Some(1024 * MIB);
+    options.cfg.view_mem_estimate = 32 * MIB;
+    let world = World::start(options);
+
+    // §8 Sizing: the cap is taken before the burst, so the two routes that do
+    // not fit wait for a request instead of being forked at startup — the
+    // scheduler is forked before init preloads the app, so nothing else could
+    // bound this.
+    world
+        .until(|world| !world.log.lock().unwrap().spawns.is_empty())
+        .await;
+    world.advance(Duration::from_secs(5)).await;
+    assert_eq!(
+        world.log.lock().unwrap().spawns,
+        vec![0],
+        "one process, not three"
+    );
+    assert!(world.log.lock().unwrap().retires.is_empty());
+}
+#[tokio::test]
 async fn an_explicit_cap_wins_over_the_derived_one() {
     tokio::time::pause();
     // A probe that would derive a cap of one if it were ever consulted.

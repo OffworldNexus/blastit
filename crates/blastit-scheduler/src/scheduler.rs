@@ -49,11 +49,11 @@
 //!   seven outcomes, which §8.1 closes).
 //! * A scheduler-written body is sent even for a `HEAD` request: deciding not
 //!   to is http's business, not the scheduler's (§2.3).
-//! * §8 Sizing's derived `BLASTIT_MAX_VIEW_PROCESSES` default is measured at
-//!   the first `SPAWNED`, not at startup: init forks every view from its
-//!   supervision loop, which starts only after the app is preloaded (§4), so
-//!   that is the first moment the preloaded heap is part of the memory the cap
-//!   is derived from.
+//! * §8 Sizing's derived `BLASTIT_MAX_VIEW_PROCESSES` default is taken twice:
+//!   provisionally at startup, so the eager or preforked burst obeys it, and
+//!   again at the first `SPAWNED`, which is the first moment §8's "usage after
+//!   preload" exists (init forks every view from its supervision loop, which
+//!   begins only once the app is preloaded, §4).
 //! * Two settings exist that §8.2 does not name, because §2.4 asks for the
 //!   behaviour without giving it a variable: [`SchedulerConfig::spawn_backoff`]
 //!   ("don't spin") and the per-peer byte caps in this module.
@@ -312,6 +312,9 @@ struct Scheduler {
     /// §8 Sizing's derived view process cap, once init has proved the app is
     /// preloaded (see [`Scheduler::derive_view_cap`]).
     derived_view_cap: Option<u32>,
+    /// Whether `derived_view_cap` came from a reading taken *after* the
+    /// preload, which is the one §8 asks for.
+    derived_after_preload: bool,
     /// When the memory high watermark is checked next (`None`: not watched).
     memory_check_at: Option<Instant>,
     /// http closed `http.chan`.
@@ -360,6 +363,7 @@ impl Scheduler {
             draining: false,
             drain_deadline: None,
             derived_view_cap: None,
+            derived_after_preload: false,
             memory_check_at,
             http_closed: false,
             dropped: 0,
@@ -382,7 +386,12 @@ impl Scheduler {
 
     /// Spawns the views that must exist at startup: every preforked route, and
     /// every route when `BLASTIT_VIEW_SPAWN=eager` (§2.4, §6).
+    ///
+    /// §8 Sizing: the derived cap is taken first, so this burst obeys it too —
+    /// init has not finished preloading yet, which is why
+    /// [`Scheduler::derive_view_cap`] takes it again at the first `SPAWNED`.
     fn start(&mut self) -> Result<(), SchedulerError> {
+        self.derive_view_cap(false);
         let wanted: Vec<usize> = (0..self.routes.len())
             .filter(|route| self.cfg.eager_spawn || self.routes[*route].prefork)
             .collect();
@@ -1182,17 +1191,26 @@ impl Scheduler {
             .and_then(|probe| probe.read())
     }
 
-    /// Takes §8 Sizing's derived view cap, once.
+    /// Takes §8 Sizing's derived view cap (§8 Sizing, §9.2 #8).
     ///
-    /// The default has to be measured *after* the app was preloaded, and init
-    /// forks every view from its supervision loop, which only starts once
-    /// `BLASTIT_APP`, `BLASTIT_PRELOAD` and `BLASTIT_WARMUP` have been
-    /// imported (§4). The first `SPAWNED` is therefore the first proof that the
-    /// preloaded heap is part of the number: the scheduler itself is forked
-    /// before CPython exists, so init cannot hand it a post-preload value.
-    /// When the memory cannot be read the cap stays unset, which §8 asks for.
-    fn derive_view_cap(&mut self) {
-        if self.cfg.max_view_processes.is_some() || self.derived_view_cap.is_some() {
+    /// §8 asks for the cap to come from the usage *after preload*, and that
+    /// moment is not when the scheduler starts: init forks every view from its
+    /// supervision loop, which begins only once `BLASTIT_APP`,
+    /// `BLASTIT_PRELOAD` and `BLASTIT_WARMUP` have been imported (§4), and the
+    /// scheduler itself is forked before CPython exists. So the cap is taken
+    /// twice:
+    ///
+    /// * `after_preload: false`, from [`Scheduler::start`], so the eager or
+    ///   preforked burst obeys the cap it can already see rather than forking
+    ///   everything the manifest names;
+    /// * `after_preload: true`, at the first `SPAWNED` — the first proof the
+    ///   preloaded heap is part of the reading — which replaces it.
+    ///
+    /// A reading that cannot be taken leaves the cap unset, which §8 asks for.
+    fn derive_view_cap(&mut self, after_preload: bool) {
+        if self.cfg.max_view_processes.is_some()
+            || (self.derived_view_cap.is_some() && (self.derived_after_preload || !after_preload))
+        {
             return;
         }
         let Some(total) = self.cfg.mem_total_bytes else {
@@ -1202,6 +1220,7 @@ impl Scheduler {
             return;
         };
         self.derived_view_cap = Some(derived_view_cap(total, used, self.cfg.view_mem_estimate));
+        self.derived_after_preload = after_preload;
     }
 
     /// The live view process cap in force: `BLASTIT_MAX_VIEW_PROCESSES`, or the
@@ -1297,8 +1316,8 @@ impl Scheduler {
         fd: Option<OwnedFd>,
     ) -> Result<(), SchedulerError> {
         // §8 Sizing: this is the first moment the preloaded heap exists (see
-        // `derive_view_cap`), so it is where the derived cap is measured.
-        self.derive_view_cap();
+        // `derive_view_cap`), so it is where the cap is measured for good.
+        self.derive_view_cap(true);
         let Some(fd) = fd else {
             return Err(SchedulerError::protocol(
                 "SPAWNED arrived without a view.chan descriptor",

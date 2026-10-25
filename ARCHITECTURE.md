@@ -876,13 +876,19 @@ writes to gets copied (§9.2). So:
   hit cost memory. Views marked `prefork = true` in the manifest are forked at
   startup, which removes the first-hit fork latency (12–60 ms on DO).
 * `BLASTIT_MAX_VIEW_PROCESSES` caps the number of live view processes. When a
-  new one is needed, the least-recently-used idle one is retired. The default
-  is derived once the app is preloaded, as
+  new one is needed, the least-recently-used idle one is retired, and the eager
+  or `prefork` burst at startup is bounded by the same cap instead of forking
+  every route the manifest names. The default is
   `max(1, (total − usage after preload − reserve) / BLASTIT_VIEW_MEM_ESTIMATE)`:
   at least one view process, because a cap of zero would refuse every request.
   The reserve is `max(64 MiB, 10 % of total)`, kept for the kernel, the
-  platform's agents and the next fork. There is no cap when memory cannot be
-  read, and that is logged once (`boot`, at `warn`).
+  platform's agents and the next fork. The scheduler takes that reading twice —
+  once before the burst, which is *before* init has finished preloading, and
+  again at the first view process init reports, which is the first moment §4's
+  "usage after preload" exists — so a burst that turns out too big for the
+  second reading is trimmed as later views are needed. When the machine's
+  memory cannot be read at all there is no derived cap, and init says so once,
+  as a `warn` line of its own output (§8.1).
 * `total` is `min(MemTotal, cgroup limit)` and `used` is the cgroup's own
   accounting: on DO, `MemTotal` *is* the instance size and the cgroup v1
   `memory.usage_in_bytes` is accurate (§9.2 #8). The sources, in order, are
@@ -986,7 +992,7 @@ with `request` events.
 | `BLASTIT_VIEW_IDLE_TIMEOUT` / `BLASTIT_VIEW_MAX_REQUESTS` | `600s` / `0` (off) | view process recycling |
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | live view process cap (LRU retirement) |
 | `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | expected cost per view process, used for the cap |
-| `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `MemTotal`; above it, idle view processes are retired |
+| `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total` (the smaller of `MemTotal` and the cgroup limit); above it, one idle view process per 2 s check is retired |
 | `BLASTIT_MAX_HEADER_BYTES` / `BLASTIT_MAX_BODY_BYTES` | `64 KiB` / `100 MiB` | HTTP limits |
 | `BLASTIT_HEADER_TIMEOUT` / `BLASTIT_KEEPALIVE_TIMEOUT` | `10s` / `75s` | HTTP timeouts (keep-alive above the LB's) |
 | `BLASTIT_TRUST_FORWARDED` | `1` | trust `X-Forwarded-*` from the LB |
@@ -1049,7 +1055,7 @@ is written up in
 7. **Immortalizing the preloaded heap fixes it.** Before `gc.freeze()`, init
    walks every reachable object (`gc.get_objects()` plus `gc.get_referents()`)
    and sets the low 32 bits of `ob_refcnt` to `0xFFFFFFFF`, which is CPython
-   3.12/3.13's immortal marker on 64-bit (PEP 683). Incref and decref then
+   3.12–3.14's immortal marker on 64-bit (PEP 683). Incref and decref then
    never write to those objects. Measured on DO:
 
    | per-child cost on DO | plain | immortalized |

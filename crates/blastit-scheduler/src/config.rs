@@ -100,8 +100,9 @@ pub struct SchedulerConfig {
     pub max_requests: u64,
     /// `BLASTIT_MAX_VIEW_PROCESSES`: live view process cap, enforced by
     /// retiring the least-recently-used idle view. `None` means the §8 default
-    /// derived from memory (see [`derived_view_cap`]), and that is measured
-    /// once init has preloaded the app (§4).
+    /// derived from memory (see [`derived_view_cap`]), which the scheduler
+    /// takes before its startup burst and again once init reports a preloaded
+    /// view process (§4).
     pub max_view_processes: Option<u32>,
     /// `BLASTIT_HEALTH_PATH`: answered by the scheduler itself.
     pub health_path: String,

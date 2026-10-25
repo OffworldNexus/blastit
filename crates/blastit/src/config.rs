@@ -481,6 +481,20 @@ impl Config {
                 "must be `module:attribute`".to_string(),
             ));
         }
+        if let Some(0) = self.max_view_processes {
+            return Err(invalid(
+                "BLASTIT_MAX_VIEW_PROCESSES",
+                "must be at least 1, or no view process could ever run".to_string(),
+            ));
+        }
+        if self.view_mem_estimate == 0 {
+            return Err(invalid(
+                "BLASTIT_VIEW_MEM_ESTIMATE",
+                "must be at least 1 byte, or the view process cap cannot be derived from \
+                 memory (§8 Sizing)"
+                    .to_string(),
+            ));
+        }
         if let Some(warmup) = &self.warmup
             && !warmup.contains(':')
         {
@@ -1233,6 +1247,37 @@ mod tests {
         config.frame_max = 4;
         assert!(config.validate().is_err());
         config.frame_max = blastit_frame::MAX_FRAME_DEFAULT;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_view_cap_of_zero_is_refused() {
+        // §8 Sizing: a cap of zero could never fork a view process, so every
+        // request would time out waiting for one.
+        let mut config = Config::default();
+        config.max_view_processes = Some(0);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("BLASTIT_MAX_VIEW_PROCESSES"),
+            "{err}"
+        );
+        config.max_view_processes = Some(1);
+        assert!(config.validate().is_ok());
+        config.max_view_processes = None;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_view_mem_estimate_of_zero_is_refused() {
+        // §8 Sizing: the estimate is the divisor of the derived cap.
+        let mut config = Config::default();
+        config.view_mem_estimate = 0;
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("BLASTIT_VIEW_MEM_ESTIMATE"),
+            "{err}"
+        );
+        config.view_mem_estimate = 1;
         assert!(config.validate().is_ok());
     }
 }

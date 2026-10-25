@@ -161,6 +161,12 @@ impl Reader {
     /// Reads one sample: `total` from `meminfo` and the cgroup limit, `used`
     /// from the cgroup usage or from `MemTotal − MemAvailable`.
     ///
+    /// The file reads behind this block, and that is deliberate: every file is
+    /// a couple of kilobytes of kernel-generated text that never touches a
+    /// disk, and the callers are off the request path (the scheduler's §8
+    /// probe, at most once per its 2 s check interval, and the two readings
+    /// init takes while it starts).
+    ///
     /// # Errors
     ///
     /// An [`io::Error`] when `/proc/meminfo` cannot be read, or when it is
@@ -230,7 +236,13 @@ fn parse_kib(rest: &str) -> Option<u64> {
 }
 
 /// Reads a file, keeping the path in the error: the caller's log has to name
-/// the file `§8 Sizing` could not read.
+/// the file behind §8 Sizing's numbers.
+///
+/// The read blocks, and that is deliberate. Every file here is a couple of
+/// kilobytes of kernel-generated text that never touches a disk, and the
+/// callers are §8's memory probe — which the scheduler runs off the request
+/// path, at most once per check interval (2 s) — and the two readings init
+/// takes while it starts. A request never waits on this.
 fn read(path: &Path) -> io::Result<String> {
     fs::read_to_string(path).map_err(|source| {
         Error::MemoryUnreadable {

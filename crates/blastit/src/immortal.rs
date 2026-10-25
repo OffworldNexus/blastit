@@ -51,6 +51,31 @@ pub const MIN_MINOR: u8 = 12;
 /// The last CPython minor whose marker blastit writes, on `3.x`.
 pub const MAX_MINOR: u8 = 14;
 
+/// The interpreter facts §9.2 #7's marker depends on.
+///
+/// Every one of them decides either where the reference count sits or what
+/// `0xFFFFFFFF` means to `Py_INCREF` and `Py_DECREF`, so [`supported`] is a
+/// pure function of exactly these: each refusal can be unit-tested without such
+/// a build being installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interpreter {
+    /// CPython major version.
+    pub major: u8,
+    /// CPython minor version.
+    pub minor: u8,
+    /// Pointer width of the interpreter, in bits.
+    pub pointer_width: u32,
+    /// Whether a 32-bit store at offset zero means the low half of `ob_refcnt`:
+    /// little-endian for both the build that writes the marker and the
+    /// interpreter that owns the object.
+    pub little_endian: bool,
+    /// Free-threaded build (`Py_GIL_DISABLED`), whose counts live in
+    /// `ob_ref_local` and `ob_ref_shared` instead of `ob_refcnt`.
+    pub free_threaded: bool,
+    /// `Py_TRACE_REFS` build, which keeps two pointers *before* `ob_refcnt`.
+    pub trace_refs: bool,
+}
+
 /// What one immortalisation pass did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
@@ -65,36 +90,111 @@ pub struct Stats {
 /// Refuses an interpreter whose immortal marker blastit does not know (§9.2
 /// #7: "blastit refuses to start on a version it doesn't know").
 ///
+/// This is the pure half: [`check`] is this function applied to [`probe`].
+///
 /// # Errors
 ///
 /// A sentence for the log, naming what is unsupported and why.
-pub fn check(py: Python<'_>) -> Result<(), String> {
-    if !cfg!(target_pointer_width = "64") {
+pub fn supported(interpreter: &Interpreter) -> Result<(), String> {
+    if interpreter.pointer_width != 64 {
         return Err(format!(
-            "heap immortalisation needs 64-bit CPython: this is a {}-bit build",
-            usize::BITS
+            "heap immortalisation needs 64-bit CPython: this is a {}-bit one",
+            interpreter.pointer_width
         ));
     }
-    if !cfg!(target_endian = "little") {
-        return Err("heap immortalisation needs a little-endian CPython".to_string());
+    if !interpreter.little_endian {
+        return Err(
+            "heap immortalisation needs a little-endian CPython: the marker is the low 32 bits \
+             of the reference count, which is a 32-bit store only on a little-endian object"
+                .to_string(),
+        );
     }
-    let version = py.version_info();
-    if (version.major, version.minor) < (3, MIN_MINOR)
-        || (version.major, version.minor) > (3, MAX_MINOR)
+    if (interpreter.major, interpreter.minor) < (3, MIN_MINOR)
+        || (interpreter.major, interpreter.minor) > (3, MAX_MINOR)
     {
         return Err(format!(
-            "CPython {}.{}.{}: §9.2 #7's immortal marker is known for 3.{MIN_MINOR} to 3.{MAX_MINOR} only",
-            version.major, version.minor, version.patch
+            "CPython {}.{}: §9.2 #7's immortal marker is known for 3.{MIN_MINOR} to 3.{MAX_MINOR} only",
+            interpreter.major, interpreter.minor
         ));
     }
-    if free_threaded(py) {
+    if interpreter.free_threaded {
         return Err(
             "the free-threaded CPython build (Py_GIL_DISABLED) keeps its reference counts in \
              ob_ref_local and ob_ref_shared, where §9.2 #7's marker means nothing"
                 .to_string(),
         );
     }
+    if interpreter.trace_refs {
+        return Err(
+            "a Py_TRACE_REFS CPython build (sys.getobjects) puts two pointers before ob_refcnt, \
+             so §9.2 #7's marker would land in the middle of that list"
+                .to_string(),
+        );
+    }
     Ok(())
+}
+
+/// [`supported`] for the interpreter that is actually running.
+///
+/// # Errors
+///
+/// As [`supported`].
+pub fn check(py: Python<'_>) -> Result<(), String> {
+    supported(&probe(py))
+}
+
+/// Reads the facts [`supported`] needs from the running interpreter.
+fn probe(py: Python<'_>) -> Interpreter {
+    let version = py.version_info();
+    Interpreter {
+        major: version.major,
+        minor: version.minor,
+        pointer_width: pointer_width(py),
+        // Both halves matter: the marker is a 32-bit store written by this
+        // build into an object laid out by the interpreter.
+        little_endian: cfg!(target_endian = "little") && sys_byteorder_is_little(py),
+        free_threaded: free_threaded(py),
+        trace_refs: trace_refs(py),
+    }
+}
+
+/// The interpreter's own pointer width, in bits.
+///
+/// `struct.calcsize("P")` is the width CPython reports for itself, which is the
+/// one the object layout follows. A platform where the question cannot be asked
+/// is this build's own width.
+fn pointer_width(py: Python<'_>) -> u32 {
+    let bytes = py
+        .import("struct")
+        .and_then(|module| module.call_method1("calcsize", ("P",)))
+        .and_then(|size| size.extract::<u32>());
+    match bytes {
+        Ok(bytes) => bytes.saturating_mul(8),
+        Err(_) => usize::BITS,
+    }
+}
+
+/// Whether the interpreter calls its own byte order little-endian.
+fn sys_byteorder_is_little(py: Python<'_>) -> bool {
+    let order = py
+        .import("sys")
+        .and_then(|sys| sys.getattr("byteorder"))
+        .and_then(|order| order.extract::<String>());
+    match order {
+        Ok(order) => order == "little",
+        Err(_) => cfg!(target_endian = "little"),
+    }
+}
+
+/// Whether the running interpreter is a `Py_TRACE_REFS` build.
+///
+/// `sys.getobjects` exists only there, and such a build keeps
+/// `_PyObject_HEAD_EXTRA` — two pointers — in front of `ob_refcnt` (§9.2 #7's
+/// offset-zero store would overwrite the middle of that list).
+fn trace_refs(py: Python<'_>) -> bool {
+    py.import("sys")
+        .and_then(|sys| sys.getattr("getobjects"))
+        .is_ok()
 }
 
 /// Whether the running interpreter is the free-threaded build.
@@ -247,27 +347,134 @@ mod tests {
     }
 
     #[test]
-    fn an_unsupported_interpreter_is_refused_with_a_reason() {
+    fn a_supported_interpreter_is_accepted() {
+        assert!(supported(&supported_interpreter()).is_ok());
+        assert!(
+            supported(&Interpreter {
+                minor: MIN_MINOR,
+                ..supported_interpreter()
+            })
+            .is_ok()
+        );
+        assert!(
+            supported(&Interpreter {
+                minor: MAX_MINOR,
+                ..supported_interpreter()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_32_bit_interpreter_is_refused() {
+        let problem = supported(&Interpreter {
+            pointer_width: 32,
+            ..supported_interpreter()
+        })
+        .unwrap_err();
+        assert!(problem.contains("64-bit"), "{problem}");
+        assert!(problem.contains("32-bit"), "{problem}");
+    }
+
+    #[test]
+    fn a_big_endian_interpreter_is_refused() {
+        let problem = supported(&Interpreter {
+            little_endian: false,
+            ..supported_interpreter()
+        })
+        .unwrap_err();
+        assert!(problem.contains("little-endian"), "{problem}");
+    }
+
+    #[test]
+    fn versions_outside_3_12_to_3_14_are_refused() {
+        for (major, minor) in [(3, 11), (3, 15), (3, 0), (2, 7), (4, 0)] {
+            let problem = supported(&Interpreter {
+                major,
+                minor,
+                ..supported_interpreter()
+            })
+            .unwrap_err();
+            assert!(
+                problem.contains(&format!("CPython {major}.{minor}")),
+                "unclear refusal for {major}.{minor}: {problem}"
+            );
+            assert!(problem.contains("3.12 to 3.14"), "{problem}");
+        }
+    }
+
+    #[test]
+    fn a_free_threaded_build_is_refused() {
+        let problem = supported(&Interpreter {
+            free_threaded: true,
+            ..supported_interpreter()
+        })
+        .unwrap_err();
+        assert!(problem.contains("free-threaded"), "{problem}");
+        assert!(problem.contains("Py_GIL_DISABLED"), "{problem}");
+    }
+
+    #[test]
+    fn a_trace_refs_build_is_refused() {
+        let problem = supported(&Interpreter {
+            trace_refs: true,
+            ..supported_interpreter()
+        })
+        .unwrap_err();
+        assert!(problem.contains("Py_TRACE_REFS"), "{problem}");
+        assert!(problem.contains("sys.getobjects"), "{problem}");
+        assert!(problem.contains("ob_refcnt"), "{problem}");
+    }
+
+    #[test]
+    fn the_running_interpreter_agrees_with_the_pure_check() {
         Python::initialize();
-        Python::attach(|py| match check(py) {
-            Ok(()) => {
-                let version = py.version_info();
-                assert!(
-                    (3, MIN_MINOR) <= (version.major, version.minor)
-                        && (version.major, version.minor) <= (3, MAX_MINOR),
-                    "accepted an unknown version: {}.{}",
-                    version.major,
-                    version.minor
-                );
-                assert!(!free_threaded(py), "accepted a free-threaded build");
-            }
-            Err(problem) => {
-                assert!(
-                    problem.contains("immortal") || problem.contains("CPython"),
-                    "unclear refusal: {problem}"
-                );
+        Python::attach(|py| {
+            let interpreter = probe(py);
+            assert_eq!(interpreter.pointer_width, usize::BITS, "probed width");
+            assert_eq!(
+                interpreter.little_endian,
+                cfg!(target_endian = "little"),
+                "probed endianness"
+            );
+            assert!(!interpreter.trace_refs, "a Py_TRACE_REFS build is running");
+            assert_eq!(
+                check(py).is_ok(),
+                supported(&interpreter).is_ok(),
+                "check() must be supported(probe())"
+            );
+            match check(py) {
+                Ok(()) => {
+                    let version = py.version_info();
+                    assert!(
+                        (3, MIN_MINOR) <= (version.major, version.minor)
+                            && (version.major, version.minor) <= (3, MAX_MINOR),
+                        "accepted an unknown version: {}.{}",
+                        version.major,
+                        version.minor
+                    );
+                    assert!(!free_threaded(py), "accepted a free-threaded build");
+                }
+                Err(problem) => {
+                    assert!(
+                        problem.contains("immortal") || problem.contains("CPython"),
+                        "unclear refusal: {problem}"
+                    );
+                }
             }
         });
+    }
+
+    /// The facts of a CPython every blastit build is tested against.
+    fn supported_interpreter() -> Interpreter {
+        Interpreter {
+            major: 3,
+            minor: 13,
+            pointer_width: usize::BITS,
+            little_endian: true,
+            free_threaded: false,
+            trace_refs: false,
+        }
     }
 
     #[test]
