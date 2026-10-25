@@ -1,0 +1,103 @@
+name: Release
+
+# Every commit to develop publishes wheels as 0.1.0.dev<run number>, attached
+# to the rolling `wheels` release, and refreshes the PEP 503 index on GitHub
+# Pages that lists them all (old versions stay, so lock files keep resolving):
+#
+#   https://offworldnexus.github.io/blastit/simple/
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: wheel (CPython ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Development version
+        run: scripts/dev-version.sh "$GITHUB_RUN_NUMBER"
+      - name: Build in manylinux_2_28
+        uses: PyO3/maturin-action@v1
+        with:
+          manylinux: "2_28"
+          args: --release --out dist --interpreter python${{ matrix.python }} --features blastit-py/extension-module
+          # Inside the container, so the Python-free dbproxy binary the wheel
+          # carries is built against the same old glibc as the extension.
+          before-script-linux: |
+            cargo build --release --locked -p blastit-dbproxy --bin blastit-dbproxy
+            install -D -m 0755 target/release/blastit-dbproxy python/blastit/_bin/blastit-dbproxy
+      - name: The wheel carries dbproxy
+        run: |
+          python3 - <<'PY'
+          import glob, zipfile
+          for wheel in glob.glob("dist/*.whl"):
+              info = zipfile.ZipFile(wheel).getinfo("blastit/_bin/blastit-dbproxy")
+              assert (info.external_attr >> 16) & 0o111, f"{wheel}: dbproxy is not executable"
+              print(wheel, "ok")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.python }}
+          path: dist/*.whl
+
+  publish:
+    needs: wheels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Upload to the rolling `wheels` release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view wheels >/dev/null 2>&1; then
+            gh release create wheels --prerelease --title "Development wheels" \
+              --notes "Wheels built from every commit to develop. Install from the index: https://offworldnexus.github.io/blastit/simple/" \
+              --target "$GITHUB_SHA"
+          fi
+          gh release upload wheels dist/*.whl --clobber
+
+  index:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}simple/
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write the PEP 503 index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/wheels" --jq .id)
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$id/assets?per_page=100" --jq '.[]' > assets.jsonl
+          python3 .github/scripts/simple_index.py assets.jsonl site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

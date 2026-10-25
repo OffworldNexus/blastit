@@ -2,7 +2,11 @@
 .worktrees
 **/__pycache__
 e2e/app.log
-target/*
-!target/release
-target/release/*
-!target/release/blastit
+# The e2e build stage builds the workspace inside the image; the host's build
+# directory and the dbproxy binary it dropped into the Python package are not
+# inputs. `dist/` is deliberately *not* ignored: e2e/Dockerfile.prebuilt installs
+# a wheel built on the host.
+target
+python/blastit/_bin
+# Never ship a host-built extension: the build stage writes its own.
+python/blastit/*.so

@@ -185,6 +185,21 @@ pub struct Config {
     /// environment rewrite, because it names the variables the *app* sees. It
     /// is a list of names, never a value, so it is no secret.
     pub proxy_outputs: BTreeMap<String, Vec<String>>,
+    /// The interpreter's `sys.path` when the console script started (D2).
+    ///
+    /// Another field that comes from no environment variable: stage 0 fills it
+    /// in from the installation it runs in. A wheel's stage 1 is `execve`'d as
+    /// `python -I -m blastit`, and `-I` drops `PYTHONPATH` and the working
+    /// directory from `sys.path`, so the entries the user's interpreter had
+    /// travel here and stage 1 puts them back before the first import (§4).
+    /// Empty for the standalone binary, whose stage 1 embeds CPython and
+    /// computes its own path.
+    ///
+    /// The entries are bytes — `os.fsencode`, because a path that is not valid
+    /// UTF-8 is a path like any other — while the document is JSON. Each is
+    /// carried one byte per character ([`latin1`]), which is the identity for
+    /// the ASCII of every ordinary path.
+    pub sys_path: Vec<Vec<u8>>,
 }
 
 impl Default for Config {
@@ -226,6 +241,7 @@ impl Default for Config {
             backlog: 1024,
             max_connections: 1024,
             proxy_outputs: BTreeMap::new(),
+            sys_path: Vec::new(),
         }
     }
 }
@@ -660,6 +676,15 @@ impl Config {
             })
             .collect();
         object.insert("proxy_outputs".into(), Value::Object(outputs));
+        object.insert(
+            "sys_path".into(),
+            Value::Array(
+                self.sys_path
+                    .iter()
+                    .map(|entry| Value::from(latin1(entry)))
+                    .collect(),
+            ),
+        );
         Value::Object(object)
     }
 
@@ -736,6 +761,10 @@ impl Config {
         config.backlog = json_i32(value, "backlog")?;
         config.max_connections = json_usize(value, "max_connections")?;
         config.proxy_outputs = json_string_lists(value, "proxy_outputs")?;
+        config.sys_path = json_string_list(value, "sys_path")?
+            .iter()
+            .map(|entry| unlatin1("sys_path", entry))
+            .collect::<Result<Vec<Vec<u8>>, ConfigError>>()?;
         Ok(config)
     }
 }
@@ -743,6 +772,38 @@ impl Config {
 /// The private scratch directory of the view running under `uid` (§2.2, §7.2).
 pub fn view_dir(uid: u32) -> PathBuf {
     PathBuf::from(format!("/run/blastit/views/{uid}"))
+}
+
+/// A byte string as the JSON string the configuration document can carry.
+///
+/// JSON has no byte strings, and a `sys.path` entry is bytes (`os.fsencode`):
+/// one byte per character is the identity for the ASCII of every ordinary path
+/// and round-trips the rest exactly, where a UTF-8 conversion would refuse a
+/// path that is not valid UTF-8.
+fn latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| char::from(*byte)).collect()
+}
+
+/// The inverse of [`latin1`].
+///
+/// # Errors
+///
+/// [`ConfigError::Document`] for a character that is not a byte, which is a
+/// document stage 0 did not write.
+fn unlatin1(field: &'static str, value: &str) -> Result<Vec<u8>, ConfigError> {
+    let mut bytes = Vec::with_capacity(value.len());
+    for character in value.chars() {
+        match u8::try_from(u32::from(character)) {
+            Ok(byte) => bytes.push(byte),
+            Err(_) => {
+                return Err(document(
+                    field,
+                    format!("`{character}` is not a byte (the document carries latin-1)"),
+                ));
+            }
+        }
+    }
+    Ok(bytes)
 }
 
 /// Whether `BLASTIT_SECCOMP` asks for the §7.3 filters, as the `boot` event
@@ -1208,6 +1269,11 @@ mod tests {
         config.max_body_bytes = 1 << 20;
         config.health_path = "/health".to_string();
         config.warmup = Some("web.warmup:run".to_string());
+        config.sys_path = vec![
+            b"/app".to_vec(),
+            b"/app/.venv/lib/python3.14/site-packages".to_vec(),
+            vec![b'/', b'a', 0xff, b'p'],
+        ];
         config.validate().unwrap();
 
         let json = config.to_json();
@@ -1215,6 +1281,26 @@ mod tests {
         assert!(!text.contains("BLASTIT_"), "{text}");
         let back = Config::from_json(&json).unwrap();
         assert_eq!(back, config);
+    }
+
+    #[test]
+    fn a_sys_path_entry_that_is_not_utf8_survives_the_document() {
+        let mut config = Config::default();
+        // `os.fsencode` bytes that are not a UTF-8 string at all.
+        config.sys_path = vec![vec![b'/', b'a', 0xff, b'p'], b"/app".to_vec()];
+
+        let json = config.to_json();
+        assert_eq!(json["sys_path"][0], serde_json::json!("/a\u{ff}p"));
+        let back = Config::from_json(&json).unwrap();
+        assert_eq!(back.sys_path, config.sys_path);
+    }
+
+    #[test]
+    fn a_sys_path_entry_outside_latin1_is_refused() {
+        let mut json = Config::default().to_json();
+        json["sys_path"] = serde_json::json!(["/app/\u{20ac}"]);
+        let err = Config::from_json(&json).unwrap_err();
+        assert!(err.to_string().contains("sys_path"), "{err}");
     }
 
     #[test]

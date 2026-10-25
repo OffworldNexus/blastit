@@ -18,6 +18,14 @@
 //!
 //! Nothing here parses HTTP and nothing here talks to the database: init exists
 //! to fork, to supervise and to be the only writer to stdout (§2.1).
+//!
+//! # Two ways to have an interpreter
+//!
+//! The standalone binary embeds CPython and initialises it here (§9.3). A wheel
+//! install is *already* a Python process: `blastit._blastit.main()` is called by
+//! the console script, stage 0 re-executes that same interpreter (§4), and this
+//! stage uses the interpreter it finds — no second CPython, and the venv's
+//! `site-packages` are its own. That is the whole of [`Interpreter`].
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -34,11 +42,12 @@ use blastit_scheduler::{
 };
 use blastit_sys::mem;
 use blastit_sys::{
-    Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, fork,
-    harden_child, pipe, restore_signal_mask_in_child, set_dumpable, socketpair_stream,
+    Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, harden_child,
+    pipe, restore_signal_mask_in_child, set_dumpable, socketpair_stream,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
@@ -46,6 +55,24 @@ use crate::immortal::Stats;
 use crate::logs::{Emitter, fail, output_event};
 use crate::roles::{HttpFds, SchedulerFds};
 use crate::supervise::{ComponentPipes, Parts, Supervisor};
+
+/// Whether stage 1 finds an interpreter already running (§4).
+pub enum Interpreter<'py> {
+    /// The standalone binary: CPython is embedded in this image and is
+    /// initialised here (§9.3).
+    Embed,
+    /// A wheel install: the interpreter that re-executed us for stage 1 is up,
+    /// its main thread holds the GIL, and its `site-packages` are the venv's.
+    Hosted(Python<'py>),
+}
+
+impl Interpreter<'_> {
+    /// Whether this is an interpreter the host started, as opposed to one this
+    /// process embeds.
+    const fn is_hosted(&self) -> bool {
+        matches!(self, Self::Hosted(_))
+    }
+}
 
 /// Where stage 1 finds what stage 0 left it (§4).
 #[derive(Debug, Clone, Copy)]
@@ -100,7 +127,14 @@ gc.freeze()
 ";
 
 /// Runs stage 1. Never returns.
-pub fn run(options: Options) -> ! {
+///
+/// `interpreter` says whether CPython has to be started here (the standalone
+/// binary) or is the interpreter this process already runs on (a wheel install,
+/// §4, §9.3).
+pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
+    // Whether a live interpreter is in this image, which decides how the forks
+    // below behave (§9.3) and how stage 1 finds the application's modules.
+    let hosted = interpreter.is_hosted();
     // The configuration itself is not known yet, so a failure here is JSON.
     let boot = Emitter::stdout(LogFormat::Json, Level::Info);
     let config = read_config(&boot, options.config_fd);
@@ -191,6 +225,7 @@ pub fn run(options: Options) -> ! {
         layout.http(),
         mask,
         config.seccomp,
+        hosted,
     );
     // The parent keeps only the read ends, and never the listening socket.
     drop(http_end);
@@ -222,6 +257,7 @@ pub fn run(options: Options) -> ! {
         layout.scheduler(),
         mask,
         config.seccomp,
+        hosted,
     );
     drop(sched_http_end);
     drop(sched_ctl_end);
@@ -272,26 +308,73 @@ pub fn run(options: Options) -> ! {
         );
     }
 
-    Python::initialize();
-    Python::attach(|py| {
-        let app = load(py, &config, &emitter, memory);
-        emit_ready(&emitter, &config, routes.len());
-        let mut supervisor = Supervisor::new(
-            Parts {
-                cfg: config,
-                limits,
-                routes,
-                egress,
-                app,
-                ctl: ctl_end,
-                signals,
-                mask,
-                components,
-            },
-            &emitter,
-        );
-        supervisor.run(py)
-    })
+    // Everything from here on needs an interpreter, and the forks above were the
+    // last thing that had to happen while init was single-threaded (§2.1).
+    let serving = Serving {
+        config,
+        limits,
+        routes,
+        egress,
+        memory,
+        ctl: ctl_end,
+        signals,
+        mask,
+        components,
+        hosted: interpreter.is_hosted(),
+    };
+    match interpreter {
+        Interpreter::Embed => {
+            Python::initialize();
+            Python::attach(|py| serve(py, &emitter, serving))
+        }
+        Interpreter::Hosted(py) => serve(py, &emitter, serving),
+    }
+}
+
+/// Everything stage 1 needs once an interpreter is available (§4).
+struct Serving {
+    /// The configuration, already parsed.
+    config: Config,
+    /// Frame limits of every channel.
+    limits: Limits,
+    /// One entry per manifest route, in routing order.
+    routes: Vec<blastit_scheduler::RouteInfo>,
+    /// Whether each route may keep `AF_INET`/`AF_INET6`, by route index (§7.3).
+    egress: Vec<bool>,
+    /// The memory reading taken before the fork, for §8 Sizing.
+    memory: Option<mem::Sample>,
+    /// init's end of `ctl.chan`.
+    ctl: OwnedFd,
+    /// The signalfd init listens on.
+    signals: SignalFd,
+    /// The mask to put back in every child.
+    mask: SignalMask,
+    /// The components to supervise, by pid.
+    components: BTreeMap<i32, (Component, ComponentPipes)>,
+    /// Whether the interpreter was started by the host rather than embedded
+    /// here.
+    hosted: bool,
+}
+
+/// Loads the application, emits `ready`, and supervises. Never returns.
+fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
+    let app = load(py, &serving.config, emitter, serving.memory, serving.hosted);
+    emit_ready(emitter, &serving.config, serving.routes.len());
+    let mut supervisor = Supervisor::new(
+        Parts {
+            cfg: serving.config,
+            limits: serving.limits,
+            routes: serving.routes,
+            egress: serving.egress,
+            app,
+            ctl: serving.ctl,
+            signals: serving.signals,
+            mask: serving.mask,
+            components: serving.components,
+        },
+        emitter,
+    );
+    supervisor.run(py)
 }
 
 /// Reads the configuration document stage 0 wrote into the pipe (§4).
@@ -397,6 +480,10 @@ fn read_memory(emitter: &Emitter) -> Option<mem::Sample> {
 }
 
 /// Forks the http process, which drops to `uid` and serves (§4).
+///
+/// `hosted` runs the fork under CPython's protocol when an interpreter is live
+/// in this image (§9.3, [`crate::forking`]).
+#[allow(clippy::too_many_arguments)]
 fn fork_http(
     emitter: &Emitter,
     child: ChildIo,
@@ -405,8 +492,9 @@ fn fork_http(
     uid: u32,
     mask: SignalMask,
     seccomp: bool,
+    hosted: bool,
 ) -> Pid {
-    match fork() {
+    match crate::forking::fork(hosted) {
         Ok(Fork::Parent(pid)) => pid,
         Ok(Fork::Child) => {
             if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Http, seccomp) {
@@ -432,8 +520,9 @@ fn fork_scheduler(
     uid: u32,
     mask: SignalMask,
     seccomp: bool,
+    hosted: bool,
 ) -> Pid {
-    match fork() {
+    match crate::forking::fork(hosted) {
         Ok(Fork::Parent(pid)) => pid,
         Ok(Fork::Child) => {
             if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Scheduler, seccomp) {
@@ -475,16 +564,27 @@ fn prepare_child(
 ///
 /// `memory` is the reading `run` took before the fork: it is the one that
 /// warned, once, when the machine's memory cannot be read at all (§8 Sizing).
+///
+/// `hosted` is `true` when the interpreter is the one the wheel was installed
+/// into: its `site-packages` are already on `sys.path`, and what `-I` dropped —
+/// `PYTHONPATH`, the working directory — is put back before the first import.
 fn load(
     py: Python<'_>,
     config: &Config,
     emitter: &Emitter,
     memory: Option<mem::Sample>,
+    hosted: bool,
 ) -> Py<PyAny> {
-    // §9.3: an embedded interpreter does not find the distribution's
-    // site-packages on its own. Best effort — a system without sysconfig is not
-    // a reason to refuse to start.
-    let _ = py.run(SITE_PACKAGES, None, None);
+    if hosted {
+        if let Err(err) = restore_sys_path(py, &config.sys_path) {
+            python_fail(py, emitter, "sys.path", &err);
+        }
+    } else {
+        // §9.3: an embedded interpreter does not find the distribution's
+        // site-packages on its own. Best effort — a system without sysconfig is
+        // not a reason to refuse to start.
+        let _ = py.run(SITE_PACKAGES, None, None);
+    }
 
     let spec = config.app.as_deref().unwrap_or_default();
     let app = match import_callable(py, spec) {
@@ -517,6 +617,36 @@ fn load(
     }
     emit_preload(emitter, config, stats, refresh_memory(memory));
     app
+}
+
+/// Puts the interpreter's import path back where stage 0 found it (§4).
+///
+/// A wheel's stage 1 runs with `-I` — the same interpreter, but no `PYTHONPATH`
+/// and no working directory on `sys.path`. The entries the user's interpreter
+/// had — bytes, as stage 0 recorded them with `os.fsencode` — are re-inserted in
+/// front, in their original order, skipping the ones `-I` already provides: the
+/// result is exactly the `sys.path` the console script saw, which is where the
+/// application's modules are found. `os.fsdecode` is what turns those bytes back
+/// into the text `sys.path` is made of, without dropping a path that is not
+/// valid UTF-8.
+///
+/// # Errors
+///
+/// Whatever the interpreter raises when `sys.path` is not what CPython promises
+/// it is.
+fn restore_sys_path(py: Python<'_>, entries: &[Vec<u8>]) -> PyResult<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let fsdecode = py.import("os")?.getattr("fsdecode")?;
+    let path = py.import("sys")?.getattr("path")?;
+    for entry in entries.iter().rev() {
+        let decoded = fsdecode.call1((PyBytes::new(py, entry),))?;
+        if !path.contains(decoded.clone())? {
+            path.call_method1("insert", (0, decoded))?;
+        }
+    }
+    Ok(())
 }
 
 /// §9.2 #7: makes the preloaded heap immortal.

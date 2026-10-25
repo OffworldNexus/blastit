@@ -1,0 +1,52 @@
+# The wheel a project installs (`pip install blastit`, `uv add blastit`).
+#
+# Same shape as granian's: a pyo3 extension for the server itself
+# (`blastit._blastit`, built from `crates/blastit-py`), a Python package for the
+# console script (`python/blastit`), and maturin as the build backend. Nothing
+# here detects a virtualenv: the CLI *is* a Python program, so it runs on the
+# interpreter of the environment it is installed in, and so does stage 1 of the
+# server (§4).
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "blastit"
+description = "A sandboxing WSGI server: uids, per-route database grants, and no framework integration"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: No Input/Output (Daemon)",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP :: WSGI :: Server",
+]
+# No Python dependency at all: the server is the extension, and the CLI imports
+# nothing but the standard library.
+dependencies = []
+
+[project.scripts]
+blastit = "blastit.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/OffworldNexus/blastit"
+
+[tool.maturin]
+manifest-path = "crates/blastit-py/Cargo.toml"
+module-name = "blastit._blastit"
+python-source = "python"
+# The wheel carries `blastit/_bin/blastit-dbproxy`, the Python-free binary stage 0
+# `execve`s for the credentials-holding role (§4, D2). `scripts/build-wheel.sh`
+# builds it and puts it in the package before maturin runs, and it is gitignored
+# there — which maturin's walk of `python-source` *does* respect, so the path is
+# named explicitly. Without this line the wheel has no dbproxy binary in it and
+# blastit refuses to start.
+include = [{ path = "python/blastit/_bin/blastit-dbproxy", format = "wheel" }]

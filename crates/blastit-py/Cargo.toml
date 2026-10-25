@@ -1,0 +1,34 @@
+[package]
+name = "blastit-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+# The root `pyproject.toml` says `module-name = "blastit._blastit"`, which puts
+# this artifact at `blastit/_blastit.<abi>.so`; a lib target's name is the last
+# component of the module's name.
+name = "_blastit"
+crate-type = ["cdylib"]
+
+[features]
+# `pyo3/extension-module`, i.e. "the symbols come from the interpreter that
+# loads me": the wheel's extension must not link `libpython` (the interpreter
+# already has it, and an auditwheel-compliant wheel cannot depend on it).
+#
+# It is deliberately *not* a default feature, and no dependency of this package
+# enables it: cargo unifies a package's features across a whole build graph, so
+# with it on, the standalone `blastit` binary — the same workspace, and the one
+# program that embeds CPython and must link `libpython` — would not link.
+# `scripts/build-wheel.sh` enables it, and only there.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+blastit = { version = "0.1.0", path = "../blastit" }
+pyo3 = { version = "0.30.1" }

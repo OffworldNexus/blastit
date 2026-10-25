@@ -94,16 +94,50 @@ statement it was refused:
 
 ### 1. Install
 
-blastit isn't on PyPI yet. Pre-built wheels (Linux x86_64, CPython 3.13 and
-3.14), published from every commit to `develop` on blastit's own package
-index, are the next roadmap step ([D2](ROADMAP.md#phase-d-adoption)); this
-section will then show how to `uv add` them. Until then, build it from a
-checkout (Rust 1.88+ and a CPython with its shared library):
+blastit isn't on PyPI yet. Wheels (Linux x86_64, CPython 3.13 and 3.14) are
+built from every commit to `develop` and published on
+[blastit's own package index](https://offworldnexus.github.io/blastit/simple/).
+With uv:
+
+```toml
+# pyproject.toml
+[[tool.uv.index]]
+name = "blastit"
+url = "https://offworldnexus.github.io/blastit/simple/"
+explicit = true
+
+[tool.uv.sources]
+blastit = { index = "blastit" }
+```
 
 ```console
-$ cargo build --release
-$ sudo install target/release/blastit /usr/local/bin/blastit
+$ uv add --prerelease allow blastit
+$ uv run blastit                     # or .venv/bin/blastit, or python -m blastit
 ```
+
+With pip:
+
+```console
+$ pip install --pre blastit --extra-index-url https://offworldnexus.github.io/blastit/simple/
+```
+
+Like granian, blastit is a compiled extension plus a `blastit` command written
+in Python, so it runs on the interpreter of the environment it's installed in:
+your virtualenv and its packages are simply there. To build a wheel yourself,
+run `scripts/build-wheel.sh` (Rust 1.88+ and uv).
+
+Configuration is still environment variables only (`BLASTIT_APP`,
+`BLASTIT_MANIFEST`, `PORT`, …), and it still wants to be PID 1 in the
+container. Two things to know before you start it:
+
+* it has to run as **root**: init binds the port, then drops every other
+  process to its own unprivileged user (see the Dockerfile below);
+* the project directory — and therefore the `.venv` with blastit and the app's
+  dependencies in it — has to stay **readable by the sandbox users**. Routes run
+  as `BLASTIT_UID_BASE + 1000 + i`, and blastit drops to `UID_BASE + 3` before
+  it `execve`s its own database proxy, so a project inside a `0700` directory
+  hides both from those users. `/app`, `/srv/app` or an ordinary checkout are
+  fine.
 
 ### 2. Django
 
@@ -122,17 +156,12 @@ in the container. It binds the port and then drops every process to its own
 unprivileged user:
 
 ```dockerfile
-FROM python:3.13-slim AS blastit
-RUN apt-get update && apt-get install -y --no-install-recommends curl build-essential git \
- && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-RUN git clone --depth 1 -b develop https://github.com/OffworldNexus/blastit /src \
- && cd /src && PYO3_PYTHON=/usr/local/bin/python3.13 /root/.cargo/bin/cargo build --release
-
 FROM python:3.13-slim
 WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
-COPY --from=blastit /src/target/release/blastit /usr/local/bin/blastit
+
+RUN pip install --pre blastit --extra-index-url https://offworldnexus.github.io/blastit/simple/
 
 ENV BLASTIT_APP=myproject.wsgi:application \
     BLASTIT_MANIFEST=/app/blastit.toml \

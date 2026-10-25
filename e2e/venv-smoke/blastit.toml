@@ -1,0 +1,19 @@
+# The manifest of the venv smoke test's app (ARCHITECTURE.md §6, §8.2).
+#
+# One route, and one PostgreSQL proxy the route has a grant on: the grant is what
+# makes stage 0 bind the route's private socket and `execve` the Python-free
+# `blastit/_bin/blastit-dbproxy` the wheel ships (§4). The upstream is never
+# contacted — nothing in this test connects to it — the URL only has to parse.
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "root"
+path = ['/']
+methods = ["GET"]
+
+[route.db]
+queries = ["SELECT 1"]

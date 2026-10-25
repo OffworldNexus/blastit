@@ -122,7 +122,10 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p blastit --locked
+      - name: Build the wheel
+        run: pipx install maturin && scripts/build-wheel.sh
+        env:
+          MATURIN: maturin
       - name: Run the scenario under blastit
         run: python e2e/run.py
         env:
@@ -133,3 +136,21 @@ jobs:
           name: e2e-app-log
           path: e2e/app.log
           if-no-files-found: ignore
+
+  wheel-smoke:
+    name: wheel in a uv virtualenv (modelw/base, CPython 3.14)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.14"
+      - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the wheel
+        run: pipx install maturin && scripts/build-wheel.sh
+        env:
+          MATURIN: maturin
+      - run: e2e/venv-smoke.sh
