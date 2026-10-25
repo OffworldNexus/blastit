@@ -1177,6 +1177,7 @@ marked *(docs)*.
 |---|---|
 | gVisor (reports kernel `4.4.0`); some syscalls missing (`pidfd_open` → `ENOSYS`) | AF_UNIX only internally; no `pidfd`, `io_uring` or namespaces; check every syscall we use against gVisor's compatibility table |
 | Root, PID 1, Docker-default capabilities minus `NET_RAW` | enough: `SETUID`, `SETGID`, `CHOWN`, `FOWNER`. The image must **not** set a non-root `USER` |
+| `no_new_privs` set on every container (seen on the pilot project: `sudo` refuses to start) | blastit must *start* as root (`USER root`, then `CMD ["blastit"]`); it only ever drops privileges, which `no_new_privs` allows. Other components of the same image that should not run as root drop to their user themselves (`setpriv --reuid=… --regid=… --init-groups …`) |
 | No `CAP_SYS_ADMIN` / `CAP_NET_ADMIN` | no mount or user namespaces, no cgroups of our own, no per-uid firewall. Isolation is uids + file modes + rlimits + seccomp |
 | `SO_PEERCRED` broken; `/proc/<pid>/environ` readable across uids | per-view pg listeners + `SCM_CREDENTIALS`; `execve` barrier; dbproxy exec'd with an empty env |
 | COW in ~2 MiB chunks; ~14–18 MiB floor per process | immortalized heap, lazy spawning, LRU cap on live view processes |
