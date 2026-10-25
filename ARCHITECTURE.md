@@ -758,11 +758,21 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
   reveals it); unqualified `pg_*` names are never grantable as tables, since
   `pg_catalog` comes first on every search path — statements on the catalogue
   stay exact `queries`; casts to `reg*` and to types other than the built-in
-  plain ones need a `functions` entry.
+  plain ones need a `functions` entry. A row lock is the same shape: a
+  locking clause (`FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY
+  SHARE`, with or without `OF …`, and through a derived relation) needs an
+  `update` entry on every base table it locks — but on **any one column**,
+  because PostgreSQL asks for the UPDATE privilege on a single column of a
+  locked table — so `update = ["id"]` is enough for a route that only reads
+  the rows it locks, while the columns it reads still need `select`; the
+  denial reads `update on t (any column, to lock its rows) not granted`.
 * **Rewriting a manifest from a test suite.** The pytest plugin (D3b) reports,
   per `(route, proxy)`, the smallest `tables`/`functions` grant covering every
   statement the route ran, with the TOML to paste in, so a route can be moved
-  from exact queries to table grants in one step.
+  from exact queries to table grants in one step. A table a statement only
+  locks gets an `update` entry on one column the route already reads (`id`
+  when it reads one, otherwise the first), never `"*"`, and the snippet says
+  so in a comment.
 * **`unrestricted = true`** in a route's own grant (`[route.<db>]`) means
   exactly what it says: that route may run any statement on that proxy,
   transaction control included. It is still a sandbox — the listener, the uid

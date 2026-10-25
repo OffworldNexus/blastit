@@ -395,15 +395,25 @@ fn select_into_is_refused() {
 fn locking_a_row_needs_update() {
     assert_eq!(
         covered("SELECT id FROM t FOR UPDATE"),
-        ["select on t.id", "update on t.*"]
+        [
+            "select on t.id",
+            "update on t (any column, to lock its rows)"
+        ]
     );
     assert_eq!(
         covered("SELECT id FROM t FOR SHARE OF t"),
-        ["select on t.id", "update on t.*"]
+        [
+            "select on t.id",
+            "update on t (any column, to lock its rows)"
+        ]
     );
     assert_eq!(
         covered("SELECT id, u.id FROM t, u FOR UPDATE OF u"),
-        ["select on t.id", "select on u.id", "update on u.*"],
+        [
+            "select on t.id",
+            "select on u.id",
+            "update on u (any column, to lock its rows)"
+        ],
         "only the named relation is locked"
     );
     assert!(
@@ -956,18 +966,27 @@ fn a_write_target_is_named_by_its_own_grant() {
 #[test]
 fn locking_a_derived_relation_locks_the_tables_it_names() {
     // The statement reads no column of `auth_user`, but PostgreSQL locks its
-    // rows through the subquery, so `update` is required.
+    // rows through the subquery, so `update` is required — on any one column.
     assert_eq!(
         covered("SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR UPDATE"),
-        ["select on auth_user", "update on auth_user.*"]
+        [
+            "select on auth_user",
+            "update on auth_user (any column, to lock its rows)"
+        ]
     );
     assert_eq!(
         covered("SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR SHARE"),
-        ["select on auth_user", "update on auth_user.*"]
+        [
+            "select on auth_user",
+            "update on auth_user (any column, to lock its rows)"
+        ]
     );
     assert_eq!(
         covered("WITH x AS (SELECT 1 FROM auth_user) SELECT 1 FROM x FOR UPDATE"),
-        ["select on auth_user", "update on auth_user.*"]
+        [
+            "select on auth_user",
+            "update on auth_user (any column, to lock its rows)"
+        ]
     );
     // `OF s` locks only `s`; `s` stands for `auth_user`.
     assert_eq!(
@@ -975,13 +994,17 @@ fn locking_a_derived_relation_locks_the_tables_it_names() {
         [
             "select on auth_user",
             "select on t",
-            "update on auth_user.*"
+            "update on auth_user (any column, to lock its rows)"
         ]
     );
     // ... and a join alias stands for both of its sides.
     assert_eq!(
         covered("SELECT 1 FROM t JOIN u ON true FOR UPDATE OF t"),
-        ["select on t", "select on u", "update on t.*"]
+        [
+            "select on t",
+            "select on u",
+            "update on t (any column, to lock its rows)"
+        ]
     );
 }
 

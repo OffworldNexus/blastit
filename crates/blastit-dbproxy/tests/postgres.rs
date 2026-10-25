@@ -1889,7 +1889,8 @@ async fn table_grants_run_a_django_shaped_join_and_refuse_a_column() {
 /// A locking clause hidden behind a derived relation reaches the base table
 /// (D7): `SELECT 1 FROM (SELECT 1 FROM t) s FOR UPDATE` locks `t`'s rows even
 /// though the outer statement reads no column of `t`, so a grant without
-/// `update` on `t` must refuse it — and one with `update` must let it run.
+/// `update` on `t` must refuse it — and one with `update` on **any one column**
+/// must let it run (D7b), which is what PostgreSQL asks for to lock a row.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_grants_refuse_a_lock_hidden_behind_a_subquery() {
     let Some(url) = pg_url() else { return };
@@ -1915,8 +1916,9 @@ async fn table_grants_refuse_a_lock_hidden_behind_a_subquery() {
         )],
         [],
     );
+    // One column is enough to lock the rows: `"*"` is not needed (D7b).
     let mut locking = read_only.clone();
-    locking.tables.entry(table.clone()).or_default().update = Some(Columns::All);
+    locking.tables.entry(table.clone()).or_default().update = Some(Columns::list(["name"]));
 
     let directory = scratch("lock");
     let listener = bind(&directory, 5432);
@@ -1946,12 +1948,15 @@ async fn table_grants_refuse_a_lock_hidden_behind_a_subquery() {
     let EventKind::SqlDenied(denied) = event.kind() else {
         unreachable!("filtered for sql.denied")
     };
-    assert_eq!(denied.reason(), format!("update on {table}.* not granted"));
+    assert_eq!(
+        denied.reason(),
+        format!("update on {table} (any column, to lock its rows) not granted")
+    );
 
-    // With `update`, it reaches PostgreSQL and takes the lock.
+    // With `update` on one column, it reaches PostgreSQL and takes the lock.
     let client = connect(&directory, 5433).await.expect("connects");
     client
         .query(&sql, &[])
         .await
-        .expect("the grant's update covers the lock");
+        .expect("one column is enough for the grant to cover the lock");
 }
