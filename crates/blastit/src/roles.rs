@@ -10,7 +10,7 @@
 //! reads the log: it is `0` when the role returned cleanly.
 
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{FromRawFd, RawFd};
 use std::sync::Arc;
 
 use blastit_events::{Event, encode_json};
@@ -18,10 +18,8 @@ use blastit_frame::Limits;
 use blastit_http::HttpConfig;
 use blastit_manifest::RoutingTable;
 use blastit_scheduler::{RouteInfo, SchedulerConfig, UnixCtl};
-use blastit_sys::{SeccompRole, Signal};
 use tokio::runtime::{Builder, Runtime};
 
-use crate::child::{child_exit, install_filter};
 use crate::logs::write_line;
 
 /// The descriptors the http role owns.
@@ -119,57 +117,12 @@ pub fn scheduler(
 /// The dbproxy role: read its configuration, adopt its listeners and serve
 /// (§2.2).
 ///
-/// The configuration — the real upstream credentials, the listener table and
-/// the policy — arrives over `secrets.pipe` and is closed as soon as it has been
-/// read (§4). dbproxy is `execve`'d with an empty environment, which clears
-/// `PR_SET_PDEATHSIG` and the dumpable flag, so both are re-applied here before
-/// anything else. `seccomp` is §7.3's `BLASTIT_SECCOMP`, which cannot come from
-/// the environment for this one role and arrives as `--seccomp=0|1` instead.
-/// The ready byte goes out once the listeners are adopted, which is before
-/// `run_with_listeners` checks `SO_PASSCRED` and switches them to non-blocking:
-/// that work cannot fail for a socket [`blastit_sys::bind_unix_listener`] made,
-/// and waiting for it would mean inventing a hook the crate does not have.
-///
-/// Returns the process exit code.
-pub fn dbproxy(secrets_fd: RawFd, events_fd: RawFd, ready_fd: RawFd, seccomp: bool) -> i32 {
-    // SAFETY: the descriptor was created for dbproxy by init and is owned by it
-    // from here on; nothing else refers to the number.
-    let secrets = unsafe { std::fs::File::from_raw_fd(secrets_fd) };
-    let Ok(config) = blastit_dbproxy::read_config(secrets) else {
-        return 1;
-    };
-    let _ = blastit_sys::harden_child(Signal::KILL);
-    let _ = blastit_sys::set_dumpable(false);
-    // §7.3, and before the ready byte: a filter that cannot be installed has to
-    // fail the boot rather than leave dbproxy serving unfiltered.
-    if let Err(err) = install_filter(seccomp, SeccompRole::DbProxy) {
-        child_exit(&format!("dbproxy: {err}"), 1);
-    }
-
-    let mut listeners = Vec::with_capacity(config.listeners.len());
-    for spec in &config.listeners {
-        // SAFETY: init bound each of these sockets and passed the descriptor
-        // across dbproxy's `execve`; dbproxy takes ownership of it.
-        let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(spec.fd) };
-        listeners.push((listener, spec.clone()));
-    }
-
-    // SAFETY: `ready_fd` is dbproxy's own end of the ready pipe.
-    let ready = unsafe { OwnedFd::from_raw_fd(ready_fd) };
-    let _ = rustix::io::write(&ready, b"1");
-    drop(ready);
-
-    let emit = events_sink(events_fd);
-    let Ok(runtime) = runtime() else {
-        return 1;
-    };
-    runtime.block_on(async move {
-        match blastit_dbproxy::run_with_listeners(config, listeners, emit).await {
-            Ok(()) => 0,
-            Err(_) => 1,
-        }
-    })
-}
+/// dbproxy holds the real credentials, so it runs no interpreter — not even
+/// this one (§2.2, §4). The role therefore lives in the crate that does not
+/// link CPython, [`blastit_dbproxy::role`], and both this binary and the
+/// Python-free `blastit-dbproxy` a wheel installs call the same function
+/// (§4, [`crate::cli`]).
+pub use blastit_dbproxy::role::dbproxy;
 
 /// Adopts an inherited TCP listener, in non-blocking mode (§2.3).
 fn tcp_listener(fd: RawFd) -> io::Result<tokio::net::TcpListener> {

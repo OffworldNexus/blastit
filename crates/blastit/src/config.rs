@@ -186,6 +186,16 @@ pub struct Config {
     /// environment rewrite, because it names the variables the *app* sees. It
     /// is a list of names, never a value, so it is no secret.
     pub proxy_outputs: BTreeMap<String, Vec<String>>,
+    /// The interpreter's `sys.path` when the console script started (D2).
+    ///
+    /// Another field that comes from no environment variable: stage 0 fills it
+    /// in from the installation it runs in. A wheel's stage 1 is `execve`'d as
+    /// `python -I -m blastit`, and `-I` drops `PYTHONPATH` and the working
+    /// directory from `sys.path`, so the entries the user's interpreter had
+    /// travel here and stage 1 puts them back before the first import (§4).
+    /// Empty for the standalone binary, whose stage 1 embeds CPython and
+    /// computes its own path.
+    pub sys_path: Vec<String>,
 }
 
 impl Default for Config {
@@ -227,6 +237,7 @@ impl Default for Config {
             backlog: 1024,
             max_connections: 1024,
             proxy_outputs: BTreeMap::new(),
+            sys_path: Vec::new(),
         }
     }
 }
@@ -647,6 +658,10 @@ impl Config {
             })
             .collect();
         object.insert("proxy_outputs".into(), Value::Object(outputs));
+        object.insert(
+            "sys_path".into(),
+            Value::Array(self.sys_path.iter().cloned().map(Value::from).collect()),
+        );
         Value::Object(object)
     }
 
@@ -723,6 +738,7 @@ impl Config {
         config.backlog = json_i32(value, "backlog")?;
         config.max_connections = json_usize(value, "max_connections")?;
         config.proxy_outputs = json_string_lists(value, "proxy_outputs")?;
+        config.sys_path = json_string_list(value, "sys_path")?;
         Ok(config)
     }
 }
@@ -1195,6 +1211,10 @@ mod tests {
         config.max_body_bytes = 1 << 20;
         config.health_path = "/health".to_string();
         config.warmup = Some("web.warmup:run".to_string());
+        config.sys_path = vec![
+            "/app".to_string(),
+            "/app/.venv/lib/python3.14/site-packages".to_string(),
+        ];
         config.validate().unwrap();
 
         let json = config.to_json();

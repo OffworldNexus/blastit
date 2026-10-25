@@ -19,27 +19,27 @@
 //! otherwise.
 
 use std::collections::BTreeMap;
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use blastit_dbproxy::{DbproxyConfig, ListenerSpec, ProxySpec, write_config};
 use blastit_events::{
-    Component, Event, EventKind, Level, Lifecycle, ManifestWarning as WarningEvent,
+    Component, Event, EventKind, Level, Lifecycle, ManifestWarning as WarningEvent, Stream,
 };
 use blastit_manifest::{Manifest, UidLayout};
 use blastit_sys::{
-    Fork, Pid, Rlimits, Signal, bind_unix_listener, current_signal_mask, exe_path, exec, fork,
-    harden_child, make_private_dir, pipe, restore_signal_mask_in_child, set_cloexec, set_dumpable,
+    Fork, Pid, Rlimits, Signal, bind_unix_listener, current_signal_mask, exec, fork, harden_child,
+    make_private_dir, pipe, restore_signal_mask_in_child, set_cloexec, set_dumpable,
 };
 
 use crate::child::{ChildIo, Deadline, read_one, wait_readable};
 use crate::config::{Config, LogFormat, view_dir};
-use crate::logs::{Emitter, fail};
+use crate::host::{Host, Reexec};
+use crate::logs::{Emitter, fail, output_event};
 
 /// How long stage 0 waits for dbproxy's ready byte before giving up (§4).
 pub const DBPROXY_READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -63,7 +63,12 @@ fn dbproxy_limits(config: &Config) -> Rlimits {
 }
 
 /// Runs stage 0. Never returns: it `execve`s stage 1 or exits non-zero.
-pub fn run() -> ! {
+///
+/// `host` says how blastit was installed: which program the barrier and
+/// dbproxy's own `execve` start, and — for a wheel — the interpreter's import
+/// path, which travels with the configuration because stage 1 is re-executed
+/// with `-I` (§4).
+pub fn run(host: &Host) -> ! {
     // §4: `boot` is the first event, emitted before anything can fail. The
     // configuration is not parsed yet, so this one line is always JSON — and the
     // §7.3 seccomp flag is read straight from its variable, because an operator
@@ -120,10 +125,16 @@ pub fn run() -> ! {
         .collect();
 
     let listeners = bind_view_sockets(&emitter, &manifest, &prepared, &layout);
-    let dbproxy = fork_dbproxy(&emitter, &config, &prepared, listeners);
+    let dbproxy = fork_dbproxy(&emitter, &config, host, &prepared, listeners);
+
+    // The interpreter's import path travels in the configuration, not in the
+    // environment: stage 1 is `execve`'d as an interpreter of its own (§4), and
+    // a wheel re-executes it with `-I`, which drops `PYTHONPATH` and the
+    // working directory. Empty for the standalone binary.
+    config.sys_path = host.sys_path().to_vec();
 
     // Everything a secret touched is gone from the process image in one step.
-    exec_stage1(&emitter, &config, prepared.app_env(), dbproxy)
+    exec_stage1(&emitter, &config, host, prepared.app_env(), dbproxy)
 }
 
 /// Creates every view's private directory and binds the pg sockets it may use
@@ -200,6 +211,7 @@ fn bind_view_sockets(
 fn fork_dbproxy(
     emitter: &Emitter,
     config: &Config,
+    host: &Host,
     prepared: &blastit_env::Prepared,
     listeners: Vec<(UnixListener, ListenerSpec)>,
 ) -> Option<DbproxyHandover> {
@@ -266,7 +278,14 @@ fn fork_dbproxy(
             }
             drop(secrets);
 
-            wait_ready(emitter, &ready_read);
+            if let Err(reason) = wait_ready(&ready_read) {
+                // Whatever dbproxy said on the way out is in the pipes init is
+                // holding for stage 1, and a boot that fails with nothing but
+                // "exited" is a boot nobody can debug (§8.1).
+                emit_child_output(emitter, &stdout_read, Stream::Stdout);
+                emit_child_output(emitter, &stderr_read, Stream::Stderr);
+                fail(emitter, &reason);
+            }
             Some(DbproxyHandover {
                 pid,
                 events: events_read,
@@ -275,22 +294,28 @@ fn fork_dbproxy(
             })
         }
         Fork::Child => {
-            let argv = vec![
-                cstring(emitter, "blastit"),
-                cstring(emitter, "--role=dbproxy"),
-                cstring(
-                    emitter,
-                    &format!("--secrets-fd={}", secrets_read.as_raw_fd()),
-                ),
-                cstring(
-                    emitter,
-                    &format!("--events-fd={}", events_write.as_raw_fd()),
-                ),
-                cstring(emitter, &format!("--ready-fd={}", ready_write.as_raw_fd())),
-                // dbproxy is exec'd with an empty environment (§4), so §7.3's
-                // `BLASTIT_SECCOMP` reaches it as an argument instead.
-                cstring(emitter, &format!("--seccomp={}", u8::from(config.seccomp))),
-            ];
+            let mut argv = reexec_argv(emitter, host.dbproxy());
+            argv.push(cstring(emitter, "--role=dbproxy"));
+            argv.push(cstring(
+                emitter,
+                format!("--secrets-fd={}", secrets_read.as_raw_fd()),
+            ));
+            argv.push(cstring(
+                emitter,
+                format!("--events-fd={}", events_write.as_raw_fd()),
+            ));
+            argv.push(cstring(
+                emitter,
+                format!("--ready-fd={}", ready_write.as_raw_fd()),
+            ));
+            // dbproxy is exec'd with an empty environment (§4), so §7.3's
+            // `BLASTIT_SECCOMP` reaches it as an argument instead. A wheel
+            // install hands the same argument to the Python-free
+            // `blastit-dbproxy` binary it ships, which takes the same flags.
+            argv.push(cstring(
+                emitter,
+                format!("--seccomp={}", u8::from(config.seccomp)),
+            ));
             let outcome = child
                 .clear_cloexec(&[])
                 .and_then(|()| child.prepare())
@@ -306,7 +331,7 @@ fn fork_dbproxy(
             }
             // An empty environment: dbproxy's `/proc/<pid>/environ` is empty,
             // and the credentials arrive over the pipe it already holds (§4).
-            let err = exec(&exe_cstring(emitter), &argv, &[]);
+            let err = exec(&program(emitter, host.dbproxy()), &argv, &[]);
             fail(emitter, &format!("exec dbproxy: {err}"));
         }
     }
@@ -325,28 +350,61 @@ pub struct DbproxyHandover {
 }
 
 /// Waits for dbproxy's ready byte, with a deadline (§4).
-fn wait_ready(emitter: &Emitter, ready: &OwnedFd) {
+///
+/// # Errors
+///
+/// A message saying how the wait ended — the deadline, a failed `poll`, or the
+/// child exiting first. The caller prints it together with whatever the child
+/// left in its output pipes.
+fn wait_ready(ready: &OwnedFd) -> Result<(), String> {
     let deadline = Deadline::after(DBPROXY_READY_TIMEOUT);
     loop {
         if deadline.expired() {
-            fail(
-                emitter,
-                &format!(
-                    "dbproxy did not report ready within {}s",
-                    DBPROXY_READY_TIMEOUT.as_secs()
-                ),
-            );
+            return Err(format!(
+                "dbproxy did not report ready within {}s",
+                DBPROXY_READY_TIMEOUT.as_secs()
+            ));
         }
         match wait_readable(ready.as_fd(), deadline.left()) {
             Ok(true) => {}
             Ok(false) => continue,
-            Err(err) => fail(emitter, &format!("waiting for dbproxy: {err}")),
+            Err(err) => return Err(format!("waiting for dbproxy: {err}")),
         }
         match read_one(ready.as_fd()) {
-            Ok(Some(_)) => return,
-            Ok(None) => fail(emitter, "dbproxy exited before it was ready"),
-            Err(err) => fail(emitter, &format!("waiting for dbproxy: {err}")),
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => return Err("dbproxy exited before it was ready".to_string()),
+            Err(err) => return Err(format!("waiting for dbproxy: {err}")),
         }
+    }
+}
+
+/// Prints what a child that died before reporting ready left in one of its
+/// output pipes, as `app.output` events (§8.1).
+///
+/// This is the only place init reads a child's stdout or stderr itself: normally
+/// stage 1 collects both, but a dbproxy that failed to start never gets that
+/// far, and the reason it failed — a missing binary, a permission a dropped uid
+/// does not have — is nothing but its own last words. The pipe is read to `EOF`
+/// (the child is gone, so its write end is closed) and the total is capped,
+/// because a component that failed the boot is not trusted to keep it short.
+fn emit_child_output(emitter: &Emitter, fd: &OwnedFd, stream: Stream) {
+    /// Largest amount of a failed child's output init will log.
+    const MAX: usize = 8 * 1024;
+
+    let mut bytes = vec![0_u8; MAX];
+    let mut total = 0;
+    while total < MAX {
+        match rustix::io::read(fd, &mut bytes[total..]) {
+            Ok(0) => break,
+            Ok(count) => total += count,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(_) => break,
+        }
+    }
+    bytes.truncate(total);
+    for line in String::from_utf8_lossy(&bytes).lines() {
+        emitter
+            .emit(&output_event(Component::Dbproxy, None, stream, line).with_level(Level::Error));
     }
 }
 
@@ -361,6 +419,7 @@ fn wait_ready(emitter: &Emitter, ready: &OwnedFd) {
 fn exec_stage1(
     emitter: &Emitter,
     config: &Config,
+    host: &Host,
     app_env: &BTreeMap<String, String>,
     dbproxy: Option<DbproxyHandover>,
 ) -> ! {
@@ -384,23 +443,24 @@ fn exec_stage1(
     }
     drop(file);
 
-    let mut argv = vec![
-        cstring(emitter, "blastit"),
-        cstring(emitter, "--stage=1"),
-        cstring(emitter, &format!("--config-fd={}", config_read.as_raw_fd())),
-    ];
+    let mut argv = reexec_argv(emitter, host.stage1());
+    argv.push(cstring(emitter, "--stage=1"));
+    argv.push(cstring(
+        emitter,
+        format!("--config-fd={}", config_read.as_raw_fd()),
+    ));
     let mut keep = vec![config_read.as_raw_fd()];
     if let Some(dbproxy) = &dbproxy {
         argv.push(cstring(
             emitter,
-            &format!("--dbproxy-pid={}", dbproxy.pid.as_raw()),
+            format!("--dbproxy-pid={}", dbproxy.pid.as_raw()),
         ));
         for (flag, fd) in [
             ("--dbproxy-events-fd", &dbproxy.events),
             ("--dbproxy-stdout-fd", &dbproxy.stdout),
             ("--dbproxy-stderr-fd", &dbproxy.stderr),
         ] {
-            argv.push(cstring(emitter, &format!("{flag}={}", fd.as_raw_fd())));
+            argv.push(cstring(emitter, format!("{flag}={}", fd.as_raw_fd())));
             keep.push(fd.as_raw_fd());
         }
     }
@@ -417,23 +477,36 @@ fn exec_stage1(
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    let err = exec(&exe_cstring(emitter), &argv, &env);
+    let err = exec(&program(emitter, host.stage1()), &argv, &env);
     fail(emitter, &format!("exec stage 1: {err}"))
 }
 
-/// `/proc/self/exe` as a C string.
-fn exe_cstring(emitter: &Emitter) -> CString {
-    let path: PathBuf = exe_path().to_path_buf();
-    let bytes = path.as_os_str().as_bytes().to_vec();
-    match CString::new(bytes) {
-        Ok(path) => path,
-        Err(_) => fail(emitter, "the executable path contains a NUL byte"),
-    }
+/// The program and its prefix, as the `argv` a re-exec starts with (§4).
+///
+/// `argv[0]` is the program itself, as `execve`'s callers conventionally do: for
+/// the standalone binary that is `/proc/self/exe`, and for a wheel install it is
+/// the interpreter — which is also what CPython wants there, because it reads
+/// `argv[0]` to find the interpreter whose `site-packages` the app needs.
+fn reexec_argv(emitter: &Emitter, reexec: &Reexec) -> Vec<CString> {
+    let mut argv = vec![cstring(emitter, &reexec.program)];
+    argv.extend(reexec.prefix.iter().map(|arg| cstring(emitter, arg)));
+    argv
 }
 
-/// A C string, or a fatal error naming the value.
-fn cstring(emitter: &Emitter, value: &str) -> CString {
-    match CString::new(value) {
+/// The `execve` path of a re-exec, as a C string.
+///
+/// # Panics
+///
+/// Never: a path with a NUL byte in it cannot be passed to `execve`, so
+/// [`cstring`] turns it into a fatal error with a message instead.
+fn program(emitter: &Emitter, reexec: &Reexec) -> CString {
+    cstring(emitter, &reexec.program)
+}
+
+/// An argument, or a path, as a C string, or a fatal error naming what is
+/// wrong.
+fn cstring(emitter: &Emitter, value: impl AsRef<OsStr>) -> CString {
+    match CString::new(value.as_ref().as_bytes().to_vec()) {
         Ok(value) => value,
         Err(_) => fail(emitter, "an argument contains a NUL byte"),
     }

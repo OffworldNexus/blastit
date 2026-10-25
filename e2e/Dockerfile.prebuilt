@@ -1,9 +1,11 @@
-# Same image as e2e/Dockerfile, with a blastit binary built beforehand on the
-# host (CI: cargo build --release on the runner, against the same Python 3.13).
+# Same image as e2e/Dockerfile, with the wheel built beforehand on the host: the
+# CI job runs `scripts/build-wheel.sh` against the same Python 3.13 and hands the
+# `dist/*.whl` it produced to this build.
 FROM python:3.13-slim-trixie
 COPY e2e/demo/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
-COPY target/release/blastit /usr/local/bin/blastit
+COPY dist/blastit-*-cp313-*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/*.whl && rm -rf /tmp/*.whl
 COPY e2e/demo /app
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \

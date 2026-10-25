@@ -1,6 +1,10 @@
 # End-to-end test: the demo app under blastit, against a real PostgreSQL.
 # Driven by e2e/run.py; see e2e/README.md.
-name: blastit-e2e
+#
+# The project and image names are overridable so that two checkouts can run the
+# test at the same time: `E2E_PROJECT=d2-e2e E2E_IMAGE=blastit-e2e-d2
+# E2E_PORT=18181 uv run python e2e/run.py`. CI uses the defaults.
+name: ${E2E_PROJECT:-blastit-e2e}
 
 x-app-env: &app-env
   DATABASE_URL: postgresql://demo:${E2E_DB_PASSWORD:?}@db:5432/demo?sslmode=disable
@@ -22,13 +26,13 @@ services:
   # Schema and users, with the real credentials, outside blastit.
   migrate:
     build: { context: .., dockerfile: "e2e/${E2E_DOCKERFILE:-Dockerfile}" }
-    image: blastit-e2e
+    image: ${E2E_IMAGE:-blastit-e2e}
     environment: *app-env
     command: ["sh", "-c", "python manage.py migrate -v0 && python manage.py seed"]
     depends_on: { db: { condition: service_healthy } }
 
   app:
-    image: blastit-e2e
+    image: ${E2E_IMAGE:-blastit-e2e}
     environment: *app-env
     ports: ["127.0.0.1:${E2E_PORT:-18080}:8080"]
     depends_on: { migrate: { condition: service_completed_successfully } }

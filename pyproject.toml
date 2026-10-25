@@ -1,0 +1,49 @@
+# The wheel a project installs (`pip install blastit`, `uv add blastit`).
+#
+# Same shape as granian's: a pyo3 extension for the server itself
+# (`blastit._blastit`, built from `crates/blastit-py`), a Python package for the
+# console script (`python/blastit`), and maturin as the build backend. Nothing
+# here detects a virtualenv: the CLI *is* a Python program, so it runs on the
+# interpreter of the environment it is installed in, and so does stage 1 of the
+# server (§4).
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "blastit"
+description = "A sandboxing WSGI server: uids, per-route database grants, and no framework integration"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: No Input/Output (Daemon)",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP :: WSGI :: Server",
+]
+# No Python dependency at all: the server is the extension, and the CLI imports
+# nothing but the standard library.
+dependencies = []
+
+[project.scripts]
+blastit = "blastit.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/OffworldNexus/blastit"
+
+[tool.maturin]
+manifest-path = "crates/blastit-py/Cargo.toml"
+module-name = "blastit._blastit"
+python-source = "python"
+# The wheel carries `blastit/_bin/blastit-dbproxy`, a Python-free binary built by
+# `scripts/build-wheel.sh` before this one runs (gitignored in the source tree).
+# It is part of the `python-source` tree, so maturin includes it as package data;
+# the file has to keep mode 0755, because stage 0 `execve`s it (§4).

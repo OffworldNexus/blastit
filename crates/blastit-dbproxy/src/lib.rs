@@ -91,6 +91,7 @@
 mod config;
 mod error;
 mod hooks;
+pub mod role;
 mod server;
 mod state;
 mod upstream;

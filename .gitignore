@@ -2,3 +2,16 @@
 /.worktrees
 /e2e/app.log
 __pycache__/
+
+# Built wheels, and the Python-free dbproxy binary `scripts/build-wheel.sh` copies
+# into the package before maturin runs.
+/dist
+/python/blastit/_bin/
+
+# `uv run` in this repository: the root `pyproject.toml` is maturin's, so uv
+# treats the checkout as a project and makes an environment (and a lock file)
+# next to it.
+/.venv
+/uv.lock
+# A stale extension built in place by an editable install (`uv sync`).
+/python/blastit/*.so

@@ -112,6 +112,7 @@ dependencies = [
  "async-trait",
  "blastit-events",
  "blastit-sqlpolicy",
+ "blastit-sys",
  "pregresql",
  "rustix",
  "serde",
@@ -168,6 +169,14 @@ dependencies = [
  "regex",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "blastit-py"
+version = "0.1.0"
+dependencies = [
+ "blastit",
+ "pyo3",
 ]
 
 [[package]]
