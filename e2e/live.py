@@ -77,7 +77,7 @@ jobs:
 - name: migrate
   kind: PRE_DEPLOY
 {image_block}  instance_size_slug: apps-s-1vcpu-1gb
-  run_command: python manage.py migrate -v0 && python manage.py seed
+  run_command: sh -c 'python manage.py migrate -v0 && python manage.py seed'
   envs:
 {common_env}services:
 - name: web
@@ -146,9 +146,11 @@ def wait_deployment(app_id, timeout=25 * 60):
                 full = doctl("apps", "get-deployment", app_id, dep["id"], check=False)
                 full = full[0] if isinstance(full, list) and full else (full or {})
                 print_failed_steps((full.get("progress") or {}).get("steps") or [])
-                for kind in ("deploy", "run"):
-                    out = doctl("apps", "logs", app_id, "--type", kind, parse=False, check=False)
-                    print(f"--- {kind} log tail ---\n{out[-4000:]}")
+                for component in ("migrate", "web"):
+                    for kind in ("deploy", "run"):
+                        out = doctl("apps", "logs", app_id, component, "--type", kind,
+                                    "--deployment", dep["id"], parse=False, check=False)
+                        print(f"--- {component} {kind} log tail ---\n{out[-4000:]}")
                 raise RuntimeError(f"deployment {phase}")
         time.sleep(15)
     raise TimeoutError("deployment did not become ACTIVE in time")
