@@ -20,15 +20,21 @@
 //! read are only the local endpoint and two non-secret facts. Every error in
 //! [`EnvError`] names the variable involved, never its value.
 //!
+//! **`app_env` is the whole environment.** [`Prepared::app_env`] is meant to
+//! *replace* the child's environment — `execve`'s `envp`, or `clearenv` plus
+//! `setenv` — not to be merged into the parent's; merging would put back
+//! everything the rewrite removed, credentials included.
+//!
 //! **`HOME` and `TMPDIR` are not here.** §5.3 lists them among the injected
 //! defaults, but each view gets a private scratch directory that only the
 //! process launcher knows, so they are set per view later; [`build`] leaves
 //! them out and documents it.
 //!
-//! **What this crate does not do.** It carries a proxy's `postgresql` query
-//! parameters through untouched in [`postgresql::Upstream::options`]. Forcing
-//! `standard_conforming_strings = on` on every upstream connection is
-//! dbproxy's job — the SQL policy depends on it (§2.2) — and not this crate's.
+//! **What this crate does not do.** It carries the allowlisted `postgresql`
+//! query parameters through in [`postgresql::Upstream::options`], and refuses
+//! the rest. Forcing `standard_conforming_strings = on` on every upstream
+//! connection is dbproxy's job — the SQL policy depends on it (§2.2) — and not
+//! this crate's.
 //!
 //! ```
 //! use std::collections::BTreeMap;

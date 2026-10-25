@@ -31,7 +31,7 @@ use std::ffi::OsString;
 
 use blastit_manifest::{Manifest, Protocol, ProxyName};
 
-use crate::error::{EnvError, EnvErrors};
+use crate::error::{EnvError, EnvErrors, invalid_name_reason};
 use crate::postgresql::{self, Upstream};
 use crate::template::Template;
 
@@ -70,6 +70,12 @@ pub struct Prepared {
 
 impl Prepared {
     /// The environment the application will see, secrets removed (§5.3).
+    ///
+    /// This is the child's **whole** environment: the launcher must pass it to
+    /// `execve` as `envp`, or set it with `clearenv` + `setenv`, rather than
+    /// merging it into the parent's. Merging would put back every variable the
+    /// rewrite removed — the proxy inputs, `BLASTIT_*` and the strip list — and
+    /// the credentials with them.
     pub fn app_env(&self) -> &BTreeMap<String, String> {
         &self.app_env
     }
@@ -150,6 +156,21 @@ pub fn build(
                     continue;
                 };
 
+                let mut names_are_usable = true;
+                for variable in proxy.input().values() {
+                    if let Some(reason) = invalid_name_reason(variable) {
+                        errors.push(EnvError::InvalidVariableName {
+                            proxy: name.clone(),
+                            variable: variable.clone(),
+                            reason,
+                        });
+                        names_are_usable = false;
+                    }
+                }
+                if !names_are_usable {
+                    continue;
+                }
+
                 let upstream = match postgresql::upstream(proxy, platform_env) {
                     Ok(upstream) => upstream,
                     Err(found) => {
@@ -166,6 +187,14 @@ pub fn build(
 
                 let mut produced_here = Vec::new();
                 for (variable, source) in &table {
+                    if let Some(reason) = invalid_name_reason(variable) {
+                        errors.push(EnvError::InvalidVariableName {
+                            proxy: name.clone(),
+                            variable: variable.clone(),
+                            reason,
+                        });
+                        continue;
+                    }
                     if variable.starts_with(RESERVED_PREFIX) {
                         errors.push(EnvError::ReservedOutput {
                             proxy: name.clone(),

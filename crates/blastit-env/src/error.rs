@@ -16,6 +16,23 @@ use crate::template::TemplateError;
 /// Longest name quoted in an error message before it is cut short.
 const MAX_QUOTED_CHARS: usize = 120;
 
+/// Why a variable name cannot be used, if it cannot.
+///
+/// The name becomes a key in the child's environment block, which is a
+/// NUL-separated `KEY=VALUE` list, so an empty name, an `=` or a NUL byte would
+/// corrupt or truncate it (§5.3).
+pub(crate) fn invalid_name_reason(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        Some("it is empty")
+    } else if name.contains('=') {
+        Some("it contains '='")
+    } else if name.contains('\0') {
+        Some("it contains a NUL byte")
+    } else {
+        None
+    }
+}
+
 /// Renders a name for an error message: quoted, control characters escaped and
 /// long values cut short, so one error always stays on one line (§8.1).
 pub(crate) fn quoted(value: impl fmt::Display) -> String {
@@ -136,6 +153,85 @@ pub enum EnvError {
         slot: String,
         /// The variable's name.
         variable: String,
+    },
+    /// A URL query parameter that blastit does not carry through (§5.2).
+    ///
+    /// Only the value of an allowlisted parameter is ever kept; the names that
+    /// would move the connection somewhere else (or supply another credential)
+    /// are rejected instead of being passed to dbproxy.
+    #[error(
+        "proxy {} input {}: variable {} names the query parameter {}, which is not allowed",
+        quoted(.proxy),
+        quoted(.slot),
+        quoted(.variable),
+        quoted(.parameter)
+    )]
+    DisallowedParameter {
+        /// The proxy being declared.
+        proxy: ProxyName,
+        /// The slot that wanted the variable.
+        slot: String,
+        /// The variable's name.
+        variable: String,
+        /// The offending parameter's name (never its value).
+        parameter: String,
+    },
+    /// A host list (`h1,h2`), which blastit does not support anywhere (§5.2).
+    #[error(
+        "proxy {} input {}: variable {} names more than one host; multi-host input is not supported",
+        quoted(.proxy),
+        quoted(.slot),
+        quoted(.variable)
+    )]
+    MultipleHosts {
+        /// The proxy being declared.
+        proxy: ProxyName,
+        /// The slot that wanted the variable.
+        slot: String,
+        /// The variable's name.
+        variable: String,
+    },
+    /// A URL whose path names no database (`postgres://host`, `postgres://host/`)
+    /// or a `database` input whose value is empty (§5.2).
+    #[error(
+        "proxy {} input {}: variable {} names no database",
+        quoted(.proxy),
+        quoted(.slot),
+        quoted(.variable)
+    )]
+    MissingDatabase {
+        /// The proxy being declared.
+        proxy: ProxyName,
+        /// The slot that wanted the variable.
+        slot: String,
+        /// The variable's name.
+        variable: String,
+    },
+    /// The split form maps no `database` slot at all (§5.2).
+    #[error(
+        "proxy {} input: the split form needs a {} slot",
+        quoted(.proxy),
+        quoted("database")
+    )]
+    NoDatabaseSlot {
+        /// The proxy being declared.
+        proxy: ProxyName,
+    },
+    /// An input or output variable name cannot be a key in the child's
+    /// environment block (§5.3).
+    #[error(
+        "proxy {}: variable {} is not a usable name: {}",
+        quoted(.proxy),
+        quoted(.variable),
+        .reason
+    )]
+    InvalidVariableName {
+        /// The proxy being declared.
+        proxy: ProxyName,
+        /// The offending name.
+        variable: String,
+        /// Why it cannot be used.
+        reason: &'static str,
     },
     /// An output would name a `BLASTIT_*` variable, which blastit keeps for
     /// itself (§5.3).
@@ -290,8 +386,28 @@ mod tests {
 
     use blastit_manifest::ProxyName;
 
-    use super::{EnvError, EnvErrors, quoted};
+    use super::{EnvError, EnvErrors, invalid_name_reason, quoted};
     use crate::template::TemplateError;
+
+    #[test]
+    fn unusable_variable_names_are_named_with_a_reason() {
+        assert_eq!(invalid_name_reason("DATABASE_URL"), None);
+        assert_eq!(invalid_name_reason(""), Some("it is empty"));
+        assert_eq!(invalid_name_reason("A=B"), Some("it contains '='"));
+        assert_eq!(invalid_name_reason("A\0B"), Some("it contains a NUL byte"));
+    }
+
+    #[test]
+    fn invalid_name_errors_escape_control_characters() {
+        let error = EnvError::InvalidVariableName {
+            proxy: ProxyName::from("db"),
+            variable: "A\0B".to_string(),
+            reason: "it contains a NUL byte",
+        };
+        let text = error.to_string();
+        assert!(!text.contains('\0'));
+        assert!(text.contains(r"A\u{0}B"), "{text}");
+    }
 
     #[test]
     fn quoted_escapes_control_characters_and_cuts_long_values() {

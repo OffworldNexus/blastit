@@ -528,6 +528,123 @@ fn the_strip_list_comes_from_the_environment_and_from_the_argument() {
 }
 
 #[test]
+fn a_url_may_not_smuggle_configuration() {
+    // Every form of a parameter that could redirect the connection or add a
+    // credential is refused, and neither its value nor the URL comes back.
+    for query in [
+        "password=S3NT1NEL-d0-not-log-me",
+        "sslpassword=S3NT1NEL-d0-not-log-me",
+        "passfile=%2Frun%2Fsecrets%2Fpgpass",
+        "sslkey=%2Frun%2Fsecrets%2Fclient.key",
+        "sslcert=%2Frun%2Fsecrets%2Fclient.crt",
+        "sslrootcert=%2Frun%2Fsecrets%2Fca.crt",
+        "sslcrl=%2Frun%2Fsecrets%2Fca.crl",
+        "options=-c%20password%3D-S3NT1NEL-d0-not-log-me",
+        "host=elsewhere",
+        "hostaddr=203.0.113.9",
+        "user=other",
+        "dbname=other",
+        "port=6432",
+        "service=elsewhere",
+    ] {
+        let url = format!("postgresql://u:p@db.example.com:5432/defaultdb?{query}");
+        let manifest = one_proxy(r#"{ url = "DATABASE_URL" }"#);
+        let platform = env(&[("DATABASE_URL", url.as_str())]);
+        for text in failure(&manifest, &platform) {
+            assert!(!text.contains(SENTINEL), "{query}: {text}");
+            assert!(!text.contains(&url), "{query}: {text}");
+            assert!(text.contains("DATABASE_URL"), "{query}: {text}");
+        }
+    }
+}
+
+#[test]
+fn two_failing_proxies_report_both_errors() {
+    let manifest = parse(
+        r#"version = 1
+[proxy.alpha]
+protocol = "postgresql"
+input = { url = "ALPHA_URL", ca_cert = "MISSING_CA" }
+[proxy.beta]
+protocol = "postgresql"
+input = { host = "BETA_HOST", database = "MISSING_DB" }
+"#,
+    );
+    let platform = env(&[
+        ("ALPHA_URL", "postgresql://u:p@h/db"),
+        ("BETA_HOST", "db.example.com"),
+    ]);
+    let errors = build(&manifest, &platform, None).expect_err("build should fail");
+    assert_eq!(errors.len(), 2);
+    assert!(errors.errors().iter().any(|error| matches!(
+        error,
+        EnvError::MissingVariable { proxy, variable, .. }
+            if proxy.as_str() == "alpha" && variable == "MISSING_CA"
+    )));
+    assert!(errors.errors().iter().any(|error| matches!(
+        error,
+        EnvError::MissingVariable { proxy, variable, .. }
+            if proxy.as_str() == "beta" && variable == "MISSING_DB"
+    )));
+    let text = errors.to_string();
+    assert!(
+        text.contains("MISSING_CA") && text.contains("MISSING_DB"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_unusable_output_variable_name_aborts_the_boot() {
+    let manifest = one_proxy_output(
+        r#"{ url = "DATABASE_URL" }"#,
+        r#""BAD=NAME" = "{{ user }}""#,
+    );
+    let platform = env(&[("DATABASE_URL", "postgresql://u:p@h/db")]);
+    let errors = build(&manifest, &platform, None).expect_err("build should fail");
+    assert!(errors.errors().iter().any(|error| matches!(
+        error,
+        EnvError::InvalidVariableName { variable, .. } if variable == "BAD=NAME"
+    )));
+}
+
+#[test]
+fn a_variable_name_is_checked_before_the_proxy_is_used() {
+    // An input variable name with an `=` is refused, and the proxy is skipped
+    // rather than parsed with a name that could never be an environment key.
+    let manifest = one_proxy_output(r#"{ url = "DATABASE=URL" }"#, r#"X = "{{ user }}""#);
+    let platform = env(&[("DATABASE=URL", "postgresql://u:p@h/db")]);
+    let errors = build(&manifest, &platform, None).expect_err("build should fail");
+    assert!(
+        errors
+            .errors()
+            .iter()
+            .any(|error| matches!(error, EnvError::InvalidVariableName { .. }))
+    );
+    // The proxy was skipped, so its output was not reported as missing.
+    assert!(
+        !errors
+            .errors()
+            .iter()
+            .any(|error| matches!(error, EnvError::MissingVariable { .. }))
+    );
+}
+
+#[test]
+fn a_url_without_a_database_aborts_the_boot() {
+    let manifest = one_proxy(r#"{ url = "DATABASE_URL" }"#);
+    for url in ["postgresql://u:p@h", "postgresql://u:p@h/"] {
+        let platform = env(&[("DATABASE_URL", url)]);
+        let errors = build(&manifest, &platform, None).expect_err("build should fail");
+        assert!(
+            errors
+                .errors()
+                .iter()
+                .any(|error| matches!(error, EnvError::MissingDatabase { .. }))
+        );
+    }
+}
+
+#[test]
 fn injected_defaults_do_not_override_values_that_are_already_there() {
     let manifest = parse("version = 1\n");
     let platform = env(&[
@@ -602,10 +719,25 @@ fn every_error_names_variables_and_never_a_value() {
     let bad = env(&[("DATABASE_URL", "postgresql://u:S3NT1NEL-d0-not-log-me@/db")]);
     assert_quiet(&failure(&one_proxy(r#"{ url = "DATABASE_URL" }"#), &bad));
 
+    // A URL whose query carries the sentinel in a parameter blastit refuses.
+    for query in [
+        "password=S3NT1NEL-d0-not-log-me",
+        "options=-c%20password%3DS3NT1NEL-d0-not-log-me",
+        "sslkey=S3NT1NEL-d0-not-log-me",
+    ] {
+        let url = format!("postgresql://u:p@h:5432/db?{query}");
+        let bad = env(&[("DATABASE_URL", url.as_str())]);
+        assert_quiet(&failure(&one_proxy(r#"{ url = "DATABASE_URL" }"#), &bad));
+    }
+
     // A split port that is not a number.
-    let bad_port = env(&[("DB_HOST", "db.example.com"), ("DB_PORT", "not-a-port")]);
+    let bad_port = env(&[
+        ("DB_HOST", "db.example.com"),
+        ("DB_PORT", "not-a-port"),
+        ("DB_DATABASE", "db"),
+    ]);
     assert_quiet(&failure(
-        &one_proxy(r#"{ host = "DB_HOST", port = "DB_PORT" }"#),
+        &one_proxy(r#"{ host = "DB_HOST", port = "DB_PORT", database = "DB_DATABASE" }"#),
         &bad_port,
     ));
 
