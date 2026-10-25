@@ -3,41 +3,55 @@
 //! The manifest and the wire are normalised with the same rules, so a query
 //! written by hand in a grant matches the text libpq sends, as long as it is
 //! the same statement with arbitrary whitespace, comments and formatting.
+//!
+//! Which characters are whitespace, where a string ends and where a comment
+//! starts all follow PostgreSQL 18's `src/backend/parser/scan.l`, via the
+//! shared [`crate::lexer`]: a no-break space is not whitespace to PostgreSQL,
+//! and a comment can never hide part of a statement.
 
-use crate::lexer::{RegionKind, lex};
+use crate::lexer::{RegionKind, is_space, lex};
 
 /// Normalises `sql` for exact allowlist comparison.
 ///
-/// The rules (ARCHITECTURE.md §6, extended so that a comment can never hide a
-/// second statement):
+/// The rules (ARCHITECTURE.md §6):
 ///
-/// * the text is trimmed;
+/// * the text is trimmed of scan.l whitespace only, so a no-break space at
+///   either end is kept;
 /// * every comment is replaced by a single space: `--` up to the end of its
-///   line, and `/* … */` including PostgreSQL's nesting. An unterminated block
-///   comment swallows the rest of the text;
-/// * every run of whitespace left in the code **outside** quoted regions
-///   collapses to one space;
+///   line (`\n` **or** `\r`), and `/* … */` including PostgreSQL's nesting. An
+///   unterminated block comment swallows the rest of the text;
+/// * every run of whitespace left in the code — scan.l's `space`, i.e. space,
+///   tab, newline, carriage return, form feed, vertical tab — collapses to one
+///   space. Any other character that Rust considers whitespace (no-break space,
+///   line separator, …) is ordinary text to PostgreSQL and is kept as-is;
 /// * trailing `;` separators are removed, including the whitespace around them
 ///   and repeated separators (`SELECT 1 ;;` → `SELECT 1`); only separators in
 ///   code are removed, so `SELECT ';'` is unchanged;
 /// * quoted regions are kept verbatim: single-quoted strings (`'it''s'`),
 ///   E-strings (`E'a\'b  c'`, where a backslash escapes the next character),
+///   bit and hex strings (`B'1010'`, `X'1F'`, with no escape at all),
 ///   double-quoted identifiers (`"a  b"`) and dollar-quoted strings (`$$…$$`,
-///   `$tag$…$tag$`, tags following PostgreSQL's identifier rules);
-/// * `$1` and a bare `$` are ordinary text, not dollar quotes;
+///   `$tag$…$tag$`);
+/// * `$1` is a parameter and `a$b$c` is one identifier: neither opens a dollar
+///   quote. A bare `$` is ordinary text;
 /// * an unterminated quote is kept verbatim to the end of the text; the text is
 ///   trimmed before scanning, so trailing whitespace is gone even inside an
 ///   unterminated quote. This function never panics.
+///
+/// Strings are read as if `standard_conforming_strings` were `on` (see the
+/// crate documentation).
 ///
 /// ```
 /// # use blastit_sqlpolicy::normalize;
 /// assert_eq!(normalize("SELECT 1 -- ; DROP TABLE t"), "SELECT 1");
 /// assert_eq!(normalize("SELECT 1 --\n; DROP TABLE t"), "SELECT 1 ; DROP TABLE t");
+/// assert_eq!(normalize("SELECT 1 --\r; DROP TABLE t"), "SELECT 1 ; DROP TABLE t");
 /// assert_eq!(normalize("SELECT 1 /* c */ 2 ;"), "SELECT 1 2");
 /// assert_eq!(normalize("SELECT 'a  b'"), "SELECT 'a  b'");
+/// assert_eq!(normalize("SELECT\x0b1"), "SELECT 1");
 /// ```
 pub fn normalize(sql: &str) -> String {
-    let chars: Vec<char> = sql.trim().chars().collect();
+    let chars: Vec<char> = sql.trim_matches(is_space).chars().collect();
     let mut out = Output::new(chars.len());
     let mut pending_space = false;
 
@@ -51,7 +65,7 @@ pub fn normalize(sql: &str) -> String {
             }
             RegionKind::Code => {
                 for c in text {
-                    if c.is_whitespace() {
+                    if is_space(*c) {
                         pending_space = true;
                     } else {
                         out.flush_space(&mut pending_space);
@@ -61,6 +75,8 @@ pub fn normalize(sql: &str) -> String {
             }
             RegionKind::SingleQuoted
             | RegionKind::EString
+            | RegionKind::BitString
+            | RegionKind::HexString
             | RegionKind::QuotedIdent
             | RegionKind::DollarQuoted => {
                 // Quoted: verbatim, so inner whitespace and `;` are preserved.
@@ -112,7 +128,7 @@ impl Output {
     fn finish(mut self) -> String {
         while let Some(last) = self.text.chars().next_back() {
             let plain = matches!(self.plain.last(), Some(true));
-            if plain && (last == ';' || last.is_whitespace()) {
+            if plain && (last == ';' || is_space(last)) {
                 self.text.pop();
                 self.plain.pop();
             } else {
@@ -136,10 +152,26 @@ mod tests {
         case("SELECT  1", "SELECT 1");
         case("SELECT\t1", "SELECT 1");
         case("SELECT\n1", "SELECT 1");
+        case("SELECT\r1", "SELECT 1");
         case("SELECT \t\n 1", "SELECT 1");
         case("  SELECT\n\n  1  ", "SELECT 1");
         case("", "");
         case("   \t\n ", "");
+    }
+
+    #[test]
+    fn collapses_exactly_scan_l_whitespace() {
+        // scan.l `space` = [ \t\n\r\f\v]
+        case("SELECT\x0b1", "SELECT 1");
+        case("SELECT\x0c1", "SELECT 1");
+        case("SELECT\r\n1", "SELECT 1");
+        case("SELECT \x0b\x0c\r\n 1", "SELECT 1");
+        // Everything else is ordinary text and must not be touched.
+        case("SELECT\u{a0}1", "SELECT\u{a0}1");
+        case("SELECT\u{85}1", "SELECT\u{85}1");
+        case("SELECT\u{2000}1", "SELECT\u{2000}1");
+        case("SELECT\u{2028}1", "SELECT\u{2028}1");
+        case("SELECT\u{3000}1", "SELECT\u{3000}1");
     }
 
     #[test]
@@ -160,6 +192,18 @@ mod tests {
     }
 
     #[test]
+    fn a_carriage_return_ends_a_line_comment() {
+        case("Q --\r; DROP TABLE t", "Q ; DROP TABLE t");
+        case("Q -- c\r; DROP TABLE t", "Q ; DROP TABLE t");
+        case("BEGIN -- x\r; DROP TABLE t", "BEGIN ; DROP TABLE t");
+        case("SELECT 1 -- c\r\nFROM t", "SELECT 1 FROM t");
+        case("SELECT 1 --\r", "SELECT 1");
+        // Without a newline of either kind, the comment runs to the end.
+        case("Q --\n; DROP TABLE t", "Q ; DROP TABLE t");
+        case("Q --; DROP TABLE t", "Q");
+    }
+
+    #[test]
     fn comment_markers_inside_quotes_are_not_comments() {
         case("SELECT '-- not a comment'", "SELECT '-- not a comment'");
         case(
@@ -167,6 +211,9 @@ mod tests {
             "SELECT '/* not a comment */'",
         );
         case("SELECT \"-- not a comment\"", "SELECT \"-- not a comment\"");
+        case("SELECT E'-- not a comment'", "SELECT E'-- not a comment'");
+        case("SELECT B'-- not a comment'", "SELECT B'-- not a comment'");
+        case("SELECT X'-- not a comment'", "SELECT X'-- not a comment'");
         case(
             "SELECT $$--  not  a  comment$$",
             "SELECT $$--  not  a  comment$$",
@@ -217,7 +264,19 @@ mod tests {
         case("SELECT $$a  b", "SELECT $$a  b");
         case("SELECT $tag$a", "SELECT $tag$a");
         case("SELECT $é$a  b$é$", "SELECT $é$a  b$é$");
+        case("SELECT $€$a  b$€$", "SELECT $€$a  b$€$");
+        case("SELECT $€1_$a  b$€1_$", "SELECT $€1_$a  b$€1_$");
         case("SELECT $_t1$a  b$_t1$", "SELECT $_t1$a  b$_t1$");
+    }
+
+    #[test]
+    fn identifiers_keep_their_dollar_signs() {
+        // `a$b$c` is one identifier (scan.l `ident_cont` includes `$`), so the
+        // spaces around it collapse instead of opening a dollar quote.
+        case("SELECT a$b$c", "SELECT a$b$c");
+        case("SELECT a$b$x   y$b$z", "SELECT a$b$x y$b$z");
+        case("SELECT a$$b$$c", "SELECT a$$b$$c");
+        case("SELECT  a$tag$x   y$tag$z  ", "SELECT a$tag$x y$tag$z");
     }
 
     #[test]
@@ -231,8 +290,6 @@ mod tests {
 
     #[test]
     fn e_strings_after_an_identifier_are_not_e_strings() {
-        // `WHERE'x'` and `xE'y'` hold no E-string, so the space collapse applies
-        // to everything outside the quoted part.
         case(r"WHERE'x  y'", r"WHERE'x  y'");
         case(r"SELECT xE'y  z'", r"SELECT xE'y  z'");
         case(r"SELECT name  E'y  z'", r"SELECT name E'y  z'");
@@ -244,6 +301,26 @@ mod tests {
         assert_eq!(escaped, r"SELECT E'a\'b  c'");
         assert_ne!(escaped, normalize(r"SELECT E'a\'b c'"));
         assert_ne!(escaped, r"SELECT E'a'b c'");
+    }
+
+    #[test]
+    fn a_number_before_the_e_is_not_a_string_prefix() {
+        // scan.l `integer_junk`: `1E` is one (error) token, so the quote after
+        // it starts a plain string, where a backslash is not an escape.
+        case(r"1E'a\'b  c'", r"1E'a\'b c'");
+        case(r".5E'a\'b  c'", r".5E'a\'b c'");
+        case(r"0x1E'a\'b  c'", r"0x1E'a\'b c'");
+        case("SELECT 1, E'a  b'", "SELECT 1, E'a  b'");
+    }
+
+    #[test]
+    fn bit_and_hex_strings_have_no_escape() {
+        // xb/xh are `[^']*`: no `''`, no backslash.
+        case(r"B'a\'b  c'", r"B'a\'b c'");
+        case(r"X'a\'b  c'", r"X'a\'b c'");
+        case("B'a''b  c'", "B'a''b  c'");
+        case("SELECT B'1010 1010'", "SELECT B'1010 1010'");
+        case("SELECT X'1F 2A'", "SELECT X'1F 2A'");
     }
 
     #[test]
@@ -266,6 +343,15 @@ mod tests {
         case("SELECT 'a' 'b  c", "SELECT 'a' 'b  c");
         case("SELECT 'a  b;", "SELECT 'a  b;");
         case("SELECT 'a  b';", "SELECT 'a  b'");
+        case(r"SELECT B'a  b", r"SELECT B'a  b");
+    }
+
+    #[test]
+    fn strings_separated_by_a_newline_are_not_continued() {
+        // scan.l would scan `'a'\n'b'` as one literal; see the lexer's module
+        // documentation for why that difference is harmless.
+        case("SELECT 'a'\n'b'", "SELECT 'a' 'b'");
+        case("SELECT 'a'  'b'", "SELECT 'a' 'b'");
     }
 
     #[test]
@@ -273,6 +359,7 @@ mod tests {
         case("SELECT  'héllo  wörld'", "SELECT 'héllo  wörld'");
         case("SELECT 'héllo'  ,  'wörld'", "SELECT 'héllo' , 'wörld'");
         case("SELECT '日本語  テスト'", "SELECT '日本語  テスト'");
+        case("SELECT €€", "SELECT €€");
     }
 
     #[test]
@@ -287,6 +374,9 @@ mod tests {
             "SELECT 1 -- don't  collapse",
             r"SELECT E'a\'b  c'",
             "SELECT 1/* c */2",
+            "Q --\r; DROP TABLE t",
+            "SELECT B'a\\'b  c'",
+            "SELECT\u{a0}1",
         ] {
             let once = normalize(input);
             assert_eq!(normalize(&once), once, "input: {input:?}");

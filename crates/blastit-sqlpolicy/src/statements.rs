@@ -6,17 +6,17 @@
 //! transaction-control statements a grant may enable with
 //! `transaction_control = true`, and nothing else.
 
-use crate::lexer::{RegionKind, lex};
-use crate::normalize::normalize;
+use crate::lexer::{RegionKind, is_space, lex};
 
 /// How many statements `sql` contains, counting only segments that hold
 /// something other than whitespace and comments.
 ///
-/// Splits on `;` in code: never inside single-quoted strings, E-strings,
-/// double-quoted identifiers, dollar-quoted strings or comments (`--`, and
-/// nested `/* */`). Used to make sure a transaction-control statement is the
-/// *only* statement in the text, so that a separator hidden in a string or a
-/// comment cannot smuggle a second statement past the policy.
+/// Splits on `;` in code: never inside single-quoted strings, E-strings, bit or
+/// hex strings, double-quoted identifiers, dollar-quoted strings or comments
+/// (`--`, ended by `\n` or `\r`, and nested `/* */`). Used to make sure a
+/// transaction-control statement is the *only* statement in the text, so that a
+/// separator hidden in a string or a comment cannot smuggle a second statement
+/// past the policy.
 pub(crate) fn statement_count_hint(sql: &str) -> usize {
     let chars: Vec<char> = sql.chars().collect();
     let mut count = 0;
@@ -32,13 +32,15 @@ pub(crate) fn statement_count_hint(sql: &str) -> usize {
                             count += 1;
                             has_content = false;
                         }
-                    } else if !c.is_whitespace() {
+                    } else if !is_space(*c) {
                         has_content = true;
                     }
                 }
             }
             RegionKind::SingleQuoted
             | RegionKind::EString
+            | RegionKind::BitString
+            | RegionKind::HexString
             | RegionKind::QuotedIdent
             | RegionKind::DollarQuoted => has_content = true,
         }
@@ -50,27 +52,28 @@ pub(crate) fn statement_count_hint(sql: &str) -> usize {
     count
 }
 
-/// Whether `sql` is a single transaction-control statement: `BEGIN`,
-/// `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT <ident>`,
-/// `RELEASE [SAVEPOINT] <ident>` or
+/// Whether the already-normalised text `normalized` is a single
+/// transaction-control statement: `BEGIN`, `START TRANSACTION`, `COMMIT`,
+/// `END`, `ROLLBACK`, `SAVEPOINT <ident>`, `RELEASE [SAVEPOINT] <ident>` or
 /// `ROLLBACK [WORK|TRANSACTION] TO [SAVEPOINT] <ident>`.
 ///
-/// The text is normalised first, so comments are ignored and a trailing `;` is
-/// irrelevant. Keywords are case-insensitive; identifiers are plain
-/// `[A-Za-z_][A-Za-z0-9_]*` or double-quoted. `BEGIN`, `COMMIT`, `END` and
-/// `ROLLBACK` take an optional `WORK`/`TRANSACTION` suffix, and `BEGIN` and
+/// The caller passes text from [`crate::normalize`], so comments are gone and a
+/// trailing `;` is irrelevant. Keywords are case-insensitive; identifiers are
+/// plain `[A-Za-z_][A-Za-z0-9_]*` or double-quoted. `BEGIN`, `COMMIT`, `END`
+/// and `ROLLBACK` take an optional `WORK`/`TRANSACTION` suffix, and `BEGIN` and
 /// `START TRANSACTION` take an optional transaction mode list
 /// (`ISOLATION LEVEL …`, `READ ONLY`, `READ WRITE`, separated by whitespace or
-/// commas).
+/// commas). Only scan.l's `space` separates tokens, so `BEGIN` followed by a
+/// no-break space is not this grammar's `BEGIN` — PostgreSQL does not read it
+/// as one either.
 ///
 /// A text holding more than one statement never qualifies, however harmless
 /// each statement looks on its own.
-pub(crate) fn is_transaction_control(sql: &str) -> bool {
-    let normalized = normalize(sql);
-    if statement_count_hint(&normalized) != 1 {
+pub(crate) fn is_transaction_control(normalized: &str) -> bool {
+    if statement_count_hint(normalized) != 1 {
         return false;
     }
-    let mut parser = Parser::new(&normalized);
+    let mut parser = Parser::new(normalized);
     parser.parse_statement() && parser.at_end()
 }
 
@@ -88,9 +91,9 @@ impl Parser {
         }
     }
 
-    /// Skips whitespace.
+    /// Skips scan.l whitespace.
     fn skip_ws(&mut self) {
-        while matches!(self.chars.get(self.pos), Some(c) if c.is_whitespace()) {
+        while matches!(self.chars.get(self.pos), Some(c) if is_space(*c)) {
             self.pos += 1;
         }
     }
@@ -245,6 +248,13 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::normalize::normalize;
+
+    /// The grammar consumes normalised text, which is what `Allowlist::check`
+    /// passes it.
+    fn tc(sql: &str) -> bool {
+        is_transaction_control(&normalize(sql))
+    }
 
     fn count(input: &str, expected: usize) {
         assert_eq!(statement_count_hint(input), expected, "input: {input:?}");
@@ -261,6 +271,9 @@ mod tests {
         count("SELECT 1 -- ;\n", 1);
         count("SELECT 1 /* ; */", 1);
         count("SELECT E'a\\';b'", 1);
+        count("SELECT B'a;b'", 1);
+        count("SELECT X'a;b'", 1);
+        count("SELECT a$b;c", 2);
     }
 
     #[test]
@@ -280,11 +293,13 @@ mod tests {
         count(";;", 0);
         count(" ; ; ", 0);
         count("-- only a comment", 0);
+        count("-- only a comment\r", 0);
         count("/* only a comment */", 0);
         count("/* a /* nested */ still */", 0);
         count("/* unterminated", 0);
         count("BEGIN; -- trailing comment", 1);
         count("/* lead */ SELECT 1 /* tail */", 1);
+        count("Q --\r; DROP TABLE t", 2);
     }
 
     #[test]
@@ -292,11 +307,13 @@ mod tests {
         count("SELECT 'a;b'", 1);
         count("\"a;b\"", 1);
         count("SELECT E'a\\';b'", 1);
+        count("SELECT B'a;b'", 1);
         count("SELECT $tag$a; b$tag$", 1);
         count("SELECT 1 -- ;\nDROP TABLE t", 1);
         count("SELECT 1 /* ; */ DROP TABLE t", 1);
         // ... while a separator after a terminated comment does split.
         count("SELECT 1; -- trailing\nSELECT 2", 2);
+        count("SELECT 1; -- trailing\rSELECT 2", 2);
         count("SELECT 1 /* c */ ; SELECT 2", 2);
     }
 
@@ -305,6 +322,8 @@ mod tests {
         count("SELECT 'a; b", 1);
         count("SELECT \"a; b", 1);
         count("SELECT E'a; b", 1);
+        count("SELECT B'a; b", 1);
+        count("SELECT X'a; b", 1);
         count("SELECT $tag$a; b", 1);
     }
 
@@ -326,7 +345,7 @@ mod tests {
             "ROLLBACK WORK",
             "ROLLBACK TRANSACTION",
         ] {
-            assert!(is_transaction_control(sql), "should accept {sql:?}");
+            assert!(tc(sql), "should accept {sql:?}");
         }
     }
 
@@ -345,7 +364,7 @@ mod tests {
             "ROLLBACK WORK TO SAVEPOINT s1",
             "ROLLBACK TRANSACTION TO s1",
         ] {
-            assert!(is_transaction_control(sql), "should accept {sql:?}");
+            assert!(tc(sql), "should accept {sql:?}");
         }
     }
 
@@ -363,8 +382,11 @@ mod tests {
             "BEGIN ISOLATION LEVEL SERIALIZABLE, READ ONLY",
             "START TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE",
             "BEGIN READ ONLY, ISOLATION LEVEL SERIALIZABLE",
+            "\tBEGIN\tREAD\tONLY\t",
+            "BEGIN\rREAD\rONLY",
+            "BEGIN\x0bREAD\x0cONLY",
         ] {
-            assert!(is_transaction_control(sql), "should accept {sql:?}");
+            assert!(tc(sql), "should accept {sql:?}");
         }
     }
 
@@ -375,13 +397,14 @@ mod tests {
             "BEGIN /* go */",
             "BEGIN; -- go",
             "BEGIN;",
+            "BEGIN; -- go\r",
             "COMMIT /* go */;",
             "END -- go",
             "ROLLBACK WORK; -- go",
             "SAVEPOINT s1 -- go",
             "START TRANSACTION /* iso */ READ WRITE -- go",
         ] {
-            assert!(is_transaction_control(sql), "should accept {sql:?}");
+            assert!(tc(sql), "should accept {sql:?}");
         }
     }
 
@@ -422,8 +445,13 @@ mod tests {
             ";",
             "  ",
             "'BEGIN'",
+            // Not scan.l whitespace, so PostgreSQL does not read it as BEGIN.
+            "BEGIN\u{a0}",
+            "\u{a0}BEGIN",
+            "BEGIN\u{2028}",
+            "BEGIN E'x'",
         ] {
-            assert!(!is_transaction_control(sql), "should reject {sql:?}");
+            assert!(!tc(sql), "should reject {sql:?}");
         }
     }
 
@@ -435,8 +463,11 @@ mod tests {
             "SAVEPOINT s1; SELECT 1",
             "BEGIN;; COMMIT",
             "BEGIN; -- c\nDROP TABLE t",
+            "BEGIN -- c\r; DROP TABLE t",
+            "Q --\r; DROP TABLE t",
+            "BEGIN; SELECT 'a; b'",
         ] {
-            assert!(!is_transaction_control(sql), "should reject {sql:?}");
+            assert!(!tc(sql), "should reject {sql:?}");
         }
     }
 }

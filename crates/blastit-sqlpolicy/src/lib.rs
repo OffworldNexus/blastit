@@ -9,6 +9,24 @@
 //! one space. Matching the whole normalised text is what makes a listed query
 //! followed by a second statement fail to match.
 //!
+//! # Agreement with PostgreSQL
+//!
+//! Normalisation follows PostgreSQL 18's `src/backend/parser/scan.l` for every
+//! boundary a policy check depends on: which characters are whitespace
+//! (`space` = `[ \t\n\r\f\v]`, and nothing else), where a line comment ends
+//! (`\n` or `\r`), where a quoted region starts and ends (`''`, E-strings,
+//! `B'…'`/`X'…'`, `"…"`, `$tag$…$tag$`), and which `$` opens a dollar quote
+//! (`a$b$c` is one identifier). See the `lexer` module for the two deliberate
+//! divergences, neither of which can hide code or quoted data.
+//!
+//! **`standard_conforming_strings = on` is assumed**, which is PostgreSQL's
+//! default and what dbproxy must force on every upstream connection (as a
+//! startup parameter, or `SET standard_conforming_strings = on`). With it on, a
+//! `'…'` literal has no backslash escapes: `'a\'` ends at the second quote,
+//! which is how this crate reads it. With it off, PostgreSQL would read the
+//! same bytes as an escape string ending later, and a statement could contain
+//! text this crate thought was outside the literal.
+//!
 //! A grant with `transaction_control = true` additionally allows the
 //! transaction-control statements (and only those) when the text holds exactly
 //! one statement: `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`,
@@ -121,7 +139,8 @@ impl Allowlist {
         if self.queries.contains(&normalized) {
             return Decision::Allowed;
         }
-        if self.transaction_control && is_transaction_control(sql) {
+        // The grammar wants the text normalised exactly once, as here.
+        if self.transaction_control && is_transaction_control(&normalized) {
             return Decision::Allowed;
         }
         Decision::Denied { normalized }
@@ -428,6 +447,124 @@ mod tests {
     }
 
     #[test]
+    fn a_carriage_return_ends_a_line_comment() {
+        // scan.l `comment` ends at `\n` *or* `\r`, so the `;` on the next line
+        // is code again and the comment-only query no longer matches.
+        let allow = allowlist(&["Q"], true);
+        assert_eq!(
+            allow.check("Q --\r; DROP TABLE t"),
+            Decision::Denied {
+                normalized: "Q ; DROP TABLE t".to_string()
+            }
+        );
+        // The mirror image, as with `\n`: a comment that never ends before the
+        // end of the text stands for `Q` and is a different text.
+        let allow = allowlist(&["Q -- ; DROP TABLE t"], true);
+        assert_eq!(
+            allow.check("Q --\r; DROP TABLE t"),
+            Decision::Denied {
+                normalized: "Q ; DROP TABLE t".to_string()
+            }
+        );
+        // ... and a transaction statement cannot hide one behind a CR.
+        let allow = allowlist(&[CATALOG_QUERY], true);
+        assert!(!allow.check("BEGIN -- x\r; DROP TABLE t").is_allowed());
+        assert!(!allow.check("BEGIN -- x\rDROP TABLE t").is_allowed());
+        // A CR-terminated comment on its own is still a fine BEGIN.
+        assert!(allow.check("BEGIN -- x\r").is_allowed());
+        assert!(allow.check("BEGIN; -- x\r").is_allowed());
+    }
+
+    #[test]
+    fn dollar_signs_inside_identifiers_are_not_dollar_quotes() {
+        // scan.l `ident_cont` includes `$`, so `a$b$c` is one identifier and no
+        // dollar quote can start in the middle of it.
+        let allow = allowlist(&["SELECT a$b$x y$b$z"], false);
+        assert_eq!(allow.check("SELECT a$b$x   y$b$z;"), Decision::Allowed);
+        assert_eq!(allow.check("SELECT a$b$x y$b$z"), Decision::Allowed);
+        // A real dollar quote still works, and `$1$` is a parameter plus `$`.
+        let allow = allowlist(&["SELECT $tag$a  b$tag$"], false);
+        assert_eq!(allow.check("SELECT  $tag$a  b$tag$  ;"), Decision::Allowed);
+        let allow = allowlist(&["SELECT $1$"], false);
+        assert_eq!(allow.check("SELECT  $1$ ;"), Decision::Allowed);
+    }
+
+    #[test]
+    fn bit_and_hex_strings_are_opaque_without_escapes() {
+        // xb/xh are `[^']*`: no backslash escape, so a backslash-escaped quote
+        // does not keep the literal open and the spaces after it are code.
+        let allow = allowlist(&[r"SELECT B'a\'b c'"], false);
+        assert_eq!(allow.check(r"SELECT B'a\'b  c'"), Decision::Allowed);
+        assert_eq!(allow.check(r"SELECT   B'a\'b    c'  "), Decision::Allowed);
+        // A doubled quote ends the bit string and starts a standard string.
+        let allow = allowlist(&["SELECT B'a''b  c'"], false);
+        assert_eq!(allow.check("SELECT B'a''b  c'"), Decision::Allowed);
+        assert!(!allow.check("SELECT B'a''b c'").is_allowed());
+        // Hex strings behave the same, and are not `SELECT X'1F'` plus junk.
+        let allow = allowlist(&["SELECT X'1F 2A'"], false);
+        assert_eq!(allow.check("SELECT X'1F 2A'"), Decision::Allowed);
+        assert!(!allow.check("SELECT X'1F 2A' , 'z'").is_allowed());
+    }
+
+    #[test]
+    fn non_pg_whitespace_is_not_collapsed() {
+        let allow = allowlist(&["SELECT 1"], true);
+        for sql in [
+            "SELECT\u{a0}1",
+            "SELECT\u{2028}1",
+            "SELECT\u{2000}1",
+            "SELECT\u{85}1",
+        ] {
+            assert!(!allow.check(sql).is_allowed(), "should deny {sql:?}");
+        }
+        // ... while scan.l's own whitespace is.
+        for sql in [
+            "SELECT 1",
+            "SELECT\t1",
+            "SELECT\r1",
+            "SELECT\x0b1",
+            "SELECT\x0c1",
+            "SELECT\r\n1",
+            " SELECT \t\r\n\x0b\x0c 1 ; ",
+        ] {
+            assert!(allow.check(sql).is_allowed(), "should allow {sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_number_glues_a_following_e_to_itself() {
+        // `1E` is one token in PostgreSQL (`integer_junk`), so the quote after
+        // it starts a standard string: no backslash escape, which means the
+        // literal ends at the second quote and the spaces after it collapse.
+        let allow = allowlist(&["SELECT 1"], false);
+        assert_eq!(
+            allow.check(r"SELECT 1E'a\'b  c'"),
+            Decision::Denied {
+                normalized: r"SELECT 1E'a\'b c'".to_string()
+            }
+        );
+        // With a space before the E, the E does start its own token, so the
+        // backslash escapes the quote and both spaces survive.
+        let allow = allowlist(&[r"SELECT E'a\'b  c'"], false);
+        assert_eq!(allow.check(r"SELECT   E'a\'b  c'  ;"), Decision::Allowed);
+        assert_eq!(
+            allow.check(r"SELECT E'a\'b c'"),
+            Decision::Denied {
+                normalized: r"SELECT E'a\'b c'".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn queried_then_appended_statement_still_denied() {
+        // A `;` hidden in a string, an E-string or a dollar quote is not a
+        // separator, but it does not let a listed query grow a second one.
+        let allow = allowlist(&["SELECT 'a; b'"], true);
+        assert_eq!(allow.check("SELECT 'a; b';"), Decision::Allowed);
+        assert!(!allow.check("SELECT 'a; b'; DROP TABLE t").is_allowed());
+    }
+
+    #[test]
     fn queries_are_stored_normalised_and_distinct() {
         let allow = allowlist(
             &[
@@ -548,9 +685,11 @@ mod tests {
     #[test]
     fn exhaustive_short_inputs_never_panic() {
         // Every string of length <= 4 over a hostile alphabet, so quote,
-        // E-string, comment and dollar-quote handling is exercised together.
+        // E-string, bit/hex-string, comment and dollar-quote handling is
+        // exercised together.
         let alphabet = [
-            '\'', '"', '$', ';', '-', '/', '*', '\\', ' ', '\n', 'a', 'b', 'e',
+            '\'', '"', '$', ';', '-', '/', '*', '\\', ' ', '\n', '\r', '\x0b', 'a', 'b', 'e', 'B',
+            'X', '€',
         ];
         let allow = allowlist(&["SELECT 1", "BEGIN"], true);
         for len in 0..=4 {
