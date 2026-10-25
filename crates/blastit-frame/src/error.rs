@@ -86,8 +86,18 @@ pub enum FrameError {
         detail: &'static str,
     },
 
-    /// A `ctl.chan` frame carried a non-zero id.
-    #[error("ctl.chan frames must carry id 0, got {id}")]
+    /// A response status outside the range HTTP allows.
+    #[error("response status {status} is outside the 100..=999 range")]
+    BadStatus {
+        /// The offending status code.
+        status: u16,
+    },
+
+    /// A frame that has no stream carried a non-zero id.
+    ///
+    /// `ctl.chan` messages and `READY` are the only frames without a stream, so
+    /// they are the only ones that must use id 0.
+    #[error("frames without a stream (ctl.chan and READY) must carry id 0, got {id}")]
     IdNotZero {
         /// The offending id.
         id: u32,

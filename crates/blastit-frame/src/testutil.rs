@@ -60,6 +60,14 @@ pub fn shorten_frame(frame: &[u8], new_payload_len: usize) -> Vec<u8> {
     out
 }
 
+/// Total frame size a `length` field asks for, saturating at `usize::MAX`.
+///
+/// Spelled out here so the expectations stay 32-bit-safe: `4 + u32::MAX` does
+/// not fit a 32-bit `usize`, and the decoder saturates rather than wrapping.
+pub fn total_frame_size(length: u32) -> usize {
+    (u64::from(length) + 4).min(usize::MAX as u64) as usize
+}
+
 /// A whole request/response exchange with every frame kind on `http.chan` or
 /// `view.chan`, as `(encoded stream, expected frames)`.
 pub fn client_exchange() -> (Vec<u8>, Vec<(u32, Frame)>) {

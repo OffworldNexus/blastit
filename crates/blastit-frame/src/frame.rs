@@ -32,6 +32,29 @@
 //! Decoding is strict: a payload with trailing bytes, a field that does not
 //! fit, an undefined enum value or a non-UTF-8 `string32` is an error. Nothing
 //! in this module panics on input, whatever the bytes are.
+//!
+//! Beyond the encoding, two fields are range-checked in both directions:
+//! `RESP_HEAD.status` must be in [`MIN_STATUS`]`..=`[`MAX_STATUS`]
+//! (`100..=999`), and [`crate::ExitStatus::Signal`] must be a plausible signal
+//! number (see [`crate::MIN_SIGNAL`], [`crate::MAX_SIGNAL`]).
+//!
+//! # Log safety
+//!
+//! [`Debug`](core::fmt::Debug) is implemented by hand for [`Frame`],
+//! [`ReqHead`] and [`RespHead`], and nowhere prints a header value or a body:
+//! those routinely carry personal data and secrets and are never logged
+//! (ARCHITECTURE.md §8.1). A head prints its method, the *path* of its target
+//! (query strings are dropped), its header names, and its connection facts; a
+//! body prints its length. Use the accessors when the bytes themselves are
+//! needed.
+//!
+//! ```text
+//! ReqHead { method: "GET", path: "/search", headers: ["Host", "Cookie"],
+//!           remote_addr: "203.0.113.7:1234", scheme: Https, server_port: 443, .. }
+//! RespBody { len: 5120 }
+//! ```
+//!
+//! `server_name` is the `Host` header's value, so it is left out too.
 
 use crate::ctl::Ctl;
 use crate::error::FrameError;
@@ -121,6 +144,14 @@ impl TypeCode {
             self,
             Self::Spawn | Self::Spawned | Self::Retire | Self::Exited | Self::Drain
         )
+    }
+
+    /// Whether this kind has no stream and therefore must use id 0.
+    ///
+    /// That is every `ctl.chan` message, plus `READY`, which describes the
+    /// process rather than a request.
+    pub const fn requires_zero_id(self) -> bool {
+        self.is_ctl() || matches!(self, Self::Ready)
     }
 
     /// The frame's name as it appears in ARCHITECTURE.md §3.1.
@@ -227,7 +258,7 @@ impl DoneOutcome {
 }
 
 /// The head of a request, rebuilt into a WSGI `environ` by the view.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct ReqHead {
     /// Request method, verbatim and case-preserved.
     pub method: Vec<u8>,
@@ -245,10 +276,41 @@ pub struct ReqHead {
     pub server_port: u16,
 }
 
+/// The `Debug` view of a request head, for logs (ARCHITECTURE.md §8.1).
+///
+/// It prints what the `request` event is allowed to carry and nothing else:
+/// the method, the *path* of the target (a query string is never logged), the
+/// remote address, the scheme and port, and the header **names**.
+/// `server_name` is the `Host` header's value and header values are never
+/// logged, so it is left out along with every value in `headers`.
+impl core::fmt::Debug for ReqHead {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ReqHead")
+            .field("method", &BytesAsText(&self.method))
+            .field("path", &PathOnly(&self.target))
+            .field("headers", &HeaderNames(&self.headers))
+            .field("remote_addr", &self.remote_addr)
+            .field("scheme", &self.scheme)
+            .field("server_port", &self.server_port)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Lowest response status this crate accepts; below it, a "status" is not a
+/// response status at all (interim `1xx` answers are perfectly valid).
+pub const MIN_STATUS: u16 = 100;
+
+/// Highest response status this crate accepts.
+///
+/// HTTP's own registry stops at `511`, but nothing stops an application from
+/// having its own code in the `5xx` block, so the ceiling is the last
+/// three-digit status.
+pub const MAX_STATUS: u16 = 999;
+
 /// The head of a response, sent by the view before any body frame.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RespHead {
-    /// HTTP status code.
+    /// HTTP status code, in `100..=999`.
     pub status: u16,
     /// Reason phrase; may be empty, in which case the front end picks one.
     pub reason: Vec<u8>,
@@ -256,11 +318,54 @@ pub struct RespHead {
     pub headers: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
+impl Default for RespHead {
+    /// A `200` head with no reason and no headers.
+    ///
+    /// Deliberately not derived: a default `0` status could never be encoded or
+    /// decoded, so [`RespHead::default`] produces a valid one.
+    fn default() -> Self {
+        Self {
+            status: 200,
+            reason: Vec::new(),
+            headers: Vec::new(),
+        }
+    }
+}
+
+impl RespHead {
+    /// Reject a status outside the range a response may carry.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameError::BadStatus`] for anything outside `100..=999`.
+    pub const fn validated(&self) -> Result<(), FrameError> {
+        if self.status < MIN_STATUS || self.status > MAX_STATUS {
+            return Err(FrameError::BadStatus {
+                status: self.status,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The `Debug` view of a response head, for logs (ARCHITECTURE.md §8.1).
+///
+/// Only the status and the header **names**: header values are never logged,
+/// and the reason phrase is application text.
+impl core::fmt::Debug for RespHead {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RespHead")
+            .field("status", &self.status)
+            .field("headers", &HeaderNames(&self.headers))
+            .finish_non_exhaustive()
+    }
+}
+
 /// One frame: its kind and its fields.
 ///
 /// The stream a frame belongs to is carried by the frame's `id`, not by the
 /// frame itself (see [`crate::Decoder::next_frame`] and [`crate::encode`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Frame {
     /// A request head; starts a new stream.
     ReqHead(ReqHead),
@@ -292,6 +397,72 @@ pub enum Frame {
     Ctl(Ctl),
 }
 
+/// The `Debug` view of a frame, for logs (ARCHITECTURE.md §8.1).
+///
+/// Header values and bodies are never printed: a body shows its length, and a
+/// head goes through the redacting [`ReqHead`] / [`RespHead`] implementations.
+/// Use the accessors when the real bytes are needed.
+impl core::fmt::Debug for Frame {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ReqHead(head) => f.debug_tuple("ReqHead").field(head).finish(),
+            Self::ReqBody(body) => f.debug_struct("ReqBody").field("len", &body.len()).finish(),
+            Self::ReqEnd => f.write_str("ReqEnd"),
+            Self::Cancel => f.write_str("Cancel"),
+            Self::RespHead(head) => f.debug_tuple("RespHead").field(head).finish(),
+            Self::RespBody(body) => f
+                .debug_struct("RespBody")
+                .field("len", &body.len())
+                .finish(),
+            Self::RespEnd => f.write_str("RespEnd"),
+            Self::RespAbort { reason } => {
+                f.debug_struct("RespAbort").field("reason", reason).finish()
+            }
+            Self::Done { outcome } => f.debug_tuple("Done").field(outcome).finish(),
+            Self::Ready => f.write_str("Ready"),
+            Self::Ctl(msg) => f.debug_tuple("Ctl").field(msg).finish(),
+        }
+    }
+}
+
+/// Prints a byte string as lossy UTF-8: a method, a path or a header name is
+/// useful in a log even when it is not valid UTF-8, and it is never a secret.
+struct BytesAsText<'a>(&'a [u8]);
+
+impl core::fmt::Debug for BytesAsText<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", String::from_utf8_lossy(self.0))
+    }
+}
+
+/// Prints a request target with its query string and fragment removed: those
+/// routinely carry personal data and are never logged (ARCHITECTURE.md §8.1).
+struct PathOnly<'a>(&'a [u8]);
+
+impl core::fmt::Debug for PathOnly<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let end = self
+            .0
+            .iter()
+            .position(|byte| *byte == b'?' || *byte == b'#')
+            .unwrap_or(self.0.len());
+        BytesAsText(&self.0[..end]).fmt(f)
+    }
+}
+
+/// Prints the names of a header list and none of the values.
+struct HeaderNames<'a>(&'a [(Vec<u8>, Vec<u8>)]);
+
+impl core::fmt::Debug for HeaderNames<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut list = f.debug_list();
+        for (name, _value) in self.0 {
+            list.entry(&BytesAsText(name));
+        }
+        list.finish()
+    }
+}
+
 impl Frame {
     /// The wire type code of this frame.
     ///
@@ -321,10 +492,20 @@ impl Frame {
         }
     }
 
+    /// Whether this frame has no stream and therefore must carry id 0.
+    ///
+    /// That is every `ctl.chan` message, plus `READY`, which is about the
+    /// process rather than a request.
+    pub const fn requires_zero_id(&self) -> bool {
+        matches!(self, Self::Ctl(_) | Self::Ready)
+    }
+
     /// Encode this frame's payload into `out`, without any header.
     ///
     /// The header needs the payload length, which is why the encoder runs this
     /// twice: once against a counting sink and once against the real buffer.
+    /// Validation lives here too, so an invalid frame is refused before a byte
+    /// of it is written.
     pub(crate) fn write_payload(&self, sink: &mut impl Sink) -> Result<(), FrameError> {
         match self {
             Self::ReqHead(head) => {
@@ -342,6 +523,7 @@ impl Frame {
                 Ok(())
             }
             Self::RespHead(head) => {
+                head.validated()?;
                 sink.put_u16(head.status);
                 sink.put_bytes32(&head.reason, "reason")?;
                 write_headers(sink, &head.headers)
@@ -356,11 +538,12 @@ impl Frame {
         }
     }
 
-    /// Reject a `ctl.chan` frame that is not addressed to id 0.
+    /// Reject a frame without a stream that is not addressed to id 0.
     pub(crate) fn check_id(&self, id: u32) -> Result<(), FrameError> {
-        match self {
-            Self::Ctl(msg) => msg.check_id(id),
-            _ => Ok(()),
+        if id == 0 || !self.requires_zero_id() {
+            Ok(())
+        } else {
+            Err(FrameError::IdNotZero { id })
         }
     }
 
@@ -381,11 +564,15 @@ impl Frame {
             TypeCode::ReqBody => Self::ReqBody(reader.take_rest().to_vec()),
             TypeCode::ReqEnd => Self::ReqEnd,
             TypeCode::Cancel => Self::Cancel,
-            TypeCode::RespHead => Self::RespHead(RespHead {
-                status: reader.u16("status")?,
-                reason: reader.bytes32("reason")?.to_vec(),
-                headers: read_headers(&mut reader)?,
-            }),
+            TypeCode::RespHead => {
+                let head = RespHead {
+                    status: reader.u16("status")?,
+                    reason: reader.bytes32("reason")?.to_vec(),
+                    headers: read_headers(&mut reader)?,
+                };
+                head.validated()?;
+                Self::RespHead(head)
+            }
             TypeCode::RespBody => Self::RespBody(reader.take_rest().to_vec()),
             TypeCode::RespEnd => Self::RespEnd,
             TypeCode::RespAbort => Self::RespAbort {
@@ -403,6 +590,19 @@ impl Frame {
         };
         reader.finish()?;
         Ok(frame)
+    }
+
+    /// Decode a payload the caller already owns.
+    ///
+    /// Body frames take the buffer as it is, so the streaming path never has to
+    /// copy a body twice: once out of the read buffer, and again out of a
+    /// [`crate::RawFrame`].
+    pub(crate) fn decode_owned(ty: u8, payload: Vec<u8>) -> Result<Self, FrameError> {
+        match TypeCode::from_code(ty)? {
+            TypeCode::ReqBody => Ok(Self::ReqBody(payload)),
+            TypeCode::RespBody => Ok(Self::RespBody(payload)),
+            _ => Self::decode(ty, &payload),
+        }
     }
 }
 

@@ -218,10 +218,14 @@ mod tests {
                 "max_frame {bad} should be rejected"
             );
         }
-        assert!(matches!(
-            Limits::new(MAX_FRAME_CEILING + 1),
-            Err(FrameError::BadLimits { .. })
-        ));
+        // One above the ceiling, where the platform's `usize` has room for it
+        // (on a 32-bit target there is no larger value, so nothing to test).
+        if let Some(too_big) = MAX_FRAME_CEILING.checked_add(1) {
+            assert!(matches!(
+                Limits::new(too_big),
+                Err(FrameError::BadLimits { .. })
+            ));
+        }
         assert!(Limits::new(MIN_FRAME).is_ok());
         assert!(Limits::new(MAX_FRAME_CEILING).is_ok());
         assert_eq!(Limits::new(64).map(Limits::max_frame), Ok(64));
@@ -254,7 +258,7 @@ mod tests {
         assert_eq!(
             limits.check_declared_len(u32::MAX),
             Err(FrameError::FrameTooLarge {
-                size: u32::MAX as usize + 4,
+                size: crate::testutil::total_frame_size(u32::MAX),
                 max: 64
             })
         );

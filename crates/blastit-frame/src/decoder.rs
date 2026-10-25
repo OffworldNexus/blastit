@@ -118,22 +118,25 @@ impl Decoder {
 
     /// The next frame, decoded into a [`Frame`].
     ///
+    /// Body frames take ownership of the bytes taken off the wire, so a body is
+    /// copied exactly once, on its way out of the decoder's buffer.
+    ///
     /// # Errors
     ///
-    /// Any [`FrameError`], including a bad payload and a `ctl.chan` frame with
-    /// a non-zero id.
+    /// Any [`FrameError`], including a bad payload and a frame without a stream
+    /// (`ctl.chan` and `READY`) that carries a non-zero id.
     pub fn next_frame(&mut self) -> Result<Option<(u32, Frame)>, FrameError> {
         let Some((id, raw)) = self.next_raw()? else {
             return Ok(None);
         };
-        let frame = match raw.decode() {
+        let frame = match raw.into_frame() {
             Ok(frame) => frame,
             Err(err) => {
                 self.poison(err.clone());
                 return Err(err);
             }
         };
-        if id != 0 && frame.as_ctl().is_some() {
+        if id != 0 && frame.requires_zero_id() {
             let err = FrameError::IdNotZero { id };
             self.poison(err.clone());
             return Err(err);
@@ -219,7 +222,9 @@ mod tests {
     use crate::frame::{DoneOutcome, ReqHead, RespHead, Scheme, TypeCode};
     use crate::limits::Limits;
     use crate::raw::RawFrame;
-    use crate::testutil::{Rng, all_codes, client_exchange, frame_bytes, shorten_frame};
+    use crate::testutil::{
+        Rng, all_codes, client_exchange, frame_bytes, shorten_frame, total_frame_size,
+    };
 
     fn limits() -> Limits {
         Limits::default()
@@ -332,7 +337,7 @@ mod tests {
         assert_eq!(
             decoder.next_frame().unwrap_err(),
             FrameError::FrameTooLarge {
-                size: u32::MAX as usize + 4,
+                size: total_frame_size(u32::MAX),
                 max: limits.max_frame(),
             }
         );
@@ -347,7 +352,7 @@ mod tests {
         assert_eq!(
             decoder.next_raw().unwrap_err(),
             FrameError::FrameTooLarge {
-                size: (u32::MAX - 1) as usize + 4,
+                size: total_frame_size(u32::MAX - 1),
                 max: limits().max_frame(),
             }
         );
@@ -430,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn next_frame_reports_a_ctl_id_of_zero_only() {
+    fn frames_without_a_stream_require_id_zero() {
         let mut decoder = Decoder::new(limits());
         decoder.push(&wire(&Frame::Ctl(Ctl::Drain), 0));
         assert_eq!(
@@ -438,20 +443,50 @@ mod tests {
             Some((0, Frame::Ctl(Ctl::Drain)))
         );
 
-        // Built by hand: the encoder refuses to produce this.
         let mut decoder = Decoder::new(limits());
-        decoder.push(&frame_bytes(TypeCode::Drain.code(), 4, &[]));
-        assert_eq!(
-            decoder.next_frame().unwrap_err(),
-            FrameError::IdNotZero { id: 4 }
-        );
-        // The raw layer still forwards it.
-        let mut decoder = Decoder::new(limits());
-        decoder.push(&frame_bytes(TypeCode::Drain.code(), 4, &[]));
-        assert_eq!(
-            decoder.next_raw().unwrap(),
-            Some((4, RawFrame::new(0x44, 4, Vec::new())))
-        );
+        decoder.push(&wire(&Frame::Ready, 0));
+        assert_eq!(decoder.next_frame().unwrap(), Some((0, Frame::Ready)));
+
+        // Built by hand: the encoder refuses to produce either of these.
+        for ty in [TypeCode::Drain.code(), TypeCode::Ready.code()] {
+            let mut decoder = Decoder::new(limits());
+            decoder.push(&frame_bytes(ty, 4, &[]));
+            assert_eq!(
+                decoder.next_frame().unwrap_err(),
+                FrameError::IdNotZero { id: 4 },
+                "type {ty:#04x} must require id 0"
+            );
+
+            // The raw layer still forwards it.
+            let mut decoder = Decoder::new(limits());
+            decoder.push(&frame_bytes(ty, 4, &[]));
+            assert_eq!(
+                decoder.next_raw().unwrap(),
+                Some((4, RawFrame::new(ty, 4, Vec::new())))
+            );
+        }
+    }
+
+    #[test]
+    fn body_payloads_are_moved_out_of_the_raw_frame() {
+        let raw = RawFrame::new(TypeCode::RespBody.code(), 1, b"0123456789".to_vec());
+        let pointer = raw.payload.as_ptr();
+        match raw.into_frame().unwrap() {
+            Frame::RespBody(body) => {
+                assert_eq!(body, b"0123456789");
+                assert_eq!(body.as_ptr(), pointer, "the body was copied, not moved");
+            }
+            other => panic!("unexpected frame {other:?}"),
+        }
+
+        // Non-body frames decode from the borrowed payload, as before.
+        let expected = Frame::RespHead(RespHead {
+            status: 204,
+            reason: Vec::new(),
+            headers: vec![(b"X-A".to_vec(), b"1".to_vec())],
+        });
+        let raw = expected.to_raw(1).unwrap();
+        assert_eq!(raw.into_frame().unwrap(), expected);
     }
 
     #[test]

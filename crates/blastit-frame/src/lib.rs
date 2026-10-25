@@ -10,7 +10,9 @@
 //! * `length` counts the bytes *after* the length field, so it is always
 //!   `5 + payload.len()`.
 //! * `type` selects the frame kind, see [`TypeCode`].
-//! * `id` is the request or stream id; `ctl.chan` frames always use `0`.
+//! * `id` is the request or stream id. Frames without a stream — every
+//!   `ctl.chan` message and `READY` — always use `0`, see
+//!   [`Frame::requires_zero_id`].
 //! * a frame (header included) may not exceed [`Limits::max_frame`], which
 //!   defaults to [`MAX_FRAME_DEFAULT`] (1 MiB, §3.1). Bodies larger than that
 //!   are split into several `*_BODY` frames, see [`Limits::encode_req_body`].
@@ -46,6 +48,15 @@
 //! * [`Limits`], [`Decoder`], [`encode`] — the codec itself.
 //!
 //! Errors are always [`FrameError`]; nothing in this crate panics on input.
+//!
+//! # Log safety
+//!
+//! `Debug` is the log-safe view of a frame: it never prints a header value or a
+//! body, because those routinely carry personal data and secrets and are never
+//! logged (ARCHITECTURE.md §8.1). Bodies print their length, heads print their
+//! method, path (without the query string), header *names* and connection
+//! facts, and [`RawFrame`] prints its type, id and length. Reach for the
+//! accessors when the real bytes are needed.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
@@ -60,10 +71,12 @@ mod raw;
 mod testutil;
 mod wire;
 
-pub use crate::ctl::{Ctl, ExitStatus};
+pub use crate::ctl::{Ctl, ExitStatus, MAX_SIGNAL, MIN_SIGNAL};
 pub use crate::decoder::Decoder;
 pub use crate::error::FrameError;
-pub use crate::frame::{DoneOutcome, Frame, ReqHead, RespHead, Scheme, TypeCode};
+pub use crate::frame::{
+    DoneOutcome, Frame, MAX_STATUS, MIN_STATUS, ReqHead, RespHead, Scheme, TypeCode,
+};
 pub use crate::limits::{BodyChunks, Limits, MAX_FRAME_CEILING, MAX_FRAME_DEFAULT, MIN_FRAME};
 pub use crate::raw::RawFrame;
 pub use crate::wire::{HEADER_LEN, MIN_LENGTH};
@@ -172,10 +185,10 @@ mod tests {
     }
 
     fn frame_id(index: usize) -> u32 {
-        // Control frames must go out with id 0, everything else gets an id
-        // with plenty of bits set.
+        // Frames without a stream must go out with id 0, everything else gets
+        // an id with plenty of bits set.
         let frame = &every_frame()[index];
-        if frame.as_ctl().is_some() {
+        if frame.requires_zero_id() {
             0
         } else {
             (index as u32).wrapping_mul(0x9E37_79B9)
@@ -323,23 +336,66 @@ mod tests {
     }
 
     #[test]
-    fn ctl_frames_are_sent_with_id_zero() {
-        let frame = Frame::Ctl(Ctl::Spawn { route: 1 });
-        let mut out = Vec::new();
-        assert_eq!(
-            encode(&frame, 7, &mut out),
-            Err(FrameError::IdNotZero { id: 7 })
-        );
-        assert!(out.is_empty());
-        assert!(encode(&frame, 0, &mut out).is_ok());
-        assert_eq!(
-            frame.to_raw(3).unwrap_err(),
-            FrameError::IdNotZero { id: 3 }
-        );
+    fn frames_without_a_stream_are_sent_with_id_zero() {
+        for frame in [
+            Frame::Ctl(Ctl::Spawn { route: 1 }),
+            Frame::Ctl(Ctl::Drain),
+            Frame::Ready,
+        ] {
+            let mut out = Vec::new();
+            assert_eq!(
+                encode(&frame, 7, &mut out),
+                Err(FrameError::IdNotZero { id: 7 }),
+                "{frame:?} must not be encodable with a stream id"
+            );
+            assert!(out.is_empty());
+            assert!(encode(&frame, 0, &mut out).is_ok());
+            assert_eq!(
+                frame.to_raw(3).unwrap_err(),
+                FrameError::IdNotZero { id: 3 }
+            );
+            assert!(frame.requires_zero_id());
+        }
 
-        // Non-ctl frames carry any id.
+        // Frames that do belong to a stream carry any id.
         assert!(encode(&Frame::ReqEnd, 7, &mut Vec::new()).is_ok());
-        assert!(Frame::Ready.to_raw(7).is_ok());
+        assert!(encode(&Frame::Cancel, 7, &mut Vec::new()).is_ok());
+        assert!(!Frame::RespEnd.requires_zero_id());
+        assert!(Frame::RespEnd.to_raw(7).is_ok());
+    }
+
+    #[test]
+    fn raw_frames_without_a_stream_reject_a_stream_id() {
+        for ty in [
+            TypeCode::Spawn.code(),
+            TypeCode::Spawned.code(),
+            TypeCode::Retire.code(),
+            TypeCode::Exited.code(),
+            TypeCode::Drain.code(),
+            TypeCode::Ready.code(),
+        ] {
+            let raw = RawFrame::new(ty, 9, Vec::new());
+            let mut out = Vec::new();
+            assert_eq!(
+                raw.encode(&Limits::default(), &mut out),
+                Err(FrameError::IdNotZero { id: 9 }),
+                "type {ty:#04x}"
+            );
+            assert!(out.is_empty());
+            assert!(raw.requires_zero_id());
+
+            let mut raw = raw;
+            raw.set_id(0);
+            assert!(raw.encode(&Limits::default(), &mut out).is_ok());
+            assert!(!out.is_empty());
+        }
+
+        // A stream frame keeps its id, and an unknown code is left alone.
+        let raw = RawFrame::new(TypeCode::ReqBody.code(), 9, Vec::new());
+        assert!(raw.encode(&Limits::default(), &mut Vec::new()).is_ok());
+        let raw = RawFrame::new(0x7f, 9, Vec::new());
+        assert!(raw.encode(&Limits::default(), &mut Vec::new()).is_ok());
+        assert!(!raw.requires_zero_id());
     }
 
     #[test]
@@ -465,6 +521,261 @@ mod tests {
         assert_eq!(
             decoder.next_frame().unwrap_err(),
             FrameError::NotUtf8 { field: "reason" }
+        );
+
+        // ... including RETIRE's reason, which also crosses ctl.chan.
+        let mut payload4 = Vec::new();
+        payload4.extend_from_slice(&3u32.to_le_bytes()); // route
+        payload4.extend_from_slice(&4u32.to_le_bytes()); // pid
+        payload4.extend_from_slice(&(invalid.len() as u32).to_le_bytes());
+        payload4.extend_from_slice(&invalid);
+        let mut decoder = Decoder::new(Limits::default());
+        decoder.push(&crate::testutil::frame_bytes(
+            TypeCode::Retire.code(),
+            0,
+            &payload4,
+        ));
+        assert_eq!(
+            decoder.next_frame().unwrap_err(),
+            FrameError::NotUtf8 { field: "reason" }
+        );
+        // The same payload without the bad bytes is a normal RETIRE.
+        let mut payload5 = Vec::new();
+        payload5.extend_from_slice(&3u32.to_le_bytes());
+        payload5.extend_from_slice(&4u32.to_le_bytes());
+        payload5.extend_from_slice(&4u32.to_le_bytes());
+        payload5.extend_from_slice(b"idle");
+        let mut decoder = Decoder::new(Limits::default());
+        decoder.push(&crate::testutil::frame_bytes(
+            TypeCode::Retire.code(),
+            0,
+            &payload5,
+        ));
+        assert_eq!(
+            decoder.next_frame().unwrap(),
+            Some((
+                0,
+                Frame::Ctl(Ctl::Retire {
+                    route: 3,
+                    pid: 4,
+                    reason: "idle".to_string(),
+                })
+            ))
+        );
+    }
+
+    #[test]
+    fn status_outside_the_valid_range_is_rejected() {
+        assert_eq!(RespHead::default().status, 200);
+        assert_eq!(RespHead::default().validated(), Ok(()));
+
+        for bad in [0u16, 1, 99, 1000, u16::MAX] {
+            let head = RespHead {
+                status: bad,
+                ..RespHead::default()
+            };
+            assert_eq!(head.validated(), Err(FrameError::BadStatus { status: bad }));
+            let mut out = Vec::new();
+            assert_eq!(
+                encode(&Frame::RespHead(head), 1, &mut out),
+                Err(FrameError::BadStatus { status: bad }),
+                "status {bad} must not be encodable"
+            );
+            assert!(out.is_empty());
+            assert_eq!(
+                Frame::RespHead(RespHead {
+                    status: bad,
+                    ..RespHead::default()
+                })
+                .to_raw(1)
+                .unwrap_err(),
+                FrameError::BadStatus { status: bad }
+            );
+        }
+
+        for good in [MIN_STATUS, 200, 204, 418, 599, MAX_STATUS] {
+            let head = RespHead {
+                status: good,
+                ..RespHead::default()
+            };
+            assert_eq!(head.validated(), Ok(()));
+            let mut wire = Vec::new();
+            encode(&Frame::RespHead(head.clone()), 1, &mut wire).unwrap();
+            let mut decoder = Decoder::new(Limits::default());
+            decoder.push(&wire);
+            assert_eq!(
+                decoder.next_frame().unwrap(),
+                Some((1, Frame::RespHead(head)))
+            );
+        }
+
+        // A peer can send any status; the decoder refuses the invalid ones.
+        for bad in [0u16, 99, 1000, u16::MAX] {
+            let mut payload = bad.to_le_bytes().to_vec();
+            payload.extend_from_slice(&0u32.to_le_bytes()); // reason
+            payload.extend_from_slice(&0u16.to_le_bytes()); // headers
+            let mut decoder = Decoder::new(Limits::default());
+            decoder.push(&crate::testutil::frame_bytes(
+                TypeCode::RespHead.code(),
+                1,
+                &payload,
+            ));
+            assert_eq!(
+                decoder.next_frame().unwrap_err(),
+                FrameError::BadStatus { status: bad }
+            );
+            assert!(decoder.is_poisoned());
+        }
+    }
+
+    #[test]
+    fn signal_out_of_range_is_rejected() {
+        for good in [MIN_SIGNAL, 9, 15, MAX_SIGNAL] {
+            assert_eq!(
+                ExitStatus::from_parts(1, good),
+                Ok(ExitStatus::Signal(good))
+            );
+            assert_eq!(
+                ExitStatus::Signal(good).validated(),
+                Ok(ExitStatus::Signal(good))
+            );
+            let frame = Frame::Ctl(Ctl::Exited {
+                route: 1,
+                pid: 2,
+                status: ExitStatus::Signal(good),
+            });
+            assert!(encode(&frame, 0, &mut Vec::new()).is_ok());
+        }
+        for bad in [0i32, -1, -9, MAX_SIGNAL + 1, 1000, i32::MAX, i32::MIN] {
+            assert_eq!(
+                ExitStatus::from_parts(1, bad),
+                Err(FrameError::OutOfRange {
+                    field: "signal",
+                    detail: "must be in 1..=64"
+                }),
+                "signal {bad}"
+            );
+            let frame = Frame::Ctl(Ctl::Exited {
+                route: 1,
+                pid: 2,
+                status: ExitStatus::Signal(bad),
+            });
+            let mut out = Vec::new();
+            assert_eq!(
+                encode(&frame, 0, &mut out),
+                Err(FrameError::OutOfRange {
+                    field: "signal",
+                    detail: "must be in 1..=64"
+                })
+            );
+            assert!(out.is_empty());
+
+            // ... and a forged EXITED off the wire is refused too.
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&1u32.to_le_bytes());
+            payload.extend_from_slice(&2u32.to_le_bytes());
+            payload.push(1); // signal tag
+            payload.extend_from_slice(&bad.to_le_bytes());
+            let mut decoder = Decoder::new(Limits::default());
+            decoder.push(&crate::testutil::frame_bytes(
+                TypeCode::Exited.code(),
+                0,
+                &payload,
+            ));
+            assert_eq!(
+                decoder.next_frame().unwrap_err(),
+                FrameError::OutOfRange {
+                    field: "signal",
+                    detail: "must be in 1..=64"
+                }
+            );
+        }
+
+        // Exit codes are not restricted: a process may return anything.
+        for code in [0i32, 1, 255, -1, i32::MIN, i32::MAX] {
+            assert_eq!(ExitStatus::from_parts(0, code), Ok(ExitStatus::Code(code)));
+            assert_eq!(
+                ExitStatus::Code(code).validated(),
+                Ok(ExitStatus::Code(code))
+            );
+        }
+    }
+
+    #[test]
+    fn debug_output_never_prints_header_values_or_bodies() {
+        let secret = "s3cr3t-header-value";
+        let head = ReqHead {
+            method: b"GET".to_vec(),
+            target: b"/search?token=s3cr3t-query&page=2".to_vec(),
+            headers: vec![
+                (b"Authorization".to_vec(), secret.as_bytes().to_vec()),
+                (b"Cookie".to_vec(), b"session=deadbeef".to_vec()),
+            ],
+            remote_addr: "203.0.113.7:1234".to_string(),
+            scheme: Scheme::Https,
+            server_name: "secret-host.example".to_string(),
+            server_port: 443,
+        };
+        let text = format!("{:?}", Frame::ReqHead(head));
+        assert!(!text.contains(secret), "header value leaked: {text}");
+        assert!(!text.contains("deadbeef"), "header value leaked: {text}");
+        assert!(
+            !text.contains("s3cr3t-query"),
+            "query string leaked: {text}"
+        );
+        assert!(!text.contains("secret-host.example"), "Host leaked: {text}");
+        assert!(
+            text.contains("Authorization"),
+            "header name missing: {text}"
+        );
+        assert!(text.contains("Cookie"), "header name missing: {text}");
+        assert!(text.contains("GET"), "method missing: {text}");
+        assert!(text.contains("/search"), "path missing: {text}");
+
+        let resp = RespHead {
+            status: 500,
+            reason: b"s3cr3t-reason".to_vec(),
+            headers: vec![(b"Set-Cookie".to_vec(), secret.as_bytes().to_vec())],
+        };
+        let text = format!("{:?}", Frame::RespHead(resp));
+        assert!(
+            !text.contains(secret),
+            "response header value leaked: {text}"
+        );
+        assert!(!text.contains("s3cr3t-reason"), "reason leaked: {text}");
+        assert!(text.contains("Set-Cookie"), "header name missing: {text}");
+        assert!(text.contains("500"), "status missing: {text}");
+
+        let body = b"s3cr3t-body-bytes".to_vec();
+        for frame in [Frame::ReqBody(body.clone()), Frame::RespBody(body.clone())] {
+            let text = format!("{frame:?}");
+            assert!(!text.contains("s3cr3t-body-bytes"), "body leaked: {text}");
+            assert!(
+                text.contains(&body.len().to_string()),
+                "length missing: {text}"
+            );
+        }
+
+        // The raw layer carries exactly the same bytes, so it redacts too.
+        let raw = RawFrame::new(TypeCode::RespBody.code(), 1, body);
+        let text = format!("{raw:?}");
+        assert!(
+            !text.contains("s3cr3t-body-bytes"),
+            "raw payload leaked: {text}"
+        );
+        assert!(text.contains("17"), "length missing: {text}");
+
+        // A truncated (non-UTF-8) header name is still printable, and is not
+        // printed as a byte array.
+        let head = ReqHead {
+            headers: vec![(vec![0xff, 0x00, b'A'], vec![0xff])],
+            ..ReqHead::default()
+        };
+        let text = format!("{head:?}");
+        assert!(text.contains('A'), "lossy name missing: {text}");
+        assert!(
+            !text.contains("[255, 0, 65]"),
+            "name printed as bytes: {text}"
         );
     }
 

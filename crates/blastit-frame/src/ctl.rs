@@ -24,7 +24,10 @@ use crate::wire::{Reader, Sink};
 /// How a view process ended, carried by [`Ctl::Exited`].
 ///
 /// Wire value: `u8` tag `0` for a normal exit with a code, `1` for a signal,
-/// each followed by the `i32` value.
+/// each followed by the `i32` value. Signals are validated against
+/// [`MIN_SIGNAL`]`..=`[`MAX_SIGNAL`] so that a forged `EXITED` cannot invent a
+/// signal number the kernel does not have; exit codes are left unconstrained,
+/// because there is no upper bound on what a process can return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {
     /// `WIFEXITED`: the process returned this status.
@@ -32,6 +35,12 @@ pub enum ExitStatus {
     /// `WIFSIGNALED`: the process was killed by this signal.
     Signal(i32),
 }
+
+/// Lowest real-time-agnostic signal number: `SIGHUP`.
+pub const MIN_SIGNAL: i32 = 1;
+
+/// Highest signal number this crate accepts: the usual `NSIG - 1` ceiling.
+pub const MAX_SIGNAL: i32 = 64;
 
 impl ExitStatus {
     /// The wire value of this status.
@@ -53,11 +62,12 @@ impl ExitStatus {
     ///
     /// # Errors
     ///
-    /// [`FrameError::BadEnum`] for any tag other than `0` or `1`.
+    /// [`FrameError::BadEnum`] for any tag other than `0` or `1`, and
+    /// [`FrameError::OutOfRange`] for a signal outside `1..=64`.
     pub const fn from_parts(tag: u8, value: i32) -> Result<Self, FrameError> {
         match tag {
             0 => Ok(Self::Code(value)),
-            1 => Ok(Self::Signal(value)),
+            1 => Self::Signal(value).validated(),
             other => Err(FrameError::BadEnum {
                 field: "exit status tag",
                 value: other as u64,
@@ -65,7 +75,26 @@ impl ExitStatus {
         }
     }
 
+    /// Reject a signal number that cannot be real.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameError::OutOfRange`] for a [`ExitStatus::Signal`] outside
+    /// `1..=64`. Exit codes are always accepted.
+    pub const fn validated(self) -> Result<Self, FrameError> {
+        match self {
+            Self::Signal(value) if value < MIN_SIGNAL || value > MAX_SIGNAL => {
+                Err(FrameError::OutOfRange {
+                    field: "signal",
+                    detail: "must be in 1..=64",
+                })
+            }
+            status => Ok(status),
+        }
+    }
+
     pub(crate) fn write(&self, sink: &mut impl Sink) -> Result<(), FrameError> {
+        self.validated()?;
         sink.put_u8(self.tag());
         sink.put_raw(&self.code().to_le_bytes());
         Ok(())
@@ -136,15 +165,6 @@ impl Ctl {
     /// The wire type code as a byte.
     pub const fn code(&self) -> u8 {
         self.type_code().code()
-    }
-
-    /// Reject a control frame that is not addressed to id 0.
-    pub(crate) fn check_id(&self, id: u32) -> Result<(), FrameError> {
-        if id == 0 {
-            Ok(())
-        } else {
-            Err(FrameError::IdNotZero { id })
-        }
     }
 
     pub(crate) fn write_payload(&self, sink: &mut impl Sink) -> Result<(), FrameError> {
