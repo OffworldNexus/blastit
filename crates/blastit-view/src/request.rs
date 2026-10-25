@@ -1,53 +1,54 @@
 //! What one request shares between its thread, the I/O thread and `wsgi.input`.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use blastit_frame::{DoneOutcome, Frame, ReqHead};
+use blastit_frame::{DoneOutcome, ReqHead};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use crate::environ;
+use crate::flow::Flow;
 use crate::input::{BodyMsg, Input};
 use crate::response::{RespError, Response, StartResponse, resp_error_to_py};
 use crate::wire::Writer;
 
 /// The shared state of one request.
 ///
-/// Three threads touch it: the I/O thread (cancels the request, meters the
-/// body, aborts it when the body queue overflows, delivers the frames), the
-/// request thread (writes the response) and, through [`crate::input::Input`],
-/// whatever application threads read the body.
+/// Three threads touch it: the I/O thread (cancels the request, meters the body
+/// against its credit, grants credit for the response, delivers the frames),
+/// the request thread (writes the response, credits the request body back) and,
+/// through [`crate::input::Input`], whatever application threads read the body.
 ///
-/// Two flags keep the two writers of the response honest:
-///
-/// * `cancelled` — the scheduler sent `CANCEL`. Every later frame of that
-///   request is discarded (nothing is sent), reads raise `OSError`, and `DONE`
-///   still goes out with [`DoneOutcome::Aborted`](blastit_frame::DoneOutcome).
-/// * `terminal` — the one `RESP_END` or `RESP_ABORT` of this request has been
-///   claimed. It is claimed exactly once, with [`RequestState::claim_terminal`],
-///   which is what stops the I/O thread's abort and the request thread's
-///   `RESP_END` from both going out when a body overflows right as the
-///   application finishes.
+/// A single flag keeps the two possible writers of the response honest:
+/// `terminal` — the one `RESP_END` or `RESP_ABORT` of this request has been
+/// claimed. It is claimed exactly once, with [`RequestState::claim_terminal`],
+/// so two paths racing to end the same response cannot both go out.
+/// `cancelled` discards the response entirely, and closes the flow-control
+/// window so a request thread blocked on credit wakes up.
 #[derive(Debug)]
 pub(crate) struct RequestState {
     cancelled: AtomicBool,
     terminal: AtomicBool,
-    overflowed: AtomicBool,
-    pending: AtomicUsize,
+    flow: Arc<Flow>,
 }
 
 impl RequestState {
-    /// State for a request that has just started.
+    /// State for a request that has just started, with a fresh window in each
+    /// direction (§3.1).
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             cancelled: AtomicBool::new(false),
             terminal: AtomicBool::new(false),
-            overflowed: AtomicBool::new(false),
-            pending: AtomicUsize::new(0),
+            flow: Flow::new(),
         })
+    }
+
+    /// The flow-control windows of this request.
+    pub(crate) fn flow(&self) -> &Flow {
+        &self.flow
     }
 
     /// Whether the scheduler cancelled this request.
@@ -55,9 +56,11 @@ impl RequestState {
         self.cancelled.load(Ordering::SeqCst)
     }
 
-    /// Mark the request cancelled, discarding every further response frame.
+    /// Mark the request cancelled: its output is discarded from now on, and a
+    /// thread blocked on response credit is woken to stop writing.
     pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        self.flow.response().close();
     }
 
     /// Whether the one terminal frame has been sent or claimed.
@@ -79,59 +82,13 @@ impl RequestState {
         !self.terminal.swap(true, Ordering::SeqCst)
     }
 
-    /// Give up on the request because its body queue overflowed, returning
-    /// whether this call should be the one to send the `RESP_ABORT`.
+    /// Stop waiting for response credit: no more is coming.
     ///
-    /// The request stays in its failed state for every later read, and `DONE`
-    /// reports it as aborted even when the terminal frame was already claimed
-    /// by the application's own `RESP_END`.
-    pub(crate) fn overflow(&self) -> bool {
-        self.overflowed.store(true, Ordering::SeqCst);
-        self.claim_terminal()
+    /// Used when the channel ends with the request still running, so its thread
+    /// can finish and be joined instead of blocking forever.
+    pub(crate) fn close_window(&self) {
+        self.flow.response().close();
     }
-
-    /// Whether the body queue overflowed (see [`crate::BODY_BUFFER_LIMIT`]).
-    pub(crate) fn is_overflowed(&self) -> bool {
-        self.overflowed.load(Ordering::SeqCst)
-    }
-
-    /// Add body bytes the I/O thread has just queued for the application.
-    ///
-    /// Returns the new total, which the caller compares against
-    /// [`crate::BODY_BUFFER_LIMIT`].
-    pub(crate) fn add_pending(&self, bytes: usize) -> usize {
-        self.pending.fetch_add(bytes, Ordering::SeqCst) + bytes
-    }
-
-    /// Note that the application consumed `bytes` body bytes.
-    pub(crate) fn consume_pending(&self, bytes: usize) {
-        // Saturating: the counter is a safety net, and a wrong zero there must
-        // never wrap around into "the queue is enormous".
-        let mut current = self.pending.load(Ordering::SeqCst);
-        while current != 0 {
-            let next = current.saturating_sub(bytes);
-            match self.pending.compare_exchange_weak(
-                current,
-                next,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return,
-                Err(observed) => current = observed,
-            }
-        }
-    }
-
-    /// Body bytes queued but not yet read by the application.
-    #[cfg(test)]
-    pub(crate) fn pending(&self) -> usize {
-        self.pending.load(Ordering::SeqCst)
-    }
-}
-
-/// Take a lock, treating a poisoned mutex as usable (see [`crate::wire`]).
-pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Everything a request thread needs that is the same for every request.
@@ -162,13 +119,13 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    /// Serve the request, then report how it ended.
+    /// Serve the request and report how it ended.
     ///
     /// The interpreter is attached for the duration of the call and released
-    /// again before `DONE` is sent: the scheduler is told the slot is free only
-    /// once nothing of the request is still touching Python. `DONE` goes out
-    /// exactly once, whatever happened to the application — including a
-    /// cancelled request and a channel that cannot be written to any more.
+    /// again before it returns: whatever reports the outcome — normally the
+    /// thread's slot guard — does so only once nothing of the request still
+    /// touches Python. There is exactly one `DONE` per `REQ_HEAD`, and the
+    /// guard is what sends it.
     pub(crate) fn run(self) -> DoneOutcome {
         let Worker {
             id,
@@ -178,12 +135,7 @@ impl Worker {
             state,
             ctx,
         } = self;
-        let outcome =
-            Python::attach(|py| serve_request(py, &head, &ctx, &state, &writer, body, id));
-        // Best effort: if the channel is gone the I/O thread has already found
-        // out, and there is nobody left to tell anyway.
-        let _ = writer.write_frame(&Frame::Done { outcome }, id);
-        outcome
+        Python::attach(|py| serve_request(py, &head, &ctx, &state, &writer, body, id))
     }
 }
 
@@ -198,7 +150,10 @@ fn serve_request(
     id: u32,
 ) -> DoneOutcome {
     let resp = Arc::new(Response::new(Arc::clone(writer), id, Arc::clone(state)));
-    let input = match Bound::new(py, Input::new(Arc::clone(state), body)) {
+    let input = match Bound::new(
+        py,
+        Input::new(Arc::clone(state), body, id, Arc::clone(writer)),
+    ) {
         Ok(input) => input,
         Err(err) => return failed(py, &resp, err),
     };
@@ -249,9 +204,13 @@ fn serve_request(
 
     // `close()` runs before `RESP_END` and after everything else, error or not
     // (ARCHITECTURE.md §2.5): request_finished handlers and the database
-    // connection are done before the worker slot is released.
+    // connection are done before the worker slot is released. A close() that
+    // raises is reported to stderr and marks the request errored, but it does
+    // not change a response that was already streamed.
+    let mut close_failed = false;
     if let Some(err) = call_close(&result) {
         err.print(py);
+        close_failed = true;
     }
 
     // A cancelled request is over: nothing more is sent for it, and the
@@ -259,15 +218,16 @@ fn serve_request(
     if state.is_cancelled() {
         return DoneOutcome::Aborted;
     }
-    // The body queue overflowed, and the I/O thread has already answered the
-    // request with RESP_ABORT.
-    if state.is_overflowed() {
-        return DoneOutcome::Aborted;
-    }
 
     let Some(err) = failure else {
         return match resp.finish(py) {
-            Ok(()) => DoneOutcome::Completed,
+            Ok(()) => {
+                if close_failed {
+                    DoneOutcome::Errored
+                } else {
+                    DoneOutcome::Completed
+                }
+            }
             // Without a start_response there is no response at all.
             Err(RespError::NotStarted) => failed(
                 py,
@@ -326,6 +286,7 @@ fn call_close(result: &Bound<'_, PyAny>) -> Option<PyErr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blastit_frame::INITIAL_WINDOW;
 
     #[test]
     fn the_terminal_frame_is_claimed_exactly_once() {
@@ -338,44 +299,36 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_closes_the_output_but_not_the_claim() {
+    fn cancelling_closes_the_output_and_the_window() {
         let state = RequestState::new();
         assert!(!state.output_closed());
+        // Spend the whole response window, then cancel: a writer with no credit
+        // left must give up rather than wait for a grant that cannot come.
+        let window = u64::from(INITIAL_WINDOW) as usize;
+        assert_eq!(state.flow().response().take(window), window);
         state.cancel();
         assert!(state.is_cancelled());
         assert!(state.output_closed());
         assert!(!state.is_terminal());
+        assert_eq!(state.flow().response().take(1), 0, "the window is closed");
     }
 
     #[test]
-    fn an_overflow_claims_the_terminal_frame_exactly_once() {
-        let state = RequestState::new();
-        assert!(!state.is_overflowed());
-        assert!(state.overflow());
-        assert!(state.is_overflowed());
-        assert!(!state.overflow(), "the terminal frame was claimed already");
-        assert!(state.is_overflowed());
-    }
-
-    #[test]
-    fn the_second_terminal_claim_loses_even_after_an_abort() {
-        let state = RequestState::new();
-        assert!(state.overflow());
-        // A request thread finishing at the same moment must not add RESP_END.
-        assert!(!state.claim_terminal());
-        assert!(state.output_closed());
-    }
-
-    #[test]
-    fn pending_bytes_are_metered_and_never_underflow() {
-        let state = RequestState::new();
-        assert_eq!(state.pending(), 0);
-        assert_eq!(state.add_pending(10), 10);
-        assert_eq!(state.add_pending(5), 15);
-        state.consume_pending(7);
-        assert_eq!(state.pending(), 8);
-        state.consume_pending(100);
-        assert_eq!(state.pending(), 0);
-        assert_eq!(state.add_pending(1), 1);
+    fn every_request_has_its_own_window() {
+        let first = RequestState::new();
+        let second = RequestState::new();
+        assert!(first.flow().body_received(10));
+        assert!(second.flow().body_received(10));
+        first.flow().body_granted(100);
+        assert_eq!(
+            first.flow().body_left(),
+            i64::from(INITIAL_WINDOW) + 90,
+            "grants belong to the request that granted them"
+        );
+        assert_eq!(
+            second.flow().body_left(),
+            i64::from(INITIAL_WINDOW) - 10,
+            "and so do spends"
+        );
     }
 }

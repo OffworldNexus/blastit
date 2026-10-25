@@ -2,23 +2,6 @@
 
 use blastit_frame::Limits;
 
-/// How many bytes of a request body one request may have queued (and not yet
-/// consumed by the application) before the view gives up on it.
-///
-/// `wsgi.input` is fed by `REQ_BODY` frames, and the application decides when
-/// to read them. An application that reads slowly — or not at all — would
-/// otherwise let the I/O thread buffer the whole upload (ARCHITECTURE.md §3.1
-/// says uploads are not buffered in memory). A bounded *channel* would instead
-/// block the I/O thread and so stall every other request in the process, so the
-/// queue is unbounded but metered: once a request holds more than this many
-/// unconsumed bytes, the view stops queueing its body, marks the request
-/// aborted (`RESP_ABORT`), and makes further reads raise `OSError`.
-///
-/// One mebibyte is the default frame limit (§3.1) and a comfortable margin over
-/// the largest body a normal request carries; a legitimate multipart upload
-/// streams, and streaming never queues more than the application is behind by.
-pub const BODY_BUFFER_LIMIT: usize = 1024 * 1024;
-
 /// The configuration of one view process.
 ///
 /// A view process serves exactly one manifest route under one uid
@@ -53,6 +36,33 @@ impl ViewConfig {
             ..Self::default()
         }
     }
+
+    /// Reject a `script_name` that cannot be a mount point.
+    ///
+    /// A mount point is empty (the route is mounted at the root) or a path with
+    /// a leading slash and no trailing one, so that stripping it from a request
+    /// path is unambiguous: `/app` is a mount point, `app` and `/app/` are not,
+    /// because neither could be removed from `/app/list` without guessing where
+    /// the boundary is.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the offending value.
+    pub fn validate(&self) -> Result<(), String> {
+        let script = self.script_name.as_str();
+        if script.is_empty() {
+            return Ok(());
+        }
+        if !script.starts_with('/') {
+            return Err(format!("script_name {script:?} must start with '/'"));
+        }
+        if script.ends_with('/') {
+            return Err(format!(
+                "script_name {script:?} must not end with '/'; use \"\" for the root"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -81,9 +91,28 @@ mod tests {
     }
 
     #[test]
-    fn the_body_buffer_limit_holds_a_whole_body_frame() {
-        // A body frame that fits the channel must never overflow the queue on
-        // its own, or a normal single-frame upload could not be buffered.
-        assert!(BODY_BUFFER_LIMIT >= Limits::default().max_payload());
+    fn a_mount_point_is_empty_or_a_slash_prefixed_path() {
+        for good in ["", "/app", "/deep/mount", "/a.b", "/app_v2"] {
+            let cfg = ViewConfig {
+                script_name: good.to_string(),
+                ..ViewConfig::for_route("web")
+            };
+            assert!(cfg.validate().is_ok(), "{good:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn a_bad_mount_point_is_refused_with_a_reason() {
+        // No leading slash, a trailing slash (including the lone slash: a mount
+        // point that ends in `/` could not be stripped unambiguously), or a
+        // doubled one.
+        for bad in ["app", "app/", "/app/", "/", "//", "/app//sub/"] {
+            let cfg = ViewConfig {
+                script_name: bad.to_string(),
+                ..ViewConfig::for_route("web")
+            };
+            let err = cfg.validate().expect_err("must be refused");
+            assert!(err.contains("script_name"), "{bad:?}: {err}");
+        }
     }
 }

@@ -7,7 +7,7 @@ mod support;
 use std::time::{Duration, Instant};
 
 use blastit_frame::{DoneOutcome, Frame, Limits, RespHead};
-use blastit_view::{BODY_BUFFER_LIMIT, ViewConfig, ViewError};
+use blastit_view::{ViewConfig, ViewError};
 use support::{End, Harness, global_int, hello_app};
 
 #[test]
@@ -305,7 +305,8 @@ fn max_threads_refuses_a_request_with_503() {
     assert_eq!(served.status(), 200);
     assert_eq!(served.body, b"slept");
     assert_eq!(harness.expect_done(1), DoneOutcome::Completed);
-    assert!(harness.finish().is_ok());
+    let ended = harness.finish();
+    assert!(ended.is_ok(), "serve returned {ended:?}");
 }
 
 #[test]
@@ -354,50 +355,35 @@ fn a_large_response_is_split_into_frames_that_fit() {
 }
 
 #[test]
-fn a_body_that_is_never_read_aborts_the_request() {
+fn a_body_that_is_never_read_stalls_instead_of_aborting() {
+    // The window is the whole safety net now: the scheduler may send one
+    // window's worth and no more, and nothing is aborted or buffered.
     let mut harness = Harness::for_route(
         "web",
         support::load_app(
             "ignores_body",
             "import time\n\
              def app(environ, start_response):\n\
-             \x20   time.sleep(0.6)\n\
+             \x20   time.sleep(0.4)\n\
              \x20   start_response(\"200 OK\", [])\n\
-             \x20   return [b\"too late\"]\n",
+             \x20   return [b\"ignored it all\"]\n",
         ),
     );
     assert_eq!(harness.expect_frame(), (0, Frame::Ready));
 
     harness.send(&support::request("POST", "/"), 1);
-    // More than the view is willing to hold for an application that is not
-    // reading: the request is over, and the scheduler is told at once.
-    let overflow = vec![b'a'; BODY_BUFFER_LIMIT];
-    harness.send_body(1, &overflow);
-    harness.send_body(1, b"!");
-
-    let frames = harness.drain_until_done(1);
-    let abort = frames.iter().find_map(|frame| match frame {
-        Frame::RespAbort { reason } => Some(reason.clone()),
-        _ => None,
-    });
-    assert!(abort.is_some(), "no RESP_ABORT in {frames:?}");
-    assert!(
-        !frames
-            .iter()
-            .any(|frame| matches!(frame, Frame::RespHead(_))),
-        "the application's late response must not go out: {frames:?}"
-    );
-    assert!(
-        frames.iter().all(|frame| !matches!(frame, Frame::RespEnd)),
-        "an aborted response does not also end: {frames:?}"
-    );
+    harness.upload(1, &vec![b'a'; support::INITIAL_CREDIT]);
     assert_eq!(
-        frames.last(),
-        Some(&Frame::Done {
-            outcome: DoneOutcome::Aborted
-        }),
-        "the thread that was still running reports the abort"
+        harness.upload_credit(1),
+        0,
+        "an application that reads nothing credits nothing back"
     );
+
+    harness.send(&Frame::ReqEnd, 1);
+    let response = harness.read_response(1);
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.body, b"ignored it all");
+    assert_eq!(harness.expect_done(1), DoneOutcome::Completed);
     assert!(harness.finish().is_ok());
 }
 
@@ -527,5 +513,207 @@ fn a_request_that_ends_without_reading_its_body_still_ends() {
 
     harness.send_body(1, b"this body is nobody's");
     harness.send(&Frame::ReqEnd, 1);
+    assert!(harness.finish().is_ok());
+}
+
+#[test]
+fn a_req_head_without_a_stream_is_a_protocol_error() {
+    let mut harness = Harness::for_route("web", support::load_app("id_zero", &hello_app("hi")));
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    harness.send(&support::request("GET", "/"), 0);
+    let err = harness.finish().expect_err("serve must refuse id 0");
+    assert!(
+        matches!(err, ViewError::Protocol(_)),
+        "expected a protocol error, got {err:?}"
+    );
+}
+
+#[test]
+fn a_second_start_response_without_exc_info_is_an_error() {
+    let mut harness = Harness::for_route(
+        "web",
+        support::load_app(
+            "start_twice",
+            "def app(environ, start_response):\n\
+             \x20   start_response(\"200 OK\", [])\n\
+             \x20   start_response(\"418 Teapot\", [])\n\
+             \x20   return [b\"unreachable\"]\n",
+        ),
+    );
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    let response = harness.get("/");
+    assert_eq!(
+        response.status(),
+        500,
+        "the second call raised before anything was sent"
+    );
+    assert_eq!(response.outcome, DoneOutcome::Errored);
+    assert!(harness.finish().is_ok());
+}
+
+#[test]
+fn a_second_start_response_with_exc_info_replaces_an_unsent_head() {
+    let mut harness = Harness::for_route(
+        "web",
+        support::load_app(
+            "replace_head",
+            "import sys\n\
+             def app(environ, start_response):\n\
+             \x20   start_response(\"200 OK\", [])\n\
+             \x20   try:\n\
+             \x20       raise ValueError(\"recoverable\")\n\
+             \x20   except ValueError:\n\
+             \x20       write = start_response(\"418 Teapot\", [], sys.exc_info())\n\
+             \x20   write(b\"teapot\")\n\
+             \x20   return []\n",
+        ),
+    );
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    let response = harness.get("/");
+    assert_eq!(
+        response.status(),
+        418,
+        "PEP 3333 lets the application replace a head it has not sent"
+    );
+    assert_eq!(response.body, b"teapot");
+    assert_eq!(response.outcome, DoneOutcome::Completed);
+    assert!(harness.finish().is_ok());
+}
+
+#[test]
+fn an_exc_info_tuple_is_re_raised_once_the_head_is_sent() {
+    let mut harness = Harness::for_route(
+        "web",
+        support::load_app(
+            "exc_info_tuple",
+            "import sys\n\
+             def app(environ, start_response):\n\
+             \x20   write = start_response(\"200 OK\", [])\n\
+             \x20   write(b\"partial\")\n\
+             \x20   try:\n\
+             \x20       raise ValueError(\"the real failure\")\n\
+             \x20   except ValueError:\n\
+             \x20       start_response(\"500 Nope\", [], sys.exc_info())\n\
+             \x20   return [b\"unreachable\"]\n",
+        ),
+    );
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    let response = harness.get("/");
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.body, b"partial");
+    assert!(
+        matches!(response.end, End::Abort(_)),
+        "the re-raised exception abandons the rest: {:?}",
+        response.end
+    );
+    assert_eq!(response.outcome, DoneOutcome::Errored);
+    assert!(harness.finish().is_ok());
+}
+
+#[test]
+fn an_exception_instance_is_re_raised_like_an_exc_info_tuple() {
+    let mut harness = Harness::for_route(
+        "web",
+        support::load_app(
+            "exc_info_instance",
+            "def app(environ, start_response):\n\
+             \x20   write = start_response(\"200 OK\", [])\n\
+             \x20   write(b\"partial\")\n\
+             \x20   start_response(\"500 Nope\", [], ValueError(\"passed straight in\"))\n\
+             \x20   return [b\"unreachable\"]\n",
+        ),
+    );
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    let response = harness.get("/");
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.body, b"partial");
+    assert!(matches!(response.end, End::Abort(_)));
+    assert_eq!(response.outcome, DoneOutcome::Errored);
+    assert!(harness.finish().is_ok());
+}
+
+#[test]
+fn a_raising_close_marks_the_request_errored_but_finishes_it() {
+    let module = support::load_module(
+        "close_raises",
+        "class Body:\n\
+         \x20   def __iter__(self):\n\
+         \x20       yield b\"all there is\"\n\
+         \x20   def close(self):\n\
+         \x20       raise RuntimeError(\"close failed\")\n\
+         def app(environ, start_response):\n\
+         \x20   start_response(\"200 OK\", [])\n\
+         \x20   return Body()\n",
+    );
+    let mut harness = Harness::for_route("web", support::app_of(&module));
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    let response = harness.get("/");
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.body, b"all there is",
+        "a cleanup handler cannot un-stream a response that was already sent"
+    );
+    assert_eq!(response.end, End::End);
+    assert_eq!(
+        response.outcome,
+        DoneOutcome::Errored,
+        "but the scheduler hears that it failed"
+    );
+    assert!(harness.finish().is_ok());
+}
+
+#[test]
+fn an_unservable_script_name_is_refused_before_ready() {
+    let cfg = ViewConfig {
+        script_name: "/app/".to_string(),
+        ..ViewConfig::for_route("web")
+    };
+    let harness = Harness::start(support::load_app("bad_script_name", &hello_app("hi")), cfg);
+    let err = harness.finish().expect_err("the mount point is not usable");
+    assert!(
+        matches!(err, ViewError::Config(_)),
+        "expected a configuration error, got {err:?}"
+    );
+
+    // Nothing was served, so READY never went out either.
+    let cfg = ViewConfig {
+        script_name: "app".to_string(),
+        ..ViewConfig::for_route("web")
+    };
+    let mut harness = Harness::start(
+        support::load_app("bad_script_name_2", &hello_app("hi")),
+        cfg,
+    );
+    assert!(harness.next_frame().is_none(), "no READY for a bad config");
+    assert!(matches!(
+        harness.finish().expect_err("still refused"),
+        ViewError::Config(_)
+    ));
+}
+
+#[test]
+fn a_read_timeout_on_the_channel_is_retried() {
+    // The channel may be handed over with a read timeout (a supervisor's, a
+    // signal's): a timed-out read says nothing about the channel, so the view
+    // must keep reading rather than give up.
+    let mut harness = Harness::start_reading_with_timeout(
+        support::load_app("slow_start", &hello_app("after a pause")),
+        ViewConfig::for_route("web"),
+        Duration::from_millis(50),
+    );
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    // Long enough for the I/O thread to hit its timeout more than once.
+    std::thread::sleep(Duration::from_millis(200));
+    let response = harness.get("/");
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.body, b"after a pause");
+    assert_eq!(response.outcome, DoneOutcome::Completed);
     assert!(harness.finish().is_ok());
 }

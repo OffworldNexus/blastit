@@ -3,17 +3,23 @@
 //! Every test file uses this the same way: build a WSGI application from Python
 //! source, start [`Harness::start`], play the scheduler on the other end of the
 //! channel, and (usually) [`Harness::finish`] to check how `serve` returned.
+//!
+//! The harness is also the flow-control peer of §3.1: it honours the request
+//! window when it uploads ([`Harness::upload`]) and spends the response window
+//! as a real http would ([`Harness::grant_response`]).
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use blastit_frame::{Decoder, DoneOutcome, Frame, Limits, ReqHead, RespHead, Scheme, encode};
+use blastit_frame::{
+    Decoder, DoneOutcome, Frame, INITIAL_WINDOW, Limits, ReqHead, RespHead, Scheme, encode,
+};
 use blastit_view::{ViewConfig, ViewError, serve};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -28,21 +34,42 @@ pub struct Harness {
     decoder: Decoder,
     limits: Limits,
     join: Option<JoinHandle<Result<(), ViewError>>>,
+    /// Request-body credit the view has granted us, per request.
+    upload_credit: HashMap<u32, usize>,
+    /// Frames read while waiting for credit or for a `WINDOW`, in order.
+    deferred: VecDeque<(u32, Frame)>,
 }
 
 impl Harness {
     /// Start a view on a socketpair and hand back its other end.
     pub fn start(app: Py<PyAny>, cfg: ViewConfig) -> Self {
+        Self::start_with(app, cfg, None)
+    }
+
+    /// Start a view whose own end of the channel has a read timeout.
+    ///
+    /// This is how a caller that sets one (a supervisor, a signal-driven loop)
+    /// would hand the channel over; a timed-out read must not end the process.
+    pub fn start_reading_with_timeout(app: Py<PyAny>, cfg: ViewConfig, timeout: Duration) -> Self {
+        Self::start_with(app, cfg, Some(timeout))
+    }
+
+    fn start_with(app: Py<PyAny>, cfg: ViewConfig, view_timeout: Option<Duration>) -> Self {
         let limits = cfg.frame_limits;
         let (ours, peer) = UnixStream::pair().expect("socketpair");
         peer.set_read_timeout(Some(TIMEOUT)).expect("read timeout");
+        if let Some(timeout) = view_timeout {
+            ours.set_read_timeout(Some(timeout)).expect("read timeout");
+        }
         let view_cfg = cfg.clone();
-        let join = thread::spawn(move || serve(ours, app, view_cfg));
+        let join = thread::spawn(move || Python::attach(|py| serve(py, ours, app, view_cfg)));
         Self {
             peer,
             decoder: Decoder::new(limits),
             limits,
             join: Some(join),
+            upload_credit: HashMap::new(),
+            deferred: VecDeque::new(),
         }
     }
 
@@ -53,6 +80,10 @@ impl Harness {
 
     /// Send one frame.
     pub fn send(&mut self, frame: &Frame, id: u32) {
+        // A `REQ_HEAD` implicitly opens the request-body window (§3.1).
+        if matches!(frame, Frame::ReqHead(_)) {
+            self.upload_credit.insert(id, INITIAL_CREDIT);
+        }
         let mut wire = Vec::new();
         encode(frame, id, &mut wire).expect("encode");
         self.peer.write_all(&wire).expect("write frame");
@@ -63,7 +94,9 @@ impl Harness {
         self.peer.write_all(bytes).expect("write bytes");
     }
 
-    /// Send a request body, split into frames like `http` would.
+    /// Send a request body frame, without regard for the window.
+    ///
+    /// Tests that want to be a well-behaved http use [`Harness::upload`].
     pub fn send_body(&mut self, id: u32, body: &[u8]) {
         let mut wire = Vec::new();
         self.limits
@@ -72,23 +105,101 @@ impl Harness {
         self.peer.write_all(&wire).expect("write body");
     }
 
+    /// Upload `body` as the scheduler would: never beyond the credit the view
+    /// granted, waiting for `WINDOW` frames when the window runs out.
+    pub fn upload(&mut self, id: u32, body: &[u8]) {
+        let mut sent = 0;
+        while sent < body.len() {
+            let credit = *self.upload_credit.entry(id).or_insert(0);
+            if credit == 0 {
+                self.await_upload_credit(id);
+                continue;
+            }
+            let take = credit.min(body.len() - sent).min(self.limits.max_payload());
+            self.send_body(id, &body[sent..sent + take]);
+            sent += take;
+            *self.upload_credit.get_mut(&id).expect("entry") -= take;
+        }
+    }
+
+    /// The credit the view has granted request `id` for its body.
+    pub fn upload_credit(&self, id: u32) -> usize {
+        self.upload_credit.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Wait for the view to grant more request-body credit.
+    ///
+    /// `WINDOW` frames are absorbed here; anything else the view sends in the
+    /// meantime is deferred, in order, for the response readers.
+    fn await_upload_credit(&mut self, id: u32) {
+        loop {
+            let Some((frame_id, frame)) = self.raw_frame() else {
+                panic!("the view stopped answering while request {id} was uploading");
+            };
+            match frame {
+                Frame::Window { bytes } => {
+                    if frame_id == id {
+                        *self.upload_credit.entry(id).or_insert(0) += bytes as usize;
+                        return;
+                    }
+                    *self.upload_credit.entry(frame_id).or_insert(0) += bytes as usize;
+                }
+                other => self.deferred.push_back((frame_id, other)),
+            }
+        }
+    }
+
+    /// Grant `bytes` more response-body credit to request `id`.
+    ///
+    /// http does this as it writes to the client socket; a test does it to let
+    /// a response larger than one window through.
+    pub fn grant_response(&mut self, id: u32, bytes: u32) {
+        self.send(&Frame::Window { bytes }, id);
+    }
+
     /// The next frame, or `None` after a quiet [`TIMEOUT`] or an EOF.
     pub fn next_frame(&mut self) -> Option<(u32, Frame)> {
+        if let Some(frame) = self.deferred.pop_front() {
+            return Some(frame);
+        }
         loop {
             match self.decoder.next_frame() {
                 Ok(Some(frame)) => return Some(frame),
                 Ok(None) => {}
                 Err(err) => panic!("framing error: {err}"),
             }
-            let mut buf = [0u8; 1 << 16];
-            match self.peer.read(&mut buf) {
-                Ok(0) => return None,
-                Ok(n) => self.decoder.push(&buf[..n]),
-                Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                    return None;
-                }
-                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
-                Err(err) => panic!("read failed: {err}"),
+            if !self.read_more() {
+                return None;
+            }
+        }
+    }
+
+    /// Read one chunk of the socket, returning whether the channel is still
+    /// open.
+    fn read_more(&mut self) -> bool {
+        let mut buf = [0u8; 1 << 16];
+        match self.peer.read(&mut buf) {
+            Ok(0) => false,
+            Ok(n) => {
+                self.decoder.push(&buf[..n]);
+                true
+            }
+            Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => false,
+            Err(err) if err.kind() == ErrorKind::Interrupted => true,
+            Err(err) => panic!("read failed: {err}"),
+        }
+    }
+
+    /// A frame straight off the socket, ignoring the deferred queue.
+    fn raw_frame(&mut self) -> Option<(u32, Frame)> {
+        loop {
+            match self.decoder.next_frame() {
+                Ok(Some(frame)) => return Some(frame),
+                Ok(None) => {}
+                Err(err) => panic!("framing error: {err}"),
+            }
+            if !self.read_more() {
+                return None;
             }
         }
     }
@@ -98,16 +209,31 @@ impl Harness {
         self.next_frame().expect("a frame")
     }
 
+    /// The next frame that is not a `WINDOW`, booking the credit it grants.
+    fn next_response_frame(&mut self) -> (u32, Frame) {
+        loop {
+            let (id, frame) = self.expect_frame();
+            if let Frame::Window { bytes } = frame {
+                *self.upload_credit.entry(id).or_insert(0) += bytes as usize;
+                continue;
+            }
+            return (id, frame);
+        }
+    }
+
     /// Read one request's response up to its `RESP_END` or `RESP_ABORT`.
+    ///
+    /// `WINDOW` frames are absorbed: they belong to the request body, and the
+    /// upload helper has already booked them.
     pub fn read_response(&mut self, id: u32) -> Response {
-        let (start_id, frame) = self.expect_frame();
+        let (start_id, frame) = self.next_response_frame();
         assert_eq!(start_id, id, "response head for another request");
         let Frame::RespHead(head) = frame else {
             panic!("expected RESP_HEAD, got {frame:?}");
         };
         let mut body = Vec::new();
         loop {
-            let (frame_id, frame) = self.expect_frame();
+            let (frame_id, frame) = self.next_response_frame();
             assert_eq!(frame_id, id, "response frame for another request");
             match frame {
                 Frame::RespBody(chunk) => body.extend_from_slice(&chunk),
@@ -141,12 +267,17 @@ impl Harness {
     pub fn exchange(&mut self, head: Frame, body: &[u8], id: u32) -> Response {
         self.send(&head, id);
         if !body.is_empty() {
-            self.send_body(id, body);
+            self.upload(id, body);
         }
         self.send(&Frame::ReqEnd, id);
         let mut response = self.read_response(id);
         response.outcome = self.expect_done(id);
         response
+    }
+
+    /// Send a request with a body and read its response and its `DONE`.
+    pub fn post(&mut self, target: &str, body: &[u8]) -> Response {
+        self.exchange(request("POST", target), body, 1)
     }
 
     /// Whether nothing arrives within `within`.
@@ -162,14 +293,9 @@ impl Harness {
         frame.is_none()
     }
 
-    /// Send a request with a body and read its response and its `DONE`.
-    pub fn post(&mut self, target: &str, body: &[u8]) -> Response {
-        self.exchange(request("POST", target), body, 1)
-    }
-
     /// The `DONE` frame of `id`, failing the test if anything else arrives.
     pub fn expect_done(&mut self, id: u32) -> DoneOutcome {
-        let (frame_id, frame) = self.expect_frame();
+        let (frame_id, frame) = self.next_response_frame();
         assert_eq!(frame_id, id, "DONE for another request");
         match frame {
             Frame::Done { outcome } => outcome,
@@ -177,11 +303,12 @@ impl Harness {
         }
     }
 
-    /// Every frame of `id` up to and including its `DONE`.
+    /// Every frame of `id` up to and including its `DONE`, minus the `WINDOW`
+    /// frames the upload keeps for itself.
     pub fn drain_until_done(&mut self, id: u32) -> Vec<Frame> {
         let mut frames = Vec::new();
         loop {
-            let (frame_id, frame) = self.expect_frame();
+            let (frame_id, frame) = self.next_response_frame();
             assert_eq!(frame_id, id, "frame for another request");
             let done = matches!(frame, Frame::Done { .. });
             frames.push(frame);
@@ -196,7 +323,7 @@ impl Harness {
         let mut frames: HashMap<u32, Vec<Frame>> = ids.iter().map(|id| (*id, Vec::new())).collect();
         let mut done = 0;
         while done < ids.len() {
-            let (id, frame) = self.expect_frame();
+            let (id, frame) = self.next_response_frame();
             assert!(ids.contains(&id), "frame for an unknown request {id}");
             if matches!(frame, Frame::Done { .. }) {
                 done += 1;
@@ -291,6 +418,9 @@ pub fn head(method: &str, target: &str, headers: Vec<(&str, &str)>) -> ReqHead {
         server_port: 80,
     }
 }
+
+/// The credit a fresh request starts with, in each direction.
+pub const INITIAL_CREDIT: usize = INITIAL_WINDOW as usize;
 
 /// Import a Python module from source, under a name unique to one test.
 pub fn load_module(name: &str, source: &str) -> Py<PyModule> {

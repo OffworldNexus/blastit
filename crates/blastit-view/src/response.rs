@@ -5,13 +5,15 @@ use std::sync::{Arc, Mutex};
 use blastit_frame::{Frame, RespHead};
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyString;
+use pyo3::types::{PyString, PyTuple};
 
 use crate::environ::latin1_bytes;
-use crate::request::{RequestState, lock};
+use crate::request::RequestState;
+use crate::sync::lock;
 use crate::wire::{WriteError, Writer};
 
 /// The status line and headers `start_response` stored but did not send.
+#[derive(Clone)]
 struct PendingHead {
     status: u16,
     reason: Vec<u8>,
@@ -31,7 +33,8 @@ pub(crate) enum RespError {
     /// The application wrote a body, or finished, without calling
     /// `start_response`. PEP 3333 allows no response without one.
     NotStarted,
-    /// The channel write failed; the response cannot be delivered.
+    /// The channel write failed, or the flow-control window was closed: the
+    /// rest of the response cannot be delivered.
     Channel(WriteError),
 }
 
@@ -43,6 +46,10 @@ pub(crate) enum RespError {
 /// non-empty body chunk — or [`Response::finish`] does, if the application
 /// returns an empty body. That way a generator that raises before its first
 /// chunk can still be answered with a `500`.
+///
+/// Body bytes are spent against the request's flow-control window (§3.1), so a
+/// request thread whose client is not reading blocks in its write instead of
+/// filling the channel.
 pub(crate) struct Response {
     writer: Arc<Writer>,
     id: u32,
@@ -109,8 +116,8 @@ impl Response {
             return Ok(());
         }
         self.flush_head(py)?;
-        // A cancel or an abort may have landed while the head was being
-        // written; the chunk is not sent then either.
+        // A cancel may have landed while the head was being written; the chunk
+        // is not sent then either.
         if self.state.output_closed() {
             return Ok(());
         }
@@ -174,18 +181,20 @@ impl Response {
         )
     }
 
-    /// Send the stored head if it has not gone out yet.
+    /// Send the stored head, if it has not gone out yet.
+    ///
+    /// The head is only marked as sent once the frame is on the wire, so a
+    /// failing write leaves it pending: the response is then decided by whether
+    /// `start_response` had been called, not by whether a frame happened to
+    /// make it out.
     fn flush_head(&self, py: Python<'_>) -> Result<(), RespError> {
         let pending = {
-            let mut head = lock(&self.head);
+            let head = lock(&self.head);
             if head.sent {
                 return Ok(());
             }
-            match head.pending.take() {
-                Some(pending) => {
-                    head.sent = true;
-                    pending
-                }
+            match &head.pending {
+                Some(pending) => pending.clone(),
                 None => return Err(RespError::NotStarted),
             }
         };
@@ -196,7 +205,11 @@ impl Response {
                 reason: pending.reason,
                 headers: pending.headers,
             }),
-        )
+        )?;
+        let mut head = lock(&self.head);
+        head.sent = true;
+        head.pending = None;
+        Ok(())
     }
 
     /// One frame, written with the GIL released.
@@ -205,10 +218,12 @@ impl Response {
             .map_err(RespError::Channel)
     }
 
-    /// The body of one chunk, split into `RESP_BODY` frames, with the GIL
-    /// released: a slow scheduler must not hold up the rest of the process.
+    /// The body of one chunk, split into `RESP_BODY` frames and spent against
+    /// the flow-control window, with the GIL released: neither a slow scheduler
+    /// nor a slow client holds up the rest of the process.
     fn send_body(&self, py: Python<'_>, data: &[u8]) -> Result<(), RespError> {
-        py.detach(|| self.writer.write_resp_body(self.id, data))
+        let flow = self.state.flow();
+        py.detach(|| self.writer.write_body(self.id, data, flow))
             .map_err(RespError::Channel)
     }
 }
@@ -232,6 +247,12 @@ impl StartResponse {
     ///
     /// The head is validated and stored, never sent: PEP 3333 wants it on the
     /// wire just before the first body chunk.
+    ///
+    /// `exc_info` is what an application passes from inside an `except` block —
+    /// `sys.exc_info()` or the exception itself. Once the head has gone out it
+    /// is re-raised, as PEP 3333 demands; before that it is ignored and the new
+    /// head replaces the stored one, which is what makes a late failure
+    /// answerable at all.
     #[pyo3(signature = (status, headers, exc_info = None))]
     fn __call__<'py>(
         &self,
@@ -240,12 +261,20 @@ impl StartResponse {
         headers: &Bound<'py, PyAny>,
         exc_info: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        // A non-None exc_info is a re-raise demand once the head has gone out.
         let exc_info: Option<&Bound<'py, PyAny>> = exc_info.filter(|exc| !exc.is_none());
         if let Some(exc) = exc_info
             && self.resp.head_sent()
         {
-            return Err(PyErr::from_value((*exc).clone()));
+            return Err(exception_from(exc)?);
+        }
+
+        // A second `start_response` without `exc_info` is an application bug
+        // (PEP 3333): the response would be the one the application already
+        // described, and silently replacing it would hide the mistake.
+        if exc_info.is_none() && self.resp.head_started() {
+            return Err(PyRuntimeError::new_err(
+                "start_response was called twice without exc_info",
+            ));
         }
 
         let text = status
@@ -299,10 +328,34 @@ pub(crate) fn resp_error_to_py(err: RespError) -> PyErr {
         RespError::Channel(WriteError::Io(err)) => {
             PyOSError::new_err(format!("view channel is gone: {err}"))
         }
+        RespError::Channel(WriteError::WindowClosed) => PyOSError::new_err(
+            "the response's flow-control window was closed before the body was written",
+        ),
         RespError::Channel(WriteError::Frame(err)) => {
             PyValueError::new_err(format!("response frame could not be encoded: {err}"))
         }
     }
+}
+
+/// The exception to re-raise for a `start_response`'s `exc_info`.
+///
+/// PEP 3333 spells `exc_info` the way `sys.exc_info()` does — a
+/// `(type, value, traceback)` tuple — so the *value*, element 1, is the
+/// exception to re-raise. Applications also pass the exception itself, which
+/// PEP 3333's wording allows and every server accepts.
+fn exception_from(exc_info: &Bound<'_, PyAny>) -> PyResult<PyErr> {
+    if let Ok(tuple) = exc_info.cast::<PyTuple>()
+        && tuple.len() == 3
+    {
+        let value = tuple.get_item(1)?;
+        if !value.is_none() {
+            return Ok(PyErr::from_value(value));
+        }
+        // `(None, None, None)`: outside an `except` block there is nothing to
+        // re-raise, and the type slot is the only thing left to report.
+        return Ok(PyErr::from_value(tuple.get_item(0)?));
+    }
+    Ok(PyErr::from_value(exc_info.clone()))
 }
 
 /// Parse PEP 3333's `status` string into a code and a reason phrase.
@@ -412,7 +465,7 @@ mod tests {
         assert!(!resp.head_started());
 
         // The I/O thread got there first: the response must stay quiet.
-        assert!(state.overflow());
+        assert!(state.claim_terminal());
         Python::attach(|py| {
             assert!(resp.finish(py).is_ok());
             assert!(resp.abort(py, "late").is_ok());

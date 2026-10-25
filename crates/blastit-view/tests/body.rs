@@ -7,7 +7,7 @@ mod support;
 use std::time::Duration;
 
 use blastit_frame::{DoneOutcome, Frame};
-use blastit_view::BODY_BUFFER_LIMIT;
+
 use support::{End, Harness, load_app, load_module};
 
 /// The body the piecewise test reads, in the order it reads it.
@@ -220,46 +220,72 @@ fn a_cancelled_request_makes_reads_raise() {
 }
 
 #[test]
-fn an_overflowing_body_makes_reads_raise_and_aborts_the_request() {
-    let module = load_module(
-        "body_overflow",
-        "caught = ''\n\
-         def app(environ, start_response):\n\
-         \x20   global caught\n\
-         \x20   try:\n\
-         \x20       environ['wsgi.input'].read()\n\
-         \x20   except OSError as err:\n\
-         \x20       caught = str(err)\n\
-         \x20   start_response('200 OK', [])\n\
-         \x20   return [b'too late']\n",
+fn a_none_size_means_read_everything() {
+    let mut harness = Harness::for_route(
+        "web",
+        load_app(
+            "body_none_sizes",
+            "def app(environ, start_response):\n\
+             \x20   stream = environ['wsgi.input']\n\
+             \x20   parts = [stream.readline(None), stream.read(None), stream.read(None)]\n\
+             \x20   start_response('200 OK', [])\n\
+             \x20   return [b','.join(parts)]\n",
+        ),
     );
-    let mut harness = Harness::for_route("web", support::app_of(&module));
     assert_eq!(harness.expect_frame(), (0, Frame::Ready));
 
-    harness.send(&support::request("POST", "/"), 1);
-    // The application is reading, but slower than the queue grows: past the
-    // limit the view gives up instead of buffering an upload in memory.
-    let overflow = vec![b'a'; BODY_BUFFER_LIMIT];
-    harness.send_body(1, &overflow);
-    harness.send_body(1, b"!");
+    let response = harness.post("/", b"one\ntwo");
+    assert_eq!(
+        response.body, b"one\n,two,",
+        "None reads mean the same as no argument"
+    );
+    assert_eq!(response.outcome, DoneOutcome::Completed);
+    assert!(harness.finish().is_ok());
+}
 
-    let frames = harness.drain_until_done(1);
-    assert!(
-        frames
-            .iter()
-            .any(|frame| matches!(frame, Frame::RespAbort { .. })),
-        "the request was aborted: {frames:?}"
+#[test]
+fn readlines_accepts_none_and_zero_hints() {
+    let mut harness = Harness::for_route(
+        "web",
+        load_app(
+            "body_none_hint",
+            "def app(environ, start_response):\n\
+             \x20   stream = environ['wsgi.input']\n\
+             \x20   first = stream.readline(0)\n\
+             \x20   rest = stream.readlines(None)\n\
+             \x20   start_response('200 OK', [])\n\
+             \x20   return [b';'.join([first] + rest) + b';' + str(len(rest)).encode()]\n",
+        ),
     );
-    assert!(
-        frames
-            .iter()
-            .all(|frame| !matches!(frame, Frame::RespHead(_) | Frame::RespEnd)),
-        "the application's late response must not go out: {frames:?}"
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    let response = harness.post("/", b"a\nb\nc\n");
+    assert_eq!(
+        response.body, b";a\n;b\n;c\n;3",
+        "readline(0) is empty, and readlines(None) takes everything"
     );
-    let caught = support::global_str(&module, "caught");
-    assert!(
-        caught.contains("buffer limit"),
-        "the read reported the overflow: {caught}"
+    assert_eq!(response.outcome, DoneOutcome::Completed);
+    assert!(harness.finish().is_ok());
+}
+
+#[test]
+fn an_absurd_size_is_clamped_rather_than_waited_for() {
+    let mut harness = Harness::for_route(
+        "web",
+        load_app(
+            "body_huge_size",
+            "def app(environ, start_response):\n\
+             \x20   body = environ['wsgi.input'].read(10 ** 18)\n\
+             \x20   start_response('200 OK', [])\n\
+             \x20   return [str(len(body)).encode()]\n",
+        ),
     );
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    // The read is clamped, and the end of the body ends it long before the
+    // clamp matters.
+    let response = harness.post("/", b"small body");
+    assert_eq!(response.body, b"10");
+    assert_eq!(response.outcome, DoneOutcome::Completed);
     assert!(harness.finish().is_ok());
 }
