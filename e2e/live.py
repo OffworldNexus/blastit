@@ -121,6 +121,15 @@ def cleanup(name):
         log(f"nothing to delete for {name}")
 
 
+def print_failed_steps(steps, depth=0):
+    for step in steps:
+        if step.get("status") not in ("SUCCESS", "PENDING"):
+            reason = step.get("reason") or {}
+            print(f"{'  ' * depth}- {step.get('name')}: {step.get('status')} "
+                  f"{reason.get('code', '')} {reason.get('message', '')}".rstrip(), flush=True)
+        print_failed_steps(step.get("steps") or [], depth + 1)
+
+
 def wait_deployment(app_id, timeout=25 * 60):
     deadline = time.monotonic() + timeout
     phase = None
@@ -134,6 +143,9 @@ def wait_deployment(app_id, timeout=25 * 60):
             if phase == "ACTIVE":
                 return dep
             if phase in ("ERROR", "CANCELED"):
+                full = doctl("apps", "get-deployment", app_id, dep["id"], check=False)
+                full = full[0] if isinstance(full, list) and full else (full or {})
+                print_failed_steps((full.get("progress") or {}).get("steps") or [])
                 for kind in ("deploy", "run"):
                     out = doctl("apps", "logs", app_id, "--type", kind, parse=False, check=False)
                     print(f"--- {kind} log tail ---\n{out[-4000:]}")
