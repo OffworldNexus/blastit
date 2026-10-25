@@ -24,6 +24,10 @@
 //! * **Lifecycle.** One live process per route at most, spawned on first use
 //!   (or at startup for preforked routes and in eager mode), retired when idle
 //!   or over its request cap, and recycled when it accumulates stuck threads.
+//! * **Sizing.** §8's view process cap — `BLASTIT_MAX_VIEW_PROCESSES`, or the
+//!   default derived from the machine's memory once the app is preloaded — and
+//!   the `BLASTIT_MEM_HIGH_WATERMARK` check that retires one idle view when
+//!   aggregate usage is above it.
 //!
 //! ```no_run
 //! use std::sync::Arc;
@@ -64,7 +68,10 @@ mod route;
 mod scheduler;
 mod task;
 
-pub use crate::config::{SPAWN_BACKOFF, SchedulerConfig};
+pub use crate::config::{
+    MEMORY_CHECK_INTERVAL, MIN_MEM_RESERVE, MemoryProbe, SPAWN_BACKOFF, SchedulerConfig,
+    derived_view_cap, mem_reserve,
+};
 pub use crate::ctl::{CtlChannel, UnixCtl};
 pub use crate::error::SchedulerError;
 pub use crate::route::{RouteInfo, routes_from_manifest};

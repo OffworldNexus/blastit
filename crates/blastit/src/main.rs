@@ -18,6 +18,7 @@
 
 mod child;
 mod config;
+mod immortal;
 mod logs;
 mod roles;
 mod stage0;
