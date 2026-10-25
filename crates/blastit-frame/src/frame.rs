@@ -24,10 +24,18 @@
 //! | `RESP_ABORT` | `0x08` | `reason string32` |
 //! | `DONE` | `0x09` | `outcome u8` |
 //! | `READY` | `0x0A` | empty |
+//! | `WINDOW` | `0x0B` | `bytes u32` |
 //!
-//! `READY` is not in §3.1's table but is what a freshly forked view sends on
-//! `view.chan` before the scheduler may dispatch to it (§4). It is the only
-//! code outside `0x01`–`0x09`, and it is view-chan only.
+//! `READY` is what a freshly forked view sends on `view.chan` before the
+//! scheduler may dispatch to it (§4); it is view-chan only.
+//!
+//! `WINDOW` is per-stream flow control (§3.1): it grants the receiver of a
+//! body permission to send `bytes` more body bytes on that stream. Towards
+//! the client (http → scheduler → view) it credits the response body; towards
+//! the app (view → scheduler → http) it credits the request body. Each body
+//! starts with [`INITIAL_WINDOW`] bytes of credit. A sender never sends body
+//! bytes beyond its credit, so no buffer on the path grows past the window,
+//! and no shared channel ever waits for one slow stream.
 //!
 //! Decoding is strict: a payload with trailing bytes, a field that does not
 //! fit, an undefined enum value or a non-UTF-8 `string32` is an error. Nothing
@@ -91,6 +99,8 @@ pub enum TypeCode {
     Done = 0x09,
     /// A newly forked view is ready to serve (`view.chan`).
     Ready = 0x0A,
+    /// Flow-control credit for one stream's body.
+    Window = 0x0B,
     /// Ask init to fork a view process.
     Spawn = 0x40,
     /// Answer to `Spawn`, carrying the new pid.
@@ -126,6 +136,7 @@ impl TypeCode {
             0x08 => Ok(Self::RespAbort),
             0x09 => Ok(Self::Done),
             0x0A => Ok(Self::Ready),
+            0x0B => Ok(Self::Window),
             0x40 => Ok(Self::Spawn),
             0x41 => Ok(Self::Spawned),
             0x42 => Ok(Self::Retire),
@@ -167,6 +178,7 @@ impl TypeCode {
             Self::RespAbort => "RESP_ABORT",
             Self::Done => "DONE",
             Self::Ready => "READY",
+            Self::Window => "WINDOW",
             Self::Spawn => "SPAWN",
             Self::Spawned => "SPAWNED",
             Self::Retire => "RETIRE",
@@ -296,6 +308,9 @@ impl core::fmt::Debug for ReqHead {
     }
 }
 
+/// The body credit each stream starts with, in each direction (see `WINDOW`).
+pub const INITIAL_WINDOW: u32 = 1024 * 1024;
+
 /// Lowest response status this crate accepts; below it, a "status" is not a
 /// response status at all (interim `1xx` answers are perfectly valid).
 pub const MIN_STATUS: u16 = 100;
@@ -393,6 +408,11 @@ pub enum Frame {
     },
     /// A freshly forked view is ready (`view.chan`, id 0).
     Ready,
+    /// Permission to send `bytes` more body bytes on this stream.
+    Window {
+        /// Bytes of credit granted; never zero on the wire.
+        bytes: u32,
+    },
     /// A `ctl.chan` message; always sent with `id == 0`.
     Ctl(Ctl),
 }
@@ -420,6 +440,7 @@ impl core::fmt::Debug for Frame {
             }
             Self::Done { outcome } => f.debug_tuple("Done").field(outcome).finish(),
             Self::Ready => f.write_str("Ready"),
+            Self::Window { bytes } => f.debug_struct("Window").field("bytes", bytes).finish(),
             Self::Ctl(msg) => f.debug_tuple("Ctl").field(msg).finish(),
         }
     }
@@ -480,6 +501,7 @@ impl Frame {
             Self::RespAbort { .. } => TypeCode::RespAbort.code(),
             Self::Done { .. } => TypeCode::Done.code(),
             Self::Ready => TypeCode::Ready.code(),
+            Self::Window { .. } => TypeCode::Window.code(),
             Self::Ctl(msg) => msg.code(),
         }
     }
@@ -533,6 +555,16 @@ impl Frame {
                 sink.put_u8(outcome.code());
                 Ok(())
             }
+            Self::Window { bytes } => {
+                if *bytes == 0 {
+                    return Err(FrameError::OutOfRange {
+                        field: "bytes",
+                        detail: "a window grants at least one byte",
+                    });
+                }
+                sink.put_u32(*bytes);
+                Ok(())
+            }
             Self::ReqEnd | Self::Cancel | Self::RespEnd | Self::Ready => Ok(()),
             Self::Ctl(msg) => msg.write_payload(sink),
         }
@@ -582,6 +614,16 @@ impl Frame {
                 outcome: DoneOutcome::from_code(reader.u8("outcome")?)?,
             },
             TypeCode::Ready => Self::Ready,
+            TypeCode::Window => {
+                let bytes = reader.u32("bytes")?;
+                if bytes == 0 {
+                    return Err(FrameError::OutOfRange {
+                        field: "bytes",
+                        detail: "a window grants at least one byte",
+                    });
+                }
+                Self::Window { bytes }
+            }
             TypeCode::Spawn
             | TypeCode::Spawned
             | TypeCode::Retire

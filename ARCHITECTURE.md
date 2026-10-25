@@ -326,12 +326,30 @@ payload`, in little-endian, with a hard maximum frame size of
 | towards the app | `REQ_HEAD {method, target, headers, remote_addr, scheme, server_name/port}`, `REQ_BODY {bytes}`, `REQ_END`, `CANCEL` |
 | towards the client | `RESP_HEAD {status, reason, headers}`, `RESP_BODY {bytes}`, `RESP_END`, `RESP_ABORT {reason}` |
 | view → scheduler only | `DONE {req_id, outcome}`, which releases the worker slot; `READY` (id 0), once, when the view can take requests |
+| both ways | `WINDOW {bytes}`: flow-control credit for this stream's body (see below) |
 
 The scheduler rewrites ids between ① and ③. A view only ever sees its own
 `req_id`s and cannot address any other stream. Bodies stream in both
 directions. A view starts work as soon as `REQ_HEAD` arrives, and `wsgi.input`
 blocks until body frames arrive. This handles large uploads (DO closes uploads
 at 600 s) without buffering them in memory.
+
+**Flow control.** The channels are shared by many streams, so no stream may
+make a reader wait: every reader always keeps reading, and every per-stream
+buffer is bounded by a credit window instead.
+
+* Each body, in each direction, starts with `INITIAL_WINDOW` (1 MiB) of
+  credit. A sender never sends body bytes beyond its credit.
+* Request bodies: the view sends `WINDOW` as the app consumes `wsgi.input`;
+  the scheduler forwards it to http, which reads more from that client's
+  socket only when it has credit. A slow app slows its own client down, over
+  TCP, and nothing else.
+* Response bodies: http sends `WINDOW` as it writes to the client socket; the
+  scheduler forwards it to the view, where a request thread that runs out of
+  credit blocks in its write (as it would on a socket). A slow client slows
+  its own request thread down, and nothing else.
+* A peer that sends beyond its credit has broken the protocol: a view is
+  recycled, and http aborts the stream.
 
 ### 3.2 Request lifecycle
 
