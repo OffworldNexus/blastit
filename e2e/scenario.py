@@ -60,6 +60,11 @@ class Client:
         return self.request("POST", path, {"csrfmiddlewaretoken": self.csrf(), **(data or {})})
 
 
+def location(headers):
+    """The path of a redirect: the platform's edge may make Location absolute."""
+    return urllib.parse.urlsplit(headers.get("Location", "")).path
+
+
 def wait_ready(base, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -88,7 +93,7 @@ def main():
     status, _, _ = alice.request("GET", "/")
     check(status == 200, "home page is served")
     status, headers, _ = alice.request("GET", "/notes/")
-    check(status == 302 and headers.get("Location", "").startswith("/login/"), "notes redirect to the login page")
+    check(status == 302 and location(headers) == "/login/", "notes redirect to the login page")
 
     print("log in")
     status, _, body = alice.request("GET", "/login/")
@@ -96,7 +101,7 @@ def main():
     status, _, body = alice.post("/login/", {"username": "alice", "password": "wrong"})
     check(status == 200 and "Invalid username or password" in body, "a wrong password is refused")
     status, headers, _ = alice.post("/login/", {"username": "alice", "password": args.password})
-    check(status == 302 and headers.get("Location") == "/notes/", "the right password logs in")
+    check(status == 302 and location(headers) == "/notes/", "the right password logs in")
 
     print("notes")
     marker = f"note-{time.time_ns()}"
@@ -146,7 +151,7 @@ def main():
     status, _, _ = alice.post("/logout/")
     check(status == 302, "logging out redirects")
     status, headers, _ = alice.request("GET", "/notes/")
-    check(status == 302 and headers.get("Location", "").startswith("/login/"), "notes need a login again")
+    check(status == 302 and location(headers) == "/login/", "notes need a login again")
 
     print(f"\n{'PASS' if not FAILURES else 'FAIL'}: {len(FAILURES)} failure(s)")
     for f in FAILURES:
