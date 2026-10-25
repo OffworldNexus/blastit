@@ -33,9 +33,10 @@ groups = ["connection"]
 protocol = "postgresql"
 input = { url = "DATABASE_URL" }
 
-# Django runs this on a new connection when the server's time zone isn't UTC.
+# Django's own connection housekeeping: the time zone on a new connection when
+# the server's isn't UTC, and the health check after a request had an error.
 [group.connection.db]
-queries = ["SELECT set_config('TimeZone', $1, false)"]
+queries = ["SELECT set_config('TimeZone', $1, false)", "SELECT 1"]
 """
 
 
