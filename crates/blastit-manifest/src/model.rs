@@ -5,6 +5,8 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use blastit_sqlpolicy::TableGrants;
+
 use crate::error::{ManifestErrors, ManifestWarning};
 use crate::parse;
 use crate::validate;
@@ -146,13 +148,15 @@ impl Proxy {
 }
 
 /// The contents of a grant on a `postgresql` proxy (§5.2): the statements the
-/// route may run, whether transaction control is allowed, and whether every
-/// statement is allowed instead (§6, `unrestricted = true`).
+/// route may run, whether transaction control is allowed, whether every
+/// statement is allowed instead (§6, `unrestricted = true`), and which tables,
+/// columns and functions its statements may touch (§6, D7).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PgGrant {
     queries: Vec<String>,
     transaction_control: bool,
     unrestricted: bool,
+    tables: TableGrants,
 }
 
 impl PgGrant {
@@ -162,7 +166,18 @@ impl PgGrant {
             queries,
             transaction_control,
             unrestricted: false,
+            tables: TableGrants::default(),
         }
+    }
+
+    /// The same grant with table and column grants (§6, D7).
+    ///
+    /// A statement that no exact query lists is then checked against these by
+    /// parsing it ([`blastit_sqlpolicy::analyze`]), so a route can grant a
+    /// database shape instead of every statement text.
+    pub fn with_tables(mut self, tables: TableGrants) -> Self {
+        self.tables = tables;
+        self
     }
 
     /// A grant that allows every statement on its proxy (§6).
@@ -175,6 +190,7 @@ impl PgGrant {
             queries: Vec::new(),
             transaction_control: false,
             unrestricted: true,
+            tables: TableGrants::default(),
         }
     }
 
@@ -192,6 +208,12 @@ impl PgGrant {
     /// Empty for an unrestricted grant, which allows by not listing.
     pub fn queries(&self) -> &[String] {
         &self.queries
+    }
+
+    /// The tables, columns and functions the grant allows beyond its queries
+    /// (§6, D7).
+    pub fn tables(&self) -> &TableGrants {
+        &self.tables
     }
 
     /// Whether `BEGIN`/`COMMIT`/`ROLLBACK` and savepoints are allowed.
@@ -212,11 +234,15 @@ impl PgGrant {
     /// An empty effective grant means the route gets no dbproxy listener for
     /// that proxy at all (§2.2, §6).
     pub fn is_empty(&self) -> bool {
-        !self.unrestricted && self.queries.is_empty() && !self.transaction_control
+        !self.unrestricted
+            && self.queries.is_empty()
+            && !self.transaction_control
+            && self.tables.is_empty()
     }
 
     /// Unions `other` into `self`: queries are deduplicated in insertion order,
-    /// transaction control and `unrestricted` are OR-ed (§6).
+    /// transaction control and `unrestricted` are OR-ed, and table and column
+    /// grants are unioned per table and column (§6).
     pub fn merge_from(&mut self, other: &Self) {
         self.transaction_control |= other.transaction_control;
         self.unrestricted |= other.unrestricted;
@@ -225,6 +251,7 @@ impl PgGrant {
                 self.queries.push(query.clone());
             }
         }
+        self.tables.merge_from(&other.tables);
     }
 }
 

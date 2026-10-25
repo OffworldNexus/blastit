@@ -3,7 +3,9 @@
 
 mod common;
 
-use blastit_manifest::{Manifest, ManifestError, ManifestErrors, Protocol, ProxyName};
+use blastit_manifest::{
+    Columns, Manifest, ManifestError, ManifestErrors, PgGrant, Protocol, ProxyName,
+};
 
 use common::{SECTION_5_1, SECTION_6, parse_errors, section_5_1, section_6, text_map, texts};
 
@@ -638,4 +640,223 @@ fn unrestricted_must_be_a_boolean() {
             path: "route[0].db.unrestrictedt".to_string(),
         })
     );
+}
+
+//
+// Table and column grants (§6, D7).
+//
+
+/// A manifest with one route whose grant is exactly `grant`.
+fn manifest_with(grant: &str) -> String {
+    format!(
+        "version = 1\n\
+         [proxy.db]\nprotocol = \"postgresql\"\n\
+         [[route]]\nname = \"notes\"\npath = ['/notes/']\n\
+         [route.db]\n{grant}"
+    )
+}
+
+/// The route's inline `postgresql` grant.
+fn inline(source: &str) -> PgGrant {
+    Manifest::from_toml_str(source)
+        .expect("parses")
+        .route(0)
+        .and_then(|route| route.grant(&ProxyName::from("db")))
+        .and_then(|grant| grant.as_postgresql())
+        .cloned()
+        .expect("the route's grant")
+}
+
+#[test]
+fn table_grants_parse() {
+    let grant = inline(&manifest_with(
+        "functions = [\"st_distance\", \"unaccent\"]\n\n\
+         [route.db.tables]\n\
+         restaurants_restaurant = { select = [\"id\", \"slug\", \"name\"] }\n\
+         restaurants_cuisinetype = { select = \"*\" }\n\
+         orders_order = { select = \"*\", insert = \"*\", update = [\"status\", \"accepted_at\"], delete = true }\n",
+    ));
+    assert!(grant.queries().is_empty());
+    let tables = grant.tables();
+    assert_eq!(
+        tables.table("restaurants_restaurant").unwrap().select,
+        Some(Columns::list(["id", "slug", "name"]))
+    );
+    assert_eq!(
+        tables.table("restaurants_cuisinetype").unwrap().select,
+        Some(Columns::All)
+    );
+    let orders = tables.table("orders_order").unwrap();
+    assert_eq!(orders.select, Some(Columns::All));
+    assert_eq!(orders.insert, Some(Columns::All));
+    assert_eq!(
+        orders.update,
+        Some(Columns::list(["status", "accepted_at"]))
+    );
+    assert!(orders.delete);
+    assert_eq!(
+        texts(&tables.functions().map(str::to_string).collect::<Vec<_>>()),
+        ["st_distance", "unaccent"]
+    );
+
+    assert!(
+        !grant.is_empty(),
+        "table grants alone make a grant non-empty"
+    );
+    assert!(!grant.is_unrestricted());
+    assert!(!grant.transaction_control());
+}
+
+#[test]
+fn a_table_grant_may_name_another_schema() {
+    let grant = inline(&manifest_with(
+        "[route.db.tables.\"audit.users\"]\nselect = [\"id\"]\n",
+    ));
+    assert!(grant.tables().table("audit.users").is_some());
+    // `public.` is the same table as the unqualified name.
+    let grant = inline(&manifest_with(
+        "[route.db.tables.\"public.notes\"]\nselect = \"*\"\n",
+    ));
+    assert!(grant.tables().table("notes").is_some());
+    // ... and `pg_catalog.lower` is `lower`.
+    let grant = inline(&manifest_with(
+        "functions = [\"pg_catalog.lower\"]\n\n[route.db.tables]\nt = { select = \"*\" }\n",
+    ));
+    assert_eq!(Vec::from_iter(grant.tables().functions()), ["lower"]);
+}
+
+#[test]
+fn an_unknown_table_operation_is_refused() {
+    assert_eq!(
+        parse_errors(&manifest_with(
+            "[route.db.tables]\nt = { select = \"*\", upsert = true }\n"
+        )),
+        ManifestErrors::from(ManifestError::UnknownTableOperation {
+            path: "route[0].db.tables.t.upsert".to_string(),
+        })
+    );
+}
+
+#[test]
+fn a_column_grant_is_a_star_or_a_list() {
+    // `select = "*"` is the string form ...
+    assert!(
+        Manifest::from_toml_str(&manifest_with(
+            "[route.db.tables]\nt = { select = \"*\" }\n"
+        ))
+        .is_ok()
+    );
+    // ... a list of names the other.
+    assert!(
+        Manifest::from_toml_str(&manifest_with(
+            "[route.db.tables]\nt = { select = [\"id\"] }\n"
+        ))
+        .is_ok()
+    );
+
+    for (bad, found) in [
+        ("select = \"id\"", "a string"),
+        ("select = 1", "an integer"),
+        ("select = true", "a boolean"),
+    ] {
+        let errors = parse_errors(&manifest_with(&format!(
+            "[route.db.tables]\nt = {{ {bad} }}\n"
+        )));
+        let error = &errors.errors()[0];
+        assert!(
+            matches!(error, ManifestError::WrongType { path, .. } if path == "route[0].db.tables.t.select"),
+            "{bad}: {error:?}"
+        );
+        assert!(error.to_string().contains(found), "{bad}: {error}");
+    }
+}
+
+#[test]
+fn a_star_inside_a_column_list_is_refused() {
+    assert_eq!(
+        parse_errors(&manifest_with(
+            "[route.db.tables]\nt = { select = [\"*\", \"id\"] }\n"
+        )),
+        ManifestErrors::from(ManifestError::StarredColumn {
+            path: "route[0].db.tables.t.select".to_string(),
+        })
+    );
+}
+
+#[test]
+fn an_empty_table_or_column_name_is_refused() {
+    assert!(matches!(
+        parse_errors(&manifest_with(
+            "[route.db.tables]\n\"\" = { select = \"*\" }\n"
+        ))
+        .errors()[0],
+        ManifestError::Empty { .. }
+    ));
+    assert!(matches!(
+        parse_errors(&manifest_with(
+            "[route.db.tables]\nt = { select = [\"\"] }\n"
+        ))
+        .errors()[0],
+        ManifestError::Empty { .. }
+    ));
+    assert!(matches!(
+        parse_errors(&manifest_with(
+            "functions = [\"\"]\n\n[route.db.tables]\nt = { select = \"*\" }\n"
+        ))
+        .errors()[0],
+        ManifestError::Empty { .. }
+    ));
+}
+
+#[test]
+fn delete_must_be_a_boolean() {
+    assert_eq!(
+        parse_errors(&manifest_with(
+            "[route.db.tables]\nt = { delete = \"yes\" }\n"
+        )),
+        ManifestErrors::from(ManifestError::WrongType {
+            path: "route[0].db.tables.t.delete".to_string(),
+            expected: "a boolean",
+            found: "a string",
+        })
+    );
+    // `delete = false` grants nothing, and is not an error.
+    let grant = inline(&manifest_with(
+        "[route.db.tables]\nt = { delete = false }\n",
+    ));
+    assert!(!grant.tables().table("t").unwrap().delete);
+    assert!(grant.tables().is_empty(), "nothing is granted");
+}
+
+#[test]
+fn a_table_grant_must_be_a_table_of_operations() {
+    assert!(matches!(
+        parse_errors(&manifest_with("[route.db.tables]\nt = \"*\"\n")).errors()[0],
+        ManifestError::WrongType { .. }
+    ));
+    assert!(matches!(
+        parse_errors(&manifest_with("tables = \"*\"\n")).errors()[0],
+        ManifestError::WrongType { .. }
+    ));
+    // An unknown key next to `tables` is still an error.
+    assert_eq!(
+        parse_errors(&manifest_with("tablesx = {}\n")),
+        ManifestErrors::from(ManifestError::UnknownKey {
+            path: "route[0].db.tablesx".to_string(),
+        })
+    );
+}
+
+#[test]
+fn functions_must_be_a_list_of_names() {
+    assert!(matches!(
+        parse_errors(&manifest_with("functions = \"lower\"\n")).errors()[0],
+        ManifestError::WrongType { .. }
+    ));
+    assert!(matches!(
+        parse_errors(&manifest_with("functions = [1]\n")).errors()[0],
+        ManifestError::WrongType { .. }
+    ));
+    let grant = inline(&manifest_with("functions = [\"unaccent\", \"unaccent\"]\n"));
+    assert_eq!(Vec::from_iter(grant.tables().functions()), ["unaccent"]);
 }

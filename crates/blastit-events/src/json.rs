@@ -112,6 +112,7 @@ fn encode_with(event: &Event, truncated: &[&'static str]) -> String {
             push_member(&mut out, "pid", &info.pid.to_string());
             push_member(&mut out, "proxy", &json_string(&info.proxy));
             push_member(&mut out, "kind", &json_string(info.kind.as_str()));
+            push_member(&mut out, "reason", &json_string(&info.reason));
             push_member(&mut out, "sqlstate", &json_string(&info.sqlstate));
             push_member(&mut out, "in_transaction", &json_bool(info.in_transaction));
             push_member(&mut out, "sql", &json_string(&info.sql));
@@ -285,6 +286,7 @@ fn string_slots(event: &mut Event) -> Vec<(&'static str, &mut String)> {
         }
         EventKind::SqlDenied(info) => {
             slots.push(("proxy", &mut info.proxy));
+            slots.push(("reason", &mut info.reason));
             slots.push(("sqlstate", &mut info.sqlstate));
             slots.push(("sql", &mut info.sql));
             if let SqlKind::Other(kind) = &mut info.kind {
@@ -527,6 +529,7 @@ mod tests {
                 "pid",
                 "proxy",
                 "kind",
+                "reason",
                 "sqlstate",
                 "in_transaction",
                 "sql",
@@ -543,6 +546,7 @@ mod tests {
         assert_eq!(value["proxy"], "db");
         assert_eq!(value["kind"], "parse");
         assert_eq!(value["sqlstate"], "42501");
+        assert_eq!(value["reason"], "select on shop_product.price not granted");
         assert_eq!(value["in_transaction"], false);
         assert_eq!(
             value["sql"],

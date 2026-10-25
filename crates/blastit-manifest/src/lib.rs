@@ -16,7 +16,8 @@
 //!
 //! Templates, input slots and the meaning of a statement belong to other
 //! crates: this one keeps `input`, `output` and `queries` as raw strings
-//! (§5.1, §5.2).
+//! (§5.1, §5.2). A `postgresql` grant's `tables` and `functions` are kept as the
+//! typed [`TableGrants`] `blastit-sqlpolicy` checks statements against (§6, D7).
 //!
 //! Errors render on one line: control characters are escaped and long values
 //! are cut short, so a manifest problem never breaks the event stream (§8.1).
@@ -57,6 +58,7 @@ mod routing;
 mod uid;
 mod validate;
 
+pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning};
 pub use model::{Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route};
 pub use routing::{Match, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable};

@@ -636,3 +636,94 @@ fn merging_keeps_unrestricted_once_it_is_on() {
     assert!(grant.is_unrestricted());
     assert_eq!(texts(grant.queries()), ["SELECT 2"]);
 }
+
+//
+// Table and column grants (§6, D7).
+//
+
+/// A manifest whose only route grants `grant` on `db`.
+fn notes_with(grant: &str) -> String {
+    format!(
+        "version = 1\n\
+         [proxy.db]\nprotocol = \"postgresql\"\n\
+         [[route]]\nname = \"notes\"\npath = ['/notes/']\n\
+         [route.db]\n{grant}"
+    )
+}
+
+#[test]
+fn an_unrestricted_grant_takes_no_tables() {
+    let errors = validate_errors(
+        &notes_with("unrestricted = true\n\n[route.db.tables]\nt = { select = \"*\" }\n"),
+        20_000,
+    );
+    assert_eq!(errors.len(), 1, "{errors}");
+    assert!(
+        errors.errors()[0].to_string().contains("take no tables"),
+        "{errors}"
+    );
+
+    let errors = validate_errors(
+        &notes_with("unrestricted = true\nfunctions = [\"unaccent\"]\n"),
+        20_000,
+    );
+    assert_eq!(errors.len(), 1, "{errors}");
+    assert!(
+        errors.errors()[0].to_string().contains("take no functions"),
+        "{errors}"
+    );
+
+    // ... and both at once, next to queries, is reported once per problem.
+    let errors = validate_errors(
+        &notes_with(
+            "unrestricted = true\nqueries = [\"SELECT 1\"]\nfunctions = [\"f\"]\n\n[route.db.tables]\nt = { select = \"*\" }\n",
+        ),
+        20_000,
+    );
+    assert_eq!(errors.len(), 3, "{errors}");
+}
+
+#[test]
+fn a_system_catalogue_table_grant_is_refused() {
+    for table in [
+        "pg_catalog.pg_class",
+        "information_schema.tables",
+        "pg_catalog",
+        "information_schema",
+    ] {
+        let errors = validate_errors(
+            &notes_with(&format!("[route.db.tables.\"{table}\"]\nselect = \"*\"\n")),
+            20_000,
+        );
+        assert_eq!(errors.len(), 1, "{table}: {errors}");
+        assert!(
+            errors.errors()[0].to_string().contains("system catalogue"),
+            "{table}: {errors}"
+        );
+    }
+    // A group's table grants are checked too.
+    let errors = validate_errors(
+        "version = 1\n\
+         [proxy.db]\nprotocol = \"postgresql\"\n\
+         [group.all.db.tables.\"pg_catalog.pg_class\"]\nselect = \"*\"\n\
+         [[route]]\nname = \"notes\"\npath = ['/notes/']\ngroups = [\"all\"]\n",
+        20_000,
+    );
+    assert_eq!(errors.len(), 1, "{errors}");
+}
+
+#[test]
+fn table_grants_may_be_attached_to_a_group() {
+    // Only `unrestricted` is restricted to an inline grant: anything a group
+    // grants reaches every route it is attached to, which is what groups are
+    // for.
+    let warnings = validate_warnings(
+        "version = 1\n\
+         [proxy.db]\nprotocol = \"postgresql\"\n\
+         [group.catalog.db.tables]\n\
+         shop_product = { select = [\"id\", \"name\"] }\n\
+         [group.catalog.db]\nfunctions = [\"unaccent\"]\n\
+         [[route]]\nname = \"product-detail\"\npath = ['/products/.*']\ngroups = [\"catalog\"]\n",
+    );
+    assert_eq!(warnings, vec![]);
+}

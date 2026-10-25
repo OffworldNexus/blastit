@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use blastit_events::{Component, Event, EventKind, PgRefuseReason, PgRefused, SqlDenied, SqlKind};
+use blastit_events::{Component, Event, EventKind, PgRefuseReason, PgRefused, SqlDenied};
 use blastit_sqlpolicy::Allowlist;
 use pregresql::proxy::cancel::CancelRegistry;
 use pregresql::proxy::{InboundConnection, UpstreamTls};
@@ -123,6 +123,7 @@ impl Shared {
                     Allowlist::unrestricted()
                 } else {
                     Allowlist::new(&spec.queries, spec.transaction_control)
+                        .with_tables(spec.tables.clone())
                 },
                 proxy: Arc::clone(proxy),
                 // One registry per listener: a view can only cancel the sessions
@@ -195,23 +196,12 @@ impl Shared {
     }
 
     /// Reports a statement the policy refused (`ARCHITECTURE.md` §8.1).
-    pub(crate) fn emit_sql_denied(
-        &self,
-        route: &str,
-        pid: u32,
-        proxy: &str,
-        kind: SqlKind,
-        sql: String,
-        in_transaction: bool,
-    ) {
-        let denied = SqlDenied::new(
-            pid,
-            proxy,
-            kind,
-            sql,
-            crate::hooks::DENIED_SQLSTATE,
-            in_transaction,
-        );
+    ///
+    /// The [`SqlDenied`] the caller builds carries the policy's own explanation
+    /// — which table, column or function a table grant does not cover, or that no
+    /// grant lists the text at all. It never carries a parameter value: values
+    /// are not part of a policy check.
+    pub(crate) fn emit_sql_denied(&self, route: &str, denied: SqlDenied) {
         self.emit_event(Some(route), EventKind::SqlDenied(denied));
     }
 
@@ -410,6 +400,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use blastit_sqlpolicy::TableGrants;
     use pregresql::proxy::UnixCredentials;
 
     fn credentials(pid: i32, uid: u32) -> UnixCredentials {
@@ -485,6 +476,7 @@ mod tests {
             queries: vec![],
             transaction_control: false,
             unrestricted: false,
+            tables: TableGrants::default(),
         };
         let listeners = vec![listener("a"), listener("b")];
         let config = DbproxyConfig {
@@ -537,6 +529,7 @@ mod tests {
             queries: vec![],
             transaction_control: false,
             unrestricted: false,
+            tables: TableGrants::default(),
         };
         let config = DbproxyConfig {
             proxies: vec![proxy],

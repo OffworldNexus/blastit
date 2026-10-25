@@ -177,3 +177,85 @@ fn merge_from_is_the_union() {
     assert!(!PgGrant::new(vec!["SELECT 1".to_string()], false).is_empty());
     assert!(!PgGrant::new(vec![], true).is_empty());
 }
+
+//
+// Table and column grants (§6, D7).
+//
+
+use blastit_manifest::{Columns, TableGrant, TableGrants};
+
+fn table(select: Option<Columns>) -> TableGrant {
+    TableGrant {
+        select,
+        ..TableGrant::default()
+    }
+}
+
+#[test]
+fn table_grants_merge_across_groups_and_the_route() {
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [group.catalog.db.tables]\n\
+                  shop_product = { select = [\"id\", \"name\"] }\n\
+                  [group.catalog.db]\nfunctions = [\"unaccent\"]\n\
+                  [[route]]\nname = \"product-detail\"\npath = ['/products/.*']\n\
+                  groups = [\"catalog\"]\n\
+                  [route.db.tables.shop_product]\nselect = [\"slug\"]\n\
+                  [route.db.tables.shop_order]\ninsert = \"*\"\n";
+    let manifest = Manifest::from_toml_str(source).expect("parses");
+    let db = db_grant(manifest.effective_grants(0));
+    let tables = db.tables();
+    assert_eq!(
+        tables.table("shop_product").unwrap().select,
+        Some(Columns::list(["id", "name", "slug"])),
+        "the route's columns are added to the group's"
+    );
+    assert_eq!(
+        tables.table("shop_order").unwrap().insert,
+        Some(Columns::All)
+    );
+    assert_eq!(Vec::from_iter(tables.functions()), ["unaccent"]);
+}
+
+#[test]
+fn a_star_absorbs_a_column_list_when_grants_merge() {
+    let mut left = PgGrant::new(vec![], false).with_tables(TableGrants::new(
+        [("t".to_string(), table(Some(Columns::list(["id"]))))],
+        [],
+    ));
+    let right = PgGrant::new(vec![], false).with_tables(TableGrants::new(
+        [("t".to_string(), table(Some(Columns::All)))],
+        ["f".to_string()],
+    ));
+    left.merge_from(&right);
+    assert_eq!(left.tables().table("t").unwrap().select, Some(Columns::All));
+    assert_eq!(Vec::from_iter(left.tables().functions()), ["f"]);
+
+    let mut left = PgGrant::default();
+    left.merge_from(&right);
+    assert_eq!(left.tables().table("t").unwrap().select, Some(Columns::All));
+}
+
+#[test]
+fn a_grant_of_nothing_but_tables_is_not_empty() {
+    // A route with table grants needs a dbproxy listener, or its statements
+    // would never reach the analysis at all (§2.2).
+    let tables = PgGrant::new(vec![], false).with_tables(TableGrants::new(
+        [("t".to_string(), table(Some(Columns::All)))],
+        [],
+    ));
+    assert!(!tables.is_empty());
+
+    let functions = PgGrant::new(vec![], false).with_tables(TableGrants::new(
+        std::iter::empty(),
+        ["unaccent".to_string()],
+    ));
+    assert!(!functions.is_empty());
+
+    // An entry that grants no operation of a table grants nothing.
+    let nothing = PgGrant::new(vec![], false).with_tables(TableGrants::new(
+        [("t".to_string(), TableGrant::default())],
+        [],
+    ));
+    assert!(nothing.is_empty());
+}

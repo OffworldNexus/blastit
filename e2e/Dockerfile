@@ -6,7 +6,10 @@
 # `scripts/build-wheel.sh` builds the Python-free `blastit-dbproxy` binary first
 # and copies it into the wheel at `blastit/_bin/blastit-dbproxy` (§4).
 FROM python:3.13-slim-trixie AS build
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gcc libc6-dev \
+# `libclang` is a build dependency of `pg_query`: it generates the Rust bindings
+# for PostgreSQL's own parser with bindgen (D7, §6). The manylinux images the
+# published wheels are built in ship it; this one has to install it.
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gcc libc6-dev clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 ENV PATH=/root/.cargo/bin:$PATH \

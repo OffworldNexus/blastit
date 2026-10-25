@@ -117,6 +117,20 @@ pub enum ManifestError {
         /// Dotted path of the offending key.
         path: String,
     },
+    /// A key of a `[route.db.tables.<table>]` entry that is not one of the four
+    /// operations (§6, D7).
+    #[error("{path}: unknown operation; expected select, insert, update or delete")]
+    UnknownTableOperation {
+        /// Dotted path of the offending key.
+        path: String,
+    },
+    /// A `"*"` inside a column list: the whole table is the string form
+    /// (`select = "*"`), so a list holding one is ambiguous (§6, D7).
+    #[error("{path}: \"*\" is not a column name; write select = \"*\" for every column")]
+    StarredColumn {
+        /// Dotted path of the offending list.
+        path: String,
+    },
     /// A required key is absent.
     #[error("{path}: missing required key")]
     MissingKey {
@@ -293,6 +307,41 @@ pub enum ManifestError {
         location: Location,
         /// The proxy the grant names.
         proxy: ProxyName,
+    },
+    /// A grant carries both `unrestricted = true` and table grants or a function
+    /// list (§6, D7).
+    ///
+    /// Same rule as `queries`: the grant would read as a restriction that is not
+    /// there, because the route may run anything on that proxy either way.
+    #[error(
+        "{location}: unrestricted grants take no {what} (grant on proxy {})",
+        quoted(.proxy)
+    )]
+    UnrestrictedWithContent {
+        /// Where the grant is written.
+        location: Location,
+        /// The proxy the grant names.
+        proxy: ProxyName,
+        /// What the grant should not carry: `tables` or `functions`.
+        what: &'static str,
+    },
+    /// A table grant names one of PostgreSQL's system catalogues (§6, D7).
+    ///
+    /// `pg_catalog` and `information_schema` describe everything else in the
+    /// database, and the analysis never reads them through a table grant, so an
+    /// entry naming one could only ever be dead weight that reads like a
+    /// capability.
+    #[error(
+        "{location}: {table} is a system catalogue, which a table grant can never allow (grant on proxy {})",
+        quoted(.proxy)
+    )]
+    UnusableTable {
+        /// Where the grant is written.
+        location: Location,
+        /// The proxy the grant names.
+        proxy: ProxyName,
+        /// The table as written.
+        table: String,
     },
 }
 

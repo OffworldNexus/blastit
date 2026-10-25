@@ -36,6 +36,11 @@
 //! `SAVEPOINT <ident>`, `RELEASE [SAVEPOINT] <ident>` and
 //! `ROLLBACK [WORK|TRANSACTION] TO [SAVEPOINT] <ident>`.
 //!
+//! [`Allowlist`] also carries the grant's [`TableGrants`] (§6, D7): a statement
+//! whose exact text is not listed is allowed when it parses to one `SELECT`,
+//! `INSERT`, `UPDATE` or `DELETE` that only touches granted tables, columns and
+//! functions (see [`analyze`] and [`Allowlist::with_tables`]).
+//!
 //! [`Allowlist::unrestricted`] is the other extreme: a route a manifest marks
 //! `unrestricted = true` may run any statement on one proxy (§6), and its
 //! allowlist allows everything without normalising or comparing anything.
@@ -46,13 +51,19 @@
 //! let allow = Allowlist::new(["SELECT 1"], true);
 //! assert_eq!(
 //!     allow.check("  select  1 ; "),
-//!     Decision::Denied { normalized: "select 1".to_string() },
+//!     Decision::Denied {
+//!         normalized: "select 1".to_string(),
+//!         reason: "the statement is not granted".to_string(),
+//!     },
 //! );
 //! assert_eq!(allow.check("SELECT\n  1;"), Decision::Allowed);
 //! assert_eq!(allow.check("BEGIN"), Decision::Allowed);
 //! assert_eq!(
 //!     allow.check("BEGIN; DROP TABLE t"),
-//!     Decision::Denied { normalized: "BEGIN; DROP TABLE t".to_string() },
+//!     Decision::Denied {
+//!         normalized: "BEGIN; DROP TABLE t".to_string(),
+//!         reason: "the statement is not granted".to_string(),
+//!     },
 //! );
 //!
 //! // A grant survives the shapes a Django app produces.
@@ -63,20 +74,31 @@
 //! );
 //! ```
 
+mod analysis;
 mod lexer;
+mod lru;
 mod normalize;
 mod statements;
+mod tables;
 
+pub use analysis::{
+    Access, Analysis, AnalysisError, Op, SAFE_FUNCTIONS, StatementKind, analyze, cached_analyses,
+    is_safe_function,
+};
 pub use normalize::normalize;
+pub use tables::{Columns, Denied, TableGrant, TableGrants};
 
 use std::collections::HashSet;
 
 use statements::is_transaction_control;
 
+/// Why a statement is refused when no exact grant lists it and the grant has no
+/// table grants to check it against.
+const NOT_GRANTED: &str = "the statement is not granted";
+
 /// What a [`Allowlist`] decided about one SQL text.
 ///
-/// Not exhaustive: more decision kinds (and more detail in `Denied`) may be
-/// added without a breaking change.
+/// Not exhaustive: more decision kinds may be added without a breaking change.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -87,6 +109,11 @@ pub enum Decision {
         /// The normalised text, ready to log (`sql.denied`, §8.1) and to extend
         /// the manifest with.
         normalized: String,
+        /// Why it was refused, in one line: `select on auth_user.password not
+        /// granted` for a table grant, `the statement is not granted` for a
+        /// text no grant lists. It names tables, columns and functions, never a
+        /// parameter value (§8.1).
+        reason: String,
     },
 }
 
@@ -99,8 +126,8 @@ impl Decision {
 
 /// The SQL one `postgresql` grant allows on one (route, proxy) pair.
 ///
-/// Built from the effective queries of a route (§6, "Effective grants") plus
-/// the route's `transaction_control` flag, or with
+/// Built from the effective queries of a route (§6, "Effective grants"), its
+/// [`TableGrants`] and the route's `transaction_control` flag, or with
 /// [`Allowlist::unrestricted`] for a route a manifest marked
 /// `unrestricted = true`.
 #[derive(Debug, Clone, Default)]
@@ -108,6 +135,7 @@ pub struct Allowlist {
     queries: HashSet<String>,
     transaction_control: bool,
     unrestricted: bool,
+    tables: TableGrants,
 }
 
 impl Allowlist {
@@ -118,6 +146,9 @@ impl Allowlist {
     /// manifest formatting differences are irrelevant when checking. Queries
     /// that normalise to the empty text are ignored: no text is ever allowed
     /// just because the manifest contained an empty string.
+    ///
+    /// The grant's table grants are added with [`Allowlist::with_tables`]; a
+    /// grant that has none allows only what its queries list.
     pub fn new<S: AsRef<str>>(
         queries: impl IntoIterator<Item = S>,
         transaction_control: bool,
@@ -133,7 +164,25 @@ impl Allowlist {
             queries: set,
             transaction_control,
             unrestricted: false,
+            tables: TableGrants::default(),
         }
+    }
+
+    /// The same allowlist with the grant's table and column grants (§6, D7).
+    ///
+    /// A statement that is not listed exactly is then analysed
+    /// ([`analyze`]) and allowed when every table, column and function it
+    /// touches is granted. An exact match still wins: it is checked first and
+    /// costs no parse, which is what keeps a route that lists its statements
+    /// unchanged.
+    pub fn with_tables(mut self, tables: TableGrants) -> Self {
+        self.tables = tables;
+        self
+    }
+
+    /// The grant's table and column grants.
+    pub fn tables(&self) -> &TableGrants {
+        &self.tables
     }
 
     /// An allowlist that allows every statement.
@@ -148,6 +197,7 @@ impl Allowlist {
             queries: HashSet::new(),
             transaction_control: false,
             unrestricted: true,
+            tables: TableGrants::default(),
         }
     }
 
@@ -164,18 +214,24 @@ impl Allowlist {
     ///
     /// An [`Allowlist::unrestricted`] one allows everything without looking at
     /// the text at all, empty text included: PostgreSQL answers an empty
-    /// statement with an `EmptyQueryResponse` and runs nothing. Every other
-    /// allowlist allows the text when its normalised form is exactly one of the
-    /// allowlisted queries, or — with `transaction_control` — when it is a
-    /// single transaction-control statement, and denies empty or
-    /// whitespace-only text.
+    /// statement with an `EmptyQueryResponse` and runs nothing.
+    ///
+    /// Every other allowlist allows the text when its normalised form is exactly
+    /// one of the allowlisted quarries, when — with `transaction_control` — it is
+    /// a single transaction-control statement, or, with table grants, when it
+    /// analyses ([`analyze`]) to a statement of its grant's tables, columns and
+    /// functions. It denies empty or whitespace-only text.
     pub fn check(&self, sql: &str) -> Decision {
         if self.unrestricted {
             return Decision::Allowed;
         }
         let normalized = normalize(sql);
+        let deny = |reason: &str| Decision::Denied {
+            normalized: normalized.clone(),
+            reason: reason.to_string(),
+        };
         if normalized.is_empty() {
-            return Decision::Denied { normalized };
+            return deny(NOT_GRANTED);
         }
         if self.queries.contains(&normalized) {
             return Decision::Allowed;
@@ -184,7 +240,26 @@ impl Allowlist {
         if self.transaction_control && is_transaction_control(&normalized) {
             return Decision::Allowed;
         }
-        Decision::Denied { normalized }
+        if self.tables.is_empty() {
+            // Nothing to analyse against: the grant is a list of statements and
+            // this is not one of them.
+            return deny(NOT_GRANTED);
+        }
+        // The analysis is cached by this normalised text, which is also the key
+        // an exact grant is compared against (§6).
+        match analysis::analyze_cached(sql, &normalized).as_ref() {
+            Ok(analysis) => match self.tables.check(analysis) {
+                Ok(()) => Decision::Allowed,
+                Err(denied) => Decision::Denied {
+                    normalized,
+                    reason: denied.to_string(),
+                },
+            },
+            Err(error) => Decision::Denied {
+                normalized,
+                reason: error.to_string(),
+            },
+        }
     }
 
     /// Whether this allowlist also accepts single transaction-control
@@ -207,14 +282,15 @@ impl Allowlist {
         self.queries.len()
     }
 
-    /// Whether the allowlist holds no listed query at all. It can then only
-    /// allow transaction-control statements, if those are enabled.
+    /// Whether the allowlist can allow nothing at all: no listed query, no table
+    /// grant and no extra function. It can then only allow transaction-control
+    /// statements, if those are enabled.
     ///
     /// An [`Allowlist::unrestricted`] one is never empty: it allows everything,
     /// which is the opposite of allowing nothing, and it reads the same way on
     /// both sides of the policy (`PgGrant::is_empty` in `blastit-manifest`).
     pub fn is_empty(&self) -> bool {
-        !self.unrestricted && self.queries.is_empty()
+        !self.unrestricted && self.queries.is_empty() && self.tables.is_empty()
     }
 }
 
@@ -236,7 +312,15 @@ mod tests {
     fn denied_reason(decision: Decision) -> String {
         match decision {
             Decision::Allowed => panic!("expected a denial"),
-            Decision::Denied { normalized } => normalized,
+            Decision::Denied { normalized, .. } => normalized,
+        }
+    }
+
+    /// A denial of a statement no exact grant lists.
+    fn deny(normalized: String) -> Decision {
+        Decision::Denied {
+            normalized,
+            reason: NOT_GRANTED.to_string(),
         }
     }
 
@@ -246,9 +330,7 @@ mod tests {
         assert_eq!(allow.check(CATALOG_QUERY), Decision::Allowed);
         assert_eq!(
             allow.check("DROP TABLE shop_product"),
-            Decision::Denied {
-                normalized: "DROP TABLE shop_product".to_string()
-            }
+            deny("DROP TABLE shop_product".to_string())
         );
         assert_eq!(allow.len(), 1);
         assert!(!allow.is_empty());
@@ -290,12 +372,7 @@ mod tests {
             allow.check(&format!("{SESSION_QUERY}\n;\n")),
             Decision::Allowed
         );
-        assert_eq!(
-            allow.check(ORDER_INSERT),
-            Decision::Denied {
-                normalized: normalize(ORDER_INSERT),
-            }
-        );
+        assert_eq!(allow.check(ORDER_INSERT), deny(normalize(ORDER_INSERT),));
 
         let allow = allowlist(&["SET TIME ZONE 'UTC'"], false);
         assert_eq!(
@@ -452,18 +529,14 @@ mod tests {
         let allow = allowlist(&["SELECT 1 -- ; DROP TABLE t"], true);
         assert_eq!(
             allow.check("SELECT 1 --\n; DROP TABLE t"),
-            Decision::Denied {
-                normalized: "SELECT 1 ; DROP TABLE t".to_string()
-            }
+            deny("SELECT 1 ; DROP TABLE t".to_string())
         );
         // ... and the mirror image: a stored query whose comment ends in a
         // newline no longer matches the one-line spelling of it.
         let allow = allowlist(&["SELECT 1 --\n; DROP TABLE t"], true);
         assert_eq!(
             allow.check("SELECT 1 -- ; DROP TABLE t"),
-            Decision::Denied {
-                normalized: "SELECT 1".to_string()
-            }
+            deny("SELECT 1".to_string())
         );
         // A separator after any comment starts a second statement again.
         let allow = allowlist(&["SELECT 1"], true);
@@ -506,18 +579,14 @@ mod tests {
         let allow = allowlist(&["Q"], true);
         assert_eq!(
             allow.check("Q --\r; DROP TABLE t"),
-            Decision::Denied {
-                normalized: "Q ; DROP TABLE t".to_string()
-            }
+            deny("Q ; DROP TABLE t".to_string())
         );
         // The mirror image, as with `\n`: a comment that never ends before the
         // end of the text stands for `Q` and is a different text.
         let allow = allowlist(&["Q -- ; DROP TABLE t"], true);
         assert_eq!(
             allow.check("Q --\r; DROP TABLE t"),
-            Decision::Denied {
-                normalized: "Q ; DROP TABLE t".to_string()
-            }
+            deny("Q ; DROP TABLE t".to_string())
         );
         // ... and a transaction statement cannot hide one behind a CR.
         let allow = allowlist(&[CATALOG_QUERY], true);
@@ -592,9 +661,7 @@ mod tests {
         let allow = allowlist(&["SELECT 1"], false);
         assert_eq!(
             allow.check(r"SELECT 1E'a\'b  c'"),
-            Decision::Denied {
-                normalized: r"SELECT 1E'a\'b c'".to_string()
-            }
+            deny(r"SELECT 1E'a\'b c'".to_string())
         );
         // With a space before the E, the E does start its own token, so the
         // backslash escapes the quote and both spaces survive.
@@ -602,9 +669,7 @@ mod tests {
         assert_eq!(allow.check(r"SELECT   E'a\'b  c'  ;"), Decision::Allowed);
         assert_eq!(
             allow.check(r"SELECT E'a\'b c'"),
-            Decision::Denied {
-                normalized: r"SELECT E'a\'b c'".to_string()
-            }
+            deny(r"SELECT E'a\'b c'".to_string())
         );
     }
 
@@ -670,9 +735,7 @@ mod tests {
         let allow = allowlist(&[CATALOG_QUERY], true);
         assert_eq!(
             allow.check("BEGIN; SELECT 'a; b'"),
-            Decision::Denied {
-                normalized: "BEGIN; SELECT 'a; b'".to_string()
-            }
+            deny("BEGIN; SELECT 'a; b'".to_string())
         );
     }
 
@@ -681,21 +744,14 @@ mod tests {
         let allow = allowlist(&[CATALOG_QUERY], false);
         assert_eq!(
             allow.check("  DELETE\n\tFROM \"shop_product\"  ;  "),
-            Decision::Denied {
-                normalized: "DELETE FROM \"shop_product\"".to_string()
-            }
+            deny("DELETE FROM \"shop_product\"".to_string())
         );
     }
 
     #[test]
     fn decision_helper_reports_allowance() {
         assert!(Decision::Allowed.is_allowed());
-        assert!(
-            !Decision::Denied {
-                normalized: String::new()
-            }
-            .is_allowed()
-        );
+        assert!(!deny(String::new()).is_allowed());
     }
 
     #[test]
@@ -946,11 +1002,10 @@ mod tests {
         );
         assert_eq!(
             decision,
-            Decision::Denied {
-                normalized:
-                    r#"INSERT INTO "auth_user" ("username") VALUES ($?), ... RETURNING "auth_user"."id""#
-                        .to_string(),
-            }
+            deny(
+                r#"INSERT INTO "auth_user" ("username") VALUES ($?), ... RETURNING "auth_user"."id""#
+                    .to_string()
+            )
         );
     }
 
