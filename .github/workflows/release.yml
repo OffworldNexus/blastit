@@ -92,8 +92,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/wheels" > release.json
-          python3 .github/scripts/simple_index.py release.json site
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/wheels" --jq .id)
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$id/assets?per_page=100" --jq '.[]' > assets.jsonl
+          python3 .github/scripts/simple_index.py assets.jsonl site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -4,10 +4,10 @@
 mod common;
 
 use blastit_manifest::{
-    Location, Manifest, ManifestError, ManifestErrors, ManifestWarning, ProxyName,
+    Location, Manifest, ManifestError, ManifestErrors, ManifestWarning, PgGrant, ProxyName,
 };
 
-use common::{SECTION_5_1, SECTION_6, section_6, validate_errors, validate_warnings};
+use common::{SECTION_5_1, SECTION_6, section_6, texts, validate_errors, validate_warnings};
 
 #[test]
 fn the_section_6_example_validates_without_warnings() {
@@ -426,4 +426,213 @@ fn locations_read_well_in_errors() {
         .to_string(),
         "route \"checkout\" (index 2)"
     );
+}
+
+/// A manifest with one unrestricted inline grant, and a place to put more.
+const UNRESTRICTED: &str = "version = 1\n\
+                             [proxy.db]\nprotocol = \"postgresql\"\n\
+                             [proxy.analytics]\nprotocol = \"postgresql\"\n\
+                             [[route]]\nname = \"admin\"\npath = ['/admin/.*']\n\
+                             [route.db]\nunrestricted = true\n\
+                             [route.analytics]\nunrestricted = true\n\
+                             [[route]]\nname = \"about\"\npath = ['/about/']\n\
+                             [route.db]\nqueries = []\n";
+
+#[test]
+fn an_unrestricted_route_warns_once_per_route_and_proxy() {
+    assert_eq!(
+        validate_warnings(UNRESTRICTED),
+        vec![
+            ManifestWarning::UnrestrictedRoute {
+                route: "admin".to_string(),
+                proxy: ProxyName::from("analytics"),
+            },
+            ManifestWarning::UnrestrictedRoute {
+                route: "admin".to_string(),
+                proxy: ProxyName::from("db"),
+            },
+        ],
+        "one warning per (route, proxy), in route then proxy order"
+    );
+}
+
+#[test]
+fn an_unrestricted_grant_in_a_group_is_refused_at_boot() {
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [group.backoffice.db]\nunrestricted = true\n\
+                  [[route]]\nname = \"admin\"\npath = ['/admin/.*']\ngroups = [\"backoffice\"]\n";
+    let errors = validate_errors(source, 20_000);
+    assert_eq!(
+        errors,
+        ManifestErrors::from(ManifestError::UnrestrictedGroup {
+            location: Location::Group("backoffice".to_string()),
+            proxy: ProxyName::from("db"),
+        })
+    );
+    let rendered = errors.to_string();
+    assert!(
+        rendered.contains("unrestricted is only allowed inline on a route"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("group \"backoffice\""), "{rendered}");
+
+    // A group attached nowhere is refused too: it could be attached to every
+    // route at the next deploy, which is what the rule exists for.
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [group.backoffice.db]\nunrestricted = true\n\
+                  [[route]]\nname = \"about\"\npath = ['/about/']\n";
+    assert_eq!(
+        validate_errors(source, 20_000),
+        ManifestErrors::from(ManifestError::UnrestrictedGroup {
+            location: Location::Group("backoffice".to_string()),
+            proxy: ProxyName::from("db"),
+        })
+    );
+
+    // Attached globally: same refusal, and the global `groups` line does not
+    // hide it.
+    let source = "version = 1\n\
+                  groups = [\"backoffice\"]\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [group.backoffice.db]\nunrestricted = true\n\
+                  [[route]]\nname = \"about\"\npath = ['/about/']\n";
+    assert_eq!(
+        validate_errors(source, 20_000),
+        ManifestErrors::from(ManifestError::UnrestrictedGroup {
+            location: Location::Group("backoffice".to_string()),
+            proxy: ProxyName::from("db"),
+        })
+    );
+
+    // `unrestricted = false` in a group is an ordinary grant.
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [group.backoffice.db]\nunrestricted = false\nqueries = [\"SELECT 1\"]\n\
+                  [[route]]\nname = \"admin\"\npath = ['/admin/.*']\ngroups = [\"backoffice\"]\n";
+    assert_eq!(validate_warnings(source), vec![]);
+}
+
+#[test]
+fn an_unrestricted_grant_takes_no_queries() {
+    // A query list next to `unrestricted = true` would read as a restriction
+    // and is not one: the route may run anything either way, so the boot is
+    // refused rather than left claiming more than it does.
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [[route]]\nname = \"admin\"\npath = ['/admin/.*']\n\
+                  [route.db]\nunrestricted = true\nqueries = [\"SELECT 1\"]\n";
+    let errors = validate_errors(source, 20_000);
+    assert_eq!(
+        errors,
+        ManifestErrors::from(ManifestError::UnrestrictedWithQueries {
+            location: Location::Route {
+                index: 0,
+                name: "admin".to_string(),
+            },
+            proxy: ProxyName::from("db"),
+        })
+    );
+    let rendered = errors.to_string();
+    assert!(
+        rendered.contains("unrestricted grants take no queries"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("route \"admin\""), "{rendered}");
+
+    // An empty list claims nothing, so it is allowed (with the boot warning).
+    let source = source.replace("queries = [\"SELECT 1\"]", "queries = []");
+    assert_eq!(
+        validate_warnings(&source),
+        vec![ManifestWarning::UnrestrictedRoute {
+            route: "admin".to_string(),
+            proxy: ProxyName::from("db"),
+        }]
+    );
+
+    // ... and so is a list with `unrestricted = false`.
+    let source = source.replace("unrestricted = true", "unrestricted = false");
+    assert_eq!(validate_warnings(&source), vec![]);
+
+    // A grant that lists both and sits in a group breaks both rules, and both
+    // are reported.
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [group.backoffice.db]\nunrestricted = true\nqueries = [\"SELECT 1\"]\n\
+                  [[route]]\nname = \"admin\"\npath = ['/admin/.*']\ngroups = [\"backoffice\"]\n";
+    let errors = validate_errors(source, 20_000);
+    assert_eq!(
+        errors.errors(),
+        [
+            ManifestError::UnrestrictedGroup {
+                location: Location::Group("backoffice".to_string()),
+                proxy: ProxyName::from("db"),
+            },
+            ManifestError::UnrestrictedWithQueries {
+                location: Location::Group("backoffice".to_string()),
+                proxy: ProxyName::from("db"),
+            },
+        ]
+    );
+}
+
+#[test]
+fn an_unrestricted_route_needs_no_query_and_gets_a_grant() {
+    let manifest = Manifest::from_toml_str(UNRESTRICTED).expect("parses");
+    manifest
+        .validate(20_000)
+        .expect("validates despite the warning");
+    // The route gets a grant on both proxies, so init binds both listeners
+    // (§2.2, §6), and the second route's empty grant on `db` disappears.
+    let admin = manifest.effective_grants(0);
+    assert_eq!(admin.len(), 2);
+    for (proxy, grant) in &admin {
+        let grant = grant.as_postgresql().expect("a postgresql grant");
+        assert!(grant.is_unrestricted(), "{proxy:?}");
+        assert!(!grant.is_empty(), "{proxy:?}");
+    }
+    assert_eq!(
+        manifest.effective_grants(1).len(),
+        0,
+        "an empty inline grant is no grant at all"
+    );
+}
+
+#[test]
+fn a_group_can_never_make_a_route_unrestricted() {
+    // The check is about groups, not about the union: nothing a group holds can
+    // turn a route into one that may run anything.
+    let source = "version = 1\n\
+                  groups = [\"wide\"]\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [group.wide.db]\nqueries = [\"SELECT 1\"]\ntransaction_control = true\n\
+                  [[route]]\nname = \"about\"\npath = ['/about/']\n\
+                  [route.db]\nqueries = [\"SELECT 2\"]\n";
+    let manifest = Manifest::from_toml_str(source).expect("parses");
+    assert_eq!(manifest.validate(20_000).expect("validates"), vec![]);
+    let mut grants = manifest.effective_grants(0);
+    let grant = grants
+        .remove(&ProxyName::from("db"))
+        .expect("the union")
+        .into_postgresql()
+        .expect("a postgresql grant");
+    assert!(!grant.is_unrestricted());
+    assert_eq!(texts(grant.queries()), ["SELECT 1", "SELECT 2"]);
+    assert!(grant.transaction_control());
+}
+
+#[test]
+fn merging_keeps_unrestricted_once_it_is_on() {
+    let mut grant = PgGrant::new(vec!["SELECT 1".to_string()], true);
+    assert!(!grant.is_unrestricted());
+    grant.merge_from(&PgGrant::unrestricted());
+    assert!(grant.is_unrestricted());
+    assert_eq!(texts(grant.queries()), ["SELECT 1"], "the queries stay");
+    assert!(!grant.is_empty());
+
+    let mut grant = PgGrant::unrestricted();
+    grant.merge_from(&PgGrant::new(vec!["SELECT 2".to_string()], false));
+    assert!(grant.is_unrestricted());
+    assert_eq!(texts(grant.queries()), ["SELECT 2"]);
 }

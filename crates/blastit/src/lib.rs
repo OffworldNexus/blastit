@@ -19,6 +19,8 @@ pub mod host;
 
 mod child;
 mod config;
+mod forking;
+mod immortal;
 mod logs;
 mod roles;
 mod stage0;

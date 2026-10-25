@@ -32,7 +32,7 @@ use blastit_events::{
 };
 use blastit_manifest::{Manifest, UidLayout};
 use blastit_sys::{
-    Fork, Pid, Rlimits, Signal, bind_unix_listener, current_signal_mask, exec, fork, harden_child,
+    Fork, Pid, Rlimits, Signal, bind_unix_listener, current_signal_mask, exec, harden_child,
     make_private_dir, pipe, restore_signal_mask_in_child, set_cloexec, set_dumpable,
 };
 
@@ -43,6 +43,14 @@ use crate::logs::{Emitter, fail, output_event};
 
 /// How long stage 0 waits for dbproxy's ready byte before giving up (§4).
 pub const DBPROXY_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long stage 0 keeps reading a failed dbproxy's output before giving up
+/// (§8.1).
+///
+/// Short on purpose: init is already failing the boot, and the child that never
+/// reported ready is still alive and still holds the write end of its pipes —
+/// see [`emit_child_output`].
+pub const CHILD_OUTPUT_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Largest configuration document init will write into a pipe.
 ///
@@ -68,7 +76,11 @@ fn dbproxy_limits(config: &Config) -> Rlimits {
 /// dbproxy's own `execve` start, and — for a wheel — the interpreter's import
 /// path, which travels with the configuration because stage 1 is re-executed
 /// with `-I` (§4).
-pub fn run(host: &Host) -> ! {
+///
+/// `interpreter` is `true` when a live CPython is in this image (a wheel: the
+/// console script's), which is what its `fork` has to account for (§9.3, and
+/// [`crate::forking`]).
+pub fn run(host: &Host, interpreter: bool) -> ! {
     // §4: `boot` is the first event, emitted before anything can fail. The
     // configuration is not parsed yet, so this one line is always JSON — and the
     // §7.3 seccomp flag is read straight from its variable, because an operator
@@ -125,7 +137,7 @@ pub fn run(host: &Host) -> ! {
         .collect();
 
     let listeners = bind_view_sockets(&emitter, &manifest, &prepared, &layout);
-    let dbproxy = fork_dbproxy(&emitter, &config, host, &prepared, listeners);
+    let dbproxy = fork_dbproxy(&emitter, &config, host, interpreter, &prepared, listeners);
 
     // The interpreter's import path travels in the configuration, not in the
     // environment: stage 1 is `execve`'d as an interpreter of its own (§4), and
@@ -192,6 +204,7 @@ fn bind_view_sockets(
                     uid,
                     queries: pg.queries().to_vec(),
                     transaction_control: pg.transaction_control(),
+                    unrestricted: pg.is_unrestricted(),
                 },
             ));
         }
@@ -212,6 +225,7 @@ fn fork_dbproxy(
     emitter: &Emitter,
     config: &Config,
     host: &Host,
+    interpreter: bool,
     prepared: &blastit_env::Prepared,
     listeners: Vec<(UnixListener, ListenerSpec)>,
 ) -> Option<DbproxyHandover> {
@@ -262,7 +276,7 @@ fn fork_dbproxy(
     };
     let uid = UidLayout::new(config.uid_base).dbproxy();
 
-    match fork_ok(emitter) {
+    match fork_ok(emitter, interpreter) {
         Fork::Parent(pid) => {
             // The parent keeps only the read ends, and neither end of the pg
             // listeners: dbproxy owns those after the fork.
@@ -278,10 +292,12 @@ fn fork_dbproxy(
             }
             drop(secrets);
 
-            if let Err(reason) = wait_ready(&ready_read) {
+            if let Err(reason) = wait_ready(&ready_read, DBPROXY_READY_TIMEOUT) {
                 // Whatever dbproxy said on the way out is in the pipes init is
                 // holding for stage 1, and a boot that fails with nothing but
-                // "exited" is a boot nobody can debug (§8.1).
+                // "exited" is a boot nobody can debug (§8.1). On a *timeout* the
+                // child is still alive and still holds the write ends, which is
+                // why the drain is bounded (see `emit_child_output`).
                 emit_child_output(emitter, &stdout_read, Stream::Stdout);
                 emit_child_output(emitter, &stderr_read, Stream::Stderr);
                 fail(emitter, &reason);
@@ -351,18 +367,21 @@ pub struct DbproxyHandover {
 
 /// Waits for dbproxy's ready byte, with a deadline (§4).
 ///
+/// `timeout` is the whole budget, and it is a parameter so that a test can watch
+/// it expire in milliseconds instead of waiting out [`DBPROXY_READY_TIMEOUT`].
+///
 /// # Errors
 ///
 /// A message saying how the wait ended — the deadline, a failed `poll`, or the
 /// child exiting first. The caller prints it together with whatever the child
 /// left in its output pipes.
-fn wait_ready(ready: &OwnedFd) -> Result<(), String> {
-    let deadline = Deadline::after(DBPROXY_READY_TIMEOUT);
+fn wait_ready(ready: &OwnedFd, timeout: Duration) -> Result<(), String> {
+    let deadline = Deadline::after(timeout);
     loop {
         if deadline.expired() {
             return Err(format!(
                 "dbproxy did not report ready within {}s",
-                DBPROXY_READY_TIMEOUT.as_secs()
+                timeout.as_secs_f32()
             ));
         }
         match wait_readable(ready.as_fd(), deadline.left()) {
@@ -384,13 +403,24 @@ fn wait_ready(ready: &OwnedFd) -> Result<(), String> {
 /// This is the only place init reads a child's stdout or stderr itself: normally
 /// stage 1 collects both, but a dbproxy that failed to start never gets that
 /// far, and the reason it failed — a missing binary, a permission a dropped uid
-/// does not have — is nothing but its own last words. The pipe is read to `EOF`
-/// (the child is gone, so its write end is closed) and the total is capped,
-/// because a component that failed the boot is not trusted to keep it short.
+/// does not have — is nothing but its own last words.
+///
+/// # Why the reads are non-blocking and bounded
+///
+/// A drain only *starts* once the wait for dbproxy's ready byte has failed, and
+/// one of those failures is the timeout: there the child is very much alive and
+/// still holds the write ends, so a plain read to `EOF` would block init
+/// forever — turning a failure into a hang. The pipe is therefore switched to
+/// non-blocking, and whatever has not arrived when [`CHILD_OUTPUT_TIMEOUT`] is
+/// spent is not worth waiting for: init is on its way out.
 fn emit_child_output(emitter: &Emitter, fd: &OwnedFd, stream: Stream) {
     /// Largest amount of a failed child's output init will log.
     const MAX: usize = 8 * 1024;
 
+    let deadline = Deadline::after(CHILD_OUTPUT_TIMEOUT);
+    // Best effort: a pipe that cannot be switched is still read to its current
+    // end, and the deadline below bounds that too.
+    let _ = rustix::fs::fcntl_setfl(fd, rustix::fs::OFlags::NONBLOCK);
     let mut bytes = vec![0_u8; MAX];
     let mut total = 0;
     while total < MAX {
@@ -398,6 +428,15 @@ fn emit_child_output(emitter: &Emitter, fd: &OwnedFd, stream: Stream) {
             Ok(0) => break,
             Ok(count) => total += count,
             Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                // Nothing there *yet*: the child may still be alive and about to
+                // say something, so wait for it — but not past the deadline.
+                if deadline.expired()
+                    || !wait_readable(fd.as_fd(), deadline.left()).unwrap_or(false)
+                {
+                    break;
+                }
+            }
             Err(_) => break,
         }
     }
@@ -520,10 +559,122 @@ fn pipe_ok(emitter: &Emitter, what: &str) -> (OwnedFd, OwnedFd) {
     }
 }
 
-/// `blastit_sys::fork`, fatal on failure.
-fn fork_ok(emitter: &Emitter) -> Fork {
-    match fork() {
+/// `fork()`, fatal on failure.
+///
+/// With a live interpreter in this image the fork runs under CPython's protocol
+/// ([`crate::forking`]): a wheel's stage 0 forks dbproxy from inside the
+/// console script's interpreter, and §9.3 applies to it as much as to a view.
+fn fork_ok(emitter: &Emitter, interpreter: bool) -> Fork {
+    match crate::forking::fork(interpreter) {
         Ok(fork) => fork,
         Err(err) => fail(emitter, &format!("fork: {err}")),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::io::Read;
+    use std::time::Instant;
+
+    use super::*;
+
+    /// Everything an emitter wrote to `read_end`, once its peer is closed.
+    fn captured(fd: OwnedFd) -> String {
+        let mut file = std::fs::File::from(fd);
+        let mut text = String::new();
+        file.read_to_string(&mut text).unwrap();
+        text
+    }
+
+    /// Drains `child_output` and returns what was logged, with how long the
+    /// drain itself took.
+    fn drain(child_output: &OwnedFd, stream: Stream) -> (String, Duration) {
+        let (capture_read, capture_write) = pipe().unwrap();
+        let emitter = Emitter::new(
+            capture_write.as_raw_fd(),
+            LogFormat::Json,
+            Level::Info,
+            false,
+        );
+        let started = Instant::now();
+        emit_child_output(&emitter, child_output, stream);
+        let elapsed = started.elapsed();
+        drop(capture_write);
+        (captured(capture_read), elapsed)
+    }
+
+    /// The read end of a pipe whose write end the caller keeps for itself.
+    fn output_pipe() -> (OwnedFd, OwnedFd) {
+        pipe().unwrap()
+    }
+
+    /// A dbproxy that printed something and then hung holds its write end open:
+    /// the drain has to read what it said without waiting for the process.
+    #[test]
+    fn a_live_child_that_printed_is_still_logged() {
+        let (read_end, write_end) = output_pipe();
+        rustix::io::write(&write_end, b"exec dbproxy: Permission denied\n").unwrap();
+
+        let (text, elapsed) = drain(&read_end, Stream::Stdout);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the drain waited for a live child: {elapsed:?}"
+        );
+        assert!(text.contains("Permission denied"), "{text}");
+        assert!(text.contains(r#""component":"dbproxy""#), "{text}");
+        assert!(text.contains(r#""event":"app.output""#), "{text}");
+    }
+
+    /// And a live child that said *nothing* must not block the boot either: this
+    /// is the timeout case, where the process is still alive and still holds the
+    /// write end of both pipes.
+    #[test]
+    fn a_silent_live_child_does_not_block_the_drain() {
+        let (read_end, _write_end) = output_pipe();
+
+        let (text, elapsed) = drain(&read_end, Stream::Stderr);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the drain hung: {elapsed:?}"
+        );
+        assert!(text.is_empty(), "nothing was written: {text}");
+    }
+
+    /// The ordinary failure: dbproxy is gone, and what it printed on the way out
+    /// is the only explanation of why.
+    #[test]
+    fn a_dead_child_output_becomes_app_output_events() {
+        let (read_end, write_end) = output_pipe();
+        rustix::io::write(&write_end, b"first\nsecond\n").unwrap();
+        drop(write_end);
+
+        let (text, _) = drain(&read_end, Stream::Stdout);
+        assert!(text.contains("first"), "{text}");
+        assert!(text.contains("second"), "{text}");
+    }
+
+    /// The wait itself: a dbproxy that never writes must expire the deadline —
+    /// and quickly, which is why the timeout is a parameter.
+    #[test]
+    fn a_dbproxy_that_never_reports_ready_times_out() {
+        let (ready, _write_end) = output_pipe();
+        let started = Instant::now();
+        let err = wait_ready(&ready, Duration::from_millis(50)).unwrap_err();
+        assert!(err.contains("did not report ready within"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the deadline was not honoured: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// And a dbproxy that died first is reported as that, not as a timeout.
+    #[test]
+    fn a_dbproxy_that_exits_before_ready_is_reported_as_such() {
+        let (ready, write_end) = output_pipe();
+        drop(write_end);
+        let err = wait_ready(&ready, Duration::from_secs(30)).unwrap_err();
+        assert_eq!(err, "dbproxy exited before it was ready");
     }
 }

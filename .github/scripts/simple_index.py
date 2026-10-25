@@ -1,9 +1,11 @@
 """Write a PEP 503 simple index for the wheels attached to a GitHub release.
 
-    simple_index.py RELEASE.json OUT_DIR
+    simple_index.py ASSETS.jsonl OUT_DIR
 
-RELEASE.json is `gh api repos/<owner>/<repo>/releases/tags/<tag>`. Each asset's
-SHA-256 comes from GitHub's own `digest` field, so nothing is downloaded.
+ASSETS.jsonl holds one release asset per line, from
+`gh api --paginate repos/<owner>/<repo>/releases/<id>/assets --jq '.[]'` (the
+release object itself only embeds the first page). Each asset's SHA-256 comes
+from GitHub's own `digest` field, so nothing is downloaded.
 """
 
 import html
@@ -11,11 +13,11 @@ import json
 import pathlib
 import sys
 
-release = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assets = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]
 out = pathlib.Path(sys.argv[2])
 
 links = []
-for asset in sorted(release["assets"], key=lambda a: a["name"]):
+for asset in sorted(assets, key=lambda a: a["name"]):
     name = asset["name"]
     if not name.endswith(".whl"):
         continue

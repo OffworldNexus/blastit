@@ -49,6 +49,11 @@
 //!   seven outcomes, which §8.1 closes).
 //! * A scheduler-written body is sent even for a `HEAD` request: deciding not
 //!   to is http's business, not the scheduler's (§2.3).
+//! * §8 Sizing's derived `BLASTIT_MAX_VIEW_PROCESSES` default is taken twice:
+//!   provisionally at startup, so the eager or preforked burst obeys it, and
+//!   again at the first `SPAWNED`, which is the first moment §8's "usage after
+//!   preload" exists (init forks every view from its supervision loop, which
+//!   begins only once the app is preloaded, §4).
 //! * Two settings exist that §8.2 does not name, because §2.4 asks for the
 //!   behaviour without giving it a variable: [`SchedulerConfig::spawn_backoff`]
 //!   ("don't spin") and the per-peer byte caps in this module.
@@ -70,7 +75,7 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use crate::config::SchedulerConfig;
+use crate::config::{SchedulerConfig, derived_view_cap};
 use crate::ctl::CtlChannel;
 use crate::error::SchedulerError;
 use crate::path::{
@@ -304,6 +309,14 @@ struct Scheduler {
     draining: bool,
     /// When draining gives up on the requests that are left.
     drain_deadline: Option<Instant>,
+    /// §8 Sizing's derived view process cap, once init has proved the app is
+    /// preloaded (see [`Scheduler::derive_view_cap`]).
+    derived_view_cap: Option<u32>,
+    /// Whether `derived_view_cap` came from a reading taken *after* the
+    /// preload, which is the one §8 asks for.
+    derived_after_preload: bool,
+    /// When the memory high watermark is checked next (`None`: not watched).
+    memory_check_at: Option<Instant>,
     /// http closed `http.chan`.
     http_closed: bool,
     /// Frames dropped because they named an unknown stream or request, or
@@ -324,6 +337,11 @@ impl Scheduler {
         ctl_out: Outbound,
     ) -> Self {
         let script_name = cfg.script_name.as_deref().and_then(normalize_script_name);
+        // §8 Sizing: the watermark is watched on a timer, so the scheduler only
+        // schedules it when it has something to watch.
+        let memory_check_at = cfg
+            .watches_memory()
+            .then(|| Instant::now() + cfg.memory_check_interval);
         Self {
             cfg,
             routes,
@@ -344,6 +362,9 @@ impl Scheduler {
             lru: 0,
             draining: false,
             drain_deadline: None,
+            derived_view_cap: None,
+            derived_after_preload: false,
+            memory_check_at,
             http_closed: false,
             dropped: 0,
         }
@@ -365,7 +386,12 @@ impl Scheduler {
 
     /// Spawns the views that must exist at startup: every preforked route, and
     /// every route when `BLASTIT_VIEW_SPAWN=eager` (§2.4, §6).
+    ///
+    /// §8 Sizing: the derived cap is taken first, so this burst obeys it too —
+    /// init has not finished preloading yet, which is why
+    /// [`Scheduler::derive_view_cap`] takes it again at the first `SPAWNED`.
     fn start(&mut self) -> Result<(), SchedulerError> {
+        self.derive_view_cap(false);
         let wanted: Vec<usize> = (0..self.routes.len())
             .filter(|route| self.cfg.eager_spawn || self.routes[*route].prefork)
             .collect();
@@ -435,6 +461,10 @@ impl Scheduler {
         {
             take(deadline);
         }
+        // §8 Sizing: the memory watermark is checked on its own cadence.
+        if let Some(at) = self.memory_check_at {
+            take(at);
+        }
         next
     }
 
@@ -449,6 +479,7 @@ impl Scheduler {
         self.dispatch_queued()?;
         self.expire_requests()?;
         self.retire_finished_views()?;
+        self.check_memory()?;
         Ok(())
     }
 
@@ -1106,6 +1137,98 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Retires one idle view when aggregate memory is above
+    /// `BLASTIT_MEM_HIGH_WATERMARK` (§8 Sizing, §9.2 #8).
+    ///
+    /// One process per check and never one with a request in flight: the point
+    /// is to give memory back, not to fail a request. With nothing idle the
+    /// check does nothing, and the next one — `memory_check_interval` later —
+    /// tries again.
+    fn check_memory(&mut self) -> Result<(), SchedulerError> {
+        let now = Instant::now();
+        let Some(at) = self.memory_check_at else {
+            return Ok(());
+        };
+        if now < at {
+            return Ok(());
+        }
+        // Count from now, so a scheduler that was busy for several intervals
+        // cannot burst through a backlog and retire several views in a row.
+        self.memory_check_at = Some(now + self.cfg.memory_check_interval);
+        let Some(watermark) = self.cfg.mem_high_watermark_bytes else {
+            return Ok(());
+        };
+        let Some(usage) = self.read_memory() else {
+            return Ok(());
+        };
+        if usage <= watermark {
+            return Ok(());
+        }
+        let Some(victim) = self.oldest_idle_view() else {
+            return Ok(());
+        };
+        self.retire(victim, RetireReason::MemoryPressure)
+    }
+
+    /// The idle view that has gone unused the longest, which is the one memory
+    /// pressure retires first (§8 Sizing: "oldest-first").
+    ///
+    /// A view with a request in flight is never a candidate, and neither is one
+    /// whose process has not been forked yet.
+    fn oldest_idle_view(&self) -> Option<ViewKey> {
+        self.views
+            .values()
+            .filter(|view| view.ready && !view.spawning && view.key.pid != 0 && view.inflight == 0)
+            .min_by_key(|view| view.last_used)
+            .map(|view| view.key)
+    }
+
+    /// Reads the machine's aggregate memory usage, if it can be read (§9.2 #8).
+    fn read_memory(&self) -> Option<u64> {
+        self.cfg
+            .memory_usage
+            .as_ref()
+            .and_then(|probe| probe.read())
+    }
+
+    /// Takes §8 Sizing's derived view cap (§8 Sizing, §9.2 #8).
+    ///
+    /// §8 asks for the cap to come from the usage *after preload*, and that
+    /// moment is not when the scheduler starts: init forks every view from its
+    /// supervision loop, which begins only once `BLASTIT_APP`,
+    /// `BLASTIT_PRELOAD` and `BLASTIT_WARMUP` have been imported (§4), and the
+    /// scheduler itself is forked before CPython exists. So the cap is taken
+    /// twice:
+    ///
+    /// * `after_preload: false`, from [`Scheduler::start`], so the eager or
+    ///   preforked burst obeys the cap it can already see rather than forking
+    ///   everything the manifest names;
+    /// * `after_preload: true`, at the first `SPAWNED` — the first proof the
+    ///   preloaded heap is part of the reading — which replaces it.
+    ///
+    /// A reading that cannot be taken leaves the cap unset, which §8 asks for.
+    fn derive_view_cap(&mut self, after_preload: bool) {
+        if self.cfg.max_view_processes.is_some()
+            || (self.derived_view_cap.is_some() && (self.derived_after_preload || !after_preload))
+        {
+            return;
+        }
+        let Some(total) = self.cfg.mem_total_bytes else {
+            return;
+        };
+        let Some(used) = self.read_memory() else {
+            return;
+        };
+        self.derived_view_cap = Some(derived_view_cap(total, used, self.cfg.view_mem_estimate));
+        self.derived_after_preload = after_preload;
+    }
+
+    /// The live view process cap in force: `BLASTIT_MAX_VIEW_PROCESSES`, or the
+    /// §8 derived default once it has been measured.
+    fn view_cap(&self) -> Option<u32> {
+        self.cfg.max_view_processes.or(self.derived_view_cap)
+    }
+
     // ------------------------------------------------------------- lifecycle
 
     /// Asks init for a view process, respecting the LRU cap (§2.4).
@@ -1119,7 +1242,7 @@ impl Scheduler {
             }
             self.backoff.remove(&route);
         }
-        if let Some(cap) = self.cfg.max_view_processes
+        if let Some(cap) = self.view_cap()
             && self.views.len() as u32 >= cap
         {
             // Retire the least recently used idle view to make room; with none
@@ -1192,6 +1315,9 @@ impl Scheduler {
         pid: u32,
         fd: Option<OwnedFd>,
     ) -> Result<(), SchedulerError> {
+        // §8 Sizing: this is the first moment the preloaded heap exists (see
+        // `derive_view_cap`), so it is where the cap is measured for good.
+        self.derive_view_cap(true);
         let Some(fd) = fd else {
             return Err(SchedulerError::protocol(
                 "SPAWNED arrived without a view.chan descriptor",

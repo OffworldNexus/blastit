@@ -154,6 +154,34 @@ fn construct_at(chars: &[char], i: usize) -> Option<(RegionKind, usize)> {
     }
 }
 
+/// End of a bind placeholder (`$1`, `$23`) starting at `chars[i]`, or `None`
+/// when no placeholder starts there.
+///
+/// scan.l's `param` is `\${decdigit}+`. `i` must be the start of a *code* token,
+/// which is what the callers guarantee: a `$` inside a string, a quoted
+/// identifier or a dollar quote is data the lexer never hands over as code, a
+/// `$` that is part of an identifier (`a$1`, scan.l's `ident_cont`) is consumed
+/// by that identifier's own token, and a `$` that opens a dollar quote (`$$`)
+/// starts a quoted region instead.
+///
+/// scan.l's `param_junk` (`$1E` is one error token) is deliberately not
+/// modelled: `$1E` is a syntax error to PostgreSQL, so it can never execute,
+/// and reading it as the placeholder `$1` followed by `E` keeps the rule
+/// simpler without letting anything through.
+pub(crate) fn placeholder_end(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i) != Some(&'$') {
+        return None;
+    }
+    let mut j = i + 1;
+    if !matches!(chars.get(j), Some(c) if c.is_ascii_digit()) {
+        return None;
+    }
+    while matches!(chars.get(j), Some(c) if c.is_ascii_digit()) {
+        j += 1;
+    }
+    Some(j)
+}
+
 /// Length of the code token starting at `chars[i]`.
 ///
 /// Only identifiers and numeric literals are scanned exactly, because they are
@@ -161,7 +189,7 @@ fn construct_at(chars: &[char], i: usize) -> Option<(RegionKind, usize)> {
 /// token — an operator, a `self` character, `other` — can be walked one
 /// character at a time, which also keeps comment detection (`--`, `/*`) and the
 /// operator rule's back-up behaviour equivalent.
-fn code_token_end(chars: &[char], i: usize) -> usize {
+pub(crate) fn code_token_end(chars: &[char], i: usize) -> usize {
     if matches!(chars.get(i), Some(c) if is_ident_start(*c)) {
         let mut j = i + 1;
         while matches!(chars.get(j), Some(c) if is_ident_cont(*c)) {
@@ -431,13 +459,13 @@ pub(crate) fn find_dollar_close(chars: &[char], from: usize, tag: &str) -> Optio
 
 /// scan.l `ident_start` / `dolq_start`: `[A-Za-z\200-\377_]`, that is ASCII
 /// letters, `_`, and every character with a code point of 0x80 or more.
-fn is_ident_start(c: char) -> bool {
+pub(crate) fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c >= '\u{80}' || c == '_'
 }
 
 /// scan.l `ident_cont`: `[A-Za-z\200-\377_0-9$]`, which is why `$` inside an
 /// identifier never opens a dollar quote.
-fn is_ident_cont(c: char) -> bool {
+pub(crate) fn is_ident_cont(c: char) -> bool {
     is_ident_start(c) || c.is_ascii_digit() || c == '$'
 }
 
@@ -788,5 +816,37 @@ mod tests {
             assert_eq!(regions[0].start, 0, "{sql:?}");
             assert_eq!(regions[0].end, chars.len(), "{sql:?}");
         }
+    }
+
+    #[test]
+    fn placeholders_are_dollar_signs_and_digits() {
+        fn end(sql: &str) -> Option<usize> {
+            let chars: Vec<char> = sql.chars().collect();
+            placeholder_end(&chars, 0)
+        }
+        assert_eq!(end("$1"), Some(2));
+        assert_eq!(end("$12, x"), Some(3));
+        assert_eq!(end("$0"), Some(2));
+        assert_eq!(end("$007 "), Some(4));
+        // Not placeholders: no digits, not a `$`, or the `$` of a dollar quote.
+        assert_eq!(end("$"), None);
+        assert_eq!(end("$a"), None);
+        assert_eq!(end("$?"), None);
+        assert_eq!(end("$$1"), None);
+        assert_eq!(end("$tag$"), None);
+        assert_eq!(end("1"), None);
+        assert_eq!(end(""), None);
+    }
+
+    #[test]
+    fn a_placeholder_is_only_read_where_a_token_starts() {
+        // `a$1` is one identifier, so nothing inside it is a parameter; the
+        // callers only test at token starts, which this mirrors by asking after
+        // the identifier.
+        let sql = "a$1";
+        let chars: Vec<char> = sql.chars().collect();
+        let after_ident = code_token_end(&chars, 0);
+        assert_eq!(after_ident, chars.len());
+        assert_eq!(placeholder_end(&chars, after_ident), None);
     }
 }

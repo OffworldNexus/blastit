@@ -4,8 +4,21 @@
 FROM python:3.13-slim-trixie
 COPY e2e/demo/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
-COPY dist/blastit-*-cp313-*.whl /tmp/
-RUN pip install --no-cache-dir /tmp/*.whl && rm -rf /tmp/*.whl
+COPY dist/blastit-*-cp313-*.whl /tmp/dist/
+# Exactly one: two wheels of the same distribution in `dist/` (a release and a
+# development version, say) would make pip pick a fight here rather than say what
+# is wrong, and this image is meant to install *the* wheel CI just built.
+RUN set -e; \
+    wheels="$(ls /tmp/dist/*.whl)"; \
+    count="$(printf '%s\n' "$wheels" | wc -l)"; \
+    if [ "$count" != 1 ]; then \
+        echo "e2e/Dockerfile.prebuilt wants exactly one cp313 wheel in dist/, found $count:" >&2; \
+        printf '%s\n' "$wheels" >&2; \
+        echo "clean up dist/, or keep only the one this image should install" >&2; \
+        exit 1; \
+    fi; \
+    pip install --no-cache-dir "$wheels"; \
+    rm -rf /tmp/dist
 COPY e2e/demo /app
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \

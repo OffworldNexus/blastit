@@ -154,6 +154,21 @@ fn lifecycle_summary(lifecycle: &Lifecycle) -> String {
     if let Some(seccomp) = lifecycle.seccomp {
         parts.push(format!("seccomp={}", if seccomp { "on" } else { "off" }));
     }
+    if let Some(immortalized) = lifecycle.immortalized {
+        parts.push(format!("immortalized={immortalized}"));
+    }
+    if let Some(immortalize_ms) = lifecycle.immortalize_ms {
+        parts.push(format!("immortalize={immortalize_ms:.1}ms"));
+    }
+    if let Some(mem_total) = lifecycle.mem_total {
+        parts.push(format!("mem_total={}", mebibytes(mem_total)));
+    }
+    if let Some(mem_used) = lifecycle.mem_used {
+        parts.push(format!("mem_used={}", mebibytes(mem_used)));
+    }
+    if let Some(max_view_processes) = lifecycle.max_view_processes {
+        parts.push(format!("max_view_processes={max_view_processes}"));
+    }
     if !lifecycle.outputs.is_empty() {
         let mut rendered: Vec<String> = Vec::new();
         for (proxy, names) in &lifecycle.outputs {
@@ -163,6 +178,11 @@ fn lifecycle_summary(lifecycle: &Lifecycle) -> String {
         parts.push(format!("outputs: {}", rendered.join(", ")));
     }
     parts.join("  ")
+}
+
+/// Bytes as the nearest mebibyte, for the human format's memory fields.
+fn mebibytes(bytes: u64) -> String {
+    format!("{:.0}MiB", bytes as f64 / (1024.0 * 1024.0))
 }
 
 /// Escape the control characters of text coming from an event, so that one
@@ -223,7 +243,7 @@ mod tests {
             line,
             concat!(
                 "14:02:12.007 WARN  sql.denied  product-detail  db  parse  ",
-                r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $1"#
+                r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?"#
             )
         );
     }
