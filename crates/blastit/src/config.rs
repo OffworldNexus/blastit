@@ -175,6 +175,10 @@ pub struct Config {
     /// `BLASTIT_BACKLOG`: the TCP listen backlog. Not in §8.2, but §3 names the
     /// variable.
     pub backlog: i32,
+    /// `BLASTIT_MAX_CONNECTIONS`: client connections http serves at once. Not
+    /// in §8.2 either; http's own default is 1024, and the front end's
+    /// `RLIMIT_NOFILE` is sized from it.
+    pub max_connections: usize,
     /// The output variable names each proxy produced, by proxy name (§5.1).
     ///
     /// This is the one field that does not come from an environment variable:
@@ -221,6 +225,7 @@ impl Default for Config {
             warmup: None,
             frame_max: blastit_frame::MAX_FRAME_DEFAULT,
             backlog: 1024,
+            max_connections: 1024,
             proxy_outputs: BTreeMap::new(),
         }
     }
@@ -409,6 +414,12 @@ impl Config {
             config.backlog,
             parse_i32,
         )?;
+        config.max_connections = defaulted(
+            variable("BLASTIT_MAX_CONNECTIONS")?,
+            "BLASTIT_MAX_CONNECTIONS",
+            config.max_connections,
+            parse_usize,
+        )?;
         config.validate()?;
         Ok(config)
     }
@@ -457,6 +468,12 @@ impl Config {
         if self.backlog < 1 {
             return Err(invalid("BLASTIT_BACKLOG", "must be at least 1".to_string()));
         }
+        if self.max_connections < 1 {
+            return Err(invalid(
+                "BLASTIT_MAX_CONNECTIONS",
+                "must be at least 1".to_string(),
+            ));
+        }
         if let Some(app) = &self.app
             && !app.contains(':')
         {
@@ -480,6 +497,21 @@ impl Config {
     /// budget when that is unset (§8.2).
     pub fn view_worker_cap(&self) -> u32 {
         self.view_max_workers.unwrap_or(self.max_workers)
+    }
+
+    /// The `RLIMIT_NOFILE` http, the scheduler and dbproxy run with.
+    ///
+    /// The front end is the greedy one: one descriptor per client connection,
+    /// bounded by `BLASTIT_MAX_CONNECTIONS`. The 256 are the listener, the
+    /// channels, the log pipes and whatever a runtime keeps for itself; the
+    /// scheduler (one descriptor per view process) and dbproxy (one per
+    /// connection) stay well inside that.
+    ///
+    /// `RLIMIT_NPROC` is deliberately **not** set for these three: §7.2's
+    /// thread budget exists for the view uids, which are the ones an attacker
+    /// gets, and a limit on init's own children would only bite blastit itself.
+    pub fn component_nofile(&self) -> u64 {
+        self.max_connections as u64 + 256
     }
 
     /// `BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` for `proxy`, or
@@ -600,6 +632,10 @@ impl Config {
         );
         object.insert("frame_max".into(), Value::from(self.frame_max as u64));
         object.insert("backlog".into(), Value::from(self.backlog));
+        object.insert(
+            "max_connections".into(),
+            Value::from(self.max_connections as u64),
+        );
         let outputs = self
             .proxy_outputs
             .iter()
@@ -685,6 +721,7 @@ impl Config {
         config.warmup = json_opt_string(value, "warmup")?;
         config.frame_max = json_usize(value, "frame_max")?;
         config.backlog = json_i32(value, "backlog")?;
+        config.max_connections = json_usize(value, "max_connections")?;
         config.proxy_outputs = json_string_lists(value, "proxy_outputs")?;
         Ok(config)
     }

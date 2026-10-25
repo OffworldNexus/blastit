@@ -7,10 +7,29 @@
 //!
 //! The fork runs CPython's own protocol — `PyOS_BeforeFork()`,
 //! `PyOS_AfterFork_Parent()` in the parent, `PyOS_AfterFork_Child()` in the
-//! child — while holding the GIL, which is what §9.3 requires: the interpreter's
-//! locks have to be in a known state on both sides of the fork. The child then
-//! runs the crate-level child sequence, sets the private `HOME`/`TMPDIR` the
-//! application is supposed to see, and never returns.
+//! child — while holding the GIL. The child then runs the crate-level child
+//! sequence, sets the private `HOME`/`TMPDIR` the application is supposed to
+//! see, and never returns.
+//!
+//! # Forks happen with the GIL held
+//!
+//! §9.3 describes the GIL as released around the fork, with each child
+//! re-attaching. This implementation holds it instead, on both sides:
+//!
+//! * `PyOS_BeforeFork()` stops the world, which CPython only allows with the
+//!   GIL held, and `PyOS_AfterFork_Parent()` / `PyOS_AfterFork_Child()` restart
+//!   it — they are the matching half of the call, not an optional extra;
+//! * init holds the GIL for its whole life (there is no other thread in it that
+//!   could want it), so "release around the fork" would mean detaching and
+//!   re-attaching around every view, for no benefit;
+//! * the child therefore **inherits the GIL**, and the only thing it may do
+//!   with it is hand it to [`blastit_view::serve`], which detaches for the
+//!   whole of its work and lets the request threads attach. Everything between
+//!   `PyOS_AfterFork_Child()` and that call runs on the interpreter's main
+//!   thread with no other Python thread in existence — the fork contract §9.3
+//!   asks for — and nothing else in the child touches the interpreter.
+//!
+//! The orchestrator records this deviation in `ARCHITECTURE.md` §9.3.
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
@@ -125,6 +144,12 @@ pub fn fork_view(
 }
 
 /// Everything the child does after `PyOS_AfterFork_Child`. Never returns.
+///
+/// The work after the child sequence is wrapped in `catch_unwind`: the
+/// workspace cannot set `panic = "abort"` from one crate, so an unexpected
+/// panic — a poisoned lock, an index that should not be out of range — is
+/// turned into an exit code instead of an unwinding child that leaves a
+/// half-initialised interpreter behind. A view that panics exits `70`.
 #[allow(clippy::too_many_arguments)]
 fn child_main(
     py: Python<'_>,
@@ -150,6 +175,39 @@ fn child_main(
     if let Err(err) = restore_signal_mask_in_child(mask) {
         child_exit(&format!("view {}: {err}", info.name), 1);
     }
+
+    let name = info.name.clone();
+    let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        serve_forever(py, cfg, limits, info, app, view_end, dir)
+    }));
+    match started {
+        // `serve_forever` never returns normally; this is unreachable in
+        // practice, and exiting non-zero is the honest answer if it happens.
+        Ok(()) => child_exit(
+            &format!("view {name}: the view stopped without a reason"),
+            1,
+        ),
+        Err(payload) => child_exit(
+            &format!("view {name}: panicked: {}", panic_message(&payload)),
+            70,
+        ),
+    }
+}
+
+/// The rest of a view's life: the interpreter's `HOME`/`TMPDIR`, then serving.
+///
+/// This is the part `child_main` guards with `catch_unwind`; it is with the GIL
+/// held throughout, and the only call that touches the interpreter is
+/// [`blastit_view::serve`], which detaches.
+fn serve_forever(
+    py: Python<'_>,
+    cfg: &Config,
+    limits: Limits,
+    info: &RouteInfo,
+    app: &Py<PyAny>,
+    view_end: OwnedFd,
+    dir: PathBuf,
+) {
     if let Err(err) = set_view_environment(py, &dir) {
         child_exit(&format!("view {}: HOME/TMPDIR: {err}", info.name), 1);
     }
@@ -171,6 +229,17 @@ fn child_main(
     match blastit_view::serve(py, chan, app.clone_ref(py), view_cfg) {
         Ok(()) => child_exit("", 0),
         Err(err) => child_exit(&format!("view {}: {err}", info.name), 1),
+    }
+}
+
+/// The text of a panic payload, for the log.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "a panic with no message".to_string()
     }
 }
 

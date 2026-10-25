@@ -93,16 +93,12 @@ pub fn run(options: Options) -> ! {
         Ok(source) => source,
         Err(err) => fail(&emitter, &format!("{}: {err}", config.manifest.display())),
     };
-    let (manifest, warnings) = match Manifest::parse_and_validate(&source, config.uid_base) {
+    let (manifest, _warnings) = match Manifest::parse_and_validate(&source, config.uid_base) {
         Ok(parsed) => parsed,
         Err(errors) => fail(&emitter, &errors.to_string()),
     };
-    for warning in &warnings {
-        emitter.emit(&Event::now(
-            Component::Init,
-            EventKind::ManifestWarning(blastit_events::ManifestWarning::new(warning.to_string())),
-        ));
-    }
+    // Warnings are stage 0's: it reads and validates the manifest first, and
+    // printing them twice would be noise (§8.1).
 
     let limits = match config.limits() {
         Ok(limits) => limits,
@@ -154,7 +150,7 @@ pub fn run(options: Options) -> ! {
                 http_end.as_raw_fd(),
                 http_ev_write.as_raw_fd(),
             ],
-            limits: no_core(),
+            limits: component_limits(&config),
             working_dir: None,
         },
         HttpFds {
@@ -181,7 +177,7 @@ pub fn run(options: Options) -> ! {
                 sched_ctl_end.as_raw_fd(),
                 sched_ev_write.as_raw_fd(),
             ],
-            limits: no_core(),
+            limits: component_limits(&config),
             working_dir: None,
         },
         SchedulerFds {
@@ -296,6 +292,7 @@ fn http_config(config: &Config, limits: Limits) -> HttpConfig {
         trust_forwarded: config.trust_forwarded,
         frame_limits: limits,
         server_port: config.server_port,
+        max_connections: config.max_connections,
         ..HttpConfig::default()
     }
 }
@@ -470,11 +467,14 @@ fn python_fail(py: Python<'_>, emitter: &Emitter, what: &str, err: &PyErr) -> ! 
     unsafe { libc::_exit(1) }
 }
 
-/// `RLIMIT_CORE = 0` for a component that needs no other limit (§7.2).
-fn no_core() -> blastit_sys::Rlimits {
+/// The limits http, the scheduler and dbproxy run under: a descriptor budget
+/// sized from the configuration, and no core file (§7.2).
+///
+/// `RLIMIT_NPROC` is left alone here; it belongs to the view uids.
+fn component_limits(config: &Config) -> blastit_sys::Rlimits {
     blastit_sys::Rlimits {
         nproc: None,
-        nofile: None,
+        nofile: Some(config.component_nofile()),
         core_zero: true,
     }
 }

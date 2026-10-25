@@ -260,6 +260,47 @@ impl Server {
         self.request("GET", target)
     }
 
+    /// Every event of the given name that stdout has produced, parsed.
+    fn events(&self, name: &str) -> Vec<serde_json::Value> {
+        self.stdout_lines()
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| value["event"].as_str() == Some(name))
+            .collect()
+    }
+
+    /// The pids of the processes init forked, oldest first.
+    ///
+    /// `/proc/<pid>/task/<pid>/children` is the kernel's own list of a thread's
+    /// children; init is single-threaded, so its main thread's entry has them
+    /// all.
+    fn children(&self) -> Vec<i32> {
+        let path = format!(
+            "/proc/{}/task/{}/children",
+            self.child.id(),
+            self.child.id()
+        );
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("reading {path}: {err}\n{}", self.stdout_text()));
+        let mut pids: Vec<i32> = text
+            .split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
+            .collect();
+        pids.sort_unstable();
+        pids
+    }
+
+    /// The pid of the component that runs under `uid`, if it is alive.
+    ///
+    /// Every process of blastit has `gid == uid` and no supplementary groups
+    /// (§2), so the uid is enough to tell http, the scheduler, dbproxy and the
+    /// views apart.
+    fn component_pid(&self, uid: u32) -> Option<i32> {
+        self.children()
+            .into_iter()
+            .find(|pid| process_uid(*pid) == Some(uid))
+    }
+
     /// Sends a signal to the process.
     fn signal(&self, signal: i32) {
         // SAFETY: the pid came from `spawn`, so it is a live child of this
@@ -337,6 +378,63 @@ fn free_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+/// One plain request from a test thread that does not own the `Server`.
+///
+/// Panics rather than hanging: the read timeout is the test's "none hang"
+/// assertion.
+fn raw_request(port: u16, target: &str) -> u16 {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let request =
+        format!("GET {target} HTTP/1.1\r\nHost: blastit.test\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .expect("the server answered instead of hanging");
+    Response::parse(&raw).status
+}
+
+/// The real uid of `pid`, from `/proc/<pid>/status`; `None` when it is gone.
+fn process_uid(pid: i32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|uid| uid.parse().ok())
+}
+
+/// Everything `/proc/<pid>/environ` holds, as text.
+///
+/// The kernel's view of the *initial* environment block of the process image:
+/// exactly what survives a `fork`, and what an `execve` replaces (§4).
+fn environ_of(pid: i32) -> String {
+    let bytes = std::fs::read(format!("/proc/{pid}/environ"))
+        .unwrap_or_else(|err| panic!("reading /proc/{pid}/environ: {err}"));
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// One open descriptor of `pid`: its number and what it points at.
+fn open_fds(pid: i32) -> Vec<(i32, String)> {
+    let dir = format!("/proc/{pid}/fd");
+    let entries = std::fs::read_dir(&dir).unwrap_or_else(|err| panic!("reading {dir}: {err}"));
+    let mut fds: Vec<(i32, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let number = entry.file_name().to_string_lossy().parse::<i32>().ok()?;
+            let target = std::fs::read_link(entry.path())
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Some((number, target))
+        })
+        .collect();
+    fds.sort_by_key(|(number, _)| *number);
+    fds
 }
 
 /// `LD_LIBRARY_PATH` for the spawned binary, so it can load `libpython`.
@@ -431,6 +529,7 @@ def application(environ, start_response):
             "blastit": sorted(k for k in os.environ if k.startswith("BLASTIT_")),
             "database_url": os.environ.get("DATABASE_URL"),
             "page_url": os.environ.get("PAGE_URL"),
+            "environ": dict(os.environ),
             "uid": os.getuid(),
             "pid": os.getpid(),
             "gid": os.getgid(),
@@ -581,6 +680,44 @@ version = 1
 [[route]]
 name = "one"
 path = ['/', '/one', '/env']
+"#;
+
+/// One route that matches everything, for tests that need a single view.
+const ONE_ROUTE: &str = r#"
+version = 1
+
+[[route]]
+name = "one"
+path = ['.*']
+"#;
+
+/// A declared proxy with a grant: dbproxy exists and the view has a socket.
+const PROXY_AND_ROUTE: &str = r#"
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "one"
+path = ['.*']
+[route.db]
+queries = ["SELECT 1"]
+"#;
+
+/// A declared proxy that no route grants: its variables are rewritten, but it
+/// gets no listener and so no dbproxy.
+const PROXY_WITHOUT_GRANTS: &str = r#"
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "one"
+path = ['.*']
 "#;
 
 #[test]
@@ -979,6 +1116,306 @@ path = ['/other']
     assert!(
         !PathBuf::from(format!("/run/blastit/views/{}/.s.PGSQL.5432", base + 1001)).exists(),
         "a route with no grant gets no listener"
+    );
+}
+
+#[test]
+fn a_route_keeps_serving_while_its_view_is_retired() {
+    if !needs_root("retire") {
+        return;
+    }
+    let base = 48_000;
+    let server = Server::start(
+        "retire",
+        base,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[("BLASTIT_VIEW_MAX_REQUESTS", "1")],
+    );
+
+    // Every dispatch retires the process that served it, so most of these
+    // requests arrive while the previous process is killed but not yet reaped.
+    // A SPAWN that has to wait must not be dropped: the scheduler sends it once.
+    let port = server.port;
+    let clients: Vec<std::thread::JoinHandle<u16>> = (0..16)
+        .map(|_| std::thread::spawn(move || raw_request(port, "/one")))
+        .collect();
+    for client in clients {
+        let status = client.join().expect("the client thread finishes");
+        assert_eq!(status, 200, "{}", server.stdout_text());
+    }
+    for _ in 0..20 {
+        assert_eq!(server.get("/one").status, 200, "{}", server.stdout_text());
+    }
+
+    let spawned = server.events("process.spawned");
+    assert!(
+        spawned.len() >= 8,
+        "{} spawns for 36 requests\n{}",
+        spawned.len(),
+        server.stdout_text()
+    );
+    assert!(spawned.len() <= 36, "{}", spawned.len());
+    let mut pids: Vec<i64> = spawned
+        .iter()
+        .filter_map(|event| event["pid"].as_i64())
+        .collect();
+    let total = pids.len();
+    pids.sort_unstable();
+    pids.dedup();
+    assert_eq!(pids.len(), total, "every spawn is a fresh process");
+
+    // Every process is retired on purpose and reaped, so the ledger balances.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && server.events("process.exited").len() < total {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        server.events("process.exited").len() >= total,
+        "{} reaped for {total} spawned\n{}",
+        server.events("process.exited").len(),
+        server.stdout_text()
+    );
+}
+
+#[test]
+fn a_view_holds_only_its_stdio_and_its_channel() {
+    if !needs_root("fds") {
+        return;
+    }
+    let base = 49_000;
+    let server = Server::start(
+        "fds",
+        base,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[],
+    );
+    assert_eq!(server.get("/one").status, 200);
+    let value: serde_json::Value = serde_json::from_str(&server.get("/env").body).unwrap();
+    let view_pid = value["pid"].as_i64().unwrap() as i32;
+
+    // A view inherits its own `view.chan` end and its log pipes, and nothing
+    // else: not the listening socket, not `http.chan`, not `ctl.chan`, not
+    // another view's channel (§3).
+    let fds = open_fds(view_pid);
+    assert_eq!(
+        fds.iter()
+            .map(|(number, _)| *number)
+            .take(3)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "the child sequence puts stdio on 0, 1 and 2: {fds:?}"
+    );
+    assert_eq!(fds[0].1, "/dev/null", "{fds:?}");
+    assert!(
+        fds[1].1.starts_with("pipe:"),
+        "stdout is a log pipe: {fds:?}"
+    );
+    assert!(
+        fds[2].1.starts_with("pipe:"),
+        "stderr is a log pipe: {fds:?}"
+    );
+    let extras: Vec<&(i32, String)> = fds.iter().filter(|(number, _)| *number > 2).collect();
+    let channel = extras.first().expect("the view holds its end of view.chan");
+    assert!(
+        channel.1.starts_with("socket:"),
+        "the only non-stdio descriptor is the view channel: {fds:?}"
+    );
+    for extra in &extras {
+        assert_eq!(
+            extra.1, channel.1,
+            "every extra descriptor is that same channel — the writer's clone — \
+             and nothing else: {fds:?}"
+        );
+    }
+}
+
+#[test]
+fn the_real_credential_is_in_no_environment() {
+    if !needs_root("credential") {
+        return;
+    }
+    let base = 50_000;
+    let password = "ci-sentinel-password-9f2c";
+    let url =
+        format!("postgresql://doadmin:{password}@db.internal:25060/defaultdb?sslmode=require");
+    let server = Server::start(
+        "credential",
+        base,
+        PROXY_AND_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[("DATABASE_URL", &url)],
+    );
+
+    let response = server.get("/env");
+    assert_eq!(response.status, 200, "{}", server.stdout_text());
+    let value: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+    let view_pid = value["pid"].as_i64().unwrap() as i32;
+
+    // The application's own environment…
+    let app_environ = value["environ"].to_string();
+    assert!(
+        !app_environ.contains(password),
+        "the app's os.environ carries the password"
+    );
+    // …the kernel's view of it, which is what a `fork` copies (§4)…
+    assert!(
+        !environ_of(view_pid).contains(password),
+        "the view's /proc/<pid>/environ carries the password"
+    );
+    // …stage 1's, which is the app environment after the `execve` barrier, and
+    // which every view inherits…
+    let init_environ = environ_of(server.child.id() as i32);
+    assert!(
+        !init_environ.contains(password),
+        "init's stage 1 environ carries the password: {init_environ}"
+    );
+    for entry in init_environ.split('\0').filter(|entry| !entry.is_empty()) {
+        assert!(
+            !entry.starts_with("BLASTIT_"),
+            "stage 1 kept a BLASTIT_ variable: {entry}"
+        );
+    }
+    // …and dbproxy's, which is the one process that *does* hold the credential,
+    // exec'd with an empty environment: its block is empty.
+    let dbproxy = server
+        .component_pid(base + 3)
+        .unwrap_or_else(|| panic!("dbproxy runs\n{}", server.stdout_text()));
+    assert_eq!(
+        environ_of(dbproxy),
+        "",
+        "dbproxy's environment is empty (§4)"
+    );
+    // Nothing reached the log either.
+    assert!(!server.stdout_text().contains(password));
+}
+
+#[test]
+fn a_component_that_dies_takes_init_with_it() {
+    if !needs_root("component") {
+        return;
+    }
+    // http, the scheduler and dbproxy are all fatal: init kills everything and
+    // exits non-zero, so the platform restarts the container (§8).
+    for (tag, offset) in [("http", 1u32), ("scheduler", 2), ("dbproxy", 3)] {
+        let base = 51_000 + offset * 100;
+        let mut server = Server::start(
+            tag,
+            base,
+            PROXY_AND_ROUTE,
+            "app:application",
+            &[("app.py", APP)],
+            &[("DATABASE_URL", "postgresql://doadmin:pw@127.0.0.1:1/db")],
+        );
+        let pid = server
+            .component_pid(base + offset)
+            .unwrap_or_else(|| panic!("{tag} runs\n{}", server.stdout_text()));
+        // SAFETY: `pid` is a live child of this process, and `kill` takes two
+        // integers.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        let status = server
+            .wait_for_exit()
+            .unwrap_or_else(|| panic!("init noticed {tag} dying\n{}", server.stdout_text()));
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "{tag} died and init exited {status:?}\n{}",
+            server.stdout_text()
+        );
+    }
+}
+
+#[test]
+fn an_idle_view_is_retired_and_the_next_request_respawns_it() {
+    if !needs_root("idle") {
+        return;
+    }
+    let base = 52_000;
+    let server = Server::start(
+        "idle",
+        base,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[("BLASTIT_VIEW_IDLE_TIMEOUT", "1s")],
+    );
+    let first = server.get("/one");
+    assert_eq!(first.status, 200, "{}", server.stdout_text());
+
+    // The scheduler retires the idle view and init kills it.
+    assert!(
+        server.wait_for_event("\"event\":\"process.retired\""),
+        "{}",
+        server.stdout_text()
+    );
+    assert!(
+        server.wait_for_event("\"event\":\"process.exited\""),
+        "{}",
+        server.stdout_text()
+    );
+    assert_eq!(
+        server.children().len(),
+        2,
+        "only http and the scheduler are left\n{}",
+        server.stdout_text()
+    );
+
+    // The next request forks a fresh process.
+    let second = server.get("/one");
+    assert_eq!(second.status, 200, "{}", server.stdout_text());
+    assert!(
+        server.events("process.spawned").len() >= 2,
+        "{}",
+        server.stdout_text()
+    );
+}
+
+#[test]
+fn a_proxy_with_no_grant_gets_no_dbproxy_and_no_credential() {
+    if !needs_root("ungranted") {
+        return;
+    }
+    let base = 53_000;
+    let password = "ci-sentinel-password-4b71";
+    let url = format!("postgresql://doadmin:{password}@db.internal:25060/defaultdb");
+    let server = Server::start(
+        "ungranted",
+        base,
+        PROXY_WITHOUT_GRANTS,
+        "app:application",
+        &[("app.py", APP)],
+        &[("DATABASE_URL", &url)],
+    );
+
+    // It boots, and the input variable is rewritten to the local endpoint even
+    // though no route may use it.
+    let response = server.get("/env");
+    assert_eq!(response.status, 200, "{}", server.stdout_text());
+    let value: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+    let database_url = value["database_url"].as_str().expect("DATABASE_URL is set");
+    assert!(
+        !database_url.contains(password),
+        "the credential was not replaced: {database_url}"
+    );
+    assert!(
+        database_url.contains("proc"),
+        "the app is pointed at the local socket: {database_url}"
+    );
+
+    // No listener means no dbproxy, and no view either until it is used.
+    assert!(
+        server.component_pid(base + 3).is_none(),
+        "dbproxy was forked without a listener\n{}",
+        server.stdout_text()
+    );
+    assert!(
+        server.component_pid(base + 1000).is_some(),
+        "the view was forked for the request\n{}",
+        server.stdout_text()
     );
 }
 

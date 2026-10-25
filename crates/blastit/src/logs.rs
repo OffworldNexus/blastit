@@ -487,14 +487,22 @@ mod tests {
     fn a_view_output_pipe_rewrites_the_route() {
         let text = capture(LogFormat::Json, Level::Info, |emitter| {
             emitter.forward(
-                &Pipe::Events {
+                &Pipe::Stdout {
                     component: Component::View,
+                    route: Some("one".to_string()),
                 },
                 r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"x","component":"dbproxy","route":"other"}"#,
             );
         });
         let value: Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(value["component"], "view");
+        assert_eq!(
+            value["component"], "view",
+            "the pipe decides the component, not the payload"
+        );
+        assert_eq!(
+            value["route"], "one",
+            "a view's own pipe also decides the route"
+        );
     }
 
     #[test]

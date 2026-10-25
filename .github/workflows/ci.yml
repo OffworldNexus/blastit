@@ -109,6 +109,7 @@ jobs:
       # init must be root (PID 1 in the container); the smoke tests start the real binary.
       - run: cargo build -p blastit --tests --locked
       - run: sudo -E env "PATH=$PATH" cargo test -p blastit --locked -- --test-threads=1
+<<<<<<< HEAD
 
   e2e:
     name: e2e (Django under blastit, Docker)
@@ -133,3 +134,5 @@ jobs:
           name: e2e-app-log
           path: e2e/app.log
           if-no-files-found: ignore
+=======
+>>>>>>> origin/develop
