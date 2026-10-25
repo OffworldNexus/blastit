@@ -214,6 +214,175 @@ the `sql.denied` lines: each one is a statement a route ran and wasn't granted
 yet. If it belongs there, copy it into the route. If it doesn't, you just
 found a route that does more than you thought.
 
+#### Fill in the grants with your test suite
+
+Denials in production are the truth — that's what actually ran. But each pass
+only reveals the *first* denial of each request, because a denied statement
+aborts the request, so filling the manifest in that way is one deploy per
+statement. Your test suite already makes most of those requests. blastit ships
+a pytest plugin that watches it and tells you the difference, **before** the
+deploy:
+
+```console
+$ uv run pytest --blastit-manifest blastit.toml
+...
+blastit: 412 requests, 977 statements, 38/41 routes exercised — report in blastit-report.json
+blastit: route product-list: 3 statement(s) missing (see blastit-report.json)
+blastit: route checkout: needs transaction_control = true
+blastit: route search: 2 grant(s) unused
+blastit: route queue opens outbound connections (redis:6379, amqp:5672) but has no egress = true
+blastit: 4 unrouted request(s): GET /robots.txt, GET /favicon.ico (see blastit-report.json)
+blastit: 2 connection-setup statement(s) some routes do not grant: put them in a group attached to every route (see blastit-report.json)
+blastit: 2 route(s) never exercised: webhooks, admin
+======================= 1513 passed, 12 skipped in 84.20s =======================
+```
+
+The options, when the defaults do not fit:
+
+```
+--blastit-manifest PATH        the blastit.toml to diff against; without it the
+                               plugin does nothing at all (or `blastit_manifest`
+                               in pytest.ini / pyproject.toml)
+--blastit-report PATH          where the JSON report goes (default
+                               blastit-report.json, relative to where pytest runs)
+--blastit-proxy ALIAS=PROXY    maps a database alias to a manifest proxy, when
+                               the manifest declares more than one postgresql
+                               proxy (repeat it per alias)
+--blastit-strict               fail the session when anything is missing,
+                               unrouted, needing transaction_control or egress,
+                               not granted in every route, unreadable, or worth a
+                               warning from the plugin itself
+```
+
+The plugin is inert unless you ask for it, and it needs
+[pytest-django](https://pytest-django.readthedocs.io/) and psycopg 3 with
+server-side binding (`DATABASES[...]["OPTIONS"]["server_side_binding"] = True`,
+§6). It works under pytest-xdist too: every worker reports what it saw, and the
+controller merges them into one report. Set the manifest in `pytest.ini` or
+`pyproject.toml` if you would rather not repeat the option:
+
+```ini
+[pytest]
+blastit_manifest = blastit.toml
+```
+
+`blastit-report.json` has the detail the summary only counts, per route:
+
+```json
+{
+  "name": "product-list",
+  "requests": 26,
+  "needs_transaction_control": false,
+  "egress": {
+    "observed": [
+      {"target": "redis:6379", "host": "redis", "port": 6379, "family": "AF_INET",
+       "count": 26, "tests": ["shop/tests/test_catalog.py::test_on_sale"]}
+    ],
+    "needed": false
+  },
+  "proxies": [
+    {
+      "name": "db",
+      "observed": 51,
+      "missing": [
+        {
+          "sql": "SELECT \"shop_product\".\"id\", \"shop_product\".\"name\" FROM \"shop_product\" WHERE \"shop_product\".\"on_sale\" = $? LIMIT 21",
+          "count": 9,
+          "wire_sql": "SELECT \"shop_product\".\"id\", \"shop_product\".\"name\" FROM \"shop_product\" WHERE \"shop_product\".\"on_sale\" = $1 LIMIT 21",
+          "tests": ["shop/tests/test_catalog.py::test_on_sale"],
+          "paths": ["/products/on-sale/"]
+        }
+      ],
+      "unused": ["SELECT \"shop_product\".\"id\" FROM \"shop_product\" LIMIT 21"],
+      "transaction_control": {"observed": false, "granted": false, "needed": false}
+    }
+  ]
+}
+```
+
+and, at the top level, the statements every connection runs:
+
+```json
+"connection_setup": {
+  "statements": [
+    {"sql": "SELECT set_config('TimeZone', $?, false)", "proxy": "db", "count": 26,
+     "wire_sql": "SELECT set_config('TimeZone', $1, false)",
+     "ungranted_in": ["product-list", "search"], "granted_in": 36}
+  ],
+  "ungranted": 1
+}
+```
+
+How to read it:
+
+* **`missing`** — statements the suite executed that no grant allows. `sql` is
+  the *normalised* text (the exact form the manifest comparison reads), so you
+  can paste it into the route's `queries` as it is; `wire_sql` is one raw
+  occurrence with its `$1`, `$2`… placeholders; `tests` and `paths` name up to
+  five examples, so you can find the code that sent it. A statement the tests
+  never sent can still be missing in production — the report is a lower bound.
+  Placeholders are compared as `$?`, and so are the shapes a live query changes
+  on every call: an `IN ($1)` grant fits an `IN` list of any length, and one
+  grant fits a run of `VALUES (…)` rows (a single row is a shape of its own).
+* **`unused`** — grants that nothing matched. Either dead code, or a request
+  your suite doesn't make yet.
+* **`needs_transaction_control`** — the route ran `BEGIN`/`COMMIT` or a
+  savepoint (a nested `transaction.atomic()`, or `ATOMIC_REQUESTS` on the
+  alias) and the route's grant does not allow transaction control. Add
+  `transaction_control = true`; do *not* try to grant a savepoint, its name
+  changes on every request. psycopg's own `BEGIN`/`COMMIT` are captured too, so
+  this is seen even when no cursor of the request sends one — a transaction that
+  was already open when the request began (pytest-django's `django_db`, an outer
+  `atomic()`) is not the route's and is not counted.
+* **`unrouted`** — paths blastit would answer `404` for before Django ever saw
+  them. Either add a route for them (a catch-all `path = ['.*']` is the usual
+  answer, so the app renders its own 404s) or stop requesting them.
+* **`unexercised_routes`** — routes nothing hit: their grants are unproven, not
+  proven wrong.
+* **`egress`** — the outbound connections the route tried to open, with the
+  destination, how often and an example test, and `needed` when the route has no
+  `egress = true` (§7.3), which is what the seccomp filter would refuse. Mocked
+  HTTP clients — pytest-httpx, `responses`, a stub transport — never open a
+  socket, so the list is a **lower bound**: a route it says nothing about can
+  still need `egress = true` in production.
+* **`connection_setup`** — the statements psycopg runs as a connection is
+  established: `SET`s of your own (a `connection_created` receiver, a
+  middleware), Django's `set_config('TimeZone', …)`, a `TypeInfo.fetch` a
+  backend does at connect. None of them goes through a request's cursors, and
+  under blastit **every request opens its own connection** (`CONN_MAX_AGE = 0`),
+  so they run on every route in production — put them in a group attached to
+  every route (`groups = ["connection"]` at the top level). `ungranted_in` names
+  the routes that would refuse them today; a route with no grant for that proxy
+  gets no listener and never runs them, so it is not listed.
+* **`unrecognised`** — statements the plugin could not read, counted rather than
+  dropped. psycopg's t-string queries (`t"SELECT {name}"`) have no text before
+  they are rendered, so nothing can be compared to a grant; report them to
+  whoever wrote the query.
+* **`plugin_warnings`** — what the plugin itself could not do, most importantly
+  an alias that does not set `server_side_binding = True`: psycopg then inlines
+  the parameters and the `$n` text in the report is one the plugin made up,
+  not the text dbproxy would check.
+* `--blastit-strict` fails the run on any of the above, for a CI job that keeps
+  the manifest from rotting. Add the `missing` statements, re-run until it is
+  clean, and deploy.
+
+Two statements cannot be granted, and the report cannot hide it:
+
+* a savepoint's name (`SAVEPOINT "s140234_x1"`) is made per request: the fix is
+  `transaction_control = true` on the route, not a grant;
+* a named cursor — `QuerySet.iterator()`, i.e. Django's `chunked_cursor()` — sends
+  `DECLARE "_django_curs_140234_sync_1" CURSOR FOR …`, then `FETCH` and `CLOSE`
+  with the same generated name, so no grant can match them. Turn server-side
+  cursors off for the routes that use them
+  (`DATABASES[...]["DISABLE_SERVER_SIDE_CURSORS"] = True`) or accept that they
+  will be denied under blastit.
+
+Read the report, add the grants, repeat until
+`blastit: the manifest covers every request that was made`. The denial logs stay
+the source of truth in production — the tests only make the requests they make —
+but by the time the app is deployed the manifest is already most of the way
+there instead of a deploy per statement.
+
 ## What you get, and what you don't
 
 | If this is compromised… | …the attacker gets | …and cannot |

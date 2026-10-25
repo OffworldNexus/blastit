@@ -154,3 +154,38 @@ jobs:
         env:
           MATURIN: maturin
       - run: e2e/venv-smoke.sh
+
+  pytest-plugin:
+    name: pytest plugin (CPython 3.14, PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: blastit
+          POSTGRES_PASSWORD: ci-not-secret
+          POSTGRES_DB: blastit
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U blastit" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      DATABASE_URL: postgresql://blastit:ci-not-secret@127.0.0.1:5432/blastit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.14"
+      - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the wheel
+        run: pipx install maturin && scripts/build-wheel.sh
+        env:
+          MATURIN: maturin
+      - name: Install the wheel and the test tools
+        run: |
+          python -m venv /tmp/blastit-tests
+          /tmp/blastit-tests/bin/pip install dist/blastit-*.whl pytest pytest-django pytest-xdist django 'psycopg[binary]'
+      - name: Run the plugin's tests
+        run: /tmp/blastit-tests/bin/pytest python/tests -q

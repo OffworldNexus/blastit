@@ -1,0 +1,132 @@
+# The manifest the plugin's tests diff against (D3b).
+#
+# It is deliberately *not* finished: routes are missing grants, one needs
+# transaction control, some have a stale grant, one is never exercised, one path
+# the tests use has no route at all, and no route grants the statements psycopg
+# runs as a connection is established. Every one of those is a line in the report
+# the plugin writes.
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+# Complete: the single SELECT this view sends is granted.
+[[route]]
+name = "notes"
+path = ['/notes/']
+methods = ["GET"]
+[route.db]
+queries = [
+  "SELECT \"notes_note\".\"id\" AS \"id\" FROM \"notes_note\" WHERE \"notes_note\".\"owner_id\" = $1"
+]
+
+# Its own grant, plus one that no code path runs any more: an `unused` line.
+[[route]]
+name = "note-create"
+path = ['/notes/create/']
+methods = ["POST"]
+[route.db]
+queries = [
+  "INSERT INTO \"notes_note\" (\"owner_id\", \"body\") VALUES ($1, $2) RETURNING \"notes_note\".\"id\"",
+  "SELECT \"notes_note\".\"body\" FROM \"notes_note\" WHERE \"notes_note\".\"id\" = $1"
+]
+
+# The view sends a DELETE; the manifest grants something else entirely.
+[[route]]
+name = "note-delete"
+path = ['/notes/[0-9]+/delete/']
+methods = ["POST"]
+[route.db]
+queries = [
+  "SELECT \"notes_note\".\"id\" FROM \"notes_note\" ORDER BY \"notes_note\".\"id\" DESC LIMIT 1"
+]
+
+# A nested `atomic` is a SAVEPOINT: the route needs transaction_control, and
+# the UPDATE it sends is granted.
+[[route]]
+name = "note-atomic"
+path = ['/notes/atomic/']
+methods = ["POST"]
+[route.db]
+queries = [
+  "UPDATE \"notes_note\" SET \"body\" = $1 WHERE \"notes_note\".\"owner_id\" = $2"
+]
+
+# One grant for an `IN` list of any length (D3a): the report would give this
+# text back for a list of one id, of ten ids, or of a hundred.
+[[route]]
+name = "note-in"
+path = ['/notes/in/']
+methods = ["GET"]
+[route.db]
+queries = [
+  "SELECT \"notes_note\".\"id\" AS \"id\" FROM \"notes_note\" WHERE \"notes_note\".\"id\" IN ($1)"
+]
+
+# One grant for a run of identical VALUES rows, whatever the count — the `, ...`
+# is what D3a's normaliser writes, and reading it back is idempotent.
+[[route]]
+name = "note-multi"
+path = ['/notes/multi/']
+methods = ["GET"]
+[route.db]
+queries = [
+  "INSERT INTO \"notes_note\" (\"owner_id\", \"body\") VALUES ($1, $2), ... RETURNING \"notes_note\".\"id\""
+]
+
+# No grant: Django's `bulk_create` sends one `VALUES` row for a single object and
+# an `UNNEST` array for several, so this route has two statements to grant, and
+# neither covers the other.
+[[route]]
+name = "note-bulk"
+path = ['/notes/bulk/']
+methods = ["GET"]
+
+# No grant at all: the type lookup this view makes goes straight through psycopg,
+# so the report is where it shows up.
+[[route]]
+name = "note-types"
+path = ['/notes/types/']
+methods = ["GET"]
+
+# No grant either, because what this route sends is not the SELECT in the view:
+# a named cursor is a `DECLARE … CURSOR FOR …`, plus the `FETCH` that reads it.
+[[route]]
+name = "note-stream"
+path = ['/notes/stream/']
+methods = ["GET"]
+
+# psycopg sends the BEGIN and the COMMIT of this route's `atomic()` itself, and
+# neither is granted here: the route needs transaction_control.
+[[route]]
+name = "note-atomic-live"
+path = ['/notes/atomic-live/']
+methods = ["POST"]
+[route.db]
+queries = [
+  "UPDATE \"notes_note\" SET \"body\" = $1 WHERE \"notes_note\".\"owner_id\" = $2"
+]
+
+# This one may open outbound connections.
+[[route]]
+name = "note-cache"
+path = ['/notes/cache/']
+methods = ["GET"]
+egress = true
+
+# This one does too, and says nothing about it: the report is where that shows.
+[[route]]
+name = "note-queue"
+path = ['/notes/queue/']
+methods = ["GET"]
+
+# No test reaches this one: it is reported as never exercised, not as missing.
+[[route]]
+name = "orders"
+path = ['/orders/']
+methods = ["GET"]
+[route.db]
+queries = [
+  "SELECT \"orders_order\".\"id\" FROM \"orders_order\" LIMIT 21"
+]

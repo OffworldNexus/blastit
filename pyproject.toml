@@ -36,6 +36,14 @@ dependencies = []
 [project.scripts]
 blastit = "blastit.__main__:main"
 
+# D3b: pytest finds the plugin by itself once the wheel is installed, so a
+# project only has to ask for a manifest (`pytest --blastit-manifest
+# blastit.toml`) — no conftest, no `-p`. The module imports nothing but pytest,
+# the standard library and, when a manifest is given, Django, so a test suite
+# that never asks for it pays for one option group in `--help`.
+[project.entry-points.pytest11]
+blastit = "blastit.pytest_plugin"
+
 [project.urls]
 Homepage = "https://github.com/OffworldNexus/blastit"
 
