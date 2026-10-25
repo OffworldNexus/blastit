@@ -119,11 +119,17 @@ in the container. It binds the port and then drops every process to its own
 unprivileged user:
 
 ```dockerfile
+FROM python:3.13-slim AS blastit
+RUN apt-get update && apt-get install -y --no-install-recommends curl build-essential git \
+ && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+RUN git clone --depth 1 -b develop https://github.com/OffworldNexus/blastit /src \
+ && cd /src && PYO3_PYTHON=/usr/local/bin/python3.13 /root/.cargo/bin/cargo build --release
+
 FROM python:3.13-slim
 WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
-COPY --from=blastit /usr/local/bin/blastit /usr/local/bin/blastit
+COPY --from=blastit /src/target/release/blastit /usr/local/bin/blastit
 
 ENV BLASTIT_APP=myproject.wsgi:application \
     BLASTIT_MANIFEST=/app/blastit.toml \
