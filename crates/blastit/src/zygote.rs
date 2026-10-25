@@ -156,7 +156,12 @@ fn child_main(
 
     // SAFETY: `view_end` is this process's end of `view.chan`, created for it
     // before the fork; nothing else in this process owns the number.
-    let chan = unsafe { std::os::unix::net::UnixStream::from_raw_fd(view_end.as_raw_fd()) };
+    let raw = view_end.as_raw_fd();
+    let chan = unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) };
+    // The stream owns the descriptor from here, and `serve` closes it when it
+    // is done. `view_end` must not close it a second time — a descriptor that
+    // has already gone back to the kernel can have been handed out again.
+    std::mem::forget(view_end);
     let view_cfg = ViewConfig {
         route_name: info.name.clone(),
         script_name: mount_point(cfg.script_name.as_deref()),
