@@ -231,6 +231,7 @@ blastit: route product-list: 3 statement(s) missing (see blastit-report.json)
 blastit: route checkout: needs transaction_control = true
 blastit: route search: 2 grant(s) unused
 blastit: 4 unrouted request(s): GET /robots.txt, GET /favicon.ico (see blastit-report.json)
+blastit: 2 connection-setup statement(s) some routes do not grant: put them in a group attached to every route (see blastit-report.json)
 blastit: 2 route(s) never exercised: webhooks, admin
 ======================= 1513 passed, 12 skipped in 84.20s =======================
 ```
@@ -260,7 +261,7 @@ blastit_manifest = blastit.toml
       "observed": 51,
       "missing": [
         {
-          "sql": "SELECT \"shop_product\".\"id\", \"shop_product\".\"name\" FROM \"shop_product\" WHERE \"shop_product\".\"on_sale\" = $1 LIMIT 21",
+          "sql": "SELECT \"shop_product\".\"id\", \"shop_product\".\"name\" FROM \"shop_product\" WHERE \"shop_product\".\"on_sale\" = $? LIMIT 21",
           "count": 9,
           "wire_sql": "SELECT \"shop_product\".\"id\", \"shop_product\".\"name\" FROM \"shop_product\" WHERE \"shop_product\".\"on_sale\" = $1 LIMIT 21",
           "tests": ["shop/tests/test_catalog.py::test_on_sale"],
@@ -274,6 +275,19 @@ blastit_manifest = blastit.toml
 }
 ```
 
+and, at the top level, the statements every connection runs:
+
+```json
+"connection_setup": {
+  "statements": [
+    {"sql": "SELECT set_config('TimeZone', $?, false)", "proxy": "db", "count": 26,
+     "wire_sql": "SELECT set_config('TimeZone', $1, false)",
+     "ungranted_in": ["product-list", "search"], "granted_in": 36}
+  ],
+  "ungranted": 1
+}
+```
+
 How to read it:
 
 * **`missing`** — statements the suite executed that no grant allows. `sql` is
@@ -282,6 +296,9 @@ How to read it:
   occurrence with its `$1`, `$2`… placeholders; `tests` and `paths` name up to
   five examples, so you can find the code that sent it. A statement the tests
   never sent can still be missing in production — the report is a lower bound.
+  Placeholders are compared as `$?`, and so are the shapes a live query changes
+  on every call: an `IN ($1)` grant fits an `IN` list of any length, and one
+  grant fits a run of `VALUES (…)` rows (a single row is a shape of its own).
 * **`unused`** — grants that nothing matched. Either dead code, or a request
   your suite doesn't make yet.
 * **`needs_transaction_control`** — the route ran `BEGIN`/`COMMIT` or a
@@ -294,9 +311,20 @@ How to read it:
   answer, so the app renders its own 404s) or stop requesting them.
 * **`unexercised_routes`** — routes nothing hit: their grants are unproven, not
   proven wrong.
-* `--blastit-strict` fails the run when anything is missing or unrouted, for a
-  CI job that keeps the manifest from rotting. Add the `missing` statements,
-  re-run until it is clean, and deploy.
+* **`connection_setup`** — the statements psycopg runs as a connection is
+  established: `SET`s of your own (a `connection_created` receiver, a
+  middleware), Django's `set_config('TimeZone', …)`, a `TypeInfo.fetch` a
+  backend does at connect. None of them goes through a request's cursors, and
+  under blastit **every request opens its own connection** (`CONN_MAX_AGE = 0`),
+  so they run on every route in production — put them in a group attached to
+  every route (`groups = ["connection"]` at the top level). `ungranted_in` names
+  the routes that would refuse them today; a route with no grant for that proxy
+  gets no listener and never runs them, so it is not listed. Statements psycopg
+  sends itself (not only Django's cursors) are captured, so a type lookup or a
+  server-side cursor's `DECLARE` shows up like any other statement.
+* `--blastit-strict` fails the run when anything is missing, unrouted, or not
+  granted in every route, for a CI job that keeps the manifest from rotting.
+  Add the `missing` statements, re-run until it is clean, and deploy.
 
 Read the report, add the grants, repeat until
 `blastit: the manifest covers every request that was made`. The denial logs stay

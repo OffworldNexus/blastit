@@ -71,6 +71,20 @@ class Outcome:
         """The normalised SQL every `missing` entry of a route names."""
         return [entry["sql"] for entry in self.proxy(name, proxy)["missing"]]
 
+    def setup_statements(self) -> list[dict[str, Any]]:
+        """The connection-setup statements of the report."""
+        return list(self.report["connection_setup"]["statements"])
+
+    def setup(self, marker: str) -> dict[str, Any]:
+        """The connection-setup statement whose normalised SQL contains `marker`."""
+        for entry in self.setup_statements():
+            if marker in entry["sql"]:
+                return entry
+        raise AssertionError(
+            f"no connection-setup statement contains {marker!r}: "
+            f"{[entry['sql'] for entry in self.setup_statements()]}"
+        )
+
 
 @pytest.fixture(scope="session")
 def project(tmp_path_factory: pytest.TempPathFactory) -> Path:
@@ -145,7 +159,7 @@ def strict(project: Path, tmp_path_factory: pytest.TempPathFactory) -> Outcome:
 def test_the_suite_itself_passes(baseline: Outcome) -> None:
     """The plugin records requests; it does not change what the tests do."""
     assert baseline.returncode == 0, baseline.stdout + baseline.stderr
-    assert "7 passed" in baseline.stdout, baseline.stdout
+    assert "11 passed" in baseline.stdout, baseline.stdout
 
 
 def test_a_granted_route_is_clean(baseline: Outcome) -> None:
@@ -159,14 +173,16 @@ def test_a_granted_route_is_clean(baseline: Outcome) -> None:
 
 def test_a_missing_grant_names_the_statement_the_test_and_the_path(baseline: Outcome) -> None:
     """The DELETE is executed and not granted: the report says exactly where."""
-    delete = 'DELETE FROM "notes_note" WHERE "notes_note"."id" = $1'
+    delete = 'DELETE FROM "notes_note" WHERE "notes_note"."id" = $?'
     assert baseline.missing_sql("note-delete") == [delete]
     entry = baseline.proxy("note-delete")["missing"][0]
     assert entry["count"] == 1
-    assert entry["wire_sql"] == delete, "the wire text, placeholders included"
+    assert entry["wire_sql"] == 'DELETE FROM "notes_note" WHERE "notes_note"."id" = $1'
     assert entry["tests"] == ["tests/test_app.py::test_delete_note"]
     assert entry["paths"] == ["/notes/4/delete/"]
-    assert baseline.report["totals"]["missing"] == 3, "the DELETE and the two savepoints"
+    assert baseline.report["totals"]["missing"] == 6, (
+        "the DELETE, the two savepoints, bulk_create's two shapes, and the type lookup"
+    )
 
 
 def test_a_grant_nothing_matched_is_unused(baseline: Outcome) -> None:
@@ -174,7 +190,7 @@ def test_a_grant_nothing_matched_is_unused(baseline: Outcome) -> None:
     stale = 'SELECT "notes_note"."id" FROM "notes_note" ORDER BY "notes_note"."id" DESC LIMIT 1'
     assert baseline.proxy("note-delete")["unused"] == [stale]
     assert baseline.proxy("note-create")["unused"] == [
-        'SELECT "notes_note"."body" FROM "notes_note" WHERE "notes_note"."id" = $1'
+        'SELECT "notes_note"."body" FROM "notes_note" WHERE "notes_note"."id" = $?'
     ]
     assert baseline.proxy("note-create")["missing"] == [], "its own grant matched"
     assert baseline.report["totals"]["unused"] == 2
@@ -197,6 +213,89 @@ def test_a_savepoint_needs_transaction_control(baseline: Outcome) -> None:
     assert baseline.report["totals"]["needs_transaction_control"] == ["note-atomic"]
 
 
+def test_an_id_list_of_any_length_is_one_grant(baseline: Outcome) -> None:
+    """Two requests, one with one id and one with three: the `IN` grant covers both.
+
+    D3a's shape rule: `IN ($1)` and `IN ($1, $2, $3)` normalise to `IN ($?, ...)`,
+    so a `prefetch_related` of ten objects does not need a grant of its own.
+    """
+    assert baseline.route("note-in")["requests"] == 2
+    assert baseline.proxy("note-in")["observed"] == 2
+    assert baseline.proxy("note-in")["missing"] == [], "one grant, both list lengths"
+    assert baseline.proxy("note-in")["unused"] == [], "and the grant was used"
+
+
+def test_a_run_of_values_rows_is_one_grant(baseline: Outcome) -> None:
+    """A two-row and a five-row hand-written `INSERT` match the same collapsed grant."""
+    assert baseline.route("note-multi")["requests"] == 2
+    assert baseline.proxy("note-multi")["observed"] == 2
+    assert baseline.proxy("note-multi")["missing"] == [], "one grant, both row counts"
+    assert baseline.proxy("note-multi")["unused"] == []
+
+
+def test_bulk_create_sends_two_shapes(baseline: Outcome) -> None:
+    """`bulk_create` of one object and of three are two statements, not one.
+
+    Django sends a single `VALUES` row for one object and an `UNNEST` array for
+    several, so the row count changes the statement itself: both have to be
+    granted, and a grant for one never covers the other.
+    """
+    missing = baseline.missing_sql("note-bulk")
+    assert len(missing) == 2, missing
+    unnest = [sql for sql in missing if "UNNEST(" in sql]
+    values = [sql for sql in missing if "UNNEST(" not in sql and "VALUES (" in sql]
+    assert len(unnest) == 1 and len(values) == 1, missing
+    assert all(", ..." not in sql for sql in missing), "neither is a collapsed run"
+    assert unnest[0] != values[0]
+    assert baseline.proxy("note-bulk")["observed"] == 2
+
+
+def test_a_statement_psycopg_runs_itself_is_reported(baseline: Outcome) -> None:
+    """The type lookup goes straight through psycopg, and is still diffed.
+
+    This is what the postgis and hstore backends do at connect; no Django cursor
+    of the request sees it, so only the psycopg-level capture can find it.
+    """
+    missing = baseline.missing_sql("note-types")
+    assert len(missing) == 1, missing
+    assert "pg_type" in missing[0] and "to_regtype($?)" in missing[0], missing
+    entry = baseline.proxy("note-types")["missing"][0]
+    assert entry["count"] == 1
+    assert entry["tests"] == ["tests/test_app.py::test_type_info_fetch"]
+    assert baseline.proxy("note-types")["observed"] == 1
+
+
+def test_connection_setup_names_the_routes_that_do_not_grant_it(baseline: Outcome) -> None:
+    """The statements every connection runs are reported apart from the requests.
+
+    Under blastit every request opens its own connection, so these run on every
+    route in production — while here they ran once, mostly outside any request.
+    """
+    assert len(baseline.setup_statements()) == 2, baseline.setup_statements()
+    django_setup = baseline.setup("set_config")
+    assert django_setup["sql"] == "SELECT set_config('TimeZone', $?, false)"
+    assert django_setup["wire_sql"] == "SELECT set_config('TimeZone', $1, false)"
+    assert django_setup["proxy"] == "db"
+    assert django_setup["count"] >= 1
+    assert django_setup["ungranted_in"] == [
+        "notes",
+        "note-create",
+        "note-delete",
+        "note-atomic",
+        "note-in",
+        "note-multi",
+        "orders",
+    ], "every route with a listener, and not the two with no grant at all"
+    assert django_setup["granted_in"] == 0
+
+    app_setup = baseline.setup("application_name")
+    assert app_setup["sql"] == "SET application_name = 'blastit-test'"
+    assert app_setup["ungranted_in"] == django_setup["ungranted_in"]
+    assert baseline.report["connection_setup"]["ungranted"] == 2
+    assert baseline.report["totals"]["connection_setup"] == 2
+    assert baseline.report["totals"]["connection_setup_ungranted"] == 2
+
+
 def test_an_unrouted_path_is_reported_with_its_test(baseline: Outcome) -> None:
     """`/oops/` exists in Django; blastit would answer 404 before reaching it."""
     unrouted = baseline.report["unrouted"]
@@ -213,28 +312,29 @@ def test_a_route_no_request_reached_is_named(baseline: Outcome) -> None:
     assert baseline.report["unexercised_routes"] == ["orders"]
     assert baseline.route("orders")["requests"] == 0
     assert baseline.route("orders")["proxies"] == []
-    assert baseline.report["totals"]["routes_exercised"] == 4
+    assert baseline.report["totals"]["routes_exercised"] == 8
 
 
 def test_sql_outside_a_request_is_ignored(baseline: Outcome) -> None:
     """The plugin records requests, not statements: pytest-django's own SQL is invisible."""
     assert "4242" not in baseline.report_path.read_text(encoding="utf-8")
-    assert baseline.report["totals"]["statements"] == 7, (
-        "one per request, plus the two savepoints and the UPDATE"
+    assert baseline.report["totals"]["statements"] == 14, (
+        "one per request, plus the two savepoints and bulk_create's second shape"
     )
 
 
 def test_the_report_counts_what_the_manifest_does_not_cover(baseline: Outcome) -> None:
     """The totals are the summary a human reads first."""
     totals = baseline.report["totals"]
-    assert totals["requests"] == 6
-    assert totals["routed"] == 5
+    assert totals["requests"] == 13
+    assert totals["routed"] == 12
     assert totals["unrouted"] == 1
-    assert totals["missing_distinct"] == 3
+    assert totals["routes"] == 9
+    assert totals["missing_distinct"] == 6
     assert totals["clean"] is False
     assert baseline.report["version"] == 1
     assert baseline.report["manifest"] == {
-        "routes": 5,
+        "routes": 9,
         "proxies": {"db": "postgresql"},
         "warnings": [],
     }
@@ -243,16 +343,26 @@ def test_the_report_counts_what_the_manifest_does_not_cover(baseline: Outcome) -
 
 def test_the_terminal_summary_is_short_and_actionable(baseline: Outcome) -> None:
     """What the developer sees without opening the JSON."""
+    assert "blastit: 13 requests, 14 statements, 8/9 routes exercised" in baseline.stdout
     assert "blastit: route note-delete: 1 statement(s) missing" in baseline.stdout
+    assert "blastit: route note-bulk: 2 statement(s) missing" in baseline.stdout
     assert "blastit: route note-atomic: needs transaction_control = true" in baseline.stdout
     assert "blastit: 1 unrouted request(s): GET /oops/" in baseline.stdout
+    assert (
+        "blastit: 2 connection-setup statement(s) some routes do not grant: "
+        "put them in a group attached to every route" in baseline.stdout
+    )
     assert "blastit-report.json" in baseline.stdout
 
 
 def test_strict_fails_the_session(strict: Outcome) -> None:
     """`--blastit-strict` is the exit code a CI job can watch."""
     assert strict.returncode == 1, strict.stdout + strict.stderr
-    assert "blastit: --blastit-strict: 3 statement execution(s) missing" in strict.stdout
+    assert (
+        "blastit: --blastit-strict: 6 statement execution(s) missing, 1 unrouted "
+        "request(s) and 2 connection-setup statement(s) not granted in every route"
+        in strict.stdout
+    )
     assert strict.report["totals"]["clean"] is False
 
 
@@ -262,16 +372,21 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     """The whole point: what the report says, applied to the manifest, is clean.
 
     Applying the report happens twice, which is the honest shape of the loop: the
-    first pass adds the statements of the routes that ran, and gives the
-    unrouted path a route of its own — and only then do that route's own
-    statements show up as missing, because until it existed nothing could
-    attribute them to it.
+    first pass adds the statements of the routes that ran — including the two
+    `bulk_create` shapes and the type lookup psycopg sends — puts the
+    connection-setup statements in a group attached to every route, and gives the
+    unrouted path a route of its own. Only then do that route's own statements
+    show up as missing, because until it existed nothing could attribute them to
+    it.
     """
     assert baseline.report["totals"]["clean"] is False
     copy = copy_project(project, tmp_path)
     source = (copy / "blastit.toml").read_text(encoding="utf-8")
 
     repaired = repaired_manifest(source, baseline)
+    assert "SELECT set_config('TimeZone', $?, false)" in repaired, (
+        "the connection-setup statement is in the repair"
+    )
     (copy / "blastit-repaired.toml").write_text(repaired, encoding="utf-8")
     second = run(
         copy,
@@ -282,6 +397,9 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     assert second.returncode == 0, second.stdout + second.stderr
     assert second.report["totals"]["unrouted"] == 0, "the path has a route now"
     assert second.report["totals"]["needs_transaction_control"] == []
+    assert second.report["connection_setup"]["ungranted"] == 0, (
+        "the group attached to every route covers the connection setup"
+    )
     assert second.missing_sql("fallback") == ["SELECT 1"], "the new route's own SQL"
     assert second.report["totals"]["missing"] == 1
 
@@ -340,8 +458,9 @@ def test_more_than_one_proxy_needs_a_mapping(project: Path, tmp_path: Path) -> N
     assert with_mapping.route("notes")["proxies"][0]["name"] == "warehouse"
     assert with_mapping.missing_sql("notes", "warehouse") == [
         'SELECT "notes_note"."id" AS "id" FROM "notes_note" '
-        'WHERE "notes_note"."owner_id" = $1'
+        'WHERE "notes_note"."owner_id" = $?'
     ]
+    assert with_mapping.setup("set_config")["ungranted_in"] == ["notes"]
 
 
 def test_a_typo_in_the_mapping_is_a_usage_error(project: Path, tmp_path: Path) -> None:
@@ -397,12 +516,13 @@ def test_xdist_workers_are_merged(project: Path, tmp_path: Path) -> None:
         report="xdist-report.json",
     )
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
-    assert "7 passed" in outcome.stdout
+    assert "11 passed" in outcome.stdout
     totals = outcome.report["totals"]
-    assert totals["requests"] == 6, "every request, from both workers"
-    assert totals["statements"] == 7
-    assert totals["routes_exercised"] == 4
-    assert totals["missing"] == 3
+    assert totals["requests"] == 13, "every request, from both workers"
+    assert totals["statements"] == 14
+    assert totals["routes_exercised"] == 8
+    assert totals["missing"] == 6
+    assert totals["connection_setup_ungranted"] == 2, "counted once, not once per worker"
     assert not list(copy.glob("xdist-report.json.gw*")), "the worker files are cleaned up"
     assert "blastit: route note-delete: 1 statement(s) missing" in outcome.stdout
 
@@ -413,7 +533,8 @@ def test_xdist_reports_are_not_merged_twice(project: Path, tmp_path: Path) -> No
     first = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json")
     second = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json")
     assert first.returncode == second.returncode == 0
-    assert first.report["totals"]["requests"] == second.report["totals"]["requests"] == 6
+    assert first.report["totals"]["requests"] == second.report["totals"]["requests"] == 13
+    assert second.report["connection_setup"]["ungranted"] == 2
     assert not list(copy.glob("twice.json.gw*"))
 
 
@@ -438,6 +559,10 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
       normalised text over, which is exactly what a grant holds;
     * a route that `needs_transaction_control` gets the flag, instead of a grant
       for a savepoint whose name changes on every run;
+    * the connection-setup statements go into a group attached to every route
+      (`groups = ["connection"]`), which is what the report's
+      `ungranted_in` is telling you to do: they run on every route in
+      production, so they cannot belong to one;
     * a path the report calls `unrouted` gets a route of its own: blastit would
       have answered 404 before Django saw it. That route's statements were not
       attributed to anything (they could not be), so the next run is the one that
@@ -456,6 +581,20 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
                     queries.append(entry["sql"])
             if block["transaction_control"]["needed"]:
                 route[block["name"]]["transaction_control"] = True
+
+    setup = [
+        entry["sql"]
+        for entry in outcome.report["connection_setup"]["statements"]
+        if entry["ungranted_in"]
+    ]
+    if setup:
+        groups = document.setdefault("groups", [])
+        if "connection" not in groups:
+            groups.append("connection")
+        grant = document.setdefault("group", {}).setdefault("connection", {}).setdefault("db", {})
+        queries = grant.setdefault("queries", [])
+        queries.extend(sql for sql in setup if sql not in queries)
+
     for entry in outcome.report["unrouted"]:
         document.setdefault("route", []).append(
             {"name": "fallback", "path": [entry["path_info"]], "db": {"queries": []}}
@@ -466,11 +605,14 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
 def dumps_manifest(document: dict[str, Any]) -> str:
     """Writes the small subset of `blastit.toml` the tiny project uses.
 
-    `version`, `[proxy.*]` with an inline `input`, and `[[route]]` with an inline
-    `[route.<proxy>]` grant — so a test can apply a report to a manifest the way
-    a human would, without a TOML writer in the plugin's own dependencies.
+    `version`, top-level `groups`, `[proxy.*]` with an inline `input`,
+    `[group.*.<proxy>]`, and `[[route]]` with an inline `[route.<proxy>]` grant —
+    so a test can apply a report to a manifest the way a human would, without a
+    TOML writer in the plugin's own dependencies.
     """
     lines = [f"version = {document['version']}"]
+    if document.get("groups"):
+        lines.append(f"groups = {_toml(document['groups'])}")
     for name, proxy in document.get("proxy", {}).items():
         inputs = ", ".join(
             f"{key} = {_toml(value)}" for key, value in proxy.get("input", {}).items()
@@ -481,6 +623,12 @@ def dumps_manifest(document: dict[str, Any]) -> str:
             f"protocol = {_toml(proxy['protocol'])}",
             f"input = {{ {inputs} }}",
         ]
+    for name, group in document.get("group", {}).items():
+        for proxy_name, grant in group.items():
+            lines += ["", f"[group.{name}.{proxy_name}]"]
+            if grant.get("transaction_control"):
+                lines.append("transaction_control = true")
+            lines.append(f"queries = {_toml(grant.get('queries', []))}")
     for route in document.get("route", []):
         lines += [
             "",
@@ -536,5 +684,5 @@ def two_proxy_manifest() -> str:
         "path = ['/notes/']\n"
         'methods = ["GET"]\n'
         "[route.warehouse]\n"
-        "queries = []\n"
+        "queries = ['SELECT 1']\n"
     )

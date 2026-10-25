@@ -1,8 +1,8 @@
 """The test suite the plugin records.
 
-One request per view, over a real PostgreSQL: what the plugin reports is exactly
-this file's traffic, plus the SQL pytest-django itself runs around it (which the
-plugin must ignore, because no route is responsible for it).
+One request (or a few) per view, over a real PostgreSQL: what the plugin reports
+is exactly this file's traffic, plus the SQL pytest-django itself runs around it
+(which the plugin must ignore, because no route is responsible for it).
 
 Nothing here knows about blastit or the manifest, which is the point — the
 report is written from an ordinary Django test suite.
@@ -46,6 +46,35 @@ def test_atomic_note(client):
     """An UPDATE inside a nested atomic, i.e. a SAVEPOINT."""
     response = client.post("/notes/atomic/")
     assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_id_in_lists_of_any_length(client):
+    """The same `IN` list query with one id and with three: one grant (D3a)."""
+    assert client.get("/notes/in/?ids=1").status_code == 200
+    assert client.get("/notes/in/?ids=1,2,3").status_code == 200
+
+
+@pytest.mark.django_db
+def test_multi_row_values(client):
+    """A hand-written two-row `INSERT`, then a five-row one: one grant (D3a)."""
+    assert client.get("/notes/multi/?rows=2").status_code == 200
+    assert client.get("/notes/multi/?rows=5").status_code == 200
+
+
+@pytest.mark.django_db
+def test_bulk_create_shapes(client):
+    """Three rows in one `bulk_create`, then one: Django sends two shapes (D3a)."""
+    assert client.get("/notes/bulk/?rows=3").status_code == 200
+    assert client.get("/notes/bulk/?rows=1").status_code == 200
+
+
+@pytest.mark.django_db
+def test_type_info_fetch(client):
+    """A type lookup through psycopg itself, as postgis and hstore do it."""
+    response = client.get("/notes/types/")
+    assert response.status_code == 200
+    assert response.content.isdigit()
 
 
 @pytest.mark.django_db

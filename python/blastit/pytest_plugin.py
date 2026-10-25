@@ -41,6 +41,27 @@ whatever called it. Per-request state lives in a :mod:`contextvars` variable, so
 requests served by ``live_server`` in another thread — the case a test suite
 that also uses Playwright always has — never mix with the test thread's own.
 
+Statements psycopg runs by itself
+--------------------------------
+
+Django's ``execute_wrapper`` only sees the statements that go through its own
+cursors, and those are not all of them: psycopg sends ``SET``s of its own while
+a connection opens, and a backend looks a type's OID up at connect with
+``TypeInfo.fetch`` (postgis, hstore — psycopg's ``Connection.execute``, which no
+Django cursor of that request sees). Under blastit every request opens its own
+connection (``CONN_MAX_AGE = 0``, §6), so in production those statements run on
+**every** route, once per request; in a test suite the connection is reused and
+they run once, usually outside any request at all.
+
+So the plugin also wraps ``psycopg.Cursor.execute``/``executemany``/``stream``
+and ``psycopg.Connection.execute`` — the outermost wrapper records and the inner
+ones stay quiet, so a statement is counted once — and it records what runs while
+``DatabaseWrapper.connect()`` is in progress as a separate ``connection_setup``
+set. They are not a route's statements, so the report does not diff them against
+one route: it lists the routes that do **not** grant them, and the fix is a
+group attached to every route (``groups = ["connection"]`` at the top level,
+§6). ``--blastit-strict`` fails while one is missing.
+
 Options
 -------
 
@@ -100,10 +121,16 @@ are::
      "unrouted": [{"method": ..., "path_info": ..., "count": N,
                    "statements": N, "tests": [...]}],
      "unexercised_routes": [...],
+     "connection_setup": {"statements": [{"sql": ..., "proxy": ..., "count": N,
+                                          "wire_sql": ...,
+                                          "ungranted_in": [...],
+                                          "granted_in": N}],
+                          "ungranted": N},
      "totals": {"requests": N, "routed": N, "unrouted": N, "routes": N,
                 "routes_exercised": N, "statements": N, "missing": N,
                 "missing_distinct": N, "unused": N,
-                "needs_transaction_control": [...], "clean": bool}}
+                "needs_transaction_control": [...], "connection_setup": N,
+                "connection_setup_ungranted": N, "clean": bool}}
 
 ``missing[].sql`` is the *normalised* text: it is what a grant has to contain,
 so it can be pasted into the manifest as it is. ``wire_sql`` is one raw
@@ -128,6 +155,11 @@ __all__ = ["pytest_addoption", "pytest_configure", "pytest_unconfigure"]
 # The observations document and the report are versioned together, and the
 # extension refuses to read a version it does not know (crates/blastit-py).
 _OBSERVATIONS_VERSION = 1
+
+#: Django's alias for the connection it opens *without* a database, to create the
+#: test database (`django.db.backends.base.base.NO_DB_ALIAS`). What it runs is
+#: test machinery, never request traffic, and it names no manifest proxy.
+NO_DB_ALIAS = "__no_db__"
 
 #: Where the JSON report goes when `--blastit-report` is not given.
 DEFAULT_REPORT = "blastit-report.json"
@@ -223,6 +255,23 @@ class _RequestContext:
 #: The request being handled in this thread, or `None` outside a request.
 _CURRENT: ContextVar[_RequestContext | None] = ContextVar("blastit_request", default=None)
 
+#: The Django alias whose connection is being established, or `None`.
+#:
+#: A connection-setup statement is not a route's: under blastit every request
+#: opens its own connection (§6, "What the app must do"), so these run on every
+#: route, once per request — while a test suite reuses one connection and runs
+#: them outside any request. They are reported separately, and the report says
+#: which routes do not grant them.
+_CONNECTING: ContextVar[str | None] = ContextVar("blastit_connecting", default=None)
+
+#: How many capture wrappers are on the stack for the statement being run.
+#:
+#: Django's cursor wrapper and psycopg's own methods see the same statement, and
+#: `Connection.execute` delegates to `Cursor.execute`: the outermost wrapper
+#: records it, the inner ones see a non-zero depth and stay quiet, so one
+#: statement is one line however many layers saw it.
+_DEPTH: ContextVar[int] = ContextVar("blastit_depth", default=0)
+
 
 @dataclass
 class _ObservedRequest:
@@ -263,6 +312,7 @@ class _Session:
         self.declared = _postgresql_proxies(self.manifest)
         _check_proxy_mapping(self)
         self.observations: list[_ObservedRequest] = []
+        self.connection_setup: dict[tuple[str, str], int] = {}
         self.lock = threading.Lock()
         self.nodeid: str | None = None
         self.installed = False
@@ -299,11 +349,35 @@ class _Session:
         with self.lock:
             self.observations.append(observed)
 
+    def record_connection_setup(self, alias: str | None, sql: str) -> None:
+        """Counts one statement psycopg ran as a connection was established.
+
+        Aggregated here rather than kept per occurrence: these are the same few
+        statements over and over, and what matters is which ones a route does not
+        grant, not when they ran.
+        """
+        key = (alias or "", sql)
+        with self.lock:
+            self.connection_setup[key] = self.connection_setup.get(key, 0) + 1
+
     def document(self) -> dict[str, Any]:
         """The observations document the extension reads."""
         with self.lock:
             requests = [observed.as_json(self.proxy_for) for observed in self.observations]
-        return {"version": _OBSERVATIONS_VERSION, "requests": requests}
+            setup = sorted(self.connection_setup.items())
+        return {
+            "version": _OBSERVATIONS_VERSION,
+            "requests": requests,
+            "connection_setup": [
+                {
+                    "alias": alias or None,
+                    "proxy": self.proxy_for(alias) if alias else None,
+                    "sql": sql,
+                    "count": count,
+                }
+                for (alias, sql), count in setup
+            ],
+        }
 
 
 #: The session in progress, or `None` when the plugin is inert.
@@ -459,6 +533,88 @@ def _patch_handler() -> None:
     BaseHandler.get_response = get_response
 
 
+def _patch_connect() -> None:
+    """Marks the statements run while a Django connection is being established.
+
+    `DatabaseWrapper.connect()` calls the backend's `get_new_connection`, then
+    `init_connection_state()`, then sends `connection_created` — and psycopg
+    sends `SET`s of its own as the connection opens. All of that is
+    connection-setup SQL, and none of it goes through a request's cursors in
+    production and tests the same way, so it is recorded apart from the requests.
+    """
+    from django.db.backends.base.base import BaseDatabaseWrapper
+
+    original = BaseDatabaseWrapper.connect
+    if getattr(original, "_blastit_patched", False):
+        return
+
+    def connect(self: Any) -> Any:
+        token = _CONNECTING.set(str(self.alias))
+        try:
+            return original(self)
+        finally:
+            _CONNECTING.reset(token)
+
+    connect._blastit_patched = True  # type: ignore[attr-defined]
+    connect.__doc__ = original.__doc__
+    connect.__wrapped__ = original  # type: ignore[attr-defined]
+    BaseDatabaseWrapper.connect = connect
+
+
+def _capture(alias: str | None, sql: Any, params: Any, connection: Any = None) -> None:
+    """Records one statement, wherever it came from.
+
+    Called by both capture layers, outermost first; only the outermost one
+    records. A statement run while a connection is being established goes to the
+    session's connection-setup set — whether or not a request is in flight,
+    because it is not the request's — and any other statement goes to the request
+    that is running, or nowhere when none is.
+    """
+    if _DEPTH.get():
+        return
+    session = _SESSION
+    if session is None:
+        return
+    text = _sql_text(sql, connection)
+    if text is None:
+        return
+    wire = to_wire_sql(text) if params is not None else text
+
+    connecting = _CONNECTING.get()
+    if connecting == NO_DB_ALIAS:
+        # Django opens one connection *without* a database to create the test
+        # database. It is test machinery, it never runs under blastit (the
+        # database is already there), and its alias names no proxy.
+        return
+    if connecting is not None:
+        session.record_connection_setup(connecting or alias, wire)
+        return
+    current = _CURRENT.get()
+    if current is not None:
+        current.add(alias or "", wire)
+
+
+def _sql_text(sql: Any, connection: Any) -> str | None:
+    """The text of a query, whichever form it came in.
+
+    A `str` is what Django and most application code pass. psycopg also accepts
+    `sql.Composable` objects, and renders them against the connection — which is
+    what psycopg itself does before it converts the placeholders; the result
+    still has its `%s`, so the same conversion and the same grant comparison
+    apply. Anything else (a `Template`) has no text to compare: it is left alone
+    rather than guessed at.
+    """
+    if isinstance(sql, str):
+        return sql
+    render = getattr(sql, "as_string", None)
+    if render is None or connection is None:
+        return None
+    try:
+        return str(render(connection))
+    except Exception:  # noqa: BLE001 - a query we cannot render is one we skip
+        return None
+
+
 def _wrap_connection(connection: Any) -> None:
     """Records every statement executed on one database connection.
 
@@ -474,14 +630,143 @@ def _wrap_connection(connection: Any) -> None:
         # text as it is; with parameters, the text that goes on the wire has
         # `$n` placeholders, which is what a grant has to match. `executemany`
         # is one statement, however many rows it carries.
-        wire = to_wire_sql(sql) if params is not None else sql
-        current = _CURRENT.get()
-        if current is not None:
-            current.add(alias, wire)
-        return execute(sql, params, many, context)
+        _capture(alias, sql, params, getattr(connection, "connection", None))
+        token = _DEPTH.set(_DEPTH.get() + 1)
+        try:
+            return execute(sql, params, many, context)
+        finally:
+            _DEPTH.reset(token)
 
     connection.execute_wrappers.append(wrapper)
     connection._blastit_wrapped = True  # type: ignore[attr-defined]
+
+
+def _psycopg_connection(target: Any) -> Any:
+    """The psycopg connection behind a cursor, or `target` itself when it is one."""
+    import psycopg
+
+    return target if isinstance(target, psycopg.Connection) else target.connection
+
+
+def _alias_of(connection: Any) -> str | None:
+    """The Django alias of a psycopg connection, when Django owns it.
+
+    Looked up rather than remembered by `id()`: psycopg connections are created
+    and dropped (one per request under blastit), and an address can be reused by
+    a connection of another alias. An app that talks to psycopg directly, or a
+    run with no Django at all, simply has no alias.
+    """
+    try:
+        from django.db import connections
+
+        for wrapper in connections.all():
+            if getattr(wrapper, "connection", None) is connection:
+                return str(wrapper.alias)
+    except Exception:  # noqa: BLE001 - no Django, or Django without settings
+        return None
+    return None
+
+
+def _declared_statement(cursor: Any, query: Any, connection: Any) -> Any:
+    """What psycopg sends for a server-side cursor: a `DECLARE … CURSOR FOR …`.
+
+    `ServerCursor.execute` does not go through a cursor's `execute` at all: it
+    builds one `DECLARE` statement and sends that. Recording the query the
+    caller wrote would name a statement that never reached PostgreSQL — a grant
+    for it could not match — so psycopg's own rendering of the statement is
+    used, and the caller's query only if it cannot be built.
+    """
+    make = getattr(cursor, "_make_declare_statement", None)
+    if make is None:
+        return query
+    try:
+        return make(query)
+    except Exception:  # noqa: BLE001 - a DECLARE we cannot build is not one we guess
+        return query
+
+
+def _wrap_psycopg_method(
+    target: Any,
+    name: str,
+    *,
+    streaming: bool = False,
+    statement: Any = None,
+) -> None:
+    """Wraps one psycopg method so a statement is recorded as it is sent."""
+    original = getattr(target, name, None)
+    if original is None or getattr(original, "_blastit_patched", False):
+        return
+
+    if streaming:
+
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            connection = _psycopg_connection(self)
+            query, params = query_params(args, kwargs)
+            if statement is not None:
+                query = statement(self, query, connection)
+            _capture(_alias_of(connection), query, params, connection)
+            yield from original(self, *args, **kwargs)
+
+    else:
+
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            connection = _psycopg_connection(self)
+            query, params = query_params(args, kwargs)
+            if statement is not None:
+                query = statement(self, query, connection)
+            _capture(_alias_of(connection), query, params, connection)
+            token = _DEPTH.set(_DEPTH.get() + 1)
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                _DEPTH.reset(token)
+
+    wrapper._blastit_patched = True  # type: ignore[attr-defined]
+    wrapper.__doc__ = original.__doc__
+    wrapper.__wrapped__ = original  # type: ignore[attr-defined]
+    setattr(target, name, wrapper)
+
+
+def query_params(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, Any]:
+    """The `(query, params)` of a psycopg call, whatever the signature is.
+
+    psycopg's methods take `(query, params=None, ...)` positionally, but changes
+    between versions (and keyword-only options) mean the only safe reading is
+    "the first argument is the query, the second — if there is one — the
+    parameters".
+    """
+    query = args[0] if args else kwargs.get("query")
+    params = args[1] if len(args) > 1 else kwargs.get("params")
+    return query, params
+
+
+def _patch_psycopg() -> None:
+    """Records the statements psycopg runs itself, not only Django's cursors.
+
+    Django's `execute_wrapper` only sees statements that go through its own
+    cursors. psycopg runs some of its own: `TypeInfo.fetch`, which the PostGIS
+    and hstore backends use to look up a type's OID at connect, and the
+    connection's own `SET`s. Those are exactly the statements a manifest has to
+    grant — they go on the wire, so dbproxy checks them — and the plugin could
+    not see them before.
+
+    `Cursor.execute`, `executemany` and `stream` are short methods with stable
+    signatures; the wrapper reads the query and the parameters positionally and
+    leaves the call itself alone. `ServerCursor` inherits from `Cursor`, and
+    `Connection.execute` delegates to a cursor, so the outermost wrapper records
+    and the inner ones stay quiet.
+    """
+    try:
+        import psycopg
+    except ImportError:
+        return
+    _wrap_psycopg_method(psycopg.Cursor, "execute")
+    _wrap_psycopg_method(psycopg.Cursor, "executemany")
+    _wrap_psycopg_method(psycopg.Cursor, "stream", streaming=True)
+    _wrap_psycopg_method(psycopg.Connection, "execute")
+    server_cursor = getattr(psycopg, "ServerCursor", None)
+    if server_cursor is not None:
+        _wrap_psycopg_method(server_cursor, "execute", statement=_declared_statement)
 
 
 def _on_connection_created(sender: Any = None, connection: Any = None, **_: Any) -> None:
@@ -520,6 +805,8 @@ def _install(session: _Session) -> None:
 
     try:
         _patch_handler()
+        _patch_connect()
+        _patch_psycopg()
         connection_created.connect(
             _on_connection_created, dispatch_uid="blastit_pytest_plugin"
         )
@@ -671,6 +958,8 @@ def _merged_observations(session: _Session) -> dict[str, Any]:
             continue
         for request in theirs.get("requests", []):
             document["requests"].append(request)
+        for statement in theirs.get("connection_setup", []):
+            document["connection_setup"].append(statement)
     for path in workers:
         try:
             path.unlink()
@@ -735,8 +1024,10 @@ def _finish(session: pytest.Session, state: _Session) -> None:
         lines.append(
             (
                 "blastit: --blastit-strict: "
-                f"{totals['missing']} statement execution(s) missing and "
-                f"{totals['unrouted']} unrouted request(s)",
+                f"{totals['missing']} statement execution(s) missing, "
+                f"{totals['unrouted']} unrouted request(s) and "
+                f"{totals['connection_setup_ungranted']} connection-setup "
+                "statement(s) not granted in every route",
                 True,
             )
         )
@@ -802,6 +1093,16 @@ def _summary(report: dict[str, Any], path: str) -> list[tuple[str, bool]]:
                 f"blastit: {len(report['unexercised_routes'])} route(s) never "
                 f"exercised: {', '.join(report['unexercised_routes'])}",
                 False,
+            )
+        )
+    setup = report["connection_setup"]
+    if setup["ungranted"]:
+        lines.append(
+            (
+                f"blastit: {setup['ungranted']} connection-setup statement(s) some "
+                "routes do not grant: put them in a group attached to every route "
+                f"(see {path})",
+                True,
             )
         )
     return lines

@@ -33,6 +33,9 @@
 //!         {"alias": "default", "proxy": "db", "sql": "SELECT \"notes\".\"id\" FROM \"notes\" WHERE \"notes\".\"owner_id\" = $1"}
 //!       ]
 //!     }
+//!   ],
+//!   "connection_setup": [
+//!     {"alias": "default", "proxy": "db", "sql": "SET application_name = 'app'", "count": 2}
 //!   ]
 //! }
 //! ```
@@ -48,7 +51,12 @@
 //!   and the manifest proxy they belong to in `proxy` (absent: the manifest has
 //!   to declare exactly one `postgresql` proxy);
 //! * `sql` is what counts: it is normalised with [`blastit_sqlpolicy::normalize`]
-//!   before it is compared to a grant, exactly like the text on the wire.
+//!   before it is compared to a grant, exactly like the text on the wire;
+//! * `connection_setup` is what psycopg ran on its own while a Django connection
+//!   was being established — its `SET`s, the type lookups a backend does at
+//!   connect, anything a `connection_created` receiver sends. They belong to no
+//!   request, so they can appear with no request at all, and `count` says how
+//!   often they ran.
 //!
 //! # The report
 //!
@@ -87,11 +95,19 @@
 //!      "tests": ["tests/test_oops.py::test_oops"]}
 //!   ],
 //!   "unexercised_routes": [],
+//!   "connection_setup": {
+//!     "statements": [
+//!       {"sql": "SET application_name = 'app'", "proxy": "db", "count": 2,
+//!        "wire_sql": "SET application_name = 'app'",
+//!        "ungranted_in": ["checkout"], "granted_in": 4}
+//!     ],
+//!     "ungranted": 1
+//!   },
 //!   "totals": {
 //!     "requests": 2, "routed": 2, "unrouted": 0, "routes": 1,
 //!     "routes_exercised": 1, "statements": 3, "missing": 1,
 //!     "missing_distinct": 1, "unused": 1, "needs_transaction_control": [],
-//!     "clean": false
+//!     "connection_setup": 1, "connection_setup_ungranted": 1, "clean": false
 //!   }
 //! }
 //! ```
@@ -103,11 +119,18 @@
 //!   order they were observed;
 //! * `unused` lists the grants of that `(route, proxy)` pair that nothing
 //!   matched, in manifest order. A route that no request reached reports no
-//!   proxy at all: [`unexercised_routes`] names it, so listing grants as unused
+//!   proxy at all: `unexercised_routes` names it, so listing grants as unused
 //!   would be noise;
-//! * `totals.clean` is true when nothing is missing, nothing is unrouted and no
-//!   route needs transaction control it was not granted — what
-//!   `--blastit-strict` fails a session over.
+//! * `connection_setup` is the other half of the same job: those statements are
+//!   not a route's, so what matters is not which route ran them but which routes
+//!   do not allow them. `ungranted_in` names those (a route with no grant on the
+//!   proxy gets no listener and never runs them, so it is not counted either
+//!   way), and `granted_in` counts the routes that already do — the fix is a
+//!   group attached to every route, `groups = ["connection"]` (§6);
+//! * `totals.clean` is true when nothing is missing, nothing is unrouted, no
+//!   route needs transaction control it was not granted and no connection-setup
+//!   statement is ungranted in a route — what `--blastit-strict` fails a session
+//!   over.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -220,7 +243,8 @@ pub(crate) fn audit(
         .validate_default()
         .map_err(|errors| AuditError::manifest(&errors))?;
     let table = RoutingTable::new(&manifest).map_err(|errors| AuditError::manifest(&errors))?;
-    let requests = parse_observations(observations_json)?;
+    let observations = parse_observations(observations_json)?;
+    let requests = &observations.requests;
     let mount = Mount::new(script_name);
     let probe = TcProbe::new();
 
@@ -229,7 +253,7 @@ pub(crate) fn audit(
     let mut routed_requests = 0usize;
     let mut routed_statements = 0usize;
 
-    for request in &requests {
+    for request in requests {
         let matched = mount
             .strip(&request.path_info)
             .and_then(|path| table.route(&request.method, path));
@@ -278,12 +302,13 @@ pub(crate) fn audit(
         &mount,
         &traces,
         &unrouted,
+        &observations.connection_setup,
         Summary {
             requests: requests.len(),
             routed: routed_requests,
             statements: routed_statements,
         },
-    );
+    )?;
     serde_json::to_string_pretty(&report).map_err(|error| AuditError::Report(error.to_string()))
 }
 
@@ -301,8 +326,9 @@ fn assemble(
     mount: &Mount,
     traces: &BTreeMap<usize, RouteTrace>,
     unrouted: &BTreeMap<(String, String), UnroutedTrace>,
+    connection_setup: &[ObservedSetup],
     summary: Summary,
-) -> Value {
+) -> Result<Value, AuditError> {
     let mut routes = Vec::with_capacity(manifest.route_count());
     let mut unexercised = Vec::new();
     let mut needs_transaction_control = Vec::new();
@@ -371,9 +397,7 @@ fn assemble(
             unused += unused_here.len();
 
             let observed_control = observed.is_some_and(|observed| observed.transaction_control);
-            let granted_control = grant
-                .as_ref()
-                .is_some_and(|grant| grant.transaction_control());
+            let granted_control = policy.transaction_control;
             let needed = observed_control && !granted_control;
             route_needs_transaction_control |= needed;
 
@@ -433,9 +457,13 @@ fn assemble(
         .iter()
         .map(|warning| json!(warning.to_string()))
         .collect();
-    let clean = missing == 0 && unrouted_count == 0 && needs_transaction_control.is_empty();
+    let setup = setup_section(manifest, connection_setup)?;
+    let clean = missing == 0
+        && unrouted_count == 0
+        && needs_transaction_control.is_empty()
+        && setup.ungranted == 0;
 
-    json!({
+    Ok(json!({
         "version": VERSION,
         "manifest": {
             "routes": manifest.route_count(),
@@ -446,6 +474,7 @@ fn assemble(
         "routes": routes,
         "unrouted": unrouted_entries,
         "unexercised_routes": unexercised,
+        "connection_setup": setup.value,
         "totals": {
             "requests": summary.requests,
             "routed": summary.routed,
@@ -457,9 +486,112 @@ fn assemble(
             "missing_distinct": missing_distinct,
             "unused": unused,
             "needs_transaction_control": needs_transaction_control,
+            "connection_setup": setup.statements,
+            "connection_setup_ungranted": setup.ungranted,
             "clean": clean,
         },
+    }))
+}
+
+/// The `connection_setup` section of the report: the statements psycopg runs as
+/// a connection is established, and which routes do not grant them (§6).
+///
+/// Every request opens its own connection (§6, "What the app must do"), so in
+/// production these statements run on every route that has a listener for that
+/// proxy, once per request — while in tests the connection is often reused and
+/// they run outside any request at all. They belong in a group attached to
+/// every route (`groups = ["connection"]`), so the report names the routes that
+/// are missing them rather than diffing them against one route.
+///
+/// A route with no grant on that proxy gets no listener and never runs them, so
+/// it is not counted either way.
+struct SetupSection {
+    /// The section itself.
+    value: Value,
+    /// How many distinct statements it holds.
+    statements: usize,
+    /// How many of them at least one route does not grant.
+    ungranted: usize,
+}
+
+/// Builds the `connection_setup` section.
+fn setup_section(
+    manifest: &Manifest,
+    observed: &[ObservedSetup],
+) -> Result<SetupSection, AuditError> {
+    let mut traces: BTreeMap<(ProxyName, String), SetupTrace> = BTreeMap::new();
+    for statement in observed {
+        let proxy = resolve_proxy(manifest, statement.proxy.as_deref())?;
+        let normalised = normalize(&statement.sql);
+        if normalised.is_empty() {
+            continue;
+        }
+        let trace = traces
+            .entry((proxy, normalised))
+            .or_insert_with(|| SetupTrace {
+                wire_sql: statement.sql.clone(),
+                ..SetupTrace::default()
+            });
+        trace.count += statement.count;
+    }
+
+    let mut ungranted_total = 0usize;
+    let mut statements = Vec::with_capacity(traces.len());
+    for ((proxy, sql), mut trace) in traces {
+        for index in 0..manifest.route_count() {
+            let (Some(route), true) = (
+                manifest.route(index),
+                manifest.effective_grants(index).contains_key(&proxy),
+            ) else {
+                continue;
+            };
+            let grant = grant_of(manifest, index, &proxy);
+            if Policy::of(grant.as_ref()).allow.check(&sql).is_allowed() {
+                trace.granted_in += 1;
+            } else {
+                trace.ungranted_in.push(route.name().to_string());
+            }
+        }
+        if !trace.ungranted_in.is_empty() {
+            ungranted_total += 1;
+        }
+        statements.push(json!({
+            "sql": sql,
+            "proxy": proxy.as_str(),
+            "count": trace.count,
+            "wire_sql": trace.wire_sql,
+            "ungranted_in": trace.ungranted_in,
+            "granted_in": trace.granted_in,
+        }));
+    }
+    statements.sort_by(|left, right| {
+        right["count"]
+            .as_u64()
+            .cmp(&left["count"].as_u64())
+            .then_with(|| left["sql"].as_str().cmp(&right["sql"].as_str()))
+    });
+
+    Ok(SetupSection {
+        statements: statements.len(),
+        value: json!({
+            "statements": statements,
+            "ungranted": ungranted_total,
+        }),
+        ungranted: ungranted_total,
     })
+}
+
+/// What one connection-setup statement did, and what the manifest says about it.
+#[derive(Default)]
+struct SetupTrace {
+    /// How many times it ran over the session.
+    count: u64,
+    /// One raw occurrence, for a human who wants to see the placeholders.
+    wire_sql: String,
+    /// The routes that have a listener for that proxy and do not grant it.
+    ungranted_in: Vec<String>,
+    /// How many routes that have a listener for that proxy do grant it.
+    granted_in: usize,
 }
 
 /// The `postgresql` proxies a route should be reported on: the ones it has
@@ -528,23 +660,35 @@ struct Policy {
     /// The granted statements, normalised, in manifest order and without
     /// duplicates: the candidates for `unused`.
     granted: Vec<String>,
+    /// Whether the grant allows transaction control. An `unrestricted = true`
+    /// grant does, by allowing everything; `PgGrant::transaction_control()` is
+    /// false for it, so the flag alone would say a route needs the flag it
+    /// already has.
+    transaction_control: bool,
 }
 
 impl Policy {
     /// Builds the policy of an effective grant (absent: a route with no grant
     /// for that proxy gets no listener, so nothing is allowed — §2.2).
     ///
-    /// D3a adds `unrestricted = true` to a route's own grant. Its `Allowlist`
-    /// allows everything, and its granted set is empty; when that lands, this
-    /// is the one place to read it, with
-    /// `if grant.is_unrestricted() { return Policy { allow: Allowlist::unrestricted(), granted: Vec::new() } }`.
+    /// `unrestricted = true` (§6, D3a) is the other extreme: its allowlist
+    /// allows everything, so nothing can be missing there and its (empty)
+    /// granted set has nothing to call unused.
     fn of(grant: Option<&PgGrant>) -> Self {
         let Some(grant) = grant else {
             return Self {
                 allow: Allowlist::default(),
                 granted: Vec::new(),
+                transaction_control: false,
             };
         };
+        if grant.is_unrestricted() {
+            return Self {
+                allow: Allowlist::unrestricted(),
+                granted: Vec::new(),
+                transaction_control: true,
+            };
+        }
         let mut granted: Vec<String> = Vec::with_capacity(grant.queries().len());
         for query in grant.queries() {
             let query = normalize(query);
@@ -555,6 +699,7 @@ impl Policy {
         Self {
             allow: Allowlist::new(grant.queries(), grant.transaction_control()),
             granted,
+            transaction_control: grant.transaction_control(),
         }
     }
 }
@@ -730,12 +875,30 @@ struct ObservedStatement {
     sql: String,
 }
 
+/// A statement psycopg itself ran: what goes on the wire as a connection is
+/// established, before (or without) any Django cursor of a request.
+struct ObservedSetup {
+    /// The proxy it belongs to, when the plugin could tell.
+    proxy: Option<String>,
+    /// The wire SQL.
+    sql: String,
+    /// How many times it ran. Defaults to one.
+    count: u64,
+}
+
+/// Everything one pytest session recorded: the requests, and the statements
+/// psycopg ran on its own to set a connection up.
+struct Observations {
+    requests: Vec<ObservedRequest>,
+    connection_setup: Vec<ObservedSetup>,
+}
+
 /// Reads the observations document the plugin writes.
 ///
 /// Unknown keys are ignored, so a plugin and an extension from different
 /// versions still work together; the keys that carry meaning must be there and
 /// must have the documented type.
-fn parse_observations(source: &str) -> Result<Vec<ObservedRequest>, AuditError> {
+fn parse_observations(source: &str) -> Result<Observations, AuditError> {
     let value: Value = serde_json::from_str(source)
         .map_err(|error| AuditError::Observations(format!("not valid JSON: {error}")))?;
     let object = value
@@ -759,7 +922,44 @@ fn parse_observations(source: &str) -> Result<Vec<ObservedRequest>, AuditError> 
     for (index, request) in requests.iter().enumerate() {
         out.push(parse_request(request, index)?);
     }
-    Ok(out)
+
+    let setup = match object.get("connection_setup") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(setup) => {
+            let list = setup
+                .as_array()
+                .ok_or_else(|| bad("connection_setup", "expected an array"))?;
+            let mut out = Vec::with_capacity(list.len());
+            for (index, statement) in list.iter().enumerate() {
+                out.push(parse_setup(statement, index)?);
+            }
+            out
+        }
+    };
+
+    Ok(Observations {
+        requests: out,
+        connection_setup: setup,
+    })
+}
+
+/// Reads one `connection_setup[]` entry.
+fn parse_setup(value: &Value, index: usize) -> Result<ObservedSetup, AuditError> {
+    let at = format!("connection_setup[{index}]");
+    let object = value
+        .as_object()
+        .ok_or_else(|| bad(&at, "expected an object"))?;
+    let count = match object.get("count") {
+        None | Some(Value::Null) => 1,
+        Some(count) => count
+            .as_u64()
+            .ok_or_else(|| bad(&at, "count: expected a non-negative integer"))?,
+    };
+    Ok(ObservedSetup {
+        proxy: optional_string(object, "proxy", &at)?,
+        sql: required_string(object, "sql", &at)?,
+        count,
+    })
 }
 
 /// Reads one `requests[]` entry.
@@ -1016,7 +1216,7 @@ mod tests {
         let missing = &proxy(&report, "notes")["missing"][0];
         assert_eq!(
             missing["sql"],
-            r#"DELETE FROM "notes" WHERE "notes"."id" = $1"#
+            r#"DELETE FROM "notes" WHERE "notes"."id" = $?"#
         );
         assert_eq!(missing["count"], 1);
         assert_eq!(
@@ -1049,7 +1249,7 @@ mod tests {
         );
         assert_eq!(
             missing_sql(&report, "notes"),
-            ["DELETE FROM \"notes\" WHERE id = $1"]
+            ["DELETE FROM \"notes\" WHERE id = $?"]
         );
         let normalised = missing_sql(&report, "notes")[0].clone();
         let repaired = SIMPLE.replace(
@@ -1094,7 +1294,7 @@ mod tests {
         // Sorted by how often they ran, so the biggest hole comes first.
         assert_eq!(
             missing_sql(&report, "notes"),
-            [r#"DELETE FROM "notes" WHERE id = $1"#, "SELECT 1"]
+            [r#"DELETE FROM "notes" WHERE id = $?"#, "SELECT 1"]
         );
         let counts: Vec<u64> = proxy(&report, "notes")["missing"]
             .as_array()
@@ -1142,7 +1342,7 @@ mod tests {
         assert_eq!(proxy(&report, "notes")["observed"], 0);
         assert_eq!(
             proxy(&report, "notes")["unused"],
-            json!([r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $1 LIMIT 21"#])
+            json!([r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $? LIMIT 21"#])
         );
     }
 
@@ -1533,6 +1733,26 @@ mod tests {
                 r#"{"version": 1, "requests": [{"method": "GET", "path_info": "/", "statements": [{}]}]}"#,
                 "statements[0]: missing `sql`",
             ),
+            (
+                r#"{"version": 1, "requests": [], "connection_setup": {}}"#,
+                "connection_setup: expected an array",
+            ),
+            (
+                r#"{"version": 1, "requests": [], "connection_setup": [1]}"#,
+                "connection_setup[0]: expected an object",
+            ),
+            (
+                r#"{"version": 1, "requests": [], "connection_setup": [{}]}"#,
+                "connection_setup[0]: missing `sql`",
+            ),
+            (
+                r#"{"version": 1, "requests": [], "connection_setup": [{"sql": "SELECT 1", "count": "3"}]}"#,
+                "connection_setup[0]: count: expected a non-negative integer",
+            ),
+            (
+                r#"{"version": 1, "requests": [], "connection_setup": [{"sql": 1}]}"#,
+                "connection_setup[0]: sql: expected a string",
+            ),
         ];
         for (source, expected) in cases {
             let error = audit(SIMPLE, source, None).expect_err("invalid observations");
@@ -1744,8 +1964,290 @@ mod tests {
         assert_eq!(
             missing_sql(&report, "notes"),
             [
-                r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $1 LIMIT 21; DROP TABLE "notes""#
+                r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $? LIMIT 21; DROP TABLE "notes""#
             ]
         );
+    }
+
+    /// A one-route manifest whose grant holds exactly `queries`, as TOML basic
+    /// strings (the escaping is JSON's).
+    fn manifest_with_queries(queries: &[String]) -> String {
+        let mut out = String::from(
+            "version = 1\n\
+             [proxy.db]\n\
+             protocol = \"postgresql\"\n\
+             input = { url = \"DATABASE_URL\" }\n\
+             [[route]]\n\
+             name = \"notes\"\n\
+             path = ['/notes/.*']\n\
+             methods = [\"GET\", \"POST\"]\n\
+             [route.db]\n\
+             queries = [\n",
+        );
+        for query in queries {
+            out.push_str("  ");
+            out.push_str(&serde_json::to_string(query).expect("a string"));
+            out.push_str(",\n");
+        }
+        out.push_str("]\n");
+        out
+    }
+
+    /// One observed statement whose SQL is escaped for the JSON document, for a
+    /// test that would rather not escape it by hand.
+    fn json_statement(sql: &str) -> String {
+        format!(
+            r#"{{"alias": "default", "proxy": "db", "sql": {}}}"#,
+            serde_json::to_string(sql).expect("a string")
+        )
+    }
+
+    #[test]
+    fn a_list_of_placeholders_after_in_is_one_grant_of_any_length() {
+        // D3a: `IN ($1)`, `IN ($1, $2)`, `IN ($1, $2, $3)`… are one shape, so a
+        // prefix or a `prefetch_related` of ten objects needs no grant of its
+        // own — which is exactly the statement an `__in` lookup produces.
+        let one = r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."id" IN ($1)"#;
+        let three = r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."id" IN ($1, $2, $3)"#;
+        let report = run(
+            &manifest_with_queries(&[one.to_string()]),
+            &document(&format!(
+                "{}, {}",
+                request("GET", "/notes/", &json_statement(one)),
+                request("GET", "/notes/", &json_statement(three)),
+            )),
+        );
+        assert_eq!(
+            report["totals"]["missing"], 0,
+            "one grant covers both list lengths"
+        );
+        assert_eq!(report["totals"]["unused"], 0, "and the grant was used");
+        assert_eq!(report["totals"]["statements"], 2);
+    }
+
+    #[test]
+    fn a_run_of_values_rows_is_one_grant_and_a_single_row_is_another() {
+        // D3a again, for `bulk_create`: the run of identical rows collapses, so
+        // one grant fits three rows, thirty rows, or none of them twice. A
+        // single row is left alone on purpose, and is therefore a shape of its
+        // own — one grant never covers both.
+        let three = r#"INSERT INTO "notes" ("owner_id", "body") VALUES ($1, $2), ($3, $4), ($5, $6) RETURNING "notes"."id""#;
+        let one =
+            r#"INSERT INTO "notes" ("owner_id", "body") VALUES ($1, $2) RETURNING "notes"."id""#;
+
+        let bare = run(
+            &manifest_with_queries(&[]),
+            &document(&request("POST", "/notes/", &json_statement(three))),
+        );
+        let shape = missing_sql(&bare, "notes")[0].clone();
+        assert!(
+            shape.contains(", ..."),
+            "the run of rows collapses: {shape}"
+        );
+
+        let manifest = manifest_with_queries(std::slice::from_ref(&shape));
+        let many = run(
+            &manifest,
+            &document(&request("POST", "/notes/", &json_statement(three))),
+        );
+        assert_eq!(
+            many["totals"]["missing"], 0,
+            "one grant, any number of rows"
+        );
+
+        let single = run(
+            &manifest,
+            &document(&request("POST", "/notes/", &json_statement(one))),
+        );
+        assert_eq!(missing_sql(&single, "notes"), [normalize_sql(one)]);
+        assert_ne!(normalize_sql(one), shape, "the two shapes stay distinct");
+
+        // ... and granting both shapes makes both requests clean: the report is
+        // what tells a human there are two of them.
+        let both = run(
+            &manifest_with_queries(&[shape, normalize_sql(one)]),
+            &document(&format!(
+                "{}, {}",
+                request("POST", "/notes/", &json_statement(one)),
+                request("POST", "/notes/", &json_statement(three)),
+            )),
+        );
+        assert_eq!(both["totals"]["missing"], 0);
+        assert_eq!(both["totals"]["unused"], 0, "each grant matched its shape");
+    }
+
+    /// A manifest with a group attached to one route, one route that grants
+    /// everything, one that grants something else, and one with no listener.
+    const SETUP: &str = r#"
+        version = 1
+
+        [proxy.db]
+        protocol = "postgresql"
+        input = { url = "DATABASE_URL" }
+
+        [group.connection.db]
+        queries = ["SET application_name = 'app'"]
+
+        [[route]]
+        name = "notes"
+        path = ['/notes/.*']
+        groups = ["connection"]
+
+        [[route]]
+        name = "checkout"
+        path = ['/checkout/']
+        [route.db]
+        unrestricted = true
+
+        [[route]]
+        name = "about"
+        path = ['/about/']
+        [route.db]
+        queries = ['SELECT "cms_page"."body" FROM "cms_page" LIMIT 21']
+
+        [[route]]
+        name = "static"
+        path = ['/static/.*']
+    "#;
+
+    /// One `connection_setup` entry.
+    fn setup(sql: &str, count: u64) -> String {
+        format!(
+            r#"{{"alias": "default", "proxy": "db", "sql": {}, "count": {count}}}"#,
+            serde_json::to_string(sql).expect("a string")
+        )
+    }
+
+    /// A document with only connection-setup statements.
+    fn setup_document(statements: &str) -> String {
+        format!(r#"{{"version": 1, "requests": [], "connection_setup": [{statements}]}}"#)
+    }
+
+    #[test]
+    fn connection_setup_names_the_routes_that_do_not_grant_it() {
+        // No request at all: these statements are not a route's, they run when a
+        // connection is established — which, under blastit, every request does
+        // afresh (§6, "What the app must do").
+        let report = run(
+            SETUP,
+            &setup_document(&setup("SET application_name = 'app'", 2)),
+        );
+        let entry = &report["connection_setup"]["statements"][0];
+        assert_eq!(entry["sql"], "SET application_name = 'app'");
+        assert_eq!(entry["wire_sql"], "SET application_name = 'app'");
+        assert_eq!(entry["proxy"], "db");
+        assert_eq!(entry["count"], 2);
+        assert_eq!(
+            entry["ungranted_in"],
+            json!(["about"]),
+            "the global group covers notes, `unrestricted` covers checkout, \
+             and the route with no grant has no listener to run it on"
+        );
+        assert_eq!(entry["granted_in"], 2);
+        assert_eq!(report["connection_setup"]["ungranted"], 1);
+        assert_eq!(report["totals"]["connection_setup"], 1);
+        assert_eq!(report["totals"]["connection_setup_ungranted"], 1);
+        assert_eq!(report["totals"]["clean"], false);
+    }
+
+    #[test]
+    fn connection_setup_granted_everywhere_is_clean() {
+        let report = run(
+            &manifest_with_queries(&["SET application_name = 'app'".to_string()]),
+            &setup_document(&setup("SET application_name = 'app'", 1)),
+        );
+        assert_eq!(
+            report["connection_setup"],
+            json!({"statements": [{
+                "sql": "SET application_name = 'app'",
+                "proxy": "db",
+                "count": 1,
+                "wire_sql": "SET application_name = 'app'",
+                "ungranted_in": [],
+                "granted_in": 1,
+            }], "ungranted": 0})
+        );
+        assert_eq!(report["totals"]["clean"], true);
+        assert_eq!(report["totals"]["connection_setup_ungranted"], 0);
+    }
+
+    #[test]
+    fn a_route_with_no_listener_is_not_counted_in_connection_setup() {
+        // `static` has no `[route.db]` grant, so it gets no listener at all: it
+        // can never run one of these, and naming it would be noise.
+        let report = run(SETUP, &setup_document(&setup("SELECT 1", 1)));
+        let entry = &report["connection_setup"]["statements"][0];
+        assert_eq!(entry["ungranted_in"], json!(["notes", "about"]));
+        assert_eq!(
+            entry["granted_in"], 1,
+            "only the unrestricted route allows it"
+        );
+    }
+
+    #[test]
+    fn connection_setup_is_aggregated_normalised_and_proxied() {
+        // Two aliases, the same statement twice, written differently: one entry,
+        // because that is what a grant holds. No proxy named, one declared.
+        let report = run(
+            SETUP,
+            &setup_document(&format!(
+                "{}, {}, {}",
+                setup("SET application_name = 'app'", 2),
+                r#"{"alias": "replica", "sql": "SET   application_name  =  'app' ;", "count": 3}"#,
+                setup("SELECT 1", 1),
+            )),
+        );
+        let statements = report["connection_setup"]["statements"]
+            .as_array()
+            .expect("a list");
+        assert_eq!(statements.len(), 2);
+        let app = statements
+            .iter()
+            .find(|entry| entry["sql"] == "SET application_name = 'app'")
+            .expect("the SET is there");
+        assert_eq!(app["count"], 5, "2 plus a reformatted 3");
+        assert_eq!(app["proxy"], "db", "inferred from the only proxy");
+        assert_eq!(app["wire_sql"], "SET application_name = 'app'");
+    }
+
+    #[test]
+    fn connection_setup_can_be_absent_and_is_never_present_twice() {
+        let report = run(SETUP, &document(""));
+        assert_eq!(
+            report["connection_setup"],
+            json!({"statements": [], "ungranted": 0})
+        );
+        assert_eq!(report["totals"]["connection_setup"], 0);
+        assert_eq!(report["totals"]["clean"], true);
+    }
+
+    #[test]
+    fn an_unrestricted_route_has_nothing_to_fill_in() {
+        // `unrestricted = true` (§6, D3a) allows every statement, transaction
+        // control included, so nothing can be missing there — and the report
+        // must not ask for a `transaction_control` flag the route already has.
+        let report = run(
+            SETUP,
+            &document(&request(
+                "POST",
+                "/checkout/",
+                &format!(
+                    "{}, {}",
+                    json_statement(r#"DELETE FROM "orders" WHERE "orders"."id" = $1"#),
+                    json_statement("SAVEPOINT s1"),
+                ),
+            )),
+        );
+        assert_eq!(missing_sql(&report, "checkout"), Vec::<String>::new());
+        assert_eq!(proxy(&report, "checkout")["unused"], json!([]));
+        assert_eq!(
+            proxy(&report, "checkout")["transaction_control"],
+            json!({"observed": true, "granted": true, "needed": false})
+        );
+        assert_eq!(
+            route(&report, "checkout")["needs_transaction_control"],
+            false
+        );
+        assert_eq!(report["totals"]["missing"], 0);
     }
 }

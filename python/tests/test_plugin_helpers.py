@@ -112,6 +112,13 @@ class TestManifestProxies:
 class TestStatementCapture:
     """The wrapper that sits on a Django connection, with no Django in sight."""
 
+    @pytest.fixture(autouse=True)
+    def session(self, monkeypatch: pytest.MonkeyPatch) -> _FakeSession:
+        """A stand-in session: the capture only records while one is active."""
+        fake = _FakeSession()
+        monkeypatch.setattr(plugin, "_SESSION", fake)
+        return fake
+
     def test_a_wrapper_is_installed_once(self) -> None:
         connection = _FakeConnection()
         plugin._wrap_connection(connection)
@@ -157,6 +164,52 @@ class TestStatementCapture:
         assert len(first.statements) == 1
         assert len(second.statements) == 1
 
+    def test_the_outermost_layer_records_each_statement_once(self) -> None:
+        """psycopg's layer sees the same statement as Django's: only one line."""
+        connection = _FakeConnection()
+        plugin._wrap_connection(connection)
+        seen: list[str] = []
+
+        def executor(sql: str, params: Any, many: bool, context: Any) -> Any:
+            # What psycopg's own wrapper does with the very same statement, from
+            # inside Django's.
+            plugin._capture("default", sql, params)
+            seen.append(sql)
+            return (sql, params)
+
+        wrapped = functools.partial(connection.execute_wrappers[0], executor)
+        with _request() as context:
+            wrapped("SELECT %s", [1], False, {})
+        assert seen == ["SELECT %s"], "the statement was executed"
+        assert context.statements == [("default", "SELECT $1")], "and recorded once"
+
+    def test_a_query_that_cannot_be_rendered_is_skipped(self) -> None:
+        assert plugin._sql_text("SELECT 1", None) == "SELECT 1"
+        assert plugin._sql_text(object(), None) is None
+        assert plugin._sql_text(None, None) is None
+
+    def test_a_statement_during_a_connect_is_connection_setup(self, session: _FakeSession) -> None:
+        """It is the connection's SQL, not a route's, wherever it runs."""
+        connection = _FakeConnection()
+        plugin._wrap_connection(connection)
+        token = plugin._CONNECTING.set("default")
+        try:
+            _execute(connection, "SET application_name = 'x'", None)
+        finally:
+            plugin._CONNECTING.reset(token)
+        assert session.setup == [("default", "SET application_name = 'x'")]
+
+    def test_the_connection_that_creates_the_test_database_is_ignored(self, session: _FakeSession) -> None:
+        """Django's `__no_db__` connection is test machinery, not the app's."""
+        connection = _FakeConnection()
+        plugin._wrap_connection(connection)
+        token = plugin._CONNECTING.set(plugin.NO_DB_ALIAS)
+        try:
+            _execute(connection, "SET application_name = 'x'", None)
+        finally:
+            plugin._CONNECTING.reset(token)
+        assert session.setup == []
+
 
 class _FakeConnection:
     """The two attributes `_wrap_connection` touches on a Django connection."""
@@ -164,6 +217,16 @@ class _FakeConnection:
     def __init__(self, alias: str = "default") -> None:
         self.alias = alias
         self.execute_wrappers: list[Any] = []
+
+
+class _FakeSession:
+    """The one thing the capture asks of a session."""
+
+    def __init__(self) -> None:
+        self.setup: list[tuple[str | None, str]] = []
+
+    def record_connection_setup(self, alias: str | None, sql: str) -> None:
+        self.setup.append((alias, sql))
 
 
 @contextlib.contextmanager

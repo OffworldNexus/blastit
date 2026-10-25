@@ -5,15 +5,21 @@
 `crates/blastit-py/src/audit.rs`):
 
 * `test_plugin_helpers.py` — the pure parts, no Django, no database: the wire
-  form of a query, `--blastit-proxy` parsing, the observations document.
+  form of a query, `--blastit-proxy` parsing, the observations document, and the
+  Django-level capture (with a fake connection and a fake session).
+* `test_wire_capture.py` — what psycopg sends by itself, over a real connection
+  and no Django at all: `Connection.execute`, `Cursor.execute`/`executemany`/
+  `stream`, `ServerCursor`'s `DECLARE`, `TypeInfo.fetch`, and the statement
+  deduplication between the two capture layers.
 * `test_pytest_plugin.py` — real `pytest` sessions in a copy of `project/`, a
   tiny Django app with an unfinished `blastit.toml` next to it. That is the only
   honest way to test a pytest plugin: the options, the hooks, the terminal
   summary, the exit code and the xdist merge are all things only a session has.
-* `project/` — the Django project those sessions run: five views, one model,
-  and a manifest that is missing a grant, needs `transaction_control`, has a
-  stale grant, has a route nothing exercises and has no route at all for one
-  path a test asks for.
+* `project/` — the Django project those sessions run: ten views, one model, a
+  `connection_created` receiver that runs a `SET`, and a manifest that is missing
+  grants, needs `transaction_control`, has stale grants, has a route nothing
+  exercises, has no route at all for one path a test asks for, and grants none of
+  the statements psycopg runs as a connection is established.
 
 They need two things `cargo test` does not give them: the compiled extension
 (`blastit._blastit`) plus the plugin entry point, installed in a virtualenv, and
