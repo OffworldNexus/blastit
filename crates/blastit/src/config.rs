@@ -172,11 +172,10 @@ pub struct Config {
     /// `BLASTIT_FRAME_MAX`: the frame limit of `http.chan`, `view.chan` and
     /// `ctl.chan` (§3.1).
     pub frame_max: usize,
-    /// `BLASTIT_BACKLOG`: the TCP listen backlog. Not in §8.2, but §3 names the
-    /// variable.
+    /// `BLASTIT_BACKLOG`: the TCP listen backlog (§8.2).
     pub backlog: i32,
-    /// `BLASTIT_MAX_CONNECTIONS`: client connections http serves at once. Not
-    /// in §8.2 either; http's own default is 1024, and the front end's
+    /// `BLASTIT_MAX_CONNECTIONS`: client connections http serves at once
+    /// (§8.2). http's own default is 1024, and the front end's
     /// `RLIMIT_NOFILE` is sized from it.
     pub max_connections: usize,
     /// The output variable names each proxy produced, by proxy name (§5.1).

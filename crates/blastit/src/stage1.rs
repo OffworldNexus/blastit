@@ -10,7 +10,8 @@
 //! bind 0.0.0.0:$PORT
 //! fork http (base+1) and scheduler (base+2) — both before CPython exists
 //! initialise CPython, import BLASTIT_APP, preload, warm up, close DB handles
-//! gc.collect() · gc.freeze()
+//! gc.collect() · immortalize the heap (§9.2 #7) · gc.freeze()
+//! boot: what the preload cost and the view cap memory buys (§8)
 //! ready
 //! supervise, holding the GIL
 //! ```
@@ -27,7 +28,11 @@ use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
 use blastit_frame::Limits;
 use blastit_http::HttpConfig;
 use blastit_manifest::{Manifest, RoutingTable, UidLayout};
-use blastit_scheduler::{SPAWN_BACKOFF, SchedulerConfig, routes_from_manifest};
+use blastit_scheduler::{
+    MEMORY_CHECK_INTERVAL, MemoryProbe, SPAWN_BACKOFF, SchedulerConfig, derived_view_cap,
+    routes_from_manifest,
+};
+use blastit_sys::mem;
 use blastit_sys::{
     Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, fork,
     harden_child, pipe, restore_signal_mask_in_child, set_dumpable, socketpair_stream,
@@ -37,6 +42,7 @@ use pyo3::prelude::*;
 
 use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
+use crate::immortal::Stats;
 use crate::logs::{Emitter, fail, output_event};
 use crate::roles::{HttpFds, SchedulerFds};
 use crate::supervise::{ComponentPipes, Parts, Supervisor};
@@ -68,17 +74,28 @@ except Exception:
     pass
 ";
 
-/// §4: close database handles before the fork, then make the heap stable.
+/// §4: close database handles before the fork.
 ///
 /// A connection opened at import time would be inherited — uselessly and
-/// dangerously — by every view; `gc.collect()` before `gc.freeze()` is what
-/// keeps the frozen set small.
-const CLOSE_AND_FREEZE: &std::ffi::CStr = c"
+/// dangerously — by every view. `gc.collect()` comes straight after, so the set
+/// `gc.freeze()` freezes a moment later is as small as it can be, and so the
+/// immortalisation pass walks a heap with no garbage in it.
+const CLOSE_AND_COLLECT: &std::ffi::CStr = c"
 import gc, sys
 if 'django' in sys.modules:
     from django.db import connections
     connections.close_all()
 gc.collect()
+";
+
+/// §9.2 #7: freeze the heap, once the part of it that can be immortalised has
+/// been.
+///
+/// `gc.freeze()` puts the collector's objects out of its reach. It runs *after*
+/// the immortalisation pass, because an immortal object is never freed and its
+/// address can therefore never be reused by a later allocation.
+const FREEZE: &std::ffi::CStr = c"
+import gc
 gc.freeze()
 ";
 
@@ -104,6 +121,11 @@ pub fn run(options: Options) -> ! {
         Ok(limits) => limits,
         Err(err) => fail(&emitter, &err.to_string()),
     };
+    // §8 Sizing: the machine's memory decides how many view processes fit.
+    // `total` is a constant, so it can be read before the fork and handed to
+    // the scheduler; `used` is only meaningful after the app is preloaded, so
+    // that half is read in `load` (and by the scheduler itself, on its timer).
+    let memory = read_memory(&emitter);
     let layout = UidLayout::new(config.uid_base);
     let routes = routes_from_manifest(&manifest, &layout);
     // §7.3: a view may keep `AF_INET`/`AF_INET6` only when its route says so.
@@ -144,7 +166,7 @@ pub fn run(options: Options) -> ! {
     let mask = signals.previous_mask();
 
     let http_cfg = http_config(&config, limits);
-    let sched_cfg = scheduler_config(&config, limits);
+    let sched_cfg = scheduler_config(&config, limits, memory);
 
     let http_pid = fork_http(
         &emitter,
@@ -307,7 +329,18 @@ fn http_config(config: &Config, limits: Limits) -> HttpConfig {
 }
 
 /// The scheduler's configuration (§8.2).
-fn scheduler_config(config: &Config, limits: Limits) -> SchedulerConfig {
+///
+/// `memory` is the reading taken before the fork: §8 Sizing's watermark is a
+/// percentage of `total`, which does not change, and the *usage* is what the
+/// scheduler watches for itself on its timer (§9.2 #8: only aggregates are
+/// reliable under gVisor).
+fn scheduler_config(
+    config: &Config,
+    limits: Limits,
+    memory: Option<mem::Sample>,
+) -> SchedulerConfig {
+    let watermark = memory
+        .map(|sample| (sample.total() as f64 * config.mem_high_watermark_percent / 100.0) as u64);
     SchedulerConfig {
         max_workers: config.max_workers,
         view_max_workers: config.view_max_workers,
@@ -323,6 +356,42 @@ fn scheduler_config(config: &Config, limits: Limits) -> SchedulerConfig {
         script_name: config.script_name.clone(),
         frame_limits: limits,
         spawn_backoff: SPAWN_BACKOFF,
+        memory_usage: memory.map(|_| MemoryProbe::new(current_usage)),
+        mem_high_watermark_bytes: watermark,
+        memory_check_interval: MEMORY_CHECK_INTERVAL,
+        mem_total_bytes: memory.map(|sample| sample.total()),
+        view_mem_estimate: config.view_mem_estimate,
+    }
+}
+
+/// The machine's aggregate memory usage in bytes, or `None` when it cannot be
+/// read (§9.2 #8).
+fn current_usage() -> Option<u64> {
+    mem::Reader::new("/")
+        .sample()
+        .ok()
+        .map(|sample| sample.used())
+}
+
+/// The machine's memory, or a warning that §8 Sizing could not read it.
+///
+/// Unreadable memory leaves the view cap alone rather than guessing (§8), so
+/// this is reported once and the caller carries on with `None`.
+fn read_memory(emitter: &Emitter) -> Option<mem::Sample> {
+    match mem::Reader::new("/").sample() {
+        Ok(sample) => Some(sample),
+        Err(err) => {
+            emitter.emit(
+                &output_event(
+                    Component::Init,
+                    None,
+                    Stream::Stderr,
+                    &format!("memory: {err}: no view process cap is derived from memory (§8)"),
+                )
+                .with_level(Level::Warn),
+            );
+            None
+        }
     }
 }
 
@@ -427,10 +496,60 @@ fn load(py: Python<'_>, config: &Config, emitter: &Emitter) -> Py<PyAny> {
             python_fail(py, emitter, &format!("BLASTIT_WARMUP ({warmup})"), &err);
         }
     }
-    if let Err(err) = py.run(CLOSE_AND_FREEZE, None, None) {
-        python_fail(py, emitter, "close_all/gc.freeze", &err);
+    if let Err(err) = py.run(CLOSE_AND_COLLECT, None, None) {
+        python_fail(py, emitter, "close_all/gc.collect", &err);
     }
+    // §9.2 #7, between `gc.collect()` and `gc.freeze()`: nothing left in the
+    // collected heap is garbage, and every object a request could touch stops
+    // counting references.
+    let stats = immortalize(py, emitter);
+    if let Err(err) = py.run(FREEZE, None, None) {
+        python_fail(py, emitter, "gc.freeze", &err);
+    }
+    emit_preload(emitter, config, stats);
     app
+}
+
+/// §9.2 #7: makes the preloaded heap immortal.
+///
+/// Both failures are fatal. An interpreter blastit does not know cannot be
+/// immortalised at all, and a heap that was not immortalised would silently
+/// cost every view process the copy of it that §9.2 #6 describes — the
+/// difference between 18 MiB and 90 MiB per child.
+fn immortalize(py: Python<'_>, emitter: &Emitter) -> Stats {
+    if let Err(problem) = crate::immortal::check(py) {
+        fail(emitter, &problem);
+    }
+    match crate::immortal::immortalize(py) {
+        Ok(stats) => stats,
+        Err(err) => python_fail(py, emitter, "heap immortalisation", &err),
+    }
+}
+
+/// §8 Sizing and §9.2 #7: what the preload cost, and the view process cap the
+/// memory that is left buys.
+///
+/// This runs after the app was imported and immortalised, so `mem_used` is the
+/// number §8 asks for ("usage after preload") and the derived cap is the one
+/// the scheduler measures for itself, from the same function.
+fn emit_preload(emitter: &Emitter, config: &Config, stats: Stats) {
+    let mut lifecycle = Lifecycle::default()
+        .with_stage("preload")
+        .with_immortalized(stats.objects)
+        .with_immortalize_ms(stats.elapsed.as_secs_f64() * 1000.0);
+    // §8: memory that cannot be read leaves the cap uncapped, and
+    // `read_memory` has already said so at `warn`.
+    if let Some(sample) = read_memory(emitter) {
+        lifecycle = lifecycle
+            .with_mem_total(sample.total())
+            .with_mem_used(sample.used())
+            .with_max_view_processes(derived_view_cap(
+                sample.total(),
+                sample.used(),
+                config.view_mem_estimate,
+            ));
+    }
+    emitter.emit(&Event::now(Component::Init, EventKind::Boot(lifecycle)));
 }
 
 /// `module:attribute` as a Python object.

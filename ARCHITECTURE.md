@@ -877,12 +877,26 @@ writes to gets copied (§9.2). So:
   startup, which removes the first-hit fork latency (12–60 ms on DO).
 * `BLASTIT_MAX_VIEW_PROCESSES` caps the number of live view processes. When a
   new one is needed, the least-recently-used idle one is retired. The default
-  is derived at startup as `(MemTotal − usage after preload − reserve) /
-  BLASTIT_VIEW_MEM_ESTIMATE`. On DO, `MemTotal` *is* the instance size and
-  the cgroup v1 `memory.usage_in_bytes` is accurate.
-* The scheduler also watches aggregate usage, which is the only reliable
-  number (`VmRSS` doesn't move under gVisor). Above
-  `BLASTIT_MEM_HIGH_WATERMARK`, it retires idle view processes oldest-first.
+  is derived once the app is preloaded, as
+  `max(1, (total − usage after preload − reserve) / BLASTIT_VIEW_MEM_ESTIMATE)`:
+  at least one view process, because a cap of zero would refuse every request.
+  The reserve is `max(64 MiB, 10 % of total)`, kept for the kernel, the
+  platform's agents and the next fork. There is no cap when memory cannot be
+  read, and that is logged once (`boot`, at `warn`).
+* `total` is `min(MemTotal, cgroup limit)` and `used` is the cgroup's own
+  accounting: on DO, `MemTotal` *is* the instance size and the cgroup v1
+  `memory.usage_in_bytes` is accurate (§9.2 #8). The sources, in order, are
+  `/proc/meminfo` (`MemTotal`, with `MemTotal − MemAvailable` as the fallback
+  for `used`), cgroup v2 `/sys/fs/cgroup/memory.max` and `memory.current`, then
+  cgroup v1 `/sys/fs/cgroup/memory/memory.limit_in_bytes` and
+  `memory/memory.usage_in_bytes`. `max` — or v1's page-rounded `LONG_MAX` —
+  means "no limit". The `boot` event reports `mem_total`, `mem_used` and the
+  `max_view_processes` they buy, so the sizing decision is in the log.
+* The scheduler also watches aggregate usage on its own, which is the only
+  reliable number (`VmRSS` doesn't move under gVisor). Above
+  `BLASTIT_MEM_HIGH_WATERMARK` (a percentage of `total`) it checks every 2
+  seconds and retires **one** idle view process per check, oldest-first; a view
+  with a request in flight is never retired for memory.
 
 ### 8.1 Logs
 
@@ -936,6 +950,12 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 | `app.output` | init | info (stdout) / warn (stderr) | `stream`, `line`, `part`, `parts` | the app or a library printed something |
 | `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, the rendered output variable *names* per proxy (never values), the warning text (for example an unattached group) | lifecycle of the whole server |
 
+The `boot` event of the **`preload`** stage is the one that says what the app
+cost before the fork: `immortalized` and `immortalize_ms` for §9.2 #7's pass
+over the heap, and the memory the view process cap was derived from —
+`mem_total`, `mem_used` and `max_view_processes` (§8 Sizing). Byte counts are
+integers.
+
 **Data that is never logged:** query strings, header values, request and
 response bodies, and SQL parameter values. They routinely carry personal data
 and secrets. `path` is the routed `PATH_INFO`.
@@ -971,6 +991,8 @@ with `request` events.
 | `BLASTIT_HEADER_TIMEOUT` / `BLASTIT_KEEPALIVE_TIMEOUT` | `10s` / `75s` | HTTP timeouts (keep-alive above the LB's) |
 | `BLASTIT_TRUST_FORWARDED` | `1` | trust `X-Forwarded-*` from the LB |
 | `BLASTIT_HEALTH_PATH` | `/_blastit/health` | answered by the scheduler |
+| `BLASTIT_BACKLOG` | `1024` | TCP listen backlog init binds with (§3) |
+| `BLASTIT_MAX_CONNECTIONS` | `1024` | client connections http serves at once; sizes http's `RLIMIT_NOFILE` |
 | `BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` | `= MAX_WORKERS` | upstream connection cap of proxy `<NAME>` (upper-cased) |
 | `BLASTIT_ENV_STRIP` | — | extra variables hidden from the app |
 | `BLASTIT_SECCOMP` | `1` | the §7.3 filters (verified on DO) |

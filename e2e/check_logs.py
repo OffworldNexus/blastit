@@ -45,6 +45,25 @@ def main():
     check({"boot", "ready"} <= kinds, "boot and ready events")
     check(any(e.get("event") == "boot" and e.get("seccomp") is True for e in events),
           "the boot event says the seccomp filters are on")
+
+    # §9.2 #7 and §8 Sizing: the preload `boot` event reports the
+    # immortalisation and the view process cap the memory bought.
+    preload = [e for e in events if e.get("event") == "boot" and "immortalized" in e]
+    check(len(preload) == 1, f"one preload boot event ({len(preload)})")
+    if preload:
+        immortalized = preload[0].get("immortalized")
+        check(isinstance(immortalized, int) and immortalized > 0,
+              f"the preloaded heap was immortalised ({immortalized} objects)")
+        check(isinstance(preload[0].get("immortalize_ms"), (int, float)),
+              f"the pass was timed ({preload[0].get('immortalize_ms')}ms)")
+        cap = preload[0].get("max_view_processes")
+        check(isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1,
+              f"the view process cap was derived from memory ({cap})")
+        check(isinstance(preload[0].get("mem_total"), int) and preload[0]["mem_total"] > 0,
+              f"mem_total is a byte count ({preload[0].get('mem_total')})")
+        check(isinstance(preload[0].get("mem_used"), int),
+              f"mem_used is a byte count ({preload[0].get('mem_used')})")
+
     denied = [e for e in events if e.get("event") == "sql.denied"]
     sqls = [e.get("sql", "") for e in denied]
     check(any(e.get("route") == "notes" and '"auth_user"."password"' in e.get("sql", "") for e in denied),
