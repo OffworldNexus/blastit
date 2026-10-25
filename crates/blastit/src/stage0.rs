@@ -65,11 +65,17 @@ fn dbproxy_limits(config: &Config) -> Rlimits {
 /// Runs stage 0. Never returns: it `execve`s stage 1 or exits non-zero.
 pub fn run() -> ! {
     // §4: `boot` is the first event, emitted before anything can fail. The
-    // configuration is not parsed yet, so this one line is always JSON.
+    // configuration is not parsed yet, so this one line is always JSON — and the
+    // §7.3 seccomp flag is read straight from its variable, because an operator
+    // has to be able to see whether the filters are on (§8.1).
     let boot = Emitter::stdout(LogFormat::Json, Level::Info);
     boot.emit(&Event::now(
         Component::Init,
-        EventKind::Boot(Lifecycle::default().with_stage("stage0")),
+        EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("stage0")
+                .with_seccomp(crate::config::seccomp_requested()),
+        ),
     ));
 
     let mut config = match Config::from_env() {
@@ -281,6 +287,9 @@ fn fork_dbproxy(
                     &format!("--events-fd={}", events_write.as_raw_fd()),
                 ),
                 cstring(emitter, &format!("--ready-fd={}", ready_write.as_raw_fd())),
+                // dbproxy is exec'd with an empty environment (§4), so §7.3's
+                // `BLASTIT_SECCOMP` reaches it as an argument instead.
+                cstring(emitter, &format!("--seccomp={}", u8::from(config.seccomp))),
             ];
             let outcome = child
                 .clear_cloexec(&[])

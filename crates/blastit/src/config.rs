@@ -163,7 +163,7 @@ pub struct Config {
     pub proxy_max_connections: BTreeMap<String, u32>,
     /// `BLASTIT_ENV_STRIP`.
     pub env_strip: Option<String>,
-    /// `BLASTIT_SECCOMP`; the §7.3 filters are C4.
+    /// `BLASTIT_SECCOMP`: the §7.3 per-role filters.
     pub seccomp: bool,
     /// `BLASTIT_GRACEFUL_TIMEOUT`.
     pub graceful_timeout: Duration,
@@ -730,6 +730,24 @@ impl Config {
 /// The private scratch directory of the view running under `uid` (§2.2, §7.2).
 pub fn view_dir(uid: u32) -> PathBuf {
     PathBuf::from(format!("/run/blastit/views/{uid}"))
+}
+
+/// Whether `BLASTIT_SECCOMP` asks for the §7.3 filters, as the `boot` event
+/// needs it (§8.1).
+///
+/// [`Config::from_env`] parses the same variable, but stage 0 prints `boot`
+/// before it parses anything, so this reads the variable on its own. Everything
+/// but the documented "off" spellings means on, and a value that is not a
+/// boolean at all is treated as on here and rejected a moment later by
+/// [`Config::from_env`], which names the variable.
+pub fn seccomp_requested() -> bool {
+    match std::env::var("BLASTIT_SECCOMP") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
 }
 
 /// Reads one environment variable, or `None` when it is unset.

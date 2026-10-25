@@ -826,6 +826,7 @@ pub struct Lifecycle {
     routes: Option<u32>,
     workers: Option<u32>,
     duration_ms: Option<f64>,
+    seccomp: Option<bool>,
     outputs: BTreeMap<String, Vec<String>>,
 }
 
@@ -855,6 +856,17 @@ impl Lifecycle {
     #[must_use]
     pub fn with_duration_ms(mut self, duration_ms: f64) -> Self {
         self.duration_ms = Some(duration_ms);
+        self
+    }
+
+    /// Whether the §7.3 seccomp filters are on.
+    ///
+    /// The `boot` event carries this: a booted server with the filters off
+    /// looks exactly like one with them on from the outside, and the log is
+    /// where an operator sees it.
+    #[must_use]
+    pub fn with_seccomp(mut self, seccomp: bool) -> Self {
+        self.seccomp = Some(seccomp);
         self
     }
 
@@ -889,6 +901,11 @@ impl Lifecycle {
     /// How long the phase took, in milliseconds.
     pub fn duration_ms(&self) -> Option<f64> {
         self.duration_ms
+    }
+
+    /// Whether the §7.3 seccomp filters are on, when the event says.
+    pub fn seccomp(&self) -> Option<bool> {
+        self.seccomp
     }
 
     /// Output variable names per proxy; never values.

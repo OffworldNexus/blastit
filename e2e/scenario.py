@@ -147,6 +147,33 @@ def main():
     else:
         check(facts.get("has_password") is True, "baseline: the app holds the database password")
 
+    print("egress and system calls")
+    # A fresh client: the egress route has no grants at all, so the probe must
+    # not load a session or open a database connection either.
+    probe = Client(args.base)
+    status, _, body = probe.request("GET", "/debug/egress/")
+    facts = json.loads(body) if status == 200 else {}
+    check(status == 200, "the debug route answers the egress probe")
+    if under_blastit:
+        check(facts.get("route") == "debug", "the probe ran in the debug route's process")
+        check(facts.get("inet") == "refused", "a route without egress cannot create an inet socket")
+        check(facts.get("inet_errno") == 1, "the refusal is EPERM")
+        check(facts.get("ptrace") == "refused", "ptrace is refused in a view")
+    else:
+        check(facts.get("inet") == "allowed", "baseline: no filter, an inet socket is created")
+
+    status, _, body = probe.request("GET", "/egress/probe/")
+    facts = json.loads(body) if status == 200 else {}
+    check(status == 200, "the egress route answers the egress probe")
+    check(facts.get("inet") == "allowed", "a route with egress creates an inet socket")
+    if under_blastit:
+        check(facts.get("route") == "egress", "the probe ran in the egress route's process")
+        check(facts.get("ptrace") == "refused", "ptrace is refused here too")
+    # In baseline mode the second probe's `ptrace` is whatever the process it
+    # landed on reported: a process may only `PTRACE_TRACEME` once, so a worker
+    # that already ran the first probe refuses it. Only blastit's answer is
+    # deterministic, and that is the one worth asserting.
+
     print("raw SQL, from two processes")
     # One note to count, so "unchanged" cannot pass on an empty table.
     alice.post("/notes/", {"text": "keep-me"})

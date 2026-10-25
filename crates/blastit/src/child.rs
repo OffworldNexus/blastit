@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use blastit_sys::{
-    Rlimits, chdir, close_fds_except, dup_onto, set_cloexec, set_rlimits, set_umask,
+    Rlimits, SeccompRole, chdir, close_fds_except, dup_onto, set_cloexec, set_rlimits, set_umask,
 };
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::process::Resource;
@@ -122,6 +122,26 @@ fn clamp_nofile(requested: u64) -> Option<u64> {
         Some(hard) if hard <= requested => None,
         _ => Some(requested),
     }
+}
+
+/// Installs `role`'s seccomp filter when `BLASTIT_SECCOMP` asks for it (§7.3).
+///
+/// This is the step right before a child starts anything of its own: the filter
+/// cannot be removed, applies to every thread that exists or is created later,
+/// and has to be on while the child is still single-threaded — before a view
+/// serves its first request and before http, scheduler or dbproxy build their
+/// runtime (§4).
+///
+/// # Errors
+///
+/// [`std::io::Error`] when the filter cannot be installed. There is no
+/// recovery in a child: the caller exits non-zero, and init treats a component
+/// that did that as fatal (§8).
+pub fn install_filter(enabled: bool, role: SeccompRole) -> io::Result<()> {
+    if enabled {
+        blastit_sys::install(role)?;
+    }
+    Ok(())
 }
 
 /// `poll(2)` for readability, with a timeout.

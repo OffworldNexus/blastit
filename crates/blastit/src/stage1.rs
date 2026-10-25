@@ -29,13 +29,13 @@ use blastit_http::HttpConfig;
 use blastit_manifest::{Manifest, RoutingTable, UidLayout};
 use blastit_scheduler::{SPAWN_BACKOFF, SchedulerConfig, routes_from_manifest};
 use blastit_sys::{
-    Fork, Pid, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, fork, harden_child, pipe,
-    restore_signal_mask_in_child, set_dumpable, socketpair_stream,
+    Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, fork,
+    harden_child, pipe, restore_signal_mask_in_child, set_dumpable, socketpair_stream,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::child::{ChildIo, child_exit};
+use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
 use crate::logs::{Emitter, fail, output_event};
 use crate::roles::{HttpFds, SchedulerFds};
@@ -106,6 +106,12 @@ pub fn run(options: Options) -> ! {
     };
     let layout = UidLayout::new(config.uid_base);
     let routes = routes_from_manifest(&manifest, &layout);
+    // §7.3: a view may keep `AF_INET`/`AF_INET6` only when its route says so.
+    let egress: Vec<bool> = manifest
+        .routes()
+        .iter()
+        .map(|route| route.egress())
+        .collect();
     let table = match RoutingTable::new(&manifest) {
         Ok(table) => table,
         Err(errors) => fail(&emitter, &errors.to_string()),
@@ -161,6 +167,7 @@ pub fn run(options: Options) -> ! {
         http_cfg,
         layout.http(),
         mask,
+        config.seccomp,
     );
     // The parent keeps only the read ends, and never the listening socket.
     drop(http_end);
@@ -191,6 +198,7 @@ pub fn run(options: Options) -> ! {
         limits,
         layout.scheduler(),
         mask,
+        config.seccomp,
     );
     drop(sched_http_end);
     drop(sched_ctl_end);
@@ -250,6 +258,7 @@ pub fn run(options: Options) -> ! {
                 cfg: config,
                 limits,
                 routes,
+                egress,
                 app,
                 ctl: ctl_end,
                 signals,
@@ -325,11 +334,12 @@ fn fork_http(
     cfg: HttpConfig,
     uid: u32,
     mask: SignalMask,
+    seccomp: bool,
 ) -> Pid {
     match fork() {
         Ok(Fork::Parent(pid)) => pid,
         Ok(Fork::Child) => {
-            if let Err(message) = prepare_child(child, uid, mask, "http") {
+            if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Http, seccomp) {
                 child_exit(&message, 1);
             }
             let code = crate::roles::http(fds, cfg);
@@ -351,11 +361,12 @@ fn fork_scheduler(
     limits: Limits,
     uid: u32,
     mask: SignalMask,
+    seccomp: bool,
 ) -> Pid {
     match fork() {
         Ok(Fork::Parent(pid)) => pid,
         Ok(Fork::Child) => {
-            if let Err(message) = prepare_child(child, uid, mask, "scheduler") {
+            if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Scheduler, seccomp) {
                 child_exit(&message, 1);
             }
             let code = crate::roles::scheduler(fds, cfg, routes, table, limits);
@@ -366,20 +377,28 @@ fn fork_scheduler(
 }
 
 /// The child sequence http and the scheduler share: descriptors, privileges,
-/// hardening, signal mask (§4).
+/// hardening, the seccomp filter, the signal mask (§4, §7.3).
 ///
 /// # Errors
 ///
 /// A message for the log when one of those steps fails; there is no recovery in
 /// a child.
-fn prepare_child(child: ChildIo, uid: u32, mask: SignalMask, role: &str) -> Result<(), String> {
+fn prepare_child(
+    child: ChildIo,
+    uid: u32,
+    mask: SignalMask,
+    role: SeccompRole,
+    seccomp: bool,
+) -> Result<(), String> {
+    let name = role.name();
     child
         .prepare()
-        .map_err(|err| format!("{role}: {err}"))
-        .and_then(|()| drop_privileges(uid).map_err(|err| format!("{role}: {err}")))
-        .and_then(|()| harden_child(Signal::KILL).map_err(|err| format!("{role}: {err}")))?;
+        .map_err(|err| format!("{name}: {err}"))
+        .and_then(|()| drop_privileges(uid).map_err(|err| format!("{name}: {err}")))
+        .and_then(|()| harden_child(Signal::KILL).map_err(|err| format!("{name}: {err}")))
+        .and_then(|()| install_filter(seccomp, role).map_err(|err| format!("{name}: {err}")))?;
     let _ = set_dumpable(false);
-    restore_signal_mask_in_child(mask).map_err(|err| format!("{role}: {err}"))
+    restore_signal_mask_in_child(mask).map_err(|err| format!("{name}: {err}"))
 }
 
 /// Imports and prepares the application, and returns the WSGI callable (§4).

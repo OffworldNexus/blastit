@@ -37,14 +37,14 @@ use std::path::{Path, PathBuf};
 use blastit_frame::Limits;
 use blastit_scheduler::RouteInfo;
 use blastit_sys::{
-    Fork, Pid, Rlimits, Signal, drop_privileges, fork, harden_child, pipe,
+    Fork, Pid, Rlimits, SeccompRole, Signal, drop_privileges, fork, harden_child, pipe,
     restore_signal_mask_in_child, set_dumpable, socketpair_stream,
 };
 use blastit_view::ViewConfig;
 use pyo3::prelude::*;
 use pyo3::types::PyTracebackMethods;
 
-use crate::child::{ChildIo, child_exit};
+use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, view_dir};
 
 /// How many extra processes a view's uid may have beyond its request threads
@@ -75,6 +75,9 @@ pub struct ForkedView {
 /// Forks a view process for `info`, or returns the errno and leaves the process
 /// as it was.
 ///
+/// `egress` is the route's manifest flag (§7.3): it is what lets the child's
+/// filter keep `AF_INET`/`AF_INET6` working.
+///
 /// # Errors
 ///
 /// [`std::io::Error`] when a socketpair or pipe cannot be created, or when
@@ -86,6 +89,7 @@ pub fn fork_view(
     info: &RouteInfo,
     app: &Py<PyAny>,
     mask: blastit_sys::SignalMask,
+    egress: bool,
 ) -> std::io::Result<ForkedView> {
     let (view_end, scheduler_end) = socketpair_stream()?;
     let (stdout_read, stdout_write) = pipe()?;
@@ -138,7 +142,9 @@ pub fn fork_view(
             // SAFETY: we are in the child of the fork above, and the GIL is
             // held. Nothing before this call has touched an allocator lock.
             unsafe { pyo3::ffi::PyOS_AfterFork_Child() };
-            child_main(py, cfg, limits, info, app, mask, child, view_end, dir)
+            child_main(
+                py, cfg, limits, info, app, mask, child, view_end, dir, egress,
+            )
         }
     }
 }
@@ -161,13 +167,17 @@ fn child_main(
     child: ChildIo,
     view_end: OwnedFd,
     dir: PathBuf,
+    egress: bool,
 ) -> ! {
     // The child sequence, in the order `blastit_sys` documents: descriptors,
-    // limits, umask, working directory, then privileges, then hardening.
+    // limits, umask, working directory, then privileges, then hardening, then
+    // the seccomp filter (§4, §7.3) — which is the last thing to happen before
+    // the view starts a thread.
     let outcome = child
         .prepare()
         .and_then(|()| drop_privileges(info.uid))
-        .and_then(|()| harden_child(Signal::KILL));
+        .and_then(|()| harden_child(Signal::KILL))
+        .and_then(|()| install_filter(cfg.seccomp, SeccompRole::View { egress }));
     if let Err(err) = outcome {
         child_exit(&format!("view {}: {err}", info.name), 1);
     }

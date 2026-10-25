@@ -60,7 +60,7 @@ queries = [
 
 [[route]]
 name = "debug"
-path = ['/debug/env/']
+path = ['/debug/env/', '/debug/egress/']
 methods = ["GET"]
 
 [[route]]
@@ -71,6 +71,12 @@ methods = ["GET"]
 queries = [
   'SELECT count(*) FROM notes_note',
 ]
+
+[[route]]
+name = "egress"
+path = ['/egress/probe/']
+methods = ["GET"]
+egress = true
 
 [[route]]
 name = "fallback"

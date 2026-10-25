@@ -151,6 +151,9 @@ fn lifecycle_summary(lifecycle: &Lifecycle) -> String {
     if let Some(duration_ms) = lifecycle.duration_ms {
         parts.push(format!("{duration_ms:.1}ms"));
     }
+    if let Some(seccomp) = lifecycle.seccomp {
+        parts.push(format!("seccomp={}", if seccomp { "on" } else { "off" }));
+    }
     if !lifecycle.outputs.is_empty() {
         let mut rendered: Vec<String> = Vec::new();
         for (proxy, names) in &lifecycle.outputs {
@@ -372,11 +375,13 @@ mod tests {
         let event = fixture::event(EventKind::Boot(
             Lifecycle::default()
                 .with_stage("preload")
+                .with_seccomp(true)
                 .with_output("db", "DATABASE_URL")
                 .with_output("db", "PGHOST"),
         ));
         let line = plain(&event);
         assert!(line.contains("preload"), "{line}");
+        assert!(line.contains("seccomp=on"), "{line}");
         assert!(
             line.contains("outputs: db=[DATABASE_URL, PGHOST]"),
             "{line}"

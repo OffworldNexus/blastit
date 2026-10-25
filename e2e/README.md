@@ -40,3 +40,10 @@ route was granted. `grants.py` gives the `sql` route exactly one statement
 (`SELECT count(*) FROM notes_note`) and nothing else, so the `notes` route is
 refused that same text and vice versa. The checks in `scenario.py` send the
 same text from both processes and from a third route that has no grants.
+
+`/debug/egress/` and `/egress/probe/` run the same probe — create (and close) an
+`AF_INET` socket, and `ptrace(PTRACE_TRACEME)` this process — and report what
+happened. The first is on the `debug` route, the second on `egress` with
+`egress = true` and no grants, so under blastit the §7.3 filters refuse the
+socket on one route and not the other. A route is marked egress with the fifth
+column of `grants.py`'s `ROUTES`.

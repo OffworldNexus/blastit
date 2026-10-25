@@ -3,9 +3,9 @@
 //! `init` is the only process in blastit that has privileges, and the only one
 //! that forks. This crate holds the small, Linux-specific primitives that job
 //! needs — forking, file-descriptor hygiene, `SCM_RIGHTS` file-descriptor
-//! passing, listener binding, privilege dropping, hardening, `execve`,
-//! signals and reaping — each wrapped in one safe, documented and tested
-//! function, so the `C1b` binary is mostly wiring.
+//! passing, listener binding, privilege dropping, hardening, seccomp filters,
+//! `execve`, signals and reaping — each wrapped in one safe, documented and
+//! tested function, so the `C1b` binary is mostly wiring.
 //!
 //! # Rules this crate implements
 //!
@@ -78,6 +78,7 @@
 //! drop_privileges(uid)            // setgroups, setresgid, setresuid (+ checks)
 //! harden_child(Signal::KILL)      // ORDER: setresgid/setresuid clear PDEATHSIG
 //! set_dumpable(false)
+//! install(SeccompRole::Http)      // §7.3: on while still single-threaded
 //! restore_signal_mask_in_child(mask)  // ORDER: exec keeps the mask, so drop it
 //! exec(exe_path(), argv, env)     // or a view's own post-fork work (§9.3)
 //! ```
@@ -85,6 +86,10 @@
 //! * `harden_child` comes **after** `drop_privileges`: `setresgid` and
 //!   `setresuid` clear `PR_SET_PDEATHSIG`, so hardening first loses the death
 //!   signal ([`harden_child`] has the details).
+//! * [`install`] comes **before** anything that can create a thread — a view's
+//!   first request, or a role's runtime: the filter cannot be removed and
+//!   applies to every thread that already exists as well as every one created
+//!   later (§7.3).
 //! * [`restore_signal_mask_in_child`] comes **after** everything that must not
 //!   be interrupted by a signal and **before** the exec: `execve` resets signal
 //!   handlers but not the mask, so a child that does not restore it starts with
@@ -120,6 +125,7 @@ mod fd;
 mod pid;
 mod privs;
 mod proc;
+mod seccomp;
 mod signal;
 mod sock;
 
@@ -136,6 +142,7 @@ pub use crate::privs::{
     Rlimits, drop_privileges, dumpable, harden_child, set_dumpable, set_rlimits, set_umask,
 };
 pub use crate::proc::{Fork, chdir, fork, fork_unchecked, thread_count};
+pub use crate::seccomp::{SeccompRole, install};
 pub use crate::signal::{
     SignalFd, SignalMask, current_signal_mask, kill, reap, restore_signal_mask_in_child,
 };

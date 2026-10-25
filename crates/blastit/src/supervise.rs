@@ -99,6 +99,9 @@ pub struct Parts {
     pub limits: Limits,
     /// One entry per manifest route, in routing order.
     pub routes: Vec<RouteInfo>,
+    /// One entry per manifest route, in routing order: whether its view may
+    /// reach the network (§7.3).
+    pub egress: Vec<bool>,
     /// The imported WSGI callable.
     pub app: Py<PyAny>,
     /// init's end of `ctl.chan`.
@@ -116,6 +119,7 @@ pub struct Supervisor<'a> {
     cfg: Config,
     limits: Limits,
     routes: Vec<RouteInfo>,
+    egress: Vec<bool>,
     app: Py<PyAny>,
     emitter: &'a Emitter,
     ctl: Option<OwnedFd>,
@@ -179,6 +183,7 @@ impl<'a> Supervisor<'a> {
             cfg: parts.cfg,
             limits: parts.limits,
             routes: parts.routes,
+            egress: parts.egress,
             app: parts.app,
             emitter,
             ctl: Some(parts.ctl),
@@ -405,8 +410,16 @@ impl<'a> Supervisor<'a> {
     /// Forks the view for `index`, hands its channel over, and records it.
     fn spawn_now(&mut self, py: Python<'_>, index: usize, info: &RouteInfo) {
         let route = index as u32;
-        let child = match zygote::fork_view(py, &self.cfg, self.limits, info, &self.app, self.mask)
-        {
+        let egress = self.egress.get(index).copied().unwrap_or(false);
+        let child = match zygote::fork_view(
+            py,
+            &self.cfg,
+            self.limits,
+            info,
+            &self.app,
+            self.mask,
+            egress,
+        ) {
             Ok(child) => child,
             Err(err) => fail(self.emitter, &format!("forking a view: {err}")),
         };

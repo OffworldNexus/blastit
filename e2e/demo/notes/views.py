@@ -1,6 +1,6 @@
 """A tiny notes app: log in, write and delete your own notes, log out.
 
-Two extra endpoints exist to test the sandbox, not the app:
+Three extra endpoints exist to test the sandbox, not the app:
 
 * ``/notes/peek/`` runs, from the notes route, a statement the manifest never
   granted: reading every user's password hash. Under blastit it must fail.
@@ -11,9 +11,13 @@ Two extra endpoints exist to test the sandbox, not the app:
 * ``/debug/env/`` reports *facts* about the database configuration the app
   sees (never the values themselves): under blastit it holds no password and
   points at a local socket.
+* ``/debug/egress/`` and ``/egress/probe/`` report what the process's system
+  calls allow; only the second route may reach the network.
 """
 
+import ctypes
 import os
+import socket
 from urllib.parse import unquote, urlsplit
 
 from django.contrib.auth import authenticate, login, logout
@@ -131,3 +135,31 @@ def raw_sql(request):
     except DatabaseError as e:
         sqlstate = getattr(e, "sqlstate", None) or getattr(e.__cause__, "sqlstate", None)
         return JsonResponse({"ok": False, "route": route, "sqlstate": sqlstate})
+
+
+def egress_probe(request):
+    """Report what this process's system calls allow, without doing anything else.
+
+    Mounted in two routes: ``/debug/egress/`` (no egress) and
+    ``/egress/probe/`` (``egress = true``). The socket is created and closed
+    again, never connected, and ``ptrace`` traces this very process. Under
+    blastit's filters (ARCHITECTURE.md §7.3) both are refused unless the route
+    was granted egress; outside blastit both are allowed.
+    """
+    result = {
+        "route": request.META.get("blastit.route"),
+        "inet": "allowed",
+        "inet_errno": None,
+        "ptrace": "allowed",
+    }
+    try:
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).close()
+    except OSError as e:
+        result["inet"], result["inet_errno"] = "refused", e.errno
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.ptrace.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+    libc.ptrace.restype = ctypes.c_long
+    if libc.ptrace(0, 0, None, None) != 0:  # PTRACE_TRACEME
+        result["ptrace"] = "refused"
+    return JsonResponse(result)
