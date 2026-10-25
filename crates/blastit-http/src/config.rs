@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use blastit_frame::Limits;
+use blastit_frame::{INITIAL_WINDOW, Limits, MAX_FRAME_DEFAULT};
 
 /// One mebibyte, spelled out so the defaults read like §8.2's table.
 const KIB: usize = 1024;
@@ -55,6 +55,11 @@ pub struct HttpConfig {
     /// response can fill this much and no more, and then only its own stream
     /// fails. The shared channel reader never waits for a client, so no stream
     /// can delay another.
+    ///
+    /// The default is `INITIAL_WINDOW + max_frame`: a well-behaved view never
+    /// sends more than its credit (one window), and the extra frame is the one
+    /// that can be in flight when the credit runs out. Anything past that is a
+    /// peer sending beyond credit, and aborts the stream.
     pub stream_buffer_bytes: usize,
     /// Most client connections served at once.
     ///
@@ -78,7 +83,7 @@ impl Default for HttpConfig {
             trust_forwarded: true,
             frame_limits: Limits::default(),
             server_port: 8080,
-            stream_buffer_bytes: 4 * MIB as usize,
+            stream_buffer_bytes: INITIAL_WINDOW as usize + MAX_FRAME_DEFAULT,
             max_connections: 1024,
             body_timeout: Duration::from_secs(600),
         }
@@ -96,7 +101,11 @@ mod tests {
         assert_eq!(cfg.max_body_bytes, 100 * 1024 * 1024);
         assert_eq!(cfg.header_timeout, Duration::from_secs(10));
         assert_eq!(cfg.keepalive_timeout, Duration::from_secs(75));
-        assert_eq!(cfg.stream_buffer_bytes, 4 * 1024 * 1024);
+        assert_eq!(
+            cfg.stream_buffer_bytes,
+            INITIAL_WINDOW as usize + cfg.frame_limits.max_frame(),
+            "the window plus the frame that may be in flight when it runs out"
+        );
         assert_eq!(cfg.max_connections, 1024);
         assert_eq!(cfg.body_timeout, Duration::from_secs(600));
         assert!(cfg.trust_forwarded, "§8.2 defaults trust_forwarded to 1");
