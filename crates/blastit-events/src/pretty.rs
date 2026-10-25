@@ -101,6 +101,9 @@ fn summary(event: &Event) -> String {
             info.uid,
             escape_inline(info.reason.as_str())
         ),
+        EventKind::ProcessCap(info) => {
+            format!("estimate_bytes={}  cap={}", info.estimate_bytes, info.cap)
+        }
         EventKind::AppOutput(output) => {
             let mut out = escape_inline(output.stream.as_str());
             if output.parts > 1 {
@@ -228,8 +231,8 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::{
-        AppOutput, ExitKind, Lifecycle, ManifestWarning, Outcome, ProcessExited, ProcessRetired,
-        ProcessSpawned, RequestInfo, RetireReason, Stream,
+        AppOutput, ExitKind, Lifecycle, ManifestWarning, Outcome, ProcessCap, ProcessExited,
+        ProcessRetired, ProcessSpawned, RequestInfo, RetireReason, Stream,
     };
 
     fn plain(event: &Event) -> String {
@@ -285,6 +288,7 @@ mod tests {
                 20_001,
                 RetireReason::Idle,
             ))),
+            fixture::event(EventKind::ProcessCap(ProcessCap::new(141_557_760, 4))),
             fixture::event(EventKind::AppOutput(AppOutput::new(Stream::Stdout, "hi"))),
             fixture::event(EventKind::AppOutput(
                 AppOutput::new(Stream::Stderr, "hi")
@@ -326,6 +330,15 @@ mod tests {
             line.contains("GET /nope → (unmatched)  404 unmatched"),
             "{line}"
         );
+    }
+
+    #[test]
+    fn a_cap_event_reports_the_measurement_and_the_cap() {
+        let event = fixture::event(EventKind::ProcessCap(ProcessCap::new(141_557_760, 4)));
+        let line = plain(&event);
+        assert!(line.contains("process.cap"), "{line}");
+        assert!(line.contains("estimate_bytes=141557760"), "{line}");
+        assert!(line.contains("cap=4"), "{line}");
     }
 
     #[test]

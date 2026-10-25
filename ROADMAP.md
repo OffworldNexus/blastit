@@ -62,6 +62,7 @@ CI grows with the code, never ahead of it:
 | **C3** memory | `blastit` | C1 | §8 sizing, §9.2 | heap immortalisation before fork, `BLASTIT_MAX_VIEW_PROCESSES` LRU cap, memory high-watermark retirement | ✅ |
 | **C3b** immortalisation on 3.14 | `blastit` | C3 | §9.2 | heap immortalisation skipped (with a warning) on CPython 3.14, where it corrupts a real app's heap; `BLASTIT_IMMORTALIZE=auto\|1\|0` | ✅ |
 | **C3c** sharing on 3.14 | `blastit` | C3b | §9.2 | a way to keep the preloaded heap shared on CPython 3.14 that survives its mortal-only decrefs (or a measurement showing what it costs without) | ⬜ |
+| **C3d** no LRU livelock, measured per-view memory | `blastit` | C3 | §2.4, §8 sizing | the cap only retires a `READY`, idle process whose route has nothing queued, and waits otherwise; the derived cap uses the measured per-view cost, reported once per change as `process.cap`; above the high watermark a spawn needs an evictable victim, and a memory retire backs the route off | ✅ |
 | **C4** seccomp | `blastit` | C1 | §7.3 | per-role filters, `egress` grants | ✅ |
 | **C5** DO | — | C2 | §10, §11 | deploy the e2e app on App Platform; re-run the spike checks against the real binary; measure a real app's memory | ✅ |
 
