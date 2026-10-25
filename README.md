@@ -131,7 +131,9 @@ Configuration is still environment variables only (`BLASTIT_APP`,
 container. Two things to know before you start it:
 
 * it has to run as **root**: init binds the port, then drops every other
-  process to its own unprivileged user (see the Dockerfile below);
+  process to its own unprivileged user (see the Dockerfile below). Start it
+  as root directly (`USER root`), not through `sudo`: App Platform sets
+  `no_new_privs`, which stops `sudo`, and blastit only ever drops privileges;
 * the project directory — and therefore the `.venv` with blastit and the app's
   dependencies in it — has to stay **readable by the sandbox users**. Routes run
   as `BLASTIT_UID_BASE + 1000 + i`, and blastit drops to `UID_BASE + 3` before
