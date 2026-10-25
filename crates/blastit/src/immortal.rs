@@ -22,12 +22,21 @@
 //!   upper half is unused, so writing only the low half is the whole value.
 //! * **3.14** — `_Py_IsImmortal` is exactly `(int32_t)refcnt < 0`, and the
 //!   upper half holds `ob_overflow` and `ob_flags`, which must not be touched.
+//!   The marker is what that test reads, but **not every decref on 3.14 checks
+//!   it**: paths that only handle mortal objects count an immortal one down,
+//!   `0xFFFFFFFF` → `0xFFFFFFFE` → …, and some later decref frees or corrupts
+//!   it. Views then segfault in `_PyObject_Malloc` on their first request, so
+//!   [`Immortalize::Auto`] does **not** mark a 3.14 heap, and
+//!   `BLASTIT_IMMORTALIZE=1` forces it for experiments only.
+//!
+//! Anything else — 32-bit, big-endian, a CPython outside 3.12–3.14, or a
+//! free-threaded build, whose counts live in `ob_ref_local` and
+//! `ob_ref_shared` instead — is **skipped with a warning** rather than
+//! half-done: the server starts and each view copies more of the preloaded
+//! heap, which is the cost §9.2 #6 measured ([`decide`]).
 //!
 //! Immortal objects are never freed, which §9.2 #7 accepts for a heap that
-//! lives as long as the container. Anything else — 32-bit, big-endian, an
-//! unknown CPython, or a free-threaded build, whose counts live in
-//! `ob_ref_local` and `ob_ref_shared` instead — is refused with a message
-//! rather than half-done ([`check`]).
+//! lives as long as the container.
 
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -35,6 +44,8 @@ use std::time::{Duration, Instant};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
+
+use crate::config::Immortalize;
 
 /// The immortal marker, as the low 32 bits of `ob_refcnt`.
 const IMMORTAL_LOW: u32 = u32::MAX;
@@ -45,18 +56,30 @@ const IMMORTAL_LOW: u32 = u32::MAX;
 /// of Python calls by three orders of magnitude without changing the walk.
 const BATCH: usize = 1024;
 
-/// The first CPython minor whose marker blastit writes, on `3.x`.
+/// What skipping the marker costs, appended to every [`Decision::Off`]: §9.2
+/// #6's copy of the shared heap, per view process.
+const SKIPPED_COST: &str = ", views will copy more of the preloaded heap";
+
+/// The first CPython minor whose marker blastit knows, on `3.x`.
 pub const MIN_MINOR: u8 = 12;
 
-/// The last CPython minor whose marker blastit writes, on `3.x`.
+/// The last CPython minor whose marker blastit knows, on `3.x`: written on
+/// 3.12, 3.13 and 3.14, the last of which only `BLASTIT_IMMORTALIZE=1` asks for
+/// ([`Immortalize::Auto`] stops at [`AUTO_MAX_MINOR`]).
 pub const MAX_MINOR: u8 = 14;
+
+/// The last CPython minor [`Immortalize::Auto`] marks, on `3.x`.
+///
+/// 3.14 writes the same marker, but some of its decref paths do not check it
+/// (see the module docs), so an auto pass stops at 3.13.
+pub const AUTO_MAX_MINOR: u8 = 13;
 
 /// The interpreter facts §9.2 #7's marker depends on.
 ///
 /// Every one of them decides either where the reference count sits or what
-/// `0xFFFFFFFF` means to `Py_INCREF` and `Py_DECREF`, so [`supported`] is a
-/// pure function of exactly these: each refusal can be unit-tested without such
-/// a build being installed.
+/// `0xFFFFFFFF` means to `Py_INCREF` and `Py_DECREF`, so [`supported`] and
+/// [`decide`] are pure functions of exactly these: each refusal can be
+/// unit-tested without such a build being installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Interpreter {
     /// CPython major version.
@@ -88,9 +111,10 @@ pub struct Stats {
 }
 
 /// Refuses an interpreter whose immortal marker blastit does not know (§9.2
-/// #7: "blastit refuses to start on a version it doesn't know").
+/// #7). This is the pure half of [`decide`].
 ///
-/// This is the pure half: [`check`] is this function applied to [`probe`].
+/// A refusal is not fatal: [`decide`] turns it into [`Decision::Off`] and stage
+/// 1 warns instead of starting a server that cannot be immortalised.
 ///
 /// # Errors
 ///
@@ -134,13 +158,113 @@ pub fn supported(interpreter: &Interpreter) -> Result<(), String> {
     Ok(())
 }
 
-/// [`supported`] for the interpreter that is actually running.
+/// Whether §9.2 #7's pass runs for one interpreter and one
+/// `BLASTIT_IMMORTALIZE` setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    /// Write the marker over the preloaded heap.
+    On,
+    /// Leave the heap alone, for this reason: the sentence the `warn` event
+    /// and the preload `boot` event carry.
+    Off(String),
+}
+
+impl Decision {
+    /// Whether the pass runs.
+    pub const fn is_on(&self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    /// The reason the pass does not run, when it does not.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::On => None,
+            Self::Off(reason) => Some(reason),
+        }
+    }
+}
+
+/// §9.2 #7's decision for one interpreter and one setting.
+///
+/// This is the whole policy, with no interpreter in sight, so every branch is
+/// unit-testable:
+///
+/// | `BLASTIT_IMMORTALIZE` | 3.12/3.13 | 3.14 | anything else |
+/// |---|---|---|---|
+/// | `auto` (default) | on | **off**: unsafe there | off |
+/// | `1` | on | on, for experiments | off |
+/// | `0` | off | off | off |
+///
+/// The setting decides before the interpreter does, so an operator who turned
+/// the pass off is told that, and only then what a version could not do. Every
+/// [`Decision::Off`] ends with what skipping costs, so the sentence reads as
+/// one line in the log whatever the reason.
+pub fn decide(interpreter: &Interpreter, setting: Immortalize) -> Decision {
+    if setting == Immortalize::Off {
+        return Decision::Off(format!(
+            "BLASTIT_IMMORTALIZE=0: heap immortalisation is off{SKIPPED_COST}"
+        ));
+    }
+    if let Err(problem) = supported(interpreter) {
+        return Decision::Off(format!("{problem}{SKIPPED_COST}"));
+    }
+    if setting == Immortalize::Auto
+        && !(interpreter.major == 3 && (MIN_MINOR..=AUTO_MAX_MINOR).contains(&interpreter.minor))
+    {
+        return Decision::Off(format!(
+            "CPython {}.{}: heap immortalisation is unsafe on this version{SKIPPED_COST}",
+            interpreter.major, interpreter.minor
+        ));
+    }
+    Decision::On
+}
+
+/// §9.2 #7's outcome for the running interpreter: the decision, and what the
+/// pass did when it ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    /// On, or off with the sentence that says why.
+    pub decision: Decision,
+    /// What the pass did — `Some` exactly when the decision is
+    /// [`Decision::On`].
+    pub stats: Option<Stats>,
+}
+
+impl Outcome {
+    /// How many objects carry the marker afterwards: the pass's count, or zero
+    /// when the pass was skipped.
+    pub fn objects(&self) -> u64 {
+        self.stats.map_or(0, |stats| stats.objects)
+    }
+
+    /// How long the pass took, in milliseconds, when it ran.
+    ///
+    /// A skipped pass has no duration: there was no walk to time.
+    pub fn millis(&self) -> Option<f64> {
+        self.stats.map(|stats| stats.elapsed.as_secs_f64() * 1000.0)
+    }
+}
+
+/// [`decide`] for the interpreter that is running, and the pass when it says
+/// to run it.
 ///
 /// # Errors
 ///
-/// As [`supported`].
-pub fn check(py: Python<'_>) -> Result<(), String> {
-    supported(&probe(py))
+/// Whatever importing `gc` or calling it raises, when the decision was to run
+/// the pass. A caller that decided to run and cannot must not start: a view
+/// would then copy the shared heap. A skipped pass never fails.
+pub fn apply(py: Python<'_>, setting: Immortalize) -> PyResult<Outcome> {
+    let decision = decide(&probe(py), setting);
+    if !decision.is_on() {
+        return Ok(Outcome {
+            decision,
+            stats: None,
+        });
+    }
+    Ok(Outcome {
+        decision,
+        stats: Some(immortalize(py)?),
+    })
 }
 
 /// Reads the facts [`supported`] needs from the running interpreter.
@@ -243,7 +367,8 @@ fn free_threaded(py: Python<'_>) -> bool {
 /// # Errors
 ///
 /// Whatever importing `gc` or calling it raises. A caller that cannot
-/// immortalise must not start: a view would then copy the shared heap.
+/// immortalise must not start: a view would then copy the shared heap. Callers
+/// go through [`apply`], which decides whether to run this at all.
 pub fn immortalize(py: Python<'_>) -> PyResult<Stats> {
     let gc = py.import("gc")?;
     let get_objects = gc.getattr("get_objects")?;
@@ -373,6 +498,19 @@ mod tests {
         globals
     }
 
+    /// Whether this interpreter can carry §9.2 #7's marker at all.
+    fn walkable(py: Python<'_>) -> bool {
+        supported(&probe(py)).is_ok()
+    }
+
+    /// The interpreter facts to test a decision against, at `minor`.
+    fn interpreter(minor: u8) -> Interpreter {
+        Interpreter {
+            minor,
+            ..supported_interpreter()
+        }
+    }
+
     #[test]
     fn a_supported_interpreter_is_accepted() {
         assert!(supported(&supported_interpreter()).is_ok());
@@ -454,11 +592,17 @@ mod tests {
     }
 
     #[test]
-    fn the_running_interpreter_agrees_with_the_pure_check() {
+    fn the_running_interpreter_is_probed() {
         let _heap = heap();
         Python::initialize();
         Python::attach(|py| {
             let interpreter = probe(py);
+            let version = py.version_info();
+            assert_eq!(
+                (interpreter.major, interpreter.minor),
+                (version.major, version.minor),
+                "probed version"
+            );
             assert_eq!(interpreter.pointer_width, usize::BITS, "probed width");
             assert_eq!(
                 interpreter.little_endian,
@@ -466,31 +610,99 @@ mod tests {
                 "probed endianness"
             );
             assert!(!interpreter.trace_refs, "a Py_TRACE_REFS build is running");
-            assert_eq!(
-                check(py).is_ok(),
-                supported(&interpreter).is_ok(),
-                "check() must be supported(probe())"
-            );
-            match check(py) {
-                Ok(()) => {
-                    let version = py.version_info();
-                    assert!(
-                        (3, MIN_MINOR) <= (version.major, version.minor)
-                            && (version.major, version.minor) <= (3, MAX_MINOR),
-                        "accepted an unknown version: {}.{}",
-                        version.major,
-                        version.minor
-                    );
-                    assert!(!free_threaded(py), "accepted a free-threaded build");
-                }
-                Err(problem) => {
-                    assert!(
-                        problem.contains("immortal") || problem.contains("CPython"),
-                        "unclear refusal: {problem}"
-                    );
-                }
+            if walkable(py) {
+                assert!(
+                    (3, MIN_MINOR) <= (version.major, version.minor)
+                        && (version.major, version.minor) <= (3, MAX_MINOR),
+                    "accepted an unknown version: {}.{}",
+                    version.major,
+                    version.minor
+                );
+                assert!(!free_threaded(py), "accepted a free-threaded build");
+            } else {
+                let problem = supported(&interpreter).unwrap_err();
+                assert!(
+                    problem.contains("immortal") || problem.contains("CPython"),
+                    "unclear refusal: {problem}"
+                );
             }
         });
+    }
+
+    #[test]
+    fn an_unsupported_interpreter_is_refused_by_supported_alone() {
+        // §9.2 #7 used to refuse to start here; the refusal is now only a
+        // reason for `decide`, and every one of them can be turned into a skip.
+        for unsupported in [
+            Interpreter {
+                pointer_width: 32,
+                ..supported_interpreter()
+            },
+            Interpreter {
+                little_endian: false,
+                ..supported_interpreter()
+            },
+            Interpreter {
+                minor: 15,
+                ..supported_interpreter()
+            },
+            Interpreter {
+                free_threaded: true,
+                ..supported_interpreter()
+            },
+            Interpreter {
+                trace_refs: true,
+                ..supported_interpreter()
+            },
+        ] {
+            let problem = supported(&unsupported).unwrap_err();
+            for setting in [Immortalize::Auto, Immortalize::On] {
+                let decision = decide(&unsupported, setting);
+                assert!(!decision.is_on(), "{unsupported:?} with {setting:?}");
+                let reason = decision.reason().unwrap();
+                assert!(reason.contains(&problem), "{reason}");
+                assert!(
+                    reason.ends_with("views will copy more of the preloaded heap"),
+                    "{reason}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_version_and_the_setting_decide_the_pass() {
+        // §9.2 #7: the marker is safe on 3.12 and 3.13, unsafe on 3.14.
+        for minor in [MIN_MINOR, 13] {
+            assert_eq!(decide(&interpreter(minor), Immortalize::Auto), Decision::On);
+            assert_eq!(decide(&interpreter(minor), Immortalize::On), Decision::On);
+        }
+
+        // `auto` on 3.14: skipped, with the reason the log carries.
+        let unsafe_here = decide(&interpreter(MAX_MINOR), Immortalize::Auto);
+        assert!(!unsafe_here.is_on());
+        assert_eq!(
+            unsafe_here.reason().unwrap(),
+            "CPython 3.14: heap immortalisation is unsafe on this version, views will copy more \
+             of the preloaded heap"
+        );
+        // ... and `1` forces it there, for experiments.
+        assert_eq!(
+            decide(&interpreter(MAX_MINOR), Immortalize::On),
+            Decision::On
+        );
+
+        // `0` never runs the pass, and says so before anything else.
+        for minor in [MIN_MINOR, 13, MAX_MINOR] {
+            let off = decide(&interpreter(minor), Immortalize::Off);
+            assert!(!off.is_on());
+            assert!(
+                off.reason().unwrap().contains("BLASTIT_IMMORTALIZE=0"),
+                "{off:?}"
+            );
+        }
+
+        // `Decision::On` has no reason to give.
+        assert_eq!(Decision::On.reason(), None);
     }
 
     /// The facts of a CPython every blastit build is tested against.
@@ -506,12 +718,65 @@ mod tests {
     }
 
     #[test]
+    fn a_skipped_pass_walks_nothing() {
+        let _heap = heap();
+        Python::initialize();
+        Python::attach(|py| {
+            // `BLASTIT_IMMORTALIZE=0` never walks, whatever interpreter this is:
+            // `apply` is the whole decision, and the heap is untouched.
+            let globals = namespace(py, c"HOLD = {'marker': 'blastit' * 32}\n");
+            let held = globals.get_item("HOLD").unwrap().unwrap();
+            let marker = held.get_item("marker").unwrap();
+            assert!(!is_immortal(marker.as_ptr()));
+
+            let outcome = apply(py, Immortalize::Off).unwrap();
+            assert!(!outcome.decision.is_on());
+            assert_eq!(outcome.stats, None);
+            assert_eq!(outcome.objects(), 0);
+            assert_eq!(outcome.millis(), None);
+            assert!(!is_immortal(marker.as_ptr()), "the heap was walked");
+        });
+    }
+
+    #[test]
+    fn the_running_interpreter_follows_the_same_decision() {
+        let _heap = heap();
+        Python::initialize();
+        Python::attach(|py| {
+            let version = py.version_info();
+            // On this interpreter, `auto` runs the walk exactly when the pure
+            // decision says it should; on 3.14 that is "no walk", which is the
+            // point of the whole exercise.
+            let outcome = apply(py, Immortalize::Auto).unwrap();
+            let expected = decide(&probe(py), Immortalize::Auto);
+            assert_eq!(outcome.decision, expected);
+            assert_eq!(outcome.stats.is_some(), expected.is_on());
+            if expected.is_on() {
+                assert!(walkable(py), "an accepted interpreter can be walked");
+                assert!(
+                    version.major == 3 && (MIN_MINOR..=AUTO_MAX_MINOR).contains(&version.minor),
+                    "only the interpreters auto trusts ran the walk: {}.{}",
+                    version.major,
+                    version.minor
+                );
+                assert!(outcome.objects() > 0, "nothing was immortalised");
+                let millis = outcome.millis().unwrap();
+                assert!(millis >= 0.0 && millis.is_finite(), "{millis}");
+            } else {
+                assert_eq!(outcome.objects(), 0);
+                let reason = outcome.decision.reason().unwrap();
+                assert!(reason.contains("views will copy"), "{reason}");
+            }
+        });
+    }
+
+    #[test]
     fn an_immortalised_object_stops_counting_references() {
         let _heap = heap();
         Python::initialize();
         Python::attach(|py| {
-            if check(py).is_err() {
-                // The refusal path is the test above; this one needs the walk.
+            if !walkable(py) {
+                // The skip path is tested above; this one needs the walk.
                 return;
             }
             let globals = namespace(
@@ -552,7 +817,7 @@ mod tests {
         let _heap = heap();
         Python::initialize();
         Python::attach(|py| {
-            if check(py).is_err() {
+            if !walkable(py) {
                 return;
             }
             immortalize(py).unwrap();
@@ -575,7 +840,7 @@ mod tests {
         let _heap = heap();
         Python::initialize();
         Python::attach(|py| {
-            if check(py).is_err() {
+            if !walkable(py) {
                 return;
             }
             // A `str` and an `int` are not tracked by the collector, so they

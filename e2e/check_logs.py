@@ -51,11 +51,24 @@ def main():
     preload = [e for e in events if e.get("event") == "boot" and "immortalized" in e]
     check(len(preload) == 1, f"one preload boot event ({len(preload)})")
     if preload:
+        immortalize = preload[0].get("immortalize")
+        check(immortalize in ("on", "off"),
+              f"the boot event says whether the heap was immortalised ({immortalize})")
         immortalized = preload[0].get("immortalized")
-        check(isinstance(immortalized, int) and immortalized > 0,
-              f"the preloaded heap was immortalised ({immortalized} objects)")
-        check(isinstance(preload[0].get("immortalize_ms"), (int, float)),
-              f"the pass was timed ({preload[0].get('immortalize_ms')}ms)")
+        check(isinstance(immortalized, int) and not isinstance(immortalized, bool),
+              f"the immortalised count is an integer ({immortalized})")
+        if immortalize == "on":
+            check(immortalized > 0,
+                  f"the preloaded heap was immortalised ({immortalized} objects)")
+            check(isinstance(preload[0].get("immortalize_ms"), (int, float)),
+                  f"the pass was timed ({preload[0].get('immortalize_ms')}ms)")
+        else:
+            # Skipped: nothing was marked, and the event carries the reason
+            # (CPython 3.14, an unsupported build, BLASTIT_IMMORTALIZE=0).
+            check(immortalized == 0, f"nothing was marked ({immortalized})")
+            check(bool(preload[0].get("immortalize_reason")),
+                  f"the boot event says why it was skipped "
+                  f"({preload[0].get('immortalize_reason')})")
         cap = preload[0].get("max_view_processes")
         check(isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1,
               f"the view process cap was derived from memory ({cap})")
@@ -63,6 +76,13 @@ def main():
               f"mem_total is a byte count ({preload[0].get('mem_total')})")
         check(isinstance(preload[0].get("mem_used"), int),
               f"mem_used is a byte count ({preload[0].get('mem_used')})")
+        # A skipped pass says so once, at warn, before the boot event.
+        if immortalize == "off":
+            warnings = [e for e in events
+                        if e.get("event") == "app.output" and e.get("level") == "warn"
+                        and "immortalisation is off" in e.get("line", "")]
+            check(len(warnings) == 1,
+                  f"one warn line says immortalisation is off ({len(warnings)})")
 
     denied = [e for e in events if e.get("event") == "sql.denied"]
     sqls = [e.get("sql", "") for e in denied]

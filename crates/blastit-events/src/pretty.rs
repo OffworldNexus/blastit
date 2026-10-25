@@ -154,11 +154,20 @@ fn lifecycle_summary(lifecycle: &Lifecycle) -> String {
     if let Some(seccomp) = lifecycle.seccomp {
         parts.push(format!("seccomp={}", if seccomp { "on" } else { "off" }));
     }
+    if let Some(immortalize) = lifecycle.immortalize {
+        parts.push(format!(
+            "immortalize={}",
+            if immortalize { "on" } else { "off" }
+        ));
+    }
+    if let Some(reason) = &lifecycle.immortalize_reason {
+        parts.push(format!("because {}", escape_inline(reason)));
+    }
     if let Some(immortalized) = lifecycle.immortalized {
         parts.push(format!("immortalized={immortalized}"));
     }
     if let Some(immortalize_ms) = lifecycle.immortalize_ms {
-        parts.push(format!("immortalize={immortalize_ms:.1}ms"));
+        parts.push(format!("immortalize_ms={immortalize_ms:.1}ms"));
     }
     if let Some(mem_total) = lifecycle.mem_total {
         parts.push(format!("mem_total={}", mebibytes(mem_total)));
@@ -406,6 +415,34 @@ mod tests {
             line.contains("outputs: db=[DATABASE_URL, PGHOST]"),
             "{line}"
         );
+    }
+
+    #[test]
+    fn immortalisation_shows_whether_it_ran_and_why_not() {
+        let skipped = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("preload")
+                .with_immortalize(false)
+                .with_immortalize_reason("CPython 3.14 is unsafe")
+                .with_immortalized(0),
+        ));
+        let line = plain(&skipped);
+        assert!(line.contains("immortalize=off"), "{line}");
+        assert!(line.contains("immortalized=0"), "{line}");
+        assert!(line.contains("CPython 3.14 is unsafe"), "{line}");
+        assert!(!line.contains("immortalize_ms"), "{line}");
+
+        let ran = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("preload")
+                .with_immortalize(true)
+                .with_immortalized(1_610_300)
+                .with_immortalize_ms(1785.4),
+        ));
+        let line = plain(&ran);
+        assert!(line.contains("immortalize=on"), "{line}");
+        assert!(line.contains("immortalized=1610300"), "{line}");
+        assert!(line.contains("immortalize_ms=1785.4ms"), "{line}");
     }
 
     #[test]

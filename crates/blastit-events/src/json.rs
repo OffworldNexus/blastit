@@ -17,9 +17,9 @@ use crate::{
 /// The result is never longer than [`MAX_EVENT_BYTES`]. When the event does
 /// not fit, the longest strings are cut, largest first, on character
 /// boundaries and named in a trailing `"truncated"` array. In practice the
-/// fields that grow are the free text ones — `sql`, `path`, `line`, `reason`
-/// and `message` — but every string is covered, so the limit holds whatever
-/// the caller passes.
+/// fields that grow are the free text ones — `sql`, `path`, `line`, `reason`,
+/// `message` and `immortalize_reason` — but every string is covered, so the
+/// limit holds whatever the caller passes.
 ///
 /// [`Event::with_truncated`] names fields the *caller* already shortened;
 /// those names are reported too, whether or not the event needed cutting here.
@@ -191,6 +191,16 @@ fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static
     if let Some(seccomp) = lifecycle.seccomp {
         push_member(out, "seccomp", &json_bool(seccomp));
     }
+    if let Some(immortalize) = lifecycle.immortalize {
+        push_member(
+            out,
+            "immortalize",
+            &json_string(if immortalize { "on" } else { "off" }),
+        );
+    }
+    if let Some(reason) = &lifecycle.immortalize_reason {
+        push_member(out, "immortalize_reason", &json_string(reason));
+    }
     if let Some(immortalized) = lifecycle.immortalized {
         push_member(out, "immortalized", &immortalized.to_string());
     }
@@ -306,6 +316,9 @@ fn string_slots(event: &mut Event) -> Vec<(&'static str, &mut String)> {
         | EventKind::Shutdown(lifecycle) => {
             if let Some(stage) = lifecycle.stage.as_mut() {
                 slots.push(("stage", stage));
+            }
+            if let Some(reason) = lifecycle.immortalize_reason.as_mut() {
+                slots.push(("immortalize_reason", reason));
             }
         }
         EventKind::ManifestWarning(info) => {
@@ -649,6 +662,7 @@ mod tests {
         let preload = fixture::event(EventKind::Boot(
             Lifecycle::default()
                 .with_stage("preload")
+                .with_immortalize(true)
                 .with_immortalized(1_610_300)
                 .with_immortalize_ms(1785.4)
                 .with_mem_total(1_073_741_824)
@@ -664,6 +678,7 @@ mod tests {
                 "event",
                 "component",
                 "stage",
+                "immortalize",
                 "immortalized",
                 "immortalize_ms",
                 "mem_total",
@@ -672,6 +687,7 @@ mod tests {
             ]
         );
         let value = parse(&json);
+        assert_eq!(value["immortalize"], "on");
         assert_eq!(value["immortalized"], 1_610_300);
         assert_eq!(value["immortalize_ms"], 1785.4);
         assert_eq!(value["mem_total"], 1_073_741_824);
@@ -853,6 +869,61 @@ mod tests {
         let json = encode_json(&event);
         let value = check_fits(&event, &json);
         assert_eq!(value["truncated"], serde_json::json!(["stage"]));
+    }
+
+    #[test]
+    fn a_skipped_immortalisation_is_reported_with_its_reason() {
+        // §9.2 #7 on CPython 3.14: the pass is skipped, nothing is marked, and
+        // the event carries the same sentence as the `warn` line.
+        let event = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("preload")
+                .with_immortalize(false)
+                .with_immortalize_reason(
+                    "CPython 3.14: heap immortalisation is unsafe on this version",
+                )
+                .with_immortalized(0),
+        ));
+        let json = encode_json(&event);
+        assert_eq!(
+            top_level_keys(&json),
+            [
+                "ts",
+                "level",
+                "event",
+                "component",
+                "stage",
+                "immortalize",
+                "immortalize_reason",
+                "immortalized",
+            ]
+        );
+        let value = check_fits(&event, &json);
+        assert_eq!(value["immortalize"], "off");
+        assert_eq!(value["immortalized"], 0);
+        assert!(value["immortalized"].is_u64(), "a count, not a float");
+        assert!(
+            value["immortalize_reason"]
+                .as_str()
+                .unwrap()
+                .contains("3.14")
+        );
+        // A skipped pass has no duration: `immortalize_ms` is the pass's own.
+        assert!(value.get("immortalize_ms").is_none());
+    }
+
+    #[test]
+    fn a_long_immortalisation_reason_is_cut() {
+        let event = fixture::event(EventKind::Boot(
+            Lifecycle::default().with_immortalize_reason("r".repeat(4000)),
+        ));
+        let json = encode_json(&event);
+        let value = check_fits(&event, &json);
+        assert_eq!(
+            value["truncated"],
+            serde_json::json!(["immortalize_reason"])
+        );
+        assert!(value["immortalize_reason"].as_str().unwrap().len() < 4000);
     }
 
     #[test]

@@ -10,7 +10,7 @@
 //! bind 0.0.0.0:$PORT
 //! fork http (base+1) and scheduler (base+2) — both before CPython exists
 //! initialise CPython, import BLASTIT_APP, preload, warm up, close DB handles
-//! gc.collect() · immortalize the heap (§9.2 #7) · gc.freeze()
+//! gc.collect() · immortalize the heap (§9.2 #7, where that is safe) · gc.freeze()
 //! boot: what the preload cost and the view cap memory buys (§8)
 //! ready
 //! supervise, holding the GIL
@@ -51,7 +51,7 @@ use pyo3::types::PyBytes;
 
 use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
-use crate::immortal::Stats;
+use crate::immortal::{Decision, Outcome};
 use crate::logs::{Emitter, fail, output_event};
 use crate::roles::{HttpFds, SchedulerFds};
 use crate::supervise::{ComponentPipes, Parts, Supervisor};
@@ -115,12 +115,13 @@ if 'django' in sys.modules:
 gc.collect()
 ";
 
-/// §9.2 #7: freeze the heap, once the part of it that can be immortalised has
-/// been.
+/// §9.2 #7: freeze the heap, whether or not it could be immortalised.
 ///
-/// `gc.freeze()` puts the collector's objects out of its reach. It runs *after*
-/// the immortalisation pass, because an immortal object is never freed and its
-/// address can therefore never be reused by a later allocation.
+/// `gc.freeze()` puts the collector's objects out of its reach before the fork
+/// in every case. When the immortalisation pass runs, it runs *before* this,
+/// because an immortal object is never freed and its address can therefore
+/// never be reused by a later allocation; when the pass is skipped
+/// ([`crate::immortal::Decision::Off`]), the heap is frozen all the same.
 const FREEZE: &std::ffi::CStr = c"
 import gc
 gc.freeze()
@@ -610,12 +611,13 @@ fn load(
     }
     // §9.2 #7, between `gc.collect()` and `gc.freeze()`: nothing left in the
     // collected heap is garbage, and every object a request could touch stops
-    // counting references.
-    let stats = immortalize(py, emitter);
+    // counting references — on an interpreter where marking it is safe, which
+    // `BLASTIT_IMMORTALIZE` and the version decide.
+    let outcome = immortalize(py, config, emitter);
     if let Err(err) = py.run(FREEZE, None, None) {
         python_fail(py, emitter, "gc.freeze", &err);
     }
-    emit_preload(emitter, config, stats, refresh_memory(memory));
+    emit_preload(emitter, config, &outcome, refresh_memory(memory));
     app
 }
 
@@ -649,20 +651,29 @@ fn restore_sys_path(py: Python<'_>, entries: &[Vec<u8>]) -> PyResult<()> {
     Ok(())
 }
 
-/// §9.2 #7: makes the preloaded heap immortal.
+/// §9.2 #7: makes the preloaded heap immortal, when that is safe here.
 ///
-/// Both failures are fatal. An interpreter blastit does not know cannot be
-/// immortalised at all, and a heap that was not immortalised would silently
-/// cost every view process the copy of it that §9.2 #6 describes — the
-/// difference between 18 MiB and 90 MiB per child.
-fn immortalize(py: Python<'_>, emitter: &Emitter) -> Stats {
-    if let Err(problem) = crate::immortal::check(py) {
-        fail(emitter, &problem);
-    }
-    match crate::immortal::immortalize(py) {
-        Ok(stats) => stats,
+/// The decision is `BLASTIT_IMMORTALIZE` against the running interpreter
+/// ([`crate::immortal::decide`]): on 3.14 the marker corrupts the heap, so
+/// `auto` skips it, and an interpreter whose marker blastit does not know is
+/// skipped too — the server starts rather than refusing, and every view
+/// process simply copies more of the preloaded heap (§9.2 #6).
+///
+/// A skip is one `warn` line saying why; the same reason travels in the
+/// preload `boot` event ([`preload_lifecycle`]). A pass that was *decided* and
+/// then failed is still fatal: a heap that was not immortalised when it could
+/// have been is the copy §9.2 #6 measured.
+fn immortalize(py: Python<'_>, config: &Config, emitter: &Emitter) -> Outcome {
+    let outcome = match crate::immortal::apply(py, config.immortalize) {
+        Ok(outcome) => outcome,
         Err(err) => python_fail(py, emitter, "heap immortalisation", &err),
+    };
+    if let Decision::Off(reason) = &outcome.decision {
+        emitter.emit(
+            &output_event(Component::Init, None, Stream::Stderr, reason).with_level(Level::Warn),
+        );
     }
+    outcome
 }
 
 /// The reading §8 Sizing's `boot` event reports, taken now that the app is
@@ -680,14 +691,39 @@ fn refresh_memory(before: Option<mem::Sample>) -> Option<mem::Sample> {
 /// §8 Sizing and §9.2 #7: what the preload cost, and the view process cap the
 /// memory that is left buys.
 ///
-/// This runs after the app was imported and immortalised, so `mem_used` is the
-/// number §8 asks for ("usage after preload") and the derived cap is the one
-/// the scheduler measures for itself, from the same function.
-fn emit_preload(emitter: &Emitter, config: &Config, stats: Stats, memory: Option<mem::Sample>) {
+/// This runs after the app was imported and the heap immortalised — or left
+/// alone on purpose — so `mem_used` is the number §8 asks for ("usage after
+/// preload") and the derived cap is the one the scheduler measures for itself,
+/// from the same function.
+fn emit_preload(
+    emitter: &Emitter,
+    config: &Config,
+    outcome: &Outcome,
+    memory: Option<mem::Sample>,
+) {
+    emitter.emit(&Event::now(
+        Component::Init,
+        EventKind::Boot(preload_lifecycle(config, outcome, memory)),
+    ));
+}
+
+/// The `boot` payload of the preload phase (§8.1).
+///
+/// `immortalize` says whether §9.2 #7's pass ran, and `immortalize_reason` why
+/// it did not; `immortalized` and `immortalize_ms` describe the pass itself
+/// and are therefore a zero and a nothing when there was none. Apart from the
+/// emitting, so that a test can read the fields back without a log.
+fn preload_lifecycle(config: &Config, outcome: &Outcome, memory: Option<mem::Sample>) -> Lifecycle {
     let mut lifecycle = Lifecycle::default()
         .with_stage("preload")
-        .with_immortalized(stats.objects)
-        .with_immortalize_ms(stats.elapsed.as_secs_f64() * 1000.0);
+        .with_immortalize(outcome.decision.is_on())
+        .with_immortalized(outcome.objects());
+    if let Some(reason) = outcome.decision.reason() {
+        lifecycle = lifecycle.with_immortalize_reason(reason);
+    }
+    if let Some(millis) = outcome.millis() {
+        lifecycle = lifecycle.with_immortalize_ms(millis);
+    }
     if let Some(sample) = memory {
         lifecycle = lifecycle
             .with_mem_total(sample.total())
@@ -698,7 +734,7 @@ fn emit_preload(emitter: &Emitter, config: &Config, stats: Stats, memory: Option
                 config.view_mem_estimate,
             ));
     }
-    emitter.emit(&Event::now(Component::Init, EventKind::Boot(lifecycle)));
+    lifecycle
 }
 
 /// `module:attribute` as a Python object.
@@ -779,5 +815,103 @@ fn pair_ok(emitter: &Emitter, what: &str) -> (OwnedFd, OwnedFd) {
     match socketpair_stream() {
         Ok(pair) => pair,
         Err(err) => fail(emitter, &format!("{what}: {err}")),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::fs::File;
+    use std::time::Duration;
+
+    use blastit_events::encode_json;
+
+    use super::*;
+    use crate::config::Immortalize;
+    use crate::immortal::Outcome;
+
+    /// Runs `f` with an emitter on a pipe, and returns the lines it wrote.
+    ///
+    /// Nothing here touches the heap: the setting below is the one that never
+    /// walks it, so these tests cannot race the whole-interpreter passes in
+    /// `crate::immortal`'s own tests.
+    fn capture<T>(f: impl FnOnce(&Emitter) -> T) -> (String, T) {
+        let (read, write) = pipe().unwrap();
+        let emitter = Emitter::new(write.as_raw_fd(), LogFormat::Json, Level::Debug, false);
+        let value = f(&emitter);
+        drop(write);
+        let mut text = String::new();
+        File::from(read).read_to_string(&mut text).unwrap();
+        (text, value)
+    }
+
+    /// The preload `boot` event as JSON, which is what an operator reads.
+    fn boot_json(config: &Config, outcome: &Outcome) -> serde_json::Value {
+        let event = Event::now(
+            Component::Init,
+            EventKind::Boot(preload_lifecycle(config, outcome, None)),
+        );
+        serde_json::from_str(&encode_json(&event)).unwrap()
+    }
+
+    #[test]
+    fn a_skipped_pass_is_reported_in_the_boot_event() {
+        let config = Config::default();
+        let outcome = Outcome {
+            decision: Decision::Off("CPython 3.14: unsupported here".to_string()),
+            stats: None,
+        };
+        let value = boot_json(&config, &outcome);
+        assert_eq!(value["event"], "boot");
+        assert_eq!(value["stage"], "preload");
+        assert_eq!(value["immortalize"], "off");
+        assert_eq!(value["immortalized"], 0);
+        assert_eq!(
+            value["immortalize_reason"],
+            "CPython 3.14: unsupported here"
+        );
+        assert!(value.get("immortalize_ms").is_none(), "{value}");
+    }
+
+    #[test]
+    fn a_pass_that_ran_is_reported_in_the_boot_event() {
+        let config = Config::default();
+        let outcome = Outcome {
+            decision: Decision::On,
+            stats: Some(crate::immortal::Stats {
+                objects: 1_610_300,
+                elapsed: Duration::from_secs_f64(1.7854),
+            }),
+        };
+        let value = boot_json(&config, &outcome);
+        assert_eq!(value["immortalize"], "on");
+        assert_eq!(value["immortalized"], 1_610_300);
+        assert!(value.get("immortalize_reason").is_none(), "{value}");
+        let millis = value["immortalize_ms"].as_f64().unwrap();
+        assert!((millis - 1785.4).abs() < 1.0, "{millis}");
+    }
+
+    #[test]
+    fn skipping_immortalisation_warns_once_with_the_reason() {
+        // `BLASTIT_IMMORTALIZE=0` never walks the heap, on any interpreter: the
+        // decision is the setting's, whatever version this is.
+        let config = Config {
+            immortalize: Immortalize::Off,
+            ..Config::default()
+        };
+        Python::initialize();
+        Python::attach(|py| {
+            let (text, outcome) = capture(|emitter| immortalize(py, &config, emitter));
+            assert!(!outcome.decision.is_on());
+            let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+            assert_eq!(lines.len(), 1, "one warn line, got {text:?}");
+            let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+            assert_eq!(value["level"], "warn");
+            assert_eq!(value["event"], "app.output");
+            assert_eq!(value["component"], "init");
+            let line = value["line"].as_str().unwrap();
+            assert!(line.contains("BLASTIT_IMMORTALIZE=0"), "{line}");
+            assert!(line.contains("views will copy"), "{line}");
+        });
     }
 }

@@ -824,11 +824,12 @@ pub struct PartOutOfRange {
 /// the names alone are what lets an operator line the log up with the
 /// manifest.
 ///
-/// The memory fields (`immortalized`, `immortalize_ms`, `mem_total`,
-/// `mem_used`, `max_view_processes`) are the preload phase of §4 and §8
-/// Sizing: how much of the heap was immortalised (§9.2 #7) and how the view
-/// process cap was derived from the machine's memory (§8). They are counts and
-/// byte figures, never content.
+/// The memory fields (`immortalize`, `immortalize_reason`, `immortalized`,
+/// `immortalize_ms`, `mem_total`, `mem_used`, `max_view_processes`) are the
+/// preload phase of §4 and §8 Sizing: whether the heap was immortalised and why
+/// not when it was not, how much of it was (§9.2 #7), and how the view process
+/// cap was derived from the machine's memory (§8). They are counts, byte
+/// figures and interpreter names, never content.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Lifecycle {
     stage: Option<String>,
@@ -836,6 +837,8 @@ pub struct Lifecycle {
     workers: Option<u32>,
     duration_ms: Option<f64>,
     seccomp: Option<bool>,
+    immortalize: Option<bool>,
+    immortalize_reason: Option<String>,
     immortalized: Option<u64>,
     immortalize_ms: Option<f64>,
     mem_total: Option<u64>,
@@ -881,6 +884,28 @@ impl Lifecycle {
     #[must_use]
     pub fn with_seccomp(mut self, seccomp: bool) -> Self {
         self.seccomp = Some(seccomp);
+        self
+    }
+
+    /// Sets whether §9.2 #7's pass ran at all, which the preload `boot` event
+    /// reports as `on` or `off`.
+    ///
+    /// The pass is skipped on an interpreter where its marker is unsafe or
+    /// unknown ([`Self::with_immortalize_reason`]), and a skipped pass looks
+    /// exactly like a run that marked nothing from the outside.
+    #[must_use]
+    pub fn with_immortalize(mut self, immortalize: bool) -> Self {
+        self.immortalize = Some(immortalize);
+        self
+    }
+
+    /// Sets why §9.2 #7's pass was skipped (§9.2 #7).
+    ///
+    /// The reason names the interpreter or the setting that turned it off; it
+    /// is a sentence built by blastit, never a value from the environment.
+    #[must_use]
+    pub fn with_immortalize_reason(mut self, reason: impl Into<String>) -> Self {
+        self.immortalize_reason = Some(reason.into());
         self
     }
 
@@ -955,6 +980,16 @@ impl Lifecycle {
     /// Whether the §7.3 seccomp filters are on, when the event says.
     pub fn seccomp(&self) -> Option<bool> {
         self.seccomp
+    }
+
+    /// Whether §9.2 #7's pass ran, when the event says.
+    pub fn immortalize(&self) -> Option<bool> {
+        self.immortalize
+    }
+
+    /// Why §9.2 #7's pass was skipped, when it was.
+    pub fn immortalize_reason(&self) -> Option<&str> {
+        self.immortalize_reason.as_deref()
     }
 
     /// How many heap objects were made immortal, when the phase did that.
@@ -1566,6 +1601,7 @@ mod tests {
             .with_routes(3)
             .with_workers(16)
             .with_duration_ms(42.5)
+            .with_immortalize(true)
             .with_immortalized(9)
             .with_immortalize_ms(1.5)
             .with_mem_total(1024)
@@ -1577,6 +1613,7 @@ mod tests {
         assert_eq!(lifecycle.routes(), Some(3));
         assert_eq!(lifecycle.workers(), Some(16));
         assert_eq!(lifecycle.duration_ms(), Some(42.5));
+        assert_eq!(lifecycle.immortalize(), Some(true));
         assert_eq!(lifecycle.immortalized(), Some(9));
         assert_eq!(lifecycle.immortalize_ms(), Some(1.5));
         assert_eq!(lifecycle.mem_total(), Some(1024));
@@ -1685,6 +1722,8 @@ mod tests {
         assert_eq!(Lifecycle::default().routes(), None);
         assert_eq!(Lifecycle::default().workers(), None);
         assert_eq!(Lifecycle::default().duration_ms(), None);
+        assert_eq!(Lifecycle::default().immortalize(), None);
+        assert_eq!(Lifecycle::default().immortalize_reason(), None);
         assert_eq!(Lifecycle::default().immortalized(), None);
         assert_eq!(Lifecycle::default().immortalize_ms(), None);
         assert_eq!(Lifecycle::default().mem_total(), None);
