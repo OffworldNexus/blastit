@@ -1,0 +1,94 @@
+name: Live (DigitalOcean)
+
+# The e2e scenario on the real target: App Platform (gVisor) in ams3, with a
+# fresh managed PostgreSQL per run, deleted afterwards (e2e/live.py).
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *" # janitor only
+
+concurrency:
+  group: live-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  live:
+    if: github.event_name != 'schedule'
+    name: live e2e on App Platform (ams3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: do-live
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip without a DigitalOcean token
+        id: token
+        run: |
+          if [ -z "${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}" ]; then
+            echo "No DIGITALOCEAN_ACCESS_TOKEN: skipping the live test." >> "$GITHUB_STEP_SUMMARY"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.token.outputs.present == 'true'
+        id: python
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - if: steps.token.outputs.present == 'true'
+        run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.token.outputs.present == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.token.outputs.present == 'true'
+      - name: Build the image
+        if: steps.token.outputs.present == 'true'
+        run: |
+          cargo build --release -p blastit --locked
+          IMAGE="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')-e2e:${GITHUB_SHA}"
+          docker build -f e2e/Dockerfile.prebuilt -t "$IMAGE" .
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+      - uses: digitalocean/action-doctl@v2
+        if: steps.token.outputs.present == 'true'
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: Deploy, run the scenario, check the logs, delete everything
+        if: steps.token.outputs.present == 'true'
+        run: python e2e/live.py --name "blastit-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --image "$IMAGE"
+        env:
+          GHCR_CREDENTIALS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
+      - name: Cleanup (also on cancel)
+        if: always() && steps.token.outputs.present == 'true'
+        run: python e2e/live.py --cleanup --name "blastit-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-app-log
+          path: e2e/out/
+          if-no-files-found: ignore
+
+  janitor:
+    if: github.event_name == 'schedule'
+    name: delete stale live resources
+    runs-on: ubuntu-latest
+    environment: do-live
+    env:
+      HAS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: digitalocean/action-doctl@v2
+        if: env.HAS_TOKEN == 'true'
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - run: python3 e2e/live.py --janitor --older-than-minutes 90
+        if: env.HAS_TOKEN == 'true'
