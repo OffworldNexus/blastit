@@ -470,8 +470,12 @@ impl Manifest {
     /// on. A proxy whose union allows nothing is absent, because a route with
     /// no grant gets no listener for it at all (§2.2).
     ///
+    /// Grants are returned as written, resolved through their proxy's protocol;
+    /// a caller that only knows `postgresql` narrows them with
+    /// [`Grant::as_postgresql`].
+    ///
     /// An out-of-range index has no grants.
-    pub fn effective_grants(&self, route_index: usize) -> BTreeMap<ProxyName, PgGrant> {
+    pub fn effective_grants(&self, route_index: usize) -> BTreeMap<ProxyName, Grant> {
         let Some(route) = self.routes.get(route_index) else {
             return BTreeMap::new();
         };
@@ -489,12 +493,7 @@ impl Manifest {
 
         merged
             .into_iter()
-            .filter_map(|(proxy, grant)| {
-                grant
-                    .into_postgresql()
-                    .filter(|grant| !grant.is_empty())
-                    .map(|grant| (proxy, grant))
-            })
+            .filter(|(_, grant)| !grant.is_empty())
             .collect()
     }
 

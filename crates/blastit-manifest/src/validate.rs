@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
-use crate::error::{Location, ManifestError, ManifestErrors, ManifestWarning};
+use crate::error::{Location, ManifestError, ManifestErrors, ManifestWarning, regex_message};
 use crate::model::{Manifest, ProxyName};
 use crate::routing::compile_pattern;
 use crate::uid::UidLayout;
@@ -104,18 +104,26 @@ fn check_routes(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
                     route: name.to_string(),
                     rule,
                     pattern: pattern.clone(),
-                    message: error.to_string(),
+                    message: regex_message(&error),
                 });
             }
         }
 
-        for method in route.methods().unwrap_or_default() {
-            if !valid_method(method) {
-                errors.push(ManifestError::InvalidMethod {
-                    route: name.to_string(),
-                    method: method.clone(),
-                });
+        match route.methods() {
+            Some([]) => errors.push(ManifestError::EmptyMethods {
+                route: name.to_string(),
+            }),
+            Some(methods) => {
+                for method in methods {
+                    if !valid_method(method) {
+                        errors.push(ManifestError::InvalidMethod {
+                            route: name.to_string(),
+                            method: method.clone(),
+                        });
+                    }
+                }
             }
+            None => {}
         }
     }
 }

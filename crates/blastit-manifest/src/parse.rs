@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use toml::Value;
 
-use crate::error::{Location, ManifestError, ManifestErrors};
+use crate::error::{Location, ManifestError, ManifestErrors, escape_control};
 use crate::model::{
     Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, UnresolvedGrant,
 };
@@ -41,7 +41,9 @@ pub(crate) fn parse(source: &str) -> Result<Manifest, ManifestErrors> {
     let routes = parser.routes(&document);
     for key in document.keys() {
         if !TOP_LEVEL_KEYS.contains(&key.as_str()) {
-            parser.error(ManifestError::UnknownKey { path: key.clone() });
+            parser.error(ManifestError::UnknownKey {
+                path: escape_control(key),
+            });
         }
     }
 
@@ -64,16 +66,25 @@ fn syntax_error(error: &toml::de::Error, source: &str) -> ManifestError {
     let message = match error.span() {
         Some(span) => {
             let (line, column) = position(source, span.start);
-            format!("{} (line {line}, column {column})", error.message())
+            format!(
+                "{} (line {line}, column {column})",
+                escape_control(error.message())
+            )
         }
-        None => error.message().to_string(),
+        None => escape_control(error.message()),
     };
     ManifestError::Syntax { message }
 }
 
 /// One-based line and column of a byte offset, for a parse error.
+///
+/// The offset comes from the TOML parser and is rounded down to a character
+/// boundary, so a multi-byte character can never split a slice.
 fn position(source: &str, offset: usize) -> (usize, usize) {
-    let offset = offset.min(source.len());
+    let mut offset = offset.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
     let head = &source[..offset];
     let line = head.matches('\n').count() + 1;
     let column = head
@@ -140,7 +151,7 @@ impl Parser {
         };
 
         for (name, value) in table {
-            let path = format!("proxy.{name}");
+            let path = format!("proxy.{}", escape_control(name));
             if name.is_empty() {
                 self.error(ManifestError::Empty {
                     path: "proxy name".to_string(),
@@ -157,7 +168,7 @@ impl Parser {
             let mut input = BTreeMap::new();
             let mut output = BTreeMap::new();
             for (key, value) in fields {
-                let key_path = format!("{path}.{key}");
+                let key_path = format!("{path}.{}", escape_control(key));
                 match key.as_str() {
                     "protocol" => {
                         has_protocol = true;
@@ -211,7 +222,7 @@ impl Parser {
         };
 
         for (name, value) in table {
-            let path = format!("group.{name}");
+            let path = format!("group.{}", escape_control(name));
             if name.is_empty() {
                 self.error(ManifestError::Empty {
                     path: "group name".to_string(),
@@ -225,7 +236,7 @@ impl Parser {
             let location = Location::Group(name.clone());
             let mut grants = BTreeMap::new();
             for (proxy, value) in fields {
-                let grant_path = format!("{path}.{proxy}");
+                let grant_path = format!("{path}.{}", escape_control(proxy));
                 if let Some((proxy, grant)) =
                     self.resolve_grant(&grant_path, value, proxy, location.clone())
                 {
@@ -265,7 +276,7 @@ impl Parser {
             let mut egress = false;
             let mut prefork = false;
             for (key, value) in fields {
-                let key_path = format!("{path}.{key}");
+                let key_path = format!("{path}.{}", escape_control(key));
                 match key.as_str() {
                     "name" => {
                         has_name = true;
@@ -311,7 +322,7 @@ impl Parser {
                 if ROUTE_KEYS.contains(&key.as_str()) {
                     continue;
                 }
-                let grant_path = format!("{path}.{key}");
+                let grant_path = format!("{path}.{}", escape_control(key));
                 if let Some((proxy, grant)) =
                     self.resolve_grant(&grant_path, value, key, location.clone())
                 {
@@ -381,7 +392,7 @@ impl Parser {
         let mut queries = Vec::new();
         let mut transaction_control = false;
         for (key, value) in table {
-            let key_path = format!("{path}.{key}");
+            let key_path = format!("{path}.{}", escape_control(key));
             match key.as_str() {
                 "queries" => {
                     if let Some(list) = self.string_list(Some(value), &key_path) {
@@ -435,7 +446,7 @@ impl Parser {
                 });
                 continue;
             }
-            let entry_path = format!("{path}.{key}");
+            let entry_path = format!("{path}.{}", escape_control(key));
             let Some(entry) = self.as_str(value, &entry_path) else {
                 continue;
             };
@@ -527,6 +538,8 @@ fn type_name(value: &Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::position;
 
     #[test]
@@ -535,5 +548,16 @@ mod tests {
         assert_eq!(position("abc", 2), (1, 3));
         assert_eq!(position("a\nbc", 3), (2, 2));
         assert_eq!(position("a\nbc", 99), (2, 3));
+    }
+
+    #[test]
+    fn position_rounds_down_to_a_char_boundary() {
+        // "café": the `é` occupies bytes 3 and 4, so byte 4 is inside it.
+        assert_eq!(position("café", 4), (1, 4));
+        assert_eq!(position("café", 5), (1, 6));
+        assert_eq!(position("é", 1), (1, 1));
+        assert_eq!(position("a\né", 3), (2, 1));
+        // Far past the end: clamped to the length of the text.
+        assert_eq!(position("é", 99), (1, 3));
     }
 }

@@ -18,6 +18,9 @@
 //! crates: this one keeps `input`, `output` and `queries` as raw strings
 //! (§5.1, §5.2).
 //!
+//! Errors render on one line: control characters are escaped and long values
+//! are cut short, so a manifest problem never breaks the event stream (§8.1).
+//!
 //! ```
 //! use blastit_manifest::{Manifest, Match, RoutingTable};
 //!
@@ -40,7 +43,7 @@
 //! ;
 //! assert_eq!(manifest.validate(20_000).expect("valid"), vec![]);
 //!
-//! let table = RoutingTable::try_new(&manifest).expect("valid");
+//! let table = RoutingTable::new(&manifest).expect("valid");
 //! assert_eq!(table.route("GET", "/about/"), Some(Match { route: 0, rule: 0 }));
 //! assert_eq!(table.route("GET", "/elsewhere"), None);
 //! ```
@@ -56,5 +59,5 @@ mod validate;
 
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning};
 pub use model::{Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route};
-pub use routing::{Match, REGEX_SIZE_LIMIT, RoutingTable};
+pub use routing::{Match, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable};
 pub use uid::UidLayout;

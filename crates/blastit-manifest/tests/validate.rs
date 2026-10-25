@@ -224,6 +224,19 @@ fn methods_must_be_uppercase_http_tokens() {
 }
 
 #[test]
+fn methods_must_not_be_an_empty_list() {
+    let source = "version = 1\n\
+                  [[route]]\nname = \"about\"\npath = ['.*']\nmethods = []\n";
+    assert_eq!(
+        validate_errors(source, 20_000),
+        ManifestErrors::from(ManifestError::EmptyMethods {
+            route: "about".to_string(),
+        }),
+        "an explicit empty filter would make the route unreachable"
+    );
+}
+
+#[test]
 fn valid_methods_are_accepted() {
     let source = "version = 1\n\
                   [[route]]\nname = \"about\"\npath = ['.*']\nmethods = [\"GET\", \"HEAD\", \"MKCOL\", \"M-SEARCH\"]\n";

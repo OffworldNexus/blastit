@@ -2,7 +2,7 @@
 
 use regex::{Regex, RegexBuilder};
 
-use crate::error::{ManifestError, ManifestErrors};
+use crate::error::{ManifestError, ManifestErrors, regex_message};
 use crate::model::Manifest;
 
 /// Largest compiled size of one path regex.
@@ -11,15 +11,31 @@ use crate::model::Manifest;
 /// bounded compile keeps a pathological pattern from ballooning the scheduler.
 pub const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
+/// Deepest nesting of groups in one path regex.
+///
+/// A path pattern has no business being deeply nested, and bounding it keeps a
+/// pathological one from making the parser work hard.
+pub const REGEX_NEST_LIMIT: u32 = 64;
+
+/// A regex builder with the limits blastit applies to manifest regexes.
+fn builder(pattern: &str) -> RegexBuilder {
+    let mut builder = RegexBuilder::new(pattern);
+    builder.size_limit(REGEX_SIZE_LIMIT);
+    builder.dfa_size_limit(REGEX_SIZE_LIMIT);
+    builder.nest_limit(REGEX_NEST_LIMIT);
+    builder
+}
+
 /// Compiles a path pattern anchored to a full match (§6).
 ///
-/// The manifest's regexes carry no anchors of their own: `path = ['.*']` is a
-/// catch-all, and `path = ['/about/']` matches `/about/` and nothing else.
+/// The pattern is compiled twice. First on its own: wrapping a pattern in a
+/// group rescues a malformed one — it makes `x)|(.*` a valid, and dangerous,
+/// catch-all — so an unbalanced pattern has to be rejected before it is
+/// wrapped. Then as `^(?:pattern)$`, so it has to match the whole of
+/// `PATH_INFO` rather than any part of it.
 pub(crate) fn compile_pattern(pattern: &str) -> Result<Regex, regex::Error> {
-    RegexBuilder::new(&format!("^(?:{pattern})$"))
-        .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_SIZE_LIMIT)
-        .build()
+    builder(pattern).build()?;
+    builder(&format!("^(?:{pattern})$")).build()
 }
 
 /// The routing decision: which route, and which of its path rules, matched
@@ -36,7 +52,7 @@ pub struct Match {
 #[derive(Debug)]
 struct CompiledRoute {
     methods: Option<Vec<String>>,
-    rules: Vec<Option<Regex>>,
+    rules: Vec<Regex>,
 }
 
 /// The manifest's routes, with their path regexes compiled (§2.4).
@@ -48,55 +64,36 @@ pub struct RoutingTable {
 impl RoutingTable {
     /// Compiles the manifest's routing table.
     ///
-    /// A pattern that does not compile is skipped, so it can never match:
-    /// [`Manifest::validate`] rejects such a manifest before the scheduler ever
-    /// gets here, and [`RoutingTable::try_new`] reports the failures instead.
-    pub fn new(manifest: &Manifest) -> Self {
-        Self::compile(manifest, &mut Vec::new())
-    }
-
-    /// Compiles the manifest's routing table, reporting patterns that do not
-    /// compile.
-    pub fn try_new(manifest: &Manifest) -> Result<Self, ManifestErrors> {
+    /// Every pattern has to compile, so a manifest that is not
+    /// [`validated`](Manifest::validate) first still fails here rather than
+    /// routing requests by accident.
+    pub fn new(manifest: &Manifest) -> Result<Self, ManifestErrors> {
         let mut errors = Vec::new();
-        let table = Self::compile(manifest, &mut errors);
+        let mut routes = Vec::with_capacity(manifest.route_count());
+        for route in manifest.routes() {
+            let mut rules = Vec::with_capacity(route.path().len());
+            for (rule, pattern) in route.path().iter().enumerate() {
+                match compile_pattern(pattern) {
+                    Ok(regex) => rules.push(regex),
+                    Err(error) => errors.push(ManifestError::InvalidRegex {
+                        route: route.name().to_string(),
+                        rule,
+                        pattern: pattern.clone(),
+                        message: regex_message(&error),
+                    }),
+                }
+            }
+            routes.push(CompiledRoute {
+                methods: route.methods().map(<[String]>::to_vec),
+                rules,
+            });
+        }
+
         if errors.is_empty() {
-            Ok(table)
+            Ok(Self { routes })
         } else {
             Err(ManifestErrors::from(errors))
         }
-    }
-
-    /// The compiled table, collecting compile failures.
-    fn compile(manifest: &Manifest, errors: &mut Vec<ManifestError>) -> Self {
-        let routes = manifest
-            .routes()
-            .iter()
-            .map(|route| {
-                let rules = route
-                    .path()
-                    .iter()
-                    .enumerate()
-                    .map(|(rule, pattern)| match compile_pattern(pattern) {
-                        Ok(regex) => Some(regex),
-                        Err(error) => {
-                            errors.push(ManifestError::InvalidRegex {
-                                route: route.name().to_string(),
-                                rule,
-                                pattern: pattern.clone(),
-                                message: error.to_string(),
-                            });
-                            None
-                        }
-                    })
-                    .collect();
-                CompiledRoute {
-                    methods: route.methods().map(<[String]>::to_vec),
-                    rules,
-                }
-            })
-            .collect();
-        Self { routes }
     }
 
     /// Matches a request against the table, in manifest order: the first route
@@ -117,7 +114,7 @@ impl RoutingTable {
     ///      [[route]]\nname = \"fallback\"\npath = ['.*']\n",
     /// )
     /// .unwrap();
-    /// let table = RoutingTable::try_new(&manifest).unwrap();
+    /// let table = RoutingTable::new(&manifest).unwrap();
     ///
     /// assert_eq!(table.route("GET", "/about/"), Some(Match { route: 0, rule: 0 }));
     /// assert_eq!(table.route("GET", "/about/x"), Some(Match { route: 1, rule: 0 }));
@@ -130,10 +127,7 @@ impl RoutingTable {
                 continue;
             }
             for (rule, pattern) in compiled.rules.iter().enumerate() {
-                if pattern
-                    .as_ref()
-                    .is_some_and(|pattern| pattern.is_match(path_info))
-                {
+                if pattern.is_match(path_info) {
                     return Some(Match { route, rule });
                 }
             }
@@ -158,5 +152,48 @@ mod tests {
         let catch_all = compile_pattern(".*").expect("valid");
         assert!(catch_all.is_match(""));
         assert!(catch_all.is_match("/anything/at/all"));
+    }
+
+    #[test]
+    fn alternatives_stay_inside_the_wrapper() {
+        // Without the non-capturing group, `a|ab` would match `a` and stop.
+        let pattern = compile_pattern("a|ab").expect("valid");
+        assert!(pattern.is_match("ab"));
+        assert!(pattern.is_match("a"));
+        assert!(!pattern.is_match("aba"));
+
+        let grouped = compile_pattern("(a)").expect("valid");
+        assert!(grouped.is_match("a"));
+        assert!(!grouped.is_match("aa"));
+    }
+
+    #[test]
+    fn unbalanced_patterns_are_rejected_before_they_are_wrapped() {
+        // `x)|(.*` would become `^(?:x)|(.*)$`: a catch-all. `a)|(b` would
+        // match a prefix or a suffix. Both are malformed on their own.
+        for pattern in ["x)|(.*", "a)|(b", ")", "(", "a)b(c"] {
+            assert!(
+                compile_pattern(pattern).is_err(),
+                "{pattern:?} must not compile"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_flags_cannot_widen_the_anchor() {
+        // Flag groups are scoped to the group they are written in, so `(?m)`
+        // inside the wrapper cannot turn the trailing `$` into a line anchor.
+        let pattern = compile_pattern("(?m).*a").expect("valid");
+        assert!(pattern.is_match("a"));
+        assert!(pattern.is_match("ba"));
+        assert!(!pattern.is_match("a\n"));
+        assert!(!pattern.is_match("b\na"));
+    }
+
+    #[test]
+    fn deeply_nested_patterns_are_rejected() {
+        let deep = format!("{}a{}", "(?:".repeat(200), ")".repeat(200));
+        let error = compile_pattern(&deep).expect_err("nesting is bounded");
+        assert!(error.to_string().contains("nested parentheses"), "{error}");
     }
 }

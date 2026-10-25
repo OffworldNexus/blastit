@@ -6,7 +6,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use blastit_manifest::{Manifest, PgGrant, ProxyName};
+use blastit_manifest::{Grant, Manifest, PgGrant, ProxyName};
 
 use common::{section_6, texts};
 
@@ -18,14 +18,12 @@ const CHECKOUT_INSERT: &str =
 const ABOUT_SELECT: &str =
     r#"SELECT "cms_page"."body" FROM "cms_page" WHERE "cms_page"."slug" = $1 LIMIT 21"#;
 
-/// The one grant in a single-proxy result.
-fn db_grant(grants: BTreeMap<ProxyName, PgGrant>) -> PgGrant {
+/// The one grant in a single-proxy result, narrowed to `postgresql`.
+fn db_grant(grants: BTreeMap<ProxyName, Grant>) -> PgGrant {
     assert_eq!(grants.len(), 1, "only proxy \"db\": {grants:?}");
-    grants
-        .into_iter()
-        .next()
-        .map(|(_, grant)| grant)
-        .expect("proxy db")
+    let (name, grant) = grants.into_iter().next().expect("proxy db");
+    assert_eq!(name, ProxyName::from("db"));
+    grant.into_postgresql().expect("a postgresql grant")
 }
 
 #[test]

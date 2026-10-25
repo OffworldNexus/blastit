@@ -399,6 +399,77 @@ fn broken_toml_is_a_syntax_error_with_a_position() {
 }
 
 #[test]
+fn syntax_errors_after_non_ascii_text_stay_on_one_line() {
+    for source in [
+        "version = 1\n# café ☕\nversion = 1\n",
+        "version = 1\n\"café\" = \"☕\"\n\"café\" = \"☕\"\n",
+        "version = 1\ncafé = ☕\n",
+        "version = 1\nname = \"ok\"\n\u{0}\n",
+    ] {
+        let errors = parse_errors(source);
+        let rendered = errors.to_string();
+        assert!(
+            rendered.starts_with("manifest has 1 error(s)"),
+            "{source:?} -> {rendered}"
+        );
+        for line in rendered.lines() {
+            assert!(
+                line.starts_with("manifest has 1 error(s)") || line.starts_with("  - "),
+                "{source:?} -> {rendered}"
+            );
+        }
+        let single = errors.errors()[0].to_string();
+        assert!(!single.contains('\n'), "{source:?} -> {single}");
+    }
+}
+
+#[test]
+fn control_characters_in_names_and_keys_are_escaped() {
+    // A quoted TOML key may hold a newline; the error must not carry it.
+    let source = "version = 1\n[[route]]\nname = \"bad\\nname\"\npath = ['.*']\n";
+    let manifest = Manifest::from_toml_str(source).expect("parses");
+    let errors = manifest.validate(20_000).expect_err("invalid route name");
+    let rendered = errors.errors()[0].to_string();
+    assert!(!rendered.contains('\n'), "{rendered:?}");
+    assert!(
+        rendered.contains(r#"invalid name "bad\nname""#),
+        "{rendered}"
+    );
+
+    let source = "version = 1\n[proxy.\"a\\nb\"]\nprotocol = \"postgresql\"\noops = 1\n";
+    let errors = parse_errors(source);
+    let rendered = errors.errors()[0].to_string();
+    assert!(
+        rendered.contains(r#"proxy.a\nb.oops: unknown key"#),
+        "{rendered}"
+    );
+    assert!(!rendered.contains('\n'));
+}
+
+#[test]
+fn long_patterns_are_cut_short_in_messages_but_kept_in_the_error() {
+    let pattern = format!("[{}", "a".repeat(400));
+    let source = format!("version = 1\n[[route]]\nname = \"about\"\npath = ['{pattern}']\n");
+    let manifest = Manifest::from_toml_str(&source).expect("parses");
+    let errors = manifest.validate(20_000).expect_err("not a regex");
+    match &errors.errors()[0] {
+        ManifestError::InvalidRegex {
+            pattern: reported, ..
+        } => assert_eq!(reported, &pattern, "the error keeps the pattern as written"),
+        other => panic!("unexpected error {other:?}"),
+    }
+
+    let rendered = errors.errors()[0].to_string();
+    assert!(rendered.contains('…'), "{rendered}");
+    assert!(!rendered.contains('\n'), "{rendered}");
+    assert!(rendered.len() < 220, "still short: {rendered}");
+    assert!(
+        !rendered.contains(&"a".repeat(200)),
+        "the pattern is cut in the message"
+    );
+}
+
+#[test]
 fn every_problem_is_collected_and_listed() {
     let source = "version = 1\n\
                   first = 1\n\

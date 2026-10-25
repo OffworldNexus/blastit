@@ -2,8 +2,59 @@
 //! non-fatal warnings (§6).
 
 use std::fmt;
+use std::fmt::Write as _;
 
 use crate::model::ProxyName;
+
+/// Longest value quoted in an error message before it is cut short.
+pub(crate) const MAX_QUOTED_CHARS: usize = 120;
+
+/// Escapes control characters, so a name or a path never breaks a line.
+pub(crate) fn escape_control(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            character if character.is_control() => {
+                let _ = write!(out, "\\u{{{:x}}}", character as u32);
+            }
+            character => out.push(character),
+        }
+    }
+    out
+}
+
+/// Renders a name, path or pattern for an error message: quoted, with control
+/// characters escaped and long values cut to [`MAX_QUOTED_CHARS`] characters.
+pub(crate) fn quoted(value: impl fmt::Display) -> String {
+    let text = value.to_string();
+    let cut = text.char_indices().nth(MAX_QUOTED_CHARS).map(|(at, _)| at);
+    let mut out = String::with_capacity(text.len() + 3);
+    out.push('"');
+    match cut {
+        Some(at) => {
+            out.push_str(&escape_control(&text[..at]));
+            out.push('…');
+        }
+        None => out.push_str(&escape_control(&text)),
+    }
+    out.push('"');
+    out
+}
+
+/// A regex compile failure as a single line: the `regex` crate reports syntax
+/// errors with a source excerpt, and the last line is the actual problem.
+pub(crate) fn regex_message(error: &regex::Error) -> String {
+    let text = error.to_string();
+    let last = text
+        .lines()
+        .last()
+        .map_or(text.as_str(), |line| line)
+        .trim();
+    escape_control(last)
+}
 
 /// Where in the manifest something sits, so an error can name it precisely.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,8 +76,10 @@ impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Global => f.write_str("global groups"),
-            Self::Group(group) => write!(f, "group \"{group}\""),
-            Self::Route { index, name } => write!(f, "route \"{name}\" (index {index})"),
+            Self::Group(group) => write!(f, "group {}", quoted(group)),
+            Self::Route { index, name } => {
+                write!(f, "route {} (index {index})", quoted(name))
+            }
         }
     }
 }
@@ -37,6 +90,9 @@ impl fmt::Display for Location {
 /// [`ManifestError::UnknownKey`], [`ManifestError::WrongType`]…); validation
 /// reports the ones that need the whole document
 /// ([`ManifestError::UnknownGroup`], [`ManifestError::InvalidRegex`]…).
+///
+/// [`Display`](fmt::Display) always renders one line, whatever the manifest
+/// contains.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ManifestError {
     /// The source is not valid TOML.
@@ -84,7 +140,7 @@ pub enum ManifestError {
         path: String,
     },
     /// `protocol` names something this build does not have (§5.1).
-    #[error("proxy \"{proxy}\": unknown protocol {protocol:?} (known: \"postgresql\")")]
+    #[error("proxy {}: unknown protocol {} (known: \"postgresql\")", quoted(.proxy), quoted(.protocol))]
     UnknownProtocol {
         /// The proxy being declared.
         proxy: String,
@@ -92,7 +148,7 @@ pub enum ManifestError {
         protocol: String,
     },
     /// A group is referenced where it was never declared (§6).
-    #[error("{location}: unknown group \"{group}\"")]
+    #[error("{location}: unknown group {}", quoted(.group))]
     UnknownGroup {
         /// Where the group is referenced.
         location: Location,
@@ -100,7 +156,7 @@ pub enum ManifestError {
         group: String,
     },
     /// A grant names a proxy that has no `[proxy.<name>]` section (§5.1, §6).
-    #[error("{location}: grant on unknown proxy \"{proxy}\"")]
+    #[error("{location}: grant on unknown proxy {}", quoted(.proxy))]
     GrantOnUnknownProxy {
         /// Where the grant is written.
         location: Location,
@@ -109,7 +165,10 @@ pub enum ManifestError {
     },
     /// Two routes share a name; routes are addressed by name in the logs and by
     /// index in the uid table, so a duplicate is ambiguous.
-    #[error("duplicate route name \"{name}\" (routes {first} and {second})")]
+    #[error(
+        "duplicate route name {} (routes {first} and {second})",
+        quoted(.name)
+    )]
     DuplicateRouteName {
         /// The duplicated name.
         name: String,
@@ -119,7 +178,10 @@ pub enum ManifestError {
         second: usize,
     },
     /// A route name does not match `[a-z0-9][a-z0-9_-]*`.
-    #[error("route {index}: invalid name {name:?}; must match [a-z0-9][a-z0-9_-]*")]
+    #[error(
+        "route {index}: invalid name {}; must match [a-z0-9][a-z0-9_-]*",
+        quoted(.name)
+    )]
     InvalidRouteName {
         /// Index of the route in the manifest.
         index: usize,
@@ -127,13 +189,16 @@ pub enum ManifestError {
         name: String,
     },
     /// A route lists no path regexes at all, so nothing can ever reach it.
-    #[error("route \"{route}\": path must list at least one regex")]
+    #[error("route {}: path must list at least one regex", quoted(.route))]
     EmptyPath {
         /// The route's name.
         route: String,
     },
     /// A route lists an empty path regex, which would only match an empty path.
-    #[error("route \"{route}\" rule {rule}: the path regex must not be empty")]
+    #[error(
+        "route {} rule {rule}: the path regex must not be empty",
+        quoted(.route)
+    )]
     EmptyPattern {
         /// The route's name.
         route: String,
@@ -141,7 +206,11 @@ pub enum ManifestError {
         rule: usize,
     },
     /// A path regex does not compile (§6).
-    #[error("route \"{route}\" rule {rule}: invalid regex {pattern:?}: {message}")]
+    #[error(
+        "route {} rule {rule}: invalid regex {}: {message}",
+        quoted(.route),
+        quoted(.pattern)
+    )]
     InvalidRegex {
         /// The route's name.
         route: String,
@@ -149,18 +218,29 @@ pub enum ManifestError {
         rule: usize,
         /// The pattern as written.
         pattern: String,
-        /// The regex engine's message.
+        /// The regex engine's message, on one line.
         message: String,
     },
     /// A method is not an uppercase HTTP method token.
     #[error(
-        "route \"{route}\": invalid method {method:?}; expected an uppercase HTTP method token"
+        "route {}: invalid method {}; expected an uppercase HTTP method token",
+        quoted(.route),
+        quoted(.method)
     )]
     InvalidMethod {
         /// The route's name.
         route: String,
         /// The offending method token.
         method: String,
+    },
+    /// A route lists methods but none of them, so it can never be reached.
+    #[error(
+        "route {}: methods must list at least one method, or be left out",
+        quoted(.route)
+    )]
+    EmptyMethods {
+        /// The route's name.
+        route: String,
     },
     /// The route's uid would leave the range blastit stays in (§2).
     #[error(
@@ -194,14 +274,17 @@ pub enum ManifestError {
 pub enum ManifestWarning {
     /// A `[group.<name>]` that no route and no global `groups` entry
     /// references: it grants nothing.
-    #[error("group \"{group}\" is attached to no route and no global groups: it grants nothing")]
+    #[error(
+        "group {} is attached to no route and no global groups: it grants nothing",
+        quoted(.group)
+    )]
     UnattachedGroup {
         /// The group's name.
         group: String,
     },
     /// A proxy that no route and no group grants: it is declared, but nothing
     /// may use it, so its variables never reach the app.
-    #[error("proxy \"{proxy}\" has no grant in any route or group: it is unusable")]
+    #[error("proxy {} has no grant in any route or group: it is unusable", quoted(.proxy))]
     UngrantedProxy {
         /// The proxy's name.
         proxy: ProxyName,
