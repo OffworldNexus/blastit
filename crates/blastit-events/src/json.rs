@@ -191,6 +191,21 @@ fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static
     if let Some(seccomp) = lifecycle.seccomp {
         push_member(out, "seccomp", &json_bool(seccomp));
     }
+    if let Some(immortalized) = lifecycle.immortalized {
+        push_member(out, "immortalized", &immortalized.to_string());
+    }
+    if let Some(immortalize_ms) = lifecycle.immortalize_ms {
+        push_member(out, "immortalize_ms", &json_f64(immortalize_ms));
+    }
+    if let Some(mem_total) = lifecycle.mem_total {
+        push_member(out, "mem_total", &mem_total.to_string());
+    }
+    if let Some(mem_used) = lifecycle.mem_used {
+        push_member(out, "mem_used", &mem_used.to_string());
+    }
+    if let Some(max_view_processes) = lifecycle.max_view_processes {
+        push_member(out, "max_view_processes", &max_view_processes.to_string());
+    }
     // `outputs` is written even when it was emptied, so that a `truncated`
     // entry always refers to a member that is there.
     if !lifecycle.outputs.is_empty() || truncated.contains(&"outputs") {
@@ -628,6 +643,44 @@ mod tests {
         let value = parse(&json);
         assert_eq!(value["seccomp"], serde_json::json!(false));
         assert_eq!(value["outputs"]["db"][0], "DATABASE_URL");
+
+        // §8 Sizing and §9.2 #7: the preload phase of `boot` reports the
+        // immortalisation and the memory the view cap was derived from.
+        let preload = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("preload")
+                .with_immortalized(1_610_300)
+                .with_immortalize_ms(1785.4)
+                .with_mem_total(1_073_741_824)
+                .with_mem_used(203_423_744)
+                .with_max_view_processes(22),
+        ));
+        let json = encode_json(&preload);
+        assert_eq!(
+            top_level_keys(&json),
+            [
+                "ts",
+                "level",
+                "event",
+                "component",
+                "stage",
+                "immortalized",
+                "immortalize_ms",
+                "mem_total",
+                "mem_used",
+                "max_view_processes",
+            ]
+        );
+        let value = parse(&json);
+        assert_eq!(value["immortalized"], 1_610_300);
+        assert_eq!(value["immortalize_ms"], 1785.4);
+        assert_eq!(value["mem_total"], 1_073_741_824);
+        assert_eq!(value["mem_used"], 203_423_744);
+        assert_eq!(value["max_view_processes"], 22);
+        assert!(value["immortalized"].is_u64(), "a count, not a float");
+        assert!(value["mem_total"].is_u64(), "byte counts are integers");
+        assert!(value["mem_used"].is_u64());
+        assert!(value["max_view_processes"].is_u64());
 
         let output = fixture::event(EventKind::AppOutput(AppOutput::new(Stream::Stdout, "hi")));
         assert_eq!(

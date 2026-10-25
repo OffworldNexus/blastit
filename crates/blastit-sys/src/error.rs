@@ -109,6 +109,25 @@ pub enum Error {
         source: io::Error,
     },
 
+    /// A memory figure behind §8 Sizing's derived view cap could not be read.
+    #[error("cannot read {path}: {detail}")]
+    MemoryFigure {
+        /// The file that was read.
+        path: PathBuf,
+        /// What was wrong with it.
+        detail: &'static str,
+    },
+
+    /// A file behind §8 Sizing's derived view cap could not be read at all.
+    #[error("cannot read {}", path.display())]
+    MemoryUnreadable {
+        /// The file that could not be read.
+        path: PathBuf,
+        /// The `errno` it reported.
+        #[source]
+        source: io::Error,
+    },
+
     /// [`crate::install`] was called from a process that had more than one
     /// thread (ARCHITECTURE.md §7.3).
     #[error(

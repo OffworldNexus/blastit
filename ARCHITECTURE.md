@@ -876,13 +876,33 @@ writes to gets copied (§9.2). So:
   hit cost memory. Views marked `prefork = true` in the manifest are forked at
   startup, which removes the first-hit fork latency (12–60 ms on DO).
 * `BLASTIT_MAX_VIEW_PROCESSES` caps the number of live view processes. When a
-  new one is needed, the least-recently-used idle one is retired. The default
-  is derived at startup as `(MemTotal − usage after preload − reserve) /
-  BLASTIT_VIEW_MEM_ESTIMATE`. On DO, `MemTotal` *is* the instance size and
-  the cgroup v1 `memory.usage_in_bytes` is accurate.
-* The scheduler also watches aggregate usage, which is the only reliable
-  number (`VmRSS` doesn't move under gVisor). Above
-  `BLASTIT_MEM_HIGH_WATERMARK`, it retires idle view processes oldest-first.
+  new one is needed, the least-recently-used idle one is retired, and the eager
+  or `prefork` burst at startup is bounded by the same cap instead of forking
+  every route the manifest names. The default is
+  `max(1, (total − usage after preload − reserve) / BLASTIT_VIEW_MEM_ESTIMATE)`:
+  at least one view process, because a cap of zero would refuse every request.
+  The reserve is `max(64 MiB, 10 % of total)`, kept for the kernel, the
+  platform's agents and the next fork. The scheduler takes that reading twice —
+  once before the burst, which is *before* init has finished preloading, and
+  again at the first view process init reports, which is the first moment §4's
+  "usage after preload" exists — so a burst that turns out too big for the
+  second reading is trimmed as later views are needed. When the machine's
+  memory cannot be read at all there is no derived cap, and init says so once,
+  as a `warn` line of its own output (§8.1).
+* `total` is `min(MemTotal, cgroup limit)` and `used` is the cgroup's own
+  accounting: on DO, `MemTotal` *is* the instance size and the cgroup v1
+  `memory.usage_in_bytes` is accurate (§9.2 #8). The sources, in order, are
+  `/proc/meminfo` (`MemTotal`, with `MemTotal − MemAvailable` as the fallback
+  for `used`), cgroup v2 `/sys/fs/cgroup/memory.max` and `memory.current`, then
+  cgroup v1 `/sys/fs/cgroup/memory/memory.limit_in_bytes` and
+  `memory/memory.usage_in_bytes`. `max` — or v1's page-rounded `LONG_MAX` —
+  means "no limit". The `boot` event reports `mem_total`, `mem_used` and the
+  `max_view_processes` they buy, so the sizing decision is in the log.
+* The scheduler also watches aggregate usage on its own, which is the only
+  reliable number (`VmRSS` doesn't move under gVisor). Above
+  `BLASTIT_MEM_HIGH_WATERMARK` (a percentage of `total`) it checks every 2
+  seconds and retires **one** idle view process per check, oldest-first; a view
+  with a request in flight is never retired for memory.
 
 ### 8.1 Logs
 
@@ -936,6 +956,12 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 | `app.output` | init | info (stdout) / warn (stderr) | `stream`, `line`, `part`, `parts` | the app or a library printed something |
 | `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, the rendered output variable *names* per proxy (never values), the warning text (for example an unattached group) | lifecycle of the whole server |
 
+The `boot` event of the **`preload`** stage is the one that says what the app
+cost before the fork: `immortalized` and `immortalize_ms` for §9.2 #7's pass
+over the heap, and the memory the view process cap was derived from —
+`mem_total`, `mem_used` and `max_view_processes` (§8 Sizing). Byte counts are
+integers.
+
 **Data that is never logged:** query strings, header values, request and
 response bodies, and SQL parameter values. They routinely carry personal data
 and secrets. `path` is the routed `PATH_INFO`.
@@ -966,11 +992,13 @@ with `request` events.
 | `BLASTIT_VIEW_IDLE_TIMEOUT` / `BLASTIT_VIEW_MAX_REQUESTS` | `600s` / `0` (off) | view process recycling |
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | live view process cap (LRU retirement) |
 | `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | expected cost per view process, used for the cap |
-| `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `MemTotal`; above it, idle view processes are retired |
+| `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total` (the smaller of `MemTotal` and the cgroup limit); above it, one idle view process per 2 s check is retired |
 | `BLASTIT_MAX_HEADER_BYTES` / `BLASTIT_MAX_BODY_BYTES` | `64 KiB` / `100 MiB` | HTTP limits |
 | `BLASTIT_HEADER_TIMEOUT` / `BLASTIT_KEEPALIVE_TIMEOUT` | `10s` / `75s` | HTTP timeouts (keep-alive above the LB's) |
 | `BLASTIT_TRUST_FORWARDED` | `1` | trust `X-Forwarded-*` from the LB |
 | `BLASTIT_HEALTH_PATH` | `/_blastit/health` | answered by the scheduler |
+| `BLASTIT_BACKLOG` | `1024` | TCP listen backlog init binds with (§3) |
+| `BLASTIT_MAX_CONNECTIONS` | `1024` | client connections http serves at once; sizes http's `RLIMIT_NOFILE` |
 | `BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` | `= MAX_WORKERS` | upstream connection cap of proxy `<NAME>` (upper-cased) |
 | `BLASTIT_ENV_STRIP` | — | extra variables hidden from the app |
 | `BLASTIT_SECCOMP` | `1` | the §7.3 filters (verified on DO) |
@@ -1027,7 +1055,7 @@ is written up in
 7. **Immortalizing the preloaded heap fixes it.** Before `gc.freeze()`, init
    walks every reachable object (`gc.get_objects()` plus `gc.get_referents()`)
    and sets the low 32 bits of `ob_refcnt` to `0xFFFFFFFF`, which is CPython
-   3.12/3.13's immortal marker on 64-bit (PEP 683). Incref and decref then
+   3.12–3.14's immortal marker on 64-bit (PEP 683). Incref and decref then
    never write to those objects. Measured on DO:
 
    | per-child cost on DO | plain | immortalized |

@@ -129,6 +129,8 @@ mod seccomp;
 mod signal;
 mod sock;
 
+pub mod mem;
+
 #[cfg(test)]
 mod testutil;
 

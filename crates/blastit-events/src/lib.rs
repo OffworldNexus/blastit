@@ -820,6 +820,12 @@ pub struct PartOutOfRange {
 /// the secret the proxy exists to hide (§5), so it must not reach this type;
 /// the names alone are what lets an operator line the log up with the
 /// manifest.
+///
+/// The memory fields (`immortalized`, `immortalize_ms`, `mem_total`,
+/// `mem_used`, `max_view_processes`) are the preload phase of §4 and §8
+/// Sizing: how much of the heap was immortalised (§9.2 #7) and how the view
+/// process cap was derived from the machine's memory (§8). They are counts and
+/// byte figures, never content.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Lifecycle {
     stage: Option<String>,
@@ -827,6 +833,11 @@ pub struct Lifecycle {
     workers: Option<u32>,
     duration_ms: Option<f64>,
     seccomp: Option<bool>,
+    immortalized: Option<u64>,
+    immortalize_ms: Option<f64>,
+    mem_total: Option<u64>,
+    mem_used: Option<u64>,
+    max_view_processes: Option<u32>,
     outputs: BTreeMap<String, Vec<String>>,
 }
 
@@ -870,6 +881,41 @@ impl Lifecycle {
         self
     }
 
+    /// Sets how many heap objects were made immortal (§9.2 #7).
+    #[must_use]
+    pub fn with_immortalized(mut self, objects: u64) -> Self {
+        self.immortalized = Some(objects);
+        self
+    }
+
+    /// Sets how long the immortalisation pass took, in milliseconds (§9.2 #7).
+    #[must_use]
+    pub fn with_immortalize_ms(mut self, immortalize_ms: f64) -> Self {
+        self.immortalize_ms = Some(immortalize_ms);
+        self
+    }
+
+    /// Sets the machine's total memory, in bytes (§8 Sizing).
+    #[must_use]
+    pub fn with_mem_total(mut self, mem_total: u64) -> Self {
+        self.mem_total = Some(mem_total);
+        self
+    }
+
+    /// Sets the memory in use when the cap was derived, in bytes (§8 Sizing).
+    #[must_use]
+    pub fn with_mem_used(mut self, mem_used: u64) -> Self {
+        self.mem_used = Some(mem_used);
+        self
+    }
+
+    /// Sets the live view process cap in force (§8 Sizing).
+    #[must_use]
+    pub fn with_max_view_processes(mut self, cap: u32) -> Self {
+        self.max_view_processes = Some(cap);
+        self
+    }
+
     /// Records that proxy `proxy` will see an output variable called `name`.
     ///
     /// `name` is the variable *name*; passing the rendered value instead would
@@ -906,6 +952,31 @@ impl Lifecycle {
     /// Whether the §7.3 seccomp filters are on, when the event says.
     pub fn seccomp(&self) -> Option<bool> {
         self.seccomp
+    }
+
+    /// How many heap objects were made immortal, when the phase did that.
+    pub fn immortalized(&self) -> Option<u64> {
+        self.immortalized
+    }
+
+    /// How long the immortalisation pass took, in milliseconds.
+    pub fn immortalize_ms(&self) -> Option<f64> {
+        self.immortalize_ms
+    }
+
+    /// The machine's total memory, in bytes.
+    pub fn mem_total(&self) -> Option<u64> {
+        self.mem_total
+    }
+
+    /// The memory in use when the view cap was derived, in bytes.
+    pub fn mem_used(&self) -> Option<u64> {
+        self.mem_used
+    }
+
+    /// The live view process cap in force, when it is known.
+    pub fn max_view_processes(&self) -> Option<u32> {
+        self.max_view_processes
     }
 
     /// Output variable names per proxy; never values.
@@ -1492,12 +1563,22 @@ mod tests {
             .with_routes(3)
             .with_workers(16)
             .with_duration_ms(42.5)
+            .with_immortalized(9)
+            .with_immortalize_ms(1.5)
+            .with_mem_total(1024)
+            .with_mem_used(256)
+            .with_max_view_processes(22)
             .with_output("db", "DATABASE_URL")
             .with_output("db", "PGHOST");
         assert_eq!(lifecycle.stage(), Some("preload"));
         assert_eq!(lifecycle.routes(), Some(3));
         assert_eq!(lifecycle.workers(), Some(16));
         assert_eq!(lifecycle.duration_ms(), Some(42.5));
+        assert_eq!(lifecycle.immortalized(), Some(9));
+        assert_eq!(lifecycle.immortalize_ms(), Some(1.5));
+        assert_eq!(lifecycle.mem_total(), Some(1024));
+        assert_eq!(lifecycle.mem_used(), Some(256));
+        assert_eq!(lifecycle.max_view_processes(), Some(22));
         assert_eq!(
             lifecycle.outputs()["db"],
             vec!["DATABASE_URL".to_owned(), "PGHOST".to_owned()]
@@ -1601,6 +1682,11 @@ mod tests {
         assert_eq!(Lifecycle::default().routes(), None);
         assert_eq!(Lifecycle::default().workers(), None);
         assert_eq!(Lifecycle::default().duration_ms(), None);
+        assert_eq!(Lifecycle::default().immortalized(), None);
+        assert_eq!(Lifecycle::default().immortalize_ms(), None);
+        assert_eq!(Lifecycle::default().mem_total(), None);
+        assert_eq!(Lifecycle::default().mem_used(), None);
+        assert_eq!(Lifecycle::default().max_view_processes(), None);
         assert!(Lifecycle::default().outputs().is_empty());
     }
 
