@@ -3,7 +3,7 @@ description: Cheap Rust implementer for one well-specified blastit roadmap step 
 mode: subagent
 model: openrouter/deepseek/deepseek-v4.1-flash#high
 color: "#4d9de0"
-steps: 150
+steps: 400
 permissions:
   - action: edit
     resource: "**/ARCHITECTURE.md"
