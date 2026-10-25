@@ -967,19 +967,33 @@ writes to gets copied (§9.2). So:
   hit cost memory. Views marked `prefork = true` in the manifest are forked at
   startup, which removes the first-hit fork latency (12–60 ms on DO).
 * `BLASTIT_MAX_VIEW_PROCESSES` caps the number of live view processes. When a
-  new one is needed, the least-recently-used idle one is retired, and the eager
-  or `prefork` burst at startup is bounded by the same cap instead of forking
-  every route the manifest names. The default is
-  `max(1, (total − usage after preload − reserve) / BLASTIT_VIEW_MEM_ESTIMATE)`:
-  at least one view process, because a cap of zero would refuse every request.
-  The reserve is `max(64 MiB, 10 % of total)`, kept for the kernel, the
-  platform's agents and the next fork. The scheduler takes that reading twice —
-  once before the burst, which is *before* init has finished preloading, and
-  again at the first view process init reports, which is the first moment §4's
-  "usage after preload" exists — so a burst that turns out too big for the
-  second reading is trimmed as later views are needed. When the machine's
-  memory cannot be read at all there is no derived cap, and init says so once,
-  as a `warn` line of its own output (§8.1).
+  new one is needed, the least-recently-used **evictable** one is retired: a
+  process that is `READY`, has nothing in flight and has no request waiting in
+  the admission queue for its own route. A process that has not answered the
+  request it was forked for — including one that has not sent `READY` yet — is
+  never retired, and when nothing is evictable the request stays in the queue
+  instead: the cap may never fail a request by killing the process that would
+  have served it. The eager or `prefork` burst at startup is bounded by the
+  same cap instead of forking every route the manifest names. The default is
+  `max(1, (total − usage after preload − reserve) / estimate)`: at least one
+  view process, because a cap of zero would refuse every request. The reserve
+  is `max(64 MiB, 10 % of total)`, kept for the kernel, the platform's agents
+  and the next fork. `estimate` starts as `BLASTIT_VIEW_MEM_ESTIMATE` and is
+  replaced by the cost the scheduler **measures**: after each view process
+  reports `READY` it samples aggregate usage, keeps a moving average of the
+  rise per view process and re-derives the cap from it. That matters because a
+  view copies most of the preloaded heap — about 135 MiB under gVisor on
+  CPython 3.14, where nothing is immortalised, against the 32 MiB default — so
+  a cap derived from the configured estimate (≈45 on a 2 GiB instance) bounds
+  nothing. The measurement only ever replaces the *derived* default;
+  `BLASTIT_MAX_VIEW_PROCESSES` still wins, and an estimate that is never
+  measured stays where the operator put it. The scheduler takes that reading
+  twice — once before the burst, which is *before* init has finished
+  preloading, and again at the first view process init reports, which is the
+  first moment §4's "usage after preload" exists — so a burst that turns out
+  too big for the second reading is trimmed as later views are needed. When the
+  machine's memory cannot be read at all there is no derived cap, and init says
+  so once, as a `warn` line of its own output (§8.1).
 * `total` is `min(MemTotal, cgroup limit)` and `used` is the cgroup's own
   accounting: on DO, `MemTotal` *is* the instance size and the cgroup v1
   `memory.usage_in_bytes` is accurate (§9.2 #8). The sources, in order, are
@@ -993,7 +1007,12 @@ writes to gets copied (§9.2). So:
   reliable number (`VmRSS` doesn't move under gVisor). Above
   `BLASTIT_MEM_HIGH_WATERMARK` (a percentage of `total`) it checks every 2
   seconds and retires **one** idle view process per check, oldest-first; a view
-  with a request in flight is never retired for memory.
+  with a request in flight is never retired for memory. While usage is above
+  the watermark a new view process is only spawned if an evictable one can be
+  retired first, and otherwise the request waits in the queue: pressure cannot
+  become retire-then-respawn thrash. A view retired for memory pressure is not
+  spawned again for its route until the spawn backoff has passed (§2.4's "don't
+  spin", the same cool-down a route whose spawn failed already gets).
 
 ### 8.1 Logs
 
@@ -1044,6 +1063,7 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 | `pg.refused` | dbproxy | warn | `route`, `proxy`, `reason` (`credentials_mismatch`, `too_many_connections`, `upstream_unreachable`, …) | a connection to the proxy was refused |
 | `http.rejected` | http | info | `remote_addr`, `status` (400, 413, 431, 501…), `reason` | a request was refused before reaching the scheduler |
 | `process.spawned` / `process.exited` / `process.retired` | init, scheduler | info (warn for crashes) | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`) | view process lifecycle |
+| `process.cap` | scheduler | info | `estimate_bytes` (the measured cost of one view process), `cap` (the live view process cap it buys) | the measured cost or the cap changed (§8 Sizing); never once per request |
 | `app.output` | init | info (stdout) / warn (stderr) | `stream`, `line`, `part`, `parts` | the app or a library printed something |
 | `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, the rendered output variable *names* per proxy (never values), the warning text (for example an unattached group) | lifecycle of the whole server |
 
@@ -1082,7 +1102,7 @@ with `request` events.
 | `BLASTIT_VIEW_SPAWN` | `lazy` | `lazy` \| `eager` (`prefork = true` in the manifest overrides per view) |
 | `BLASTIT_VIEW_IDLE_TIMEOUT` / `BLASTIT_VIEW_MAX_REQUESTS` | `600s` / `0` (off) | view process recycling |
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | live view process cap (LRU retirement) |
-| `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | expected cost per view process, used for the cap |
+| `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | expected cost per view process: the starting divisor of the derived cap, and the floor of the measured one |
 | `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total` (the smaller of `MemTotal` and the cgroup limit); above it, one idle view process per 2 s check is retired |
 | `BLASTIT_IMMORTALIZE` | `auto` | `auto` \| `1` \| `0`: mark the preloaded heap immortal before the fork (§9.2 #7). `auto` does it on CPython 3.12 and 3.13 only, because 3.14's decrefs corrupt a marked heap; `1` forces it wherever the marker is known (3.12–3.14); `0` never |
 | `BLASTIT_MAX_HEADER_BYTES` / `BLASTIT_MAX_BODY_BYTES` | `64 KiB` / `100 MiB` | HTTP limits |
