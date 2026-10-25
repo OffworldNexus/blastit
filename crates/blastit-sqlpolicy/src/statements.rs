@@ -1,80 +1,46 @@
 //! Statement counting and the transaction-control grammar (ARCHITECTURE.md
 //! §5.2, §6).
 //!
-//! Neither is a SQL parser. The counter splits on top-level `;` only, and the
-//! grammar accepts exactly the transaction-control statements a grant may
-//! enable with `transaction_control = true`, and nothing else.
+//! Neither is a SQL parser. The counter splits on top-level `;` only, using the
+//! same lexer as [`crate::normalize`], and the grammar accepts exactly the
+//! transaction-control statements a grant may enable with
+//! `transaction_control = true`, and nothing else.
 
-use crate::normalize::{dollar_tag_at, find_dollar_close};
+use crate::lexer::{RegionKind, lex};
+use crate::normalize::normalize;
 
 /// How many statements `sql` contains, counting only segments that hold
 /// something other than whitespace and comments.
 ///
-/// Splits on `;` outside single-quoted strings, double-quoted identifiers,
-/// dollar-quoted strings, `--` line comments and `/* */` block comments
-/// (nested, as PostgreSQL allows). Used to make sure a transaction-control
-/// statement is the *only* statement in the text.
+/// Splits on `;` in code: never inside single-quoted strings, E-strings,
+/// double-quoted identifiers, dollar-quoted strings or comments (`--`, and
+/// nested `/* */`). Used to make sure a transaction-control statement is the
+/// *only* statement in the text, so that a separator hidden in a string or a
+/// comment cannot smuggle a second statement past the policy.
 pub(crate) fn statement_count_hint(sql: &str) -> usize {
     let chars: Vec<char> = sql.chars().collect();
     let mut count = 0;
     let mut has_content = false;
-    let mut i = 0;
 
-    while i < chars.len() {
-        match chars[i] {
-            '\'' => {
-                i = skip_quoted(&chars, i, '\'');
-                has_content = true;
-            }
-            '"' => {
-                i = skip_quoted(&chars, i, '"');
-                has_content = true;
-            }
-            '$' => {
-                match dollar_tag_at(&chars, i) {
-                    Some((open_len, tag)) => {
-                        i = match find_dollar_close(&chars, i + open_len, &tag) {
-                            Some(close) => close + open_len,
-                            None => chars.len(),
-                        };
-                    }
-                    None => i += 1,
-                }
-                has_content = true;
-            }
-            '-' if chars.get(i + 1) == Some(&'-') => {
-                i += 2;
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
-            }
-            '/' if chars.get(i + 1) == Some(&'*') => {
-                i += 2;
-                let mut depth = 1usize;
-                while i < chars.len() && depth > 0 {
-                    if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
-                        depth += 1;
-                        i += 2;
-                    } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
-                        depth -= 1;
-                        i += 2;
-                    } else {
-                        i += 1;
+    for region in lex(&chars) {
+        match region.kind {
+            RegionKind::Comment => {}
+            RegionKind::Code => {
+                for c in &chars[region.start..region.end] {
+                    if *c == ';' {
+                        if has_content {
+                            count += 1;
+                            has_content = false;
+                        }
+                    } else if !c.is_whitespace() {
+                        has_content = true;
                     }
                 }
             }
-            ';' => {
-                if has_content {
-                    count += 1;
-                    has_content = false;
-                }
-                i += 1;
-            }
-            c if c.is_whitespace() => i += 1,
-            _ => {
-                has_content = true;
-                i += 1;
-            }
+            RegionKind::SingleQuoted
+            | RegionKind::EString
+            | RegionKind::QuotedIdent
+            | RegionKind::DollarQuoted => has_content = true,
         }
     }
 
@@ -84,41 +50,27 @@ pub(crate) fn statement_count_hint(sql: &str) -> usize {
     count
 }
 
-/// Skips a quoted region opened by `quote` at `chars[i]`, returning the index
-/// just past the closing quote (or the end of the text).
-fn skip_quoted(chars: &[char], mut i: usize, quote: char) -> usize {
-    i += 1;
-    while i < chars.len() {
-        if chars[i] == quote {
-            if chars.get(i + 1) == Some(&quote) {
-                i += 2;
-                continue;
-            }
-            return i + 1;
-        }
-        i += 1;
-    }
-    i
-}
-
 /// Whether `sql` is a single transaction-control statement: `BEGIN`,
 /// `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT <ident>`,
 /// `RELEASE [SAVEPOINT] <ident>` or
 /// `ROLLBACK [WORK|TRANSACTION] TO [SAVEPOINT] <ident>`.
 ///
-/// Keywords are case-insensitive; identifiers are plain
-/// `[A-Za-z_][A-Za-z0-9_]*` or double-quoted. `BEGIN` and `START TRANSACTION`
-/// take an optional transaction mode list (`ISOLATION LEVEL …`, `READ ONLY`,
-/// `READ WRITE`, separated by whitespace or commas), and `BEGIN`, `COMMIT` and
-/// `ROLLBACK` take an optional `WORK`/`TRANSACTION` suffix.
+/// The text is normalised first, so comments are ignored and a trailing `;` is
+/// irrelevant. Keywords are case-insensitive; identifiers are plain
+/// `[A-Za-z_][A-Za-z0-9_]*` or double-quoted. `BEGIN`, `COMMIT`, `END` and
+/// `ROLLBACK` take an optional `WORK`/`TRANSACTION` suffix, and `BEGIN` and
+/// `START TRANSACTION` take an optional transaction mode list
+/// (`ISOLATION LEVEL …`, `READ ONLY`, `READ WRITE`, separated by whitespace or
+/// commas).
 ///
-/// Callers pass already-normalised text; a text holding more than one statement
-/// never qualifies.
+/// A text holding more than one statement never qualifies, however harmless
+/// each statement looks on its own.
 pub(crate) fn is_transaction_control(sql: &str) -> bool {
-    if statement_count_hint(sql) != 1 {
+    let normalized = normalize(sql);
+    if statement_count_hint(&normalized) != 1 {
         return false;
     }
-    let mut parser = Parser::new(sql);
+    let mut parser = Parser::new(&normalized);
     parser.parse_statement() && parser.at_end()
 }
 
@@ -224,11 +176,10 @@ impl Parser {
                 self.parse_modes()
             }
             "START" => self.eat_keyword("TRANSACTION") && self.parse_modes(),
-            "COMMIT" => {
+            "COMMIT" | "END" => {
                 self.eat_scope();
                 self.at_end()
             }
-            "END" => self.at_end(),
             "ROLLBACK" => {
                 self.eat_scope();
                 if self.at_end() {
@@ -309,6 +260,7 @@ mod tests {
         count("SELECT $1", 1);
         count("SELECT 1 -- ;\n", 1);
         count("SELECT 1 /* ; */", 1);
+        count("SELECT E'a\\';b'", 1);
     }
 
     #[test]
@@ -336,9 +288,23 @@ mod tests {
     }
 
     #[test]
+    fn separators_inside_quotes_and_comments_do_not_split() {
+        count("SELECT 'a;b'", 1);
+        count("\"a;b\"", 1);
+        count("SELECT E'a\\';b'", 1);
+        count("SELECT $tag$a; b$tag$", 1);
+        count("SELECT 1 -- ;\nDROP TABLE t", 1);
+        count("SELECT 1 /* ; */ DROP TABLE t", 1);
+        // ... while a separator after a terminated comment does split.
+        count("SELECT 1; -- trailing\nSELECT 2", 2);
+        count("SELECT 1 /* c */ ; SELECT 2", 2);
+    }
+
+    #[test]
     fn unterminated_quotes_swallow_separators() {
         count("SELECT 'a; b", 1);
         count("SELECT \"a; b", 1);
+        count("SELECT E'a; b", 1);
         count("SELECT $tag$a; b", 1);
     }
 
@@ -354,6 +320,8 @@ mod tests {
             "COMMIT WORK",
             "COMMIT TRANSACTION",
             "END",
+            "END WORK",
+            "END TRANSACTION",
             "ROLLBACK",
             "ROLLBACK WORK",
             "ROLLBACK TRANSACTION",
@@ -401,6 +369,23 @@ mod tests {
     }
 
     #[test]
+    fn ignores_comments_and_a_trailing_separator() {
+        for sql in [
+            "BEGIN -- go",
+            "BEGIN /* go */",
+            "BEGIN; -- go",
+            "BEGIN;",
+            "COMMIT /* go */;",
+            "END -- go",
+            "ROLLBACK WORK; -- go",
+            "SAVEPOINT s1 -- go",
+            "START TRANSACTION /* iso */ READ WRITE -- go",
+        ] {
+            assert!(is_transaction_control(sql), "should accept {sql:?}");
+        }
+    }
+
+    #[test]
     fn rejects_other_statements() {
         for sql in [
             "SELECT 1",
@@ -410,9 +395,8 @@ mod tests {
             "COMMIT; SELECT 1",
             "START",
             "START WORK",
-            "END WORK",
-            "END TRANSACTION",
             "COMMIT WORK EXTRA",
+            "END WORK EXTRA",
             "BEGIN READ",
             "BEGIN READ SOMETHING",
             "BEGIN ISOLATION",
@@ -450,6 +434,7 @@ mod tests {
             "COMMIT; BEGIN",
             "SAVEPOINT s1; SELECT 1",
             "BEGIN;; COMMIT",
+            "BEGIN; -- c\nDROP TABLE t",
         ] {
             assert!(!is_transaction_control(sql), "should reject {sql:?}");
         }

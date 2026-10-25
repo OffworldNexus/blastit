@@ -2,73 +2,72 @@
 //!
 //! The manifest and the wire are normalised with the same rules, so a query
 //! written by hand in a grant matches the text libpq sends, as long as it is
-//! the same statement with arbitrary whitespace and formatting.
+//! the same statement with arbitrary whitespace, comments and formatting.
+
+use crate::lexer::{RegionKind, lex};
 
 /// Normalises `sql` for exact allowlist comparison.
 ///
-/// The rules (ARCHITECTURE.md §6):
+/// The rules (ARCHITECTURE.md §6, extended so that a comment can never hide a
+/// second statement):
 ///
 /// * the text is trimmed;
+/// * every comment is replaced by a single space: `--` up to the end of its
+///   line, and `/* … */` including PostgreSQL's nesting. An unterminated block
+///   comment swallows the rest of the text;
+/// * every run of whitespace left in the code **outside** quoted regions
+///   collapses to one space;
 /// * trailing `;` separators are removed, including the whitespace around them
-///   and repeated separators (`SELECT 1 ;;` → `SELECT 1`); only separators
-///   outside quotes are removed, so `SELECT ';'` is unchanged;
-/// * every run of whitespace **outside** single-quoted strings (`'it''s'`),
+///   and repeated separators (`SELECT 1 ;;` → `SELECT 1`); only separators in
+///   code are removed, so `SELECT ';'` is unchanged;
+/// * quoted regions are kept verbatim: single-quoted strings (`'it''s'`),
+///   E-strings (`E'a\'b  c'`, where a backslash escapes the next character),
 ///   double-quoted identifiers (`"a  b"`) and dollar-quoted strings (`$$…$$`,
-///   `$tag$…$tag$`) collapses to a single space;
-/// * comments are left as ordinary text: `--` and `/* */` get no special
-///   treatment here and whitespace inside them collapses like anywhere else;
-/// * `$1` and `$` are ordinary text, not dollar quotes;
-/// * an unterminated quote (or dollar quote) is kept verbatim to the end of the
-///   text; the text is trimmed before scanning, so trailing whitespace is gone
-///   even inside an unterminated quote; this function never panics.
+///   `$tag$…$tag$`, tags following PostgreSQL's identifier rules);
+/// * `$1` and a bare `$` are ordinary text, not dollar quotes;
+/// * an unterminated quote is kept verbatim to the end of the text; the text is
+///   trimmed before scanning, so trailing whitespace is gone even inside an
+///   unterminated quote. This function never panics.
+///
+/// ```
+/// # use blastit_sqlpolicy::normalize;
+/// assert_eq!(normalize("SELECT 1 -- ; DROP TABLE t"), "SELECT 1");
+/// assert_eq!(normalize("SELECT 1 --\n; DROP TABLE t"), "SELECT 1 ; DROP TABLE t");
+/// assert_eq!(normalize("SELECT 1 /* c */ 2 ;"), "SELECT 1 2");
+/// assert_eq!(normalize("SELECT 'a  b'"), "SELECT 'a  b'");
+/// ```
 pub fn normalize(sql: &str) -> String {
     let chars: Vec<char> = sql.trim().chars().collect();
     let mut out = Output::new(chars.len());
     let mut pending_space = false;
-    let mut i = 0;
 
-    while i < chars.len() {
-        match chars[i] {
-            '\'' => {
-                out.flush_space(&mut pending_space);
-                out.push('\'', true);
-                i = copy_quoted(&chars, i + 1, '\'', &mut out);
+    for region in lex(&chars) {
+        let text = &chars[region.start..region.end];
+        match region.kind {
+            RegionKind::Comment => {
+                // A comment stands for a single space; the surrounding
+                // whitespace collapsing then merges it with its neighbours.
+                pending_space = true;
             }
-            '"' => {
-                out.flush_space(&mut pending_space);
-                out.push('"', true);
-                i = copy_quoted(&chars, i + 1, '"', &mut out);
-            }
-            '$' => {
-                out.flush_space(&mut pending_space);
-                match dollar_tag_at(&chars, i) {
-                    Some((open_len, tag)) => {
-                        // Copy the whole literal verbatim; its contents never
-                        // take part in whitespace collapsing or in the
-                        // trailing-separator strip.
-                        let end = match find_dollar_close(&chars, i + open_len, &tag) {
-                            Some(close) => close + open_len,
-                            None => chars.len(),
-                        };
-                        for c in &chars[i..end] {
-                            out.push(*c, false);
-                        }
-                        i = end;
-                    }
-                    None => {
-                        out.push('$', true);
-                        i += 1;
+            RegionKind::Code => {
+                for c in text {
+                    if c.is_whitespace() {
+                        pending_space = true;
+                    } else {
+                        out.flush_space(&mut pending_space);
+                        out.push(*c, true);
                     }
                 }
             }
-            c if c.is_whitespace() => {
-                pending_space = true;
-                i += 1;
-            }
-            c => {
+            RegionKind::SingleQuoted
+            | RegionKind::EString
+            | RegionKind::QuotedIdent
+            | RegionKind::DollarQuoted => {
+                // Quoted: verbatim, so inner whitespace and `;` are preserved.
                 out.flush_space(&mut pending_space);
-                out.push(c, true);
-                i += 1;
+                for c in text {
+                    out.push(*c, false);
+                }
             }
         }
     }
@@ -76,75 +75,9 @@ pub fn normalize(sql: &str) -> String {
     out.finish()
 }
 
-/// Copies a single- or double-quoted region, starting just after its opening
-/// quote, and returns the index just past its closing quote. A doubled quote is
-/// an escape (`'it''s'`, `"a""b"`); an unterminated region runs to the end of
-/// the text, which is then kept verbatim.
-fn copy_quoted(chars: &[char], mut i: usize, quote: char, out: &mut Output) -> usize {
-    while i < chars.len() {
-        if chars[i] == quote {
-            if chars.get(i + 1) == Some(&quote) {
-                out.push(quote, false);
-                out.push(quote, false);
-                i += 2;
-                continue;
-            }
-            out.push(quote, true);
-            return i + 1;
-        }
-        out.push(chars[i], false);
-        i += 1;
-    }
-    i
-}
-
-/// If a dollar-quote opening delimiter starts at `chars[i]` (`$$`, `$tag$`),
-/// returns its length and tag. `$1` and a bare `$` are not dollar quotes.
-pub(crate) fn dollar_tag_at(chars: &[char], i: usize) -> Option<(usize, String)> {
-    if chars.get(i) != Some(&'$') {
-        return None;
-    }
-    let mut j = i + 1;
-    if chars.get(j) == Some(&'$') {
-        return Some((2, String::new()));
-    }
-    let start = j;
-    if !matches!(chars.get(j), Some(c) if c.is_ascii_alphabetic() || *c == '_') {
-        return None;
-    }
-    j += 1;
-    while matches!(chars.get(j), Some(c) if c.is_ascii_alphanumeric() || *c == '_') {
-        j += 1;
-    }
-    if chars.get(j) == Some(&'$') {
-        Some((j - i + 1, chars[start..j].iter().collect()))
-    } else {
-        None
-    }
-}
-
-/// Index of the `$tag$` that closes a dollar quote opened with `tag`, searching
-/// from `from`; `None` when the literal is never closed.
-pub(crate) fn find_dollar_close(chars: &[char], from: usize, tag: &str) -> Option<usize> {
-    let mut needle = String::with_capacity(tag.len() + 2);
-    needle.push('$');
-    needle.push_str(tag);
-    needle.push('$');
-    let needle: Vec<char> = needle.chars().collect();
-    let len = needle.len();
-
-    let mut k = from;
-    while k + len <= chars.len() {
-        if chars[k..k + len] == needle[..] {
-            return Some(k);
-        }
-        k += 1;
-    }
-    None
-}
-
 /// Output under construction, with a parallel flag per character telling
-/// whether it was produced outside a quoted region.
+/// whether it came from code (and may therefore take part in the trailing
+/// separator strip).
 struct Output {
     text: String,
     plain: Vec<bool>,
@@ -163,8 +96,8 @@ impl Output {
         self.plain.push(plain);
     }
 
-    /// Emits the single space that stands for a collapsed whitespace run, if one
-    /// is pending.
+    /// Emits the single space that stands for a collapsed whitespace run or a
+    /// comment, if one is pending.
     fn flush_space(&mut self, pending: &mut bool) {
         if *pending {
             if !self.text.is_empty() {
@@ -175,7 +108,7 @@ impl Output {
     }
 
     /// Drops trailing `;` separators and the whitespace around them, then
-    /// returns the normalised text. Only unquoted characters are dropped.
+    /// returns the normalised text. Only code characters are dropped.
     fn finish(mut self) -> String {
         while let Some(last) = self.text.chars().next_back() {
             let plain = matches!(self.plain.last(), Some(true));
@@ -207,8 +140,37 @@ mod tests {
         case("  SELECT\n\n  1  ", "SELECT 1");
         case("", "");
         case("   \t\n ", "");
-        case("SELECT 1 --  a   b", "SELECT 1 -- a b");
-        case("SELECT 1 /*  a\n b */", "SELECT 1 /* a b */");
+    }
+
+    #[test]
+    fn replaces_comments_with_one_space() {
+        case("SELECT 1 --  a   b", "SELECT 1");
+        case("SELECT 1 --  a   b\n", "SELECT 1");
+        case("SELECT 1 -- a\nFROM t", "SELECT 1 FROM t");
+        case("SELECT 1 /*  a\n b */", "SELECT 1");
+        case("SELECT 1/*  a  */2", "SELECT 1 2");
+        case("/* lead */SELECT 1", "SELECT 1");
+        case("/* unterminated", "");
+        case("SELECT 1 /* unterminated", "SELECT 1");
+        case("SELECT 1 /* a /* b */ c */", "SELECT 1");
+        case("-- only a comment", "");
+        case("SELECT 1 --", "SELECT 1");
+        case("SELECT 1 ;-- x", "SELECT 1");
+        case("SELECT /* x */'a  b'", "SELECT 'a  b'");
+    }
+
+    #[test]
+    fn comment_markers_inside_quotes_are_not_comments() {
+        case("SELECT '-- not a comment'", "SELECT '-- not a comment'");
+        case(
+            "SELECT '/* not a comment */'",
+            "SELECT '/* not a comment */'",
+        );
+        case("SELECT \"-- not a comment\"", "SELECT \"-- not a comment\"");
+        case(
+            "SELECT $$--  not  a  comment$$",
+            "SELECT $$--  not  a  comment$$",
+        );
     }
 
     #[test]
@@ -254,6 +216,34 @@ mod tests {
         case("SELECT $$", "SELECT $$");
         case("SELECT $$a  b", "SELECT $$a  b");
         case("SELECT $tag$a", "SELECT $tag$a");
+        case("SELECT $é$a  b$é$", "SELECT $é$a  b$é$");
+        case("SELECT $_t1$a  b$_t1$", "SELECT $_t1$a  b$_t1$");
+    }
+
+    #[test]
+    fn keeps_e_strings_verbatim() {
+        case(r"SELECT E'a\'b  c'", r"SELECT E'a\'b  c'");
+        case(r"SELECT e'a\'b  c'", r"SELECT e'a\'b  c'");
+        case(r"SELECT E'it''s  ok'", r"SELECT E'it''s  ok'");
+        case(r"E'a\'b", r"E'a\'b");
+        case(r"SELECT (E'a  b'), 'c  d'", r"SELECT (E'a  b'), 'c  d'");
+    }
+
+    #[test]
+    fn e_strings_after_an_identifier_are_not_e_strings() {
+        // `WHERE'x'` and `xE'y'` hold no E-string, so the space collapse applies
+        // to everything outside the quoted part.
+        case(r"WHERE'x  y'", r"WHERE'x  y'");
+        case(r"SELECT xE'y  z'", r"SELECT xE'y  z'");
+        case(r"SELECT name  E'y  z'", r"SELECT name E'y  z'");
+    }
+
+    #[test]
+    fn e_strings_keep_their_own_whitespace() {
+        let escaped = normalize(r"SELECT E'a\'b  c'");
+        assert_eq!(escaped, r"SELECT E'a\'b  c'");
+        assert_ne!(escaped, normalize(r"SELECT E'a\'b c'"));
+        assert_ne!(escaped, r"SELECT E'a'b c'");
     }
 
     #[test]
@@ -295,6 +285,8 @@ mod tests {
             "BEGIN; SELECT 1",
             "; ;",
             "SELECT 1 -- don't  collapse",
+            r"SELECT E'a\'b  c'",
+            "SELECT 1/* c */2",
         ] {
             let once = normalize(input);
             assert_eq!(normalize(&once), once, "input: {input:?}");

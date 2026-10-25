@@ -4,10 +4,10 @@
 //! blastit does not parse SQL. A `postgresql` grant (§5.2) lists the statement
 //! texts the app may send, and dbproxy compares them **exactly**, after
 //! normalising both the manifest's text and the text on the wire with the same
-//! rules (§6, "Matching"): trim, drop trailing `;`, and collapse every run of
-//! whitespace outside quoted strings and comments to one space. Matching the
-//! whole normalised text is what makes a listed query followed by a second
-//! statement fail to match.
+//! rules (§6, "Matching"): trim, drop trailing `;`, replace every comment by a
+//! single space, and collapse every run of whitespace outside quoted strings to
+//! one space. Matching the whole normalised text is what makes a listed query
+//! followed by a second statement fail to match.
 //!
 //! A grant with `transaction_control = true` additionally allows the
 //! transaction-control statements (and only those) when the text holds exactly
@@ -31,6 +31,7 @@
 //! );
 //! ```
 
+mod lexer;
 mod normalize;
 mod statements;
 
@@ -41,6 +42,10 @@ use std::collections::HashSet;
 use statements::is_transaction_control;
 
 /// What a [`Allowlist`] decided about one SQL text.
+///
+/// Not exhaustive: more decision kinds (and more detail in `Denied`) may be
+/// added without a breaking change.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     /// The text is allowed.
@@ -78,10 +83,13 @@ impl Allowlist {
     /// manifest formatting differences are irrelevant when checking. Queries
     /// that normalise to the empty text are ignored: no text is ever allowed
     /// just because the manifest contained an empty string.
-    pub fn new<'a>(queries: impl IntoIterator<Item = &'a str>, transaction_control: bool) -> Self {
+    pub fn new<S: AsRef<str>>(
+        queries: impl IntoIterator<Item = S>,
+        transaction_control: bool,
+    ) -> Self {
         let mut set = HashSet::new();
         for query in queries {
-            let query = normalize(query);
+            let query = normalize(query.as_ref());
             if !query.is_empty() {
                 set.insert(query);
             }
@@ -90,6 +98,12 @@ impl Allowlist {
             queries: set,
             transaction_control,
         }
+    }
+
+    /// The distinct normalised queries the allowlist holds, in no particular
+    /// order.
+    pub fn queries(&self) -> impl Iterator<Item = &str> {
+        self.queries.iter().map(String::as_str)
     }
 
     /// Decides whether `sql` is allowed.
@@ -107,7 +121,7 @@ impl Allowlist {
         if self.queries.contains(&normalized) {
             return Decision::Allowed;
         }
-        if self.transaction_control && is_transaction_control(&normalized) {
+        if self.transaction_control && is_transaction_control(sql) {
             return Decision::Allowed;
         }
         Decision::Denied { normalized }
@@ -119,7 +133,8 @@ impl Allowlist {
         self.transaction_control
     }
 
-    /// How many distinct normalised queries the allowlist holds.
+    /// How many **distinct normalised** queries the allowlist holds: two
+    /// manifest entries that differ only in formatting count once.
     pub fn len(&self) -> usize {
         self.queries.len()
     }
@@ -291,7 +306,10 @@ mod tests {
             "BEGIN ISOLATION LEVEL READ COMMITTED, READ ONLY",
             "COMMIT",
             "COMMIT WORK",
+            "COMMIT; -- a comment",
             "END",
+            "END WORK",
+            "END TRANSACTION",
             "ROLLBACK",
             "ROLLBACK WORK",
             "SAVEPOINT s1",
@@ -305,6 +323,9 @@ mod tests {
             "ROLLBACK TO SAVEPOINT s1",
             "ROLLBACK WORK TO SAVEPOINT s1",
             "ROLLBACK TRANSACTION TO s1",
+            "BEGIN; -- x",
+            "BEGIN /* c */",
+            "begin  /* c */  ;  ",
         ] {
             assert!(allow.check(sql).is_allowed(), "should allow {sql:?}");
         }
@@ -325,7 +346,7 @@ mod tests {
             "ROLLBACK TO",
             "ROLLBACK TO 1",
             "COMMIT WORK EXTRA",
-            "END WORK",
+            "END WORK EXTRA",
         ] {
             let decision = allow.check(sql);
             assert!(!decision.is_allowed(), "should deny {sql:?}");
@@ -348,6 +369,87 @@ mod tests {
         ] {
             assert!(!allow.check(sql).is_allowed(), "should deny {sql:?}");
         }
+    }
+
+    #[test]
+    fn a_comment_never_hides_a_second_statement() {
+        // Reproduction from review: the `--` comment is replaced by a single
+        // space, not collapsed together with the newline that ends it, so the
+        // `;` on the next line is real code and the stored query no longer
+        // matches.
+        let allow = allowlist(&["SELECT 1 -- ; DROP TABLE t"], true);
+        assert_eq!(
+            allow.check("SELECT 1 --\n; DROP TABLE t"),
+            Decision::Denied {
+                normalized: "SELECT 1 ; DROP TABLE t".to_string()
+            }
+        );
+        // ... and the mirror image: a stored query whose comment ends in a
+        // newline no longer matches the one-line spelling of it.
+        let allow = allowlist(&["SELECT 1 --\n; DROP TABLE t"], true);
+        assert_eq!(
+            allow.check("SELECT 1 -- ; DROP TABLE t"),
+            Decision::Denied {
+                normalized: "SELECT 1".to_string()
+            }
+        );
+        // A separator after any comment starts a second statement again.
+        let allow = allowlist(&["SELECT 1"], true);
+        for sql in [
+            "SELECT 1 -- c\n; DROP TABLE t",
+            "SELECT 1 /* c */ ; DROP TABLE t",
+            "SELECT 1 /* c */ DROP TABLE t",
+            "SELECT 1 -- c\nDROP TABLE t",
+        ] {
+            assert!(!allow.check(sql).is_allowed(), "should deny {sql:?}");
+        }
+    }
+
+    #[test]
+    fn comment_contents_do_not_matter_but_quoted_markers_do() {
+        // Comments normalise to a single space whatever they contain, so two
+        // spellings of the same statement with different comments are equal.
+        let allow = allowlist(&["SELECT 1 /* ; */ DROP TABLE t"], true);
+        assert_eq!(
+            allow.check("SELECT 1 /*\nsome\nother\ncomment\n*/ DROP TABLE t"),
+            Decision::Allowed
+        );
+        // A comment marker inside a quoted region is data, not a comment.
+        let allow = allowlist(&["SELECT 1"], true);
+        for sql in [
+            "SELECT '-- 1'",
+            "SELECT '/* 1 */'",
+            "SELECT \"-- 1\"",
+            "SELECT $$-- 1$$",
+            "SELECT E'-- 1'",
+        ] {
+            assert!(!allow.check(sql).is_allowed(), "should deny {sql:?}");
+        }
+    }
+
+    #[test]
+    fn queries_are_stored_normalised_and_distinct() {
+        let allow = allowlist(
+            &[
+                "SELECT   1 ;",
+                "SELECT 1",
+                "SELECT\t1;",
+                "SELECT 1 -- c",
+                "SET TIME ZONE 'UTC'",
+            ],
+            false,
+        );
+        assert_eq!(allow.len(), 2);
+        let mut stored: Vec<&str> = allow.queries().collect();
+        stored.sort_unstable();
+        assert_eq!(stored, ["SELECT 1", "SET TIME ZONE 'UTC'"]);
+        for stored in allow.queries() {
+            assert_eq!(normalize(stored), stored);
+        }
+        // `new` accepts anything `AsRef<str>`: owned strings too.
+        let owned = Allowlist::new([String::from("SELECT 1"), "SELECT  1 ;".to_string()], false);
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned.check("SELECT 1"), Decision::Allowed);
     }
 
     #[test]
@@ -445,9 +547,11 @@ mod tests {
 
     #[test]
     fn exhaustive_short_inputs_never_panic() {
-        // Every string of length <= 3 over a hostile alphabet, so quote,
-        // comment and dollar-quote handling is exercised together.
-        let alphabet = ['\'', '"', '$', ';', '-', '/', '*', ' ', '\n', 'a', 'b'];
+        // Every string of length <= 4 over a hostile alphabet, so quote,
+        // E-string, comment and dollar-quote handling is exercised together.
+        let alphabet = [
+            '\'', '"', '$', ';', '-', '/', '*', '\\', ' ', '\n', 'a', 'b', 'e',
+        ];
         let allow = allowlist(&["SELECT 1", "BEGIN"], true);
         for len in 0..=4 {
             let combos = alphabet.len().pow(len);
@@ -460,6 +564,13 @@ mod tests {
                 }
                 let once = normalize(&sql);
                 assert_eq!(normalize(&once), once, "not idempotent for {sql:?}");
+                // Normalisation and the statement splitter share one lexer, so
+                // normalising may never change how many statements a text has.
+                assert_eq!(
+                    crate::statements::statement_count_hint(&once),
+                    crate::statements::statement_count_hint(&sql),
+                    "statement count changed by normalisation for {sql:?}"
+                );
                 let _ = allow.check(&sql);
                 let _ = allow.check(&once);
             }
