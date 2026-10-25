@@ -437,11 +437,10 @@ def pg_query(sql, port):
             return "startup-error " + sqlstate(payload)
     payload_sql = sql.encode("utf-8") + b"\x00"
     sock.sendall(b"Q" + struct.pack("!I", len(payload_sql) + 4) + payload_sql)
-    # Read until the ReadyForQuery that closes *this* round trip, that is the
-    # first one after the reply's own messages. dbproxy relays the upstream
-    # session's own ReadyForQuery once, right after the startup reply, so the
-    # first message can be a bare `Z`; stopping there would mistake it for the
-    # answer. See the report on this step.
+    # Read until the ReadyForQuery that closes *this* round trip: the first one
+    # after the reply's own messages. Anything a backend sends out of band (a
+    # NoticeResponse, an asynchronous ReadyForQuery) cannot then be mistaken for
+    # the answer.
     kinds = []
     data = None
     content = False
@@ -863,12 +862,8 @@ path = ['/other']
         .as_str()
         .unwrap_or_else(|| panic!("no `granted` in {}", response.body));
     assert!(
-        granted.contains("data=1"),
-        "SELECT 1 returns a DataRow: {granted}"
-    );
-    assert!(
-        granted.contains("TDC"),
-        "SELECT 1 is answered with RowDescription/DataRow/CommandComplete: {granted}"
+        granted.contains("kinds=TDCZ") && granted.contains("data=1"),
+        "SELECT 1 is answered with RowDescription/DataRow/CommandComplete/ReadyForQuery: {granted}"
     );
     let denied = value["denied"]
         .as_str()
