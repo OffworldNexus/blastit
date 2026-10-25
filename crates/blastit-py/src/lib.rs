@@ -117,6 +117,40 @@ fn audit_report(manifest_toml: &str, observations_json: &str) -> PyResult<String
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Analyses one SQL statement the way a table grant is checked (D7, §6).
+///
+/// The statement is parsed by PostgreSQL's own parser and resolved to the
+/// tables, columns, operations and functions it touches — or refused with the
+/// reason, when it is not one statement of a kind a table grant can describe.
+///
+/// # Returns
+///
+/// Pretty-printed JSON in the shape of the report's `table_grants`:
+///
+/// ```json
+/// {
+///   "kind": "select",
+///   "tables": {
+///     "restaurants_restaurant": {"select": ["id", "name"]},
+///     "restaurants_cuisinetype": {"select": "*"}
+///   },
+///   "functions": ["unaccent"]
+/// }
+/// ```
+///
+/// `tables` is the smallest `[route.<proxy>.tables]` grant that covers the
+/// statement; `functions` lists only the calls beyond the built-in safe set
+/// ([`blastit_sqlpolicy::SAFE_FUNCTIONS`]), which is what a grant has to write.
+///
+/// # Errors
+///
+/// [`PyValueError`] with the same one-line reason a `sql.denied` event carries.
+#[pyfunction]
+#[pyo3(name = "analyze")]
+fn analyze_statement(sql: &str) -> PyResult<String> {
+    audit::analyze_statement(sql).map_err(PyValueError::new_err)
+}
+
 /// The interpreter's `sys.path`, as bytes, for stage 1 to restore (§4).
 ///
 /// `os.fsencode` is what makes this exact: a path is bytes, and one that is not
@@ -154,5 +188,6 @@ fn _blastit(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(main, module)?)?;
     module.add_function(wrap_pyfunction!(normalize, module)?)?;
     module.add_function(wrap_pyfunction!(audit_report, module)?)?;
+    module.add_function(wrap_pyfunction!(analyze_statement, module)?)?;
     Ok(())
 }

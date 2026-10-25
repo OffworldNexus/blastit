@@ -522,6 +522,10 @@ pub struct SqlDenied {
     pid: u32,
     proxy: String,
     kind: SqlKind,
+    /// Why the policy refused the statement (D7): `select on
+    /// auth_user.password not granted`, `the statement is not granted`. The
+    /// empty string when the refusal has no reason of its own.
+    reason: String,
     sql: String,
     sqlstate: String,
     in_transaction: bool,
@@ -549,10 +553,28 @@ impl SqlDenied {
             pid,
             proxy: proxy.into(),
             kind,
+            reason: String::new(),
             sql: sql.into(),
             sqlstate: sqlstate.into(),
             in_transaction,
         }
+    }
+
+    /// The same record with the policy's reason for the refusal (D7).
+    ///
+    /// The reason names what is missing — `select on auth_user.password not
+    /// granted`, `the function pg_read_file is not granted` — so the person
+    /// reading the log knows what to add. It never carries a parameter value:
+    /// values are not part of a policy check at all (§8.1).
+    #[must_use]
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = reason.into();
+        self
+    }
+
+    /// Why the policy refused the statement, empty when it said nothing.
+    pub fn reason(&self) -> &str {
+        &self.reason
     }
 
     /// The view process that ran the statement.

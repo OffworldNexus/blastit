@@ -860,3 +860,142 @@ def two_proxy_manifest() -> str:
         "[route.warehouse]\n"
         "queries = ['SELECT 1']\n"
     )
+
+
+#
+# Table and column grants (D7).
+#
+
+
+def test_a_route_reports_the_table_grant_that_covers_it(baseline: Outcome) -> None:
+    """Every statement a route ran, as the smallest table grant covering it."""
+    grants = baseline.proxy("notes")["table_grants"]
+    assert grants["tables"] == {
+        "notes_note": {"select": ["id", "owner_id"], "insert": None, "update": None, "delete": False}
+    }
+    assert grants["functions"] == []
+    assert grants["unanalysable"] == []
+    assert grants["toml"] == (
+        "[route.db.tables]\n"
+        'notes_note = { select = ["id", "owner_id"] }\n'
+    )
+
+
+def test_a_whole_row_read_asks_for_every_column(baseline: Outcome) -> None:
+    """`SELECT *` is a grant of `"*"`, not of the columns it happened to return."""
+    # `note-create`'s INSERT … RETURNING, `note-delete`'s DELETE and its SELECT.
+    grants = baseline.proxy("note-delete")["table_grants"]
+    assert grants["tables"]["notes_note"]["delete"] is True
+    assert grants["tables"]["notes_note"]["select"] == ["id"]
+
+
+def test_statements_a_table_grant_cannot_describe_are_listed(baseline: Outcome) -> None:
+    """Transaction control is not a table grant: the route needs the flag."""
+    grants = baseline.proxy("note-atomic")["table_grants"]
+    assert grants["tables"]["notes_note"]["update"] == ["body"]
+    reasons = {entry["sql"] for entry in grants["unanalysable"]}
+    assert "BEGIN" in reasons, grants["unanalysable"]
+    assert any(sql.startswith("SAVEPOINT") for sql in reasons), reasons
+    for entry in grants["unanalysable"]:
+        assert entry["reason"], "every unanalysable statement carries its reason"
+
+
+def test_every_statement_of_the_route_is_covered_not_only_the_missing_ones(
+    baseline: Outcome,
+) -> None:
+    """The point of the section: a route can be rewritten from queries to tables."""
+    # `note-in`'s one grant matched, and its statements are still in the table
+    # grant, because that is what a rewrite has to cover.
+    grants = baseline.proxy("note-in")["table_grants"]
+    assert grants["tables"]["notes_note"]["select"] == ["id"]
+    assert baseline.proxy("note-in")["missing"] == []
+
+
+def test_a_catalogue_lookup_cannot_be_a_table_grant(baseline: Outcome) -> None:
+    """psycopg's type lookup touches `pg_type`, which no table grant may name.
+
+    `pg_catalog` is first on the search path, so an unqualified `pg_type` *is*
+    the catalogue: the analysis refuses it, the plugin never suggests a key for
+    it, and the statement has to be granted as an exact query instead.
+    """
+    grants = baseline.proxy("note-types")["table_grants"]
+    assert grants["tables"] == {}, grants["tables"]
+    assert grants["functions"] == [], grants["functions"]
+    reasons = grants["unanalysable"]
+    assert any("pg_type" in entry["sql"] for entry in reasons), reasons
+    assert all("system catalogues" in entry["reason"] for entry in reasons), reasons
+    # The statement text is still reported, so it can be listed in `queries`.
+    missing = baseline.missing_sql("note-types")
+    assert any("pg_type" in sql and "to_regtype($?)" in sql for sql in missing), missing
+
+
+def test_prefer_tables_prints_the_snippet(project: Path, tmp_path: Path) -> None:
+    """`--blastit-prefer-tables`: the fix reads as a grant, not as statements."""
+    outcome = run(
+        copy_project(project, tmp_path),
+        "--blastit-manifest",
+        "blastit.toml",
+        "--blastit-prefer-tables",
+        "-q",
+    )
+    assert "[route.db.tables]" in outcome.stdout, outcome.stdout
+    assert 'notes_note = { select = ["id"], delete = true }' in outcome.stdout, outcome.stdout
+    # The statements are still named: the snippet is the other way to fix them.
+    assert "statement(s) missing" in outcome.stdout
+
+
+def test_the_option_without_a_manifest_is_a_usage_error(project: Path, tmp_path: Path) -> None:
+    outcome = run(copy_project(project, tmp_path), "--blastit-prefer-tables")
+    output = (outcome.stdout + outcome.stderr).replace("\n", " ")
+    assert outcome.returncode == 4
+    assert "--blastit-prefer-tables need --blastit-manifest" in output, output
+
+
+def test_a_table_grant_in_the_manifest_covers_the_route(project: Path, tmp_path: Path) -> None:
+    """A manifest written as table grants passes the same audit (D7)."""
+    copy = copy_project(project, tmp_path)
+    (copy / "tables.toml").write_text(
+        "version = 1\n"
+        "\n"
+        "[proxy.db]\n"
+        'protocol = "postgresql"\n'
+        'input = { url = "DATABASE_URL" }\n'
+        "\n"
+        "[[route]]\n"
+        'name = "notes"\n'
+        "path = ['/notes/']\n"
+        'methods = ["GET"]\n'
+        "[route.db.tables]\n"
+        'notes_note = { select = ["id", "owner_id"] }\n',
+        encoding="utf-8",
+    )
+    outcome = run(
+        copy,
+        "--blastit-manifest",
+        "tables.toml",
+        "-k",
+        "test_list_notes",
+    )
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+    assert outcome.proxy("notes")["missing"] == [], "the table grant covers the SELECT"
+    assert outcome.proxy("notes")["unused"] == []
+    assert outcome.report["totals"]["missing"] == 0
+
+
+def test_the_analysis_can_be_asked_for_directly() -> None:
+    """`blastit._blastit.analyze`, the same analysis the policy runs."""
+    from blastit import _blastit
+
+    analysis = json.loads(
+        _blastit.analyze(
+            'SELECT "notes_note"."id" FROM "notes_note" WHERE "notes_note"."owner_id" = $1'
+        )
+    )
+    assert analysis["kind"] == "select"
+    assert analysis["tables"]["notes_note"]["select"] == ["id", "owner_id"]
+    assert analysis["functions"] == []
+
+    # A statement no table grant can describe is refused, with the reason.
+    with pytest.raises(ValueError) as refused:
+        _blastit.analyze("SET TIME ZONE 'UTC'")
+    assert "only SELECT, INSERT, UPDATE and DELETE" in str(refused.value)

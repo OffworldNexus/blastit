@@ -1072,6 +1072,7 @@ mod tests {
     #[tokio::test]
     async fn the_adopted_listener_fds_are_checked_before_they_are_used() {
         use crate::config::{DbproxyConfig, ListenerSpec, ProxySpec};
+        use blastit_sqlpolicy::TableGrants;
 
         let proxy = ProxySpec {
             name: "db".to_string(),
@@ -1093,6 +1094,7 @@ mod tests {
             queries: vec![],
             transaction_control: false,
             unrestricted: false,
+            tables: TableGrants::default(),
         };
         let emit: crate::Emit = Arc::new(|_: blastit_events::Event| {});
 
@@ -1119,6 +1121,7 @@ mod tests {
     fn state() -> Arc<Shared> {
         use crate::config::{DbproxyConfig, ListenerSpec, ProxySpec};
         use blastit_events::Event;
+        use blastit_sqlpolicy::TableGrants;
 
         let listener = ListenerSpec {
             fd: -1,
@@ -1128,6 +1131,7 @@ mod tests {
             queries: vec![],
             transaction_control: false,
             unrestricted: false,
+            tables: TableGrants::default(),
         };
         let proxy = ProxySpec {
             name: "db".to_string(),

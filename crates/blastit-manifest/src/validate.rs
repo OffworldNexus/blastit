@@ -4,9 +4,11 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 use crate::error::{Location, ManifestError, ManifestErrors, ManifestWarning, regex_message};
-use crate::model::{Manifest, ProxyName};
+use crate::model::{Manifest, PgGrant, ProxyName};
 use crate::routing::compile_pattern;
 use crate::uid::UidLayout;
+
+use blastit_sqlpolicy::is_system_table;
 
 /// Validates a manifest and collects its warnings.
 pub(crate) fn validate(
@@ -17,6 +19,7 @@ pub(crate) fn validate(
     check_groups(manifest, &mut errors);
     check_grants(manifest, &mut errors);
     check_unrestricted(manifest, &mut errors);
+    check_table_grants(manifest, &mut errors);
     check_routes(manifest, &mut errors);
     check_uids(manifest, base, &mut errors);
 
@@ -98,17 +101,81 @@ fn check_unrestricted(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
     }
     for (index, route) in manifest.routes().iter().enumerate() {
         for (proxy, grant) in route.grants() {
-            if grant
-                .as_postgresql()
-                .is_some_and(|grant| grant.is_unrestricted() && !grant.queries().is_empty())
-            {
+            let Some(grant_pg) = grant.as_postgresql() else {
+                continue;
+            };
+            let location = Location::Route {
+                index,
+                name: route.name().to_string(),
+            };
+            if !grant_pg.is_unrestricted() {
+                continue;
+            }
+            if !grant_pg.queries().is_empty() {
                 errors.push(ManifestError::UnrestrictedWithQueries {
-                    location: Location::Route {
-                        index,
-                        name: route.name().to_string(),
-                    },
+                    location: location.clone(),
                     proxy: proxy.clone(),
                 });
+            }
+            if !grant_pg.tables().tables().is_empty() {
+                errors.push(ManifestError::UnrestrictedWithContent {
+                    location: location.clone(),
+                    proxy: proxy.clone(),
+                    what: "tables",
+                });
+            }
+            if grant_pg.tables().functions().next().is_some() {
+                errors.push(ManifestError::UnrestrictedWithContent {
+                    location,
+                    proxy: proxy.clone(),
+                    what: "functions",
+                });
+            }
+        }
+    }
+}
+
+/// A table grant may name any table except a system catalogue (§6, D7).
+///
+/// The analysis refuses a qualified `pg_catalog`/`information_schema` name and
+/// any **unqualified** name that resolves into one — `pg_class` (because
+/// `pg_catalog` is first on the search path) and the `information_schema` views
+/// — so an entry naming one could only read as a capability it is not.
+fn check_table_grants(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
+    let mut check = |location: &Location, proxy: &ProxyName, grant: &PgGrant| {
+        for table in grant.tables().tables().keys() {
+            let qualified = table.contains('.');
+            let system = table.starts_with("pg_catalog.")
+                || table.starts_with("information_schema.")
+                || table == "pg_catalog"
+                || table == "information_schema"
+                // An unqualified key is the one the analysis would refuse: the
+                // name a statement names cannot keep a schema.
+                || (!qualified && is_system_table(table));
+            if system {
+                errors.push(ManifestError::UnusableTable {
+                    location: location.clone(),
+                    proxy: proxy.clone(),
+                    table: table.clone(),
+                });
+            }
+        }
+    };
+    for (name, group) in manifest.groups() {
+        for (proxy, grant) in group.grants() {
+            if let Some(grant) = grant.as_postgresql() {
+                check(&Location::Group(name.clone()), proxy, grant);
+            }
+        }
+    }
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let location = Location::Route {
+            index,
+            name: route.name().to_string(),
+        };
+        for (proxy, grant) in route.grants() {
+            if let Some(grant) = grant.as_postgresql() {
+                check(&location, proxy, grant);
             }
         }
     }

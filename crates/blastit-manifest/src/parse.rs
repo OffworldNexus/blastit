@@ -12,6 +12,7 @@ use crate::error::{Location, ManifestError, ManifestErrors, escape_control};
 use crate::model::{
     Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, UnresolvedGrant,
 };
+use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 
 /// Keys allowed at the top level of the document.
 const TOP_LEVEL_KEYS: &[&str] = &["version", "groups", "proxy", "group", "route"];
@@ -386,12 +387,14 @@ impl Parser {
         }
     }
 
-    /// `queries`, `transaction_control` and `unrestricted`, the grant contents
-    /// of `postgresql` (§5.2, §6).
+    /// `queries`, `transaction_control`, `unrestricted`, `tables` and
+    /// `functions`: the grant contents of `postgresql` (§5.2, §6, D7).
     fn pg_grant(&mut self, table: &toml::Table, path: &str) -> PgGrant {
         let mut queries = Vec::new();
         let mut transaction_control = false;
         let mut unrestricted = false;
+        let mut tables: BTreeMap<String, TableGrant> = BTreeMap::new();
+        let mut functions: BTreeSet<String> = BTreeSet::new();
         for (key, value) in table {
             let key_path = format!("{path}.{}", escape_control(key));
             match key.as_str() {
@@ -412,10 +415,113 @@ impl Parser {
                         unrestricted = value;
                     }
                 }
+                "tables" => self.table_grants(value, &key_path, &mut tables),
+                "functions" => {
+                    if let Some(list) = self.string_list(Some(value), &key_path) {
+                        for name in list {
+                            if name.is_empty() {
+                                self.error(ManifestError::Empty {
+                                    path: format!("{key_path}: a function name"),
+                                });
+                            } else {
+                                functions.insert(name);
+                            }
+                        }
+                    }
+                }
                 _ => self.error(ManifestError::UnknownKey { path: key_path }),
             }
         }
-        PgGrant::new(queries, transaction_control).with_unrestricted(unrestricted)
+        PgGrant::new(queries, transaction_control)
+            .with_unrestricted(unrestricted)
+            .with_tables(TableGrants::new(tables, functions))
+    }
+
+    /// The `tables` of a grant: one entry per table, each with the operations
+    /// it grants (§6, D7).
+    fn table_grants(
+        &mut self,
+        value: &Value,
+        path: &str,
+        tables: &mut BTreeMap<String, TableGrant>,
+    ) {
+        let Some(entries) = self.as_table(value, path) else {
+            return;
+        };
+        for (name, value) in entries {
+            let table_path = format!("{path}.{}", escape_control(name));
+            if name.is_empty() {
+                self.error(ManifestError::Empty {
+                    path: format!("{path}: a table name"),
+                });
+                continue;
+            }
+            let Some(operations) = self.as_table(value, &table_path) else {
+                continue;
+            };
+            let mut grant = TableGrant::default();
+            for (operation, value) in operations {
+                let operation_path = format!("{table_path}.{}", escape_control(operation));
+                match operation.as_str() {
+                    "select" => grant.select = self.columns(value, &operation_path),
+                    "insert" => grant.insert = self.columns(value, &operation_path),
+                    "update" => grant.update = self.columns(value, &operation_path),
+                    "delete" => {
+                        if let Some(value) = self.as_bool(value, &operation_path) {
+                            grant.delete = value;
+                        }
+                    }
+                    _ => self.error(ManifestError::UnknownTableOperation {
+                        path: operation_path,
+                    }),
+                }
+            }
+            tables.insert(name.clone(), grant);
+        }
+    }
+
+    /// The columns one operation of a table grant names: the string `"*"`, or a
+    /// list of column names (§6, D7).
+    fn columns(&mut self, value: &Value, path: &str) -> Option<Columns> {
+        match value {
+            Value::String(all) if all == "*" => Some(Columns::All),
+            Value::String(_) => {
+                self.error(ManifestError::WrongType {
+                    path: path.to_string(),
+                    expected: "the string \"*\" (every column) or a list of column names",
+                    found: type_name(value),
+                });
+                None
+            }
+            Value::Array(_) => {
+                let list = self.string_list(Some(value), path)?;
+                let mut columns = BTreeSet::new();
+                for column in list {
+                    if column == "*" {
+                        self.error(ManifestError::StarredColumn {
+                            path: path.to_string(),
+                        });
+                        continue;
+                    }
+                    if column.is_empty() {
+                        self.error(ManifestError::Empty {
+                            path: format!("{path}: a column name"),
+                        });
+                        continue;
+                    }
+                    columns.insert(column);
+                }
+                Some(Columns::List(columns))
+            }
+            other => {
+                self.error(ManifestError::WrongType {
+                    path: path.to_string(),
+                    expected: "the string \"*\" (every column) or a list of column names",
+                    found: type_name(other),
+                });
+                None
+            }
+        }
     }
 
     /// A TOML list of strings, such as `groups`, `methods` or `path`.

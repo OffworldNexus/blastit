@@ -46,7 +46,8 @@ pub(crate) fn sql_denied_event() -> Event {
         r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?"#,
         "42501",
         false,
-    );
+    )
+    .with_reason("select on shop_product.price not granted");
     Event::at(
         sql_denied_ts(),
         Component::Dbproxy,

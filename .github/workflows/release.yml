@@ -38,6 +38,7 @@ jobs:
           # Inside the container, so the Python-free dbproxy binary the wheel
           # carries is built against the same old glibc as the extension.
           before-script-linux: |
+            dnf install -y --setopt=install_weak_deps=False clang && dnf clean all
             cargo build --release --locked -p blastit-dbproxy --bin blastit-dbproxy
             install -D -m 0755 target/release/blastit-dbproxy python/blastit/_bin/blastit-dbproxy
       - name: The wheel carries dbproxy

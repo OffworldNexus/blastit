@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use blastit_events::{PgRefuseReason, SqlKind};
+use blastit_events::{PgRefuseReason, SqlDenied, SqlKind};
 use blastit_sqlpolicy::{Decision, normalize};
 use pregresql::protocol::TransactionStatus;
 use pregresql::proxy::{
@@ -225,7 +225,7 @@ impl QueryHook for DbproxyQuery {
                 };
                 match listener.allowlist.check(ctx.sql) {
                     Decision::Allowed => QueryDecision::Allow,
-                    Decision::Denied { normalized } => {
+                    Decision::Denied { normalized, reason } => {
                         let kind = if is_copy(&normalized) {
                             SqlKind::Copy
                         } else {
@@ -233,11 +233,15 @@ impl QueryHook for DbproxyQuery {
                         };
                         self.shared.emit_sql_denied(
                             route,
-                            pid,
-                            proxy,
-                            kind,
-                            normalized,
-                            in_transaction,
+                            SqlDenied::new(
+                                pid,
+                                proxy,
+                                kind,
+                                normalized,
+                                DENIED_SQLSTATE,
+                                in_transaction,
+                            )
+                            .with_reason(reason),
                         );
                         QueryDecision::deny_with(
                             DENIED_SQLSTATE,
@@ -267,8 +271,11 @@ impl QueryHook for DbproxyQuery {
                 } else {
                     SqlKind::Other("bind".to_string())
                 };
-                self.shared
-                    .emit_sql_denied(route, pid, proxy, kind, sql, in_transaction);
+                self.shared.emit_sql_denied(
+                    route,
+                    SqlDenied::new(pid, proxy, kind, sql, DENIED_SQLSTATE, in_transaction)
+                        .with_reason("the statement was never authorised".to_string()),
+                );
                 QueryDecision::deny_with(
                     DENIED_SQLSTATE,
                     format!("statement denied for route {route}"),
@@ -282,11 +289,15 @@ impl QueryHook for DbproxyQuery {
             QueryKind::FunctionCall => {
                 self.shared.emit_sql_denied(
                     route,
-                    pid,
-                    proxy,
-                    SqlKind::FunctionCall,
-                    String::new(),
-                    in_transaction,
+                    SqlDenied::new(
+                        pid,
+                        proxy,
+                        SqlKind::FunctionCall,
+                        String::new(),
+                        DENIED_SQLSTATE,
+                        in_transaction,
+                    )
+                    .with_reason(FUNCTION_CALL_MESSAGE.to_string()),
                 );
                 QueryDecision::deny_with(DENIED_SQLSTATE, FUNCTION_CALL_MESSAGE)
             }
@@ -338,6 +349,7 @@ mod tests {
 
     use super::*;
     use crate::config::{DbproxyConfig, ListenerSpec, ProxySpec};
+    use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 
     /// The pid the fake client's `SCM_CREDENTIALS` carry.
     const CLIENT_PID: i32 = 4242;
@@ -367,6 +379,7 @@ mod tests {
             queries: queries.iter().map(|query| query.to_string()).collect(),
             transaction_control,
             unrestricted: false,
+            tables: TableGrants::default(),
         }
     }
 
@@ -874,5 +887,76 @@ mod tests {
             .await
             .expect_err("refused");
         assert_eq!(error.sqlstate, CREDENTIALS_SQLSTATE);
+    }
+
+    //
+    // Table and column grants (§6, D7).
+    //
+
+    /// A listener whose grant is a table grant: `orders_order` may be read in
+    /// `id` and `status` only, and written in `status` only.
+    fn table_grant_listener(uid: u32) -> ListenerSpec {
+        let tables = TableGrants::new(
+            [(
+                "orders_order".to_string(),
+                TableGrant {
+                    select: Some(Columns::list(["id", "status"])),
+                    insert: Some(Columns::list(["status"])),
+                    ..TableGrant::default()
+                },
+            )],
+            [],
+        );
+        ListenerSpec {
+            tables,
+            ..listener(uid, &[], false)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_table_grant_allows_a_statement_no_query_lists() {
+        let uid = 21_000;
+        let (shared, events) = state(proxy(reachable_port(), 4), vec![table_grant_listener(uid)]);
+        let connection = connection(1, "0", uid);
+        let hook = DbproxyQuery::new(Arc::clone(&shared));
+
+        // A statement the grant's table grants cover, though nothing lists it.
+        assert_eq!(
+            hook.authorize(query_context(
+                &connection,
+                QueryKind::Simple,
+                r#"SELECT "orders_order"."id", "orders_order"."status" FROM "orders_order" WHERE "orders_order"."status" = $1"#,
+                true,
+            ))
+            .await,
+            QueryDecision::Allow
+        );
+        assert!(events.lock().unwrap().is_empty());
+
+        // A column the grant does not cover is refused, and the event says
+        // which one.
+        assert_eq!(
+            hook.authorize(query_context(
+                &connection,
+                QueryKind::Simple,
+                r#"SELECT "orders_order"."total" FROM "orders_order""#,
+                true,
+            ))
+            .await,
+            QueryDecision::deny_with(DENIED_SQLSTATE, "statement denied for route product-detail")
+        );
+        let events = events.lock().unwrap();
+        let denied = events
+            .iter()
+            .find_map(|event| match event.kind() {
+                EventKind::SqlDenied(denied) => Some(denied),
+                _ => None,
+            })
+            .expect("a sql.denied event");
+        assert_eq!(denied.reason(), "select on orders_order.total not granted");
+        assert_eq!(
+            denied.sql(),
+            r#"SELECT "orders_order"."total" FROM "orders_order""#
+        );
     }
 }

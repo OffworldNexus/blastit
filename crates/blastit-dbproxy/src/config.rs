@@ -20,6 +20,8 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::Zeroizing;
 
+use blastit_sqlpolicy::TableGrants;
+
 use crate::error::DbproxyError;
 use crate::upstream::SslPlan;
 
@@ -175,6 +177,11 @@ pub struct ListenerSpec {
     /// dbproxy, and still never sees the credentials.
     #[serde(default)]
     pub unrestricted: bool,
+    /// The table, column and function grants of the route's effective grant
+    /// (§6, D7). A statement no query lists is parsed with PostgreSQL's parser
+    /// and allowed when every table, column and function it touches is here.
+    #[serde(default)]
+    pub tables: TableGrants,
 }
 
 /// Writes `cfg` as a length-prefixed JSON document.
@@ -454,6 +461,7 @@ mod tests {
                     queries: vec!["SELECT 1".to_string()],
                     transaction_control: false,
                     unrestricted: false,
+                    tables: TableGrants::default(),
                 },
                 ListenerSpec {
                     fd: 4,
@@ -463,6 +471,7 @@ mod tests {
                     queries: vec![],
                     transaction_control: true,
                     unrestricted: false,
+                    tables: TableGrants::default(),
                 },
             ],
         }

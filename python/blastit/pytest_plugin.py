@@ -110,6 +110,13 @@ Options
     granted in every route, a statement could not be read, or the plugin itself
     had to warn about something.
 
+``--blastit-prefer-tables``
+    Print the ``table_grants`` snippet of a route with missing statements, so the
+    fix reads as a table grant rather than as a list of statements. It does not
+    change what is *missing*: the audit already checks table grants as well as
+    exact ones, so a statement a route's table grants cover is not missing at
+    all.
+
 `pytest-xdist <https://pytest-xdist.readthedocs.io/>`_ works: each worker writes
 the requests it saw next to the report path, and the controller merges them and
 reports once, so ``pytest -n auto --blastit-manifest blastit.toml`` gives one
@@ -150,7 +157,14 @@ are::
                               "unused": [...],
                               "transaction_control": {"observed": bool,
                                                       "granted": bool,
-                                                      "needed": bool}}]}],
+                                                      "needed": bool},
+                              "table_grants": {
+                                  "tables": {"orders_order": {"select": ["id"],
+                                                              "delete": true}},
+                                  "functions": ["unaccent"],
+                                  "toml": "[route.db.tables]\\n…",
+                                  "unanalysable": [{"sql": ...,
+                                                    "reason": ...}]}}]}],
      "unrouted": [{"method": ..., "path_info": ..., "count": N,
                    "statements": N, "tests": [...]}],
      "unexercised_routes": [...],
@@ -172,6 +186,17 @@ are::
 ``missing[].sql`` is the *normalised* text: it is what a grant has to contain,
 so it can be pasted into the manifest as it is. ``wire_sql`` is one raw
 occurrence, for a human who wants to see the placeholders as they were sent.
+
+``table_grants`` is the other way to fix a route (D7): the smallest
+``[route.<proxy>.tables]`` grant that covers every statement the route ran,
+with the TOML to paste in. It is reported per ``(route, proxy)`` pair, because
+that is what a grant is, and it is computed from **every** statement the pair
+ran — the ones that matched a grant included — so a route can be rewritten from
+exact queries to table grants in one step. A statement a table grant cannot
+describe at all (a ``SET``, a ``COPY``, a statement this build does not
+understand) is listed in ``unanalysable``, with the same reason a ``sql.denied``
+event carries: the covering grant is then not a complete replacement for the
+route's exact queries.
 """
 
 from __future__ import annotations
@@ -364,6 +389,7 @@ class _Session:
         report = config.getoption("blastit_report")
         self.report_path = Path(report)
         self.strict = bool(config.getoption("blastit_strict"))
+        self.prefer_tables = bool(config.getoption("blastit_prefer_tables"))
         self.proxies = _proxy_options(config.getoption("blastit_proxy") or [])
         self.declared = _postgresql_proxies(self.manifest)
         _check_proxy_mapping(self)
@@ -1216,6 +1242,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="fail the session when anything is missing or unrouted",
     )
+    group.addoption(
+        "--blastit-prefer-tables",
+        action="store_true",
+        default=False,
+        help="print the table-grant snippet of a route with missing statements, "
+        "instead of only naming the statements (D7)",
+    )
     parser.addini(
         "blastit_manifest",
         "path of the blastit.toml to diff the test suite against",
@@ -1228,10 +1261,15 @@ def pytest_configure(config: pytest.Config) -> None:
     global _SESSION
     _SESSION = None
     if not config.getoption("blastit_manifest") and not config.getini("blastit_manifest"):
-        if config.getoption("blastit_proxy") or config.getoption("blastit_strict"):
+        if (
+            config.getoption("blastit_proxy")
+            or config.getoption("blastit_strict")
+            or config.getoption("blastit_prefer_tables")
+        ):
             raise pytest.UsageError(
-                "blastit: --blastit-proxy and --blastit-strict need "
-                "--blastit-manifest (or blastit_manifest in the configuration)"
+                "blastit: --blastit-proxy, --blastit-strict and "
+                "--blastit-prefer-tables need --blastit-manifest (or "
+                "blastit_manifest in the configuration)"
             )
         return
     session = _Session(config)
@@ -1393,7 +1431,7 @@ def _finish(session: pytest.Session, state: _Session) -> None:
     lines: list[tuple[str, bool]] = []
     if report is not None:
         _write_json(state.report_path, report)
-        lines = _summary(report, str(state.report_path))
+        lines = _summary(report, str(state.report_path), state.prefer_tables)
     for warning in state.warnings:
         lines.append((f"blastit: {warning}", True))
     for problem in state.problems:
@@ -1421,11 +1459,14 @@ def _finish(session: pytest.Session, state: _Session) -> None:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
-def _summary(report: dict[str, Any], path: str) -> list[tuple[str, bool]]:
+def _summary(report: dict[str, Any], path: str, prefer_tables: bool = False) -> list[tuple[str, bool]]:
     """The terminal summary: short, and actionable.
 
     Each line says what to do — add the statements a route is missing, look at
-    the routes nothing exercised — and where the detail is.
+    the routes nothing exercised — and where the detail is. With
+    ``--blastit-prefer-tables``, a route with missing statements also prints the
+    table grant that covers everything it ran (D7), which is the other way to
+    fix it: a grant of tables and columns instead of a list of statements.
     """
     totals = report["totals"]
     lines: list[tuple[str, bool]] = [
@@ -1449,6 +1490,18 @@ def _summary(report: dict[str, Any], path: str) -> list[tuple[str, bool]]:
                     True,
                 )
             )
+            if prefer_tables:
+                for proxy in route["proxies"]:
+                    snippet = proxy.get("table_grants", {}).get("toml", "")
+                    if proxy["missing"] and snippet:
+                        lines.append(
+                            (
+                                f"blastit: route {route['name']} (proxy "
+                                f"{proxy['name']}): a table grant covering every "
+                                f"statement it ran:\n{snippet}",
+                                True,
+                            )
+                        )
         if route["needs_transaction_control"]:
             lines.append(
                 (

@@ -22,10 +22,12 @@ use blastit_dbproxy::{
     write_config,
 };
 use blastit_events::{Event, EventKind, PgRefuseReason, SqlKind, encode_json};
+use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio_postgres::error::SqlState;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
 
 /// A password that must never appear in an event or an error.
@@ -252,6 +254,23 @@ fn listener_spec(
         queries: queries.iter().map(|query| query.to_string()).collect(),
         transaction_control,
         unrestricted: false,
+        tables: TableGrants::default(),
+    }
+}
+
+/// A listener whose grant is a table grant rather than a list of statements
+/// (§6, D7).
+fn table_listener(uid: u32, tables: TableGrants) -> ListenerSpec {
+    ListenerSpec {
+        // Ignored by `run_with_listeners`: the listener is already owned.
+        fd: -1,
+        route: "restaurants".to_string(),
+        proxy: "db".to_string(),
+        uid,
+        queries: Vec::new(),
+        transaction_control: false,
+        unrestricted: false,
+        tables,
     }
 }
 
@@ -1732,4 +1751,207 @@ async fn ready_is_called_once_the_listeners_are_adopted() {
             .all(|event| !matches!(event.kind(), EventKind::SqlDenied(_))),
         "nothing was denied"
     );
+}
+
+/// A route whose grant is a table grant, against the real PostgreSQL (D7, §6):
+/// the shape a Django list endpoint sends runs whatever its filters are, and a
+/// column the grant does not name is refused before it reaches the server.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_grants_run_a_django_shaped_join_and_refuse_a_column() {
+    let Some(url) = pg_url() else { return };
+    let upstream = upstream(&url);
+    let product = table_for("d7_product");
+    let category = table_for("d7_category");
+    let client = direct(&upstream).await;
+    client
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {product}; DROP TABLE IF EXISTS {category}; \
+             CREATE TABLE {category} (id int primary key, name text); \
+             CREATE TABLE {product} (id int primary key, name text, price numeric, \
+                                      category_id int references {category}(id)); \
+             INSERT INTO {category} VALUES (1, 'food'); \
+             INSERT INTO {product} VALUES (1, 'bread', 2.5, 1), (2, 'milk', 1.5, 1)"
+        ))
+        .await
+        .expect("the fixture tables are created");
+
+    let tables = TableGrants::new(
+        [
+            (
+                product.clone(),
+                TableGrant {
+                    select: Some(Columns::list(["id", "name", "category_id"])),
+                    insert: Some(Columns::list(["id", "name", "category_id"])),
+                    ..TableGrant::default()
+                },
+            ),
+            (
+                category.clone(),
+                TableGrant {
+                    select: Some(Columns::list(["id", "name"])),
+                    ..TableGrant::default()
+                },
+            ),
+        ],
+        [],
+    );
+    let directory = scratch("tables");
+    let listener = bind(&directory, 5432);
+    let proxy = start(
+        directory.clone(),
+        vec![proxy_spec("db", &upstream, 4)],
+        vec![(listener, table_listener(current_uid(), tables))],
+    );
+    let client = connect(&directory, 5432).await.expect("connects");
+
+    // One join, four filters: four statements, none of them listed anywhere.
+    let join = format!(
+        r#"SELECT "{product}"."id", "{product}"."name", "{category}"."name" FROM "{product}" INNER JOIN "{category}" ON ("{product}"."category_id" = "{category}"."id") WHERE "#
+    );
+    for filter in [
+        format!(r#""{product}"."id" = $1"#),
+        format!(r#""{product}"."name" LIKE $1"#),
+        format!(r#"("{product}"."name" LIKE $1 AND "{product}"."category_id" = $2)"#),
+        format!(r#""{category}"."name" = $1"#),
+    ] {
+        let statement = format!("{join}{filter} ORDER BY \"{product}\".\"id\" ASC LIMIT 21");
+        let text = "bread";
+        let one = 1i32;
+        let params: Vec<&(dyn ToSql + Sync)> = if filter.contains(r#""id" = $1"#) {
+            vec![&one]
+        } else if filter.contains("$2") {
+            vec![&text, &one]
+        } else {
+            vec![&text]
+        };
+        // The row count does not matter: what matters is that the statement
+        // reached PostgreSQL instead of a 42501.
+        client
+            .query(&statement, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+
+    // An INSERT the grant covers (the `price` column is not in it), and one it
+    // does not.
+    let insert =
+        format!(r#"INSERT INTO "{product}" ("id", "name", "category_id") VALUES ($1, $2, $3)"#);
+    client
+        .execute(&insert, &[&3i32, &"eggs", &1i32])
+        .await
+        .expect("the grant's columns are written");
+    let error = client
+        .execute(
+            &format!(r#"INSERT INTO "{product}" ("id", "name", "category_id", "price") VALUES ($1, $2, $3, $4)"#),
+            &[&4i32, &"cheese", &1i32, &9.5],
+        )
+        .await
+        .expect_err("a column the grant does not name is refused");
+    assert_eq!(sqlstate(&error).as_deref(), Some("42501"));
+
+    // Reading a column the grant does not name is refused too, and the log says
+    // which one.
+    let error = client
+        .query(
+            &format!(r#"SELECT "{product}"."price" FROM "{product}""#),
+            &[],
+        )
+        .await
+        .expect_err("a column the grant does not name is refused");
+    assert_eq!(sqlstate(&error).as_deref(), Some("42501"));
+    let event = proxy.event(
+        |event| {
+            matches!(event.kind(), EventKind::SqlDenied(denied)
+                if denied.sql().starts_with("SELECT") && denied.sql().contains("price"))
+        },
+        "the denied price SELECT",
+    );
+    let EventKind::SqlDenied(denied) = event.kind() else {
+        unreachable!("filtered for sql.denied")
+    };
+    assert_eq!(
+        denied.reason(),
+        format!("select on {product}.price not granted")
+    );
+    assert_eq!(
+        denied.sql(),
+        format!(r#"SELECT "{product}"."price" FROM "{product}""#)
+    );
+
+    // A table the grant does not name at all is refused as well.
+    let error = client
+        .query("SELECT name FROM pg_class", &[])
+        .await
+        .expect_err("another table is not granted");
+    assert_eq!(sqlstate(&error).as_deref(), Some("42501"));
+}
+
+/// A locking clause hidden behind a derived relation reaches the base table
+/// (D7): `SELECT 1 FROM (SELECT 1 FROM t) s FOR UPDATE` locks `t`'s rows even
+/// though the outer statement reads no column of `t`, so a grant without
+/// `update` on `t` must refuse it — and one with `update` must let it run.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_grants_refuse_a_lock_hidden_behind_a_subquery() {
+    let Some(url) = pg_url() else { return };
+    let upstream = upstream(&url);
+    let table = table_for("d7_locked");
+    let client = direct(&upstream).await;
+    client
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {table}; \
+             CREATE TABLE {table} (id int primary key, name text); \
+             INSERT INTO {table} VALUES (1, 'alpha'), (2, 'beta')"
+        ))
+        .await
+        .expect("the fixture table is created");
+
+    let read_only = TableGrants::new(
+        [(
+            table.clone(),
+            TableGrant {
+                select: Some(Columns::All),
+                ..TableGrant::default()
+            },
+        )],
+        [],
+    );
+    let mut locking = read_only.clone();
+    locking.tables.entry(table.clone()).or_default().update = Some(Columns::All);
+
+    let directory = scratch("lock");
+    let listener = bind(&directory, 5432);
+    let other = bind(&directory, 5433);
+    let proxy = start(
+        directory.clone(),
+        vec![proxy_spec("db", &upstream, 4)],
+        vec![
+            (listener, table_listener(current_uid(), read_only)),
+            (other, table_listener(current_uid(), locking)),
+        ],
+    );
+
+    let sql = format!("SELECT 1 FROM (SELECT 1 FROM {table}) s FOR UPDATE");
+
+    // Without `update`, the statement is refused before it reaches the server.
+    let client = connect(&directory, 5432).await.expect("connects");
+    let error = client
+        .query(&sql, &[])
+        .await
+        .expect_err("a lock through a subquery needs update");
+    assert_eq!(sqlstate(&error).as_deref(), Some("42501"));
+    let event = proxy.event(
+        |event| matches!(event.kind(), EventKind::SqlDenied(denied) if denied.sql() == sql),
+        "the denied lock",
+    );
+    let EventKind::SqlDenied(denied) = event.kind() else {
+        unreachable!("filtered for sql.denied")
+    };
+    assert_eq!(denied.reason(), format!("update on {table}.* not granted"));
+
+    // With `update`, it reaches PostgreSQL and takes the lock.
+    let client = connect(&directory, 5433).await.expect("connects");
+    client
+        .query(&sql, &[])
+        .await
+        .expect("the grant's update covers the lock");
 }

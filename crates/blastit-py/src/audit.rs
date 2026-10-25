@@ -105,7 +105,10 @@
 //!             }
 //!           ],
 //!           "unused": ["SELECT ..."],
-//!           "transaction_control": {"observed": false, "granted": false, "needed": false}
+//!           "transaction_control": {"observed": false, "granted": false, "needed": false},
+//!           "table_grants": {"tables": {"notes": {"select": ["id"]}},
+//!                            "functions": [], "toml": "[route.db.tables]\n…",
+//!                            "unanalysable": []}
 //!         }
 //!       ]
 //!     }
@@ -165,7 +168,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use blastit_manifest::{Manifest, PgGrant, Protocol, ProxyName, RoutingTable};
-use blastit_sqlpolicy::{Allowlist, normalize};
+use blastit_sqlpolicy::{Allowlist, TableGrants, analyze, normalize};
 use serde_json::{Map, Value, json};
 
 /// How many distinct test node ids and paths one `missing` entry keeps.
@@ -245,6 +248,28 @@ pub(crate) fn normalize_sql(sql: &str) -> String {
     normalize(sql)
 }
 
+/// Analyses one statement and renders it as the report's `table_grants` shape
+/// (D7).
+///
+/// This is [`blastit_sqlpolicy::analyze`] — the same analysis the policy runs —
+/// rendered as JSON, so `import blastit._blastit; _blastit.analyze(sql)` shows
+/// exactly what a table grant would have to cover.
+///
+/// # Errors
+///
+/// [`blastit_sqlpolicy::AnalysisError`], whose message is the reason a
+/// `sql.denied` event carries.
+pub(crate) fn analyze_statement(sql: &str) -> Result<String, String> {
+    let analysis = analyze(sql).map_err(|error| error.to_string())?;
+    let mut document = serde_json::to_value(TableGrants::covering(std::iter::once(&analysis)))
+        .map_err(|error| error.to_string())?;
+    if let Some(map) = document.as_object_mut() {
+        // The grant's own shape, plus the kind of statement it came from.
+        map.insert("kind".to_string(), json!(analysis.kind().as_str()));
+    }
+    serde_json::to_string_pretty(&document).map_err(|error| error.to_string())
+}
+
 /// Diffs the observations of a test suite against a manifest (§6).
 ///
 /// The observations carry the `PATH_INFO` the app saw, which is the string the
@@ -308,7 +333,10 @@ pub(crate) fn audit(manifest_toml: &str, observations_json: &str) -> Result<Stri
             trace.executions += 1;
             routed_statements += 1;
 
-            if policy.allow.check(&normalised).is_allowed() {
+            // The policy is asked about the text as it went on the wire: it
+            // normalises it itself, and a table grant has to *parse* it (D7), so
+            // the normalised form (`$?`) is not what it can be handed.
+            if policy.allow.check(&statement.sql).is_allowed() {
                 if policy.granted.contains(&normalised) {
                     trace.matched.insert(normalised.clone());
                 }
@@ -318,6 +346,22 @@ pub(crate) fn audit(manifest_toml: &str, observations_json: &str) -> Result<Stri
                     request.nodeid.as_deref(),
                     &request.path_info,
                 );
+            }
+
+            // What a table grant covering this pair would have to say (D7).
+            // `analyze` is cached by the same normalised text the policy just
+            // checked, so a statement that was analysed there is not parsed
+            // again.
+            match analyze(&statement.sql) {
+                Ok(analysis) => trace
+                    .table_grants
+                    .merge_from(&TableGrants::covering(std::iter::once(&analysis))),
+                Err(error) => {
+                    trace
+                        .unanalysable
+                        .entry(normalised.clone())
+                        .or_insert_with(|| error.to_string());
+                }
             }
 
             if request.transaction_control || probe.is_transaction_control(&normalised) {
@@ -456,6 +500,18 @@ fn assemble(
             let needed = observed_control && !granted_control;
             route_needs_transaction_control |= needed;
 
+            let (table_grants, unanalysable) = observed.map_or_else(
+                || (TableGrants::default(), Vec::new()),
+                |observed| {
+                    let unanalysable: Vec<Value> = observed
+                        .unanalysable
+                        .iter()
+                        .map(|(sql, reason)| json!({"sql": sql, "reason": reason}))
+                        .collect();
+                    (observed.table_grants.clone(), unanalysable)
+                },
+            );
+
             proxies.push(json!({
                 "name": proxy.as_str(),
                 "observed": observed.map_or(0, |observed| observed.executions),
@@ -466,6 +522,7 @@ fn assemble(
                     "granted": granted_control,
                     "needed": needed,
                 },
+                "table_grants": table_grants_json(&table_grants, proxy.as_str(), unanalysable),
             }));
         }
         if route_needs_transaction_control {
@@ -628,7 +685,13 @@ fn setup_section(
                 continue;
             };
             let grant = grant_of(manifest, index, &proxy);
-            if Policy::of(grant.as_ref()).allow.check(&sql).is_allowed() {
+            // The wire text, not the normalised one: a table grant has to parse
+            // it (D7).
+            if Policy::of(grant.as_ref())
+                .allow
+                .check(&trace.wire_sql)
+                .is_allowed()
+            {
                 trace.granted_in += 1;
             } else {
                 trace.ungranted_in.push(route.name().to_string());
@@ -779,7 +842,8 @@ impl Policy {
             }
         }
         Self {
-            allow: Allowlist::new(grant.queries(), grant.transaction_control()),
+            allow: Allowlist::new(grant.queries(), grant.transaction_control())
+                .with_tables(grant.tables().clone()),
             granted,
             transaction_control: grant.transaction_control(),
         }
@@ -827,6 +891,12 @@ struct ProxyTrace {
     /// Whether a transaction-control statement, or a whole request that needs
     /// one, was observed.
     transaction_control: bool,
+    /// The smallest table grant that covers every statement this pair ran
+    /// (§6, D7): what the route would have to write to drop its exact queries.
+    table_grants: TableGrants,
+    /// The statements a table grant cannot describe at all, by normalised text,
+    /// with the reason.
+    unanalysable: BTreeMap<String, String>,
 }
 
 /// What one route did on the network (§7.3).
@@ -859,6 +929,31 @@ impl EgressTrace {
 /// A set that is always empty, to borrow instead of allocating for an
 /// observation that never happened.
 static EMPTY_MATCHED: BTreeSet<String> = BTreeSet::new();
+
+/// The `table_grants` section of one `(route, proxy)` pair (§6, D7).
+///
+/// It is the smallest table grant that covers every statement the pair was
+/// observed to run, plus the TOML a manifest author pastes into
+/// `[route.<proxy>.tables]` — the rewrite of a route's exact queries into table
+/// grants. It is per pair, not per route, because a grant is: a route with two
+/// `postgresql` proxies has two grants, and the plugin reports each where it
+/// belongs.
+///
+/// `unanalysable` lists the statements a table grant cannot describe at all
+/// (a `SET`, a `COPY`, a statement this build does not understand). They are
+/// reported, never dropped: the covering grant is then not a complete
+/// replacement for the route's exact queries.
+fn table_grants_json(tables: &TableGrants, proxy: &str, unanalysable: Vec<Value>) -> Value {
+    let mut section = serde_json::to_value(tables).unwrap_or_else(|_| json!({}));
+    if let Some(map) = section.as_object_mut() {
+        map.insert(
+            "toml".to_string(),
+            json!(tables.to_toml(&format!("route.{proxy}"))),
+        );
+        map.insert("unanalysable".to_string(), json!(unanalysable));
+    }
+    section
+}
 
 /// One statement executed but not granted.
 #[derive(Default)]

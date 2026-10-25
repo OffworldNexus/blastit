@@ -9,3 +9,18 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# Table and column grants are checked by parsing the statement (D7, §6), and the
+# parser has to be the one PostgreSQL itself runs: a second implementation would
+# be a parser differential, and any text the two read differently is a bypass.
+# `pg_query` builds libpg_query (the server's parser, from source) and generates
+# its bindings, so it needs a C compiler and libclang at build time.
+pg_query = "6.2.1"
+# The parse tree `pg_query` returns is walked through its JSON form, where every
+# node type is reached by structure instead of by a hand-written match that could
+# forget one.
+serde_json = "1.0.154"
+# The grant model is the same value in the manifest, in dbproxy's configuration
+# and in the pytest plugin's report, so it travels as JSON (§5.2, §6).
+serde = { version = "1.0.229", features = ["derive"] }
