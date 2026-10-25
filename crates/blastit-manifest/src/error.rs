@@ -279,6 +279,21 @@ pub enum ManifestError {
         /// The proxy the group's grant names.
         proxy: ProxyName,
     },
+    /// A grant carries both `unrestricted = true` and a list of queries (§6).
+    ///
+    /// The list would read as a restriction and is not one: the route may run
+    /// anything on that proxy either way, so rather than leave a manifest that
+    /// claims more than it does, the boot is refused.
+    #[error(
+        "{location}: unrestricted grants take no queries (grant on proxy {})",
+        quoted(.proxy)
+    )]
+    UnrestrictedWithQueries {
+        /// Where the grant is written.
+        location: Location,
+        /// The proxy the grant names.
+        proxy: ProxyName,
+    },
 }
 
 /// Something suspicious that does not stop the server from starting (§6).

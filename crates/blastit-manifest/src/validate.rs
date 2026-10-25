@@ -65,20 +65,48 @@ fn check_grants(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
     }
 }
 
-/// `unrestricted = true` is only allowed inline on a route (§6).
+/// The two rules an `unrestricted = true` grant has to obey (§6): it is only
+/// allowed inline on a route, and it takes no queries.
 ///
 /// A group can be attached to every route at once, so an unrestricted grant
 /// there could turn the whole manifest into one sandbox — the opposite of what
-/// the file is for. Inline, it reaches exactly one route and one proxy.
+/// the file is for. Inline, it reaches exactly one route and one proxy, and a
+/// query list next to it could only ever suggest a restriction that is not
+/// there.
 fn check_unrestricted(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
     for (name, group) in manifest.groups() {
         for (proxy, grant) in group.grants() {
+            let Some(grant) = grant.as_postgresql() else {
+                continue;
+            };
+            if !grant.is_unrestricted() {
+                continue;
+            }
+            let location = Location::Group(name.clone());
+            errors.push(ManifestError::UnrestrictedGroup {
+                location: location.clone(),
+                proxy: proxy.clone(),
+            });
+            // A grant that does both is wrong twice; both are reported.
+            if !grant.queries().is_empty() {
+                errors.push(ManifestError::UnrestrictedWithQueries {
+                    location,
+                    proxy: proxy.clone(),
+                });
+            }
+        }
+    }
+    for (index, route) in manifest.routes().iter().enumerate() {
+        for (proxy, grant) in route.grants() {
             if grant
                 .as_postgresql()
-                .is_some_and(|grant| grant.is_unrestricted())
+                .is_some_and(|grant| grant.is_unrestricted() && !grant.queries().is_empty())
             {
-                errors.push(ManifestError::UnrestrictedGroup {
-                    location: Location::Group(name.clone()),
+                errors.push(ManifestError::UnrestrictedWithQueries {
+                    location: Location::Route {
+                        index,
+                        name: route.name().to_string(),
+                    },
                     proxy: proxy.clone(),
                 });
             }

@@ -1292,6 +1292,98 @@ async fn only_the_documented_startup_parameters_are_accepted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_unrestricted_route_still_refuses_forbidden_startup_parameters() {
+    let Some(url) = pg_url() else { return };
+    let upstream = upstream(&url);
+    let items = table_for("unrestricted_startup");
+    setup_items(&upstream, &items).await;
+
+    let directory = scratch("unrestricted-startup");
+    let listener = bind(&directory, 5432);
+    let proxy = start(
+        directory.clone(),
+        vec![proxy_spec("db", &upstream, 4)],
+        vec![(
+            listener,
+            // A route that may run anything at all on this proxy.
+            ListenerSpec {
+                unrestricted: true,
+                ..listener_spec("backoffice", "db", current_uid(), &[], false)
+            },
+        )],
+    );
+
+    // `unrestricted` is about *statements*: the session is still dbproxy's, so
+    // what a client claims in its startup packet still cannot reshape the
+    // upstream session it gets (§2.2).
+    let value = "a-value-that-must-not-be-quoted";
+    let forbidden = [
+        "options",
+        "search_path",
+        "role",
+        "session_authorization",
+        "default_transaction_read_only",
+    ];
+    for name in forbidden {
+        let answer = raw_exchange(
+            &directory,
+            5432,
+            &startup_packet(&[("user", "blastit"), ("database", "blastit"), (name, value)]),
+        )
+        .await;
+        assert_eq!(
+            answer.first().copied(),
+            Some(b'E'),
+            "{name}: an ErrorResponse, got {answer:?}"
+        );
+        assert!(
+            contains(&answer, b"28000"),
+            "{name}: the refusal is 28000, got {answer:?}"
+        );
+        assert!(
+            !contains(&answer, value.as_bytes()),
+            "{name}: the refusal must not quote a value: {answer:?}"
+        );
+    }
+
+    // One `pg.refused` per connection, with the route and the reason, and not a
+    // single `sql.denied`: the policy never saw a statement.
+    let events = proxy.events();
+    let refusals = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind(),
+                EventKind::PgRefused(refused)
+                    if refused.reason() == &PgRefuseReason::Other("startup_parameter".to_string())
+            )
+        })
+        .count();
+    assert_eq!(refusals, forbidden.len(), "{events:#?}");
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.kind(), EventKind::SqlDenied(_))),
+        "{events:#?}"
+    );
+
+    // ... and a client that sends nothing extra gets a session in which the
+    // policy really does allow anything.
+    let client = connect(&directory, 5432).await.expect("connects");
+    client
+        .simple_query(&format!("SELECT count(*) FROM {items}"))
+        .await
+        .expect("an unrestricted route may run this");
+    assert!(
+        proxy
+            .events()
+            .iter()
+            .all(|event| !matches!(event.kind(), EventKind::SqlDenied(_))),
+        "nothing is logged per statement"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn every_connection_to_a_closed_port_is_refused_by_dbroxy() {
     let Some(url) = pg_url() else { return };
     let upstream = upstream(&url);

@@ -512,9 +512,11 @@ impl RequestInfo {
 
 /// A statement the database proxy refused (§8.1 `sql.denied`).
 ///
-/// `sql` is the normalised statement text, with parameters left as
-/// placeholders; parameter values are never logged (§8.1), and the type has no
-/// field for them.
+/// `sql` is the normalised statement text, with every parameter left as the
+/// placeholder `$?` and the statement's shape normalised with it
+/// (ARCHITECTURE.md §6): a list of parameters is `IN ($?, ...)` and a run of
+/// identical `VALUES` rows is `(row), ...`. Parameter values are never logged
+/// (§8.1), and the type has no field for them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SqlDenied {
     pid: u32,
@@ -530,9 +532,10 @@ impl SqlDenied {
     ///
     /// **`sql` is the caller's contract**: the normalised statement text, the
     /// same one the proxy matched against its allowlist, with every parameter
-    /// left as its placeholder (`$1`, `%s`, …). Parameter *values* are never
-    /// logged (§8.1), so a caller that has only the interpolated statement
-    /// must send the placeholder form instead — this crate cannot undo an
+    /// left as the placeholder `$?` — a parameter list is `IN ($?, ...)`, a run
+    /// of identical rows is `(row), ...`. Parameter *values* are never logged
+    /// (§8.1), so a caller that has only the interpolated statement must send
+    /// the parameterised form instead — this crate cannot undo an
     /// interpolation that has already happened.
     pub fn new(
         pid: u32,
@@ -567,7 +570,7 @@ impl SqlDenied {
         &self.kind
     }
 
-    /// The normalised statement, parameters left as placeholders.
+    /// The normalised statement, with every parameter left as `$?`.
     pub fn sql(&self) -> &str {
         &self.sql
     }
