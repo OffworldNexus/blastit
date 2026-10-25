@@ -10,7 +10,7 @@
 //! bind 0.0.0.0:$PORT
 //! fork http (base+1) and scheduler (base+2) — both before CPython exists
 //! initialise CPython, import BLASTIT_APP, preload, warm up, close DB handles
-//! gc.collect() · immortalize the heap (§9.2 #7, where that is safe) · gc.freeze()
+//! gc.collect() · immortalize the preloaded heap (§9.2 #7) · gc.freeze()
 //! boot: what the preload cost and the view cap memory buys (§8)
 //! ready
 //! supervise, holding the GIL
@@ -611,7 +611,7 @@ fn load(
     }
     // §9.2 #7, between `gc.collect()` and `gc.freeze()`: nothing left in the
     // collected heap is garbage, and every object a request could touch stops
-    // counting references — on an interpreter where marking it is safe, which
+    // counting references — on an interpreter whose marker blastit knows, which
     // `BLASTIT_IMMORTALIZE` and the version decide.
     let outcome = immortalize(py, config, emitter);
     if let Err(err) = py.run(FREEZE, None, None) {
@@ -651,13 +651,14 @@ fn restore_sys_path(py: Python<'_>, entries: &[Vec<u8>]) -> PyResult<()> {
     Ok(())
 }
 
-/// §9.2 #7: makes the preloaded heap immortal, when that is safe here.
+/// §9.2 #7: makes the preloaded heap immortal, when the interpreter's marker is
+/// known here.
 ///
 /// The decision is `BLASTIT_IMMORTALIZE` against the running interpreter
-/// ([`crate::immortal::decide`]): on 3.14 the marker corrupts the heap, so
-/// `auto` skips it, and an interpreter whose marker blastit does not know is
-/// skipped too — the server starts rather than refusing, and every view
-/// process simply copies more of the preloaded heap (§9.2 #6).
+/// ([`crate::immortal::decide`]): every interpreter blastit knows gets the
+/// marker *it* reads — 3.14 CPython's own split word — and one whose marker
+/// blastit does not know is skipped, so the server starts rather than refusing
+/// and every view process simply copies more of the preloaded heap (§9.2 #6).
 ///
 /// A skip is one `warn` line saying why; the same reason travels in the
 /// preload `boot` event ([`preload_lifecycle`]). A pass that was *decided* and

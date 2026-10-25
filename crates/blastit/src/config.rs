@@ -64,17 +64,20 @@ impl SpawnMode {
 
 /// When §9.2 #7's heap immortalisation runs (`BLASTIT_IMMORTALIZE`).
 ///
-/// The marker §9.2 #7 writes is safe on CPython 3.12 and 3.13 and unsafe on
-/// 3.14, where some decrefs do not check it, so the default is to run it where
-/// it is known to be safe and to leave the heap alone elsewhere.
+/// Every CPython 3.12–3.14 has a marker that holds its reference counts still —
+/// 3.14's is its own, the split word `crate::immortal::marker` writes — so the
+/// default runs the pass on every interpreter blastit knows, and skips the ones
+/// it does not (32-bit, big-endian, free-threaded, `Py_TRACE_REFS`, or a
+/// version outside that range).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Immortalize {
-    /// Immortalise on the interpreters §9.2 #7 is known to hold on — CPython
-    /// 3.12 and 3.13 — and skip it everywhere else. The default.
+    /// Immortalise wherever the marker is known — CPython 3.12 to 3.14, as
+    /// `crate::immortal::supported` decides — and skip it everywhere else. The
+    /// default.
     Auto,
-    /// Immortalise wherever the marker is known at all — CPython 3.12 to 3.14,
-    /// as `crate::immortal::supported` decides — including 3.14, whose heap is
-    /// not safe to mark, for experiments.
+    /// The same interpreters as [`Immortalize::Auto`], asked for by an operator
+    /// rather than assumed: `1` says the pass must run, and the interpreter
+    /// still has the last word about whether its marker is known at all.
     On,
     /// Never immortalise, whatever the interpreter.
     Off,
