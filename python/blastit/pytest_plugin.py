@@ -834,6 +834,10 @@ def _warn_if_binding_is_client_side(connection: Any) -> None:
     if session is None:
         return
     alias = str(connection.alias)
+    if alias == NO_DB_ALIAS:
+        # The copy Django opens to create the test database: test machinery, and
+        # its SQL never reaches a route.
+        return
     with session.lock:
         if alias in session.reported_bindings:
             return
