@@ -147,6 +147,10 @@ fn encode_with(event: &Event, truncated: &[&'static str]) -> String {
             push_member(&mut out, "uid", &info.uid.to_string());
             push_member(&mut out, "reason", &json_string(info.reason.as_str()));
         }
+        EventKind::ProcessCap(info) => {
+            push_member(&mut out, "estimate_bytes", &info.estimate_bytes.to_string());
+            push_member(&mut out, "cap", &info.cap.to_string());
+        }
         EventKind::AppOutput(output) => {
             push_member(&mut out, "stream", &json_string(output.stream.as_str()));
             push_member(&mut out, "line", &json_string(&output.line));
@@ -326,7 +330,7 @@ fn string_slots(event: &mut Event) -> Vec<(&'static str, &mut String)> {
         EventKind::ManifestWarning(info) => {
             slots.push(("message", &mut info.message));
         }
-        EventKind::ProcessSpawned(_) | EventKind::ProcessExited(_) => {}
+        EventKind::ProcessSpawned(_) | EventKind::ProcessExited(_) | EventKind::ProcessCap(_) => {}
     }
     slots
 }
@@ -403,8 +407,8 @@ mod tests {
     use crate::fixture;
     use crate::{
         AppOutput, Component, ExitKind, HttpRejected, ManifestWarning, Outcome, PgRefuseReason,
-        PgRefused, ProcessExited, ProcessRetired, ProcessSpawned, RejectReason, RequestInfo,
-        RetireReason, SqlDenied, Stream,
+        PgRefused, ProcessCap, ProcessExited, ProcessRetired, ProcessSpawned, RejectReason,
+        RequestInfo, RetireReason, SqlDenied, Stream,
     };
 
     /// The keys of the top-level object, in order.
@@ -590,6 +594,7 @@ mod tests {
                 20_001,
                 RetireReason::MemoryPressure,
             ))),
+            fixture::event(EventKind::ProcessCap(ProcessCap::new(141_557_760, 4))),
             fixture::event(EventKind::AppOutput(AppOutput::new(
                 Stream::Stderr,
                 "boom\n",
@@ -727,6 +732,19 @@ mod tests {
             ["ts", "level", "event", "component", "pid", "uid", "signal"]
         );
         assert!(parse(&encode_json(&process)).get("status").is_none());
+
+        // §8 Sizing: the measured cost per view and the cap it bought.
+        let cap = fixture::event(EventKind::ProcessCap(ProcessCap::new(141_557_760, 4)));
+        let json = encode_json(&cap);
+        assert_eq!(
+            top_level_keys(&json),
+            ["ts", "level", "event", "component", "estimate_bytes", "cap"]
+        );
+        let value = parse(&json);
+        assert_eq!(value["estimate_bytes"], 141_557_760);
+        assert_eq!(value["cap"], 4);
+        assert!(value["estimate_bytes"].is_u64(), "byte counts are integers");
+        assert!(value["cap"].is_u64());
     }
 
     #[test]

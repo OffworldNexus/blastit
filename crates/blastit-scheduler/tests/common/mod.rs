@@ -11,6 +11,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,7 +21,7 @@ use blastit_frame::{
 };
 use blastit_manifest::{Manifest, RoutingTable, UidLayout};
 use blastit_scheduler::{
-    CtlChannel, Emit, SchedulerConfig, SchedulerError, routes_from_manifest, run,
+    CtlChannel, Emit, MemoryProbe, SchedulerConfig, SchedulerError, routes_from_manifest, run,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -87,6 +88,50 @@ enum Step {
     Close,
     /// Hold this request until the gate grants a permit.
     Hold(u32),
+}
+
+/// A fake memory model for the §8 Sizing tests.
+///
+/// Aggregate usage starts at `base` and grows by `per_view` every time the
+/// fake init forks a view process, which is what §9.2 #2 says a fork does under
+/// gVisor: the child copies the 2 MiB chunks of the preloaded heap it writes
+/// to. Tests read or set the usage directly, and the scheduler sees it through
+/// [`Memory::probe`].
+pub struct Memory {
+    usage: AtomicU64,
+    per_view: u64,
+}
+
+impl Memory {
+    /// A machine holding `base` bytes in which each view process costs
+    /// `per_view` more, in bytes.
+    pub fn new(base: u64, per_view: u64) -> Arc<Self> {
+        Arc::new(Self {
+            usage: AtomicU64::new(base),
+            per_view,
+        })
+    }
+
+    /// The probe the scheduler reads through: the usage right now.
+    pub fn probe(self: &Arc<Self>) -> MemoryProbe {
+        let model = self.clone();
+        MemoryProbe::new(move || Some(model.usage()))
+    }
+
+    /// The usage right now, in bytes.
+    pub fn usage(&self) -> u64 {
+        self.usage.load(Ordering::Relaxed)
+    }
+
+    /// Sets the usage, as a machine going under or over a watermark would.
+    pub fn set(&self, bytes: u64) {
+        self.usage.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Records one more forked view process.
+    fn fork(&self) {
+        self.usage.fetch_add(self.per_view, Ordering::Relaxed);
+    }
 }
 
 /// Everything the fake init and the fake views saw.
@@ -398,6 +443,8 @@ pub struct Options {
     pub manifest: String,
     pub scripts: Arc<Mutex<HashMap<usize, Script>>>,
     pub exit_on_retire: bool,
+    /// A fake memory model whose usage the fake init grows on every fork.
+    pub memory_model: Option<Arc<Memory>>,
 }
 
 impl Options {
@@ -415,6 +462,7 @@ impl Options {
             manifest: "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n".to_string(),
             scripts: Arc::new(Mutex::new(HashMap::new())),
             exit_on_retire: true,
+            memory_model: None,
         }
     }
 
@@ -430,6 +478,15 @@ impl Options {
             .lock()
             .expect("scripts lock")
             .insert(route, script);
+        self
+    }
+
+    /// Makes `model` the machine's memory: the scheduler reads it through a
+    /// probe, and the fake init grows it by the model's per-view cost on every
+    /// `SPAWN`, the way §9.2 #2 says a fork does.
+    pub fn memory(mut self, model: Arc<Memory>) -> Self {
+        self.cfg.memory_usage = Some(model.probe());
+        self.memory_model = Some(model);
         self
     }
 }
@@ -470,6 +527,7 @@ impl World {
 
         let scripts = options.scripts.clone();
         let exit_on_retire = options.exit_on_retire;
+        let memory_model = options.memory_model.clone();
         let init_log = log.clone();
         tokio::spawn(async move {
             let mut pid = 1000u32;
@@ -478,6 +536,11 @@ impl World {
                     Ctl::Spawn { route } => {
                         pid += 1;
                         let route = route as usize;
+                        // §9.2 #2: by the time init reports the fork, the copy
+                        // it costs is part of the aggregate reading.
+                        if let Some(model) = &memory_model {
+                            model.fork();
+                        }
                         let (for_scheduler, for_view) =
                             UnixStream::pair().expect("view socketpair");
                         let script = scripts
@@ -608,6 +671,19 @@ impl World {
             .iter()
             .filter_map(|event| match event.kind() {
                 blastit_events::EventKind::ProcessRetired(retired) => Some(retired.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `process.cap` events emitted so far (§8 Sizing).
+    pub fn caps(&self) -> Vec<blastit_events::ProcessCap> {
+        self.events
+            .lock()
+            .expect("events lock")
+            .iter()
+            .filter_map(|event| match event.kind() {
+                blastit_events::EventKind::ProcessCap(cap) => Some(*cap),
                 _ => None,
             })
             .collect()

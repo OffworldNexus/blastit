@@ -759,6 +759,40 @@ impl ProcessRetired {
     }
 }
 
+/// The live view process cap in force, and the cost per view process it was
+/// derived from (§8.1 `process.cap`).
+///
+/// The scheduler emits one of these when its measured cost per view, or the
+/// cap that follows from it, changes — never once per request. §8 Sizing's
+/// derived cap is a divisor away from the configured
+/// `BLASTIT_VIEW_MEM_ESTIMATE`, and this event is where the divisor an
+/// operator can actually measure appears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessCap {
+    estimate_bytes: u64,
+    cap: u32,
+}
+
+impl ProcessCap {
+    /// A cap of `cap` view processes, from `estimate_bytes` per process.
+    pub fn new(estimate_bytes: u64, cap: u32) -> Self {
+        Self {
+            estimate_bytes,
+            cap,
+        }
+    }
+
+    /// The cost of one view process the cap was derived from, in bytes.
+    pub fn estimate_bytes(&self) -> u64 {
+        self.estimate_bytes
+    }
+
+    /// The live view process cap in force.
+    pub fn cap(&self) -> u32 {
+        self.cap
+    }
+}
+
 /// One line printed by a child process (§8.1 `app.output`).
 ///
 /// init wraps every child line in one of these. A line that does not fit is
@@ -1083,6 +1117,8 @@ pub enum EventKind {
     ProcessExited(ProcessExited),
     /// A view process was retired on purpose.
     ProcessRetired(ProcessRetired),
+    /// The live view process cap and the measured cost per view.
+    ProcessCap(ProcessCap),
     /// A child process printed a line.
     AppOutput(AppOutput),
     /// The server started a phase of its startup.
@@ -1106,6 +1142,7 @@ impl EventKind {
             Self::ProcessSpawned(_) => "process.spawned",
             Self::ProcessExited(_) => "process.exited",
             Self::ProcessRetired(_) => "process.retired",
+            Self::ProcessCap(_) => "process.cap",
             Self::AppOutput(_) => "app.output",
             Self::Boot(_) => "boot",
             Self::Ready(_) => "ready",
@@ -1140,6 +1177,7 @@ impl EventKind {
             Self::HttpRejected(_)
             | Self::ProcessSpawned(_)
             | Self::ProcessRetired(_)
+            | Self::ProcessCap(_)
             | Self::Boot(_)
             | Self::Ready(_)
             | Self::Shutdown(_) => Level::Info,
@@ -1385,6 +1423,10 @@ mod tests {
                 Level::Info,
             ),
             (
+                EventKind::ProcessCap(ProcessCap::new(135 * 1024 * 1024, 4)),
+                Level::Info,
+            ),
+            (
                 EventKind::AppOutput(AppOutput::new(Stream::Stdout, "hello")),
                 Level::Info,
             ),
@@ -1446,6 +1488,7 @@ mod tests {
             "process.spawned",
             "process.exited",
             "process.retired",
+            "process.cap",
             "app.output",
             "boot",
             "ready",
@@ -1719,6 +1762,12 @@ mod tests {
         assert_eq!(retired.pid(), 11);
         assert_eq!(retired.uid(), 20_001);
         assert_eq!(retired.reason(), &RetireReason::LruCap);
+
+        // §8 Sizing: the cap event carries the divisor it was derived from.
+        let cap = ProcessCap::new(141_557_760, 4);
+        assert_eq!(cap.estimate_bytes(), 141_557_760);
+        assert_eq!(cap.cap(), 4);
+        assert_eq!(cap, ProcessCap::new(141_557_760, 4));
 
         let output = AppOutput::new(Stream::Stdout, "hi");
         assert_eq!(output.stream(), Stream::Stdout);

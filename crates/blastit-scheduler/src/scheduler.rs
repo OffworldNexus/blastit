@@ -53,7 +53,23 @@
 //!   provisionally at startup, so the eager or preforked burst obeys it, and
 //!   again at the first `SPAWNED`, which is the first moment §8's "usage after
 //!   preload" exists (init forks every view from its supervision loop, which
-//!   begins only once the app is preloaded, §4).
+//!   begins only once the app is preloaded, §4). From then on it is re-derived
+//!   from the cost per view that is *measured* as views come up (see
+//!   [`Scheduler::measure_view_memory`]) and reported as `process.cap` when it
+//!   changes.
+//! * The LRU cap only ever retires a view that is `READY`, has nothing in
+//!   flight and has no request waiting in the queue for its own route
+//!   ([`Scheduler::evictable_view`]). Anything else and a request would fail
+//!   only because the cap was busy killing the very process that would have
+//!   served it — a real instance did that thousands of times a second, and
+//!   answered every request `503`. With no evictable view the request keeps
+//!   waiting for a worker slot, bounded by `BLASTIT_QUEUE_TIMEOUT` as usual.
+//! * Spawning is also refused while aggregate usage is above
+//!   `BLASTIT_MEM_HIGH_WATERMARK` unless an evictable view can be retired
+//!   first, so memory pressure never becomes retire-then-respawn thrash. A view
+//!   retired for memory pressure cools its route down for
+//!   [`SchedulerConfig::spawn_backoff`], as does one retired for the cap before
+//!   it ever served anything.
 //! * Two settings exist that §8.2 does not name, because §2.4 asks for the
 //!   behaviour without giving it a variable: [`SchedulerConfig::spawn_backoff`]
 //!   ("don't spin") and the per-peer byte caps in this module.
@@ -65,7 +81,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use blastit_events::{
-    Component, Event, EventKind, Outcome, ProcessRetired, RequestInfo, RetireReason,
+    Component, Event, EventKind, Outcome, ProcessCap, ProcessRetired, RequestInfo, RetireReason,
 };
 use blastit_frame::{
     Ctl, DoneOutcome, Frame, FrameError, INITIAL_WINDOW, Limits, ReqHead, RespHead,
@@ -203,6 +219,19 @@ impl View {
     }
 }
 
+/// One §8 Sizing memory sample: the aggregate usage, and how many views had
+/// sent `READY` when it was taken.
+///
+/// The difference between two samples is the memory one more view process
+/// cost, which is the divisor §8's derived cap should have used all along.
+#[derive(Debug, Clone, Copy)]
+struct MemSample {
+    /// Aggregate usage in bytes.
+    used: u64,
+    /// Views that had sent `READY`.
+    views: u32,
+}
+
 /// One request, from its `REQ_HEAD` to the `DONE` that releases its slot.
 struct Request {
     /// http's stream id, for the response frames.
@@ -315,6 +344,23 @@ struct Scheduler {
     /// Whether `derived_view_cap` came from a reading taken *after* the
     /// preload, which is the one §8 asks for.
     derived_after_preload: bool,
+    /// §8 Sizing: the usage init reported once the app was preloaded, kept as
+    /// the `used` of every later derivation of the cap.
+    preload_used: Option<u64>,
+    /// §8 Sizing: the last `(usage, ready views)` sample, which is what turns
+    /// consecutive samples into a measured cost per view process.
+    mem_sample: Option<MemSample>,
+    /// §8 Sizing: the measured cost of one view process, a moving average
+    /// clamped to at least `BLASTIT_VIEW_MEM_ESTIMATE`.
+    measured_view_mem: Option<u64>,
+    /// §8 Sizing: the `(estimate, cap)` pair the last `process.cap` event
+    /// reported, so a change — and only a change — is logged.
+    reported_cap: Option<(u64, u32)>,
+    /// The most recent aggregate reading, with when it was taken. A spawn
+    /// decision must not read the probe once per pump, so this is what
+    /// [`Scheduler::memory`] serves until it is
+    /// [`SchedulerConfig::memory_check_interval`] old.
+    mem_reading: Option<(Instant, Option<u64>)>,
     /// When the memory high watermark is checked next (`None`: not watched).
     memory_check_at: Option<Instant>,
     /// http closed `http.chan`.
@@ -364,6 +410,11 @@ impl Scheduler {
             drain_deadline: None,
             derived_view_cap: None,
             derived_after_preload: false,
+            preload_used: None,
+            mem_sample: None,
+            measured_view_mem: None,
+            reported_cap: None,
+            mem_reading: None,
             memory_check_at,
             http_closed: false,
             dropped: 0,
@@ -1158,7 +1209,7 @@ impl Scheduler {
         let Some(watermark) = self.cfg.mem_high_watermark_bytes else {
             return Ok(());
         };
-        let Some(usage) = self.read_memory() else {
+        let Some(usage) = self.memory_now() else {
             return Ok(());
         };
         if usage <= watermark {
@@ -1191,6 +1242,38 @@ impl Scheduler {
             .and_then(|probe| probe.read())
     }
 
+    /// Reads the probe now, and keeps the reading for the next
+    /// [`Scheduler::memory`] call.
+    fn memory_now(&mut self) -> Option<u64> {
+        let usage = self.read_memory();
+        self.mem_reading = Some((Instant::now(), usage));
+        usage
+    }
+
+    /// The aggregate usage in bytes, re-read only when the cached reading is
+    /// older than `memory_check_interval`.
+    ///
+    /// §8 Sizing samples memory on that cadence anyway, and a spawn that is
+    /// refused for memory is retried on every pump: without the cache a busy
+    /// scheduler would read the probe per event rather than per check.
+    fn memory(&mut self) -> Option<u64> {
+        if let Some((at, usage)) = self.mem_reading
+            && at.elapsed() < self.cfg.memory_check_interval
+        {
+            return usage;
+        }
+        self.memory_now()
+    }
+
+    /// Whether aggregate usage is above `BLASTIT_MEM_HIGH_WATERMARK` (§8
+    /// Sizing). Memory that cannot be read is not pressure.
+    fn above_watermark(&mut self) -> bool {
+        let Some(watermark) = self.cfg.mem_high_watermark_bytes else {
+            return false;
+        };
+        self.memory().is_some_and(|usage| usage > watermark)
+    }
+
     /// Takes §8 Sizing's derived view cap (§8 Sizing, §9.2 #8).
     ///
     /// §8 asks for the cap to come from the usage *after preload*, and that
@@ -1204,11 +1287,14 @@ impl Scheduler {
     ///   preforked burst obeys the cap it can already see rather than forking
     ///   everything the manifest names;
     /// * `after_preload: true`, at the first `SPAWNED` — the first proof the
-    ///   preloaded heap is part of the reading — which replaces it.
+    ///   preloaded heap is part of the reading — which replaces it, and which
+    ///   also gives [`Scheduler::measure_view_memory`] the baseline it counts
+    ///   the measured cost per view from.
     ///
     /// A reading that cannot be taken leaves the cap unset, which §8 asks for.
     fn derive_view_cap(&mut self, after_preload: bool) {
         if self.cfg.max_view_processes.is_some()
+            || self.measured_view_mem.is_some()
             || (self.derived_view_cap.is_some() && (self.derived_after_preload || !after_preload))
         {
             return;
@@ -1216,11 +1302,98 @@ impl Scheduler {
         let Some(total) = self.cfg.mem_total_bytes else {
             return;
         };
-        let Some(used) = self.read_memory() else {
+        let Some(used) = self.memory_now() else {
             return;
         };
+        if after_preload {
+            // §8 Sizing: this reading is the `used` every later derivation
+            // starts from, and the baseline the measured cost is counted
+            // against.
+            self.preload_used = Some(used);
+            self.mem_sample = Some(MemSample { used, views: 0 });
+        }
         self.derived_view_cap = Some(derived_view_cap(total, used, self.cfg.view_mem_estimate));
         self.derived_after_preload = after_preload;
+    }
+
+    /// §8 Sizing: measures what one more view process costs, from the rise in
+    /// aggregate usage per view that came up, and re-derives the cap from it.
+    ///
+    /// Measured cost is the number §8 Sizing's default was always missing: each
+    /// view copies most of the preloaded heap (about 135 MiB under gVisor on
+    /// CPython 3.14, against a `BLASTIT_VIEW_MEM_ESTIMATE` of 32 MiB), so a cap
+    /// derived from the configured estimate bounds nothing at all. The estimate
+    /// is a moving average clamped to at least the configured one: a machine
+    /// that measures nothing keeps the operator's number, and one that measures
+    /// more than that gets the cap that fits.
+    ///
+    /// Nothing happens when `BLASTIT_MAX_VIEW_PROCESSES` is set (§8 only
+    /// derives the default), when the machine's memory cannot be read, or
+    /// before the first `SPAWNED` gave a baseline to measure against.
+    fn measure_view_memory(&mut self) {
+        if self.cfg.max_view_processes.is_some() || self.cfg.mem_total_bytes.is_none() {
+            return;
+        }
+        let Some(usage) = self.memory_now() else {
+            return;
+        };
+        let views = self.ready_view_count();
+        let Some(previous) = self.mem_sample else {
+            self.mem_sample = Some(MemSample { used: usage, views });
+            return;
+        };
+        if views <= previous.views || usage <= previous.used {
+            // Nothing to learn: no view came up since the last sample, or the
+            // machine gave memory back rather than spending it. The sample
+            // point still moves forward.
+            self.mem_sample = Some(MemSample {
+                used: usage.max(previous.used),
+                views: views.max(previous.views),
+            });
+            return;
+        }
+        let added = u64::from(views - previous.views);
+        let per_view = ((usage - previous.used) / added).max(self.cfg.view_mem_estimate);
+        self.measured_view_mem = Some(match self.measured_view_mem {
+            Some(previous) => (previous + per_view) / 2,
+            None => per_view,
+        });
+        self.mem_sample = Some(MemSample { used: usage, views });
+        self.derive_measured_cap();
+    }
+
+    /// The views that have sent `READY`, which is how many heap copies exist.
+    fn ready_view_count(&self) -> u32 {
+        u32::try_from(self.views.values().filter(|view| view.ready).count()).unwrap_or(u32::MAX)
+    }
+
+    /// Re-derives §8 Sizing's cap from the measured cost per view, and reports
+    /// the pair when it changed.
+    fn derive_measured_cap(&mut self) {
+        let (Some(total), Some(used), Some(estimate)) = (
+            self.cfg.mem_total_bytes,
+            self.preload_used,
+            self.measured_view_mem,
+        ) else {
+            return;
+        };
+        let cap = derived_view_cap(total, used, estimate);
+        self.derived_view_cap = Some(cap);
+        self.derived_after_preload = true;
+        if self.reported_cap != Some((estimate, cap)) {
+            self.reported_cap = Some((estimate, cap));
+            self.emit_cap(estimate, cap);
+        }
+    }
+
+    /// Emits `process.cap` (§8.1): the measured cost per view and the cap it
+    /// buys. Only ever emitted when one of the two changes.
+    fn emit_cap(&mut self, estimate: u64, cap: u32) {
+        let event = Event::now(
+            Component::Scheduler,
+            EventKind::ProcessCap(ProcessCap::new(estimate, cap)),
+        );
+        (self.emit)(event);
     }
 
     /// The live view process cap in force: `BLASTIT_MAX_VIEW_PROCESSES`, or the
@@ -1231,7 +1404,15 @@ impl Scheduler {
 
     // ------------------------------------------------------------- lifecycle
 
-    /// Asks init for a view process, respecting the LRU cap (§2.4).
+    /// Asks init for a view process, respecting the LRU cap and the memory high
+    /// watermark (§2.4, §8 Sizing).
+    ///
+    /// When the cap is full, or usage is above the watermark, a view has to be
+    /// retired first. Only [`Scheduler::evictable_view`] qualifies for that,
+    /// and with no evictable view the spawn does not happen at all: the request
+    /// that wanted it waits in the admission queue, where
+    /// `BLASTIT_QUEUE_TIMEOUT` bounds the wait, instead of the cap forking and
+    /// killing in a loop.
     fn try_spawn(&mut self, route: usize) -> Result<(), SchedulerError> {
         if self.views.contains_key(&route) {
             return Ok(());
@@ -1242,15 +1423,17 @@ impl Scheduler {
             }
             self.backoff.remove(&route);
         }
+        if !self.make_room(route)? {
+            return Ok(());
+        }
+        // `make_room` retires at most one process, and the cap it retired for
+        // may still be exceeded — a measured cap can land below the number of
+        // processes that are already live. Then the spawn waits for the next
+        // round of shedding rather than adding to the overshoot.
         if let Some(cap) = self.view_cap()
             && self.views.len() as u32 >= cap
         {
-            // Retire the least recently used idle view to make room; with none
-            // idle the request keeps waiting (§2.4).
-            let Some(victim) = self.least_recently_used_idle(route) else {
-                return Ok(());
-            };
-            self.retire(victim, RetireReason::LruCap)?;
+            return Ok(());
         }
         self.views.insert(route, View::spawning(route));
         let route_id = u32::try_from(route).unwrap_or(u32::MAX);
@@ -1261,15 +1444,70 @@ impl Scheduler {
         Ok(())
     }
 
-    /// The idle view that was dispatched to longest ago, excluding `route`.
-    fn least_recently_used_idle(&self, route: usize) -> Option<ViewKey> {
+    /// Makes room for a new view process for `route`, or says the spawn has to
+    /// wait (§2.4, §8 Sizing).
+    ///
+    /// A full cap and a reading above `BLASTIT_MEM_HIGH_WATERMARK` both mean a
+    /// process has to go first, and both use the same victim: the
+    /// least-recently-used view that has nothing in flight and owes nothing to
+    /// its own route's queue. Retiring one for memory pressure while the cap
+    /// has room is deliberate — §8 Sizing would rather give a process back than
+    /// add one to a machine that is already over the watermark.
+    ///
+    /// Returns `false` when the spawn must not happen: the caller leaves the
+    /// request queued.
+    fn make_room(&mut self, route: usize) -> Result<bool, SchedulerError> {
+        let cap_full = self
+            .view_cap()
+            .is_some_and(|cap| self.views.len() as u32 >= cap);
+        let over_watermark = self.above_watermark();
+        if !cap_full && !over_watermark {
+            return Ok(true);
+        }
+        let Some(victim) = self.evictable_view(route) else {
+            return Ok(false);
+        };
+        let reason = if cap_full {
+            RetireReason::LruCap
+        } else {
+            RetireReason::MemoryPressure
+        };
+        self.retire(victim, reason)?;
+        Ok(true)
+    }
+
+    /// The view that may be retired to make room for `route`.
+    ///
+    /// It must be live, `READY`, have nothing in flight, and have no request
+    /// waiting in the admission queue for its own route. A process that has not
+    /// finished the request it was forked for — or one that is still waiting
+    /// for its first `READY` — is never the victim: choosing one would kill the
+    /// answer to a request that is about to be dispatched, and doing that once
+    /// per pump is exactly the livelock this predicate exists to stop. The
+    /// least recently used of the candidates wins.
+    fn evictable_view(&self, route: usize) -> Option<ViewKey> {
         self.views
             .values()
             .filter(|view| {
-                view.key.route != route && !view.spawning && view.key.pid != 0 && view.inflight == 0
+                view.key.route != route
+                    && view.ready
+                    && !view.spawning
+                    && view.key.pid != 0
+                    && view.inflight == 0
+                    && !self.route_waiting(view.key.route)
             })
             .min_by_key(|view| view.last_used)
             .map(|view| view.key)
+    }
+
+    /// Whether any request still in the admission queue is routed to `route`.
+    fn route_waiting(&self, route: usize) -> bool {
+        self.queue.iter().any(|stream_id| {
+            self.requests
+                .get(stream_id)
+                .and_then(|request| request.route)
+                == Some(route)
+        })
     }
 
     /// Retires one view process: fail what it owes, ask init to kill it, and
@@ -1298,6 +1536,20 @@ impl Scheduler {
         // Dropping the queue ends the writer task, which closes the
         // scheduler's end of this view's channel.
         drop(view.out);
+        // §2.4/§8 Sizing: a route must not be forked again immediately after a
+        // retirement that was not about its own work. A view retired for the
+        // cap before it ever served anything is a fork that bought nothing, so
+        // its route waits `spawn_backoff` like a route whose spawn failed; one
+        // retired for memory pressure would otherwise be respawned by the very
+        // next request and copy the same heap back, which is the
+        // retire-then-respawn thrash §8 Sizing warns about. Retiring a view
+        // that has served is not rate-limited: that is ordinary LRU work.
+        if matches!(reason, RetireReason::MemoryPressure)
+            || (matches!(reason, RetireReason::LruCap) && view.sent == 0)
+        {
+            self.backoff
+                .insert(key.route, Instant::now() + self.cfg.spawn_backoff);
+        }
         let route_id = u32::try_from(key.route).unwrap_or(u32::MAX);
         self.ctl_push(Ctl::Retire {
             route: route_id,
@@ -1368,6 +1620,7 @@ impl Scheduler {
 
     /// A view is ready to serve (§4).
     fn view_ready(&mut self, key: ViewKey) {
+        let mut marked = false;
         if let Some(view) = self.views.get_mut(&key.route)
             && view.key == key
         {
@@ -1379,6 +1632,12 @@ impl Scheduler {
             if view.inflight == 0 {
                 view.idle_since = Some(Instant::now());
             }
+            marked = true;
+        }
+        if marked {
+            // §8 Sizing: this is the first moment the view's share of the
+            // preloaded heap exists in the aggregate reading.
+            self.measure_view_memory();
         }
     }
 

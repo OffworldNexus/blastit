@@ -474,3 +474,192 @@ async fn an_unexpected_ctl_message_fails_the_run() {
         "unexpected error: {error}"
     );
 }
+
+#[tokio::test]
+async fn a_cap_of_two_serves_three_routes_without_lru_churn() {
+    tokio::time::pause();
+    // Three routes, two processes: the third route's request can only be
+    // served by retiring one of the first two, and all three must be answered.
+    let manifest = format!(
+        "version = 1\n{}{}{}",
+        route("a", "/a/"),
+        route("b", "/b/"),
+        route("c", "/c/")
+    );
+    let mut options = Options::new()
+        .manifest(&manifest)
+        .script(
+            0,
+            Script::Answer {
+                body: b"a".to_vec(),
+            },
+        )
+        .script(
+            1,
+            Script::Answer {
+                body: b"b".to_vec(),
+            },
+        )
+        .script(
+            2,
+            Script::Answer {
+                body: b"c".to_vec(),
+            },
+        );
+    options.cfg.max_view_processes = Some(2);
+    options.cfg.queue_timeout = Duration::from_secs(60);
+    let mut world = World::start(options);
+
+    // The three requests arrive together, before any process is ready. The
+    // picker used to hand the cap a process that had been forked for one of
+    // them but had not answered yet, which turned into thousands of
+    // spawn/retire cycles a second and three `503`s.
+    world.http.send_request(1, head("GET", "/a/"), b"").await;
+    world.http.send_request(2, head("GET", "/b/"), b"").await;
+    world.http.send_request(3, head("GET", "/c/"), b"").await;
+
+    let first = world.http.response(1).await;
+    assert_eq!(status_of(&first), 200);
+    assert_eq!(body_of(&first), b"a");
+    let second = world.http.response(2).await;
+    assert_eq!(status_of(&second), 200);
+    assert_eq!(body_of(&second), b"b");
+    let third = world.http.response(3).await;
+    assert_eq!(status_of(&third), 200, "the third route waited its turn");
+    assert_eq!(body_of(&third), b"c");
+
+    // Served sequentially behind a cap of two: a handful of forks, not a storm.
+    let log = world.log.lock().unwrap();
+    assert!(
+        log.spawns.len() <= 4,
+        "bounded spawns, got {:?}",
+        log.spawns
+    );
+    assert!(
+        log.retires.len() <= 2,
+        "bounded retires, got {:?}",
+        log.retires
+    );
+    assert!(
+        log.retires.iter().all(|(_, reason)| reason == "lru_cap"),
+        "only the cap retires here, got {:?}",
+        log.retires
+    );
+    drop(log);
+    assert!(
+        world
+            .requests()
+            .iter()
+            .all(|request| request.status() == 200),
+        "no request was refused"
+    );
+}
+
+#[tokio::test]
+async fn a_view_that_is_not_ready_yet_is_never_a_victim() {
+    tokio::time::pause();
+    // Route 0's process is forked and never says `READY`. The cap of one is
+    // full, but a process that has not served anything is not a candidate: the
+    // request for route 1 waits for the queue timeout instead of killing it.
+    let mut options = Options::new()
+        .manifest(&two_routes())
+        .script(
+            0,
+            Script::NeverReady {
+                after: Duration::from_secs(3600),
+            },
+        )
+        .script(
+            1,
+            Script::Answer {
+                body: b"b".to_vec(),
+            },
+        );
+    options.cfg.max_view_processes = Some(1);
+    options.cfg.queue_timeout = Duration::from_secs(5);
+    let mut world = World::start(options);
+
+    world.http.send_request(1, head("GET", "/a/"), b"").await;
+    world
+        .until(|world| world.log.lock().unwrap().spawns == vec![0])
+        .await;
+    world.http.send_request(2, head("GET", "/b/"), b"").await;
+    let frames = world.http.awaited_response(2).await;
+    assert_eq!(status_of(&frames), 503);
+    assert_eq!(world.requests()[0].outcome(), Outcome::QueueTimeout);
+    assert_eq!(
+        world.log.lock().unwrap().spawns,
+        vec![0],
+        "the not-ready process was never retired for a second one"
+    );
+    let retires = world.log.lock().unwrap().retires.clone();
+    assert!(retires.is_empty(), "nothing was retired: {retires:?}");
+}
+
+#[tokio::test]
+async fn a_view_whose_route_is_waiting_is_never_a_victim() {
+    tokio::time::pause();
+    // Route 0's process has served its one request (`max_requests = 1`, so it
+    // is `stopping`) and route 0 has another request queued behind it. With the
+    // cap of one full, route 1's request must not retire that process: it is
+    // the only thing that can still answer route 0.
+    let mut options = Options::new()
+        .manifest(&two_routes())
+        .script(
+            0,
+            Script::Hold {
+                body: b"a".to_vec(),
+                gate: Arc::new(Semaphore::new(0)),
+            },
+        )
+        .script(
+            1,
+            Script::Answer {
+                body: b"b".to_vec(),
+            },
+        );
+    options.cfg.max_workers = 4;
+    options.cfg.max_requests = 1;
+    options.cfg.max_view_processes = Some(1);
+    options.cfg.queue_timeout = Duration::from_secs(3600);
+    let gate = match &options.scripts.lock().unwrap()[&0] {
+        Script::Hold { gate, .. } => gate.clone(),
+        _ => unreachable!("route 0 holds"),
+    };
+    let mut world = World::start(options);
+
+    world
+        .http
+        .send_request(1, head("GET", "/a/"), b"body")
+        .await;
+    world
+        .until(|world| world.log.lock().unwrap().spawns == vec![0])
+        .await;
+    // Both of these wait: route 0 is at its request cap, and route 1 has no
+    // process and no room for one.
+    world.http.send_request(2, head("GET", "/a/"), b"").await;
+    world.http.send_request(3, head("GET", "/b/"), b"").await;
+    gate.add_permits(2);
+
+    let first = world.http.response(1).await;
+    assert_eq!(status_of(&first), 200);
+    assert_eq!(body_of(&first), b"a");
+    let second = world.http.response(2).await;
+    assert_eq!(status_of(&second), 200, "route 0 was not starved");
+    assert_eq!(body_of(&second), b"a");
+    let third = world.http.response(3).await;
+    assert_eq!(status_of(&third), 200);
+    assert_eq!(body_of(&third), b"b");
+
+    // The first retirement is the request cap, not the LRU picker reaching for
+    // a process that still owed route 0 an answer.
+    assert_eq!(
+        world.log.lock().unwrap().retires[0],
+        (0, "max_requests".to_string())
+    );
+    assert_eq!(
+        world.log.lock().unwrap().spawns,
+        vec![0, 0, 1],
+        "route 0 was respawned for its own queued request before route 1's"
+    );
+}
