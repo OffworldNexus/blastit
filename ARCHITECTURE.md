@@ -818,9 +818,11 @@ removed and applies to every thread, present or future.
   `bpf`, `keyctl`, `add_key`, `request_key`, `perf_event_open`, `userfaultfd`,
   the three `io_uring` calls, `kexec_load`, `kexec_file_load`, `init_module`,
   `finit_module`, `delete_module`, `mount`, `umount2`, `pivot_root`, `swapon`,
-  `swapoff`, `reboot`, `setns`, `unshare` and `open_by_handle_at`. They are
-  the calls that read another process's memory, load code into the kernel, or
-  move between namespaces and mounts; none is part of serving a request.
+  `swapoff`, `reboot`, `setns`, `unshare`, `open_by_handle_at`, `pidfd_getfd`,
+  `kcmp`, `process_madvise` and the new mount API (`open_tree`, `move_mount`,
+  `fsopen`, `fsconfig`, `fsmount`, `fspick`). They are the calls that read or
+  steer another process, load code into the kernel, or move between namespaces
+  and mounts; none is part of serving a request.
 * **`socket()`** is checked on the address family in `args[0]`:
   * **views:** `AF_UNIX` only. A view whose manifest entry has
     `egress = true` may also use `AF_INET`/`AF_INET6`. Every other family —
