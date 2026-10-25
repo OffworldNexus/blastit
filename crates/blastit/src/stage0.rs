@@ -50,12 +50,17 @@ pub const DBPROXY_READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// would deadlock the writer. A real configuration is a few hundred bytes.
 pub const MAX_CONFIG_DOCUMENT: usize = 60 * 1024;
 
-/// `RLIMIT_CORE = 0` for a child that needs no other limit (§7.2).
-const NO_CORE: Rlimits = Rlimits {
-    nproc: None,
-    nofile: None,
-    core_zero: true,
-};
+/// The limits dbproxy runs under: a descriptor budget sized from the
+/// configuration, and no core file (§7.2).
+///
+/// `RLIMIT_NPROC` belongs to the view uids, so it is left alone here.
+fn dbproxy_limits(config: &Config) -> Rlimits {
+    Rlimits {
+        nproc: None,
+        nofile: Some(config.component_nofile()),
+        core_zero: true,
+    }
+}
 
 /// Runs stage 0. Never returns: it `execve`s stage 1 or exits non-zero.
 pub fn run() -> ! {
@@ -234,7 +239,7 @@ fn fork_dbproxy(
         stdout: Some(stdout_write),
         stderr: Some(stderr_write),
         keep,
-        limits: NO_CORE,
+        limits: dbproxy_limits(config),
         working_dir: None,
     };
     let uid = UidLayout::new(config.uid_base).dbproxy();

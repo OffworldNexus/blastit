@@ -16,6 +16,7 @@ use blastit_sys::{
     Rlimits, chdir, close_fds_except, dup_onto, set_cloexec, set_rlimits, set_umask,
 };
 use rustix::event::{PollFd, PollFlags, Timespec};
+use rustix::process::Resource;
 
 /// The descriptors a child keeps, and where its stdio goes.
 #[derive(Debug)]
@@ -74,7 +75,10 @@ impl ChildIo {
         }
 
         close_fds_except(&self.keep)?;
-        set_rlimits(self.limits)?;
+        set_rlimits(Rlimits {
+            nofile: self.limits.nofile.and_then(clamp_nofile),
+            ..self.limits
+        })?;
         set_umask(0o077);
         if let Some(dir) = self.working_dir.as_deref() {
             chdir(dir)?;
@@ -84,10 +88,10 @@ impl ChildIo {
 
     /// Clears `FD_CLOEXEC` on the descriptors that must survive an `execve`.
     ///
-    /// §3 makes every descriptor close-on-exec; the deliberate exceptions are
-    /// the ones named here — dbproxy's `secrets.pipe`, its events pipe, its
-    /// ready pipe and the pg listeners it adopts — plus dbproxy's own stdin,
-    /// stdout and stderr, which [`ChildIo::prepare`] already handled.
+    /// §3 makes every descriptor close-on-exec; the exceptions are the ones
+    /// named here — dbproxy's `secrets.pipe`, its events pipe, its ready pipe
+    /// and the pg listeners it adopts — plus the child's own stdin, stdout and
+    /// stderr, which [`ChildIo::prepare`] already handled.
     ///
     /// # Errors
     ///
@@ -106,6 +110,20 @@ impl ChildIo {
     }
 }
 
+/// The `RLIMIT_NOFILE` a child may actually be given.
+///
+/// Lowering a hard limit needs no capability; raising one does. A request above
+/// the process's current hard limit would come back `EPERM` and take the whole
+/// boot down, so the hard limit is read first and the request is dropped when it
+/// is not lower than it — a container that already runs with fewer descriptors
+/// than blastit asks for keeps its own limit.
+fn clamp_nofile(requested: u64) -> Option<u64> {
+    match rustix::process::getrlimit(Resource::Nofile).maximum {
+        Some(hard) if hard <= requested => None,
+        _ => Some(requested),
+    }
+}
+
 /// `poll(2)` for readability, with a timeout.
 ///
 /// Returns `false` when the timeout expired. Used by stage 0 to wait for
@@ -115,7 +133,25 @@ impl ChildIo {
 ///
 /// [`std::io::Error`] when `poll` fails.
 pub fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
-    let mut pollfd = [PollFd::from_borrowed_fd(fd, PollFlags::IN)];
+    wait_for(fd, PollFlags::IN, timeout)
+}
+
+/// `poll(2)` for writability, with a timeout.
+///
+/// Returns `false` when the timeout expired. Used before writing a `ctl.chan`
+/// message on a non-blocking socket, so a scheduler that stopped reading cannot
+/// wedge init.
+///
+/// # Errors
+///
+/// [`std::io::Error`] when `poll` fails.
+pub fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
+    wait_for(fd, PollFlags::OUT, timeout)
+}
+
+/// One `poll(2)` for a single descriptor.
+fn wait_for(fd: BorrowedFd<'_>, flags: PollFlags, timeout: Duration) -> io::Result<bool> {
+    let mut pollfd = [PollFd::from_borrowed_fd(fd, flags)];
     let timespec = Timespec {
         tv_sec: timeout.as_secs().min(i64::MAX as u64) as _,
         tv_nsec: timeout.subsec_nanos() as _,

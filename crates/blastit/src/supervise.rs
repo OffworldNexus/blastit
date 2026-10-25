@@ -25,7 +25,7 @@
 //! init is single-threaded and holds the GIL for the whole loop: nothing else
 //! could want it, and the zygote needs it to fork.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
@@ -39,7 +39,7 @@ use blastit_sys::{
 };
 use pyo3::prelude::*;
 
-use crate::child::Deadline;
+use crate::child::{Deadline, wait_writable};
 use crate::config::Config;
 use crate::logs::{Emitter, LineBuffer, Pipe, fail, lossy};
 use crate::zygote;
@@ -47,6 +47,15 @@ use crate::zygote;
 /// How long the surviving children get after `SIGTERM` before `SIGKILL`, once
 /// the drain is over.
 pub const TERMINATE_GRACE: Duration = Duration::from_secs(2);
+
+/// How long init waits for room on `ctl.chan` before it decides the scheduler
+/// is gone.
+///
+/// `ctl.chan` carries a handful of bytes per message and its reader never stops
+/// reading, so a full pipe means the scheduler is wedged or dead. Waiting
+/// forever would wedge init with it, which is exactly what the reap loop must
+/// not do.
+pub const SEND_CTL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// One descriptor in the poll set, with what to do with its bytes.
 struct Source {
@@ -117,6 +126,13 @@ pub struct Supervisor<'a> {
     components: BTreeMap<i32, Component>,
     views: HashMap<i32, ViewChild>,
     route_pids: HashMap<usize, i32>,
+    /// SPAWNs for routes whose previous view is killed but not yet reaped.
+    ///
+    /// The scheduler sends SPAWN at most once per route and does not ask
+    /// again, so one that arrives while the old process is still a zombie has
+    /// to be remembered and served as soon as it is reaped: dropping it would
+    /// leave that route without a process for good.
+    pending_spawns: BTreeSet<usize>,
     shutting_down: bool,
     shutdown: Shutdown,
     /// Where the sources start in the poll set: two when `ctl.chan` is polled.
@@ -152,6 +168,13 @@ impl<'a> Supervisor<'a> {
                 lines: LineBuffer::new(),
             });
         }
+        // `ctl.chan` is written from the reap path, so it must never block it:
+        // a scheduler that stopped reading has to show up as a timeout, not as
+        // an init that hangs. Only this end is affected; the scheduler's own
+        // socket is a different open file description.
+        if let Err(err) = rustix::fs::fcntl_setfl(&parts.ctl, rustix::fs::OFlags::NONBLOCK) {
+            fail(emitter, &format!("ctl.chan: {err}"));
+        }
         Self {
             cfg: parts.cfg,
             limits: parts.limits,
@@ -166,6 +189,7 @@ impl<'a> Supervisor<'a> {
             components,
             views: HashMap::new(),
             route_pids: HashMap::new(),
+            pending_spawns: BTreeSet::new(),
             shutting_down: false,
             shutdown: Shutdown::Serving,
             source_base: 2,
@@ -176,8 +200,8 @@ impl<'a> Supervisor<'a> {
     pub fn run(&mut self, py: Python<'_>) -> ! {
         loop {
             self.poll_once(py);
-            self.reap_children();
-            self.progress_shutdown();
+            self.reap_children(py);
+            self.progress_shutdown(py);
         }
     }
 
@@ -285,6 +309,10 @@ impl<'a> Supervisor<'a> {
         let ctl = unsafe { BorrowedFd::borrow_raw(raw) };
         let (read, fd) = match recv_with_fd(ctl, &mut buffer) {
             Ok(read) => read,
+            // The socket is non-blocking and `poll` said there was something to
+            // read; `EAGAIN` here is a race that costs nothing, because the poll
+            // set is level-triggered.
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return,
             Err(err) => fail(self.emitter, &format!("ctl.chan: {err}")),
         };
         // init never receives a descriptor on ctl.chan; if one arrives it is
@@ -336,7 +364,7 @@ impl<'a> Supervisor<'a> {
         };
         match message {
             Ctl::Spawn { route } => self.spawn(py, route),
-            Ctl::Retire { pid, .. } => self.retire(pid),
+            Ctl::Retire { route, pid, .. } => self.retire(route, pid),
             // init is the sender of SPAWNED, EXITED and DRAIN; a scheduler that
             // sends one back has broken the protocol, but that is not worth
             // killing a process over.
@@ -352,6 +380,13 @@ impl<'a> Supervisor<'a> {
     }
 
     /// `SPAWN`: fork a view process for `route` and answer `SPAWNED` (§4).
+    ///
+    /// A route whose previous view has been killed but not yet reaped cannot be
+    /// forked twice: two processes for one uid would share a socket directory
+    /// and a `view.chan` the scheduler only has one end for. The SPAWN is held
+    /// instead, and [`Supervisor::service_pending_spawns`] forks it the moment
+    /// the old pid is reaped. The scheduler sends SPAWN once per route and does
+    /// not repeat it, so dropping it here would leave the route dead for good.
     fn spawn(&mut self, py: Python<'_>, route: u32) {
         let index = route as usize;
         let Some(info) = self.routes.get(index).cloned() else {
@@ -361,16 +396,16 @@ impl<'a> Supervisor<'a> {
             );
         };
         if self.route_pids.contains_key(&index) {
-            self.emitter.emit(&Event::now(
-                Component::Init,
-                EventKind::ManifestWarning(ManifestWarning::new(format!(
-                    "route {} already has a live view; ignoring SPAWN",
-                    info.name
-                ))),
-            ));
+            self.pending_spawns.insert(index);
             return;
         }
-        let child = match zygote::fork_view(py, &self.cfg, self.limits, &info, &self.app, self.mask)
+        self.spawn_now(py, index, &info);
+    }
+
+    /// Forks the view for `index`, hands its channel over, and records it.
+    fn spawn_now(&mut self, py: Python<'_>, index: usize, info: &RouteInfo) {
+        let route = index as u32;
+        let child = match zygote::fork_view(py, &self.cfg, self.limits, info, &self.app, self.mask)
         {
             Ok(child) => child,
             Err(err) => fail(self.emitter, &format!("forking a view: {err}")),
@@ -389,15 +424,7 @@ impl<'a> Supervisor<'a> {
             let _ = kill(child.pid, Signal::KILL);
             fail(self.emitter, &format!("encoding SPAWNED: {err}"));
         }
-        let Some(ctl) = self.ctl.as_ref().map(AsFd::as_fd) else {
-            let _ = kill(child.pid, Signal::KILL);
-            fail(self.emitter, "ctl.chan is closed; SPAWNED cannot be sent");
-        };
-        match send_with_fd(ctl, &bytes, child.scheduler_end.as_fd()) {
-            Ok(written) if written == bytes.len() => {}
-            Ok(_) => fail(self.emitter, "SPAWNED was written short"),
-            Err(err) => fail(self.emitter, &format!("ctl.chan: {err}")),
-        }
+        self.send_spawned(&bytes, child.scheduler_end.as_fd());
         drop(child.scheduler_end);
 
         self.sources.push(Source {
@@ -437,13 +464,53 @@ impl<'a> Supervisor<'a> {
         self.emitter.emit(&event);
     }
 
+    /// Forks the views of every route whose SPAWN had to wait.
+    ///
+    /// Called after the reap loop, so a route that just lost its process gets
+    /// its new one in the same wakeup.
+    fn service_pending_spawns(&mut self, py: Python<'_>) {
+        if self.pending_spawns.is_empty() {
+            return;
+        }
+        if self.shutting_down {
+            // The drain is over for new work: the scheduler has stopped
+            // dispatching, so there is nothing for a fresh process to serve.
+            self.pending_spawns.clear();
+            return;
+        }
+        let waiting: Vec<usize> = self.pending_spawns.iter().copied().collect();
+        for index in waiting {
+            if self.route_pids.contains_key(&index) {
+                continue;
+            }
+            self.pending_spawns.remove(&index);
+            let Some(info) = self.routes.get(index).cloned() else {
+                continue;
+            };
+            self.spawn_now(py, index, &info);
+        }
+    }
+
     /// `RETIRE`: kill the view the scheduler no longer wants (§2.4).
-    fn retire(&mut self, pid: u32) {
-        let Some(pid) = Pid::from_raw(pid as i32) else {
-            fail(
-                self.emitter,
-                "ctl.chan: RETIRE with a pid that cannot exist",
-            );
+    ///
+    /// Views are retired when the scheduler finds them idle, over their request
+    /// cap or damaged. Only a pid init itself forked for *that* route is killed:
+    /// a RETIRE naming anything else is a protocol error the supervisor
+    /// ignores, because init is the one process that must not be talked into
+    /// signalling an arbitrary pid.
+    fn retire(&mut self, route: u32, pid: u32) {
+        let raw = pid as i32;
+        if self.views.get(&raw).map(|view| view.route) != Some(route as usize) {
+            self.emitter.emit(&Event::now(
+                Component::Init,
+                EventKind::ManifestWarning(ManifestWarning::new(format!(
+                    "RETIRE for pid {pid}, which is not a live view of route {route}; ignored"
+                ))),
+            ));
+            return;
+        }
+        let Some(pid) = Pid::from_raw(raw) else {
+            return;
         };
         if let Err(err) = kill(pid, Signal::KILL) {
             // A view that is already gone is fine: its exit is reported when it
@@ -458,7 +525,10 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Reaps every child that has exited, and reports each one (§4, §8).
-    fn reap_children(&mut self) {
+    ///
+    /// A route that lost its process is served its waiting SPAWN in the same
+    /// wakeup, so the scheduler's requests never wait for a second one.
+    fn reap_children(&mut self, py: Python<'_>) {
         let reaped = match reap() {
             Ok(reaped) => reaped,
             Err(err) => fail(self.emitter, &format!("reaping: {err}")),
@@ -478,6 +548,7 @@ impl<'a> Supervisor<'a> {
             self.route_pids.remove(&view.route);
             self.view_exit(view, pid, status);
         }
+        self.service_pending_spawns(py);
     }
 
     /// Reports a view's exit to the scheduler and to the log (§4).
@@ -548,7 +619,7 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Moves the shutdown along as the deadline passes or children leave.
-    fn progress_shutdown(&mut self) {
+    fn progress_shutdown(&mut self, py: Python<'_>) {
         match self.shutdown {
             Shutdown::Serving => {}
             Shutdown::Drain(deadline) => {
@@ -564,7 +635,7 @@ impl<'a> Supervisor<'a> {
                 }
                 if deadline.expired() {
                     self.kill_all();
-                    self.reap_until(TERMINATE_GRACE);
+                    self.reap_until(py, TERMINATE_GRACE);
                     self.finish();
                 }
             }
@@ -596,10 +667,10 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Reaps for at most `budget`, so a killed child is gone before init exits.
-    fn reap_until(&mut self, budget: Duration) {
+    fn reap_until(&mut self, py: Python<'_>, budget: Duration) {
         let deadline = Deadline::after(budget);
         while !deadline.expired() {
-            self.reap_children();
+            self.reap_children(py);
             if self.views.is_empty() && self.components.is_empty() {
                 return;
             }
@@ -608,8 +679,13 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Writes one `ctl.chan` message; a failure here is fatal.
+    ///
+    /// The socket is non-blocking, so a scheduler that stopped reading cannot
+    /// wedge init: the write is retried for at most [`SEND_CTL_TIMEOUT`], and a
+    /// timeout means the scheduler is gone and the whole container has to go
+    /// with it (§8: init must not pretend a dead component is alive).
     fn send_ctl(&self, message: &Ctl) {
-        let Some(ctl) = self.ctl.as_ref() else {
+        let Some(ctl) = self.ctl.as_ref().map(AsFd::as_fd) else {
             // The scheduler is gone; nothing can act on the message any more.
             return;
         };
@@ -620,15 +696,58 @@ impl<'a> Supervisor<'a> {
         {
             fail(self.emitter, &format!("encoding a ctl.chan message: {err}"));
         }
+        let deadline = Deadline::after(SEND_CTL_TIMEOUT);
         let mut written = 0;
         while written < bytes.len() {
             match rustix::io::write(ctl, &bytes[written..]) {
                 Ok(0) => break,
                 Ok(count) => written += count,
                 Err(rustix::io::Errno::INTR) => {}
-                Err(_) => break,
+                Err(rustix::io::Errno::AGAIN) => wait_or_die(self.emitter, ctl, deadline),
+                Err(err) => fail(self.emitter, &format!("ctl.chan: {err}")),
             }
         }
+    }
+
+    /// Sends `SPAWNED`, with the scheduler's end of the new `view.chan`
+    /// attached (§3).
+    ///
+    /// Fatal on any failure, and waited for the same way as
+    /// [`Supervisor::send_ctl`]. A view whose `SPAWNED` never arrives must not
+    /// outlive init: the child's `PR_SET_PDEATHSIG` is what makes that true,
+    /// and init does not get past this point anyway.
+    fn send_spawned(&self, bytes: &[u8], fd: BorrowedFd<'_>) {
+        let Some(ctl) = self.ctl.as_ref().map(AsFd::as_fd) else {
+            fail(self.emitter, "ctl.chan is closed; SPAWNED cannot be sent");
+        };
+        let deadline = Deadline::after(SEND_CTL_TIMEOUT);
+        loop {
+            match send_with_fd(ctl, bytes, fd) {
+                Ok(written) if written == bytes.len() => return,
+                Ok(_) => fail(self.emitter, "SPAWNED was written short"),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_or_die(self.emitter, ctl, deadline);
+                }
+                Err(err) => fail(self.emitter, &format!("ctl.chan: {err}")),
+            }
+        }
+    }
+}
+
+/// Waits until `fd` takes a write, or decides its peer is gone.
+///
+/// Shared by both writers on `ctl.chan`. A scheduler that stopped reading is a
+/// dead scheduler: waiting for it forever would wedge init, and init is the one
+/// process in the container that must never wedge (§8).
+fn wait_or_die(emitter: &Emitter, fd: BorrowedFd<'_>, deadline: Deadline) {
+    if deadline.expired() {
+        fail(
+            emitter,
+            "ctl.chan: the scheduler stopped reading; treating it as dead",
+        );
+    }
+    if let Err(err) = wait_writable(fd, deadline.left()) {
+        fail(emitter, &format!("ctl.chan: {err}"));
     }
 }
 
