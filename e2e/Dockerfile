@@ -20,6 +20,7 @@ COPY --from=build /usr/local/bin/blastit /usr/local/bin/blastit
 COPY e2e/demo /app
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
     BLASTIT_APP=demo.wsgi:application \
     BLASTIT_PRELOAD=demo.urls,notes.views \
     BLASTIT_MANIFEST=/app/blastit.toml \

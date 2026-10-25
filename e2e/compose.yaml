@@ -21,7 +21,7 @@ services:
 
   # Schema and users, with the real credentials, outside blastit.
   migrate:
-    build: { context: .., dockerfile: e2e/Dockerfile }
+    build: { context: .., dockerfile: "e2e/${E2E_DOCKERFILE:-Dockerfile}" }
     image: blastit-e2e
     environment: *app-env
     command: ["sh", "-c", "python manage.py migrate -v0 && python manage.py seed"]

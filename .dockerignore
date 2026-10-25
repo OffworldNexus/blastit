@@ -1,0 +1,8 @@
+.git
+.worktrees
+**/__pycache__
+e2e/app.log
+target/*
+!target/release
+target/release/*
+!target/release/blastit
