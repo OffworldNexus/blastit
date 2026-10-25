@@ -735,6 +735,9 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
   Its user is a staff-only back-office (Django's admin) whose SQL is too
   varied to list, where the guarantee that remains is that the process still
   never sees the credentials.
+  A grant that lists `queries` next to `unrestricted = true` is a boot error
+  too (`unrestricted grants take no queries`): the list would read as a
+  restriction, and it isn't one.
 * **Validation at boot.** An unknown group, a duplicate route name, an
   invalid regex or `unrestricted` in a group aborts the boot. A group that is
   attached nowhere, and a route that is unrestricted on a proxy, are reported
@@ -936,7 +939,7 @@ human-readable lines, for running blastit by hand. Both carry the same fields.
 
 ```json
 {"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","request_id":"01JB9…","method":"GET","path":"/products/42/","route":"product-detail","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_out":5120,"remote_addr":"203.0.113.7"}
-{"ts":"2026-10-25T14:02:12.007Z","level":"warn","event":"sql.denied","component":"dbproxy","route":"product-detail","pid":57,"proxy":"db","kind":"parse","sqlstate":"42501","in_transaction":false,"sql":"SELECT \"shop_product\".\"price\" FROM \"shop_product\" WHERE \"shop_product\".\"id\" = $1"}
+{"ts":"2026-10-25T14:02:12.007Z","level":"warn","event":"sql.denied","component":"dbproxy","route":"product-detail","pid":57,"proxy":"db","kind":"parse","sqlstate":"42501","in_transaction":false,"sql":"SELECT \"shop_product\".\"price\" FROM \"shop_product\" WHERE \"shop_product\".\"id\" = $?"}
 ```
 
 ```text
