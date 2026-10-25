@@ -712,6 +712,16 @@ path = ['/about/']
 queries = ['SELECT "cms_page"."body" FROM "cms_page" WHERE "cms_page"."slug" = $1 LIMIT 21']
 
 [[route]]
+name = "restaurants"
+path = ['/restaurants/.*']
+[route.db.tables]                   # instead of listing every statement (D7)
+restaurants_restaurant = { select = ["id", "slug", "name"] }
+restaurants_cuisinetype = { select = "*" }               # every column
+orders_order = { select = "*", insert = "*", update = ["status", "accepted_at"], delete = true }
+[route.db]
+functions = ["st_distance", "unaccent"]                  # beyond the built-in safe set
+
+[[route]]
 name = "fallback"                   # catch-all: the app renders its own 404s
 path = ['.*']                       # without it, unmatched paths get blastit's own 404
                                     # only the global groups; add grants if error pages need the DB
@@ -723,6 +733,36 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
   `unrestricted` is on if any of them turns it on, but a *group* that turns it
   on aborts the boot (below), so in practice it is only ever inline. A route
   with no grant for a database gets no listener for it at all (§2.2).
+* **Table and column grants.** A `postgresql` grant may say which **tables and
+  columns** a route may read and write, instead of — or next to — the statements
+  it may run. `[route.<db>.tables]` has one entry per table: `select`, `insert`
+  and `update` take a list of column names or the string `"*"` (every column),
+  and `delete` is `true`; `functions` lists the function calls allowed beyond the
+  built-in safe set. A statement that is not listed exactly is parsed with
+  PostgreSQL's own parser (`libpg_query` — a second implementation would be a
+  parser differential, and any text the two read differently is a bypass) and
+  allowed when every table, column and function it touches is granted. Anything
+  else is refused: another statement kind, a construct the analysis does not
+  understand, a function nobody granted. Reading a column anywhere — a `WHERE`,
+  an `ORDER BY`, a join condition — is reading it; `*` needs `select = "*"` on
+  every base table it expands to, through derived relations; `count(*)` reads no
+  column; an unqualified column has to be granted on every relation in scope
+  that could provide it; `public.t` is `t` and any other schema keeps its
+  qualified name; `pg_catalog` and `information_schema` are never readable this
+  way; a function call must be in the built-in safe set or in `functions`
+  (`pg_catalog.x` is `x`). A route's tables are the union of its own, its
+  groups' and the global groups', with `"*"` absorbing a column list, and
+  `unrestricted` with `tables` (or `functions`) is a boot error like
+  `unrestricted` with `queries`. Every base table a statement names must appear
+  in the grant, even when no column of it is read (a row count or an EXISTS
+  reveals it); unqualified `pg_*` names are never grantable as tables, since
+  `pg_catalog` comes first on every search path — statements on the catalogue
+  stay exact `queries`; casts to `reg*` and to types other than the built-in
+  plain ones need a `functions` entry.
+* **Rewriting a manifest from a test suite.** The pytest plugin (D3b) reports,
+  per `(route, proxy)`, the smallest `tables`/`functions` grant covering every
+  statement the route ran, with the TOML to paste in, so a route can be moved
+  from exact queries to table grants in one step.
 * **`unrestricted = true`** in a route's own grant (`[route.<db>]`) means
   exactly what it says: that route may run any statement on that proxy,
   transaction control included. It is still a sandbox — the listener, the uid
@@ -959,7 +999,7 @@ human-readable lines, for running blastit by hand. Both carry the same fields.
 
 ```json
 {"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","request_id":"01JB9…","method":"GET","path":"/products/42/","route":"product-detail","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_out":5120,"remote_addr":"203.0.113.7"}
-{"ts":"2026-10-25T14:02:12.007Z","level":"warn","event":"sql.denied","component":"dbproxy","route":"product-detail","pid":57,"proxy":"db","kind":"parse","sqlstate":"42501","in_transaction":false,"sql":"SELECT \"shop_product\".\"price\" FROM \"shop_product\" WHERE \"shop_product\".\"id\" = $?"}
+{"ts":"2026-10-25T14:02:12.007Z","level":"warn","event":"sql.denied","component":"dbproxy","route":"product-detail","pid":57,"proxy":"db","kind":"parse","sqlstate":"42501","in_transaction":false,"sql":"SELECT \"shop_product\".\"price\" FROM \"shop_product\" WHERE \"shop_product\".\"id\" = $?","reason":"select on shop_product.price not granted"}
 ```
 
 ```text
@@ -990,7 +1030,7 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 | Event | From | Level | Fields | Emitted when |
 |---|---|---|---|---|
 | `request` | scheduler | info (warn for 5xx) | `request_id`, `method`, `path`, `route` (null if unmatched), `rule` (index of the matching `path` regex), `status`, `outcome` (`ok`, `unmatched`, `queue_full`, `queue_timeout`, `timeout`, `view_died`, `client_gone`), `queued_ms`, `duration_ms`, `bytes_in`, `bytes_out`, `remote_addr` | once per request, at the end; this is the routing decision |
-| `sql.denied` | dbproxy | warn | `route`, `pid` (view process), `proxy`, `kind` (`query`, `parse`, `function_call`, `copy`, …), `sql` (normalised), `sqlstate`, `in_transaction` | a statement was rejected |
+| `sql.denied` | dbproxy | warn | `route`, `pid` (view process), `proxy`, `kind` (`query`, `parse`, `function_call`, `copy`, …), `sql` (normalised), `sqlstate`, `in_transaction`, `reason` (the policy's explanation, for example `select on auth_user.password not granted`; never a parameter value) | a statement was rejected |
 | `pg.refused` | dbproxy | warn | `route`, `proxy`, `reason` (`credentials_mismatch`, `too_many_connections`, `upstream_unreachable`, …) | a connection to the proxy was refused |
 | `http.rejected` | http | info | `remote_addr`, `status` (400, 413, 431, 501…), `reason` | a request was refused before reaching the scheduler |
 | `process.spawned` / `process.exited` / `process.retired` | init, scheduler | info (warn for crashes) | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`) | view process lifecycle |
