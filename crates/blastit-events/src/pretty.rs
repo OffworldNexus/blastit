@@ -1,8 +1,8 @@
 //! The pretty line encoder (ARCHITECTURE.md §8.1: `BLASTIT_LOG_FORMAT=pretty`).
 
 use crate::{
-    Event, EventKind, Level, Lifecycle, MAX_EVENT_BYTES, Outcome, RequestInfo, floor_boundary,
-    format_clock_time,
+    Event, EventKind, ExitKind, Level, Lifecycle, MAX_EVENT_BYTES, Outcome, RequestInfo,
+    floor_boundary, format_clock_time,
 };
 
 const RESET: &str = "\u{1b}[0m";
@@ -88,10 +88,9 @@ fn summary(event: &Event) -> String {
             info.fork_ms
         ),
         EventKind::ProcessExited(info) => {
-            let ending = match (info.status, info.signal) {
-                (_, Some(signal)) => format!("signal={signal}"),
-                (Some(status), None) => format!("status={status}"),
-                (None, None) => "status=?".to_owned(),
+            let ending = match info.exit {
+                ExitKind::Status(status) => format!("status={status}"),
+                ExitKind::Signal(signal) => format!("signal={signal}"),
             };
             format!("{}  pid={} uid={}  {ending}", route(), info.pid, info.uid)
         }
@@ -197,7 +196,7 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::{
-        AppOutput, Lifecycle, ManifestWarning, Outcome, ProcessExited, ProcessRetired,
+        AppOutput, ExitKind, Lifecycle, ManifestWarning, Outcome, ProcessExited, ProcessRetired,
         ProcessSpawned, RequestInfo, RetireReason, Stream,
     };
 
@@ -239,10 +238,16 @@ mod tests {
             fixture::event(EventKind::ProcessSpawned(ProcessSpawned::new(
                 57, 20_001, 12.5,
             ))),
-            fixture::event(EventKind::ProcessExited(
-                ProcessExited::new(57, 20_001).with_signal(9),
-            )),
-            fixture::event(EventKind::ProcessExited(ProcessExited::new(57, 20_001))),
+            fixture::event(EventKind::ProcessExited(ProcessExited::new(
+                57,
+                20_001,
+                ExitKind::Signal(9),
+            ))),
+            fixture::event(EventKind::ProcessExited(ProcessExited::new(
+                57,
+                20_001,
+                ExitKind::Status(0),
+            ))),
             fixture::event(EventKind::ProcessRetired(ProcessRetired::new(
                 57,
                 20_001,
@@ -250,7 +255,9 @@ mod tests {
             ))),
             fixture::event(EventKind::AppOutput(AppOutput::new(Stream::Stdout, "hi"))),
             fixture::event(EventKind::AppOutput(
-                AppOutput::new(Stream::Stderr, "hi").with_part(2, 3),
+                AppOutput::new(Stream::Stderr, "hi")
+                    .with_part(2, 3)
+                    .unwrap(),
             )),
             fixture::event(EventKind::Boot(
                 Lifecycle::default()

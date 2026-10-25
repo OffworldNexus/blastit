@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Event, EventKind, Lifecycle, MAX_EVENT_BYTES, PgRefuseReason, RejectReason, RetireReason,
-    SqlKind, floor_boundary, format_timestamp,
+    Event, EventKind, ExitKind, Lifecycle, MAX_EVENT_BYTES, PgRefuseReason, RejectReason,
+    RetireReason, SqlKind, floor_boundary, format_timestamp,
 };
 
 /// Encode one event as a single JSON object, without a trailing newline.
@@ -20,15 +20,19 @@ use crate::{
 /// fields that grow are the free text ones — `sql`, `path`, `line`, `reason`
 /// and `message` — but every string is covered, so the limit holds whatever
 /// the caller passes.
+///
+/// [`Event::with_truncated`] names fields the *caller* already shortened;
+/// those names are reported too, whether or not the event needed cutting here.
 pub fn encode_json(event: &Event) -> String {
-    let encoded = encode_with(event, &[]);
+    let declared = event.truncated_fields();
+    let encoded = encode_with(event, declared);
     if encoded.len() <= MAX_EVENT_BYTES {
         return encoded;
     }
 
     // Work on a copy: the caller keeps the complete event.
+    let mut truncated: Vec<&'static str> = declared.to_vec();
     let mut event = event.clone();
-    let mut truncated: Vec<&'static str> = Vec::new();
 
     // Cut the long string fields, largest first, until the line fits. Every
     // cut removes at least as many encoded bytes as raw bytes, so this
@@ -45,14 +49,13 @@ pub fn encode_json(event: &Event) -> String {
     }
 
     // The lifecycle `outputs` map is the only structured field that can grow
-    // without bound, so if nothing is left to cut the entries themselves are
-    // dropped, longest list first, and `outputs` joins `truncated`. Events
-    // built by blastit never get here.
+    // without bound, so if nothing is left to cut, whole proxies are dropped
+    // and `outputs` joins `truncated`. Events built by blastit never get here.
     loop {
         if encode_with(&event, &truncated).len() <= MAX_EVENT_BYTES {
             break;
         }
-        if !drop_output_slot(&mut event, &mut truncated) {
+        if !drop_output_proxy(&mut event, &mut truncated) {
             break;
         }
     }
@@ -60,9 +63,10 @@ pub fn encode_json(event: &Event) -> String {
     encode_with(&event, &truncated)
 }
 
-/// Encode without truncation. Only used to measure how much room is left.
+/// Encode without the encoder's own truncation, but with the fields the caller
+/// already declared as shortened. Only used to measure how much room is left.
 pub(crate) fn encoded_len(event: &Event) -> usize {
-    encode_with(event, &[]).len()
+    encode_with(event, event.truncated_fields()).len()
 }
 
 /// The full encoder. `truncated` is appended as the last member when non-empty.
@@ -129,13 +133,14 @@ fn encode_with(event: &Event, truncated: &[&'static str]) -> String {
         EventKind::ProcessExited(info) => {
             push_member(&mut out, "pid", &info.pid.to_string());
             push_member(&mut out, "uid", &info.uid.to_string());
-            if let Some(status) = info.status {
-                push_member(&mut out, "status", &status.to_string());
-            }
-            if let Some(signal) = info.signal {
-                push_member(&mut out, "signal", &signal.to_string());
-            }
+            // Exactly one of `status` and `signal` (§8.1).
+            let (field, code) = match info.exit {
+                ExitKind::Status(status) => ("status", status),
+                ExitKind::Signal(signal) => ("signal", signal),
+            };
+            push_member(&mut out, field, &code.to_string());
         }
+
         EventKind::ProcessRetired(info) => {
             push_member(&mut out, "pid", &info.pid.to_string());
             push_member(&mut out, "uid", &info.uid.to_string());
@@ -328,38 +333,19 @@ fn cut_longest_string(event: &mut Event, excess: usize, truncated: &mut Vec<&'st
     true
 }
 
-/// Give up one `outputs` entry: the last variable name of the longest list,
-/// then whole proxies, newest key first. Returns `false` when nothing is left.
-fn drop_output_slot(event: &mut Event, truncated: &mut Vec<&'static str>) -> bool {
+/// Drop one whole proxy from the lifecycle `outputs` map, recording `outputs`
+/// in `truncated`. Returns `false` when the map is empty.
+///
+/// Whole proxies only: a proxy's list of variable names is either complete or
+/// gone, so a reader never sees a half-rendered set and mistakes it for the
+/// app's real environment. The last key in `BTreeMap` order goes first, which
+/// keeps the choice deterministic.
+fn drop_output_proxy(event: &mut Event, truncated: &mut Vec<&'static str>) -> bool {
     let (EventKind::Boot(lifecycle) | EventKind::Ready(lifecycle) | EventKind::Shutdown(lifecycle)) =
         &mut event.kind
     else {
         return false;
     };
-
-    let longest = {
-        let mut longest: Option<(&String, usize)> = None;
-        for (proxy, names) in &lifecycle.outputs {
-            if names.is_empty() {
-                continue;
-            }
-            let better = match &longest {
-                None => true,
-                Some((_, len)) => names.len() > *len,
-            };
-            if better {
-                longest = Some((proxy, names.len()));
-            }
-        }
-        longest.map(|(proxy, _)| proxy.clone())
-    };
-    if let Some(proxy) = longest {
-        if let Some(names) = lifecycle.outputs.get_mut(&proxy) {
-            names.pop();
-        }
-        mark(truncated, "outputs");
-        return true;
-    }
 
     if lifecycle.outputs.pop_last().is_some() {
         mark(truncated, "outputs");
@@ -383,9 +369,9 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::{
-        AppOutput, Component, HttpRejected, ManifestWarning, Outcome, PgRefuseReason, PgRefused,
-        ProcessExited, ProcessRetired, ProcessSpawned, RejectReason, RequestInfo, RetireReason,
-        SqlDenied, Stream,
+        AppOutput, Component, ExitKind, HttpRejected, ManifestWarning, Outcome, PgRefuseReason,
+        PgRefused, ProcessExited, ProcessRetired, ProcessSpawned, RejectReason, RequestInfo,
+        RetireReason, SqlDenied, Stream,
     };
 
     /// The keys of the top-level object, in order.
@@ -554,12 +540,16 @@ mod tests {
                 57, 20_001, 12.5,
             )))
             .with_route("product-detail"),
-            fixture::event(EventKind::ProcessExited(
-                ProcessExited::new(57, 20_001).with_status(0),
-            )),
-            fixture::event(EventKind::ProcessExited(
-                ProcessExited::new(57, 20_001).with_signal(9),
-            )),
+            fixture::event(EventKind::ProcessExited(ProcessExited::new(
+                57,
+                20_001,
+                ExitKind::Status(0),
+            ))),
+            fixture::event(EventKind::ProcessExited(ProcessExited::new(
+                57,
+                20_001,
+                ExitKind::Signal(9),
+            ))),
             fixture::event(EventKind::ProcessRetired(ProcessRetired::new(
                 57,
                 20_001,
@@ -633,9 +623,7 @@ mod tests {
         let value = parse(&json);
         assert_eq!(value["outputs"]["db"][0], "DATABASE_URL");
 
-        let output = fixture::event(EventKind::AppOutput(
-            AppOutput::new(Stream::Stdout, "hi").with_part(1, 1),
-        ));
+        let output = fixture::event(EventKind::AppOutput(AppOutput::new(Stream::Stdout, "hi")));
         assert_eq!(
             top_level_keys(&encode_json(&output)),
             [
@@ -650,9 +638,11 @@ mod tests {
             ]
         );
 
-        let process = fixture::event(EventKind::ProcessExited(
-            ProcessExited::new(57, 20_001).with_signal(9),
-        ));
+        let process = fixture::event(EventKind::ProcessExited(ProcessExited::new(
+            57,
+            20_001,
+            ExitKind::Signal(9),
+        )));
         assert_eq!(
             top_level_keys(&encode_json(&process)),
             ["ts", "level", "event", "component", "pid", "uid", "signal"]
@@ -855,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn many_outputs_are_reduced_until_the_line_fits() {
+    fn many_outputs_lose_whole_proxies_until_the_line_fits() {
         let mut lifecycle = Lifecycle::default();
         for proxy in 0..500 {
             lifecycle = lifecycle
@@ -866,7 +856,19 @@ mod tests {
         let json = encode_json(&event);
         let value = check_fits(&event, &json);
         assert_eq!(value["truncated"], serde_json::json!(["outputs"]));
-        assert!(value["outputs"].as_object().unwrap().len() < 500);
+        let outputs = value["outputs"].as_object().unwrap();
+        assert!(!outputs.is_empty());
+        assert!(outputs.len() < 500);
+        // Whole proxies only: every proxy that is still there is complete.
+        for (proxy, names) in outputs {
+            assert_eq!(
+                names,
+                &serde_json::json!(["VARIABLE_NAME_HERE", "ANOTHER_VARIABLE"]),
+                "proxy {proxy} lost part of its variable list"
+            );
+        }
+        // The surviving proxies are the first keys in BTreeMap order.
+        assert!(outputs.contains_key("proxy-000"));
     }
 
     #[test]
@@ -878,7 +880,45 @@ mod tests {
         let event = fixture::event(EventKind::Boot(lifecycle));
         let json = encode_json(&event);
         let value = check_fits(&event, &json);
-        assert!(value["truncated"].is_array() || value["outputs"].is_object());
+        assert_eq!(value["truncated"], serde_json::json!(["outputs"]));
+        assert!(value["outputs"].as_object().unwrap().len() < 500);
+    }
+
+    #[test]
+    fn declared_truncated_fields_are_reported_even_when_the_event_fits() {
+        let event = fixture::request_event().with_truncated(["route", "request_id"]);
+        let json = encode_json(&event);
+        assert!(json.len() < MAX_EVENT_BYTES);
+        let value = check_fits(&event, &json);
+        assert_eq!(
+            value["truncated"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            [
+                &serde_json::json!("route"),
+                &serde_json::json!("request_id")
+            ]
+        );
+        // A declared field is merged with the encoder's own cuts, once each.
+        let long = "x".repeat(4000);
+        let event = fixture::event(EventKind::ManifestWarning(ManifestWarning::new(long)))
+            .with_route("product-detail")
+            .with_truncated(["route"]);
+        let json = encode_json(&event);
+        let value = check_fits(&event, &json);
+        assert_eq!(
+            value["truncated"],
+            serde_json::json!(["route", "message"]),
+            "declared names come first, then the encoder's"
+        );
+        // No `truncated` member at all when nothing was cut.
+        assert!(
+            parse(&encode_json(&fixture::request_event()))
+                .get("truncated")
+                .is_none()
+        );
     }
 
     #[test]

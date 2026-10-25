@@ -5,16 +5,28 @@ use time::OffsetDateTime;
 use crate::json::encoded_len;
 use crate::{AppOutput, Component, Event, EventKind, MAX_EVENT_BYTES, Stream, floor_boundary};
 
+/// Largest size an over-long shared `route` or `request_id` is cut to before
+/// splitting, in bytes.
+const SHARED_FIELD_BYTES: usize = 256;
+
 /// Turn one line of app output into `app.output` events at the current time.
 ///
 /// See [`split_app_output_at`].
 pub fn split_app_output(
     component: Component,
     route: Option<String>,
+    request_id: Option<String>,
     stream: Stream,
     line: &str,
 ) -> Vec<Event> {
-    split_app_output_at(OffsetDateTime::now_utc(), component, route, stream, line)
+    split_app_output_at(
+        OffsetDateTime::now_utc(),
+        component,
+        route,
+        request_id,
+        stream,
+        line,
+    )
 }
 
 /// Turn one line of app output into `app.output` events, all stamped `ts`.
@@ -24,21 +36,30 @@ pub fn split_app_output(
 /// unparseable, so a line that does not fit is split (§8.1). Every returned
 /// event encodes to at most [`MAX_EVENT_BYTES`] bytes with its `line` intact,
 /// carries the shared `part` (1-based) and `parts` fields, and concatenating
-/// their `line`s gives back `line` exactly.
+/// their `line`s gives back `line` exactly. A line that fits is returned as a
+/// single event with `part` 1 and `parts` 1.
 ///
-/// A line that fits is returned as a single event with `part` 1 and `parts` 1.
+/// `route` and `request_id` are the fields every piece would otherwise carry a
+/// full copy of. A copy is paid for once per piece, so an over-long one is cut
+/// to 256 bytes here, once, and declared in `truncated` on every piece instead
+/// of spending the budget of each piece on it. That is the only truncation
+/// splitting does: it never cuts `line`.
 pub fn split_app_output_at(
     ts: OffsetDateTime,
     component: Component,
     route: Option<String>,
+    request_id: Option<String>,
     stream: Stream,
     line: &str,
 ) -> Vec<Event> {
+    let mut truncated: Vec<&'static str> = Vec::new();
     let context = Context {
         ts,
         component,
-        route,
+        route: route.map(|route| cut_shared("route", route, &mut truncated)),
+        request_id: request_id.map(|id| cut_shared("request_id", id, &mut truncated)),
         stream,
+        truncated,
     };
 
     // `parts` is written into every event, so a bigger number leaves less room
@@ -55,12 +76,27 @@ pub fn split_app_output_at(
     }
 }
 
+/// Cut a shared string to [`SHARED_FIELD_BYTES`] on a character boundary,
+/// recording its name when it was longer.
+fn cut_shared(name: &'static str, mut value: String, truncated: &mut Vec<&'static str>) -> String {
+    if value.len() > SHARED_FIELD_BYTES {
+        let keep = floor_boundary(&value, SHARED_FIELD_BYTES);
+        value.truncate(keep);
+        if !truncated.contains(&name) {
+            truncated.push(name);
+        }
+    }
+    value
+}
+
 /// What every piece of one line shares.
 struct Context {
     ts: OffsetDateTime,
     component: Component,
     route: Option<String>,
+    request_id: Option<String>,
     stream: Stream,
+    truncated: Vec<&'static str>,
 }
 
 impl Context {
@@ -68,15 +104,15 @@ impl Context {
         let mut event = Event::at(
             self.ts,
             self.component,
-            EventKind::AppOutput(AppOutput {
-                stream: self.stream,
-                line: line.to_owned(),
-                part,
-                parts,
-            }),
+            EventKind::AppOutput(AppOutput::piece(self.stream, line.to_owned(), part, parts)),
         );
-        event.route.clone_from(&self.route);
-        event
+        if let Some(route) = &self.route {
+            event = event.with_route(route.clone());
+        }
+        if let Some(request_id) = &self.request_id {
+            event = event.with_request_id(request_id.clone());
+        }
+        event.with_truncated(self.truncated.iter().copied())
     }
 }
 
@@ -138,36 +174,57 @@ mod tests {
     fn lines(events: &[Event]) -> String {
         events
             .iter()
-            .map(|event| match &event.kind {
-                EventKind::AppOutput(output) => output.line.clone(),
+            .map(|event| match event.kind() {
+                EventKind::AppOutput(output) => output.line().to_owned(),
                 other => panic!("unexpected event {}", other.name()),
             })
             .collect()
     }
 
+    fn parts_of(events: &[Event]) -> u32 {
+        match events.first().map(Event::kind) {
+            Some(EventKind::AppOutput(output)) => output.parts(),
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+
+    /// Every piece fits, is numbered consistently, and the pieces rebuild the
+    /// line. The `line` itself is never truncated.
     fn check(events: &[Event], original: &str) {
         assert!(!events.is_empty());
         let parts = u32::try_from(events.len()).unwrap();
+        assert_eq!(parts_of(events), parts);
         for (index, event) in events.iter().enumerate() {
-            let EventKind::AppOutput(output) = &event.kind else {
-                panic!("unexpected event {}", event.kind.name());
+            let EventKind::AppOutput(output) = event.kind() else {
+                panic!("unexpected event {}", event.kind().name());
             };
-            assert_eq!(output.parts, parts);
-            assert_eq!(output.part, u32::try_from(index).unwrap() + 1);
-            assert_eq!(event.level, event.kind.default_level());
+            assert_eq!(output.parts(), parts);
+            assert_eq!(output.part(), u32::try_from(index).unwrap() + 1);
+            assert_eq!(event.level(), event.kind().default_level());
             let json = encode_json(event);
             assert!(
                 json.len() <= MAX_EVENT_BYTES,
                 "part {} is {} bytes",
-                output.part,
+                output.part(),
                 json.len()
             );
             let value: Value = serde_json::from_str(&json).unwrap();
-            assert!(
-                value.get("truncated").is_none(),
-                "split parts are never truncated"
+            assert_eq!(
+                json.len(),
+                encoded_len(event),
+                "a split piece must fit without the encoder cutting it"
             );
-            assert_eq!(value["line"], output.line);
+            assert_eq!(value["line"], output.line());
+            if let Some(names) = value.get("truncated") {
+                let names = names.as_array().unwrap();
+                assert!(!names.is_empty());
+                for name in names {
+                    assert!(
+                        name == "route" || name == "request_id",
+                        "splitting must never truncate the line itself, got {name}"
+                    );
+                }
+            }
         }
         assert_eq!(lines(events), original);
     }
@@ -176,6 +233,18 @@ mod tests {
         split_app_output(
             Component::Init,
             Some("product-detail".to_owned()),
+            None,
+            Stream::Stdout,
+            line,
+        )
+    }
+
+    fn split_at(line: &str) -> Vec<Event> {
+        split_app_output_at(
+            crate::fixture::request_ts(),
+            Component::Init,
+            Some("product-detail".to_owned()),
+            None,
             Stream::Stdout,
             line,
         )
@@ -186,12 +255,13 @@ mod tests {
         let events = split("hello");
         assert_eq!(events.len(), 1);
         check(&events, "hello");
-        let EventKind::AppOutput(output) = &events[0].kind else {
+        let EventKind::AppOutput(output) = events[0].kind() else {
             panic!()
         };
-        assert_eq!((output.part, output.parts), (1, 1));
-        assert_eq!(events[0].route.as_deref(), Some("product-detail"));
-        assert_eq!(events[0].component, Component::Init);
+        assert_eq!((output.part(), output.parts()), (1, 1));
+        assert_eq!(events[0].route(), Some("product-detail"));
+        assert_eq!(events[0].component(), Component::Init);
+        assert!(events[0].truncated_fields().is_empty());
     }
 
     #[test]
@@ -203,9 +273,10 @@ mod tests {
 
     #[test]
     fn stderr_is_warn() {
-        let events = split_app_output(Component::Init, None, Stream::Stderr, "boom");
-        assert_eq!(events[0].level, crate::Level::Warn);
-        assert!(events[0].route.is_none());
+        let events = split_app_output(Component::Init, None, None, Stream::Stderr, "boom");
+        assert_eq!(events[0].level(), crate::Level::Warn);
+        assert!(events[0].route().is_none());
+        assert!(events[0].request_id().is_none());
     }
 
     #[test]
@@ -242,13 +313,6 @@ mod tests {
         }
     }
 
-    fn parts_of(events: &[Event]) -> u32 {
-        match &events[0].kind {
-            EventKind::AppOutput(output) => output.parts,
-            other => panic!("unexpected event {}", other.name()),
-        }
-    }
-
     #[test]
     fn digit_width_of_parts_does_not_overflow_the_limit() {
         // Enough pieces that `parts` gains a digit, checked by the invariant
@@ -262,21 +326,91 @@ mod tests {
     }
 
     #[test]
+    fn an_over_long_shared_route_is_cut_once_before_splitting() {
+        let route = "r".repeat(2048);
+        let request_id = "i".repeat(1024);
+        let line = "a".repeat(10_000);
+        let events = split_app_output_at(
+            crate::fixture::request_ts(),
+            Component::Init,
+            Some(route.clone()),
+            Some(request_id.clone()),
+            Stream::Stdout,
+            &line,
+        );
+        check(&events, &line);
+
+        let parts = parts_of(&events);
+        // Without the cut, a 2 KiB route leaves no room for the line in any
+        // piece and this would be one piece per character.
+        assert!((5..=10).contains(&parts), "unexpected part count {parts}");
+        for event in &events {
+            assert_eq!(event.route().unwrap().len(), 256);
+            assert!(route.starts_with(event.route().unwrap()));
+            assert_eq!(event.request_id().unwrap().len(), 256);
+            assert!(request_id.starts_with(event.request_id().unwrap()));
+            assert_eq!(event.truncated_fields(), ["route", "request_id"]);
+            let value: Value = serde_json::from_str(&encode_json(event)).unwrap();
+            assert_eq!(
+                value["truncated"],
+                serde_json::json!(["route", "request_id"])
+            );
+            assert_eq!(value["route"].as_str().unwrap().len(), 256);
+        }
+
+        // A route that already fits is left exactly as it is, with no
+        // `truncated` bookkeeping.
+        let short = split_app_output_at(
+            crate::fixture::request_ts(),
+            Component::Init,
+            Some("r".repeat(256)),
+            Some("i".repeat(255)),
+            Stream::Stdout,
+            &line,
+        );
+        assert!(short[0].truncated_fields().is_empty());
+        assert_eq!(short[0].route().unwrap().len(), 256);
+        assert!(short[0].route().unwrap().ends_with('r'));
+    }
+
+    #[test]
+    fn cutting_a_shared_field_keeps_it_a_prefix_on_a_char_boundary() {
+        let mut truncated = Vec::new();
+        let value = cut_shared("route", "é".repeat(1000), &mut truncated);
+        assert_eq!(value.len(), 256);
+        assert!(value.chars().all(|c| c == 'é'));
+        assert!(value.is_char_boundary(value.len()));
+        assert_eq!(truncated, ["route"]);
+
+        let mut truncated = Vec::new();
+        let exactly = cut_shared("route", "é".repeat(128), &mut truncated);
+        assert_eq!(exactly.len(), 256);
+        assert!(truncated.is_empty());
+
+        let mut truncated = Vec::new();
+        let odd = cut_shared("route", "éa".repeat(500), &mut truncated);
+        assert!(odd.is_char_boundary(odd.len()));
+        assert_eq!(odd.len(), 255);
+        assert_eq!(truncated, ["route"]);
+
+        // "aé" puts a boundary exactly on the limit, so nothing is lost.
+        let mut truncated = Vec::new();
+        let aligned = cut_shared("route", "aé".repeat(500), &mut truncated);
+        assert_eq!(aligned.len(), 256);
+        assert!(aligned.ends_with('a'));
+        assert_eq!(truncated, ["route"]);
+    }
+
+    #[test]
     fn every_piece_uses_the_given_timestamp() {
         let ts = crate::fixture::request_ts();
         let line = "z".repeat(5000);
-        let events = split_app_output_at(
-            ts,
-            Component::Init,
-            Some("r".to_owned()),
-            Stream::Stderr,
-            &line,
-        );
-        assert!(events.iter().all(|event| event.ts == ts));
+        let events = split_at(&line);
+        assert!(events.iter().all(|event| event.ts() == ts));
         assert!(
             events
                 .iter()
-                .all(|event| event.route.as_deref() == Some("r"))
+                .all(|event| event.route() == Some("product-detail"))
         );
         check(&events, &line);
     }

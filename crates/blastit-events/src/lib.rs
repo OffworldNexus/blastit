@@ -12,9 +12,14 @@
 //!
 //! * **Privacy.** §8.1 never logs query strings, header values, request or
 //!   response bodies, or SQL parameter values, and the model has no field for
-//!   any of them, so no caller can log them. [`RequestInfo::from_target`]
-//!   strips the query string from the request target; SQL events carry the
-//!   normalised statement with its parameters left as placeholders.
+//!   any of them, so no caller can log them. [`RequestInfo::from_target`] and
+//!   [`RequestInfo::with_path`] are the only ways to set a `path`, and both
+//!   drop everything from the first `?`; SQL events carry the normalised
+//!   statement with its parameters left as placeholders.
+//! * **No field-by-field construction.** Every payload field is private and is
+//!   set through a constructor or a `with_*` builder, so a caller cannot place
+//!   a value into a field without passing the invariant that field carries —
+//!   the query-string stripping above, for instance.
 //! * **Size.** Whatever the input, an encoded JSON event is at most
 //!   [`MAX_EVENT_BYTES`]: long strings are cut on a character boundary and
 //!   named in `"truncated"`, and [`split_app_output`] turns one over-long app
@@ -41,7 +46,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, UtcOffset};
 
 #[cfg(test)]
@@ -65,8 +69,7 @@ pub const MAX_EVENT_BYTES: usize = 2048;
 ///
 /// Ordered from least to most severe, so that applying `BLASTIT_LOG_LEVEL` is
 /// a simple comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level {
     /// Verbose detail, off by default.
     Debug,
@@ -120,8 +123,7 @@ impl FromStr for Level {
 ///
 /// init stamps this from the pipe an event arrived on, so a view cannot forge
 /// another component's events (§8.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Component {
     /// PID 1: startup, preload, process supervision, log collection.
     Init,
@@ -155,8 +157,7 @@ impl fmt::Display for Component {
 }
 
 /// Which stream of a child process a line of app output came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Stream {
     /// Standard output, logged at [`Level::Info`].
     Stdout,
@@ -175,8 +176,7 @@ impl Stream {
 }
 
 /// How a request ended, for `request` events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Outcome {
     /// The view answered.
     Ok,
@@ -211,6 +211,7 @@ impl Outcome {
 
 /// What kind of statement the database proxy refused.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum SqlKind {
     /// A query (`SELECT`, `INSERT`, …).
     Query,
@@ -220,7 +221,8 @@ pub enum SqlKind {
     FunctionCall,
     /// A `COPY` statement.
     Copy,
-    /// Anything else, by its protocol-reported name.
+    /// Anything else, by its protocol-reported name. New kinds arrive here
+    /// without changing the crate's version.
     Other(String),
 }
 
@@ -239,6 +241,7 @@ impl SqlKind {
 
 /// Why the database proxy refused a connection.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum PgRefuseReason {
     /// The uid that connected is not allowed to use the proxy.
     CredentialsMismatch,
@@ -246,7 +249,7 @@ pub enum PgRefuseReason {
     TooManyConnections,
     /// The upstream database could not be reached.
     UpstreamUnreachable,
-    /// Anything else.
+    /// Anything else, from the proxy's own wording.
     Other(String),
 }
 
@@ -264,6 +267,7 @@ impl PgRefuseReason {
 
 /// Why http refused a request before the scheduler saw it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum RejectReason {
     /// The request line or headers are malformed, `400`.
     MalformedRequest,
@@ -292,6 +296,7 @@ impl RejectReason {
 
 /// Why a view process was retired.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum RetireReason {
     /// `BLASTIT_VIEW_IDLE_TIMEOUT` expired.
     Idle,
@@ -321,33 +326,64 @@ impl RetireReason {
     }
 }
 
+/// How a view process ended.
+///
+/// A wait status is either an exit code or a signal, never both, so the model
+/// has one enum instead of two options. `process.exited` writes exactly one of
+/// the `status` and `signal` fields from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExitKind {
+    /// The process exited by itself with this code.
+    Status(i32),
+    /// The process was killed by this signal.
+    Signal(i32),
+}
+
+impl ExitKind {
+    /// The JSON field this variant fills: `status` or `signal`.
+    pub const fn field_name(self) -> &'static str {
+        match self {
+            Self::Status(_) => "status",
+            Self::Signal(_) => "signal",
+        }
+    }
+
+    /// The exit code or the signal number.
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::Status(code) | Self::Signal(code) => code,
+        }
+    }
+
+    /// Whether the ending counts as a crash, so `process.exited` is a warning:
+    /// it was signalled, or it exited non-zero.
+    pub const fn is_crash(self) -> bool {
+        match self {
+            Self::Signal(_) => true,
+            Self::Status(0) => false,
+            Self::Status(_) => true,
+        }
+    }
+}
+
 /// The routing decision and the outcome of one request (§8.1 `request`).
 ///
 /// There is deliberately no field for the query string, headers, bodies or
-/// anything else that carries personal data. Build it with
-/// [`RequestInfo::from_target`], which drops the query string.
+/// anything else that carries personal data. The `path` is only ever set by
+/// [`RequestInfo::from_target`] or [`RequestInfo::with_path`], both of which
+/// drop the query string.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestInfo {
-    /// The request method, as received.
-    pub method: String,
-    /// The routed `PATH_INFO`: the request target without its query string.
-    pub path: String,
-    /// Index of the matching `path` regex in the route, `None` when unmatched.
-    pub rule: Option<u32>,
-    /// The status sent to the client.
-    pub status: u16,
-    /// How the request ended.
-    pub outcome: Outcome,
-    /// Time spent queued for a worker slot, in milliseconds.
-    pub queued_ms: f64,
-    /// Time from admission to the last response byte, in milliseconds.
-    pub duration_ms: f64,
-    /// Bytes read from the client.
-    pub bytes_in: u64,
-    /// Bytes written to the client.
-    pub bytes_out: u64,
-    /// The client address, or the `X-Forwarded-For` value when trusted.
-    pub remote_addr: String,
+    method: String,
+    path: String,
+    rule: Option<u32>,
+    status: u16,
+    outcome: Outcome,
+    queued_ms: f64,
+    duration_ms: f64,
+    bytes_in: u64,
+    bytes_out: u64,
+    remote_addr: String,
 }
 
 impl RequestInfo {
@@ -369,6 +405,64 @@ impl RequestInfo {
             bytes_out: 0,
             remote_addr: String::new(),
         }
+    }
+
+    /// Replaces the `path` from a request target, dropping the query string
+    /// exactly as [`RequestInfo::from_target`] does.
+    #[must_use]
+    pub fn with_path(mut self, request_target: &str) -> Self {
+        self.path = strip_query(request_target).to_owned();
+        self
+    }
+
+    /// The request method, as received.
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+
+    /// The routed `PATH_INFO`: the request target without its query string.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Index of the matching `path` regex in the route, `None` when unmatched.
+    pub fn rule(&self) -> Option<u32> {
+        self.rule
+    }
+
+    /// The status sent to the client.
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// How the request ended.
+    pub fn outcome(&self) -> Outcome {
+        self.outcome
+    }
+
+    /// Time spent queued for a worker slot, in milliseconds.
+    pub fn queued_ms(&self) -> f64 {
+        self.queued_ms
+    }
+
+    /// Time from admission to the last response byte, in milliseconds.
+    pub fn duration_ms(&self) -> f64 {
+        self.duration_ms
+    }
+
+    /// Bytes read from the client.
+    pub fn bytes_in(&self) -> u64 {
+        self.bytes_in
+    }
+
+    /// Bytes written to the client.
+    pub fn bytes_out(&self) -> u64 {
+        self.bytes_out
+    }
+
+    /// The client address, or the `X-Forwarded-For` value when trusted.
+    pub fn remote_addr(&self) -> &str {
+        &self.remote_addr
     }
 
     /// Sets the index of the matching `path` regex.
@@ -418,26 +512,28 @@ impl RequestInfo {
 
 /// A statement the database proxy refused (§8.1 `sql.denied`).
 ///
-/// `sql` is the normalised statement; parameters stay as placeholders, which
-/// is what §8.1 requires.
+/// `sql` is the normalised statement text, with parameters left as
+/// placeholders; parameter values are never logged (§8.1), and the type has no
+/// field for them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SqlDenied {
-    /// The view process that ran the statement.
-    pub pid: u32,
-    /// The proxy name from the manifest.
-    pub proxy: String,
-    /// What kind of statement it was.
-    pub kind: SqlKind,
-    /// The normalised statement, parameters left as placeholders.
-    pub sql: String,
-    /// The SQLSTATE the view received, for example `42501`.
-    pub sqlstate: String,
-    /// Whether a transaction was open when the statement arrived.
-    pub in_transaction: bool,
+    pid: u32,
+    proxy: String,
+    kind: SqlKind,
+    sql: String,
+    sqlstate: String,
+    in_transaction: bool,
 }
 
 impl SqlDenied {
     /// A denial record.
+    ///
+    /// **`sql` is the caller's contract**: the normalised statement text, the
+    /// same one the proxy matched against its allowlist, with every parameter
+    /// left as its placeholder (`$1`, `%s`, …). Parameter *values* are never
+    /// logged (§8.1), so a caller that has only the interpolated statement
+    /// must send the placeholder form instead — this crate cannot undo an
+    /// interpolation that has already happened.
     pub fn new(
         pid: u32,
         proxy: impl Into<String>,
@@ -455,15 +551,43 @@ impl SqlDenied {
             in_transaction,
         }
     }
+
+    /// The view process that ran the statement.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// The proxy name from the manifest.
+    pub fn proxy(&self) -> &str {
+        &self.proxy
+    }
+
+    /// What kind of statement it was.
+    pub fn kind(&self) -> &SqlKind {
+        &self.kind
+    }
+
+    /// The normalised statement, parameters left as placeholders.
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    /// The SQLSTATE the view received, for example `42501`.
+    pub fn sqlstate(&self) -> &str {
+        &self.sqlstate
+    }
+
+    /// Whether a transaction was open when the statement arrived.
+    pub fn in_transaction(&self) -> bool {
+        self.in_transaction
+    }
 }
 
 /// A refused connection to a proxy (§8.1 `pg.refused`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgRefused {
-    /// The proxy name from the manifest.
-    pub proxy: String,
-    /// Why the connection was refused.
-    pub reason: PgRefuseReason,
+    proxy: String,
+    reason: PgRefuseReason,
 }
 
 impl PgRefused {
@@ -474,17 +598,24 @@ impl PgRefused {
             reason,
         }
     }
+
+    /// The proxy name from the manifest.
+    pub fn proxy(&self) -> &str {
+        &self.proxy
+    }
+
+    /// Why the connection was refused.
+    pub fn reason(&self) -> &PgRefuseReason {
+        &self.reason
+    }
 }
 
 /// A request refused before it reached the scheduler (§8.1 `http.rejected`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpRejected {
-    /// The client address, as far as http can tell.
-    pub remote_addr: String,
-    /// The status sent, for example `400`, `413`, `431` or `501`.
-    pub status: u16,
-    /// Why the request was refused.
-    pub reason: RejectReason,
+    remote_addr: String,
+    status: u16,
+    reason: RejectReason,
 }
 
 impl HttpRejected {
@@ -496,17 +627,29 @@ impl HttpRejected {
             reason,
         }
     }
+
+    /// The client address, as far as http can tell.
+    pub fn remote_addr(&self) -> &str {
+        &self.remote_addr
+    }
+
+    /// The status sent, for example `400`, `413`, `431` or `501`.
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Why the request was refused.
+    pub fn reason(&self) -> &RejectReason {
+        &self.reason
+    }
 }
 
 /// A view process was forked (§8.1 `process.spawned`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessSpawned {
-    /// The new process.
-    pub pid: u32,
-    /// The uid it runs under.
-    pub uid: u32,
-    /// How long the fork took, in milliseconds.
-    pub fork_ms: f64,
+    pid: u32,
+    uid: u32,
+    fork_ms: f64,
 }
 
 impl ProcessSpawned {
@@ -514,65 +657,80 @@ impl ProcessSpawned {
     pub fn new(pid: u32, uid: u32, fork_ms: f64) -> Self {
         Self { pid, uid, fork_ms }
     }
+
+    /// The new process.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// The uid it runs under.
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// How long the fork took, in milliseconds.
+    pub fn fork_ms(&self) -> f64 {
+        self.fork_ms
+    }
 }
 
 /// A view process ended (§8.1 `process.exited`).
-///
-/// Exactly one of `status` and `signal` is normally set; both are `None` when
-/// the wait status could not be obtained.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessExited {
-    /// The process that ended.
-    pub pid: u32,
-    /// The uid it ran under.
-    pub uid: u32,
-    /// The exit code, when it exited by itself.
-    pub status: Option<i32>,
-    /// The signal that killed it, when it was signalled.
-    pub signal: Option<i32>,
+    pid: u32,
+    uid: u32,
+    exit: ExitKind,
 }
 
 impl ProcessExited {
-    /// An exit record for a clean exit or an unknown status for `pid`.
-    pub fn new(pid: u32, uid: u32) -> Self {
-        Self {
-            pid,
-            uid,
-            status: None,
-            signal: None,
-        }
+    /// An exit record for `pid`, which ended with `exit`.
+    pub fn new(pid: u32, uid: u32, exit: ExitKind) -> Self {
+        Self { pid, uid, exit }
     }
 
-    /// Sets the exit code.
-    #[must_use]
-    pub fn with_status(mut self, status: i32) -> Self {
-        self.status = Some(status);
-        self
+    /// The process that ended.
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 
-    /// Sets the signal that killed the process.
-    #[must_use]
-    pub fn with_signal(mut self, signal: i32) -> Self {
-        self.signal = Some(signal);
-        self
+    /// The uid it ran under.
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// How it ended: an exit code or a signal.
+    pub fn exit(&self) -> ExitKind {
+        self.exit
     }
 }
 
 /// A view process was retired on purpose (§8.1 `process.retired`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessRetired {
-    /// The process that was retired.
-    pub pid: u32,
-    /// The uid it ran under.
-    pub uid: u32,
-    /// Why it was retired.
-    pub reason: RetireReason,
+    pid: u32,
+    uid: u32,
+    reason: RetireReason,
 }
 
 impl ProcessRetired {
     /// A retirement record.
     pub fn new(pid: u32, uid: u32, reason: RetireReason) -> Self {
         Self { pid, uid, reason }
+    }
+
+    /// The process that was retired.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// The uid it ran under.
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Why it was retired.
+    pub fn reason(&self) -> &RetireReason {
+        &self.reason
     }
 }
 
@@ -582,14 +740,10 @@ impl ProcessRetired {
 /// split by [`split_app_output`] into `parts` events, `part` being 1-based.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppOutput {
-    /// Which stream the line came from.
-    pub stream: Stream,
-    /// The line, without its terminating newline.
-    pub line: String,
-    /// Index of this piece, 1-based.
-    pub part: u32,
-    /// Number of pieces the original line was split into.
-    pub parts: u32,
+    stream: Stream,
+    line: String,
+    part: u32,
+    parts: u32,
 }
 
 impl AppOutput {
@@ -603,32 +757,76 @@ impl AppOutput {
         }
     }
 
-    /// One piece of a line that was split into `parts` pieces.
-    #[must_use]
-    pub fn with_part(mut self, part: u32, parts: u32) -> Self {
-        self.part = part;
-        self.parts = parts;
-        self
+    /// Marks this event as piece `part` of `parts`.
+    ///
+    /// Returns [`PartOutOfRange`] unless `1 <= part <= parts`: a part number
+    /// outside the set it belongs to would make a reader drop or duplicate
+    /// app output, so it is rejected rather than clamped.
+    pub fn with_part(self, part: u32, parts: u32) -> Result<Self, PartOutOfRange> {
+        if part < 1 || part > parts {
+            return Err(PartOutOfRange { part, parts });
+        }
+        Ok(Self {
+            part,
+            parts,
+            ..self
+        })
     }
+
+    /// One measured piece of a line, built by [`split_app_output`] while it
+    /// works out how many pieces there are.
+    pub(crate) fn piece(stream: Stream, line: String, part: u32, parts: u32) -> Self {
+        Self {
+            stream,
+            line,
+            part,
+            parts,
+        }
+    }
+
+    /// Which stream the line came from.
+    pub fn stream(&self) -> Stream {
+        self.stream
+    }
+
+    /// The line, without its terminating newline.
+    pub fn line(&self) -> &str {
+        &self.line
+    }
+
+    /// Index of this piece, 1-based.
+    pub fn part(&self) -> u32 {
+        self.part
+    }
+
+    /// Number of pieces the original line was split into.
+    pub fn parts(&self) -> u32 {
+        self.parts
+    }
+}
+
+/// Returned by [`AppOutput::with_part`] for a `part` outside `1..=parts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("part {part} is not within 1..={parts}")]
+pub struct PartOutOfRange {
+    part: u32,
+    parts: u32,
 }
 
 /// Payload of the `boot`, `ready` and `shutdown` events (§8.1).
 ///
-/// `outputs` carries the rendered output variable *names* per proxy, so the
-/// server's own log can explain what the app's environment will look like
-/// without ever printing a value.
+/// `outputs` is the caller's contract: the *names* of the environment
+/// variables each proxy renders for the app, never their values. A value is
+/// the secret the proxy exists to hide (§5), so it must not reach this type;
+/// the names alone are what lets an operator line the log up with the
+/// manifest.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Lifecycle {
-    /// Named phase, for example `preload` or `drain`.
-    pub stage: Option<String>,
-    /// Number of routes in the manifest.
-    pub routes: Option<u32>,
-    /// Size of the global worker budget.
-    pub workers: Option<u32>,
-    /// How long the phase took, in milliseconds.
-    pub duration_ms: Option<f64>,
-    /// Output variable names per proxy; never values.
-    pub outputs: BTreeMap<String, Vec<String>>,
+    stage: Option<String>,
+    routes: Option<u32>,
+    workers: Option<u32>,
+    duration_ms: Option<f64>,
+    outputs: BTreeMap<String, Vec<String>>,
 }
 
 impl Lifecycle {
@@ -660,7 +858,10 @@ impl Lifecycle {
         self
     }
 
-    /// Records that proxy `proxy` will see output variable `name`.
+    /// Records that proxy `proxy` will see an output variable called `name`.
+    ///
+    /// `name` is the variable *name*; passing the rendered value instead would
+    /// put a secret on stdout.
     #[must_use]
     pub fn with_output(mut self, proxy: impl Into<String>, name: impl Into<String>) -> Self {
         self.outputs
@@ -669,13 +870,37 @@ impl Lifecycle {
             .push(name.into());
         self
     }
+
+    /// Named phase, for example `preload` or `drain`.
+    pub fn stage(&self) -> Option<&str> {
+        self.stage.as_deref()
+    }
+
+    /// Number of routes in the manifest.
+    pub fn routes(&self) -> Option<u32> {
+        self.routes
+    }
+
+    /// Size of the global worker budget.
+    pub fn workers(&self) -> Option<u32> {
+        self.workers
+    }
+
+    /// How long the phase took, in milliseconds.
+    pub fn duration_ms(&self) -> Option<f64> {
+        self.duration_ms
+    }
+
+    /// Output variable names per proxy; never values.
+    pub fn outputs(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.outputs
+    }
 }
 
 /// A problem found while validating the manifest (§8.1 `manifest.warning`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManifestWarning {
-    /// The warning text, for example an unattached group.
-    pub message: String,
+    message: String,
 }
 
 impl ManifestWarning {
@@ -685,10 +910,16 @@ impl ManifestWarning {
             message: message.into(),
         }
     }
+
+    /// The warning text, for example an unattached group.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 /// What an event is about; one variant per row of the §8.1 table.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum EventKind {
     /// The routing decision and the outcome of a request.
     Request(RequestInfo),
@@ -752,9 +983,11 @@ impl EventKind {
                 Stream::Stderr => Level::Warn,
             },
             Self::ProcessExited(info) => {
-                let crashed =
-                    info.signal.is_some() || info.status.is_some_and(|status| status != 0);
-                if crashed { Level::Warn } else { Level::Info }
+                if info.exit.is_crash() {
+                    Level::Warn
+                } else {
+                    Level::Info
+                }
             }
             Self::HttpRejected(_)
             | Self::ProcessSpawned(_)
@@ -767,20 +1000,18 @@ impl EventKind {
 }
 
 /// One event: the fields common to every event, plus its kind.
+///
+/// Built with [`Event::at`], [`Event::now`] or [`Event::new`] and the `with_*`
+/// builders.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
-    /// When the event happened, in UTC; both encoders print milliseconds.
-    pub ts: OffsetDateTime,
-    /// Severity, normally [`EventKind::default_level`].
-    pub level: Level,
-    /// The component that emitted the event.
-    pub component: Component,
-    /// The route the event belongs to, when it applies.
-    pub route: Option<String>,
-    /// The request id, when it applies. dbproxy never has one (§8.1).
-    pub request_id: Option<String>,
-    /// What the event is about.
-    pub kind: EventKind,
+    ts: OffsetDateTime,
+    level: Level,
+    component: Component,
+    route: Option<String>,
+    request_id: Option<String>,
+    kind: EventKind,
+    truncated: Vec<&'static str>,
 }
 
 impl Event {
@@ -793,6 +1024,7 @@ impl Event {
             route: None,
             request_id: None,
             kind,
+            truncated: Vec::new(),
         }
     }
 
@@ -805,6 +1037,45 @@ impl Event {
     /// Same as [`Event::now`].
     pub fn new(component: Component, kind: EventKind) -> Self {
         Self::now(component, kind)
+    }
+
+    /// When the event happened, in UTC.
+    pub fn ts(&self) -> OffsetDateTime {
+        self.ts
+    }
+
+    /// Severity, normally [`EventKind::default_level`].
+    pub fn level(&self) -> Level {
+        self.level
+    }
+
+    /// The component that emitted the event.
+    pub fn component(&self) -> Component {
+        self.component
+    }
+
+    /// The route the event belongs to, when it applies.
+    pub fn route(&self) -> Option<&str> {
+        self.route.as_deref()
+    }
+
+    /// The request id, when it applies. dbproxy never has one (§8.1).
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    /// What the event is about.
+    pub fn kind(&self) -> &EventKind {
+        &self.kind
+    }
+
+    /// Fields the caller already shortened before building this event.
+    ///
+    /// The JSON encoder copies these into `truncated`; it never adds them
+    /// itself. [`split_app_output`] uses this to report a shared `route` or
+    /// `request_id` that it cut once instead of carrying a copy in every part.
+    pub fn truncated_fields(&self) -> &[&'static str] {
+        &self.truncated
     }
 
     /// Overrides the level chosen by [`EventKind::default_level`].
@@ -832,6 +1103,18 @@ impl Event {
     #[must_use]
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
+        self
+    }
+
+    /// Declares fields this event already had shortened, using their JSON key
+    /// names. They are reported in `truncated` even when the event fits.
+    #[must_use]
+    pub fn with_truncated<I: IntoIterator<Item = &'static str>>(mut self, fields: I) -> Self {
+        for field in fields {
+            if !self.truncated.contains(&field) {
+                self.truncated.push(field);
+            }
+        }
         self
     }
 }
@@ -934,19 +1217,19 @@ mod tests {
                 Level::Info,
             ),
             (
-                EventKind::ProcessExited(ProcessExited::new(57, 20001)),
+                EventKind::ProcessExited(ProcessExited::new(57, 20001, ExitKind::Status(0))),
                 Level::Info,
             ),
             (
-                EventKind::ProcessExited(ProcessExited::new(57, 20001).with_status(0)),
-                Level::Info,
-            ),
-            (
-                EventKind::ProcessExited(ProcessExited::new(57, 20001).with_status(1)),
+                EventKind::ProcessExited(ProcessExited::new(57, 20001, ExitKind::Status(1))),
                 Level::Warn,
             ),
             (
-                EventKind::ProcessExited(ProcessExited::new(57, 20001).with_signal(9)),
+                EventKind::ProcessExited(ProcessExited::new(57, 20001, ExitKind::Status(-1))),
+                Level::Warn,
+            ),
+            (
+                EventKind::ProcessExited(ProcessExited::new(57, 20001, ExitKind::Signal(9))),
                 Level::Warn,
             ),
             (
@@ -987,18 +1270,18 @@ mod tests {
     fn event_constructors_pick_the_level() {
         let kind = EventKind::Request(RequestInfo::from_target("GET", "/a").with_status(503));
         assert_eq!(
-            Event::new(Component::Scheduler, kind.clone()).level,
+            Event::new(Component::Scheduler, kind.clone()).level(),
             Level::Warn
         );
         assert_eq!(
-            Event::now(Component::Scheduler, kind.clone()).level,
+            Event::now(Component::Scheduler, kind.clone()).level(),
             Level::Warn
         );
         let ts = OffsetDateTime::from_unix_timestamp(0).unwrap();
         let event = Event::at(ts, Component::Scheduler, kind);
-        assert_eq!(event.ts, ts);
-        assert_eq!(event.level, Level::Warn);
-        assert_eq!(event.with_level(Level::Debug).level, Level::Debug);
+        assert_eq!(event.ts(), ts);
+        assert_eq!(event.level(), Level::Warn);
+        assert_eq!(event.with_level(Level::Debug).level(), Level::Debug);
     }
 
     #[test]
@@ -1034,7 +1317,8 @@ mod tests {
         assert_eq!("warn".parse::<Level>().unwrap(), Level::Warn);
         assert_eq!("WARNING".parse::<Level>().unwrap(), Level::Warn);
         assert_eq!("error".parse::<Level>().unwrap(), Level::Error);
-        assert!("nope".parse::<Level>().is_err());
+        let error = "nope".parse::<Level>().unwrap_err();
+        assert_eq!(error.to_string(), "unknown log level `nope`");
         assert_eq!(Level::Warn.to_string(), "warn");
     }
 
@@ -1071,6 +1355,17 @@ mod tests {
     }
 
     #[test]
+    fn exit_kind_names_and_crashes() {
+        assert_eq!(ExitKind::Status(0).field_name(), "status");
+        assert_eq!(ExitKind::Signal(9).field_name(), "signal");
+        assert_eq!(ExitKind::Status(3).code(), 3);
+        assert_eq!(ExitKind::Signal(9).code(), 9);
+        assert!(!ExitKind::Status(0).is_crash());
+        assert!(ExitKind::Status(1).is_crash());
+        assert!(ExitKind::Signal(15).is_crash());
+    }
+
+    #[test]
     fn request_target_strips_the_query_string() {
         assert_eq!(
             strip_query("/products/42/?utm_source=mail"),
@@ -1085,11 +1380,53 @@ mod tests {
         assert_eq!(strip_query("/a?token=secret"), "/a");
 
         let info = RequestInfo::from_target("GET", "/products/42/?token=secret");
-        assert_eq!(info.method, "GET");
-        assert_eq!(info.path, "/products/42/");
-        assert_eq!(info.status, 0);
-        assert_eq!(info.outcome, Outcome::Ok);
-        assert_eq!(info.rule, None);
+        assert_eq!(info.method(), "GET");
+        assert_eq!(info.path(), "/products/42/");
+        assert_eq!(info.status(), 0);
+        assert_eq!(info.outcome(), Outcome::Ok);
+        assert_eq!(info.rule(), None);
+    }
+
+    /// The `path` has no setter that keeps a query string: every route into
+    /// the field goes through `strip_query`.
+    #[test]
+    fn no_setter_can_put_a_query_string_in_the_path() {
+        let cases = [
+            "/products/42/?token=secret",
+            "/?",
+            "/a?x=1?y=2",
+            "/a;b?c=d#e",
+            "?only=query",
+        ];
+        for target in cases {
+            let from_target = RequestInfo::from_target("GET", target);
+            assert!(
+                !from_target.path().contains('?'),
+                "from_target kept a query string: {}",
+                from_target.path()
+            );
+            assert_eq!(from_target.path(), strip_query(target));
+
+            let with_path = RequestInfo::from_target("GET", "/")
+                .with_path(target)
+                .with_status(200);
+            assert!(
+                !with_path.path().contains('?'),
+                "with_path kept a query string: {}",
+                with_path.path()
+            );
+            assert_eq!(with_path.path(), strip_query(target));
+        }
+
+        // The builders that take other fields cannot touch `path`.
+        let built = RequestInfo::from_target("GET", "/a?x=1")
+            .with_rule(0)
+            .with_status(200)
+            .with_outcome(Outcome::Ok)
+            .with_timings(0.1, 1.0)
+            .with_bytes(1, 2)
+            .with_remote_addr("203.0.113.7?fake=1");
+        assert_eq!(built.path(), "/a");
     }
 
     #[test]
@@ -1126,12 +1463,12 @@ mod tests {
             .with_timings(1.5, 20.0)
             .with_bytes(10, 20)
             .with_remote_addr("198.51.100.9");
-        assert_eq!(info.rule, Some(2));
-        assert_eq!(info.status, 201);
-        assert_eq!(info.queued_ms, 1.5);
-        assert_eq!(info.duration_ms, 20.0);
-        assert_eq!((info.bytes_in, info.bytes_out), (10, 20));
-        assert_eq!(info.remote_addr, "198.51.100.9");
+        assert_eq!(info.rule(), Some(2));
+        assert_eq!(info.status(), 201);
+        assert_eq!(info.queued_ms(), 1.5);
+        assert_eq!(info.duration_ms(), 20.0);
+        assert_eq!((info.bytes_in(), info.bytes_out()), (10, 20));
+        assert_eq!(info.remote_addr(), "198.51.100.9");
 
         let lifecycle = Lifecycle::default()
             .with_stage("preload")
@@ -1140,28 +1477,127 @@ mod tests {
             .with_duration_ms(42.5)
             .with_output("db", "DATABASE_URL")
             .with_output("db", "PGHOST");
-        assert_eq!(lifecycle.stage.as_deref(), Some("preload"));
-        assert_eq!(lifecycle.routes, Some(3));
-        assert_eq!(lifecycle.workers, Some(16));
-        assert_eq!(lifecycle.duration_ms, Some(42.5));
+        assert_eq!(lifecycle.stage(), Some("preload"));
+        assert_eq!(lifecycle.routes(), Some(3));
+        assert_eq!(lifecycle.workers(), Some(16));
+        assert_eq!(lifecycle.duration_ms(), Some(42.5));
         assert_eq!(
-            lifecycle.outputs["db"],
+            lifecycle.outputs()["db"],
             vec!["DATABASE_URL".to_owned(), "PGHOST".to_owned()]
         );
 
-        let output = AppOutput::new(Stream::Stderr, "boom").with_part(2, 3);
-        assert_eq!((output.part, output.parts), (2, 3));
-        assert_eq!(ManifestWarning::new("x").message, "x");
-        assert_eq!(ProcessSpawned::new(1, 2, 3.0).uid, 2);
-        assert_eq!(ProcessExited::new(1, 2).with_signal(9).signal, Some(9));
+        let output = AppOutput::new(Stream::Stderr, "boom")
+            .with_part(2, 3)
+            .unwrap();
+        assert_eq!((output.part(), output.parts()), (2, 3));
+        assert_eq!(ManifestWarning::new("x").message(), "x");
+        assert_eq!(ProcessSpawned::new(1, 2, 3.0).uid(), 2);
         assert_eq!(
-            ProcessRetired::new(1, 2, RetireReason::Idle).reason,
-            RetireReason::Idle
+            ProcessExited::new(1, 2, ExitKind::Signal(9)).exit(),
+            ExitKind::Signal(9)
         );
         assert_eq!(
-            HttpRejected::new("a", 413, RejectReason::BodyTooLarge).status,
+            ProcessRetired::new(1, 2, RetireReason::Idle).reason(),
+            &RetireReason::Idle
+        );
+        assert_eq!(
+            HttpRejected::new("a", 413, RejectReason::BodyTooLarge).status(),
             413
         );
+    }
+
+    #[test]
+    fn getters_expose_every_field() {
+        let request = RequestInfo::from_target("GET", "/a?b=1")
+            .with_rule(1)
+            .with_status(200)
+            .with_outcome(Outcome::Ok)
+            .with_timings(0.5, 1.5)
+            .with_bytes(3, 4)
+            .with_remote_addr("203.0.113.7");
+        assert_eq!(request.method(), "GET");
+        assert_eq!(request.path(), "/a");
+        assert_eq!(request.rule(), Some(1));
+        assert_eq!(request.status(), 200);
+        assert_eq!(request.outcome(), Outcome::Ok);
+        assert_eq!(request.queued_ms(), 0.5);
+        assert_eq!(request.duration_ms(), 1.5);
+        assert_eq!(request.bytes_in(), 3);
+        assert_eq!(request.bytes_out(), 4);
+        assert_eq!(request.remote_addr(), "203.0.113.7");
+
+        let denied = SqlDenied::new(7, "db", SqlKind::Copy, "COPY x", "42501", true);
+        assert_eq!(denied.pid(), 7);
+        assert_eq!(denied.proxy(), "db");
+        assert_eq!(denied.kind(), &SqlKind::Copy);
+        assert_eq!(denied.sql(), "COPY x");
+        assert_eq!(denied.sqlstate(), "42501");
+        assert!(denied.in_transaction());
+
+        let refused = PgRefused::new("db", PgRefuseReason::TooManyConnections);
+        assert_eq!(refused.proxy(), "db");
+        assert_eq!(refused.reason(), &PgRefuseReason::TooManyConnections);
+
+        let rejected = HttpRejected::new("198.51.100.1", 431, RejectReason::HeaderTooLarge);
+        assert_eq!(rejected.remote_addr(), "198.51.100.1");
+        assert_eq!(rejected.status(), 431);
+        assert_eq!(rejected.reason(), &RejectReason::HeaderTooLarge);
+
+        let spawned = ProcessSpawned::new(11, 20_001, 12.5);
+        assert_eq!(
+            (spawned.pid(), spawned.uid(), spawned.fork_ms()),
+            (11, 20_001, 12.5)
+        );
+
+        let exited = ProcessExited::new(11, 20_001, ExitKind::Signal(15));
+        assert_eq!(
+            (exited.pid(), exited.uid(), exited.exit()),
+            (11, 20_001, ExitKind::Signal(15))
+        );
+
+        let retired = ProcessRetired::new(11, 20_001, RetireReason::LruCap);
+        assert_eq!(retired.pid(), 11);
+        assert_eq!(retired.uid(), 20_001);
+        assert_eq!(retired.reason(), &RetireReason::LruCap);
+
+        let output = AppOutput::new(Stream::Stdout, "hi");
+        assert_eq!(output.stream(), Stream::Stdout);
+        assert_eq!(output.line(), "hi");
+        assert_eq!((output.part(), output.parts()), (1, 1));
+
+        let warning = ManifestWarning::new("unattached group");
+        assert_eq!(warning.message(), "unattached group");
+
+        // §5: an output carries variable *names*, never values.
+        let lifecycle = Lifecycle::default()
+            .with_stage("preload")
+            .with_routes(1)
+            .with_workers(2)
+            .with_duration_ms(3.0)
+            .with_output("db", "DATABASE_URL");
+        assert_eq!(lifecycle.stage(), Some("preload"));
+        assert_eq!(lifecycle.routes(), Some(1));
+        assert_eq!(lifecycle.workers(), Some(2));
+        assert_eq!(lifecycle.duration_ms(), Some(3.0));
+        assert_eq!(lifecycle.outputs()["db"], vec!["DATABASE_URL".to_owned()]);
+        assert_eq!(Lifecycle::default().stage(), None);
+        assert_eq!(Lifecycle::default().routes(), None);
+        assert_eq!(Lifecycle::default().workers(), None);
+        assert_eq!(Lifecycle::default().duration_ms(), None);
+        assert!(Lifecycle::default().outputs().is_empty());
+    }
+
+    #[test]
+    fn with_part_rejects_parts_outside_the_set() {
+        let whole = AppOutput::new(Stream::Stdout, "hi");
+        assert!(whole.clone().with_part(1, 1).is_ok());
+        assert!(whole.clone().with_part(1, 3).is_ok());
+        assert!(whole.clone().with_part(3, 3).is_ok());
+        let error = whole.clone().with_part(0, 3).unwrap_err();
+        assert_eq!(error.to_string(), "part 0 is not within 1..=3");
+        assert!(whole.clone().with_part(4, 3).is_err());
+        assert!(whole.clone().with_part(0, 0).is_err());
+        assert!(whole.with_part(u32::MAX, u32::MAX).is_ok());
     }
 
     #[test]
@@ -1174,13 +1610,34 @@ mod tests {
         .with_route("product-detail")
         .with_request_id("01JB9");
         assert_eq!(event.clone(), event);
-        assert_eq!(event.route.as_deref(), Some("product-detail"));
-        assert_eq!(event.request_id.as_deref(), Some("01JB9"));
-        assert!(
-            event
-                .with_ts(OffsetDateTime::from_unix_timestamp(1).unwrap())
-                .ts
-                > OffsetDateTime::from_unix_timestamp(0).unwrap()
-        );
+        assert_eq!(event.route(), Some("product-detail"));
+        assert_eq!(event.request_id(), Some("01JB9"));
+        assert_eq!(event.component(), Component::Init);
+        assert_eq!(event.kind().name(), "ready");
+        assert!(event.truncated_fields().is_empty());
+        let later = event
+            .clone()
+            .with_ts(OffsetDateTime::from_unix_timestamp(1).unwrap());
+        assert!(later.ts() > event.ts());
+        assert_eq!(later.route(), event.route());
+    }
+
+    #[test]
+    fn declared_truncated_fields_are_deduplicated_and_ordered() {
+        let event = Event::at(
+            OffsetDateTime::from_unix_timestamp(0).unwrap(),
+            Component::Init,
+            EventKind::Ready(Lifecycle::default()),
+        )
+        .with_truncated(["route"])
+        .with_truncated(["route", "request_id"]);
+        assert_eq!(event.truncated_fields().to_vec(), ["route", "request_id"]);
+    }
+
+    #[test]
+    fn event_defaults_have_no_route_or_request_id() {
+        let event = Event::now(Component::Init, EventKind::Shutdown(Lifecycle::default()));
+        assert_eq!(event.route(), None);
+        assert_eq!(event.request_id(), None);
     }
 }
