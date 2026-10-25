@@ -4,6 +4,10 @@ Two extra endpoints exist to test the sandbox, not the app:
 
 * ``/notes/peek/`` runs, from the notes route, a statement the manifest never
   granted: reading every user's password hash. Under blastit it must fail.
+* ``/debug/sql/?q=…`` and ``/notes/sql/?q=…`` run ``q`` as raw SQL, verbatim.
+  The same view is mounted in two routes, so the same text can be sent from
+  two processes: blastit must let each process run only its own grants.
+  Outside blastit this is a plain SQL injection hole; never serve it so.
 * ``/debug/env/`` reports *facts* about the database configuration the app
   sees (never the values themselves): under blastit it holds no password and
   points at a local socket.
@@ -15,6 +19,7 @@ from urllib.parse import unquote, urlsplit
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
+from django.db import DatabaseError, connection
 from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404, redirect
@@ -107,3 +112,22 @@ def env(request):
             "route": request.META.get("blastit.route"),
         }
     )
+
+
+def raw_sql(request):
+    """Run ``q`` verbatim and report what happened, including the proxy's refusal.
+
+    Mounted in two routes (`/debug/sql/` and `/notes/sql/`), so the same text
+    can be sent from two processes: the proof is that each process can only run
+    what its own route was granted, and a refused statement is refused by
+    blastit's proxy (SQLSTATE 42501), not by the database's permissions.
+    """
+    route = request.META.get("blastit.route")
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(request.GET.get("q", ""))
+            rows = [list(map(str, r)) for r in cursor.fetchall()] if cursor.description else []
+        return JsonResponse({"ok": True, "route": route, "rows": rows})
+    except DatabaseError as e:
+        sqlstate = getattr(e, "sqlstate", None) or getattr(e.__cause__, "sqlstate", None)
+        return JsonResponse({"ok": False, "route": route, "sqlstate": sqlstate})

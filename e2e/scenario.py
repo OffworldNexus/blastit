@@ -147,6 +147,54 @@ def main():
     else:
         check(facts.get("has_password") is True, "baseline: the app holds the database password")
 
+    print("raw SQL, from two processes")
+    granted = "SELECT count(*) FROM notes_note"
+    other = "SELECT count(*) FROM auth_user"
+    destructive = "DROP TABLE notes_note"
+    multi = "SELECT 1; " + destructive
+
+    def raw(client, path, sql):
+        status, _, body = client.request("GET", f"{path}?q=" + urllib.parse.quote(sql))
+        try:
+            return status, json.loads(body)
+        except ValueError:
+            return status, {}
+
+    status, body = raw(alice, "/debug/sql/", granted)
+    before = int(body.get("rows", [["0"]])[0][0]) if body.get("ok") else None
+    check(status == 200 and body.get("ok") is True, "raw SQL runs where it was granted")
+    if under_blastit:
+        check(body.get("route") == "sql", "and it ran in the sql route's own process")
+
+    # The very same text, sent from the notes process: not granted there.
+    status, body = raw(alice, "/notes/sql/", granted)
+    if under_blastit:
+        check(status == 200 and body.get("ok") is False and body.get("sqlstate") == "42501",
+              "the same statement is refused on the notes route (SQLSTATE 42501)")
+    else:
+        check(status == 200 and body.get("ok") is True, "baseline: no allowlist, so it runs anywhere")
+
+    status, body = raw(alice, "/debug/sql/", other)
+    if under_blastit:
+        check(status == 200 and body.get("ok") is False and body.get("sqlstate") == "42501",
+              "the sql route can't read the users table")
+    else:
+        check(status == 200 and body.get("ok") is True, "baseline: the users table is readable from any route")
+
+    if under_blastit:
+        status, body = raw(alice, "/notes/sql/", destructive)
+        check(status == 200 and body.get("ok") is False, "a destructive statement is refused")
+        status, body = raw(alice, "/notes/sql/", multi)
+        check(status == 200 and body.get("ok") is False, "two statements in one text are refused")
+        status, body = raw(alice, "/debug/sql/", granted)
+        after = int(body.get("rows", [["0"]])[0][0]) if body.get("ok") else None
+        check(after == before, "nothing reached the table, the row count is unchanged")
+        # And the routes still work: their own grants were never affected.
+        status, _, body = alice.request("GET", "/notes/")
+        check(status == 200, "the notes route still works")
+        status, _, body = alice.post("/login/", {"username": "alice", "password": args.password})
+        check(status == 302, "alice can still log in")
+
     print("log out")
     status, _, _ = alice.post("/logout/")
     check(status == 302, "logging out redirects")

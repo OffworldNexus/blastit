@@ -47,7 +47,7 @@ queries = [
 
 [[route]]
 name = "notes"
-path = ['/notes/', '/notes/[0-9]+/delete/', '/notes/peek/']
+path = ['/notes/', '/notes/[0-9]+/delete/', '/notes/peek/', '/notes/sql/']
 groups = ["session"]
 [route.db]
 transaction_control = true
@@ -62,6 +62,15 @@ queries = [
 name = "debug"
 path = ['/debug/env/']
 methods = ["GET"]
+
+[[route]]
+name = "sql"
+path = ['/debug/sql/']
+methods = ["GET"]
+[route.db]
+queries = [
+  'SELECT count(*) FROM notes_note',
+]
 
 [[route]]
 name = "fallback"
