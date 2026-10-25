@@ -16,8 +16,11 @@
 //!
 //! One consequence of running under `sudo`: sudo removes `LD_LIBRARY_PATH` from
 //! the environment, and that is how a Python outside the loader's default
-//! search path (the CI tool cache) is normally found. Every spawned binary is
-//! therefore given it back, derived from `PYO3_PYTHON`; see `library_path`.
+//! search path (the CI tool cache) is normally found. The spawned binary is
+//! therefore given it back, derived from `PYO3_PYTHON` (see `library_path`),
+//! and — for dbproxy, which is `execve`'d with an empty environment (§4) and
+//! so cannot be helped that way — `build.rs` puts the interpreter's library
+//! directory in the binary's `RUNPATH`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs::Permissions;
@@ -344,9 +347,10 @@ fn free_port() -> u16 {
 /// *removes* `LD_LIBRARY_PATH` from the environment, so the binary init spawns
 /// would not find `libpython` and would exit 127 before its first event.
 ///
-/// The interpreter this crate was built against is named by `PYO3_PYTHON`, so
-/// the directory that actually holds its `libpython` is derived from that and
-/// put in front of whatever the caller had.
+/// `build.rs` also puts the interpreter's library directory in the binary's
+/// `RUNPATH`, which is what makes dbproxy — `execve`'d with an empty
+/// environment (§4) — work; this is the belt to that pair of braces, for a
+/// build whose `libpython` is only reachable through the environment.
 fn library_path() -> Option<String> {
     let mut entries: Vec<String> = Vec::new();
     if let Some(python) = std::env::var_os("PYO3_PYTHON") {
