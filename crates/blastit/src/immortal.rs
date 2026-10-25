@@ -233,6 +233,13 @@ fn free_threaded(py: Python<'_>) -> bool {
 /// the address set meaningful for the whole walk: an immortal object is never
 /// freed, so no later object can reuse its address.
 ///
+/// It is a **whole-interpreter** pass: `gc.get_objects()` is every tracked
+/// object in the process, so anything another thread allocates or holds while
+/// this runs is immortalised too. init satisfies that trivially — stage 1 is
+/// single-threaded and nothing else in the process runs Python (§2.1, §4) — but
+/// a caller that shares its interpreter with other Python threads must
+/// serialise around this call.
+///
 /// # Errors
 ///
 /// Whatever importing `gc` or calling it raises. A caller that cannot
@@ -319,9 +326,29 @@ unsafe fn write_marker(object: *mut ffi::PyObject) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
     use pyo3::types::PyDict;
 
     use super::*;
+
+    /// Serialises the tests in this binary that touch the interpreter heap.
+    ///
+    /// These tests are threads of one process and share one interpreter, and
+    /// [`immortalize`] is a whole-interpreter pass: `gc.get_objects()` is what
+    /// the collector tracks, so a pass running in a parallel test marks the
+    /// objects another test is holding — including one it has just created to
+    /// check that a *new* object is left alone. The window is real: CPython
+    /// releases the GIL at bytecode boundaries, so a pass can run in the middle
+    /// of another test's `py.run`, where the executing frame makes everything
+    /// that snippet bound reachable. Every test here holds this lock for its
+    /// whole body, so each one sees a heap only its own pass has touched.
+    static HEAP: Mutex<()> = Mutex::new(());
+
+    /// The lock described on [`HEAP`]; a poisoned lock still runs the next test.
+    fn heap() -> MutexGuard<'static, ()> {
+        HEAP.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// Whether the object already carries §9.2 #7's marker.
     fn is_immortal(object: *mut ffi::PyObject) -> bool {
@@ -428,6 +455,7 @@ mod tests {
 
     #[test]
     fn the_running_interpreter_agrees_with_the_pure_check() {
+        let _heap = heap();
         Python::initialize();
         Python::attach(|py| {
             let interpreter = probe(py);
@@ -479,6 +507,7 @@ mod tests {
 
     #[test]
     fn an_immortalised_object_stops_counting_references() {
+        let _heap = heap();
         Python::initialize();
         Python::attach(|py| {
             if check(py).is_err() {
@@ -520,6 +549,7 @@ mod tests {
 
     #[test]
     fn an_object_created_afterwards_is_unaffected() {
+        let _heap = heap();
         Python::initialize();
         Python::attach(|py| {
             if check(py).is_err() {
@@ -542,6 +572,7 @@ mod tests {
 
     #[test]
     fn the_walk_reaches_untracked_objects() {
+        let _heap = heap();
         Python::initialize();
         Python::attach(|py| {
             if check(py).is_err() {
