@@ -27,6 +27,11 @@
 //!   all is not granted;
 //! * a `*` read, an `INSERT` with no column list and a `DELETE` need the
 //!   whole-table form (`select = "*"`, `insert = "*"`, `delete = true`);
+//! * a locking clause (`FOR UPDATE`, `FOR SHARE`, …) needs an `update` entry on
+//!   every base table it locks, through derived relations — but on **any one**
+//!   column, because that is all PostgreSQL asks for to lock a row: a route that
+//!   only reads the rows it locks can be granted `update = ["id"]`.
+//!   [`TableGrants::covering`] writes exactly that instead of `"*"`;
 //! * naming a table is touching it: `SELECT count(*) FROM t`, `SELECT 1 FROM t`
 //!   and `EXISTS (SELECT 1 FROM t)` read no column but still learn that the
 //!   table exists, so they need a `select` entry — any columns. The entry a
@@ -156,6 +161,16 @@ pub struct TableGrant {
     /// The columns the route may change in an existing row, `update = …`.
     #[serde(default)]
     pub update: Option<Columns>,
+    /// Whether `update` is only there to lock rows (`FOR UPDATE`), not to write
+    /// them — a hint [`TableGrants::covering`] leaves for
+    /// [`TableGrants::to_toml`], which says so in a comment.
+    ///
+    /// A lock needs the UPDATE privilege on **any one** column of the table
+    /// (PostgreSQL's rule), so the covering grant names the smallest column the
+    /// route already reads instead of `"*"`. It changes nothing about what the
+    /// grant allows; a manifest never writes it, and it is not serialised.
+    #[serde(skip)]
+    pub lock_only: bool,
     /// Whether the route may delete rows, `delete = true`.
     #[serde(default)]
     pub delete: bool,
@@ -176,6 +191,15 @@ impl TableGrant {
             // empty list. What the statement learns is that the table exists,
             // not any column of it.
             Extent::Named => granted.is_some(),
+            // A row lock (`FOR UPDATE`): PostgreSQL asks for the UPDATE
+            // privilege on *at least one* column of a locked table, so any
+            // `update` entry with a column in it covers the lock. An empty
+            // list does not: it grants no column to update.
+            Extent::Any => match granted {
+                Some(Columns::All) => true,
+                Some(Columns::List(columns)) => !columns.is_empty(),
+                None => false,
+            },
             // A whole-row access (`*`, an `INSERT` with no column list) is not
             // covered by a list of columns: it reads or writes them all.
             Extent::Whole => matches!(granted, Some(Columns::All)),
@@ -202,6 +226,7 @@ impl TableGrant {
             }
         }
         self.delete |= other.delete;
+        self.lock_only |= other.lock_only;
     }
 
     /// Whether the grant allows nothing at all.
@@ -324,17 +349,25 @@ impl TableGrants {
     ///
     /// This is what the pytest plugin reports for a route: the tables, columns
     /// and functions its statements were observed to touch, so that a manifest
-    /// written from exact queries can be rewritten as a table grant (D7).
+    /// written from exact queries can be rewritten as a table grant (D7). A
+    /// table a statement only locks (`FOR UPDATE`) gets an `update` entry on the
+    /// smallest column the route already reads — any one column is enough for
+    /// PostgreSQL — never `"*"`.
     pub fn covering<'a>(analyses: impl IntoIterator<Item = &'a Analysis>) -> Self {
         let mut covering = Self::default();
+        let mut locked = BTreeSet::new();
         for analysis in analyses {
             for access in analysis.accesses() {
+                if access.extent() == &Extent::Any {
+                    locked.insert(access.table().to_string());
+                }
                 covering.cover(access);
             }
             for function in analysis.extra_functions() {
                 covering.functions.insert(function.to_string());
             }
         }
+        covering.settle_locks(&locked);
         covering
     }
 
@@ -354,6 +387,12 @@ impl TableGrants {
         *slot = Some(match (slot.take(), access.extent()) {
             // A whole-row access covers every column, so it absorbs a list.
             (Some(Columns::All), _) | (_, Extent::Whole) => Columns::All,
+            // A row lock names no column of its own: it needs `update` on any
+            // one column, which `settle_locks` fills in at the end — after
+            // every statement has been seen, so it can pick a column the route
+            // already reads. Keep whatever a written `UPDATE` asked for.
+            (Some(current), Extent::Any) => current,
+            (None, Extent::Any) => Columns::List(BTreeSet::new()),
             // A written list — even an empty one — already covers naming the
             // table; an empty one is exactly what a table only counted gets.
             (Some(columns @ Columns::List(_)), Extent::Named) => columns,
@@ -364,6 +403,32 @@ impl TableGrants {
             }
             (None, Extent::Column(column)) => Columns::list([column]),
         });
+    }
+
+    /// Fills in the `update` entry that a row lock alone asks for.
+    ///
+    /// It runs once every statement has been covered, so the column it picks is
+    /// one the route already reads: `id` when it reads one, otherwise the first
+    /// column it reads, and `"*"` when it reads no column at all (a lock through
+    /// a subquery names the table without reading a column of it, so there is no
+    /// name to write). A table whose `update` entry a statement's own writes
+    /// already filled keeps it: that entry covers the lock too.
+    fn settle_locks(&mut self, locked: &BTreeSet<String>) {
+        for table in locked {
+            let Some(grant) = self.tables.get_mut(table) else {
+                continue;
+            };
+            let covered = match &grant.update {
+                Some(Columns::All) => true,
+                Some(Columns::List(columns)) => !columns.is_empty(),
+                None => false,
+            };
+            if covered {
+                continue;
+            }
+            grant.update = Some(lock_update(grant.select.as_ref()));
+            grant.lock_only = true;
+        }
     }
 
     /// Renders the grants as the TOML a manifest holds, under the section
@@ -380,6 +445,17 @@ impl TableGrants {
         out.push_str(prefix);
         out.push_str(".tables]\n");
         for (table, grant) in &self.tables {
+            if grant.lock_only {
+                let columns = match &grant.update {
+                    Some(columns) => columns_toml(columns),
+                    None => "[]".to_string(),
+                };
+                out.push_str(&format!(
+                    "# {}: `update = {columns}` only locks its rows (`FOR UPDATE`) — any one \
+                     column is enough, as PostgreSQL requires.\n",
+                    key_toml(table),
+                ));
+            }
             let mut operations = Vec::new();
             for (name, columns) in [
                 ("select", &grant.select),
@@ -486,6 +562,29 @@ fn columns_toml(columns: &Columns) -> String {
     }
 }
 
+/// The `update` entry a row lock alone needs: one column the route already
+/// reads.
+///
+/// PostgreSQL wants the UPDATE privilege on any one column of a locked table, so
+/// the smallest covering grant names one instead of `"*"`: `id` when the route
+/// reads it (a lock's `WHERE` usually goes through the key), otherwise the first
+/// column it reads, and `"*"` when it reads none — a lock through a subquery can
+/// name a table without reading a column of it, and then there is no name to
+/// write.
+fn lock_update(select: Option<&Columns>) -> Columns {
+    let Some(Columns::List(columns)) = select else {
+        return Columns::All;
+    };
+    let column = columns
+        .iter()
+        .find(|column| column.as_str() == "id")
+        .or_else(|| columns.iter().next());
+    match column {
+        Some(column) => Columns::list([column.clone()]),
+        None => Columns::All,
+    }
+}
+
 /// A TOML key: bare when it can be, quoted when it cannot.
 fn key_toml(key: &str) -> String {
     let bare = !key.is_empty()
@@ -589,6 +688,7 @@ mod tests {
                     select: Some(Columns::All),
                     insert: Some(Columns::list(["status"])),
                     update: Some(Columns::list(["status", "accepted_at"])),
+                    lock_only: false,
                     delete: false,
                 },
             )],
@@ -761,6 +861,7 @@ mod tests {
                         select: None,
                         insert: None,
                         update: None,
+                        lock_only: false,
                         delete: false,
                     },
                 )],
@@ -944,9 +1045,14 @@ mod tests {
     #[test]
     fn locking_a_derived_relation_needs_update_on_its_base_table() {
         let grants = selecting("auth_user", &["id"]);
-        // A plain lock already needed `update`.
+        // A plain lock needs `update`, on any column of the table. The reason
+        // says so: PostgreSQL asks for the UPDATE privilege on at least one
+        // column of a locked table.
         let denied = checked(&grants, "SELECT id FROM auth_user FOR UPDATE").expect_err("denied");
-        assert_eq!(denied.reason(), "update on auth_user.* not granted");
+        assert_eq!(
+            denied.reason(),
+            "update on auth_user (any column, to lock its rows) not granted"
+        );
         // Through a subquery, too: the statement reads no column of the table,
         // but PostgreSQL locks its rows.
         let denied = checked(
@@ -954,20 +1060,130 @@ mod tests {
             "SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR UPDATE",
         )
         .expect_err("denied");
-        assert_eq!(denied.reason(), "update on auth_user.* not granted");
-        // With the `update` grant, both are allowed.
-        let mut with_update = grants.clone();
-        with_update
-            .tables
-            .entry("auth_user".to_string())
-            .or_default()
-            .update = Some(Columns::All);
-        assert!(
-            checked(
-                &with_update,
-                "SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR UPDATE"
-            )
-            .is_ok()
+        assert_eq!(
+            denied.reason(),
+            "update on auth_user (any column, to lock its rows) not granted"
+        );
+        // With the `update` grant, both are allowed — and `"*"` is not the only
+        // way: one column is enough, exactly as PostgreSQL requires.
+        for update in [
+            Columns::All,
+            Columns::list(["id"]),
+            Columns::list(["status"]),
+        ] {
+            let mut with_update = grants.clone();
+            with_update
+                .tables
+                .entry("auth_user".to_string())
+                .or_default()
+                .update = Some(update.clone());
+            assert!(
+                checked(
+                    &with_update,
+                    "SELECT 1 FROM (SELECT 1 FROM auth_user) s FOR UPDATE"
+                )
+                .is_ok(),
+                "update = {update:?} locks the rows"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lock_is_not_satisfied_by_an_empty_update_list() {
+        // `update = []` grants no column, so it grants no lock either: there is
+        // nothing to lock the rows *with*.
+        let mut grants = selecting("t", &["id"]);
+        grants.tables.entry("t".to_string()).or_default().update =
+            Some(Columns::List(BTreeSet::new()));
+        let denied = checked(&grants, "SELECT id FROM t FOR UPDATE").expect_err("denied");
+        assert_eq!(
+            denied.reason(),
+            "update on t (any column, to lock its rows) not granted"
+        );
+        // An `insert` entry is a different operation: it does not lock.
+        let insert_only = TableGrants::new(
+            [(
+                "t".to_string(),
+                TableGrant {
+                    select: Some(Columns::list(["id"])),
+                    insert: Some(Columns::All),
+                    ..TableGrant::default()
+                },
+            )],
+            [],
+        );
+        assert!(checked(&insert_only, "SELECT id FROM t FOR UPDATE").is_err());
+    }
+
+    #[test]
+    fn covering_a_locked_table_asks_for_one_column_not_every_column() {
+        // The Django shape (D7b): a join locked with `select_for_update()` reads
+        // its columns and writes none, so the covering grant needs no more than
+        // `update = ["id"]` per locked table.
+        let analyses =
+            [
+                analyze("SELECT t.id, t.status, u.id FROM t JOIN u ON u.t_id = t.id FOR UPDATE")
+                    .unwrap(),
+            ];
+        let covering = TableGrants::covering(analyses.iter());
+        assert_eq!(
+            covering.to_toml("route.db"),
+            "[route.db.tables]\n\
+             # t: `update = [\"id\"]` only locks its rows (`FOR UPDATE`) — any one column is \
+             enough, as PostgreSQL requires.\n\
+             t = { select = [\"id\", \"status\"], update = [\"id\"] }\n\
+             # u: `update = [\"id\"]` only locks its rows (`FOR UPDATE`) — any one column is \
+             enough, as PostgreSQL requires.\n\
+             u = { select = [\"id\", \"t_id\"], update = [\"id\"] }\n"
+        );
+        assert!(covering.check(&analyses[0]).is_ok());
+        // ... and it is still the smallest one that fits: another column of `t`
+        // is not granted.
+        assert!(checked(&covering, "SELECT password FROM t").is_err());
+    }
+
+    #[test]
+    fn covering_a_locked_table_picks_the_column_it_reads() {
+        // `id` when the route reads one (the key a lock's `WHERE` goes through)…
+        let key = [analyze("SELECT t.status, t.id FROM t FOR UPDATE").unwrap()];
+        assert_eq!(
+            TableGrants::covering(key.iter()).to_toml("route.db"),
+            "[route.db.tables]\n\
+             # t: `update = [\"id\"]` only locks its rows (`FOR UPDATE`) — any one column is \
+             enough, as PostgreSQL requires.\n\
+             t = { select = [\"id\", \"status\"], update = [\"id\"] }\n"
+        );
+        // … otherwise the first column it reads.
+        let first = [analyze("SELECT t.status, t.name FROM t FOR UPDATE").unwrap()];
+        assert_eq!(
+            TableGrants::covering(first.iter()).to_toml("route.db"),
+            "[route.db.tables]\n\
+             # t: `update = [\"name\"]` only locks its rows (`FOR UPDATE`) — any one column is \
+             enough, as PostgreSQL requires.\n\
+             t = { select = [\"name\", \"status\"], update = [\"name\"] }\n"
+        );
+        // A lock through a subquery reads no column of the table it locks, so
+        // there is no name to pick: the suggestion is `"*"`.
+        let none = [analyze("SELECT 1 FROM (SELECT 1 FROM t) s FOR UPDATE").unwrap()];
+        let covering = TableGrants::covering(none.iter());
+        assert_eq!(
+            covering.to_toml("route.db"),
+            "[route.db.tables]\n\
+             # t: `update = \"*\"` only locks its rows (`FOR UPDATE`) — any one column is \
+             enough, as PostgreSQL requires.\n\
+             t = { select = [], update = \"*\" }\n"
+        );
+        assert!(covering.check(&none[0]).is_ok());
+        // A table whose own `UPDATE` already names columns keeps them: they lock
+        // the rows just as well, and no comment claims the entry is only a lock.
+        let written = [
+            analyze("SELECT id FROM t FOR UPDATE").unwrap(),
+            analyze("UPDATE t SET status = $1 WHERE id = $2").unwrap(),
+        ];
+        assert_eq!(
+            TableGrants::covering(written.iter()).to_toml("route.db"),
+            "[route.db.tables]\n\
+             t = { select = [\"id\"], update = [\"status\"] }\n"
         );
     }
 

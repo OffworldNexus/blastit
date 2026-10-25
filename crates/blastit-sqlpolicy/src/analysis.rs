@@ -47,7 +47,10 @@
 //! the ones it read a column from: that is what makes a locking clause require
 //! `update` on the tables under a subquery or a CTE — `SELECT 1 FROM (SELECT 1
 //! FROM auth_user) s FOR UPDATE` locks `auth_user` rows, so the grant has to say
-//! `update` on `auth_user`.
+//! `update` on `auth_user`. **Any** `update` entry is enough for a lock, on any
+//! one column: PostgreSQL only asks for the UPDATE privilege on a single column
+//! of a locked table (and `select` for the columns read), so a route that locks
+//! rows it only reads needs no more than `update = ["id"]`.
 //!
 //! Two mechanisms keep that honest as the code grows. Every node type the
 //! resolver handles explicitly (and consumes itself, like a `JOIN` or an
@@ -301,14 +304,14 @@ impl fmt::Display for Op {
 /// One thing a statement does to one table (§6).
 ///
 /// A `column` of `None` is a whole-table access: a `*` read, an `INSERT` with no
-/// column list, a `DELETE`, or the `FOR UPDATE` lock of a table. The table is
-/// spelled the way a grant has to spell it: `public.t` is `t`, any other schema
-/// keeps its qualified name.
+/// column list, or a `DELETE`. The table is spelled the way a grant has to spell
+/// it: `public.t` is `t`, any other schema keeps its qualified name.
 ///
-/// There is a third, weaker shape: a table the statement only *names* —
+/// Two weaker shapes exist. A table the statement only *names* —
 /// `SELECT count(*) FROM t` — needs some `select` entry, but no particular
-/// column. [`Access::named`] is that access, and it is what
-/// [`Op::Select`] on a table with no column read turns into.
+/// column ([`Access::named`]). A table whose rows are *locked* (`FOR UPDATE`)
+/// needs some `update` entry on any one column, which is what PostgreSQL asks
+/// for and what [`Access::lock`] is.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Access {
     op: Op,
@@ -318,14 +321,18 @@ pub struct Access {
 
 /// How much of a table one [`Access`] needs.
 ///
-/// Ordered so that a `Named` access sorts before a whole-row one and a column
-/// one: the first access a denial reports is the first thing a grant author
-/// would have to add.
+/// Ordered so that a `Named` access sorts before an any-column one, a whole-row
+/// one and a column one: the first access a denial reports is the first thing a
+/// grant author would have to add.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Extent {
     /// The table is named, but no column of it is read: any `select` entry
     /// covers it.
     Named,
+    /// Any one column of the table, the one PostgreSQL needs for a row lock
+    /// (`FOR UPDATE`): a non-empty `update` list or `update = "*"` covers it,
+    /// but an empty list does not — it grants no column to update.
+    Any,
     /// Every column: `select = "*"`, `insert = "*"`, a `DELETE`.
     Whole,
     /// One column, by the name PostgreSQL resolved.
@@ -336,7 +343,8 @@ impl Access {
     /// One access of a statement.
     ///
     /// `column` of `None` is a whole-row access (`select on t.*`), `Some` a
-    /// column one (`select on t.id`); [`Access::named`] is the table-only form.
+    /// column one (`select on t.id`); [`Access::named`] is the table-only form
+    /// and [`Access::lock`] the row-lock one.
     pub fn new(op: Op, table: impl Into<String>, column: Option<&str>) -> Self {
         let extent = match column {
             Some(column) => Extent::Column(column.to_string()),
@@ -363,6 +371,22 @@ impl Access {
         }
     }
 
+    /// An access that locks a table's rows: `SELECT … FOR UPDATE` (and `FOR NO
+    /// KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE`).
+    ///
+    /// PostgreSQL asks for the UPDATE privilege on **at least one column** of
+    /// every locked table, so any `update` entry covers this — a non-empty
+    /// column list or `"*"` — while an empty one does not, since it grants no
+    /// column. The denial says so: `update on t (any column, to lock its rows)
+    /// not granted`.
+    pub fn lock(table: impl Into<String>) -> Self {
+        Self {
+            op: Op::Update,
+            table: table.into(),
+            extent: Extent::Any,
+        }
+    }
+
     /// The privilege this access needs.
     pub fn op(&self) -> Op {
         self.op
@@ -373,11 +397,13 @@ impl Access {
         &self.table
     }
 
-    /// The column, or `None` for a whole-table or table-only access.
+    /// The column, or `None` for a whole-table, table-only or any-column
+    /// access. The last is a row lock: it names no column, and every `update`
+    /// entry with at least one column covers it.
     pub fn column(&self) -> Option<&str> {
         match &self.extent {
             Extent::Column(column) => Some(column),
-            Extent::Named | Extent::Whole => None,
+            Extent::Named | Extent::Any | Extent::Whole => None,
         }
     }
 
@@ -391,12 +417,18 @@ impl fmt::Display for Access {
     /// `select on auth_user.password`, `delete on orders_order`, `select on
     /// auth_user`: the form a denial's `reason` uses, and the one a human reads
     /// in a log. A whole-table access is spelled `t.*`, which is what a grant has
-    /// to say; a table-only access is spelled by the table's name alone.
+    /// to say; a table-only access is spelled by the table's name alone; a row
+    /// lock says what a grant has to add for it (`any column`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (&self.extent, self.op) {
             (Extent::Column(column), _) => write!(f, "{} on {}.{}", self.op, self.table, column),
             (_, Op::Delete) => write!(f, "delete on {}", self.table),
             (Extent::Named, _) => write!(f, "{} on {}", self.op, self.table),
+            (Extent::Any, _) => write!(
+                f,
+                "{} on {} (any column, to lock its rows)",
+                self.op, self.table
+            ),
             (Extent::Whole, _) => write!(f, "{} on {}.*", self.op, self.table),
         }
     }
@@ -1785,7 +1817,9 @@ impl Resolver {
     }
 
     /// `FOR UPDATE`/`FOR SHARE`: locking a row is reading it to change it, so the
-    /// locked tables need `update` (§6).
+    /// locked tables need `update` (§6) — on **any one column**, which is what
+    /// PostgreSQL asks for: the UPDATE privilege on at least one column of every
+    /// locked table (the columns read need `select` as usual).
     ///
     /// A relation can be derived — a subquery, a CTE, a join — and PostgreSQL
     /// still locks the base tables under it, so the requirement follows the set
@@ -1815,7 +1849,7 @@ impl Resolver {
             };
             for rel in locked {
                 for table in rel.named_tables() {
-                    self.access(Op::Update, &table, None);
+                    self.accesses.insert(Access::lock(table));
                 }
             }
         }
