@@ -811,7 +811,7 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
 | scheduler | it can send any request to any view | do anything a view couldn't already be made to do by an HTTP request |
 | dbproxy | the real DB credentials | — this is the crown jewel. It runs no app code, is not dumpable, and is the smallest Rust component we can make it |
 | init | everything | — it runs only blastit code after stage 1 imports, and handles no external input |
-| import-time app code | root, before any sandboxing | — **out of scope**. Imports must run before the fork for COW sharing |
+| import-time app code | root, before any sandboxing | — **out of scope**. Imports must run before the fork for COW sharing. Installed as a wheel, blastit's stage 0 is itself the virtualenv's interpreter, so the venv's `.pth` files and `sitecustomize` run there too, with the real credentials still in the environment: they are import-time code of the same kind |
 
 ### 7.2 Mechanisms that work without extra privileges
 
