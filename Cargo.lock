@@ -18,6 +18,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
+name = "blastit"
+version = "0.1.0"
+dependencies = [
+ "blastit-env",
+ "blastit-events",
+ "blastit-frame",
+ "blastit-http",
+ "blastit-manifest",
+ "blastit-scheduler",
+ "blastit-sys",
+ "blastit-view",
+ "libc",
+ "pyo3",
+ "rustix",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "blastit-env"
 version = "0.1.0"
 dependencies = [

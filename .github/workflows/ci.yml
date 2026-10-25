@@ -68,3 +68,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --locked
+
+  smoke:
+    name: smoke (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # init must be root (PID 1 in the container); the smoke tests start the real binary.
+      - run: cargo build -p blastit --tests --locked
+      - run: sudo -E env "PATH=$PATH" cargo test -p blastit --locked -- --test-threads=1
