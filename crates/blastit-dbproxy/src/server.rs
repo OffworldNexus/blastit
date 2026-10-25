@@ -1092,6 +1092,7 @@ mod tests {
             uid: 21_000,
             queries: vec![],
             transaction_control: false,
+            unrestricted: false,
         };
         let emit: crate::Emit = Arc::new(|_: blastit_events::Event| {});
 
@@ -1126,6 +1127,7 @@ mod tests {
             uid: 21_000,
             queries: vec![],
             transaction_control: false,
+            unrestricted: false,
         };
         let proxy = ProxySpec {
             name: "db".to_string(),

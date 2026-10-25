@@ -146,11 +146,13 @@ impl Proxy {
 }
 
 /// The contents of a grant on a `postgresql` proxy (§5.2): the statements the
-/// route may run, and whether transaction control is allowed.
+/// route may run, whether transaction control is allowed, and whether every
+/// statement is allowed instead (§6, `unrestricted = true`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PgGrant {
     queries: Vec<String>,
     transaction_control: bool,
+    unrestricted: bool,
 }
 
 impl PgGrant {
@@ -159,17 +161,50 @@ impl PgGrant {
         Self {
             queries,
             transaction_control,
+            unrestricted: false,
         }
     }
 
+    /// A grant that allows every statement on its proxy (§6).
+    ///
+    /// The manifest spelling is `unrestricted = true`, and it is only accepted
+    /// inline on a route ([`crate::ManifestError::UnrestrictedGroup`]): a group
+    /// could attach it to every route by accident.
+    pub fn unrestricted() -> Self {
+        Self {
+            queries: Vec::new(),
+            transaction_control: false,
+            unrestricted: true,
+        }
+    }
+
+    /// The same grant, with the `unrestricted` flag of a manifest entry.
+    ///
+    /// Only the parser builds grants from a document; this is how it carries
+    /// the flag into a value [`PgGrant::new`] cannot produce.
+    pub(crate) fn with_unrestricted(mut self, unrestricted: bool) -> Self {
+        self.unrestricted = unrestricted;
+        self
+    }
+
     /// The statements the grant allows, in manifest order.
+    ///
+    /// Empty for an unrestricted grant, which allows by not listing.
     pub fn queries(&self) -> &[String] {
         &self.queries
     }
 
     /// Whether `BEGIN`/`COMMIT`/`ROLLBACK` and savepoints are allowed.
+    ///
+    /// Always false for an unrestricted grant, which needs no such flag: it
+    /// allows transaction control along with everything else.
     pub fn transaction_control(&self) -> bool {
         self.transaction_control
+    }
+
+    /// Whether the grant allows every statement on its proxy, whatever it is.
+    pub fn is_unrestricted(&self) -> bool {
+        self.unrestricted
     }
 
     /// True when the grant allows nothing at all.
@@ -177,13 +212,14 @@ impl PgGrant {
     /// An empty effective grant means the route gets no dbproxy listener for
     /// that proxy at all (§2.2, §6).
     pub fn is_empty(&self) -> bool {
-        self.queries.is_empty() && !self.transaction_control
+        !self.unrestricted && self.queries.is_empty() && !self.transaction_control
     }
 
     /// Unions `other` into `self`: queries are deduplicated in insertion order,
-    /// transaction control is OR-ed (§6).
+    /// transaction control and `unrestricted` are OR-ed (§6).
     pub fn merge_from(&mut self, other: &Self) {
         self.transaction_control |= other.transaction_control;
+        self.unrestricted |= other.unrestricted;
         for query in &other.queries {
             if !self.queries.contains(query) {
                 self.queries.push(query.clone());

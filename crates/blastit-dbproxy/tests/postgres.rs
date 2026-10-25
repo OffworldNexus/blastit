@@ -251,6 +251,7 @@ fn listener_spec(
         uid,
         queries: queries.iter().map(|query| query.to_string()).collect(),
         transaction_control,
+        unrestricted: false,
     }
 }
 
@@ -624,6 +625,190 @@ async fn two_routes_on_one_proxy_have_separate_allowlists() {
         })
         .collect();
     assert_eq!(routes, ["catalog", "orders"], "one denial per route");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unrestricted_route_runs_anything_and_its_neighbour_still_gets_42501() {
+    let Some(url) = pg_url() else { return };
+    let upstream = upstream(&url);
+    let items = table_for("unrestricted");
+    setup_items(&upstream, &items).await;
+    let probe = table_for("unrestricted_probe");
+    let direct_client = direct(&upstream).await;
+    direct_client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {probe}"))
+        .await
+        .expect("the probe table is gone");
+
+    let all = format!("SELECT id, name FROM {items}");
+    let directory = scratch("unrestricted");
+    let backoffice = bind(&directory, 5432);
+    let catalog = bind(&directory, 5433);
+    let proxy = start(
+        directory.clone(),
+        vec![proxy_spec("db", &upstream, 4)],
+        vec![
+            (
+                backoffice,
+                // `[route.db] unrestricted = true` (ARCHITECTURE.md §6): no
+                // queries at all, and everything is allowed.
+                ListenerSpec {
+                    unrestricted: true,
+                    ..listener_spec("backoffice", "db", current_uid(), &[], false)
+                },
+            ),
+            (
+                catalog,
+                listener_spec("catalog", "db", current_uid(), &[all.as_str()], false),
+            ),
+        ],
+    );
+
+    // The unrestricted route runs statements no listed grant could cover, and
+    // its session is still a session through dbproxy.
+    let mut admin = connect(&directory, 5432).await.expect("connects");
+    admin
+        .execute(&format!("CREATE TABLE {probe} (v text)"), &[])
+        .await
+        .expect("DDL is allowed on an unrestricted route");
+    admin
+        .query(
+            &format!("INSERT INTO {probe} (v) VALUES ($1) RETURNING v"),
+            &[&"from-the-back-office"],
+        )
+        .await
+        .expect("an insert is allowed too");
+    let transaction = admin.transaction().await.expect("BEGIN as well");
+    transaction
+        .query(&format!("SELECT id, name FROM {items}"), &[])
+        .await
+        .expect("and any query");
+    transaction.commit().await.expect("COMMIT");
+
+    // The neighbouring route keeps its own list: the same statements are
+    // refused there, with 42501.
+    let reader = connect(&directory, 5433).await.expect("connects");
+    for sql in [
+        format!("CREATE TABLE {probe} (v text)"),
+        format!("INSERT INTO {probe} (v) VALUES ($1)"),
+        "BEGIN".to_string(),
+    ] {
+        let error = reader
+            .query(&sql, &[&"denied"])
+            .await
+            .expect_err("the catalog route may not run this");
+        assert_eq!(sqlstate(&error).as_deref(), Some("42501"), "{sql}");
+    }
+    reader
+        .query(&all, &[])
+        .await
+        .expect("its own grant still works");
+
+    // The unrestricted route's work reached the server, and the denied
+    // statements did not.
+    let count = direct_client
+        .query_one(&format!("SELECT count(*) FROM {probe}"), &[])
+        .await
+        .expect("the probe table is readable")
+        .get::<_, i64>(0);
+    assert_eq!(count, 1);
+
+    // Nothing is logged for the unrestricted route: there is nothing to deny.
+    // The reader's three refusals are, one per statement.
+    let events = proxy.events();
+    assert!(
+        events
+            .iter()
+            .all(|event| event.route() != Some("backoffice")),
+        "an unrestricted route logs no per-statement event: {events:#?}"
+    );
+    let denied = events
+        .iter()
+        .filter(|event| {
+            event.route() == Some("catalog") && matches!(event.kind(), EventKind::SqlDenied(_))
+        })
+        .count();
+    assert_eq!(denied, 3, "{events:#?}");
+    for event in &events {
+        let line = encode_json(event);
+        assert!(
+            !line.contains(&upstream.user) && !line.contains("ci-not-secret"),
+            "an event leaked the upstream identity: {line}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_shapes_a_django_app_sends_match_their_grant() {
+    let Some(url) = pg_url() else { return };
+    let upstream = upstream(&url);
+    let items = table_for("shapes");
+    setup_items(&upstream, &items).await;
+
+    let one = format!("SELECT id, name FROM {items} WHERE id IN ($1)");
+    let insert = format!("INSERT INTO {items} (id, name) VALUES ($1, $2), ($3, $4)");
+    let directory = scratch("shapes");
+    let listener = bind(&directory, 5432);
+    let proxy = start(
+        directory.clone(),
+        vec![proxy_spec("db", &upstream, 4)],
+        vec![(
+            listener,
+            listener_spec(
+                "notes",
+                "db",
+                current_uid(),
+                &[one.as_str(), insert.as_str()],
+                false,
+            ),
+        )],
+    );
+    let client = connect(&directory, 5432).await.expect("connects");
+
+    // `__in` and `prefetch_related` grow the list, and every added placeholder
+    // renumbers the ones after it.
+    let statement = format!("SELECT id, name FROM {items} WHERE id IN ($1, $2, $3)");
+    let rows = client
+        .query(&statement, &[&1i32, &2i32, &99i32])
+        .await
+        .expect("the length of the list is not part of the statement");
+    assert_eq!(rows.len(), 2);
+    let rows = client
+        .query(&one, &[&1i32])
+        .await
+        .expect("one placeholder is the same statement");
+    assert_eq!(rows.len(), 1);
+
+    // `bulk_create` sends one row per object.
+    let statement = format!("INSERT INTO {items} (id, name) VALUES ($1, $2), ($3, $4), ($5, $6)");
+    let inserted = client
+        .execute(&statement, &[&10i32, &"x", &11i32, &"y", &12i32, &"z"])
+        .await
+        .expect("the number of rows is not part of the statement");
+    assert_eq!(inserted, 3);
+    let count = direct(&upstream)
+        .await
+        .query_one(&format!("SELECT count(*) FROM {items}"), &[])
+        .await
+        .expect("the table is readable")
+        .get::<_, i64>(0);
+    assert_eq!(count, 5, "the three rows were inserted");
+
+    // A statement whose shape differs is still a different statement.
+    let error = client
+        .query(
+            &format!("SELECT id, name FROM {items} WHERE name IN ($1, $2)"),
+            &[&"alpha", &"beta"],
+        )
+        .await
+        .expect_err("a different statement is not granted");
+    assert_eq!(sqlstate(&error).as_deref(), Some("42501"));
+    let denied = proxy.denied("notes");
+    assert_eq!(
+        denied.sql(),
+        format!("SELECT id, name FROM {items} WHERE name IN ($?, ...)"),
+        "the log carries the shape form, so it can be pasted into the manifest"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

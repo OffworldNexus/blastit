@@ -16,6 +16,7 @@ pub(crate) fn validate(
     let mut errors = Vec::new();
     check_groups(manifest, &mut errors);
     check_grants(manifest, &mut errors);
+    check_unrestricted(manifest, &mut errors);
     check_routes(manifest, &mut errors);
     check_uids(manifest, base, &mut errors);
 
@@ -61,6 +62,27 @@ fn check_grants(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
             location: unresolved.location().clone(),
             proxy: unresolved.proxy().clone(),
         });
+    }
+}
+
+/// `unrestricted = true` is only allowed inline on a route (§6).
+///
+/// A group can be attached to every route at once, so an unrestricted grant
+/// there could turn the whole manifest into one sandbox — the opposite of what
+/// the file is for. Inline, it reaches exactly one route and one proxy.
+fn check_unrestricted(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
+    for (name, group) in manifest.groups() {
+        for (proxy, grant) in group.grants() {
+            if grant
+                .as_postgresql()
+                .is_some_and(|grant| grant.is_unrestricted())
+            {
+                errors.push(ManifestError::UnrestrictedGroup {
+                    location: Location::Group(name.clone()),
+                    proxy: proxy.clone(),
+                });
+            }
+        }
     }
 }
 
@@ -199,7 +221,8 @@ fn token_char(byte: u8) -> bool {
         )
 }
 
-/// The non-fatal findings: a group attached nowhere and a proxy nobody grants.
+/// The non-fatal findings: a group attached nowhere, a proxy nobody grants, and
+/// an unrestricted route.
 fn warnings(manifest: &Manifest) -> Vec<ManifestWarning> {
     let mut warnings = Vec::new();
 
@@ -231,6 +254,22 @@ fn warnings(manifest: &Manifest) -> Vec<ManifestWarning> {
             warnings.push(ManifestWarning::UngrantedProxy {
                 proxy: proxy.clone(),
             });
+        }
+    }
+
+    // One warning per (route, proxy) that may run anything at all, in route
+    // order and then proxy order, so a boot reports the same list every time.
+    for route in manifest.routes() {
+        for (proxy, grant) in route.grants() {
+            if grant
+                .as_postgresql()
+                .is_some_and(|grant| grant.is_unrestricted())
+            {
+                warnings.push(ManifestWarning::UnrestrictedRoute {
+                    route: route.name().to_string(),
+                    proxy: proxy.clone(),
+                });
+            }
         }
     }
 
