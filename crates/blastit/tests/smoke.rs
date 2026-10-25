@@ -13,14 +13,18 @@
 //! provides one as a service container). They speak the PostgreSQL wire
 //! protocol by hand over a Unix socket, so the tests need no Python packages
 //! beyond the standard library.
-
+//!
+//! One consequence of running under `sudo`: sudo removes `LD_LIBRARY_PATH` from
+//! the environment, and that is how a Python outside the loader's default
+//! search path (the CI tool cache) is normally found. Every spawned binary is
+//! therefore given it back, derived from `PYO3_PYTHON`; see `library_path`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs::Permissions;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -145,6 +149,9 @@ impl Server {
         for (key, value) in env {
             command.env(key, value);
         }
+        if let Some(path) = library_path() {
+            command.env("LD_LIBRARY_PATH", path);
+        }
         let mut child = command.spawn().expect("the blastit binary starts");
 
         let stdout = Arc::new(Mutex::new(Vec::new()));
@@ -180,7 +187,8 @@ impl Server {
             }
             if let Some(status) = self.exited() {
                 panic!(
-                    "blastit exited with {status} before it was ready\nstdout:\n{}\nstderr:\n{}",
+                    "blastit exited with {status} before it was ready{}\nstdout:\n{}\nstderr:\n{}",
+                    library_hint(&self.stderr_text()),
                     self.stdout_text(),
                     self.stderr_text()
                 );
@@ -326,6 +334,63 @@ fn free_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+/// `LD_LIBRARY_PATH` for the spawned binary, so it can load `libpython`.
+///
+/// A Python that is not in the loader's default search path (the CI tool cache,
+/// for instance) is normally found through `LD_LIBRARY_PATH`, which the
+/// `setup-python` action exports. The smoke tests run under `sudo`, and sudo
+/// *removes* `LD_LIBRARY_PATH` from the environment, so the binary init spawns
+/// would not find `libpython` and would exit 127 before its first event.
+///
+/// The interpreter this crate was built against is named by `PYO3_PYTHON`, so
+/// the directory that actually holds its `libpython` is derived from that and
+/// put in front of whatever the caller had.
+fn library_path() -> Option<String> {
+    let mut entries: Vec<String> = Vec::new();
+    if let Some(python) = std::env::var_os("PYO3_PYTHON") {
+        let interpreter = PathBuf::from(python);
+        if let Some(prefix) = interpreter.parent().and_then(Path::parent) {
+            for candidate in ["lib", "lib64"] {
+                let dir = prefix.join(candidate);
+                if holds_libpython(&dir) {
+                    entries.push(dir.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+        entries.push(existing.to_string_lossy().into_owned());
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries.join(":"))
+    }
+}
+
+/// A hint for a binary that could not load `libpython`, or nothing.
+fn library_hint(stderr: &str) -> String {
+    if stderr.contains("libpython") {
+        "\n(the binary could not load libpython: it was built against PYO3_PYTHON, \
+         so either set that or put its lib directory in LD_LIBRARY_PATH)"
+            .to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Whether `dir` contains a shared `libpython`.
+fn holds_libpython(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with("libpython") && name.contains(".so")
+    })
 }
 
 /// The WSGI application every test that is not about the database uses.
