@@ -82,6 +82,15 @@ name = "blastit-sqlpolicy"
 version = "0.1.0"
 
 [[package]]
+name = "blastit-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "thiserror",
+]
+
+[[package]]
 name = "blastit-view"
 version = "0.1.0"
 dependencies = [
