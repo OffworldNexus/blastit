@@ -45,24 +45,72 @@ def address_of(remote_addr):
     return text
 
 
+# §10: the socket peer is DO's ingress, and the ingress address was measured as
+# `10.244.x.x` on one cluster and `100.127.x` on another. Those are what a
+# reported `REMOTE_ADDR` must not be. `100.64.0.0/10` as a whole is *not* here:
+# it is also carrier-NAT client space, and a CGNAT client is a legitimate
+# origin — blastit reports what `do-connecting-ip` carries, and that is the
+# client.
+INGRESS_NETWORKS = (
+    ipaddress.ip_network("10.244.0.0/16"),
+    ipaddress.ip_network("100.127.0.0/16"),
+)
+
+
 def is_client_address(remote_addr):
     """Whether a `REMOTE_ADDR` could be an internet client's own address.
 
     What it must not be is the ingress's: blastit reports the socket peer when
-    nothing in the request may be believed, and an ingress address is a private
-    or carrier-NAT one (§10: `10.244.x.x`, `100.127.x`). Loopback is not a
-    client a hosted deployment can have either.
+    nothing in the request may be believed, and the ingress is the only peer a
+    hosted deployment has (§10, [`INGRESS_NETWORKS`]). Loopback is not a client
+    such a deployment can have either.
+
+    Everything else is a client, including addresses a `is_private`-style test
+    would call private: a deployment behind a corporate network or a carrier NAT
+    reports the address the edge saw, and that address is a real client's. This
+    is a check on *who the deployment says the client is*, not on whether the
+    client is reachable from the internet.
     """
     try:
         address = ipaddress.ip_address(address_of(remote_addr))
     except ValueError:
         return False
-    return not (
-        address.is_loopback
-        or address.is_private
-        or address.is_link_local
-        or address in ipaddress.ip_network("100.64.0.0/10")
-    )
+    return not (address.is_loopback or any(address in net for net in INGRESS_NETWORKS))
+
+
+def self_test():
+    """The decisions this file makes about what it is told, asserted.
+
+    `scenario.py --self-test`, and run by both e2e drivers before the scenario
+    itself: the scenario needs a running deployment, these do not, and
+    `is_client_address` is the one place where naming the wrong range would make
+    the "is this address the ingress?" check pass for something that is not a
+    client — or fail for a client that is one.
+    """
+    print("helpers")
+    # A socket peer carries `ip:port`; a header's entry is a bare address.
+    check(address_of("172.18.0.1:51234") == "172.18.0.1", "a peer's port is dropped")
+    check(address_of("203.0.113.7") == "203.0.113.7", "a bare address is itself")
+    check(address_of("[2001:db8::1]:443") == "2001:db8::1", "a bracketed IPv6 is unwrapped")
+    check(address_of("") == "" and address_of(None) == "", "nothing is nothing")
+
+    # The ingress a hosted deployment reports is the socket peer (§10), in
+    # either cluster's address range; loopback is nobody's client either.
+    for ingress in ("10.244.3.9", "100.127.1.1", "::1", "127.0.0.1:5000", "[::1]:80"):
+        check(not is_client_address(ingress), f"{ingress} is not a client")
+    # Everything else is one — including a CGNAT address, which is why
+    # `100.64.0.0/10` is not excluded as a whole (§10: the range is also
+    # carrier-NAT client space), and a private one, which is what a deployment
+    # behind a corporate network reports.
+    for client in ("203.0.113.7", "100.64.3.9", "100.126.0.1", "2001:db8::1", "172.18.0.1"):
+        check(is_client_address(client), f"{client} is a client")
+    check(not is_client_address(""), "an empty address is not a client")
+    check(not is_client_address("garbage:1"), "neither is text")
+
+    print(f"\n{'PASS' if not FAILURES else 'FAIL'}: {len(FAILURES)} failure(s)")
+    for failure in FAILURES:
+        print(f"  - {failure}")
+    return 1 if FAILURES else 0
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -120,10 +168,13 @@ def wait_ready(base, timeout):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("base")
-    ap.add_argument("--expect", choices=["blastit", "baseline"], required=True)
+    ap.add_argument("base", nargs="?", help="the URL to drive; omitted with --self-test")
+    ap.add_argument("--expect", choices=["blastit", "baseline"],
+                    help="what is serving the app; required unless --self-test")
     ap.add_argument("--password", default="demo-password")
     ap.add_argument("--wait", type=int, default=120)
+    ap.add_argument("--self-test", action="store_true",
+                    help="check the helpers of this file and exit (E1)")
     ap.add_argument(
         "--remote-addr",
         help="the client address blastit must report: an IP (asserted exactly, as the "
@@ -146,6 +197,10 @@ def main():
         "says",
     )
     args = ap.parse_args()
+    if args.self_test:
+        return self_test()
+    if not args.base or not args.expect:
+        ap.error("a base URL and --expect are required (or use --self-test)")
     under_blastit = args.expect == "blastit"
     wait_ready(args.base, args.wait)
 

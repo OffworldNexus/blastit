@@ -172,6 +172,13 @@ def remove_env_file(ssh):
     ssh_run(ssh, f"rm -f /root/blastit/{ENV_FILE}")
 
 
+def scenario_self_test():
+    """`scenario.py --self-test`: the helpers' own assertions (E1)."""
+    return subprocess.run(
+        [sys.executable, os.path.join(ROOT, "e2e", "scenario.py"), "--self-test"], text=True
+    ).returncode
+
+
 def scenario(port, timeout=180, remote_addr=None, expect_scheme=None, forged_proto_ignored=False):
     """The shared e2e scenario, against the app on `port`.
 
@@ -553,6 +560,9 @@ def local(args):
     env = compose_env(project, args.port, args.tls_port, image, password, args.dockerfile)
     rc = 1
     try:
+        # E1: the scenario's own helpers first — they need no stack, and a
+        # failure here should not cost a build.
+        rc = scenario_self_test()
         log(f"docker compose up --build ({project}, port {args.port})")
         # Every service, not just `app`: Traefik depends on the app, not the
         # other way round, and `up app` would leave the ingress out — which is
@@ -562,8 +572,8 @@ def local(args):
             return 1
         gateway = network_gateway(env, project)
         log(f"the compose network's gateway: {gateway}")
-        rc = scenario(args.port, remote_addr=gateway, expect_scheme="http",
-                      forged_proto_ignored=True)
+        rc |= scenario(args.port, remote_addr=gateway, expect_scheme="http",
+                       forged_proto_ignored=True)
         logs = subprocess.run(["docker", "compose", "-f", COMPOSE, "logs", "--no-color",
                                "--no-log-prefix", "app"], env=env, text=True,
                               capture_output=True).stdout
@@ -694,6 +704,9 @@ def ship_checkout(ssh):
 def droplet(args):
     name, key_name = names(args)
     require_clean()
+    # E1: the scenario's own helpers, before anything costs twenty minutes.
+    if scenario_self_test() != 0:
+        return 1
     password = "e2e-" + secrets.token_hex(16)
     ssh = None
     key = None

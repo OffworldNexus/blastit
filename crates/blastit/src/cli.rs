@@ -59,8 +59,8 @@ struct Args {
 fn usage() -> String {
     format!(
         "{USAGE}\n\n\
-         presets (also `BLASTIT_PRESET=NAME`; an explicit BLASTIT_* variable wins over any \
-         of them):\n{}",
+         presets (`--preset NAME`, or `BLASTIT_PRESET=NAME`; every BLASTIT_* variable that \
+         is set wins over one):\n{}",
         crate::config::preset_help()
     )
 }
@@ -68,7 +68,7 @@ fn usage() -> String {
 /// The roles and their arguments; [`usage`] adds the presets.
 const USAGE: &str = "\
 usage:
-  blastit [--preset=NAME]                   stage 0
+  blastit [--preset NAME]                   stage 0
   blastit --stage=1 --config-fd=N \\
           [--dbproxy-pid=P --dbproxy-events-fd=N \\
            --dbproxy-stdout-fd=N --dbproxy-stderr-fd=N]   stage 1
@@ -202,14 +202,32 @@ fn role_is_allowed(role: &str, hosted: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Parses `--key=value` arguments, refusing anything else.
+/// Parses `--key=value` arguments — and `--preset NAME`, which people type —
+/// refusing anything else.
 ///
 /// # Errors
 ///
 /// A one-line message naming the argument; the caller prints it with the usage.
 fn parse(arguments: &[String]) -> Result<Args, String> {
     let mut args = Args::default();
-    for argument in arguments {
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        index += 1;
+        // E1: `--preset NAME` is how the flag is written in the documentation
+        // and how an operator types it; `--preset=NAME` is the spelling every
+        // other argument of this program uses. Both are accepted, and this is
+        // the only argument that takes a value of its own: the rest name
+        // descriptors and roles, where a stray word means a mistake.
+        if argument == "--preset" {
+            let value = arguments
+                .get(index)
+                .filter(|next| !next.starts_with('-'))
+                .ok_or_else(|| "`--preset` wants a preset name".to_string())?;
+            index += 1;
+            args.preset = Some(preset_name(value)?);
+            continue;
+        }
         let Some((key, value)) = argument.split_once('=') else {
             return Err(format!("`{argument}` is not `--key=value`"));
         };
@@ -404,12 +422,63 @@ mod tests {
     }
 
     #[test]
+    fn the_preset_flag_takes_its_value_as_a_separate_argument_too() {
+        // E1: `--preset NAME` is what the documentation and an operator's shell
+        // history use, so it is accepted beside the `--key=value` spelling.
+        let spaced = parse(&["--preset".to_string(), "digitalocean-paas".to_string()]).unwrap();
+        assert_eq!(spaced.preset.as_deref(), Some("digitalocean-paas"));
+
+        // Either spelling, and either way whitespace around the name is the
+        // operator's, not part of it.
+        let joined = parse(&["--preset=digitalocean-paas".to_string()]).unwrap();
+        assert_eq!(joined.preset, spaced.preset);
+        let padded = parse(&["--preset".to_string(), " digitalocean-paas ".to_string()]).unwrap();
+        assert_eq!(padded.preset.as_deref(), Some("digitalocean-paas"));
+
+        // A flag with nothing after it is a flag that was meant to carry
+        // something, and the next argument being another flag says the same
+        // thing: a preset is never called `--help`.
+        assert!(parse(&["--preset".to_string()]).is_err());
+        assert!(parse(&["--preset".to_string(), "--help".to_string()]).is_err());
+        assert!(parse(&["--preset".to_string(), "--preset=x".to_string()]).is_err());
+        // A name that is not a preset is refused where the presets are known
+        // (`Config::from_env`), not here.
+        assert_eq!(
+            parse(&["--preset".to_string(), "nope".to_string()])
+                .unwrap()
+                .preset
+                .as_deref(),
+            Some("nope")
+        );
+
+        // The last one wins, whichever spelling each uses: this is an argument,
+        // not a set.
+        let twice = parse(&[
+            "--preset".to_string(),
+            "compose-traefik".to_string(),
+            "--preset=digitalocean-paas".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(twice.preset.as_deref(), Some("digitalocean-paas"));
+
+        // And it still belongs to stage 0 on its own.
+        assert!(
+            parse(&[
+                "--stage=1".to_string(),
+                "--preset".to_string(),
+                "x".to_string()
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn the_usage_text_lists_the_presets() {
         // E1: `--preset` is the one argument whose values an operator cannot
         // guess, so `--help` (and every argument error) names them, one line
-        // each.
+        // each, and shows the spelling the documentation uses.
         let usage = usage();
-        assert!(usage.contains("--preset=NAME"), "{usage}");
+        assert!(usage.contains("--preset NAME"), "{usage}");
         assert!(usage.contains("BLASTIT_PRESET=NAME"), "{usage}");
         for preset in crate::config::PRESETS {
             assert!(usage.contains(preset.name()), "{usage}");

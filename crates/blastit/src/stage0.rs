@@ -374,12 +374,22 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // anything can fail with it, so the `boot` line below can say it — and so
     // E1's preset assumption can be checked against it.
     config.privilege = Some(privilege.clone());
-    config.note_preset_assumptions(privilege.mode);
     let emitter = Emitter::stdout(config.log_format, config.log_level);
     emitter.emit(&Event::now(
         Component::Init,
         EventKind::Boot(config_lifecycle(&privilege, &config)),
     ));
+    // E1: a preset rests on a platform that hands init a particular identity, so
+    // a boot that contradicts one says so here — before the manifest is read,
+    // because a boot that fails on the manifest, on the environment rewrite or on
+    // a view socket never reaches stage 1, and this is the line that explains
+    // that boot to the operator who picked the preset.
+    if let Some(warning) = config.preset_assumption_warning(privilege.mode) {
+        emitter.emit(
+            &output_event(Component::Init, None, Stream::Stderr, warning.message())
+                .with_level(Level::Warn),
+        );
+    }
 
     if config.app.is_none() {
         fail(

@@ -341,9 +341,12 @@ impl Immortalize {
 ///
 /// Three things are worth a line at boot: a variable that is still read but must
 /// not be used any more, a value blastit had to adjust to something usable, and a
-/// preset whose assumptions do not hold for this boot. The stage 1 document
-/// carries the token and stage 1 prints the sentence: the document describes the
-/// configuration, and the wording of a log line belongs with the log.
+/// preset whose assumptions do not hold for this boot. The first two are
+/// decisions stage 0 made while parsing, so the stage 1 document carries the
+/// token and stage 1 prints the sentence: the document describes the
+/// configuration, and the wording of a log line belongs with the log. The third
+/// is printed by stage 0 itself ([`Config::preset_assumption_warning`]), because
+/// a boot that fails before stage 1 must still say it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warning {
     /// `BLASTIT_TRUST_FORWARDED` was set to a true value, and is read as
@@ -582,28 +585,25 @@ impl PresetChoice {
 }
 
 impl Config {
-    /// Adds the notice a preset's own assumptions deserve, given the mode init
+    /// The notice a preset's own assumptions deserve, given the mode init
     /// detected (E1, §2.1).
     ///
-    /// Called once, at boot, after the mode is known: the value of a preset is
-    /// its set of defaults, but each set rests on a platform that hands init a
-    /// particular identity, and a deployment using a preset where that does not
-    /// hold is a deployment whose assumptions are wrong in a way it cannot see
-    /// from the outside. It is a warning and never a refusal — root in a
-    /// rootless deployment still works, it is simply more authority than the
-    /// preset asked for.
-    pub fn note_preset_assumptions(&mut self, mode: Mode) {
-        let Some(choice) = &self.preset else {
-            return;
-        };
-        let Some(warning) =
-            Preset::find(&choice.name).and_then(|preset| preset.assumption_warning(mode))
-        else {
-            return;
-        };
-        if !self.warnings.contains(&warning) {
-            self.warnings.push(warning);
-        }
+    /// `None` when the two agree, and when there is no preset at all. The value
+    /// of a preset is its set of defaults, but each set rests on a platform that
+    /// hands init a particular identity, and a deployment using a preset where
+    /// that does not hold is a deployment whose assumptions are wrong in a way
+    /// it cannot see from the outside. It is a warning and never a refusal —
+    /// root in a rootless deployment still works, it is simply more authority
+    /// than the preset asked for.
+    ///
+    /// Stage 0 asks this and prints the line itself, instead of carrying the
+    /// token to stage 1 the way the other notices are carried: a boot that fails
+    /// on the manifest, on the environment rewrite or on a view socket never
+    /// reaches stage 1, and "this preset was written for the wrong kind of
+    /// platform" is exactly the thing to know about *that* boot.
+    pub fn preset_assumption_warning(&self, mode: Mode) -> Option<Warning> {
+        let choice = self.preset.as_ref()?;
+        Preset::find(&choice.name).and_then(|preset| preset.assumption_warning(mode))
     }
 }
 
@@ -1879,7 +1879,13 @@ pub fn seccomp_requested() -> bool {
 fn preset_choice(
     flag: Option<&str>,
 ) -> Result<(Option<&'static Preset>, Vec<Warning>), ConfigError> {
-    let from_env = variable("BLASTIT_PRESET")?.filter(|name| !name.is_empty());
+    // The variable is read the way the flag is: whitespace around a name is the
+    // operator's — an env file or a CI variable is easy to pad by accident — and
+    // a value that is only whitespace is how a deployment clears an inherited
+    // one.
+    let from_env = variable("BLASTIT_PRESET")?
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
     let (name, source) = match flag {
         Some(name) => {
             let warning = match &from_env {
@@ -3548,6 +3554,41 @@ mod tests {
     }
 
     #[test]
+    fn the_preset_name_is_trimmed_however_it_arrives() {
+        // E1: the variable is read the way the flag is — an env file, a compose
+        // `environment:` entry or a CI variable is easy to pad by accident — and
+        // a value that is only whitespace is an unset variable.
+        let _env = env();
+        // SAFETY: `env()` is held for the whole test.
+        unsafe {
+            let _clean = NoPreset::new();
+
+            std::env::set_var("BLASTIT_PRESET", "  compose-traefik  ");
+            let config = Config::from_env(None).unwrap();
+            assert_eq!(
+                config.preset.as_ref().map(|choice| choice.name.as_str()),
+                Some("compose-traefik")
+            );
+            assert_eq!(config.client_ip_header, "x-forwarded-for");
+
+            // A padded name still matches the flag, so a padded variable is not
+            // a disagreement worth a warning.
+            let config = Config::from_env(Some("compose-traefik")).unwrap();
+            assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+            assert_eq!(
+                config.preset.as_ref().map(|choice| choice.name.as_str()),
+                Some("compose-traefik")
+            );
+
+            for empty in ["", " ", "\t", "\n ", " \t"] {
+                std::env::set_var("BLASTIT_PRESET", empty);
+                let config = Config::from_env(None).unwrap();
+                assert!(config.preset.is_none(), "{empty:?} is unset");
+            }
+        }
+    }
+
+    #[test]
     fn the_stage_one_document_carries_the_preset() {
         // E1: the preset travels in the configuration document like everything
         // else, because stage 1's environment is the app's and has no
@@ -3607,60 +3648,68 @@ mod tests {
     }
 
     #[test]
-    fn a_preset_whose_assumption_does_not_hold_warns_once() {
+    fn a_preset_whose_assumption_does_not_hold_is_named_but_never_refused() {
         // E1, §2.1: the mode is detected rather than configured, so a preset
         // used where its platform's identity does not hold says so, and never
-        // refuses: root in a rootless deployment still works.
-        let mut config = Config::default();
-        config.preset = Some(PresetChoice {
-            name: "digitalocean-paas".to_string(),
-            supplied: BTreeMap::new(),
-            overridden: Vec::new(),
-        });
-        config.note_preset_assumptions(Mode::Capabilities);
-        assert_eq!(config.warnings, vec![Warning::PresetExpectsRoot]);
-        // Once: a second call is not a second line.
-        config.note_preset_assumptions(Mode::Capabilities);
-        assert_eq!(config.warnings.len(), 1);
-        assert!(config.warnings[0].message().contains("root"));
+        // refuses: root in a rootless deployment still works. Stage 0 prints the
+        // line itself, which is why this returns the notice instead of adding it
+        // to `warnings` for stage 1.
+        let chosen = |preset: &str| Config {
+            preset: Some(PresetChoice {
+                name: preset.to_string(),
+                supplied: BTreeMap::new(),
+                overridden: Vec::new(),
+            }),
+            ..Config::default()
+        };
+
+        let digitalocean = chosen("digitalocean-paas");
+        let warning = digitalocean
+            .preset_assumption_warning(Mode::Capabilities)
+            .expect("a root preset booted without capabilities");
+        assert_eq!(warning, Warning::PresetExpectsRoot);
+        assert!(warning.message().contains("root"));
         assert_eq!(
-            Warning::parse(config.warnings[0].as_str()).unwrap(),
-            Warning::PresetExpectsRoot
+            Warning::parse(warning.as_str()).unwrap(),
+            Warning::PresetExpectsRoot,
+            "the token round-trips even though stage 0 prints the sentence"
+        );
+        assert!(
+            digitalocean.warnings.is_empty(),
+            "the notice is printed at the boot, not carried to stage 1: {:?}",
+            digitalocean.warnings
         );
 
-        // The mode the preset assumes says nothing at all.
-        let mut root = Config::default();
-        root.preset = Some(PresetChoice {
-            name: "digitalocean-paas".to_string(),
-            supplied: BTreeMap::new(),
-            overridden: Vec::new(),
-        });
-        root.note_preset_assumptions(Mode::Root);
-        assert!(root.warnings.is_empty(), "{:?}", root.warnings);
+        // The mode the preset assumes says nothing at all, and asking twice
+        // cannot say anything twice.
+        assert_eq!(digitalocean.preset_assumption_warning(Mode::Root), None);
+        assert_eq!(
+            digitalocean.preset_assumption_warning(Mode::Capabilities),
+            Some(Warning::PresetExpectsRoot)
+        );
 
         // And the other way round: a rootless preset booted as root.
-        let mut rootless = Config::default();
-        rootless.preset = Some(PresetChoice {
-            name: "compose-traefik".to_string(),
-            supplied: BTreeMap::new(),
-            overridden: Vec::new(),
-        });
-        rootless.note_preset_assumptions(Mode::Root);
-        assert_eq!(rootless.warnings, vec![Warning::PresetExpectsRootless]);
-        assert!(rootless.warnings[0].message().contains("rootless"));
+        let rootless = chosen("compose-traefik");
+        let warning = rootless
+            .preset_assumption_warning(Mode::Root)
+            .expect("a rootless preset booted as root");
+        assert_eq!(warning, Warning::PresetExpectsRootless);
+        assert!(warning.message().contains("rootless"));
         assert_eq!(
-            Warning::parse(rootless.warnings[0].as_str()).unwrap(),
+            Warning::parse(warning.as_str()).unwrap(),
             Warning::PresetExpectsRootless
         );
-        rootless.warnings.clear();
-        rootless.note_preset_assumptions(Mode::Capabilities);
-        assert!(rootless.warnings.is_empty(), "{:?}", rootless.warnings);
+        assert_eq!(rootless.preset_assumption_warning(Mode::Capabilities), None);
 
-        // No preset, no notice — whatever mode the boot is in.
-        let mut none = Config::default();
-        none.note_preset_assumptions(Mode::Root);
-        none.note_preset_assumptions(Mode::Capabilities);
-        assert!(none.warnings.is_empty(), "{:?}", none.warnings);
+        // No preset, no notice — whatever mode the boot is in — and a name this
+        // build does not know has nothing to assume.
+        let none = Config::default();
+        assert_eq!(none.preset_assumption_warning(Mode::Root), None);
+        assert_eq!(none.preset_assumption_warning(Mode::Capabilities), None);
+        assert_eq!(
+            chosen("gone-in-a-later-build").preset_assumption_warning(Mode::Root),
+            None
+        );
     }
 
     #[test]

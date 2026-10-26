@@ -13,6 +13,16 @@ way in is through Traefik — and the app runs with
 `BLASTIT_PRESET=compose-traefik`, which is the trust decision for that
 deployment: read `X-Forwarded-For`, and believe the peer that sent it.
 
+That trust decision has an **assumption**, and it is the deployment's to keep:
+*no untrusted peer can reach blastit's port*. Any container on the same compose
+network **can**: blastit binds `0.0.0.0:8080` inside its network namespace, and a
+peer whose address is not in `BLASTIT_TRUSTED_PROXIES` is the client — here
+every peer is trusted, so a container that sends an `X-Forwarded-For` of its own
+is believed. So a deployment of this preset publishes no port for the app (only
+Traefik's), and keeps containers it does not trust **off that network** — its own
+sidecars are trusted by construction, which is what makes service-to-service
+calls work without a second rule.
+
 ```console
 $ uv run e2e/rootless/run.py --local       # Docker Compose, on this machine
 $ uv run e2e/rootless/run.py --droplet     # a DigitalOcean Droplet in ams3
@@ -63,7 +73,15 @@ boot event, the wire and the log:
   entry point, where Traefik terminates TLS with a self-signed certificate.
 
 Two published ports, in other words: `E2E_PORT` (Traefik's `:80`) and
-`E2E_TLS_PORT` (Traefik's `:443`, for the scheme check above).
+`E2E_TLS_PORT` (Traefik's `:443`, for the scheme check above). The app itself
+publishes nothing, and the compose file gives every service one network: the
+assumption above is the file's job to keep true, not the preset's to check.
+
+The same assumption, from the other side: `digitalocean-paas` trusts every peer
+because an App Platform service is only reachable through DO's load balancer and
+the app's own internal services — nothing untrusted can reach the socket, and the
+edge overwrites the header being read. A deployment that exposes that port some
+other way would be handing the same trust to whoever can reach it (§10).
 
 ## The capabilities, and why each one is there
 

@@ -128,12 +128,9 @@ def main():
                         ("/debug/egress/", "debug"), ("/egress/probe/", "egress")]:
         check((path, route) in routed, f"{path} was routed to {route}")
 
-    # E1: a deployment that runs under a preset says so, and names the settings
-    # the preset supplied — the one line an operator needs to know what the trust
-    # rules of this server are.
     # E1: the trust rules of this deployment are a preset, and the scenario has
     # just checked what they decide (the client address, the scheme). The log
-    # says which preset it was.
+    # says which preset it was, and which settings it supplied.
     expected_preset = os.environ.get("E2E_EXPECT_PRESET", "")
     if expected_preset:
         boots = [e for e in events if e.get("event") == "boot"]
