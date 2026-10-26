@@ -478,6 +478,87 @@ Two things it refuses, because a `queries` entry is trusted as it is:
 Either way it says what it refused and why, on stderr, and writes nothing of
 it.
 
+### Rootless
+
+blastit asks the kernel which privileges it has before it does anything, so it
+can run as an unprivileged user holding only what the boot needs instead of root:
+`cap_setuid`, `cap_setgid`, `cap_chown`, `cap_fowner`, `cap_dac_override` and
+`cap_kill`, plus `cap_setpcap` when the container can give it (without it, the
+children keep their bounding set and the boot says so). Its first event says which
+mode it chose, so a deployment that *thinks* it granted a capability finds out at
+boot rather than at the first request:
+
+```json
+{"event":"boot","stage":"stage0","seccomp":true,"privilege":"capabilities",
+ "bounding_set":"dropped",
+ "capabilities":["cap_chown","cap_dac_override","cap_fowner","cap_kill","cap_setgid","cap_setuid","cap_setpcap"]}
+```
+
+The capabilities go on a **dedicated copy** of the file init starts from, never on
+the interpreter or binary the rest of the image runs: a file capability turns any
+process of its owner's uid that can run it into init (`setuid(0)`). The copy is
+`0500`, owned by that uid, sits next to the original (CPython finds its stdlib and
+its venv from the executable's own path) and is what the entrypoint starts.
+
+**That uid is therefore a dedicated one**: no worker, migration, sidecar or shell
+may run as it, because it is the only uid that can run the copy — a debug shell of
+it would be init. The boot warns (it does not refuse) when another process of that
+uid is already running, and the e2e runs its worker and migrations on a uid of
+their own, checks that uid is refused the copy, and checks that the *shared*
+interpreter grants nothing:
+
+```console
+# a wheel install: `blastit` is a console script, so its interpreter is the file
+$ interpreter="$(readlink -f "$(command -v python)")"
+$ sudo cp "$interpreter" "$interpreter-init"
+$ sudo chown 1000:1000 "$interpreter-init" && sudo chmod 0500 "$interpreter-init"
+$ sudo setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+      "$interpreter-init"
+$ "$interpreter-init" -m blastit
+
+# a standalone install: the same, and `BLASTIT_EXEC` names the capability-free
+# copy `--role=dbproxy` runs (it cannot be the capable file: a child's empty
+# bounding set makes the kernel refuse that `execve`)
+$ sudo cp /usr/local/bin/blastit /usr/local/bin/blastit-init
+$ sudo chown 1000:1000 /usr/local/bin/blastit-init && sudo chmod 0500 /usr/local/bin/blastit-init
+$ sudo setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+      /usr/local/bin/blastit-init
+$ BLASTIT_EXEC=/usr/local/bin/blastit /usr/local/bin/blastit-init
+```
+
+`BLASTIT_EXEC`'s target is checked at boot: owned by root or by init's uid,
+writable by neither group nor others, in a directory that is not either — a uid
+that could replace that binary would decide what dbproxy, the process holding the
+real credentials, runs next. `/tmp` is the usual trap, and the boot refuses it by
+name.
+
+Docker's `--cap-add` does **not** give capabilities to a `--user` process — it
+only limits the container's bounding set — so a deployment either gives them to
+the copy with `setcap`, or passes them as ambient capabilities from a launcher
+that starts as root (the spelling that works where `no_new_privs` is set on the
+container, since the kernel then ignores file capabilities):
+
+```console
+$ setpriv --reuid=1000 --regid=1000 --init-groups \
+      --inh-caps +setuid,+setgid,+chown,+fowner,+dac_override,+kill,+setpcap \
+      --ambient-caps +setuid,+setgid,+chown,+fowner,+dac_override,+kill,+setpcap \
+      blastit
+```
+
+Two things a rootless deployment provides itself:
+
+* a runtime directory the service user owns — `/run/blastit`, for example
+  `--tmpfs /run/blastit:mode=0700,uid=1000,gid=1000` — because `/run` belongs
+  to root;
+* a service uid that is not one of the layout's (`BLASTIT_UID_BASE`): the boot
+  refuses a uid that the layout hands to another process.
+
+`e2e/rootless/` is a working example: PostgreSQL and the demo app in two
+containers, the app under `user:` with `cap_drop: [ALL]` and only those
+`cap_add`s, driven by `e2e/rootless/run.py` — locally, or on a DigitalOcean
+Droplet it creates and destroys. On App Platform, which sets `no_new_privs`,
+starting as root stays the way (§10).
+
 ## What you get, and what you don't
 
 | If this is compromised… | …the attacker gets | …and cannot |
