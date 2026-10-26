@@ -1,0 +1,49 @@
+name: Wheels
+
+# Every commit to `develop` builds the manylinux_2_28 wheels this project ships
+# — CPython 3.13 and 3.14 — and leaves them as artifacts of the run. That way
+# packaging breakage shows up on the commit that caused it, and anyone who wants
+# to try the current tree can download the wheel it built.
+#
+# Nothing is published here: from 0.1 blastit is on PyPI, and a `v*` tag is what
+# publishes (`.github/workflows/publish-pypi.yml`, trusted publishing). The two
+# share `.github/actions/build-wheel`, so the released wheel is the one every
+# commit already built.
+#
+# The wheels an artifact carries have a version of their own — `Cargo.toml`'s
+# plus `-dev<run number>` (`scripts/dev-version.sh`) — so a downloaded artifact
+# is never mistaken for the release at the same commit.
+#
+# x86_64 only, like the published ones: arm64 does not build (see
+# `.github/workflows/publish-pypi.yml` for what it would take).
+#
+# Nothing runs on a pull request: a PR that changes the packaging gets the same
+# build, and more, from `.github/workflows/publish-pypi.yml`.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: wheel (CPython ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Development version
+        run: scripts/dev-version.sh "$GITHUB_RUN_NUMBER"
+      - uses: ./.github/actions/build-wheel
+        with:
+          python: ${{ matrix.python }}
+          artifact: wheel-${{ matrix.python }}

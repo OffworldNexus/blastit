@@ -3,20 +3,26 @@ name: Docs
 # Builds the documentation site on every pull request and every push to
 # `develop`, so a broken link is a red check rather than a broken page.
 #
-# Deployment is deliberately *not* on every push. GitHub Pages in this
-# repository is also where `release.yml` publishes the PEP 503 wheel index
-# (https://offworldnexus.github.io/blastit/simple/), and a deployment replaces
-# the whole site: while `develop` is the only place a wheel can be installed
-# from — 0.1.0 is not on PyPI yet — deploying the docs from `develop` would
-# delete the index that the deployment pipeline depends on. So the site goes up
-# on an explicit `workflow_dispatch`, and on a `v*` tag, which is the release:
-# by then the wheels are on PyPI and the Pages site is free to be just the
-# documentation.
+# Deployment is deliberately *not* on every push. A Pages deployment replaces
+# the whole site, and the site currently deployed there is not (yet) these
+# docs: it is the PEP 503 wheel index that `release.yml` used to publish, and
+# that lock files written before E4 still point at
+# (https://offworldnexus.github.io/blastit/simple/). E4 retired the index in
+# favour of PyPI and added `publish-pypi.yml`, but the last index is still being
+# served until something deploys. So the site goes up on an explicit
+# `workflow_dispatch`, and on a `v*` tag, which is the release: by then the
+# wheels are on PyPI and the Pages site is free to be just the documentation.
 #
-# The `github-pages` environment restricts deployments to the `develop` branch,
-# so a tag needs a deployment branch policy of its own — see the E2 pull request
-# for the `gh api` call that adds it. Until that is done, a tag deploy is
-# refused by the environment, not by this file.
+# The `github-pages` environment restricts deployments to a branch policy that
+# currently lists `develop` alone, so a tag needs a deployment branch policy of
+# its own:
+#
+#   gh api --method POST \
+#     repos/OffworldNexus/blastit/environments/github-pages/deployment-branch-policies \
+#     -f name='v*' -f type=tag
+#
+# Until that is done, a tag deploy is refused by the environment, not by this
+# file.
 
 on:
   push:

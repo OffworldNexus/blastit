@@ -257,16 +257,15 @@ blastit is pre-release, so upgrading is the one operation to be deliberate about
 === "uv"
 
     ```console
-    $ uv add --prerelease allow --upgrade blastit
+    $ uv add --upgrade blastit
     ```
 
-    The wheel index keeps every version it has ever published, so a lock file
-    keeps resolving.
+    A released version stays on PyPI, so a lock file keeps resolving.
 
 === "pip"
 
     ```console
-    $ pip install --pre --upgrade blastit --extra-index-url https://offworldnexus.github.io/blastit/simple/
+    $ pip install --upgrade blastit
     ```
 
 Then restart the server and read the first three lines of the log. They say

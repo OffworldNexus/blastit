@@ -14,24 +14,26 @@ minutes and needs nothing but a Linux machine and root.
 
 ## 1. Install it
 
-blastit is not on PyPI yet. Wheels (Linux x86_64, CPython 3.13 and 3.14) are
-built from every commit to `develop` and published on
-[blastit's own package index](https://offworldnexus.github.io/blastit/simple/).
-With uv:
-
-```toml title="pyproject.toml"
-[[tool.uv.index]]
-name = "blastit"
-url = "https://offworldnexus.github.io/blastit/simple/"
-explicit = true
-
-[tool.uv.sources]
-blastit = { index = "blastit" }
+```console
+$ uv add blastit
 ```
+
+Wheels are published for Linux x86_64 on CPython 3.13 and 3.14, plus an sdist
+that builds the same wheel from source anywhere else. With pip:
 
 ```console
-$ uv add --prerelease allow blastit
+$ pip install blastit
 ```
+
+For the current `develop` instead of a release — which builds from source, and
+needs a Rust toolchain (1.88+) and libclang:
+
+```console
+$ uv add "blastit @ git+https://github.com/OffworldNexus/blastit@develop"
+```
+
+CI also builds a wheel for every commit to `develop`, as an artifact of that
+commit's run.
 
 Like granian, blastit is a compiled extension plus a `blastit` command written
 in Python, so it runs on the interpreter of the environment it is installed in:

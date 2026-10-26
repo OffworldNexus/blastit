@@ -13,11 +13,8 @@ for [Django](django.md). What differs is how you fill the grants in, because
 ```console
 $ uv init --python 3.13 shop && cd shop
 $ uv add flask 'psycopg[binary]'
-$ uv add --prerelease allow blastit
+$ uv add blastit
 ```
-
-If `uv add` cannot find blastit, add the package index first, as in
-[Getting started](../getting-started.md#1-install-it).
 
 ```python title="app.py"
 import os

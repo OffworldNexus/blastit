@@ -116,11 +116,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# blastit is a compiled extension plus a `blastit` command, installed like any
-# other dependency. Not on PyPI yet: the index below carries the wheels CI
-# builds from every commit to develop.
-RUN pip install --no-cache-dir --pre blastit \
-      --extra-index-url https://offworldnexus.github.io/blastit/simple/
+# blastit is on PyPI: a compiled extension plus a `blastit` command, installed
+# like any other dependency.
+RUN pip install --no-cache-dir blastit
 
 COPY . .
 

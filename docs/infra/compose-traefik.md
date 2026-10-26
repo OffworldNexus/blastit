@@ -204,8 +204,7 @@ FROM python:3.13-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir --pre blastit \
-      --extra-index-url https://offworldnexus.github.io/blastit/simple/
+RUN pip install --no-cache-dir blastit
 RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 COPY . .

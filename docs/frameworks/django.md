@@ -24,18 +24,8 @@ Why each one matters is in
 
 ## Install
 
-```console title="pyproject.toml"
-[[tool.uv.index]]
-name = "blastit"
-url = "https://offworldnexus.github.io/blastit/simple/"
-explicit = true
-
-[tool.uv.sources]
-blastit = { index = "blastit" }
-```
-
 ```console
-$ uv add --prerelease allow blastit
+$ uv add blastit                  # or: pip install blastit
 ```
 
 Then, in the environment where you run `manage.py`:

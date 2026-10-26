@@ -39,6 +39,14 @@ and routes them itself. All blastit adds is one file, `blastit.toml`.
 $ uv add blastit                  # or: pip install blastit
 ```
 
+Wheels are published for Linux x86_64 on CPython 3.13 and 3.14, with an sdist
+that builds the same wheel from source anywhere else. For the current `develop`
+instead of a release:
+
+```console
+$ uv add "blastit @ git+https://github.com/OffworldNexus/blastit@develop"
+```
+
 ```python title="hello.py"
 def application(environ, start_response):
     start_response("200 OK", [("Content-Type", "text/plain")])
@@ -96,6 +104,7 @@ $ cargo test --workspace
 `develop` is the only long-lived branch. Each roadmap step in
 [`ROADMAP.md`](ROADMAP.md) lands as one pull request from a
 `feature/<step>-<slug>` branch, with green CI before merging.
+[`RELEASING.md`](RELEASING.md) describes how a release is cut.
 
 ## License
 
