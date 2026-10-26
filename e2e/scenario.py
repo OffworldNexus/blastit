@@ -9,6 +9,7 @@ read password hashes and the app sees no database password.
 """
 
 import argparse
+import errno
 import http.cookiejar
 import json
 import re
@@ -167,17 +168,57 @@ def main():
     # on a plain container — the *view* process that answers this has none, and
     # has `no_new_privs` set, so an execve of a file with file capabilities
     # cannot give it one back.
+    #
+    # The verdict has to be the kernel's, and `/proc/self/status` is not always
+    # the kernel's: under gVisor (App Platform) the file has no `CapAmb` and no
+    # `NoNewPrivs` line at all, so the probe asks through `prctl(2)` and the
+    # `/proc` fields are reported — and checked — only where the platform prints
+    # them.
     status, _, body = probe.request("GET", "/debug/caps/")
     facts = json.loads(body) if status == 200 else {}
     check(status == 200, "the debug route answers the capability probe")
     if under_blastit:
         check(facts.get("route") == "debug", "the probe ran in the debug route's process")
-        for field in ("inheritable", "permitted", "effective", "bounding", "ambient"):
+        for field in ("inheritable", "permitted", "effective", "bounding"):
             check(
                 facts.get(field) == "0000000000000000",
                 f"a view holds no {field} capability ({facts.get(field)})",
             )
-        check(facts.get("no_new_privs") == "1", "a view has no_new_privs set")
+        kernel = facts.get("prctl") or {}
+        check(
+            kernel.get("no_new_privs") == 1,
+            f"the kernel says no_new_privs is set (prctl gave {kernel.get('no_new_privs')})",
+        )
+        # `PR_CAP_AMBIENT_IS_SET` is asked once per capability number. `EINVAL`
+        # is the answer of a kernel that has no such sub-command at all (before
+        # 4.3, gVisor before it implemented ambient capabilities): it cannot
+        # have one set, which is what this check is after. Any other errno is
+        # not an answer, and the check says so.
+        ambient = kernel.get("ambient")
+        check(
+            ambient == [] and kernel.get("ambient_errno") in (None, errno.EINVAL),
+            f"the kernel says no ambient capability is set (prctl gave {ambient}, "
+            f"errno {kernel.get('ambient_errno')})",
+        )
+        print(f"  info prctl: {json.dumps(kernel, sort_keys=True)}")
+        print(
+            "  info /proc/self/status:"
+            f" CapInh={facts.get('inheritable')} CapPrm={facts.get('permitted')}"
+            f" CapEff={facts.get('effective')} CapBnd={facts.get('bounding')}"
+            f" CapAmb={facts.get('ambient')} NoNewPrivs={facts.get('no_new_privs')}"
+            f" ({facts.get('proc_error')})"
+        )
+        # The two fields gVisor omits, when the platform *does* print them: they
+        # have to agree with the kernel's own answer. `None` — the line is
+        # absent — is not a failure, it is the reason the probe asks `prctl`.
+        check(
+            facts.get("ambient") in (None, "0000000000000000"),
+            f"/proc agrees: no ambient capability ({facts.get('ambient')})",
+        )
+        check(
+            facts.get("no_new_privs") in (None, "1"),
+            f"/proc agrees: no_new_privs is set ({facts.get('no_new_privs')})",
+        )
     else:
         # Outside blastit there is nothing that clears anything: the check is
         # that the probe itself ran.
