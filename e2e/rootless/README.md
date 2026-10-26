@@ -26,10 +26,13 @@ assertions:
 * in `/proc` of the container: **every** process running under a layout uid —
   http (20001), the scheduler (20002), dbproxy (20003) and every view — holds
   nothing, bounding set included, and has `no_new_privs` set;
-* on the capable file itself: it is mode `0500`, owned by the service uid, and
-  another uid is refused by the kernel (`EACCES`);
-* as the service uid: a plain `python3`, and a second `manage.py`, hold nothing
-  and cannot `setuid(0)` — the shared interpreter grants nothing (B1).
+* on the capable file itself: it is mode `0500`, owned by the uid init runs as,
+  that uid can run it, and **every other uid is refused by the kernel**
+  (`EACCES`) — the worker and the migrations run as a uid of their own in the
+  compose file, and that is the uid the check uses;
+* as a worker's uid: a plain `python3`, and a `manage.py`, hold nothing and
+  cannot `setuid(0)`: the *shared* interpreter grants nothing, and the uid that
+  can run the copy is a dedicated one (B1).
 
 ## The capabilities, and why each one is there
 
@@ -95,14 +98,23 @@ never goes on a file anybody else runs:
 
 * the copy sits **next to** the original, because CPython finds its stdlib
   (`sys.prefix`) and the venv's `site-packages` from the executable's own path;
-* `0500`, owned by the service uid: another uid — a worker, a migration that is
-  not init, an `setpriv`'d shell — gets `EACCES`. The e2e checks both;
-* the boot refuses, with the recipe, a deployment where the *shared* file carries
-  the capabilities, and refuses a wheel that cannot name the capability-free
-  interpreter at all;
+* `0500`, owned by the uid init runs as — and **that uid is dedicated**: it is
+  the uid that can run the copy, so a worker, a migration or an operator's shell
+  must use another one. The compose file gives them `E2E_WORKER_UID` (10001 by
+  default), and the e2e checks that uid is refused the copy (`EACCES`) and that
+  it holds nothing when it runs the *shared* interpreter;
+* the boot refuses, with the recipe, a deployment where **any name** of the
+  shared interpreter carries the capabilities (`python`, `python3`, `python3.13`
+  and `sys._base_executable` are all checked, and compared with init's copy by
+  device and inode rather than by name), and refuses a wheel that cannot name the
+  capability-free interpreter at all;
 * a child cannot use the copy even if it could run it: its bounding set is empty
   and it sets `no_new_privs`, and the kernel refuses such an `execve` outright
-  (`EPERM`, "insufficient to execute correctly").
+  (`EPERM`, "insufficient to execute correctly");
+* `BLASTIT_EXEC`'s target must be owned by root or by init's uid and writable by
+  neither group nor others, in a directory that is not either: a uid that could
+  replace that binary would decide what dbproxy — the process holding the real
+  credentials — runs next. The boot refuses anything else, `/tmp` included.
 
 **Standalone install.** The same principle one level up: `setcap` on the binary
 itself breaks `--role=dbproxy`, which re-executes `/proc/self/exe` from a child

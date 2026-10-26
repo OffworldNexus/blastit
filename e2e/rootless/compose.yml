@@ -7,7 +7,11 @@
 #   E2E_PROJECT   compose project name (two checkouts can run at once)
 #   E2E_IMAGE     image name for the app
 #   E2E_PORT      host port the app is published on (localhost only)
-#   E2E_APP_UID   uid/gid the server runs as; must match the image's user
+#   E2E_APP_UID   uid/gid the server runs as; must match the image's user, and
+#                 must be a *dedicated* uid: nothing else may run as it (D6)
+#   E2E_WORKER_UID
+#                 uid/gid the worker and the migrations run as — a different one,
+#                 because init's can run the capable copy
 #   E2E_ROOTLESS_DOCKERFILE  Dockerfile to build (a prebuilt variant, in CI)
 name: ${E2E_PROJECT:-blastit-d6-rootless}
 
@@ -28,18 +32,23 @@ services:
       interval: 1s
       retries: 60
 
-  # Schema and users, with the real credentials, outside blastit — and as root,
-  # which is what a migration needs. Only the app service is rootless.
+  # Schema and users, with the real credentials, outside blastit — and as a uid of
+  # its *own*, never the one init runs as (D6): that uid can run the file the
+  # capabilities are on, so nothing else may share it. The e2e checks that this
+  # uid is refused that file (`EACCES`).
   migrate:
     build: { context: ../.., dockerfile: "e2e/rootless/${E2E_ROOTLESS_DOCKERFILE:-Dockerfile}" }
     image: ${E2E_IMAGE:-blastit-d6-rootless}
+    user: "${E2E_WORKER_UID:-10001}:${E2E_WORKER_UID:-10001}"
     environment: *app-env
     command: ["sh", "-c", "python manage.py migrate -v0 && python manage.py seed"]
     depends_on: { db: { condition: service_healthy } }
 
   # D6: the rootless server. Everything here is the deployment decision:
   #
-  #   user:           the unprivileged identity init runs as (never root);
+  #   user:           the unprivileged identity init runs as (never root), and a
+  #                   **dedicated** one: no worker, migration or shell may share
+  #                   it, because it can run the capable copy `*-init`;
   #   cap_drop: ALL   nothing is inherited from the container's own set;
   #   cap_add:        exactly the capability bounding set the dedicated copy's
   #                   file capabilities may fill — nothing else is reachable;

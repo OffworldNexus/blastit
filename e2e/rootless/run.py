@@ -44,9 +44,12 @@ TAG = "blastit-d6"
 REGION = "ams3"
 SIZE = "s-2vcpu-4gb"
 ENV_FILE = ".e2e-compose.env"
-# The compose file leaves `BLASTIT_UID_BASE` alone (§8.2's default): http, the
-# scheduler and dbproxy are the first three uids of the layout (§2).
+# The uids a deployment uses (§2 and D6): init's own, and the one everything
+# else that touches the image — a worker, a migration, an operator's shell — must
+# use instead, because init's can run the file the capabilities are on.
 UID_BASE = 20_000
+APP_UID = 10_000
+WORKER_UID = 10_001
 # The capabilities D6 asks for, in the order the kernel numbers them. The
 # image's `setcap` line, the compose `cap_add` list and this list are one set,
 # and the log check fails when blastit reports anything else.
@@ -197,6 +200,13 @@ def check_rootless_logs(path, password):
                 f"({sorted({e.get('uid') for e in spawned})})")
     ok &= check(any(e.get("seccomp") is True for e in events),
                 "the seccomp filters are on in the boot event")
+    # D6: init's uid is dedicated, and here nothing else runs as it — the compose
+    # gives the worker and the migrations a uid of their own. The warning is for
+    # the deployments that forgot, and it must not be a false positive here.
+    siblings = [e for e in events
+                if e.get("event") == "app.output" and "run as uid" in e.get("line", "")]
+    ok &= check(not siblings,
+                f"nothing else runs as init's uid at boot ({[e.get('line') for e in siblings]})")
     return rc | (0 if ok else 1)
 
 
@@ -309,19 +319,19 @@ def check_container(env, project, ssh=None):
         return compose_remote(ssh, env, "exec", "-T", "-u", str(uid), "app", "sh", "-c",
                               shlex.quote(script)).stdout
 
-    def run_probe(what, command):
-        """Writes the probe into the container, runs it, and reads the line."""
+    def run_probe(what, command, uid):
+        """Writes the probe into the container, runs it as `uid`, reads the line."""
         script = (f"cat > /tmp/blastit-probe.py <<'PROBE'\n{SELF_PROBE}PROBE\n{command}\n")
-        out = in_container(script)
+        out = as_uid(uid, script)
         line = next((text for text in out.splitlines() if text.startswith("probe ")), "")
         fields = line.split()
         if len(fields) != 9:
             return check(False, f"{what} did not report: {out.strip()[:200]}")
         _, uid, inh, prm, eff, bnd, amb, nnp, setuid0 = fields
-        # What B1 promises for a process blastit did not spawn: it holds nothing
-        # (the shared interpreter grants nothing) and cannot become root. It has
-        # no `no_new_privs` — nothing set one on it — and the container's
-        # bounding set, which is why it also may not *run* the capable copy.
+        # The shared interpreter grants nothing: a process started from it holds
+        # no capability and cannot become root. It is *not* protected by its uid —
+        # `no_new_privs` is not set on it (nothing set one) and it has the
+        # container's bounding set — which is why init's uid is dedicated (D6).
         held = (inh, prm, eff, amb) == (ZERO,) * 4
         return check(
             held and setuid0 == "refused",
@@ -348,22 +358,31 @@ def check_container(env, project, ssh=None):
                       (UID_BASE + 3, "dbproxy")):
         ok &= check(uid in layout, f"{what} runs under uid {uid} (D6 keeps the layout)")
 
-    ok &= run_probe("a plain python3", "python3 /tmp/blastit-probe.py")
-    ok &= run_probe("a second manage.py, as the service user",
-                    'python3 manage.py shell -c "$(cat /tmp/blastit-probe.py)"')
+    # A worker, a migration and a shell all run as their own uid (the compose has
+    # the `migrate` service on it), and that uid is the one the checks below use:
+    # what protects the capable copy is that *they* cannot run it, not that they
+    # are somehow capability-free.
+    ok &= run_probe(f"a plain python3, as the worker's uid ({WORKER_UID})",
+                    "python3 /tmp/blastit-probe.py", WORKER_UID)
+    ok &= run_probe(f"a manage.py, as the worker's uid ({WORKER_UID})",
+                    'python3 manage.py shell -c "$(cat /tmp/blastit-probe.py)"', WORKER_UID)
 
-    # The capable copy is init's alone: mode `0500`, owned by the service uid, and
-    # another uid cannot run it (B1 — a worker, a migration, an operator's shell
-    # that is not init).
+    # The capable copy is init's alone: mode `0500`, owned by the uid init runs
+    # as, runnable by that uid, refused to every other one (B1, D6 — the uid is
+    # dedicated precisely because it *can* run it).
     facts = in_container(
         'stat -c "mode=%a uid=%u" "$(readlink -f "$(command -v python3)")-init"')
-    ok &= check("mode=500 uid=10000" in facts,
-                f"the capable copy is mode 0500 and owned by the service uid ({facts.strip()})")
-    refused = as_uid(
-        UID_BASE,
-        'copy="$(readlink -f "$(command -v python3)")-init"; "$copy" -V 2>&1 || true')
+    ok &= check(f"mode=500 uid={APP_UID}" in facts,
+                f"the capable copy is mode 0500 and owned by init's uid ({facts.strip()})")
+    runnable = as_uid(APP_UID,
+                      'copy="$(readlink -f "$(command -v python3)")-init"; "$copy" -V 2>&1 || true')
+    ok &= check("Permission denied" not in runnable,
+                f"init's own uid can run it — which is why nothing else may use that uid "
+                f"({runnable.strip()})")
+    refused = as_uid(WORKER_UID,
+                     'copy="$(readlink -f "$(command -v python3)")-init"; "$copy" -V 2>&1 || true')
     ok &= check("Permission denied" in refused,
-                f"another uid (the layout's own {UID_BASE}) cannot run it ({refused.strip()})")
+                f"the worker's uid cannot run it ({refused.strip()})")
     return 0 if ok else 1
 
 
@@ -548,11 +567,14 @@ def ship_checkout(ssh):
 def droplet(args):
     name, key_name = names(args)
     require_clean()
-    key = generate_key(key_name)
     password = "e2e-" + secrets.token_hex(16)
     ssh = None
+    key = None
     rc = 1
     try:
+        # Inside the `try`: a key that was generated and then failed to import is
+        # the `finally`'s to remove too (M2).
+        key = generate_key(key_name)
         log(f"importing the SSH key {key_name}")
         imported = doctl("compute", "ssh-key", "import", key_name, "--public-key-file", key + ".pub")
         imported = imported[0] if isinstance(imported, list) else imported
@@ -628,7 +650,8 @@ def droplet(args):
     finally:
         if args.keep:
             log(f"--keep: leaving {name}, the key {key_name} and the key file "
-                f"{os.path.dirname(key)}; delete with `run.py --cleanup --name {name}`")
+                f"({os.path.dirname(key) if key else 'none was generated'}); delete with "
+                f"`run.py --cleanup --name {name}`")
         else:
             # M2: the droplet, the key and the private key file all go together
             # (`destroy` removes the file), and the env file — which holds the
@@ -691,7 +714,10 @@ def destroy(name, key_name):
     # outlive it (`--keep` is the caller's business, and it does not call this).
     for directory in glob.glob(os.path.join(tempfile.gettempdir(), f"{key_name}-*")):
         shutil.rmtree(directory, ignore_errors=True)
-        log(f"removed the private key file ({directory})")
+        if os.path.exists(directory):
+            log(f"could not remove the private key file ({directory}): it is still there")
+        else:
+            log(f"removed the private key file ({directory})")
     verify_gone(name, key_name)
 
 

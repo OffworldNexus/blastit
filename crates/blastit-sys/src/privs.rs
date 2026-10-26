@@ -31,10 +31,13 @@ use crate::error::Error;
 ///    container.
 ///
 /// The result is checked rather than assumed: the real, effective and saved uids
-/// and gids must all be `uid`, no supplementary group may be left, every one of
-/// the five capability sets must be empty, and `setuid(0)` must now fail. Any
-/// other outcome is an error, because a sandbox that kept a way back to root is
-/// worse than one that failed to start (§4).
+/// and gids must all be `uid`, no supplementary group may be left, every
+/// capability set the process **holds** must be empty (permitted, effective,
+/// inheritable and ambient), the **bounding** set too when `cap_setpcap` allowed
+/// emptying it (M1: a container that cannot give it boots, with the set kept and
+/// `PR_SET_NO_NEW_PRIVS` closing what it would still allow), and `setuid(0)` must
+/// now fail. Any other outcome is an error, because a sandbox that kept a way
+/// back to root is worse than one that failed to start (§4).
 ///
 /// This is process-wide, not thread-local: glibc's `setresuid` applies the
 /// change to every thread, which is one more reason init must be

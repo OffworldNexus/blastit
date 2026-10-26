@@ -63,8 +63,76 @@ fn stage0_lifecycle(privilege: Option<&Privilege>) -> Lifecycle {
     }
 }
 
-/// The privilege mode D6's `boot` event reports, from what `blastit-sys` read
-/// out of `/proc/self/status`.
+/// Warns when another process already runs as init's uid (D6).
+///
+/// The file that may carry the capabilities is mode `0500`, owned by the uid
+/// init runs as, so that uid is the *only* one that can run it — and running it
+/// is becoming init (`setuid(0)`, every sandbox opened). A worker, a migration
+/// or an operator's shell that shares that uid therefore inherits init's whole
+/// authority, and no amount of checking inside blastit can undo that: it is a
+/// deployment decision. This is the one place blastit can see it, at boot, when
+/// nothing of its own is running yet but somebody else may be.
+///
+/// It is a warning and not a refusal: a container legitimately has other
+/// processes of that uid (`docker exec` for a debug shell, a sidecar that drops
+/// privileges, this very check's own shell), and blastit cannot tell a debug
+/// shell from a threat.
+fn warn_about_siblings(emitter: &Emitter) {
+    let uid = current_uid();
+    let siblings = others_with_uid(uid);
+    if siblings.is_empty() {
+        return;
+    }
+    emitter.emit(
+        &output_event(
+            Component::Init,
+            None,
+            Stream::Stderr,
+            &format!(
+                "{} other process(es) run as uid {uid} ({}): that uid can run the file \
+                 blastit's capabilities are on, so a worker, a migration or a shell \
+                 should run as another uid (D6)",
+                siblings.len(),
+                siblings
+                    .iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .with_level(Level::Warn),
+    );
+}
+
+/// The pids, other than this process, that run as `uid` (D6).
+///
+/// Pure except for `/proc`: reading it is best effort — a pid that disappears
+/// between the listing and the read is not a failure — and a `/proc` that cannot
+/// be read at all reports nothing rather than failing a boot over a warning.
+fn others_with_uid(uid: u32) -> Vec<i32> {
+    let ours = std::process::id() as i32;
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut pids: Vec<i32> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+        .filter(|pid| *pid != ours)
+        .filter(|pid| effective_uid(*pid) == Some(uid))
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+/// The effective uid of `pid`, from `/proc/<pid>/status` (D6).
+///
+/// `None` when the process is gone, or when its status cannot be read: a warning
+/// is not worth failing a boot over.
+fn effective_uid(pid: i32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    line.split_whitespace().nth(2)?.parse().ok()
+}
 fn privilege_from(held: &blastit_sys::Held) -> Privilege {
     Privilege {
         mode: match held.mode {
@@ -267,6 +335,12 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
             .with_level(Level::Warn),
         );
     }
+    // D6: init's uid is a dedicated one. Whatever else runs as it can run the
+    // file the capabilities are on — and becoming init is `setuid(0)`. A
+    // deployment decides who that uid is (a worker, a migration, an operator's
+    // shell all belong somewhere else); this says when it did not, once, before
+    // anything is forked.
+    warn_about_siblings(&boot);
 
     let mut config = match Config::from_env() {
         Ok(config) => config,

@@ -4,13 +4,18 @@
 # console script are the ones a project gets from `pip install blastit` — and the
 # capability is given to a **dedicated copy of the interpreter** (B1):
 #
-#   * the shared interpreter stays capability-free, because *every* process of
-#     the service uid can run it — an operator's `python manage.py`, a worker, a
+#   * the shared interpreter stays capability-free: *every* process of the uid
+#     init runs as can run it — an operator's `python manage.py`, a worker, a
 #     second shell — and a file with file capabilities turns any of them into
-#     init (`setuid(0)` and all);
-#   * the copy is owned by that uid, mode `0500`, so nothing else can run it, and
-#     it sits next to the original: CPython finds its stdlib and its venv from
-#     the executable's own path;
+#     init (`setuid(0)` and all). The boot refuses a deployment where any of the
+#     names of the shared interpreter carries them;
+#   * the copy is owned by that uid, mode `0500`, and **that uid is dedicated**:
+#     no worker, migration or shell may share it, because it is the uid that can
+#     run the copy — and running the copy is becoming init (`setuid(0)`, every
+#     sandbox opened). The compose file gives the worker and the migrations a uid
+#     of their own, and the e2e checks that uid is refused the copy;
+#   * it sits next to the original: CPython finds its stdlib and its venv from the
+#     executable's own path;
 #   * the children cannot use it either: their bounding set is empty and they set
 #     `no_new_privs`, and the kernel refuses such an `execve` outright.
 #

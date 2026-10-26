@@ -1139,6 +1139,15 @@ fn the_boot_events_say_init_runs_as_root() {
     }
     assert_eq!(boots[0]["stage"], "stage0");
     assert_eq!(boots[1]["stage"], "preload");
+    // D6: init's uid must be a dedicated one, and this very test harness is
+    // another process of uid 0 — so the boot says so, once, before it forks
+    // anything. (On a deployment where nothing else runs as that uid, there is no
+    // such line; the e2e checks that side.)
+    assert!(
+        server.wait_for_event("other process(es) run as uid 0"),
+        "the boot warns about siblings of its own uid:\n{}",
+        server.stdout_text()
+    );
 }
 
 #[test]
@@ -1273,11 +1282,11 @@ fn a_rootless_standalone_install_runs_dbproxy_from_the_capability_free_copy() {
         std::io::Error::last_os_error()
     );
     assert!(
-        blastit::host::has_file_caps(&init),
+        blastit::host::has_file_caps(&init).unwrap(),
         "the attribute is there"
     );
     assert!(
-        !blastit::host::has_file_caps(&plain),
+        !blastit::host::has_file_caps(&plain).unwrap(),
         "the copy stays capability-free"
     );
     // A rootless init owns the runtime directory (§7.2): `/run` belongs to root,
