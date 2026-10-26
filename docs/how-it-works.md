@@ -146,29 +146,29 @@ image for good:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant I0 as init (stage 0)<br/>uid 0 · the real environment
+    participant I0 as stage 0 (init)
     participant D as dbproxy
-    participant I1 as init (stage 1)<br/>uid 0 · the swapped environment
+    participant I1 as stage 1 (init)
     participant H as http
     participant S as scheduler
     participant V as view process
 
-    Note over I0: single-threaded
+    Note over I0: uid 0 · the real environment · single-threaded
     I0->>I0: read the environment, parse the manifest
-    I0->>I0: read each proxy's inputs → upstream config, render output templates
+    I0->>I0: read each proxy's inputs, render the outputs
     I0->>I0: build the uid table, create /run/blastit/views/<uid>
     I0->>I0: bind one PostgreSQL listener per (route, proxy) granted
     I0->>D: fork → setuid(B+3) → execve(--role=dbproxy, environment = {})
     activate D
     Note over D: a fresh image: its environ is empty
     I0->>D: the proxy's inputs, the listener table, the grants
-    I0->>I0: app environment = platform environment − inputs − BLASTIT_* + outputs
+    I0->>I0: app environment = platform − inputs − BLASTIT_* + outputs
     I0->>I1: execve(self, --stage=1, the swapped environment)
-    Note over I0,I1: the barrier: the address space is replaced,<br/>no secret survives, still PID 1
+    Note over I0,I1: the barrier: no secret survives,<br/>still PID 1
     I1->>I1: bind 0.0.0.0:$PORT
     I1->>H: fork, before CPython is initialised
     I1->>S: fork, before CPython is initialised
-    I1->>I1: init CPython, import the app and BLASTIT_PRELOAD, run BLASTIT_WARMUP
+    I1->>I1: init CPython, import the app and BLASTIT_PRELOAD
     I1->>I1: close the database connections, gc.collect()
     I1->>I1: make the heap immortal, gc.freeze()
     I1->>V: fork the routes marked prefork = true

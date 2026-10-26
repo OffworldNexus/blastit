@@ -27,7 +27,7 @@ blastit serves the same app, unchanged, but splits it up:
     its own Unix user. A compromised route cannot read another one's memory,
     signal it, or borrow its rights.
 
-- :material-key-off: **Secrets stay out of reach**
+- :material-key-variant: **Secrets stay out of reach**
 
     The real database URL never reaches your code. Your app sees an ordinary
     `DATABASE_URL`, which points at a local proxy run by blastit. Only that
