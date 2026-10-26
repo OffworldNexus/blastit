@@ -1,6 +1,21 @@
-# blastit
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/brand/header-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset=".github/brand/header-light.svg">
+  <img src=".github/brand/header-light.svg" alt="blastit — Small bird. Small blast radius." width="960">
+</picture>
+
+<p align="center">
+  <a href="https://offworldnexus.github.io/blastit/">Documentation</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="LICENSE">Apache 2.0</a>
+</p>
 
 **A WSGI server that keeps the blast radius of a security bug small.**
+
+| One sandbox per route | Secrets stay out of reach | Only the grants it needs |
+| --- | --- | --- |
+| Each route runs in its own process, under its own Unix user. | Your app talks to local proxies; only blastit holds the real credentials. | Every route may run only the SQL statements its manifest grants. |
 
 In a typical Python web app, every view runs in the same process, with the
 same database credentials and the same rights. One exploitable bug in the
