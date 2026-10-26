@@ -47,7 +47,9 @@ on:
 
 concurrency:
   group: publish-${{ github.ref }}
-  cancel-in-progress: false
+  # A tag run is left alone — it can be halfway through an upload. A rehearsal
+  # (dispatch, pull request) is superseded by the next push, like CI.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 permissions:
   contents: read
