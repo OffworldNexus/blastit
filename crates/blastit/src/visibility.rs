@@ -151,41 +151,64 @@ impl Blocker {
     }
 }
 
-/// A directory on `sys.path` that another uid could write to.
+/// A path on `sys.path` that another uid could write to.
 ///
 /// The sandbox is the uid: code that runs in a view runs with that route's
 /// grants, so a file planted in a directory on `sys.path` is not a hole in the
 /// allowlist — but *which* route imports it is not the planter's choice, and a
 /// route that plants a module another route imports is one route writing the
 /// code of another. blastit refuses to start rather than serve that.
+///
+/// `path` is a directory (or a zip file, which is a file on `sys.path`) that has
+/// to stop being writable; `entry` is the `sys.path` entry it is about, when
+/// that is not `path` itself — an entry that is not there yet and could be
+/// *created* in a writable directory above it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Writable {
-    /// The directory another uid could write.
+    /// What has to stop being writable.
     pub path: PathBuf,
-    /// Its permission bits, exactly as `chmod` writes them.
+    /// The `sys.path` entry, when it is not `path`: a path that does not exist
+    /// yet and could be created in `path`.
+    pub entry: Option<PathBuf>,
+    /// The permission bits of `path`, exactly as `chmod` writes them.
     pub mode: u32,
     /// The uid the kernel was asked as, when the probe ran.
     pub probed_uid: Option<u32>,
-    /// Which class let it through, for the message.
-    pub why: &'static str,
+    /// Which class let it through, for the message. It names the uid when the
+    /// mode bits were the ones that answered, because that is what an operator has
+    /// to look up.
+    pub why: String,
 }
 
 impl Writable {
-    /// The sentence an operator reads for a writable `sys.path` directory.
+    /// The sentence an operator reads for a writable `sys.path` path.
     pub fn message(&self) -> String {
         let answer = match self.probed_uid {
             Some(uid) => format!("`access(2)` says uid {uid} may write it ({})", self.why),
             None => format!("the mode bits say so ({})", self.why),
         };
+        let what = match &self.entry {
+            Some(entry) => format!(
+                "{} (mode {:04o}) is writable by another uid, and {} is on `sys.path` but \
+                 is not there yet: it could be created",
+                self.path.display(),
+                self.mode,
+                entry.display(),
+            ),
+            None => format!(
+                "{} (mode {:04o}) is writable by another uid",
+                self.path.display(),
+                self.mode,
+            ),
+        };
         format!(
-            "{} (mode {:04o}) is writable by another uid: {answer}. blastit put it on \
-             `sys.path` — the directory it was started in, or one it added — and a view \
-             process runs as a uid of its own, so a route could plant a module another \
-             route imports, and whichever route imports it is not the planter's choice. \
-             Start blastit in the code tree, next to the application — a directory only \
-             its owner (and root) can write — or make this one so: `chmod go-w {}`",
-            self.path.display(),
-            self.mode,
+            "{what}: {answer}. `sys.path` is how a view finds code — the interpreter's own \
+             entries, the working directory blastit was started in, and whatever \
+             `PYTHONPATH` or a `.pth` file added — and a view process runs as a uid of its \
+             own, so a route could plant a module another route imports, and whichever \
+             route imports it is not the planter's choice. Start blastit in the code tree, \
+             next to the application — a directory only its owner (and root) can write — \
+             or make this one so: `chmod go-w {}`",
             self.path.display(),
         )
     }
@@ -230,7 +253,7 @@ pub enum Probe {
     Read,
     /// Execute it: what a child `execve`s.
     Execute,
-    /// Write to it: what a directory on `sys.path` must **not** allow.
+    /// Write to it: what no path on `sys.path` may allow another uid.
     Write,
 }
 
@@ -243,18 +266,31 @@ impl Probe {
             Self::Write => libc::W_OK,
         }
     }
+
+    /// Whether a *successful* `access(2)` is the answer this probe is looking
+    /// for.
+    ///
+    /// The read and execute checks ask "can this uid reach it", and a failure
+    /// is the answer that matters. `Write` asks the opposite — "may this uid
+    /// write it" — so the child reports the first path where `access(2)`
+    /// *succeeds*, and "nothing was reported" means "nothing is writable".
+    const fn wants_grant(self) -> bool {
+        matches!(self, Self::Write)
+    }
 }
 
-/// What one probe found: the path that failed, and how far above it the
-/// directory that blocks is.
+/// What one probe found: the path that answered the question, and how far above
+/// it the directory that blocks is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Verdict {
     /// Index into the list that was probed.
     pub index: usize,
     /// How many directories *above* that path the blocker is; `0` is the path
-    /// itself.
+    /// itself. Only the read and execute questions walk upwards — what may be
+    /// written is written where `sys.path` names it.
     pub depth: usize,
-    /// The errno `access(2)` gave.
+    /// The errno `access(2)` gave, when it gave one (the write question is
+    /// answered by success, which has no errno).
     pub errno: i32,
 }
 
@@ -329,27 +365,38 @@ fn probe_as(uid: u32, paths: &[PathBuf], ask: Probe) -> [u8; 10] {
         };
         // SAFETY: `access` takes a NUL-terminated path and a bitmask of R_OK,
         // W_OK, X_OK and F_OK; it reads no memory of ours.
-        if unsafe { libc::access(name.as_ptr(), ask.bits()) } == 0 {
+        let granted = unsafe { libc::access(name.as_ptr(), ask.bits()) } == 0;
+        if granted != ask.wants_grant() {
+            // Not the answer this question is looking for: reachable, when the
+            // question was "can this uid reach it", or unreachable, when it was
+            // "may this uid write it".
             continue;
         }
-        let errno = io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(libc::EACCES);
-        // The path itself failed. Name the first directory above it that does
-        // not let `uid` through — from the outermost down, because that is the
-        // one an operator has to open first — and the path itself when every
-        // ancestor is passable (the file is simply not readable, executable or
-        // writable).
-        let ancestors: Vec<PathBuf> = path.ancestors().skip(1).map(Path::to_path_buf).collect();
+        let errno = if ask.wants_grant() {
+            // Success has no errno, and the write refusal does not report one.
+            0
+        } else {
+            io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EACCES)
+        };
+        // For the read and execute questions the path itself failed. Name the
+        // first directory above it that does not let `uid` through — from the
+        // outermost down, because that is the one an operator has to open first
+        // — and the path itself when every ancestor is passable (the file is
+        // simply not readable or not executable).
         let mut depth = 0usize;
-        for (at, ancestor) in ancestors.iter().enumerate().rev() {
-            let Some(name) = cstring(ancestor) else {
-                continue;
-            };
-            // SAFETY: as above; an ancestor only has to be traversable.
-            if unsafe { libc::access(name.as_ptr(), libc::X_OK) } != 0 {
-                depth = at + 1;
-                break;
+        if !ask.wants_grant() {
+            let ancestors: Vec<PathBuf> = path.ancestors().skip(1).map(Path::to_path_buf).collect();
+            for (at, ancestor) in ancestors.iter().enumerate().rev() {
+                let Some(name) = cstring(ancestor) else {
+                    continue;
+                };
+                // SAFETY: as above; an ancestor only has to be traversable.
+                if unsafe { libc::access(name.as_ptr(), libc::X_OK) } != 0 {
+                    depth = at + 1;
+                    break;
+                }
             }
         }
         return record(RECORD_BLOCKED, index as u32, depth, errno);
@@ -436,81 +483,155 @@ pub fn unexecutable(paths: &[PathBuf], uid: u32, interpreter: bool) -> Option<Bl
     by_probe_or_mode(paths, uid, Probe::Execute, interpreter, true)
 }
 
-/// The first directory of `paths` another uid could write.
+/// The first path on `sys.path` another uid could write.
 ///
-/// These are the directories *blastit* puts on `sys.path` — the one it was
-/// started in, and the ones it adds for an embedded interpreter — and the
-/// question is the opposite of [`unreadable`]'s: not "can a view read it" but
-/// "can someone who is not a view *write* it". The kernel answers, for the first
-/// view uid, exactly as it does for the read checks; the mode bits are what
-/// *explains* a refusal: a group class counts when the directory's gid is one of
-/// `dropped`'s uids, the sticky bit saves nothing, and an ACL that allows or
-/// denies something the bits do not mention is the reason the kernel is asked
-/// rather than guessed at.
+/// The question is the opposite of [`unreadable`]'s: not "can a view read it"
+/// but "can a uid blastit drops to *write* it". These are the paths the
+/// interpreter will import through — its own entries, the working directory
+/// blastit was started in, whatever `PYTHONPATH` or a `.pth` file added, and a
+/// zip file if one is on the path — because a writable one is a cross-route code
+/// plant whoever put it there.
+///
+/// The kernel answers, and it is asked **once per uid**, because an ACL can
+/// grant exactly one route's uid what it denies every other: the child reports
+/// the first path that uid may write, and the refusal names the path and the
+/// uid. Each entry is asked about as it is — a directory, or the zip file itself
+/// — except when it is not there at all: then the question is its nearest
+/// existing directory, which is where somebody could *create* the entry.
+///
+/// The mode bits are the fallback for a uid the probe could not drop to, and
+/// they are also what *explains* a refusal: other-writable, group-writable when
+/// the path's gid is that uid's own (a dropped-to process has no supplementary
+/// groups), or sticky — a `/tmp`-style directory takes a file with a fresh name
+/// whatever the sticky bit does about deleting one that is already there.
 pub fn writable(paths: &[PathBuf], dropped: &DroppedTo, interpreter: bool) -> Option<Writable> {
-    for path in paths {
-        let Ok(metadata) = std::fs::metadata(path) else {
-            continue;
-        };
-        let mode = metadata.permissions().mode();
-        let by_mode = writable_by_mode(mode, metadata.gid(), dropped);
-        // `access(2)` answers the *opposite* question here, so its answers read
-        // the other way round: success is the refusal, and a failure means this
-        // uid may not write it after all.
-        match probe(
-            std::slice::from_ref(path),
-            dropped.probe,
-            Probe::Write,
-            interpreter,
-        ) {
-            // The kernel denies it: an ACL can deny what the group class allows,
-            // and this directory is fine.
-            Ok(Some(_)) => continue,
-            // The kernel allows it — whether the bits said so or an ACL did.
+    // One question per entry, in the order `sys.path` lists them.
+    let questions: Vec<Question> = paths
+        .iter()
+        .filter_map(|entry| Question::of(entry))
+        .collect();
+    let targets: Vec<PathBuf> = questions.iter().map(|q| q.target.clone()).collect();
+
+    // One fork per uid: the child reports the first target that uid may write,
+    // and "nothing" is an answer too — it means the kernel was asked and found
+    // nothing.
+    let mut found: Vec<(usize, u32)> = Vec::new();
+    let mut asked: BTreeSet<u32> = BTreeSet::new();
+    for uid in &dropped.uids {
+        match probe(&targets, *uid, Probe::Write, interpreter) {
+            Ok(Some(verdict)) => found.push((verdict.index, *uid)),
             Ok(None) => {
-                return Some(Writable {
-                    path: path.clone(),
-                    mode: mode & 0o7777,
-                    probed_uid: Some(dropped.probe),
-                    why: by_mode.unwrap_or("an ACL lets it through"),
-                });
+                asked.insert(*uid);
             }
-            // No answer: the mode bits decided, and the message says so.
-            Err(_) => match by_mode {
-                Some(why) => {
-                    return Some(Writable {
-                        path: path.clone(),
-                        mode: mode & 0o7777,
-                        probed_uid: None,
-                        why,
-                    });
-                }
-                None => continue,
-            },
+            // No answer: the mode bits speak for this uid below.
+            Err(_) => {}
+        }
+    }
+    found.sort_unstable();
+    let first = found
+        .first()
+        .and_then(|(index, uid)| questions.get(*index).map(|question| (question, *uid)));
+    if let Some((question, uid)) = first {
+        let why = writable_by_mode(question.mode, question.gid, uid)
+            .unwrap_or_else(|| "an ACL lets it through".to_string());
+        return Some(question.refusal(Some(uid), why));
+    }
+
+    // The uids the kernel could not be asked for, and what the mode bits say
+    // about them: the documented fallback, which cannot see an ACL either way.
+    for question in &questions {
+        for uid in dropped.uids.iter().filter(|uid| !asked.contains(uid)) {
+            if let Some(why) = writable_by_mode(question.mode, question.gid, *uid) {
+                return Some(question.refusal(None, why));
+            }
         }
     }
     None
 }
 
-/// Whether the mode bits alone say another uid could write a directory with
-/// this `mode` and `gid`.
-///
-/// The classes this check names: **other** may write it; the **group** may
-/// write it *and* the directory's gid is one of the uids blastit drops to (a
-/// group class only counts for a uid that is in that group, and a dropped-to
-/// process has no supplementary groups, so the gid has to be its own); or it is
-/// **sticky** — a `/tmp`-style directory takes a file with a fresh name whatever
-/// the sticky bit does about deleting one that is there.
-fn writable_by_mode(mode: u32, gid: u32, dropped: &DroppedTo) -> Option<&'static str> {
-    if mode & Access::Write.bit() != 0 {
-        return Some(if mode & 0o1000 != 0 {
-            "the sticky bit stops another uid deleting what is there, not writing to it"
-        } else {
-            "other-writable"
-        });
+/// One `sys.path` entry, and what to ask about it.
+struct Question {
+    /// What must not be writable: the entry itself, or the nearest existing
+    /// directory above an entry that is not there.
+    target: PathBuf,
+    /// The `sys.path` entry, when it is not `target`.
+    entry: Option<PathBuf>,
+    /// `target`'s permission bits.
+    mode: u32,
+    /// `target`'s gid, which is the group a dropped-to uid would have to be in.
+    gid: u32,
+}
+
+impl Question {
+    /// The question one `sys.path` entry asks, or `None` when there is nothing
+    /// to ask.
+    ///
+    /// A path that is there is asked about as it is: a directory, or a file —
+    /// a zip on `sys.path` is a file, and writing it is writing code. A path
+    /// that is *not* there is asked about through its nearest existing
+    /// directory, because that is where it could be created; an entry whose
+    /// ancestors are all files, or which has no directory above it at all,
+    /// cannot be created and is not this check's business.
+    fn of(entry: &Path) -> Option<Self> {
+        if let Ok(metadata) = std::fs::metadata(entry) {
+            return Some(Self {
+                target: entry.to_path_buf(),
+                entry: None,
+                mode: metadata.permissions().mode(),
+                gid: metadata.gid(),
+            });
+        }
+        let above = entry.ancestors().skip(1).find(|path| path.exists())?;
+        let metadata = std::fs::metadata(above).ok()?;
+        if !metadata.is_dir() {
+            return None;
+        }
+        Some(Self {
+            target: above.to_path_buf(),
+            entry: Some(entry.to_path_buf()),
+            mode: metadata.permissions().mode(),
+            gid: metadata.gid(),
+        })
     }
-    if mode & 0o020 != 0 && dropped.uids.contains(&gid) {
-        return Some("group-writable for a group blastit drops to");
+
+    /// The refusal this question produced.
+    fn refusal(&self, probed_uid: Option<u32>, why: String) -> Writable {
+        Writable {
+            path: self.target.clone(),
+            entry: self.entry.clone(),
+            mode: self.mode & 0o7777,
+            probed_uid,
+            why,
+        }
+    }
+}
+
+/// Whether the mode bits alone say `uid` could write a path with this `mode` and
+/// `gid`.
+///
+/// The classes this check names: **other** may write it; the **group** may write
+/// it *and* the path's gid is the uid's own (a group class only counts for a uid
+/// that is in that group, and a dropped-to process has no supplementary groups,
+/// so the gid has to be its own); or it is **sticky** — a `/tmp`-style directory
+/// takes a file with a fresh name whatever the sticky bit does about deleting
+/// one that is there.
+///
+/// The uid is named when the group class is what answered, because the mode
+/// bits were the only witness: the message has to say which uid a deployment has
+/// to keep out.
+fn writable_by_mode(mode: u32, gid: u32, uid: u32) -> Option<String> {
+    if mode & Access::Write.bit() != 0 {
+        return Some(
+            if mode & 0o1000 != 0 {
+                "the sticky bit stops another uid deleting what is there, not writing to it"
+            } else {
+                "other-writable"
+            }
+            .to_string(),
+        );
+    }
+    if mode & 0o020 != 0 && gid == uid {
+        return Some(format!("group-writable for uid {uid}'s own group"));
     }
     None
 }
@@ -958,8 +1079,8 @@ mod tests {
 
     #[test]
     fn a_directory_another_uid_could_write_is_refused() {
-        // What blastit puts on `sys.path` may not be writable by a uid it drops
-        // to: one route could plant a module another route imports.
+        // A path on `sys.path` may not be writable by a uid blastit drops to:
+        // one route could plant a module another route imports.
         let tree = TempTree::new("writable");
         // 0755 is what a code tree is.
         assert_eq!(
@@ -973,6 +1094,7 @@ mod tests {
             let refusal = writable(std::slice::from_ref(&directory), &dropped(), false)
                 .unwrap_or_else(|| panic!("{name} must be refused"));
             assert_eq!(refusal.path, directory, "{name}");
+            assert_eq!(refusal.entry, None, "{name}");
             assert!(
                 refusal.message().contains("chmod go-w"),
                 "{}",
@@ -1004,10 +1126,18 @@ mod tests {
             writable(std::slice::from_ref(&shared), &dropped(), false),
             None
         );
+        // An empty list has nothing to refuse, and a path that is not there
+        // under a directory nobody else can write is not a hole either.
+        assert_eq!(writable(&[], &dropped(), false), None);
+        assert_eq!(
+            writable(&[tree.path.join("missing")], &dropped(), false),
+            None,
+            "the tree is 0755, so nobody else could create it"
+        );
 
-        // …and when it *is* a view's, the mode bits say so and the kernel
-        // agrees (root only: only root can put a directory in that group). In a
-        // child, because the probe forks.
+        // …and when the gid *is* a uid blastit drops to, the mode bits say so
+        // and the kernel agrees (root only: only root can put a directory in
+        // that group). In a child, because the probe forks.
         if can_probe() {
             chown(&shared, 0, dropped().probe);
             assert_eq!(
@@ -1027,6 +1157,108 @@ mod tests {
                 "a group a dropped-to uid is in (1 = the refusal is not the kernel's, 2 = none)"
             );
         }
+    }
+
+    #[test]
+    fn every_uid_that_could_write_is_asked() {
+        // An ACL, or a group class, can grant one route's uid what it denies
+        // every other: the check asks the kernel once per uid, not once for the
+        // first route. `root:<a later view uid> 0770` is that case without an
+        // ACL — the first view uid is not in that group and cannot write, the
+        // later one *is* and can.
+        if !can_probe() {
+            return;
+        }
+        let tree = TempTree::new("every-uid");
+        let shared = tree.dir("shared", 0o770);
+        let later = *dropped().uids.iter().next_back().expect("a uid");
+        assert_ne!(later, dropped().probe, "the first uid is not the answer");
+        chown(&shared, 0, later);
+        assert_eq!(
+            in_a_child(|| {
+                match writable(std::slice::from_ref(&shared), &dropped(), false) {
+                    Some(refusal) if refusal.probed_uid == Some(later) => 0,
+                    Some(_) => 1,
+                    None => 2,
+                }
+            }),
+            0,
+            "the later uid's write access (1 = another uid was blamed, 2 = none found)"
+        );
+        // The message names that uid, which is what an operator has to look up.
+        assert!(
+            writable(std::slice::from_ref(&shared), &dropped(), false)
+                .map(|refusal| refusal.message().contains(&later.to_string()))
+                .unwrap_or(false)
+                || !can_probe(),
+            "the message names the uid"
+        );
+    }
+
+    #[test]
+    fn a_missing_entry_under_a_writable_directory_is_refused() {
+        // An entry that is not there yet is a hole all the same, when the
+        // directory it would be created in is writable: the interpreter would
+        // import from it the moment somebody made it.
+        let tree = TempTree::new("missing-entry");
+        let open = tree.dir("open", 0o777);
+        let missing = open.join("not-there");
+        let refusal = writable(std::slice::from_ref(&missing), &dropped(), false)
+            .unwrap_or_else(|| panic!("{missing:?} must be refused"));
+        assert_eq!(refusal.path, open, "what has to change is the directory");
+        assert_eq!(
+            refusal.entry,
+            Some(missing.clone()),
+            "and the entry is named"
+        );
+        assert!(
+            refusal.message().contains(&missing.display().to_string())
+                && refusal.message().contains("not there yet"),
+            "the message explains how it could be created: {}",
+            refusal.message()
+        );
+        assert!(
+            refusal.message().contains("chmod go-w"),
+            "{}",
+            refusal.message()
+        );
+
+        // The nearest *existing* directory is the one that matters: a level
+        // deeper changes nothing.
+        assert_eq!(
+            writable(&[open.join("a/b/c")], &dropped(), false)
+                .map(|refusal| refusal.path)
+                .as_deref(),
+            Some(open.as_path())
+        );
+    }
+
+    #[test]
+    fn a_writable_zip_on_sys_path_is_refused() {
+        // A zip is a file on `sys.path`, and `zipimport` reads modules out of
+        // it: writing the *file* is what plants code, so that is what is asked
+        // about — not the directory it sits in, which is fine here.
+        let tree = TempTree::new("zip");
+        let archive = tree.path.join("app.zip");
+        std::fs::write(&archive, b"PK\x05\x06").unwrap();
+        std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            writable(std::slice::from_ref(&archive), &dropped(), false),
+            None,
+            "0644 in a 0755 tree is what a shipped archive looks like"
+        );
+
+        std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let refusal = writable(std::slice::from_ref(&archive), &dropped(), false)
+            .unwrap_or_else(|| panic!("{archive:?} must be refused"));
+        assert_eq!(refusal.path, archive, "the file itself");
+        assert_eq!(refusal.entry, None);
+        assert_eq!(refusal.mode, 0o666);
+        assert!(
+            refusal.message().contains(&archive.display().to_string()),
+            "{}",
+            refusal.message()
+        );
     }
 
     #[test]

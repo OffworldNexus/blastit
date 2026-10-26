@@ -2336,6 +2336,77 @@ fn a_writable_working_directory_is_refused() {
 }
 
 #[test]
+fn a_writable_directory_only_on_pythonpath_is_refused() {
+    // §5.3: the check is over the *whole* `sys.path` the interpreter will
+    // import through, not only what blastit put there. An entry a `PYTHONPATH`
+    // names (or a `.pth` file added) is imported through exactly as much, and a
+    // route can plant code in it just the same — so a `0777` directory that is
+    // only on `PYTHONPATH`, with a working directory that is fine, is refused.
+    if !needs_root("writable PYTHONPATH") {
+        return;
+    }
+    let fixture = Fixture::new("writable-pythonpath");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    let shared = fixture.path.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, Permissions::from_mode(0o777)).unwrap();
+    let python_path = format!("{}:{}", fixture.python_path(), shared.display());
+
+    let refused = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", "8098"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("PYTHONPATH", &python_path),
+            ("BLASTIT_UID_BASE", "48600"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+        ],
+        0,
+        Some(&fixture.path),
+    );
+    assert!(
+        refused.contains("is writable by another uid"),
+        "the boot refuses:\n{refused}"
+    );
+    assert!(
+        refused.contains(&shared.display().to_string()),
+        "and names the entry, not the working directory:\n{refused}"
+    );
+    assert!(
+        refused.contains("PYTHONPATH") && refused.contains("chmod go-w"),
+        "and says where the entry comes from, and what to do:\n{refused}"
+    );
+
+    // The same entry, 0755 (in the test's own group): it stays, and the boot
+    // gets past the check to the failure planted behind it.
+    std::fs::set_permissions(&shared, Permissions::from_mode(0o755)).unwrap();
+    let text = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", "8098"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("PYTHONPATH", &python_path),
+            ("BLASTIT_UID_BASE", "48600"),
+            ("BLASTIT_PRELOAD", "no.such.module"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+        ],
+        0,
+        Some(&fixture.path),
+    );
+    assert!(
+        !text.contains("is writable by another uid"),
+        "0755 is not a hole:\n{text}"
+    );
+    assert!(
+        text.contains("BLASTIT_PRELOAD"),
+        "and the boot stopped at the step after the check:\n{text}"
+    );
+}
+
+#[test]
 fn a_directory_a_view_can_read_through_its_own_group_is_not_a_blocker() {
     // The other half of the same check: `root:<view uid> 0750` is readable by
     // the view — its gid *is* the view's own, which needs no supplementary

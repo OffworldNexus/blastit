@@ -31,7 +31,6 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 
 use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
@@ -92,22 +91,33 @@ pub struct Options {
 }
 
 /// Everything a view needs of its scratch directory, in Python (§5.3).
-///
-/// It also records what it *appended* in `blastit_added_paths`: those are
-/// directories blastit put on `sys.path` itself, which the boot refuses when
-/// another uid could write to them.
 const SITE_PACKAGES: &std::ffi::CStr = c"
-blastit_added_paths = []
 try:
     import os, sys, sysconfig
     for _key in ('purelib', 'platlib'):
         _path = sysconfig.get_paths().get(_key)
         if _path and _path not in sys.path and os.path.isdir(_path):
             sys.path.append(_path)
-            if _path not in blastit_added_paths:
-                blastit_added_paths.append(_path)
 except Exception:
     pass
+";
+
+/// The whole `sys.path` a view will import through (§5.3), absolute.
+///
+/// Not only what blastit put there: the interpreter's own entries, the working
+/// directory (§5.3), whatever `PYTHONPATH` named, whatever a `.pth` file added
+/// while `site` ran, and anything an import has appended by the time this runs.
+/// A writable entry is a cross-route code plant whoever added it — one route
+/// writing a module another route imports — so the boot asks about all of them.
+/// `abspath` resolves the empty entry to the working directory, which is what
+/// the interpreter does with it.
+const SYS_PATH: &std::ffi::CStr = c"
+import os, sys
+blastit_sys_path = []
+for _entry in sys.path:
+    _path = os.path.abspath(_entry)
+    if _path not in blastit_sys_path:
+        blastit_sys_path.append(_path)
 ";
 
 /// Everything a view has to be able to read, as Python paths (§7.2).
@@ -755,27 +765,26 @@ fn check_view_paths(
         fail(emitter, &blocker.message());
     }
 
-    // §5.3/D2: the directories *blastit* puts on `sys.path` are the working
-    // directory it was started in and, for an embedded interpreter, the
-    // interpreter's own `site-packages`. Code there is imported by whichever
-    // route asks for it first, so a directory another uid can write is a route
-    // planting code in another route — refused at boot rather than served.
-    let mut added: Vec<PathBuf> = config
-        .cwd
-        .as_deref()
-        .map(|dir| PathBuf::from(std::ffi::OsString::from_vec(dir.to_vec())))
-        .into_iter()
-        .collect();
-    match scope.get_item("blastit_added_paths") {
+    // §5.3: the whole `sys.path` — not only the directories blastit added. An
+    // entry a view imports through that another uid can write is a route
+    // planting a module another route imports, whoever put the entry there:
+    // blastit, `PYTHONPATH`, a `.pth` file, or the interpreter itself. Refused
+    // at boot rather than served.
+    if let Err(err) = py.run(SYS_PATH, Some(scope), None) {
+        python_fail(py, emitter, "sys.path", &err);
+    }
+    match scope.get_item("blastit_sys_path") {
         Ok(Some(value)) => match value.extract::<Vec<String>>() {
-            Ok(paths) => added.extend(paths.into_iter().map(PathBuf::from)),
-            Err(err) => python_fail(py, emitter, "the directories blastit put on sys.path", &err),
+            Ok(entries) => {
+                let entries: Vec<PathBuf> = entries.into_iter().map(PathBuf::from).collect();
+                if let Some(writable) = crate::visibility::writable(&entries, &dropped, true) {
+                    fail(emitter, &writable.message());
+                }
+            }
+            Err(err) => python_fail(py, emitter, "the paths on sys.path", &err),
         },
         Ok(None) => {}
-        Err(err) => python_fail(py, emitter, "the directories blastit put on sys.path", &err),
-    }
-    if let Some(writable) = crate::visibility::writable(&added, &dropped, true) {
-        fail(emitter, &writable.message());
+        Err(err) => python_fail(py, emitter, "the paths on sys.path", &err),
     }
 }
 
