@@ -42,7 +42,7 @@ stdout is the only output. See [log events](log-events.md).
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_UID_BASE` | `20000` | the base of the uid layout: `+1` http, `+2` scheduler, `+3` dbproxy, `+1000+i` for route *i* |
+| `BLASTIT_UID_BASE` | `20000` | the uid layout's base: `+1` http, `+2` scheduler, `+3` dbproxy, `+1000+i` for route *i* |
 | `BLASTIT_SECCOMP` | `1` | the per-role seccomp filters; the only lever for egress control |
 | `BLASTIT_EXEC` | — | standalone installs only: the capability-free copy of the binary that dbproxy runs |
 
@@ -117,7 +117,7 @@ Sizing the cap: [memory and process caps](../infra/anything-else.md#memory-and-p
 | Setting | Default | What it does |
 |---|---|---|
 | `BLASTIT_CLIENT_IP_HEADER` | `x-forwarded-for` | the header the client address is read from, and only from a trusted peer |
-| `BLASTIT_TRUSTED_PROXIES` | `127.0.0.1,::1` | peers whose client-IP header is believed: addresses, CIDR or `*`; a port is a boot error |
+| `BLASTIT_TRUSTED_PROXIES` | `127.0.0.1,::1` | peers whose client-IP header is believable: addresses, CIDR or `*`; a port is an error |
 | `BLASTIT_TRUST_FORWARDED` | — | deprecated: `0` is an empty trusted list, `1` is `*`; the list above wins |
 
 `wsgi.url_scheme` follows the same trust decision: `X-Forwarded-Proto` is read
