@@ -25,8 +25,8 @@ The socket peer is DO's ingress, not the client: the address comes from a header
 * **`X-Forwarded-For`** — the edge appends to it
   (`<client-supplied…>,<real client>,<edge>`), so a forged entry sits next to the
   real client.
-* **`X-Forwarded-Proto`** — the edge sets it, and the preset trusts it, so
-  `wsgi.url_scheme` is `https` behind TLS.
+* **`X-Forwarded-Proto`** — the edge overwrites it with `https`, so
+  `wsgi.url_scheme` is `https` and a client cannot change it.
 * **`X-Real-IP`, `Forwarded`, `True-Client-IP`, `X-Client-IP`** — never read.
 
 Trusting every peer is safe only because the read header is one the edge

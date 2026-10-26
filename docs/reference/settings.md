@@ -139,8 +139,10 @@ The resolution rule, and how to work it out for your own ingress, is in
 [client IP and trusted proxies](../infra/anything-else.md#client-ip-and-trusted-proxies).
 `wsgi.url_scheme` follows the same trust decision: `X-Forwarded-Proto` is read
 only from a trusted peer, only its last value, and only if it is exactly `http`
-or `https` — which is safe where the ingress overwrites that header (Traefik v3,
-measured) and unmeasured on App Platform, where the preset trusts every peer.
+or `https`; anything else leaves the scheme `http`. What the ingress writes is
+therefore what the app reports, and both bundled ingresses **overwrite** the
+header with the scheme they terminated — measured on Traefik v3 and on DO's edge
+— so at both, a client cannot choose the value.
 
 <!-- E2b -->
 `REMOTE_ADDR` is a bare IP address, with the peer's port in `REMOTE_PORT` when

@@ -32,14 +32,15 @@ hop closest to blastit added.
   `100.64.0.0/10`): with every entry inside it, the resolver reads the leftmost
   one, which a client appended.
 * `wsgi.url_scheme` follows the same rule: `X-Forwarded-Proto` is read from a
-  trusted peer, and only when it is exactly `http` or `https`.
+  trusted peer, and only when it is exactly `http` or `https` — so the ingress
+  must **overwrite** it, as nginx does below.
 
 `BLASTIT_TRUST_FORWARDED` is deprecated: `1` means `*`, `0` trusts nobody, and it
 warns at boot.
 
 ## Working it out for your own ingress
 
-Add this view to your app, route it, and ask for it through the ingress:
+Add this view, route it, then ask for it through the ingress:
 
 ```python title="whoami.py"
 import json
@@ -102,7 +103,7 @@ force.
   nothing is evictable, the request waits.
 * **`BLASTIT_VIEW_IDLE_TIMEOUT`** (`600s`) retires an idle view process, and
   `BLASTIT_VIEW_MAX_REQUESTS` (`0`, off) retires one after N requests — a leak
-  valve at the cost of a fork per N requests.
+  valve.
 
 Give the container a memory limit: `BLASTIT_MEM_HIGH_WATERMARK` (default `85%` of
 it) retires idle processes under pressure.
