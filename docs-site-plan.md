@@ -27,7 +27,7 @@ framework* and *fit it to your infra* — sit on top of the classic ones.
 |---|---|
 | `index.md` — **Home** | what blastit is, why, who it is for and who it is not for |
 | `getting-started.md` — **Getting started** | the shortest real path to a request served by blastit |
-| `frameworks/index.md` — **Fit it to your framework** | what blastit needs from an app; how routes map to URL paths; ASGI |
+| `frameworks/index.md` — **Fit it to your framework** | what blastit needs from an app; how routes map to URL paths |
 | `frameworks/django.md` | the Django lifecycle, install → manifest → run → test → live server |
 | `frameworks/flask.md` | the same for Flask and other WSGI frameworks, with what changes |
 | `frameworks/day-to-day.md` | everyday life once it is installed, and upgrading |
@@ -81,7 +81,6 @@ framework* and *fit it to your infra* — sit on top of the classic ones.
 | 5 | Does the pytest plugin work for Flask? | `frameworks/flask.md#no-pytest-plugin-for-flask` |
 | 6 | Then how do I fill the manifest in? | `frameworks/flask.md#filling-the-manifest-without-the-plugin` |
 | 7 | What do connected pools and inlined parameters do to me? | `frameworks/flask.md#database-clients` |
-| 8 | Can I use FastAPI / ASGI? | `frameworks/index.md#asgi-and-fastapi` |
 | 9 | And after the first deploy? | `frameworks/day-to-day.md#everyday-life` |
 
 ### (c) The person deploying it
@@ -169,7 +168,7 @@ follows the code.
 
 Also worth saying in the docs because the code makes it true, and the README
 does not: **the pytest plugin is Django-only.** It defines "a request" as
-`django.core.handlers.base.BaseHandler.get_response`; a Flask or FastAPI app
+`django.core.handlers.base.BaseHandler.get_response`; a Flask app
 has no such call, and asking it for a manifest there stops the session with
 `ERROR: blastit: the plugin needs Django in the test environment to record
 requests: No module named 'django'`. A Flask project fills its manifest from

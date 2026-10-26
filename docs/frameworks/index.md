@@ -46,19 +46,6 @@ catch-all goes last.
 * `BLASTIT_SCRIPT_NAME` strips a mount prefix and sets `SCRIPT_NAME`.
 * `path = ['.*']` last lets your app render its own 404s.
 
-## ASGI and FastAPI
-
-!!! warning "WSGI only"
-
-    blastit speaks WSGI and HTTP/1.1, not ASGI. An ASGI app needs an adapter
-    such as [a2wsgi](https://github.com/abersheeran/a2wsgi); CI does not cover
-    that path.
-
-Create the adapter inside each process, on the first request, not at import
-time: blastit forks from a single-threaded parent and a2wsgi starts an event-loop
-thread. The pytest plugin is Django-only — see
-[Flask](flask.md#no-pytest-plugin-for-flask).
-
 ## Next
 
 [Day-to-day life](day-to-day.md), then
