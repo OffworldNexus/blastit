@@ -82,7 +82,9 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10
+      # `uvx` for the README rewrite. Pinned to a release tag rather than to a
+      # major one: `astral-sh/setup-uv` stopped publishing major tags after `v7`.
+      - uses: astral-sh/setup-uv@v10.3.2
       # Before the build: the README is the wheel's long description, and PyPI
       # renders it with no repository around it.
       - name: README links, as PyPI needs them
@@ -98,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: README links, as PyPI needs them
         run: uv run --no-project scripts/readme-absolute-links.py
       # The sdist is what a platform without a wheel installs, so it has to build
@@ -138,7 +140,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.2
       # Everything that will be uploaded: the wheels and the sdist, nothing else.
       - run: |
           set -euo pipefail
