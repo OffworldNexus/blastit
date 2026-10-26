@@ -64,12 +64,13 @@ def check(cond, what):
     return bool(cond)
 
 
-def run(cmd, *, check_rc=True, cwd=None, **kw):
-    p = subprocess.run(cmd, text=True, capture_output=True, cwd=cwd, **kw)
+def run(cmd, *, check_rc=True, cwd=None, capture=True, **kw):
+    """Run a command, capturing its output unless `capture=False`."""
+    p = subprocess.run(cmd, text=True, capture_output=capture, cwd=cwd, **kw)
     if check_rc and p.returncode != 0:
         raise RuntimeError(
             f"{' '.join(str(part) for part in cmd[:6])}… failed ({p.returncode}): "
-            f"{p.stderr.strip()[-800:]}"
+            f"{(p.stderr or '')[-800:]}"
         )
     return p
 
@@ -101,8 +102,10 @@ def compose_env(project, port, image, password, dockerfile="Dockerfile"):
 
 
 def compose_local(env, *args):
+    # `logs` is captured for the checks; everything else streams to the
+    # terminal, so a build failure is visible while it happens.
     return subprocess.run(["docker", "compose", "-f", COMPOSE, *args], env=env, text=True,
-                          capture_output=("-" in args or "logs" in args))
+                          capture_output=("logs" in args))
 
 
 def compose_remote(ssh, env, *args, check_rc=True):
@@ -309,10 +312,12 @@ def ship_checkout(ssh):
     with tempfile.TemporaryDirectory() as tmp:
         archive = os.path.join(tmp, "blastit.tar")
         with open(archive, "wb") as out:
-            run(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT, stdout=out, check_rc=False)
-        remote = subprocess.run([*ssh, "rm -rf /root/blastit && mkdir -p /root/blastit && "
-                                        "tar -x -C /root/blastit"], stdin=open(archive, "rb"),
-                                check=False)
+            subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT, stdout=out,
+                           check=True)
+        with open(archive, "rb") as source:
+            remote = subprocess.run(
+                [*ssh, "rm -rf /root/blastit && mkdir -p /root/blastit && tar -x -C /root/blastit"],
+                stdin=source, check=False)
         if remote.returncode != 0:
             raise RuntimeError("shipping the checkout failed")
     commit = run(["git", "rev-parse", "HEAD"], cwd=ROOT).stdout.strip()
