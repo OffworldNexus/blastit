@@ -69,12 +69,15 @@ def default_ref() -> str:
 
     A release is built from a tag, so the tag: the description then points at the
     sources of the version it belongs to. A branch build names the branch. A pull
-    request builds a *merge* ref (`44/merge`), which nobody can open, so the
-    branch it targets is used instead.
+    request builds a *merge* ref — `refs/pull/44/merge`, which GitHub reports as a
+    branch named `44/merge` — and nobody can open that, so the branch it targets
+    is used instead (`GITHUB_BASE_REF` is set on pull requests only).
     """
+    if os.environ.get("GITHUB_BASE_REF"):
+        return os.environ["GITHUB_BASE_REF"]
     if os.environ.get("GITHUB_REF_TYPE") in ("tag", "branch"):
         return os.environ.get("GITHUB_REF_NAME") or DEFAULT_REF
-    return os.environ.get("GITHUB_BASE_REF") or DEFAULT_REF
+    return DEFAULT_REF
 
 
 def absolute(target: str, repo: str, ref: str) -> str | None:
