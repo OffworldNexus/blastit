@@ -1,0 +1,91 @@
+/*
+ * blastit brand colours — the Eurasian nuthatch palette.
+ *
+ * Tokens: docs/brand/mascot-artwork.md#palette (hex + OKLCH, contrast ratios).
+ * For Zensical / Material for MkDocs: add this file to `extra_css` and set
+ * `primary: custom` and `accent: custom` on both palette entries, with
+ * `scheme: default` (light) and `scheme: slate` (dark).
+ */
+
+:root {
+  /* Mascot colours: identical in both schemes. */
+  --blastit-slate: #6a808e;        /* crown and back */
+  --blastit-slate-mid: #4b6272;    /* wing coverts */
+  --blastit-slate-deep: #223846;   /* primaries and tail */
+  --blastit-stripe: #101317;       /* eye-stripe and eye */
+  --blastit-cheek: #fbfaf6;        /* cheek, glint, tail spots */
+  --blastit-buff: #f3c997;         /* breast and belly */
+  --blastit-rust: #9b4723;         /* undertail */
+  --blastit-rust-deep: #81371c;    /* undertail shadow */
+  --blastit-bill: #30383b;
+  --blastit-bill-pale: #a1a5a6;
+  --blastit-eye-ring: #3d4246;
+  --blastit-umber: #3f3a36;        /* legs and feet */
+  --blastit-branch: #2a2d32;
+}
+
+/* Light scheme. */
+:root,
+[data-md-color-scheme="default"] {
+  --blastit-background: #f4efe3;
+  --blastit-surface: #fffcf5;
+  --blastit-ink: #161a20;
+  --blastit-muted: #56616b;
+  --blastit-primary: #223846;
+  --blastit-primary-ink: #ffffff;
+  --blastit-accent: #9b4723;
+  --blastit-accent-ink: #ffffff;
+}
+
+/* Dark scheme. */
+[data-md-color-scheme="slate"] {
+  --blastit-background: #121820;
+  --blastit-surface: #1b232c;
+  --blastit-ink: #f1ece0;
+  --blastit-muted: #a5b0b8;
+  --blastit-primary: #223846;
+  --blastit-primary-ink: #f1ece0;
+  --blastit-accent: #eb9a6c;
+  --blastit-accent-ink: #1c0f08;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-md-color-scheme]) {
+    --blastit-background: #121820;
+    --blastit-surface: #1b232c;
+    --blastit-ink: #f1ece0;
+    --blastit-muted: #a5b0b8;
+    --blastit-primary: #223846;
+    --blastit-primary-ink: #f1ece0;
+    --blastit-accent: #eb9a6c;
+    --blastit-accent-ink: #1c0f08;
+  }
+}
+
+/* Theme mapping (Material-style variables). */
+[data-md-color-scheme="default"],
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: var(--blastit-primary);
+  --md-primary-fg-color--light: var(--blastit-slate-mid);
+  --md-primary-fg-color--dark: #172833;
+  --md-primary-bg-color: var(--blastit-primary-ink);
+  --md-primary-bg-color--light: color-mix(in oklch, var(--blastit-primary-ink) 70%, transparent);
+
+  --md-accent-fg-color: var(--blastit-accent);
+  --md-accent-fg-color--transparent: color-mix(in oklch, var(--blastit-accent) 10%, transparent);
+  --md-accent-bg-color: var(--blastit-accent-ink);
+  --md-accent-bg-color--light: color-mix(in oklch, var(--blastit-accent-ink) 70%, transparent);
+
+  --md-default-bg-color: var(--blastit-background);
+  --md-default-fg-color: var(--blastit-ink);
+  --md-default-fg-color--light: var(--blastit-muted);
+  --md-default-fg-color--lighter: color-mix(in oklch, var(--blastit-muted) 55%, transparent);
+  --md-default-fg-color--lightest: color-mix(in oklch, var(--blastit-muted) 18%, transparent);
+
+  --md-code-bg-color: var(--blastit-surface);
+  --md-code-fg-color: var(--blastit-ink);
+  --md-typeset-color: var(--blastit-ink);
+  --md-typeset-a-color: var(--blastit-accent);
+  --md-footer-bg-color: var(--blastit-primary);
+  --md-footer-fg-color: var(--blastit-primary-ink);
+}

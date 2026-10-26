@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>blastit</title>
+  <rect width="64" height="64" rx="14" fill="#9b4723"/>
+  <svg width="64" height="64" viewBox="436 76 400 400">
+    <defs><clipPath id="neck-cut"><path d="M440 140 H950 V382 H508 L452 296 Z"/></clipPath></defs>
+    <g clip-path="url(#neck-cut)">
+      <path id="underparts" fill="#f3c997" d="M768 245 C757 290 756 330 763 362 C776 400 774 460 764 510 C746 580 676 655 600 686 C580 694 565 699 548 700 C495 702 455 696 425 688 C482 650 508 602 510 555 L555 300 Z"/>
+      <path id="crown-and-back" fill="#6a808e" d="M548 382 L645 382 L280 480 L225 540 L460 305 C482 224 556 168 648 167 C700 167 740 186 770 212 L700 268 L600 280 L540 320 Z"/>
+      <path id="eye-stripe" fill="#101317" d="M790 221 L700 232 C650 236 600 245 565 265 C530 290 508 330 508 382 L548 382 C547 345 556 312 582 294 C610 277 650 272 700 266 L752 250 Z"/>
+      <path id="cheek" fill="#fbfaf6" d="M576 300 C605 281 660 272 700 266 L752 250 C742 280 728 305 706 320 C680 340 640 345 615 333 C596 325 584 314 576 300 Z"/>
+      <path id="bill-lower" fill="#a1a5a6" d="M936 183 Q840 240 752 272 L763 234 Z"/>
+      <path id="bill" fill="#30383b" d="M769 207 L928 175 L937 182 L775 240 L763 236 Z"/>
+      <circle id="eye-ring" cx="676" cy="250" r="28" fill="#3d4246"/>
+      <circle id="eye" cx="676" cy="250" r="22" fill="#101317"/>
+      <circle id="eye-glint" cx="673" cy="241" r="5.5" fill="#fbfaf6"/>
+    </g>
+  </svg>
+</svg>
