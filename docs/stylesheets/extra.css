@@ -1,0 +1,27 @@
+/*
+ * One rule, added by E2.
+ *
+ * The reference pages carry tables with four or five columns of prose — the
+ * settings reference most of all — and on a phone one of those is wider than
+ * the viewport, which stretches the whole page and makes the text tiny. Below
+ * the tablet breakpoint the table scrolls inside its own box instead.
+ *
+ * The palette and the colours are `docs/brand/brand.css` (E3); this file is
+ * only about layout.
+ */
+@media screen and (max-width: 44.9375em) {
+  .md-typeset__table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    /* A scrollbar inside the box needs a little room, and the shadow makes it
+       visible that there is more to the right. */
+    padding-bottom: 0.2rem;
+  }
+
+  .md-typeset__table table:not([class]) {
+    /* Let the columns keep their natural width so the table scrolls rather
+       than squeezing five columns into 360px. */
+    min-width: max-content;
+  }
+}
