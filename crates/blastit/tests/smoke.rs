@@ -62,6 +62,17 @@ fn needs_root(name: &str) -> bool {
     false
 }
 
+/// Whether a line is the `ready` event, in whichever format the log is in.
+///
+/// A test may ask for `pretty` (`BLASTIT_LOG_FORMAT`), and the two formats share
+/// no spelling: a JSON line carries `"event":"ready"`, and the human line is the
+/// padded `INFO  ready` the pretty encoder writes. Both are read here, because
+/// what the harness is waiting for is that the server is up — not that it chose
+/// one format over the other.
+fn is_ready_line(line: &str) -> bool {
+    line.contains("\"event\":\"ready\"") || line.contains("INFO  ready")
+}
+
 /// The PostgreSQL URL the CI job provides, if there is one.
 fn test_pg_url() -> Option<String> {
     std::env::var("BLASTIT_TEST_PG_URL")
@@ -221,11 +232,7 @@ impl Server {
     fn wait_for_ready(&mut self) {
         let deadline = Instant::now() + READY_TIMEOUT;
         while Instant::now() < deadline {
-            if self
-                .stdout_lines()
-                .iter()
-                .any(|line| line.contains("\"ready\""))
-            {
+            if self.stdout_lines().iter().any(|line| is_ready_line(line)) {
                 return;
             }
             if let Some(status) = self.exited() {
@@ -1604,10 +1611,6 @@ fn pretty_renders_a_forwarded_event_as_the_human_line() {
         server.stdout_text()
     );
     let log = server.stdout_text();
-    assert!(
-        !log.contains("\"event\":"),
-        "a pretty log is not JSON:\n{log}"
-    );
 
     // The request: `HH:MM:SS.mmm INFO  request  GET /query → data  200  1.2ms`.
     let request = log
@@ -1624,6 +1627,10 @@ fn pretty_renders_a_forwarded_event_as_the_human_line() {
         "the duration reaches the line: {request}"
     );
     assert!(!request.contains("method="), "not a field dump: {request}");
+    assert!(
+        !request.contains("\"event\":") && !request.starts_with('{'),
+        "and not a JSON object: {request}"
+    );
 
     // The denial: `WARN sql.denied  data  db  query  SELECT 2`.
     let denied = log
@@ -1639,6 +1646,17 @@ fn pretty_renders_a_forwarded_event_as_the_human_line() {
         "the statement is in the line: {denied}"
     );
     assert!(!denied.contains("proxy="), "not a field dump: {denied}");
+    assert!(
+        !denied.contains("\"event\":") && !denied.starts_with('{'),
+        "and not a JSON object: {denied}"
+    );
+    // Stage 0 prints its own first lines as JSON — the configuration, and so the
+    // format, is not parsed yet — so this is about the lines a component
+    // forwarded, which is what the test asked for.
+    assert!(
+        log.lines().filter(|line| line.starts_with('{')).count() <= 2,
+        "only stage 0's first lines may be JSON:\n{log}"
+    );
 }
 
 #[test]
