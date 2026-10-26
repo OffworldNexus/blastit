@@ -63,6 +63,7 @@ The privilege mode has no variable: the `boot` event reports it.
 
 `BLASTIT_FAIR_QUEUING=1` orders the admission queue by a two-level fair scheduler
 instead of by arrival; `0` is plain FIFO, and the `BLASTIT_FQ_*` knobs go unread.
+[Fair queuing](../infra/fair-queuing.md) turns it on safely.
 
 | Setting | Default | What it does |
 |---|---|---|

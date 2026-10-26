@@ -42,4 +42,4 @@ is worse — it reads the leftmost entry, the client's invention, whenever every
 entry is inside it.
 
 Next: [App Platform](digitalocean-paas.md) · [Compose + Traefik](compose-traefik.md) ·
-[Anything else](anything-else.md).
+[Anything else](anything-else.md) · [Fair queuing](fair-queuing.md).
