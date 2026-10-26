@@ -154,6 +154,31 @@ checked 'UV_PYTHON_INSTALL_DIR' \
 echo "--- private.log"
 cat "$work/private.log"
 
+# E2b: the same check one stage earlier, for the file the credentials-holding
+# child `execve`s. dbproxy runs as uid B+3, so the binary has to be executable by
+# others; `0700` is the mode that used to fail the boot with
+# `exec dbproxy: Permission denied (os error 13)` and say nothing else.
+chmod 0700 "$dbproxy"
+if sudo env \
+    PORT=8081 \
+    BLASTIT_APP=wsgi:application \
+    BLASTIT_MANIFEST="$work/blastit.toml" \
+    BLASTIT_LOG_FORMAT=json \
+    DATABASE_URL="postgresql://demo:not-a-real-password@db.invalid:5432/demo?sslmode=disable" \
+    "$work/.venv/bin/blastit" >"$work/dbproxy-mode.log" 2>&1; then
+    echo "  FAIL a dbproxy binary the child cannot execute booted"
+    status=1
+else
+    echo "  ok   a dbproxy binary the child cannot execute is refused"
+fi
+chmod 0755 "$dbproxy"
+checked 'is not executable by other uids' \
+    "the message says what is wrong with it" "$work/dbproxy-mode.log"
+checked "$dbproxy" "and names the file that blocks" "$work/dbproxy-mode.log"
+checked 'chmod o+rx' "and the fix that opens it" "$work/dbproxy-mode.log"
+echo "--- dbproxy-mode.log"
+cat "$work/dbproxy-mode.log"
+
 # A dbproxy that dies before it reports ready has to fail the boot *and* say why
 # (§8.1): the wheel ships that binary, so this is the packaging failure the test
 # can produce. `cp` then `rm` rather than an in-place edit: the file is a

@@ -3,7 +3,8 @@
 # `dist/*.whl` it produced to this build.
 FROM python:3.13-slim-trixie
 COPY e2e/demo/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY e2e/sqlalchemy/requirements.txt /sqlalchemy/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt -r /sqlalchemy/requirements.txt
 COPY dist/blastit-*-cp313-*.whl /tmp/dist/
 # Exactly one: two wheels of the same distribution in `dist/` (a release and a
 # development version, say) would make pip pick a fight here rather than say what
@@ -20,6 +21,9 @@ RUN set -e; \
     pip install --no-cache-dir "$wheels"; \
     rm -rf /tmp/dist
 COPY e2e/demo /app
+# The second app of the end-to-end test (E2b): Flask + SQLAlchemy, served from
+# this directory so its own manifest and its own grants are what run it.
+COPY e2e/sqlalchemy /sqlalchemy
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \

@@ -1,0 +1,69 @@
+# The manifest the Flask + SQLAlchemy app is served with (E2b).
+#
+# Read it as the answer to "what does SQLAlchemy need that Django does not?":
+# nothing new — the same two things, in the same places (§6).
+#
+# 1. **`groups = ["connection"]`, attached to every route.** Opening a
+#    connection runs statements that belong to no request: psycopg and
+#    SQLAlchemy ask the server about its version, the current schema, the string
+#    escaping mode and the transaction isolation level, and look up a type OID.
+#    They are exactly what the `connection_setup` section of the report is for
+#    (`set_config('TimeZone', …)` for Django, these for SQLAlchemy), so they go
+#    in a group attached to every route and nowhere else. A statement that is
+#    not one of them, and not in a route's own grant, is still refused.
+# 2. **`transaction_control = true`.** SQLAlchemy opens a transaction for every
+#    `engine.begin()` — `BEGIN`, the `SAVEPOINT`/`RELEASE` pair psycopg wraps it
+#    in, and `COMMIT` — which is what that flag allows and all it allows.
+version = 1
+groups = ["connection"]
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+# What a connection to this proxy runs before the app runs anything.
+[group.connection.db]
+transaction_control = true
+queries = [
+  # SQLAlchemy's `PGDialect_psycopg` asks for all four as it initialises.
+  "select pg_catalog.version()",
+  "select current_schema()",
+  "show standard_conforming_strings",
+  "show transaction isolation level",
+  # psycopg fetches the metadata of a type OID it does not know yet; the
+  # statement is normalised by blastit, so `$1` matches the numbering psycopg
+  # actually sent.
+  "SELECT typname AS name, oid, typarray AS array_oid, oid::regtype::text AS regtype, typdelim AS delimiter FROM pg_type t WHERE t.oid = to_regtype($1) ORDER BY t.oid",
+]
+
+# The read route: `SELECT` and nothing else.
+[[route]]
+name = "notes-read"
+path = ['/notes/']
+methods = ["GET"]
+groups = ["connection"]
+[route.db]
+queries = ["SELECT id, body FROM sqlalchemy_notes ORDER BY id"]
+
+# The write route: `INSERT`, and the `SELECT` that counts what is there.
+[[route]]
+name = "notes-write"
+path = ['/notes/add/']
+methods = ["POST"]
+groups = ["connection"]
+[route.db]
+queries = [
+  "INSERT INTO sqlalchemy_notes (body) VALUES ($1)",
+  "SELECT count(*) FROM sqlalchemy_notes",
+]
+
+# The route that tries a `DELETE` nobody granted: it *has* a grant on this proxy
+# (the `SELECT` below), so it gets a socket and the proxy refuses the statement
+# with SQLSTATE `42501` — a per-route limit, not a missing connection.
+[[route]]
+name = "notes-clear"
+path = ['/notes/clear/']
+methods = ["POST"]
+groups = ["connection"]
+[route.db]
+queries = ["SELECT count(*) FROM sqlalchemy_notes"]

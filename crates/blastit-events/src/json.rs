@@ -585,10 +585,6 @@ fn number_u16(object: &Map<String, Value>, name: &str) -> Option<u16> {
     u16::try_from(number_u64(object, name)?).ok()
 }
 
-fn number_i32(object: &Map<String, Value>, name: &str) -> Option<i32> {
-    i32::try_from(member(object, name)?.as_i64()?).ok()
-}
-
 fn number_f64(object: &Map<String, Value>, name: &str) -> Option<f64> {
     member(object, name)?.as_f64()
 }

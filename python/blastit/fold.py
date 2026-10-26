@@ -92,12 +92,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     """`blastit-manifest fold LOG... --manifest blastit.toml [--write] [--prefer-tables]
     [--allow-dangerous]`.
 
+    The console script's spelling: `blastit-manifest` is a command with
+    subcommands, and `fold` is the one it has. `python -m blastit.fold` *is* this
+    tool, so it takes the same arguments without the word `fold` (see
+    [`_direct`]).
+
     Returns the process exit status: 0 when it printed (or wrote) what the
     manifest was missing — an empty diff is a normal, good outcome — and 1 on
     anything it could not do (an unreadable log, a manifest it cannot parse,
     edit or prove safe).
     """
-    parser = _parser()
+    return _run(_parser(), argv)
+
+
+def _direct(argv: Sequence[str] | None = None) -> int:
+    """`python -m blastit.fold LOG... --manifest blastit.toml …`.
+
+    The same fold, without a subcommand to name: a module invoked with `-m` takes
+    its own arguments, and `python -m blastit.fold` is what a deployment has when
+    the package is importable but the console script is not.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m blastit.fold",
+        description="Read blastit's JSON logs and the manifest, and say what grants are missing.",
+    )
+    _fold_arguments(parser)
+    parser.set_defaults(handler=_fold)
+    return _run(parser, argv)
+
+
+def _run(parser: argparse.ArgumentParser, argv: Sequence[str] | None) -> int:
+    """Parses one spelling's arguments, and runs the handler they select."""
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
@@ -107,7 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    """The command line: one subcommand today, `fold`."""
+    """The `blastit-manifest` command line: one subcommand today, `fold`."""
     parser = argparse.ArgumentParser(
         prog="blastit-manifest",
         description="Read blastit's JSON logs and the manifest, and say what grants are missing.",
@@ -118,6 +143,13 @@ def _parser() -> argparse.ArgumentParser:
         help="print (or write) the grants the statements in LOG(s) were denied for",
         description=__doc__.splitlines()[0],
     )
+    _fold_arguments(fold)
+    fold.set_defaults(handler=_fold)
+    return parser
+
+
+def _fold_arguments(fold: argparse.ArgumentParser) -> None:
+    """Fold's own options, shared by both spellings of the command."""
     fold.add_argument(
         "logs",
         nargs="+",
@@ -150,8 +182,6 @@ def _parser() -> argparse.ArgumentParser:
         "transaction commands, and statements calling a function outside blastit's "
         "safe set (an exact `queries` entry runs whatever it calls)",
     )
-    fold.set_defaults(handler=_fold)
-    return parser
 
 
 class _FoldError(Exception):
@@ -1182,7 +1212,7 @@ def _apply(lines: list[str], scan: _Scan, addition: _Addition) -> _Scan:
         scan = _Scan("".join(lines))
         route = _route_element(scan, addition.route)
     if addition.tables:
-        lines = _set_tables(scan, route, addition.proxy, addition.tables)
+        lines = _set_tables(scan, route, grant, addition.proxy, addition.tables)
     return _Scan("".join(lines))
 
 
@@ -1228,16 +1258,59 @@ def _unquote_value(value: str) -> str:
     return text
 
 
-def _grant_element(
-    scan: _Scan, route: _Line, proxy: str, addition: _Addition
-) -> _Line:
-    """The `[route.<proxy>]` line of a route.
+@dataclass
+class _Grant:
+    """Where a route's own grant on one proxy is, and where its keys go.
 
-    Raises [`_FoldError`] when the route has no such grant — naming the group
-    that grants the proxy instead when that is what the route has, because
-    folder writes into a route's own section and a group's grant is a different
-    one — and when a grant the edit has to write into is an inline table, which
-    the line-level edit cannot merge into.
+    A grant blastit boots may be written as nothing but sections of its own:
+    `[route.db.tables]` is the route's `db` grant (§6), and a route whose tables
+    live there is a route with a grant. So the edit accepts it as one — and a key
+    that belongs to the *grant* rather than to one of its sections (`queries`,
+    `functions`) has to be written under a `[route.<proxy>]` header of its own,
+    just before the first section: a key written inside `[route.db.tables]` would
+    be a key of the `tables` table.
+    """
+
+    #: The `[route.<proxy>]` header, when the manifest has one.
+    header: _Line | None
+    #: The first `[route.<proxy>.<section>]` header, when the grant is written as
+    #: sections alone.
+    section: _Line | None
+    #: The grant's dotted key, for a header the edit has to write.
+    key: tuple[str, ...]
+
+    @property
+    def insert_at(self) -> int:
+        """The index a key of the grant itself belongs at."""
+        assert self.header is not None or self.section is not None
+        if self.header is not None:
+            return self.header.index + 1
+        return self.section.index  # type: ignore[union-attr]
+
+    def block_end(self, scan: _Scan) -> int:
+        """The first line after the block a key of the grant would land in.
+
+        For a grant with its own header that is the next header; for one written
+        as sections alone there is no such block yet, so the key cannot already
+        be there.
+        """
+        if self.header is None:
+            return self.insert_at
+        return scan.block_end(self.header.index)
+
+
+def _grant_element(scan: _Scan, route: _Line, proxy: str, addition: _Addition) -> _Grant:
+    """Where the route's `[route.<proxy>]` grant is.
+
+    Raises [`_FoldError`] when the route has no grant on that proxy at all —
+    naming the group that grants the proxy instead when that is what the route
+    has, because folder writes into a route's own section and a group's grant is
+    a different one — and when a grant the edit has to write into is an inline
+    table, which the line-level edit cannot merge into.
+
+    A grant written as `[route.<proxy>.tables]` (or any other section of it) *is*
+    a grant, so it is accepted: that is a manifest blastit boots, and the tables
+    it names are the route's.
 
     Only what the edit *writes* is refused: a `tables = { … }` entry is fine as
     long as nothing is added to the tables grant, and so is an inline grant on
@@ -1252,8 +1325,11 @@ def _grant_element(
                 f"inline table (`{proxy} = {{ … }}`, line {line.index + 1}); write it as "
                 f"`[route.{proxy}]` first, so fold can add to it"
             )
+    section: _Line | None = None
     for header in scan.headers():
-        if header.header == wanted and route.index < header.index < end:
+        if not (route.index < header.index < end):
+            continue
+        if header.header == wanted:
             if addition.tables:
                 for line in scan.keys(header.index + 1, scan.block_end(header.index)):
                     if line.key == _TABLES and _inline_table(line):
@@ -1262,12 +1338,23 @@ def _grant_element(
                             f"(line {line.index + 1}); write it as `[route.{proxy}.tables]` "
                             "first, so fold can add to it"
                         )
-            return header
+            return _Grant(header=header, section=None, key=wanted)
+        if (
+            section is None
+            and header.header is not None
+            and len(header.header) > len(wanted)
+            and header.header[: len(wanted)] == wanted
+        ):
+            section = header
+    if section is not None:
+        return _Grant(header=None, section=section, key=wanted)
     where = (
         f"the route {_route_name(scan, route)!r} is granted that proxy by {addition.via}, "
         f"which has no `[route.{proxy}]` section to write into"
         if addition.via
-        else f"the route {_route_name(scan, route)!r} has no `[route.{proxy}]` grant"
+        else f"the route {_route_name(scan, route)!r} has no `[route.{proxy}]` grant: no "
+        f"`[route.{proxy}]` section, no `[route.{proxy}.tables]` one, and no group that "
+        "grants it"
     )
     raise _FoldError(
         f"{where}; a route's own grant is unioned with its groups' (§6), so write a "
@@ -1283,16 +1370,31 @@ def _route_name(scan: _Scan, route: _Line) -> str:
     return "?"
 
 
-def _add_queries(scan: _Scan, grant: _Line, queries: list[tuple[str, str]]) -> list[str]:
+def _add_queries(scan: _Scan, grant: _Grant, queries: list[tuple[str, str]]) -> list[str]:
     """Appends statements to the grant's `queries`, or writes the array."""
-    end = scan.block_end(grant.index)
     items = [_query_line(sql, reason) for sql, reason in queries]
-    for line in scan.keys(grant.index + 1, end):
-        if line.key == _QUERIES:
-            return _append_to_array(scan, line, items)
+    if grant.header is not None:
+        for line in scan.keys(grant.header.index + 1, grant.block_end(scan)):
+            if line.key == _QUERIES:
+                return _append_to_array(scan, line, items)
     lines = [line.text for line in scan.lines]
-    lines[grant.index + 1 : grant.index + 1] = ["queries = [\n", *items, "]\n"]
+    block = _grant_key_lines(grant, ["queries = [\n", *items, "]\n"])
+    lines[grant.insert_at : grant.insert_at] = block
     return lines
+
+
+def _grant_key_lines(grant: _Grant, key: list[str]) -> list[str]:
+    """The lines that write one key under the grant.
+
+    A grant with a header of its own takes the key as it is. One written as
+    sections alone needs the `[route.<proxy>]` header written first, and a blank
+    line after the key — the section that follows has to stay a section, and a
+    key written inside `[route.db.tables]` would be a key of the *tables* table.
+    """
+    if grant.header is not None:
+        return key
+    header = f"[{'.'.join(_toml_key(part) for part in grant.key)}]\n"
+    return [header, *key, "\n"]
 
 
 def _append_to_array(scan: _Scan, line: _Line, items: list[str]) -> list[str]:
@@ -1366,26 +1468,27 @@ def _query_line(sql: str, reason: str) -> str:
     return f"  {_toml_string(sql)},{comment}\n"
 
 
-def _set_functions(scan: _Scan, grant: _Line, functions: list[str]) -> list[str]:
+def _set_functions(scan: _Scan, grant: _Grant, functions: list[str]) -> list[str]:
     """Appends the functions a grant is missing, keeping what it already had.
 
     A `functions` entry the manifest already wrote stays where it is, comments
     included: what is added is what the analysis found and the route did not have.
     """
-    end = scan.block_end(grant.index)
-    for line in scan.keys(grant.index + 1, end):
-        if line.key != _FUNCTIONS:
-            continue
-        have = _array_values(scan, line)
-        missing = [name for name in functions if name not in have]
-        if not missing:
-            return [other.text for other in scan.lines]
-        return _append_to_array(
-            scan, line, [f"  {_toml_string(name)},\n" for name in missing]
-        )
+    if grant.header is not None:
+        for line in scan.keys(grant.header.index + 1, grant.block_end(scan)):
+            if line.key != _FUNCTIONS:
+                continue
+            have = _array_values(scan, line)
+            missing = [name for name in functions if name not in have]
+            if not missing:
+                return [other.text for other in scan.lines]
+            return _append_to_array(
+                scan, line, [f"  {_toml_string(name)},\n" for name in missing]
+            )
     lines = [line.text for line in scan.lines]
     rendered = ", ".join(_toml_string(name) for name in functions)
-    lines[grant.index + 1 : grant.index + 1] = [f"functions = [{rendered}]\n"]
+    block = _grant_key_lines(grant, [f"functions = [{rendered}]\n"])
+    lines[grant.insert_at : grant.insert_at] = block
     return lines
 
 
@@ -1407,7 +1510,7 @@ def _table_operations(grant: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def _set_tables(
-    scan: _Scan, route: _Line, proxy: str, tables: dict[str, dict[str, Any]]
+    scan: _Scan, route: _Line, grant: _Grant, proxy: str, tables: dict[str, dict[str, Any]]
 ) -> list[str]:
     """Writes a route's `[route.<proxy>.tables]` section, merged in place.
 
@@ -1417,6 +1520,10 @@ def _set_tables(
     place and which gains the ones the grant has and it does not. Tables the
     manifest did not have are added as entries of the `tables` table, which is
     what the rest of a manifest in this repository looks like.
+
+    The section is written where the grant's own block ends — or, for a grant
+    that is nothing but sections (`[route.db.tables.products]` and no `[route.db]`
+    at all), just before the first of them, which is where a super-table belongs.
     """
     lines = [line.text for line in scan.lines]
     wanted = ("route", *proxy.split("."), "tables")
@@ -1426,12 +1533,11 @@ def _set_tables(
         None,
     )
     if header is None:
-        grant = next(
-            line
-            for line in scan.headers(("route", *proxy.split(".")))
-            if route.index < line.index < route_end
-        )
-        insert = scan.block_end(grant.index)
+        if grant.header is not None:
+            insert = scan.block_end(grant.header.index)
+        else:
+            assert grant.section is not None
+            insert = grant.section.index
         block: list[str] = []
         if insert > 0 and lines[insert - 1].strip() != "":
             block.append("\n")
@@ -1841,4 +1947,4 @@ def _missing_after_edit(
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_direct())

@@ -157,7 +157,9 @@ fn blocks(path: &Path, executable: bool) -> Option<Blocker> {
         };
         let mode = metadata.permissions().mode() & 0o777;
         if depth == 0 {
-            let wanted = leaf_accesses(metadata.is_dir(), executable);
+            let Some(wanted) = leaf_accesses(metadata.is_dir(), executable) else {
+                continue;
+            };
             if let Some(access) = wanted.iter().find(|access| mode & access.bit() == 0) {
                 return Some(Blocker {
                     path: directory.to_path_buf(),
@@ -184,13 +186,15 @@ fn blocks(path: &Path, executable: bool) -> Option<Blocker> {
 /// by walking through it — while a program is executed and a file is read. The
 /// order is the order the message names them in: readability first, because
 /// that is the one an operator usually has to change.
-fn leaf_accesses(is_dir: bool, executable: bool) -> &'static [Access] {
-    if executable {
-        &[Access::Execute]
-    } else if is_dir {
-        &[Access::Read, Access::Traverse]
-    } else {
-        &[Access::Read]
+fn leaf_accesses(is_dir: bool, executable: bool) -> Option<&'static [Access]> {
+    match (executable, is_dir) {
+        // A program a child `execve`s: the file itself has to be executable.
+        (true, _) => Some(&[Access::Execute]),
+        // A directory the interpreter and the application are read through: it
+        // is both read and descended into. A file is neither — nothing here runs
+        // it, and whether a view could read it is not this check's business.
+        (false, true) => Some(&[Access::Read, Access::Traverse]),
+        (false, false) => None,
     }
 }
 
