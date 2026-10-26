@@ -110,12 +110,18 @@ def compose_local(env, *args):
 
 def compose_remote(ssh, env, *args, check_rc=True):
     """`docker compose …` on the droplet, over ssh."""
-    variables = " ".join(
-        f"{name}={env[name]}"
-        for name in ("E2E_PROJECT", "E2E_IMAGE", "E2E_PORT", "E2E_DB_PASSWORD", "E2E_ROOTLESS_DOCKERFILE")
-    )
-    command = f"cd /root/blastit && env {variables} docker compose -f e2e/rootless/compose.yml {' '.join(args)}"
+    command = (f"cd /root/blastit && env {remote_env(env)} "
+               f"docker compose -f e2e/rootless/compose.yml {' '.join(args)}")
     return ssh_run(ssh, command, check_rc=check_rc)
+
+
+def remote_env(env):
+    """The compose variables, as `env VAR=value …` for a remote shell."""
+    return " ".join(
+        f"{name}={env[name]}"
+        for name in ("E2E_PROJECT", "E2E_IMAGE", "E2E_PORT", "E2E_DB_PASSWORD",
+                     "E2E_ROOTLESS_DOCKERFILE")
+    )
 
 
 def scenario(port, timeout=180):
@@ -395,7 +401,7 @@ def droplet(args):
             log(f"the interpreter's file capabilities on the droplet: {caps.stdout.strip()}")
             rc |= 0 if "cap_setuid" in caps.stdout and "cap_setpcap" in caps.stdout else 1
             inspect = (
-                "cd /root/blastit && docker inspect -f "
+                f"cd /root/blastit && env {remote_env(env)} docker inspect -f "
                 "'User={{.Config.User}} CapDrop={{.HostConfig.CapDrop}} "
                 "CapAdd={{.HostConfig.CapAdd}}' "
                 '"$(docker compose -f e2e/rootless/compose.yml ps -q app)"'
