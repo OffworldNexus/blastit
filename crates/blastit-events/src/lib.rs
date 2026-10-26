@@ -55,7 +55,7 @@ mod pretty;
 mod split;
 
 pub use json::{decode_json, encode_json};
-pub use pretty::encode_pretty;
+pub use pretty::{encode_pretty, escape_inline};
 pub use split::{split_app_output, split_app_output_at};
 
 /// Largest encoded event, in bytes.

@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 
 use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
@@ -91,13 +92,20 @@ pub struct Options {
 }
 
 /// Everything a view needs of its scratch directory, in Python (§5.3).
+///
+/// It also records what it *appended* in `blastit_added_paths`: those are
+/// directories blastit put on `sys.path` itself, which the boot refuses when
+/// another uid could write to them.
 const SITE_PACKAGES: &std::ffi::CStr = c"
+blastit_added_paths = []
 try:
     import os, sys, sysconfig
     for _key in ('purelib', 'platlib'):
         _path = sysconfig.get_paths().get(_key)
         if _path and _path not in sys.path and os.path.isdir(_path):
             sys.path.append(_path)
+            if _path not in blastit_added_paths:
+                blastit_added_paths.append(_path)
 except Exception:
     pass
 ";
@@ -412,7 +420,14 @@ struct Serving {
 
 /// Loads the application, emits `ready`, and supervises. Never returns.
 fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
-    let app = load(py, &serving.config, emitter, serving.memory, serving.hosted);
+    let app = load(
+        py,
+        &serving.config,
+        serving.routes.len(),
+        emitter,
+        serving.memory,
+        serving.hosted,
+    );
     emit_ready(emitter, &serving.config, serving.routes.len());
     let mut supervisor = Supervisor::new(
         Parts {
@@ -627,10 +642,16 @@ fn prepare_child(
 fn load(
     py: Python<'_>,
     config: &Config,
+    routes: usize,
     emitter: &Emitter,
     memory: Option<mem::Sample>,
     hosted: bool,
 ) -> Py<PyAny> {
+    // What blastit itself puts on `sys.path` is recorded here, because a
+    // directory another uid could write is refused below: the working directory
+    // it was started in, and whatever an embedded interpreter had to be told
+    // about.
+    let scope = PyDict::new(py);
     if hosted {
         if let Err(err) = restore_sys_path(py, &config.sys_path) {
             python_fail(py, emitter, "sys.path", &err);
@@ -639,7 +660,7 @@ fn load(
         // §9.3: an embedded interpreter does not find the distribution's
         // site-packages on its own. Best effort — a system without sysconfig is
         // not a reason to refuse to start.
-        let _ = py.run(SITE_PACKAGES, None, None);
+        let _ = py.run(SITE_PACKAGES, Some(&scope), None);
     }
     if let Err(err) = put_cwd_first(py, config.cwd.as_deref()) {
         python_fail(py, emitter, "the working directory on sys.path", &err);
@@ -648,7 +669,7 @@ fn load(
     // which is not the one that installed the interpreter. A deployment that
     // fails this is refused here, at boot, rather than answering requests that
     // only some paths can serve.
-    check_view_paths(py, config.app.as_deref().unwrap_or_default(), emitter);
+    check_view_paths(py, config, routes, &scope, emitter);
 
     let spec = config.app.as_deref().unwrap_or_default();
     let app = match import_callable(py, spec) {
@@ -695,17 +716,25 @@ fn load(
 ///
 /// A module that cannot be found at all is skipped: the import right after says
 /// so, with the name of the variable an operator has to fix.
-fn check_view_paths(py: Python<'_>, app: &str, emitter: &Emitter) {
-    let module = app.split(':').next().unwrap_or_default();
+fn check_view_paths(
+    py: Python<'_>,
+    config: &Config,
+    routes: usize,
+    scope: &Bound<'_, PyDict>,
+    emitter: &Emitter,
+) {
+    let layout = UidLayout::new(config.uid_base);
+    let dropped = crate::visibility::DroppedTo::of(layout, routes);
+    let module = config.app.as_deref().unwrap_or_default();
+    let module = module.split(':').next().unwrap_or_default();
     // The snippet defines a function, so its names have to live in a *globals*
     // mapping rather than in a locals one: Python resolves a function's globals,
     // not its caller's locals. The dict is this call's own, and nothing in it
     // travels anywhere.
-    let scope = PyDict::new(py);
     if let Err(err) = scope.set_item("blastit_app_module", module) {
         python_fail(py, emitter, "BLASTIT_APP (the module to check)", &err);
     }
-    if let Err(err) = py.run(VIEW_PATHS, Some(&scope), None) {
+    if let Err(err) = py.run(VIEW_PATHS, Some(scope), None) {
         python_fail(py, emitter, "the paths a view imports through", &err);
     }
     let paths: Vec<String> =
@@ -719,8 +748,34 @@ fn check_view_paths(py: Python<'_>, app: &str, emitter: &Emitter) {
             Err(err) => python_fail(py, emitter, "the paths a view imports through", &err),
         };
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    if let Some(blocker) = crate::visibility::unreadable(&paths) {
+    // A live interpreter is in this image — stage 1 is past the point where
+    // CPython is up in both installations — and this thread holds the GIL, which
+    // is what the fork protocol needs (§9.3).
+    if let Some(blocker) = crate::visibility::unreadable(&paths, &dropped, true) {
         fail(emitter, &blocker.message());
+    }
+
+    // §5.3/D2: the directories *blastit* puts on `sys.path` are the working
+    // directory it was started in and, for an embedded interpreter, the
+    // interpreter's own `site-packages`. Code there is imported by whichever
+    // route asks for it first, so a directory another uid can write is a route
+    // planting code in another route — refused at boot rather than served.
+    let mut added: Vec<PathBuf> = config
+        .cwd
+        .as_deref()
+        .map(|dir| PathBuf::from(std::ffi::OsString::from_vec(dir.to_vec())))
+        .into_iter()
+        .collect();
+    match scope.get_item("blastit_added_paths") {
+        Ok(Some(value)) => match value.extract::<Vec<String>>() {
+            Ok(paths) => added.extend(paths.into_iter().map(PathBuf::from)),
+            Err(err) => python_fail(py, emitter, "the directories blastit put on sys.path", &err),
+        },
+        Ok(None) => {}
+        Err(err) => python_fail(py, emitter, "the directories blastit put on sys.path", &err),
+    }
+    if let Some(writable) = crate::visibility::writable(&added, &dropped, true) {
+        fail(emitter, &writable.message());
     }
 }
 

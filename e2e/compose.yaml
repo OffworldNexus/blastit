@@ -33,7 +33,7 @@ services:
       - -c
       - >-
         python manage.py migrate -v0 && python manage.py seed &&
-        python /sqlalchemy/setup.py "$$DATABASE_URL"
+        python /sqlalchemy/setup.py
     depends_on: { db: { condition: service_healthy } }
 
   app:
@@ -45,8 +45,10 @@ services:
   # The second app of the end-to-end test (E2b): Flask + SQLAlchemy, on the same
   # image and the same database, with a manifest of its own. It runs *in*
   # `/sqlalchemy`, so the working directory blastit was started in is what puts
-  # `app` on `sys.path` (§5.3) — the app is not installed and nothing sets
-  # `PYTHONPATH` for it.
+  # `app` on `sys.path` (§5.3) — the app is not installed, and `PYTHONPATH` is
+  # emptied here so that nothing else can put anything there: the interesting
+  # path is the working directory, and an inherited `PYTHONPATH` would hide a
+  # regression in it.
   sqlalchemy:
     image: ${E2E_IMAGE:-blastit-e2e}
     environment:
@@ -54,6 +56,7 @@ services:
       BLASTIT_APP: app:application
       BLASTIT_MANIFEST: /sqlalchemy/blastit.toml
       BLASTIT_LOG_FORMAT: json
+      PYTHONPATH: ""
       # The image preloads the Django demo's URLconf; this app has none.
       BLASTIT_PRELOAD: ""
     working_dir: /sqlalchemy

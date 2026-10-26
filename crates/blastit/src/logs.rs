@@ -270,18 +270,22 @@ pub fn render_pretty(value: &Map<String, Value>, color: bool) -> String {
         .and_then(Value::as_str)
         .unwrap_or("info")
         .to_ascii_uppercase();
-    let event = value
-        .get("event")
-        .and_then(Value::as_str)
-        .unwrap_or("event")
-        .to_string();
+    let event = blastit_events::escape_inline(
+        value
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or("event"),
+    );
     let mut line = String::with_capacity(128);
     if color {
         line.push_str(colour_of(&level));
     }
     line.push_str(&clock);
     line.push(' ');
-    line.push_str(&format!("{level:<6}"));
+    // The level and the event name come from the line too, so they are escaped
+    // for printing the same way every value is: only the colour decision reads
+    // the raw level.
+    line.push_str(&format!("{:<6}", blastit_events::escape_inline(&level)));
     if color {
         line.push_str("\u{1b}[0m");
         line.push_str("\u{1b}[1m");
@@ -295,7 +299,7 @@ pub fn render_pretty(value: &Map<String, Value>, color: bool) -> String {
             continue;
         }
         line.push(' ');
-        line.push_str(key);
+        line.push_str(&blastit_events::escape_inline(key));
         line.push('=');
         line.push_str(&render_value(item));
     }
@@ -324,9 +328,16 @@ fn colour_of(level: &str) -> &'static str {
 }
 
 /// One JSON value as it appears in a `key=value` pair.
+///
+/// Every value here comes from a line a component wrote, which means it can
+/// carry application data — a path, a header, a statement, a line of app output.
+/// A control character in one of them is escaped, exactly as the human form
+/// escapes it: a raw `\n` would make one event look like two lines, and a raw
+/// `\u{1b}[2J` would let a view redraw the operator's terminal (or hide what it
+/// wrote from whatever reads the log).
 fn render_value(value: &Value) -> String {
     match value {
-        Value::String(text) => text.clone(),
+        Value::String(text) => blastit_events::escape_inline(text),
         Value::Array(items) => items.iter().map(render_value).collect::<Vec<_>>().join(","),
         other => other.to_string(),
     }
@@ -463,6 +474,56 @@ mod tests {
             EventKind::ManifestWarning(ManifestWarning::new(name.to_string())),
         )
         .with_level(Level::Info)
+    }
+
+    #[test]
+    fn a_forwarded_line_this_build_cannot_read_is_escaped_before_it_is_printed() {
+        // The fallback renders whatever the line holds, and what a line holds
+        // can be an application's own text: a newline would make one event look
+        // like two, and `\u{1b}[2J` would clear the operator's terminal — or hide
+        // what a view wrote from whatever reads the log.
+        let text = capture(LogFormat::Pretty, Level::Info, |emitter| {
+            emitter.forward(
+                &Pipe::Events {
+                    component: Component::View,
+                },
+                "{\"ts\":\"2026-10-25T14:02:11.384Z\",\"level\":\"info\",\
+                 \"event\":\"something.new\",\"line\":\"first\\nsecond\\u001b[2Jthird\",\
+                 \"path\":\"/a\\u0007b\"}",
+            );
+        });
+        assert_eq!(text.lines().count(), 1, "one line, always: {text:?}");
+        assert!(
+            text.contains(r"first\nsecond\u{1b}[2Jthird"),
+            "the escapes are spelled out: {text:?}"
+        );
+        assert!(
+            text.contains(r"path=/a\u{7}b"),
+            "and every value is escaped, not just the one: {text:?}"
+        );
+        let line = text.strip_suffix('\n').unwrap_or(&text);
+        assert!(
+            !line.chars().any(char::is_control),
+            "no control character survives: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_forwarded_line_that_is_not_an_event_is_escaped_in_the_dump() {
+        // The event name and the level come from the line too, and a line this
+        // build does not know goes through the fallback as it is.
+        let text = capture(LogFormat::Pretty, Level::Info, |emitter| {
+            emitter.forward(
+                &Pipe::Events {
+                    component: Component::View,
+                },
+                "{\"ts\":\"2026-10-25T14:02:11.384Z\",\"level\":\"warn\\u001b[2J\",\
+                 \"event\":\"a\\nb\"}",
+            );
+        });
+        assert_eq!(text.lines().count(), 1, "{text:?}");
+        assert!(text.contains(r"a\nb"), "{text:?}");
+        assert!(text.contains(r"WARN\u{1b}[2J"), "{text:?}");
     }
 
     #[test]

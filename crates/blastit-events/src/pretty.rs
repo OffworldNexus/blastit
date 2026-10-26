@@ -235,9 +235,17 @@ fn mebibytes(bytes: u64) -> String {
     format!("{:.0}MiB", bytes as f64 / (1024.0 * 1024.0))
 }
 
-/// Escape the control characters of text coming from an event, so that one
-/// event stays one line and a view cannot redraw the operator's terminal.
-fn escape_inline(text: &str) -> String {
+/// One printable line's worth of arbitrary text: control characters escaped.
+///
+/// Every string a pretty line carries comes from a component that may be
+/// carrying application data — a path, a statement, a line of app output — and a
+/// raw `\n` or `\u{1b}[2J` in one of them would turn one event into two lines, or
+/// clear the operator's terminal. So the escapes are spelled out (`\n`, `\r`,
+/// `\t`, or `\u{…}` for anything else in Unicode's control ranges), and the
+/// result is always exactly one line. It is public because the *fallback* the
+/// logger keeps for a line it cannot read back into an event (`blastit`'s
+/// `render_pretty`) has to escape exactly the same way.
+pub fn escape_inline(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
         match character {

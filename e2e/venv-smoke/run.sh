@@ -146,7 +146,7 @@ else
     echo "  ok   a Python the view uids cannot read is refused"
 fi
 sudo chmod 0755 "$stdlib"
-checked 'mode 0750) is not readable by other uids' \
+checked 'mode 0750) is not readable' \
     "the message says what is wrong with it" "$work/private.log"
 checked "$stdlib" "and names the directory that blocks" "$work/private.log"
 checked 'UV_PYTHON_INSTALL_DIR' \
@@ -172,7 +172,7 @@ else
     echo "  ok   a dbproxy binary the child cannot execute is refused"
 fi
 chmod 0755 "$dbproxy"
-checked 'is not executable by other uids' \
+checked 'is not executable' \
     "the message says what is wrong with it" "$work/dbproxy-mode.log"
 checked "$dbproxy" "and names the file that blocks" "$work/dbproxy-mode.log"
 checked 'chmod o+rx' "and the fix that opens it" "$work/dbproxy-mode.log"

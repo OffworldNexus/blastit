@@ -408,13 +408,15 @@ pub fn parse_addr(text: &str) -> Option<IpAddr> {
 /// The same spelling [`parse_addr`] reads — a bare `ip:port`, or a bracketed
 /// IPv6 literal with one (`[::1]:8080`) — because the two are always read
 /// together: this is the port CGI puts in `REMOTE_PORT` while the address goes
-/// in `REMOTE_ADDR`. `None` when the text carries no port, and when it is no
-/// address at all: a port is the port *of* an address, and `localhost:80` has
-/// neither.
+/// in `REMOTE_ADDR`. `None` when the text carries no port, when the port is `0`
+/// — a socket that arrived from port zero is not a connection anyone made, and
+/// `REMOTE_PORT=0` would be a number an app would take for a port — and when the
+/// text is no address at all: a port is the port *of* an address, and
+/// `localhost:80` has neither.
 pub fn parse_port(text: &str) -> Option<u16> {
     let text = text.trim();
     parse_addr(text)?;
-    split_port(text).1?.parse().ok()
+    split_port(text).1?.parse().ok().filter(|port| *port != 0)
 }
 
 /// A socket peer as `REMOTE_ADDR` spells one: its address, and nothing else.

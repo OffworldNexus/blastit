@@ -24,6 +24,9 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = os.environ.get("E2E_PORT", "18080")
 SQLALCHEMY_PORT = os.environ.get("E2E_SQLALCHEMY_PORT", "18081")
+# The compose project, as `compose.yaml` derives it: a run's artifacts are named
+# after it, so two checkouts running at once do not write the same file.
+PROJECT = os.environ.get("E2E_PROJECT", "blastit-e2e")
 
 
 def compose(*args, **kw):
@@ -72,7 +75,7 @@ def main():
             [sys.executable, os.path.join(HERE, "sqlalchemy_check.py"),
              f"http://127.0.0.1:{SQLALCHEMY_PORT}"]
         ).returncode
-        sqlalchemy_log = os.path.join(tempfile.gettempdir(), "blastit-e2e-sqlalchemy.log")
+        sqlalchemy_log = os.path.join(tempfile.gettempdir(), f"{PROJECT}-sqlalchemy.log")
         logs = compose(
             "logs", "--no-color", "--no-log-prefix", "sqlalchemy", capture_output=True, text=True
         ).stdout

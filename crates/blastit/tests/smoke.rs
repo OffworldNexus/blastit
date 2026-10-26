@@ -591,7 +591,12 @@ impl Drop for RunDir {
 /// [`Server`] insists on a `ready` event, which is exactly what a boot that is
 /// *supposed* to fail never produces; this is the bounded, both-pipes version
 /// the refusals are checked with.
-fn run_to_exit(program: &[&std::ffi::OsStr], env: &[(&str, &str)], uid: u32) -> String {
+fn run_to_exit(
+    program: &[&std::ffi::OsStr],
+    env: &[(&str, &str)],
+    uid: u32,
+    cwd: Option<&Path>,
+) -> String {
     use std::os::unix::process::CommandExt;
     let (program, arguments) = program.split_first().expect("a program to run");
     let mut command = Command::new(program);
@@ -603,6 +608,9 @@ fn run_to_exit(program: &[&std::ffi::OsStr], env: &[(&str, &str)], uid: u32) -> 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     for (key, value) in env {
         command.env(key, value);
     }
@@ -1438,6 +1446,7 @@ fn a_rootless_standalone_install_runs_dbproxy_from_the_capability_free_copy() {
             ("PYTHONPATH", &python_path),
         ],
         uid,
+        None,
     );
     assert!(
         refused.contains("BLASTIT_EXEC"),
@@ -2207,6 +2216,7 @@ fn a_failing_boot_still_says_the_preset_assumption_it_contradicts() {
             ("BLASTIT_LOG_FORMAT", "json"),
         ],
         0,
+        None,
     );
     assert!(
         text.contains("is for a rootless deployment"),
@@ -2243,6 +2253,7 @@ fn an_unknown_preset_is_refused_with_the_list_of_presets() {
             ("BLASTIT_LOG_FORMAT", "json"),
         ],
         0,
+        None,
     );
     assert!(text.contains("unknown preset"), "{text}");
     assert!(text.contains("compose-trafik"), "{text}");
@@ -2264,9 +2275,201 @@ fn an_unknown_preset_is_refused_with_the_list_of_presets() {
             ("BLASTIT_PRESET", "compose-trafik"),
         ],
         0,
+        None,
     );
     assert!(text.contains("BLASTIT_PRESET"), "{text}");
     assert!(text.contains("unknown preset"), "{text}");
+}
+
+#[test]
+fn a_writable_working_directory_is_refused() {
+    // §5.3: blastit puts the directory it was started in on `sys.path`, so a
+    // `0777` one lets a view plant a module another view imports. The check is
+    // about the uids blastit drops to — a view runs as one, and is not the
+    // owner — so the hole is a directory those uids can write, and it is the
+    // *directory* that matters: writing a file into it needs no permission on
+    // anything already there.
+    if !needs_root("writable cwd") {
+        return;
+    }
+    let fixture = Fixture::new("writable-cwd");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    for mode in [0o777, 0o1777] {
+        std::fs::set_permissions(&fixture.path, Permissions::from_mode(mode)).unwrap();
+        let refused = run_to_exit(
+            &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+            &[
+                ("PORT", "8098"),
+                ("BLASTIT_APP", "app:application"),
+                ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+                ("PYTHONPATH", &fixture.python_path()),
+                ("BLASTIT_UID_BASE", "48300"),
+                ("BLASTIT_LOG_FORMAT", "json"),
+            ],
+            0,
+            Some(&fixture.path),
+        );
+        assert!(
+            refused.contains("is writable by another uid"),
+            "mode {mode:o}: the boot refuses:\n{refused}"
+        );
+        assert!(
+            refused.contains(&fixture.path.display().to_string()),
+            "mode {mode:o}: and names the directory:\n{refused}"
+        );
+        assert!(
+            refused.contains("chmod go-w") && refused.contains("sys.path"),
+            "mode {mode:o}: and says what to do, and why it matters:\n{refused}"
+        );
+        assert!(
+            !refused.contains("\"event\":\"ready\""),
+            "mode {mode:o}: nothing is served:\n{refused}"
+        );
+        if mode == 0o1777 {
+            assert!(
+                refused.contains("sticky"),
+                "the sticky bit is answered, not obeyed:\n{refused}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_directory_a_view_can_read_through_its_own_group_is_not_a_blocker() {
+    // The other half of the same check: `root:<view uid> 0750` is readable by
+    // the view — its gid *is* the view's own, which needs no supplementary
+    // group — while the mode bits say nothing at all for "other". Only the
+    // kernel can tell that apart from a directory the view may not read, so it
+    // is asked; a boot that guesses from the bits refuses a working install.
+    if !needs_root("group class") {
+        return;
+    }
+    let fixture = Fixture::new("group-class");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    let base = 48_400;
+    let view = base + 1000;
+
+    // The boot is made to fail *after* the visibility check, on a module that
+    // is not there: the output then says which of the two refused.
+    let run = |base: u32| {
+        let base_text = base.to_string();
+        run_to_exit(
+            &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+            &[
+                ("PORT", "8098"),
+                ("BLASTIT_APP", "app:application"),
+                ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+                ("PYTHONPATH", &fixture.python_path()),
+                ("BLASTIT_UID_BASE", &base_text),
+                ("BLASTIT_PRELOAD", "no.such.module"),
+                ("BLASTIT_LOG_FORMAT", "json"),
+            ],
+            0,
+            None,
+        )
+    };
+
+    std::os::unix::fs::chown(&fixture.path, Some(0), Some(view)).unwrap();
+    std::fs::set_permissions(&fixture.path, Permissions::from_mode(0o750)).unwrap();
+    let text = run(base);
+    assert!(
+        !text.contains("is not readable"),
+        "the view's own group reaches it:\n{text}"
+    );
+    assert!(
+        text.contains("BLASTIT_PRELOAD"),
+        "and the boot stopped at the step after the check:\n{text}"
+    );
+
+    // The same mode in a group no view is in: now it blocks, by name.
+    std::os::unix::fs::chown(&fixture.path, Some(0), Some(base + 500)).unwrap();
+    std::fs::set_permissions(&fixture.path, Permissions::from_mode(0o750)).unwrap();
+    let text = run(base);
+    assert!(
+        text.contains("is not readable"),
+        "a group the view is not in does not:\n{text}"
+    );
+    assert!(
+        text.contains(&fixture.path.display().to_string()) && text.contains("chmod o+rx"),
+        "and the refusal names the path and the fix:\n{text}"
+    );
+}
+
+#[test]
+fn a_boot_s_first_lines_are_in_the_format_its_settings_name() {
+    // §8.1: the first lines of a boot are made before the settings that say how
+    // lines are printed have been read — the capability sets, the placement, the
+    // sibling warning. They wait for the format rather than being written as
+    // JSON, so `BLASTIT_LOG_FORMAT=pretty` gives a human first line, and a boot
+    // that fails later (here: the manifest is not there) prints in the format
+    // the operator asked for too.
+    if !needs_root("stage 0 log format") {
+        return;
+    }
+    let text = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", "8095"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", "/nonexistent/blastit.toml"),
+            ("BLASTIT_UID_BASE", "48500"),
+            ("BLASTIT_LOG_FORMAT", "pretty"),
+        ],
+        0,
+        None,
+    );
+    let first = text.lines().next().unwrap_or_default();
+    assert!(
+        first.contains("boot") && first.contains("stage0"),
+        "the first line is the one the boot made first:\n{text}"
+    );
+    assert!(
+        !first.starts_with('{'),
+        "and it is the human form, not JSON:\n{first}"
+    );
+    assert!(
+        text.contains("nonexistent"),
+        "the failure that follows is in the same format:\n{text}"
+    );
+}
+
+#[test]
+fn a_boot_with_no_readable_configuration_writes_its_first_lines_as_json() {
+    // §8.1: when the configuration cannot be read there is no format to print
+    // in, so the lines that waited go out as JSON — the one format that needs no
+    // settings — and the error follows them. Here the settings are the error:
+    // an unknown `BLASTIT_LOG_FORMAT`, chosen so that a boot which guessed would
+    // have guessed this very format.
+    if !needs_root("stage 0 log format fallback") {
+        return;
+    }
+    let text = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", "8095"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", "/nonexistent/blastit.toml"),
+            ("BLASTIT_UID_BASE", "48500"),
+            ("BLASTIT_LOG_FORMAT", "nope"),
+        ],
+        0,
+        None,
+    );
+    let first = text.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with('{') && first.contains("\"event\":\"boot\""),
+        "JSON, whatever was asked for:\n{text}"
+    );
+    assert!(
+        text.contains("unknown format `nope`"),
+        "and the error comes after them:\n{text}"
+    );
+    assert!(
+        !text.contains("INFO  boot"),
+        "no human line was written anywhere:\n{text}"
+    );
 }
 
 #[test]

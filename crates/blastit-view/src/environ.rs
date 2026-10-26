@@ -413,5 +413,11 @@ mod tests {
         assert_eq!(remote_port("unnamed-socket"), None, "not an address");
         assert_eq!(remote_port(""), None);
         assert_eq!(remote_port("203.0.113.7:70000"), None, "not a port");
+        assert_eq!(
+            remote_port("203.0.113.7:0"),
+            None,
+            "port zero is not a port a client connected from"
+        );
+        assert_eq!(remote_port("[::1]:0"), None);
     }
 }
