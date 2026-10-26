@@ -1,0 +1,83 @@
+name: Docs
+
+# Builds the documentation site on every pull request and every push to
+# `develop`, so a broken link is a red check rather than a broken page.
+#
+# Deployment is deliberately *not* on every push. GitHub Pages in this
+# repository is also where `release.yml` publishes the PEP 503 wheel index
+# (https://offworldnexus.github.io/blastit/simple/), and a deployment replaces
+# the whole site: while `develop` is the only place a wheel can be installed
+# from — 0.1.0 is not on PyPI yet — deploying the docs from `develop` would
+# delete the index that the deployment pipeline depends on. So the site goes up
+# on an explicit `workflow_dispatch`, and on a `v*` tag, which is the release:
+# by then the wheels are on PyPI and the Pages site is free to be just the
+# documentation.
+#
+# The `github-pages` environment restricts deployments to the `develop` branch,
+# so a tag needs a deployment branch policy of its own — see the E2 pull request
+# for the `gh api` call that adds it. Until that is done, a tag deploy is
+# refused by the environment, not by this file.
+
+on:
+  push:
+    branches: [develop]
+    tags: ["v*"]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
+
+permissions:
+  contents: read
+
+env:
+  # Pinned: a Zensical release can change what counts as a warning, and a docs
+  # build that suddenly fails on an unrelated PR is worse than a deliberate
+  # bump. `uvx` is not used here because the runner has pipx and the repository
+  # already installs build tools that way.
+  ZENSICAL_VERSION: "0.0.73"
+
+jobs:
+  build:
+    name: build (--strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Zensical
+        run: pipx install "zensical==$ZENSICAL_VERSION"
+      # `--strict` aborts on a warning, and link validation is on by default:
+      # every internal link and every link anchor is resolved, so a renamed
+      # heading or a moved page fails this job.
+      - name: Build
+        run: zensical build --strict
+      # Only the deploy job consumes this, and `upload-pages-artifact` only
+      # exists for a run that may deploy.
+      - uses: actions/configure-pages@v5
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+      - name: Upload the site
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: deploy (GitHub Pages)
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

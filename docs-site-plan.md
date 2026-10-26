@@ -170,6 +170,28 @@ follows the code.
 Also worth saying in the docs because the code makes it true, and the README
 does not: **the pytest plugin is Django-only.** It defines "a request" as
 `django.core.handlers.base.BaseHandler.get_response`; a Flask or FastAPI app
-has no such call, so its SQL is recorded with no request to belong to and
-nothing is diffed. A Flask project fills its manifest from `blastit-manifest
-fold` instead.
+has no such call, and asking it for a manifest there stops the session with
+`ERROR: blastit: the plugin needs Django in the test environment to record
+requests: No module named 'django'`. A Flask project fills its manifest from
+`blastit-manifest fold` instead.
+
+## Found by running it
+
+Each of these came out of following the site's own pages in
+`/tmp/opencode/e2-{flask,django,flat}` with a wheel built from this checkout, and
+each is documented on the page where a reader would meet it. Nothing here was
+fixed: the plugin is not this step's to change, so the site says what happens and
+the pull request reports it.
+
+| # | What happens | Where it is documented |
+|---|---|---|
+| 1 | The pytest live server hands `WSGI_APPLICATION` to `BLASTIT_APP` as it stands, but Django defines that setting as a *dotted* path (`myshop.wsgi.application`); the boot fails with ``BLASTIT_APP: must be `module:attribute` ``. `--blastit-live-app myproject.wsgi:application` is the workaround, and it is what the plugin's own `python/tests/live_project/settings.py` does with `WSGI_APPLICATION = "wsgi:application"` | [Django, the live server](docs/frameworks/django.md#the-live-server) |
+| 2 | The live server runs with its cwd and `PYTHONPATH` set to the **directory of the settings module**, so a packaged settings module (`myshop/settings.py`) leaves `myshop` unimportable: `ModuleNotFoundError: No module named 'myshop'`. A flat `settings.py` is what the fixture was written for | same |
+| 3 | A **relative** `blastit_manifest` (`pytest.ini`) or `--blastit-manifest blastit.toml` breaks the live server, which runs in another directory: `blastit.toml: No such file or directory (os error 2)`. An absolute path works | same |
+| 4 | `WSGI_APPLICATION` is also what `--blastit-live-app` falls back to, so the same dotted value reaches `BLASTIT_APP` there | same |
+| 5 | A `SELECT set_config(…)` granted by a **global** group is reported in `unused_global` and in the summary (`1 grant(s) of a global group nothing matched`) even though the same report's `connection_setup` shows `granted_in: 2` and `ungranted: 0`: a statement that only runs while a connection opens is not a request's statement | [The plugin reference](docs/reference/pytest-plugin.md#unused_global-can-name-a-grant-that-is-doing-its-job) |
+| 6 | `BLASTIT_APP` has to be importable, and `python -I` drops `PYTHONPATH`; blastit restores the console script's `sys.path`, whose first entry is `.venv/bin`. Without `PYTHONPATH=$PWD` the boot fails with `ModuleNotFoundError: No module named 'app'` | [Getting started](docs/getting-started.md#3-start-it) |
+| 7 | A Python installed under a private home directory (`uv python install` → `~/.local/share/uv/python`, `~` at `0750`) is not readable by the view uids, so the **stdlib** fails to import in a view: `ModuleNotFoundError: No module named 'stringprep'`, `'encodings.idna'`, `'subprocess'`. Only what is compiled into `libpython` works. Real, and the docs did not mention it | [Getting started](docs/getting-started.md#1-install-it), [Troubleshooting](docs/troubleshooting.md#it-does-not-start) |
+| 8 | `REMOTE_ADDR` is an `ip:port` string when the address came from the socket peer, and a bare IP when a trusted header named it (`ClientIp::remote_addr`) | [Anything else](docs/infra/anything-else.md#client-ip-and-trusted-proxies) |
+| 9 | A `__pycache__` directory owned by **root** appears in the project and in the venv's `site-packages`: stage 1 runs `python -I` as root and `PYTHONDONTWRITEBYTECODE` does not reach it | [Troubleshooting](docs/troubleshooting.md#it-does-not-start) |
+
