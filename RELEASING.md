@@ -123,7 +123,7 @@ tag is the release.
 
 ## The development wheels are not this
 
-Every commit to `develop` builds the same wheels (`.github/workflows/release.yml`)
+Every commit to `develop` builds the same wheels (`.github/workflows/wheels.yml`)
 and leaves them as artifacts of that run, with a `0.1.0.dev<run>` version so
 they can't be mistaken for the release of the same commit. Nothing publishes
 them, and nothing outside the run can install from them — they exist to catch a

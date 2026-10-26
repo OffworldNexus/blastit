@@ -9,8 +9,10 @@
 #      is where stage 0 `execve`s it from. It is a plain Rust binary linked
 #      against the system glibc, so build it wherever the wheel's *target* glibc
 #      lives: a runner (ci.yml) is fine for a wheel that stays on that runner's
-#      distribution, and `release.yml` builds the published manylinux wheels
-#      inside the manylinux_2_28 container instead of calling this script.
+#      distribution; CI builds the published wheels inside the manylinux_2_28
+#      container instead of calling this script
+#      (`.github/workflows/wheels.yml` for a commit to `develop`,
+#      `.github/workflows/publish-pypi.yml` for a release).
 #   2. the `blastit._blastit` extension, with `pyo3/extension-module` enabled, so
 #      it does not link `libpython` — the interpreter that loads it already has
 #      it, and an auditwheel-compliant wheel may not depend on it.

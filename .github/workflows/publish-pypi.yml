@@ -19,7 +19,7 @@ name: Publish
 #     tag instead of during it.
 #
 # The development builds — the wheels every commit to `develop` builds, without
-# publishing — are `.github/workflows/release.yml`, and they share
+# publishing — are `.github/workflows/wheels.yml`, and they share
 # `.github/actions/build-wheel` with this one, so the released wheel is the same
 # one every commit already built.
 #

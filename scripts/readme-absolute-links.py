@@ -22,9 +22,10 @@ bytes; everything else goes to the blob view. Targets that already start with a
 scheme (`https:`, `mailto:`), a fragment (`#`), a host (`//`) or a site path
 (`/`) are left as they are.
 
-The ref defaults to `$GITHUB_REF_NAME` — the tag a release is built from, so the
-description points at the released sources — and to `develop` outside CI. The
-repository defaults to `$GITHUB_REPOSITORY`, then to `OffworldNexus/blastit`.
+The ref defaults to the tag a release is built from (`$GITHUB_REF_NAME` when
+`$GITHUB_REF_TYPE` is `tag`), then to the branch, then to the branch a pull
+request targets, and to `develop` outside CI. The repository defaults to
+`$GITHUB_REPOSITORY`, then to `OffworldNexus/blastit`.
 """
 
 from __future__ import annotations
@@ -57,6 +58,19 @@ LINK = re.compile(
 STILL_RELATIVE = re.compile(r"\]\((?P<target>[^)\s]+)\)")
 
 FENCE = re.compile(r"^[ \t]*(?:```|~~~)")
+
+
+def default_ref() -> str:
+    """The ref the absolute links should name.
+
+    A release is built from a tag, so the tag: the description then points at the
+    sources of the version it belongs to. A branch build names the branch. A pull
+    request builds a *merge* ref (`44/merge`), which nobody can open, so the
+    branch it targets is used instead.
+    """
+    if os.environ.get("GITHUB_REF_TYPE") in ("tag", "branch"):
+        return os.environ.get("GITHUB_REF_NAME") or DEFAULT_REF
+    return os.environ.get("GITHUB_BASE_REF") or DEFAULT_REF
 
 
 def absolute(target: str, repo: str, ref: str) -> str | None:
@@ -107,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("paths", nargs="*", default=["README.md"], help="files to rewrite (default: README.md)")
     parser.add_argument("--check", action="store_true", help="change nothing, report what it would change")
-    parser.add_argument("--ref", default=os.environ.get("GITHUB_REF_NAME") or DEFAULT_REF, help="git ref the links point at")
+    parser.add_argument("--ref", default=default_ref(), help="git ref the links point at")
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY") or DEFAULT_REPO, help="OWNER/NAME")
     args = parser.parse_args(argv)
 

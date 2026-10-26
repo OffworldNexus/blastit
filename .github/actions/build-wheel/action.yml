@@ -7,7 +7,7 @@ description: >
   `scripts/build-wheel.sh` does the same thing on a developer's machine; the
   container is what makes the wheel work on an older glibc than the runner's, so
   CI builds in there. Both the development wheels
-  (`.github/workflows/release.yml`) and the published ones
+  (`.github/workflows/wheels.yml`) and the published ones
   (`.github/workflows/publish-pypi.yml`) come from here, so the released wheel is
   the one every commit to `develop` already built and smoked.
 
