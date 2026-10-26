@@ -1,0 +1,23 @@
+# The manifest a real blastit serves the packaged project with (D3c).
+#
+# The same half-written shape as `live_project`'s: the route the suite
+# exercises is granted, and Django's own connection housekeeping lives in a
+# group attached to every route, because under blastit every request opens its
+# own connection (§6).
+version = 1
+groups = ["django"]
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[group.django.db]
+queries = ["SELECT set_config('TimeZone', $1, false)"]
+
+[[route]]
+name = "packaged"
+path = ['/packaged/']
+methods = ["GET"]
+groups = ["django"]
+[route.db]
+queries = ["SELECT 1"]

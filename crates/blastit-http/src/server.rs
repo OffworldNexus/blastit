@@ -191,9 +191,12 @@ async fn refuse_over_capacity<IO>(mut io: IO, peer: &str, emit: &Emit)
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    // The refusal names the client the same way every other one does: the
+    // peer's address, with its port left in `peer_addr` where `REMOTE_PORT`
+    // comes from (CGI).
     emit_rejected(
         emit,
-        peer,
+        &blastit_frame::peer_address(peer),
         503,
         RejectReason::Other("too_many_connections".into()),
     );

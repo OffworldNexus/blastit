@@ -68,7 +68,7 @@
 //!
 //! ```text
 //! ReqHead { method: "GET", path: "/search", headers: ["Host", "Cookie"],
-//!           remote_addr: "203.0.113.7:1234", scheme: Https, server_port: 443, .. }
+//!           remote_addr: "203.0.113.7", scheme: Https, server_port: 443, .. }
 //! RespBody { len: 5120 }
 //! ```
 //!

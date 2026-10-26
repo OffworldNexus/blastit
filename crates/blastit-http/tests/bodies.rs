@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use blastit_frame::{Frame, Limits};
 use blastit_http::HttpConfig;
 
-use common::{Harness, PEER, QUIET, Rig};
+use common::{Harness, PEER_IP, QUIET, Rig};
 
 /// A front end whose channel frames hold about 190 bytes of body, so a body of
 /// any size arrives as several frames.
@@ -189,7 +189,7 @@ async fn a_malformed_chunked_body_is_refused_and_cancelled() {
     );
     assert_eq!(
         h.events.rejections(),
-        [(PEER.to_string(), 400, "malformed_request".to_string())]
+        [(PEER_IP.to_string(), 400, "malformed_request".to_string())]
     );
 }
 
@@ -212,7 +212,7 @@ async fn a_chunked_body_over_the_limit_is_413_and_cancelled() {
     assert_eq!(h.scheduler.until_cancelled().await.0, id);
     assert_eq!(
         h.events.rejections(),
-        [(PEER.to_string(), 413, "body_too_large".to_string())]
+        [(PEER_IP.to_string(), 413, "body_too_large".to_string())]
     );
 }
 
@@ -235,7 +235,7 @@ async fn a_declared_body_over_the_limit_never_reaches_the_scheduler() {
     );
     assert_eq!(
         h.events.rejections(),
-        [(PEER.to_string(), 413, "body_too_large".to_string())]
+        [(PEER_IP.to_string(), 413, "body_too_large".to_string())]
     );
 }
 

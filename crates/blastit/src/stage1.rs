@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::PathBuf;
 
 use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
 use blastit_frame::Limits;
@@ -47,7 +48,7 @@ use blastit_sys::{
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 
 use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
@@ -99,6 +100,49 @@ try:
             sys.path.append(_path)
 except Exception:
     pass
+";
+
+/// Everything a view has to be able to read, as Python paths (§7.2).
+///
+/// A view process imports *after* the fork: a lazy module, a template, a
+/// URLconf that is not in `BLASTIT_PRELOAD`. What it imports through is the
+/// interpreter (its `sys.prefix` and `sys.base_prefix`), the standard library,
+/// `site-packages`, and the directory the application's own module comes from —
+/// and a view is not the owner's uid, so the only bits that apply to it are
+/// "other"'s. Stage 1 collects them here and [`crate::visibility::unreadable`]
+/// decides whether a view could reach them, so a deployment that cannot is
+/// refused at boot instead of answering some requests and raising
+/// `ModuleNotFoundError: No module named 'stringprep'` inside others.
+///
+/// Both a path and what it resolves to are collected: a symlinked interpreter is
+/// reached through the link *and* read at the target, and both have to be
+/// traversable. `blastit_app_module` is the module of `BLASTIT_APP` and is set
+/// by the caller; a module that cannot be found at all is not this check's
+/// business — the import right after says so, in its own words.
+const VIEW_PATHS: &std::ffi::CStr = c"
+import importlib.util, os, sys, sysconfig
+blastit_view_paths = []
+def _add_blastit_path(path):
+    if not path:
+        return
+    for _candidate in (path, os.path.realpath(path)):
+        if _candidate not in blastit_view_paths:
+            blastit_view_paths.append(_candidate)
+for _prefix in (getattr(sys, 'base_prefix', ''), sys.prefix):
+    _add_blastit_path(_prefix)
+for _key, _path in sysconfig.get_paths().items():
+    if _key in ('stdlib', 'platstdlib', 'purelib', 'platlib'):
+        _add_blastit_path(_path)
+if blastit_app_module:
+    try:
+        _spec = importlib.util.find_spec(blastit_app_module)
+    except Exception:
+        _spec = None
+    if _spec is not None:
+        if getattr(_spec, 'origin', None):
+            _add_blastit_path(os.path.dirname(_spec.origin))
+        for _location in (getattr(_spec, 'submodule_search_locations', None) or ()):
+            _add_blastit_path(_location)
 ";
 
 /// §4: close database handles before the fork.
@@ -597,6 +641,14 @@ fn load(
         // not a reason to refuse to start.
         let _ = py.run(SITE_PACKAGES, None, None);
     }
+    if let Err(err) = put_cwd_first(py, config.cwd.as_deref()) {
+        python_fail(py, emitter, "the working directory on sys.path", &err);
+    }
+    // §7.2: what a view imports after the fork has to be readable by *its* uid,
+    // which is not the one that installed the interpreter. A deployment that
+    // fails this is refused here, at boot, rather than answering requests that
+    // only some paths can serve.
+    check_view_paths(py, config.app.as_deref().unwrap_or_default(), emitter);
 
     let spec = config.app.as_deref().unwrap_or_default();
     let app = match import_callable(py, spec) {
@@ -630,6 +682,94 @@ fn load(
     }
     emit_preload(emitter, config, &outcome, refresh_memory(memory));
     app
+}
+
+/// §7.2: refuses a boot whose interpreter or code a view uid could not read.
+///
+/// `app` is `BLASTIT_APP`; its module names the directory the application's own
+/// code comes from, which a view imports through as much as it imports the
+/// standard library. Called *before* the application is imported: this is the
+/// check that has to happen while a failure is a boot failure, because the
+/// imports it stands for happen after the fork, inside one view, long after
+/// everything looked healthy.
+///
+/// A module that cannot be found at all is skipped: the import right after says
+/// so, with the name of the variable an operator has to fix.
+fn check_view_paths(py: Python<'_>, app: &str, emitter: &Emitter) {
+    let module = app.split(':').next().unwrap_or_default();
+    // The snippet defines a function, so its names have to live in a *globals*
+    // mapping rather than in a locals one: Python resolves a function's globals,
+    // not its caller's locals. The dict is this call's own, and nothing in it
+    // travels anywhere.
+    let scope = PyDict::new(py);
+    if let Err(err) = scope.set_item("blastit_app_module", module) {
+        python_fail(py, emitter, "BLASTIT_APP (the module to check)", &err);
+    }
+    if let Err(err) = py.run(VIEW_PATHS, Some(&scope), None) {
+        python_fail(py, emitter, "the paths a view imports through", &err);
+    }
+    let paths: Vec<String> =
+        match scope
+            .get_item("blastit_view_paths")
+            .and_then(|value| match value {
+                Some(value) => value.extract::<Vec<String>>(),
+                None => Ok(Vec::new()),
+            }) {
+            Ok(paths) => paths,
+            Err(err) => python_fail(py, emitter, "the paths a view imports through", &err),
+        };
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    if let Some(blocker) = crate::visibility::unreadable(&paths) {
+        fail(emitter, &blocker.message());
+    }
+}
+
+/// Puts the working directory `blastit` was started in first on `sys.path`
+/// (§5.3, D2).
+///
+/// `python -I` implies `-P`, so the interpreter that runs stage 1 starts with
+/// neither `PYTHONPATH` nor the working directory on `sys.path` — and a project
+/// that is not installed (`pip install -e .` never run) has nowhere else for its
+/// `wsgi:application` to come from. gunicorn, uwsgi and granian all make the
+/// directory they were started in importable, so a project ported from one of
+/// them must not need `PYTHONPATH=$PWD` to serve itself.
+///
+/// This is the **only** thing `-I`'s isolation is given back besides
+/// [`restore_sys_path`]'s recorded entries: no `PYTHON*` variable changes how
+/// the interpreter starts, because none is read. An entry that is already there
+/// is moved to the front rather than duplicated, and `None` — a stage 0 that
+/// could not read its own working directory — does nothing.
+///
+/// # Errors
+///
+/// Whatever the interpreter raises while `sys.path` is edited, which is a boot
+/// that cannot say where its own application lives.
+fn put_cwd_first(py: Python<'_>, cwd: Option<&[u8]>) -> PyResult<()> {
+    let Some(cwd) = cwd else {
+        return Ok(());
+    };
+    let decoded = py
+        .import("os")?
+        .getattr("fsdecode")?
+        .call1((PyBytes::new(py, cwd),))?;
+    let path = py.import("sys")?.getattr("path")?;
+    // The directory is *moved* to the front when it is already on the path —
+    // `sys.path` is searched in order, and "first" is the whole point — and
+    // added when it is not. The index is found before anything is edited, so
+    // the list is never mutated while it is being walked.
+    let length = path.len()?;
+    let mut found = None;
+    for index in 0..length {
+        if path.get_item(index)?.eq(&decoded)? {
+            found = Some(index);
+            break;
+        }
+    }
+    if let Some(at) = found {
+        path.call_method1("pop", (at,))?;
+    }
+    path.call_method1("insert", (0, decoded))?;
+    Ok(())
 }
 
 /// Puts the interpreter's import path back where stage 0 found it (§4).
@@ -844,6 +984,7 @@ fn pair_ok(emitter: &Emitter, what: &str) -> (OwnedFd, OwnedFd) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::fs::File;
+    use std::os::unix::ffi::OsStrExt;
     use std::time::Duration;
 
     use blastit_events::encode_json;
@@ -966,5 +1107,73 @@ mod tests {
             assert!(line.contains("BLASTIT_IMMORTALIZE=0"), "{line}");
             assert!(line.contains("views will copy"), "{line}");
         });
+    }
+
+    /// §5.3: the directory blastit was started in is first on `sys.path`, once.
+    ///
+    /// This is what a project that is not installed serves itself from, so the
+    /// two things that matter are that it is *first* — ahead of the recorded
+    /// `sys.path` of the console script, and of the interpreter's own entries —
+    /// and that a directory already on the path is moved rather than added
+    /// twice. Everything happens under one attached interpreter, and the
+    /// interpreter is put back afterwards, so no other test in this binary sees
+    /// the directory.
+    #[test]
+    fn the_working_directory_goes_first_on_sys_path() {
+        let dir = std::env::temp_dir().join(format!("blastit-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = dir.as_os_str().as_bytes().to_vec();
+        let decoded = dir.to_str().unwrap().to_string();
+        Python::initialize();
+        Python::attach(|py| {
+            let path = py.import("sys").unwrap().getattr("path").unwrap();
+            let before: Vec<String> = path.extract().unwrap();
+
+            put_cwd_first(py, Some(&bytes)).unwrap();
+            assert_eq!(
+                path.get_item(0).unwrap().extract::<String>().unwrap(),
+                decoded,
+                "the working directory is first: {before:?}"
+            );
+            assert_eq!(
+                path.call_method1("count", (decoded.as_str(),))
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1,
+                "and it is on the path exactly once"
+            );
+
+            // A second call moves it back to the front instead of duplicating
+            // it, which is what a `sys.path` that already holds the directory
+            // (a `PYTHONPATH=.` on the console script) looks like.
+            put_cwd_first(py, Some(&bytes)).unwrap();
+            assert_eq!(
+                path.get_item(0).unwrap().extract::<String>().unwrap(),
+                decoded
+            );
+            assert_eq!(
+                path.call_method1("count", (decoded.as_str(),))
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+
+            // `None` is a stage 0 that could not read its own working
+            // directory: nothing changes.
+            let with_dir: Vec<String> = path.extract().unwrap();
+            put_cwd_first(py, None).unwrap();
+            assert_eq!(path.extract::<Vec<String>>().unwrap(), with_dir);
+
+            // Put the interpreter back as it was for every other test here.
+            path.call_method1("remove", (decoded.as_str(),)).unwrap();
+            assert_eq!(
+                path.extract::<Vec<String>>().unwrap(),
+                before,
+                "the path is exactly as it was found"
+            );
+        });
+        let _ = std::fs::remove_dir(&dir);
     }
 }

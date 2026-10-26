@@ -44,6 +44,15 @@ pub(crate) fn build<'py>(
     env.set_item("SERVER_PORT", head.server_port.to_string())?;
     env.set_item("SERVER_PROTOCOL", "HTTP/1.1")?;
     env.set_item("REMOTE_ADDR", &head.remote_addr)?;
+    // CGI splits the connection's address in two, and PEP 3333 keeps the split:
+    // `REMOTE_ADDR` is the address, `REMOTE_PORT` is its port. The only port a
+    // request carries is the connection's — a trusted client-IP chain entry is
+    // an address and nothing else — so a peer that has no port (a socket with no
+    // name) has no `REMOTE_PORT` either, and the key is absent rather than
+    // empty.
+    if let Some(port) = remote_port(&head.peer_addr) {
+        env.set_item("REMOTE_PORT", port.to_string())?;
+    }
     for (name, value) in &headers.http {
         env.set_item(latin1_decode(name), latin1_decode(value))?;
     }
@@ -66,6 +75,22 @@ fn scheme_name(scheme: Scheme) -> &'static str {
         Scheme::Http => "http",
         Scheme::Https => "https",
     }
+}
+
+/// The port `REMOTE_PORT` reports: the one the request arrived from.
+///
+/// CGI and PEP 3333 split a connection's address into `REMOTE_ADDR`, which is
+/// the address alone, and `REMOTE_PORT`. The port is [`ReqHead::peer_addr`]'s —
+/// the only place in a request that has one, because a client-IP chain entry is
+/// an address and nothing else. A peer that is not an address at all is a
+/// *connection* with no name, and then the app is told nothing rather than told
+/// wrongly.
+///
+/// When a trusted proxy's chain named the client, the port here is the
+/// *connection's* (the proxy's): no port for the client exists anywhere in the
+/// request, and `REMOTE_ADDR` is still who the chain says.
+fn remote_port(peer: &str) -> Option<u16> {
+    blastit_frame::parse_port(peer)
 }
 
 /// Split a request target into its path and its query string, both still raw.
@@ -376,5 +401,17 @@ mod tests {
     fn scheme_names_are_the_wsgi_ones() {
         assert_eq!(scheme_name(Scheme::Http), "http");
         assert_eq!(scheme_name(Scheme::Https), "https");
+    }
+
+    #[test]
+    fn the_port_of_a_connection_comes_from_the_peer_address() {
+        assert_eq!(remote_port("203.0.113.7:51000"), Some(51000));
+        assert_eq!(remote_port("[2001:db8::1]:443"), Some(443));
+        assert_eq!(remote_port("[::1]"), None, "no port after the brackets");
+        assert_eq!(remote_port("2001:db8::1"), None, "a bare IPv6 address");
+        assert_eq!(remote_port("203.0.113.7"), None, "a bare IPv4 address");
+        assert_eq!(remote_port("unnamed-socket"), None, "not an address");
+        assert_eq!(remote_port(""), None);
+        assert_eq!(remote_port("203.0.113.7:70000"), None, "not a port");
     }
 }

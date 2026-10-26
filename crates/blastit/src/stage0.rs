@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr};
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::UnixListener;
 use std::time::Duration;
 
@@ -456,6 +456,14 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // a wheel re-executes it with `-I`, which drops `PYTHONPATH` and the
     // working directory. Empty for the standalone binary.
     config.sys_path = host.sys_path().to_vec();
+    // §5.3: and so does the directory blastit was started in, which stage 1 puts
+    // first on `sys.path` — the directory gunicorn, uwsgi and granian all make
+    // importable, so a project that was never `pip install`ed serves its own
+    // `wsgi:application`. It is read here, in stage 0, because that is the one
+    // place that knows where the operator started the server.
+    config.cwd = std::env::current_dir()
+        .ok()
+        .map(|dir| dir.into_os_string().into_vec());
 
     // Everything a secret touched is gone from the process image in one step.
     exec_stage1(

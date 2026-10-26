@@ -225,9 +225,11 @@ def request_probe(request):
 
     E1: a configuration preset is mostly a decision about *whom to believe* —
     which client-IP header, from which peers — so the only way to check one is to
-    ask the app what blastit resolved. ``REMOTE_ADDR`` is that decision: either
-    the socket peer (``ip:port``, nothing was believed) or a bare address that a
-    trusted header named. ``wsgi.url_scheme`` is the same decision applied to
+    ask the app what blastit resolved. ``REMOTE_ADDR`` is that decision — the
+    socket peer's address, or an address a trusted header named — and it is an
+    address and nothing else: the port of the connection is the separate
+    ``REMOTE_PORT`` key, as CGI and PEP 3333 have it.
+    ``wsgi.url_scheme`` is the same decision applied to
     ``X-Forwarded-Proto``: ``https`` only when a peer blastit trusts said so,
     which is why a client's own ``X-Forwarded-Proto`` cannot make a plaintext
     deployment report HTTPS.
@@ -239,6 +241,7 @@ def request_probe(request):
         {
             "route": request.META.get("blastit.route"),
             "remote_addr": request.META.get("REMOTE_ADDR"),
+            "remote_port": request.META.get("REMOTE_PORT"),
             "scheme": request.META.get("wsgi.url_scheme"),
             "host": request.META.get("HTTP_HOST"),
             "saw_forwarded_for": "HTTP_X_FORWARDED_FOR" in request.META,

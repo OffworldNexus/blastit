@@ -12,7 +12,7 @@ use blastit_events::{Component, Level};
 use blastit_frame::{Frame, RespHead};
 use blastit_http::{HttpConfig, HttpError};
 
-use common::{Harness, Listening, PEER, QUIET, Rig, find};
+use common::{Harness, Listening, PEER_IP, QUIET, Rig, find};
 
 /// A response head with nothing but a status.
 fn bare_head(status: u16) -> RespHead {
@@ -75,10 +75,14 @@ async fn serve_answers_a_request_over_a_real_listener() {
         .await;
     let (id, head) = listening.scheduler.head().await;
     assert_eq!(head.target, b"/health");
+    assert_eq!(
+        head.remote_addr, "127.0.0.1",
+        "a real connection reports its socket peer's address, and not its port"
+    );
     assert!(
-        head.remote_addr.starts_with("127.0.0.1:"),
-        "a real connection reports its socket peer: {}",
-        head.remote_addr
+        head.peer_addr.starts_with("127.0.0.1:"),
+        "the socket peer keeps its port: {}",
+        head.peer_addr
     );
     assert_eq!(listening.scheduler.end().await, id);
     listening.scheduler.respond(id, 200, &[], b"pong").await;
@@ -264,8 +268,8 @@ async fn the_events_sink_carries_nothing_that_must_never_be_logged() {
     // §8.1: no query string, no header value and no body ever appears.
     let encoded = blastit_events::encode_json(event);
     assert!(
-        encoded.contains(r#""remote_addr":"203.0.113.7:54321""#),
-        "{encoded}"
+        encoded.contains(r#""remote_addr":"203.0.113.7""#),
+        "`remote_addr` is the address alone: {encoded}"
     );
     assert!(encoded.contains(r#""status":413"#), "{encoded}");
     assert!(
@@ -326,7 +330,7 @@ async fn the_server_hands_out_its_configuration_and_channel_state() {
         .write(b"GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 9.9.9.9\r\n\r\n")
         .await;
     let (id, head) = rig.scheduler.head().await;
-    assert_eq!(head.remote_addr, PEER, "untrusted headers are ignored");
+    assert_eq!(head.remote_addr, PEER_IP, "untrusted headers are ignored");
     assert_eq!(head.server_port, 1234);
     assert_eq!(rig.scheduler.end().await, id);
     task.abort();

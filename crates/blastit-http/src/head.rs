@@ -86,6 +86,11 @@ pub struct RequestHead {
     pub keep_alive: bool,
     /// The client address, as the one resolver decided it (D5): the peer, or
     /// the address a trusted `BLASTIT_CLIENT_IP_HEADER` chain names.
+    ///
+    /// This is what the app sees as `REMOTE_ADDR`, so it is an address and
+    /// nothing else — a bare IP, normalised. The port the connection arrived
+    /// from is not in it (CGI, PEP 3333): it is [`RequestHead::peer_addr`]'s,
+    /// and the view reports it as `REMOTE_PORT`.
     pub remote_addr: String,
     /// The address the request actually arrived on, `ip:port` (D5). Never a
     /// header's value, and the only thing the trust decision is made on.
@@ -420,13 +425,17 @@ fn valid_host(host: &[u8]) -> bool {
 /// trusted peer's `BLASTIT_CLIENT_IP_HEADER` chain can name someone else, and a
 /// chain with an unparsable entry names nobody.
 ///
+/// What is reported is the address alone, with no port, brackets or zone: it is
+/// the `REMOTE_ADDR` the app sees, and the view takes `REMOTE_PORT` from
+/// [`RequestHead::peer_addr`] (CGI, PEP 3333).
+///
 /// A peer that cannot be read as an address has no resolution, and is reported
 /// verbatim: this is a front end that logs rather than a scheduler that keys.
 fn client_addr(raw: &[(Vec<u8>, Vec<u8>)], cfg: &HttpConfig, peer: &str) -> String {
     cfg.client_ip
         .resolve(peer, raw)
-        .map(|client| client.remote_addr(peer))
-        .unwrap_or_else(|| peer.to_string())
+        .map(|client| client.remote_addr())
+        .unwrap_or_else(|| blastit_frame::peer_address(peer))
 }
 
 /// The scheme, from `X-Forwarded-Proto` when the peer may be trusted.
@@ -518,7 +527,11 @@ mod tests {
         assert_eq!(head.body, BodyFraming::None);
         assert!(!head.expect_continue);
         assert!(head.keep_alive);
-        assert_eq!(head.remote_addr, "10.0.0.1:9999");
+        assert_eq!(
+            head.remote_addr, "10.0.0.1",
+            "the peer's port is not part of `REMOTE_ADDR`"
+        );
+        assert_eq!(head.peer_addr, "10.0.0.1:9999", "the peer keeps it");
         assert_eq!(head.scheme, Scheme::Http);
         assert_eq!(head.server_name, "example.com");
         assert_eq!(head.headers.len(), 2);
@@ -746,7 +759,7 @@ mod tests {
         // ignored: 1.2.3.4 is whatever the client typed.
         let raw = "GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 1.2.3.4, 5.6.7.8\r\nX-Forwarded-Proto: https\r\n\r\n";
         let head = parse_head(raw);
-        assert_eq!(head.remote_addr, "10.0.0.1:9999");
+        assert_eq!(head.remote_addr, "10.0.0.1");
         assert_eq!(head.peer_addr, "10.0.0.1:9999");
         assert_eq!(head.scheme, Scheme::Http, "and neither can its scheme");
 
@@ -755,7 +768,7 @@ mod tests {
         cfg.client_ip.trusted = TrustedProxies::none();
         match parse(raw.as_bytes(), &cfg, "127.0.0.1:9999") {
             Parsed::Complete(head, _) => {
-                assert_eq!(head.remote_addr, "127.0.0.1:9999");
+                assert_eq!(head.remote_addr, "127.0.0.1");
                 assert_eq!(head.scheme, Scheme::Http);
             }
             other => panic!("expected a complete head, got {other:?}"),
@@ -789,7 +802,7 @@ mod tests {
         for value in ["", " ", " , "] {
             let raw = format!("GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: {value}\r\n\r\n");
             match parse(raw.as_bytes(), &cfg(), "127.0.0.1:1") {
-                Parsed::Complete(head, _) => assert_eq!(head.remote_addr, "127.0.0.1:1"),
+                Parsed::Complete(head, _) => assert_eq!(head.remote_addr, "127.0.0.1"),
                 other => panic!("expected a complete head, got {other:?}"),
             }
         }
@@ -797,7 +810,7 @@ mod tests {
         // An unparsable entry makes the whole header ignored (it never falls
         // through to another header), and IPv4-mapped addresses are normalised.
         for (value, expected) in [
-            ("1.2.3.4, garbage", "127.0.0.1:1"),
+            ("1.2.3.4, garbage", "127.0.0.1"),
             ("::ffff:203.0.113.7", "203.0.113.7"),
             ("[2001:db8::1]", "2001:db8::1"),
         ] {
@@ -875,7 +888,7 @@ mod tests {
             "POST / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 1.2.3.4, 5.6.7.8\r\nTransfer-Encoding: gzip\r\n\r\n",
         );
         assert_eq!(reject.status, 501);
-        assert_eq!(reject.remote_addr.as_deref(), Some("10.0.0.1:9999"));
+        assert_eq!(reject.remote_addr.as_deref(), Some("10.0.0.1"));
 
         // From a trusted peer the same refusal names the client.
         let raw = "POST / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 1.2.3.4, 5.6.7.8\r\nTransfer-Encoding: gzip\r\n\r\n";

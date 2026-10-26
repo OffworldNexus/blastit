@@ -33,8 +33,8 @@ async fn a_simple_get_goes_out_and_comes_back_byte_for_byte() {
         "the query string is forwarded"
     );
     assert_eq!(
-        head.remote_addr, "203.0.113.7:54321",
-        "the TCP peer by default"
+        head.remote_addr, "203.0.113.7",
+        "the TCP peer's address by default, and no port (CGI)"
     );
     assert_eq!(head.server_name, "example.com");
     assert_eq!(head.server_port, 8080);

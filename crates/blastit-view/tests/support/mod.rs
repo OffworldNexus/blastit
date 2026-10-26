@@ -462,7 +462,7 @@ pub fn head(method: &str, target: &str, headers: Vec<(&str, &str)>) -> ReqHead {
             .into_iter()
             .map(|(name, value)| (name.as_bytes().to_vec(), value.as_bytes().to_vec()))
             .collect(),
-        remote_addr: "203.0.113.7:51000".to_string(),
+        remote_addr: "203.0.113.7".to_string(),
         scheme: Scheme::Http,
         server_name: "view.test".to_string(),
         server_port: 80,

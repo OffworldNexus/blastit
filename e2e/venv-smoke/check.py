@@ -1,14 +1,17 @@
 """The checks the venv smoke test runs against the server, in the venv. Stdlib only.
 
-    check.py --base-url http://127.0.0.1:8080 --prefix /work/.venv --marker blastit-venv-smoke
+    check.py --base-url http://127.0.0.1:8080 --prefix /work/.venv --cwd /work \
+        --marker blastit-venv-smoke
 
 Waits for the server to answer (the boot takes a moment, and it fails fast if it
 never does), then asserts what the packaging is supposed to guarantee: the app is
-served by the interpreter of the virtualenv the wheel was installed into.
+served by the interpreter of the virtualenv the wheel was installed into, from a
+project that is not installed and has no `PYTHONPATH`.
 """
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -41,6 +44,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:8080")
     parser.add_argument("--prefix", required=True, help="the virtualenv's directory")
+    parser.add_argument(
+        "--cwd",
+        help="the directory blastit was started in, which `sys.path[0]` must be "
+        "(the project is not installed and no PYTHONPATH is set)",
+    )
     parser.add_argument("--marker", default="blastit-venv-smoke")
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
@@ -73,6 +81,18 @@ def main():
         f"PATH_INFO reached the app ({document.get('path')!r})",
     )
     check(document.get("route") == "root", f"the manifest routed it ({document.get('route')!r})")
+    if args.cwd:
+        first = document.get("path_first")
+        check(
+            first is not None and os.path.realpath(first) == os.path.realpath(args.cwd),
+            f"the working directory blastit was started in is first on sys.path "
+            f"({first!r}, expected {args.cwd!r})",
+        )
+        check(
+            document.get("cwd") != args.cwd,
+            "the app's own working directory is the view's scratch directory, so "
+            "the entry above is the server's, not the view's",
+        )
 
     for failure in FAILURES:
         print(f"FAILED: {failure}")

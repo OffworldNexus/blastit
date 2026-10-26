@@ -755,6 +755,22 @@ pub struct Config {
     /// carried one byte per character ([`latin1`]), which is the identity for
     /// the ASCII of every ordinary path.
     pub sys_path: Vec<Vec<u8>>,
+    /// The working directory `blastit` was launched in (D2, §5.3).
+    ///
+    /// Another field that comes from no environment variable: stage 0 reads it
+    /// (`getcwd`) and stage 1 puts it first on `sys.path`, because that is what
+    /// every other WSGI server does with the directory it was started in —
+    /// gunicorn, uwsgi and granian all make the working directory importable, so
+    /// a project that is not installed (`pip install -e .` never run) serves its
+    /// own `wsgi:application` without `PYTHONPATH`. `-I` drops the working
+    /// directory from `sys.path` along with `PYTHONPATH`, which is exactly what
+    /// this puts back — and only this, so the isolation from *environment*
+    /// variables stays.
+    ///
+    /// Bytes, like [`Config::sys_path`], because a directory is a path and a
+    /// path is bytes; `None` when stage 0 could not read the working directory
+    /// at all, which is a boot about to fail for other reasons.
+    pub cwd: Option<Vec<u8>>,
     /// D6: the privilege mode init detected, and the capabilities it holds.
     ///
     /// Another field that comes from no environment variable: stage 0 reads
@@ -835,6 +851,7 @@ impl Default for Config {
             max_connections: 1024,
             proxy_outputs: BTreeMap::new(),
             sys_path: Vec::new(),
+            cwd: None,
             privilege: None,
             preset: None,
         }
@@ -1612,6 +1629,16 @@ impl Config {
                     .collect(),
             ),
         );
+        // D2: the directory `blastit` was started in, in bytes like `sys.path`
+        // — stage 1 puts it first on `sys.path`, which is what makes a project
+        // that is not installed importable without `PYTHONPATH` (§5.3).
+        object.insert(
+            "cwd".into(),
+            match &self.cwd {
+                None => Value::Null,
+                Some(dir) => Value::from(latin1(dir)),
+            },
+        );
         // E1: which preset is in force, what it supplied and what an explicit
         // variable overrode. Every value here is one of blastit's own, so the
         // document stays free of the operator's environment.
@@ -1750,6 +1777,9 @@ impl Config {
             .iter()
             .map(|entry| unlatin1("sys_path", entry))
             .collect::<Result<Vec<Vec<u8>>, ConfigError>>()?;
+        config.cwd = json_opt_string(value, "cwd")?
+            .map(|dir| unlatin1("cwd", &dir))
+            .transpose()?;
         Ok(config)
     }
 }
@@ -2688,6 +2718,31 @@ mod tests {
         json["sys_path"] = serde_json::json!(["/app/\u{20ac}"]);
         let err = Config::from_json(&json).unwrap_err();
         assert!(err.to_string().contains("sys_path"), "{err}");
+    }
+
+    #[test]
+    fn the_working_directory_blastit_started_in_travels_in_the_document() {
+        // D2/§5.3: stage 1 puts it first on `sys.path`, so it is carried as
+        // bytes like every other path — a directory that is not valid UTF-8 is
+        // a directory like any other.
+        let mut config = Config::default();
+        assert_eq!(config.cwd, None, "nothing was started in a directory yet");
+        assert_eq!(config.to_json()["cwd"], serde_json::Value::Null);
+        config.cwd = Some(vec![b'/', b'a', 0xff, b'p']);
+        let json = config.to_json();
+        assert_eq!(json["cwd"], serde_json::json!("/a\u{ff}p"));
+        assert_eq!(Config::from_json(&json).unwrap().cwd, config.cwd);
+
+        // A directory outside latin-1, and a member that is not a string: a
+        // document stage 0 did not write names the field.
+        let mut json = Config::default().to_json();
+        json["cwd"] = serde_json::json!("/app/\u{20ac}");
+        let err = Config::from_json(&json).unwrap_err();
+        assert!(err.to_string().contains("cwd"), "{err}");
+        let mut json = Config::default().to_json();
+        json["cwd"] = serde_json::json!(["/app"]);
+        let err = Config::from_json(&json).unwrap_err();
+        assert!(err.to_string().contains("cwd"), "{err}");
     }
 
     #[test]

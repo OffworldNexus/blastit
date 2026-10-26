@@ -765,6 +765,8 @@ def application(environ, start_response):
             "gid": os.getgid(),
             "route": environ.get("blastit.route"),
             "script": environ.get("SCRIPT_NAME"),
+            "remote_addr": environ.get("REMOTE_ADDR"),
+            "remote_port": environ.get("REMOTE_PORT"),
         }).encode()
         return respond(start_response, body)
     body = ("uid=%d pid=%d path=%s" % (os.getuid(), os.getpid(), path)).encode()
@@ -1046,6 +1048,20 @@ fn the_app_environment_has_no_blastit_variables_and_home_is_its_scratch_director
     );
     assert_eq!(value["route"].as_str().unwrap(), "one");
     assert_eq!(value["gid"].as_u64().unwrap(), u64::from(base + 1000));
+    // CGI and PEP 3333: the app is told the client's address and its port as
+    // two keys, and the address holds no port.
+    assert_eq!(
+        value["remote_addr"].as_str().unwrap(),
+        "127.0.0.1",
+        "the socket peer's address alone: {}",
+        server.stdout_text()
+    );
+    assert!(
+        value["remote_port"]
+            .as_str()
+            .is_some_and(|port| port.parse::<u16>().is_ok_and(|port| port > 0)),
+        "the connection's port, as a string: {value}"
+    );
 }
 
 #[test]
@@ -2210,17 +2226,12 @@ fn a_preset_is_accepted_and_reported_at_boot() {
         .unwrap_or_else(|| panic!("no request event: {requests:?}"));
     assert_eq!(forged["remote_addr"], "203.0.113.7", "{forged}");
 
-    // Without the header, the socket peer is the client — its own ephemeral
-    // port, which is what `REMOTE_ADDR` is when nothing is forwarded.
+    // Without the header, the socket peer's address is the client — with its
+    // port nowhere in `REMOTE_ADDR`, which is the address alone (CGI).
     assert_eq!(server.get("/one").status, 200);
     let requests = server.wait_for_events("request", 2);
     let honest = requests.last().expect("a request event");
-    assert!(
-        honest["remote_addr"]
-            .as_str()
-            .is_some_and(|addr| addr.starts_with("127.0.0.1:")),
-        "{honest}"
-    );
+    assert_eq!(honest["remote_addr"], "127.0.0.1", "{honest}");
     assert!(
         server
             .stdout_text()
@@ -2326,10 +2337,8 @@ fn a_client_ip_header_is_only_believed_when_it_is_configured_to_be() {
     );
     let requests = server.wait_for_events("request", 2);
     let event = requests.last().expect("a request event");
-    assert!(
-        event["remote_addr"]
-            .as_str()
-            .is_some_and(|addr| addr.starts_with("127.0.0.1:")),
-        "{event}"
+    assert_eq!(
+        event["remote_addr"], "127.0.0.1",
+        "the socket peer's address, without its port: {event}"
     );
 }

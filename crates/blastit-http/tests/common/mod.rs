@@ -21,6 +21,10 @@ use tokio::task::JoinHandle;
 /// The address every connection is accepted from, unless a test says otherwise.
 pub const PEER: &str = "203.0.113.7:54321";
 
+/// The same peer with no port: what the app is told as `REMOTE_ADDR` (CGI and
+/// PEP 3333 make that the address alone; the port is `REMOTE_PORT`).
+pub const PEER_IP: &str = "203.0.113.7";
+
 /// How long a test waits for bytes before deciding they are not coming.
 pub const PATIENCE: Duration = Duration::from_secs(5);
 
