@@ -116,7 +116,7 @@ def compose_remote(ssh, env, *args, check_rc=True):
 
 
 def remote_env(env):
-    """The compose variables, as `env VAR=value …` for a remote shell."""
+    """The compose variables, as `VAR=value …` for `export` in a remote shell."""
     return " ".join(
         f"{name}={env[name]}"
         for name in ("E2E_PROJECT", "E2E_IMAGE", "E2E_PORT", "E2E_DB_PASSWORD",
@@ -401,7 +401,7 @@ def droplet(args):
             log(f"the interpreter's file capabilities on the droplet: {caps.stdout.strip()}")
             rc |= 0 if "cap_setuid" in caps.stdout and "cap_setpcap" in caps.stdout else 1
             inspect = (
-                f"cd /root/blastit && env {remote_env(env)} docker inspect -f "
+                f"cd /root/blastit && export {remote_env(env)} && docker inspect -f "
                 "'User={{.Config.User}} CapDrop={{.HostConfig.CapDrop}} "
                 "CapAdd={{.HostConfig.CapAdd}}' "
                 '"$(docker compose -f e2e/rootless/compose.yml ps -q app)"'
