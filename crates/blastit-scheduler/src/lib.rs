@@ -63,14 +63,15 @@
 mod config;
 mod ctl;
 mod error;
+mod fair;
 mod path;
 mod route;
 mod scheduler;
 mod task;
 
 pub use crate::config::{
-    MEMORY_CHECK_INTERVAL, MIN_MEM_RESERVE, MemoryProbe, SPAWN_BACKOFF, SchedulerConfig,
-    derived_view_cap, mem_reserve,
+    FAIR_GC_INTERVAL, FairConfig, MEMORY_CHECK_INTERVAL, MIN_MEM_RESERVE, MemoryProbe,
+    SPAWN_BACKOFF, SchedulerConfig, derived_view_cap, mem_reserve,
 };
 pub use crate::ctl::{CtlChannel, UnixCtl};
 pub use crate::error::SchedulerError;
