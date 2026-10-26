@@ -566,8 +566,12 @@ def render(additions: list[_Addition]) -> str:
             continue
         lines: list[str] = [
             f"# {addition.route} (proxy {addition.proxy}): what the log's denials are missing",
-            f"[route.{addition.proxy}]",
         ]
+        # The grant's own section, only when something goes in it: a
+        # `[route.<proxy>]` with nothing under it says nothing, and a route that
+        # only gains a table grant needs none.
+        if addition.queries or addition.functions:
+            lines.append(f"[route.{addition.proxy}]")
         if addition.queries:
             lines.append("queries = [")
             for sql, reason in addition.queries:

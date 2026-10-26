@@ -1824,7 +1824,13 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     if _postgresql_url_variable(session.manifest_path) is not None:
         # The test database has to exist, and reading its name from the
         # connection is only right once pytest-django has created it.
-        request.getfixturevalue("django_db_setup")
+        try:
+            request.getfixturevalue("django_db_setup")
+        except pytest.FixtureLookupError as error:
+            pytest.skip(
+                "blastit: a live server is pointed at the *test* database, which "
+                f"pytest-django's django_db_setup creates: {error}"
+            )
     # The views run as their own uids: they have to be able to read the code.
     _make_reachable(_project_directory())
     live = _start_live_server(prefix, request.config, tmp_path / "blastit-live.log")
