@@ -35,6 +35,12 @@ dependencies = []
 
 [project.scripts]
 blastit = "blastit.__main__:main"
+# D3c: the manifest tooling, next to the server. `blastit-manifest fold` reads
+# blastit's own JSON logs and prints (or writes) the grants a manifest is
+# missing, over the same normalisation and table-grant analysis the pytest
+# plugin uses. `python -m blastit.fold` does the same for an environment where
+# only the package is importable.
+blastit-manifest = "blastit.fold:main"
 
 # D3b: pytest finds the plugin by itself once the wheel is installed, so a
 # project only has to ask for a manifest (`pytest --blastit-manifest

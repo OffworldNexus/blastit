@@ -269,6 +269,167 @@ impl fmt::Display for StatementKind {
     }
 }
 
+/// What PostgreSQL's own parser says a statement is (D3c).
+///
+/// [`analyze`] answers only for the four kinds a table grant can cover, because
+/// that is all a table grant can allow. A tool that has to decide whether a
+/// statement read out of a log may be granted *at all* — `blastit-manifest fold`
+/// — needs an answer for every kind: a `SET`, a `COPY`, a `CREATE TABLE`, the
+/// transaction commands. That is what [`classify`] gives it, without a second
+/// parser and without guessing from the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StatementClass {
+    /// `SELECT`, `VALUES`, and a `WITH` clause around either.
+    Select,
+    /// `INSERT`, including its `ON CONFLICT` clause.
+    Insert,
+    /// `UPDATE`.
+    Update,
+    /// `DELETE`.
+    Delete,
+    /// Anything else: DDL, `SET`, `COPY`, `DO`, `CALL`, `LOCK`, `GRANT`,
+    /// `TRUNCATE`, `VACUUM`, `LISTEN`, the transaction commands — every kind a
+    /// grant is not an allowlist for.
+    Other,
+}
+
+impl StatementClass {
+    /// The lowercase spelling, the same word a grant's operation keys use.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::Delete => "delete",
+            Self::Other => "other",
+        }
+    }
+
+    /// Whether the four plain kinds a table grant covers include this one.
+    pub const fn is_plain(self) -> bool {
+        !matches!(self, Self::Other)
+    }
+}
+
+impl fmt::Display for StatementClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One statement's kind, and the name to say it by (D3c).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Classified {
+    class: StatementClass,
+    label: String,
+    statements: usize,
+}
+
+impl Classified {
+    /// The kind, in the words a grant and a report use.
+    pub const fn class(&self) -> StatementClass {
+        self.class
+    }
+
+    /// Whether a `queries` entry — and a table grant — may hold this statement.
+    ///
+    /// False for everything a grant is not an allowlist for, and false for a
+    /// text that holds more than one statement: a grant is one statement, so a
+    /// caller has to split the text rather than write it (§6, D3c).
+    pub const fn is_plain(&self) -> bool {
+        self.class.is_plain() && self.statements == 1
+    }
+
+    /// How many statements the text holds. One for everything a grant can hold.
+    pub const fn statements(&self) -> usize {
+        self.statements
+    }
+
+    /// The statement's own name, for a message: `SELECT`, `SET`, `CREATE TABLE`.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+/// Classifies the one statement in `sql`, with PostgreSQL's own parser (D3c).
+///
+/// Unlike [`analyze`] this succeeds for *every* statement libpg_query can parse,
+/// and says what it is; the four kinds a table grant can cover come back as
+/// [`StatementClass::Select`] and friends, everything else as
+/// [`StatementClass::Other`] with its own name in [`Classified::label`], and a
+/// text that holds several statements carries how many — a grant is one
+/// statement, so a caller has to refuse it rather than pick one.
+///
+/// # Errors
+///
+/// [`AnalysisError::Syntax`] when the text is not valid SQL, and
+/// [`AnalysisError::Empty`] when it holds no statement at all.
+pub fn classify(sql: &str) -> Result<Classified, AnalysisError> {
+    let parsed = pg_query::parse(sql).map_err(|error| AnalysisError::Syntax(syntax(&error)))?;
+    let statements = &parsed.protobuf.stmts;
+    if statements.is_empty() {
+        return Err(AnalysisError::Empty);
+    }
+    let statement = statements[0].stmt.as_ref().ok_or(AnalysisError::Empty)?;
+    let node = statement.node.as_ref().ok_or(AnalysisError::Empty)?;
+    let tree = serde_json::to_value(node)
+        .map_err(|error| AnalysisError::NotUnderstood(format!("readable SQL: {error}")))?;
+    let kind = one_of(&tree)
+        .map(|(kind, _)| kind)
+        .ok_or(AnalysisError::Empty)?;
+    let class = match kind {
+        "SelectStmt" => StatementClass::Select,
+        "InsertStmt" => StatementClass::Insert,
+        "UpdateStmt" => StatementClass::Update,
+        "DeleteStmt" => StatementClass::Delete,
+        _ => StatementClass::Other,
+    };
+    let label = match statements.len() {
+        1 => classify_label(&tree, kind),
+        count => format!("{count} statements"),
+    };
+    Ok(Classified {
+        class,
+        label,
+        statements: statements.len(),
+    })
+}
+
+/// What to call a statement, node kinds that share a name included.
+///
+/// `RESET` and `SET ROLE` are both a `VariableSetStmt` to PostgreSQL's parser,
+/// and a person reading "RESET ALL is a SET" would look for the wrong thing, so
+/// the node's own `kind` field decides between them.
+fn classify_label(tree: &serde_json::Value, node: &str) -> String {
+    match node {
+        "VariableSetStmt" if is_reset(tree) => "RESET".to_string(),
+        "GrantStmt" if is_revoke(tree) => "REVOKE".to_string(),
+        _ => statement_label(node).to_string(),
+    }
+}
+
+/// Whether a `GrantStmt` is a `REVOKE` (`is_grant` false) rather than a `GRANT`.
+fn is_revoke(tree: &serde_json::Value) -> bool {
+    let Some((kind, body)) = one_of(tree) else {
+        return false;
+    };
+    kind == "GrantStmt" && body.get("is_grant") == Some(&serde_json::Value::Bool(false))
+}
+
+/// Whether a `VariableSetStmt` is a `RESET` (`VAR_RESET`, `VAR_RESET_ALL`)
+/// rather than a `SET`.
+fn is_reset(tree: &serde_json::Value) -> bool {
+    use pg_query::protobuf::VariableSetKind;
+
+    let Some((_, body)) = one_of(tree) else {
+        return false;
+    };
+    let Some(kind) = body.get("kind").and_then(serde_json::Value::as_i64) else {
+        return false;
+    };
+    kind == VariableSetKind::VarReset as i64 || kind == VariableSetKind::VarResetAll as i64
+}
+
 /// The privilege one access needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Op {
@@ -667,6 +828,10 @@ fn syntax(error: &pg_query::Error) -> String {
 /// How a statement kind is named in a refusal.
 fn statement_label(kind: &str) -> &str {
     match kind {
+        "SelectStmt" => "SELECT",
+        "InsertStmt" => "INSERT",
+        "UpdateStmt" => "UPDATE",
+        "DeleteStmt" => "DELETE",
         "TransactionStmt" => "a transaction-control statement",
         "VariableSetStmt" => "SET",
         "VariableShowStmt" => "SHOW",
@@ -688,6 +853,37 @@ fn statement_label(kind: &str) -> &str {
         "TruncateStmt" => "TRUNCATE",
         "GrantStmt" => "GRANT",
         "RevokeStmt" => "REVOKE",
+        // DDL: a statement a grant is not an allowlist for, named the way a
+        // person reading a denial expects (`CREATE TABLE`, not `CreateStmt`).
+        "CreateStmt" => "CREATE TABLE",
+        "CreateTableAsStmt" => "CREATE TABLE AS",
+        "AlterTableStmt" => "ALTER TABLE",
+        "AlterDomainStmt" => "ALTER DOMAIN",
+        "AlterDatabaseStmt" => "ALTER DATABASE",
+        "AlterDatabaseSetStmt" => "ALTER DATABASE SET",
+        "AlterRoleStmt" => "ALTER ROLE",
+        "AlterRoleSetStmt" => "ALTER ROLE SET",
+        "AlterOwnerStmt" => "ALTER … OWNER TO",
+        "CreateRoleStmt" => "CREATE ROLE",
+        "DropRoleStmt" => "DROP ROLE",
+        "IndexStmt" => "CREATE INDEX",
+        "ViewStmt" => "CREATE VIEW",
+        "DropStmt" => "DROP",
+        "RenameStmt" => "ALTER … RENAME",
+        "RefreshMatViewStmt" => "REFRESH MATERIALIZED VIEW",
+        "ClusterStmt" => "CLUSTER",
+        "CreateFunctionStmt" => "CREATE FUNCTION",
+        "CreateExtensionStmt" => "CREATE EXTENSION",
+        "CreateSchemaStmt" => "CREATE SCHEMA",
+        "CreateSeqStmt" => "CREATE SEQUENCE",
+        "CreateTrigStmt" => "CREATE TRIGGER",
+        "CreatePolicyStmt" => "CREATE POLICY",
+        "VacuumStmt" => "VACUUM",
+        "DefineStmt" => "CREATE",
+        "CommentStmt" => "COMMENT",
+        "RuleStmt" => "CREATE RULE",
+        "SecLabelStmt" => "SECURITY LABEL",
+        "DefElem" => "a definition",
         other => other,
     }
 }
