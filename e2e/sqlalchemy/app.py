@@ -34,10 +34,12 @@ from sqlalchemy.engine import make_url
 app = Flask(__name__)
 
 #: What blastit rendered for the app: no password, and the view's own socket
-#: directory as the `host` parameter. SQLAlchemy's `postgresql+psycopg://`
-#: dialect hands `host` and `port` straight to `psycopg.connect`.
+#: directory as the `host` parameter. SQLAlchemy's `postgresql+psycopg://` dialect
+#: hands `host` and `port` straight to `psycopg.connect`, which is why the socket
+#: travels in the query and not in the authority: SQLAlchemy does not
+#: percent-decode an authority's host (ARCHITECTURE.md §5.2).
 URL = make_url(os.environ["DATABASE_URL"])
-engine = create_engine(URL.set(drivername="postgresql+psycopg"), pool_pre_ping=False)
+engine = create_engine(URL.set(drivername="postgresql+psycopg"))
 
 
 @app.get("/notes/")

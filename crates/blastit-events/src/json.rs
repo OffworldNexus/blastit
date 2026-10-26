@@ -1025,6 +1025,122 @@ mod tests {
         fixture::request_event()
     }
 
+    /// One event of every kind, with every optional member set.
+    ///
+    /// A round trip can only prove the decoder against the encoder if every arm
+    /// of both is visited: this is the list that does.
+    fn every_kind() -> Vec<Event> {
+        let lifecycle = Lifecycle::default()
+            .with_stage("preload")
+            .with_routes(3)
+            .with_workers(16)
+            .with_duration_ms(412.7)
+            .with_seccomp(true)
+            .with_privilege("capabilities")
+            .with_bounding_set(true)
+            .with_capability("cap_chown")
+            .with_immortalize(true)
+            .with_immortalize_reason("forced")
+            .with_immortalized(1_610_300)
+            .with_immortalize_ms(1_785.4)
+            .with_mem_total(1_057_259_520)
+            .with_mem_used(211_812_352)
+            .with_max_view_processes(23)
+            .with_output("db", "DATABASE_URL")
+            .with_preset("compose-traefik")
+            .with_preset_setting("BLASTIT_FAIR_QUEUING", "on")
+            .with_preset_override("BLASTIT_LOG_FORMAT");
+        let output = AppOutput::new(Stream::Stderr, "a line of output")
+            .with_part(2, 3)
+            .expect("2 of 3");
+        vec![
+            fixture::request_event(),
+            fixture::sql_denied_event(),
+            fixture::event(EventKind::PgRefused(PgRefused::new(
+                "db",
+                PgRefuseReason::UpstreamUnreachable,
+            ))),
+            fixture::event(EventKind::PgRefused(PgRefused::new(
+                "db",
+                PgRefuseReason::Other("the pool is full".to_string()),
+            ))),
+            fixture::event(EventKind::HttpRejected(HttpRejected::new(
+                "203.0.113.7",
+                431,
+                RejectReason::HeaderTooLarge,
+            ))),
+            fixture::event(EventKind::HttpRejected(HttpRejected::new(
+                "203.0.113.7",
+                400,
+                RejectReason::Other("body_timeout".to_string()),
+            ))),
+            fixture::event(EventKind::ProcessSpawned(ProcessSpawned::new(
+                57, 20_000, 1.5,
+            ))),
+            fixture::event(EventKind::ProcessExited(ProcessExited::new(
+                57,
+                20_000,
+                ExitKind::Status(3),
+            ))),
+            fixture::event(EventKind::ProcessExited(ProcessExited::new(
+                57,
+                20_000,
+                ExitKind::Signal(9),
+            ))),
+            fixture::event(EventKind::ProcessRetired(ProcessRetired::new(
+                57,
+                20_000,
+                RetireReason::MemoryPressure,
+            ))),
+            fixture::event(EventKind::ProcessCap(ProcessCap::new(33_554_432, 23))),
+            fixture::event(EventKind::AppOutput(output)),
+            fixture::event(EventKind::Boot(lifecycle.clone())),
+            fixture::event(EventKind::Ready(lifecycle.clone())),
+            fixture::event(EventKind::Shutdown(lifecycle)),
+            fixture::event(EventKind::ManifestWarning(ManifestWarning::new(
+                "the group `session` is attached to no route",
+            ))),
+        ]
+    }
+
+    #[test]
+    fn every_event_kind_round_trips_through_the_decoder() {
+        // The decoder is the encoder's inverse, and this is the check that it
+        // stays that way: an event of every kind — every optional member set,
+        // both arms of every alternative — encodes, decodes and encodes back to
+        // the very same line.
+        for event in every_kind() {
+            let line = encode_json(&event);
+            let decoded = decode_json(&line).unwrap_or_else(|| panic!("{line} did not decode"));
+            assert_eq!(decoded, event, "{line}");
+            assert_eq!(encode_json(&decoded), line, "re-encoded");
+        }
+    }
+
+    #[test]
+    fn a_line_this_build_did_not_write_is_not_an_event() {
+        // Every one of these is a line the *pretty* path has to fall back on the
+        // field dump for, so none of them may decode into an invented event.
+        for line in [
+            "",
+            "not json",
+            "[]",
+            "null",
+            r#"{"ts":"2026-10-25T14:02:11.384Z"}"#,
+            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","component":"init"}"#,
+            // An event a newer component emits.
+            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"something.new","component":"init"}"#,
+            // A member of the wrong type.
+            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"process.cap","component":"init","estimate_bytes":"many","cap":3}"#,
+            // A timestamp this crate does not write.
+            r#"{"ts":"2026-10-25 14:02:11","level":"info","event":"process.cap","component":"init","estimate_bytes":1,"cap":3}"#,
+            // Both halves of an exit, when the encoder writes exactly one.
+            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"process.exited","component":"init","pid":1,"uid":2,"status":0,"signal":9}"#,
+        ] {
+            assert!(decode_json(line).is_none(), "{line} decoded");
+        }
+    }
+
     #[test]
     fn request_example_has_the_documented_values_and_key_order() {
         let json = encode_json(&request_event());
