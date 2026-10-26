@@ -73,6 +73,35 @@
 //! * Two settings exist that §8.2 does not name, because §2.4 asks for the
 //!   behaviour without giving it a variable: [`SchedulerConfig::spawn_backoff`]
 //!   ("don't spin") and the per-peer byte caps in this module.
+//!
+//! # Fair queuing (D5)
+//!
+//! With `BLASTIT_FAIR_QUEUING=on` the admission queue is ordered by
+//! [`crate::fair`] instead of by arrival: the two-level flow with the least
+//! budget spent goes first, within a route and across routes. Off — the
+//! default — is exactly the FIFO §2.4 describes, including its one subtlety:
+//! a request at the head that cannot be served must not hold up a later one
+//! whose route has a ready view, so the walk skips it.
+//!
+//! The queue holds stream ids either way, and every path that removes a
+//! request (dispatch, timeout, cancel, release) goes through the same
+//! [`Admission::remove`], so the two orderings cannot drift apart.
+//!
+//! The cost a fair flow is charged comes from the view process — the only
+//! place that can measure it — in the `DONE_COST` frame: the wall time of the
+//! WSGI call (through the iterable's `close()`) and the thread's CPU time over
+//! the same span. The report is untrusted: a view is sandboxed and may be
+//! compromised, so it is clamped to the wall time the scheduler itself
+//! observed between dispatch and completion, and a request with no report
+//! (crash, timeout, cancel, a client that went away, a view built before D5)
+//! charges the observed time instead. The event keeps both numbers as
+//! `cost_ns` (what was charged) and `cpu_ns` (what the worker reported).
+//!
+//! Because the report arrives in `DONE`, which the view sends after `close()`,
+//! the `request` event of a successful response is emitted when the request is
+//! released rather than at `RESP_END`. Its `duration_ms` still ends at the
+//! last response byte (see [`Request::finished_at`]), so the documented
+//! meaning of the field does not move.
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
@@ -84,16 +113,17 @@ use blastit_events::{
     Component, Event, EventKind, Outcome, ProcessCap, ProcessRetired, RequestInfo, RetireReason,
 };
 use blastit_frame::{
-    Ctl, DoneOutcome, Frame, FrameError, INITIAL_WINDOW, Limits, ReqHead, RespHead,
+    Ctl, DoneOutcome, Frame, FrameError, INITIAL_WINDOW, Limits, ReqHead, RequestCost, RespHead,
 };
 use blastit_manifest::RoutingTable;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use crate::config::{SchedulerConfig, derived_view_cap};
+use crate::config::{FAIR_GC_INTERVAL, SchedulerConfig, derived_view_cap, nanos};
 use crate::ctl::CtlChannel;
 use crate::error::SchedulerError;
+use crate::fair::{Cost, FairQueue, FlowRef};
 use crate::path::{
     is_control_byte, normalize_script_name, path_of_target, percent_decode, strip_script_name,
 };
@@ -219,6 +249,151 @@ impl View {
     }
 }
 
+/// The admission queue: plain FIFO (§2.4), or the fair queue (D5).
+///
+/// Both hold the stream ids of the requests that are waiting for a worker
+/// slot; only the order they hand them back differs.
+enum Admission {
+    /// §2.4's bounded FIFO, in arrival order.
+    Fifo(VecDeque<u32>),
+    /// The two-level fair queue, in budget order.
+    Fair(Box<FairQueue>),
+}
+
+impl Admission {
+    /// The queue the configuration asks for.
+    fn new(fair_queuing: bool, cfg: crate::config::FairConfig) -> Self {
+        if fair_queuing {
+            Self::Fair(Box::new(FairQueue::new(cfg)))
+        } else {
+            Self::Fifo(VecDeque::new())
+        }
+    }
+
+    /// The fair queue, when the configuration asked for one.
+    fn fair(&self) -> Option<&FairQueue> {
+        match self {
+            Self::Fifo(_) => None,
+            Self::Fair(queue) => Some(queue),
+        }
+    }
+
+    /// The fair queue, when the configuration asked for one.
+    fn fair_mut(&mut self) -> Option<&mut FairQueue> {
+        match self {
+            Self::Fifo(_) => None,
+            Self::Fair(queue) => Some(queue),
+        }
+    }
+
+    /// Whether fair queuing is on.
+    fn is_fair(&self) -> bool {
+        self.fair().is_some()
+    }
+
+    /// The flow of a new request, counting it as admitted (D5).
+    ///
+    /// A FIFO queue has no flows, so this is `None` there and the caller
+    /// carries nothing it will not need.
+    fn resolve(&mut self, peer: &str, headers: &[(Vec<u8>, Vec<u8>)]) -> Option<FlowRef> {
+        self.fair_mut().map(|queue| queue.resolve(peer, headers))
+    }
+
+    /// Queue a request that is waiting for `route`.
+    fn push(&mut self, stream_id: u32, route: u32, flow: Option<FlowRef>) {
+        match self {
+            Self::Fifo(queue) => queue.push_back(stream_id),
+            Self::Fair(queue) => queue.push(
+                stream_id,
+                route,
+                flow.unwrap_or_else(FairQueue::overflow_flow),
+            ),
+        }
+    }
+
+    /// Forget a request: it was dispatched, timed out, or was cancelled.
+    ///
+    /// Idempotent: a stream id that is not queued is not an error.
+    fn remove(&mut self, stream_id: u32) {
+        match self {
+            Self::Fifo(queue) => queue.retain(|queued| *queued != stream_id),
+            Self::Fair(queue) => queue.remove(stream_id),
+        }
+    }
+
+    /// Whether a request is still waiting.
+    fn contains(&self, stream_id: u32) -> bool {
+        match self {
+            Self::Fifo(queue) => queue.contains(&stream_id),
+            Self::Fair(queue) => queue.contains(stream_id),
+        }
+    }
+
+    /// How many requests are waiting.
+    fn len(&self) -> usize {
+        match self {
+            Self::Fifo(queue) => queue.len(),
+            Self::Fair(queue) => queue.len(),
+        }
+    }
+
+    /// Whether nothing is waiting.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Every waiting request, in no particular order.
+    ///
+    /// The queue timeouts and the shutdown check walk all of them, so the
+    /// order they come back in does not matter.
+    fn ids(&self) -> Vec<u32> {
+        match self {
+            Self::Fifo(queue) => queue.iter().copied().collect(),
+            Self::Fair(queue) => queue.ids(),
+        }
+    }
+
+    /// Every route that has something waiting (D5: empty for the FIFO, whose
+    /// walk reads the routes off the requests themselves).
+    fn routes(&self) -> Vec<u32> {
+        match self {
+            Self::Fifo(_) => Vec::new(),
+            Self::Fair(queue) => queue.routes(),
+        }
+    }
+
+    /// The request that goes next for `route`, and the budget its flow has
+    /// spent (D5).
+    fn peek(&self, route: u32) -> Option<(u64, u32)> {
+        self.fair()?.peek(route)
+    }
+
+    /// Take the next request for `route` (D5).
+    fn pop(&mut self, route: u32) -> Option<u32> {
+        self.fair_mut()?.pop(route)
+    }
+
+    /// Charge a flow for a request (D5).
+    fn debit(&mut self, flow: &FlowRef, charged_ns: u64, now: Instant) {
+        if let Some(queue) = self.fair_mut() {
+            queue.debit(flow, Cost(charged_ns), now.into_std());
+        }
+    }
+
+    /// Let a flow go once the request that held it is over (D5).
+    fn release_flow(&mut self, flow: FlowRef, now: Instant) {
+        if let Some(queue) = self.fair_mut() {
+            queue.release(flow, now.into_std());
+        }
+    }
+
+    /// Collect the flows that may be collected now (D5).
+    fn gc(&mut self, now: Instant) {
+        if let Some(queue) = self.fair_mut() {
+            queue.gc(now.into_std());
+        }
+    }
+}
 /// One §8 Sizing memory sample: the aggregate usage, and how many views had
 /// sent `READY` when it was taken.
 ///
@@ -268,6 +443,24 @@ struct Request {
     cancelled: bool,
     /// The view and request id this request was dispatched under.
     view: Option<(ViewKey, u32)>,
+    /// The fair-queuing flow this request belongs to (D5), when fair queuing
+    /// is on. It is resolved once, when the request is admitted, and returned
+    /// once, when the request is released.
+    flow: Option<FlowRef>,
+    /// The view's own measurement of what this request cost it (D5), from the
+    /// `DONE_COST` frame. Untrusted: [`Scheduler::charge`] clamps it.
+    report: Option<RequestCost>,
+    /// What was charged to the flow for this request, in nanoseconds: the
+    /// clamped report, or the time the scheduler observed itself. This is the
+    /// `cost_ns` of the `request` event (§8.1).
+    charged_ns: u64,
+    /// The flow has been charged for this request. Exactly one of the response
+    /// end and the release does it (D5).
+    charged: bool,
+    /// When the response ended — the last byte, the abort or the failure —
+    /// which is where `duration_ms` stops even though the event waits for the
+    /// `DONE` that carries the cost report (D5).
+    finished_at: Option<Instant>,
     /// A `RESP_HEAD` was forwarded to http.
     head_sent: bool,
     /// The response to http is over (`RESP_END`, `RESP_ABORT` or a status the
@@ -322,8 +515,9 @@ struct Scheduler {
     counter: u64,
     /// Every request that has not been released yet, by http stream id.
     requests: HashMap<u32, Request>,
-    /// Requests waiting for a worker slot, oldest first (§2.4's bounded FIFO).
-    queue: VecDeque<u32>,
+    /// Requests waiting for a worker slot, oldest first (§2.4's bounded FIFO)
+    /// or in fair order (D5).
+    queue: Admission,
     /// The live view per route: at most one (§2.4).
     views: HashMap<usize, View>,
     /// `(view, request id)` to http stream id: what a frame from a view means.
@@ -338,6 +532,9 @@ struct Scheduler {
     draining: bool,
     /// When draining gives up on the requests that are left.
     drain_deadline: Option<Instant>,
+    /// When the fair queue's idle flows are collected next (D5). `None` while
+    /// fair queuing is off, because a FIFO queue has no flows to collect.
+    next_gc: Option<Instant>,
     /// §8 Sizing's derived view process cap, once init has proved the app is
     /// preloaded (see [`Scheduler::derive_view_cap`]).
     derived_view_cap: Option<u32>,
@@ -383,6 +580,8 @@ impl Scheduler {
         ctl_out: Outbound,
     ) -> Self {
         let script_name = cfg.script_name.as_deref().and_then(normalize_script_name);
+        let fair_queuing = cfg.fair_queuing;
+        let queue = Admission::new(fair_queuing, cfg.fair.clone());
         // §8 Sizing: the watermark is watched on a timer, so the scheduler only
         // schedules it when it has something to watch.
         let memory_check_at = cfg
@@ -400,7 +599,7 @@ impl Scheduler {
             started: Instant::now(),
             counter: 0,
             requests: HashMap::new(),
-            queue: VecDeque::new(),
+            queue,
             views: HashMap::new(),
             dispatch: HashMap::new(),
             slots: 0,
@@ -408,6 +607,7 @@ impl Scheduler {
             lru: 0,
             draining: false,
             drain_deadline: None,
+            next_gc: fair_queuing.then(|| Instant::now() + FAIR_GC_INTERVAL),
             derived_view_cap: None,
             derived_after_preload: false,
             preload_used: None,
@@ -477,10 +677,10 @@ impl Scheduler {
                 None => at,
             });
         };
-        for stream_id in &self.queue {
+        for stream_id in self.queue.ids() {
             if let Some(since) = self
                 .requests
-                .get(stream_id)
+                .get(&stream_id)
                 .and_then(|request| request.queued_since)
             {
                 take(since + self.cfg.queue_timeout);
@@ -516,6 +716,10 @@ impl Scheduler {
         if let Some(at) = self.memory_check_at {
             take(at);
         }
+        // D5: so is the fair queue's collection of idle flows.
+        if let Some(at) = self.next_gc {
+            take(at);
+        }
         next
     }
 
@@ -531,7 +735,28 @@ impl Scheduler {
         self.expire_requests()?;
         self.retire_finished_views()?;
         self.check_memory()?;
+        self.collect_flows(now);
         Ok(())
+    }
+
+    /// Collects the fair queue's idle flows (D5), at most once per
+    /// [`FAIR_GC_INTERVAL`].
+    ///
+    /// A flow's own request end collects it, so this is only the sweep for a
+    /// flow whose last request ended while the queue stayed busy: without it,
+    /// the tables would grow with the number of clients that have ever
+    /// connected.
+    fn collect_flows(&mut self, now: Instant) {
+        let Some(at) = self.next_gc else {
+            return;
+        };
+        if now < at {
+            return;
+        }
+        // Count from now, so a scheduler that was busy for several intervals
+        // cannot sweep several times in a row.
+        self.next_gc = Some(now + FAIR_GC_INTERVAL);
+        self.queue.gc(now);
     }
 
     /// Handles one `http.chan` frame.
@@ -575,9 +800,10 @@ impl Scheduler {
                 Ok(())
             }
             Frame::Done { outcome } => self.view_done(key, id, outcome),
+            Frame::RespEnd => self.view_end(key, id, None),
+            Frame::RespEndCost { cost } => self.view_end(key, id, Some(cost)),
             Frame::RespHead(head) => self.view_head(key, id, head),
             Frame::RespBody(body) => self.view_body(key, id, body),
-            Frame::RespEnd => self.view_end(key, id),
             Frame::RespAbort { reason } => self.view_abort(key, id, &reason),
             Frame::Window { bytes } => self.view_window(key, id, bytes),
             // A view may only address its own requests: drop anything else.
@@ -694,6 +920,11 @@ impl Scheduler {
             end_seen: false,
             cancelled: false,
             view: None,
+            flow: None,
+            report: None,
+            charged_ns: 0,
+            charged: false,
+            finished_at: None,
             head_sent: false,
             complete: false,
             emitted: false,
@@ -712,11 +943,12 @@ impl Scheduler {
                     "Bad Request",
                     "bad request\n",
                     Outcome::Unmatched,
+                    None,
                 )
             }
             Resolution::Health => {
                 self.requests.insert(stream_id, request);
-                self.respond(stream_id, 200, "OK", "ok")?;
+                self.respond(stream_id, 200, "OK", "ok", None)?;
                 self.finish_immediately(stream_id, Outcome::Ok)
             }
             Resolution::Unrouted => {
@@ -727,6 +959,7 @@ impl Scheduler {
                     "Not Found",
                     "not found\n",
                     Outcome::Unmatched,
+                    None,
                 )
             }
             Resolution::Routed {
@@ -737,7 +970,14 @@ impl Scheduler {
                 request.route = Some(route);
                 request.rule = Some(rule);
                 request.path_info = Some(path_info);
+                // D5: the flow is resolved once per request, from the raw peer
+                // and the headers, and it is the *same* resolution the front
+                // end used for `REMOTE_ADDR`.
+                request.flow = self
+                    .queue
+                    .resolve(&request.head.peer_addr, &request.head.headers);
                 self.requests.insert(stream_id, request);
+                let retry_after = retry_after_seconds(self.cfg.queue_timeout);
                 if self.draining {
                     self.reject(
                         stream_id,
@@ -745,6 +985,7 @@ impl Scheduler {
                         "Service Unavailable",
                         "draining\n",
                         Outcome::QueueFull,
+                        Some(retry_after),
                     )
                 } else if self.can_dispatch(route) {
                     self.dispatch(stream_id)
@@ -755,6 +996,7 @@ impl Scheduler {
                         "Service Unavailable",
                         "queue full\n",
                         Outcome::QueueFull,
+                        Some(retry_after),
                     )
                 } else {
                     self.enqueue(stream_id);
@@ -806,12 +1048,23 @@ impl Scheduler {
         }
     }
 
-    /// Puts a request at the back of the admission queue.
+    /// Puts a request in the admission queue: at the back of the FIFO, or into
+    /// its flow (D5).
     fn enqueue(&mut self, stream_id: u32) {
+        let route = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.route)
+            .and_then(|route| u32::try_from(route).ok())
+            .unwrap_or(u32::MAX);
+        let flow = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.flow);
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.queued_since = Some(Instant::now());
         }
-        self.queue.push_back(stream_id);
+        self.queue.push(stream_id, route, flow);
     }
 
     /// Records request body bytes: forwards them when the request is
@@ -887,6 +1140,7 @@ impl Scheduler {
             request.outcome = Outcome::ClientGone;
             request.complete = true;
         }
+        self.mark_finished(stream_id);
         self.emit_request(stream_id);
         if view.is_none() {
             // Never dispatched: it leaves the queue, and no slot was ever held.
@@ -951,10 +1205,18 @@ impl Scheduler {
     }
 
     /// Dispatches every queued request it can, spawning views as needed.
+    ///
+    /// With fair queuing off (the default) this is §2.4's FIFO walk: the
+    /// requests are considered in arrival order, and one that cannot be served
+    /// — its route's view is not ready — is skipped rather than allowed to hold
+    /// up the ones behind it.
     fn dispatch_queued(&mut self) -> Result<(), SchedulerError> {
-        let queued: Vec<u32> = self.queue.iter().copied().collect();
+        if self.queue.is_fair() {
+            return self.dispatch_queued_fair();
+        }
+        let queued: Vec<u32> = self.queue.ids();
         for stream_id in queued {
-            if !self.queue.contains(&stream_id) {
+            if !self.queue.contains(stream_id) {
                 continue;
             }
             let Some(route) = self
@@ -976,6 +1238,76 @@ impl Scheduler {
             }
         }
         Ok(())
+    }
+
+    /// The fair walk (D5): dispatch the queued request whose flow has spent the
+    /// least, among the routes that can take one right now.
+    ///
+    /// A route whose view is not ready — or not spawned yet — never holds up
+    /// another route: the choice is made among the routes that *can* dispatch,
+    /// and a route whose spawn is in flight is simply not one of them yet.
+    fn dispatch_queued_fair(&mut self) -> Result<(), SchedulerError> {
+        loop {
+            if self.slots >= self.cfg.max_workers {
+                return Ok(());
+            }
+            let mut best: Option<(u64, u32, u32)> = None;
+            for route in self.queue.routes() {
+                if !self.can_dispatch(route as usize) {
+                    if !self.views.contains_key(&(route as usize)) && !self.draining {
+                        self.try_spawn(route as usize)?;
+                    }
+                    continue;
+                }
+                if let Some((used, stream_id)) = self.queue.peek(route) {
+                    let better = match best {
+                        Some((best_used, best_route, _)) => (used, route) < (best_used, best_route),
+                        None => true,
+                    };
+                    if better {
+                        best = Some((used, route, stream_id));
+                    }
+                }
+            }
+            let Some((_, route, _)) = best else {
+                return Ok(());
+            };
+            // Take it out of the order, and advance the queue's clock to it:
+            // that is what makes a later request from the same flow wait its
+            // turn, and what lets an idle flow catch up and be collected.
+            let Some(stream_id) = self.queue.pop(route) else {
+                continue;
+            };
+            let slots = self.slots;
+            self.dispatch(stream_id)?;
+            if self.slots == slots {
+                // Its view could not take it after all, which the walk above
+                // just said it could: put the request back rather than lose it,
+                // and stop, because nothing about the order has changed.
+                self.requeue(stream_id);
+                return Ok(());
+            }
+        }
+    }
+
+    /// Puts a request that was taken out of the queue but not dispatched back.
+    ///
+    /// Its `queued_since` is untouched, so a request that this happens to still
+    /// has the queue timeout it always had. The flow's order puts it at the
+    /// back of its own queue, which is where a request of that flow that took
+    /// no time belongs.
+    fn requeue(&mut self, stream_id: u32) {
+        let route = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.route)
+            .and_then(|route| u32::try_from(route).ok())
+            .unwrap_or(u32::MAX);
+        let flow = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.flow);
+        self.queue.push(stream_id, route, flow);
     }
 
     /// Hands one request to its view, rewriting its id (§3.1).
@@ -1002,7 +1334,7 @@ impl Scheduler {
                 request.download_credit.saturating_sub(INITIAL_WINDOW),
             )
         };
-        self.queue.retain(|queued_id| *queued_id != stream_id);
+        self.queue.remove(stream_id);
         self.dispatch.insert((key, id), stream_id);
         self.slots += 1;
 
@@ -1065,10 +1397,11 @@ impl Scheduler {
     fn expire_queue(&mut self) -> Result<(), SchedulerError> {
         let now = Instant::now();
         let timeout = self.cfg.queue_timeout;
+        let retry_after = retry_after_seconds(timeout);
         let expired: Vec<u32> = self
             .queue
-            .iter()
-            .copied()
+            .ids()
+            .into_iter()
             .filter(|stream_id| {
                 self.requests
                     .get(stream_id)
@@ -1078,13 +1411,14 @@ impl Scheduler {
             })
             .collect();
         for stream_id in expired {
-            self.queue.retain(|queued_id| *queued_id != stream_id);
+            self.queue.remove(stream_id);
             self.reject(
                 stream_id,
                 503,
                 "Service Unavailable",
                 "queue timeout\n",
                 Outcome::QueueTimeout,
+                Some(retry_after),
             )?;
         }
         Ok(())
@@ -1136,12 +1470,13 @@ impl Scheduler {
                     },
                 )?;
             } else {
-                self.respond(stream_id, 504, "Gateway Timeout", "gateway timeout\n")?;
+                self.respond(stream_id, 504, "Gateway Timeout", "gateway timeout\n", None)?;
             }
             if let Some(request) = self.requests.get_mut(&stream_id) {
                 request.complete = true;
                 request.outcome = Outcome::Timeout;
             }
+            self.mark_finished(stream_id);
             self.emit_request(stream_id);
             if let Some((key, id)) = view {
                 self.view_push(key, id, Frame::Cancel)?;
@@ -1502,9 +1837,12 @@ impl Scheduler {
 
     /// Whether any request still in the admission queue is routed to `route`.
     fn route_waiting(&self, route: usize) -> bool {
-        self.queue.iter().any(|stream_id| {
+        if let Some(queue) = self.queue.fair() {
+            return queue.waiting_for_route(u32::try_from(route).unwrap_or(u32::MAX));
+        }
+        self.queue.ids().into_iter().any(|stream_id| {
             self.requests
-                .get(stream_id)
+                .get(&stream_id)
                 .and_then(|request| request.route)
                 == Some(route)
         })
@@ -1677,8 +2015,8 @@ impl Scheduler {
             // `502`, and the route backs off before it is spawned again.
             let waiting: Vec<u32> = self
                 .queue
-                .iter()
-                .copied()
+                .ids()
+                .into_iter()
                 .filter(|stream_id| {
                     self.requests
                         .get(stream_id)
@@ -1687,7 +2025,7 @@ impl Scheduler {
                 })
                 .collect();
             for stream_id in waiting {
-                self.queue.retain(|queued_id| *queued_id != stream_id);
+                self.queue.remove(stream_id);
                 let _ = self.fail_request(stream_id, Outcome::ViewDied, 502);
                 self.release(stream_id);
             }
@@ -1699,26 +2037,36 @@ impl Scheduler {
     // --------------------------------------------------------------- replies
 
     /// Sends a small `text/plain` response the scheduler wrote itself.
+    ///
+    /// `retry_after` is §8's `Retry-After` in seconds, which every `503` the
+    /// scheduler writes carries: a client that is turned away because the
+    /// server is busy should be told when to come back, and §2.4's queue
+    /// timeout is the number the server can actually promise.
     fn respond(
         &mut self,
         stream_id: u32,
         status: u16,
         reason: &str,
         body: &str,
+        retry_after: Option<u64>,
     ) -> Result<(), SchedulerError> {
+        let mut headers = vec![
+            (
+                b"Content-Type".to_vec(),
+                b"text/plain; charset=utf-8".to_vec(),
+            ),
+            (
+                b"Content-Length".to_vec(),
+                body.len().to_string().into_bytes(),
+            ),
+        ];
+        if let Some(seconds) = retry_after {
+            headers.push((b"Retry-After".to_vec(), seconds.to_string().into_bytes()));
+        }
         let head = RespHead {
             status,
             reason: reason.as_bytes().to_vec(),
-            headers: vec![
-                (
-                    b"Content-Type".to_vec(),
-                    b"text/plain; charset=utf-8".to_vec(),
-                ),
-                (
-                    b"Content-Length".to_vec(),
-                    body.len().to_string().into_bytes(),
-                ),
-            ],
+            headers,
         };
         self.http_push(stream_id, Frame::RespHead(head))?;
         if !body.is_empty() {
@@ -1730,7 +2078,18 @@ impl Scheduler {
             request.status = status;
             request.bytes_out = body.len() as u64;
         }
+        self.mark_finished(stream_id);
         Ok(())
+    }
+
+    /// Records where the response ended, which is where `duration_ms` stops
+    /// (§8.1) even though the `request` event may wait for the view's `DONE`.
+    fn mark_finished(&mut self, stream_id: u32) {
+        if let Some(request) = self.requests.get_mut(&stream_id)
+            && request.finished_at.is_none()
+        {
+            request.finished_at = Some(Instant::now());
+        }
     }
 
     /// Answers a request the scheduler refused, and logs it.
@@ -1741,12 +2100,14 @@ impl Scheduler {
         reason: &str,
         body: &str,
         outcome: Outcome,
+        retry_after: Option<u64>,
     ) -> Result<(), SchedulerError> {
-        self.respond(stream_id, status, reason, body)?;
+        self.respond(stream_id, status, reason, body, retry_after)?;
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.outcome = outcome;
             request.complete = true;
         }
+        self.mark_finished(stream_id);
         self.emit_request(stream_id);
         self.release(stream_id);
         Ok(())
@@ -1762,6 +2123,7 @@ impl Scheduler {
             request.outcome = outcome;
             request.complete = true;
         }
+        self.mark_finished(stream_id);
         self.emit_request(stream_id);
         self.release(stream_id);
         Ok(())
@@ -1791,18 +2153,21 @@ impl Scheduler {
             )?;
         } else {
             let (reason, body) = canned(status);
-            self.respond(stream_id, status, reason, body)?;
+            // A `502` is not a `503`: the server is not busy, the view died.
+            self.respond(stream_id, status, reason, body, None)?;
         }
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.complete = true;
             request.outcome = outcome;
         }
+        self.mark_finished(stream_id);
         self.emit_request(stream_id);
         Ok(())
     }
 
     /// Releases a request: its worker slot, its view id and its memory.
     fn release(&mut self, stream_id: u32) {
+        self.charge(stream_id);
         self.emit_request(stream_id);
         let Some(request) = self.requests.remove(&stream_id) else {
             return;
@@ -1821,7 +2186,50 @@ impl Scheduler {
         if request.slots {
             self.slots = self.slots.saturating_sub(1);
         }
-        self.queue.retain(|queued_id| *queued_id != stream_id);
+        self.queue.remove(stream_id);
+        if let Some(flow) = request.flow {
+            self.queue.release_flow(flow, Instant::now());
+        }
+    }
+
+    /// What this request cost, and what the flow is charged for it (D5).
+    ///
+    /// The cost is the view's own report when there is one, **clamped** to the
+    /// time the scheduler observed between dispatch and completion: a view
+    /// process is sandboxed and may be compromised, and a report that claims
+    /// more time than the request could possibly have taken is a report that
+    /// would let one client buy the whole queue. With no report — the view
+    /// crashed, timed out, was cancelled, the client went away, or the view was
+    /// built before D5 — the observed time is charged instead.
+    ///
+    /// It is idempotent, and it is called from two places: at the response end
+    /// when a report arrived (so a flow that has spent its budget is behind the
+    /// others before its thread even exits), and at release for everything
+    /// else.
+    fn charge(&mut self, stream_id: u32) {
+        let Some(request) = self.requests.get(&stream_id) else {
+            return;
+        };
+        if request.charged {
+            return;
+        }
+        let observed = request
+            .dispatched_at
+            .map(|since| Instant::now().duration_since(since))
+            .map(nanos)
+            .unwrap_or(0);
+        let charged = match request.report {
+            Some(report) => report.wall_ns.min(observed),
+            None => observed,
+        };
+        let flow = request.flow;
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.charged_ns = charged;
+            request.charged = true;
+        }
+        if let Some(flow) = flow {
+            self.queue.debit(&flow, charged, Instant::now());
+        }
     }
 
     /// Emits the one `request` event a request gets, once (§8.1).
@@ -1835,7 +2243,15 @@ impl Scheduler {
         let now = Instant::now();
         let queued_until = request.dispatched_at.unwrap_or(now);
         let queued_ms = millis(queued_until.duration_since(request.arrived));
-        let duration_ms = millis(now.duration_since(request.arrived));
+        // §8.1: `duration_ms` is the time to the last response byte, which is
+        // where `finished_at` was set. The event itself may wait for the view's
+        // `DONE` (D5), which is where the cost report travels.
+        let duration_ms = millis(
+            request
+                .finished_at
+                .unwrap_or(now)
+                .duration_since(request.arrived),
+        );
         // §8.1: the `path` is the routed `PATH_INFO`, and never a query
         // string. A target the scheduler could not decode has no `PATH_INFO`
         // at all, so it reports the target with its query string removed.
@@ -1851,7 +2267,11 @@ impl Scheduler {
         .with_outcome(request.outcome)
         .with_timings(queued_ms, duration_ms)
         .with_bytes(request.bytes_in, request.bytes_out)
-        .with_remote_addr(request.head.remote_addr.clone());
+        .with_remote_addr(request.head.remote_addr.clone())
+        .with_cost(
+            request.charged_ns,
+            request.report.map(|report| report.cpu_ns),
+        );
         if let Some(rule) = request.rule {
             info = info.with_rule(rule);
         }
@@ -1922,7 +2342,7 @@ impl Scheduler {
                             request.outcome = Outcome::Ok;
                         }
                     }
-                    self.emit_request(stream_id);
+                    self.mark_finished(stream_id);
                 }
                 DoneOutcome::Completed | DoneOutcome::Errored => {
                     self.fail_request(stream_id, Outcome::ViewDied, 502)?;
@@ -1990,7 +2410,20 @@ impl Scheduler {
     }
 
     /// `RESP_END` from a view: the response is complete, the slot is not.
-    fn view_end(&mut self, key: ViewKey, id: u32) -> Result<(), SchedulerError> {
+    ///
+    /// `cost` is the view's report for this request (D5) when it sent one: the
+    /// wall time of the WSGI call — through the iterable's `close()` — and the
+    /// thread's CPU time over the same span. It is untrusted, so
+    /// [`Scheduler::charge`] clamps it before anything is scheduled on it.
+    ///
+    /// A response that streams is charged here, when its stream ends, which is
+    /// exactly when the report arrives.
+    fn view_end(
+        &mut self,
+        key: ViewKey,
+        id: u32,
+        cost: Option<RequestCost>,
+    ) -> Result<(), SchedulerError> {
         let Some(&stream_id) = self.dispatch.get(&(key, id)) else {
             self.dropped += 1;
             return Ok(());
@@ -2008,6 +2441,13 @@ impl Scheduler {
             if !request.cancelled {
                 request.outcome = Outcome::Ok;
             }
+        }
+        self.mark_finished(stream_id);
+        if let Some(cost) = cost {
+            if let Some(request) = self.requests.get_mut(&stream_id) {
+                request.report = Some(cost);
+            }
+            self.charge(stream_id);
         }
         self.emit_request(stream_id);
         Ok(())
@@ -2034,12 +2474,13 @@ impl Scheduler {
                 },
             )?;
         } else {
-            self.respond(stream_id, 502, "Bad Gateway", "bad gateway\n")?;
+            self.respond(stream_id, 502, "Bad Gateway", "bad gateway\n", None)?;
         }
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.complete = true;
             request.outcome = Outcome::ViewDied;
         }
+        self.mark_finished(stream_id);
         self.emit_request(stream_id);
         Ok(())
     }
@@ -2065,6 +2506,21 @@ impl Scheduler {
 /// Milliseconds as a float, for `request` events.
 fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+/// The `Retry-After` a `503` carries, in seconds: §2.4's queue timeout rounded
+/// up, never less than one second (§8: "`503` with `Retry-After`").
+///
+/// A client that is turned away because every worker is busy should be told
+/// when to come back, and the queue timeout is the number the server can
+/// actually promise: it is how long a request that *did* fit was willing to
+/// wait. Zero — a queue that never waits — still says one second, because
+/// `Retry-After: 0` asks a client to spin.
+fn retry_after_seconds(timeout: Duration) -> u64 {
+    let seconds = timeout
+        .as_secs()
+        .saturating_add(u64::from(timeout.subsec_nanos() > 0));
+    seconds.max(1)
 }
 
 /// The reason phrase and body of a status the scheduler writes itself.

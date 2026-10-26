@@ -107,7 +107,10 @@ pub(crate) struct OuterKey {
 }
 
 /// The one flow every outer flow that does not fit shares.
-const OVERFLOW_OUTER: OuterKey = OuterKey { family: 0, masked: 0 };
+const OVERFLOW_OUTER: OuterKey = OuterKey {
+    family: 0,
+    masked: 0,
+};
 /// The one inner flow that every inner flow that does not fit shares.
 const INNER_OVERFLOW: u64 = u64::MAX;
 
@@ -156,7 +159,9 @@ impl InnerFlow {
 
     /// Whether this flow has work for `route`.
     fn has_work(&self, route: u32) -> bool {
-        self.queues.get(&route).is_some_and(|queue| !queue.is_empty())
+        self.queues
+            .get(&route)
+            .is_some_and(|queue| !queue.is_empty())
     }
 }
 
@@ -354,7 +359,12 @@ impl FairQueue {
         let (inner_used, inner_key) = *outer.backlog.get(&route)?.iter().next()?;
         outer.v = outer.v.max(inner_used);
 
-        let stream_id = outer.inners.get_mut(&inner_key)?.queues.get_mut(&route)?.pop_front()?;
+        let stream_id = outer
+            .inners
+            .get_mut(&inner_key)?
+            .queues
+            .get_mut(&route)?
+            .pop_front()?;
         let has_work = outer.touch(route, inner_key);
         let used = outer.used;
         touch_root(&mut self.root_backlog, route, outer_key, has_work, used);
@@ -390,7 +400,11 @@ impl FairQueue {
             .entry(inner)
             .or_insert_with(|| InnerFlow::new(outer_v, burst));
         inner_flow.last_active = now;
-        inner_flow.queues.entry(route).or_default().push_back(stream_id);
+        inner_flow
+            .queues
+            .entry(route)
+            .or_default()
+            .push_back(stream_id);
         outer_flow.touch(route, inner);
 
         // Same at the outer level: it only falls back to the queue's clock
@@ -423,10 +437,10 @@ impl FairQueue {
             .and_then(|inner_flow| inner_flow.queues.get_mut(&route))
         {
             queue.retain(|queued| *queued != stream_id);
-            if queue.is_empty() {
-                if let Some(inner_flow) = outer_flow.inners.get_mut(&inner) {
-                    inner_flow.queues.remove(&route);
-                }
+            if queue.is_empty()
+                && let Some(inner_flow) = outer_flow.inners.get_mut(&inner)
+            {
+                inner_flow.queues.remove(&route);
             }
         }
         let has_work = outer_flow.touch(route, inner);
@@ -485,12 +499,15 @@ impl FairQueue {
             if let Some(inner_flow) = outer_flow.inners.get_mut(&flow.inner) {
                 inner_flow.in_flight = inner_flow.in_flight.saturating_sub(1);
             }
-            drop_inner = outer_flow.inners.get(&flow.inner).is_some_and(|inner_flow| {
-                inner_flow.idle()
-                    && inner_flow.in_flight == 0
-                    && (budget_reached(outer_v, inner_flow.used)
-                        || now.duration_since(inner_flow.last_active) > ttl)
-            });
+            drop_inner = outer_flow
+                .inners
+                .get(&flow.inner)
+                .is_some_and(|inner_flow| {
+                    inner_flow.idle()
+                        && inner_flow.in_flight == 0
+                        && (budget_reached(outer_v, inner_flow.used)
+                            || now.duration_since(inner_flow.last_active) > ttl)
+                });
             if drop_inner && outer_flow.inners.remove(&flow.inner).is_some() {
                 self.inner_count = self.inner_count.saturating_sub(1);
             }
@@ -602,18 +619,18 @@ impl FairQueue {
         };
 
         let base_outer = self.outer_key(ip);
-        let outer = if self.outers.contains_key(&base_outer) || self.outers.len() < self.cfg.outer_max
-        {
-            base_outer
-        } else {
-            match self.overflow_outer {
-                Some(key) if self.outers.contains_key(&key) => key,
-                _ => {
-                    self.overflow_outer = Some(OVERFLOW_OUTER);
-                    OVERFLOW_OUTER
+        let outer =
+            if self.outers.contains_key(&base_outer) || self.outers.len() < self.cfg.outer_max {
+                base_outer
+            } else {
+                match self.overflow_outer {
+                    Some(key) if self.outers.contains_key(&key) => key,
+                    _ => {
+                        self.overflow_outer = Some(OVERFLOW_OUTER);
+                        OVERFLOW_OUTER
+                    }
                 }
-            }
-        };
+            };
 
         let candidate = self.inner_key(headers, ip);
         let inner = match self.outers.get(&outer) {
@@ -711,6 +728,18 @@ impl FairQueue {
         hasher.finish()
     }
 
+    /// The flow every request that cannot be told apart shares (D5).
+    ///
+    /// It is the key the overflow tables hand out and the key an unreadable
+    /// peer gets, so a scheduler with no flow of its own can still queue a
+    /// request somewhere it will be served fairly.
+    pub(crate) fn overflow_flow() -> FlowRef {
+        FlowRef {
+            outer: OVERFLOW_OUTER,
+            inner: INNER_OVERFLOW,
+        }
+    }
+
     /// How many inner flows exist right now.
     #[cfg(test)]
     pub(crate) fn inner_count(&self) -> usize {
@@ -775,9 +804,12 @@ fn mask128(prefix: u8) -> u128 {
     }
 }
 
-
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use std::time::Duration;
@@ -833,10 +865,8 @@ mod tests {
     #[test]
     fn inner_flows_of_one_outer_are_ordered_by_budget() {
         let mut queue = queue();
-        let mut browser_a = Vec::new();
-        browser_a.push((b"user-agent".to_vec(), b"browser-a".to_vec()));
-        let mut browser_b = Vec::new();
-        browser_b.push((b"user-agent".to_vec(), b"browser-b".to_vec()));
+        let browser_a = vec![(b"user-agent".to_vec(), b"browser-a".to_vec())];
+        let browser_b = vec![(b"user-agent".to_vec(), b"browser-b".to_vec())];
 
         let a = queue.resolve(&peer("10.0.0.1"), &browser_a);
         let b = queue.resolve(&peer("10.0.0.1"), &browser_b);
@@ -922,12 +952,9 @@ mod tests {
         let mut cfg = FairConfig::default();
         cfg.inner_max_per_outer = 1;
         let mut queue = FairQueue::new(cfg);
-        let mut a = Vec::new();
-        a.push((b"user-agent".to_vec(), b"a".to_vec()));
-        let mut b = Vec::new();
-        b.push((b"user-agent".to_vec(), b"b".to_vec()));
-        let mut c = Vec::new();
-        c.push((b"user-agent".to_vec(), b"c".to_vec()));
+        let a = vec![(b"user-agent".to_vec(), b"a".to_vec())];
+        let b = vec![(b"user-agent".to_vec(), b"b".to_vec())];
+        let c = vec![(b"user-agent".to_vec(), b"c".to_vec())];
 
         let first = queue.resolve(&peer("10.0.0.1"), &a);
         let second = queue.resolve(&peer("10.0.0.1"), &b);
@@ -998,8 +1025,7 @@ mod tests {
     #[test]
     fn the_inner_key_tracks_the_fingerprint() {
         let mut queue = queue();
-        let mut headers = Vec::new();
-        headers.push((b"user-agent".to_vec(), b"browser-a".to_vec()));
+        let headers = vec![(b"user-agent".to_vec(), b"browser-a".to_vec())];
         let first = queue.resolve(&peer("10.0.0.1"), &headers);
         let same = queue.resolve(&peer("10.0.0.1"), &headers);
         let mut other_headers = headers.clone();
@@ -1013,23 +1039,23 @@ mod tests {
 
         // Only the configured headers are, and header names are matched the
         // way HTTP does.
-        let mut auth = Vec::new();
-        auth.push((b"AUTHORIZATION".to_vec(), b"Bearer x".to_vec()));
+        let auth = vec![(b"AUTHORIZATION".to_vec(), b"Bearer x".to_vec())];
         let with_auth = queue.resolve(&peer("10.0.0.1"), &auth);
         assert_ne!(with_auth.inner, first.inner);
-        let mut irrelevant = Vec::new();
-        irrelevant.push((b"authorization".to_vec(), b"Bearer x".to_vec()));
+        let mut irrelevant = vec![(b"authorization".to_vec(), b"Bearer x".to_vec())];
         irrelevant.push((b"x-random".to_vec(), b"1".to_vec()));
         let with_irrelevant = queue.resolve(&peer("10.0.0.1"), &irrelevant);
         assert_eq!(
             with_irrelevant.inner, with_auth.inner,
             "a header the operator did not list is not part of the key"
         );
-        assert_eq!(with_auth.inner, queue.resolve(&peer("10.0.0.1"), &auth).inner);
+        assert_eq!(
+            with_auth.inner,
+            queue.resolve(&peer("10.0.0.1"), &auth).inner
+        );
 
         // A missing header and an empty one are one flow, not two.
-        let mut empty = Vec::new();
-        empty.push((b"authorization".to_vec(), Vec::new()));
+        let empty = vec![(b"authorization".to_vec(), Vec::new())];
         assert_eq!(
             empty.len(),
             queue.resolve(&peer("10.0.0.1"), &empty).inner.min(1) as usize
@@ -1043,13 +1069,10 @@ mod tests {
     #[test]
     fn cookies_are_part_of_the_inner_key() {
         let mut queue = queue();
-        let mut one = Vec::new();
-        one.push((b"cookie".to_vec(), b"sessionid=aaa; other=1".to_vec()));
-        let mut two = Vec::new();
-        two.push((b"cookie".to_vec(), b"sessionid=bbb".to_vec()));
+        let one = vec![(b"cookie".to_vec(), b"sessionid=aaa; other=1".to_vec())];
+        let two = vec![(b"cookie".to_vec(), b"sessionid=bbb".to_vec())];
         // The same cookie in a second header instance is the same client.
-        let mut split = Vec::new();
-        split.push((b"cookie".to_vec(), b"other=1".to_vec()));
+        let mut split = vec![(b"cookie".to_vec(), b"other=1".to_vec())];
         split.push((b"cookie".to_vec(), b"sessionid=aaa".to_vec()));
         assert_ne!(
             queue.resolve(&peer("10.0.0.1"), &one).inner,
@@ -1083,8 +1106,7 @@ mod tests {
         cfg.inner_max = 3;
         let mut queue = FairQueue::new(cfg);
         for index in 0..16u8 {
-            let mut headers = Vec::new();
-            headers.push((b"user-agent".to_vec(), vec![b'a' + index]));
+            let headers = vec![(b"user-agent".to_vec(), vec![b'a' + index])];
             queue.resolve(&format!("10.0.{index}.1:1"), &headers);
         }
         assert!(
@@ -1113,12 +1135,9 @@ mod tests {
         cfg.inner_max_per_outer = 1;
         cfg.inner_max = 2;
         let mut queue = FairQueue::new(cfg);
-        let mut a = Vec::new();
-        a.push((b"user-agent".to_vec(), b"a".to_vec()));
-        let mut b = Vec::new();
-        b.push((b"user-agent".to_vec(), b"b".to_vec()));
-        let mut c = Vec::new();
-        c.push((b"user-agent".to_vec(), b"c".to_vec()));
+        let a = vec![(b"user-agent".to_vec(), b"a".to_vec())];
+        let b = vec![(b"user-agent".to_vec(), b"b".to_vec())];
+        let c = vec![(b"user-agent".to_vec(), b"c".to_vec())];
         let first = queue.resolve(&peer("10.0.0.1"), &a);
         let second = queue.resolve(&peer("10.0.0.1"), &b);
         let third = queue.resolve(&peer("10.0.0.1"), &c);
@@ -1183,7 +1202,6 @@ mod tests {
 
         // ... and the same sweep collects a flow whose last request ended long
         // ago while the queue stayed busy.
-        let mut queue = queue;
         let flow = push(&mut queue, 2, 0, "10.0.0.1");
         queue.pop(0);
         queue.debit(&flow, Cost(1), now);
@@ -1239,9 +1257,9 @@ mod tests {
         assert_eq!(queue.pop(0), Some(1));
         queue.debit(&flow, Cost(5), Instant::now());
         queue.release(flow, Instant::now());
-        assert_eq!(queue.waiting_for_route(0), true);
+        assert!(queue.waiting_for_route(0));
         assert_eq!(queue.pop(0), Some(2));
-        assert_eq!(queue.waiting_for_route(0), false);
+        assert!(!queue.waiting_for_route(0));
         assert!(!queue.waiting_for_route(1));
     }
 
@@ -1297,15 +1315,17 @@ mod tests {
         // §8.1: header values and cookies are never logged, and neither is a
         // hash of them.
         let mut queue = queue();
-        let mut headers = Vec::new();
-        headers.push((b"authorization".to_vec(), b"Bearer s3cret".to_vec()));
+        let headers = vec![(b"authorization".to_vec(), b"Bearer s3cret".to_vec())];
         let flow = queue.resolve(&peer("203.0.113.7"), &headers);
         let text = format!("{flow:?}");
         assert!(!text.contains("s3cret"), "a header value leaked: {text}");
         let inner = format!("{}", flow.inner);
         assert!(!text.contains(&inner), "the hash leaked: {text}");
         assert!(
-            text.contains(&format!("{}", u32::from(std::net::Ipv4Addr::new(203, 0, 113, 0)))),
+            text.contains(&format!(
+                "{}",
+                u32::from(std::net::Ipv4Addr::new(203, 0, 113, 0))
+            )),
             "the prefix is fine: {text}"
         );
         assert!(text.contains("hidden"), "{text}");

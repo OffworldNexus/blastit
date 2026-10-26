@@ -69,7 +69,7 @@ fn serve_runs_with_the_gil_held_by_its_caller() {
             match read_frame(&mut peer, &mut decoder) {
                 (1, Frame::RespHead(head)) => seen.status = head.status,
                 (1, Frame::RespBody(chunk)) => seen.body.extend_from_slice(&chunk),
-                (1, Frame::RespEnd) => {}
+                (1, Frame::RespEnd | Frame::RespEndCost { .. }) => {}
                 (1, Frame::Done { outcome }) => {
                     seen.outcome = Some(outcome);
                     break;

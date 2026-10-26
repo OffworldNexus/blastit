@@ -21,19 +21,20 @@
 //! | `RESP_HEAD` | `0x05` | `status u16`, `reason bytes32`, `headers` as in `REQ_HEAD` |
 //! | `RESP_BODY` | `0x06` | the body bytes, raw |
 //! | `RESP_END` | `0x07` | empty |
+//! | `RESP_END_COST` | `0x0C` | `cost_ns u64`, `cpu_ns u64` |
 //! | `RESP_ABORT` | `0x08` | `reason string32` |
 //! | `DONE` | `0x09` | `outcome u8` |
 //! | `READY` | `0x0A` | empty |
 //! | `WINDOW` | `0x0B` | `bytes u32` |
-//! | `DONE_COST` | `0x0C` | `outcome u8`, `wall_ns u64`, `cpu_ns u64` |
 //!
-//! `DONE` and `DONE_COST` are the two wire forms of the same frame kind: a
-//! view that measured what the request cost it sends `DONE_COST`, and one that
-//! has nothing to report — an older build, a refusal it answered from the I/O
-//! thread, a thread that panicked — sends `DONE`. The scheduler accepts both
-//! and falls back to the time it observed itself when there is no report
-//! (ARCHITECTURE.md §2.4, D5), so the two ends are not lockstep. A code this
-//! crate does not know is still forwarded byte for byte by the raw layer.
+//! `RESP_END` and `RESP_END_COST` are the two wire forms of the same frame
+//! kind: the view that measured what the request cost it (D5) sends the second,
+//! and one that has nothing to report — a build from before D5, a response the
+//! view refused from the I/O thread — sends the first. The scheduler accepts
+//! both, and charges the flow the time it observed itself when there is no
+//! report, so the two ends are not lockstep and a lost report is a fallback
+//! rather than a protocol error. A code this crate does not know is still
+//! forwarded byte for byte by the raw layer.
 //!
 //! `READY` is what a freshly forked view sends on `view.chan` before the
 //! scheduler may dispatch to it (§4); it is view-chan only.
@@ -106,12 +107,11 @@ pub enum TypeCode {
     RespAbort = 0x08,
     /// The request's worker slot is released.
     Done = 0x09,
-    /// The request's worker slot is released, with what the request cost the
-    /// view process.
+    /// The response is complete, with what the request cost the view process.
     ///
-    /// The same frame kind as [`TypeCode::Done`], with the cost the view
-    /// measured attached: see [`Frame::Done`].
-    DoneCost = 0x0C,
+    /// The same frame kind as [`TypeCode::RespEnd`], with the cost the view
+    /// measured attached: see [`Frame::RespEndCost`].
+    RespEndCost = 0x0C,
     /// A newly forked view is ready to serve (`view.chan`).
     Ready = 0x0A,
     /// Flow-control credit for one stream's body.
@@ -152,7 +152,7 @@ impl TypeCode {
             0x09 => Ok(Self::Done),
             0x0A => Ok(Self::Ready),
             0x0B => Ok(Self::Window),
-            0x0C => Ok(Self::DoneCost),
+            0x0C => Ok(Self::RespEndCost),
             0x40 => Ok(Self::Spawn),
             0x41 => Ok(Self::Spawned),
             0x42 => Ok(Self::Retire),
@@ -193,7 +193,7 @@ impl TypeCode {
             Self::RespEnd => "RESP_END",
             Self::RespAbort => "RESP_ABORT",
             Self::Done => "DONE",
-            Self::DoneCost => "DONE_COST",
+            Self::RespEndCost => "RESP_END_COST",
             Self::Ready => "READY",
             Self::Window => "WINDOW",
             Self::Spawn => "SPAWN",
@@ -448,6 +448,19 @@ pub enum Frame {
     RespBody(Vec<u8>),
     /// The response is complete.
     RespEnd,
+    /// The response is complete, and the view reports what the request cost it
+    /// (D5).
+    ///
+    /// The same frame kind as [`Frame::RespEnd`] in its second wire form: a
+    /// view that measured the request sends this, one that has nothing to
+    /// report sends `RESP_END`. The scheduler accepts both. The report is
+    /// **untrusted** — a view process is sandboxed and may be compromised — so
+    /// it is clamped to the time the scheduler observed between dispatch and
+    /// completion.
+    RespEndCost {
+        /// What the request cost the view process.
+        cost: RequestCost,
+    },
     /// The response failed after its head was sent.
     RespAbort {
         /// Human-readable reason, for logs.
@@ -457,20 +470,6 @@ pub enum Frame {
     Done {
         /// How the request ended.
         outcome: DoneOutcome,
-    },
-    /// The worker thread released the stream's worker slot, and reported what
-    /// the request cost it (D5).
-    ///
-    /// The same frame kind as [`Frame::Done`] in its second wire form: a view
-    /// that measured the request sends this, one that has nothing to report
-    /// sends `DONE`. The scheduler accepts both. The number is **untrusted** —
-    /// a view process is sandboxed and may be compromised — so it is clamped
-    /// to the time the scheduler observed between dispatch and completion.
-    DoneCost {
-        /// How the request ended.
-        outcome: DoneOutcome,
-        /// What the request cost the view process.
-        cost: RequestCost,
     },
     /// A freshly forked view is ready (`view.chan`, id 0).
     Ready,
@@ -505,11 +504,9 @@ impl core::fmt::Debug for Frame {
                 f.debug_struct("RespAbort").field("reason", reason).finish()
             }
             Self::Done { outcome } => f.debug_tuple("Done").field(outcome).finish(),
-            Self::DoneCost { outcome, cost } => f
-                .debug_struct("DoneCost")
-                .field("outcome", outcome)
-                .field("cost", cost)
-                .finish(),
+            Self::RespEndCost { cost } => {
+                f.debug_struct("RespEndCost").field("cost", cost).finish()
+            }
             Self::Ready => f.write_str("Ready"),
             Self::Window { bytes } => f.debug_struct("Window").field("bytes", bytes).finish(),
             Self::Ctl(msg) => f.debug_tuple("Ctl").field(msg).finish(),
@@ -571,7 +568,7 @@ impl Frame {
             Self::RespEnd => TypeCode::RespEnd.code(),
             Self::RespAbort { .. } => TypeCode::RespAbort.code(),
             Self::Done { .. } => TypeCode::Done.code(),
-            Self::DoneCost { .. } => TypeCode::DoneCost.code(),
+            Self::RespEndCost { .. } => TypeCode::RespEndCost.code(),
             Self::Ready => TypeCode::Ready.code(),
             Self::Window { .. } => TypeCode::Window.code(),
             Self::Ctl(msg) => msg.code(),
@@ -628,8 +625,7 @@ impl Frame {
                 sink.put_u8(outcome.code());
                 Ok(())
             }
-            Self::DoneCost { outcome, cost } => {
-                sink.put_u8(outcome.code());
+            Self::RespEndCost { cost } => {
                 sink.put_u64(cost.wall_ns);
                 sink.put_u64(cost.cpu_ns);
                 Ok(())
@@ -693,8 +689,7 @@ impl Frame {
             TypeCode::Done => Self::Done {
                 outcome: DoneOutcome::from_code(reader.u8("outcome")?)?,
             },
-            TypeCode::DoneCost => Self::DoneCost {
-                outcome: DoneOutcome::from_code(reader.u8("outcome")?)?,
+            TypeCode::RespEndCost => Self::RespEndCost {
                 cost: RequestCost {
                     wall_ns: reader.u64("cost_ns")?,
                     cpu_ns: reader.u64("cpu_ns")?,

@@ -106,6 +106,11 @@ fn encode_with(event: &Event, truncated: &[&'static str]) -> String {
             push_member(&mut out, "duration_ms", &json_f64(info.duration_ms));
             push_member(&mut out, "bytes_in", &info.bytes_in.to_string());
             push_member(&mut out, "bytes_out", &info.bytes_out.to_string());
+            push_member(&mut out, "cost_ns", &info.cost_ns.to_string());
+            match info.cpu_ns {
+                Some(cpu_ns) => push_member(&mut out, "cpu_ns", &cpu_ns.to_string()),
+                None => push_member(&mut out, "cpu_ns", "null"),
+            }
             push_member(&mut out, "remote_addr", &json_string(&info.remote_addr));
         }
         EventKind::SqlDenied(info) => {
@@ -493,6 +498,8 @@ mod tests {
                 "duration_ms",
                 "bytes_in",
                 "bytes_out",
+                "cost_ns",
+                "cpu_ns",
                 "remote_addr",
             ]
         );
@@ -511,6 +518,10 @@ mod tests {
         assert_eq!(value["queued_ms"], 0.1);
         assert_eq!(value["duration_ms"], 18.4);
         assert_eq!(value["bytes_out"], 5120);
+        // D5: what the request cost the view process, and the thread CPU time
+        // it reported over the same span.
+        assert_eq!(value["cost_ns"], 18_400_000);
+        assert_eq!(value["cpu_ns"], 9_100_000);
         assert_eq!(value["remote_addr"], "203.0.113.7");
         // §8.1's example line omits `bytes_in`; the table lists it, so it is
         // always written.
@@ -790,6 +801,27 @@ mod tests {
         assert!(json.contains("\\u0001"));
         let value = parse(&json);
         assert!(value["message"].as_str().unwrap().contains("é 漢"));
+    }
+
+    #[test]
+    fn a_request_with_no_cost_report_still_has_the_fields() {
+        // D5: `cost_ns` is always a number (it is what the scheduler observed
+        // even when nothing reported), and `cpu_ns` is null when no view
+        // measured it, so a reader never has to guess which happened.
+        let event = fixture::event(EventKind::Request(
+            RequestInfo::from_target("GET", "/a").with_cost(0, None),
+        ));
+        let json = encode_json(&event);
+        let value = check_fits(&event, &json);
+        assert_eq!(value["cost_ns"], 0);
+        assert!(value["cpu_ns"].is_null());
+
+        // ... and a report of a cost of zero is a report: `cpu_ns` is present.
+        let event = fixture::event(EventKind::Request(
+            RequestInfo::from_target("GET", "/a").with_cost(0, Some(0)),
+        ));
+        let value = check_fits(&event, &encode_json(&event));
+        assert_eq!(value["cpu_ns"], 0);
     }
 
     #[test]

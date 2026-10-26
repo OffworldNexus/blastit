@@ -384,6 +384,10 @@ pub struct RequestInfo {
     bytes_in: u64,
     bytes_out: u64,
     remote_addr: String,
+    /// What the request cost the view process, in nanoseconds (D5).
+    cost_ns: u64,
+    /// The view's thread CPU time over the same span, when it reported one.
+    cpu_ns: Option<u64>,
 }
 
 impl RequestInfo {
@@ -404,6 +408,8 @@ impl RequestInfo {
             bytes_in: 0,
             bytes_out: 0,
             remote_addr: String::new(),
+            cost_ns: 0,
+            cpu_ns: None,
         }
     }
 
@@ -465,6 +471,23 @@ impl RequestInfo {
         &self.remote_addr
     }
 
+    /// What the request cost the view process, in nanoseconds (D5).
+    ///
+    /// This is what the scheduler charged for the request: the view's own
+    /// measurement, clamped to the time the scheduler observed between
+    /// dispatch and completion, or that observed time when no report arrived.
+    pub fn cost_ns(&self) -> u64 {
+        self.cost_ns
+    }
+
+    /// The view's thread CPU time over the request, when it reported one.
+    ///
+    /// `None` means no `DONE_COST` arrived — a view built before D5, a crash, a
+    /// timeout, a cancellation — so nothing was measured on that side.
+    pub fn cpu_ns(&self) -> Option<u64> {
+        self.cpu_ns
+    }
+
     /// Sets the index of the matching `path` regex.
     #[must_use]
     pub fn with_rule(mut self, rule: u32) -> Self {
@@ -499,6 +522,19 @@ impl RequestInfo {
     pub fn with_bytes(mut self, bytes_in: u64, bytes_out: u64) -> Self {
         self.bytes_in = bytes_in;
         self.bytes_out = bytes_out;
+        self
+    }
+
+    /// Sets what the request cost the view process (D5), in nanoseconds.
+    ///
+    /// `cost_ns` is what the scheduler charged — the view's own measurement,
+    /// clamped to the time the scheduler observed, or the observed time when
+    /// there is no report at all. `cpu_ns` is the worker's thread CPU time over
+    /// the same span, or `None` when no report arrived.
+    #[must_use]
+    pub fn with_cost(mut self, cost_ns: u64, cpu_ns: Option<u64>) -> Self {
+        self.cost_ns = cost_ns;
+        self.cpu_ns = cpu_ns;
         self
     }
 

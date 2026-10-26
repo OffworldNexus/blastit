@@ -344,7 +344,7 @@ fn a_large_response_is_split_into_frames_that_fit() {
                 chunks += 1;
                 body.extend_from_slice(&chunk);
             }
-            Frame::RespEnd => break,
+            Frame::RespEnd | Frame::RespEndCost { .. } => break,
             other => panic!("unexpected frame {other:?}"),
         }
     }
@@ -715,5 +715,58 @@ fn a_read_timeout_on_the_channel_is_retried() {
     assert_eq!(response.status(), 200);
     assert_eq!(response.body, b"after a pause");
     assert_eq!(response.outcome, DoneOutcome::Completed);
+    assert!(harness.finish().is_ok());
+}
+
+#[test]
+fn a_response_reports_what_the_request_cost_the_view() {
+    // D5: the request thread is the only place that can measure the cost, so
+    // it reports both numbers — the wall time of the WSGI call and its own
+    // thread CPU time — in the last frame of the response.
+    let mut harness = Harness::for_route("web", support::load_app("cost", &hello_app("measured")));
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    harness.send(&support::request("GET", "/"), 1);
+    harness.send(&Frame::ReqEnd, 1);
+
+    let (response, cost) = support::read_response_and_cost(&mut harness, 1);
+    assert_eq!(response.body, b"measured");
+    assert_eq!(response.end, End::End);
+    let cost = cost.expect("the view measured the request");
+    assert!(cost.wall_ns > 0, "the wall time is always measurable");
+    assert!(
+        cost.cpu_ns > 0,
+        "CPython's time.thread_time_ns is CLOCK_THREAD_CPUTIME_ID, and this \
+         request ran Python"
+    );
+    assert!(
+        cost.cpu_ns <= cost.wall_ns,
+        "CPU time cannot exceed wall time: {cost:?}"
+    );
+    assert_eq!(harness.expect_done(1), DoneOutcome::Completed);
+    assert!(harness.finish().is_ok());
+}
+
+#[test]
+fn a_view_that_fails_after_the_head_still_reports_nothing_and_aborts() {
+    // The cancel path has no response to end, so there is nothing to report:
+    // the scheduler falls back to the time it observed (D5).
+    let module = support::load_module(
+        "abort_cost",
+        "def app(environ, start_response):\n\
+         \x20   start_response(\"200 OK\", [(\"Content-Type\", \"text/plain\")])\n\
+         \x20   yield b\"part\"\n\
+         \x20   raise RuntimeError(\"boom\")\n",
+    );
+    let mut harness = Harness::for_route("web", support::app_of(&module));
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    harness.send(&support::request("GET", "/"), 1);
+    harness.send(&Frame::ReqEnd, 1);
+
+    let response = harness.read_response(1);
+    assert_eq!(response.body, b"part");
+    assert!(matches!(response.end, End::Abort(_)), "{:?}", response.end);
+    assert_eq!(harness.expect_done(1), DoneOutcome::Errored);
     assert!(harness.finish().is_ok());
 }

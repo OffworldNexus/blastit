@@ -1079,7 +1079,24 @@ pub fn head(method: &str, target: &str) -> ReqHead {
         scheme: Scheme::Http,
         server_name: "example.com".to_string(),
         server_port: 80,
+        peer_addr: "203.0.113.7:41234".to_string(),
     }
+}
+
+/// A request head whose socket peer is `peer`.
+///
+/// The peer is what the client-IP trust decision and the fair queue's outer
+/// flow are made on (D5), so a test that wants a header believed says where
+/// the request came from.
+pub fn head_from(method: &str, target: &str, peer: &str, forwarded: Option<&str>) -> ReqHead {
+    let mut head = head(method, target);
+    head.peer_addr = peer.to_string();
+    head.remote_addr = peer.to_string();
+    if let Some(value) = forwarded {
+        head.headers
+            .push((b"X-Forwarded-For".to_vec(), value.as_bytes().to_vec()));
+    }
+    head
 }
 
 /// The status of a response's first head frame.

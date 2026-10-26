@@ -155,12 +155,10 @@ mod tests {
             Frame::Done {
                 outcome: DoneOutcome::Errored,
             },
-            Frame::DoneCost {
-                outcome: DoneOutcome::Completed,
+            Frame::RespEndCost {
                 cost: RequestCost::new(12_500_000, 3_000_000),
             },
-            Frame::DoneCost {
-                outcome: DoneOutcome::Errored,
+            Frame::RespEndCost {
                 cost: RequestCost::new(u64::MAX, 0),
             },
             Frame::Ready,
@@ -801,19 +799,16 @@ mod tests {
 
     #[test]
     fn a_cost_report_round_trips_in_both_wire_forms() {
-        // One frame kind, two wire forms: `DONE_COST` when the view measured
-        // the request, `DONE` when it has nothing to report (an older build, a
-        // refusal answered from the I/O thread, a thread that panicked). The
+        // One frame kind, two wire forms: `RESP_END_COST` when the view
+        // measured the request, `RESP_END` when it has nothing to report (a
+        // build from before D5, a response the I/O thread refused). The
         // scheduler must understand both, so both must round trip.
-        let reported = Frame::DoneCost {
-            outcome: DoneOutcome::Completed,
+        let reported = Frame::RespEndCost {
             cost: RequestCost::new(12_345_678, 1_234_567),
         };
-        let bare = Frame::Done {
-            outcome: DoneOutcome::Completed,
-        };
-        assert_eq!(reported.code(), TypeCode::DoneCost.code());
-        assert_eq!(bare.code(), TypeCode::Done.code());
+        let bare = Frame::RespEnd;
+        assert_eq!(reported.code(), TypeCode::RespEndCost.code());
+        assert_eq!(bare.code(), TypeCode::RespEnd.code());
         assert_ne!(reported, bare, "the report is not the same frame");
 
         for frame in [reported.clone(), bare] {
@@ -824,11 +819,13 @@ mod tests {
             assert_eq!(decoder.next_frame().unwrap(), Some((9, frame.clone())));
         }
 
-        // The layout is fixed: `u8 outcome | u64 wall_ns | u64 cpu_ns`.
+        // The layout is fixed: `u64 wall_ns | u64 cpu_ns`. The report is the
+        // last frame of the response, so the scheduler charges the flow from
+        // it; the two wire forms have to be told apart by the type code alone.
         let mut wire = Vec::new();
         encode(&reported, 1, &mut wire).unwrap();
-        assert_eq!(wire.len(), HEADER_LEN + 1 + 8 + 8);
-        assert_eq!(wire[9], DoneOutcome::Completed.code());
+        assert_eq!(wire.len(), HEADER_LEN + 8 + 8);
+        assert_eq!(wire[4], TypeCode::RespEndCost.code());
 
         // Zero is a legitimate measurement (a request that cost nothing
         // measurable), and so is the whole `u64` range.
@@ -838,10 +835,7 @@ mod tests {
             RequestCost::new(0, u64::MAX),
             RequestCost::new(u64::MAX, u64::MAX),
         ] {
-            let frame = Frame::DoneCost {
-                outcome: DoneOutcome::Aborted,
-                cost,
-            };
+            let frame = Frame::RespEndCost { cost };
             let mut wire = Vec::new();
             encode(&frame, 2, &mut wire).unwrap();
             let mut decoder = Decoder::new(Limits::default());
@@ -852,36 +846,45 @@ mod tests {
 
     #[test]
     fn a_truncated_cost_report_is_refused() {
-        // A `DONE_COST` payload is exactly 17 bytes; anything shorter is a
+        // A `RESP_END_COST` payload is exactly 16 bytes; anything shorter is a
         // broken frame rather than a request that cost nothing.
-        let frame = Frame::DoneCost {
-            outcome: DoneOutcome::Completed,
+        let frame = Frame::RespEndCost {
             cost: RequestCost::new(7, 8),
         };
         let payload = frame.to_raw(1).unwrap().payload;
-        assert_eq!(payload.len(), 17);
-        for len in [1usize, 9, 16] {
-            let wire = crate::testutil::frame_bytes(TypeCode::DoneCost.code(), 1, &payload[..len]);
+        assert_eq!(payload.len(), 16);
+        for len in [0usize, 1, 8, 15] {
+            let wire =
+                crate::testutil::frame_bytes(TypeCode::RespEndCost.code(), 1, &payload[..len]);
             let mut decoder = Decoder::new(Limits::default());
             decoder.push(&wire);
             assert!(
                 decoder.next_frame().is_err(),
-                "a {len}-byte DONE_COST payload must not decode"
+                "a {len}-byte RESP_END_COST payload must not decode"
             );
         }
 
         // One byte too many is a broken frame too, not a cost report.
         let mut extra = payload.clone();
         extra.push(0);
-        let wire = crate::testutil::frame_bytes(TypeCode::DoneCost.code(), 1, &extra);
+        let wire = crate::testutil::frame_bytes(TypeCode::RespEndCost.code(), 1, &extra);
         let mut decoder = Decoder::new(Limits::default());
         decoder.push(&wire);
         assert_eq!(
             decoder.next_frame().unwrap_err(),
             FrameError::TrailingBytes {
-                ty: "DONE_COST",
+                ty: "RESP_END_COST",
                 extra: 1
             }
+        );
+
+        // ... and the kind is not a body frame: its payload is exactly two
+        // integers, so it cannot be smuggled past the expensive path either.
+        assert!(
+            !Frame::RespEndCost {
+                cost: RequestCost::default()
+            }
+            .requires_zero_id()
         );
     }
 

@@ -198,7 +198,7 @@ impl FairConfig {
 }
 
 /// Nanoseconds in a duration, saturating.
-fn nanos(duration: Duration) -> u64 {
+pub(crate) fn nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
@@ -374,7 +374,10 @@ mod tests {
     #[test]
     fn fair_queuing_is_off_by_default() {
         let cfg = SchedulerConfig::default();
-        assert!(!cfg.fair_queuing, "§2.4 defaults BLASTIT_FAIR_QUEUING to off");
+        assert!(
+            !cfg.fair_queuing,
+            "§2.4 defaults BLASTIT_FAIR_QUEUING to off"
+        );
     }
 
     #[test]

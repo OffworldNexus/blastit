@@ -112,15 +112,13 @@ pub fn client_exchange() -> (Vec<u8>, Vec<(u32, Frame)>) {
         ),
         (
             1,
-            Frame::DoneCost {
-                outcome: DoneOutcome::Completed,
+            Frame::RespEndCost {
                 cost: RequestCost::new(12_500_000, 3_000_000),
             },
         ),
         (
             2,
-            Frame::DoneCost {
-                outcome: DoneOutcome::Aborted,
+            Frame::RespEndCost {
                 cost: RequestCost::new(0, 0),
             },
         ),
