@@ -162,6 +162,27 @@ def main():
     else:
         check(facts.get("inet") == "allowed", "baseline: no filter, an inet socket is created")
 
+    print("capabilities")
+    # D6: whatever mode init runs in — root on App Platform, a few capabilities
+    # on a plain container — the *view* process that answers this has none, and
+    # has `no_new_privs` set, so an execve of a file with file capabilities
+    # cannot give it one back.
+    status, _, body = probe.request("GET", "/debug/caps/")
+    facts = json.loads(body) if status == 200 else {}
+    check(status == 200, "the debug route answers the capability probe")
+    if under_blastit:
+        check(facts.get("route") == "debug", "the probe ran in the debug route's process")
+        for field in ("inheritable", "permitted", "effective", "ambient"):
+            check(
+                facts.get(field) == "0000000000000000",
+                f"a view holds no {field} capability ({facts.get(field)})",
+            )
+        check(facts.get("no_new_privs") == "1", "a view has no_new_privs set")
+    else:
+        # Outside blastit there is nothing that clears anything: the check is
+        # that the probe itself ran.
+        check(isinstance(facts.get("uid"), int), "baseline: the probe reads its own status")
+
     status, _, body = probe.request("GET", "/egress/probe/")
     facts = json.loads(body) if status == 200 else {}
     check(status == 200, "the egress route answers the egress probe")

@@ -157,6 +157,16 @@ fn lifecycle_summary(lifecycle: &Lifecycle) -> String {
     if let Some(seccomp) = lifecycle.seccomp {
         parts.push(format!("seccomp={}", if seccomp { "on" } else { "off" }));
     }
+    // D6: which mode init runs in, and the capabilities it holds.
+    if let Some(privilege) = &lifecycle.privilege {
+        parts.push(format!("privilege={privilege}"));
+    }
+    if !lifecycle.capabilities.is_empty() {
+        parts.push(format!(
+            "capabilities=[{}]",
+            lifecycle.capabilities.join(" ")
+        ));
+    }
     if let Some(immortalize) = lifecycle.immortalize {
         parts.push(format!(
             "immortalize={}",
@@ -410,6 +420,34 @@ mod tests {
             warning.starts_with("14:02:11.384 WARN  manifest.warning x"),
             "{warning}"
         );
+    }
+
+    #[test]
+    fn lifecycle_shows_the_privilege_mode_and_its_capabilities() {
+        // D6: the pretty format says the same thing as the JSON one, next to
+        // `seccomp`, because a human reading a boot line is asking the same
+        // question.
+        let event = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("stage0")
+                .with_privilege("capabilities")
+                .with_capability("cap_chown")
+                .with_capability("cap_setuid"),
+        ));
+        let line = encode_pretty(&event, false);
+        assert!(line.contains("privilege=capabilities"), "{line}");
+        assert!(
+            line.contains("capabilities=[cap_chown cap_setuid]"),
+            "{line}"
+        );
+        let root = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("stage0")
+                .with_privilege("root"),
+        ));
+        let line = encode_pretty(&root, false);
+        assert!(line.contains("privilege=root"), "{line}");
+        assert!(!line.contains("capabilities="), "{line}");
     }
 
     #[test]

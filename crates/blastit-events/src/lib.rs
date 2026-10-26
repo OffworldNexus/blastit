@@ -893,6 +893,8 @@ pub struct Lifecycle {
     workers: Option<u32>,
     duration_ms: Option<f64>,
     seccomp: Option<bool>,
+    privilege: Option<String>,
+    capabilities: Vec<String>,
     immortalize: Option<bool>,
     immortalize_reason: Option<String>,
     immortalized: Option<u64>,
@@ -940,6 +942,30 @@ impl Lifecycle {
     #[must_use]
     pub fn with_seccomp(mut self, seccomp: bool) -> Self {
         self.seccomp = Some(seccomp);
+        self
+    }
+
+    /// Sets the privilege mode init itself runs in: `root` or `capabilities`
+    /// (D6).
+    ///
+    /// A server started as an unprivileged user holding a few capabilities
+    /// looks exactly like one started as root from the outside, and the two
+    /// have different failure modes when a platform forgets a capability — so
+    /// which one is in force belongs in the log, next to `seccomp` and for the
+    /// same reason.
+    #[must_use]
+    pub fn with_privilege(mut self, privilege: impl Into<String>) -> Self {
+        self.privilege = Some(privilege.into());
+        self
+    }
+
+    /// Records that the process holds the capability `name` (D6).
+    ///
+    /// A capability *name* (`cap_setuid`), never a value: this is a list of the
+    /// fixed names the kernel defines.
+    #[must_use]
+    pub fn with_capability(mut self, name: impl Into<String>) -> Self {
+        self.capabilities.push(name.into());
         self
     }
 
@@ -1036,6 +1062,18 @@ impl Lifecycle {
     /// Whether the §7.3 seccomp filters are on, when the event says.
     pub fn seccomp(&self) -> Option<bool> {
         self.seccomp
+    }
+
+    /// `root` or `capabilities`: the mode init runs in, when the event says
+    /// (D6).
+    pub fn privilege(&self) -> Option<&str> {
+        self.privilege.as_deref()
+    }
+
+    /// The capability names the process holds, `cap_...`; empty in root mode
+    /// (D6).
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
     }
 
     /// Whether §9.2 #7's pass ran, when the event says.

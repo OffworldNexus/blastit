@@ -46,6 +46,22 @@ def main():
     check(any(e.get("event") == "boot" and e.get("seccomp") is True for e in events),
           "the boot event says the seccomp filters are on")
 
+    # D6: the same boot event says which mode init runs in, because a rootless
+    # server and a root one are indistinguishable from the outside — and the
+    # rootless one is the deployment whose capabilities have to be right.
+    stage0 = [e for e in events if e.get("event") == "boot" and e.get("stage") == "stage0"]
+    check(len(stage0) == 1, f"one stage 0 boot event ({len(stage0)})")
+    if stage0:
+        privilege = stage0[0].get("privilege")
+        check(privilege in ("root", "capabilities"),
+              f"the boot event says the mode init runs in ({privilege})")
+        capabilities = stage0[0].get("capabilities") or []
+        check(bool(capabilities) == (privilege == "capabilities"),
+              f"the capability set is listed exactly in rootless mode "
+              f"({privilege}: {capabilities})")
+        check(all(str(c).startswith("cap_") for c in capabilities),
+              f"every capability it names is a cap_* name ({capabilities})")
+
     # §9.2 #7 and §8 Sizing: the preload `boot` event reports the
     # immortalisation and the view process cap the memory bought.
     preload = [e for e in events if e.get("event") == "boot" and "immortalized" in e]
@@ -103,7 +119,8 @@ def main():
 
     routed = {(e.get("path"), e.get("route")) for e in events if e.get("event") == "request"}
     for path, route in [("/login/", "login"), ("/notes/", "notes"), ("/logout/", "logout"),
-                        ("/debug/env/", "debug"), ("/", "fallback"), ("/notes/peek/", "notes"),
+                        ("/debug/env/", "debug"), ("/debug/caps/", "debug"),
+                        ("/", "fallback"), ("/notes/peek/", "notes"),
                         ("/notes/sql/", "notes"), ("/debug/sql/", "sql"),
                         ("/debug/egress/", "debug"), ("/egress/probe/", "egress")]:
         check((path, route) in routed, f"{path} was routed to {route}")

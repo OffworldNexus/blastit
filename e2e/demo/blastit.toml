@@ -60,7 +60,7 @@ queries = [
 
 [[route]]
 name = "debug"
-path = ['/debug/env/', '/debug/egress/']
+path = ['/debug/env/', '/debug/caps/', '/debug/egress/']
 methods = ["GET"]
 
 [[route]]

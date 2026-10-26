@@ -37,12 +37,72 @@ use blastit_sys::{
 };
 
 use crate::child::{ChildIo, Deadline, read_one, wait_readable};
-use crate::config::{Config, LogFormat, view_dir};
+use crate::config::{Config, LogFormat, Privilege, view_dir};
 use crate::host::{Host, Reexec};
 use crate::logs::{Emitter, fail, output_event};
 
 /// How long stage 0 waits for dbproxy's ready byte before giving up (§4).
 pub const DBPROXY_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The uid init is running as (D6).
+///
+/// The effective uid, which is the one a `setuid` from it would have to be
+/// authorised for.
+fn current_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+/// The `boot` event of stage 0 (§8.1), with D6's mode when it is known.
+fn stage0_lifecycle(privilege: Option<&Privilege>) -> Lifecycle {
+    let lifecycle = Lifecycle::default()
+        .with_stage("stage0")
+        .with_seccomp(crate::config::seccomp_requested());
+    match privilege {
+        Some(privilege) => privilege.lifecycle(lifecycle),
+        None => lifecycle,
+    }
+}
+
+/// The privilege mode D6's `boot` event reports, from what `blastit-sys` read
+/// out of `/proc/self/status`.
+fn privilege_from(held: blastit_sys::Held) -> Privilege {
+    match held.mode {
+        blastit_sys::PrivilegeMode::Root => Privilege::Root,
+        blastit_sys::PrivilegeMode::Capabilities => Privilege::Capabilities {
+            capabilities: held
+                .capabilities
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+        },
+    }
+}
+
+/// Which layout process, if any, already runs under `uid` (D6).
+///
+/// Pure, so the collision check is a unit test rather than a deployment
+/// surprise. A rootless `init` runs as an ordinary uid, and the layout hands
+/// every other process its own uid out of the same space; if init's uid *is* one
+/// of them, the process that was supposed to be sandboxed under it shares init's
+/// identity — it could read init's private state, and a `setuid` back to that
+/// uid would be no change at all. `None` means the uid is free.
+fn layout_collision(manifest: &Manifest, layout: &UidLayout, uid: u32) -> Option<String> {
+    if uid == layout.http() {
+        return Some("the http process".to_string());
+    }
+    if uid == layout.scheduler() {
+        return Some("the scheduler".to_string());
+    }
+    if uid == layout.dbproxy() {
+        return Some("dbproxy".to_string());
+    }
+    manifest
+        .routes()
+        .iter()
+        .enumerate()
+        .find(|(index, _)| layout.view(*index) == uid)
+        .map(|(_, route)| format!("route `{}`", route.name()))
+}
 
 /// How long stage 0 keeps reading a failed dbproxy's output before giving up
 /// (§8.1).
@@ -86,13 +146,26 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
     // §7.3 seccomp flag is read straight from its variable, because an operator
     // has to be able to see whether the filters are on (§8.1).
     let boot = Emitter::stdout(LogFormat::Json, Level::Info);
+    // D6: root or a handful of capabilities is read from the kernel, and it
+    // decides whether the boot can build its sandboxes at all. It comes before
+    // the first event, because the event has to report it.
+    let privilege = match blastit_sys::caps::detect() {
+        Ok(held) => privilege_from(held),
+        Err(err) => {
+            // A boot that cannot read its own capability sets cannot say which
+            // mode it is in. It says nothing about the mode rather than
+            // guessing, and stops: a child that keeps a capability nobody
+            // looked for is exactly what §4 refuses to risk.
+            boot.emit(&Event::now(
+                Component::Init,
+                EventKind::Boot(stage0_lifecycle(None)),
+            ));
+            fail(&boot, &err.to_string());
+        }
+    };
     boot.emit(&Event::now(
         Component::Init,
-        EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("stage0")
-                .with_seccomp(crate::config::seccomp_requested()),
-        ),
+        EventKind::Boot(stage0_lifecycle(Some(&privilege))),
     ));
 
     let mut config = match Config::from_env() {
@@ -135,6 +208,22 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
         .iter()
         .map(|(name, names)| (name.as_str().to_string(), names.clone()))
         .collect();
+    // D6: init is an ordinary uid in rootless mode, and the layout hands out
+    // the uids of every other process. A collision would give a view init's
+    // identity, so it is refused before any directory is created with it.
+    if let Some(process) = layout_collision(&manifest, &layout, current_uid()) {
+        fail(
+            &emitter,
+            &format!(
+                "init runs as uid {}, which is the uid of {process} in the layout \
+                 (BLASTIT_UID_BASE={}): run it as a uid below the layout, or raise \
+                 BLASTIT_UID_BASE (D6)",
+                current_uid(),
+                config.uid_base
+            ),
+        );
+    }
+    config.privilege = Some(privilege);
 
     let listeners = bind_view_sockets(&emitter, &manifest, &prepared, &layout);
     let dbproxy = fork_dbproxy(&emitter, &config, host, interpreter, &prepared, listeners);
@@ -610,6 +699,102 @@ mod tests {
         pipe().unwrap()
     }
 
+    /// A manifest with `routes` routes, in the order they matter here.
+    fn manifest_with(routes: usize) -> Manifest {
+        let mut source = String::from("version = 1\n");
+        for index in 0..routes {
+            source.push_str(&format!(
+                "\n[[route]]\nname = \"r{index}\"\npath = ['/r{index}/']\n"
+            ));
+        }
+        Manifest::parse_and_validate(&source, 20_000).unwrap().0
+    }
+
+    #[test]
+    fn the_layout_collision_check_knows_every_process_it_hands_a_uid_to() {
+        // D6: init is an ordinary uid in rootless mode, so its own uid must not
+        // be one the layout gives away.
+        let manifest = manifest_with(3);
+        let layout = UidLayout::new(20_000);
+        assert_eq!(
+            layout_collision(&manifest, &layout, 20_001).unwrap(),
+            "the http process"
+        );
+        assert_eq!(
+            layout_collision(&manifest, &layout, 20_002).unwrap(),
+            "the scheduler"
+        );
+        assert_eq!(
+            layout_collision(&manifest, &layout, 20_003).unwrap(),
+            "dbproxy"
+        );
+        assert_eq!(
+            layout_collision(&manifest, &layout, 21_000).unwrap(),
+            "route `r0`"
+        );
+        assert_eq!(
+            layout_collision(&manifest, &layout, 21_002).unwrap(),
+            "route `r2`"
+        );
+    }
+
+    #[test]
+    fn a_uid_outside_the_layout_is_free() {
+        let manifest = manifest_with(2);
+        let layout = UidLayout::new(20_000);
+        // The ordinary case: a service uid, and root.
+        assert!(layout_collision(&manifest, &layout, 0).is_none());
+        assert!(layout_collision(&manifest, &layout, 1000).is_none());
+        // A view uid of a route this manifest does not have is free too.
+        assert!(layout_collision(&manifest, &layout, 21_002).is_none());
+        // And the whole check disappears when the base is a high, private one.
+        let layout = UidLayout::new(100_000);
+        assert!(layout_collision(&manifest, &layout, 20_001).is_none());
+        assert_eq!(
+            layout_collision(&manifest, &layout, 101_001).unwrap(),
+            "route `r1`"
+        );
+    }
+
+    #[test]
+    fn the_stage_zero_boot_event_says_the_mode() {
+        let root = stage0_lifecycle(Some(&Privilege::Root));
+        assert_eq!(root.stage(), Some("stage0"));
+        assert_eq!(root.privilege(), Some("root"));
+        assert!(root.capabilities().is_empty());
+
+        let rootless = stage0_lifecycle(Some(&Privilege::Capabilities {
+            capabilities: vec!["cap_chown".to_string(), "cap_setuid".to_string()],
+        }));
+        assert_eq!(rootless.privilege(), Some("capabilities"));
+        assert_eq!(rootless.capabilities(), ["cap_chown", "cap_setuid"]);
+
+        // A boot that could not read its own capability sets says nothing about
+        // the mode rather than guessing one.
+        let unknown = stage0_lifecycle(None);
+        assert_eq!(unknown.stage(), Some("stage0"));
+        assert_eq!(unknown.privilege(), None);
+    }
+
+    #[test]
+    fn the_detected_mode_becomes_the_boot_field() {
+        let root = privilege_from(blastit_sys::Held {
+            mode: blastit_sys::PrivilegeMode::Root,
+            capabilities: Vec::new(),
+        });
+        assert_eq!(root, Privilege::Root);
+        let rootless = privilege_from(blastit_sys::Held {
+            mode: blastit_sys::PrivilegeMode::Capabilities,
+            capabilities: vec!["cap_chown", "cap_setuid"],
+        });
+        assert_eq!(
+            rootless,
+            Privilege::Capabilities {
+                capabilities: vec!["cap_chown".to_string(), "cap_setuid".to_string()],
+            }
+        );
+        assert_eq!(rootless.mode(), "capabilities");
+    }
     /// A dbproxy that printed something and then hung holds its write end open:
     /// the drain has to read what it said without waiting for the process.
     #[test]

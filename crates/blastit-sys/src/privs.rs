@@ -5,21 +5,36 @@ use std::io;
 use rustix::process::{DumpableBehavior, Resource, Rlimit, set_dumpable_behavior, setrlimit};
 
 use crate::Signal;
+use crate::caps;
 use crate::error::Error;
 
-/// Process-wide identity: drop to `uid`, with `gid == uid` and no supplementary
-/// groups (ARCHITECTURE.md §2.1, §7.2).
+/// Process-wide identity: drop to `uid`, with `gid == uid`, no supplementary
+/// groups and **no capabilities at all** (ARCHITECTURE.md §2.1, §7.2; ROADMAP
+/// D6).
 ///
 /// Root can `setuid()` to any uid without an `/etc/passwd` entry and without
-/// breaking COW (§9.1). The order is the one that cannot be reversed:
-/// `setgroups(0, NULL)` first, then `setresgid`, then `setresuid`. Dropping the
-/// uid last is what makes the earlier calls possible, and dropping all three
-/// saved ids is what makes them irreversible.
+/// breaking COW (§9.1); an unprivileged `init` starting with the capabilities of
+/// [`crate::caps`] can do the same, which is what D6's rootless mode is. The
+/// order is the one that cannot be reversed, and it is also the order the
+/// capability sets have to be dropped in:
 ///
-/// The result is checked rather than assumed: the real, effective and saved
-/// uids and gids must all be `uid`, and `setuid(0)` must now fail. Any other
-/// outcome is an error, because a sandbox that kept a way back to root is worse
-/// than one that failed to start (§4).
+/// 1. the ambient, inheritable and bounding sets, while `CAP_SETPCAP` is still
+///    there — a root process loses its effective set the moment `setresuid`
+///    leaves uid 0, and dropping a bounding capability needs it;
+/// 2. `setgroups(0, NULL)`, then `setresgid`, then `setresuid` — dropping the
+///    uid last is what makes the earlier calls possible, and dropping all three
+///    saved ids is what makes them irreversible;
+/// 3. the permitted and effective sets. A **rootless** process still holds
+///    them: the kernel only clears the capability sets when *all* of a
+///    process's uids cross 0, and a rootless `init` was never 0. Without this
+///    step a view would keep `CAP_SETUID` and could become any uid in the
+///    container.
+///
+/// The result is checked rather than assumed: the real, effective and saved uids
+/// and gids must all be `uid`, no supplementary group may be left, every one of
+/// the five capability sets must be empty, and `setuid(0)` must now fail. Any
+/// other outcome is an error, because a sandbox that kept a way back to root is
+/// worse than one that failed to start (§4).
 ///
 /// This is process-wide, not thread-local: glibc's `setresuid` applies the
 /// change to every thread, which is one more reason init must be
@@ -37,6 +52,10 @@ pub fn drop_privileges(uid: u32) -> io::Result<()> {
         .into());
     }
 
+    // ARCHITECTURE §7.2 / ROADMAP D6: before the uid change, while the
+    // capability that can drop a bounding capability is still effective.
+    caps::clear_before_uid_change()?;
+
     // SAFETY: `setgroups` with a count of 0 and a null pointer clears the
     // supplementary group list; it reads no memory.
     if unsafe { libc::setgroups(0, std::ptr::null()) } == -1 {
@@ -52,6 +71,11 @@ pub fn drop_privileges(uid: u32) -> io::Result<()> {
     if unsafe { libc::setresuid(uid, uid, uid) } == -1 {
         return Err(priv_drop("setresuid"));
     }
+
+    // ROADMAP D6: a rootless process keeps permitted and effective across the
+    // uid change, so they are cleared here — and checked, because a view that
+    // kept `CAP_SETUID` is the whole point of this step.
+    caps::clear_after_uid_change()?;
 
     let mut rgid = 0;
     let mut egid = 0;
@@ -84,8 +108,8 @@ pub fn drop_privileges(uid: u32) -> io::Result<()> {
     }
 
     // SAFETY: `setuid(0)` takes one uid by value. It must fail here: with no
-    // capabilities and no root in any of the saved ids, there is nothing to
-    // set the uid back to 0 with.
+    // capability and no root in any of the saved ids, there is nothing to set
+    // the uid back to 0 with.
     if unsafe { libc::setuid(0) } == 0 {
         return Err(Error::PrivilegeCheck {
             stage: "setuid(0)",
@@ -221,8 +245,10 @@ pub fn dumpable() -> io::Result<bool> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::caps::{CapSet, Capabilities};
     use crate::error::Error;
     use crate::testutil::{child_ok, euid, in_child, is_root, must, must_err, root_only};
 
@@ -381,16 +407,21 @@ mod tests {
     }
 
     #[test]
-    fn drop_privileges_without_root_fails_at_setgroups() {
+    fn drop_privileges_without_root_fails_before_it_can_drop_anything() {
         if is_root() {
             println!("skipped: needs a non-root user");
             return;
         }
+        // A process with no capabilities cannot even clear the bounding set:
+        // `PR_CAPBSET_DROP` needs `CAP_SETPCAP`, and D6 clears the sets before
+        // the uid change. The boot refuses long before this, in
+        // `caps::decide`, with the list of capabilities that are missing —
+        // this is the same failure one layer down, so it names its own step.
         let uid = euid();
         let code = in_child(move || match drop_privileges(uid) {
             Ok(()) => 1,
             Err(err) => match Error::from_io(&err) {
-                Some(Error::PrivilegeDrop { stage, .. }) if *stage == "setgroups(0, NULL)" => 0,
+                Some(Error::CapabilityDrop { stage, .. }) if *stage == "PR_CAPBSET_DROP" => 0,
                 _ => 2,
             },
         });
@@ -425,6 +456,50 @@ mod tests {
                     return 4;
                 }
             }
+            0
+        });
+        assert_eq!(code, 0, "child failure code {code}");
+    }
+
+    /// ROADMAP D6: a drop that *starts* with the capabilities of a rootless
+    /// init — the ambient caps `setpriv`/a container can hand an unprivileged
+    /// process — leaves every capability set empty.
+    ///
+    /// This is the shape a rootless `init` is in: a uid that never was 0, a
+    /// permitted and effective set the kernel keeps across `setresuid`, and an
+    /// ambient set that survives `execve`. Without the explicit clear in
+    /// [`drop_privileges`], the child would keep `CAP_SETUID` and could become
+    /// any uid in the container.
+    #[test]
+    fn drop_privileges_clears_a_rootless_capability_set() {
+        if !root_only() {
+            return;
+        }
+        let uid = 20_500;
+        let code = in_child(move || {
+            let needs = crate::caps::Capability::NEEDED
+                .iter()
+                .fold(0_u64, |mask, cap| mask | (1_u64 << cap.raw()));
+            // The capabilities a rootless init is started with: permitted and
+            // effective set, plus the inheritable/ambient pair a launcher can
+            // hand over. As root we have to raise them ourselves.
+            if crate::caps::capset(needs, needs, needs).is_err() {
+                return 1;
+            }
+            if !Capabilities::read()
+                .unwrap()
+                .holds(CapSet::Permitted, crate::caps::Capability::SETUID)
+            {
+                return 2;
+            }
+            if drop_privileges(uid).is_err() {
+                return 3;
+            }
+            let left = Capabilities::read().unwrap();
+            if !left.is_clear() {
+                return 4;
+            }
+            // The identity checks ran, so the capabilities are gone for good.
             0
         });
         assert_eq!(code, 0, "child failure code {code}");

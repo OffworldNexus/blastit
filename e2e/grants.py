@@ -24,7 +24,7 @@ ROUTES = [
         True,
         False,
     ),
-    ("debug", [r"/debug/env/", r"/debug/egress/"], ["GET"], False, False),
+    ("debug", [r"/debug/env/", r"/debug/caps/", r"/debug/egress/"], ["GET"], False, False),
     ("sql", [r"/debug/sql/"], ["GET"], False, False),
     # The only route that may reach the network (§7.3), and it has no grants:
     # the probe opens no database connection at all.

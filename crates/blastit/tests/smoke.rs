@@ -961,6 +961,91 @@ fn concurrent_requests_to_one_route_run_in_parallel_threads() {
 }
 
 #[test]
+fn the_boot_events_say_init_runs_as_root() {
+    if !needs_root("privilege") {
+        return;
+    }
+    // D6: the mode belongs in the log, because a rootless boot and a root one
+    // look identical from the outside.
+    let server = Server::start(
+        "privilege",
+        46_000,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[],
+    );
+    assert_eq!(server.get("/one").status, 200);
+    let boots = server.events("boot");
+    assert!(boots.len() >= 2, "stage 0 and preload: {boots:?}");
+    for boot in &boots {
+        assert_eq!(boot["privilege"], "root", "{boot}");
+        assert!(boot.get("capabilities").is_none(), "{boot}");
+    }
+    assert_eq!(boots[0]["stage"], "stage0");
+    assert_eq!(boots[1]["stage"], "preload");
+}
+
+#[test]
+fn a_non_root_init_without_its_capabilities_names_them() {
+    if unsafe { libc::getuid() } == 0 {
+        println!("a non-root init: skipped: needs a non-root user");
+        return;
+    }
+    // D6: the same binary, as an ordinary user with no capabilities. It must
+    // fail at boot with the list of capabilities it is missing, not later with
+    // an EPERM nobody can place.
+    let fixture = Fixture::new("rootless");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
+    command
+        .env("PORT", "8099")
+        .env("BLASTIT_APP", "app:application")
+        .env("BLASTIT_MANIFEST", &manifest)
+        .env("PYTHONPATH", fixture.python_path())
+        .env("BLASTIT_UID_BASE", "47000")
+        .env("BLASTIT_LOG_FORMAT", "json")
+        .env("BLASTIT_LOG_LEVEL", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(path) = library_path() {
+        command.env("LD_LIBRARY_PATH", path);
+    }
+    let output = command.output().expect("the blastit binary starts");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        !output.status.success(),
+        "a boot without capabilities must fail\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    // The `boot` event is still the first line: it says it knows nothing about
+    // a mode it could not read.
+    let first: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap_or(""))
+        .unwrap_or_else(|err| panic!("{err}: {stdout}"));
+    assert_eq!(first["event"], "boot");
+    assert!(first.get("privilege").is_none(), "{first}");
+    for needle in [
+        "cap_setuid",
+        "cap_setgid",
+        "cap_chown",
+        "cap_fowner",
+        "cap_kill",
+        "cap_setpcap",
+    ] {
+        assert!(
+            stdout.contains(needle) || stderr.contains(needle),
+            "{needle} is missing from\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+    assert!(
+        stdout.contains("setcap") || stderr.contains("setcap"),
+        "the error says how to fix it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn stdout_is_one_event_per_line_and_covers_the_lifecycle() {
     if !needs_root("events") {
         return;
