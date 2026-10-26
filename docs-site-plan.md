@@ -230,7 +230,7 @@ Three things were checked by running them, not by reading them:
 Round 2 checked every item in `round1.md` again against the merged site and the
 source. Three things came out of it:
 
-* **The README is now 50 lines, from 110** — the banner, the links row, a
+* **The README is now 51 lines, from 110** — the banner, the links row, a
   three-sentence pitch, one Get started (10 lines of code: `uv init && uv add
   blastit`, `hello.py`, `blastit.toml`, the run command), the
   "Read the documentation →" line, and the licence. Everything the old README

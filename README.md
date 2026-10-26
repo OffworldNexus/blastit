@@ -12,6 +12,7 @@
 runs in its own process under its own Unix user, talks to a local proxy instead of
 the real database, and may run only the SQL its manifest grants it — so one
 exploitable bug in the least important page is worth that page, not the app.
+Linux only, CPython 3.13+, PostgreSQL.
 
 ## Get started
 
