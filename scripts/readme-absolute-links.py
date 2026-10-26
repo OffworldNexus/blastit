@@ -7,7 +7,8 @@ carries the README as its long description, so the links have to point at
 github.com before the build.
 
     uv run --no-project scripts/readme-absolute-links.py           # rewrite in place
-    uv run --no-project scripts/readme-absolute-links.py --check   # say what would change
+    uv run --no-project scripts/readme-absolute-links.py --check   # change nothing; exit 1
+                                                                  # if anything would change
 
 What it rewrites, in the whole file (fenced code blocks are left alone):
 
@@ -170,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
             path.write_text(text)
         elif changed:
             print(f"{path}: {len(changed)} link(s) would be rewritten", file=sys.stderr, flush=True)
+            # `--check` is a check: the file is not the one PyPI needs yet.
+            status = 1
         elif not left:
             print(f"{path}: already absolute", flush=True)
     return status

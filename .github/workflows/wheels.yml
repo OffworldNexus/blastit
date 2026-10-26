@@ -14,6 +14,9 @@ name: Wheels
 # plus `-dev<run number>` (`scripts/dev-version.sh`) — so a downloaded artifact
 # is never mistaken for the release at the same commit.
 #
+# x86_64 only, like the published ones: arm64 does not build (see
+# `.github/workflows/publish-pypi.yml` for what it would take).
+#
 # Nothing runs on a pull request: a PR that changes the packaging gets the same
 # build, and more, from `.github/workflows/publish-pypi.yml`.
 

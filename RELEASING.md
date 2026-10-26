@@ -58,6 +58,13 @@ workflow is safe — `skip-existing` means the files already there are left alon
 With `dry-run` left checked, the same run builds and verifies everything and
 stops before any upload: what a pull request gets.
 
+A dispatch cannot reach the real PyPI: `pypi` and `release` require
+`github.event_name == 'push'` as well as a tag ref, so the only thing a manual
+run can upload to is TestPyPI — and only with `dry-run` unchecked. (A dispatch
+*can* name a tag as its ref — `gh workflow run publish-pypi.yml --ref v0.1.0` —
+and GitHub reports `ref_type == 'tag'` for it; that is exactly why the event is
+part of the guard.)
+
 ## Release
 
 The version is in `Cargo.toml` (`[workspace.package] version`), and the tag is
@@ -79,10 +86,11 @@ tag is the release.
 4. **Watch it**: `gh run watch`, or *Actions → Publish*. In order: the tag is
    checked against `Cargo.toml` and the changelog (the `guard` job), the wheels
    are built for CPython 3.13 and 3.14 on x86_64, the sdist is built and
-   installed from, everything goes through `twine check --strict`, and then the
-   `pypi` job waits for your approval in the environment before it uploads. The
-   last job creates the GitHub release, with the artifacts attached and the
-   changelog entry as its notes.
+   installed from, and then the description is rendered the way PyPI renders it
+   (`verify`: `scripts/check-long-description.py`, below). After that the `pypi`
+   job waits for your approval in the environment before it uploads. The last
+   job creates the GitHub release, with the artifacts attached and the changelog
+   entry as its notes.
 5. **Clean up, once**: the development wheels used to be published on a rolling
    `wheels` GitHub release, and it is not a release at all. Once 0.1.0 is on
    PyPI, delete it:
@@ -131,11 +139,54 @@ broken wheel on the commit that broke it, and for whoever wants to try the
 current tree. The two workflows build with the same action,
 `.github/actions/build-wheel`.
 
+## The description PyPI shows
+
+`verify` runs `scripts/check-long-description.py` on the wheels and the sdist:
+it checks the metadata a release needs, and it renders the description with the
+renderer **PyPI itself uses** — `readme_renderer` with `comrak` (GFM) and `nh3`
+for the tag allowlist — then fails if anything in the result is relative, or if
+the README banner does not come from `raw.githubusercontent.com`.
+
+It is not `twine check`, deliberately: twine does not render a Markdown
+description at all (`twine.commands.check._RENDERERS["text/markdown"]` is
+`None`, "rendering cannot fail"), so it cannot see a description that renders to
+nothing or an image PyPI cannot fetch. To run it by hand:
+
+```console
+$ uv run --no-project scripts/check-long-description.py dist/*
+```
+
 ## Only x86_64, for now
 
-aarch64 does not compile: `blastit-sys` uses `libc::SYS_fchmodat2`, which libc
-does not define for aarch64 (the log is in run 40388835113 of `Publish`). That
-is a code fix in `crates/blastit-sys`, not a packaging one, so the release
-matrix is CPython 3.13 and 3.14 on x86_64 until it lands. Adding it back is one
-matrix dimension in `.github/workflows/publish-pypi.yml` on
-`ubuntu-24.04-arm`.
+The release matrix is CPython 3.13 and 3.14 on x86_64. arm64 is not a matrix
+dimension waiting to be switched on, it is a step of its own:
+
+* **it does not compile.** `blastit-sys` uses `libc::SYS_fchmodat2`, which libc
+  does not define for aarch64 (the log is run 40388835113 of `Publish`), so
+  there is no arm64 wheel *and* no arm64 source build.
+* **and that is not the whole of it.** §7.3's seccomp filters, and the arch
+  check they are built under, are written for x86_64 and have never run on arm64
+  at all.
+
+So arm64 means fixing the syscall numbers, reviewing the filters against the
+arm64 ABI, and adding a job on `ubuntu-24.04-arm` that builds *and* runs the
+tests there — a step with its own test run, not a one-line change.
+
+## What floats
+
+Every action is pinned to a major version (`actions/checkout@v4`,
+`PyO3/maturin-action@v1`, …), which follows upstream's fixes without a diff per
+release. Three of them move more than a version number does:
+
+* `dtolnay/rust-toolchain@stable` and `pypa/gh-action-pypi-publish@release/v1`
+  are *branches*: the first installs whatever stable Rust is that day (the
+  workspace's MSRV is checked separately, in `ci.yml`), the second is what the
+  publishing action's own documentation tells you to use;
+* `PyO3/maturin-action@v1` is pinned, but the maturin it installs is the latest
+  release by default, so the *build tool* floats inside it;
+* `astral-sh/setup-uv` is pinned to an exact release (`v10.3.2`) rather than a
+  major, because it stopped publishing major tags after `v7`.
+
+Nothing is pinned by commit SHA. That would be stricter — a tag can be moved —
+and is the right next step if this repository ever gets a bot that moves the
+pins.

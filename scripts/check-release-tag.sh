@@ -24,7 +24,11 @@ if [[ -z $tag ]]; then
     exit 1
 fi
 
-version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+version=$(awk '
+    /^\[workspace\.package\]/ { inside = 1; next }
+    /^\[/ { inside = 0 }
+    inside && /^version = "/ { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }
+' Cargo.toml)
 if [[ -z $version ]]; then
     echo "no [workspace.package] version in Cargo.toml" >&2
     exit 1

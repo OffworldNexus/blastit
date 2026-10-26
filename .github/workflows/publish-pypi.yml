@@ -3,16 +3,18 @@ name: Publish
 # E4: the release path. Pushing a `v*` tag publishes the manylinux wheels and the
 # sdist to PyPI through trusted publishing — OIDC, so there is no API token to
 # leak or rotate — from a GitHub environment named `pypi`. Nothing is built
-# before the tag has been checked against `Cargo.toml`, and every file has to
-# pass `twine check --strict` first.
+# before the tag has been checked against `Cargo.toml`, and nothing is uploaded
+# before the description has been rendered the way PyPI renders it
+# (`scripts/check-long-description.py`, in `verify`).
 #
 # A tag can't be rehearsed, so the same builds also run on two other events, and
-# neither publishes anything:
+# neither can publish a release:
 #
 #   * `workflow_dispatch` builds everything and stops before the upload. Uncheck
 #     `dry-run` to send the very same files to TestPyPI, from the `testpypi`
 #     environment — the dress rehearsal, with an index that takes throwaway
-#     versions;
+#     versions. `pypi` and `release` check `github.event_name` as well as
+#     `github.ref_type`, so a dispatch on a tag cannot reach them;
 #   * a pull request that touches the packaging itself (this file, the action,
 #     pyproject.toml, scripts/, README.md — it is the long description) runs the
 #     builds, so a broken sdist or a wheel without dbproxy is found before the
@@ -74,9 +76,11 @@ jobs:
     needs: guard
     runs-on: ubuntu-latest
     strategy:
-      # aarch64 is not built: `blastit-sys` uses `libc::SYS_fchmodat2`, which
-      # libc does not define for aarch64, so the extension does not compile
-      # there. Run 40388835113 (this workflow, first version) has the log.
+      # x86_64 only. arm64 is a step of its own, not a matrix dimension:
+      # `blastit-sys` does not compile for aarch64 (`libc::SYS_fchmodat2` is not
+      # defined there — run 40388835113 has the log), and §7.3's seccomp filters
+      # and the arch check they run under are written for x86_64 and have never
+      # run on arm64 at all. That needs an arm64 runner and a test run on it.
       matrix:
         python: ["3.13", "3.14"]
     steps:
@@ -117,10 +121,10 @@ jobs:
       - name: The installed blastit runs, with dbproxy in it
         run: |
           set -euo pipefail
-          # `--help` prints the usage and exits non-zero (it is not a `--key=value`),
-          # so the exit status is not the check — the words are, and they come from
-          # `blastit._blastit`: a wheel from this sdist that doesn't load has none.
-          usage=$(/tmp/from-sdist/bin/blastit --help 2>&1 || true)
+          # `--help` prints the usage and exits 0 (`cli::SUCCESS`); the words come
+          # from `blastit._blastit`, so a wheel built from this sdist that doesn't
+          # load fails here.
+          usage=$(/tmp/from-sdist/bin/blastit --help)
           printf '%s\n' "$usage" | grep -q "stage 0"
           dbproxy=$(ls /tmp/from-sdist/lib/python3*/site-packages/blastit/_bin/blastit-dbproxy)
           test -x "$dbproxy"
@@ -131,20 +135,24 @@ jobs:
           path: dist/*.tar.gz
 
   verify:
-    name: twine check --strict
+    name: description, as PyPI renders it
     needs: [wheels, sdist]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - uses: astral-sh/setup-uv@v10.3.2
-      # Everything that will be uploaded: the wheels and the sdist, nothing else.
-      - run: |
+      # Every file that will be uploaded: the wheels and the sdist, nothing else.
+      # The script renders the description with PyPI's own renderer, which
+      # `twine check` does not do for Markdown (see RELEASING.md).
+      - name: Every file that goes to PyPI
+        run: |
           set -euo pipefail
           ls -l dist
-          uvx twine check --strict dist/*
+          uv run --no-project scripts/check-long-description.py dist/*
 
   testpypi:
     name: TestPyPI
@@ -173,7 +181,12 @@ jobs:
   pypi:
     name: PyPI
     needs: verify
-    if: github.ref_type == 'tag'
+    # The event is part of the guard, not only the ref type: a
+    # `workflow_dispatch` can name a tag as its ref, and GitHub reports
+    # `ref_type == 'tag'` for that too. Without `event_name`, dispatching this
+    # workflow on `v0.1.0` would publish to the real PyPI — the one thing the
+    # dispatch path must never be able to do.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -197,7 +210,9 @@ jobs:
   release:
     name: GitHub release
     needs: pypi
-    if: github.ref_type == 'tag'
+    # Same guard as `pypi`: a release follows a publish, and a dispatch must
+    # not be able to create one either.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
