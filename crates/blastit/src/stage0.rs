@@ -561,6 +561,16 @@ fn fork_dbproxy(
         return None;
     }
 
+    // §7.2: dbproxy is `execve`'d as `BLASTIT_UID_BASE + 3`, so the child has
+    // to be able to *reach* the file before it is forked. A wheel installed
+    // under a directory the dropped-to uids cannot pass — a checkout inside a
+    // `0750` home, say — otherwise fails the boot with `exec dbproxy: Permission
+    // denied (os error 13)`, which names neither the directory nor the fix.
+    if let Some(blocker) = crate::visibility::unexecutable(std::slice::from_ref(&placement.dbproxy))
+    {
+        fail(emitter, &blocker.message());
+    }
+
     let proxies: Vec<ProxySpec> = prepared
         .upstreams()
         .iter()

@@ -339,9 +339,9 @@ mod tests {
     #[test]
     fn fields_can_be_surrounded_by_literals() {
         assert_eq!(
-            render("postgresql://blastit@{{ socket_dir | urlencode }}:{{ port }}/{{ database }}")
+            render("postgresql://blastit@/{{ database }}?host={{ socket_dir }}&port={{ port }}")
                 .unwrap(),
-            "postgresql://blastit@%2Fproc%2Fself%2Fcwd:5432/defaultdb"
+            "postgresql://blastit@/defaultdb?host=/proc/self/cwd&port=5432"
         );
     }
 

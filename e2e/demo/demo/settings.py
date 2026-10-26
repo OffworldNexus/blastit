@@ -28,6 +28,12 @@ ROOT_URLCONF = "demo.urls"
 WSGI_APPLICATION = "demo.wsgi.application"
 
 DATABASES = {"default": dj_database_url.parse(os.environ["DATABASE_URL"], conn_max_age=0)}
+# blastit renders a libpq URI whose socket directory is a query parameter
+# (`postgresql://blastit@/shop?host=/proc/self/cwd&port=5432`): `dj-database-url`
+# puts the unknown parameters in Django's `OPTIONS`, which the PostgreSQL
+# backend passes through to `psycopg.connect`, so no percent-decoding is needed
+# here — and SQLAlchemy, which does not decode a percent-encoded host, reads the
+# same URL (ARCHITECTURE.md §5.2).
 # blastit matches SQL text exactly, so parameters must travel separately (ARCHITECTURE.md §6).
 DATABASES["default"].setdefault("OPTIONS", {})["server_side_binding"] = True
 

@@ -181,7 +181,7 @@ impl Emitter {
                     self.write_line(&text);
                 }
             }
-            LogFormat::Pretty => self.write_line(&render_pretty(&value, self.color)),
+            LogFormat::Pretty => self.write_line(&pretty_line(&value, self.color)),
         }
     }
 
@@ -232,11 +232,33 @@ pub fn write_line(fd: RawFd, line: &str) {
     }
 }
 
-/// `HH:MM:SS.mmm LEVEL event key=value …`, the one-line rendering of a
-/// forwarded event (§8.1).
+/// The pretty line for a forwarded event (§8.1).
 ///
-/// The timestamp is taken from the event's own `ts`, so a forwarded line keeps
-/// the time the component stamped it with.
+/// Every event a component emits has a human form, and that form is written
+/// once — by [`blastit_events::encode_pretty`], which is what init's *own*
+/// events are rendered with — so a forwarded line is read back into the event
+/// it came from and rendered the same way. A line this build cannot read (an
+/// `event` name it does not know, a member that is not what the encoder writes)
+/// falls back to [`render_pretty`]'s field dump, which is what every event used
+/// to get: nothing is lost, the fields are all there in the order they arrived.
+fn pretty_line(value: &Map<String, Value>, color: bool) -> String {
+    match serde_json::to_string(value)
+        .ok()
+        .and_then(|line| blastit_events::decode_json(&line))
+    {
+        Some(event) => blastit_events::encode_pretty(&event, color),
+        None => render_pretty(value, color),
+    }
+}
+
+/// `HH:MM:SS.mmm LEVEL event key=value …`: the field dump a forwarded line
+/// that cannot be read back into an event gets.
+///
+/// It is the fallback of [`pretty_line`], for a line this build does not know:
+/// an `event` a newer component emitted, or members that are not the ones the
+/// encoder writes. Showing every field, in the order they arrived, is more
+/// useful than dropping the line — and the timestamp is the event's own, so the
+/// line keeps the time the component stamped it with.
 pub fn render_pretty(value: &Map<String, Value>, color: bool) -> String {
     let clock = value
         .get("ts")

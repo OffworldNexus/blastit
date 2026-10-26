@@ -26,7 +26,7 @@ Three extra endpoints exist to test the sandbox, not the app:
 import ctypes
 import os
 import socket
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
@@ -110,15 +110,31 @@ def peek(request):
     return JsonResponse({"users_read": len(hashes)})
 
 
+def local_host(url):
+    """The host — a socket directory, here — a rendered `DATABASE_URL` names.
+
+    blastit renders a libpq URI whose socket directory travels as a **query
+    parameter**, `postgresql://blastit@/shop?host=/proc/self/cwd&port=5432`: the
+    authority is empty, which is how libpq and SQLAlchemy both spell a Unix
+    socket, and — unlike a percent-encoded host, which SQLAlchemy does not decode
+    — it is read by every client. A project that parses the URL itself has to
+    look in both places, which is what this does.
+    """
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    if parts.hostname:
+        return unquote(parts.hostname)
+    return unquote(query.get("host", ""))
+
+
 def env(request):
     url = os.environ.get("DATABASE_URL", "")
     parts = urlsplit(url)
-    host = unquote(parts.hostname or "") if parts.hostname else ""
     return JsonResponse(
         {
             "database_url_set": bool(url),
             "has_password": bool(parts.password),
-            "host_is_local_socket": host.startswith("/"),
+            "host_is_local_socket": local_host(url).startswith("/"),
             "ca_cert_visible": "DATABASE_CA_CERT" in os.environ,
             "blastit_vars_visible": sorted(k for k in os.environ if k.startswith("BLASTIT_")),
             "route": request.META.get("blastit.route"),

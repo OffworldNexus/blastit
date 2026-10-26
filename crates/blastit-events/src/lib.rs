@@ -54,7 +54,7 @@ mod json;
 mod pretty;
 mod split;
 
-pub use json::encode_json;
+pub use json::{decode_json, encode_json};
 pub use pretty::encode_pretty;
 pub use split::{split_app_output, split_app_output_at};
 

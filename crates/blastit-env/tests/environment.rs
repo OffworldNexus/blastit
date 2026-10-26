@@ -124,7 +124,7 @@ fn architecture_5_1_example_end_to_end() {
     // The app sees the local endpoints, never the platform's.
     assert_eq!(
         app(&prepared, "DATABASE_URL"),
-        Some("postgresql://blastit@%2Fproc%2Fself%2Fcwd:5433/defaultdb")
+        Some("postgresql://blastit@/defaultdb?host=/proc/self/cwd&port=5433")
     );
     assert_eq!(app(&prepared, "ANALYTICS_DB_HOST"), Some("/proc/self/cwd"));
     assert_eq!(app(&prepared, "ANALYTICS_DB_PORT"), Some("5432"));
@@ -199,7 +199,7 @@ fn no_output_table_rewrites_the_same_variable_in_place() {
 
     assert_eq!(
         app(&prepared, "DATABASE_URL"),
-        Some("postgresql://blastit@%2Fproc%2Fself%2Fcwd:5432/defaultdb")
+        Some("postgresql://blastit@/defaultdb?host=/proc/self/cwd&port=5432")
     );
     assert!(!prepared.app_env().contains_key("DATABASE_CA_CERT"));
     assert_eq!(app(&prepared, "PATH"), Some("/usr/bin"));
@@ -332,7 +332,7 @@ fn database_names_that_need_encoding_are_encoded() {
     let prepared = build(&manifest, &platform, None).expect("builds");
     assert_eq!(
         app(&prepared, "DATABASE_URL"),
-        Some("postgresql://blastit@%2Fproc%2Fself%2Fcwd:5432/my%20db%2Fx")
+        Some("postgresql://blastit@/my%20db%2Fx?host=/proc/self/cwd&port=5432")
     );
     // The `database` field itself is the decoded name.
     assert_eq!(
@@ -405,15 +405,18 @@ fn an_output_may_not_overwrite_a_variable_it_does_not_own() {
 
 #[test]
 fn an_output_may_redefine_its_own_input() {
+    // `url` is a URI that already carries its parameters, so anything a project
+    // appends joins with `&`: the rendered value is
+    // `postgresql://blastit@/db?host=/proc/self/cwd&port=5432`.
     let manifest = one_proxy_output(
         r#"{ url = "DATABASE_URL" }"#,
-        r#"DATABASE_URL = "{{ url }}?sslmode=disable""#,
+        r#"DATABASE_URL = "{{ url }}&application_name=shop""#,
     );
     let platform = env(&[("DATABASE_URL", "postgresql://u:p@h/db")]);
     let prepared = build(&manifest, &platform, None).expect("builds");
     assert_eq!(
         app(&prepared, "DATABASE_URL"),
-        Some("postgresql://blastit@%2Fproc%2Fself%2Fcwd:5432/db?sslmode=disable")
+        Some("postgresql://blastit@/db?host=/proc/self/cwd&port=5432&application_name=shop")
     );
 }
 

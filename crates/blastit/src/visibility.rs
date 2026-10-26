@@ -1,23 +1,26 @@
-//! Whether the uids that serve requests can read what a view imports (§2.1,
-//! §5.3, §7.2).
+//! Whether the uids blastit drops to can reach what they need (§2.1, §5.3,
+//! §7.2).
 //!
-//! A view process runs as a uid of its own, and it is not the owner's: the
-//! configuration, the interpreter and the application's code belong to whoever
-//! installed them, so the only permission bits that apply inside a view are
-//! **other**'s (`o`). A directory the owner can read and traverse is not
-//! necessarily one a view can, and the failure it produces is in the middle of
-//! a request: the modules an application imports *lazily* — `stringprep` and
-//! `encodings.idna` behind Django's URL parsing, a template, a URLconf that is
-//! not in `BLASTIT_PRELOAD` — are imported after the fork, from a directory
-//! nobody has looked at since the server started.
+//! blastit's other uids are not the owner's: the configuration, the interpreter
+//! and the application's code belong to whoever installed them, so the only
+//! permission bits that reach a view process — or the child that runs dbproxy —
+//! are **other**'s (`o`). A directory the owner can read and traverse is not
+//! necessarily one a view can, and the failures it produces are both bad ones:
 //!
-//! The failure mode is nasty enough to be worth a refusal at boot instead:
-//! `libpython`'s built-ins keep working, so the app starts, answers the health
-//! probe and serves some requests, and then a view raises
-//! `ModuleNotFoundError: No module named 'stringprep'` on one path and nothing
-//! else. The cost of refusing is a deployment that has to move an interpreter
-//! somewhere every uid can reach; the cost of not refusing is a production
-//! incident whose message says nothing about permissions.
+//! * a view imports *lazily* — `stringprep` and `encodings.idna` behind Django's
+//!   URL parsing, a template, a URLconf that is not in `BLASTIT_PRELOAD` — after
+//!   the fork, from a directory nobody has looked at since the server started.
+//!   `libpython`'s built-ins keep working, so the app starts, answers the health
+//!   probe and serves some requests, and then one view raises
+//!   `ModuleNotFoundError: No module named 'stringprep'` on one path and nothing
+//!   else;
+//! * the child that holds the credentials cannot `execve` dbproxy, and dies
+//!   with `Permission denied (os error 13)` — before any of that, with nothing
+//!   in the log saying which directory a deployment has to open.
+//!
+//! Both are worth a refusal at boot instead, and that is what this module
+//! produces: the first path a dropped-to uid cannot reach, its mode, and the
+//! fix.
 //!
 //! # What is checked
 //!
@@ -25,60 +28,77 @@
 //! standard library, `site-packages`, and the directory the application's own
 //! module comes from. For each of them, every directory on the way down must be
 //! traversable by others (`o+x`) and the directory itself readable (`o+r`) —
-//! reading a module means descending into the directory that holds it. The
-//! first directory that fails is the one the message names, because it is the
+//! reading a module means descending into the directory that holds it. A child
+//! `execve`s *programs*, so [`unexecutable`] asks the other question: the file
+//! itself must be executable (`o+x`) and every directory above it traversable.
+//! The first path that fails is the one the message names, because it is the
 //! one an operator has to change.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-/// What a view cannot do with a directory, in the words of the message.
+/// What a uid blastit drops to cannot do with a path, in the words of the
+/// message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
     /// Read it: list it, and read the files in it.
     Read,
     /// Traverse it: reach what is below it.
     Traverse,
+    /// Execute it: `execve` a program a child has to run.
+    Execute,
 }
 
 impl Access {
+    /// The permission bit a path has to set for this access.
+    const fn bit(self) -> u32 {
+        match self {
+            Self::Read => 0o004,
+            Self::Traverse | Self::Execute => 0o001,
+        }
+    }
+
     /// The words [`Blocker::message`] uses for this access.
     pub const fn phrase(self) -> &'static str {
         match self {
             Self::Read => "not readable by other uids",
             Self::Traverse => "not traversable by other uids",
+            Self::Execute => "not executable by other uids",
         }
     }
 }
 
-/// A directory a view uid cannot reach, and what is wrong with it.
+/// A path a uid blastit drops to cannot reach, and what is wrong with it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Blocker {
-    /// The directory that blocks, as it was asked for.
+    /// The path that blocks, as it was asked for.
     pub path: PathBuf,
     /// Its permission bits, exactly as `chmod` writes them.
     pub mode: u32,
-    /// What a view cannot do with it.
+    /// What that uid cannot do with it.
     pub access: Access,
 }
 
 impl Blocker {
     /// The sentence an operator reads: what is wrong, and what to do about it.
     ///
-    /// It names the directory, its mode, and both fixes: moving what is
-    /// unreachable somewhere every uid can read — for an interpreter, a
-    /// system-wide Python, or `UV_PYTHON_INSTALL_DIR` for a uv-managed one —
-    /// or opening the way to it, which is the whole path rather than the one
-    /// directory, so the message says that too.
+    /// It names the path, its mode, and both fixes: moving what is unreachable
+    /// somewhere every uid can read — for an interpreter, a system-wide Python,
+    /// or `UV_PYTHON_INSTALL_DIR` for a uv-managed one — or opening the way to
+    /// it, which is the whole path rather than the one directory, so the message
+    /// says that too. Both symptoms are named, because the two callers refuse
+    /// two different failures: a view losing a lazy import, and a child that
+    /// cannot `execve` dbproxy.
     pub fn message(&self) -> String {
         format!(
-            "{} (mode {:04o}) is {}: a view process runs as a uid of its own (§2.1), so \
-             only the \"other\" permission bits apply to it, and a view that cannot reach \
-             this directory loses the modules it imports lazily (`ModuleNotFoundError: \
-             No module named 'stringprep'`, `encodings.idna`, …). Two fixes: move it \
-             somewhere every uid can read — for an interpreter, a system-wide Python, or \
-             `export UV_PYTHON_INSTALL_DIR=/opt/uv-python` before `uv python install` — \
-             or open the way to it: `chmod o+rx {}` here and on every directory above it",
+            "{} (mode {:04o}) is {}: blastit's other uids — a view process, and the child \
+             that runs dbproxy — are not the owner, so only the \"other\" permission bits \
+             reach them, and what breaks is a lazy import inside a view \
+             (`ModuleNotFoundError: No module named 'stringprep'`, `encodings.idna`, …) or \
+             an `execve` (`Permission denied (os error 13)`). Two fixes: move it somewhere \
+             every uid can read — for an interpreter, a system-wide Python, or `export \
+             UV_PYTHON_INSTALL_DIR=/opt/uv-python` before `uv python install` — or open \
+             the way to it: `chmod o+rx {}` here and on every directory above it",
             self.path.display(),
             self.mode,
             self.access.phrase(),
@@ -94,51 +114,84 @@ impl Blocker {
 /// is where a managed Python under a private home blocks, then the application's
 /// own code.
 ///
-/// A path that is not there, or is not a directory, is not this check's
-/// business: an import that needs a missing directory fails with its own
-/// message, and claiming a permission problem there would send an operator to
-/// `chmod` something that does not exist.
+/// A path that is not there is not this check's business: an import that needs a
+/// missing directory fails with its own message, and claiming a permission
+/// problem there would send an operator to `chmod` something that does not
+/// exist.
 pub fn unreadable(paths: &[PathBuf]) -> Option<Blocker> {
-    paths.iter().find_map(|path| blocks(path))
+    paths.iter().find_map(|path| blocks(path, false))
 }
 
-/// The first directory on the way to `path` that a view uid could not reach.
+/// The first program of `paths` a child uid could not `execve`.
 ///
-/// The directory itself must be readable *and* traversable — a module inside it
-/// is reached by descending into it — and every directory above it must be
-/// traversable. Symlinks are followed, because the kernel resolves them: the
-/// directory a view has to be allowed through is the target's, not the link's.
-fn blocks(path: &Path) -> Option<Blocker> {
+/// dbproxy is `execve`'d as `BLASTIT_UID_BASE + 3`, which is not the owner of
+/// anything the deployment installed: the file itself needs `o+x`, and every
+/// directory on the way to it needs `o+x` too. Without this the child dies in
+/// `execve` with `Permission denied (os error 13)`, which says nothing about
+/// which directory a deployment has to open — the same failure mode
+/// [`unreadable`] refuses, one stage later.
+pub fn unexecutable(paths: &[PathBuf]) -> Option<Blocker> {
+    paths.iter().find_map(|path| blocks(path, true))
+}
+
+/// The first path on the way to `path` that a dropped-to uid could not use.
+///
+/// `executable` says what the leaf is for: a program a child `execve`s
+/// ([`unexecutable`], `true`) or a directory the interpreter and the application
+/// are read through ([`unreadable`], `false`). The leaf must allow what that
+/// needs — a directory a module is found in has to be readable *and*
+/// traversable, a program executable, a file readable — and every directory
+/// above it must be traversable. Symlinks are followed, because the kernel
+/// resolves them: the directory a view has to be allowed through is the
+/// target's, not the link's.
+fn blocks(path: &Path, executable: bool) -> Option<Blocker> {
     for (depth, directory) in path.ancestors().enumerate() {
         if directory.as_os_str().is_empty() {
             continue;
         }
         let Ok(metadata) = std::fs::metadata(directory) else {
-            // The directory is not there (or not readable to us, which as root
-            // or init's uid means it is not there): whatever needed it fails
-            // with its own message.
+            // The path is not there (or not readable to us, which as root or
+            // init's uid means it is not there): whatever needed it fails with
+            // its own message.
             continue;
         };
-        if !metadata.is_dir() {
+        let mode = metadata.permissions().mode() & 0o777;
+        if depth == 0 {
+            let wanted = leaf_accesses(metadata.is_dir(), executable);
+            if let Some(access) = wanted.iter().find(|access| mode & access.bit() == 0) {
+                return Some(Blocker {
+                    path: directory.to_path_buf(),
+                    mode,
+                    access: *access,
+                });
+            }
             continue;
         }
-        let mode = metadata.permissions().mode() & 0o777;
-        let access = match (mode & 0o004 == 0, mode & 0o001 == 0) {
-            // The directory a file is in is both read and descended into; a
-            // directory on the way to it is only descended into.
-            (true, _) if depth == 0 => Some(Access::Read),
-            (_, true) => Some(Access::Traverse),
-            _ => None,
-        };
-        if let Some(access) = access {
+        if mode & Access::Traverse.bit() == 0 {
             return Some(Blocker {
                 path: directory.to_path_buf(),
                 mode,
-                access,
+                access: Access::Traverse,
             });
         }
     }
     None
+}
+
+/// What the last path on the way has to allow.
+///
+/// A directory is both read and descended into — a module inside it is reached
+/// by walking through it — while a program is executed and a file is read. The
+/// order is the order the message names them in: readability first, because
+/// that is the one an operator usually has to change.
+fn leaf_accesses(is_dir: bool, executable: bool) -> &'static [Access] {
+    if executable {
+        &[Access::Execute]
+    } else if is_dir {
+        &[Access::Read, Access::Traverse]
+    } else {
+        &[Access::Read]
+    }
 }
 
 #[cfg(test)]
@@ -256,6 +309,51 @@ mod tests {
         let second = tree.dir("project", 0o700);
         let blocker = unreadable(&[first.clone(), second]).expect("a blocker");
         assert_eq!(blocker.path, first);
+    }
+
+    #[test]
+    fn a_program_a_child_could_not_execute_is_named_and_explained() {
+        // dbproxy is `execve`'d as uid `BLASTIT_UID_BASE + 3`, which owns
+        // nothing a deployment installed: the file itself has to be executable
+        // by others, and so does every directory on the way to it.
+        let tree = TempTree::new("program");
+        let program = tree.path.join("blastit-dbproxy");
+        std::fs::write(&program, b"#!/bin/sh\n").unwrap();
+
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let blocker = unexecutable(std::slice::from_ref(&program)).expect("a blocker");
+        assert_eq!(blocker.path, program);
+        assert_eq!(blocker.mode, 0o700);
+        assert_eq!(blocker.access, Access::Execute);
+        let message = blocker.message();
+        assert!(
+            message.contains("not executable by other uids"),
+            "{message}"
+        );
+        assert!(message.contains("Permission denied"), "{message}");
+
+        // Readable but not executable is still not executable…
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            unexecutable(std::slice::from_ref(&program)).unwrap().access,
+            Access::Execute
+        );
+        // …and `0755`, which is what a shipped binary is, is fine.
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(unexecutable(std::slice::from_ref(&program)), None);
+
+        // A program behind a directory nobody may pass: the *directory* is what
+        // an operator has to change, so that is what is named.
+        let private = tree.dir("private", 0o700);
+        let inside = private.join("blastit-dbproxy");
+        std::fs::write(&inside, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let blocker = unexecutable(&[inside]).expect("a blocker");
+        assert_eq!(blocker.path, private);
+        assert_eq!(blocker.access, Access::Traverse);
+
+        // A path that is not there is not a permission problem.
+        assert_eq!(unexecutable(&[tree.path.join("missing")]), None);
     }
 
     #[test]

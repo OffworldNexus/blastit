@@ -1103,9 +1103,9 @@ queries = ["SELECT 1"]
     assert_eq!(response.status, 200, "{}", server.stdout_text());
     let value: serde_json::Value = serde_json::from_str(&response.body).unwrap();
     let database_url = value["database_url"].as_str().expect("DATABASE_URL is set");
-    assert!(
-        database_url.contains("/proc/self/cwd") || database_url.contains("%2Fproc%2Fself%2Fcwd"),
-        "the app is pointed at its own socket: {database_url}"
+    assert_eq!(
+        database_url, "postgresql://blastit@/defaultdb?host=/proc/self/cwd&port=5432",
+        "the app is pointed at its own socket, in the shape every client reads"
     );
     assert!(
         !database_url.contains(password),
@@ -1549,6 +1549,96 @@ fn sigterm_drains_and_exits_zero_within_the_graceful_timeout() {
         "{}",
         server.stdout_text()
     );
+}
+
+/// The manifest the two database tests serve: one granted query, one other
+/// route.
+const GRANTED_AND_DENIED: &str = r#"
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "data"
+path = ['/query']
+[route.db]
+queries = ["SELECT 1"]
+
+[[route]]
+name = "other"
+path = ['/other']
+"#;
+
+#[test]
+fn pretty_renders_a_forwarded_event_as_the_human_line() {
+    // §8.1: `BLASTIT_LOG_FORMAT=pretty` is one human line per event, and that
+    // line is written once — by the same encoder that renders init's own
+    // events. A child's event arrives as JSON on a pipe, so it has to be read
+    // back into an event first; a `method=GET path=/query …` field dump is what
+    // this replaces.
+    if !needs_root("pretty format") {
+        return;
+    }
+    let Some(url) = test_pg_url() else {
+        println!("pretty format: skipped: BLASTIT_TEST_PG_URL is not set");
+        return;
+    };
+    let base = 51_000;
+    let server = Server::start_with(
+        "pretty",
+        base,
+        GRANTED_AND_DENIED,
+        "app:application",
+        &[("app.py", PG_APP)],
+        &[("DATABASE_URL", &url), ("BLASTIT_LOG_FORMAT", "pretty")],
+        &[],
+        None,
+    );
+
+    assert_eq!(server.get("/query").status, 200, "{}", server.stdout_text());
+    assert!(
+        server.wait_for_event("sql.denied"),
+        "{}",
+        server.stdout_text()
+    );
+    let log = server.stdout_text();
+    assert!(
+        !log.contains("\"event\":"),
+        "a pretty log is not JSON:\n{log}"
+    );
+
+    // The request: `HH:MM:SS.mmm INFO  request  GET /query → data  200  1.2ms`.
+    let request = log
+        .lines()
+        .find(|line| line.contains(" request ") && line.contains("GET /query"))
+        .unwrap_or_else(|| panic!("no request line in:\n{log}"));
+    assert!(
+        request.contains("→ data"),
+        "the route reaches the line: {request}"
+    );
+    assert!(request.contains("200"), "{request}");
+    assert!(
+        request.trim_end().ends_with("ms"),
+        "the duration reaches the line: {request}"
+    );
+    assert!(!request.contains("method="), "not a field dump: {request}");
+
+    // The denial: `WARN sql.denied  data  db  query  SELECT 2`.
+    let denied = log
+        .lines()
+        .find(|line| line.contains("sql.denied"))
+        .unwrap_or_else(|| panic!("no sql.denied line in:\n{log}"));
+    assert!(
+        denied.contains(" db "),
+        "the proxy is in the line: {denied}"
+    );
+    assert!(
+        denied.contains("SELECT 2"),
+        "the statement is in the line: {denied}"
+    );
+    assert!(!denied.contains("proxy="), "not a field dump: {denied}");
 }
 
 #[test]

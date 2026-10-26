@@ -15,7 +15,7 @@ for the app (§5.2).
 """
 
 import os
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 SECRET_KEY = "not-a-secret-this-is-a-test"
 DEBUG = False
@@ -31,6 +31,10 @@ DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 STATIC_URL = "/static/"
 
 _url = urlsplit(os.environ.get("DATABASE_URL", ""))
+# blastit's socket directory is a query parameter
+# (`?host=/proc/self/cwd&port=5432`); a URL this project's own test process is
+# handed names a host and a port the ordinary way. Both are read here.
+_query = dict(parse_qsl(_url.query))
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -38,8 +42,8 @@ DATABASES = {
         "USER": unquote(_url.username or ""),
         "PASSWORD": unquote(_url.password or ""),
         # The socket directory the view runs in, under blastit (§5.2).
-        "HOST": unquote(_url.hostname or ""),
-        "PORT": str(_url.port or 5432),
+        "HOST": unquote(_url.hostname) if _url.hostname else unquote(_query.get("host", "")),
+        "PORT": str(_url.port or _query.get("port") or 5432),
         # §6: without this, psycopg inlines the literals and no grant matches.
         "OPTIONS": {"server_side_binding": True},
         # §6: request threads are thrown away after every request.

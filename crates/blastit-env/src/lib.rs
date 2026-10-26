@@ -64,7 +64,7 @@
 //! // The app gets the local endpoint, under the same variable name.
 //! assert_eq!(
 //!     prepared.app_env().get("DATABASE_URL").map(String::as_str),
-//!     Some("postgresql://blastit@%2Fproc%2Fself%2Fcwd:5432/defaultdb"),
+//!     Some("postgresql://blastit@/defaultdb?host=/proc/self/cwd&port=5432"),
 //! );
 //! // The CA material is gone from the app's environment…
 //! assert_eq!(prepared.app_env().get("DATABASE_CA_CERT"), None);
