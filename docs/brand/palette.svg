@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="460" viewBox="0 0 960 460" role="img" aria-labelledby="title desc">
+  <title id="title">blastit palette</title>
+  <desc id="desc">Mascot colours of the Eurasian nuthatch, and the light and dark interface tokens, with hex and OKLCH values.</desc>
+  <rect width="960" height="460" rx="8" fill="#121820"/>
+  <text x="22" y="34" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="12" letter-spacing="1">MASCOT</text>
+  <rect x="22" y="44" width="84" height="52" rx="4" fill="#6a808e" stroke="#2c3742" stroke-width="1"/>
+  <text x="64.0" y="112" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">SLATE</text>
+  <text x="64.0" y="126" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#6A808E</text>
+  <text x="64.0" y="140" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">58.7% .033 236</text>
+  <rect x="114" y="44" width="84" height="52" rx="4" fill="#4b6272" stroke="#2c3742" stroke-width="1"/>
+  <text x="156.0" y="112" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">SLATE-MID</text>
+  <text x="156.0" y="126" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#4B6272</text>
+  <text x="156.0" y="140" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">48.4% .038 239</text>
+  <rect x="206" y="44" width="84" height="52" rx="4" fill="#223846" stroke="#2c3742" stroke-width="1"/>
+  <text x="248.0" y="112" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">SLATE-DEEP</text>
+  <text x="248.0" y="126" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#223846</text>
+  <text x="248.0" y="140" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">32.9% .037 237</text>
+  <rect x="298" y="44" width="84" height="52" rx="4" fill="#101317" stroke="#2c3742" stroke-width="1"/>
+  <text x="340.0" y="112" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">STRIPE</text>
+  <text x="340.0" y="126" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#101317</text>
+  <text x="340.0" y="140" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">18.5% .009 256</text>
+  <rect x="390" y="44" width="84" height="52" rx="4" fill="#fbfaf6" stroke="#2c3742" stroke-width="1"/>
+  <text x="432.0" y="112" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">CHEEK</text>
+  <text x="432.0" y="126" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#FBFAF6</text>
+  <text x="432.0" y="140" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">98.5% .005 95</text>
+  <rect x="482" y="44" width="84" height="52" rx="4" fill="#f3c997" stroke="#2c3742" stroke-width="1"/>
+  <text x="524.0" y="112" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">BUFF</text>
+  <text x="524.0" y="126" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#F3C997</text>
+  <text x="524.0" y="140" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">86.1% .081 71</text>
+  <rect x="574" y="44" width="84" height="52" rx="4" fill="#9b4723" stroke="#2c3742" stroke-width="1"/>
+  <text x="616.0" y="112" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">RUST</text>
+  <text x="616.0" y="126" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#9B4723</text>
+  <text x="616.0" y="140" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">50.0% .123 42</text>
+  <rect x="666" y="44" width="84" height="52" rx="4" fill="#81371c" stroke="#2c3742" stroke-width="1"/>
+  <text x="708.0" y="112" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">RUST-DEEP</text>
+  <text x="708.0" y="126" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#81371C</text>
+  <text x="708.0" y="140" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">43.3% .110 40</text>
+  <rect x="758" y="44" width="84" height="52" rx="4" fill="#a1a5a6" stroke="#2c3742" stroke-width="1"/>
+  <text x="800.0" y="112" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">BILL-PALE</text>
+  <text x="800.0" y="126" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#A1A5A6</text>
+  <text x="800.0" y="140" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">71.9% .005 214</text>
+  <rect x="850" y="44" width="84" height="52" rx="4" fill="#3f3a36" stroke="#2c3742" stroke-width="1"/>
+  <text x="892.0" y="112" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">UMBER</text>
+  <text x="892.0" y="126" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#3F3A36</text>
+  <text x="892.0" y="140" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">35.2% .010 61</text>
+  <text x="22" y="176" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="12" letter-spacing="1">LIGHT · default</text>
+  <rect x="22" y="186" width="84" height="52" rx="4" fill="#f4efe3" stroke="#2c3742" stroke-width="1"/>
+  <text x="64.0" y="254" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">BACKGROUND</text>
+  <text x="64.0" y="268" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#F4EFE3</text>
+  <text x="64.0" y="282" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">95.3% .017 88</text>
+  <rect x="114" y="186" width="84" height="52" rx="4" fill="#fffcf5" stroke="#2c3742" stroke-width="1"/>
+  <text x="156.0" y="254" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">SURFACE</text>
+  <text x="156.0" y="268" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#FFFCF5</text>
+  <text x="156.0" y="282" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">99.1% .010 87</text>
+  <rect x="206" y="186" width="84" height="52" rx="4" fill="#161a20" stroke="#2c3742" stroke-width="1"/>
+  <text x="248.0" y="254" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">INK</text>
+  <text x="248.0" y="268" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#161A20</text>
+  <text x="248.0" y="282" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">21.6% .013 258</text>
+  <rect x="298" y="186" width="84" height="52" rx="4" fill="#56616b" stroke="#2c3742" stroke-width="1"/>
+  <text x="340.0" y="254" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">MUTED</text>
+  <text x="340.0" y="268" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#56616B</text>
+  <text x="340.0" y="282" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">48.7% .021 246</text>
+  <rect x="390" y="186" width="84" height="52" rx="4" fill="#223846" stroke="#2c3742" stroke-width="1"/>
+  <text x="432.0" y="254" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">PRIMARY</text>
+  <text x="432.0" y="268" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#223846</text>
+  <text x="432.0" y="282" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">32.9% .037 237</text>
+  <rect x="482" y="186" width="84" height="52" rx="4" fill="#9b4723" stroke="#2c3742" stroke-width="1"/>
+  <text x="524.0" y="254" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">ACCENT</text>
+  <text x="524.0" y="268" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#9B4723</text>
+  <text x="524.0" y="282" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">50.0% .123 42</text>
+  <rect x="574" y="186" width="84" height="52" rx="4" fill="#ffffff" stroke="#2c3742" stroke-width="1"/>
+  <text x="616.0" y="254" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">ACCENT-INK</text>
+  <text x="616.0" y="268" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#FFFFFF</text>
+  <text x="616.0" y="282" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">100.0% 0 0</text>
+  <text x="22" y="318" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="12" letter-spacing="1">DARK · slate</text>
+  <rect x="22" y="328" width="84" height="52" rx="4" fill="#121820" stroke="#2c3742" stroke-width="1"/>
+  <text x="64.0" y="396" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">BACKGROUND</text>
+  <text x="64.0" y="410" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#121820</text>
+  <text x="64.0" y="424" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">20.7% .018 256</text>
+  <rect x="114" y="328" width="84" height="52" rx="4" fill="#1b232c" stroke="#2c3742" stroke-width="1"/>
+  <text x="156.0" y="396" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">SURFACE</text>
+  <text x="156.0" y="410" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#1B232C</text>
+  <text x="156.0" y="424" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">25.2% .021 252</text>
+  <rect x="206" y="328" width="84" height="52" rx="4" fill="#f1ece0" stroke="#2c3742" stroke-width="1"/>
+  <text x="248.0" y="396" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">INK</text>
+  <text x="248.0" y="410" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#F1ECE0</text>
+  <text x="248.0" y="424" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">94.4% .017 88</text>
+  <rect x="298" y="328" width="84" height="52" rx="4" fill="#a5b0b8" stroke="#2c3742" stroke-width="1"/>
+  <text x="340.0" y="396" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">MUTED</text>
+  <text x="340.0" y="410" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#A5B0B8</text>
+  <text x="340.0" y="424" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">75.1% .017 239</text>
+  <rect x="390" y="328" width="84" height="52" rx="4" fill="#223846" stroke="#2c3742" stroke-width="1"/>
+  <text x="432.0" y="396" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">PRIMARY</text>
+  <text x="432.0" y="410" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#223846</text>
+  <text x="432.0" y="424" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">32.9% .037 237</text>
+  <rect x="482" y="328" width="84" height="52" rx="4" fill="#eb9a6c" stroke="#2c3742" stroke-width="1"/>
+  <text x="524.0" y="396" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">ACCENT</text>
+  <text x="524.0" y="410" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#EB9A6C</text>
+  <text x="524.0" y="424" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">75.8% .115 50</text>
+  <rect x="574" y="328" width="84" height="52" rx="4" fill="#1c0f08" stroke="#2c3742" stroke-width="1"/>
+  <text x="616.0" y="396" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">ACCENT-INK</text>
+  <text x="616.0" y="410" fill="#f1ece0" font-family="ui-monospace, monospace" font-size="11" text-anchor="middle">#1C0F08</text>
+  <text x="616.0" y="424" fill="#a5b0b8" font-family="ui-monospace, monospace" font-size="9.5" text-anchor="middle">18.5% .026 49</text>
+</svg>

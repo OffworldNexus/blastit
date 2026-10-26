@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>blastit — Eurasian nuthatch</title>
+  <desc>Hand-authored flat colour planes aligned to the 1024-pixel reference. Layered, not butted: every boundary between two colours is the edge of one shape lying over another, whose hidden edge runs well under it.</desc>
+  <path id="legs" fill="#3f3a36" d="M428.7 682 L447.8 679.1 L524 775.6 L506.2 782 Z M596.8 670 L619.6 659.2 L648.4 698.8 L629.2 706 Z"/>
+  <path id="body" fill="#6a808e" d="M460 305 C482 224 556 168 648 167 C700 167 740 186 770 212 L800 205 L790 230 L764 248 L752 275 C750 300 750 330 757 362 C770 400 768 460 758 510 C740 578 672 648 598 680 C578 688 565 693 548 694 C500 696 462 690 430 682 C405 684 382 673 348 650 C300 661 245 656 215 640 L235 610 L232 540 L280 485 Z"/>
+  <path id="tail" fill="#223846" d="M87 704 L222 612 L232 631 L111 734 Z"/>
+  <path id="tail-light" fill="#4b6272" d="M87 704 L222 612 L227 622 L98 719 Z"/>
+  <path id="undertail-deep" fill="#81371c" d="M205 640 C240 662 300 668 345 655 L388 662 L425 600 L415 575 L400 575 L230 610 Z"/>
+  <path id="undertail" fill="#9b4723" d="M345 655 C380 680 405 692 430 690 L445 680 C505 655 530 600 524 546 L400 580 C405 610 390 640 345 655 Z"/>
+  <path id="underparts" fill="#f3c997" d="M790 228 L768 245 C757 290 756 330 763 362 C776 400 774 460 764 510 C746 580 676 655 600 686 C580 694 565 699 548 700 C495 702 455 696 425 688 C482 650 508 602 510 555 L560 470 L640 392 L645 382 L530 382 L545 300 L600 282 L700 262 L740 240 Z"/>
+  <path id="primaries" fill="#223846" d="M120 642 L225 540 L240 535 L258 566 L463 494 L462 535 L608 478 L615 480 C590 510 560 535 515 555 L400 582 L235 618 Z"/>
+  <path id="wing-coverts" fill="#4b6272" d="M645 382 C650 420 640 455 615 480 L448 550 L455 503 L255 578 L225 540 L280 480 Z"/>
+  <path id="tail-spots" fill="#fbfaf6" d="M230 552 L241 563 L230 574 L219 563 Z M219 581 L229 591 L219 601 L209 591 Z M185 602 L193 610 L185 618 L177 610 Z"/>
+  <path id="cheek" fill="#fbfaf6" d="M566 288 C600 268 660 262 700 256 L760 238 L752 250 C742 280 728 305 706 320 C680 340 640 345 615 333 C596 325 584 314 576 300 Z"/>
+  <path id="eye-stripe" fill="#101317" d="M808 219 L700 232 C650 236 600 245 565 265 C530 290 508 330 508 382 L548 382 C547 345 556 312 582 294 C610 277 650 272 700 266 L752 250 L764 241 L790 238 Z"/>
+  <path id="bill-lower" fill="#a1a5a6" d="M936 183 Q840 240 752 272 L763 234 L780 228 L925 180 Z"/>
+  <path id="bill" fill="#30383b" d="M769 207 L928 175 L937 182 L775 240 L763 236 Z"/>
+  <circle id="eye-ring" cx="676" cy="250" r="28" fill="#3d4246"/>
+  <circle id="eye" cx="676" cy="250" r="22" fill="#101317"/>
+  <circle id="eye-glint" cx="673" cy="241" r="5.5" fill="#fbfaf6"/>
+  <path id="branch" fill="#2a2d32" d="M398 852 L806 607 L830 648 L420 892 Z"/>
+  <path id="feet" fill="#3f3a36" d="M468 812 L471 802 C472 772 500 758 540 757 C570 757 592 768 598 786 L586 785 L580 816 L570 790 Z M608 728 L611 718 C612 692 640 678 676 677 C700 677 716 690 720 723 L708 708 C700 702 690 700 680 701 Z"/>
+</svg>
