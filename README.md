@@ -593,6 +593,26 @@ Everything is configured through environment variables: `BLASTIT_APP`,
 (`BLASTIT_LOG_FORMAT=pretty` for humans). The full list is in
 [`ARCHITECTURE.md` §8.2](ARCHITECTURE.md#82-configuration-reference).
 
+### Pick a preset
+
+Two deployments were measured end to end, and each has a name:
+
+```console
+$ blastit --preset digitalocean-paas     # DigitalOcean App Platform
+$ blastit --preset compose-traefik       # Docker Compose behind Traefik
+```
+
+A preset is a set of **defaults**: anything you set yourself — every `BLASTIT_*`
+variable, and `PORT` — still wins, so adding one to a deployment that already
+configures blastit by hand changes nothing it named. (`BLASTIT_PRESET=NAME` is the
+same thing for a process you do not start yourself.) `blastit --help` lists them
+with a one-line description, and the `boot` event says which one is in force,
+which settings it supplied and which of them you overrode. Each preset also says
+what it assumes — root or capabilities, and *who can reach the port* — and the
+boot warns when the first of those does not hold. For anything else, the
+variables in [`ARCHITECTURE.md` §8.2](ARCHITECTURE.md#82-configuration-reference)
+are the whole story.
+
 ## Learn more
 
 * [`ARCHITECTURE.md`](ARCHITECTURE.md): the design, the security model, and

@@ -2,11 +2,17 @@
 # app under blastit in another, with blastit started as an **unprivileged user
 # holding only the capabilities it needs** instead of root.
 #
+# E1: Traefik v3 is the ingress, as it is in a Compose deployment, and the app
+# publishes no port at all — the only way in is through Traefik. The app runs
+# with `BLASTIT_PRESET=compose-traefik`, which is the trust decision for this
+# deployment: read `X-Forwarded-For`, and believe the peer that sent it.
+#
 # Driven by `e2e/rootless/run.py`; see `e2e/rootless/README.md`.
 #
 #   E2E_PROJECT   compose project name (two checkouts can run at once)
 #   E2E_IMAGE     image name for the app
-#   E2E_PORT      host port the app is published on (localhost only)
+#   E2E_PORT      host port Traefik publishes its plaintext entry point on
+#   E2E_TLS_PORT  host port Traefik publishes its TLS entry point on
 #   E2E_APP_UID   uid/gid the server runs as; must match the image's user, and
 #                 must be a *dedicated* uid: nothing else may run as it (D6)
 #   E2E_WORKER_UID
@@ -18,7 +24,6 @@ name: ${E2E_PROJECT:-blastit-d6-rootless}
 x-app-env: &app-env
   DATABASE_URL: postgresql://demo:${E2E_DB_PASSWORD:?}@db:5432/demo?sslmode=disable
   DJANGO_SECRET_KEY: e2e-not-secret
-  BLASTIT_LOG_FORMAT: json
 
 services:
   db:
@@ -43,6 +48,24 @@ services:
     environment: *app-env
     command: ["sh", "-c", "python manage.py migrate -v0 && python manage.py seed"]
     depends_on: { db: { condition: service_healthy } }
+
+  # E1: the ingress. Traefik is published on loopback only, and the app publishes
+  # nothing: a deployment's clients reach the app through Traefik and nothing else,
+  # which is what makes "believe the peer that sent the header" a rule rather than
+  # a gamble.
+  traefik:
+    image: traefik:v3.7.16
+    command:
+      - --entryPoints.web.address=:80
+      - --entryPoints.websecure.address=:443
+      - --providers.file.filename=/etc/traefik/blastit.yml
+      - --log.level=INFO
+    volumes:
+      - ./traefik.yml:/etc/traefik/blastit.yml:ro
+    ports:
+      - "127.0.0.1:${E2E_PORT:-18080}:80"
+      - "127.0.0.1:${E2E_TLS_PORT:-18443}:443"
+    depends_on: [app]
 
   # D6: the rootless server. Everything here is the deployment decision:
   #
@@ -71,7 +94,13 @@ services:
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETGID, SETPCAP, SETUID]
     tmpfs:
       - /run/blastit:mode=0700,uid=${E2E_APP_UID:-10000},gid=${E2E_APP_UID:-10000}
-    environment: *app-env
+    environment:
+      <<: *app-env
+      # E1: the whole trust decision for this deployment is the preset — which
+      # client-IP header, believed from which peers, plus fair queuing and JSON
+      # logs. No `BLASTIT_*` variable is set beside it, so the boot event says
+      # the preset supplied all of them.
+      BLASTIT_PRESET: compose-traefik
     command: ["/usr/local/bin/python3.13-init", "-m", "blastit"]
-    ports: ["127.0.0.1:${E2E_PORT:-18080}:8080"]
+    expose: ["8080"]
     depends_on: { migrate: { condition: service_completed_successfully } }

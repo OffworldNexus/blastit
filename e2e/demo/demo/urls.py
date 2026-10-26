@@ -12,6 +12,7 @@ urlpatterns = [
     path("notes/sql/", views.raw_sql),
     path("debug/sql/", views.raw_sql),
     path("debug/env/", views.env),
+    path("debug/request/", views.request_probe),
     path("debug/caps/", views.caps_probe),
     path("debug/egress/", views.egress_probe),
     path("egress/probe/", views.egress_probe),

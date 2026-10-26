@@ -63,6 +63,26 @@ fn stage0_lifecycle(privilege: Option<&Privilege>) -> Lifecycle {
     }
 }
 
+/// The `boot` event of the phase that parsed the configuration (§8.1, E1).
+///
+/// The first `boot` line is printed before anything can fail, so it knows
+/// nothing of the configuration — not the mode, not the preset. This one is the
+/// line that says what the boot *is*: which privilege mode init detected, what
+/// the §7.3 filters are set to, and which preset supplied which defaults. It
+/// comes before the manifest is read, so a boot that fails later still says
+/// which preset it was failing with.
+fn config_lifecycle(privilege: &Privilege, config: &Config) -> Lifecycle {
+    let lifecycle = privilege.lifecycle(
+        Lifecycle::default()
+            .with_stage("config")
+            .with_seccomp(config.seccomp),
+    );
+    match &config.preset {
+        Some(choice) => choice.lifecycle(lifecycle),
+        None => lifecycle,
+    }
+}
+
 /// Warns when another process already runs as init's uid (D6).
 ///
 /// The file that may carry the capabilities is mode `0500`, owned by the uid
@@ -277,7 +297,10 @@ fn dbproxy_limits(config: &Config) -> Rlimits {
 /// `interpreter` is `true` when a live CPython is in this image (a wheel: the
 /// console script's), which is what its `fork` has to account for (§9.3, and
 /// [`crate::forking`]).
-pub fn run(host: &Host, interpreter: bool) -> ! {
+///
+/// `preset` is `--preset` when the command line carried one, and it wins over
+/// `BLASTIT_PRESET` (E1, [`Config::from_env`]).
+pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // §4: `boot` is the first event, emitted before anything can fail. The
     // configuration is not parsed yet, so this one line is always JSON — and the
     // §7.3 seccomp flag is read straight from its variable, because an operator
@@ -342,11 +365,31 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
     // anything is forked.
     warn_about_siblings(&boot);
 
-    let mut config = match Config::from_env() {
+    let mut config = match Config::from_env(preset) {
         Ok(config) => config,
         Err(err) => fail(&boot, &err.to_string()),
     };
+    // D6: init's mode belongs in the configuration, because stage 1's preload
+    // `boot` event reports the same thing stage 0's does. It is set here, before
+    // anything can fail with it, so the `boot` line below can say it — and so
+    // E1's preset assumption can be checked against it.
+    config.privilege = Some(privilege.clone());
     let emitter = Emitter::stdout(config.log_format, config.log_level);
+    emitter.emit(&Event::now(
+        Component::Init,
+        EventKind::Boot(config_lifecycle(&privilege, &config)),
+    ));
+    // E1: a preset rests on a platform that hands init a particular identity, so
+    // a boot that contradicts one says so here — before the manifest is read,
+    // because a boot that fails on the manifest, on the environment rewrite or on
+    // a view socket never reaches stage 1, and this is the line that explains
+    // that boot to the operator who picked the preset.
+    if let Some(warning) = config.preset_assumption_warning(privilege.mode) {
+        emitter.emit(
+            &output_event(Component::Init, None, Stream::Stderr, warning.message())
+                .with_level(Level::Warn),
+        );
+    }
 
     if config.app.is_none() {
         fail(
@@ -397,7 +440,6 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
             ),
         );
     }
-    config.privilege = Some(privilege);
 
     let listeners = bind_view_sockets(&emitter, &manifest, &prepared, &layout);
     let dbproxy = fork_dbproxy(
@@ -991,6 +1033,55 @@ mod tests {
         assert_eq!(unknown.stage(), Some("stage0"));
         assert_eq!(unknown.privilege(), None);
         assert_eq!(unknown.bounding_set(), None);
+    }
+
+    #[test]
+    fn the_configuration_boot_event_says_the_mode_and_the_preset() {
+        // E1: the first `boot` line is printed before the configuration is
+        // read, so this is the one that says what the boot is: the mode init
+        // detected, whether the filters are on, and which preset supplied which
+        // defaults.
+        let privilege = Privilege {
+            mode: Mode::Capabilities,
+            capabilities: vec!["cap_setuid".to_string()],
+            bounding_set_dropped: true,
+        };
+        let mut config = Config::default();
+        assert_eq!(
+            config_lifecycle(&privilege, &config).stage(),
+            Some("config")
+        );
+        assert_eq!(
+            config_lifecycle(&privilege, &config).preset(),
+            None,
+            "no preset: the event says null, which the encoder writes"
+        );
+
+        config.preset = Some(crate::config::PresetChoice {
+            name: "compose-traefik".to_string(),
+            supplied: std::collections::BTreeMap::from([(
+                "BLASTIT_CLIENT_IP_HEADER".to_string(),
+                "x-forwarded-for".to_string(),
+            )]),
+            overridden: vec!["BLASTIT_LOG_FORMAT".to_string()],
+        });
+        let lifecycle = config_lifecycle(&privilege, &config);
+        assert_eq!(lifecycle.stage(), Some("config"));
+        assert_eq!(lifecycle.privilege(), Some("capabilities"));
+        assert_eq!(lifecycle.capabilities(), ["cap_setuid"]);
+        assert_eq!(lifecycle.seccomp(), Some(true), "the effective setting");
+        assert_eq!(lifecycle.preset(), Some("compose-traefik"));
+        assert_eq!(
+            lifecycle.preset_settings().get("BLASTIT_CLIENT_IP_HEADER"),
+            Some(&"x-forwarded-for".to_string())
+        );
+        assert_eq!(lifecycle.preset_overridden(), ["BLASTIT_LOG_FORMAT"]);
+
+        // The filters being off is the configuration's word, not the
+        // variable's: a `boot` line that disagrees with the running server is
+        // the failure this field exists to prevent (§7.3).
+        config.seccomp = false;
+        assert_eq!(config_lifecycle(&privilege, &config).seccomp(), Some(false));
     }
 
     #[test]

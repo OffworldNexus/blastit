@@ -9,6 +9,15 @@
 //! privileges and fork, so a test that is not root prints `skipped: needs root`
 //! and passes. The `smoke (root)` CI job runs this file with `sudo`.
 //!
+//! They are written to run **one at a time** (`--test-threads=1`, which is how
+//! that job runs them): every server uses the same `/run/blastit` (§7.2), and
+//! the rootless-binary test has to `chown` the two directories of
+//! `/run/blastit` that init creates in — never recursively, because the per-uid
+//! directories under `views/` belong to whichever test created them. A loaded
+//! machine also makes a few of them (the signal and dead-component ones) timing
+//! sensitive. Everything here still passes with the default thread count on a
+//! quiet machine; it is not a promise.
+//!
 //! The PostgreSQL checks only run when `BLASTIT_TEST_PG_URL` is set (the CI job
 //! provides one as a service container). They speak the PostgreSQL wire
 //! protocol by hand over a Unix socket, so the tests need no Python packages
@@ -268,6 +277,12 @@ impl Server {
 
     /// One HTTP/1.1 request, answered in full.
     fn request(&self, method: &str, target: &str) -> Response {
+        self.request_with(method, target, &[])
+    }
+
+    /// The same, with headers of the caller's own (E1: the client-IP rules are
+    /// about what a request *says*, so a test has to be able to lie).
+    fn request_with(&self, method: &str, target: &str, extra: &[(&str, &str)]) -> Response {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap_or_else(|err| {
             panic!(
                 "connecting to the server for {target}: {err}\nstdout:\n{}",
@@ -277,9 +292,12 @@ impl Server {
         stream
             .set_read_timeout(Some(Duration::from_secs(20)))
             .unwrap();
-        let request = format!(
-            "{method} {target} HTTP/1.1\r\nHost: blastit.test\r\nConnection: close\r\n\r\n"
-        );
+        let mut request =
+            format!("{method} {target} HTTP/1.1\r\nHost: blastit.test\r\nConnection: close\r\n");
+        for (name, value) in extra {
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        request.push_str("\r\n");
         stream.write_all(request.as_bytes()).unwrap();
         let mut raw = Vec::new();
         stream.read_to_end(&mut raw).unwrap();
@@ -298,6 +316,30 @@ impl Server {
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .filter(|value| value["event"].as_str() == Some(name))
             .collect()
+    }
+
+    /// The same, once at least `count` of them have arrived.
+    ///
+    /// A response is complete before the scheduler's `request` event has been
+    /// written to init, through its pipe and out to stdout, so a test that reads
+    /// the stream the moment its request returns is racing the writer. Waiting
+    /// for the count it asked for is the difference between a test and a flake
+    /// on a loaded machine (CI runs this file with `--test-threads=1`, a
+    /// developer's `cargo test` does not).
+    fn wait_for_events(&self, name: &str, count: usize) -> Vec<serde_json::Value> {
+        let deadline = Instant::now() + EXIT_TIMEOUT;
+        while Instant::now() < deadline {
+            let events = self.events(name);
+            if events.len() >= count {
+                return events;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "only {} `{name}` event(s) arrived, wanted {count}\nstdout:\n{}",
+            self.events(name).len(),
+            self.stdout_text()
+        );
     }
 
     /// The pids of the processes init forked, oldest first.
@@ -1165,13 +1207,19 @@ fn the_boot_events_say_init_runs_as_root() {
     );
     assert_eq!(server.get("/one").status, 200);
     let boots = server.events("boot");
-    assert!(boots.len() >= 2, "stage 0 and preload: {boots:?}");
+    assert!(boots.len() >= 3, "stage 0, config and preload: {boots:?}");
     for boot in &boots {
         assert_eq!(boot["privilege"], "root", "{boot}");
         assert!(boot.get("capabilities").is_none(), "{boot}");
     }
     assert_eq!(boots[0]["stage"], "stage0");
-    assert_eq!(boots[1]["stage"], "preload");
+    assert_eq!(boots[1]["stage"], "config");
+    assert_eq!(boots[2]["stage"], "preload");
+    // E1: with no preset, every `boot` line says `preset: null` rather than
+    // leaving an operator to wonder whether this build has presets at all.
+    for boot in &boots {
+        assert!(boot["preset"].is_null(), "{boot}");
+    }
     // D6: init's uid must be a dedicated one, and this very test harness is
     // another process of uid 0 — so the boot says so, once, before it forks
     // anything. (On a deployment where nothing else runs as that uid, there is no
@@ -1327,15 +1375,27 @@ fn a_rootless_standalone_install_runs_dbproxy_from_the_capability_free_copy() {
     // A rootless init owns the runtime directory (§7.2): `/run` belongs to root,
     // so a deployment gives the service uid a directory of its own — a `tmpfs`
     // in the e2e, a `chown` here.
+    //
+    // Exactly two directories, never `-R`: every test that starts a server
+    // creates `/run/blastit/views/<uid>` of its own, and a recursive `chown`
+    // here would take those away from a test running beside this one (the
+    // failure is a socket owned by the wrong uid in another test's assertion).
+    // `views` is what init has to be able to create *in*; the per-uid
+    // directories below it are created by whoever forked the view, and init is
+    // the one that chowns them (it holds `CAP_CHOWN` for exactly that).
     let runtime = Path::new("/run/blastit");
     std::fs::create_dir_all(runtime.join("views")).unwrap();
     assert!(
         std::process::Command::new("chown")
-            .args(["-R", &format!("{uid}:{uid}"), "/run/blastit"])
+            .args([
+                &format!("{uid}:{uid}"),
+                "/run/blastit",
+                "/run/blastit/views"
+            ])
             .status()
             .map(|status| status.success())
             .unwrap_or(false),
-        "chown -R {uid} /run/blastit"
+        "chown {uid} /run/blastit /run/blastit/views"
     );
 
     let manifest = dir.readable("blastit.toml", PROXY_AND_ROUTE);
@@ -1414,7 +1474,18 @@ fn stdout_is_one_event_per_line_and_covers_the_lifecycle() {
         &[],
     );
     assert_eq!(server.get("/one").status, 200);
-    assert!(server.wait_for_event("\"event\":\"app.output\""));
+    // Wait for the events this test is *about*, one at a time: the response is
+    // complete before the scheduler's `request` event has been written to init,
+    // through its pipe and out to stdout, so a wait on `app.output` alone is
+    // satisfied by the boot's own warning (the sibling line, above) and the
+    // `request` event may still be in flight on a loaded machine.
+    for expected in ["boot", "ready", "request", "process.spawned", "app.output"] {
+        assert!(
+            server.wait_for_event(&format!("\"event\":\"{expected}\"")),
+            "no `{expected}` event in:\n{}",
+            server.stdout_text()
+        );
+    }
 
     let lines = server.stdout_lines();
     assert!(lines.len() >= 5, "{}", lines.join("\n"));
@@ -1913,4 +1984,352 @@ fn connect_as(uid: u32, path: &str) -> Option<i32> {
             }
         }
     }
+}
+
+#[test]
+fn a_preset_whose_assumption_does_not_hold_says_so_before_anything_else_can_fail() {
+    // E1: `compose-traefik` assumes a rootless deployment (D6) and this binary
+    // is started as root — which the smoke tests always are. The line is stage
+    // 0's, so it is printed before the manifest is read, the environment is
+    // rewritten and any view socket is bound.
+    if !needs_root("preset assumption") {
+        return;
+    }
+    let server = Server::start_with(
+        "preset-assumption",
+        48_900,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[],
+        &[env!("CARGO_BIN_EXE_blastit"), "--preset", "compose-traefik"],
+        None,
+    );
+    assert_eq!(server.get("/one").status, 200, "{}", server.stdout_text());
+    assert!(
+        server.wait_for_event("is for a rootless deployment"),
+        "{}",
+        server.stdout_text()
+    );
+    let warnings: Vec<String> = server
+        .stdout_lines()
+        .into_iter()
+        .filter(|line| line.contains("is for a rootless deployment"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "once: {}", server.stdout_text());
+    let event: serde_json::Value = serde_json::from_str(&warnings[0]).expect("one JSON line");
+    assert_eq!(event["event"], "app.output");
+    assert_eq!(event["level"], "warn");
+    assert_eq!(event["stream"], "stderr");
+    // It is printed even though stage 1 also runs: the token is stage 0's, and
+    // carrying it to stage 1 as well would say it twice.
+    assert!(
+        !server
+            .stdout_text()
+            .contains("BLASTIT_PRESET is set and names a different preset"),
+        "{}",
+        server.stdout_text()
+    );
+
+    // The other direction: `digitalocean-paas` assumes root, and this boot is
+    // root, so the same code path says nothing at all.
+    let quiet = Server::start_with(
+        "preset-quiet",
+        48_800,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[],
+        &[
+            env!("CARGO_BIN_EXE_blastit"),
+            "--preset",
+            "digitalocean-paas",
+        ],
+        None,
+    );
+    assert_eq!(quiet.get("/one").status, 200, "{}", quiet.stdout_text());
+    assert!(
+        !quiet
+            .stdout_text()
+            .contains("is for a platform that starts blastit as root"),
+        "a root boot under a root preset says nothing: {}",
+        quiet.stdout_text()
+    );
+}
+
+#[test]
+fn a_failing_boot_still_says_the_preset_assumption_it_contradicts() {
+    // E1: the same line, from a boot that never reaches stage 1 — a manifest
+    // that is not there. This is the whole reason stage 0 prints it: the
+    // operator who picked the preset is the one who has to read why this boot
+    // failed.
+    if !needs_root("preset assumption failure") {
+        return;
+    }
+    let fixture = Fixture::new("preset-assumption-fail");
+    fixture.write("app.py", APP);
+    let text = run_to_exit(
+        &[
+            std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit")),
+            std::ffi::OsStr::new("--preset"),
+            std::ffi::OsStr::new("compose-traefik"),
+        ],
+        &[
+            ("PORT", "8096"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", "/nonexistent/blastit.toml"),
+            ("PYTHONPATH", &fixture.python_path()),
+            ("BLASTIT_UID_BASE", "48200"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+        ],
+        0,
+    );
+    assert!(
+        text.contains("is for a rootless deployment"),
+        "the assumption is in the failing boot's output:\n{text}"
+    );
+    assert!(
+        text.contains("nonexistent"),
+        "and so is the failure itself:\n{text}"
+    );
+    assert!(!text.contains("\"event\":\"ready\""), "{text}");
+}
+
+#[test]
+fn an_unknown_preset_is_refused_with_the_list_of_presets() {
+    if !needs_root("preset refusal") {
+        return;
+    }
+    // E1: a startup error, before anything is forked, naming the flag the
+    // operator used and every preset this build knows.
+    let fixture = Fixture::new("preset-refusal");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    let text = run_to_exit(
+        &[
+            std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit")),
+            std::ffi::OsStr::new("--preset=compose-trafik"),
+        ],
+        &[
+            ("PORT", "8097"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("PYTHONPATH", &fixture.python_path()),
+            ("BLASTIT_UID_BASE", "48100"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+        ],
+        0,
+    );
+    assert!(text.contains("unknown preset"), "{text}");
+    assert!(text.contains("compose-trafik"), "{text}");
+    assert!(text.contains("--preset"), "{text}");
+    for preset in ["digitalocean-paas", "compose-traefik"] {
+        assert!(text.contains(preset), "{preset} is missing from\n{text}");
+    }
+
+    // The same name through the environment, named as the variable it is.
+    let text = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", "8097"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("PYTHONPATH", &fixture.python_path()),
+            ("BLASTIT_UID_BASE", "48100"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+            ("BLASTIT_PRESET", "compose-trafik"),
+        ],
+        0,
+    );
+    assert!(text.contains("BLASTIT_PRESET"), "{text}");
+    assert!(text.contains("unknown preset"), "{text}");
+}
+
+#[test]
+fn a_preset_is_accepted_and_reported_at_boot() {
+    if !needs_root("preset") {
+        return;
+    }
+    // E1: `--preset` on the command line, reported by the boot with what the
+    // preset supplied and what the environment overrode (this harness sets
+    // `BLASTIT_LOG_FORMAT`, which the preset also supplies), and in force in the
+    // resolver: `compose-traefik` trusts every peer, so a client-IP header is
+    // believed.
+    let base = 48_000;
+    let server = Server::start_with(
+        "preset",
+        base,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[],
+        &[env!("CARGO_BIN_EXE_blastit"), "--preset=compose-traefik"],
+        None,
+    );
+
+    let boots = server.events("boot");
+    let config = boots
+        .iter()
+        .find(|boot| boot["stage"] == "config")
+        .unwrap_or_else(|| panic!("no config boot event: {boots:?}"));
+    assert_eq!(config["preset"], "compose-traefik", "{config}");
+    assert_eq!(
+        config["preset_settings"],
+        serde_json::json!({
+            "BLASTIT_CLIENT_IP_HEADER": "x-forwarded-for",
+            "BLASTIT_TRUSTED_PROXIES": "*",
+            "BLASTIT_FAIR_QUEUING": "on",
+        }),
+        "{config}"
+    );
+    assert_eq!(
+        config["preset_overridden"],
+        serde_json::json!(["BLASTIT_LOG_FORMAT"]),
+        "the harness's own `BLASTIT_LOG_FORMAT` wins over the preset's: {config}"
+    );
+    // The preload line says the same thing, so a log read from the middle is
+    // still readable.
+    let preload = boots
+        .iter()
+        .find(|boot| boot["stage"] == "preload")
+        .unwrap_or_else(|| panic!("no preload boot event: {boots:?}"));
+    assert_eq!(preload["preset"], "compose-traefik", "{preload}");
+
+    // The preset's resolver is in force: `do-connecting-ip` is read (from any
+    // peer, because the preset trusts every one) and `X-Forwarded-For` is not.
+    assert_eq!(
+        server
+            .request_with("GET", "/one", &[("X-Forwarded-For", "203.0.113.7")])
+            .status,
+        200
+    );
+    let requests = server.wait_for_events("request", 1);
+    let forged = requests
+        .iter()
+        .find(|event| event["path"] == "/one")
+        .unwrap_or_else(|| panic!("no request event: {requests:?}"));
+    assert_eq!(forged["remote_addr"], "203.0.113.7", "{forged}");
+
+    // Without the header, the socket peer is the client — its own ephemeral
+    // port, which is what `REMOTE_ADDR` is when nothing is forwarded.
+    assert_eq!(server.get("/one").status, 200);
+    let requests = server.wait_for_events("request", 2);
+    let honest = requests.last().expect("a request event");
+    assert!(
+        honest["remote_addr"]
+            .as_str()
+            .is_some_and(|addr| addr.starts_with("127.0.0.1:")),
+        "{honest}"
+    );
+    assert!(
+        server
+            .stdout_text()
+            .contains("\"preset\":\"compose-traefik\"")
+    );
+}
+
+#[test]
+fn the_command_line_preset_wins_and_says_so() {
+    if !needs_root("preset conflict") {
+        return;
+    }
+    // E1: the flag is the more explicit of the two, so it wins — and a variable
+    // that lost is worth a line, because an operator who put
+    // `BLASTIT_PRESET=compose-traefik` in an image and then ran
+    // `blastit --preset=digitalocean-paas` has just changed which header is
+    // believed and which peers may say it.
+    let server = Server::start_with(
+        "preset-conflict",
+        48_700,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[("BLASTIT_PRESET", "compose-traefik")],
+        &[env!("CARGO_BIN_EXE_blastit"), "--preset=digitalocean-paas"],
+        None,
+    );
+    assert_eq!(server.get("/one").status, 200, "{}", server.stdout_text());
+
+    // The `config` line names the preset that won, and the settings *it*
+    // supplies.
+    let boots = server.events("boot");
+    let config = boots
+        .iter()
+        .find(|boot| boot["stage"] == "config")
+        .unwrap_or_else(|| panic!("no config boot event: {boots:?}"));
+    assert_eq!(config["preset"], "digitalocean-paas", "{config}");
+    assert_eq!(
+        config["preset_settings"]["BLASTIT_CLIENT_IP_HEADER"], "do-connecting-ip",
+        "{config}"
+    );
+
+    // And the operator is told that `BLASTIT_PRESET` was not what decided. (The
+    // first `app.output` line is the boot's "other process(es) run as uid 0"
+    // warning, so the wait is for this sentence, not for the event name.)
+    assert!(
+        server.wait_for_event("BLASTIT_PRESET is set and names a different preset"),
+        "{}",
+        server.stdout_text()
+    );
+    let warnings: Vec<String> = server
+        .stdout_lines()
+        .into_iter()
+        .filter(|line| line.contains("BLASTIT_PRESET is set and names a different preset"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{}", server.stdout_text());
+
+    // The preset's resolver is in force: `do-connecting-ip` is read (from any
+    // peer, because the preset trusts every one) and `X-Forwarded-For` is not.
+    assert_eq!(
+        server
+            .request_with("GET", "/one", &[("Do-Connecting-Ip", "203.0.113.7")])
+            .status,
+        200
+    );
+    let requests = server.wait_for_events("request", 2);
+    let event = requests.last().expect("a request event");
+    assert_eq!(event["remote_addr"], "203.0.113.7", "{event}");
+}
+
+#[test]
+fn a_client_ip_header_is_only_believed_when_it_is_configured_to_be() {
+    if !needs_root("trusted proxies") {
+        return;
+    }
+    // E1's other side, in the same harness: with no preset and no
+    // `BLASTIT_TRUSTED_PROXIES`, the default trusts loopback only — and this
+    // test's client *is* loopback. The difference the preset makes is which
+    // header is read, so a `do-connecting-ip` sent here is not read at all.
+    let server = Server::start(
+        "trust",
+        48_500,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[("BLASTIT_CLIENT_IP_HEADER", "do-connecting-ip")],
+    );
+    assert_eq!(
+        server
+            .request_with("GET", "/one", &[("Do-Connecting-Ip", "203.0.113.7")])
+            .status,
+        200
+    );
+    let requests = server.wait_for_events("request", 1);
+    let event = requests.last().expect("a request event");
+    assert_eq!(event["remote_addr"], "203.0.113.7", "{event}");
+    // A different header is not consulted in its place.
+    assert_eq!(
+        server
+            .request_with("GET", "/one", &[("X-Forwarded-For", "198.51.100.9")])
+            .status,
+        200
+    );
+    let requests = server.wait_for_events("request", 2);
+    let event = requests.last().expect("a request event");
+    assert!(
+        event["remote_addr"]
+            .as_str()
+            .is_some_and(|addr| addr.starts_with("127.0.0.1:")),
+        "{event}"
+    );
 }
