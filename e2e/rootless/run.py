@@ -23,10 +23,12 @@ under a `blastit-d6-` name, then deleted with the droplet.
 
 import argparse
 import datetime as dt
+import glob
 import json
 import os
 import secrets
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -628,14 +630,13 @@ def droplet(args):
             log(f"--keep: leaving {name}, the key {key_name} and the key file "
                 f"{os.path.dirname(key)}; delete with `run.py --cleanup --name {name}`")
         else:
-            # M2: the droplet, the key and the private key file all go together,
-            # and the env file (which holds the database password) with them.
+            # M2: the droplet, the key and the private key file all go together
+            # (`destroy` removes the file), and the env file — which holds the
+            # database password — with them.
             if ssh is not None:
                 remove_env_file(ssh)
             destroy(name, key_name)
-            shutil.rmtree(os.path.dirname(key), ignore_errors=True)
     return rc
-
 
 def wait_http(port, timeout=900):
     """The app answers its health path through the tunnel."""
@@ -673,7 +674,7 @@ def find_key(key_name):
 
 
 def destroy(name, key_name):
-    """Delete the droplet and the key, then say what is left."""
+    """Delete the droplet, the key, and any private key file left for them."""
     droplet = find_droplet(name)
     if droplet is None:
         log(f"no droplet named {name}")
@@ -686,6 +687,11 @@ def destroy(name, key_name):
     else:
         log(f"deleting SSH key {key['id']} ({key_name})")
         doctl("compute", "ssh-key", "delete", str(key["id"]), "--force", parse=False, check_rc=False)
+    # M2: the private key of a droplet that no longer exists has no reason to
+    # outlive it (`--keep` is the caller's business, and it does not call this).
+    for directory in glob.glob(os.path.join(tempfile.gettempdir(), f"{key_name}-*")):
+        shutil.rmtree(directory, ignore_errors=True)
+        log(f"removed the private key file ({directory})")
     verify_gone(name, key_name)
 
 
