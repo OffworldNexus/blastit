@@ -1,0 +1,77 @@
+# The rootless end-to-end test (D6): PostgreSQL in one container and the demo
+# app under blastit in another, with blastit started as an **unprivileged user
+# holding only the capabilities it needs** instead of root.
+#
+# Driven by `e2e/rootless/run.py`; see `e2e/rootless/README.md`.
+#
+#   E2E_PROJECT   compose project name (two checkouts can run at once)
+#   E2E_IMAGE     image name for the app
+#   E2E_PORT      host port the app is published on (localhost only)
+#   E2E_APP_UID   uid/gid the server runs as; must match the image's user, and
+#                 must be a *dedicated* uid: nothing else may run as it (D6)
+#   E2E_WORKER_UID
+#                 uid/gid the worker and the migrations run as — a different one,
+#                 because init's can run the capable copy
+#   E2E_ROOTLESS_DOCKERFILE  Dockerfile to build (a prebuilt variant, in CI)
+name: ${E2E_PROJECT:-blastit-d6-rootless}
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://demo:${E2E_DB_PASSWORD:?}@db:5432/demo?sslmode=disable
+  DJANGO_SECRET_KEY: e2e-not-secret
+  BLASTIT_LOG_FORMAT: json
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: ${E2E_DB_PASSWORD:?}
+      POSTGRES_DB: demo
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "demo"]
+      interval: 1s
+      retries: 60
+
+  # Schema and users, with the real credentials, outside blastit — and as a uid of
+  # its *own*, never the one init runs as (D6): that uid can run the file the
+  # capabilities are on, so nothing else may share it. The e2e checks that this
+  # uid is refused that file (`EACCES`).
+  migrate:
+    build: { context: ../.., dockerfile: "e2e/rootless/${E2E_ROOTLESS_DOCKERFILE:-Dockerfile}" }
+    image: ${E2E_IMAGE:-blastit-d6-rootless}
+    user: "${E2E_WORKER_UID:-10001}:${E2E_WORKER_UID:-10001}"
+    environment: *app-env
+    command: ["sh", "-c", "python manage.py migrate -v0 && python manage.py seed"]
+    depends_on: { db: { condition: service_healthy } }
+
+  # D6: the rootless server. Everything here is the deployment decision:
+  #
+  #   user:           the unprivileged identity init runs as (never root), and a
+  #                   **dedicated** one: no worker, migration or shell may share
+  #                   it, because it can run the capable copy `*-init`;
+  #   cap_drop: ALL   nothing is inherited from the container's own set;
+  #   cap_add:        exactly the capability bounding set the dedicated copy's
+  #                   file capabilities may fill — nothing else is reachable;
+  #   tmpfs /run/blastit
+  #                   §7.2's runtime directory, owned by that user, because
+  #                   `/run` itself belongs to root and a rootless init cannot
+  #                   create a directory there;
+  #   command:        the *copy* of the interpreter the image gave the
+  #                   capabilities to — never the shared one, which the app's own
+  #                   tooling (a worker, `manage.py`, a shell) also runs (B1).
+  #
+  # The capabilities themselves come from `setcap` on that copy in the image
+  # (see e2e/rootless/Dockerfile): `docker --user` does not hand a non-root
+  # process the capabilities `--cap-add` lists, it only limits what a file
+  # capability can grant.
+  app:
+    image: ${E2E_IMAGE:-blastit-d6-rootless}
+    user: "${E2E_APP_UID:-10000}:${E2E_APP_UID:-10000}"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETGID, SETPCAP, SETUID]
+    tmpfs:
+      - /run/blastit:mode=0700,uid=${E2E_APP_UID:-10000},gid=${E2E_APP_UID:-10000}
+    environment: *app-env
+    command: ["/usr/local/bin/python3.13-init", "-m", "blastit"]
+    ports: ["127.0.0.1:${E2E_PORT:-18080}:8080"]
+    depends_on: { migrate: { condition: service_completed_successfully } }

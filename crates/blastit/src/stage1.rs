@@ -730,6 +730,11 @@ fn preload_lifecycle(config: &Config, outcome: &Outcome, memory: Option<mem::Sam
         .with_stage("preload")
         .with_immortalize(outcome.decision.is_on())
         .with_immortalized(outcome.objects());
+    // D6: stage 0 detected the mode and put it in the configuration, so this
+    // `boot` event says the same thing as stage 0's did.
+    if let Some(privilege) = &config.privilege {
+        lifecycle = privilege.lifecycle(lifecycle);
+    }
     if let Some(reason) = outcome.decision.reason() {
         lifecycle = lifecycle.with_immortalize_reason(reason);
     }

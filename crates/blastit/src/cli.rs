@@ -99,6 +99,18 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
                     );
                     return FAILURE;
                 };
+                // D6: this process is this file `execve`d again, and a binary
+                // with file capabilities is granted them *by the execve* —
+                // `no_new_privs`, which the child set before exec'ing, is what
+                // normally stops that, but the invariant belongs to this
+                // process rather than to the kernel's promise. dbproxy holds the
+                // real credentials (§2.2): it may not hold a capability.
+                // `hold_none` is the check, not the drop: a wheel's dbproxy
+                // starts with nothing to drop.
+                if let Err(err) = blastit_sys::caps::hold_none() {
+                    eprintln!("blastit: dbproxy: {err}");
+                    return FAILURE;
+                }
                 // Absent means on: `BLASTIT_SECCOMP` defaults to on (§8.2), and
                 // a dbproxy started by hand is no reason to run unfiltered.
                 let seccomp = args.seccomp.unwrap_or(true);

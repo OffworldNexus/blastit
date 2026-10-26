@@ -50,12 +50,16 @@ pub fn encode_json(event: &Event) -> String {
 
     // The lifecycle `outputs` map is the only structured field that can grow
     // without bound, so if nothing is left to cut, whole proxies are dropped
-    // and `outputs` joins `truncated`. Events built by blastit never get here.
+    // and `outputs` joins `truncated`. The `capabilities` list is bounded in
+    // practice (a dozen names the kernel defines), and is dropped the same way
+    // so that no caller can break the line limit with it either.
     loop {
         if encode_with(&event, &truncated).len() <= MAX_EVENT_BYTES {
             break;
         }
-        if !drop_output_proxy(&mut event, &mut truncated) {
+        if !drop_output_proxy(&mut event, &mut truncated)
+            && !drop_capability(&mut event, &mut truncated)
+        {
             break;
         }
     }
@@ -201,6 +205,28 @@ fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static
     if let Some(seccomp) = lifecycle.seccomp {
         push_member(out, "seccomp", &json_bool(seccomp));
     }
+    if let Some(privilege) = &lifecycle.privilege {
+        push_member(out, "privilege", &json_string(privilege));
+    }
+    // D6/M1: whether the children's bounding set is emptied. Reported in both
+    // modes, because it is a fact about the boot rather than about init's own
+    // set.
+    if let Some(dropped) = lifecycle.bounding_set {
+        push_member(
+            out,
+            "bounding_set",
+            &json_string(if dropped { "dropped" } else { "kept" }),
+        );
+    }
+    // D6: the capabilities an unprivileged init holds. Absent in root mode,
+    // where the set is the container's own (§10).
+    if !lifecycle.capabilities.is_empty() || truncated.contains(&"capabilities") {
+        push_member(
+            out,
+            "capabilities",
+            &encode_capabilities(&lifecycle.capabilities),
+        );
+    }
     if let Some(immortalize) = lifecycle.immortalize {
         push_member(
             out,
@@ -231,6 +257,15 @@ fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static
     if !lifecycle.outputs.is_empty() || truncated.contains(&"outputs") {
         push_member(out, "outputs", &encode_outputs(&lifecycle.outputs));
     }
+}
+
+fn encode_capabilities(capabilities: &[String]) -> String {
+    let names = capabilities
+        .iter()
+        .map(|name| json_string(name))
+        .collect::<Vec<String>>()
+        .join(",");
+    format!("[{names}]")
 }
 
 fn encode_outputs(outputs: &BTreeMap<String, Vec<String>>) -> String {
@@ -396,10 +431,31 @@ fn drop_output_proxy(event: &mut Event, truncated: &mut Vec<&'static str>) -> bo
     false
 }
 
+/// Record that a structured field was cut, once.
 fn mark(truncated: &mut Vec<&'static str>, name: &'static str) {
     if !truncated.contains(&name) {
         truncated.push(name);
     }
+}
+
+/// Drop one capability name from a lifecycle event, recording `capabilities` in
+/// `truncated`. Returns `false` when the list is empty.
+///
+/// One name at a time, from the end: the list is a set of what the process
+/// holds, so a reader who sees it cut knows it is not the whole story — which is
+/// what `truncated` is for. Last first, so the choice is deterministic.
+fn drop_capability(event: &mut Event, truncated: &mut Vec<&'static str>) -> bool {
+    let (EventKind::Boot(lifecycle) | EventKind::Ready(lifecycle) | EventKind::Shutdown(lifecycle)) =
+        &mut event.kind
+    else {
+        return false;
+    };
+
+    if lifecycle.capabilities.pop().is_some() {
+        mark(truncated, "capabilities");
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -923,6 +979,79 @@ mod tests {
         let json = encode_json(&event);
         let value = check_fits(&event, &json);
         assert_eq!(value["truncated"], serde_json::json!(["stage"]));
+    }
+
+    #[test]
+    fn the_privilege_mode_and_its_capabilities_are_reported() {
+        // D6: the `boot` event says `root` or `capabilities`, and in the
+        // rootless case the set init holds.
+        let root = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("stage0")
+                .with_seccomp(true)
+                .with_privilege("root"),
+        ));
+        let json = encode_json(&root);
+        assert_eq!(
+            top_level_keys(&json),
+            [
+                "ts",
+                "level",
+                "event",
+                "component",
+                "stage",
+                "seccomp",
+                "privilege"
+            ]
+        );
+        let value = parse(&json);
+        assert_eq!(value["privilege"], "root");
+        assert!(value.get("capabilities").is_none(), "{value}");
+
+        let rootless = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("stage0")
+                .with_privilege("capabilities")
+                .with_capability("cap_chown")
+                .with_capability("cap_setuid"),
+        ));
+        let json = encode_json(&rootless);
+        assert_eq!(
+            top_level_keys(&json),
+            [
+                "ts",
+                "level",
+                "event",
+                "component",
+                "stage",
+                "privilege",
+                "capabilities"
+            ]
+        );
+        let value = parse(&json);
+        assert_eq!(value["privilege"], "capabilities");
+        assert_eq!(
+            value["capabilities"],
+            serde_json::json!(["cap_chown", "cap_setuid"])
+        );
+    }
+
+    #[test]
+    fn an_over_long_capability_list_is_cut_and_named() {
+        // A caller can put anything in the list; the line limit still holds,
+        // and the names that went are in `truncated`.
+        let mut lifecycle = Lifecycle::default().with_privilege("capabilities");
+        for index in 0..400 {
+            lifecycle = lifecycle.with_capability(format!("cap_{index}"));
+        }
+        let event = fixture::event(EventKind::Boot(lifecycle));
+        let json = encode_json(&event);
+        let value = check_fits(&event, &json);
+        assert_eq!(value["truncated"], serde_json::json!(["capabilities"]));
+        let kept = value["capabilities"].as_array().unwrap();
+        assert!(!kept.is_empty());
+        assert!(kept.len() < 400);
+        assert_eq!(kept[0], "cap_0", "a prefix of the set survives");
     }
 
     #[test]

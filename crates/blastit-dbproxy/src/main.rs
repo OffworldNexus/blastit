@@ -25,6 +25,15 @@ fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match parse(&arguments) {
         Ok(options) => {
+            // D6: this process was `execve`d by a child of init, and a file with
+            // file capabilities is granted them *by that execve* — `no_new_privs`
+            // is what normally stops it, but the invariant belongs to this
+            // process rather than to the kernel's promise. dbproxy holds the real
+            // credentials (§2.2): it may not hold a capability.
+            if let Err(err) = blastit_sys::caps::hold_none() {
+                eprintln!("blastit-dbproxy: {err}");
+                return ExitCode::FAILURE;
+            }
             let code = blastit_dbproxy::role::dbproxy(
                 options.secrets_fd,
                 options.events_fd,

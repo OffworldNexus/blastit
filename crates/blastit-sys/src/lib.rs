@@ -75,7 +75,7 @@
 //! set_rlimits(Rlimits { .. })     // NPROC, NOFILE, CORE=0
 //! set_umask(0o077)
 //! chdir(&scratch)                 // a view: /run/blastit/views/<uid>
-//! drop_privileges(uid)            // setgroups, setresgid, setresuid (+ checks)
+//! drop_privileges(uid)            // caps off, setgroups, setresgid, setresuid (+ checks)
 //! harden_child(Signal::KILL)      // ORDER: setresgid/setresuid clear PDEATHSIG
 //! set_dumpable(false)
 //! install(SeccompRole::Http)      // §7.3: on while still single-threaded
@@ -83,6 +83,12 @@
 //! exec(exe_path(), argv, env)     // or a view's own post-fork work (§9.3)
 //! ```
 //!
+//! * `drop_privileges` clears **every capability set** as part of the drop
+//!   ([`caps`]): the ambient, inheritable and bounding sets before the uid
+//!   change, the permitted and effective ones after it, and it fails if
+//!   anything is left. A rootless `init` keeps its capabilities across
+//!   `setresuid` — the kernel only clears them when the uid crosses 0 — so a
+//!   child that did not clear them would keep `CAP_SETUID`.
 //! * `harden_child` comes **after** `drop_privileges`: `setresgid` and
 //!   `setresuid` clear `PR_SET_PDEATHSIG`, so hardening first loses the death
 //!   signal ([`harden_child`] has the details).
@@ -129,11 +135,13 @@ mod seccomp;
 mod signal;
 mod sock;
 
+pub mod caps;
 pub mod mem;
 
 #[cfg(test)]
 mod testutil;
 
+pub use crate::caps::{CapSet, Capabilities, Capability, Held, PrivilegeMode};
 pub use crate::error::Error;
 pub use crate::exec::{exe_path, exec};
 pub use crate::fd::{

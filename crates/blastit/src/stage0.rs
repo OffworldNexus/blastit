@@ -37,12 +37,209 @@ use blastit_sys::{
 };
 
 use crate::child::{ChildIo, Deadline, read_one, wait_readable};
-use crate::config::{Config, LogFormat, view_dir};
-use crate::host::{Host, Reexec};
+use crate::config::{Config, LogFormat, Mode, Privilege, view_dir};
+use crate::host::{EXEC, Host, Install, Placement, Reexec};
 use crate::logs::{Emitter, fail, output_event};
 
 /// How long stage 0 waits for dbproxy's ready byte before giving up (§4).
 pub const DBPROXY_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The uid init is running as (D6).
+///
+/// The effective uid, which is the one a `setuid` from it would have to be
+/// authorised for.
+fn current_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+/// The `boot` event of stage 0 (§8.1), with D6's mode when it is known.
+fn stage0_lifecycle(privilege: Option<&Privilege>) -> Lifecycle {
+    let lifecycle = Lifecycle::default()
+        .with_stage("stage0")
+        .with_seccomp(crate::config::seccomp_requested());
+    match privilege {
+        Some(privilege) => privilege.lifecycle(lifecycle),
+        None => lifecycle,
+    }
+}
+
+/// Warns when another process already runs as init's uid (D6).
+///
+/// The file that may carry the capabilities is mode `0500`, owned by the uid
+/// init runs as, so that uid is the *only* one that can run it — and running it
+/// is becoming init (`setuid(0)`, every sandbox opened). A worker, a migration
+/// or an operator's shell that shares that uid therefore inherits init's whole
+/// authority, and no amount of checking inside blastit can undo that: it is a
+/// deployment decision. This is the one place blastit can see it, at boot, when
+/// nothing of its own is running yet but somebody else may be.
+///
+/// It is a warning and not a refusal: a container legitimately has other
+/// processes of that uid (`docker exec` for a debug shell, a sidecar that drops
+/// privileges, this very check's own shell), and blastit cannot tell a debug
+/// shell from a threat.
+fn warn_about_siblings(emitter: &Emitter) {
+    let uid = current_uid();
+    let siblings = others_with_uid(uid);
+    if siblings.is_empty() {
+        return;
+    }
+    emitter.emit(
+        &output_event(
+            Component::Init,
+            None,
+            Stream::Stderr,
+            &format!(
+                "{} other process(es) run as uid {uid} ({}): that uid can run the file \
+                 blastit's capabilities are on, so a worker, a migration or a shell \
+                 should run as another uid (D6)",
+                siblings.len(),
+                siblings
+                    .iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .with_level(Level::Warn),
+    );
+}
+
+/// The pids, other than this process, that run as `uid` (D6).
+///
+/// Pure except for `/proc`: reading it is best effort — a pid that disappears
+/// between the listing and the read is not a failure — and a `/proc` that cannot
+/// be read at all reports nothing rather than failing a boot over a warning.
+fn others_with_uid(uid: u32) -> Vec<i32> {
+    let ours = std::process::id() as i32;
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut pids: Vec<i32> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+        .filter(|pid| *pid != ours)
+        .filter(|pid| effective_uid(*pid) == Some(uid))
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+/// The effective uid of `pid`, from `/proc/<pid>/status` (D6).
+///
+/// `None` when the process is gone, or when its status cannot be read: a warning
+/// is not worth failing a boot over.
+fn effective_uid(pid: i32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    line.split_whitespace().nth(2)?.parse().ok()
+}
+fn privilege_from(held: &blastit_sys::Held) -> Privilege {
+    Privilege {
+        mode: match held.mode {
+            blastit_sys::PrivilegeMode::Root => Mode::Root,
+            blastit_sys::PrivilegeMode::Capabilities => Mode::Capabilities,
+        },
+        capabilities: match held.mode {
+            // A rootless init is exactly what its permitted set says.
+            blastit_sys::PrivilegeMode::Capabilities => held
+                .capabilities
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            // Root's own set is the container's: §10 documents it, and the
+            // event does not pretend to list it.
+            blastit_sys::PrivilegeMode::Root => Vec::new(),
+        },
+        bounding_set_dropped: held.bounding_set_dropped,
+    }
+}
+
+/// The sentence a boot that lacks capabilities fails with (D6/B1, B2).
+///
+/// [`blastit_sys::caps::Missing`] only states the fact (the uid and the missing
+/// names), because *which file* should have been given them depends on the
+/// installation — and this is the only place that knows it. Root is never told
+/// to "start as root": it already is, and its capabilities come from the
+/// container.
+fn capability_advice(host: &Host, err: &std::io::Error) -> String {
+    let install = host.install();
+    let Some(blastit_sys::Error::MissingCapabilities { uid, missing }) =
+        blastit_sys::Error::from_io(err)
+    else {
+        return err.to_string();
+    };
+    if *uid == 0 {
+        return format!(
+            "this boot runs as uid 0 and the container's effective capability set is \
+             missing {missing}: uid 0 needs them as much as any other uid (they are what \
+             `chown`s the view directories, `open`s them and `kill`s a view). Docker's \
+             default capabilities include them — check `--cap-drop`, `--cap-add` and any \
+             bounding-set restriction on the container.\n  \
+             A rootless deployment gives them to a *dedicated copy* of the {} instead:\n  \
+             {}\n  {}",
+            install.file(),
+            copy_recipe(install),
+            install.naming()
+        );
+    }
+    format!(
+        "init runs as uid {uid} and is missing {missing}.\n  \
+         A rootless deployment gives the capabilities to a *dedicated copy* of the {}, \
+         never to the shared one:\n  {}\n  {}",
+        install.file(),
+        copy_recipe(install),
+        install.naming()
+    )
+}
+
+/// The four commands that make the capable copy, in this installation's words
+/// (D6/B1, B2).
+fn copy_recipe(install: Install) -> String {
+    match install {
+        Install::Wheel => format!(
+            "cp \"$(readlink -f <the interpreter>)\" <same directory>/<interpreter>-init\n  \
+             chown <the uid init runs as>:<its gid> <the copy>\n  chmod 0500 <the copy>\n  \
+             setcap '{}+ep' <the copy>\n  \
+             then start `<the copy> -m blastit` (the copy stays next to the original: \
+             CPython finds its stdlib and its venv from the executable's own path)",
+            blastit_sys::caps::Capability::SETCAP
+        ),
+        Install::Binary => format!(
+            "cp <the blastit binary> <the binary>-init\n  \
+             chown <the uid init runs as>:<its gid> <the copy>\n  chmod 0500 <the copy>\n  \
+             setcap '{}+ep' <the copy>\n  \
+             then start <the copy>, and set {EXEC}=<the blastit binary> so that \
+             `--role=dbproxy` runs the capability-free copy",
+            blastit_sys::caps::Capability::SETCAP,
+        ),
+    }
+}
+
+/// Which layout process, if any, already runs under `uid` (D6).
+///
+/// Pure, so the collision check is a unit test rather than a deployment
+/// surprise. A rootless `init` runs as an ordinary uid, and the layout hands
+/// every other process its own uid out of the same space; if init's uid *is* one
+/// of them, the process that was supposed to be sandboxed under it shares init's
+/// identity — it could read init's private state, and a `setuid` back to that
+/// uid would be no change at all. `None` means the uid is free.
+fn layout_collision(manifest: &Manifest, layout: &UidLayout, uid: u32) -> Option<String> {
+    if uid == layout.http() {
+        return Some("the http process".to_string());
+    }
+    if uid == layout.scheduler() {
+        return Some("the scheduler".to_string());
+    }
+    if uid == layout.dbproxy() {
+        return Some("dbproxy".to_string());
+    }
+    manifest
+        .routes()
+        .iter()
+        .enumerate()
+        .find(|(index, _)| layout.view(*index) == uid)
+        .map(|(_, route)| format!("route `{}`", route.name()))
+}
 
 /// How long stage 0 keeps reading a failed dbproxy's output before giving up
 /// (§8.1).
@@ -86,14 +283,64 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
     // §7.3 seccomp flag is read straight from its variable, because an operator
     // has to be able to see whether the filters are on (§8.1).
     let boot = Emitter::stdout(LogFormat::Json, Level::Info);
+    // D6: root or a handful of capabilities is read from the kernel, and it
+    // decides whether the boot can build its sandboxes at all. It comes before
+    // the first event, because the event has to report it.
+    let held = match blastit_sys::caps::detect() {
+        Ok(held) => held,
+        Err(err) => {
+            // A boot that cannot read its own capability sets cannot say which
+            // mode it is in. It says nothing about the mode rather than
+            // guessing, and stops: a child that keeps a capability nobody
+            // looked for is exactly what §4 refuses to risk. The advice is the
+            // one an operator can act on, which is why it comes from here
+            // (`Host` knows how blastit was installed) and not from the error.
+            boot.emit(&Event::now(
+                Component::Init,
+                EventKind::Boot(stage0_lifecycle(None)),
+            ));
+            fail(&boot, &capability_advice(host, &err));
+        }
+    };
+    let privilege = privilege_from(&held);
+    // D6/B1, B2: the file that may carry the capabilities is init's alone. A
+    // child that has dropped its bounding set cannot `execve` such a file at
+    // all, and every process of init's uid can run it — so the boot checks
+    // where each role's program comes from, and says what to fix.
+    let placement = match host.placement(held.bounding_set_dropped) {
+        Ok(placement) => placement,
+        Err(message) => {
+            boot.emit(&Event::now(
+                Component::Init,
+                EventKind::Boot(stage0_lifecycle(Some(&privilege))),
+            ));
+            fail(&boot, &message);
+        }
+    };
     boot.emit(&Event::now(
         Component::Init,
-        EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("stage0")
-                .with_seccomp(crate::config::seccomp_requested()),
-        ),
+        EventKind::Boot(stage0_lifecycle(Some(&privilege))),
     ));
+    if !held.bounding_set_dropped {
+        // M1: the boot runs, and says so, once.
+        boot.emit(
+            &output_event(
+                Component::Init,
+                None,
+                Stream::Stderr,
+                "cap_setpcap is not held: the children keep their bounding set. Every \
+                 other capability set is still cleared, and `no_new_privs` still stops \
+                 an `execve` from granting what the bounding set allows (D6/M1)",
+            )
+            .with_level(Level::Warn),
+        );
+    }
+    // D6: init's uid is a dedicated one. Whatever else runs as it can run the
+    // file the capabilities are on — and becoming init is `setuid(0)`. A
+    // deployment decides who that uid is (a worker, a migration, an operator's
+    // shell all belong somewhere else); this says when it did not, once, before
+    // anything is forked.
+    warn_about_siblings(&boot);
 
     let mut config = match Config::from_env() {
         Ok(config) => config,
@@ -135,9 +382,32 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
         .iter()
         .map(|(name, names)| (name.as_str().to_string(), names.clone()))
         .collect();
+    // D6: init is an ordinary uid in rootless mode, and the layout hands out
+    // the uids of every other process. A collision would give a view init's
+    // identity, so it is refused before any directory is created with it.
+    if let Some(process) = layout_collision(&manifest, &layout, current_uid()) {
+        fail(
+            &emitter,
+            &format!(
+                "init runs as uid {}, which is the uid of {process} in the layout \
+                 (BLASTIT_UID_BASE={}): run it as a uid below the layout, or raise \
+                 BLASTIT_UID_BASE (D6)",
+                current_uid(),
+                config.uid_base
+            ),
+        );
+    }
+    config.privilege = Some(privilege);
 
     let listeners = bind_view_sockets(&emitter, &manifest, &prepared, &layout);
-    let dbproxy = fork_dbproxy(&emitter, &config, host, interpreter, &prepared, listeners);
+    let dbproxy = fork_dbproxy(
+        &emitter,
+        &config,
+        &placement,
+        interpreter,
+        &prepared,
+        listeners,
+    );
 
     // The interpreter's import path travels in the configuration, not in the
     // environment: stage 1 is `execve`'d as an interpreter of its own (§4), and
@@ -146,7 +416,14 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
     config.sys_path = host.sys_path().to_vec();
 
     // Everything a secret touched is gone from the process image in one step.
-    exec_stage1(&emitter, &config, host, prepared.app_env(), dbproxy)
+    exec_stage1(
+        &emitter,
+        &config,
+        host,
+        &placement,
+        prepared.app_env(),
+        dbproxy,
+    )
 }
 
 /// Creates every view's private directory and binds the pg sockets it may use
@@ -225,7 +502,7 @@ fn bind_view_sockets(
 fn fork_dbproxy(
     emitter: &Emitter,
     config: &Config,
-    host: &Host,
+    placement: &Placement,
     interpreter: bool,
     prepared: &blastit_env::Prepared,
     listeners: Vec<(UnixListener, ListenerSpec)>,
@@ -311,7 +588,10 @@ fn fork_dbproxy(
             })
         }
         Fork::Child => {
-            let mut argv = reexec_argv(emitter, host.dbproxy());
+            // D6/B2: the *checked* program, not `host.dbproxy()`: a standalone
+            // install whose own file carries the capabilities must run this role
+            // as the capability-free copy, or the `execve` itself fails.
+            let mut argv = reexec_argv(emitter, &Reexec::program(&placement.dbproxy));
             argv.push(cstring(emitter, "--role=dbproxy"));
             argv.push(cstring(
                 emitter,
@@ -348,7 +628,11 @@ fn fork_dbproxy(
             }
             // An empty environment: dbproxy's `/proc/<pid>/environ` is empty,
             // and the credentials arrive over the pipe it already holds (§4).
-            let err = exec(&program(emitter, host.dbproxy()), &argv, &[]);
+            let err = exec(
+                &program(emitter, &Reexec::program(&placement.dbproxy)),
+                &argv,
+                &[],
+            );
             fail(emitter, &format!("exec dbproxy: {err}"));
         }
     }
@@ -460,6 +744,7 @@ fn exec_stage1(
     emitter: &Emitter,
     config: &Config,
     host: &Host,
+    placement: &Placement,
     app_env: &BTreeMap<String, String>,
     dbproxy: Option<DbproxyHandover>,
 ) -> ! {
@@ -483,7 +768,15 @@ fn exec_stage1(
     }
     drop(file);
 
-    let mut argv = reexec_argv(emitter, host.stage1());
+    // D6/B1, B2: init's own image — the file a deployment may have given the
+    // capabilities to. Stage 1 forks the children and drops their privileges,
+    // so it needs them, and this `execve` comes from stage 0, whose bounding
+    // set is still whole: the file capabilities apply.
+    let stage1 = Reexec {
+        program: placement.init.clone(),
+        prefix: host.stage1().prefix.clone(),
+    };
+    let mut argv = reexec_argv(emitter, &stage1);
     argv.push(cstring(emitter, "--stage=1"));
     argv.push(cstring(
         emitter,
@@ -517,7 +810,7 @@ fn exec_stage1(
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    let err = exec(&program(emitter, host.stage1()), &argv, &env);
+    let err = exec(&program(emitter, &stage1), &argv, &env);
     fail(emitter, &format!("exec stage 1: {err}"))
 }
 
@@ -610,6 +903,116 @@ mod tests {
         pipe().unwrap()
     }
 
+    /// A manifest with `routes` routes, in the order they matter here.
+    fn manifest_with(routes: usize) -> Manifest {
+        let mut source = String::from("version = 1\n");
+        for index in 0..routes {
+            source.push_str(&format!(
+                "\n[[route]]\nname = \"r{index}\"\npath = ['/r{index}/']\n"
+            ));
+        }
+        Manifest::parse_and_validate(&source, 20_000).unwrap().0
+    }
+
+    #[test]
+    fn the_layout_collision_check_knows_every_process_it_hands_a_uid_to() {
+        // D6: init is an ordinary uid in rootless mode, so its own uid must not
+        // be one the layout gives away.
+        let manifest = manifest_with(3);
+        let layout = UidLayout::new(20_000);
+        assert_eq!(
+            layout_collision(&manifest, &layout, 20_001).unwrap(),
+            "the http process"
+        );
+        assert_eq!(
+            layout_collision(&manifest, &layout, 20_002).unwrap(),
+            "the scheduler"
+        );
+        assert_eq!(
+            layout_collision(&manifest, &layout, 20_003).unwrap(),
+            "dbproxy"
+        );
+        assert_eq!(
+            layout_collision(&manifest, &layout, 21_000).unwrap(),
+            "route `r0`"
+        );
+        assert_eq!(
+            layout_collision(&manifest, &layout, 21_002).unwrap(),
+            "route `r2`"
+        );
+    }
+
+    #[test]
+    fn a_uid_outside_the_layout_is_free() {
+        let manifest = manifest_with(2);
+        let layout = UidLayout::new(20_000);
+        // The ordinary case: a service uid, and root.
+        assert!(layout_collision(&manifest, &layout, 0).is_none());
+        assert!(layout_collision(&manifest, &layout, 1000).is_none());
+        // A view uid of a route this manifest does not have is free too.
+        assert!(layout_collision(&manifest, &layout, 21_002).is_none());
+        // And the whole check disappears when the base is a high, private one.
+        let layout = UidLayout::new(100_000);
+        assert!(layout_collision(&manifest, &layout, 20_001).is_none());
+        assert_eq!(
+            layout_collision(&manifest, &layout, 101_001).unwrap(),
+            "route `r1`"
+        );
+    }
+
+    #[test]
+    fn the_stage_zero_boot_event_says_the_mode() {
+        let root = stage0_lifecycle(Some(&Privilege {
+            mode: Mode::Root,
+            capabilities: Vec::new(),
+            bounding_set_dropped: true,
+        }));
+        assert_eq!(root.stage(), Some("stage0"));
+        assert_eq!(root.privilege(), Some("root"));
+        assert!(root.capabilities().is_empty());
+        assert_eq!(root.bounding_set(), Some(true));
+
+        let rootless = stage0_lifecycle(Some(&Privilege {
+            mode: Mode::Capabilities,
+            capabilities: vec!["cap_chown".to_string(), "cap_setuid".to_string()],
+            bounding_set_dropped: false,
+        }));
+        assert_eq!(rootless.privilege(), Some("capabilities"));
+        assert_eq!(rootless.capabilities(), ["cap_chown", "cap_setuid"]);
+        assert_eq!(
+            rootless.bounding_set(),
+            Some(false),
+            "M1: a deployment without cap_setpcap says so"
+        );
+
+        // A boot that could not read its own capability sets says nothing about
+        // the mode rather than guessing one.
+        let unknown = stage0_lifecycle(None);
+        assert_eq!(unknown.stage(), Some("stage0"));
+        assert_eq!(unknown.privilege(), None);
+        assert_eq!(unknown.bounding_set(), None);
+    }
+
+    #[test]
+    fn the_detected_mode_becomes_the_boot_field() {
+        let root = privilege_from(&blastit_sys::Held {
+            mode: blastit_sys::PrivilegeMode::Root,
+            capabilities: Vec::new(),
+            bounding_set_dropped: true,
+        });
+        assert_eq!(root.mode, Mode::Root);
+        assert!(root.capabilities.is_empty());
+        assert!(root.bounding_set_dropped);
+        let rootless = privilege_from(&blastit_sys::Held {
+            mode: blastit_sys::PrivilegeMode::Capabilities,
+            capabilities: vec!["cap_chown", "cap_setuid"],
+            bounding_set_dropped: false,
+        });
+        assert_eq!(rootless.mode, Mode::Capabilities);
+        assert_eq!(rootless.capabilities, ["cap_chown", "cap_setuid"]);
+        assert!(!rootless.bounding_set_dropped);
+        assert_eq!(rootless.mode.as_str(), "capabilities");
+    }
     /// A dbproxy that printed something and then hung holds its write end open:
     /// the drain has to read what it said without waiting for the process.
     #[test]

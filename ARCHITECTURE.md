@@ -68,7 +68,7 @@ request comes from blastit's own routing table in the manifest (§6).
 
 | Component | Count | uid | Python? | Holds | Talks to |
 |---|---|---|---|---|---|
-| **init** | 1 (PID 1) | 0 | stage 1 only | listen socket, all internal socket ends while forking, preloaded app | everyone (control) |
+| **init** | 1 (PID 1) | 0, or the uid it was started as (D6) | stage 1 only | listen socket, all internal socket ends while forking, preloaded app | everyone (control) |
 | **dbproxy** | 1 (own `execve`) | `UID_BASE+3` | no | **the real DB credentials**, the query policy, one listener per view | views (Unix sockets), PostgreSQL (TCP/TLS) |
 | **http** | 1 | `UID_BASE+1` | no | the listening TCP socket | load balancer, scheduler |
 | **scheduler** | 1 | `UID_BASE+2` | no | the manifest's routing table, worker budget, one channel per view process | http, init, view processes |
@@ -80,7 +80,7 @@ uids needs an `/etc/passwd` entry, because `setuid()` only needs `CAP_SETUID`
 (experiment 1, confirmed on DO). Every process gets `gid == uid` and an empty
 supplementary group list.
 
-### 2.1 init (PID 1, root)
+### 2.1 init (PID 1, root or capabilities)
 
 init is the only process with privileges. It never parses HTTP, never runs a
 view and never talks to the database. It does three things.
@@ -101,6 +101,58 @@ view and never talks to the database. It does three things.
 **Invariant: init is single-threaded at every `fork()`.** It runs no tokio
 runtime and no background thread. BLAS thread pools are pinned to one thread
 (§9.3). Any runtime a child needs is created after the fork, in the child.
+
+It needs two things of its identity, and they are not the same thing: the
+capability to *become* each uid of the layout below, and the capability to
+create and own their private files. As root both come from uid 0. When blastit
+is started as an unprivileged user instead (D6), both come from a small
+capability set, which the boot reads from `/proc/self/status` and reports:
+
+* `cap_setuid`, `cap_setgid` — `setresuid`, `setresgid` and `setgroups` to the
+  uid layout of §2;
+* `cap_chown`, `cap_fowner` — `chown` and `chmod` of the view directories and
+  their sockets, which belong to the view's uid by the time their mode is set;
+* `cap_dac_override` — opening a view's private directory to bind the socket
+  inside it, which is `0700` and already the view's;
+* `cap_kill` — `kill(2)` on a view process, whose uid is never init's.
+
+`cap_setpcap` is **wanted, not required**: with it the children's bounding set is
+emptied as well, and without it every other set is still cleared and
+`PR_SET_NO_NEW_PRIVS` still stops an `execve` from granting what the bounding set
+allows. A container that cannot give it (`--cap-drop SETPCAP`, a runtime without
+`PR_CAPBSET_DROP`) boots, with one warning and `"bounding_set": "kept"` in the
+`boot` event. Nothing else is needed: blastit only ever *lowers* an `rlimit`, and
+binding `$PORT` needs no privilege.
+
+The mode is not configured but detected, and a process that is missing one of
+those capabilities is refused at boot with the names of the missing ones and the
+`setcap` line that fixes it. The first `boot` event says which mode is in force —
+`"privilege":"root"`, or `"privilege":"capabilities"` with the set in
+`"capabilities"` — because the two deployments look identical from the outside.
+
+**The file that carries them is init's alone.** A file with file capabilities
+turns any process of its owner's uid that can run it into init, and a *child*
+cannot `execve` such a file at all once its bounding set is empty (the kernel
+refuses with `EPERM`, "insufficient to execute correctly"). So a rootless
+deployment gives the capabilities to a **dedicated copy** of the file init starts
+from — a wheel's interpreter, a standalone binary — which is mode `0500`, owned
+by the uid init runs as, and started by the entrypoint and by nothing else.
+
+That uid is then a **dedicated** one: it is the only uid that can run the copy,
+and running the copy is becoming init. A worker, a migration, an operator's shell
+and every sidecar must use another uid, and the `boot` event warns (it never
+refuses — a debug shell is legitimate) when another process of init's uid is
+already running when it starts. The shared interpreter stays capability-free:
+**every** name it can be started by (`python`, `python3`, `python3.X`,
+`sys._base_executable`, the resolved `sys.executable`) is checked for the
+attribute, and it is compared with init's file by device and inode rather than by
+name, so a symlink chain cannot hide the mistake and a name that *is* init's own
+copy is not a shared name. The boot refuses, with the recipe, a deployment where
+the shared file carries them, or where a child's program does. `BLASTIT_EXEC`
+names the capability-free copy of a standalone install's own binary (which
+`--role=dbproxy` runs), and that file must be owned by root or by init's uid,
+writable by neither group nor others, in a directory that is not either: a uid
+that could replace it would decide what the credentials-holding process runs next.
 
 ### 2.2 dbproxy
 
@@ -249,6 +301,74 @@ http.
   that went away, a view that died — charges that observed time instead. The
   `request` event keeps both numbers: `cost_ns` (what was charged) and `cpu_ns`
   (what the worker reported, `null` when it reported nothing).
+
+The fair queue is a port of granian's fair scheduler (`--fq-*`); the options map
+as follows, and these are the deliberate differences:
+
+| granian | blastit | Default |
+|---|---|---|
+| `--fq` (on/off switch) | `BLASTIT_FAIR_QUEUING` | `off` |
+| `--fq-outer-prefix-v4` | `BLASTIT_FQ_OUTER_PREFIX_V4` | `24` |
+| `--fq-outer-prefix-v6` | `BLASTIT_FQ_OUTER_PREFIX_V6` | `56` |
+| `--fq-outer-max` | `BLASTIT_FQ_OUTER_MAX` | `65536` |
+| `--fq-inner-max-per-outer` | `BLASTIT_FQ_INNER_MAX_PER_OUTER` | `1024` |
+| `--fq-inner-max` | `BLASTIT_FQ_INNER_MAX` | `262144` |
+| `--fq-burst` | `BLASTIT_FQ_BURST` | `20ms` |
+| `--fq-max-debt` | `BLASTIT_FQ_MAX_DEBT` | `5s` |
+| `--fq-debt-ttl` | `BLASTIT_FQ_DEBT_TTL` | `30s` |
+| `--fq-inner-headers` | `BLASTIT_FQ_INNER_HEADERS` | `user-agent,accept-language,sec-ch-ua,sec-ch-ua-platform,sec-ch-ua-mobile,authorization` |
+| `--fq-inner-cookies` | `BLASTIT_FQ_INNER_COOKIES` | `sessionid,session` |
+| `--fq-inner-include-ip` | `BLASTIT_FQ_INNER_INCLUDE_IP` | `1` |
+
+* **`*` means the rightmost entry, not the leftmost.** granian takes `chain[0]`
+  when every peer is trusted. Wherever the edge *appends* to a header the client
+  already sent — App Platform does — the leftmost entry is the client's own
+  invention, so blastit takes the rightmost: what the closest hop added is the
+  one thing that hop cannot be lying about.
+* **Cost comes from the view, not from the loop.** granian measures its own loop
+  time and charges while the request runs; blastit takes the request's own
+  measurement from the worker — the whole of `serve_request`, not just the WSGI
+  call — and charges at the response's end. A view that lies is bounded on both
+  sides: **upwards** by the time the scheduler observed, and **downwards** by the
+  time up to its own first response frame, so it cannot report zero for a request
+  it took real time to answer. It can only buy itself the gap between its first
+  frame and its last one — that is, exactly the time its own client was waiting
+  for it. A view that says nothing is charged what the scheduler saw.
+* **One lane per route, and one worker budget across routes.** granian has two
+  fixed lanes (events, loop steps). blastit's queue only ever serves the route a
+  queued request belongs to, so the lanes are the routes; the best flow is
+  compared across them because they all compete for `BLASTIT_MAX_WORKERS`. The
+  comparison is an extension of the in-route one, not a second rule: **outer
+  flows belong to the queue, not to a route** — `used` is one number per client
+  however many routes that client has work for — so `(outer.used, inner.used)` is
+  the same key inside a route and between routes, with the route index as the
+  last tiebreak where the in-route order breaks ties on the flow keys.
+* **`BLASTIT_TRUST_FORWARDED` is deprecated but still honoured**, translated to
+  `BLASTIT_TRUSTED_PROXIES`, with a warning: D5 changes what "trust the load
+  balancer" means from "believe the last `X-Forwarded-For` entry from anyone" to
+  "believe `BLASTIT_CLIENT_IP_HEADER` from these peers".
+* **`refresh_root`.** Every mutation of a flow's queues ends in `touch`, and
+  `refresh_root` prunes the per-route root index when a flow is *removed* under
+  it (an idle one collected, or an outer flow dropped). granian has no such
+  index — it walks its flow table — so this is blastit's bookkeeping, not a
+  second rule, and an entry that outlived its flow would be a stale candidate.
+* **A peer whose address cannot be read goes to the overflow flow.** granian's
+  chain either parses or does not; blastit's `REQ_HEAD` may arrive with a peer
+  string that is not an address at all (`peer_addr` empty, a Unix socket with no
+  name). It is queued in the same overflow flow as every client that cannot be
+  told apart, rather than in a flow of its own that would be one client's
+  private lane.
+* **`TrustedProxies` refuses what it cannot read.** granian's `--trusted-hosts`
+  drops entries it does not understand; blastit fails the boot instead, with the
+  variable named and the value never quoted — a trusted-proxy list that silently
+  trusts nothing when the operator meant it to trust something is a deployment
+  that believes a forged `X-Forwarded-For` from the very peer it meant to
+  distrust. (`127.0.0.1:8080` is the mistake worth naming: a port is not a
+  network.)
+* **There is no `system` queue.** granian keeps a lane for its own internal
+  work. blastit's scheduler has none: nothing it does for itself (health checks,
+  the `404` for an unmatched path, a `503`, a `504`) takes a worker slot or
+  enters the admission queue, so there is no work that has to outrank a client's.
 * **The budget counts threads, not answers.** A slot is released when the view
   reports `DONE`, meaning the thread has actually exited. A timed-out request
   gets a `504` right away, but its slot stays taken until the thread finishes.
@@ -550,13 +670,30 @@ sequenceDiagram
     activate V
     I->>S: ctl.chan: SPAWNED {view, pid} + scheduler end (SCM_RIGHTS)
     I->>I: close its copy of both ends
-    Note over V: close all fds except its view.chan end and log pipes<br/>PyOS_AfterFork_Child() (GIL held, §9.3)<br/>setrlimit NPROC (threads + margin), NOFILE, CORE=0<br/>umask 077 · chdir + HOME + TMPDIR = /run/blastit/views/<uid><br/>setgroups([]) · setgid(uid) · setuid(uid): all capabilities dropped<br/>PR_SET_PDEATHSIG SIGKILL · PR_SET_NO_NEW_PRIVS<br/>seccomp filter (§7.3)
+    Note over V: close all fds except its view.chan end and log pipes<br/>PyOS_AfterFork_Child() (GIL held, §9.3)<br/>setrlimit NPROC (threads + margin), NOFILE, CORE=0<br/>umask 077 · chdir + HOME + TMPDIR = /run/blastit/views/<uid><br/>drop capabilities: ambient and inheritable first, then the bounding<br/>set while cap_setpcap is still effective (skipped without it, M1);<br/>then setgroups([]) · setgid(uid) · setuid(uid); then permitted and effective<br/>PR_SET_PDEATHSIG SIGKILL · PR_SET_NO_NEW_PRIVS<br/>seccomp filter (§7.3)
     V->>S: view.chan: ready
     Note over S: queued requests for the view are dispatched
     V--xI: exit (crash, or kill on RETIRE)
     I->>S: ctl.chan: EXITED {view, pid, status}
     deactivate V
 ```
+
+Every child drops its capability sets itself, in the order the kernel requires,
+and checks that they are gone. The ambient set goes first, because the kernel's
+invariant is `ambient ⊆ permitted ∩ inheritable` and a `capset` that broke it
+would be refused; then the inheritable set, and the bounding set when
+`cap_setpcap` is held, because dropping a bounding capability needs it in the
+**effective** set and a root process loses that set the moment `setresuid` leaves
+uid 0; then `setgroups`, `setresgid` and `setresuid`; then the permitted and
+effective sets.
+
+A rootless init is why this is explicit rather than implied by the uid change:
+the kernel clears a process's capability sets only when all of its uids cross 0,
+and a rootless init's uid never was 0, so a child that dropped nothing would keep
+`cap_setuid` — a way back to any uid in the container. The check is part of the
+drop: every set the process *holds* must be empty afterwards, and a child whose
+sets are not does not start. The bounding set is checked when it was dropped, and
+reported as kept when it could not be (M1).
 
 If anything in a stage fails, the whole container exits non-zero. A
 half-started sandbox is worse than a crash loop that the platform can see.
@@ -1021,6 +1158,15 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
   threads and gVisor 16: gVisor doesn't count the main thread, so leave one
   unit of margin.
 * **`PR_SET_PDEATHSIG(SIGKILL)`.** No process outlives init.
+* **Capabilities.** Every child clears every capability set it holds and sets
+  `PR_SET_NO_NEW_PRIVS`. The flag is what makes an `execve` of a file with file
+  capabilities grant nothing: with it set, the new permitted set may only be a
+  subset of the old one, and the kernel refuses the `execve` outright (`EPERM` —
+  "insufficient to execute correctly") when the file's capabilities cannot be
+  honoured. So the file init starts from (D6) may carry the boot's capabilities
+  without a view being able to use them: a view holds nothing, and its bounding
+  set is empty. The dedicated copy is also mode `0500` and owned by init's uid, so
+  another uid cannot run it in the first place.
 
 ### 7.3 seccomp
 
@@ -1139,7 +1285,7 @@ writes to gets copied (§9.2). So:
   so once, as a `warn` line of its own output (§8.1).
 * `total` is `min(MemTotal, cgroup limit)` and `used` is the cgroup's own
   accounting: on DO, `MemTotal` *is* the instance size and the cgroup v1
-  `memory.usage_in_bytes` is accurate (§9.2 #8). The sources, in order, are
+  `memory.usage_in_bytes` is accurate (§9.2 #10). The sources, in order, are
   `/proc/meminfo` (`MemTotal`, with `MemTotal − MemAvailable` as the fallback
   for `used`), cgroup v2 `/sys/fs/cgroup/memory.max` and `memory.current`, then
   cgroup v1 `/sys/fs/cgroup/memory/memory.limit_in_bytes` and
@@ -1208,7 +1354,7 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 | `process.spawned` / `process.exited` / `process.retired` | init, scheduler | info (warn for crashes) | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`) | view process lifecycle |
 | `process.cap` | scheduler | info | `estimate_bytes` (the measured cost of one view process), `cap` (the live view process cap it buys) | the measured cost or the cap changed (§8 Sizing); never once per request |
 | `app.output` | init | info (stdout) / warn (stderr) | `stream`, `line`, `part`, `parts` | the app or a library printed something |
-| `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, the rendered output variable *names* per proxy (never values), the warning text (for example an unattached group) | lifecycle of the whole server |
+| `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, `seccomp`, `privilege` (`root` or `capabilities`, D6) with `capabilities` (the set init holds, rootless mode only) and `bounding_set` (`dropped` or `kept`, M1), the rendered output variable *names* per proxy (never values), the warning text (for example an unattached group) | lifecycle of the whole server |
 
 `cost_ns` is what the request was charged for fair queuing: the view
 process's own measurement, clamped between the time from dispatch to the
@@ -1221,7 +1367,7 @@ clock on its interpreter — so a reader never has to guess which happened.
 arrives with it.
 
 The `boot` event of the **`preload`** stage is the one that says what the app
-cost before the fork: `immortalized` and `immortalize_ms` for §9.2 #7's pass
+cost before the fork: `immortalized` and `immortalize_ms` for §9.2 #9's pass
 over the heap, and the memory the view process cap was derived from —
 `mem_total`, `mem_used` and `max_view_processes` (§8 Sizing). Byte counts are
 integers.
@@ -1268,7 +1414,7 @@ with `request` events.
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | live view process cap (LRU retirement) |
 | `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | expected cost per view process: the starting divisor of the derived cap, and the floor of the measured one |
 | `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total` (the smaller of `MemTotal` and the cgroup limit); above it, one idle view process per 2 s check is retired |
-| `BLASTIT_IMMORTALIZE` | `auto` | `auto` \| `1` \| `0`: mark the preloaded heap immortal before the fork (§9.2 #7), each version with the marker CPython itself writes there. `auto` and `1` both do it on 3.12–3.14 and skip any interpreter whose marker blastit does not know (32-bit, big-endian, free-threaded, `Py_TRACE_REFS`, or a version outside that range), with the reason in the `boot` event; `0` never |
+| `BLASTIT_IMMORTALIZE` | `auto` | `auto` \| `1` \| `0`: mark the preloaded heap immortal before the fork (§9.2 #9), each version with the marker CPython itself writes there. `auto` and `1` both do it on 3.12–3.14 and skip any interpreter whose marker blastit does not know (32-bit, big-endian, free-threaded, `Py_TRACE_REFS`, or a version outside that range), with the reason in the `boot` event; `0` never |
 | `BLASTIT_MAX_HEADER_BYTES` / `BLASTIT_MAX_BODY_BYTES` | `64 KiB` / `100 MiB` | HTTP limits |
 | `BLASTIT_HEADER_TIMEOUT` / `BLASTIT_KEEPALIVE_TIMEOUT` | `10s` / `75s` | HTTP timeouts (keep-alive above the LB's) |
 | `BLASTIT_CLIENT_IP_HEADER` | `x-forwarded-for` | header the client address is read from, and only from a trusted peer; a chain entry is a bare or bracketed address, so `1.2.3.4:5678` makes the whole header unreadable and the peer is the client |
@@ -1282,6 +1428,16 @@ with `request` events.
 | `BLASTIT_SECCOMP` | `1` | the §7.3 filters (verified on DO) |
 | `BLASTIT_GRACEFUL_TIMEOUT` | `25s` | drain time on `SIGTERM` |
 | `BLASTIT_WARMUP` | — | optional `module:callable` run before the fork |
+
+`BLASTIT_UID_BASE` also decides which uid init may **not** run as (D6): the boot
+refuses a uid the layout hands to another process — the http, scheduler and
+dbproxy uids, and one per route — because that process would share init's
+identity. `BLASTIT_EXEC` (the standalone install only) names the capability-free
+copy of the binary that `--role=dbproxy` runs; a wheel names its own interpreter
+through the console script. There is deliberately no variable for the privilege
+*mode*: it is read from `/proc/self/status` at boot and reported in the `boot`
+event, because a deployment that believes it granted a capability has no other way
+to find out that it did not.
 
 ---
 
@@ -1315,22 +1471,44 @@ is written up in
    gVisor leaving out the main thread). `PR_SET_PDEATHSIG` and
    `PR_SET_CHILD_SUBREAPER` work. `SCM_RIGHTS` works across uids, and
    `execve("/proc/self/exe")` works. `pidfd_open` is `ENOSYS`.
+5. **A non-root `--user` process gets no capabilities from `--cap-add`.** On
+   Docker 29.5 (`docker compose` v5), `--cap-add`/`--cap-drop` set the
+   container's *bounding* set only: a `user:` process starts with `CapPrm`,
+   `CapEff` and `CapAmb` all zero (measured locally and on a Droplet in ams3).
+   Two mechanisms do hand capabilities to a non-root process: **file
+   capabilities** on the file whose `execve` should have them
+   (`setcap 'cap_setuid,…+ep'`), and a launcher that sets the inheritable and
+   ambient sets before it changes the uid (`setpriv --inh-caps … --ambient-caps
+   …`). A container that sets `no_new_privs` (the App Platform, §10) ignores
+   file capabilities entirely, so there starting as root stays the way.
+6. **A file with capabilities is init's alone, and a child cannot `execve` one.**
+   `get_file_caps` returns `EPERM` when a file's permitted set cannot be honoured
+   — which is what every child of a capability-carrying file sees, its bounding
+   set being empty — and a rootless init keeps its capabilities across
+   `setresuid`, because the kernel only clears the sets when a uid crosses 0.
+   Together they mean the capability belongs on a **dedicated copy** of the file
+   init starts from (mode `0500`, owned by init's uid, whose uid is then a
+   dedicated one), that a wheel install `execve`s its separate `blastit-dbproxy`
+   for the credentials-holding role, and that a standalone install names its
+   capability-free copy in `BLASTIT_EXEC`. The check is by **device and inode**
+   over every name the shared interpreter has, because the kernel grants the
+   attribute of the file an `execve` resolves to, not of the name it was given.
 
 ### 9.2 Memory
 
-5. **Preload-then-fork is still the big memory win, but gVisor raises the
+7. **Preload-then-fork is still the big memory win, but gVisor raises the
    cost of each process.** On Linux, 100 forked workers of a Django +
    scientific-stack parent (≈173 MiB) cost 575 MiB of PSS in total
    (experiment 2). On DO, each forked process costs a floor of about
    14–18 MiB however small or large the parent is. That covers its own
    stack, malloc arenas and interpreter state.
-6. **gVisor breaks COW in chunks of about 2 MiB.** After a fork, touching
+8. **gVisor breaks COW in chunks of about 2 MiB.** After a fork, touching
    0.1% of the objects in a 67 MiB Python heap, at random, made each child
    copy **82 MiB** (on Linux: about 3 MiB). Touching 10% contiguously cost
    only about 8 MiB. Python refcounts write to every object a request reads,
    so without countermeasures each view process would end up copying most of
    the preloaded heap.
-7. **Immortalizing the preloaded heap fixes it.** Before `gc.freeze()`, init
+9. **Immortalizing the preloaded heap fixes it.** Before `gc.freeze()`, init
    walks every reachable object (`gc.get_objects()` plus `gc.get_referents()`)
    and writes CPython's own immortal marker over its reference count, the pair
    `_Py_SetImmortalUntracked` writes: the low 32 bits of `ob_refcnt` —
@@ -1381,7 +1559,7 @@ is written up in
    refusing to start. Immortal objects are never freed, which is fine for a
    heap that lives as long as the container.
 
-8. **Measure memory on aggregates only.** gVisor has no `smaps_rollup`, and
+10. **Measure memory on aggregates only.** gVisor has no `smaps_rollup`, and
    `VmRSS` doesn't change after allocations. On DO, `/proc/meminfo` reports
    the instance (`MemTotal` = 1 GiB), and cgroup v1
    `memory/memory.usage_in_bytes` is accurate. (Local `runsc` showed the
@@ -1390,28 +1568,28 @@ is written up in
 
 ### 9.3 Python and fork
 
-9. **Threads and `fork` don't mix.** BLAS/OMP thread pools started before a
+11. **Threads and `fork` don't mix.** BLAS/OMP thread pools started before a
    fork don't exist in the child, and the child deadlocks: exactly the KMeans
    views hung with multi-threaded BLAS, on Linux and under gVisor alike.
    Hence the single-threaded-at-fork invariant and the forced
    `*_NUM_THREADS=1`.
-10. **Fork and GIL ordering with pyo3.** `PyOS_AfterFork_Child()` must run
+12. **Fork and GIL ordering with pyo3.** `PyOS_AfterFork_Child()` must run
     *while holding the GIL*; otherwise CPython aborts. init's stage 1 is the
     only thread and holds the GIL for its whole supervision loop, so it forks
     between `PyOS_BeforeFork()` and `PyOS_AfterFork_Parent()`, and the child
     inherits the GIL, calls `PyOS_AfterFork_Child()`, and then only calls
     `blastit_view::serve`, which releases it for its I/O loop.
-11. **Embedded CPython can't find the distro's `site-packages` by itself.**
+13. **Embedded CPython can't find the distro's `site-packages` by itself.**
     Append them to `sys.path` before the first import.
 
 ### 9.4 Latency and robustness
 
-12. **gVisor makes syscalls and forks expensive.** Syscall-heavy requests take
+14. **gVisor makes syscalls and forks expensive.** Syscall-heavy requests take
     about twice as long (27 → 50 ms in the PoC). A fork takes 12–60 ms on DO,
     against 0.5–7 ms on Linux. blastit adds two internal hops each way
     (http → scheduler → view), and the DB adds one more. Frames are large and
     batched, and hot views are forked at startup.
-13. **A receive timeout on every worker channel** turned a deadlocked worker
+15. **A receive timeout on every worker channel** turned a deadlocked worker
     into a single `502` instead of a hung server. It is generalised here as
     the scheduler's timeouts and recycling.
 
@@ -1425,8 +1603,8 @@ marked *(docs)*.
 | Constraint | Consequence for blastit |
 |---|---|
 | gVisor (reports kernel `4.4.0`); some syscalls missing (`pidfd_open` → `ENOSYS`) | AF_UNIX only internally; no `pidfd`, `io_uring` or namespaces; check every syscall we use against gVisor's compatibility table |
-| Root, PID 1, Docker-default capabilities minus `NET_RAW` | enough: `SETUID`, `SETGID`, `CHOWN`, `FOWNER`. The image must **not** set a non-root `USER` |
-| `no_new_privs` set on every container (seen on the pilot project: `sudo` refuses to start) | blastit must *start* as root (`USER root`, then `CMD ["blastit"]`); it only ever drops privileges, which `no_new_privs` allows. Other components of the same image that should not run as root drop to their user themselves (`setpriv --reuid=… --regid=… --init-groups …`) |
+| Root, PID 1, Docker-default capabilities minus `NET_RAW` | enough: `SETUID`, `SETGID`, `CHOWN`, `FOWNER`, `DAC_OVERRIDE`, `KILL`. The image must **not** set a non-root `USER`, and this is also why D6's rootless mode is not for this platform: a non-root `user:` gets no capabilities from `--cap-add`, and `no_new_privs` makes the kernel ignore file capabilities too |
+| `no_new_privs` set on every container (seen on the pilot project: `sudo` refuses to start) | blastit must *start* as root (`USER root`, then `CMD ["blastit"]`); it only ever drops privileges, which `no_new_privs` allows. Other components of the same image that should not run as root drop to their user themselves (`setpriv --reuid=… --regid=… --init-groups …`). A *rootless* start would need the capabilities as ambient capabilities: `no_new_privs` alone does not take away what a process already holds, but it does stop `execve` from granting file capabilities |
 | No `CAP_SYS_ADMIN` / `CAP_NET_ADMIN` | no mount or user namespaces, no cgroups of our own, no per-uid firewall. Isolation is uids + file modes + rlimits + seccomp |
 | `SO_PEERCRED` broken; `/proc/<pid>/environ` readable across uids | per-view pg listeners + `SCM_CREDENTIALS`; `execve` barrier; dbproxy exec'd with an empty env |
 | COW in ~2 MiB chunks; ~14–18 MiB floor per process | immortalized heap, lazy spawning, LRU cap on live view processes |

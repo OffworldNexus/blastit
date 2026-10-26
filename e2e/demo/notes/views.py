@@ -13,6 +13,8 @@ Three extra endpoints exist to test the sandbox, not the app:
   points at a local socket.
 * ``/debug/egress/`` and ``/egress/probe/`` report what the process's system
   calls allow; only the second route may reach the network.
+* ``/debug/caps/`` reports what the process's *capabilities* are: D6's proof
+  that a rootless init still hands a view nothing to escalate with.
 """
 
 import ctypes
@@ -135,6 +137,43 @@ def raw_sql(request):
     except DatabaseError as e:
         sqlstate = getattr(e, "sqlstate", None) or getattr(e.__cause__, "sqlstate", None)
         return JsonResponse({"ok": False, "route": route, "sqlstate": sqlstate})
+
+
+def caps_probe(request):
+    """Report this process's own privilege state, without changing anything.
+
+    Mounted on the ``debug`` route, which has no database grant. D6: a view
+    process runs with **no capability at all** — not even the ones the rootless
+    init that forked it holds — and with ``no_new_privs`` set, which is what
+    keeps an ``execve`` of a binary with file capabilities from handing them
+    back. The values are the raw ``/proc/self/status`` fields, so the check is
+    the kernel's, not the app's.
+    """
+    fields = {}
+    try:
+        with open("/proc/self/status", encoding="ascii", errors="replace") as status:
+            for line in status:
+                key, separator, value = line.partition(":")
+                if not separator:
+                    continue
+                if key.startswith("Cap"):
+                    fields[key] = value.strip()
+                elif key == "NoNewPrivs":
+                    fields["NoNewPrivs"] = value.strip()
+    except OSError as e:  # pragma: no cover - the kernel always has /proc
+        return JsonResponse({"route": request.META.get("blastit.route"), "error": str(e)}, status=500)
+    return JsonResponse(
+        {
+            "route": request.META.get("blastit.route"),
+            "uid": os.getuid(),
+            "inheritable": fields.get("CapInh"),
+            "permitted": fields.get("CapPrm"),
+            "effective": fields.get("CapEff"),
+            "bounding": fields.get("CapBnd"),
+            "ambient": fields.get("CapAmb"),
+            "no_new_privs": fields.get("NoNewPrivs"),
+        }
+    )
 
 
 def egress_probe(request):

@@ -137,6 +137,31 @@ jobs:
           path: e2e/app.log
           if-no-files-found: ignore
 
+  rootless:
+    name: e2e rootless (capabilities, Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the wheel
+        run: pipx install maturin && scripts/build-wheel.sh
+        env:
+          MATURIN: maturin
+      - name: Run the scenario with capabilities instead of root
+        run: python e2e/rootless/run.py --local --dockerfile Dockerfile.prebuilt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rootless-app-log
+          path: e2e/rootless/out/
+          if-no-files-found: ignore
+
   wheel-smoke:
     name: wheel in a uv virtualenv (modelw/base, CPython 3.14)
     runs-on: ubuntu-latest
