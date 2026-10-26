@@ -141,6 +141,9 @@ The resolution rule, and how to work it out for your own ingress, is in
 only from a trusted peer, only its last value, and only if it is exactly `http`
 or `https`.
 
+`REMOTE_ADDR` is an `ip:port` string when the address came from the peer, and a
+bare IP when a trusted header named it.
+
 ## Proxies
 
 | Variable | Default | Meaning |

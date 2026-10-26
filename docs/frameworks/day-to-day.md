@@ -241,6 +241,15 @@ queries = ["SELECT set_config('TimeZone', $1, false)", "SELECT 1"]
 The plugin reports them separately, as `connection_setup`, with the routes that
 do not grant them.
 
+!!! note "A global group's `SELECT set_config(…)` looks unused, and is not"
+
+    A statement that only runs while a connection is opened is reported in
+    `connection_setup`, not as a request's statement — so the grant that covers
+    it can still turn up in `unused_global`, and the summary says
+    `1 grant(s) of a global group nothing matched`. `connection_setup`'s
+    `ungranted: 0` is the answer that matters, and what `--blastit-strict`
+    acts on. [The reference explains it](../reference/pytest-plugin.md#unused_global-can-name-a-grant-that-is-doing-its-job).
+
 ## Upgrading
 
 blastit is pre-release, so upgrading is the one operation to be deliberate about.

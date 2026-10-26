@@ -90,6 +90,7 @@ a newline in it is not the same text as the same statement with a space.
 $ export DATABASE_URL=postgresql://shop:secret@127.0.0.1:5432/shop
 $ export BLASTIT_APP=app:app
 $ export BLASTIT_MANIFEST=$PWD/blastit.toml
+$ export PYTHONPATH=$PWD      # so `app` is importable
 $ export PORT=8080
 $ sudo -E .venv/bin/blastit
 ```
@@ -166,21 +167,25 @@ inbound connection is one upstream connection.
 ## No pytest plugin for Flask
 
 The plugin is **Django-only**, and it is worth being precise about why rather
-than discovering it from an empty report.
+than discovering it from a traceback.
 
 It defines "a request" as `django.core.handlers.base.BaseHandler.get_response`.
 Everything else — which route the path belongs to, which test made the request,
 which statements belong to it — hangs off that. It also knows Django's database
 aliases, Django's `ATOMIC_REQUESTS`, and pytest-django's `live_server`.
 
-A Flask app has no `BaseHandler`. The plugin's psycopg-level capture still sees
-your statements, but with no request to attach them to they are treated as
-fixture or setup traffic and dropped, so `pytest --blastit-manifest
-blastit.toml` reports nothing useful about a Flask project.
+Ask it for a manifest in a project without Django and the session stops with:
+
+```text
+ERROR: blastit: the plugin needs Django in the test environment to record requests: No module named 'django'
+```
+
+That is the whole of the failure — a clear one, and not a wrong report. Nothing
+about blastit itself assumes Django; only the plugin does.
 
 ### Filling the manifest without the plugin
 
-Three ways, in the order most projects use them.
+Four ways, in the order most projects use them.
 
 **1. Write the routes and use table grants.** If you would rather not enumerate
 statements at all, say which tables and columns each route may touch, and let

@@ -46,6 +46,11 @@ Three more details that decide real deployments:
 * **A peer that is not an address at all** (an unnamed Unix socket) is not
   trusted.
 
+When the address comes from the **peer**, `REMOTE_ADDR` keeps the `ip:port`
+shape it arrived with — `127.0.0.1:52244`. When it comes from a **header**, it
+is a bare IP, because a chain entry is an address and nothing else. Any code
+that compares `REMOTE_ADDR` to a list of addresses should expect both shapes.
+
 `BLASTIT_TRUSTED_PROXIES` **refuses what it cannot read** rather than dropping
 it: `127.0.0.1:8080` is a boot error, not an entry. A trusted-proxy list that
 silently trusts nothing when the operator meant it to trust something is a

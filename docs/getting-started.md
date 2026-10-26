@@ -39,10 +39,24 @@ your virtualenv and its packages are simply there.
 
 !!! tip "Where the interpreter has to be readable"
 
-    Routes run as `BLASTIT_UID_BASE + 1000 + i`, and blastit drops to
-    `UID_BASE + 3` before it `execve`s its own database proxy. A project inside
-    a `0700` directory hides both the project and its `.venv` from those users.
-    `/app`, `/srv/app` or an ordinary checkout are fine.
+    Two things have to be readable by the sandbox users, and neither is
+    obvious:
+
+    * **the project**, because routes run as `BLASTIT_UID_BASE + 1000 + i` and
+      blastit drops to `UID_BASE + 3` before it `execve`s its own database
+      proxy. A project inside a `0700` directory hides both the project and its
+      `.venv` from those users. `/app`, `/srv/app` or an ordinary checkout are
+      fine.
+    * **the interpreter's own standard library.** A Python installed under a
+      private home directory — `uv python install` puts one in
+      `~/.local/share/uv/python`, and `~` is often `0750` — is reachable by
+      your shell and by nobody else. Under blastit, only the modules built into
+      the `libpython` binary import; every pure-Python stdlib module fails with
+      `ModuleNotFoundError: No module named 'stringprep'` (or `encodings.idna`,
+      or `subprocess`), which is a confusing way to learn this. Traversable
+      paths are what matter, not how they are installed: a flat, world-readable
+      install under `/opt`, or the distribution's own `/usr/bin/python3.x`, both
+      work.
 
 ## 2. Write the smallest app and manifest
 
@@ -71,15 +85,30 @@ written. The first route that matches wins, so a catch-all goes last.
 ```console
 $ export BLASTIT_APP=hello:application
 $ export BLASTIT_MANIFEST=$PWD/blastit.toml
+$ export PYTHONPATH=$PWD      # so `hello` is importable: see below
 $ export PORT=8080
 $ sudo -E .venv/bin/blastit
-{"ts":"…","level":"info","event":"boot","component":"init","stage":"stage0","seccomp":true,"privilege":"root","bounding_set":"dropped"}
+{"ts":"…","level":"info","event":"boot","component":"init","stage":"stage0","seccomp":true,"privilege":"root","bounding_set":"dropped","preset":null}
 {"ts":"…","level":"info","event":"boot","component":"init","stage":"config","seccomp":true,"privilege":"root","preset":null}
 {"ts":"…","level":"info","event":"boot","component":"init","stage":"preload","immortalize":"on","immortalized":148213,"immortalize_ms":412.7,"mem_total":1057259520,"mem_used":211812352,"max_view_processes":23}
 {"ts":"…","level":"info","event":"ready","component":"init","stage":"serving","routes":1,"workers":16}
 ```
 
-`sudo -E` keeps your `BLASTIT_*` variables. In another terminal:
+!!! warning "`BLASTIT_APP` has to be importable"
+
+    Stage 1 re-executes the interpreter with `-I`, which drops `PYTHONPATH` and
+    the working directory from `sys.path` — so blastit carries the *console
+    script's* `sys.path` across that barrier itself. The console script's own
+    first entry is its `bin` directory, not your project, so a project that is
+    not installed as a package needs `PYTHONPATH=$PWD`. (`e2e/Dockerfile` sets
+    `PYTHONPATH=/app` for the same reason.)
+
+    Forget it and the boot fails with
+    `BLASTIT_APP (hello:application): ModuleNotFoundError: No module named 'hello'`.
+
+`sudo -E` keeps your `BLASTIT_*` variables. If your sudo is configured without
+`env_reset`, `sudo env VAR=… .venv/bin/blastit` is the spelling that always
+works. In another terminal:
 
 ```console
 $ curl -sS localhost:8080/whatever

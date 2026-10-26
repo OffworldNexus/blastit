@@ -276,10 +276,49 @@ Two consequences of that:
   what was *denied*, never what *ran*, so no grant of that route can be called
   dead.
 
+It has three requirements of its own, all of them
+[spelled out on the Django page](../frameworks/django.md#the-live-server):
+`WSGI_APPLICATION` in blastit's `module:attribute` spelling (or
+`--blastit-live-app`), an **absolute** `--blastit-manifest`, and a settings
+module that is importable from the directory it lives in.
+
 It preloads your root URLconf and serves your project where it lives when the
 view uids can read it there; when they cannot — pytest's own temporary
 directories are private — it serves a copy in a temporary directory it creates
 and removes, and changes no mode of your checkout.
+
+## `unused_global` can name a grant that is doing its job
+
+One report quirk worth knowing before you chase it: a statement that only ever
+runs while a connection is being established is reported in `connection_setup`,
+not as a request's statement — so a global group grant that covers it can still
+appear in `unused_global`, because no *request* matched it.
+
+The usual example is the grant everybody ends up with:
+
+```text
+blastit: 1 grant(s) of a global group nothing matched (see blastit-report.json)
+```
+
+```json
+"unused_global": {"count": 1, "statements": [
+  {"groups": ["connection"], "proxy": "db", "sql": "SELECT set_config('TimeZone', $?, false)"}
+], "tables": []}
+```
+
+while the same report says it is fine:
+
+```json
+"connection_setup": {"statements": [
+  {"sql": "SELECT set_config('TimeZone', $?, false)", "proxy": "db", "count": 1,
+   "wire_sql": "SELECT set_config('TimeZone', $1, false)",
+   "ungranted_in": [], "granted_in": 2}
+], "ungranted": 0}
+```
+
+`granted_in` is the number that matters here, and `ungranted: 0` is the answer
+`--blastit-strict` acts on. The `unused_global` entry is not a mistake in the
+manifest.
 
 ## See also
 

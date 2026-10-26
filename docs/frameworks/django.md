@@ -162,6 +162,7 @@ $ uv run python manage.py migrate
 $ export BLASTIT_APP=myproject.wsgi:application
 $ export BLASTIT_PRELOAD=myproject.urls   # import the URLconf before the fork
 $ export BLASTIT_MANIFEST=$PWD/blastit.toml
+$ export PYTHONPATH=$PWD                  # so `myproject` is importable
 $ export PORT=8080
 $ sudo -E .venv/bin/blastit
 ```
@@ -278,6 +279,52 @@ suite. It preloads your root URLconf and serves your project where it lives when
 the view uids can read it there; when they cannot — pytest's own temporary
 directories are private — it serves a copy in a temporary directory it creates
 and removes, and changes no mode of your checkout.
+
+!!! warning "Three things the live server needs, and one it does not do yet"
+
+    This fixture is the newest and least forgiving part of the plugin. Check
+    all three before you conclude your manifest is wrong.
+
+    1. **`WSGI_APPLICATION` has to be spelled `module:attribute`.** The fixture
+       hands that setting to `BLASTIT_APP` as it stands, and Django defines it
+       as a *dotted* path — `django-admin startproject` writes
+       `myshop.wsgi.application`, which Django accepts and blastit does not. The
+       boot then fails with ``BLASTIT_APP: must be `module:attribute` ``. Pass
+       blastit's spelling explicitly:
+
+        ```console
+        $ uv run pytest --blastit-live-app myproject.wsgi:application --blastit-live-server
+        ```
+
+       (The plugin's own test project writes `WSGI_APPLICATION = "wsgi:application"`
+       for this reason.)
+
+    2. **The manifest path has to be absolute.** The server runs in another
+       directory, so a relative `--blastit-manifest blastit.toml` (or the same
+       value in `pytest.ini`) is not found:
+
+        ```console
+        $ uv run pytest --blastit-manifest "$PWD/blastit.toml" --blastit-live-app myproject.wsgi:application
+        ```
+
+    3. **The WSGI callable has to be importable from the directory that holds
+       your settings module**, because that directory is the server's working
+       directory and its `PYTHONPATH`. With the `django-admin startproject`
+       layout — `myshop/settings.py`, so the settings module is `myshop.settings`
+       — that puts `myshop/` itself on the path, and `import myshop.wsgi` fails
+       with `ModuleNotFoundError: No module named 'myshop'`. A project whose
+       settings module is a plain file next to `wsgi.py` (`settings.py`,
+       `DJANGO_SETTINGS_MODULE=settings`) is what the fixture was written for.
+
+    Neither of the last two is something the docs can paper over, and both are
+    reported in this pull request.
+
+    What *does* work today, end to end: a suite that drives
+    `blastit_live_server` (or `--blastit-live-server`) in a project laid out
+    like the plugin's own `python/tests/live_project/`, with
+    `WSGI_APPLICATION` in blastit's spelling and an absolute
+    `--blastit-manifest`. Everything else about the manifest loop — the report,
+    `--blastit-strict`, the denied statements — works in any layout.
 
 Read the report, add the grants, and repeat until the plugin says the manifest
 covers every request that was made.

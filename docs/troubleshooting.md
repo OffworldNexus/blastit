@@ -17,7 +17,7 @@ quietly.
 | What you see | Cause |
 |---|---|
 | `blastit: BLASTIT_FOO: …` | a variable that does not parse. The message names the variable, never its value |
-| `blastit: BLASTIT_APP: must be \`module:attribute\`` | `BLASTIT_APP` has no `:` |
+| `blastit: BLASTIT_APP: must be \`module:attribute\`` | `BLASTIT_APP` has no `:` — a blank start with nothing named, or the pytest live server handing over Django's dotted `WSGI_APPLICATION`. See the row lower down |
 | `configuration document: …` | a stage 1 problem — a document stage 0 did not write. Report it |
 | `blastit: … is not `--key=value`` | an internal argument was mistyped. See [the command line](reference/cli.md#internal-arguments) |
 | `… is only for stage 0` | `--preset` was passed with `--stage=1` or `--role=…` |
@@ -34,11 +34,12 @@ quietly.
 | `BLASTIT_EXEC` refused | its target is not owned by root or by init's uid, is writable by group or others, or sits in a directory that is. `/tmp` is refused by name |
 | `--role=dbproxy runs no interpreter` | `--role=dbproxy` from a wheel install. That is stage 0's job, and the wheel ships the Python-free binary it uses |
 | `python: …` output on stderr with a non-zero exit | importing `BLASTIT_APP`, `BLASTIT_PRELOAD` or `BLASTIT_WARMUP` raised. It is printed as `app.output` events, not as a traceback on stderr of its own |
-
-If the log stops after `stage0` and never reaches `config`, the configuration did
-not parse. If it reaches `config` but not `preload`, the failure is in the
-manifest, the environment rewrite, or binding the database sockets — all of which
-happen between the two.
+| `BLASTIT_APP (app:app): ModuleNotFoundError: No module named 'app'` | the project is not on the interpreter's `sys.path`: stage 1 re-executes with `-I`, and blastit restores only the *console script's* path, whose first entry is its own `bin` directory. Set `PYTHONPATH=$PWD` (or install the project) |
+| `BLASTIT_APP: must be \`module:attribute\`` | `module` and `attribute` are separated by a **colon**. Django's `WSGI_APPLICATION` uses dots, and the pytest live server hands that setting to blastit as it stands — pass `--blastit-live-app myproject.wsgi:application` |
+| `ModuleNotFoundError: No module named 'stringprep'`, or `'encodings.idna'`, or `'subprocess'`, from a view | the **interpreter's own standard library** is not readable by the view uids. A Python installed under a private home (`uv python install` puts one in `~/.local/share/uv/python`, and `~` is often `0750`) is reachable by your shell and by no sandbox uid, so only the modules compiled into `libpython` import. Use an interpreter with traversable paths |
+| a `__pycache__` directory owned by root appears in the project or its `site-packages` | expected: stage 1 runs `python -I` **as root**, which ignores `PYTHONDONTWRITEBYTECODE`, and compiles the modules it imports before the fork into bytecode there. That is also why a wheel serves an application directory it may write to |
+| the log stops after `stage0` | the configuration did not parse; see the row above |
+| the log reaches `config` but not `preload` | the failure is in the manifest, the environment rewrite, or binding the database sockets — all of which happen between the two |
 
 ## It starts, but requests do not arrive
 
@@ -78,6 +79,7 @@ This is the interesting class, because it means the sandbox is working.
 | Symptom | Cause |
 |---|---|
 | `REMOTE_ADDR` is the load balancer's address | `BLASTIT_TRUSTED_PROXIES` does not include it. Default is `127.0.0.1,::1`; a non-loopback proxy has to be named. Read [working it out for your own ingress](infra/anything-else.md#working-it-out-for-your-own-ingress) |
+| `REMOTE_ADDR` carries a port | expected when the address came from the socket peer: it keeps the `ip:port` shape it arrived with. An address a trusted header named is a bare IP. Code that compares `REMOTE_ADDR` to a list of addresses should handle both |
 | `REMOTE_ADDR` is a forged value | the header being read is one the ingress passes through. Measure it with the throwaway route in that same section |
 | `request.is_secure()` is false behind TLS | `X-Forwarded-Proto` is not arriving from a trusted peer (or is not exactly `https`). Django also needs `SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")` |
 | `environ["SCRIPT_NAME"]` is empty but the app is mounted under a path | set `BLASTIT_SCRIPT_NAME`; blastit strips it before routing and passes it as `SCRIPT_NAME` |
