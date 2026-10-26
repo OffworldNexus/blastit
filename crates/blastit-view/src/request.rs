@@ -124,10 +124,12 @@ impl AppContext {
 /// The span of one request, measured two ways (D5).
 ///
 /// Started when the request thread picks the request up and stopped when its
-/// response ends, so it covers the WSGI call, the iteration of its iterable and
-/// the iterable's `close()` — which is what the scheduler charges. The
-/// scheduler clamps it against the time it observed itself, so a view process
-/// that lies here cannot buy its clients a bigger share of the queue.
+/// response ends, so it covers `serve_request`: the WSGI callable, the
+/// iteration of its iterable, the iterable's `close()` and the frames written
+/// back — which is what the scheduler charges. The scheduler clamps it against
+/// its own measurements (the time to this view's first frame, and the time it
+/// observed itself), so a view process that lies here cannot buy its clients a
+/// bigger share of the queue.
 pub(crate) struct Span {
     started: Instant,
     cpu_ns: Option<u64>,
@@ -143,13 +145,18 @@ impl Span {
     }
 
     /// Stop measuring, and report the wall and thread-CPU times.
+    ///
+    /// `cpu_ns` is `None` when this thread could not measure its own CPU time —
+    /// no `time.thread_time_ns`, or a reading that failed at one end of the
+    /// span. Absent is not zero: zero is a measurement, and this is the absence
+    /// of one ([`RequestCost::cpu_ns`]).
     pub(crate) fn stop(self, py: Python<'_>, ctx: &AppContext) -> RequestCost {
         let cpu_ns = match (self.cpu_ns, ctx.cpu_ns(py)) {
             // Both ends read: the difference is this thread's CPU time over
             // the span. The clock is monotonic, so it cannot go backwards;
             // `saturating_sub` is there for a platform that disagrees.
-            (Some(before), Some(after)) => after.saturating_sub(before),
-            _ => 0,
+            (Some(before), Some(after)) => Some(after.saturating_sub(before)),
+            _ => None,
         };
         RequestCost::new(
             u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX),
@@ -206,8 +213,9 @@ fn serve_request(
     id: u32,
 ) -> DoneOutcome {
     // D5: the measurement starts with the request thread's own work and ends
-    // when its response ends, so it covers the WSGI call, the iteration of its
-    // iterable and the iterable's `close()`.
+    // when its response ends, so it covers `serve_request` — the WSGI call, the
+    // iteration of its iterable, the iterable's `close()` and the frames this
+    // function writes back.
     let span = Span::start(py, ctx);
     let resp = Arc::new(Response::new(Arc::clone(writer), id, Arc::clone(state)));
     let input = match Bound::new(
@@ -402,8 +410,8 @@ mod tests {
     fn the_span_measures_wall_time_and_thread_cpu_time() {
         // D5: both numbers come from the same span, and the CPU one is this
         // thread's own clock. If the interpreter has no thread clock the view
-        // reports zero CPU time rather than a wrong one — which is why the
-        // assertion is conditional.
+        // reports *no* CPU time rather than a zero it did not measure — which is
+        // why the assertions are conditional.
         Python::attach(|py| {
             let ctx = AppContext {
                 app: py.None(),
@@ -421,17 +429,18 @@ mod tests {
             let cost = span.stop(py, &ctx);
             assert!(spin > 0);
             assert!(cost.wall_ns > 0, "wall time is always measurable");
-            assert!(
-                cost.cpu_ns <= cost.wall_ns,
-                "CPU time cannot exceed the wall time it happened in: {cost:?}"
-            );
             if raw {
-                assert!(cost.cpu_ns > 0, "the thread ran Python: {cost:?}");
+                let cpu_ns = cost.cpu_ns.expect("the interpreter has a thread clock");
+                assert!(
+                    cpu_ns <= cost.wall_ns,
+                    "CPU time cannot exceed the wall time it happened in: {cost:?}"
+                );
+                assert!(cpu_ns > 0, "the thread ran Python: {cost:?}");
             } else {
-                assert_eq!(cost.cpu_ns, 0, "no clock, no CPU time");
+                assert_eq!(cost.cpu_ns, None, "no clock, no CPU time");
             }
 
-            // A context with no clock at all reports zero CPU time and still
+            // A context with no clock at all reports no CPU time, and still
             // reports the wall time.
             let blind = AppContext {
                 app: py.None(),
@@ -442,7 +451,16 @@ mod tests {
             assert_eq!(blind.cpu_ns(py), None);
             let span = Span::start(py, &blind);
             let cost = span.stop(py, &blind);
-            assert_eq!(cost.cpu_ns, 0);
+            assert_eq!(cost.cpu_ns, None);
+            assert!(cost.wall_ns > 0, "wall time is measurable without a clock");
+
+            // Half a clock — the start read, the end not — claims nothing about
+            // the CPU either.
+            let half = Span {
+                started: std::time::Instant::now(),
+                cpu_ns: Some(1_000),
+            };
+            assert_eq!(half.stop(py, &blind).cpu_ns, None);
         });
     }
 }

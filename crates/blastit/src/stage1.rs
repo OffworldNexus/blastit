@@ -143,9 +143,9 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     // §8.1: a setting that is deprecated is the operator's to hear about, once,
     // and the log is the only place blastit can say it. The decision comes from
     // stage 0's parsing and the sentences name variables, never values.
-    for deprecation in &config.deprecations {
+    for warning in &config.warnings {
         emitter.emit(
-            &output_event(Component::Init, None, Stream::Stderr, deprecation.message())
+            &output_event(Component::Init, None, Stream::Stderr, warning.message())
                 .with_level(Level::Warn),
         );
     }

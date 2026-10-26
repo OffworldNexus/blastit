@@ -69,7 +69,7 @@ async fn three_clients(
     chains: (&str, &str, &str),
     header: &str,
 ) -> Vec<String> {
-    let cost = RequestCost::new(40_000_000, 20_000_000);
+    let cost = RequestCost::new(40_000_000, Some(20_000_000));
     let (first, second, third) = peers;
     let (first_chain, second_chain, third_chain) = chains;
     let gate = Arc::new(Semaphore::new(0));
@@ -175,7 +175,7 @@ async fn with_fair_queuing_on_a_blocked_head_does_not_hold_up_another_route() {
 /// Returns the world and the gate; `count` is how many *more* requests of A
 /// are queued.
 async fn burst_behind_one_held(fair: bool, count: u32) -> (World, Arc<Semaphore>) {
-    let cost = RequestCost::new(40_000_000, 20_000_000);
+    let cost = RequestCost::new(40_000_000, Some(20_000_000));
     let gate = Arc::new(Semaphore::new(0));
     let mut options = Options::new().script(0, reporting(b"ok", cost, gate.clone()));
     options.cfg.max_workers = 1;
@@ -269,7 +269,7 @@ async fn a_cheap_client_is_favoured_over_an_expensive_one() {
     // A holds the only slot and has queued a second request; B queues one of
     // its own. When A's first request ends — it cost 40ms — B goes first.
     let gate = Arc::new(Semaphore::new(0));
-    let cost = RequestCost::new(40_000_000, 20_000_000);
+    let cost = RequestCost::new(40_000_000, Some(20_000_000));
     let mut options = Options::new().script(0, reporting(b"ok", cost, gate.clone()));
     options.cfg.max_workers = 1;
     options.cfg.queue_timeout = Duration::from_secs(600);
@@ -302,6 +302,209 @@ async fn a_cheap_client_is_favoured_over_an_expensive_one() {
     }
 }
 
+/// `BLASTIT_FQ_DEBT_TTL` for the tests below: comfortably above the queue's own
+/// collection interval ([`blastit_scheduler::FAIR_GC_INTERVAL`]), so "inside the
+/// TTL" and "past the TTL" are two clearly different places on the paused clock.
+const DEBT_TTL: Duration = Duration::from_secs(3);
+
+/// What client A's first request costs: it is held for this long, so this is
+/// both what the view reports and what the scheduler observed, and the clamp
+/// therefore charges exactly it.
+const PAID: Duration = Duration::from_millis(40);
+
+/// Whether a client's debt is remembered across `gap`.
+///
+/// One client (A) spends 40ms of the worker's time on a first request and has
+/// nothing queued behind it; a third client (C) holds the only slot; then two
+/// clients queue — A again, and B, who has spent nothing. Who goes next is the
+/// answer: a flow that still owes time queues behind the client that has spent
+/// nothing, and one whose debt has been forgotten starts level with it.
+///
+/// `gap` is the idle time between A's first request ending and the two new ones
+/// arriving, as the queue's own clock — the scheduler's, not
+/// [`std::time::Instant::now`] — measures it.
+async fn debt_after(gap: Duration) -> Vec<String> {
+    let cost = RequestCost::new(PAID.as_nanos() as u64, Some(20_000_000));
+    let gate = Arc::new(Semaphore::new(0));
+    let mut options = Options::new().script(0, reporting(b"ok", cost, gate.clone()));
+    options.cfg.max_workers = 1;
+    options.cfg.queue_size = 64;
+    options.cfg.queue_timeout = Duration::from_secs(600);
+    options.cfg.fair_queuing = true;
+    options.cfg.fair.debt_ttl = DEBT_TTL;
+    let mut world = World::start(options);
+
+    // C holds the only slot, A's first request waits behind it.
+    world
+        .http
+        .send_request(1, head_from("GET", "/c/1", "10.9.0.1:1", None), b"")
+        .await;
+    world
+        .http
+        .send_request(2, head_from("GET", "/a/1", "10.0.0.1:1", None), b"")
+        .await;
+    world.until(|world| served(world, 0).len() == 1).await;
+
+    // C ends; A's first request goes out.
+    gate.add_permits(1);
+    world.until(|world| served(world, 0).len() == 2).await;
+
+    // A's first request is held for what it costs, so the charge is the report
+    // (the clamp is the observed time, and they are equal here).
+    world.advance(PAID).await;
+
+    // A's first request ends and pays; C's second is sent *after* the permit,
+    // so it can only be dispatched once A's slot has been released — seeing it
+    // in the log is what proves A's flow is idle again.
+    gate.add_permits(1);
+    world
+        .http
+        .send_request(3, head_from("GET", "/c/2", "10.9.0.1:1", None), b"")
+        .await;
+    world.until(|world| served(world, 0).len() == 3).await;
+
+    // The gap: the queue's clock moves, and its collection sweep with it.
+    world.advance(gap).await;
+
+    // A and B both queue behind C, which is still holding the slot.
+    world
+        .http
+        .send_request(4, head_from("GET", "/a/2", "10.0.0.1:1", None), b"")
+        .await;
+    world
+        .http
+        .send_request(5, head_from("GET", "/b/1", "10.1.0.1:1", None), b"")
+        .await;
+    world.advance(Duration::from_millis(1)).await;
+
+    // C ends; the walk picks between A's debt and B's clean slate.
+    gate.add_permits(1);
+    world.until(|world| served(world, 0).len() == 4).await;
+    served(&world, 0)
+}
+
+#[tokio::test]
+async fn a_flow_that_has_paid_is_remembered_until_the_debt_ttl() {
+    tokio::time::pause();
+    // Inside the TTL the flow still owes 40ms, so the client that has spent
+    // nothing goes first — on the queue's own clock, which is the one the
+    // scheduler stamped this flow with.
+    let order = debt_after(Duration::from_millis(100)).await;
+    assert_eq!(
+        order,
+        ["/c/1", "/a/1", "/c/2", "/b/1"],
+        "a debtor queues behind a client that has spent nothing ({order:?})"
+    );
+}
+
+#[tokio::test]
+async fn a_flow_that_has_paid_is_forgotten_after_the_debt_ttl() {
+    tokio::time::pause();
+    // Past the TTL (and past the queue's own collection interval) nothing
+    // remembers the flow: A's next request is a new flow, level with B's.
+    let order = debt_after(DEBT_TTL + Duration::from_secs(2)).await;
+    assert_eq!(
+        order,
+        ["/c/1", "/a/1", "/c/2", "/a/2"],
+        "the debt is gone, so A is not behind B any more ({order:?})"
+    );
+}
+
+#[tokio::test]
+async fn an_under_reporting_view_is_charged_at_least_until_its_first_frame() {
+    tokio::time::pause();
+    // A view that says a request cost it nothing, for a request the scheduler
+    // watched it take 5ms to answer. The report is what a compromised view
+    // would send to make its clients free, so it is clamped from below by the
+    // time up to the view's first response frame — the one part of the request
+    // it cannot hide without delaying its own client.
+    let cost = RequestCost::new(0, Some(7_000));
+    let gate = Arc::new(Semaphore::new(0));
+    let mut options = Options::new().script(0, reporting(b"ok", cost, gate.clone()));
+    options.cfg.fair_queuing = true;
+    let mut world = World::start(options);
+
+    world.http.send_request(1, head("GET", "/"), b"").await;
+    world.until(|world| served(world, 0).len() == 1).await;
+    world.advance(Duration::from_millis(5)).await;
+    gate.add_permits(1);
+    assert_eq!(body_of(&world.http.response(1).await), b"ok");
+    world
+        .until(|world| world.event_by_path("/").is_some())
+        .await;
+
+    let event = world.event_by_path("/").unwrap();
+    assert_eq!(event.status(), 200);
+    assert!(
+        event.cost_ns() >= 5_000_000,
+        "the report of 0 is not what was charged: {}ns",
+        event.cost_ns()
+    );
+    // The bound is still the scheduler's own observation: the floor cannot make
+    // the charge bigger than the request itself.
+    let bound = ((event.duration_ms() * 1_000_000.0).ceil() as u64)
+        .max(5_000_000)
+        .saturating_add(1);
+    assert!(
+        event.cost_ns() <= bound,
+        "{}ns charged for a {bound}ns request",
+        event.cost_ns()
+    );
+    assert_eq!(
+        event.cpu_ns(),
+        Some(7_000),
+        "the CPU time is still the view's own report"
+    );
+}
+
+#[tokio::test]
+async fn an_under_reporting_view_does_not_buy_its_client_priority() {
+    tokio::time::pause();
+    // The same under-reporting view, seen from the queue: A's first request
+    // took 5ms and was reported as free, so A's flow owes the floor. A client
+    // that has spent nothing still goes first — a compromised view cannot make
+    // its own clients free.
+    let cost = RequestCost::new(0, Some(0));
+    let gate = Arc::new(Semaphore::new(0));
+    let mut options = Options::new().script(0, reporting(b"ok", cost, gate.clone()));
+    options.cfg.max_workers = 1;
+    options.cfg.queue_timeout = Duration::from_secs(600);
+    options.cfg.fair_queuing = true;
+    let mut world = World::start(options);
+
+    world
+        .http
+        .send_request(1, head_from("GET", "/a/1", "10.0.0.1:1", None), b"")
+        .await;
+    world.until(|world| served(world, 0).len() == 1).await;
+
+    // A's second request queues behind the first, and B's behind that.
+    world
+        .http
+        .send_request(2, head_from("GET", "/a/2", "10.0.0.1:1", None), b"")
+        .await;
+    world
+        .http
+        .send_request(3, head_from("GET", "/b", "10.1.0.1:1", None), b"")
+        .await;
+    // The request takes 5ms, which is what its flow is charged whatever it
+    // reports.
+    world.advance(Duration::from_millis(5)).await;
+
+    gate.add_permits(1);
+    world.until(|world| served(world, 0).len() == 2).await;
+    assert_eq!(
+        served(&world, 0),
+        ["/a/1", "/b"],
+        "the client that has spent nothing goes first, reported cost or no cost"
+    );
+    gate.add_permits(2);
+    world.until(|world| served(world, 0).len() == 3).await;
+    for id in 1..=3 {
+        let _ = world.http.response(id).await;
+    }
+}
+
 #[tokio::test]
 async fn a_report_larger_than_the_observed_time_is_clamped() {
     tokio::time::pause();
@@ -310,7 +513,7 @@ async fn a_report_larger_than_the_observed_time_is_clamped() {
     // to buy its clients the whole queue. The view waits for a permit, so the
     // test decides how long the request takes: 5ms of the paused clock.
     for report in [10_000_000_000, u64::MAX] {
-        let cost = RequestCost::new(report, 3_000);
+        let cost = RequestCost::new(report, Some(3_000));
         let gate = Arc::new(Semaphore::new(0));
         let mut options = Options::new().script(0, reporting(b"ok", cost, gate.clone()));
         options.cfg.fair_queuing = true;
@@ -467,7 +670,7 @@ async fn do_connecting_ip_decides_the_client_on_app_platform() {
     // App Platform: the socket peer is a DigitalOcean ingress address and
     // `do-connecting-ip` is the one header the edge overwrites (see §10), so it
     // is the one blastit is configured to read.
-    let cost = RequestCost::new(40_000_000, 20_000_000);
+    let cost = RequestCost::new(40_000_000, Some(20_000_000));
     let gate = Arc::new(Semaphore::new(0));
     let mut options = Options::new().script(0, reporting(b"ok", cost, gate.clone()));
     options.cfg.max_workers = 1;

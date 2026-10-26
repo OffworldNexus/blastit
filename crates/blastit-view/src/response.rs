@@ -142,8 +142,9 @@ impl Response {
     /// `RESP_END` — or `RESP_END_COST` when the caller measured what the
     /// request cost (D5).
     ///
-    /// `cost` is the request thread's own measurement of the WSGI call, which
-    /// is the last frame of a response that was answered at all. It is
+    /// `cost` is the request thread's own measurement of `serve_request` — the
+    /// WSGI call through the iterable's `close()`, and the frames written back
+    /// — and it is the last frame of a response that was answered at all. It is
     /// deliberately not kept here: the scheduler treats it as untrusted and
     /// clamps it.
     pub(crate) fn finish(

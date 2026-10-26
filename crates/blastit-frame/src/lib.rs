@@ -73,8 +73,8 @@ mod testutil;
 mod wire;
 
 pub use crate::clientip::{
-    ClientIp, ClientIpConfig, ClientIpError, ClientIpSource, TrustedProxies, normalize_ip,
-    parse_addr,
+    ClientIp, ClientIpConfig, ClientIpError, ClientIpSource, TrustedProxies, is_header_name,
+    normalize_ip, parse_addr,
 };
 pub use crate::ctl::{Ctl, ExitStatus, MAX_SIGNAL, MIN_SIGNAL};
 pub use crate::decoder::Decoder;
@@ -156,10 +156,10 @@ mod tests {
                 outcome: DoneOutcome::Errored,
             },
             Frame::RespEndCost {
-                cost: RequestCost::new(12_500_000, 3_000_000),
+                cost: RequestCost::new(12_500_000, Some(3_000_000)),
             },
             Frame::RespEndCost {
-                cost: RequestCost::new(u64::MAX, 0),
+                cost: RequestCost::new(u64::MAX, Some(0)),
             },
             Frame::Ready,
             Frame::Window { bytes: 1 },
@@ -804,7 +804,7 @@ mod tests {
         // build from before D5, a response the I/O thread refused). The
         // scheduler must understand both, so both must round trip.
         let reported = Frame::RespEndCost {
-            cost: RequestCost::new(12_345_678, 1_234_567),
+            cost: RequestCost::new(12_345_678, Some(1_234_567)),
         };
         let bare = Frame::RespEnd;
         assert_eq!(reported.code(), TypeCode::RespEndCost.code());
@@ -819,21 +819,34 @@ mod tests {
             assert_eq!(decoder.next_frame().unwrap(), Some((9, frame.clone())));
         }
 
-        // The layout is fixed: `u64 wall_ns | u64 cpu_ns`. The report is the
-        // last frame of the response, so the scheduler charges the flow from
-        // it; the two wire forms have to be told apart by the type code alone.
+        // The layout is fixed: `u64 wall_ns | u8 cpu_present | [u64 cpu_ns]`. The
+        // report is the last frame of the response, so the scheduler charges the
+        // flow from it; the two wire forms have to be told apart by the type
+        // code alone, and a view with no CPU clock to read writes the short
+        // form of the report rather than a zero it did not measure.
         let mut wire = Vec::new();
         encode(&reported, 1, &mut wire).unwrap();
-        assert_eq!(wire.len(), HEADER_LEN + 8 + 8);
+        assert_eq!(wire.len(), HEADER_LEN + 8 + 1 + 8);
         assert_eq!(wire[4], TypeCode::RespEndCost.code());
+        let mut wire = Vec::new();
+        encode(
+            &Frame::RespEndCost {
+                cost: without_cpu(),
+            },
+            1,
+            &mut wire,
+        )
+        .unwrap();
+        assert_eq!(wire.len(), HEADER_LEN + 8 + 1, "no CPU time, no CPU field");
 
         // Zero is a legitimate measurement (a request that cost nothing
         // measurable), and so is the whole `u64` range.
         for cost in [
-            RequestCost::new(0, 0),
-            RequestCost::new(1, 0),
-            RequestCost::new(0, u64::MAX),
-            RequestCost::new(u64::MAX, u64::MAX),
+            RequestCost::new(0, Some(0)),
+            RequestCost::new(1, Some(0)),
+            RequestCost::new(0, Some(u64::MAX)),
+            RequestCost::new(u64::MAX, Some(u64::MAX)),
+            without_cpu(),
         ] {
             let frame = Frame::RespEndCost { cost };
             let mut wire = Vec::new();
@@ -844,16 +857,22 @@ mod tests {
         }
     }
 
+    /// A cost report from a view with no thread clock to read.
+    fn without_cpu() -> RequestCost {
+        RequestCost::new(12_345_678, None)
+    }
+
     #[test]
     fn a_truncated_cost_report_is_refused() {
-        // A `RESP_END_COST` payload is exactly 16 bytes; anything shorter is a
-        // broken frame rather than a request that cost nothing.
+        // A `RESP_END_COST` payload is exactly 9 or 17 bytes — a wall time, a
+        // presence byte, and the CPU time when there is one — so anything else
+        // is a broken frame rather than a request that cost nothing.
         let frame = Frame::RespEndCost {
-            cost: RequestCost::new(7, 8),
+            cost: RequestCost::new(7, Some(8)),
         };
         let payload = frame.to_raw(1).unwrap().payload;
-        assert_eq!(payload.len(), 16);
-        for len in [0usize, 1, 8, 15] {
+        assert_eq!(payload.len(), 17);
+        for len in [0usize, 1, 8, 9, 16] {
             let wire =
                 crate::testutil::frame_bytes(TypeCode::RespEndCost.code(), 1, &payload[..len]);
             let mut decoder = Decoder::new(Limits::default());
@@ -863,6 +882,21 @@ mod tests {
                 "a {len}-byte RESP_END_COST payload must not decode"
             );
         }
+
+        // A presence byte that is neither 0 nor 1 is a broken report, not a
+        // guess.
+        let mut bad = payload.clone();
+        bad[8] = 2;
+        let wire = crate::testutil::frame_bytes(TypeCode::RespEndCost.code(), 1, &bad);
+        let mut decoder = Decoder::new(Limits::default());
+        decoder.push(&wire);
+        assert_eq!(
+            decoder.next_frame().unwrap_err(),
+            FrameError::BadEnum {
+                field: "cpu_present",
+                value: 2
+            }
+        );
 
         // One byte too many is a broken frame too, not a cost report.
         let mut extra = payload.clone();
@@ -878,8 +912,9 @@ mod tests {
             }
         );
 
-        // ... and the kind is not a body frame: its payload is exactly two
-        // integers, so it cannot be smuggled past the expensive path either.
+        // ... and the kind is not a body frame: its payload is a wall time, a
+        // presence byte and at most one more integer, so it cannot be smuggled
+        // past the expensive path either.
         assert!(
             !Frame::RespEndCost {
                 cost: RequestCost::default()

@@ -474,16 +474,18 @@ impl RequestInfo {
     /// What the request cost the view process, in nanoseconds (D5).
     ///
     /// This is what the scheduler charged for the request: the view's own
-    /// measurement, clamped to the time the scheduler observed between
-    /// dispatch and completion, or that observed time when no report arrived.
+    /// measurement, clamped between the time up to the view's first response
+    /// frame and the time the scheduler observed between dispatch and
+    /// completion, or that observed time when no report arrived.
     pub fn cost_ns(&self) -> u64 {
         self.cost_ns
     }
 
     /// The view's thread CPU time over the request, when it reported one.
     ///
-    /// `None` means no `DONE_COST` arrived — a view built before D5, a crash, a
-    /// timeout, a cancellation — so nothing was measured on that side.
+    /// `None` means the end frame carried no `RESP_END_COST` — a view built
+    /// before D5, a crash, a timeout, a cancellation — or that the view had no
+    /// thread CPU clock to measure with, so nothing was measured on that side.
     pub fn cpu_ns(&self) -> Option<u64> {
         self.cpu_ns
     }
@@ -528,9 +530,10 @@ impl RequestInfo {
     /// Sets what the request cost the view process (D5), in nanoseconds.
     ///
     /// `cost_ns` is what the scheduler charged — the view's own measurement,
-    /// clamped to the time the scheduler observed, or the observed time when
-    /// there is no report at all. `cpu_ns` is the worker's thread CPU time over
-    /// the same span, or `None` when no report arrived.
+    /// clamped between the time to its first response frame and the observed
+    /// time, or the observed time when there is no report at all. `cpu_ns` is
+    /// the worker's thread CPU time over the same span, or `None` when it had
+    /// no measurement to report.
     #[must_use]
     pub fn with_cost(mut self, cost_ns: u64, cpu_ns: Option<u64>) -> Self {
         self.cost_ns = cost_ns;

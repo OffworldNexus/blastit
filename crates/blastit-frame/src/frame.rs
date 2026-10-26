@@ -291,22 +291,28 @@ impl DoneOutcome {
 ///
 /// The view is the only place that can measure this: the scheduler sees when a
 /// request was dispatched and when it ended, but not how much of that time the
-/// worker spent on it. Both numbers cover the same span — the WSGI call, the
-/// iteration of its iterable and the iterable's `close()` — and are
+/// worker spent on it. Both numbers cover the same span — one call of the WSGI
+/// callable through `serve_request`, its iterable's `close()` included — and are
 /// **untrusted**: a view process is sandboxed and may be compromised, so the
-/// scheduler clamps `wall_ns` to the time it observed itself.
+/// scheduler clamps `wall_ns` between the time to the view's first response
+/// frame and the time it observed itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord, Hash)]
 pub struct RequestCost {
     /// Wall time of the request in the view process, in nanoseconds.
     pub wall_ns: u64,
-    /// `CLOCK_THREAD_CPUTIME_ID` over the same span, in nanoseconds.
-    pub cpu_ns: u64,
+    /// `CLOCK_THREAD_CPUTIME_ID` over the same span, in nanoseconds, or `None`
+    /// when the interpreter had no thread clock to read.
+    ///
+    /// Absent is not the same as zero: a measurement of zero is a claim about
+    /// the request, and an interpreter without `time.thread_time_ns` makes no
+    /// claim at all.
+    pub cpu_ns: Option<u64>,
 }
 
 impl RequestCost {
     /// A cost measured as `wall_ns` of wall time and `cpu_ns` of thread CPU
-    /// time.
-    pub const fn new(wall_ns: u64, cpu_ns: u64) -> Self {
+    /// time (`None` when the view could not measure it).
+    pub const fn new(wall_ns: u64, cpu_ns: Option<u64>) -> Self {
         Self { wall_ns, cpu_ns }
     }
 }
@@ -455,8 +461,10 @@ pub enum Frame {
     /// view that measured the request sends this, one that has nothing to
     /// report sends `RESP_END`. The scheduler accepts both. The report is
     /// **untrusted** — a view process is sandboxed and may be compromised — so
-    /// it is clamped to the time the scheduler observed between dispatch and
-    /// completion.
+    /// [`RequestCost::wall_ns`] is clamped between the time up to the view's
+    /// first response frame and the time the scheduler observed between
+    /// dispatch and completion, and [`RequestCost::cpu_ns`] is only ever
+    /// reported, never scheduled on.
     RespEndCost {
         /// What the request cost the view process.
         cost: RequestCost,
@@ -627,7 +635,13 @@ impl Frame {
             }
             Self::RespEndCost { cost } => {
                 sink.put_u64(cost.wall_ns);
-                sink.put_u64(cost.cpu_ns);
+                match cost.cpu_ns {
+                    Some(cpu_ns) => {
+                        sink.put_u8(1);
+                        sink.put_u64(cpu_ns);
+                    }
+                    None => sink.put_u8(0),
+                }
                 Ok(())
             }
             Self::Window { bytes } => {
@@ -692,7 +706,16 @@ impl Frame {
             TypeCode::RespEndCost => Self::RespEndCost {
                 cost: RequestCost {
                     wall_ns: reader.u64("cost_ns")?,
-                    cpu_ns: reader.u64("cpu_ns")?,
+                    cpu_ns: match reader.u8("cpu_present")? {
+                        0 => None,
+                        1 => Some(reader.u64("cpu_ns")?),
+                        other => {
+                            return Err(FrameError::BadEnum {
+                                field: "cpu_present",
+                                value: u64::from(other),
+                            });
+                        }
+                    },
                 },
             },
             TypeCode::Ready => Self::Ready,

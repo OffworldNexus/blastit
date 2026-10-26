@@ -28,6 +28,9 @@
 //!   instead. Nothing falls through to another header, because "read every
 //!   plausible header until one parses" is a forgery amplifier, not a
 //!   fallback. An *empty* entry (`,,`) is skipped the way a list's noise is.
+//!   An entry is a bare address or a bracketed one — a chain entry is an
+//!   address, so `1.2.3.4:5678` is unparsable, exactly as the reference
+//!   implementation's `forwarded_chain` treats it, and the header is ignored.
 //! * IPv4-mapped IPv6 addresses (`::ffff:203.0.113.7`) are normalised to IPv4,
 //!   so a client that arrives as a mapped address is not a second client.
 
@@ -270,7 +273,8 @@ impl ClientIpConfig {
     /// The candidate addresses in this request's client-IP header, in the order
     /// they arrived.
     ///
-    /// `None` — "do not believe any of this" — when any entry is unparsable.
+    /// `None` — "do not believe any of this" — when any entry is not a chain
+    /// entry (see [`parse_chain_entry`]).
     fn chain(&self, headers: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<IpAddr>> {
         let mut chain = Vec::new();
         for value in header_values(headers, &self.header) {
@@ -282,8 +286,7 @@ impl ClientIpConfig {
                 if item.is_empty() {
                     continue;
                 }
-                let item = strip_brackets(item);
-                chain.push(parse_addr(item)?);
+                chain.push(parse_chain_entry(item)?);
             }
         }
         Some(chain)
@@ -350,6 +353,26 @@ fn strip_brackets(item: &str) -> &str {
         .unwrap_or(item)
 }
 
+/// One entry of a client-IP chain: a bare address, or an IPv6 literal in
+/// brackets, and nothing else.
+///
+/// An entry that is anything else — `1.2.3.4:5678`, `example.com`, `unknown`, a
+/// `Forwarded`-style `for=1.2.3.4` — is not a chain entry, and the whole header
+/// is then ignored (see the module documentation): reading half of a value we
+/// cannot read is how a forgery becomes an address. The reference
+/// implementation's `forwarded_chain` parses its entries as addresses for the
+/// same reason.
+///
+/// The *peer*, by contrast, arrives as an `ip:port` socket address and is read
+/// with [`parse_addr`]: the two are different things and are spelled
+/// differently on purpose.
+fn parse_chain_entry(item: &str) -> Option<IpAddr> {
+    strip_brackets(item)
+        .parse::<IpAddr>()
+        .ok()
+        .map(normalize_ip)
+}
+
 /// An `ip`, an `ip:port`, or a bracketed IPv6 with or without a port.
 pub fn parse_addr(text: &str) -> Option<IpAddr> {
     let text = text.trim();
@@ -412,7 +435,12 @@ fn masked_v6(ip: Ipv6Addr, prefix: u8) -> u128 {
 }
 
 /// Whether `name` can be a header field name on the wire (§3.1: an HTTP token).
-fn is_header_name(name: &str) -> bool {
+///
+/// The same check serves a cookie name, which is a token too (RFC 6265): the
+/// fair queue's `BLASTIT_FQ_INNER_HEADERS` and `BLASTIT_FQ_INNER_COOKIES` are
+/// lists of these, so init can reject a name that could never match a request
+/// instead of hashing a name nothing will ever send.
+pub fn is_header_name(name: &str) -> bool {
     !name.is_empty()
         && name.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
@@ -551,6 +579,13 @@ mod tests {
             "203.0.113.5, ,not-an-ip",
             "203.0.113.5,garbage",
             "203.0.113.5:70000",
+            // A port, even a valid one: a chain entry is an address, and
+            // believing the address of something that is not one is reading
+            // half a value we cannot read.
+            "203.0.113.5:80",
+            "203.0.113.5, 198.51.100.9:80",
+            "[2001:db8::1]:80, 203.0.113.5",
+            "for=203.0.113.5",
             "",
             " ",
         ] {

@@ -721,8 +721,9 @@ fn a_read_timeout_on_the_channel_is_retried() {
 #[test]
 fn a_response_reports_what_the_request_cost_the_view() {
     // D5: the request thread is the only place that can measure the cost, so
-    // it reports both numbers — the wall time of the WSGI call and its own
-    // thread CPU time — in the last frame of the response.
+    // it reports both numbers — the wall time of the WSGI call through
+    // `serve_request`, and its own thread CPU time — in the last frame of the
+    // response.
     let mut harness = Harness::for_route("web", support::load_app("cost", &hello_app("measured")));
     assert_eq!(harness.expect_frame(), (0, Frame::Ready));
 
@@ -734,13 +735,12 @@ fn a_response_reports_what_the_request_cost_the_view() {
     assert_eq!(response.end, End::End);
     let cost = cost.expect("the view measured the request");
     assert!(cost.wall_ns > 0, "the wall time is always measurable");
+    let cpu_ns = cost
+        .cpu_ns
+        .expect("CPython's time.thread_time_ns is CLOCK_THREAD_CPUTIME_ID");
+    assert!(cpu_ns > 0, "and this request ran Python");
     assert!(
-        cost.cpu_ns > 0,
-        "CPython's time.thread_time_ns is CLOCK_THREAD_CPUTIME_ID, and this \
-         request ran Python"
-    );
-    assert!(
-        cost.cpu_ns <= cost.wall_ns,
+        cpu_ns <= cost.wall_ns,
         "CPU time cannot exceed wall time: {cost:?}"
     );
     assert_eq!(harness.expect_done(1), DoneOutcome::Completed);

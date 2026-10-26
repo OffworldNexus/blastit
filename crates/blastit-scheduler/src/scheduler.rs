@@ -89,16 +89,19 @@
 //!
 //! The cost a fair flow is charged comes from the view process — the only
 //! place that can measure it — in the `RESP_END_COST` frame, which is the
-//! response's last frame in its second wire form: the wall time of the WSGI
-//! call (through the iterable's `close()`) and the thread's CPU time over the
-//! same span. The report is untrusted: a view is sandboxed and may be
-//! compromised, so it is clamped to the wall time the scheduler itself observed
-//! between dispatch and completion, and a request whose end frame carries no
-//! report (an older build, a timeout, a cancellation, a view that died)
-//! charges the observed time instead. The event keeps both numbers as `cost_ns`
-//! (what was charged) and `cpu_ns` (what the worker reported), and it is still
-//! emitted when the scheduler learns the request ended — at `RESP_END` for a
-//! response, at release for everything else.
+//! response's last frame in its second wire form: the wall time of
+//! `serve_request` (the WSGI call through the iterable's `close()`, and the
+//! frames written back) and the thread's CPU time over the same span. The
+//! report is untrusted: a view is sandboxed and may be compromised, so it is
+//! clamped **between** the time up to the view's first response frame — which
+//! it cannot shorten without delaying its own client — **and** the wall time
+//! the scheduler itself observed between dispatch and completion; a request
+//! whose end frame carries no report (an older build, a timeout, a
+//! cancellation, a view that died) charges the observed time instead. The
+//! event keeps both numbers as `cost_ns` (what was charged) and `cpu_ns` (what
+//! the worker reported, `null` when it had no thread clock to read), and it is
+//! still emitted when the scheduler learns the request ended — at `RESP_END`
+//! for a response, at release for everything else.
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
@@ -120,7 +123,7 @@ use tokio::time::Instant;
 use crate::config::{FAIR_GC_INTERVAL, SchedulerConfig, derived_view_cap, nanos};
 use crate::ctl::CtlChannel;
 use crate::error::SchedulerError;
-use crate::fair::{Cost, FairQueue, FlowRef};
+use crate::fair::{Cost, FairQueue, FlowRef, NextFlow};
 use crate::path::{
     is_control_byte, normalize_script_name, path_of_target, percent_decode, strip_script_name,
 };
@@ -292,18 +295,31 @@ impl Admission {
     ///
     /// A FIFO queue has no flows, so this is `None` there and the caller
     /// carries nothing it will not need.
-    fn resolve(&mut self, peer: &str, headers: &[(Vec<u8>, Vec<u8>)]) -> Option<FlowRef> {
-        self.fair_mut().map(|queue| queue.resolve(peer, headers))
+    ///
+    /// `now` is the scheduler's clock, converted once: the queue stamps
+    /// `last_active` from the same clock its eviction rules read, so an idle
+    /// flow's debt ages against the clock the scheduler actually uses (a paused
+    /// one in a test, the wall clock in production) instead of against
+    /// [`std::time::Instant::now`] behind its back.
+    fn resolve(
+        &mut self,
+        peer: &str,
+        headers: &[(Vec<u8>, Vec<u8>)],
+        now: Instant,
+    ) -> Option<FlowRef> {
+        self.fair_mut()
+            .map(|queue| queue.resolve(peer, headers, now.into_std()))
     }
 
     /// Queue a request that is waiting for `route`.
-    fn push(&mut self, stream_id: u32, route: u32, flow: Option<FlowRef>) {
+    fn push(&mut self, stream_id: u32, route: u32, flow: Option<FlowRef>, now: Instant) {
         match self {
             Self::Fifo(queue) => queue.push_back(stream_id),
             Self::Fair(queue) => queue.push(
                 stream_id,
                 route,
                 flow.unwrap_or_else(FairQueue::overflow_flow),
+                now.into_std(),
             ),
         }
     }
@@ -359,9 +375,9 @@ impl Admission {
         }
     }
 
-    /// The request that goes next for `route`, and the budget its flow has
-    /// spent (D5).
-    fn peek(&self, route: u32) -> Option<(u64, u32)> {
+    /// The request that goes next for `route`, and the flow it belongs to
+    /// (D5).
+    fn peek(&self, route: u32) -> Option<NextFlow> {
         self.fair()?.peek(route)
     }
 
@@ -445,10 +461,12 @@ struct Request {
     /// once, when the request is released.
     flow: Option<FlowRef>,
     /// The view's own measurement of what this request cost it (D5), from the
-    /// `DONE_COST` frame. Untrusted: [`Scheduler::charge`] clamps it.
+    /// `RESP_END_COST` frame. Untrusted: [`Scheduler::charge`] clamps it
+    /// between the view's first frame and the time the scheduler observed.
     report: Option<RequestCost>,
     /// What was charged to the flow for this request, in nanoseconds: the
-    /// clamped report, or the time the scheduler observed itself. This is the
+    /// reported cost clamped between the view's first frame and the observed
+    /// time, or the observed time when there was no report. This is the
     /// `cost_ns` of the `request` event (§8.1).
     charged_ns: u64,
     /// The flow has been charged for this request. Exactly one of the response
@@ -458,6 +476,10 @@ struct Request {
     /// which is where `duration_ms` stops even though the event waits for the
     /// `DONE` that carries the cost report (D5).
     finished_at: Option<Instant>,
+    /// When the view sent its first response frame (D5): the floor under what
+    /// this request may be charged, because it is the one part of the request
+    /// the view cannot shorten without making its own client wait.
+    head_at: Option<Instant>,
     /// A `RESP_HEAD` was forwarded to http.
     head_sent: bool,
     /// The response to http is over (`RESP_END`, `RESP_ABORT` or a status the
@@ -898,6 +920,9 @@ impl Scheduler {
             )));
         }
         let request_id = self.next_request_id();
+        // The event's one clock: `arrived` and the flow the queue stamps are
+        // read from it, so a request cannot age against two clocks at once.
+        let now = Instant::now();
         let mut request = Request {
             stream_id,
             request_id,
@@ -905,7 +930,7 @@ impl Scheduler {
             route: None,
             rule: None,
             path_info: None,
-            arrived: Instant::now(),
+            arrived: now,
             queued_since: None,
             dispatched_at: None,
             deadline: None,
@@ -922,6 +947,7 @@ impl Scheduler {
             charged_ns: 0,
             charged: false,
             finished_at: None,
+            head_at: None,
             head_sent: false,
             complete: false,
             emitted: false,
@@ -969,10 +995,12 @@ impl Scheduler {
                 request.path_info = Some(path_info);
                 // D5: the flow is resolved once per request, from the raw peer
                 // and the headers, and it is the *same* resolution the front
-                // end used for `REMOTE_ADDR`.
-                request.flow = self
-                    .queue
-                    .resolve(&request.head.peer_addr, &request.head.headers);
+                // end used for `REMOTE_ADDR`. The queue is given this event's
+                // clock, so what it stamps and what it later compares are one
+                // clock.
+                request.flow =
+                    self.queue
+                        .resolve(&request.head.peer_addr, &request.head.headers, now);
                 self.requests.insert(stream_id, request);
                 let retry_after = retry_after_seconds(self.cfg.queue_timeout);
                 if self.draining {
@@ -1048,6 +1076,7 @@ impl Scheduler {
     /// Puts a request in the admission queue: at the back of the FIFO, or into
     /// its flow (D5).
     fn enqueue(&mut self, stream_id: u32) {
+        let now = Instant::now();
         let route = self
             .requests
             .get(&stream_id)
@@ -1059,9 +1088,9 @@ impl Scheduler {
             .get(&stream_id)
             .and_then(|request| request.flow);
         if let Some(request) = self.requests.get_mut(&stream_id) {
-            request.queued_since = Some(Instant::now());
+            request.queued_since = Some(now);
         }
-        self.queue.push(stream_id, route, flow);
+        self.queue.push(stream_id, route, flow, now);
     }
 
     /// Records request body bytes: forwards them when the request is
@@ -1243,12 +1272,20 @@ impl Scheduler {
     /// A route whose view is not ready — or not spawned yet — never holds up
     /// another route: the choice is made among the routes that *can* dispatch,
     /// and a route whose spawn is in flight is simply not one of them yet.
+    ///
+    /// The candidates are compared by their flow's two-level virtual time, in
+    /// the same order the route's own backlog uses: the outer flow's `used`
+    /// first, then the inner flow's. An outer flow belongs to the *queue*, not
+    /// to a route — one client's budget is one number however many routes it has
+    /// work for — so `(outer.used, inner.used)` is the same key in-route and
+    /// across routes, and the route index is only the last tiebreak, where the
+    /// in-route order breaks ties on the flow keys.
     fn dispatch_queued_fair(&mut self) -> Result<(), SchedulerError> {
         loop {
             if self.slots >= self.cfg.max_workers {
                 return Ok(());
             }
-            let mut best: Option<(u64, u32, u32)> = None;
+            let mut best: Option<(NextFlow, u32)> = None;
             for route in self.queue.routes() {
                 if !self.can_dispatch(route as usize) {
                     if !self.views.contains_key(&(route as usize)) && !self.draining {
@@ -1256,17 +1293,20 @@ impl Scheduler {
                     }
                     continue;
                 }
-                if let Some((used, stream_id)) = self.queue.peek(route) {
-                    let better = match best {
-                        Some((best_used, best_route, _)) => (used, route) < (best_used, best_route),
-                        None => true,
-                    };
-                    if better {
-                        best = Some((used, route, stream_id));
+                let Some(next) = self.queue.peek(route) else {
+                    continue;
+                };
+                let better = match &best {
+                    Some((best, best_route)) => {
+                        (next.outer, next.inner, route) < (best.outer, best.inner, *best_route)
                     }
+                    None => true,
+                };
+                if better {
+                    best = Some((next, route));
                 }
             }
-            let Some((_, route, _)) = best else {
+            let Some((_, route)) = best else {
                 return Ok(());
             };
             // Take it out of the order, and advance the queue's clock to it:
@@ -1294,6 +1334,7 @@ impl Scheduler {
     /// back of its own queue, which is where a request of that flow that took
     /// no time belongs.
     fn requeue(&mut self, stream_id: u32) {
+        let now = Instant::now();
         let route = self
             .requests
             .get(&stream_id)
@@ -1304,7 +1345,7 @@ impl Scheduler {
             .requests
             .get(&stream_id)
             .and_then(|request| request.flow);
-        self.queue.push(stream_id, route, flow);
+        self.queue.push(stream_id, route, flow, now);
     }
 
     /// Hands one request to its view, rewriting its id (§3.1).
@@ -2191,13 +2232,20 @@ impl Scheduler {
 
     /// What this request cost, and what the flow is charged for it (D5).
     ///
-    /// The cost is the view's own report when there is one, **clamped** to the
-    /// time the scheduler observed between dispatch and completion: a view
-    /// process is sandboxed and may be compromised, and a report that claims
-    /// more time than the request could possibly have taken is a report that
-    /// would let one client buy the whole queue. With no report — the view
-    /// crashed, timed out, was cancelled, the client went away, or the view was
-    /// built before D5 — the observed time is charged instead.
+    /// The cost is the view's own report when there is one, **clamped** into
+    /// `[floor, observed]`, where `observed` is the time the scheduler saw
+    /// between dispatch and completion and `floor` the time up to the view's
+    /// first response frame. Both bounds are the scheduler's own measurements,
+    /// and both are needed because a view process is sandboxed and may be
+    /// compromised: a report that claims more time than the request could
+    /// possibly have taken would let one client buy the whole queue, and a
+    /// report of nothing would let it keep its place at the front for free —
+    /// while the floor is exactly the time the view cannot hide, because
+    /// shortening it means delaying its own client's response.
+    ///
+    /// With no report — the view crashed, timed out, was cancelled, the client
+    /// went away, or the view was built before D5 — the observed time is charged
+    /// instead.
     ///
     /// It is idempotent, and it is called from two places: at the response end
     /// — with the report when the view sent one, with the observed time when it
@@ -2210,13 +2258,24 @@ impl Scheduler {
         if request.charged {
             return;
         }
+        let now = Instant::now();
         let observed = request
             .dispatched_at
-            .map(|since| Instant::now().duration_since(since))
+            .map(|since| now.duration_since(since))
             .map(nanos)
             .unwrap_or(0);
+        let floor = match (request.dispatched_at, request.head_at) {
+            // Dispatch to the view's first frame: the view's own work on the
+            // request, which it cannot hide without delaying its client.
+            (Some(dispatched), Some(head)) => head.duration_since(dispatched),
+            _ => Duration::ZERO,
+        };
+        let floor = nanos(floor)
+            // A clock that cannot go backwards still cannot make the floor the
+            // ceiling: `clamp` would panic on `floor > observed`.
+            .min(observed);
         let charged = match request.report {
-            Some(report) => report.wall_ns.min(observed),
+            Some(report) => report.wall_ns.clamp(floor, observed),
             None => observed,
         };
         let flow = request.flow;
@@ -2267,7 +2326,9 @@ impl Scheduler {
         .with_remote_addr(request.head.remote_addr.clone())
         .with_cost(
             request.charged_ns,
-            request.report.map(|report| report.cpu_ns),
+            // The view's own CPU measurement, when it could take one: absent is
+            // not the same as zero (§8.1).
+            request.report.and_then(|report| report.cpu_ns),
         );
         if let Some(rule) = request.rule {
             info = info.with_rule(rule);
@@ -2375,6 +2436,10 @@ impl Scheduler {
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.status = head.status;
             request.head_sent = true;
+            // D5: the first frame the view produced is the floor of what its
+            // request may be charged — the view cannot shorten that without
+            // delaying its own response.
+            request.head_at = Some(Instant::now());
         }
         self.http_push(stream_id, Frame::RespHead(head))
     }
@@ -2409,9 +2474,10 @@ impl Scheduler {
     /// `RESP_END` from a view: the response is complete, the slot is not.
     ///
     /// `cost` is the view's report for this request (D5) when it sent one: the
-    /// wall time of the WSGI call — through the iterable's `close()` — and the
-    /// thread's CPU time over the same span. It is untrusted, so
-    /// [`Scheduler::charge`] clamps it before anything is scheduled on it.
+    /// wall time of `serve_request` — the WSGI call, through the iterable's
+    /// `close()`, and the frames written back — and the thread's CPU time over
+    /// the same span. It is untrusted, so [`Scheduler::charge`] clamps it
+    /// between the view's first frame and the time the scheduler observed.
     ///
     /// A response that streams is charged here, when its stream ends, which is
     /// exactly when the report arrives.

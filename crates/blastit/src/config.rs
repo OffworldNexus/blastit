@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use blastit_events::Level;
-use blastit_frame::{ClientIpConfig, Limits, TrustedProxies};
+use blastit_frame::{ClientIpConfig, Limits, TrustedProxies, is_header_name};
 use blastit_scheduler::{
     FQ_BURST_DEFAULT, FQ_DEBT_TTL_DEFAULT, FQ_INNER_COOKIES_DEFAULT, FQ_INNER_HEADERS_DEFAULT,
     FQ_INNER_MAX_DEFAULT, FQ_INNER_MAX_PER_OUTER_DEFAULT, FQ_MAX_DEBT_DEFAULT,
@@ -36,6 +36,14 @@ use thiserror::Error;
 /// the `the_default_trusted_proxies_are_the_resolver_s` test keeps the two from
 /// drifting apart.
 pub const TRUSTED_PROXIES_DEFAULT: &[&str] = &["127.0.0.1", "::1"];
+
+/// §8.2's floor for `BLASTIT_FQ_DEBT_TTL` (D5).
+///
+/// A debt TTL shorter than this — and shorter than
+/// [`blastit_scheduler::FAIR_GC_INTERVAL`] in particular — would be a TTL that
+/// expires between two of the queue's own collection sweeps, so a shorter value
+/// is read as this one, with a warning at boot.
+pub const MIN_DEBT_TTL: Duration = Duration::from_secs(1);
 
 /// Where init prints its event stream (§8.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,37 +116,57 @@ impl Immortalize {
     }
 }
 
-/// A setting that is still read but must not be used any more (§8.2, D5).
+/// A notice about the configuration, for stage 1 to print once (§8.1, D5).
 ///
+/// Two things are worth a line at boot: a variable that is still read but must
+/// not be used any more, and a value blastit had to adjust to something usable.
 /// The stage 1 document carries the token and stage 1 prints the sentence: the
 /// document describes the configuration, and the wording of a log line belongs
 /// with the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Deprecation {
+pub enum Warning {
     /// `BLASTIT_TRUST_FORWARDED` was set to a true value, and is read as
     /// `BLASTIT_TRUSTED_PROXIES=*` — which is what it always meant: the last
     /// entry of anybody's `X-Forwarded-For`.
-    TrustedByEveryone,
+    TrustForwardedAny,
     /// `BLASTIT_TRUST_FORWARDED` was set to a false value, and is read as an
     /// empty `BLASTIT_TRUSTED_PROXIES` — no peer is trusted, as before.
-    TrustedByNoOne,
+    TrustForwardedNone,
     /// `BLASTIT_TRUST_FORWARDED` was set as well as `BLASTIT_TRUSTED_PROXIES`,
     /// and is ignored: the new variable is the one that configures the
     /// resolver.
-    Ignored,
+    TrustForwardedIgnored,
+    /// `BLASTIT_FQ_OUTER_PREFIX_V4` was longer than an IPv4 address.
+    OuterPrefixV4Clamped,
+    /// `BLASTIT_FQ_OUTER_PREFIX_V6` was longer than an IPv6 address.
+    OuterPrefixV6Clamped,
+    /// `BLASTIT_FQ_OUTER_MAX` was zero.
+    OuterMaxClamped,
+    /// `BLASTIT_FQ_INNER_MAX_PER_OUTER` was zero.
+    InnerMaxPerOuterClamped,
+    /// `BLASTIT_FQ_INNER_MAX` was zero.
+    InnerMaxClamped,
+    /// `BLASTIT_FQ_DEBT_TTL` was shorter than a second.
+    DebtTtlFloored,
 }
 
-impl Deprecation {
+impl Warning {
     /// The `snake_case` token the stage 1 document carries.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::TrustedByEveryone => "trust_forwarded_any",
-            Self::TrustedByNoOne => "trust_forwarded_none",
-            Self::Ignored => "trust_forwarded_ignored",
+            Self::TrustForwardedAny => "trust_forwarded_any",
+            Self::TrustForwardedNone => "trust_forwarded_none",
+            Self::TrustForwardedIgnored => "trust_forwarded_ignored",
+            Self::OuterPrefixV4Clamped => "outer_prefix_v4_clamped",
+            Self::OuterPrefixV6Clamped => "outer_prefix_v6_clamped",
+            Self::OuterMaxClamped => "outer_max_clamped",
+            Self::InnerMaxPerOuterClamped => "inner_max_per_outer_clamped",
+            Self::InnerMaxClamped => "inner_max_clamped",
+            Self::DebtTtlFloored => "debt_ttl_floored",
         }
     }
 
-    /// The token back to a deprecation.
+    /// The token back to a warning.
     ///
     /// # Errors
     ///
@@ -146,32 +174,62 @@ impl Deprecation {
     /// a document stage 0 did not write.
     pub fn parse(token: &str) -> Result<Self, ConfigError> {
         match token {
-            "trust_forwarded_any" => Ok(Self::TrustedByEveryone),
-            "trust_forwarded_none" => Ok(Self::TrustedByNoOne),
-            "trust_forwarded_ignored" => Ok(Self::Ignored),
-            other => Err(document("deprecations", format!("unknown token `{other}`"))),
+            "trust_forwarded_any" => Ok(Self::TrustForwardedAny),
+            "trust_forwarded_none" => Ok(Self::TrustForwardedNone),
+            "trust_forwarded_ignored" => Ok(Self::TrustForwardedIgnored),
+            "outer_prefix_v4_clamped" => Ok(Self::OuterPrefixV4Clamped),
+            "outer_prefix_v6_clamped" => Ok(Self::OuterPrefixV6Clamped),
+            "outer_max_clamped" => Ok(Self::OuterMaxClamped),
+            "inner_max_per_outer_clamped" => Ok(Self::InnerMaxPerOuterClamped),
+            "inner_max_clamped" => Ok(Self::InnerMaxClamped),
+            "debt_ttl_floored" => Ok(Self::DebtTtlFloored),
+            other => Err(document("warnings", format!("unknown token `{other}`"))),
         }
     }
 
-    /// The line to print for this deprecation (§8.1).
+    /// The line to print for this warning (§8.1).
     ///
     /// It names the variables and never a value, so an operator can act on it
     /// without the log saying what they configured.
     pub const fn message(self) -> &'static str {
         match self {
-            Self::TrustedByEveryone => {
+            Self::TrustForwardedAny => {
                 "BLASTIT_TRUST_FORWARDED is deprecated (D5): it is read as \
                  BLASTIT_TRUSTED_PROXIES=*, which trusts every peer, as it always did. \
                  Use BLASTIT_CLIENT_IP_HEADER with BLASTIT_TRUSTED_PROXIES"
             }
-            Self::TrustedByNoOne => {
+            Self::TrustForwardedNone => {
                 "BLASTIT_TRUST_FORWARDED is deprecated (D5): it is read as an empty \
                  BLASTIT_TRUSTED_PROXIES, which trusts no peer, as it always did. \
                  Use BLASTIT_CLIENT_IP_HEADER with BLASTIT_TRUSTED_PROXIES"
             }
-            Self::Ignored => {
+            Self::TrustForwardedIgnored => {
                 "BLASTIT_TRUST_FORWARDED is deprecated (D5) and is ignored because \
                  BLASTIT_TRUSTED_PROXIES is set: remove it"
+            }
+            Self::OuterPrefixV4Clamped => {
+                "BLASTIT_FQ_OUTER_PREFIX_V4 is longer than an IPv4 address, and is read \
+                 as 32"
+            }
+            Self::OuterPrefixV6Clamped => {
+                "BLASTIT_FQ_OUTER_PREFIX_V6 is longer than an IPv6 address, and is read \
+                 as 128"
+            }
+            Self::OuterMaxClamped => {
+                "BLASTIT_FQ_OUTER_MAX is 0, and is read as 1: every client would share \
+                 the overflow flow otherwise"
+            }
+            Self::InnerMaxPerOuterClamped => {
+                "BLASTIT_FQ_INNER_MAX_PER_OUTER is 0, and is read as 1: every client of \
+                 an outer flow would share its overflow flow otherwise"
+            }
+            Self::InnerMaxClamped => {
+                "BLASTIT_FQ_INNER_MAX is 0, and is read as 1: every client would share \
+                 the overflow flow otherwise"
+            }
+            Self::DebtTtlFloored => {
+                "BLASTIT_FQ_DEBT_TTL is shorter than a second, and is read as 1s: a \
+                 flow that owes time is remembered at least that long"
             }
         }
     }
@@ -311,13 +369,13 @@ pub struct Config {
     /// anything resolves with, and it parses this list the same way on both
     /// sides.
     pub trusted_proxies: Vec<String>,
-    /// Settings that are still read but must not be used any more, for stage 1
-    /// to report once (D5).
+    /// Notices about the configuration itself, for stage 1 to print once (D5).
     ///
-    /// A deprecated variable is translated rather than silently honoured, and
-    /// this is what says so: the sentences are built by blastit and name
+    /// A deprecated variable is translated rather than silently honoured, and a
+    /// value that is out of range is clamped rather than refused; this is what
+    /// says which happened. The sentences are built by blastit and name
     /// variables, never values (§8.1).
-    pub deprecations: Vec<Deprecation>,
+    pub warnings: Vec<Warning>,
     /// `BLASTIT_HEALTH_PATH`.
     pub health_path: String,
     /// `BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS`, by lower-cased proxy name.
@@ -415,7 +473,7 @@ impl Default for Config {
                 .iter()
                 .map(|entry| (*entry).to_string())
                 .collect(),
-            deprecations: Vec::new(),
+            warnings: Vec::new(),
             health_path: "/_blastit/health".to_string(),
             proxy_max_connections: BTreeMap::new(),
             env_strip: None,
@@ -653,7 +711,7 @@ impl Config {
             config.fq_inner_include_ip,
             parse_bool,
         )?;
-        let (client_ip_header, trusted_proxies, deprecations) = client_ip_settings(
+        let (client_ip_header, trusted_proxies, warnings) = client_ip_settings(
             variable("BLASTIT_CLIENT_IP_HEADER")?,
             variable("BLASTIT_TRUSTED_PROXIES")?,
             variable("BLASTIT_TRUST_FORWARDED")?,
@@ -662,7 +720,7 @@ impl Config {
         )?;
         config.client_ip_header = client_ip_header;
         config.trusted_proxies = trusted_proxies;
-        config.deprecations = deprecations;
+        config.warnings = warnings;
         if let Some(value) = variable("BLASTIT_HEALTH_PATH")?.filter(|value| !value.is_empty()) {
             config.health_path = value;
         }
@@ -703,12 +761,13 @@ impl Config {
         Ok(config)
     }
 
-    /// Checks the combinations of values that only make sense together.
+    /// Checks the combinations of values that only make sense together, and
+    /// clamps the ones that have a usable nearest value (§8.2, D5).
     ///
     /// # Errors
     ///
     /// [`ConfigError`] naming a variable.
-    pub fn validate(&self) -> Result<(), ConfigError> {
+    pub fn validate(&mut self) -> Result<(), ConfigError> {
         if self.max_workers == 0 {
             return Err(invalid(
                 "BLASTIT_MAX_WORKERS",
@@ -783,38 +842,27 @@ impl Config {
                 "must be `module:callable`".to_string(),
             ));
         }
-        // D5: the fair queue's knobs only mean something once they can be
-        // satisfied. A prefix longer than the family's address would put every
-        // client in one flow while looking like a per-client rule, and a table
-        // that holds nothing would send every client to the overflow flow.
-        if usize::from(self.fq_outer_prefix_v4) > 32 {
-            return Err(invalid(
-                "BLASTIT_FQ_OUTER_PREFIX_V4",
-                "must be a prefix length between 0 and 32".to_string(),
-            ));
-        }
-        if usize::from(self.fq_outer_prefix_v6) > 128 {
-            return Err(invalid(
-                "BLASTIT_FQ_OUTER_PREFIX_V6",
-                "must be a prefix length between 0 and 128".to_string(),
-            ));
-        }
-        for (variable, value) in [
-            ("BLASTIT_FQ_OUTER_MAX", self.fq_outer_max),
-            (
-                "BLASTIT_FQ_INNER_MAX_PER_OUTER",
-                self.fq_inner_max_per_outer,
-            ),
-            ("BLASTIT_FQ_INNER_MAX", self.fq_inner_max),
+        // D5: the fair queue's knobs are clamped to something usable rather than
+        // refused, the way the reference implementation does it — a /33 prefix is
+        // a /32, and a table that holds nothing is a table that holds one — and
+        // the operator is told once at boot.
+        self.clamp_fair_queue();
+        // A name that can never match a request is a setting that does nothing:
+        // the fair queue's header and cookie lists are tokens (§3.1), so a name
+        // with a space, a colon or a control byte in it is refused rather than
+        // hashed into a key nothing will ever produce.
+        for (variable, kind, names) in [
+            ("BLASTIT_FQ_INNER_HEADERS", "header", &self.fq_inner_headers),
+            ("BLASTIT_FQ_INNER_COOKIES", "cookie", &self.fq_inner_cookies),
         ] {
-            if value == 0 {
+            if names.iter().any(|name| !is_header_name(name)) {
                 return Err(invalid(
                     variable,
-                    "must be at least 1, or every client would share the overflow flow".to_string(),
+                    format!("every entry must be a {kind} name, never a value"),
                 ));
             }
         }
-        if ClientIpConfig::new(&self.client_ip_header, &[] as &[&str]).is_err() {
+        if !is_header_name(&self.client_ip_header) {
             return Err(invalid(
                 "BLASTIT_CLIENT_IP_HEADER",
                 "must be a header name, without its colon".to_string(),
@@ -830,6 +878,42 @@ impl Config {
     /// budget when that is unset (§8.2).
     pub fn view_worker_cap(&self) -> u32 {
         self.view_max_workers.unwrap_or(self.max_workers)
+    }
+
+    /// Brings the `BLASTIT_FQ_*` knobs into the range the queue can use (D5).
+    ///
+    /// Each of these has an obvious nearest usable value — a prefix cannot be
+    /// longer than the address it masks, a table cannot hold zero flows, and a
+    /// debt TTL shorter than a second is a TTL that expires between two checks
+    /// — so a value out of range is adjusted, not refused: a server that will
+    /// not start over a prefix length is worse than one that starts and says
+    /// what it did ([`Config::warnings`], printed once at boot).
+    fn clamp_fair_queue(&mut self) {
+        if self.fq_outer_prefix_v4 > 32 {
+            self.fq_outer_prefix_v4 = 32;
+            self.warnings.push(Warning::OuterPrefixV4Clamped);
+        }
+        if self.fq_outer_prefix_v6 > 128 {
+            self.fq_outer_prefix_v6 = 128;
+            self.warnings.push(Warning::OuterPrefixV6Clamped);
+        }
+        for (value, warning) in [
+            (&mut self.fq_outer_max, Warning::OuterMaxClamped),
+            (
+                &mut self.fq_inner_max_per_outer,
+                Warning::InnerMaxPerOuterClamped,
+            ),
+            (&mut self.fq_inner_max, Warning::InnerMaxClamped),
+        ] {
+            if *value == 0 {
+                *value = 1;
+                self.warnings.push(warning);
+            }
+        }
+        if self.fq_debt_ttl < MIN_DEBT_TTL {
+            self.fq_debt_ttl = MIN_DEBT_TTL;
+            self.warnings.push(Warning::DebtTtlFloored);
+        }
     }
 
     /// The one client-IP resolver, for the front end and the scheduler (D5).
@@ -1051,11 +1135,11 @@ impl Config {
             ),
         );
         object.insert(
-            "deprecations".into(),
+            "warnings".into(),
             Value::Array(
-                self.deprecations
+                self.warnings
                     .iter()
-                    .map(|deprecation| Value::from(deprecation.as_str()))
+                    .map(|warning| Value::from(warning.as_str()))
                     .collect(),
             ),
         );
@@ -1178,10 +1262,10 @@ impl Config {
         config.fq_inner_include_ip = json_bool(value, "fq_inner_include_ip")?;
         config.client_ip_header = json_string(value, "client_ip_header")?;
         config.trusted_proxies = json_string_list(value, "trusted_proxies")?;
-        config.deprecations = json_string_list(value, "deprecations")?
+        config.warnings = json_string_list(value, "warnings")?
             .iter()
-            .map(|token| Deprecation::parse(token))
-            .collect::<Result<Vec<Deprecation>, ConfigError>>()?;
+            .map(|token| Warning::parse(token))
+            .collect::<Result<Vec<Warning>, ConfigError>>()?;
         config.health_path = json_string(value, "health_path")?;
         let connections = value
             .get("proxy_max_connections")
@@ -1376,7 +1460,7 @@ fn parse_u8(name: &str, value: &str) -> Result<u8, ConfigError> {
 /// anybody's `X-Forwarded-For`. Either way the operator is told to move on, and
 /// a `BLASTIT_TRUSTED_PROXIES` that is also set wins, with a warning saying so.
 ///
-/// No deprecation is reported here for a value that is not a boolean at all:
+/// No warning is reported here for a value that is not a boolean at all:
 /// [`parse_bool`] rejects it and the error names the variable.
 fn client_ip_settings(
     header: Option<String>,
@@ -1384,26 +1468,26 @@ fn client_ip_settings(
     legacy: Option<String>,
     default_header: &str,
     default_trusted: &[String],
-) -> Result<(String, Vec<String>, Vec<Deprecation>), ConfigError> {
+) -> Result<(String, Vec<String>, Vec<Warning>), ConfigError> {
     let header = match header {
         Some(value) => parse_client_ip_header(&value)?,
         None => default_header.to_string(),
     };
-    let mut deprecations = Vec::new();
+    let mut warnings = Vec::new();
     let trusted = match trusted {
         Some(value) => {
             if legacy.is_some() {
-                deprecations.push(Deprecation::Ignored);
+                warnings.push(Warning::TrustForwardedIgnored);
             }
             parse_trusted_proxies(&value)?
         }
         None => match legacy {
             Some(value) => {
                 let trust = parse_bool("BLASTIT_TRUST_FORWARDED", &value)?;
-                deprecations.push(if trust {
-                    Deprecation::TrustedByEveryone
+                warnings.push(if trust {
+                    Warning::TrustForwardedAny
                 } else {
-                    Deprecation::TrustedByNoOne
+                    Warning::TrustForwardedNone
                 });
                 if trust {
                     vec!["*".to_string()]
@@ -1414,13 +1498,13 @@ fn client_ip_settings(
             None => default_trusted.to_vec(),
         },
     };
-    Ok((header, trusted, deprecations))
+    Ok((header, trusted, warnings))
 }
 
 /// `BLASTIT_CLIENT_IP_HEADER`: a header name, lower-cased.
 fn parse_client_ip_header(value: &str) -> Result<String, ConfigError> {
     let header = value.trim().to_ascii_lowercase();
-    if ClientIpConfig::new(&header, &[] as &[&str]).is_err() {
+    if !is_header_name(&header) {
         return Err(invalid(
             "BLASTIT_CLIENT_IP_HEADER",
             "must be a header name, without its colon".to_string(),
@@ -1916,7 +2000,7 @@ mod tests {
         config.fq_inner_include_ip = false;
         config.client_ip_header = "do-connecting-ip".to_string();
         config.trusted_proxies = vec!["10.0.0.0/8".to_string(), "*".to_string()];
-        config.deprecations = vec![Deprecation::TrustedByEveryone];
+        config.warnings = vec![Warning::TrustForwardedAny];
         config.sys_path = vec![
             b"/app".to_vec(),
             b"/app/.venv/lib/python3.14/site-packages".to_vec(),
@@ -2072,7 +2156,7 @@ mod tests {
         assert_eq!(config.client_ip_header, "x-forwarded-for");
         assert_eq!(config.trusted_proxies, ["127.0.0.1", "::1"]);
         assert!(
-            config.deprecations.is_empty(),
+            config.warnings.is_empty(),
             "nothing is deprecated by default"
         );
     }
@@ -2137,15 +2221,37 @@ mod tests {
             assert_eq!(fair.inner_headers, ["user-agent", "x-api-key"]);
             assert!(!fair.inner_include_ip);
 
+            // Out-of-range values are clamped, not refused, and the boot
+            // warning says so (D5, as the reference implementation does).
             std::env::set_var("BLASTIT_FQ_OUTER_PREFIX_V4", "33");
-            let err = Config::from_env().unwrap_err();
-            assert!(
-                err.to_string().contains("BLASTIT_FQ_OUTER_PREFIX_V4"),
-                "{err}"
-            );
-            std::env::set_var("BLASTIT_FQ_OUTER_PREFIX_V4", "16");
-
             std::env::set_var("BLASTIT_FQ_INNER_MAX", "0");
+            std::env::set_var("BLASTIT_FQ_DEBT_TTL", "250ms");
+            let clamped = Config::from_env().unwrap();
+            assert_eq!(clamped.fq_outer_prefix_v4, 32);
+            assert_eq!(clamped.fq_inner_max, 1);
+            assert_eq!(clamped.fq_debt_ttl, MIN_DEBT_TTL);
+            assert_eq!(
+                clamped.warnings,
+                vec![
+                    Warning::OuterPrefixV4Clamped,
+                    Warning::InnerMaxClamped,
+                    Warning::DebtTtlFloored
+                ]
+            );
+            for warning in &clamped.warnings {
+                assert!(
+                    warning.message().contains("BLASTIT_FQ_"),
+                    "the warning names the variable: {:?}",
+                    warning.message()
+                );
+            }
+            std::env::set_var("BLASTIT_FQ_OUTER_PREFIX_V4", "16");
+            std::env::set_var("BLASTIT_FQ_INNER_MAX", "9");
+            std::env::set_var("BLASTIT_FQ_DEBT_TTL", "2m");
+
+            // A value that is not a number at all *is* refused: there is no
+            // nearest usable value to a word.
+            std::env::set_var("BLASTIT_FQ_INNER_MAX", "many");
             let err = Config::from_env().unwrap_err();
             assert!(err.to_string().contains("BLASTIT_FQ_INNER_MAX"), "{err}");
             std::env::set_var("BLASTIT_FQ_INNER_MAX", "9");
@@ -2292,12 +2398,12 @@ mod tests {
                 ip("1.2.3.4")
             );
             assert_eq!(
-                config.deprecations,
-                vec![Deprecation::TrustedByNoOne],
+                config.warnings,
+                vec![Warning::TrustForwardedNone],
                 "`0` is translated, and said out loud"
             );
             assert!(
-                Deprecation::TrustedByNoOne.message().contains("deprecated"),
+                Warning::TrustForwardedNone.message().contains("deprecated"),
                 "the message names the variable and its replacement"
             );
 
@@ -2307,16 +2413,16 @@ mod tests {
             std::env::set_var("BLASTIT_TRUST_FORWARDED", "1");
             let config = Config::from_env().unwrap();
             assert_eq!(config.trusted_proxies, ["*"]);
-            assert_eq!(config.deprecations, vec![Deprecation::TrustedByEveryone]);
+            assert_eq!(config.warnings, vec![Warning::TrustForwardedAny]);
             assert!(config.client_ip().trusted.is_any());
 
             // The new variable wins, and says so.
             std::env::set_var("BLASTIT_TRUSTED_PROXIES", "10.0.0.0/8");
             let config = Config::from_env().unwrap();
             assert_eq!(config.trusted_proxies, ["10.0.0.0/8"]);
-            assert_eq!(config.deprecations, vec![Deprecation::Ignored]);
+            assert_eq!(config.warnings, vec![Warning::TrustForwardedIgnored]);
             assert!(
-                Deprecation::Ignored.message().contains("ignored"),
+                Warning::TrustForwardedIgnored.message().contains("ignored"),
                 "an ignored setting is named as ignored"
             );
 
@@ -2332,41 +2438,145 @@ mod tests {
     }
 
     #[test]
-    fn the_configuration_deprecations_travel_to_stage_1() {
+    fn a_fair_queue_entry_that_is_not_a_name_is_refused() {
+        // §3.1: a header name is a token, and so is a cookie name (RFC 6265). An
+        // entry that is a *value* — or that carries a space or a colon — would
+        // be hashed against a name no request can have, so it is refused rather
+        // than quietly doing nothing.
+        let mut config = Config::default();
+        for bad in [
+            "user agent",
+            "user-agent:",
+            "a=b",
+            "",
+            "a\nb",
+            "Bearer s3cret",
+            "cookie=sessionid",
+        ] {
+            config.fq_inner_headers = vec![bad.to_string()];
+            let err = config.validate().unwrap_err();
+            assert!(
+                err.to_string().contains("BLASTIT_FQ_INNER_HEADERS"),
+                "{bad:?}: {err}"
+            );
+            assert!(err.to_string().contains("header name"), "{bad:?}: {err}");
+        }
+        for bad in ["session id", "sessionid=", "sessionid; Path=/", ""] {
+            config.fq_inner_headers = vec!["user-agent".to_string()];
+            config.fq_inner_cookies = vec![bad.to_string()];
+            let err = config.validate().unwrap_err();
+            assert!(
+                err.to_string().contains("BLASTIT_FQ_INNER_COOKIES"),
+                "{bad:?}: {err}"
+            );
+            assert!(err.to_string().contains("cookie name"), "{bad:?}: {err}");
+        }
+
+        // The names HTTP actually uses pass, including the defaults and the
+        // empty-but-for-that case of hashing no header at all.
+        config.fq_inner_headers = vec!["x-api-key".to_string(), "sec-ch-ua".to_string()];
+        config.fq_inner_cookies = vec!["sessionid".to_string(), "csrf.token".to_string()];
+        config.validate().unwrap();
+        config.fq_inner_headers = Vec::new();
+        config.fq_inner_cookies = Vec::new();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn the_fair_queue_knobs_are_clamped_and_reported() {
+        // D5, as the reference implementation does it: a prefix that cannot be
+        // longer than the address it masks, a table that holds nothing, and a
+        // debt TTL under a second all have a nearest usable value, so none of
+        // them stops the server from starting.
+        let mut config = Config::default();
+        config.fq_outer_prefix_v4 = 33;
+        config.fq_outer_prefix_v6 = 129;
+        config.fq_outer_max = 0;
+        config.fq_inner_max_per_outer = 0;
+        config.fq_inner_max = 0;
+        config.fq_debt_ttl = Duration::from_millis(250);
+        config.validate().unwrap();
+        assert_eq!(config.fq_outer_prefix_v4, 32);
+        assert_eq!(config.fq_outer_prefix_v6, 128);
+        assert_eq!(config.fq_outer_max, 1);
+        assert_eq!(config.fq_inner_max_per_outer, 1);
+        assert_eq!(config.fq_inner_max, 1);
+        assert_eq!(config.fq_debt_ttl, MIN_DEBT_TTL);
+        assert_eq!(
+            config.warnings,
+            vec![
+                Warning::OuterPrefixV4Clamped,
+                Warning::OuterPrefixV6Clamped,
+                Warning::OuterMaxClamped,
+                Warning::InnerMaxPerOuterClamped,
+                Warning::InnerMaxClamped,
+                Warning::DebtTtlFloored,
+            ]
+        );
+        // The queue is configured with the clamped values, not with the raw
+        // ones, and clamping is not a way of turning fair queuing on.
+        let fair = config.fair_config();
+        assert_eq!(fair.outer_prefix_v4, 32);
+        assert_eq!(fair.outer_max, 1);
+        assert_eq!(fair.debt_ttl, MIN_DEBT_TTL);
+        assert!(!config.fair_queuing);
+
+        // In range, or exactly on the boundary, nothing is adjusted and
+        // nothing is reported.
+        let mut config = Config::default();
+        config.fq_debt_ttl = MIN_DEBT_TTL;
+        config.fq_outer_prefix_v4 = 32;
+        config.fq_outer_prefix_v6 = 128;
+        config.validate().unwrap();
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.fq_outer_prefix_v6, 128);
+    }
+
+    #[test]
+    fn the_configuration_warnings_travel_to_stage_1() {
         // The document is what stage 1 reads, and it is stage 1 that prints the
         // warning (§8.1), so the decision has to survive the round trip.
         let mut config = Config::default();
-        config.deprecations = vec![Deprecation::Ignored];
+        config.warnings = vec![Warning::TrustForwardedIgnored, Warning::DebtTtlFloored];
         let json = config.to_json();
         assert_eq!(
-            json["deprecations"],
-            serde_json::json!(["trust_forwarded_ignored"])
+            json["warnings"],
+            serde_json::json!(["trust_forwarded_ignored", "debt_ttl_floored"])
         );
-        assert_eq!(
-            Config::from_json(&json).unwrap().deprecations,
-            config.deprecations
-        );
+        assert_eq!(Config::from_json(&json).unwrap().warnings, config.warnings);
 
         // Every token round-trips, and a token this build does not know is a
         // document error that names the field.
-        for deprecation in [
-            Deprecation::TrustedByEveryone,
-            Deprecation::TrustedByNoOne,
-            Deprecation::Ignored,
+        for warning in [
+            Warning::TrustForwardedAny,
+            Warning::TrustForwardedNone,
+            Warning::TrustForwardedIgnored,
         ] {
-            assert_eq!(
-                Deprecation::parse(deprecation.as_str()).unwrap(),
-                deprecation
-            );
+            assert_eq!(Warning::parse(warning.as_str()).unwrap(), warning);
             assert!(
-                deprecation.message().contains("BLASTIT_TRUST_FORWARDED")
-                    && deprecation.message().contains("BLASTIT_TRUSTED_PROXIES"),
+                warning.message().contains("BLASTIT_TRUST_FORWARDED")
+                    && warning.message().contains("BLASTIT_TRUSTED_PROXIES"),
                 "the message says what to do instead"
             );
         }
+        for warning in [
+            Warning::OuterPrefixV4Clamped,
+            Warning::OuterPrefixV6Clamped,
+            Warning::OuterMaxClamped,
+            Warning::InnerMaxPerOuterClamped,
+            Warning::InnerMaxClamped,
+            Warning::DebtTtlFloored,
+        ] {
+            assert_eq!(Warning::parse(warning.as_str()).unwrap(), warning);
+            assert!(
+                warning.message().contains("BLASTIT_FQ_") && warning.message().contains("read as"),
+                "the message says what it was read as: {:?}",
+                warning.message()
+            );
+        }
         let mut json = json;
-        json["deprecations"] = serde_json::json!(["something_else"]);
+        json["warnings"] = serde_json::json!(["something_else"]);
         let err = Config::from_json(&json).unwrap_err();
-        assert!(err.to_string().contains("deprecations"), "{err}");
+        assert!(err.to_string().contains("warnings"), "{err}");
     }
 }

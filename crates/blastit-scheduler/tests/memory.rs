@@ -142,18 +142,31 @@ async fn a_busy_view_is_never_retired_for_memory() {
         .until(|world| world.log.lock().unwrap().spawns == vec![0])
         .await;
     usage.store(500 * MIB, Ordering::Relaxed);
-    // Past several 2 s memory checks, and *inside* the 30 s request timeout: a
-    // request in flight here is not one this test wants to see expire.
-    world.advance(Duration::from_secs(25)).await;
+    // Well past the 30 s request timeout *and* past several 2 s memory checks:
+    // the client has been answered a `504`, but the thread is still running.
+    world.advance(Duration::from_secs(35)).await;
 
-    // §8 Sizing retires *idle* views: a request in flight is not one, and the
-    // scheduler would rather be over the watermark than fail that request.
+    // §8 Sizing retires *idle* views, and this one is not idle: a request is
+    // still in flight, and its slot stays taken until the thread exits (§2.4) —
+    // even though the request is overdue. The scheduler would rather be over the
+    // watermark than retire the process that is running it.
     assert!(world.log.lock().unwrap().retires.is_empty(), "still busy");
+    assert_eq!(
+        status_of(&world.http.response(1).await),
+        504,
+        "the client was told, without the thread being killed"
+    );
 
-    // Once it is idle, the next check takes it.
+    // The thread finally ends: the view answers (the frames are dropped — the
+    // client already has its `504`) and its `DONE` releases the slot. The check
+    // after that one sees an idle view, still over the watermark.
     gate.add_permits(1);
-    assert_eq!(body_of(&world.http.response(1).await), b"a");
-    world.advance(Duration::from_secs(3)).await;
+    for _ in 0..4 {
+        world.advance(Duration::from_secs(2)).await;
+        if !world.log.lock().unwrap().retires.is_empty() {
+            break;
+        }
+    }
     assert_eq!(
         world.log.lock().unwrap().retires,
         vec![(0, "memory_pressure".to_string())]

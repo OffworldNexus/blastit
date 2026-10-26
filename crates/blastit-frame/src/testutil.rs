@@ -113,13 +113,13 @@ pub fn client_exchange() -> (Vec<u8>, Vec<(u32, Frame)>) {
         (
             1,
             Frame::RespEndCost {
-                cost: RequestCost::new(12_500_000, 3_000_000),
+                cost: RequestCost::new(12_500_000, Some(3_000_000)),
             },
         ),
         (
             2,
             Frame::RespEndCost {
-                cost: RequestCost::new(0, 0),
+                cost: RequestCost::new(0, Some(0)),
             },
         ),
         (

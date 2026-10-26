@@ -35,6 +35,15 @@
 //! left to serve, as is one that has been idle for `BLASTIT_FQ_DEBT_TTL`:
 //! without that, the tables would hold every client that ever connected.
 //!
+//! # One clock
+//!
+//! Every method that needs the time of day takes it as an argument, and the
+//! scheduler converts its own clock once per event (`Instant::now()` on tokio's
+//! clock, `.into_std()`). Nothing in here reads a clock of its own, so the
+//! instant a flow is stamped with and the instant its idleness is measured
+//! against are always the same clock — the paused one a test drives, or the
+//! wall clock in production.
+//!
 //! # Bounded tables
 //!
 //! Both levels are bounded (`BLASTIT_FQ_OUTER_MAX`,
@@ -265,6 +274,21 @@ struct Entry {
     flow: FlowRef,
 }
 
+/// The request that goes next for one route, and what its flow has spent.
+///
+/// Two `used` numbers rather than one, because the order is two-level: a
+/// caller deciding between routes compares `outer` first and `inner` second,
+/// which is exactly what the route's own backlog does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NextFlow {
+    /// The outer flow's virtual time.
+    pub(crate) outer: u64,
+    /// The inner flow's virtual time.
+    pub(crate) inner: u64,
+    /// The request itself.
+    pub(crate) stream_id: u32,
+}
+
 /// The two-level fair queue (see the module documentation).
 ///
 /// A `FairQueue` only decides *order*: which of the queued requests goes next.
@@ -337,18 +361,24 @@ impl FairQueue {
         self.entries.keys().copied().collect()
     }
 
-    /// The flow of the request that goes next for `route`, and the budget it
-    /// has spent — the two-level "lowest `used` first" choice.
+    /// The flow of the request that goes next for `route` — the two-level
+    /// "lowest `used` first" choice.
     ///
-    /// The inner flow's `used` is what a request's place in the order is: the
-    /// budget its flow has spent, and the one number that compares across
-    /// routes.
-    pub(crate) fn peek(&self, route: u32) -> Option<(u64, u32)> {
-        let (_, outer_key) = *self.root_backlog.get(&route)?.iter().next()?;
+    /// Both levels are reported, because both are what the order is made of:
+    /// the outer flow's `used` is the client's budget, the inner flow's is the
+    /// one behind NAT, and the route's own backlog compares them in that order
+    /// (`OuterBacklog`, then `InnerBacklog`), so a caller comparing candidates
+    /// across routes uses the same key.
+    pub(crate) fn peek(&self, route: u32) -> Option<NextFlow> {
+        let (outer_used, outer_key) = *self.root_backlog.get(&route)?.iter().next()?;
         let outer = self.outers.get(&outer_key)?;
-        let (used, inner_key) = *outer.backlog.get(&route)?.iter().next()?;
+        let (inner_used, inner_key) = *outer.backlog.get(&route)?.iter().next()?;
         let stream_id = *outer.inners.get(&inner_key)?.queues.get(&route)?.front()?;
-        Some((used, stream_id))
+        Some(NextFlow {
+            outer: outer_used,
+            inner: inner_used,
+            stream_id,
+        })
     }
 
     /// Take the next request for `route`, and move the queue's clock to it.
@@ -373,11 +403,14 @@ impl FairQueue {
     }
 
     /// Queue `stream_id`, which is waiting for `route` in `flow`.
-    pub(crate) fn push(&mut self, stream_id: u32, route: u32, flow: FlowRef) {
+    ///
+    /// `now` is the caller's clock, the same one [`FairQueue::debit`],
+    /// [`FairQueue::release`] and [`FairQueue::gc`] are given: what is stamped
+    /// here is what those rules compare against.
+    pub(crate) fn push(&mut self, stream_id: u32, route: u32, flow: FlowRef, now: Instant) {
         let FlowRef { outer, inner } = flow;
         let v = self.v;
         let burst = self.cfg.burst_ns();
-        let now = Instant::now();
 
         let outer_flow = self
             .outers
@@ -609,8 +642,15 @@ impl FairQueue {
     /// This also counts the request as **admitted**: the flow is held until
     /// [`FairQueue::release`] is called for it, which is what keeps a flow that
     /// is being served from being collected.
-    pub(crate) fn resolve(&mut self, peer: &str, headers: &[(Vec<u8>, Vec<u8>)]) -> FlowRef {
-        let now = Instant::now();
+    ///
+    /// `now` is the caller's clock, the one [`FairQueue::release`] and
+    /// [`FairQueue::gc`] compare `last_active` against.
+    pub(crate) fn resolve(
+        &mut self,
+        peer: &str,
+        headers: &[(Vec<u8>, Vec<u8>)],
+        now: Instant,
+    ) -> FlowRef {
         let burst = self.cfg.burst_ns();
         let Some(ip) = self.cfg.client_ip.resolve(peer, headers).map(|c| c.ip()) else {
             // Not an address at all: the overflow flow is exactly where
@@ -829,10 +869,17 @@ mod tests {
         format!("{ip}:41234")
     }
 
+    /// One instant, taken once: the unit tests read the real clock, and a
+    /// request's resolve and push have to be the same reading of it.
+    fn now() -> Instant {
+        Instant::now()
+    }
+
     /// Queue one request and return its flow.
     fn push(queue: &mut FairQueue, stream_id: u32, route: u32, ip: &str) -> FlowRef {
-        let flow = queue.resolve(&peer(ip), &client(ip));
-        queue.push(stream_id, route, flow);
+        let at = now();
+        let flow = queue.resolve(&peer(ip), &client(ip), at);
+        queue.push(stream_id, route, flow, at);
         flow
     }
 
@@ -854,9 +901,9 @@ mod tests {
     #[test]
     fn requests_within_one_flow_stay_in_arrival_order() {
         let mut queue = queue();
-        let flow = queue.resolve(&peer("10.0.0.1"), &client("10.0.0.1"));
+        let flow = queue.resolve(&peer("10.0.0.1"), &client("10.0.0.1"), Instant::now());
         for stream_id in 0..5 {
-            queue.push(stream_id, 0, flow);
+            queue.push(stream_id, 0, flow, Instant::now());
         }
         let served: Vec<u32> = (0..5).map(|_| queue.pop(0).unwrap()).collect();
         assert_eq!(served, vec![0, 1, 2, 3, 4]);
@@ -868,13 +915,13 @@ mod tests {
         let browser_a = vec![(b"user-agent".to_vec(), b"browser-a".to_vec())];
         let browser_b = vec![(b"user-agent".to_vec(), b"browser-b".to_vec())];
 
-        let a = queue.resolve(&peer("10.0.0.1"), &browser_a);
-        let b = queue.resolve(&peer("10.0.0.1"), &browser_b);
+        let a = queue.resolve(&peer("10.0.0.1"), &browser_a, Instant::now());
+        let b = queue.resolve(&peer("10.0.0.1"), &browser_b, Instant::now());
         assert_eq!(a.outer, b.outer, "one outer flow");
         assert_ne!(a.inner, b.inner, "two browsers, two inner flows");
 
-        queue.push(1, 0, a);
-        queue.push(2, 0, b);
+        queue.push(1, 0, a, Instant::now());
+        queue.push(2, 0, b, Instant::now());
         queue.debit(&a, Cost(50_000_000), Instant::now());
         assert_eq!(queue.pop(0), Some(2), "b has spent nothing");
         assert_eq!(queue.pop(0), Some(1));
@@ -901,8 +948,12 @@ mod tests {
         let route1 = push(&mut queue, 2, 1, "10.1.0.1");
         assert_eq!(queue.routes(), vec![0, 1]);
         queue.debit(&route0, Cost(10_000_000), Instant::now());
-        assert_eq!(queue.peek(0).unwrap().1, 1);
-        assert_eq!(queue.peek(1).unwrap().1, 2);
+        // Both levels are reported, and the one that decides is the outer
+        // flow's: route 0's client has spent 10ms, so route 1 goes first.
+        assert_eq!(queue.peek(0).unwrap().stream_id, 1);
+        assert_eq!(queue.peek(0).unwrap().outer, 10_000_000);
+        assert_eq!(queue.peek(1).unwrap().stream_id, 2);
+        assert_eq!(queue.peek(1).unwrap().outer, 0);
         assert_eq!(queue.pop(1), Some(2), "route 1's flow has spent nothing");
         assert_eq!(queue.pop(0), Some(1));
         let _ = route1;
@@ -913,8 +964,8 @@ mod tests {
         let mut queue = queue();
         push(&mut queue, 1, 0, "10.0.0.1");
         push(&mut queue, 2, 1, "10.0.0.1");
-        assert_eq!(queue.peek(1), Some((0, 2)));
-        assert_eq!(queue.peek(0), Some((0, 1)));
+        assert_eq!(queue.peek(1).unwrap().stream_id, 2);
+        assert_eq!(queue.peek(0).unwrap().stream_id, 1);
         assert_eq!(queue.pop(1), Some(2));
         assert_eq!(queue.pop(1), None, "route 1 has nothing left");
         assert_eq!(queue.pop(0), Some(1));
@@ -925,9 +976,9 @@ mod tests {
         let mut cfg = FairConfig::default();
         cfg.outer_max = 1;
         let mut queue = FairQueue::new(cfg);
-        let a = queue.resolve(&peer("10.0.0.1"), &[]);
-        let b = queue.resolve(&peer("10.1.0.1"), &[]);
-        let c = queue.resolve(&peer("10.2.0.1"), &[]);
+        let a = queue.resolve(&peer("10.0.0.1"), &[], Instant::now());
+        let b = queue.resolve(&peer("10.1.0.1"), &[], Instant::now());
+        let c = queue.resolve(&peer("10.2.0.1"), &[], Instant::now());
         assert_ne!(a.outer, b.outer);
         assert_eq!(b.outer, c.outer, "the second and later share the overflow");
         assert_eq!(b.outer, OVERFLOW_OUTER);
@@ -940,8 +991,8 @@ mod tests {
 
         // ... and one flow queued twice is served in arrival order, because
         // everything that lands in the same flow is one client.
-        queue.push(1, 0, b);
-        queue.push(2, 0, b);
+        queue.push(1, 0, b, Instant::now());
+        queue.push(2, 0, b, Instant::now());
         assert_eq!(queue.pop(0), Some(1));
         assert_eq!(queue.pop(0), Some(2));
         assert_eq!(queue.pop(0), None);
@@ -956,9 +1007,9 @@ mod tests {
         let b = vec![(b"user-agent".to_vec(), b"b".to_vec())];
         let c = vec![(b"user-agent".to_vec(), b"c".to_vec())];
 
-        let first = queue.resolve(&peer("10.0.0.1"), &a);
-        let second = queue.resolve(&peer("10.0.0.1"), &b);
-        let third = queue.resolve(&peer("10.0.0.1"), &c);
+        let first = queue.resolve(&peer("10.0.0.1"), &a, Instant::now());
+        let second = queue.resolve(&peer("10.0.0.1"), &b, Instant::now());
+        let third = queue.resolve(&peer("10.0.0.1"), &c, Instant::now());
         assert_ne!(first.inner, second.inner);
         assert_eq!(second.inner, INNER_OVERFLOW);
         assert_eq!(third.inner, INNER_OVERFLOW);
@@ -968,9 +1019,9 @@ mod tests {
         let mut cfg = FairConfig::default();
         cfg.inner_max = 1;
         let mut queue = FairQueue::new(cfg);
-        let one = queue.resolve(&peer("10.0.0.1"), &a);
-        let two = queue.resolve(&peer("10.0.0.2"), &b);
-        let three = queue.resolve(&peer("10.0.0.1"), &a);
+        let one = queue.resolve(&peer("10.0.0.1"), &a, Instant::now());
+        let two = queue.resolve(&peer("10.0.0.2"), &b, Instant::now());
+        let three = queue.resolve(&peer("10.0.0.1"), &a, Instant::now());
         assert_eq!(one.inner, three.inner, "an existing inner flow is kept");
         assert_eq!(two.inner, INNER_OVERFLOW);
     }
@@ -978,19 +1029,19 @@ mod tests {
     #[test]
     fn an_unreadable_peer_shares_the_overflow_flow() {
         let mut queue = queue();
-        let unnamed = queue.resolve("not-an-address", &[]);
+        let unnamed = queue.resolve("not-an-address", &[], Instant::now());
         assert_eq!(unnamed.outer, OVERFLOW_OUTER);
         assert_eq!(unnamed.inner, INNER_OVERFLOW);
-        let also = queue.resolve("", &[]);
+        let also = queue.resolve("", &[], Instant::now());
         assert_eq!(also, unnamed, "one flow for everything unreadable");
     }
 
     #[test]
     fn the_outer_key_is_the_configured_prefix() {
         let mut queue = queue();
-        let a = queue.resolve(&peer("203.0.113.7"), &[]);
-        let b = queue.resolve(&peer("203.0.113.200"), &[]);
-        let c = queue.resolve(&peer("203.0.114.7"), &[]);
+        let a = queue.resolve(&peer("203.0.113.7"), &[], Instant::now());
+        let b = queue.resolve(&peer("203.0.113.200"), &[], Instant::now());
+        let c = queue.resolve(&peer("203.0.114.7"), &[], Instant::now());
         assert_eq!(a.outer, b.outer, "one /24");
         assert_ne!(a.outer, c.outer);
         assert_eq!(a.outer.family, 4);
@@ -1001,15 +1052,15 @@ mod tests {
 
         // IPv6 uses its own prefix, and an address is never in a prefix of the
         // other family.
-        let v6 = queue.resolve(&peer("[2001:db8:1:100::1]"), &[]);
-        let near = queue.resolve(&peer("[2001:db8:1:1ff::1]"), &[]);
-        let far = queue.resolve(&peer("[2001:db8:1:200::1]"), &[]);
+        let v6 = queue.resolve(&peer("[2001:db8:1:100::1]"), &[], Instant::now());
+        let near = queue.resolve(&peer("[2001:db8:1:1ff::1]"), &[], Instant::now());
+        let far = queue.resolve(&peer("[2001:db8:1:200::1]"), &[], Instant::now());
         assert_eq!(v6.outer, near.outer, "one /56");
         assert_ne!(v6.outer, far.outer);
         assert_ne!(v6.outer.family, a.outer.family);
 
         // An IPv4-mapped IPv6 address is the same client as its IPv4 form.
-        let mapped = queue.resolve(&peer("[::ffff:203.0.113.7]"), &[]);
+        let mapped = queue.resolve(&peer("[::ffff:203.0.113.7]"), &[], Instant::now());
         assert_eq!(mapped.outer, a.outer);
 
         // A prefix of zero puts every address of the family in one flow.
@@ -1017,8 +1068,8 @@ mod tests {
         cfg.outer_prefix_v4 = 0;
         let mut wide = FairQueue::new(cfg);
         assert_eq!(
-            wide.resolve(&peer("1.2.3.4"), &[]).outer,
-            wide.resolve(&peer("9.9.9.9"), &[]).outer
+            wide.resolve(&peer("1.2.3.4"), &[], Instant::now()).outer,
+            wide.resolve(&peer("9.9.9.9"), &[], Instant::now()).outer
         );
     }
 
@@ -1026,12 +1077,12 @@ mod tests {
     fn the_inner_key_tracks_the_fingerprint() {
         let mut queue = queue();
         let headers = vec![(b"user-agent".to_vec(), b"browser-a".to_vec())];
-        let first = queue.resolve(&peer("10.0.0.1"), &headers);
-        let same = queue.resolve(&peer("10.0.0.1"), &headers);
+        let first = queue.resolve(&peer("10.0.0.1"), &headers, Instant::now());
+        let same = queue.resolve(&peer("10.0.0.1"), &headers, Instant::now());
         let mut other_headers = headers.clone();
         other_headers[0].1 = b"browser-b".to_vec();
-        let other = queue.resolve(&peer("10.0.0.1"), &other_headers);
-        let other_ip = queue.resolve(&peer("10.0.0.2"), &headers);
+        let other = queue.resolve(&peer("10.0.0.1"), &other_headers, Instant::now());
+        let other_ip = queue.resolve(&peer("10.0.0.2"), &headers, Instant::now());
         assert_eq!(first.inner, same.inner);
         assert_ne!(first.inner, other.inner, "the user agent is in the key");
         assert_ne!(first.inner, other_ip.inner, "so is the address");
@@ -1040,29 +1091,36 @@ mod tests {
         // Only the configured headers are, and header names are matched the
         // way HTTP does.
         let auth = vec![(b"AUTHORIZATION".to_vec(), b"Bearer x".to_vec())];
-        let with_auth = queue.resolve(&peer("10.0.0.1"), &auth);
+        let with_auth = queue.resolve(&peer("10.0.0.1"), &auth, Instant::now());
         assert_ne!(with_auth.inner, first.inner);
         let mut irrelevant = vec![(b"authorization".to_vec(), b"Bearer x".to_vec())];
         irrelevant.push((b"x-random".to_vec(), b"1".to_vec()));
-        let with_irrelevant = queue.resolve(&peer("10.0.0.1"), &irrelevant);
+        let with_irrelevant = queue.resolve(&peer("10.0.0.1"), &irrelevant, Instant::now());
         assert_eq!(
             with_irrelevant.inner, with_auth.inner,
             "a header the operator did not list is not part of the key"
         );
         assert_eq!(
             with_auth.inner,
-            queue.resolve(&peer("10.0.0.1"), &auth).inner
+            queue
+                .resolve(&peer("10.0.0.1"), &auth, Instant::now())
+                .inner
         );
 
         // A missing header and an empty one are one flow, not two.
         let empty = vec![(b"authorization".to_vec(), Vec::new())];
         assert_eq!(
             empty.len(),
-            queue.resolve(&peer("10.0.0.1"), &empty).inner.min(1) as usize
+            queue
+                .resolve(&peer("10.0.0.1"), &empty, Instant::now())
+                .inner
+                .min(1) as usize
         );
         assert_eq!(
-            queue.resolve(&peer("10.0.0.1"), &empty).inner,
-            queue.resolve(&peer("10.0.0.1"), &[]).inner
+            queue
+                .resolve(&peer("10.0.0.1"), &empty, Instant::now())
+                .inner,
+            queue.resolve(&peer("10.0.0.1"), &[], Instant::now()).inner
         );
     }
 
@@ -1075,12 +1133,14 @@ mod tests {
         let mut split = vec![(b"cookie".to_vec(), b"other=1".to_vec())];
         split.push((b"cookie".to_vec(), b"sessionid=aaa".to_vec()));
         assert_ne!(
-            queue.resolve(&peer("10.0.0.1"), &one).inner,
-            queue.resolve(&peer("10.0.0.1"), &two).inner
+            queue.resolve(&peer("10.0.0.1"), &one, Instant::now()).inner,
+            queue.resolve(&peer("10.0.0.1"), &two, Instant::now()).inner
         );
         assert_eq!(
-            queue.resolve(&peer("10.0.0.1"), &one).inner,
-            queue.resolve(&peer("10.0.0.1"), &split).inner
+            queue.resolve(&peer("10.0.0.1"), &one, Instant::now()).inner,
+            queue
+                .resolve(&peer("10.0.0.1"), &split, Instant::now())
+                .inner
         );
 
         // Excluding the address makes two addresses one flow, and including it
@@ -1089,12 +1149,16 @@ mod tests {
         cfg.inner_include_ip = false;
         let mut shared = FairQueue::new(cfg);
         assert_eq!(
-            shared.resolve(&peer("10.0.0.1"), &one).inner,
-            shared.resolve(&peer("10.0.0.2"), &one).inner
+            shared
+                .resolve(&peer("10.0.0.1"), &one, Instant::now())
+                .inner,
+            shared
+                .resolve(&peer("10.0.0.2"), &one, Instant::now())
+                .inner
         );
         assert_ne!(
-            queue.resolve(&peer("10.0.0.1"), &one).inner,
-            queue.resolve(&peer("10.0.0.2"), &one).inner
+            queue.resolve(&peer("10.0.0.1"), &one, Instant::now()).inner,
+            queue.resolve(&peer("10.0.0.2"), &one, Instant::now()).inner
         );
     }
 
@@ -1107,7 +1171,7 @@ mod tests {
         let mut queue = FairQueue::new(cfg);
         for index in 0..16u8 {
             let headers = vec![(b"user-agent".to_vec(), vec![b'a' + index])];
-            queue.resolve(&format!("10.0.{index}.1:1"), &headers);
+            queue.resolve(&format!("10.0.{index}.1:1"), &headers, Instant::now());
         }
         assert!(
             queue.outer_count() <= 5,
@@ -1138,9 +1202,9 @@ mod tests {
         let a = vec![(b"user-agent".to_vec(), b"a".to_vec())];
         let b = vec![(b"user-agent".to_vec(), b"b".to_vec())];
         let c = vec![(b"user-agent".to_vec(), b"c".to_vec())];
-        let first = queue.resolve(&peer("10.0.0.1"), &a);
-        let second = queue.resolve(&peer("10.0.0.1"), &b);
-        let third = queue.resolve(&peer("10.0.0.1"), &c);
+        let first = queue.resolve(&peer("10.0.0.1"), &a, Instant::now());
+        let second = queue.resolve(&peer("10.0.0.1"), &b, Instant::now());
+        let third = queue.resolve(&peer("10.0.0.1"), &c, Instant::now());
         assert_ne!(first.inner, second.inner);
         assert_eq!(second.inner, third.inner, "one overflow flow, shared");
         assert_eq!(queue.inner_count(), 2);
@@ -1163,6 +1227,40 @@ mod tests {
         assert_eq!(queue.outer_count(), 0, "nothing queued, nothing in flight");
         assert_eq!(queue.inner_count(), 0);
         assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn a_flow_is_aged_against_the_clock_its_caller_gives_it() {
+        // "How idle is this flow?" is the difference between two `now`s the
+        // caller supplies — the push's, the charge's, the release's, the
+        // sweep's — and nothing in here reads a clock of its own. That is what
+        // lets the scheduler hand the queue the clock it schedules on (a paused
+        // one, in a test) and get the answer a wall clock would give; feeding
+        // the queue an instant a minute in the past therefore says exactly what
+        // a minute of waiting says.
+        let mut queue = queue();
+        let minute_ago = Instant::now() - Duration::from_secs(60);
+        let flow = queue.resolve(&peer("10.0.0.1"), &[], minute_ago);
+        queue.push(1, 0, flow, minute_ago);
+        queue.pop(0);
+        queue.debit(&flow, Cost(40_000_000), minute_ago);
+        queue.release(flow, Instant::now());
+        assert_eq!(
+            queue.outer_count(),
+            0,
+            "an idle minute is past the 30s debt TTL"
+        );
+
+        // The same flow, stamped now: a clock that has barely moved keeps it,
+        // and so does the sweep.
+        let flow = queue.resolve(&peer("10.0.0.1"), &[], Instant::now());
+        queue.push(2, 0, flow, Instant::now());
+        queue.pop(0);
+        queue.debit(&flow, Cost(40_000_000), Instant::now());
+        queue.release(flow, Instant::now());
+        assert_eq!(queue.outer_count(), 1, "the debtor is kept");
+        queue.gc(Instant::now());
+        assert_eq!(queue.outer_count(), 1, "and the sweep agrees with it");
     }
 
     #[test]
@@ -1216,9 +1314,9 @@ mod tests {
     fn a_queued_request_keeps_its_flow_alive() {
         let mut queue = queue();
         let now = Instant::now();
-        let flow = queue.resolve(&peer("10.0.0.1"), &[]);
-        queue.push(1, 0, flow);
-        queue.push(2, 0, flow);
+        let flow = queue.resolve(&peer("10.0.0.1"), &[], Instant::now());
+        queue.push(1, 0, flow, Instant::now());
+        queue.push(2, 0, flow, Instant::now());
         queue.pop(0);
         queue.debit(&flow, Cost(1_000_000_000), now);
         queue.release(flow, now);
@@ -1253,7 +1351,7 @@ mod tests {
         push(&mut queue, 2, 0, "10.1.0.1");
         // The first request is dispatched (so it leaves the queue), and its
         // flow is charged and released.
-        let flow = queue.resolve(&peer("10.0.0.1"), &[]);
+        let flow = queue.resolve(&peer("10.0.0.1"), &[], Instant::now());
         assert_eq!(queue.pop(0), Some(1));
         queue.debit(&flow, Cost(5), Instant::now());
         queue.release(flow, Instant::now());
@@ -1301,13 +1399,16 @@ mod tests {
         // The overflow outer flow has family 0, which no real prefix has, so a
         // client can never land in it by address.
         let mut queue = queue();
-        let real = queue.resolve(&peer("0.0.0.0"), &[]);
+        let real = queue.resolve(&peer("0.0.0.0"), &[], Instant::now());
         assert_eq!(real.outer.family, 4);
         assert_ne!(real.outer, OVERFLOW_OUTER);
         let mut cfg = FairConfig::default();
         cfg.outer_prefix_v4 = 0;
         let mut wide = FairQueue::new(cfg);
-        assert_ne!(wide.resolve(&peer("0.0.0.0"), &[]).outer, OVERFLOW_OUTER);
+        assert_ne!(
+            wide.resolve(&peer("0.0.0.0"), &[], Instant::now()).outer,
+            OVERFLOW_OUTER
+        );
     }
 
     #[test]
@@ -1316,7 +1417,7 @@ mod tests {
         // hash of them.
         let mut queue = queue();
         let headers = vec![(b"authorization".to_vec(), b"Bearer s3cret".to_vec())];
-        let flow = queue.resolve(&peer("203.0.113.7"), &headers);
+        let flow = queue.resolve(&peer("203.0.113.7"), &headers, Instant::now());
         let text = format!("{flow:?}");
         assert!(!text.contains("s3cret"), "a header value leaked: {text}");
         let inner = format!("{}", flow.inner);
@@ -1343,8 +1444,8 @@ mod tests {
             vec![(b"cookie".to_vec(), vec![b'a'; 4096])],
         ];
         for headers in cases {
-            let _ = queue.resolve("not-an-address", &headers);
-            let _ = queue.resolve("203.0.113.7:1", &headers);
+            let _ = queue.resolve("not-an-address", &headers, Instant::now());
+            let _ = queue.resolve("203.0.113.7:1", &headers, Instant::now());
         }
     }
 }

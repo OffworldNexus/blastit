@@ -40,10 +40,13 @@
 //!   `REQ_HEAD`, with the GIL released again — it is what releases the
 //!   scheduler's worker slot, and it must not wait for Python.
 //! * The request thread is the only place that can measure what a request
-//!   cost, so it does (D5): the wall time of the WSGI call — through the
-//!   iterable's `close()` — and its own `CLOCK_THREAD_CPUTIME_ID` over the same
-//!   span, both reported in the response's final frame (`RESP_END_COST`). The
-//!   scheduler, not the view, decides what to do with the numbers.
+//!   cost, so it does (D5): the wall time of `serve_request` for that request —
+//!   the WSGI call, the iteration of its iterable, the iterable's `close()` and
+//!   the frames written back — and its own `CLOCK_THREAD_CPUTIME_ID` over the
+//!   same span, both reported in the response's final frame
+//!   (`RESP_END_COST`; the CPU time is absent, not zero, when the interpreter
+//!   has no thread clock). The scheduler, not the view, decides what to do with
+//!   the numbers.
 //! * One writer owns the channel's write side, one frame at a time, so frames
 //!   from concurrent requests never interleave mid-frame and no sender waits
 //!   behind another stream's body.
