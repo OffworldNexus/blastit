@@ -94,9 +94,8 @@ statement it was refused:
 
 ### 1. Install
 
-blastit is on PyPI: wheels for Linux, CPython 3.13 and 3.14 (x86_64 and
-aarch64), and an sdist that builds the same wheel from source for anything
-else.
+blastit is on PyPI: wheels for Linux, CPython 3.13 and 3.14 (x86_64), and an
+sdist that builds the same wheel from source for anything else.
 
 With uv:
 
@@ -111,34 +110,18 @@ With pip:
 $ pip install blastit
 ```
 
-Every commit to `develop` is also published as `0.1.0.dev<build>` on
-[blastit's own package index](https://offworldnexus.github.io/blastit/simple/) —
-for something newer than the last release, or to test a fix that isn't released
-yet. `v0.1.0` is the first release, so until that tag exists this is the only
-index that has blastit on it.
-
-With uv, pointing at that index:
-
-```toml
-# pyproject.toml
-[[tool.uv.index]]
-name = "blastit"
-url = "https://offworldnexus.github.io/blastit/simple/"
-explicit = true
-
-[tool.uv.sources]
-blastit = { index = "blastit" }
-```
+For a development build — the current `develop`, or a branch of it — install it
+from git, which builds it from source:
 
 ```console
-$ uv add --prerelease allow blastit
+$ uv add "blastit @ git+https://github.com/OffworldNexus/blastit@develop"
+$ pip install "blastit @ git+https://github.com/OffworldNexus/blastit@develop"
 ```
 
-With pip, from that index:
-
-```console
-$ pip install --pre blastit --extra-index-url https://offworldnexus.github.io/blastit/simple/
-```
+That build needs a Rust toolchain (1.88+) and libclang (the SQL parser's
+bindings are generated with bindgen). CI builds a wheel for every commit to
+`develop` as well, for CPython 3.13 and 3.14: it's on that commit's run, under
+*Actions* → the commit → *Artifacts*, as `0.1.0.dev<build>`.
 
 Like granian, blastit is a compiled extension plus a `blastit` command written
 in Python, so it runs on the interpreter of the environment it's installed in:
@@ -182,7 +165,7 @@ WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
 
-RUN pip install --pre blastit --extra-index-url https://offworldnexus.github.io/blastit/simple/
+RUN pip install blastit
 
 ENV BLASTIT_APP=myproject.wsgi:application \
     BLASTIT_MANIFEST=/app/blastit.toml \

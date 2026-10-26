@@ -14,11 +14,12 @@ name: Publish
 #     environment — the dress rehearsal, with an index that takes throwaway
 #     versions;
 #   * a pull request that touches the packaging itself (this file, the action,
-#     pyproject.toml, scripts/) runs the builds, so a broken sdist or a wheel
-#     without dbproxy is found before the tag instead of during it.
+#     pyproject.toml, scripts/, README.md — it is the long description) runs the
+#     builds, so a broken sdist or a wheel without dbproxy is found before the
+#     tag instead of during it.
 #
-# The development flow — a wheel per commit to `develop`, listed by the PEP 503
-# index on GitHub Pages — is `.github/workflows/release.yml`, and it shares
+# The development builds — the wheels every commit to `develop` builds, without
+# publishing — are `.github/workflows/release.yml`, and they share
 # `.github/actions/build-wheel` with this one, so the released wheel is the same
 # one every commit already built.
 #
@@ -40,6 +41,7 @@ on:
       - "Cargo.toml"
       - "blastit_build.py"
       - "scripts/**"
+      - "README.md"
       - ".github/actions/**"
       - ".github/workflows/publish-pypi.yml"
 
@@ -66,20 +68,15 @@ jobs:
         run: scripts/release-notes.sh "$GITHUB_REF_NAME" > /dev/null
 
   wheels:
-    name: wheel (CPython ${{ matrix.python }}, ${{ matrix.arch }})
+    name: wheel (CPython ${{ matrix.python }})
     needs: guard
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     strategy:
-      # One architecture failing shouldn't hide whether the other built.
-      fail-fast: false
+      # aarch64 is not built: `blastit-sys` uses `libc::SYS_fchmodat2`, which
+      # libc does not define for aarch64, so the extension does not compile
+      # there. Run 40388835113 (this workflow, first version) has the log.
       matrix:
         python: ["3.13", "3.14"]
-        arch: [x86_64, aarch64]
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       # `uvx` for the README rewrite. Pinned to a release tag rather than to a
@@ -92,7 +89,7 @@ jobs:
       - uses: ./.github/actions/build-wheel
         with:
           python: ${{ matrix.python }}
-          artifact: wheel-${{ matrix.python }}-${{ matrix.arch }}
+          artifact: wheel-${{ matrix.python }}
 
   sdist:
     name: sdist

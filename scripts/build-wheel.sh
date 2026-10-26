@@ -19,9 +19,11 @@
 # `--interpreter` does the same); it must be the interpreter the wheel will be
 # installed into, because the extension is not abi3.
 #
-# Every commit that publishes a wheel needs its own version, from Cargo:
-# `scripts/dev-version.sh <build number>` moves the workspace version and
-# everything that depends on it, and this script is happy to run after it.
+# The wheels CI builds for a commit to `develop` carry a version of their own,
+# from Cargo: `scripts/dev-version.sh <build number>` moves the workspace version
+# and everything that depends on it, so a wheel downloaded from a run can't be
+# mistaken for the release at the same commit. This script is happy to run after
+# it.
 #
 # Usage: scripts/build-wheel.sh [extra arguments for `maturin build`]
 set -euo pipefail

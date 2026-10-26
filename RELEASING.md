@@ -78,12 +78,22 @@ tag is the release.
 
 4. **Watch it**: `gh run watch`, or *Actions → Publish*. In order: the tag is
    checked against `Cargo.toml` and the changelog (the `guard` job), the wheels
-   are built for CPython 3.13 and 3.14 on x86_64 and aarch64, the sdist is built
-   and installed from, everything goes through `twine check --strict`, and then
-   the `pypi` job waits for your approval in the environment before it uploads.
-   The last job creates the GitHub release, with the artifacts attached and the
+   are built for CPython 3.13 and 3.14 on x86_64, the sdist is built and
+   installed from, everything goes through `twine check --strict`, and then the
+   `pypi` job waits for your approval in the environment before it uploads. The
+   last job creates the GitHub release, with the artifacts attached and the
    changelog entry as its notes.
-5. **Check the result**:
+5. **Clean up, once**: the development wheels used to be published on a rolling
+   `wheels` GitHub release, and it is not a release at all. Once 0.1.0 is on
+   PyPI, delete it:
+
+   ```console
+   $ gh release delete wheels --cleanup-tag
+   ```
+
+   Do it once, and not before: until 0.1.0 is up, that release is the only place
+   those older development wheels can be found.
+6. **Check the result**:
 
    ```console
    $ uv venv /tmp/blastit-0.1.0 && VIRTUAL_ENV=/tmp/blastit-0.1.0 uv pip install blastit==0.1.0
@@ -113,8 +123,19 @@ tag is the release.
 
 ## The development wheels are not this
 
-Every commit to `develop` still publishes `0.1.0.dev<run>` wheels to the rolling
-`wheels` release and lists them in the PEP 503 index on GitHub Pages
-(`.github/workflows/release.yml`). Those never touch PyPI, and they keep
-working while a release is in flight: the two workflows build with the same
-action, `.github/actions/build-wheel`.
+Every commit to `develop` builds the same wheels (`.github/workflows/release.yml`)
+and leaves them as artifacts of that run, with a `0.1.0.dev<run>` version so
+they can't be mistaken for the release of the same commit. Nothing publishes
+them, and nothing outside the run can install from them — they exist to catch a
+broken wheel on the commit that broke it, and for whoever wants to try the
+current tree. The two workflows build with the same action,
+`.github/actions/build-wheel`.
+
+## Only x86_64, for now
+
+aarch64 does not compile: `blastit-sys` uses `libc::SYS_fchmodat2`, which libc
+does not define for aarch64 (the log is in run 40388835113 of `Publish`). That
+is a code fix in `crates/blastit-sys`, not a packaging one, so the release
+matrix is CPython 3.13 and 3.14 on x86_64 until it lands. Adding it back is one
+matrix dimension in `.github/workflows/publish-pypi.yml` on
+`ubuntu-24.04-arm`.

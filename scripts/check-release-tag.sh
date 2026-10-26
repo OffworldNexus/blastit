@@ -30,9 +30,8 @@ if [[ -z $version ]]; then
     exit 1
 fi
 
-# `0.1.0-dev42` is a development wheel's version (dev-version.sh), never a
-# release: the index it is published to lists it under a `wheels` pre-release,
-# and PyPI must never see one.
+# `0.1.0-dev42` is a development wheel's version (dev-version.sh): what CI
+# builds on every commit to `develop`, and never a release. PyPI must not see one.
 if [[ $version == *-dev* ]]; then
     echo "Cargo.toml says $version: that is a development version, not a release" >&2
     exit 1

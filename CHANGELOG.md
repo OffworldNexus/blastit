@@ -97,12 +97,14 @@ URLs; the one file blastit adds is `blastit.toml`.
   same either way, and boot says which mode it is in.
 - **An installable package**: `blastit` on PyPI, with a `blastit` command, a
   `blastit-manifest` command and the pytest plugin, for CPython 3.13 and 3.14 on
-  Linux (`manylinux_2_28`, x86_64 and aarch64). `pip install blastit` and
-  `uv add blastit` need no Rust toolchain at all — those are wheels — and the
-  sdist publishes the same thing for a platform without one: it builds the wheel
-  from source, database proxy included, when the package is installed.
-- **Development builds** for every commit to `develop`, on the project's own
-  package index, for pinning to something newer than the last release.
+  Linux x86_64 (`manylinux_2_28`). `pip install blastit` and `uv add blastit`
+  need no Rust toolchain at all — those are wheels — and the sdist publishes the
+  same thing for a platform without one: it builds the wheel from source,
+  database proxy included, when the package is installed.
+- **Development builds**, for something newer than the last release: install
+  from `develop` itself (`uv add "blastit @
+  git+https://github.com/OffworldNexus/blastit@develop"`), or take the wheel CI
+  built for a commit from that run's artifacts.
 - The wheel is a compiled extension plus a command written in Python, so the
   server runs on the interpreter of the environment it was installed into: your
   virtualenv and its packages are simply there.
