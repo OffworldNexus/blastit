@@ -502,6 +502,7 @@ mod tests {
             scheme: Scheme::Https,
             server_name: "example.com".to_string(),
             server_port: 8443,
+            peer_addr: "10.244.3.9:51515".to_string(),
         };
         let resp = RespHead {
             status: 201,

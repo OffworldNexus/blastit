@@ -75,7 +75,8 @@ pub use crate::ctl::{Ctl, ExitStatus, MAX_SIGNAL, MIN_SIGNAL};
 pub use crate::decoder::Decoder;
 pub use crate::error::FrameError;
 pub use crate::frame::{
-    DoneOutcome, Frame, INITIAL_WINDOW, MAX_STATUS, MIN_STATUS, ReqHead, RespHead, Scheme, TypeCode,
+    DoneOutcome, Frame, INITIAL_WINDOW, MAX_STATUS, MIN_STATUS, ReqHead, RequestCost, RespHead,
+    Scheme, TypeCode,
 };
 pub use crate::limits::{BodyChunks, Limits, MAX_FRAME_CEILING, MAX_FRAME_DEFAULT, MIN_FRAME};
 pub use crate::raw::RawFrame;
@@ -112,6 +113,7 @@ mod tests {
             scheme: Scheme::Https,
             server_name: String::new(),
             server_port: 0,
+            peer_addr: String::new(),
         };
         // Header names and values are byte strings, not text.
         header.headers.push((vec![0xff, 0x00], vec![0xfe]));
@@ -147,6 +149,14 @@ mod tests {
             },
             Frame::Done {
                 outcome: DoneOutcome::Errored,
+            },
+            Frame::DoneCost {
+                outcome: DoneOutcome::Completed,
+                cost: RequestCost::new(12_500_000, 3_000_000),
+            },
+            Frame::DoneCost {
+                outcome: DoneOutcome::Errored,
+                cost: RequestCost::new(u64::MAX, 0),
             },
             Frame::Ready,
             Frame::Window { bytes: 1 },
@@ -287,7 +297,7 @@ mod tests {
 
         // ... and a header-heavy frame is measured by its total size, not by
         // the size of its body.
-        let tight = Limits::new(40).unwrap();
+        let tight = Limits::new(45).unwrap();
         let small = ReqHead {
             method: b"GET".to_vec(),
             target: b"/".to_vec(),
@@ -296,6 +306,8 @@ mod tests {
             server_port: 1,
             ..ReqHead::default()
         };
+        // 9 header + 7 method + 5 target + 2 count + 7 remote_addr + 1 scheme
+        // + 5 server_name + 2 port + 4 (empty) peer_addr = 42.
         assert!(
             tight
                 .encode(&Frame::ReqHead(small.clone()), 1, &mut Vec::new())
@@ -305,7 +317,7 @@ mod tests {
         bigger.headers.push((b"X-A".to_vec(), vec![0u8; 6]));
         assert_eq!(
             tight.encode(&Frame::ReqHead(bigger), 1, &mut Vec::new()),
-            Err(FrameError::FrameTooLarge { size: 55, max: 40 })
+            Err(FrameError::FrameTooLarge { size: 59, max: 45 })
         );
     }
 
@@ -717,6 +729,7 @@ mod tests {
             scheme: Scheme::Https,
             server_name: "secret-host.example".to_string(),
             server_port: 443,
+            peer_addr: "10.244.3.9:1234".to_string(),
         };
         let text = format!("{:?}", Frame::ReqHead(head));
         assert!(!text.contains(secret), "header value leaked: {text}");
@@ -778,6 +791,168 @@ mod tests {
         assert!(
             !text.contains("[255, 0, 65]"),
             "name printed as bytes: {text}"
+        );
+    }
+
+    #[test]
+    fn a_cost_report_round_trips_in_both_wire_forms() {
+        // One frame kind, two wire forms: `DONE_COST` when the view measured
+        // the request, `DONE` when it has nothing to report (an older build, a
+        // refusal answered from the I/O thread, a thread that panicked). The
+        // scheduler must understand both, so both must round trip.
+        let reported = Frame::DoneCost {
+            outcome: DoneOutcome::Completed,
+            cost: RequestCost::new(12_345_678, 1_234_567),
+        };
+        let bare = Frame::Done {
+            outcome: DoneOutcome::Completed,
+        };
+        assert_eq!(reported.code(), TypeCode::DoneCost.code());
+        assert_eq!(bare.code(), TypeCode::Done.code());
+        assert_ne!(reported, bare, "the report is not the same frame");
+
+        for frame in [reported.clone(), bare] {
+            let mut wire = Vec::new();
+            encode(&frame, 9, &mut wire).unwrap();
+            let mut decoder = Decoder::new(Limits::default());
+            decoder.push(&wire);
+            assert_eq!(decoder.next_frame().unwrap(), Some((9, frame.clone())));
+        }
+
+        // The layout is fixed: `u8 outcome | u64 wall_ns | u64 cpu_ns`.
+        let mut wire = Vec::new();
+        encode(&reported, 1, &mut wire).unwrap();
+        assert_eq!(wire.len(), HEADER_LEN + 1 + 8 + 8);
+        assert_eq!(wire[9], DoneOutcome::Completed.code());
+
+        // Zero is a legitimate measurement (a request that cost nothing
+        // measurable), and so is the whole `u64` range.
+        for cost in [
+            RequestCost::new(0, 0),
+            RequestCost::new(1, 0),
+            RequestCost::new(0, u64::MAX),
+            RequestCost::new(u64::MAX, u64::MAX),
+        ] {
+            let frame = Frame::DoneCost {
+                outcome: DoneOutcome::Aborted,
+                cost,
+            };
+            let mut wire = Vec::new();
+            encode(&frame, 2, &mut wire).unwrap();
+            let mut decoder = Decoder::new(Limits::default());
+            decoder.push(&wire);
+            assert_eq!(decoder.next_frame().unwrap(), Some((2, frame)));
+        }
+    }
+
+    #[test]
+    fn a_truncated_cost_report_is_refused() {
+        // A `DONE_COST` payload is exactly 17 bytes; anything shorter is a
+        // broken frame rather than a request that cost nothing.
+        let frame = Frame::DoneCost {
+            outcome: DoneOutcome::Completed,
+            cost: RequestCost::new(7, 8),
+        };
+        let payload = frame.to_raw(1).unwrap().payload;
+        assert_eq!(payload.len(), 17);
+        for len in [1usize, 9, 16] {
+            let wire = crate::testutil::frame_bytes(TypeCode::DoneCost.code(), 1, &payload[..len]);
+            let mut decoder = Decoder::new(Limits::default());
+            decoder.push(&wire);
+            assert!(
+                decoder.next_frame().is_err(),
+                "a {len}-byte DONE_COST payload must not decode"
+            );
+        }
+
+        // One byte too many is a broken frame too, not a cost report.
+        let mut extra = payload.clone();
+        extra.push(0);
+        let wire = crate::testutil::frame_bytes(TypeCode::DoneCost.code(), 1, &extra);
+        let mut decoder = Decoder::new(Limits::default());
+        decoder.push(&wire);
+        assert_eq!(
+            decoder.next_frame().unwrap_err(),
+            FrameError::TrailingBytes {
+                ty: "DONE_COST",
+                extra: 1
+            }
+        );
+    }
+
+    #[test]
+    fn the_raw_peer_round_trips_and_is_not_the_resolved_client() {
+        // The head carries both: `remote_addr` is what the front end resolved
+        // (possibly from a trusted header), `peer_addr` is the socket the
+        // request arrived on, which no client can forge.
+        let head = ReqHead {
+            method: b"GET".to_vec(),
+            target: b"/".to_vec(),
+            remote_addr: "203.0.113.7".to_string(),
+            peer_addr: "10.244.3.9:41337".to_string(),
+            ..ReqHead::default()
+        };
+        let frame = Frame::ReqHead(head.clone());
+        let mut wire = Vec::new();
+        encode(&frame, 4, &mut wire).unwrap();
+        let mut decoder = Decoder::new(Limits::default());
+        decoder.push(&wire);
+        let Some((4, Frame::ReqHead(decoded))) = decoder.next_frame().unwrap() else {
+            panic!("expected a REQ_HEAD");
+        };
+        assert_eq!(decoded, head);
+        assert_eq!(decoded.peer_addr, "10.244.3.9:41337");
+        assert_eq!(decoded.remote_addr, "203.0.113.7");
+
+        // A head without a peer (the address could not be read) is valid: the
+        // field is a string like any other, and an old-style empty value must
+        // still decode.
+        let empty = ReqHead {
+            method: b"GET".to_vec(),
+            peer_addr: String::new(),
+            ..ReqHead::default()
+        };
+        let mut wire = Vec::new();
+        encode(&Frame::ReqHead(empty.clone()), 5, &mut wire).unwrap();
+        let mut decoder = Decoder::new(Limits::default());
+        decoder.push(&wire);
+        assert_eq!(
+            decoder.next_frame().unwrap(),
+            Some((5, Frame::ReqHead(empty)))
+        );
+
+        // The log-safe `Debug` prints both addresses and still no header value.
+        let text = format!("{head:?}");
+        assert!(text.contains("10.244.3.9:41337"), "{text}");
+        assert!(text.contains("203.0.113.7"), "{text}");
+    }
+
+    #[test]
+    fn a_head_with_a_missing_peer_field_is_refused() {
+        // The field is the last one in the payload, so a head that stops before
+        // it is truncated rather than silently defaulted: the trust decision
+        // the scheduler makes on it must not be made on nothing.
+        let head = ReqHead {
+            method: b"GET".to_vec(),
+            target: b"/".to_vec(),
+            remote_addr: "127.0.0.1:1".to_string(),
+            scheme: Scheme::Https,
+            server_name: "h".to_string(),
+            server_port: 443,
+            peer_addr: "127.0.0.1:1".to_string(),
+            ..ReqHead::default()
+        };
+        let payload = Frame::ReqHead(head).to_raw(1).unwrap().payload;
+        let wire = crate::testutil::frame_bytes(
+            TypeCode::ReqHead.code(),
+            1,
+            &payload[..payload.len() - 5],
+        );
+        let mut decoder = Decoder::new(Limits::default());
+        decoder.push(&wire);
+        assert_eq!(
+            decoder.next_frame().unwrap_err(),
+            FrameError::Truncated { field: "peer_addr" }
         );
     }
 

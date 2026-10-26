@@ -7,14 +7,14 @@
 //! payload of each frame kind is a flat sequence of fields, with no padding
 //! and no optional parts:
 //!
-//! * `u8`, `u16`, `u32`, `i32`: the little-endian integer itself.
+//! * `u8`, `u16`, `u32`, `u64`, `i32`: the little-endian integer itself.
 //! * `bytes32`: a `u32` byte length followed by that many raw bytes.
 //! * `string32`: a `bytes32` that must be valid UTF-8.
 //! * `count × …`: a `u16` count followed by that many entries.
 //!
 //! | Type | Code | Payload |
 //! |---|---|---|
-//! | `REQ_HEAD` | `0x01` | `method bytes32`, `target bytes32`, `headers` (`u16` count of `name bytes32` + `value bytes32`), `remote_addr string32`, `scheme u8`, `server_name string32`, `server_port u16` |
+//! | `REQ_HEAD` | `0x01` | `method bytes32`, `target bytes32`, `headers` (`u16` count of `name bytes32` + `value bytes32`), `remote_addr string32`, `scheme u8`, `server_name string32`, `server_port u16`, `peer_addr string32` |
 //! | `REQ_BODY` | `0x02` | the body bytes, raw |
 //! | `REQ_END` | `0x03` | empty |
 //! | `CANCEL` | `0x04` | empty |
@@ -25,6 +25,15 @@
 //! | `DONE` | `0x09` | `outcome u8` |
 //! | `READY` | `0x0A` | empty |
 //! | `WINDOW` | `0x0B` | `bytes u32` |
+//! | `DONE_COST` | `0x0C` | `outcome u8`, `wall_ns u64`, `cpu_ns u64` |
+//!
+//! `DONE` and `DONE_COST` are the two wire forms of the same frame kind: a
+//! view that measured what the request cost it sends `DONE_COST`, and one that
+//! has nothing to report — an older build, a refusal it answered from the I/O
+//! thread, a thread that panicked — sends `DONE`. The scheduler accepts both
+//! and falls back to the time it observed itself when there is no report
+//! (ARCHITECTURE.md §2.4, D5), so the two ends are not lockstep. A code this
+//! crate does not know is still forwarded byte for byte by the raw layer.
 //!
 //! `READY` is what a freshly forked view sends on `view.chan` before the
 //! scheduler may dispatch to it (§4); it is view-chan only.
@@ -97,6 +106,12 @@ pub enum TypeCode {
     RespAbort = 0x08,
     /// The request's worker slot is released.
     Done = 0x09,
+    /// The request's worker slot is released, with what the request cost the
+    /// view process.
+    ///
+    /// The same frame kind as [`TypeCode::Done`], with the cost the view
+    /// measured attached: see [`Frame::Done`].
+    DoneCost = 0x0C,
     /// A newly forked view is ready to serve (`view.chan`).
     Ready = 0x0A,
     /// Flow-control credit for one stream's body.
@@ -137,6 +152,7 @@ impl TypeCode {
             0x09 => Ok(Self::Done),
             0x0A => Ok(Self::Ready),
             0x0B => Ok(Self::Window),
+            0x0C => Ok(Self::DoneCost),
             0x40 => Ok(Self::Spawn),
             0x41 => Ok(Self::Spawned),
             0x42 => Ok(Self::Retire),
@@ -177,6 +193,7 @@ impl TypeCode {
             Self::RespEnd => "RESP_END",
             Self::RespAbort => "RESP_ABORT",
             Self::Done => "DONE",
+            Self::DoneCost => "DONE_COST",
             Self::Ready => "READY",
             Self::Window => "WINDOW",
             Self::Spawn => "SPAWN",
@@ -269,6 +286,31 @@ impl DoneOutcome {
     }
 }
 
+/// What one request cost the view process that answered it (ARCHITECTURE.md
+/// §2.4, D5).
+///
+/// The view is the only place that can measure this: the scheduler sees when a
+/// request was dispatched and when it ended, but not how much of that time the
+/// worker spent on it. Both numbers cover the same span — the WSGI call, the
+/// iteration of its iterable and the iterable's `close()` — and are
+/// **untrusted**: a view process is sandboxed and may be compromised, so the
+/// scheduler clamps `wall_ns` to the time it observed itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord, Hash)]
+pub struct RequestCost {
+    /// Wall time of the request in the view process, in nanoseconds.
+    pub wall_ns: u64,
+    /// `CLOCK_THREAD_CPUTIME_ID` over the same span, in nanoseconds.
+    pub cpu_ns: u64,
+}
+
+impl RequestCost {
+    /// A cost measured as `wall_ns` of wall time and `cpu_ns` of thread CPU
+    /// time.
+    pub const fn new(wall_ns: u64, cpu_ns: u64) -> Self {
+        Self { wall_ns, cpu_ns }
+    }
+}
+
 /// The head of a request, rebuilt into a WSGI `environ` by the view.
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct ReqHead {
@@ -278,7 +320,8 @@ pub struct ReqHead {
     pub target: Vec<u8>,
     /// Headers in the order they arrived, names and values as received.
     pub headers: Vec<(Vec<u8>, Vec<u8>)>,
-    /// Client address as the front end saw it.
+    /// Client address as the front end resolved it (ARCHITECTURE.md §2.4): the
+    /// peer, or the address a trusted `BLASTIT_CLIENT_IP_HEADER` chain names.
     pub remote_addr: String,
     /// Scheme, from the load balancer's `X-Forwarded-Proto`.
     pub scheme: Scheme,
@@ -286,13 +329,21 @@ pub struct ReqHead {
     pub server_name: String,
     /// Host port.
     pub server_port: u16,
+    /// The address of the socket the request actually arrived on, `ip:port`,
+    /// exactly as [`std::net::TcpStream::peer_addr`] reported it.
+    ///
+    /// This is never a header's value, so it cannot be forged by a client, and
+    /// it is what the trust decision for `remote_addr` and for the fair
+    /// scheduler's flows is made on (ARCHITECTURE.md §2.4). Empty when the peer
+    /// address could not be read at all.
+    pub peer_addr: String,
 }
 
 /// The `Debug` view of a request head, for logs (ARCHITECTURE.md §8.1).
 ///
 /// It prints what the `request` event is allowed to carry and nothing else:
 /// the method, the *path* of the target (a query string is never logged), the
-/// remote address, the scheme and port, and the header **names**.
+/// two addresses, the scheme and port, and the header **names**.
 /// `server_name` is the `Host` header's value and header values are never
 /// logged, so it is left out along with every value in `headers`.
 impl core::fmt::Debug for ReqHead {
@@ -304,6 +355,7 @@ impl core::fmt::Debug for ReqHead {
             .field("remote_addr", &self.remote_addr)
             .field("scheme", &self.scheme)
             .field("server_port", &self.server_port)
+            .field("peer_addr", &self.peer_addr)
             .finish_non_exhaustive()
     }
 }
@@ -406,6 +458,20 @@ pub enum Frame {
         /// How the request ended.
         outcome: DoneOutcome,
     },
+    /// The worker thread released the stream's worker slot, and reported what
+    /// the request cost it (D5).
+    ///
+    /// The same frame kind as [`Frame::Done`] in its second wire form: a view
+    /// that measured the request sends this, one that has nothing to report
+    /// sends `DONE`. The scheduler accepts both. The number is **untrusted** —
+    /// a view process is sandboxed and may be compromised — so it is clamped
+    /// to the time the scheduler observed between dispatch and completion.
+    DoneCost {
+        /// How the request ended.
+        outcome: DoneOutcome,
+        /// What the request cost the view process.
+        cost: RequestCost,
+    },
     /// A freshly forked view is ready (`view.chan`, id 0).
     Ready,
     /// Permission to send `bytes` more body bytes on this stream.
@@ -439,6 +505,11 @@ impl core::fmt::Debug for Frame {
                 f.debug_struct("RespAbort").field("reason", reason).finish()
             }
             Self::Done { outcome } => f.debug_tuple("Done").field(outcome).finish(),
+            Self::DoneCost { outcome, cost } => f
+                .debug_struct("DoneCost")
+                .field("outcome", outcome)
+                .field("cost", cost)
+                .finish(),
             Self::Ready => f.write_str("Ready"),
             Self::Window { bytes } => f.debug_struct("Window").field("bytes", bytes).finish(),
             Self::Ctl(msg) => f.debug_tuple("Ctl").field(msg).finish(),
@@ -500,6 +571,7 @@ impl Frame {
             Self::RespEnd => TypeCode::RespEnd.code(),
             Self::RespAbort { .. } => TypeCode::RespAbort.code(),
             Self::Done { .. } => TypeCode::Done.code(),
+            Self::DoneCost { .. } => TypeCode::DoneCost.code(),
             Self::Ready => TypeCode::Ready.code(),
             Self::Window { .. } => TypeCode::Window.code(),
             Self::Ctl(msg) => msg.code(),
@@ -538,6 +610,7 @@ impl Frame {
                 sink.put_u8(head.scheme.code());
                 sink.put_str32(&head.server_name, "server_name")?;
                 sink.put_u16(head.server_port);
+                sink.put_str32(&head.peer_addr, "peer_addr")?;
                 Ok(())
             }
             Self::ReqBody(body) | Self::RespBody(body) => {
@@ -553,6 +626,12 @@ impl Frame {
             Self::RespAbort { reason } => sink.put_str32(reason, "reason"),
             Self::Done { outcome } => {
                 sink.put_u8(outcome.code());
+                Ok(())
+            }
+            Self::DoneCost { outcome, cost } => {
+                sink.put_u8(outcome.code());
+                sink.put_u64(cost.wall_ns);
+                sink.put_u64(cost.cpu_ns);
                 Ok(())
             }
             Self::Window { bytes } => {
@@ -592,6 +671,7 @@ impl Frame {
                 scheme: Scheme::from_code(reader.u8("scheme")?)?,
                 server_name: reader.string32("server_name")?.to_owned(),
                 server_port: reader.u16("server_port")?,
+                peer_addr: reader.string32("peer_addr")?.to_owned(),
             }),
             TypeCode::ReqBody => Self::ReqBody(reader.take_rest().to_vec()),
             TypeCode::ReqEnd => Self::ReqEnd,
@@ -612,6 +692,13 @@ impl Frame {
             },
             TypeCode::Done => Self::Done {
                 outcome: DoneOutcome::from_code(reader.u8("outcome")?)?,
+            },
+            TypeCode::DoneCost => Self::DoneCost {
+                outcome: DoneOutcome::from_code(reader.u8("outcome")?)?,
+                cost: RequestCost {
+                    wall_ns: reader.u64("cost_ns")?,
+                    cpu_ns: reader.u64("cpu_ns")?,
+                },
             },
             TypeCode::Ready => Self::Ready,
             TypeCode::Window => {
