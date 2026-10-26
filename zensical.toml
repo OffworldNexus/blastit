@@ -32,6 +32,7 @@ nav = [
     { "DigitalOcean App Platform" = "infra/digitalocean-paas.md" },
     { "Docker Compose behind Traefik" = "infra/compose-traefik.md" },
     { "Anything else" = "infra/anything-else.md" },
+    { "Fair queuing" = "infra/fair-queuing.md" },
   ] },
   { "Reference" = [
     "reference/settings.md",
