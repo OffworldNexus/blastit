@@ -142,7 +142,9 @@ async fn a_busy_view_is_never_retired_for_memory() {
         .until(|world| world.log.lock().unwrap().spawns == vec![0])
         .await;
     usage.store(500 * MIB, Ordering::Relaxed);
-    world.advance(Duration::from_secs(30)).await;
+    // Past several 2 s memory checks, and *inside* the 30 s request timeout: a
+    // request in flight here is not one this test wants to see expire.
+    world.advance(Duration::from_secs(25)).await;
 
     // §8 Sizing retires *idle* views: a request in flight is not one, and the
     // scheduler would rather be over the watermark than fail that request.

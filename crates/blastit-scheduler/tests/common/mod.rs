@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use blastit_events::Event;
 use blastit_frame::{
-    Ctl, Decoder, DoneOutcome, ExitStatus, Frame, INITIAL_WINDOW, Limits, ReqHead, RespHead, Scheme,
+    Ctl, Decoder, DoneOutcome, ExitStatus, Frame, INITIAL_WINDOW, Limits, ReqHead, RequestCost,
+    RespHead, Scheme,
 };
 use blastit_manifest::{Manifest, RoutingTable, UidLayout};
 use blastit_scheduler::{
@@ -25,6 +26,7 @@ use blastit_scheduler::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 
@@ -78,6 +80,18 @@ pub enum Script {
     /// request and stops reading altogether: the scheduler's queue towards it
     /// is what has to stay bounded.
     Deaf { window: u32 },
+    /// `READY`, then a `200` with `body`, a `RESP_END_COST` reporting `cost`
+    /// and a `DONE` (D5): what the fair-queuing tests need to say how much a
+    /// request cost the view.
+    Cost { body: Vec<u8>, cost: RequestCost },
+    /// Like [`Script::Cost`], but each request waits for a permit before it is
+    /// answered, so the test decides when it ends — and therefore how long the
+    /// scheduler observed it.
+    HeldCost {
+        body: Vec<u8>,
+        cost: RequestCost,
+        gate: Arc<Semaphore>,
+    },
 }
 
 /// What a script wants the view task to do after handling a frame.
@@ -181,8 +195,18 @@ impl Log {
 /// It tracks flow control the way a real front end does (§3.1): it never sends
 /// more request-body bytes than the credit it has, and it grants response-body
 /// credit as it "writes" the body out.
+///
+/// Writing is *queued*, not done here (D5): a real front end keeps reading
+/// `http.chan` while its requests wait in the scheduler's admission queue, and a
+/// test that had to wait for the scheduler to read before it could send the next
+/// request would wedge on exactly the state these tests set up — a full queue.
+/// [`Http::send`] hands the bytes to [`writer_task`], which never blocks the
+/// test; the read half stays here, because every look at the world goes through
+/// it.
 pub struct Http {
-    stream: UnixStream,
+    stream: OwnedReadHalf,
+    /// Frames on their way out, in order, on the writer task.
+    to_send: mpsc::UnboundedSender<Outgoing>,
     decoder: Decoder,
     inbox: VecDeque<(u32, Frame)>,
     closed: bool,
@@ -194,10 +218,44 @@ pub struct Http {
     granted: HashMap<u32, u64>,
 }
 
+/// What the test client queues for [`writer_task`].
+enum Outgoing {
+    /// Bytes to write, already encoded.
+    Bytes(Vec<u8>),
+    /// Shut the write half down, which is what finishing EOF looks like.
+    Close,
+}
+
+/// Writes what the test sends, in order, on a task of its own.
+///
+/// This is the piece that keeps a queued request from wedging the test: when the
+/// scheduler stops reading — its own inbound queue is full, which is what a
+/// full admission queue looks like from here — this task blocks in `write_all`
+/// while the test keeps sending, asserting and looking at the world.
+async fn writer_task(mut write: OwnedWriteHalf, mut outgoing: mpsc::UnboundedReceiver<Outgoing>) {
+    while let Some(message) = outgoing.recv().await {
+        match message {
+            Outgoing::Bytes(bytes) => {
+                if write.write_all(&bytes).await.is_err() {
+                    return;
+                }
+            }
+            Outgoing::Close => {
+                let _ = write.shutdown().await;
+                return;
+            }
+        }
+    }
+}
+
 impl Http {
     fn new(stream: UnixStream) -> Self {
+        let (stream, write) = stream.into_split();
+        let (to_send, outgoing) = mpsc::unbounded_channel();
+        tokio::spawn(writer_task(write, outgoing));
         Self {
             stream,
+            to_send,
             decoder: Decoder::new(Limits::default()),
             inbox: VecDeque::new(),
             closed: false,
@@ -225,11 +283,26 @@ impl Http {
         }
     }
 
-    /// Encodes and writes one frame.
+    /// Encodes one frame and queues it for the writer task.
+    ///
+    /// It yields once, so the writer usually has it on the wire before the
+    /// caller looks at anything — but it never waits for the scheduler to take
+    /// it, which is the difference between a test that can fill the scheduler's
+    /// queue and one that cannot.
     pub async fn send(&mut self, id: u32, frame: &Frame) {
         let mut wire = Vec::new();
         Limits::default().encode(frame, id, &mut wire).unwrap();
-        self.stream.write_all(&wire).await.unwrap();
+        self.queue(wire).await;
+    }
+
+    /// Queues already-encoded bytes, yielding so the writer task can run.
+    async fn queue(&mut self, bytes: Vec<u8>) {
+        if self.to_send.send(Outgoing::Bytes(bytes)).is_err() {
+            // The writer task is gone only when the scheduler's end is, which
+            // every caller finds out through `closed()`.
+            self.closed = true;
+        }
+        tokio::task::yield_now().await;
     }
 
     /// Sends a request head, which is what starts a stream's credit.
@@ -287,7 +360,7 @@ impl Http {
 
     /// Sends raw bytes on `http.chan`, which a real http would never do.
     pub async fn send_raw(&mut self, bytes: &[u8]) {
-        self.stream.write_all(bytes).await.unwrap();
+        self.queue(bytes.to_vec()).await;
     }
 
     /// Sends a whole request: head, body and end.
@@ -303,7 +376,10 @@ impl Http {
             *stream == id
                 && matches!(
                     frame,
-                    Frame::RespEnd | Frame::RespAbort { .. } | Frame::Cancel
+                    Frame::RespEnd
+                        | Frame::RespEndCost { .. }
+                        | Frame::RespAbort { .. }
+                        | Frame::Cancel
                 )
         })
     }
@@ -348,7 +424,11 @@ impl Http {
     /// read in pieces must not lose its head to an earlier look.
     fn take_response(&mut self, id: u32) -> Option<Vec<Frame>> {
         let end = self.inbox.iter().position(|(stream, frame)| {
-            *stream == id && matches!(frame, Frame::RespEnd | Frame::RespAbort { .. })
+            *stream == id
+                && matches!(
+                    frame,
+                    Frame::RespEnd | Frame::RespEndCost { .. } | Frame::RespAbort { .. }
+                )
         })?;
         let mut frames = Vec::new();
         let mut rest = VecDeque::new();
@@ -405,7 +485,8 @@ impl Http {
 
     /// Closes the client's end of `http.chan`, which ends the scheduler's run.
     pub async fn close(&mut self) {
-        let _ = self.stream.shutdown().await;
+        let _ = self.to_send.send(Outgoing::Close);
+        tokio::task::yield_now().await;
     }
 
     /// Every frame buffered so far, leaving the inbox empty.
@@ -820,7 +901,10 @@ async fn view_task(route: usize, stream: UnixStream, mut script: Script, log: Ar
                 if let Some(id) = pending.pop_front() {
                     permit.forget();
                     let body = script.hold_body();
-                    answer(&mut write, id, &body, true).await;
+                    match script.hold_cost() {
+                        Some(cost) => answer_with_cost(&mut write, id, &body, cost, true).await,
+                        None => answer(&mut write, id, &body, true).await,
+                    }
                 }
             }
         }
@@ -1002,6 +1086,22 @@ impl Script {
                     send_frame(write, id, &Frame::RespEnd).await;
                 }
             }
+            Script::Cost { body, cost } => {
+                if head {
+                    answer_with_cost(write, id, body, *cost, true).await;
+                }
+            }
+            Script::HeldCost { body, cost, gate } => {
+                if head {
+                    match gate.clone().try_acquire_owned() {
+                        Ok(permit) => {
+                            permit.forget();
+                            answer_with_cost(write, id, body, *cost, true).await;
+                        }
+                        Err(_) => return Step::Hold(id),
+                    }
+                }
+            }
             Script::Deaf { window } => {
                 if head {
                     // Hand out credit and then never read again: the process is
@@ -1018,7 +1118,9 @@ impl Script {
     /// Waits for a permit, for the scripts that hold requests.
     async fn permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         match self {
-            Script::Hold { gate, .. } => gate.clone().acquire_owned().await.ok(),
+            Script::Hold { gate, .. } | Script::HeldCost { gate, .. } => {
+                gate.clone().acquire_owned().await.ok()
+            }
             _ => std::future::pending().await,
         }
     }
@@ -1026,9 +1128,42 @@ impl Script {
     /// The body a held request is answered with.
     fn hold_body(&self) -> Vec<u8> {
         match self {
-            Script::Hold { body, .. } => body.clone(),
+            Script::Hold { body, .. } | Script::HeldCost { body, .. } => body.clone(),
             _ => Vec::new(),
         }
+    }
+
+    /// The cost a held request is answered with, when the script reports one.
+    fn hold_cost(&self) -> Option<RequestCost> {
+        match self {
+            Script::HeldCost { cost, .. } => Some(*cost),
+            _ => None,
+        }
+    }
+}
+
+/// Writes a head, body and a cost-reporting end, plus `DONE` when asked (D5).
+async fn answer_with_cost(
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+    id: u32,
+    body: &[u8],
+    cost: RequestCost,
+    done: bool,
+) {
+    send_frame(write, id, &resp_head(200, body.len())).await;
+    if !body.is_empty() {
+        send_frame(write, id, &Frame::RespBody(body.to_vec())).await;
+    }
+    send_frame(write, id, &Frame::RespEndCost { cost }).await;
+    if done {
+        send_frame(
+            write,
+            id,
+            &Frame::Done {
+                outcome: DoneOutcome::Completed,
+            },
+        )
+        .await;
     }
 }
 
@@ -1120,9 +1255,12 @@ pub fn body_of(frames: &[Frame]) -> Vec<u8> {
         .collect()
 }
 
-/// Whether the frames end with a `RESP_END`.
+/// Whether the frames end with a `RESP_END`, with or without a cost report.
 pub fn ended(frames: &[Frame]) -> bool {
-    matches!(frames.last(), Some(Frame::RespEnd))
+    matches!(
+        frames.last(),
+        Some(Frame::RespEnd | Frame::RespEndCost { .. })
+    )
 }
 
 /// Whether the frames end with a `RESP_ABORT`.

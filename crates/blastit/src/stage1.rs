@@ -140,6 +140,15 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     let boot = Emitter::stdout(LogFormat::Json, Level::Info);
     let config = read_config(&boot, options.config_fd);
     let emitter = Emitter::stdout(config.log_format, config.log_level);
+    // §8.1: a setting that is deprecated is the operator's to hear about, once,
+    // and the log is the only place blastit can say it. The decision comes from
+    // stage 0's parsing and the sentences name variables, never values.
+    for deprecation in &config.deprecations {
+        emitter.emit(
+            &output_event(Component::Init, None, Stream::Stderr, deprecation.message())
+                .with_level(Level::Warn),
+        );
+    }
 
     let source = match std::fs::read_to_string(&config.manifest) {
         Ok(source) => source,
@@ -405,7 +414,7 @@ fn http_config(config: &Config, limits: Limits) -> HttpConfig {
         max_body_bytes: config.max_body_bytes,
         header_timeout: config.header_timeout,
         keepalive_timeout: config.keepalive_timeout,
-        trust_forwarded: config.trust_forwarded,
+        client_ip: config.client_ip(),
         frame_limits: limits,
         server_port: config.server_port,
         max_connections: config.max_connections,
@@ -431,6 +440,8 @@ fn scheduler_config(
         view_max_workers: config.view_max_workers,
         queue_size: config.queue_size,
         queue_timeout: config.queue_timeout,
+        fair_queuing: config.fair_queuing,
+        fair: config.fair_config(),
         request_timeout: config.request_timeout,
         stuck_threads: config.stuck_threads,
         eager_spawn: config.view_spawn == crate::config::SpawnMode::Eager,

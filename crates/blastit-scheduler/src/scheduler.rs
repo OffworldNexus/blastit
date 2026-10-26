@@ -88,20 +88,17 @@
 //! [`Admission::remove`], so the two orderings cannot drift apart.
 //!
 //! The cost a fair flow is charged comes from the view process — the only
-//! place that can measure it — in the `DONE_COST` frame: the wall time of the
-//! WSGI call (through the iterable's `close()`) and the thread's CPU time over
-//! the same span. The report is untrusted: a view is sandboxed and may be
-//! compromised, so it is clamped to the wall time the scheduler itself
-//! observed between dispatch and completion, and a request with no report
-//! (crash, timeout, cancel, a client that went away, a view built before D5)
-//! charges the observed time instead. The event keeps both numbers as
-//! `cost_ns` (what was charged) and `cpu_ns` (what the worker reported).
-//!
-//! Because the report arrives in `DONE`, which the view sends after `close()`,
-//! the `request` event of a successful response is emitted when the request is
-//! released rather than at `RESP_END`. Its `duration_ms` still ends at the
-//! last response byte (see [`Request::finished_at`]), so the documented
-//! meaning of the field does not move.
+//! place that can measure it — in the `RESP_END_COST` frame, which is the
+//! response's last frame in its second wire form: the wall time of the WSGI
+//! call (through the iterable's `close()`) and the thread's CPU time over the
+//! same span. The report is untrusted: a view is sandboxed and may be
+//! compromised, so it is clamped to the wall time the scheduler itself observed
+//! between dispatch and completion, and a request whose end frame carries no
+//! report (an older build, a timeout, a cancellation, a view that died)
+//! charges the observed time instead. The event keeps both numbers as `cost_ns`
+//! (what was charged) and `cpu_ns` (what the worker reported), and it is still
+//! emitted when the scheduler learns the request ended — at `RESP_END` for a
+//! response, at release for everything else.
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
@@ -2203,9 +2200,9 @@ impl Scheduler {
     /// built before D5 — the observed time is charged instead.
     ///
     /// It is idempotent, and it is called from two places: at the response end
-    /// when a report arrived (so a flow that has spent its budget is behind the
-    /// others before its thread even exits), and at release for everything
-    /// else.
+    /// — with the report when the view sent one, with the observed time when it
+    /// did not — and at release, for a request whose response never ends (a
+    /// `504`, a cancellation, a view that died).
     fn charge(&mut self, stream_id: u32) {
         let Some(request) = self.requests.get(&stream_id) else {
             return;
@@ -2443,12 +2440,19 @@ impl Scheduler {
             }
         }
         self.mark_finished(stream_id);
-        if let Some(cost) = cost {
-            if let Some(request) = self.requests.get_mut(&stream_id) {
-                request.report = Some(cost);
-            }
-            self.charge(stream_id);
+        // D5: the response's last byte is where a request's cost is fixed —
+        // with the view's report when it sent one, with the time the scheduler
+        // observed itself when it did not — so the event carries what was
+        // actually charged, and the flow is behind the others before its thread
+        // even exits. [`Scheduler::charge`] is idempotent, and
+        // [`Scheduler::release`] charges the requests that never end a response
+        // at all (a `504`, a cancellation, a view that died).
+        if let Some(cost) = cost
+            && let Some(request) = self.requests.get_mut(&stream_id)
+        {
+            request.report = Some(cost);
         }
+        self.charge(stream_id);
         self.emit_request(stream_id);
         Ok(())
     }
