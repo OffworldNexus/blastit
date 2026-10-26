@@ -453,9 +453,34 @@ struct RunDir {
 }
 
 impl RunDir {
-    /// Creates `/run/blastit-smoke-<pid>-<tag>-<n>`, mode `0755`.
-    fn new(tag: &str) -> Self {
-        let mut path = PathBuf::from("/opt");
+    /// A directory in a place no other uid can write, or `None` when this host
+    /// has none (a runner with a world-writable `/opt`, a shared `/`): the tests
+    /// that need one print and pass, the way a root-only test does. The checks
+    /// that *refuse* something do not need it.
+    ///
+    /// Not `/tmp`: many hosts mount it `nosuid`, and the kernel ignores file
+    /// capabilities there. Not `/run` either: systemd mounts it `noexec`.
+    fn protected(tag: &str) -> Option<Self> {
+        for parent in ["/opt", "/usr/local", "/srv"] {
+            if !Path::new(parent).is_dir() {
+                continue;
+            }
+            let dir = Self::under(parent, tag);
+            let probe = dir.executable("probe", b"#!/bin/sh\n");
+            // SAFETY: `geteuid` takes no arguments and cannot fail.
+            let uid = unsafe { libc::geteuid() };
+            if blastit::host::plain_is_protected(&probe, uid).is_ok() {
+                return Some(dir);
+            }
+            drop(dir);
+        }
+        println!("skipped: no directory only its owner can write, on this host");
+        None
+    }
+
+    /// Creates `<parent>/blastit-smoke-<pid>-<tag>-<n>`, mode `0755`.
+    fn under(parent: &str, tag: &str) -> Self {
+        let mut path = PathBuf::from(parent);
         path.push(format!(
             "blastit-smoke-{}-{}-{}",
             std::process::id(),
@@ -468,8 +493,16 @@ impl RunDir {
         Self { path }
     }
 
-    /// Writes a file everything may read (`0644`).
-    fn write(&self, name: &str, contents: &str) -> PathBuf {
+    /// Writes a file anything may read and execute (`0755`).
+    fn executable(&self, name: &str, contents: &[u8]) -> PathBuf {
+        let path = self.path.join(name);
+        std::fs::write(&path, contents).unwrap();
+        std::fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Writes a file anything may read (`0644`), for a manifest or an app.
+    fn readable(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.path.join(name);
         std::fs::write(&path, contents).unwrap();
         std::fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
@@ -1267,7 +1300,9 @@ fn a_rootless_standalone_install_runs_dbproxy_from_the_capability_free_copy() {
     // `execve` fails: the kernel refuses a file with file capabilities that an
     // empty bounding set cannot honour.
     let uid = 49_500;
-    let dir = RunDir::new("rootless-bin");
+    let Some(dir) = RunDir::protected("rootless-bin") else {
+        return;
+    };
     // The set a deployment is advised to give (`caps::WANTED`), straight into
     // the attribute the kernel reads: `setcap` is not guaranteed to be in the
     // image the tests run in, and `CAP_SETFCAP` is root's anyway.
@@ -1303,8 +1338,8 @@ fn a_rootless_standalone_install_runs_dbproxy_from_the_capability_free_copy() {
         "chown -R {uid} /run/blastit"
     );
 
-    let manifest = dir.write("blastit.toml", PROXY_AND_ROUTE);
-    dir.write("app.py", PG_APP);
+    let manifest = dir.readable("blastit.toml", PROXY_AND_ROUTE);
+    dir.readable("app.py", PG_APP);
     let python_path = dir.python_path();
     let url = "postgresql://nowhere:nowhere@127.0.0.1:1/nowhere";
 
