@@ -26,6 +26,7 @@ import datetime as dt
 import json
 import os
 import secrets
+import shlex
 import signal
 import subprocess
 import sys
@@ -40,6 +41,10 @@ PREFIX = "blastit-d6-"
 TAG = "blastit-d6"
 REGION = "ams3"
 SIZE = "s-2vcpu-4gb"
+ENV_FILE = ".e2e-compose.env"
+# The compose file leaves `BLASTIT_UID_BASE` alone (§8.2's default): http, the
+# scheduler and dbproxy are the first three uids of the layout (§2).
+UID_BASE = 20_000
 # The capabilities D6 asks for, in the order the kernel numbers them. The
 # image's `setcap` line, the compose `cap_add` list and this list are one set,
 # and the log check fails when blastit reports anything else.
@@ -91,6 +96,12 @@ def doctl(*args, parse=True, check_rc=True):
 
 
 def compose_env(project, port, image, password, dockerfile="Dockerfile"):
+    """The compose variables.
+
+    On the droplet these are written to an **env file** (over ssh, from stdin),
+    so the database password never appears in an `ssh` command line, where `ps`
+    would show it.
+    """
     return {
         **os.environ,
         "E2E_PROJECT": project,
@@ -101,6 +112,7 @@ def compose_env(project, port, image, password, dockerfile="Dockerfile"):
     }
 
 
+
 def compose_local(env, *args):
     # `logs` is captured for the checks; everything else streams to the
     # terminal, so a build failure is visible while it happens.
@@ -109,19 +121,31 @@ def compose_local(env, *args):
 
 
 def compose_remote(ssh, env, *args, check_rc=True):
-    """`docker compose …` on the droplet, over ssh."""
-    command = (f"cd /root/blastit && env {remote_env(env)} "
-               f"docker compose -f e2e/rootless/compose.yml {' '.join(args)}")
+    """`docker compose …` on the droplet, over ssh, with the env file.
+
+    `--env-file` is what substitutes `${E2E_DB_PASSWORD}`: the value is in the
+    file the droplet received over stdin, never in a command line that `ps` on
+    the droplet could read.
+    """
+    command = (f"cd /root/blastit && docker compose --env-file {ENV_FILE} "
+               f"-f e2e/rootless/compose.yml {' '.join(args)}")
     return ssh_run(ssh, command, check_rc=check_rc)
 
 
-def remote_env(env):
-    """The compose variables, as `VAR=value …` for `export` in a remote shell."""
-    return " ".join(
-        f"{name}={env[name]}"
-        for name in ("E2E_PROJECT", "E2E_IMAGE", "E2E_PORT", "E2E_DB_PASSWORD",
-                     "E2E_ROOTLESS_DOCKERFILE")
-    )
+def write_env_file(ssh, env):
+    """Writes the compose variables to the droplet, from stdin (never argv)."""
+    variables = ("E2E_PROJECT", "E2E_IMAGE", "E2E_PORT", "E2E_DB_PASSWORD",
+                 "E2E_ROOTLESS_DOCKERFILE")
+    text = "".join(f"{name}={env[name]}\n" for name in variables if name in env)
+    written = subprocess.run([*ssh, f"cat > /root/blastit/{ENV_FILE}"], input=text, text=True,
+                             capture_output=True, check=False)
+    if written.returncode != 0:
+        raise RuntimeError(f"writing the env file failed: {written.stderr.strip()}")
+
+
+def remove_env_file(ssh):
+    """Removes the env file (it holds the database password) — best effort."""
+    ssh_run(ssh, f"rm -f /root/blastit/{ENV_FILE}")
 
 
 def scenario(port, timeout=180):
@@ -183,8 +207,204 @@ def dump_logs(text, out):
 
 
 # --------------------------------------------------------------------------
+# the capabilities of the *processes*, read out of `/proc` inside the container
+# --------------------------------------------------------------------------
+
+# Prints one line per process of the container, except init: id, uid, the five
+# capability sets and `no_new_privs` (§7.2, D6). `awk` over `/proc/<pid>/status`
+# is readable across uids on Linux (`/proc` is world-readable; under gVisor it
+# always is, §9.1 #3), which is what makes this checkable from outside the
+# server.
+PROCESS_PROBE = r"""
+for dir in /proc/[0-9]*; do
+  pid=${dir#/proc/}
+  [ "$pid" = 1 ] && continue
+  awk -v pid="$pid" '
+    /^Uid:/ {uid = $2}
+    /^CapInh:/ {inh = $2}
+    /^CapPrm:/ {prm = $2}
+    /^CapEff:/ {eff = $2}
+    /^CapBnd:/ {bnd = $2}
+    /^CapAmb:/ {amb = $2}
+    /^NoNewPrivs:/ {nnp = $2}
+    END {printf "%s %s %s %s %s %s %s %s\n", pid, uid, inh, prm, eff, bnd, amb, nnp}
+  ' "$dir/status" 2>/dev/null
+done
+"""
+
+# The capability sets and the uid of *this* process, plus whether it can become
+# root: the B1 check, for a process that is not init (a plain `python3`, a second
+# `manage.py`). Written to a file inside the container and run from there — a
+# `-c` one-liner cannot hold the `try` that `setuid(0)` needs.
+SELF_PROBE = """\
+import os
+
+caps = {
+    line.split(":")[0]: line.split(":")[1].strip()
+    for line in open("/proc/self/status")
+    if line.startswith(("Cap", "NoNewPrivs"))
+}
+
+
+def attempt():
+    try:
+        os.setuid(0)
+        return "ok"
+    except OSError as error:
+        return "refused"
+
+
+print(
+    "probe",
+    os.getuid(),
+    caps["CapInh"],
+    caps["CapPrm"],
+    caps["CapEff"],
+    caps["CapBnd"],
+    caps["CapAmb"],
+    caps["NoNewPrivs"],
+    attempt(),
+)
+"""
+
+ZERO = "0000000000000000"
+
+
+def check_container(env, project, ssh=None):
+    """D6's checks inside the running container: who holds what.
+
+    * every process of the container that runs under a **layout** uid — http, the
+      scheduler, dbproxy and every view (`§2`) — holds no capability at all, not
+      even in its bounding set, and has `no_new_privs` set;
+    * the three component uids are among them;
+    * a plain `python3`, and a second `manage.py`, run as the service uid hold
+      nothing and cannot become root: the *shared* interpreter has no file
+      capabilities, only the dedicated copy init starts from does (B1).
+
+    Processes outside the layout — root, the service uid, and this check's own
+    shell — are not asserted on: the service uid's own processes are what the two
+    probes above are for, and `docker compose exec` starts a process of that uid
+    that is not init and has no `no_new_privs`, which is the point (it is the
+    interpreter, not the uid, that must stay capability-free).
+    """
+    print("D6: what the container's own processes hold")
+    ok = True
+
+    def in_container(script):
+        if ssh is None:
+            return subprocess.run(["docker", "compose", "-f", COMPOSE, "exec", "-T", "app",
+                                   "sh", "-c", script], env=env, text=True,
+                                  capture_output=True).stdout
+        return compose_remote(ssh, env, "exec", "-T", "app", "sh", "-c",
+                              shlex.quote(script)).stdout
+
+    def as_uid(uid, script):
+        """The same, as another uid: what the container lets a foreign process do."""
+        if ssh is None:
+            return subprocess.run(["docker", "compose", "-f", COMPOSE, "exec", "-T", "-u",
+                                   str(uid), "app", "sh", "-c", script], env=env, text=True,
+                                  capture_output=True).stdout
+        return compose_remote(ssh, env, "exec", "-T", "-u", str(uid), "app", "sh", "-c",
+                              shlex.quote(script)).stdout
+
+    def run_probe(what, command):
+        """Writes the probe into the container, runs it, and reads the line."""
+        script = (f"cat > /tmp/blastit-probe.py <<'PROBE'\n{SELF_PROBE}PROBE\n{command}\n")
+        out = in_container(script)
+        line = next((text for text in out.splitlines() if text.startswith("probe ")), "")
+        fields = line.split()
+        if len(fields) != 9:
+            return check(False, f"{what} did not report: {out.strip()[:200]}")
+        _, uid, inh, prm, eff, bnd, amb, nnp, setuid0 = fields
+        # What B1 promises for a process blastit did not spawn: it holds nothing
+        # (the shared interpreter grants nothing) and cannot become root. It has
+        # no `no_new_privs` — nothing set one on it — and the container's
+        # bounding set, which is why it also may not *run* the capable copy.
+        held = (inh, prm, eff, amb) == (ZERO,) * 4
+        return check(
+            held and setuid0 == "refused",
+            f"{what} (uid {uid}) holds nothing and cannot become root "
+            f"(inh={inh} prm={prm} eff={eff} amb={amb} nnp={nnp} setuid={setuid0})",
+        )
+
+    seen = {}
+    for line in in_container(PROCESS_PROBE).splitlines():
+        fields = line.split()
+        if len(fields) != 8:
+            continue
+        pid, uid, inh, prm, eff, bnd, amb, nnp = fields
+        seen[int(uid)] = (pid, inh, prm, eff, bnd, amb, nnp)
+    layout = {uid: state for uid, state in seen.items() if uid >= UID_BASE}
+    ok &= check(len(layout) >= 4, f"the layout runs more than one process ({len(layout)})")
+    for uid, (pid, inh, prm, eff, bnd, amb, nnp) in sorted(layout.items()):
+        ok &= check(
+            (inh, prm, eff, bnd, amb) == (ZERO,) * 5 and nnp == "1",
+            f"uid {uid} (pid {pid}) holds nothing and has no_new_privs "
+            f"(inh={inh} prm={prm} eff={eff} bnd={bnd} amb={amb} nnp={nnp})",
+        )
+    for uid, what in ((UID_BASE + 1, "http"), (UID_BASE + 2, "scheduler"),
+                      (UID_BASE + 3, "dbproxy")):
+        ok &= check(uid in layout, f"{what} runs under uid {uid} (D6 keeps the layout)")
+
+    ok &= run_probe("a plain python3", "python3 /tmp/blastit-probe.py")
+    ok &= run_probe("a second manage.py, as the service user",
+                    'python3 manage.py shell -c "$(cat /tmp/blastit-probe.py)"')
+
+    # The capable copy is init's alone: mode `0500`, owned by the service uid, and
+    # another uid cannot run it (B1 — a worker, a migration, an operator's shell
+    # that is not init).
+    facts = in_container(
+        'stat -c "mode=%a uid=%u" "$(readlink -f "$(command -v python3)")-init"')
+    ok &= check("mode=500 uid=10000" in facts,
+                f"the capable copy is mode 0500 and owned by the service uid ({facts.strip()})")
+    refused = as_uid(
+        UID_BASE,
+        'copy="$(readlink -f "$(command -v python3)")-init"; "$copy" -V 2>&1 || true')
+    ok &= check("Permission denied" in refused,
+                f"another uid (the layout's own {UID_BASE}) cannot run it ({refused.strip()})")
+    return 0 if ok else 1
+
+
+# --------------------------------------------------------------------------
 # local run
 # --------------------------------------------------------------------------
+
+
+def caps_and_limits(env, ssh=None):
+    """The two facts a deployment is about: which file has the capabilities, and
+    what the container was allowed to give it (D6/B1)."""
+    if ssh is None:
+        caps = subprocess.run(
+            ["docker", "compose", "-f", COMPOSE, "exec", "-T", "app", "sh", "-c",
+             'getcap "$(readlink -f "$(command -v python3)")-init"; '
+             'echo "shared: $(getcap "$(readlink -f "$(command -v python3)")")"'],
+            env=env, text=True, capture_output=True)
+        limits = subprocess.run(
+            ["docker", "inspect", "-f", "User={{.Config.User}} CapDrop={{.HostConfig.CapDrop}} "
+             "CapAdd={{.HostConfig.CapAdd}}",
+             subprocess.run(["docker", "compose", "-f", COMPOSE, "ps", "-q", "app"], env=env,
+                            text=True, capture_output=True).stdout.strip()],
+            text=True, capture_output=True)
+    else:
+        caps = compose_remote(
+            ssh, env, "exec", "-T", "app", "sh", "-c",
+            shlex.quote('getcap "$(readlink -f "$(command -v python3)")-init"; '
+                        'echo "shared: $(getcap "$(readlink -f "$(command -v python3)")")"'))
+        limits = ssh_run(ssh, f"cd /root/blastit && docker compose --env-file {ENV_FILE} "
+                              "-f e2e/rootless/compose.yml ps -q app | "
+                              "xargs docker inspect -f 'User={{.Config.User}} "
+                              "CapDrop={{.HostConfig.CapDrop}} CapAdd={{.HostConfig.CapAdd}}'")
+    capabilities = caps.stdout.strip()
+    log(f"the dedicated interpreter's file capabilities: {capabilities}")
+    ok = "cap_setuid" in capabilities and "cap_setpcap" in capabilities
+    # B1: the *shared* interpreter must have none — every process of that uid can
+    # run it, and the capabilities would turn any of them into init.
+    shared = next((line for line in caps.stdout.splitlines() if line.startswith("shared:")), "")
+    ok &= "cap_" not in shared
+    if not ok:
+        print(f"  FAIL the capabilities are on the wrong file:\n{caps.stdout}{caps.stderr}")
+    log(f"the app container's limits: {limits.stdout.strip()}")
+    return 0 if ok else 1
 
 
 def local(args):
@@ -203,18 +423,8 @@ def local(args):
                                "--no-log-prefix", "app"], env=env, text=True,
                               capture_output=True).stdout
         rc |= check_rootless_logs(dump_logs(logs, args.out), password)
-        caps = subprocess.run(["docker", "compose", "-f", COMPOSE, "exec", "-T", "app", "sh", "-c",
-                               'getcap "$(readlink -f "$(command -v python3)")"'], env=env,
-                              text=True, capture_output=True)
-        log(f"the interpreter's file capabilities: {caps.stdout.strip() or caps.stderr.strip()}")
-        rc |= 0 if "cap_setuid" in caps.stdout and "cap_setpcap" in caps.stdout else 1
-        limits = subprocess.run(
-            ["docker", "inspect", "-f", "User={{.Config.User}} CapDrop={{.HostConfig.CapDrop}} "
-             "CapAdd={{.HostConfig.CapAdd}}",
-             subprocess.run(["docker", "compose", "-f", COMPOSE, "ps", "-q", "app"], env=env,
-                            text=True, capture_output=True).stdout.strip()],
-            text=True, capture_output=True)
-        log(f"the app container's limits: {limits.stdout.strip()}")
+        rc |= caps_and_limits(env)
+        rc |= check_container(env, project)
     finally:
         if rc:
             compose_local(env, "logs", "--no-color", "--tail", "200", "app")
@@ -235,15 +445,18 @@ def names(args):
     return name, key_name
 
 
-def ssh_key_path(key_name):
-    return os.path.join("/tmp/opencode", f"{key_name}_ed25519")
-
-
 def generate_key(key_name):
-    path = ssh_key_path(key_name)
-    run(["rm", "-f", path, path + ".pub"])
+    """Generates the run's SSH key in a directory of its own.
+
+    A `TemporaryDirectory` the driver removes when it is done (M2): the private
+    key of a droplet that no longer exists has no reason to sit in `/tmp`
+    forever. `--keep` prints the path instead, because the droplet it opens still
+    does.
+    """
+    directory = tempfile.mkdtemp(prefix=f"{key_name}-")
+    path = os.path.join(directory, "id_ed25519")
     run(["ssh-keygen", "-t", "ed25519", "-N", "", "-C", key_name, "-f", path])
-    log(f"generated an SSH key at {path}")
+    log(f"generated an SSH key in {directory}")
     return path
 
 
@@ -335,6 +548,7 @@ def droplet(args):
     require_clean()
     key = generate_key(key_name)
     password = "e2e-" + secrets.token_hex(16)
+    ssh = None
     rc = 1
     try:
         log(f"importing the SSH key {key_name}")
@@ -373,6 +587,7 @@ def droplet(args):
 
         env = compose_env(args.project or "blastit-d6-rootless", args.port,
                           args.image or "blastit-d6-rootless:droplet", password)
+        write_env_file(ssh, env)
         log("docker compose up --build (a full Rust build on the droplet, this takes a while)")
         started = time.monotonic()
         up = compose_remote(ssh, env, "up", "--build", "--detach", "app")
@@ -394,20 +609,10 @@ def droplet(args):
             logs = compose_remote(ssh, env, "logs", "--no-color", "--no-log-prefix", "app").stdout
             rc |= check_rootless_logs(dump_logs(logs, args.out), password)
             # The mechanisms, read out of the containers rather than out of the
-            # log: the interpreter's file capabilities, and what the container
-            # was allowed to give it.
-            caps = compose_remote(ssh, env, "exec", "-T", "app", "sh", "-c",
-                                  "'getcap \"$(readlink -f \"$(command -v python3)\")\"'")
-            log(f"the interpreter's file capabilities on the droplet: {caps.stdout.strip()}")
-            rc |= 0 if "cap_setuid" in caps.stdout and "cap_setpcap" in caps.stdout else 1
-            inspect = (
-                f"cd /root/blastit && export {remote_env(env)} && docker inspect -f "
-                "'User={{.Config.User}} CapDrop={{.HostConfig.CapDrop}} "
-                "CapAdd={{.HostConfig.CapAdd}}' "
-                '"$(docker compose -f e2e/rootless/compose.yml ps -q app)"'
-            )
-            limits = ssh_run(ssh, inspect)
-            log(f"the app container's limits: {limits.stdout.strip() or limits.stderr.strip()}")
+            # log: which file has the capabilities, what the container was
+            # allowed to give it, and what every process of the container holds.
+            rc |= caps_and_limits(env, ssh)
+            rc |= check_container(env, env["E2E_PROJECT"], ssh)
             log(f"the run said {'PASS' if rc == 0 else 'FAIL'}")
         finally:
             tunnel.terminate()
@@ -420,10 +625,15 @@ def droplet(args):
         rc = 1
     finally:
         if args.keep:
-            log(f"--keep: leaving {name} and the key {key_name}; delete with "
-                f"`run.py --cleanup --name {name}`")
+            log(f"--keep: leaving {name}, the key {key_name} and the key file "
+                f"{os.path.dirname(key)}; delete with `run.py --cleanup --name {name}`")
         else:
+            # M2: the droplet, the key and the private key file all go together,
+            # and the env file (which holds the database password) with them.
+            if ssh is not None:
+                remove_env_file(ssh)
             destroy(name, key_name)
+            shutil.rmtree(os.path.dirname(key), ignore_errors=True)
     return rc
 
 
@@ -500,34 +710,48 @@ def verify_gone(name, key_name):
 def janitor(minutes):
     """Delete the resources this script leaves behind.
 
-    Droplets are the expensive resource: anything tagged `blastit-d6` that is
-    older than `--older-than-minutes` goes, whichever run created it. An SSH key
-    goes with the droplet of the same name: doctl does not report when a key was
-    created, so the safe rule is that a `blastit-d6-` key is deleted when no
-    surviving droplet carries its name.
+    Two rules, both conservative about what they cannot see:
+
+    * **a droplet** goes when its age is *known* and older than
+      `--older-than-minutes`. An age that cannot be read is a lower bound of
+      zero, not a licence to delete: without a `created_at` there is no way to
+      tell a crashed run from one that is starting, so the droplet stays;
+    * **an SSH key** goes with the droplet of the same name, and only then:
+      `doctl compute ssh-key list` reports no creation time, so a key whose
+      droplet is being created right now (the driver imports the key *before* the
+      droplet exists) is indistinguishable from an orphan. A key of a droplet the
+      janitor just deleted is deleted with it; any other is left for
+      `--cleanup --name`.
     """
     now = dt.datetime.now(dt.timezone.utc)
 
     def old(created):
+        """Whether `created` is *known* to be older than the cutoff."""
         try:
-            stamp = dt.datetime.fromisoformat(created.replace("Z", "+00:00").rstrip(" "))
+            stamp = dt.datetime.fromisoformat(str(created).replace("Z", "+00:00").rstrip(" "))
         except (AttributeError, ValueError):
-            return True
+            return False
+        if stamp.tzinfo is None:
+            return False
         return (now - stamp).total_seconds() > minutes * 60
 
     droplets = doctl("compute", "droplet", "list", "--tag-name", TAG) or []
-    surviving = set()
+    deleted = set()
     for droplet in droplets:
+        name = droplet.get("name", "")
         if old(droplet.get("created_at", "")):
-            log(f"stale droplet {droplet['name']} ({droplet['id']}, created {droplet.get('created_at')})")
-            doctl("compute", "droplet", "delete", str(droplet["id"]), "--force", parse=False, check_rc=False)
-        else:
-            surviving.add(droplet.get("name"))
+            log(f"stale droplet {name} ({droplet['id']}, created {droplet.get('created_at')})")
+            doctl("compute", "droplet", "delete", str(droplet["id"]), "--force", parse=False,
+                  check_rc=False)
+            deleted.add(name)
+    if not deleted:
+        log("no droplet is known to be older than the cutoff")
     for key in doctl("compute", "ssh-key", "list") or []:
         key_name = key.get("name", "")
-        if key_name.startswith(PREFIX) and key_name not in surviving:
-            log(f"stale SSH key {key_name} ({key['id']})")
-            doctl("compute", "ssh-key", "delete", str(key["id"]), "--force", parse=False, check_rc=False)
+        if key_name in deleted:
+            log(f"the SSH key of the droplet that went: {key_name} ({key['id']})")
+            doctl("compute", "ssh-key", "delete", str(key["id"]), "--force", parse=False,
+                  check_rc=False)
     return 0
 
 

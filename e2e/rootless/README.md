@@ -12,16 +12,24 @@ $ uv run e2e/rootless/run.py --local       # Docker Compose, on this machine
 $ uv run e2e/rootless/run.py --droplet     # a DigitalOcean Droplet in ams3
 ```
 
-Both modes build `e2e/rootless/Dockerfile` (the wheel install, plus `setcap`),
-run `e2e/rootless/compose.yml`, drive `e2e/scenario.py` over HTTP and check
-`e2e/check_logs.py` plus D6's own assertions on the event stream:
+Both modes build `e2e/rootless/Dockerfile` (the wheel install, plus `setcap` on
+a dedicated copy of the interpreter), run `e2e/rootless/compose.yml`, drive
+`e2e/scenario.py` over HTTP and check `e2e/check_logs.py` plus D6's own
+assertions:
 
-* the `boot` event of stage 0 **and** of the preload phase say
-  `"privilege": "capabilities"` and list the capabilities init holds;
-* every `process.spawned` has a uid of its own, above `BLASTIT_UID_BASE`;
-* a view's `/debug/caps/` probe — `/proc/self/status`, read in the view —
-  reports `CapInh`/`CapPrm`/`CapEff`/`CapBnd`/`CapAmb` all zero and
-  `NoNewPrivs: 1`.
+* on the event stream: the `boot` event of stage 0 **and** of the preload phase
+  say `"privilege": "capabilities"`, list the capabilities init holds, and say
+  `"bounding_set": "dropped"`; every `process.spawned` has a uid of its own,
+  above `BLASTIT_UID_BASE`; a view's `/debug/caps/` probe — `/proc/self/status`,
+  read in the view — reports `CapInh`/`CapPrm`/`CapEff`/`CapBnd`/`CapAmb` all
+  zero and `NoNewPrivs: 1`;
+* in `/proc` of the container: **every** process running under a layout uid —
+  http (20001), the scheduler (20002), dbproxy (20003) and every view — holds
+  nothing, bounding set included, and has `no_new_privs` set;
+* on the capable file itself: it is mode `0500`, owned by the service uid, and
+  another uid is refused by the kernel (`EACCES`);
+* as the service uid: a plain `python3`, and a second `manage.py`, hold nothing
+  and cannot `setuid(0)` — the shared interpreter grants nothing (B1).
 
 ## The capabilities, and why each one is there
 
@@ -40,15 +48,24 @@ same set:
 | `cap_setpcap` | dropping every child's **bounding** set, so nothing can hand a capability back |
 
 `cap_sys_resource` is **not** needed: blastit only ever *lowers* a `setrlimit`.
+`cap_setpcap` is *wanted* rather than required (M1): without it the boot runs, a
+child still holds nothing (its permitted, effective, inheritable and ambient sets
+are cleared, and it sets `no_new_privs`, which is what stops an `execve` from
+granting what the bounding set allows), and the `boot` event says
+`"bounding_set": "kept"` with a warning. A container that cannot give
+`cap_setpcap` — an old `--cap-drop`, a runtime without `PR_CAPBSET_DROP` — keeps
+working. Missing one of the six *required* ones is still refused at boot, with
+the names and the recipe.
 
 ## How the capabilities are granted
 
-Two mechanisms exist; this test uses both, one per context:
+Two mechanisms exist; this test uses the first, and the second is the spelling
+for a platform that sets `no_new_privs`:
 
-* **File capabilities on the binary** (`setcap`) — what the image does. In a
-  wheel install the "binary" is the **interpreter**: `blastit` is a console
-  script, its shebang names the image's Python, and the file capability is
-  granted at *that* `execve`.
+* **File capabilities on a dedicated copy of the file init starts from**
+  (`setcap`). In a wheel install that file is the **interpreter**: `blastit` is a
+  console script whose shebang names the image's Python. The *shared* interpreter
+  never carries them — see below.
 * **Ambient capabilities from a launcher** — `setpriv --reuid … --inh-caps +…
   --ambient-caps +…` from an entrypoint that starts as root. This is the way to
   do it on a platform that sets `no_new_privs` on the container (App Platform,
@@ -63,14 +80,49 @@ therefore keeps `user:` (the process really is non-root), uses `cap_drop: [ALL]`
 and `cap_add:` for exactly the bounding set a file capability may fill, and
 relies on `setcap` for permitted/effective.
 
-Two consequences worth knowing when deploying this:
+### The capable file is init's alone (B1, B2)
+
+A file with file capabilities turns **any** process of its owner's uid that can
+run it into init: `CAP_SETUID`, `CAP_SETPCAP`, `setuid(0)`. So the capability
+never goes on a file anybody else runs:
+
+```
+/usr/local/bin/python3.13        root:root  0755   the interpreter a project's `python` is
+/usr/local/bin/python3.13-init   10000:10000 0500  the copy init is started from, with
+                                                  cap_chown,cap_dac_override,cap_fowner,
+                                                  cap_kill,cap_setgid,cap_setuid,cap_setpcap
+```
+
+* the copy sits **next to** the original, because CPython finds its stdlib
+  (`sys.prefix`) and the venv's `site-packages` from the executable's own path;
+* `0500`, owned by the service uid: another uid — a worker, a migration that is
+  not init, an `setpriv`'d shell — gets `EACCES`. The e2e checks both;
+* the boot refuses, with the recipe, a deployment where the *shared* file carries
+  the capabilities, and refuses a wheel that cannot name the capability-free
+  interpreter at all;
+* a child cannot use the copy even if it could run it: its bounding set is empty
+  and it sets `no_new_privs`, and the kernel refuses such an `execve` outright
+  (`EPERM`, "insufficient to execute correctly").
+
+**Standalone install.** The same principle one level up: `setcap` on the binary
+itself breaks `--role=dbproxy`, which re-executes `/proc/self/exe` from a child
+whose bounding set is empty. A rootless standalone deployment therefore keeps two
+copies and names the capability-free one:
+
+```console
+$ cp /usr/local/bin/blastit /usr/local/bin/blastit-init
+$ chown 10000:10000 /usr/local/bin/blastit-init && chmod 0500 /usr/local/bin/blastit-init
+$ sudo setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+      /usr/local/bin/blastit-init
+$ BLASTIT_EXEC=/usr/local/bin/blastit /usr/local/bin/blastit-init
+```
+
+Two more consequences worth knowing when deploying this:
 
 * a child that has cleared its **bounding** set cannot `execve` a file with file
-  capabilities at all: the kernel refuses with `EPERM` ("insufficient to execute
-  correctly"), which is why the wheel's separate `blastit-dbproxy` binary — no
-  file capabilities — is what the capability-holding wheel install `execve`s for
-  that role. It also means a view cannot use the interpreter's capabilities
-  even if it manages to `execve` it: the attempt fails.
+  capabilities at all, which is why the wheel's separate `blastit-dbproxy`
+  binary — no file capabilities — is what the capability-holding wheel install
+  `execve`s for that role;
 * `/run/blastit` must be writable by the uid init runs as. `/run` belongs to
   root, so the compose file mounts a `tmpfs` there owned by that uid:
   `tmpfs: ["/run/blastit:mode=0700,uid=10000,gid=10000"]`.
@@ -94,17 +146,25 @@ $ uv run e2e/rootless/run.py --droplet --name blastit-d6-manual
 [ rootless … ] verified: neither the droplet nor the key named blastit-d6-manual exists
 ```
 
-`--keep` leaves both in place for debugging; `--cleanup --name …` deletes them
-afterwards. The janitor deletes what an interrupted run left behind:
+`--keep` leaves both in place for debugging (it prints the path of the private
+key, which is otherwise removed with the droplet); `--cleanup --name …` deletes
+them afterwards. The janitor deletes what an interrupted run left behind:
 
 ```console
 $ uv run e2e/rootless/run.py --janitor --older-than-minutes 120
+[rootless …] stale droplet blastit-d6-stale (1, created 2020-01-01T00:00:00Z)
+[rootless …] the SSH key of the droplet that went: blastit-d6-stale (11)
 ```
 
-Droplets tagged `blastit-d6` older than the cutoff go. An SSH key named
-`blastit-d6-…` goes too, unless a *surviving* droplet named after it is still
-there — `doctl` does not report when a key was created, so the rule is the one
-that cannot delete a key still in use.
+Two conservative rules, both about what the API does not say:
+
+* a droplet goes when its age is **known** to be past the cutoff. A `created_at`
+  that cannot be read is a lower bound of zero, not a licence to delete: there is
+  no way to tell a crashed run from one that is starting, so the droplet stays;
+* an SSH key goes **with the droplet of the same name**, and only then — `doctl
+  compute ssh-key list` reports no creation time, so a key whose droplet is being
+  created at this very moment (the driver imports the key first) looks exactly
+  like an orphan. Any other key is left for `--cleanup --name`.
 
 ## In CI
 

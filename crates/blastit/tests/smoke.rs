@@ -23,9 +23,11 @@
 //! directory in the binary's `RUNPATH`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::ffi::CString;
 use std::fs::Permissions;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -130,6 +132,26 @@ impl Server {
         python: &[(&str, &str)],
         env: &[(&str, &str)],
     ) -> Self {
+        Self::start_with(tag, uid_base, manifest, app, python, env, &[], None)
+    }
+
+    /// The same, with the program to start instead of the binary itself —
+    /// `setpriv` wrapping it, a copied binary with file capabilities — and,
+    /// when it is not this process's own uid, a uid to start it as.
+    ///
+    /// D6 needs both: a container that dropped `cap_setpcap` (M1) and a rootless
+    /// standalone install whose own file carries the capabilities (B2).
+    #[allow(clippy::too_many_arguments)]
+    fn start_with(
+        tag: &str,
+        uid_base: u32,
+        manifest: &str,
+        app: &str,
+        python: &[(&str, &str)],
+        env: &[(&str, &str)],
+        argv: &[&str],
+        as_uid: Option<u32>,
+    ) -> Self {
         let fixture = Fixture::new(tag);
         let manifest_path = fixture.write("blastit.toml", manifest);
         for (name, contents) in python {
@@ -137,7 +159,16 @@ impl Server {
         }
         let port = free_port();
 
-        let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
+        let (program, arguments) = match argv.split_first() {
+            Some((program, rest)) => ((*program).to_string(), rest.to_vec()),
+            None => (env!("CARGO_BIN_EXE_blastit").to_string(), Vec::new()),
+        };
+        let mut command = Command::new(program);
+        command.args(arguments);
+        if let Some(uid) = as_uid {
+            use std::os::unix::process::CommandExt;
+            command.uid(uid).gid(uid);
+        }
         command
             .env("PORT", port.to_string())
             .env("BLASTIT_APP", app)
@@ -407,6 +438,130 @@ fn process_uid(pid: i32) -> Option<u32> {
         .find_map(|line| line.strip_prefix("Uid:"))
         .and_then(|line| line.split_whitespace().next())
         .and_then(|uid| uid.parse().ok())
+}
+
+/// A world-readable, executable directory for a test that needs **file
+/// capabilities** (D6/B2).
+///
+/// Not `/tmp` (many hosts mount it `nosuid`) and not `/run` (systemd mounts it
+/// `noexec`), and not the cargo target directory either (`/home/<user>` is often
+/// not traversable by the view uids): `/opt` is on the root filesystem, which
+/// honours file capabilities, and a `0755` directory there is readable,
+/// executable and traversable by every uid the test needs.
+struct RunDir {
+    path: PathBuf,
+}
+
+impl RunDir {
+    /// Creates `/run/blastit-smoke-<pid>-<tag>-<n>`, mode `0755`.
+    fn new(tag: &str) -> Self {
+        let mut path = PathBuf::from("/opt");
+        path.push(format!(
+            "blastit-smoke-{}-{}-{}",
+            std::process::id(),
+            tag,
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
+        Self { path }
+    }
+
+    /// Writes a file everything may read (`0644`).
+    fn write(&self, name: &str, contents: &str) -> PathBuf {
+        let path = self.path.join(name);
+        std::fs::write(&path, contents).unwrap();
+        std::fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
+        path
+    }
+
+    /// Copies this test's own binary in, `0755`, with `security.capability` set
+    /// to `mask` when one is asked for.
+    ///
+    /// Returns whether the attribute was written; it needs `CAP_SETFCAP`, which
+    /// is what a deployment's `setcap` needs too.
+    fn binary(&self, name: &str, mask: Option<u32>) -> (PathBuf, bool) {
+        let path = self.path.join(name);
+        std::fs::copy(env!("CARGO_BIN_EXE_blastit"), &path).unwrap();
+        std::fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
+        let wrote = match mask {
+            None => true,
+            Some(mask) => write_file_caps(&path, mask),
+        };
+        (path, wrote)
+    }
+
+    /// The directory as a `PYTHONPATH` entry.
+    fn python_path(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for RunDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Runs a program to its exit and returns everything it printed (D6).
+///
+/// [`Server`] insists on a `ready` event, which is exactly what a boot that is
+/// *supposed* to fail never produces; this is the bounded, both-pipes version
+/// the refusals are checked with.
+fn run_to_exit(program: &[&std::ffi::OsStr], env: &[(&str, &str)], uid: u32) -> String {
+    use std::os::unix::process::CommandExt;
+    let (program, arguments) = program.split_first().expect("a program to run");
+    let mut command = Command::new(program);
+    command
+        .args(arguments)
+        .uid(uid)
+        .gid(uid)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    if let Some(path) = library_path() {
+        command.env("LD_LIBRARY_PATH", path);
+    }
+    let child = command.spawn().expect("the program starts");
+    let output = child.wait_with_output().expect("it ends on its own");
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    assert!(
+        !output.status.success(),
+        "a refused boot must not exit zero:\n{text}"
+    );
+    text
+}
+
+/// Writes `security.capability` with `permitted = mask` (D6/B2).
+///
+/// The attribute the kernel reads at an `execve`, written directly — a
+/// deployment uses `setcap`, which is not guaranteed to be in the image the
+/// tests run in. Needs `CAP_SETFCAP`, so this is root-only, like `setcap`.
+fn write_file_caps(path: &Path, mask: u32) -> bool {
+    // `struct vfs_cap_data`: `VFS_CAP_REVISION_2 | VFS_CAP_FLAGS_EFFECTIVE`,
+    // then two words of permitted and inheritable per half.
+    let mut value = [0_u8; 20];
+    value[..4].copy_from_slice(&0x0200_0001_u32.to_le_bytes());
+    value[4..8].copy_from_slice(&mask.to_le_bytes());
+    let name = c"security.capability";
+    let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `setxattr` takes a NUL-terminated path, a NUL-terminated name, a
+    // buffer of the length given and a flags word.
+    unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        ) == 0
+    }
 }
 
 /// Everything `/proc/<pid>/environ` holds, as text.
@@ -1043,6 +1198,161 @@ fn a_non_root_init_without_its_capabilities_names_them() {
         stdout.contains("setcap") || stderr.contains("setcap"),
         "the error says how to fix it\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+}
+
+#[test]
+fn a_root_boot_without_cap_setpcap_runs_and_says_the_bounding_set_is_kept() {
+    if !needs_root("bounding set") {
+        return;
+    }
+    // M1: a container that cannot give `cap_setpcap` (an old `--cap-drop`, a
+    // runtime without `PR_CAPBSET_DROP`) must still boot. `setpriv
+    // --bounding-set -setpcap` is that container: for root, the permitted set
+    // an `execve` leaves is the bounding set, so the binary starts without
+    // `cap_setpcap` anywhere.
+    let server = Server::start_with(
+        "bounding",
+        49_000,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[],
+        &[
+            "setpriv",
+            "--bounding-set",
+            "-setpcap",
+            env!("CARGO_BIN_EXE_blastit"),
+        ],
+        None,
+    );
+    let boots = server.events("boot");
+    assert_eq!(
+        boots[0]["privilege"], "root",
+        "it is still a root boot: {}",
+        boots[0]
+    );
+    assert_eq!(
+        boots[0]["bounding_set"], "kept",
+        "and the event says which happened: {}",
+        boots[0]
+    );
+    assert!(
+        server.wait_for_event("cap_setpcap is not held"),
+        "the warning"
+    );
+    // And it serves: the children lose every set they hold, `no_new_privs` is
+    // set, and the sandbox is otherwise the same one.
+    assert_eq!(server.get("/one").status, 200);
+    let spawned = server.events("process.spawned");
+    assert!(!spawned.is_empty(), "a view was forked");
+}
+
+#[test]
+fn a_rootless_standalone_install_runs_dbproxy_from_the_capability_free_copy() {
+    if !needs_root("rootless binary") {
+        return;
+    }
+    // B2: the file that carries the capabilities is init's alone, and
+    // `--role=dbproxy` — a child, whose bounding set is empty by then — runs the
+    // capability-free copy `BLASTIT_EXEC` names. Without it the child's
+    // `execve` fails: the kernel refuses a file with file capabilities that an
+    // empty bounding set cannot honour.
+    let uid = 49_500;
+    let dir = RunDir::new("rootless-bin");
+    // The set a deployment is advised to give (`caps::WANTED`), straight into
+    // the attribute the kernel reads: `setcap` is not guaranteed to be in the
+    // image the tests run in, and `CAP_SETFCAP` is root's anyway.
+    let mask = blastit_sys::caps::Capability::WANTED
+        .iter()
+        .fold(0_u32, |mask, cap| mask | (1 << cap.raw()));
+    let (init, wrote) = dir.binary("blastit-init", Some(mask));
+    let (plain, _) = dir.binary("blastit", None);
+    assert!(
+        wrote,
+        "setxattr(security.capability): {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(
+        blastit::host::has_file_caps(&init),
+        "the attribute is there"
+    );
+    assert!(
+        !blastit::host::has_file_caps(&plain),
+        "the copy stays capability-free"
+    );
+    // A rootless init owns the runtime directory (§7.2): `/run` belongs to root,
+    // so a deployment gives the service uid a directory of its own — a `tmpfs`
+    // in the e2e, a `chown` here.
+    let runtime = Path::new("/run/blastit");
+    std::fs::create_dir_all(runtime.join("views")).unwrap();
+    assert!(
+        std::process::Command::new("chown")
+            .args(["-R", &format!("{uid}:{uid}"), "/run/blastit"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false),
+        "chown -R {uid} /run/blastit"
+    );
+
+    let manifest = dir.write("blastit.toml", PROXY_AND_ROUTE);
+    dir.write("app.py", PG_APP);
+    let python_path = dir.python_path();
+    let url = "postgresql://nowhere:nowhere@127.0.0.1:1/nowhere";
+
+    // Without `BLASTIT_EXEC` the boot refuses, by name: dbproxy would have to
+    // `execve` the file that carries the capabilities.
+    let refused = run_to_exit(
+        &[init.as_os_str()],
+        &[
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("BLASTIT_UID_BASE", "20000"),
+            ("DATABASE_URL", url),
+            ("PYTHONPATH", &python_path),
+        ],
+        uid,
+    );
+    assert!(
+        refused.contains("BLASTIT_EXEC"),
+        "the refusal names the variable:\n{refused}"
+    );
+    assert!(
+        refused.contains("cannot name") && refused.contains("capability-free binary"),
+        "and says what is missing:\n{refused}"
+    );
+    // It never got as far as forking dbproxy, so nothing was served.
+    assert!(!refused.contains("\"ready\""), "{refused}");
+
+    // With it, the boot reaches `ready`: dbproxy was `execve`d from the
+    // capability-free copy and answered on its ready pipe.
+    let server = Server::start_with(
+        "rootless-bin",
+        20_000,
+        PROXY_AND_ROUTE,
+        "app:application",
+        &[("app.py", PG_APP)],
+        &[
+            ("BLASTIT_EXEC", plain.to_str().unwrap()),
+            ("DATABASE_URL", url),
+        ],
+        &[init.to_str().unwrap()],
+        Some(uid),
+    );
+    let boots = server.events("boot");
+    assert_eq!(
+        boots[0]["privilege"], "capabilities",
+        "a rootless boot: {}",
+        boots[0]
+    );
+    assert!(
+        boots[0]["capabilities"]
+            .as_array()
+            .is_some_and(|caps| caps.iter().any(|cap| cap == "cap_setuid")),
+        "{}",
+        boots[0]
+    );
+    assert_eq!(boots[0]["bounding_set"], "dropped", "{}", boots[0]);
+    assert!(server.get("/").status < 500, "{}", server.stdout_text());
 }
 
 #[test]

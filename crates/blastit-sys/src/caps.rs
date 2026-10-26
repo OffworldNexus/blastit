@@ -88,9 +88,34 @@ impl Capability {
     pub const SYS_RESOURCE: Self = Self(24);
 
     /// The capabilities an unprivileged `init` needs, in ascending order —
-    /// which is also the order [`Capability::SETCAP`] and the log lines spell
+    /// which is also the order [`Capability::SETCAP`] and its log lines spell
     /// them.
-    pub const NEEDED: [Self; 7] = [
+    ///
+    /// These six are what *must* be there for the boot to work, as root and as
+    /// an unprivileged uid alike (see [`decide`]): the uid layout
+    /// (`setuid`/`setgid`), the private directories (`chown`/`fowner`), opening
+    /// one of them (`dac_override`) and signalling a view (`kill`).
+    /// `cap_setpcap` is not in the list; [`Capability::WANTED`] adds it, and a
+    /// boot without it still runs (D6/M1).
+    pub const NEEDED: [Self; 6] = [
+        Self::CHOWN,
+        Self::DAC_OVERRIDE,
+        Self::FOWNER,
+        Self::KILL,
+        Self::SETGID,
+        Self::SETUID,
+    ];
+
+    /// Everything a deployment should give `init`: [`Capability::NEEDED`] plus
+    /// `cap_setpcap`, which lets it **empty its children's bounding set**.
+    ///
+    /// Without `cap_setpcap` a child still holds nothing, and
+    /// `PR_SET_NO_NEW_PRIVS` — set by every child — still stops an `execve` from
+    /// granting what the bounding set allows, so its absence is a warning at
+    /// boot and a `"bounding_set": "kept"` in the `boot` event rather than a
+    /// refusal: a container that cannot give it (a `--cap-drop` from before, a
+    /// runtime without `PR_CAPBSET_DROP`) must keep working.
+    pub const WANTED: [Self; 7] = [
         Self::CHOWN,
         Self::DAC_OVERRIDE,
         Self::FOWNER,
@@ -104,7 +129,7 @@ impl Capability {
     /// to give blastit what it is missing.
     ///
     /// ```console
-    /// $ sudo setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' /path/to/blastit
+    /// $ sudo setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' /path/to/blastit-init
     /// ```
     pub const SETCAP: &'static str =
         "cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap";
@@ -244,6 +269,18 @@ impl Capabilities {
         self == Self::default()
     }
 
+    /// The process holds no capability: permitted, effective, inheritable and
+    /// ambient are empty.
+    ///
+    /// The **bounding** set is deliberately not part of this (M1): it is not
+    /// something a process holds but what a later `execve` could still be
+    /// granted, and `PR_SET_NO_NEW_PRIVS` is what closes that door. A process
+    /// that checks this one and then sets the flag holds nothing that a
+    /// capability check could use.
+    pub fn holds_none(self) -> bool {
+        self.inheritable == 0 && self.permitted == 0 && self.effective == 0 && self.ambient == 0
+    }
+
     /// One set, as the bitmask the kernel reports.
     pub fn get(self, set: CapSet) -> u64 {
         match set {
@@ -357,6 +394,46 @@ fn optional_field(status: &str, name: &'static str) -> io::Result<Option<u64>> {
     Ok(None)
 }
 
+/// What a process that cannot run init is missing (D6).
+///
+/// A value rather than a sentence: the caller is the one that knows *how*
+/// blastit was installed — a wheel's interpreter, a standalone binary — and
+/// therefore which file it has to tell the operator to `setcap`, and which
+/// capability-free file the children must use instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Missing {
+    /// The uid init is running as.
+    pub uid: u32,
+    /// The capabilities missing from the effective set, in
+    /// [`Capability::NEEDED`] order.
+    pub capabilities: Vec<Capability>,
+}
+
+impl Missing {
+    /// The missing capabilities as `cap_...` names, comma-separated.
+    pub fn names(&self) -> String {
+        self.capabilities
+            .iter()
+            .map(|cap| cap.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// The plain-est failure there is: a [`Missing`] turned into an `io::Error`.
+///
+/// The message is deliberately bare — the *caller* adds the deployment-specific
+/// advice, because only it knows which file holds the capabilities and which one
+/// the children must use instead (D6/B1, B2).
+impl From<Missing> for io::Error {
+    fn from(missing: Missing) -> Self {
+        io::Error::other(Error::MissingCapabilities {
+            uid: missing.uid,
+            missing: missing.names(),
+        })
+    }
+}
+
 /// The privilege mode `init` runs in (D6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivilegeMode {
@@ -388,36 +465,40 @@ pub struct Held {
     /// the process's own — a root process's permitted set is the container's
     /// bounding set intersected with what the file it started from had.
     pub capabilities: Vec<&'static str>,
+    /// Whether init can **empty its children's bounding set**
+    /// ([`Capability::SETPCAP`]).
+    ///
+    /// `false` is not a failure: every other set is still cleared and
+    /// `PR_SET_NO_NEW_PRIVS` still stops an `execve` from granting what the
+    /// bounding set allows, so the boot warns and reports
+    /// `"bounding_set": "kept"` (D6/M1).
+    pub bounding_set_dropped: bool,
 }
 
 /// Decides the mode `init` runs in from its uid and capability sets (D6).
 ///
 /// Pure, so every combination is a unit test: this is the decision that turns
-/// "start me as root or with the right `setcap` line" into a boot or into one
-/// error naming what is missing.
+/// "start me as root or with the right `setcap` line" into a boot or into the
+/// list of capabilities that are missing.
 ///
 /// The effective set is what authorises the calls the boot makes — `setgroups`,
-/// `setresuid`, `chown`, `fchmod` and `kill` — so that is the set the decision
-/// reads. A root process whose effective set was cut down fails here too, with
-/// the same list, which is the honest answer: it cannot build a sandbox either.
+/// `setresuid`, `chown`, `fchmod`, the `open` of a view's directory and `kill` —
+/// so that is the set the decision reads, in both modes. **Root is not
+/// special**: a container that dropped one of those from uid 0's effective set
+/// cannot build its sandboxes either, and saying so at boot beats an `EPERM` at
+/// the first view. `cap_setpcap` is deliberately not in [`Capability::NEEDED`]:
+/// without it the boot still runs, and says so (M1).
 ///
 /// # Errors
 ///
-/// [`Error::MissingCapabilities`] naming every capability that is missing, when
-/// the process is neither root nor holding the whole set.
-pub fn decide(uid: u32, caps: &Capabilities) -> io::Result<PrivilegeMode> {
+/// [`Missing`], with the capabilities the effective set lacks.
+pub fn decide(uid: u32, caps: &Capabilities) -> Result<PrivilegeMode, Missing> {
     let missing = caps.missing(CapSet::Effective, &Capability::NEEDED);
     if !missing.is_empty() {
-        return Err(Error::MissingCapabilities {
+        return Err(Missing {
             uid,
-            missing: missing
-                .iter()
-                .map(|cap| cap.name())
-                .collect::<Vec<_>>()
-                .join(", "),
-            setcap: Capability::SETCAP,
-        }
-        .into());
+            capabilities: missing,
+        });
     }
     Ok(if uid == 0 {
         PrivilegeMode::Root
@@ -431,12 +512,11 @@ pub fn decide(uid: u32, caps: &Capabilities) -> io::Result<PrivilegeMode> {
 /// # Errors
 ///
 /// [`std::io::Error`] when `/proc/self/status` cannot be read or parsed, and
-/// [`Error::MissingCapabilities`] — through [`decide`] — when the process can
-/// run neither as root nor as an unprivileged holder of the needed
-/// capabilities.
+/// [`Missing`] — through [`decide`] — when the process can run neither as root
+/// nor as a holder of the needed capabilities.
 pub fn detect() -> io::Result<Held> {
     let caps = Capabilities::read()?;
-    let mode = decide(geteuid().as_raw(), &caps)?;
+    let mode = decide(geteuid().as_raw(), &caps).map_err(io::Error::from)?;
     let capabilities = match mode {
         // A rootless init is exactly what its permitted set says.
         PrivilegeMode::Capabilities => caps.names(CapSet::Permitted),
@@ -444,43 +524,65 @@ pub fn detect() -> io::Result<Held> {
         // the container's, and §10 is where they are documented.
         PrivilegeMode::Root => Vec::new(),
     };
-    Ok(Held { mode, capabilities })
+    Ok(Held {
+        mode,
+        capabilities,
+        bounding_set_dropped: caps.holds(CapSet::Effective, Capability::SETPCAP),
+    })
 }
 
-/// Clears the ambient, inheritable and bounding sets, keeping the permitted and
-/// effective ones.
+/// Clears the ambient and inheritable sets, and the bounding set **when it
+/// can**, keeping the permitted and effective ones.
 ///
 /// This is the half of [`clear`] that has to happen **before** a uid change:
 /// `PR_CAPBSET_DROP` needs `CAP_SETPCAP` in the effective set, and leaving uid 0
 /// is what clears that set. Both halves are what [`crate::drop_privileges`]
 /// runs, in that order.
 ///
+/// A process without `CAP_SETPCAP` — a container started with
+/// `--cap-drop SETPCAP`, a root process whose effective set was cut down —
+/// cannot empty the bounding set at all. That is not a reason to refuse to
+/// start (M1): the ambient and inheritable sets are still cleared here, the
+/// permitted and effective ones by [`clear_after_uid_change`], and the
+/// `PR_SET_NO_NEW_PRIVS` every child sets is what stops an `execve` from
+/// granting what the bounding set still allows. The boot says which of the two
+/// happened, in its `bounding_set` field.
+///
 /// # Errors
 ///
-/// [`Error::CapabilityDrop`] naming the step that failed — dropping the
-/// bounding set without `CAP_SETPCAP` is the interesting one, because it means
-/// a child would keep a capability it cannot lose — and
-/// [`Error::CapabilitiesRemaining`] when a set is still not empty afterwards.
+/// [`Error::CapabilityDrop`] naming the step that failed, and
+/// [`Error::CapabilitiesRemaining`] when a set that was cleared is not empty
+/// afterwards.
 pub fn clear_before_uid_change() -> io::Result<()> {
+    let caps = Capabilities::read()?;
     clear_ambient()?;
     clear_inheritable()?;
-    clear_bounding()?;
-    verify(&[CapSet::Ambient, CapSet::Inheritable, CapSet::Bounding])
+    if caps.holds(CapSet::Effective, Capability::SETPCAP) {
+        clear_bounding()?;
+        return verify(&[CapSet::Ambient, CapSet::Inheritable, CapSet::Bounding]);
+    }
+    verify(&[CapSet::Ambient, CapSet::Inheritable])
 }
 
-/// Clears the permitted and effective sets, and checks that nothing is left.
+/// Clears the permitted and effective sets, and checks that nothing is held.
 ///
 /// The second half of [`clear`]: after this, the process holds no capability at
-/// all, whatever it was started with.
+/// all, whatever it was started with. The **bounding** set is not part of the
+/// check — it is a restriction rather than something held, and emptying it is
+/// [`clear_before_uid_change`]'s job, when the process can (M1).
 ///
 /// # Errors
 ///
 /// [`Error::CapabilityDrop`] when the kernel refuses the `capset`, and
-/// [`Error::CapabilitiesRemaining`] when any of the five sets is not empty
-/// afterwards.
+/// [`Error::CapabilitiesRemaining`] when a set is not empty afterwards.
 pub fn clear_after_uid_change() -> io::Result<()> {
     capset(0, 0, 0)?;
-    verify(&CapSet::ALL)
+    verify(&[
+        CapSet::Inheritable,
+        CapSet::Permitted,
+        CapSet::Effective,
+        CapSet::Ambient,
+    ])
 }
 
 /// Clears every capability set the calling process can clear: ambient,
@@ -501,18 +603,25 @@ pub fn clear() -> io::Result<()> {
 /// Makes sure the calling process holds **no** capability at all.
 ///
 /// [`clear`] when there is anything to clear — which needs `CAP_SETPCAP` for
-/// the bounding set — and nothing but a check when there is not. A process that
-/// already holds none is what a wheel install's dbproxy starts as (nothing
-/// grants *it* capabilities), and refusing to start there would be wrong: what
-/// matters is that it holds none, not that it dropped some.
+/// the bounding set, and skips it when the process does not have that — and
+/// nothing but a check when there is not. A process that already holds none is
+/// what a wheel install's dbproxy starts as (nothing grants *it*
+/// capabilities), and refusing to start there would be wrong: what matters is
+/// that it holds none, not that it dropped some.
+///
+/// The check is [`Capabilities::holds_none`]: permitted, effective, inheritable
+/// and ambient. The bounding set is not something this process *holds* — it is
+/// what a later `execve` could still be granted — and the `no_new_privs` every
+/// child of init sets is what closes that door (M1).
 ///
 /// # Errors
 ///
-/// [`Error::CapabilitiesRemaining`] when a set survives the clearing, and as
-/// [`Capabilities::read`] when `/proc/self/status` cannot be read — read as
-/// "holds nothing" instead, a compromised dbproxy would keep a way back.
+/// [`Capabilities::read`]'s errors when `/proc/self/status` cannot be read, and
+/// [`Error::CapabilitiesRemaining`] — through [`clear`] — when a capability
+/// survives the attempt. Both are errors rather than "nothing to do": a process
+/// that cannot prove it holds nothing must not serve.
 pub fn hold_none() -> io::Result<()> {
-    if Capabilities::read()?.is_clear() {
+    if Capabilities::read()?.holds_none() {
         return Ok(());
     }
     clear()
@@ -774,15 +883,16 @@ mod tests {
     }
 
     #[test]
-    fn the_setcap_line_names_exactly_the_needed_set() {
-        // The error message tells an operator what to paste; it has to match the
-        // list the decision checks, or it sends them in circles.
-        let from_needed = Capability::NEEDED
+    fn the_setcap_line_names_exactly_the_wanted_set() {
+        // The boot tells an operator what to paste; it has to match the list a
+        // deployment is *advised* to give — `WANTED`, which is `NEEDED` plus
+        // `cap_setpcap` — or it sends them in circles.
+        let from_wanted = Capability::WANTED
             .iter()
             .map(|cap| cap.name())
             .collect::<Vec<_>>()
             .join(",");
-        assert_eq!(Capability::SETCAP, from_needed);
+        assert_eq!(Capability::SETCAP, from_wanted);
     }
 
     #[test]
@@ -826,21 +936,23 @@ mod tests {
     fn the_effective_set_is_the_one_that_decides() {
         // Permitted without effective authorises nothing: `capset` could raise
         // it, but blastit never does that, and a boot that only *could* setuid
-        // is a boot that fails at the first view.
+        // is a boot that fails at the first view. `0x16b` is the whole set
+        // without `cap_setuid`.
         let caps = Capabilities::parse_status(&status(
             "0",
             "00000000000001eb",
-            "0",
+            "000000000000016b",
             "00000000000001eb",
             "0",
         ))
         .unwrap();
         let err = decide(10_000, &caps).unwrap_err();
-        assert!(err.to_string().contains("cap_setuid"), "{err}");
+        assert_eq!(err.capabilities, [Capability::SETUID]);
+        assert!(err.names().contains("cap_setuid"), "{err:?}");
     }
 
     #[test]
-    fn a_missing_capability_is_named_with_the_fix() {
+    fn a_missing_capability_is_named() {
         let caps = Capabilities::parse_status(&status(
             "0",
             "00000000000001ea",
@@ -850,32 +962,28 @@ mod tests {
         ))
         .unwrap();
         let err = decide(10_000, &caps).unwrap_err();
-        match Error::from_io(&err) {
-            Some(Error::MissingCapabilities { missing, uid, .. }) => {
-                assert_eq!(uid, &10_000);
-                assert_eq!(missing, "cap_chown");
-            }
-            other => panic!("not a MissingCapabilities error: {other:?}"),
-        }
-        let message = err.to_string();
-        assert!(message.contains("cap_chown"), "{message}");
-        assert!(message.contains(Capability::SETCAP), "{message}");
-        assert!(message.contains("uid 10000"), "{message}");
+        assert_eq!(err.uid, 10_000);
+        assert_eq!(err.capabilities, [Capability::CHOWN]);
+        assert_eq!(err.names(), "cap_chown");
+        // The plain fact, and only that: which *file* to `setcap` is the boot's
+        // to say, because only the boot knows how blastit was installed (D6).
+        let plain = io::Error::from(err).to_string();
+        assert!(plain.contains("uid 10000"), "{plain}");
+        assert!(plain.contains("cap_chown"), "{plain}");
+        assert!(!plain.contains("setcap"), "{plain}");
     }
 
     #[test]
     fn a_process_with_no_capabilities_at_all_is_told_all_six() {
         let caps = Capabilities::parse_status(&status("0", "0", "0", "0", "0")).unwrap();
         let err = decide(1000, &caps).unwrap_err();
-        let message = err.to_string();
+        assert_eq!(err.capabilities, Capability::NEEDED);
+        let names = err.names();
         for cap in Capability::NEEDED {
-            assert!(
-                message.contains(cap.name()),
-                "{cap:?} missing from {message}"
-            );
+            assert!(names.contains(cap.name()), "{cap:?} missing from {names}");
         }
-        // And with the setcap line, which is how an operator fixes it.
-        assert!(message.contains("setcap"), "{message}");
+        // And `cap_setpcap` is *not* one of them: a boot without it runs (M1).
+        assert!(!names.contains("cap_setpcap"), "{names}");
     }
 
     #[test]
@@ -885,14 +993,38 @@ mod tests {
         let caps = Capabilities::parse_status(&status(
             "0",
             "00000000000001eb",
-            "0000000000000069",
+            "000000000000006b",
             "00000000000000e9",
             "0",
         ))
         .unwrap();
         let err = decide(0, &caps).unwrap_err();
-        assert!(err.to_string().contains("uid 0"), "{err}");
-        assert!(err.to_string().contains("cap_setuid"), "{err}");
+        assert_eq!(err.uid, 0);
+        assert_eq!(err.capabilities, [Capability::SETUID]);
+    }
+
+    #[test]
+    fn setpcap_is_wanted_but_not_needed() {
+        // M1: without `cap_setpcap` the boot runs — the children keep their
+        // bounding set, which the boot reports — so the decision must not
+        // refuse. `0xeb` is the six needed capabilities, without it.
+        let caps = Capabilities::parse_status(&status(
+            "0",
+            "00000000000000eb",
+            "00000000000000eb",
+            "00000000000001eb",
+            "0",
+        ))
+        .unwrap();
+        assert_eq!(decide(0, &caps).unwrap(), PrivilegeMode::Root);
+        assert_eq!(decide(1000, &caps).unwrap(), PrivilegeMode::Capabilities);
+        assert!(!caps.holds(CapSet::Effective, Capability::SETPCAP));
+        assert_eq!(
+            Capability::WANTED.len(),
+            Capability::NEEDED.len() + 1,
+            "SETPCAP is the one that is wanted and not needed"
+        );
+        assert!(Capability::WANTED.contains(&Capability::SETPCAP));
     }
 
     #[test]
@@ -906,6 +1038,11 @@ mod tests {
             Ok(mode) => {
                 let held = detect().unwrap();
                 assert_eq!(held.mode, mode);
+                assert_eq!(
+                    held.bounding_set_dropped,
+                    caps.holds(CapSet::Effective, Capability::SETPCAP),
+                    "the boot event has to say whether the bounding set can be emptied"
+                );
                 if mode == PrivilegeMode::Capabilities {
                     for cap in Capability::NEEDED {
                         assert!(
@@ -920,7 +1057,10 @@ mod tests {
             }
             Err(err) => {
                 let detected = detect().unwrap_err();
-                assert_eq!(detected.to_string(), err.to_string());
+                assert_eq!(
+                    Error::from_io(&detected).map(ToString::to_string),
+                    Some(io::Error::from(err).to_string())
+                );
             }
         }
     }
@@ -936,7 +1076,10 @@ mod tests {
         // capability sets for. `PR_SET_KEEPCAPS` is what a launcher uses to
         // hand them over in the first place.
         let code = in_child(|| {
-            let needs = Capability::NEEDED
+            // The whole set a deployment is advised to give (M1): with
+            // `cap_setpcap` the bounding set is emptied too, which is the
+            // strongest form of the invariant.
+            let needs = Capability::WANTED
                 .iter()
                 .fold(0_u64, |mask, cap| mask | (1_u64 << cap.raw()));
             if capset(needs, needs, needs).is_err() {
@@ -999,25 +1142,84 @@ mod tests {
     }
 
     #[test]
-    fn clearing_without_setpcap_says_so() {
+    fn without_setpcap_the_bounding_set_is_kept_and_said_so() {
         if is_root() {
             println!("skipped: needs a non-root user");
             return;
         }
-        // A process with no capabilities at all cannot drop its bounding set:
-        // the error has to name the step, because the alternative is a child
-        // that silently keeps whatever the bounding set still allows it to
-        // gain through a file with file capabilities.
+        // M1: a process that cannot empty its bounding set still runs — the
+        // other four sets are cleared, `no_new_privs` stops an `execve` from
+        // granting what the bounding set allows, and the boot reports
+        // `"bounding_set": "kept"`. Refusing here would break a container that
+        // cannot give `cap_setpcap` at all.
         let code = in_child(|| {
-            if clear_before_uid_change().is_ok() {
+            if Capabilities::read()
+                .unwrap()
+                .holds(CapSet::Effective, Capability::SETPCAP)
+            {
                 return 1;
             }
-            if Capabilities::read().unwrap().get(CapSet::Bounding) == 0 {
+            if clear().is_err() {
                 return 2;
+            }
+            let left = Capabilities::read().unwrap();
+            if !left.holds_none() {
+                return 3;
+            }
+            if left.get(CapSet::Bounding) == 0 {
+                return 4;
+            }
+            // And the way back to root is gone all the same.
+            if unsafe { libc::setuid(0) } == 0 {
+                return 5;
             }
             0
         });
         assert_eq!(code, 0, "child failure code {code}");
+    }
+
+    #[test]
+    fn holding_nothing_ignores_the_bounding_set_but_nothing_else() {
+        // The distinction `hold_none` rests on (M1): permitted, effective,
+        // inheritable and ambient are what a process *holds*; the bounding set
+        // is what a later `execve` could still be granted, and `no_new_privs`
+        // is what closes that door.
+        let full =
+            Capabilities::parse_status(&status("0", "0", "0", "00000000000001eb", "0")).unwrap();
+        assert!(full.holds_none());
+        assert!(!full.is_clear());
+        for set in [
+            CapSet::Ambient,
+            CapSet::Permitted,
+            CapSet::Effective,
+            CapSet::Inheritable,
+        ] {
+            let one = Capabilities::parse_status(&status(
+                if set == CapSet::Inheritable {
+                    "0000000000000001"
+                } else {
+                    "0"
+                },
+                if set == CapSet::Permitted {
+                    "0000000000000001"
+                } else {
+                    "0"
+                },
+                if set == CapSet::Effective {
+                    "0000000000000001"
+                } else {
+                    "0"
+                },
+                "00000000000001eb",
+                if set == CapSet::Ambient {
+                    "0000000000000001"
+                } else {
+                    "0"
+                },
+            ))
+            .unwrap();
+            assert!(!one.holds_none(), "{set:?} must count as held");
+        }
     }
 
     #[test]

@@ -161,6 +161,12 @@ fn lifecycle_summary(lifecycle: &Lifecycle) -> String {
     if let Some(privilege) = &lifecycle.privilege {
         parts.push(format!("privilege={privilege}"));
     }
+    if let Some(dropped) = lifecycle.bounding_set {
+        parts.push(format!(
+            "bounding_set={}",
+            if dropped { "dropped" } else { "kept" }
+        ));
+    }
     if !lifecycle.capabilities.is_empty() {
         parts.push(format!(
             "capabilities=[{}]",

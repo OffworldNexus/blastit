@@ -417,16 +417,17 @@ mod tests {
             println!("skipped: needs a non-root user");
             return;
         }
-        // A process with no capabilities cannot even clear the bounding set:
-        // `PR_CAPBSET_DROP` needs `CAP_SETPCAP`, and D6 clears the sets before
-        // the uid change. The boot refuses long before this, in
-        // `caps::decide`, with the list of capabilities that are missing —
-        // this is the same failure one layer down, so it names its own step.
+        // A process with no capabilities cannot even clear what it holds:
+        // `setgroups(0, NULL)` is the first call that needs one, and D6's
+        // capability drop deliberately runs ahead of it (M1: the bounding set is
+        // skipped rather than treated as a failure, because a container without
+        // `cap_setpcap` must keep working). The boot refuses long before this, in
+        // `caps::decide`, with the list of capabilities that are missing.
         let uid = euid();
         let code = in_child(move || match drop_privileges(uid) {
             Ok(()) => 1,
             Err(err) => match Error::from_io(&err) {
-                Some(Error::CapabilityDrop { stage, .. }) if *stage == "PR_CAPBSET_DROP" => 0,
+                Some(Error::PrivilegeDrop { stage, .. }) if *stage == "setgroups(0, NULL)" => 0,
                 _ => 2,
             },
         });
@@ -482,12 +483,13 @@ mod tests {
         }
         let uid = 20_500;
         let code = in_child(move || {
-            let needs = crate::caps::Capability::NEEDED
+            // The capabilities a rootless init is started with: the whole set a
+            // deployment is advised to give (M1 — with `cap_setpcap` the
+            // bounding set is emptied too), as permitted and effective, which is
+            // what a launcher hands over. As root we raise them ourselves.
+            let needs = crate::caps::Capability::WANTED
                 .iter()
                 .fold(0_u64, |mask, cap| mask | (1_u64 << cap.raw()));
-            // The capabilities a rootless init is started with: permitted and
-            // effective set, plus the inheritable/ambient pair a launcher can
-            // hand over. As root we have to raise them ourselves.
             if crate::caps::capset(needs, needs, needs).is_err() {
                 return 1;
             }

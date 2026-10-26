@@ -37,8 +37,8 @@ use blastit_sys::{
 };
 
 use crate::child::{ChildIo, Deadline, read_one, wait_readable};
-use crate::config::{Config, LogFormat, Privilege, view_dir};
-use crate::host::{Host, Reexec};
+use crate::config::{Config, LogFormat, Mode, Privilege, view_dir};
+use crate::host::{EXEC, Host, Install, Placement, Reexec};
 use crate::logs::{Emitter, fail, output_event};
 
 /// How long stage 0 waits for dbproxy's ready byte before giving up (§4).
@@ -65,16 +65,85 @@ fn stage0_lifecycle(privilege: Option<&Privilege>) -> Lifecycle {
 
 /// The privilege mode D6's `boot` event reports, from what `blastit-sys` read
 /// out of `/proc/self/status`.
-fn privilege_from(held: blastit_sys::Held) -> Privilege {
-    match held.mode {
-        blastit_sys::PrivilegeMode::Root => Privilege::Root,
-        blastit_sys::PrivilegeMode::Capabilities => Privilege::Capabilities {
-            capabilities: held
+fn privilege_from(held: &blastit_sys::Held) -> Privilege {
+    Privilege {
+        mode: match held.mode {
+            blastit_sys::PrivilegeMode::Root => Mode::Root,
+            blastit_sys::PrivilegeMode::Capabilities => Mode::Capabilities,
+        },
+        capabilities: match held.mode {
+            // A rootless init is exactly what its permitted set says.
+            blastit_sys::PrivilegeMode::Capabilities => held
                 .capabilities
                 .iter()
                 .map(|name| (*name).to_string())
                 .collect(),
+            // Root's own set is the container's: §10 documents it, and the
+            // event does not pretend to list it.
+            blastit_sys::PrivilegeMode::Root => Vec::new(),
         },
+        bounding_set_dropped: held.bounding_set_dropped,
+    }
+}
+
+/// The sentence a boot that lacks capabilities fails with (D6/B1, B2).
+///
+/// [`blastit_sys::caps::Missing`] only states the fact (the uid and the missing
+/// names), because *which file* should have been given them depends on the
+/// installation — and this is the only place that knows it. Root is never told
+/// to "start as root": it already is, and its capabilities come from the
+/// container.
+fn capability_advice(host: &Host, err: &std::io::Error) -> String {
+    let install = host.install();
+    let Some(blastit_sys::Error::MissingCapabilities { uid, missing }) =
+        blastit_sys::Error::from_io(err)
+    else {
+        return err.to_string();
+    };
+    if *uid == 0 {
+        return format!(
+            "this boot runs as uid 0 and the container's effective capability set is \
+             missing {missing}: uid 0 needs them as much as any other uid (they are what \
+             `chown`s the view directories, `open`s them and `kill`s a view). Docker's \
+             default capabilities include them — check `--cap-drop`, `--cap-add` and any \
+             bounding-set restriction on the container.\n  \
+             A rootless deployment gives them to a *dedicated copy* of the {} instead:\n  \
+             {}\n  {}",
+            install.file(),
+            copy_recipe(install),
+            install.naming()
+        );
+    }
+    format!(
+        "init runs as uid {uid} and is missing {missing}.\n  \
+         A rootless deployment gives the capabilities to a *dedicated copy* of the {}, \
+         never to the shared one:\n  {}\n  {}",
+        install.file(),
+        copy_recipe(install),
+        install.naming()
+    )
+}
+
+/// The four commands that make the capable copy, in this installation's words
+/// (D6/B1, B2).
+fn copy_recipe(install: Install) -> String {
+    match install {
+        Install::Wheel => format!(
+            "cp \"$(readlink -f <the interpreter>)\" <same directory>/<interpreter>-init\n  \
+             chown <the uid init runs as>:<its gid> <the copy>\n  chmod 0500 <the copy>\n  \
+             setcap '{}+ep' <the copy>\n  \
+             then start `<the copy> -m blastit` (the copy stays next to the original: \
+             CPython finds its stdlib and its venv from the executable's own path)",
+            blastit_sys::caps::Capability::SETCAP
+        ),
+        Install::Binary => format!(
+            "cp <the blastit binary> <the binary>-init\n  \
+             chown <the uid init runs as>:<its gid> <the copy>\n  chmod 0500 <the copy>\n  \
+             setcap '{}+ep' <the copy>\n  \
+             then start <the copy>, and set {EXEC}=<the blastit binary> so that \
+             `--role=dbproxy` runs the capability-free copy",
+            blastit_sys::caps::Capability::SETCAP,
+        ),
     }
 }
 
@@ -149,24 +218,55 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
     // D6: root or a handful of capabilities is read from the kernel, and it
     // decides whether the boot can build its sandboxes at all. It comes before
     // the first event, because the event has to report it.
-    let privilege = match blastit_sys::caps::detect() {
-        Ok(held) => privilege_from(held),
+    let held = match blastit_sys::caps::detect() {
+        Ok(held) => held,
         Err(err) => {
             // A boot that cannot read its own capability sets cannot say which
             // mode it is in. It says nothing about the mode rather than
             // guessing, and stops: a child that keeps a capability nobody
-            // looked for is exactly what §4 refuses to risk.
+            // looked for is exactly what §4 refuses to risk. The advice is the
+            // one an operator can act on, which is why it comes from here
+            // (`Host` knows how blastit was installed) and not from the error.
             boot.emit(&Event::now(
                 Component::Init,
                 EventKind::Boot(stage0_lifecycle(None)),
             ));
-            fail(&boot, &err.to_string());
+            fail(&boot, &capability_advice(host, &err));
+        }
+    };
+    let privilege = privilege_from(&held);
+    // D6/B1, B2: the file that may carry the capabilities is init's alone. A
+    // child that has dropped its bounding set cannot `execve` such a file at
+    // all, and every process of init's uid can run it — so the boot checks
+    // where each role's program comes from, and says what to fix.
+    let placement = match host.placement(held.bounding_set_dropped) {
+        Ok(placement) => placement,
+        Err(message) => {
+            boot.emit(&Event::now(
+                Component::Init,
+                EventKind::Boot(stage0_lifecycle(Some(&privilege))),
+            ));
+            fail(&boot, &message);
         }
     };
     boot.emit(&Event::now(
         Component::Init,
         EventKind::Boot(stage0_lifecycle(Some(&privilege))),
     ));
+    if !held.bounding_set_dropped {
+        // M1: the boot runs, and says so, once.
+        boot.emit(
+            &output_event(
+                Component::Init,
+                None,
+                Stream::Stderr,
+                "cap_setpcap is not held: the children keep their bounding set. Every \
+                 other capability set is still cleared, and `no_new_privs` still stops \
+                 an `execve` from granting what the bounding set allows (D6/M1)",
+            )
+            .with_level(Level::Warn),
+        );
+    }
 
     let mut config = match Config::from_env() {
         Ok(config) => config,
@@ -226,7 +326,14 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
     config.privilege = Some(privilege);
 
     let listeners = bind_view_sockets(&emitter, &manifest, &prepared, &layout);
-    let dbproxy = fork_dbproxy(&emitter, &config, host, interpreter, &prepared, listeners);
+    let dbproxy = fork_dbproxy(
+        &emitter,
+        &config,
+        &placement,
+        interpreter,
+        &prepared,
+        listeners,
+    );
 
     // The interpreter's import path travels in the configuration, not in the
     // environment: stage 1 is `execve`'d as an interpreter of its own (§4), and
@@ -235,7 +342,14 @@ pub fn run(host: &Host, interpreter: bool) -> ! {
     config.sys_path = host.sys_path().to_vec();
 
     // Everything a secret touched is gone from the process image in one step.
-    exec_stage1(&emitter, &config, host, prepared.app_env(), dbproxy)
+    exec_stage1(
+        &emitter,
+        &config,
+        host,
+        &placement,
+        prepared.app_env(),
+        dbproxy,
+    )
 }
 
 /// Creates every view's private directory and binds the pg sockets it may use
@@ -314,7 +428,7 @@ fn bind_view_sockets(
 fn fork_dbproxy(
     emitter: &Emitter,
     config: &Config,
-    host: &Host,
+    placement: &Placement,
     interpreter: bool,
     prepared: &blastit_env::Prepared,
     listeners: Vec<(UnixListener, ListenerSpec)>,
@@ -400,7 +514,10 @@ fn fork_dbproxy(
             })
         }
         Fork::Child => {
-            let mut argv = reexec_argv(emitter, host.dbproxy());
+            // D6/B2: the *checked* program, not `host.dbproxy()`: a standalone
+            // install whose own file carries the capabilities must run this role
+            // as the capability-free copy, or the `execve` itself fails.
+            let mut argv = reexec_argv(emitter, &Reexec::program(&placement.dbproxy));
             argv.push(cstring(emitter, "--role=dbproxy"));
             argv.push(cstring(
                 emitter,
@@ -437,7 +554,11 @@ fn fork_dbproxy(
             }
             // An empty environment: dbproxy's `/proc/<pid>/environ` is empty,
             // and the credentials arrive over the pipe it already holds (§4).
-            let err = exec(&program(emitter, host.dbproxy()), &argv, &[]);
+            let err = exec(
+                &program(emitter, &Reexec::program(&placement.dbproxy)),
+                &argv,
+                &[],
+            );
             fail(emitter, &format!("exec dbproxy: {err}"));
         }
     }
@@ -549,6 +670,7 @@ fn exec_stage1(
     emitter: &Emitter,
     config: &Config,
     host: &Host,
+    placement: &Placement,
     app_env: &BTreeMap<String, String>,
     dbproxy: Option<DbproxyHandover>,
 ) -> ! {
@@ -572,7 +694,15 @@ fn exec_stage1(
     }
     drop(file);
 
-    let mut argv = reexec_argv(emitter, host.stage1());
+    // D6/B1, B2: init's own image — the file a deployment may have given the
+    // capabilities to. Stage 1 forks the children and drops their privileges,
+    // so it needs them, and this `execve` comes from stage 0, whose bounding
+    // set is still whole: the file capabilities apply.
+    let stage1 = Reexec {
+        program: placement.init.clone(),
+        prefix: host.stage1().prefix.clone(),
+    };
+    let mut argv = reexec_argv(emitter, &stage1);
     argv.push(cstring(emitter, "--stage=1"));
     argv.push(cstring(
         emitter,
@@ -606,7 +736,7 @@ fn exec_stage1(
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    let err = exec(&program(emitter, host.stage1()), &argv, &env);
+    let err = exec(&program(emitter, &stage1), &argv, &env);
     fail(emitter, &format!("exec stage 1: {err}"))
 }
 
@@ -758,42 +888,56 @@ mod tests {
 
     #[test]
     fn the_stage_zero_boot_event_says_the_mode() {
-        let root = stage0_lifecycle(Some(&Privilege::Root));
+        let root = stage0_lifecycle(Some(&Privilege {
+            mode: Mode::Root,
+            capabilities: Vec::new(),
+            bounding_set_dropped: true,
+        }));
         assert_eq!(root.stage(), Some("stage0"));
         assert_eq!(root.privilege(), Some("root"));
         assert!(root.capabilities().is_empty());
+        assert_eq!(root.bounding_set(), Some(true));
 
-        let rootless = stage0_lifecycle(Some(&Privilege::Capabilities {
+        let rootless = stage0_lifecycle(Some(&Privilege {
+            mode: Mode::Capabilities,
             capabilities: vec!["cap_chown".to_string(), "cap_setuid".to_string()],
+            bounding_set_dropped: false,
         }));
         assert_eq!(rootless.privilege(), Some("capabilities"));
         assert_eq!(rootless.capabilities(), ["cap_chown", "cap_setuid"]);
+        assert_eq!(
+            rootless.bounding_set(),
+            Some(false),
+            "M1: a deployment without cap_setpcap says so"
+        );
 
         // A boot that could not read its own capability sets says nothing about
         // the mode rather than guessing one.
         let unknown = stage0_lifecycle(None);
         assert_eq!(unknown.stage(), Some("stage0"));
         assert_eq!(unknown.privilege(), None);
+        assert_eq!(unknown.bounding_set(), None);
     }
 
     #[test]
     fn the_detected_mode_becomes_the_boot_field() {
-        let root = privilege_from(blastit_sys::Held {
+        let root = privilege_from(&blastit_sys::Held {
             mode: blastit_sys::PrivilegeMode::Root,
             capabilities: Vec::new(),
+            bounding_set_dropped: true,
         });
-        assert_eq!(root, Privilege::Root);
-        let rootless = privilege_from(blastit_sys::Held {
+        assert_eq!(root.mode, Mode::Root);
+        assert!(root.capabilities.is_empty());
+        assert!(root.bounding_set_dropped);
+        let rootless = privilege_from(&blastit_sys::Held {
             mode: blastit_sys::PrivilegeMode::Capabilities,
             capabilities: vec!["cap_chown", "cap_setuid"],
+            bounding_set_dropped: false,
         });
-        assert_eq!(
-            rootless,
-            Privilege::Capabilities {
-                capabilities: vec!["cap_chown".to_string(), "cap_setuid".to_string()],
-            }
-        );
-        assert_eq!(rootless.mode(), "capabilities");
+        assert_eq!(rootless.mode, Mode::Capabilities);
+        assert_eq!(rootless.capabilities, ["cap_chown", "cap_setuid"]);
+        assert!(!rootless.bounding_set_dropped);
+        assert_eq!(rootless.mode.as_str(), "capabilities");
     }
     /// A dbproxy that printed something and then hung holds its write end open:
     /// the drain has to read what it said without waiting for the process.

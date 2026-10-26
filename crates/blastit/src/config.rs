@@ -72,71 +72,91 @@ impl LogFormat {
 /// mode, so an operator reading the log knows which of the two deployments they
 /// are looking at.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Privilege {
+pub struct Privilege {
+    /// Which of the two shapes init found itself in.
+    pub mode: Mode,
+    /// The names init holds, `cap_...`, as `setcap` spells them: empty in root
+    /// mode, where the interesting set is the container's.
+    pub capabilities: Vec<String>,
+    /// Whether init can empty its children's bounding sets (`cap_setpcap`,
+    /// D6/M1).
+    ///
+    /// `false` is not a failure — every other set is still cleared and
+    /// `no_new_privs` closes what the bounding set would allow — but the `boot`
+    /// event says which of the two happened, in both modes.
+    pub bounding_set_dropped: bool,
+}
+
+/// Which shape init found itself in (D6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
     /// uid 0: the container's own capability set authorises the boot (§10).
     Root,
-    /// An unprivileged uid holding `capabilities` (D6's rootless mode).
-    Capabilities {
-        /// The names init holds, `cap_...`, as `setcap` spells them.
-        capabilities: Vec<String>,
-    },
+    /// An unprivileged uid holding [`Privilege::capabilities`] (D6's rootless
+    /// mode).
+    Capabilities,
+}
+
+impl Mode {
+    /// The `boot` event's `privilege` field: `root` or `capabilities`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Capabilities => "capabilities",
+        }
+    }
 }
 
 impl Privilege {
-    /// The `boot` event's `privilege` field: `root` or `capabilities`.
-    pub fn mode(&self) -> &'static str {
-        match self {
-            Self::Root => "root",
-            Self::Capabilities { .. } => "capabilities",
-        }
-    }
-
-    /// The capabilities init holds; empty in root mode, where the interesting
-    /// set is the container's.
-    pub fn capabilities(&self) -> &[String] {
-        match self {
-            Self::Root => &[],
-            Self::Capabilities { capabilities } => capabilities,
-        }
-    }
-
-    /// Adds the mode and the capability names to a lifecycle event (§8.1, D6).
+    /// Adds the mode, the capability names and the bounding-set fact to a
+    /// lifecycle event (§8.1, D6).
     ///
     /// The one place both stages build these fields from, so the two `boot`
     /// events cannot drift apart.
     pub fn lifecycle(&self, lifecycle: Lifecycle) -> Lifecycle {
-        let lifecycle = lifecycle.with_privilege(self.mode());
-        self.capabilities()
-            .iter()
-            .fold(lifecycle, |lifecycle, name| {
-                lifecycle.with_capability(name.clone())
-            })
+        let lifecycle = lifecycle
+            .with_privilege(self.mode.as_str())
+            .with_bounding_set(self.bounding_set_dropped);
+        self.capabilities.iter().fold(lifecycle, |lifecycle, name| {
+            lifecycle.with_capability(name.clone())
+        })
     }
 
-    /// The same, from a mode this crate only reads back (§4's JSON document).
+    /// The same, from the document stage 0 wrote (§4).
     ///
     /// # Errors
     ///
     /// [`ConfigError::Document`] for a mode that is not one of the two, which is
     /// a document stage 0 did not write.
     pub fn from_json(value: &Value) -> Result<Option<Self>, ConfigError> {
-        match value.get("privilege") {
-            None | Some(Value::Null) => Ok(None),
+        let mode = match value.get("privilege") {
+            None | Some(Value::Null) => return Ok(None),
             Some(Value::String(mode)) => match mode.as_str() {
-                "root" => Ok(Some(Self::Root)),
-                "capabilities" => Ok(Some(Self::Capabilities {
-                    capabilities: json_optional_string_list(value, "capabilities")?,
-                })),
-                other => Err(document(
-                    "privilege",
-                    format!("unknown mode `{other}` (root or capabilities)"),
-                )),
+                "root" => Mode::Root,
+                "capabilities" => Mode::Capabilities,
+                other => {
+                    return Err(document(
+                        "privilege",
+                        format!("unknown mode `{other}` (root or capabilities)"),
+                    ));
+                }
             },
-            Some(_) => Err(document(
-                "privilege",
-                "must be a string or null".to_string(),
-            )),
-        }
+            Some(_) => {
+                return Err(document(
+                    "privilege",
+                    "must be a string or null".to_string(),
+                ));
+            }
+        };
+        let capabilities = match mode {
+            Mode::Capabilities => json_optional_string_list(value, "capabilities")?,
+            Mode::Root => Vec::new(),
+        };
+        Ok(Some(Self {
+            mode,
+            capabilities,
+            bounding_set_dropped: json_optional_bool(value, "bounding_set")?.unwrap_or(true),
+        }))
     }
 }
 
@@ -1264,14 +1284,15 @@ impl Config {
             })
             .collect();
         object.insert("proxy_outputs".into(), Value::Object(outputs));
-        // D6: the mode init detected, and the capabilities it holds. `root` is
-        // written as a plain mode with no list; the rootless case carries the
-        // names, never a value of any kind.
+        // D6: the mode init detected, the capabilities it holds, and whether
+        // the children's bounding set can be emptied. `root` is written as a
+        // plain mode with no list; the rootless case carries the names, never a
+        // value of any kind.
         object.insert(
             "privilege".into(),
             match &self.privilege {
                 None => Value::Null,
-                Some(privilege) => Value::from(privilege.mode()),
+                Some(privilege) => Value::from(privilege.mode.as_str()),
             },
         );
         object.insert(
@@ -1279,13 +1300,24 @@ impl Config {
             Value::Array(
                 self.privilege
                     .as_ref()
-                    .map(Privilege::capabilities)
+                    .map(|privilege| privilege.capabilities.as_slice())
                     .unwrap_or_default()
                     .iter()
                     .cloned()
                     .map(Value::from)
                     .collect(),
             ),
+        );
+        object.insert(
+            "bounding_set".into(),
+            match self
+                .privilege
+                .as_ref()
+                .map(|privilege| privilege.bounding_set_dropped)
+            {
+                None => Value::Null,
+                Some(dropped) => Value::from(dropped),
+            },
         );
         object.insert(
             "sys_path".into(),
@@ -1926,6 +1958,21 @@ fn json_bool(value: &Value, name: &'static str) -> Result<bool, ConfigError> {
         .ok_or_else(|| document(name, "must be true or false".to_string()))
 }
 
+/// A JSON boolean, or `None` when the field is absent or null.
+///
+/// Used for a field stage 0 only writes once it has detected something (D6's
+/// bounding-set fact), so a reader does not have to care which.
+///
+/// # Errors
+///
+/// [`ConfigError::Document`] when the field is there but is not a boolean.
+fn json_optional_bool(value: &Value, name: &'static str) -> Result<Option<bool>, ConfigError> {
+    match value.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => json_bool(value, name).map(Some),
+    }
+}
+
 fn json_duration(value: &Value, name: &'static str) -> Result<Duration, ConfigError> {
     let millis = json_f64(value, name)?;
     if !millis.is_finite() || millis < 0.0 {
@@ -2133,8 +2180,10 @@ mod tests {
             b"/app/.venv/lib/python3.14/site-packages".to_vec(),
             vec![b'/', b'a', 0xff, b'p'],
         ];
-        config.privilege = Some(Privilege::Capabilities {
+        config.privilege = Some(Privilege {
+            mode: Mode::Capabilities,
             capabilities: vec!["cap_chown".to_string(), "cap_setuid".to_string()],
+            bounding_set_dropped: true,
         });
         config.validate().unwrap();
 
@@ -2190,20 +2239,29 @@ mod tests {
         let json = config.to_json();
         assert_eq!(json["privilege"], serde_json::Value::Null);
         assert_eq!(json["capabilities"], serde_json::json!([]));
+        assert_eq!(json["bounding_set"], serde_json::Value::Null);
 
-        // Root: a mode, no list.
-        config.privilege = Some(Privilege::Root);
+        // Root: a mode, no list, and the bounding-set fact anyway (M1: root
+        // empties it too, when the container has `cap_setpcap`).
+        config.privilege = Some(Privilege {
+            mode: Mode::Root,
+            capabilities: Vec::new(),
+            bounding_set_dropped: true,
+        });
         let json = config.to_json();
         assert_eq!(json["privilege"], serde_json::json!("root"));
         assert_eq!(json["capabilities"], serde_json::json!([]));
+        assert_eq!(json["bounding_set"], serde_json::json!(true));
         let back = Config::from_json(&json).unwrap();
-        assert_eq!(back.privilege, Some(Privilege::Root));
-        assert_eq!(Privilege::Root.mode(), "root");
-        assert!(Privilege::Root.capabilities().is_empty());
+        assert_eq!(back.privilege, config.privilege);
+        assert_eq!(Mode::Root.as_str(), "root");
 
-        // Rootless: the mode and the names init holds.
-        config.privilege = Some(Privilege::Capabilities {
+        // Rootless: the mode, the names init holds, and the one it could not
+        // empty.
+        config.privilege = Some(Privilege {
+            mode: Mode::Capabilities,
             capabilities: vec!["cap_chown".to_string(), "cap_setuid".to_string()],
+            bounding_set_dropped: false,
         });
         let json = config.to_json();
         assert_eq!(json["privilege"], serde_json::json!("capabilities"));
@@ -2211,16 +2269,25 @@ mod tests {
             json["capabilities"],
             serde_json::json!(["cap_chown", "cap_setuid"])
         );
+        assert_eq!(json["bounding_set"], serde_json::json!(false));
         let back = Config::from_json(&json).unwrap();
         assert_eq!(back.privilege, config.privilege);
+        assert_eq!(Mode::Capabilities.as_str(), "capabilities");
         assert_eq!(
-            config.privilege.as_ref().unwrap().mode(),
-            "capabilities",
-            "the boot event's spelling"
-        );
-        assert_eq!(
-            config.privilege.as_ref().unwrap().capabilities(),
+            config.privilege.as_ref().unwrap().capabilities,
             ["cap_chown", "cap_setuid"]
+        );
+        assert!(!config.privilege.as_ref().unwrap().bounding_set_dropped);
+        // A document that predates the field still reads as "dropped", which is
+        // what the boot in force does unless it says otherwise.
+        let mut older = json.clone();
+        older.as_object_mut().unwrap().remove("bounding_set");
+        assert!(
+            Config::from_json(&older)
+                .unwrap()
+                .privilege
+                .unwrap()
+                .bounding_set_dropped
         );
     }
 
@@ -2233,18 +2300,31 @@ mod tests {
         json["privilege"] = serde_json::json!(1);
         let err = Config::from_json(&json).unwrap_err();
         assert!(err.to_string().contains("privilege"), "{err}");
+        json["privilege"] = serde_json::json!("capabilities");
+        json["bounding_set"] = serde_json::json!("maybe");
+        let err = Config::from_json(&json).unwrap_err();
+        assert!(err.to_string().contains("bounding_set"), "{err}");
     }
 
     #[test]
     fn the_privilege_fields_reach_a_lifecycle_event() {
-        let privilege = Privilege::Capabilities {
+        let privilege = Privilege {
+            mode: Mode::Capabilities,
             capabilities: vec!["cap_chown".to_string(), "cap_setuid".to_string()],
+            bounding_set_dropped: true,
         };
         let lifecycle = privilege.lifecycle(Lifecycle::default().with_stage("stage0"));
         assert_eq!(lifecycle.privilege(), Some("capabilities"));
         assert_eq!(lifecycle.capabilities(), ["cap_chown", "cap_setuid"]);
-        let root = Privilege::Root.lifecycle(Lifecycle::default().with_stage("stage0"));
+        assert_eq!(lifecycle.bounding_set(), Some(true));
+        let root = Privilege {
+            mode: Mode::Root,
+            capabilities: Vec::new(),
+            bounding_set_dropped: false,
+        }
+        .lifecycle(Lifecycle::default().with_stage("stage0"));
         assert_eq!(root.privilege(), Some("root"));
+        assert_eq!(root.bounding_set(), Some(false), "M1 says which happened");
         assert!(root.capabilities().is_empty());
     }
 

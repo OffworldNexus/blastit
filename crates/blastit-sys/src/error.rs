@@ -38,24 +38,18 @@ pub enum Error {
         detail: &'static str,
     },
 
-    /// `init` is neither root nor holding the capabilities its boot needs
-    /// (ROADMAP D6).
+    /// `init` does not hold the capabilities its boot needs (ROADMAP D6).
     ///
-    /// The message names every missing capability and the `setcap` line that
-    /// gives them, because the alternative — failing later at the first
-    /// `setuid` with an `EPERM` — says nothing about what to add.
-    #[error(
-        "init runs as uid {uid} and cannot build its sandboxes: the effective capability set \
-         is missing {missing}. Start it as root (uid 0), or give the binary {setcap}:\n    \
-         setcap '{setcap}+ep' <binary>"
-    )]
+    /// The message states the fact — the uid and the missing capability names —
+    /// and nothing else: which *file* should have been given them depends on how
+    /// blastit was installed, and the boot is the only place that knows
+    /// ([`crate::caps::Missing`]).
+    #[error("the effective capability set of uid {uid} is missing {missing}")]
     MissingCapabilities {
         /// The uid `init` is running as.
         uid: u32,
         /// The missing capabilities, `cap_...` names, comma-separated.
         missing: String,
-        /// The whole set, as `setcap` spells it.
-        setcap: &'static str,
     },
 
     /// A capability set could not be dropped (ROADMAP D6).

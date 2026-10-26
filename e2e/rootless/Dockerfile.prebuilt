@@ -4,7 +4,8 @@
 #
 # Exactly one cp313 wheel must be in `dist/`. The capability block is the same
 # as in the other rootless Dockerfile; see that file for why the capability goes
-# on the interpreter.
+# to a *dedicated copy* of the interpreter (never to the shared one, which every
+# process of the service uid can run).
 FROM python:3.13-slim-trixie
 COPY e2e/demo/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
@@ -23,9 +24,13 @@ RUN set -e; \
     rm -rf /tmp/dist
 ARG BLASTIT_UID=10000
 RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit
-RUN setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
-        "$(readlink -f /usr/local/bin/python3.13)" \
-    && getcap "$(readlink -f /usr/local/bin/python3.13)"
+RUN interpreter="$(readlink -f /usr/local/bin/python3.13)" \
+    && cp "$interpreter" "${interpreter%/*}/python3.13-init" \
+    && chown "$BLASTIT_UID:$BLASTIT_UID" "${interpreter%/*}/python3.13-init" \
+    && chmod 0500 "${interpreter%/*}/python3.13-init" \
+    && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+         "${interpreter%/*}/python3.13-init" \
+    && getcap "${interpreter%/*}/python3.13-init" && getcap "$interpreter" || true
 COPY e2e/demo /app
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
@@ -36,4 +41,6 @@ ENV PYTHONUNBUFFERED=1 \
     BLASTIT_MANIFEST=/app/blastit.toml \
     PORT=8080
 EXPOSE 8080
-CMD ["blastit"]
+# The *copy* holds the capabilities; the shared interpreter stays
+# capability-free (B1).
+CMD ["/usr/local/bin/python3.13-init", "-m", "blastit"]

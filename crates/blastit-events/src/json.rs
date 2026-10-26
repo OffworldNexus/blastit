@@ -208,6 +208,16 @@ fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static
     if let Some(privilege) = &lifecycle.privilege {
         push_member(out, "privilege", &json_string(privilege));
     }
+    // D6/M1: whether the children's bounding set is emptied. Reported in both
+    // modes, because it is a fact about the boot rather than about init's own
+    // set.
+    if let Some(dropped) = lifecycle.bounding_set {
+        push_member(
+            out,
+            "bounding_set",
+            &json_string(if dropped { "dropped" } else { "kept" }),
+        );
+    }
     // D6: the capabilities an unprivileged init holds. Absent in root mode,
     // where the set is the container's own (§10).
     if !lifecycle.capabilities.is_empty() || truncated.contains(&"capabilities") {

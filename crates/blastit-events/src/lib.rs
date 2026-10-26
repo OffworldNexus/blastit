@@ -934,6 +934,7 @@ pub struct Lifecycle {
     seccomp: Option<bool>,
     privilege: Option<String>,
     capabilities: Vec<String>,
+    bounding_set: Option<bool>,
     immortalize: Option<bool>,
     immortalize_reason: Option<String>,
     immortalized: Option<u64>,
@@ -1005,6 +1006,18 @@ impl Lifecycle {
     #[must_use]
     pub fn with_capability(mut self, name: impl Into<String>) -> Self {
         self.capabilities.push(name.into());
+        self
+    }
+
+    /// Whether the children's **bounding** capability set is emptied (D6, M1).
+    ///
+    /// `false` means `cap_setpcap` was not held: every other set is still
+    /// cleared on the way down, and `no_new_privs` still stops an `execve` from
+    /// granting what the bounding set allows, so the boot runs and says so
+    /// rather than refusing.
+    #[must_use]
+    pub fn with_bounding_set(mut self, dropped: bool) -> Self {
+        self.bounding_set = Some(dropped);
         self
     }
 
@@ -1113,6 +1126,12 @@ impl Lifecycle {
     /// (D6).
     pub fn capabilities(&self) -> &[String] {
         &self.capabilities
+    }
+
+    /// Whether the children's bounding set is emptied, when the event says
+    /// (D6, M1).
+    pub fn bounding_set(&self) -> Option<bool> {
+        self.bounding_set
     }
 
     /// Whether §9.2 #7's pass ran, when the event says.

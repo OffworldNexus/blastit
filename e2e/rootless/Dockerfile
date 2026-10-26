@@ -1,16 +1,24 @@
 # The rootless end-to-end image (D6). Build context: the repository root.
 #
 # The install is the shipped one — the wheel, so the app's dependencies and the
-# console script are the ones a project gets from `pip install blastit` — and
-# the capability is given to the **interpreter** `execve`: a wheel install *is* a
-# Python program, its console script's shebang names this image's Python, and
-# that is the file whose `execve` the kernel grants file capabilities to.
+# console script are the ones a project gets from `pip install blastit` — and the
+# capability is given to a **dedicated copy of the interpreter** (B1):
 #
-# Why not `--cap-add` on a `user:` container: Docker hands a non-root
-# `--user` process **no** capabilities at all — `--cap-add`/`cap_drop` only set
-# the container's bounding set, which is what the capabilities below may fill.
-# Verified with `docker compose run` on this file's image: `CapPrm`, `CapEff` and
-# `CapAmb` are all zero for `user:` with `cap_add`.
+#   * the shared interpreter stays capability-free, because *every* process of
+#     the service uid can run it — an operator's `python manage.py`, a worker, a
+#     second shell — and a file with file capabilities turns any of them into
+#     init (`setuid(0)` and all);
+#   * the copy is owned by that uid, mode `0500`, so nothing else can run it, and
+#     it sits next to the original: CPython finds its stdlib and its venv from
+#     the executable's own path;
+#   * the children cannot use it either: their bounding set is empty and they set
+#     `no_new_privs`, and the kernel refuses such an `execve` outright.
+#
+# Why not `--cap-add` on a `user:` container: Docker hands a non-root `--user`
+# process **no** capabilities at all — `--cap-add`/`cap_drop` only set the
+# container's bounding set, which is what the file capability may fill. Verified
+# with `docker compose run` on this file's image: `CapPrm`, `CapEff` and `CapAmb`
+# are all zero for `user:` with `cap_add`.
 #
 # The uid the server runs as (`BLASTIT_UID`, 10000 by default) must stay below
 # `BLASTIT_UID_BASE` (20000, §2): the boot refuses a uid the layout hands to
@@ -45,12 +53,17 @@ COPY --from=build /src/dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm -rf /tmp/*.whl
 ARG BLASTIT_UID=10000
 RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit
-# The capabilities of `crates/blastit-sys/src/caps.rs`, on the interpreter the
-# console script starts. Order matters: `chown` clears a file capability, so
-# nothing re-owns the file after this line.
-RUN setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
-        "$(readlink -f /usr/local/bin/python3.13)" \
-    && getcap "$(readlink -f /usr/local/bin/python3.13)"
+# The dedicated copy of the interpreter, with the capabilities (B1). Order
+# matters: `chown` clears a file capability, so nothing re-owns the file after
+# the `setcap`, and the copy stays next to the original so CPython still finds
+# its stdlib and site-packages (`sys.prefix` follows the executable's path).
+RUN interpreter="$(readlink -f /usr/local/bin/python3.13)" \
+    && cp "$interpreter" "${interpreter%/*}/python3.13-init" \
+    && chown "$BLASTIT_UID:$BLASTIT_UID" "${interpreter%/*}/python3.13-init" \
+    && chmod 0500 "${interpreter%/*}/python3.13-init" \
+    && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+         "${interpreter%/*}/python3.13-init" \
+    && getcap "${interpreter%/*}/python3.13-init" && getcap "$interpreter" || true
 COPY e2e/demo /app
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
@@ -62,5 +75,6 @@ ENV PYTHONUNBUFFERED=1 \
     PORT=8080
 EXPOSE 8080
 # No `USER`: the container's user is the `user:` field of the compose service,
-# which is where the non-root identity of this deployment is declared.
-CMD ["blastit"]
+# which is where the non-root identity of this deployment is declared. The
+# command is the *copy*: the shared interpreter stays capability-free.
+CMD ["/usr/local/bin/python3.13-init", "-m", "blastit"]

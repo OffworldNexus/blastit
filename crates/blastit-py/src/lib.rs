@@ -65,10 +65,43 @@ fn main(py: Python<'_>, argv: Vec<String>, executable: String, dbproxy: String) 
         )));
     }
     Ok(cli::main(
-        Host::wheel(executable, dbproxy, interpreter_path(py)?),
+        Host::wheel(
+            executable,
+            dbproxy,
+            plain_interpreter(py)?,
+            interpreter_path(py)?,
+        ),
         argv,
         Some(py),
     ))
+}
+
+/// The interpreter a **child** of init must use, if this installation can name
+/// one (D6/B1).
+///
+/// A rootless wheel install starts blastit from a dedicated copy of the
+/// interpreter that carries the boot's file capabilities, and `sys.executable`
+/// is then that copy: running it is what turns any process of init's uid into
+/// `init` (`setuid(0)` and all). The project's own interpreter — the one a
+/// developer's `python`, `manage.py` or a worker uses — is
+/// `sys.prefix/bin/python`, and that is the file a child gets. It is the *same*
+/// file as `sys.executable` under an ambient-capability deployment, which is a
+/// perfectly good deployment: nothing about that file grants anything then.
+///
+/// `None` when this interpreter cannot name such a file. The boot then refuses
+/// only if the running file turns out to carry file capabilities, which is
+/// exactly the case where the name is needed — and `placement` is the one that
+/// says so, with the recipe.
+fn plain_interpreter(py: Python<'_>) -> PyResult<Option<PathBuf>> {
+    let sys = py.import("sys")?;
+    let mut candidates = Vec::new();
+    if let Ok(prefix) = sys.getattr("prefix")?.extract::<String>() {
+        candidates.push(PathBuf::from(prefix).join("bin").join("python"));
+    }
+    if let Ok(base) = sys.getattr("_base_executable")?.extract::<String>() {
+        candidates.push(PathBuf::from(base));
+    }
+    Ok(candidates.into_iter().find(|path| path.is_file()))
 }
 
 /// Normalises one SQL text the way blastit compares it to a grant (§6).

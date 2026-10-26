@@ -41,14 +41,17 @@ services:
   #
   #   user:           the unprivileged identity init runs as (never root);
   #   cap_drop: ALL   nothing is inherited from the container's own set;
-  #   cap_add:        exactly the capability bounding set the binary's file
-  #                   capabilities may fill — nothing else is reachable;
+  #   cap_add:        exactly the capability bounding set the dedicated copy's
+  #                   file capabilities may fill — nothing else is reachable;
   #   tmpfs /run/blastit
   #                   §7.2's runtime directory, owned by that user, because
   #                   `/run` itself belongs to root and a rootless init cannot
-  #                   create a directory there.
+  #                   create a directory there;
+  #   command:        the *copy* of the interpreter the image gave the
+  #                   capabilities to — never the shared one, which the app's own
+  #                   tooling (a worker, `manage.py`, a shell) also runs (B1).
   #
-  # The capabilities themselves come from `setcap` on the binary in the image
+  # The capabilities themselves come from `setcap` on that copy in the image
   # (see e2e/rootless/Dockerfile): `docker --user` does not hand a non-root
   # process the capabilities `--cap-add` lists, it only limits what a file
   # capability can grant.
@@ -60,5 +63,6 @@ services:
     tmpfs:
       - /run/blastit:mode=0700,uid=${E2E_APP_UID:-10000},gid=${E2E_APP_UID:-10000}
     environment: *app-env
+    command: ["/usr/local/bin/python3.13-init", "-m", "blastit"]
     ports: ["127.0.0.1:${E2E_PORT:-18080}:8080"]
     depends_on: { migrate: { condition: service_completed_successfully } }
