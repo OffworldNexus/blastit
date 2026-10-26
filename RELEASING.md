@@ -117,8 +117,8 @@ tag is the release.
 * **The tag doesn't match `Cargo.toml`**: the `guard` job says so and nothing is
   built. Delete the tag (`git push origin :v0.1.1`), decide which of the two is
   right, and tag again.
-* **A build or `twine check` fails**: nothing has been uploaded. Fix it on
-  `develop`, and either move the tag to the new commit
+* **A build or the description check fails**: nothing has been uploaded. Fix it
+  on `develop`, and either move the tag to the new commit
   (`git push origin :v0.1.0 && git tag -a v0.1.0 && git push origin v0.1.0`) or
   re-run the workflow from the tag.
 * **The upload failed partway**: re-run the `pypi` job. PyPI never accepts the
