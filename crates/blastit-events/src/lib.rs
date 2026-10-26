@@ -184,6 +184,9 @@ pub enum Outcome {
     Unmatched,
     /// The admission queue was full, `503`.
     QueueFull,
+    /// The client already had `BLASTIT_MAX_QUEUED_PER_CLIENT` requests waiting
+    /// in the admission queue, `503` (§2.4).
+    ClientQueueFull,
     /// The queue wait exceeded `BLASTIT_QUEUE_TIMEOUT`, `503`.
     QueueTimeout,
     /// `BLASTIT_REQUEST_TIMEOUT` expired first, `504`.
@@ -201,6 +204,7 @@ impl Outcome {
             Self::Ok => "ok",
             Self::Unmatched => "unmatched",
             Self::QueueFull => "queue_full",
+            Self::ClientQueueFull => "client_queue_full",
             Self::QueueTimeout => "queue_timeout",
             Self::Timeout => "timeout",
             Self::ViewDied => "view_died",
@@ -1531,6 +1535,7 @@ mod tests {
     #[test]
     fn reason_enums_render_snake_case_and_escape_hatches() {
         assert_eq!(Outcome::QueueTimeout.as_str(), "queue_timeout");
+        assert_eq!(Outcome::ClientQueueFull.as_str(), "client_queue_full");
         assert_eq!(Outcome::ViewDied.as_str(), "view_died");
         assert_eq!(SqlKind::FunctionCall.as_str(), "function_call");
         assert_eq!(SqlKind::Other("listen".to_owned()).as_str(), "listen");

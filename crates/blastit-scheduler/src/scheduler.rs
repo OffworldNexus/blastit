@@ -47,6 +47,17 @@
 //! * A `RESP_ABORT` from a view is reported with the `view_died` outcome, and
 //!   a `DRAIN` rejects new requests with `503`/`queue_full` (the closest of the
 //!   seven outcomes, which §8.1 closes).
+//! * The admission queue is one FIFO per client, served round-robin, when
+//!   `BLASTIT_FAIR_QUEUING` is on ([`crate::admission`]): the client key comes
+//!   from the peer, and a header only names the client when an operator
+//!   configured one *and* the peer is a trusted proxy. Off — the default —
+//!   every request shares one FIFO, which is the queue §2.4 describes and the
+//!   one a single client always saw.
+//! * A request refused by `BLASTIT_MAX_QUEUED_PER_CLIENT` reports
+//!   `client_queue_full`, an outcome §8.1 does not name.
+//! * Every `503` the scheduler writes itself carries `Retry-After` (§8 asks
+//!   for it on the queue-full and queue-timeout answers, and a client that
+//!   retries sooner would only be refused again).
 //! * A scheduler-written body is sent even for a `HEAD` request: deciding not
 //!   to is http's business, not the scheduler's (§2.3).
 //! * §8 Sizing's derived `BLASTIT_MAX_VIEW_PROCESSES` default is taken twice:
@@ -74,7 +85,7 @@
 //!   behaviour without giving it a variable: [`SchedulerConfig::spawn_backoff`]
 //!   ("don't spin") and the per-peer byte caps in this module.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -91,6 +102,7 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use crate::admission::{AdmissionQueue, ClientId, client_for};
 use crate::config::{SchedulerConfig, derived_view_cap};
 use crate::ctl::CtlChannel;
 use crate::error::SchedulerError;
@@ -243,6 +255,9 @@ struct Request {
     /// The route this request was routed to, if any (`None` for the requests
     /// the scheduler answers itself: health, `400`, `404`).
     route: Option<usize>,
+    /// The client this request belongs to, for fair queuing (§2.4). Always
+    /// [`ClientId::All`] when `BLASTIT_FAIR_QUEUING` is off.
+    client: ClientId,
     /// Index of the matching path regex in the route (§8.1 `rule`).
     rule: Option<u32>,
     /// The routed `PATH_INFO`: decoded and `SCRIPT_NAME`-stripped (§8.1).
@@ -322,8 +337,10 @@ struct Scheduler {
     counter: u64,
     /// Every request that has not been released yet, by http stream id.
     requests: HashMap<u32, Request>,
-    /// Requests waiting for a worker slot, oldest first (§2.4's bounded FIFO).
-    queue: VecDeque<u32>,
+    /// Requests waiting for a worker slot (§2.4's bounded queue): one FIFO per
+    /// client served round-robin when `BLASTIT_FAIR_QUEUING` is on, and one
+    /// first-come-first-served FIFO when it is off.
+    queue: AdmissionQueue,
     /// The live view per route: at most one (§2.4).
     views: HashMap<usize, View>,
     /// `(view, request id)` to http stream id: what a frame from a view means.
@@ -383,6 +400,8 @@ impl Scheduler {
         ctl_out: Outbound,
     ) -> Self {
         let script_name = cfg.script_name.as_deref().and_then(normalize_script_name);
+        // §2.4: the admission queue is per-client only when fair queuing is on.
+        let fair_queuing = cfg.fair_queuing;
         // §8 Sizing: the watermark is watched on a timer, so the scheduler only
         // schedules it when it has something to watch.
         let memory_check_at = cfg
@@ -400,7 +419,7 @@ impl Scheduler {
             started: Instant::now(),
             counter: 0,
             requests: HashMap::new(),
-            queue: VecDeque::new(),
+            queue: AdmissionQueue::new(fair_queuing),
             views: HashMap::new(),
             dispatch: HashMap::new(),
             slots: 0,
@@ -477,10 +496,10 @@ impl Scheduler {
                 None => at,
             });
         };
-        for stream_id in &self.queue {
+        for stream_id in self.queue.iter() {
             if let Some(since) = self
                 .requests
-                .get(stream_id)
+                .get(&stream_id)
                 .and_then(|request| request.queued_since)
             {
                 take(since + self.cfg.queue_timeout);
@@ -675,11 +694,13 @@ impl Scheduler {
             )));
         }
         let request_id = self.next_request_id();
+        let client = client_for(&head, &self.cfg);
         let mut request = Request {
             stream_id,
             request_id,
             head,
             route: None,
+            client,
             rule: None,
             path_info: None,
             arrived: Instant::now(),
@@ -737,6 +758,7 @@ impl Scheduler {
                 request.route = Some(route);
                 request.rule = Some(rule);
                 request.path_info = Some(path_info);
+                let client = request.client.clone();
                 self.requests.insert(stream_id, request);
                 if self.draining {
                     self.reject(
@@ -747,7 +769,16 @@ impl Scheduler {
                         Outcome::QueueFull,
                     )
                 } else if self.can_dispatch(route) {
-                    self.dispatch(stream_id)
+                    self.dispatch(stream_id)?;
+                    Ok(())
+                } else if self.client_queue_full(&client) {
+                    self.reject(
+                        stream_id,
+                        503,
+                        "Service Unavailable",
+                        "client queue full\n",
+                        Outcome::ClientQueueFull,
+                    )
                 } else if self.queue.len() >= self.cfg.queue_size {
                     self.reject(
                         stream_id,
@@ -757,11 +788,22 @@ impl Scheduler {
                         Outcome::QueueFull,
                     )
                 } else {
-                    self.enqueue(stream_id);
+                    self.enqueue(stream_id, &client);
                     Ok(())
                 }
             }
         }
+    }
+
+    /// Whether `client` has `BLASTIT_MAX_QUEUED_PER_CLIENT` requests waiting
+    /// already, so this one must be refused (§2.4).
+    ///
+    /// Only fair queuing has per-client queues to count, and a cap of zero
+    /// means no cap at all, so either one makes this false.
+    fn client_queue_full(&self, client: &ClientId) -> bool {
+        self.cfg.fair_queuing
+            && self.cfg.max_queued_per_client > 0
+            && self.queue.client_len(client) >= self.cfg.max_queued_per_client
     }
 
     /// Turns the request target into a routing decision (§2.4, §6).
@@ -806,12 +848,12 @@ impl Scheduler {
         }
     }
 
-    /// Puts a request at the back of the admission queue.
-    fn enqueue(&mut self, stream_id: u32) {
+    /// Puts a request at the back of its client's queue (§2.4).
+    fn enqueue(&mut self, stream_id: u32, client: &ClientId) {
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.queued_since = Some(Instant::now());
         }
-        self.queue.push_back(stream_id);
+        self.queue.push(client, stream_id);
     }
 
     /// Records request body bytes: forwards them when the request is
@@ -950,43 +992,84 @@ impl Scheduler {
         }
     }
 
-    /// Dispatches every queued request it can, spawning views as needed.
+    /// Dispatches every queued request it can, spawning views as needed, in
+    /// fair order across clients when `BLASTIT_FAIR_QUEUING` is on (§2.4).
+    ///
+    /// The queue hands out turns round-robin: the client at the front of the
+    /// ring is considered first, and serving it moves it to the back, so one
+    /// client's burst cannot take every slot before another client's request is
+    /// even looked at. A client whose request cannot run right now — its route
+    /// is at its per-view cap, or has no live view — is rotated to the back
+    /// rather than dropped, and gets its turn again next time round. When the
+    /// global worker budget makes routes compete for slots, this is the order
+    /// they compete in.
     fn dispatch_queued(&mut self) -> Result<(), SchedulerError> {
-        let queued: Vec<u32> = self.queue.iter().copied().collect();
-        for stream_id in queued {
-            if !self.queue.contains(&stream_id) {
-                continue;
+        let mut blocked = 0usize;
+        loop {
+            if self.slots >= self.cfg.max_workers {
+                return Ok(());
             }
+            let Some(client) = self.queue.front_client() else {
+                return Ok(());
+            };
+            let Some(stream_id) = self.queue.front_stream(&client) else {
+                // The ring only ever holds clients with something waiting, so
+                // this is a belt-and-braces rotation rather than a real case.
+                self.queue.rotate(&client);
+                blocked += 1;
+                if blocked >= self.queue.client_count().max(1) {
+                    return Ok(());
+                }
+                continue;
+            };
             let Some(route) = self
                 .requests
                 .get(&stream_id)
                 .and_then(|request| request.route)
             else {
+                self.queue.remove(&client, stream_id);
                 continue;
             };
-            if self.slots >= self.cfg.max_workers {
-                return Ok(());
-            }
             if self.can_dispatch(route) {
-                self.dispatch(stream_id)?;
+                if self.dispatch(stream_id)? {
+                    self.queue.after_served(&client, stream_id);
+                    blocked = 0;
+                } else {
+                    // The view could not take it after all: leave it queued and
+                    // give the next client a turn.
+                    self.queue.rotate(&client);
+                    blocked += 1;
+                    if blocked >= self.queue.client_count().max(1) {
+                        return Ok(());
+                    }
+                }
                 continue;
             }
             if !self.views.contains_key(&route) && !self.draining {
                 self.try_spawn(route)?;
             }
+            self.queue.rotate(&client);
+            blocked += 1;
+            // A full round without a dispatch means every client is blocked on
+            // its own route: stop, rather than spinning over the ring.
+            if blocked >= self.queue.client_count().max(1) {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 
     /// Hands one request to its view, rewriting its id (§3.1).
-    fn dispatch(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+    ///
+    /// Returns `false` when the view could not take it after all — the caller
+    /// then leaves the request where it is rather than dequeuing it.
+    fn dispatch(&mut self, stream_id: u32) -> Result<bool, SchedulerError> {
         let Some((key, id, _out)) = self.reserve(stream_id) else {
-            return Ok(());
+            return Ok(false);
         };
         let now = Instant::now();
         let (head, body, end, extra_credit) = {
             let Some(request) = self.requests.get_mut(&stream_id) else {
-                return Ok(());
+                return Ok(false);
             };
             request.queued_since = None;
             request.dispatched_at = Some(now);
@@ -1002,7 +1085,6 @@ impl Scheduler {
                 request.download_credit.saturating_sub(INITIAL_WINDOW),
             )
         };
-        self.queue.retain(|queued_id| *queued_id != stream_id);
         self.dispatch.insert((key, id), stream_id);
         self.slots += 1;
 
@@ -1022,7 +1104,7 @@ impl Scheduler {
         if end {
             self.view_push(key, id, Frame::ReqEnd)?;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Takes a worker slot and a request id for `stream_id`, if its view can
@@ -1065,10 +1147,9 @@ impl Scheduler {
     fn expire_queue(&mut self) -> Result<(), SchedulerError> {
         let now = Instant::now();
         let timeout = self.cfg.queue_timeout;
-        let expired: Vec<u32> = self
+        let expired: Vec<(u32, ClientId)> = self
             .queue
             .iter()
-            .copied()
             .filter(|stream_id| {
                 self.requests
                     .get(stream_id)
@@ -1076,9 +1157,14 @@ impl Scheduler {
                     .map(|since| now.duration_since(since) >= timeout)
                     .unwrap_or(false)
             })
+            .filter_map(|stream_id| {
+                self.requests
+                    .get(&stream_id)
+                    .map(|request| (stream_id, request.client.clone()))
+            })
             .collect();
-        for stream_id in expired {
-            self.queue.retain(|queued_id| *queued_id != stream_id);
+        for (stream_id, client) in expired {
+            self.queue.remove(&client, stream_id);
             self.reject(
                 stream_id,
                 503,
@@ -1504,7 +1590,7 @@ impl Scheduler {
     fn route_waiting(&self, route: usize) -> bool {
         self.queue.iter().any(|stream_id| {
             self.requests
-                .get(stream_id)
+                .get(&stream_id)
                 .and_then(|request| request.route)
                 == Some(route)
         })
@@ -1678,7 +1764,6 @@ impl Scheduler {
             let waiting: Vec<u32> = self
                 .queue
                 .iter()
-                .copied()
                 .filter(|stream_id| {
                     self.requests
                         .get(stream_id)
@@ -1687,7 +1772,12 @@ impl Scheduler {
                 })
                 .collect();
             for stream_id in waiting {
-                self.queue.retain(|queued_id| *queued_id != stream_id);
+                let client = self
+                    .requests
+                    .get(&stream_id)
+                    .map(|request| request.client.clone())
+                    .unwrap_or(ClientId::All);
+                self.queue.remove(&client, stream_id);
                 let _ = self.fail_request(stream_id, Outcome::ViewDied, 502);
                 self.release(stream_id);
             }
@@ -1706,19 +1796,28 @@ impl Scheduler {
         reason: &str,
         body: &str,
     ) -> Result<(), SchedulerError> {
+        let mut headers = vec![
+            (
+                b"Content-Type".to_vec(),
+                b"text/plain; charset=utf-8".to_vec(),
+            ),
+            (
+                b"Content-Length".to_vec(),
+                body.len().to_string().into_bytes(),
+            ),
+        ];
+        // §8: a `503` the admission queue produced carries `Retry-After`, so a
+        // well-behaved client backs off instead of hammering a full queue.
+        if status == 503 {
+            headers.push((
+                b"Retry-After".to_vec(),
+                self.cfg.retry_after_secs().to_string().into_bytes(),
+            ));
+        }
         let head = RespHead {
             status,
             reason: reason.as_bytes().to_vec(),
-            headers: vec![
-                (
-                    b"Content-Type".to_vec(),
-                    b"text/plain; charset=utf-8".to_vec(),
-                ),
-                (
-                    b"Content-Length".to_vec(),
-                    body.len().to_string().into_bytes(),
-                ),
-            ],
+            headers,
         };
         self.http_push(stream_id, Frame::RespHead(head))?;
         if !body.is_empty() {
@@ -1821,7 +1920,7 @@ impl Scheduler {
         if request.slots {
             self.slots = self.slots.saturating_sub(1);
         }
-        self.queue.retain(|queued_id| *queued_id != stream_id);
+        self.queue.remove(&request.client, stream_id);
     }
 
     /// Emits the one `request` event a request gets, once (§8.1).

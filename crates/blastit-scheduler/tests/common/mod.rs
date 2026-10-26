@@ -1082,6 +1082,55 @@ pub fn head(method: &str, target: &str) -> ReqHead {
     }
 }
 
+/// A request head for `method` and `target` seen from `peer`, with `headers`
+/// appended to the ones [`head`] adds.
+///
+/// `peer` is what the front end reports as `remote_addr`: an address, usually
+/// with the connection's port, which is where the scheduler's peer-derived
+/// client key comes from (§2.4).
+pub fn head_from(method: &str, target: &str, peer: &str, headers: &[(&str, &str)]) -> ReqHead {
+    let mut head = head(method, target);
+    head.remote_addr = peer.to_string();
+    for (name, value) in headers {
+        head.headers
+            .push((name.as_bytes().to_vec(), value.as_bytes().to_vec()));
+    }
+    head
+}
+
+/// The targets of the requests view `route` was dispatched, in order.
+pub fn targets_of(log: &Log, route: usize) -> Vec<String> {
+    log.received
+        .iter()
+        .filter(|(seen, _, frame)| *seen == route && matches!(frame, Frame::ReqHead(_)))
+        .filter_map(|(_, _, frame)| match frame {
+            Frame::ReqHead(head) => Some(String::from_utf8_lossy(&head.target).into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every dispatch, across every route, as `(route, target)` in the order the
+/// views received their `REQ_HEAD`.
+pub fn dispatch_order(log: &Log) -> Vec<(usize, String)> {
+    log.received
+        .iter()
+        .filter_map(|(route, _, frame)| match frame {
+            Frame::ReqHead(head) => {
+                Some((*route, String::from_utf8_lossy(&head.target).into_owned()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The position of the first request to `target` in the dispatch order.
+pub fn dispatch_position(log: &Log, target: &str) -> Option<usize> {
+    dispatch_order(log)
+        .iter()
+        .position(|(_, seen)| seen == target)
+}
+
 /// The status of a response's first head frame.
 pub fn status_of(frames: &[Frame]) -> u16 {
     match frames.first() {

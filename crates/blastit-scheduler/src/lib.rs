@@ -18,9 +18,12 @@
 //!   against the manifest's routes; the scheduler answers `404` itself when
 //!   nothing matches, and its health path itself always.
 //! * **Admission.** A global budget of [`SchedulerConfig::max_workers`] live
-//!   request threads, a per-view cap, and one bounded FIFO queue. The budget
-//!   counts threads, not answers: a slot is released when the view reports
-//!   `DONE`, so a timed-out request still occupies one until its thread exits.
+//!   request threads, a per-view cap, and one bounded queue. The budget counts
+//!   threads, not answers: a slot is released when the view reports `DONE`, so
+//!   a timed-out request still occupies one until its thread exits. With
+//!   `BLASTIT_FAIR_QUEUING` on, that queue is one FIFO per client served
+//!   round-robin, so a burst from one client cannot starve the others; with it
+//!   off (the default) it is the first-come-first-served FIFO of §2.4.
 //! * **Lifecycle.** One live process per route at most, spawned on first use
 //!   (or at startup for preforked routes and in eager mode), retired when idle
 //!   or over its request cap, and recycled when it accumulates stuck threads.
@@ -60,6 +63,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod admission;
 mod config;
 mod ctl;
 mod error;
@@ -69,8 +73,8 @@ mod scheduler;
 mod task;
 
 pub use crate::config::{
-    MEMORY_CHECK_INTERVAL, MIN_MEM_RESERVE, MemoryProbe, SPAWN_BACKOFF, SchedulerConfig,
-    derived_view_cap, mem_reserve,
+    ClientKey, MEMORY_CHECK_INTERVAL, MIN_MEM_RESERVE, MemoryProbe, SPAWN_BACKOFF, SchedulerConfig,
+    TrustedProxies, derived_view_cap, mem_reserve,
 };
 pub use crate::ctl::{CtlChannel, UnixCtl};
 pub use crate::error::SchedulerError;

@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use blastit_events::Level;
 use blastit_frame::Limits;
+use blastit_scheduler::{ClientKey, TrustedProxies};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
@@ -164,6 +165,16 @@ pub struct Config {
     pub queue_size: usize,
     /// `BLASTIT_QUEUE_TIMEOUT`.
     pub queue_timeout: Duration,
+    /// `BLASTIT_FAIR_QUEUING`: serve the scheduler's admission queue
+    /// round-robin across clients instead of first-come-first-served (§2.4).
+    pub fair_queuing: bool,
+    /// `BLASTIT_CLIENT_KEY`: what identifies a client for fair queuing.
+    pub client_key: ClientKey,
+    /// `BLASTIT_TRUSTED_PROXIES`: the peers whose client-IP header may be
+    /// believed. Empty means none.
+    pub trusted_proxies: TrustedProxies,
+    /// `BLASTIT_MAX_QUEUED_PER_CLIENT`; zero disables the cap.
+    pub max_queued_per_client: usize,
     /// `BLASTIT_REQUEST_TIMEOUT`.
     pub request_timeout: Duration,
     /// `BLASTIT_STUCK_THREADS`.
@@ -253,6 +264,10 @@ impl Default for Config {
             view_max_workers: None,
             queue_size: 256,
             queue_timeout: Duration::from_secs(10),
+            fair_queuing: false,
+            client_key: ClientKey::Peer,
+            trusted_proxies: TrustedProxies::none(),
+            max_queued_per_client: 0,
             request_timeout: Duration::from_secs(30),
             stuck_threads: 4,
             view_spawn: SpawnMode::Lazy,
@@ -355,6 +370,26 @@ impl Config {
             "BLASTIT_QUEUE_TIMEOUT",
             config.queue_timeout,
             parse_duration,
+        )?;
+        config.fair_queuing = defaulted(
+            variable("BLASTIT_FAIR_QUEUING")?,
+            "BLASTIT_FAIR_QUEUING",
+            config.fair_queuing,
+            parse_bool,
+        )?;
+        if let Some(value) = variable("BLASTIT_CLIENT_KEY")? {
+            config.client_key =
+                ClientKey::parse(&value).map_err(|reason| invalid("BLASTIT_CLIENT_KEY", reason))?;
+        }
+        if let Some(value) = variable("BLASTIT_TRUSTED_PROXIES")? {
+            config.trusted_proxies = TrustedProxies::parse(&value)
+                .map_err(|reason| invalid("BLASTIT_TRUSTED_PROXIES", reason))?;
+        }
+        config.max_queued_per_client = defaulted(
+            variable("BLASTIT_MAX_QUEUED_PER_CLIENT")?,
+            "BLASTIT_MAX_QUEUED_PER_CLIENT",
+            config.max_queued_per_client,
+            parse_usize,
         )?;
         config.request_timeout = defaulted(
             variable("BLASTIT_REQUEST_TIMEOUT")?,
@@ -561,6 +596,22 @@ impl Config {
                 "must be `module:callable`".to_string(),
             ));
         }
+        // §2.4: a header only names a client when an operator named it *and*
+        // the peer is trusted. Nothing to validate when it is not trusted —
+        // the header is simply ignored — but the combination is a common
+        // mistake and worth saying once, here rather than at request time.
+        if self.fair_queuing
+            && self.client_key.header().is_some()
+            && self.trusted_proxies.source().is_empty()
+        {
+            return Err(invalid(
+                "BLASTIT_CLIENT_KEY",
+                "names a header but BLASTIT_TRUSTED_PROXIES is empty, so the \
+                 header would never be read; set the proxy addresses, or `*` \
+                 for the platform's edge"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -640,6 +691,16 @@ impl Config {
         object.insert(
             "queue_timeout_ms".into(),
             Value::from(millis(self.queue_timeout)),
+        );
+        object.insert("fair_queuing".into(), Value::from(self.fair_queuing));
+        object.insert("client_key".into(), Value::from(self.client_key.as_str()));
+        object.insert(
+            "trusted_proxies".into(),
+            Value::from(self.trusted_proxies.source()),
+        );
+        object.insert(
+            "max_queued_per_client".into(),
+            Value::from(self.max_queued_per_client as u64),
         );
         object.insert(
             "request_timeout_ms".into(),
@@ -760,6 +821,12 @@ impl Config {
         config.view_max_workers = json_opt_u32(value, "view_max_workers")?;
         config.queue_size = json_usize(value, "queue_size")?;
         config.queue_timeout = json_duration(value, "queue_timeout_ms")?;
+        config.fair_queuing = json_bool(value, "fair_queuing")?;
+        config.client_key = ClientKey::parse(&json_string(value, "client_key")?)
+            .map_err(|reason| document("client_key", reason))?;
+        config.trusted_proxies = TrustedProxies::parse(&json_string(value, "trusted_proxies")?)
+            .map_err(|reason| document("trusted_proxies", reason))?;
+        config.max_queued_per_client = json_usize(value, "max_queued_per_client")?;
         config.request_timeout = json_duration(value, "request_timeout_ms")?;
         config.stuck_threads = json_u32(value, "stuck_threads")?;
         config.view_spawn = match json_string(value, "view_spawn")?.as_str() {
@@ -1512,5 +1579,103 @@ mod tests {
         );
         config.view_mem_estimate = 1;
         assert!(config.validate().is_ok());
+    }
+
+    /// Removes the fair-queuing variables, so a test can start from unset.
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold the [`ENV`] lock: mutating the process environment
+    /// is only sound while no other thread reads it.
+    unsafe fn clear_fair_queuing_env() {
+        for name in [
+            "BLASTIT_FAIR_QUEUING",
+            "BLASTIT_CLIENT_KEY",
+            "BLASTIT_TRUSTED_PROXIES",
+            "BLASTIT_MAX_QUEUED_PER_CLIENT",
+        ] {
+            // SAFETY: the caller holds the lock.
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+
+    #[test]
+    fn the_fair_queuing_settings_are_read_from_the_environment() {
+        let _env = env();
+        // SAFETY: `env()` is held for the whole test, so no other test reads or
+        // writes the environment while this one runs.
+        unsafe {
+            clear_fair_queuing_env();
+            let config = Config::from_env().unwrap();
+            assert!(!config.fair_queuing, "the default is off");
+            assert_eq!(config.client_key, ClientKey::Peer);
+            assert!(config.trusted_proxies.source().is_empty());
+            assert_eq!(config.max_queued_per_client, 0);
+
+            std::env::set_var("BLASTIT_FAIR_QUEUING", "on");
+            std::env::set_var("BLASTIT_CLIENT_KEY", "header:Do-Connecting-Ip");
+            std::env::set_var("BLASTIT_TRUSTED_PROXIES", "10.0.0.0/8, 127.0.0.1");
+            std::env::set_var("BLASTIT_MAX_QUEUED_PER_CLIENT", "7");
+            let config = Config::from_env().unwrap();
+            assert!(config.fair_queuing);
+            assert_eq!(
+                config.client_key,
+                ClientKey::Header("do-connecting-ip".to_string())
+            );
+            assert_eq!(config.trusted_proxies.source(), "10.0.0.0/8, 127.0.0.1");
+            assert_eq!(config.max_queued_per_client, 7);
+
+            std::env::set_var("BLASTIT_CLIENT_KEY", "ip");
+            let err = Config::from_env().unwrap_err();
+            assert!(err.to_string().contains("BLASTIT_CLIENT_KEY"), "{err}");
+            std::env::set_var("BLASTIT_CLIENT_KEY", "peer");
+
+            std::env::set_var("BLASTIT_TRUSTED_PROXIES", "not-a-network");
+            let err = Config::from_env().unwrap_err();
+            assert!(err.to_string().contains("BLASTIT_TRUSTED_PROXIES"), "{err}");
+
+            clear_fair_queuing_env();
+        }
+    }
+
+    #[test]
+    fn a_header_client_key_without_a_trusted_proxy_is_refused() {
+        // §2.4: a header that would never be read is a configuration mistake,
+        // not a silent fall-back to the peer.
+        let mut config = Config::default();
+        config.fair_queuing = true;
+        config.client_key = ClientKey::Header("x-forwarded-for".to_string());
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("BLASTIT_CLIENT_KEY"), "{err}");
+
+        config.trusted_proxies = TrustedProxies::parse("203.0.113.0/24").unwrap();
+        assert!(config.validate().is_ok());
+
+        // With fair queuing off the key is never consulted, so the pair is
+        // harmless and stays allowed.
+        let mut config = Config::default();
+        config.client_key = ClientKey::Header("x-forwarded-for".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn the_fair_queuing_settings_survive_the_document() {
+        let mut config = Config::default();
+        config.fair_queuing = true;
+        config.client_key = ClientKey::Header("x-forwarded-for".to_string());
+        config.trusted_proxies = TrustedProxies::parse("10.0.0.0/8, *").unwrap();
+        config.max_queued_per_client = 9;
+        config.validate().unwrap();
+
+        let json = config.to_json();
+        assert_eq!(json["fair_queuing"], serde_json::json!(true));
+        assert_eq!(
+            json["client_key"],
+            serde_json::json!("header:x-forwarded-for")
+        );
+        assert_eq!(json["trusted_proxies"], serde_json::json!("10.0.0.0/8, *"));
+        assert_eq!(json["max_queued_per_client"], serde_json::json!(9));
+        let back = Config::from_json(&json).unwrap();
+        assert_eq!(back, config);
     }
 }
