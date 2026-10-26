@@ -387,14 +387,21 @@ def droplet(args):
             rc = scenario(args.port)
             logs = compose_remote(ssh, env, "logs", "--no-color", "--no-log-prefix", "app").stdout
             rc |= check_rootless_logs(dump_logs(logs, args.out), password)
-            caps = ssh_run(ssh, 'getcap "$(readlink -f "$(command -v python3)")"')
+            # The mechanisms, read out of the containers rather than out of the
+            # log: the interpreter's file capabilities, and what the container
+            # was allowed to give it.
+            caps = compose_remote(ssh, env, "exec", "-T", "app", "sh", "-c",
+                                  "'getcap \"$(readlink -f \"$(command -v python3)\")\"'")
             log(f"the interpreter's file capabilities on the droplet: {caps.stdout.strip()}")
             rc |= 0 if "cap_setuid" in caps.stdout and "cap_setpcap" in caps.stdout else 1
-            limits = ssh_run(ssh, "docker inspect -f User={{.Config.User}} "
-                                  "CapDrop={{.HostConfig.CapDrop}} CapAdd={{.HostConfig.CapAdd}} "
-                                  "CapAddAmbient={{.HostConfig.CapAddAmbient}} "
-                                  "$(docker compose -f /root/blastit/e2e/rootless/compose.yml ps -q app)")
-            log(f"the app container's limits: {limits.stdout.strip()}")
+            inspect = (
+                "cd /root/blastit && docker inspect -f "
+                "'User={{.Config.User}} CapDrop={{.HostConfig.CapDrop}} "
+                "CapAdd={{.HostConfig.CapAdd}}' "
+                '"$(docker compose -f e2e/rootless/compose.yml ps -q app)"'
+            )
+            limits = ssh_run(ssh, inspect)
+            log(f"the app container's limits: {limits.stdout.strip() or limits.stderr.strip()}")
             log(f"the run said {'PASS' if rc == 0 else 'FAIL'}")
         finally:
             tunnel.terminate()
@@ -472,7 +479,7 @@ def verify_gone(name, key_name):
     DigitalOcean's list calls are eventually consistent, so a deletion is
     confirmed over a few seconds rather than once.
     """
-    for attempt in range(6):
+    for attempt in range(10):
         left = [d["name"] for d in doctl("compute", "droplet", "list", "--tag-name", TAG) or []
                 if d.get("name") == name]
         keys = [k["name"] for k in doctl("compute", "ssh-key", "list") or []
@@ -480,7 +487,7 @@ def verify_gone(name, key_name):
         if not left and not keys:
             log(f"verified: neither the droplet nor the key named {name} exists")
             return
-        time.sleep(2 + attempt)
+        time.sleep(5)
     print(f"!! still there after cleanup: droplets={left} keys={keys}", flush=True)
 
 
