@@ -263,7 +263,8 @@ class TestRender:
         additions = fold.plan(document(), [denial("SELECT 1", route="ghost")], prefer_tables=False)
         assert fold.render(additions) == ""
         assert additions[0].notes == [
-            "ghost: the manifest declares no route of that name — add it, then fold again"
+            "ghost: the manifest declares no route of that name — fold extends the routes "
+            "a manifest has, it never creates one"
         ]
 
 
@@ -289,19 +290,29 @@ class TestEdit:
         assert "# Session housekeeping, for every route." in edited
         assert edited.index("[group.own.db]") < edited.index("[[route]]")
 
-    def test_a_route_without_a_grant_gets_one(self) -> None:
-        addition = fold.plan(document(), [denial("SELECT 'new'")], prefer_tables=False)[0]
-        addition.proxy = "warehouse"
-        edited = fold.apply_additions(MANIFEST, [addition])
-        parsed = tomllib.loads(edited)
-        notes = [route for route in parsed["route"] if route["name"] == "notes"][0]
-        assert notes["warehouse"]["queries"] == ["SELECT 'new'"]
-        assert notes["db"]["queries"] == ["SELECT 'granted'"]
-        assert "tables" not in notes["db"], "nothing invented for a route that had none"
-        catalog = [route for route in parsed["route"] if route["name"] == "catalog"][0]
-        assert catalog["db"]["tables"] == {"products": {"select": ["id"]}}
-        assert catalog["db"]["queries"] == ["SELECT 'listed'"]
-        assert "# A manifest with the two kinds of group" in edited
+    def test_a_route_without_a_grant_on_that_proxy_is_refused(self) -> None:
+        """A denial can only come from a proxy the route is granted (§2.2)."""
+        addition = fold.plan(
+            document(), [denial("SELECT 'new'", proxy="warehouse")], prefer_tables=False
+        )[0]
+        # `warehouse` is not declared by this manifest, so the plan refuses it…
+        assert addition.is_empty()
+        assert any("does not declare" in note for note in addition.notes)
+        # …and a declared proxy the route has no grant on is refused too.
+        manifest = MANIFEST.replace(
+            'input = { url = "DATABASE_URL" }',
+            'input = { url = "DATABASE_URL" }\n\n[proxy.warehouse]\n'
+            'protocol = "postgresql"\ninput = { url = "WAREHOUSE_URL" }',
+        )
+        addition = fold.plan(
+            document(manifest), [denial("SELECT 'new'", proxy="warehouse")], prefer_tables=False
+        )[0]
+        assert addition.is_empty()
+        assert any("no grant on that proxy" in note for note in addition.notes)
+        with pytest.raises(fold._FoldError):
+            fold.apply_additions(manifest, [fold._Addition(
+                route="notes", proxy="warehouse", queries=[("SELECT 'new'", "")]
+            )])
 
     def test_a_one_line_array_becomes_a_multi_line_one(self) -> None:
         text = MANIFEST.replace(
@@ -443,19 +454,19 @@ class TestWithTheExtension:
 
     def test_prefer_tables_reports_a_statement_no_table_grant_describes(self) -> None:
         pytest.importorskip("blastit._blastit", reason="the analysis is the extension")
+        # A plain `SELECT` the analysis refuses (a system catalogue cannot be a
+        # table grant) is kept as an exact query: the kind is what decides, not
+        # the analysis.
         additions = fold.plan(
             document(),
-            [denial("SET TIME ZONE 'UTC'"), denial('SELECT "products"."id" FROM "products"')],
+            [denial('SELECT "pg_type"."oid" FROM "pg_type"')],
             prefer_tables=True,
         )
-        assert additions[0].queries == [
-            ("SET TIME ZONE 'UTC'", additions[0].queries[0][1])
+        assert [sql for sql, _ in additions[0].queries] == [
+            'SELECT "pg_type"."oid" FROM "pg_type"'
         ]
-        assert "only SELECT" in additions[0].queries[0][1]
-        assert additions[0].tables == {"products": {"select": ["id"]}}, (
-            "the covering grant of the analysable statement, cleaned of the "
-            "operations it does not grant"
-        )
+        assert "catalogues" in additions[0].queries[0][1]
+        assert additions[0].tables == {}
 
     def test_a_denial_the_log_normalised_is_analysed_all_the_same(self) -> None:
         pytest.importorskip("blastit._blastit", reason="the analysis is the extension")
@@ -466,3 +477,589 @@ class TestWithTheExtension:
         )
         assert additions[0].queries == []
         assert additions[0].tables["products"]["delete"] is True
+
+
+class TestDangerousStatements:
+    """A grant is not an allowlist for DDL, `SET`, `COPY` or a transaction (D3c).
+
+    The kind comes from PostgreSQL's own parser — never from a pattern over the
+    text — so `SET ROLE` and a `SELECT` are told apart by the same authority that
+    will run them.
+    """
+
+    def classify(self, verdict: str, label: str = "SET") -> Any:
+        def classify(sql: str) -> str:
+            return json.dumps({"class": verdict, "label": label, "plain": verdict != "other"})
+
+        return classify
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SET ROLE admin",
+            "SET SESSION AUTHORIZATION 'admin'",
+            "RESET ALL",
+            "COPY notes FROM STDIN",
+            "DO $$ BEGIN END $$",
+            "CALL p()",
+            "LOCK TABLE notes",
+            "GRANT SELECT ON notes TO x",
+            "REVOKE SELECT ON notes FROM x",
+            "ALTER TABLE notes ADD COLUMN a int",
+            "CREATE TABLE t (a int)",
+            "DROP TABLE notes",
+            "TRUNCATE notes",
+            "VACUUM notes",
+            "LISTEN c",
+            "NOTIFY c",
+            "BEGIN",
+            "COMMIT",
+        ],
+    )
+    def test_a_statement_of_another_kind_is_refused(self, sql: str) -> None:
+        additions = fold.plan(document(), [denial(sql)], prefer_tables=False)
+        assert additions[0].queries == [], sql
+        assert additions[0].is_empty(), sql
+        note = additions[0].notes[0]
+        assert "refused" in note and sql in note, note
+        assert "--allow-dangerous" in note, note
+
+    def test_the_label_names_the_kind_the_parser_saw(self) -> None:
+        additions = fold.plan(document(), [denial("SET ROLE admin")], prefer_tables=False)
+        assert "SET is not a plain SELECT, INSERT, UPDATE or DELETE" in additions[0].notes[0]
+        additions = fold.plan(document(), [denial("CREATE TABLE t (a int)")], prefer_tables=False)
+        assert "CREATE TABLE is not a plain" in additions[0].notes[0]
+
+    def test_a_plain_statement_of_every_kind_is_granted(self) -> None:
+        for sql in [
+            "SELECT 1",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "INSERT INTO notes (body) VALUES ($?)",
+            "UPDATE notes SET body = $? WHERE id = $?",
+            "DELETE FROM notes WHERE id = $?",
+        ]:
+            additions = fold.plan(document(), [denial(sql)], prefer_tables=False)
+            assert [item for item, _ in additions[0].queries] == [sql], sql
+
+    def test_the_flag_grants_it_anyway_and_says_so(self) -> None:
+        additions = fold.plan(
+            document(),
+            [denial("SET ROLE admin")],
+            prefer_tables=False,
+            allow_dangerous=True,
+        )
+        assert [sql for sql, _ in additions[0].queries] == ["SET ROLE admin"]
+        assert any("--allow-dangerous" in note for note in additions[0].notes)
+
+    def test_a_statement_nothing_can_parse_is_refused(self) -> None:
+        """Text that is not SQL is not a grant: nothing would ever match it."""
+        additions = fold.plan(
+            document(),
+            [denial("SELECT 'unterminated")],
+            prefer_tables=False,
+        )
+        assert additions[0].is_empty()
+        assert "unreadable" in additions[0].notes[0]
+
+    def test_prefer_tables_refuses_them_too(self) -> None:
+        additions = fold.plan(
+            document(),
+            [denial("SELECT 'x' FROM t"), denial("SET ROLE admin")],
+            prefer_tables=True,
+            covering=covering_for("t"),
+        )
+        assert [sql for sql, _ in additions[0].queries] == []
+        assert additions[0].tables == {"t": {"select": ["id"]}}
+        assert any("SET ROLE admin" in note for note in additions[0].notes)
+
+    def test_the_classifier_is_what_decides(self) -> None:
+        """Nothing about the text decides it: the injected verdict is obeyed (D3c)."""
+        additions = fold.plan(
+            document(),
+            [denial("SELECT 1")],
+            prefer_tables=False,
+            classify=self.classify("other", "SET"),
+        )
+        assert additions[0].is_empty()
+        assert "refused" in additions[0].notes[0]
+
+
+class TestLogFieldsAreNotManifestText:
+    """Whatever a log line holds, it reaches the file as data or not at all (D3c)."""
+
+    def test_a_reason_becomes_one_bounded_comment(self) -> None:
+        hostile = 'nope]\n[route.evil]\nqueries = ["DROP TABLE users"]\n# \x07\x01'
+        rendered = fold.render(
+            fold.plan(document(), [denial("SELECT 1", reason=hostile)], prefer_tables=False)
+        )
+        assert "\x07" not in rendered and "\x01" not in rendered
+        assert len(rendered.splitlines()) == 5, (
+            "the reason is a comment on the statement's own line, and adds none"
+        )
+        parsed = tomllib.loads(rendered)
+        assert parsed["route"]["db"]["queries"] == ["SELECT 1"], (
+            "the reason is a comment, and only a comment"
+        )
+        assert "evil" not in parsed["route"], "no table was opened by a log line"
+        assert [line for line in rendered.splitlines() if line.startswith("[")] == ["[route.db]"]
+
+    def test_a_long_reason_is_cut(self) -> None:
+        rendered = fold.render(
+            fold.plan(document(), [denial("SELECT 1", reason="x" * 5000)], prefer_tables=False)
+        )
+        comment = next(line for line in rendered.splitlines() if "#" in line)
+        assert len(comment) <= fold.COMMENT_LIMIT + 40, len(comment)
+
+    def test_a_statement_is_an_escaped_toml_string(self) -> None:
+        sql = "SELECT 'a\"b', 'c\\d', 'e\nf' FROM t"
+        rendered = fold.render(
+            fold.plan(document(), [denial(sql)], prefer_tables=False)
+        )
+        parsed = tomllib.loads(rendered)
+        assert parsed["route"]["db"]["queries"] == [sql]
+
+    def test_a_table_name_needing_quotes_is_quoted(self) -> None:
+        addition = fold._Addition(
+            route="notes",
+            proxy="db",
+            tables={"weird name": {"select": ["id"]}},
+        )
+        rendered = fold.render([addition])
+        assert '"weird name" = { select = ["id"] }' in rendered
+        assert tomllib.loads(rendered)["route"]["db"]["tables"] == {
+            "weird name": {"select": ["id"]}
+        }
+
+    def test_a_proxy_that_is_not_a_plain_toml_key_is_refused(self) -> None:
+        additions = fold.plan(
+            document(), [denial("SELECT 1", proxy='db"\ninjected')], prefer_tables=False
+        )
+        assert additions[0].is_empty()
+        assert "not a plain TOML key" in additions[0].notes[0]
+
+    def test_a_proxy_the_manifest_does_not_declare_is_refused(self) -> None:
+        additions = fold.plan(
+            document(), [denial("SELECT 1", proxy="elsewhere")], prefer_tables=False
+        )
+        assert additions[0].is_empty()
+        assert "does not declare" in additions[0].notes[0]
+
+    def test_a_route_the_manifest_does_not_declare_is_refused(self) -> None:
+        additions = fold.plan(
+            document(), [denial("SELECT 1", route="ghost]\n[route.evil")], prefer_tables=False
+        )
+        assert additions[0].is_empty()
+        assert "no route of that name" in additions[0].notes[0]
+
+    def test_the_notes_are_diagnostics_not_toml(self) -> None:
+        additions = fold.plan(document(), [denial("SET ROLE admin")], prefer_tables=False)
+        rendered = fold.render(additions)
+        assert rendered == "", "a refusal prints no TOML"
+        assert additions[0].notes, "and the reason is still said"
+
+
+class TestTheScan:
+    """Headers and keys, told apart from the same text inside a string or array."""
+
+    def test_a_header_inside_a_multi_line_string_is_not_a_header(self) -> None:
+        text = (
+            'version = 1\n\n[[route]]\nname = "one"\npath = ["/one/"]\n'
+            '[route.db]\nqueries = [\n  """\n[[route]]\n[route.db]\n""",\n]\n\n'
+            '[[route]]\nname = "two"\npath = ["/two/"]\n[route.db]\nqueries = []\n'
+        )
+        scan = fold._Scan(text)
+        headers = [line.header for line in scan.headers()]
+        assert headers == [("route",), ("route", "db"), ("route",), ("route", "db")]
+        routes = [
+            fold._route_name(scan, line)
+            for line in scan.headers(("route",))
+            if line.array_of_tables
+        ]
+        assert routes == ["one", "two"]
+
+    def test_a_key_inside_a_multi_line_array_is_not_a_key(self) -> None:
+        text = 'version = 1\n\n[[route]]\nname = "one"\npath = ["/one/"]\n'
+        text += '[route.db]\nqueries = [\n  "SELECT 1",\n  "tables = 2",\n]\n'
+        scan = fold._Scan(text)
+        keys = [line.key for line in scan.lines if line.key is not None]
+        assert keys == [("version",), ("name",), ("path",), ("queries",)]
+
+    def test_a_key_inside_a_multi_line_string_is_not_a_key(self) -> None:
+        text = 'version = 1\n\n[[route]]\nname = "one"\npath = ["/one/"]\n'
+        text += '[route.db]\nqueries = [\n  """\nname = "evil"\n""",\n]\n'
+        scan = fold._Scan(text)
+        names = [line.key for line in scan.lines if line.key == ("name",)]
+        assert len(names) == 1
+
+    def test_a_bracket_inside_a_string_does_not_open_an_array(self) -> None:
+        text = 'version = 1\n\n[[route]]\nname = "one"\npath = ["/one/"]\n'
+        text += '[route.db]\nqueries = ["SELECT \'[\' , \']\'"]\n[[route]]\nname = "two"\n'
+        scan = fold._Scan(text)
+        assert [line.header for line in scan.headers(("route",))] == [("route",), ("route",)]
+        assert scan.lines[-1].depth == 0
+
+    def test_find_unquoted_steps_over_quoted_regions(self) -> None:
+        """The bracket a one-line array closes on is found outside its strings."""
+        for sample in [
+            'a = ["]"]',
+            'a = ["x]y"]',
+            r'a = ["x\"] y"]',
+            "a = [']' ]",
+        ]:
+            found = fold._find_unquoted(sample, "]", 0)
+            assert sample[found:] == "]", f"{sample!r}: {found}"
+        assert fold._find_unquoted('a = ["x"] # ]', "]", 9) == -1, "a comment is not a bracket"
+        assert fold._find_unquoted("nothing here", "]", 0) == -1
+        assert fold._find_unquoted("a = ']' ", "]", 0) == -1, "a literal is not a bracket"
+
+    def test_a_quoted_region_ends_where_toml_says_it_does(self) -> None:
+        for text, expected_rest in [
+            ('"a\\"b" rest', " rest"),
+            ("'a''b' rest", " rest"),
+            ('"a]b" rest', " rest"),
+            ("'a]b' rest", " rest"),
+        ]:
+            assert text[fold._quoted_end(text, 0, text[0]) :] == expected_rest, text
+
+
+class TestTheEditAgainstHostileShapes:
+    """The edit against the manifest shapes a line regex would get wrong (D3c)."""
+
+    ONE_LINE = """\
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "notes"
+path = ['/notes/']
+[route.db]
+queries = ["SELECT 'a]b'", 'SELECT "c]d"."e" FROM "c]d"']  # two statements, one line
+"""
+
+    def addition(self, sql: str = "SELECT 1") -> Any:
+        return fold.plan(document(self.ONE_LINE), [denial(sql)], prefer_tables=False)[0]
+
+    def test_a_bracket_in_a_literal_does_not_end_the_array(self) -> None:
+        edited = fold.apply_additions(self.ONE_LINE, [self.addition()])
+        parsed = tomllib.loads(edited)
+        assert parsed["route"][0]["db"]["queries"] == [
+            "SELECT 'a]b'",
+            'SELECT "c]d"."e" FROM "c]d"',
+            "SELECT 1",
+        ]
+        assert "# two statements, one line" in edited
+
+    def test_a_multi_line_string_does_not_hide_the_route_it_is_in(self) -> None:
+        text = self.ONE_LINE.replace(
+            """queries = ["SELECT 'a]b'", 'SELECT "c]d"."e" FROM "c]d"']  # two statements, one line""",
+            'queries = [\n  """\n[[route]]\nname = "not a route"\n""",\n]',
+        )
+        text += '\n[[route]]\nname = "later"\npath = ["/later/"]\n[route.db]\nqueries = []\n'
+        addition = fold.plan(
+            document(text), [denial("SELECT 1", route="later")], prefer_tables=False
+        )[0]
+        edited = fold.apply_additions(text, [addition])
+        parsed = tomllib.loads(edited)
+        assert [route["name"] for route in parsed["route"]] == ["notes", "later"]
+        assert parsed["route"][1]["db"]["queries"] == ["SELECT 1"]
+        assert '"""' in edited, "the multi-line string is still there"
+
+    def test_an_inline_grant_is_refused_not_duplicated(self) -> None:
+        text = self.ONE_LINE.replace(
+            "[route.db]\nqueries = [\"SELECT 'a]b'\", 'SELECT \"c]d\".\"e\" FROM \"c]d\"']  # two statements, one line",
+            'db = { queries = ["SELECT 1"] }',
+        )
+        with pytest.raises(fold._FoldError) as refused:
+            fold.apply_additions(text, [self.addition()])
+        assert "inline table" in str(refused.value)
+        assert "line" in str(refused.value)
+
+    def test_an_inline_tables_grant_is_refused_not_duplicated(self) -> None:
+        text = self.ONE_LINE.replace(
+            "queries = [\"SELECT 'a]b'\", 'SELECT \"c]d\".\"e\" FROM \"c]d\"']  # two statements, one line",
+            'tables = { products = { select = ["id"] } }',
+        )
+        addition = fold.plan(
+            document(text),
+            [denial("INSERT INTO products (id) VALUES ($1)")],
+            prefer_tables=True,
+            covering=lambda statements, prefix: json.dumps(
+                {
+                    "tables": {"products": {"insert": ["id"]}},
+                    "functions": [],
+                    "toml": "",
+                    "unanalysable": [],
+                }
+            ),
+        )[0]
+        assert addition.tables, "the plan has something to write"
+        with pytest.raises(fold._FoldError) as refused:
+            fold.apply_additions(text, [addition])
+        assert "inline table" in str(refused.value)
+
+
+class TestTheEditIsProved:
+    """Nothing is written until the result is the manifest plus exactly the plan (D3c).
+
+    The plan is a document a log wrote; the file is one a manifest author owns.
+    Between the two, the edit has to be *proved*: re-parsed, compared key by key,
+    and audited by blastit itself.
+    """
+
+    MANIFEST = """\
+# A manifest with one route and one grant.
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "notes"
+path = ['/notes/']
+[route.db]
+queries = ["SELECT 'granted'"]
+"""
+
+    LOG = "\n".join(
+        [
+            '{"event":"request","method":"GET","path":"/notes/","route":"notes"}',
+            '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SELECT \'new\'",'
+            '"reason":"not granted"}',
+        ]
+    )
+
+    @pytest.fixture
+    def manifest(self, tmp_path: Path) -> Path:
+        path = tmp_path / "blastit.toml"
+        path.write_text(self.MANIFEST, encoding="utf-8")
+        return path
+
+    def planned(self, tmp_path: Path, manifest: Path) -> tuple[Any, ...]:
+        """The old text, the document, the events, the denials and the plan."""
+        events = fold.read_events([str(tmp_path / "app.log")])
+        denials = fold.denials_of(events)
+        additions = fold.plan(
+            tomllib.loads(manifest.read_text(encoding="utf-8")),
+            denials,
+            prefer_tables=False,
+        )
+        return events, denials, additions
+
+    @pytest.fixture(autouse=True)
+    def log(self, tmp_path: Path) -> None:
+        (tmp_path / "app.log").write_text(self.LOG + "\n", encoding="utf-8")
+
+    def test_an_edit_that_is_exactly_the_plan_is_accepted(self, tmp_path: Path, manifest: Path) -> None:
+        old = manifest.read_text(encoding="utf-8")
+        events, denials, additions = self.planned(tmp_path, manifest)
+        edited = fold.apply_additions(old, additions)
+        fold._verify_edit(
+            manifest, old, edited, tomllib.loads(old), additions, events, denials
+        )
+        parsed = tomllib.loads(edited)
+        assert parsed["route"][0]["db"]["queries"] == ["SELECT 'granted'", "SELECT 'new'"]
+
+    def test_a_route_that_appeared_is_refused(self, tmp_path: Path, manifest: Path) -> None:
+        old = manifest.read_text(encoding="utf-8")
+        events, denials, additions = self.planned(tmp_path, manifest)
+        edited = old + '\n[[route]]\nname = "extra"\npath = ["/extra/"]\n'
+        with pytest.raises(fold._FoldError) as refused:
+            fold._verify_edit(
+                manifest, old, edited, tomllib.loads(old), additions, events, denials
+            )
+        assert "routes" in str(refused.value)
+
+    def test_a_grant_that_changed_something_else_is_refused(
+        self, tmp_path: Path, manifest: Path
+    ) -> None:
+        old = manifest.read_text(encoding="utf-8")
+        events, denials, additions = self.planned(tmp_path, manifest)
+        edited = fold.apply_additions(old, additions).replace(
+            '  "SELECT \'new\'",',
+            '  "SELECT \'new\'",\n  "SELECT \'unplanned\'",',
+        )
+        with pytest.raises(fold._FoldError) as refused:
+            fold._verify_edit(
+                manifest, old, edited, tomllib.loads(old), additions, events, denials
+            )
+        assert "not the grant the plan asked for" in str(refused.value)
+
+    def test_a_proxy_that_changed_is_refused(self, tmp_path: Path, manifest: Path) -> None:
+        old = manifest.read_text(encoding="utf-8")
+        events, denials, additions = self.planned(tmp_path, manifest)
+        edited = fold.apply_additions(old, additions).replace("proxy.db", "proxy.other")
+        with pytest.raises(fold._FoldError) as refused:
+            fold._verify_edit(
+                manifest, old, edited, tomllib.loads(old), additions, events, denials
+            )
+        assert "proxy declarations" in str(refused.value)
+
+    def test_a_statement_the_audit_still_refuses_is_refused(
+        self, tmp_path: Path, manifest: Path
+    ) -> None:
+        """The last word is blastit's own audit, run on the whole document."""
+        old = manifest.read_text(encoding="utf-8")
+        events, denials, additions = self.planned(tmp_path, manifest)
+        # A plan that claims to grant a statement the edit does not write: the
+        # audit is what catches it.
+        additions[0].statements.append("SELECT 'new'")
+        additions[0].queries = []
+        edited = fold.apply_additions(old, additions)
+        with pytest.raises(fold._FoldError) as refused:
+            fold._verify_edit(
+                manifest, old, edited, tomllib.loads(old), additions, events, denials
+            )
+        assert "still refuses" in str(refused.value)
+
+    def test_a_refused_edit_writes_nothing(
+        self, tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The file is left alone: a fold that cannot prove its edit does not guess."""
+        old = manifest.read_text(encoding="utf-8")
+        events, denials, additions = self.planned(tmp_path, manifest)
+        monkeypatch.setattr(
+            fold, "apply_additions", lambda text, wanted: text + '\n[[route]]\nname = "x"\n'
+        )
+        with pytest.raises(fold._FoldError):
+            fold._write(manifest, old, tomllib.loads(old), events, denials, additions)
+        assert manifest.read_text(encoding="utf-8") == old
+
+
+class TestTheCliDiagnostics:
+    """What a session prints where: TOML on stdout, notes on stderr (D3c)."""
+
+    def test_a_refusal_is_a_diagnostic_not_a_comment(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "blastit.toml"
+        manifest.write_text(TestTheEditIsProved.MANIFEST, encoding="utf-8")
+        log = tmp_path / "app.log"
+        log.write_text(
+            '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SET ROLE admin",'
+            '"reason":"not granted"}\n',
+            encoding="utf-8",
+        )
+        assert fold.main(["fold", str(log), "--manifest", str(manifest)]) == 0
+        captured = capsys.readouterr()
+        assert "SET ROLE admin" in captured.err
+        assert captured.err.startswith("note: "), captured.err
+        assert not captured.err.startswith("# "), "a note is not a TOML comment"
+        assert captured.out == "", "a refusal has no TOML to print"
+
+    def test_the_flag_grants_it_and_the_file_parses(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "blastit.toml"
+        manifest.write_text(TestTheEditIsProved.MANIFEST, encoding="utf-8")
+        log = tmp_path / "app.log"
+        log.write_text(
+            '{"event":"request","method":"GET","path":"/notes/","route":"notes"}\n'
+            '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SET ROLE admin",'
+            '"reason":"not granted"}\n',
+            encoding="utf-8",
+        )
+        assert (
+            fold.main(["fold", str(log), "--manifest", str(manifest), "--allow-dangerous"])
+            == 0
+        )
+        captured = capsys.readouterr()
+        assert "SET ROLE admin" in captured.err, "it says what it did"
+        parsed = tomllib.loads(captured.out)
+        assert parsed["route"]["db"]["queries"] == ["SET ROLE admin"]
+
+    def test_write_refuses_a_manifest_it_cannot_edit_safely(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "blastit.toml"
+        manifest.write_text(
+            TestTheEditIsProved.MANIFEST.replace(
+                '[route.db]\nqueries = ["SELECT \'granted\'"]',
+                'db = { queries = ["SELECT \'granted\'"] }',
+            ),
+            encoding="utf-8",
+        )
+        old = manifest.read_text(encoding="utf-8")
+        log = tmp_path / "app.log"
+        log.write_text(
+            '{"event":"request","method":"GET","path":"/notes/","route":"notes"}\n'
+            '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SELECT \'new\'",'
+            '"reason":"not granted"}\n',
+            encoding="utf-8",
+        )
+        assert fold.main(["fold", str(log), "--manifest", str(manifest), "--write"]) == 1
+        assert "inline table" in capsys.readouterr().err
+        assert manifest.read_text(encoding="utf-8") == old, "nothing was written"
+
+    def test_prefer_tables_write_end_to_end(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "blastit.toml"
+        manifest.write_text(TestTheEditIsProved.MANIFEST, encoding="utf-8")
+        log = tmp_path / "app.log"
+        log.write_text(
+            '{"event":"request","method":"GET","path":"/notes/","route":"notes"}\n'
+            '{"event":"sql.denied","route":"notes","proxy":"db",'
+            '"sql":"INSERT INTO orders (id, total) VALUES ($1, $2)","reason":"not granted"}\n',
+            encoding="utf-8",
+        )
+        assert (
+            fold.main(
+                ["fold", str(log), "--manifest", str(manifest), "--prefer-tables", "--write"]
+            )
+            == 0
+        )
+        parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        tables = parsed["route"][0]["db"]["tables"]
+        assert tables["orders"] == {"insert": ["id", "total"]}
+        assert parsed["route"][0]["db"]["queries"] == ["SELECT 'granted'"]
+
+
+class TestAFunctionGrantSurvives:
+    """A route's own `functions` are kept when the plan adds one (D3c)."""
+
+    MANIFEST = """\
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "search"
+path = ['/search/']
+[route.db]
+functions = ["unaccent"]
+queries = ["SELECT 'listed'"]
+"""
+
+    LOG = "\n".join(
+        [
+            '{"event":"request","method":"GET","path":"/search/","route":"search"}',
+            '{"event":"sql.denied","route":"search","proxy":"db",'
+            '"sql":"SELECT unaccent($1), st_distance($1, $2)",'
+            '"reason":"the function st_distance is not granted"}',
+        ]
+    )
+
+    def test_the_union_is_written_and_the_edit_is_accepted(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "blastit.toml"
+        manifest.write_text(self.MANIFEST, encoding="utf-8")
+        log = tmp_path / "app.log"
+        log.write_text(self.LOG + "\n", encoding="utf-8")
+        assert (
+            fold.main(
+                ["fold", str(log), "--manifest", str(manifest), "--prefer-tables", "--write"]
+            )
+            == 0
+        ), capsys.readouterr().err
+        parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        assert parsed["route"][0]["db"]["functions"] == ["st_distance", "unaccent"], (
+            "the route's own function is kept, and the plan's is added to it"
+        )
+        assert parsed["route"][0]["db"]["queries"] == ["SELECT 'listed'"]

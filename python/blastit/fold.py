@@ -33,7 +33,20 @@ What it folds
   (in `--prefer-tables` mode);
 * never a statement this build cannot read: `--prefer-tables` keeps those as
   exact `queries` and says so, with the reason `analyze` gave — a system
-  catalogue, an unknown function, a statement kind no table grant describes.
+  catalogue, an unknown function, a statement kind no table grant describes;
+* never a statement of a kind a grant is not an allowlist for: DDL, `SET` and
+  `RESET` (a `SET ROLE` above all), `COPY`, `DO`, `CALL`, `LOCK`, `GRANT`,
+  `REVOKE`, `TRUNCATE`, `VACUUM`, `LISTEN`/`NOTIFY`, the transaction commands.
+  PostgreSQL's own parser names the kind (never a pattern over the text), the
+  statement is refused unless `--allow-dangerous` is given, and either way it is
+  listed on stderr with the reason.
+
+Nothing a log says is trusted as manifest text. A `route` names a route the
+manifest already declares, a `proxy` a proxy it already declares *and* that the
+route is granted; fold never creates a route, and it refuses — rather than
+writes — a name it cannot spell as a plain TOML key. A reason becomes a
+single-line comment, bounded in length, and every statement is written as an
+escaped TOML string.
 
 Lines that are not events are skipped, and so is an App Platform prefix in front
 of one (`2026-10-25T14:02:11.384Z app[web.1]: {…}`): see
@@ -42,17 +55,27 @@ of one (`2026-10-25T14:02:11.384Z app[web.1]: {…}`): see
 `--write`
 ---------
 
-Without `--write` the file is not touched: the TOML to paste is printed. With
-it, the additions are merged into the file with a line-level edit — the new
-statements go into the route's existing `queries = [ … ]`, a new
-`[route.<proxy>.tables]` section is added under the route's grant, and a table
-entry that was there keeps its position and its neighbours' comments. Nothing
-else in the file is rewritten, so a diff shows only the grants.
+Without `--write` the file is not touched: the TOML to paste is printed, and it
+is parsed before it is printed. With it, the additions are merged into the file
+with a line-level edit — the new statements go into the route's existing
+`queries = [ … ]`, a new `[route.<proxy>.tables]` section is written under the
+route's grant, and a table entry that was there keeps its position and its
+neighbours' comments. Nothing else in the file is rewritten.
+
+The edit is then *proved* before anything is written: the whole result is parsed
+again, its grants are compared key by key to the plan (no route, proxy, group or
+version may differ, and no grant may hold anything the plan did not ask for),
+and blastit's own `audit` is run on it with the log's traffic as observations, so
+every statement the plan grants has to come out granted. An edit that fails any
+of that is refused, and the file is left exactly as it was. A grant written as an
+inline table (`db = { … }`, `tables = { … }`) is refused too: the line-level
+edit cannot merge into it, and a duplicate key would not parse.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -66,12 +89,13 @@ __all__ = ["main"]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """`blastit-manifest fold LOG... --manifest blastit.toml [--write] [--prefer-tables]`.
+    """`blastit-manifest fold LOG... --manifest blastit.toml [--write] [--prefer-tables]
+    [--allow-dangerous]`.
 
     Returns the process exit status: 0 when it printed (or wrote) what the
     manifest was missing — an empty diff is a normal, good outcome — and 1 on
-    anything it could not do (an unreadable log, a manifest it cannot parse or
-    edit safely).
+    anything it could not do (an unreadable log, a manifest it cannot parse,
+    edit or prove safe).
     """
     parser = _parser()
     args = parser.parse_args(argv)
@@ -118,6 +142,13 @@ def _parser() -> argparse.ArgumentParser:
         "statements (D7), keeping as exact queries whatever a table grant cannot "
         "describe",
     )
+    fold.add_argument(
+        "--allow-dangerous",
+        action="store_true",
+        help="grant statements that are not a plain SELECT, INSERT, UPDATE or DELETE "
+        "(DDL, SET, COPY, DO, CALL, LOCK, GRANT, TRUNCATE, VACUUM, LISTEN, transaction "
+        "control) instead of refusing them",
+    )
     fold.set_defaults(handler=_fold)
     return parser
 
@@ -160,6 +191,10 @@ class _Addition:
     tables: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: `functions` entries beyond the safe set, the route's own included.
     functions: list[str] = field(default_factory=list)
+    #: Every statement this addition makes runnable, as the log wrote it. The
+    #: verification replays them through `blastit._blastit.audit` on the edited
+    #: manifest and checks each one is granted there (D3c).
+    statements: list[str] = field(default_factory=list)
     #: What was left out and why, for the summary.
     notes: list[str] = field(default_factory=list)
 
@@ -173,14 +208,15 @@ class _Addition:
 #
 
 
-def read_denials(logs_or_stdin: Iterable[str]) -> list[_Denial]:
-    """The denials every log holds, deduplicated, in the order they were read.
+def read_events(logs_or_stdin: Iterable[str]) -> list[dict[str, Any]]:
+    """Every event the logs hold, in the order they were read (D3c).
 
     `-` reads standard input, so a live pipeline works:
-    `ssh app blastit | blastit-manifest fold - --manifest blastit.toml`.
+    `ssh app blastit | blastit-manifest fold - --manifest blastit.toml`. Lines
+    that are not events are skipped — a log carries the app's own output, and an
+    App Platform prefix in front of every line (`blastit.logs` knows both).
     """
-    denials: list[_Denial] = []
-    seen: set[tuple[str, str, str]] = set()
+    events: list[dict[str, Any]] = []
     for source in logs_or_stdin:
         if source == "-":
             text = sys.stdin.read()
@@ -190,21 +226,34 @@ def read_denials(logs_or_stdin: Iterable[str]) -> list[_Denial]:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError as error:
                 raise _FoldError(f"{path}: {error}") from error
-        for denial in logs.denials(logs.parse_events(text.splitlines())):
-            key = (denial["route"], denial["proxy"], denial["sql"])
-            if key in seen:
-                continue
-            seen.add(key)
-            denials.append(
-                _Denial(
-                    route=denial["route"],
-                    proxy=denial["proxy"],
-                    sql=denial["sql"],
-                    reason=denial["reason"],
-                    count=denial["count"],
-                )
+        events.extend(logs.parse_events(text.splitlines()))
+    return events
+
+
+def denials_of(events: Iterable[dict[str, Any]]) -> list[_Denial]:
+    """The `sql.denied` events, deduplicated by `(route, proxy, statement)`."""
+    denials: list[_Denial] = []
+    seen: set[tuple[str, str, str]] = set()
+    for denial in logs.denials(events):
+        key = (denial["route"], denial["proxy"], denial["sql"])
+        if key in seen:
+            continue
+        seen.add(key)
+        denials.append(
+            _Denial(
+                route=denial["route"],
+                proxy=denial["proxy"],
+                sql=denial["sql"],
+                reason=denial["reason"],
+                count=denial["count"],
             )
+        )
     return denials
+
+
+def read_denials(logs_or_stdin: Iterable[str]) -> list[_Denial]:
+    """The denials every log holds: [`read_events`] then [`denials_of`]."""
+    return denials_of(read_events(logs_or_stdin))
 
 
 #
@@ -217,15 +266,22 @@ def plan(
     denials: list[_Denial],
     *,
     prefer_tables: bool,
+    allow_dangerous: bool = False,
     covering: Callable[[list[str], str], str] | None = None,
+    classify: Callable[[str], str] | None = None,
 ) -> list[_Addition]:
     """What each `(route, proxy)` grant has to gain, in manifest order.
 
-    `document` is the manifest, parsed by `tomllib`; `covering` is in injectable
-    for tests and defaults to `blastit._blastit.covering`.
+    `document` is the manifest, parsed by `tomllib`. `covering` and `classify`
+    are injectable for tests and default to `blastit._blastit.covering` and
+    `blastit._blastit.classify`; `allow_dangerous` lets a statement that is not
+    a plain `SELECT`/`INSERT`/`UPDATE`/`DELETE` through (D3c), which is off by
+    default because a `SET ROLE`, a `COPY` or a `CREATE TABLE` in a grant is a
+    hole, not a fix.
     """
     routes = _routes(document)
     groups = document.get("group") or {}
+    proxies = set((document.get("proxy") or {}).keys())
     global_groups = [str(name) for name in document.get("groups") or []]
     by_pair: dict[tuple[str, str], list[_Denial]] = {}
     for denial in denials:
@@ -236,8 +292,26 @@ def plan(
         addition = _Addition(route=route_name, proxy=proxy)
         if route is None:
             addition.notes.append(
-                f"{route_name}: the manifest declares no route of that name — add it, "
-                "then fold again"
+                f"{route_name}: the manifest declares no route of that name — fold extends "
+                "the routes a manifest has, it never creates one"
+            )
+            results.append(addition)
+            continue
+        # Every value here comes out of a log line, which an application can
+        # influence: a `proxy` that is not a key of this manifest, or a `route`
+        # that is not a route of it, is a log from elsewhere — or a forgery —
+        # and nothing of it may reach the file (D3c).
+        if _bare_key(proxy) is None:
+            addition.notes.append(
+                f"{route_name}: the log names the proxy {proxy!r}, which is not a plain "
+                "TOML key; fold cannot write a grant section for it"
+            )
+            results.append(addition)
+            continue
+        if proxy not in proxies:
+            addition.notes.append(
+                f"{route_name}: the log names the proxy {proxy!r}, which this manifest "
+                "does not declare"
             )
             results.append(addition)
             continue
@@ -250,6 +324,14 @@ def plan(
             )
             results.append(addition)
             continue
+        if not _granted_proxies(proxy, grant, groups, global_groups, route):
+            addition.notes.append(
+                f"{route_name} ({proxy}): the route has no grant on that proxy — a route "
+                "only gets a listener for a proxy it is granted (§2.2), so the log is "
+                "older than the manifest; add the grant by hand, then fold again"
+            )
+            results.append(addition)
+            continue
         addition = _plan_route(
             route=route,
             route_name=route_name,
@@ -259,7 +341,9 @@ def plan(
             global_groups=global_groups,
             denials=by_pair[(route_name, proxy)],
             prefer_tables=prefer_tables,
+            allow_dangerous=allow_dangerous,
             covering=covering,
+            classify=classify,
         )
         results.append(addition)
     return results
@@ -275,11 +359,14 @@ def _plan_route(
     global_groups: list[str],
     denials: list[_Denial],
     prefer_tables: bool,
+    allow_dangerous: bool,
     covering: Callable[[list[str], str], str] | None,
+    classify: Callable[[str], str] | None,
 ) -> _Addition:
     """What one route's grant is missing, from its denials."""
     addition = _Addition(route=route_name, proxy=proxy)
     existing = _granted_queries(proxy, grant, groups, global_groups, route)
+    judge = classify or _classify
     new: list[_Denial] = []
     seen: set[str] = set()
     for denial in denials:
@@ -297,6 +384,23 @@ def _plan_route(
         if normalised in seen:
             continue
         seen.add(normalised)
+        # What kind of statement this is decides whether a grant may hold it at
+        # all; PostgreSQL's own parser answers, never a guess from the text.
+        kind = _kind(judge, denial)
+        if kind is None:
+            continue
+        if not kind["plain"] and not allow_dangerous:
+            why = f" ({kind['reason']})" if kind["reason"] else ""
+            addition.notes.append(
+                f"{denial.sql!r}: refused — {kind['label']} is not a plain SELECT, INSERT, "
+                f"UPDATE or DELETE{why}; pass --allow-dangerous to grant it anyway"
+            )
+            continue
+        if not kind["plain"]:
+            addition.notes.append(
+                f"{denial.sql!r}: granted although it is {kind['label']}, which is not a "
+                "plain SELECT, INSERT, UPDATE or DELETE (--allow-dangerous)"
+            )
         new.append(denial)
     if not new:
         return addition
@@ -316,6 +420,7 @@ def _plan_route(
         kept.append(denial)
     if not kept:
         return addition
+    addition.statements = [denial.sql for denial in kept]
 
     if not prefer_tables:
         addition.queries = [(denial.sql, denial.reason) for denial in kept]
@@ -337,6 +442,28 @@ def _plan_route(
         set(_text_list(grant.get("functions") if grant else None)) | set(merged["functions"])
     )
     return addition
+
+
+def _kind(
+    judge: Callable[[str], str], denial: _Denial
+) -> dict[str, Any] | None:
+    """What kind of statement a denial is, or `None` when nothing can say.
+
+    The log holds the normalised text, and the parser needs the statement, so
+    [`logs.parseable_sql`] is what the classification sees. A statement nothing
+    can parse is refused and named: a grant for text that is not SQL is a grant
+    nothing will ever match.
+    """
+    try:
+        verdict = json.loads(judge(denial.parseable))
+    except Exception as error:  # noqa: BLE001 - a refusal from the parser, or no parser
+        return {
+            "plain": False,
+            "label": "unreadable",
+            "reason": str(error),
+        }
+    verdict.setdefault("reason", "")
+    return verdict
 
 
 def _order(
@@ -400,6 +527,41 @@ def _group_grant(group: Any, proxy: str) -> Any:
     return group.get(proxy) if isinstance(group, dict) else None
 
 
+def _granted_proxies(
+    proxy: str,
+    grant: dict[str, Any] | None,
+    groups: dict[str, Any],
+    global_groups: list[str],
+    route: dict[str, Any],
+) -> bool:
+    """Whether a route has a grant on one proxy, inline or through a group (§6).
+
+    A route only gets a listener for a proxy it is granted (§2.2), so a denial
+    naming a proxy the route is not granted is a log of another manifest — and
+    fold will not invent the grant for it.
+    """
+    if isinstance(grant, dict):
+        return True
+    for name in global_groups:
+        if isinstance(_group_grant(groups.get(name), proxy), dict):
+            return True
+    return any(
+        isinstance(_group_grant(groups.get(str(name)), proxy), dict)
+        for name in route.get("groups") or []
+    )
+
+
+def _bare_key(name: str) -> str | None:
+    """The name when it is a plain TOML key, or `None`.
+
+    Fold writes `[route.<proxy>]` headers and `[route.<proxy>.tables]` entries,
+    and a name that needs quoting would make every one of those a quoting
+    problem of its own. A proxy the manifest declares under a quoted key is one
+    fold says it cannot write into, never one it writes wrong.
+    """
+    return name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else None
+
+
 def _collect_queries(grant: Any, sources: dict[str, str], label: str) -> None:
     """Adds a grant's queries to `sources`, keeping the first label seen."""
     if not isinstance(grant, dict):
@@ -420,6 +582,19 @@ def _covering(statements: list[str], prefix: str) -> str:
     from blastit import _blastit
 
     return _blastit.covering(statements, prefix)
+
+
+def _classify(sql: str) -> str:
+    """`blastit._blastit.classify`: PostgreSQL's own parser naming the statement.
+
+    The same parser the analysis uses, answering for *every* kind — the four a
+    grant can hold, and the rest (DDL, `SET`, `COPY`, `DO`, `CALL`, `LOCK`,
+    `GRANT`, `TRUNCATE`, `VACUUM`, `LISTEN`, the transaction commands) — which
+    is what a tool that offers to write a grant has to know before it does.
+    """
+    from blastit import _blastit
+
+    return _blastit.classify(sql)
 
 
 def _text_list(value: Any) -> list[str]:
@@ -548,6 +723,579 @@ def _toml_key(value: str) -> str:
 
 
 #
+# The manifest as TOML: scanning, rendering, and the line-level edit.
+#
+
+
+@dataclass
+class _Line:
+    """One line of a manifest, and what a scan of the whole file made of it."""
+
+    #: Index in the file, 0-based.
+    index: int
+    #: The line as it was written, newline included.
+    text: str
+    #: The dotted key of a table header (`[route.db]`, `[[route]]`), if the line
+    #: opens one. `None` for every other line, *including* a line that merely
+    #: looks like a header inside a string or an array.
+    header: tuple[str, ...] | None = None
+    #: Whether the header opens an array of tables (`[[route]]`).
+    array_of_tables: bool = False
+    #: The key this line assigns (`queries = …`), split into its components and
+    #: unquoted. `None` when the line assigns nothing.
+    key: tuple[str, ...] | None = None
+    #: The text after `key =`, stripped of trailing whitespace.
+    value: str = ""
+    #: How deep in an array the line starts, and how deep it ends.
+    depth: int = 0
+    end_depth: int = 0
+
+
+class _Scan:
+    """A manifest, walked once: which lines are structural, and which are data.
+
+    A line regex cannot tell a table header from a line that merely looks like
+    one. Inside a multi-line string (three quotes, or three apostrophes) a
+    `[[route]]` line is text; inside a multi-line array, a line that starts with
+    `[` is an element; and a `queries = [` line opens an array the *rest of the
+    file* may be inside. The two things that make a line structural are
+    therefore being outside a string and being outside an array, and only a walk
+    of the file knows them, so this is that walk: one pass, character by
+    character, tracking every string, every array and every comment, and
+    recording for each line the header, key and array depth the walk saw at its
+    start.
+
+    It is deliberately not a TOML parser: it does not have to agree with one on
+    what a value means, only on where a line stops being structure and starts
+    being data. The edit is verified — re-parsed and audited — before anything
+    is written, so a line this scanner gets wrong is refused, never written.
+    """
+
+    def __init__(self, text: str) -> None:
+        """Walks the text once."""
+        self.lines: list[_Line] = []
+        depth = 0
+        multiline: str | None = None
+        for index, raw in enumerate(text.splitlines(keepends=True)):
+            line = _Line(index=index, text=raw, depth=depth)
+            self.lines.append(line)
+            if depth == 0 and multiline is None:
+                after = self._structure(line)
+            else:
+                after = 0
+            depth, multiline = self._walk(raw, after, depth, multiline)
+            line.end_depth = depth
+
+    def _structure(self, line: _Line) -> int:
+        """Fills in a line's header or key, and says where its body starts."""
+        stripped = line.text.lstrip()
+        offset = len(line.text) - len(stripped)
+        if not stripped or stripped.startswith("#"):
+            return 0
+        if stripped.startswith("["):
+            header = _header_key(stripped)
+            if header is not None:
+                line.header = header
+                line.array_of_tables = stripped.startswith("[[")
+                return offset + _header_end(stripped)
+            return offset
+        key, value, start = _key_of(stripped)
+        if key is not None:
+            line.key = key
+            line.value = value
+            return offset + start
+        return offset
+
+    def _walk(
+        self, raw: str, start: int, depth: int, multiline: str | None
+    ) -> tuple[int, str | None]:
+        """Updates the array depth and the open multi-line string."""
+        index = start
+        while index < len(raw):
+            char = raw[index]
+            if multiline is not None:
+                if raw.startswith(multiline, index):
+                    index += len(multiline)
+                    multiline = None
+                    continue
+                if multiline == '"""' and char == "\\":
+                    index += 2
+                    continue
+                index += 1
+                continue
+            if char == "#":
+                break  # a comment runs to the end of the line
+            if raw.startswith('"""', index) or raw.startswith("'''", index):
+                multiline = raw[index : index + 3]
+                index += 3
+                continue
+            if char in ("'", '"'):
+                index = _quoted_end(raw, index, char)
+                continue
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth = max(0, depth - 1)
+            index += 1
+        return depth, multiline
+
+    def headers(self, key: tuple[str, ...] | None = None) -> list[_Line]:
+        """Every line that opens a table, in file order."""
+        found = [line for line in self.lines if line.header is not None]
+        if key is not None:
+            found = [line for line in found if line.header == key]
+        return found
+
+    def block_end(self, index: int) -> int:
+        """The first line after `index` that opens a table, or the file's end."""
+        for line in self.lines[index + 1 :]:
+            if line.header is not None:
+                return line.index
+        return len(self.lines)
+
+    def keys(self, start: int, end: int) -> list[_Line]:
+        """The lines between `start` and `end` that assign a key."""
+        return [
+            line
+            for line in self.lines[start:end]
+            if line.key is not None and line.depth == 0
+        ]
+
+    def array_end(self, line: _Line) -> int | None:
+        """The line a key's array closes on, when it closes on a line of its own.
+
+        `None` when the value is not an array, or when the array opens and closes
+        on `line` itself — the caller finds the bracket on the line then.
+        """
+        if line.end_depth <= line.depth:
+            return None
+        for other in self.lines[line.index + 1 :]:
+            if other.end_depth == line.depth:
+                return other.index
+        return None
+
+    def text(self) -> str:
+        """Every line, joined: the file the scan walked."""
+        return "".join(line.text for line in self.lines)
+
+
+def _header_end(text: str) -> int:
+    """The offset just after the `]`/`]]` that closes a table header."""
+    closing = "]]" if text.startswith("[[") else "]"
+    found = _find_unquoted(text, closing, 1)
+    if found < 0:
+        return len(text)
+    return found + len(closing)
+
+
+def _header_key(text: str) -> tuple[str, ...] | None:
+    """The dotted key components of a header line, or `None`."""
+    double = text.startswith("[[")
+    closing = "]]" if double else "]"
+    start = 2 if double else 1
+    found = _find_unquoted(text, closing, start)
+    if found < 0:
+        return None
+    return _split_key(text[start:found])
+
+
+def _key_of(text: str) -> tuple[tuple[str, ...] | None, str, int]:
+    """The key a line assigns, its value, and where the value starts.
+
+    `(None, "", 0)` when the line assigns nothing: a value without a key, or a
+    line this build does not understand. The `=` is looked for outside quoted
+    keys and strings, so a `=` inside a key spelled `"a=b"` is not one.
+    """
+    found = _find_unquoted(text, "=", 0)
+    if found < 0:
+        return None, "", 0
+    key = _split_key(text[:found])
+    if key is None:
+        return None, "", 0
+    value = text[found + 1 :].strip()
+    return key, value, found + 1
+
+
+def _split_key(text: str) -> tuple[str, ...] | None:
+    """A dotted TOML key's components, unquoted, or `None` when it is not one."""
+    parts: list[str] = []
+    for part in _split_dotted(text):
+        name = _unquote_key(part.strip())
+        if name is None:
+            return None
+        parts.append(name)
+    return tuple(parts) if parts else None
+
+
+def _split_dotted(text: str) -> list[str]:
+    """Splits a dotted key on its dots, outside quoted components."""
+    parts: list[str] = []
+    start = 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in ("'", '"'):
+            index = _quoted_end(text, index, char)
+            continue
+        if char == ".":
+            parts.append(text[start:index])
+            start = index + 1
+        index += 1
+    parts.append(text[start:])
+    return parts
+
+
+def _unquote_key(part: str) -> str | None:
+    """A key component's name, or `None` when it is neither bare nor quoted."""
+    if not part:
+        return None
+    if part[0] in ("'", '"'):
+        quote = part[0]
+        if len(part) < 2 or part[-1] != quote:
+            return None
+        inner = part[1:-1]
+        if quote == '"':
+            try:
+                return json.loads(part)
+            except ValueError:
+                return None
+        return inner
+    if re.fullmatch(r"[A-Za-z0-9_-]+", part):
+        return part
+    return None
+
+
+def _find_unquoted(text: str, wanted: str, start: int) -> int:
+    """The offset of `wanted` outside every quoted region, or -1.
+
+    This is what a `]` or an `=` inside a TOML string must not be mistaken for
+    (D3c): a statement in a one-line `queries` array can hold either.
+    """
+    index = start
+    while index < len(text):
+        char = text[index]
+        if char in ("'", '"'):
+            index = _quoted_end(text, index, char)
+            continue
+        if char == "#":
+            return -1 if wanted != "#" else index
+        if text.startswith(wanted, index):
+            return index
+        index += 1
+    return -1
+
+
+def _quoted_end(text: str, index: int, quote: str) -> int:
+    """The offset just after the quoted region that opens at `index`.
+
+    Single-line only: a manifest's strings are one line each (a `queries` entry
+    with a newline in it is written as `\\n`), and the multi-line forms are the
+    scan's business, not this helper's.
+    """
+    scan = index + 1
+    while scan < len(text):
+        char = text[scan]
+        if quote == '"' and char == "\\":
+            scan += 2
+            continue
+        if char == quote:
+            if scan + 1 < len(text) and text[scan + 1] == quote:
+                scan += 2
+                continue
+            return scan + 1
+        scan += 1
+    return len(text)
+
+
+#
+# The edit itself.
+#
+
+
+def _diagnostic(message: str) -> None:
+    """One note for a person, on stderr, never as TOML."""
+    print(f"note: {message}", file=sys.stderr)
+
+
+def _comment(text: str) -> str:
+    """A log field as a TOML comment: one line, no controls, bounded.
+
+    A `sql.denied` reason is dbproxy's, and dbproxy's reasons quote the
+    statement — including, for a quoted identifier, whatever the application put
+    in it. A newline there would end the comment and let the rest of the text be
+    read as TOML; a control character is noise; and a kilobyte of reason is not
+    a comment. So the text is flattened and cut, and the result can only ever be
+    a comment.
+    """
+    flattened = "".join(
+        " " if character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F else character
+        for character in text
+    )
+    return flattened.strip()[:COMMENT_LIMIT]
+
+
+#: How long a rendered comment may be, in characters.
+COMMENT_LIMIT = 160
+
+#: The key a `queries` grant is written under, and the two others fold knows.
+_QUERIES = ("queries",)
+_FUNCTIONS = ("functions",)
+_TABLES = ("tables",)
+
+
+def _inline_table(line: _Line) -> bool:
+    """Whether a key's value is an inline table (`db = { … }`)."""
+    return line.value.startswith("{")
+
+
+def _apply(lines: list[str], scan: _Scan, addition: _Addition) -> _Scan:
+    """Merges one `(route, proxy)` addition into the manifest, and re-scans it.
+
+    The scan is rebuilt after every change: line indices move, and a second
+    addition has to see the file as it now is.
+    """
+    route = _route_element(scan, addition.route)
+    grant = _grant_element(scan, route, addition.proxy)
+    if addition.queries:
+        lines = _add_queries(scan, grant, addition.queries)
+        scan = _Scan("".join(lines))
+        route = _route_element(scan, addition.route)
+        grant = _grant_element(scan, route, addition.proxy)
+    if addition.functions:
+        lines = _set_functions(scan, grant, addition.functions)
+        scan = _Scan("".join(lines))
+        route = _route_element(scan, addition.route)
+    if addition.tables:
+        lines = _set_tables(scan, route, addition.proxy, addition.tables)
+    return _Scan("".join(lines))
+
+
+def _route_element(scan: _Scan, name: str) -> _Line:
+    """The `[[route]]` line of the route called `name`.
+
+    Raises [`_FoldError`] when no such element exists: fold extends a route, it
+    never invents one.
+    """
+    for header in scan.headers(("route",)):
+        end = _element_end(scan, header)
+        for line in scan.keys(header.index + 1, end):
+            if line.key == ("name",) and _unquote_value(line.value) == name:
+                return header
+    raise _FoldError(
+        f"the manifest declares no `[[route]]` named {name!r}; fold extends the routes "
+        "a manifest already has, it never creates one"
+    )
+
+
+def _element_end(scan: _Scan, header: _Line) -> int:
+    """Where an array-of-tables element ends: the next one, or the file's end."""
+    for other in scan.lines[header.index + 1 :]:
+        if other.header == ("route",) and other.array_of_tables:
+            return other.index
+    return len(scan.lines)
+
+
+def _unquote_value(value: str) -> str:
+    """The text of a one-line TOML string value, or the value as it is."""
+    text = value.strip()
+    if text[:1] == '"':
+        found = _quoted_end(text, 0, '"')
+        if found > 1:
+            try:
+                return json.loads(text[:found])
+            except ValueError:
+                return text[1 : found - 1]
+    if text[:1] == "'":
+        found = _quoted_end(text, 0, "'")
+        if found > 1:
+            return text[1 : found - 1]
+    return text
+
+
+def _grant_element(scan: _Scan, route: _Line, proxy: str) -> _Line:
+    """The `[route.<proxy>]` line of a route.
+
+    Raises [`_FoldError`] when the route has no such grant: a denial names a
+    proxy the route has a listener for (§2.2), so a route without that grant is
+    a different manifest's route, not one to write into. It also refuses — never
+    guesses at — a grant written as an inline table, which the line-level edit
+    cannot merge into.
+    """
+    wanted = ("route", *proxy.split("."))
+    end = _element_end(scan, route)
+    for line in scan.keys(route.index + 1, end):
+        if line.key is not None and line.key[0] == proxy and _inline_table(line):
+            raise _FoldError(
+                f"the route {_route_name(scan, route)!r} writes its {proxy!r} grant as an "
+                f"inline table (`{proxy} = {{ … }}`, line {line.index + 1}); write it as "
+                f"`[route.{proxy}]` first, so fold can add to it"
+            )
+    for header in scan.headers():
+        if header.header == wanted and route.index < header.index < end:
+            for line in scan.keys(header.index + 1, scan.block_end(header.index)):
+                if line.key == _TABLES and _inline_table(line):
+                    raise _FoldError(
+                        f"`[route.{proxy}]` writes its `tables` grant as an inline table "
+                        f"(line {line.index + 1}); write it as `[route.{proxy}.tables]` "
+                        "first, so fold can add to it"
+                    )
+            return header
+    raise _FoldError(
+        f"the route {_route_name(scan, route)!r} has no `[route.{proxy}]` grant; a route "
+        "only gets a listener for a proxy it is granted (§2.2), so a denial for it means "
+        "the log is older than the manifest — add the grant by hand, then fold again"
+    )
+
+
+def _route_name(scan: _Scan, route: _Line) -> str:
+    """The `name` a route element declares, for a message."""
+    for line in scan.keys(route.index + 1, _element_end(scan, route)):
+        if line.key == ("name",):
+            return _unquote_value(line.value)
+    return "?"
+
+
+def _add_queries(scan: _Scan, grant: _Line, queries: list[tuple[str, str]]) -> list[str]:
+    """Appends statements to the grant's `queries`, or writes the array."""
+    lines = [line.text for line in scan.lines]
+    items = [_query_line(sql, reason) for sql, reason in queries]
+    end = scan.block_end(grant.index)
+    for line in scan.keys(grant.index + 1, end):
+        if line.key != _QUERIES:
+            continue
+        if not line.value.startswith("["):
+            raise _FoldError(
+                f"the `queries` key of `{grant.text.strip()}` is not a literal array "
+                f"(line {line.index + 1}); edit it by hand"
+            )
+        closing = scan.array_end(line)
+        if closing is not None:
+            lines[closing:closing] = items
+            return lines
+        # A one-line array: rewritten as a multi-line one. Its text is kept as it
+        # is, and the closing bracket is found with a quote-aware scan, because a
+        # statement inside it may hold a `]` (in a quoted identifier, say).
+        bracket = _find_unquoted(line.text, "]", line.text.find("["))
+        if bracket < 0:
+            raise _FoldError(
+                f"the `queries` array on line {line.index + 1} is not closed; edit it "
+                "by hand"
+            )
+        opening = line.text.find("[")
+        head = line.text[: opening + 1].rstrip("\n")
+        body = line.text[opening + 1 : bracket].strip()
+        suffix = line.text[bracket + 1 :].rstrip("\n").rstrip()
+        block = [f"{head}\n"]
+        if body:
+            block.append(f"  {body},\n")
+        block.extend(items)
+        block.append(f"]{'  ' + suffix if suffix else ''}\n")
+        lines[line.index : line.index + 1] = block
+        return lines
+    lines[grant.index + 1 : grant.index + 1] = ["queries = [\n", *items, "]\n"]
+    return lines
+
+
+def _query_line(sql: str, reason: str) -> str:
+    """One entry of a `queries` array, with its reason as a comment."""
+    comment = f"  # {_comment(reason)}" if reason else ""
+    return f"  {_toml_string(sql)},{comment}\n"
+
+
+def _set_functions(scan: _Scan, grant: _Line, functions: list[str]) -> list[str]:
+    """Writes the grant's `functions = [ … ]` line, or replaces it."""
+    lines = [line.text for line in scan.lines]
+    rendered = ", ".join(_toml_string(name) for name in functions)
+    end = scan.block_end(grant.index)
+    for line in scan.keys(grant.index + 1, end):
+        if line.key != _FUNCTIONS:
+            continue
+        stop = scan.array_end(line)
+        lines[line.index : (stop + 1 if stop is not None else line.index + 1)] = [
+            f"functions = [{rendered}]\n"
+        ]
+        return lines
+    lines[grant.index + 1 : grant.index + 1] = [f"functions = [{rendered}]\n"]
+    return lines
+
+
+def _set_tables(
+    scan: _Scan, route: _Line, proxy: str, tables: dict[str, dict[str, Any]]
+) -> list[str]:
+    """Writes a route's `[route.<proxy>.tables]` section, merged in place."""
+    lines = [line.text for line in scan.lines]
+    wanted = ("route", *proxy.split("."), "tables")
+    route_end = _element_end(scan, route)
+    header = next(
+        (
+            line
+            for line in scan.headers(wanted)
+            if route.index < line.index < route_end
+        ),
+        None,
+    )
+    if header is None:
+        grant = next(
+            line
+            for line in scan.headers(("route", *proxy.split(".")))
+            if route.index < line.index < route_end
+        )
+        insert = scan.block_end(grant.index)
+        block: list[str] = []
+        if insert > 0 and lines[insert - 1].strip() != "":
+            block.append("\n")
+        block.append(f"[{'.'.join(_toml_key(part) for part in wanted)}]\n")
+        lines[insert:insert] = block
+        scan = _Scan("".join(lines))
+        header = next(
+            line for line in scan.headers(wanted) if line.index >= insert
+        )
+    end = scan.block_end(header.index)
+    remaining = dict(tables)
+    for line in scan.keys(header.index + 1, end):
+        if line.key is None:
+            continue
+        table = line.key[0] if len(line.key) == 1 else None
+        if table is None or table not in remaining:
+            continue
+        lines[line.index] = _render_table(table, remaining.pop(table)) + "\n"
+    if remaining:
+        additions = [
+            f"{_render_table(table, grant)}\n" for table, grant in sorted(remaining.items())
+        ]
+        lines[end:end] = additions
+        end += len(additions)
+    if end < len(lines) and lines[end].strip() != "":
+        # A blank line between sections: a manifest is read by people, and the
+        # next header may be the next `[[route]]`.
+        lines[end:end] = ["\n"]
+    return lines
+
+
+def apply_additions(text: str, additions: list[_Addition]) -> str:
+    """The manifest with every addition merged in, as text.
+
+    A line-level edit, because what a manifest author cares about is their
+    comments and their order: the new statements are appended inside the route's
+    existing `queries = [ … ]` array (or the array is added to the route's
+    grant), a `[route.<proxy>.tables]` section is written under the grant with
+    the route's existing table entries updated in place, and no other line is
+    touched.
+
+    Raises [`_FoldError`] when the file is not shaped the way the edit needs — a
+    route with no `[[route]]` element, a grant written as an inline table, a
+    `queries` key that is not a literal array — because half-editing a manifest
+    would be worse than saying so, and because [`_verify_edit`] is what proves
+    the result is the manifest plus exactly the plan.
+    """
+    scan = _Scan(text)
+    for addition in additions:
+        if addition.is_empty():
+            continue
+        scan = _apply([line.text for line in scan.lines], scan, addition)
+    return scan.text()
+
+#
 # Rendering, and writing the file.
 #
 
@@ -556,38 +1304,58 @@ def render(additions: list[_Addition]) -> str:
     """The TOML to paste, one block per `(route, proxy)` grant.
 
     A grant with nothing to add prints nothing at all, and the notes — a denial
-    that needs a hand, a statement that is already granted (an undeclared route,
-    an unrestricted grant) — are the caller's to print: what comes out of here
-    is TOML, and only TOML.
+    that needs a hand, a statement that is already granted, one that was refused
+    — are the caller's to print: what comes out of here is TOML, and only TOML,
+    which is checked by parsing it before it is returned.
     """
     blocks: list[str] = []
     for addition in additions:
         if addition.is_empty():
             continue
         lines: list[str] = [
-            f"# {addition.route} (proxy {addition.proxy}): what the log's denials are missing",
+            f"# {_comment(addition.route)} (proxy {_comment(addition.proxy)}): "
+            "what the log's denials are missing",
         ]
         # The grant's own section, only when something goes in it: a
         # `[route.<proxy>]` with nothing under it says nothing, and a route that
         # only gains a table grant needs none.
+        # Every name in a header goes through `_toml_key`: a proxy that is not a
+        # plain key is quoted here, and refused long before the edit (D3c).
+        proxy = _bare_key(addition.proxy) or _toml_key(addition.proxy)
         if addition.queries or addition.functions:
-            lines.append(f"[route.{addition.proxy}]")
+            lines.append(f"[route.{proxy}]")
         if addition.queries:
             lines.append("queries = [")
             for sql, reason in addition.queries:
-                comment = f"  # {reason}" if reason else ""
-                lines.append(f"  {_toml_string(sql)},{comment}")
+                lines.append(_query_line(sql, reason).rstrip("\n"))
             lines.append("]")
         if addition.functions:
             rendered = ", ".join(_toml_string(name) for name in addition.functions)
             lines.append(f"functions = [{rendered}]")
         if addition.tables:
             lines.append("")
-            lines.append(f"[route.{addition.proxy}.tables]")
+            lines.append(f"[route.{proxy}.tables]")
             for table, grant in sorted(addition.tables.items()):
                 lines.append(_render_table(table, grant))
-        blocks.append("\n".join(lines))
+        block = "\n".join(lines)
+        if not _parses(block):
+            raise _FoldError(
+                f"the block written for {addition.route} ({addition.proxy}) is not valid "
+                "TOML, which is a bug in fold: nothing was written"
+            )
+        blocks.append(block)
     return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def _parses(text: str) -> bool:
+    """Whether a rendered snippet is valid TOML on its own."""
+    import tomllib
+
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+    return True
 
 
 def _fold(args: argparse.Namespace) -> int:
@@ -603,14 +1371,20 @@ def _fold(args: argparse.Namespace) -> int:
     except tomllib.TOMLDecodeError as error:
         raise _FoldError(f"{manifest_path} is not valid TOML: {error}") from error
 
-    denials = read_denials(args.logs)
-    additions = plan(document, denials, prefer_tables=args.prefer_tables)
+    events = read_events(args.logs)
+    denials = denials_of(events)
+    additions = plan(
+        document,
+        denials,
+        prefer_tables=args.prefer_tables,
+        allow_dangerous=args.allow_dangerous,
+    )
     if args.write:
-        return _write(manifest_path, text, additions)
+        return _write(manifest_path, text, document, events, denials, additions)
     rendered = render(additions)
-    notes = [note for addition in additions for note in addition.notes]
-    for note in notes:
-        print(f"# {note}", file=sys.stderr)
+    for addition in additions:
+        for note in addition.notes:
+            _diagnostic(note)
     if not rendered:
         print(f"{manifest_path}: nothing to add", file=sys.stderr)
         return 0
@@ -618,12 +1392,19 @@ def _fold(args: argparse.Namespace) -> int:
     return 0
 
 
-def _write(manifest_path: Path, text: str, additions: list[_Addition]) -> int:
-    """Merges the additions into the manifest, keeping everything else."""
+def _write(
+    manifest_path: Path,
+    text: str,
+    document: dict[str, Any],
+    events: list[dict[str, Any]],
+    denials: list[_Denial],
+    additions: list[_Addition],
+) -> int:
+    """Merges the additions into the manifest, after proving they are all it changes."""
     wanted = [addition for addition in additions if not addition.is_empty()]
     for addition in additions:
         for note in addition.notes:
-            print(f"# {note}", file=sys.stderr)
+            _diagnostic(note)
     if not wanted:
         print(f"{manifest_path}: nothing to add", file=sys.stderr)
         return 0
@@ -631,6 +1412,7 @@ def _write(manifest_path: Path, text: str, additions: list[_Addition]) -> int:
         edited = apply_additions(text, wanted)
     except _FoldError as error:
         raise _FoldError(f"{manifest_path}: {error}") from error
+    _verify_edit(manifest_path, text, edited, document, wanted, events, denials)
     manifest_path.write_text(edited, encoding="utf-8")
     for addition in wanted:
         print(
@@ -642,239 +1424,187 @@ def _write(manifest_path: Path, text: str, additions: list[_Addition]) -> int:
     return 0
 
 
-def apply_additions(text: str, additions: list[_Addition]) -> str:
-    """The manifest with every addition merged in, as text.
+def _verify_edit(
+    manifest_path: Path,
+    old_text: str,
+    new_text: str,
+    document: dict[str, Any],
+    additions: list[_Addition],
+    events: list[dict[str, Any]],
+    denials: list[_Denial],
+) -> None:
+    """Proves the edit is the manifest plus exactly the planned grants (D3c).
 
-    A line-level edit, because what a manifest author cares about is their
-    comments and their order: the new statements are appended inside the route's
-    existing `queries = [ … ]` array (or the array is added to the route's
-    grant), a `[route.<proxy>.tables]` section is written under the grant with
-    the route's existing table entries updated in place, and no other line is
-    touched.
-
-    Raises [`_FoldError`] when the file is not shaped the way the edit needs —
-    a route with no `[[route]]` block, a `queries` key this tool cannot edit —
-    because half-editing a manifest would be worse than saying so.
+    Nothing here trusts the writer or the plan: the edited document is parsed
+    again, its grants are compared key by key to what the plan says they should
+    be, and blastit's own `audit` is run on the whole document with the log's
+    traffic as observations, so every statement the plan grants must come out
+    *granted* there. A result that changed anything else — a route invented, a
+    proxy renamed, a group edited, an entry that grew a column nobody planned —
+    is a refusal, and the file is left exactly as it was.
     """
-    lines = text.splitlines(keepends=True)
-    for addition in additions:
-        if addition.is_empty():
-            continue
-        lines = _apply(lines, addition)
-    return "".join(lines)
+    import tomllib
 
+    try:
+        old = tomllib.loads(old_text)
+        new = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as error:
+        raise _FoldError(f"{manifest_path}: the edit is not valid TOML: {error}") from error
 
-#: A table header line: `[a.b]`, `[a.b.c]`, `[[route]]`.
-_HEADER = re.compile(r"^\s*\[(?P<double>\[)?[^\]]+\]\]?\s*(#.*)?$")
+    _unchanged(new.get("version"), old.get("version"), "the manifest version")
+    _unchanged(new.get("groups"), old.get("groups"), "the global groups")
+    _unchanged(new.get("proxy"), old.get("proxy"), "the proxy declarations")
+    _unchanged(new.get("group"), old.get("group"), "the groups")
 
-
-def _header_key(line: str) -> str | None:
-    """The dotted key of a table header line, or `None` for anything else."""
-    match = _HEADER.match(line)
-    if match is None:
-        return None
-    text = line.strip()
-    double = text.startswith("[[")
-    close = "]]" if double else "]"
-    end = text.find(close, 2 if double else 1)
-    start = 2 if double else 1
-    return text[start:end].strip()
-
-
-def _apply(lines: list[str], addition: _Addition) -> list[str]:
-    """Merges one `(route, proxy)` addition into the manifest's lines."""
-    start = _route_block(lines, addition.route)
-    if start is None:
+    planned = {(addition.route, addition.proxy): addition for addition in additions}
+    old_routes = old.get("route") or []
+    new_routes = new.get("route") or []
+    if len(old_routes) != len(new_routes) or [
+        route.get("name") for route in old_routes
+    ] != [route.get("name") for route in new_routes]:
         raise _FoldError(
-            f"no `[[route]]` block declares the route {addition.route!r}; add the route "
-            "first, then fold again"
+            f"{manifest_path}: the edit changed the routes a manifest declares; "
+            "fold never creates, removes or renames one"
         )
-    grant = _grant_block(lines, start, addition.proxy)
-    if grant is None:
-        grant = _add_grant_block(lines, _route_region_end(lines, start), addition.proxy)
-    if addition.queries:
-        lines = _add_queries(lines, grant, addition.queries)
-    if addition.functions:
-        lines = _set_functions(lines, grant, addition.functions)
-    if addition.tables:
-        lines = _set_tables(lines, start, addition.proxy, addition.tables)
-    return lines
-
-
-def _route_region_end(lines: list[str], start: int) -> int:
-    """The line the route's own region ends at: the next `[[route]]`, or EOF.
-
-    A `[route.<proxy>]` section and a `[route.<proxy>.tables]` one both belong
-    to the last `[[route]]` before them, so everything up to the next route is
-    this route's — wherever a `[group.*]` of another kind sits in between.
-    """
-    index = start + 1
-    while index < len(lines):
-        if _header_key(lines[index]) == "route":
-            return index
-        index += 1
-    return len(lines)
-
-
-
-def _route_block(lines: list[str], name: str) -> int | None:
-    """The line index of the `[[route]]` block whose `name` is `name`."""
-    index = 0
-    while index < len(lines):
-        if _header_key(lines[index]) == "route":
-            end = _block_end(lines, index + 1)
-            value = _find_key(lines, index + 1, end, "name")
-            if value is not None and value.strip().strip("\"'") == name:
-                return index
-            index = end
-            continue
-        index += 1
-    return None
-
-
-def _block_end(lines: list[str], start: int) -> int:
-    """The first line index at or after `start` that opens a new table."""
-    index = start
-    while index < len(lines):
-        if _header_key(lines[index]) is not None:
-            return index
-        index += 1
-    return len(lines)
-
-
-def _find_key(lines: list[str], start: int, end: int, key: str) -> str | None:
-    """The value of `key = …` inside a block, as it was written."""
-    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(?P<value>.*?)\s*(#.*)?$")
-    for index in range(start, end):
-        match = pattern.match(lines[index])
-        if match is not None:
-            return match.group("value")
-    return None
-
-
-def _grant_block(lines: list[str], start: int, proxy: str) -> int | None:
-    """The line index of the route's `[route.<proxy>]` header, or `None`."""
-    wanted = f"route.{proxy}"
-    for index in range(start + 1, _route_region_end(lines, start)):
-        if _header_key(lines[index]) == wanted:
-            return index
-    return None
-
-
-def _add_grant_block(lines: list[str], insert: int, proxy: str) -> int:
-    """Writes a new `[route.<proxy>]` block, and returns its header's line index."""
-    block: list[str] = []
-    if insert > 0 and lines[insert - 1].strip() != "":
-        block.append("\n")
-    block.append(f"[route.{proxy}]\n")
-    lines[insert:insert] = block
-    return insert + len(block) - 1
-
-
-def _add_queries(
-    lines: list[str], grant: int, queries: list[tuple[str, str]]
-) -> list[str]:
-    """Appends statements to the grant's `queries`, or writes the array."""
-    end = _block_end(lines, grant + 1)
-    items = [
-        f"  {_toml_string(sql)},{f'  # {reason}' if reason else ''}\n" for sql, reason in queries
-    ]
-    for index in range(grant + 1, end):
-        stripped = lines[index].lstrip()
-        if not stripped.startswith("queries"):
-            continue
-        opening = stripped.find("[")
-        if opening < 0:
+    for before, after in zip(old_routes, new_routes):
+        name = str(before.get("name"))
+        for key in sorted(set(before) | set(after), key=str):
+            addition = planned.get((name, key))
+            if addition is None:
+                _unchanged(after.get(key), before.get(key), f"the {key!r} of route {name!r}")
+                continue
+            expected = _expected_grant(before.get(key), addition)
+            if after.get(key) != expected:
+                raise _FoldError(
+                    f"{manifest_path}: the edit of route {name!r} ({key}) is not the grant "
+                    "the plan asked for; nothing was written"
+                )
+    for route_name, proxy in planned:
+        written = next(
+            (route for route in new_routes if str(route.get("name")) == route_name), None
+        )
+        if written is None or proxy not in written:
             raise _FoldError(
-                f"the `queries` key of `{lines[grant].strip()}` is not a literal array; "
-                "edit it by hand"
+                f"{manifest_path}: the plan names the grant {route_name} ({proxy}), which "
+                "the edit did not write; nothing was written"
             )
-        prefix = lines[index][: len(lines[index]) - len(stripped)]
-        if "]" not in stripped[opening + 1 :]:
-            # A multi-line array: the new items go in front of its closing bracket.
-            closing = _closing_bracket(lines, index, end)
-            lines[closing:closing] = items
-            return lines
-        # A one-line array: rewritten as a multi-line one, its text kept as it is
-        # and whatever followed the `]` (a comment, usually) kept with it.
-        closing = stripped.find("]", opening)
-        body = stripped[opening + 1 : closing].strip()
-        suffix = stripped[closing + 1 :].rstrip("\n").rstrip()
-        block = [f"{prefix}{stripped[: opening + 1]}\n"]
-        if body:
-            block.append(f"  {body},\n")
-        block.extend(items)
-        block.append(f"{prefix}]{'  ' + suffix if suffix else ''}\n")
-        lines[index : index + 1] = block
-        return lines
-    lines[grant + 1 : grant + 1] = ["queries = [\n", *items, "]\n"]
-    return lines
+
+    missing = _missing_after_edit(new_text, document, additions, events, denials)
+    for addition in additions:
+        for sql in addition.statements:
+            key = (addition.route, addition.proxy, sql)
+            if key not in missing:
+                continue
+            raise _FoldError(
+                f"{manifest_path}: after the edit, blastit's own audit still refuses "
+                f"{sql!r} on the route {addition.route!r} (proxy {addition.proxy!r}); "
+                "nothing was written"
+            )
 
 
-def _closing_bracket(lines: list[str], start: int, end: int) -> int:
-    """The line index of the `]` that closes the array opened on `start`."""
-    for index in range(start, end):
-        if lines[index].strip().startswith("]"):
-            return index
-    raise _FoldError(
-        f"the `queries` array opened on line {start + 1} is never closed; edit it by hand"
-    )
+def _unchanged(after: Any, before: Any, what: str) -> None:
+    """Refuses an edit that changed something it had no business changing."""
+    if after != before:
+        raise _FoldError(f"the edit changed {what}; nothing was written")
 
 
-def _set_functions(lines: list[str], grant: int, functions: list[str]) -> list[str]:
-    """Writes the grant's `functions = [ … ]` line, or replaces it."""
-    end = _block_end(lines, grant + 1)
-    rendered = ", ".join(_toml_string(name) for name in functions)
-    line = f"functions = [{rendered}]\n"
-    for index in range(grant + 1, end):
-        if lines[index].lstrip().startswith("functions"):
-            lines[index] = line
-            return lines
-    lines[grant + 1 : grant + 1] = [line]
-    return lines
+def _expected_grant(before: Any, addition: _Addition) -> dict[str, Any]:
+    """The grant an addition plans: the old one, plus exactly the plan."""
+    expected = copy.deepcopy(before) if isinstance(before, dict) else {}
+    queries = [str(sql) for sql in _text_list(expected.get("queries"))]
+    for sql, _reason in addition.queries:
+        if sql not in queries:
+            queries.append(sql)
+    if queries:
+        expected["queries"] = queries
+    if addition.tables:
+        tables = dict(expected.get("tables") or {})
+        tables.update(addition.tables)
+        expected["tables"] = tables
+    if addition.functions:
+        # The writer renders the sorted union of what the route had and what the
+        # plan adds, so that is what the file has to hold.
+        expected["functions"] = sorted(
+            set(_text_list(expected.get("functions"))) | set(addition.functions)
+        )
+    return expected
 
 
-def _set_tables(
-    lines: list[str], route_start: int, proxy: str, tables: dict[str, dict[str, Any]]
-) -> list[str]:
-    """Writes a route's `[route.<proxy>.tables]` section, merged in place."""
-    wanted = f"route.{proxy}.tables"
-    route_end = _route_region_end(lines, route_start)
-    header: int | None = None
-    for index in range(route_start + 1, route_end):
-        if _header_key(lines[index]) == wanted:
-            header = index
-            break
-    if header is None:
-        block: list[str] = []
-        if route_end > 0 and lines[route_end - 1].strip() != "":
-            block.append("\n")
-        block.append(f"[{wanted}]\n")
-        lines[route_end:route_end] = block
-        header = route_end + len(block) - 1
-    end = _block_end(lines, header + 1)
-    remaining = dict(tables)
-    for index in range(header + 1, end):
-        key = _entry_key(lines[index])
-        if key is None or key not in remaining:
+#: Where the audit runs on the edited manifest: the statements the plan grants,
+#: keyed by `(route, proxy, sql)`, and only for the pairs the log shows a request
+#: for — a `sql.denied` event carries a route, not a request id (§8.1).
+def _missing_after_edit(
+    new_text: str,
+    document: dict[str, Any],
+    additions: list[_Addition],
+    events: list[dict[str, Any]],
+    denials: list[_Denial],
+) -> set[tuple[str, str, str]]:
+    """Which planned statements blastit's own audit still refuses (D3c).
+
+    The observations are the ones the pytest plugin's live server builds out of
+    the same log: the `request` events give each route the `(method, path)` it
+    was served at, and a denial is attached to the first request of its route.
+    A pair the log never shows a request for cannot be routed by the audited
+    manifest, so it is reported as unchecked rather than guessed at, and a denial
+    for a route or proxy the manifest does not declare is left out — that is
+    exactly what the plan refused with a note, and the audit cannot attribute it
+    at all.
+    """
+    from blastit import _blastit
+
+    routes = _routes(document)
+    proxies = set((document.get("proxy") or {}).keys())
+    observable = [
+        denial
+        for denial in denials
+        if denial.route in routes and denial.proxy in proxies
+    ]
+    requests: list[dict[str, Any]] = []
+    by_route: dict[str, list[_Denial]] = {}
+    for denial in observable:
+        by_route.setdefault(denial.route, []).append(denial)
+    attached: set[str] = set()
+    for entry in logs.routed_requests(events):
+        route = str(entry["route"])
+        statements: list[dict[str, Any]] = []
+        if route not in attached:
+            attached.add(route)
+            statements = [
+                {"alias": None, "proxy": denial.proxy or None, "sql": denial.parseable}
+                for denial in by_route.get(route, [])
+            ]
+        requests.append(
+            {
+                "method": entry["method"],
+                "path_info": entry["path"],
+                "nodeid": None,
+                "transaction_control": False,
+                "statements": statements,
+                "egress": [],
+                "source": "live",
+            }
+        )
+    observations = json.dumps({"version": 1, "requests": requests})
+    try:
+        report = json.loads(_blastit.audit(new_text, observations))
+    except Exception as error:  # noqa: BLE001 - blastit refuses the manifest, or the audit
+        raise _FoldError(
+            f"blastit's own audit refused the edited manifest ({error}); nothing was written"
+        ) from error
+    refused: set[tuple[str, str, str]] = set()
+    for route in report["routes"]:
+        for block in route["proxies"]:
+            for entry in block["missing"]:
+                refused.add((str(route["name"]), str(block["name"]), str(entry["sql"])))
+    for addition in additions:
+        if addition.route in attached:
             continue
-        lines[index] = _render_table(key, remaining.pop(key)) + "\n"
-    if remaining:
-        additions = [f"{_render_table(table, grant)}\n" for table, grant in sorted(remaining.items())]
-        lines[end:end] = additions
-    return lines
-
-
-#: `name = …` or `"name" = …` inside a `[…tables]` section.
-_ENTRY = re.compile(r'^\s*(?:"(?P<quoted>[^"]*)"|(?P<bare>[A-Za-z0-9_-]+))\s*=')
-
-
-def _entry_key(line: str) -> str | None:
-    """The table name a `table = { … }` line grants, or `None`."""
-    match = _ENTRY.match(line)
-    if match is None:
-        return None
-    return match.group("quoted") or match.group("bare")
+        _diagnostic(
+            f"{addition.route} ({addition.proxy}): the log has no `request` event for this "
+            "route, so the audit could not check that the new grant covers it"
+        )
+    return refused
 
 
 if __name__ == "__main__":

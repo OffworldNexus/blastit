@@ -291,6 +291,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1472,9 +1473,15 @@ def _live_app_spec(config: pytest.Config) -> str:
     from_option = config.getoption("blastit_live_app")
     if from_option:
         return str(from_option)
-    from django.conf import settings
+    try:
+        from django.conf import settings
 
-    declared = getattr(settings, "WSGI_APPLICATION", None)
+        # Reading a setting raises when Django is not configured at all, and a
+        # suite without Django is a suite this fixture skips from, not one it
+        # breaks.
+        declared = getattr(settings, "WSGI_APPLICATION", None)
+    except Exception:  # noqa: BLE001 - no Django, or Django without settings
+        return ""
     if declared:
         return str(declared)
     module = os.environ.get("DJANGO_SETTINGS_MODULE", "")
@@ -1586,27 +1593,77 @@ def _preload_modules() -> list[str]:
     return [root] if isinstance(root, str) and root else []
 
 
-def _make_reachable(path: Path) -> None:
-    """Makes the project's directory tree traversable by the view uids (§2.1).
+def _traversable(path: Path) -> bool:
+    """Whether the view uids can reach the project, and read what is under it (§2.1).
 
     Every view runs as a uid of its own, so it has to be able to *read* the
-    application's code — `/app` in a container is world-readable for exactly
-    that reason. A test project in a private directory (pytest's own `tmp_path`
-    is `0700`) would otherwise fail to import anything it did not already have
-    in memory when blastit forked it, which looks like an application bug.
-
-    Only the missing `o+x`/`o+r` on directories is added, and the walk stops at
-    the first directory the views can already traverse.
+    application's code — `/app` in a container is 0755 for exactly that reason.
+    Each directory on the way has to be traversable by others, and the project
+    directory itself readable; whether a file inside is readable is something
+    the server fails loudly about, and is not guessed at here.
     """
     directory = path.resolve()
-    while True:
-        mode = directory.stat().st_mode & 0o777
-        if mode & 0o005 == 0o005:
-            return
-        directory.chmod(mode | 0o005)
-        if directory.parent == directory:
-            return
-        directory = directory.parent
+    if directory.stat().st_mode & 0o004 == 0:
+        return False
+    return all(parent.stat().st_mode & 0o001 for parent in directory.parents)
+
+
+#: What a copy of the project never needs. Copying a checkout's `.git`, its
+#: virtualenv or its `node_modules` would be slow, and no live server reads them:
+#: the interpreter and its site-packages come from `sys.executable`, not from the
+#: project directory.
+_SKIP_COPYING = shutil.ignore_patterns(
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    "target",
+)
+
+
+def _serveable_project(project: Path, root: Path) -> tuple[Path, Path | None]:
+    """The directory a live server serves, and the copy it is, when it is one.
+
+    Nothing outside the project is loosened, and the project's own modes are
+    never touched: if the view uids cannot reach it — pytest's `tmp_path` is
+    `0700`, and so is every directory under it — the project is *copied* into a
+    directory this fixture creates (`/tmp`, world-traversable) and the copy is
+    served instead, with the modes a container gives `/app`. The returned root is
+    the temporary directory to remove at teardown, or `None` when the project was
+    served where it lives.
+    """
+    if _traversable(project):
+        return project, None
+    temporary = Path(tempfile.mkdtemp(prefix="blastit-live-"))
+    target = temporary / project.name
+    shutil.copytree(project, target, ignore=_SKIP_COPYING, symlinks=True)
+    _open_up(target)
+    temporary.chmod(0o755)
+    return target, temporary
+
+
+def _open_up(root: Path) -> None:
+    """Gives a *copy* of the project the modes a container image has.
+
+    Only ever called on what [`_serveable_project`] created, never on the
+    project itself: the copy is read by several uids that are not the test user,
+    and it is removed at teardown.
+    """
+    for path in [root, *root.rglob("*")]:
+        if path.is_symlink():
+            continue
+        mode = path.stat().st_mode
+        wanted = mode | (0o755 if path.is_dir() else 0o444)
+        if wanted != mode:
+            path.chmod(wanted)
 
 
 def _postgresql_url_variable(manifest: Path) -> str | None:
@@ -1638,6 +1695,8 @@ def _postgresql_url_variable(manifest: Path) -> str | None:
 def _start_live_server(
     prefix: list[str],
     config: pytest.Config,
+    project: Path,
+    manifest: Path,
     log_path: Path,
 ) -> _LiveServer:
     """Starts a live server, or fails with what it said on the way out.
@@ -1654,7 +1713,6 @@ def _start_live_server(
             "WSGI_APPLICATION in the Django settings, or pass --blastit-live-app "
             "module:attribute"
         )
-    manifest = Path(str(config.getoption("blastit_manifest") or config.getini("blastit_manifest")))
     variable = _postgresql_url_variable(manifest)
     if variable is None and _postgresql_proxies(manifest.read_text(encoding="utf-8")):
         pytest.skip(
@@ -1662,6 +1720,7 @@ def _start_live_server(
             "URL from one variable (`input = { url = \"DATABASE_URL\" }`, §5.1) to be "
             "pointed at the test database"
         )
+    environment_path = log_path.parent / "blastit-live.env"
     failure = ""
     for _ in range(LIVE_SERVER_ATTEMPTS):
         port = _free_port()
@@ -1669,19 +1728,12 @@ def _start_live_server(
         log_path.write_text("", encoding="utf-8")
         with log_path.open("w", encoding="utf-8") as log:
             if prefix:
-                environment_file = log_path.with_suffix(".env")
-                environment_file.write_text(
-                    "".join(
-                        f"export {key}={shlex.quote(value)}\n"
-                        for key, value in environment.items()
-                    ),
-                    encoding="utf-8",
-                )
+                _write_environment(environment_path, environment)
                 command = [
                     *prefix,
                     "/bin/sh",
                     "-c",
-                    f". {shlex.quote(str(environment_file))} && exec \"$@\"",
+                    f". {shlex.quote(str(environment_path))} && exec \"$@\"",
                     "blastit",
                     sys.executable,
                     "-m",
@@ -1689,7 +1741,7 @@ def _start_live_server(
                 ]
                 process = subprocess.Popen(
                     command,  # noqa: S603 - fixed argv, no shell
-                    cwd=str(_project_directory()),
+                    cwd=str(project),
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -1698,7 +1750,7 @@ def _start_live_server(
             else:
                 process = subprocess.Popen(  # noqa: S603 - sys.executable, fixed argv
                     [sys.executable, "-m", "blastit"],
-                    cwd=str(_project_directory()),
+                    cwd=str(project),
                     env=environment,
                     stdout=log,
                     stderr=subprocess.STDOUT,
@@ -1715,11 +1767,27 @@ def _start_live_server(
         if _wait_for_health(live):
             return live
         failure = _stop_live_server(live).strip()
-    _clean_bytecode(prefix, _project_directory())
+    _clean_bytecode(prefix, project)
+    environment_path.unlink(missing_ok=True)
     pytest.fail(
         f"blastit: the live server never answered on {HEALTH_PATH} "
         f"(started {LIVE_SERVER_ATTEMPTS} time(s)); its last words:\n{failure[-4000:]}"
     )
+
+
+def _write_environment(path: Path, environment: dict[str, str]) -> None:
+    """Writes the server's environment for `sudo` to source, readable by its owner only.
+
+    `sudo` resets the environment, and the variables include the test database's
+    URL — a password, in this repository's CI, and a secret in a project that
+    points the fixture at something real. The file is therefore written `0600`
+    by the test user (whom root can read regardless), and removed at teardown.
+    """
+    path.write_text(
+        "".join(f"export {key}={shlex.quote(value)}\n" for key, value in environment.items()),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
 
 
 def _wait_for_health(live: _LiveServer) -> bool:
@@ -1767,16 +1835,19 @@ def _signal_group(pid: int, number: int) -> None:
 
 
 def _clean_bytecode(prefix: list[str], project: Path) -> None:
-    """Removes the bytecode caches a live server left in the project (D3c).
+    """Removes the bytecode caches a live server left in a project it was served from.
 
     A wheel's stage 1 runs `python -I -m blastit`, and `-I` implies `-E`: the
     interpreter ignores `PYTHONDONTWRITEBYTECODE` — which blastit itself injects
     (§5.3) — so every module it imports *as root* before the fork leaves a
-    `__pycache__` owned by root in the project directory: the WSGI callable, the
-    settings, and the URLconf `BLASTIT_PRELOAD` names. The test process cannot
-    remove what root left, and pytest's own cleanup of its temporary directory
-    then fails on it. Cleaning it up is the fixture's mess to clean, and it
-    needs the same privileges the server did.
+    `__pycache__` owned by root next to the project's code. The test process
+    cannot remove what root left, and pytest's own cleanup of its temporary
+    directory then fails on it.
+
+    Only the directories this user does *not* own go: a `__pycache__` the test
+    run itself wrote is the test run's business, not root's, and is left where it
+    is. Removing root's needs the privileges the server had, which is what
+    `prefix` is.
     """
     subprocess.run(  # noqa: S603 - a fixed argv, no shell
         [
@@ -1787,6 +1858,9 @@ def _clean_bytecode(prefix: list[str], project: Path) -> None:
             "__pycache__",
             "-type",
             "d",
+            "!",
+            "-uid",
+            str(os.getuid()),
             "-exec",
             "rm",
             "-rf",
@@ -1831,14 +1905,25 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
                 "blastit: a live server is pointed at the *test* database, which "
                 f"pytest-django's django_db_setup creates: {error}"
             )
-    # The views run as their own uids: they have to be able to read the code.
-    _make_reachable(_project_directory())
-    live = _start_live_server(prefix, request.config, tmp_path / "blastit-live.log")
+    # The views run as their own uids and have to be able to read the code: the
+    # project is served where it is when they can, and as a copy in a directory
+    # this fixture makes and removes when they cannot. Nothing outside the
+    # project is ever loosened, and the project's modes are never touched.
+    project, temporary = _serveable_project(_project_directory(), tmp_path)
+    manifest = session.manifest_path
+    if temporary is not None and manifest.is_relative_to(_project_directory()):
+        manifest = project / manifest.relative_to(_project_directory())
+    live = _start_live_server(
+        prefix, request.config, project, manifest, tmp_path / "blastit-live.log"
+    )
     try:
         yield live
     finally:
         text = _stop_live_server(live)
-        _clean_bytecode(prefix, _project_directory())
+        _clean_bytecode(prefix, project)
+        (tmp_path / "blastit-live.env").unlink(missing_ok=True)
+        if temporary is not None:
+            shutil.rmtree(temporary, ignore_errors=True)
         state = _SESSION
         if state is not None:
             try:

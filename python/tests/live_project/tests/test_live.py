@@ -16,10 +16,14 @@ is per test:
 * a path with no route is blastit's own 404, and lands in the report as
   `unrouted`.
 
-The last test uses `live_server` rather than `blastit_live_server`: it only runs
-when the outer session passed `--blastit-live-server`, which is what the plugin
-does with that name.
+The last two tests use `live_server` rather than `blastit_live_server`: the first
+only runs when the outer session passed `--blastit-live-server` (which is what
+the plugin does with that name), and the second only when the environment asks
+for this project's own `live_server` (`conftest.py`), to pin down which of the
+two a project gets.
 """
+
+import os
 
 import pytest
 from urllib.error import HTTPError
@@ -57,3 +61,15 @@ def test_the_live_server_override_serves_live_server(live_server) -> None:
     with pytest.raises(HTTPError) as refused:
         urlopen(f"{live_server.url}/live/denied/")  # noqa: S310 - 127.0.0.1
     assert refused.value.code == 500
+
+
+@pytest.mark.skipif(
+    not os.environ.get("BLASTIT_TEST_OWN_LIVE_SERVER"),
+    reason="this project's own live_server is only defined when the environment asks",
+)
+def test_own_live_server_wins(live_server) -> None:
+    """A project's own `live_server` is not replaced by the plugin's (D3c)."""
+    assert live_server.url == "http://127.0.0.1:1/", (
+        "the conftest fixture is collected after the plugin's, so it is the one a "
+        "project gets"
+    )

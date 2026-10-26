@@ -180,6 +180,40 @@ fn covering_statements(statements: Vec<String>, prefix: String) -> PyResult<Stri
     audit::covering(&statements, &prefix).map_err(PyValueError::new_err)
 }
 
+/// Classifies one statement with PostgreSQL's own parser, without analysing it
+/// (D3c, §6).
+///
+/// The statement is parsed by libpg_query and named for what it is — `select`,
+/// `insert`, `update` and `delete` are the four kinds a grant can hold, and
+/// everything else (DDL, `SET`, `COPY`, `DO`, `CALL`, `LOCK`, `GRANT`,
+/// `TRUNCATE`, `VACUUM`, `LISTEN`, the transaction commands) is `other`.
+///
+/// It exists because the analysis refuses those statements for *other* reasons
+/// too (a system catalogue, an unknown function, a construct it does not walk),
+/// and a tool that offers to write a grant into a manifest has to know the
+/// difference: `SELECT … FROM pg_type` is a statement a `queries` entry may
+/// hold, and `SET ROLE …` is not.
+///
+/// # Returns
+///
+/// Pretty-printed JSON:
+///
+/// ```json
+/// {"class": "select", "label": "SELECT", "plain": true}
+/// {"class": "other", "label": "SET", "plain": false}
+/// ```
+///
+/// # Errors
+///
+/// [`PyValueError`] with the reason a `sql.denied` event would carry: the text
+/// is not valid SQL, holds no statement, or holds more than one — a grant is one
+/// statement, so a caller has to refuse the text rather than pick one.
+#[pyfunction]
+#[pyo3(name = "classify")]
+fn classify_statement(sql: &str) -> PyResult<String> {
+    audit::classify(sql).map_err(PyValueError::new_err)
+}
+
 /// The interpreter's `sys.path`, as bytes, for stage 1 to restore (§4).
 ///
 /// `os.fsencode` is what makes this exact: a path is bytes, and one that is not
@@ -219,5 +253,6 @@ fn _blastit(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(audit_report, module)?)?;
     module.add_function(wrap_pyfunction!(analyze_statement, module)?)?;
     module.add_function(wrap_pyfunction!(covering_statements, module)?)?;
+    module.add_function(wrap_pyfunction!(classify_statement, module)?)?;
     Ok(())
 }

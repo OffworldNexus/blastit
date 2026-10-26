@@ -339,6 +339,27 @@ pub(crate) fn covering(statements: &[String], prefix: &str) -> Result<String, St
     serde_json::to_string_pretty(&document).map_err(|error| error.to_string())
 }
 
+/// Classifies one statement and renders it as JSON (D3c).
+///
+/// This is `blastit._blastit.classify`: what PostgreSQL's own parser says a
+/// statement is, for *every* statement, not only the four a table grant covers.
+/// Nothing here classifies by text: the parser decides, and the caller gets its
+/// verdict as data.
+///
+/// # Errors
+///
+/// The reason a `sql.denied` event carries: the text is not valid SQL, holds no
+/// statement, or holds more than one.
+pub(crate) fn classify(sql: &str) -> Result<String, String> {
+    let classified = blastit_sqlpolicy::classify(sql).map_err(|error| error.to_string())?;
+    let document = json!({
+        "class": classified.class().as_str(),
+        "label": classified.label(),
+        "plain": classified.is_plain(),
+    });
+    serde_json::to_string_pretty(&document).map_err(|error| error.to_string())
+}
+
 /// Diffs the observations of a test suite against a manifest (§6).
 ///
 /// The observations carry the `PATH_INFO` the app saw, which is the string the

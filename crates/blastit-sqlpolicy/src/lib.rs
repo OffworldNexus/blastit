@@ -82,8 +82,8 @@ mod statements;
 mod tables;
 
 pub use analysis::{
-    Access, Analysis, AnalysisError, Op, SAFE_FUNCTIONS, StatementKind, analyze, cached_analyses,
-    is_safe_function, is_system_table,
+    Access, Analysis, AnalysisError, Classified, Op, SAFE_FUNCTIONS, StatementClass, StatementKind,
+    analyze, cached_analyses, classify, is_safe_function, is_system_table,
 };
 pub use normalize::normalize;
 pub use tables::{Columns, Denied, TableGrant, TableGrants};

@@ -22,6 +22,8 @@ from typing import Any
 
 import pytest
 
+from blastit import pytest_plugin as plugin
+
 HERE = Path(__file__).parent
 PROJECT = HERE / "live_project"
 
@@ -31,6 +33,18 @@ pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
     reason="needs a real PostgreSQL: set DATABASE_URL or BLASTIT_TEST_PG_URL",
 )
+
+
+@pytest.fixture
+def privileges() -> None:
+    """Skips the tests that start a server when blastit could not run here (D3c).
+
+    The inner session would skip too — the fixture does exactly this — but the
+    outer test asserts on what that session *did*, so it has to skip first:
+    a machine without root and without passwordless sudo cannot test a sandbox
+    server, and saying so is the whole answer.
+    """
+    plugin._live_server_prefix()
 
 
 class Outcome:
@@ -79,6 +93,7 @@ def run(
     *args: str,
     report: str = "blastit-live-report.json",
     tmp_path: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> Outcome:
     """Runs pytest in a copy of the live project, and returns what it did."""
     target = project
@@ -89,6 +104,7 @@ def run(
         **os.environ,
         "DATABASE_URL": str(DATABASE_URL),
         "PYTHONDONTWRITEBYTECODE": "1",
+        **(env or {}),
     }
     completed = subprocess.run(  # noqa: S603 - sys.executable, fixed arguments
         [sys.executable, "-m", "pytest", *args, "--blastit-report", report],
@@ -101,7 +117,9 @@ def run(
     return Outcome(completed, target / report)
 
 
-def test_a_live_server_is_served_by_blastit(project: Path, tmp_path: Path) -> None:
+def test_a_live_server_is_served_by_blastit(
+    privileges: None, project: Path, tmp_path: Path
+) -> None:
     """The three requests the tests make are in the report, straight from the log.
 
     The plugin sees nothing of them itself — they are made to another process —
@@ -139,10 +157,37 @@ def test_a_live_server_is_served_by_blastit(project: Path, tmp_path: Path) -> No
     )
     assert report["totals"]["unused_global"] == 0
     assert report["totals"]["clean"] is False, "a grant is missing"
+    assert not list(outcome.report_path.parent.glob("blastit-live.env")), (
+        "the environment file, which holds the test database's URL, is removed"
+    )
+
+
+def test_a_projects_own_live_server_wins(privileges: None, project: Path, tmp_path: Path) -> None:
+    """A `conftest.py` fixture is collected after the plugin, so it wins (D3c).
+
+    The live project defines its own `live_server` when the environment asks for
+    it (its `conftest.py` says why); `--blastit-live-server` must not take that
+    away from it, and the report proves it: nothing went through blastit at all.
+    """
+    outcome = run(
+        project,
+        "--blastit-manifest",
+        "blastit.toml",
+        "--blastit-live-server",
+        "-k",
+        "own_live_server",
+        report="own-report.json",
+        env={"BLASTIT_TEST_OWN_LIVE_SERVER": "1"},
+    )
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+    assert "1 passed" in outcome.stdout, outcome.stdout
+    assert outcome.report["totals"]["requests"] == 0, (
+        "the project's own fixture served it, not blastit"
+    )
 
 
 def test_the_live_server_option_serves_a_live_server_suite(
-    project: Path, tmp_path: Path
+    privileges: None, project: Path, tmp_path: Path
 ) -> None:
     """`--blastit-live-server`: `live_server` is blastit's, and the report says so.
 
