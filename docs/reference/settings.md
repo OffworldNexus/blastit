@@ -1,8 +1,8 @@
 # Settings
 
-Everything is environment variables, plus the manifest. A variable that is set
-wins over a preset, even when it is empty, and `PORT` counts the same. `--preset`
-is the only [flag](cli.md).
+Everything is environment variables, plus the manifest. A set variable wins
+over a preset, even when empty, and `PORT` counts the same. `--preset` is the
+only [flag](cli.md).
 
 ## The app and the manifest
 
@@ -11,7 +11,7 @@ is the only [flag](cli.md).
 | `BLASTIT_APP` | — | the WSGI callable, `module:attribute`; required |
 | `BLASTIT_PRELOAD` | — | modules imported before the fork, comma-separated |
 | `BLASTIT_MANIFEST` | `/app/blastit.toml` | the manifest path |
-| `BLASTIT_SCRIPT_NAME` | — | mount prefix stripped before routing; the app sees it as `SCRIPT_NAME` |
+| `BLASTIT_SCRIPT_NAME` | — | mount prefix stripped before routing; the app sees `SCRIPT_NAME` |
 | `BLASTIT_WARMUP` | — | an optional `module:callable` run before the fork, for an expensive first use |
 | `BLASTIT_ENV_STRIP` | — | extra variables hidden from the app, comma-separated |
 
@@ -24,7 +24,7 @@ blastit's own environment: the project's virtualenv.
 |---|---|---|
 | `PORT` | `8080` | the port init binds on `0.0.0.0`; set by most platforms |
 | `SERVER_PORT` | `= PORT` | the port the app is told the server runs on, when a load balancer's differs |
-| `BLASTIT_HEALTH_PATH` | `/_blastit/health` | answered by the scheduler, covering http → scheduler without a view process |
+| `BLASTIT_HEALTH_PATH` | `/_blastit/health` | answered by the scheduler itself, without a view process |
 | `BLASTIT_BACKLOG` | `1024` | the TCP listen backlog |
 
 The health path takes no worker slot: traffic cannot starve a health check.
@@ -52,7 +52,7 @@ The privilege mode has no variable: the `boot` event reports it.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_MAX_WORKERS` | `16` | live request threads across every view; size it at or below the database connection limit |
+| `BLASTIT_MAX_WORKERS` | `16` | live request threads across every view; keep it under the database connection limit |
 | `BLASTIT_VIEW_MAX_WORKERS` | `= MAX_WORKERS` | request-thread cap of one view process; also sizes its `RLIMIT_NPROC` |
 | `BLASTIT_QUEUE_SIZE` | `256` | the bounded admission queue; beyond it the answer is `503` |
 | `BLASTIT_QUEUE_TIMEOUT` | `10s` | how long a request may wait in that queue before `503` |
@@ -89,8 +89,7 @@ instead of by arrival; `0` is plain FIFO, and the `BLASTIT_FQ_*` knobs go unread
 | `BLASTIT_MAX_CONNECTIONS` | `1024` | client connections served at once |
 | `BLASTIT_FRAME_MAX` | `1 MiB` | the largest internal frame; larger bodies travel in several |
 
-No TLS or HTTP/2: a load balancer terminates TLS and speaks plaintext HTTP/1.1.
-`Upgrade` gets `501`.
+No TLS or HTTP/2: a load balancer terminates TLS. `Upgrade` gets `501`.
 
 ## View process lifecycle and memory
 
@@ -98,7 +97,7 @@ No TLS or HTTP/2: a load balancer terminates TLS and speaks plaintext HTTP/1.1.
 |---|---|---|
 | `BLASTIT_VIEW_SPAWN` | `lazy` | `lazy` or `eager`; `prefork = true` overrides it per route |
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | the live view-process cap, with LRU retirement |
-| `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | the expected cost of one view process, the starting divisor of the cap |
+| `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | the expected cost of one view process; the cap's starting divisor |
 | `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | above it, one idle view process per check is retired |
 | `BLASTIT_VIEW_IDLE_TIMEOUT` | `600s` | retire a view process idle this long |
 | `BLASTIT_VIEW_MAX_REQUESTS` | `0` (off) | retire a view process after this many requests |
@@ -116,12 +115,14 @@ Sizing the cap: [memory and process caps](../infra/anything-else.md#memory-and-p
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_CLIENT_IP_HEADER` | `x-forwarded-for` | the header the client address is read from, and only from a trusted peer |
+| `BLASTIT_CLIENT_IP_HEADER` | `x-forwarded-for` | the header the client address is read from, from a trusted peer only |
 | `BLASTIT_TRUSTED_PROXIES` | `127.0.0.1,::1` | peers whose client-IP header is believable: addresses, CIDR or `*`; a port is an error |
 | `BLASTIT_TRUST_FORWARDED` | — | deprecated: `0` is an empty trusted list, `1` is `*`; the list above wins |
 
 `wsgi.url_scheme` follows the same trust decision: `X-Forwarded-Proto` is read
-only from a trusted peer. The full resolution rule is in
+only from a trusted peer, only its last value, and only if it is exactly `http`
+or `https`. Both bundled ingresses overwrite it, so a client cannot choose it.
+The full rule is in
 [client IP and trusted proxies](../infra/anything-else.md#client-ip-and-trusted-proxies).
 
 ## Proxies
@@ -137,7 +138,7 @@ A proxy's protocol, inputs and outputs live in the
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_PRESET` | — | a named set of defaults, such as `digitalocean-paas` or `compose-traefik` |
+| `BLASTIT_PRESET` | — | a named set of defaults, such as `digitalocean-paas` |
 
 `--preset NAME` wins over `BLASTIT_PRESET`; an unknown name lists the presets
 and exits.

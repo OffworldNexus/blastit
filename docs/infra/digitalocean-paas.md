@@ -37,40 +37,50 @@ The socket peer blastit sees on App Platform is **DigitalOcean's ingress** —
 client address has to come from a header, and the whole question is which one
 may be believed.
 
-Measured on App Platform ([§10](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md#10-platform-constraints-digitalocean-app-platform)):
+Measured on App Platform on 2026-10-26 ([§10](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md#10-platform-constraints-digitalocean-app-platform)),
+by sending each request to a throwaway service in `ams3` that echoes its
+headers, twice: once as-is, once with the header forged.
 
 | Header | What arrives |
 |---|---|
 | `do-connecting-ip` | **overwritten by the edge** with the real client address |
+| `X-Forwarded-Proto` | **overwritten by the edge** with `https` |
 | `X-Real-IP` | stripped |
 | `X-Forwarded-For` | appended to: `<client-supplied…>,<real client>,<Cloudflare edge>` |
+| `X-Forwarded-Host`, `X-Forwarded-Port` | pass through **forged**, and are absent when the client sends nothing |
 | `Forwarded`, `True-Client-IP`, `X-Client-IP` | pass through **forged** |
-| `X-Forwarded-Proto` | **not measured.** So blastit's rule for it — read only from a trusted peer, and only if the value is exactly `http` or `https` — is not known to be enough here: with every peer trusted, treat `wsgi.url_scheme` as client-controlled until somebody probes it |
 
-`do-connecting-ip` is therefore the one header an operator can believe: the
-edge replaces it, so nothing a client sends can survive in it. It is not
-`x-forwarded-for`, because the edge *appends* to that one — a forged leftmost
-entry would sit in the chain right next to the real client.
+`do-connecting-ip` is therefore the one header an operator can believe for the
+client address: the edge replaces it, so nothing a client sends can survive in
+it. It is not `x-forwarded-for`, because the edge *appends* to that one — a
+forged leftmost entry would sit in the chain right next to the real client.
 
-!!! warning "`wsgi.url_scheme` is the one thing this preset does not pin down"
+### The scheme is `https`, and a client cannot say otherwise
 
-    `X-Forwarded-Proto` is measured to be **overwritten** by Traefik, and that is
-    what makes reading it safe
-    [behind Traefik](compose-traefik.md#what-it-sets). On App Platform nobody has
-    probed what the edge does with it, and the preset trusts every peer — so a
-    client may be able to say `https`. Django's
-    `SECURE_PROXY_SSL_HEADER`, `request.is_secure()` and every absolute URL built
-    from the scheme are the things that depend on it. Until it is probed, do not
-    rely on the scheme for anything security-relevant, and check it with a
-    throwaway route the way
-    [the client address is checked](anything-else.md#working-it-out-for-your-own-ingress).
+`X-Forwarded-Proto` is rewritten by the edge on the way in, the same way
+`do-connecting-ip` is. Forged values do not survive it: `http`,
+`https, http`, `gopher`, `HTTPS`, and a second `X-Forwarded-Proto` line all
+arrive at the container as exactly one `X-Forwarded-Proto: https`. A plain
+`http://` request to the app's domain is answered with `301` to `https://` by
+the edge and never reaches the container at all, so the only requests a view
+ever sees are the ones that came in over TLS.
+
+So `wsgi.url_scheme` is `https` on App Platform, and there is no request a
+client can send that makes it anything else. Django's
+`SECURE_PROXY_SSL_HEADER`, `request.is_secure()`, and the absolute URLs built
+from the scheme are all safe to rely on here. The one `http` a view can see is a
+request that did not come through the edge — another component of the same app
+calling this one on the internal network — which is exactly the request that
+*is* plaintext.
 
 **Trusting every peer is safe here for one reason, and it is not the peer
-list.** What makes it safe is that the header being read is one the edge
-overwrites. The peer list only has to cover the hops that can reach the
-container, and every one of them is DO's or this app's — the load balancer, and
-the app's own internal services. Trusting every peer is then the simplest rule
-that also covers service-to-service calls, with no second rule for "internal".
+list.** What makes it safe is that both headers blastit reads on this platform —
+`do-connecting-ip` and `X-Forwarded-Proto` — are ones the edge overwrites, so a
+client's own value cannot reach the reader. The peer list only has to cover the
+hops that can reach the container, and every one of them is DO's or this app's —
+the load balancer, and the app's own internal services. Trusting every peer is
+then the simplest rule that also covers service-to-service calls, with no second
+rule for "internal".
 
 !!! warning "The assumption is the deployment's to keep"
 
@@ -84,16 +94,18 @@ that also covers service-to-service calls, with no second rule for "internal".
     * **A component you do not trust, on the app's network.** Every other
       service in the same app can reach this one and is believed — that is what
       makes internal calls work without a second rule. It also means a
-      compromised sibling service can forge the client address as seen by this
-      one.
+      compromised sibling service can forge the client address, and the scheme
+      with it, as seen by this one: both guarantees above are about requests
+      that came in through the edge.
 
 Nothing in blastit can detect either; the preset's job stops at saying what it
 assumed, and it does.
 
-`X-Real-IP`, `Forwarded`, `True-Client-IP`, `X-Client-IP` and `CF-Connecting-IP`
-are **not read at all** — blastit reads exactly one header,
-`BLASTIT_CLIENT_IP_HEADER`, and only from a peer it trusts. That is the whole
-of the rule; there is no fallback list.
+`X-Real-IP`, `Forwarded`, `True-Client-IP`, `X-Client-IP`, `X-Forwarded-Host`,
+`X-Forwarded-Port` and `CF-Connecting-IP` are **not read at all** — the client
+address comes from exactly one header, `BLASTIT_CLIENT_IP_HEADER`, and the scheme
+from `X-Forwarded-Proto`, each only from a peer it trusts. That is the whole of
+the rule; there is no fallback list.
 
 One more consequence of reading an overwritten header: `100.64.0.0/10` is also
 carrier-grade NAT client space, so a real client can arrive *from* that range.
