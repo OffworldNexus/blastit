@@ -14,7 +14,10 @@ Three extra endpoints exist to test the sandbox, not the app:
 * ``/debug/egress/`` and ``/egress/probe/`` report what the process's system
   calls allow; only the second route may reach the network.
 * ``/debug/caps/`` reports what the process's *capabilities* are: D6's proof
-  that a rootless init still hands a view nothing to escalate with.
+  that a rootless init still hands a view nothing to escalate with. It asks the
+  kernel through ``prctl(2)``, and reports ``/proc/self/status`` beside it,
+  because a platform is free to print less than a kernel does: gVisor, the App
+  Platform runtime, has no ``CapAmb`` and no ``NoNewPrivs`` line (§9.1).
 """
 
 import ctypes
@@ -139,6 +142,81 @@ def raw_sql(request):
         return JsonResponse({"ok": False, "route": route, "sqlstate": sqlstate})
 
 
+# `/proc/self/status` is not the only place these answers live, and on gVisor
+# (the App Platform runtime, §9.1) it is not a place at all: the file has no
+# `CapAmb` and no `NoNewPrivs` line. So the probe asks the *kernel* directly,
+# through `prctl(2)`, and reports the file's fields beside that as information.
+#
+# The numbers are the kernel's (`<linux/prctl.h>`):
+#
+# * `PR_GET_NO_NEW_PRIVS` returns the flag itself, 1 or 0;
+# * `PR_CAP_AMBIENT` (47) with `PR_CAP_AMBIENT_IS_SET` (1) answers for one
+#   capability number at a time, and a kernel without ambient capabilities at
+#   all — before 4.3, gVisor before release-20260727.0, which leaves the
+#   sub-command to its `EINVAL` default — refuses it: there are none to report,
+#   which is the same fact an empty set would state, and the errno is what tells
+#   the two apart;
+# * `PR_CAPBSET_READ` (23) answers whether one capability is still in the
+#   bounding set, which is what a later `execve` could still be granted.
+#
+# `PR_CAP_AMBIENT_IS_SET` is **1**, not 3: 3 is `PR_CAP_AMBIENT_LOWER`, which
+# would clear an ambient capability instead of reporting it and would answer 0
+# for every capability, so a probe that used it could never see one.
+PR_GET_NO_NEW_PRIVS = 39
+PR_CAPBSET_READ = 23
+PR_CAP_AMBIENT = 47
+PR_CAP_AMBIENT_IS_SET = 1
+# `CAP_CHECKPOINT_RESTORE` (40), the last capability Linux 6.x names. The loop
+# is bounded by this constant rather than by the first `EINVAL`: a number the
+# kernel does not know and a sub-command it does not know both answer `EINVAL`,
+# and the two mean different things here.
+CAP_LAST = 40
+
+_LIBC = None
+
+
+def _prctl(subcommand, *args):
+    """One ``prctl(2)`` call, through ``libc``, as ``(result, errno)``.
+
+    There is no Python wrapper for ``prctl``, so the call goes through
+    ``ctypes``. On success the result is what the kernel returned and the errno
+    is ``None``; on failure the result is ``None`` and the errno is the one the
+    call set. ``args`` are the integer arguments after the sub-command, of which
+    the kernel takes at most four.
+    """
+    global _LIBC
+    if _LIBC is None:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [ctypes.c_int, *(ctypes.c_ulong,) * 4]
+        libc.prctl.restype = ctypes.c_int
+        _LIBC = libc
+    ctypes.set_errno(0)
+    result = _LIBC.prctl(subcommand, *[*args, 0, 0, 0, 0][:4])
+    if result == -1:
+        return None, ctypes.get_errno()
+    return result, None
+
+
+def _kernel_set(subcommand, *prefix):
+    """The capabilities the kernel says are set, by number, as ``(caps, errno)``.
+
+    Both questions the probe asks are one ``prctl`` per capability number:
+    ``PR_CAPBSET_READ`` for the bounding set, and ``PR_CAP_AMBIENT`` with
+    ``PR_CAP_AMBIENT_IS_SET`` for the ambient one (``prefix`` is that
+    sub-command). A kernel that does not know the sub-command answers the first
+    call with ``EINVAL``, and then there is no capability to report: the errno
+    is what tells "none" apart from an implementation that failed.
+    """
+    caps = []
+    for cap in range(CAP_LAST + 1):
+        answer, error = _prctl(subcommand, *prefix, cap, 0, 0)
+        if error is not None:
+            return caps, error
+        if answer:
+            caps.append(cap)
+    return caps, None
+
+
 def caps_probe(request):
     """Report this process's own privilege state, without changing anything.
 
@@ -146,10 +224,17 @@ def caps_probe(request):
     process runs with **no capability at all** — not even the ones the rootless
     init that forked it holds — and with ``no_new_privs`` set, which is what
     keeps an ``execve`` of a binary with file capabilities from handing them
-    back. The values are the raw ``/proc/self/status`` fields, so the check is
-    the kernel's, not the app's.
+    back.
+
+    The answers are the kernel's, asked through ``prctl(2)``: the runtime is
+    allowed to print less in ``/proc/self/status`` than the kernel knows, and
+    gVisor does (no ``CapAmb``, no ``NoNewPrivs``). The fields of that file are
+    reported beside them for the platforms that do print it — ``null`` where
+    they are absent — and ``proc_error`` says why they are missing when the file
+    itself cannot be read.
     """
     fields = {}
+    proc_error = None
     try:
         with open("/proc/self/status", encoding="ascii", errors="replace") as status:
             for line in status:
@@ -160,8 +245,11 @@ def caps_probe(request):
                     fields[key] = value.strip()
                 elif key == "NoNewPrivs":
                     fields["NoNewPrivs"] = value.strip()
-    except OSError as e:  # pragma: no cover - the kernel always has /proc
-        return JsonResponse({"route": request.META.get("blastit.route"), "error": str(e)}, status=500)
+    except OSError as e:  # pragma: no cover - a kernel always has /proc, a sandbox may not
+        proc_error = str(e)
+    no_new_privs, no_new_privs_error = _prctl(PR_GET_NO_NEW_PRIVS)
+    ambient, ambient_error = _kernel_set(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET)
+    bounding, bounding_error = _kernel_set(PR_CAPBSET_READ)
     return JsonResponse(
         {
             "route": request.META.get("blastit.route"),
@@ -172,6 +260,15 @@ def caps_probe(request):
             "bounding": fields.get("CapBnd"),
             "ambient": fields.get("CapAmb"),
             "no_new_privs": fields.get("NoNewPrivs"),
+            "proc_error": proc_error,
+            "prctl": {
+                "no_new_privs": no_new_privs,
+                "no_new_privs_errno": no_new_privs_error,
+                "ambient": ambient,
+                "ambient_errno": ambient_error,
+                "bounding": bounding,
+                "bounding_errno": bounding_error,
+            },
         }
     )
 
