@@ -270,14 +270,25 @@ runcmd:
 
 
 def droplet_image(args):
+    """The image to create the droplet with.
+
+    A DigitalOcean Docker image saves the cloud-init step, but the only one on
+    offer here is `docker-20-04` (Ubuntu 22.04, an old Docker and a compose v1),
+    so a current Ubuntu with Docker installed by cloud-init is the safer
+    default: the compose file uses syntax only compose v2 understands.
+    """
     if args.droplet_image:
         return args.droplet_image
     images = doctl("compute", "image", "list", "--public") or []
-    docker = sorted(str(i.get("slug", "")) for i in images
-                    if str(i.get("slug", "")).startswith("docker-"))
-    if docker:
-        log(f"droplet image: {docker[-1]} (Docker and Compose are already there)")
-        return docker[-1]
+    modern = sorted(
+        str(image.get("slug", ""))
+        for image in images
+        if str(image.get("slug", "")).startswith("docker-")
+        and ("24.04" in str(image.get("name", "")) or "26.04" in str(image.get("name", "")))
+    )
+    if modern:
+        log(f"droplet image: {modern[-1]} (Docker and Compose are already there)")
+        return modern[-1]
     log("droplet image: ubuntu-24-04-x64 (Docker is installed by cloud-init)")
     return "ubuntu-24-04-x64"
 
