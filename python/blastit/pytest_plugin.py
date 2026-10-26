@@ -1443,9 +1443,12 @@ def _live_server_prefix() -> list[str]:
     blastit's init binds the listeners, makes the view directories under
     `/run/blastit` and drops privileges to the view uids (§2.1, §4), so it runs
     as root. Tests that already run as root start it directly; otherwise
-    passwordless `sudo -n` is used, and the environment travels in a file that
-    only root can read — `sudo` resets the environment, and the test database's
-    password has no business in `ps`.
+    passwordless `sudo -n` is used, with the server's environment in a file
+    written `0600` by whoever runs the tests (root reads it either way, and it is
+    removed at teardown): `sudo` resets the environment, and the test database's
+    URL — a password — has no business in `ps`.
+
+    Raises `pytest.skip` with the reason when the machine has neither.
     """
     if os.geteuid() == 0:
         return []
@@ -1629,7 +1632,7 @@ _SKIP_COPYING = shutil.ignore_patterns(
 )
 
 
-def _serveable_project(project: Path, root: Path) -> tuple[Path, Path | None]:
+def _serveable_project(project: Path) -> tuple[Path, Path | None]:
     """The directory a live server serves, and the copy it is, when it is one.
 
     Nothing outside the project is loosened, and the project's own modes are
@@ -1909,7 +1912,7 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     # project is served where it is when they can, and as a copy in a directory
     # this fixture makes and removes when they cannot. Nothing outside the
     # project is ever loosened, and the project's modes are never touched.
-    project, temporary = _serveable_project(_project_directory(), tmp_path)
+    project, temporary = _serveable_project(_project_directory())
     manifest = session.manifest_path
     if temporary is not None and manifest.is_relative_to(_project_directory()):
         manifest = project / manifest.relative_to(_project_directory())

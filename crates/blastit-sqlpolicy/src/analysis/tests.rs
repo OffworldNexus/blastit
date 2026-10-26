@@ -1261,11 +1261,14 @@ fn every_other_kind_is_not_plain() {
 }
 
 #[test]
-fn a_statement_that_is_not_one_statement_is_refused_by_classify_too() {
-    assert!(matches!(
-        classify("SELECT 1; SELECT 2"),
-        Err(AnalysisError::MultipleStatements(2))
-    ));
+fn a_text_that_holds_more_than_one_statement_is_not_plain() {
+    // A grant is one statement, so a text that holds several is never plain —
+    // and the count is data, not an error, so a caller can say what to do.
+    let several = classify("SELECT 1; SELECT 2").expect("it parses");
+    assert_eq!(several.statements(), 2);
+    assert!(!several.is_plain());
+    assert_eq!(several.label(), "2 statements");
+    assert_eq!(classify("SELECT 1").expect("it parses").statements(), 1);
     assert!(matches!(classify("  "), Err(AnalysisError::Empty)));
     assert!(matches!(
         classify("SELECT FROM"),

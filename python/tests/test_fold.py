@@ -209,7 +209,14 @@ class TestPlanning:
             document(),
             [denial('SELECT "products"."id" FROM "products"', route="catalog")],
             prefer_tables=True,
-            covering=covering_for("products"),
+            covering=lambda statements, prefix: json.dumps(
+                {
+                    "tables": {"products": {"select": ["id"]}},
+                    "functions": [],
+                    "toml": "",
+                    "unanalysable": [],
+                }
+            ),
         )
         assert additions[0].queries == []
         assert additions[0].tables == {}
@@ -1052,14 +1059,456 @@ queries = ["SELECT 'listed'"]
         manifest.write_text(self.MANIFEST, encoding="utf-8")
         log = tmp_path / "app.log"
         log.write_text(self.LOG + "\n", encoding="utf-8")
+        # `st_distance` is outside blastit's safe set, so the statement is
+        # refused unless the operator asks for it (D3c).
+        assert (
+            fold.main(
+                [
+                    "fold",
+                    str(log),
+                    "--manifest",
+                    str(manifest),
+                    "--prefer-tables",
+                    "--allow-dangerous",
+                    "--write",
+                ]
+            )
+            == 0
+        ), capsys.readouterr().err
+        parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        assert parsed["route"][0]["db"]["functions"] == ["unaccent", "st_distance"], (
+            "the route's own function stays where it is, and the plan's is appended"
+        )
+        assert parsed["route"][0]["db"]["queries"] == ["SELECT 'listed'"]
+
+
+class TestLockGrants:
+    """A row lock never gets `"*"`, and a lock with no column to name is a query (D3c)."""
+
+    MANIFEST = """\
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "users"
+path = ['/users/.*']
+[route.db]
+queries = ["SELECT 'listed'"]
+"""
+
+    def log(self, sql: str) -> str:
+        return "\n".join(
+            [
+                '{"event":"request","method":"GET","path":"/users/","route":"users"}',
+                '{"event":"sql.denied","route":"users","proxy":"db","sql":%s,'
+                '"reason":"not granted"}' % json.dumps(sql),
+            ]
+        )
+
+    def plan(self, sql: str, **kwargs: Any) -> Any:
+        manifest = tomllib.loads(self.MANIFEST)
+        return fold.plan(
+            manifest,
+            [fold._Denial(route="users", proxy="db", sql=sql, reason="not granted")],
+            prefer_tables=True,
+            **kwargs,
+        )[0]
+
+    def test_a_lock_the_statement_reads_a_column_of_names_it(self) -> None:
+        addition = self.plan(
+            'SELECT "auth_user"."id" FROM "auth_user" WHERE "auth_user"."id" = $? FOR UPDATE'
+        )
+        assert addition.tables["auth_user"]["update"] == ["id"]
+        assert addition.tables["auth_user"]["update"] != "*", "never a star"
+
+    def test_a_lock_that_reads_every_column_names_one_of_them(self) -> None:
+        # `SELECT *` names no column, so there is nothing to put in `update`, and
+        # `"*"` would grant the UPDATE privilege on every column of the table.
+        addition = self.plan('SELECT * FROM "auth_user" FOR UPDATE')
+        assert addition.queries == [
+            ('SELECT * FROM "auth_user" FOR UPDATE', addition.queries[0][1])
+        ]
+        assert "primary key" in addition.queries[0][1], addition.queries[0][1]
+        assert not addition.tables, "the table grant cannot cover it"
+
+    def test_a_lock_that_reads_no_column_is_a_query_with_a_note(self) -> None:
+        addition = self.plan('SELECT 1 FROM "auth_user" FOR UPDATE')
+        assert [sql for sql, _ in addition.queries] == ['SELECT 1 FROM "auth_user" FOR UPDATE']
+        assert "primary key" in addition.queries[0][1]
+        assert not addition.tables
+
+    def test_a_statement_the_existing_table_grant_cannot_cover_is_not_dropped(self) -> None:
+        """An empty `update` is not "already covered": it grants no column."""
+        manifest = self.MANIFEST.replace(
+            'queries = ["SELECT \'listed\'"]',
+            '[route.db.tables]\nauth_user = { select = ["id"] }',
+        )
+        addition = fold.plan(
+            tomllib.loads(manifest),
+            [
+                fold._Denial(
+                    route="users",
+                    proxy="db",
+                    sql='SELECT 1 FROM "auth_user" FOR UPDATE',
+                    reason="not granted",
+                )
+            ],
+            prefer_tables=True,
+        )[0]
+        assert [sql for sql, _ in addition.queries] == ['SELECT 1 FROM "auth_user" FOR UPDATE']
+
+    def test_never_writes_a_star_for_a_lock_in_the_written_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "blastit.toml"
+        manifest.write_text(self.MANIFEST, encoding="utf-8")
+        log = tmp_path / "app.log"
+        log.write_text(
+            self.log('SELECT * FROM "auth_user" FOR UPDATE') + "\n", encoding="utf-8"
+        )
         assert (
             fold.main(
                 ["fold", str(log), "--manifest", str(manifest), "--prefer-tables", "--write"]
             )
             == 0
         ), capsys.readouterr().err
-        parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
-        assert parsed["route"][0]["db"]["functions"] == ["st_distance", "unaccent"], (
-            "the route's own function is kept, and the plan's is added to it"
+        written = manifest.read_text(encoding="utf-8")
+        assert "update = \"*\"" not in written, written
+        parsed = tomllib.loads(written)
+        assert parsed["route"][0]["db"]["queries"] == [
+            "SELECT 'listed'",
+            'SELECT * FROM "auth_user" FOR UPDATE',
+        ]
+
+
+class TestFunctionGrants:
+    """An exact `queries` entry is trusted: whatever it calls runs (D3c)."""
+
+    @pytest.mark.parametrize(
+        "sql, function",
+        [
+            ("SELECT set_config('TimeZone', $?, false)", "set_config"),
+            ("SELECT pg_read_file($?)", "pg_read_file"),
+            ("SELECT lo_import($?)", "lo_import"),
+            ("SELECT pg_terminate_backend($?)", "pg_terminate_backend"),
+            ("SELECT unaccent($?)", "unaccent"),
+            ("SELECT 'x'::regclass", "regclass"),
+        ],
+    )
+    def test_a_function_outside_the_safe_set_is_refused(
+        self, sql: str, function: str
+    ) -> None:
+        additions = fold.plan(document(), [denial(sql)], prefer_tables=False)
+        assert additions[0].queries == [], sql
+        note = additions[0].notes[0]
+        assert "refused" in note and function in note, note
+        assert "--allow-dangerous" in note, note
+
+    def test_the_flag_grants_it_and_names_what_it_calls(self) -> None:
+        additions = fold.plan(
+            document(),
+            [denial("SELECT set_config('TimeZone', $?, false)")],
+            prefer_tables=False,
+            allow_dangerous=True,
         )
-        assert parsed["route"][0]["db"]["queries"] == ["SELECT 'listed'"]
+        assert [sql for sql, _ in additions[0].queries] == [
+            "SELECT set_config('TimeZone', $?, false)"
+        ]
+        assert any("set_config" in note for note in additions[0].notes)
+
+    def test_a_safe_function_is_not_dangerous(self) -> None:
+        additions = fold.plan(document(), [denial("SELECT lower($?)")], prefer_tables=False)
+        assert [sql for sql, _ in additions[0].queries] == ["SELECT lower($?)"]
+        assert additions[0].notes == []
+
+    def test_a_multi_statement_text_is_refused_even_with_the_flag(self) -> None:
+        additions = fold.plan(
+            document(),
+            [denial("SELECT 1; DELETE FROM notes")],
+            prefer_tables=False,
+            allow_dangerous=True,
+        )
+        assert additions[0].is_empty(), "a grant is one statement"
+        assert "2 statements" in additions[0].notes[0]
+        assert "split" in additions[0].notes[0]
+
+    def test_prefer_tables_refuses_it_too(self) -> None:
+        additions = fold.plan(
+            document(),
+            [denial("SELECT set_config('TimeZone', $?, false)")],
+            prefer_tables=True,
+            covering=covering_for("t"),
+        )
+        assert additions[0].queries == []
+        assert additions[0].tables == {}, "no table grant either"
+        assert any("set_config" in note for note in additions[0].notes)
+
+    def test_the_analysis_is_what_decides(self) -> None:
+        """Not the text: an injected analysis says what the statement calls."""
+        additions = fold.plan(
+            document(),
+            [denial("SELECT 1")],
+            prefer_tables=False,
+            describe=lambda sql: json.dumps(
+                {"kind": "select", "tables": {}, "functions": ["pg_read_file"]}
+            ),
+        )
+        assert additions[0].queries == []
+        assert "pg_read_file" in additions[0].notes[0]
+
+    def test_a_broken_installation_is_not_a_verdict(self) -> None:
+        """Only the parser's refusal is caught; anything else is the tool's problem."""
+        def broken(sql: str) -> str:
+            raise RuntimeError("no extension here")
+
+        with pytest.raises(RuntimeError):
+            fold.plan(document(), [denial("SELECT 1")], prefer_tables=False, classify=broken)
+
+
+class TestDiagnosticsAndEdits:
+    """The small things that make the tool usable, and the shapes it accepts (D3c)."""
+
+    MANIFEST = """\
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[group.session.db]
+queries = ["SELECT 'session'"]
+
+[[route]]
+name = "grouped"
+path = ['/grouped/']
+groups = ["session"]
+
+[[route]]
+name = "notes"
+path = ['/notes/']
+[route.db]
+functions = [
+  "unaccent",  # reads a rule file
+]
+queries = ["SELECT 'listed'"]
+[route.db.tables]
+products = { select = ["id"] }
+[route.db.tables.orders]
+select = ["id"]
+"""
+
+    def write(self, tmp_path: Path, sql: str, route: str, *args: str) -> tuple[int, str, str]:
+        manifest = tmp_path / "blastit.toml"
+        manifest.write_text(self.MANIFEST, encoding="utf-8")
+        path = "/grouped/" if route == "grouped" else "/notes/"
+        log = tmp_path / "app.log"
+        log.write_text(
+            "\n".join(
+                [
+                    '{"event":"request","method":"GET","path":"%s","route":"%s"}'
+                    % (path, route),
+                    '{"event":"sql.denied","route":"%s","proxy":"db","sql":%s,'
+                    '"reason":"not granted"}' % (route, json.dumps(sql)),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        code = fold.main(
+            ["fold", str(log), "--manifest", str(manifest), *args]
+        )
+        return code, manifest.read_text(encoding="utf-8"), ""
+
+    def test_a_group_only_route_says_which_group(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        code, written, _ = self.write(
+            tmp_path, "SELECT 'new'", "grouped", "--write"
+        )
+        assert code == 1
+        error = capsys.readouterr().err
+        assert "'session'" in error and "group" in error, error
+        assert "[route.db]" in error, "and says what to write by hand"
+        assert written == self.MANIFEST, "nothing was written"
+
+    def test_an_inline_tables_grant_is_left_alone_when_nothing_is_written_into_it(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "blastit.toml"
+        manifest.write_text(
+            """version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "notes"
+path = ['/notes/']
+[route.db]
+queries = ["SELECT 'listed'"]
+tables = { products = { select = ["id"] } }
+""",
+            encoding="utf-8",
+        )
+        log = tmp_path / "app.log"
+        log.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "event": "request",
+                            "method": "GET",
+                            "path": "/notes/",
+                            "route": "notes",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "event": "sql.denied",
+                            "route": "notes",
+                            "proxy": "db",
+                            "sql": 'SELECT "notes"."body" FROM "notes"',
+                            "reason": "not granted",
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        assert (
+            fold.main(["fold", str(log), "--manifest", str(manifest), "--write"]) == 0
+        ), capsys.readouterr().err
+        parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        assert parsed["route"][0]["db"]["queries"] == [
+            "SELECT 'listed'",
+            'SELECT "notes"."body" FROM "notes"',
+        ]
+        assert parsed["route"][0]["db"]["tables"] == {"products": {"select": ["id"]}}, (
+            "the inline tables grant is left exactly as it was"
+        )
+
+    def test_a_table_written_as_its_own_header_is_updated_in_place(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code, written, _ = self.write(
+            tmp_path,
+            'INSERT INTO "orders" ("id", "total") VALUES ($1, $2)',
+            "notes",
+            "--prefer-tables",
+            "--write",
+        )
+        assert code == 0, capsys.readouterr().err
+        assert "[route.db.tables.orders]" in written, "the header stays where it is"
+        parsed = tomllib.loads(written)
+        assert parsed["route"][1]["db"]["tables"]["orders"] == {
+            "select": ["id"],
+            "insert": ["id", "total"],
+        }
+        assert parsed["route"][1]["db"]["tables"]["products"] == {"select": ["id"]}
+
+    def test_functions_are_appended_to_the_array_the_manifest_has(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code, written, _ = self.write(
+            tmp_path,
+            "SELECT st_distance($1, $2)",
+            "notes",
+            "--prefer-tables",
+            "--allow-dangerous",
+            "--write",
+        )
+        assert code == 0, capsys.readouterr().err
+        assert "# reads a rule file" in written, "the comment on the entry stays"
+        parsed = tomllib.loads(written)
+        assert parsed["route"][1]["db"]["functions"] == ["unaccent", "st_distance"]
+
+    def test_the_summary_counts_the_functions(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code, _, _ = self.write(
+            tmp_path,
+            "SELECT st_distance($1, $2)",
+            "notes",
+            "--prefer-tables",
+            "--allow-dangerous",
+            "--write",
+        )
+        assert code == 0
+        assert "2 function(s)" in capsys.readouterr().err
+
+    def test_a_control_character_is_escaped(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        sql = "SELECT 'a\x7fb', '\x01' FROM t"
+        code, written, _ = self.write(tmp_path, sql, "notes", "--write")
+        assert code == 0, capsys.readouterr().err
+        assert "\x7f" not in written and "\x01" not in written, "no raw control character"
+        assert "\\u007F" in written, written
+        parsed = tomllib.loads(written)
+        assert parsed["route"][1]["db"]["queries"] == ["SELECT 'listed'", sql]
+
+
+class TestTheAuditProofIsNotSkipped:
+    """A route the edited manifest does not route the log's requests to says so (D3c)."""
+
+    MANIFEST = """\
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+# A catch-all *before* the route the log names: the audit routes the request
+# here, so nothing of the log is checked against the later route.
+[[route]]
+name = "catch-all"
+path = ['.*']
+[route.db]
+queries = ["SELECT 'catch-all'"]
+
+[[route]]
+name = "notes"
+path = ['/notes/']
+[route.db]
+queries = ["SELECT 'listed'"]
+"""
+
+    def test_the_note_says_the_audit_routed_it_elsewhere(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "blastit.toml"
+        manifest.write_text(self.MANIFEST, encoding="utf-8")
+        log = tmp_path / "app.log"
+        log.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "event": "request",
+                            "method": "GET",
+                            "path": "/notes/",
+                            "route": "notes",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "event": "sql.denied",
+                            "route": "notes",
+                            "proxy": "db",
+                            "sql": "SELECT 'new'",
+                            "reason": "not granted",
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        assert (
+            fold.main(["fold", str(log), "--manifest", str(manifest), "--write"]) == 0
+        ), capsys.readouterr().err
+        error = capsys.readouterr().err
+        assert "routes none of the log's requests here" in error, error
+        parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        assert parsed["route"][1]["db"]["queries"] == ["SELECT 'listed'", "SELECT 'new'"]

@@ -287,6 +287,19 @@ pub(crate) fn analyze_statement(sql: &str) -> Result<String, String> {
     serde_json::to_string_pretty(&document).map_err(|error| error.to_string())
 }
 
+/// Why a statement that locks a table without reading a column of it cannot be
+/// covered by a table grant (§6, D3c).
+///
+/// PostgreSQL asks for the UPDATE privilege on any *one* column of a locked
+/// table, and a table grant has no `"*"` for a lock: `"*"` would hand out the
+/// UPDATE privilege on every column. So a lock with no column to name — the
+/// statement reads none of them (`SELECT 1 FROM t FOR UPDATE`, `SELECT * FROM t
+/// FOR UPDATE`) — keeps the statement an exact query, and the table grant is
+/// left for a manifest author to finish by naming a column.
+pub(crate) const LOCK_NEEDS_A_COLUMN: &str = "its rows are locked (`FOR UPDATE`) without reading \
+     a column of it, so name one in the table's `update` entry — its primary key, say: a table \
+     grant never takes `\"*\"` for a lock, and without the entry the statement is refused";
+
 /// The smallest table grant that covers a set of statements (D3c).
 ///
 /// This is `blastit._blastit.covering`, the function `blastit-manifest fold
@@ -326,7 +339,20 @@ pub(crate) fn covering(statements: &[String], prefix: &str) -> Result<String, St
     let mut unanalysable = Vec::new();
     for sql in statements {
         match analyze(sql) {
-            Ok(analysis) => analyses.push(analysis),
+            Ok(analysis) => {
+                // A statement that locks a table without reading a column of it
+                // cannot be covered by a table grant, and no other statement of
+                // the set changes that: it stays an exact `queries` entry (D3c).
+                if TableGrants::covering(std::iter::once(&analysis))
+                    .locks_without_a_column()
+                    .next()
+                    .is_some()
+                {
+                    unanalysable.push(json!({"sql": sql, "reason": LOCK_NEEDS_A_COLUMN}));
+                    continue;
+                }
+                analyses.push(analysis);
+            }
             Err(error) => unanalysable.push(json!({"sql": sql, "reason": error.to_string()})),
         }
     }
@@ -344,18 +370,21 @@ pub(crate) fn covering(statements: &[String], prefix: &str) -> Result<String, St
 /// This is `blastit._blastit.classify`: what PostgreSQL's own parser says a
 /// statement is, for *every* statement, not only the four a table grant covers.
 /// Nothing here classifies by text: the parser decides, and the caller gets its
-/// verdict as data.
+/// verdict as data — which kind, how many statements the text holds, and whether
+/// a grant may hold it at all.
 ///
 /// # Errors
 ///
-/// The reason a `sql.denied` event carries: the text is not valid SQL, holds no
-/// statement, or holds more than one.
+/// The reason a `sql.denied` event carries: the text is not valid SQL, or holds
+/// no statement at all. A text that holds several is *not* an error: it is
+/// `"statements": 3` in the verdict, and never plain.
 pub(crate) fn classify(sql: &str) -> Result<String, String> {
     let classified = blastit_sqlpolicy::classify(sql).map_err(|error| error.to_string())?;
     let document = json!({
         "class": classified.class().as_str(),
         "label": classified.label(),
         "plain": classified.is_plain(),
+        "statements": classified.statements(),
     });
     serde_json::to_string_pretty(&document).map_err(|error| error.to_string())
 }
@@ -451,9 +480,19 @@ pub(crate) fn audit(manifest_toml: &str, observations_json: &str) -> Result<Stri
             // again.
             match analyze(&statement.sql) {
                 Ok(analysis) => {
-                    trace
-                        .table_grants
-                        .merge_from(&TableGrants::covering(std::iter::once(&analysis)));
+                    let covering = TableGrants::covering(std::iter::once(&analysis));
+                    let locked: BTreeSet<String> = covering
+                        .locks_without_a_column()
+                        .map(str::to_string)
+                        .collect();
+                    if !locked.is_empty() {
+                        trace
+                            .nameless_locks
+                            .entry(normalised.clone())
+                            .or_default()
+                            .extend(locked);
+                    }
+                    trace.table_grants.merge_from(&covering);
                     // Whether a global group's table grant was needed at all: a
                     // statement that only this group's tables and columns allow
                     // makes it a used one (D3c).
@@ -717,12 +756,24 @@ fn assemble(
             let (table_grants, unanalysable) = observed.map_or_else(
                 || (TableGrants::default(), Vec::new()),
                 |observed| {
-                    let unanalysable: Vec<Value> = observed
+                    let mut tables = observed.table_grants.clone();
+                    // A lock one statement could not name a column for may yet be
+                    // named from what another statement of the pair reads, which
+                    // is what makes the merged grant better than any one of them
+                    // (§6, D3c).
+                    tables.pick_locking_columns();
+                    let nameless: BTreeSet<&str> = tables.locks_without_a_column().collect();
+                    let mut unanalysable: Vec<Value> = observed
                         .unanalysable
                         .iter()
                         .map(|(sql, reason)| json!({"sql": sql, "reason": reason}))
                         .collect();
-                    (observed.table_grants.clone(), unanalysable)
+                    for (sql, locked) in &observed.nameless_locks {
+                        if locked.iter().any(|table| nameless.contains(table.as_str())) {
+                            unanalysable.push(json!({"sql": sql, "reason": LOCK_NEEDS_A_COLUMN}));
+                        }
+                    }
+                    (tables, unanalysable)
                 },
             );
 
@@ -1238,6 +1289,11 @@ struct ProxyTrace {
     /// The statements a table grant cannot describe at all, by normalised text,
     /// with the reason.
     unanalysable: BTreeMap<String, String>,
+    /// The tables whose row lock this pair's statements could not name a column
+    /// for, by the statement that locked them (D3c). A statement here is only
+    /// reported when the *merged* grant cannot name one either — another
+    /// statement of the route may read a column the lock can use.
+    nameless_locks: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// What one route did on the network (§7.3).
@@ -1790,6 +1846,128 @@ mod tests {
             .iter()
             .map(|entry| entry["sql"].as_str().expect("a string").to_string())
             .collect()
+    }
+
+    /// A row lock a table grant can name a column for, and one it cannot (D3c).
+    #[test]
+    fn a_locking_statement_gets_a_column_named_never_a_star() {
+        let manifest = r#"
+            version = 1
+            [proxy.db]
+            protocol = "postgresql"
+            input = { url = "DATABASE_URL" }
+            [[route]]
+            name = "notes"
+            path = ['/notes/.*']
+            [route.db]
+            queries = ['SELECT 1']
+        "#;
+        let locked = run(
+            manifest,
+            &document(&request(
+                "GET",
+                "/notes/",
+                &statement(
+                    r#"SELECT \"notes\".\"id\" FROM \"notes\" WHERE \"notes\".\"id\" = $1 FOR UPDATE"#,
+                ),
+            )),
+        );
+        let grants = &proxy(&locked, "notes")["table_grants"];
+        assert_eq!(grants["tables"]["notes"]["update"], json!(["id"]));
+        assert!(
+            !grants["toml"]
+                .as_str()
+                .expect("a string")
+                .contains("update = \"*\""),
+            "a lock never renders a star: {}",
+            grants["toml"]
+        );
+        assert_eq!(grants["unanalysable"], json!([]));
+
+        // `SELECT *` names no column to give the lock: the covering grant cannot
+        // allow the statement, and the report says so instead of writing `"*"`.
+        let star = run(
+            manifest,
+            &document(&request(
+                "GET",
+                "/notes/",
+                &statement(r#"SELECT * FROM \"notes\" FOR UPDATE"#),
+            )),
+        );
+        let grants = &proxy(&star, "notes")["table_grants"];
+        assert_eq!(
+            grants["tables"]["notes"]["update"],
+            json!([]),
+            "the lock is named by nothing: the entry grants no column"
+        );
+        assert!(
+            !grants["toml"]
+                .as_str()
+                .expect("a string")
+                .contains("update"),
+            "and the rendered grant leaves it out: {}",
+            grants["toml"]
+        );
+        assert_eq!(grants["unanalysable"].as_array().expect("a list").len(), 1);
+        assert_eq!(
+            grants["unanalysable"][0]["sql"],
+            r#"SELECT * FROM "notes" FOR UPDATE"#
+        );
+        assert!(
+            grants["unanalysable"][0]["reason"]
+                .as_str()
+                .expect("a string")
+                .contains("primary key"),
+            "{}",
+            grants["unanalysable"][0]["reason"]
+        );
+        assert!(
+            !grants["toml"]
+                .as_str()
+                .expect("a string")
+                .contains("update = \"*\""),
+            "{}",
+            grants["toml"]
+        );
+    }
+
+    #[test]
+    fn a_lock_another_statement_reads_a_column_for_is_named_from_it() {
+        // The pair's grant is merged statement by statement; the lock of one is
+        // named from what the other reads, because PostgreSQL asks for the UPDATE
+        // privilege on any single column of a locked table (D3c).
+        let manifest = r#"
+            version = 1
+            [proxy.db]
+            protocol = "postgresql"
+            input = { url = "DATABASE_URL" }
+            [[route]]
+            name = "notes"
+            path = ['/notes/.*']
+            [route.db]
+            queries = ['SELECT 1']
+        "#;
+        let report = run(
+            manifest,
+            &document(&request(
+                "GET",
+                "/notes/",
+                &format!(
+                    "{}, {}",
+                    statement(r#"SELECT 1 FROM \"notes\" FOR UPDATE"#),
+                    statement(
+                        r#"SELECT \"notes\".\"id\" FROM \"notes\" WHERE \"notes\".\"id\" = $1"#,
+                    ),
+                ),
+            )),
+        );
+        let grants = &proxy(&report, "notes")["table_grants"];
+        assert_eq!(grants["tables"]["notes"]["update"], json!(["id"]));
+        assert_eq!(
+            grants["unanalysable"],
+            json!([]),
+            "the lock is named after all"
+        );
     }
 
     #[test]

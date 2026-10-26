@@ -322,6 +322,7 @@ impl fmt::Display for StatementClass {
 pub struct Classified {
     class: StatementClass,
     label: String,
+    statements: usize,
 }
 
 impl Classified {
@@ -331,8 +332,17 @@ impl Classified {
     }
 
     /// Whether a `queries` entry — and a table grant — may hold this statement.
+    ///
+    /// False for everything a grant is not an allowlist for, and false for a
+    /// text that holds more than one statement: a grant is one statement, so a
+    /// caller has to split the text rather than write it (§6, D3c).
     pub const fn is_plain(&self) -> bool {
-        self.class.is_plain()
+        self.class.is_plain() && self.statements == 1
+    }
+
+    /// How many statements the text holds. One for everything a grant can hold.
+    pub const fn statements(&self) -> usize {
+        self.statements
     }
 
     /// The statement's own name, for a message: `SELECT`, `SET`, `CREATE TABLE`.
@@ -346,21 +356,19 @@ impl Classified {
 /// Unlike [`analyze`] this succeeds for *every* statement libpg_query can parse,
 /// and says what it is; the four kinds a table grant can cover come back as
 /// [`StatementClass::Select`] and friends, everything else as
-/// [`StatementClass::Other`] with its own name in [`Classified::label`].
+/// [`StatementClass::Other`] with its own name in [`Classified::label`], and a
+/// text that holds several statements carries how many — a grant is one
+/// statement, so a caller has to refuse it rather than pick one.
 ///
 /// # Errors
 ///
-/// [`AnalysisError::Syntax`] when the text is not valid SQL,
-/// [`AnalysisError::Empty`] when it holds no statement at all, and
-/// [`AnalysisError::MultipleStatements`] when it holds more than one — a grant
-/// is one statement, so a caller has to refuse the text rather than pick one.
+/// [`AnalysisError::Syntax`] when the text is not valid SQL, and
+/// [`AnalysisError::Empty`] when it holds no statement at all.
 pub fn classify(sql: &str) -> Result<Classified, AnalysisError> {
     let parsed = pg_query::parse(sql).map_err(|error| AnalysisError::Syntax(syntax(&error)))?;
     let statements = &parsed.protobuf.stmts;
-    match statements.len() {
-        0 => return Err(AnalysisError::Empty),
-        1 => {}
-        count => return Err(AnalysisError::MultipleStatements(count)),
+    if statements.is_empty() {
+        return Err(AnalysisError::Empty);
     }
     let statement = statements[0].stmt.as_ref().ok_or(AnalysisError::Empty)?;
     let node = statement.node.as_ref().ok_or(AnalysisError::Empty)?;
@@ -376,9 +384,14 @@ pub fn classify(sql: &str) -> Result<Classified, AnalysisError> {
         "DeleteStmt" => StatementClass::Delete,
         _ => StatementClass::Other,
     };
+    let label = match statements.len() {
+        1 => classify_label(&tree, kind),
+        count => format!("{count} statements"),
+    };
     Ok(Classified {
         class,
-        label: classify_label(&tree, kind),
+        label,
+        statements: statements.len(),
     })
 }
 

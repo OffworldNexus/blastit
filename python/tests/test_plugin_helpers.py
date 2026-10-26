@@ -464,7 +464,7 @@ class TestTheLiveServerFilesystem:
             project.chmod(0o755)
             (project / "sub").chmod(0o755)
             assert plugin._traversable(project) is True
-            served, temporary = plugin._serveable_project(project, root)
+            served, temporary = plugin._serveable_project(project)
             assert served == project, "no copy is made when the views can read it"
             assert temporary is None
         finally:
@@ -475,7 +475,7 @@ class TestTheLiveServerFilesystem:
         project = self.make_project(tmp_path)
         assert plugin._traversable(project) is False
         before = {path: path.stat().st_mode for path in [project, tmp_path, project / "sub"]}
-        served, temporary = plugin._serveable_project(project, tmp_path)
+        served, temporary = plugin._serveable_project(project)
         assert served != project
         assert temporary is not None and temporary.is_dir()
         assert plugin._traversable(served) is True, "the copy is readable by the view uids"
@@ -489,7 +489,7 @@ class TestTheLiveServerFilesystem:
     def test_the_copy_is_removed_by_the_fixture(self, tmp_path: Path) -> None:
         """Teardown removes it; the modes it took are the temporary directory's."""
         project = self.make_project(tmp_path)
-        served, temporary = plugin._serveable_project(project, tmp_path)
+        served, temporary = plugin._serveable_project(project)
         assert temporary is not None
         assert temporary.stat().st_mode & 0o001, "the copy's root stays traversable"
         shutil.rmtree(temporary)
