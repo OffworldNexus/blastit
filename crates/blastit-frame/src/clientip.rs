@@ -252,11 +252,8 @@ impl ClientIpConfig {
                 source: ClientIpSource::Peer,
             });
         }
-        let chain = match self.chain(headers) {
-            Some(chain) => chain,
-            // One unparsable entry: believe nothing in this request's header.
-            None => Vec::new(),
-        };
+        // One unparsable entry: believe nothing in this request's header.
+        let chain = self.chain(headers).unwrap_or_default();
         match select_client_ip(&chain, &self.trusted) {
             Some(ip) => Some(ClientIp {
                 ip,
