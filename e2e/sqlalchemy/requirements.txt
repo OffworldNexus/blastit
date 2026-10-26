@@ -1,3 +1,6 @@
-Flask==3.*
-SQLAlchemy==2.*
+# The Flask + SQLAlchemy app (E2b). Pinned by major.minor, like the demo's: a
+# connection's statements are this app's subject, and a driver that adds one
+# would fail the test rather than the deployment it is standing in for.
+Flask==3.1.*
+SQLAlchemy==2.1.*
 psycopg[binary]==3.*
