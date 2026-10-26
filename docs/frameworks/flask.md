@@ -84,12 +84,17 @@ the comparison, so a newline and a space are the same text.
 
 ```console
 $ export DATABASE_URL=postgresql://shop:secret@127.0.0.1:5432/shop
-$ export BLASTIT_APP=app:app
-$ export BLASTIT_MANIFEST=$PWD/blastit.toml
-$ export PYTHONPATH=$PWD      # so `app` is importable
-$ export PORT=8080
-$ sudo -E .venv/bin/blastit
+
+$ sudo env BLASTIT_APP=app:app \
+           BLASTIT_MANIFEST=$PWD/blastit.toml \
+           PORT=8080 \
+           .venv/bin/blastit
 ```
+
+<!-- E2b -->
+`app:app` resolves because blastit puts the directory it was started from on the
+interpreter's import path — start it from the project root and there is nothing
+to configure. In a container, run it as root directly rather than through `sudo`.
 
 There is no `BLASTIT_PRELOAD` here because a small Flask app has nothing
 expensive to load on first request. Once it does — a serialiser library, an
@@ -97,7 +102,7 @@ ORM's model registry, a big template — list it, so that every route shares one
 copy instead of loading it again in its own process:
 
 ```console
-$ export BLASTIT_PRELOAD=app,shop.serializers
+$ sudo env BLASTIT_PRELOAD=app,shop.serializers … .venv/bin/blastit
 ```
 
 ## Database clients

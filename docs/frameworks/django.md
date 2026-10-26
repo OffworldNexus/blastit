@@ -4,6 +4,10 @@ The whole lifecycle, from an existing project: two settings, an install, the
 first `blastit.toml`, running it locally, and then filling the grants in from
 your test suite. Nothing here changes your code.
 
+Not on Django? [Flask and other WSGI apps](flask.md) is the same lifecycle, with
+what changes; [the section index](index.md) explains what blastit needs from any
+app.
+
 ## Two settings
 
 Django's SQL only becomes checkable when two things are true, and both are

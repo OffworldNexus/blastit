@@ -225,4 +225,37 @@ Three things were checked by running them, not by reading them:
   with a fence has `window.mermaid` loaded, no `<pre class="mermaid">` left
   unconsumed, and a screenshot of the region shows the diagram drawn.
 
+## Round 2
+
+Round 2 checked every item in `round1.md` again against the merged site and the
+source. Three things came out of it:
+
+* **The README is now 50 lines, from 110** — the banner, the links row, a
+  three-sentence pitch, one Get started (10 lines of code: `uv init && uv add
+  blastit`, `hello.py`, `blastit.toml`, the run command), the
+  "Read the documentation →" line, and the licence. Everything the old README
+  carried — the status paragraph, the install variants, the preset discussion,
+  the pytest plugin, `fold`, rootless, the development section — is on a page of
+  the site, and each of those pages is reachable from the documentation's own
+  menu. Nothing was lost: the status block is Home's, the install variants are
+  Getting started's, the Development section's two facts are `RELEASING.md` and
+  `ROADMAP.md`, both linked from the Changelog page.
+* **One E2b sentence had been missed**: the Flask page's run block still exported
+  `PYTHONPATH=$PWD`, which E2b-4 makes unnecessary. Fixed, and marked like the
+  others.
+* **Mermaid is verified on the deployed site**, not just locally: the live
+  `how-it-works/` HTML contains a `rel="preload"` of
+  `https://unpkg.com/mermaid@12/dist/mermaid.min.js`, the theme's
+  `bundle.77dd0ce9.min.js` (which contains the loader that injects it), and the
+  three diagram sources as `<pre class="mermaid"><code>…` — and a screenshot of
+  the live page shows the flowchart drawn. A DOM query still shows nothing,
+  because the theme renders into a **closed shadow root**; that is a property of
+  the theme, not of this site, and there is no supported way to change it.
+
+The one round-1 item this PR leaves as it found it is the console warning about a
+form field with no `id` or `name`: the field is the theme's search input, built
+by the theme's JavaScript inside a closed shadow root, and nothing in
+`overrides/` or in the content adds a form field. The evidence is in the pull
+request.
+
 
