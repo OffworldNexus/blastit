@@ -307,73 +307,45 @@ http.
   `request` event keeps both numbers: `cost_ns` (what was charged) and `cpu_ns`
   (what the worker reported, `null` when it reported nothing).
 
-The fair queue is a port of granian's fair scheduler (`--fq-*`); the options map
-as follows, and these are the deliberate differences:
+#### Design choices
 
-| granian | blastit | Default |
-|---|---|---|
-| `--fq` (on/off switch) | `BLASTIT_FAIR_QUEUING` | `off` |
-| `--fq-outer-prefix-v4` | `BLASTIT_FQ_OUTER_PREFIX_V4` | `24` |
-| `--fq-outer-prefix-v6` | `BLASTIT_FQ_OUTER_PREFIX_V6` | `56` |
-| `--fq-outer-max` | `BLASTIT_FQ_OUTER_MAX` | `65536` |
-| `--fq-inner-max-per-outer` | `BLASTIT_FQ_INNER_MAX_PER_OUTER` | `1024` |
-| `--fq-inner-max` | `BLASTIT_FQ_INNER_MAX` | `262144` |
-| `--fq-burst` | `BLASTIT_FQ_BURST` | `20ms` |
-| `--fq-max-debt` | `BLASTIT_FQ_MAX_DEBT` | `5s` |
-| `--fq-debt-ttl` | `BLASTIT_FQ_DEBT_TTL` | `30s` |
-| `--fq-inner-headers` | `BLASTIT_FQ_INNER_HEADERS` | `user-agent,accept-language,sec-ch-ua,sec-ch-ua-platform,sec-ch-ua-mobile,authorization` |
-| `--fq-inner-cookies` | `BLASTIT_FQ_INNER_COOKIES` | `sessionid,session` |
-| `--fq-inner-include-ip` | `BLASTIT_FQ_INNER_INCLUDE_IP` | `1` |
-
-* **`*` means the rightmost entry, not the leftmost.** granian takes `chain[0]`
-  when every peer is trusted. Wherever the edge *appends* to a header the client
-  already sent — App Platform does — the leftmost entry is the client's own
-  invention, so blastit takes the rightmost: what the closest hop added is the
-  one thing that hop cannot be lying about.
-* **Cost comes from the view, not from the loop.** granian measures its own loop
-  time and charges while the request runs; blastit takes the request's own
-  measurement from the worker — the whole of `serve_request`, not just the WSGI
-  call — and charges at the response's end. A view that lies is bounded on both
-  sides: **upwards** by the time the scheduler observed, and **downwards** by the
-  time up to its own first response frame, so it cannot report zero for a request
-  it took real time to answer. It can only buy itself the gap between its first
-  frame and its last one — that is, exactly the time its own client was waiting
-  for it. A view that says nothing is charged what the scheduler saw.
-* **One lane per route, and one worker budget across routes.** granian has two
-  fixed lanes (events, loop steps). blastit's queue only ever serves the route a
-  queued request belongs to, so the lanes are the routes; the best flow is
-  compared across them because they all compete for `BLASTIT_MAX_WORKERS`. The
-  comparison is an extension of the in-route one, not a second rule: **outer
-  flows belong to the queue, not to a route** — `used` is one number per client
-  however many routes that client has work for — so `(outer.used, inner.used)` is
-  the same key inside a route and between routes, with the route index as the
-  last tiebreak where the in-route order breaks ties on the flow keys.
-* **`BLASTIT_TRUST_FORWARDED` is deprecated but still honoured**, translated to
-  `BLASTIT_TRUSTED_PROXIES`, with a warning: D5 changes what "trust the load
-  balancer" means from "believe the last `X-Forwarded-For` entry from anyone" to
-  "believe `BLASTIT_CLIENT_IP_HEADER` from these peers".
-* **`refresh_root`.** Every mutation of a flow's queues ends in `touch`, and
-  `refresh_root` prunes the per-route root index when a flow is *removed* under
-  it (an idle one collected, or an outer flow dropped). granian has no such
-  index — it walks its flow table — so this is blastit's bookkeeping, not a
-  second rule, and an entry that outlived its flow would be a stale candidate.
-* **A peer whose address cannot be read goes to the overflow flow.** granian's
-  chain either parses or does not; blastit's `REQ_HEAD` may arrive with a peer
-  string that is not an address at all (`peer_addr` empty, a Unix socket with no
-  name). It is queued in the same overflow flow as every client that cannot be
-  told apart, rather than in a flow of its own that would be one client's
-  private lane.
-* **`TrustedProxies` refuses what it cannot read.** granian's `--trusted-hosts`
-  drops entries it does not understand; blastit fails the boot instead, with the
-  variable named and the value never quoted — a trusted-proxy list that silently
-  trusts nothing when the operator meant it to trust something is a deployment
-  that believes a forged `X-Forwarded-For` from the very peer it meant to
-  distrust. (`127.0.0.1:8080` is the mistake worth naming: a port is not a
-  network.)
-* **There is no `system` queue.** granian keeps a lane for its own internal
-  work. blastit's scheduler has none: nothing it does for itself (health checks,
-  the `404` for an unmatched path, a `503`, a `504`) takes a worker slot or
-  enters the admission queue, so there is no work that has to outrank a client's.
+* **`*` means the rightmost entry, not the leftmost.** Wherever the edge
+  *appends* to a header the client already sent — App Platform does — the leftmost
+  entry is the client's own invention, so blastit takes the rightmost: what the
+  closest hop added is the one thing that hop cannot be lying about.
+* **A lying view is bounded on both sides.** The worker's report of what the
+  request cost is clamped **upwards** by the time the scheduler observed, and
+  **downwards** by the time up to the view's own first response frame, so a view
+  cannot report zero for a request it took real time to answer. It can only buy
+  itself the gap between its first frame and its last one — that is, exactly the
+  time its own client was waiting for it. A view that says nothing is charged what
+  the scheduler saw.
+* **One lane per route, and one worker budget across routes.** The queue only
+  ever serves the route a queued request belongs to, so the lanes are the routes;
+  the best flow is compared across them because they all compete for
+  `BLASTIT_MAX_WORKERS`. **Outer flows belong to the queue, not to a route** —
+  `used` is one number per client however many routes that client has work for —
+  so `(outer.used, inner.used)` is the same key inside a route and between routes,
+  with the route index as the last tiebreak.
+* **The root index is refreshed.** Every mutation of a flow's queues ends in
+  `touch`, and `refresh_root` prunes the per-route root index when a flow is
+  *removed* under it (an idle one collected, or an outer flow dropped): an entry
+  that outlived its flow would be a stale candidate.
+* **A peer whose address cannot be read goes to the overflow flow.** A `REQ_HEAD`
+  may arrive with a peer string that is not an address at all (`peer_addr` empty,
+  a Unix socket with no name). It is queued in the same overflow flow as every
+  client that cannot be told apart, rather than in a flow of its own that would be
+  one client's private lane.
+* **`TrustedProxies` refuses what it cannot read.** An entry it does not
+  understand fails the boot, with the variable named and the value never quoted —
+  a trusted-proxy list that silently trusts nothing when the operator meant it to
+  trust something is a deployment that believes a forged `X-Forwarded-For` from
+  the very peer it meant to distrust. (`127.0.0.1:8080` is the mistake worth
+  naming: a port is not a network.)
+* **There is no `system` queue.** Nothing the scheduler does for itself (health
+  checks, the `404` for an unmatched path, a `503`, a `504`) takes a worker slot
+  or enters the admission queue, so there is no work that has to outrank a
+  client's.
 * **The budget counts threads, not answers.** A slot is released when the view
   reports `DONE`, meaning the thread has actually exited. A timed-out request
   gets a `504` right away, but its slot stays taken until the thread finishes.
@@ -1482,7 +1454,7 @@ operator:
 |---|---|---|---|
 | `digitalocean-paas` | `BLASTIT_CLIENT_IP_HEADER` | `do-connecting-ip` | the one header DO's edge **overwrites** with the real client address, so a client cannot put anything in it (§10) |
 | | `BLASTIT_TRUSTED_PROXIES` | `*` | every peer is trusted, and the assumption is that **nothing untrusted can reach the socket**: an App Platform service is only reachable through DO's load balancer and the app's own internal services, and the header being read is one the edge overwrites. Trusting every peer is then the simplest rule that also covers internal service-to-service calls (§10) |
-| | `BLASTIT_FAIR_QUEUING` | `on` | one client's burst must not starve the others on a single small instance (§2.4, D5); granian's defaults for the `BLASTIT_FQ_*` knobs |
+| | `BLASTIT_FAIR_QUEUING` | `on` | one client's burst must not starve the others on a single small instance (§2.4, D5); the defaults for the `BLASTIT_FQ_*` knobs |
 | | `BLASTIT_LOG_FORMAT` | `json` | the platform forwards stdout to its own log service and truncates a line at 2048 bytes (§8.1) |
 | | *assumption* | `root` | App Platform starts the container as root and cannot grant capabilities to a non-root user, so this preset's deployment is a root one (§2.1, §10) |
 | | *not set* | `PORT`, `BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` | the platform owns the port, and a connection cap names a proxy that only the manifest knows (§8 Sizing) |
