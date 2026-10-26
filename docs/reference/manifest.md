@@ -1,24 +1,8 @@
 # The manifest
 
-The manifest is blastit's own routing table and the whole of its permission
-model, in one file that is **versioned with the code**, because it describes the
-code.
-
-* Default path: `/app/blastit.toml`, or `BLASTIT_MANIFEST`.
-* Read at boot, in both stages, and in force until the process restarts. There
-  is no reload.
-* Parsed **strictly**: an unknown key is an error, not a comment.
-
-```mermaid
-flowchart TB
-    m["blastit.toml"] --> p["[proxy.db]<br/>protocol, inputs, outputs"]
-    m --> g["[group.session.db]<br/>grants several routes share"]
-    m --> r["[[route]]<br/>name, path, methods, groups, egress, prefork"]
-    r --> i["[route.db]<br/>queries, tables, functions, transaction_control, unrestricted"]
-    g --> e["effective grants of a route<br/>= its own + its groups' + the global groups'"]
-    i --> e
-    e --> l["one listener per (route, proxy)<br/>only if the route has a grant on it"]
-```
+The manifest is blastit's routing table and its whole permission model, in one
+file. Default `/app/blastit.toml`, or `BLASTIT_MANIFEST`; read at boot, parsed
+strictly, so an unknown key is an error.
 
 ## Top-level keys
 
@@ -26,86 +10,11 @@ flowchart TB
 |---|---|---|
 | `version` | yes | must be `1` |
 | `groups` | no | group names attached to **every** route |
-| `[proxy.<name>]` | no | a named broker for one external service. A grant naming an undeclared proxy aborts the boot |
-| `[group.<name>]` | no | grants several routes share. A group grants nothing until it is attached |
+| `[proxy.<name>]` | no | a named broker for one external service; a grant on an undeclared proxy aborts the boot |
+| `[group.<name>]` | no | grants several routes share; a group grants nothing until attached |
 | `[[route]]` | yes | one sandbox: one process, one uid |
 
-Top-level keys come before any `[table]`. In TOML that means `version` and
-`groups` at the top of the file.
-
-## Proxies
-
-A proxy declares the protocol it speaks, the environment variables it owns, and
-the environment variables the application sees instead.
-
-```toml
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }
-# No output table: DATABASE_URL is rewritten in place, and DATABASE_CA_CERT
-# disappears from the app's environment.
-
-[proxy.analytics]
-protocol = "postgresql"
-input = { url = "ANALYTICS_URL" }
-[proxy.analytics.output]
-ANALYTICS_DB_HOST = "{{ socket_dir }}"
-ANALYTICS_DB_PORT = "{{ port }}"
-ANALYTICS_DB_NAME = "{{ database }}"
-ANALYTICS_DB_USER = "{{ user }}"
-```
-
-* **Inputs.** `input` maps the protocol's input slots to environment variable
-  names. Every input variable is removed from the app's environment unless an
-  output of the same name redefines it. **A missing input variable aborts the
-  boot.**
-* **Outputs.** `output` maps variable names to templates. Without an `output`
-  table the protocol's defaults apply: each input variable is replaced by the
-  equivalent local value under the *same name*. That is the `DATABASE_URL` →
-  `DATABASE_URL` case, which needs no configuration.
-* **Templates** are deliberately tiny: `{{ field }}` inserts a field and
-  `{{ field | urlencode }}` percent-encodes it. No logic, no loops, no access to
-  the environment. They are rendered once, at boot, and an unknown field or
-  filter aborts the boot.
-* **Secrets cannot be templated.** The fields a protocol offers describe the
-  *local* endpoint plus a few non-secret facts. Passwords, upstream hosts and CA
-  material never reach a template, so no output can leak them.
-* **Collisions abort the boot**: an output may not overwrite a variable it does
-  not own, and two proxies may not produce the same variable.
-
-`blastit.toml` holds no secrets, and that is by design — nothing in it is a
-credential, and it is safe to commit.
-
-### Protocol `postgresql`
-
-| Input slot | Content |
-|---|---|
-| `url` | a libpq URI (`postgres://` or `postgresql://`). The usual case, and DO's `${db.DATABASE_URL}` |
-| `host`, `port`, `user`, `password`, `database`, `sslmode` | the same thing split into parameters, an alternative to `url` — setting both forms is an error |
-| `ca_cert` | PEM text, for the upstream TLS leg. DO's `${db.CA_CERT}` |
-
-| Template field | Value |
-|---|---|
-| `url` | `postgresql://{{ user }}@{{ socket_dir \| urlencode }}:{{ port }}/{{ database }}` |
-| `socket_dir` | `/proc/self/cwd` — each view's working directory is its own socket directory |
-| `port` | this proxy's local port: `5432 + k`, *k* being the proxy's index among the `postgresql` proxies **sorted by name** |
-| `socket_path` | `/proc/self/cwd/.s.PGSQL.<port>` |
-| `database` | the upstream database name (not a secret) |
-| `user` | `blastit`. The proxy ignores it, because identity comes from the socket |
-
-**Default outputs:** `url` → the same variable; `host` → `{{ socket_dir }}`,
-`port` → `{{ port }}`, `user` → `{{ user }}`, `database` → `{{ database }}`;
-`sslmode` → `disable`, since the local leg is a Unix socket; `password` and
-`ca_cert` → removed.
-
-The port selects the proxy and `/proc/self/cwd` selects the view: libpq connects
-to `<host>/.s.PGSQL.<port>`, and a percent-encoded host is how libpq and
-`dj-database-url` write a Unix socket directory. The rendered values are
-identical in every process, which matters because frameworks read their database
-settings once, at import, before the fork.
-
-**Grant contents for this protocol:** `queries`, `tables`, `functions`,
-`transaction_control`, `unrestricted`.
+`version` and `groups` come before any `[table]`.
 
 ## Routes
 
@@ -115,48 +24,85 @@ name = "product-detail"
 path = ['/products/[0-9]+/']        # full match against PATH_INFO
 methods = ["GET", "HEAD"]           # optional; default: any method
 groups = ["catalog"]                # shared grants
-prefork = true                      # fork at startup: skip the first-hit latency
+prefork = true                      # fork at startup, not on first use
 egress = true                       # may open TCP connections
-[route.db]
-queries = [ … ]
 ```
 
 | Key | Required | Meaning |
 |---|---|---|
-| `name` | yes | the route's name: in the log, and in `environ["blastit.route"]`. Duplicates abort the boot |
-| `path` | yes | a **list** of regular expressions, matched against the whole of `PATH_INFO`, in order |
-| `methods` | no | the methods this route answers. Without it, any method. **`HEAD` is never implied by `GET`** |
+| `name` | yes | the route's name, in the log and in `environ["blastit.route"]`; must match `[a-z0-9][a-z0-9_-]*`, and duplicates abort the boot |
+| `path` | yes | a list of regexes matched against the whole of `PATH_INFO`, in order |
+| `methods` | no | the methods it answers; without it, any method. `HEAD` is never implied by `GET` |
 | `groups` | no | groups whose grants this route takes |
-| `egress` | no | `true` lets the process open outbound TCP connections. Without it the seccomp filter refuses every `AF_INET`/`AF_INET6` socket |
+| `egress` | no | `true` lets the process open outbound TCP connections |
 | `prefork` | no | `true` forks this view at startup instead of on first use |
 
-`path` is a list of regexes even when there is only one of them:
-`path = ['.*']`. <!-- E2b --> A single regex may also be written as a plain
-string, `path = ".*"`, which is the shorthand `ARCHITECTURE.md` uses — the list
-form is what every example here uses, because it is the one that always works.
+`path` is always a list, even for one regex: `path = ['.*']`.
+
+## Proxies
+
+A proxy declares its protocol, the variables it owns, and the variables the app
+sees instead.
+
+```toml
+[proxy.analytics]
+protocol = "postgresql"
+input = { url = "ANALYTICS_URL" }
+[proxy.analytics.output]
+ANALYTICS_DB_HOST = "{{ socket_dir }}"
+ANALYTICS_DB_PORT = "{{ port }}"
+```
+
+* **Inputs** — `input` maps input slots to variable names. A missing input
+  variable aborts the boot.
+* **Outputs** — `output` maps names to templates. Without an `output` table,
+  each input variable is rewritten in place: `DATABASE_URL` in, `DATABASE_URL`
+  out, pointing at the local endpoint.
+* **Templates** are tiny: `{{ field }}` inserts a field and `{{ field | urlencode }}`
+  percent-encodes it. They render once, at boot; an unknown field or filter
+  aborts the boot.
+* **Secrets cannot be templated**: templates see the local endpoint and a few
+  non-secret facts.
+* An output may not overwrite a variable it does not own, and no two proxies may
+  produce the same variable.
+
+`blastit.toml` holds no secrets and is safe to commit.
+
+### Protocol `postgresql`
+
+Input slots: `url` (a libpq URI), or the same split into `host`, `port`, `user`,
+`password`, `database`, `sslmode` — not both — plus `ca_cert` (PEM for the
+upstream TLS leg).
+
+Template fields: the default `url` is
+`postgresql://{{ user }}@{{ socket_dir | urlencode }}:{{ port }}/{{ database }}`,
+where `socket_dir` is `/proc/self/cwd`, each view's own socket directory, and
+`port` is `5432 + k`, *k* = index among `postgresql` proxies sorted by name.
+`user` is `blastit`, which the proxy ignores.
+
+Default outputs: every input variable is rewritten in place; `sslmode` becomes
+`disable`; `password` and `ca_cert` are removed. The local leg is a Unix socket,
+so libpq connects to `<host>/.s.PGSQL.<port>`.
+
+Grant keys for this protocol: `queries`, `tables`, `functions`,
+`transaction_control`, `unrestricted`.
 
 ## Grants
 
-A grant is per proxy. For a `postgresql` proxy it says which statements a route
-may run, and whether transaction control is allowed.
+A grant is per proxy; for `postgresql` it says which statements a route may run.
 
 ```toml
 [group.session.db]                  # grants several routes share
 transaction_control = true
-queries = [
-  "SET TIME ZONE 'UTC'",
-  'SELECT "django_session"."session_key" FROM "django_session" WHERE "django_session"."session_key" = $1 LIMIT 21',
-]
+queries = ["SET TIME ZONE 'UTC'"]
 
 [[route]]
 name = "restaurants"
 path = ['/restaurants/.*']
 [route.db.tables]                   # instead of listing every statement
 restaurants_restaurant = { select = ["id", "slug", "name"] }
-restaurants_cuisinetype = { select = "*" }         # every column
-orders_order = { select = "*", insert = "*", update = ["status", "accepted_at"], delete = true }
-[route.db]
-functions = ["st_distance", "unaccent"]            # beyond the built-in safe set (see the appendix)
+orders_order = { select = "*", update = ["status"], delete = true }
+functions = ["st_distance"]         # beyond the built-in safe set
 ```
 
 | Key | Type | Meaning |
@@ -164,62 +110,35 @@ functions = ["st_distance", "unaccent"]            # beyond the built-in safe se
 | `queries` | list of strings | the statements this grant allows, compared after normalisation |
 | `tables` | table | which tables and columns the route may read and write |
 | `functions` | list of strings | function calls allowed beyond [the built-in safe set](#the-built-in-safe-function-set) |
-| `transaction_control` | bool | allow `BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT`/`RELEASE`/`ROLLBACK TO` |
+| `transaction_control` | bool | allow `BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT` and friends |
 | `unrestricted` | bool | allow **every** statement on this proxy. Inline on a route only |
 
-### Exact queries
-
 An exact `queries` entry is trusted as it is: blastit compares the text and runs
-what it matches. It does not look at what the statement calls, so an entry for
-`SELECT set_config(…)`, `SELECT pg_read_file(…)` or a statement calling
-`pg_terminate_backend` runs that function with the app's privileges. That is what
-a table grant is for.
+what it matches, without looking at what it calls.
 
 ### Table and column grants
 
-`[route.<db>.tables]` has one entry per table:
+`[route.<db>.tables]` has one entry per table; `select`, `insert` and `update`
+take columns or `"*"`, and `delete` takes `true`.
 
-| Operation | Value |
-|---|---|
-| `select`, `insert`, `update` | a list of column names, or the string `"*"` (every column) |
-| `delete` | `true` |
+A statement no exact query lists is parsed with **PostgreSQL's own parser**
+(`libpg_query`) and allowed when every table, column and function it touches is
+granted.
 
-`functions` sits next to `tables`, in the grant's own table, and lists the
-function calls allowed beyond [the built-in safe set](#the-built-in-safe-function-set).
-
-A statement that no exact query lists is parsed with **PostgreSQL's own parser**
-(`libpg_query` — a second implementation would be a parser differential, and any
-text the two read differently is a bypass) and allowed when every table, column
-and function it touches is granted. Anything else is refused: another statement
-kind, a construct the analysis does not understand, a function nobody granted.
-
-The details that decide real deployments:
+What decides real deployments:
 
 * reading a column **anywhere** — a `WHERE`, an `ORDER BY`, a join condition — is
   reading it;
-* `*` needs `select = "*"` on every base table it expands to, through derived
-  relations;
+* every base table a statement names must be granted, even when no column of it
+  is read;
 * `count(*)` reads no column;
-* an unqualified column has to be granted on every relation in scope that could
-  provide it;
-* `public.t` is `t`; any other schema keeps its qualified name;
-* `pg_catalog` and `information_schema` are never readable this way — statements
+* `pg_catalog` and `information_schema` are never readable this way: statements
   on the catalogue stay exact `queries`;
-* a function call must be in
-  [the built-in safe set](#the-built-in-safe-function-set) or in `functions`
-  (`pg_catalog.x` is `x`). Casts to `reg*` and to types other than the built-in
-  plain ones need a `functions` entry;
-* **every base table a statement names must appear in the grant**, even when no
-  column of it is read: a row count or an `EXISTS` reveals it;
-* a **row lock** (`FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY
-  SHARE`, with or without `OF …`, and through a derived relation) needs an
-  `update` entry on every base table it locks — but on **any one column**,
-  because PostgreSQL asks for the UPDATE privilege on a single column of a locked
-  table. So `update = ["id"]` is enough for a route that only reads the rows it
-  locks, while the columns it reads still need `select`. The denial reads
-  ``update on t (any column, to lock its rows) not granted``;
-* unqualified `pg_*` names are never grantable as tables, since `pg_catalog`
-  comes first on every search path.
+* a row lock (`FOR UPDATE`, `FOR SHARE`, …) needs an `update` entry on every base
+  table it locks, on any one column;
+* a function call must be in [the built-in safe set](#the-built-in-safe-function-set)
+  or in `functions` (`pg_catalog.x` is `x`); casts to `reg*` and other types need
+  an entry.
 
 ### `unrestricted`
 
@@ -231,176 +150,91 @@ path = ['/admin/.*']
 unrestricted = true
 ```
 
-It means exactly what it says: that route may run any statement on that proxy,
-transaction control included.
+That route may run any statement on that proxy, transaction control included.
 
-* **Inline on a route only.** A group can be attached to every route at once,
-  which would turn the whole manifest into one sandbox, so `unrestricted` in a
-  group is a boot error.
-* **Every unrestricted (route, proxy) is a `manifest.warning` at boot**, so a
-  deployment cannot be unrestricted by accident.
-* **It is still a sandbox**: the listener, the uid check, the other proxies'
-  grants and the credential barrier all stay. It simply has nothing left to
-  check on this one, so dbproxy logs no statement for it.
-* `unrestricted` with `queries` is a boot error (`unrestricted grants take no
-  queries`): the list would read as a restriction, and it is not one. The same
-  for `unrestricted` with `tables` or `functions`.
-
-Its user is a staff-only back-office — Django's admin — whose SQL is too varied
-to enumerate, where the guarantee that remains is that the process still never
-sees the credentials.
+* Inline on a route only: `unrestricted` in a group is a boot error.
+* Every unrestricted (route, proxy) is a `manifest.warning` at boot.
+* The sandbox stays: the listener, the uid check, the other proxies' grants and
+  the credential barrier.
+* `unrestricted` with `queries`, `tables` or `functions` is a boot error.
 
 ### Effective grants
 
-A route's allowlist for a proxy is the **union** of:
-
-1. its own inline grant,
-2. the grants of the groups it lists,
-3. the grants of the global groups.
-
-`transaction_control` is on if any of them turns it on. `unrestricted` is on if
-any of them turns it on — but since a group cannot carry it, in practice it is
-only ever inline.
-
-**A route with no grant at all for a proxy gets no listener for it.** That is the
-strongest thing in the file: the `fallback` route in most manifests cannot reach
-the database, because there is no socket for it to connect to.
+A route's allowlist for a proxy is the **union** of its own grant, its groups'
+grants and the global groups'; `transaction_control` is on if any turns it on.
+**A route with no grant for a proxy gets no listener**, so a catch-all fallback
+cannot reach the database.
 
 ## How a statement matches
 
-Matching is exact, on normalised text, and the *shape* of the text is normalised
-too, so a real app's SQL does not have to be the same bytes twice.
+Matching is exact, on normalised text: trimmed, a trailing `;` removed,
+whitespace collapsed outside quotes. The *shape* is normalised too:
 
-**Normalisation** (applied to both the grant and the text on the wire): trimmed,
-a trailing `;` removed, whitespace collapsed outside quotes and identifiers.
+* `$1`, `$2`… become `$?`, so one template is one grant;
+* a list of nothing but placeholders after `IN` becomes `IN ($?, ...)` at any
+  length, so `__in` matches one grant;
+* identical rows after `VALUES` collapse to one row and `...`, so `bulk_create`
+  matches one grant.
 
-**Shape:**
+A `Parse` that matches authorises the `Bind`/`Execute` that follow, and simple
+query messages get the same check. `COPY`, `LISTEN` and the function-call
+sub-protocol are denied unless listed.
 
-* every bind placeholder `$<digits>` outside quoted regions and comments becomes
-  `$?`. The numbering carries no meaning for the policy — values always travel
-  separately — and it shifts whenever a statement is assembled dynamically, so
-  one template means one grant;
-* a parenthesised list right after `IN`/`NOT IN` that holds nothing but
-  placeholders becomes `IN ($?, ...)`, whatever its length, so
-  `prefetch_related` and `__in` match one grant for every page size. A list with
-  anything else in it — a string, a subquery, a nested tuple — is left alone;
-* after `VALUES`, a run of identical rows `(…), (…), …` becomes the single row
-  followed by `, ...`, so `bulk_create` matches one grant for every number of
-  objects. A single row is left as it is, rows that differ from each other do not
-  collapse, and a **function call's argument list never collapses**: its arity
-  picks the overload.
-
-**Protocol:** a `Parse` that matches authorises the `Bind`/`Execute` that follow
-it. Simple-protocol `Query` messages go through the same check, so a route
-cannot get around the policy by switching protocols. `COPY`, `LISTEN` and the
-function-call sub-protocol are denied unless they are listed. A text holding
-several statements never matches: a grant is one statement.
-
-**Two things cannot be granted**, and the tooling reports them instead of trying:
-
-* a savepoint's name (`SAVEPOINT "s140234_x1"`) is made per request. The fix is
-  `transaction_control = true`;
-* a named cursor — `QuerySet.iterator()`, that is Django's `chunked_cursor()` —
-  sends `DECLARE "_django_curs_140234_sync_1" CURSOR FOR …` and then
-  `FETCH`/`CLOSE` with the same generated name.
+Two things cannot be granted: a savepoint's name (use `transaction_control`) and
+a named cursor (`QuerySet.iterator()`).
 
 ## Routing
 
-* Routes are tried **in manifest order**, and the first one whose `path` (and
-  `methods`, if set) matches wins.
-* A regex must match the **whole** of `PATH_INFO` — the percent-decoded path the
-  app will see.
-* They use Rust [`regex`](https://docs.rs/regex/latest/regex/) syntax, which
-  guarantees linear-time matching, so a hostile URL cannot stall the scheduler.
-* `BLASTIT_SCRIPT_NAME` strips a mount prefix first, as WSGI does.
-* If nothing matches, the scheduler answers `404` itself and **no Python runs**.
-  A catch-all (`path = ['.*']`, listed last) lets the app render its own 404s.
-* Every routing decision is a `request` event, with `route` and the index of the
-  matching regex in `rule`.
-
-**Getting it wrong is safe, if annoying** — see
-[what blastit needs from an app](../frameworks/index.md#routes-and-url-paths),
-where the reason is spelled out once.
+* Routes are tried in order; the first match of `path` (and `methods`) wins.
+* A regex must match the whole of `PATH_INFO`.
+* They use Rust [`regex`](https://docs.rs/regex/latest/regex/) syntax, matched in
+  linear time.
+* `BLASTIT_SCRIPT_NAME` strips a mount prefix first.
+* Nothing matches: the scheduler answers `404`, no Python runs. A catch-all
+  listed last lets the app render its own 404s.
+* Every decision is a `request` event, with `route` and `rule`.
 
 ## Validation at boot
 
-**Aborts the boot:**
+Aborts the boot: an unknown key or group, a `version` that is not `1`, a grant
+on an undeclared proxy, a duplicate route name, an invalid regex or method, a
+missing proxy input variable, and `unrestricted` in a group or next to
+`queries`/`tables`/`functions`.
 
-* an unknown key, anywhere;
-* a `version` that is not `1`;
-* an unknown group, or a grant on an undeclared proxy;
-* a duplicate route name;
-* an invalid regex, or a method token that is not a token;
-* `unrestricted` in a group, or `unrestricted` next to `queries`/`tables`/
-  `functions`;
-* a missing proxy input variable.
-
-**Warns and runs:**
-
-* a group that is attached nowhere;
-* a route that is unrestricted on a proxy;
-* `BLASTIT_PRESET` disagreeing with `--preset`.
+Warns and runs: a group attached nowhere, a proxy no grant uses, and an
+unrestricted route.
 
 ## Writing one
 
-Do not write the statements by hand from memory. Two tools do it from evidence:
+Two tools write grants from evidence, instead of from memory:
 
-* **the pytest plugin** — Django, and it diffs what your test suite really ran
-  against the manifest: [the plugin](pytest-plugin.md);
-* **`blastit-manifest fold`** — anything, from a log of `sql.denied` events:
+* **the pytest plugin** — Django: it diffs what your test suite ran against the
+  manifest and prints the table grant to paste: [the plugin](pytest-plugin.md);
+* **`blastit-manifest fold`** — anything, from `sql.denied` events:
   [fold the log](../frameworks/day-to-day.md#fold-the-log).
 
-The plugin also reports the smallest table grant covering a route's statements,
-with the TOML to paste in, so a route can be moved from exact queries to table
-grants in one step.
-
-`e2e/demo/blastit.toml` in the repository is a real manifest for a small Django
-app — sessions, a login, notes, and two routes that deliberately have less than
-the others — generated from a scenario run and then committed.
+`e2e/demo/blastit.toml` in the repository is a working example.
 
 ## The built-in safe function set
 
-A `tables` grant checks the functions a statement calls, and there is a set of
-names it accepts without being told to: SQL's own vocabulary, where every call
-is a pure function of its arguments. Anything else — a function of your own, an
-extension's, or one of PostgreSQL's that reads a file or a rule — has to be named
-in the grant's `functions` list.
+A `tables` grant accepts these names; anything else must be named in the grant's
+`functions`.
 
-These are all 75, and the list is deliberately a *floor*: a name that is not in
-it is not automatically dangerous, it is simply one a grant has to name.
+Aggregates: `array_agg`, `avg`, `bool_and`, `bool_or`, `count`, `json_agg`,
+`json_build_object`, `jsonb_agg`, `jsonb_build_object`, `max`, `min`,
+`string_agg`, `sum`. Conditions: `coalesce`, `greatest`, `least`, `nullif`.
+Strings: `btrim`, `concat`, `left`, `length`, `lower`, `ltrim`, `overlay`,
+`position`, `replace`, `right`, `rtrim`, `similar_to_escape`, `substr`,
+`substring`, `trim`, `upper`. Numbers: `abs`, `ceil`, `floor`, `round`. Dates
+and times: `age`, `date_trunc`, `extract`, `make_interval`, `now`, `timezone`,
+`to_char`. Sets and arrays: `array_length`, `cardinality`, `generate_series`,
+`unnest`. Window functions: `dense_rank`, `rank`, `row_number`, `cume_dist`,
+`first_value`, `lag`, `last_value`, `lead`, `mode`, `nth_value`, `ntile`,
+`percent_rank`, `percentile_cont`, `percentile_disc`, `stddev`, `stddev_pop`,
+`stddev_samp`, `var_pop`, `var_samp`, `variance`. JSON and full text:
+`json_extract_path_text`, `jsonb_array_length`, `jsonb_extract_path_text`,
+`plainto_tsquery`, `to_tsvector`, `ts_rank`, `websearch_to_tsquery`.
 
-| Group | Names |
-|---|---|
-| Aggregates | `array_agg`, `avg`, `bool_and`, `bool_or`, `count`, `json_agg`, `json_build_object`, `jsonb_agg`, `jsonb_build_object`, `max`, `min`, `string_agg`, `sum` |
-| Conditions | `coalesce`, `greatest`, `least`, `nullif` |
-| Strings | `btrim`, `concat`, `left`, `length`, `lower`, `ltrim`, `overlay`, `position`, `replace`, `right`, `rtrim`, `similar_to_escape`, `substr`, `substring`, `trim`, `upper` |
-| Numbers | `abs`, `ceil`, `floor`, `round` |
-| Dates and times | `age`, `date_trunc`, `extract`, `make_interval`, `now`, `timezone`, `to_char` |
-| Sets and arrays | `array_length`, `cardinality`, `generate_series`, `unnest` |
-| Window functions | `dense_rank`, `rank`, `row_number` |
-| Window and ordered-set functions | `cume_dist`, `first_value`, `lag`, `last_value`, `lead`, `mode`, `nth_value`, `ntile`, `percent_rank`, `percentile_cont`, `percentile_disc`, `stddev`, `stddev_pop`, `stddev_samp`, `var_pop`, `var_samp`, `variance` |
-| Full-text search and JSON extraction | `json_extract_path_text`, `jsonb_array_length`, `jsonb_extract_path_text`, `plainto_tsquery`, `to_tsvector`, `ts_rank`, `websearch_to_tsquery` |
-
-Notes that decide real grants:
-
-* **`pg_catalog.` is dropped before the lookup**, so `pg_catalog.lower` and
-  `lower` are one name.
-* **Some SQL syntax is a call.** `EXTRACT(…)` is `pg_catalog.extract`,
-  `x AT TIME ZONE y` is `pg_catalog.timezone`, and `SUBSTRING`, `POSITION` and
-  `OVERLAY` are the same: they are here so that standard SQL is not denied for a
-  name nobody can write in a grant.
-* **`coalesce`, `nullif`, `greatest` and `least` are parse-tree nodes**, not
-  ordinary calls; they are listed because the architecture names them.
-* **`unaccent` is deliberately absent**: it reads a rule file, so a grant has to
-  name it in `functions`.
-* **A cast can be a call.** `reg*` types and types outside the built-in plain
-  scalar set need a `functions` entry, under the type's name.
-
-The set lives in `crates/blastit-sqlpolicy/src/analysis.rs` (`SAFE_FUNCTIONS`),
-which is where to check it for the build you are running.
-
-## See also
-
-* [The plugin reference](pytest-plugin.md) — the report, field by field.
-* [Day-to-day life](../frameworks/day-to-day.md) — living with the manifest.
-* [`ARCHITECTURE.md` §6](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md#6-the-manifest) — the specification.
+`pg_catalog.` is dropped before the lookup. `unaccent` reads a rule file, so a
+grant must name it. The list is `SAFE_FUNCTIONS` in
+`crates/blastit-sqlpolicy/src/analysis.rs`.
