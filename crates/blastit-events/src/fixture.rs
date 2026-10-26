@@ -31,6 +31,7 @@ pub(crate) fn request_event() -> Event {
         .with_status(200)
         .with_timings(0.1, 18.4)
         .with_bytes(0, 5120)
+        .with_cost(18_400_000, Some(9_100_000))
         .with_remote_addr("203.0.113.7");
     Event::at(request_ts(), Component::Scheduler, EventKind::Request(info))
         .with_request_id("01JB9")

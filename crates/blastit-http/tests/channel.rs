@@ -305,12 +305,19 @@ async fn a_server_keeps_serving_after_a_client_misbehaves() {
 #[tokio::test]
 async fn the_server_hands_out_its_configuration_and_channel_state() {
     let mut rig = Rig::new(HttpConfig {
-        trust_forwarded: false,
+        client_ip: blastit_frame::ClientIpConfig::new("x-forwarded-for", &[] as &[&str]).unwrap(),
         server_port: 1234,
         ..HttpConfig::default()
     });
     assert_eq!(rig.server.config().server_port, 1234);
-    assert!(!rig.server.config().trust_forwarded);
+    assert!(
+        !rig.server
+            .config()
+            .client_ip
+            .trusted
+            .contains(&"203.0.113.7".parse().unwrap()),
+        "nothing is trusted when the list is empty"
+    );
     assert_eq!(rig.server.limits(), rig.server.config().frame_limits);
     assert!(!rig.server.is_closed());
 

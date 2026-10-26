@@ -168,7 +168,7 @@ fn a_response_larger_than_the_window_waits_for_credit() {
         assert_eq!(id, 1);
         match frame {
             Frame::RespBody(chunk) => rest += chunk.len(),
-            Frame::RespEnd => break,
+            Frame::RespEnd | Frame::RespEndCost { .. } => break,
             other => panic!("unexpected frame {other:?}"),
         }
     }
@@ -230,7 +230,7 @@ fn the_io_thread_keeps_serving_while_a_request_waits_for_credit() {
         assert_eq!(id, 1);
         match frame {
             Frame::RespBody(chunk) => rest += chunk.len(),
-            Frame::RespEnd => break,
+            Frame::RespEnd | Frame::RespEndCost { .. } => break,
             other => panic!("unexpected frame {other:?}"),
         }
     }

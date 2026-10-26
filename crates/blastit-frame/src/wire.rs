@@ -37,6 +37,7 @@ pub(crate) trait Sink {
     fn put_u8(&mut self, value: u8);
     fn put_u16(&mut self, value: u16);
     fn put_u32(&mut self, value: u32);
+    fn put_u64(&mut self, value: u64);
     /// Write `bytes` without any length prefix.
     fn put_raw(&mut self, bytes: &[u8]);
     /// Write `bytes` prefixed by their `u32` length.
@@ -64,6 +65,10 @@ impl Sink for Vec<u8> {
         self.extend_from_slice(&value.to_le_bytes());
     }
 
+    fn put_u64(&mut self, value: u64) {
+        self.extend_from_slice(&value.to_le_bytes());
+    }
+
     fn put_raw(&mut self, bytes: &[u8]) {
         self.extend_from_slice(bytes);
     }
@@ -83,6 +88,10 @@ impl Sink for Counter {
 
     fn put_u32(&mut self, _value: u32) {
         self.0 += 4;
+    }
+
+    fn put_u64(&mut self, _value: u64) {
+        self.0 += 8;
     }
 
     fn put_raw(&mut self, bytes: &[u8]) {
@@ -132,6 +141,13 @@ impl<'a> Reader<'a> {
     pub(crate) fn u32(&mut self, field: &'static str) -> Result<u32, FrameError> {
         let bytes = self.take(4, field)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    pub(crate) fn u64(&mut self, field: &'static str) -> Result<u64, FrameError> {
+        let bytes = self.take(8, field)?;
+        Ok(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
     }
 
     pub(crate) fn i32(&mut self, field: &'static str) -> Result<i32, FrameError> {

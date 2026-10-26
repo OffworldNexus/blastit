@@ -311,6 +311,7 @@ where
             scheme: head.scheme,
             server_name: head.server_name.clone(),
             server_port: self.cfg.server_port,
+            peer_addr: head.peer_addr.clone(),
         };
         // A head that does not fit one frame cannot be forwarded at all.
         // Checking here, rather than letting the writer task discover it, keeps

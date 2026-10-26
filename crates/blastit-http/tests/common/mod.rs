@@ -632,4 +632,20 @@ impl Harness {
             task,
         }
     }
+
+    /// Start a front end and open one connection accepted from `peer`.
+    ///
+    /// The peer address is what the trust decision is made on (D5), so a test
+    /// that wants a header believed — or disbelieved — says where the request
+    /// came from.
+    pub fn start_from(cfg: HttpConfig, peer: &str) -> Self {
+        let rig = Rig::new(cfg);
+        let (client, task) = rig.connect_from(peer);
+        Self {
+            client,
+            scheduler: rig.scheduler,
+            events: rig.events,
+            task,
+        }
+    }
 }

@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use blastit_frame::{INITIAL_WINDOW, Limits, MAX_FRAME_DEFAULT};
+use blastit_frame::{ClientIpConfig, INITIAL_WINDOW, Limits, MAX_FRAME_DEFAULT};
 
 /// One mebibyte, spelled out so the defaults read like §8.2's table.
 const KIB: usize = 1024;
@@ -16,8 +16,10 @@ const MIB: u64 = 1024 * 1024;
 ///
 /// The [`Default`] is the §8.2 column: `BLASTIT_MAX_HEADER_BYTES=64 KiB`,
 /// `BLASTIT_MAX_BODY_BYTES=100 MiB`, `BLASTIT_HEADER_TIMEOUT=10s`,
-/// `BLASTIT_KEEPALIVE_TIMEOUT=75s`, `BLASTIT_TRUST_FORWARDED=1`,
-/// `BLASTIT_FRAME_MAX=1 MiB` and `PORT=8080`.
+/// `BLASTIT_KEEPALIVE_TIMEOUT=75s`,
+/// `BLASTIT_CLIENT_IP_HEADER=x-forwarded-for` with
+/// `BLASTIT_TRUSTED_PROXIES=127.0.0.1,::1`, `BLASTIT_FRAME_MAX=1 MiB` and
+/// `PORT=8080`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpConfig {
     /// Largest request head (request line plus headers), in bytes.
@@ -38,11 +40,14 @@ pub struct HttpConfig {
     ///
     /// The same idle bound applies to a request body that stops arriving.
     pub keepalive_timeout: Duration,
-    /// Whether `X-Forwarded-For` and `X-Forwarded-Proto` are believed.
+    /// How the client address is resolved from the peer and the headers (D5).
     ///
-    /// They are only as trustworthy as the load balancer that writes them, so
-    /// this must stay off when the front end is reachable directly.
-    pub trust_forwarded: bool,
+    /// `BLASTIT_CLIENT_IP_HEADER` (default `x-forwarded-for`) is honoured only
+    /// when the socket peer is in `BLASTIT_TRUSTED_PROXIES` (default
+    /// `127.0.0.1,::1`); the same trust check covers `X-Forwarded-Proto`. This
+    /// is the one resolver the scheduler uses too, so the address the app sees
+    /// as `REMOTE_ADDR` and the address fair queuing keys on are the same.
+    pub client_ip: ClientIpConfig,
     /// Frame size limit of `http.chan`, from `BLASTIT_FRAME_MAX`.
     pub frame_limits: Limits,
     /// `SERVER_PORT` as the app sees it: the port the load balancer published,
@@ -80,7 +85,7 @@ impl Default for HttpConfig {
             max_body_bytes: 100 * MIB,
             header_timeout: Duration::from_secs(10),
             keepalive_timeout: Duration::from_secs(75),
-            trust_forwarded: true,
+            client_ip: ClientIpConfig::default(),
             frame_limits: Limits::default(),
             server_port: 8080,
             stream_buffer_bytes: INITIAL_WINDOW as usize + MAX_FRAME_DEFAULT,
@@ -108,7 +113,12 @@ mod tests {
         );
         assert_eq!(cfg.max_connections, 1024);
         assert_eq!(cfg.body_timeout, Duration::from_secs(600));
-        assert!(cfg.trust_forwarded, "§8.2 defaults trust_forwarded to 1");
+        assert_eq!(
+            cfg.client_ip,
+            ClientIpConfig::default(),
+            "§8.2 defaults the client-IP pair to localhost"
+        );
+        assert_eq!(cfg.client_ip.header, "x-forwarded-for");
         assert_eq!(cfg.frame_limits, Limits::default());
         assert_eq!(cfg.server_port, 8080);
     }

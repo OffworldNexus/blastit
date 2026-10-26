@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use blastit_frame::{Frame, RespHead};
+use blastit_frame::{Frame, RequestCost, RespHead};
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyString, PyTuple};
@@ -18,6 +18,20 @@ struct PendingHead {
     status: u16,
     reason: Vec<u8>,
     headers: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// The frame that ends a response: `RESP_END`, or the form that carries what
+/// the request cost the view (D5).
+///
+/// The cost rides on the frame that already ends the response rather than on a
+/// frame of its own, so the scheduler has the number at exactly the moment the
+/// resource it is charging for was released, and a view that cannot measure
+/// anything still ends the response the way it always did.
+fn end_frame(cost: Option<RequestCost>) -> Frame {
+    match cost {
+        Some(cost) => Frame::RespEndCost { cost },
+        None => Frame::RespEnd,
+    }
 }
 
 /// Whether a response head exists, and whether it has gone out.
@@ -125,8 +139,19 @@ impl Response {
     }
 
     /// Finish a response normally: flush the head if the body was empty, then
-    /// `RESP_END`.
-    pub(crate) fn finish(&self, py: Python<'_>) -> Result<(), RespError> {
+    /// `RESP_END` — or `RESP_END_COST` when the caller measured what the
+    /// request cost (D5).
+    ///
+    /// `cost` is the request thread's own measurement of `serve_request` — the
+    /// WSGI call through the iterable's `close()`, and the frames written back
+    /// — and it is the last frame of a response that was answered at all. It is
+    /// deliberately not kept here: the scheduler treats it as untrusted and
+    /// clamps it.
+    pub(crate) fn finish(
+        &self,
+        py: Python<'_>,
+        cost: Option<RequestCost>,
+    ) -> Result<(), RespError> {
         if self.state.output_closed() {
             return Ok(());
         }
@@ -137,14 +162,18 @@ impl Response {
             return Ok(());
         }
         self.flush_head(py)?;
-        self.send_frame(py, Frame::RespEnd)
+        self.send_frame(py, end_frame(cost))
     }
 
     /// Answer an application that failed before its head was sent.
     ///
     /// A short `500` takes the place of the response the application never
     /// produced; the traceback itself already went to stderr.
-    pub(crate) fn send_internal_error(&self, py: Python<'_>) -> Result<(), RespError> {
+    pub(crate) fn send_internal_error(
+        &self,
+        py: Python<'_>,
+        cost: Option<RequestCost>,
+    ) -> Result<(), RespError> {
         const BODY: &[u8] = b"Internal Server Error\n";
         if self.state.output_closed() || !self.state.claim_terminal() {
             return Ok(());
@@ -165,7 +194,7 @@ impl Response {
         };
         self.send_frame(py, Frame::RespHead(head))?;
         self.send_body(py, BODY)?;
-        self.send_frame(py, Frame::RespEnd)
+        self.send_frame(py, end_frame(cost))
     }
 
     /// Abandon a response whose head is already on the wire.
@@ -467,9 +496,9 @@ mod tests {
         // The I/O thread got there first: the response must stay quiet.
         assert!(state.claim_terminal());
         Python::attach(|py| {
-            assert!(resp.finish(py).is_ok());
+            assert!(resp.finish(py, None).is_ok());
             assert!(resp.abort(py, "late").is_ok());
-            assert!(resp.send_internal_error(py).is_ok());
+            assert!(resp.send_internal_error(py, None).is_ok());
             assert!(resp.write_chunk(py, b"body").is_ok());
         });
     }
@@ -481,7 +510,7 @@ mod tests {
         let state = RequestState::new();
         let resp = Response::new(writer, 1, state);
         Python::attach(|py| {
-            assert!(matches!(resp.finish(py), Err(RespError::NotStarted)));
+            assert!(matches!(resp.finish(py, None), Err(RespError::NotStarted)));
             assert!(matches!(
                 resp.write_chunk(py, b"body"),
                 Err(RespError::NotStarted)

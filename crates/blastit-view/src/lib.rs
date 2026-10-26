@@ -39,6 +39,14 @@
 //!   the iterable's `close()`. `DONE` is sent after that, exactly once per
 //!   `REQ_HEAD`, with the GIL released again — it is what releases the
 //!   scheduler's worker slot, and it must not wait for Python.
+//! * The request thread is the only place that can measure what a request
+//!   cost, so it does (D5): the wall time of `serve_request` for that request —
+//!   the WSGI call, the iteration of its iterable, the iterable's `close()` and
+//!   the frames written back — and its own `CLOCK_THREAD_CPUTIME_ID` over the
+//!   same span, both reported in the response's final frame
+//!   (`RESP_END_COST`; the CPU time is absent, not zero, when the interpreter
+//!   has no thread clock). The scheduler, not the view, decides what to do with
+//!   the numbers.
 //! * One writer owns the channel's write side, one frame at a time, so frames
 //!   from concurrent requests never interleave mid-frame and no sender waits
 //!   behind another stream's body.
@@ -158,13 +166,33 @@ pub fn serve(
     app: Py<PyAny>,
     cfg: ViewConfig,
 ) -> Result<(), ViewError> {
+    // D5: the thread-CPU clock is resolved here, while the interpreter is
+    // being held for the fork, and not per request.
+    let clock = thread_clock(py);
     // The caller may be holding the GIL (init is, §4); nothing below needs it,
     // and the request threads do.
-    py.detach(move || serve_detached(chan, app, cfg))
+    py.detach(move || serve_detached(chan, app, cfg, clock))
+}
+
+/// `time.thread_time_ns`, the interpreter's name for
+/// `CLOCK_THREAD_CPUTIME_ID` (D5).
+///
+/// The request thread measures its own CPU time with it. It is a plain Python
+/// callable from the standard library, so measuring costs no new dependency and
+/// no new syscall wrapper; `None` when the interpreter does not have it, in
+/// which case views report no CPU time at all.
+fn thread_clock(py: Python<'_>) -> Option<Py<PyAny>> {
+    let module = py.import("time").ok()?;
+    module.getattr("thread_time_ns").ok().map(Bound::unbind)
 }
 
 /// The body of [`serve`], with the GIL released.
-fn serve_detached(chan: UnixStream, app: Py<PyAny>, cfg: ViewConfig) -> Result<(), ViewError> {
+fn serve_detached(
+    chan: UnixStream,
+    app: Py<PyAny>,
+    cfg: ViewConfig,
+    clock: Option<Py<PyAny>>,
+) -> Result<(), ViewError> {
     cfg.validate().map_err(ViewError::Config)?;
     let limits = cfg.frame_limits;
     let mut chan = chan;
@@ -178,6 +206,7 @@ fn serve_detached(chan: UnixStream, app: Py<PyAny>, cfg: ViewConfig) -> Result<(
             app,
             route_name: cfg.route_name,
             script_name: cfg.script_name,
+            clock,
         }),
         registry: Arc::new(Mutex::new(Registry {
             live: HashMap::new(),
