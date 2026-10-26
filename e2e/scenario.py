@@ -172,7 +172,7 @@ def main():
     check(status == 200, "the debug route answers the capability probe")
     if under_blastit:
         check(facts.get("route") == "debug", "the probe ran in the debug route's process")
-        for field in ("inheritable", "permitted", "effective", "ambient"):
+        for field in ("inheritable", "permitted", "effective", "bounding", "ambient"):
             check(
                 facts.get(field) == "0000000000000000",
                 f"a view holds no {field} capability ({facts.get(field)})",

@@ -383,9 +383,10 @@ pub struct Held {
     pub mode: PrivilegeMode,
     /// The capabilities `init` holds in its permitted set, `cap_...` names.
     ///
-    /// Empty in [`PrivilegeMode::Root`] when the process is a plain root: the
-    /// interesting set is the container's, and the event does not guess it. A
-    /// *root* process that was also given capabilities reports them.
+    /// Empty in [`PrivilegeMode::Root`]: the interesting set is then the
+    /// container's, which §10 documents, so [`detect`] does not guess it from
+    /// the process's own — a root process's permitted set is the container's
+    /// bounding set intersected with what the file it started from had.
     pub capabilities: Vec<&'static str>,
 }
 

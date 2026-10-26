@@ -293,11 +293,19 @@ def droplet_image(args):
     return "ubuntu-24-04-x64"
 
 
-def ship_checkout(ssh):
-    """`git archive HEAD` into `/root/blastit` on the droplet."""
+def require_clean():
+    """The droplet run ships `git archive HEAD`, so HEAD has to be the whole
+    story."""
     dirty = run(["git", "status", "--porcelain"], cwd=ROOT).stdout.strip()
     if dirty:
-        raise RuntimeError("the worktree is dirty: commit it before the droplet run")
+        raise RuntimeError(
+            "the worktree is dirty, and the droplet run ships `git archive HEAD`: "
+            f"commit first\n{dirty}"
+        )
+
+
+def ship_checkout(ssh):
+    """`git archive HEAD` into `/root/blastit` on the droplet."""
     with tempfile.TemporaryDirectory() as tmp:
         archive = os.path.join(tmp, "blastit.tar")
         with open(archive, "wb") as out:
@@ -313,6 +321,7 @@ def ship_checkout(ssh):
 
 def droplet(args):
     name, key_name = names(args)
+    require_clean()
     key = generate_key(key_name)
     password = "e2e-" + secrets.token_hex(16)
     rc = 1
@@ -325,10 +334,11 @@ def droplet(args):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
             f.write(cloud_init())
             user_data = f.name
-        log(f"creating the droplet {name} in {REGION} ({droplet_image(args)}, {args.droplet_size})")
+        image = droplet_image(args)
+        log(f"creating the droplet {name} in {REGION} ({image}, {args.droplet_size})")
         try:
             created = doctl("compute", "droplet", "create", name, "--region", REGION,
-                            "--size", args.droplet_size, "--image", droplet_image(args),
+                            "--size", args.droplet_size, "--image", image,
                             "--ssh-keys", fingerprint, "--tag-name", TAG,
                             "--user-data-file", user_data, "--wait")
         finally:
@@ -452,14 +462,21 @@ def destroy(name, key_name):
 
 
 def verify_gone(name, key_name):
-    """Say, loudly, whether anything of this run is left behind."""
-    left = [d["name"] for d in doctl("compute", "droplet", "list", "--tag-name", TAG) or []
-            if d.get("name") == name]
-    keys = [k["name"] for k in doctl("compute", "ssh-key", "list") or [] if k.get("name") == key_name]
-    if left or keys:
-        print(f"!! still there after cleanup: droplets={left} keys={keys}", flush=True)
-    else:
-        log(f"verified: neither the droplet nor the key named {name} exists")
+    """Say, loudly, whether anything of this run is left behind.
+
+    DigitalOcean's list calls are eventually consistent, so a deletion is
+    confirmed over a few seconds rather than once.
+    """
+    for attempt in range(6):
+        left = [d["name"] for d in doctl("compute", "droplet", "list", "--tag-name", TAG) or []
+                if d.get("name") == name]
+        keys = [k["name"] for k in doctl("compute", "ssh-key", "list") or []
+                if k.get("name") == key_name]
+        if not left and not keys:
+            log(f"verified: neither the droplet nor the key named {name} exists")
+            return
+        time.sleep(2 + attempt)
+    print(f"!! still there after cleanup: droplets={left} keys={keys}", flush=True)
 
 
 def janitor(minutes):

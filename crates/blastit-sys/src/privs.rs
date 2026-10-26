@@ -43,6 +43,11 @@ use crate::error::Error;
 /// Note for callers: `setresgid` and `setresuid` **clear
 /// `PR_SET_PDEATHSIG`**, so [`harden_child`] has to run *after* this, not
 /// before. See [`harden_child`] for the full story.
+///
+/// It also allocates: the capability sets are read back from
+/// `/proc/self/status` to check them, before and after the uid change. The
+/// contract is the crate's usual one — it is written for a child of a
+/// deliberately single-threaded process (§2.1).
 pub fn drop_privileges(uid: u32) -> io::Result<()> {
     if uid == 0 {
         return Err(Error::PrivilegeCheck {

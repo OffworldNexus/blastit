@@ -20,7 +20,8 @@ run `e2e/rootless/compose.yml`, drive `e2e/scenario.py` over HTTP and check
   `"privilege": "capabilities"` and list the capabilities init holds;
 * every `process.spawned` has a uid of its own, above `BLASTIT_UID_BASE`;
 * a view's `/debug/caps/` probe — `/proc/self/status`, read in the view —
-  reports `CapInh`/`CapPrm`/`CapEff`/`CapAmb` all zero and `NoNewPrivs: 1`.
+  reports `CapInh`/`CapPrm`/`CapEff`/`CapBnd`/`CapAmb` all zero and
+  `NoNewPrivs: 1`.
 
 ## The capabilities, and why each one is there
 
