@@ -48,14 +48,18 @@ ABSOLUTE = re.compile(r"(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//|/|#|$)")
 
 # Every place a target can hide in this README: an inline link or image
 # (`[text](target)`, `![alt](target)`), a reference definition
-# (`[label]: target`), and the raw HTML `src=`/`href=`.
+# (`[label]: target`), and the raw HTML the banner needs — `src=`, `href=`, and
+# `srcset=`, whose value is a comma-separated list of candidates.
 LINK = re.compile(
     r"""(?P<lead>\]\(|^[ \t]*\[[^\]\n]*\]:[ \t]*|(?:src|href)=["'])(?P<target>[^"')\s>]+)""",
     re.MULTILINE,
 )
+SRCSET = re.compile(r"""(?P<lead>srcset=["'])(?P<candidates>[^"']*)""")
 
-# Anything left looking like `](relative)` after a rewrite is a bug here.
-STILL_RELATIVE = re.compile(r"\]\((?P<target>[^)\s]+)\)")
+# Anything left looking like a relative target after a rewrite is a bug here.
+STILL_RELATIVE = re.compile(
+    r"""\]\((?P<target>[^)\s]+)\)|(?:src|href)=["'](?P<attr>[^"'\s>]+)""",
+)
 
 FENCE = re.compile(r"^[ \t]*(?:```|~~~)")
 
@@ -86,8 +90,7 @@ def absolute(target: str, repo: str, ref: str) -> str | None:
 
 def rewrite(text: str, repo: str, ref: str) -> tuple[str, list[tuple[str, str]], list[str]]:
     """Returns the rewritten text, the links it made absolute, and anything it
-    could not (`](target)` with a relative target is the only shape it knows, and
-    the only shape the README uses)."""
+    could not — a relative target in a shape this does not know."""
     changed: list[tuple[str, str]] = []
     left: list[str] = []
 
@@ -97,6 +100,19 @@ def rewrite(text: str, repo: str, ref: str) -> tuple[str, list[tuple[str, str]],
             return match.group(0)
         changed.append((match.group("target"), url))
         return match.group("lead") + url
+
+    def replace_srcset(match: re.Match[str]) -> str:
+        # `srcset` is a list — `url 1x, url 2x` — so every candidate is a target
+        # of its own, and the descriptors (`2x`, `480w`) stay as they are.
+        candidates = []
+        for candidate in match.group("candidates").split(","):
+            url, _, descriptor = candidate.strip().partition(" ")
+            absolute_url = absolute(url, repo, ref)
+            if absolute_url is not None:
+                changed.append((url, absolute_url))
+                url = absolute_url
+            candidates.append(" ".join(part for part in (url, descriptor) if part))
+        return match.group("lead") + ", ".join(candidates)
 
     out: list[str] = []
     in_fence = False
@@ -109,12 +125,26 @@ def rewrite(text: str, repo: str, ref: str) -> tuple[str, list[tuple[str, str]],
             # Commands and TOML in a code block, not links: leave them alone.
             out.append(line)
             continue
-        line = LINK.sub(replace, line)
-        left.extend(
-            match.group("target") for match in STILL_RELATIVE.finditer(line) if not ABSOLUTE.match(match.group("target"))
-        )
+        line = SRCSET.sub(replace_srcset, LINK.sub(replace, line))
+        left.extend(relative_targets(line, repo, ref))
         out.append(line)
     return "".join(out), changed, left
+
+
+def relative_targets(line: str, repo: str, ref: str) -> list[str]:
+    """The targets in `line` that a renderer with no repository around it — PyPI
+    — would resolve to nothing: the ones that should have been rewritten."""
+    found: list[str] = []
+    for match in STILL_RELATIVE.finditer(line):
+        target = match.group("target") or match.group("attr")
+        if absolute(target, repo, ref) is not None:
+            found.append(target)
+    for match in SRCSET.finditer(line):
+        for candidate in match.group("candidates").split(","):
+            target = candidate.strip().partition(" ")[0]
+            if target and absolute(target, repo, ref) is not None:
+                found.append(target)
+    return found
 
 
 def main(argv: list[str] | None = None) -> int:
