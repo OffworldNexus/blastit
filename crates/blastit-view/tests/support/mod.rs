@@ -17,6 +17,7 @@ use std::os::unix::net::UnixStream;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use blastit_frame::RequestCost;
 use blastit_frame::{
     Decoder, DoneOutcome, Frame, INITIAL_WINDOW, Limits, ReqHead, RespHead, Scheme, encode,
 };
@@ -237,7 +238,9 @@ impl Harness {
             assert_eq!(frame_id, id, "response frame for another request");
             match frame {
                 Frame::RespBody(chunk) => body.extend_from_slice(&chunk),
-                Frame::RespEnd => {
+                // D5: the final frame of a response the view measured is
+                // `RESP_END_COST`; both forms end the response.
+                Frame::RespEnd | Frame::RespEndCost { .. } => {
                     return Response {
                         head,
                         body,
@@ -364,6 +367,53 @@ pub enum End {
     Abort(String),
 }
 
+/// Read one request's response, and report the cost it reported (D5).
+///
+/// The tests that check the *cost* itself use this; everything else only cares
+/// that the response ended.
+pub fn read_response_and_cost(peer: &mut Harness, id: u32) -> (Response, Option<RequestCost>) {
+    let (start_id, frame) = peer.next_response_frame();
+    assert_eq!(start_id, id, "response head for another request");
+    let Frame::RespHead(head) = frame else {
+        panic!("expected RESP_HEAD, got {frame:?}");
+    };
+    let mut body = Vec::new();
+    let mut cost = None;
+    loop {
+        let (frame_id, frame) = peer.next_response_frame();
+        assert_eq!(frame_id, id, "response frame for another request");
+        match frame {
+            Frame::RespBody(chunk) => body.extend_from_slice(&chunk),
+            Frame::RespEnd => break,
+            Frame::RespEndCost { cost: reported } => {
+                cost = Some(reported);
+                break;
+            }
+            Frame::RespAbort { reason } => {
+                return (
+                    Response {
+                        head,
+                        body,
+                        end: End::Abort(reason),
+                        outcome: DoneOutcome::default(),
+                    },
+                    None,
+                );
+            }
+            other => panic!("unexpected frame in a response: {other:?}"),
+        }
+    }
+    (
+        Response {
+            head,
+            body,
+            end: End::End,
+            outcome: DoneOutcome::default(),
+        },
+        cost,
+    )
+}
+
 impl Response {
     /// The status of the head.
     pub fn status(&self) -> u16 {
@@ -416,6 +466,7 @@ pub fn head(method: &str, target: &str, headers: Vec<(&str, &str)>) -> ReqHead {
         scheme: Scheme::Http,
         server_name: "view.test".to_string(),
         server_port: 80,
+        peer_addr: "203.0.113.7:51000".to_string(),
     }
 }
 

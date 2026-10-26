@@ -4,7 +4,7 @@
 //! way on every machine.
 
 use crate::ctl::{Ctl, ExitStatus};
-use crate::frame::{DoneOutcome, Frame, ReqHead, RespHead, Scheme};
+use crate::frame::{DoneOutcome, Frame, ReqHead, RequestCost, RespHead, Scheme};
 
 /// A splitmix64 generator, used for chunk sizes and for mutated payloads.
 #[derive(Debug, Clone)]
@@ -32,9 +32,10 @@ impl Rng {
 }
 
 /// Every type code this crate defines, for exhaustive tests.
-pub fn all_codes() -> [u8; 15] {
+pub fn all_codes() -> [u8; 17] {
     [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x40, 0x41, 0x42, 0x43, 0x44,
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x40, 0x41, 0x42,
+        0x43, 0x44,
     ]
 }
 
@@ -75,10 +76,11 @@ pub fn client_exchange() -> (Vec<u8>, Vec<(u32, Frame)>) {
         method: b"GET".to_vec(),
         target: b"/x".to_vec(),
         headers: vec![(b"Host".to_vec(), b"example.com".to_vec())],
-        remote_addr: "127.0.0.1:5000".to_string(),
+        remote_addr: "127.0.0.1".to_string(),
         scheme: Scheme::Http,
         server_name: "example.com".to_string(),
         server_port: 80,
+        peer_addr: "127.0.0.1:5000".to_string(),
     };
     let frames = vec![
         (1, Frame::ReqHead(head)),
@@ -106,6 +108,18 @@ pub fn client_exchange() -> (Vec<u8>, Vec<(u32, Frame)>) {
             1,
             Frame::Done {
                 outcome: DoneOutcome::Completed,
+            },
+        ),
+        (
+            1,
+            Frame::RespEndCost {
+                cost: RequestCost::new(12_500_000, Some(3_000_000)),
+            },
+        ),
+        (
+            2,
+            Frame::RespEndCost {
+                cost: RequestCost::new(0, Some(0)),
             },
         ),
         (

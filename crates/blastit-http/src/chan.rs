@@ -619,6 +619,7 @@ mod tests {
             target: target.as_bytes().to_vec(),
             headers: Vec::new(),
             remote_addr: "203.0.113.7:1".to_string(),
+            peer_addr: "10.244.3.9:5151".to_string(),
             scheme: Scheme::Http,
             server_name: "localhost".to_string(),
             server_port: 8080,

@@ -63,14 +63,18 @@
 mod config;
 mod ctl;
 mod error;
+mod fair;
 mod path;
 mod route;
 mod scheduler;
 mod task;
 
 pub use crate::config::{
-    MEMORY_CHECK_INTERVAL, MIN_MEM_RESERVE, MemoryProbe, SPAWN_BACKOFF, SchedulerConfig,
-    derived_view_cap, mem_reserve,
+    FAIR_GC_INTERVAL, FQ_BURST_DEFAULT, FQ_DEBT_TTL_DEFAULT, FQ_INNER_COOKIES_DEFAULT,
+    FQ_INNER_HEADERS_DEFAULT, FQ_INNER_MAX_DEFAULT, FQ_INNER_MAX_PER_OUTER_DEFAULT,
+    FQ_MAX_DEBT_DEFAULT, FQ_OUTER_MAX_DEFAULT, FQ_OUTER_PREFIX_V4_DEFAULT,
+    FQ_OUTER_PREFIX_V6_DEFAULT, FairConfig, MEMORY_CHECK_INTERVAL, MIN_MEM_RESERVE, MemoryProbe,
+    SPAWN_BACKOFF, SchedulerConfig, derived_view_cap, mem_reserve,
 };
 pub use crate::ctl::{CtlChannel, UnixCtl};
 pub use crate::error::SchedulerError;

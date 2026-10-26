@@ -8,7 +8,12 @@ SQL.
 import contextlib
 import functools
 import json
+import os
+import shlex
+import shutil
+import tempfile
 import threading
+from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
@@ -108,6 +113,103 @@ class TestManifestProxies:
     def test_broken_toml_is_a_usage_error(self) -> None:
         with pytest.raises(pytest.UsageError):
             plugin._postgresql_proxies("version = ")
+
+
+class TestLiveServerManifest:
+    """What the live server needs from the manifest, read without Django (D3c)."""
+
+    def manifest(self, tmp_path: Path, text: str) -> Path:
+        path = tmp_path / "blastit.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_a_url_input_is_the_variable_to_point_at_the_test_database(
+        self, tmp_path: Path
+    ) -> None:
+        path = self.manifest(
+            tmp_path,
+            "version = 1\n"
+            "[proxy.db]\n"
+            'protocol = "postgresql"\n'
+            'input = { url = "DATABASE_URL" }\n',
+        )
+        assert plugin._postgresql_url_variable(path) == "DATABASE_URL"
+
+    def test_a_proxy_taking_its_upstream_in_pieces_has_no_url_variable(
+        self, tmp_path: Path
+    ) -> None:
+        path = self.manifest(
+            tmp_path,
+            "version = 1\n"
+            "[proxy.db]\n"
+            'protocol = "postgresql"\n'
+            'input = { host = "DB_HOST", database = "DB_NAME" }\n',
+        )
+        assert plugin._postgresql_url_variable(path) is None
+
+    def test_a_manifest_without_a_postgresql_proxy_has_no_url_variable(
+        self, tmp_path: Path
+    ) -> None:
+        path = self.manifest(tmp_path, "version = 1\n")
+        assert plugin._postgresql_url_variable(path) is None
+
+
+class TestLiveObservations:
+    """A live server's log, folded into the observations (D3c)."""
+
+    LOG = "\n".join(
+        [
+            '2026-10-25T14:02:11.384Z app[web.1]: {"event":"request","method":"GET",'
+            '"path":"/_blastit/health","route":null,"status":200}',
+            '{"event":"request","method":"GET","path":"/notes/","route":"notes","status":200}',
+            '{"event":"sql.denied","route":"notes","proxy":"db",'
+            '"sql":"SELECT \\"notes\\".\\"body\\" FROM \\"notes\\" WHERE \\"notes\\".\\"id\\" = $?",'
+            '"reason":"select on notes.body not granted"}',
+            '{"event":"request","method":"GET","path":"/oops/","route":null,"status":404}',
+        ]
+    )
+
+    def test_a_live_request_carries_its_own_proxy_and_the_live_source(self) -> None:
+        assert plugin._live_request("GET", "/notes/", "tests/test_x.py::test_it", []) == {
+            "method": "GET",
+            "path_info": "/notes/",
+            "nodeid": "tests/test_x.py::test_it",
+            "transaction_control": False,
+            "statements": [],
+            "egress": [],
+            "source": "live",
+        }
+
+    def test_the_log_becomes_requests_with_the_denials_attached(self) -> None:
+        session = _FakeSession()
+        plugin._Session.record_live(
+            session, self.LOG, "tests/test_x.py::test_it", (plugin.HEALTH_PATH,)
+        )
+        assert len(session.live) == 2, "the health probe is not traffic"
+        unrouted, routed = session.live[0], session.live[1]
+        assert unrouted["path_info"] == "/oops/", "the 404 blastit answered itself"
+        assert routed["path_info"] == "/notes/"
+        assert routed["nodeid"] == "tests/test_x.py::test_it"
+        statements = routed["statements"]
+        assert len(statements) == 1, statements
+        assert statements[0]["proxy"] == "db"
+        # The log's text is normalised; what the extension gets is its shape, so
+        # the table-grant analysis has something to parse (`blastit.logs`).
+        assert statements[0]["sql"] == 'SELECT "notes"."body" FROM "notes" WHERE "notes"."id" = $1'
+
+    def test_the_health_path_the_fixture_polls_is_not_traffic(self) -> None:
+        session = _FakeSession()
+        plugin._Session.record_live(
+            session, self.LOG, None, (plugin.HEALTH_PATH,)
+        )
+        assert [entry["path_info"] for entry in session.live] == ["/oops/", "/notes/"]
+
+    def test_a_denial_with_no_request_event_is_a_problem(self) -> None:
+        log = '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SELECT 1"}'
+        session = _FakeSession()
+        plugin._Session.record_live(session, log, None, ())
+        assert session.live == []
+        assert session.problems and "notes" in session.problems[0], session.problems
 
 
 class TestStatementCapture:
@@ -254,6 +356,9 @@ class _FakeSession:
         self.warnings: list[str] = []
         self.reported_bindings: set[str] = set()
         self.lock = threading.Lock()
+        # What a live server's log folds into (D3c).
+        self.live: list[dict[str, Any]] = []
+        self.problems: list[str] = []
 
     def record_connection_setup(self, alias: str | None, sql: str) -> None:
         self.setup.append((alias, sql))
@@ -333,3 +438,179 @@ class TestObservationDocument:
         context = plugin._RequestContext()
         context.add_egress("AF_INET", "redis", 6379)
         assert context.egress == [("AF_INET", "redis", 6379)]
+
+
+class TestTheLiveServerFilesystem:
+    """What the live server is served from, without touching what is not ours (D3c)."""
+
+    def make_project(self, root: Path) -> Path:
+        project = root / "project"
+        project.mkdir()
+        (project / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (project / "sub").mkdir()
+        (project / "sub" / "mod.py").write_text("y = 2\n", encoding="utf-8")
+        (project / ".git").mkdir()
+        (project / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+        (project / "__pycache__").mkdir()
+        return project
+
+    def test_a_traversable_project_is_served_where_it_is(self) -> None:
+        # A directory under `/tmp` itself: pytest's own `tmp_path` sits under a
+        # `0700` basetemp, which is exactly the case that has to be copied.
+        root = Path(tempfile.mkdtemp(prefix="blastit-live-test-", dir="/tmp"))
+        try:
+            project = self.make_project(root)
+            root.chmod(0o755)
+            project.chmod(0o755)
+            (project / "sub").chmod(0o755)
+            assert plugin._traversable(project) is True
+            served, temporary = plugin._serveable_project(project)
+            assert served == project, "no copy is made when the views can read it"
+            assert temporary is None
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_a_private_project_is_copied_and_nothing_is_loosened(self, tmp_path: Path) -> None:
+        """pytest's `tmp_path` is `0700`: the views could not read the code at all."""
+        project = self.make_project(tmp_path)
+        assert plugin._traversable(project) is False
+        before = {path: path.stat().st_mode for path in [project, tmp_path, project / "sub"]}
+        served, temporary = plugin._serveable_project(project)
+        assert served != project
+        assert temporary is not None and temporary.is_dir()
+        assert plugin._traversable(served) is True, "the copy is readable by the view uids"
+        assert (served / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+        assert (served / "sub" / "mod.py").is_file()
+        assert not (served / ".git").exists(), "a checkout is not what a server reads"
+        assert not (served / "__pycache__").exists()
+        after = {path: path.stat().st_mode for path in before}
+        assert after == before, "not one mode of the project or its parents changed"
+
+    def test_the_copy_is_removed_by_the_fixture(self, tmp_path: Path) -> None:
+        """Teardown removes it; the modes it took are the temporary directory's."""
+        project = self.make_project(tmp_path)
+        served, temporary = plugin._serveable_project(project)
+        assert temporary is not None
+        assert temporary.stat().st_mode & 0o001, "the copy's root stays traversable"
+        shutil.rmtree(temporary)
+        assert not temporary.exists()
+        assert served.parent.exists() is False
+
+    def test_the_environment_file_is_readable_by_its_owner_only(self, tmp_path: Path) -> None:
+        url = "postgresql://user:it's-a-secret@host/db"
+        path = tmp_path / "blastit-live.env"
+        plugin._write_environment(path, {"DATABASE_URL": url})
+        assert path.stat().st_mode & 0o777 == 0o600, "only its owner and root may read it"
+        assert path.read_text(encoding="utf-8") == f"export DATABASE_URL={shlex.quote(url)}\n"
+
+    def test_only_bytecode_this_user_does_not_own_is_removed(self, tmp_path: Path) -> None:
+        project = self.make_project(tmp_path)
+        cache = project / "__pycache__"
+        cache.mkdir(exist_ok=True)
+        plugin._clean_bytecode([], project)
+        assert cache.is_dir(), "a cache this run wrote is this run's, not root's"
+
+    def test_the_find_only_looks_at_what_this_user_does_not_own(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[list[str]] = []
+
+        def run(command: list[str], **kwargs: Any) -> Any:
+            seen.append(command)
+            return None
+
+        monkeypatch.setattr(plugin.subprocess, "run", run)
+        plugin._clean_bytecode(["/usr/bin/sudo", "-n"], tmp_path / "project")
+        assert seen == [
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "find",
+                str(tmp_path / "project"),
+                "-name",
+                "__pycache__",
+                "-type",
+                "d",
+                "!",
+                "-uid",
+                str(os.getuid()),
+                "-exec",
+                "rm",
+                "-rf",
+                "--",
+                "{}",
+                "+",
+            ]
+        ]
+
+
+class TestLiveServerPrivileges:
+    """When blastit cannot run here, the fixture says so instead of failing (D3c)."""
+
+    def test_root_starts_it_directly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(plugin.os, "geteuid", lambda: 0)
+        assert plugin._live_server_prefix() == []
+
+    def test_passwordless_sudo_is_the_other_way(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(plugin.os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(plugin.shutil, "which", lambda name: "/usr/bin/sudo")
+        monkeypatch.setattr(
+            plugin.subprocess, "run", lambda *args, **kwargs: _Completed(0)
+        )
+        assert plugin._live_server_prefix() == ["/usr/bin/sudo", "-n"]
+
+    def test_sudo_that_wants_a_password_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(plugin.os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(plugin.shutil, "which", lambda name: "/usr/bin/sudo")
+        monkeypatch.setattr(
+            plugin.subprocess, "run", lambda *args, **kwargs: _Completed(1)
+        )
+        with pytest.raises(pytest.skip.Exception) as skipped:
+            plugin._live_server_prefix()
+        assert "root" in str(skipped.value) and "sudo" in str(skipped.value)
+
+    def test_no_root_and_no_sudo_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(plugin.os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(plugin.shutil, "which", lambda name: None)
+        with pytest.raises(pytest.skip.Exception) as skipped:
+            plugin._live_server_prefix()
+        assert "passwordless sudo" in str(skipped.value)
+
+
+class TestLiveAppSpec:
+    """Which WSGI callable the live server serves (D3c)."""
+
+    def test_the_option_wins(self) -> None:
+        config = _FakeConfig({"blastit_live_app": "myproject.wsgi:application"})
+        assert plugin._live_app_spec(config) == "myproject.wsgi:application"
+
+    def test_django_without_settings_is_a_skip_not_a_raise(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No Django configured at all: the fixture skips, it never breaks (D3c)."""
+        import django.conf
+
+        class Unconfigured:
+            def __getattr__(self, name: str) -> Any:
+                raise RuntimeError("settings are not configured")
+
+        monkeypatch.setattr(django.conf, "settings", Unconfigured())
+        monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+        assert plugin._live_app_spec(_FakeConfig({})) == ""
+
+
+class _Completed:
+    """A `subprocess.run` result with just a return code."""
+
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+
+
+class _FakeConfig:
+    """The two calls `_live_app_spec` makes on a pytest config."""
+
+    def __init__(self, options: dict[str, Any]) -> None:
+        self.options = options
+
+    def getoption(self, name: str) -> Any:
+        return self.options.get(name)

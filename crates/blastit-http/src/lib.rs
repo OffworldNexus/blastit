@@ -44,9 +44,10 @@
 //!   that is not HTTP/1.0 or 1.1, and a body over `max_body_bytes`. Every
 //!   refusal writes an `http.rejected` event (§8.1) and closes the connection.
 //! * **Normalise.** Hop-by-hop fields never cross a hop in either direction;
-//!   the client address and scheme come from `X-Forwarded-For` /
-//!   `X-Forwarded-Proto` only when [`HttpConfig::trust_forwarded`] is set;
-//!   `server_name` is `Host` without its port.
+//!   the client address comes from `BLASTIT_CLIENT_IP_HEADER` and the scheme
+//!   from `X-Forwarded-Proto`, each only when the socket peer is one of
+//!   [`HttpConfig::client_ip`]'s trusted proxies (D5: one resolver, shared with
+//!   the scheduler); `server_name` is `Host` without its port.
 //! * **Encode.** Status line, validated headers and `Content-Length`,
 //!   chunked or close-delimited framing, chosen here and not by the view — and
 //!   never a length on a 1xx or 204, which cannot have a body at all.

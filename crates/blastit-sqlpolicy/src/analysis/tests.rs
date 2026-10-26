@@ -1166,3 +1166,123 @@ fn the_pure_window_and_text_functions_are_safe() {
         );
     }
 }
+
+/// The class of a statement, and what it is called (D3c).
+///
+/// [`classify`] answers where [`analyze`] cannot: a tool that offers to write a
+/// grant into a manifest has to tell `SELECT … FROM pg_type` (which a `queries`
+/// entry may hold) from `SET ROLE …` (which it may not), and neither can be
+/// guessed at from the text.
+fn class_of(sql: &str) -> (StatementClass, String) {
+    let classified = classify(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    (classified.class(), classified.label().to_string())
+}
+
+#[test]
+fn the_four_kinds_a_table_grant_covers_are_plain() {
+    for (sql, class, label) in [
+        ("SELECT 1", StatementClass::Select, "SELECT"),
+        ("SELECT * FROM t", StatementClass::Select, "SELECT"),
+        ("VALUES (1)", StatementClass::Select, "SELECT"),
+        (
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            StatementClass::Select,
+            "SELECT",
+        ),
+        (
+            "WITH x AS (SELECT 1) UPDATE t SET a = 1 WHERE id IN (SELECT * FROM x)",
+            StatementClass::Update,
+            "UPDATE",
+        ),
+        (
+            "INSERT INTO t (a) VALUES (1)",
+            StatementClass::Insert,
+            "INSERT",
+        ),
+        ("UPDATE t SET a = 1", StatementClass::Update, "UPDATE"),
+        ("DELETE FROM t", StatementClass::Delete, "DELETE"),
+    ] {
+        let (kind, named) = class_of(sql);
+        assert_eq!(kind, class, "{sql}");
+        assert_eq!(named, label, "{sql}");
+        assert!(kind.is_plain(), "{sql}");
+    }
+}
+
+#[test]
+fn every_other_kind_is_not_plain() {
+    // The list a grant must refuse: DDL, the session commands, the transaction
+    // commands, and everything that is not a statement about rows.
+    for (sql, label) in [
+        ("SET TIME ZONE 'UTC'", "SET"),
+        ("SET ROLE admin", "SET"),
+        ("RESET ALL", "RESET"),
+        ("COPY t FROM STDIN", "COPY"),
+        ("DO $$ BEGIN END $$", "DO"),
+        ("CALL p()", "CALL"),
+        ("LOCK TABLE t", "LOCK"),
+        ("GRANT SELECT ON t TO x", "GRANT"),
+        ("REVOKE SELECT ON t FROM x", "REVOKE"),
+        ("ALTER TABLE t ADD COLUMN a int", "ALTER TABLE"),
+        ("CREATE TABLE t (a int)", "CREATE TABLE"),
+        ("CREATE INDEX i ON t (a)", "CREATE INDEX"),
+        ("DROP TABLE t", "DROP"),
+        ("TRUNCATE t", "TRUNCATE"),
+        ("VACUUM t", "VACUUM"),
+        ("LISTEN c", "LISTEN"),
+        ("NOTIFY c", "NOTIFY"),
+        ("BEGIN", "a transaction-control statement"),
+        ("COMMIT", "a transaction-control statement"),
+        ("SAVEPOINT s1", "a transaction-control statement"),
+        (
+            "MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DO NOTHING",
+            "MERGE",
+        ),
+        ("DECLARE c CURSOR FOR SELECT 1", "DECLARE CURSOR"),
+        ("FETCH c", "FETCH"),
+        ("CLOSE c", "CLOSE"),
+        ("EXPLAIN SELECT 1", "EXPLAIN"),
+        ("PREPARE p AS SELECT 1", "PREPARE"),
+        ("SHOW timezone", "SHOW"),
+        ("SELECT 1 INTO t2", "SELECT"),
+    ] {
+        let (kind, named) = class_of(sql);
+        assert_eq!(named, label, "{sql}");
+        if sql == "SELECT 1 INTO t2" {
+            // `SELECT … INTO` *is* a `SelectStmt` to the parser; the analysis is
+            // what refuses it (`INTO` creates a table). `classify` says what the
+            // statement is, not whether a table grant walks it.
+            assert_eq!(kind, StatementClass::Select, "{sql}");
+            continue;
+        }
+        assert_eq!(kind, StatementClass::Other, "{sql}");
+        assert!(!kind.is_plain(), "{sql}");
+    }
+}
+
+#[test]
+fn a_text_that_holds_more_than_one_statement_is_not_plain() {
+    // A grant is one statement, so a text that holds several is never plain —
+    // and the count is data, not an error, so a caller can say what to do.
+    let several = classify("SELECT 1; SELECT 2").expect("it parses");
+    assert_eq!(several.statements(), 2);
+    assert!(!several.is_plain());
+    assert_eq!(several.label(), "2 statements");
+    assert_eq!(classify("SELECT 1").expect("it parses").statements(), 1);
+    assert!(matches!(classify("  "), Err(AnalysisError::Empty)));
+    assert!(matches!(
+        classify("SELECT FROM"),
+        Err(AnalysisError::Syntax(_))
+    ));
+}
+
+#[test]
+fn a_system_catalogue_read_is_still_a_plain_select() {
+    // The analysis refuses it — a table grant must not name `pg_type` — but the
+    // *kind* is a `SELECT`, which is what an exact `queries` entry holds.
+    let sql = r#"SELECT "pg_type"."oid" FROM "pg_type""#;
+    assert!(analyze(sql).is_err());
+    let (kind, label) = class_of(sql);
+    assert_eq!((kind, label.as_str()), (StatementClass::Select, "SELECT"));
+    assert!(kind.is_plain());
+}

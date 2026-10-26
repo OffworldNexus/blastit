@@ -254,6 +254,12 @@ The options, when the defaults do not fit:
                                unrouted, needing transaction_control or egress,
                                not granted in every route, unreadable, or worth a
                                warning from the plugin itself
+--blastit-live-server          serve pytest-django's live_server through blastit
+                               itself, so real front-end traffic is checked
+                               against the manifest (needs root, or passwordless
+                               sudo)
+--blastit-live-app MODULE:ATTR  the WSGI callable that server serves (default:
+                               WSGI_APPLICATION, or <package>.wsgi:application)
 ```
 
 The plugin is inert unless you ask for it, and it needs
@@ -328,6 +334,11 @@ How to read it:
   grant fits a run of `VALUES (…)` rows (a single row is a shape of its own).
 * **`unused`** — grants that nothing matched. Either dead code, or a request
   your suite doesn't make yet.
+* **`unused_global`** — the same idea for the grants a **global** group
+  (`groups = […]` at the top level) hands to every route at once. A statement
+  such a group grants is not one route's grant, so counting it as unused per
+  route would repeat one dead grant once per route; it is reported here, once,
+  and only when no route matched it. Same for a global group's `tables` grant.
 * **`needs_transaction_control`** — the route ran `BEGIN`/`COMMIT` or a
   savepoint (a nested `transaction.atomic()`, or `ATOMIC_REQUESTS` on the
   alias) and the route's grant does not allow transaction control. Add
@@ -379,11 +390,93 @@ Two statements cannot be granted, and the report cannot hide it:
   (`DATABASES[...]["DISABLE_SERVER_SIDE_CURSORS"] = True`) or accept that they
   will be denied under blastit.
 
+### Front-end traffic, served by blastit itself
+
+The plugin sees the requests *your test process* makes. A suite that drives a
+live server — Playwright against `live_server`, a browser, `requests` to a URL —
+makes its traffic somewhere else: in a server process of its own, where the
+plugin cannot look, and where the paths nobody asserts on are exactly the ones
+that surprise a deployment. `blastit_live_server` closes that gap. It starts the
+real `blastit` binary on a free port, with your manifest and your *test*
+database, and hands you the URL:
+
+```python
+from urllib.request import urlopen
+
+
+def test_notes_page(blastit_live_server):
+    with urlopen(f"{blastit_live_server.url}/notes/") as response:
+        assert response.status == 200
+```
+
+Suite already written against `live_server`? Run it with
+`--blastit-live-server` and `live_server` *is* blastit's, tests untouched (or
+alias it in your `conftest.py`: `from blastit.pytest_plugin import
+blastit_live_server as live_server`). On teardown the server's log is folded
+into the report: every `request` it served and every `sql.denied` it wrote, so a
+grant the front end needs and your tests never exercised shows up as a missing
+statement like any other.
+
+It runs blastit, so it needs what blastit needs: **root, or passwordless
+sudo** (view uids, listeners, `/run/blastit`). Without either it skips, with the
+reason, rather than failing your suite. It preloads your root URLconf (§6) and
+serves your project where it lives when the view uids can read it there; when
+they cannot — pytest's own temporary directories are private — it serves a copy
+in a temporary directory it creates and removes, and changes no mode of your
+checkout.
+
+That log says what was *denied*, never what *ran*, so a route only it saw
+reports no unused grants: the report never calls a grant dead when nothing
+observed whether it was used.
+
 Read the report, add the grants, repeat until
 `blastit: the manifest covers every request that was made`. The denial logs stay
 the source of truth in production — the tests only make the requests they make —
 but by the time the app is deployed the manifest is already most of the way
 there instead of a deploy per statement.
+
+#### Fold the denials from production
+
+The test suite only makes the requests it makes; production makes the rest — a
+404's redirect lookup, a query whose shape depends on the data, a code path no
+test covers. Every one of those is a `sql.denied` line in the log, and
+`blastit-manifest fold` turns them into the grants your manifest is missing:
+
+```console
+$ blastit-manifest fold app.log --manifest blastit.toml          # the TOML to paste
+$ blastit-manifest fold app.log --manifest blastit.toml --write  # or write it
+$ blastit-manifest fold app.log --manifest blastit.toml --prefer-tables
+$ blastit-manifest fold app.log --manifest blastit.toml --allow-dangerous
+```
+
+Without `--write` nothing is touched: it prints the grant to add, with the
+reason dbproxy gave as a comment. With it, the statements go inside the route's
+existing `queries = [ … ]` (or a `[route.<proxy>.tables]` section is added under
+the grant), and the rest of the file — comments, order, everything — stays where
+it was. `--prefer-tables` adds the smallest table grant covering the denials
+instead, and keeps whatever a table grant cannot describe (a system catalogue,
+an unknown function, a `SET`) as an exact query, saying why.
+
+It never adds a grant to an `unrestricted` route (there is nothing left to grant
+there), it skips what your manifest already allows, and it compares statements
+with blastit's own normaliser — so what it writes is what dbproxy matches.
+`python -m blastit.fold` does the same where only the package is importable.
+
+Two things it refuses, because a `queries` entry is trusted as it is:
+
+* a statement whose *kind* a grant is not an allowlist for — DDL, `SET` and
+  `RESET` (`SET ROLE` above all), `COPY`, `DO`, `CALL`, `LOCK`, `GRANT`,
+  `REVOKE`, `TRUNCATE`, `VACUUM`, `LISTEN`/`NOTIFY`, the transaction commands,
+  and a text holding more than one statement (split it first);
+* a statement calling a function outside blastit's safe set — `set_config`,
+  `pg_read_file`, `lo_import`, `pg_terminate_backend`, an extension's function:
+  blastit compares the text and runs what it matches, so granting one as an
+  exact `queries` entry runs that function with the app's privileges. Give the
+  route a table grant instead (which checks functions), or say
+  `--allow-dangerous` if that is really what you want.
+
+Either way it says what it refused and why, on stderr, and writes nothing of
+it.
 
 ## What you get, and what you don't
 

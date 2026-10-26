@@ -409,10 +409,13 @@ impl TableGrants {
     ///
     /// It runs once every statement has been covered, so the column it picks is
     /// one the route already reads: `id` when it reads one, otherwise the first
-    /// column it reads, and `"*"` when it reads no column at all (a lock through
-    /// a subquery names the table without reading a column of it, so there is no
-    /// name to write). A table whose `update` entry a statement's own writes
+    /// column it reads. A table whose `update` entry a statement's own writes
     /// already filled keeps it: that entry covers the lock too.
+    ///
+    /// When there is no column to name ([`lock_update`] answers `None`) the
+    /// entry is left empty, and the grant does **not** allow the lock — the
+    /// statement has to stay an exact `queries` entry, and
+    /// [`TableGrants::locks_without_a_column`] is how a caller finds out.
     fn settle_locks(&mut self, locked: &BTreeSet<String>) {
         for table in locked {
             let Some(grant) = self.tables.get_mut(table) else {
@@ -426,8 +429,58 @@ impl TableGrants {
             if covered {
                 continue;
             }
-            grant.update = Some(lock_update(grant.select.as_ref()));
+            grant.update = Some(
+                lock_update(grant.select.as_ref())
+                    .unwrap_or_else(|| Columns::List(BTreeSet::new())),
+            );
             grant.lock_only = true;
+        }
+    }
+
+    /// The tables whose row lock this grant cannot name a column for (D3c).
+    ///
+    /// A statement that locks a table without reading a column of it
+    /// (`SELECT 1 FROM t FOR UPDATE`, `SELECT * FROM t FOR UPDATE`) leaves the
+    /// `update` entry empty: a table grant never takes `"*"` for a lock, because
+    /// `"*"` would hand out the UPDATE privilege on every column of the table
+    /// (§6). Such a table is *named* without being granted, the statement is not
+    /// allowed by this grant, and a caller that offered the grant as a
+    /// replacement for a route's exact queries has to say so and keep the
+    /// statement as an exact `queries` entry.
+    pub fn locks_without_a_column(&self) -> impl Iterator<Item = &str> {
+        self.tables
+            .iter()
+            .filter(|(_, grant)| {
+                grant.lock_only
+                    && matches!(&grant.update, Some(Columns::List(columns)) if columns.is_empty())
+            })
+            .map(|(table, _)| table.as_str())
+    }
+
+    /// Names one column for every lock left without one, from what *this* grant
+    /// reads.
+    ///
+    /// It is what makes the covering grant of several statements better than any
+    /// one of them: a statement may lock a table it reads no column of while
+    /// another statement of the same route reads one, and PostgreSQL asks for
+    /// the UPDATE privilege on any single column of a locked table. A lock with
+    /// no column to name in the whole grant is left alone.
+    pub fn pick_locking_columns(&mut self) {
+        let picks: Vec<(String, Columns)> = self
+            .tables
+            .iter()
+            .filter(|(_, grant)| {
+                grant.lock_only
+                    && matches!(&grant.update, Some(Columns::List(columns)) if columns.is_empty())
+            })
+            .filter_map(|(table, grant)| {
+                lock_update(grant.select.as_ref()).map(|columns| (table.clone(), columns))
+            })
+            .collect();
+        for (table, columns) in picks {
+            if let Some(grant) = self.tables.get_mut(&table) {
+                grant.update = Some(columns);
+            }
         }
     }
 
@@ -439,13 +492,20 @@ impl TableGrants {
     /// author pastes in to replace a list of exact queries. Tables and columns
     /// are sorted, so the same grants render the same text and a diff is
     /// readable.
+    ///
+    /// A lock whose column this grant cannot name is written as a comment
+    /// saying so, and the table is left without an `update` entry: it is the one
+    /// thing a manifest author has to finish by hand, because a lock needs a
+    /// column and a table grant has no `"*"` (§6, D3c).
     pub fn to_toml(&self, prefix: &str) -> String {
         let mut out = String::new();
         out.push('[');
         out.push_str(prefix);
         out.push_str(".tables]\n");
         for (table, grant) in &self.tables {
-            if grant.lock_only {
+            let unnamable = grant.lock_only
+                && matches!(&grant.update, Some(Columns::List(columns)) if columns.is_empty());
+            if grant.lock_only && !unnamable {
                 let columns = match &grant.update {
                     Some(columns) => columns_toml(columns),
                     None => "[]".to_string(),
@@ -456,6 +516,14 @@ impl TableGrants {
                     key_toml(table),
                 ));
             }
+            if unnamable {
+                out.push_str(&format!(
+                    "# {}: its rows are locked (`FOR UPDATE`) without reading a column of it, so \
+                     name one here — its primary key, say: a table grant never takes `\"*\"` for \
+                     a lock, and without the entry the statement is refused.\n",
+                    key_toml(table),
+                ));
+            }
             let mut operations = Vec::new();
             for (name, columns) in [
                 ("select", &grant.select),
@@ -463,6 +531,9 @@ impl TableGrants {
                 ("update", &grant.update),
             ] {
                 if let Some(columns) = columns {
+                    if name == "update" && unnamable {
+                        continue;
+                    }
                     operations.push(format!("{name} = {}", columns_toml(columns)));
                 }
             }
@@ -568,21 +639,24 @@ fn columns_toml(columns: &Columns) -> String {
 /// PostgreSQL wants the UPDATE privilege on any one column of a locked table, so
 /// the smallest covering grant names one instead of `"*"`: `id` when the route
 /// reads it (a lock's `WHERE` usually goes through the key), otherwise the first
-/// column it reads, and `"*"` when it reads none — a lock through a subquery can
-/// name a table without reading a column of it, and then there is no name to
-/// write.
-fn lock_update(select: Option<&Columns>) -> Columns {
+/// column it reads.
+///
+/// `None` when there is no column to name — the statement locked the table
+/// without reading a column of it (`SELECT 1 FROM t FOR UPDATE`, or a `SELECT *`
+/// that names none), or reads every column with `*`. A table grant has no `"*"`
+/// for a lock: `"*"` would grant the UPDATE privilege on every column of the
+/// table, which is exactly the privilege a lock does not need (§6). `None` means
+/// the covering grant does not allow the statement, and a caller that offered to
+/// write the grant has to say so instead.
+fn lock_update(select: Option<&Columns>) -> Option<Columns> {
     let Some(Columns::List(columns)) = select else {
-        return Columns::All;
+        return None;
     };
     let column = columns
         .iter()
         .find(|column| column.as_str() == "id")
         .or_else(|| columns.iter().next());
-    match column {
-        Some(column) => Columns::list([column.clone()]),
-        None => Columns::All,
-    }
+    column.map(|column| Columns::list([column.clone()]))
 }
 
 /// A TOML key: bare when it can be, quoted when it cannot.
@@ -1163,17 +1237,71 @@ mod tests {
              t = { select = [\"name\", \"status\"], update = [\"name\"] }\n"
         );
         // A lock through a subquery reads no column of the table it locks, so
-        // there is no name to pick: the suggestion is `"*"`.
+        // there is no name to pick — and a table grant has no `"*"` for a lock:
+        // the entry is left out, the grant does *not* allow the statement, and
+        // the manifest author is told to name a column (D3c).
         let none = [analyze("SELECT 1 FROM (SELECT 1 FROM t) s FOR UPDATE").unwrap()];
         let covering = TableGrants::covering(none.iter());
+        assert_eq!(covering.locks_without_a_column().collect::<Vec<_>>(), ["t"]);
+        assert!(
+            !covering.to_toml("route.db").contains("update = \"*\""),
+            "a lock never renders `update = \"*\"`: {}",
+            covering.to_toml("route.db")
+        );
         assert_eq!(
             covering.to_toml("route.db"),
             "[route.db.tables]\n\
-             # t: `update = \"*\"` only locks its rows (`FOR UPDATE`) — any one column is \
-             enough, as PostgreSQL requires.\n\
-             t = { select = [], update = \"*\" }\n"
+             # t: its rows are locked (`FOR UPDATE`) without reading a column of it, so name \
+             one here — its primary key, say: a table grant never takes `\"*\"` for a lock, and \
+             without the entry the statement is refused.\n\
+             t = { select = [] }\n"
         );
-        assert!(covering.check(&none[0]).is_ok());
+        assert!(
+            covering.check(&none[0]).is_err(),
+            "the covering grant cannot allow a lock it cannot name a column for"
+        );
+        // A `SELECT *` names no column either: same answer, never `"*"`.
+        let every = [analyze("SELECT * FROM t FOR UPDATE").unwrap()];
+        let covering = TableGrants::covering(every.iter());
+        assert_eq!(covering.locks_without_a_column().collect::<Vec<_>>(), ["t"]);
+        assert!(
+            !covering.to_toml("route.db").contains("update"),
+            "{}",
+            covering.to_toml("route.db")
+        );
+        // …but a column another statement of the same route reads is enough for
+        // a lock: PostgreSQL asks for the UPDATE privilege on any single column
+        // of a locked table, so the covering grant of the whole set names one.
+        let mixed = [
+            analyze("SELECT 1 FROM t FOR UPDATE").unwrap(),
+            analyze("SELECT t.id FROM t WHERE t.id = $1").unwrap(),
+        ];
+        let covering = TableGrants::covering(mixed.iter());
+        assert!(
+            covering.locks_without_a_column().next().is_none(),
+            "the statement that reads `id` names the lock of the other one"
+        );
+        assert!(covering.check(&mixed[0]).is_ok(), "the lock is granted");
+        // A caller that merges the covering of each statement — the audit does,
+        // one statement at a time — has to settle the locks afterwards, from
+        // what the merged grant reads.
+        let mut merged = TableGrants::covering(std::iter::once(&mixed[0]));
+        assert_eq!(merged.locks_without_a_column().collect::<Vec<_>>(), ["t"]);
+        merged.merge_from(&TableGrants::covering(std::iter::once(&mixed[1])));
+        assert_eq!(merged.locks_without_a_column().collect::<Vec<_>>(), ["t"]);
+        merged.pick_locking_columns();
+        assert_eq!(
+            merged.locks_without_a_column().collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            merged.to_toml("route.db"),
+            "[route.db.tables]\n\
+             # t: `update = [\"id\"]` only locks its rows (`FOR UPDATE`) — any one column is \
+             enough, as PostgreSQL requires.\n\
+             t = { select = [\"id\"], update = [\"id\"] }\n"
+        );
+        assert!(merged.check(&mixed[0]).is_ok(), "the lock is granted now");
         // A table whose own `UPDATE` already names columns keeps them: they lock
         // the rows just as well, and no comment claims the entry is only a lock.
         let written = [
@@ -1203,5 +1331,21 @@ mod tests {
         with_type.functions.insert("regclass".to_string());
         assert!(checked(&with_type, "SELECT a::regclass FROM t").is_ok());
         assert!(checked(&with_type, "SELECT a::regclass[] FROM t").is_ok());
+    }
+
+    #[test]
+    fn a_control_character_is_escaped_in_toml() {
+        // TOML forbids a raw control character in a basic string, U+007F (DEL)
+        // included: a statement out of a log could hold one, and a manifest that
+        // does not parse is worse than one that does (D3c).
+        assert_eq!(string_toml("a\u{7f}b"), "\"a\\u007Fb\"");
+        assert_eq!(string_toml("a\u{1}b"), "\"a\\u0001b\"");
+        assert_eq!(string_toml("a\nb\tc\rd"), "\"a\\nb\\tc\\rd\"");
+        assert_eq!(string_toml("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert_eq!(key_toml("a\u{7f}b"), "\"a\\u007Fb\"");
+        assert_eq!(key_toml("plain"), "plain");
+        // U+0085 (NEL) is a control character too, and printable text is not.
+        assert_eq!(string_toml("a\u{85}b"), "\"a\\u0085b\"");
+        assert_eq!(string_toml("héllo — ok"), "\"héllo — ok\"");
     }
 }

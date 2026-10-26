@@ -49,6 +49,10 @@ def log(msg):
 
 
 def app_spec(name, cluster, image):
+    # §10, D5: the socket peer is a DigitalOcean ingress address (10.244.x.x
+    # here, 100.127.x on other clusters) and the edge overwrites
+    # `do-connecting-ip` with the real client, so that is the header blastit is
+    # told to read — and only from those ranges.
     ref, tag = image.rsplit(":", 1)
     _, owner, repo = ref.split("/", 2)
     creds = os.environ.get("GHCR_CREDENTIALS", "")
@@ -91,6 +95,12 @@ jobs:
 {common_env}  - key: BLASTIT_LOG_FORMAT
     scope: RUN_TIME
     value: json
+  - key: BLASTIT_CLIENT_IP_HEADER
+    scope: RUN_TIME
+    value: do-connecting-ip
+  - key: BLASTIT_TRUSTED_PROXIES
+    scope: RUN_TIME
+    value: 10.0.0.0/8,100.64.0.0/10
 """
 
 

@@ -118,6 +118,14 @@
 //!      "tests": ["tests/test_oops.py::test_oops"]}
 //!   ],
 //!   "unexercised_routes": [],
+//!   "unused_global": {
+//!     "statements": [{"proxy": "db", "sql": "SELECT 1",
+//!                     "groups": ["connection"]}],
+//!     "tables": [{"proxy": "db", "group": "catalog",
+//!                 "tables": {"shop_product": {"select": ["id"]}},
+//!                 "functions": []}],
+//!     "count": 2
+//!   },
 //!   "connection_setup": {
 //!     "statements": [
 //!       {"sql": "SET application_name = 'app'", "proxy": "db", "count": 2,
@@ -133,7 +141,8 @@
 //!   "totals": {
 //!     "requests": 2, "routed": 2, "unrouted": 0, "routes": 1,
 //!     "routes_exercised": 1, "statements": 3, "missing": 1,
-//!     "missing_distinct": 1, "unused": 1, "needs_transaction_control": [],
+//!     "missing_distinct": 1, "unused": 1, "unused_global": 0,
+//!     "needs_transaction_control": [],
 //!     "connection_setup": 1, "connection_setup_ungranted": 1, "egress": 1,
 //!     "unrecognised": 1, "plugin_warnings": 0, "clean": false
 //!   }
@@ -148,7 +157,15 @@
 //! * `unused` lists the grants of that `(route, proxy)` pair that nothing
 //!   matched, in manifest order. A route that no request reached reports no
 //!   proxy at all: `unexercised_routes` names it, so listing grants as unused
-//!   would be noise;
+//!   would be noise. A statement a route is granted only through a *global*
+//!   group (§6) is never listed here: that group applies to every route, so the
+//!   statement would be "unused" once per route. It is reported once, in
+//!   `unused_global`, and only when no route matched it (D3c);
+//! * `unused_global` is the same idea for the global groups: `statements` lists
+//!   the statements a global group grants that no route matched, with the
+//!   groups that grant them, and `tables` lists the table grants a global group
+//!   hands out that no observed statement needed. `unused` never holds either,
+//!   so a statement of a global group is reported once and not once per route;
 //! * `egress.observed` is what the route reached for, most attempted first, and
 //!   `egress.needed` is true when it did and the route has no `egress = true`
 //!   (§7.3): a route that may not open connections would have them refused;
@@ -167,8 +184,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use blastit_manifest::{Manifest, PgGrant, Protocol, ProxyName, RoutingTable};
-use blastit_sqlpolicy::{Allowlist, TableGrants, analyze, normalize};
+use blastit_manifest::{Grant, Manifest, PgGrant, Protocol, ProxyName, RoutingTable};
+use blastit_sqlpolicy::{Allowlist, Analysis, TableGrants, analyze, normalize};
 use serde_json::{Map, Value, json};
 
 /// How many distinct test node ids and paths one `missing` entry keeps.
@@ -270,6 +287,108 @@ pub(crate) fn analyze_statement(sql: &str) -> Result<String, String> {
     serde_json::to_string_pretty(&document).map_err(|error| error.to_string())
 }
 
+/// Why a statement that locks a table without reading a column of it cannot be
+/// covered by a table grant (§6, D3c).
+///
+/// PostgreSQL asks for the UPDATE privilege on any *one* column of a locked
+/// table, and a table grant has no `"*"` for a lock: `"*"` would hand out the
+/// UPDATE privilege on every column. So a lock with no column to name — the
+/// statement reads none of them (`SELECT 1 FROM t FOR UPDATE`, `SELECT * FROM t
+/// FOR UPDATE`) — keeps the statement an exact query, and the table grant is
+/// left for a manifest author to finish by naming a column.
+pub(crate) const LOCK_NEEDS_A_COLUMN: &str = "its rows are locked (`FOR UPDATE`) without reading \
+     a column of it, so name one in the table's `update` entry — its primary key, say: a table \
+     grant never takes `\"*\"` for a lock, and without the entry the statement is refused";
+
+/// The smallest table grant that covers a set of statements (D3c).
+///
+/// This is `blastit._blastit.covering`, the function `blastit-manifest fold
+/// --prefer-tables` uses to turn the statements a log denied into the grant a
+/// manifest should hold: every statement is analysed, and the grant is the one
+/// [`TableGrants::covering`] derives from *all of them at once* — which is what
+/// makes a row lock (`FOR UPDATE`) ask for `update` on a column the route
+/// already reads, instead of on `"*"`.
+///
+/// The statements are handed over as they went on the wire or as the log
+/// recorded them; each one is normalised by the analysis itself.
+///
+/// # Returns
+///
+/// Pretty-printed JSON:
+///
+/// ```json
+/// {
+///   "tables": {"shop_product": {"select": ["id", "name"]}},
+///   "functions": ["unaccent"],
+///   "toml": "[route.db.tables]\nshop_product = { select = [\"id\", \"name\"] }\n",
+///   "unanalysable": [{"sql": "SET TIME ZONE 'UTC'",
+///                     "reason": "only SELECT, INSERT, UPDATE and DELETE…"}]
+/// }
+/// ```
+///
+/// `unanalysable` lists the statements a table grant cannot describe at all —
+/// they have to stay exact `queries`, and the reason is the same one a
+/// `sql.denied` event carries.
+///
+/// # Errors
+///
+/// Only a JSON rendering failure, which cannot happen in practice: a statement
+/// this build cannot analyse is data, not an error.
+pub(crate) fn covering(statements: &[String], prefix: &str) -> Result<String, String> {
+    let mut analyses = Vec::with_capacity(statements.len());
+    let mut unanalysable = Vec::new();
+    for sql in statements {
+        match analyze(sql) {
+            Ok(analysis) => {
+                // A statement that locks a table without reading a column of it
+                // cannot be covered by a table grant, and no other statement of
+                // the set changes that: it stays an exact `queries` entry (D3c).
+                if TableGrants::covering(std::iter::once(&analysis))
+                    .locks_without_a_column()
+                    .next()
+                    .is_some()
+                {
+                    unanalysable.push(json!({"sql": sql, "reason": LOCK_NEEDS_A_COLUMN}));
+                    continue;
+                }
+                analyses.push(analysis);
+            }
+            Err(error) => unanalysable.push(json!({"sql": sql, "reason": error.to_string()})),
+        }
+    }
+    let tables = TableGrants::covering(analyses.iter());
+    let mut document = serde_json::to_value(&tables).map_err(|error| error.to_string())?;
+    if let Some(map) = document.as_object_mut() {
+        map.insert("unanalysable".to_string(), json!(unanalysable));
+        map.insert("toml".to_string(), json!(tables.to_toml(prefix)));
+    }
+    serde_json::to_string_pretty(&document).map_err(|error| error.to_string())
+}
+
+/// Classifies one statement and renders it as JSON (D3c).
+///
+/// This is `blastit._blastit.classify`: what PostgreSQL's own parser says a
+/// statement is, for *every* statement, not only the four a table grant covers.
+/// Nothing here classifies by text: the parser decides, and the caller gets its
+/// verdict as data — which kind, how many statements the text holds, and whether
+/// a grant may hold it at all.
+///
+/// # Errors
+///
+/// The reason a `sql.denied` event carries: the text is not valid SQL, or holds
+/// no statement at all. A text that holds several is *not* an error: it is
+/// `"statements": 3` in the verdict, and never plain.
+pub(crate) fn classify(sql: &str) -> Result<String, String> {
+    let classified = blastit_sqlpolicy::classify(sql).map_err(|error| error.to_string())?;
+    let document = json!({
+        "class": classified.class().as_str(),
+        "label": classified.label(),
+        "plain": classified.is_plain(),
+        "statements": classified.statements(),
+    });
+    serde_json::to_string_pretty(&document).map_err(|error| error.to_string())
+}
+
 /// Diffs the observations of a test suite against a manifest (§6).
 ///
 /// The observations carry the `PATH_INFO` the app saw, which is the string the
@@ -297,6 +416,10 @@ pub(crate) fn audit(manifest_toml: &str, observations_json: &str) -> Result<Stri
     let observations = parse_observations(observations_json)?;
     let requests = &observations.requests;
     let probe = TcProbe::new();
+    // What the *global* groups grant (§6, D3c): a statement they grant belongs
+    // to every route at once, so it is never a route's own `unused` line — the
+    // report says it once, in `unused_global`.
+    let mut global = GlobalState::of(&manifest);
 
     let mut traces: BTreeMap<usize, RouteTrace> = BTreeMap::new();
     let mut unrouted: BTreeMap<(String, String), UnroutedTrace> = BTreeMap::new();
@@ -314,6 +437,9 @@ pub(crate) fn audit(manifest_toml: &str, observations_json: &str) -> Result<Stri
 
         let trace = traces.entry(matched.route).or_default();
         trace.requests += 1;
+        if !request.live {
+            trace.suite_requests += 1;
+        }
         routed_requests += 1;
 
         for attempt in &request.egress {
@@ -353,9 +479,25 @@ pub(crate) fn audit(manifest_toml: &str, observations_json: &str) -> Result<Stri
             // checked, so a statement that was analysed there is not parsed
             // again.
             match analyze(&statement.sql) {
-                Ok(analysis) => trace
-                    .table_grants
-                    .merge_from(&TableGrants::covering(std::iter::once(&analysis))),
+                Ok(analysis) => {
+                    let covering = TableGrants::covering(std::iter::once(&analysis));
+                    let locked: BTreeSet<String> = covering
+                        .locks_without_a_column()
+                        .map(str::to_string)
+                        .collect();
+                    if !locked.is_empty() {
+                        trace
+                            .nameless_locks
+                            .entry(normalised.clone())
+                            .or_default()
+                            .extend(locked);
+                    }
+                    trace.table_grants.merge_from(&covering);
+                    // Whether a global group's table grant was needed at all: a
+                    // statement that only this group's tables and columns allow
+                    // makes it a used one (D3c).
+                    global.mark_used(&proxy, &analysis);
+                }
                 Err(error) => {
                     trace
                         .unanalysable
@@ -376,6 +518,7 @@ pub(crate) fn audit(manifest_toml: &str, observations_json: &str) -> Result<Stri
         &observations,
         &traces,
         &unrouted,
+        &global,
         Summary {
             requests: requests.len(),
             routed: routed_requests,
@@ -392,6 +535,89 @@ struct Summary {
     statements: usize,
 }
 
+/// What the *global* groups of a manifest grant, and whether it was needed
+/// (§6, D3c).
+///
+/// A global group is attached to every route at once (`groups = […]` at the top
+/// level), so a statement it grants is in every route's effective grant and no
+/// route can claim it. Reporting it as unused per route would repeat one dead
+/// grant once per route, which is what a manifest with twenty routes and one
+/// global group would drown in; reporting it once — here — says the same thing
+/// honestly. A statement is unused only when *no* route matched it.
+struct GlobalState {
+    /// Per proxy, every statement a global group grants, with the groups that
+    /// grant it, in manifest order.
+    queries: BTreeMap<ProxyName, BTreeMap<String, Vec<String>>>,
+    /// Every table grant a global group hands out, and whether any observed
+    /// statement needed it.
+    tables: Vec<GlobalTables>,
+}
+
+/// One global group's table grant on one proxy, and whether it was used.
+struct GlobalTables {
+    group: String,
+    proxy: ProxyName,
+    tables: TableGrants,
+    used: bool,
+}
+
+impl GlobalState {
+    /// Collects the global groups' grants, per proxy and per statement.
+    fn of(manifest: &Manifest) -> Self {
+        let mut queries: BTreeMap<ProxyName, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+        let mut tables = Vec::new();
+        for name in manifest.global_groups() {
+            let Some(group) = manifest.group(name) else {
+                continue;
+            };
+            for (proxy, grant) in group.grants() {
+                let Some(pg) = grant.as_postgresql() else {
+                    continue;
+                };
+                for query in pg.queries() {
+                    let normalised = normalize(query);
+                    if normalised.is_empty() {
+                        continue;
+                    }
+                    queries
+                        .entry(proxy.clone())
+                        .or_default()
+                        .entry(normalised)
+                        .or_default()
+                        .push(name.clone());
+                }
+                if !pg.tables().is_empty() {
+                    tables.push(GlobalTables {
+                        group: name.clone(),
+                        proxy: proxy.clone(),
+                        tables: pg.tables().clone(),
+                        used: false,
+                    });
+                }
+            }
+        }
+        Self { queries, tables }
+    }
+
+    /// Notes that a global group's table grant permitted one observed statement.
+    ///
+    /// `TableGrants::check` is also happy with a statement that touches nothing
+    /// (a `SELECT 1`), so an analysis that needs no grant at all is not evidence
+    /// that anything was used.
+    fn mark_used(&mut self, proxy: &ProxyName, analysis: &Analysis) {
+        let needs_grant =
+            !analysis.access_set().is_empty() || analysis.extra_functions().next().is_some();
+        if !needs_grant {
+            return;
+        }
+        for tables in &mut self.tables {
+            if !tables.used && &tables.proxy == proxy && tables.tables.check(analysis).is_ok() {
+                tables.used = true;
+            }
+        }
+    }
+}
+
 /// Builds the report document out of the traces of the request loop.
 fn assemble(
     manifest: &Manifest,
@@ -399,6 +625,7 @@ fn assemble(
     observations: &Observations,
     traces: &BTreeMap<usize, RouteTrace>,
     unrouted: &BTreeMap<(String, String), UnroutedTrace>,
+    global: &GlobalState,
     summary: Summary,
 ) -> Result<Value, AuditError> {
     let mut routes = Vec::with_capacity(manifest.route_count());
@@ -409,6 +636,9 @@ fn assemble(
     let mut missing = 0usize;
     let mut missing_distinct = 0usize;
     let mut unused = 0usize;
+    // The `(proxy, statement)` pairs some route matched: a global group's
+    // statement is used as soon as *one* route ran it.
+    let mut global_matched: BTreeSet<(ProxyName, String)> = BTreeSet::new();
 
     for index in 0..manifest.route_count() {
         let (Some(route), trace) = (manifest.route(index), traces.get(&index)) else {
@@ -430,6 +660,11 @@ fn assemble(
             continue;
         }
         exercised += 1;
+
+        // A route that only a live server's log saw: the requests are real, but
+        // the statements that *ran* are not in it — only the denied ones are.
+        // So nothing can be said about the route's grants having matched (D3c).
+        let live_only = trace.is_some_and(|trace| trace.suite_requests == 0);
 
         let mut egress: Vec<Value> = Vec::new();
         let mut attempts: Vec<(&(String, u16), &EgressTrace)> = trace
@@ -463,6 +698,9 @@ fn assemble(
             let policy = Policy::of(grant.as_ref());
             let observed = trace.and_then(|trace| trace.proxies.get(proxy.as_str()));
             let matched = observed.map_or(&EMPTY_MATCHED, |observed| &observed.matched);
+            for sql in matched {
+                global_matched.insert((proxy.clone(), sql.clone()));
+            }
 
             let mut entries: Vec<(&String, &MissingTrace)> = observed
                 .map(|observed| observed.missing.iter().collect())
@@ -488,11 +726,26 @@ fn assemble(
                 })
                 .collect();
 
-            let unused_here: Vec<&String> = policy
-                .granted
-                .iter()
-                .filter(|query| !matched.contains(query.as_str()))
-                .collect();
+            // A statement this route only gets through a *global* group is not
+            // this route's unused line: that group is attached to every route,
+            // so the same grant would be reported dead once per route. What a
+            // route *does* own — its inline grant and the groups it names — is
+            // reported here; the global groups' statements are reported once,
+            // below, when no route matched them (D3c).
+            let own = own_queries(manifest, index, &proxy);
+            let unused_here: Vec<&String> = if live_only {
+                // Nothing observed this route but its own log: no grant of it
+                // can be called dead.
+                Vec::new()
+            } else {
+                policy
+                    .granted
+                    .iter()
+                    .filter(|query| {
+                        !matched.contains(query.as_str()) && own.contains(query.as_str())
+                    })
+                    .collect()
+            };
             unused += unused_here.len();
 
             let observed_control = observed.is_some_and(|observed| observed.transaction_control);
@@ -503,12 +756,24 @@ fn assemble(
             let (table_grants, unanalysable) = observed.map_or_else(
                 || (TableGrants::default(), Vec::new()),
                 |observed| {
-                    let unanalysable: Vec<Value> = observed
+                    let mut tables = observed.table_grants.clone();
+                    // A lock one statement could not name a column for may yet be
+                    // named from what another statement of the pair reads, which
+                    // is what makes the merged grant better than any one of them
+                    // (§6, D3c).
+                    tables.pick_locking_columns();
+                    let nameless: BTreeSet<&str> = tables.locks_without_a_column().collect();
+                    let mut unanalysable: Vec<Value> = observed
                         .unanalysable
                         .iter()
                         .map(|(sql, reason)| json!({"sql": sql, "reason": reason}))
                         .collect();
-                    (observed.table_grants.clone(), unanalysable)
+                    for (sql, locked) in &observed.nameless_locks {
+                        if locked.iter().any(|table| nameless.contains(table.as_str())) {
+                            unanalysable.push(json!({"sql": sql, "reason": LOCK_NEEDS_A_COLUMN}));
+                        }
+                    }
+                    (tables, unanalysable)
                 },
             );
 
@@ -587,6 +852,11 @@ fn assemble(
             })
         })
         .collect();
+    let unused_global = unused_global_section(
+        global,
+        &global_matched,
+        &live_only_proxies(manifest, traces),
+    );
     let clean = missing == 0
         && unrouted_count == 0
         && needs_transaction_control.is_empty()
@@ -605,6 +875,7 @@ fn assemble(
         "routes": routes,
         "unrouted": unrouted_entries,
         "unexercised_routes": unexercised,
+        "unused_global": unused_global,
         "connection_setup": setup.value,
         "unrecognised": {
             "statements": unrecognised,
@@ -621,6 +892,7 @@ fn assemble(
             "missing": missing,
             "missing_distinct": missing_distinct,
             "unused": unused,
+            "unused_global": unused_global["count"],
             "needs_transaction_control": needs_transaction_control,
             "connection_setup": setup.statements,
             "connection_setup_ungranted": setup.ungranted,
@@ -630,6 +902,123 @@ fn assemble(
             "clean": clean,
         },
     }))
+}
+
+/// The proxies on which some route was seen *only* in a live server's log
+/// (D3c).
+///
+/// A global group's grant is only called unused when no route matched it — and
+/// on such a proxy no route can be *asked*: the log records denials, not the
+/// statements that ran, so "nothing matched it" would be a claim about traffic
+/// nobody observed.
+fn live_only_proxies(
+    manifest: &Manifest,
+    traces: &BTreeMap<usize, RouteTrace>,
+) -> BTreeSet<ProxyName> {
+    traces
+        .iter()
+        .filter(|(_, trace)| trace.requests > 0 && trace.suite_requests == 0)
+        .flat_map(|(index, _)| manifest.effective_grants(*index).into_keys())
+        .collect()
+}
+
+/// The `unused_global` section: what the global groups grant that nothing used
+/// (§6, D3c).
+///
+/// A global group is attached to every route, so its statements are in every
+/// route's effective grant. Reporting each one as unused once per route would
+/// be noise a reader cannot act on; reporting them once, here, is the same
+/// information: *no* request in the suite touched it, so the grant — or the
+/// requests — can go.
+///
+/// * `statements` is every statement a global group grants that no route
+///   matched, with the groups that grant it;
+/// * `tables` is every `tables`/`functions` grant a global group hands out that
+///   no observed statement needed: the group's table grant allowed nothing the
+///   suite ran. A statement that only *half* used a group's tables does not
+///   make it used in this sense — the whole grant is reported, because that is
+///   the unit a manifest author edits.
+///
+/// A proxy on which a route was only seen in a *live server's* log is skipped
+/// whole (D3c): that log records what was denied, never what ran, so no global
+/// grant of it can be shown to be dead.
+///
+/// A statement a route also grants itself stays that route's business: it is
+/// reported in the route's own `unused`, and here as well while no route
+/// matched it, because the global group is what put it in every route's grant.
+fn unused_global_section(
+    global: &GlobalState,
+    matched: &BTreeSet<(ProxyName, String)>,
+    unverifiable: &BTreeSet<ProxyName>,
+) -> Value {
+    let mut statements: Vec<Value> = Vec::new();
+    for (proxy, granted) in &global.queries {
+        if unverifiable.contains(proxy) {
+            continue;
+        }
+        for (sql, groups) in granted {
+            if matched.contains(&(proxy.clone(), sql.clone())) {
+                continue;
+            }
+            statements.push(json!({
+                "proxy": proxy.as_str(),
+                "sql": sql,
+                "groups": groups,
+            }));
+        }
+    }
+    let mut tables: Vec<Value> = Vec::new();
+    for grant in &global.tables {
+        if grant.used || unverifiable.contains(&grant.proxy) {
+            continue;
+        }
+        tables.push(json!({
+            "proxy": grant.proxy.as_str(),
+            "group": grant.group,
+            "tables": grant.tables.tables(),
+            "functions": grant.tables.functions().collect::<Vec<_>>(),
+        }));
+    }
+    let count = statements.len() + tables.len();
+    json!({
+        "statements": statements,
+        "tables": tables,
+        "count": count,
+    })
+}
+
+/// The statements a route is granted *without* the global groups: its own
+/// inline grant and the grants of the groups it names.
+///
+/// This is the set whose unmatched entries are the route's own `unused` lines
+/// (§6, D3c): a statement only a global group grants is not this route's to
+/// call dead, because that group grants it to every route at once.
+fn own_queries(manifest: &Manifest, index: usize, proxy: &ProxyName) -> BTreeSet<String> {
+    let mut queries = BTreeSet::new();
+    let Some(route) = manifest.route(index) else {
+        return queries;
+    };
+    collect_queries(route.grant(proxy), &mut queries);
+    for name in route.groups() {
+        collect_queries(
+            manifest.group(name).and_then(|group| group.grant(proxy)),
+            &mut queries,
+        );
+    }
+    queries
+}
+
+/// Adds a grant's queries, normalised, to a set.
+fn collect_queries(grant: Option<&Grant>, into: &mut BTreeSet<String>) {
+    let Some(pg) = grant.and_then(Grant::as_postgresql) else {
+        return;
+    };
+    for query in pg.queries() {
+        let normalised = normalize(query);
+        if !normalised.is_empty() {
+            into.insert(normalised);
+        }
+    }
 }
 
 /// The `connection_setup` section of the report: the statements psycopg runs as
@@ -876,6 +1265,9 @@ impl TcProbe {
 #[derive(Default)]
 struct RouteTrace {
     requests: usize,
+    /// How many of those requests were recorded by this process — the suite
+    /// itself — rather than read out of a live server's log (D3c).
+    suite_requests: usize,
     proxies: BTreeMap<String, ProxyTrace>,
     egress: BTreeMap<(String, u16), EgressTrace>,
 }
@@ -897,6 +1289,11 @@ struct ProxyTrace {
     /// The statements a table grant cannot describe at all, by normalised text,
     /// with the reason.
     unanalysable: BTreeMap<String, String>,
+    /// The tables whose row lock this pair's statements could not name a column
+    /// for, by the statement that locked them (D3c). A statement here is only
+    /// reported when the *merged* grant cannot name one either — another
+    /// statement of the route may read a column the lock can use.
+    nameless_locks: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// What one route did on the network (§7.3).
@@ -1025,6 +1422,14 @@ struct ObservedRequest {
     statements: Vec<ObservedStatement>,
     /// The outbound connections the request tried to open (§7.3).
     egress: Vec<ObservedEgress>,
+    /// True when the request is known only from a *live server's* log (D3c):
+    /// `"source": "live"` in the observations.
+    ///
+    /// A log records the requests that were served and the statements that were
+    /// **denied** — never the statements that ran. So a route only such a log
+    /// saw can be told what it is missing, and nothing about which of its grants
+    /// matched, which is what the report refuses to guess at.
+    live: bool,
 }
 
 /// One outbound connection attempt.
@@ -1218,6 +1623,9 @@ fn parse_request(value: &Value, index: usize) -> Result<ObservedRequest, AuditEr
     let path_info = required_string(object, "path_info", &at)?;
     let nodeid = optional_string(object, "nodeid", &at)?;
     let transaction_control = optional_bool(object, "transaction_control", &at)?;
+    // Where the request is known from: a live server's log (`"live"`), or this
+    // process's own Django (anything else, absence included).
+    let live = optional_string(object, "source", &at)?.as_deref() == Some("live");
     let statements = match object.get("statements") {
         None => Vec::new(),
         Some(statements) => {
@@ -1258,6 +1666,7 @@ fn parse_request(value: &Value, index: usize) -> Result<ObservedRequest, AuditEr
         transaction_control,
         statements,
         egress,
+        live,
     })
 }
 
@@ -1437,6 +1846,128 @@ mod tests {
             .iter()
             .map(|entry| entry["sql"].as_str().expect("a string").to_string())
             .collect()
+    }
+
+    /// A row lock a table grant can name a column for, and one it cannot (D3c).
+    #[test]
+    fn a_locking_statement_gets_a_column_named_never_a_star() {
+        let manifest = r#"
+            version = 1
+            [proxy.db]
+            protocol = "postgresql"
+            input = { url = "DATABASE_URL" }
+            [[route]]
+            name = "notes"
+            path = ['/notes/.*']
+            [route.db]
+            queries = ['SELECT 1']
+        "#;
+        let locked = run(
+            manifest,
+            &document(&request(
+                "GET",
+                "/notes/",
+                &statement(
+                    r#"SELECT \"notes\".\"id\" FROM \"notes\" WHERE \"notes\".\"id\" = $1 FOR UPDATE"#,
+                ),
+            )),
+        );
+        let grants = &proxy(&locked, "notes")["table_grants"];
+        assert_eq!(grants["tables"]["notes"]["update"], json!(["id"]));
+        assert!(
+            !grants["toml"]
+                .as_str()
+                .expect("a string")
+                .contains("update = \"*\""),
+            "a lock never renders a star: {}",
+            grants["toml"]
+        );
+        assert_eq!(grants["unanalysable"], json!([]));
+
+        // `SELECT *` names no column to give the lock: the covering grant cannot
+        // allow the statement, and the report says so instead of writing `"*"`.
+        let star = run(
+            manifest,
+            &document(&request(
+                "GET",
+                "/notes/",
+                &statement(r#"SELECT * FROM \"notes\" FOR UPDATE"#),
+            )),
+        );
+        let grants = &proxy(&star, "notes")["table_grants"];
+        assert_eq!(
+            grants["tables"]["notes"]["update"],
+            json!([]),
+            "the lock is named by nothing: the entry grants no column"
+        );
+        assert!(
+            !grants["toml"]
+                .as_str()
+                .expect("a string")
+                .contains("update"),
+            "and the rendered grant leaves it out: {}",
+            grants["toml"]
+        );
+        assert_eq!(grants["unanalysable"].as_array().expect("a list").len(), 1);
+        assert_eq!(
+            grants["unanalysable"][0]["sql"],
+            r#"SELECT * FROM "notes" FOR UPDATE"#
+        );
+        assert!(
+            grants["unanalysable"][0]["reason"]
+                .as_str()
+                .expect("a string")
+                .contains("primary key"),
+            "{}",
+            grants["unanalysable"][0]["reason"]
+        );
+        assert!(
+            !grants["toml"]
+                .as_str()
+                .expect("a string")
+                .contains("update = \"*\""),
+            "{}",
+            grants["toml"]
+        );
+    }
+
+    #[test]
+    fn a_lock_another_statement_reads_a_column_for_is_named_from_it() {
+        // The pair's grant is merged statement by statement; the lock of one is
+        // named from what the other reads, because PostgreSQL asks for the UPDATE
+        // privilege on any single column of a locked table (D3c).
+        let manifest = r#"
+            version = 1
+            [proxy.db]
+            protocol = "postgresql"
+            input = { url = "DATABASE_URL" }
+            [[route]]
+            name = "notes"
+            path = ['/notes/.*']
+            [route.db]
+            queries = ['SELECT 1']
+        "#;
+        let report = run(
+            manifest,
+            &document(&request(
+                "GET",
+                "/notes/",
+                &format!(
+                    "{}, {}",
+                    statement(r#"SELECT 1 FROM \"notes\" FOR UPDATE"#),
+                    statement(
+                        r#"SELECT \"notes\".\"id\" FROM \"notes\" WHERE \"notes\".\"id\" = $1"#,
+                    ),
+                ),
+            )),
+        );
+        let grants = &proxy(&report, "notes")["table_grants"];
+        assert_eq!(grants["tables"]["notes"]["update"], json!(["id"]));
+        assert_eq!(
+            grants["unanalysable"],
+            json!([]),
+            "the lock is named after all"
+        );
     }
 
     #[test]
@@ -1740,10 +2271,12 @@ mod tests {
         assert_eq!(route(&report, "checkout")["proxies"], json!([]));
         assert_eq!(report["totals"]["routes"], 2);
         assert_eq!(report["totals"]["routes_exercised"], 1);
-        // `notes` ran without touching the database, so both its grants — the
-        // session group's and its own — are unused; `checkout` did not run at
-        // all, so it claims nothing.
-        assert_eq!(report["totals"]["unused"], 2);
+        // `notes` ran without touching the database, so its own grant and the
+        // group it names are unused; the global group's statement is not a
+        // route's unused line (D3c), and `checkout` did not run at all, so it
+        // claims nothing.
+        assert_eq!(report["totals"]["unused"], 1);
+        assert_eq!(report["totals"]["unused_global"], 1);
     }
 
     #[test]
@@ -2592,6 +3125,243 @@ mod tests {
         assert!(
             report.get("script_name").is_none(),
             "no mount prefix to report"
+        );
+    }
+
+    //
+    // Global groups are nobody's route (D3c).
+    //
+
+    /// Two routes, one group of each kind: a global one applied to every route
+    /// and one the route names itself.
+    const GLOBAL: &str = r#"
+        version = 1
+        groups = ["session"]
+
+        [proxy.db]
+        protocol = "postgresql"
+        input = { url = "DATABASE_URL" }
+
+        [group.session.db]
+        queries = ['SELECT 0']
+
+        [group.own.db]
+        queries = ['SELECT 9']
+
+        [[route]]
+        name = "notes"
+        path = ['/notes/.*']
+        groups = ["own"]
+        [route.db]
+        queries = ['SELECT 1']
+
+        [[route]]
+        name = "orders"
+        path = ['/orders/']
+        [route.db]
+        queries = ['SELECT 2']
+    "#;
+
+    #[test]
+    fn a_global_group_statement_is_not_unused_once_per_route() {
+        let report = run(
+            GLOBAL,
+            &document(&request("GET", "/notes/", &statement("SELECT 1"))),
+        );
+        // The route's own group's statement is the route's to call dead; the
+        // global group's is not, once per route.
+        assert_eq!(proxy(&report, "notes")["unused"], json!(["SELECT 9"]));
+        assert_eq!(
+            report["unused_global"]["statements"],
+            json!([{"proxy": "db", "sql": "SELECT 0", "groups": ["session"]}])
+        );
+        assert_eq!(report["unused_global"]["count"], 1);
+        assert_eq!(report["totals"]["unused"], 1, "the route's own group only");
+        assert_eq!(report["totals"]["unused_global"], 1);
+        assert_eq!(
+            report["totals"]["clean"], true,
+            "unused grants do not fail strict"
+        );
+    }
+
+    #[test]
+    fn a_global_group_statement_one_route_used_is_unused_nowhere() {
+        let report = run(
+            GLOBAL,
+            &document(&request("GET", "/notes/", &statement("SELECT 0"))),
+        );
+        assert_eq!(report["unused_global"]["statements"], json!([]));
+        assert_eq!(report["unused_global"]["count"], 0);
+        assert_eq!(report["totals"]["unused_global"], 0);
+        assert_eq!(
+            proxy(&report, "notes")["unused"],
+            json!(["SELECT 9", "SELECT 1"]),
+            "one route ran the global group's statement, so all of them are live"
+        );
+    }
+
+    /// A global group whose only grant is a table grant (D7).
+    const GLOBAL_TABLES: &str = r#"
+        version = 1
+        groups = ["catalog"]
+
+        [proxy.db]
+        protocol = "postgresql"
+        input = { url = "DATABASE_URL" }
+
+        [group.catalog.db.tables]
+        shop_product = { select = ["id"] }
+
+        [[route]]
+        name = "notes"
+        path = ['/notes/.*']
+        [route.db]
+        queries = ['SELECT 1']
+    "#;
+
+    #[test]
+    fn a_global_group_table_grant_nothing_needed_is_reported_once() {
+        let report = run(
+            GLOBAL_TABLES,
+            &document(&request("GET", "/notes/", &statement("SELECT 1"))),
+        );
+        assert_eq!(report["unused_global"]["statements"], json!([]));
+        let tables = report["unused_global"]["tables"]
+            .as_array()
+            .expect("a list");
+        assert_eq!(tables.len(), 1, "{tables:?}");
+        assert_eq!(tables[0]["proxy"], "db");
+        assert_eq!(tables[0]["group"], "catalog");
+        assert_eq!(tables[0]["tables"]["shop_product"]["select"], json!(["id"]));
+        assert_eq!(tables[0]["functions"], json!([]));
+        assert_eq!(report["totals"]["unused_global"], 1);
+        assert_eq!(
+            proxy(&report, "notes")["unused"],
+            json!([]),
+            "a table grant is never a route's unused line"
+        );
+    }
+
+    #[test]
+    fn a_global_group_table_grant_a_statement_needed_is_used() {
+        let report = run(
+            GLOBAL_TABLES,
+            &document(&request(
+                "GET",
+                "/notes/",
+                &statement(r#"SELECT \"shop_product\".\"id\" FROM \"shop_product\""#),
+            )),
+        );
+        assert_eq!(
+            proxy(&report, "notes")["missing"],
+            json!([]),
+            "the global group's table grant allowed it"
+        );
+        assert_eq!(report["unused_global"]["tables"], json!([]));
+        assert_eq!(report["unused_global"]["count"], 0);
+    }
+
+    #[test]
+    fn the_covering_grant_of_a_set_of_statements_is_taken_at_once() {
+        // A row lock asks for `update` on *one* column, and the covering grant
+        // picks one the route already reads when it is given every statement at
+        // once — which is why the fold tool calls this function and not the
+        // per-statement analysis.
+        let statements = vec![
+            r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."id" = $1 FOR UPDATE"#.to_string(),
+            r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $1"#.to_string(),
+        ];
+        let document: Value =
+            serde_json::from_str(&covering(&statements, "route.db").expect("renders"))
+                .expect("JSON");
+        assert_eq!(
+            document["tables"]["notes"]["select"],
+            json!(["id", "owner_id"])
+        );
+        assert_eq!(document["tables"]["notes"]["update"], json!(["id"]));
+        assert_eq!(document["functions"], json!([]));
+        assert_eq!(document["unanalysable"], json!([]));
+        assert_eq!(
+            document["toml"].as_str().expect("a string"),
+            "[route.db.tables]\n\
+             # notes: `update = [\"id\"]` only locks its rows (`FOR UPDATE`) — any one \
+             column is enough, as PostgreSQL requires.\n\
+             notes = { select = [\"id\", \"owner_id\"], update = [\"id\"] }\n"
+        );
+    }
+
+    /// A route whose only evidence is a live server's log (D3c).
+    #[test]
+    fn a_live_logs_request_claims_nothing_about_a_routes_grants() {
+        let observations = format!(
+            r#"{{"version": 1, "requests": [{{"method": "GET", "path_info": "/notes/",
+                "source": "live", "statements": [{}]}}]}}"#,
+            statement("SELECT 'denied'")
+        );
+        let report = run(GLOBAL, &observations);
+        assert_eq!(
+            missing_sql(&report, "notes"),
+            ["SELECT 'denied'"],
+            "a denial in the log is a missing grant, whether it came from a log or not"
+        );
+        assert_eq!(
+            proxy(&report, "notes")["unused"],
+            json!([]),
+            "the log says what was denied, never what ran: no grant is called dead"
+        );
+        assert_eq!(report["unused_global"]["statements"], json!([]));
+        assert_eq!(report["unused_global"]["count"], 0);
+        assert_eq!(report["totals"]["unused"], 0);
+        assert_eq!(report["totals"]["unused_global"], 0);
+        assert_eq!(report["totals"]["clean"], false, "a grant is missing");
+    }
+
+    #[test]
+    fn a_route_the_suite_reached_still_reports_its_own_grants_as_unused() {
+        let observations = format!(
+            r#"{{"version": 1, "requests": [
+                {{"method": "GET", "path_info": "/notes/", "statements": []}},
+                {{"method": "GET", "path_info": "/orders/", "source": "live",
+                  "statements": [{}]}}
+            ]}}"#,
+            statement("SELECT 'denied'")
+        );
+        let report = run(GLOBAL, &observations);
+        assert_eq!(
+            proxy(&report, "notes")["unused"],
+            json!(["SELECT 9", "SELECT 1"]),
+            "the suite's own request is evidence about the route it reached"
+        );
+        assert_eq!(
+            proxy(&report, "orders")["unused"],
+            json!([]),
+            "and a route only a log saw still claims nothing"
+        );
+        assert_eq!(
+            report["unused_global"]["statements"],
+            json!([]),
+            "a global grant on a proxy a live route used cannot be called dead"
+        );
+    }
+
+    #[test]
+    fn a_statement_no_table_grant_can_describe_comes_back_separately() {
+        let statements = vec!["SET TIME ZONE 'UTC'".to_string()];
+        let document: Value =
+            serde_json::from_str(&covering(&statements, "route.db").expect("renders"))
+                .expect("JSON");
+        assert_eq!(document["tables"], json!({}));
+        assert_eq!(document["functions"], json!([]));
+        let unanalysable = document["unanalysable"].as_array().expect("a list");
+        assert_eq!(unanalysable.len(), 1);
+        assert_eq!(unanalysable[0]["sql"], "SET TIME ZONE 'UTC'");
+        assert!(
+            unanalysable[0]["reason"]
+                .as_str()
+                .expect("a string")
+                .contains("only SELECT"),
+            "{:?}",
+            unanalysable[0]["reason"]
         );
     }
 }
