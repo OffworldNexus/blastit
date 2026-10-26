@@ -16,6 +16,13 @@ scenario (`e2e/scenario.py`) and the same log checks (`e2e/check_logs.py`, plus
 `check_rootless_logs` here — D6's own part: the boot event says which mode init
 runs in, and it is `capabilities`).
 
+E1: the compose file puts Traefik v3 in front of the app and starts blastit with
+`BLASTIT_PRESET=compose-traefik`, so this driver also checks the preset's own
+claims: the boot event names it and the settings it supplied, `REMOTE_ADDR` is
+the client Traefik saw (and not a header the client forged), and
+`wsgi.url_scheme` follows Traefik's `X-Forwarded-Proto` — `http` over its
+plaintext entry point, `https` behind its TLS one.
+
 Authentication: doctl's (DIGITALOCEAN_ACCESS_TOKEN, or `--context` locally). The
 SSH key a droplet is created with is generated in `/tmp/opencode` and imported
 under a `blastit-d6-` name, then deleted with the droplet.
@@ -30,6 +37,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -62,6 +70,16 @@ CAPABILITIES = [
     "cap_setuid",
     "cap_setpcap",
 ]
+# E1: the preset the compose file gives the app, and the settings it supplies —
+# the whole trust decision for this deployment. The driver asserts that the boot
+# event reports exactly these, and that no `BLASTIT_*` variable overrode one.
+PRESET = "compose-traefik"
+PRESET_SETTINGS = {
+    "BLASTIT_CLIENT_IP_HEADER": "x-forwarded-for",
+    "BLASTIT_TRUSTED_PROXIES": "*",
+    "BLASTIT_FAIR_QUEUING": "on",
+    "BLASTIT_LOG_FORMAT": "json",
+}
 CONTEXT = []
 
 
@@ -100,7 +118,7 @@ def doctl(*args, parse=True, check_rc=True):
 # --------------------------------------------------------------------------
 
 
-def compose_env(project, port, image, password, dockerfile="Dockerfile"):
+def compose_env(project, port, tls_port, image, password, dockerfile="Dockerfile"):
     """The compose variables.
 
     On the droplet these are written to an **env file** (over ssh, from stdin),
@@ -112,6 +130,7 @@ def compose_env(project, port, image, password, dockerfile="Dockerfile"):
         "E2E_PROJECT": project,
         "E2E_IMAGE": image,
         "E2E_PORT": str(port),
+        "E2E_TLS_PORT": str(tls_port),
         "E2E_DB_PASSWORD": password,
         "E2E_ROOTLESS_DOCKERFILE": dockerfile,
     }
@@ -139,7 +158,7 @@ def compose_remote(ssh, env, *args, check_rc=True):
 
 def write_env_file(ssh, env):
     """Writes the compose variables to the droplet, from stdin (never argv)."""
-    variables = ("E2E_PROJECT", "E2E_IMAGE", "E2E_PORT", "E2E_DB_PASSWORD",
+    variables = ("E2E_PROJECT", "E2E_IMAGE", "E2E_PORT", "E2E_TLS_PORT", "E2E_DB_PASSWORD",
                  "E2E_ROOTLESS_DOCKERFILE")
     text = "".join(f"{name}={env[name]}\n" for name in variables if name in env)
     written = subprocess.run([*ssh, f"cat > /root/blastit/{ENV_FILE}"], input=text, text=True,
@@ -153,13 +172,25 @@ def remove_env_file(ssh):
     ssh_run(ssh, f"rm -f /root/blastit/{ENV_FILE}")
 
 
-def scenario(port, timeout=180):
-    """The shared e2e scenario, against the app on `port`."""
-    return subprocess.run(
-        [sys.executable, os.path.join(ROOT, "e2e", "scenario.py"),
-         f"http://127.0.0.1:{port}", "--expect", "blastit", "--wait", str(timeout)],
-        text=True,
-    ).returncode
+def scenario(port, timeout=180, remote_addr=None, expect_scheme=None, forged_proto_ignored=False):
+    """The shared e2e scenario, against the app on `port`.
+
+    `remote_addr` is what the client address must be — the docker network's
+    gateway, here, because that is what a published port's clients look like
+    from inside the container — and `expect_scheme` is the scheme the ingress's
+    own `X-Forwarded-Proto` implies (E1). `forged_proto_ignored` says the
+    ingress sets `X-Forwarded-Proto` itself, which this stack's Traefik does
+    (measured; see ARCHITECTURE §10's Traefik subsection).
+    """
+    command = [sys.executable, os.path.join(ROOT, "e2e", "scenario.py"),
+               f"http://127.0.0.1:{port}", "--expect", "blastit", "--wait", str(timeout)]
+    if remote_addr:
+        command += ["--remote-addr", remote_addr]
+    if expect_scheme:
+        command += ["--expect-scheme", expect_scheme]
+    if forged_proto_ignored:
+        command += ["--forged-proto-ignored"]
+    return subprocess.run(command, text=True).returncode
 
 
 def check_rootless_logs(path, password):
@@ -208,6 +239,93 @@ def check_rootless_logs(path, password):
     ok &= check(not siblings,
                 f"nothing else runs as init's uid at boot ({[e.get('line') for e in siblings]})")
     return rc | (0 if ok else 1)
+
+
+def check_preset_logs(path):
+    """E1's own log checks: the boot event names the preset and its settings."""
+    events = read_events(path)
+    print("E1: the boot event names the preset the deployment uses")
+    ok = True
+    boots = [e for e in events if e.get("event") == "boot"]
+    named = [e for e in boots if e.get("preset") == PRESET]
+    ok &= check(bool(named), f"a boot event says `preset: {PRESET}` "
+                             f"({[e.get('stage') for e in boots]})")
+    for stage in ("config", "preload"):
+        event = next((e for e in boots if e.get("stage") == stage), {})
+        ok &= check(event.get("preset") == PRESET,
+                    f"the {stage} boot event names it ({event.get('preset')})")
+        ok &= check(event.get("preset_settings") == PRESET_SETTINGS,
+                    f"and the settings it supplied ({event.get('preset_settings')})")
+        ok &= check(not event.get("preset_overridden"),
+                    f"with nothing overriding them ({event.get('preset_overridden')})")
+    return 0 if ok else 1
+
+
+def read_events(path):
+    """Every JSON event in a log file, skipping lines that are not events."""
+    events = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                pass
+    return events
+
+
+def tls_request_probe(port):
+    """The same probe through Traefik's TLS entry point.
+
+    Certificate verification is off: Traefik generates a self-signed certificate
+    and this run is about which *scheme* reaches the app, not about the chain.
+    """
+    context = ssl._create_unverified_context()
+    url = f"https://127.0.0.1:{port}/debug/request/"
+    with urllib.request.urlopen(url, context=context, timeout=30) as response:
+        return json.loads(response.read().decode())
+
+
+def check_proxy_headers(tls_port, gateway):
+    """E1: the ingress decides the scheme and the client address, not the client."""
+    print("E1: the ingress decides the scheme and the client address")
+    ok = True
+    try:
+        facts = tls_request_probe(tls_port)
+    except Exception as e:  # noqa: BLE001
+        return 0 if check(False, f"Traefik's TLS entry point answers ({e!r})") else 1
+    ok &= check(facts.get("scheme") == "https",
+                f"a request Traefik TLS-terminated is `https` to the app "
+                f"({facts.get('scheme')})")
+    ok &= check(facts.get("remote_addr") == gateway,
+                f"and the client address is the one Traefik saw "
+                f"({facts.get('remote_addr')}, expected {gateway})")
+    ok &= check(facts.get("route") == "debug", f"the probe ran on the debug route ({facts})")
+    return 0 if ok else 1
+
+
+def network_gateway(env, project, ssh=None):
+    """The docker network's gateway address.
+
+    A connection from the host to a published port arrives in the container from
+    the bridge's gateway, so this is the address Traefik sees for the scenario's
+    client — what `REMOTE_ADDR` must be (E1).
+    """
+    name = f"{project}_default"
+    if ssh is None:
+        p = subprocess.run(["docker", "network", "inspect", name, "-f", GATEWAY_FORMAT],
+                           env=env, text=True, capture_output=True)
+    else:
+        p = ssh_run(ssh, f"docker network inspect {name} -f {shlex.quote(GATEWAY_FORMAT)}")
+    gateway = p.stdout.strip()
+    if not gateway:
+        raise RuntimeError(f"no gateway for the network {name}: {p.stderr.strip()[-400:]}")
+    return gateway
+
+
+GATEWAY_FORMAT = "{{(index .IPAM.Config 0).Gateway}}"
 
 
 def dump_logs(text, out):
@@ -432,18 +550,27 @@ def local(args):
     password = "e2e-" + secrets.token_hex(16)
     project = args.project or "blastit-d6-rootless"
     image = args.image or "blastit-d6-rootless:local"
-    env = compose_env(project, args.port, image, password, args.dockerfile)
+    env = compose_env(project, args.port, args.tls_port, image, password, args.dockerfile)
     rc = 1
     try:
         log(f"docker compose up --build ({project}, port {args.port})")
-        if compose_local(env, "up", "--build", "--detach", "app").returncode != 0:
+        # Every service, not just `app`: Traefik depends on the app, not the
+        # other way round, and `up app` would leave the ingress out — which is
+        # the only way in (E1).
+        if compose_local(env, "up", "--build", "--detach").returncode != 0:
             compose_local(env, "logs", "--no-color", "--tail", "80", "app")
             return 1
-        rc = scenario(args.port)
+        gateway = network_gateway(env, project)
+        log(f"the compose network's gateway: {gateway}")
+        rc = scenario(args.port, remote_addr=gateway, expect_scheme="http",
+                      forged_proto_ignored=True)
         logs = subprocess.run(["docker", "compose", "-f", COMPOSE, "logs", "--no-color",
                                "--no-log-prefix", "app"], env=env, text=True,
                               capture_output=True).stdout
-        rc |= check_rootless_logs(dump_logs(logs, args.out), password)
+        path = dump_logs(logs, args.out)
+        rc |= check_rootless_logs(path, password)
+        rc |= check_preset_logs(path)
+        rc |= check_proxy_headers(args.tls_port, gateway)
         rc |= caps_and_limits(env)
         rc |= check_container(env, project)
     finally:
@@ -609,12 +736,12 @@ def droplet(args):
 
         ship_checkout(ssh)
 
-        env = compose_env(args.project or "blastit-d6-rootless", args.port,
+        env = compose_env(args.project or "blastit-d6-rootless", args.port, args.tls_port,
                           args.image or "blastit-d6-rootless:droplet", password)
         write_env_file(ssh, env)
         log("docker compose up --build (a full Rust build on the droplet, this takes a while)")
         started = time.monotonic()
-        up = compose_remote(ssh, env, "up", "--build", "--detach", "app")
+        up = compose_remote(ssh, env, "up", "--build", "--detach")
         log(f"compose up returned {up.returncode} after {time.monotonic() - started:.0f}s")
         if up.returncode != 0:
             print(up.stdout[-4000:], up.stderr[-4000:])
@@ -623,15 +750,23 @@ def droplet(args):
 
         # The app publishes on the droplet's loopback; the scenario runs here,
         # through a tunnel, so nothing is exposed to the internet.
-        log(f"tunnelling 127.0.0.1:{args.port} from the droplet")
+        log(f"tunnelling 127.0.0.1:{args.port} and {args.tls_port} from the droplet")
         tunnel = subprocess.Popen(
-            [*ssh_argv(key, ip), "-N", "-L", f"127.0.0.1:{args.port}:127.0.0.1:{args.port}",
+            [*ssh_argv(key, ip), "-N",
+             "-L", f"127.0.0.1:{args.port}:127.0.0.1:{args.port}",
+             "-L", f"127.0.0.1:{args.tls_port}:127.0.0.1:{args.tls_port}",
              "-o", "ExitOnForwardFailure=yes"])
         try:
             wait_http(args.port)
-            rc = scenario(args.port)
+            gateway = network_gateway(env, env["E2E_PROJECT"], ssh)
+            log(f"the compose network's gateway on the droplet: {gateway}")
+            rc = scenario(args.port, remote_addr=gateway, expect_scheme="http",
+                          forged_proto_ignored=True)
             logs = compose_remote(ssh, env, "logs", "--no-color", "--no-log-prefix", "app").stdout
-            rc |= check_rootless_logs(dump_logs(logs, args.out), password)
+            path = dump_logs(logs, args.out)
+            rc |= check_rootless_logs(path, password)
+            rc |= check_preset_logs(path)
+            rc |= check_proxy_headers(args.tls_port, gateway)
             # The mechanisms, read out of the containers rather than out of the
             # log: which file has the capabilities, what the container was
             # allowed to give it, and what every process of the container holds.
@@ -799,7 +934,11 @@ def main():
     ap.add_argument("--project", help="compose project name")
     ap.add_argument("--image", help="image tag for the app service")
     ap.add_argument("--dockerfile", default="Dockerfile", help="Dockerfile under e2e/rootless/")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("E2E_PORT", "18080")))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("E2E_PORT", "18080")),
+                    help="host port Traefik publishes its entry point on")
+    ap.add_argument("--tls-port", type=int,
+                    default=int(os.environ.get("E2E_TLS_PORT", "18443")),
+                    help="host port Traefik publishes its TLS entry point on (E1)")
     ap.add_argument("--droplet-size", default=SIZE)
     ap.add_argument("--droplet-image", help="droplet image slug (default: the newest docker-* one)")
     ap.add_argument("--context", help="doctl auth context (local runs)")

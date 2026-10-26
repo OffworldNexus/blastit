@@ -6,11 +6,18 @@
 The user flow (log in, add and delete notes, log out) must work the same way
 in both modes. The sandbox checks differ: under blastit the notes route can't
 read password hashes and the app sees no database password.
+
+Under blastit the client's own address is checked too (E1): `--remote-addr` says
+what the deployment's ingress sees for this client — an IP to assert exactly, or
+`public` where the driver cannot know it (a hosted deployment) and the address
+only has to be a client's rather than the ingress's. Whatever the answer is, a
+client-IP header the *client* sent never becomes `REMOTE_ADDR`.
 """
 
 import argparse
 import errno
 import http.cookiejar
+import ipaddress
 import json
 import re
 import sys
@@ -28,6 +35,36 @@ def check(cond, what):
         FAILURES.append(what)
 
 
+def address_of(remote_addr):
+    """The IP of a `REMOTE_ADDR`: a socket peer carries `ip:port`."""
+    text = (remote_addr or "").strip()
+    if text.startswith("[") and "]" in text:
+        return text[1 : text.index("]")]
+    if text.count(":") == 1:
+        return text.split(":")[0]
+    return text
+
+
+def is_client_address(remote_addr):
+    """Whether a `REMOTE_ADDR` could be an internet client's own address.
+
+    What it must not be is the ingress's: blastit reports the socket peer when
+    nothing in the request may be believed, and an ingress address is a private
+    or carrier-NAT one (§10: `10.244.x.x`, `100.127.x`). Loopback is not a
+    client a hosted deployment can have either.
+    """
+    try:
+        address = ipaddress.ip_address(address_of(remote_addr))
+    except ValueError:
+        return False
+    return not (
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address in ipaddress.ip_network("100.64.0.0/10")
+    )
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -39,10 +76,12 @@ class Client:
         self.jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar), NoRedirect)
 
-    def request(self, method, path, data=None):
+    def request(self, method, path, data=None, headers=None):
         body = urllib.parse.urlencode(data).encode() if data is not None else None
         req = urllib.request.Request(self.base + path, data=body, method=method)
         req.add_header("Referer", self.base + path)
+        for name, value in (headers or {}).items():
+            req.add_header(name, value)
         if body is not None:
             req.add_header("Content-Type", "application/x-www-form-urlencoded")
         try:
@@ -85,6 +124,27 @@ def main():
     ap.add_argument("--expect", choices=["blastit", "baseline"], required=True)
     ap.add_argument("--password", default="demo-password")
     ap.add_argument("--wait", type=int, default=120)
+    ap.add_argument(
+        "--remote-addr",
+        help="the client address blastit must report: an IP (asserted exactly, as the "
+        "ingress sees this client), or `public` (any client address rather than the "
+        "ingress's, for a deployment whose client the driver cannot know)",
+    )
+    ap.add_argument(
+        "--expect-scheme",
+        choices=["http", "https"],
+        help="the scheme the deployment must report, where the driver knows whether the "
+        "ingress terminated TLS",
+    )
+    ap.add_argument(
+        "--forged-proto-ignored",
+        action="store_true",
+        help="the deployment cannot be lied to about the scheme: the ingress overwrites "
+        "X-Forwarded-Proto itself (measured on Traefik v3's default configuration) or "
+        "the peer is not trusted to say it. Not for a deployment whose edge forwards a "
+        "client's X-Forwarded-Proto untouched — there the client *is* who the scheme "
+        "says",
+    )
     args = ap.parse_args()
     under_blastit = args.expect == "blastit"
     wait_ready(args.base, args.wait)
@@ -147,6 +207,70 @@ def main():
         check(status in (400, 404), "path traversal-looking paths don't reach a privileged route")
     else:
         check(facts.get("has_password") is True, "baseline: the app holds the database password")
+
+    print("client address")
+    # E1: what the deployment believes about the client. `REMOTE_ADDR` is
+    # blastit's resolution — the socket peer, or a trusted client-IP header's
+    # entry — and `wsgi.url_scheme` is `X-Forwarded-Proto` from a peer blastit
+    # trusts, so a client that sends either header itself changes neither.
+    status, _, body = alice.request("GET", "/debug/request/")
+    facts = json.loads(body) if status == 200 else {}
+    check(status == 200, "the debug route answers the request probe")
+    honest_addr = facts.get("remote_addr")
+    honest_scheme = facts.get("scheme")
+    check(bool(honest_addr), f"the app is told who the client is ({honest_addr})")
+    check(honest_scheme in ("http", "https"), f"and which scheme it spoke ({honest_scheme})")
+    if args.remote_addr and args.remote_addr != "public":
+        check(
+            honest_addr == args.remote_addr,
+            f"REMOTE_ADDR is the client the ingress saw "
+            f"({honest_addr}, expected {args.remote_addr})",
+        )
+    elif under_blastit and args.remote_addr == "public":
+        check(
+            is_client_address(honest_addr),
+            f"REMOTE_ADDR is a client's address, not the ingress's ({honest_addr})",
+        )
+
+    forged = Client(args.base)
+    # The client sends every client-IP header a proxy might set, and every one of
+    # them is a lie it cannot make blastit believe.
+    headers = {
+        "X-Forwarded-For": "6.6.6.6",
+        "X-Real-Ip": "6.6.6.6",
+        "Forwarded": "for=6.6.6.6;proto=https",
+        "X-Client-IP": "6.6.6.6",
+        "True-Client-IP": "6.6.6.6",
+        "CF-Connecting-IP": "6.6.6.6",
+        "do-connecting-ip": "6.6.6.6",
+    }
+    if args.forged_proto_ignored:
+        headers["X-Forwarded-Proto"] = "https"
+    status, _, body = forged.request("GET", "/debug/request/", headers=headers)
+    facts = json.loads(body) if status == 200 else {}
+    forged_addr = facts.get("remote_addr")
+    check(
+        forged_addr != "6.6.6.6",
+        f"a client-IP header the client sent is never REMOTE_ADDR ({forged_addr})",
+    )
+    # The address, not the exact string: a peer is reported as `ip:port`, and
+    # this request is a connection of its own.
+    check(
+        address_of(forged_addr) == address_of(honest_addr),
+        f"and the client the deployment sees is unchanged ({forged_addr})",
+    )
+    if args.forged_proto_ignored:
+        check(
+            facts.get("scheme") == honest_scheme,
+            f"as is the scheme: X-Forwarded-Proto from an untrusted peer is not read "
+            f"({facts.get('scheme')})",
+        )
+    if args.expect_scheme:
+        check(
+            honest_scheme == args.expect_scheme,
+            f"wsgi.url_scheme is the ingress's own, not the client's "
+            f"({honest_scheme}, expected {args.expect_scheme})",
+        )
 
     print("egress and system calls")
     # A fresh client: the egress route has no grants at all, so the probe must

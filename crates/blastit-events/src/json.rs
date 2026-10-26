@@ -166,10 +166,11 @@ fn encode_with(event: &Event, truncated: &[&'static str]) -> String {
             push_member(&mut out, "part", &output.part.to_string());
             push_member(&mut out, "parts", &output.parts.to_string());
         }
-        EventKind::Boot(lifecycle)
-        | EventKind::Ready(lifecycle)
-        | EventKind::Shutdown(lifecycle) => {
-            push_lifecycle(&mut out, lifecycle, truncated);
+        EventKind::Boot(lifecycle) => {
+            push_lifecycle(&mut out, lifecycle, truncated, true);
+        }
+        EventKind::Ready(lifecycle) | EventKind::Shutdown(lifecycle) => {
+            push_lifecycle(&mut out, lifecycle, truncated, false);
         }
         EventKind::ManifestWarning(info) => {
             push_member(&mut out, "message", &json_string(&info.message));
@@ -189,7 +190,12 @@ fn encode_with(event: &Event, truncated: &[&'static str]) -> String {
     out
 }
 
-fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static str]) {
+/// The lifecycle fields, in the order §8.1 lists them.
+///
+/// `boot` writes `preset` even when there is none: a `boot` line with
+/// `"preset":null` is a boot with no preset, which is a different statement from
+/// a line that does not mention presets at all (E1).
+fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static str], boot: bool) {
     if let Some(stage) = &lifecycle.stage {
         push_member(out, "stage", &json_string(stage));
     }
@@ -257,6 +263,46 @@ fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static
     if !lifecycle.outputs.is_empty() || truncated.contains(&"outputs") {
         push_member(out, "outputs", &encode_outputs(&lifecycle.outputs));
     }
+    // E1: which preset is in force, what it supplied, and what an explicit
+    // variable overrode. The values are the preset's own — blastit's
+    // configuration, not the operator's — and the overridden settings are names
+    // only.
+    match &lifecycle.preset {
+        Some(preset) => push_member(out, "preset", &json_string(preset)),
+        None if boot => push_member(out, "preset", "null"),
+        None => {}
+    }
+    if !lifecycle.preset_settings.is_empty() || truncated.contains(&"preset_settings") {
+        push_member(
+            out,
+            "preset_settings",
+            &encode_settings(&lifecycle.preset_settings),
+        );
+    }
+    if !lifecycle.preset_overridden.is_empty() {
+        let names = lifecycle
+            .preset_overridden
+            .iter()
+            .map(|name| json_string(name))
+            .collect::<Vec<String>>()
+            .join(",");
+        push_member(out, "preset_overridden", &format!("[{names}]"));
+    }
+}
+
+/// The presets' settings as a JSON object: variable name to the preset's value.
+fn encode_settings(settings: &BTreeMap<String, String>) -> String {
+    let mut out = String::from("{");
+    for (index, (name, value)) in settings.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(name));
+        out.push(':');
+        out.push_str(&json_string(value));
+    }
+    out.push('}');
+    out
 }
 
 fn encode_capabilities(capabilities: &[String]) -> String {
@@ -365,6 +411,19 @@ fn string_slots(event: &mut Event) -> Vec<(&'static str, &mut String)> {
             }
             if let Some(reason) = lifecycle.immortalize_reason.as_mut() {
                 slots.push(("immortalize_reason", reason));
+            }
+            if let Some(preset) = lifecycle.preset.as_mut() {
+                slots.push(("preset", preset));
+            }
+            // The preset's own values, and the names it was overridden for.
+            // Presets are blastit's own tables, so these cannot grow with the
+            // environment — but a value that is long enough to matter is cut
+            // like any other string, so the line limit holds here too.
+            for value in lifecycle.preset_settings.values_mut() {
+                slots.push(("preset_settings", value));
+            }
+            for name in &mut lifecycle.preset_overridden {
+                slots.push(("preset_overridden", name));
             }
         }
         EventKind::ManifestWarning(info) => {
@@ -727,6 +786,7 @@ mod tests {
                 "duration_ms",
                 "seccomp",
                 "outputs",
+                "preset",
             ]
         );
         let value = parse(&json);
@@ -760,6 +820,7 @@ mod tests {
                 "mem_total",
                 "mem_used",
                 "max_view_processes",
+                "preset",
             ]
         );
         let value = parse(&json);
@@ -1001,7 +1062,8 @@ mod tests {
                 "component",
                 "stage",
                 "seccomp",
-                "privilege"
+                "privilege",
+                "preset",
             ]
         );
         let value = parse(&json);
@@ -1025,7 +1087,8 @@ mod tests {
                 "component",
                 "stage",
                 "privilege",
-                "capabilities"
+                "capabilities",
+                "preset",
             ]
         );
         let value = parse(&json);
@@ -1079,6 +1142,7 @@ mod tests {
                 "immortalize",
                 "immortalize_reason",
                 "immortalized",
+                "preset",
             ]
         );
         let value = check_fits(&event, &json);
@@ -1093,6 +1157,113 @@ mod tests {
         );
         // A skipped pass has no duration: `immortalize_ms` is the pass's own.
         assert!(value.get("immortalize_ms").is_none());
+    }
+
+    #[test]
+    fn a_boot_event_names_the_preset_and_its_settings() {
+        // E1: the preset, the settings it supplied and their values, and the
+        // settings an explicit variable overrode — names only, because those
+        // values came from the environment.
+        let event = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("config")
+                .with_preset("compose-traefik")
+                .with_preset_setting("BLASTIT_CLIENT_IP_HEADER", "x-forwarded-for")
+                .with_preset_setting("BLASTIT_FAIR_QUEUING", "on")
+                .with_preset_override("BLASTIT_LOG_FORMAT"),
+        ));
+        let json = encode_json(&event);
+        assert_eq!(
+            top_level_keys(&json),
+            [
+                "ts",
+                "level",
+                "event",
+                "component",
+                "stage",
+                "preset",
+                "preset_settings",
+                "preset_overridden",
+            ]
+        );
+        let value = check_fits(&event, &json);
+        assert_eq!(value["preset"], "compose-traefik");
+        assert_eq!(
+            value["preset_settings"],
+            serde_json::json!({
+                "BLASTIT_CLIENT_IP_HEADER": "x-forwarded-for",
+                "BLASTIT_FAIR_QUEUING": "on",
+            })
+        );
+        assert_eq!(
+            value["preset_overridden"],
+            serde_json::json!(["BLASTIT_LOG_FORMAT"])
+        );
+        // Never the overriding value, and never a value of the environment's.
+        assert!(!json.contains("\"log_format\""));
+    }
+
+    #[test]
+    fn a_boot_event_without_a_preset_says_null() {
+        // E1: a `boot` line that says `"preset":null` is a boot with no preset,
+        // which is a different statement from a line that never mentions one —
+        // and `ready` and `shutdown`, which share the payload, stay quiet.
+        let boot = fixture::event(EventKind::Boot(Lifecycle::default().with_stage("stage0")));
+        let json = encode_json(&boot);
+        assert_eq!(
+            top_level_keys(&json),
+            ["ts", "level", "event", "component", "stage", "preset"]
+        );
+        assert!(check_fits(&boot, &json)["preset"].is_null());
+
+        for kind in [
+            EventKind::Ready(Lifecycle::default().with_stage("serving")),
+            EventKind::Shutdown(Lifecycle::default().with_stage("drain")),
+        ] {
+            let event = fixture::event(kind);
+            let json = encode_json(&event);
+            assert_eq!(
+                top_level_keys(&json),
+                ["ts", "level", "event", "component", "stage"]
+            );
+            assert!(!json.contains("preset"));
+        }
+
+        // A `ready` that does carry one reports it, for a reader that only kept
+        // the last lifecycle line.
+        let ready = fixture::event(EventKind::Ready(
+            Lifecycle::default()
+                .with_stage("serving")
+                .with_preset("compose-traefik"),
+        ));
+        let value = check_fits(&ready, &encode_json(&ready));
+        assert_eq!(value["preset"], "compose-traefik");
+        assert!(value.get("preset_settings").is_none());
+        assert!(value.get("preset_overridden").is_none());
+    }
+
+    #[test]
+    fn a_long_preset_setting_is_cut_and_named() {
+        // The preset tables are blastit's own, but the line limit has to hold
+        // whatever they hold.
+        let event = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_preset("compose-traefik")
+                .with_preset_setting("BLASTIT_TRUSTED_PROXIES", "x".repeat(4000))
+                .with_preset_override("y".repeat(4000)),
+        ));
+        let json = encode_json(&event);
+        let value = check_fits(&event, &json);
+        let truncated = value["truncated"].as_array().unwrap();
+        assert!(
+            truncated.contains(&serde_json::json!("preset_settings")),
+            "{value}"
+        );
+        assert!(
+            truncated.contains(&serde_json::json!("preset_overridden")),
+            "{value}"
+        );
+        assert!(value["preset"].is_string(), "the name stays: {value}");
     }
 
     #[test]

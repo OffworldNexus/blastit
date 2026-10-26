@@ -268,6 +268,12 @@ impl Server {
 
     /// One HTTP/1.1 request, answered in full.
     fn request(&self, method: &str, target: &str) -> Response {
+        self.request_with(method, target, &[])
+    }
+
+    /// The same, with headers of the caller's own (E1: the client-IP rules are
+    /// about what a request *says*, so a test has to be able to lie).
+    fn request_with(&self, method: &str, target: &str, extra: &[(&str, &str)]) -> Response {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap_or_else(|err| {
             panic!(
                 "connecting to the server for {target}: {err}\nstdout:\n{}",
@@ -277,9 +283,12 @@ impl Server {
         stream
             .set_read_timeout(Some(Duration::from_secs(20)))
             .unwrap();
-        let request = format!(
-            "{method} {target} HTTP/1.1\r\nHost: blastit.test\r\nConnection: close\r\n\r\n"
-        );
+        let mut request =
+            format!("{method} {target} HTTP/1.1\r\nHost: blastit.test\r\nConnection: close\r\n");
+        for (name, value) in extra {
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        request.push_str("\r\n");
         stream.write_all(request.as_bytes()).unwrap();
         let mut raw = Vec::new();
         stream.read_to_end(&mut raw).unwrap();
@@ -1165,13 +1174,19 @@ fn the_boot_events_say_init_runs_as_root() {
     );
     assert_eq!(server.get("/one").status, 200);
     let boots = server.events("boot");
-    assert!(boots.len() >= 2, "stage 0 and preload: {boots:?}");
+    assert!(boots.len() >= 3, "stage 0, config and preload: {boots:?}");
     for boot in &boots {
         assert_eq!(boot["privilege"], "root", "{boot}");
         assert!(boot.get("capabilities").is_none(), "{boot}");
     }
     assert_eq!(boots[0]["stage"], "stage0");
-    assert_eq!(boots[1]["stage"], "preload");
+    assert_eq!(boots[1]["stage"], "config");
+    assert_eq!(boots[2]["stage"], "preload");
+    // E1: with no preset, every `boot` line says `preset: null` rather than
+    // leaving an operator to wonder whether this build has presets at all.
+    for boot in &boots {
+        assert!(boot["preset"].is_null(), "{boot}");
+    }
     // D6: init's uid must be a dedicated one, and this very test harness is
     // another process of uid 0 — so the boot says so, once, before it forks
     // anything. (On a deployment where nothing else runs as that uid, there is no
@@ -1913,4 +1928,180 @@ fn connect_as(uid: u32, path: &str) -> Option<i32> {
             }
         }
     }
+}
+
+#[test]
+fn an_unknown_preset_is_refused_with_the_list_of_presets() {
+    if !needs_root("preset refusal") {
+        return;
+    }
+    // E1: a startup error, before anything is forked, naming the flag the
+    // operator used and every preset this build knows.
+    let fixture = Fixture::new("preset-refusal");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    let text = run_to_exit(
+        &[
+            std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit")),
+            std::ffi::OsStr::new("--preset=compose-trafik"),
+        ],
+        &[
+            ("PORT", "8097"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("PYTHONPATH", &fixture.python_path()),
+            ("BLASTIT_UID_BASE", "48100"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+        ],
+        0,
+    );
+    assert!(text.contains("unknown preset"), "{text}");
+    assert!(text.contains("compose-trafik"), "{text}");
+    assert!(text.contains("--preset"), "{text}");
+    for preset in ["digitalocean-paas", "compose-traefik"] {
+        assert!(text.contains(preset), "{preset} is missing from\n{text}");
+    }
+
+    // The same name through the environment, named as the variable it is.
+    let text = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", "8097"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("PYTHONPATH", &fixture.python_path()),
+            ("BLASTIT_UID_BASE", "48100"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+            ("BLASTIT_PRESET", "compose-trafik"),
+        ],
+        0,
+    );
+    assert!(text.contains("BLASTIT_PRESET"), "{text}");
+    assert!(text.contains("unknown preset"), "{text}");
+}
+
+#[test]
+fn a_preset_is_accepted_and_reported_at_boot() {
+    if !needs_root("preset") {
+        return;
+    }
+    // E1: `--preset` on the command line, reported by the boot with what the
+    // preset supplied and what the environment overrode (this harness sets
+    // `BLASTIT_LOG_FORMAT`, which the preset also supplies), and in force in the
+    // resolver: `compose-traefik` trusts every peer, so a client-IP header is
+    // believed.
+    let base = 48_000;
+    let server = Server::start_with(
+        "preset",
+        base,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[],
+        &[env!("CARGO_BIN_EXE_blastit"), "--preset=compose-traefik"],
+        None,
+    );
+
+    let boots = server.events("boot");
+    let config = boots
+        .iter()
+        .find(|boot| boot["stage"] == "config")
+        .unwrap_or_else(|| panic!("no config boot event: {boots:?}"));
+    assert_eq!(config["preset"], "compose-traefik", "{config}");
+    assert_eq!(
+        config["preset_settings"],
+        serde_json::json!({
+            "BLASTIT_CLIENT_IP_HEADER": "x-forwarded-for",
+            "BLASTIT_TRUSTED_PROXIES": "*",
+            "BLASTIT_FAIR_QUEUING": "on",
+        }),
+        "{config}"
+    );
+    assert_eq!(
+        config["preset_overridden"],
+        serde_json::json!(["BLASTIT_LOG_FORMAT"]),
+        "the harness's own `BLASTIT_LOG_FORMAT` wins over the preset's: {config}"
+    );
+    // The preload line says the same thing, so a log read from the middle is
+    // still readable.
+    let preload = boots
+        .iter()
+        .find(|boot| boot["stage"] == "preload")
+        .unwrap_or_else(|| panic!("no preload boot event: {boots:?}"));
+    assert_eq!(preload["preset"], "compose-traefik", "{preload}");
+
+    // Every peer is trusted, so the resolver believes the header — and takes
+    // its rightmost entry, which for a single-value header is the only one.
+    assert_eq!(
+        server
+            .request_with("GET", "/one", &[("X-Forwarded-For", "203.0.113.7")])
+            .status,
+        200
+    );
+    let requests = server.events("request");
+    let forged = requests
+        .iter()
+        .find(|event| event["path"] == "/one")
+        .unwrap_or_else(|| panic!("no request event: {requests:?}"));
+    assert_eq!(forged["remote_addr"], "203.0.113.7", "{forged}");
+
+    // Without the header, the socket peer is the client — its own ephemeral
+    // port, which is what `REMOTE_ADDR` is when nothing is forwarded.
+    assert_eq!(server.get("/one").status, 200);
+    let requests = server.events("request");
+    let honest = requests.last().expect("a request event");
+    assert!(
+        honest["remote_addr"]
+            .as_str()
+            .is_some_and(|addr| addr.starts_with("127.0.0.1:")),
+        "{honest}"
+    );
+    assert!(
+        server
+            .stdout_text()
+            .contains("\"preset\":\"compose-traefik\"")
+    );
+}
+
+#[test]
+fn a_client_ip_header_is_only_believed_when_it_is_configured_to_be() {
+    if !needs_root("trusted proxies") {
+        return;
+    }
+    // E1's other side, in the same harness: with no preset and no
+    // `BLASTIT_TRUSTED_PROXIES`, the default trusts loopback only — and this
+    // test's client *is* loopback. The difference the preset makes is which
+    // header is read, so a `do-connecting-ip` sent here is not read at all.
+    let server = Server::start(
+        "trust",
+        48_500,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[("BLASTIT_CLIENT_IP_HEADER", "do-connecting-ip")],
+    );
+    assert_eq!(
+        server
+            .request_with("GET", "/one", &[("Do-Connecting-Ip", "203.0.113.7")])
+            .status,
+        200
+    );
+    let requests = server.events("request");
+    let event = requests.last().expect("a request event");
+    assert_eq!(event["remote_addr"], "203.0.113.7", "{event}");
+    // A different header is not consulted in its place.
+    assert_eq!(
+        server
+            .request_with("GET", "/one", &[("X-Forwarded-For", "198.51.100.9")])
+            .status,
+        200
+    );
+    let requests = server.events("request");
+    let event = requests.last().expect("a request event");
+    assert!(
+        event["remote_addr"]
+            .as_str()
+            .is_some_and(|addr| addr.starts_with("127.0.0.1:")),
+        "{event}"
+    );
 }

@@ -205,6 +205,28 @@ fn lifecycle_summary(lifecycle: &Lifecycle) -> String {
         }
         parts.push(format!("outputs: {}", rendered.join(", ")));
     }
+    // E1: the preset in force, what it supplied, and what an explicit variable
+    // overrode. The names are the same ones the JSON format uses, so a reader
+    // can move between the two.
+    if let Some(preset) = &lifecycle.preset {
+        parts.push(format!("preset={}", escape_inline(preset)));
+    }
+    if !lifecycle.preset_settings.is_empty() {
+        let settings: Vec<String> = lifecycle
+            .preset_settings
+            .iter()
+            .map(|(name, value)| format!("{}={}", escape_inline(name), escape_inline(value)))
+            .collect();
+        parts.push(format!("preset_settings: {}", settings.join(", ")));
+    }
+    if !lifecycle.preset_overridden.is_empty() {
+        let names: Vec<String> = lifecycle
+            .preset_overridden
+            .iter()
+            .map(|name| escape_inline(name))
+            .collect();
+        parts.push(format!("preset_overridden: {}", names.join(", ")));
+    }
     parts.join("  ")
 }
 
@@ -500,6 +522,33 @@ mod tests {
         assert!(line.contains("immortalize=on"), "{line}");
         assert!(line.contains("immortalized=1610300"), "{line}");
         assert!(line.contains("immortalize_ms=1785.4ms"), "{line}");
+    }
+
+    #[test]
+    fn lifecycle_shows_the_preset_and_its_settings() {
+        // E1: the pretty line says the same as the JSON one, with the same
+        // `preset_*` names so a reader can move between the two.
+        let event = fixture::event(EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("config")
+                .with_preset("compose-traefik")
+                .with_preset_setting("BLASTIT_CLIENT_IP_HEADER", "x-forwarded-for")
+                .with_preset_override("BLASTIT_LOG_FORMAT"),
+        ));
+        let line = encode_pretty(&event, false);
+        assert!(line.contains("preset=compose-traefik"), "{line}");
+        assert!(
+            line.contains("preset_settings: BLASTIT_CLIENT_IP_HEADER=x-forwarded-for"),
+            "{line}"
+        );
+        assert!(
+            line.contains("preset_overridden: BLASTIT_LOG_FORMAT"),
+            "{line}"
+        );
+
+        let plain = fixture::event(EventKind::Boot(Lifecycle::default().with_stage("stage0")));
+        let line = encode_pretty(&plain, false);
+        assert!(!line.contains("preset"), "{line}");
     }
 
     #[test]

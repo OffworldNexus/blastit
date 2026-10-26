@@ -48,12 +48,27 @@ struct Args {
     /// `--seccomp=0|1`: §7.3's filters, for the one role that is `execve`'d and
     /// so cannot read `BLASTIT_SECCOMP` from the environment (§4).
     seccomp: Option<bool>,
+    /// `--preset=NAME`: the §8.2 defaults to start from (E1).
+    preset: Option<String>,
 }
 
 /// How to use the program, printed with a command-line error.
+///
+/// The presets are listed with their one-line descriptions: `--preset` is the
+/// one argument whose valid values an operator cannot guess (E1).
+fn usage() -> String {
+    format!(
+        "{USAGE}\n\n\
+         presets (also `BLASTIT_PRESET=NAME`; an explicit BLASTIT_* variable wins over any \
+         of them):\n{}",
+        crate::config::preset_help()
+    )
+}
+
+/// The roles and their arguments; [`usage`] adds the presets.
 const USAGE: &str = "\
 usage:
-  blastit                                   stage 0 (no arguments)
+  blastit [--preset=NAME]                   stage 0
   blastit --stage=1 --config-fd=N \\
           [--dbproxy-pid=P --dbproxy-events-fd=N \\
            --dbproxy-stdout-fd=N --dbproxy-stderr-fd=N]   stage 1
@@ -70,10 +85,19 @@ usage:
 /// raises out of `main()` — the caller turns it into `ExitCode::from` or
 /// `SystemExit`. Stage 0 and stage 1 never return at all.
 pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
+    // E1: the usage text lists the presets with their one-line descriptions,
+    // which is the only way to find out what `--preset` accepts.
+    if argv
+        .iter()
+        .any(|argument| argument == "--help" || argument == "-h")
+    {
+        println!("{}", usage());
+        return SUCCESS;
+    }
     match parse(&argv) {
         Ok(args) => dispatch(args, &host, py),
         Err(message) => {
-            eprintln!("blastit: {message}\n{USAGE}");
+            eprintln!("blastit: {message}\n{}", usage());
             FAILURE
         }
     }
@@ -81,6 +105,9 @@ pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
 
 /// The exit status of everything that refuses to start (§4).
 const FAILURE: u8 = 1;
+
+/// The exit status of `--help`, which is not a failure.
+const SUCCESS: u8 = 0;
 
 /// Runs the role the arguments name.
 fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
@@ -125,7 +152,7 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
     }
 
     match args.stage {
-        None | Some(0) => stage0::run(host, py.is_some()),
+        None | Some(0) => stage0::run(host, py.is_some(), args.preset.as_deref()),
         Some(1) => {
             let Some(config_fd) = args.config_fd else {
                 eprintln!("blastit: --stage=1 needs --config-fd");
@@ -198,6 +225,7 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
             "--events-fd" => args.events_fd = Some(descriptor(value, key)?),
             "--ready-fd" => args.ready_fd = Some(descriptor(value, key)?),
             "--seccomp" => args.seccomp = Some(flag(value, key)?),
+            "--preset" => args.preset = Some(preset_name(value)?),
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
@@ -206,6 +234,13 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
     // process that still has the variable.
     if args.seccomp.is_some() && args.role.as_deref() != Some("dbproxy") {
         return Err("`--seccomp` is only for `--role=dbproxy`".to_string());
+    }
+    // E1: the preset belongs to stage 0, which is the stage that reads the
+    // environment. Stage 1 gets the values the preset supplied through the
+    // configuration document, the same way it gets every other setting, and the
+    // roles below stage 1 have no configuration of their own.
+    if args.preset.is_some() && (args.stage == Some(1) || args.role.is_some()) {
+        return Err("`--preset` is only for stage 0".to_string());
     }
     Ok(args)
 }
@@ -234,6 +269,21 @@ fn flag(value: &str, key: &str) -> Result<bool, String> {
         "0" => Ok(false),
         other => Err(format!("`{key}` wants 0 or 1, not `{other}`")),
     }
+}
+
+/// A `--preset` argument: a name, without the whitespace an operator may have
+/// typed around it (E1).
+///
+/// The name itself is checked where the presets are known (E1,
+/// [`crate::stage0`] hands it to `Config::from_env`), which is also where
+/// `BLASTIT_PRESET` is checked; this only refuses the empty value, which is a
+/// flag that was meant to carry something.
+fn preset_name(value: &str) -> Result<String, String> {
+    let name = value.trim();
+    if name.is_empty() {
+        return Err("`--preset` wants a preset name".to_string());
+    }
+    Ok(name.to_string())
 }
 
 #[cfg(test)]
@@ -316,5 +366,59 @@ mod tests {
     fn an_interpreter_never_holds_the_credentials() {
         let err = role_is_allowed("dbproxy", true).unwrap_err();
         assert!(err.contains("blastit-dbproxy"), "{err}");
+    }
+
+    #[test]
+    fn the_preset_flag_parses_and_belongs_to_stage_zero() {
+        // E1: `--preset=NAME` is a stage 0 argument. Stage 1 reads the values
+        // the preset supplied out of the configuration document instead, and
+        // the roles below it have no configuration to apply a preset to.
+        let args = parse(&["--preset=compose-traefik".to_string()]).unwrap();
+        assert_eq!(args.preset.as_deref(), Some("compose-traefik"));
+        assert!(args.stage.is_none());
+
+        // Whitespace around it is the operator's, not part of the name.
+        let padded = parse(&["--preset= compose-traefik ".to_string()]).unwrap();
+        assert_eq!(padded.preset.as_deref(), Some("compose-traefik"));
+
+        // An empty value is a flag that was meant to carry something.
+        assert!(parse(&["--preset=".to_string()]).is_err());
+        assert!(parse(&["--preset= ".to_string()]).is_err());
+        assert!(
+            parse(&[
+                "--stage=1".to_string(),
+                "--preset=compose-traefik".to_string()
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--role=dbproxy".to_string(),
+                "--secrets-fd=3".to_string(),
+                "--events-fd=4".to_string(),
+                "--ready-fd=5".to_string(),
+                "--preset=compose-traefik".to_string(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_usage_text_lists_the_presets() {
+        // E1: `--preset` is the one argument whose values an operator cannot
+        // guess, so `--help` (and every argument error) names them, one line
+        // each.
+        let usage = usage();
+        assert!(usage.contains("--preset=NAME"), "{usage}");
+        assert!(usage.contains("BLASTIT_PRESET=NAME"), "{usage}");
+        for preset in crate::config::PRESETS {
+            assert!(usage.contains(preset.name()), "{usage}");
+            assert!(usage.contains(preset.summary()), "{usage}");
+        }
+        // And one per line, not run together.
+        assert!(
+            usage.lines().filter(|line| line.contains(": ")).count() >= 2,
+            "{usage}"
+        );
     }
 }

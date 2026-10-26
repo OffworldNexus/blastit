@@ -7,6 +7,12 @@ the check is that everything else is unchanged: the uid layout, the secret
 barrier, the seccomp filters, and a view process that holds no capability at
 all.
 
+E1 adds a second thing this stack is: a **Compose deployment behind an ingress**.
+Traefik v3 is published on loopback, the app publishes no port at all — the only
+way in is through Traefik — and the app runs with
+`BLASTIT_PRESET=compose-traefik`, which is the trust decision for that
+deployment: read `X-Forwarded-For`, and believe the peer that sent it.
+
 ```console
 $ uv run e2e/rootless/run.py --local       # Docker Compose, on this machine
 $ uv run e2e/rootless/run.py --droplet     # a DigitalOcean Droplet in ams3
@@ -33,6 +39,31 @@ assertions:
 * as a worker's uid: a plain `python3`, and a `manage.py`, hold nothing and
   cannot `setuid(0)`: the *shared* interpreter grants nothing, and the uid that
   can run the copy is a dedicated one (B1).
+
+## What E1 checks
+
+The preset is the deployment's identity, so the run checks it three ways — the
+boot event, the wire and the log:
+
+* the `boot` event of the `config` and the `preload` phase say
+  `"preset": "compose-traefik"` with the settings it supplied
+  (`BLASTIT_CLIENT_IP_HEADER=x-forwarded-for`, `BLASTIT_TRUSTED_PROXIES=*`,
+  `BLASTIT_FAIR_QUEUING=on`, `BLASTIT_LOG_FORMAT=json`) and nothing overriding
+  them;
+* `REMOTE_ADDR`, read from `/debug/request/` in the app, is the address Traefik
+  saw for the test client — the compose network's gateway, which the driver
+  reads with `docker network inspect`. A client that sends `X-Forwarded-For`,
+  `X-Real-Ip`, `X-Forwarded-Proto`, `Forwarded`, `X-Client-IP`,
+  `True-Client-IP`, `CF-Connecting-IP` or `do-connecting-ip` of its own changes
+  neither the address nor the scheme: Traefik's default configuration
+  **overwrites** `X-Forwarded-*` from a peer it does not trust (measured; see
+  ARCHITECTURE §10's Traefik subsection);
+* `wsgi.url_scheme` follows Traefik: `http` over its plaintext entry point (even
+  when the client claims `X-Forwarded-Proto: https`), and `https` behind its TLS
+  entry point, where Traefik terminates TLS with a self-signed certificate.
+
+Two published ports, in other words: `E2E_PORT` (Traefik's `:80`) and
+`E2E_TLS_PORT` (Traefik's `:443`, for the scheme check above).
 
 ## The capabilities, and why each one is there
 

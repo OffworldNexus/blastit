@@ -49,10 +49,12 @@ def log(msg):
 
 
 def app_spec(name, cluster, image):
-    # §10, D5: the socket peer is a DigitalOcean ingress address (10.244.x.x
-    # here, 100.127.x on other clusters) and the edge overwrites
-    # `do-connecting-ip` with the real client, so that is the header blastit is
-    # told to read — and only from those ranges.
+    # E1: the App Platform trust decision is a preset. It sets
+    # `BLASTIT_CLIENT_IP_HEADER=do-connecting-ip` and trusts every peer, which
+    # §10 explains: a service is only reachable through DO's load balancer and
+    # the app's own internal services, and the edge *overwrites* that header with
+    # the real client address (measured; see §10's table), so no client can forge
+    # it. It also turns on fair queuing and JSON logs.
     ref, tag = image.rsplit(":", 1)
     _, owner, repo = ref.split("/", 2)
     creds = os.environ.get("GHCR_CREDENTIALS", "")
@@ -92,15 +94,9 @@ jobs:
     http_path: /_blastit/health
     initial_delay_seconds: 20
   envs:
-{common_env}  - key: BLASTIT_LOG_FORMAT
+{common_env}  - key: BLASTIT_PRESET
     scope: RUN_TIME
-    value: json
-  - key: BLASTIT_CLIENT_IP_HEADER
-    scope: RUN_TIME
-    value: do-connecting-ip
-  - key: BLASTIT_TRUSTED_PROXIES
-    scope: RUN_TIME
-    value: 10.0.0.0/8,100.64.0.0/10
+    value: digitalocean-paas
 """
 
 
@@ -231,15 +227,25 @@ def full_run(args):
         log(f"app live at {url}")
         wait_http(url)
 
-        rc = subprocess.run([sys.executable, os.path.join(HERE, "scenario.py"), url, "--expect", "blastit"]).returncode
+        rc = subprocess.run(
+            [sys.executable, os.path.join(HERE, "scenario.py"), url, "--expect", "blastit",
+             # E1: the client address must be a client's, not the platform
+             # ingress's — the driver cannot know the runner's public address, so
+             # the scenario checks what it can: that `REMOTE_ADDR` is nobody's
+             # forged header and is not an ingress.
+             "--remote-addr", "public"],
+        ).returncode
         time.sleep(20)  # let App Platform's log forwarding catch up
         os.makedirs(args.out, exist_ok=True)
         log_path = os.path.join(args.out, "live-app.log")
         with open(log_path, "w") as f:
             f.write(run_logs(app["id"]))
         log(f"app log saved to {log_path}")
-        rc |= subprocess.run([sys.executable, os.path.join(HERE, "check_logs.py"), log_path],
-                             env={**os.environ, "E2E_SECRET": password, "E2E_SECRET_VAR": "E2E_SECRET"}).returncode
+        rc |= subprocess.run(
+            [sys.executable, os.path.join(HERE, "check_logs.py"), log_path],
+            env={**os.environ, "E2E_SECRET": password, "E2E_SECRET_VAR": "E2E_SECRET",
+                 "E2E_EXPECT_PRESET": "digitalocean-paas"},
+        ).returncode
     except KeyboardInterrupt as e:
         log(f"interrupted ({e}), cleaning up")
         rc = 130

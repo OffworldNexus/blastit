@@ -13,6 +13,9 @@ Three extra endpoints exist to test the sandbox, not the app:
   points at a local socket.
 * ``/debug/egress/`` and ``/egress/probe/`` report what the process's system
   calls allow; only the second route may reach the network.
+* ``/debug/request/`` reports who blastit says the client is
+  (``REMOTE_ADDR``), which scheme it derived, and which forwarded headers
+  arrived: E1's proof that a preset's trust rules are the ones in force.
 * ``/debug/caps/`` reports what the process's *capabilities* are: D6's proof
   that a rootless init still hands a view nothing to escalate with. It asks the
   kernel through ``prctl(2)``, and reports ``/proc/self/status`` beside it,
@@ -215,6 +218,35 @@ def _kernel_set(subcommand, *prefix):
         if answer:
             caps.append(cap)
     return caps, None
+
+
+def request_probe(request):
+    """Report who the server says the client is, and how it read the transport.
+
+    E1: a configuration preset is mostly a decision about *whom to believe* —
+    which client-IP header, from which peers — so the only way to check one is to
+    ask the app what blastit resolved. ``REMOTE_ADDR`` is that decision: either
+    the socket peer (``ip:port``, nothing was believed) or a bare address that a
+    trusted header named. ``wsgi.url_scheme`` is the same decision applied to
+    ``X-Forwarded-Proto``: ``https`` only when a peer blastit trusts said so,
+    which is why a client's own ``X-Forwarded-Proto`` cannot make a plaintext
+    deployment report HTTPS.
+
+    The headers are reported as booleans, never echoed back: this is a probe of
+    what the deployment decided, not a header dump.
+    """
+    return JsonResponse(
+        {
+            "route": request.META.get("blastit.route"),
+            "remote_addr": request.META.get("REMOTE_ADDR"),
+            "scheme": request.META.get("wsgi.url_scheme"),
+            "host": request.META.get("HTTP_HOST"),
+            "saw_forwarded_for": "HTTP_X_FORWARDED_FOR" in request.META,
+            "saw_real_ip": "HTTP_X_REAL_IP" in request.META,
+            "saw_forwarded_proto": "HTTP_X_FORWARDED_PROTO" in request.META,
+            "saw_do_connecting_ip": "HTTP_DO_CONNECTING_IP" in request.META,
+        }
+    )
 
 
 def caps_probe(request):

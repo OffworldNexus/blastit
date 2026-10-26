@@ -28,7 +28,11 @@ def main():
             print("compose up failed")
             return 1
         rc = subprocess.run([sys.executable, os.path.join(HERE, "scenario.py"), f"http://127.0.0.1:{PORT}",
-                             "--expect", "blastit"]).returncode
+                             "--expect", "blastit",
+                             # The app is published directly here, so the peer is
+                             # not a trusted one and a header the client sends is
+                             # not read at all (E1).
+                             "--forged-proto-ignored"]).returncode
         logs = compose("logs", "--no-color", "--no-log-prefix", "app", capture_output=True, text=True).stdout
         with open(os.path.join(HERE, "app.log"), "w") as f:
             f.write(logs)
