@@ -45,11 +45,25 @@ Measured on App Platform ([§10](https://github.com/OffworldNexus/blastit/blob/d
 | `X-Real-IP` | stripped |
 | `X-Forwarded-For` | appended to: `<client-supplied…>,<real client>,<Cloudflare edge>` |
 | `Forwarded`, `True-Client-IP`, `X-Client-IP` | pass through **forged** |
+| `X-Forwarded-Proto` | **not measured.** So blastit's rule for it — read only from a trusted peer, and only if the value is exactly `http` or `https` — is not known to be enough here: with every peer trusted, treat `wsgi.url_scheme` as client-controlled until somebody probes it |
 
 `do-connecting-ip` is therefore the one header an operator can believe: the
 edge replaces it, so nothing a client sends can survive in it. It is not
 `x-forwarded-for`, because the edge *appends* to that one — a forged leftmost
 entry would sit in the chain right next to the real client.
+
+!!! warning "`wsgi.url_scheme` is the one thing this preset does not pin down"
+
+    `X-Forwarded-Proto` is measured to be **overwritten** by Traefik, and that is
+    what makes reading it safe
+    [behind Traefik](compose-traefik.md#what-it-sets). On App Platform nobody has
+    probed what the edge does with it, and the preset trusts every peer — so a
+    client may be able to say `https`. Django's
+    `SECURE_PROXY_SSL_HEADER`, `request.is_secure()` and every absolute URL built
+    from the scheme are the things that depend on it. Until it is probed, do not
+    rely on the scheme for anything security-relevant, and check it with a
+    throwaway route the way
+    [the client address is checked](anything-else.md#working-it-out-for-your-own-ingress).
 
 **Trusting every peer is safe here for one reason, and it is not the peer
 list.** What makes it safe is that the header being read is one the edge
@@ -219,7 +233,7 @@ services:
 $ doctl apps create --spec app.yaml
 ```
 
-Then the first three lines of the service's log should say which mode and which
+Then the first two lines of the service's log should say which mode and which
 preset are in force:
 
 ```json

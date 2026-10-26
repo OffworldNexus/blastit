@@ -168,6 +168,12 @@ route's existing `queries = [ … ]` (or a `[route.<proxy>.tables]` section is
 added under the grant), and the rest of the file — comments, order, everything —
 stays where it was.
 
+<!-- E2b -->
+A route whose grant is written **only** as `[route.<proxy>.tables]` is one it
+writes too: `--write` adds to a `tables` grant as happily as to a `queries` list,
+so a route that was moved to table grants in one step does not have to be moved
+back to accept a folded statement.
+
 It skips what your manifest already allows, and it never adds a grant to an
 `unrestricted` route: there is nothing left to grant there.
 
@@ -184,7 +190,7 @@ with the app's privileges.
 * **a statement whose kind a grant is not an allowlist for** — DDL, `SET` and
   `RESET` (`SET ROLE` above all), `COPY`, `DO`, `CALL`, `LOCK`, `GRANT`,
   `REVOKE`, `TRUNCATE`, `VACUUM`, `LISTEN`/`NOTIFY`, the transaction commands;
-* **a statement calling a function outside blastit's safe set** —
+* **a statement calling a function outside [blastit's safe set](../reference/manifest.md#the-built-in-safe-function-set)** —
   `set_config`, `pg_read_file`, `lo_import`, `pg_terminate_backend`, an
   extension's function.
 
@@ -211,7 +217,7 @@ grant:
 
 ## Keeping the manifest honest
 
-Two habits keep a manifest from drifting away from the app.
+Three habits keep a manifest from drifting away from the app.
 
 **Fail CI when it drifts.** With the plugin:
 
@@ -225,10 +231,26 @@ that is missing, a path that is unrouted, a route that needs
 connection-setup statement some route does not grant, a statement the plugin
 could not read.
 
+**Without the plugin, fold a staging log before a release.** A Flask, Pyramid or
+httpx-based app has no `--blastit-strict` to lean on, so the equivalent gate is a
+run of the real app against a staging database and then one command that turns
+everything it was denied into a grant:
+
+```console
+$ blastit-manifest fold staging.log --manifest blastit.toml            # what is missing
+$ blastit-manifest fold staging.log --manifest blastit.toml --write    # add it
+$ git diff blastit.toml                                                # read the diff, then commit
+```
+
+Point the app at blastit, walk the paths a release touches, and let the fold do
+the typing. The same thing works on a production log when a route starts being
+denied there.
+
 **Keep one group for connection setup.** psycopg runs a few statements of its
 own every time a connection is opened, and under blastit that is *every
-request*. Django's `set_config('TimeZone', …)` is one; a `connection_created`
-receiver that runs a `SET` is another. None of them goes through a request's
+request*. Django's `set_config('TimeZone', …)` is one, SQLAlchemy's
+`select pg_catalog.version()` is another, and a `connection_created`
+receiver that runs a `SET` is a third. None of them goes through a request's
 cursors, so they belong in a group attached to every route:
 
 ```toml
@@ -241,14 +263,14 @@ queries = ["SELECT set_config('TimeZone', $1, false)", "SELECT 1"]
 The plugin reports them separately, as `connection_setup`, with the routes that
 do not grant them.
 
-!!! note "A global group's `SELECT set_config(…)` looks unused, and is not"
+!!! note "Connection-setup statements are reported separately, and are not dead grants"
 
-    A statement that only runs while a connection is opened is reported in
-    `connection_setup`, not as a request's statement — so the grant that covers
-    it can still turn up in `unused_global`, and the summary says
-    `1 grant(s) of a global group nothing matched`. `connection_setup`'s
-    `ungranted: 0` is the answer that matters, and what `--blastit-strict`
-    acts on. [The reference explains it](../reference/pytest-plugin.md#unused_global-can-name-a-grant-that-is-doing-its-job).
+    A statement that only runs while a connection is opened — Django's
+    `set_config('TimeZone', …)`, SQLAlchemy's `select pg_catalog.version()` —
+    is reported in `connection_setup`, not as a request's statement, and never
+    as an unused grant. `connection_setup`'s `ungranted: 0` is the answer that
+    matters, and what `--blastit-strict`
+    acts on. [The reference explains it](../reference/pytest-plugin.md#connection-setup-statements-are-not-unused_global).
 
 ## Upgrading
 

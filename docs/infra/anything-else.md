@@ -46,10 +46,11 @@ Three more details that decide real deployments:
 * **A peer that is not an address at all** (an unnamed Unix socket) is not
   trusted.
 
-When the address comes from the **peer**, `REMOTE_ADDR` keeps the `ip:port`
-shape it arrived with — `127.0.0.1:52244`. When it comes from a **header**, it
-is a bare IP, because a chain entry is an address and nothing else. Any code
-that compares `REMOTE_ADDR` to a list of addresses should expect both shapes.
+<!-- E2b -->
+`REMOTE_ADDR` is a bare IP address in both cases: an address a trusted header
+named, or the peer's own. The peer's port, when it arrived over a socket, is in
+`REMOTE_PORT`, so code that compares `REMOTE_ADDR` to a list of addresses does
+not have to strip anything.
 
 `BLASTIT_TRUSTED_PROXIES` **refuses what it cannot read** rather than dropping
 it: `127.0.0.1:8080` is a boot error, not an entry. A trusted-proxy list that
@@ -59,8 +60,12 @@ distrust. An empty list (`BLASTIT_TRUSTED_PROXIES=`) trusts nobody.
 
 `wsgi.url_scheme` follows the same trust decision: `X-Forwarded-Proto` is read
 only from a trusted peer, and only the last value, and only if it is exactly
-`http` or `https`. So a plaintext deployment cannot be made to report HTTPS by a
-client, and behind a TLS-terminating ingress your app still sees `https`.
+`http` or `https`. **That is a rule, not a guarantee.** It holds only where the
+ingress overwrites the header (or where its own observation is the one that ends
+up last): measured for Traefik v3, unmeasured for DO's edge — see
+[the App Platform caveat](digitalocean-paas.md#what-it-sets). If a client can
+send its own `X-Forwarded-Proto` and the peer is trusted, the value is the
+client's.
 
 ### Working it out for your own ingress
 
@@ -155,7 +160,7 @@ mode is **detected, not configured**, and reported in the first event.
 | Mode | When you get it | What it needs |
 |---|---|---|
 | `root` | the container or unit starts blastit as uid 0 | the container's own capability set: `SETUID`, `SETGID`, `CHOWN`, `FOWNER`, `DAC_OVERRIDE`, `KILL`. Docker's defaults minus `NET_RAW` are enough |
-| `capabilities` | anything else | six capabilities, and only those: `cap_setuid`, `cap_setgid`, `cap_chown`, `cap_fowner`, `cap_dac_override`, `cap_kill`, plus `cap_setpcap` when the platform can give it |
+| `capabilities` | anything else | the six it requires, and only those — `cap_setuid`, `cap_setgid`, `cap_chown`, `cap_fowner`, `cap_dac_override`, `cap_kill` — plus `cap_setpcap` when the platform can give it |
 
 Pick `root` when your platform gives the container root and you have not been
 asked to do better: it is what App Platform and most Kubernetes namespaces do,
@@ -311,7 +316,8 @@ line**. Nothing is written to disk.
 
 * **`json`** is the one to ship: one JSON object per line, which is what
   `blastit-manifest fold` reads back.
-* **`pretty`** prints the same events as coloured, aligned lines. It is for
+* **`pretty`** prints the same events as coloured, aligned lines — the child
+  events (`request`, `sql.denied`) included. It is for
   running blastit by hand, and for a `systemd` journal you actually read.
 * **Every line is kept under 2048 bytes**, because App Platform truncates
   forwarded lines and a truncated JSON line is unparseable: long fields are cut
@@ -444,7 +450,7 @@ $ docker run -d --name shop \
     -e DATABASE_CA_CERT="$(cat ca.pem)" \
     -e BLASTIT_TRUSTED_PROXIES=172.18.0.2 \
     -p 127.0.0.1:8080:8080 \
-    --health-cmd 'curl -fsS http://127.0.0.1:8080/_blastit/health' \
+    --health-cmd 'python -c "import urllib.request;urllib.request.urlopen(\"http://127.0.0.1:8080/_blastit/health\")"' \
     --health-interval 10s --health-start-period 15s \
     registry.example.com/shop:1.2.3
 ```
@@ -452,6 +458,16 @@ $ docker run -d --name shop \
 * **No `--user`.** Docker's default capability set is enough for root mode;
   `--cap-drop ALL` without adding `SETUID`, `SETGID`, `CHOWN`, `FOWNER`,
   `DAC_OVERRIDE` and `KILL` is not.
+* **`BLASTIT_TRUSTED_PROXIES=172.18.0.2` is a placeholder**, and the one value
+  here you have to work out: it is the address your ingress connects *from*, as
+  this container sees it (the address of the nginx container, not of the host or
+  of the client). Add a route for
+  [the `/whoami` probe](#working-it-out-for-your-own-ingress), ask through the
+  ingress, and read the address the container reports.
+* **The health check runs inside the image**, so it may only use what the image
+  has. `python` is always there — the line above uses only the standard library
+  — while `curl` and `wget` are not part of `python:3.13-slim`, which is why the
+  check is written as a `python -c` one-liner.
 * **Publish on loopback only** (`127.0.0.1:8080:8080`) and let an ingress
   reach it, or make sure nothing else can: with `BLASTIT_TRUSTED_PROXIES=*` a
   published port hands the client-IP header to whoever can reach it.
@@ -503,14 +519,33 @@ ReadWritePaths=/run/blastit
 WantedBy=multi-user.target
 ```
 
+```ini title="/etc/shop/blastit.env"
+DATABASE_URL=postgresql://shop:secret@127.0.0.1:5432/shop
+DJANGO_SECRET_KEY=…
+BLASTIT_APP=shop.wsgi:application
+BLASTIT_PRELOAD=shop.urls
+BLASTIT_MANIFEST=/srv/shop/blastit.toml
+PORT=8080
+
+# The client address, from whatever is in front: nginx on this host, say.
+BLASTIT_CLIENT_IP_HEADER=x-forwarded-for
+BLASTIT_TRUSTED_PROXIES=127.0.0.1,::1
+```
+
 ```console
 $ sudo install -d -o shop -g shop /srv/shop /etc/shop
+$ sudo install -m 0600 -o shop -g shop /dev/null /etc/shop/blastit.env   # then edit it
 $ sudo systemctl daemon-reload && sudo systemctl enable --now shop
 $ journalctl -u shop -f -o cat      # the event stream, one line per event
 ```
 
 Notes:
 
+* **`EnvironmentFile`** is where every setting lives — the same file the
+  [Django page](../frameworks/django.md#run-it-locally) uses for a local run,
+  which is the point of keeping it out of the unit. `systemctl show shop -p
+  Environment` prints what systemd resolved, secrets included, so treat it like
+  any other file with a password in it (`0600`, owned by the service user).
 * **`AmbientCapabilities`** is what makes this work without a `setcap` copy:
   systemd sets the inheritable and ambient sets before it changes the uid, and
   ambient capabilities survive the exec of an unprivileged file. `User=shop`
@@ -557,9 +592,12 @@ server {
 }
 ```
 
-```console
-$ export BLASTIT_CLIENT_IP_HEADER=x-forwarded-for
-$ export BLASTIT_TRUSTED_PROXIES=127.0.0.1,::1
+Those are two lines in the service's environment, whichever way you run it —
+the [systemd unit](#systemd) above has them in `/etc/shop/blastit.env`:
+
+```ini
+BLASTIT_CLIENT_IP_HEADER=x-forwarded-for
+BLASTIT_TRUSTED_PROXIES=127.0.0.1,::1
 ```
 
 `proxy_set_header X-Forwarded-For $remote_addr` **states** the value rather than

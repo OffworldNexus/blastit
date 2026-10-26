@@ -14,8 +14,10 @@ minutes and needs nothing but a Linux machine and root.
 
 ## 1. Install it
 
+`uv add` adds to a project, so start one if you have not:
+
 ```console
-$ uv add blastit
+$ uv init && uv add blastit       # or: pip install blastit
 ```
 
 Wheels are published for Linux x86_64 on CPython 3.13 and 3.14, plus an sdist
@@ -39,26 +41,22 @@ Like granian, blastit is a compiled extension plus a `blastit` command written
 in Python, so it runs on the interpreter of the environment it is installed in:
 your virtualenv and its packages are simply there.
 
-!!! tip "Where the interpreter has to be readable"
+!!! tip "Where the project has to be readable"
 
-    Two things have to be readable by the sandbox users, and neither is
-    obvious:
+    Routes run as `BLASTIT_UID_BASE + 1000 + i`, and blastit drops to
+    `UID_BASE + 3` before it `execve`s its own database proxy — so the project
+    and its `.venv` have to be readable by those users. A project inside a
+    `0700` directory hides both. `/app`, `/srv/app` or an ordinary checkout are
+    fine.
 
-    * **the project**, because routes run as `BLASTIT_UID_BASE + 1000 + i` and
-      blastit drops to `UID_BASE + 3` before it `execve`s its own database
-      proxy. A project inside a `0700` directory hides both the project and its
-      `.venv` from those users. `/app`, `/srv/app` or an ordinary checkout are
-      fine.
-    * **the interpreter's own standard library.** A Python installed under a
-      private home directory — `uv python install` puts one in
-      `~/.local/share/uv/python`, and `~` is often `0750` — is reachable by
-      your shell and by nobody else. Under blastit, only the modules built into
-      the `libpython` binary import; every pure-Python stdlib module fails with
-      `ModuleNotFoundError: No module named 'stringprep'` (or `encodings.idna`,
-      or `subprocess`), which is a confusing way to learn this. Traversable
-      paths are what matter, not how they are installed: a flat, world-readable
-      install under `/opt`, or the distribution's own `/usr/bin/python3.x`, both
-      work.
+    <!-- E2b -->
+    An interpreter whose own standard library sits behind a private home
+    directory (`uv python install` puts one in `~/.local/share/uv/python`, and
+    `~` is often `0750`) is refused at boot, naming the interpreter and the fix,
+    rather than failing later with `ModuleNotFoundError: No module named
+    'stringprep'` inside a view. A world-traversable interpreter — the
+    distribution's own `/usr/bin/python3.x`, or a flat install under `/opt` — is
+    what to use.
 
 ## 2. Write the smallest app and manifest
 
@@ -85,32 +83,28 @@ written. The first route that matches wins, so a catch-all goes last.
 ## 3. Start it
 
 ```console
-$ export BLASTIT_APP=hello:application
-$ export BLASTIT_MANIFEST=$PWD/blastit.toml
-$ export PYTHONPATH=$PWD      # so `hello` is importable: see below
-$ export PORT=8080
-$ sudo -E .venv/bin/blastit
+$ sudo env BLASTIT_APP=hello:application \
+           BLASTIT_MANIFEST=$PWD/blastit.toml \
+           PORT=8080 \
+           .venv/bin/blastit
 {"ts":"…","level":"info","event":"boot","component":"init","stage":"stage0","seccomp":true,"privilege":"root","bounding_set":"dropped","preset":null}
 {"ts":"…","level":"info","event":"boot","component":"init","stage":"config","seccomp":true,"privilege":"root","preset":null}
 {"ts":"…","level":"info","event":"boot","component":"init","stage":"preload","immortalize":"on","immortalized":148213,"immortalize_ms":412.7,"mem_total":1057259520,"mem_used":211812352,"max_view_processes":23}
 {"ts":"…","level":"info","event":"ready","component":"init","stage":"serving","routes":1,"workers":16}
 ```
 
-!!! warning "`BLASTIT_APP` has to be importable"
+<!-- E2b -->
+`BLASTIT_APP` is importable from the directory you start blastit in, so `hello`
+is found because you are in the project: no `PYTHONPATH` and no installed
+package are needed. (A project that *is* installed — the usual case for an app
+behind `manage.py` — resolves the same way, from the console script's own
+import path.)
 
-    Stage 1 re-executes the interpreter with `-I`, which drops `PYTHONPATH` and
-    the working directory from `sys.path` — so blastit carries the *console
-    script's* `sys.path` across that barrier itself. The console script's own
-    first entry is its `bin` directory, not your project, so a project that is
-    not installed as a package needs `PYTHONPATH=$PWD`. (`e2e/Dockerfile` sets
-    `PYTHONPATH=/app` for the same reason.)
-
-    Forget it and the boot fails with
-    `BLASTIT_APP (hello:application): ModuleNotFoundError: No module named 'hello'`.
-
-`sudo -E` keeps your `BLASTIT_*` variables. If your sudo is configured without
-`env_reset`, `sudo env VAR=… .venv/bin/blastit` is the spelling that always
-works. In another terminal:
+`sudo env VAR=…` passes exactly those variables to root, which is what always
+works: `sudo -E` is ignored when sudo is configured with `env_reset`. In a
+container, start blastit as root directly — no `sudo` at all — because a
+platform sets `no_new_privs`, which stops `sudo` from working. In another
+terminal:
 
 ```console
 $ curl -sS localhost:8080/whatever
@@ -131,13 +125,16 @@ when you would rather your app rendered its own 404s.
 ## 4. BLASTIT_LOG_FORMAT=pretty, for reading it yourself
 
 ```console
-$ BLASTIT_LOG_FORMAT=pretty sudo -E .venv/bin/blastit
+$ sudo env BLASTIT_LOG_FORMAT=pretty BLASTIT_APP=hello:application \
+           BLASTIT_MANIFEST=$PWD/blastit.toml PORT=8080 .venv/bin/blastit
 14:02:11.384 INFO  boot        stage0  seccomp=true privilege=root
 14:02:11.402 INFO  request     GET /whatever → hello  200  2.1ms
 ```
 
-Both formats carry the same fields; see
-[log events](reference/log-events.md) for what each one means.
+<!-- E2b -->
+`pretty` prints the same events as the JSON format, child events like `request`
+and `sql.denied` included, as one coloured line each; see
+[log events](reference/log-events.md) for what each field means.
 
 ## 5. Where to go next
 

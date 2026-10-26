@@ -49,8 +49,8 @@ def products():
     return {"products": [{"id": row[0], "name": row[1]} for row in rows]}
 ```
 
-The manifest is the same shape as Django's: a proxy, a route per permission
-set, and a catch-all.
+The manifest is the same shape as Django's: [a proxy](../reference/manifest.md#proxies),
+a route per permission set, and a catch-all.
 
 ```toml title="blastit.toml"
 version = 1
@@ -76,10 +76,9 @@ path = ['.*']
 Note the shape of that `queries` entry: it is the statement *as it goes on the
 wire* after normalisation — trimmed, no trailing `;`, whitespace collapsed, and
 every bind placeholder written `$?`. The two Python string literals above are
-concatenated by Python into one line, so the SQL text on the wire is one line
-too. That matters: a statement split across lines in *the Python source* is
-fine, because the text is concatenated before it is sent, but a statement with
-a newline in it is not the same text as the same statement with a space.
+concatenated by Python into one line, and a statement split across lines in the
+source is no different from one on a single line: whitespace is collapsed before
+the comparison, so a newline and a space are the same text.
 
 ## Run it locally
 
@@ -140,13 +139,44 @@ away afterwards. A connection that outlives its request is orphaned.
 
 === "SQLAlchemy"
 
-    One engine, no pool:
+    One engine, no pool, and a route that allows transaction control:
 
     ```python
     from sqlalchemy import create_engine
     from sqlalchemy.pool import NullPool
 
     engine = create_engine(os.environ["DATABASE_URL"], poolclass=NullPool)
+    ```
+
+    <!-- E2b -->
+    Two things to get right, and both bite at the first request — one as a
+    connection error, the other as a `sql.denied`:
+
+    * **`DATABASE_URL` as blastit renders it** is a URL SQLAlchemy parses as it
+      stands — the socket directory percent-encoded as the host, which is
+      exactly what libpq expects
+      (`postgresql://blastit@%2Fproc%2Fself%2Fcwd:5433/shop`) — so
+      `create_engine(os.environ["DATABASE_URL"], poolclass=NullPool)` is the
+      whole recipe. No host or port has to be worked out by hand.
+    * **SQLAlchemy opens a transaction of its own**, by sending `BEGIN` on the
+      connection, so the route needs `transaction_control = true` — the same
+      thing Django's `ATOMIC_REQUESTS` needs:
+
+    ```toml
+    [route.db]
+    transaction_control = true
+    queries = [ … ]
+    ```
+
+    Its first connection also runs `select pg_catalog.version()` before any
+    request statement does, so that one belongs in a group attached to every
+    route:
+
+    ```toml
+    groups = ["connection"]
+
+    [group.connection.db]
+    queries = ["select pg_catalog.version()"]
     ```
 
 === "Flask-SQLAlchemy"
@@ -232,10 +262,17 @@ It is all in
 [Day-to-day life](day-to-day.md#fold-the-log).
 
 **4. Bring your own capture.** If you want that report for a non-Django app,
-the piece to write is small: record, per request, the `PATH_INFO`, the HTTP
-method and every statement psycopg sends, then diff that against the manifest
-with blastit's own matching. Nothing in blastit assumes Django; only the plugin
-does.
+the two things the plugin calls are in the extension, and neither assumes a
+framework:
+
+* `blastit._blastit.normalize(sql)` — normalise a statement to the text a grant
+  is compared against;
+* `blastit._blastit.audit(manifest_toml, observations_json)` — diff what you
+  observed against a manifest, and return the same report the plugin writes.
+
+Record the `PATH_INFO`, the method and every statement psycopg sends per
+request, hand the result to `audit`, and you have the report for any WSGI app.
+Nothing in blastit assumes Django; only the plugin does.
 
 !!! note "Why the asymmetry"
 

@@ -24,8 +24,12 @@ blastit serves the same app, unchanged, but splits it up:
 - :material-shield-account: **One sandbox per route**
 
     You group your URLs into *routes*; every route gets its own process under
-    its own Unix user. A compromised route cannot read another one's memory,
-    signal it, or borrow its rights.
+    its own Unix user. A compromised route cannot read another one's memory
+    through the kernel, signal it, or borrow its rights — and on the target
+    platform's sandboxed kernel its *memory layout* and its file-descriptor list
+    are still visible to other routes, which is one of the things the
+    [security model](security.md#what-the-sandboxed-kernel-does-not-do) is
+    explicit about.
 
 - :material-key-variant: **Secrets stay out of reach**
 
@@ -65,15 +69,36 @@ bug is worth.
 
 | If this is compromised… | …the attacker gets | …and cannot |
 |---|---|---|
-| one route | that route's granted statements, its scratch directory, and the network only if the route has `egress = true` | run any other statement, read the database credentials, touch another route's process |
+| one route | that route's granted statements; every file the app can open (the code tree, the virtualenv, `/tmp`); all the CPU and memory it can take; the network only if the route has `egress = true` | run any other statement, read the database credentials, touch another route's process, or take another route's worker slot |
 | the HTTP front end | the raw bytes of requests in flight | reach the database, run Python |
 
 blastit does not protect against code that runs when your app is *imported*:
 that happens before the sandboxes exist. And it only sandboxes what goes through
 its proxies — other secrets in the environment (an API key for a third-party
 service, say) are still visible to every route. The
-[security model](security.md#what-a-compromise-buys) is explicit about all of
-it.
+[security model](security.md#threat-model) is explicit about all of it.
+
+## What it costs
+
+Nothing changes in your application, and this is the rest of the bill:
+
+* **one process per route**, forked from a preloaded, immortalised parent, so
+  the copies share memory copy-on-write instead of starting from scratch. A
+  route nobody requests costs nothing: views are spawned lazily on the first
+  request that needs one, and retired when they go idle;
+* **about 140 MiB per live view process** for a real Django app, measured on
+  DigitalOcean App Platform — which is why the number of *live* view processes is
+  capped from the machine's memory rather than the number of routes. The `boot`
+  and `process.cap` events report the estimate and the cap. On plain Linux the
+  cost is much lower;
+* **root, or a small capability set**, to start: blastit binds the port and drops
+  every other process to its own unprivileged user;
+* **one file**, `blastit.toml`, versioned with the code, plus whatever you
+  already do to run a container. There is no framework integration, no
+  middleware, and no configuration beyond environment variables.
+
+The [sizing section](infra/anything-else.md#memory-and-process-caps) is the
+arithmetic for a real machine.
 
 ## Who it is for
 

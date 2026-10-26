@@ -130,8 +130,10 @@ queries = [ … ]
 | `egress` | no | `true` lets the process open outbound TCP connections. Without it the seccomp filter refuses every `AF_INET`/`AF_INET6` socket |
 | `prefork` | no | `true` forks this view at startup instead of on first use |
 
-`path` is a list even when it holds one regex: `path = ['.*']`, not
-`path = ".*"`.
+`path` is a list of regexes even when there is only one of them:
+`path = ['.*']`. <!-- E2b --> A single regex may also be written as a plain
+string, `path = ".*"`, which is the shorthand `ARCHITECTURE.md` uses — the list
+form is what every example here uses, because it is the one that always works.
 
 ## Grants
 
@@ -154,14 +156,14 @@ restaurants_restaurant = { select = ["id", "slug", "name"] }
 restaurants_cuisinetype = { select = "*" }         # every column
 orders_order = { select = "*", insert = "*", update = ["status", "accepted_at"], delete = true }
 [route.db]
-functions = ["st_distance", "unaccent"]            # beyond the built-in safe set
+functions = ["st_distance", "unaccent"]            # beyond the built-in safe set (see the appendix)
 ```
 
 | Key | Type | Meaning |
 |---|---|---|
 | `queries` | list of strings | the statements this grant allows, compared after normalisation |
 | `tables` | table | which tables and columns the route may read and write |
-| `functions` | list of strings | function calls allowed beyond blastit's built-in safe set |
+| `functions` | list of strings | function calls allowed beyond [the built-in safe set](#the-built-in-safe-function-set) |
 | `transaction_control` | bool | allow `BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT`/`RELEASE`/`ROLLBACK TO` |
 | `unrestricted` | bool | allow **every** statement on this proxy. Inline on a route only |
 
@@ -183,7 +185,7 @@ a table grant is for.
 | `delete` | `true` |
 
 `functions` sits next to `tables`, in the grant's own table, and lists the
-function calls allowed beyond the built-in safe set.
+function calls allowed beyond [the built-in safe set](#the-built-in-safe-function-set).
 
 A statement that no exact query lists is parsed with **PostgreSQL's own parser**
 (`libpg_query` — a second implementation would be a parser differential, and any
@@ -203,7 +205,8 @@ The details that decide real deployments:
 * `public.t` is `t`; any other schema keeps its qualified name;
 * `pg_catalog` and `information_schema` are never readable this way — statements
   on the catalogue stay exact `queries`;
-* a function call must be in the built-in safe set or in `functions`
+* a function call must be in
+  [the built-in safe set](#the-built-in-safe-function-set) or in `functions`
   (`pg_catalog.x` is `x`). Casts to `reg*` and to types other than the built-in
   plain ones need a `functions` entry;
 * **every base table a statement names must appear in the grant**, even when no
@@ -315,9 +318,9 @@ several statements never matches: a grant is one statement.
 * Every routing decision is a `request` event, with `route` and the index of the
   matching regex in `rule`.
 
-**Getting it wrong is safe, if annoying.** A misrouted request runs in a process
-whose allowlist does not fit its queries, so they are denied — and every denial
-is logged. It fails closed; it never gains a privilege.
+**Getting it wrong is safe, if annoying** — see
+[what blastit needs from an app](../frameworks/index.md#routes-and-url-paths),
+where the reason is spelled out once.
 
 ## Validation at boot
 
@@ -354,6 +357,47 @@ grants in one step.
 `e2e/demo/blastit.toml` in the repository is a real manifest for a small Django
 app — sessions, a login, notes, and two routes that deliberately have less than
 the others — generated from a scenario run and then committed.
+
+## The built-in safe function set
+
+A `tables` grant checks the functions a statement calls, and there is a set of
+names it accepts without being told to: SQL's own vocabulary, where every call
+is a pure function of its arguments. Anything else — a function of your own, an
+extension's, or one of PostgreSQL's that reads a file or a rule — has to be named
+in the grant's `functions` list.
+
+These are all 75, and the list is deliberately a *floor*: a name that is not in
+it is not automatically dangerous, it is simply one a grant has to name.
+
+| Group | Names |
+|---|---|
+| Aggregates | `array_agg`, `avg`, `bool_and`, `bool_or`, `count`, `json_agg`, `json_build_object`, `jsonb_agg`, `jsonb_build_object`, `max`, `min`, `string_agg`, `sum` |
+| Conditions | `coalesce`, `greatest`, `least`, `nullif` |
+| Strings | `btrim`, `concat`, `left`, `length`, `lower`, `ltrim`, `overlay`, `position`, `replace`, `right`, `rtrim`, `similar_to_escape`, `substr`, `substring`, `trim`, `upper` |
+| Numbers | `abs`, `ceil`, `floor`, `round` |
+| Dates and times | `age`, `date_trunc`, `extract`, `make_interval`, `now`, `timezone`, `to_char` |
+| Sets and arrays | `array_length`, `cardinality`, `generate_series`, `unnest` |
+| Window functions | `dense_rank`, `rank`, `row_number` |
+| Window and ordered-set functions | `cume_dist`, `first_value`, `lag`, `last_value`, `lead`, `mode`, `nth_value`, `ntile`, `percent_rank`, `percentile_cont`, `percentile_disc`, `stddev`, `stddev_pop`, `stddev_samp`, `var_pop`, `var_samp`, `variance` |
+| Full-text search and JSON extraction | `json_extract_path_text`, `jsonb_array_length`, `jsonb_extract_path_text`, `plainto_tsquery`, `to_tsvector`, `ts_rank`, `websearch_to_tsquery` |
+
+Notes that decide real grants:
+
+* **`pg_catalog.` is dropped before the lookup**, so `pg_catalog.lower` and
+  `lower` are one name.
+* **Some SQL syntax is a call.** `EXTRACT(…)` is `pg_catalog.extract`,
+  `x AT TIME ZONE y` is `pg_catalog.timezone`, and `SUBSTRING`, `POSITION` and
+  `OVERLAY` are the same: they are here so that standard SQL is not denied for a
+  name nobody can write in a grant.
+* **`coalesce`, `nullif`, `greatest` and `least` are parse-tree nodes**, not
+  ordinary calls; they are listed because the architecture names them.
+* **`unaccent` is deliberately absent**: it reads a rule file, so a grant has to
+  name it in `functions`.
+* **A cast can be a call.** `reg*` types and types outside the built-in plain
+  scalar set need a `functions` entry, under the type's name.
+
+The set lives in `crates/blastit-sqlpolicy/src/analysis.rs` (`SAFE_FUNCTIONS`),
+which is where to check it for the build you are running.
 
 ## See also
 

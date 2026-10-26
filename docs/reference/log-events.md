@@ -9,7 +9,7 @@ lifecycle) and what the app printed. Nothing is written to disk.
 | `BLASTIT_LOG_FORMAT` | What it prints |
 |---|---|
 | `json` (the default) | one JSON object per line, for a log collector and for `blastit-manifest fold` |
-| `pretty` | the same events as coloured, aligned lines, for running blastit by hand |
+| `pretty` | the same events as coloured, aligned lines, for running blastit by hand — child events (`request`, `sql.denied`) included <!-- E2b --> |
 
 ```json
 {"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","request_id":"01JB9…","method":"GET","path":"/products/42/","route":"product-detail","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_in":0,"bytes_out":5120,"cost_ns":18400000,"cpu_ns":9100000,"remote_addr":"203.0.113.7"}
@@ -74,11 +74,12 @@ three is readable on its own, which is the point.
 **`stage0`** — printed before anything can fail, so it says the seccomp setting
 — read straight from its variable — and nothing about a configuration that has
 not been read yet. It carries `privilege` (`root` or `capabilities`),
-`bounding_set` (`dropped` or `kept`) and, in rootless mode, the
-`capabilities` set.
+`bounding_set` (`dropped` or `kept`), and, in rootless mode, the `capabilities`
+set. `preset` is always `null` here: the configuration has not been read yet,
+which is the point of this line.
 
 ```json
-{"event":"boot","component":"init","stage":"stage0","seccomp":true,"privilege":"capabilities","capabilities":["cap_chown","cap_dac_override","cap_fowner","cap_kill","cap_setgid","cap_setuid","cap_setpcap"],"bounding_set":"dropped"}
+{"event":"boot","component":"init","stage":"stage0","seccomp":true,"privilege":"capabilities","capabilities":["cap_chown","cap_dac_override","cap_fowner","cap_kill","cap_setgid","cap_setuid","cap_setpcap"],"bounding_set":"dropped","preset":null}
 ```
 
 **`config`** — emitted as soon as the configuration parsed, and *before* the
@@ -92,9 +93,10 @@ configured, and the preset:
 | `preset_settings` | the settings the preset supplied, with **the preset's own values** — never the operator's |
 | `preset_overridden` | the names of those settings that an explicit variable overrode. The value that won is never reported |
 
-A `warn` `app.output` line follows this one when the preset's assumptions about
-the platform do not hold for this boot (`preset_expects_root`,
-`preset_expects_rootless`).
+A `warn` **`app.output`** line follows this one — prose on stderr, not a field of
+this event — when the preset's values assume a platform this boot is not: a
+preset written for a root start in a rootless deployment, or the other way
+round.
 
 **`preload`** — stage 1's, the one that says what the app cost before the fork:
 `immortalize` (`on`/`off`), `immortalize_reason` when it was skipped,

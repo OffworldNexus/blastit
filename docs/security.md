@@ -19,7 +19,7 @@ attacker holding?*
 | Not covered | Why |
 |---|---|
 | code the app runs **at import time** | imports run before the sandboxes exist, and they have to: sharing the preloaded heap copy-on-write is the memory story. Installed as a wheel, this includes the virtualenv's `.pth` files and `sitecustomize`, which run with the real credentials still in the environment |
-| **other secrets** in the environment | an API key for a third-party service that the app itself must hold cannot be swapped, and stays visible to every route. `BLASTIT_ENV_STRIP` hides what you name; proxies are the general answer, and only `postgresql` has one so far |
+| **other secrets** in the environment | an API key for a third-party service that the app itself must hold cannot be swapped, and stays visible to every route. [`BLASTIT_ENV_STRIP`](reference/settings.md#the-app-and-the-manifest) hides what you name; proxies are the general answer, and only `postgresql` has one so far |
 | TLS, HTTP/2, WebSockets, `Upgrade` | a load balancer terminates TLS. `Upgrade` is answered `501` |
 | per-uid **network egress** filtering | that needs `CAP_NET_ADMIN`, which the target platform does not grant. The best available is a seccomp filter on `socket()` |
 | constraining **parameter values** | out of scope for v1: a grant says which statement, not which row |
@@ -28,13 +28,27 @@ attacker holding?*
 
 ## What a compromise buys
 
+Five components, so, in one line each: a **view** is one route's process, where
+the application runs; **http** is the internet-facing parser; the **scheduler**
+routs requests to views and owns the worker budget; **dbproxy** is the only
+process that holds the real database credentials; **init** is PID 1, which forks
+every other component and supervises them.
+
 | If this is compromised… | …the attacker gets | …and cannot |
 |---|---|---|
-| **a view** (request-time RCE) | that view's allowlisted statements; its scratch directory; egress, only if the route has `egress = true`; other processes' `environ`/`cmdline`/`maps`, which hold no secrets | run any other statement; read the real database credentials; read or `ptrace` another process's memory; connect to another view's database socket; reach another view's channel; hold more threads than its `RLIMIT_NPROC` |
+| **a view** (request-time RCE) | that view's allowlisted statements; its scratch directory; **every file the app can open** — the code tree, the virtualenv, `/tmp` — so any secret in a readable file is readable from here; **all the CPU, and memory up to the container's whole limit**, since there is no per-view CPU or memory limit; egress, only if the route has `egress = true`; other processes' `environ`/`cmdline`/`maps`, which hold no secrets | run any other statement; read the real database credentials; read or `ptrace` another process's memory; connect to another view's database socket; reach another view's channel; hold more threads than its `RLIMIT_NPROC`; **take another route's worker slot** — the budget is global — though it can still starve the machine |
 | **http** | the raw bytes of in-flight HTTP traffic | reach the database (its uid is in no listener's table); run Python; spawn processes |
 | **the scheduler** | it can send any request to any view | do anything a view could not already be made to do by an HTTP request |
-| **dbproxy** | the real database credentials | — this is the crown jewel. It runs no application code, is not dumpable, and is the smallest Rust component in the tree |
+| **dbproxy** | the real database credentials | — this is the crown jewel. It runs no application code, is not dumpable, and is deliberately kept small |
 | **init** | everything | — it runs only blastit code after stage 1's imports, and handles no external input |
+
+The two lines worth reading twice are the first pair of *gets*: a view is not
+limited in the resources it may consume, and it can read any file its uid can
+open. The sandbox is about **what a route may do to the database and to the
+other routes**, not about how much of the machine it may use — for that, cap the
+container (`resources.limits` in Kubernetes, `--memory` in Docker) and let
+[`BLASTIT_MAX_WORKERS`](reference/settings.md#admission-and-threads) bound the
+threads.
 
 The sandbox comes from **uid privileges, not from code isolation**: all app code
 is mapped into every view process, and a view can run another view's code — only
@@ -44,7 +58,7 @@ and it never gains a privilege.
 
 ## The mechanisms
 
-### Distinct uids, and what the sandboxed kernel does *not* do
+### What the sandboxed kernel does not do
 
 Every process has its own uid, `gid == uid`, and an empty supplementary group
 list. Different uids cannot signal each other, `ptrace` each other, or read each
@@ -90,9 +104,12 @@ scans the log for the database password as a test rather than as a convention.
 
 Every child **clears every capability set it holds** and sets
 `PR_SET_NO_NEW_PRIVS`, in the order the kernel requires: ambient first, then
-inheritable, then the bounding set while `cap_setpcap` is still effective, then
-`setgroups`/`setresgid`/`setresuid`, then permitted and effective. The drop is
-checked, not assumed — a child whose sets are not empty does not start.
+inheritable, then the bounding set — which is only reachable while
+`cap_setpcap` is still effective — then `setgroups`/`setresgid`/`setresuid`,
+then permitted and effective. The drop is checked, not assumed: a child whose
+sets are not empty does not start, and the `boot` event says whether the
+children's bounding set was `dropped` or `kept` (`kept` when the platform could
+not give `cap_setpcap`, with one warning).
 
 That matters most in rootless mode. A rootless init's uid never was 0, so the
 kernel does not clear its capabilities on `setresuid`: a child that dropped
@@ -114,10 +131,11 @@ privileges. It needs only `PR_SET_NO_NEW_PRIVS`, no capability — which is what
 makes it work on the target platform, where the spike measured `socket(AF_INET)`
 going to `EPERM` while `AF_UNIX` kept working.
 
-The filter is a **refusal list**: the default action is allow, and what it
-refuses it refuses with `EPERM`, so a syscall it says nothing about cannot be
-what breaks a request. It is installed while the child is still single-threaded,
-because it cannot be removed and applies to every thread, present or future.
+The filter is a **refusal list**, so it is a floor rather than a cage: its
+default action is allow, anything it says nothing about is permitted, and what it
+does refuse it refuses with `EPERM`. It is installed while the child is still
+single-threaded, because it cannot be removed and applies to every thread,
+present or future.
 
 * **every role** refuses `ptrace`, `process_vm_readv`/`writev`, `bpf`, `keyctl`,
   `perf_event_open`, `userfaultfd`, `io_uring`, the module-loading calls, `mount`
@@ -181,10 +199,18 @@ where it can be. The rows worth chasing:
 | seccomp filters installed by the application are enforced, and `PR_SET_NO_NEW_PRIVS` is too | the App Platform spike |
 | `RLIMIT_NPROC` is per uid and counts threads | experiment, and the spike (gVisor leaves out the main thread, so leave one unit of margin) |
 | a non-root `--user` process gets **no** capabilities from `--cap-add` | measured on Docker 29.5 (compose v5), locally and on a Droplet |
-| a file with capabilities is init's alone, and a child cannot `execve` one | experiment, and the rootless end-to-end test, which checks that a different uid is refused the copy |
+| another uid cannot run the capable copy at all | the rootless end-to-end test, which checks a different uid is refused it (`EACCES`) |
+| a child cannot `execve` a file with file capabilities | a `no_new_privs` kernel rule, argued in [§7.2](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md#72-mechanisms-that-work-without-extra-privileges) — **not** tested end to end |
 | copy-on-write breaks in ~2 MiB chunks, and immortalisation fixes it | experiments 2 and 3; the numbers are in [§9.2](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md#92-memory) |
 | the App Platform edge **overwrites** `do-connecting-ip` and **appends** to `X-Forwarded-For` | the live probe beside [§10](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md#10-platform-constraints-digitalocean-app-platform) |
-| what Traefik v3 does with each of eight headers, under three configurations | the measurement beside [§10](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md#docker-compose-behind-traefik) |
+| what Traefik v3 does with each of eleven headers, under three configurations | the measurement beside [§10](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md#docker-compose-behind-traefik) |
+
+The two archives those rows point into —
+[`docs/archive/2026-10-experiments.md`](https://github.com/OffworldNexus/blastit/blob/develop/docs/archive/2026-10-experiments.md)
+for the bare-Linux and local-gVisor experiments, and
+[`docs/spikes/2026-10-do-app-platform.md`](https://github.com/OffworldNexus/blastit/blob/develop/docs/spikes/2026-10-do-app-platform.md)
+for the platform probes — are not part of this site; they are working notes, and
+they live in the repository.
 
 ## Reviewing it yourself
 

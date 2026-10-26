@@ -4,12 +4,16 @@ A tour of the machine, in the order a request meets it. The full specification
 is [`ARCHITECTURE.md`](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md),
 which this page links into at every step rather than paraphrasing.
 
-## One binary, five roles
+## One program, five roles
 
-A single Rust binary, `blastit`, plays every role. Most roles are chosen by
-their position in the process tree; the database proxy is the exception, and is
-`execve`'d with an empty environment. CPython is embedded through `pyo3`, and the
-only Python blastit knows about is one standard WSGI callable.
+A single Rust program plays every role, and it is invoked in one of two ways. As
+a **standalone binary**, `blastit` is that one file, and `--role=dbproxy`
+re-executes itself. As a **wheel install**, the server is the `blastit._blastit`
+extension inside your virtualenv's interpreter, and the credentials-holding role
+is a separate, Python-free binary the wheel ships (`blastit/_bin/blastit-dbproxy`)
+that stage 0 `execve`s instead of itself. Most roles, either way, are chosen by a
+process's position in the tree: CPython is embedded through `pyo3`, and the only
+Python blastit knows about is one standard WSGI callable.
 
 | Component | Count | uid | Python? | Holds | Talks to |
 |---|---|---|---|---|---|
@@ -32,7 +36,7 @@ flowchart TB
             v0["<b>view 0</b><br/>uid B+1000"]
             v1["<b>view 1</b><br/>uid B+1001"]
         end
-        dbproxy["<b>dbproxy</b><br/>uid B+3 · one listener per view<br/>listener + SCM_CREDENTIALS → allowlist"]
+        dbproxy["<b>dbproxy</b><br/>uid B+3 · one listener per (route, proxy)<br/>listener + SCM_CREDENTIALS → allowlist"]
     end
 
     lb -- "TCP 0.0.0.0:$PORT" --> http

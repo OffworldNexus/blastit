@@ -91,8 +91,11 @@ unreadable log, a manifest it cannot parse, edit, or prove safe.
 $ python -m blastit.fold LOG... --manifest blastit.toml
 ```
 
-does the same where only the package is importable. What it refuses and why is
-in [day-to-day life](../frameworks/day-to-day.md#fold-the-log).
+<!-- E2b -->
+does the same thing, option for option, in an environment where only the
+package — and not the `blastit-manifest` console script — is importable. What it
+refuses and why is in
+[day-to-day life](../frameworks/day-to-day.md#fold-the-log).
 
 ## See also
 

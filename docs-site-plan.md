@@ -175,23 +175,54 @@ has no such call, and asking it for a manifest there stops the session with
 requests: No module named 'django'`. A Flask project fills its manifest from
 `blastit-manifest fold` instead.
 
-## Found by running it
+## Found by running it, and what the reviewers changed
 
-Each of these came out of following the site's own pages in
-`/tmp/opencode/e2-{flask,django,flat}` with a wheel built from this checkout, and
-each is documented on the page where a reader would meet it. Nothing here was
-fixed: the plugin is not this step's to change, so the site says what happens and
-the pull request reports it.
+The first nine came out of following the site's own pages with a wheel built from
+this checkout. **The first eight are being fixed in code by E2b**, so the site now
+describes the fixed behaviour and marks each such sentence with an `<!-- E2b -->`
+comment in the Markdown (invisible on the page) for whoever checks it once E2b
+lands. The rest are findings about the site itself, and are fixed here.
 
-| # | What happens | Where it is documented |
+| # | What happened | How the site says it now |
 |---|---|---|
-| 1 | The pytest live server hands `WSGI_APPLICATION` to `BLASTIT_APP` as it stands, but Django defines that setting as a *dotted* path (`myshop.wsgi.application`); the boot fails with ``BLASTIT_APP: must be `module:attribute` ``. `--blastit-live-app myproject.wsgi:application` is the workaround, and it is what the plugin's own `python/tests/live_project/settings.py` does with `WSGI_APPLICATION = "wsgi:application"` | [Django, the live server](docs/frameworks/django.md#the-live-server) |
-| 2 | The live server runs with its cwd and `PYTHONPATH` set to the **directory of the settings module**, so a packaged settings module (`myshop/settings.py`) leaves `myshop` unimportable: `ModuleNotFoundError: No module named 'myshop'`. A flat `settings.py` is what the fixture was written for | same |
-| 3 | A **relative** `blastit_manifest` (`pytest.ini`) or `--blastit-manifest blastit.toml` breaks the live server, which runs in another directory: `blastit.toml: No such file or directory (os error 2)`. An absolute path works | same |
-| 4 | `WSGI_APPLICATION` is also what `--blastit-live-app` falls back to, so the same dotted value reaches `BLASTIT_APP` there | same |
-| 5 | A `SELECT set_config(…)` granted by a **global** group is reported in `unused_global` and in the summary (`1 grant(s) of a global group nothing matched`) even though the same report's `connection_setup` shows `granted_in: 2` and `ungranted: 0`: a statement that only runs while a connection opens is not a request's statement | [The plugin reference](docs/reference/pytest-plugin.md#unused_global-can-name-a-grant-that-is-doing-its-job) |
-| 6 | `BLASTIT_APP` has to be importable, and `python -I` drops `PYTHONPATH`; blastit restores the console script's `sys.path`, whose first entry is `.venv/bin`. Without `PYTHONPATH=$PWD` the boot fails with `ModuleNotFoundError: No module named 'app'` | [Getting started](docs/getting-started.md#3-start-it) |
-| 7 | A Python installed under a private home directory (`uv python install` → `~/.local/share/uv/python`, `~` at `0750`) is not readable by the view uids, so the **stdlib** fails to import in a view: `ModuleNotFoundError: No module named 'stringprep'`, `'encodings.idna'`, `'subprocess'`. Only what is compiled into `libpython` works. Real, and the docs did not mention it | [Getting started](docs/getting-started.md#1-install-it), [Troubleshooting](docs/troubleshooting.md#it-does-not-start) |
-| 8 | `REMOTE_ADDR` is an `ip:port` string when the address came from the socket peer, and a bare IP when a trusted header named it (`ClientIp::remote_addr`) | [Anything else](docs/infra/anything-else.md#client-ip-and-trusted-proxies) |
-| 9 | A `__pycache__` directory owned by **root** appears in the project and in the venv's `site-packages`: stage 1 runs `python -I` as root and `PYTHONDONTWRITEBYTECODE` does not reach it | [Troubleshooting](docs/troubleshooting.md#it-does-not-start) |
+| E2b-1 | The pytest live server hands `WSGI_APPLICATION` to `BLASTIT_APP` as it stands, but Django defines that setting as a *dotted* path (`myshop.wsgi.application`), so the boot failed with ``BLASTIT_APP: must be `module:attribute` `` | [Django, the live server](docs/frameworks/django.md#the-live-server) says it works with the `startproject` layout, marked `<!-- E2b -->` |
+| E2b-2 | The live server ran with its cwd and `PYTHONPATH` set to the **directory of the settings module**, so a packaged settings module left `myshop` unimportable | same |
+| E2b-3 | A **relative** `blastit_manifest` broke the live server, which runs in another directory (`blastit.toml: No such file or directory`) | same |
+| E2b-4 | `BLASTIT_APP` had to be importable and `python -I` drops `PYTHONPATH`, so a project that was not installed needed `PYTHONPATH=$PWD` | [Getting started](docs/getting-started.md#3-start-it) and [Troubleshooting](docs/troubleshooting.md) say the directory blastit was started from is on `sys.path`; the run command has no `PYTHONPATH` |
+| E2b-5 | A Python under a private home directory made a **view** lose the standard library (`ModuleNotFoundError: No module named 'stringprep'`) | refused at boot, naming the interpreter and the fix — [Getting started](docs/getting-started.md#1-install-it) |
+| E2b-6 | A `SELECT set_config(…)` granted by a **global** group was reported in `unused_global` although `connection_setup` showed `granted_in: 2` | [The plugin reference](docs/reference/pytest-plugin.md) — connection-setup statements are reported once, and are not dead grants |
+| E2b-7 | `REMOTE_ADDR` carried the peer's port as `ip:port` | a bare IP, with the port in `REMOTE_PORT` — [Anything else](docs/infra/anything-else.md#client-ip-and-trusted-proxies), [Settings](docs/reference/settings.md) |
+| E2b-8 | `BLASTIT_LOG_FORMAT=pretty` did not print child events, and `fold --write` refused a route whose grant was only `[route.<proxy>.tables]`; `python -m blastit.fold` and a bare `path` string were the other two | [Log events](docs/reference/log-events.md), [Day-to-day life](docs/frameworks/day-to-day.md#fold-the-log), [The CLI](docs/reference/cli.md), [The manifest](docs/reference/manifest.md) |
+| 9 | The compose example in [Docker Compose behind Traefik](docs/infra/compose-traefik.md) mounted the Traefik file at `/etc/traefik/traefik.yml`, which is Traefik's **static** default: Traefik exited. PostgreSQL 18 also refused `pgdata:/var/lib/postgresql/data` | the file is `dynamic.yml`, mounted at `/etc/traefik/dynamic.yml` and named by the provider; the volume is `/var/lib/postgresql`. Both verified by bringing the stack up ([below](#verifying-the-examples)) |
+| 10 | `curl` is not in `python:3.13-slim`, so the plain-Docker health check as written could not run | the health check is a `python -c` one-liner, and the section says why |
+| 11 | A Python installed under a private home directory also hid the *standard library* from the views (the same finding as E2b-5, from the other side) | [Getting started](docs/getting-started.md#1-install-it) |
+| 12 | A `__pycache__` directory owned by **root** appears in the project, because stage 1 runs `python -I` as root and `PYTHONDONTWRITEBYTECODE` does not reach it | [Troubleshooting](docs/troubleshooting.md) |
+| 13 | Mermaid diagrams **do** render, but the theme paints each one into a **closed shadow root**, so no DOM query can see the `<svg>`: a checker looking for one sees nothing. Pixels are the only honest check | verified with a screenshot ([below](#verifying-the-examples)); a `rel="preload"` of the Mermaid runtime was added so the diagram appears sooner |
+| 14 | "Every page logs a form field without an `id` or `name`": the served DOM has **no** such field. Every `<input>` the server renders carries an `id` (the drawer and search toggles, the three palette radios), and the field Chrome flags is the theme's search input, which its JavaScript builds inside a closed shadow root — invisible to `document.querySelectorAll`. Nothing in `overrides/` or in the content adds a form field, so there is nothing here to fix; a DOM-patching script was written, found to have nothing to patch, and removed again | reported, not patched |
+
+## Verifying the examples
+
+Three things were checked by running them, not by reading them:
+
+* **The compose example, for real.** A Django app image built from the page's own
+  Dockerfile (with the wheel from this checkout substituted for the PyPI install,
+  which does not exist yet), the page's `compose.yaml`, and the page's
+  `dynamic.yml`, started with `docker compose -p e2docs up -d`. Traefik routed
+  `Host: shop.example.com` to blastit; `GET /debug/request/` through Traefik
+  reported `remote_addr: 172.29.0.1` and `scheme: http`, and **neither changed**
+  when the client sent `X-Forwarded-For: 6.6.6.6` and `X-Forwarded-Proto: https`
+  — Traefik overwrites both by default, which is what the page claims. The same
+  request through the TLS entry point reported `scheme: https`, from Traefik's
+  self-signed certificate, which the page now says out loud. The `config` boot
+  event said `preset: "compose-traefik"` with exactly the four settings the page
+  lists, and `privilege: "capabilities"`. Then `down -v` and the image removed.
+* **The README's commands, in a container.** `python:3.13-slim-trixie`,
+  `uv init && uv add <the wheel>`, the two-file example, then the run command as
+  root: `hello from blastit`, `route: hello`, `uid: 21000`, `status: 200`. One
+  caveat, and it is E2b-4: today the command needs `PYTHONPATH=/app` as well,
+  which E2b makes unnecessary.
+* **Mermaid, in a real browser.** A headless Chrome driven over CDP: every page
+  with a fence has `window.mermaid` loaded, no `<pre class="mermaid">` left
+  unconsumed, and a screenshot of the region shows the diagram drawn.
+
 

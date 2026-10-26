@@ -229,6 +229,13 @@ How to read it:
 manifest from rotting. Add the `missing` statements, re-run until it is clean,
 and deploy.
 
+!!! warning "`--blastit-strict` only fails on what the suite reached"
+
+    A session that collected no routed request reports clean — there is nothing
+    to be missing. `routes_exercised` in `totals` (and the summary line, which
+    prints it as `38/41 routes exercised`) is the number to read before you take
+    a green run as proof, and `unexercised_routes` names the ones nothing hit.
+
 ## The live server
 
 The plugin sees the requests *your test process* makes. A suite that drives a
@@ -287,26 +294,13 @@ view uids can read it there; when they cannot — pytest's own temporary
 directories are private — it serves a copy in a temporary directory it creates
 and removes, and changes no mode of your checkout.
 
-## `unused_global` can name a grant that is doing its job
+## Connection-setup statements are not `unused_global`
 
-One report quirk worth knowing before you chase it: a statement that only ever
-runs while a connection is being established is reported in `connection_setup`,
-not as a request's statement — so a global group grant that covers it can still
-appear in `unused_global`, because no *request* matched it.
-
-The usual example is the grant everybody ends up with:
-
-```text
-blastit: 1 grant(s) of a global group nothing matched (see blastit-report.json)
-```
-
-```json
-"unused_global": {"count": 1, "statements": [
-  {"groups": ["connection"], "proxy": "db", "sql": "SELECT set_config('TimeZone', $?, false)"}
-], "tables": []}
-```
-
-while the same report says it is fine:
+<!-- E2b -->
+A statement that only ever runs while a connection is being established —
+psycopg's `set_config('TimeZone', …)`, SQLAlchemy's `select pg_catalog.version()`
+— is not any route's request statement, so the report keeps it out of the routes
+and out of `unused_global`:
 
 ```json
 "connection_setup": {"statements": [
@@ -316,9 +310,10 @@ while the same report says it is fine:
 ], "ungranted": 0}
 ```
 
-`granted_in` is the number that matters here, and `ungranted: 0` is the answer
-`--blastit-strict` acts on. The `unused_global` entry is not a mistake in the
-manifest.
+`granted_in` is the number that matters, and `ungranted: 0` is the answer
+`--blastit-strict` acts on: every route that runs the statement grants it. A
+group attached to every route is the right home for them either way — see
+[keeping the manifest honest](../frameworks/day-to-day.md#keeping-the-manifest-honest).
 
 ## See also
 

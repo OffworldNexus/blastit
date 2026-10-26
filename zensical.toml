@@ -46,7 +46,7 @@ nav = [
   { "Changelog" = "changelog.md" },
 ]
 
-extra_css = ["brand/brand.css"]
+extra_css = ["brand/brand.css", "stylesheets/extra.css"]
 
 # `archive/` and `spikes/` are working material, not pages, and so are the brand
 # files a human works with rather than reads. Everything else under `brand/` is

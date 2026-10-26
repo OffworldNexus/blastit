@@ -31,12 +31,14 @@ and routes them itself. All blastit adds is one file, `blastit.toml`.
 
 > **Status: pre-release.** blastit runs a real Django app end to end on
 > DigitalOcean App Platform in CI, but it hasn't had a stable release, and the
-> manifest format may still change. Linux only, CPython 3.13+.
+> manifest format may still change. Linux only, CPython 3.13+, PostgreSQL.
 
 ## Get started
 
+`uv add` needs a project to add to, so start one if you have not:
+
 ```console
-$ uv add blastit                  # or: pip install blastit
+$ uv init && uv add blastit       # or: pip install blastit
 ```
 
 Wheels are published for Linux x86_64 on CPython 3.13 and 3.14, with an sdist
@@ -62,10 +64,14 @@ path = ['.*']
 ```
 
 ```console
-$ export BLASTIT_APP=hello:application BLASTIT_MANIFEST=$PWD/blastit.toml \
-         PYTHONPATH=$PWD PORT=8080
-$ sudo -E .venv/bin/blastit
+$ sudo env BLASTIT_APP=hello:application \
+           BLASTIT_MANIFEST=$PWD/blastit.toml \
+           PORT=8080 \
+           .venv/bin/blastit
 ```
+
+(In a container, run it as root directly rather than through `sudo` — that is
+what a platform does, and it is what `no_new_privs` requires.)
 
 A request to `http://localhost:8080/` is now served by a sandboxed process, and
 blastit's stdout has one `request` event per request naming the route it chose.
@@ -95,16 +101,9 @@ what the isolation does and does not claim.
 
 ## Development
 
-```console
-$ cargo fmt --all -- --check
-$ cargo clippy --workspace --all-targets -- -D warnings
-$ cargo test --workspace
-```
-
-`develop` is the only long-lived branch. Each roadmap step in
-[`ROADMAP.md`](ROADMAP.md) lands as one pull request from a
-`feature/<step>-<slug>` branch, with green CI before merging.
-[`RELEASING.md`](RELEASING.md) describes how a release is cut.
+`develop` is the only long-lived branch: each roadmap step in
+[`ROADMAP.md`](ROADMAP.md) lands as one pull request with green CI, and
+[`RELEASING.md`](RELEASING.md) has how a release is cut.
 
 ## License
 

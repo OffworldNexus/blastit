@@ -10,6 +10,10 @@ or, for a process you do not start yourself:
 $ BLASTIT_PRESET=compose-traefik blastit
 ```
 
+That name is a [preset](index.md#what-a-preset-is): a set of *defaults* for one
+platform, every one of which a `BLASTIT_*` variable you set yourself still wins
+over.
+
 This preset rests on a measurement of its own, not on the App Platform one:
 Traefik **v3.7.16** is the ingress, blastit is behind it, and the app publishes
 no port at all.
@@ -27,7 +31,7 @@ and two assumptions it does not turn into settings:
 
 | | | |
 |---|---|---|
-| privilege mode it assumes | `capabilities` | this is the rootless deployment: init runs as a dedicated uid holding six capabilities, not as root |
+| privilege mode it assumes | `capabilities` | this is the rootless deployment: init runs as a dedicated uid holding the six capabilities it requires plus `cap_setpcap` (seven granted), not as root |
 | deliberately not set | `BLASTIT_EXEC`, the `BLASTIT_PROXY_<NAME>_*` caps | both name something only the deployment knows: the capability-free copy of the binary, and the manifest's proxies |
 
 ## Why `x-forwarded-for`, and why `*`
@@ -85,11 +89,11 @@ From which:
 
 ## A full example
 
-Three files, and two published ports: Traefik's. The app publishes nothing.
+Four files, and two published ports: Traefik's. The app publishes nothing.
 
-### `traefik.yml` — the file provider
+### `dynamic.yml` — Traefik's file provider
 
-```yaml title="traefik.yml"
+```yaml title="dynamic.yml"
 http:
   routers:
     app:
@@ -113,6 +117,51 @@ itself — it does not pass a client's own value through unless the client's
 address is in `forwardedHeaders.trustedIPs` — so `http` arrives over the
 plaintext entry point and `https` behind the TLS one.
 
+!!! note "The file has to be the *dynamic* configuration, not `traefik.yml`"
+
+    Traefik reads `/etc/traefik/traefik.yml` as its **static** configuration
+    (entry points, providers, the log level) and refuses to start if a dynamic
+    file is there instead — it is the same path, with two different meanings.
+    That is why the file above is `dynamic.yml` and the provider points at it
+    explicitly:
+
+    ```yaml
+    - --providers.file.filename=/etc/traefik/dynamic.yml
+    ```
+
+    `e2e/rootless/compose.yml` in the repository is the same arrangement, and it
+    is what the end-to-end test runs.
+
+!!! note "The TLS entry point serves a self-signed certificate"
+
+    Nothing above asks Traefik for a real certificate, so `https://` on
+    `websecure` presents Traefik's own self-signed one and a browser will warn.
+    That is fine for a smoke test — the point of that entry point in this example
+    is that `X-Forwarded-Proto` arrives as `https` — and it is not fine for
+    production. Let Traefik get a certificate instead, by adding an ACME
+    resolver to its **static** configuration (the `command:` list) and naming it
+    on the router:
+
+    ```yaml
+    # command:
+    - --certificatesResolvers.le.acme.email=ops@example.com
+    - --certificatesResolvers.le.acme.storage=/letsencrypt/acme.json
+    - --certificatesResolvers.le.acme.httpChallenge.entryPoint=web
+    ```
+
+    ```yaml
+    # dynamic.yml, on the router that terminates TLS:
+    app-tls:
+      tls:
+        certResolver: le
+    ```
+
+    That needs a volume for `/letsencrypt` and port 80 reachable from outside.
+    [Traefik's own TLS documentation](https://doc.traefik.io/traefik/https/tls/)
+    is the reference; a deployment that terminates TLS *in front of* Traefik is
+    the other arrangement, and it has to write
+    `forwardedHeaders.trustedIPs` itself.
+
 ### `compose.yaml`
 
 ```yaml title="compose.yaml"
@@ -135,7 +184,7 @@ services:
       interval: 1s
       retries: 60
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
 
   # Schema changes run outside blastit, with the real credentials, and as a uid
   # of their own — never the one init runs as (see "Rootless" below).
@@ -169,10 +218,10 @@ services:
     command:
       - --entryPoints.web.address=:80
       - --entryPoints.websecure.address=:443
-      - --providers.file.filename=/etc/traefik/traefik.yml
+      - --providers.file.filename=/etc/traefik/dynamic.yml
       - --log.level=INFO
     volumes:
-      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./dynamic.yml:/etc/traefik/dynamic.yml:ro
     ports:
       - "80:80"
       - "443:443"
@@ -253,12 +302,23 @@ example uses the first:
           blastit
     ```
 
+### Build and push the image
+
+The three files above sit together with the `Dockerfile` below, whose build
+context is that directory:
+
+```console
+$ export TAG=$(git rev-parse --short HEAD)
+$ docker build -t registry.example.com/shop:$TAG .
+$ docker push registry.example.com/shop:$TAG
+```
+
 Start it:
 
 ```console
-$ DB_PASSWORD=… DJANGO_SECRET_KEY=… TAG=$(git rev-parse --short HEAD) docker compose up -d
+$ DB_PASSWORD=… DJANGO_SECRET_KEY=… TAG=$TAG docker compose up -d
 $ curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: shop.example.com' http://127.0.0.1/
-$ docker compose logs app | head -3
+$ docker compose logs app | head -2
 {"event":"boot","component":"init","stage":"stage0","seccomp":true,"privilege":"capabilities","capabilities":["cap_chown","cap_dac_override","cap_fowner","cap_kill","cap_setgid","cap_setuid","cap_setpcap"],"bounding_set":"dropped"}
 ```
 

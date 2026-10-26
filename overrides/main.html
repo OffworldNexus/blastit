@@ -30,6 +30,18 @@
   <link rel="alternate icon" href="{{ 'brand/favicon.ico' | url }}" sizes="any">
   <link rel="apple-touch-icon" href="{{ 'brand/apple-touch-icon.png' | url }}">
 
+  {#
+    The theme loads its Mermaid runtime from unpkg.com the first time it sees a
+    diagram, which makes every page with a fence wait for a ~5 MB cross-origin
+    download before anything is drawn. A plain (no `crossorigin`, to match the
+    script tag the theme injects) preload starts that fetch while the document
+    is still parsing, so the diagram appears as soon as the loader asks for it.
+    Only on pages that have a diagram, so the rest pay nothing.
+  #}
+  {% if page.content and 'class="mermaid"' in page.content %}
+    <link rel="preload" as="script" href="https://unpkg.com/mermaid@12/dist/mermaid.min.js">
+  {% endif %}
+
   {% if is_root %}
     {% set title = config.site_name %}
   {% elif page.meta and page.meta.title %}

@@ -1,12 +1,28 @@
 # Fit it to your framework
 
-blastit is a WSGI server. That is the whole of its integration story, and it is
-deliberately short.
+Two paths, one per kind of project. They are separate pages because the
+day-to-day loop differs — what fills the manifest in, mostly — and everything
+that does *not* differ is on this page, once.
+
+<div class="grid cards" markdown>
+
+- :fontawesome-brands-python: **[Django](django.md)**
+
+    Two settings, the first `blastit.toml`, running it locally, and the manifest
+    filled in from your test suite with the pytest plugin.
+
+- :material-flask: **[Flask and other WSGI apps](flask.md)**
+
+    The same lifecycle, with what changes: the plugin does not apply, so the
+    manifest comes from table grants and `blastit-manifest fold`.
+
+</div>
 
 ## No framework integration
 
-blastit loads **one standard WSGI callable** (`BLASTIT_APP`, written
-`module:attribute`) and calls it. It knows nothing about your framework's
+blastit is a WSGI server. That is the whole of its integration story, and it is
+deliberately short: it loads **one standard WSGI callable** (`BLASTIT_APP`,
+written `module:attribute`) and calls it. It knows nothing about your framework's
 routing, your middleware, your settings module or your test runner. Which
 process serves a request comes from blastit's own routing table in
 `blastit.toml`, not from your URL configuration.
@@ -34,14 +50,16 @@ error.
 ### Send parameters separately from the SQL text
 
 blastit matches statements by their text, so the text of a statement has to be
-the same on every request. A client that inlines literals into the SQL —
-psycopg2, or psycopg 3 in its default client-side binding mode — sends a
-different string every time, and no allowlist could ever match it.
+the same on every request. A client that inlines literals into the SQL sends a
+different string every time, and no allowlist could ever match it. That is
+psycopg2, and it is **Django's** psycopg 3 backend in its default client-side
+binding mode — psycopg 3's own `Cursor` binds on the server.
 
 | Client | What to do |
 |---|---|
-| Django with psycopg 3 | `DATABASES["default"]["OPTIONS"]["server_side_binding"] = True` |
-| Django with psycopg2 | not usable: it has no server-side binding. |
+| psycopg 3 (`psycopg`), used directly | nothing: parameters are sent separately, as `$1` |
+| Django with psycopg 3 | `DATABASES["default"].setdefault("OPTIONS", {})["server_side_binding"] = True`, the setting that turns off the backend's client-side binding |
+| Django with psycopg2 | not usable: it has no server-side binding |
 | SQLAlchemy with psycopg 3 | `postgresql+psycopg://`, which binds server-side by default |
 | SQLAlchemy with psycopg2 | not usable, for the same reason |
 
@@ -50,7 +68,7 @@ different string every time, and no allowlist could ever match it.
 Under blastit every request opens its own connection, and request threads are
 thrown away afterwards, so a connection that outlives its request is orphaned.
 
-* Django: `DATABASES["default"]["CONN_MAX_AGE"] = 0`
+* Django: `dj_database_url.config(conn_max_age=0)`, or `CONN_MAX_AGE = 0`
 * SQLAlchemy: `poolclass=NullPool`
 * Flask-SQLAlchemy: `SQLALCHEMY_ENGINE_OPTIONS = {"poolclass": NullPool}`
 
@@ -153,19 +171,6 @@ plugin does not apply: see
 
 ## Next
 
-<div class="grid cards" markdown>
-
-- :fontawesome-brands-python: **[Django](django.md)**
-
-    Install, first manifest, run locally, and fill in the grants from your test
-    suite.
-
-- :material-flask: **[Flask and other WSGI apps](flask.md)**
-
-    The same, and what to do where the Django tooling does not apply.
-
-- :material-sync: **[Day-to-day life](day-to-day.md)**
-
-    Adding a view, a denial, folding a production log, upgrading.
-
-</div>
+Once the app is running under blastit, the loop is the same for every framework:
+[adding a view, a new query, and reading a denial](day-to-day.md). Where it runs
+is [fit it to your infra](../infra/index.md).

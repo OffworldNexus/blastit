@@ -34,9 +34,9 @@ quietly.
 | `BLASTIT_EXEC` refused | its target is not owned by root or by init's uid, is writable by group or others, or sits in a directory that is. `/tmp` is refused by name |
 | `--role=dbproxy runs no interpreter` | `--role=dbproxy` from a wheel install. That is stage 0's job, and the wheel ships the Python-free binary it uses |
 | `python: …` output on stderr with a non-zero exit | importing `BLASTIT_APP`, `BLASTIT_PRELOAD` or `BLASTIT_WARMUP` raised. It is printed as `app.output` events, not as a traceback on stderr of its own |
-| `BLASTIT_APP (app:app): ModuleNotFoundError: No module named 'app'` | the project is not on the interpreter's `sys.path`: stage 1 re-executes with `-I`, and blastit restores only the *console script's* path, whose first entry is its own `bin` directory. Set `PYTHONPATH=$PWD` (or install the project) |
-| `BLASTIT_APP: must be \`module:attribute\`` | `module` and `attribute` are separated by a **colon**. Django's `WSGI_APPLICATION` uses dots, and the pytest live server hands that setting to blastit as it stands — pass `--blastit-live-app myproject.wsgi:application` |
-| `ModuleNotFoundError: No module named 'stringprep'`, or `'encodings.idna'`, or `'subprocess'`, from a view | the **interpreter's own standard library** is not readable by the view uids. A Python installed under a private home (`uv python install` puts one in `~/.local/share/uv/python`, and `~` is often `0750`) is reachable by your shell and by no sandbox uid, so only the modules compiled into `libpython` import. Use an interpreter with traversable paths |
+| `BLASTIT_APP (app:app): ModuleNotFoundError: No module named 'app'` | the module is not importable in the directory blastit was started from. Start it from the project root (the directory that holds `app.py`), or install the project <!-- E2b: the directory blastit was started from is on sys.path --> |
+| `BLASTIT_APP: must be \`module:attribute\`` | `module` and `attribute` are separated by a **colon**, as in `myproject.wsgi:application`. Django's `WSGI_APPLICATION` setting uses dots instead, and the pytest live server translates it for you <!-- E2b --> |
+| an interpreter under a private `$HOME` | refused at boot, with the interpreter and the fix named: a user directory that a view uid cannot traverse hides the whole standard library from the sandbox, so blastit refuses rather than letting a route fail later with `ModuleNotFoundError` <!-- E2b --> |
 | a `__pycache__` directory owned by root appears in the project or its `site-packages` | expected: stage 1 runs `python -I` **as root**, which ignores `PYTHONDONTWRITEBYTECODE`, and compiles the modules it imports before the fork into bytecode there. That is also why a wheel serves an application directory it may write to |
 | the log stops after `stage0` | the configuration did not parse; see the row above |
 | the log reaches `config` but not `preload` | the failure is in the manifest, the environment rewrite, or binding the database sockets — all of which happen between the two |
@@ -71,15 +71,15 @@ This is the interesting class, because it means the sandbox is working.
 | `53300` (too many connections) | the proxy's upstream cap, `BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` (default `BLASTIT_MAX_WORKERS`). Raise `BLASTIT_MAX_WORKERS` only up to the database plan's limit |
 | `DECLARE "_django_curs_…" CURSOR FOR …` refused | a named cursor. Turn server-side cursors off for that route (`DATABASES[...]["DISABLE_SERVER_SIDE_CURSORS"] = True`), because the name is generated per request and no grant can match it |
 | `SAVEPOINT "s140234_x1"` refused | the route needs `transaction_control = true`. Do not try to grant a savepoint |
-| the statement looks identical to the grant | check the *normalised* text: trimmed, no trailing `;`, whitespace collapsed, `$1`/`$2` compared as `$?`. Two lines of Python that concatenate into one SQL statement are fine; a newline inside the SQL is not the same text as a space |
-| everything is denied at once | the app inlines its parameters: psycopg2, or psycopg 3 with client-side binding. See [what blastit needs from an app](frameworks/index.md#send-parameters-separately-from-the-sql-text) |
+| the statement looks identical to the grant | check the *normalised* text: trimmed, no trailing `;`, whitespace collapsed, `$1`/`$2` compared as `$?`. Two lines of Python that concatenate into one SQL statement are fine, and a newline **is** the same text as a space — whitespace is collapsed before the comparison — but a different word order, or an extra column in the `SELECT` list, is not |
+| everything is denied at once | the app inlines its parameters: psycopg2, or **Django's** psycopg 3 backend in its default client-side binding mode. Plain psycopg 3 binds on the server. See [what blastit needs from an app](frameworks/index.md#send-parameters-separately-from-the-sql-text) |
 
 ## Something is different from the app's point of view
 
 | Symptom | Cause |
 |---|---|
 | `REMOTE_ADDR` is the load balancer's address | `BLASTIT_TRUSTED_PROXIES` does not include it. Default is `127.0.0.1,::1`; a non-loopback proxy has to be named. Read [working it out for your own ingress](infra/anything-else.md#working-it-out-for-your-own-ingress) |
-| `REMOTE_ADDR` carries a port | expected when the address came from the socket peer: it keeps the `ip:port` shape it arrived with. An address a trusted header named is a bare IP. Code that compares `REMOTE_ADDR` to a list of addresses should handle both |
+| `REMOTE_ADDR` carries a port | it does not: the address is bare, and the peer's port is in `REMOTE_PORT`. Code that compares `REMOTE_ADDR` to a list of addresses needs no stripping |
 | `REMOTE_ADDR` is a forged value | the header being read is one the ingress passes through. Measure it with the throwaway route in that same section |
 | `request.is_secure()` is false behind TLS | `X-Forwarded-Proto` is not arriving from a trusted peer (or is not exactly `https`). Django also needs `SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")` |
 | `environ["SCRIPT_NAME"]` is empty but the app is mounted under a path | set `BLASTIT_SCRIPT_NAME`; blastit strips it before routing and passes it as `SCRIPT_NAME` |
