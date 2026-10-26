@@ -84,8 +84,12 @@ pub struct RequestHead {
     pub expect_continue: bool,
     /// The client wants the connection kept open after this response.
     pub keep_alive: bool,
-    /// The client address: the peer, or the last `X-Forwarded-For` entry.
+    /// The client address, as the one resolver decided it (D5): the peer, or
+    /// the address a trusted `BLASTIT_CLIENT_IP_HEADER` chain names.
     pub remote_addr: String,
+    /// The address the request actually arrived on, `ip:port` (D5). Never a
+    /// header's value, and the only thing the trust decision is made on.
+    pub peer_addr: String,
     /// `http`, or `https` when a trusted `X-Forwarded-Proto` says so.
     pub scheme: Scheme,
     /// `Host` without its port, or `localhost`.
@@ -225,7 +229,8 @@ pub fn parse(available: &[u8], cfg: &HttpConfig, peer: &str) -> Parsed {
                 expect_continue,
                 keep_alive,
                 remote_addr: client_addr(&raw, cfg, peer),
-                scheme: scheme(&raw, cfg),
+                peer_addr: peer.to_string(),
+                scheme: scheme(&raw, cfg, peer),
                 server_name: host_name(&raw).unwrap_or_else(|| "localhost".to_string()),
             };
             Parsed::Complete(head, used)
@@ -408,39 +413,48 @@ fn valid_host(host: &[u8]) -> bool {
         })
 }
 
-/// The client address to report, from `X-Forwarded-For` when it may be trusted.
+/// The client address to report, by the one resolver both ends use (D5).
 ///
-/// A load balancer *appends* the address it saw, so the last entry is the one
-/// it added and the closest thing to the real client. Entries to its left are
-/// whatever the client sent and mean nothing here.
+/// The **peer** decides whether anything may be believed: a peer outside
+/// `BLASTIT_TRUSTED_PROXIES` is the client, whatever its headers say. Only a
+/// trusted peer's `BLASTIT_CLIENT_IP_HEADER` chain can name someone else, and a
+/// chain with an unparsable entry names nobody.
+///
+/// A peer that cannot be read as an address has no resolution, and is reported
+/// verbatim: this is a front end that logs rather than a scheduler that keys.
 fn client_addr(raw: &[(Vec<u8>, Vec<u8>)], cfg: &HttpConfig, peer: &str) -> String {
-    if cfg.trust_forwarded
-        && let Some(value) = headers::values(raw, "x-forwarded-for").last()
-        && let Some(last) = value.rsplit(|byte| *byte == b',').next()
-    {
-        let last = headers::trim(last);
-        if !last.is_empty() {
-            return String::from_utf8_lossy(last).into_owned();
-        }
-    }
-    peer.to_string()
+    cfg.client_ip
+        .resolve(peer, raw)
+        .map(|client| client.remote_addr(peer))
+        .unwrap_or_else(|| peer.to_string())
 }
 
-/// The scheme, from `X-Forwarded-Proto` when it may be trusted.
+/// The scheme, from `X-Forwarded-Proto` when the peer may be trusted.
 ///
-/// Anything that is not exactly `http` or `https` is ignored: a scheme is a
-/// two-value enum, and a load balancer that writes something else is not
+/// The trust check is the client-IP one (D5): a header from a peer we would not
+/// believe about addresses is not a header to believe about the transport
+/// either. Anything that is not exactly `http` or `https` is ignored: a scheme
+/// is a two-value enum, and a load balancer that writes something else is not
 /// describing a scheme we could report.
-fn scheme(raw: &[(Vec<u8>, Vec<u8>)], cfg: &HttpConfig) -> Scheme {
-    if cfg.trust_forwarded
-        && let Some(value) = headers::values(raw, "x-forwarded-proto").last()
-    {
+fn scheme(raw: &[(Vec<u8>, Vec<u8>)], cfg: &HttpConfig, peer: &str) -> Scheme {
+    if !peer_is_trusted(cfg, peer) {
+        return Scheme::Http;
+    }
+    if let Some(value) = headers::values(raw, "x-forwarded-proto").last() {
         let value = headers::trim(value);
         if value.eq_ignore_ascii_case(b"https") {
             return Scheme::Https;
         }
     }
     Scheme::Http
+}
+
+/// Whether the socket peer is one whose headers may be believed.
+///
+/// A peer that is not an address at all is not trusted: "I could not read where
+/// this came from" is not grounds for believing what it says.
+fn peer_is_trusted(cfg: &HttpConfig, peer: &str) -> bool {
+    blastit_frame::parse_addr(peer).is_some_and(|ip| cfg.client_ip.trusted.contains(&ip))
 }
 
 /// The `Host` name without its port, or `None` when there is no `Host`.
@@ -469,6 +483,7 @@ fn host_name(raw: &[(Vec<u8>, Vec<u8>)]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blastit_frame::{ClientIpConfig, TrustedProxies};
 
     fn cfg() -> HttpConfig {
         HttpConfig::default()
@@ -726,35 +741,96 @@ mod tests {
     }
 
     #[test]
-    fn forwarded_headers_are_trusted_only_when_configured() {
+    fn a_peer_we_do_not_trust_cannot_name_itself_in_a_header() {
+        // The default trusts only the loopback, so this peer's header is
+        // ignored: 1.2.3.4 is whatever the client typed.
         let raw = "GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 1.2.3.4, 5.6.7.8\r\nX-Forwarded-Proto: https\r\n\r\n";
         let head = parse_head(raw);
-        assert_eq!(head.remote_addr, "5.6.7.8", "the last entry is the LB's");
-        assert_eq!(head.scheme, Scheme::Https);
+        assert_eq!(head.remote_addr, "10.0.0.1:9999");
+        assert_eq!(head.peer_addr, "10.0.0.1:9999");
+        assert_eq!(head.scheme, Scheme::Http, "and neither can its scheme");
 
+        // A peer with no trusted list at all is in the same position.
         let mut cfg = cfg();
-        cfg.trust_forwarded = false;
-        match parse(raw.as_bytes(), &cfg, "10.0.0.1:9999") {
+        cfg.client_ip.trusted = TrustedProxies::none();
+        match parse(raw.as_bytes(), &cfg, "127.0.0.1:9999") {
             Parsed::Complete(head, _) => {
-                assert_eq!(head.remote_addr, "10.0.0.1:9999");
+                assert_eq!(head.remote_addr, "127.0.0.1:9999");
+                assert_eq!(head.scheme, Scheme::Http);
+            }
+            other => panic!("expected a complete head, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_trusted_peer_names_the_client_and_the_scheme() {
+        let raw = "GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 1.2.3.4, 5.6.7.8\r\nX-Forwarded-Proto: https\r\n\r\n";
+        match parse(raw.as_bytes(), &cfg(), "127.0.0.1:9999") {
+            Parsed::Complete(head, _) => {
+                // Rightmost first: 5.6.7.8 is not us, so it is the client.
+                assert_eq!(head.remote_addr, "5.6.7.8");
+                assert_eq!(head.peer_addr, "127.0.0.1:9999");
+                assert_eq!(head.scheme, Scheme::Https);
+            }
+            other => panic!("expected a complete head, got {other:?}"),
+        }
+
+        // A single entry, and a scheme we do not know.
+        let raw = "GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 9.9.9.9\r\nX-Forwarded-Proto: ftp\r\n\r\n";
+        match parse(raw.as_bytes(), &cfg(), "127.0.0.1:1") {
+            Parsed::Complete(head, _) => {
+                assert_eq!(head.remote_addr, "9.9.9.9");
                 assert_eq!(head.scheme, Scheme::Http);
             }
             other => panic!("expected a complete head, got {other:?}"),
         }
 
-        // A single, unpadded entry, and a scheme we do not know.
-        let head = parse_head(
-            "GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 9.9.9.9\r\nX-Forwarded-Proto: ftp\r\n\r\n",
-        );
-        assert_eq!(head.remote_addr, "9.9.9.9");
-        assert_eq!(head.scheme, Scheme::Http);
+        // An empty header names nobody: the peer stands.
+        for value in ["", " ", " , "] {
+            let raw = format!("GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: {value}\r\n\r\n");
+            match parse(raw.as_bytes(), &cfg(), "127.0.0.1:1") {
+                Parsed::Complete(head, _) => assert_eq!(head.remote_addr, "127.0.0.1:1"),
+                other => panic!("expected a complete head, got {other:?}"),
+            }
+        }
 
-        // An empty last entry falls back to the peer.
-        let head = parse_head("GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 1.2.3.4, \r\n\r\n");
-        assert_eq!(head.remote_addr, "10.0.0.1:9999");
+        // An unparsable entry makes the whole header ignored (it never falls
+        // through to another header), and IPv4-mapped addresses are normalised.
+        for (value, expected) in [
+            ("1.2.3.4, garbage", "127.0.0.1:1"),
+            ("::ffff:203.0.113.7", "203.0.113.7"),
+            ("[2001:db8::1]", "2001:db8::1"),
+        ] {
+            let raw = format!("GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: {value}\r\n\r\n");
+            match parse(raw.as_bytes(), &cfg(), "127.0.0.1:1") {
+                Parsed::Complete(head, _) => assert_eq!(head.remote_addr, expected, "{value}"),
+                other => panic!("expected a complete head, got {other:?}"),
+            }
+        }
 
-        let head = parse_head("GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: \r\n\r\n");
-        assert_eq!(head.remote_addr, "10.0.0.1:9999");
+        // The resolver reads whichever header it was configured with, so App
+        // Platform can use the one the edge overwrites.
+        let mut cfg = cfg();
+        cfg.client_ip = ClientIpConfig::new("do-connecting-ip", &["10.0.0.0/8"]).unwrap();
+        let raw = "GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 1.2.3.4\r\ndo-connecting-ip: 203.0.113.7\r\n\r\n";
+        match parse(raw.as_bytes(), &cfg, "10.244.3.9:1") {
+            Parsed::Complete(head, _) => {
+                assert_eq!(head.remote_addr, "203.0.113.7");
+                assert_eq!(head.peer_addr, "10.244.3.9:1");
+            }
+            other => panic!("expected a complete head, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_chain_of_trusted_proxies_takes_its_leftmost_entry() {
+        let mut cfg = cfg();
+        cfg.client_ip = ClientIpConfig::new("x-forwarded-for", &["10.0.0.0/8"]).unwrap();
+        let raw = "GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 10.1.1.1, 10.2.2.2\r\n\r\n";
+        match parse(raw.as_bytes(), &cfg, "10.244.3.9:1") {
+            Parsed::Complete(head, _) => assert_eq!(head.remote_addr, "10.1.1.1"),
+            other => panic!("expected a complete head, got {other:?}"),
+        }
     }
 
     #[test]
@@ -792,12 +868,24 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_names_the_forwarded_client_when_there_is_one() {
+    fn a_refusal_names_the_resolved_client_when_there_is_one() {
+        // `parse_reject` uses an untrusted peer, so the header it carries is
+        // ignored: the refusal names the peer.
         let reject = parse_reject(
             "POST / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 1.2.3.4, 5.6.7.8\r\nTransfer-Encoding: gzip\r\n\r\n",
         );
         assert_eq!(reject.status, 501);
-        assert_eq!(reject.remote_addr.as_deref(), Some("5.6.7.8"));
+        assert_eq!(reject.remote_addr.as_deref(), Some("10.0.0.1:9999"));
+
+        // From a trusted peer the same refusal names the client.
+        let raw = "POST / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 1.2.3.4, 5.6.7.8\r\nTransfer-Encoding: gzip\r\n\r\n";
+        match parse(raw.as_bytes(), &cfg(), "127.0.0.1:9999") {
+            Parsed::Reject(reject) => {
+                assert_eq!(reject.status, 501);
+                assert_eq!(reject.remote_addr.as_deref(), Some("5.6.7.8"));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
 
         // A malformed request line has no headers to look at.
         let reject = parse_reject("GET / HTTP/1.1\r\nBad Header\r\n\r\n");
