@@ -110,6 +110,103 @@ class TestManifestProxies:
             plugin._postgresql_proxies("version = ")
 
 
+class TestLiveServerManifest:
+    """What the live server needs from the manifest, read without Django (D3c)."""
+
+    def manifest(self, tmp_path: Path, text: str) -> Path:
+        path = tmp_path / "blastit.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_a_url_input_is_the_variable_to_point_at_the_test_database(
+        self, tmp_path: Path
+    ) -> None:
+        path = self.manifest(
+            tmp_path,
+            "version = 1\n"
+            "[proxy.db]\n"
+            'protocol = "postgresql"\n'
+            'input = { url = "DATABASE_URL" }\n',
+        )
+        assert plugin._postgresql_url_variable(path) == "DATABASE_URL"
+
+    def test_a_proxy_taking_its_upstream_in_pieces_has_no_url_variable(
+        self, tmp_path: Path
+    ) -> None:
+        path = self.manifest(
+            tmp_path,
+            "version = 1\n"
+            "[proxy.db]\n"
+            'protocol = "postgresql"\n'
+            'input = { host = "DB_HOST", database = "DB_NAME" }\n',
+        )
+        assert plugin._postgresql_url_variable(path) is None
+
+    def test_a_manifest_without_a_postgresql_proxy_has_no_url_variable(
+        self, tmp_path: Path
+    ) -> None:
+        path = self.manifest(tmp_path, "version = 1\n")
+        assert plugin._postgresql_url_variable(path) is None
+
+
+class TestLiveObservations:
+    """A live server's log, folded into the observations (D3c)."""
+
+    LOG = "\n".join(
+        [
+            '2026-10-25T14:02:11.384Z app[web.1]: {"event":"request","method":"GET",'
+            '"path":"/_blastit/health","route":null,"status":200}',
+            '{"event":"request","method":"GET","path":"/notes/","route":"notes","status":200}',
+            '{"event":"sql.denied","route":"notes","proxy":"db",'
+            '"sql":"SELECT \\"notes\\".\\"body\\" FROM \\"notes\\" WHERE \\"notes\\".\\"id\\" = $?",'
+            '"reason":"select on notes.body not granted"}',
+            '{"event":"request","method":"GET","path":"/oops/","route":null,"status":404}',
+        ]
+    )
+
+    def test_a_live_request_carries_its_own_proxy_and_the_live_source(self) -> None:
+        assert plugin._live_request("GET", "/notes/", "tests/test_x.py::test_it", []) == {
+            "method": "GET",
+            "path_info": "/notes/",
+            "nodeid": "tests/test_x.py::test_it",
+            "transaction_control": False,
+            "statements": [],
+            "egress": [],
+            "source": "live",
+        }
+
+    def test_the_log_becomes_requests_with_the_denials_attached(self) -> None:
+        session = _FakeSession()
+        plugin._Session.record_live(
+            session, self.LOG, "tests/test_x.py::test_it", (plugin.HEALTH_PATH,)
+        )
+        assert len(session.live) == 2, "the health probe is not traffic"
+        unrouted, routed = session.live[0], session.live[1]
+        assert unrouted["path_info"] == "/oops/", "the 404 blastit answered itself"
+        assert routed["path_info"] == "/notes/"
+        assert routed["nodeid"] == "tests/test_x.py::test_it"
+        statements = routed["statements"]
+        assert len(statements) == 1, statements
+        assert statements[0]["proxy"] == "db"
+        # The log's text is normalised; what the extension gets is its shape, so
+        # the table-grant analysis has something to parse (`blastit.logs`).
+        assert statements[0]["sql"] == 'SELECT "notes"."body" FROM "notes" WHERE "notes"."id" = $1'
+
+    def test_the_health_path_the_fixture_polls_is_not_traffic(self) -> None:
+        session = _FakeSession()
+        plugin._Session.record_live(
+            session, self.LOG, None, (plugin.HEALTH_PATH,)
+        )
+        assert [entry["path_info"] for entry in session.live] == ["/oops/", "/notes/"]
+
+    def test_a_denial_with_no_request_event_is_a_problem(self) -> None:
+        log = '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SELECT 1"}'
+        session = _FakeSession()
+        plugin._Session.record_live(session, log, None, ())
+        assert session.live == []
+        assert session.problems and "notes" in session.problems[0], session.problems
+
+
 class TestStatementCapture:
     """The wrapper that sits on a Django connection, with no Django in sight."""
 
@@ -254,6 +351,9 @@ class _FakeSession:
         self.warnings: list[str] = []
         self.reported_bindings: set[str] = set()
         self.lock = threading.Lock()
+        # What a live server's log folds into (D3c).
+        self.live: list[dict[str, Any]] = []
+        self.problems: list[str] = []
 
     def record_connection_setup(self, alias: str | None, sql: str) -> None:
         self.setup.append((alias, sql))

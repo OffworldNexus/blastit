@@ -86,6 +86,70 @@ Mocked HTTP clients — pytest-httpx, responses, a stub transport — never open
 socket, so the list is a **lower bound**: a route the report says nothing about
 may still need ``egress = true`` in production.
 
+A live server, served by blastit itself
+--------------------------------------
+
+Everything above records what happens *inside this process*. A test suite that
+drives a live server — pytest-django's ``live_server``, Playwright against it —
+makes its real traffic in a server process of its own, so the plugin cannot see
+it, and the front-end paths nobody asserts on are exactly the ones that surprise
+a deployment. The ``blastit_live_server`` fixture (D3c) closes that gap: it
+starts the real ``blastit`` binary on a free port, with the project's manifest
+and the *test* database, waits for its health path, yields the URL to point a
+browser or an HTTP client at, and on teardown folds what the server logged — the
+``request`` events and every ``sql.denied`` — into the same observations the
+report is built from.
+
+```python
+from urllib.request import urlopen
+
+
+def test_notes_page(blastit_live_server):
+    with urlopen(f"{blastit_live_server.url}/notes/") as response:
+        assert response.status == 200
+```
+
+or, when the suite already uses ``live_server`` everywhere:
+
+```console
+$ pytest --blastit-live-server --blastit-manifest blastit.toml
+```
+
+``--blastit-live-server`` makes ``live_server`` *be* blastit's, so a suite that
+was written against pytest-django's is served through blastit without touching
+the tests. A project can also say it in its own ``conftest.py``::
+
+    from blastit.pytest_plugin import blastit_live_server as live_server  # noqa: F401
+
+Two things it needs, because blastit is a sandbox and not a thread:
+
+* **root**, or passwordless ``sudo``: init binds listeners, makes the view
+  directories under ``/run/blastit`` and drops privileges to the view uids
+  (§2.1, §4). A machine with neither is skipped, with the reason, rather than
+  failed: what the fixture tests is the manifest, and it cannot be tested
+  without those privileges at all.
+* the **WSGI callable** to serve: ``WSGI_APPLICATION`` in the Django settings,
+  or ``--blastit-live-app module:attribute``. Without either, ``myproject.wsgi:
+  application`` is guessed from ``DJANGO_SETTINGS_MODULE``.
+
+What the log cannot say is as important as what it says. A `sql.denied` event
+carries the route, the proxy and the *normalised* statement — not the request
+that made it — so the plugin attaches it to the first request the log shows for
+that route; that is what puts a path next to the statement, and a route with no
+request event at all is reported as a problem rather than dropped. The statement
+is normalised, so it is what a grant has to hold — and
+[`blastit.logs.parseable_sql`](logs.py) turns it back into SQL PostgreSQL's
+parser accepts, so the route's `table_grants` snippet covers the denial too.
+
+A log also says nothing about the statements that *ran*: it records the requests
+that were served and the statements that were denied, never an allowed one. So a
+route whose only evidence is the log — the common case for a suite whose traffic
+all goes through the live server — reports its `missing` grants and no `unused`
+ones, and `unused_global` stays empty for the proxies such a route has a grant
+on: the report never calls a grant dead when nothing observed whether it was
+used. The suite's own requests, the ones this process served, are evidence like
+any other.
+
 Options
 -------
 
@@ -116,6 +180,17 @@ Options
     change what is *missing*: the audit already checks table grants as well as
     exact ones, so a statement a route's table grants cover is not missing at
     all.
+
+``--blastit-live-server``
+    Serve pytest-django's ``live_server`` fixture through blastit itself, so a
+    suite written against it checks real front-end traffic against the manifest.
+    Off by default: pytest-django's ``live_server`` runs the app in a thread of
+    this process, which is faster and needs no privileges.
+
+``--blastit-live-app MODULE:ATTR``
+    The WSGI callable ``blastit_live_server`` should serve. Default: the Django
+    setting ``WSGI_APPLICATION``, or ``<package>.wsgi:application`` derived from
+    ``DJANGO_SETTINGS_MODULE``.
 
 `pytest-xdist <https://pytest-xdist.readthedocs.io/>`_ works: each worker writes
 the requests it saw next to the report path, and the controller merges them and
@@ -168,6 +243,11 @@ are::
      "unrouted": [{"method": ..., "path_info": ..., "count": N,
                    "statements": N, "tests": [...]}],
      "unexercised_routes": [...],
+     "unused_global": {"statements": [{"proxy": ..., "sql": ...,
+                                       "groups": [...]}],
+                       "tables": [{"proxy": ..., "group": ...,
+                                   "tables": {...}, "functions": [...]}],
+                       "count": N},
      "connection_setup": {"statements": [{"sql": ..., "proxy": ..., "count": N,
                                           "wire_sql": ...,
                                           "ungranted_in": [...],
@@ -178,7 +258,7 @@ are::
      "plugin_warnings": [...],
      "totals": {"requests": N, "routed": N, "unrouted": N, "routes": N,
                 "routes_exercised": N, "statements": N, "missing": N,
-                "missing_distinct": N, "unused": N,
+                "missing_distinct": N, "unused": N, "unused_global": N,
                 "needs_transaction_control": [...], "connection_setup": N,
                 "connection_setup_ungranted": N, "egress": N, "unrecognised": N,
                 "plugin_warnings": N, "clean": bool}}
@@ -201,11 +281,21 @@ route's exact queries.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
+import shlex
+import shutil
+import signal
 import socket
+import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -394,6 +484,10 @@ class _Session:
         self.declared = _postgresql_proxies(self.manifest)
         _check_proxy_mapping(self)
         self.observations: list[_ObservedRequest] = []
+        #: What a live server's log recorded (D3c), already in the document's
+        #: shape: a denial there carries its proxy itself, which a request
+        #: recorded in this process has to resolve from a database alias.
+        self.live: list[dict[str, Any]] = []
         self.connection_setup: dict[tuple[str, str], int] = {}
         self.unrecognised: dict[tuple[str, str], int] = {}
         self.lock = threading.Lock()
@@ -458,10 +552,80 @@ class _Session:
         with self.lock:
             self.unrecognised[key] = self.unrecognised.get(key, 0) + 1
 
+    def record_live(
+        self, text: str, nodeid: str | None, ignore_paths: tuple[str, ...] = ()
+    ) -> None:
+        """Adds what a live server's log recorded to the observations (D3c).
+
+        A server started with [`blastit_live_server`] is another process: the
+        plugin sees nothing of its requests through Django, so the log is the
+        only record of what the front end really sent. Every `request` event
+        becomes an observation, so a route the traffic hit is exercised and a
+        path blastit would not have routed is reported as `unrouted`; every
+        `sql.denied` becomes a statement of its route's first observation, so
+        the grant the manifest is missing comes out as `missing`.
+
+        A denial carries a route and no request id (§8.1, "Correlation"), so the
+        route is the only link between a statement and a path. One with no
+        request event at all — a log cut in half, a route no request reached —
+        cannot be checked against the manifest, and is reported as a problem
+        rather than dropped.
+
+        `ignore_paths` is what the server answers itself and no suite asked for:
+        the health path (§2.4), which the fixture polls and which is in the log
+        because the scheduler logs every request it answers. Counting it as
+        traffic would report an unrouted request that nobody made.
+        """
+        from blastit import logs
+
+        events = logs.parse_events(text.splitlines())
+        by_route: dict[str, list[dict[str, Any]]] = {}
+        for denial in logs.denials(events):
+            by_route.setdefault(denial["route"], []).append(denial)
+
+        observations: list[dict[str, Any]] = [
+            _live_request(entry["method"], entry["path"], nodeid, [])
+            for entry in logs.unrouted_requests(events)
+            if entry["path"] not in ignore_paths
+        ]
+        attached: set[str] = set()
+        for entry in logs.routed_requests(events):
+            route = entry["route"]
+            statements: list[dict[str, Any]] = []
+            if route not in attached:
+                attached.add(route)
+                statements = [
+                    {
+                        "alias": None,
+                        "proxy": denial["proxy"] or None,
+                        # The log holds the normalised text, which no parser can
+                        # read; `parseable_sql` is the same statement as SQL
+                        # again, so the table-grant analysis has something to
+                        # work with, and normalising it gives the log's text back.
+                        "sql": logs.parseable_sql(denial["sql"]),
+                    }
+                    for denial in by_route.get(route, [])
+                ]
+            observations.append(
+                _live_request(entry["method"], entry["path"], nodeid, statements)
+            )
+
+        unattached = sorted(set(by_route) - attached)
+        with self.lock:
+            self.live.extend(observations)
+            if unattached:
+                self.problems.append(
+                    "the live server's log has sql.denied events for the route(s) "
+                    + ", ".join(unattached)
+                    + " but no `request` event for them: a denied statement cannot be "
+                    "checked against the manifest without the request that ran it"
+                )
+
     def document(self) -> dict[str, Any]:
         """The observations document the extension reads."""
         with self.lock:
             requests = [observed.as_json(self.proxy_for) for observed in self.observations]
+            requests.extend(self.live)
             setup = sorted(self.connection_setup.items())
             unrecognised = sorted(self.unrecognised.items())
             warnings = list(self.warnings)
@@ -1212,6 +1376,503 @@ def _wrap_existing_connections() -> None:
         _wrap_connection(connection)
 
 
+#
+# A live server, served by blastit itself (D3c).
+#
+
+
+#: How long a live server gets to answer on its health path before it is a
+#: failure. Generous: the first request pays for the interpreter's import of the
+#: project, which is what a cold boot of the server costs.
+LIVE_SERVER_TIMEOUT = 60.0
+
+#: How long a live server gets to stop after `SIGTERM` before it is killed.
+LIVE_SERVER_GRACE = 20.0
+
+#: The health path the fixture asks for; the server is told to use it, so a
+#: project that sets `BLASTIT_HEALTH_PATH` for production does not confuse it.
+HEALTH_PATH = "/_blastit/health"
+
+#: How many times a live server is started before the fixture gives up. A port
+#: that something else grabbed between the probe and the bind is worth one more
+#: try; anything else fails with the server's own log.
+LIVE_SERVER_ATTEMPTS = 3
+
+
+@dataclass
+class _LiveServer:
+    """A real `blastit` serving this project, as a test sees it."""
+
+    #: The base URL, without a trailing slash.
+    url: str
+    #: The address it answers on (`127.0.0.1`).
+    host: str
+    #: The port it bound.
+    port: int
+    #: The process, for a test that wants to watch it.
+    process: Any
+    #: The file its stdout (and stderr) went to.
+    log_path: Path
+
+
+def _live_request(
+    method: str, path: str, nodeid: str | None, statements: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """One observation, in the document's shape, built from a live server's log.
+
+    The shape is the extension's (`crates/blastit-py/src/audit.rs`): a statement
+    carries its own proxy here, because a `sql.denied` event names one and there
+    is no database alias in this process to resolve it from. `source` is for a
+    human reading the document; the extension ignores keys it does not know.
+    """
+    return {
+        "method": method,
+        "path_info": path,
+        "nodeid": nodeid,
+        "transaction_control": False,
+        "statements": statements,
+        "egress": [],
+        "source": "live",
+    }
+
+
+def _live_server_prefix() -> list[str]:
+    """How a live server has to be started on this machine, or a skip.
+
+    blastit's init binds the listeners, makes the view directories under
+    `/run/blastit` and drops privileges to the view uids (§2.1, §4), so it runs
+    as root. Tests that already run as root start it directly; otherwise
+    passwordless `sudo -n` is used, and the environment travels in a file that
+    only root can read — `sudo` resets the environment, and the test database's
+    password has no business in `ps`.
+    """
+    if os.geteuid() == 0:
+        return []
+    sudo = shutil.which("sudo")
+    if sudo is not None:
+        check = subprocess.run(  # noqa: S603 - an absolute path, no shell
+            [sudo, "-n", "true"], capture_output=True, check=False, text=True
+        )
+        if check.returncode == 0:
+            return [sudo, "-n"]
+    pytest.skip(
+        "blastit: a live server needs root (view uids, listeners, /run/blastit) — "
+        "run the tests as root, or give this user passwordless sudo (`sudo -n true`)"
+    )
+
+
+def _live_app_spec(config: pytest.Config) -> str:
+    """The WSGI callable the live server should serve.
+
+    `--blastit-live-app` wins; then the project's own `WSGI_APPLICATION`; then
+    the layout `django-admin startproject` writes, where the settings module
+    `myproject.settings` comes with `myproject.wsgi:application`. Empty when
+    none of them says anything, which the fixture turns into a skip.
+    """
+    from_option = config.getoption("blastit_live_app")
+    if from_option:
+        return str(from_option)
+    from django.conf import settings
+
+    declared = getattr(settings, "WSGI_APPLICATION", None)
+    if declared:
+        return str(declared)
+    module = os.environ.get("DJANGO_SETTINGS_MODULE", "")
+    if "." in module:
+        return f"{module.rsplit('.', 1)[0]}.wsgi:application"
+    return ""
+
+
+def _project_directory() -> Path:
+    """The directory a live server should run in, so the app is importable.
+
+    A wheel's stage 1 gets the console script's `sys.path` back (`-I` drops it),
+    and that path holds the working directory — so starting the server where the
+    settings module lives is what puts `wsgi` on it, exactly as
+    `manage.py runserver` does.
+    """
+    module = os.environ.get("DJANGO_SETTINGS_MODULE", "")
+    imported = sys.modules.get(module) if module else None
+    path = getattr(imported, "__file__", None)
+    if path:
+        return Path(path).resolve().parent
+    return Path.cwd()
+
+
+def _test_database_url(alias: str = "default") -> str:
+    """The test database as a URL a `postgresql` proxy can read (§5.2).
+
+    pytest-django's `django_db_setup` has already renamed the connection to the
+    test database, so this is the database the suite's own tests use — which is
+    what the live server has to be pointed at, or it would serve production's
+    (or whatever `DATABASE_URL` names) instead of the fixtures' data.
+
+    A Unix-socket host is spelled the way libpq spells one in a URL: the host is
+    the percent-encoded directory (`postgresql://user@%2Fvar%2Frun%2Fpostgresql:5432/db`).
+    """
+    from django.db import connections
+
+    settings_dict = connections[alias].settings_dict
+    user = str(settings_dict.get("USER") or "")
+    password = str(settings_dict.get("PASSWORD") or "")
+    host = str(settings_dict.get("HOST") or "")
+    port = str(settings_dict.get("PORT") or 5432)
+    name = str(settings_dict.get("NAME") or "")
+    credentials = urllib.parse.quote(user, safe="")
+    if password:
+        credentials += f":{urllib.parse.quote(password, safe='')}"
+    authority = urllib.parse.quote(host, safe="") if host else "localhost"
+    return f"postgresql://{credentials}@{authority}:{port}/{urllib.parse.quote(name, safe='')}"
+
+
+def _free_port() -> int:
+    """A port nothing is using right now, for the live server to bind."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _live_server_environment(
+    config: pytest.Config, manifest: Path, port: int, app_spec: str
+) -> dict[str, str]:
+    """The environment a live server is started with.
+
+    Deliberately small: the app's environment under blastit is not the test
+    runner's (§5.3 builds it from the manifest's outputs), so passing the whole
+    environment would only hand the app variables it will not have in
+    production. What it needs is the WSGI callable, the manifest, the port, the
+    settings module and the proxy's own input variable.
+    """
+    environment = {
+        "BLASTIT_APP": app_spec,
+        "BLASTIT_MANIFEST": str(manifest),
+        "BLASTIT_LOG_FORMAT": "json",
+        "BLASTIT_HEALTH_PATH": HEALTH_PATH,
+        "PORT": str(port),
+        "PYTHONPATH": str(_project_directory()),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    settings_module = os.environ.get("DJANGO_SETTINGS_MODULE")
+    if settings_module:
+        environment["DJANGO_SETTINGS_MODULE"] = settings_module
+    preload = _preload_modules()
+    if preload:
+        # §6, "Load lazily-loaded code before the fork": Django imports its root
+        # URLconf on the first request, which under blastit is *after* the fork —
+        # so the import would happen in one view process, from a directory the
+        # app's own uid may not be able to read. Naming it here is what the
+        # architecture tells a Django project to do, and the fixture can do it
+        # for the project rather than making every suite remember.
+        environment["BLASTIT_PRELOAD"] = ",".join(preload)
+    variable = _postgresql_url_variable(manifest)
+    if variable is not None:
+        environment[variable] = _test_database_url()
+    return environment
+
+
+def _preload_modules() -> list[str]:
+    """The modules a Django project imports lazily, for `BLASTIT_PRELOAD` (§6).
+
+    The root URLconf, which is the one the architecture names: Django resolves
+    it on the first request, so without this it is imported after the fork and
+    the URL configuration lives in one view process only. Empty when Django is
+    not usable or declares none.
+    """
+    try:
+        from django.conf import settings
+    except Exception:  # noqa: BLE001 - not a Django project, or settings are unusable
+        return []
+    root = getattr(settings, "ROOT_URLCONF", None)
+    return [root] if isinstance(root, str) and root else []
+
+
+def _make_reachable(path: Path) -> None:
+    """Makes the project's directory tree traversable by the view uids (§2.1).
+
+    Every view runs as a uid of its own, so it has to be able to *read* the
+    application's code — `/app` in a container is world-readable for exactly
+    that reason. A test project in a private directory (pytest's own `tmp_path`
+    is `0700`) would otherwise fail to import anything it did not already have
+    in memory when blastit forked it, which looks like an application bug.
+
+    Only the missing `o+x`/`o+r` on directories is added, and the walk stops at
+    the first directory the views can already traverse.
+    """
+    directory = path.resolve()
+    while True:
+        mode = directory.stat().st_mode & 0o777
+        if mode & 0o005 == 0o005:
+            return
+        directory.chmod(mode | 0o005)
+        if directory.parent == directory:
+            return
+        directory = directory.parent
+
+
+def _postgresql_url_variable(manifest: Path) -> str | None:
+    """The variable a `postgresql` proxy reads its URL from, or `None`.
+
+    `input = { url = "DATABASE_URL" }` is the usual declaration (§5.1). A proxy
+    that takes its upstream in pieces (`host`, `port`, `user`, `password`,
+    `database`) is not something this fixture can fill in from one URL, and the
+    caller says so.
+    """
+    import tomllib
+
+    document = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    proxies = document.get("proxy")
+    if not isinstance(proxies, dict):
+        return None
+    for declaration in proxies.values():
+        if not isinstance(declaration, dict):
+            continue
+        if declaration.get("protocol") != "postgresql":
+            continue
+        inputs = declaration.get("input")
+        if isinstance(inputs, dict) and isinstance(inputs.get("url"), str):
+            return str(inputs["url"])
+        return None
+    return None
+
+
+def _start_live_server(
+    prefix: list[str],
+    config: pytest.Config,
+    log_path: Path,
+) -> _LiveServer:
+    """Starts a live server, or fails with what it said on the way out.
+
+    A port that something else grabbed between the probe and the bind is the one
+    failure worth retrying; anything else is the server's own explanation, which
+    is why its output goes to a file rather than a pipe — a server that fails to
+    boot must not be able to hang the test run by holding one open.
+    """
+    app_spec = _live_app_spec(config)
+    if not app_spec:
+        pytest.skip(
+            "blastit: a live server needs the WSGI callable to serve — set "
+            "WSGI_APPLICATION in the Django settings, or pass --blastit-live-app "
+            "module:attribute"
+        )
+    manifest = Path(str(config.getoption("blastit_manifest") or config.getini("blastit_manifest")))
+    variable = _postgresql_url_variable(manifest)
+    if variable is None and _postgresql_proxies(manifest.read_text(encoding="utf-8")):
+        pytest.skip(
+            "blastit: a live server needs the manifest's postgresql proxy to take its "
+            "URL from one variable (`input = { url = \"DATABASE_URL\" }`, §5.1) to be "
+            "pointed at the test database"
+        )
+    failure = ""
+    for _ in range(LIVE_SERVER_ATTEMPTS):
+        port = _free_port()
+        environment = _live_server_environment(config, manifest, port, app_spec)
+        log_path.write_text("", encoding="utf-8")
+        with log_path.open("w", encoding="utf-8") as log:
+            if prefix:
+                environment_file = log_path.with_suffix(".env")
+                environment_file.write_text(
+                    "".join(
+                        f"export {key}={shlex.quote(value)}\n"
+                        for key, value in environment.items()
+                    ),
+                    encoding="utf-8",
+                )
+                command = [
+                    *prefix,
+                    "/bin/sh",
+                    "-c",
+                    f". {shlex.quote(str(environment_file))} && exec \"$@\"",
+                    "blastit",
+                    sys.executable,
+                    "-m",
+                    "blastit",
+                ]
+                process = subprocess.Popen(
+                    command,  # noqa: S603 - fixed argv, no shell
+                    cwd=str(_project_directory()),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    start_new_session=True,
+                )
+            else:
+                process = subprocess.Popen(  # noqa: S603 - sys.executable, fixed argv
+                    [sys.executable, "-m", "blastit"],
+                    cwd=str(_project_directory()),
+                    env=environment,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    start_new_session=True,
+                )
+        live = _LiveServer(
+            url=f"http://127.0.0.1:{port}",
+            host="127.0.0.1",
+            port=port,
+            process=process,
+            log_path=log_path,
+        )
+        if _wait_for_health(live):
+            return live
+        failure = _stop_live_server(live).strip()
+    _clean_bytecode(prefix, _project_directory())
+    pytest.fail(
+        f"blastit: the live server never answered on {HEALTH_PATH} "
+        f"(started {LIVE_SERVER_ATTEMPTS} time(s)); its last words:\n{failure[-4000:]}"
+    )
+
+
+def _wait_for_health(live: _LiveServer) -> bool:
+    """Waits for the server to answer its health path, or for it to exit."""
+    deadline = time.monotonic() + LIVE_SERVER_TIMEOUT
+    url = f"{live.url}{HEALTH_PATH}"
+    while time.monotonic() < deadline:
+        if live.process.poll() is not None:
+            return False
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:  # noqa: S310 - 127.0.0.1
+                if response.status == 200:
+                    return True
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(0.05)
+    return False
+
+
+def _stop_live_server(live: _LiveServer) -> str:
+    """Stops a live server, and returns everything it logged.
+
+    `SIGTERM` is what blastit's own graceful shutdown listens for (§4); the whole
+    process group is signalled, because the view processes and dbproxy are its
+    children and must not outlive the test.
+    """
+    process = live.process
+    if process.poll() is None:
+        _signal_group(process.pid, signal.SIGTERM)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=LIVE_SERVER_GRACE)
+    if process.poll() is None:
+        _signal_group(process.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=5)
+    with contextlib.suppress(OSError):
+        return live.log_path.read_text(encoding="utf-8", errors="replace")
+    return ""
+
+
+def _signal_group(pid: int, number: int) -> None:
+    """Signals every process of a live server's own process group."""
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(os.getpgid(pid), number)
+
+
+def _clean_bytecode(prefix: list[str], project: Path) -> None:
+    """Removes the bytecode caches a live server left in the project (D3c).
+
+    A wheel's stage 1 runs `python -I -m blastit`, and `-I` implies `-E`: the
+    interpreter ignores `PYTHONDONTWRITEBYTECODE` — which blastit itself injects
+    (§5.3) — so every module it imports *as root* before the fork leaves a
+    `__pycache__` owned by root in the project directory: the WSGI callable, the
+    settings, and the URLconf `BLASTIT_PRELOAD` names. The test process cannot
+    remove what root left, and pytest's own cleanup of its temporary directory
+    then fails on it. Cleaning it up is the fixture's mess to clean, and it
+    needs the same privileges the server did.
+    """
+    subprocess.run(  # noqa: S603 - a fixed argv, no shell
+        [
+            *prefix,
+            "find",
+            str(project),
+            "-name",
+            "__pycache__",
+            "-type",
+            "d",
+            "-exec",
+            "rm",
+            "-rf",
+            "--",
+            "{}",
+            "+",
+        ],
+        capture_output=True,
+        check=False,
+    )
+
+
+@pytest.fixture
+def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
+    """A real `blastit`, serving this project, for a live-server test suite (D3c).
+
+    Yields the server — `.url`, `.host`, `.port`, like pytest-django's
+    `live_server` — after it answers its health path, and on teardown collects
+    the log's `request` and `sql.denied` events into the observations the report
+    is built from, so front-end traffic is diffed against the manifest like any
+    other request.
+
+    It needs a manifest (`--blastit-manifest`), and the privileges blastit needs
+    to start (root, or passwordless sudo): without either it skips with the
+    reason rather than failing a suite that has nothing to do with blastit's own
+    requirements.
+    """
+    session = _SESSION
+    if session is None:
+        pytest.skip(
+            "blastit: a live server needs --blastit-manifest (or blastit_manifest in "
+            "the configuration) to serve the project with"
+        )
+    prefix = _live_server_prefix()
+    if _postgresql_url_variable(session.manifest_path) is not None:
+        # The test database has to exist, and reading its name from the
+        # connection is only right once pytest-django has created it.
+        request.getfixturevalue("django_db_setup")
+    # The views run as their own uids: they have to be able to read the code.
+    _make_reachable(_project_directory())
+    live = _start_live_server(prefix, request.config, tmp_path / "blastit-live.log")
+    try:
+        yield live
+    finally:
+        text = _stop_live_server(live)
+        _clean_bytecode(prefix, _project_directory())
+        state = _SESSION
+        if state is not None:
+            try:
+                state.record_live(text, state.nodeid, (HEALTH_PATH,))
+            except Exception as error:  # noqa: BLE001 - reported, never raised in teardown
+                state.problems.append(f"the live server's log could not be read: {error!r}")
+
+
+class _LiveServerPlugin:
+    """The `live_server` a `--blastit-live-server` session gets (D3c).
+
+    Registered only when the option is given, and registered at
+    `pytest_configure` — after pytest-django — so that a project asking for it
+    gets blastit's server under the name its tests already use, without touching
+    the tests. A `conftest.py` fixture, or a `pytest_plugins` entry, still wins:
+    it is collected later.
+    """
+
+    @pytest.fixture
+    def live_server(self, blastit_live_server: Any) -> Any:
+        """pytest-django's `live_server`, served by blastit itself.
+
+        pytest-django's own `_live_server_helper` — autouse, and part of the
+        fixture's contract — enables an `ALLOWED_HOSTS` override on whatever
+        `live_server` yields, so ours carries one too. It is the *test*
+        process's settings, not the server's: what the server accepts is its own
+        `ALLOWED_HOSTS`, in its own process, which is why a project whose
+        settings are stricter than `["*"]` has to accept the address it is
+        served on.
+        """
+        try:
+            from django.test.utils import modify_settings
+        except Exception:  # noqa: BLE001 - no Django settings: nothing to carry
+            return blastit_live_server
+        blastit_live_server._live_server_modified_settings = modify_settings(  # noqa: SLF001
+            ALLOWED_HOSTS={"append": blastit_live_server.host}
+        )
+        return blastit_live_server
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Declares the plugin's options; registers no behaviour on its own."""
     group = parser.getgroup("blastit")
@@ -1249,6 +1910,21 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="print the table-grant snippet of a route with missing statements, "
         "instead of only naming the statements (D7)",
     )
+    group.addoption(
+        "--blastit-live-server",
+        action="store_true",
+        default=False,
+        help="serve pytest-django's live_server through blastit itself, so real "
+        "front-end traffic is checked against the manifest (D3c; needs root or "
+        "passwordless sudo)",
+    )
+    group.addoption(
+        "--blastit-live-app",
+        metavar="MODULE:ATTR",
+        default=None,
+        help="the WSGI callable blastit_live_server serves (default: the Django "
+        "setting WSGI_APPLICATION, or <package>.wsgi:application)",
+    )
     parser.addini(
         "blastit_manifest",
         "path of the blastit.toml to diff the test suite against",
@@ -1265,15 +1941,24 @@ def pytest_configure(config: pytest.Config) -> None:
             config.getoption("blastit_proxy")
             or config.getoption("blastit_strict")
             or config.getoption("blastit_prefer_tables")
+            or config.getoption("blastit_live_server")
+            or config.getoption("blastit_live_app")
         ):
             raise pytest.UsageError(
                 "blastit: --blastit-proxy, --blastit-strict and "
                 "--blastit-prefer-tables need --blastit-manifest (or "
-                "blastit_manifest in the configuration)"
+                "blastit_manifest in the configuration); --blastit-live-server and "
+                "--blastit-live-app need it too, to know which manifest to serve "
+                "the project with"
             )
         return
     session = _Session(config)
     _SESSION = session
+    # The option asks for blastit's own live server under the name the suite
+    # already uses; nothing is registered without it, so a project keeps
+    # pytest-django's `live_server` — which is what most suites want.
+    if config.getoption("blastit_live_server"):
+        config.pluginmanager.register(_LiveServerPlugin(), "blastit-live-server")
     _install(session)
 
 
@@ -1513,6 +2198,14 @@ def _summary(report: dict[str, Any], path: str, prefer_tables: bool = False) -> 
             lines.append(
                 (f"blastit: route {route['name']}: {unused} grant(s) unused", False)
             )
+    if totals.get("unused_global"):
+        lines.append(
+            (
+                f"blastit: {totals['unused_global']} grant(s) of a global group nothing "
+                f"matched (see {path})",
+                False,
+            )
+        )
     if totals["unrouted"]:
         examples = ", ".join(
             f"{entry['method']} {entry['path_info']}" for entry in report["unrouted"][:3]

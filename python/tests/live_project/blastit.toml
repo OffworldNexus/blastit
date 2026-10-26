@@ -1,0 +1,36 @@
+# The manifest a real blastit serves this project with (D3c).
+#
+# It is deliberately half-written in the same way a real one is: the route that
+# the test suite exercises is granted, and the route that exists only for
+# production traffic is not — which is the case `blastit-manifest fold` and a
+# live-server suite are both for. Nothing here lists Django's own
+# `set_config('TimeZone', …)`: that goes in a group attached to every route,
+# because under blastit every request opens its own connection (§6).
+version = 1
+groups = ["django"]
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+# Django's own connection housekeeping, which runs on every route.
+[group.django.db]
+queries = ["SELECT set_config('TimeZone', $1, false)"]
+
+# Complete: the one statement this view sends is granted.
+[[route]]
+name = "live-ok"
+path = ['/live/']
+methods = ["GET"]
+groups = ["django"]
+[route.db]
+queries = ["SELECT 1"]
+
+# The other half of the point: this route is served, it sends something, and the
+# manifest does not grant it. The denial is in the log, and the live-server
+# fixture is what puts it in the report.
+[[route]]
+name = "live-denied"
+path = ['/live/denied/']
+methods = ["GET"]
+groups = ["django"]
