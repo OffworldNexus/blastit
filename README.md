@@ -94,10 +94,30 @@ statement it was refused:
 
 ### 1. Install
 
-blastit isn't on PyPI yet. Wheels (Linux x86_64, CPython 3.13 and 3.14) are
-built from every commit to `develop` and published on
-[blastit's own package index](https://offworldnexus.github.io/blastit/simple/).
+blastit is on PyPI: wheels for Linux, CPython 3.13 and 3.14 (x86_64 and
+aarch64), and an sdist that builds the same wheel from source for anything
+else.
+
 With uv:
+
+```console
+$ uv add blastit
+$ uv run blastit                     # or .venv/bin/blastit, or python -m blastit
+```
+
+With pip:
+
+```console
+$ pip install blastit
+```
+
+Every commit to `develop` is also published as `0.1.0.dev<build>` on
+[blastit's own package index](https://offworldnexus.github.io/blastit/simple/) —
+for something newer than the last release, or to test a fix that isn't released
+yet. `v0.1.0` is the first release, so until that tag exists this is the only
+index that has blastit on it.
+
+With uv, pointing at that index:
 
 ```toml
 # pyproject.toml
@@ -112,10 +132,9 @@ blastit = { index = "blastit" }
 
 ```console
 $ uv add --prerelease allow blastit
-$ uv run blastit                     # or .venv/bin/blastit, or python -m blastit
 ```
 
-With pip:
+With pip, from that index:
 
 ```console
 $ pip install --pre blastit --extra-index-url https://offworldnexus.github.io/blastit/simple/

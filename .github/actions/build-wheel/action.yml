@@ -1,0 +1,62 @@
+name: Build a wheel
+description: >
+  Build one blastit wheel in manylinux_2_28 — the extension, the Python package,
+  and the Python-free `blastit-dbproxy` binary the wheel carries (§4, D2) — and
+  upload it as an artifact.
+
+  `scripts/build-wheel.sh` does the same thing on a developer's machine; the
+  container is what makes the wheel work on an older glibc than the runner's, so
+  CI builds in there. Both the development wheels
+  (`.github/workflows/release.yml`) and the published ones
+  (`.github/workflows/publish-pypi.yml`) come from here, so the released wheel is
+  the one every commit to `develop` already built and smoked.
+
+inputs:
+  python:
+    description: CPython version to build for, as maturin's `--interpreter` takes it (`3.13`)
+    required: true
+  artifact:
+    description: Name to upload the wheel under
+    required: true
+  manylinux:
+    description: manylinux tag to build in
+    required: false
+    default: "2_28"
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Build in manylinux_2_28
+      uses: PyO3/maturin-action@v1
+      with:
+        manylinux: ${{ inputs.manylinux }}
+        args: --release --out dist --interpreter python${{ inputs.python }} --features blastit-py/extension-module
+        # Inside the container, so the Python-free dbproxy binary the wheel
+        # carries is built against the same old glibc as the extension.
+        before-script-linux: |
+          dnf install -y --setopt=install_weak_deps=False clang && dnf clean all
+          cargo build --release --locked -p blastit-dbproxy --bin blastit-dbproxy
+          install -D -m 0755 target/release/blastit-dbproxy python/blastit/_bin/blastit-dbproxy
+    - name: The wheel carries dbproxy, executable
+      shell: bash
+      run: |
+        set -euo pipefail
+        for wheel in dist/*.whl; do
+            # A wheel is a zip and the file name is stored uncompressed, so
+            # finding it needs no tool; the mode lives in the zip's attributes,
+            # which is what `zipinfo -l` prints in its first column.
+            if ! grep -qa "blastit/_bin/blastit-dbproxy" "$wheel"; then
+                echo "$wheel has no dbproxy binary in it: blastit refuses to start without it" >&2
+                exit 1
+            fi
+            if ! zipinfo -l "$wheel" | awk '{ print $1, $NF }' | grep -qx -- "-..x..x..x blastit/_bin/blastit-dbproxy"; then
+                echo "dbproxy is not executable in $wheel" >&2
+                exit 1
+            fi
+            echo "$wheel ok"
+        done
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact }}
+        path: dist/*.whl

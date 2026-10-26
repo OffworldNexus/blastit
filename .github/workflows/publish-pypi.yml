@@ -1,0 +1,224 @@
+name: Publish
+
+# E4: the release path. Pushing a `v*` tag publishes the manylinux wheels and the
+# sdist to PyPI through trusted publishing — OIDC, so there is no API token to
+# leak or rotate — from a GitHub environment named `pypi`. Nothing is built
+# before the tag has been checked against `Cargo.toml`, and every file has to
+# pass `twine check --strict` first.
+#
+# A tag can't be rehearsed, so the same builds also run on two other events, and
+# neither publishes anything:
+#
+#   * `workflow_dispatch` builds everything and stops before the upload. Uncheck
+#     `dry-run` to send the very same files to TestPyPI, from the `testpypi`
+#     environment — the dress rehearsal, with an index that takes throwaway
+#     versions;
+#   * a pull request that touches the packaging itself (this file, the action,
+#     pyproject.toml, scripts/) runs the builds, so a broken sdist or a wheel
+#     without dbproxy is found before the tag instead of during it.
+#
+# The development flow — a wheel per commit to `develop`, listed by the PEP 503
+# index on GitHub Pages — is `.github/workflows/release.yml`, and it shares
+# `.github/actions/build-wheel` with this one, so the released wheel is the same
+# one every commit already built.
+#
+# The one-time PyPI setup (trusted publisher, environments) is in RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Build and verify everything, upload nothing. Uncheck to publish to TestPyPI.
+        type: boolean
+        default: true
+  pull_request:
+    branches: [develop]
+    paths:
+      - "pyproject.toml"
+      - "Cargo.toml"
+      - "blastit_build.py"
+      - "scripts/**"
+      - ".github/actions/**"
+      - ".github/workflows/publish-pypi.yml"
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: the tag names a release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Only a tag can be wrong about the version it publishes: a dispatch or a
+      # pull request rehearses the build, not a release.
+      - name: Tag vs Cargo.toml
+        if: github.ref_type == 'tag'
+        run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+      - name: The changelog has an entry for it
+        if: github.ref_type == 'tag'
+        run: scripts/release-notes.sh "$GITHUB_REF_NAME" > /dev/null
+
+  wheels:
+    name: wheel (CPython ${{ matrix.python }}, ${{ matrix.arch }})
+    needs: guard
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One architecture failing shouldn't hide whether the other built.
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.14"]
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10
+      # Before the build: the README is the wheel's long description, and PyPI
+      # renders it with no repository around it.
+      - name: README links, as PyPI needs them
+        run: uv run --no-project scripts/readme-absolute-links.py
+      - uses: ./.github/actions/build-wheel
+        with:
+          python: ${{ matrix.python }}
+          artifact: wheel-${{ matrix.python }}-${{ matrix.arch }}
+
+  sdist:
+    name: sdist
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10
+      - name: README links, as PyPI needs them
+        run: uv run --no-project scripts/readme-absolute-links.py
+      # The sdist is what a platform without a wheel installs, so it has to build
+      # a working wheel on its own — including the dbproxy binary, which the
+      # build backend builds from the workspace in it (`blastit_build.py`).
+      - name: Build the sdist
+        run: uvx maturin sdist --out dist
+      - name: Install from the sdist, in a fresh environment
+        run: |
+          set -euo pipefail
+          uv venv --python 3.13 /tmp/from-sdist
+          # `--no-cache`: this must build the sdist here and now, not reuse a
+          # wheel some earlier run put in the cache.
+          VIRTUAL_ENV=/tmp/from-sdist uv pip install --no-cache dist/blastit-*.tar.gz
+      - name: The installed blastit runs, with dbproxy in it
+        run: |
+          set -euo pipefail
+          # `--help` prints the usage and exits non-zero (it is not a `--key=value`),
+          # so the exit status is not the check — the words are, and they come from
+          # `blastit._blastit`: a wheel from this sdist that doesn't load has none.
+          usage=$(/tmp/from-sdist/bin/blastit --help 2>&1 || true)
+          printf '%s\n' "$usage" | grep -q "stage 0"
+          dbproxy=$(ls /tmp/from-sdist/lib/python3*/site-packages/blastit/_bin/blastit-dbproxy)
+          test -x "$dbproxy"
+          ls -l "$dbproxy"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  verify:
+    name: twine check --strict
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: astral-sh/setup-uv@v10
+      # Everything that will be uploaded: the wheels and the sdist, nothing else.
+      - run: |
+          set -euo pipefail
+          ls -l dist
+          uvx twine check --strict dist/*
+
+  testpypi:
+    name: TestPyPI
+    needs: verify
+    # A dispatch, and only with `dry-run` unchecked; a tag never goes here.
+    if: github.event_name == 'workflow_dispatch' && !inputs.dry-run
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/blastit
+    # Only the job that uploads gets a token to prove who it is.
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # A rehearsal runs the same version again after a fix; without this,
+          # the second one stops on the files the first one uploaded.
+          skip-existing: true
+
+  pypi:
+    name: PyPI
+    needs: verify
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/blastit
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # Attestations are on by default in this action: PyPI records, for every
+      # file, that these workflows built it from this commit.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # PyPI refuses a file it already has, and never replaces one. This
+          # only skips those: re-running a half-failed upload finishes it
+          # instead of spending the version number again.
+          skip-existing: true
+
+  release:
+    name: GitHub release
+    needs: pypi
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach the wheels and the sdist to the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The notes are the changelog entry the guard already found.
+          scripts/release-notes.sh "$GITHUB_REF_NAME" > notes.md
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              # A re-run of a failed publish: the release is there already.
+              gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+              gh release create "$GITHUB_REF_NAME" dist/* \
+                --verify-tag \
+                --title "blastit $GITHUB_REF_NAME" \
+                --notes-file notes.md
+          fi
