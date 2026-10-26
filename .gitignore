@@ -15,3 +15,6 @@ __pycache__/
 /uv.lock
 # A stale extension built in place by an editable install (`uv sync`).
 /python/blastit/*.so
+
+# The rootless e2e run's logs (e2e/rootless/run.py).
+/e2e/rootless/out/
