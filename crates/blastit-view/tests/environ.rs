@@ -58,6 +58,25 @@ fn the_standard_environment_is_there() {
 }
 
 #[test]
+fn a_peer_that_is_not_an_address_keeps_its_name_and_has_no_port() {
+    // A socket with no name — an unnamed Unix socket — is not an `ip:port`, so
+    // there is no port to report: the key is absent rather than empty. The
+    // address stays what the front end could read, because an empty value would
+    // claim the connection has no client at all.
+    let mut head = support::head("GET", "/", Vec::new());
+    head.remote_addr = "unnamed-socket".to_string();
+    head.peer_addr = "unnamed-socket".to_string();
+    let response = echo(head, &["REMOTE_ADDR", "REMOTE_PORT"], "web");
+    assert_eq!(response.field("REMOTE_ADDR"), "unnamed-socket");
+    assert_eq!(
+        response.field("REMOTE_PORT"),
+        "None",
+        "no port to report: {}",
+        response.text()
+    );
+}
+
+#[test]
 fn path_info_is_percent_decoded_and_read_as_latin1() {
     // `%C3%A9` decodes to two bytes, which latin-1 reads as two characters:
     // the body carries exactly the bytes the client sent in the path.
