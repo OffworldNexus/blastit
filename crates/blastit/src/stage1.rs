@@ -735,6 +735,11 @@ fn preload_lifecycle(config: &Config, outcome: &Outcome, memory: Option<mem::Sam
     if let Some(privilege) = &config.privilege {
         lifecycle = privilege.lifecycle(lifecycle);
     }
+    // E1: and the preset, for the same reason — a `boot` line in the middle of a
+    // deployment's log has to be readable on its own.
+    if let Some(choice) = &config.preset {
+        lifecycle = choice.lifecycle(lifecycle);
+    }
     if let Some(reason) = outcome.decision.reason() {
         lifecycle = lifecycle.with_immortalize_reason(reason);
     }
@@ -906,6 +911,37 @@ mod tests {
         assert!(value.get("immortalize_reason").is_none(), "{value}");
         let millis = value["immortalize_ms"].as_f64().unwrap();
         assert!((millis - 1785.4).abs() < 1.0, "{millis}");
+        assert!(value["preset"].is_null(), "no preset: {value}");
+    }
+
+    #[test]
+    fn the_preload_boot_event_carries_the_preset_stage_zero_chose() {
+        // E1: the preset is stage 0's decision and travels in the document, and
+        // the preload `boot` line repeats it — a line in the middle of a log is
+        // read on its own, and the mode it describes came from the same source.
+        let config = Config {
+            preset: Some(crate::config::PresetChoice {
+                name: "compose-traefik".to_string(),
+                supplied: std::collections::BTreeMap::from([(
+                    "BLASTIT_TRUSTED_PROXIES".to_string(),
+                    "*".to_string(),
+                )]),
+                overridden: vec!["BLASTIT_LOG_FORMAT".to_string()],
+            }),
+            ..Config::default()
+        };
+        let outcome = Outcome {
+            decision: Decision::Off("for the test".to_string()),
+            stats: None,
+        };
+        let value = boot_json(&config, &outcome);
+        assert_eq!(value["stage"], "preload");
+        assert_eq!(value["preset"], "compose-traefik");
+        assert_eq!(value["preset_settings"]["BLASTIT_TRUSTED_PROXIES"], "*");
+        assert_eq!(
+            value["preset_overridden"],
+            serde_json::json!(["BLASTIT_LOG_FORMAT"])
+        );
     }
 
     #[test]

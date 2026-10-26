@@ -943,6 +943,9 @@ pub struct Lifecycle {
     mem_used: Option<u64>,
     max_view_processes: Option<u32>,
     outputs: BTreeMap<String, Vec<String>>,
+    preset: Option<String>,
+    preset_settings: BTreeMap<String, String>,
+    preset_overridden: Vec<String>,
 }
 
 impl Lifecycle {
@@ -1091,6 +1094,44 @@ impl Lifecycle {
         self
     }
 
+    /// Names the configuration preset in force (E1).
+    ///
+    /// A `boot` event with no preset set says so in the encoder: the preset is
+    /// `null`, not absent, so an operator never has to tell "no preset" from
+    /// "this build does not know about presets".
+    #[must_use]
+    pub fn with_preset(mut self, preset: impl Into<String>) -> Self {
+        self.preset = Some(preset.into());
+        self
+    }
+
+    /// Records that the preset supplied the setting `name` (E1).
+    ///
+    /// `value` is the preset's own value — blastit's, not the operator's — and
+    /// the *name* is the `BLASTIT_*` variable it would have been set by. The
+    /// pair is what §8.1's "which values the boot decided" needs; the value an
+    /// explicit variable replaced it with is never reported.
+    #[must_use]
+    pub fn with_preset_setting(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.preset_settings.insert(name.into(), value.into());
+        self
+    }
+
+    /// Records that an explicit variable overrode what the preset supplied
+    /// (E1).
+    ///
+    /// The *name* only: the value came from the environment, and §8.1 keeps
+    /// environment values out of the log.
+    #[must_use]
+    pub fn with_preset_override(mut self, name: impl Into<String>) -> Self {
+        self.preset_overridden.push(name.into());
+        self
+    }
+
     /// Named phase, for example `preload` or `drain`.
     pub fn stage(&self) -> Option<&str> {
         self.stage.as_deref()
@@ -1172,6 +1213,25 @@ impl Lifecycle {
     /// Output variable names per proxy; never values.
     pub fn outputs(&self) -> &BTreeMap<String, Vec<String>> {
         &self.outputs
+    }
+
+    /// The preset in force, when one is (E1).
+    pub fn preset(&self) -> Option<&str> {
+        self.preset.as_deref()
+    }
+
+    /// The settings the preset supplied and the values it gave them: the
+    /// `BLASTIT_*` variable name to the preset's own value (E1).
+    ///
+    /// Only the ones still in force: a setting an explicit variable overrode is
+    /// in [`Self::preset_overridden`] instead.
+    pub fn preset_settings(&self) -> &BTreeMap<String, String> {
+        &self.preset_settings
+    }
+
+    /// The variables that overrode what the preset supplied, by name (E1).
+    pub fn preset_overridden(&self) -> &[String] {
+        &self.preset_overridden
     }
 }
 

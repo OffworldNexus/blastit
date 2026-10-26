@@ -1354,7 +1354,7 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 | `process.spawned` / `process.exited` / `process.retired` | init, scheduler | info (warn for crashes) | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`) | view process lifecycle |
 | `process.cap` | scheduler | info | `estimate_bytes` (the measured cost of one view process), `cap` (the live view process cap it buys) | the measured cost or the cap changed (§8 Sizing); never once per request |
 | `app.output` | init | info (stdout) / warn (stderr) | `stream`, `line`, `part`, `parts` | the app or a library printed something |
-| `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, `seccomp`, `privilege` (`root` or `capabilities`, D6) with `capabilities` (the set init holds, rootless mode only) and `bounding_set` (`dropped` or `kept`, M1), the rendered output variable *names* per proxy (never values), the warning text (for example an unattached group) | lifecycle of the whole server |
+| `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, `seccomp`, `privilege` (`root` or `capabilities`, D6) with `capabilities` (the set init holds, rootless mode only) and `bounding_set` (`dropped` or `kept`, M1), the preset in force with the settings it supplied and the ones an explicit variable overrode (`preset`, `preset_settings`, `preset_overridden`; E1 — `preset` is written as `null` in a `boot` that has none, and the supplied settings' values are the preset's own, never the operator's), the rendered output variable *names* per proxy (never values), the warning text (for example an unattached group) | lifecycle of the whole server |
 
 `cost_ns` is what the request was charged for fair queuing: the view
 process's own measurement, clamped between the time from dispatch to the
@@ -1371,6 +1371,18 @@ cost before the fork: `immortalized` and `immortalize_ms` for §9.2 #9's pass
 over the heap, and the memory the view process cap was derived from —
 `mem_total`, `mem_used` and `max_view_processes` (§8 Sizing). Byte counts are
 integers.
+
+**The three `boot` lines.** The first is `stage0`'s: printed before anything can
+fail, so it says the §7.3 seccomp setting, read straight from its variable, and
+nothing about a configuration that was not read yet — including `preset: null`.
+The `config` line is also stage 0's, emitted as soon as the configuration parsed
+and *before* the manifest is read, so a boot that fails later still says which
+preset it was failing with; it carries the mode init detected, the filters as
+configured, and the preset. The `preload` line is stage 1's (§8 Sizing, §9.2 #7).
+A `warn` line follows the `config` one when the preset's assumptions about the
+platform do not hold for this boot (`preset_expects_root`,
+`preset_expects_rootless`) — stage 0 prints that one itself rather than carrying
+it to stage 1, for the same reason the `config` line exists.
 
 **Data that is never logged:** query strings, header values, request and
 response bodies, and SQL parameter values. They routinely carry personal data
@@ -1428,6 +1440,7 @@ with `request` events.
 | `BLASTIT_SECCOMP` | `1` | the §7.3 filters (verified on DO) |
 | `BLASTIT_GRACEFUL_TIMEOUT` | `25s` | drain time on `SIGTERM` |
 | `BLASTIT_WARMUP` | — | optional `module:callable` run before the fork |
+| `BLASTIT_PRESET` | — | a named set of defaults (see **Presets** below); `--preset NAME` (or `--preset=NAME`) sets the same thing and wins over this variable when the two disagree. The name is trimmed; a value that is only whitespace is unset. Every variable that is *set* — and `PORT` — wins over the preset, so precedence is built-in default < preset < environment. An unknown name is a startup error that lists the presets |
 
 `BLASTIT_UID_BASE` also decides which uid init may **not** run as (D6): the boot
 refuses a uid the layout hands to another process — the http, scheduler and
@@ -1438,6 +1451,42 @@ through the console script. There is deliberately no variable for the privilege
 *mode*: it is read from `/proc/self/status` at boot and reported in the `boot`
 event, because a deployment that believes it granted a capability has no other way
 to find out that it did not.
+
+**Presets.** A preset is a set of *defaults* for one platform: the two below are
+the two deployments that were measured end to end, and everything else is a
+combination of the variables in this table. Because a preset never wins over a
+variable that is set, `BLASTIT_PRESET=…` is always safe to add to a deployment
+that already configures blastit by hand. `blastit --help` lists them, and the
+`boot` event names the preset in force, the settings it supplied and the ones an
+explicit variable overrode (`preset`, `preset_settings`, `preset_overridden`,
+§8.1).
+
+Each preset carries two kinds of assumption, and neither is checked for the
+operator:
+
+* the **privilege mode** its values were written for. The mode is detected, not
+  configured (§2.1), so a boot that contradicts one **warns once and runs** —
+  root in a rootless deployment still works, it is simply more authority than the
+  preset asked for. Stage 0 prints that line (before the manifest is read, so a
+  boot that fails before stage 1 still says it).
+* **which peers can reach the socket**, for the client-IP setting it supplies.
+  That one is the deployment's to keep: blastit cannot tell a hop it owns from a
+  peer that reached it some other way, so the table says what each value assumes.
+
+| Preset | Setting | Value | What the value assumes |
+|---|---|---|---|
+| `digitalocean-paas` | `BLASTIT_CLIENT_IP_HEADER` | `do-connecting-ip` | the one header DO's edge **overwrites** with the real client address, so a client cannot put anything in it (§10) |
+| | `BLASTIT_TRUSTED_PROXIES` | `*` | every peer is trusted, and the assumption is that **nothing untrusted can reach the socket**: an App Platform service is only reachable through DO's load balancer and the app's own internal services, and the header being read is one the edge overwrites. Trusting every peer is then the simplest rule that also covers internal service-to-service calls (§10) |
+| | `BLASTIT_FAIR_QUEUING` | `on` | one client's burst must not starve the others on a single small instance (§2.4, D5); granian's defaults for the `BLASTIT_FQ_*` knobs |
+| | `BLASTIT_LOG_FORMAT` | `json` | the platform forwards stdout to its own log service and truncates a line at 2048 bytes (§8.1) |
+| | *assumption* | `root` | App Platform starts the container as root and cannot grant capabilities to a non-root user, so this preset's deployment is a root one (§2.1, §10) |
+| | *not set* | `PORT`, `BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` | the platform owns the port, and a connection cap names a proxy that only the manifest knows (§8 Sizing) |
+| `compose-traefik` | `BLASTIT_CLIENT_IP_HEADER` | `x-forwarded-for` | Traefik v3 **overwrites** it from a peer it does not trust, and appends its own entry otherwise; the rightmost entry is what the closest hop saw in both cases (the measurement beside §10) |
+| | `BLASTIT_TRUSTED_PROXIES` | `*` | the assumption is that **no untrusted peer can reach blastit's port**: the app publishes no port, so the peers that can are the containers on its own compose network — **any service on that network can reach it and will be believed**, so a deployment keeps containers it does not trust off that network (its own sidecars are trusted by construction, which is what makes service-to-service calls work). `*` means *the rightmost entry*, which is the one thing the hop in front cannot be lying about — a network list would take the *leftmost* entry whenever the client's own address is inside it (the measurement beside §10) |
+| | `BLASTIT_FAIR_QUEUING` | `on` | as above |
+| | `BLASTIT_LOG_FORMAT` | `json` | stdout is the container's log |
+| | *assumption* | `capabilities` | this is the rootless deployment of D6: init runs as a dedicated uid holding six capabilities, not as root |
+| | *not set* | `BLASTIT_EXEC`, the `BLASTIT_PROXY_<NAME>_*` caps | both name something only the deployment knows: the capability-free copy of the binary (a wheel names its own interpreter), and the manifest's proxies |
 
 ---
 
@@ -1609,11 +1658,12 @@ marked *(docs)*.
 | `SO_PEERCRED` broken; `/proc/<pid>/environ` readable across uids | per-view pg listeners + `SCM_CREDENTIALS`; `execve` barrier; dbproxy exec'd with an empty env |
 | COW in ~2 MiB chunks; ~14–18 MiB floor per process | immortalized heap, lazy spawning, LRU cap on live view processes |
 | HTTP/1.1 from the edge, TLS terminated there *(docs)* | http speaks plaintext HTTP/1.1 only |
-| The socket peer is DigitalOcean's ingress (`10.244.x.x` on this cluster, `100.127.x` on others), not the client | `BLASTIT_CLIENT_IP_HEADER=do-connecting-ip` with `BLASTIT_TRUSTED_PROXIES=10.0.0.0/8,100.64.0.0/10`, so only the ingress may name the client |
+| The socket peer is DigitalOcean's ingress (`10.244.x.x` on this cluster, `100.127.x` on others), not the client | `BLASTIT_PRESET=digitalocean-paas` reads the client from `do-connecting-ip` and trusts **every** peer |
+| An App Platform service is only reachable through DO's load balancer and the app's own internal services | nothing untrusted can reach the socket, so trusting every peer is the simplest rule that also covers service-to-service calls; what makes it safe is not the peer list but that the edge **overwrites** `do-connecting-ip`, so no client can put anything in the header being read. The old `10.0.0.0/8,100.64.0.0/10` list is gone: a trusted *peer list* was only ever needed to stop a client from *appending* to a header an upstream appends to, and `do-connecting-ip` is not that header — `X-Forwarded-For` is, and the preset does not read it (§10's appending row) |
 | `X-Forwarded-For` arrives as `<client-supplied…>,<real client>,<Cloudflare edge>`: the edge **appends** | the resolver walks the chain from the right and stops at the first address that is not trusted, so a forged leftmost entry never becomes the client |
 | `do-connecting-ip` is overwritten by the edge with the real client address, and `X-Real-IP` is stripped | `do-connecting-ip` is the one header an operator can believe on App Platform; `X-Real-IP` is not read at all |
 | `Forwarded`, `True-Client-IP` and `X-Client-IP` pass through **forged** | they are not read; only `BLASTIT_CLIENT_IP_HEADER` is, and only from a trusted peer |
-| `100.64.0.0/10` is also CGNAT client space, and a client behind a carrier NAT can arrive *from* it | that range is in the trusted list above only because the edge **overwrites** `do-connecting-ip`: a client cannot append to a header the edge replaces. Never use this trusted list with a header an upstream appends to — a forged entry would then be inside a range believed by construction |
+| `100.64.0.0/10` is also CGNAT client space, and a client behind a carrier NAT can arrive *from* it | it no longer matters, and it is *not* treated as a proxy range anywhere: a client behind a carrier NAT may be `100.64.0.0/10`, and with the header overwritten by the edge that is simply the address blastit reports (the live e2e asserts `REMOTE_ADDR` is a client's, explicitly allowing `100.64.0.0/10`). The trap the old row warned about — a forged entry sitting inside a trusted range — cannot arise from a list that has no entries |
 | `PORT` set by the platform (`8080` by default) | bound by init |
 | Root filesystem is a writable 9p overlay; `/tmp` and `/dev/shm` are tmpfs (count as RAM); 4 GiB, ephemeral, no volumes *(docs)* | runtime dirs under `/run/blastit` (disk, not RAM); recreated on every start |
 | Forwarded log lines ≤ 2048 bytes *(docs)* | init re-chunks every log line |
@@ -1621,6 +1671,63 @@ marked *(docs)*.
 | `MemTotal` = instance size; cgroup v1 memory usage available; `cpu_count()` overstates | memory cap derived at startup; never size from the CPU count |
 | Managed PG connection limits (about 20 on small plans) *(docs)* | `BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` |
 | Kubernetes underneath (`KUBERNETES_*` variables in the env) | stripped from the app env like everything else not needed |
+
+### Docker Compose behind Traefik
+
+`compose-traefik` is the second preset, and it rests on a measurement of its own
+rather than on the App Platform one: the ingress is **Traefik v3.7.16**, blastit
+is behind it, and the app publishes no port at all.
+
+The preset's second assumption is about *reachability*: no untrusted peer can
+reach blastit's port. Any container on the same compose network can — blastit
+binds `0.0.0.0:8080` inside its own network namespace, and every peer is trusted
+— so a deployment of this preset publishes no port for the app (only Traefik's)
+and keeps containers it does not trust off that network. Sidecars of the same
+deployment are trusted by construction, which is what makes service-to-service
+calls work without a second rule. (`digitalocean-paas` makes the same
+assumption, from the platform's side: see the table above.)
+
+What Traefik does with the headers it manages, as observed from the app (every
+row is one request from outside the compose network; the client's address as
+Traefik saw it was the network's gateway, `172.29.0.1`, and Traefik itself was
+`172.29.0.3`):
+
+| Header the client sends | Traefik's defaults | `forwardedHeaders.trustedIPs` contains the client | `forwardedHeaders.insecure=true` |
+|---|---|---|---|
+| *(nothing)* | `X-Forwarded-For: 172.29.0.1`, `X-Real-Ip: 172.29.0.1`, `X-Forwarded-Proto: http` | same | same |
+| `X-Forwarded-For: 6.6.6.6` | **overwritten**: `172.29.0.1` | **appended**: `6.6.6.6, 172.29.0.1` | appended |
+| `X-Real-Ip: 6.6.6.6` | **overwritten**: `172.29.0.1` | **kept**: `6.6.6.6` | kept |
+| `X-Forwarded-Proto: https` | **overwritten**: `http` | **kept**: `https` | kept |
+| `X-Forwarded-Host` / `-Port` / `-Server` | overwritten | kept | kept |
+| `Forwarded`, `True-Client-IP`, `X-Client-IP`, `CF-Connecting-IP`, `do-connecting-ip` | pass through **forged** | pass through forged | pass through forged |
+
+From which:
+
+* **`x-forwarded-for` is the header to read, not `X-Real-Ip`.** Traefik always
+  adds its own observation to `X-Forwarded-For`, so the rightmost entry is the
+  address it saw in *every* configuration above; `X-Real-Ip` is whatever the
+  client sent as soon as the client's address is in `trustedIPs`.
+* **Every peer is trusted** (`BLASTIT_TRUSTED_PROXIES=*`), which is a rule about
+  the *rightmost* entry: `*` takes `chain.last()`. The private ranges a Docker
+  network uses were the other candidate, and they are worse here — when every
+  entry of a chain is trusted the resolver takes the **leftmost**, so with the
+  client's own address inside those ranges (the bridge gateway; every other
+  container; a LAN client) a forged `X-Forwarded-For: 6.6.6.6` *becomes* the
+  client. Trusting a peer because its address is in `10/8` also says nothing
+  about whether it is a hop this deployment owns.
+* **`X-Forwarded-Proto` is followed** (`wsgi.url_scheme`), because the peer is
+  trusted to say it and Traefik overwrites it by default: a client's own
+  `https` cannot make a plaintext deployment report HTTPS, and behind Traefik's
+  TLS entry point the app sees `https`.
+* **`forwardedHeaders.trustedIPs` must not name a client** unless something that
+  really is a proxy sits in front of Traefik: with the client's address in it,
+  Traefik keeps the client's `X-Real-Ip` and `X-Forwarded-Proto`. Even then
+  `X-Forwarded-For` stays the right header for the reason above, which is the
+  second reason the preset reads that one.
+* A deployment that terminates TLS *in front of* Traefik is that other
+  configuration, and it is the one case where the operator has to write the
+  `trustedIPs` list themselves: the preset's values assume Traefik is the hop
+  that decides.
 
 ---
 

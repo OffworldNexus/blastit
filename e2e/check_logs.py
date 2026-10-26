@@ -9,6 +9,8 @@
   the database;
 * the scenario's requests were routed to the expected routes, including the
   egress probe, and the boot event says the seccomp filters are on;
+* `E2E_EXPECT_PRESET` names the preset the deployment runs under, when it has
+  one (E1), and the boot event names it and the settings it supplied;
 * the database password appears nowhere.
 """
 
@@ -119,11 +121,28 @@ def main():
 
     routed = {(e.get("path"), e.get("route")) for e in events if e.get("event") == "request"}
     for path, route in [("/login/", "login"), ("/notes/", "notes"), ("/logout/", "logout"),
-                        ("/debug/env/", "debug"), ("/debug/caps/", "debug"),
+                        ("/debug/env/", "debug"), ("/debug/request/", "debug"),
+                        ("/debug/caps/", "debug"),
                         ("/", "fallback"), ("/notes/peek/", "notes"),
                         ("/notes/sql/", "notes"), ("/debug/sql/", "sql"),
                         ("/debug/egress/", "debug"), ("/egress/probe/", "egress")]:
         check((path, route) in routed, f"{path} was routed to {route}")
+
+    # E1: the trust rules of this deployment are a preset, and the scenario has
+    # just checked what they decide (the client address, the scheme). The log
+    # says which preset it was, and which settings it supplied.
+    expected_preset = os.environ.get("E2E_EXPECT_PRESET", "")
+    if expected_preset:
+        boots = [e for e in events if e.get("event") == "boot"]
+        named = [e for e in boots if e.get("preset") == expected_preset]
+        check(bool(named), f"the boot event names the preset ({expected_preset})")
+        if named:
+            supplied = named[-1].get("preset_settings") or {}
+            check(bool(supplied),
+                  f"and the settings it supplied ({sorted(supplied)})")
+            check(all(str(name).startswith("BLASTIT_") for name in supplied),
+                  f"every one of them is a BLASTIT_* variable ({sorted(supplied)})")
+
     print(f"\n{'PASS' if not FAILURES else 'FAIL'}: {len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 
