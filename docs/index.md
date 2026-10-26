@@ -45,7 +45,7 @@ A request's route and its grants come from `blastit.toml`, next to your code.
 Yes if your app is [WSGI](frameworks/index.md#no-framework-integration), your
 database is PostgreSQL, and your host is Linux.
 
-No if you need ASGI, HTTP/2, WebSockets or a non-CPython interpreter.
+No if you need HTTP/2, WebSockets or a non-CPython interpreter.
 
 !!! warning "Pre-release"
 
