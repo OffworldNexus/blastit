@@ -6,25 +6,47 @@
 # here detects a virtualenv: the CLI *is* a Python program, so it runs on the
 # interpreter of the environment it is installed in, and so does stage 1 of the
 # server (§4).
+#
+# The backend is `blastit_build`, which is maturin's with one thing in front of
+# it: a PEP 517 build also builds `blastit-dbproxy` and puts it in the package,
+# so `pip install blastit` from the sdist yields the same working wheel the
+# manylinux builds do (see `blastit_build.py`). `maturin build` itself — what
+# `scripts/build-wheel.sh` and CI run — never loads this file.
 [build-system]
-requires = ["maturin>=1.9,<2.0"]
-build-backend = "maturin"
+# 1.9.3 is the first release that carries `license-files` into the sdist, which
+# is where a source install reads them from (§ E4).
+requires = ["maturin>=1.9.3,<2.0"]
+build-backend = "blastit_build"
+backend-path = ["."]
 
 [project]
 name = "blastit"
 description = "A sandboxing WSGI server: uids, per-route database grants, and no framework integration"
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "Apache-2.0" }
+# SPDX expression (PEP 639), with the file it names; the Apache 2.0 text is at
+# `LICENSE`, and PEP 639 says a project with a license expression must not also
+# carry a `License ::` classifier.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+# Both from `git log`, the only authorship record there is: no other name or
+# address appears in the repository or in the LICENSE.
+authors = [{ name = "Rémy Sanchez", email = "remy.sanchez@hyperthese.net" }]
+maintainers = [{ name = "Rémy Sanchez", email = "remy.sanchez@hyperthese.net" }]
+keywords = ["wsgi", "server", "sandbox", "security", "privilege-separation", "postgresql", "django"]
 dynamic = ["version"]
 classifiers = [
+    # 0.1 is the first public release, `blastit.toml` may still change, and the
+    # README says pre-release: Alpha, not Beta.
     "Development Status :: 3 - Alpha",
     "Environment :: No Input/Output (Daemon)",
     "Intended Audience :: Developers",
+    # Linux only: the sandboxes are uids, seccomp and `execve` (§7).
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    # The extension is not abi3 and no wheel is built for PyPy.
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Topic :: Internet :: WWW/HTTP :: WSGI :: Server",
@@ -52,6 +74,10 @@ blastit = "blastit.pytest_plugin"
 
 [project.urls]
 Homepage = "https://github.com/OffworldNexus/blastit"
+Documentation = "https://offworldnexus.github.io/blastit/"
+Source = "https://github.com/OffworldNexus/blastit"
+Issues = "https://github.com/OffworldNexus/blastit/issues"
+Changelog = "https://github.com/OffworldNexus/blastit/blob/develop/CHANGELOG.md"
 
 [tool.maturin]
 manifest-path = "crates/blastit-py/Cargo.toml"
@@ -63,4 +89,10 @@ python-source = "python"
 # there — which maturin's walk of `python-source` *does* respect, so the path is
 # named explicitly. Without this line the wheel has no dbproxy binary in it and
 # blastit refuses to start.
-include = [{ path = "python/blastit/_bin/blastit-dbproxy", format = "wheel" }]
+include = [
+    { path = "python/blastit/_bin/blastit-dbproxy", format = "wheel" },
+    # The build backend isn't part of the cargo workspace or of `python-source`,
+    # so the sdist has to be told about it: without this file, `pip install` of
+    # that sdist has no `blastit_build` module to import.
+    { path = "blastit_build.py", format = "sdist" },
+]

@@ -109,32 +109,34 @@ statement it was refused:
 
 ### 1. Install
 
-blastit isn't on PyPI yet. Wheels (Linux x86_64, CPython 3.13 and 3.14) are
-built from every commit to `develop` and published on
-[blastit's own package index](https://offworldnexus.github.io/blastit/simple/).
+blastit is on PyPI: wheels for Linux, CPython 3.13 and 3.14 (x86_64), and an
+sdist that builds the same wheel from source for anything else.
+
 With uv:
 
-```toml
-# pyproject.toml
-[[tool.uv.index]]
-name = "blastit"
-url = "https://offworldnexus.github.io/blastit/simple/"
-explicit = true
-
-[tool.uv.sources]
-blastit = { index = "blastit" }
-```
-
 ```console
-$ uv add --prerelease allow blastit
+$ uv add blastit
 $ uv run blastit                     # or .venv/bin/blastit, or python -m blastit
 ```
 
 With pip:
 
 ```console
-$ pip install --pre blastit --extra-index-url https://offworldnexus.github.io/blastit/simple/
+$ pip install blastit
 ```
+
+For a development build — the current `develop`, or a branch of it — install it
+from git, which builds it from source:
+
+```console
+$ uv add "blastit @ git+https://github.com/OffworldNexus/blastit@develop"
+$ pip install "blastit @ git+https://github.com/OffworldNexus/blastit@develop"
+```
+
+That build needs a Rust toolchain (1.88+) and libclang (the SQL parser's
+bindings are generated with bindgen). CI builds a wheel for every commit to
+`develop` as well, for CPython 3.13 and 3.14: it's on that commit's run, under
+*Actions* → the commit → *Artifacts*, as `0.1.0.dev<build>`.
 
 Like granian, blastit is a compiled extension plus a `blastit` command written
 in Python, so it runs on the interpreter of the environment it's installed in:
@@ -178,7 +180,7 @@ WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
 
-RUN pip install --pre blastit --extra-index-url https://offworldnexus.github.io/blastit/simple/
+RUN pip install blastit
 
 ENV BLASTIT_APP=myproject.wsgi:application \
     BLASTIT_MANIFEST=/app/blastit.toml \

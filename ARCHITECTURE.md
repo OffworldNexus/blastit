@@ -154,6 +154,11 @@ names the capability-free copy of a standalone install's own binary (which
 writable by neither group nor others, in a directory that is not either: a uid
 that could replace it would decide what the credentials-holding process runs next.
 
+**Distribution.** A tagged release publishes the wheels to PyPI through trusted
+publishing (`.github/workflows/publish-pypi.yml`); from an sdist, the build
+backend builds `blastit-dbproxy` from the workspace inside it, so a source
+install carries the same binary as a wheel.
+
 ### 2.2 dbproxy
 
 This is a pregresql `Proxy` with blastit's two hooks.

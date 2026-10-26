@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Sets the development version one commit's wheels are published under (D2).
+# Sets the version a development wheel carries (D2).
 #
-# A wheel's version comes from Cargo (`dynamic = ["version"]` in pyproject.toml),
-# and every commit to `develop` needs its own: the index the pilot installs from
-# is a moving target, and a client only picks the newest wheel up if the version
-# moved.
+# A wheel's version comes from Cargo (`dynamic = ["version"]` in pyproject.toml).
+# Every commit to `develop` builds a wheel and attaches it to that run as an
+# artifact, and that wheel must not look like a release: it carries
+# `<version>-dev<run number>` instead, so an artifact downloaded from a run —
+# or a wheel installed from it — is never mistaken for the 0.1.0 on PyPI.
+# Nothing publishes it (E4).
 #
 #   scripts/dev-version.sh 42        # 0.1.0 → 0.1.0-dev42 → blastit-0.1.0.dev42-…whl
 #

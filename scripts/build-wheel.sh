@@ -9,8 +9,10 @@
 #      is where stage 0 `execve`s it from. It is a plain Rust binary linked
 #      against the system glibc, so build it wherever the wheel's *target* glibc
 #      lives: a runner (ci.yml) is fine for a wheel that stays on that runner's
-#      distribution, and `release.yml` builds the published manylinux wheels
-#      inside the manylinux_2_28 container instead of calling this script.
+#      distribution; CI builds the published wheels inside the manylinux_2_28
+#      container instead of calling this script
+#      (`.github/workflows/wheels.yml` for a commit to `develop`,
+#      `.github/workflows/publish-pypi.yml` for a release).
 #   2. the `blastit._blastit` extension, with `pyo3/extension-module` enabled, so
 #      it does not link `libpython` — the interpreter that loads it already has
 #      it, and an auditwheel-compliant wheel may not depend on it.
@@ -19,9 +21,11 @@
 # `--interpreter` does the same); it must be the interpreter the wheel will be
 # installed into, because the extension is not abi3.
 #
-# Every commit that publishes a wheel needs its own version, from Cargo:
-# `scripts/dev-version.sh <build number>` moves the workspace version and
-# everything that depends on it, and this script is happy to run after it.
+# The wheels CI builds for a commit to `develop` carry a version of their own,
+# from Cargo: `scripts/dev-version.sh <build number>` moves the workspace version
+# and everything that depends on it, so a wheel downloaded from a run can't be
+# mistaken for the release at the same commit. This script is happy to run after
+# it.
 #
 # Usage: scripts/build-wheel.sh [extra arguments for `maturin build`]
 set -euo pipefail
