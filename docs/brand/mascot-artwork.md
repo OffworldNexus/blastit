@@ -76,11 +76,12 @@ both are poster licence kept from the reference.
 Hand-authored in the reference bitmap's 1024 × 1024 coordinate space, by
 reading coordinates off gridded crops of the reference. No auto-traced
 paths, embedded bitmaps, gradients, filters or strokes. The full mascot has
-**16 paths and 3 circle primitives**.
+**16 paths and 3 circle primitives**, layered so that no colour boundary
+is two paths meeting (see below).
 
 Each round was checked twice: a true 50 % overlay of the artwork on the
 reference, and a diagnostic render of every path's outline over the
-reference (outlines are diagnostic only; the artwork has no strokes). Nine
+reference (outlines are diagnostic only; the artwork has no strokes). Ten
 rounds:
 
 | Round | What changed |
@@ -94,33 +95,116 @@ rounds:
 | 7 | White seam between undertail and belly removed (undertail now runs under the belly edge); belly tightened. |
 | 8 | Cheek start moved onto the stripe's inner edge to close a buff sliver; a belly-edge change tried and rejected. |
 | 9 | Final geometry; colours normalised to the palette tokens; crown's lower corner tucked under the stripe (a 2 px seam visible in the head mark). |
+| 10 | Review: seams and holes, worst at the bill base. Re-layered (below) with the visible outline unchanged; `check_seams.py` added. |
+
+### Layering: no seams
+
+Two paths that only *meet* never render cleanly: each one's anti-aliased edge
+is part-transparent, and the background shows through the line where they
+touch. So no boundary between two colours is shared by two paths. Each visible
+boundary is the edge of exactly one shape lying over another, and the shape
+below runs well under it (typically 5–10 units):
+
+- **`body`** is one slate silhouette under the whole bird: crown, back, wing,
+  belly, flank, and forward under the bill. Where slate is the outline (the
+  crown and back), its edge *is* the outline. Elsewhere it stops about 6
+  units inside the shape that draws the outline (belly, undertail, wing tip),
+  so it can't fringe that edge.
+- **The flank stack.** The tail runs under `undertail-deep`, which runs under
+  `undertail`, which runs under `underparts`. The tops of all three hide
+  under `primaries`.
+- **The wing.** `primaries` run up under `wing-coverts`, whose lower edge,
+  with its notch, is the one you see.
+- **`underparts`** runs under the stripe and the cheek, and forward under the
+  lower mandible. Its edge along the shoulder line (y 382) is the edge you
+  see over the slate back.
+- **`cheek`** reaches up under the stripe.
+- **`eye-stripe`** runs on under both mandibles.
+- **The bill.** `bill-lower` reaches up under the dark `bill`, and both lie
+  over the head, which reaches under them.
+- **Legs and feet.** The legs start inside the belly and end inside the
+  feet, and the feet's heels sit inside the branch. The gap between the
+  legs, the belly and the branch is deliberate.
+
+The visible outline is unchanged. A pixel diff of the old and new art at 4×
+changes only where seams and slivers were filled: the bill base, the
+stripe/cheek crescent, the throat under the bill, the bill tip, the leg
+tops, and the heels.
+
+### Seam check
+
+[`check_seams.py`](check_seams.py) proves it. It is a PEP 723 script:
+`uv run docs/brand/check_seams.py`. It checks `mascot.svg`, the head mark,
+the ink and paper cutouts, `logo.svg`, `favicon.svg`, and the bird inlined in
+`favicon.svg`, both banners and the social card. Each is rendered with resvg,
+on a transparent background, at 4× (the head marks at 4× and 8×):
+
+1. Flood the clear region (alpha < 128) from the image border.
+2. Add the listed deliberate gaps (the space between the legs, the cutouts'
+   holes).
+3. Widen that region by 1 px to take in the outline's own anti-aliasing.
+4. Report every remaining pixel with alpha < 250, grouped into clusters with
+   their position in SVG units.
+
+The script exits 1 if it finds any. It also writes renders on magenta and on
+the favicon's rust, and zoomed crops of every junction (bill base, mandibles,
+eye, stripe, cheek, throat, shoulder, wing notch, flank, undertail, tail
+spots, wing tip and tail, leg tops, feet). The bill base is always also
+cropped at 8×. A notch in the outline that narrows to a point (the tail meets
+the wing tip; the two mandible tips) leaves one anti-aliased pixel at its
+apex. Clusters of 3 px or fewer within 2 px of the outside are counted as
+"outline corners", not seams.
+
+The favicon's own tile is opaque, so its alpha can't show a seam; the
+`favicon-bird` target checks the bird inside it.
+
+Seam pixels before and after the layering:
+
+| Target | Before, 4× | After, 4× | Before, 8× | After, 8× |
+| --- | ---: | ---: | ---: | ---: |
+| `mascot.svg` | 6 676 (93 clusters) | 0 | — | — |
+| `mascot-head.svg` | 3 884 (7) | 0 | 14 668 (7) | 0 |
+| `mascot-head-ink.svg` | 0 | 0 | 0 | 0 |
+| `mascot-head-paper.svg` | 0 | 0 | 0 | 0 |
+| `logo.svg` | 0 | 0 | 0 | 0 |
+| `favicon.svg` (whole tile) | 0 | 0 | 0 | 0 |
+| bird in `favicon.svg` | 3 855 (4) | 0 | 14 635 (4) | 0 |
+| bird in `header-light.svg` | 6 676 (93) | 0 | — | — |
+| bird in `header-dark.svg` | 6 676 (93) | 0 | — | — |
+| bird in `social-card.svg` | 6 676 (93) | 0 | — | — |
 
 ### Path inventory
 
 “Anchors” counts move/line/Bézier endpoints, including the initial point of
-each subpath, not `Z` closures or control handles. Bottom to top:
+each subpath, not `Z` closures or control handles. Hidden vertices (the parts
+that run under a neighbour) are included. Bottom to top:
 
-| SVG shape ID | Fill | Subpaths | Anchors | Bézier segments |
-| --- | --- | ---: | ---: | ---: |
-| `legs` | `umber` | 2 | 8 | 0 |
-| `tail` | `slate-deep` | 1 | 4 | 0 |
-| `tail-light` | `slate-mid` | 1 | 4 | 0 |
-| `undertail-deep` | `rust-deep` | 1 | 4 | 2 |
-| `undertail` | `rust` | 1 | 5 | 3 |
-| `underparts` | `buff` | 1 | 8 | 6 |
-| `crown-and-back` | `slate` | 1 | 10 | 2 |
-| `wing-coverts` | `slate-mid` | 1 | 7 | 1 |
-| `primaries` | `slate-deep` | 1 | 9 | 1 |
-| `tail-spots` | `cheek` | 3 | 12 | 0 |
-| `eye-stripe` | `stripe` | 1 | 8 | 4 |
-| `cheek` | `cheek` | 1 | 6 | 4 |
-| `bill-lower` | `bill-pale` | 1 | 3 | 1 |
-| `bill` | `bill` | 1 | 5 | 0 |
-| `eye-ring` | `eye-ring` | circle r 28 | — | — |
-| `eye` | `stripe` | circle r 22 | — | — |
-| `eye-glint` | `cheek` | circle r 5.5 | — | — |
-| `branch` | `branch` | 1 | 4 | 0 |
-| `feet` | `umber` | 2 | 11 | 5 |
+| SVG shape ID | Fill | Subpaths | Anchors | Bézier segments | Runs under |
+| --- | --- | ---: | ---: | ---: | --- |
+| `legs` | `umber` | 2 | 8 | 0 | belly, undertail, feet |
+| `body` | `slate` | 1 | 17 | 9 | everything above |
+| `tail` | `slate-deep` | 1 | 4 | 0 | `undertail-deep`, `primaries` |
+| `tail-light` | `slate-mid` | 1 | 4 | 0 | `undertail-deep`, `primaries` |
+| `undertail-deep` | `rust-deep` | 1 | 7 | 1 | `undertail`, `primaries` |
+| `undertail` | `rust` | 1 | 6 | 3 | `underparts`, `primaries` |
+| `underparts` | `buff` | 1 | 16 | 6 | wing, `cheek`, `eye-stripe`, mandibles |
+| `primaries` | `slate-deep` | 1 | 11 | 1 | `wing-coverts` |
+| `wing-coverts` | `slate-mid` | 1 | 7 | 1 | — |
+| `tail-spots` | `cheek` | 3 | 12 | 0 | — |
+| `cheek` | `cheek` | 1 | 7 | 4 | `eye-stripe`, eye |
+| `eye-stripe` | `stripe` | 1 | 10 | 4 | `bill`, `bill-lower`, eye |
+| `bill-lower` | `bill-pale` | 1 | 5 | 1 | `bill` |
+| `bill` | `bill` | 1 | 5 | 0 | — |
+| `eye-ring` | `eye-ring` | circle r 28 | — | — | `eye` |
+| `eye` | `stripe` | circle r 22 | — | — | `eye-glint` |
+| `eye-glint` | `cheek` | circle r 5.5 | — | — | — |
+| `branch` | `branch` | 1 | 4 | 0 | `feet` |
+| `feet` | `umber` | 2 | 13 | 5 | — |
+
+The head mark, the favicon, the banners and the social card are derived from
+`mascot.svg`. The head mark takes the nine head shapes (`body` through the
+eye) in the same order, under the neck clip; the others inline the full
+mascot. Regenerate them all whenever `mascot.svg` changes, then run the check.
 
 ## Deliverables
 
@@ -135,6 +219,7 @@ each subpath, not `Z` closures or control handles. Bottom to top:
 | `favicon-32.png`, `favicon.ico` (16/32/48), `apple-touch-icon.png` (180, square), `icon-512.png` | Renders of the favicon. |
 | [`mascot-compare.png`](mascot-compare.png) | Reference \| 50 % overlay \| flat artwork. |
 | [`mascot-side-by-side.png`](mascot-side-by-side.png) | Reference and flat artwork. |
+| [`check_seams.py`](check_seams.py) | The seam and hole check (see *Seam check*). |
 | [`palette.svg`](palette.svg), [`brand.css`](brand.css) | The palette, and the same tokens as CSS custom properties. |
 | [`social-card.svg`](social-card.svg) / [`social-card.png`](social-card.png) | OpenGraph card, 1280 × 640. |
 | [`../../.github/brand/header-light.svg`](../../.github/brand/header-light.svg), [`header-dark.svg`](../../.github/brand/header-dark.svg) | README banner, 960 × 260, mascot inline as vectors. |
