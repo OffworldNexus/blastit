@@ -626,6 +626,12 @@ password, because dbproxy authenticates by socket identity.
    | `LC_ALL` | `C.UTF-8` | no locale files needed |
    | `HOME`, `TMPDIR` | replaced per view | private scratch directory |
 
+Stage 1 runs `python -I`, which implies `-E`: the interpreter ignores every
+`PYTHON*` variable, so the `PYTHONDONTWRITEBYTECODE` above does not reach it —
+the modules stage 1 imports before the fork are compiled into `__pycache__`
+directories owned by the user blastit started as, which is why a wheel serves an
+application directory it may write to.
+
 Proxies are the general pattern for every future capability: **replace the
 credential with a local endpoint served by a broker that checks the
 manifest**. A new protocol (Redis, S3-style object storage, outbound HTTP
@@ -771,8 +777,74 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
   statement the route ran, with the TOML to paste in, so a route can be moved
   from exact queries to table grants in one step. A table a statement only
   locks gets an `update` entry on one column the route already reads (`id`
-  when it reads one, otherwise the first), never `"*"`, and the snippet says
-  so in a comment.
+  when it reads one, otherwise the first), never `"*"` — a lock needs the
+  UPDATE privilege on *any one* column, so `"*"` would hand out every column of
+  the table — and the snippet says so in a comment. A statement that locks a
+  table without reading a column of it (`SELECT 1 FROM t FOR UPDATE`, `SELECT *
+  FROM t FOR UPDATE`) names no column at all: the covering grant leaves the
+  `update` entry out, the snippet says to name one (the primary key, say), and
+  the statement stays an exact `queries` entry, which is what the tooling
+  writes for it. A **global** group's grants are reported once and not once
+  per route: a statement it grants is in every route's effective grant, so
+  listing it as unused per route would repeat one dead grant as many times as
+  there are routes (D3c).
+* **Global groups, in the report and in the tooling.** A statement a route is
+  granted only through a group attached to every route (`groups = […]` at the
+  top level) is never in that route's `unused`; the report has a section of its
+  own for it, `unused_global`, and a statement appears there only when *no*
+  route matched it. A global group's `tables`/`functions` grant is reported the
+  same way, once, when no observed statement needed it. A route whose only
+  evidence is a live server's log (below) reports no `unused` grants at all: the
+  log records the statements that were **denied**, never the ones that ran, so
+  no grant of it can be called dead, and `unused_global` stays empty for the
+  proxies such a route has a grant on.
+* **A live server, served by blastit itself.** A suite that drives a live server
+  — Playwright against `live_server` — makes its traffic in a server process of
+  its own, which the plugin cannot see from the test process. `blastit_live_server`
+  (and `--blastit-live-server`, which serves pytest-django's own `live_server`
+  the same way) starts the real blastit on a free port, with the project's
+  manifest and the *test* database, waits for the health path, and on teardown
+  folds the log's `request` and `sql.denied` events into the same observations
+  the report is built from — so real front-end traffic is checked against the
+  manifest and a missing grant comes out as `missing`. It needs what blastit
+  itself needs (root, or passwordless sudo) and skips, with the reason, where it
+  cannot have them; it preloads the project's root URLconf, which is what this
+  section asks a Django project to do anyway; and it serves the project from a
+  copy in a temporary directory when the view uids cannot read it where it
+  lives, never changing a mode outside the project. A denial carries a route and
+  no request id, so it is attached to the first request the log shows for it.
+* **Folding denials from logs.** `blastit-manifest fold LOG… --manifest
+  blastit.toml [--write] [--prefer-tables] [--allow-dangerous]` reads the same
+  event stream and prints — or, with `--write`, merges into the file — the
+  grants the statements a production log denied are missing: the exact
+  `queries` by default, or the smallest `tables`/`functions` grant covering
+  them. It never adds a grant to an `unrestricted` route, deduplicates, and
+  keeps a statement no table grant can describe — a system catalogue, a lock
+  with no column to name — as an exact query, saying why.
+
+  **An exact `queries` entry is trusted as it is.** blastit compares the text
+  and runs what it matches: it does not look at what a statement calls, so a
+  `queries` entry for `SELECT set_config(…)`, `SELECT pg_read_file(…)`,
+  `SELECT lo_import(…)` or a statement calling `pg_terminate_backend` runs that
+  function with the app's privileges. That is what a table grant is for — it
+  checks tables, columns and functions — and it is why `fold` refuses, unless
+  `--allow-dangerous` is given, a statement whose kind a grant is not an
+  allowlist for (DDL, `SET` and `RESET`, `COPY`, `DO`, `CALL`, `LOCK`, `GRANT`,
+  `REVOKE`, `TRUNCATE`, `VACUUM`, `LISTEN`, `NOTIFY`, the transaction commands)
+  *and* one that calls a function outside blastit's safe set. PostgreSQL's own
+  parser says which kind it is and the analysis says which functions it calls;
+  neither is guessed at from the text. A text holding several statements is
+  refused with or without the flag: a grant is one statement, so it has to be
+  split. Whatever is refused is listed on stderr with the reason, and nothing of
+  it is written.
+
+  Statements are compared, and merged, with blastit's own normaliser and
+  table-grant analysis (`normalize`, `analyze`, `covering`), so the tool has no
+  rules of its own to drift from. Every edit is proved before it is written: the
+  result is re-parsed, compared key by key to the plan, and audited with
+  blastit's own `audit` with the log's traffic as observations, so a grant the
+  plan does not explain cannot reach the file — and a route the log's requests
+  no longer route to is reported as unchecked rather than passed silently.
 * **`unrestricted = true`** in a route's own grant (`[route.<db>]`) means
   exactly what it says: that route may run any statement on that proxy,
   transaction control included. It is still a sandbox — the listener, the uid
