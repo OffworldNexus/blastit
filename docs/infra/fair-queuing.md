@@ -17,8 +17,7 @@ Fair queuing orders the admission queue by client instead of by arrival.
 * **Lowest debt goes next.** A flow that just became busy gets one burst
   allowance (`BLASTIT_FQ_BURST`) before it queues; its debt is capped at
   `BLASTIT_FQ_MAX_DEBT` and forgotten after `BLASTIT_FQ_DEBT_TTL` idle.
-* It is **granian's design**, ported from
-  [granian](https://github.com/emmett-framework/granian)'s fair scheduler.
+* It is a port of [granian's fair scheduler](https://github.com/Xowap/granian/tree/feature/kff-272-python-side-http-fair-queuing).
 
 ```mermaid
 flowchart TB
