@@ -1,0 +1,74 @@
+name: Docs
+
+# Builds the documentation site on every pull request and every push to
+# `develop`, so a broken link is a red check rather than a broken page, and
+# deploys it on every push to `develop`, on `workflow_dispatch`, and on a pushed
+# `v*` tag.
+#
+# The site is the only thing GitHub Pages serves here now: the PEP 503 wheel
+# index that `release.yml` used to publish was retired in E4, and releases go to
+# PyPI instead. Deploying from `develop` is also what makes the README's links
+# into the documentation live.
+
+on:
+  push:
+    branches: [develop]
+    tags: ["v*"]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
+
+permissions:
+  contents: read
+
+env:
+  # Pinned: a Zensical release can change what counts as a warning, and a docs
+  # build that suddenly fails on an unrelated PR is worse than a deliberate
+  # bump. `uvx` is not used here because the runner has pipx and the repository
+  # already installs build tools that way.
+  ZENSICAL_VERSION: "0.0.73"
+
+jobs:
+  build:
+    name: build (--strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Zensical
+        run: pipx install "zensical==$ZENSICAL_VERSION"
+      # `--strict` aborts on a warning, and link validation is on by default:
+      # every internal link and every link anchor is resolved, so a renamed
+      # heading or a moved page fails this job.
+      - name: Build
+        run: zensical build --strict
+      - uses: actions/configure-pages@v5
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: deploy (GitHub Pages)
+    needs: build
+    # A pull request builds the site and stops there: the `github-pages`
+    # environment allows `develop` and `v*` only, so a deployment from a
+    # feature branch would be refused.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

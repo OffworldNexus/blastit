@@ -1,0 +1,76 @@
+{#-
+  A tiny override, added by E2.
+
+  Three things the theme configuration cannot express:
+
+  * the `<title>` of the root page (the theme derives it from the navigation
+    title, which would read "Home - blastit");
+  * the favicon set. `theme.favicon` emits one `<link rel="icon">` (base.html,
+    `site_meta` block); the `.ico` and the Apple touch icon are added here;
+  * an Open Graph card. Zensical has no social-card generator, so
+    `docs/brand/social-card.png` (E3) is pointed at directly, and absolutely,
+    which is what a crawler needs.
+
+  The grid cards and `.md-button` links in the content rely on `attr_list` and
+  `md_in_html`, both enabled in `zensical.toml`.
+-#}
+{% extends "base.html" %}
+
+{% block htmltitle %}
+  {% set is_root = page.url in ('', '/', 'index.html') %}
+  {% if is_root %}
+    <title>{{ config.site_name }}</title>
+  {% else %}
+    {{ super() }}
+  {% endif %}
+{% endblock %}
+
+{% block extrahead %}
+  {% set is_root = page.url in ('', '/', 'index.html') %}
+  <link rel="alternate icon" href="{{ 'brand/favicon.ico' | url }}" sizes="any">
+  <link rel="apple-touch-icon" href="{{ 'brand/apple-touch-icon.png' | url }}">
+
+  {#
+    The theme loads its Mermaid runtime from unpkg.com the first time it sees a
+    diagram, which makes every page with a fence wait for a ~5 MB cross-origin
+    download before anything is drawn. A plain (no `crossorigin`, to match the
+    script tag the theme injects) preload starts that fetch while the document
+    is still parsing, so the diagram appears as soon as the loader asks for it.
+    Only on pages that have a diagram, so the rest pay nothing.
+  #}
+  {% if page.content and 'class="mermaid"' in page.content %}
+    <link rel="preload" as="script" href="https://unpkg.com/mermaid@12/dist/mermaid.min.js">
+  {% endif %}
+
+  {% if is_root %}
+    {% set title = config.site_name %}
+  {% elif page.meta and page.meta.title %}
+    {% set title = page.meta.title %}
+  {% elif page.title %}
+    {% set title = page.title | striptags %}
+  {% else %}
+    {% set title = config.site_name %}
+  {% endif %}
+  {% if page.meta and page.meta.description %}
+    {% set description = page.meta.description %}
+  {% else %}
+    {% set description = config.site_description %}
+  {% endif %}
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ title }}">
+  <meta property="og:description" content="{{ description }}">
+  <meta property="og:image" content="{{ config.site_url }}brand/social-card.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="blastit — a Eurasian nuthatch. Small bird. Small blast radius.">
+  {% if page.canonical_url %}
+    <meta property="og:url" content="{{ page.canonical_url }}">
+  {% endif %}
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ title }}">
+  <meta name="twitter:description" content="{{ description }}">
+  <meta name="twitter:image" content="{{ config.site_url }}brand/social-card.png">
+{% endblock %}
