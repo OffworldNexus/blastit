@@ -19,6 +19,7 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = os.environ.get("E2E_PORT", "18080")
@@ -63,12 +64,15 @@ def main():
                              env={**env, "E2E_SECRET_VAR": "E2E_DB_PASSWORD"}).returncode
 
         # The second app: Flask + SQLAlchemy, its own manifest, its own port. The
-        # HTTP part first, then its log: a log only holds requests that were made.
+        # HTTP part first, then its log — a log only holds requests that were
+        # made, and this one is written outside the checkout: it is a run's
+        # artifact, not a file of the repository, and the `logs` dump below has
+        # it when something fails.
         rc |= subprocess.run(
             [sys.executable, os.path.join(HERE, "sqlalchemy_check.py"),
              f"http://127.0.0.1:{SQLALCHEMY_PORT}"]
         ).returncode
-        sqlalchemy_log = os.path.join(HERE, "sqlalchemy.log")
+        sqlalchemy_log = os.path.join(tempfile.gettempdir(), "blastit-e2e-sqlalchemy.log")
         logs = compose(
             "logs", "--no-color", "--no-log-prefix", "sqlalchemy", capture_output=True, text=True
         ).stdout
