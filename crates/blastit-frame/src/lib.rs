@@ -61,6 +61,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod clientip;
 mod ctl;
 mod decoder;
 mod error;
@@ -71,6 +72,10 @@ mod raw;
 mod testutil;
 mod wire;
 
+pub use crate::clientip::{
+    ClientIp, ClientIpConfig, ClientIpError, ClientIpSource, TrustedProxies, normalize_ip,
+    parse_addr,
+};
 pub use crate::ctl::{Ctl, ExitStatus, MAX_SIGNAL, MIN_SIGNAL};
 pub use crate::decoder::Decoder;
 pub use crate::error::FrameError;
