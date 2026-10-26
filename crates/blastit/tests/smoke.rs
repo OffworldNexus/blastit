@@ -2064,6 +2064,67 @@ fn a_preset_is_accepted_and_reported_at_boot() {
 }
 
 #[test]
+fn the_command_line_preset_wins_and_says_so() {
+    if !needs_root("preset conflict") {
+        return;
+    }
+    // E1: the flag is the more explicit of the two, so it wins — and a variable
+    // that lost is worth a line, because an operator who put
+    // `BLASTIT_PRESET=compose-traefik` in an image and then ran
+    // `blastit --preset=digitalocean-paas` has just changed which header is
+    // believed and which peers may say it.
+    let server = Server::start_with(
+        "preset-conflict",
+        48_700,
+        ONE_ROUTE,
+        "app:application",
+        &[("app.py", APP)],
+        &[("BLASTIT_PRESET", "compose-traefik")],
+        &[env!("CARGO_BIN_EXE_blastit"), "--preset=digitalocean-paas"],
+        None,
+    );
+    assert_eq!(server.get("/one").status, 200, "{}", server.stdout_text());
+
+    // The `config` line names the preset that won, and the settings *it*
+    // supplies.
+    let boots = server.events("boot");
+    let config = boots
+        .iter()
+        .find(|boot| boot["stage"] == "config")
+        .unwrap_or_else(|| panic!("no config boot event: {boots:?}"));
+    assert_eq!(config["preset"], "digitalocean-paas", "{config}");
+    assert_eq!(
+        config["preset_settings"]["BLASTIT_CLIENT_IP_HEADER"], "do-connecting-ip",
+        "{config}"
+    );
+
+    // And the operator is told that `BLASTIT_PRESET` was not what decided.
+    assert!(
+        server.wait_for_event("\"event\":\"app.output\""),
+        "{}",
+        server.stdout_text()
+    );
+    let warnings: Vec<String> = server
+        .stdout_lines()
+        .into_iter()
+        .filter(|line| line.contains("BLASTIT_PRESET is set and names a different preset"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{}", server.stdout_text());
+
+    // The preset's resolver is in force: `do-connecting-ip` is read (from any
+    // peer, because the preset trusts every one) and `X-Forwarded-For` is not.
+    assert_eq!(
+        server
+            .request_with("GET", "/one", &[("Do-Connecting-Ip", "203.0.113.7")])
+            .status,
+        200
+    );
+    let requests = server.events("request");
+    let event = requests.last().expect("a request event");
+    assert_eq!(event["remote_addr"], "203.0.113.7", "{event}");
+}
+
+#[test]
 fn a_client_ip_header_is_only_believed_when_it_is_configured_to_be() {
     if !needs_root("trusted proxies") {
         return;
