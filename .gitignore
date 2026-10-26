@@ -18,3 +18,6 @@ __pycache__/
 
 # The rootless e2e run's logs (e2e/rootless/run.py).
 /e2e/rootless/out/
+
+# The documentation site `zensical build` writes (E2).
+/site
