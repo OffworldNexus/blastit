@@ -1,0 +1,26 @@
+# The ingress in front of the app (E1): Traefik v3, one plaintext entry point and
+# one TLS entry point, both forwarding to blastit's port.
+#
+# Two entry points on purpose: Traefik sets `X-Forwarded-Proto` itself — it does
+# not pass a client's own value through unless the client's address is in
+# `forwardedHeaders.trustedIPs` (measured, see ARCHITECTURE §10's Traefik
+# subsection) — so the scenario can check both directions of the rule blastit
+# applies to it: `http` over the plain entry point, `https` behind the TLS one.
+# Traefik generates its own self-signed certificate for the TLS entry point; the
+# test asks whether the *scheme* arrives, not whether the chain is trusted.
+http:
+  routers:
+    app:
+      rule: PathPrefix(`/`)
+      entryPoints: [web]
+      service: app
+    app-tls:
+      rule: PathPrefix(`/`)
+      entryPoints: [websecure]
+      service: app
+      tls: {}
+  services:
+    app:
+      loadBalancer:
+        servers:
+          - url: http://app:8080

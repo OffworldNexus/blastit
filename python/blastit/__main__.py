@@ -8,8 +8,9 @@ the same reason they are for ``python app.py``. From there the stages of §4:
   carrying the interpreter's ``sys.path`` across the barrier;
 * it ``execve``s ``blastit/_bin/blastit-dbproxy`` — a binary with no interpreter
   in it — for the role that holds the real credentials;
-* and the configuration stays environment-only, as §8.2 says: the usual
-  ``BLASTIT_*`` variables, and nothing else.
+* and the configuration comes from the environment, as §8.2 says: the usual
+  ``BLASTIT_*`` variables, plus an optional ``--preset NAME`` that supplies
+  defaults those variables still override.
 """
 
 import os
