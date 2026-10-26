@@ -183,8 +183,9 @@ and its channel to the scheduler.
   and keep-alive idle time.
 * Normalises the request: strips hop-by-hop headers and rejects any request
   that has both `Content-Length` and `Transfer-Encoding`. It derives the
-  client address and scheme from `X-Forwarded-For` / `X-Forwarded-Proto`, but
-  only when `BLASTIT_TRUST_FORWARDED=1`.
+  client address and scheme with one resolver: the header
+  `BLASTIT_CLIENT_IP_HEADER` is believed only from a socket peer in
+  `BLASTIT_TRUSTED_PROXIES` (§8.2).
 * Encodes responses. It validates header names and values (no CR/LF
   injection) and picks `Content-Length` or chunked encoding. Views produce a
   status line, headers and body chunks; they never write raw bytes to the
@@ -207,7 +208,47 @@ http.
   the number of request threads alive across all view processes. It can also
   enforce a per-view cap. Excess requests wait in a bounded FIFO
   (`BLASTIT_QUEUE_SIZE`, `BLASTIT_QUEUE_TIMEOUT`); once that overflows, the
-  answer is `503`.
+  answer is `503`. A request at the head that cannot be served — its route's
+  view is not ready — does not hold up the requests behind it whose route can.
+* **Fair queuing.** With `BLASTIT_FAIR_QUEUING=on` the same bounded queue is
+  ordered by a two-level fair scheduler instead of by arrival. Every waiting
+  request belongs to a **flow**: an **outer** flow keyed by the client's IP
+  prefix (`BLASTIT_FQ_OUTER_PREFIX_V4`, default `24`, and
+  `BLASTIT_FQ_OUTER_PREFIX_V6`, default `56`), and an **inner** flow keyed by a
+  hash of the client address and of the headers and cookies the operator listed
+  (`BLASTIT_FQ_INNER_HEADERS`, `BLASTIT_FQ_INNER_COOKIES`,
+  `BLASTIT_FQ_INNER_INCLUDE_IP`) — one browser behind a NAT cannot starve its
+  neighbours, one network cannot starve another. Both levels keep a virtual
+  time, and both are dispatched lowest-first; a flow that becomes backlogged
+  after being quiet restarts one `BLASTIT_FQ_BURST` (default `20ms`) behind the
+  clock, so a new client may spend one burst before it queues, and every
+  request then charges what it cost, up to one `BLASTIT_FQ_MAX_DEBT` (default
+  `5s`) ahead of the clock, so no flow can borrow unboundedly against the
+  future. Both tables are bounded (`BLASTIT_FQ_OUTER_MAX`,
+  `BLASTIT_FQ_INNER_MAX_PER_OUTER`, `BLASTIT_FQ_INNER_MAX`): a flow that does
+  not fit shares one overflow flow with every other one that does not, and a
+  request whose client address cannot be read at all goes to that same overflow
+  flow. Idle flows are collected once their debt is paid or after
+  `BLASTIT_FQ_DEBT_TTL` (default `30s`, read as `1s` when it is shorter), so the
+  tables cannot grow with the number of clients that have ever connected. The
+  inner key is a per-process seeded hash of header and cookie values, which are
+  never logged, and neither is the hash. A route whose view is not ready is not
+  a candidate, so it never holds up another route. A knob that is out of range
+  is *clamped*, not refused — a prefix cannot be longer than the address it
+  masks and a table cannot hold zero flows — and the `boot` stage says so.
+* **What a request costs.** The flow is charged the view process's own
+  measurement — the wall time of `serve_request` (the WSGI call, the iteration
+  of its iterable, the `close()` and the frames written back) and the thread's
+  CPU time over the same span — reported in the response's last frame
+  (`RESP_END_COST`). The report comes from a sandboxed process and is
+  untrusted, so it is **clamped between** the time from dispatch to the view's
+  first response frame — the one part of the request the view cannot hide
+  without delaying its own client — **and** the time the scheduler observed
+  between dispatch and the end of the response; a request whose end frame
+  carries no report — a view built before D5, a `504`, a cancellation, a client
+  that went away, a view that died — charges that observed time instead. The
+  `request` event keeps both numbers: `cost_ns` (what was charged) and `cpu_ns`
+  (what the worker reported, `null` when it reported nothing).
 * **The budget counts threads, not answers.** A slot is released when the view
   reports `DONE`, meaning the thread has actually exited. A timed-out request
   gets a `504` right away, but its slot stays taken until the thread finishes.
@@ -323,10 +364,30 @@ payload`, in little-endian, with a hard maximum frame size of
 
 | Direction | Frames |
 |---|---|
-| towards the app | `REQ_HEAD {method, target, headers, remote_addr, scheme, server_name/port}`, `REQ_BODY {bytes}`, `REQ_END`, `CANCEL` |
-| towards the client | `RESP_HEAD {status, reason, headers}`, `RESP_BODY {bytes}`, `RESP_END`, `RESP_ABORT {reason}` |
+| towards the app | `REQ_HEAD {method, target, headers, remote_addr, peer_addr, scheme, server_name/port}`, `REQ_BODY {bytes}`, `REQ_END`, `CANCEL` |
+| towards the client | `RESP_HEAD {status, reason, headers}`, `RESP_BODY {bytes}`, `RESP_END` / `RESP_END_COST {cost_ns, cpu_present, cpu_ns}`, `RESP_ABORT {reason}` |
 | view → scheduler only | `DONE {req_id, outcome}`, which releases the worker slot; `READY` (id 0), once, when the view can take requests |
 | both ways | `WINDOW {bytes}`: flow-control credit for this stream's body (see below) |
+
+`RESP_END` and `RESP_END_COST` are one frame kind with two wire forms: a view
+that measured what the request cost it sends the second, one that has nothing
+to report — an older build, a response the view's I/O thread wrote itself —
+sends the first. The scheduler accepts both, so the two ends are not lockstep
+and a lost report is a fallback rather than a protocol error. A code this
+version does not know is still forwarded byte for byte by the raw layer.
+
+`RESP_END_COST`'s `cpu_ns` is optional and says whether it is there
+(`cpu_present` is 0 or 1): a view whose interpreter has no
+`time.thread_time_ns` reports the absence of a CPU measurement rather than a
+zero it did not take. The scheduler clamps `cost_ns` between the time up to
+this view's first response frame and the time it observed itself, and only
+reports `cpu_ns` — never schedules on it.
+
+`REQ_HEAD`'s `peer_addr` is the address of the socket the request arrived on,
+exactly as the kernel reported it. It is never a header's value, so a client
+cannot forge it, and it is what the trust decision for `remote_addr` and for
+the fair scheduler's flows is made on. `remote_addr` stays what the app sees
+in `REMOTE_ADDR` — the peer, or the address a trusted client-IP chain names.
 
 The scheduler rewrites ids between ① and ③. A view only ever sees its own
 `req_id`s and cannot address any other stream. Bodies stream in both
@@ -1030,6 +1091,13 @@ manifest buys.
 **Sizing.** Choose `BLASTIT_MAX_WORKERS` ≤ the DB plan's connection limit,
 because each request thread can hold one upstream connection.
 
+The fair queue's tables are bounded by configuration, not by the number of
+clients: `BLASTIT_FQ_OUTER_MAX` outer flows per worker, and
+`BLASTIT_FQ_INNER_MAX` inner flows across them (`BLASTIT_FQ_INNER_MAX_PER_OUTER`
+for one outer flow). A client that arrives on an address that cannot be read —
+an unnamed socket — is one request of the same overflow flow as every other
+such client, which is the honest accounting: they cannot be told apart.
+
 Memory decides how many view processes can be alive at once. Under DO's
 gVisor, every forked process costs a floor of **about 14–18 MiB**, against
 about 1 MiB on Linux. On top of that, each 2 MiB chunk of shared memory it
@@ -1102,7 +1170,7 @@ JSON object per line. `pretty` prints the same events as coloured, aligned,
 human-readable lines, for running blastit by hand. Both carry the same fields.
 
 ```json
-{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","request_id":"01JB9…","method":"GET","path":"/products/42/","route":"product-detail","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_out":5120,"remote_addr":"203.0.113.7"}
+{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","request_id":"01JB9…","method":"GET","path":"/products/42/","route":"product-detail","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_in":0,"bytes_out":5120,"cost_ns":18400000,"cpu_ns":9100000,"remote_addr":"203.0.113.7"}
 {"ts":"2026-10-25T14:02:12.007Z","level":"warn","event":"sql.denied","component":"dbproxy","route":"product-detail","pid":57,"proxy":"db","kind":"parse","sqlstate":"42501","in_transaction":false,"sql":"SELECT \"shop_product\".\"price\" FROM \"shop_product\" WHERE \"shop_product\".\"id\" = $?","reason":"select on shop_product.price not granted"}
 ```
 
@@ -1133,7 +1201,7 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 
 | Event | From | Level | Fields | Emitted when |
 |---|---|---|---|---|
-| `request` | scheduler | info (warn for 5xx) | `request_id`, `method`, `path`, `route` (null if unmatched), `rule` (index of the matching `path` regex), `status`, `outcome` (`ok`, `unmatched`, `queue_full`, `queue_timeout`, `timeout`, `view_died`, `client_gone`), `queued_ms`, `duration_ms`, `bytes_in`, `bytes_out`, `remote_addr` | once per request, at the end; this is the routing decision |
+| `request` | scheduler | info (warn for 5xx) | `request_id`, `method`, `path`, `route` (null if unmatched), `rule` (index of the matching `path` regex), `status`, `outcome` (`ok`, `unmatched`, `queue_full`, `queue_timeout`, `timeout`, `view_died`, `client_gone`), `queued_ms`, `duration_ms`, `bytes_in`, `bytes_out`, `cost_ns`, `cpu_ns`, `remote_addr` | once per request, at the end; this is the routing decision |
 | `sql.denied` | dbproxy | warn | `route`, `pid` (view process), `proxy`, `kind` (`query`, `parse`, `function_call`, `copy`, …), `sql` (normalised), `sqlstate`, `in_transaction`, `reason` (the policy's explanation, for example `select on auth_user.password not granted`; never a parameter value) | a statement was rejected |
 | `pg.refused` | dbproxy | warn | `route`, `proxy`, `reason` (`credentials_mismatch`, `too_many_connections`, `upstream_unreachable`, …) | a connection to the proxy was refused |
 | `http.rejected` | http | info | `remote_addr`, `status` (400, 413, 431, 501…), `reason` | a request was refused before reaching the scheduler |
@@ -1141,6 +1209,16 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 | `process.cap` | scheduler | info | `estimate_bytes` (the measured cost of one view process), `cap` (the live view process cap it buys) | the measured cost or the cap changed (§8 Sizing); never once per request |
 | `app.output` | init | info (stdout) / warn (stderr) | `stream`, `line`, `part`, `parts` | the app or a library printed something |
 | `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, the rendered output variable *names* per proxy (never values), the warning text (for example an unattached group) | lifecycle of the whole server |
+
+`cost_ns` is what the request was charged for fair queuing: the view
+process's own measurement, clamped between the time from dispatch to the
+view's first response frame and the time the scheduler observed to the end
+of the response, or that observed time when no report arrived. It is always a
+number. `cpu_ns` is the thread CPU time the view measured over the same span,
+and `null` when the view had none to report — no `RESP_END_COST`, or no thread
+clock on its interpreter — so a reader never has to guess which happened.
+`duration_ms` still ends at the last response byte, whether or not the number
+arrives with it.
 
 The `boot` event of the **`preload`** stage is the one that says what the app
 cost before the fork: `immortalized` and `immortalize_ms` for §9.2 #7's pass
@@ -1172,6 +1250,17 @@ with `request` events.
 | `BLASTIT_MAX_WORKERS` | `16` | global number of live request threads |
 | `BLASTIT_VIEW_MAX_WORKERS` | `= MAX_WORKERS` | per-view thread cap (also sets `RLIMIT_NPROC`) |
 | `BLASTIT_QUEUE_SIZE` / `BLASTIT_QUEUE_TIMEOUT` | `256` / `10s` | admission queue |
+| `BLASTIT_FAIR_QUEUING` | `0` | `1` orders the admission queue fairly (§2.4) instead of by arrival; `0` is exactly the FIFO |
+| `BLASTIT_FQ_OUTER_PREFIX_V4` / `_V6` | `24` / `56` | how much of a client address an outer flow keeps; read as `32` / `128` when longer |
+| `BLASTIT_FQ_OUTER_MAX` | `65536` | outer flows per worker; the rest share one overflow flow; read as `1` when `0` |
+| `BLASTIT_FQ_INNER_MAX_PER_OUTER` | `1024` | inner flows one outer flow may hold; read as `1` when `0` |
+| `BLASTIT_FQ_INNER_MAX` | `262144` | inner flows per worker; read as `1` when `0` |
+| `BLASTIT_FQ_BURST` | `20ms` | what a client may spend before it starts queueing behind the others |
+| `BLASTIT_FQ_MAX_DEBT` | `5s` | how far ahead of the queue's virtual time one flow may borrow |
+| `BLASTIT_FQ_DEBT_TTL` | `30s` | how long an idle flow with debt is remembered; read as `1s` when shorter |
+| `BLASTIT_FQ_INNER_HEADERS` | `user-agent,accept-language,sec-ch-ua,sec-ch-ua-platform,sec-ch-ua-mobile,authorization` | headers hashed into the inner flow key (an empty value hashes none); every entry is checked to be a header name |
+| `BLASTIT_FQ_INNER_COOKIES` | `sessionid,session` | cookies hashed into the inner flow key; every entry is checked to be a cookie name |
+| `BLASTIT_FQ_INNER_INCLUDE_IP` | `1` | whether the full client address is part of the inner flow key |
 | `BLASTIT_REQUEST_TIMEOUT` | `30s` | time until the client gets a `504` |
 | `BLASTIT_STUCK_THREADS` | `4` | overdue threads before a view process is recycled |
 | `BLASTIT_VIEW_SPAWN` | `lazy` | `lazy` \| `eager` (`prefork = true` in the manifest overrides per view) |
@@ -1182,7 +1271,9 @@ with `request` events.
 | `BLASTIT_IMMORTALIZE` | `auto` | `auto` \| `1` \| `0`: mark the preloaded heap immortal before the fork (§9.2 #7), each version with the marker CPython itself writes there. `auto` and `1` both do it on 3.12–3.14 and skip any interpreter whose marker blastit does not know (32-bit, big-endian, free-threaded, `Py_TRACE_REFS`, or a version outside that range), with the reason in the `boot` event; `0` never |
 | `BLASTIT_MAX_HEADER_BYTES` / `BLASTIT_MAX_BODY_BYTES` | `64 KiB` / `100 MiB` | HTTP limits |
 | `BLASTIT_HEADER_TIMEOUT` / `BLASTIT_KEEPALIVE_TIMEOUT` | `10s` / `75s` | HTTP timeouts (keep-alive above the LB's) |
-| `BLASTIT_TRUST_FORWARDED` | `1` | trust `X-Forwarded-*` from the LB |
+| `BLASTIT_CLIENT_IP_HEADER` | `x-forwarded-for` | header the client address is read from, and only from a trusted peer; a chain entry is a bare or bracketed address, so `1.2.3.4:5678` makes the whole header unreadable and the peer is the client |
+| `BLASTIT_TRUSTED_PROXIES` | `127.0.0.1,::1` | peers whose client-IP header may be believed: IP addresses, CIDR networks or `*`; a port is an error, and an empty list trusts nobody. **Changed** (§2.3, D5): before D5 an unset `BLASTIT_TRUST_FORWARDED` meant the rightmost `X-Forwarded-For` entry was believed from any peer. A deployment behind a non-loopback proxy must now set `BLASTIT_TRUSTED_PROXIES`, or `REMOTE_ADDR` becomes the proxy and `wsgi.url_scheme` becomes `http` |
+| `BLASTIT_TRUST_FORWARDED` | — | **deprecated** (§2.3, D5): `0` is `BLASTIT_TRUSTED_PROXIES` empty, `1` is `*`, which is what it always meant — the rightmost entry of anybody's `X-Forwarded-For`. Either way it is reported once as a warn `app.output` line at startup, and `BLASTIT_TRUSTED_PROXIES` wins when both are set |
 | `BLASTIT_HEALTH_PATH` | `/_blastit/health` | answered by the scheduler |
 | `BLASTIT_BACKLOG` | `1024` | TCP listen backlog init binds with (§3) |
 | `BLASTIT_MAX_CONNECTIONS` | `1024` | client connections http serves at once; sizes http's `RLIMIT_NOFILE` |
@@ -1340,6 +1431,11 @@ marked *(docs)*.
 | `SO_PEERCRED` broken; `/proc/<pid>/environ` readable across uids | per-view pg listeners + `SCM_CREDENTIALS`; `execve` barrier; dbproxy exec'd with an empty env |
 | COW in ~2 MiB chunks; ~14–18 MiB floor per process | immortalized heap, lazy spawning, LRU cap on live view processes |
 | HTTP/1.1 from the edge, TLS terminated there *(docs)* | http speaks plaintext HTTP/1.1 only |
+| The socket peer is DigitalOcean's ingress (`10.244.x.x` on this cluster, `100.127.x` on others), not the client | `BLASTIT_CLIENT_IP_HEADER=do-connecting-ip` with `BLASTIT_TRUSTED_PROXIES=10.0.0.0/8,100.64.0.0/10`, so only the ingress may name the client |
+| `X-Forwarded-For` arrives as `<client-supplied…>,<real client>,<Cloudflare edge>`: the edge **appends** | the resolver walks the chain from the right and stops at the first address that is not trusted, so a forged leftmost entry never becomes the client |
+| `do-connecting-ip` is overwritten by the edge with the real client address, and `X-Real-IP` is stripped | `do-connecting-ip` is the one header an operator can believe on App Platform; `X-Real-IP` is not read at all |
+| `Forwarded`, `True-Client-IP` and `X-Client-IP` pass through **forged** | they are not read; only `BLASTIT_CLIENT_IP_HEADER` is, and only from a trusted peer |
+| `100.64.0.0/10` is also CGNAT client space, and a client behind a carrier NAT can arrive *from* it | that range is in the trusted list above only because the edge **overwrites** `do-connecting-ip`: a client cannot append to a header the edge replaces. Never use this trusted list with a header an upstream appends to — a forged entry would then be inside a range believed by construction |
 | `PORT` set by the platform (`8080` by default) | bound by init |
 | Root filesystem is a writable 9p overlay; `/tmp` and `/dev/shm` are tmpfs (count as RAM); 4 GiB, ephemeral, no volumes *(docs)* | runtime dirs under `/run/blastit` (disk, not RAM); recreated on every start |
 | Forwarded log lines ≤ 2048 bytes *(docs)* | init re-chunks every log line |
