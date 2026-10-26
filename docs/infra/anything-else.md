@@ -59,13 +59,23 @@ deployment that believes a forged header from the very peer it meant to
 distrust. An empty list (`BLASTIT_TRUSTED_PROXIES=`) trusts nobody.
 
 `wsgi.url_scheme` follows the same trust decision: `X-Forwarded-Proto` is read
-only from a trusted peer, and only the last value, and only if it is exactly
-`http` or `https`. **That is a rule, not a guarantee.** It holds only where the
-ingress overwrites the header (or where its own observation is the one that ends
-up last): measured for Traefik v3, unmeasured for DO's edge — see
-[the App Platform caveat](digitalocean-paas.md#what-it-sets). If a client can
-send its own `X-Forwarded-Proto` and the peer is trusted, the value is the
-client's.
+only from a trusted peer, only its last value, and only if that value is exactly
+`http` or `https`; anything else leaves the scheme `http`. Django's
+`SECURE_PROXY_SSL_HEADER`, `request.is_secure()` and every absolute URL built
+from the scheme are what read the result.
+
+This one reads a header, so it is only as good as the ingress: the ingress has
+to **overwrite** `X-Forwarded-Proto` with the scheme it terminated. Where it does
+not, a client's own value reaches blastit through a trusted peer and *becomes*
+`wsgi.url_scheme`. Both bundled ingresses do overwrite it — measured on Traefik
+v3 and on DO's edge, where a forged `http`, `https, http`, `gopher` or a second
+header all come out as the hop's own `https` — so at both, no client can choose
+the scheme the app sees. On an ingress of your own, settle this header the same
+way as the client address, in the questions below, and have the ingress *set* the
+value instead of passing the client's through: nginx needs
+`proxy_set_header X-Forwarded-Proto $scheme` for that. The App Platform
+measurement is
+[here](digitalocean-paas.md#the-scheme-is-https-and-a-client-cannot-say-otherwise).
 
 ### Working it out for your own ingress
 
