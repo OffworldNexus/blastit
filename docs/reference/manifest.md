@@ -31,18 +31,16 @@ egress = true                       # may open TCP connections
 | Key | Required | Meaning |
 |---|---|---|
 | `name` | yes | the route's name, in the log and in `environ["blastit.route"]`; must match `[a-z0-9][a-z0-9_-]*`, and duplicates abort the boot |
-| `path` | yes | a list of regexes matched against the whole of `PATH_INFO`, in order |
+| `path` | yes | a list of regexes matched against the whole of `PATH_INFO`, in order. One regex may be written as a bare string: `path = ".*"` is `path = ['.*']` |
 | `methods` | no | the methods it answers; without it, any method. `HEAD` is never implied by `GET` |
 | `groups` | no | groups whose grants this route takes |
 | `egress` | no | `true` lets the process open outbound TCP connections |
 | `prefork` | no | `true` forks this view at startup instead of on first use |
 
-`path` is always a list, even for one regex: `path = ['.*']`.
-
 ## Proxies
 
-A proxy declares its protocol, the variables it owns, and the variables the app
-sees instead.
+A proxy declares its protocol, the variables it owns, and the ones the app sees
+instead.
 
 ```toml
 [proxy.analytics]
@@ -75,10 +73,12 @@ Input slots: `url` (a libpq URI), or the same split into `host`, `port`, `user`,
 upstream TLS leg).
 
 Template fields: the default `url` is
-`postgresql://{{ user }}@{{ socket_dir | urlencode }}:{{ port }}/{{ database }}`,
-where `socket_dir` is `/proc/self/cwd`, each view's own socket directory, and
-`port` is `5432 + k`, *k* = index among `postgresql` proxies sorted by name.
-`user` is `blastit`, which the proxy ignores.
+`postgresql://{{ user }}@/{{ database }}?host={{ socket_dir }}&port={{ port }}` —
+the socket directory in a **query parameter**, the one form libpq,
+`dj-database-url` and SQLAlchemy all resolve (SQLAlchemy does not percent-decode
+a host) — where `socket_dir` is `/proc/self/cwd`, each view's own socket
+directory, and `port` is `5432 + k`, *k* = index among `postgresql` proxies
+sorted by name. `user` is `blastit`, which the proxy ignores.
 
 Default outputs: every input variable is rewritten in place; `sslmode` becomes
 `disable`; `password` and `ca_cert` are removed. The local leg is a Unix socket,
@@ -176,8 +176,8 @@ whitespace collapsed outside quotes. The *shape* is normalised too:
 * identical rows after `VALUES` collapse to one row and `...`, so `bulk_create`
   matches one grant.
 
-A `Parse` that matches authorises the `Bind`/`Execute` that follow, and simple
-query messages get the same check. `COPY`, `LISTEN` and the function-call
+A matching `Parse` authorises the `Bind`/`Execute` that follow; simple query
+messages get the same check. `COPY`, `LISTEN` and the function-call
 sub-protocol are denied unless listed.
 
 Two things cannot be granted: a savepoint's name (use `transaction_control`) and

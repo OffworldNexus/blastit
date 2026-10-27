@@ -392,11 +392,8 @@ async fn a_body_timeout_still_applies_while_waiting_for_credit() {
     assert_eq!(scheduler.until_cancelled().await.0, id);
     assert_eq!(
         rig.events.rejections(),
-        [(
-            "203.0.113.7:54321".to_string(),
-            408,
-            "body_timeout".to_string()
-        )]
+        [("203.0.113.7".to_string(), 408, "body_timeout".to_string())],
+        "the refusal names the peer's address, and not its port"
     );
     writing.abort();
 }

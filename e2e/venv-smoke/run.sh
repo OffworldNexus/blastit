@@ -72,13 +72,17 @@ ls -l "$dbproxy"
 # The environment the platform gives PID 1 (§8.2). `DATABASE_URL` is a
 # credential for dbproxy — the app never sees it — and it is never dialled: the
 # test only needs dbproxy to start from the wheel's own binary.
+#
+# No `PYTHONPATH`: `cp /fixture/wsgi.py .` puts the app in the working directory
+# and never installs it, so `wsgi:application` importing at all is the check that
+# blastit makes the directory it was started in importable (§5.3) — the way
+# gunicorn, uwsgi and granian do. `sudo` keeps that directory.
 run_server() {
     sudo env \
         PORT=8080 \
         BLASTIT_APP=wsgi:application \
         BLASTIT_MANIFEST="$work/blastit.toml" \
         BLASTIT_LOG_FORMAT=json \
-        PYTHONPATH="$work" \
         DATABASE_URL="postgresql://demo:not-a-real-password@db.invalid:5432/demo?sslmode=disable" \
         "$work/.venv/bin/blastit" "$@"
 }
@@ -97,7 +101,8 @@ trap cleanup EXIT
 
 if ! "$work/.venv/bin/python" check.py \
     --base-url http://127.0.0.1:8080 \
-    --prefix "$work/.venv"; then
+    --prefix "$work/.venv" \
+    --cwd "$work"; then
     echo "--- blastit.log"
     cat "$work/blastit.log"
     exit 1
@@ -109,6 +114,70 @@ checked '"stage":"stage0"' "boot is stage 0" "$work/blastit.log"
 checked '"stage":"serving"' "ready is serving" "$work/blastit.log"
 echo "--- blastit.log"
 cat "$work/blastit.log"
+
+# §7.2: an interpreter a view uid cannot reach is refused at boot, by name.
+#
+# A view process runs as a uid of its own, so only the "other" permission bits
+# reach it: a Python under a private home (`uv python install` puts one in
+# `~/.local/share/uv/python`, and `~` is often `0750`) used to lose its whole
+# standard library *inside* a view, one `ModuleNotFoundError` at a time
+# (`stringprep`, `encodings.idna`), while everything looked fine from the
+# outside. The check is a boot refusal now, and this is the shape it is for: a
+# standard library the view uids cannot read. `0750` is what a private home is,
+# applied to the directory that holds the modules.
+#
+# Root can still read it, so the boot gets all the way to stage 1 — which is
+# where the check is, and what makes the failure a refusal with a message rather
+# than a `ModuleNotFoundError` in one view on one path.
+stdlib=$(
+    "$work/.venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])'
+)
+sudo chmod 0750 "$stdlib"
+if sudo env \
+    PORT=8081 \
+    BLASTIT_APP=wsgi:application \
+    BLASTIT_MANIFEST="$work/blastit.toml" \
+    BLASTIT_LOG_FORMAT=json \
+    DATABASE_URL="postgresql://demo:not-a-real-password@db.invalid:5432/demo?sslmode=disable" \
+    "$work/.venv/bin/blastit" >"$work/private.log" 2>&1; then
+    echo "  FAIL a Python the view uids cannot read booted"
+    status=1
+else
+    echo "  ok   a Python the view uids cannot read is refused"
+fi
+sudo chmod 0755 "$stdlib"
+checked 'mode 0750) is not readable' \
+    "the message says what is wrong with it" "$work/private.log"
+checked "$stdlib" "and names the directory that blocks" "$work/private.log"
+checked 'UV_PYTHON_INSTALL_DIR' \
+    "and the fix that moves the interpreter" "$work/private.log"
+echo "--- private.log"
+cat "$work/private.log"
+
+# E2b: the same check one stage earlier, for the file the credentials-holding
+# child `execve`s. dbproxy runs as uid B+3, so the binary has to be executable by
+# others; `0700` is the mode that used to fail the boot with
+# `exec dbproxy: Permission denied (os error 13)` and say nothing else.
+chmod 0700 "$dbproxy"
+if sudo env \
+    PORT=8081 \
+    BLASTIT_APP=wsgi:application \
+    BLASTIT_MANIFEST="$work/blastit.toml" \
+    BLASTIT_LOG_FORMAT=json \
+    DATABASE_URL="postgresql://demo:not-a-real-password@db.invalid:5432/demo?sslmode=disable" \
+    "$work/.venv/bin/blastit" >"$work/dbproxy-mode.log" 2>&1; then
+    echo "  FAIL a dbproxy binary the child cannot execute booted"
+    status=1
+else
+    echo "  ok   a dbproxy binary the child cannot execute is refused"
+fi
+chmod 0755 "$dbproxy"
+checked 'is not executable' \
+    "the message says what is wrong with it" "$work/dbproxy-mode.log"
+checked "$dbproxy" "and names the file that blocks" "$work/dbproxy-mode.log"
+checked 'chmod o+rx' "and the fix that opens it" "$work/dbproxy-mode.log"
+echo "--- dbproxy-mode.log"
+cat "$work/dbproxy-mode.log"
 
 # A dbproxy that dies before it reports ready has to fail the boot *and* say why
 # (§8.1): the wheel ships that binary, so this is the packaging failure the test

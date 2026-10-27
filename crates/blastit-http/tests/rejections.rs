@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use blastit_http::HttpConfig;
 
-use common::{Harness, PEER, QUIET};
+use common::{Harness, PEER_IP, QUIET};
 
 /// The status line of a refusal the front end wrote itself.
 fn refusal(status: u16, phrase: &str) -> Vec<u8> {
@@ -32,7 +32,7 @@ async fn refusal_for(config: HttpConfig, request: &[u8], status: u16, phrase: &s
     );
     assert_eq!(
         h.events.rejections(),
-        [(PEER.to_string(), status, reason.to_string())],
+        [(PEER_IP.to_string(), status, reason.to_string())],
         "request {request:?}"
     );
     assert!(
@@ -194,7 +194,7 @@ async fn a_head_that_never_finishes_is_408() {
     );
     assert_eq!(
         h.events.rejections(),
-        [(PEER.to_string(), 408, "header_timeout".to_string())]
+        [(PEER_IP.to_string(), 408, "header_timeout".to_string())]
     );
     assert!(h.scheduler.next_within(QUIET).await.is_none());
 }
@@ -234,7 +234,7 @@ async fn a_head_that_never_finishes_after_a_first_request_is_408() {
     );
     assert_eq!(
         h.events.rejections(),
-        [(PEER.to_string(), 408, "header_timeout".to_string())]
+        [(PEER_IP.to_string(), 408, "header_timeout".to_string())]
     );
 }
 

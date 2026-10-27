@@ -26,7 +26,7 @@ Three extra endpoints exist to test the sandbox, not the app:
 import ctypes
 import os
 import socket
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
@@ -110,15 +110,31 @@ def peek(request):
     return JsonResponse({"users_read": len(hashes)})
 
 
+def local_host(url):
+    """The host — a socket directory, here — a rendered `DATABASE_URL` names.
+
+    blastit renders a libpq URI whose socket directory travels as a **query
+    parameter**, `postgresql://blastit@/shop?host=/proc/self/cwd&port=5432`: the
+    authority is empty, which is how libpq and SQLAlchemy both spell a Unix
+    socket, and — unlike a percent-encoded host, which SQLAlchemy does not decode
+    — it is read by every client. A project that parses the URL itself has to
+    look in both places, which is what this does.
+    """
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    if parts.hostname:
+        return unquote(parts.hostname)
+    return unquote(query.get("host", ""))
+
+
 def env(request):
     url = os.environ.get("DATABASE_URL", "")
     parts = urlsplit(url)
-    host = unquote(parts.hostname or "") if parts.hostname else ""
     return JsonResponse(
         {
             "database_url_set": bool(url),
             "has_password": bool(parts.password),
-            "host_is_local_socket": host.startswith("/"),
+            "host_is_local_socket": local_host(url).startswith("/"),
             "ca_cert_visible": "DATABASE_CA_CERT" in os.environ,
             "blastit_vars_visible": sorted(k for k in os.environ if k.startswith("BLASTIT_")),
             "route": request.META.get("blastit.route"),
@@ -225,9 +241,11 @@ def request_probe(request):
 
     E1: a configuration preset is mostly a decision about *whom to believe* —
     which client-IP header, from which peers — so the only way to check one is to
-    ask the app what blastit resolved. ``REMOTE_ADDR`` is that decision: either
-    the socket peer (``ip:port``, nothing was believed) or a bare address that a
-    trusted header named. ``wsgi.url_scheme`` is the same decision applied to
+    ask the app what blastit resolved. ``REMOTE_ADDR`` is that decision — the
+    socket peer's address, or an address a trusted header named — and it is an
+    address and nothing else: the port of the connection is the separate
+    ``REMOTE_PORT`` key, as CGI and PEP 3333 have it.
+    ``wsgi.url_scheme`` is the same decision applied to
     ``X-Forwarded-Proto``: ``https`` only when a peer blastit trusts said so,
     which is why a client's own ``X-Forwarded-Proto`` cannot make a plaintext
     deployment report HTTPS.
@@ -239,6 +257,7 @@ def request_probe(request):
         {
             "route": request.META.get("blastit.route"),
             "remote_addr": request.META.get("REMOTE_ADDR"),
+            "remote_port": request.META.get("REMOTE_PORT"),
             "scheme": request.META.get("wsgi.url_scheme"),
             "host": request.META.get("HTTP_HOST"),
             "saw_forwarded_for": "HTTP_X_FORWARDED_FOR" in request.META,

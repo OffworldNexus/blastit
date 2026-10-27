@@ -25,6 +25,10 @@ const ROUTE_KEYS: &[&str] = &["name", "path", "methods", "groups", "egress", "pr
 const ROUTE_KEY_EXPECTED: &str = "one of the route keys (`name`, `path`, `methods`, `groups`, \
                                    `egress`, `prefork`) or a table holding an inline grant";
 
+/// Expected values of a route's `path`, for the error message of anything that
+/// is neither.
+const PATTERN_EXPECTED: &str = "a regex, or an array of them";
+
 /// Parses a manifest document.
 pub(crate) fn parse(source: &str) -> Result<Manifest, ManifestErrors> {
     let document: toml::Table = match source.parse() {
@@ -285,7 +289,7 @@ impl Parser {
                     }
                     "path" => {
                         has_path = true;
-                        patterns = self.string_list(Some(value), &key_path);
+                        patterns = self.patterns(value, &key_path);
                     }
                     "methods" => methods = self.string_list(Some(value), &key_path),
                     "groups" => groups = self.string_list(Some(value), &key_path),
@@ -517,6 +521,31 @@ impl Parser {
                 self.error(ManifestError::WrongType {
                     path: path.to_string(),
                     expected: "the string \"*\" (every column) or a list of column names",
+                    found: type_name(other),
+                });
+                None
+            }
+        }
+    }
+
+    /// A route's `path`: a list of regexes, or the one regex a bare string
+    /// holds.
+    ///
+    /// A list is the manifest's own form (`path = ['/products/.*']`), and
+    /// ARCHITECTURE.md writes the catch-all as a string (`path = ".*"`) in more
+    /// than one place — a string is a list of one in every configuration
+    /// language a reader has met, and refusing it costs a boot and buys nothing
+    /// but a workaround. What is *not* accepted is still refused by name:
+    /// anything that is neither a string nor a list says so, and a list with
+    /// something else in it names the entry.
+    fn patterns(&mut self, value: &Value, path: &str) -> Option<Vec<String>> {
+        match value {
+            Value::String(pattern) => Some(vec![pattern.clone()]),
+            Value::Array(_) => self.string_list(Some(value), path),
+            other => {
+                self.error(ManifestError::WrongType {
+                    path: path.to_string(),
+                    expected: PATTERN_EXPECTED,
                     found: type_name(other),
                 });
                 None

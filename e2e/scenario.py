@@ -36,13 +36,30 @@ def check(cond, what):
 
 
 def address_of(remote_addr):
-    """The IP of a `REMOTE_ADDR`: a socket peer carries `ip:port`."""
+    """The IP of a `REMOTE_ADDR`, whatever shape it arrives in.
+
+    blastit reports the address alone (CGI), so a value is already its own
+    address; the `ip:port` and `[ipv6]:port` shapes an older build reported — and
+    that a driver may still hand in through `--remote-addr` — are unwrapped all
+    the same, because a check that reads an address must not care which spelling
+    of one it was given.
+    """
     text = (remote_addr or "").strip()
     if text.startswith("[") and "]" in text:
         return text[1 : text.index("]")]
     if text.count(":") == 1:
         return text.split(":")[0]
     return text
+
+
+def is_port(value):
+    """Whether a `REMOTE_PORT` really is the port of the connection.
+
+    CGI's `REMOTE_PORT` is a decimal string; anything else — a whole address, an
+    empty value, a number out of range — is a deployment saying something it
+    cannot mean.
+    """
+    return isinstance(value, str) and value.isdigit() and 0 < int(value) < 65536
 
 
 # §10: the socket peer is DO's ingress, and the ingress address was measured as
@@ -106,6 +123,12 @@ def self_test():
         check(is_client_address(client), f"{client} is a client")
     check(not is_client_address(""), "an empty address is not a client")
     check(not is_client_address("garbage:1"), "neither is text")
+
+    # CGI: the port is a key of its own, and a port is what it has to be.
+    for port in ("51000", "1", "65535"):
+        check(is_port(port), f"{port} is a port")
+    for not_a_port in (None, "", "0", "65536", "127.0.0.1:51000", 51000, "-1"):
+        check(not is_port(not_a_port), f"{not_a_port!r} is not a port")
 
     print(f"\n{'PASS' if not FAILURES else 'FAIL'}: {len(FAILURES)} failure(s)")
     for failure in FAILURES:
@@ -275,6 +298,19 @@ def main():
     honest_scheme = facts.get("scheme")
     check(bool(honest_addr), f"the app is told who the client is ({honest_addr})")
     check(honest_scheme in ("http", "https"), f"and which scheme it spoke ({honest_scheme})")
+    if under_blastit:
+        # CGI and PEP 3333: `REMOTE_ADDR` is the address, and the connection's
+        # port is `REMOTE_PORT`. A socket peer's `ip:port` in the first one, or a
+        # `REMOTE_PORT` that is not a port, is a deployment the app cannot read
+        # the way every other server lets it.
+        check(
+            honest_addr == address_of(honest_addr),
+            f"REMOTE_ADDR is an address and nothing else ({honest_addr})",
+        )
+        check(
+            is_port(facts.get("remote_port")),
+            f"the connection's port is REMOTE_PORT ({facts.get('remote_port')!r})",
+        )
     if args.remote_addr and args.remote_addr != "public":
         check(
             honest_addr == args.remote_addr,
@@ -308,8 +344,9 @@ def main():
         forged_addr != "6.6.6.6",
         f"a client-IP header the client sent is never REMOTE_ADDR ({forged_addr})",
     )
-    # The address, not the exact string: a peer is reported as `ip:port`, and
-    # this request is a connection of its own.
+    # The address, not the exact string: the two requests arrived as two
+    # connections, and whichever port each came from is `REMOTE_PORT`, never
+    # part of `REMOTE_ADDR`.
     check(
         address_of(forged_addr) == address_of(honest_addr),
         f"and the client the deployment sees is unchanged ({forged_addr})",

@@ -31,10 +31,14 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 FROM python:3.13-slim-trixie
 COPY e2e/demo/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY e2e/sqlalchemy/requirements.txt /sqlalchemy/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt -r /sqlalchemy/requirements.txt
 COPY --from=build /src/dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm -rf /tmp/*.whl
 COPY e2e/demo /app
+# The second app of the end-to-end test (E2b): Flask + SQLAlchemy, served from
+# this directory so its own manifest and its own grants are what run it.
+COPY e2e/sqlalchemy /sqlalchemy
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \

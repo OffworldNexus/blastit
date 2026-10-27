@@ -62,6 +62,17 @@ fn needs_root(name: &str) -> bool {
     false
 }
 
+/// Whether a line is the `ready` event, in whichever format the log is in.
+///
+/// A test may ask for `pretty` (`BLASTIT_LOG_FORMAT`), and the two formats share
+/// no spelling: a JSON line carries `"event":"ready"`, and the human line is the
+/// padded `INFO  ready` the pretty encoder writes. Both are read here, because
+/// what the harness is waiting for is that the server is up — not that it chose
+/// one format over the other.
+fn is_ready_line(line: &str) -> bool {
+    line.contains("\"event\":\"ready\"") || line.contains("INFO  ready")
+}
+
 /// The PostgreSQL URL the CI job provides, if there is one.
 fn test_pg_url() -> Option<String> {
     std::env::var("BLASTIT_TEST_PG_URL")
@@ -221,11 +232,7 @@ impl Server {
     fn wait_for_ready(&mut self) {
         let deadline = Instant::now() + READY_TIMEOUT;
         while Instant::now() < deadline {
-            if self
-                .stdout_lines()
-                .iter()
-                .any(|line| line.contains("\"ready\""))
-            {
+            if self.stdout_lines().iter().any(|line| is_ready_line(line)) {
                 return;
             }
             if let Some(status) = self.exited() {
@@ -584,7 +591,12 @@ impl Drop for RunDir {
 /// [`Server`] insists on a `ready` event, which is exactly what a boot that is
 /// *supposed* to fail never produces; this is the bounded, both-pipes version
 /// the refusals are checked with.
-fn run_to_exit(program: &[&std::ffi::OsStr], env: &[(&str, &str)], uid: u32) -> String {
+fn run_to_exit(
+    program: &[&std::ffi::OsStr],
+    env: &[(&str, &str)],
+    uid: u32,
+    cwd: Option<&Path>,
+) -> String {
     use std::os::unix::process::CommandExt;
     let (program, arguments) = program.split_first().expect("a program to run");
     let mut command = Command::new(program);
@@ -596,6 +608,9 @@ fn run_to_exit(program: &[&std::ffi::OsStr], env: &[(&str, &str)], uid: u32) -> 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     for (key, value) in env {
         command.env(key, value);
     }
@@ -765,6 +780,8 @@ def application(environ, start_response):
             "gid": os.getgid(),
             "route": environ.get("blastit.route"),
             "script": environ.get("SCRIPT_NAME"),
+            "remote_addr": environ.get("REMOTE_ADDR"),
+            "remote_port": environ.get("REMOTE_PORT"),
         }).encode()
         return respond(start_response, body)
     body = ("uid=%d pid=%d path=%s" % (os.getuid(), os.getpid(), path)).encode()
@@ -1046,6 +1063,20 @@ fn the_app_environment_has_no_blastit_variables_and_home_is_its_scratch_director
     );
     assert_eq!(value["route"].as_str().unwrap(), "one");
     assert_eq!(value["gid"].as_u64().unwrap(), u64::from(base + 1000));
+    // CGI and PEP 3333: the app is told the client's address and its port as
+    // two keys, and the address holds no port.
+    assert_eq!(
+        value["remote_addr"].as_str().unwrap(),
+        "127.0.0.1",
+        "the socket peer's address alone: {}",
+        server.stdout_text()
+    );
+    assert!(
+        value["remote_port"]
+            .as_str()
+            .is_some_and(|port| port.parse::<u16>().is_ok_and(|port| port > 0)),
+        "the connection's port, as a string: {value}"
+    );
 }
 
 #[test]
@@ -1087,9 +1118,9 @@ queries = ["SELECT 1"]
     assert_eq!(response.status, 200, "{}", server.stdout_text());
     let value: serde_json::Value = serde_json::from_str(&response.body).unwrap();
     let database_url = value["database_url"].as_str().expect("DATABASE_URL is set");
-    assert!(
-        database_url.contains("/proc/self/cwd") || database_url.contains("%2Fproc%2Fself%2Fcwd"),
-        "the app is pointed at its own socket: {database_url}"
+    assert_eq!(
+        database_url, "postgresql://blastit@/defaultdb?host=/proc/self/cwd&port=5432",
+        "the app is pointed at its own socket, in the shape every client reads"
     );
     assert!(
         !database_url.contains(password),
@@ -1415,6 +1446,7 @@ fn a_rootless_standalone_install_runs_dbproxy_from_the_capability_free_copy() {
             ("PYTHONPATH", &python_path),
         ],
         uid,
+        None,
     );
     assert!(
         refused.contains("BLASTIT_EXEC"),
@@ -1532,6 +1564,107 @@ fn sigterm_drains_and_exits_zero_within_the_graceful_timeout() {
         server.wait_for_event("\"stage\":\"stopped\""),
         "{}",
         server.stdout_text()
+    );
+}
+
+/// The manifest the two database tests serve: one granted query, one other
+/// route.
+const GRANTED_AND_DENIED: &str = r#"
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "data"
+path = ['/query']
+[route.db]
+queries = ["SELECT 1"]
+
+[[route]]
+name = "other"
+path = ['/other']
+"#;
+
+#[test]
+fn pretty_renders_a_forwarded_event_as_the_human_line() {
+    // §8.1: `BLASTIT_LOG_FORMAT=pretty` is one human line per event, and that
+    // line is written once — by the same encoder that renders init's own
+    // events. A child's event arrives as JSON on a pipe, so it has to be read
+    // back into an event first; a `method=GET path=/query …` field dump is what
+    // this replaces.
+    if !needs_root("pretty format") {
+        return;
+    }
+    let Some(url) = test_pg_url() else {
+        println!("pretty format: skipped: BLASTIT_TEST_PG_URL is not set");
+        return;
+    };
+    let base = 51_000;
+    let server = Server::start_with(
+        "pretty",
+        base,
+        GRANTED_AND_DENIED,
+        "app:application",
+        &[("app.py", PG_APP)],
+        &[("DATABASE_URL", &url), ("BLASTIT_LOG_FORMAT", "pretty")],
+        &[],
+        None,
+    );
+
+    assert_eq!(server.get("/query").status, 200, "{}", server.stdout_text());
+    assert!(
+        server.wait_for_event("sql.denied"),
+        "{}",
+        server.stdout_text()
+    );
+    let log = server.stdout_text();
+
+    // The request: `HH:MM:SS.mmm INFO  request  GET /query → data  200  1.2ms`.
+    let request = log
+        .lines()
+        .find(|line| line.contains(" request ") && line.contains("GET /query"))
+        .unwrap_or_else(|| panic!("no request line in:\n{log}"));
+    assert!(
+        request.contains("→ data"),
+        "the route reaches the line: {request}"
+    );
+    assert!(request.contains("200"), "{request}");
+    assert!(
+        request.trim_end().ends_with("ms"),
+        "the duration reaches the line: {request}"
+    );
+    assert!(!request.contains("method="), "not a field dump: {request}");
+    assert!(
+        !request.contains("\"event\":") && !request.starts_with('{'),
+        "and not a JSON object: {request}"
+    );
+
+    // The denial: `WARN sql.denied  data  db  query  SELECT 2`.
+    let denied = log
+        .lines()
+        .find(|line| line.contains("sql.denied"))
+        .unwrap_or_else(|| panic!("no sql.denied line in:\n{log}"));
+    assert!(
+        denied.contains(" db "),
+        "the proxy is in the line: {denied}"
+    );
+    assert!(
+        denied.contains("SELECT 2"),
+        "the statement is in the line: {denied}"
+    );
+    assert!(!denied.contains("proxy="), "not a field dump: {denied}");
+    assert!(
+        !denied.contains("\"event\":") && !denied.starts_with('{'),
+        "and not a JSON object: {denied}"
+    );
+    // Stage 0 prints its own first lines as JSON — the configuration, and so the
+    // format, is not parsed yet — so this is about the lines a component
+    // forwarded, which is what the test asked for.
+    assert!(
+        log.lines().filter(|line| line.starts_with('{')).count() <= 2,
+        "only stage 0's first lines may be JSON:\n{log}"
     );
 }
 
@@ -2083,6 +2216,7 @@ fn a_failing_boot_still_says_the_preset_assumption_it_contradicts() {
             ("BLASTIT_LOG_FORMAT", "json"),
         ],
         0,
+        None,
     );
     assert!(
         text.contains("is for a rootless deployment"),
@@ -2119,6 +2253,7 @@ fn an_unknown_preset_is_refused_with_the_list_of_presets() {
             ("BLASTIT_LOG_FORMAT", "json"),
         ],
         0,
+        None,
     );
     assert!(text.contains("unknown preset"), "{text}");
     assert!(text.contains("compose-trafik"), "{text}");
@@ -2140,9 +2275,326 @@ fn an_unknown_preset_is_refused_with_the_list_of_presets() {
             ("BLASTIT_PRESET", "compose-trafik"),
         ],
         0,
+        None,
     );
     assert!(text.contains("BLASTIT_PRESET"), "{text}");
     assert!(text.contains("unknown preset"), "{text}");
+}
+
+#[test]
+fn a_writable_working_directory_is_refused() {
+    // §5.3: blastit puts the directory it was started in on `sys.path`, so a
+    // `0777` one lets a view plant a module another view imports. The check is
+    // about the uids blastit drops to — a view runs as one, and is not the
+    // owner — so the hole is a directory those uids can write, and it is the
+    // *directory* that matters: writing a file into it needs no permission on
+    // anything already there.
+    if !needs_root("writable cwd") {
+        return;
+    }
+    let fixture = Fixture::new("writable-cwd");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    for mode in [0o777, 0o1777] {
+        std::fs::set_permissions(&fixture.path, Permissions::from_mode(mode)).unwrap();
+        // A port of its own per boot: the previous one releases its listener
+        // only when its dbproxy child is gone, and the child outlives init for
+        // a moment.
+        let port = free_port().to_string();
+        let refused = run_to_exit(
+            &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+            &[
+                ("PORT", port.as_str()),
+                ("BLASTIT_APP", "app:application"),
+                ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+                ("PYTHONPATH", &fixture.python_path()),
+                ("BLASTIT_UID_BASE", "48300"),
+                ("BLASTIT_LOG_FORMAT", "json"),
+            ],
+            0,
+            Some(&fixture.path),
+        );
+        assert!(
+            refused.contains("is writable by another uid"),
+            "mode {mode:o}: the boot refuses:\n{refused}"
+        );
+        assert!(
+            refused.contains(&fixture.path.display().to_string()),
+            "mode {mode:o}: and names the directory:\n{refused}"
+        );
+        assert!(
+            refused.contains("chmod go-w") && refused.contains("sys.path"),
+            "mode {mode:o}: and says what to do, and why it matters:\n{refused}"
+        );
+        assert!(
+            !refused.contains("\"event\":\"ready\""),
+            "mode {mode:o}: nothing is served:\n{refused}"
+        );
+        if mode == 0o1777 {
+            assert!(
+                refused.contains("sticky"),
+                "the sticky bit is answered, not obeyed:\n{refused}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_writable_directory_only_on_pythonpath_is_refused() {
+    // §5.3: the check is over the *whole* `sys.path` the interpreter will
+    // import through, not only what blastit put there. An entry a `PYTHONPATH`
+    // names (or a `.pth` file added) is imported through exactly as much, and a
+    // route can plant code in it just the same — so a `0777` directory that is
+    // only on `PYTHONPATH`, with a working directory that is fine, is refused.
+    if !needs_root("writable PYTHONPATH") {
+        return;
+    }
+    let fixture = Fixture::new("writable-pythonpath");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    let shared = fixture.path.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, Permissions::from_mode(0o777)).unwrap();
+    let python_path = format!("{}:{}", fixture.python_path(), shared.display());
+    let port = free_port().to_string();
+
+    let refused = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", port.as_str()),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("PYTHONPATH", &python_path),
+            ("BLASTIT_UID_BASE", "48600"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+        ],
+        0,
+        Some(&fixture.path),
+    );
+    assert!(
+        refused.contains("is writable by another uid"),
+        "the boot refuses:\n{refused}"
+    );
+    assert!(
+        refused.contains(&shared.display().to_string()),
+        "and names the entry, not the working directory:\n{refused}"
+    );
+    assert!(
+        refused.contains("PYTHONPATH") && refused.contains("chmod go-w"),
+        "and says where the entry comes from, and what to do:\n{refused}"
+    );
+
+    // The same entry, 0755 (in the test's own group): it stays, and the boot
+    // gets past the check to the failure planted behind it.
+    std::fs::set_permissions(&shared, Permissions::from_mode(0o755)).unwrap();
+    let port = free_port().to_string();
+    let text = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", port.as_str()),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("PYTHONPATH", &python_path),
+            ("BLASTIT_UID_BASE", "48600"),
+            ("BLASTIT_PRELOAD", "no.such.module"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+        ],
+        0,
+        Some(&fixture.path),
+    );
+    assert!(
+        !text.contains("is writable by another uid"),
+        "0755 is not a hole:\n{text}"
+    );
+    assert!(
+        text.contains("BLASTIT_PRELOAD"),
+        "and the boot stopped at the step after the check:\n{text}"
+    );
+}
+
+#[test]
+fn a_writable_directory_above_the_working_directory_is_refused() {
+    // The review's repro, at the boot: blastit started in `<parent>/sub` where
+    // `parent` is `0777` and `sub` is `0755`. Nothing about `sub` is wrong — but
+    // a view uid can `rmdir` it and put its own directory back, so the boot
+    // refuses and names `parent`, not the working directory.
+    if !needs_root("writable ancestor") {
+        return;
+    }
+    let fixture = Fixture::new("writable-parent");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    let parent = fixture.path.join("parent");
+    let started_in = parent.join("sub");
+    std::fs::create_dir_all(&started_in).unwrap();
+    std::fs::set_permissions(&parent, Permissions::from_mode(0o777)).unwrap();
+    std::fs::set_permissions(&started_in, Permissions::from_mode(0o755)).unwrap();
+    let port = free_port().to_string();
+
+    let refused = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", port.as_str()),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("PYTHONPATH", &fixture.python_path()),
+            ("BLASTIT_UID_BASE", "48700"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+        ],
+        0,
+        Some(&started_in),
+    );
+    assert!(
+        refused.contains("is writable by another uid"),
+        "the boot refuses:\n{refused}"
+    );
+    assert!(
+        refused.contains(&parent.display().to_string()),
+        "and names the directory above it:\n{refused}"
+    );
+    assert!(
+        refused.contains(&started_in.display().to_string()),
+        "and the entry it would take over:\n{refused}"
+    );
+    assert!(refused.contains("chmod go-w"), "and the fix:\n{refused}");
+}
+
+#[test]
+fn a_directory_a_view_can_read_through_its_own_group_is_not_a_blocker() {
+    // The other half of the same check: `root:<view uid> 0750` is readable by
+    // the view — its gid *is* the view's own, which needs no supplementary
+    // group — while the mode bits say nothing at all for "other". Only the
+    // kernel can tell that apart from a directory the view may not read, so it
+    // is asked; a boot that guesses from the bits refuses a working install.
+    if !needs_root("group class") {
+        return;
+    }
+    let fixture = Fixture::new("group-class");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    let base = 48_400;
+    let view = base + 1000;
+
+    // The boot is made to fail *after* the visibility check, on a module that
+    // is not there: the output then says which of the two refused.
+    let run = |base: u32| {
+        let base_text = base.to_string();
+        let port = free_port().to_string();
+        run_to_exit(
+            &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+            &[
+                ("PORT", port.as_str()),
+                ("BLASTIT_APP", "app:application"),
+                ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+                ("PYTHONPATH", &fixture.python_path()),
+                ("BLASTIT_UID_BASE", &base_text),
+                ("BLASTIT_PRELOAD", "no.such.module"),
+                ("BLASTIT_LOG_FORMAT", "json"),
+            ],
+            0,
+            None,
+        )
+    };
+
+    std::os::unix::fs::chown(&fixture.path, Some(0), Some(view)).unwrap();
+    std::fs::set_permissions(&fixture.path, Permissions::from_mode(0o750)).unwrap();
+    let text = run(base);
+    assert!(
+        !text.contains("is not readable"),
+        "the view's own group reaches it:\n{text}"
+    );
+    assert!(
+        text.contains("BLASTIT_PRELOAD"),
+        "and the boot stopped at the step after the check:\n{text}"
+    );
+
+    // The same mode in a group no view is in: now it blocks, by name.
+    std::os::unix::fs::chown(&fixture.path, Some(0), Some(base + 500)).unwrap();
+    std::fs::set_permissions(&fixture.path, Permissions::from_mode(0o750)).unwrap();
+    let text = run(base);
+    assert!(
+        text.contains("is not readable"),
+        "a group the view is not in does not:\n{text}"
+    );
+    assert!(
+        text.contains(&fixture.path.display().to_string()) && text.contains("chmod o+rx"),
+        "and the refusal names the path and the fix:\n{text}"
+    );
+}
+
+#[test]
+fn a_boot_s_first_lines_are_in_the_format_its_settings_name() {
+    // §8.1: the first lines of a boot are made before the settings that say how
+    // lines are printed have been read — the capability sets, the placement, the
+    // sibling warning. They wait for the format rather than being written as
+    // JSON, so `BLASTIT_LOG_FORMAT=pretty` gives a human first line, and a boot
+    // that fails later (here: the manifest is not there) prints in the format
+    // the operator asked for too.
+    if !needs_root("stage 0 log format") {
+        return;
+    }
+    let text = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", "8095"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", "/nonexistent/blastit.toml"),
+            ("BLASTIT_UID_BASE", "48500"),
+            ("BLASTIT_LOG_FORMAT", "pretty"),
+        ],
+        0,
+        None,
+    );
+    let first = text.lines().next().unwrap_or_default();
+    assert!(
+        first.contains("boot") && first.contains("stage0"),
+        "the first line is the one the boot made first:\n{text}"
+    );
+    assert!(
+        !first.starts_with('{'),
+        "and it is the human form, not JSON:\n{first}"
+    );
+    assert!(
+        text.contains("nonexistent"),
+        "the failure that follows is in the same format:\n{text}"
+    );
+}
+
+#[test]
+fn a_boot_with_no_readable_configuration_writes_its_first_lines_as_json() {
+    // §8.1: when the configuration cannot be read there is no format to print
+    // in, so the lines that waited go out as JSON — the one format that needs no
+    // settings — and the error follows them. Here the settings are the error:
+    // an unknown `BLASTIT_LOG_FORMAT`, chosen so that a boot which guessed would
+    // have guessed this very format.
+    if !needs_root("stage 0 log format fallback") {
+        return;
+    }
+    let text = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", "8095"),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", "/nonexistent/blastit.toml"),
+            ("BLASTIT_UID_BASE", "48500"),
+            ("BLASTIT_LOG_FORMAT", "nope"),
+        ],
+        0,
+        None,
+    );
+    let first = text.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with('{') && first.contains("\"event\":\"boot\""),
+        "JSON, whatever was asked for:\n{text}"
+    );
+    assert!(
+        text.contains("unknown format `nope`"),
+        "and the error comes after them:\n{text}"
+    );
+    assert!(
+        !text.contains("INFO  boot"),
+        "no human line was written anywhere:\n{text}"
+    );
 }
 
 #[test]
@@ -2210,17 +2662,12 @@ fn a_preset_is_accepted_and_reported_at_boot() {
         .unwrap_or_else(|| panic!("no request event: {requests:?}"));
     assert_eq!(forged["remote_addr"], "203.0.113.7", "{forged}");
 
-    // Without the header, the socket peer is the client — its own ephemeral
-    // port, which is what `REMOTE_ADDR` is when nothing is forwarded.
+    // Without the header, the socket peer's address is the client — with its
+    // port nowhere in `REMOTE_ADDR`, which is the address alone (CGI).
     assert_eq!(server.get("/one").status, 200);
     let requests = server.wait_for_events("request", 2);
     let honest = requests.last().expect("a request event");
-    assert!(
-        honest["remote_addr"]
-            .as_str()
-            .is_some_and(|addr| addr.starts_with("127.0.0.1:")),
-        "{honest}"
-    );
+    assert_eq!(honest["remote_addr"], "127.0.0.1", "{honest}");
     assert!(
         server
             .stdout_text()
@@ -2326,10 +2773,8 @@ fn a_client_ip_header_is_only_believed_when_it_is_configured_to_be() {
     );
     let requests = server.wait_for_events("request", 2);
     let event = requests.last().expect("a request event");
-    assert!(
-        event["remote_addr"]
-            .as_str()
-            .is_some_and(|addr| addr.starts_with("127.0.0.1:")),
-        "{event}"
+    assert_eq!(
+        event["remote_addr"], "127.0.0.1",
+        "the socket peer's address, without its port: {event}"
     );
 }

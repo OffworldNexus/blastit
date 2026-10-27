@@ -6,7 +6,7 @@ mod common;
 use blastit_frame::{ClientIpConfig, Scheme};
 use blastit_http::HttpConfig;
 
-use common::{Harness, PEER};
+use common::{Harness, PEER, PEER_IP};
 
 /// A front end with an unusual `server_port`, so tests can tell it from the
 /// port the listener happens to use, whose client-IP header is believed from
@@ -26,8 +26,9 @@ fn trusting() -> HttpConfig {
 }
 
 /// The address of [`PEER`] without its port: a trusted proxy list names
-/// addresses and networks, never ports.
-const TRUSTED: &str = "203.0.113.7";
+/// addresses and networks, never ports, and `REMOTE_ADDR` is the same address
+/// alone.
+const TRUSTED: &str = PEER_IP;
 
 #[tokio::test]
 async fn a_trusted_peer_names_the_client_behind_it() {
@@ -84,7 +85,10 @@ async fn a_client_that_is_not_trusted_cannot_forge_its_own_address() {
         .write(b"GET / HTTP/1.1\r\nHost: h\r\nX-Forwarded-For: 203.0.113.7\r\nX-Forwarded-Proto: https\r\n\r\n")
         .await;
     let (id, head) = h.scheduler.head().await;
-    assert_eq!(head.remote_addr, "198.51.100.9:1111");
+    assert_eq!(
+        head.remote_addr, "198.51.100.9",
+        "the peer's port is not part of `REMOTE_ADDR`"
+    );
     assert_eq!(head.peer_addr, "198.51.100.9:1111");
     assert_eq!(head.scheme, Scheme::Http, "and not its scheme either");
     assert_eq!(h.scheduler.end().await, id);
@@ -101,7 +105,10 @@ async fn forwarded_headers_are_ignored_when_they_are_not_trusted() {
         )
         .await;
     let (id, head) = h.scheduler.head().await;
-    assert_eq!(head.remote_addr, PEER, "the socket peer, not the header");
+    assert_eq!(
+        head.remote_addr, PEER_IP,
+        "the socket peer's address, not the header"
+    );
     assert_eq!(head.scheme, Scheme::Http);
     assert_eq!(h.scheduler.end().await, id);
 }
@@ -147,7 +154,7 @@ async fn a_missing_host_falls_back_to_localhost_on_http_1_0() {
     let (id, head) = h.scheduler.head().await;
     assert_eq!(head.server_name, "localhost");
     assert_eq!(head.server_port, 8443);
-    assert_eq!(head.remote_addr, PEER);
+    assert_eq!(head.remote_addr, PEER_IP);
     assert_eq!(h.scheduler.end().await, id);
 }
 
@@ -192,7 +199,7 @@ async fn a_rejection_without_headers_names_the_peer() {
     let _ = h.client.read_to_end().await;
     assert_eq!(
         h.events.rejections(),
-        [(PEER.to_string(), 400, "malformed_request".to_string())]
+        [(PEER_IP.to_string(), 400, "malformed_request".to_string())]
     );
 }
 
@@ -202,7 +209,7 @@ async fn one_connection_carries_the_default_scheme_and_the_peer() {
     h.client.write(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n").await;
     let (id, head) = h.scheduler.head().await;
     assert_eq!(head.scheme, Scheme::Http);
-    assert_eq!(head.remote_addr, PEER);
+    assert_eq!(head.remote_addr, PEER_IP);
     assert_eq!(head.server_port, 8080, "the §8.2 default of PORT");
     assert_eq!(h.scheduler.end().await, id);
 }

@@ -740,10 +740,13 @@ where
 
     /// Emit `http.rejected` and answer with a status line and no body.
     async fn reject(&mut self, reject: Reject) {
+        // `remote_addr` is the address alone (CGI): a rejection with no
+        // resolved client — a head that never parsed — still names the peer,
+        // and names it without its port.
         let remote = reject
             .remote_addr
             .clone()
-            .unwrap_or_else(|| self.peer.clone());
+            .unwrap_or_else(|| blastit_frame::peer_address(&self.peer));
         self.refuse(&remote, reject.status, reject.reason).await;
     }
 

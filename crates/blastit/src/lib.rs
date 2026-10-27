@@ -26,6 +26,7 @@ mod roles;
 mod stage0;
 mod stage1;
 mod supervise;
+mod visibility;
 mod zygote;
 
 pub use crate::host::{Host, Reexec};

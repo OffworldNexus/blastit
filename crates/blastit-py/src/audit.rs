@@ -162,10 +162,13 @@
 //!   statement would be "unused" once per route. It is reported once, in
 //!   `unused_global`, and only when no route matched it (D3c);
 //! * `unused_global` is the same idea for the global groups: `statements` lists
-//!   the statements a global group grants that no route matched, with the
-//!   groups that grant them, and `tables` lists the table grants a global group
-//!   hands out that no observed statement needed. `unused` never holds either,
-//!   so a statement of a global group is reported once and not once per route;
+//!   the statements a global group grants that nothing used, with the groups
+//!   that grant them, and `tables` lists the table grants a global group hands
+//!   out that no observed statement needed. `unused` never holds either, so a
+//!   statement of a global group is reported once and not once per route. A
+//!   statement `connection_setup` accounts for is *used*: it only runs while a
+//!   connection is established, so no request can match it, and a group that
+//!   grants it (`groups = ["connection"]`) is doing its job (D3c);
 //! * `egress.observed` is what the route reached for, most attempted first, and
 //!   `egress.needed` is true when it did and the route has no `egress = true`
 //!   (§7.3): a route that may not open connections would have them refused;
@@ -854,7 +857,7 @@ fn assemble(
         .collect();
     let unused_global = unused_global_section(
         global,
-        &global_matched,
+        &used_statements(&global_matched, &setup),
         &live_only_proxies(manifest, traces),
     );
     let clean = missing == 0
@@ -922,6 +925,25 @@ fn live_only_proxies(
         .collect()
 }
 
+/// Every `(proxy, statement)` pair the suite has used (§6, D3c).
+///
+/// Two things make a grant used: a route that matched its statement, and
+/// [`setup_section`] — the statements that run while a connection is being
+/// established. The second is what makes a global group's
+/// `SELECT set_config('TimeZone', …)` used: it only runs when a connection
+/// opens, so no *request* can match it, and the connection-setup section is
+/// precisely where the report already says the grant covers it. Reading the two
+/// together is what keeps a correct manifest from being reported as one grant
+/// too many.
+fn used_statements(
+    matched: &BTreeSet<(ProxyName, String)>,
+    setup: &SetupSection,
+) -> BTreeSet<(ProxyName, String)> {
+    let mut used = matched.clone();
+    used.extend(setup.accounted.iter().cloned());
+    used
+}
+
 /// The `unused_global` section: what the global groups grant that nothing used
 /// (§6, D3c).
 ///
@@ -931,8 +953,16 @@ fn live_only_proxies(
 /// information: *no* request in the suite touched it, so the grant — or the
 /// requests — can go.
 ///
-/// * `statements` is every statement a global group grants that no route
-///   matched, with the groups that grant it;
+/// `matched` is every `(proxy, statement)` the suite used, per
+/// [`used_statements`]: a statement a route ran, **or** one
+/// [`setup_section`] accounts for. The second is what a connection-setup group
+/// needs: `SELECT set_config('TimeZone', …)` never runs inside a request, so no
+/// route can match it, and a report that called the group that grants it dead
+/// would be telling an operator to delete a grant the same report shows
+/// `connection_setup` using.
+///
+/// * `statements` is every statement a global group grants that nothing used,
+///   with the groups that grant it;
 /// * `tables` is every `tables`/`functions` grant a global group hands out that
 ///   no observed statement needed: the group's table grant allowed nothing the
 ///   suite ran. A statement that only *half* used a group's tables does not
@@ -1040,6 +1070,13 @@ struct SetupSection {
     statements: usize,
     /// How many of them at least one route does not grant.
     ungranted: usize,
+    /// The `(proxy, statement)` pairs it accounts for, normalised.
+    ///
+    /// A statement that only runs while a connection opens is *used*: it is not
+    /// a request's statement, so no route matches it, and a global group that
+    /// grants it is doing exactly its job (`groups = ["connection"]`). The
+    /// report says so by keeping it out of `unused_global` (D3c, §6).
+    accounted: BTreeSet<(ProxyName, String)>,
 }
 
 /// Builds the `connection_setup` section.
@@ -1065,7 +1102,9 @@ fn setup_section(
 
     let mut ungranted_total = 0usize;
     let mut statements = Vec::with_capacity(traces.len());
+    let mut accounted: BTreeSet<(ProxyName, String)> = BTreeSet::new();
     for ((proxy, sql), mut trace) in traces {
+        accounted.insert((proxy.clone(), sql.clone()));
         for index in 0..manifest.route_count() {
             let (Some(route), true) = (
                 manifest.route(index),
@@ -1112,6 +1151,7 @@ fn setup_section(
             "ungranted": ungranted_total,
         }),
         ungranted: ungranted_total,
+        accounted,
     })
 }
 
@@ -2964,6 +3004,72 @@ mod tests {
         assert_eq!(app["count"], 5, "2 plus a reformatted 3");
         assert_eq!(app["proxy"], "db", "inferred from the only proxy");
         assert_eq!(app["wire_sql"], "SET application_name = 'app'");
+    }
+
+    /// A manifest whose *global* group is Django's connection housekeeping (§6).
+    ///
+    /// `SELECT set_config('TimeZone', $1, false)` only runs while a connection
+    /// opens, so it is granted to every route and no request ever runs it; the
+    /// second statement is the control — a grant nothing used at all.
+    const CONNECTION: &str = r#"
+        version = 1
+        groups = ["connection"]
+
+        [proxy.db]
+        protocol = "postgresql"
+        input = { url = "DATABASE_URL" }
+
+        [group.connection.db]
+        queries = [
+          "SELECT set_config('TimeZone', $1, false)",
+          "SELECT 'never runs'",
+        ]
+
+        [[route]]
+        name = "notes"
+        path = ['/notes/.*']
+        [route.db]
+        queries = ["SELECT 1"]
+    "#;
+
+    #[test]
+    fn a_statement_connection_setup_accounts_for_is_used_rather_than_unused() {
+        // The report used to say both things at once: `connection_setup` showed
+        // the group's `set_config` granted in every route, and `unused_global`
+        // called the same grant one that "nothing matched" — because it only
+        // runs while a connection opens, which is not a request. A statement
+        // the connection-setup section accounts for is *used*.
+        let observations = format!(
+            r#"{{"version": 1, "requests": [{}], "connection_setup": [{}]}}"#,
+            request("GET", "/notes/", &statement("SELECT 1")),
+            setup("SELECT set_config('TimeZone', $1, false)", 2),
+        );
+        let report = run(CONNECTION, &observations);
+
+        let entry = &report["connection_setup"]["statements"][0];
+        assert_eq!(entry["sql"], "SELECT set_config('TimeZone', $?, false)");
+        assert_eq!(entry["granted_in"], 1, "the group grants it everywhere");
+        assert_eq!(entry["ungranted_in"], json!([]));
+        assert_eq!(report["totals"]["clean"], true);
+
+        // The grant it accounts for is not in `unused_global`, and the summary
+        // cannot say "nothing matched" about it. The control statement, which
+        // nothing ran at all, still is — the fix is about the statements that
+        // run while a connection opens, not about every statement.
+        assert_eq!(report["unused_global"]["count"], 1, "{report}");
+        assert_eq!(
+            report["unused_global"]["statements"],
+            json!([{
+                "proxy": "db",
+                "sql": "SELECT 'never runs'",
+                "groups": ["connection"],
+            }])
+        );
+        assert_eq!(report["totals"]["unused_global"], 1);
+        assert_eq!(
+            report["totals"]["unused"], 0,
+            "the route's own grant matched"
+        );
     }
 
     #[test]

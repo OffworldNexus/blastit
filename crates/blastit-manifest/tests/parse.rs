@@ -318,6 +318,42 @@ fn input_names_must_not_be_empty() {
 }
 
 #[test]
+fn a_route_path_may_be_one_string_or_a_list_of_them() {
+    // §2.4 and §6 both write the catch-all as `path = ".*"`, and a string is a
+    // list of one in every configuration language a reader has met. The two
+    // forms are the same route.
+    let single =
+        Manifest::from_toml_str("version = 1\n[[route]]\nname = \"fallback\"\npath = \".*\"\n")
+            .expect("a string is one pattern");
+    let list =
+        Manifest::from_toml_str("version = 1\n[[route]]\nname = \"fallback\"\npath = ['.*']\n")
+            .expect("a list of patterns");
+    assert_eq!(texts(single.route(0).unwrap().path()), [".*"]);
+    assert_eq!(
+        texts(single.route(0).unwrap().path()),
+        texts(list.route(0).unwrap().path())
+    );
+
+    // An ordinary pattern, and a list of two: the form says nothing about how
+    // many patterns there are.
+    let one =
+        Manifest::from_toml_str("version = 1\n[[route]]\nname = \"about\"\npath = \"/about/\"\n")
+            .expect("a string is one pattern");
+    assert_eq!(texts(one.route(0).unwrap().path()), ["/about/"]);
+    let two = Manifest::from_toml_str(
+        "version = 1\n[[route]]\nname = \"about\"\npath = [\"/about/\", \"/help/\"]\n",
+    )
+    .expect("a list of patterns");
+    assert_eq!(texts(two.route(0).unwrap().path()), ["/about/", "/help/"]);
+
+    // An empty list is still an empty list, and a list with something else in
+    // it still names the entry.
+    let empty =
+        Manifest::from_toml_str("version = 1\n[[route]]\nname = \"about\"\npath = []\n").unwrap();
+    assert!(empty.route(0).unwrap().path().is_empty());
+}
+
+#[test]
 fn route_fields_are_required_and_typed() {
     assert_eq!(
         parse_errors("version = 1\n[[route]]\npath = ['/about/']\n"),
@@ -332,11 +368,11 @@ fn route_fields_are_required_and_typed() {
         })
     );
     assert_eq!(
-        parse_errors("version = 1\n[[route]]\nname = \"about\"\npath = \"/about/\"\n"),
+        parse_errors("version = 1\n[[route]]\nname = \"about\"\npath = 1\n"),
         ManifestErrors::from(ManifestError::WrongType {
             path: "route[0].path".to_string(),
-            expected: "an array",
-            found: "a string",
+            expected: "a regex, or an array of them",
+            found: "an integer",
         })
     );
     assert_eq!(

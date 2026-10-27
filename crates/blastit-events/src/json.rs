@@ -1,10 +1,16 @@
-//! The JSON line encoder (ARCHITECTURE.md §8.1: `BLASTIT_LOG_FORMAT=json`).
+//! The JSON line encoder (ARCHITECTURE.md §8.1: `BLASTIT_LOG_FORMAT=json`), and
+//! the decoder that reads a line back into an [`Event`].
 
 use std::collections::BTreeMap;
 
+use serde_json::{Map, Value};
+use time::OffsetDateTime;
+
 use crate::{
-    Event, EventKind, ExitKind, Lifecycle, MAX_EVENT_BYTES, PgRefuseReason, RejectReason,
-    RetireReason, SqlKind, floor_boundary, format_timestamp,
+    AppOutput, Component, Event, EventKind, ExitKind, HttpRejected, Level, Lifecycle,
+    MAX_EVENT_BYTES, ManifestWarning, Outcome, PgRefuseReason, PgRefused, ProcessCap,
+    ProcessExited, ProcessRetired, ProcessSpawned, RejectReason, RequestInfo, RetireReason,
+    SqlDenied, SqlKind, Stream, floor_boundary, format_timestamp,
 };
 
 /// Encode one event as a single JSON object, without a trailing newline.
@@ -344,6 +350,433 @@ fn push_member(out: &mut String, key: &str, raw: &str) {
     out.push_str(raw);
 }
 
+/// Parse one JSON line back into an [`Event`], or `None` when it is not a line
+/// this build's [`encode_json`] could have written.
+///
+/// The inverse of the encoder, for the two things a forwarded line is used for:
+/// the pretty rendering (§8.1's human form is written once, by
+/// [`crate::encode_pretty`]) and anything else that wants the *event* rather
+/// than its JSON. A line that does not decode — not JSON, not an object, an
+/// unknown `event` name, a missing member, a member of the wrong type — is
+/// [`None`] rather than a guess: a caller that has such a line says so in its
+/// own words, and never invents a field.
+///
+/// `truncated` is the encoder's bookkeeping, and is not rebuilt: a decoded
+/// event has no fields *it* shortened, and the strings it carries are the ones
+/// the line holds.
+pub fn decode_json(line: &str) -> Option<Event> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let object = value.as_object()?;
+
+    let ts = parse_timestamp(text(object, "ts")?)?;
+    let level = text(object, "level")?.parse::<Level>().ok()?;
+    let component = parse_component(text(object, "component")?)?;
+    // `route` is null on a request that matched nothing, and absent elsewhere.
+    let route = optional_text(object, "route")?;
+    let request_id = optional_text(object, "request_id")?;
+    let kind = decode_kind(text(object, "event")?, object)?;
+
+    let mut event = Event::at(ts, component, kind).with_level(level);
+    if let Some(route) = route {
+        event = event.with_route(route);
+    }
+    if let Some(request_id) = request_id {
+        event = event.with_request_id(request_id);
+    }
+    Some(event)
+}
+
+/// The event kind named by the line's `event` member.
+fn decode_kind(name: &str, object: &Map<String, Value>) -> Option<EventKind> {
+    let kind = match name {
+        "request" => {
+            let mut info = RequestInfo::from_target(text(object, "method")?, text(object, "path")?);
+            if let Some(rule) = optional_u32(object, "rule")? {
+                info = info.with_rule(rule);
+            }
+            info = info
+                .with_status(number_u16(object, "status")?)
+                .with_outcome(parse_outcome(text(object, "outcome")?)?)
+                .with_timings(
+                    number_f64(object, "queued_ms")?,
+                    number_f64(object, "duration_ms")?,
+                )
+                .with_bytes(
+                    number_u64(object, "bytes_in")?,
+                    number_u64(object, "bytes_out")?,
+                )
+                .with_cost(
+                    number_u64(object, "cost_ns")?,
+                    optional_u64(object, "cpu_ns")?,
+                )
+                .with_remote_addr(text(object, "remote_addr")?);
+            EventKind::Request(info)
+        }
+        "sql.denied" => {
+            let denial = SqlDenied::new(
+                number_u32(object, "pid")?,
+                text(object, "proxy")?,
+                parse_sql_kind(text(object, "kind")?),
+                text(object, "sql")?,
+                text(object, "sqlstate")?,
+                flag(object, "in_transaction")?,
+            );
+            match optional_text(object, "reason")? {
+                Some(reason) => EventKind::SqlDenied(denial.with_reason(reason)),
+                None => EventKind::SqlDenied(denial),
+            }
+        }
+        "pg.refused" => EventKind::PgRefused(PgRefused::new(
+            text(object, "proxy")?,
+            parse_pg_refuse_reason(text(object, "reason")?),
+        )),
+        "http.rejected" => EventKind::HttpRejected(HttpRejected::new(
+            text(object, "remote_addr")?,
+            number_u16(object, "status")?,
+            parse_reject_reason(text(object, "reason")?),
+        )),
+        "process.spawned" => EventKind::ProcessSpawned(ProcessSpawned::new(
+            number_u32(object, "pid")?,
+            number_u32(object, "uid")?,
+            number_f64(object, "fork_ms")?,
+        )),
+        "process.exited" => {
+            // Exactly one of `status` and `signal` (§8.1).
+            let exit = match (
+                optional_i32(object, "status")?,
+                optional_i32(object, "signal")?,
+            ) {
+                (Some(status), None) => ExitKind::Status(status),
+                (None, Some(signal)) => ExitKind::Signal(signal),
+                _ => return None,
+            };
+            EventKind::ProcessExited(ProcessExited::new(
+                number_u32(object, "pid")?,
+                number_u32(object, "uid")?,
+                exit,
+            ))
+        }
+        "process.retired" => EventKind::ProcessRetired(ProcessRetired::new(
+            number_u32(object, "pid")?,
+            number_u32(object, "uid")?,
+            parse_retire_reason(text(object, "reason")?),
+        )),
+        "process.cap" => EventKind::ProcessCap(ProcessCap::new(
+            number_u64(object, "estimate_bytes")?,
+            number_u32(object, "cap")?,
+        )),
+        "app.output" => {
+            let output = AppOutput::new(
+                parse_stream(text(object, "stream")?)?,
+                text(object, "line")?,
+            )
+            .with_part(number_u32(object, "part")?, number_u32(object, "parts")?)
+            .ok()?;
+            EventKind::AppOutput(output)
+        }
+        "boot" => EventKind::Boot(decode_lifecycle(object)?),
+        "ready" => EventKind::Ready(decode_lifecycle(object)?),
+        "shutdown" => EventKind::Shutdown(decode_lifecycle(object)?),
+        "manifest.warning" => {
+            EventKind::ManifestWarning(ManifestWarning::new(text(object, "message")?))
+        }
+        _ => return None,
+    };
+    Some(kind)
+}
+
+/// The lifecycle fields of a `boot`, `ready` or `shutdown` line.
+fn decode_lifecycle(object: &Map<String, Value>) -> Option<Lifecycle> {
+    let mut lifecycle = Lifecycle::default();
+    if let Some(stage) = optional_text(object, "stage")? {
+        lifecycle = lifecycle.with_stage(stage);
+    }
+    if let Some(routes) = optional_u32(object, "routes")? {
+        lifecycle = lifecycle.with_routes(routes);
+    }
+    if let Some(workers) = optional_u32(object, "workers")? {
+        lifecycle = lifecycle.with_workers(workers);
+    }
+    if let Some(duration_ms) = optional_f64(object, "duration_ms")? {
+        lifecycle = lifecycle.with_duration_ms(duration_ms);
+    }
+    if let Some(seccomp) = optional_flag(object, "seccomp")? {
+        lifecycle = lifecycle.with_seccomp(seccomp);
+    }
+    if let Some(privilege) = optional_text(object, "privilege")? {
+        lifecycle = lifecycle.with_privilege(privilege);
+    }
+    if let Some(bounding_set) = optional_text(object, "bounding_set")? {
+        lifecycle = lifecycle.with_bounding_set(bounding_set == "dropped");
+    }
+    for capability in optional_strings(object, "capabilities")? {
+        lifecycle = lifecycle.with_capability(capability);
+    }
+    if let Some(immortalize) = optional_text(object, "immortalize")? {
+        lifecycle = lifecycle.with_immortalize(immortalize == "on");
+    }
+    if let Some(reason) = optional_text(object, "immortalize_reason")? {
+        lifecycle = lifecycle.with_immortalize_reason(reason);
+    }
+    if let Some(immortalized) = optional_u64(object, "immortalized")? {
+        lifecycle = lifecycle.with_immortalized(immortalized);
+    }
+    if let Some(immortalize_ms) = optional_f64(object, "immortalize_ms")? {
+        lifecycle = lifecycle.with_immortalize_ms(immortalize_ms);
+    }
+    if let Some(mem_total) = optional_u64(object, "mem_total")? {
+        lifecycle = lifecycle.with_mem_total(mem_total);
+    }
+    if let Some(mem_used) = optional_u64(object, "mem_used")? {
+        lifecycle = lifecycle.with_mem_used(mem_used);
+    }
+    if let Some(cap) = optional_u32(object, "max_view_processes")? {
+        lifecycle = lifecycle.with_max_view_processes(cap);
+    }
+    for (proxy, names) in optional_lists(object, "outputs")? {
+        for name in names {
+            lifecycle = lifecycle.with_output(proxy.as_str(), name);
+        }
+    }
+    if let Some(preset) = optional_text(object, "preset")? {
+        lifecycle = lifecycle.with_preset(preset);
+    }
+    for (name, value) in optional_strings_map(object, "preset_settings")? {
+        lifecycle = lifecycle.with_preset_setting(name.as_str(), value.as_str());
+    }
+    for name in optional_strings(object, "preset_overridden")? {
+        lifecycle = lifecycle.with_preset_override(name);
+    }
+    Some(lifecycle)
+}
+
+/// A member of the object, whatever it is.
+fn member<'a>(object: &'a Map<String, Value>, name: &str) -> Option<&'a Value> {
+    object.get(name)
+}
+
+/// A member that must be a string.
+fn text<'a>(object: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
+    member(object, name)?.as_str()
+}
+
+/// A member that is a string, or absent, or `null`.
+///
+/// # Errors
+///
+/// `None` — "this is not a line the encoder wrote" — for anything else: a
+/// `route` that is a number is not a route this crate ever wrote.
+fn optional_text<'a>(object: &'a Map<String, Value>, name: &str) -> Option<Option<&'a str>> {
+    match member(object, name) {
+        None | Some(Value::Null) => Some(None),
+        Some(value) => Some(Some(value.as_str()?)),
+    }
+}
+
+fn number_u64(object: &Map<String, Value>, name: &str) -> Option<u64> {
+    member(object, name)?.as_u64()
+}
+
+fn number_u32(object: &Map<String, Value>, name: &str) -> Option<u32> {
+    u32::try_from(number_u64(object, name)?).ok()
+}
+
+fn number_u16(object: &Map<String, Value>, name: &str) -> Option<u16> {
+    u16::try_from(number_u64(object, name)?).ok()
+}
+
+fn number_f64(object: &Map<String, Value>, name: &str) -> Option<f64> {
+    member(object, name)?.as_f64()
+}
+
+/// A member that is a number, or absent, or `null`.
+fn optional_u64(object: &Map<String, Value>, name: &str) -> Option<Option<u64>> {
+    match member(object, name) {
+        None | Some(Value::Null) => Some(None),
+        Some(value) => Some(Some(value.as_u64()?)),
+    }
+}
+
+fn optional_u32(object: &Map<String, Value>, name: &str) -> Option<Option<u32>> {
+    optional_u64(object, name).map(|value| value.and_then(|value| u32::try_from(value).ok()))
+}
+
+fn optional_i32(object: &Map<String, Value>, name: &str) -> Option<Option<i32>> {
+    match member(object, name) {
+        None | Some(Value::Null) => Some(None),
+        Some(value) => Some(Some(i32::try_from(value.as_i64()?).ok()?)),
+    }
+}
+
+fn optional_f64(object: &Map<String, Value>, name: &str) -> Option<Option<f64>> {
+    match member(object, name) {
+        None | Some(Value::Null) => Some(None),
+        Some(value) => Some(Some(value.as_f64()?)),
+    }
+}
+
+fn flag(object: &Map<String, Value>, name: &str) -> Option<bool> {
+    member(object, name)?.as_bool()
+}
+
+/// A member that is a boolean, or absent.
+fn optional_flag(object: &Map<String, Value>, name: &str) -> Option<Option<bool>> {
+    match member(object, name) {
+        None | Some(Value::Null) => Some(None),
+        Some(value) => Some(Some(value.as_bool()?)),
+    }
+}
+
+/// A member that is an array of strings, or absent.
+fn optional_strings(object: &Map<String, Value>, name: &str) -> Option<Vec<String>> {
+    let Some(value) = member(object, name) else {
+        return Some(Vec::new());
+    };
+    let array = value.as_array()?;
+    let mut strings = Vec::with_capacity(array.len());
+    for item in array {
+        strings.push(item.as_str()?.to_string());
+    }
+    Some(strings)
+}
+
+/// A member that is an object of strings, or absent.
+fn optional_strings_map(object: &Map<String, Value>, name: &str) -> Option<Vec<(String, String)>> {
+    let Some(value) = member(object, name) else {
+        return Some(Vec::new());
+    };
+    let map = value.as_object()?;
+    let mut pairs = Vec::with_capacity(map.len());
+    for (key, item) in map {
+        pairs.push((key.clone(), item.as_str()?.to_string()));
+    }
+    Some(pairs)
+}
+
+/// A member that is an object of arrays of strings, or absent: the lifecycle
+/// `outputs` map, proxy name to variable names.
+fn optional_lists(object: &Map<String, Value>, name: &str) -> Option<Vec<(String, Vec<String>)>> {
+    let Some(value) = member(object, name) else {
+        return Some(Vec::new());
+    };
+    let map = value.as_object()?;
+    let mut lists = Vec::with_capacity(map.len());
+    for (key, item) in map {
+        let array = item.as_array()?;
+        let mut names = Vec::with_capacity(array.len());
+        for name in array {
+            names.push(name.as_str()?.to_string());
+        }
+        lists.push((key.clone(), names));
+    }
+    Some(lists)
+}
+
+/// The vocabularies the encoder writes by name, read back.
+fn parse_component(text: &str) -> Option<Component> {
+    Some(match text {
+        "init" => Component::Init,
+        "http" => Component::Http,
+        "scheduler" => Component::Scheduler,
+        "dbproxy" => Component::Dbproxy,
+        "view" => Component::View,
+        _ => return None,
+    })
+}
+
+fn parse_outcome(text: &str) -> Option<Outcome> {
+    Some(match text {
+        "ok" => Outcome::Ok,
+        "unmatched" => Outcome::Unmatched,
+        "queue_full" => Outcome::QueueFull,
+        "queue_timeout" => Outcome::QueueTimeout,
+        "timeout" => Outcome::Timeout,
+        "view_died" => Outcome::ViewDied,
+        "client_gone" => Outcome::ClientGone,
+        _ => return None,
+    })
+}
+
+fn parse_stream(text: &str) -> Option<Stream> {
+    Some(match text {
+        "stdout" => Stream::Stdout,
+        "stderr" => Stream::Stderr,
+        _ => return None,
+    })
+}
+
+/// A `sql.denied` kind: anything that is not one of the four names is the
+/// protocol's own word for it, which is what `Other` holds.
+fn parse_sql_kind(text: &str) -> SqlKind {
+    match text {
+        "query" => SqlKind::Query,
+        "parse" => SqlKind::Parse,
+        "function_call" => SqlKind::FunctionCall,
+        "copy" => SqlKind::Copy,
+        other => SqlKind::Other(other.to_string()),
+    }
+}
+
+fn parse_pg_refuse_reason(text: &str) -> PgRefuseReason {
+    match text {
+        "credentials_mismatch" => PgRefuseReason::CredentialsMismatch,
+        "too_many_connections" => PgRefuseReason::TooManyConnections,
+        "upstream_unreachable" => PgRefuseReason::UpstreamUnreachable,
+        other => PgRefuseReason::Other(other.to_string()),
+    }
+}
+
+fn parse_reject_reason(text: &str) -> RejectReason {
+    match text {
+        "malformed_request" => RejectReason::MalformedRequest,
+        "header_too_large" => RejectReason::HeaderTooLarge,
+        "body_too_large" => RejectReason::BodyTooLarge,
+        "upgrade_unsupported" => RejectReason::UpgradeUnsupported,
+        other => RejectReason::Other(other.to_string()),
+    }
+}
+
+fn parse_retire_reason(text: &str) -> RetireReason {
+    match text {
+        "idle" => RetireReason::Idle,
+        "max_requests" => RetireReason::MaxRequests,
+        "stuck_threads" => RetireReason::StuckThreads,
+        "memory_pressure" => RetireReason::MemoryPressure,
+        "lru_cap" => RetireReason::LruCap,
+        other => RetireReason::Other(other.to_string()),
+    }
+}
+
+/// `2026-10-25T14:02:11.384Z`, the one spelling [`format_timestamp`] writes.
+///
+/// Parsed field by field rather than with `time`'s RFC 3339 parser: that one
+/// lives behind a feature this crate does not need for anything else, and a
+/// decoder that cannot read the encoder's own output is a decoder that does not
+/// work.
+fn parse_timestamp(text: &str) -> Option<OffsetDateTime> {
+    let (date, rest) = text.strip_suffix('Z')?.split_once('T')?;
+    let (clock, millis) = rest.split_once('.')?;
+    let mut date = date.split('-');
+    let year: i32 = date.next()?.parse().ok()?;
+    let month: u8 = date.next()?.parse().ok()?;
+    let day: u8 = date.next()?.parse().ok()?;
+    if date.next().is_some() {
+        return None;
+    }
+    let mut clock = clock.split(':');
+    let hour: u8 = clock.next()?.parse().ok()?;
+    let minute: u8 = clock.next()?.parse().ok()?;
+    let second: u8 = clock.next()?.parse().ok()?;
+    if clock.next().is_some() {
+        return None;
+    }
+    let millisecond: u16 = millis.parse().ok()?;
+    let date =
+        time::Date::from_calendar_date(year, time::Month::try_from(month).ok()?, day).ok()?;
+    let clock = time::Time::from_hms_milli(hour, minute, second, millisecond).ok()?;
+    Some(time::PrimitiveDateTime::new(date, clock).assume_utc())
+}
+
 /// A JSON string literal. `serde_json` owns the escaping rules.
 fn json_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned())
@@ -590,6 +1023,122 @@ mod tests {
 
     fn request_event() -> Event {
         fixture::request_event()
+    }
+
+    /// One event of every kind, with every optional member set.
+    ///
+    /// A round trip can only prove the decoder against the encoder if every arm
+    /// of both is visited: this is the list that does.
+    fn every_kind() -> Vec<Event> {
+        let lifecycle = Lifecycle::default()
+            .with_stage("preload")
+            .with_routes(3)
+            .with_workers(16)
+            .with_duration_ms(412.7)
+            .with_seccomp(true)
+            .with_privilege("capabilities")
+            .with_bounding_set(true)
+            .with_capability("cap_chown")
+            .with_immortalize(true)
+            .with_immortalize_reason("forced")
+            .with_immortalized(1_610_300)
+            .with_immortalize_ms(1_785.4)
+            .with_mem_total(1_057_259_520)
+            .with_mem_used(211_812_352)
+            .with_max_view_processes(23)
+            .with_output("db", "DATABASE_URL")
+            .with_preset("compose-traefik")
+            .with_preset_setting("BLASTIT_FAIR_QUEUING", "on")
+            .with_preset_override("BLASTIT_LOG_FORMAT");
+        let output = AppOutput::new(Stream::Stderr, "a line of output")
+            .with_part(2, 3)
+            .expect("2 of 3");
+        vec![
+            fixture::request_event(),
+            fixture::sql_denied_event(),
+            fixture::event(EventKind::PgRefused(PgRefused::new(
+                "db",
+                PgRefuseReason::UpstreamUnreachable,
+            ))),
+            fixture::event(EventKind::PgRefused(PgRefused::new(
+                "db",
+                PgRefuseReason::Other("the pool is full".to_string()),
+            ))),
+            fixture::event(EventKind::HttpRejected(HttpRejected::new(
+                "203.0.113.7",
+                431,
+                RejectReason::HeaderTooLarge,
+            ))),
+            fixture::event(EventKind::HttpRejected(HttpRejected::new(
+                "203.0.113.7",
+                400,
+                RejectReason::Other("body_timeout".to_string()),
+            ))),
+            fixture::event(EventKind::ProcessSpawned(ProcessSpawned::new(
+                57, 20_000, 1.5,
+            ))),
+            fixture::event(EventKind::ProcessExited(ProcessExited::new(
+                57,
+                20_000,
+                ExitKind::Status(3),
+            ))),
+            fixture::event(EventKind::ProcessExited(ProcessExited::new(
+                57,
+                20_000,
+                ExitKind::Signal(9),
+            ))),
+            fixture::event(EventKind::ProcessRetired(ProcessRetired::new(
+                57,
+                20_000,
+                RetireReason::MemoryPressure,
+            ))),
+            fixture::event(EventKind::ProcessCap(ProcessCap::new(33_554_432, 23))),
+            fixture::event(EventKind::AppOutput(output)),
+            fixture::event(EventKind::Boot(lifecycle.clone())),
+            fixture::event(EventKind::Ready(lifecycle.clone())),
+            fixture::event(EventKind::Shutdown(lifecycle)),
+            fixture::event(EventKind::ManifestWarning(ManifestWarning::new(
+                "the group `session` is attached to no route",
+            ))),
+        ]
+    }
+
+    #[test]
+    fn every_event_kind_round_trips_through_the_decoder() {
+        // The decoder is the encoder's inverse, and this is the check that it
+        // stays that way: an event of every kind — every optional member set,
+        // both arms of every alternative — encodes, decodes and encodes back to
+        // the very same line.
+        for event in every_kind() {
+            let line = encode_json(&event);
+            let decoded = decode_json(&line).unwrap_or_else(|| panic!("{line} did not decode"));
+            assert_eq!(decoded, event, "{line}");
+            assert_eq!(encode_json(&decoded), line, "re-encoded");
+        }
+    }
+
+    #[test]
+    fn a_line_this_build_did_not_write_is_not_an_event() {
+        // Every one of these is a line the *pretty* path has to fall back on the
+        // field dump for, so none of them may decode into an invented event.
+        for line in [
+            "",
+            "not json",
+            "[]",
+            "null",
+            r#"{"ts":"2026-10-25T14:02:11.384Z"}"#,
+            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","component":"init"}"#,
+            // An event a newer component emits.
+            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"something.new","component":"init"}"#,
+            // A member of the wrong type.
+            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"process.cap","component":"init","estimate_bytes":"many","cap":3}"#,
+            // A timestamp this crate does not write.
+            r#"{"ts":"2026-10-25 14:02:11","level":"info","event":"process.cap","component":"init","estimate_bytes":1,"cap":3}"#,
+            // Both halves of an exit, when the encoder writes exactly one.
+            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"process.exited","component":"init","pid":1,"uid":2,"status":0,"signal":9}"#,
+        ] {
+            assert!(decode_json(line).is_none(), "{line} decoded");
+        }
     }
 
     #[test]

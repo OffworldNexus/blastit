@@ -31,6 +31,11 @@
   tiny Django project whose tests are served by the *real* `blastit` binary, so
   what is checked is front-end traffic against the manifest. Those tests skip
   without root (or passwordless sudo), which is what starting blastit needs.
+* `packaged_project/` — the same thing in the layout `django-admin startproject
+  myshop .` writes: the settings inside a package (`myshop/settings.py`), the
+  dotted `WSGI_APPLICATION` Django declares, and a relative
+  `--blastit-manifest`. Nothing here installs the project, so this is also what
+  checks that the directory blastit was started in is importable (§5.3).
 
 They need two things `cargo test` does not give them: the compiled extension
 (`blastit._blastit`) plus the plugin entry point, installed in a virtualenv, and

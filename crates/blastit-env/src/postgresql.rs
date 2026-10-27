@@ -244,6 +244,25 @@ pub fn upstream(
 ///
 /// Exactly [`template_fields`]: the local endpoint and two non-secret facts.
 /// There is no field for the password, the upstream host or the CA.
+///
+/// # The shape of `url`
+///
+/// `postgresql://blastit@/shop?host=/proc/self/cwd&port=5432` — the socket
+/// directory in a **query parameter**, not in the authority. Both spellings are
+/// legal, and only this one is read by every consumer: libpq (and so
+/// `psycopg.connect(url)`) resolves `host` from the query when there is no
+/// authority, `dj-database-url` puts the unknown parameters in Django's
+/// `OPTIONS` (which its PostgreSQL backend passes through to
+/// `psycopg.connect`), and SQLAlchemy's `postgresql://` and
+/// `postgresql+psycopg://` dialects hand `host`/`port` to the driver as keyword
+/// arguments.
+///
+/// The percent-encoded-authority spelling
+/// (`postgresql://blastit@%2Fproc%2Fself%2Fcwd:5432/shop`) is what libpq and
+/// `dj-database-url` were built to read, and SQLAlchemy does not decode it: it
+/// passes the literal `%2Fproc%2Fself%2Fcwd` as the host, which the driver then
+/// puts through DNS. One spelling that every consumer resolves is worth more
+/// than a shorter one that one of them does not.
 pub fn template_fields(upstream: &Upstream, port: u16) -> Fields {
     let mut fields = Fields::new();
     fields.insert("socket_dir", SOCKET_DIR);
@@ -254,8 +273,7 @@ pub fn template_fields(upstream: &Upstream, port: u16) -> Fields {
     fields.insert(
         "url",
         format!(
-            "postgresql://{LOCAL_USER}@{}:{port}/{}",
-            urlencode(SOCKET_DIR),
+            "postgresql://{LOCAL_USER}@/{}?host={SOCKET_DIR}&port={port}",
             urlencode(&upstream.database)
         ),
     );
@@ -928,7 +946,7 @@ mod tests {
         assert_eq!(fields.get("user"), Some("blastit"));
         assert_eq!(
             fields.get("url"),
-            Some("postgresql://blastit@%2Fproc%2Fself%2Fcwd:5433/my%20db")
+            Some("postgresql://blastit@/my%20db?host=/proc/self/cwd&port=5433")
         );
 
         // Nothing reachable from a template mentions a secret.

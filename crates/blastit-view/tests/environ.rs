@@ -34,6 +34,7 @@ fn the_standard_environment_is_there() {
             "SERVER_PORT",
             "SERVER_PROTOCOL",
             "REMOTE_ADDR",
+            "REMOTE_PORT",
             "blastit.route",
         ],
         "web",
@@ -46,8 +47,33 @@ fn the_standard_environment_is_there() {
     assert_eq!(response.field("SERVER_NAME"), "view.test");
     assert_eq!(response.field("SERVER_PORT"), "80");
     assert_eq!(response.field("SERVER_PROTOCOL"), "HTTP/1.1");
-    assert_eq!(response.field("REMOTE_ADDR"), "203.0.113.7:51000");
+    // CGI and PEP 3333: the address is one key and the port is another.
+    assert_eq!(
+        response.field("REMOTE_ADDR"),
+        "203.0.113.7",
+        "the peer's port is not part of `REMOTE_ADDR`"
+    );
+    assert_eq!(response.field("REMOTE_PORT"), "51000");
     assert_eq!(response.field("blastit.route"), "web");
+}
+
+#[test]
+fn a_peer_that_is_not_an_address_keeps_its_name_and_has_no_port() {
+    // A socket with no name — an unnamed Unix socket — is not an `ip:port`, so
+    // there is no port to report: the key is absent rather than empty. The
+    // address stays what the front end could read, because an empty value would
+    // claim the connection has no client at all.
+    let mut head = support::head("GET", "/", Vec::new());
+    head.remote_addr = "unnamed-socket".to_string();
+    head.peer_addr = "unnamed-socket".to_string();
+    let response = echo(head, &["REMOTE_ADDR", "REMOTE_PORT"], "web");
+    assert_eq!(response.field("REMOTE_ADDR"), "unnamed-socket");
+    assert_eq!(
+        response.field("REMOTE_PORT"),
+        "None",
+        "no port to report: {}",
+        response.text()
+    );
 }
 
 #[test]
@@ -217,6 +243,8 @@ fn the_wsgi_keys_are_present() {
          \x20       'errors_is_stderr=' + repr(e['wsgi.errors'] is sys.stderr),\n\
          \x20       'input_is_a_stream=' + repr(all(hasattr(e['wsgi.input'], n) for n in ('read', 'readline', 'readlines'))),\n\
          \x20       'input_iterable=' + repr(iter(e['wsgi.input']) is not None),\n\
+         \x20       'remote_addr=' + e['REMOTE_ADDR'],\n\
+         \x20       'remote_port=' + e['REMOTE_PORT'],\n\
          \x20   ]\n\
          \x20   body = '\\n'.join(lines).encode('latin-1')\n\
          \x20   start_response('200 OK', [('Content-Type', 'text/plain')])\n\
@@ -235,6 +263,9 @@ fn the_wsgi_keys_are_present() {
     assert_eq!(response.field("errors_is_stderr"), "True");
     assert_eq!(response.field("input_is_a_stream"), "True");
     assert_eq!(response.field("input_iterable"), "True");
+    // The client's address, split the way CGI and PEP 3333 split it.
+    assert_eq!(response.field("remote_addr"), "203.0.113.7");
+    assert_eq!(response.field("remote_port"), "51000");
 
     // The scheme comes from the front end, not from the app.
     let mut https = support::head("GET", "/", Vec::new());

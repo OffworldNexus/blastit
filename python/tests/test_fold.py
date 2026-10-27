@@ -12,6 +12,7 @@ manifest or drops a comment is worse than no fold at all.
 
 import io
 import json
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -65,6 +66,24 @@ products = { select = ["id"] }
 def denial(sql: str, route: str = "notes", proxy: str = "db", reason: str = "not granted") -> Any:
     """One `sql.denied` line's worth of a denial."""
     return fold._Denial(route=route, proxy=proxy, sql=sql, reason=reason)
+
+
+#: A route whose whole `db` grant is written as sections of it — no
+#: `[route.db]` header at all. blastit boots this (the tables are the route's,
+#: §6), so fold has to accept it too.
+TABLES_ONLY = """\
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "catalog"
+path = ['/catalog/.*']
+[route.db.tables]
+products = { select = ["id"] }
+"""
 
 
 def document(text: str = MANIFEST) -> dict[str, Any]:
@@ -360,6 +379,66 @@ class TestEdit:
         assert parsed["route"][0]["db"]["tables"] == {"orders": {"select": ["id"]}}
         assert 'orders = { select = ["id"] }' in edited
 
+    def test_a_grant_written_as_sections_alone_takes_a_queries_key(self) -> None:
+        """`[route.db.tables]` is the route's `db` grant, so fold writes into it."""
+        addition = fold._Addition(
+            route="catalog", proxy="db", queries=[("SELECT 1", "not granted")]
+        )
+        edited = fold.apply_additions(TABLES_ONLY, [addition])
+        parsed = tomllib.loads(edited)
+        grant = parsed["route"][0]["db"]
+        assert grant["queries"] == ["SELECT 1"]
+        assert grant["tables"] == {"products": {"select": ["id"]}}, "the table grant is intact"
+        # The key is written under a `[route.db]` header of its own, before the
+        # section it would otherwise have landed inside.
+        assert edited.index("[route.db]\nqueries = [") < edited.index("[route.db.tables]")
+        assert edited.rstrip().endswith('products = { select = ["id"] }')
+
+    def test_a_nested_table_section_is_a_grant_too(self) -> None:
+        """`[route.db.tables.products]` and nothing else is still a grant."""
+        text = TABLES_ONLY.replace(
+            '[route.db.tables]\nproducts = { select = ["id"] }',
+            '[route.db.tables.products]\nselect = ["id"]\n',
+        )
+        addition = fold._Addition(
+            route="catalog", proxy="db", queries=[("SELECT 1", "not granted")]
+        )
+        edited = fold.apply_additions(text, [addition])
+        parsed = tomllib.loads(edited)
+        assert parsed["route"][0]["db"]["queries"] == ["SELECT 1"]
+        assert parsed["route"][0]["db"]["tables"]["products"]["select"] == ["id"]
+        # The super-table is written before the section it is the parent of.
+        assert edited.index("[route.db]\n") < edited.index("[route.db.tables.products]")
+
+    def test_a_tables_section_can_be_added_to_a_sections_only_grant(self) -> None:
+        """The `--prefer-tables` edit lands in the table grant that is there."""
+        addition = fold._Addition(
+            route="catalog", proxy="db", tables={"orders": {"select": ["id"]}}
+        )
+        edited = fold.apply_additions(TABLES_ONLY, [addition])
+        parsed = tomllib.loads(edited)
+        assert parsed["route"][0]["db"]["tables"] == {
+            "products": {"select": ["id"]},
+            "orders": {"select": ["id"]},
+        }
+
+    def test_the_refusal_counts_the_sections_a_grant_can_be_written_as(self) -> None:
+        """A route with no grant at all is told which sections would have been one."""
+        manifest = MANIFEST.replace(
+            'input = { url = "DATABASE_URL" }',
+            'input = { url = "DATABASE_URL" }\n\n[proxy.warehouse]\n'
+            'protocol = "postgresql"\ninput = { url = "WAREHOUSE_URL" }',
+        )
+        addition = fold._Addition(
+            route="notes", proxy="warehouse", queries=[("SELECT 1", "not granted")]
+        )
+        with pytest.raises(fold._FoldError) as refused:
+            fold.apply_additions(manifest, [addition])
+        message = str(refused.value)
+        assert "no `[route.warehouse]` section" in message, message
+        assert "no `[route.warehouse.tables]` one" in message, message
+        assert "and no group that grants it" in message, message
+
     def test_a_route_the_manifest_does_not_declare_cannot_be_written(self) -> None:
         addition = fold._Addition(
             route="ghost", proxy="db", queries=[("SELECT 1", "not granted")]
@@ -417,6 +496,50 @@ class TestCli:
         assert parsed["route"][0]["db"]["queries"] == ["SELECT 'granted'", "DELETE FROM notes"]
         assert parsed["groups"] == ["session"]
         assert "# A manifest with the two kinds of group" in written
+
+    def test_the_module_takes_folds_arguments_without_the_subcommand(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`python -m blastit.fold LOG --manifest …`: this module *is* fold."""
+        manifest, log = self._files(tmp_path)
+        assert fold._direct([str(log), "--manifest", str(manifest)]) == 0
+        out = capsys.readouterr().out
+        assert "[route.db]" in out
+        assert '"DELETE FROM notes",  # the statement is not granted' in out
+
+    def test_the_module_parses_its_own_arguments_for_real(self, tmp_path: Path) -> None:
+        """`python -m blastit.fold app.log …` used to refuse `app.log` as an
+        invalid subcommand: the module takes fold's arguments, and nothing else."""
+        manifest, log = self._files(tmp_path)
+        completed = subprocess.run(  # noqa: S603 - sys.executable, fixed argv
+            [sys.executable, "-m", "blastit.fold", str(log), "--manifest", str(manifest)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "[route.db]" in completed.stdout
+        assert '"DELETE FROM notes"' in completed.stdout
+
+    def test_the_module_fails_the_way_the_console_script_does(self, tmp_path: Path) -> None:
+        """Same exit status, same words, for a log that is not there."""
+        manifest, _ = self._files(tmp_path)
+        completed = subprocess.run(  # noqa: S603 - sys.executable, fixed argv
+            [
+                sys.executable,
+                "-m",
+                "blastit.fold",
+                str(tmp_path / "nope.log"),
+                "--manifest",
+                str(manifest),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 1
+        assert "blastit-manifest fold:" in completed.stderr
+        assert "nope.log" in completed.stderr
 
     def test_nothing_to_add_writes_nothing(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

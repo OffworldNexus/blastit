@@ -74,7 +74,7 @@ mod wire;
 
 pub use crate::clientip::{
     ClientIp, ClientIpConfig, ClientIpError, ClientIpSource, TrustedProxies, is_header_name,
-    normalize_ip, parse_addr,
+    normalize_ip, parse_addr, parse_port, peer_address,
 };
 pub use crate::ctl::{Ctl, ExitStatus, MAX_SIGNAL, MIN_SIGNAL};
 pub use crate::decoder::Decoder;
@@ -728,7 +728,7 @@ mod tests {
                 (b"Authorization".to_vec(), secret.as_bytes().to_vec()),
                 (b"Cookie".to_vec(), b"session=deadbeef".to_vec()),
             ],
-            remote_addr: "203.0.113.7:1234".to_string(),
+            remote_addr: "203.0.113.7".to_string(),
             scheme: Scheme::Https,
             server_name: "secret-host.example".to_string(),
             server_port: 443,

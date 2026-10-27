@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr};
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::UnixListener;
 use std::time::Duration;
 
@@ -50,6 +50,44 @@ pub const DBPROXY_READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// authorised for.
 fn current_uid() -> u32 {
     rustix::process::geteuid().as_raw()
+}
+
+/// Where the events made before the log settings are read wait (§8.1).
+///
+/// The format is one of the *settings*, and stage 0's first lines are made
+/// before those settings exist: the capability sets, the placement, the sibling
+/// warning, and the `boot` event that reports them. They are kept here, in the
+/// order they were made, and written out once the configuration that says how
+/// lines are printed has been parsed — so `BLASTIT_LOG_FORMAT=pretty` gives a
+/// human first line like every other.
+#[derive(Default)]
+struct Early {
+    events: Vec<Event>,
+}
+
+impl Early {
+    /// Keeps `event` for later, in order.
+    fn emit(&mut self, event: Event) {
+        self.events.push(event);
+    }
+
+    /// Writes everything that waited into `emitter`, and empties the queue.
+    fn flush(&mut self, emitter: &Emitter) {
+        for event in self.events.drain(..) {
+            emitter.emit(&event);
+        }
+    }
+}
+
+/// Fails a boot that has not resolved its configuration yet.
+///
+/// §8.1: the lines that waited are written as JSON — the format that needs no
+/// settings, and the one an operator reading a failed boot can always parse —
+/// and the error follows them.
+fn fail_early(early: &mut Early, message: &str) -> ! {
+    let json = Emitter::stdout(LogFormat::Json, Level::Info);
+    early.flush(&json);
+    fail(&json, message)
 }
 
 /// The `boot` event of stage 0 (§8.1), with D6's mode when it is known.
@@ -97,14 +135,14 @@ fn config_lifecycle(privilege: &Privilege, config: &Config) -> Lifecycle {
 /// processes of that uid (`docker exec` for a debug shell, a sidecar that drops
 /// privileges, this very check's own shell), and blastit cannot tell a debug
 /// shell from a threat.
-fn warn_about_siblings(emitter: &Emitter) {
+fn warn_about_siblings(early: &mut Early) {
     let uid = current_uid();
     let siblings = others_with_uid(uid);
     if siblings.is_empty() {
         return;
     }
-    emitter.emit(
-        &output_event(
+    early.emit(
+        output_event(
             Component::Init,
             None,
             Stream::Stderr,
@@ -301,11 +339,13 @@ fn dbproxy_limits(config: &Config) -> Rlimits {
 /// `preset` is `--preset` when the command line carried one, and it wins over
 /// `BLASTIT_PRESET` (E1, [`Config::from_env`]).
 pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
-    // §4: `boot` is the first event, emitted before anything can fail. The
-    // configuration is not parsed yet, so this one line is always JSON — and the
-    // §7.3 seccomp flag is read straight from its variable, because an operator
-    // has to be able to see whether the filters are on (§8.1).
-    let boot = Emitter::stdout(LogFormat::Json, Level::Info);
+    // §8.1: the log format is one of the *settings*, and stage 0's first lines
+    // are made before there is a configuration to read it from — so they are
+    // kept here, in the order they were made, and written out once the settings
+    // (preset included) have been resolved. A boot whose configuration cannot be
+    // read at all writes them as JSON instead, followed by the error: JSON is
+    // the one format that needs no settings to print.
+    let mut early = Early::default();
     // D6: root or a handful of capabilities is read from the kernel, and it
     // decides whether the boot can build its sandboxes at all. It comes before
     // the first event, because the event has to report it.
@@ -318,11 +358,11 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
             // looked for is exactly what §4 refuses to risk. The advice is the
             // one an operator can act on, which is why it comes from here
             // (`Host` knows how blastit was installed) and not from the error.
-            boot.emit(&Event::now(
+            early.emit(Event::now(
                 Component::Init,
                 EventKind::Boot(stage0_lifecycle(None)),
             ));
-            fail(&boot, &capability_advice(host, &err));
+            fail_early(&mut early, &capability_advice(host, &err));
         }
     };
     let privilege = privilege_from(&held);
@@ -333,21 +373,21 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     let placement = match host.placement(held.bounding_set_dropped) {
         Ok(placement) => placement,
         Err(message) => {
-            boot.emit(&Event::now(
+            early.emit(Event::now(
                 Component::Init,
                 EventKind::Boot(stage0_lifecycle(Some(&privilege))),
             ));
-            fail(&boot, &message);
+            fail_early(&mut early, &message);
         }
     };
-    boot.emit(&Event::now(
+    early.emit(Event::now(
         Component::Init,
         EventKind::Boot(stage0_lifecycle(Some(&privilege))),
     ));
     if !held.bounding_set_dropped {
         // M1: the boot runs, and says so, once.
-        boot.emit(
-            &output_event(
+        early.emit(
+            output_event(
                 Component::Init,
                 None,
                 Stream::Stderr,
@@ -363,11 +403,11 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // deployment decides who that uid is (a worker, a migration, an operator's
     // shell all belong somewhere else); this says when it did not, once, before
     // anything is forked.
-    warn_about_siblings(&boot);
+    warn_about_siblings(&mut early);
 
     let mut config = match Config::from_env(preset) {
         Ok(config) => config,
-        Err(err) => fail(&boot, &err.to_string()),
+        Err(err) => fail_early(&mut early, &err.to_string()),
     };
     // D6: init's mode belongs in the configuration, because stage 1's preload
     // `boot` event reports the same thing stage 0's does. It is set here, before
@@ -375,6 +415,8 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // E1's preset assumption can be checked against it.
     config.privilege = Some(privilege.clone());
     let emitter = Emitter::stdout(config.log_format, config.log_level);
+    // The lines that waited for the settings, in the format they name.
+    early.flush(&emitter);
     emitter.emit(&Event::now(
         Component::Init,
         EventKind::Boot(config_lifecycle(&privilege, &config)),
@@ -456,6 +498,14 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // a wheel re-executes it with `-I`, which drops `PYTHONPATH` and the
     // working directory. Empty for the standalone binary.
     config.sys_path = host.sys_path().to_vec();
+    // §5.3: and so does the directory blastit was started in, which stage 1 puts
+    // first on `sys.path` — the directory gunicorn, uwsgi and granian all make
+    // importable, so a project that was never `pip install`ed serves its own
+    // `wsgi:application`. It is read here, in stage 0, because that is the one
+    // place that knows where the operator started the server.
+    config.cwd = std::env::current_dir()
+        .ok()
+        .map(|dir| dir.into_os_string().into_vec());
 
     // Everything a secret touched is gone from the process image in one step.
     exec_stage1(
@@ -551,6 +601,25 @@ fn fork_dbproxy(
 ) -> Option<DbproxyHandover> {
     if listeners.is_empty() {
         return None;
+    }
+
+    // §7.2: dbproxy is `execve`'d as `BLASTIT_UID_BASE + 3`, so the child has
+    // to be able to *reach* the file before it is forked. A wheel installed
+    // under a directory the dropped-to uids cannot pass — a checkout inside a
+    // `0750` home, say — otherwise fails the boot with `exec dbproxy: Permission
+    // denied (os error 13)`, which names neither the directory nor the fix.
+    let layout = UidLayout::new(config.uid_base);
+    // The route count is not needed here: the execute question never reads the
+    // sticky exemption, which is the only thing the uid list is for.
+    match crate::visibility::unexecutable(
+        std::slice::from_ref(&placement.dbproxy),
+        layout.dbproxy(),
+        interpreter,
+        &crate::visibility::DroppedTo::of(layout, 0),
+    ) {
+        Ok(Some(blocker)) => fail(emitter, &blocker.message()),
+        Ok(None) => {}
+        Err(timed_out) => fail(emitter, &timed_out.message()),
     }
 
     let proxies: Vec<ProxySpec> = prepared

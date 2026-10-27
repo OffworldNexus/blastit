@@ -33,6 +33,14 @@
 //!   implementation's `forwarded_chain` treats it, and the header is ignored.
 //! * IPv4-mapped IPv6 addresses (`::ffff:203.0.113.7`) are normalised to IPv4,
 //!   so a client that arrives as a mapped address is not a second client.
+//!
+//! # What the app sees
+//!
+//! The resolved address is `REMOTE_ADDR`, and CGI and PEP 3333 make that the
+//! *address*: a bare IP, normalised, with no port, brackets or zone
+//! ([`ClientIp::remote_addr`]). The socket address the request arrived on keeps
+//! its `ip:port` shape in [`crate::ReqHead::peer_addr`], which is where the port
+//! the app sees as `REMOTE_PORT` comes from.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -175,16 +183,14 @@ impl ClientIp {
         self.source == ClientIpSource::Header
     }
 
-    /// What the app sees in `REMOTE_ADDR`.
+    /// What the app sees in `REMOTE_ADDR`: the address, and nothing else.
     ///
-    /// The peer keeps the `ip:port` shape it arrived with; an address named by
-    /// a header is a bare IP, because a chain entry is an address and nothing
-    /// else.
-    pub fn remote_addr(self, peer: &str) -> String {
-        match self.source {
-            ClientIpSource::Header => self.ip.to_string(),
-            ClientIpSource::Peer => peer.to_string(),
-        }
+    /// A bare IP — normalised, so an IPv4-mapped IPv6 address is the IPv4 one,
+    /// and without a port, brackets or zone. CGI and PEP 3333 make
+    /// `REMOTE_ADDR` the *address*; the port belongs in `REMOTE_PORT`, and the
+    /// connection's is in [`crate::ReqHead::peer_addr`].
+    pub fn remote_addr(self) -> String {
+        self.ip.to_string()
     }
 }
 
@@ -374,18 +380,82 @@ fn parse_chain_entry(item: &str) -> Option<IpAddr> {
 }
 
 /// An `ip`, an `ip:port`, or a bracketed IPv6 with or without a port.
+///
+/// A port that is not a port (`1.2.3.4:70000`, `[::1]:x`) makes the whole thing
+/// unreadable: reading the address out of something we cannot read is how a
+/// value nobody can vouch for becomes a trusted one, and it is the same reason
+/// an unparsable chain entry ignores the whole header.
+///
+/// An IPv6 scope (`fe80::1%eth0`) is dropped, with the brackets: a zone names an
+/// interface *of the machine that has it*, not part of the address, and
+/// `REMOTE_ADDR` is the address alone.
 pub fn parse_addr(text: &str) -> Option<IpAddr> {
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
-    if let Ok(ip) = strip_brackets(text).parse::<IpAddr>() {
-        return Some(normalize_ip(ip));
+    let (host, port) = split_port(text);
+    if let Some(port) = port
+        && port.parse::<u16>().is_err()
+    {
+        return None;
     }
-    if let Ok(addr) = text.parse::<std::net::SocketAddr>() {
-        return Some(normalize_ip(addr.ip()));
+    strip_zone(host).parse::<IpAddr>().ok().map(normalize_ip)
+}
+
+/// The port of an `ip:port` string, when it has one.
+///
+/// The same spelling [`parse_addr`] reads — a bare `ip:port`, or a bracketed
+/// IPv6 literal with one (`[::1]:8080`) — because the two are always read
+/// together: this is the port CGI puts in `REMOTE_PORT` while the address goes
+/// in `REMOTE_ADDR`. `None` when the text carries no port, when the port is `0`
+/// — a socket that arrived from port zero is not a connection anyone made, and
+/// `REMOTE_PORT=0` would be a number an app would take for a port — and when the
+/// text is no address at all: a port is the port *of* an address, and
+/// `localhost:80` has neither.
+pub fn parse_port(text: &str) -> Option<u16> {
+    let text = text.trim();
+    parse_addr(text)?;
+    split_port(text).1?.parse().ok().filter(|port| *port != 0)
+}
+
+/// A socket peer as `REMOTE_ADDR` spells one: its address, and nothing else.
+///
+/// `ip:port` becomes the bare IP, and a peer that is not an address at all (a
+/// socket with no name) is returned exactly as it arrived: a front end that
+/// cannot read its peer has no address to report, and an empty value would be a
+/// lie about a connection that is there.
+pub fn peer_address(peer: &str) -> String {
+    parse_addr(peer).map_or_else(|| peer.to_string(), |ip| ip.to_string())
+}
+
+/// Splits an address string into its host and its port, if it has one.
+///
+/// An IPv6 literal is bracketed when a port follows it, exactly as a URL writes
+/// one, so the brackets and what is inside them are the host; anything after
+/// `]:` is the port. A bare address may hold several colons (`2001:db8::1`) and
+/// no port, so the text is only read as `host:port` when what follows the colon
+/// is a number.
+fn split_port(text: &str) -> (&str, Option<&str>) {
+    if let Some(rest) = text.strip_prefix('[') {
+        return match rest.split_once(']') {
+            Some((host, tail)) => (host, tail.strip_prefix(':')),
+            // An unterminated bracket is not a host.
+            None => ("", None),
+        };
     }
-    None
+    match text.split_once(':') {
+        Some((host, port)) if port.parse::<u16>().is_ok() => (host, Some(port)),
+        _ => (text, None),
+    }
+}
+
+/// An address without its IPv6 zone (`fe80::1%eth0` → `fe80::1`).
+fn strip_zone(text: &str) -> &str {
+    match text.split_once('%') {
+        Some((host, _zone)) => host,
+        None => text,
+    }
 }
 
 /// IPv4-mapped IPv6 becomes IPv4, so one client is one client.
@@ -494,7 +564,9 @@ mod tests {
         assert_eq!(client.ip(), ip("198.51.100.7"));
         assert_eq!(client.source(), ClientIpSource::Peer);
         assert!(!client.is_forwarded());
-        assert_eq!(client.remote_addr("198.51.100.7:5000"), "198.51.100.7:5000");
+        // The port stays out of `REMOTE_ADDR` (CGI): it is a separate key the
+        // view takes from the peer.
+        assert_eq!(client.remote_addr(), "198.51.100.7");
 
         // With no list at all, nothing is trusted.
         let none = cfg(&[]);
@@ -515,7 +587,7 @@ mod tests {
         let client = config.resolve("127.0.0.1:5000", &forward).unwrap();
         assert_eq!(client.ip(), ip("203.0.113.5"));
         assert!(client.is_forwarded());
-        assert_eq!(client.remote_addr("127.0.0.1:5000"), "203.0.113.5");
+        assert_eq!(client.remote_addr(), "203.0.113.5");
     }
 
     #[test]
@@ -676,7 +748,7 @@ mod tests {
 
         // And the display form is IPv4, because the mapped form is not a
         // different client but a different spelling.
-        assert_eq!(client.remote_addr("127.0.0.1:5000"), "203.0.113.5");
+        assert_eq!(client.remote_addr(), "203.0.113.5");
     }
 
     #[test]
@@ -689,6 +761,11 @@ mod tests {
         assert_eq!(parse_addr(""), None);
         assert_eq!(parse_addr("localhost"), None);
         assert_eq!(parse_addr("203.0.113.5:70000"), None);
+        // A port that is not a port is not a port, whatever follows the colon.
+        assert_eq!(parse_addr("203.0.113.5:x"), None);
+        assert_eq!(parse_addr("[::1]:x"), None);
+        assert_eq!(parse_addr("[::1"), None, "an unterminated bracket");
+        assert_eq!(parse_addr("[]:80"), None, "brackets around nothing");
 
         // A chain entry may be bracketed, the way an IPv6 literal is in a URL.
         let config = cfg(&["127.0.0.1"]);
@@ -697,6 +774,42 @@ mod tests {
             config.resolve("127.0.0.1:5000", &forward).unwrap().ip(),
             ip("2001:db8::1")
         );
+    }
+
+    #[test]
+    fn a_zoned_peer_is_the_address_without_its_zone() {
+        // A zone names an interface of this machine, not part of the address,
+        // and `REMOTE_ADDR` is the address.
+        assert_eq!(parse_addr("fe80::1%eth0"), Some(ip("fe80::1")));
+        assert_eq!(parse_addr("[fe80::1%eth0]:8080"), Some(ip("fe80::1")));
+        assert_eq!(parse_addr("[fe80::1%eth0]"), Some(ip("fe80::1")));
+
+        let config = cfg(&[]);
+        let client = config.resolve("[fe80::1%eth0]:8080", &[]).unwrap();
+        assert_eq!(client.remote_addr(), "fe80::1");
+    }
+
+    #[test]
+    fn the_app_is_told_the_address_and_never_the_port() {
+        // CGI and PEP 3333: `REMOTE_ADDR` is the address, and a peer's
+        // `ip:port` — whichever form it arrived in — is reported as the address
+        // alone. The port the app sees is `REMOTE_PORT`, which the view takes
+        // from `peer_addr`.
+        let config = cfg(&["127.0.0.1", "10.0.0.0/8"]);
+        for (peer, expected) in [
+            ("203.0.113.7:51000", "203.0.113.7"),
+            ("[2001:db8::1]:51000", "2001:db8::1"),
+            ("[::ffff:203.0.113.7]:51000", "203.0.113.7"),
+            ("127.0.0.1:51000", "127.0.0.1"),
+        ] {
+            let client = config.resolve(peer, &[]).unwrap();
+            assert_eq!(client.remote_addr(), expected, "{peer}");
+            assert_eq!(
+                client.remote_addr(),
+                client.ip().to_string(),
+                "`REMOTE_ADDR` is the resolved address, and nothing else"
+            );
+        }
     }
 
     #[test]

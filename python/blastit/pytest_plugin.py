@@ -130,7 +130,19 @@ Two things it needs, because blastit is a sandbox and not a thread:
   without those privileges at all.
 * the **WSGI callable** to serve: ``WSGI_APPLICATION`` in the Django settings,
   or ``--blastit-live-app module:attribute``. Without either, ``myproject.wsgi:
-  application`` is guessed from ``DJANGO_SETTINGS_MODULE``.
+  application`` is guessed from ``DJANGO_SETTINGS_MODULE``. Django's setting is
+  a *dotted* path (``myshop.wsgi.application``), and it is converted to the
+  ``module:attribute`` spelling ``BLASTIT_APP`` takes — as is anything passed to
+  ``--blastit-live-app`` that names a callable that way.
+
+The server runs in the project's **root**: the directory ``DJANGO_SETTINGS_MODULE``
+is importable from, which is one directory per dotted component above the settings
+module's own file. That is both what makes a packaged settings module
+(``myshop/settings.py``) importable and what makes a project that is not installed
+serve itself at all, since blastit puts the working directory it was started in
+first on ``sys.path`` (§5.3). ``--blastit-manifest`` is read from the directory
+pytest was invoked in, so a relative path is the file the person who typed the
+command was looking at rather than one the server happens to sit next to.
 
 What the log cannot say is as important as what it says. A `sql.denied` event
 carries the route, the proxy and the *normalised* statement — not the request
@@ -156,7 +168,9 @@ Options
 ``--blastit-manifest PATH``
     The ``blastit.toml`` to diff against. Without it (and without the
     ``blastit_manifest`` ini option) the plugin does nothing at all: nothing is
-    patched, nothing is written, no test sees a difference.
+    patched, nothing is written, no test sees a difference. A relative path is
+    read from the directory pytest was invoked in, not from the one a live
+    server runs in.
 
 ``--blastit-report PATH``
     Where to write the JSON report. Default ``blastit-report.json``, relative to
@@ -657,6 +671,11 @@ _SESSION: _Session | None = None
 def _manifest_path(config: pytest.Config) -> Path:
     """The manifest to use: `--blastit-manifest`, or the ini option.
 
+    A relative path is resolved against the directory pytest was **invoked** in,
+    which is the directory the person who typed the command meant it in — not
+    the one a live server runs in, which is the project's (a `blastit.toml` in
+    the project would be a different file, or none at all).
+
     Raises `pytest.UsageError` when the configured file is not there, because
     the alternative is a report that silently diffs against nothing.
     """
@@ -664,6 +683,8 @@ def _manifest_path(config: pytest.Config) -> Path:
     from_ini = config.getini("blastit_manifest")
     raw = from_option or from_ini
     path = Path(str(raw))
+    if not path.is_absolute():
+        path = Path(config.invocation_params.dir) / path
     if not path.is_file():
         raise pytest.UsageError(
             f"blastit: the manifest {str(path)!r} is not a file (from "
@@ -1465,6 +1486,25 @@ def _live_server_prefix() -> list[str]:
     )
 
 
+def _colon_spec(spec: str) -> str:
+    """`module:attribute` for a WSGI callable, from either spelling.
+
+    Django defines `WSGI_APPLICATION` as a *dotted* path —
+    `myshop.wsgi.application`, which is what `django-admin startproject` writes —
+    while `BLASTIT_APP` takes `module:attribute`, the spelling gunicorn and
+    `importlib` use. The last dot splits the module from the attribute, which is
+    the only reading of a dotted path that names exactly one callable; anything
+    already carrying a colon is returned unchanged, so `--blastit-live-app
+    myshop.wsgi:application` and this conversion agree.
+    """
+    if ":" in spec:
+        return spec
+    module, dot, attribute = spec.rpartition(".")
+    if not dot:
+        return spec
+    return f"{module}:{attribute}"
+
+
 def _live_app_spec(config: pytest.Config) -> str:
     """The WSGI callable the live server should serve.
 
@@ -1472,10 +1512,15 @@ def _live_app_spec(config: pytest.Config) -> str:
     the layout `django-admin startproject` writes, where the settings module
     `myproject.settings` comes with `myproject.wsgi:application`. Empty when
     none of them says anything, which the fixture turns into a skip.
+
+    Whatever a project declares is converted to `module:attribute`
+    ([`_colon_spec`]): a Django project says `WSGI_APPLICATION =
+    "myshop.wsgi.application"`, and passing that to `BLASTIT_APP` unchanged is a
+    boot failure rather than a mystery a project has to solve.
     """
     from_option = config.getoption("blastit_live_app")
     if from_option:
-        return str(from_option)
+        return _colon_spec(str(from_option))
     try:
         from django.conf import settings
 
@@ -1486,27 +1531,42 @@ def _live_app_spec(config: pytest.Config) -> str:
     except Exception:  # noqa: BLE001 - no Django, or Django without settings
         return ""
     if declared:
-        return str(declared)
+        return _colon_spec(str(declared))
     module = os.environ.get("DJANGO_SETTINGS_MODULE", "")
     if "." in module:
         return f"{module.rsplit('.', 1)[0]}.wsgi:application"
     return ""
 
 
-def _project_directory() -> Path:
-    """The directory a live server should run in, so the app is importable.
+def _project_directory(config: pytest.Config) -> Path:
+    """The directory a live server runs in, so the application is importable.
 
-    A wheel's stage 1 gets the console script's `sys.path` back (`-I` drops it),
-    and that path holds the working directory — so starting the server where the
-    settings module lives is what puts `wsgi` on it, exactly as
-    `manage.py runserver` does.
+    That is the **project root**: the directory `DJANGO_SETTINGS_MODULE` is
+    importable from, which is one directory per dotted component above the
+    settings module's own file. `django-admin startproject myshop .` writes
+    `myshop/settings.py` with `DJANGO_SETTINGS_MODULE = "myshop.settings"`, and
+    the server has to run one directory above `myshop/` — where the settings
+    module's *directory* would leave `myshop` unimportable
+    (`ModuleNotFoundError: No module named 'myshop'`).
+
+    The working directory is what blastit puts first on `sys.path` (§5.3), so
+    this is also what makes a project that is not installed importable at all.
+    pytest's rootdir is the fallback when the settings module says nothing: the
+    directory the suite runs in, since the one pytest was invoked in may be
+    anywhere.
     """
     module = os.environ.get("DJANGO_SETTINGS_MODULE", "")
     imported = sys.modules.get(module) if module else None
     path = getattr(imported, "__file__", None)
     if path:
-        return Path(path).resolve().parent
-    return Path.cwd()
+        directory = Path(path).resolve().parent
+        # `myshop.settings` is `<root>/myshop/settings.py`: the file's parent is
+        # the innermost package, so one directory comes off per component above
+        # the module itself.
+        for _ in range(max(len(module.split(".")) - 1, 0)):
+            directory = directory.parent
+        return directory
+    return Path(config.rootdir)
 
 
 def _test_database_url(alias: str = "default") -> str:
@@ -1552,6 +1612,11 @@ def _live_server_environment(
     environment would only hand the app variables it will not have in
     production. What it needs is the WSGI callable, the manifest, the port, the
     settings module and the proxy's own input variable.
+
+    There is no `PYTHONPATH`, on purpose: the server runs in the project's own
+    directory, and blastit puts that directory first on `sys.path` (§5.3), which
+    is what gunicorn, uwsgi and granian do — so a suite tests the project the way
+    a deployment serves it, instead of helping the server find its own code.
     """
     environment = {
         "BLASTIT_APP": app_spec,
@@ -1559,7 +1624,6 @@ def _live_server_environment(
         "BLASTIT_LOG_FORMAT": "json",
         "BLASTIT_HEALTH_PATH": HEALTH_PATH,
         "PORT": str(port),
-        "PYTHONPATH": str(_project_directory()),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     settings_module = os.environ.get("DJANGO_SETTINGS_MODULE")
@@ -1912,10 +1976,11 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     # project is served where it is when they can, and as a copy in a directory
     # this fixture makes and removes when they cannot. Nothing outside the
     # project is ever loosened, and the project's modes are never touched.
-    project, temporary = _serveable_project(_project_directory())
+    root = _project_directory(request.config)
+    project, temporary = _serveable_project(root)
     manifest = session.manifest_path
-    if temporary is not None and manifest.is_relative_to(_project_directory()):
-        manifest = project / manifest.relative_to(_project_directory())
+    if temporary is not None and manifest.is_relative_to(root):
+        manifest = project / manifest.relative_to(root)
     live = _start_live_server(
         prefix, request.config, project, manifest, tmp_path / "blastit-live.log"
     )

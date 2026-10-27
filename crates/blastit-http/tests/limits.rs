@@ -155,10 +155,9 @@ async fn connections_over_the_cap_are_answered_with_503() {
     assert_eq!(rejections.len(), 1);
     assert_eq!(rejections[0].1, 503);
     assert_eq!(rejections[0].2, "too_many_connections");
-    assert!(
-        rejections[0].0.starts_with("127.0.0.1:"),
-        "the socket peer is named: {}",
-        rejections[0].0
+    assert_eq!(
+        rejections[0].0, "127.0.0.1",
+        "the socket peer's address is named, and not its port"
     );
 
     // The first connection is unaffected, which is the point of answering
@@ -209,11 +208,7 @@ async fn a_body_that_takes_too_long_is_408_and_cancelled() {
     assert_eq!(scheduler.until_cancelled().await.0, id);
     assert_eq!(
         rig.events.rejections(),
-        [(
-            "203.0.113.7:54321".to_string(),
-            408,
-            "body_timeout".to_string()
-        )]
+        [("203.0.113.7".to_string(), 408, "body_timeout".to_string())]
     );
 }
 

@@ -26,6 +26,10 @@ from blastit import pytest_plugin as plugin
 
 HERE = Path(__file__).parent
 PROJECT = HERE / "live_project"
+#: The same thing in the layout `django-admin startproject myshop .` writes:
+#: packaged settings, a dotted `WSGI_APPLICATION`, and a project that is not
+#: installed.
+PACKAGED = HERE / "packaged_project"
 
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("BLASTIT_TEST_PG_URL")
 
@@ -88,6 +92,14 @@ def project(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return target
 
 
+@pytest.fixture(scope="session")
+def packaged_project(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A pristine copy of the project `startproject` would have written."""
+    target = tmp_path_factory.mktemp("blastit-packaged") / "packaged_project"
+    shutil.copytree(PACKAGED, target, ignore=shutil.ignore_patterns("__pycache__"))
+    return target
+
+
 def run(
     project: Path,
     *args: str,
@@ -115,6 +127,32 @@ def run(
         check=False,
     )
     return Outcome(completed, target / report)
+
+
+def test_a_packaged_settings_module_is_served(
+    privileges: None, packaged_project: Path, tmp_path: Path
+) -> None:
+    """`django-admin startproject myshop .`, served through the live server (D3c).
+
+    Three things about that layout used to stop a live server from starting, and
+    this is the one test that walks over all three at once:
+
+    * `WSGI_APPLICATION = "myshop.wsgi.application"` is a *dotted* path, and
+      `BLASTIT_APP` takes `module:attribute`;
+    * `myshop` is importable only from the directory that holds the package, so
+      the server has to run in the project root rather than next to the settings
+      module;
+    * the project is not installed, and nothing here sets `PYTHONPATH`: the
+      working directory blastit was started in is what `sys.path` holds (§5.3).
+
+    The manifest is passed the way a person types it — a relative path — which
+    only works if the plugin resolves it where it was invoked.
+    """
+    outcome = run(packaged_project, "--blastit-manifest", "blastit.toml", tmp_path=tmp_path)
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+    assert "1 passed" in outcome.stdout, outcome.stdout
+    assert outcome.report["totals"]["requests"] == 1
+    assert outcome.missing_sql("packaged") == [], "the manifest grants what the view ran"
 
 
 def test_a_live_server_is_served_by_blastit(
