@@ -104,9 +104,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
-      # The runner image ships its tool cache world-writable; blastit refuses an
+      # The runner image ships /opt and its tool cache world-writable; blastit refuses an
       # interpreter a view uid could plant a module in, as it should.
-      - run: sudo chmod -R go-w /opt/hostedtoolcache
+      - run: sudo chmod go-w /opt && sudo chmod -R go-w /opt/hostedtoolcache
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # init must be root (PID 1 in the container); the smoke tests start the real binary.
@@ -205,9 +205,9 @@ jobs:
         with:
           python-version: "3.14"
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
-      # The runner image ships its tool cache world-writable; blastit refuses an
+      # The runner image ships /opt and its tool cache world-writable; blastit refuses an
       # interpreter a view uid could plant a module in, as it should.
-      - run: sudo chmod -R go-w /opt/hostedtoolcache
+      - run: sudo chmod go-w /opt && sudo chmod -R go-w /opt/hostedtoolcache
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the wheel
