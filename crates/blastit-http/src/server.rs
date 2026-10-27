@@ -72,6 +72,11 @@ impl Acceptor for TcpAcceptor {
         let listener = &mut self.listener;
         async move {
             let (stream, peer) = listener.accept().await?;
+            // The response head and its body are written as separate TCP writes;
+            // with Nagle on, a small body waits for the client's delayed ACK — a
+            // fixed ~40 ms on every response (measured from a packet capture).
+            // Turn it off on the accepted socket.
+            stream.set_nodelay(true)?;
             Ok((stream, peer.to_string()))
         }
     }
@@ -360,6 +365,31 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let acceptor = TcpAcceptor::new(listener);
             assert_ne!(acceptor.local_addr().unwrap().port(), 0);
+        });
+    }
+
+    #[test]
+    fn the_tcp_acceptor_turns_nagle_off() {
+        // A response's head and its body are two separate TCP writes. With Nagle
+        // on, a small body waits for the client's delayed ACK — a fixed ~40 ms on
+        // every response — so an accepted socket must not have it on.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            // `connect` completes from the listen backlog, before `accept`.
+            let client = TcpStream::connect(addr).await.unwrap();
+            let mut acceptor = TcpAcceptor::new(listener);
+            let (server, _peer) = acceptor.accept().await.unwrap();
+            assert!(
+                server.nodelay().unwrap(),
+                "an accepted socket must not have Nagle on: a small response body \
+                 would wait for the client's delayed ACK"
+            );
+            drop(client);
         });
     }
 }
