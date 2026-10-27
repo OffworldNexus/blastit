@@ -10,7 +10,7 @@
 use std::io;
 
 use blastit_events::{Component, Event, EventKind, HttpRejected, RejectReason};
-use blastit_frame::{Frame, ReqHead};
+use blastit_frame::{Frame, INITIAL_WINDOW, ReqHead};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 
@@ -25,13 +25,19 @@ use crate::response::{self, Framing};
 /// Most bytes read from the client in one go.
 const READ_CHUNK: usize = 16 * 1024;
 
-/// Response-body bytes written before a `WINDOW` grant is batched up.
+/// Response-body credit, in bytes, at or below which the connection grants the
+/// view what it has written.
 ///
-/// Grants are what keep a view from running out of credit, so they are sent as
-/// soon as this much has been written — and once more whenever the response
-/// goes quiet, because a view that is *waiting* for credit would otherwise wait
-/// for the next byte to arrive, which is the byte it is not allowed to send.
-const WINDOW_GRANT: u64 = 64 * 1024;
+/// A `WINDOW` is a whole frame in each direction and a wakeup at each end, so
+/// the connection lets a view's credit run down toward this mark before topping
+/// it back up, rather than returning every byte the moment it is written: a
+/// response whose body stays far below it never costs a `WINDOW` at all. It is
+/// the same 64 KiB batch as before — [`INITIAL_WINDOW`] is measured in orders
+/// above it — which leaves the view ~960 KiB of batching between grants and,
+/// at the mark itself, 64 KiB of credit: far more than the round trip over the
+/// local socketpair that separates the two ends, so a grant that is still in
+/// flight cannot leave the view waiting for it.
+const WINDOW_LOW_WATER: u64 = 64 * 1024;
 
 /// Consumed bytes below this mark are not worth moving to the front of the
 /// buffer; above it, the buffer is compacted once the read cursor is past
@@ -573,23 +579,35 @@ where
     }
 
     /// Relay the response frames of a request to the client.
+    ///
+    /// Response credit is granted lazily. A view starts each body with
+    /// [`INITIAL_WINDOW`] bytes, and this is the only granter, so the credit a
+    /// view still holds is `INITIAL_WINDOW` minus the body bytes taken off the
+    /// stream and not yet granted back. The grant goes out only once that falls
+    /// to [`WINDOW_LOW_WATER`], and it returns everything owed, restoring the
+    /// view to a full window. Checking the mark *before* waiting for the next
+    /// frame is what keeps a view that has spent its credit from deadlocking:
+    /// such a view has nothing left to send, so no frame will ever arrive to
+    /// trigger the grant it is blocked on.
     async fn relay(
         &mut self,
         stream: &mut Stream,
         request: &RequestHead,
     ) -> Result<Relay, HttpError> {
         let mut resp = Resp::new();
-        // Response-body bytes the client has taken, not yet turned into a
-        // `WINDOW` back to the scheduler.
-        let mut grant: u64 = 0;
+        // Body bytes taken off the stream, written or knowingly dropped, that
+        // have not been granted back yet. The view's remaining credit is
+        // `INITIAL_WINDOW` minus this.
+        let mut owed: u64 = 0;
         loop {
-            // Return credit in batches, and always before waiting: a view that
-            // blocked on credit has nothing left to send, so waiting for the
-            // next frame here would wait for the grant itself.
-            let bytes = grant.min(u64::from(u32::MAX)) as u32;
-            if bytes > 0 && (grant >= WINDOW_GRANT || stream.queued_bytes() == 0) {
+            // Grant only when the view is running low, and always before
+            // waiting: a small response never reaches the mark, so it never
+            // costs a `WINDOW`, and a view that has run dry is topped back up
+            // rather than left waiting for a frame it cannot send.
+            if owed > 0 && u64::from(INITIAL_WINDOW).saturating_sub(owed) <= WINDOW_LOW_WATER {
+                let bytes = owed.min(u64::from(u32::MAX)) as u32;
                 let _ = stream.send_window(bytes);
-                grant -= u64::from(bytes);
+                owed -= u64::from(bytes);
             }
             let Some(frame) = stream.recv().await? else {
                 // No answer can arrive any more.
@@ -634,7 +652,7 @@ where
                     // Credit is owed for every body byte the connection has
                     // dealt with, written or knowingly dropped: the view may
                     // send that much again.
-                    grant = grant.saturating_add(chunk.len() as u64);
+                    owed = owed.saturating_add(chunk.len() as u64);
                 }
                 Frame::RespEnd => {
                     if !resp.head_written {
