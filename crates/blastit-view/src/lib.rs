@@ -841,10 +841,17 @@ struct SlotGuard<'a> {
 
 impl SlotGuard<'_> {
     /// Report how the request ended and drop out of the registry.
+    ///
+    /// The registry entry goes first. `DONE` is what tells the scheduler the
+    /// worker's slot is free, and a free slot is handed to the next request
+    /// *immediately* — under the same request id, because the scheduler reuses
+    /// them. An entry still in the table when that `REQ_HEAD` arrives makes a
+    /// fresh request look like a second one on a live stream, and that is a
+    /// protocol error, which ends the whole view.
     fn finish(mut self, outcome: DoneOutcome) {
-        let _ = self.writer.write_frame(&Frame::Done { outcome }, self.id);
-        self.done = true;
         lock(self.registry).live.remove(&self.id);
+        self.done = true;
+        let _ = self.writer.write_frame(&Frame::Done { outcome }, self.id);
     }
 }
 
@@ -855,15 +862,16 @@ impl Drop for SlotGuard<'_> {
         }
         // The thread is unwinding: the application never reported an outcome,
         // and the scheduler would wait for a slot forever, so say the worst and
-        // let the scheduler recycle the process.
+        // let the scheduler recycle the process. The registry entry goes first
+        // here too, and for the same reason as in `finish`.
+        lock(self.registry).live.remove(&self.id);
+        self.state.cancel();
         let _ = self.writer.write_frame(
             &Frame::Done {
                 outcome: DoneOutcome::Errored,
             },
             self.id,
         );
-        self.state.cancel();
-        lock(self.registry).live.remove(&self.id);
     }
 }
 
