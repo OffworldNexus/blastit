@@ -328,17 +328,37 @@ impl Stream {
 
     /// Send `REQ_HEAD`, which starts the request.
     pub async fn send_head(&mut self, head: ReqHead) -> Result<(), HttpError> {
-        self.send(Frame::ReqHead(head)).await
+        self.send_frame(Frame::ReqHead(head)).await
     }
 
     /// Send a `REQ_BODY` frame.
     pub async fn send_body(&mut self, body: Vec<u8>) -> Result<(), HttpError> {
-        self.send(Frame::ReqBody(body)).await
+        self.send_frame(Frame::ReqBody(body)).await
     }
 
     /// Send `REQ_END`: the request body is complete.
     pub async fn send_end(&mut self) -> Result<(), HttpError> {
-        self.send(Frame::ReqEnd).await
+        self.send_frame(Frame::ReqEnd).await
+    }
+
+    /// Send one already-built frame, for a caller that has to measure it before
+    /// sending it.
+    ///
+    /// A connection sizes a request head with
+    /// [`Limits::encoded_len`](blastit_frame::Limits::encoded_len) before it
+    /// knows whether the frame fits; going through [`Stream::send_head`] then
+    /// would mean rebuilding the frame from a clone. Handing over the frame the
+    /// connection already holds keeps the head to the one conversion it needs
+    /// and leaves the writer to encode it exactly once.
+    pub async fn send_frame(&self, frame: Frame) -> Result<(), HttpError> {
+        if !self.shared.is_alive() {
+            return Err(HttpError::ChannelClosed);
+        }
+        self.shared
+            .out
+            .send((self.id, frame))
+            .await
+            .map_err(|_| HttpError::ChannelClosed)
     }
 
     /// Send `CANCEL`: the client went away or the response was given up on.
@@ -484,17 +504,6 @@ impl Stream {
                 Err(_) => std::future::pending().await,
             }
         }
-    }
-
-    async fn send(&self, frame: Frame) -> Result<(), HttpError> {
-        if !self.shared.is_alive() {
-            return Err(HttpError::ChannelClosed);
-        }
-        self.shared
-            .out
-            .send((self.id, frame))
-            .await
-            .map_err(|_| HttpError::ChannelClosed)
     }
 }
 

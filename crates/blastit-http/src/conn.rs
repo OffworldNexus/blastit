@@ -314,27 +314,23 @@ where
             peer_addr: head.peer_addr.clone(),
         };
         // A head that does not fit one frame cannot be forwarded at all.
-        // Checking here, rather than letting the writer task discover it, keeps
-        // one oversized request from looking like a dead channel.
-        self.scratch.clear();
-        let fits = self
+        // Measuring it here, rather than letting the writer task discover it,
+        // keeps one oversized request from looking like a dead channel — and
+        // measuring it with `encoded_len` rather than by encoding it into the
+        // scratch buffer means the head is never copied just to be sized.
+        let frame = Frame::ReqHead(request);
+        if self
             .cfg
             .frame_limits
-            .encode(
-                &Frame::ReqHead(request.clone()),
-                stream.id(),
-                &mut self.scratch,
-            )
-            .is_ok();
-        // The probe borrowed the body buffer; hand it back empty.
-        self.scratch.clear();
-        if !fits {
+            .encoded_len(&frame, stream.id())
+            .is_err()
+        {
             self.refuse(&head.remote_addr.clone(), 431, RejectReason::HeaderTooLarge)
                 .await;
             return Ok(false);
         }
 
-        match stream.send_head(request).await {
+        match stream.send_frame(frame).await {
             Ok(()) => {}
             // The scheduler is gone: answer the one request that is in hand,
             // and let the accept loop report the channel as fatal.
