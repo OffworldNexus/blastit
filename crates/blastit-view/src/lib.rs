@@ -16,28 +16,31 @@
 //! READY ──▶ [ I/O thread: read frames, decode, dispatch ]   (GIL released)
 //!              │ REQ_HEAD
 //!              ▼
-//!           std::thread ──▶ Python::attach ──▶ environ ──▶ app(environ, start_response)
+//!           worker thread ──▶ Python::attach (once) ──▶ environ ──▶ app(environ, start_response)
 //!              │                                            │
 //!              │                             RESP_HEAD ◀────┤ lazily, on the first
 //!              │                             RESP_BODY ◀────┤ non-empty chunk
 //!              │                             RESP_END/ABORT ◀┤ or at the end
 //!              ▼                                            ▼
-//!           DONE (after close(), with the GIL released)
+//!           DONE (after close(), with the GIL released) ──▶ park (GIL released)
 //! ```
 //!
 //! * [`serve`] takes a [`Python`] token and detaches for the whole of its work
 //!   (`Python::detach`), because its caller has the GIL: the I/O loop must not
 //!   hold it, or the request threads it starts could never attach.
 //! * The calling thread is the I/O thread. It reads frames until the channel's
-//!   far end closes, and then waits for the request threads it started (§2.5's
-//!   "one OS thread per request": threads, not a pool, because the application
-//!   is not written for cooperative scheduling). It never waits for a stream:
-//!   every per-stream buffer is bounded by a credit window instead (§3.1's flow
-//!   control).
-//! * Every `REQ_HEAD` starts a thread that attaches to the interpreter, builds
-//!   a PEP 3333 `environ`, calls the application, streams the response and runs
-//!   the iterable's `close()`. `DONE` is sent after that, exactly once per
-//!   `REQ_HEAD`, with the GIL released again — it is what releases the
+//!   far end closes, and then waits for the workers still serving a request
+//!   (§2.5). It never waits for a stream: every per-stream buffer is bounded by
+//!   a credit window instead (§3.1's flow control).
+//! * Every `REQ_HEAD` is handed to a **worker**, one OS thread that attaches to
+//!   the interpreter once and then serves requests one after another. A worker
+//!   parks — with the GIL released — while there is nothing to do, and is
+//!   started only when no parked worker can take the request, so the stack
+//!   grows with demand instead of holding `max_threads` threads up front. Each
+//!   request still gets its own `wsgi.input` and its own response: a worker
+//!   builds a PEP 3333 `environ`, calls the application, streams the response
+//!   and runs the iterable's `close()`. `DONE` is sent after that, exactly once
+//!   per `REQ_HEAD`, with the GIL released again — it is what releases the
 //!   scheduler's worker slot, and it must not wait for Python.
 //! * The request thread is the only place that can measure what a request
 //!   cost, so it does (D5): the wall time of `serve_request` for that request —
@@ -82,9 +85,28 @@
 //! * **`max_threads` is a safety net.** A view that is at its limit answers a
 //!   new `REQ_HEAD` with `503` + `RESP_END` + `DONE` from the I/O thread,
 //!   without starting anything. The scheduler's budgets should never let this
-//!   happen.
-//! * **A request thread that panics** still releases its slot: a drop guard
-//!   removes it from the registry and sends a best-effort `DONE { Errored }`.
+//!   happen, and reuse must not weaken it: the limit counts *live* requests,
+//!   not worker threads, so a parked worker cannot turn a `503` into a wait.
+//! * **A worker that panics** still releases its slot: a drop guard removes it
+//!   from the registry and sends a best-effort `DONE { Errored }`, and the
+//!   worker retires instead of serving another request on a thread that
+//!   unwound.
+//! * **A worker's Python thread state outlives one request.** The worker
+//!   attaches once and stays attached, so `threading.local` — and anything else
+//!   an application keeps per thread — persists from one request to the next.
+//!   That is what every threaded WSGI server does; it is the one user-visible
+//!   consequence of reuse.
+//!
+//! # Workers and the GIL
+//!
+//! A worker attaches to the interpreter once, when its thread starts, and keeps
+//! that attachment for as long as it lives, so the cost of a thread state is
+//! paid once per worker and not once per request. It **releases the GIL**
+//! (`Python::detach`) for every moment it is parked: a parked worker that held
+//! the GIL would deadlock the whole process, because the I/O thread and every
+//! other worker would wait on it. All of this goes through pyo3's public
+//! [`Python::attach`]; nothing here initialises or finalises the interpreter,
+//! which is inherited from the fork (§4, §9.3).
 //!
 //! # Errors
 //!
@@ -113,12 +135,14 @@ mod response;
 mod sync;
 mod wire;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Read};
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use blastit_frame::{Decoder, DoneOutcome, Frame, HEADER_LEN, Limits, ReqHead, RespHead, TypeCode};
 use pyo3::prelude::*;
@@ -134,6 +158,23 @@ use crate::wire::Writer;
 /// How much of the channel is read at once. One frame's worth or more, so a
 /// full frame usually arrives in one syscall.
 const READ_SIZE: usize = 64 * 1024;
+
+/// How long a parked worker waits for another request before retiring.
+///
+/// Long enough that a view under steady traffic keeps its threads across the
+/// gaps between requests, short enough that a view which has gone quiet gives
+/// its stacks back. This is the "keep a small stack, not a whole pool" half of
+/// §1's memory-frugal goal: a view idle for the keep-alive holds no worker at
+/// all.
+const IDLE_KEEPALIVE: Duration = Duration::from_secs(30);
+
+/// The most workers that stay parked between requests.
+///
+/// A view keeps a few stacks warm — that is the point of reuse — but not as
+/// many as its concurrency once reached: a burst of a hundred requests would
+/// otherwise leave a hundred stacks behind. Workers beyond this retire as soon
+/// as their request is done rather than park.
+const IDLE_POOL_MAX: usize = 8;
 
 /// Serve one view process on `chan` until the scheduler's end closes.
 ///
@@ -201,23 +242,36 @@ fn serve_detached(
     writer.write_frame(&Frame::Ready, 0)?;
 
     let mut view = View {
-        writer,
-        ctx: Arc::new(AppContext {
-            app,
-            route_name: cfg.route_name,
-            script_name: cfg.script_name,
-            clock,
-        }),
-        registry: Arc::new(Mutex::new(Registry {
-            live: HashMap::new(),
-        })),
-        threads: Vec::new(),
+        pool: Pool::new(
+            writer,
+            Arc::new(Mutex::new(Registry {
+                live: HashMap::new(),
+            })),
+            Arc::new(AppContext {
+                app,
+                route_name: cfg.route_name,
+                script_name: cfg.script_name,
+                clock,
+            }),
+        ),
         max_threads: cfg.max_threads,
     };
 
     let result = view.read_requests(&mut chan, limits);
-    view.finish();
+    view.pool.finish();
     result
+}
+
+/// One request waiting for a worker, or already being served by one.
+struct Job {
+    /// The request's id on `view.chan`.
+    id: u32,
+    /// The head the scheduler sent.
+    head: ReqHead,
+    /// The far end of the request's `wsgi.input`.
+    body: Receiver<BodyMsg>,
+    /// What this request shares with the I/O thread.
+    state: Arc<RequestState>,
 }
 
 /// One live request's handles, as the I/O thread knows them.
@@ -233,12 +287,77 @@ struct Registry {
     live: HashMap<u32, Live>,
 }
 
+/// The hand-off between the I/O thread and the parked workers.
+struct Park {
+    /// The jobs waiting for a worker, and the workers waiting for a job.
+    inner: Mutex<PoolInner>,
+    /// Wakes a parked worker when a job arrives, or when the view ends.
+    wake: Condvar,
+}
+
+/// What the I/O thread and the parked workers share.
+struct PoolInner {
+    /// Jobs waiting for a worker. A job usually skips this queue — it is handed
+    /// straight to a parked worker — so it is almost always empty.
+    jobs: VecDeque<Job>,
+    /// How many workers are parked right now.
+    idle: usize,
+    /// Set when the channel ends: no worker parks again, and every parked one
+    /// wakes and retires.
+    closing: bool,
+}
+
+impl PoolInner {
+    /// Whether a parked worker is waiting and not already matched to a job.
+    ///
+    /// Each queued job will be taken by a parked worker, so the workers still
+    /// available are the parked ones minus the queued jobs. When this is
+    /// `false` every parked worker is already spoken for, and a new request
+    /// must get a thread of its own: queueing it behind one of them would turn
+    /// concurrency into a queue.
+    fn has_free_worker(&self) -> bool {
+        self.jobs.len() < self.idle
+    }
+}
+
+/// The stack of OS threads a view reuses to serve requests (§2.5).
+///
+/// A worker attaches to the interpreter once and then serves requests one after
+/// another: taking a job when one is waiting, parking as an idle worker when
+/// none is, and retiring after [`IDLE_KEEPALIVE`]. Threads are started only
+/// when a request arrives and no parked worker can take it, so a quiet view
+/// holds no stack and demand is what grows the stack — never `max_threads`
+/// threads allocated up front. At most [`IDLE_POOL_MAX`] workers stay parked:
+/// a view between requests keeps a few stacks warm and lets the rest go.
+///
+/// Why reuse at all, when the cost of a thread was once considered the price of
+/// "one OS thread per request": starting a thread, attaching it to the
+/// interpreter and tearing its thread state down again costs more than a
+/// trivial request does (§8, D5's profile). The application contract does not
+/// change — still one request at a time on its thread, with its own
+/// `wsgi.input` and its own response — but per-thread state the application
+/// keeps (`threading.local`) now lives as long as the worker does.
+struct Pool {
+    /// The hand-off the workers park on.
+    park: Arc<Park>,
+    /// Every worker this process has started, joined when the channel ends.
+    threads: Vec<JoinHandle<()>>,
+    /// How many workers have been started, for naming their threads.
+    started: u64,
+    /// The channel's single writer, shared with every worker.
+    writer: Arc<Writer>,
+    /// Every request still running.
+    registry: Arc<Mutex<Registry>>,
+    /// The route's process-wide context.
+    ctx: Arc<AppContext>,
+}
+
 /// The state of one view process between `READY` and the channel's end.
 struct View {
-    writer: Arc<Writer>,
-    ctx: Arc<AppContext>,
-    registry: Arc<Mutex<Registry>>,
-    threads: Vec<JoinHandle<()>>,
+    /// The worker stack, and the process-wide handles it shares.
+    pool: Pool,
+    /// The largest number of requests this process serves at once, or `None`
+    /// for no limit.
     max_threads: Option<u32>,
 }
 
@@ -295,7 +414,7 @@ impl View {
                     }
                 }
             }
-            self.reap();
+            self.pool.reap();
         }
         result
     }
@@ -324,7 +443,12 @@ impl View {
         }
     }
 
-    /// Start a request thread for `head`.
+    /// Start a request for `head`, on a parked worker or a new one.
+    ///
+    /// Admission is decided here and nowhere else, so reuse cannot change it: a
+    /// request that arrives with the process already at `max_threads` live
+    /// requests is refused with `503` even if a worker is parked, and a refused
+    /// request never waits for a worker.
     fn start(&mut self, id: u32, head: ReqHead) -> Result<(), ViewError> {
         if id == 0 {
             // A request without a stream could not be answered at all.
@@ -332,12 +456,12 @@ impl View {
                 "REQ_HEAD with id 0: a request needs a stream".to_string(),
             ));
         }
-        self.reap();
+        self.pool.reap();
 
         let state = RequestState::new();
         let (tx, body) = channel();
         {
-            let mut registry = lock(&self.registry);
+            let mut registry = lock(&self.pool.registry);
             if registry.live.contains_key(&id) {
                 return Err(ViewError::Protocol(format!(
                     "REQ_HEAD for request {id}, which is already running"
@@ -358,41 +482,20 @@ impl View {
             );
         }
 
-        let worker = Worker {
+        let job = Job {
             id,
             head,
             body,
-            writer: Arc::clone(&self.writer),
-            state: state.clone(),
-            ctx: Arc::clone(&self.ctx),
+            state,
         };
-        let registry = Arc::clone(&self.registry);
-        let writer = Arc::clone(&self.writer);
-        let spawned = std::thread::Builder::new()
-            .name(format!("blastit-view-req-{id}"))
-            .spawn(move || {
-                // Whatever happens inside — including a panic — the request's
-                // slot is released and the scheduler hears about it once.
-                let guard = SlotGuard {
-                    id,
-                    state: &state,
-                    writer: &writer,
-                    registry: &registry,
-                    done: false,
-                };
-                let outcome = worker.run();
-                guard.finish(outcome);
-            });
-        match spawned {
-            Ok(handle) => {
-                self.threads.push(handle);
-                Ok(())
-            }
-            Err(_) => {
-                lock(&self.registry).live.remove(&id);
-                self.refuse(id, 503, "Service Unavailable")
-            }
+        if self.pool.assign(job).is_err() {
+            // No worker could take the request and a new thread could not be
+            // started: it has not been picked up by anyone, so release its slot
+            // and answer it exactly as the cap does.
+            lock(&self.pool.registry).live.remove(&id);
+            return self.refuse(id, 503, "Service Unavailable");
         }
+        Ok(())
     }
 
     /// Hand a message to the request's `wsgi.input`, spending its credit.
@@ -456,9 +559,9 @@ impl View {
                 b"text/plain; charset=utf-8".to_vec(),
             )],
         };
-        self.writer.write_frame(&Frame::RespHead(head), id)?;
-        self.writer.write_frame(&Frame::RespEnd, id)?;
-        self.writer.write_frame(
+        self.pool.writer.write_frame(&Frame::RespHead(head), id)?;
+        self.pool.writer.write_frame(&Frame::RespEnd, id)?;
+        self.pool.writer.write_frame(
             &Frame::Done {
                 outcome: DoneOutcome::Completed,
             },
@@ -469,17 +572,80 @@ impl View {
 
     /// The message route to a request that is still running.
     fn live(&self, id: u32) -> Option<(Sender<BodyMsg>, Arc<RequestState>)> {
-        lock(&self.registry)
+        lock(&self.pool.registry)
             .live
             .get(&id)
             .map(|live| (live.tx.clone(), Arc::clone(&live.state)))
     }
+}
 
-    /// Join the handles of request threads that have already finished.
+impl Pool {
+    /// A worker stack with nothing in it: workers are started as demand comes.
+    fn new(writer: Arc<Writer>, registry: Arc<Mutex<Registry>>, ctx: Arc<AppContext>) -> Self {
+        Self {
+            park: Arc::new(Park {
+                inner: Mutex::new(PoolInner {
+                    jobs: VecDeque::new(),
+                    idle: 0,
+                    closing: false,
+                }),
+                wake: Condvar::new(),
+            }),
+            threads: Vec::new(),
+            started: 0,
+            writer,
+            registry,
+            ctx,
+        }
+    }
+
+    /// Hand `job` to a parked worker that is not already committed, or start
+    /// one for it.
     ///
-    /// Threads remove their own registry entry, but their `JoinHandle` stays
-    /// here until it is reaped; without this a busy view would hold one handle
-    /// per request it ever served.
+    /// A parked worker is only free if no queued job is already waiting for it,
+    /// which is what `jobs < idle` compares: the count of workers parked minus
+    /// the count of jobs they have already been matched with is the number
+    /// still available. Without that check a second concurrent request would
+    /// queue behind the first on the one parked worker — reuse would quietly
+    /// serialise requests that used to run in parallel.
+    ///
+    /// # Errors
+    ///
+    /// When no worker is free and a new thread could not be started. The job
+    /// has not been picked up by anyone then, so the caller releases the
+    /// request's slot and answers `503`; this never turns into a wait.
+    fn assign(&mut self, job: Job) -> std::io::Result<()> {
+        {
+            let mut inner = lock(&self.park.inner);
+            if inner.has_free_worker() {
+                inner.jobs.push_back(job);
+                self.park.wake.notify_one();
+                return Ok(());
+            }
+        }
+        self.spawn(job)
+    }
+
+    /// Start one worker that serves `first` before it parks.
+    fn spawn(&mut self, first: Job) -> std::io::Result<()> {
+        let park = Arc::clone(&self.park);
+        let writer = Arc::clone(&self.writer);
+        let registry = Arc::clone(&self.registry);
+        let ctx = Arc::clone(&self.ctx);
+        self.started += 1;
+        let handle = std::thread::Builder::new()
+            .name(format!("blastit-view-worker-{}", self.started))
+            .spawn(move || worker_loop(park, writer, registry, ctx, first))?;
+        self.threads.push(handle);
+        Ok(())
+    }
+
+    /// Join the handles of workers that have already retired.
+    ///
+    /// A worker removes its own registry entry and stops parking on its own, but
+    /// its `JoinHandle` stays here until it is reaped; without this a view that
+    /// served a long burst would hold one handle per thread it ever started,
+    /// finished or not.
     fn reap(&mut self) {
         if self.threads.is_empty() {
             return;
@@ -495,15 +661,24 @@ impl View {
         self.threads = live;
     }
 
-    /// Wind the process down after the channel is done with.
+    /// Wind the worker stack down after the channel is done with.
     ///
-    /// The channel is over, so no request's body will grow any further and no
-    /// response credit will ever arrive: every live request is told both, which
-    /// is what unblocks an application waiting for frames, or a request thread
+    /// Closing the pool is what retires the parked workers: they wake from their
+    /// park and stop instead of waiting for a request that cannot come. The
+    /// channel is over, so no request's body will grow any further and no
+    /// response credit will ever arrive either: every live request is told both,
+    /// which is what unblocks an application waiting for frames, or a worker
     /// waiting for a window, so that the join below can finish. A request that
     /// still has credit left finishes its current frames — the scheduler may
-    /// still be reading, it just is not writing.
+    /// still be reading, it just is not writing. The join is what makes
+    /// [`serve`] wait for every request it accepted, exactly once each.
     fn finish(&mut self) {
+        {
+            let mut inner = lock(&self.park.inner);
+            inner.closing = true;
+        }
+        self.park.wake.notify_all();
+
         let live: Vec<(Sender<BodyMsg>, Arc<RequestState>)> = lock(&self.registry)
             .live
             .values()
@@ -517,6 +692,141 @@ impl View {
             let _ = handle.join();
         }
     }
+}
+
+impl Park {
+    /// The next job for the calling worker, or `None` when the view is closing
+    /// or the worker has been idle for longer than [`IDLE_KEEPALIVE`].
+    ///
+    /// This is the one place a worker blocks, and it is called with the GIL
+    /// released; parking here while holding it would deadlock the process. The
+    /// job queue is checked before the idle limit, so a worker that wakes to a
+    /// job takes it even if it was about to retire.
+    fn next_job(&self) -> Option<Job> {
+        let mut inner = lock(&self.inner);
+        loop {
+            if let Some(job) = inner.jobs.pop_front() {
+                return Some(job);
+            }
+            if inner.closing || inner.idle >= IDLE_POOL_MAX {
+                return None;
+            }
+            inner.idle += 1;
+            let (guard, timeout) = self
+                .wake
+                .wait_timeout(inner, IDLE_KEEPALIVE)
+                .unwrap_or_else(PoisonError::into_inner);
+            inner = guard;
+            inner.idle -= 1;
+            if timeout.timed_out() && inner.jobs.is_empty() && !inner.closing {
+                return None;
+            }
+        }
+    }
+}
+
+/// The body of one pooled worker thread.
+///
+/// The interpreter is attached once, here, for the whole life of the worker:
+/// the Python thread state — and with it whatever the application keeps in
+/// `threading.local` — survives from one request to the next, and a thread
+/// state is no longer paid for on every request. The GIL is released
+/// (`Python::detach`) for every moment the worker is parked; a parked worker
+/// that held it would stop both the I/O thread and every other worker.
+///
+/// The attachment is pyo3's, never a second initialisation or finalisation of
+/// the interpreter: the interpreter is inherited from the fork (§4, §9.3).
+fn worker_loop(
+    park: Arc<Park>,
+    writer: Arc<Writer>,
+    registry: Arc<Mutex<Registry>>,
+    ctx: Arc<AppContext>,
+    first: Job,
+) {
+    Python::attach(|py| {
+        let mut next = Some(first);
+        loop {
+            let Some(job) = next else {
+                break;
+            };
+            if serve_one(py, &writer, &registry, &ctx, job) {
+                // The request panicked. The slot guard sent its `DONE` and
+                // freed its slot while unwinding, but a thread that unwound is
+                // not a thread to hand another request to.
+                break;
+            }
+            // Park, with the GIL released, until there is another request or
+            // the view ends.
+            next = py.detach(|| park.next_job());
+        }
+    });
+}
+
+/// Serve one job on this worker, reporting whether the request panicked.
+///
+/// Takes the token the worker already holds: attaching once for the life of the
+/// worker, rather than once per request, is where most of the saving is.
+fn serve_one(
+    py: Python<'_>,
+    writer: &Arc<Writer>,
+    registry: &Arc<Mutex<Registry>>,
+    ctx: &Arc<AppContext>,
+    job: Job,
+) -> bool {
+    let Job {
+        id,
+        head,
+        body,
+        state,
+    } = job;
+    let writer = Arc::clone(writer);
+    let registry = Arc::clone(registry);
+    let ctx = Arc::clone(ctx);
+    let guard_state = Arc::clone(&state);
+    let guard_writer = Arc::clone(&writer);
+    let guard_registry = Arc::clone(&registry);
+    guarded(id, guard_state, guard_writer, guard_registry, move || {
+        let worker = Worker {
+            id,
+            head,
+            body,
+            writer,
+            state,
+            ctx,
+        };
+        worker.run(py)
+    })
+}
+
+/// Run one request under its slot guard, and report whether the request panicked.
+///
+/// The guard is built *inside* the unwind boundary, so a panic anywhere in the
+/// request — including the interpreter — drops it, and its [`Drop`] sends the
+/// one `DONE { Errored }` that frees the scheduler's slot. The caller must
+/// retire the worker when this returns `true`: the slot is released, but the
+/// thread is not handed another request.
+fn guarded<F>(
+    id: u32,
+    state: Arc<RequestState>,
+    writer: Arc<Writer>,
+    registry: Arc<Mutex<Registry>>,
+    body: F,
+) -> bool
+where
+    F: FnOnce() -> DoneOutcome,
+{
+    catch_unwind(AssertUnwindSafe(|| {
+        let guard = SlotGuard {
+            id,
+            state: &state,
+            writer: &writer,
+            registry: &registry,
+            done: false,
+        };
+        let outcome = body();
+        guard.finish(outcome);
+    }))
+    .is_err()
 }
 
 /// Releases a request's slot however its thread ends, panics included.
@@ -685,5 +995,118 @@ mod tests {
             )],
             "exactly one DONE, and no Errored after it"
         );
+    }
+
+    #[test]
+    fn a_panicking_request_releases_its_slot_and_retires_the_worker() {
+        // The pool runs every request under `guarded`, whose guard lives inside
+        // the unwind boundary. A panic must still produce exactly one `DONE`
+        // (the `Errored` the scheduler needs to free the slot), and `guarded`
+        // must report it so the worker retires rather than serve again.
+        let limits = Limits::default();
+        let (ours, peer) = UnixStream::pair().expect("socketpair");
+        let writer = Arc::new(Writer::new(ours, limits));
+        let state = RequestState::new();
+        let registry = registry_with(11, &state);
+
+        let panicked = guarded(
+            11,
+            Arc::clone(&state),
+            Arc::clone(&writer),
+            Arc::clone(&registry),
+            || panic!("the application blew the worker up"),
+        );
+
+        assert!(panicked, "a panic must retire the worker");
+        assert!(
+            lock(&registry).live.is_empty(),
+            "and release the slot all the same"
+        );
+        assert!(state.is_cancelled(), "and wake anything blocked on it");
+        assert_eq!(
+            frames_from(peer, limits),
+            vec![(
+                11,
+                Frame::Done {
+                    outcome: DoneOutcome::Errored
+                }
+            )],
+            "exactly one DONE, and it says Errored"
+        );
+    }
+
+    #[test]
+    fn a_served_request_keeps_the_worker() {
+        // The other half of the panic test: a normal request reports no panic,
+        // so the worker parks and can serve again.
+        let limits = Limits::default();
+        let (ours, peer) = UnixStream::pair().expect("socketpair");
+        let writer = Arc::new(Writer::new(ours, limits));
+        let state = RequestState::new();
+        let registry = registry_with(13, &state);
+
+        let panicked = guarded(
+            13,
+            Arc::clone(&state),
+            Arc::clone(&writer),
+            Arc::clone(&registry),
+            || DoneOutcome::Completed,
+        );
+
+        assert!(!panicked, "a served request keeps its worker");
+        assert!(lock(&registry).live.is_empty());
+        assert_eq!(
+            frames_from(peer, limits),
+            vec![(
+                13,
+                Frame::Done {
+                    outcome: DoneOutcome::Completed
+                }
+            )]
+        );
+    }
+
+    /// A job for a request that does nothing, for the pool's bookkeeping tests.
+    fn queued_job(id: u32) -> Job {
+        let (_tx, body) = channel();
+        Job {
+            id,
+            head: ReqHead {
+                method: b"GET".to_vec(),
+                target: b"/".to_vec(),
+                headers: Vec::new(),
+                remote_addr: "203.0.113.7".to_string(),
+                scheme: blastit_frame::Scheme::Http,
+                server_name: "view.test".to_string(),
+                server_port: 80,
+                peer_addr: "203.0.113.7:51000".to_string(),
+            },
+            body,
+            state: RequestState::new(),
+        }
+    }
+
+    #[test]
+    fn a_parked_worker_committed_to_a_job_is_not_free_for_another() {
+        // The pool only reuses a worker that no queued job is waiting for.
+        // Getting this wrong would serialise two requests onto one thread.
+        let mut inner = PoolInner {
+            jobs: VecDeque::new(),
+            idle: 0,
+            closing: false,
+        };
+        assert!(!inner.has_free_worker(), "no worker at all");
+
+        inner.idle = 1;
+        assert!(inner.has_free_worker(), "one parked worker, nothing queued");
+
+        inner.jobs.push_back(queued_job(1));
+        assert!(
+            !inner.has_free_worker(),
+            "the one parked worker is already spoken for"
+        );
+
+        inner.idle = 2;
+        assert!(inner.has_free_worker(), "a second parked worker is free");
     }
 }
