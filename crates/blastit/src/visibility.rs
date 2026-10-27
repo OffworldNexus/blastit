@@ -19,26 +19,36 @@
 //! * the child that holds the credentials cannot `execve` dbproxy, and dies
 //!   with `Permission denied (os error 13)` — before any of that, with nothing
 //!   in the log saying which directory a deployment has to open;
-//! * a directory on `sys.path` that another uid can *write* lets one route plant
-//!   a module another route imports: the sandbox is the uid, so code that runs
-//!   under a route's own uid is code that route's grants apply to — but which
-//!   route imports it is not the planter's choice to make.
+//! * a path on `sys.path` that another uid can *write* — or a directory *above*
+//!   one, since the uid can `rmdir` the entry and put its own back — lets one
+//!   route plant a module another route imports: the sandbox is the uid, so code
+//!   that runs under a route's own uid is code that route's grants apply to —
+//!   but which route imports it is not the planter's choice to make.
 //!
 //! So the checks *ask the kernel*: [`probe`] forks a child, drops it to the uid
 //! in question and calls `access(2)` on each path, which is the decision the
 //! kernel will make inside a view. Only when a probe cannot run at all (a test
 //! run as an ordinary user, a system without `/proc`) does the module fall back
-//! to reading the mode bits, and the message says which of the two answered.
+//! to reading the mode bits, and the message says which of the two answered. The
+//! child notes each path before it asks, and the parent's deadline — one second,
+//! never blocking — kills it if it never answers: a `sys.path` that hangs is a
+//! boot that stops and names the path (see [`TimedOut`]), not one that sits
+//! there.
 //!
 //! # What is checked
 //!
 //! Every path a view imports *through*: the interpreter's prefixes, the standard
 //! library, `site-packages`, and the directory the application's own module comes
 //! from — read and traversed, [`unreadable`]. A child `execve`s *programs*, so
-//! [`unexecutable`] asks the other question. And every directory blastit itself
-//! adds to `sys.path` must be one no other uid can write, [`writable`]. The first
-//! path that fails is the one the message names, because it is the one an
-//! operator has to change.
+//! [`unexecutable`] asks the other question. And every path on the interpreter's
+//! `sys.path` — its own entries, the working directory, whatever `PYTHONPATH` or
+//! a `.pth` file added, a zip file on the path — must be one no uid blastit drops
+//! to can write, *and* so must every directory above one up to `/`: [`writable`].
+//! A sticky directory above an entry — `/tmp` is the one every deployment has —
+//! is the exception, and only when the entry below it belongs to root or to init,
+//! because the sticky bit stops a uid unlinking or renaming what it does not own.
+//! The first path that fails is the one the message names, because it is the one
+//! an operator has to change.
 
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -47,9 +57,9 @@ use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use blastit_sys::{Fork, pipe};
+use blastit_sys::{Fork, Pid, pipe};
 
 use crate::child::{read_one, wait_readable};
 
@@ -161,8 +171,8 @@ impl Blocker {
 ///
 /// `path` is a directory (or a zip file, which is a file on `sys.path`) that has
 /// to stop being writable; `entry` is the `sys.path` entry it is about, when
-/// that is not `path` itself — an entry that is not there yet and could be
-/// *created* in a writable directory above it.
+/// that is not `path` itself — an entry *below* a writable directory, one that
+/// could be replaced, or created if it is not there yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Writable {
     /// What has to stop being writable.
@@ -189,8 +199,9 @@ impl Writable {
         };
         let what = match &self.entry {
             Some(entry) => format!(
-                "{} (mode {:04o}) is writable by another uid, and {} is on `sys.path` but \
-                 is not there yet: it could be created",
+                "{} (mode {:04o}) is writable by another uid, and {} is on `sys.path` below \
+                 it: that uid could take the entry over — replace it, or create it if it is \
+                 not there yet — and every route would import whatever it left",
                 self.path.display(),
                 self.mode,
                 entry.display(),
@@ -244,8 +255,7 @@ impl DroppedTo {
         }
     }
 }
-
-/// What a probe asks of every path it is given.
+/// What a probe asks of every [`Target`] it is given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Probe {
     /// Read and traverse it: what the interpreter and the application are read
@@ -253,7 +263,8 @@ pub enum Probe {
     Read,
     /// Execute it: what a child `execve`s.
     Execute,
-    /// Write to it: what no path on `sys.path` may allow another uid.
+    /// Write to it: what no path on `sys.path` — and no directory above one —
+    /// may allow another uid.
     Write,
 }
 
@@ -270,38 +281,110 @@ impl Probe {
     /// Whether a *successful* `access(2)` is the answer this probe is looking
     /// for.
     ///
-    /// The read and execute checks ask "can this uid reach it", and a failure
-    /// is the answer that matters. `Write` asks the opposite — "may this uid
-    /// write it" — so the child reports the first path where `access(2)`
+    /// The read and execute checks ask "can this uid reach it", and a failure is
+    /// what they are looking for. `Write` asks the opposite — "may this uid
+    /// write it" — so the child reports the first target where `access(2)`
     /// *succeeds*, and "nothing was reported" means "nothing is writable".
     const fn wants_grant(self) -> bool {
         matches!(self, Self::Write)
     }
+
+    /// Whether the sticky bit is read for this question.
+    ///
+    /// It is only ever an exemption, and only for the *write* question: a
+    /// `/tmp`-style directory stops a uid unlinking or renaming an entry it does
+    /// not own, which is the second way into a `sys.path` entry. For the entry
+    /// itself nothing changes — the sticky bit does not stop a *new* file being
+    /// created — so [`Target::child`] is what it is read for.
+    const fn reads_sticky(self) -> bool {
+        matches!(self, Self::Write)
+    }
 }
 
-/// What one probe found: the path that answered the question, and how far above
-/// it the directory that blocks is.
+/// One thing a probe asks about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    /// The path the child `access(2)`s.
+    path: PathBuf,
+    /// The path *below* this one, whose removal or renaming is the other way a
+    /// dropped-to uid could take the entry over. `None` for the entry itself,
+    /// where writing it — or creating a file inside it — is the way in.
+    child: Option<PathBuf>,
+    /// The `sys.path` entry this is about, when it is not `path` itself. For the
+    /// message: it is the entry a deployment has to protect, and `path` is the
+    /// directory that has to stop being writable.
+    entry: Option<PathBuf>,
+}
+
+/// What a probe found: the target that answered it, and what the kernel and the
+/// filesystem said about the path the answer is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Verdict {
-    /// Index into the list that was probed.
+    /// Index into the targets that were probed.
     pub index: usize,
-    /// How many directories *above* that path the blocker is; `0` is the path
-    /// itself. Only the read and execute questions walk upwards — what may be
-    /// written is written where `sys.path` names it.
+    /// How many directories *above* the answered path the path the refusal is
+    /// about is; `0` means the answered path itself. Only the read and execute
+    /// answers walk upwards.
     pub depth: usize,
+    /// (mode) The permission bits of the path the refusal is about.
+    pub mode: u32,
+    /// The uid that owns it.
+    pub uid: u32,
+    /// Its gid.
+    pub gid: u32,
     /// The errno `access(2)` gave, when it gave one (the write question is
     /// answered by success, which has no errno).
     pub errno: i32,
 }
 
-/// Asks the kernel, as `uid` would, about every path in `paths`.
+/// A check that had to be killed before it answered.
+///
+/// The child that asks the kernel is inside a syscall on [`TimedOut::path`] — a
+/// hung mount, an unreachable network filesystem — and the mode bits would need
+/// a `stat` through the same filesystem, so they are *not* consulted: the boot
+/// refuses instead, and names the path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimedOut {
+    /// The path the child was on when the deadline passed.
+    pub path: PathBuf,
+}
+
+impl TimedOut {
+    /// The sentence an operator reads.
+    pub fn message(&self) -> String {
+        format!(
+            "the visibility check on {} did not answer in {} s: the child blastit asks the \
+             kernel with is inside a syscall on it, and blastit refuses to serve code it \
+             could not check. Look at that path — a hung mount, an unreachable network \
+             filesystem — and at what is above it",
+            self.path.display(),
+            PROBE_TIMEOUT.as_secs_f32(),
+        )
+    }
+}
+
+/// What a probe had to say.
+#[derive(Debug)]
+pub enum Spoken {
+    /// The kernel says every target is fine.
+    Fine,
+    /// The kernel answers about one of them.
+    Found(Verdict),
+    /// The probe could not run at all — no pipe, no fork, or a child that could
+    /// not drop to the uid — so the mode bits are the only answer there is. What
+    /// went wrong is not something a caller can act on: the fallback is the same
+    /// whichever way the kernel went unasked.
+    NoProbe,
+}
+
+/// Asks the kernel, as `uid` would, about every target in `targets`.
 ///
 /// The answer comes from a short-lived child: it `fork`s, drops to `uid` — the
 /// same setgroups/setgid/setuid sequence a view goes through, so the *group*
 /// class and any ACL are the ones a view would meet — and calls `access(2)` on
-/// each path in turn. When a path fails, the child walks its ancestors from the
-/// outermost directory down and reports the first one that does not let `uid`
-/// through, which is the directory an operator has to change first.
+/// each target in turn. It notes each target it starts on, so a child that never
+/// answers can be named, and it reports the mode, owner and group of the path
+/// the answer is about, so the parent never has to `stat` at all.
 ///
 /// `interpreter` says whether CPython is live in this image and the caller holds
 /// the GIL, exactly as [`crate::forking::fork`] does: a wheel install forks under
@@ -310,57 +393,74 @@ pub struct Verdict {
 ///
 /// # Errors
 ///
-/// When the probe could not run: the fork or the pipe failed, the child could
-/// not drop to `uid` (which is what a test run as an ordinary user gets), or the
-/// child did not answer in [`PROBE_TIMEOUT`]. The caller then falls back to
-/// reading the mode bits, which is a guess the kernel does not have to agree
-/// with — and the message says which of the two answered.
+/// [`TimedOut`], when the child did not answer before [`PROBE_TIMEOUT`]: the
+/// caller refuses rather than ask the same hung filesystem for the mode bits. The
+/// child is killed and reaped without blocking; what is left of it, if anything,
+/// is init's own supervisor's to reap.
 pub fn probe(
-    paths: &[PathBuf],
+    targets: &[Target],
     uid: u32,
     ask: Probe,
     interpreter: bool,
-) -> io::Result<Option<Verdict>> {
-    if paths.is_empty() {
-        return Ok(None);
+) -> Result<Spoken, TimedOut> {
+    if targets.is_empty() {
+        return Ok(Spoken::Fine);
     }
-    let (read_end, write_end) = pipe()?;
-    match crate::forking::fork(interpreter)? {
-        Fork::Child => {
+    let (read_end, write_end) = match pipe() {
+        Ok(pair) => pair,
+        Err(_) => return Ok(Spoken::NoProbe),
+    };
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let forked = crate::forking::fork(interpreter);
+    match forked {
+        Ok(Fork::Child) => {
             drop(read_end);
-            // The child speaks in ten bytes and never returns: no unwinding, no
-            // destructors, nothing of the parent's state that a `fork` could
-            // have copied half-written.
-            write_record(write_end.as_raw_fd(), &probe_as(uid, paths, ask));
+            // The child never returns: no unwinding, no destructors, nothing of
+            // the parent's state that a `fork` could have copied half-written.
+            write_answer(write_end.as_raw_fd(), uid, targets, ask);
             // SAFETY: `_exit` is async-signal-safe and never returns.
             unsafe { libc::_exit(0) }
         }
-        Fork::Parent(pid) => {
+        Ok(Fork::Parent(pid)) => {
             drop(write_end);
-            let answer = read_record(read_end.as_raw_fd());
-            // SAFETY: `waitpid` writes one status word into `status`, and the
-            // child is this process's own.
-            unsafe { libc::waitpid(pid.as_raw(), std::ptr::null_mut(), 0) };
+            let answer = read_answer(read_end.as_raw_fd(), targets, deadline);
+            reap(pid, deadline);
             answer
         }
+        Err(_) => Ok(Spoken::NoProbe),
     }
 }
 
-/// The first byte of a record: what the child is reporting.
-const RECORD_AGAIN: u8 = 0;
-const RECORD_NOTHING: u8 = 1;
-const RECORD_BLOCKED: u8 = 2;
+/// The first byte of an answer.
+const ANSWER_FINE: u8 = 0;
+const ANSWER_NOTHING: u8 = 1;
+const ANSWER_FOUND: u8 = 2;
 
-/// Runs in the child: drops to `uid`, then asks `access(2)` about each path.
-fn probe_as(uid: u32, paths: &[PathBuf], ask: Probe) -> [u8; 10] {
+/// The first byte of a "this is the target I am starting on" note.
+const ANSWER_WORKING: u8 = 0xff;
+
+/// The bytes of one answer: kind, index, depth, mode, uid, gid, errno.
+const ANSWER_BYTES: usize = 1 + 4 * 6;
+
+/// Writes the child's answer, noting each target before it is asked about.
+///
+/// The notes are what makes a timeout nameable: they are written *before* the
+/// `access(2)` that may never return, so the parent always knows which path the
+/// child was on.
+fn write_answer(fd: RawFd, uid: u32, targets: &[Target], ask: Probe) {
+    // The uid init runs as, which is one of the owners the sticky bit protects a
+    // child from being replaced by. It has to be read before the drop.
+    let init_uid = rustix::process::geteuid().as_raw();
     if let Err(error) = blastit_sys::drop_privileges(uid) {
-        // The kernel cannot be asked from here at all: the errno is the best
-        // that can be said, and the caller falls back to the mode bits.
+        // The kernel cannot be asked from here at all: the caller falls back to
+        // the mode bits.
         let errno = error.raw_os_error().unwrap_or(libc::EPERM);
-        return record(RECORD_NOTHING, 0, 0, errno);
+        write_bytes(fd, &answer(ANSWER_NOTHING, 0, 0, 0, 0, 0, errno));
+        return;
     }
-    for (index, path) in paths.iter().enumerate() {
-        let Some(name) = cstring(path) else {
+    for (index, target) in targets.iter().enumerate() {
+        write_bytes(fd, &working(index));
+        let Some(name) = cstring(&target.path) else {
             continue;
         };
         // SAFETY: `access` takes a NUL-terminated path and a bitmask of R_OK,
@@ -380,39 +480,117 @@ fn probe_as(uid: u32, paths: &[PathBuf], ask: Probe) -> [u8; 10] {
                 .raw_os_error()
                 .unwrap_or(libc::EACCES)
         };
-        // For the read and execute questions the path itself failed. Name the
+        // For the read and execute questions the target itself failed. Name the
         // first directory above it that does not let `uid` through — from the
         // outermost down, because that is the one an operator has to open first
-        // — and the path itself when every ancestor is passable (the file is
+        // — and the target itself when every ancestor is passable (the file is
         // simply not readable or not executable).
-        let mut depth = 0usize;
-        if !ask.wants_grant() {
-            let ancestors: Vec<PathBuf> = path.ancestors().skip(1).map(Path::to_path_buf).collect();
-            for (at, ancestor) in ancestors.iter().enumerate().rev() {
-                let Some(name) = cstring(ancestor) else {
+        let (depth, blocked) = if ask.wants_grant() {
+            (0usize, target.path.clone())
+        } else {
+            let depth = first_blocking_ancestor(&target.path);
+            let blocked = if depth == 0 {
+                target.path.clone()
+            } else {
+                target
+                    .path
+                    .ancestors()
+                    .nth(depth)
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| target.path.clone())
+            };
+            (depth, blocked)
+        };
+        // What the refusal is about, as the kernel and the filesystem see it. A
+        // directory that is already open to `uid` through its own group is not a
+        // blocker, so this is only read for the path the answer names.
+        let Ok(metadata) = std::fs::metadata(&blocked) else {
+            // Gone between the `access` and the `stat`: nothing to name.
+            continue;
+        };
+        let mode = metadata.permissions().mode();
+        // A sticky directory a uid may write is not a way into the entry below
+        // it: the sticky bit stops that uid unlinking or renaming an entry it
+        // does not own. It *is* one when the child is the uid's own, or when
+        // there is nothing there yet — a file with a fresh name is what a sticky
+        // directory does allow.
+        if ask.reads_sticky() && mode & 0o1000 != 0 {
+            if let Some(child) = &target.child {
+                if sticky_child_is_safe(child, uid, init_uid) {
                     continue;
-                };
-                // SAFETY: as above; an ancestor only has to be traversable.
-                if unsafe { libc::access(name.as_ptr(), libc::X_OK) } != 0 {
-                    depth = at + 1;
-                    break;
                 }
             }
         }
-        return record(RECORD_BLOCKED, index as u32, depth, errno);
+        write_bytes(
+            fd,
+            &answer(
+                ANSWER_FOUND,
+                index,
+                depth,
+                mode & 0o7777,
+                metadata.uid(),
+                metadata.gid(),
+                errno,
+            ),
+        );
+        return;
     }
-    record(RECORD_AGAIN, 0, 0, 0)
+    write_bytes(fd, &answer(ANSWER_FINE, 0, 0, 0, 0, 0, 0));
 }
 
-/// One ten-byte answer: what happened, which path, how far above it the blocker
-/// is, and the errno.
-fn record(kind: u8, index: u32, depth: usize, errno: i32) -> [u8; 10] {
-    let mut out = [kind, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    out[1..5].copy_from_slice(&index.to_le_bytes());
-    // A path deeper than 255 components is not a path this message can name
-    // better than by its leaf, so the depth saturates.
-    out[5] = u8::try_from(depth).unwrap_or(u8::MAX);
-    out[6..10].copy_from_slice(&errno.to_le_bytes());
+/// Whether a sticky directory's child is one a dropped-to uid cannot replace.
+///
+/// The sticky bit stops unlinking or renaming an entry the caller does not own,
+/// so a child owned by root — or by init, which is the uid a deployment's code
+/// usually belongs to — is out of that uid's reach. A child that is not there,
+/// or that belongs to the uid in question, is not.
+fn sticky_child_is_safe(child: &Path, uid: u32, init_uid: u32) -> bool {
+    let Ok(metadata) = std::fs::metadata(child) else {
+        return false;
+    };
+    let owner = metadata.uid();
+    owner != uid && (owner == 0 || owner == init_uid)
+}
+
+/// The first directory above `path` a dropped-to uid could not pass, as a depth.
+///
+/// Runs in the child, after the drop, so the answer is the kernel's.
+fn first_blocking_ancestor(path: &Path) -> usize {
+    let ancestors: Vec<PathBuf> = path.ancestors().skip(1).map(Path::to_path_buf).collect();
+    for (at, ancestor) in ancestors.iter().enumerate().rev() {
+        let Some(name) = cstring(ancestor) else {
+            continue;
+        };
+        // SAFETY: as above; an ancestor only has to be traversable.
+        if unsafe { libc::access(name.as_ptr(), libc::X_OK) } != 0 {
+            return at + 1;
+        }
+    }
+    0
+}
+
+/// One answer: what happened, which target, how far above it, and the facts.
+fn answer(
+    kind: u8,
+    index: usize,
+    depth: usize,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    errno: i32,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ANSWER_BYTES);
+    out.push(kind);
+    for field in [index as u32, depth as u32, mode, uid, gid, errno as u32] {
+        out.extend_from_slice(&field.to_le_bytes());
+    }
+    out
+}
+
+/// The note that says which target the child is starting on.
+fn working(index: usize) -> [u8; 5] {
+    let mut out = [ANSWER_WORKING, 0, 0, 0, 0];
+    out[1..5].copy_from_slice(&(index as u32).to_le_bytes());
     out
 }
 
@@ -420,39 +598,192 @@ fn cstring(path: &Path) -> Option<CString> {
     CString::new(path.as_os_str().as_bytes()).ok()
 }
 
-/// Writes the child's answer, in one `write`.
-fn write_record(fd: RawFd, bytes: &[u8; 10]) {
+/// Writes bytes to the pipe, ignoring a short write: the child says what it can
+/// and `_exit`s, and the parent's deadline bounds the rest.
+fn write_bytes(fd: RawFd, bytes: &[u8]) {
     // SAFETY: `write` takes a descriptor, a buffer and its length.
     unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
 }
 
-/// Reads the child's answer, or `Err` when it did not come.
-fn read_record(fd: RawFd) -> io::Result<Option<Verdict>> {
+/// Reads the child's answer, within `deadline`.
+///
+/// The stream is the notes and then one answer, so a child that never answers
+/// still says which target it was on.
+///
+/// # Errors
+///
+/// [`TimedOut`], naming the target the child was on, when the deadline passed
+/// before the answer did. Nothing here waits past it.
+fn read_answer(fd: RawFd, targets: &[Target], deadline: Instant) -> Result<Spoken, TimedOut> {
     // SAFETY: the descriptor is the read end of a pipe this process made and
     // still owns.
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-    let mut bytes = [0u8; 10];
-    for slot in &mut bytes {
-        if !wait_readable(borrowed, PROBE_TIMEOUT)? {
-            return Err(io::Error::other("the probe did not answer"));
+    let mut working_on = None;
+    let mut header = [0u8; 1];
+    loop {
+        match read_exactly(borrowed, &mut header, deadline) {
+            Ok(Read::Filled) => {}
+            Ok(Read::Timeout) => {
+                return Err(TimedOut {
+                    path: name_of(targets, working_on),
+                });
+            }
+            // The child is gone without answering — it could not drop, or a
+            // signal took it: the mode bits are the only answer there is.
+            Ok(Read::End) | Err(_) => return Ok(Spoken::NoProbe),
         }
-        match read_one(borrowed)? {
+        let kind = header[0];
+        let rest = if kind == ANSWER_WORKING {
+            4
+        } else {
+            ANSWER_BYTES - 1
+        };
+        let mut bytes = vec![0u8; rest];
+        match read_exactly(borrowed, &mut bytes, deadline) {
+            Ok(Read::Filled) => {}
+            Ok(Read::Timeout) => {
+                return Err(TimedOut {
+                    path: name_of(targets, working_on),
+                });
+            }
+            Ok(Read::End) | Err(_) => return Ok(Spoken::NoProbe),
+        }
+        if kind == ANSWER_WORKING {
+            working_on =
+                Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize);
+            continue;
+        }
+        let field = |at: usize| -> u32 {
+            let mut four = [0u8; 4];
+            four.copy_from_slice(&bytes[at * 4..at * 4 + 4]);
+            u32::from_le_bytes(four)
+        };
+        let verdict = Verdict {
+            index: field(0) as usize,
+            depth: field(1) as usize,
+            mode: field(2),
+            uid: field(3),
+            gid: field(4),
+            errno: field(5) as i32,
+        };
+        return match kind {
+            ANSWER_FINE => Ok(Spoken::Fine),
+            ANSWER_FOUND => Ok(Spoken::Found(verdict)),
+            _ => Ok(Spoken::NoProbe),
+        };
+    }
+}
+
+/// The path a timeout is reported against: the target the child was on, or the
+/// first one when it never said.
+fn name_of(targets: &[Target], working_on: Option<usize>) -> PathBuf {
+    let index = working_on.unwrap_or(0);
+    targets
+        .get(index)
+        .or_else(|| targets.first())
+        .map(|target| target.path.clone())
+        .unwrap_or_default()
+}
+
+/// How one `read_exactly` ended.
+enum Read {
+    /// The bytes asked for arrived.
+    Filled,
+    /// The deadline passed first.
+    Timeout,
+    /// The other end is closed.
+    End,
+}
+
+/// Reads exactly `bytes` before `deadline`; the budget shrinks as it goes, so a
+/// child that trickles cannot hold the boot past it.
+fn read_exactly(fd: BorrowedFd<'_>, bytes: &mut [u8], deadline: Instant) -> io::Result<Read> {
+    for slot in bytes.iter_mut() {
+        let budget = deadline.saturating_duration_since(Instant::now());
+        if !wait_readable(fd, budget)? {
+            return Ok(Read::Timeout);
+        }
+        match read_one(fd)? {
             Some(byte) => *slot = byte,
-            None => return Err(io::Error::other("the probe wrote nothing")),
+            None => return Ok(Read::End),
         }
     }
-    let index = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
-    let depth = usize::from(bytes[5]);
-    let errno = i32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
-    match bytes[0] {
-        RECORD_AGAIN => Ok(None),
-        RECORD_BLOCKED => Ok(Some(Verdict {
-            index,
-            depth,
-            errno,
-        })),
-        _ => Err(io::Error::other("the probe could not drop privileges")),
+    Ok(Read::Filled)
+}
+
+/// Reaps the probe child, without ever blocking the boot for longer than the
+/// deadline it was given.
+///
+/// `waitpid(WNOHANG)` until the deadline, then `SIGKILL` and one last
+/// non-blocking wait: a child that is still inside a syscall cannot be waited
+/// for at all, and init's own supervisor reaps whatever is left.
+fn reap(pid: Pid, deadline: Instant) {
+    loop {
+        if reap_once(pid) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // SAFETY: `kill` takes a pid and a signal number.
+            unsafe { libc::kill(pid.as_raw(), libc::SIGKILL) };
+            reap_once(pid);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+/// One `waitpid(WNOHANG)`: true when the child is gone.
+fn reap_once(pid: Pid) -> bool {
+    let mut status = 0;
+    // SAFETY: `waitpid` writes one status word into `status`, and the child is
+    // this process's own.
+    let waited = unsafe { libc::waitpid(pid.as_raw(), &mut status, libc::WNOHANG) };
+    waited == pid.as_raw() || waited == -1
+}
+
+/// The read and execute questions of a list of paths: the paths themselves.
+fn targets_of(paths: &[PathBuf]) -> Vec<Target> {
+    paths
+        .iter()
+        .map(|path| Target {
+            path: path.clone(),
+            child: None,
+            entry: None,
+        })
+        .collect()
+}
+
+/// The write questions of a list of `sys.path` entries.
+///
+/// Every entry *and every directory above it up to `/`*, because a writable
+/// directory above an entry is a way in: a uid that may write `/a` may `rmdir`
+/// `/a/b` and put its own directory back. The entry itself comes first, then its
+/// parents, and each parent carries the child below it — the one a sticky
+/// directory would protect.
+fn targets_above(entries: &[PathBuf]) -> Vec<Target> {
+    let mut targets = Vec::new();
+    for entry in entries {
+        let mut child: Option<PathBuf> = None;
+        for (level, path) in std::iter::once(entry.clone())
+            .chain(entry.ancestors().skip(1).map(Path::to_path_buf))
+            .enumerate()
+        {
+            if path.as_os_str().is_empty() {
+                break;
+            }
+            targets.push(Target {
+                path: path.clone(),
+                child: child.clone(),
+                entry: if level == 0 {
+                    None
+                } else {
+                    Some(entry.clone())
+                },
+            });
+            child = Some(path);
+        }
+    }
+    targets
 }
 
 /// The first directory of `paths` a view uid could not read or traverse.
@@ -467,8 +798,22 @@ fn read_record(fd: RawFd) -> io::Result<Option<Verdict>> {
 /// missing directory fails with its own message, and claiming a permission
 /// problem there would send an operator to `chmod` something that does not
 /// exist.
-pub fn unreadable(paths: &[PathBuf], dropped: &DroppedTo, interpreter: bool) -> Option<Blocker> {
-    by_probe_or_mode(paths, dropped.probe, Probe::Read, interpreter, false)
+///
+/// # Errors
+///
+/// [`TimedOut`], when the probe the check asks the kernel with did not answer.
+pub fn unreadable(
+    paths: &[PathBuf],
+    dropped: &DroppedTo,
+    interpreter: bool,
+) -> Result<Option<Blocker>, TimedOut> {
+    by_probe_or_mode(
+        &targets_of(paths),
+        dropped.probe,
+        Probe::Read,
+        interpreter,
+        false,
+    )
 }
 
 /// The first program of `paths` a child uid could not `execve`.
@@ -479,131 +824,117 @@ pub fn unreadable(paths: &[PathBuf], dropped: &DroppedTo, interpreter: bool) -> 
 /// child dies in `execve` with `Permission denied (os error 13)`, which says
 /// nothing about which directory a deployment has to open — the same failure
 /// mode [`unreadable`] refuses, one stage later.
-pub fn unexecutable(paths: &[PathBuf], uid: u32, interpreter: bool) -> Option<Blocker> {
-    by_probe_or_mode(paths, uid, Probe::Execute, interpreter, true)
+///
+/// # Errors
+///
+/// [`TimedOut`], when the probe did not answer.
+pub fn unexecutable(
+    paths: &[PathBuf],
+    uid: u32,
+    interpreter: bool,
+) -> Result<Option<Blocker>, TimedOut> {
+    by_probe_or_mode(&targets_of(paths), uid, Probe::Execute, interpreter, true)
 }
 
-/// The first path on `sys.path` another uid could write.
+/// The first path on `sys.path`, or above one, another uid could write.
 ///
 /// The question is the opposite of [`unreadable`]'s: not "can a view read it"
-/// but "can a uid blastit drops to *write* it". These are the paths the
-/// interpreter will import through — its own entries, the working directory
-/// blastit was started in, whatever `PYTHONPATH` or a `.pth` file added, and a
-/// zip file if one is on the path — because a writable one is a cross-route code
-/// plant whoever put it there.
+/// but "can a uid blastit drops to *write* it" — or take it over from above,
+/// which for a directory is the same thing. These are the paths the interpreter
+/// will import through — its own entries, the working directory blastit was
+/// started in, whatever `PYTHONPATH` or a `.pth` file added, and a zip file if
+/// one is on the path — because a writable one, or a writable directory above
+/// one, is a cross-route code plant whoever put it there.
 ///
 /// The kernel answers, and it is asked **once per uid**, because an ACL can
 /// grant exactly one route's uid what it denies every other: the child reports
 /// the first path that uid may write, and the refusal names the path and the
-/// uid. Each entry is asked about as it is — a directory, or the zip file itself
-/// — except when it is not there at all: then the question is its nearest
-/// existing directory, which is where somebody could *create* the entry.
+/// uid. Every entry is asked about with its parents (see [`targets_above`]);
+/// a *sticky* parent — `/tmp` is the one every deployment has — is not a way in
+/// when the child below it belongs to root or to init, because a uid cannot
+/// unlink or rename what it does not own there.
 ///
 /// The mode bits are the fallback for a uid the probe could not drop to, and
 /// they are also what *explains* a refusal: other-writable, group-writable when
 /// the path's gid is that uid's own (a dropped-to process has no supplementary
-/// groups), or sticky — a `/tmp`-style directory takes a file with a fresh name
-/// whatever the sticky bit does about deleting one that is already there.
-pub fn writable(paths: &[PathBuf], dropped: &DroppedTo, interpreter: bool) -> Option<Writable> {
-    // One question per entry, in the order `sys.path` lists them.
-    let questions: Vec<Question> = paths
-        .iter()
-        .filter_map(|entry| Question::of(entry))
-        .collect();
-    let targets: Vec<PathBuf> = questions.iter().map(|q| q.target.clone()).collect();
-
+/// groups), or sticky — with the same exemption, modelled the same way.
+///
+/// # Errors
+///
+/// [`TimedOut`], when a probe did not answer: a `sys.path` that hung is a boot
+/// that has to stop, not one that may guess from the mode bits through the same
+/// filesystem.
+pub fn writable(
+    paths: &[PathBuf],
+    dropped: &DroppedTo,
+    interpreter: bool,
+) -> Result<Option<Writable>, TimedOut> {
+    let targets = targets_above(paths);
+    if targets.is_empty() {
+        return Ok(None);
+    }
     // One fork per uid: the child reports the first target that uid may write,
-    // and "nothing" is an answer too — it means the kernel was asked and found
-    // nothing.
-    let mut found: Vec<(usize, u32)> = Vec::new();
-    let mut asked: BTreeSet<u32> = BTreeSet::new();
+    // and "nothing" is an answer too.
+    let mut found: Vec<(usize, u32, Verdict)> = Vec::new();
+    let mut unasked: Vec<u32> = Vec::new();
     for uid in &dropped.uids {
-        match probe(&targets, *uid, Probe::Write, interpreter) {
-            Ok(Some(verdict)) => found.push((verdict.index, *uid)),
-            Ok(None) => {
-                asked.insert(*uid);
-            }
-            // No answer: the mode bits speak for this uid below.
-            Err(_) => {}
+        match probe(&targets, *uid, Probe::Write, interpreter)? {
+            Spoken::Found(verdict) => found.push((verdict.index, *uid, verdict)),
+            Spoken::Fine => {}
+            Spoken::NoProbe => unasked.push(*uid),
         }
     }
-    found.sort_unstable();
-    let first = found
-        .first()
-        .and_then(|(index, uid)| questions.get(*index).map(|question| (question, *uid)));
-    if let Some((question, uid)) = first {
-        let why = writable_by_mode(question.mode, question.gid, uid)
+    found.sort_unstable_by_key(|(index, uid, _)| (*index, *uid));
+    if let Some((index, uid, verdict)) = found.first() {
+        let Some(target) = targets.get(*index) else {
+            return Ok(None);
+        };
+        let why = writable_by_mode(verdict.mode, verdict.gid, *uid)
             .unwrap_or_else(|| "an ACL lets it through".to_string());
-        return Some(question.refusal(Some(uid), why));
+        return Ok(Some(Writable {
+            path: target.path.clone(),
+            entry: target.entry.clone(),
+            mode: verdict.mode,
+            probed_uid: Some(*uid),
+            why,
+        }));
+    }
+    if unasked.is_empty() {
+        return Ok(None);
     }
 
     // The uids the kernel could not be asked for, and what the mode bits say
     // about them: the documented fallback, which cannot see an ACL either way.
-    for question in &questions {
-        for uid in dropped.uids.iter().filter(|uid| !asked.contains(uid)) {
-            if let Some(why) = writable_by_mode(question.mode, question.gid, *uid) {
-                return Some(question.refusal(None, why));
+    let init_uid = rustix::process::geteuid().as_raw();
+    for target in &targets {
+        let Ok(metadata) = std::fs::metadata(&target.path) else {
+            continue;
+        };
+        let mode = metadata.permissions().mode();
+        if mode & 0o1000 != 0 {
+            if let Some(child) = &target.child {
+                if dropped
+                    .uids
+                    .iter()
+                    .all(|uid| sticky_child_is_safe(child, *uid, init_uid))
+                {
+                    continue;
+                }
+            }
+        }
+        for uid in &unasked {
+            if let Some(why) = writable_by_mode(mode, metadata.gid(), *uid) {
+                return Ok(Some(Writable {
+                    path: target.path.clone(),
+                    entry: target.entry.clone(),
+                    mode: mode & 0o7777,
+                    probed_uid: None,
+                    why,
+                }));
             }
         }
     }
-    None
-}
-
-/// One `sys.path` entry, and what to ask about it.
-struct Question {
-    /// What must not be writable: the entry itself, or the nearest existing
-    /// directory above an entry that is not there.
-    target: PathBuf,
-    /// The `sys.path` entry, when it is not `target`.
-    entry: Option<PathBuf>,
-    /// `target`'s permission bits.
-    mode: u32,
-    /// `target`'s gid, which is the group a dropped-to uid would have to be in.
-    gid: u32,
-}
-
-impl Question {
-    /// The question one `sys.path` entry asks, or `None` when there is nothing
-    /// to ask.
-    ///
-    /// A path that is there is asked about as it is: a directory, or a file —
-    /// a zip on `sys.path` is a file, and writing it is writing code. A path
-    /// that is *not* there is asked about through its nearest existing
-    /// directory, because that is where it could be created; an entry whose
-    /// ancestors are all files, or which has no directory above it at all,
-    /// cannot be created and is not this check's business.
-    fn of(entry: &Path) -> Option<Self> {
-        if let Ok(metadata) = std::fs::metadata(entry) {
-            return Some(Self {
-                target: entry.to_path_buf(),
-                entry: None,
-                mode: metadata.permissions().mode(),
-                gid: metadata.gid(),
-            });
-        }
-        let above = entry.ancestors().skip(1).find(|path| path.exists())?;
-        let metadata = std::fs::metadata(above).ok()?;
-        if !metadata.is_dir() {
-            return None;
-        }
-        Some(Self {
-            target: above.to_path_buf(),
-            entry: Some(entry.to_path_buf()),
-            mode: metadata.permissions().mode(),
-            gid: metadata.gid(),
-        })
-    }
-
-    /// The refusal this question produced.
-    fn refusal(&self, probed_uid: Option<u32>, why: String) -> Writable {
-        Writable {
-            path: self.target.clone(),
-            entry: self.entry.clone(),
-            mode: self.mode & 0o7777,
-            probed_uid,
-            why,
-        }
-    }
+    Ok(None)
 }
 
 /// Whether the mode bits alone say `uid` could write a path with this `mode` and
@@ -614,11 +945,12 @@ impl Question {
 /// that is in that group, and a dropped-to process has no supplementary groups,
 /// so the gid has to be its own); or it is **sticky** — a `/tmp`-style directory
 /// takes a file with a fresh name whatever the sticky bit does about deleting
-/// one that is there.
+/// one that is there, which is why [`writable`] exempts a sticky *parent* only
+/// when the child below it belongs to root or init.
 ///
-/// The uid is named when the group class is what answered, because the mode
-/// bits were the only witness: the message has to say which uid a deployment has
-/// to keep out.
+/// The uid is named when the group class is what answered, because the mode bits
+/// were the only witness: the message has to say which uid a deployment has to
+/// keep out.
 fn writable_by_mode(mode: u32, gid: u32, uid: u32) -> Option<String> {
     if mode & Access::Write.bit() != 0 {
         return Some(
@@ -636,28 +968,37 @@ fn writable_by_mode(mode: u32, gid: u32, uid: u32) -> Option<String> {
     None
 }
 
-/// Asks the kernel about `paths`, in the terms the checks use.
-fn checked(paths: &[PathBuf], uid: u32, ask: Probe, interpreter: bool) -> Answer {
-    match probe(paths, uid, ask, interpreter) {
-        Ok(None) => Answer::Fine,
-        Ok(Some(verdict)) => {
-            let Some(path) = paths.get(verdict.index) else {
-                return Answer::Fine;
+/// One check: the kernel's answer when it can be asked, the mode bits when it
+/// cannot.
+///
+/// The fallback runs on [`Spoken::NoProbe`] only. A probe that answered "every
+/// path is fine" is an answer, and answering it again with the mode bits would
+/// refuse exactly the deployments the probe exists for — a directory a view
+/// reaches through a group class, or an ACL nobody can read out of the bits.
+fn by_probe_or_mode(
+    targets: &[Target],
+    uid: u32,
+    ask: Probe,
+    interpreter: bool,
+    executable: bool,
+) -> Result<Option<Blocker>, TimedOut> {
+    match probe(targets, uid, ask, interpreter)? {
+        Spoken::Found(verdict) => {
+            let Some(target) = targets.get(verdict.index) else {
+                return Ok(None);
             };
-            // The blocker is `depth` directories above the path — the directory
-            // an operator has to open first — and the path itself when nothing
-            // above it blocks, which leaves the path's own access as the answer.
+            // The path the refusal is about: the target itself, or the directory
+            // above it that does not let the uid through.
             let blocked = if verdict.depth == 0 {
-                path.clone()
+                target.path.clone()
             } else {
-                path.ancestors()
+                target
+                    .path
+                    .ancestors()
                     .nth(verdict.depth)
                     .map(Path::to_path_buf)
-                    .unwrap_or_else(|| path.clone())
+                    .unwrap_or_else(|| target.path.clone())
             };
-            let mode = std::fs::metadata(&blocked)
-                .map(|metadata| metadata.permissions().mode() & 0o777)
-                .unwrap_or(0);
             let access = match (verdict.depth, ask) {
                 // A directory on the way is only traversed.
                 (depth, _) if depth > 0 => Access::Traverse,
@@ -665,48 +1006,17 @@ fn checked(paths: &[PathBuf], uid: u32, ask: Probe, interpreter: bool) -> Answer
                 (_, Probe::Execute) => Access::Execute,
                 (_, Probe::Write) => Access::Write,
             };
-            Answer::Blocked(Blocker {
+            Ok(Some(Blocker {
                 path: blocked,
-                mode,
+                mode: verdict.mode & 0o777,
                 access,
                 probed_uid: Some(uid),
-            })
+            }))
         }
-        Err(_) => Answer::Unasked,
-    }
-}
-
-/// What one check got back.
-enum Answer {
-    /// The kernel says every path is fine.
-    Fine,
-    /// The kernel names a path that blocks.
-    Blocked(Blocker),
-    /// The probe could not run at all, so the mode bits are the only answer
-    /// there is.
-    Unasked,
-}
-
-/// One check: the kernel's answer when it can be asked, the mode bits when it
-/// cannot.
-///
-/// The fallback runs on [`Answer::Unasked`] only. A probe that answered "every
-/// path is fine" is an answer, and answering it again with the mode bits would
-/// refuse exactly the deployments the probe exists for — a directory a view
-/// reaches through a group class, or an ACL nobody can read out of the bits.
-fn by_probe_or_mode(
-    paths: &[PathBuf],
-    uid: u32,
-    ask: Probe,
-    interpreter: bool,
-    executable: bool,
-) -> Option<Blocker> {
-    match checked(paths, uid, ask, interpreter) {
-        Answer::Blocked(blocker) => Some(blocker),
-        Answer::Fine => None,
-        Answer::Unasked => paths
+        Spoken::Fine => Ok(None),
+        Spoken::NoProbe => Ok(targets
             .iter()
-            .find_map(|path| blocks(path, executable).map(unprobed)),
+            .find_map(|target| blocks(&target.path, executable).map(unprobed))),
     }
 }
 
@@ -767,9 +1077,9 @@ fn blocks(path: &Path, executable: bool) -> Option<Blocker> {
 /// What the last path on the way has to allow.
 ///
 /// A directory is both read and descended into — a module inside it is reached
-/// by walking through it — while a program is executed and a file is read. The
-/// order is the order the message names them in: readability first, because
-/// that is the one an operator usually has to change.
+/// by reading the directory and traversing it — and a program only has to be
+/// executable. A file that is neither is not this check's business: whether a
+/// view could read it is not a permission a deployment has to grant.
 fn leaf_accesses(is_dir: bool, executable: bool) -> Option<&'static [Access]> {
     match (executable, is_dir) {
         // A program a child `execve`s: the file itself has to be executable.
@@ -801,9 +1111,39 @@ mod tests {
     /// The uid `unexecutable` is asked as in these tests: dbproxy's.
     const DBPROXY_UID: u32 = PROBE_BASE + 3;
 
+    /// A uid that is nobody in the layout and nobody running the tests: the
+    /// owner of a directory that a sticky parent should have protected, and
+    /// does not, because it is not root and not init.
+    const OTHERS_UID: u32 = 60_000;
+
     /// The layout a probe speaks for in these tests.
     fn dropped() -> DroppedTo {
         DroppedTo::of(blastit_manifest::UidLayout::new(PROBE_BASE), 2)
+    }
+
+    /// [`unreadable`], [`unexecutable`] and [`writable`] with the timeout turned into a
+    /// test failure: nothing these tests ask about hangs, and a `TimedOut` is a bug
+    /// in the test rather than a case it is about (the timeout has its own test).
+    fn unreadable(paths: &[PathBuf], dropped: &DroppedTo, interpreter: bool) -> Option<Blocker> {
+        super::unreadable(paths, dropped, interpreter).expect("no timeout")
+    }
+
+    fn unexecutable(paths: &[PathBuf], uid: u32, interpreter: bool) -> Option<Blocker> {
+        super::unexecutable(paths, uid, interpreter).expect("no timeout")
+    }
+
+    fn writable(paths: &[PathBuf], dropped: &DroppedTo, interpreter: bool) -> Option<Writable> {
+        super::writable(paths, dropped, interpreter).expect("no timeout")
+    }
+
+    /// The same for [`probe`], whose targets these tests build from paths.
+    fn probe(
+        paths: &[PathBuf],
+        uid: u32,
+        ask: Probe,
+        interpreter: bool,
+    ) -> Result<Spoken, TimedOut> {
+        super::probe(&targets_of(paths), uid, ask, interpreter)
     }
 
     /// Whether this process can drop to another uid, which is what a probe has
@@ -1044,9 +1384,9 @@ mod tests {
         assert_eq!(
             in_a_child(
                 || match probe(std::slice::from_ref(&shared), view, Probe::Read, false) {
-                    Ok(None) => 0,
-                    Ok(Some(_)) => 1,
-                    Err(_) => 2,
+                    Ok(Spoken::Fine) => 0,
+                    Ok(Spoken::Found(_)) => 1,
+                    Ok(Spoken::NoProbe) | Err(_) => 2,
                 }
             ),
             0,
@@ -1196,6 +1536,159 @@ mod tests {
     }
 
     #[test]
+    fn a_writable_directory_above_an_entry_is_refused() {
+        // The review's repro: `/tmp/ex/parent` is `0777` and
+        // `/tmp/ex/parent/sub` is `0755` and on `PYTHONPATH`. A uid that may
+        // write `parent` may `rmdir` `sub` and put its own directory back, so
+        // the entry is only as safe as everything above it.
+        let tree = TempTree::new("above-entry");
+        let parent = tree.dir("parent", 0o777);
+        let sub = tree.dir("parent/sub", 0o755);
+        let refusal = writable(std::slice::from_ref(&sub), &dropped(), false)
+            .unwrap_or_else(|| panic!("{parent:?} must be refused"));
+        assert_eq!(refusal.path, parent, "the directory that has to change");
+        assert_eq!(refusal.entry, Some(sub.clone()), "and the entry below it");
+        assert!(
+            refusal.message().contains(&sub.display().to_string())
+                && refusal.message().contains(&parent.display().to_string())
+                && refusal.message().contains("chmod go-w"),
+            "the message names both, and the fix: {}",
+            refusal.message()
+        );
+        assert!(
+            refusal.message().contains("take the entry over"),
+            "and says how it would be taken over: {}",
+            refusal.message()
+        );
+
+        // The entry itself being the writable one is still reported first.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let refusal = writable(std::slice::from_ref(&sub), &dropped(), false)
+            .unwrap_or_else(|| panic!("{sub:?} must be refused"));
+        assert_eq!(refusal.path, sub);
+        assert_eq!(
+            refusal.entry, None,
+            "the entry itself is not a child of one"
+        );
+    }
+
+    #[test]
+    fn a_sticky_directory_above_an_entry_is_not_a_way_in() {
+        // `/tmp` itself: sticky and writable by everyone, and *not* a way into
+        // what is below it — the sticky bit stops a uid unlinking or renaming an
+        // entry it does not own, and the directory below belongs to root or to
+        // init, which is the deployment's own uid. Nothing here is root-only:
+        // the test's own uid plays init, and its own tree is what is protected.
+        let tree = TempTree::new("sticky-safe");
+        let safe = tree.dir("safe", 0o1777);
+        let inside = tree.dir("safe/inside", 0o755);
+        assert_eq!(
+            writable(std::slice::from_ref(&inside), &dropped(), false),
+            None,
+            "a sticky parent over a root- or init-owned child is not a hole"
+        );
+
+        // The same parent, with a child owned by somebody a dropped-to uid
+        // neither is nor can touch: then the sticky bit protects nothing, because
+        // root can hand a directory to anyone and a uid that owns an entry in a
+        // sticky directory may rename it. Root only, for the `chown`.
+        if can_probe() {
+            let taken = tree.dir("safe/taken", 0o755);
+            chown(&taken, OTHERS_UID, OTHERS_UID);
+            assert_eq!(
+                in_a_child(|| {
+                    match writable(std::slice::from_ref(&taken), &dropped(), false) {
+                        Some(refusal)
+                            if refusal.path == safe
+                                && refusal.entry == Some(taken.clone())
+                                && refusal.message().contains("sticky") =>
+                        {
+                            0
+                        }
+                        Some(_) => 1,
+                        None => 2,
+                    }
+                }),
+                0,
+                "a sticky parent over somebody else's child (1 = another refusal, 2 = none)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_probe_that_does_not_answer_names_its_path_and_is_killed() {
+        // The deadline really has to bound the boot: a child that is inside a
+        // syscall it will never leave gets `SIGKILL`ed, the check reports the
+        // path it was on, and nothing blocks. The child here is the test's own,
+        // because the probe's child only ever calls `access(2)` and `stat`.
+        let tree = TempTree::new("timeout");
+        let slow = tree.path.join("slow");
+        std::fs::create_dir(&slow).unwrap();
+        let targets = targets_of(std::slice::from_ref(&slow));
+        let (read_end, write_end) = blastit_sys::pipe().unwrap();
+        let forked = unsafe { blastit_sys::fork_unchecked() }.unwrap();
+        let pid = match forked {
+            Fork::Child => {
+                drop(read_end);
+                // Say which target this child is "on", then never answer.
+                write_bytes(write_end.as_raw_fd(), &working(0));
+                std::thread::sleep(Duration::from_secs(30));
+                // SAFETY: `_exit` never returns.
+                unsafe { libc::_exit(0) }
+            }
+            Fork::Parent(pid) => {
+                drop(write_end);
+                pid
+            }
+        };
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let answer = read_answer(read_end.as_raw_fd(), &targets, deadline);
+        assert!(
+            matches!(answer, Err(TimedOut { ref path }) if path == &slow),
+            "the timeout names the path the child was on"
+        );
+        let started = Instant::now();
+        reap(pid, deadline);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the reap does not block past the deadline either"
+        );
+        // Killed and reaped here, not left for a supervisor that is not running
+        // in a test. `SIGKILL` is asynchronous, so this waits for it — with a
+        // bound, because a child that is not reaped at all is the failure.
+        let mut status = 0;
+        let mut waited = 0;
+        let give_up = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < give_up {
+            // SAFETY: `waitpid` writes one status word into `status`.
+            waited = unsafe { libc::waitpid(pid.as_raw(), &mut status, libc::WNOHANG) };
+            if waited == -1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(waited, -1, "the child was killed and reaped: {waited}");
+    }
+
+    #[test]
+    fn a_probe_leaves_no_child_behind() {
+        // The other half of the deadline: a child that answers is reaped inside
+        // it, so no probe leaves a zombie. Run in a child of our own, so
+        // `waitpid(-1)` has nothing else to report.
+        let uid = *dropped().uids.iter().next().expect("a uid");
+        let code = in_a_child(|| {
+            let targets = targets_of(&[PathBuf::from("/")]);
+            let _ = super::probe(&targets, uid, Probe::Read, false);
+            let mut status = 0;
+            // SAFETY: `waitpid` writes one status word into `status`.
+            let left = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            i32::from(left != -1)
+        });
+        assert_eq!(code, 0, "no probe child is left unreaped");
+    }
+
+    #[test]
     fn a_missing_entry_under_a_writable_directory_is_refused() {
         // An entry that is not there yet is a hole all the same, when the
         // directory it would be created in is writable: the interpreter would
@@ -1213,8 +1706,8 @@ mod tests {
         );
         assert!(
             refusal.message().contains(&missing.display().to_string())
-                && refusal.message().contains("not there yet"),
-            "the message explains how it could be created: {}",
+                && refusal.message().contains("take the entry over"),
+            "the message explains how the entry could be taken over: {}",
             refusal.message()
         );
         assert!(

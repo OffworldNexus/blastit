@@ -2297,10 +2297,14 @@ fn a_writable_working_directory_is_refused() {
     fixture.write("app.py", APP);
     for mode in [0o777, 0o1777] {
         std::fs::set_permissions(&fixture.path, Permissions::from_mode(mode)).unwrap();
+        // A port of its own per boot: the previous one releases its listener
+        // only when its dbproxy child is gone, and the child outlives init for
+        // a moment.
+        let port = free_port().to_string();
         let refused = run_to_exit(
             &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
             &[
-                ("PORT", "8098"),
+                ("PORT", port.as_str()),
                 ("BLASTIT_APP", "app:application"),
                 ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
                 ("PYTHONPATH", &fixture.python_path()),
@@ -2352,11 +2356,12 @@ fn a_writable_directory_only_on_pythonpath_is_refused() {
     std::fs::create_dir(&shared).unwrap();
     std::fs::set_permissions(&shared, Permissions::from_mode(0o777)).unwrap();
     let python_path = format!("{}:{}", fixture.python_path(), shared.display());
+    let port = free_port().to_string();
 
     let refused = run_to_exit(
         &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
         &[
-            ("PORT", "8098"),
+            ("PORT", port.as_str()),
             ("BLASTIT_APP", "app:application"),
             ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
             ("PYTHONPATH", &python_path),
@@ -2382,10 +2387,11 @@ fn a_writable_directory_only_on_pythonpath_is_refused() {
     // The same entry, 0755 (in the test's own group): it stays, and the boot
     // gets past the check to the failure planted behind it.
     std::fs::set_permissions(&shared, Permissions::from_mode(0o755)).unwrap();
+    let port = free_port().to_string();
     let text = run_to_exit(
         &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
         &[
-            ("PORT", "8098"),
+            ("PORT", port.as_str()),
             ("BLASTIT_APP", "app:application"),
             ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
             ("PYTHONPATH", &python_path),
@@ -2404,6 +2410,53 @@ fn a_writable_directory_only_on_pythonpath_is_refused() {
         text.contains("BLASTIT_PRELOAD"),
         "and the boot stopped at the step after the check:\n{text}"
     );
+}
+
+#[test]
+fn a_writable_directory_above_the_working_directory_is_refused() {
+    // The review's repro, at the boot: blastit started in `<parent>/sub` where
+    // `parent` is `0777` and `sub` is `0755`. Nothing about `sub` is wrong — but
+    // a view uid can `rmdir` it and put its own directory back, so the boot
+    // refuses and names `parent`, not the working directory.
+    if !needs_root("writable ancestor") {
+        return;
+    }
+    let fixture = Fixture::new("writable-parent");
+    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    fixture.write("app.py", APP);
+    let parent = fixture.path.join("parent");
+    let started_in = parent.join("sub");
+    std::fs::create_dir_all(&started_in).unwrap();
+    std::fs::set_permissions(&parent, Permissions::from_mode(0o777)).unwrap();
+    std::fs::set_permissions(&started_in, Permissions::from_mode(0o755)).unwrap();
+    let port = free_port().to_string();
+
+    let refused = run_to_exit(
+        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
+        &[
+            ("PORT", port.as_str()),
+            ("BLASTIT_APP", "app:application"),
+            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
+            ("PYTHONPATH", &fixture.python_path()),
+            ("BLASTIT_UID_BASE", "48700"),
+            ("BLASTIT_LOG_FORMAT", "json"),
+        ],
+        0,
+        Some(&started_in),
+    );
+    assert!(
+        refused.contains("is writable by another uid"),
+        "the boot refuses:\n{refused}"
+    );
+    assert!(
+        refused.contains(&parent.display().to_string()),
+        "and names the directory above it:\n{refused}"
+    );
+    assert!(
+        refused.contains(&started_in.display().to_string()),
+        "and the entry it would take over:\n{refused}"
+    );
+    assert!(refused.contains("chmod go-w"), "and the fix:\n{refused}");
 }
 
 #[test]
@@ -2426,10 +2479,11 @@ fn a_directory_a_view_can_read_through_its_own_group_is_not_a_blocker() {
     // is not there: the output then says which of the two refused.
     let run = |base: u32| {
         let base_text = base.to_string();
+        let port = free_port().to_string();
         run_to_exit(
             &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
             &[
-                ("PORT", "8098"),
+                ("PORT", port.as_str()),
                 ("BLASTIT_APP", "app:application"),
                 ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
                 ("PYTHONPATH", &fixture.python_path()),

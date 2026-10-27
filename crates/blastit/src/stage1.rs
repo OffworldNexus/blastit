@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 
 use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
@@ -761,8 +762,10 @@ fn check_view_paths(
     // A live interpreter is in this image — stage 1 is past the point where
     // CPython is up in both installations — and this thread holds the GIL, which
     // is what the fork protocol needs (§9.3).
-    if let Some(blocker) = crate::visibility::unreadable(&paths, &dropped, true) {
-        fail(emitter, &blocker.message());
+    match crate::visibility::unreadable(&paths, &dropped, true) {
+        Ok(Some(blocker)) => fail(emitter, &blocker.message()),
+        Ok(None) => {}
+        Err(timed_out) => fail(emitter, &timed_out.message()),
     }
 
     // §5.3: the whole `sys.path` — not only the directories blastit added. An
@@ -776,9 +779,22 @@ fn check_view_paths(
     match scope.get_item("blastit_sys_path") {
         Ok(Some(value)) => match value.extract::<Vec<String>>() {
             Ok(entries) => {
-                let entries: Vec<PathBuf> = entries.into_iter().map(PathBuf::from).collect();
-                if let Some(writable) = crate::visibility::writable(&entries, &dropped, true) {
-                    fail(emitter, &writable.message());
+                let mut entries: Vec<PathBuf> = entries.into_iter().map(PathBuf::from).collect();
+                // The working directory blastit was started in is a `sys.path`
+                // entry like any other — but it is also the one place this check
+                // has to cover even if `put_cwd_first` did not have to insert
+                // it, because that is where the application's own module comes
+                // from.
+                if let Some(cwd) = config.cwd.as_deref() {
+                    let cwd = PathBuf::from(std::ffi::OsString::from_vec(cwd.to_vec()));
+                    if !entries.contains(&cwd) {
+                        entries.insert(0, cwd);
+                    }
+                }
+                match crate::visibility::writable(&entries, &dropped, true) {
+                    Ok(Some(writable)) => fail(emitter, &writable.message()),
+                    Ok(None) => {}
+                    Err(timed_out) => fail(emitter, &timed_out.message()),
                 }
             }
             Err(err) => python_fail(py, emitter, "the paths on sys.path", &err),
