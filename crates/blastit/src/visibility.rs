@@ -514,12 +514,9 @@ fn write_answer(fd: RawFd, uid: u32, targets: &[Target], ask: Probe) {
         // does not own. It *is* one when the child is the uid's own, or when
         // there is nothing there yet — a file with a fresh name is what a sticky
         // directory does allow.
-        if ask.reads_sticky() && mode & 0o1000 != 0 {
-            if let Some(child) = &target.child {
-                if sticky_child_is_safe(child, uid, init_uid) {
-                    continue;
-                }
-            }
+        if ask.reads_sticky() && mode & 0o1000 != 0 && sticky_protects(&target.child, uid, init_uid)
+        {
+            continue;
         }
         write_bytes(
             fd,
@@ -550,6 +547,22 @@ fn sticky_child_is_safe(child: &Path, uid: u32, init_uid: u32) -> bool {
     };
     let owner = metadata.uid();
     owner != uid && (owner == 0 || owner == init_uid)
+}
+
+/// The same for a [`Target`]'s child, which may be missing: a sticky directory
+/// lets a *new* name through, so there is nothing there to protect.
+fn sticky_protects(child: &Option<PathBuf>, uid: u32, init_uid: u32) -> bool {
+    match child {
+        Some(child) => sticky_child_is_safe(child, uid, init_uid),
+        None => false,
+    }
+}
+
+/// The same, for every uid blastit drops to: the fallback's exemption holds
+/// only when no dropped-to uid can replace the child.
+fn sticky_protects_for_all(child: &Option<PathBuf>, uids: &BTreeSet<u32>, init_uid: u32) -> bool {
+    uids.iter()
+        .all(|uid| sticky_protects(child, *uid, init_uid))
 }
 
 /// The first directory above `path` a dropped-to uid could not pass, as a depth.
@@ -911,16 +924,8 @@ pub fn writable(
             continue;
         };
         let mode = metadata.permissions().mode();
-        if mode & 0o1000 != 0 {
-            if let Some(child) = &target.child {
-                if dropped
-                    .uids
-                    .iter()
-                    .all(|uid| sticky_child_is_safe(child, *uid, init_uid))
-                {
-                    continue;
-                }
-            }
+        if mode & 0o1000 != 0 && sticky_protects_for_all(&target.child, &dropped.uids, init_uid) {
+            continue;
         }
         for uid in &unasked {
             if let Some(why) = writable_by_mode(mode, metadata.gid(), *uid) {
