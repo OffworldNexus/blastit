@@ -103,6 +103,7 @@
 //! still emitted when the scheduler learns the request ended — at `RESP_END`
 //! for a response, at release for everything else.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
@@ -2311,25 +2312,27 @@ impl Scheduler {
         // §8.1: the `path` is the routed `PATH_INFO`, and never a query
         // string. A target the scheduler could not decode has no `PATH_INFO`
         // at all, so it reports the target with its query string removed.
-        let path = match &request.path_info {
-            Some(path_info) => path_info.clone(),
-            None => String::from_utf8_lossy(path_of_target(&request.head.target)).into_owned(),
+        //
+        // Both are handed to `from_target` as borrowed text, which is what
+        // strips the query and allocates the `path` once: cloning `path_info`
+        // first would allocate the same string twice per request.
+        let method = String::from_utf8_lossy(&request.head.method);
+        let routed_path = match &request.path_info {
+            Some(path_info) => Cow::Borrowed(path_info.as_str()),
+            None => String::from_utf8_lossy(path_of_target(&request.head.target)),
         };
-        let mut info = RequestInfo::from_target(
-            String::from_utf8_lossy(&request.head.method).into_owned(),
-            &path,
-        )
-        .with_status(request.status)
-        .with_outcome(request.outcome)
-        .with_timings(queued_ms, duration_ms)
-        .with_bytes(request.bytes_in, request.bytes_out)
-        .with_remote_addr(request.head.remote_addr.clone())
-        .with_cost(
-            request.charged_ns,
-            // The view's own CPU measurement, when it could take one: absent is
-            // not the same as zero (§8.1).
-            request.report.and_then(|report| report.cpu_ns),
-        );
+        let mut info = RequestInfo::from_target(&*method, &routed_path)
+            .with_status(request.status)
+            .with_outcome(request.outcome)
+            .with_timings(queued_ms, duration_ms)
+            .with_bytes(request.bytes_in, request.bytes_out)
+            .with_remote_addr(request.head.remote_addr.clone())
+            .with_cost(
+                request.charged_ns,
+                // The view's own CPU measurement, when it could take one:
+                // absent is not the same as zero (§8.1).
+                request.report.and_then(|report| report.cpu_ns),
+            );
         if let Some(rule) = request.rule {
             info = info.with_rule(rule);
         }

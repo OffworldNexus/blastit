@@ -2,15 +2,16 @@
 //! the decoder that reads a line back into an [`Event`].
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 
 use serde_json::{Map, Value};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::{
     AppOutput, Component, Event, EventKind, ExitKind, HttpRejected, Level, Lifecycle,
     MAX_EVENT_BYTES, ManifestWarning, Outcome, PgRefuseReason, PgRefused, ProcessCap,
     ProcessExited, ProcessRetired, ProcessSpawned, RejectReason, RequestInfo, RetireReason,
-    SqlDenied, SqlKind, Stream, floor_boundary, format_timestamp,
+    SqlDenied, SqlKind, Stream, floor_boundary,
 };
 
 /// Encode one event as a single JSON object, without a trailing newline.
@@ -30,10 +31,27 @@ use crate::{
 /// [`Event::with_truncated`] names fields the *caller* already shortened;
 /// those names are reported too, whether or not the event needed cutting here.
 pub fn encode_json(event: &Event) -> String {
+    let mut out = Vec::with_capacity(256);
+    encode_json_into(&mut out, event);
+    // SAFETY: the encoder writes only ASCII and the UTF-8 bytes of the strings
+    // it is handed, so the buffer is always valid UTF-8.
+    unsafe { String::from_utf8_unchecked(out) }
+}
+
+/// Encode one event as a single JSON object, appended to `out`, without a
+/// trailing newline.
+///
+/// [`encode_json`] is this with a fresh buffer. This form exists for the event
+/// sink, which emits one event per request: it clears and reuses a single
+/// buffer, so a request costs no allocation for its line. Only the encoded
+/// object is appended — whatever `out` already holds is left in front of it —
+/// and the bytes are exactly what [`encode_json`] returns for the same event.
+pub fn encode_json_into(out: &mut Vec<u8>, event: &Event) {
     let declared = event.truncated_fields();
-    let encoded = encode_with(event, declared);
-    if encoded.len() <= MAX_EVENT_BYTES {
-        return encoded;
+    let start = out.len();
+    encode_into_with(out, event, declared);
+    if out.len() - start <= MAX_EVENT_BYTES {
+        return;
     }
 
     // Work on a copy: the caller keeps the complete event.
@@ -44,11 +62,12 @@ pub fn encode_json(event: &Event) -> String {
     // cut removes at least as many encoded bytes as raw bytes, so this
     // terminates; `false` means every string is already empty.
     loop {
-        let encoded = encode_with(&event, &truncated);
-        if encoded.len() <= MAX_EVENT_BYTES {
-            return encoded;
+        out.truncate(start);
+        encode_into_with(out, &event, &truncated);
+        if out.len() - start <= MAX_EVENT_BYTES {
+            return;
         }
-        let excess = encoded.len() - MAX_EVENT_BYTES;
+        let excess = out.len() - start - MAX_EVENT_BYTES;
         if !cut_longest_string(&mut event, excess, &mut truncated) {
             break;
         }
@@ -60,7 +79,9 @@ pub fn encode_json(event: &Event) -> String {
     // practice (a dozen names the kernel defines), and is dropped the same way
     // so that no caller can break the line limit with it either.
     loop {
-        if encode_with(&event, &truncated).len() <= MAX_EVENT_BYTES {
+        out.truncate(start);
+        encode_into_with(out, &event, &truncated);
+        if out.len() - start <= MAX_EVENT_BYTES {
             break;
         }
         if !drop_output_proxy(&mut event, &mut truncated)
@@ -70,130 +91,129 @@ pub fn encode_json(event: &Event) -> String {
         }
     }
 
-    encode_with(&event, &truncated)
+    out.truncate(start);
+    encode_into_with(out, &event, &truncated);
 }
 
 /// Encode without the encoder's own truncation, but with the fields the caller
 /// already declared as shortened. Only used to measure how much room is left.
 pub(crate) fn encoded_len(event: &Event) -> usize {
-    encode_with(event, event.truncated_fields()).len()
+    let mut out = Vec::with_capacity(256);
+    encode_into_with(&mut out, event, event.truncated_fields());
+    out.len()
 }
 
 /// The full encoder. `truncated` is appended as the last member when non-empty.
-fn encode_with(event: &Event, truncated: &[&'static str]) -> String {
-    let mut out = String::with_capacity(256);
-    out.push('{');
-    push_member(&mut out, "ts", &json_string(&format_timestamp(event.ts)));
-    push_member(&mut out, "level", &json_string(event.level.as_str()));
-    push_member(&mut out, "event", &json_string(event.kind.name()));
-    push_member(
-        &mut out,
-        "component",
-        &json_string(event.component.as_str()),
-    );
+///
+/// Writes straight into `out` with no per-field `String`: `serde_json` formats
+/// and escapes each string and float into the buffer, `write!` formats the
+/// integers, and the values a caller can pick only from a fixed set are written
+/// as literals. That is what keeps a `request` event from allocating once per
+/// field. The byte sequence is the one [`encode_json`] documents.
+fn encode_into_with(out: &mut Vec<u8>, event: &Event, truncated: &[&'static str]) {
+    out.push(b'{');
+    push_timestamp_member(out, event.ts);
+    push_str_member(out, "level", event.level.as_str());
+    push_str_member(out, "event", event.kind.name());
+    push_str_member(out, "component", event.component.as_str());
     match &event.route {
-        Some(route) => push_member(&mut out, "route", &json_string(route)),
+        Some(route) => push_str_member(out, "route", route),
         // §8.1: `route` is null on a request that matched nothing.
         None if matches!(event.kind, EventKind::Request(_)) => {
-            push_member(&mut out, "route", "null")
+            push_raw_member(out, "route", b"null");
         }
         None => {}
     }
     if let Some(request_id) = &event.request_id {
-        push_member(&mut out, "request_id", &json_string(request_id));
+        push_str_member(out, "request_id", request_id);
     }
 
     match &event.kind {
         EventKind::Request(info) => {
-            push_member(&mut out, "method", &json_string(&info.method));
-            push_member(&mut out, "path", &json_string(&info.path));
+            push_str_member(out, "method", &info.method);
+            push_str_member(out, "path", &info.path);
             if let Some(rule) = info.rule {
-                push_member(&mut out, "rule", &rule.to_string());
+                push_u64_member(out, "rule", u64::from(rule));
             }
-            push_member(&mut out, "status", &info.status.to_string());
-            push_member(&mut out, "outcome", &json_string(info.outcome.as_str()));
-            push_member(&mut out, "queued_ms", &json_f64(info.queued_ms));
-            push_member(&mut out, "duration_ms", &json_f64(info.duration_ms));
-            push_member(&mut out, "bytes_in", &info.bytes_in.to_string());
-            push_member(&mut out, "bytes_out", &info.bytes_out.to_string());
-            push_member(&mut out, "cost_ns", &info.cost_ns.to_string());
+            push_u64_member(out, "status", u64::from(info.status));
+            push_str_member(out, "outcome", info.outcome.as_str());
+            push_f64_member(out, "queued_ms", info.queued_ms);
+            push_f64_member(out, "duration_ms", info.duration_ms);
+            push_u64_member(out, "bytes_in", info.bytes_in);
+            push_u64_member(out, "bytes_out", info.bytes_out);
+            push_u64_member(out, "cost_ns", info.cost_ns);
             match info.cpu_ns {
-                Some(cpu_ns) => push_member(&mut out, "cpu_ns", &cpu_ns.to_string()),
-                None => push_member(&mut out, "cpu_ns", "null"),
+                Some(cpu_ns) => push_u64_member(out, "cpu_ns", cpu_ns),
+                None => push_raw_member(out, "cpu_ns", b"null"),
             }
-            push_member(&mut out, "remote_addr", &json_string(&info.remote_addr));
+            push_str_member(out, "remote_addr", &info.remote_addr);
         }
         EventKind::SqlDenied(info) => {
-            push_member(&mut out, "pid", &info.pid.to_string());
-            push_member(&mut out, "proxy", &json_string(&info.proxy));
-            push_member(&mut out, "kind", &json_string(info.kind.as_str()));
-            push_member(&mut out, "reason", &json_string(&info.reason));
-            push_member(&mut out, "sqlstate", &json_string(&info.sqlstate));
-            push_member(&mut out, "in_transaction", &json_bool(info.in_transaction));
-            push_member(&mut out, "sql", &json_string(&info.sql));
+            push_u64_member(out, "pid", u64::from(info.pid));
+            push_str_member(out, "proxy", &info.proxy);
+            push_str_member(out, "kind", info.kind.as_str());
+            push_str_member(out, "reason", &info.reason);
+            push_str_member(out, "sqlstate", &info.sqlstate);
+            push_bool_member(out, "in_transaction", info.in_transaction);
+            push_str_member(out, "sql", &info.sql);
         }
         EventKind::PgRefused(info) => {
-            push_member(&mut out, "proxy", &json_string(&info.proxy));
-            push_member(&mut out, "reason", &json_string(info.reason.as_str()));
+            push_str_member(out, "proxy", &info.proxy);
+            push_str_member(out, "reason", info.reason.as_str());
         }
         EventKind::HttpRejected(info) => {
-            push_member(&mut out, "remote_addr", &json_string(&info.remote_addr));
-            push_member(&mut out, "status", &info.status.to_string());
-            push_member(&mut out, "reason", &json_string(info.reason.as_str()));
+            push_str_member(out, "remote_addr", &info.remote_addr);
+            push_u64_member(out, "status", u64::from(info.status));
+            push_str_member(out, "reason", info.reason.as_str());
         }
         EventKind::ProcessSpawned(info) => {
-            push_member(&mut out, "pid", &info.pid.to_string());
-            push_member(&mut out, "uid", &info.uid.to_string());
-            push_member(&mut out, "fork_ms", &json_f64(info.fork_ms));
+            push_u64_member(out, "pid", u64::from(info.pid));
+            push_u64_member(out, "uid", u64::from(info.uid));
+            push_f64_member(out, "fork_ms", info.fork_ms);
         }
         EventKind::ProcessExited(info) => {
-            push_member(&mut out, "pid", &info.pid.to_string());
-            push_member(&mut out, "uid", &info.uid.to_string());
+            push_u64_member(out, "pid", u64::from(info.pid));
+            push_u64_member(out, "uid", u64::from(info.uid));
             // Exactly one of `status` and `signal` (§8.1).
             let (field, code) = match info.exit {
                 ExitKind::Status(status) => ("status", status),
                 ExitKind::Signal(signal) => ("signal", signal),
             };
-            push_member(&mut out, field, &code.to_string());
+            push_i64_member(out, field, i64::from(code));
         }
 
         EventKind::ProcessRetired(info) => {
-            push_member(&mut out, "pid", &info.pid.to_string());
-            push_member(&mut out, "uid", &info.uid.to_string());
-            push_member(&mut out, "reason", &json_string(info.reason.as_str()));
+            push_u64_member(out, "pid", u64::from(info.pid));
+            push_u64_member(out, "uid", u64::from(info.uid));
+            push_str_member(out, "reason", info.reason.as_str());
         }
         EventKind::ProcessCap(info) => {
-            push_member(&mut out, "estimate_bytes", &info.estimate_bytes.to_string());
-            push_member(&mut out, "cap", &info.cap.to_string());
+            push_u64_member(out, "estimate_bytes", info.estimate_bytes);
+            push_u64_member(out, "cap", u64::from(info.cap));
         }
         EventKind::AppOutput(output) => {
-            push_member(&mut out, "stream", &json_string(output.stream.as_str()));
-            push_member(&mut out, "line", &json_string(&output.line));
-            push_member(&mut out, "part", &output.part.to_string());
-            push_member(&mut out, "parts", &output.parts.to_string());
+            push_str_member(out, "stream", output.stream.as_str());
+            push_str_member(out, "line", &output.line);
+            push_u64_member(out, "part", u64::from(output.part));
+            push_u64_member(out, "parts", u64::from(output.parts));
         }
         EventKind::Boot(lifecycle) => {
-            push_lifecycle(&mut out, lifecycle, truncated, true);
+            push_lifecycle(out, lifecycle, truncated, true);
         }
         EventKind::Ready(lifecycle) | EventKind::Shutdown(lifecycle) => {
-            push_lifecycle(&mut out, lifecycle, truncated, false);
+            push_lifecycle(out, lifecycle, truncated, false);
         }
         EventKind::ManifestWarning(info) => {
-            push_member(&mut out, "message", &json_string(&info.message));
+            push_str_member(out, "message", &info.message);
         }
     }
 
     if !truncated.is_empty() {
-        let names = truncated
-            .iter()
-            .map(|name| json_string(name))
-            .collect::<Vec<String>>()
-            .join(",");
-        push_member(&mut out, "truncated", &format!("[{names}]"));
+        begin_member(out, "truncated");
+        push_str_array(out, truncated.iter().copied());
     }
 
-    out.push('}');
-    out
+    out.push(b'}');
 }
 
 /// The lifecycle fields, in the order §8.1 lists them.
@@ -201,153 +221,204 @@ fn encode_with(event: &Event, truncated: &[&'static str]) -> String {
 /// `boot` writes `preset` even when there is none: a `boot` line with
 /// `"preset":null` is a boot with no preset, which is a different statement from
 /// a line that does not mention presets at all (E1).
-fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static str], boot: bool) {
+fn push_lifecycle(
+    out: &mut Vec<u8>,
+    lifecycle: &Lifecycle,
+    truncated: &[&'static str],
+    boot: bool,
+) {
     if let Some(stage) = &lifecycle.stage {
-        push_member(out, "stage", &json_string(stage));
+        push_str_member(out, "stage", stage);
     }
     if let Some(routes) = lifecycle.routes {
-        push_member(out, "routes", &routes.to_string());
+        push_u64_member(out, "routes", u64::from(routes));
     }
     if let Some(workers) = lifecycle.workers {
-        push_member(out, "workers", &workers.to_string());
+        push_u64_member(out, "workers", u64::from(workers));
     }
     if let Some(duration_ms) = lifecycle.duration_ms {
-        push_member(out, "duration_ms", &json_f64(duration_ms));
+        push_f64_member(out, "duration_ms", duration_ms);
     }
     if let Some(seccomp) = lifecycle.seccomp {
-        push_member(out, "seccomp", &json_bool(seccomp));
+        push_bool_member(out, "seccomp", seccomp);
     }
     if let Some(privilege) = &lifecycle.privilege {
-        push_member(out, "privilege", &json_string(privilege));
+        push_str_member(out, "privilege", privilege);
     }
     // D6/M1: whether the children's bounding set is emptied. Reported in both
     // modes, because it is a fact about the boot rather than about init's own
     // set.
     if let Some(dropped) = lifecycle.bounding_set {
-        push_member(
+        push_str_member(
             out,
             "bounding_set",
-            &json_string(if dropped { "dropped" } else { "kept" }),
+            if dropped { "dropped" } else { "kept" },
         );
     }
     // D6: the capabilities an unprivileged init holds. Absent in root mode,
     // where the set is the container's own (§10).
     if !lifecycle.capabilities.is_empty() || truncated.contains(&"capabilities") {
-        push_member(
-            out,
-            "capabilities",
-            &encode_capabilities(&lifecycle.capabilities),
-        );
+        begin_member(out, "capabilities");
+        push_str_array(out, lifecycle.capabilities.iter().map(String::as_str));
     }
     if let Some(immortalize) = lifecycle.immortalize {
-        push_member(
-            out,
-            "immortalize",
-            &json_string(if immortalize { "on" } else { "off" }),
-        );
+        push_str_member(out, "immortalize", if immortalize { "on" } else { "off" });
     }
     if let Some(reason) = &lifecycle.immortalize_reason {
-        push_member(out, "immortalize_reason", &json_string(reason));
+        push_str_member(out, "immortalize_reason", reason);
     }
     if let Some(immortalized) = lifecycle.immortalized {
-        push_member(out, "immortalized", &immortalized.to_string());
+        push_u64_member(out, "immortalized", immortalized);
     }
     if let Some(immortalize_ms) = lifecycle.immortalize_ms {
-        push_member(out, "immortalize_ms", &json_f64(immortalize_ms));
+        push_f64_member(out, "immortalize_ms", immortalize_ms);
     }
     if let Some(mem_total) = lifecycle.mem_total {
-        push_member(out, "mem_total", &mem_total.to_string());
+        push_u64_member(out, "mem_total", mem_total);
     }
     if let Some(mem_used) = lifecycle.mem_used {
-        push_member(out, "mem_used", &mem_used.to_string());
+        push_u64_member(out, "mem_used", mem_used);
     }
     if let Some(max_view_processes) = lifecycle.max_view_processes {
-        push_member(out, "max_view_processes", &max_view_processes.to_string());
+        push_u64_member(out, "max_view_processes", u64::from(max_view_processes));
     }
     // `outputs` is written even when it was emptied, so that a `truncated`
     // entry always refers to a member that is there.
     if !lifecycle.outputs.is_empty() || truncated.contains(&"outputs") {
-        push_member(out, "outputs", &encode_outputs(&lifecycle.outputs));
+        begin_member(out, "outputs");
+        push_outputs(out, &lifecycle.outputs);
     }
     // E1: which preset is in force, what it supplied, and what an explicit
     // variable overrode. The values are the preset's own — blastit's
     // configuration, not the operator's — and the overridden settings are names
     // only.
     match &lifecycle.preset {
-        Some(preset) => push_member(out, "preset", &json_string(preset)),
-        None if boot => push_member(out, "preset", "null"),
+        Some(preset) => push_str_member(out, "preset", preset),
+        None if boot => push_raw_member(out, "preset", b"null"),
         None => {}
     }
     if !lifecycle.preset_settings.is_empty() || truncated.contains(&"preset_settings") {
-        push_member(
-            out,
-            "preset_settings",
-            &encode_settings(&lifecycle.preset_settings),
-        );
+        begin_member(out, "preset_settings");
+        push_settings(out, &lifecycle.preset_settings);
     }
     if !lifecycle.preset_overridden.is_empty() {
-        let names = lifecycle
-            .preset_overridden
-            .iter()
-            .map(|name| json_string(name))
-            .collect::<Vec<String>>()
-            .join(",");
-        push_member(out, "preset_overridden", &format!("[{names}]"));
+        begin_member(out, "preset_overridden");
+        push_str_array(out, lifecycle.preset_overridden.iter().map(String::as_str));
     }
 }
 
 /// The presets' settings as a JSON object: variable name to the preset's value.
-fn encode_settings(settings: &BTreeMap<String, String>) -> String {
-    let mut out = String::from("{");
+fn push_settings(out: &mut Vec<u8>, settings: &BTreeMap<String, String>) {
+    out.push(b'{');
     for (index, (name, value)) in settings.iter().enumerate() {
         if index > 0 {
-            out.push(',');
+            out.push(b',');
         }
-        out.push_str(&json_string(name));
-        out.push(':');
-        out.push_str(&json_string(value));
+        put_str(out, name);
+        out.push(b':');
+        put_str(out, value);
     }
-    out.push('}');
-    out
+    out.push(b'}');
 }
 
-fn encode_capabilities(capabilities: &[String]) -> String {
-    let names = capabilities
-        .iter()
-        .map(|name| json_string(name))
-        .collect::<Vec<String>>()
-        .join(",");
-    format!("[{names}]")
-}
-
-fn encode_outputs(outputs: &BTreeMap<String, Vec<String>>) -> String {
-    let mut out = String::from("{");
+/// The lifecycle `outputs` map as a JSON object: proxy to variable-name list.
+fn push_outputs(out: &mut Vec<u8>, outputs: &BTreeMap<String, Vec<String>>) {
+    out.push(b'{');
     for (index, (proxy, names)) in outputs.iter().enumerate() {
         if index > 0 {
-            out.push(',');
+            out.push(b',');
         }
-        out.push_str(&json_string(proxy));
-        out.push_str(":[");
-        for (index, name) in names.iter().enumerate() {
-            if index > 0 {
-                out.push(',');
-            }
-            out.push_str(&json_string(name));
-        }
-        out.push(']');
+        put_str(out, proxy);
+        out.push(b':');
+        push_str_array(out, names.iter().map(String::as_str));
     }
-    out.push('}');
-    out
+    out.push(b'}');
 }
 
-/// Append `"key":raw` to a half-built object, with the separating comma.
-fn push_member(out: &mut String, key: &str, raw: &str) {
-    if !out.ends_with('{') {
-        out.push(',');
+/// A JSON array of strings, each escaped the way `serde_json` escapes one.
+fn push_str_array<'a>(out: &mut Vec<u8>, items: impl Iterator<Item = &'a str>) {
+    out.push(b'[');
+    for (index, item) in items.enumerate() {
+        if index > 0 {
+            out.push(b',');
+        }
+        put_str(out, item);
     }
-    out.push_str(&json_string(key));
-    out.push(':');
-    out.push_str(raw);
+    out.push(b']');
+}
+
+/// Start a member: the separating comma, the key, and its colon.
+fn begin_member(out: &mut Vec<u8>, key: &str) {
+    if !out.ends_with(b"{") {
+        out.push(b',');
+    }
+    put_str(out, key);
+    out.push(b':');
+}
+
+/// Append the JSON string literal for `text`, with `serde_json`'s escaping.
+///
+/// `serde_json` owns the escaping rules, and writes straight into the buffer so
+/// no per-field `String` is made; writing to a `Vec<u8>` cannot fail.
+fn put_str(out: &mut Vec<u8>, text: &str) {
+    let _ = serde_json::to_writer(&mut *out, text);
+}
+
+/// `"ts":"2026-10-25T14:02:11.384Z"`: the one spelling the stream uses.
+///
+/// Written digit by digit rather than through [`crate::format_timestamp`],
+/// which would allocate a `String` per event for a line every event carries.
+fn push_timestamp_member(out: &mut Vec<u8>, ts: OffsetDateTime) {
+    let ts = ts.to_offset(UtcOffset::UTC);
+    begin_member(out, "ts");
+    let _ = write!(
+        out,
+        "\"{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z\"",
+        ts.year(),
+        u8::from(ts.month()),
+        ts.day(),
+        ts.hour(),
+        ts.minute(),
+        ts.second(),
+        ts.millisecond()
+    );
+}
+
+/// `"key":"text"`, a string member with `serde_json`'s escaping.
+fn push_str_member(out: &mut Vec<u8>, key: &str, text: &str) {
+    begin_member(out, key);
+    put_str(out, text);
+}
+
+/// `"key":raw`, for a value that is already JSON: `null`, or a literal.
+fn push_raw_member(out: &mut Vec<u8>, key: &str, raw: &[u8]) {
+    begin_member(out, key);
+    out.extend_from_slice(raw);
+}
+
+/// `"key":123`, an unsigned count or identifier.
+fn push_u64_member(out: &mut Vec<u8>, key: &str, value: u64) {
+    begin_member(out, key);
+    let _ = write!(out, "{value}");
+}
+
+/// `"key":-1`, a signed value: an exit code or a signal.
+fn push_i64_member(out: &mut Vec<u8>, key: &str, value: i64) {
+    begin_member(out, key);
+    let _ = write!(out, "{value}");
+}
+
+/// A JSON number for `value`, through `serde_json` so the spelling is the one
+/// it writes for finite values and the `null` it writes for the rest.
+fn push_f64_member(out: &mut Vec<u8>, key: &str, value: f64) {
+    begin_member(out, key);
+    let _ = serde_json::to_writer(&mut *out, &value);
+}
+
+/// `"key":true` or `"key":false`.
+fn push_bool_member(out: &mut Vec<u8>, key: &str, value: bool) {
+    begin_member(out, key);
+    out.extend_from_slice(if value { b"true" } else { b"false" });
 }
 
 /// Parse one JSON line back into an [`Event`], or `None` when it is not a line
@@ -384,6 +455,233 @@ pub fn decode_json(line: &str) -> Option<Event> {
         event = event.with_request_id(request_id);
     }
     Some(event)
+}
+
+/// Restamp and canonicalise one line forwarded from an events pipe.
+///
+/// init is the only writer to stdout, so it labels every event it forwards
+/// with the `component` — and `route`, when the pipe implies one — of the pipe
+/// it arrived on, never the payload's own (§8.1). It also decides the key
+/// order: the line an operator reads has its members sorted by key, which is
+/// what a `serde_json` `Map` (a `BTreeMap`) produced when this went through
+/// one, and the output must not change. This writes that same line straight
+/// into `out`, borrowing each member's text from `line` instead of building the
+/// map: the members are copied in order, with `component` and `route` replaced
+/// or inserted, and then sorted by key.
+///
+/// Returns the line's `level` member when it carried one, so the caller can
+/// apply `BLASTIT_LOG_LEVEL` without reading the line twice, and [`None`] when
+/// `line` is not a JSON object — the caller's cue to drop it with a warning.
+///
+/// Only lines this build's [`encode_json`] wrote are expected here: an events
+/// pipe belongs to http, scheduler or dbproxy, all of which encode with this
+/// crate. The member values are copied verbatim, which is exact for them
+/// because the encoder already writes each number and string the way
+/// `serde_json` reads it back.
+pub fn restamp_json_into<'a>(
+    out: &mut Vec<u8>,
+    line: &'a str,
+    component: &str,
+    route: Option<&str>,
+) -> Option<Option<&'a str>> {
+    let parsed = parse_members(line)?;
+    let level = parsed
+        .iter()
+        .find(|member| member.key == "\"level\"")
+        .and_then(|member| plain_string_value(member.value));
+
+    let component_value = json_literal(component);
+    let route_value = route.map(json_literal);
+
+    let mut members: Vec<(&str, &str)> = Vec::with_capacity(parsed.len() + 2);
+    let mut saw_component = false;
+    let mut saw_route = false;
+    for member in &parsed {
+        let value = match member.key {
+            "\"component\"" => {
+                saw_component = true;
+                component_value.as_str()
+            }
+            "\"route\"" => match route_value.as_deref() {
+                Some(route) => {
+                    saw_route = true;
+                    route
+                }
+                // An events pipe implies no route, so the payload keeps its own.
+                None => member.value,
+            },
+            _ => member.value,
+        };
+        members.push((member.key, value));
+    }
+    if !saw_component {
+        members.push(("\"component\"", component_value.as_str()));
+    }
+    if let Some(route) = route_value.as_deref()
+        && !saw_route
+    {
+        members.push(("\"route\"", route));
+    }
+    members.sort_unstable_by(|left, right| left.0.cmp(right.0));
+
+    out.reserve(line.len() + component.len() + 16);
+    out.push(b'{');
+    for (index, (key, value)) in members.iter().enumerate() {
+        if index > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(key.as_bytes());
+        out.push(b':');
+        out.extend_from_slice(value.as_bytes());
+    }
+    out.push(b'}');
+    Some(level)
+}
+
+/// A guess at how many members an encoded line has, so the member list does not
+/// grow a handful of times on every forwarded event. A line with more members
+/// simply grows like any other `Vec`.
+const MEMBERS_HINT: usize = 16;
+
+/// One top-level member of a JSON object, as its source text.
+struct Member<'a> {
+    /// The key, with the surrounding quotes, as it appears in the source.
+    key: &'a str,
+    /// The value's raw text, as it appears in the source.
+    value: &'a str,
+}
+
+/// The top-level members of a JSON object, or `None` when `line` is not one.
+///
+/// A scanner rather than a parse: every member keeps the text it had, so
+/// nothing is normalised. Nesting is tracked so a comma or brace inside a
+/// string, array or object does not end the member early.
+fn parse_members(line: &str) -> Option<Vec<Member<'_>>> {
+    let bytes = line.as_bytes();
+    let mut index = skip_whitespace(bytes, 0);
+    if bytes.get(index) != Some(&b'{') {
+        return None;
+    }
+    index += 1;
+    let mut members = Vec::with_capacity(MEMBERS_HINT);
+    loop {
+        index = skip_whitespace(bytes, index);
+        if bytes.get(index) == Some(&b'}') {
+            return Some(members);
+        }
+        if !members.is_empty() {
+            if bytes.get(index) != Some(&b',') {
+                return None;
+            }
+            index = skip_whitespace(bytes, index + 1);
+        }
+        if bytes.get(index) != Some(&b'"') {
+            return None;
+        }
+        let key_end = scan_string(bytes, index)?;
+        let key = &line[index..key_end];
+        index = skip_whitespace(bytes, key_end);
+        if bytes.get(index) != Some(&b':') {
+            return None;
+        }
+        index = skip_whitespace(bytes, index + 1);
+        let value_end = scan_value(bytes, index)?;
+        members.push(Member {
+            key,
+            value: &line[index..value_end],
+        });
+        index = value_end;
+    }
+}
+
+/// The index just past the whitespace starting at `index`.
+fn skip_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while matches!(
+        bytes.get(index).copied(),
+        Some(b' ' | b'\t' | b'\n' | b'\r')
+    ) {
+        index += 1;
+    }
+    index
+}
+
+/// The index just past the JSON string starting at `index`, which must be `"`.
+fn scan_string(bytes: &[u8], mut index: usize) -> Option<usize> {
+    index += 1;
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'\\' => index += 2,
+            b'"' => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// The index just past the JSON value starting at `index`.
+fn scan_value(bytes: &[u8], index: usize) -> Option<usize> {
+    match bytes.get(index)? {
+        b'"' => scan_string(bytes, index),
+        b'{' | b'[' => scan_container(bytes, index),
+        // A number, `true`, `false` or `null`: everything up to the member's
+        // end. The encoder writes no whitespace, so the end is the next comma
+        // or brace at this level.
+        _ => {
+            let mut end = index;
+            while !matches!(bytes.get(end).copied(), None | Some(b',' | b'}')) {
+                end += 1;
+            }
+            // A member with no value at all (`{"a":}`) is not JSON.
+            if end == index {
+                return None;
+            }
+            Some(end)
+        }
+    }
+}
+
+/// The index just past the object or array starting at `index`, which must be
+/// `{` or `[`.
+fn scan_container(bytes: &[u8], index: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = index;
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'"' => index = scan_string(bytes, index)?,
+            b'{' | b'[' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.checked_sub(1)?;
+                index += 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// The text inside a JSON string literal this build wrote.
+///
+/// The only values read this way are the enumerated names `level` and its
+/// peers, which are ASCII and never escaped, so an escape means "not a value
+/// this build knows" rather than something to decode.
+fn plain_string_value(raw: &str) -> Option<&str> {
+    let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
+    if inner.contains('\\') {
+        None
+    } else {
+        Some(inner)
+    }
+}
+
+/// A JSON string literal for `text`, with `serde_json`'s escaping.
+fn json_literal(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned())
 }
 
 /// The event kind named by the line's `event` member.
@@ -747,7 +1045,7 @@ fn parse_retire_reason(text: &str) -> RetireReason {
     }
 }
 
-/// `2026-10-25T14:02:11.384Z`, the one spelling [`format_timestamp`] writes.
+/// `2026-10-25T14:02:11.384Z`, the one spelling `format_timestamp` writes.
 ///
 /// Parsed field by field rather than with `time`'s RFC 3339 parser: that one
 /// lives behind a feature this crate does not need for anything else, and a
@@ -775,21 +1073,6 @@ fn parse_timestamp(text: &str) -> Option<OffsetDateTime> {
         time::Date::from_calendar_date(year, time::Month::try_from(month).ok()?, day).ok()?;
     let clock = time::Time::from_hms_milli(hour, minute, second, millisecond).ok()?;
     Some(time::PrimitiveDateTime::new(date, clock).assume_utc())
-}
-
-/// A JSON string literal. `serde_json` owns the escaping rules.
-fn json_string(text: &str) -> String {
-    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned())
-}
-
-/// A JSON number. Non-finite values become `null`, which is what
-/// `serde_json` does for them, so the result is always parseable.
-fn json_f64(value: f64) -> String {
-    serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned())
-}
-
-fn json_bool(value: bool) -> String {
-    if value { "true" } else { "false" }.to_owned()
 }
 
 /// Every string in `event` that may be shortened, in encode order.
@@ -1191,6 +1474,114 @@ mod tests {
         // always written.
         assert_eq!(value["bytes_in"], 0);
         assert_eq!(value["ts"], "2026-10-25T14:02:11.384Z");
+    }
+
+    #[test]
+    fn request_lines_are_pinned_exactly() {
+        // The encoder writes straight into a buffer now, with `serde_json`
+        // formatting and escaping each field. These are the byte-for-byte
+        // lines the stream must keep producing, one per shape a `request`
+        // takes: a query string to drop, a `HEAD` that matched nothing, an
+        // aborted request, and a missing CPU report (D5).
+        let cases = [
+            (
+                Event::at(
+                    fixture::request_ts(),
+                    Component::Scheduler,
+                    EventKind::Request(
+                        RequestInfo::from_target("GET", "/products/42/?utm_source=mail")
+                            .with_rule(0)
+                            .with_status(200)
+                            .with_timings(0.1, 18.4)
+                            .with_bytes(0, 5120)
+                            .with_cost(18_400_000, Some(9_100_000))
+                            .with_remote_addr("203.0.113.7"),
+                    ),
+                )
+                .with_request_id("01JB9")
+                .with_route("product-detail"),
+                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","route":"product-detail","request_id":"01JB9","method":"GET","path":"/products/42/","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_in":0,"bytes_out":5120,"cost_ns":18400000,"cpu_ns":9100000,"remote_addr":"203.0.113.7"}"#,
+            ),
+            (
+                Event::at(
+                    fixture::request_ts(),
+                    Component::Scheduler,
+                    EventKind::Request(
+                        RequestInfo::from_target("HEAD", "/health")
+                            .with_status(404)
+                            .with_outcome(Outcome::Unmatched)
+                            .with_timings(0.0, 0.2)
+                            .with_bytes(0, 0)
+                            .with_cost(1500, None)
+                            .with_remote_addr("198.51.100.9"),
+                    ),
+                ),
+                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","route":null,"method":"HEAD","path":"/health","status":404,"outcome":"unmatched","queued_ms":0.0,"duration_ms":0.2,"bytes_in":0,"bytes_out":0,"cost_ns":1500,"cpu_ns":null,"remote_addr":"198.51.100.9"}"#,
+            ),
+            (
+                Event::at(
+                    fixture::request_ts(),
+                    Component::Scheduler,
+                    EventKind::Request(
+                        RequestInfo::from_target("POST", "/checkout?token=secret")
+                            .with_status(499)
+                            .with_outcome(Outcome::ClientGone)
+                            .with_timings(2.5, 120.0)
+                            .with_bytes(512, 0)
+                            .with_cost(60_000_000, Some(12_345_678))
+                            .with_remote_addr("203.0.113.7"),
+                    ),
+                ),
+                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","route":null,"method":"POST","path":"/checkout","status":499,"outcome":"client_gone","queued_ms":2.5,"duration_ms":120.0,"bytes_in":512,"bytes_out":0,"cost_ns":60000000,"cpu_ns":12345678,"remote_addr":"203.0.113.7"}"#,
+            ),
+            (
+                Event::at(
+                    fixture::request_ts(),
+                    Component::Scheduler,
+                    EventKind::Request(
+                        RequestInfo::from_target("GET", "/oops")
+                            .with_status(502)
+                            .with_outcome(Outcome::ViewDied)
+                            .with_timings(1.0, 5.0)
+                            .with_bytes(0, 0)
+                            .with_cost(5_000_000, None)
+                            .with_remote_addr("203.0.113.7"),
+                    ),
+                )
+                .with_request_id("01JBC")
+                .with_route("product-detail"),
+                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"warn","event":"request","component":"scheduler","route":"product-detail","request_id":"01JBC","method":"GET","path":"/oops","status":502,"outcome":"view_died","queued_ms":1.0,"duration_ms":5.0,"bytes_in":0,"bytes_out":0,"cost_ns":5000000,"cpu_ns":null,"remote_addr":"203.0.113.7"}"#,
+            ),
+        ];
+
+        for (event, expected) in cases {
+            let line = encode_json(&event);
+            assert_eq!(line, expected, "{}", event.kind.name());
+            assert!(!line.contains("utm_source"), "query string leaked: {line}");
+            assert!(!line.contains("token="), "query string leaked: {line}");
+        }
+    }
+
+    #[test]
+    fn encoding_into_a_reused_buffer_matches_encode_json() {
+        // The sink clears one buffer and encodes every event into it, and the
+        // encoder appends: one event's bytes must be exactly what `encode_json`
+        // returns, with none of the previous event left behind and no byte of a
+        // prefix disturbed.
+        let mut buffer = Vec::with_capacity(256);
+        for event in every_kind() {
+            buffer.clear();
+            encode_json_into(&mut buffer, &event);
+            assert_eq!(buffer, encode_json(&event).as_bytes());
+        }
+
+        buffer.clear();
+        buffer.extend_from_slice(b"prefix|");
+        encode_json_into(&mut buffer, &request_event());
+        assert_eq!(
+            buffer,
+            format!("prefix|{}", encode_json(&request_event())).as_bytes()
+        );
     }
 
     #[test]
@@ -2066,12 +2457,12 @@ mod tests {
     }
 
     #[test]
-    fn push_member_separates_members() {
-        let mut out = String::from("{");
-        push_member(&mut out, "a", "1");
-        push_member(&mut out, "b", "\"x\"");
-        out.push('}');
-        assert_eq!(out, r#"{"a":1,"b":"x"}"#);
+    fn member_separates_members() {
+        let mut out = Vec::from(&b"{"[..]);
+        push_u64_member(&mut out, "a", 1);
+        push_str_member(&mut out, "b", "x");
+        out.push(b'}');
+        assert_eq!(out, br#"{"a":1,"b":"x"}"#);
     }
 
     #[test]
@@ -2081,5 +2472,99 @@ mod tests {
             assert!(!event.kind.name().is_empty());
         }
         assert_eq!(Component::Init.as_str(), "init");
+    }
+
+    /// The line the old `Value` path produced: parse to a map, stamp, then
+    /// re-serialise — which sorts the members by key.
+    fn round_trip_restamp(line: &str, component: &str, route: Option<&str>) -> String {
+        let mut value: Value = serde_json::from_str(line).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("component".to_owned(), Value::from(component));
+        if let Some(route) = route {
+            object.insert("route".to_owned(), Value::from(route));
+        }
+        serde_json::to_string(&value).unwrap()
+    }
+
+    #[test]
+    fn restamping_matches_the_old_round_trip_for_every_kind() {
+        // init must keep emitting the exact bytes the `Value` round trip did —
+        // the members sorted by key, with `component` and `route` stamped from
+        // the pipe. This pins the borrowed scanner against that for every event
+        // shape, replacing a route that is there and inserting one that is not.
+        let mut events = every_kind();
+        // A line the encoder had to truncate carries a `truncated` array too.
+        events.push(fixture::event(EventKind::ManifestWarning(
+            ManifestWarning::new("x".repeat(3000)),
+        )));
+
+        for event in events {
+            let line = encode_json(&event);
+
+            let mut buffer = Vec::new();
+            let level = restamp_json_into(&mut buffer, &line, "scheduler", None);
+            assert_eq!(
+                buffer,
+                round_trip_restamp(&line, "scheduler", None).as_bytes(),
+                "{line}"
+            );
+            assert_eq!(level.flatten(), Some(event.level().as_str()), "{line}");
+
+            let mut buffer = Vec::new();
+            let level = restamp_json_into(&mut buffer, &line, "view", Some("about"));
+            assert_eq!(
+                buffer,
+                round_trip_restamp(&line, "view", Some("about")).as_bytes(),
+                "{line}"
+            );
+            assert_eq!(level.flatten(), Some(event.level().as_str()), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_forwarded_line_that_is_not_an_object_is_rejected() {
+        for line in [
+            "",
+            "not json",
+            "[]",
+            "null",
+            "5",
+            "\"a string\"",
+            "{\"a\":}",
+            "{\"a\":1,}",
+            "{",
+        ] {
+            let mut buffer = Vec::new();
+            assert!(
+                restamp_json_into(&mut buffer, line, "init", None).is_none(),
+                "{line} was accepted"
+            );
+        }
+
+        // An empty object is an object, and the stamp is added to it.
+        let mut buffer = Vec::new();
+        let level = restamp_json_into(&mut buffer, "{}", "init", None);
+        assert!(matches!(level, Some(None)), "{level:?}");
+        assert_eq!(buffer, br#"{"component":"init"}"#);
+    }
+
+    #[test]
+    fn restamping_keeps_a_payload_route_when_the_pipe_implies_none() {
+        // An events pipe never implies a route, so the payload's own `route`
+        // stays — and an unmatched request's explicit `null` route is kept too.
+        let line = encode_json(
+            &fixture::event(EventKind::ProcessCap(ProcessCap::new(1, 2))).with_route("about"),
+        );
+        let mut buffer = Vec::new();
+        restamp_json_into(&mut buffer, &line, "scheduler", None);
+        assert_eq!(
+            buffer,
+            round_trip_restamp(&line, "scheduler", None).as_bytes()
+        );
+        assert!(
+            String::from_utf8(buffer)
+                .unwrap()
+                .contains(r#""route":"about""#)
+        );
     }
 }

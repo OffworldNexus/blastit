@@ -9,18 +9,20 @@
 //! scheduler or dbproxy as fatal (§8), so the exit code matters only to whoever
 //! reads the log: it is `0` when the role returned cleanly.
 
+use std::cell::RefCell;
 use std::io;
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use blastit_events::{Event, encode_json};
+use blastit_events::{Event, MAX_EVENT_BYTES, encode_json_into};
 use blastit_frame::Limits;
 use blastit_http::HttpConfig;
 use blastit_manifest::RoutingTable;
 use blastit_scheduler::{RouteInfo, SchedulerConfig, UnixCtl};
 use tokio::runtime::{Builder, Runtime};
 
-use crate::logs::write_line;
+use crate::logs::write_bytes;
 
 /// The descriptors the http role owns.
 #[derive(Debug, Clone, Copy)]
@@ -44,13 +46,47 @@ pub struct SchedulerFds {
     pub events: RawFd,
 }
 
+// One reusable line buffer per thread, for `events_sink`.
+//
+// The sink is called once per event and may run on any of a role's worker
+// threads, so a buffer per thread takes the line allocation out of every
+// request without a lock. It is borrowed for exactly one encode and write, and
+// encoding never emits an event, so a thread cannot re-enter its own borrow.
+// The capacity is one line plus its newline, both of which the encoder
+// guarantees stay within `MAX_EVENT_BYTES`.
+thread_local! {
+    static EVENTS_LINE: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(MAX_EVENT_BYTES + 1));
+}
+
 /// An events sink that writes one JSON line per event to `fd` (§8.1).
 ///
 /// Every crate's `Emit` is this same closure type, and the sink may be called
 /// from several tasks at once: one `write` per line is what makes that safe,
-/// because a line never exceeds `PIPE_BUF`.
+/// because a line never exceeds `PIPE_BUF`. The line is built in a reused
+/// per-thread buffer, so emitting an event allocates nothing once the buffer
+/// has grown.
+///
+/// init is the only reader, and a closed events pipe never reopens, so once a
+/// write fails there is no one left to consume an event: the sink stops
+/// encoding them. Nothing an operator sees changes — a closed pipe produces no
+/// line either way — and a server being torn down stops spending a request's
+/// worth of work on lines nobody will read.
 pub fn events_sink(fd: RawFd) -> Arc<dyn Fn(Event) + Send + Sync> {
-    Arc::new(move |event: Event| write_line(fd, &encode_json(&event)))
+    let alive = AtomicBool::new(true);
+    Arc::new(move |event: Event| {
+        if !alive.load(Ordering::Relaxed) {
+            return;
+        }
+        EVENTS_LINE.with(|line| {
+            let mut line = line.borrow_mut();
+            line.clear();
+            encode_json_into(&mut line, &event);
+            line.push(b'\n');
+            if !write_bytes(fd, &line) {
+                alive.store(false, Ordering::Relaxed);
+            }
+        });
+    })
 }
 
 /// A multi-threaded tokio runtime for a role that needs one.
