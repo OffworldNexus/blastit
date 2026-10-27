@@ -1,0 +1,7 @@
+# The three servers under test and the app's one dependency. Pinned by
+# major.minor, like the e2e apps': the numbers are only meaningful for the
+# versions actually run, and a silent minor bump should be a visible change.
+psycopg[binary]==3.*
+psycopg-pool==3.*
+gunicorn==26.*
+granian==2.*

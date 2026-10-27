@@ -1,0 +1,58 @@
+---
+# Defaults for the benchmark provisioning. Everything can be overridden from the
+# environment so a run can be pointed at another account, region or size without
+# editing this file. `default(x, true)` treats an empty variable as unset.
+#
+# The one variable with no default is DO_API_TOKEN: a DigitalOcean API token
+# with read/write scope on the account.
+do_api_token: "{{ lookup('ansible.builtin.env', 'DO_API_TOKEN') }}"
+do_api_base: https://api.digitalocean.com/v2
+
+region: "{{ lookup('ansible.builtin.env', 'DO_REGION') | default('lon1', true) }}"
+# Only the CPU-Optimized / General Purpose families have dedicated vCPUs, and
+# they are not offered in every region (ams3, notably, has neither).
+image: "{{ lookup('ansible.builtin.env', 'BENCH_IMAGE_SLUG') | default('ubuntu-24-04-x64', true) }}"
+server_size: "{{ lookup('ansible.builtin.env', 'BENCH_SERVER_SIZE') | default('c-16', true) }}"
+loadgen_size: "{{ lookup('ansible.builtin.env', 'BENCH_LOADGEN_SIZE') | default('c-8', true) }}"
+
+# Which cores each side is pinned to (see benchmark/compose.yaml).
+server_cpus: "{{ lookup('ansible.builtin.env', 'BENCH_SERVER_CPUS') | default('0-7', true) }}"
+db_cpus: "{{ lookup('ansible.builtin.env', 'BENCH_DB_CPUS') | default('8-11', true) }}"
+loadgen_cpus: "{{ lookup('ansible.builtin.env', 'BENCH_LOADGEN_CPUS') | default('0-7', true) }}"
+
+# The managed PostgreSQL cluster and its built-in pool.
+pg_size: "{{ lookup('ansible.builtin.env', 'BENCH_PG_SIZE') | default('db-s-1vcpu-1gb', true) }}"
+pg_version: "{{ lookup('ansible.builtin.env', 'BENCH_PG_VERSION') | default('18', true) }}"
+db_name: "{{ lookup('ansible.builtin.env', 'BENCH_PG_DB') | default('defaultdb', true) }}"
+db_user: "{{ lookup('ansible.builtin.env', 'BENCH_PG_USER') | default('doadmin', true) }}"
+pool_name: "{{ lookup('ansible.builtin.env', 'BENCH_POOL_NAME') | default('bench', true) }}"
+pool_size: "{{ lookup('ansible.builtin.env', 'BENCH_POOL_SIZE') | default(20) }}"
+
+# Leave empty to let DigitalOcean place the cluster in the region's default VPC
+# (the droplets go there too); set it to pin a specific VPC.
+vpc_uuid: "{{ lookup('ansible.builtin.env', 'DO_VPC_UUID') | default('', true) }}"
+
+# Names. Everything created is tagged `tag`, which is what teardown finds.
+prefix: "{{ lookup('ansible.builtin.env', 'BENCH_PREFIX') | default('blastit-bench', true) }}"
+tag: "{{ prefix }}"
+ssh_key_name: "{{ lookup('ansible.builtin.env', 'BENCH_SSH_KEY_NAME') | default(prefix + '-key', true) }}"
+ssh_pub_key_path: "{{ lookup('ansible.builtin.env', 'BENCH_SSH_PUB_KEY') | default(lookup('ansible.builtin.env', 'HOME') + '/.ssh/id_rsa.pub', true) }}"
+
+# How the benchmark is run once the hosts are up.
+port: "{{ lookup('ansible.builtin.env', 'BENCH_PORT') | default('18090', true) }}"
+concurrency: "{{ lookup('ansible.builtin.env', 'BENCH_CONCURRENCY') | default('400', true) }}"
+grid_duration: "{{ lookup('ansible.builtin.env', 'BENCH_GRID_DURATION') | default(5) }}"
+grid_runs: "{{ lookup('ansible.builtin.env', 'BENCH_GRID_RUNS') | default(1) }}"
+compare_duration: "{{ lookup('ansible.builtin.env', 'BENCH_COMPARE_DURATION') | default(10) }}"
+compare_runs: "{{ lookup('ansible.builtin.env', 'BENCH_COMPARE_RUNS') | default(3) }}"
+
+# Off by default: `-e run_benchmark=true` also drives the grid + comparison and
+# fetches the result JSON back into benchmark/results/.
+run_benchmark: "{{ lookup('ansible.builtin.env', 'BENCH_RUN') | default('false', true) | bool }}"
+# On by default: build the blastit wheel locally before shipping it. PYO3_PYTHON
+# names the CPython 3.13 to build against; otherwise `uv python find 3.13`.
+build_wheel: "{{ lookup('ansible.builtin.env', 'BENCH_BUILD_WHEEL') | default('true', true) | bool }}"
+pyo3_python: "{{ lookup('ansible.builtin.env', 'PYO3_PYTHON') | default('', true) }}"
+
+repo_root: "{{ playbook_dir }}/../.."
+bench_archive: "{{ lookup('ansible.builtin.env', 'TMPDIR') | default('/tmp', true) }}/blastit-bench-sync.tgz"

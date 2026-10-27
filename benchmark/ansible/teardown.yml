@@ -1,0 +1,71 @@
+---
+# Destroy everything setup.yml created in an account/region.
+#
+#   export DO_API_TOKEN=...
+#   export DO_REGION=lon1              # optional
+#   ansible-playbook teardown.yml
+#   ansible-playbook teardown.yml -e keep_ssh_key=true   # leave the key behind
+#
+# It finds resources by the tag/name prefix, so nothing else in the account is
+# touched. Everything here is the REST API directly, because the collection has
+# no module for pools or database firewalls and a delete needs no more than this.
+
+- name: Tear the benchmark down
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require an API token
+      ansible.builtin.assert:
+        that: do_api_token | length > 0
+        fail_msg: "set DO_API_TOKEN to a read/write DigitalOcean API token"
+
+    - name: List the tagged droplets
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/droplets?tag_name={{ tag }}&per_page=200"
+        headers: { Authorization: "Bearer {{ do_api_token }}" }
+        status_code: 200
+      register: tagged_droplets
+    - name: Destroy them
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/droplets/{{ item.id }}"
+        method: DELETE
+        headers: { Authorization: "Bearer {{ do_api_token }}" }
+        status_code: [204]
+      loop: "{{ tagged_droplets.json.droplets | default([]) }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: droplet_deletes
+
+    - name: List the database clusters
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/databases?per_page=200"
+        headers: { Authorization: "Bearer {{ do_api_token }}" }
+        status_code: 200
+      register: all_databases
+    - name: Destroy ours
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/databases/{{ item.id }}"
+        method: DELETE
+        headers: { Authorization: "Bearer {{ do_api_token }}" }
+        status_code: [204]
+      loop: "{{ all_databases.json.databases | selectattr('name', 'equalto', prefix + '-pg') | list }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: db_delete
+
+    - name: List the account's SSH keys
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/account/keys?per_page=200"
+        headers: { Authorization: "Bearer {{ do_api_token }}" }
+        status_code: 200
+      register: keys
+      when: not (keep_ssh_key | default(false) | bool)
+    - name: Remove the key we added
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/account/keys/{{ item.fingerprint }}"
+        method: DELETE
+        headers: { Authorization: "Bearer {{ do_api_token }}" }
+        status_code: [204]
+      loop: "{{ keys.json.ssh_keys | selectattr('name', 'equalto', ssh_key_name) | list }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: key_delete
+      when: not (keep_ssh_key | default(false) | bool)
