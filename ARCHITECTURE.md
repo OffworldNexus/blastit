@@ -370,11 +370,16 @@ does what it is told. ("View" in the rest of this document means a route and
 its process.)
 
 * A Rust I/O thread reads frames from the scheduler channel. Each `REQ_HEAD`
-  starts a **new OS thread that attaches to the interpreter**. That thread
-  builds a standard WSGI `environ` and calls the WSGI callable, the same one
-  in every process, so the app does its own routing and middleware as usual.
-  It then streams the response back. blastit adds `blastit.route` (the route's
-  name) to `environ`, for logging only. `REMOTE_ADDR` is the resolved client
+  is handed to a **pooled request thread** that attaches to the interpreter:
+  one that has just finished a request parks and takes the next, retiring once
+  it has been idle for a while, so a busy view does not create and destroy a
+  thread per request. That thread builds a standard WSGI `environ` and calls
+  the WSGI callable, the same one in every process, so the app does its own
+  routing and middleware as usual. It then streams the response back. Because
+  a worker serves many requests, per-thread application state such as
+  `threading.local` persists across them, as in any threaded WSGI server.
+  blastit adds `blastit.route` (the route's name) to `environ`, for logging
+  only. `REMOTE_ADDR` is the resolved client
   address (§2.3) and `REMOTE_PORT` is the port the request arrived on: the
   peer's, when the peer had one — a client a trusted proxy named has no port of
   its own, so `REMOTE_PORT` is the connection's and `REMOTE_ADDR` is still who
@@ -546,7 +551,7 @@ sequenceDiagram
         S->>S: SPAWN via init, see §4
     end
     S->>V: REQ_HEAD (req_id rewritten)
-    V->>T: new OS thread, attached to the interpreter
+    V->>T: pooled request thread, attached to the interpreter
     T->>T: build standard WSGI environ
     T->>T: app(environ, start_response): the app routes it
     T->>D: connect /proc/self/cwd/.s.PGSQL.5432 (only its uid may)

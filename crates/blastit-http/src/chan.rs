@@ -50,6 +50,19 @@ const WRITE_QUEUE: usize = 64;
 /// Bytes read from `http.chan` at a time.
 const CHANNEL_READ: usize = 64 * 1024;
 
+/// Most frames one batch may carry.
+///
+/// The writer drains what is already queued into one buffer so a burst leaves
+/// in one write, but the batch has to stay small enough that a cancel arriving
+/// behind it waits for one batch and no more — otherwise a stream that was
+/// given up on would be deferred behind an unbounded run of body frames. This
+/// and [`BATCH_BYTES`] stop the drain, whichever is reached first, so the worst
+/// case is one frame larger than that cap.
+const BATCH_FRAMES: usize = 64;
+
+/// Most bytes one batch may carry; see [`BATCH_FRAMES`].
+const BATCH_BYTES: usize = 256 * 1024;
+
 /// One open stream, as the channel sees it.
 struct Entry {
     /// Frames on their way to the connection. Unbounded on purpose: the reader
@@ -315,17 +328,37 @@ impl Stream {
 
     /// Send `REQ_HEAD`, which starts the request.
     pub async fn send_head(&mut self, head: ReqHead) -> Result<(), HttpError> {
-        self.send(Frame::ReqHead(head)).await
+        self.send_frame(Frame::ReqHead(head)).await
     }
 
     /// Send a `REQ_BODY` frame.
     pub async fn send_body(&mut self, body: Vec<u8>) -> Result<(), HttpError> {
-        self.send(Frame::ReqBody(body)).await
+        self.send_frame(Frame::ReqBody(body)).await
     }
 
     /// Send `REQ_END`: the request body is complete.
     pub async fn send_end(&mut self) -> Result<(), HttpError> {
-        self.send(Frame::ReqEnd).await
+        self.send_frame(Frame::ReqEnd).await
+    }
+
+    /// Send one already-built frame, for a caller that has to measure it before
+    /// sending it.
+    ///
+    /// A connection sizes a request head with
+    /// [`Limits::encoded_len`](blastit_frame::Limits::encoded_len) before it
+    /// knows whether the frame fits; going through [`Stream::send_head`] then
+    /// would mean rebuilding the frame from a clone. Handing over the frame the
+    /// connection already holds keeps the head to the one conversion it needs
+    /// and leaves the writer to encode it exactly once.
+    pub async fn send_frame(&self, frame: Frame) -> Result<(), HttpError> {
+        if !self.shared.is_alive() {
+            return Err(HttpError::ChannelClosed);
+        }
+        self.shared
+            .out
+            .send((self.id, frame))
+            .await
+            .map_err(|_| HttpError::ChannelClosed)
     }
 
     /// Send `CANCEL`: the client went away or the response was given up on.
@@ -472,17 +505,6 @@ impl Stream {
             }
         }
     }
-
-    async fn send(&self, frame: Frame) -> Result<(), HttpError> {
-        if !self.shared.is_alive() {
-            return Err(HttpError::ChannelClosed);
-        }
-        self.shared
-            .out
-            .send((self.id, frame))
-            .await
-            .map_err(|_| HttpError::ChannelClosed)
-    }
 }
 
 impl Drop for Stream {
@@ -499,7 +521,34 @@ fn is_response(frame: &Frame) -> bool {
     )
 }
 
+/// The next frame for the batch being built, or `None` once the batch is full
+/// or both queues are momentarily empty.
+///
+/// `urgent` is asked first, so a cancel or a window that arrives while the
+/// batch is filling takes its place ahead of the request bytes still queued
+/// behind it, the same order the biased select gives the batch's first frame.
+fn next_batched(
+    urgent: &mut mpsc::UnboundedReceiver<(u32, Frame)>,
+    outgoing: &mut mpsc::Receiver<(u32, Frame)>,
+    frames: usize,
+    bytes: usize,
+) -> Option<(u32, Frame)> {
+    if frames >= BATCH_FRAMES || bytes >= BATCH_BYTES {
+        return None;
+    }
+    if let Ok(frame) = urgent.try_recv() {
+        return Some(frame);
+    }
+    outgoing.try_recv().ok()
+}
+
 /// Encode everything the connections send, cancels first.
+///
+/// The frame the biased select produces starts a batch and everything already
+/// queued behind it rides the same buffer, so a burst leaves in one `write_all`
+/// instead of one per frame. Cancels and windows are drained first and the
+/// batch is capped, so nothing queued when the writer wakes is deferred behind
+/// an unbounded run of body bytes.
 async fn writer_task<W>(
     mut writer: W,
     mut outgoing: mpsc::Receiver<(u32, Frame)>,
@@ -509,7 +558,7 @@ async fn writer_task<W>(
     W: AsyncWrite + Unpin,
 {
     let mut buf: Vec<u8> = Vec::new();
-    loop {
+    'batching: loop {
         // `biased` keeps cancels ahead of request bytes: a stream that was
         // given up on should not have to wait behind a body upload. Neither
         // queue can close while this task holds `shared`, so the only way out
@@ -523,13 +572,22 @@ async fn writer_task<W>(
             break;
         };
         buf.clear();
-        let encoded = match &frame {
-            Frame::ReqBody(body) => shared.limits.encode_req_body(id, body, &mut buf),
-            other => shared.limits.encode(other, id, &mut buf),
-        };
-        // A frame that cannot be encoded is a frame this channel can never
-        // send; the channel is done for.
-        if encoded.is_err() || writer.write_all(&buf).await.is_err() {
+        let mut frames = 0;
+        let mut next = Some((id, frame));
+        while let Some((id, frame)) = next {
+            let encoded = match &frame {
+                Frame::ReqBody(body) => shared.limits.encode_req_body(id, body, &mut buf),
+                other => shared.limits.encode(other, id, &mut buf),
+            };
+            // A frame that cannot be encoded is a frame this channel can never
+            // send; the channel is done for.
+            if encoded.is_err() {
+                break 'batching;
+            }
+            frames += 1;
+            next = next_batched(&mut urgent, &mut outgoing, frames, buf.len());
+        }
+        if writer.write_all(&buf).await.is_err() {
             break;
         }
     }
@@ -610,8 +668,11 @@ fn dispatch(shared: &Shared, id: u32, frame: Frame) {
 mod tests {
     use super::*;
     use blastit_frame::{INITIAL_WINDOW, RespHead, Scheme};
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Poll};
     use std::time::Duration;
-    use tokio::io::duplex;
+    use tokio::io::{ReadBuf, duplex};
 
     fn request_head(target: &str) -> ReqHead {
         ReqHead {
@@ -1071,5 +1132,116 @@ mod tests {
         // fail and nothing to wake.
         drop(stream);
         assert_eq!(chan.shared.streams().len(), 0);
+    }
+
+    /// A duplex end that counts the `poll_write` calls reaching it, so a test
+    /// can prove a burst of queued frames leaves as one write rather than one
+    /// each.
+    struct CountingDuplex {
+        inner: tokio::io::DuplexStream,
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for CountingDuplex {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for CountingDuplex {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_queued_request_frames_leaves_in_one_write() {
+        let (client, mut peer) = duplex(64 * 1024);
+        let writes = Arc::new(AtomicUsize::new(0));
+        let chan = Chan::new(
+            CountingDuplex {
+                inner: client,
+                writes: writes.clone(),
+            },
+            Limits::default(),
+        );
+        let stream = open(&chan);
+        let id = stream.id();
+        // Queue the whole burst before the writer is ever polled (nothing
+        // awaits in between), so it is drained into one buffer rather than
+        // written frame by frame.
+        for byte in 0..5u8 {
+            chan.shared
+                .out
+                .try_send((id, Frame::ReqBody(vec![byte; 8])))
+                .expect("the queue has room");
+        }
+
+        let frames = read_frames(&mut peer, 5).await;
+        assert_eq!(frames.len(), 5);
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            1,
+            "the whole burst is one syscall"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batch_leads_with_its_cancels() {
+        let (client, mut peer) = duplex(64 * 1024);
+        let writes = Arc::new(AtomicUsize::new(0));
+        let chan = Chan::new(
+            CountingDuplex {
+                inner: client,
+                writes: writes.clone(),
+            },
+            Limits::default(),
+        );
+        let stream = open(&chan);
+        let id = stream.id();
+        // Body bytes wait on the normal queue...
+        for byte in 0..3u8 {
+            chan.shared
+                .out
+                .try_send((id, Frame::ReqBody(vec![byte; 8])))
+                .expect("the queue has room");
+        }
+        // ...and a window takes the urgent one, which the batch writes first.
+        chan.shared
+            .cancels
+            .send((id, Frame::Window { bytes: 4096 }))
+            .expect("the queue is open");
+
+        let frames = read_frames(&mut peer, 4).await;
+        assert_eq!(
+            frames[0],
+            (id, Frame::Window { bytes: 4096 }),
+            "a grant must lead the batch"
+        );
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            1,
+            "cancels and the bytes behind them are one syscall"
+        );
     }
 }

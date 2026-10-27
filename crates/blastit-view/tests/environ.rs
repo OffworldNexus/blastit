@@ -274,3 +274,115 @@ fn the_wsgi_keys_are_present() {
     assert_eq!(response.field("scheme"), "https");
     assert!(harness.finish().is_ok());
 }
+
+/// An application that reproduces the whole `environ`, one line per key.
+///
+/// Each line is `key|type|value`, in sorted key order, so a single comparison
+/// pins the entire dictionary: which keys are present, what type each value is
+/// (a `str` for a CGI value, a `bool` for a `wsgi` flag, a tuple for
+/// `wsgi.version`) and what each value holds. The two objects that have no
+/// useful `repr` are named — `wsgi.input` is `<input>` and `wsgi.errors` is
+/// `stderr` when it is `sys.stderr`.
+const DUMP_APP: &str = r#"
+def app(environ, start_response):
+    import sys
+    lines = []
+    for key in sorted(environ):
+        value = environ[key]
+        if key == 'wsgi.input':
+            kind, shown = 'object', '<input>'
+        elif key == 'wsgi.errors':
+            kind, shown = 'object', ('stderr' if value is sys.stderr else 'other')
+        else:
+            kind, shown = type(value).__name__, repr(value)
+        lines.append(key + '|' + kind + '|' + shown)
+    body = '\n'.join(lines).encode('latin-1')
+    start_response('200 OK', [('Content-Type', 'text/plain')])
+    return [body]
+"#;
+
+#[test]
+fn the_environ_is_exactly_this() {
+    // The refactor that lets a request reuse constant objects could change the
+    // dictionary in ways no per-key test notices — a key renamed, a value
+    // turned from `str` to `bytes`, a flag turned from `bool` to `int`. This
+    // pins the whole thing at once.
+    let mut harness = Harness::for_route("web", load_app("environ_dump", DUMP_APP));
+    assert_eq!(harness.expect_frame(), (0, Frame::Ready));
+
+    // A plain GET: the `HTTP_*` keys the client asked for, a peer with a port,
+    // no content headers.
+    let response = harness.exchange(
+        Frame::ReqHead(support::head(
+            "GET",
+            "/x?y=1",
+            vec![("Host", "view.test"), ("Accept", "text/html")],
+        )),
+        &[],
+        1,
+    );
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.text(),
+        "\
+HTTP_ACCEPT|str|'text/html'\n\
+HTTP_HOST|str|'view.test'\n\
+PATH_INFO|str|'/x'\n\
+QUERY_STRING|str|'y=1'\n\
+REMOTE_ADDR|str|'203.0.113.7'\n\
+REMOTE_PORT|str|'51000'\n\
+REQUEST_METHOD|str|'GET'\n\
+SCRIPT_NAME|str|''\n\
+SERVER_NAME|str|'view.test'\n\
+SERVER_PORT|str|'80'\n\
+SERVER_PROTOCOL|str|'HTTP/1.1'\n\
+blastit.route|str|'web'\n\
+wsgi.errors|object|stderr\n\
+wsgi.input|object|<input>\n\
+wsgi.input_terminated|bool|True\n\
+wsgi.multiprocess|bool|True\n\
+wsgi.multithread|bool|True\n\
+wsgi.run_once|bool|False\n\
+wsgi.url_scheme|str|'http'\n\
+wsgi.version|tuple|(1, 0)"
+    );
+
+    // A POST over https, from a peer that is not an address: `CONTENT_TYPE` and
+    // `CONTENT_LENGTH` replace their `HTTP_*` spelling, and there is no
+    // `REMOTE_PORT` to report.
+    let mut head = support::head(
+        "POST",
+        "/submit",
+        vec![("Content-Type", "text/plain"), ("Content-Length", "5")],
+    );
+    head.scheme = Scheme::Https;
+    head.server_port = 443;
+    head.remote_addr = "unnamed-socket".to_string();
+    head.peer_addr = "unnamed-socket".to_string();
+    let response = harness.exchange(Frame::ReqHead(head), &[], 2);
+    assert_eq!(
+        response.text(),
+        "\
+CONTENT_LENGTH|str|'5'\n\
+CONTENT_TYPE|str|'text/plain'\n\
+PATH_INFO|str|'/submit'\n\
+QUERY_STRING|str|''\n\
+REMOTE_ADDR|str|'unnamed-socket'\n\
+REQUEST_METHOD|str|'POST'\n\
+SCRIPT_NAME|str|''\n\
+SERVER_NAME|str|'view.test'\n\
+SERVER_PORT|str|'443'\n\
+SERVER_PROTOCOL|str|'HTTP/1.1'\n\
+blastit.route|str|'web'\n\
+wsgi.errors|object|stderr\n\
+wsgi.input|object|<input>\n\
+wsgi.input_terminated|bool|True\n\
+wsgi.multiprocess|bool|True\n\
+wsgi.multithread|bool|True\n\
+wsgi.run_once|bool|False\n\
+wsgi.url_scheme|str|'https'\n\
+wsgi.version|tuple|(1, 0)"
+    );
+
+    assert!(harness.finish().is_ok());
+}

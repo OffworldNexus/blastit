@@ -54,7 +54,7 @@ mod json;
 mod pretty;
 mod split;
 
-pub use json::{decode_json, encode_json};
+pub use json::{decode_json, encode_json, encode_json_into, restamp_json_into};
 pub use pretty::{encode_pretty, escape_inline};
 pub use split::{split_app_output, split_app_output_at};
 
@@ -1474,6 +1474,11 @@ pub fn strip_query(request_target: &str) -> &str {
 }
 
 /// `2026-10-25T14:02:11.384Z`: RFC 3339, UTC, always three fractional digits.
+///
+/// The JSON encoder writes these characters straight into its buffer, so that
+/// a request event allocates nothing for its timestamp; this is the same
+/// spelling as text, which the tests and the human form want.
+#[cfg(test)]
 pub(crate) fn format_timestamp(ts: OffsetDateTime) -> String {
     let ts = ts.to_offset(UtcOffset::UTC);
     format!(

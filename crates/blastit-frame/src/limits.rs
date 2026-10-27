@@ -83,6 +83,32 @@ impl Limits {
         Ok(total)
     }
 
+    /// The size `frame` would take on the wire, header included, without
+    /// encoding it anywhere.
+    ///
+    /// A frame's header carries its payload length, so [`Limits::encode`] has
+    /// to measure the payload before it can write a byte. A caller that only
+    /// wants the size — the scheduler's outbound queue does, to account the
+    /// bytes against a peer's cap before queueing — would otherwise have to
+    /// encode the whole frame into a buffer and throw it away. This runs the
+    /// same measuring pass as `encode` and its validation, so it is both
+    /// cheaper and an exact predictor of what `encode` would accept.
+    ///
+    /// # Errors
+    ///
+    /// Exactly the errors [`Limits::encode`] raises before it writes: any error
+    /// [`Frame`] can raise (a field out of range, or a `ctl.chan` frame with a
+    /// non-zero id) and [`FrameError::FrameTooLarge`] when the frame does not
+    /// fit.
+    pub fn encoded_len(self, frame: &Frame, id: u32) -> Result<usize, FrameError> {
+        frame.check_id(id)?;
+        let mut counter = Counter(0);
+        frame.write_payload(&mut counter)?;
+        let total = HEADER_LEN + counter.0;
+        self.check_total(total)?;
+        Ok(total)
+    }
+
     /// Encode one frame with this channel's limit.
     ///
     /// `out` is appended to, and is left untouched when the frame does not fit:
@@ -94,12 +120,10 @@ impl Limits {
     /// encoding error [`Frame`] can raise (a field out of range, or a
     /// `ctl.chan` frame with a non-zero id).
     pub fn encode(self, frame: &Frame, id: u32, out: &mut Vec<u8>) -> Result<(), FrameError> {
-        frame.check_id(id)?;
-        let mut counter = Counter(0);
-        frame.write_payload(&mut counter)?;
-        let payload_len = counter.0;
-        let total = HEADER_LEN + payload_len;
-        self.check_total(total)?;
+        // The sizing pass is `encoded_len`, so a frame this rejects is rejected
+        // here too, and never in two different places.
+        let total = self.encoded_len(frame, id)?;
+        let payload_len = total - HEADER_LEN;
 
         let start = out.len();
         let length = len_u32(MIN_LENGTH as usize + payload_len, "length")?;

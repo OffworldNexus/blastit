@@ -26,6 +26,17 @@ fn bare_head(status: u16) -> RespHead {
     }
 }
 
+/// A head that announces `len` body bytes, so the bytes on the client's wire
+/// are the body bytes and a test's accounting is exact.
+fn length_head(status: u16, len: usize) -> RespHead {
+    let len = len.to_string();
+    RespHead {
+        status,
+        reason: Vec::new(),
+        headers: common::pairs(&[("content-length", &len)]),
+    }
+}
+
 /// Send `total` bytes of request body for `id`, and report how much of it the
 /// front end forwarded.
 ///
@@ -109,13 +120,18 @@ async fn an_upload_is_paced_by_the_window() {
         "the client should have been able to send everything"
     );
 
-    // The response is credited back, byte for byte, as the client takes it.
+    // A response far below the low-water mark is answered without a `WINDOW`:
+    // there is nothing for the front end to grant back.
     scheduler.respond(id, 201, &[], b"created!").await;
-    assert_eq!(scheduler.window().await, (id, 8));
     let response = client.read_response().await;
     assert!(
         response.starts_with(b"HTTP/1.1 201 Created\r\n"),
         "{response:?}"
+    );
+    assert_eq!(
+        scheduler.window_within(QUIET).await,
+        None,
+        "a small response must not cost a WINDOW"
     );
 }
 
@@ -167,11 +183,35 @@ async fn a_chunked_upload_is_paced_by_the_window_too() {
 }
 
 #[tokio::test]
-async fn a_response_is_granted_back_as_the_client_reads_it() {
+async fn a_small_response_costs_no_window() {
+    let mut h = Harness::start(HttpConfig::default());
+    h.client.write(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n").await;
+    let (id, _) = h.scheduler.head().await;
+    assert_eq!(h.scheduler.end().await, id);
+
+    // The whole body fits inside the credit the view already has, so the front
+    // end owes it nothing: a `WINDOW` here would be a frame each way, and two
+    // wakeups, for six bytes.
+    h.scheduler.respond(id, 200, &[], b"hello!").await;
+    let response = h.client.read_response().await;
+    assert!(
+        response.ends_with(b"\r\n6\r\nhello!\r\n0\r\n\r\n"),
+        "{response:?}"
+    );
+
+    assert_eq!(
+        h.scheduler.window_within(QUIET).await,
+        None,
+        "a body below the low-water mark must not cost a WINDOW"
+    );
+}
+
+#[tokio::test]
+async fn a_large_response_is_completed_by_its_grants() {
     let rig = Rig::new(HttpConfig::default());
     let (mut client, _task) = rig.connect();
     let mut scheduler = rig.scheduler;
-    let total = 3 * INITIAL_WINDOW as usize;
+    let total = 4 * INITIAL_WINDOW as usize;
 
     client.write(b"GET /big HTTP/1.1\r\nHost: h\r\n\r\n").await;
     let (id, _) = scheduler.head().await;
@@ -184,38 +224,97 @@ async fn a_response_is_granted_back_as_the_client_reads_it() {
         (client, response)
     });
 
+    // A view that respects its window: it sends no more than its credit, and
+    // waits for a `WINDOW` whenever it is about to run out. A body of several
+    // windows can therefore only finish if the front end grants enough, and a
+    // missing grant shows up as a hang here rather than a slow pass.
     scheduler.send(id, &Frame::RespHead(bare_head(200))).await;
     let frames = total / CHUNK;
-    for _ in 0..frames {
-        scheduler
-            .send(id, &Frame::RespBody(vec![b'z'; CHUNK]))
-            .await;
+    let mut credit = INITIAL_WINDOW as usize;
+    let mut sent = 0usize;
+    let mut granted = 0usize;
+    let mut grants = 0usize;
+    while sent < total {
+        let take = CHUNK.min(total - sent);
+        if take > credit {
+            let (granted_id, bytes) = scheduler.window().await;
+            assert_eq!(granted_id, id, "a grant for the wrong stream");
+            assert!(
+                bytes as usize > INITIAL_WINDOW as usize / 2,
+                "a grant of {bytes} bytes is not the batched top-up"
+            );
+            credit += bytes as usize;
+            granted += bytes as usize;
+            grants += 1;
+        }
+        scheduler.send(id, &Frame::RespBody(vec![b'z'; take])).await;
+        sent += take;
+        credit -= take;
     }
     scheduler.send(id, &Frame::RespEnd).await;
 
-    // Every body byte comes back as credit, batched.
-    let mut granted = 0usize;
-    let mut grants = 0;
-    while granted < total {
-        let (_, bytes) = scheduler.window().await;
-        assert!(bytes > 0);
-        if granted + bytes as usize <= total - CHUNK {
-            assert!(
-                bytes as usize >= 64 * 1024,
-                "a grant of {bytes} bytes is below the batch size"
-            );
-        }
-        granted += bytes as usize;
-        grants += 1;
-    }
-    assert_eq!(granted, total, "the client took every byte offered");
-    assert!(grants <= frames, "one grant per frame would be no batching");
+    // The view never went short: what it started with plus every grant covers
+    // the whole body.
+    assert!(
+        granted + INITIAL_WINDOW as usize >= total,
+        "the view ran out of credit: {granted} granted for {total} bytes"
+    );
+    assert!(grants > 0, "a body past one window must be granted more");
+    assert!(
+        grants < frames,
+        "{grants} grants for {frames} frames is no batching"
+    );
 
     let (_client, response) = reading.await.expect("the reader task must finish");
     assert!(
         response.len() >= total,
         "the whole body should have reached the client, got {}",
         response.len()
+    );
+}
+
+#[tokio::test]
+async fn a_view_that_spends_its_credit_is_granted_before_the_connection_waits() {
+    let rig = Rig::new(HttpConfig::default());
+    let (mut client, _task) = rig.connect();
+    let mut scheduler = rig.scheduler;
+
+    client.write(b"GET /big HTTP/1.1\r\nHost: h\r\n\r\n").await;
+    let (id, _) = scheduler.head().await;
+    assert_eq!(scheduler.end().await, id);
+
+    let reading = tokio::spawn(async move {
+        let mut client = client;
+        let response = client.read_until(b"\r\n0\r\n\r\n").await;
+        (client, response)
+    });
+
+    // The view sends exactly the window it starts with and then goes quiet: it
+    // has no credit left, and a view blocked on credit sends nothing more, so no
+    // frame will arrive to trigger a later grant.
+    scheduler.send(id, &Frame::RespHead(bare_head(200))).await;
+    for _ in 0..(INITIAL_WINDOW as usize / CHUNK) {
+        scheduler
+            .send(id, &Frame::RespBody(vec![b'z'; CHUNK]))
+            .await;
+    }
+
+    // The grant must go out anyway, before the front end waits for a frame that
+    // cannot come.
+    let (granted_id, bytes) = scheduler.window().await;
+    assert_eq!(granted_id, id);
+    assert!(bytes > 0, "a window grants at least one byte");
+
+    // With the credit it has been granted, the view finishes the response.
+    scheduler
+        .send(id, &Frame::RespBody(vec![b'z'; CHUNK]))
+        .await;
+    scheduler.send(id, &Frame::RespEnd).await;
+
+    let (_client, response) = reading.await.expect("the reader task must finish");
+    assert!(
+        response.ends_with(b"\r\n0\r\n\r\n"),
+        "the response must finish"
     );
 }
 
@@ -230,10 +329,14 @@ async fn a_client_that_stops_reading_stops_being_granted() {
     assert_eq!(scheduler.end().await, id);
 
     // Nobody is reading the client end of this connection, and the view sends
-    // less than the credit it is allowed, so nothing is failed: it is simply
-    // granted nothing beyond what the socket has taken.
-    let offered = INITIAL_WINDOW as usize + 512 * 1024;
-    scheduler.send(id, &Frame::RespHead(bare_head(200))).await;
+    // only as much as its credit allows, so nothing is failed: the front end
+    // simply stops writing once the socket buffer is full, and its credit stops
+    // there too. The body is announced by length, so the bytes on the wire are
+    // the body bytes.
+    let offered = 2 * INITIAL_WINDOW as usize;
+    scheduler
+        .send(id, &Frame::RespHead(length_head(200, offered)))
+        .await;
     for _ in 0..(offered / CHUNK) {
         scheduler
             .send(id, &Frame::RespBody(vec![b'z'; CHUNK]))
@@ -257,8 +360,9 @@ async fn a_client_that_stops_reading_stops_being_granted() {
         "a client that reads nothing is not failed for it"
     );
 
-    // Reading a little more releases a little more.
-    let _ = client.read_exact_n(512 * 1024).await;
+    // Draining the whole body lets the front end write again, and the credit it
+    // owes crosses the mark once more.
+    client.read_exact_n(offered).await;
     let mut more = 0usize;
     while let Some((_, bytes)) = scheduler.window_within(Duration::from_millis(300)).await {
         more += bytes as usize;

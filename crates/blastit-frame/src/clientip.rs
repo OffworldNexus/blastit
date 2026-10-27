@@ -254,6 +254,26 @@ impl ClientIpConfig {
     /// nothing to key a flow on; callers fall back to the peer string for
     /// logging.
     pub fn resolve(&self, peer: &str, headers: &[(Vec<u8>, Vec<u8>)]) -> Option<ClientIp> {
+        self.resolve_iter(
+            peer,
+            headers
+                .iter()
+                .map(|(name, value)| (name.as_slice(), value.as_slice())),
+        )
+    }
+
+    /// The same resolution over headers that have not been decoded.
+    ///
+    /// The scheduler reads a request head straight out of its `REQ_HEAD`
+    /// payload instead of decoding it into owned `Vec`s, so the headers arrive
+    /// as an iterator of borrowed slices rather than a slice of pairs. Both this
+    /// and [`ClientIpConfig::resolve`] funnel into `chain_iter`, so one request
+    /// cannot resolve to two
+    /// different addresses depending on which path read it (D5).
+    pub fn resolve_iter<'h, I>(&self, peer: &str, headers: I) -> Option<ClientIp>
+    where
+        I: Iterator<Item = (&'h [u8], &'h [u8])>,
+    {
         let peer_ip = parse_addr(peer)?;
         if !self.trusted.contains(&peer_ip) {
             return Some(ClientIp {
@@ -262,7 +282,7 @@ impl ClientIpConfig {
             });
         }
         // One unparsable entry: believe nothing in this request's header.
-        let chain = self.chain(headers).unwrap_or_default();
+        let chain = self.chain_iter(headers).unwrap_or_default();
         match select_client_ip(&chain, &self.trusted) {
             Some(ip) => Some(ClientIp {
                 ip,
@@ -281,9 +301,12 @@ impl ClientIpConfig {
     ///
     /// `None` — "do not believe any of this" — when any entry is not a chain
     /// entry (see [`parse_chain_entry`]).
-    fn chain(&self, headers: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<IpAddr>> {
+    fn chain_iter<'h, I>(&self, headers: I) -> Option<Vec<IpAddr>>
+    where
+        I: Iterator<Item = (&'h [u8], &'h [u8])>,
+    {
         let mut chain = Vec::new();
-        for value in header_values(headers, &self.header) {
+        for value in values_of(headers, &self.header) {
             let Ok(value) = std::str::from_utf8(value) else {
                 return None;
             };
@@ -297,6 +320,25 @@ impl ClientIpConfig {
         }
         Some(chain)
     }
+}
+
+/// The values of every instance of `name`, matched case-insensitively, in
+/// arrival order.
+///
+/// The header pairs are taken as an iterator of borrowed slices so that a
+/// decoded head (`&[(Vec<u8>, Vec<u8>)]`, mapped down to slices) and a head
+/// still in its `REQ_HEAD` payload (`ReqHeadView::headers`) share this one
+/// reader: the client-IP chain and the fair queue's inner key must see the same
+/// sequence either way, or the scheduler would schedule one request as two
+/// different clients depending on whether the head was decoded (D5).
+pub fn values_of<'h, 'n, I>(headers: I, name: &'n str) -> impl Iterator<Item = &'h [u8]>
+where
+    I: Iterator<Item = (&'h [u8], &'h [u8])>,
+{
+    let name = name.as_bytes();
+    headers.filter_map(move |(field, value)| {
+        (field.len() == name.len() && field.eq_ignore_ascii_case(name)).then_some(value)
+    })
 }
 
 /// What a `BLASTIT_TRUSTED_PROXIES` or `BLASTIT_CLIENT_IP_HEADER` value could
@@ -338,18 +380,6 @@ fn select_client_ip(chain: &[IpAddr], trusted: &TrustedProxies) -> Option<IpAddr
         }
     }
     chain.first().copied()
-}
-
-/// The values of every instance of `name`, matched case-insensitively.
-fn header_values<'a>(
-    headers: &'a [(Vec<u8>, Vec<u8>)],
-    name: &str,
-) -> impl Iterator<Item = &'a [u8]> {
-    let name = name.as_bytes();
-    headers
-        .iter()
-        .filter(move |(field, _)| field.len() == name.len() && field.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_slice())
 }
 
 /// An IPv6 literal in a chain may be bracketed the way it is in a URL.
