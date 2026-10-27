@@ -178,6 +178,14 @@ pub(crate) struct Conn<'a, IO> {
     chan: &'a Chan,
     buf: Vec<u8>,
     pos: usize,
+    /// Per-connection scratch, reused across requests so that neither a
+    /// decoded request body nor an encoded response head has to allocate for
+    /// itself. It belongs to the connection and outlives any single request;
+    /// each user clears it before writing and is done with it before the next
+    /// user touches it. The chunked-body decoder ([`Conn::stream_chunked_body`])
+    /// and the response-head writer ([`Conn::relay`]) never run at the same
+    /// time — a body is fully streamed before its response is relayed — so one
+    /// buffer serves both.
     scratch: Vec<u8>,
     /// De-chunked body bytes that are decoded but not yet sent, because the
     /// stream has no credit left for them.
@@ -580,6 +588,14 @@ where
 
     /// Relay the response frames of a request to the client.
     ///
+    /// The response head is written into the connection's scratch buffer,
+    /// which the request body path has finished with by now. The buffer is
+    /// taken out of `self` for the call so the writes below can borrow `self`
+    /// mutably, and put back afterwards so the next response on this connection
+    /// reuses the same allocation; it is only ever read between the write that
+    /// fills it and the client write that consumes it, so no reused byte can be
+    /// mistaken for a new one.
+    ///
     /// Response credit is granted lazily. A view starts each body with
     /// [`INITIAL_WINDOW`] bytes, and this is the only granter, so the credit a
     /// view still holds is `INITIAL_WINDOW` minus the body bytes taken off the
@@ -593,6 +609,20 @@ where
         &mut self,
         stream: &mut Stream,
         request: &RequestHead,
+    ) -> Result<Relay, HttpError> {
+        let mut head = std::mem::take(&mut self.scratch);
+        let outcome = self.relay_frames(stream, request, &mut head).await;
+        self.scratch = head;
+        outcome
+    }
+
+    /// [`Conn::relay`] proper: write the response, frame by frame, into `head`
+    /// as its reusable response-head buffer.
+    async fn relay_frames(
+        &mut self,
+        stream: &mut Stream,
+        request: &RequestHead,
+        head: &mut Vec<u8>,
     ) -> Result<Relay, HttpError> {
         let mut resp = Resp::new();
         // Body bytes taken off the stream, written or knowingly dropped, that
@@ -614,31 +644,31 @@ where
                 return Ok(self.fail(&mut resp, 502).await);
             };
             match &frame {
-                Frame::RespHead(head) => {
+                Frame::RespHead(head_frame) => {
                     if resp.head_written {
                         // A second head would be a second response.
                         return Ok(Relay::Abort);
                     }
-                    let no_body = request.is_head() || matches!(head.status, 100..=199 | 204 | 304);
+                    let no_body =
+                        request.is_head() || matches!(head_frame.status, 100..=199 | 204 | 304);
                     // The view may ask for the connection to be closed too,
                     // even though its own `Connection` header never reaches the
                     // client.
                     let may_keep_alive = request.keep_alive
-                        && !crate::headers::has_token(&head.headers, "connection", "close");
+                        && !crate::headers::has_token(&head_frame.headers, "connection", "close");
                     let prepared = match response::prepare(
-                        head,
+                        head_frame,
                         no_body,
                         request.version == Version::Http11,
                         may_keep_alive,
+                        head,
                     ) {
                         Ok(prepared) => prepared,
                         // Injection from the view: nothing is written yet, so
                         // the client gets an honest 502 instead.
                         Err(_) => return Ok(self.fail(&mut resp, 502).await),
                     };
-                    let mut out = Vec::new();
-                    response::encode_head(&prepared, &mut out);
-                    if !self.write_client(stream, &out).await {
+                    if !self.write_client(stream, head).await {
                         return Ok(Relay::Abort);
                     }
                     resp.framing = prepared.framing;
