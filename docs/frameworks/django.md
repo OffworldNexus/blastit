@@ -25,6 +25,10 @@ app, not Django features.
 $ uv init && uv add blastit 'psycopg[binary]' dj-database-url
 ```
 
+Run `uv` as yourself, and keep the interpreter it installs where the route uids
+can read it — [Getting started, step
+1](../getting-started.md#1-a-throwaway-directory-the-route-uids-can-read).
+
 `dj-database-url` just parses `DATABASE_URL` into `DATABASES`, and it is what
 the [end-to-end demo](https://github.com/OffworldNexus/blastit/tree/develop/e2e/demo)
 uses.

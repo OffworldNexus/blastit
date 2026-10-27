@@ -16,8 +16,11 @@ Linux only, CPython 3.13+, PostgreSQL.
 
 ## Get started
 
-`uv add` adds to a project, so `uv init` one first; with pip, skip both. In a
-container, run blastit as root directly rather than through `sudo`.
+`uv add` adds to a project, so `uv init` one first; with pip, skip both. The route
+uids have to be able to read the interpreter you use, so install a Python outside
+your home and never run `uv` with `sudo` — the [getting-started
+guide](https://offworldnexus.github.io/blastit/getting-started/) walks through it.
+In a container, run blastit as root directly rather than through `sudo`.
 
 ```console
 $ uv init && uv add blastit       # or: pip install blastit
