@@ -243,6 +243,78 @@ mod tests {
     }
 
     #[test]
+    fn encoded_len_matches_what_encode_writes() {
+        // The scheduler spends its byte cap on `encoded_len`, so it has to
+        // agree with the bytes `encode` actually writes for every frame kind.
+        // A forgotten header would under-count by nine bytes a frame, and a
+        // body frame has to be measured like any other rather than assumed.
+        let limits = Limits::default();
+        for (index, frame) in every_frame().iter().enumerate() {
+            let id = frame_id(index);
+            let mut wire = Vec::new();
+            limits.encode(frame, id, &mut wire).unwrap();
+            assert_eq!(
+                limits.encoded_len(frame, id).unwrap(),
+                wire.len(),
+                "frame {frame:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_len_rejects_exactly_what_encode_rejects() {
+        // A frame that will be refused must be refused at size time too, or the
+        // cap would be spent on a frame the writer then drops. Every refusal
+        // `encode` can make before writing a byte has to be the same refusal
+        // `encoded_len` makes.
+        let limits = Limits::new(32).unwrap();
+
+        // Too large: one payload byte past what the frame can carry.
+        let too_big = Frame::RespBody(vec![0u8; limits.max_payload() + 1]);
+        let mut out = Vec::new();
+        assert_eq!(
+            limits.encode(&too_big, 1, &mut out),
+            Err(FrameError::FrameTooLarge { size: 33, max: 32 })
+        );
+        assert_eq!(
+            limits.encoded_len(&too_big, 1),
+            Err(FrameError::FrameTooLarge { size: 33, max: 32 })
+        );
+        assert!(out.is_empty(), "a rejected frame must not be written");
+
+        // Payload errors agree too: a frame kind that cannot be encoded at all
+        // fails the same way whichever entry point is asked.
+        for frame in [
+            Frame::Window { bytes: 0 },
+            Frame::RespHead(RespHead {
+                status: 99,
+                ..RespHead::default()
+            }),
+        ] {
+            let mut out = Vec::new();
+            assert_eq!(
+                limits.encoded_len(&frame, 1),
+                limits.encode(&frame, 1, &mut out).map(|()| out.len()),
+                "frame {frame:?}"
+            );
+            assert!(out.is_empty());
+        }
+
+        // ... and a frame that must carry id 0 is refused for its id by both.
+        let zero_id = Frame::Ctl(Ctl::Drain);
+        let mut out = Vec::new();
+        assert_eq!(
+            limits.encode(&zero_id, 7, &mut out),
+            Err(FrameError::IdNotZero { id: 7 })
+        );
+        assert_eq!(
+            limits.encoded_len(&zero_id, 7),
+            Err(FrameError::IdNotZero { id: 7 })
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
     fn header_is_little_endian() {
         let mut wire = Vec::new();
         encode(&Frame::ReqEnd, 0x0102_0304, &mut wire).unwrap();

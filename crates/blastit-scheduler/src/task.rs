@@ -104,17 +104,14 @@ impl Outbound {
 
 /// The size a frame will take on the wire, header included.
 ///
-/// Body frames are exact without encoding anything; a head or a small frame is
-/// measured by encoding it into a scratch buffer, which is cheap because those
-/// frames are small and rare.
+/// Body frames are exact without measuring anything; a head or a small frame
+/// goes through [`Limits::encoded_len`], which runs the encoder's own
+/// measuring pass rather than encoding the frame into a throwaway buffer just
+/// to read its length back.
 fn frame_size(frame: &Frame, limits: Limits) -> Result<usize, FrameError> {
     match frame {
         Frame::ReqBody(body) | Frame::RespBody(body) => Ok(HEADER_LEN + body.len()),
-        other => {
-            let mut scratch = Vec::new();
-            limits.encode(other, 0, &mut scratch)?;
-            Ok(scratch.len())
-        }
+        other => limits.encoded_len(other, 0),
     }
 }
 
