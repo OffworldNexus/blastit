@@ -1,0 +1,87 @@
+# The benchmark: PostgreSQL, PgBouncer, the app under whatever server is
+# selected, and the load generator. Driven by `benchmark/run.py`; see
+# `benchmark/README.md`.
+#
+# One service (`server`) runs whichever server `BENCH_SERVER` names — all three
+# share the image's `start.sh` dispatch — so the load generator always talks to
+# `server:8080` and the only variable is which server is behind it.
+#
+# CPU is pinned so the two sides do not fight for cores: on a 16-core host the
+# server gets BENCH_SERVER_CPUS, PostgreSQL and PgBouncer BENCH_DB_CPUS, and a
+# local load generator BENCH_LOADGEN_CPUS. Set them to fit the machine, or run
+# the load generator on its own host (see the README) and ignore the last.
+name: ${BENCH_PROJECT:-blastit-bench}
+
+x-app-env: &app-env
+  BENCH_SERVER: ${BENCH_SERVER:-blastit}
+  BENCH_WORKERS: ${BENCH_WORKERS:-1}
+  BENCH_THREADS: ${BENCH_THREADS:-4}
+  BENCH_WORKER_CLASS: ${BENCH_WORKER_CLASS:-gthread}
+  # The servers talk to PgBouncer, not PostgreSQL. For blastit this URL is the
+  # dbproxy's *upstream*: the proxy opens one connection here per client
+  # connection, and the pooler multiplexes them onto a small server pool.
+  #
+  # For a managed database with its own pool (DigitalOcean Managed PostgreSQL),
+  # set BENCH_DATABASE_URL to its pooled endpoint — and BENCH_SEED_DATABASE_URL
+  # to the direct one — and the compose `db`/`pgbouncer` services are not started
+  # at all (see harness.up_db).
+  DATABASE_URL: ${BENCH_DATABASE_URL:-postgresql://bench:bench@pgbouncer:6432/bench?sslmode=disable}
+  BLASTIT_LOG_FORMAT: json
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    cpuset: "${BENCH_DB_CPUS:-8-11}"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "bench"]
+      interval: 1s
+      retries: 60
+
+  # The pooler in front of PostgreSQL. See benchmark/pgbouncer.ini.
+  pgbouncer:
+    build:
+      context: ..
+      dockerfile: benchmark/Dockerfile.pgbouncer
+    image: ${BENCH_PGBOUNCER_IMAGE:-blastit-bench-pgbouncer}
+    cpuset: "${BENCH_DB_CPUS:-8-11}"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "6432", "-U", "bench", "-d", "bench"]
+      interval: 1s
+      retries: 60
+
+  # Migrations and seed data: the direct endpoint, not the pooler, the way a real
+  # deploy runs them. A managed database supplies this through
+  # BENCH_SEED_DATABASE_URL.
+  seed:
+    build:
+      context: ..
+      dockerfile: benchmark/Dockerfile
+    image: ${BENCH_IMAGE:-blastit-bench}
+    environment:
+      <<: *app-env
+      DATABASE_URL: ${BENCH_SEED_DATABASE_URL:-postgresql://bench:bench@db:5432/bench?sslmode=disable}
+    entrypoint: ["python", "/app/seed.py"]
+    cpuset: "${BENCH_DB_CPUS:-8-11}"
+
+  server:
+    image: ${BENCH_IMAGE:-blastit-bench}
+    environment: *app-env
+    cpuset: "${BENCH_SERVER_CPUS:-0-7}"
+    ports:
+      # The load generator reaches the server over its private network when it
+      # runs on another host; BENCH_BIND is that host's private IP. Locally it
+      # stays on loopback.
+      - "${BENCH_BIND:-127.0.0.1}:${BENCH_PORT:-18090}:8080"
+
+  loadgen:
+    image: ghcr.io/hatoo/oha:latest
+    cpuset: "${BENCH_LOADGEN_CPUS:-12-15}"
+    depends_on:
+      - server

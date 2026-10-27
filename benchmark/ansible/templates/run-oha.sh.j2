@@ -1,0 +1,8 @@
+#!/bin/sh
+# Run the load generator in a container, pinned to this host's CPUs and on the
+# host network so it reaches the server host's private IP directly. oha needs
+# one file descriptor per connection, hence the raised limit.
+exec docker run --rm --network host \
+  --ulimit nofile=65536:65536 \
+  --cpuset-cpus "{{ loadgen_cpus }}" \
+  ghcr.io/hatoo/oha:latest "$@"

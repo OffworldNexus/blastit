@@ -1,0 +1,20 @@
+# PgBouncer, pooled in front of PostgreSQL (see pgbouncer.ini and compose.yaml).
+#
+# Built on the postgres image so `pg_isready` is present for the health check and
+# a `postgres` user exists to drop to — pgbouncer refuses to run as root and its
+# config may hold the upstream password, so it must be owner-only.
+# Build context: the repository root.
+FROM postgres:18
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pgbouncer \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -o postgres -g postgres -m 0755 /var/run/pgbouncer
+
+COPY benchmark/pgbouncer.ini /etc/pgbouncer/pgbouncer.ini
+RUN chown postgres:postgres /etc/pgbouncer/pgbouncer.ini \
+    && chmod 0600 /etc/pgbouncer/pgbouncer.ini
+
+USER postgres
+EXPOSE 6432
+ENTRYPOINT ["/usr/sbin/pgbouncer", "/etc/pgbouncer/pgbouncer.ini"]

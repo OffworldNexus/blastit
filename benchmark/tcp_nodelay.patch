@@ -1,0 +1,24 @@
+The TCP_NODELAY fix this benchmark found. `crates/blastit-http/src/server.rs`
+accepts the client socket without disabling Nagle; because the response head and
+body are written as two segments, a small body waits for the client's delayed
+ACK — a fixed ~40 ms per response. Applied to a scratch checkout, this took
+blastit from 24 to 2,630 req/s at one connection.
+
+Apply from the repository root:
+
+    git apply benchmark/tcp_nodelay.patch
+
+--- a/crates/blastit-http/src/server.rs
++++ b/crates/blastit-http/src/server.rs
+@@ -72,6 +72,11 @@
+         let listener = &mut self.listener;
+         async move {
+             let (stream, peer) = listener.accept().await?;
++            // The response head and its body are written as separate TCP writes;
++            // with Nagle on, a small body waits for the client's delayed ACK, a
++            // fixed ~40 ms on every request (found by the benchmark's packet
++            // capture). Disable Nagle on the accepted socket.
++            stream.set_nodelay(true)?;
+             Ok((stream, peer.to_string()))
+         }
+     }

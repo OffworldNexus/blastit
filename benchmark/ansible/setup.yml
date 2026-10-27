@@ -1,0 +1,327 @@
+---
+# Provision the benchmark on DigitalOcean, then configure both hosts.
+#
+#   export DO_API_TOKEN=...                            # required, read/write
+#   export DO_REGION=lon1                              # optional; dedicated-CPU
+#                                                      #   sizes are regional
+#   ansible-galaxy collection install -r requirements.yml
+#   ansible-playbook setup.yml                         # provision + configure
+#   ansible-playbook setup.yml -e run_benchmark=true   # ... and run it
+#   ansible-playbook teardown.yml                      # destroy everything it made
+#
+# It creates, all tagged `{{ tag }}` so teardown can find it:
+#   * a dedicated-CPU server host and a dedicated-CPU load-generator host, on the
+#     same private network;
+#   * a managed PostgreSQL cluster with a transaction-mode connection pool;
+#   * an SSH key from `ssh_pub_key_path`, so you can reach the hosts.
+#
+# See README.md for the environment variables and what each step does.
+
+- name: Check the inputs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require an API token
+      ansible.builtin.assert:
+        that: do_api_token | length > 0
+        fail_msg: "set DO_API_TOKEN to a read/write DigitalOcean API token"
+    - name: Require the public key
+      ansible.builtin.assert:
+        that: lookup('ansible.builtin.fileglob', ssh_pub_key_path) | length > 0
+        fail_msg: "no public key at {{ ssh_pub_key_path }} (set BENCH_SSH_PUB_KEY)"
+
+- name: Provision the infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Find the CPython 3.13 the wheel is built against
+      ansible.builtin.command: uv python find 3.13
+      register: found_python
+      changed_when: false
+      when: pyo3_python | length == 0
+    - name: Remember it
+      ansible.builtin.set_fact:
+        wheel_python: "{{ pyo3_python if pyo3_python | length > 0 else found_python.stdout | trim }}"
+
+    - name: Build the blastit wheel
+      ansible.builtin.command:
+        cmd: scripts/build-wheel.sh
+        chdir: "{{ repo_root }}"
+      environment:
+        PYO3_PYTHON: "{{ wheel_python }}"
+      when: build_wheel | bool
+      changed_when: true
+    - name: Require a wheel in dist/
+      ansible.builtin.assert:
+        that: lookup('ansible.builtin.fileglob', repo_root + '/dist/*.whl') | length > 0
+        fail_msg: "no wheel in dist/: run scripts/build-wheel.sh, or set BENCH_BUILD_WHEEL=true"
+
+    - name: Package the harness and the wheel for the server host
+      ansible.builtin.command:
+        cmd: >-
+          tar czf {{ bench_archive }}
+          --exclude=benchmark/results --exclude=__pycache__ --exclude=.git
+          -C {{ repo_root }} benchmark dist
+      changed_when: true
+
+    # --- SSH key (so the new hosts can be reached) --------------------------
+    - name: Read the public key
+      ansible.builtin.set_fact:
+        ssh_public_key: "{{ lookup('ansible.builtin.file', ssh_pub_key_path) | trim }}"
+    - name: Compute its MD5 fingerprint (the form DigitalOcean uses)
+      ansible.builtin.command: "ssh-keygen -E md5 -lf {{ ssh_pub_key_path }}"
+      register: key_fingerprint_raw
+      changed_when: false
+    - name: Remember the fingerprint
+      ansible.builtin.set_fact:
+        ssh_fingerprint: "{{ key_fingerprint_raw.stdout.split()[1] | regex_replace('^MD5:', '') }}"
+    - name: List the account's SSH keys
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/account/keys?per_page=200"
+        headers: { Authorization: "Bearer {{ do_api_token }}" }
+        status_code: 200
+      register: account_keys
+    - name: Register the key if it is not already there
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/account/keys"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ do_api_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "{{ ssh_key_name }}"
+          public_key: "{{ ssh_public_key }}"
+        status_code: [201]
+      when: ssh_fingerprint not in (account_keys.json.ssh_keys | map(attribute='fingerprint') | list)
+
+    # --- Droplets ----------------------------------------------------------
+    - name: Create the server host
+      community.digitalocean.digital_ocean_droplet:
+        oauth_token: "{{ do_api_token }}"
+        name: "{{ prefix }}-server"
+        region: "{{ region }}"
+        size: "{{ server_size }}"
+        image: "{{ image }}"
+        ssh_keys: ["{{ ssh_fingerprint }}"]
+        tags: ["{{ tag }}"]
+        unique_name: true
+        wait: true
+        wait_timeout: 600
+      register: server_droplet
+    - name: Create the load-generator host
+      community.digitalocean.digital_ocean_droplet:
+        oauth_token: "{{ do_api_token }}"
+        name: "{{ prefix }}-loadgen"
+        region: "{{ region }}"
+        size: "{{ loadgen_size }}"
+        image: "{{ image }}"
+        ssh_keys: ["{{ ssh_fingerprint }}"]
+        tags: ["{{ tag }}"]
+        unique_name: true
+        wait: true
+        wait_timeout: 600
+      register: loadgen_droplet
+
+    # --- Managed PostgreSQL and its pool -----------------------------------
+    - name: List the database clusters
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/databases?per_page=200"
+        headers: { Authorization: "Bearer {{ do_api_token }}" }
+        status_code: 200
+      register: databases_before
+    - name: Remember ours, if it exists
+      ansible.builtin.set_fact:
+        existing_db: >-
+          {{ (databases_before.json.databases | selectattr('name', 'equalto', prefix + '-pg') | list | first)
+             | default({}, true) }}
+    - name: Create the managed PostgreSQL cluster
+      community.digitalocean.digital_ocean_database:
+        oauth_token: "{{ do_api_token }}"
+        name: "{{ prefix }}-pg"
+        engine: pg
+        version: "{{ pg_version }}"
+        region: "{{ region }}"
+        size: "{{ pg_size }}"
+        num_nodes: 1
+        private_network_uuid: "{{ vpc_uuid | default(omit, true) }}"
+        tags: ["{{ tag }}"]
+        wait: true
+        wait_timeout: 1800
+        state: present
+      when: existing_db.id is not defined
+
+    - name: List the database clusters again
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/databases?per_page=200"
+        headers: { Authorization: "Bearer {{ do_api_token }}" }
+        status_code: 200
+      register: databases_after
+    - name: Remember our cluster's id
+      ansible.builtin.set_fact:
+        db_id: >-
+          {{ (databases_after.json.databases | selectattr('name', 'equalto', prefix + '-pg') | list | first).id }}
+    - name: Fetch the cluster's connection details
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/databases/{{ db_id }}"
+        headers: { Authorization: "Bearer {{ do_api_token }}" }
+        status_code: 200
+      register: db_cluster
+      no_log: true
+
+    - name: Create the transaction-mode connection pool
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/databases/{{ db_id }}/pools"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ do_api_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "{{ pool_name }}"
+          db: "{{ db_name }}"
+          user: "{{ db_user }}"
+          size: "{{ pool_size }}"
+          mode: transaction
+        status_code: [200, 201, 422]
+
+    - name: Trust the server host on the cluster
+      ansible.builtin.uri:
+        url: "{{ do_api_base }}/databases/{{ db_id }}/firewalls"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ do_api_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          rules:
+            - type: droplet
+              value: "{{ server_droplet.data.droplet.id | string }}"
+        status_code: [200, 201, 422]
+
+    # --- Hand the derived values to the host plays -------------------------
+    - name: Compute the endpoints
+      ansible.builtin.set_fact:
+        server_private_ip: "{{ server_droplet.data.private_ipv4_address }}"
+        loadgen_private_ip: "{{ loadgen_droplet.data.private_ipv4_address }}"
+        seed_url: >-
+          postgresql://{{ db_user }}:{{ db_cluster.json.database.private_connection.password }}@{{
+          db_cluster.json.database.private_connection.host }}:25060/{{ db_name }}?sslmode=require
+        pool_url: >-
+          postgresql://{{ db_user }}:{{ db_cluster.json.database.private_connection.password }}@{{
+          db_cluster.json.database.private_connection.host }}:25061/{{ pool_name }}?sslmode=require
+      no_log: true
+
+    - name: Hand the new hosts to the next plays
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: "{{ item.group }}"
+        ansible_host: "{{ item.ip }}"
+        ansible_user: root
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null"
+      loop:
+        - { name: bench-server, group: bench_server, ip: "{{ server_droplet.data.ip_address }}" }
+        - { name: bench-loadgen, group: bench_loadgen, ip: "{{ loadgen_droplet.data.ip_address }}" }
+
+- name: Configure the server host
+  hosts: bench_server
+  gather_facts: false
+  tasks:
+    - name: Install Docker
+      ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
+      args: { creates: /usr/bin/docker }
+    - name: Start Docker
+      ansible.builtin.service: { name: docker, state: started, enabled: true }
+    - name: Create /root/.ssh
+      ansible.builtin.file: { path: /root/.ssh, state: directory, mode: "0700" }
+    - name: Ship the harness and the wheel
+      ansible.builtin.unarchive:
+        src: "{{ bench_archive }}"
+        dest: /root
+    - name: Build the benchmark image
+      ansible.builtin.command:
+        cmd: docker compose -f benchmark/compose.yaml build seed pgbouncer
+        chdir: /root
+    - name: Pull the PostgreSQL image the compose file names
+      ansible.builtin.command: docker pull postgres:18
+    - name: Take the provisioning facts from the first play
+      ansible.builtin.set_fact:
+        server_private_ip: "{{ hostvars['localhost'].server_private_ip }}"
+        loadgen_private_ip: "{{ hostvars['localhost'].loadgen_private_ip }}"
+        seed_url: "{{ hostvars['localhost'].seed_url }}"
+        pool_url: "{{ hostvars['localhost'].pool_url }}"
+      no_log: true
+    - name: Write the environment file
+      ansible.builtin.template:
+        src: templates/bench.env.j2
+        dest: /root/bench.env
+        mode: "0600"
+      no_log: true
+    - name: Make a key to reach the load generator
+      ansible.builtin.command:
+        cmd: ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
+        creates: /root/.ssh/id_ed25519
+    - name: Read it back for the load-generator play
+      ansible.builtin.slurp:
+        src: /root/.ssh/id_ed25519.pub
+      register: server_pubkey_raw
+    - name: Remember it
+      ansible.builtin.set_fact:
+        server_pubkey: "{{ server_pubkey_raw.content | b64decode | trim }}"
+
+- name: Configure the load-generator host
+  hosts: bench_loadgen
+  gather_facts: false
+  tasks:
+    - name: Install Docker
+      ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
+      args: { creates: /usr/bin/docker }
+    - name: Start Docker
+      ansible.builtin.service: { name: docker, state: started, enabled: true }
+    - name: Create /root/.ssh
+      ansible.builtin.file: { path: /root/.ssh, state: directory, mode: "0700" }
+    - name: Authorize the server host's key
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        line: "{{ hostvars['bench-server'].server_pubkey }}"
+        create: true
+        mode: "0600"
+    - name: Install the load-generator wrapper
+      ansible.builtin.template:
+        src: templates/run-oha.sh.j2
+        dest: /root/run-oha.sh
+        mode: "0755"
+    - name: Pull the load generator
+      ansible.builtin.command: docker pull ghcr.io/hatoo/oha:latest
+
+- name: Run the benchmark
+  hosts: bench_server
+  gather_facts: false
+  tasks:
+    - name: Grid-search every engine, then compare at each engine's best
+      ansible.builtin.shell: |
+        set -eu
+        . /root/bench.env
+        python3 benchmark/grid.py --skip-build \
+          --scenarios plain json db \
+          --duration {{ grid_duration }} --warmup 1 --runs {{ grid_runs }} \
+          --concurrency {{ concurrency }}
+        tuning=$(ls -t benchmark/results/tuning-*.json | head -1)
+        python3 benchmark/run.py --skip-build --tuning "$tuning" \
+          --runs {{ compare_runs }} --duration {{ compare_duration }} --warmup 3 \
+          --concurrency {{ concurrency }}
+        compare=$(ls -t benchmark/results/compare-*.json | head -1)
+        echo "$tuning"
+        echo "$compare"
+      args: { chdir: /root, executable: /bin/bash }
+      register: bench_run
+      when: run_benchmark | bool
+    - name: Fetch the results back
+      ansible.builtin.fetch:
+        src: "/root/{{ item }}"
+        dest: "{{ repo_root }}/benchmark/results/"
+        flat: true
+      loop: "{{ bench_run.stdout_lines | default([]) | select('match', '^benchmark/results/.*\\.json$') | list }}"
+      when: run_benchmark | bool

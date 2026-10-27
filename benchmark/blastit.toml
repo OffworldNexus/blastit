@@ -1,0 +1,20 @@
+# The manifest the benchmark app runs under.
+#
+# One catch-all route: every path the app serves is one sandbox, so what is
+# measured is "blastit serving this app", not "blastit routing between many
+# views". The single grant is the SELECT the `/db` route runs, verbatim, matching
+# `DB_SQL` in `app.py`. `prefork` forks the view at startup instead of on the
+# first request, so the first measured request is not a fork.
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "bench"
+path = ['.*']
+prefork = true
+
+[route.db]
+queries = ["SELECT id, name, payload FROM bench_item ORDER BY id LIMIT 10"]
