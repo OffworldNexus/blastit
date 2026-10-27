@@ -5,7 +5,7 @@ lives in `Cargo.toml` (`[workspace.package] version`), and a release is the tag
 `v` plus that version — `scripts/check-release-tag.sh` refuses a tag that says
 anything else, and [`RELEASING.md`](RELEASING.md) has the steps.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-27)
 
 The first release.
 
@@ -76,15 +76,22 @@ URLs; the one file blastit adds is `blastit.toml`.
 - **A live-server suite can run through blastit itself**, so browser tests
   against the real server are checked against the manifest too.
 - **Presets** set a whole group of defaults for a known platform, chosen with
-  `--preset=…` or `BLASTIT_PRESET=…`: `digitalocean-paas` (root mode, the
+  `--preset NAME` or `BLASTIT_PRESET=NAME`: `digitalocean-paas` (root mode, the
   platform's client-IP header, every peer trusted because the service is only
   reachable through the platform's load balancer and internal services) and
-  `compose-traefik` (rootless mode, Traefik's `X-Forwarded-For` trusted from the
-  compose network). Every `BLASTIT_*` variable still overrides what a preset
+  `compose-traefik` (rootless mode behind Traefik, whose appended
+  `X-Forwarded-For` entry is the one believed). Every `BLASTIT_*` variable still overrides what a preset
   set, and boot says which preset ran and which values it chose.
-- **Configuration stays environment-only** — `BLASTIT_APP`,
-  `BLASTIT_MANIFEST`, `PORT`, budgets, timeouts, log format — so the same image
-  works on a laptop and on a platform.
+- **Configuration is the environment** — `BLASTIT_APP`, `BLASTIT_MANIFEST`,
+  `PORT`, budgets, timeouts, log format — plus an optional preset, so the same
+  image works on a laptop and on a platform.
+- **Mistakes are refused at boot, by name**: an interpreter, standard library or
+  proxy binary the routes cannot read, and any `sys.path` entry (or a directory
+  above it) another uid could write, which would let one route plant code
+  another imports.
+- **Your app just works**: the directory blastit starts in is importable,
+  `REMOTE_ADDR` is the client's address and `REMOTE_PORT` its port, and the
+  `DATABASE_URL` a route gets is one psycopg, Django and SQLAlchemy all read.
 
 ### Deploying it
 
@@ -114,7 +121,7 @@ URLs; the one file blastit adds is `blastit.toml`.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): the design, the security model, the
   measurements and what they assume.
 - [`ROADMAP.md`](ROADMAP.md): what is built, step by step, and what is next.
-- A documentation site on GitHub Pages, written in the order a reader asks:
-  getting started, fitting blastit to your framework, fitting it to your
-  infrastructure, then the reference.
-- A quick start in the README for a Django project and a FastAPI one.
+- [The documentation site](https://offworldnexus.github.io/blastit/): getting
+  started, fitting blastit to your framework (Django, Flask, any WSGI app),
+  fitting it to your infrastructure (the presets, anything else, fair queuing),
+  then the reference.
