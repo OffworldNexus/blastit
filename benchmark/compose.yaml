@@ -27,6 +27,11 @@ x-app-env: &app-env
   # at all (see harness.up_db).
   DATABASE_URL: ${BENCH_DATABASE_URL:-postgresql://bench:bench@pgbouncer:6432/bench?sslmode=disable}
   BLASTIT_LOG_FORMAT: json
+  # Fair queuing is blastit's own feature — nothing else here has an admission
+  # queue to order — so it stays on for every run: its cost belongs in blastit's
+  # numbers rather than in a footnote. `BENCH_FAIR_QUEUING=0` turns it off for a
+  # run that wants to isolate it.
+  BLASTIT_FAIR_QUEUING: ${BENCH_FAIR_QUEUING:-on}
 
 services:
   db:
