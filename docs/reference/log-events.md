@@ -45,7 +45,9 @@ its own.
 
 * **`stage0`** — before anything can fail: the `seccomp` setting as read, the
   `privilege` mode (`root` or `capabilities`), the `bounding_set`, and the
-  rootless `capabilities`. `preset` is always `null` here.
+  rootless `capabilities`. `preset` is always `null` here. Written in the format
+  `BLASTIT_LOG_FORMAT` names — this line waits for the settings — or as JSON
+  when the settings do not parse.
 * **`config`** — as soon as the configuration parsed, before the manifest:
   `preset` in force (or `null`), `preset_settings` with the preset's own values,
   and `preset_overridden`, the names an explicit variable overrode.

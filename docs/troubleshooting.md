@@ -10,12 +10,14 @@ Symptom → fix. Most of it is answerable from the first three `boot` events and
 | `blastit: BLASTIT_FOO: …` | a variable that does not parse; the message names it |
 | the log stops after `stage0` | the configuration did not parse, so stage 1 never ran |
 | `config`, but no `preload` | the manifest, the environment rewrite or the database sockets |
-| `must be \`module:attribute\`` | `BLASTIT_APP` needs a colon; Django's `WSGI_APPLICATION` uses dots |
-| `No module named 'app'` | the module is not importable: run blastit from the project root, or install the project |
+| `must be \`module:attribute\`` | a colon, not Django's dots: the pytest live server converts `WSGI_APPLICATION` for you, a `BLASTIT_APP` you set yourself does not |
+| `No module named 'app'` | not importable from where you started blastit. Its working directory goes first on `sys.path`, so start it next to `app.py` — or install the project |
 | an unknown key, an invalid regex, a duplicate route | the manifest; the message names the key |
 | a proxy input variable is missing | `[proxy.db] input` names a variable the environment does not have |
 | `is not a trusted proxy` | an entry is not an address or CIDR; a port is not a network |
 | `carries file capabilities` | a rootless start used the shared interpreter: use a [dedicated copy](infra/compose-traefik.md#rootless) |
+| a directory `is not readable and traversable` (or `not executable`) | the view uids cannot reach the interpreter, the stdlib, `site-packages`, your project or the dbproxy binary — a Python under a private home is the usual one. Move it (`UV_PYTHON_INSTALL_DIR=/opt/uv-python`), or `chmod o+rx` the directory named and every one above it |
+| `is writable by another uid` | a directory on the interpreter's `sys.path`, or above an entry on it: a route uid could plant a module another route imports, or `rmdir` the entry and put its own there. `chmod go-w` it, or start blastit in the code tree. When the message says "may rename or delete anything in it" — a sticky directory a view uid owns — move the project out from under it, or `chown` it to root |
 | `is the uid the layout hands out` | the service uid collides with `BLASTIT_UID_BASE + 1…3` or a route's uid |
 
 ## Requests do not arrive
@@ -51,7 +53,7 @@ Symptom → fix. Most of it is answerable from the first three `boot` events and
 |---|---|
 | `REMOTE_ADDR` is the load balancer's | `BLASTIT_TRUSTED_PROXIES` does not name it; [measure it](infra/anything-else.md#working-it-out-for-your-own-ingress) |
 | `REMOTE_ADDR` is forged | the header being read is one the ingress passes through; read another |
-| `REMOTE_ADDR` carries a port | that is the socket peer, `ip:port`: no trusted header named the client. When one does, it is a bare IP |
+| `REMOTE_ADDR` carries a port | it does not: `REMOTE_ADDR` is a bare IP, whoever the client turned out to be. The peer's port is in `REMOTE_PORT` |
 | `request.is_secure()` is false behind TLS | `X-Forwarded-Proto` is not arriving from a trusted peer, or `SECURE_PROXY_SSL_HEADER` is missing |
 | a variable the app expected is gone | `BLASTIT_*`, proxy inputs and `BLASTIT_ENV_STRIP` are removed |
 

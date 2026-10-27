@@ -33,7 +33,7 @@ The health path takes no worker slot: traffic cannot starve a health check.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_LOG_FORMAT` | `json` | `json` (one event per line) or `pretty` (coloured, for humans) |
+| `BLASTIT_LOG_FORMAT` | `json` | `json` (one event per line) or `pretty` (coloured, for humans); the boot's first lines wait for it, and a boot whose settings do not parse prints them as JSON |
 | `BLASTIT_LOG_LEVEL` | `info` | the minimum level printed |
 
 stdout is the only output. See [log events](log-events.md).

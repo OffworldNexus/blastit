@@ -56,4 +56,7 @@ $ blastit-manifest fold LOG... --manifest blastit.toml [--write] [--prefer-table
 | `--prefer-tables` | add the smallest `tables` grant covering the denials |
 | `--allow-dangerous` | grant statements a grant is not an allowlist for |
 
+When the console script is not on `PATH` — a wheel's interpreter, a container —
+`python -m blastit.fold LOG... --manifest blastit.toml` is the same command.
+
 Exits `0` on a missing-grant diff, empty or not, `1` on an unreadable log or manifest.

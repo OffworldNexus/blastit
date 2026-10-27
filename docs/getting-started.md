@@ -15,9 +15,10 @@ from source and needs a Rust toolchain and libclang.
 !!! warning "Readable by the route uids"
 
     Routes run as uids `BLASTIT_UID_BASE+1000+i`, so the project, its `.venv` and
-    the interpreter must be readable and traversable by those uids. A `0700`
-    project directory, or an interpreter behind a private home (`uv python
-    install` puts one there), breaks exactly that.
+    the interpreter must be readable and traversable by those uids. blastit
+    checks this at boot and refuses, naming the first directory that blocks and
+    both fixes: `UV_PYTHON_INSTALL_DIR=/opt/uv-python` before
+    `uv python install`, or `chmod o+rx` that directory and every one above it.
 
 ## 2. Write the smallest app and manifest
 

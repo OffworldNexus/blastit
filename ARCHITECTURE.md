@@ -242,7 +242,10 @@ and its channel to the scheduler.
   that has both `Content-Length` and `Transfer-Encoding`. It derives the
   client address and scheme with one resolver: the header
   `BLASTIT_CLIENT_IP_HEADER` is believed only from a socket peer in
-  `BLASTIT_TRUSTED_PROXIES` (§8.2).
+  `BLASTIT_TRUSTED_PROXIES` (§8.2). The address it derives is bare: no port, an
+  IPv4-mapped IPv6 address normalised to IPv4, an IPv6 zone dropped. The app is
+  told the address in `REMOTE_ADDR` and the connection's port in `REMOTE_PORT`
+  (§2.5), which is CGI's split and what PEP 3333 keeps.
 * Encodes responses. It validates header names and values (no CR/LF
   injection) and picks `Content-Length` or chunked encoding. Views produce a
   status line, headers and body chunks; they never write raw bytes to the
@@ -371,7 +374,12 @@ its process.)
   builds a standard WSGI `environ` and calls the WSGI callable, the same one
   in every process, so the app does its own routing and middleware as usual.
   It then streams the response back. blastit adds `blastit.route` (the route's
-  name) to `environ`, for logging only.
+  name) to `environ`, for logging only. `REMOTE_ADDR` is the resolved client
+  address (§2.3) and `REMOTE_PORT` is the port the request arrived on: the
+  peer's, when the peer had one — a client a trusted proxy named has no port of
+  its own, so `REMOTE_PORT` is the connection's and `REMOTE_ADDR` is still who
+  the chain says. A peer that is not an address at all (an unnamed socket) gets
+  no `REMOTE_PORT` rather than a wrong one.
 * When the thread exits, the view sends `DONE`. This happens after the WSGI
   iterable's `close()`, so `request_finished` handlers have already run and
   the DB connection is already closed.
@@ -481,10 +489,15 @@ this view's first response frame and the time it observed itself, and only
 reports `cpu_ns` — never schedules on it.
 
 `REQ_HEAD`'s `peer_addr` is the address of the socket the request arrived on,
-exactly as the kernel reported it. It is never a header's value, so a client
-cannot forge it, and it is what the trust decision for `remote_addr` and for
-the fair scheduler's flows is made on. `remote_addr` stays what the app sees
-in `REMOTE_ADDR` — the peer, or the address a trusted client-IP chain names.
+exactly as the kernel reported it — `ip:port`, or an address alone for a peer
+that is not one. It is never a header's value, so a client cannot forge it, and
+it is what the trust decision for `remote_addr` and for the fair scheduler's
+flows is made on. `remote_addr` stays what the app sees in `REMOTE_ADDR` — the
+address alone, whoever the client turned out to be: the peer's IP, normalised
+(an IPv4-mapped IPv6 address is IPv4, an IPv6 zone is dropped), or the address a
+trusted client-IP chain names. **No port is ever in it.** CGI's split is kept:
+the port the connection arrived from is a key of its own, `REMOTE_PORT`, which
+the view reports from `peer_addr` when the peer has a port (§2.5).
 
 The scheduler rewrites ids between ① and ③. A view only ever sees its own
 `req_id`s and cannot address any other stream. Bodies stream in both
@@ -714,7 +727,7 @@ With DO's environment, the app ends up seeing:
 platform: DATABASE_URL=postgresql://doadmin:s3cr3t@db-xyz.db.ondigitalocean.com:25060/defaultdb?sslmode=require
           DATABASE_CA_CERT=-----BEGIN CERTIFICATE-----…
           ANALYTICS_URL=postgresql://reader:t0ps3cr3t@db-abc.db.ondigitalocean.com:25060/analytics?sslmode=require
-app:      DATABASE_URL=postgresql://blastit@%2Fproc%2Fself%2Fcwd:5433/defaultdb
+app:      DATABASE_URL=postgresql://blastit@/defaultdb?host=/proc/self/cwd&port=5433
           ANALYTICS_DB_HOST=/proc/self/cwd
           ANALYTICS_DB_PORT=5432
           ANALYTICS_DB_NAME=analytics
@@ -763,7 +776,7 @@ by name (so the order of `[proxy.*]` sections doesn't matter).
 
 | Template field | Value |
 |---|---|
-| `url` | `postgresql://{{ user }}@{{ socket_dir \| urlencode }}:{{ port }}/{{ database }}` |
+| `url` | `postgresql://{{ user }}@/{{ database }}?host={{ socket_dir }}&port={{ port }}` — the socket directory in a **query parameter**, the one spelling libpq, `dj-database-url` and SQLAlchemy all resolve |
 | `socket_dir` | `/proc/self/cwd`: each view's working directory is its own socket directory (§2.2) |
 | `port` | this proxy's local port (`5432 + k`) |
 | `socket_path` | `/proc/self/cwd/.s.PGSQL.<port>` |
@@ -779,12 +792,18 @@ by name (so the order of `[proxy.*]` sections doesn't matter).
 
 **Grant contents:** `queries` (§6) and `transaction_control`.
 
-A percent-encoded host is how libpq and `dj-database-url` write a Unix socket
-directory. libpq connects to `<host>/.s.PGSQL.<port>`, so the **port selects
-the proxy** and `/proc/self/cwd` selects the view. The rendered values are
-identical in every process. That matters because frameworks read their
-database settings once, in init, before the fork. No output contains a
-password, because dbproxy authenticates by socket identity.
+The socket directory travels in a **query parameter** because that is the one
+spelling every consumer resolves: libpq reads `host` and `port` from the query
+when the authority carries none, `dj-database-url` passes unknown parameters
+through to the driver, and SQLAlchemy's `postgresql://` and
+`postgresql+psycopg://` dialects hand them to it as keyword arguments. The
+percent-encoded authority form is what libpq and `dj-database-url` write, and
+SQLAlchemy does not decode it — it looks up the literal `%2Fproc%2Fself%2Fcwd`
+as a host. libpq connects to `<host>/.s.PGSQL.<port>`, so the **port selects the
+proxy** and `/proc/self/cwd` selects the view. The rendered values are identical
+in every process. That matters because frameworks read their database settings
+once, in init, before the fork. No output contains a password, because dbproxy
+authenticates by socket identity.
 
 ### 5.3 The rest of the environment
 
@@ -801,11 +820,32 @@ password, because dbproxy authenticates by socket identity.
    | `LC_ALL` | `C.UTF-8` | no locale files needed |
    | `HOME`, `TMPDIR` | replaced per view | private scratch directory |
 
-Stage 1 runs `python -I`, which implies `-E`: the interpreter ignores every
-`PYTHON*` variable, so the `PYTHONDONTWRITEBYTECODE` above does not reach it —
-the modules stage 1 imports before the fork are compiled into `__pycache__`
-directories owned by the user blastit started as, which is why a wheel serves an
-application directory it may write to.
+Every path on that interpreter's `sys.path` — its own entries, the working
+directory blastit was started in, whatever `PYTHONPATH` names, whatever a `.pth`
+file added — is checked at boot, and so is **every directory above one up to
+`/`**: a uid blastit drops to that may write any of them can plant a module
+another route imports, or `rmdir` an entry and put its own directory back. A
+sticky directory above an entry (`/tmp` is the one every deployment has) is not
+a way in when the entry below it belongs to nobody blastit drops to, and it is
+one when the entry is missing — a sticky directory lets a new name through. The
+kernel is asked, once per uid; the boot refuses and names the path to fix, and a
+`sys.path` that does not answer within a second stops the boot rather than
+hanging it.
+
+Stage 1 runs `python -I`, which implies `-E` and `-P`: the interpreter ignores
+every `PYTHON*` variable, and it starts with neither `PYTHONPATH` nor the
+working directory on `sys.path`. Two things are put back before the first import
+(D2). The console script's own entries — what stage 0 recorded — are restored in
+front, so the application's modules are found where the user's interpreter found
+them. And the **working directory blastit was started in goes first**: gunicorn,
+uwsgi and granian all make the directory they were started in importable, so a
+project that is not installed serves its own `wsgi:application` with no
+`PYTHONPATH`, and `hello:application` is found in `hello.py` next to the
+operator. Neither entry crosses the barrier the other way: no `PYTHON*` variable
+changes how the interpreter starts, which is why the `PYTHONDONTWRITEBYTECODE`
+above does not reach it — the modules stage 1 imports before the fork are
+compiled into `__pycache__` directories owned by the user blastit started as,
+which is why a wheel serves an application directory it may write to.
 
 Proxies are the general pattern for every future capability: **replace the
 credential with a local endpoint served by a broker that checks the
@@ -1128,6 +1168,23 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
 * **Filesystem.** The code tree is read-only to views (owned by root, mode
   `0755` / `0644`). Each view gets a private `0700` scratch directory and
   `umask 077`. `/tmp` stays `1777` but is no longer the default scratch dir.
+* **A boot that names what a dropped-to uid cannot reach.** Every path a view
+  imports *through* — the interpreter's prefixes, the standard library,
+  `platstdlib`, `site-packages`, and the directory the application's own module
+  comes from (`importlib.util.find_spec`) — has to be readable and traversable by
+  the uids blastit drops to, or a lazy import fails inside one view after the
+  fork (`ModuleNotFoundError: No module named 'stringprep'`), one request at a
+  time. A Python installed under a private home is the case this exists for:
+  `uv python install` puts one in `~/.local/share/uv/python`, and `~` is often
+  `0750`, so `libpython`'s built-ins keep working and every pure-Python module
+  fails. The file a child has to `execve` — `BLASTIT_EXEC`, or a wheel's
+  `_bin/blastit-dbproxy` — has to be executable by dbproxy's uid, or stage 0 dies
+  with `exec dbproxy: Permission denied (os error 13)` and nothing else. blastit
+  asks the kernel with `access(2)`, as the uid in question, before either can
+  happen, and refuses the boot naming the first directory that blocks, its mode
+  and both fixes: move the interpreter (`UV_PYTHON_INSTALL_DIR=/opt/uv-python`
+  before `uv python install`), or `chmod o+rx` that directory and every one above
+  it.
 * **rlimits.** `RLIMIT_NPROC` per view uid, plus `RLIMIT_NOFILE` and
   `RLIMIT_CORE=0`. It counts threads as well as processes, summed over every
   process of the uid, on both Linux and DO's gVisor, so it is a hard backstop
@@ -1291,6 +1348,11 @@ routing drift.
 **Formats.** `BLASTIT_LOG_FORMAT=json` (the default, for the server) prints one
 JSON object per line. `pretty` prints the same events as coloured, aligned,
 human-readable lines, for running blastit by hand. Both carry the same fields.
+There is one human form: an event a component forwarded is read back into the
+event it came from and rendered the same way, so `request` and `sql.denied` look
+alike whichever component emitted them. A line this build cannot read — an
+`event` a newer component emitted — falls back to a field dump, which loses
+nothing.
 
 ```json
 {"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","request_id":"01JB9…","method":"GET","path":"/products/42/","route":"product-detail","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_in":0,"bytes_out":5120,"cost_ns":18400000,"cpu_ns":9100000,"remote_addr":"203.0.113.7"}
@@ -1333,6 +1395,10 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 | `app.output` | init | info (stdout) / warn (stderr) | `stream`, `line`, `part`, `parts` | the app or a library printed something |
 | `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, `seccomp`, `privilege` (`root` or `capabilities`, D6) with `capabilities` (the set init holds, rootless mode only) and `bounding_set` (`dropped` or `kept`, M1), the preset in force with the settings it supplied and the ones an explicit variable overrode (`preset`, `preset_settings`, `preset_overridden`; E1 — `preset` is written as `null` in a `boot` that has none, and the supplied settings' values are the preset's own, never the operator's), the rendered output variable *names* per proxy (never values), the warning text (for example an unattached group) | lifecycle of the whole server |
 
+A `remote_addr` field is the same address the app sees in `REMOTE_ADDR`: a
+bare IP, never `ip:port` (§2.5). A port is never a log field at all — it is a
+key of `environ`, not of an event, and it reaches the app and nothing else.
+
 `cost_ns` is what the request was charged for fair queuing: the view
 process's own measurement, clamped between the time from dispatch to the
 view's first response frame and the time the scheduler observed to the end
@@ -1349,9 +1415,13 @@ over the heap, and the memory the view process cap was derived from —
 `mem_total`, `mem_used` and `max_view_processes` (§8 Sizing). Byte counts are
 integers.
 
-**The three `boot` lines.** The first is `stage0`'s: printed before anything can
+**The three `boot` lines.** The first is `stage0`'s: *made* before anything can
 fail, so it says the §7.3 seccomp setting, read straight from its variable, and
 nothing about a configuration that was not read yet — including `preset: null`.
+It is *printed* once the settings that decide how lines are printed have been
+read, and in the format they name: the lines stage 0 makes that early wait in
+order and go out together, and a boot whose settings do not parse writes them as
+JSON and then the error.
 The `config` line is also stage 0's, emitted as soon as the configuration parsed
 and *before* the manifest is read, so a boot that fails later still says which
 preset it was failing with; it carries the mode init detected, the filters as
