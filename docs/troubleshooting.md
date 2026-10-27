@@ -16,7 +16,7 @@ with `BLASTIT_LOG_FORMAT=pretty`.
 | a proxy input variable is missing | `[proxy.db] input` names one the environment lacks |
 | `is not a trusted proxy` | an entry is not an address or CIDR; a port is not a network |
 | `carries file capabilities` | a rootless start used the shared interpreter: use a [dedicated copy](infra/compose-traefik.md#rootless) |
-| a directory `is not readable and traversable` (or `not executable`) | the view uids cannot reach the interpreter, the stdlib, `site-packages`, your project or the dbproxy binary — usually a Python under a private home. Move it (`UV_PYTHON_INSTALL_DIR=/opt/uv-python`), or `chmod o+rx` it and its parents |
+| a directory `is not readable and traversable` (or `not executable`) | the view uids cannot reach the interpreter, the stdlib, `site-packages`, your project or the dbproxy binary — usually a Python under a private home. [Move it](getting-started.md#1-a-throwaway-directory-the-route-uids-can-read) (`UV_PYTHON_INSTALL_DIR=/opt/uv-python`), or `chmod o+rx` it and its parents |
 | `is writable by another uid` | a directory on the interpreter's `sys.path`, or above one of its entries: a route uid could plant a module another route imports. `chmod go-w` it, or start blastit in the code tree. A sticky directory a view uid owns ("may rename or delete anything in it"): move the project out, or `chown` to root |
 | `is the uid the layout hands out` | the service uid collides with `BLASTIT_UID_BASE + 1…3` or a route's uid |
 

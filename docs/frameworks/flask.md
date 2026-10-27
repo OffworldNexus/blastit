@@ -9,6 +9,10 @@ $ uv init --python 3.13 shop && cd shop
 $ uv add flask 'psycopg[binary]' blastit
 ```
 
+Run `uv` as yourself, and keep the interpreter it installs where the route uids
+can read it — [Getting started, step
+1](../getting-started.md#1-a-throwaway-directory-the-route-uids-can-read).
+
 ```python title="app.py"
 import os
 
