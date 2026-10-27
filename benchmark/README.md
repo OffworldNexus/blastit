@@ -150,6 +150,11 @@ fixed shape for when there is no tuning file. Results are written to
 
 ## Results
 
+> **Superseded for the optimized blastit.** The tables below are the run from
+> *before* the `perf-hot-path` branch. A run of the same harness, same setup,
+> with the optimized build is in [`RECAP.md`](RECAP.md) — read that one for
+> blastit's numbers, and note that its `db` row is still provisional.
+
 **Setup.** A `c-16` server host (8 cores allotted to the server under test) and a
 `c-8` load-generator host on the same private network, `oha` at 400 keep-alive
 connections; DigitalOcean Managed PostgreSQL 18 with its built-in pool
