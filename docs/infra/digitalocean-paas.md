@@ -18,25 +18,23 @@ The platform owns `PORT`; the cap goes in the spec.
 
 ## Why the peer is not the client
 
-The socket peer is DO's ingress, not the client: the address comes from a header:
+The socket peer is DO's ingress, not the client: the address comes from a header.
 
-* **`do-connecting-ip`** — the edge overwrites it with the real client address,
-  so nothing a client sends survives. The preset reads this one.
-* **`X-Forwarded-For`** — the edge appends to it
-  (`<client-supplied…>,<real client>,<edge>`), so a forged entry sits next to the
-  real client.
-* **`X-Forwarded-Proto`** — the edge overwrites it with `https`, so
-  `wsgi.url_scheme` is `https` and a client cannot change it.
-* **`X-Real-IP`, `Forwarded`, `True-Client-IP`, `X-Client-IP`** — never read.
+| Header | What the edge does |
+|---|---|
+| `do-connecting-ip` | overwrites it with the real client address; the preset reads this one |
+| `X-Forwarded-For` | appends: `<client-supplied…>,<real client>,<edge>` |
+| `X-Forwarded-Proto` | overwrites it with `https`, so `wsgi.url_scheme` is `https` and a client cannot change it |
+| `X-Real-IP`, `Forwarded`, `True-Client-IP`, `X-Client-IP` | never read |
+| `CF-Connecting-IP` | a client-sent one is refused by Cloudflare with `403` (`error code: 1000`) and never reaches the app; an empty value passes |
 
-Trusting every peer is safe only because the read header is one the edge
-overwrites; the peers that can reach the container are DO's and this app's.
+Trusting every peer is safe only because the header read is one the edge
+overwrites.
 
 !!! warning "Keep the assumption true"
 
-    Publish no port for the service: any peer that reaches the container is
-    believed. A compromised sibling service in the same app can forge the client
-    address too.
+    Publish no port: any peer that reaches the container is believed, and a
+    compromised sibling service can forge the client address too.
 
 ## A full example
 
