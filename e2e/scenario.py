@@ -11,7 +11,9 @@ Under blastit the client's own address is checked too (E1): `--remote-addr` says
 what the deployment's ingress sees for this client — an IP to assert exactly, or
 `public` where the driver cannot know it (a hosted deployment) and the address
 only has to be a client's rather than the ingress's. Whatever the answer is, a
-client-IP header the *client* sent never becomes `REMOTE_ADDR`.
+client-IP header the *client* sent never becomes `REMOTE_ADDR` — and where the
+deployment's *edge* refuses to carry that header at all, so that no app could
+ever be told it, that is a pass of its own (`EDGE_REFUSED_CLIENT_IP_HEADERS`).
 """
 
 import argparse
@@ -95,6 +97,83 @@ def is_client_address(remote_addr):
     return not (address.is_loopback or any(address in net for net in INGRESS_NETWORKS))
 
 
+# E1: the lie every forged header tells, and the client-IP headers that carry
+# it. A client sends all of them; none of them may become `REMOTE_ADDR`.
+FORGED_ADDRESS = "6.6.6.6"
+FORGED_CLIENT_IP_HEADERS = {
+    "X-Forwarded-For": FORGED_ADDRESS,
+    "X-Real-Ip": FORGED_ADDRESS,
+    "Forwarded": f"for={FORGED_ADDRESS};proto=https",
+    "X-Client-IP": FORGED_ADDRESS,
+    "True-Client-IP": FORGED_ADDRESS,
+    "do-connecting-ip": FORGED_ADDRESS,
+}
+
+# The one header a client cannot even send on App Platform, measured there on
+# 2026-10-27 (`blastit-forge-probe` in ams3, and every other App Platform app
+# tried): the edge is Cloudflare, and it refuses a request that carries a
+# client-sent `CF-Connecting-IP` with `403`, a body of `error code: 1000` and
+# `Server: cloudflare` — the origin never sees the request. Ten requests with it
+# alone and ten with the whole set were refused 10/10, while each of the other
+# headers alone, and the whole set without this one, were answered 20/20 with
+# 200. So this one is asked for on its own request (below), where the edge's
+# refusal *is* the pass: a header that cannot reach the app cannot become
+# `REMOTE_ADDR`. Where there is no such edge (Docker/Traefik, a published port)
+# the request arrives and the header is checked like every other one.
+EDGE_REFUSED_CLIENT_IP_HEADERS = ("CF-Connecting-IP",)
+
+
+def facts_of(body):
+    """The probe route's JSON facts, or `{}` for anything that is not them.
+
+    An answer that is not the probe route's own object — the edge's error page,
+    the app's traceback, a body that never arrived — is `{}`: the scenario must
+    report what it was told rather than crash on a `json.loads` it did not
+    expect, or read someone else's JSON as the probe's answer.
+    """
+    try:
+        facts = json.loads(body)
+    except (TypeError, ValueError):
+        return {}
+    return facts if isinstance(facts, dict) else {}
+
+
+def refused_at_the_edge(status, server, body):
+    """Whether a response is the *edge* refusing the request outright.
+
+    Measured on App Platform: Cloudflare answers a client-sent
+    `CF-Connecting-IP` with `403`, `error code: 1000`, and `Server: cloudflare`,
+    and the origin never sees the request. A response from the deployment itself
+    — the app's own 403, blastit's 500 — is not that: calling one of those an
+    edge refusal would turn "the app is misbehaving" into a pass. A hang-up
+    (`status` is `None`) is reported, and is not an edge refusal either: it says
+    nothing about which header caused it.
+    """
+    if status == 200 or status is None:
+        return False
+    return "cloudflare" in (server or "").lower() or "error code:" in (body or "")
+
+
+def describe(status):
+    """An HTTP status, or the absence of one, for a line a human reads."""
+    return f"HTTP {status}" if status is not None else "no response"
+
+
+def request_probe(client, headers):
+    """One `GET /debug/request/`, and everything the answer is made of.
+
+    Returns `(status, server, facts, body)`: `status` is `None` when no HTTP
+    response arrived at all (an edge can hang up instead of answering), `server`
+    is the answer's `Server` header, and `facts` is the probe route's JSON when
+    the answer was one — `{}` otherwise.
+    """
+    try:
+        status, response_headers, body = client.request("GET", "/debug/request/", headers=headers)
+    except Exception as e:  # noqa: BLE001 — urllib raises URLError when it is hung up on
+        return None, "", {}, f"{type(e).__name__}: {e}"
+    return status, str(response_headers.get("Server", "")), facts_of(body), body
+
+
 def self_test():
     """The decisions this file makes about what it is told, asserted.
 
@@ -129,6 +208,63 @@ def self_test():
         check(is_port(port), f"{port} is a port")
     for not_a_port in (None, "", "0", "65536", "127.0.0.1:51000", 51000, "-1"):
         check(not is_port(not_a_port), f"{not_a_port!r} is not a port")
+
+    # E1's forged headers: every one a client sends is asked for exactly once,
+    # between the request the app answers and the header the edge refuses — so
+    # that dropping one from either list fails here rather than silently
+    # weakening the check.
+    mandate = {
+        "X-Forwarded-For",
+        "X-Real-Ip",
+        "Forwarded",
+        "X-Client-IP",
+        "True-Client-IP",
+        "CF-Connecting-IP",
+        "do-connecting-ip",
+    }
+    check(
+        set(FORGED_CLIENT_IP_HEADERS) | set(EDGE_REFUSED_CLIENT_IP_HEADERS) == mandate,
+        "every client-IP header a client sends is asked for",
+    )
+    check(
+        not set(FORGED_CLIENT_IP_HEADERS) & set(EDGE_REFUSED_CLIENT_IP_HEADERS),
+        "and each of them exactly once",
+    )
+    check(
+        all(FORGED_ADDRESS in value for value in FORGED_CLIENT_IP_HEADERS.values()),
+        f"every one of them carries the lie ({FORGED_ADDRESS})",
+    )
+
+    # A probe answer is the route's object; anything else is no answer at all,
+    # and a refusal is the edge's 403 — never a 200, an app's 500, or a hang-up.
+    check(facts_of('{"remote_addr": "6.6.6.6"}') == {"remote_addr": FORGED_ADDRESS},
+          "an answer is its JSON object")
+    check(facts_of("<html>403 Forbidden</html>") == {}, "an error page is no answer")
+    check(facts_of("") == {} and facts_of(None) == {}, "and neither is an empty one")
+    check(refused_at_the_edge(403, "cloudflare", "error code: 1000\n"),
+          "Cloudflare's 403 is the edge refusing")
+    check(refused_at_the_edge(403, "", "error code: 1000\n"), "the error body alone says so")
+    check(refused_at_the_edge(403, "cloudflare", ""), "the Server header alone says so")
+    check(not refused_at_the_edge(200, "cloudflare", "{}"), "a 200 is never a refusal")
+    check(not refused_at_the_edge(500, "gunicorn", "Traceback (most recent call last)"),
+          "an app's 500 is not the edge")
+    check(not refused_at_the_edge(403, "nginx", "Forbidden"), "nor is another server's 403")
+    check(not refused_at_the_edge(None, "", "URLError: connection reset"),
+          "nor a hang-up, which names no header")
+
+    check(describe(403) == "HTTP 403" and describe(None) == "no response",
+          "a status says what it is, including absent")
+
+    class _HungUp:
+        def request(self, *args, **kwargs):
+            raise OSError("connection reset by peer")
+
+    status, server, facts, body = request_probe(_HungUp(), {})
+    check(
+        status is None and facts == {} and "connection reset" in body,
+        "a hang-up is reported, not raised",
+    )
+    check(not refused_at_the_edge(status, server, body), "and it is not a pass")
 
     print(f"\n{'PASS' if not FAILURES else 'FAIL'}: {len(FAILURES)} failure(s)")
     for failure in FAILURES:
@@ -325,23 +461,20 @@ def main():
 
     forged = Client(args.base)
     # The client sends every client-IP header a proxy might set, and every one of
-    # them is a lie it cannot make blastit believe.
-    headers = {
-        "X-Forwarded-For": "6.6.6.6",
-        "X-Real-Ip": "6.6.6.6",
-        "Forwarded": "for=6.6.6.6;proto=https",
-        "X-Client-IP": "6.6.6.6",
-        "True-Client-IP": "6.6.6.6",
-        "CF-Connecting-IP": "6.6.6.6",
-        "do-connecting-ip": "6.6.6.6",
-    }
+    # them is a lie it cannot make the deployment believe. One of them does not
+    # even get that far on App Platform — the edge refuses to carry it
+    # (`EDGE_REFUSED_CLIENT_IP_HEADERS`) — so it is asked for on its own, below,
+    # and the rest go in one request, which is the one that has to arrive.
+    headers = dict(FORGED_CLIENT_IP_HEADERS)
     if args.forged_proto_ignored:
         headers["X-Forwarded-Proto"] = "https"
-    status, _, body = forged.request("GET", "/debug/request/", headers=headers)
-    facts = json.loads(body) if status == 200 else {}
+    status, _, facts, body = request_probe(forged, headers)
+    if status != 200:
+        print(f"  info the forged request: {describe(status)}: {body[:300]!r}", flush=True)
+    check(status == 200, "the deployment answers one request carrying every forged header")
     forged_addr = facts.get("remote_addr")
     check(
-        forged_addr != "6.6.6.6",
+        bool(forged_addr) and forged_addr != FORGED_ADDRESS,
         f"a client-IP header the client sent is never REMOTE_ADDR ({forged_addr})",
     )
     # The address, not the exact string: the two requests arrived as two
@@ -357,6 +490,30 @@ def main():
             f"as is the scheme: X-Forwarded-Proto from an untrusted peer is not read "
             f"({facts.get('scheme')})",
         )
+    for name in EDGE_REFUSED_CLIENT_IP_HEADERS:
+        # Asked for alone. Where the edge refuses to carry it, the request never
+        # reaches the app: a header no app is ever told cannot become
+        # `REMOTE_ADDR` either, and what a client gets is the edge's answer.
+        # Where there is no such edge, the request arrives and the header is
+        # held to exactly the same two checks as the ones above.
+        status, server, facts, body = request_probe(forged, {name: FORGED_ADDRESS})
+        if status == 200:
+            alone_addr = facts.get("remote_addr")
+            check(
+                bool(alone_addr) and alone_addr != FORGED_ADDRESS,
+                f"a client-IP header the client sent alone is never REMOTE_ADDR ({alone_addr})",
+            )
+            check(
+                address_of(alone_addr) == address_of(honest_addr),
+                f"and the client the deployment sees is unchanged ({alone_addr})",
+            )
+        else:
+            print(f"  info {name} alone: {describe(status)}: {body[:300]!r}", flush=True)
+            check(
+                refused_at_the_edge(status, server, body),
+                f"the edge refuses to carry a client-sent {name} at all "
+                f"({describe(status)}, the request never reaches the app)",
+            )
     if args.expect_scheme:
         check(
             honest_scheme == args.expect_scheme,
