@@ -213,15 +213,27 @@ impl Writable {
                 self.mode,
             ),
         };
+        let fix = if self.entry.is_some() && self.mode & 0o1000 != 0 {
+            format!(
+                "Move the project so that the entry is not below a sticky directory a uid \
+                 blastit drops to owns — the owner of a sticky directory may rename or \
+                 delete anything in it, whatever the entry's own owner is — or `chown` {} \
+                 to root",
+                self.path.display(),
+            )
+        } else {
+            format!(
+                "Start blastit in the code tree, next to the application — a directory only \
+                 its owner (and root) can write — or make this one so: `chmod go-w {}`",
+                self.path.display(),
+            )
+        };
         format!(
             "{what}: {answer}. `sys.path` is how a view finds code — the interpreter's own \
              entries, the working directory blastit was started in, and whatever \
              `PYTHONPATH` or a `.pth` file added — and a view process runs as a uid of its \
              own, so a route could plant a module another route imports, and whichever \
-             route imports it is not the planter's choice. Start blastit in the code tree, \
-             next to the application — a directory only its owner (and root) can write — \
-             or make this one so: `chmod go-w {}`",
-            self.path.display(),
+             route imports it is not the planter's choice. {fix}",
         )
     }
 }
@@ -513,7 +525,9 @@ fn write_answer(fd: RawFd, uid: u32, targets: &[Target], ask: Probe, dropped: &D
         // does not own. It *is* one when the child is the uid's own, or when
         // there is nothing there yet — a file with a fresh name is what a sticky
         // directory does allow.
-        if ask.reads_sticky() && mode & 0o1000 != 0 && sticky_protects(&target.child, uid, dropped)
+        if ask.reads_sticky()
+            && mode & 0o1000 != 0
+            && sticky_protects(metadata.uid(), &target.child, uid, dropped)
         {
             continue;
         }
@@ -551,7 +565,14 @@ fn sticky_child_is_safe(child: &Path, uid: u32, dropped: &DroppedTo) -> bool {
 
 /// The same for a [`Target`]'s child, which may be missing: a sticky directory
 /// lets a *new* name through, so there is nothing there to protect.
-fn sticky_protects(child: &Option<PathBuf>, uid: u32, dropped: &DroppedTo) -> bool {
+///
+/// `owner` is the owner of the sticky directory itself, and it comes first
+/// because POSIX gives that uid the right to rename or delete *any* entry in it:
+/// a sticky directory a uid blastit drops to owns protects nothing at all.
+fn sticky_protects(owner: u32, child: &Option<PathBuf>, uid: u32, dropped: &DroppedTo) -> bool {
+    if dropped.uids.contains(&owner) {
+        return false;
+    }
     match child {
         Some(child) => sticky_child_is_safe(child, uid, dropped),
         None => false,
@@ -559,12 +580,18 @@ fn sticky_protects(child: &Option<PathBuf>, uid: u32, dropped: &DroppedTo) -> bo
 }
 
 /// The same, for every uid blastit drops to: the fallback's exemption holds
-/// only when no dropped-to uid can replace the child.
-fn sticky_protects_for_all(child: &Option<PathBuf>, dropped: &DroppedTo) -> bool {
-    dropped
-        .uids
-        .iter()
-        .all(|uid| sticky_protects(child, *uid, dropped))
+/// only when no dropped-to uid can take the entry over.
+fn sticky_protects_for_all(owner: u32, child: &Option<PathBuf>, dropped: &DroppedTo) -> bool {
+    if dropped.uids.contains(&owner) {
+        return false;
+    }
+    let Some(child) = child else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::metadata(child) else {
+        return false;
+    };
+    !dropped.uids.contains(&metadata.uid())
 }
 
 /// The first directory above `path` a dropped-to uid could not pass, as a depth.
@@ -934,7 +961,7 @@ pub fn writable(
             continue;
         };
         let mode = metadata.permissions().mode();
-        if mode & 0o1000 != 0 && sticky_protects_for_all(&target.child, dropped) {
+        if mode & 0o1000 != 0 && sticky_protects_for_all(metadata.uid(), &target.child, dropped) {
             continue;
         }
         for uid in &unasked {
@@ -1581,6 +1608,54 @@ mod tests {
         assert_eq!(
             refusal.entry, None,
             "the entry itself is not a child of one"
+        );
+    }
+
+    #[test]
+    fn a_sticky_directory_a_view_uid_owns_is_a_way_in() {
+        // The re-check's repro: `/srv/sw` is `1775` and owned by a view uid,
+        // `inside/proj` below it belongs to root. POSIX lets the *owner* of a
+        // sticky directory rename or delete anything in it, so the sticky bit
+        // protects nothing here — uid 21000 renames `inside`, recreates the path
+        // and plants a module, and uid 21001 imports it. Root only: making a
+        // directory belong to a dropped-to uid takes `CAP_CHOWN`.
+        if !can_probe() {
+            return;
+        }
+        let tree = TempTree::new("sticky-owned");
+        let shared = tree.dir("shared", 0o1775);
+        // The child below the sticky directory belongs to root, which the sticky
+        // bit *would* protect — it is the sticky directory's own owner that gives
+        // it away.
+        tree.dir("shared/inside", 0o755);
+        let proj = tree.dir("shared/inside/proj", 0o755);
+        let owner = *dropped().uids.iter().next_back().expect("a uid");
+        chown(&shared, owner, owner);
+        assert_eq!(
+            in_a_child(|| {
+                match writable(std::slice::from_ref(&proj), &dropped(), false) {
+                    Some(refusal)
+                        if refusal.path == shared
+                            && refusal.entry == Some(proj.clone())
+                            && refusal.message().contains("may rename or delete") =>
+                    {
+                        0
+                    }
+                    Some(_) => 1,
+                    None => 2,
+                }
+            }),
+            0,
+            "a sticky directory a view uid owns (1 = another refusal, 2 = none)"
+        );
+
+        // The same tree, with the sticky directory owned by root: now the sticky
+        // bit protects `inside`, which root owns, and nothing is refused.
+        chown(&shared, 0, 0);
+        assert_eq!(
+            writable(std::slice::from_ref(&proj), &dropped(), false),
+            None,
+            "root's sticky directory protects what is below it"
         );
     }
 
