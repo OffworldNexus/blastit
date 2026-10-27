@@ -45,8 +45,9 @@
 //! a `.pth` file added, a zip file on the path — must be one no uid blastit drops
 //! to can write, *and* so must every directory above one up to `/`: [`writable`].
 //! A sticky directory above an entry — `/tmp` is the one every deployment has —
-//! is the exception, and only when the entry below it belongs to root or to init,
-//! because the sticky bit stops a uid unlinking or renaming what it does not own.
+//! is the exception, and only when the entry below it belongs to nobody blastit
+//! drops to, because the sticky bit stops a uid unlinking or renaming what it does
+//! not own.
 //! The first path that fails is the one the message names, because it is the one
 //! an operator has to change.
 
@@ -402,6 +403,7 @@ pub fn probe(
     uid: u32,
     ask: Probe,
     interpreter: bool,
+    dropped: &DroppedTo,
 ) -> Result<Spoken, TimedOut> {
     if targets.is_empty() {
         return Ok(Spoken::Fine);
@@ -417,7 +419,7 @@ pub fn probe(
             drop(read_end);
             // The child never returns: no unwinding, no destructors, nothing of
             // the parent's state that a `fork` could have copied half-written.
-            write_answer(write_end.as_raw_fd(), uid, targets, ask);
+            write_answer(write_end.as_raw_fd(), uid, targets, ask, dropped);
             // SAFETY: `_exit` is async-signal-safe and never returns.
             unsafe { libc::_exit(0) }
         }
@@ -447,10 +449,7 @@ const ANSWER_BYTES: usize = 1 + 4 * 6;
 /// The notes are what makes a timeout nameable: they are written *before* the
 /// `access(2)` that may never return, so the parent always knows which path the
 /// child was on.
-fn write_answer(fd: RawFd, uid: u32, targets: &[Target], ask: Probe) {
-    // The uid init runs as, which is one of the owners the sticky bit protects a
-    // child from being replaced by. It has to be read before the drop.
-    let init_uid = rustix::process::geteuid().as_raw();
+fn write_answer(fd: RawFd, uid: u32, targets: &[Target], ask: Probe, dropped: &DroppedTo) {
     if let Err(error) = blastit_sys::drop_privileges(uid) {
         // The kernel cannot be asked from here at all: the caller falls back to
         // the mode bits.
@@ -514,7 +513,7 @@ fn write_answer(fd: RawFd, uid: u32, targets: &[Target], ask: Probe) {
         // does not own. It *is* one when the child is the uid's own, or when
         // there is nothing there yet — a file with a fresh name is what a sticky
         // directory does allow.
-        if ask.reads_sticky() && mode & 0o1000 != 0 && sticky_protects(&target.child, uid, init_uid)
+        if ask.reads_sticky() && mode & 0o1000 != 0 && sticky_protects(&target.child, uid, dropped)
         {
             continue;
         }
@@ -538,31 +537,34 @@ fn write_answer(fd: RawFd, uid: u32, targets: &[Target], ask: Probe) {
 /// Whether a sticky directory's child is one a dropped-to uid cannot replace.
 ///
 /// The sticky bit stops unlinking or renaming an entry the caller does not own,
-/// so a child owned by root — or by init, which is the uid a deployment's code
-/// usually belongs to — is out of that uid's reach. A child that is not there,
-/// or that belongs to the uid in question, is not.
-fn sticky_child_is_safe(child: &Path, uid: u32, init_uid: u32) -> bool {
+/// so a child owned by anybody a view uid is *not* is protected: root, init, or
+/// whichever user a deployment installed its code as. A child that is not there
+/// is not — a sticky directory lets a *new* name through — and neither is one
+/// owned by a uid blastit drops to, which may rename its own entry.
+fn sticky_child_is_safe(child: &Path, uid: u32, dropped: &DroppedTo) -> bool {
     let Ok(metadata) = std::fs::metadata(child) else {
         return false;
     };
     let owner = metadata.uid();
-    owner != uid && (owner == 0 || owner == init_uid)
+    owner != uid && !dropped.uids.contains(&owner)
 }
 
 /// The same for a [`Target`]'s child, which may be missing: a sticky directory
 /// lets a *new* name through, so there is nothing there to protect.
-fn sticky_protects(child: &Option<PathBuf>, uid: u32, init_uid: u32) -> bool {
+fn sticky_protects(child: &Option<PathBuf>, uid: u32, dropped: &DroppedTo) -> bool {
     match child {
-        Some(child) => sticky_child_is_safe(child, uid, init_uid),
+        Some(child) => sticky_child_is_safe(child, uid, dropped),
         None => false,
     }
 }
 
 /// The same, for every uid blastit drops to: the fallback's exemption holds
 /// only when no dropped-to uid can replace the child.
-fn sticky_protects_for_all(child: &Option<PathBuf>, uids: &BTreeSet<u32>, init_uid: u32) -> bool {
-    uids.iter()
-        .all(|uid| sticky_protects(child, *uid, init_uid))
+fn sticky_protects_for_all(child: &Option<PathBuf>, dropped: &DroppedTo) -> bool {
+    dropped
+        .uids
+        .iter()
+        .all(|uid| sticky_protects(child, *uid, dropped))
 }
 
 /// The first directory above `path` a dropped-to uid could not pass, as a depth.
@@ -826,6 +828,7 @@ pub fn unreadable(
         Probe::Read,
         interpreter,
         false,
+        dropped,
     )
 }
 
@@ -845,8 +848,16 @@ pub fn unexecutable(
     paths: &[PathBuf],
     uid: u32,
     interpreter: bool,
+    dropped: &DroppedTo,
 ) -> Result<Option<Blocker>, TimedOut> {
-    by_probe_or_mode(&targets_of(paths), uid, Probe::Execute, interpreter, true)
+    by_probe_or_mode(
+        &targets_of(paths),
+        uid,
+        Probe::Execute,
+        interpreter,
+        true,
+        dropped,
+    )
 }
 
 /// The first path on `sys.path`, or above one, another uid could write.
@@ -864,7 +875,7 @@ pub fn unexecutable(
 /// the first path that uid may write, and the refusal names the path and the
 /// uid. Every entry is asked about with its parents (see [`targets_above`]);
 /// a *sticky* parent — `/tmp` is the one every deployment has — is not a way in
-/// when the child below it belongs to root or to init, because a uid cannot
+/// when the child below it belongs to nobody blastit drops to, because a uid cannot
 /// unlink or rename what it does not own there.
 ///
 /// The mode bits are the fallback for a uid the probe could not drop to, and
@@ -891,7 +902,7 @@ pub fn writable(
     let mut found: Vec<(usize, u32, Verdict)> = Vec::new();
     let mut unasked: Vec<u32> = Vec::new();
     for uid in &dropped.uids {
-        match probe(&targets, *uid, Probe::Write, interpreter)? {
+        match probe(&targets, *uid, Probe::Write, interpreter, dropped)? {
             Spoken::Found(verdict) => found.push((verdict.index, *uid, verdict)),
             Spoken::Fine => {}
             Spoken::NoProbe => unasked.push(*uid),
@@ -918,13 +929,12 @@ pub fn writable(
 
     // The uids the kernel could not be asked for, and what the mode bits say
     // about them: the documented fallback, which cannot see an ACL either way.
-    let init_uid = rustix::process::geteuid().as_raw();
     for target in &targets {
         let Ok(metadata) = std::fs::metadata(&target.path) else {
             continue;
         };
         let mode = metadata.permissions().mode();
-        if mode & 0o1000 != 0 && sticky_protects_for_all(&target.child, &dropped.uids, init_uid) {
+        if mode & 0o1000 != 0 && sticky_protects_for_all(&target.child, dropped) {
             continue;
         }
         for uid in &unasked {
@@ -951,7 +961,7 @@ pub fn writable(
 /// so the gid has to be its own); or it is **sticky** — a `/tmp`-style directory
 /// takes a file with a fresh name whatever the sticky bit does about deleting
 /// one that is there, which is why [`writable`] exempts a sticky *parent* only
-/// when the child below it belongs to root or init.
+/// when the child below it belongs to nobody blastit drops to.
 ///
 /// The uid is named when the group class is what answered, because the mode bits
 /// were the only witness: the message has to say which uid a deployment has to
@@ -986,8 +996,9 @@ fn by_probe_or_mode(
     ask: Probe,
     interpreter: bool,
     executable: bool,
+    dropped: &DroppedTo,
 ) -> Result<Option<Blocker>, TimedOut> {
-    match probe(targets, uid, ask, interpreter)? {
+    match probe(targets, uid, ask, interpreter, dropped)? {
         Spoken::Found(verdict) => {
             let Some(target) = targets.get(verdict.index) else {
                 return Ok(None);
@@ -1116,11 +1127,6 @@ mod tests {
     /// The uid `unexecutable` is asked as in these tests: dbproxy's.
     const DBPROXY_UID: u32 = PROBE_BASE + 3;
 
-    /// A uid that is nobody in the layout and nobody running the tests: the
-    /// owner of a directory that a sticky parent should have protected, and
-    /// does not, because it is not root and not init.
-    const OTHERS_UID: u32 = 60_000;
-
     /// The layout a probe speaks for in these tests.
     fn dropped() -> DroppedTo {
         DroppedTo::of(blastit_manifest::UidLayout::new(PROBE_BASE), 2)
@@ -1134,7 +1140,7 @@ mod tests {
     }
 
     fn unexecutable(paths: &[PathBuf], uid: u32, interpreter: bool) -> Option<Blocker> {
-        super::unexecutable(paths, uid, interpreter).expect("no timeout")
+        super::unexecutable(paths, uid, interpreter, &dropped()).expect("no timeout")
     }
 
     fn writable(paths: &[PathBuf], dropped: &DroppedTo, interpreter: bool) -> Option<Writable> {
@@ -1148,7 +1154,7 @@ mod tests {
         ask: Probe,
         interpreter: bool,
     ) -> Result<Spoken, TimedOut> {
-        super::probe(&targets_of(paths), uid, ask, interpreter)
+        super::probe(&targets_of(paths), uid, ask, interpreter, &dropped())
     }
 
     /// Whether this process can drop to another uid, which is what a probe has
@@ -1582,25 +1588,29 @@ mod tests {
     fn a_sticky_directory_above_an_entry_is_not_a_way_in() {
         // `/tmp` itself: sticky and writable by everyone, and *not* a way into
         // what is below it — the sticky bit stops a uid unlinking or renaming an
-        // entry it does not own, and the directory below belongs to root or to
-        // init, which is the deployment's own uid. Nothing here is root-only:
-        // the test's own uid plays init, and its own tree is what is protected.
+        // entry it does not own, and the directory below belongs to somebody
+        // blastit does not drop to (root, init, the user the code was installed
+        // as). Nothing here is root-only: the test's own uid is that owner, and
+        // its own tree is what is protected.
         let tree = TempTree::new("sticky-safe");
         let safe = tree.dir("safe", 0o1777);
         let inside = tree.dir("safe/inside", 0o755);
         assert_eq!(
             writable(std::slice::from_ref(&inside), &dropped(), false),
             None,
-            "a sticky parent over a root- or init-owned child is not a hole"
+            "a sticky parent over a child no dropped-to uid owns is not a hole"
         );
 
-        // The same parent, with a child owned by somebody a dropped-to uid
-        // neither is nor can touch: then the sticky bit protects nothing, because
-        // root can hand a directory to anyone and a uid that owns an entry in a
-        // sticky directory may rename it. Root only, for the `chown`.
+        // The same parent, with a child owned by a uid blastit *drops* to: the
+        // sticky bit protects nothing there, because a uid may rename an entry
+        // it owns. The child itself is mode `0500` so that it is not the
+        // writable one — the sticky directory above it is. Root only, for the
+        // `chown`.
         if can_probe() {
             let taken = tree.dir("safe/taken", 0o755);
-            chown(&taken, OTHERS_UID, OTHERS_UID);
+            let owner = *dropped().uids.iter().next_back().expect("a uid");
+            chown(&taken, owner, owner);
+            std::fs::set_permissions(&taken, std::fs::Permissions::from_mode(0o500)).unwrap();
             assert_eq!(
                 in_a_child(|| {
                     match writable(std::slice::from_ref(&taken), &dropped(), false) {
@@ -1684,7 +1694,7 @@ mod tests {
         let uid = *dropped().uids.iter().next().expect("a uid");
         let code = in_a_child(|| {
             let targets = targets_of(&[PathBuf::from("/")]);
-            let _ = super::probe(&targets, uid, Probe::Read, false);
+            let _ = super::probe(&targets, uid, Probe::Read, false, &dropped());
             let mut status = 0;
             // SAFETY: `waitpid` writes one status word into `status`.
             let left = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };

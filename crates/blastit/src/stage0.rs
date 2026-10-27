@@ -608,10 +608,14 @@ fn fork_dbproxy(
     // under a directory the dropped-to uids cannot pass — a checkout inside a
     // `0750` home, say — otherwise fails the boot with `exec dbproxy: Permission
     // denied (os error 13)`, which names neither the directory nor the fix.
+    let layout = UidLayout::new(config.uid_base);
+    // The route count is not needed here: the execute question never reads the
+    // sticky exemption, which is the only thing the uid list is for.
     match crate::visibility::unexecutable(
         std::slice::from_ref(&placement.dbproxy),
-        UidLayout::new(config.uid_base).dbproxy(),
+        layout.dbproxy(),
         interpreter,
+        &crate::visibility::DroppedTo::of(layout, 0),
     ) {
         Ok(Some(blocker)) => fail(emitter, &blocker.message()),
         Ok(None) => {}
