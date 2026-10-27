@@ -114,7 +114,8 @@ use blastit_events::{
     Component, Event, EventKind, Outcome, ProcessCap, ProcessRetired, RequestInfo, RetireReason,
 };
 use blastit_frame::{
-    Ctl, DoneOutcome, Frame, FrameError, INITIAL_WINDOW, Limits, ReqHead, RequestCost, RespHead,
+    Ctl, DoneOutcome, Frame, FrameError, INITIAL_WINDOW, Limits, RawFrame, ReqHeadView,
+    RequestCost, RespHead, TypeCode,
 };
 use blastit_manifest::RoutingTable;
 use tokio::net::UnixStream;
@@ -130,7 +131,8 @@ use crate::path::{
 };
 use crate::route::RouteInfo;
 use crate::task::{
-    OutFrame, Outbound, PushError, ctl_frame_size, read_frames, release, write_peer,
+    OutFrame, Outbound, PushError, ctl_frame_size, read_frames, read_raw_frames, release,
+    write_peer,
 };
 
 /// How many `http.chan` frames may pile up before its reader task waits.
@@ -162,8 +164,9 @@ pub type Emit = Arc<dyn Fn(Event) + Send + Sync>;
 
 /// A frame from `http.chan`, or the end of that channel.
 enum HttpIn {
-    /// One frame, muxed by the stream id http allocated.
-    Frame { id: u32, frame: Frame },
+    /// One frame, muxed by the stream id http allocated, with its payload left
+    /// as it was received (see [`Scheduler::on_http`]).
+    Frame { id: u32, raw: RawFrame },
     /// http closed its end of the channel.
     Closed,
     /// http sent bytes that are not a frame. This is blastit's own code on the
@@ -297,19 +300,24 @@ impl Admission {
     /// A FIFO queue has no flows, so this is `None` there and the caller
     /// carries nothing it will not need.
     ///
+    /// The head has not been decoded (see [`Scheduler::begin_raw`]), so the
+    /// flow is resolved from the payload's borrowed headers; `fair.rs` shares
+    /// one reader between this and the decoded form the tests use, so the key
+    /// cannot differ between the two.
+    ///
     /// `now` is the scheduler's clock, converted once: the queue stamps
     /// `last_active` from the same clock its eviction rules read, so an idle
     /// flow's debt ages against the clock the scheduler actually uses (a paused
     /// one in a test, the wall clock in production) instead of against
     /// [`std::time::Instant::now`] behind its back.
-    fn resolve(
+    fn resolve_view(
         &mut self,
         peer: &str,
-        headers: &[(Vec<u8>, Vec<u8>)],
+        head: &ReqHeadView<'_>,
         now: Instant,
     ) -> Option<FlowRef> {
         self.fair_mut()
-            .map(|queue| queue.resolve(peer, headers, now.into_std()))
+            .map(|queue| queue.resolve_view(peer, head, now.into_std()))
     }
 
     /// Queue a request that is waiting for `route`.
@@ -421,14 +429,35 @@ struct MemSample {
     views: u32,
 }
 
+/// The parts of a request head the scheduler itself reads.
+///
+/// The head is not decoded into a [`blastit_frame::ReqHead`]: its payload is
+/// forwarded to the view verbatim (see [`Scheduler::begin_raw`]), so only what
+/// routing and the `request` event need is kept here. The header list is not
+/// among them — the fair-queue flow is resolved once, at admission, from the
+/// borrowed head.
+struct RequestHead {
+    /// Request method, verbatim and case-preserved.
+    method: Vec<u8>,
+    /// Request target (origin form, e.g. `/x?y=1`), verbatim.
+    target: Vec<u8>,
+    /// Client address as the front end resolved it (ARCHITECTURE.md §2.4).
+    remote_addr: String,
+}
+
 /// One request, from its `REQ_HEAD` to the `DONE` that releases its slot.
 struct Request {
     /// http's stream id, for the response frames.
     stream_id: u32,
     /// The id reported as `request_id` in events (§8.1).
     request_id: String,
-    /// The head as it arrived; the view rebuilds its own `environ` from it.
-    head: ReqHead,
+    /// The few head fields the scheduler reads; the rest travel to the view in
+    /// `raw` untouched.
+    head: RequestHead,
+    /// The request head exactly as http sent it, forwarded to the view with
+    /// only its id rewritten. Taken here on dispatch, so the payload is moved,
+    /// never copied.
+    raw: Option<RawFrame>,
     /// The route this request was routed to, if any (`None` for the requests
     /// the scheduler answers itself: health, `400`, `404`).
     route: Option<usize>,
@@ -781,7 +810,7 @@ impl Scheduler {
 
     /// Handles one `http.chan` frame.
     fn on_http(&mut self, event: HttpIn) -> Result<(), SchedulerError> {
-        let (id, frame) = match event {
+        let (id, raw) = match event {
             HttpIn::Closed => {
                 self.http_closed = true;
                 return Ok(());
@@ -789,15 +818,34 @@ impl Scheduler {
             // http is blastit's own code: bytes that are not frames mean the
             // build is broken, not that a peer misbehaved (§3.1).
             HttpIn::Failed(error) => return Err(SchedulerError::Frame(error)),
-            HttpIn::Frame { id, frame } => (id, frame),
+            HttpIn::Frame { id, raw } => (id, raw),
+        };
+        // A `REQ_HEAD` is read where it lies and forwarded verbatim, so the
+        // scheduler never copies and re-encodes a header it will not look at.
+        //
+        // This is safe *only* for `http.chan`: http is blastit's own Rust code
+        // — no Python, no attacker input — and it encodes from a typed `Frame`,
+        // so its bytes are well-formed by construction. `view.chan` must NOT
+        // take this shortcut: it carries frames from a sandboxed, potentially
+        // compromised process, and `on_view` still receives them fully decoded
+        // from the strict `read_frames`, which validates every field. Do not
+        // apply this trick to the view channel.
+        if raw.ty == TypeCode::ReqHead.code() {
+            return self.begin_raw(id, raw);
+        }
+        let frame = match raw.into_frame() {
+            Ok(frame) => frame,
+            // A non-head payload that does not decode is a bug in this build,
+            // exactly as a decode error used to be.
+            Err(error) => return Err(SchedulerError::Frame(error)),
         };
         match frame {
-            Frame::ReqHead(head) => self.begin(id, head),
             Frame::ReqBody(body) => self.request_body(id, body),
             Frame::ReqEnd => self.request_end(id),
             Frame::Cancel => self.client_cancel(id),
             Frame::Window { bytes } => self.client_window(id, bytes),
-            // http never sends a response frame; count it and move on.
+            // http never sends a response frame, and its head was handled
+            // above; count anything else and move on.
             _ => {
                 self.dropped += 1;
                 Ok(())
@@ -908,10 +956,43 @@ impl Scheduler {
         }
     }
 
+    /// Queues a raw frame towards one view, the same way [`Scheduler::view_push`]
+    /// does but without re-encoding it.
+    ///
+    /// The byte cap is charged as [`crate::task::Outbound::push_raw`]'s own
+    /// size, which is the size the frame will take on the wire, so recycling a
+    /// view is decided against the same budget as a decoded frame.
+    fn view_push_raw(&mut self, key: ViewKey, raw: RawFrame) -> Result<(), SchedulerError> {
+        let Some(out) = self.view_out(key) else {
+            return Ok(());
+        };
+        match out.push_raw(raw) {
+            Ok(()) => Ok(()),
+            Err(PushError::Closed) => {
+                self.view_gone(key);
+                Ok(())
+            }
+            Err(PushError::Overflow { .. }) => {
+                self.retire(key, RetireReason::Other(CREDIT_OVERFLOW.to_string()))
+            }
+            // `push_raw` does not encode, so it cannot report a frame error;
+            // treat one as the build bug it would be.
+            Err(PushError::Frame(error)) => Err(SchedulerError::Frame(error)),
+        }
+    }
+
     // --------------------------------------------------------------- request
 
-    /// Routes a new request and either dispatches it or queues it (§2.4).
-    fn begin(&mut self, stream_id: u32, head: ReqHead) -> Result<(), SchedulerError> {
+    /// Routes a new request whose head was not decoded, then dispatches or
+    /// queues it (§2.4).
+    ///
+    /// Only `http.chan` reaches here (see [`Scheduler::on_http`]). The head is
+    /// parsed just far enough to route it and to resolve its fair-queue flow,
+    /// and the raw payload is kept for the view: everything the scheduler does
+    /// not read — scheme, server name and port, and every header the app sees —
+    /// reaches the view byte for byte, and no header is copied into an owned
+    /// `Vec` on the way.
+    fn begin_raw(&mut self, stream_id: u32, raw: RawFrame) -> Result<(), SchedulerError> {
         if self.requests.contains_key(&stream_id) {
             // http's contract is that a stream id is not reused while it is in
             // flight; anything else would let one request inherit another's
@@ -920,14 +1001,36 @@ impl Scheduler {
                 "http.chan reused stream id {stream_id} while it was still in flight"
             )));
         }
+        // http encodes from a typed `Frame`, so a head that does not parse is a
+        // bug in this build, not a peer's fault (§3.1).
+        let head = ReqHeadView::parse(&raw.payload).map_err(SchedulerError::Frame)?;
         let request_id = self.next_request_id();
         // The event's one clock: `arrived` and the flow the queue stamps are
         // read from it, so a request cannot age against two clocks at once.
         let now = Instant::now();
+        let resolution = self.resolve(&head);
+        // D5: the flow is resolved once per request, from the raw peer and the
+        // headers, and it is the *same* resolution the front end used for
+        // `REMOTE_ADDR`. It is resolved for a routed request before the request
+        // is queued or refused, exactly as before. The queue is given this
+        // event's clock, so what it stamps and what it later compares are one
+        // clock.
+        let flow = match &resolution {
+            Resolution::Routed { .. } => self.queue.resolve_view(head.peer_addr(), &head, now),
+            _ => None,
+        };
+        // The few head fields routing and the `request` event need, copied out
+        // before the raw payload is moved into the request.
+        let facts = RequestHead {
+            method: head.method().to_vec(),
+            target: head.target().to_vec(),
+            remote_addr: head.remote_addr().to_string(),
+        };
         let mut request = Request {
             stream_id,
             request_id,
-            head,
+            head: facts,
+            raw: Some(raw),
             route: None,
             rule: None,
             path_info: None,
@@ -957,7 +1060,6 @@ impl Scheduler {
             upload_credit: INITIAL_WINDOW,
             download_credit: INITIAL_WINDOW,
         };
-        let resolution = self.resolve(&request);
         match resolution {
             Resolution::Bad => {
                 self.requests.insert(stream_id, request);
@@ -994,14 +1096,7 @@ impl Scheduler {
                 request.route = Some(route);
                 request.rule = Some(rule);
                 request.path_info = Some(path_info);
-                // D5: the flow is resolved once per request, from the raw peer
-                // and the headers, and it is the *same* resolution the front
-                // end used for `REMOTE_ADDR`. The queue is given this event's
-                // clock, so what it stamps and what it later compares are one
-                // clock.
-                request.flow =
-                    self.queue
-                        .resolve(&request.head.peer_addr, &request.head.headers, now);
+                request.flow = flow;
                 self.requests.insert(stream_id, request);
                 let retry_after = retry_after_seconds(self.cfg.queue_timeout);
                 if self.draining {
@@ -1033,8 +1128,8 @@ impl Scheduler {
     }
 
     /// Turns the request target into a routing decision (§2.4, §6).
-    fn resolve(&self, request: &Request) -> Resolution {
-        let path = path_of_target(&request.head.target);
+    fn resolve(&self, head: &ReqHeadView<'_>) -> Resolution {
+        let path = path_of_target(head.target());
         let Some(decoded) = percent_decode(path) else {
             return Resolution::Bad;
         };
@@ -1049,7 +1144,7 @@ impl Scheduler {
         let Ok(path) = std::str::from_utf8(&decoded) else {
             return Resolution::Bad;
         };
-        let Ok(method) = std::str::from_utf8(&request.head.method) else {
+        let Ok(method) = std::str::from_utf8(head.method()) else {
             return Resolution::Bad;
         };
         // Only a GET or a HEAD is a health check; anything else is a request
@@ -1355,7 +1450,7 @@ impl Scheduler {
             return Ok(());
         };
         let now = Instant::now();
-        let (head, body, end, extra_credit) = {
+        let (raw, body, end, extra_credit) = {
             let Some(request) = self.requests.get_mut(&stream_id) else {
                 return Ok(());
             };
@@ -1365,7 +1460,7 @@ impl Scheduler {
             request.view = Some((key, id));
             request.slots = true;
             (
-                request.head.clone(),
+                request.raw.take(),
                 std::mem::take(&mut request.body),
                 request.end_seen,
                 // A view starts with `INITIAL_WINDOW` of response credit, so
@@ -1377,7 +1472,13 @@ impl Scheduler {
         self.dispatch.insert((key, id), stream_id);
         self.slots += 1;
 
-        self.view_push(key, id, Frame::ReqHead(head))?;
+        // A routed request always carries its raw head until here, so this is
+        // the whole frame the view gets, id rewritten and payload untouched.
+        debug_assert!(raw.is_some(), "a dispatched request carries its raw head");
+        if let Some(mut raw) = raw {
+            raw.set_id(id);
+            self.view_push_raw(key, raw)?;
+        }
         if extra_credit > 0 {
             self.view_push(
                 key,
@@ -2694,11 +2795,16 @@ pub async fn run<C: CtlChannel + Send + 'static>(
     let (view_in_tx, mut view_in_rx) = mpsc::channel(VIEW_IN_CAPACITY);
     let (ctl_out, ctl_out_rx, ctl_pending) = Outbound::new(limits, CTL_OUTBOUND_CAP);
 
-    tokio::spawn(read_frames(
+    // http's frames are read without decoding: it is blastit's own Rust code,
+    // so its bytes are well-formed by construction, and the request head is
+    // forwarded to the view verbatim instead of being copied header by header.
+    // The view channel is read the strict way (see `view_spawned`); do not
+    // switch it to `read_raw_frames`.
+    tokio::spawn(read_raw_frames(
         http_read,
         limits,
         http_in_tx.clone(),
-        |id, frame| HttpIn::Frame { id, frame },
+        |id, raw| HttpIn::Frame { id, raw },
         |failure| match failure {
             Some(error) => HttpIn::Failed(error),
             None => HttpIn::Closed,

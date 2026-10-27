@@ -120,6 +120,15 @@ impl<'a> Reader<'a> {
         self.buf.len() - self.pos
     }
 
+    /// How far into the payload the cursor has advanced.
+    ///
+    /// A borrowed view of a frame records where a field began and ended by the
+    /// cursor's position around a walk, so it can hand the field out as one
+    /// slice of the payload it borrowed rather than copying it.
+    pub(crate) fn position(&self) -> usize {
+        self.pos
+    }
+
     fn take(&mut self, n: usize, field: &'static str) -> Result<&'a [u8], FrameError> {
         if self.remaining() < n {
             return Err(FrameError::Truncated { field });

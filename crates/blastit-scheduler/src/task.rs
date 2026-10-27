@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use blastit_frame::{Ctl, Decoder, Frame, FrameError, HEADER_LEN, Limits};
+use blastit_frame::{Ctl, Decoder, Frame, FrameError, HEADER_LEN, Limits, RawFrame};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -29,6 +29,10 @@ pub(crate) enum OutFrame {
         /// The frame itself.
         frame: Frame,
     },
+    /// A frame whose payload is forwarded verbatim, textually identical to how
+    /// it arrived; only its id is rewritten. The scheduler uses this for the
+    /// request head it does not decode (see `Scheduler::begin_raw`).
+    Raw(RawFrame),
 }
 
 /// Why a push was refused.
@@ -96,6 +100,29 @@ impl Outbound {
         Ok(())
     }
 
+    /// Queues one raw frame, whose payload is written as it stands.
+    ///
+    /// The byte accounting is exactly [`HEADER_LEN`] plus the payload length,
+    /// the same figure [`Outbound::push`] would charge for the decoded frame:
+    /// the two must agree or a peer's cap would drift depending on which path
+    /// queued the frame.
+    pub(crate) fn push_raw(&self, raw: RawFrame) -> Result<(), PushError> {
+        let size = HEADER_LEN + raw.payload.len();
+        let before = self.pending.fetch_add(size, Ordering::AcqRel);
+        if before.saturating_add(size) > self.cap {
+            self.pending.fetch_sub(size, Ordering::AcqRel);
+            return Err(PushError::Overflow {
+                bytes: before.saturating_add(size),
+                cap: self.cap,
+            });
+        }
+        if self.tx.send(OutFrame::Raw(raw)).is_err() {
+            self.pending.fetch_sub(size, Ordering::AcqRel);
+            return Err(PushError::Closed);
+        }
+        Ok(())
+    }
+
     /// Whether this queue's writer is still running.
     pub(crate) fn is_open(&self) -> bool {
         !self.tx.is_closed()
@@ -156,15 +183,23 @@ fn next_batch_frame(
     rx: &mut mpsc::UnboundedReceiver<OutFrame>,
     frames: usize,
     bytes: usize,
-) -> Option<(u32, Frame)> {
+) -> Option<OutFrame> {
     if frames >= BATCH_FRAMES || bytes >= BATCH_BYTES {
         return None;
     }
-    match rx.try_recv() {
-        Ok(OutFrame::Frame { id, frame }) => Some((id, frame)),
-        // Empty, or the queue closed: either way this batch ends here, and a
-        // closed queue makes the next `recv` end the loop.
-        Err(_) => None,
+    // Empty, or the queue closed: either way this batch ends here, and a closed
+    // queue makes the next `recv` end the loop.
+    rx.try_recv().ok()
+}
+
+/// Appends one queued frame to `wire`, or `false` when it cannot be encoded.
+///
+/// Both kinds are encoded here: a decoded frame through the codec, and a raw
+/// one by writing its header and its untouched payload.
+fn append_frame(item: &OutFrame, limits: &Limits, wire: &mut Vec<u8>) -> bool {
+    match item {
+        OutFrame::Frame { id, frame } => limits.encode(frame, *id, wire).is_ok(),
+        OutFrame::Raw(raw) => raw.encode(limits, wire).is_ok(),
     }
 }
 
@@ -182,14 +217,14 @@ pub(crate) async fn write_peer<W: AsyncWrite + Unpin>(
 ) {
     let mut wire = Vec::new();
     'batching: loop {
-        let Some(OutFrame::Frame { id, frame }) = rx.recv().await else {
+        let Some(first) = rx.recv().await else {
             break;
         };
         wire.clear();
         let mut frames = 0;
-        let mut next = Some((id, frame));
-        while let Some((id, frame)) = next {
-            if limits.encode(&frame, id, &mut wire).is_err() {
+        let mut next = Some(first);
+        while let Some(item) = next {
+            if !append_frame(&item, &limits, &mut wire) {
                 // A frame that cannot be encoded is a bug in blastit's own
                 // code, not backpressure: the channel is done for.
                 break 'batching;
@@ -241,6 +276,59 @@ pub(crate) async fn read_frames<R, M, Map, End>(
             match decoder.next_frame() {
                 Ok(Some((id, frame))) => {
                     if tx.send(map(id, frame)).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        if failure.is_some() {
+            break;
+        }
+    }
+    let _ = tx.send(end(failure)).await;
+}
+
+/// Reads frames off a channel without decoding their payloads.
+///
+/// This is for `http.chan` only. http is blastit's own Rust code — no Python,
+/// no attacker input — and encodes from a typed [`Frame`], so its bytes are
+/// well-formed by construction; keeping a `REQ_HEAD` as a [`RawFrame`] is what
+/// lets the scheduler forward it without copying every header twice. A
+/// `view.chan` must **not** be read this way: a view is sandboxed and may be
+/// compromised, so its frames keep going through [`read_frames`], which
+/// validates every field. Do not reuse this for the view channel.
+///
+/// Everything [`read_frames`] says about closing, failure and backpressure
+/// applies here unchanged; only the payload is left alone.
+pub(crate) async fn read_raw_frames<R, M, Map, End>(
+    mut read: R,
+    limits: Limits,
+    tx: mpsc::Sender<M>,
+    map: Map,
+    end: End,
+) where
+    R: AsyncRead + Unpin,
+    Map: Fn(u32, RawFrame) -> M,
+    End: Fn(Option<FrameError>) -> M,
+{
+    let mut decoder = Decoder::with_capacity(limits, 8 * 1024);
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut failure = None;
+    loop {
+        let read_bytes = match read.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        decoder.push(&buf[..read_bytes]);
+        loop {
+            match decoder.next_raw() {
+                Ok(Some((id, raw))) => {
+                    if tx.send(map(id, raw)).await.is_err() {
                         return;
                     }
                 }

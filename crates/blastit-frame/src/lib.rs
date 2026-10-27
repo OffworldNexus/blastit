@@ -44,7 +44,8 @@
 //! * [`Frame`], [`ReqHead`], [`RespHead`] — the typed vocabulary of §3.1.
 //! * [`Ctl`], [`ExitStatus`] — the `ctl.chan` messages of §3 and §4.
 //! * [`RawFrame`] — the same frames with the payload left undecoded, for the
-//!   scheduler to rewrite ids and forward.
+//!   scheduler to rewrite ids and forward, and [`ReqHeadView`] — a borrowed
+//!   view of a request head it reads where it lies.
 //! * [`Limits`], [`Decoder`], [`encode`] — the codec itself.
 //!
 //! Errors are always [`FrameError`]; nothing in this crate panics on input.
@@ -74,7 +75,7 @@ mod wire;
 
 pub use crate::clientip::{
     ClientIp, ClientIpConfig, ClientIpError, ClientIpSource, TrustedProxies, is_header_name,
-    normalize_ip, parse_addr, parse_port, peer_address,
+    normalize_ip, parse_addr, parse_port, peer_address, values_of,
 };
 pub use crate::ctl::{Ctl, ExitStatus, MAX_SIGNAL, MIN_SIGNAL};
 pub use crate::decoder::Decoder;
@@ -84,7 +85,7 @@ pub use crate::frame::{
     Scheme, TypeCode,
 };
 pub use crate::limits::{BodyChunks, Limits, MAX_FRAME_CEILING, MAX_FRAME_DEFAULT, MIN_FRAME};
-pub use crate::raw::RawFrame;
+pub use crate::raw::{RawFrame, ReqHeadView, ReqHeaders};
 pub use crate::wire::{HEADER_LEN, MIN_LENGTH};
 
 /// Encode `frame` with `id`, using the default [`Limits`].
