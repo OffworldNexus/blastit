@@ -267,8 +267,8 @@ impl ClientIpConfig {
     /// The scheduler reads a request head straight out of its `REQ_HEAD`
     /// payload instead of decoding it into owned `Vec`s, so the headers arrive
     /// as an iterator of borrowed slices rather than a slice of pairs. Both this
-    /// and [`ClientIpConfig::resolve`] funnel into
-    /// [`ClientIpConfig::chain_iter`], so one request cannot resolve to two
+    /// and [`ClientIpConfig::resolve`] funnel into `chain_iter`, so one request
+    /// cannot resolve to two
     /// different addresses depending on which path read it (D5).
     pub fn resolve_iter<'h, I>(&self, peer: &str, headers: I) -> Option<ClientIp>
     where

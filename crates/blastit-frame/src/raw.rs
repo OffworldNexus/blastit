@@ -179,7 +179,7 @@ pub struct ReqHeadView<'a> {
 impl<'a> ReqHeadView<'a> {
     /// Parse the fields the scheduler reads out of a `REQ_HEAD` payload.
     ///
-    /// The shape is the one documented in [`crate::frame`]: `method`, `target`,
+    /// The shape is the one documented on [`Frame`]: `method`, `target`,
     /// a header count and its pairs, `remote_addr`, `scheme`, `server_name`,
     /// `server_port`, `peer_addr`. Everything the scheduler does not read is
     /// walked past, and the whole payload is checked for trailing bytes, so a
