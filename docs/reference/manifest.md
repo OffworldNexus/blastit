@@ -1,8 +1,8 @@
 # The manifest
 
 The manifest is blastit's routing table and its whole permission model, in one
-file. Default `/app/blastit.toml`, or `BLASTIT_MANIFEST`; read at boot, parsed
-strictly, so an unknown key is an error.
+file. Default `/app/blastit.toml` or `BLASTIT_MANIFEST`; parsed strictly at boot,
+so an unknown key is an error.
 
 ## Top-level keys
 
@@ -22,16 +22,16 @@ strictly, so an unknown key is an error.
 [[route]]
 name = "product-detail"
 path = ['/products/[0-9]+/']        # full match against PATH_INFO
-methods = ["GET", "HEAD"]           # optional; default: any method
+methods = ["GET", "HEAD"]           # optional
 groups = ["catalog"]                # shared grants
-prefork = true                      # fork at startup, not on first use
+prefork = true                      # fork at startup
 egress = true                       # may open TCP connections
 ```
 
 | Key | Required | Meaning |
 |---|---|---|
 | `name` | yes | the route's name, in the log and in `environ["blastit.route"]`; must match `[a-z0-9][a-z0-9_-]*`, and duplicates abort the boot |
-| `path` | yes | a list of regexes matched against the whole of `PATH_INFO`, in order. One regex may be written as a bare string: `path = ".*"` is `path = ['.*']` |
+| `path` | yes | a list of regexes matched against the whole of `PATH_INFO`, in order; one regex may be a bare string (`path = ".*"` is `path = ['.*']`) |
 | `methods` | no | the methods it answers; without it, any method. `HEAD` is never implied by `GET` |
 | `groups` | no | groups whose grants this route takes |
 | `egress` | no | `true` lets the process open outbound TCP connections |
@@ -75,10 +75,10 @@ upstream TLS leg).
 Template fields: the default `url` is
 `postgresql://{{ user }}@/{{ database }}?host={{ socket_dir }}&port={{ port }}` —
 the socket directory in a **query parameter**, the one form libpq,
-`dj-database-url` and SQLAlchemy all resolve (SQLAlchemy does not percent-decode
-a host) — where `socket_dir` is `/proc/self/cwd`, each view's own socket
-directory, and `port` is `5432 + k`, *k* = index among `postgresql` proxies
-sorted by name. `user` is `blastit`, which the proxy ignores.
+`dj-database-url` and SQLAlchemy all resolve — where `socket_dir` is
+`/proc/self/cwd`, each view's own socket directory, and `port` is `5432 + k`,
+*k* = index among `postgresql` proxies sorted by name. `user` is `blastit`,
+which the proxy ignores.
 
 Default outputs: every input variable is rewritten in place; `sslmode` becomes
 `disable`; `password` and `ca_cert` are removed. The local leg is a Unix socket,
@@ -113,8 +113,8 @@ functions = ["st_distance"]         # beyond the built-in safe set
 | `transaction_control` | bool | allow `BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT` and friends |
 | `unrestricted` | bool | allow **every** statement on this proxy. Inline on a route only |
 
-An exact `queries` entry is trusted as it is: blastit compares the text and runs
-what it matches, without looking at what it calls.
+An exact `queries` entry is trusted as it is: the text is compared and run,
+without looking at what it calls.
 
 ### Table and column grants
 
@@ -190,8 +190,8 @@ a named cursor (`QuerySet.iterator()`).
 * They use Rust [`regex`](https://docs.rs/regex/latest/regex/) syntax, matched in
   linear time.
 * `BLASTIT_SCRIPT_NAME` strips a mount prefix first.
-* Nothing matches: the scheduler answers `404`, no Python runs. A catch-all
-  listed last lets the app render its own 404s.
+* Nothing matches: the scheduler answers `404`, no Python runs. A catch-all last
+  lets the app render its own 404s.
 * Every decision is a `request` event, with `route` and `rule`.
 
 ## Validation at boot
@@ -213,7 +213,7 @@ Two tools write grants from evidence, instead of from memory:
 * **`blastit-manifest fold`** — anything, from `sql.denied` events:
   [fold the log](../frameworks/day-to-day.md#fold-the-log).
 
-`e2e/demo/blastit.toml` in the repository is a working example.
+`e2e/demo/blastit.toml` is a working example.
 
 ## The built-in safe function set
 
