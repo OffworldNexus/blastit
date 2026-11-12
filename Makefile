@@ -33,7 +33,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 
 .PHONY: help check clean guard critical-guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical \
-        py-format py-lint test-critical docs-check e2e mutants-rust
+        py-format py-lint test-critical docs-check docs-test e2e mutants-rust
 
 help: ## Show available Make targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -112,6 +112,10 @@ test-critical: critical-skip-check rs-test-critical ## Run protected critical ti
 docs-check: ## Build Zensical documentation site with --strict
 	$(UVX) zensical build --strict
 
+docs-test: ## Execute every console fence in README.md and the public docs pages
+	scripts/build-wheel.sh
+	$(UV) run --no-project python python/tests/runnable_docs/run.py
+
 e2e: ## Build wheel and run Docker + rootless capability e2e tests
 	scripts/build-wheel.sh
 	E2E_DOCKERFILE=Dockerfile.prebuilt $(UV) run --no-project e2e/run.py
@@ -122,4 +126,4 @@ mutants-rust: ## Run cargo-mutants on Rust crates (pass PKG=<crate> to scope)
 	@rm -rf mutants.out
 	TMPDIR="$(MUTANTS_TMP)" $(RUST_ENV) $(CARGO) mutants $(if $(PKG),-p "$(PKG)",--workspace) -j $(MUTANTS_JOBS) --timeout $(MUTANTS_TIMEOUT)
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-check plan-validate ## Full fast unprivileged check
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-check docs-test plan-validate ## Full fast unprivileged check

@@ -1,0 +1,31 @@
+version = 1
+app = "app:application"
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[proxy.analytics]
+protocol = "postgresql"
+input = { url = "ANALYTICS_URL" }
+
+[[route]]
+name = "catalog"
+path = ['/catalog']
+[route.db]
+queries = ["SELECT 1"]
+
+[[route]]
+name = "search"
+path = ['/search']
+[route.db]
+queries = ["SELECT 9"]
+
+[[route]]
+name = "checkout"
+path = ['/checkout']
+
+[[route]]
+name = "upload"
+path = ['/upload']
+methods = ["POST"]

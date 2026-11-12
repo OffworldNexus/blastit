@@ -1,0 +1,266 @@
+# Every `console` fence of the public documentation, and how the harness runs it.
+#
+# The page list is the site's navigation (`zensical.toml`) plus `README.md`.
+# `test_inventory` fails when a public page or a fence is missing here, so adding
+# a fence means adding one entry below. A fence entry names a handler (`mode`)
+# and the project fixture it runs in; `reason` is required for the modes that do
+# not execute the fence's own command, and is shown in the report.
+#
+# One more key exists, checked by `run.py`:
+#
+# * `port_fallback = "<reason>"` lets a fence whose port is taken run the same
+#   flag on the next free port; without it a busy port fails the fence instead.
+#
+# A product behaviour the page promises is asserted, never pinned: if it
+# regresses, the fence goes red and says which documented promise broke.
+#
+# The fence bodies themselves are never copied: the harness reads them from the
+# Markdown at run time. Editing a command or an expected output line therefore
+# changes the run without editing this file.
+
+[[page]]
+path = "README.md"
+
+[[page.fence]]
+index = 1
+mode = "install"
+
+[[page.fence]]
+index = 2
+mode = "dev"
+fixture = "hello"
+
+[[page.fence]]
+index = 3
+mode = "dev-curl"
+fixture = "hello"
+
+[[page]]
+path = "docs/index.md"
+
+[[page.fence]]
+index = 1
+mode = "summary"
+fixture = "shop"
+
+[[page]]
+path = "docs/getting-started.md"
+
+[[page.fence]]
+index = 1
+mode = "install"
+
+[[page.fence]]
+index = 2
+mode = "dev"
+fixture = "hello"
+
+[[page.fence]]
+index = 3
+mode = "dev-curl"
+fixture = "hello"
+
+[[page]]
+path = "docs/local.md"
+
+[[page.fence]]
+index = 1
+mode = "dev"
+fixture = "hello"
+
+[[page.fence]]
+index = 2
+mode = "pgstub"
+reason = "Docker is not a dependency of an unprivileged gate: the harness runs the deterministic PostgreSQL wire stub on 127.0.0.1:5432 instead, and this fence proves it answers a startup and a SELECT."
+
+[[page.fence]]
+index = 3
+mode = "page-manifest"
+fixture = "shop"
+
+[[page.fence]]
+index = 4
+mode = "learn-git"
+fixture = "learn"
+
+[[page.fence]]
+index = 5
+mode = "dev-learn"
+fixture = "learn"
+
+[[page.fence]]
+index = 6
+mode = "denial"
+fixture = "denial"
+
+[[page]]
+path = "docs/ci.md"
+
+[[page.fence]]
+index = 1
+mode = "check"
+fixture = "shop"
+
+[[page.fence]]
+index = 2
+mode = "findings"
+fixture = "findings"
+
+[[page.fence]]
+index = 3
+mode = "json"
+fixture = "findings"
+
+[[page.fence]]
+index = 4
+mode = "check"
+fixture = "shop"
+
+[[page.fence]]
+index = 5
+mode = "learn-sequence"
+fixture = "learn"
+
+[[page]]
+path = "docs/deploy/index.md"
+
+[[page.fence]]
+index = 1
+mode = "presets"
+
+[[page.fence]]
+index = 2
+mode = "example"
+reason = "Measures X-Forwarded-For through a real load balancer the harness does not have; the trusted-proxy decision itself is a settings and e2e concern."
+
+[[page]]
+path = "docs/deploy/digitalocean-paas.md"
+
+[[page.fence]]
+index = 1
+mode = "presets"
+
+[[page.fence]]
+index = 2
+mode = "static"
+reason = "Deployment recipe: doctl and Docker run against a registry and a cloud account, so the commands are statically checked instead of executed."
+
+[[page.fence]]
+index = 3
+mode = "static"
+reason = "Deployment recipe: `doctl apps create` needs a DigitalOcean account and the image the previous fence builds."
+
+[[page.fence]]
+index = 4
+mode = "static"
+reason = "Deployment recipe: psql runs the owner's role and grant SQL against the managed database."
+
+[[page]]
+path = "docs/deploy/compose-traefik.md"
+
+[[page.fence]]
+index = 1
+mode = "presets"
+
+[[page.fence]]
+index = 2
+mode = "static"
+reason = "Deployment recipe: an image build, a push and a Compose stack on a host with a registry; the boot line it shows is checked as JSON."
+
+[[page]]
+path = "docs/deploy/anything-else.md"
+
+[[page.fence]]
+index = 1
+mode = "static"
+reason = "Deployment recipe: setpriv with capability flags needs the production uid layout, which this unprivileged gate deliberately cannot create."
+
+[[page.fence]]
+index = 2
+mode = "static"
+reason = "Deployment recipe: Docker runs the published image with capabilities and a memory limit."
+
+[[page]]
+path = "docs/deploy/fair-queuing.md"
+
+[[page]]
+path = "docs/frameworks/index.md"
+
+[[page]]
+path = "docs/frameworks/django.md"
+
+[[page.fence]]
+index = 1
+mode = "install-external"
+reason = "Installs psycopg and dj-database-url from the package index; only blastit comes from this workspace. blastit's own install runs in README.md and Getting started."
+
+[[page.fence]]
+index = 2
+mode = "example"
+reason = "Needs a Django project with migrations, which is not a blastit dependency; the same `blastit dev` command runs against the stdlib WSGI fixtures in local.md and flask.md."
+
+[[page.fence]]
+index = 3
+mode = "learn-then-check"
+fixture = "learn"
+
+[[page]]
+path = "docs/frameworks/flask.md"
+
+[[page.fence]]
+index = 1
+mode = "install-external"
+reason = "Installs flask, psycopg and SQLAlchemy from the package index; only blastit comes from this workspace."
+
+[[page.fence]]
+index = 2
+mode = "dev"
+fixture = "shop"
+
+[[page]]
+path = "docs/reference/cli.md"
+
+[[page.fence]]
+index = 1
+mode = "dev-flags"
+fixture = "hello"
+port_fallback = "Port 9000 is routinely taken on a developer machine (Docker, Prometheus, Portainer). The contract this fence checks is the `--port` flag and that the banner names the chosen port, not the number 9000 itself, so it may run the same flag on the next free port and says so on its verdict line."
+
+[[page.fence]]
+index = 2
+mode = "check-flags"
+fixture = "shop"
+
+[[page.fence]]
+index = 3
+mode = "serve-flags"
+
+[[page.fence]]
+index = 4
+mode = "usage"
+
+[[page]]
+path = "docs/reference/manifest.md"
+
+[[page]]
+path = "docs/reference/settings.md"
+
+[[page]]
+path = "docs/reference/log-events.md"
+
+[[page]]
+path = "docs/how-it-works.md"
+
+[[page]]
+path = "docs/security.md"
+
+[[page.fence]]
+index = 1
+mode = "static"
+reason = "The e2e harnesses need Docker and root; the runnable-docs gate is unprivileged and Docker-free, so only the command names and the scripts they name are checked."
+
+[[page]]
+path = "docs/troubleshooting.md"
+
+[[page]]
+path = "docs/changelog.md"

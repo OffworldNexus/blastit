@@ -1,0 +1,12 @@
+version = 1
+app = "app:application"
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "home"
+path = ['/']
+[route.db]
+queries = ["SELECT 1"]

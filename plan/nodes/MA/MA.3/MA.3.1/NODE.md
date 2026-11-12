@@ -2,16 +2,16 @@
 id: MA.3.1
 title: "Runnable-docs harness executing README and docs snippets unprivileged"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MA.2]
 paths: [Makefile, "python/tests/runnable_docs/**"]
-attempts: 0
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-12T19:16"
-updated: "2026-11-12T19:16"
+updated: "2026-11-13T00:51"
 ---
 
 # Goal

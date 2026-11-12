@@ -1,0 +1,6 @@
+version = 1
+app = "hello:application"
+
+[[route]]
+name = "hello"
+path = ['.*']
