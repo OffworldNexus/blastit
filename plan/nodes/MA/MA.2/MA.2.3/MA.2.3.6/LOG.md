@@ -27,3 +27,7 @@ reviewer PASS; minor: commit 2.3.6 paths only (test_pytest_plugin.py belongs to 
 ## 2026-11-12T21:19 [lead]
 
 status review -> done
+
+## 2026-11-12T21:19 [lead]
+
+committed 39998a5

@@ -301,3 +301,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T21:19 [MA.2.3.7] (lead) REVIEW (1/3) FAIL verdict driven solely by out-of-scope pre-existing issues: test_live_server.py:191,259 asserts un-redacted SELECT 'denied' (R24 redacts to SQL
 - 2026-11-12T21:19 [MA.2.3.6] (lead) reviewer PASS; minor: commit 2.3.6 paths only (test_pytest_plugin.py belongs to MA.2.3.7), RESULT hunk count 5 not 6
 - 2026-11-12T21:19 [MA.2.3.6] (lead) status review -> done
+- 2026-11-12T21:19 [MA.2.3.6] (lead) committed 39998a5
+- 2026-11-12T21:19 [MA.2.3.7] (lead) committed as lead-accepted work (out-of-scope findings moved to MA.2.3.11)
+- 2026-11-12T21:19 [MA.2.3.7] (lead) status review -> done

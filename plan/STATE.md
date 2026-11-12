@@ -3,7 +3,7 @@
 - generated: 2026-11-12T21:19
 - autopilot: on
 - current milestone: MA Lean DX & Show-the-World Polish (0.1.1) [ready]
-- tasks: ready=9, review=1, done=24
+- tasks: ready=9, done=25
 - open human requests: 0 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 6; expensive spent: $48.52 of $100.00 cap (49%)
 
@@ -16,7 +16,6 @@
 
 ## Next actionable (top 12)
 
-- review: MA.2.3.7 Re-pin test_pytest_plugin.py against Django 6.1 setup statements and the egress warning
 - execute: MA.2.3.8 Make a clean SIGTERM to blastit dev exit 0 (late ctl.chan EPIPE is not fatal)
 - execute: MA.2.3.9 Pin check --learn refusal exit 1 and wrote=false end to end
 - execute: MA.2.3.10 Pin three unprotected audit_v1 rules: add_query with ellipsis, no_observations zero statements, would_write zero requests
@@ -27,9 +26,6 @@
 
 ## Recent journal
 
-- 2026-11-12T20:50 [MA.2.3.8] (test-curator) created (task) Make a clean SIGTERM to blastit dev exit 0 (late ctl.chan EPIPE is not fatal)
-- 2026-11-12T20:50 [MA.2.3.9] (test-curator) created (task) Pin check --learn refusal exit 1 and wrote=false end to end
-- 2026-11-12T20:50 [MA.2.3.10] (test-curator) created (task) Pin three unprotected audit_v1 rules: add_query with ellipsis, no_observations zero statements, would_write zero requests
 - 2026-11-12T20:50 [MA.2.3] (test-curator) test-curator gate audit: docs/testing/AUDIT-MA.2.3.md; BLOCKED on pytest-plugin CI job (F1/F2/F3) and dev SIGTERM exit 1 (F4); mutation 9/20 killed; filed MA.2.
 - 2026-11-12T20:50 [MA.2.3.6] (lead) status ready -> active
 - 2026-11-12T20:50 [MA.2.3.6] (lead) attempt 1/3 started
@@ -42,3 +38,6 @@
 - 2026-11-12T21:19 [MA.2.3.7] (lead) REVIEW (1/3) FAIL verdict driven solely by out-of-scope pre-existing issues: test_live_server.py:191,259 asserts un-redacted SELECT 'denied' (R24 redacts to SQL
 - 2026-11-12T21:19 [MA.2.3.6] (lead) reviewer PASS; minor: commit 2.3.6 paths only (test_pytest_plugin.py belongs to MA.2.3.7), RESULT hunk count 5 not 6
 - 2026-11-12T21:19 [MA.2.3.6] (lead) status review -> done
+- 2026-11-12T21:19 [MA.2.3.6] (lead) committed 39998a5
+- 2026-11-12T21:19 [MA.2.3.7] (lead) committed as lead-accepted work (out-of-scope findings moved to MA.2.3.11)
+- 2026-11-12T21:19 [MA.2.3.7] (lead) status review -> done
