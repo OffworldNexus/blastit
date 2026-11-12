@@ -15,3 +15,15 @@ edited fields
 ## 2026-11-12T01:59 [planner]
 
 rewrote body: user-facing docs only (Local/CI-CD/Deploy DX); design doc + ADRs now exclusively MA.5
+
+## 2026-11-12T02:05 [lead]
+
+status ready -> active
+
+## 2026-11-12T02:05 [lead]
+
+attempt 1/3 started
+
+## 2026-11-12T02:05 [lead]
+
+base 4ee2982

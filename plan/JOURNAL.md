@@ -28,3 +28,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T02:00 [MA.4] (lead) status active -> review
 - 2026-11-12T02:05 [MA.4] (lead) reviewer VERDICT: PASS (MINOR: RESULT.md git-status wording stale due to concurrent plan churn; not a defect)
 - 2026-11-12T02:05 [MA.4] (lead) status review -> done
+- 2026-11-12T02:05 [MA.4] (lead) commit 4ee2982
+- 2026-11-12T02:05 [MA.1] (lead) status ready -> active
+- 2026-11-12T02:05 [MA.1] (lead) attempt 1/3 started
+- 2026-11-12T02:05 [MA.1] (lead) base 4ee2982
+- 2026-11-12T10:15 AUTOPILOT on by conductor boot
