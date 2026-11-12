@@ -72,8 +72,9 @@ use crate::lexer::{RegionKind, code_token_end, is_ident_start, is_space, lex, pl
 ///   their arity picks the overload;
 /// * quoted regions are kept verbatim: single-quoted strings (`'it''s'`),
 ///   E-strings (`E'a\'b  c'`, where a backslash escapes the next character),
-///   bit and hex strings (`B'1010'`, `X'1F'`, with no escape at all),
-///   double-quoted identifiers (`"a  b"`) and dollar-quoted strings (`$$…$$`,
+///   bit and hex strings (`B'1010'`, `X'1F'`, with no escape at all), national
+///   strings (`N'it''s'`), Unicode escape strings (`U&'\0041'`), double-quoted
+///   identifiers (`"a  b"`) and dollar-quoted strings (`$$…$$`,
 ///   `$tag$…$tag$`);
 /// * `a$b$c` is one identifier and does not open a dollar quote. A bare `$` is
 ///   ordinary text;
@@ -146,6 +147,8 @@ pub fn normalize(sql: &str) -> String {
             | RegionKind::EString
             | RegionKind::BitString
             | RegionKind::HexString
+            | RegionKind::NationalString
+            | RegionKind::UnicodeString
             | RegionKind::QuotedIdent
             | RegionKind::DollarQuoted => {
                 // Quoted: verbatim, so inner whitespace and `;` are preserved.
@@ -320,6 +323,8 @@ fn tokenize(chars: &[char]) -> Vec<Token> {
             | RegionKind::EString
             | RegionKind::BitString
             | RegionKind::HexString
+            | RegionKind::NationalString
+            | RegionKind::UnicodeString
             | RegionKind::QuotedIdent
             | RegionKind::DollarQuoted => {
                 tokens.push(Token::new(Kind::Quoted, text, &mut pending_space));

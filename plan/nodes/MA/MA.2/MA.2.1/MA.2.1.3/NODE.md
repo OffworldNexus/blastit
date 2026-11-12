@@ -2,16 +2,16 @@
 id: MA.2.1.3
 title: "Leaf 3: sqlpolicy literal redaction, learnable verdicts and introspection setup"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MA.2.1.1]
 paths: ["crates/blastit-sqlpolicy/src/**", "crates/blastit-sqlpolicy/tests/**"]
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T13:48"
 ---
 
 # Goal
