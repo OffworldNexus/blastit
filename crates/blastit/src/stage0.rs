@@ -566,16 +566,15 @@ fn bind_view_sockets(
             };
             listeners.push((
                 listener,
-                ListenerSpec {
-                    fd: 0,
-                    route: route.name().to_string(),
-                    proxy: proxy_name.as_str().to_string(),
+                ListenerSpec::enforcing(
+                    route.name(),
+                    proxy_name.as_str(),
                     uid,
-                    queries: pg.queries().to_vec(),
-                    transaction_control: pg.transaction_control(),
-                    unrestricted: pg.is_unrestricted(),
-                    tables: pg.tables().clone(),
-                },
+                    pg.queries().to_vec(),
+                    pg.transaction_control(),
+                    pg.is_unrestricted(),
+                    pg.tables().clone(),
+                ),
             ));
         }
     }
@@ -638,10 +637,10 @@ fn fork_dbproxy(
             max_connections: config.max_connections_for(name.as_str()),
         })
         .collect();
-    let document = DbproxyConfig {
+    let document = DbproxyConfig::enforcing(
         proxies,
-        listeners: listeners.iter().map(|(_, spec)| spec.clone()).collect(),
-    };
+        listeners.iter().map(|(_, spec)| spec.clone()).collect(),
+    );
 
     let (secrets_read, secrets_write) = pipe_ok(emitter, "secrets.pipe");
     let (events_read, events_write) = pipe_ok(emitter, "dbproxy events pipe");

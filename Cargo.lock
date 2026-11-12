@@ -122,13 +122,16 @@ dependencies = [
  "blastit-events",
  "blastit-frame",
  "blastit-http",
+ "blastit-ingress",
  "blastit-manifest",
  "blastit-scheduler",
+ "blastit-sqlpolicy",
  "blastit-sys",
  "blastit-view",
  "libc",
  "pyo3",
  "rustix 1.1.5",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -192,11 +195,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "blastit-ingress"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
 name = "blastit-manifest"
 version = "0.1.0"
 dependencies = [
+ "blastit-ingress",
  "blastit-sqlpolicy",
  "regex",
+ "serde",
  "thiserror 2.0.21",
  "toml",
 ]
@@ -206,6 +222,7 @@ name = "blastit-py"
 version = "0.1.0"
 dependencies = [
  "blastit",
+ "blastit-ingress",
  "blastit-manifest",
  "blastit-sqlpolicy",
  "pyo3",
@@ -218,8 +235,10 @@ version = "0.1.0"
 dependencies = [
  "blastit-events",
  "blastit-frame",
+ "blastit-ingress",
  "blastit-manifest",
  "rustix 1.1.5",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
 ]

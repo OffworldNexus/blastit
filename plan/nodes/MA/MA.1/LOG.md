@@ -63,3 +63,7 @@ pass 4: fixed reviewer blockers on local.md grant, ci.md --json fix paths + allo
 ## 2026-11-12T10:43 [lead]
 
 status active -> done
+
+## 2026-11-12T10:43 [lead]
+
+committed ad671d6 (README.md docs/** zensical.toml + plan/MA.1)

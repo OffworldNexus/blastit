@@ -45,6 +45,16 @@ pub struct DbproxyConfig {
 }
 
 impl DbproxyConfig {
+    /// The enforcing runtime's configuration: the proxies init resolved, and the
+    /// listeners it bound for them.
+    ///
+    /// Every listener comes from [`ListenerSpec::enforcing`]: at runtime the
+    /// manifest's effective grants, carried on the listener, are the authority
+    /// (§6).
+    pub fn enforcing(proxies: Vec<ProxySpec>, listeners: Vec<ListenerSpec>) -> Self {
+        Self { proxies, listeners }
+    }
+
     /// Checks the parts of the configuration that do not depend on a socket:
     /// unique proxy names, known `sslmode` values, and listeners that name a
     /// declared proxy and a route.
@@ -182,6 +192,36 @@ pub struct ListenerSpec {
     /// and allowed when every table, column and function it touches is here.
     #[serde(default)]
     pub tables: TableGrants,
+}
+
+impl ListenerSpec {
+    /// A listener that enforces the grants it carries (§6).
+    ///
+    /// This is the runtime's listener mode: the route name, uid and grants here
+    /// are the authority, exactly as the manifest's effective grants wrote them.
+    ///
+    /// `fd` starts at `0`. Init fills it in once the listener is bound, because
+    /// the descriptor number the child sees is only known after the fork.
+    pub fn enforcing(
+        route: impl Into<String>,
+        proxy: impl Into<String>,
+        uid: u32,
+        queries: Vec<String>,
+        transaction_control: bool,
+        unrestricted: bool,
+        tables: TableGrants,
+    ) -> Self {
+        Self {
+            fd: 0,
+            route: route.into(),
+            proxy: proxy.into(),
+            uid,
+            queries,
+            transaction_control,
+            unrestricted,
+            tables,
+        }
+    }
 }
 
 /// Writes `cfg` as a length-prefixed JSON document.

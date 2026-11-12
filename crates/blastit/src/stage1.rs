@@ -38,10 +38,7 @@ use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
 use blastit_frame::Limits;
 use blastit_http::HttpConfig;
 use blastit_manifest::{Manifest, RoutingTable, UidLayout};
-use blastit_scheduler::{
-    MEMORY_CHECK_INTERVAL, MemoryProbe, SPAWN_BACKOFF, SchedulerConfig, derived_view_cap,
-    routes_from_manifest,
-};
+use blastit_scheduler::{MemoryProbe, SchedulerConfig, derived_view_cap, routes_from_manifest};
 use blastit_sys::mem;
 use blastit_sys::{
     Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, harden_child,
@@ -521,12 +518,13 @@ fn scheduler_config(
         health_path: config.health_path.clone(),
         script_name: config.script_name.clone(),
         frame_limits: limits,
-        spawn_backoff: SPAWN_BACKOFF,
         memory_usage: memory.map(|_| MemoryProbe::new(current_usage)),
         mem_high_watermark_bytes: watermark,
-        memory_check_interval: MEMORY_CHECK_INTERVAL,
         mem_total_bytes: memory.map(|sample| sample.total()),
         view_mem_estimate: config.view_mem_estimate,
+        // `SPAWN_BACKOFF` and `MEMORY_CHECK_INTERVAL` are the struct defaults,
+        // so a field a later release adds needs no edit here.
+        ..SchedulerConfig::default()
     }
 }
 
@@ -1095,6 +1093,26 @@ mod tests {
             EventKind::Boot(preload_lifecycle(config, outcome, None)),
         );
         serde_json::from_str(&encode_json(&event)).unwrap()
+    }
+
+    /// `blastit` keeps `blastit-ingress` as a direct dependency (`MA.2.1.1`):
+    /// the supervisor and `check` read the same codec the manifest writes.
+    #[test]
+    fn the_ingress_types_are_importable_and_speak_the_manifest_spelling() {
+        use blastit_ingress::{BodyCodec, IngressPolicy};
+
+        let policy = IngressPolicy {
+            body: BodyCodec::Json,
+            allow_raw: false,
+        };
+        assert_eq!(
+            serde_json::to_value(policy).unwrap(),
+            serde_json::json!({"body": "json", "allow_raw": false})
+        );
+        assert_eq!(
+            serde_json::to_value(BodyCodec::Raw).unwrap(),
+            serde_json::json!("raw")
+        );
     }
 
     #[test]

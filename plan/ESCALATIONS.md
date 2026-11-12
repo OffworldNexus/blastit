@@ -5,3 +5,4 @@ Every call to an expensive-tier agent (`strategist`, `architect`, `expert`) is r
 | time | node | to | by | reason |
 |---|---|---|---|---|
 | 2026-11-12T01:49 | MA.5 | architect | conductor | core 0.1.1 DX/runtime design (unprivileged blastit dev simulation, wire-level --learn, check/test completeness, manifest precedence, presets) derived from accepted DX docs; core UX surface per dispatch routing table |
+| 2026-11-12T12:58 | MA.5 | strategist | lead | core DX/runtime design acceptance: R1..R42 design + 6 ADRs are the source of truth for MA.2 |
