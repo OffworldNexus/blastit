@@ -1,0 +1,110 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Blastit: autonomous DX-first harness. Cheap model does almost everything; expensive tier only via strategist/architect/expert.
+  "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+  "default_agent": "conductor",
+  "formatter": true,
+  "watcher": {
+    "ignore": [
+      "target/**",
+      ".venv/**",
+      "site/**",
+      "dist/**",
+      ".worktrees/**",
+      ".playwright-mcp/**",
+      "**/node_modules/**",
+      "**/__pycache__/**",
+      ".ruff_cache/**",
+      ".pytest_cache/**",
+      "mutants*/**"
+    ]
+  },
+  "compaction": {
+    "auto": true
+  },
+  "experimental": {
+    "todo": true,
+    "subagent_depth": 8,
+    "background_compaction": true,
+    "location_idle_timeout": false
+  },
+  "agents": {
+    // Hide generic built-ins so cheap orchestrators stay inside the plan hierarchy.
+    "build": { "hidden": true },
+    "plan": { "hidden": true }
+  },
+  "permissions": [
+    // Secrets: code reads env at stage 0; agents never inspect real .env files.
+    { "action": "read", "resource": "*.env", "effect": "deny" },
+    { "action": "read", "resource": "*.env.*", "effect": "deny" },
+    { "action": "read", "resource": "*.env.example", "effect": "allow" },
+    { "action": "shell", "resource": "cat .env*", "effect": "deny" },
+    { "action": "shell", "resource": "cat .env.example", "effect": "allow" },
+
+    // Autonomy: subagents never ask the human directly; only the conductor may (overridden in conductor.md).
+    { "action": "question", "resource": "*", "effect": "deny" },
+
+    // Git safety: local commits on develop only. Pushing to origin triggers live GitHub Pages + paid DO e2e,
+    // and tags publish to PyPI, so pushing and tagging are reserved for the human owner via HUMAN.md.
+    { "action": "shell", "resource": "git push *", "effect": "deny" },
+    { "action": "shell", "resource": "git tag *", "effect": "deny" },
+    { "action": "shell", "resource": "git reset --hard *", "effect": "deny" },
+    { "action": "shell", "resource": "git rebase *", "effect": "deny" },
+    { "action": "shell", "resource": "git commit --amend *", "effect": "deny" },
+    { "action": "shell", "resource": "git checkout -- *", "effect": "deny" },
+    { "action": "shell", "resource": "git clean *", "effect": "deny" },
+    { "action": "shell", "resource": "git branch -D *", "effect": "deny" },
+    { "action": "shell", "resource": "gh pr *", "effect": "deny" },
+    { "action": "shell", "resource": "gh release *", "effect": "deny" },
+    { "action": "shell", "resource": "gh repo *", "effect": "deny" },
+
+    // Filesystem & package-manager safety.
+    { "action": "shell", "resource": "rm -rf /*", "effect": "deny" },
+    { "action": "shell", "resource": "rm -rf ~*", "effect": "deny" },
+    { "action": "shell", "resource": "rm -rf /tmp/*", "effect": "allow" },
+    { "action": "shell", "resource": "sudo *", "effect": "ask" },
+    { "action": "shell", "resource": "pip *", "effect": "deny" },
+    { "action": "shell", "resource": "pip3 *", "effect": "deny" },
+
+    // Keep agents strictly inside this repo, tool caches, and /tmp.
+    { "action": "external_directory", "resource": "*", "effect": "deny" },
+    { "action": "external_directory", "resource": "/tmp/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "~/.cache/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "~/.cargo/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "~/.rustup/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "~/.local/share/uv/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "~/.local/share/opencode/tool-output/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "~/.bun/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "/sys/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "/proc/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "/usr/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "/opt/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "/etc/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "/run/*", "effect": "allow" },
+    { "action": "edit", "resource": "/sys/*", "effect": "deny" },
+    { "action": "edit", "resource": "/proc/*", "effect": "deny" },
+    { "action": "edit", "resource": "/usr/*", "effect": "deny" },
+    { "action": "edit", "resource": "/opt/*", "effect": "deny" },
+    { "action": "edit", "resource": "/etc/*", "effect": "deny" },
+    { "action": "edit", "resource": "/run/*", "effect": "deny" },
+
+    // Disable MCP code-mode and external workspace MCPs so cheap models stay focused.
+    // chrome-devtools_* is overridden to allow in visual-checker.md only.
+    { "action": "execute", "resource": "*", "effect": "deny" },
+    { "action": "chrome-devtools_*", "resource": "*", "effect": "deny" },
+    { "action": "fastmail_*", "resource": "*", "effect": "deny" },
+    { "action": "figma_*", "resource": "*", "effect": "deny" },
+    { "action": "linear-offworld_*", "resource": "*", "effect": "deny" },
+    { "action": "sentry_*", "resource": "*", "effect": "deny" },
+    { "action": "docs_*", "resource": "*", "effect": "deny" },
+    { "action": "sheets_*", "resource": "*", "effect": "deny" },
+    { "action": "slides_*", "resource": "*", "effect": "deny" },
+
+    // Global skills/agents belonging to unrelated workflows.
+    { "action": "skill", "resource": "model-w*", "effect": "deny" },
+    { "action": "skill", "resource": "email-routine", "effect": "deny" },
+    { "action": "skill", "resource": "chrome-attach", "effect": "deny" },
+    { "action": "subagent", "resource": "model-w*", "effect": "deny" },
+    { "action": "subagent", "resource": "doer", "effect": "deny" }
+  ]
+}

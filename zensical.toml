@@ -56,6 +56,12 @@ extra_css = ["brand/brand.css", "stylesheets/extra.css"]
 exclude_docs = """
 /archive/
 /spikes/
+/VISION.md
+/design/
+/decisions/
+/research/
+/knowledge/
+/testing/
 /brand/mascot-artwork.md
 /brand/check_seams.py
 /brand/mascot-compare.png
