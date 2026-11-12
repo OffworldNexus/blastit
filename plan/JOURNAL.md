@@ -304,3 +304,19 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T21:19 [MA.2.3.6] (lead) committed 39998a5
 - 2026-11-12T21:19 [MA.2.3.7] (lead) committed as lead-accepted work (out-of-scope findings moved to MA.2.3.11)
 - 2026-11-12T21:19 [MA.2.3.7] (lead) status review -> done
+- 2026-11-12T21:20 [MA.2.3.11] (lead) created (task) Fix the live-server suite: assert R24-redacted denial and pin the dev memory watermark
+- 2026-11-12T21:20 [MA.2.3.8] (lead) status ready -> active
+- 2026-11-12T21:20 [MA.2.3.8] (lead) attempt 1/3 started
+- 2026-11-12T21:20 [MA.2.3.8] (lead) base acd9289f84e9a866ea6f8083f9ca9c37682acdb5
+- 2026-11-12T21:20 [MA.2.3.11] (lead) status ready -> active
+- 2026-11-12T21:20 [MA.2.3.11] (lead) attempt 1/3 started
+- 2026-11-12T21:20 [MA.2.3.11] (lead) base acd9289f84e9a866ea6f8083f9ca9c37682acdb5
+- 2026-11-12T21:43 [MA.2.3.8] (lead) status active -> review
+- 2026-11-12T21:43 [MA.2.3.11] (lead) status active -> review
+- 2026-11-12T21:43 [MA.2.3.9] (lead) status ready -> active
+- 2026-11-12T21:43 [MA.2.3.9] (lead) attempt 1/3 started
+- 2026-11-12T21:43 [MA.2.3.9] (lead) base acd9289f84e9a866ea6f8083f9ca9c37682acdb5
+- 2026-11-12T21:49 [MA.2.3.9] (lead) status active -> review
+- 2026-11-12T21:49 [MA.2.3.8] (lead) reviewer PASS: production fix correct, both pre-fix behaviours caught; MINOR: helper-level tests only (no Supervisor-level closed-fd test), free_port EADDRINUSE
+- 2026-11-12T21:49 [MA.2.3.11] (lead) reviewer PASS: redaction oracle is real (removing redaction falsifies both halves), watermark pin load-bearing + fixture-only on an 89% host
+- 2026-11-12T21:52 [MA.2.3.9] (lead) status review -> done

@@ -46,6 +46,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 import types
 import unittest
 from pathlib import Path
@@ -352,6 +353,80 @@ def body():
     return application
 '''
 
+
+#: `MINI_APP`'s socket round-trip, sending one statement instead of `SELECT 1`.
+#: `__STATEMENT__` is the SQL literal a `--learn` run observes, so the same app
+#: serves the inline-literal twin and the parameterised one.
+LEARN_APP = """\
+import os
+import socket
+import struct
+from urllib.parse import parse_qs, urlsplit
+
+STATEMENT = __STATEMENT__
+
+
+def query():
+    parts = urlsplit(os.environ["DATABASE_URL"])
+    query = parse_qs(parts.query)
+    path = os.path.join(query["host"][0], ".s.PGSQL." + query["port"][0])
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect(path)
+        payload = struct.pack("!I", 196608) + b"user\\0blastit\\0database\\0app\\0\\0"
+        client.sendall(struct.pack("!I", len(payload) + 4) + payload)
+        _ready(client)
+        message = STATEMENT.encode() + b"\\0"
+        client.sendall(b"Q" + struct.pack("!I", len(message) + 4) + message)
+        _ready(client)
+
+
+def _ready(client):
+    while True:
+        header = client.recv(5)
+        assert len(header) == 5, header
+        length = struct.unpack("!I", header[1:])[0]
+        body = b""
+        while len(body) < length - 4:
+            body += client.recv(length - 4 - len(body))
+        if header[:1] == b"E":
+            raise AssertionError(body)
+        if header[:1] == b"Z":
+            return
+
+
+def application(environ, start_response):
+    query()
+    payload = b"done"
+    start_response("200 OK", [("Content-Length", str(len(payload)))])
+    return [payload]
+"""
+
+
+def _learn_app(statement: str) -> str:
+    """`LEARN_APP` sending `statement`, whatever the SQL under test is."""
+    return LEARN_APP.replace("__STATEMENT__", repr(statement))
+
+
+#: One gated request for a path no manifest route covers (`/notes`), so the
+#: learn plan has a route to propose beside the statement it may or may not
+#: grant. It writes nothing to stdout: the run's document is the only one.
+LEARN_RUNNER = """\
+import os
+from blastit import _check_pytest as gate
+from app import application
+
+gated = gate.wrap(application)
+request = {"REQUEST_METHOD": "GET", "PATH_INFO": "/notes", "wsgi.input": None,
+           "CONTENT_LENGTH": "0"}
+status = {}
+def start_response(code, headers):
+    status["code"] = code
+payload = b"".join(gated(request, start_response))
+assert status["code"] == "200 OK", status
+assert payload == b"done", payload
+lines = open(os.environ["BLASTIT_CHECK_HTTP_OBS"], encoding="utf-8").read().splitlines()
+assert len(lines) == 1, lines
+"""
 
 #: Minimal stub `django` + `app_settings` modules for offline contract tests.
 STUB_DJANGO_CONF = """\
@@ -931,6 +1006,90 @@ class TestTheContract(unittest.TestCase):
         )
         self.assertEqual(
             (project.root / "blastit.toml").read_bytes(), before, "nothing was written"
+        )
+
+    def test_learn_refuses_an_inline_literal_with_exit_one_and_writes_nothing(
+        self,
+    ) -> None:
+        """`R29`/`R24`: a refused statement is exit `1`, `"wrote": false`, no write.
+
+        The denied twin sends a statement the learn policy refuses to grant
+        because the value is inlined; the allowed twin sends the parameterised
+        statement of the same shape on the same request, and it *is* written.
+        So the denial is the literal, never a blanket `--learn` refusal, and the
+        exit code cannot be satisfied by both sides.
+        """
+        literal = "SELECT 1 WHERE 's3cr3t' = 's3cr3t'"
+        parameterised = "SELECT 1 WHERE $1 = $2"
+
+        # Denied twin: one unrouted request, so there is a route to propose and
+        # the refusal is the only thing standing between the plan and a write.
+        server = self.server()
+        refused_project = self.project(runner=LEARN_RUNNER)
+        (refused_project.root / "app.py").write_text(
+            _learn_app(literal), encoding="utf-8"
+        )
+        before = (refused_project.root / "blastit.toml").read_bytes()
+        refused = self.run_check(refused_project, "--learn", "--json", server=server)
+        self.assertEqual(refused.returncode, 1, refused.stderr.decode())
+        self.assertEqual(
+            server.statements,
+            [literal],
+            "the literal reached the database, so the policy saw real wire SQL",
+        )
+        document = refused.document()
+        self.assertFalse(document["wrote"], document)
+        self.assertEqual(
+            document["proposed"],
+            {"routes": 1, "queries": 0},
+            "a route was worth writing; only the refused query was withheld",
+        )
+        after = (refused_project.root / "blastit.toml").read_bytes()
+        self.assertEqual(after, before, "a refusal writes nothing")
+        self.assertNotIn(b'name = "notes"', after, "no [[route]] line was added")
+        self.assertNotIn(b"SELECT 1 WHERE", after, "no queries line was added")
+        self.assertIn(b"learn: refused", refused.stderr)
+        self.assertIn(
+            b"bind the value with a placeholder instead",
+            refused.stderr,
+            "the refusal names the fix",
+        )
+        self.assertIn(
+            "SELECT 1 WHERE … = …".encode(),
+            refused.stderr,
+            "the refused statement is shown redacted, not dropped",
+        )
+        # R24: the value is gone from every channel the run writes, the report
+        # and its diagnostics alike.
+        self.assertTrue(
+            refused.stdout.rstrip().endswith(b"}"), "one document, nothing else"
+        )
+        self.assertNotIn(b"s3cr3t", refused.stdout)
+        self.assertNotIn(b"s3cr3t", refused.stderr)
+
+        # Allowed twin: the same request, path, and statement shape, with the
+        # value bound instead of inlined. It is proposed, written, and clean.
+        server = self.server()
+        written_project = self.project(runner=LEARN_RUNNER)
+        (written_project.root / "app.py").write_text(
+            _learn_app(parameterised), encoding="utf-8"
+        )
+        before = (written_project.root / "blastit.toml").read_bytes()
+        written = self.run_check(written_project, "--learn", "--json", server=server)
+        self.assertEqual(written.returncode, 0, written.stderr.decode())
+        document = written.document()
+        self.assertTrue(document["wrote"], document)
+        self.assertEqual(document["proposed"], {"routes": 1, "queries": 1}, document)
+        text = (written_project.root / "blastit.toml").read_bytes()
+        self.assertNotEqual(text, before, "the parameterised grant was written")
+        manifest = tomllib.loads(text.decode("utf-8"))
+        notes = [route for route in manifest["route"] if route.get("name") == "notes"]
+        self.assertEqual(len(notes), 1, text.decode("utf-8"))
+        self.assertEqual(notes[0]["path"], ["/notes"], notes)
+        self.assertEqual(
+            notes[0]["db"]["queries"],
+            ["SELECT 1 WHERE $? = $?"],
+            "the grant holds the normalised text, placeholders as `$?`",
         )
 
     def test_a_missing_pytest_is_exit_two_not_a_failed_suite(self) -> None:
