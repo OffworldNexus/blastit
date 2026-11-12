@@ -524,6 +524,48 @@ fn a_redacted_literal_and_a_savepoint_are_observe_never_add_query() {
     );
 }
 
+#[test]
+fn a_lying_query_verdict_carrying_a_redaction_is_observe_never_add_query() {
+    // `AUDIT-MA.2.3` F6: this verdict *claims* `query`, but its normalised
+    // text carries `…`. R33 says every `add_query` must be bootable, so the
+    // redaction stays `observe` no matter what the verdict says — while its
+    // parameterised twin is still granted with a `to` table.
+    let redacted = r#"SELECT "p"."id" FROM "p" WHERE "p"."name" = …"#;
+    let grantable_sql = DELETE;
+    let report = run(
+        RE_PARSE_MANIFEST,
+        &[http_line("GET", "/catalog/", None, 0, None)],
+        &[
+            routed_sql("catalog", "db", redacted, grantable(redacted), false),
+            routed_sql(
+                "catalog",
+                "db",
+                grantable_sql,
+                grantable(grantable_sql),
+                false,
+            ),
+        ],
+    );
+
+    let mut fixes: BTreeMap<String, (&'static str, Option<String>)> = BTreeMap::new();
+    for finding in &report.findings {
+        if let Finding::MissingGrant { sql, fix, .. } = finding {
+            fixes.insert(sql.clone(), (fix.action, fix.to.clone()));
+        }
+    }
+    assert_eq!(fixes.len(), 2, "both denials are reported: {fixes:?}");
+    assert_eq!(
+        fixes.get(redacted),
+        Some(&("observe", None)),
+        "a redaction is never grantable, even under a `query` verdict"
+    );
+    assert_eq!(
+        fixes.get(grantable_sql),
+        Some(&("add_query", Some("[route.db].queries".to_string()))),
+        "the parameterised twin is still grantable"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // §1.3 human contract, all nine kinds and their interaction counts
 // ---------------------------------------------------------------------------
@@ -759,6 +801,56 @@ blastit check: 4 problems · `--json` for the machine-readable list
     assert_eq!(audit_v1::human(&report), expected);
 }
 
+const ONE_PROXY_MANIFEST: &str = r#"
+version = 1
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "home"
+path = ['/']
+"#;
+
+#[test]
+fn requests_without_any_statement_are_no_observations() {
+    // `AUDIT-MA.2.3` F7: §4.2 E.3's second clause. The suite reached a route,
+    // so the "no route exercised" clause cannot fire; only the "proxy declared
+    // but not one statement observed" clause can report this run.
+    let report = run(
+        ONE_PROXY_MANIFEST,
+        &[http_line("GET", "/", None, 0, None)],
+        &[],
+    );
+    assert_eq!(report.requests, 1);
+    assert_eq!(report.routes.exercised, 1, "the request is routed");
+    assert_eq!(report.statements, 0);
+    assert_eq!(
+        kinds(&report).get("no_observations"),
+        Some(&1),
+        "exactly one no_observations for a request-only suite"
+    );
+
+    // Twin: one observed statement satisfies the clause, whatever else fires.
+    let report = run(
+        ONE_PROXY_MANIFEST,
+        &[http_line("GET", "/", None, 0, None)],
+        &[routed_sql(
+            "home",
+            "db",
+            "SELECT 1",
+            grantable("SELECT 1"),
+            false,
+        )],
+    );
+    assert_eq!(report.statements, 1);
+    assert!(
+        !kinds(&report).contains_key("no_observations"),
+        "one statement is an observation: {report:?}"
+    );
+}
+
 #[test]
 fn a_clean_run_is_one_line_and_ok() {
     let manifest = format!(
@@ -920,6 +1012,48 @@ fn an_inline_literal_or_zero_requests_never_writes() {
     assert!(!empty.would_write(false));
     let document: Value = serde_json::from_str(&empty.json(false)).expect("the document is JSON");
     assert_eq!(document["wrote"], false);
+}
+
+#[test]
+fn zero_requests_never_write_even_with_sql_to_learn() {
+    // `AUDIT-MA.2.3` F8: the gate can observe SQL without any HTTP request
+    // (`plan_learn` takes paths from SQL too), so the old zero-request test
+    // could pass on the last conjunct alone. R29: no request, no write.
+    let manifest = audit_v1::parse_manifest(GOLDEN_MANIFEST).expect("valid");
+    let sql = vec![unrouted_sql(
+        "GET",
+        "/notes/",
+        "db",
+        "SELECT 1",
+        grantable("SELECT 1"),
+        false,
+    )];
+    let plan =
+        audit_v1::plan_learn(&manifest, &observations(&[], &sql)).expect("the plan is built");
+    assert_eq!(plan.requests, 0);
+    assert_eq!(plan.routes(), 1, "the SQL path alone proposes a route");
+    assert_eq!(plan.queries(), 1, "and its grantable statement");
+    assert!(
+        !plan.would_write(false),
+        "zero HTTP requests write nothing, however much SQL was seen"
+    );
+    assert!(!plan.would_write(true));
+    let document: Value = serde_json::from_str(&plan.json(false)).expect("the document is JSON");
+    assert_eq!(document["wrote"], false);
+
+    // Twin: the same plan with one routed HTTP line is writable.
+    let http = vec![http_line("GET", "/notes/", None, 0, None)];
+    let plan =
+        audit_v1::plan_learn(&manifest, &observations(&http, &sql)).expect("the plan is built");
+    assert_eq!(plan.requests, 1);
+    assert_eq!(plan.routes(), 1);
+    assert_eq!(plan.queries(), 1);
+    assert!(
+        plan.would_write(false),
+        "one request makes the plan writable"
+    );
+    let document: Value = serde_json::from_str(&plan.json(false)).expect("the document is JSON");
+    assert_eq!(document["wrote"], true);
 }
 
 #[test]

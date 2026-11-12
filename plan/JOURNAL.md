@@ -322,3 +322,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T21:52 [MA.2.3.9] (lead) status review -> done
 - 2026-11-12T21:52 [MA.2.3.11] (lead) status review -> done
 - 2026-11-12T21:52 [MA.2.3.8] (lead) status review -> done
+- 2026-11-12T21:52 [MA.2.3.12] (lead) created (task) Harden free_port and load isolation in the protected dev suite
+- 2026-11-12T21:52 [MA.2.3.10] (lead) status ready -> active
+- 2026-11-12T21:52 [MA.2.3.10] (lead) attempt 1/3 started
+- 2026-11-12T21:52 [MA.2.3.10] (lead) base 1c070e63f9aa3093a71ff67693147c33fe7a5bc3
+- 2026-11-12T22:02 [MA.2.3.10] (lead) status active -> review
+- 2026-11-12T22:05 [MA.2.3.10] (lead) status review -> done
