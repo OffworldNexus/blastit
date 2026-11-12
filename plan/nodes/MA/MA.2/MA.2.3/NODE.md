@@ -2,7 +2,7 @@
 id: MA.2.3
 title: "CLI, unprivileged dev runtime and framework-agnostic check"
 kind: epic
-status: ready
+status: done
 priority: 2
 depends_on: [MA.2.1, MA.2.2]
 paths: [Makefile, "crates/blastit/**", "crates/blastit-events/**", "crates/blastit-py/**", "python/**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T22:57"
 ---
 
 # Goal
