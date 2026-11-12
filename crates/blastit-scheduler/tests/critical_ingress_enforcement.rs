@@ -4,8 +4,10 @@
 //! The protected cases: a `raw` body streams with zero scheduler buffer, a
 //! chunked body exactly at `BLASTIT_MAX_BODY_BYTES` passes, a valid chunked
 //! `json` body reaches the view canonically re-encoded with no stale framing
-//! headers, a non-empty body on a route that takes none is a `413`, and
-//! concurrent unrouted `--learn` requests run one at a time.
+//! headers, a non-empty body on a route that takes none is a `413`, a buffered
+//! body over the cap is a `413` before `REQ_END`, and concurrent unrouted
+//! `--learn` requests run one at a time behind a bounded queue whose overflow is
+//! a `503`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -239,6 +241,54 @@ async fn a_valid_chunked_json_body_reaches_the_view_canonically() {
 }
 
 #[tokio::test]
+async fn a_buffered_body_over_the_cap_is_refused_before_req_end() {
+    tokio::time::pause();
+    // `R12`/`R14` and §4.3: a buffered `json` body is capped **per frame**, not
+    // once the client can be trusted to stop. Ten bytes against a nine-byte cap
+    // is already a `413` while no `REQ_END` has arrived, so the scheduler never
+    // grows its buffer to hold the whole body (bounded memory, fail fast).
+    let json = b"{\"a\":1234}";
+    assert_eq!(json.len(), 10);
+    let mut options = Options::new()
+        .manifest(&ingress_manifest("/json/", "json", false))
+        .script(
+            0,
+            Script::Answer {
+                body: b"leaked".to_vec(),
+            },
+        );
+    options.cfg.max_body_bytes = 9;
+    // A long queue timeout keeps the paused clock off the queue timer, so only
+    // this test's own short bound can end the wait.
+    options.cfg.queue_timeout = Duration::from_secs(3600);
+    let mut world = World::start(options);
+
+    world
+        .http
+        .send_head(1, chunked_head("POST", "/json/", "application/json"))
+        .await;
+    world.http.send_body(1, json).await;
+    // No `REQ_END`: the cap must already have been enforced on that one frame.
+    let frames = tokio::time::timeout(Duration::from_secs(5), world.http.awaited_response(1))
+        .await
+        .expect("no 413 before REQ_END: the per-frame body cap was not enforced");
+    assert_eq!(status_of(&frames), 413);
+    assert!(ended(&frames));
+    assert!(
+        !world
+            .log
+            .lock()
+            .unwrap()
+            .saw(0, |frame| matches!(frame, Frame::ReqBody(_))),
+        "the view received body bytes the scheduler should have refused"
+    );
+    assert!(
+        world.log.lock().unwrap().request_ids(0).is_empty(),
+        "an unvalidated buffered body was dispatched to the view"
+    );
+}
+
+#[tokio::test]
 async fn a_non_empty_body_on_an_ingress_less_route_is_413() {
     // `R12`: a route that declared no `[route.ingress]` takes no body at all,
     // and the scheduler answers `413` before a view runs.
@@ -355,6 +405,85 @@ async fn concurrent_unrouted_learn_requests_queue_behind_one_slot() {
         vec![None, None],
         "an unrouted request carries no route name"
     );
+}
+
+#[tokio::test]
+async fn a_full_learn_fallback_queue_answers_503_instead_of_growing() {
+    tokio::time::pause();
+    // `R26`/§4.2 D.2: the single `--learn` fallback slot is backed by a queue of
+    // `BLASTIT_QUEUE_SIZE` *waiting* requests. The first request holds the slot,
+    // the second fills the one waiting place, and the third is turned away with
+    // `503` and a `Retry-After` instead of being buffered — an unauthenticated
+    // scanner must not be able to grow that queue.
+    let gate = Arc::new(Semaphore::new(0));
+    let mut options = Options::new()
+        .manifest(&format!("version = 1\n{}", route("known", "/known/")))
+        .script(
+            0,
+            Script::Hold {
+                body: b"held".to_vec(),
+                gate: gate.clone(),
+            },
+        );
+    options.cfg.learn_mode = true;
+    options.cfg.queue_size = 1;
+    options.cfg.queue_timeout = Duration::from_secs(3600);
+    let mut world = World::start(options);
+
+    // The first unrouted request takes the one active slot.
+    world
+        .http
+        .send_request(1, head("GET", "/learn/one"), b"")
+        .await;
+    world
+        .until(|world| world.log.lock().unwrap().request_ids(0).len() == 1)
+        .await;
+
+    // The second fills the one waiting place. Frames on one `http.chan` are
+    // ordered and the scheduler handles them one at a time, so by the time it
+    // reads the third request the second is necessarily queued: no sleep needed.
+    world
+        .http
+        .send_request(2, head("GET", "/learn/two"), b"")
+        .await;
+    world
+        .http
+        .send_request(3, head("GET", "/learn/three"), b"")
+        .await;
+
+    let frames = tokio::time::timeout(Duration::from_secs(5), world.http.awaited_response(3))
+        .await
+        .expect("the third unrouted --learn request was queued instead of refused");
+    assert_eq!(status_of(&frames), 503);
+    assert_eq!(body_of(&frames), b"queue full\n");
+    assert!(ended(&frames));
+    let retry_after = frames.iter().find_map(|frame| match frame {
+        Frame::RespHead(head) => head
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(b"retry-after"))
+            .map(|(_, value)| String::from_utf8(value.clone()).unwrap()),
+        _ => None,
+    });
+    assert_eq!(
+        retry_after.as_deref(),
+        Some("3600"),
+        "a 503 must tell the client when to come back"
+    );
+    assert_eq!(
+        world.log.lock().unwrap().request_ids(0).len(),
+        1,
+        "the refused request never reached the view"
+    );
+
+    // Releasing the first lets the queued second run, and only then.
+    gate.add_permits(1);
+    assert_eq!(body_of(&world.http.response(1).await), b"held");
+    world
+        .until(|world| world.log.lock().unwrap().request_ids(0).len() == 2)
+        .await;
+    gate.add_permits(1);
+    assert_eq!(body_of(&world.http.response(2).await), b"held");
 }
 
 #[test]
