@@ -15,10 +15,10 @@
 //! name, and whether stage 1 finds an interpreter that is already running.
 
 pub mod cli;
+pub mod config;
 pub mod host;
 
 mod child;
-mod config;
 mod forking;
 mod immortal;
 mod logs;

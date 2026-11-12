@@ -24,6 +24,7 @@
 //! interpreter it is running in (D2). Both play exactly the same roles; only
 //! the two `execve`s of §4 differ.
 
+use std::net::IpAddr;
 use std::os::fd::RawFd;
 
 use pyo3::Python;
@@ -31,6 +32,62 @@ use pyo3::Python;
 use crate::host::Host;
 use crate::stage0;
 use crate::stage1;
+
+/// The three command shapes `0.1.1` exposes (§1.1).
+///
+/// A subcommand is the *first* argument; everything else is the unchanged
+/// stage-0/stage-1/`--role` grammar the process tree uses internally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    /// Production `blastit`: fail-closed, presets, `--stage=1`/`--role=*`.
+    Serve,
+    /// `blastit dev`: the unprivileged single-UID simulation (`R2`).
+    Dev,
+    /// `blastit check` and its exact alias `blastit test` (`R3`).
+    Check,
+}
+
+impl Command {
+    /// The subcommand `argv` names, before any flags are parsed.
+    pub fn from_argv(argv: &[String]) -> Self {
+        match argv.first().map(String::as_str) {
+            Some("dev") => Self::Dev,
+            Some("check" | "test") => Self::Check,
+            _ => Self::Serve,
+        }
+    }
+}
+
+/// `blastit dev`'s accepted arguments, validated (`R2`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevOptions {
+    /// `--port`, or `PORT`, or `8080`; always `1..=65535`.
+    pub port: u16,
+    /// `--host`, or `127.0.0.1`.
+    pub host: IpAddr,
+    /// `--learn`: observe statements instead of refusing them.
+    pub learn: bool,
+}
+
+/// `blastit check`'s accepted arguments, validated (`R3`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckOptions {
+    /// `--json`: at most one JSON document on stdout.
+    pub json: bool,
+    /// `--learn`: propose routes and queries from the run.
+    pub learn: bool,
+    /// `--dry-run`, only with `--learn`.
+    pub dry_run: bool,
+    /// Everything after `--`, passed to `pytest -q` verbatim.
+    pub pytest_args: Vec<String>,
+}
+
+/// What a subcommand's parser decided: print its help, or run it.
+#[derive(Debug)]
+enum Subcommand<T> {
+    Help,
+    Run(T),
+}
 
 /// What the command line says about which role to play.
 #[derive(Debug, Default)]
@@ -68,11 +125,43 @@ fn usage() -> String {
 /// The roles and their arguments; [`usage`] adds the presets.
 const USAGE: &str = "\
 usage:
-  blastit [--preset NAME]                   stage 0
+  blastit [--preset NAME]                   stage 0 (production)
+  blastit dev [--port N] [--host ADDR] [--learn]
+                                            unprivileged single-UID simulation
+  blastit check [--json] [--learn [--dry-run]] [-- ARGS...]
+                                            audit a pytest suite (alias: test)
   blastit --stage=1 --config-fd=N \\
           [--dbproxy-pid=P --dbproxy-events-fd=N \\
            --dbproxy-stdout-fd=N --dbproxy-stderr-fd=N]   stage 1
   blastit --role=dbproxy --secrets-fd=N --events-fd=N --ready-fd=N [--seccomp=0|1]";
+
+/// `blastit dev --help` (§1.1).
+const DEV_USAGE: &str = "\
+usage: blastit dev [--port N] [--host ADDR] [--learn]
+
+  --port N      port to bind, 1..=65535 (default 8080, or PORT when set)
+  --host ADDR   IP address to bind (default 127.0.0.1); a non-loopback
+                address needs BLASTIT_DEV_EXPOSE=1
+  --learn       observe requests and SQL and propose manifest additions
+  -h, --help    print this help
+
+`blastit dev` runs the real five-role tree as the current uid: no sudo, no
+capabilities, not a sandbox. Use `blastit` for production.";
+
+/// `blastit check --help` (§1.1).
+const CHECK_USAGE: &str = "\
+usage: blastit check [--json] [--learn [--dry-run]] [-- ARGS...]
+       blastit test  ...                    exact alias of `check`
+
+  --json        write at most one JSON document to stdout; everything else,
+                including pytest output, goes to stderr
+  --learn       observe requests and SQL and propose manifest additions
+  --dry-run     with --learn, report the proposal without writing it
+  -- ARGS...    passed to `pytest -q` verbatim
+  -h, --help    print this help
+
+Exit codes: 0 clean, 1 completeness findings, 2 CLI/config error, 3 pytest
+failed (including exit 5, no tests collected).";
 
 /// Runs the role the command line names, in the installation `host` describes.
 ///
@@ -85,20 +174,51 @@ usage:
 /// raises out of `main()` — the caller turns it into `ExitCode::from` or
 /// `SystemExit`. Stage 0 and stage 1 never return at all.
 pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
-    // E1: the usage text lists the presets with their one-line descriptions,
-    // which is the only way to find out what `--preset` accepts.
-    if argv
-        .iter()
-        .any(|argument| argument == "--help" || argument == "-h")
-    {
-        println!("{}", usage());
-        return SUCCESS;
-    }
-    match parse(&argv) {
-        Ok(args) => dispatch(args, &host, py),
-        Err(message) => {
-            eprintln!("blastit: {message}\n{}", usage());
-            FAILURE
+    // Normative dispatch order (§4.2 E.1): a subcommand is the first argument,
+    // so `dev` is checked before `check` before the stage-0/stage-1/`--role`
+    // grammar. A stage-0 argument named `dev` is not a thing: the command is the
+    // first word.
+    match Command::from_argv(&argv) {
+        Command::Dev => match parse_dev(&argv[1..]) {
+            Ok(Subcommand::Help) => {
+                println!("{DEV_USAGE}");
+                SUCCESS
+            }
+            Ok(Subcommand::Run(options)) => run_dev(&options),
+            Err(message) => {
+                eprintln!("blastit dev: {message}");
+                FAILURE
+            }
+        },
+        Command::Check => match parse_check(&argv[1..]) {
+            Ok(Subcommand::Help) => {
+                println!("{CHECK_USAGE}");
+                SUCCESS
+            }
+            Ok(Subcommand::Run(options)) => run_check(&options),
+            Err(message) => {
+                eprintln!("blastit check: {message}");
+                CHECK_FAILURE
+            }
+        },
+        Command::Serve => {
+            // E1: the usage text lists the presets with their one-line
+            // descriptions, which is the only way to find out what `--preset`
+            // accepts, and the three commands the binary has.
+            if argv
+                .iter()
+                .any(|argument| argument == "--help" || argument == "-h")
+            {
+                println!("{}", usage());
+                return SUCCESS;
+            }
+            match parse(&argv) {
+                Ok(args) => dispatch(args, &host, py),
+                Err(message) => {
+                    eprintln!("blastit: {message}\n{}", usage());
+                    FAILURE
+                }
+            }
         }
     }
 }
@@ -108,6 +228,192 @@ const FAILURE: u8 = 1;
 
 /// The exit status of `--help`, which is not a failure.
 const SUCCESS: u8 = 0;
+
+/// `blastit check`'s CLI failure, distinct from a finding (`1`) and pytest
+/// (`3`) (`R4`).
+const CHECK_FAILURE: u8 = 2;
+
+/// Parses and validates `blastit dev`'s arguments (`R2`).
+///
+/// # Errors
+///
+/// A one-line message naming the argument and the fix. Every rejection is a
+/// CLI failure (`exit 1`) with nothing on stdout.
+fn parse_dev(arguments: &[String]) -> Result<Subcommand<DevOptions>, String> {
+    let mut port = None;
+    let mut host = None;
+    let mut learn = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        index += 1;
+        match argument.as_str() {
+            "-h" | "--help" => return Ok(Subcommand::Help),
+            "--learn" => learn = true,
+            "--manifest" => {
+                return Err(
+                    "`--manifest` is not accepted: put `blastit.toml` in the working \
+                     directory, or set BLASTIT_MANIFEST"
+                        .to_string(),
+                );
+            }
+            "--preset" => {
+                return Err(
+                    "`--preset` is only for `blastit` (production); `blastit dev` \
+                     ignores BLASTIT_PRESET"
+                        .to_string(),
+                );
+            }
+            "--port" => {
+                let value = arguments
+                    .get(index)
+                    .ok_or_else(|| "`--port` wants a value from 1 to 65535".to_string())?;
+                index += 1;
+                port = Some(parse_port(value)?);
+            }
+            "--host" => {
+                let value = arguments
+                    .get(index)
+                    .ok_or_else(|| "`--host` wants an IP address".to_string())?;
+                index += 1;
+                host = Some(parse_host(value)?);
+            }
+            other => {
+                if let Some(value) = other.strip_prefix("--port=") {
+                    port = Some(parse_port(value)?);
+                } else if let Some(value) = other.strip_prefix("--host=") {
+                    host = Some(parse_host(value)?);
+                } else if other.starts_with('-') {
+                    return Err(format!("unknown argument `{other}`"));
+                } else {
+                    return Err(format!("`{other}` is not an argument of `blastit dev`"));
+                }
+            }
+        }
+    }
+    Ok(Subcommand::Run(DevOptions {
+        port: match port {
+            Some(port) => port,
+            None => port_from_env()?,
+        },
+        host: host.unwrap_or(IpAddr::from([127, 0, 0, 1])),
+        learn,
+    }))
+}
+
+/// Parses and validates `blastit check` / `blastit test` (`R3`).
+///
+/// The split on `--` happens first: everything after it belongs to `pytest`,
+/// and the two flags that would hijack the harness are refused by name.
+///
+/// # Errors
+///
+/// A one-line message naming the argument and the fix. Every rejection is
+/// `exit 2` with nothing on stdout.
+fn parse_check(arguments: &[String]) -> Result<Subcommand<CheckOptions>, String> {
+    let (flags, forwarded) = match arguments.iter().position(|argument| argument == "--") {
+        Some(index) => (&arguments[..index], &arguments[index + 1..]),
+        None => (arguments, &[][..]),
+    };
+    for argument in forwarded {
+        if argument == "--blastit-manifest" || argument.starts_with("--blastit-manifest=") {
+            return Err(
+                "pytest arguments must not include `--blastit-manifest`: set \
+                 BLASTIT_MANIFEST or put `blastit.toml` in the working directory"
+                    .to_string(),
+            );
+        }
+        if argument == "--blastit-live-server" || argument.starts_with("--blastit-live-server=") {
+            return Err(
+                "pytest arguments must not include `--blastit-live-server`: `blastit check` \
+                 provides the server"
+                    .to_string(),
+            );
+        }
+    }
+    let mut options = CheckOptions {
+        json: false,
+        learn: false,
+        dry_run: false,
+        pytest_args: forwarded.to_vec(),
+    };
+    for argument in flags {
+        match argument.as_str() {
+            "-h" | "--help" => return Ok(Subcommand::Help),
+            "--json" => options.json = true,
+            "--learn" => options.learn = true,
+            "--dry-run" => options.dry_run = true,
+            "--manifest" => {
+                return Err(
+                    "`--manifest` is not accepted: put `blastit.toml` in the working \
+                     directory, or set BLASTIT_MANIFEST"
+                        .to_string(),
+                );
+            }
+            "--preset" => {
+                return Err(
+                    "`--preset` is only for `blastit` (production); `blastit check` \
+                     ignores BLASTIT_PRESET"
+                        .to_string(),
+                );
+            }
+            other => return Err(format!("unknown argument `{other}`")),
+        }
+    }
+    if options.dry_run && !options.learn {
+        return Err("`--dry-run` is only valid with `--learn`".to_string());
+    }
+    Ok(Subcommand::Run(options))
+}
+
+/// A `--port` / `PORT` value: `1..=65535` (`R2`).
+fn parse_port(value: &str) -> Result<u16, String> {
+    let port: u16 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("`--port` wants a whole number from 1 to 65535, not `{value}`"))?;
+    if port == 0 {
+        return Err("`--port` wants a whole number from 1 to 65535, not `0`".to_string());
+    }
+    Ok(port)
+}
+
+/// `PORT` when neither `--port` nor its environment spelling is absent (`R2`).
+fn port_from_env() -> Result<u16, String> {
+    match std::env::var("PORT") {
+        Ok(value) => parse_port(&value).map_err(|reason| format!("PORT: {reason}")),
+        Err(std::env::VarError::NotPresent) => Ok(8080),
+        Err(std::env::VarError::NotUnicode(_)) => Err("PORT: the value is not valid UTF-8".into()),
+    }
+}
+
+/// A `--host` value: an IP address, not a host name (`R2`).
+fn parse_host(value: &str) -> Result<IpAddr, String> {
+    value
+        .trim()
+        .parse()
+        .map_err(|_| format!("`--host` wants an IP address such as 127.0.0.1, not `{value}`"))
+}
+
+/// The `blastit dev` supervisor's seam (`MA.2.3.3` fills this in).
+///
+/// Everything above this line — the grammar, the defaults, the rejections — is
+/// final; the unprivileged five-role supervisor that turns `DevOptions` into a
+/// running server belongs to the next leaf.
+fn run_dev(options: &DevOptions) -> u8 {
+    let _ = options;
+    eprintln!(
+        "blastit dev: the unprivileged supervisor is not wired into this build yet (MA.2.3.3)"
+    );
+    CHECK_FAILURE
+}
+
+/// The `blastit check` engine's seam (`MA.2.3.5` fills this in).
+fn run_check(options: &CheckOptions) -> u8 {
+    let _ = options;
+    eprintln!("blastit check: the check engine is not wired into this build yet (MA.2.3.5)");
+    CHECK_FAILURE
+}
 
 /// Runs the role the arguments name.
 fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
@@ -489,5 +795,148 @@ mod tests {
             usage.lines().filter(|line| line.contains(": ")).count() >= 2,
             "{usage}"
         );
+    }
+
+    /// The `Run` half of a parsed subcommand, for the grammar twins below.
+    ///
+    /// `run_dev` and `run_check` are seams that later leaves fill in, so their
+    /// exit codes say nothing about the grammar; what the grammar decided is the
+    /// options, and that is what these tests assert.
+    fn run<T>(subcommand: Subcommand<T>) -> T {
+        match subcommand {
+            Subcommand::Run(options) => options,
+            Subcommand::Help => panic!("`--help` is not a command line to run"),
+        }
+    }
+
+    #[test]
+    fn the_dev_grammar_is_exactly_the_documented_one() {
+        // R2: `--port N`/`--port=N` and `--host ADDR`/`--host=ADDR`, `--learn`,
+        // and the documented default for everything that was not given. A port
+        // is always passed here, so the ambient `PORT` cannot change the result.
+        let loopback = IpAddr::from([127, 0, 0, 1]);
+        assert_eq!(
+            run(parse_dev(&["--port".to_string(), "9000".to_string()]).unwrap()),
+            DevOptions {
+                port: 9000,
+                host: loopback,
+                learn: false,
+            }
+        );
+        assert_eq!(
+            run(parse_dev(&[
+                "--port=9001".to_string(),
+                "--host=127.0.0.1".to_string(),
+                "--learn".to_string(),
+            ])
+            .unwrap()),
+            DevOptions {
+                port: 9001,
+                host: loopback,
+                learn: true,
+            }
+        );
+        assert_eq!(
+            run(parse_dev(&[
+                "--port=9002".to_string(),
+                "--host".to_string(),
+                "::1".to_string(),
+            ])
+            .unwrap())
+            .host,
+            "::1".parse::<IpAddr>().unwrap()
+        );
+        // The last spelling of a value wins, whichever one it is (`parse`'s
+        // rule, kept the same here).
+        assert_eq!(
+            run(parse_dev(&[
+                "--port=9003".to_string(),
+                "--port".to_string(),
+                "9004".to_string(),
+            ])
+            .unwrap())
+            .port,
+            9004
+        );
+        // R2's floor: a port is 1..=65535, so 0 is not "any free port".
+        for bad in [
+            &["--port".to_string(), "0".to_string()][..],
+            &["--port=0".to_string()][..],
+            &["--port".to_string(), "65536".to_string()][..],
+            &["--port=soon".to_string()][..],
+        ] {
+            let error = parse_dev(bad).unwrap_err();
+            assert!(error.contains("--port"), "{bad:?}: {error}");
+        }
+        // `--help` is not a command line to run.
+        assert!(matches!(
+            parse_dev(&["--help".to_string()]).unwrap(),
+            Subcommand::Help
+        ));
+    }
+
+    #[test]
+    fn the_check_grammar_is_exactly_the_documented_one() {
+        // R3: the three flags, their combination rule, and the `--` split.
+        assert_eq!(
+            run(parse_check(&[]).unwrap()),
+            CheckOptions {
+                json: false,
+                learn: false,
+                dry_run: false,
+                pytest_args: Vec::new(),
+            }
+        );
+        assert_eq!(
+            run(parse_check(&["--learn".to_string(), "--dry-run".to_string()]).unwrap()),
+            CheckOptions {
+                json: false,
+                learn: true,
+                dry_run: true,
+                pytest_args: Vec::new(),
+            }
+        );
+        assert_eq!(
+            run(parse_check(&[
+                "--json".to_string(),
+                "--learn".to_string(),
+                "--dry-run".to_string(),
+                "--".to_string(),
+                "-q".to_string(),
+                "tests".to_string(),
+            ])
+            .unwrap()),
+            CheckOptions {
+                json: true,
+                learn: true,
+                dry_run: true,
+                pytest_args: vec!["-q".to_string(), "tests".to_string()],
+            }
+        );
+        // `--dry-run` without `--learn` is the combination §1.1 refuses.
+        let error = parse_check(&["--dry-run".to_string()]).unwrap_err();
+        assert!(error.contains("--dry-run"), "{error}");
+        // Everything after `--` belongs to `pytest`, even a word that looks
+        // like this command's own flag.
+        let forwarded = run(parse_check(&[
+            "--learn".to_string(),
+            "--".to_string(),
+            "--dry-run".to_string(),
+        ])
+        .unwrap());
+        assert!(
+            !forwarded.dry_run,
+            "a forwarded word is not this command's flag"
+        );
+        assert_eq!(forwarded.pytest_args, ["--dry-run"]);
+        // And the two forwarded flags that would hijack the harness are refused
+        // by name, whichever spelling they use (R3).
+        let error =
+            parse_check(&["--".to_string(), "--blastit-live-server=1".to_string()]).unwrap_err();
+        assert!(error.contains("--blastit-live-server"), "{error}");
+        assert!(matches!(
+            parse_check(&["-h".to_string()]).unwrap(),
+            Subcommand::Help
+        ));
     }
 }

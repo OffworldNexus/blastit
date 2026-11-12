@@ -220,6 +220,11 @@ fn push_lifecycle(out: &mut String, lifecycle: &Lifecycle, truncated: &[&'static
     if let Some(privilege) = &lifecycle.privilege {
         push_member(out, "privilege", &json_string(privilege));
     }
+    // R23: only the `preload` `boot` carries the build; every other lifecycle
+    // event omits it entirely.
+    if let Some(build) = &lifecycle.build {
+        push_member(out, "build", &json_string(build));
+    }
     // D6/M1: whether the children's bounding set is emptied. Reported in both
     // modes, because it is a fact about the boot rather than about init's own
     // set.
@@ -505,6 +510,9 @@ fn decode_lifecycle(object: &Map<String, Value>) -> Option<Lifecycle> {
     }
     if let Some(privilege) = optional_text(object, "privilege")? {
         lifecycle = lifecycle.with_privilege(privilege);
+    }
+    if let Some(build) = optional_text(object, "build")? {
+        lifecycle = lifecycle.with_build(build);
     }
     if let Some(bounding_set) = optional_text(object, "bounding_set")? {
         lifecycle = lifecycle.with_bounding_set(bounding_set == "dropped");
@@ -841,6 +849,9 @@ fn string_slots(event: &mut Event) -> Vec<(&'static str, &mut String)> {
         | EventKind::Shutdown(lifecycle) => {
             if let Some(stage) = lifecycle.stage.as_mut() {
                 slots.push(("stage", stage));
+            }
+            if let Some(build) = lifecycle.build.as_mut() {
+                slots.push(("build", build));
             }
             if let Some(reason) = lifecycle.immortalize_reason.as_mut() {
                 slots.push(("immortalize_reason", reason));

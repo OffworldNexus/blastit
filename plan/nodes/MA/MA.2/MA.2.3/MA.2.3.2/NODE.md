@@ -2,7 +2,7 @@
 id: MA.2.3.2
 title: "Leaf 9: CLI grammar, CWD manifest discovery, presets and seccomp gate"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MA.2.2.2, MA.2.2.3, MA.2.2.4]
@@ -13,11 +13,11 @@ paths:
   - crates/blastit/src/cli.rs
   - crates/blastit/src/config.rs
   - crates/blastit/tests/critical_config_and_presets.rs
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T15:52"
 ---
 
 # Goal
