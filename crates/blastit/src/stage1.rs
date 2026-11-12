@@ -32,14 +32,13 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
 use blastit_frame::Limits;
 use blastit_http::HttpConfig;
 use blastit_manifest::{Manifest, RoutingTable, UidLayout};
 use blastit_scheduler::{MemoryProbe, SchedulerConfig, derived_view_cap, routes_from_manifest};
-use blastit_sys::mem;
 use blastit_sys::{
     Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, harden_child,
     pipe, restore_signal_mask_in_child, set_dumpable, socketpair_stream,
@@ -52,6 +51,7 @@ use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
 use crate::immortal::{Decision, Outcome};
 use crate::logs::{Emitter, output_event};
+use crate::mem_usage;
 use crate::roles::{HttpFds, SchedulerFds};
 use crate::supervise::{ComponentPipes, Parts, Supervisor};
 
@@ -528,7 +528,7 @@ struct Serving {
     /// Whether each route may keep `AF_INET`/`AF_INET6`, by route index (§7.3).
     egress: Vec<bool>,
     /// The memory reading taken before the fork, for §8 Sizing.
-    memory: Option<mem::Sample>,
+    memory: Option<mem_usage::Usage>,
     /// init's end of `ctl.chan`.
     ctl: OwnedFd,
     /// The signalfd init listens on.
@@ -681,11 +681,11 @@ fn http_config(config: &Config, limits: Limits) -> HttpConfig {
 fn scheduler_config(
     config: &Config,
     limits: Limits,
-    memory: Option<mem::Sample>,
+    memory: Option<mem_usage::Usage>,
     learn: bool,
 ) -> SchedulerConfig {
     let watermark = memory
-        .map(|sample| (sample.total() as f64 * config.mem_high_watermark_percent / 100.0) as u64);
+        .map(|usage| (usage.total() as f64 * config.mem_high_watermark_percent / 100.0) as u64);
     SchedulerConfig {
         // `dev --learn`: an unrouted request is served by the first route's
         // view instead of `404` (`R26`).
@@ -707,7 +707,7 @@ fn scheduler_config(
         frame_limits: limits,
         memory_usage: memory.map(|_| MemoryProbe::new(current_usage)),
         mem_high_watermark_bytes: watermark,
-        mem_total_bytes: memory.map(|sample| sample.total()),
+        mem_total_bytes: memory.map(|usage| usage.total()),
         view_mem_estimate: config.view_mem_estimate,
         // `SPAWN_BACKOFF` and `MEMORY_CHECK_INTERVAL` are the struct defaults,
         // so a field a later release adds needs no edit here.
@@ -717,20 +717,22 @@ fn scheduler_config(
 
 /// The machine's aggregate memory usage in bytes, or `None` when it cannot be
 /// read (§9.2 #8).
+///
+/// This is the number the scheduler compares with `BLASTIT_MEM_HIGH_WATERMARK`
+/// and derives the view cap from, so it is [`mem_usage`]'s: the cgroup's
+/// `memory.current` less the page cache and slab the kernel reclaims on
+/// demand, because a warm filesystem cache is not pressure.
 fn current_usage() -> Option<u64> {
-    mem::Reader::new("/")
-        .sample()
-        .ok()
-        .map(|sample| sample.used())
+    crate::mem_usage::read(Path::new("/")).map(|usage| usage.used())
 }
 
 /// The machine's memory, or a warning that §8 Sizing could not read it.
 ///
 /// Unreadable memory leaves the view cap alone rather than guessing (§8), so
 /// this is reported once and the caller carries on with `None`.
-fn read_memory(emitter: &Emitter) -> Option<mem::Sample> {
-    match mem::Reader::new("/").sample() {
-        Ok(sample) => Some(sample),
+fn read_memory(emitter: &Emitter) -> Option<mem_usage::Usage> {
+    match mem_usage::sample(Path::new("/")) {
+        Ok(usage) => Some(usage),
         Err(err) => {
             emitter.emit(
                 &output_event(
@@ -840,7 +842,7 @@ fn load(
     config: &Config,
     routes: usize,
     emitter: &Emitter,
-    memory: Option<mem::Sample>,
+    memory: Option<mem_usage::Usage>,
     hosted: bool,
     dev: Option<&crate::dev_learn::Dev>,
 ) -> Py<PyAny> {
@@ -1135,9 +1137,9 @@ fn immortalize(
 /// that memory can be read: when it is `None` the machine has already said so
 /// at `warn`, and re-reading here would say it twice. When the second reading
 /// fails but the first succeeded, `before` is still a usable figure.
-fn refresh_memory(before: Option<mem::Sample>) -> Option<mem::Sample> {
+fn refresh_memory(before: Option<mem_usage::Usage>) -> Option<mem_usage::Usage> {
     let before = before?;
-    Some(mem::Reader::new("/").sample().unwrap_or(before))
+    Some(mem_usage::read(Path::new("/")).unwrap_or(before))
 }
 
 /// §8 Sizing and §9.2 #7: what the preload cost, and the view process cap the
@@ -1151,7 +1153,7 @@ fn emit_preload(
     emitter: &Emitter,
     config: &Config,
     outcome: &Outcome,
-    memory: Option<mem::Sample>,
+    memory: Option<mem_usage::Usage>,
     dev: bool,
 ) {
     emitter.emit(&Event::now(
@@ -1169,7 +1171,7 @@ fn emit_preload(
 fn preload_lifecycle(
     config: &Config,
     outcome: &Outcome,
-    memory: Option<mem::Sample>,
+    memory: Option<mem_usage::Usage>,
     dev: bool,
 ) -> Lifecycle {
     let mut lifecycle = Lifecycle::default()
@@ -1197,13 +1199,13 @@ fn preload_lifecycle(
     if let Some(millis) = outcome.millis() {
         lifecycle = lifecycle.with_immortalize_ms(millis);
     }
-    if let Some(sample) = memory {
+    if let Some(usage) = memory {
         lifecycle = lifecycle
-            .with_mem_total(sample.total())
-            .with_mem_used(sample.used())
+            .with_mem_total(usage.total())
+            .with_mem_used(usage.used())
             .with_max_view_processes(derived_view_cap(
-                sample.total(),
-                sample.used(),
+                usage.total(),
+                usage.used(),
                 config.view_mem_estimate,
             ));
     }

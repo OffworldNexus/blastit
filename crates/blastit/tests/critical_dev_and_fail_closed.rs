@@ -31,6 +31,8 @@ use common::mock_pg::MockPgServer;
 
 /// How long a case waits for the server to report `ready`.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
+/// One gibibyte, for the synthetic memory trees.
+const GIB: u64 = 1024 * 1024 * 1024;
 /// How long a case waits for an event or a line.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a case waits for the process to exit.
@@ -107,6 +109,19 @@ def pg(sql):
     sock.close()
 
 
+def pg_state(sql):
+    """The statement's outcome, with PostgreSQL's SQLSTATE when it was refused."""
+    try:
+        pg(sql)
+        return {"ok": True}
+    except RuntimeError as err:
+        fields = {}
+        for part in str(err).split("\x00"):
+            if len(part) > 1:
+                fields[part[0]] = part[1:]
+        return {"ok": False, "sqlstate": fields.get("C"), "message": fields.get("M")}
+
+
 def application(environ, start_response):
     path = environ.get("PATH_INFO", "/")
     try:
@@ -129,6 +144,11 @@ def application(environ, start_response):
         elif path == "/a/2":
             pg("SELECT 333")
             payload = {"ok": True, "pid": os.getpid()}
+        elif path.endswith("/state"):
+            payload = pg_state("SELECT 1")
+        elif path == "/literal":
+            pg("SELECT 'alice'")
+            payload = {"ok": True}
         elif path.startswith("/zzz/"):
             payload = {"ok": True, "pid": os.getpid()}
         else:
@@ -605,6 +625,11 @@ fn run_dev_to_exit(tag: &str, manifest: &str, env: &[(&str, &str)]) -> (u32, Pat
         command
             .args(["dev", "--port", &port.to_string()])
             .env_clear()
+            // The case measures a failure *after* stage 0 (the import, the
+            // bind), so the host's free memory must not turn it into the
+            // watermark boot refusal. A caller that is about the watermark
+            // overrides this afterwards.
+            .env("BLASTIT_MEM_HIGH_WATERMARK", "100")
             .current_dir(&dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -951,6 +976,284 @@ fn a_non_loopback_host_needs_the_acknowledgement() {
 }
 
 #[test]
+fn a_memory_watermark_above_the_reading_serves_and_above_the_host_refuses_by_name() {
+    let server = MockPgServer::start();
+    let url = database_url(&server);
+    let routes =
+        "[[route]]\nname = \"home\"\npath = ['/.*']\n[route.db]\nqueries = [\"SELECT 1\"]\n";
+
+    // Allowed arm: a 100% watermark is above or equal to every reading, so the
+    // boot serves. This is the only way to place the host *below* the
+    // watermark; the default 85% cannot be raised by a test host.
+    let mut dev = Dev::start(
+        "mem-below",
+        &manifest(routes),
+        &[
+            ("DATABASE_URL", &url),
+            ("BLASTIT_MEM_HIGH_WATERMARK", "100"),
+        ],
+        &[],
+    );
+    dev.wait_for_ready();
+    assert_eq!(
+        dev.get_json("/")["uid"].as_u64(),
+        Some(u64::from(rustix::process::geteuid().as_raw())),
+        "the view served the first request:\n{}",
+        dev.stdout_text()
+    );
+    let status = dev.terminate();
+    assert_eq!(status.code(), Some(0), "{}", dev.stderr_text());
+
+    // Denied arm: a 0% watermark is below every real reading, so the boot has
+    // to say so and exit instead of accepting requests that answer `503`.
+    let (_, dir, output) = run_dev_to_exit(
+        "mem-above",
+        &manifest(routes),
+        &[("DATABASE_URL", &url), ("BLASTIT_MEM_HIGH_WATERMARK", "0")],
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a boot above the watermark fails:\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains("BLASTIT_MEM_HIGH_WATERMARK"),
+        "the failure names the setting: {stderr}"
+    );
+    assert!(
+        stderr.contains("GiB") && stderr.contains('%'),
+        "the failure names the current usage: {stderr}"
+    );
+    assert!(
+        stderr.contains("503"),
+        "the failure names the symptom it prevents: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a startup error writes zero bytes on stdout (§1.1): {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn the_watermark_reading_leaves_out_the_cache_the_kernel_reclaims() {
+    // 48 GiB of memory and 46 GiB of `memory.current`, of which 9 GiB is
+    // reclaimable on demand: 8 GiB of page cache that is neither tmpfs nor
+    // mapped (`file 40 − shmem 31 − file_mapped 1`) and 1 GiB of reclaimable
+    // slab. The raw figure is at 95.8 %; the reading the watermark uses is at
+    // 77.1 %.
+    let dir = memory_tree(
+        "cache",
+        48,
+        46,
+        Some(
+            "anon 6442450944\nfile 42949672960\nshmem 33285996544\n\
+             file_mapped 1073741824\ninactive_file 6442450944\nactive_file 4332199936\n\
+             slab_reclaimable 1073741824\nslab_unreclaimable 292206408\n",
+        ),
+    );
+    let cache = blastit::mem_usage::read(&dir).expect("a readable tree");
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(cache.total(), 48 * GIB);
+    assert_eq!(cache.raw(), 46 * GIB, "memory.current");
+    assert_eq!(
+        cache.reclaimable(),
+        9 * GIB,
+        "(file − shmem − file_mapped) + slab_reclaimable"
+    );
+    assert_eq!(cache.used(), 37 * GIB, "46 − 8 − 1");
+    assert!(
+        cache.raw() as f64 / cache.total() as f64 * 100.0 > 95.0,
+        "the raw figure is what made a healthy host refuse"
+    );
+    assert!(
+        blastit::mem_usage::boot_refusal(&cache, 85.0).is_none(),
+        "a host with 9 GiB reclaimable and 2 GiB of cache left serves: {cache:?}"
+    );
+    // tmpfs is not reclaimable without swap, so it stays counted: the same
+    // tree without any page-cache margin is over the watermark.
+    let dir = memory_tree(
+        "tmpfs",
+        48,
+        46,
+        Some("file 32212254720\nshmem 32212254720\nslab_reclaimable 0\n"),
+    );
+    let tmpfs = blastit::mem_usage::read(&dir).expect("a readable tree");
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(tmpfs.reclaimable(), 0, "shmem is not page cache for this");
+    assert!(blastit::mem_usage::boot_refusal(&tmpfs, 85.0).is_some());
+
+    // The same host with none of the cache: 45.7 of 48 GiB is 95.2 %, and the
+    // non-reclaimable reading refuses by name.
+    let dir = memory_tree(
+        "anon",
+        48,
+        46,
+        Some("anon 42949672960\nshmem 0\ninactive_file 214748364\nslab_reclaimable 107374182\n"),
+    );
+    let anonymous = blastit::mem_usage::read(&dir).expect("a readable tree");
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        anonymous.used(),
+        46 * GIB - (214_748_364 + 107_374_182),
+        "46 GiB less the 307.2 MiB the cgroup reports as reclaimable"
+    );
+    let message = blastit::mem_usage::boot_refusal(&anonymous, 85.0)
+        .expect("a genuinely high reading refuses");
+    assert!(message.contains("BLASTIT_MEM_HIGH_WATERMARK"), "{message}");
+    assert!(message.contains("95.2%"), "the reading: {message}");
+    assert!(message.contains("503"), "the symptom: {message}");
+
+    // A cgroup that cannot report the split keeps the raw figure rather than
+    // guessing what is reclaimable — and one with no cgroup at all keeps
+    // `MemTotal − MemAvailable`, which already excludes the cache (subtracting
+    // again would count it twice).
+    let dir = memory_tree("nostat", 48, 46, None);
+    let raw = blastit::mem_usage::read(&dir).expect("a readable tree");
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!((raw.reclaimable(), raw.used()), (0, 46 * GIB));
+
+    let dir = memory_tree("nocgroup", 48, 10, Some("inactive_file 6442450944\n"));
+    fs::remove_file(dir.join("sys/fs/cgroup/memory.current")).expect("drop memory.current");
+    fs::remove_file(dir.join("sys/fs/cgroup/memory.max")).expect("drop memory.max");
+    let meminfo = blastit::mem_usage::read(&dir).expect("a readable tree");
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        (meminfo.reclaimable(), meminfo.used()),
+        (0, 10 * GIB),
+        "MemTotal − MemAvailable (48 − 38 GiB), with the stale memory.stat \
+         subtracted from nothing: MemAvailable already excludes it"
+    );
+}
+
+/// A synthetic machine for [`blastit::mem_usage`]: `proc/meminfo`, a cgroup v2
+/// directory, and optionally its `memory.stat`.
+///
+/// The watermark arithmetic is pinned against these figures, not against the
+/// host that runs the suite: a runner with a warm page cache is exactly the
+/// case in question, and a runner without one must not be able to make the
+/// assertions vacuous.
+fn memory_tree(tag: &str, total_gib: u64, current_gib: u64, stat: Option<&str>) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "blastit-mem-{}-{tag}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("proc")).expect("a fixture proc");
+    fs::create_dir_all(dir.join("sys/fs/cgroup")).expect("a fixture cgroup");
+    fs::write(
+        dir.join("proc/meminfo"),
+        format!(
+            "MemTotal:       {} kB\nMemAvailable:   {} kB\n",
+            total_gib << 20,
+            total_gib.saturating_sub(current_gib) << 20
+        ),
+    )
+    .expect("write meminfo");
+    fs::write(
+        dir.join("sys/fs/cgroup/memory.max"),
+        format!("{}\n", total_gib * GIB),
+    )
+    .expect("write memory.max");
+    fs::write(
+        dir.join("sys/fs/cgroup/memory.current"),
+        format!("{}\n", current_gib * GIB),
+    )
+    .expect("write memory.current");
+    if let Some(stat) = stat {
+        fs::write(dir.join("sys/fs/cgroup/memory.stat"), stat).expect("write memory.stat");
+    }
+    dir
+}
+
+#[test]
+fn a_host_whose_page_cache_is_above_the_default_still_boots_and_serves() {
+    let server = MockPgServer::start();
+    let url = database_url(&server);
+    let routes =
+        "[[route]]\nname = \"home\"\npath = ['/.*']\n[route.db]\nqueries = [\"SELECT 1\"]\n";
+
+    // The documented default, named explicitly so the leg does not follow the
+    // shipped constant: on this host `memory.current` is far above 85 % while
+    // the reading the watermark uses is below it, so a boot that counted the
+    // page cache would refuse here and the view below would never be forked.
+    // The served `uid` is the proof that it read the non-reclaimable figure.
+    let reading =
+        blastit::mem_usage::read(std::path::Path::new("/")).expect("this host's memory reads");
+    let raw_percent = reading.raw() as f64 / reading.total() as f64 * 100.0;
+
+    let mut dev = Dev::start(
+        "mem-cache",
+        &manifest(routes),
+        &[("DATABASE_URL", &url), ("BLASTIT_MEM_HIGH_WATERMARK", "85")],
+        &[],
+    );
+    dev.wait_for_ready();
+    assert_eq!(
+        dev.get_json("/")["uid"].as_u64(),
+        Some(u64::from(rustix::process::geteuid().as_raw())),
+        "a view served the first request at the 85% default: the reading is \
+         {:.1}% of {:.1} GiB, and `memory.current` alone is {raw_percent:.1}%:\n{}",
+        reading.percent(),
+        reading.total() as f64 / GIB as f64,
+        dev.stdout_text()
+    );
+    let status = dev.terminate();
+    assert_eq!(status.code(), Some(0), "{}", dev.stderr_text());
+}
+
+#[test]
+fn the_dev_memory_advisory_is_one_line_and_only_above_the_default() {
+    let server = MockPgServer::start();
+    let url = database_url(&server);
+    let routes =
+        "[[route]]\nname = \"home\"\npath = ['/.*']\n[route.db]\nqueries = [\"SELECT 1\"]\n";
+
+    // A 100% watermark always boots, so the transcript shows exactly what the
+    // boot says about the reading the watermark *default* is compared with.
+    let reading =
+        blastit::mem_usage::read(std::path::Path::new("/")).expect("this host's memory reads");
+    let mut dev = Dev::start(
+        "mem-advisory",
+        &manifest(routes),
+        &[
+            ("DATABASE_URL", &url),
+            ("BLASTIT_MEM_HIGH_WATERMARK", "100"),
+        ],
+        &[],
+    );
+    dev.wait_for_ready();
+    let transcript = dev.stdout_text();
+    let status = dev.terminate();
+    assert_eq!(status.code(), Some(0), "{}", dev.stderr_text());
+
+    let advised = transcript
+        .lines()
+        .filter(|line| line.contains("WARN") && line.contains("BLASTIT_MEM_HIGH_WATERMARK"))
+        .count();
+    match blastit::mem_usage::advisory(&reading, 100.0) {
+        Some(message) => {
+            assert_eq!(advised, 1, "one WARN line, not {advised}:\n{transcript}");
+            assert!(
+                transcript.contains(&message),
+                "the WARN names the setting, the reading and the cache it left out:\n{transcript}"
+            );
+        }
+        None => assert_eq!(
+            advised,
+            0,
+            "a boot at or below the 85% default says nothing about the watermark \
+             (measured {:.1}%):\n{transcript}",
+            reading.percent()
+        ),
+    }
+}
+
+#[test]
 fn unprivileged_production_has_no_single_uid_fallback() {
     let server = MockPgServer::start();
     let url = database_url(&server);
@@ -1039,6 +1342,62 @@ path = ['/ungranted/.*']
         fs::metadata(&ungranted).err().map(|err| err.kind()),
         Some(std::io::ErrorKind::NotFound),
         "an ungranted route must have no socket: {ungranted:?}"
+    );
+
+    let status = dev.terminate();
+    assert_eq!(status.code(), Some(0), "{}", dev.stderr_text());
+}
+
+#[test]
+fn an_empty_grant_gets_a_denying_listener() {
+    let server = MockPgServer::start();
+    let url = database_url(&server);
+    let routes = "\
+[[route]]
+name = \"locked\"
+path = ['/locked/.*']
+[route.db]
+queries = []
+
+[[route]]
+name = \"open\"
+path = ['/open/.*']
+[route.db]
+queries = [\"SELECT 1\"]
+";
+    let mut dev = Dev::start(
+        "denying-listener",
+        &manifest(routes),
+        &[("DATABASE_URL", &url)],
+        &[],
+    );
+    dev.wait_for_ready();
+
+    // `docs/local.md`: "`queries = []` gives it a listener that denies every
+    // statement". The app connects and reaches PostgreSQL's permission error,
+    // not a missing socket.
+    let denied = dev.get_json("/locked/state");
+    assert_eq!(
+        denied["sqlstate"].as_str(),
+        Some("42501"),
+        "an empty grant denies with SQLSTATE 42501: {denied}\n{}",
+        dev.stdout_text()
+    );
+    // Allowed twin: the same statement passes on the granted route.
+    assert_eq!(
+        dev.get_json("/open/state")["ok"],
+        true,
+        "the granted route still passes `SELECT 1`:\n{}",
+        dev.stdout_text()
+    );
+
+    let root = dev.root();
+    let locked = root.join("views/0/.s.PGSQL.5432");
+    let metadata = fs::metadata(&locked).expect("the empty grant's socket exists");
+    assert_eq!(
+        metadata.permissions().mode() & 0o777,
+        0o600,
+        "the denying listener is 0600"
     );
 
     let status = dev.terminate();
@@ -1142,6 +1501,9 @@ queries = [\"SELECT 1\"]
         .args(["dev", "--port", &occupied_port.to_string()])
         .env_clear()
         .env("DATABASE_URL", &url)
+        // This leg is about stage 1's `bind_tcp` failure, so it has to reach
+        // stage 1 on a host whose memory would otherwise refuse the boot.
+        .env("BLASTIT_MEM_HIGH_WATERMARK", "100")
         .current_dir(&dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1390,12 +1752,100 @@ path = ['/sql']
         !home.contains("SELECT 1"),
         "an unrouted request's statement must not become a route grant:\n{learned}"
     );
+    // One pass writes the newly discovered route *and* its statement (the
+    // route's own socket is `_learn_fallback`, and with one proposed route the
+    // attribution is exact), so no second `dev --learn` is needed.
+    let extra = learned.split("name = \"extra\"").nth(1).unwrap_or_default();
+    let extra = extra.split("[[route]]").next().unwrap_or_default();
+    assert!(
+        extra.contains("SELECT 1"),
+        "the route this pass discovered keeps the statement it ran:\n{learned}"
+    );
     dev.wait_for_line("learn: ");
     assert!(
         dev.stdout_text()
-            .contains("learn: 1 routes, 1 queries added"),
-        "the summary was printed:\n{}",
+            .contains("learn: 1 routes, 2 queries added"),
+        "the summary counts the routed and the discovered statement:\n{}",
         dev.stdout_text()
+    );
+}
+
+#[test]
+fn learn_refuses_a_literal_on_a_live_request() {
+    let server = MockPgServer::start();
+    let url = database_url(&server);
+    let routes = "\
+[[route]]
+name = \"home\"
+path = ['/']
+[route.db]
+queries = [\"SELECT 1\"]
+
+[[route]]
+name = \"literal\"
+path = ['/literal']
+";
+    let mut dev = Dev::start(
+        "learn-literal",
+        &manifest(routes),
+        &[("DATABASE_URL", &url)],
+        &["--learn"],
+    );
+    dev.wait_for_ready();
+
+    // The literal-bearing statement is allowed in learn mode (R26) so the app
+    // finishes, then refused instead of written (R25).
+    let response = dev.request("GET", "/literal", None);
+    assert_eq!(
+        response.status,
+        200,
+        "the literal statement ran under --learn: {}\n{}",
+        response.body,
+        dev.stdout_text()
+    );
+    let literal: serde_json::Value = serde_json::from_str(&response.body)
+        .unwrap_or_else(|err| panic!("{err}: {}", response.body));
+    assert_eq!(
+        literal["ok"],
+        true,
+        "the literal statement ran under --learn: {literal}\n{}",
+        dev.stdout_text()
+    );
+    // A request on another declared route is unaffected by the refusal.
+    assert_eq!(
+        dev.get_json("/")["uid"].as_u64(),
+        Some(u64::from(rustix::process::geteuid().as_raw())),
+        "{}",
+        dev.stdout_text()
+    );
+    dev.wait_for_line("/literal");
+
+    let manifest_path = dev.dir.join("blastit.toml");
+    let status = dev.terminate();
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a refused statement is exit 1:\nstdout:\n{}\nstderr:\n{}",
+        dev.stdout_text(),
+        dev.stderr_text()
+    );
+    let stderr = dev.stderr_text();
+    assert!(
+        stderr.contains("learn: refused"),
+        "the refusal is reported: {stderr}"
+    );
+    assert!(
+        !stderr.contains("alice"),
+        "a refused literal never reaches a stream: {stderr}"
+    );
+    let learned = fs::read_to_string(&manifest_path).expect("the manifest is readable");
+    assert!(
+        !learned.contains("alice"),
+        "a refused literal never reaches the manifest:\n{learned}"
+    );
+    assert!(
+        !learned.contains("SELECT 'alice'"),
+        "a literal-bearing statement is never granted:\n{learned}"
     );
 }
 

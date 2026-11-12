@@ -342,3 +342,25 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T22:57 [MA.2.3] (lead) status ready -> done
 - 2026-11-12T22:58 HUMAN H-002 opened by lead (node MA)
 - 2026-11-12T22:58 [MA.2] (lead) status ready -> done
+- 2026-11-12T22:58 [MA.3.1] (lead) status ready -> active
+- 2026-11-12T22:58 [MA.3.1] (lead) attempt 1/3 started
+- 2026-11-12T22:58 [MA.3.1] (lead) base 5596dc29793945570b5836b149c5ba1e43918c37
+- 2026-11-12T23:35 [MA.3.1] (lead) status active -> review
+- 2026-11-12T23:41 [MA.3] (lead) edited fields
+- 2026-11-12T23:41 [MA.3.7] (lead) created (task) Product fixes: dev watermark boot contract, queries=[] denying listener, one-pass dev --learn
+- 2026-11-12T23:41 [MA.3.7] (lead) status ready -> active
+- 2026-11-12T23:41 [MA.3.7] (lead) attempt 1/3 started
+- 2026-11-12T23:41 [MA.3.7] (lead) base 5596dc29793945570b5836b149c5ba1e43918c37
+- 2026-11-12T23:41 [MA.3.1] (lead) REVIEW FAIL (1/3): [MAJOR] harness injects BLASTIT_MEM_HIGH_WATERMARK=100 + BLASTIT_MAX_VIEW_PROCESSES=8 (masks 503); [MAJOR] _static_command ignores 'uv run' t
+- 2026-11-12T23:41 [MA.3.1] (lead) status review -> ready
+- 2026-11-12T23:41 [MA.3.1] (lead) attempt 2/3 started
+- 2026-11-12T23:41 [MA.3.1] (lead) retry base 5596dc29793945570b5836b149c5ba1e43918c37
+- 2026-11-13T00:09 [MA.3.7] (lead) attempt 1 blocked: (a)(b)(c) fixed and pinned, but the mandated boot arm makes every dev fence fail because the watermark reads cgroup memory.current which coun
+- 2026-11-13T00:09 [MA.3.7] (lead) attempt 2/3 started
+- 2026-11-13T00:09 [MA.3.7] (lead) retry base 5596dc29793945570b5836b149c5ba1e43918c37
+- 2026-11-13T00:31 [MA.3.1] (lead) status ready -> active
+- 2026-11-13T00:31 [MA.3.1] (lead) attempt 3/3 started
+- 2026-11-13T00:31 [MA.3.1] (lead) attempt 3: delete the two expect_drift pins (MA.3.7 (b)/(c) landed; assert 42501 and the one-pass query write), per-run UV_CACHE_DIR so a rebuilt wheel cannot h
+- 2026-11-13T00:38 [MA.3.1] (lead) status active -> review
+- 2026-11-13T00:38 [MA.3.7] (lead) status active -> review
+- 2026-11-13T00:50 [MA.3.7] (lead) status review -> done

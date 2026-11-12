@@ -16,11 +16,12 @@ paths:
   - "docs/**"
   - "python/tests/**"
   - "e2e/**"
+  - "crates/**"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-12T00:50"
-updated: "2026-11-12T19:16"
+updated: "2026-11-12T23:41"
 ---
 
 # Goal

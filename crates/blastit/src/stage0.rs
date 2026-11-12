@@ -24,13 +24,14 @@ use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::UnixListener;
+use std::path::Path;
 use std::time::Duration;
 
 use blastit_dbproxy::{DbproxyConfig, ListenerSpec, ProxySpec, write_config};
 use blastit_events::{
     Component, Event, EventKind, Level, Lifecycle, ManifestWarning as WarningEvent, Stream,
 };
-use blastit_manifest::{Manifest, UidLayout};
+use blastit_manifest::{Manifest, PgGrant, ProxyName, UidLayout};
 use blastit_sys::{
     Fork, Pid, Rlimits, Signal, bind_unix_listener, current_signal_mask, exec, harden_child,
     make_private_dir, pipe, restore_signal_mask_in_child, set_cloexec, set_dumpable,
@@ -42,6 +43,7 @@ use crate::config::{Config, LogFormat, Mode, Privilege, view_dir};
 use crate::dev_learn::{DevRoot, PRIVILEGE};
 use crate::host::{EXEC, Host, Install, Placement, Reexec};
 use crate::logs::{Emitter, fail, output_event};
+use crate::mem_usage;
 
 /// How long stage 0 waits for dbproxy's ready byte before giving up (§4).
 pub const DBPROXY_READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -550,6 +552,27 @@ fn fail_dev_root(root: &DevRoot, message: &str) -> ! {
     dev_fail(message)
 }
 
+/// The sentence a `blastit dev` boot above `BLASTIT_MEM_HIGH_WATERMARK` fails
+/// with, or `None` when a view process can start (§8 Sizing).
+///
+/// The reading is taken once, at boot, and is the one the scheduler will take:
+/// [`mem_usage::read`] leaves out the page cache and slab the kernel reclaims
+/// on demand, so a machine with a warm filesystem cache is not mistaken for a
+/// machine without memory. The scheduler retires one idle view for memory
+/// pressure and refuses to *spawn* one while aggregate usage is above the
+/// watermark; with no view yet there is nothing to evict, so a boot here would
+/// serve nothing and say nothing — every request would wait out
+/// `BLASTIT_QUEUE_TIMEOUT` and answer `503`. A reading that cannot be taken is
+/// not pressure, exactly as in the scheduler (§9.2 #8).
+fn memory_reading() -> Option<mem_usage::Usage> {
+    mem_usage::read(Path::new("/"))
+}
+
+/// [`memory_reading`]'s refusal, over the same reading the advisory uses.
+fn memory_refusal(usage: &mem_usage::Usage, config: &Config) -> Option<String> {
+    mem_usage::boot_refusal(usage, config.mem_high_watermark_percent)
+}
+
 /// Removes `root` (`R20`) and aborts via [`fail`] on `emitter`.
 fn fail_with_root(emitter: &Emitter, root: &DevRoot, message: &str) -> ! {
     root.cleanup();
@@ -625,6 +648,20 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
     // Every fatal path before the banner writes here, on descriptor 2: a
     // startup error has to leave stdout empty (§1.1).
     let startup = Emitter::new(2, config.log_format, config.log_level, false);
+
+    // §8 Sizing: above `BLASTIT_MEM_HIGH_WATERMARK` the scheduler will not start
+    // a view process, so a boot that ignores the reading serves nothing and says
+    // nothing — every request waits out `BLASTIT_QUEUE_TIMEOUT` and answers
+    // `503`. Refuse at boot instead, naming the setting and the reading (§1.1,
+    // `docs/troubleshooting.md`). It is one reading for both the refusal and the
+    // advisory below, so the two cannot disagree.
+    let memory = memory_reading();
+    if let Some(message) = memory
+        .as_ref()
+        .and_then(|usage| memory_refusal(usage, &config))
+    {
+        dev_fail(&message);
+    }
 
     if config.app.is_none() {
         dev_fail("BLASTIT_APP: the WSGI callable (`module:attribute`) is required");
@@ -729,6 +766,18 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
             EventKind::ManifestWarning(WarningEvent::new(warning.to_string())),
         ));
     }
+    // A boot above the documented default is the operator's call once they
+    // raised the knob, and it is also the state in which a view's first spawn
+    // may have to wait for memory: say so once, with the reading and the cache
+    // the reading left out (§1.1).
+    if let Some(message) = memory
+        .as_ref()
+        .and_then(|usage| mem_usage::advisory(usage, config.mem_high_watermark_percent))
+    {
+        emitter.emit(
+            &output_event(Component::Init, None, Stream::Stderr, &message).with_level(Level::Warn),
+        );
+    }
     if exposed {
         // Names the address, the port and the uid, and no event ever carries a
         // `port` *field* (§1.2, `R22`, `ARCHITECTURE.md` §8.1).
@@ -800,7 +849,11 @@ fn dev_view_sockets(
                 .get(proxy_name)
                 .and_then(|grant| grant.as_postgresql())
                 .cloned();
-            if grant.is_none() && !learn {
+            // A route with no declaration at all gets no socket. A route that
+            // declares the proxy with an empty grant still gets one, so its
+            // statements are denied with `42501` instead of the connection
+            // failing with `ENOENT` (`docs/local.md`).
+            if grant.is_none() && !learn && !route_declares_proxy(manifest, index, proxy_name) {
                 continue;
             }
             let Some(port) = blastit_env::postgresql::local_port(proxy_index) else {
@@ -1066,9 +1119,11 @@ fn exec_stage1_dev(
 /// Creates every view's private directory and binds the pg sockets it may use
 /// (§2.2).
 ///
-/// One listener per (route, `postgresql` proxy) the route has a grant on. The
-/// socket's port comes from `blastit_env`'s per-proxy assignment, so every
-/// process derives the same number from the same manifest (§5.2).
+/// One listener per (route, `postgresql` proxy) the route names: its effective
+/// grants, and the empty grants it declares explicitly (see
+/// [`route_declares_proxy`]). The socket's port comes from `blastit_env`'s
+/// per-proxy assignment, so every process derives the same number from the same
+/// manifest (§5.2).
 fn bind_view_sockets(
     emitter: &Emitter,
     manifest: &Manifest,
@@ -1084,7 +1139,12 @@ fn bind_view_sockets(
         if let Err(err) = make_private_dir(&dir, uid, 0o700) {
             fail(emitter, &format!("{}: {err}", dir.display()));
         }
-        for (proxy_name, grant) in manifest.effective_grants(index) {
+        // Effective grants first (the order the manifest's proxies sort in),
+        // then the declared-but-empty ones, so a manifest that granted
+        // something keeps exactly the sockets it had before.
+        let effective = manifest.effective_grants(index);
+        let mut wanted: Vec<(usize, &ProxyName, Option<&PgGrant>)> = Vec::new();
+        for (proxy_name, grant) in &effective {
             let Some(pg) = grant.as_postgresql() else {
                 continue;
             };
@@ -1095,6 +1155,17 @@ fn bind_view_sockets(
             else {
                 continue;
             };
+            wanted.push((proxy_index, proxy_name, Some(pg)));
+        }
+        for (proxy_index, (proxy_name, _upstream)) in prepared.upstreams().iter().enumerate() {
+            if effective.contains_key(proxy_name)
+                || !route_declares_proxy(manifest, index, proxy_name)
+            {
+                continue;
+            }
+            wanted.push((proxy_index, proxy_name, None));
+        }
+        for (proxy_index, proxy_name, grant) in wanted {
             let Some(port) = blastit_env::postgresql::local_port(proxy_index) else {
                 fail(
                     emitter,
@@ -1109,16 +1180,25 @@ fn bind_view_sockets(
                 Ok(listener) => listener,
                 Err(err) => fail(emitter, &format!("{}: {err}", path.display())),
             };
+            let (queries, transaction_control, unrestricted, tables) = match grant {
+                Some(pg) => (
+                    pg.queries().to_vec(),
+                    pg.transaction_control(),
+                    pg.is_unrestricted(),
+                    pg.tables().clone(),
+                ),
+                None => (Vec::new(), false, false, Default::default()),
+            };
             listeners.push((
                 listener,
                 ListenerSpec::enforcing(
                     route.name(),
                     proxy_name.as_str(),
                     uid,
-                    pg.queries().to_vec(),
-                    pg.transaction_control(),
-                    pg.is_unrestricted(),
-                    pg.tables().clone(),
+                    queries,
+                    transaction_control,
+                    unrestricted,
+                    tables,
                 ),
             ));
         }
@@ -1129,6 +1209,29 @@ fn bind_view_sockets(
         spec.fd = listener.as_raw_fd();
     }
     listeners
+}
+
+/// Whether the route at `index` names `proxy` at all, even with an empty grant.
+///
+/// `Manifest::effective_grants` drops an empty grant, because it grants nothing;
+/// the documentation still promises the route a listener that denies every
+/// statement (`docs/local.md`: "`queries = []` gives it a listener that denies
+/// every statement"), so the *declaration* is what decides the socket. A route
+/// with no `[route.<proxy>]` and no group that names the proxy still gets no
+/// listener, which is the other half of that page.
+fn route_declares_proxy(manifest: &Manifest, index: usize, proxy: &ProxyName) -> bool {
+    let Some(route) = manifest.routes().get(index) else {
+        return false;
+    };
+    if route.grants().contains_key(proxy) {
+        return true;
+    }
+    manifest
+        .global_groups()
+        .iter()
+        .chain(route.groups().iter())
+        .filter_map(|name| manifest.groups().get(name))
+        .any(|group| group.grants().contains_key(proxy))
 }
 
 /// Forks dbproxy, hands it the secrets and waits for its ready byte (§4).
@@ -1784,5 +1887,80 @@ mod tests {
         drop(write_end);
         let err = wait_ready(&ready, Duration::from_secs(30)).unwrap_err();
         assert_eq!(err, "dbproxy exited before it was ready");
+    }
+
+    /// The arithmetic and the wording live in [`crate::mem_usage`]; this pins
+    /// the wiring: `memory_refusal` compares the reading against *the config's*
+    /// `BLASTIT_MEM_HIGH_WATERMARK`, the same ceiling the scheduler uses.
+    #[test]
+    fn memory_refusal_takes_its_ceiling_from_the_config() {
+        let gib = 1024 * 1024 * 1024;
+        let mut config = Config::for_dev().expect("a dev config");
+        config.mem_high_watermark_percent = 85.0;
+        let reading = |used: u64| crate::mem_usage::Usage::new(100 * gib, used, 0);
+        assert!(memory_refusal(&reading(80 * gib), &config).is_none());
+        assert!(
+            memory_refusal(&reading(85 * gib), &config).is_none(),
+            "the watermark is a ceiling, not a trigger"
+        );
+        let message = memory_refusal(&reading(86 * gib), &config).expect("above the watermark");
+        assert!(message.contains("BLASTIT_MEM_HIGH_WATERMARK"), "{message}");
+        assert!(message.contains("(85%)"), "the knob: {message}");
+        assert!(message.contains("503"), "the symptom: {message}");
+        // A 0% watermark can never be met: it is how a test forces the high arm
+        // without faking `/proc`.
+        config.mem_high_watermark_percent = 0.0;
+        assert!(memory_refusal(&reading(1), &config).is_some());
+        // An unreadable or empty reading is not pressure.
+        assert!(memory_refusal(&reading(0), &config).is_none());
+    }
+
+    #[test]
+    fn an_explicit_empty_grant_still_names_the_proxy_for_its_route() {
+        let source = "\
+version = 1
+
+[proxy.db]
+protocol = \"postgresql\"
+input = { url = \"DATABASE_URL\" }
+
+[group.denied.db]
+queries = []
+
+[[route]]
+name = \"locked\"
+path = ['/locked/.*']
+[route.db]
+queries = []
+
+[[route]]
+name = \"grouped\"
+path = ['/grouped/.*']
+groups = [\"denied\"]
+
+[[route]]
+name = \"ungranted\"
+path = ['/ungranted/.*']
+";
+        let (manifest, _) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let db = ProxyName::new("db");
+        assert!(
+            route_declares_proxy(&manifest, 0, &db),
+            "an inline `queries = []` is a declaration"
+        );
+        assert!(
+            route_declares_proxy(&manifest, 1, &db),
+            "an attached group that names the proxy is a declaration"
+        );
+        assert!(
+            !route_declares_proxy(&manifest, 2, &db),
+            "a route that names no proxy gets no listener"
+        );
+        // The denied twin: `effective_grants` is what drops the empty grant, so
+        // the two functions disagree on `locked` on purpose.
+        assert!(
+            !manifest.effective_grants(0).contains_key(&db),
+            "the manifest model still calls an empty grant empty"
+        );
     }
 }

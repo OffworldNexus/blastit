@@ -502,39 +502,54 @@ impl LearnRun {
             });
         }
 
-        // Grants: only grantable statements, only routes the manifest declares,
-        // and never the reserved learn fallback view (`LEARN_FALLBACK_ROUTE`) —
-        // the statements that dedicated fallback slot served belong to unrouted
-        // requests rather than to any declared route.
+        // Statements that ran on the reserved fallback view belong to an
+        // unrouted request, and a per-route socket cannot say which one. When
+        // this run proposes exactly one route, every unrouted request maps to
+        // it, so the attribution is exact; with more than one the statement
+        // cannot be placed, and guessing would hand one new route another's
+        // grants. This is what makes one `dev --learn` pass write the queries of
+        // the route it discovered (R26, R27, `docs/local.md`).
+        let fallback_owner = match edits.routes.as_slice() {
+            [only] => Some(only.name.clone()),
+            _ => None,
+        };
+
+        // Grants: only grantable statements, only routes the manifest declares
+        // or this run proposes. An existing route's own grants are filtered out;
+        // a proposed route has none yet.
         let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
         let mut grants: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
         for obs in &self.observations {
             let ObsTarget::Routed { route } = &obs.target else {
                 continue;
             };
-            if route == LEARN_FALLBACK_ROUTE {
-                continue;
-            }
+            let route = if route == LEARN_FALLBACK_ROUTE {
+                let Some(owner) = &fallback_owner else {
+                    continue;
+                };
+                owner.clone()
+            } else {
+                route.clone()
+            };
             let Some(normalized) = obs.verdict.normalized() else {
                 continue;
             };
-            let Some(index) = manifest
+            let proxy = ProxyName::new(obs.proxy.clone());
+            if let Some(index) = manifest
                 .routes()
                 .iter()
                 .position(|candidate| candidate.name() == route)
-            else {
-                continue;
-            };
-            let proxy = ProxyName::new(obs.proxy.clone());
-            let already_granted = manifest
-                .effective_grants(index)
-                .get(&proxy)
-                .and_then(Grant::as_postgresql)
-                .is_some_and(|grant| grant.queries().iter().any(|query| query == normalized));
-            if already_granted
-                || manifest.is_query_covered_by_tables_or_groups(index, &proxy, normalized)
             {
-                continue;
+                let already_granted = manifest
+                    .effective_grants(index)
+                    .get(&proxy)
+                    .and_then(Grant::as_postgresql)
+                    .is_some_and(|grant| grant.queries().iter().any(|query| query == normalized));
+                if already_granted
+                    || manifest.is_query_covered_by_tables_or_groups(index, &proxy, normalized)
+                {
+                    continue;
+                }
             }
             if !seen.insert((route.clone(), obs.proxy.clone(), normalized.to_string())) {
                 continue;
@@ -865,6 +880,11 @@ path = ['/items']
             edits.grants,
             vec![
                 ProposedGrant {
+                    route: "extra".to_string(),
+                    proxy: "home".to_string(),
+                    queries: vec!["SELECT 2".to_string()],
+                },
+                ProposedGrant {
                     route: "home".to_string(),
                     proxy: "home".to_string(),
                     queries: vec!["SELECT 111".to_string()],
@@ -875,7 +895,56 @@ path = ['/items']
                     queries: vec!["SELECT 1".to_string()],
                 },
             ],
-            "the first declared route `home` keeps its statement while the reserved fallback route is skipped"
+            "the one proposed route receives the statement its unrouted request ran, while \
+             each declared route keeps only its own"
+        );
+    }
+
+    #[test]
+    fn two_proposed_routes_do_not_borrow_each_others_fallback_statements() {
+        let source = "\
+version = 1
+app = \"app:application\"
+
+[proxy.db]
+protocol = \"postgresql\"
+input = { url = \"DATABASE_URL\" }
+
+[[route]]
+name = \"home\"
+path = ['/']
+[route.db]
+queries = [\"SELECT 1\"]
+";
+        let (manifest, _) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let mut run = LearnRun::new();
+        // Two unrouted requests propose two different routes, so a statement
+        // that ran on the single fallback view cannot be placed: granting it to
+        // either would hand one new route the other's access.
+        run.note_event(r#"{"event":"request","method":"GET","path":"/extra/1"}"#);
+        run.note_event(r#"{"event":"request","method":"GET","path":"/orders/2"}"#);
+        let fallback_obs = serde_json::json!({
+            "target": {"scope": "routed", "route": LEARN_FALLBACK_ROUTE},
+            "proxy": "db",
+            "kind": "query",
+            "sql": "SELECT 2",
+            "is_tx": false,
+            "allowed": false,
+            "verdict": {"kind": "query", "normalized": "SELECT 2"}
+        });
+        run.push_bytes(format!("{fallback_obs}\n").as_bytes());
+
+        let edits = run.edits(&manifest);
+        let names: Vec<&str> = edits
+            .routes
+            .iter()
+            .map(|route| route.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["extra", "orders"]);
+        assert!(
+            edits.grants.is_empty(),
+            "an ambiguous fallback statement is not granted to a guess: {:?}",
+            edits.grants
         );
     }
 }

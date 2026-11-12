@@ -841,7 +841,7 @@ impl Default for Config {
             view_max_requests: 0,
             max_view_processes: None,
             view_mem_estimate: 32 * 1024 * 1024,
-            mem_high_watermark_percent: 85.0,
+            mem_high_watermark_percent: crate::mem_usage::DEFAULT_WATERMARK_PERCENT,
             immortalize: Immortalize::Auto,
             max_header_bytes: 64 * 1024,
             max_body_bytes: 100 * 1024 * 1024,

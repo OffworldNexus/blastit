@@ -20,6 +20,7 @@ pub mod cli;
 pub mod config;
 pub mod host;
 pub mod infer_routes;
+pub mod mem_usage;
 
 mod child;
 mod dev_learn;
