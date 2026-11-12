@@ -151,3 +151,7 @@ attempt 5 done: reserved _learn_fallback view slot 0 + critical twin; sent to re
 ## 2026-11-12T18:30 [lead]
 
 status review -> done
+
+## 2026-11-12T18:30 [lead]
+
+committed 0ea35c0

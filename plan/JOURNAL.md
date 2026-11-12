@@ -240,3 +240,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T18:21 [MA.2.3.3] (lead) status active -> review
 - 2026-11-12T18:21 [MA.2.3.3] (lead) attempt 5 done: reserved _learn_fallback view slot 0 + critical twin; sent to review
 - 2026-11-12T18:30 [MA.2.3.3] (lead) status review -> done
+- 2026-11-12T18:30 [MA.2.3.3] (lead) committed 0ea35c0
+- 2026-11-12T18:30 [MA.2.3.4] (lead) status ready -> active
+- 2026-11-12T18:30 [MA.2.3.4] (lead) attempt 1/3 started
+- 2026-11-12T18:30 [MA.2.3.4] (lead) base 0ea35c0
+- 2026-11-12T18:50 [MA.2.3.4] (lead) status active -> review
+- 2026-11-12T18:50 [MA.2.3.4] (lead) owner done; flagged possible pre-existing race in critical_dev_and_fail_closed::only_a_granted_route_gets_a_pg_socket under parallel rs-test
+- 2026-11-12T18:50 [MA.2.3.4] (lead) sent to review (base 0ea35c0)
+- 2026-11-12T19:09 AUTOPILOT on by conductor boot
+- 2026-11-12T19:15 [MA.2.3.4] (lead) status review -> done

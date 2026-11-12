@@ -2,7 +2,7 @@
 id: MA.2.3.4
 title: "Leaf 11: check audit engine, route inference and learn plan"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MA.2.3.3]
@@ -13,11 +13,11 @@ paths:
   - crates/blastit/tests/critical_check_engine.rs
   - "crates/blastit-py/src/**"
   - "crates/blastit-py/tests/**"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T19:15"
 ---
 
 # Goal

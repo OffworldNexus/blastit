@@ -24,6 +24,7 @@
 //! return — no file, no connection, nothing to clean up.
 
 mod audit;
+mod check;
 
 use std::path::PathBuf;
 
@@ -277,6 +278,83 @@ fn classify_statement(sql: &str) -> PyResult<String> {
     audit::classify(sql).map_err(PyValueError::new_err)
 }
 
+/// Diffs one `blastit check` run against the manifest (D3b, §6, `R32..R38`).
+///
+/// `http_obs_jsonl` is the `http_obs.jsonl` the pytest gate wrote — one
+/// `{"method","path","content_type","body_len","sample"}` object per line — and
+/// `sql_obs_jsonl` the `sql_obs.jsonl` dbproxy wrote, one `WireSqlObs` per
+/// line. The manifest is blastit's own: routing, effective grants and the
+/// allowlist decide what is missing, dead, unrouted or unused.
+///
+/// # Errors
+///
+/// [`PyValueError`] naming the file and line of a malformed observation, an
+/// unsupported `schema_version`, or an invalid manifest. No partial report is
+/// ever returned; `blastit check` turns this into exit `2`.
+///
+/// # Returns
+///
+/// The `--json` report, pretty-printed (`schema_version`, `ok`, `requests`,
+/// `statements`, `routes`, `proxies`, `findings`).
+#[pyfunction]
+#[pyo3(name = "check_audit")]
+fn check_audit_report(
+    manifest_toml: &str,
+    http_obs_jsonl: &str,
+    sql_obs_jsonl: &str,
+) -> PyResult<String> {
+    check::check_audit(manifest_toml, http_obs_jsonl, sql_obs_jsonl).map_err(PyValueError::new_err)
+}
+
+/// Plans the routes and exact queries `--learn` adds and renders its document
+/// (`R27`, `R29`).
+///
+/// Unrouted statements are mapped through blastit's own route inference into
+/// the proposed route's `[route.<proxy>].queries`; only exact queries are
+/// written, never table grants, and transaction control is a stderr hint, not a
+/// silent flag. `dry_run` makes `"wrote"` false without changing the proposal.
+///
+/// # Errors
+///
+/// The same failures as [`check_audit_report`].
+///
+/// # Returns
+///
+/// `{"proposed": {"routes": R, "queries": Q}, "wrote": true|false}`, exactly
+/// the `--learn --json` document (intentionally without `schema_version`).
+#[pyfunction]
+#[pyo3(name = "plan_learn", signature = (manifest_toml, http_obs_jsonl, sql_obs_jsonl, dry_run=false))]
+fn plan_learn_report(
+    manifest_toml: &str,
+    http_obs_jsonl: &str,
+    sql_obs_jsonl: &str,
+    dry_run: bool,
+) -> PyResult<String> {
+    check::plan_learn(manifest_toml, http_obs_jsonl, sql_obs_jsonl, dry_run)
+        .map_err(PyValueError::new_err)
+}
+
+/// Probes one request body and returns its `BodySample` as JSON (`R36`).
+///
+/// `prefix` is the first bytes of the body (the gate caps it at 64 KiB) and
+/// `total_len` its real length, so a larger body reports
+/// `"truncated": true`. The sample never carries body bytes: a MIME essence and
+/// the `valid_json`/`valid_form` verdicts only.
+///
+/// # Errors
+///
+/// [`PyValueError`] only when the sample cannot be rendered, which cannot
+/// happen in practice.
+#[pyfunction]
+#[pyo3(name = "probe_ingress")]
+fn probe_ingress_sample(
+    content_type: Option<String>,
+    prefix: &[u8],
+    total_len: u64,
+) -> PyResult<String> {
+    check::probe_ingress(content_type.as_deref(), prefix, total_len).map_err(PyValueError::new_err)
+}
+
 /// The interpreter's `sys.path`, as bytes, for stage 1 to restore (§4).
 ///
 /// `os.fsencode` is what makes this exact: a path is bytes, and one that is not
@@ -317,5 +395,8 @@ fn _blastit(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(analyze_statement, module)?)?;
     module.add_function(wrap_pyfunction!(covering_statements, module)?)?;
     module.add_function(wrap_pyfunction!(classify_statement, module)?)?;
+    module.add_function(wrap_pyfunction!(check_audit_report, module)?)?;
+    module.add_function(wrap_pyfunction!(plan_learn_report, module)?)?;
+    module.add_function(wrap_pyfunction!(probe_ingress_sample, module)?)?;
     Ok(())
 }

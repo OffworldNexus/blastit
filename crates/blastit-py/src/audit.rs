@@ -736,6 +736,7 @@ fn assemble(
             // reported here; the global groups' statements are reported once,
             // below, when no route matched them (D3c).
             let own = own_queries(manifest, index, &proxy);
+            let from_group = group_queries(manifest, index, &proxy);
             let unused_here: Vec<&String> = if live_only {
                 // Nothing observed this route but its own log: no grant of it
                 // can be called dead.
@@ -745,7 +746,18 @@ fn assemble(
                     .granted
                     .iter()
                     .filter(|query| {
-                        !matched.contains(query.as_str()) && own.contains(query.as_str())
+                        !matched.contains(query.as_str())
+                            && own.contains(query.as_str())
+                            // A route's own `queries` entry a table grant
+                            // already covers is not dead (`R34`): the shared
+                            // helper is the one `blastit check` reads. A
+                            // group's statement keeps this report's older
+                            // per-route accounting, which `unused_global` and
+                            // the route's group own.
+                            && (from_group.contains(query.as_str())
+                                || !manifest.is_query_covered_by_tables_or_groups(
+                                    index, &proxy, query,
+                                ))
                     })
                     .collect()
             };
@@ -1030,6 +1042,28 @@ fn own_queries(manifest: &Manifest, index: usize, proxy: &ProxyName) -> BTreeSet
     };
     collect_queries(route.grant(proxy), &mut queries);
     for name in route.groups() {
+        collect_queries(
+            manifest.group(name).and_then(|group| group.grant(proxy)),
+            &mut queries,
+        );
+    }
+    queries
+}
+
+/// The statements a *group* grants this route: the global groups and the ones
+/// the route names.
+///
+/// The legacy report keeps a group's unmatched statement in the route's own
+/// `unused` list, and reports a global group's statement once in
+/// `unused_global`; the shared `R34` coverage helper is only consulted for the
+/// route's own inline entries, so a group statement's accounting does not
+/// change.
+fn group_queries(manifest: &Manifest, index: usize, proxy: &ProxyName) -> BTreeSet<String> {
+    let mut queries = BTreeSet::new();
+    let Some(route) = manifest.route(index) else {
+        return queries;
+    };
+    for name in manifest.global_groups().iter().chain(route.groups()) {
         collect_queries(
             manifest.group(name).and_then(|group| group.grant(proxy)),
             &mut queries,

@@ -55,3 +55,7 @@ REVIEW PASS (attempt 2). Two MINOR findings deferred to the MA.2.3 gate test-cur
 ## 2026-11-12T15:52 [lead]
 
 status review -> done
+
+## 2026-11-12T15:52 [lead]
+
+committed 15931c6

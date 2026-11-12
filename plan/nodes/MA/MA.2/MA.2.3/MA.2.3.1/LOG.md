@@ -87,3 +87,7 @@ attempt 3 (expert) done: PG18 lexer parity for all 8 literal forms, 0600 mode pr
 ## 2026-11-12T16:21 [lead]
 
 status review -> done
+
+## 2026-11-12T16:21 [lead]
+
+committed d291078
