@@ -2,16 +2,16 @@
 id: MA.2.2.4
 title: "Leaf 7: dbproxy learn, dynamic-check and literal redaction"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MA.2.2.1]
 paths: ["crates/blastit-dbproxy/src/**", "crates/blastit-dbproxy/tests/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T14:47"
 ---
 
 # Goal

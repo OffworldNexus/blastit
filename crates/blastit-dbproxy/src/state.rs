@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
+use std::os::fd::FromRawFd;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -16,8 +17,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroizing;
 
 use crate::Emit;
-use crate::config::{DbproxyConfig, ListenerSpec};
+use crate::config::{DbproxyConfig, ListenerMode, ListenerSpec};
 use crate::error::DbproxyError;
+use crate::learn::{Learning, ObsTarget};
 use crate::upstream::{CaBundles, SslPlan, upstream_parameters};
 
 /// How long dbproxy waits for the upstream to accept a TCP connection before it
@@ -64,6 +66,12 @@ pub(crate) struct Shared {
     /// the `ErrorResponse` pregresql is about to write is dbproxy's own message
     /// and not an upstream failure.
     refusals: Mutex<HashSet<u64>>,
+    /// What the listeners do with the statements they see.
+    mode: ListenerMode,
+    /// Whether a `uid == 0` listener is permitted (a root CI container).
+    allow_root_listener: bool,
+    /// The observation and attribution state (`--learn`/`check`).
+    learning: Arc<Learning>,
 }
 
 impl Shared {
@@ -76,7 +84,9 @@ impl Shared {
         listeners: &[ListenerSpec],
         emit: Emit,
     ) -> Result<Arc<Self>, DbproxyError> {
-        config.validate()?;
+        config.validate_proxies()?;
+        config.validate_serving(listeners)?;
+        config.validate_learning()?;
 
         let mut bundles = CaBundles::new();
         let mut proxies = HashMap::new();
@@ -105,6 +115,20 @@ impl Shared {
                 }),
             );
         }
+
+        // The observation pipe (`--learn`/`check`) is handed over here and owned
+        // by dbproxy from now on: init keeps the read end, nothing else refers
+        // to this descriptor by number.
+        //
+        // SAFETY: the descriptor was created for dbproxy, is not referred to by
+        // number anywhere else, and is closed when the `File` is dropped —
+        // exactly the contract the inherited listener fds follow.
+        let obs = config.obs_fd.map(|fd| unsafe { File::from_raw_fd(fd) });
+        let learning = Arc::new(Learning::new(
+            config.route_policies.iter().cloned(),
+            proxies.keys().cloned(),
+            obs,
+        ));
 
         let mut runtimes = Vec::with_capacity(listeners.len());
         for (index, spec) in listeners.iter().enumerate() {
@@ -140,7 +164,45 @@ impl Shared {
             next_pid: AtomicI32::new(1_000_000),
             urandom: File::open("/dev/urandom").ok(),
             refusals: Mutex::new(HashSet::new()),
+            mode: config.mode,
+            allow_root_listener: config.allow_root_listener,
+            learning,
         }))
+    }
+
+    /// What the listeners do with the statements they see.
+    pub(crate) fn mode(&self) -> ListenerMode {
+        self.mode
+    }
+
+    /// Whether a listener may declare `uid == 0`.
+    pub(crate) fn allow_root_listener(&self) -> bool {
+        self.allow_root_listener
+    }
+
+    /// The observation and attribution state.
+    pub(crate) fn learning(&self) -> &Arc<Learning> {
+        &self.learning
+    }
+
+    /// The allowlist a statement on `listener` is evaluated against.
+    ///
+    /// A runtime listener carries its own route's grants (§6). A shared
+    /// learning listener is one socket per proxy, so its grants come from the
+    /// [`ObsTarget`] at the top of the control channel's stack, and an unknown
+    /// route evaluates against an empty allowlist (never "anything allowed").
+    pub(crate) fn allowlist_for<'a>(
+        &'a self,
+        listener: &'a ListenerRuntime,
+        target: Option<&ObsTarget>,
+    ) -> &'a Allowlist {
+        if listener.spec.route != crate::config::WILDCARD_ROUTE {
+            return &listener.allowlist;
+        }
+        match target {
+            Some(ObsTarget::Routed { route }) => self.learning.policy(route, &listener.proxy.name),
+            _ => self.learning.policy("", &listener.proxy.name),
+        }
     }
 
     /// The listener with this tag, if there is one.
@@ -200,7 +262,8 @@ impl Shared {
     /// The [`SqlDenied`] the caller builds carries the policy's own explanation
     /// — which table, column or function a table grant does not cover, or that no
     /// grant lists the text at all. It never carries a parameter value: values
-    /// are not part of a policy check.
+    /// are not part of a policy check, and the caller redacts every quoted
+    /// literal before it builds the event (R24, S1).
     pub(crate) fn emit_sql_denied(&self, route: &str, denied: SqlDenied) {
         self.emit_event(Some(route), EventKind::SqlDenied(denied));
     }
@@ -372,15 +435,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// the kernel attached to the client's first message (`SCM_CREDENTIALS`), which
 /// gVisor fills in correctly and refuses to let a client forge.
 ///
-/// `uid` 0 never passes: root is not a view, so a root client — or a forged
-/// root credential, which the kernel only lets a privileged process create — is
-/// refused like any other stranger.
+/// `uid` 0 never passes unless the configuration opted in with
+/// `allow_root_listener` *and* the listener itself declares `uid == 0`: root is
+/// not a view (`ARCHITECTURE.md` §2.2), and the only reason the opt-in exists is
+/// a root CI container where the whole tree runs as root (ADR-0001).
 pub(crate) fn credentials_match(
     spec_uid: u32,
     credentials: Option<pregresql::proxy::UnixCredentials>,
+    allow_root: bool,
 ) -> bool {
     match credentials {
-        Some(credentials) => credentials.uid != 0 && credentials.uid == spec_uid,
+        Some(credentials) => {
+            let root_allowed = credentials.uid != 0 || (allow_root && spec_uid == 0);
+            root_allowed && credentials.uid == spec_uid
+        }
         None => false,
     }
 }
@@ -409,21 +477,54 @@ mod tests {
 
     #[test]
     fn only_the_listeners_own_uid_is_accepted() {
-        assert!(credentials_match(21_000, Some(credentials(7, 21_000))));
-        assert!(!credentials_match(21_000, Some(credentials(7, 21_001))));
-        assert!(!credentials_match(21_000, Some(credentials(7, 1000))));
+        assert!(credentials_match(
+            21_000,
+            Some(credentials(7, 21_000)),
+            false
+        ));
+        assert!(!credentials_match(
+            21_000,
+            Some(credentials(7, 21_001)),
+            false
+        ));
+        assert!(!credentials_match(
+            21_000,
+            Some(credentials(7, 1000)),
+            false
+        ));
     }
 
     #[test]
-    fn root_is_never_accepted() {
-        assert!(!credentials_match(0, Some(credentials(1, 0))));
-        assert!(!credentials_match(21_000, Some(credentials(1, 0))));
+    fn root_is_never_accepted_without_the_opt_in() {
+        assert!(!credentials_match(0, Some(credentials(1, 0)), false));
+        assert!(!credentials_match(21_000, Some(credentials(1, 0)), false));
+        // A listener that declares another uid does not accept root either,
+        // even when the container opted in.
+        assert!(!credentials_match(21_000, Some(credentials(1, 0)), true));
+    }
+
+    #[test]
+    fn a_root_ci_container_may_opt_into_a_root_listener() {
+        // ADR-0001: the opt-in exists for a container where every process is
+        // root, and it only ever admits uid 0 on a listener that declares 0.
+        assert!(credentials_match(0, Some(credentials(1, 0)), true));
+        assert!(!credentials_match(0, Some(credentials(1, 1)), true));
+        assert!(credentials_match(
+            21_000,
+            Some(credentials(1, 21_000)),
+            true
+        ));
+        assert!(!credentials_match(
+            21_000,
+            Some(credentials(1, 21_001)),
+            true
+        ));
     }
 
     #[test]
     fn a_connection_without_credentials_is_refused() {
-        assert!(!credentials_match(21_000, None));
-        assert!(!credentials_match(0, None));
+        assert!(!credentials_match(21_000, None, false));
+        assert!(!credentials_match(0, None, true));
     }
 
     #[test]
@@ -482,6 +583,7 @@ mod tests {
         let config = DbproxyConfig {
             proxies: vec![proxy],
             listeners: listeners.clone(),
+            ..DbproxyConfig::default()
         };
         let emit: crate::Emit = Arc::new(|_: Event| {});
         let shared = Shared::build(&config, &listeners, emit).expect("state");
@@ -534,6 +636,7 @@ mod tests {
         let config = DbproxyConfig {
             proxies: vec![proxy],
             listeners: vec![listener.clone()],
+            ..DbproxyConfig::default()
         };
         let emit: crate::Emit = Arc::new(|_: Event| {});
         let shared = Shared::build(&config, &[listener], emit).expect("state");
