@@ -16,6 +16,9 @@
 //!
 //! * `Enforce` still answers `42501`, and `'s3cr3t'` appears in **no** byte of
 //!   the `SqlDenied` event or the `obs_fd` stream;
+//! * a connection whose `SCM_CREDENTIALS` uid is not the listener's is refused
+//!   with `28000` before a single byte reaches the upstream, while the same
+//!   configuration serving its own uid does reach it;
 //! * a `uid == 0` listener without `allow_root_listener` is rejected;
 //! * a malformed or oversized control line cannot hang the run: it is answered
 //!   and closed, and a stalled one is cut off by the 5 s deadline.
@@ -34,7 +37,7 @@ use blastit_dbproxy::{
     DbproxyConfig, DbproxyError, Emit, ListenerMode, ListenerSpec, ObsTarget, ProxySpec,
     RoutePolicySpec, WireSqlObs, run_with_ready,
 };
-use blastit_events::{Event, EventKind, encode_json};
+use blastit_events::{Event, EventKind, PgRefuseReason, encode_json};
 use blastit_sqlpolicy::TableGrants;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpListener;
@@ -320,8 +323,14 @@ struct RawClient {
 }
 
 impl RawClient {
-    /// Connects to `<directory>/.s.PGSQL.<port>` and completes the startup.
-    async fn connect(directory: &Path, port: u16) -> Self {
+    /// Connects to `<directory>/.s.PGSQL.<port>` and sends the startup packet,
+    /// returning every frame the proxy answered with (up to `ReadyForQuery` or
+    /// end of stream).
+    ///
+    /// Nothing is asserted here: [`RawClient::connect`] is the twin that
+    /// requires the session to be trusted, and a test that expects a refusal
+    /// reads exactly what came back.
+    async fn begin(directory: &Path, port: u16) -> (Self, Vec<Frame>) {
         let path = directory.join(format!(".s.PGSQL.{port}"));
         let std_stream = StdUnixStream::connect(&path).expect("the client connects");
         std_stream
@@ -359,6 +368,12 @@ impl RawClient {
             buffer: Vec::new(),
         };
         let frames = client.read_until_ready().await;
+        (client, frames)
+    }
+
+    /// Connects to `<directory>/.s.PGSQL.<port>` and completes the startup.
+    async fn connect(directory: &Path, port: u16) -> Self {
+        let (client, frames) = Self::begin(directory, port).await;
         assert!(
             frames
                 .iter()
@@ -428,6 +443,13 @@ fn current_uid() -> u32 {
     std::fs::metadata("/proc/self")
         .expect("/proc/self is readable")
         .uid()
+}
+
+/// A uid that is *not* this test's own, for a listener this client may not use.
+fn another_uid() -> u32 {
+    let uid = current_uid();
+    assert!(uid < u32::MAX, "the test uid leaves room for a stranger");
+    uid + 1
 }
 
 /// A unique, short scratch directory (Unix socket paths are limited).
@@ -570,8 +592,19 @@ fn listener_spec(route: &str, uid: u32) -> ListenerSpec {
 /// Starts dbproxy over one listener, with the two internal channels.
 ///
 /// `config` carries everything but the listener and the channel descriptors;
-/// the tests fill in the rest, exactly as the orchestrator does.
-async fn start(name: &str, mut config: DbproxyConfig, route: &str) -> Running {
+/// the tests fill in the rest, exactly as the orchestrator does. The listener
+/// declares the test's own uid, so the kernel's `SCM_CREDENTIALS` match it.
+async fn start(name: &str, config: DbproxyConfig, route: &str) -> Running {
+    start_as(name, config, route, current_uid()).await
+}
+
+/// Starts dbproxy over one listener declaring `uid`, with the two internal
+/// channels.
+///
+/// The listener's `uid` is what `credentials_match` compares the client's
+/// kernel-attached credentials against; declaring another uid is how a test
+/// makes the client a stranger to a socket it can still open.
+async fn start_as(name: &str, mut config: DbproxyConfig, route: &str, uid: u32) -> Running {
     let directory = scratch(name);
     let port = 5432;
     let listener = bind(&directory, port);
@@ -592,7 +625,7 @@ async fn start(name: &str, mut config: DbproxyConfig, route: &str) -> Running {
     config.check_ctl_fd = Some(ctl_fd);
     config.listeners = vec![ListenerSpec {
         fd,
-        ..listener_spec(route, current_uid())
+        ..listener_spec(route, uid)
     }];
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -950,6 +983,117 @@ async fn enforce_still_answers_42501_and_redacts_every_literal() {
 
     task.abort();
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
+async fn a_listener_for_another_uid_refuses_the_client_before_the_upstream() {
+    let server = MockPgServer::start().await;
+    let mut stranger = start_as(
+        "uid-mismatch",
+        dynamic_check(&server, Vec::new()),
+        "*",
+        another_uid(),
+    )
+    .await;
+
+    // The socket's permissions let this client connect; its `SCM_CREDENTIALS`
+    // are the only reason the session is refused.
+    let (mut client, frames) = tokio::time::timeout(
+        Duration::from_secs(5),
+        RawClient::begin(&stranger.directory, stranger.port),
+    )
+    .await
+    .expect("the refused connection is answered and closed");
+    let error = frames
+        .iter()
+        .find(|frame| frame.tag == b'E')
+        .unwrap_or_else(|| panic!("a stranger uid is refused: {frames:?}"));
+    assert_eq!(
+        error.sqlstate().as_deref(),
+        Some("28000"),
+        "the refusal is invalid_authorization_specification: {error:?}"
+    );
+    assert!(
+        !frames.iter().any(|frame| frame.tag == b'Z'),
+        "no session is ever announced: {frames:?}"
+    );
+    let message = error.message().expect("the refusal carries a message");
+    assert!(
+        !message.contains("127.0.0.1") && !message.contains("real-password"),
+        "the refusal names neither the upstream nor a credential: {message}"
+    );
+
+    // Nothing the client writes behind the refusal can become a statement.
+    let _ = client
+        .stream
+        .write_all(&frame(b'Q', b"SELECT 's3cr3t' FROM orders\0"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        server.startups(),
+        Vec::<StartupRequest>::new(),
+        "the mock upstream was never even sent a startup packet"
+    );
+    assert_eq!(
+        server.statements(),
+        Vec::<String>::new(),
+        "no statement reached the upstream"
+    );
+    assert!(
+        stranger.observe(Duration::from_millis(200)).await.is_none(),
+        "a refused connection is never observed"
+    );
+    assert!(
+        stranger.obs_bytes.is_empty(),
+        "no byte was written to obs_fd: {:?}",
+        String::from_utf8_lossy(&stranger.obs_bytes)
+    );
+    let events = stranger.events();
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.kind(), EventKind::SqlDenied(_))),
+        "a refusal is not a denied statement: {events:#?}"
+    );
+    let refused = events
+        .iter()
+        .find_map(|event| match event.kind() {
+            EventKind::PgRefused(refused) => Some(refused),
+            _ => None,
+        })
+        .expect("a pg.refused event");
+    assert_eq!(
+        refused.reason(),
+        &PgRefuseReason::CredentialsMismatch,
+        "the event says why the connection was refused"
+    );
+    assert_eq!(refused.proxy(), "db");
+
+    // The twin: the very same configuration, serving the listener's own uid,
+    // does reach the upstream — the refusal is identity, not a broken proxy.
+    let accepted = start_as(
+        "uid-match",
+        dynamic_check(&server, Vec::new()),
+        "*",
+        current_uid(),
+    )
+    .await;
+    let mut client = RawClient::connect(&accepted.directory, accepted.port).await;
+    let frames = client.query("SELECT 1").await;
+    assert!(
+        !frames.iter().any(|frame| frame.tag == b'E'),
+        "the listener's own uid is served: {frames:?}"
+    );
+    assert_eq!(
+        server.startups(),
+        [StartupRequest {
+            user: "real-user".to_string(),
+            database: "app".to_string()
+        }],
+        "the matching uid is the only one that reached the upstream"
+    );
+    assert_eq!(server.statements(), ["SELECT 1"]);
 }
 
 #[tokio::test]
