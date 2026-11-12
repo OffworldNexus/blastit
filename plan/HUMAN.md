@@ -12,3 +12,11 @@ Raise expensive_cap_usd in plan/BUDGET.json (currently $238.88 spent of $100 cap
 
 **Answer:**
 
+## H-002 [open] (node MA)
+
+- asked: 2026-11-12T22:58 by lead
+
+Install cargo-mutants on the dev host (or allow a one-off `cargo install cargo-mutants`): the MA milestone gate requires `make mutants-rust PKG=blastit-manifest` and `PKG=blastit-sqlpolicy` (>=75% killed), but the binary is missing so no mutation audit can run locally.
+
+**Answer:**
+

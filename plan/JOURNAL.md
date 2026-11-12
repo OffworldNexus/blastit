@@ -340,3 +340,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T22:50 [MA.2.3.13] (lead) status active -> review
 - 2026-11-12T22:57 [MA.2.3.13] (lead) status review -> done
 - 2026-11-12T22:57 [MA.2.3] (lead) status ready -> done
+- 2026-11-12T22:58 HUMAN H-002 opened by lead (node MA)
+- 2026-11-12T22:58 [MA.2] (lead) status ready -> done

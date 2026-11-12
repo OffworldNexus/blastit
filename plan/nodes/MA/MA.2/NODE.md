@@ -2,7 +2,7 @@
 id: MA.2
 title: "Implement 0.1.1 DX upgrades (blastit dev, auto-manifest, --learn, check)"
 kind: epic
-status: ready
+status: done
 priority: 2
 depends_on: [MA.5]
 paths: ["crates/**", "python/**", Makefile]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-12T00:50"
-updated: "2026-11-12T01:41"
+updated: "2026-11-12T22:58"
 ---
 
 # Goal

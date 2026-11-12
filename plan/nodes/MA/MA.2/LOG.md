@@ -7,3 +7,7 @@ created (epic) Implement 0.1.1 DX upgrades (blastit dev, auto-manifest, --learn,
 ## 2026-11-12T01:41 [planner]
 
 edited fields
+
+## 2026-11-12T22:58 [lead]
+
+status ready -> done
