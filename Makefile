@@ -24,7 +24,14 @@ MUTANTS_TMP ?= /tmp/opencode/blastit-mutants
 MUTANTS_JOBS ?= 2
 MUTANTS_TIMEOUT ?= 90
 
-.PHONY: help check clean guard critical-guard plan-validate \
+# Where `test-critical` stages the built package and extension, so `unittest`
+# imports the real `blastit._blastit` without an install (R42, §7.1).
+CRITICAL_STAGE ?= $(CURDIR)/target/python-critical
+# The attribute/call a protected critical test may never contain. Comments never
+# match because each alternative names the construct itself, not a bare word.
+CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytest\.mark\.skip|pytest\.skip[[:space:]]*\(|importorskip[[:space:]]*\(|unittest\.skip
+
+.PHONY: help check clean guard critical-guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical \
         py-format py-lint test-critical docs-check e2e mutants-rust
 
@@ -67,20 +74,40 @@ rs-test-critical: ## Run every crates/*/tests/critical_*.rs suite
 		$(RUST_ENV) $(CARGO) test -p "$$crate" --test "$$name" --locked; \
 	done; [ "$$found" -eq 1 ] || echo "no Rust critical tests yet (crates/*/tests/critical_*.rs)"
 
-py-format: ## Format Python harness tools (and python/ once ruff-clean)
-	$(UVX) ruff check --fix --select I tools
-	$(UVX) ruff format tools
+py-format: ## Format Python harness tools and the published package
+	$(UVX) ruff check --fix --select I python tools
+	$(UVX) ruff format python tools
 
-py-lint: ## Lint and format-check Python harness tools
-	$(UVX) ruff check tools
-	$(UVX) ruff format --check tools
+py-lint: ## Lint and format-check the Python package and harness tools
+	$(UVX) ruff check python tools
+	$(UVX) ruff format --check python tools
 
-test-critical: rs-test-critical ## Run protected critical tier (Rust + Python critical tests)
-	@if [ -d python/tests/critical ] && ls python/tests/critical/test_*.py >/dev/null 2>&1; then \
-		$(UV) run --no-project pytest python/tests/critical -q; \
-	else \
-		echo "no Python critical tests yet (python/tests/critical/)"; \
-	fi
+critical-skip-check: ## Refuse a skip construct in any protected critical test (R42)
+	@set -e; \
+	files=$$(ls crates/*/tests/critical_*.rs python/tests/critical/test_*.py 2>/dev/null || true); \
+	[ -n "$$files" ] || { echo "no protected critical tests to check"; exit 0; }; \
+	if found=$$(grep -nEH "$(CRITICAL_SKIP_PATTERN)" $$files); then \
+		echo "error: a protected critical test may never skip (R42):"; \
+		echo "$$found"; \
+		exit 1; \
+	fi; \
+	echo "protected critical tests hold no skip construct"
+
+test-critical: critical-skip-check rs-test-critical ## Run protected critical tier (Rust + Python, zero skips, offline)
+	@set -e; \
+	stage="$(CRITICAL_STAGE)"; \
+	ext="$$($(PYO3_BIN) -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')"; \
+	rm -rf "$$stage"; \
+	mkdir -p "$$stage/blastit/_bin"; \
+	cp python/blastit/*.py "$$stage/blastit/"; \
+	echo "cargo build --locked -p blastit-py -p blastit-dbproxy"; \
+	$(RUST_ENV) CARGO_NET_OFFLINE=1 $(CARGO) build --locked -p blastit-py -p blastit-dbproxy; \
+	cp target/debug/lib_blastit.so "$$stage/blastit/_blastit$${ext}"; \
+	cp target/debug/blastit-dbproxy "$$stage/blastit/_bin/blastit-dbproxy"; \
+	echo "python -m unittest discover -s python/tests/critical"; \
+	CARGO_NET_OFFLINE=1 UV_OFFLINE=1 PYTHONPATH="$${stage}:$(CURDIR)/python" \
+		$(RUST_ENV) $(UV) run --no-project python -m unittest discover \
+		-s python/tests/critical -p 'test_*.py'
 
 docs-check: ## Build Zensical documentation site with --strict
 	$(UVX) zensical build --strict

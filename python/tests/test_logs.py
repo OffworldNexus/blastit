@@ -8,7 +8,6 @@ quietly lose a denial or report a statement that no grant can match.
 import json
 
 import pytest
-
 from blastit import logs
 
 
@@ -37,12 +36,19 @@ class TestParsing:
 
     def test_an_app_platform_prefix_is_stepped_over(self) -> None:
         # DO prefixes every forwarded line with the app and its instance (§8.1).
-        line = '2026-10-25T14:02:11.384Z app[web.1]: {"event":"request","route":"notes"}'
+        line = (
+            '2026-10-25T14:02:11.384Z app[web.1]: {"event":"request","route":"notes"}'
+        )
         assert logs.parse_events([line]) == [{"event": "request", "route": "notes"}]
 
     def test_a_line_that_is_not_an_event_is_skipped(self) -> None:
-        assert logs.parse_events(['14:02:11.384 INFO  request  GET /notes/ → notes']) == []
-        assert logs.parse_events(["Traceback (most recent call last):", '{"not json": ']) == []
+        assert (
+            logs.parse_events(["14:02:11.384 INFO  request  GET /notes/ → notes"]) == []
+        )
+        assert (
+            logs.parse_events(["Traceback (most recent call last):", '{"not json": '])
+            == []
+        )
 
     def test_a_json_value_that_is_not_an_object_is_skipped(self) -> None:
         # An array, a string or a number is not an event, however valid.
@@ -86,7 +92,9 @@ class TestRequests:
         ]
 
     def test_a_request_event_without_a_method_is_a_get(self) -> None:
-        events = logs.parse_events([event(event="request", path="/notes/", route="notes")])
+        events = logs.parse_events(
+            [event(event="request", path="/notes/", route="notes")]
+        )
         assert logs.routed_requests(events)[0]["method"] == "GET"
 
     def test_another_event_is_not_a_request(self) -> None:
@@ -181,7 +189,9 @@ class TestParseableSql:
         assert logs.parseable_sql(sql) == "SELECT '$?', ', ...' , $1"
 
     def test_a_doubled_quote_does_not_end_the_literal(self) -> None:
-        assert logs.parseable_sql("SELECT 'it''s $?' || $?") == "SELECT 'it''s $?' || $1"
+        assert (
+            logs.parseable_sql("SELECT 'it''s $?' || $?") == "SELECT 'it''s $?' || $1"
+        )
 
     def test_a_quoted_identifier_is_left_alone(self) -> None:
         assert logs.parseable_sql('SELECT "a$?" FROM t WHERE b = $?') == (
@@ -191,6 +201,15 @@ class TestParseableSql:
     def test_a_dollar_quoted_string_is_left_alone(self) -> None:
         assert logs.parseable_sql("SELECT $tag$a $? b$tag$, $?") == (
             "SELECT $tag$a $? b$tag$, $1"
+        )
+
+    def test_an_e_string_backslash_quote_does_not_swallow_trailing_placeholders(
+        self,
+    ) -> None:
+        sql = r"SELECT id FROM notes WHERE body = E'abc\'($?)hunter2' AND id = $?"
+        assert (
+            logs.parseable_sql(sql)
+            == r"SELECT id FROM notes WHERE body = E'abc\'($?)hunter2' AND id = $1"
         )
 
     def test_nothing_to_rewrite_is_left_alone(self) -> None:

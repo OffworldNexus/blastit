@@ -5,9 +5,8 @@ never reaches Django (blastit answers 404 itself), which is what the report's
 `unrouted` section is for.
 """
 
-from django.urls import path
-
 import views
+from django.urls import path
 
 urlpatterns = [
     path("live/", views.granted),

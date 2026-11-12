@@ -42,7 +42,9 @@ DATABASES = {
         "USER": unquote(_url.username or ""),
         "PASSWORD": unquote(_url.password or ""),
         # The socket directory the view runs in, under blastit (§5.2).
-        "HOST": unquote(_url.hostname) if _url.hostname else unquote(_query.get("host", "")),
+        "HOST": unquote(_url.hostname)
+        if _url.hostname
+        else unquote(_query.get("host", "")),
         "PORT": str(_url.port or _query.get("port") or 5432),
         # §6: without this, psycopg inlines the literals and no grant matches.
         "OPTIONS": {"server_side_binding": True},

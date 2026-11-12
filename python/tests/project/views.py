@@ -32,9 +32,8 @@ import socket
 
 from django.db import connection, transaction
 from django.http import HttpResponse
-from psycopg.types import TypeInfo
-
 from notes.models import Note
+from psycopg.types import TypeInfo
 
 OWNER = 1
 

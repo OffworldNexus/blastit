@@ -1,14 +1,16 @@
 """The one table the tiny project needs."""
 
+from typing import Any, ClassVar
+
 from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    initial = True
+    initial: ClassVar[bool] = True
 
-    dependencies: list[tuple[str, str]] = []
+    dependencies: ClassVar[list[tuple[str, str]]] = []
 
-    operations = [
+    operations: ClassVar[list[Any]] = [
         migrations.CreateModel(
             name="Note",
             fields=[

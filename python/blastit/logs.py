@@ -46,14 +46,19 @@ sees is the one dbproxy logged.
 from __future__ import annotations
 
 import json
-import re
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 __all__ = [
+    "SQL_CODE",
+    "SQL_COMMENT",
+    "SQL_IDENT",
+    "SQL_LITERAL",
     "denials",
     "parse_events",
     "parseable_sql",
     "routed_requests",
+    "sql_regions",
     "unrouted_requests",
 ]
 
@@ -121,7 +126,8 @@ def routed_requests(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         method = _text(event.get("method")) or "GET"
         path = _text(event.get("path"))
         entry = seen.setdefault(
-            (route, method, path), {"route": route, "method": method, "path": path, "count": 0}
+            (route, method, path),
+            {"route": route, "method": method, "path": path, "count": 0},
         )
         entry["count"] += 1
     return list(seen.values())
@@ -141,7 +147,9 @@ def unrouted_requests(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         method = _text(event.get("method")) or "GET"
         path = _text(event.get("path"))
-        entry = seen.setdefault((method, path), {"method": method, "path": path, "count": 0})
+        entry = seen.setdefault(
+            (method, path), {"method": method, "path": path, "count": 0}
+        )
         entry["count"] += 1
     return list(seen.values())
 
@@ -183,12 +191,254 @@ def _text(value: Any) -> str:
 
 
 #
-# The normalised text of a `sql.denied` event, as SQL again.
+# PostgreSQL 18 `scan.l` region lexer & normalised SQL reconstruction.
 #
 
+SQL_CODE = "code"
+SQL_LITERAL = "literal"
+SQL_IDENT = "ident"
+SQL_COMMENT = "comment"
 
-#: A dollar-quoted string's opening or closing tag: `$$`, or `$tag$`.
-_DOLLAR_TAG = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$")
+
+def _is_ident_start(char: str) -> bool:
+    """scan.l `ident_start` / `dolq_start`: `[A-Za-z\\200-\\377_]`."""
+    return (char.isascii() and char.isalpha()) or ord(char) >= 0x80 or char == "_"
+
+
+def _is_ident_cont(char: str) -> bool:
+    """scan.l `ident_cont`: `[A-Za-z\\200-\\377_0-9$]`."""
+    return _is_ident_start(char) or (char.isascii() and char.isdigit()) or char == "$"
+
+
+def _is_dolq_cont(char: str) -> bool:
+    """scan.l `dolq_cont`: `[A-Za-z\\200-\\377_0-9]` (`ident_cont` without `$`)."""
+    return _is_ident_start(char) or (char.isascii() and char.isdigit())
+
+
+def _decimal_end(sql: str, index: int) -> int | None:
+    """End of `{decinteger}` = `{decdigit}(_?{decdigit})*` at `sql[index]`."""
+    if index >= len(sql) or not (sql[index].isascii() and sql[index].isdigit()):
+        return None
+    cursor = index + 1
+    while True:
+        probe = cursor + 1 if cursor < len(sql) and sql[cursor] == "_" else cursor
+        if probe < len(sql) and sql[probe].isascii() and sql[probe].isdigit():
+            cursor = probe + 1
+        else:
+            break
+    return cursor
+
+
+def _radix_end(sql: str, start: int, digits: str) -> int:
+    """End of a `0x`/`0o`/`0b` literal, or its `0[xob]_?` fail fallback."""
+    cursor = start
+    matched = False
+    while True:
+        probe = cursor + 1 if cursor < len(sql) and sql[cursor] == "_" else cursor
+        if probe < len(sql) and sql[probe] in digits:
+            cursor = probe + 1
+            matched = True
+        else:
+            break
+    if matched:
+        return cursor
+    if start < len(sql) and sql[start] == "_":
+        return start + 1
+    return start
+
+
+def _number_end(sql: str, index: int) -> int | None:
+    """End of a numeric literal starting at `sql[index]`, following `scan.l`."""
+    if index < len(sql) and sql[index] == "0" and index + 1 < len(sql):
+        prefix = sql[index + 1]
+        if prefix in ("x", "X"):
+            return _radix_end(sql, index + 2, "0123456789abcdefABCDEF")
+        if prefix in ("o", "O"):
+            return _radix_end(sql, index + 2, "01234567")
+        if prefix in ("b", "B"):
+            return _radix_end(sql, index + 2, "01")
+
+    if index < len(sql) and sql[index] == ".":
+        end = _decimal_end(sql, index + 1)
+        if end is None:
+            return None
+    else:
+        integer = _decimal_end(sql, index)
+        if integer is None:
+            return None
+        if integer < len(sql) and sql[integer] == ".":
+            if integer + 1 < len(sql) and sql[integer + 1] == ".":
+                return integer
+            fraction = _decimal_end(sql, integer + 1)
+            end = integer + 1 if fraction is None else fraction
+        else:
+            end = integer
+
+    if end < len(sql) and sql[end] in ("e", "E"):
+        sign = end + 2 if end + 1 < len(sql) and sql[end + 1] in ("+", "-") else end + 1
+        exponent = _decimal_end(sql, sign)
+        if exponent is not None:
+            end = exponent
+    return end
+
+
+def _code_token_end(sql: str, index: int) -> int:
+    """End of the code token starting at `sql[index]` (`blastit_sqlpolicy::lexer`)."""
+    if _is_ident_start(sql[index]):
+        cursor = index + 1
+        while cursor < len(sql) and _is_ident_cont(sql[cursor]):
+            cursor += 1
+        return cursor
+
+    numeric = _number_end(sql, index)
+    if numeric is not None:
+        cursor = numeric
+        if cursor < len(sql) and _is_ident_start(sql[cursor]):
+            while cursor < len(sql) and _is_ident_cont(sql[cursor]):
+                cursor += 1
+        return cursor
+
+    return index + 1
+
+
+def _skip_doubled(sql: str, index: int, quote: str) -> int:
+    """Skips a `''`-or-`""`-style SQL quoted region starting at its opening quote."""
+    cursor = index + 1
+    while cursor < len(sql):
+        if sql[cursor] == quote:
+            if cursor + 1 < len(sql) and sql[cursor + 1] == quote:
+                cursor += 2
+                continue
+            return cursor + 1
+        cursor += 1
+    return cursor
+
+
+def _skip_escapeless(sql: str, quote_index: int) -> int:
+    """Skips `B'…'` or `X'…'` starting at the opening quote (no escape at all)."""
+    closing = sql.find("'", quote_index + 1)
+    return len(sql) if closing < 0 else closing + 1
+
+
+def _skip_e_string(sql: str, index: int) -> int:
+    """Skips `E'…'` starting at `E`: `\\` escapes next char and `''` escapes `'`."""
+    cursor = index + 2
+    while cursor < len(sql):
+        char = sql[cursor]
+        if char == "'":
+            if cursor + 1 < len(sql) and sql[cursor + 1] == "'":
+                cursor += 2
+                continue
+            return cursor + 1
+        if char == "\\":
+            if cursor + 1 >= len(sql):
+                return len(sql)
+            cursor += 2
+            continue
+        cursor += 1
+    return cursor
+
+
+def _skip_line_comment(sql: str, index: int) -> int:
+    """Skips `--` up to and including `\\n` or `\\r` (`scan.l` `comment`)."""
+    cursor = index + 2
+    while cursor < len(sql) and sql[cursor] not in ("\n", "\r"):
+        cursor += 1
+    return cursor + 1 if cursor < len(sql) else cursor
+
+
+def _skip_block_comment(sql: str, index: int) -> int:
+    """Skips `/* … */` starting at `/`, honouring PostgreSQL comment nesting."""
+    cursor = index + 2
+    depth = 1
+    while cursor < len(sql) and depth > 0:
+        if sql[cursor] == "/" and cursor + 1 < len(sql) and sql[cursor + 1] == "*":
+            depth += 1
+            cursor += 2
+        elif sql[cursor] == "*" and cursor + 1 < len(sql) and sql[cursor + 1] == "/":
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
+def _dollar_quote_end(sql: str, index: int) -> int | None:
+    """End of `$$…$$` or `$tag$…$tag$` starting at `sql[index]`, or `None`."""
+    cursor = index + 1
+    if cursor >= len(sql):
+        return None
+    if sql[cursor] == "$":
+        delimiter = "$$"
+    elif _is_ident_start(sql[cursor]):
+        cursor += 1
+        while cursor < len(sql) and _is_dolq_cont(sql[cursor]):
+            cursor += 1
+        if cursor >= len(sql) or sql[cursor] != "$":
+            return None
+        delimiter = sql[index : cursor + 1]
+    else:
+        return None
+    closing = sql.find(delimiter, index + len(delimiter))
+    return len(sql) if closing < 0 else closing + len(delimiter)
+
+
+def _construct_at(sql: str, index: int) -> tuple[str, int] | None:
+    """`(kind, end)` if a quoted region or comment opens at token start `index`."""
+    char = sql[index]
+    if char == "'":
+        return SQL_LITERAL, _skip_doubled(sql, index, "'")
+    if char == '"':
+        return SQL_IDENT, _skip_doubled(sql, index, '"')
+    if char in ("e", "E") and index + 1 < len(sql) and sql[index + 1] == "'":
+        return SQL_LITERAL, _skip_e_string(sql, index)
+    if char in ("b", "B", "x", "X") and index + 1 < len(sql) and sql[index + 1] == "'":
+        return SQL_LITERAL, _skip_escapeless(sql, index + 1)
+    if char in ("n", "N") and index + 1 < len(sql) and sql[index + 1] == "'":
+        return SQL_LITERAL, _skip_doubled(sql, index + 1, "'")
+    if (
+        char in ("u", "U")
+        and index + 2 < len(sql)
+        and sql[index + 1] == "&"
+        and sql[index + 2] == "'"
+    ):
+        return SQL_LITERAL, _skip_doubled(sql, index + 2, "'")
+    if char == "$":
+        end = _dollar_quote_end(sql, index)
+        if end is not None:
+            return SQL_LITERAL, end
+    if char == "-" and index + 1 < len(sql) and sql[index + 1] == "-":
+        return SQL_COMMENT, _skip_line_comment(sql, index)
+    if char == "/" and index + 1 < len(sql) and sql[index + 1] == "*":
+        return SQL_COMMENT, _skip_block_comment(sql, index)
+    return None
+
+
+def sql_regions(sql: str) -> list[tuple[str, int, int]]:
+    """Splits `sql` into `(kind, start, end)` regions following PG 18 `scan.l`.
+
+    Matches `blastit_sqlpolicy::lexer::lex`: all 8 quoted literal forms (`'…'`,
+    `E'…'` with `\\` and `''` escapes, `B'…'`, `X'…'`, `N'…'`, `U&'…'`, `$$…$$`,
+    `$tag$…$tag$`), quoted identifiers (`"…"`), `--` and nested `/* … */`
+    comments, and `$`-containing identifiers (`a$b$c`) are bounded identically.
+    """
+    regions: list[tuple[str, int, int]] = []
+    code_start = 0
+    index = 0
+    while index < len(sql):
+        found = _construct_at(sql, index)
+        if found is not None:
+            kind, end = found
+            if index > code_start:
+                regions.append((SQL_CODE, code_start, index))
+            regions.append((kind, index, end))
+            index = end
+            code_start = end
+        else:
+            index = _code_token_end(sql, index)
+    if code_start < len(sql):
+        regions.append((SQL_CODE, code_start, len(sql)))
+    return regions
 
 
 def parseable_sql(sql: str) -> str:
@@ -201,8 +451,9 @@ def parseable_sql(sql: str) -> str:
     `blastit._blastit.analyze` refuses the text of a `sql.denied` event.
 
     This rewrites them back into shapes PostgreSQL accepts, without touching
-    quoted text, quoted identifiers or dollar-quoted strings, where `$?` or
-    `, ...` may be data:
+    quoted text (`'…'`, `E'…'`, `B'…'`, `X'…'`, `N'…'`, `U&'…'`), quoted
+    identifiers, dollar-quoted strings or comments, where `$?` or `, ...` may be
+    data:
 
     * a placeholder becomes `$1` (the number carries no meaning for the policy);
     * a list cut short inside parentheses (`IN ($?, ...)`) loses the marker,
@@ -219,26 +470,16 @@ def parseable_sql(sql: str) -> str:
     out: list[str] = []
     index = 0
     while index < len(sql):
-        char = sql[index]
-        if char in ("'", '"'):
-            end = _quoted_end(sql, index, char)
+        found = _construct_at(sql, index)
+        if found is not None:
+            _, end = found
             out.append(sql[index:end])
             index = end
             continue
-        if char == "$":
-            tag = _DOLLAR_TAG.match(sql, index)
-            if tag is not None:
-                end = sql.find(tag.group(0), tag.end())
-                end = len(sql) if end < 0 else end + len(tag.group(0))
-                out.append(sql[index:end])
-                index = end
-                continue
-            if sql.startswith("$?", index):
-                out.append("$1")
-                index += 2
-                continue
-            out.append(char)
-            index += 1
+        char = sql[index]
+        if char == "$" and sql.startswith("$?", index):
+            out.append("$1")
+            index += 2
             continue
         if char == "(":
             end = _group_end(sql, index)
@@ -268,8 +509,9 @@ def parseable_sql(sql: str) -> str:
                 # is the same statement to the normaliser.
                 index = collapsed
                 continue
-        out.append(char)
-        index += 1
+        token_end = _code_token_end(sql, index)
+        out.append(sql[index:token_end])
+        index = token_end
     return "".join(out)
 
 
@@ -297,34 +539,20 @@ def _group_end(sql: str, index: int) -> int:
     depth = 0
     scan = index
     while scan < len(sql):
-        char = sql[scan]
-        if char in ("'", '"'):
-            scan = _quoted_end(sql, scan, char)
+        found = _construct_at(sql, scan)
+        if found is not None:
+            _, scan = found
             continue
-        if char == "$":
-            tag = _DOLLAR_TAG.match(sql, scan)
-            if tag is not None:
-                end = sql.find(tag.group(0), tag.end())
-                scan = len(sql) if end < 0 else end + len(tag.group(0))
-                continue
-        elif char == "(":
+        char = sql[scan]
+        if char == "(":
             depth += 1
-        elif char == ")":
+            scan += 1
+            continue
+        if char == ")":
             depth -= 1
             if depth == 0:
                 return scan + 1
-        scan += 1
-    return len(sql)
-
-
-def _quoted_end(sql: str, index: int, quote: str) -> int:
-    """The position just after the quoted region that opens at `index`."""
-    scan = index + 1
-    while scan < len(sql):
-        if sql[scan] == quote:
-            if scan + 1 < len(sql) and sql[scan + 1] == quote:
-                scan += 2
-                continue
-            return scan + 1
-        scan += 1
+            scan += 1
+            continue
+        scan = _code_token_end(sql, scan)
     return len(sql)

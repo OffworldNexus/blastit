@@ -194,3 +194,19 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T15:31 [MA.2.3.1] (lead) attempt 3/4 started
 - 2026-11-12T15:32 [MA.2.3.2] (lead) REVIEW PASS (attempt 2). Two MINOR findings deferred to the MA.2.3 gate test-curator: (a) critical_config_and_presets.rs:547 unreachable 'stage=config' branch m
 - 2026-11-12T15:52 [MA.2.3.2] (lead) status review -> done
+- 2026-11-12T15:52 [MA.2.3.2] (lead) committed 15931c6
+- 2026-11-12T15:52 [MA.2.3.3] (lead) edited fields
+- 2026-11-12T15:52 [MA.2.3.3] (lead) lead: added crates/blastit/src/cli.rs to paths — the cli.rs run_dev seam is explicitly delegated to this leaf
+- 2026-11-12T15:52 [MA.2.3.3] (lead) status ready -> active
+- 2026-11-12T15:52 [MA.2.3.3] (lead) attempt 1/3 started
+- 2026-11-12T15:52 [MA.2.3.3] (lead) base 15931c6
+- 2026-11-12T15:57 [MA.2.3.3] (lead) attempt 2/3 started
+- 2026-11-12T15:57 [MA.2.3.3] (lead) attempt 1 session ended without producing any file or RESULT (dead session); re-dispatching attempt 2
+- 2026-11-12T16:14 [MA.2.3.1] (expert) attempt 3 complete: PG18 scan.l sql_regions shared by fold+logs (all 8 literal forms -> single ellipsis, E-string backslash + trailing placeholder safe), fchmod
+- 2026-11-12T16:14 [MA.2.3.1] (expert) attempt 3/4 done: ported PG18 scan.l literal lexer/redactor to fold.py (1:1 parity with blastit-sqlpolicy::redact_literals), preserved 0600 mode in _write_atomi
+- 2026-11-12T16:16 [MA.2.3.3] (implementer) attempt 2: dev supervisor, execve barrier, banner/expose guard, dev --learn and the protected critical_dev_and_fail_closed suite land green (7/7; make check exi
+- 2026-11-12T16:16 [MA.2.3.1] (lead) status active -> review
+- 2026-11-12T16:16 [MA.2.3.1] (lead) attempt 3 (expert) done: PG18 lexer parity for all 8 literal forms, 0600 mode preservation, offline test_fold load_tests (117 cases); sent to review
+- 2026-11-12T16:16 [MA.2.3.3] (lead) status active -> review
+- 2026-11-12T16:16 [MA.2.3.3] (lead) attempt 2 done: dev supervisor + learn + critical suite (7 tests); make check exit 0; sent to review (base 15931c6)
+- 2026-11-12T16:21 [MA.2.3.1] (lead) status review -> done

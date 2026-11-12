@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from blastit import pytest_plugin as plugin
 
 HERE = Path(__file__).parent
@@ -54,7 +53,9 @@ def privileges() -> None:
 class Outcome:
     """One inner pytest session: its exit code, its output and its report."""
 
-    def __init__(self, completed: subprocess.CompletedProcess[str], report_path: Path) -> None:
+    def __init__(
+        self, completed: subprocess.CompletedProcess[str], report_path: Path
+    ) -> None:
         self.returncode = completed.returncode
         self.stdout = completed.stdout
         self.stderr = completed.stderr
@@ -118,7 +119,7 @@ def run(
         "PYTHONDONTWRITEBYTECODE": "1",
         **(env or {}),
     }
-    completed = subprocess.run(  # noqa: S603 - sys.executable, fixed arguments
+    completed = subprocess.run(
         [sys.executable, "-m", "pytest", *args, "--blastit-report", report],
         cwd=target,
         env=environment,
@@ -148,11 +149,15 @@ def test_a_packaged_settings_module_is_served(
     The manifest is passed the way a person types it — a relative path — which
     only works if the plugin resolves it where it was invoked.
     """
-    outcome = run(packaged_project, "--blastit-manifest", "blastit.toml", tmp_path=tmp_path)
+    outcome = run(
+        packaged_project, "--blastit-manifest", "blastit.toml", tmp_path=tmp_path
+    )
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
     assert "1 passed" in outcome.stdout, outcome.stdout
     assert outcome.report["totals"]["requests"] == 1
-    assert outcome.missing_sql("packaged") == [], "the manifest grants what the view ran"
+    assert outcome.missing_sql("packaged") == [], (
+        "the manifest grants what the view ran"
+    )
 
 
 def test_a_live_server_is_served_by_blastit(
@@ -200,7 +205,9 @@ def test_a_live_server_is_served_by_blastit(
     )
 
 
-def test_a_projects_own_live_server_wins(privileges: None, project: Path, tmp_path: Path) -> None:
+def test_a_projects_own_live_server_wins(
+    privileges: None, project: Path, tmp_path: Path
+) -> None:
     """A `conftest.py` fixture is collected after the plugin, so it wins (D3c).
 
     The live project defines its own `live_server` when the environment asks for
@@ -255,4 +262,6 @@ def test_the_option_without_a_manifest_is_a_usage_error(project: Path) -> None:
     outcome = run(project, "--blastit-live-server")
     output = (outcome.stdout + outcome.stderr).replace("\n", " ")
     assert outcome.returncode == 4
-    assert "--blastit-live-server" in output and "need --blastit-manifest" in output, output
+    assert "--blastit-live-server" in output and "need --blastit-manifest" in output, (
+        output
+    )

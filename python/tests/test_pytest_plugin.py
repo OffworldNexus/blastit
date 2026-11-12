@@ -35,7 +35,9 @@ pytestmark = pytest.mark.skipif(
 class Outcome:
     """One inner pytest session: its exit code, its output and its report."""
 
-    def __init__(self, completed: subprocess.CompletedProcess[str], report_path: Path) -> None:
+    def __init__(
+        self, completed: subprocess.CompletedProcess[str], report_path: Path
+    ) -> None:
         self.returncode = completed.returncode
         self.stdout = completed.stdout
         self.stderr = completed.stderr
@@ -58,7 +60,9 @@ class Outcome:
         for route in self.report["routes"]:
             if route["name"] == name:
                 return route
-        raise AssertionError(f"no route {name!r} in {[r['name'] for r in self.report['routes']]}")
+        raise AssertionError(
+            f"no route {name!r} in {[r['name'] for r in self.report['routes']]}"
+        )
 
     def proxy(self, name: str, proxy: str = "db") -> dict[str, Any]:
         """One `(route, proxy)` block of the report."""
@@ -124,7 +128,7 @@ def run(
         "PYTHONDONTWRITEBYTECODE": "1",
         **(env or {}),
     }
-    completed = subprocess.run(  # noqa: S603 - sys.executable, fixed arguments
+    completed = subprocess.run(
         [sys.executable, "-m", "pytest", *args, "--blastit-report", report],
         cwd=project,
         env=environment,
@@ -171,7 +175,9 @@ def test_a_granted_route_is_clean(baseline: Outcome) -> None:
     assert baseline.route("notes")["needs_transaction_control"] is False
 
 
-def test_a_missing_grant_names_the_statement_the_test_and_the_path(baseline: Outcome) -> None:
+def test_a_missing_grant_names_the_statement_the_test_and_the_path(
+    baseline: Outcome,
+) -> None:
     """The DELETE is executed and not granted: the report says exactly where."""
     delete = 'DELETE FROM "notes_note" WHERE "notes_note"."id" = $?'
     assert baseline.missing_sql("note-delete") == [delete]
@@ -332,7 +338,9 @@ def test_a_route_that_opens_connections_needs_egress(baseline: Outcome) -> None:
         assert baseline.route(name)["egress"] == {"observed": [], "needed": False}, name
 
 
-def test_connection_setup_names_the_routes_that_do_not_grant_it(baseline: Outcome) -> None:
+def test_connection_setup_names_the_routes_that_do_not_grant_it(
+    baseline: Outcome,
+) -> None:
     """The statements every connection runs are reported apart from the requests.
 
     Under blastit every request opens its own connection, so these run on every
@@ -417,11 +425,16 @@ def test_the_report_counts_what_the_manifest_does_not_cover(baseline: Outcome) -
 
 def test_the_terminal_summary_is_short_and_actionable(baseline: Outcome) -> None:
     """What the developer sees without opening the JSON."""
-    assert "blastit: 17 requests, 21 statements, 12/13 routes exercised" in baseline.stdout
+    assert (
+        "blastit: 17 requests, 21 statements, 12/13 routes exercised" in baseline.stdout
+    )
     assert "blastit: route note-delete: 1 statement(s) missing" in baseline.stdout
     assert "blastit: route note-bulk: 2 statement(s) missing" in baseline.stdout
     assert "blastit: route note-atomic-live: 2 statement(s) missing" in baseline.stdout
-    assert "blastit: route note-atomic: needs transaction_control = true" in baseline.stdout
+    assert (
+        "blastit: route note-atomic: needs transaction_control = true"
+        in baseline.stdout
+    )
     assert (
         "blastit: route note-queue opens outbound connections (127.0.0.1:9) "
         "but has no egress = true" in baseline.stdout
@@ -484,7 +497,7 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     assert "SELECT set_config('TimeZone', $?, false)" in repaired, (
         "the connection-setup statement is in the repair"
     )
-    assert 'egress = true' in repaired, "and so is the route that opens connections"
+    assert "egress = true" in repaired, "and so is the route that opens connections"
     (copy / "blastit-repaired.toml").write_text(repaired, encoding="utf-8")
     second = run(
         copy,
@@ -550,12 +563,16 @@ def test_atomic_requests_on_the_alias_needs_transaction_control(
 def test_more_than_one_proxy_needs_a_mapping(project: Path, tmp_path: Path) -> None:
     """With two proxies, the plugin asks which one an alias talks to."""
     copy = copy_project(project, tmp_path)
-    (copy / "blastit-two-proxies.toml").write_text(two_proxy_manifest(), encoding="utf-8")
+    (copy / "blastit-two-proxies.toml").write_text(
+        two_proxy_manifest(), encoding="utf-8"
+    )
     without = run(
         copy, "--blastit-manifest", "blastit-two-proxies.toml", "-k", "test_list_notes"
     )
     assert without.returncode == 4, "a usage error, before any test runs"
-    assert "--blastit-proxy alias=proxy" in (without.stdout + without.stderr).replace("\n", " ")
+    assert "--blastit-proxy alias=proxy" in (without.stdout + without.stderr).replace(
+        "\n", " "
+    )
     with_mapping = run(
         copy,
         "--blastit-manifest",
@@ -569,8 +586,10 @@ def test_more_than_one_proxy_needs_a_mapping(project: Path, tmp_path: Path) -> N
     assert with_mapping.returncode == 0, with_mapping.stdout + with_mapping.stderr
     assert with_mapping.route("notes")["proxies"][0]["name"] == "warehouse"
     assert with_mapping.missing_sql("notes", "warehouse") == [
-        'SELECT "notes_note"."id" AS "id" FROM "notes_note" '
-        'WHERE "notes_note"."owner_id" = $?'
+        (
+            'SELECT "notes_note"."id" AS "id" FROM "notes_note" '
+            'WHERE "notes_note"."owner_id" = $?'
+        )
     ]
     assert with_mapping.setup("set_config")["ungranted_in"] == ["notes"]
 
@@ -588,7 +607,9 @@ def test_a_typo_in_the_mapping_is_a_usage_error(project: Path, tmp_path: Path) -
     assert "not-a-proxy" in outcome.stdout + outcome.stderr
 
 
-def test_strict_without_a_manifest_is_a_usage_error(project: Path, tmp_path: Path) -> None:
+def test_strict_without_a_manifest_is_a_usage_error(
+    project: Path, tmp_path: Path
+) -> None:
     """The plugin is inert, so asking it for anything is worth naming."""
     outcome = run(copy_project(project, tmp_path), "--blastit-strict")
     output = (outcome.stdout + outcome.stderr).replace("\n", " ")
@@ -613,7 +634,9 @@ def test_an_invalid_manifest_fails_the_session(project: Path, tmp_path: Path) ->
     assert outcome.returncode == 1
     assert "blastit: the audit failed" in outcome.stdout
     assert "invalid" in outcome.stdout, outcome.stdout
-    assert not outcome.report_path.exists(), "no report is written for an invalid manifest"
+    assert not outcome.report_path.exists(), (
+        "no report is written for an invalid manifest"
+    )
 
 
 def test_xdist_workers_are_merged(project: Path, tmp_path: Path) -> None:
@@ -634,8 +657,12 @@ def test_xdist_workers_are_merged(project: Path, tmp_path: Path) -> None:
     assert totals["statements"] == 21
     assert totals["routes_exercised"] == 12
     assert totals["missing"] == 12
-    assert totals["connection_setup_ungranted"] == 2, "counted once, not once per worker"
-    assert not list(copy.glob("xdist-report.json.gw*")), "the worker files are cleaned up"
+    assert totals["connection_setup_ungranted"] == 2, (
+        "counted once, not once per worker"
+    )
+    assert not list(copy.glob("xdist-report.json.gw*")), (
+        "the worker files are cleaned up"
+    )
     assert "blastit: route note-delete: 1 statement(s) missing" in outcome.stdout
 
 
@@ -680,7 +707,9 @@ def test_an_alias_without_server_side_binding_is_reported(
     assert "warning(s)" in strict.stdout
 
 
-def test_a_stray_file_next_to_the_report_is_not_merged(project: Path, tmp_path: Path) -> None:
+def test_a_stray_file_next_to_the_report_is_not_merged(
+    project: Path, tmp_path: Path
+) -> None:
     """Only worker reports of this version are merged; anything else is reported."""
     copy = copy_project(project, tmp_path)
     stray = copy / "stray.json.old"
@@ -688,22 +717,34 @@ def test_a_stray_file_next_to_the_report_is_not_merged(project: Path, tmp_path: 
         '{"version": 1, "requests": [{"method": "GET", "path_info": "/strange/"}]}',
         encoding="utf-8",
     )
-    outcome = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="stray.json")
+    outcome = run(
+        copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="stray.json"
+    )
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
     assert "stray.json.old is not a blastit worker report" in outcome.stdout
     assert stray.is_file(), "left where it was"
-    assert outcome.report["totals"]["requests"] == 17, "the workers were merged, nothing else"
-    assert outcome.report["totals"]["unrouted"] == 1, "no /strange/ request in the report"
+    assert outcome.report["totals"]["requests"] == 17, (
+        "the workers were merged, nothing else"
+    )
+    assert outcome.report["totals"]["unrouted"] == 1, (
+        "no /strange/ request in the report"
+    )
     assert outcome.report["plugin_warnings"], outcome.report["plugin_warnings"]
 
 
 def test_xdist_reports_are_not_merged_twice(project: Path, tmp_path: Path) -> None:
     """A second run in the same directory does not see the first run's requests."""
     copy = copy_project(project, tmp_path)
-    first = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json")
-    second = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json")
+    first = run(
+        copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json"
+    )
+    second = run(
+        copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json"
+    )
     assert first.returncode == second.returncode == 0
-    assert first.report["totals"]["requests"] == second.report["totals"]["requests"] == 17
+    assert (
+        first.report["totals"]["requests"] == second.report["totals"]["requests"] == 17
+    )
     assert second.report["connection_setup"]["ungranted"] == 2
     assert not list(copy.glob("twice.json.gw*"))
 
@@ -717,7 +758,15 @@ def is_transaction_control(sql: str) -> bool:
     would be meaningless.
     """
     return sql.startswith(
-        ("SAVEPOINT ", "RELEASE ", "ROLLBACK", "BEGIN", "COMMIT", "START TRANSACTION", "END")
+        (
+            "SAVEPOINT ",
+            "RELEASE ",
+            "ROLLBACK",
+            "BEGIN",
+            "COMMIT",
+            "START TRANSACTION",
+            "END",
+        )
     )
 
 
@@ -749,7 +798,10 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
         for block in reported["proxies"]:
             queries = route.setdefault(block["name"], {}).setdefault("queries", [])
             for entry in block["missing"]:
-                if not is_transaction_control(entry["sql"]) and entry["sql"] not in queries:
+                if (
+                    not is_transaction_control(entry["sql"])
+                    and entry["sql"] not in queries
+                ):
                     queries.append(entry["sql"])
             if block["transaction_control"]["needed"]:
                 route[block["name"]]["transaction_control"] = True
@@ -765,7 +817,11 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
         groups = document.setdefault("groups", [])
         if "connection" not in groups:
             groups.append("connection")
-        grant = document.setdefault("group", {}).setdefault("connection", {}).setdefault("db", {})
+        grant = (
+            document.setdefault("group", {})
+            .setdefault("connection", {})
+            .setdefault("db", {})
+        )
         queries = grant.setdefault("queries", [])
         queries.extend(sql for sql in setup if sql not in queries)
 
@@ -871,13 +927,17 @@ def test_a_route_reports_the_table_grant_that_covers_it(baseline: Outcome) -> No
     """Every statement a route ran, as the smallest table grant covering it."""
     grants = baseline.proxy("notes")["table_grants"]
     assert grants["tables"] == {
-        "notes_note": {"select": ["id", "owner_id"], "insert": None, "update": None, "delete": False}
+        "notes_note": {
+            "select": ["id", "owner_id"],
+            "insert": None,
+            "update": None,
+            "delete": False,
+        }
     }
     assert grants["functions"] == []
     assert grants["unanalysable"] == []
     assert grants["toml"] == (
-        "[route.db.tables]\n"
-        'notes_note = { select = ["id", "owner_id"] }\n'
+        '[route.db.tables]\nnotes_note = { select = ["id", "owner_id"] }\n'
     )
 
 
@@ -939,19 +999,25 @@ def test_prefer_tables_prints_the_snippet(project: Path, tmp_path: Path) -> None
         "-q",
     )
     assert "[route.db.tables]" in outcome.stdout, outcome.stdout
-    assert 'notes_note = { select = ["id"], delete = true }' in outcome.stdout, outcome.stdout
+    assert 'notes_note = { select = ["id"], delete = true }' in outcome.stdout, (
+        outcome.stdout
+    )
     # The statements are still named: the snippet is the other way to fix them.
     assert "statement(s) missing" in outcome.stdout
 
 
-def test_the_option_without_a_manifest_is_a_usage_error(project: Path, tmp_path: Path) -> None:
+def test_the_option_without_a_manifest_is_a_usage_error(
+    project: Path, tmp_path: Path
+) -> None:
     outcome = run(copy_project(project, tmp_path), "--blastit-prefer-tables")
     output = (outcome.stdout + outcome.stderr).replace("\n", " ")
     assert outcome.returncode == 4
     assert "--blastit-prefer-tables need --blastit-manifest" in output, output
 
 
-def test_a_table_grant_in_the_manifest_covers_the_route(project: Path, tmp_path: Path) -> None:
+def test_a_table_grant_in_the_manifest_covers_the_route(
+    project: Path, tmp_path: Path
+) -> None:
     """A manifest written as table grants passes the same audit (D7)."""
     copy = copy_project(project, tmp_path)
     (copy / "tables.toml").write_text(

@@ -2,16 +2,16 @@
 id: MA.2.3.1
 title: "Leaf 8: python ruff hygiene, Makefile gates and fold literal/atomic hardening"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MA.2.1.3]
 paths: [Makefile, "python/blastit/**", "python/tests/**"]
-attempts: 0
-max_attempts: 3
-escalation: none
+attempts: 3
+max_attempts: 4
+escalation: expert
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T16:21"
 ---
 
 # Goal
