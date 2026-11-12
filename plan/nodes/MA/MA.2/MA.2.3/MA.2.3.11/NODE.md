@@ -2,7 +2,7 @@
 id: MA.2.3.11
 title: "Fix the live-server suite: assert R24-redacted denial and pin the dev memory watermark"
 kind: task
-status: review
+status: done
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T21:20"
-updated: "2026-11-12T21:43"
+updated: "2026-11-12T21:52"
 ---
 
 # Goal

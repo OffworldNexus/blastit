@@ -320,3 +320,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T21:49 [MA.2.3.8] (lead) reviewer PASS: production fix correct, both pre-fix behaviours caught; MINOR: helper-level tests only (no Supervisor-level closed-fd test), free_port EADDRINUSE
 - 2026-11-12T21:49 [MA.2.3.11] (lead) reviewer PASS: redaction oracle is real (removing redaction falsifies both halves), watermark pin load-bearing + fixture-only on an 89% host
 - 2026-11-12T21:52 [MA.2.3.9] (lead) status review -> done
+- 2026-11-12T21:52 [MA.2.3.11] (lead) status review -> done

@@ -3,7 +3,7 @@
 - generated: 2026-11-12T21:52
 - autopilot: on
 - current milestone: MA Lean DX & Show-the-World Polish (0.1.1) [ready]
-- tasks: ready=7, review=2, done=26
+- tasks: ready=7, review=1, done=27
 - open human requests: 0 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 6; expensive spent: $48.52 of $100.00 cap (49%)
 
@@ -17,7 +17,6 @@
 ## Next actionable (top 12)
 
 - review: MA.2.3.8 Make a clean SIGTERM to blastit dev exit 0 (late ctl.chan EPIPE is not fatal)
-- review: MA.2.3.11 Fix the live-server suite: assert R24-redacted denial and pin the dev memory watermark
 - execute: MA.2.3.10 Pin three unprotected audit_v1 rules: add_query with ellipsis, no_observations zero statements, would_write zero requests
 
 ## Stuck / attention
@@ -26,7 +25,6 @@
 
 ## Recent journal
 
-- 2026-11-12T21:20 [MA.2.3.8] (lead) status ready -> active
 - 2026-11-12T21:20 [MA.2.3.8] (lead) attempt 1/3 started
 - 2026-11-12T21:20 [MA.2.3.8] (lead) base acd9289f84e9a866ea6f8083f9ca9c37682acdb5
 - 2026-11-12T21:20 [MA.2.3.11] (lead) status ready -> active
@@ -41,3 +39,4 @@
 - 2026-11-12T21:49 [MA.2.3.8] (lead) reviewer PASS: production fix correct, both pre-fix behaviours caught; MINOR: helper-level tests only (no Supervisor-level closed-fd test), free_port EADDRINUSE
 - 2026-11-12T21:49 [MA.2.3.11] (lead) reviewer PASS: redaction oracle is real (removing redaction falsifies both halves), watermark pin load-bearing + fixture-only on an 89% host
 - 2026-11-12T21:52 [MA.2.3.9] (lead) status review -> done
+- 2026-11-12T21:52 [MA.2.3.11] (lead) status review -> done

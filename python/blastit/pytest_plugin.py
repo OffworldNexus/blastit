@@ -1659,6 +1659,8 @@ def _live_server_environment(
         "BLASTIT_MANIFEST": str(manifest),
         "BLASTIT_LOG_FORMAT": "json",
         "BLASTIT_HEALTH_PATH": HEALTH_PATH,
+        # Scheduler::make_room refuses spawns above the 85 % default; pin it for loaded hosts.
+        "BLASTIT_MEM_HIGH_WATERMARK": "100",
         "PORT": str(port),
         "PYTHONDONTWRITEBYTECODE": "1",
     }

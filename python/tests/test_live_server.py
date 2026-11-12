@@ -188,13 +188,18 @@ def test_a_live_server_is_served_by_blastit(
     assert report["totals"]["requests"] == 3, "one per test"
     assert outcome.route("live-ok")["requests"] == 1
     assert outcome.route("live-denied")["requests"] == 1
-    assert "SELECT 'denied'" in outcome.missing_sql("live-denied"), (
-        "the statement blastit refused, as the log normalised it"
+    denied = outcome.missing_sql("live-denied")
+    assert "SELECT …" in denied, (
+        "the statement blastit refused, as the log normalised it and R24 "
+        "redacted its literal"
+    )
+    assert "SELECT 'denied'" not in json.dumps(report), (
+        "R24 redacts the literal, so the raw text never reaches the report"
     )
     assert outcome.missing_sql("live-ok") == [], "the manifest covers the granted route"
     assert report["totals"]["missing"] == 2, (
-        "`SELECT 'denied'` and the health check Django runs after an error, both "
-        "denied on that route"
+        "`SELECT 'denied'` (redacted to `SELECT …`) and the health check Django "
+        "runs after an error, both denied on that route"
     )
     assert [entry["path_info"] for entry in report["unrouted"]] == ["/live/oops/"]
     assert report["totals"]["unrouted"] == 1
@@ -256,8 +261,12 @@ def test_the_live_server_option_serves_a_live_server_suite(
     )
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
     assert "1 passed" in outcome.stdout, outcome.stdout
-    assert "SELECT 'denied'" in outcome.missing_sql("live-denied"), (
-        "the statement only blastit could have refused is in the report"
+    assert "SELECT …" in outcome.missing_sql("live-denied"), (
+        "the statement only blastit could have refused is in the report, "
+        "redacted by R24"
+    )
+    assert "SELECT 'denied'" not in json.dumps(outcome.report), (
+        "R24 redacts the literal, so the raw text never reaches the report"
     )
     assert outcome.report["totals"]["requests"] == 1
 

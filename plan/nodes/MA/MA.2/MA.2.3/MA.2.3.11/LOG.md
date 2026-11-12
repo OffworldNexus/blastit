@@ -23,3 +23,7 @@ status active -> review
 ## 2026-11-12T21:49 [lead]
 
 reviewer PASS: redaction oracle is real (removing redaction falsifies both halves), watermark pin load-bearing + fixture-only on an 89% host
+
+## 2026-11-12T21:52 [lead]
+
+status review -> done
