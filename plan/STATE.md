@@ -16,7 +16,7 @@
 
 ## Next actionable (top 12)
 
-- gate: MA.2.1 Canonical wire codecs and workspace seams (ingress + sqlpolicy)
+- execute: MA.2.2.1 Leaf 4: manifest 0.1.1 schema, reserved-key guard and boot warnings
 
 ## Stuck / attention
 
@@ -24,8 +24,6 @@
 
 ## Recent journal
 
-- 2026-11-12T13:53 [MA.2.1.5] (lead) base f571f9105ea807c8cff54f65650610e48a710331
-- 2026-11-12T13:53 [MA.2.1.6] (lead) status ready -> active
 - 2026-11-12T13:53 [MA.2.1.6] (lead) attempt 1/3 started
 - 2026-11-12T13:53 [MA.2.1.6] (lead) base f571f9105ea807c8cff54f65650610e48a710331
 - 2026-11-12T13:53 [MA.2.1.7] (lead) status ready -> active
@@ -39,3 +37,5 @@
 - 2026-11-12T13:58 [MA.2.1.5] (lead) status review -> done
 - 2026-11-12T13:58 [MA.2.1.6] (lead) status review -> done
 - 2026-11-12T13:58 [MA.2.1.7] (lead) status review -> done
+- 2026-11-12T13:58 [MA.2.1] (lead) GATE PASS: children 1.1-1.7 done. Evidence: cargo test --workspace --all-targets --locked green (all suites ok); make check exit 0; critical_ingress 55 tests + 
+- 2026-11-12T13:58 [MA.2.1] (lead) status ready -> done

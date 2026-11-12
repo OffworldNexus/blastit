@@ -2,7 +2,7 @@
 id: MA.2.1
 title: Canonical wire codecs and workspace seams (ingress + sqlpolicy)
 kind: epic
-status: ready
+status: done
 priority: 2
 depends_on: [MA.5]
 paths:
@@ -16,7 +16,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T13:58"
 ---
 
 # Goal
