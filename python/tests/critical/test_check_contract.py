@@ -232,9 +232,16 @@ def _plugin() -> Any:
     The plugin is imported by pytest itself in a project, so its `import pytest`
     is its host, not a dependency. `make test-critical` runs under plain
     `unittest`, where the stand-in supplies the one decorator the module uses at
-    import time (`fixture`). When real pytest is the runner, it is used as is.
+    import time (`fixture`). When real pytest is the runner, it is used as is —
+    the stand-in is only built when `import pytest` itself fails, and it is
+    removed from `sys.modules` again right after the plugin has bound it, so a
+    later import in the same session (the subprocess helper is not the only
+    reader) can never see a fake module instead of the real runner.
     """
-    if "pytest" not in sys.modules:
+    synthesised = False
+    try:
+        import pytest  # noqa: F401 - the host, when the tier has a real one
+    except ModuleNotFoundError:
         fake = types.ModuleType("pytest")
 
         def fixture(*args: Any, **kwargs: Any) -> Any:
@@ -244,7 +251,12 @@ def _plugin() -> Any:
 
         fake.fixture = fixture  # type: ignore[attr-defined]
         sys.modules["pytest"] = fake
-    from blastit import pytest_plugin
+        synthesised = True
+    try:
+        from blastit import pytest_plugin
+    finally:
+        if synthesised:
+            sys.modules.pop("pytest", None)
 
     return pytest_plugin
 
@@ -625,11 +637,20 @@ class Project:
         stub.mkdir(parents=True)
         (stub / "__init__.py").write_text(STUB_PYTEST_INIT, encoding="utf-8")
         (stub / "__main__.py").write_text(STUB_PYTEST, encoding="utf-8")
+        # The stub `pytest` package shadows the host's real one, so a real
+        # `pytest_django` imported in the child would run its `@pytest.fixture`
+        # decorators against a module that has no `fixture` and blow up before
+        # the gate ever sees an exit code. Every project therefore carries an
+        # empty `pytest_django.py`: `_refuse_unhandshaken_django()`'s "is this a
+        # Django suite" probe is then deterministic offline, and the dedicated
+        # unhandshaken twin still fails closed (it is `app_settings` configuring
+        # Django *inside* pytest, not the presence of the real plugin, that the
+        # gate must refuse).
+        (self.root / "stub" / "pytest_django.py").write_text("", encoding="utf-8")
 
     def install_django_stub(self) -> None:
-        """Installs minimal offline `pytest_django`, `django`, and `app_settings`."""
+        """Installs minimal offline `django` and `app_settings` modules."""
         stub_root = self.root / "stub"
-        (stub_root / "pytest_django.py").write_text("", encoding="utf-8")
         django_pkg = stub_root / "django"
         django_pkg.mkdir(parents=True, exist_ok=True)
         (django_pkg / "__init__.py").write_text("", encoding="utf-8")

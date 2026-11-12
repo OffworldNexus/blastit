@@ -283,3 +283,21 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T20:31 [MA.2.3.5] (lead) status active -> review
 - 2026-11-12T20:37 [MA.2.3.5] (lead) edited fields
 - 2026-11-12T20:37 [MA.2.3.5] (lead) status review -> done
+- 2026-11-12T20:38 [MA.2.3.5] (lead) committed d73ded3
+- 2026-11-12T20:50 [MA.2.3.6] (test-curator) created (task) Repair the check-contract suite and psycopg guard so the pytest-plugin CI job is green
+- 2026-11-12T20:50 [MA.2.3.7] (test-curator) created (task) Re-pin test_pytest_plugin.py against Django 6.1 setup statements and the egress warning
+- 2026-11-12T20:50 [MA.2.3.8] (test-curator) created (task) Make a clean SIGTERM to blastit dev exit 0 (late ctl.chan EPIPE is not fatal)
+- 2026-11-12T20:50 [MA.2.3.9] (test-curator) created (task) Pin check --learn refusal exit 1 and wrote=false end to end
+- 2026-11-12T20:50 [MA.2.3.10] (test-curator) created (task) Pin three unprotected audit_v1 rules: add_query with ellipsis, no_observations zero statements, would_write zero requests
+- 2026-11-12T20:50 [MA.2.3] (test-curator) test-curator gate audit: docs/testing/AUDIT-MA.2.3.md; BLOCKED on pytest-plugin CI job (F1/F2/F3) and dev SIGTERM exit 1 (F4); mutation 9/20 killed; filed MA.2.
+- 2026-11-12T20:50 [MA.2.3.6] (lead) status ready -> active
+- 2026-11-12T20:50 [MA.2.3.6] (lead) attempt 1/3 started
+- 2026-11-12T20:50 [MA.2.3.6] (lead) base d73ded3043cc9df39d1a482bc6b7c4df449ac2b0
+- 2026-11-12T20:50 [MA.2.3.7] (lead) status ready -> active
+- 2026-11-12T20:50 [MA.2.3.7] (lead) attempt 1/3 started
+- 2026-11-12T20:50 [MA.2.3.7] (lead) base d73ded3043cc9df39d1a482bc6b7c4df449ac2b0
+- 2026-11-12T21:09 [MA.2.3.6] (lead) status active -> review
+- 2026-11-12T21:09 [MA.2.3.7] (lead) status active -> review
+- 2026-11-12T21:19 [MA.2.3.7] (lead) REVIEW (1/3) FAIL verdict driven solely by out-of-scope pre-existing issues: test_live_server.py:191,259 asserts un-redacted SELECT 'denied' (R24 redacts to SQL
+- 2026-11-12T21:19 [MA.2.3.6] (lead) reviewer PASS; minor: commit 2.3.6 paths only (test_pytest_plugin.py belongs to MA.2.3.7), RESULT hunk count 5 not 6
+- 2026-11-12T21:19 [MA.2.3.6] (lead) status review -> done

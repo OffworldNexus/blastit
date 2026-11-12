@@ -22,7 +22,7 @@ from blastit import pytest_plugin as plugin
 
 # The wire form of a statement is psycopg's, so these tests need the driver the
 # tiny project is served with (it is in the same test environment).
-pytest.importorskip("psycopg", reason="the wire form is psycopg's")
+psycopg = pytest.importorskip("psycopg", reason="the wire form is psycopg's")
 
 
 class TestWireForm:
@@ -58,7 +58,7 @@ class TestWireForm:
         # Mixing positional and named placeholders is a programming error in
         # psycopg; the plugin must not turn that into a failing test run.
         mixed = "SELECT %s, %(name)s"
-        with pytest.raises(psycopg.ProgrammingError):  # noqa: F821 - importorskip binds it
+        with pytest.raises(psycopg.ProgrammingError):
             plugin._psycopg_converter()(mixed.encode(), "utf-8")  # type: ignore[misc]
         assert plugin.to_wire_sql(mixed) == "SELECT $1, $2"
 
