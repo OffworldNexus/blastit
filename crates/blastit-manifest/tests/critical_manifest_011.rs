@@ -296,6 +296,79 @@ groups = { select = ["id"] }
     assert_eq!(errors.errors()[0].to_string(), not_top_level("app"));
 }
 
+#[test]
+fn a_reserved_key_inside_a_grant_body_is_not_an_unknown_field() {
+    // A grant body is reached through `[group.<name>.<proxy>]` and
+    // `[route.<proxy>]` too. The same scoping mistake there has to come back
+    // as `R8`'s message, not as the `UnknownKey` a grant field nobody declared
+    // would produce: the reader wrote a top-level key after a table, and that
+    // is the fix to name.
+    let group = |body: &str| {
+        format!(
+            "version = 1\n\
+             [proxy.db]\nprotocol = \"postgresql\"\n\
+             [group.session.db]\n{body}"
+        )
+    };
+    let route = |body: &str| {
+        format!(
+            "version = 1\n\
+             [proxy.db]\nprotocol = \"postgresql\"\n\
+             [[route]]\nname = \"notes\"\npath = ['/notes/']\n\
+             [route.db]\n{body}"
+        )
+    };
+
+    let cases = [
+        (group("version = 1\n"), "version"),
+        (group("app = \"a:b\"\n"), "app"),
+        (group("preload = [\"m\"]\n"), "preload"),
+        (route("version = 1\n"), "version"),
+        (route("app = \"a:b\"\n"), "app"),
+        (route("preload = [\"m\"]\n"), "preload"),
+    ];
+
+    for (source, key) in cases {
+        let errors = parse_errors(&source);
+        assert_eq!(
+            errors.errors(),
+            [ManifestError::NotTopLevel {
+                key: key.to_string()
+            }],
+            "for {key:?} in {source:?} (not UnknownKey)"
+        );
+        assert_eq!(errors.errors()[0].to_string(), not_top_level(key));
+    }
+
+    // The allowed twin: the same two grant bodies with a field the schema does
+    // declare boot, so the test above is not refusing every grant body.
+    let allowed = "version = 1\n\
+                   [proxy.db]\nprotocol = \"postgresql\"\n\
+                   [group.session.db]\nqueries = []\n\
+                   [[route]]\nname = \"notes\"\npath = ['/notes/']\ngroups = [\"session\"]\n\
+                   [route.db]\nqueries = []\n";
+    let (manifest, warnings) =
+        Manifest::parse_and_validate(allowed, BASE).expect("the grant bodies boot");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        manifest
+            .group("session")
+            .expect("group")
+            .grants()
+            .keys()
+            .map(ProxyName::as_str)
+            .collect::<Vec<_>>(),
+        ["db"]
+    );
+    assert!(
+        manifest
+            .route(0)
+            .expect("route")
+            .grant(&ProxyName::from("db"))
+            .is_some()
+    );
+}
+
 //
 // R11: `[route.ingress]` and the two boot warnings.
 //
@@ -469,6 +542,43 @@ fn the_fixed_protocol_statements_may_keep_their_literal() {
             "the two protocol constants are the only literal-bearing grants"
         );
     }
+}
+
+#[test]
+fn the_wire_spelling_of_the_fixed_setup_statement_is_exempt() {
+    // The wire carries `$1`; `--learn` writes the normalised `$?` form, but a
+    // hand-written or older manifest may spell the placeholder. Validation
+    // normalises only to compare, and the model keeps the author's text.
+    let source = route_with_queries("queries = [\"SELECT set_config('TimeZone', $1, false)\"]\n");
+    let (manifest, warnings) =
+        Manifest::parse_and_validate(&source, BASE).expect("the $1 spelling is the same statement");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        manifest
+            .route(0)
+            .expect("route")
+            .grant(&ProxyName::from("db"))
+            .expect("grant")
+            .as_postgresql()
+            .expect("postgresql")
+            .queries(),
+        ["SELECT set_config('TimeZone', $1, false)"],
+        "normalisation is for comparison and must not rewrite the model"
+    );
+
+    // The exemption is that exact statement, not every `set_config` call: a
+    // different literal is still a value-bearing grant.
+    let sibling =
+        route_with_queries("queries = [\"SELECT set_config('application_name', $1, false)\"]\n");
+    let (location, proxy) = route_grant();
+    assert_eq!(
+        validate_errors(&sibling),
+        ManifestErrors::from(ManifestError::LiteralQuery {
+            location,
+            proxy,
+            rule: 0,
+        })
+    );
 }
 
 #[test]

@@ -661,3 +661,88 @@ fn a_failed_write_removes_its_temp_file() {
     );
     assert_eq!(entries(dir.path()), ["blastit.toml"]);
 }
+
+/// `write_atomic`'s temp name is `.<name>.<pid>.tmp`, which anyone who can
+/// write the directory can predict. A symlink planted there has to be removed,
+/// never followed: the file is opened `O_CREAT | O_EXCL`, which refuses a name
+/// that already exists — a symlink included.
+#[cfg(unix)]
+#[test]
+fn a_planted_temp_name_symlink_is_never_written_through() {
+    let dir = TempDir::new("planted-link");
+    let path = dir.path().join("blastit.toml");
+    let victim = dir.path().join("victim.txt");
+    let planted = dir
+        .path()
+        .join(format!(".blastit.toml.{}.tmp", std::process::id()));
+
+    std::fs::write(&path, SOURCE).expect("the manifest");
+    std::fs::write(&victim, "victim\n").expect("the victim");
+    // A relative target, exactly the shape that would be written through if the
+    // temp file were opened by name without `O_EXCL`.
+    std::os::unix::fs::symlink("victim.txt", &planted).expect("the planted symlink");
+
+    let replacement = format!("{SOURCE}\n# learned one query\n");
+    write_atomic(&path, &replacement).expect("the write succeeds");
+
+    assert_eq!(
+        std::fs::read_to_string(&victim).expect("the victim reads back"),
+        "victim\n",
+        "the write followed the planted symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the manifest reads back"),
+        replacement,
+        "the manifest does not hold the new content"
+    );
+    assert!(
+        std::fs::symlink_metadata(&planted).is_err(),
+        "the planted symlink is still named in the directory"
+    );
+    assert!(
+        temp_files(dir.path()).is_empty(),
+        "a temp entry was left behind"
+    );
+    assert_eq!(entries(dir.path()), ["blastit.toml", "victim.txt"]);
+}
+
+/// A regular file left at the temp name is the retry branch, and the retry has
+/// to start from a fresh file: the stale bytes are unlinked, not truncated in
+/// place or merged with the new content.
+#[test]
+fn a_stale_regular_file_at_the_temp_name_is_replaced() {
+    use std::io::Read as _;
+
+    let dir = TempDir::new("stale-temp");
+    let path = dir.path().join("blastit.toml");
+    let planted = dir
+        .path()
+        .join(format!(".blastit.toml.{}.tmp", std::process::id()));
+    std::fs::write(&path, SOURCE).expect("the manifest");
+    std::fs::write(&planted, "stale = 1\n").expect("the stale temp file");
+    // Holding the old inode open proves which file received the write: an
+    // unlinked inode keeps its own bytes, while a file opened in place changes
+    // under this handle.
+    let stale = std::fs::File::open(&planted).expect("open the stale temp file");
+
+    write_atomic(&path, SOURCE).expect("the write succeeds");
+
+    let mut old = String::new();
+    (&stale)
+        .read_to_string(&mut old)
+        .expect("the stale file reads through the open handle");
+    assert_eq!(
+        old, "stale = 1\n",
+        "the write went into the stale temp file instead of replacing it"
+    );
+    assert_eq!(std::fs::read_to_string(&path).expect("read back"), SOURCE);
+    assert!(
+        std::fs::read_to_string(&planted).is_err(),
+        "the stale temp name is still in the directory"
+    );
+    assert!(
+        temp_files(dir.path()).is_empty(),
+        "a temp entry was left behind"
+    );
+    assert_eq!(entries(dir.path()), ["blastit.toml"]);
+}
