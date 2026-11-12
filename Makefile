@@ -15,7 +15,10 @@ CARGO ?= cargo
 # Resolve real CPython >= 3.13 binary via uv (following symlinks so ../lib holds libpython3.X.so).
 PYO3_BIN := $(shell readlink -f "$$($(UV) python find --no-project '>=3.13' 2>/dev/null || which python3)")
 PYO3_LIBDIR := $(abspath $(dir $(PYO3_BIN))/../lib)
-RUST_ENV = PYO3_PYTHON="$(PYO3_BIN)" LD_LIBRARY_PATH="$(PYO3_LIBDIR)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"
+# Install prefix (parent of bin/): embedded interpreters (PyO3 test binaries) need it as PYTHONHOME
+# at runtime, otherwise they cannot find the uv-managed stdlib ("No module named 'encodings'").
+PYO3_PREFIX := $(if $(PYO3_BIN),$(abspath $(dir $(PYO3_BIN))/..),)
+RUST_ENV = $(if $(PYO3_PREFIX),PYTHONHOME="$(PYO3_PREFIX)") PYO3_PYTHON="$(PYO3_BIN)" LD_LIBRARY_PATH="$(PYO3_LIBDIR)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"
 
 MUTANTS_TMP ?= /tmp/opencode/blastit-mutants
 MUTANTS_JOBS ?= 2
