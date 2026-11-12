@@ -416,3 +416,49 @@ fn anything_else_is_not_replayed() {
         assert!(!is_introspection_setup_sql(sql), "{sql:?}");
     }
 }
+
+#[test]
+fn only_pg_catalog_qualified_functions_are_replayed() {
+    // A replay runs once under a routed target, without a grant, so the name
+    // has to resolve to the server's function and nothing else. A two-part
+    // call resolves in the schema that is spelled out: `public.version()` is
+    // the route's own function, not the one `pg_catalog` holds.
+    for sql in [
+        "SELECT public.version()",
+        "SELECT app.current_schema()",
+        "SELECT app.to_regtype($?)",
+        "SELECT public.pg_catalog.version()",
+    ] {
+        assert!(!is_introspection_setup_sql(sql), "{sql:?}");
+    }
+    // The same calls under `pg_catalog`, and the bare name (`pg_catalog` is
+    // first on every search path), are the server's functions.
+    for sql in [
+        "SELECT version()",
+        "SELECT pg_catalog.version()",
+        "SELECT pg_catalog.current_schema()",
+        "SELECT pg_catalog.to_regtype($?)",
+    ] {
+        assert!(is_introspection_setup_sql(sql), "{sql:?}");
+    }
+}
+
+#[test]
+fn three_part_relations_are_not_replayed() {
+    // `database.schema.relation` is a name PostgreSQL accepts, and the schema
+    // part alone does not identify the catalogue: `otherdb.pg_catalog.pg_type`
+    // is another database's `pg_type`. Only the one- and two-part forms name a
+    // relation this session can vouch for.
+    for sql in [
+        "SELECT * FROM otherdb.pg_catalog.pg_type",
+        "SELECT * FROM otherdb.information_schema.tables",
+    ] {
+        assert!(!is_introspection_setup_sql(sql), "{sql:?}");
+    }
+    for sql in [
+        "SELECT * FROM pg_catalog.pg_type",
+        "SELECT * FROM information_schema.tables",
+    ] {
+        assert!(is_introspection_setup_sql(sql), "{sql:?}");
+    }
+}
