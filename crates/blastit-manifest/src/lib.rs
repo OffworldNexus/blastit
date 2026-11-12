@@ -16,6 +16,8 @@
 //!   wiring keys, and [`Route::ingress`] the request-body codec a route
 //!   declared;
 //! * [`Manifest::effective_grants`] unions the grants a route ends up with;
+//! * [`edit::apply_edits`] and [`edit::write_atomic`] are how `--learn` writes
+//!   the manifest back without reformatting it;
 //! * [`UidLayout`] maps a route index to the uid its process runs under;
 //! * [`RoutingTable`] matches `(method, path_info)` to a route.
 //!
@@ -62,6 +64,8 @@ mod parse;
 mod routing;
 mod uid;
 mod validate;
+
+pub mod edit;
 
 pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning};

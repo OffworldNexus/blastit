@@ -2,7 +2,7 @@
 id: MA.2.2.2
 title: "Leaf 5: surgical comment-preserving manifest editor and atomic write"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MA.2.2.1]
@@ -10,11 +10,11 @@ paths:
   - "crates/blastit-manifest/src/lib.rs"
   - "crates/blastit-manifest/src/edit.rs"
   - "crates/blastit-manifest/tests/critical_manifest_edit.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T14:47"
 ---
 
 # Goal
