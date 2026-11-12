@@ -29,9 +29,8 @@ flowchart TB
 ## Turn it on safely
 
 - [ ] **The client IP is right.** Flows key on it: if every request looks like it
-  comes from your load balancer, every client is one client. Set
-  `BLASTIT_CLIENT_IP_HEADER` and `BLASTIT_TRUSTED_PROXIES`, or use a preset, and
-  [check `REMOTE_ADDR`](../infra/anything-else.md#client-ip-and-trusted-proxies).
+  comes from your load balancer, every client is one client. Measure it first
+  ([deployments overview](index.md#measure-your-ingress)).
 - [ ] **One office or NAT shares a `/24`.** They share a queue — usually fine.
   Tune `BLASTIT_FQ_OUTER_PREFIX_V4` / `_V6` if it is not.
 - [ ] **Split your logged-in users.** Put your session cookie in
@@ -40,7 +39,6 @@ flowchart TB
 - [ ] **Watch it:** `cost_ns` and `cpu_ns` in the [`request`
   event](../reference/log-events.md#the-events) show what each request paid; a
   full queue answers `503` with `Retry-After`.
-- [ ] **Keep the defaults** unless you measured otherwise.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -50,10 +48,7 @@ flowchart TB
 | `BLASTIT_FQ_MAX_DEBT` | `5s` | how far ahead of the queue it may borrow |
 | `BLASTIT_FQ_DEBT_TTL` | `30s` | how long an idle debtor is remembered |
 | `BLASTIT_FQ_INNER_COOKIES` | `sessionid,session` | the cookies that split one network |
-| `BLASTIT_FQ_INNER_HEADERS` | `user-agent,accept-language,sec-ch-ua,sec-ch-ua-platform,sec-ch-ua-mobile,authorization` | the headers that do the same |
-| `BLASTIT_FQ_INNER_INCLUDE_IP` | `1` | whether the full address is part of the inner key |
 
 The queue's depth and wait are `BLASTIT_QUEUE_SIZE` (`256`) and
-`BLASTIT_QUEUE_TIMEOUT` (`10s`); the table caps (`BLASTIT_FQ_OUTER_MAX`,
-`BLASTIT_FQ_INNER_MAX*`) and every other knob are in
+`BLASTIT_QUEUE_TIMEOUT` (`10s`); every other knob is in
 [the settings](../reference/settings.md#fair-queuing).

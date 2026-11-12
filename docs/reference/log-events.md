@@ -1,14 +1,16 @@
 # Log events
 
-stdout is the only output, and it is an event stream: one event per line.
-Nothing is written to disk.
+In server mode stdout is the only output, and it is an event stream: one event
+per line. Nothing is written to disk. `blastit check --json` is the one
+exception: exactly one JSON document on stdout, everything else on stderr, and
+exit `2` leaves stdout empty.
 
 ## Formats
 
 | `BLASTIT_LOG_FORMAT` | What it prints |
 |---|---|
 | `json` (the default) | one JSON object per line, for a collector and for `blastit-manifest fold` |
-| `pretty` | the same events as coloured, aligned lines, for debugging by hand |
+| `pretty` | the same events as coloured, aligned lines, for debugging by hand; `blastit dev` and `blastit check` use it by default |
 
 Every event carries `ts`, `level`, `event` and `component`, plus `route` and
 `request_id` when they apply. `BLASTIT_LOG_LEVEL` sets the minimum level
@@ -44,16 +46,17 @@ Startup prints one `boot` event per phase, so a log with all three is readable o
 its own.
 
 * **`stage0`** — before anything can fail: the `seccomp` setting as read, the
-  `privilege` mode (`root` or `capabilities`), the `bounding_set`, and the
-  rootless `capabilities`. `preset` is always `null` here. Written in the format
-  `BLASTIT_LOG_FORMAT` names — this line waits for the settings — or as JSON
-  when the settings do not parse.
+  `privilege` mode (`root`, `capabilities`, or `unprivileged-dev` under
+  `blastit dev`), the `bounding_set`, and the rootless `capabilities`. `preset`
+  is always `null` here. Written in the format `BLASTIT_LOG_FORMAT` names — this
+  line waits for the settings — or as JSON when the settings do not parse.
 * **`config`** — as soon as the configuration parsed, before the manifest:
   `preset` in force (or `null`), `preset_settings` with the preset's own values,
   and `preset_overridden`, the names an explicit variable overrode.
-* **`preload`** — what the app cost before the fork: `immortalize`, its
-  `immortalize_reason` when skipped, `immortalize_ms`, and the memory the
-  view-process cap came from — `mem_total`, `mem_used`, `max_view_processes`.
+* **`preload`** — what the app cost before the fork: `build` (the binary's
+  version), `immortalize`, its `immortalize_reason` when skipped,
+  `immortalize_ms`, and the memory the view-process cap came from — `mem_total`,
+  `mem_used`, `max_view_processes`.
 
 `ready` follows with `stage: "serving"`, the route count, the worker budget, and
 the **names** of the output variables per proxy, never their values. `shutdown`

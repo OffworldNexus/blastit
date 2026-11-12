@@ -2,16 +2,16 @@
 id: MA.1
 title: Rewrite lean Local/CI/Deploy user documentation (DX spec) first
 kind: task
-status: active
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: []
 paths: [README.md, "docs/**", zensical.toml]
-attempts: 1
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-12T00:50"
-updated: "2026-11-12T02:05"
+updated: "2026-11-12T10:43"
 ---
 
 # Goal

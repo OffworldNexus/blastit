@@ -1,31 +1,33 @@
 # Settings
 
-Everything is environment variables, plus the manifest. A set variable wins
-over a preset, even when empty, and `PORT` counts the same. `--preset` is the
-only [flag](cli.md).
+Everything is environment variables, plus the manifest. A set `BLASTIT_*`
+variable wins over the manifest and over a preset, even when empty, and `PORT`
+counts the same. `--preset` is a flag; `--port` belongs to `blastit dev`.
 
 ## The app and the manifest
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_APP` | — | the WSGI callable, `module:attribute`; required |
-| `BLASTIT_PRELOAD` | — | modules imported before the fork, comma-separated |
-| `BLASTIT_MANIFEST` | `/app/blastit.toml` | the manifest path |
+| `BLASTIT_APP` | the manifest's `app` | the WSGI callable, `module:attribute`; one of the two is required |
+| `BLASTIT_PRELOAD` | the manifest's `preload` | modules imported before the fork, comma-separated |
+| `BLASTIT_MANIFEST` | `./blastit.toml` | the manifest path |
 | `BLASTIT_SCRIPT_NAME` | — | mount prefix stripped before routing; the app sees `SCRIPT_NAME` |
 | `BLASTIT_WARMUP` | — | an optional `module:callable` run before the fork, for an expensive first use |
 | `BLASTIT_ENV_STRIP` | — | extra variables hidden from the app, comma-separated |
 
-`BLASTIT_APP`, `BLASTIT_WARMUP` and `BLASTIT_PRELOAD` must be importable in
-blastit's own environment: the project's virtualenv.
+`app`, `preload`, `BLASTIT_APP`, `BLASTIT_WARMUP` and `BLASTIT_PRELOAD` must be
+importable in Blastit's own environment: the project's virtualenv. Blastit reads
+the process environment only; `uv run --env-file .env blastit dev` loads a file.
 
 ## Port and health
 
 | Setting | Default | What it does |
 |---|---|---|
-| `PORT` | `8080` | the port init binds on `0.0.0.0`; set by most platforms |
+| `PORT` | `8080` | the port init binds on `0.0.0.0`; most platforms set it, and `blastit dev --port` overrides it |
 | `SERVER_PORT` | `= PORT` | the port the app is told the server runs on, when a load balancer's differs |
 | `BLASTIT_HEALTH_PATH` | `/_blastit/health` | answered by the scheduler itself, without a view process |
 | `BLASTIT_BACKLOG` | `1024` | the TCP listen backlog |
+| `BLASTIT_DEV_EXPOSE` | — | `1` is the second acknowledgement `blastit dev --host` needs before it binds a non-loopback address |
 
 The health path takes no worker slot: traffic cannot starve a health check.
 
@@ -33,20 +35,25 @@ The health path takes no worker slot: traffic cannot starve a health check.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_LOG_FORMAT` | `json` | `json` (one event per line) or `pretty` (coloured, for humans); the boot's first lines wait for it, and a boot whose settings do not parse prints them as JSON |
+| `BLASTIT_LOG_FORMAT` | `json` | `json` (one event per line) or `pretty` (coloured, for humans); `blastit dev` and `blastit check` default to `pretty`. The boot's first lines wait for it, and a boot whose settings do not parse prints them as JSON |
 | `BLASTIT_LOG_LEVEL` | `info` | the minimum level printed |
 
-stdout is the only output. See [log events](log-events.md).
+In server mode stdout is the only output, one event per line. The one exception
+is `blastit check --json`: exactly one JSON document on stdout, everything else
+on stderr, and exit `2` leaves stdout empty. See [log events](log-events.md).
 
 ## Privileges and the uid layout
 
 | Setting | Default | What it does |
 |---|---|---|
 | `BLASTIT_UID_BASE` | `20000` | the uid layout's base: `+1` http, `+2` scheduler, `+3` dbproxy, `+1000+i` for route *i* |
-| `BLASTIT_SECCOMP` | `1` | the per-role seccomp filters; the only lever for egress control |
+| `BLASTIT_SECCOMP` | `1` | the per-role seccomp filters, the only syscall and egress wall. `0` removes it: honoured only with a loud `boot` warning, and both presets abort the boot on it |
 | `BLASTIT_EXEC` | — | standalone installs only: the capability-free copy of the binary that dbproxy runs |
 
-The privilege mode has no variable: the `boot` event reports it.
+The privilege mode has no variable: the `boot` event reports it — `root`,
+`capabilities`, or `unprivileged-dev` under `blastit dev`. Production refuses to
+start without root or the capability set above, or without seccomp; `blastit dev`
+needs none of them and says so in its banner.
 
 ## Admission and threads
 
@@ -63,7 +70,7 @@ The privilege mode has no variable: the `boot` event reports it.
 
 `BLASTIT_FAIR_QUEUING=1` orders the admission queue by a two-level fair scheduler
 instead of by arrival; `0` is plain FIFO, and the `BLASTIT_FQ_*` knobs go unread.
-[Fair queuing](../infra/fair-queuing.md) turns it on safely.
+[Fair queuing](../deploy/fair-queuing.md) turns it on safely.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -84,11 +91,14 @@ instead of by arrival; `0` is plain FIFO, and the `BLASTIT_FQ_*` knobs go unread
 | Setting | Default | What it does |
 |---|---|---|
 | `BLASTIT_MAX_HEADER_BYTES` | `64 KiB` | the largest request head blastit accepts |
-| `BLASTIT_MAX_BODY_BYTES` | `100 MiB` | the largest request body |
+| `BLASTIT_MAX_BODY_BYTES` | `100 MiB` | the hard ceiling for one request body; a larger `Content-Length` is rejected before any of it is buffered |
 | `BLASTIT_HEADER_TIMEOUT` | `10s` | how long the head may take to arrive (slowloris) |
 | `BLASTIT_KEEPALIVE_TIMEOUT` | `75s` | idle time on a kept-alive connection, above a load balancer's |
 | `BLASTIT_MAX_CONNECTIONS` | `1024` | client connections served at once |
 | `BLASTIT_FRAME_MAX` | `1 MiB` | the largest internal frame; larger bodies travel in several |
+
+Size the body ceiling so the largest body × concurrent uploads fits container
+memory: up to `BLASTIT_MAX_WORKERS` uploads can buffer at once.
 
 No TLS or HTTP/2: a load balancer terminates TLS. `Upgrade` gets `501`.
 
@@ -104,7 +114,7 @@ No TLS or HTTP/2: a load balancer terminates TLS. `Upgrade` gets `501`.
 | `BLASTIT_VIEW_MAX_REQUESTS` | `0` (off) | retire a view process after this many requests |
 | `BLASTIT_IMMORTALIZE` | `auto` | `auto`, `1` or `0`: mark the preloaded heap immortal before the fork |
 
-Sizing the cap: [memory and process caps](../infra/anything-else.md#memory-and-process-caps).
+Sizing the cap: [memory and process caps](../deploy/anything-else.md#memory-and-process-caps).
 
 ## Timeouts and shutdown
 
@@ -123,8 +133,10 @@ Sizing the cap: [memory and process caps](../infra/anything-else.md#memory-and-p
 `wsgi.url_scheme` follows the same trust decision: `X-Forwarded-Proto` is read
 only from a trusted peer, only its last value, and only if it is exactly `http`
 or `https`. Both bundled ingresses overwrite it, so a client cannot choose it.
-The full rule is in
-[client IP and trusted proxies](../infra/anything-else.md#client-ip-and-trusted-proxies).
+For a chain header, `*` trusts every peer and takes the **rightmost** entry —
+what the closest hop added. Naming a network instead compares entries from the
+right, and a list that contains every entry falls back to the leftmost, which the
+client invented. That is why both presets use `*` and publish no port.
 
 ## Proxies
 

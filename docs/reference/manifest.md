@@ -1,20 +1,55 @@
 # The manifest
 
-The manifest is blastit's routing table and its whole permission model, in one
-file. Default `/app/blastit.toml` or `BLASTIT_MANIFEST`; parsed strictly at boot,
-so an unknown key is an error.
+The manifest is Blastit's routing table and its whole permission model, in one
+file. Blastit reads `./blastit.toml`; `BLASTIT_MANIFEST` names another path.
+There is no upward search. Parsed strictly at boot, so an unknown key is an
+error.
 
 ## Top-level keys
 
 | Key | Required | Meaning |
 |---|---|---|
 | `version` | yes | must be `1` |
-| `groups` | no | group names attached to **every** route |
+| `app` | yes* | the WSGI callable, `module:attribute` |
+| `preload` | no | a module, or a list of them, imported once before the fork |
+| `groups` | no | group names attached to **every** route; route-level `groups` is narrower |
 | `[proxy.<name>]` | no | a named broker for one external service; a grant on an undeclared proxy aborts the boot |
 | `[group.<name>]` | no | grants several routes share; a group grants nothing until attached |
 | `[[route]]` | yes | one sandbox: one process, one uid |
 
-`version` and `groups` come before any `[table]`.
+\* `BLASTIT_APP` may supply the callable instead, and it wins over `app`.
+
+```toml
+version = 1
+app = "myshop.wsgi:application"     # Django; "app:app" for Flask
+preload = ["myshop.urls"]           # imported before the fork, shared copy-on-write
+```
+
+`BLASTIT_APP` and `BLASTIT_PRELOAD` override the two keys; `BLASTIT_PRELOAD` is
+comma-separated, and `preload` takes a string or a list. `version`, `app`,
+`preload` and `groups` are top-level. Written after the first `[table]` they are
+a parse error: `groups after a [table] is not top-level; move it above the first table`.
+
+## Groups
+
+A group is a named grant several routes share, attached only where a route names
+it. The top-level `groups` key attaches one to **every** route, including routes
+that never touch the session; prefer the route form.
+
+```toml
+[[route]]
+name = "account"
+path = ['/account/']
+methods = ["GET"]
+groups = ["session"]
+
+[group.session.db]
+transaction_control = true
+queries = ["SELECT … FROM django_session WHERE session_key = $?"]
+```
+
+A group grants nothing until it is attached, and a group attached nowhere is a
+boot warning.
 
 ## Routes
 
@@ -34,8 +69,38 @@ egress = true                       # may open TCP connections
 | `path` | yes | a list of regexes matched against the whole of `PATH_INFO`, in order; one regex may be a bare string (`path = ".*"` is `path = ['.*']`) |
 | `methods` | no | the methods it answers; without it, any method. `HEAD` is never implied by `GET` |
 | `groups` | no | groups whose grants this route takes |
-| `egress` | no | `true` lets the process open outbound TCP connections |
+| `egress` | no | `true` opens **any** IPv4/IPv6 address and port, including cloud metadata; there is no allowlist |
 | `prefork` | no | `true` forks this view at startup instead of on first use |
+| `[route.ingress]` | no | how a request body is handled; required for a route that takes one |
+
+## Ingress
+
+A route that receives a body declares what happens to it. A request with a body
+to a route with no `[route.ingress]` is a `413`; `blastit check` also fails a
+route that took a body without one.
+
+```toml
+[[route]]
+name = "checkout"
+path = ['/checkout/']
+methods = ["POST"]
+
+[route.ingress]
+body = "json"      # decoded and re-encoded before the app sees it
+```
+
+| `body` | What the route gets |
+|---|---|
+| `json` | only a valid JSON body, re-encoded canonically; anything else is a `400` |
+| `form` | only `application/x-www-form-urlencoded`, decoded and re-encoded; anything else is a `400` |
+| `none` | no body at all; a request with one is a `413` |
+| `raw` | the bytes unchanged — the loud opt-out, flagged at boot |
+
+The declared codec must match what the route really receives: `blastit check`
+reports `ingress_mismatch` when the suite sent something else. `raw` also needs
+`allow_raw = true` in the same table, or `blastit check` reports `raw_ingress`.
+0.1.1 has no multipart codec, so a file upload is `raw` today and the app's
+parser sees the original bytes.
 
 ## Proxies
 
@@ -64,7 +129,8 @@ ANALYTICS_DB_PORT = "{{ port }}"
 * An output may not overwrite a variable it does not own, and no two proxies may
   produce the same variable.
 
-`blastit.toml` holds no secrets and is safe to commit.
+`blastit.toml` holds no credentials and no inline literals, so it is safe to
+commit.
 
 ### Protocol `postgresql`
 
@@ -99,10 +165,13 @@ queries = ["SET TIME ZONE 'UTC'"]
 [[route]]
 name = "restaurants"
 path = ['/restaurants/.*']
+
+[route.db]
+functions = ["st_distance"]         # beyond the built-in safe set
+
 [route.db.tables]                   # instead of listing every statement
 restaurants_restaurant = { select = ["id", "slug", "name"] }
 orders_order = { select = "*", update = ["status"], delete = true }
-functions = ["st_distance"]         # beyond the built-in safe set
 ```
 
 | Key | Type | Meaning |
@@ -114,7 +183,10 @@ functions = ["st_distance"]         # beyond the built-in safe set
 | `unrestricted` | bool | allow **every** statement on this proxy. Inline on a route only |
 
 An exact `queries` entry is trusted as it is: the text is compared and run,
-without looking at what it calls.
+without looking at what it calls. Paste only a statement you have read:
+`pg_read_file`, `COPY … PROGRAM`, `dblink` and `lo_import` are file or network
+capabilities, not ordinary queries. A statement that inlines a literal cannot be
+granted — bind the value instead.
 
 ### Table and column grants
 
@@ -201,17 +273,20 @@ on an undeclared proxy, a duplicate route name, an invalid regex or method, a
 missing proxy input variable, and `unrestricted` in a group or next to
 `queries`/`tables`/`functions`.
 
-Warns and runs: a group attached nowhere, a proxy no grant uses, and an
-unrestricted route.
+Warns and runs: a group attached nowhere, a proxy no grant uses, an unrestricted
+route, a `raw` ingress, and an `egress` route.
 
 ## Writing one
 
-Two tools write grants from evidence, instead of from memory:
+Three tools write the manifest from evidence, instead of from memory:
 
-* **the pytest plugin** — Django: it diffs what your test suite ran against the
-  manifest and prints the table grant to paste: [the plugin](pytest-plugin.md);
-* **`blastit-manifest fold`** — anything, from `sql.denied` events:
-  [fold the log](../frameworks/day-to-day.md#fold-the-log).
+* **`blastit check --learn`** — runs your suite, records every request and
+  statement, and adds the exact `queries` the manifest lacks (a statement that
+  inlines a value is refused, not written): [CI](../ci.md#bootstrap-an-existing-project);
+* **`blastit dev --learn`** — the same, from clicking through the app:
+  [local](../local.md#fill-the-manifest-in-one-pass);
+* **`blastit-manifest fold`** — from an existing log's `sql.denied` events:
+  [command line](cli.md#blastit-manifest-fold).
 
 `e2e/demo/blastit.toml` is a working example.
 

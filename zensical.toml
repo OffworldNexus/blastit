@@ -3,11 +3,11 @@
 # Build it with `uvx zensical build --strict`, preview it with
 # `uvx zensical serve`. `docs_dir` is `docs/` — the same tree the rest of the
 # repository already links into — and `exclude_docs` keeps the material that is
-# not a page out of the build. See `docs-site-plan.md` for why.
+# not a page out of the build.
 [project]
 site_name = "blastit"
 site_url = "https://offworldnexus.github.io/blastit/"
-site_description = "A sandboxing WSGI server: one process and one uid per route, secrets kept out of the app, and only the grants each route needs."
+site_description = "A zero-trust WSGI harness: one sandbox per route, no database credentials in the app, and only the SQL each route needs."
 site_author = "Offworld Nexus"
 copyright = "&copy; 2026 Offworld Nexus &middot; Apache 2.0"
 
@@ -21,25 +21,25 @@ site_dir = "site"
 nav = [
   { "Home" = "index.md" },
   { "Getting started" = "getting-started.md" },
-  { "Fit it to your framework" = [
+  { "Local development" = "local.md" },
+  { "CI/CD" = "ci.md" },
+  { "Deployments" = [
+    "deploy/index.md",
+    { "DigitalOcean App Platform" = "deploy/digitalocean-paas.md" },
+    { "Docker Compose + Traefik" = "deploy/compose-traefik.md" },
+    { "Anywhere else" = "deploy/anything-else.md" },
+    { "Fair queuing" = "deploy/fair-queuing.md" },
+  ] },
+  { "Frameworks" = [
     "frameworks/index.md",
     { "Django" = "frameworks/django.md" },
-    { "Flask and other WSGI apps" = "frameworks/flask.md" },
-    { "Day-to-day life" = "frameworks/day-to-day.md" },
-  ] },
-  { "Fit it to your infra" = [
-    "infra/index.md",
-    { "DigitalOcean App Platform" = "infra/digitalocean-paas.md" },
-    { "Docker Compose behind Traefik" = "infra/compose-traefik.md" },
-    { "Anything else" = "infra/anything-else.md" },
-    { "Fair queuing" = "infra/fair-queuing.md" },
+    { "Flask, SQLAlchemy and raw WSGI" = "frameworks/flask.md" },
   ] },
   { "Reference" = [
-    "reference/settings.md",
-    { "Command line" = "reference/cli.md" },
+    "reference/cli.md",
     { "The manifest" = "reference/manifest.md" },
+    { "Settings" = "reference/settings.md" },
     { "Log events" = "reference/log-events.md" },
-    { "pytest plugin" = "reference/pytest-plugin.md" },
   ] },
   { "How it works" = "how-it-works.md" },
   { "Security model" = "security.md" },
