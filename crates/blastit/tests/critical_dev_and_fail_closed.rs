@@ -21,9 +21,10 @@ use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use common::mock_pg::MockPgServer;
@@ -34,6 +35,14 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a case waits for the process to exit.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How many times a launch is retried when another process takes the port
+/// `free_port()` handed out before the child can `bind` it (`EADDRINUSE`).
+///
+/// `free_port()` cannot lease the socket to the child (`blastit dev` only
+/// accepts a port number), so the race between dropping the probe listener and
+/// the child's `bind` is unavoidable. Three attempts keep that race from
+/// turning a leg about an import, a banner or `--learn` into a failure.
+const PORT_ATTEMPTS: u32 = 3;
 
 /// A counter for unique fixture directories.
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -145,6 +154,28 @@ struct Dev {
     dir: PathBuf,
     stdout: Arc<Mutex<Vec<String>>>,
     stderr: Arc<Mutex<Vec<String>>>,
+    /// The thread draining the child's stdout, kept so an exit can be reported
+    /// with the whole transcript (the last lines are still in the pipe when
+    /// `wait` returns).
+    stdout_reader: Option<JoinHandle<()>>,
+    /// The thread draining the child's stderr.
+    stderr_reader: Option<JoinHandle<()>>,
+}
+
+/// Why a freshly spawned `blastit dev` never reached `ready`.
+///
+/// A launch fails for exactly three reasons, and only the first is a property
+/// of the host's load: it is retried with a fresh port and never blamed on the
+/// behaviour a case is testing.
+enum LaunchFailure {
+    /// Another process took the port `free_port()` handed out between the probe
+    /// `bind` and the child's real `bind` (`EADDRINUSE`).
+    LostThePort,
+    /// The child exited before `ready` for any other reason.
+    Exited(ExitStatus),
+    /// The child stayed alive but never printed `ready` within
+    /// [`READY_TIMEOUT`].
+    Timeout,
 }
 
 impl Dev {
@@ -153,9 +184,71 @@ impl Dev {
     /// `env` is the *whole* child environment besides the loader/interpreter
     /// variables the embedded CPython needs; `env_clear` keeps the suite's own
     /// `BLASTIT_*` out of a case that is about the environment.
+    ///
+    /// The returned server has already printed `ready`; a launch that exits
+    /// first fails here (with the child's own transcript) instead of after the
+    /// full readiness timeout. When another process took the ephemeral port
+    /// between `free_port()` and the child's `bind`, the launch is retried with
+    /// a fresh port (`PORT_ATTEMPTS`) because that `EADDRINUSE` is a property
+    /// of the host's load, not of the behaviour the case is testing.
     fn start(tag: &str, manifest: &str, env: &[(&str, &str)], arguments: &[&str]) -> Self {
-        let dir = fixture(tag, manifest);
-        let port = free_port();
+        Self::start_with(tag, manifest, env, arguments, free_port)
+    }
+
+    /// [`Dev::start`], with the port source injected so the retry can be driven
+    /// deterministically from a test (the first attempt is handed a port that
+    /// is already taken).
+    fn start_with(
+        tag: &str,
+        manifest: &str,
+        env: &[(&str, &str)],
+        arguments: &[&str],
+        mut ports: impl FnMut() -> u16,
+    ) -> Self {
+        let mut attempt = 1;
+        loop {
+            let dir = fixture(tag, manifest);
+            let port = ports();
+            let mut dev = Self::spawn(dir, port, env, arguments);
+            match dev.settle() {
+                Ok(()) => return dev,
+                Err(LaunchFailure::LostThePort) if attempt < PORT_ATTEMPTS => {
+                    eprintln!(
+                        "blastit dev[{tag}]: port {port} was taken between free_port() and \
+                         the child's bind (EADDRINUSE); retrying with a fresh port \
+                         ({attempt}/{PORT_ATTEMPTS})"
+                    );
+                    attempt += 1;
+                    // `dev` drops here: the child already exited and its
+                    // fixture directory is removed.
+                }
+                Err(LaunchFailure::LostThePort) => panic!(
+                    "blastit dev[{tag}] could not bind port {port} in {PORT_ATTEMPTS} \
+                     attempts: another process kept taking the port between free_port() and \
+                     the child's `bind` (EADDRINUSE). This is a harness isolation failure, not \
+                     a `{tag}` behaviour failure.\nstdout:\n{}\nstderr:\n{}",
+                    dev.stdout_text(),
+                    dev.stderr_text()
+                ),
+                Err(LaunchFailure::Exited(status)) => panic!(
+                    "blastit dev[{tag}] exited {status} before `ready` on port {port}\
+                     \nstdout:\n{}\nstderr:\n{}",
+                    dev.stdout_text(),
+                    dev.stderr_text()
+                ),
+                Err(LaunchFailure::Timeout) => panic!(
+                    "no stdout line contained `ready` within {READY_TIMEOUT:?} for \
+                     blastit dev[{tag}] on port {port}\nstdout:\n{}\nstderr:\n{}",
+                    dev.stdout_text(),
+                    dev.stderr_text()
+                ),
+            }
+        }
+    }
+
+    /// Spawns one `blastit dev` attempt, with its output collected as it
+    /// arrives.
+    fn spawn(dir: PathBuf, port: u16, env: &[(&str, &str)], arguments: &[&str]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
         command
             .args(["dev", "--port", &port.to_string()])
@@ -179,18 +272,78 @@ impl Dev {
         let mut child = command.spawn().expect("the blastit binary starts");
         let stdout = Arc::new(Mutex::new(Vec::new()));
         let stderr = Arc::new(Mutex::new(Vec::new()));
-        if let Some(out) = child.stdout.take() {
-            spawn_reader(out, Arc::clone(&stdout));
-        }
-        if let Some(err) = child.stderr.take() {
-            spawn_reader(err, Arc::clone(&stderr));
-        }
+        let stdout_reader = child
+            .stdout
+            .take()
+            .map(|out| spawn_reader(out, Arc::clone(&stdout)));
+        let stderr_reader = child
+            .stderr
+            .take()
+            .map(|err| spawn_reader(err, Arc::clone(&stderr)));
         Self {
             child,
             port,
             dir,
             stdout,
             stderr,
+            stdout_reader,
+            stderr_reader,
+        }
+    }
+
+    /// Waits for the child to print `ready`, returning early when it exits
+    /// first so a lost port is classified before the readiness timeout.
+    fn settle(&mut self) -> Result<(), LaunchFailure> {
+        let deadline = Instant::now() + READY_TIMEOUT;
+        while Instant::now() < deadline {
+            if self.stdout_lines().iter().any(|line| is_ready_event(line)) {
+                return Ok(());
+            }
+            if let Some(status) = self.child.try_wait().expect("the child's exit status") {
+                // `wait` returning does not mean the pipes are empty: the last
+                // lines (including a failed `bind`) may still be on their way
+                // to the sink, and they are what classifies the exit.
+                self.drain_output();
+                return Err(
+                    if lost_the_port(self.port, &self.stdout_text(), &self.stderr_text()) {
+                        LaunchFailure::LostThePort
+                    } else {
+                        LaunchFailure::Exited(status)
+                    },
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err(LaunchFailure::Timeout)
+    }
+
+    /// Waits (bounded) for the pipe readers to reach EOF after the child exits,
+    /// and joins the ones that did.
+    ///
+    /// Only finished readers are joined: a lingering grandchild that inherited
+    /// the write end must not wedge a case whose parent is already gone.
+    fn drain_output(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let stdout_done = self
+                .stdout_reader
+                .as_ref()
+                .is_none_or(JoinHandle::is_finished);
+            let stderr_done = self
+                .stderr_reader
+                .as_ref()
+                .is_none_or(JoinHandle::is_finished);
+            if stdout_done && stderr_done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for slot in [&mut self.stdout_reader, &mut self.stderr_reader] {
+            if slot.as_ref().is_some_and(JoinHandle::is_finished)
+                && let Some(handle) = slot.take()
+            {
+                let _ = handle.join();
+            }
         }
     }
 
@@ -208,23 +361,36 @@ impl Dev {
 
     /// Waits until a stdout line contains `needle`.
     fn wait_for_line(&self, needle: &str) {
+        self.wait_for_event(&format!("contained `{needle}`"), |line| {
+            line.contains(needle)
+        });
+    }
+
+    /// Waits until a stdout line satisfies `predicate`.
+    fn wait_for_event(&self, description: &str, predicate: impl Fn(&str) -> bool) {
         let deadline = Instant::now() + READY_TIMEOUT;
         while Instant::now() < deadline {
-            if self.stdout_lines().iter().any(|line| line.contains(needle)) {
+            if self.stdout_lines().iter().any(|line| predicate(line)) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!(
-            "no stdout line contained `{needle}` within {READY_TIMEOUT:?}\nstdout:\n{}\nstderr:\n{}",
+            "no stdout line {description} within {READY_TIMEOUT:?}\nstdout:\n{}\nstderr:\n{}",
             self.stdout_text(),
             self.stderr_text()
         );
     }
 
     /// Waits for the `ready` event, in either log format.
+    ///
+    /// This must match the event itself, not any line containing the word:
+    /// stage 1's `binding 127.0.0.1:<port>: Address al**ready** in use` is
+    /// printed on stdout as an `app.output` event, so a substring match would
+    /// declare a launch that never bound to be up — and the subsequent
+    /// `connect` would then reach whichever process stole the port.
     fn wait_for_ready(&self) {
-        self.wait_for_line("ready");
+        self.wait_for_event("was the `ready` event", is_ready_event);
         let deadline = Instant::now() + READY_TIMEOUT;
         while Instant::now() < deadline {
             if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
@@ -423,8 +589,53 @@ fn copy_runtime_env(command: &mut Command) {
     }
 }
 
+/// Runs a `blastit dev` that is expected to exit, in a fresh fixture directory.
+///
+/// The caller gets the final attempt's pid, fixture directory and output. A
+/// launch that lost the ephemeral port to another process between
+/// `free_port()` and the child's `bind` is retried with a fresh port
+/// (`PORT_ATTEMPTS`), so the case sees the failure it is about (here: the
+/// `BLASTIT_APP` import) instead of an unrelated `EADDRINUSE`.
+fn run_dev_to_exit(tag: &str, manifest: &str, env: &[(&str, &str)]) -> (u32, PathBuf, Output) {
+    let mut attempt = 1;
+    loop {
+        let dir = fixture(tag, manifest);
+        let port = free_port();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
+        command
+            .args(["dev", "--port", &port.to_string()])
+            .env_clear()
+            .current_dir(&dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        copy_runtime_env(&mut command);
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        let child = command.spawn().expect("blastit dev spawns");
+        let pid = child.id();
+        let output = child.wait_with_output().expect("blastit dev exits");
+        let lost = lost_the_port(
+            port,
+            &String::from_utf8_lossy(&output.stdout),
+            &String::from_utf8_lossy(&output.stderr),
+        );
+        if lost && attempt < PORT_ATTEMPTS {
+            eprintln!(
+                "blastit dev[{tag}]: port {port} was taken between free_port() and the \
+                 child's bind (EADDRINUSE); retrying with a fresh port ({attempt}/{PORT_ATTEMPTS})"
+            );
+            let _ = fs::remove_dir_all(&dir);
+            attempt += 1;
+            continue;
+        }
+        return (pid, dir, output);
+    }
+}
+
 /// Reads a child's pipe into `sink`, line by line.
-fn spawn_reader(pipe: impl Read + Send + 'static, sink: Arc<Mutex<Vec<String>>>) {
+fn spawn_reader(pipe: impl Read + Send + 'static, sink: Arc<Mutex<Vec<String>>>) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut reader = std::io::BufReader::new(pipe);
         let mut line = Vec::new();
@@ -442,13 +653,51 @@ fn spawn_reader(pipe: impl Read + Send + 'static, sink: Arc<Mutex<Vec<String>>>)
                 }
             }
         }
-    });
+    })
 }
 
 /// A TCP port nothing is listening on right now.
+///
+/// The listener is dropped before the caller passes the number to `blastit
+/// dev`, so this is a hint, not a reservation: another process can bind the
+/// port in between. Every launch must therefore treat an `EADDRINUSE` on this
+/// port as the harness losing a race (see [`PORT_ATTEMPTS`]) rather than as the
+/// behaviour it is testing.
 fn free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a free port");
     listener.local_addr().expect("a bound address").port()
+}
+
+/// Whether a stdout line is the `ready` event, in either log format.
+///
+/// A substring match is wrong: stage 1's failed bind prints
+/// `Address already in use` on stdout (as an `app.output` event), which
+/// contains the word `ready` and would make a dead launch look serving.
+fn is_ready_event(line: &str) -> bool {
+    line.contains("\"event\":\"ready\"")
+        || line.contains("\"event\": \"ready\"")
+        || line.split_whitespace().any(|word| word == "ready")
+}
+
+/// Whether a `blastit dev` that never served failed because another process
+/// took the port `free_port()` handed out before the child could `bind` it.
+///
+/// Stage 1 reports the failure as `binding <host>:<port>: Address already in
+/// use (os error 98)`, where the host is the `--host` that leg asked for
+/// (`127.0.0.1` by default, `0.0.0.0` for the `EXPOSED` cases). That names a
+/// harness isolation race, not the import, banner or `--learn` write the
+/// surrounding case is about, so the launch retries with a fresh port.
+fn lost_the_port(port: u16, stdout: &str, stderr: &str) -> bool {
+    let address = format!(":{port}:");
+    [stdout, stderr].iter().any(|text| {
+        text.lines().any(|line| {
+            line.contains("binding ")
+                && line.contains(&address)
+                && (line.contains("Address already in use")
+                    || line.contains("os error 98")
+                    || line.contains("EADDRINUSE"))
+        })
+    })
 }
 
 /// The effective uid of `pid`.
@@ -917,7 +1166,10 @@ queries = [\"SELECT 1\"]
     );
     assert!(
         stdout.contains(&format!("binding 127.0.0.1:{occupied_port}")),
-        "stage 1 reported the occupied bind address:\n{stdout}"
+        "stage 1 must report the deliberately occupied bind address \
+         `binding 127.0.0.1:{occupied_port}: Address already in use` (this leg \
+         holds the listener itself, so a different failure would not be the \
+         `bind_tcp` path it tests):\n{stdout}\n{stderr}"
     );
     let leaked = roots_for_pid(pid);
     assert!(
@@ -927,22 +1179,17 @@ queries = [\"SELECT 1\"]
 
     // 2. Post-adopt `python_fail` path: a broken `BLASTIT_APP` fails inside
     // CPython import after `http` and `scheduler` were forked (`R20`).
-    let dir = fixture("bad-import", &manifest_text);
-    let free = free_port();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
-    command
-        .args(["dev", "--port", &free.to_string()])
-        .env_clear()
-        .env("DATABASE_URL", &url)
-        .env("BLASTIT_APP", "missing_app_module:application")
-        .current_dir(&dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    copy_runtime_env(&mut command);
-    let child = command.spawn().expect("blastit dev spawns");
-    let pid = child.id();
-    let output = child.wait_with_output().expect("blastit dev exits");
+    //
+    // The launch retries a lost ephemeral port (`run_dev_to_exit`), so the
+    // output is the failed import — never an unrelated `EADDRINUSE`.
+    let (pid, dir, output) = run_dev_to_exit(
+        "bad-import",
+        &manifest_text,
+        &[
+            ("DATABASE_URL", &url),
+            ("BLASTIT_APP", "missing_app_module:application"),
+        ],
+    );
     let _ = fs::remove_dir_all(&dir);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -950,11 +1197,14 @@ queries = [\"SELECT 1\"]
     assert_eq!(
         output.status.code(),
         Some(1),
-        "failed import must exit 1\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "the failed import must exit 1\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
         stdout.contains("BLASTIT_APP (missing_app_module:application)"),
-        "stage 1 reported the failed BLASTIT_APP import:\n{stdout}"
+        "stage 1 must report the failed `BLASTIT_APP` import — this leg tests the \
+         python_fail path after `http`/`scheduler` were forked, not `bind_tcp`; an \
+         `Address already in use` here would mean the port was taken even after the \
+         retry, not that the import was never attempted:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     let leaked = roots_for_pid(pid);
     assert!(
@@ -1347,4 +1597,97 @@ path = ['/b']
         "summary reports 2 inferred routes and all 3 routed queries:\n{}",
         dev.stdout_text()
     );
+}
+
+#[test]
+fn only_a_lost_bind_is_classified_as_a_lost_port() {
+    // Stage 1's failed bind is printed on stdout as an `app.output` event and
+    // contains the word `already`, which a substring match for `ready` used to
+    // accept: a launch that never bound looked serving.
+    let bind_line = "21:07:36.914 ERROR app.output  stderr  \
+                     binding 127.0.0.1:39411: Address already in use (os error 98)";
+    assert!(!is_ready_event(bind_line));
+    assert!(is_ready_event(
+        "21:07:36.899 INFO  ready        serving  routes=3"
+    ));
+    assert!(is_ready_event(
+        "{\"ts\":\"2026-11-12T21:07:36Z\",\"event\":\"ready\",\"stage\":\"serving\"}"
+    ));
+
+    // The exact stage-1 line an `EADDRINUSE` on the probe port produces, in
+    // both the human and the JSON log format.
+    assert!(lost_the_port(
+        39411,
+        "{\"event\":\"fail\",\"msg\":\"binding 127.0.0.1:39411: Address already in use (os error 98)\"}",
+        ""
+    ));
+    assert!(lost_the_port(
+        39411,
+        "",
+        "binding 127.0.0.1:39411: Address already in use (os error 98)"
+    ));
+    // The `EXPOSED` cases pass `--host 0.0.0.0`, so the host in the message is
+    // not always `127.0.0.1`; the port is what identifies the lost race.
+    assert!(lost_the_port(
+        34833,
+        "{\"line\":\"binding 0.0.0.0:34833: Address already in use (os error 98)\"}",
+        ""
+    ));
+    // A different port's `EADDRINUSE`, a different bind error, and the failure
+    // this suite's python_fail leg is about must all stay visible: only a race
+    // on the exact port that was handed out is retried.
+    assert!(!lost_the_port(
+        39411,
+        "binding 127.0.0.1:39412: Address already in use (os error 98)",
+        ""
+    ));
+    assert!(!lost_the_port(
+        39411,
+        "binding 127.0.0.1:39411: Permission denied (os error 13)",
+        ""
+    ));
+    assert!(!lost_the_port(
+        39411,
+        "BLASTIT_APP (missing_app_module:application)",
+        ""
+    ));
+}
+
+#[test]
+fn a_launch_that_loses_its_port_retries_with_a_fresh_one() {
+    let server = MockPgServer::start();
+    let url = database_url(&server);
+    let routes = "[[route]]\nname = \"home\"\npath = ['/.*']\n";
+
+    // This listener stands in for the unrelated process that wins the race
+    // between `free_port()` and the child's `bind`.
+    let held = TcpListener::bind(("127.0.0.1", 0)).expect("a held port");
+    let held_port = held.local_addr().expect("a bound address").port();
+    // The first attempt is handed the held port; every later attempt (the
+    // retry, and any further loss under load) gets a genuinely free one.
+    let mut first = Some(held_port);
+    let ports = move || first.take().unwrap_or_else(free_port);
+
+    // The first attempt (the held port) must fail with stage 1's `EADDRINUSE`
+    // and be retried; the second (a real free port) must serve.
+    let mut dev = Dev::start_with(
+        "lost-port",
+        &manifest(routes),
+        &[("DATABASE_URL", &url)],
+        &[],
+        ports,
+    );
+    assert_ne!(
+        dev.port, held_port,
+        "the launch moved to a fresh port after the first bind failed"
+    );
+    dev.wait_for_ready();
+    assert_eq!(
+        dev.get_json("/env")["uid"].as_u64(),
+        Some(u64::from(rustix::process::geteuid().as_raw())),
+        "the retried launch serves for real"
+    );
+    let status = dev.terminate();
+    assert_eq!(status.code(), Some(0), "{}", dev.stderr_text());
+    drop(held);
 }

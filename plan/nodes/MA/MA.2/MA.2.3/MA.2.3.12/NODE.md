@@ -2,16 +2,16 @@
 id: MA.2.3.12
 title: Harden free_port and load isolation in the protected dev suite
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: []
 paths: [crates/blastit/tests/critical_dev_and_fail_closed.rs]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T21:52"
-updated: "2026-11-12T21:52"
+updated: "2026-11-12T22:24"
 ---
 
 # Goal
