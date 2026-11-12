@@ -41,7 +41,7 @@ use pyo3::prelude::*;
 
 use crate::child::{Deadline, wait_writable};
 use crate::config::Config;
-use crate::logs::{Emitter, LineBuffer, Pipe, fail, lossy};
+use crate::logs::{Emitter, LineBuffer, Pipe, lossy};
 use crate::zygote;
 
 /// How long the surviving children get after `SIGTERM` before `SIGKILL`, once
@@ -112,6 +112,10 @@ pub struct Parts {
     pub mask: SignalMask,
     /// The components that were forked, with the pipes they log on.
     pub components: BTreeMap<i32, (Component, ComponentPipes)>,
+    /// The `blastit dev` runtime root, when this is a dev boot (`R20`).
+    pub dev: Option<crate::dev_learn::Dev>,
+    /// The `dev --learn` observation and attribution channels (`R29`).
+    pub learn: Option<crate::dev_learn::Learn>,
 }
 
 /// The supervisor of all of blastit's processes.
@@ -141,6 +145,10 @@ pub struct Supervisor<'a> {
     shutdown: Shutdown,
     /// Where the sources start in the poll set: two when `ctl.chan` is polled.
     source_base: usize,
+    /// The `blastit dev` runtime root, removed when the supervisor exits.
+    dev: Option<crate::dev_learn::Dev>,
+    /// The `dev --learn` observation pipe, attribution socket and collector.
+    learn: Option<crate::dev_learn::Learn>,
 }
 
 impl<'a> Supervisor<'a> {
@@ -177,7 +185,10 @@ impl<'a> Supervisor<'a> {
         // an init that hangs. Only this end is affected; the scheduler's own
         // socket is a different open file description.
         if let Err(err) = rustix::fs::fcntl_setfl(&parts.ctl, rustix::fs::OFlags::NONBLOCK) {
-            fail(emitter, &format!("ctl.chan: {err}"));
+            if let Some(dev) = &parts.dev {
+                dev.cleanup();
+            }
+            crate::logs::fail(emitter, &format!("ctl.chan: {err}"));
         }
         Self {
             cfg: parts.cfg,
@@ -198,6 +209,8 @@ impl<'a> Supervisor<'a> {
             shutting_down: false,
             shutdown: Shutdown::Serving,
             source_base: 2,
+            dev: parts.dev,
+            learn: parts.learn,
         }
     }
 
@@ -229,6 +242,12 @@ impl<'a> Supervisor<'a> {
                     rustix::event::PollFlags::IN,
                 ));
             }
+            if let Some(learn) = self.learn.as_ref().filter(|learn| learn.open) {
+                pollfds.push(rustix::event::PollFd::new(
+                    &learn.obs,
+                    rustix::event::PollFlags::IN,
+                ));
+            }
             for source in &self.sources {
                 pollfds.push(rustix::event::PollFd::new(
                     &source.fd,
@@ -242,11 +261,12 @@ impl<'a> Supervisor<'a> {
             let flags: Vec<rustix::event::PollFlags> =
                 match rustix::event::poll(&mut pollfds, timespec.as_ref()) {
                     Ok(_) => pollfds.iter().map(|fd| fd.revents()).collect(),
-                    Err(err) => fail(self.emitter, &format!("poll: {err}")),
+                    Err(err) => self.fail(&format!("poll: {err}")),
                 };
             // `ctl.chan` leaves the poll set once the scheduler's end is gone,
-            // and the sources then start one entry earlier.
-            self.source_base = if self.ctl.is_some() { 2 } else { 1 };
+            // and the sources then start an entry earlier.
+            let learn_polled = self.learn.as_ref().is_some_and(|learn| learn.open);
+            self.source_base = usize::from(self.ctl.is_some()) + usize::from(learn_polled) + 1;
             flags
         };
 
@@ -263,6 +283,15 @@ impl<'a> Supervisor<'a> {
         {
             self.read_ctl(py);
         }
+        let learn_at = if self.ctl.is_some() { 2 } else { 1 };
+        if self.learn.as_ref().is_some_and(|learn| learn.open)
+            && ready
+                .get(learn_at)
+                .is_some_and(|flags| flags.intersects(readable()))
+            && let Some(learn) = self.learn.as_mut()
+        {
+            learn.poll();
+        }
 
         let emitter = self.emitter;
         let base = self.source_base;
@@ -275,7 +304,10 @@ impl<'a> Supervisor<'a> {
                 continue;
             }
             let source = &mut self.sources[index];
-            if matches!(read_source(source, emitter), SourceRead::Closed) {
+            if matches!(
+                read_source(source, emitter, self.learn.as_mut()),
+                SourceRead::Closed
+            ) {
                 closed.push(index);
             }
         }
@@ -297,7 +329,7 @@ impl<'a> Supervisor<'a> {
                 Ok(Some(Signal::TERM | Signal::INT)) => self.begin_shutdown(),
                 Ok(Some(_)) => {}
                 Ok(None) => return,
-                Err(err) => fail(self.emitter, &format!("signalfd: {err}")),
+                Err(err) => self.fail(&format!("signalfd: {err}")),
             }
         }
     }
@@ -318,7 +350,7 @@ impl<'a> Supervisor<'a> {
             // read; `EAGAIN` here is a race that costs nothing, because the poll
             // set is level-triggered.
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return,
-            Err(err) => fail(self.emitter, &format!("ctl.chan: {err}")),
+            Err(err) => self.fail(&format!("ctl.chan: {err}")),
         };
         // init never receives a descriptor on ctl.chan; if one arrives it is
         // closed rather than leaked.
@@ -332,7 +364,7 @@ impl<'a> Supervisor<'a> {
             match self.decoder.next_frame() {
                 Ok(Some((_id, frame))) => self.on_ctl(py, frame),
                 Ok(None) => break,
-                Err(err) => fail(self.emitter, &format!("ctl.chan: {err}")),
+                Err(err) => self.fail(&format!("ctl.chan: {err}")),
             }
         }
     }
@@ -346,7 +378,7 @@ impl<'a> Supervisor<'a> {
     fn ctl_closed(&mut self) {
         self.ctl = None;
         if !self.shutting_down {
-            fail(self.emitter, "ctl.chan: the scheduler closed the channel");
+            self.fail("ctl.chan: the scheduler closed the channel");
         }
         let scheduler = self
             .components
@@ -362,10 +394,9 @@ impl<'a> Supervisor<'a> {
     fn on_ctl(&mut self, py: Python<'_>, frame: Frame) {
         let message = match frame {
             Frame::Ctl(message) => message,
-            other => fail(
-                self.emitter,
-                &format!("ctl.chan: unexpected {other:?} from the scheduler"),
-            ),
+            other => self.fail(&format!(
+                "ctl.chan: unexpected {other:?} from the scheduler"
+            )),
         };
         match message {
             Ctl::Spawn { route } => self.spawn(py, route),
@@ -395,10 +426,7 @@ impl<'a> Supervisor<'a> {
     fn spawn(&mut self, py: Python<'_>, route: u32) {
         let index = route as usize;
         let Some(info) = self.routes.get(index).cloned() else {
-            fail(
-                self.emitter,
-                &format!("ctl.chan: SPAWN for unknown route {route}"),
-            );
+            self.fail(&format!("ctl.chan: SPAWN for unknown route {route}"));
         };
         if self.route_pids.contains_key(&index) {
             self.pending_spawns.insert(index);
@@ -411,17 +439,28 @@ impl<'a> Supervisor<'a> {
     fn spawn_now(&mut self, py: Python<'_>, index: usize, info: &RouteInfo) {
         let route = index as u32;
         let egress = self.egress.get(index).copied().unwrap_or(false);
+        // Production gives each route its own uid and `<scratch>/views/<uid>`;
+        // `dev` gives every view the caller's uid and names the directory by
+        // route index instead (`R19`, `R20`).
+        let (dir, drop_privileges) = match &self.dev {
+            Some(dev) => (dev.view_dir(index), false),
+            None => (crate::config::view_dir(info.uid), true),
+        };
         let child = match zygote::fork_view(
             py,
-            &self.cfg,
-            self.limits,
-            info,
-            &self.app,
-            self.mask,
-            egress,
+            zygote::ViewSpawn {
+                cfg: &self.cfg,
+                limits: self.limits,
+                info,
+                app: &self.app,
+                mask: self.mask,
+                egress,
+                dir,
+                drop_privileges,
+            },
         ) {
             Ok(child) => child,
-            Err(err) => fail(self.emitter, &format!("forking a view: {err}")),
+            Err(err) => self.fail(&format!("forking a view: {err}")),
         };
 
         // The scheduler's end of `view.chan` travels next to `SPAWNED` (§3).
@@ -435,7 +474,7 @@ impl<'a> Supervisor<'a> {
             &mut bytes,
         ) {
             let _ = kill(child.pid, Signal::KILL);
-            fail(self.emitter, &format!("encoding SPAWNED: {err}"));
+            self.fail(&format!("encoding SPAWNED: {err}"));
         }
         self.send_spawned(&bytes, child.scheduler_end.as_fd());
         drop(child.scheduler_end);
@@ -544,7 +583,7 @@ impl<'a> Supervisor<'a> {
     fn reap_children(&mut self, py: Python<'_>) {
         let reaped = match reap() {
             Ok(reaped) => reaped,
-            Err(err) => fail(self.emitter, &format!("reaping: {err}")),
+            Err(err) => self.fail(&format!("reaping: {err}")),
         };
         for (pid, status) in reaped {
             let raw = pid.as_raw();
@@ -612,6 +651,9 @@ impl<'a> Supervisor<'a> {
             Component::Init,
             EventKind::Shutdown(Lifecycle::default().with_stage(format!("{component}-died"))),
         ));
+        if let Some(dev) = self.dev.take() {
+            dev.cleanup();
+        }
         // SAFETY: init is exiting; `_exit` runs no handler and cannot deadlock
         // with the GIL held.
         unsafe { libc::_exit(1) }
@@ -656,13 +698,29 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Emits the last event and exits `0` (§8).
+    ///
+    /// `blastit dev` does the two things a dev boot owes the operator before it
+    /// goes: it writes the `--learn` proposals (`R29`) and removes the
+    /// ephemeral runtime root (`R20`). The exit code is `dev`'s: `0` clean,
+    /// `1` when `--learn` refused a statement or could not write the manifest.
     fn finish(&mut self) -> ! {
         self.emitter.emit(&Event::now(
             Component::Init,
             EventKind::Shutdown(Lifecycle::default().with_stage("stopped")),
         ));
+        let code = match self.learn.take() {
+            Some(learn) => learn.run.finish(
+                &self.cfg.manifest,
+                self.cfg.uid_base,
+                self.cfg.log_format == crate::config::LogFormat::Pretty,
+            ),
+            None => 0,
+        };
+        if let Some(dev) = self.dev.take() {
+            dev.cleanup();
+        }
         // SAFETY: init is exiting; `_exit` runs no handler.
-        unsafe { libc::_exit(0) }
+        unsafe { libc::_exit(code) }
     }
 
     /// `signal` to every live child.
@@ -707,7 +765,7 @@ impl<'a> Supervisor<'a> {
             .limits
             .encode(&Frame::Ctl(message.clone()), 0, &mut bytes)
         {
-            fail(self.emitter, &format!("encoding a ctl.chan message: {err}"));
+            self.fail(&format!("encoding a ctl.chan message: {err}"));
         }
         let deadline = Deadline::after(SEND_CTL_TIMEOUT);
         let mut written = 0;
@@ -716,8 +774,8 @@ impl<'a> Supervisor<'a> {
                 Ok(0) => break,
                 Ok(count) => written += count,
                 Err(rustix::io::Errno::INTR) => {}
-                Err(rustix::io::Errno::AGAIN) => wait_or_die(self.emitter, ctl, deadline),
-                Err(err) => fail(self.emitter, &format!("ctl.chan: {err}")),
+                Err(rustix::io::Errno::AGAIN) => self.wait_or_die(ctl, deadline),
+                Err(err) => self.fail(&format!("ctl.chan: {err}")),
             }
         }
     }
@@ -731,36 +789,43 @@ impl<'a> Supervisor<'a> {
     /// and init does not get past this point anyway.
     fn send_spawned(&self, bytes: &[u8], fd: BorrowedFd<'_>) {
         let Some(ctl) = self.ctl.as_ref().map(AsFd::as_fd) else {
-            fail(self.emitter, "ctl.chan is closed; SPAWNED cannot be sent");
+            self.fail("ctl.chan is closed; SPAWNED cannot be sent");
         };
         let deadline = Deadline::after(SEND_CTL_TIMEOUT);
         loop {
             match send_with_fd(ctl, bytes, fd) {
                 Ok(written) if written == bytes.len() => return,
-                Ok(_) => fail(self.emitter, "SPAWNED was written short"),
+                Ok(_) => self.fail("SPAWNED was written short"),
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    wait_or_die(self.emitter, ctl, deadline);
+                    self.wait_or_die(ctl, deadline);
                 }
-                Err(err) => fail(self.emitter, &format!("ctl.chan: {err}")),
+                Err(err) => self.fail(&format!("ctl.chan: {err}")),
             }
         }
     }
-}
 
-/// Waits until `fd` takes a write, or decides its peer is gone.
-///
-/// Shared by both writers on `ctl.chan`. A scheduler that stopped reading is a
-/// dead scheduler: waiting for it forever would wedge init, and init is the one
-/// process in the container that must never wedge (§8).
-fn wait_or_die(emitter: &Emitter, fd: BorrowedFd<'_>, deadline: Deadline) {
-    if deadline.expired() {
-        fail(
-            emitter,
-            "ctl.chan: the scheduler stopped reading; treating it as dead",
-        );
+    /// Waits until `fd` takes a write, or decides its peer is gone.
+    ///
+    /// Shared by both writers on `ctl.chan`. A scheduler that stopped reading is a
+    /// dead scheduler: waiting for it forever would wedge init, and init is the one
+    /// process in the container that must never wedge (§8).
+    fn wait_or_die(&self, fd: BorrowedFd<'_>, deadline: Deadline) {
+        if deadline.expired() {
+            self.fail("ctl.chan: the scheduler stopped reading; treating it as dead");
+        }
+        if let Err(err) = wait_writable(fd, deadline.left()) {
+            self.fail(&format!("ctl.chan: {err}"));
+        }
     }
-    if let Err(err) = wait_writable(fd, deadline.left()) {
-        fail(emitter, &format!("ctl.chan: {err}"));
+
+    /// Kills live children, removes an adopted `dev` runtime root (`R20`), and
+    /// terminates init with a fatal event.
+    fn fail(&self, message: &str) -> ! {
+        self.kill_all();
+        if let Some(dev) = &self.dev {
+            dev.cleanup();
+        }
+        crate::logs::fail(self.emitter, message)
     }
 }
 
@@ -776,7 +841,11 @@ enum SourceRead {
 ///
 /// One `read` per `poll` wakeup: the pipes are blocking, and a second read
 /// would wait for a writer that may never come.
-fn read_source(source: &mut Source, emitter: &Emitter) -> SourceRead {
+fn read_source(
+    source: &mut Source,
+    emitter: &Emitter,
+    learn: Option<&mut crate::dev_learn::Learn>,
+) -> SourceRead {
     let mut buffer = [0u8; 16 * 1024];
     let read = loop {
         match rustix::io::read(&source.fd, &mut buffer) {
@@ -790,7 +859,16 @@ fn read_source(source: &mut Source, emitter: &Emitter) -> SourceRead {
     }
     let mut lines: Vec<Vec<u8>> = Vec::new();
     source.lines.push(&buffer[..read], &mut lines);
+    let mut learn = learn;
     for line in &lines {
+        // `dev --learn` needs the requests the scheduler could not route: they
+        // are the ones a `[[route]]` is proposed for (`R28`).
+        if let Some(learn) = learn.as_deref_mut()
+            && source.pipe.is_events()
+            && source.pipe.component() == Component::Scheduler
+        {
+            learn.run.note_event(&lossy(line));
+        }
         emit_line(emitter, &source.pipe, line);
     }
     SourceRead::Open

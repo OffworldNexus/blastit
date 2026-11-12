@@ -37,7 +37,9 @@ use blastit_sys::{
 };
 
 use crate::child::{ChildIo, Deadline, read_one, wait_readable};
+use crate::cli::DevOptions;
 use crate::config::{Config, LogFormat, Mode, Privilege, view_dir};
+use crate::dev_learn::{DevRoot, PRIVILEGE};
 use crate::host::{EXEC, Host, Install, Placement, Reexec};
 use crate::logs::{Emitter, fail, output_event};
 
@@ -234,7 +236,9 @@ fn capability_advice(host: &Host, err: &std::io::Error) -> String {
              default capabilities include them — check `--cap-drop`, `--cap-add` and any \
              bounding-set restriction on the container.\n  \
              A rootless deployment gives them to a *dedicated copy* of the {} instead:\n  \
-             {}\n  {}",
+             {}\n  {}\n  \
+             To run the same tree locally without root, use `blastit dev`; it is a \
+             single-uid simulation, not a sandbox",
             install.file(),
             copy_recipe(install),
             install.naming()
@@ -243,7 +247,9 @@ fn capability_advice(host: &Host, err: &std::io::Error) -> String {
     format!(
         "init runs as uid {uid} and is missing {missing}.\n  \
          A rootless deployment gives the capabilities to a *dedicated copy* of the {}, \
-         never to the shared one:\n  {}\n  {}",
+         never to the shared one:\n  {}\n  {}\n  \
+         To run the same tree locally without root, use `blastit dev`; it is a \
+         single-uid simulation, not a sandbox",
         install.file(),
         copy_recipe(install),
         install.naming()
@@ -516,6 +522,545 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
         prepared.app_env(),
         dbproxy,
     )
+}
+
+/// Shared stage-0 context of one `blastit dev` boot, once its [`DevRoot`]
+/// exists (`R20`).
+struct DevBoot<'a> {
+    config: &'a Config,
+    host: &'a Host,
+    root: &'a DevRoot,
+}
+
+/// Fails a `blastit dev` boot with a diagnostic on stderr and exit `1`
+/// (§1.1: a startup error writes zero bytes on stdout).
+///
+/// The root is removed by [`fail_dev_root`] or [`fail_with_root`] when one
+/// exists; `_exit` runs no destructor, which is why every parent failure after
+/// [`DevRoot::create`] goes through one of those helpers.
+fn dev_fail(message: &str) -> ! {
+    eprintln!("blastit dev: {message}");
+    // SAFETY: the boot is aborting; `_exit` runs no handler.
+    unsafe { libc::_exit(1) }
+}
+
+/// Removes `root` (`R20`) and aborts via [`dev_fail`].
+fn fail_dev_root(root: &DevRoot, message: &str) -> ! {
+    root.cleanup();
+    dev_fail(message)
+}
+
+/// Removes `root` (`R20`) and aborts via [`fail`] on `emitter`.
+fn fail_with_root(emitter: &Emitter, root: &DevRoot, message: &str) -> ! {
+    root.cleanup();
+    fail(emitter, message)
+}
+
+/// `blastit_sys::pipe` for `dev` after [`DevRoot::create`]: cleans `root` on
+/// failure before exiting (`R20`).
+fn pipe_dev(emitter: &Emitter, root: &DevRoot, what: &str) -> (OwnedFd, OwnedFd) {
+    match pipe() {
+        Ok(pair) => pair,
+        Err(err) => fail_with_root(emitter, root, &format!("{what}: {err}")),
+    }
+}
+
+/// An argument or path as a [`CString`] after [`DevRoot::create`], cleaning
+/// `root` if a NUL byte makes the re-exec impossible (`R20`).
+fn cstring_dev(root: &DevRoot, value: impl AsRef<OsStr>) -> CString {
+    match CString::new(value.as_ref().as_bytes().to_vec()) {
+        Ok(value) => value,
+        Err(_) => fail_dev_root(root, "an argument contains a NUL byte"),
+    }
+}
+
+/// [`reexec_argv`] for `dev` after [`DevRoot::create`], cleaning `root` on any
+/// NUL-byte failure (`R20`).
+fn reexec_argv_dev(root: &DevRoot, reexec: &Reexec) -> Vec<CString> {
+    let mut argv = vec![cstring_dev(root, &reexec.program)];
+    argv.extend(reexec.prefix.iter().map(|arg| cstring_dev(root, arg)));
+    argv
+}
+
+/// Runs `blastit dev`: the unprivileged single-uid simulation (`R19..R22`).
+///
+/// It is the same boot shape as [`run`] with three differences, all of them the
+/// ones `ADR-0001` names. There is no capability detection and no `setresuid`:
+/// every role runs as [`crate::dev_learn::euid`]. The runtime root is ephemeral
+/// and `0700`, with one directory per route instead of one per view uid. And the
+/// `execve` barrier's environment is the app environment itself — the only one
+/// a single-uid simulation has — from which every `[proxy.*]` secret input,
+/// every `BLASTIT_*` variable and every `BLASTIT_ENV_STRIP` name is already
+/// gone.
+///
+/// `--learn` additionally hands dbproxy an observation pipe and an attribution
+/// socket, and hands both to stage 1, which drains them and writes the manifest
+/// on a clean `SIGTERM` (`R29`).
+pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
+    // `S3`: a non-loopback bind has no authentication at all, so it needs the
+    // second acknowledgement and says so before anything is written to stdout.
+    if !crate::dev_learn::is_loopback(&options.host) && !crate::dev_learn::expose_requested() {
+        eprintln!(
+            "blastit dev: {}",
+            crate::dev_learn::exposure_error(&options.host)
+        );
+        // SAFETY: nothing of blastit's is running yet; `_exit` runs no handler.
+        unsafe { libc::_exit(1) }
+    }
+    let exposed = !crate::dev_learn::is_loopback(&options.host);
+
+    // `R2`, `R10`: `pretty` by default and `BLASTIT_PRESET` never read.
+    let mut config = match Config::for_dev() {
+        Ok(config) => config,
+        Err(err) => dev_fail(&err.to_string()),
+    };
+    config.port = options.port;
+    if std::env::var_os("SERVER_PORT").is_none() {
+        config.server_port = options.port;
+    }
+    // The privilege field is `root`/`capabilities` in the document; a dev boot
+    // is neither, and stage 0 says `unprivileged-dev` in its own event below.
+    config.privilege = None;
+    let emitter = Emitter::stdout(config.log_format, config.log_level);
+    // Every fatal path before the banner writes here, on descriptor 2: a
+    // startup error has to leave stdout empty (§1.1).
+    let startup = Emitter::new(2, config.log_format, config.log_level, false);
+
+    if config.app.is_none() {
+        dev_fail("BLASTIT_APP: the WSGI callable (`module:attribute`) is required");
+    }
+    let source = match std::fs::read_to_string(&config.manifest) {
+        Ok(source) => source,
+        Err(err) => dev_fail(&format!("{}: {err}", config.manifest.display())),
+    };
+    let (manifest, warnings) = match Manifest::parse_and_validate(&source, config.uid_base) {
+        Ok(parsed) => parsed,
+        Err(errors) => dev_fail(&format!("{errors}")),
+    };
+    let prepared = match blastit_env::build_from_process(&manifest, config.env_strip.as_deref()) {
+        Ok(prepared) => prepared,
+        Err(errors) => dev_fail(&format!("{errors}")),
+    };
+    config.proxy_outputs = prepared
+        .outputs()
+        .iter()
+        .map(|(name, names)| (name.as_str().to_string(), names.clone()))
+        .collect();
+    config.sys_path = host.sys_path().to_vec();
+    config.cwd = std::env::current_dir()
+        .ok()
+        .map(|dir| dir.into_os_string().into_vec());
+
+    let root = match DevRoot::create() {
+        Ok(root) => root,
+        Err(err) => dev_fail(&format!("runtime root: {err}")),
+    };
+    // Under `--learn`, slot `0` (`views/0`) is the dedicated unrouted-request
+    // fallback view (`LEARN_FALLBACK_ROUTE`), and declared routes sit at
+    // `1..=N` so no declared route ever shares a socket with the fallback view.
+    let view_slots = manifest.routes().len() + usize::from(options.learn);
+    if let Err(err) = root.create_view_dirs(view_slots) {
+        fail_dev_root(&root, &format!("runtime root: {err}"));
+    }
+    let boot = DevBoot {
+        config: &config,
+        host,
+        root: &root,
+    };
+
+    // `R20`: one listener per (route, proxy) the route may use — every declared
+    // `postgresql` proxy under `--learn`, so one pass can observe them all.
+    let listeners = match dev_view_sockets(&root, &manifest, &prepared, options.learn) {
+        Ok(listeners) => listeners,
+        Err(message) => fail_dev_root(&root, &message),
+    };
+
+    // `--learn`: dbproxy writes observations to `obs_write` (attributing each
+    // statement directly from its per-route `ListenerSpec.route`) and stage 1
+    // drains `obs_read`.
+    let learn = if options.learn {
+        let (obs_read, obs_write) = match pipe() {
+            Ok(pair) => pair,
+            Err(err) => fail_dev_root(&root, &format!("dev obs pipe: {err}")),
+        };
+        Some((obs_read, obs_write))
+    } else {
+        None
+    };
+
+    let dbproxy = fork_dbproxy_dev(
+        &startup,
+        &boot,
+        interpreter,
+        &prepared,
+        listeners,
+        learn.as_ref().map(|(_, obs)| obs.as_raw_fd()),
+    );
+
+    // The parent keeps the read end only.
+    let learn = match learn {
+        Some((obs_read, obs_write)) => {
+            drop(obs_write);
+            Some(obs_read)
+        }
+        None => None,
+    };
+
+    // Only now that the boot is known-good does anything reach stdout: the
+    // banner, the boot event and the exposure warning (§1.2, §1.1).
+    if config.log_format == LogFormat::Pretty {
+        print!(
+            "{}",
+            crate::dev_learn::banner(&options.host, config.port, manifest.routes().len(), exposed)
+        );
+    }
+    emitter.emit(&Event::now(
+        Component::Init,
+        EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("stage0")
+                .with_seccomp(config.seccomp)
+                .with_privilege(PRIVILEGE),
+        ),
+    ));
+    for warning in &warnings {
+        emitter.emit(&Event::now(
+            Component::Init,
+            EventKind::ManifestWarning(WarningEvent::new(warning.to_string())),
+        ));
+    }
+    if exposed {
+        // Names the address, the port and the uid, and no event ever carries a
+        // `port` *field* (§1.2, `R22`, `ARCHITECTURE.md` §8.1).
+        emitter.emit(
+            &output_event(
+                Component::Init,
+                None,
+                Stream::Stderr,
+                &format!(
+                    "blastit dev is EXPOSED on {}:{} as uid {}: there is no authentication, \
+                     so anyone who reaches it drives every route ({})",
+                    options.host,
+                    config.port,
+                    crate::dev_learn::euid(),
+                    crate::dev_learn::EXPOSE_VARIABLE
+                ),
+            )
+            .with_level(Level::Warn),
+        );
+    }
+
+    exec_stage1_dev(&boot, options.host, prepared.app_env(), dbproxy, learn)
+}
+
+/// Binds the per-route sockets of a `dev` boot (`R20`).
+///
+/// In production the (route, proxy) pairs are the route's effective grants; in
+/// `dev --learn` every declared `postgresql` proxy is bound for every route, so
+/// one pass sees the statements a route would need grants for.
+fn dev_view_sockets(
+    root: &DevRoot,
+    manifest: &Manifest,
+    prepared: &blastit_env::Prepared,
+    learn: bool,
+) -> Result<Vec<(UnixListener, ListenerSpec)>, String> {
+    let uid = crate::dev_learn::euid();
+    let mut listeners: Vec<(UnixListener, ListenerSpec)> = Vec::new();
+    if learn {
+        for (proxy_index, (proxy_name, _upstream)) in prepared.upstreams().iter().enumerate() {
+            let Some(port) = blastit_env::postgresql::local_port(proxy_index) else {
+                return Err(format!(
+                    "{}: no local port left for the postgresql proxies",
+                    proxy_name.as_str()
+                ));
+            };
+            let path = root.view_dir(0).join(format!(".s.PGSQL.{port}"));
+            let listener = bind_unix_listener(&path, uid, 0o600)
+                .map_err(|err| format!("{}: {err}", path.display()))?;
+            listeners.push((
+                listener,
+                ListenerSpec::enforcing(
+                    crate::dev_learn::LEARN_FALLBACK_ROUTE,
+                    proxy_name.as_str(),
+                    uid,
+                    Vec::new(),
+                    false,
+                    false,
+                    Default::default(),
+                ),
+            ));
+        }
+    }
+    let slot_offset = usize::from(learn);
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let slot = index + slot_offset;
+        for (proxy_index, (proxy_name, _upstream)) in prepared.upstreams().iter().enumerate() {
+            let grant = manifest
+                .effective_grants(index)
+                .get(proxy_name)
+                .and_then(|grant| grant.as_postgresql())
+                .cloned();
+            if grant.is_none() && !learn {
+                continue;
+            }
+            let Some(port) = blastit_env::postgresql::local_port(proxy_index) else {
+                return Err(format!(
+                    "{}: no local port left for the postgresql proxies",
+                    proxy_name.as_str()
+                ));
+            };
+            let path = root.view_dir(slot).join(format!(".s.PGSQL.{port}"));
+            // `SO_PASSCRED` and `0600`, owned by the one uid that may connect:
+            // in `dev` that is the caller, the only identity a view has.
+            let listener = bind_unix_listener(&path, uid, 0o600)
+                .map_err(|err| format!("{}: {err}", path.display()))?;
+            let (queries, transaction_control, unrestricted, tables) = match &grant {
+                Some(grant) => (
+                    grant.queries().to_vec(),
+                    grant.transaction_control(),
+                    grant.is_unrestricted(),
+                    grant.tables().clone(),
+                ),
+                None => (Vec::new(), false, false, Default::default()),
+            };
+            listeners.push((
+                listener,
+                ListenerSpec::enforcing(
+                    route.name(),
+                    proxy_name.as_str(),
+                    uid,
+                    queries,
+                    transaction_control,
+                    unrestricted,
+                    tables,
+                ),
+            ));
+        }
+    }
+    for (listener, spec) in &mut listeners {
+        spec.fd = listener.as_raw_fd();
+    }
+    Ok(listeners)
+}
+/// Forks dbproxy for a `dev` boot (`R19`, `R21`).
+///
+/// The child is not `setresuid`'d: it already runs as the caller. Everything
+/// else is the production sequence — empty `environ`, `PDEATHSIG`, no
+/// `no_new_privs` exceptions, the role's seccomp filter — and the configuration
+/// carries the `--learn` descriptors when the boot asked for them.
+fn fork_dbproxy_dev(
+    emitter: &Emitter,
+    boot: &DevBoot<'_>,
+    interpreter: bool,
+    prepared: &blastit_env::Prepared,
+    listeners: Vec<(UnixListener, ListenerSpec)>,
+    obs_fd: Option<std::os::fd::RawFd>,
+) -> Option<DbproxyHandover> {
+    if listeners.is_empty() {
+        return None;
+    }
+    let uid = crate::dev_learn::euid();
+    let proxies: Vec<ProxySpec> = prepared
+        .upstreams()
+        .iter()
+        .map(|(name, upstream)| ProxySpec {
+            name: name.as_str().to_string(),
+            host: upstream.host().to_string(),
+            port: upstream.port(),
+            user: upstream.user().to_string(),
+            password: upstream.password().expose().to_string().into(),
+            database: upstream.database().to_string(),
+            sslmode: upstream.sslmode().map(str::to_string),
+            ca_cert: upstream.ca_cert().map(|ca| ca.expose().to_string().into()),
+            options: upstream.options().to_vec(),
+            max_connections: boot.config.max_connections_for(name.as_str()),
+        })
+        .collect();
+    let mut document = DbproxyConfig::enforcing(
+        proxies,
+        listeners.iter().map(|(_, spec)| spec.clone()).collect(),
+    );
+    document.mode = if obs_fd.is_some() {
+        blastit_dbproxy::ListenerMode::Learn
+    } else {
+        blastit_dbproxy::ListenerMode::Enforce
+    };
+    // In `dev` the listener's uid is the caller's; root is only ever the caller
+    // when the whole suite runs as root, and then it *is* the view's uid.
+    document.allow_root_listener = uid == 0;
+    document.obs_fd = obs_fd;
+
+    let (secrets_read, secrets_write) = pipe_dev(emitter, boot.root, "secrets.pipe");
+    let (events_read, events_write) = pipe_dev(emitter, boot.root, "dbproxy events pipe");
+    let (stdout_read, stdout_write) = pipe_dev(emitter, boot.root, "dbproxy stdout pipe");
+    let (stderr_read, stderr_write) = pipe_dev(emitter, boot.root, "dbproxy stderr pipe");
+    let (ready_read, ready_write) = pipe_dev(emitter, boot.root, "dbproxy ready pipe");
+
+    let mut keep = vec![
+        secrets_read.as_raw_fd(),
+        events_write.as_raw_fd(),
+        ready_write.as_raw_fd(),
+    ];
+    keep.extend(listeners.iter().map(|(listener, _)| listener.as_raw_fd()));
+    if let Some(obs) = obs_fd {
+        keep.push(obs);
+    }
+
+    let child = ChildIo {
+        stdout: Some(stdout_write),
+        stderr: Some(stderr_write),
+        keep,
+        limits: dbproxy_limits(boot.config),
+        working_dir: None,
+    };
+
+    let forked = match crate::forking::fork(interpreter) {
+        Ok(fork) => fork,
+        Err(err) => fail_with_root(emitter, boot.root, &format!("fork: {err}")),
+    };
+    match forked {
+        Fork::Parent(pid) => {
+            drop(secrets_read);
+            drop(events_write);
+            drop(ready_write);
+            drop(child);
+            drop(listeners);
+
+            let mut secrets = std::fs::File::from(secrets_write);
+            if let Err(err) = write_config(&document, &mut secrets) {
+                fail_with_root(emitter, boot.root, &format!("secrets.pipe: {err}"));
+            }
+            drop(secrets);
+
+            if let Err(reason) = wait_ready(&ready_read, DBPROXY_READY_TIMEOUT) {
+                emit_child_output(emitter, &stdout_read, Stream::Stdout);
+                emit_child_output(emitter, &stderr_read, Stream::Stderr);
+                fail_with_root(emitter, boot.root, &reason);
+            }
+            Some(DbproxyHandover {
+                pid,
+                events: events_read,
+                stdout: stdout_read,
+                stderr: stderr_read,
+            })
+        }
+        Fork::Child => {
+            let mut argv = reexec_argv(emitter, boot.host.dbproxy());
+            argv.push(cstring(emitter, "--role=dbproxy"));
+            argv.push(cstring(
+                emitter,
+                format!("--secrets-fd={}", secrets_read.as_raw_fd()),
+            ));
+            argv.push(cstring(
+                emitter,
+                format!("--events-fd={}", events_write.as_raw_fd()),
+            ));
+            argv.push(cstring(
+                emitter,
+                format!("--ready-fd={}", ready_write.as_raw_fd()),
+            ));
+            argv.push(cstring(
+                emitter,
+                format!("--seccomp={}", u8::from(boot.config.seccomp)),
+            ));
+            let outcome = child
+                .clear_cloexec(&[])
+                .and_then(|()| child.prepare())
+                .and_then(|()| harden_child(Signal::KILL));
+            if let Err(err) = outcome {
+                fail(emitter, &format!("dbproxy child: {err}"));
+            }
+            let _ = set_dumpable(false);
+            match current_signal_mask().and_then(restore_signal_mask_in_child) {
+                Ok(()) => {}
+                Err(err) => fail(emitter, &format!("dbproxy child: {err}")),
+            }
+            let err = exec(&program(emitter, boot.host.dbproxy()), &argv, &[]);
+            fail(emitter, &format!("exec dbproxy: {err}"));
+        }
+    }
+}
+
+/// Crosses the `dev` `execve` barrier into stage 1 (`R20`).
+fn exec_stage1_dev(
+    boot: &DevBoot<'_>,
+    host_addr: std::net::IpAddr,
+    app_env: &BTreeMap<String, String>,
+    dbproxy: Option<DbproxyHandover>,
+    learn: Option<OwnedFd>,
+) -> ! {
+    let document = match serde_json::to_vec(&boot.config.to_json()) {
+        Ok(document) => document,
+        Err(err) => fail_dev_root(boot.root, &format!("configuration document: {err}")),
+    };
+    if document.len() > MAX_CONFIG_DOCUMENT {
+        fail_dev_root(
+            boot.root,
+            &format!(
+                "the configuration document is {} bytes, more than the {MAX_CONFIG_DOCUMENT}-byte limit",
+                document.len()
+            ),
+        );
+    }
+    let (config_read, config_write) = match pipe() {
+        Ok(pair) => pair,
+        Err(err) => fail_dev_root(boot.root, &format!("config pipe: {err}")),
+    };
+    let mut file = std::fs::File::from(config_write);
+    if let Err(err) = file.write_all(&document) {
+        fail_dev_root(boot.root, &format!("config pipe: {err}"));
+    }
+    drop(file);
+
+    let stage1 = boot.host.stage1();
+    let mut argv = reexec_argv_dev(boot.root, stage1);
+    argv.push(cstring_dev(boot.root, "--stage=1"));
+    argv.push(cstring_dev(
+        boot.root,
+        format!("--config-fd={}", config_read.as_raw_fd()),
+    ));
+    argv.push(cstring_dev(
+        boot.root,
+        format!("--dev-root={}", boot.root.path().display()),
+    ));
+    argv.push(cstring_dev(boot.root, format!("--dev-host={host_addr}")));
+    let mut keep = vec![config_read.as_raw_fd()];
+    if let Some(dbproxy) = &dbproxy {
+        argv.push(cstring_dev(
+            boot.root,
+            format!("--dbproxy-pid={}", dbproxy.pid.as_raw()),
+        ));
+        for (flag, fd) in [
+            ("--dbproxy-events-fd", &dbproxy.events),
+            ("--dbproxy-stdout-fd", &dbproxy.stdout),
+            ("--dbproxy-stderr-fd", &dbproxy.stderr),
+        ] {
+            argv.push(cstring_dev(boot.root, format!("{flag}={}", fd.as_raw_fd())));
+            keep.push(fd.as_raw_fd());
+        }
+    }
+    if let Some(obs) = &learn {
+        argv.push(cstring_dev(
+            boot.root,
+            format!("--dev-obs-fd={}", obs.as_raw_fd()),
+        ));
+        keep.push(obs.as_raw_fd());
+    }
+    for fd in &keep {
+        // SAFETY: every descriptor in `keep` is one this function created and
+        // still owns.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(*fd) };
+        if let Err(err) = set_cloexec(borrowed, false) {
+            fail_dev_root(boot.root, &format!("config pipe: {err}"));
+        }
+    }
+
+    let env: Vec<(String, String)> = app_env
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let err = exec(&cstring_dev(boot.root, &stage1.program), &argv, &env);
+    fail_dev_root(boot.root, &format!("exec stage 1: {err}"))
 }
 
 /// Creates every view's private directory and binds the pg sockets it may use

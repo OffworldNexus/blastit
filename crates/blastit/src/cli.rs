@@ -107,6 +107,16 @@ struct Args {
     seccomp: Option<bool>,
     /// `--preset=NAME`: the §8.2 defaults to start from (E1).
     preset: Option<String>,
+    /// `--dev-root=DIR`: the ephemeral `0700` root `blastit dev` created
+    /// (`R20`). Internal to the dev supervisor's `execve` of stage 1.
+    dev_root: Option<std::path::PathBuf>,
+    /// `--dev-host=ADDR`: the address stage 1 binds for `blastit dev` (`R22`).
+    dev_host: Option<IpAddr>,
+    /// `--dev-obs-fd=N`: stage 1's end of dbproxy's `--learn` observation pipe
+    /// (`R29`).
+    dev_obs_fd: Option<RawFd>,
+    /// `--dev-ctl-fd=N`: the `--learn` attribution socket's stage 1 end.
+    dev_ctl_fd: Option<RawFd>,
 }
 
 /// How to use the program, printed with a command-line error.
@@ -184,7 +194,7 @@ pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
                 println!("{DEV_USAGE}");
                 SUCCESS
             }
-            Ok(Subcommand::Run(options)) => run_dev(&options),
+            Ok(Subcommand::Run(options)) => run_dev(&host, &options, py.is_some()),
             Err(message) => {
                 eprintln!("blastit dev: {message}");
                 FAILURE
@@ -395,17 +405,13 @@ fn parse_host(value: &str) -> Result<IpAddr, String> {
         .map_err(|_| format!("`--host` wants an IP address such as 127.0.0.1, not `{value}`"))
 }
 
-/// The `blastit dev` supervisor's seam (`MA.2.3.3` fills this in).
+/// The `blastit dev` supervisor's entry (`MA.2.3.3`).
 ///
-/// Everything above this line — the grammar, the defaults, the rejections — is
-/// final; the unprivileged five-role supervisor that turns `DevOptions` into a
-/// running server belongs to the next leaf.
-fn run_dev(options: &DevOptions) -> u8 {
-    let _ = options;
-    eprintln!(
-        "blastit dev: the unprivileged supervisor is not wired into this build yet (MA.2.3.3)"
-    );
-    CHECK_FAILURE
+/// The grammar above decided *what* to run; this hands the options to stage 0's
+/// unprivileged mode, which never returns: it either `execve`s stage 1 or exits
+/// non-zero. `host` is the installation, exactly as it is for production.
+fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> u8 {
+    crate::stage0::run_dev(host, options, interpreter)
 }
 
 /// The `blastit check` engine's seam (`MA.2.3.5` fills this in).
@@ -475,6 +481,10 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
                     dbproxy_events_fd: args.dbproxy_events_fd,
                     dbproxy_stdout_fd: args.dbproxy_stdout_fd,
                     dbproxy_stderr_fd: args.dbproxy_stderr_fd,
+                    dev_root: args.dev_root,
+                    dev_host: args.dev_host,
+                    dev_obs_fd: args.dev_obs_fd,
+                    dev_ctl_fd: args.dev_ctl_fd,
                 },
                 interpreter,
             )
@@ -550,6 +560,14 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
             "--ready-fd" => args.ready_fd = Some(descriptor(value, key)?),
             "--seccomp" => args.seccomp = Some(flag(value, key)?),
             "--preset" => args.preset = Some(preset_name(value)?),
+            // The four `dev`-only arguments travel from stage 0 to stage 1 and
+            // name state an operator never types: the ephemeral root, the bind
+            // address, and the two internal `--learn` descriptors (`R20`,
+            // `R22`, `R29`).
+            "--dev-root" => args.dev_root = Some(std::path::PathBuf::from(value)),
+            "--dev-host" => args.dev_host = Some(parse_host(value)?),
+            "--dev-obs-fd" => args.dev_obs_fd = Some(descriptor(value, key)?),
+            "--dev-ctl-fd" => args.dev_ctl_fd = Some(descriptor(value, key)?),
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
@@ -565,6 +583,16 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
     // roles below stage 1 have no configuration of their own.
     if args.preset.is_some() && (args.stage == Some(1) || args.role.is_some()) {
         return Err("`--preset` is only for stage 0".to_string());
+    }
+    let any_dev = args.dev_root.is_some()
+        || args.dev_host.is_some()
+        || args.dev_obs_fd.is_some()
+        || args.dev_ctl_fd.is_some();
+    if any_dev && (args.stage != Some(1) || args.role.is_some()) {
+        return Err("`--dev-*` arguments are only for `--stage=1`".to_string());
+    }
+    if any_dev && args.dev_root.is_none() {
+        return Err("`--dev-*` arguments need `--dev-root`".to_string());
     }
     Ok(args)
 }
@@ -654,6 +682,32 @@ mod tests {
         assert_eq!(args.config_fd, Some(7));
         assert_eq!(args.dbproxy_pid, Some(12));
         assert_eq!(args.dbproxy_stderr_fd, Some(10));
+
+        // Internal `--dev-*` flags belong to `--stage=1` with `--dev-root`.
+        let dev_stage1 = parse(&[
+            "--stage=1".to_string(),
+            "--config-fd=7".to_string(),
+            "--dev-root=/tmp/blastit-dev-test".to_string(),
+            "--dev-host=127.0.0.1".to_string(),
+            "--dev-obs-fd=11".to_string(),
+            "--dev-ctl-fd=12".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            dev_stage1.dev_root.as_deref(),
+            Some(std::path::Path::new("/tmp/blastit-dev-test"))
+        );
+        assert_eq!(dev_stage1.dev_obs_fd, Some(11));
+        assert_eq!(dev_stage1.dev_ctl_fd, Some(12));
+        assert!(parse(&["--dev-root=/tmp/x".to_string()]).is_err());
+        assert!(
+            parse(&[
+                "--stage=1".to_string(),
+                "--config-fd=7".to_string(),
+                "--dev-obs-fd=11".to_string(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

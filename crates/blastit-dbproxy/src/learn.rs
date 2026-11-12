@@ -9,13 +9,16 @@
 //!
 //! # Attribution
 //!
-//! A shared learning listener is one socket per proxy, so a route is not known
-//! from the connection. The control socket (`check_ctl_fd`) carries a JSON line
-//! per operation — `push_routed`, `push_unrouted`, `pop`, `set_db` — and the
-//! top of the resulting stack is the [`ObsTarget`] the next statements belong
-//! to. Each line is bounded to [`CONTROL_MAX_LINE`] bytes and every read and
-//! write is bounded by [`CONTROL_TIMEOUT`], so a wedged or hostile peer can
-//! neither grow dbproxy's memory nor block it for ever.
+//! A per-route listener (`listener.spec.route != "*"`, as in `blastit dev
+//! --learn`) already names the route whose private socket accepted the
+//! connection, so its statements are attributed directly to that route. A shared
+//! wildcard listener (`"*"`, as in `blastit check`) is one socket per proxy, so
+//! a route is not known from the connection: the control socket (`check_ctl_fd`)
+//! carries a JSON line per operation — `push_routed`, `push_unrouted`, `pop`,
+//! `set_db` — and the top of the resulting stack is the [`ObsTarget`] the next
+//! statements belong to. Each line is bounded to [`CONTROL_MAX_LINE`] bytes and
+//! every read and write is bounded by [`CONTROL_TIMEOUT`], so a wedged or
+//! hostile peer can neither grow dbproxy's memory nor block it for ever.
 //!
 //! # Session setup
 //!

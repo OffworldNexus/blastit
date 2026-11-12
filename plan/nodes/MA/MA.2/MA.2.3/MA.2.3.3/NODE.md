@@ -2,12 +2,13 @@
 id: MA.2.3.3
 title: "Leaf 10: unprivileged dev supervisor, execve barrier and dev --learn"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MA.2.3.2]
 paths:
   - crates/blastit/src/lib.rs
+  - crates/blastit/src/cli.rs
   - crates/blastit/src/stage0.rs
   - crates/blastit/src/stage1.rs
   - crates/blastit/src/child.rs
@@ -15,11 +16,13 @@ paths:
   - crates/blastit/src/supervise.rs
   - crates/blastit/src/dev_learn.rs
   - "crates/blastit/tests/**"
-attempts: 0
-max_attempts: 3
-escalation: none
+  - "crates/blastit-dbproxy/src/**"
+  - "crates/blastit-dbproxy/tests/**"
+attempts: 5
+max_attempts: 5
+escalation: expert
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T18:30"
 ---
 
 # Goal

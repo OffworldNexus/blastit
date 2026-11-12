@@ -210,3 +210,33 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T16:16 [MA.2.3.3] (lead) status active -> review
 - 2026-11-12T16:16 [MA.2.3.3] (lead) attempt 2 done: dev supervisor + learn + critical suite (7 tests); make check exit 0; sent to review (base 15931c6)
 - 2026-11-12T16:21 [MA.2.3.1] (lead) status review -> done
+- 2026-11-12T16:21 [MA.2.3.1] (lead) committed d291078
+- 2026-11-12T16:21 [MA.2.3.3] (lead) REVIEW FAIL (attempt 2): MAJOR dev runtime root leaked on post-adopt fatal paths (port in use/route table/memory/app import _exit without cleanup; stage0 pipe_o
+- 2026-11-12T16:21 [MA.2.3.3] (lead) status review -> ready
+- 2026-11-12T16:21 ESCALATION #4 -> expert for MA.2.3.3 by lead: attempt 2 failed review: dev runtime root leaks on every post-adopt fatal exit path and the binding critical twin is mis
+- 2026-11-12T16:21 [MA.2.3.3] (lead) edited fields
+- 2026-11-12T16:21 [MA.2.3.3] (lead) status ready -> active
+- 2026-11-12T16:21 [MA.2.3.3] (lead) attempt 3/4 started
+- 2026-11-12T16:21 [MA.2.3.3] (lead) base d291078
+- 2026-11-12T16:41 [MA.2.3.3] (expert) attempt 3: fixed R20 dev runtime root cleanup across every fatal exit in stage0/stage1/supervise, fixed dev_learn proxy-vs-route typo + unit test, grouped DevBo
+- 2026-11-12T16:45 [MA.2.3.3] (lead) status active -> review
+- 2026-11-12T16:45 [MA.2.3.3] (lead) attempt 3 done: root cleanup on all fatal paths (DevBoot/ViewSpawn structs), dev_learn route typo, port-key and --learn 413/400 assertions; sent to review
+- 2026-11-12T16:52 [MA.2.3.3] (lead) REVIEW FAIL (attempt 3): MAJOR dev --learn mis-attributes statements across live views (push_routed on spawn / pop on exit over dbproxy's global LIFO stack; rep
+- 2026-11-12T16:52 [MA.2.3.3] (lead) edited fields
+- 2026-11-12T16:52 [MA.2.3.3] (lead) status review -> ready
+- 2026-11-12T16:52 [MA.2.3.3] (lead) status ready -> active
+- 2026-11-12T16:52 [MA.2.3.3] (lead) attempt 4/4 started
+- 2026-11-12T16:52 [MA.2.3.3] (lead) lead: extended paths with crates/blastit-dbproxy/{src,tests}/** — route attribution fix lives in hooks::observe
+- 2026-11-12T17:28 [MA.2.3.3] (expert) attempt 4: attribute per-route learning observations from listener.spec.route in dbproxy hooks::observe (reserving ctl stack for '*' wildcard listeners and drop
+- 2026-11-12T17:28 [MA.2.3.3] (lead) status active -> review
+- 2026-11-12T17:28 [MA.2.3.3] (lead) attempt 4 done: dbproxy attributes from listener route (wildcard-only LIFO), stage1 privilege stamp, reproducing twin; sent to review
+- 2026-11-12T17:37 [MA.2.3.3] (lead) REVIEW FAIL (attempt 4): MAJOR dev_learn edits() skips observations whose route equals learn_route (first declared route) whenever an unrouted request exists, s
+- 2026-11-12T17:37 [MA.2.3.3] (lead) status review -> ready
+- 2026-11-12T17:37 ESCALATION #5 -> expert for MA.2.3.3 by lead: attempt 4 fixed attribution but re-review found the learn fallback still reuses a declared route name, dropping that rou
+- 2026-11-12T17:37 [MA.2.3.3] (lead) edited fields
+- 2026-11-12T17:37 [MA.2.3.3] (lead) status ready -> active
+- 2026-11-12T17:37 [MA.2.3.3] (lead) attempt 5/5 started
+- 2026-11-12T18:18 [MA.2.3.3] (expert) attempt 5: dedicate reserved slot-0 fallback identity (_learn_fallback) under dev --learn in stage0/stage1/dev_learn so the first declared route never collides 
+- 2026-11-12T18:21 [MA.2.3.3] (lead) status active -> review
+- 2026-11-12T18:21 [MA.2.3.3] (lead) attempt 5 done: reserved _learn_fallback view slot 0 + critical twin; sent to review
+- 2026-11-12T18:30 [MA.2.3.3] (lead) status review -> done

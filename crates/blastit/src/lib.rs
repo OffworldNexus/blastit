@@ -19,6 +19,7 @@ pub mod config;
 pub mod host;
 
 mod child;
+mod dev_learn;
 mod forking;
 mod immortal;
 mod logs;

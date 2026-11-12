@@ -37,15 +37,15 @@ use std::path::{Path, PathBuf};
 use blastit_frame::Limits;
 use blastit_scheduler::RouteInfo;
 use blastit_sys::{
-    Fork, Pid, Rlimits, SeccompRole, Signal, drop_privileges, harden_child, pipe,
-    restore_signal_mask_in_child, set_dumpable, socketpair_stream,
+    Fork, Pid, Rlimits, SeccompRole, Signal, harden_child, pipe, restore_signal_mask_in_child,
+    set_dumpable, socketpair_stream,
 };
 use blastit_view::ViewConfig;
 use pyo3::prelude::*;
 use pyo3::types::PyTracebackMethods;
 
 use crate::child::{ChildIo, child_exit, install_filter};
-use crate::config::{Config, view_dir};
+use crate::config::Config;
 
 /// How many extra processes a view's uid may have beyond its request threads
 /// (§7.2: gVisor leaves out the main thread, so one unit of margin).
@@ -72,40 +72,56 @@ pub struct ForkedView {
     pub fork_ms: f64,
 }
 
-/// Forks a view process for `info`, or returns the errno and leaves the process
-/// as it was.
-///
-/// `egress` is the route's manifest flag (§7.3): it is what lets the child's
-/// filter keep `AF_INET`/`AF_INET6` working.
+/// Everything the zygote needs to fork one view process (§4, `R19..R21`).
+pub struct ViewSpawn<'a> {
+    /// Process-wide configuration.
+    pub cfg: &'a Config,
+    /// Frame limits of `view.chan`.
+    pub limits: Limits,
+    /// Route metadata and target uid.
+    pub info: &'a RouteInfo,
+    /// Preloaded WSGI callable.
+    pub app: &'a Py<PyAny>,
+    /// Signal mask to restore in the child.
+    pub mask: blastit_sys::SignalMask,
+    /// Whether the route's seccomp filter keeps `AF_INET`/`AF_INET6` (§7.3).
+    pub egress: bool,
+    /// Private scratch directory (`HOME`, `TMPDIR`, `chdir`).
+    pub dir: PathBuf,
+    /// `true` in production (`setresuid` + `RLIMIT_NPROC`), `false` in `dev`.
+    pub drop_privileges: bool,
+}
+
+/// Forks a view process for `spawn`, or returns the errno and leaves the
+/// process as it was.
 ///
 /// # Errors
 ///
 /// [`std::io::Error`] when a socketpair or pipe cannot be created, or when
 /// `fork` refuses to run because init is not single-threaded.
-pub fn fork_view(
-    py: Python<'_>,
-    cfg: &Config,
-    limits: Limits,
-    info: &RouteInfo,
-    app: &Py<PyAny>,
-    mask: blastit_sys::SignalMask,
-    egress: bool,
-) -> std::io::Result<ForkedView> {
+pub fn fork_view(py: Python<'_>, spawn: ViewSpawn<'_>) -> std::io::Result<ForkedView> {
     let (view_end, scheduler_end) = socketpair_stream()?;
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
-    let dir = view_dir(info.uid);
 
     let child = ChildIo {
         stdout: Some(stdout_write),
         stderr: Some(stderr_write),
         keep: vec![view_end.as_raw_fd()],
         limits: Rlimits {
-            nproc: Some(cfg.view_worker_cap().saturating_add(VIEW_PROCESS_MARGIN) as u64),
+            // `dev` shares one uid with every other process of the caller:
+            // lowering `RLIMIT_NPROC` there would cap the developer's whole
+            // session, which is exactly what `R21` refuses (`ADR-0001`).
+            nproc: spawn.drop_privileges.then(|| {
+                spawn
+                    .cfg
+                    .view_worker_cap()
+                    .saturating_add(VIEW_PROCESS_MARGIN) as u64
+            }),
             nofile: Some(VIEW_NOFILE),
             core_zero: true,
         },
-        working_dir: Some(dir.clone()),
+        working_dir: Some(spawn.dir.clone()),
     };
 
     let started = std::time::Instant::now();
@@ -124,9 +140,7 @@ pub fn fork_view(
             stderr: stderr_read,
             fork_ms,
         }),
-        Fork::Child => child_main(
-            py, cfg, limits, info, app, mask, child, view_end, dir, egress,
-        ),
+        Fork::Child => child_main(py, spawn, child, view_end),
     }
 }
 
@@ -137,39 +151,36 @@ pub fn fork_view(
 /// panic — a poisoned lock, an index that should not be out of range — is
 /// turned into an exit code instead of an unwinding child that leaves a
 /// half-initialised interpreter behind. A view that panics exits `70`.
-#[allow(clippy::too_many_arguments)]
-fn child_main(
-    py: Python<'_>,
-    cfg: &Config,
-    limits: Limits,
-    info: &RouteInfo,
-    app: &Py<PyAny>,
-    mask: blastit_sys::SignalMask,
-    child: ChildIo,
-    view_end: OwnedFd,
-    dir: PathBuf,
-    egress: bool,
-) -> ! {
+fn child_main(py: Python<'_>, spawn: ViewSpawn<'_>, child: ChildIo, view_end: OwnedFd) -> ! {
     // The child sequence, in the order `blastit_sys` documents: descriptors,
     // limits, umask, working directory, then privileges, then hardening, then
     // the seccomp filter (§4, §7.3) — which is the last thing to happen before
     // the view starts a thread.
-    let outcome = child
-        .prepare()
-        .and_then(|()| drop_privileges(info.uid))
-        .and_then(|()| harden_child(Signal::KILL))
-        .and_then(|()| install_filter(cfg.seccomp, SeccompRole::View { egress }));
+    let outcome = child.prepare().and_then(|()| {
+        if spawn.drop_privileges {
+            blastit_sys::drop_privileges(spawn.info.uid)?;
+        }
+        harden_child(Signal::KILL)
+    });
+    let outcome = outcome.and_then(|()| {
+        install_filter(
+            spawn.cfg.seccomp,
+            SeccompRole::View {
+                egress: spawn.egress,
+            },
+        )
+    });
     if let Err(err) = outcome {
-        child_exit(&format!("view {}: {err}", info.name), 1);
+        child_exit(&format!("view {}: {err}", spawn.info.name), 1);
     }
     let _ = set_dumpable(false);
-    if let Err(err) = restore_signal_mask_in_child(mask) {
-        child_exit(&format!("view {}: {err}", info.name), 1);
+    if let Err(err) = restore_signal_mask_in_child(spawn.mask) {
+        child_exit(&format!("view {}: {err}", spawn.info.name), 1);
     }
 
-    let name = info.name.clone();
+    let name = spawn.info.name.clone();
     let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        serve_forever(py, cfg, limits, info, app, view_end, dir)
+        serve_forever(py, &spawn, view_end)
     }));
     match started {
         // `serve_forever` never returns normally; this is unreachable in
@@ -190,17 +201,9 @@ fn child_main(
 /// This is the part `child_main` guards with `catch_unwind`; it is with the GIL
 /// held throughout, and the only call that touches the interpreter is
 /// [`blastit_view::serve`], which detaches.
-fn serve_forever(
-    py: Python<'_>,
-    cfg: &Config,
-    limits: Limits,
-    info: &RouteInfo,
-    app: &Py<PyAny>,
-    view_end: OwnedFd,
-    dir: PathBuf,
-) {
-    if let Err(err) = set_view_environment(py, &dir) {
-        child_exit(&format!("view {}: HOME/TMPDIR: {err}", info.name), 1);
+fn serve_forever(py: Python<'_>, spawn: &ViewSpawn<'_>, view_end: OwnedFd) {
+    if let Err(err) = set_view_environment(py, &spawn.dir) {
+        child_exit(&format!("view {}: HOME/TMPDIR: {err}", spawn.info.name), 1);
     }
 
     // SAFETY: `view_end` is this process's end of `view.chan`, created for it
@@ -212,14 +215,14 @@ fn serve_forever(
     // has already gone back to the kernel can have been handed out again.
     std::mem::forget(view_end);
     let view_cfg = ViewConfig {
-        route_name: info.name.clone(),
-        script_name: mount_point(cfg.script_name.as_deref()),
-        frame_limits: limits,
-        max_threads: Some(cfg.view_worker_cap()),
+        route_name: spawn.info.name.clone(),
+        script_name: mount_point(spawn.cfg.script_name.as_deref()),
+        frame_limits: spawn.limits,
+        max_threads: Some(spawn.cfg.view_worker_cap()),
     };
-    match blastit_view::serve(py, chan, app.clone_ref(py), view_cfg) {
+    match blastit_view::serve(py, chan, spawn.app.clone_ref(py), view_cfg) {
         Ok(()) => child_exit("", 0),
-        Err(err) => child_exit(&format!("view {}: {err}", info.name), 1),
+        Err(err) => child_exit(&format!("view {}: {err}", spawn.info.name), 1),
     }
 }
 

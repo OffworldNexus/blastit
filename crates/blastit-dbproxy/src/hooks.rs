@@ -329,12 +329,23 @@ impl QueryHook for DbproxyQuery {
 impl DbproxyQuery {
     /// Reports one statement to the observation stream.
     ///
-    /// The target decides attribution: a request in flight names the route (or
-    /// the unrouted request); an empty stack means the statement is connection
-    /// setup, which every route reusing the session needs, or fixture SQL, which
-    /// no route needs — and which is therefore not observed at all (ADR-0004).
+    /// A per-route listener (`listener.spec.route != "*"`) already identifies
+    /// the route whose private socket accepted the connection, so every
+    /// statement on it belongs to that route regardless of view spawn order
+    /// (`R26`, `R27`). On a shared wildcard listener (`"*"`), the control
+    /// channel's stack decides attribution: a request in flight names the route
+    /// (or the unrouted request); an empty stack means the statement is
+    /// connection setup, which every route reusing the session needs, or fixture
+    /// SQL, which no route needs — and which is therefore not observed at all
+    /// (ADR-0004).
     fn observe(&self, listener: &crate::state::ListenerRuntime, ctx: &QueryContext<'_>) {
-        let target = self.shared.learning().current_target();
+        let target = if listener.spec.route == crate::config::WILDCARD_ROUTE {
+            self.shared.learning().current_target()
+        } else {
+            Some(crate::learn::ObsTarget::Routed {
+                route: listener.spec.route.clone(),
+            })
+        };
         let allowed = self
             .shared
             .allowlist_for(listener, target.as_ref())
@@ -1189,5 +1200,131 @@ mod tests {
             denied.sql(),
             r#"SELECT "orders_order"."total" FROM "orders_order""#
         );
+    }
+
+    #[tokio::test]
+    async fn per_route_learning_listeners_attribute_from_the_listener_not_the_stack() {
+        use std::io::{BufRead, BufReader};
+        use std::os::fd::IntoRawFd;
+
+        let uid = 21_000;
+        let mut route_a = listener(uid, &["SELECT 111"], false);
+        route_a.route = "a".to_string();
+        let mut route_b = listener(uid, &[], false);
+        route_b.route = "b".to_string();
+
+        let (obs_read, obs_write) = std::io::pipe().expect("an obs pipe");
+        let (shared, events) = state_with(
+            proxy(reachable_port(), 4),
+            vec![route_a, route_b, wildcard_listener(uid)],
+            DbproxyConfig {
+                mode: crate::config::ListenerMode::Learn,
+                obs_fd: Some(obs_write.into_raw_fd()),
+                ..DbproxyConfig::default()
+            },
+        );
+        let hook = DbproxyQuery::new(Arc::clone(&shared));
+
+        // Even with no target pushed — or with another route pushed for a
+        // wildcard listener — each per-route listener attributes to its own
+        // `ListenerSpec.route` and evaluates `allowed` against its own grants.
+        let conn_a = connection(1, "0", uid);
+        let conn_b = connection(2, "1", uid);
+        let conn_wild = connection(3, "2", uid);
+
+        assert_eq!(
+            hook.authorize(query_context(
+                &conn_a,
+                QueryKind::Simple,
+                "SELECT 111",
+                true
+            ))
+            .await,
+            QueryDecision::Allow
+        );
+        shared
+            .learning()
+            .push(crate::learn::ObsTarget::Routed {
+                route: "b".to_string(),
+            })
+            .expect("push b");
+        assert_eq!(
+            hook.authorize(query_context(
+                &conn_b,
+                QueryKind::Simple,
+                "SELECT 222",
+                true
+            ))
+            .await,
+            QueryDecision::Allow
+        );
+        // Route `a` runs a statement while `"b"` sits on top of the control
+        // stack: per-route attribution keeps it on `"a"`, while `"*"` still
+        // reads the stack.
+        assert_eq!(
+            hook.authorize(query_context(
+                &conn_a,
+                QueryKind::Simple,
+                "SELECT 333",
+                true
+            ))
+            .await,
+            QueryDecision::Allow
+        );
+        assert_eq!(
+            hook.authorize(query_context(
+                &conn_wild,
+                QueryKind::Simple,
+                "SELECT 444",
+                true
+            ))
+            .await,
+            QueryDecision::Allow
+        );
+        assert!(events.lock().unwrap().is_empty());
+
+        drop(hook);
+        drop(shared);
+        let observed: Vec<crate::learn::WireSqlObs> = BufReader::new(obs_read)
+            .lines()
+            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+            .collect();
+        assert_eq!(observed.len(), 4, "{observed:#?}");
+        assert_eq!(
+            observed[0].target,
+            crate::learn::ObsTarget::Routed {
+                route: "a".to_string()
+            }
+        );
+        assert!(observed[0].allowed, "SELECT 111 is granted on route a");
+        assert_eq!(observed[0].sql, "SELECT 111");
+
+        assert_eq!(
+            observed[1].target,
+            crate::learn::ObsTarget::Routed {
+                route: "b".to_string()
+            }
+        );
+        assert!(!observed[1].allowed);
+        assert_eq!(observed[1].sql, "SELECT 222");
+
+        assert_eq!(
+            observed[2].target,
+            crate::learn::ObsTarget::Routed {
+                route: "a".to_string()
+            },
+            "a statement on route a's listener never drifts onto b"
+        );
+        assert!(!observed[2].allowed);
+        assert_eq!(observed[2].sql, "SELECT 333");
+
+        assert_eq!(
+            observed[3].target,
+            crate::learn::ObsTarget::Routed {
+                route: "b".to_string()
+            },
+            "the wildcard listener still attributes from the control stack"
+        );
+        assert_eq!(observed[3].sql, "SELECT 444");
     }
 }
