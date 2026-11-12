@@ -263,6 +263,80 @@ fn json_rejects_non_utf8_charset() {
 }
 
 // ---------------------------------------------------------------------------
+// JSON: canonical string escaping and strict-string rejections
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_re_escapes_backslash_and_quote() {
+    // §4.2 A: the decoded `\` and `"` must be written back as escapes, or the
+    // re-encoded body is not valid JSON on the wire.
+    assert_eq!(
+        json_body(JSON_CT, br#"{"a":"x\\y\"z"}"#),
+        accepted(br#"{"a":"x\\y\"z"}"#, Some(JSON))
+    );
+}
+
+#[test]
+fn json_re_emits_short_control_escapes_and_lowercase_unicode() {
+    // The five short escapes survive a round trip unchanged...
+    assert_eq!(
+        json_body(JSON_CT, b"{\"s\":\"a\\nb\\rc\\td\\be\\ff\\u0001g\"}"),
+        accepted(b"{\"s\":\"a\\nb\\rc\\td\\be\\ff\\u0001g\"}", Some(JSON))
+    );
+    // ...and a `\uXXXX` control character is re-emitted in the short form
+    // (or four lowercase hex digits when no short form exists), never raw.
+    assert_eq!(
+        json_body(
+            JSON_CT,
+            b"{\"s\":\"\\u000A\\u000D\\u0009\\u0008\\u000C\\u0001\"}"
+        ),
+        accepted(b"{\"s\":\"\\n\\r\\t\\b\\f\\u0001\"}", Some(JSON))
+    );
+}
+
+#[test]
+fn json_rejects_raw_control_byte_in_a_string() {
+    assert_eq!(
+        json_body(JSON_CT, b"{\"a\":\"\x01\"}"),
+        Err(IngressReject::JsonSyntax)
+    );
+}
+
+#[test]
+fn json_rejects_unknown_escape() {
+    assert_eq!(
+        json_body(JSON_CT, b"{\"a\":\"\\q\"}"),
+        Err(IngressReject::JsonSyntax)
+    );
+    // A `\u` escape is exactly four hex digits.
+    assert_eq!(
+        json_body(JSON_CT, b"{\"a\":\"\\u12\"}"),
+        Err(IngressReject::JsonSyntax)
+    );
+}
+
+#[test]
+fn json_rejects_strict_string_violation_twins() {
+    // A lone *low* surrogate is rejected like a lone high one (the existing
+    // test covers the high half), never panicking on the conversion.
+    assert_eq!(
+        json_body(JSON_CT, b"\"\\udc00\""),
+        Err(IngressReject::JsonLoneSurrogate)
+    );
+    let mut high_then_text = Vec::from(b"\"\\ud800".as_slice());
+    high_then_text.extend_from_slice(b"x\"");
+    assert_eq!(
+        json_body(JSON_CT, &high_then_text),
+        Err(IngressReject::JsonLoneSurrogate)
+    );
+    // Invalid UTF-8 inside a string stays a typed rejection.
+    assert_eq!(
+        json_body(JSON_CT, b"\"\xc3\x28\""),
+        Err(IngressReject::JsonNotUtf8)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Form: canonical re-encoding and validation
 // ---------------------------------------------------------------------------
 
@@ -276,6 +350,27 @@ fn form_reencodes_semicolon() {
         ),
         accepted(b"b=hello+world&a=A%3B1&b=2", Some(FORM))
     );
+}
+
+#[test]
+fn form_treats_a_raw_semicolon_as_data() {
+    // `ADR-0006` / §4.2 A: the form codec splits on `&` only. A raw `;` is
+    // data, so `a=1;b=2` is one pair whose value percent-encodes `;` and `=`.
+    assert_eq!(
+        form_body(FORM_CT, b"a=1;b=2"),
+        accepted(b"a=1%3Bb%3D2", Some(FORM))
+    );
+    // The `&` separator still produces two pairs.
+    assert_eq!(
+        form_body(FORM_CT, b"a=1&b=2"),
+        accepted(b"a=1&b=2", Some(FORM))
+    );
+}
+
+#[test]
+fn form_normalizes_a_lowercase_hex_escape() {
+    // `%3b` decodes to `;` and is re-encoded with uppercase hex digits.
+    assert_eq!(form_body(FORM_CT, b"a=%3b"), accepted(b"a=%3B", Some(FORM)));
 }
 
 #[test]
@@ -431,6 +526,22 @@ fn bodyless_safe_methods_reject_bodies() {
         assert_eq!(
             plan_body(method, json_policy(), JSON_CT, None, Some(0)),
             Ok(BodyPlan::AllowEmptyOnly)
+        );
+    }
+}
+
+#[test]
+fn buffered_bodyless_methods_reject_any_bytes() {
+    // §4.2 A row 1: the buffered API enforces the same `413` as `plan_body`,
+    // independently of it, and a zero-byte body is still accepted.
+    for method in ["GET", "HEAD", "OPTIONS"] {
+        assert_eq!(
+            transcode_buffered(BodyCodec::Json, method, JSON_CT, b"{\"a\":1}"),
+            Err(IngressReject::BodyNotAllowed)
+        );
+        assert_eq!(
+            transcode_buffered(BodyCodec::Json, method, JSON_CT, b""),
+            accepted(b"", None)
         );
     }
 }
@@ -638,6 +749,16 @@ fn probe_sample_validates_against_the_declared_type() {
     assert_eq!(
         multipart,
         sample("multipart/form-data", false, false, false)
+    );
+}
+
+#[test]
+fn probe_sample_accepts_exactly_the_cap() {
+    // `truncated` is true only when `total_len > MAX_CHECK_SAMPLE_BYTES`, so a
+    // body exactly at the cap is still probed and still suggests `json`.
+    assert_eq!(
+        probe_sample(JSON_CT, b"{\"a\":1}", MAX_CHECK_SAMPLE_BYTES as u64),
+        sample("application/json", false, true, false)
     );
 }
 
