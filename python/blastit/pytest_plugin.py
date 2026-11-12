@@ -123,11 +123,11 @@ the tests. A project can also say it in its own ``conftest.py``::
 
 Two things it needs, because blastit is a sandbox and not a thread:
 
-* **root**, or passwordless ``sudo``: init binds listeners, makes the view
-  directories under ``/run/blastit`` and drops privileges to the view uids
-  (§2.1, §4). A machine with neither is skipped, with the reason, rather than
-  failed: what the fixture tests is the manifest, and it cannot be tested
-  without those privileges at all.
+* **root**, passwordless ``sudo``, or *no privilege at all*: production init binds
+  listeners, makes the view directories under ``/run/blastit`` and drops
+  privileges to the view uids (§2.1, §4); without root the fixture starts
+  ``blastit dev`` instead, the unprivileged single-UID simulation, and the suite
+  is served by the same five-role tree under the caller's own uid (R39).
 * the **WSGI callable** to serve: ``WSGI_APPLICATION`` in the Django settings,
   or ``--blastit-live-app module:attribute``. Without either, ``myproject.wsgi:
   application`` is guessed from ``DJANGO_SETTINGS_MODULE``. Django's setting is
@@ -1482,18 +1482,14 @@ def _live_request(
     }
 
 
-def _live_server_prefix() -> list[str]:
-    """How a live server has to be started on this machine, or a skip.
+def _privileges() -> list[str] | None:
+    """The prefix production `blastit` needs here, or `None` when it cannot run.
 
-    blastit's init binds the listeners, makes the view directories under
-    `/run/blastit` and drops privileges to the view uids (§2.1, §4), so it runs
-    as root. Tests that already run as root start it directly; otherwise
-    passwordless `sudo -n` is used, with the server's environment in a file
-    written `0600` by whoever runs the tests (root reads it either way, and it is
-    removed at teardown): `sudo` resets the environment, and the test database's
-    URL — a password — has no business in `ps`.
-
-    Raises `pytest.skip` with the reason when the machine has neither.
+    Root starts it directly; otherwise passwordless `sudo -n` is used, with the
+    server's environment in a file written `0600` by whoever runs the tests
+    (root reads it either way, and it is removed at teardown): `sudo` resets the
+    environment, and the test database's URL — a password — has no business in
+    `ps`. `None` is the machine with neither (R39).
     """
     if os.geteuid() == 0:
         return []
@@ -1504,10 +1500,26 @@ def _live_server_prefix() -> list[str]:
         )
         if check.returncode == 0:
             return [sudo, "-n"]
-    pytest.skip(
-        "blastit: a live server needs root (view uids, listeners, /run/blastit) — "
-        "run the tests as root, or give this user passwordless sudo (`sudo -n true`)"
-    )
+    return None
+
+
+def _live_server_mode() -> tuple[list[str], bool]:
+    """How the live server is started: `(prefix, dev)` (R39).
+
+    Production `blastit` binds the listeners, makes the view directories under
+    `/run/blastit` and drops privileges to the view uids (§2.1, §4), so it runs
+    as root — directly, or through passwordless `sudo -n`.
+
+    Without either, the fixture does **not** skip (R39): it starts
+    `blastit dev`, the unprivileged single-UID simulation, which runs the same
+    five-role tree under the caller's own uid (§2, `ADR-0001`). A machine with no
+    root and no sudo can still test a project's traffic against its manifest;
+    what it cannot test is the OS isolation only production has.
+    """
+    prefix = _privileges()
+    if prefix is None:
+        return [], True
+    return prefix, False
 
 
 def _colon_spec(spec: str) -> str:
@@ -1785,6 +1797,7 @@ def _postgresql_url_variable(manifest: Path) -> str | None:
 
 def _start_live_server(
     prefix: list[str],
+    dev: bool,
     config: pytest.Config,
     project: Path,
     manifest: Path,
@@ -1812,6 +1825,11 @@ def _start_live_server(
             "pointed at the test database"
         )
     environment_path = log_path.parent / "blastit-live.env"
+    # R39: a machine with neither root nor sudo serves the project through
+    # `blastit dev`, the unprivileged single-UID simulation.
+    command_shape = [sys.executable, "-m", "blastit"]
+    if dev:
+        command_shape.append("dev")
     failure = ""
     for _ in range(LIVE_SERVER_ATTEMPTS):
         port = _free_port()
@@ -1826,9 +1844,7 @@ def _start_live_server(
                     "-c",
                     f'. {shlex.quote(str(environment_path))} && exec "$@"',
                     "blastit",
-                    sys.executable,
-                    "-m",
-                    "blastit",
+                    *command_shape,
                 ]
                 process = subprocess.Popen(
                     command,
@@ -1840,7 +1856,7 @@ def _start_live_server(
                 )
             else:
                 process = subprocess.Popen(
-                    [sys.executable, "-m", "blastit"],
+                    command_shape,
                     cwd=str(project),
                     env=environment,
                     stdout=log,
@@ -1976,10 +1992,10 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     is built from, so front-end traffic is diffed against the manifest like any
     other request.
 
-    It needs a manifest (`--blastit-manifest`), and the privileges blastit needs
-    to start (root, or passwordless sudo): without either it skips with the
-    reason rather than failing a suite that has nothing to do with blastit's own
-    requirements.
+    It needs a manifest (`--blastit-manifest`). It serves the project through
+    production `blastit` when it can (root, or passwordless sudo) and through the
+    unprivileged `blastit dev` simulation otherwise (R39), so a machine with
+    neither still checks a project's traffic against its manifest.
     """
     session = _SESSION
     if session is None:
@@ -1987,7 +2003,7 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
             "blastit: a live server needs --blastit-manifest (or blastit_manifest in "
             "the configuration) to serve the project with"
         )
-    prefix = _live_server_prefix()
+    prefix, dev = _live_server_mode()
     if _postgresql_url_variable(session.manifest_path) is not None:
         # The test database has to exist, and reading its name from the
         # connection is only right once pytest-django has created it.
@@ -2008,7 +2024,12 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     if temporary is not None and manifest.is_relative_to(root):
         manifest = project / manifest.relative_to(root)
     live = _start_live_server(
-        prefix, request.config, project, manifest, tmp_path / "blastit-live.log"
+        prefix,
+        dev,
+        request.config,
+        project,
+        manifest,
+        tmp_path / "blastit-live.log",
     )
     try:
         yield live

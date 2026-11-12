@@ -15,6 +15,7 @@
 //! name, and whether stage 1 finds an interpreter that is already running.
 
 pub mod audit_v1;
+pub mod check;
 pub mod cli;
 pub mod config;
 pub mod host;

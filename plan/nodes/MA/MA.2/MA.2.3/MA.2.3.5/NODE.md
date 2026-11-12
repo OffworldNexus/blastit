@@ -2,8 +2,8 @@
 id: MA.2.3.5
 title: "Leaf 12: check orchestrator, WSGI gate and python check tests"
 kind: task
-status: ready
-owner: implementer
+status: done
+owner: expert
 priority: 2
 depends_on: [MA.2.3.1, MA.2.3.4]
 paths:
@@ -14,12 +14,13 @@ paths:
   - python/blastit/pytest_plugin.py
   - python/tests/test_check.py
   - python/tests/test_live_server.py
+  - python/tests/test_plugin_helpers.py
   - "python/tests/critical/**"
-attempts: 0
-max_attempts: 3
-escalation: none
+attempts: 1
+max_attempts: 4
+escalation: expert
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T20:37"
 ---
 
 # Goal

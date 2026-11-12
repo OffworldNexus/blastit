@@ -31,3 +31,7 @@ sent to review (base 0ea35c0)
 ## 2026-11-12T19:15 [lead]
 
 status review -> done
+
+## 2026-11-12T19:15 [lead]
+
+committed 865050e; reviewer MINORs -> follow-up (transaction_label BEGIN arm, untested R33 redacted guard, unchecked indexing, pyo3 attribute conformance, routed-but-absent-route denied finding, dev socket flake did not reproduce in 5 runs)

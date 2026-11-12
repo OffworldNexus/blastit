@@ -5,11 +5,12 @@ here runs a real `pytest` session in `live_project/`, whose tests make HTTP
 requests to `blastit_live_server` (or to `live_server`, with
 `--blastit-live-server`), and then reads the report that session wrote.
 
-They need a real PostgreSQL (`DATABASE_URL` or `BLASTIT_TEST_PG_URL`) *and*
-root, or passwordless sudo: blastit is a sandbox — listeners, view uids, private
-directories — and the fixture skips, with the reason, when a machine has
-neither. Without them the tests are skipped, not failed: what they test is the
-manifest, and it cannot be tested without blastit running at all.
+They need a real PostgreSQL (`DATABASE_URL` or `BLASTIT_TEST_PG_URL`); without
+one they skip, with the reason on screen. Privilege is different since R39: the
+fixture never skips for lack of root — it starts `blastit dev`, the unprivileged
+single-UID simulation, when there is no root and no passwordless `sudo` (the
+production/production-sudo decision and its twins live in the protected
+`python/tests/critical/test_check_contract.py`).
 """
 
 import json
@@ -32,7 +33,7 @@ PACKAGED = HERE / "packaged_project"
 
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("BLASTIT_TEST_PG_URL")
 
-pytestmark = pytest.mark.skipif(
+requires_database = pytest.mark.skipif(
     not DATABASE_URL,
     reason="needs a real PostgreSQL: set DATABASE_URL or BLASTIT_TEST_PG_URL",
 )
@@ -40,14 +41,14 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def privileges() -> None:
-    """Skips the tests that start a server when blastit could not run here (D3c).
+    """Settles how the inner server starts: production, or unprivileged `dev` (R39).
 
-    The inner session would skip too — the fixture does exactly this — but the
-    outer test asserts on what that session *did*, so it has to skip first:
-    a machine without root and without passwordless sudo cannot test a sandbox
-    server, and saying so is the whole answer.
+    No skip: a machine with neither root nor passwordless sudo serves the project
+    through `blastit dev`, the single-UID simulation, so the tests below still
+    exercise a real five-role process tree. What they cannot exercise without
+    root is the OS isolation itself, which the Rust critical suite covers.
     """
-    plugin._live_server_prefix()
+    plugin._live_server_mode()
 
 
 class Outcome:
@@ -130,6 +131,7 @@ def run(
     return Outcome(completed, target / report)
 
 
+@requires_database
 def test_a_packaged_settings_module_is_served(
     privileges: None, packaged_project: Path, tmp_path: Path
 ) -> None:
@@ -160,6 +162,7 @@ def test_a_packaged_settings_module_is_served(
     )
 
 
+@requires_database
 def test_a_live_server_is_served_by_blastit(
     privileges: None, project: Path, tmp_path: Path
 ) -> None:
@@ -205,6 +208,7 @@ def test_a_live_server_is_served_by_blastit(
     )
 
 
+@requires_database
 def test_a_projects_own_live_server_wins(
     privileges: None, project: Path, tmp_path: Path
 ) -> None:
@@ -231,6 +235,7 @@ def test_a_projects_own_live_server_wins(
     )
 
 
+@requires_database
 def test_the_live_server_option_serves_a_live_server_suite(
     privileges: None, project: Path, tmp_path: Path
 ) -> None:
@@ -257,6 +262,7 @@ def test_the_live_server_option_serves_a_live_server_suite(
     assert outcome.report["totals"]["requests"] == 1
 
 
+@requires_database
 def test_the_option_without_a_manifest_is_a_usage_error(project: Path) -> None:
     """Nothing to serve with: the plugin says so before any test runs."""
     outcome = run(project, "--blastit-live-server")

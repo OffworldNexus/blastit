@@ -580,11 +580,16 @@ class TestTheLiveServerFilesystem:
 
 
 class TestLiveServerPrivileges:
-    """When blastit cannot run here, the fixture says so instead of failing (D3c)."""
+    """How production `blastit` is started here, and when there is no way (D3c).
+
+    `_live_server_mode` turns a `None` prefix into unprivileged `blastit dev`
+    instead of a skip (R39); the allowed/denied twins of that decision live in
+    `tests/critical/test_check_contract.py`, which `make check` always runs.
+    """
 
     def test_root_starts_it_directly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(plugin.os, "geteuid", lambda: 0)
-        assert plugin._live_server_prefix() == []
+        assert plugin._privileges() == []
 
     def test_passwordless_sudo_is_the_other_way(
         self, monkeypatch: pytest.MonkeyPatch
@@ -594,9 +599,9 @@ class TestLiveServerPrivileges:
         monkeypatch.setattr(
             plugin.subprocess, "run", lambda *args, **kwargs: _Completed(0)
         )
-        assert plugin._live_server_prefix() == ["/usr/bin/sudo", "-n"]
+        assert plugin._privileges() == ["/usr/bin/sudo", "-n"]
 
-    def test_sudo_that_wants_a_password_skips(
+    def test_sudo_that_wants_a_password_is_no_privileged_start(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(plugin.os, "geteuid", lambda: 1000)
@@ -604,16 +609,14 @@ class TestLiveServerPrivileges:
         monkeypatch.setattr(
             plugin.subprocess, "run", lambda *args, **kwargs: _Completed(1)
         )
-        with pytest.raises(pytest.skip.Exception) as skipped:
-            plugin._live_server_prefix()
-        assert "root" in str(skipped.value) and "sudo" in str(skipped.value)
+        assert plugin._privileges() is None
 
-    def test_no_root_and_no_sudo_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_root_and_no_sudo_is_no_privileged_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(plugin.os, "geteuid", lambda: 1000)
         monkeypatch.setattr(plugin.shutil, "which", lambda name: None)
-        with pytest.raises(pytest.skip.Exception) as skipped:
-            plugin._live_server_prefix()
-        assert "passwordless sudo" in str(skipped.value)
+        assert plugin._privileges() is None
 
 
 class TestLiveAppSpec:

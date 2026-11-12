@@ -9,3 +9,4 @@ Every call to an expensive-tier agent (`strategist`, `architect`, `expert`) is r
 | 2026-11-12T15:31 | MA.2.3.1 | expert | lead | attempt 2 failed review: fold literal redaction must be backslash-aware for E'..'/U&'..' spans (secret leak on stderr) plus mode preservation on atomic write |
 | 2026-11-12T16:21 | MA.2.3.3 | expert | lead | attempt 2 failed review: dev runtime root leaks on every post-adopt fatal exit path and the binding critical twin is missing |
 | 2026-11-12T17:37 | MA.2.3.3 | expert | lead | attempt 4 fixed attribution but re-review found the learn fallback still reuses a declared route name, dropping that route's statements when an unrouted request exists |
+| 2026-11-12T19:55 | MA.2.3.5 | expert | lead | pytest-django lifecycle/credential-leak bug: cheap attempts 1-2 failed on R30 handshake (env leak when no DB test; teardown drop failure); needs deep pytest-django hook work |

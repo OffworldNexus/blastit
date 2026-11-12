@@ -205,7 +205,7 @@ pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
                 println!("{CHECK_USAGE}");
                 SUCCESS
             }
-            Ok(Subcommand::Run(options)) => run_check(&options),
+            Ok(Subcommand::Run(options)) => run_check(&host, &options),
             Err(message) => {
                 eprintln!("blastit check: {message}");
                 CHECK_FAILURE
@@ -414,11 +414,13 @@ fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> u8 {
     crate::stage0::run_dev(host, options, interpreter)
 }
 
-/// The `blastit check` engine's seam (`MA.2.3.5` fills this in).
-fn run_check(options: &CheckOptions) -> u8 {
-    let _ = options;
-    eprintln!("blastit check: the check engine is not wired into this build yet (MA.2.3.5)");
-    CHECK_FAILURE
+/// The `blastit check` engine (`MA.2.3.5`).
+///
+/// The grammar above decided *what* to audit; this hands the options to
+/// [`crate::check::run`], which owns the transaction: validate, start dbproxy,
+/// run pytest, audit, and — under `--learn` only — write (`R3..R5`, `R30`).
+fn run_check(host: &Host, options: &CheckOptions) -> u8 {
+    crate::check::run(host, options)
 }
 
 /// Runs the role the arguments name.

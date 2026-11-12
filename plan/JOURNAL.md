@@ -249,3 +249,37 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T18:50 [MA.2.3.4] (lead) sent to review (base 0ea35c0)
 - 2026-11-12T19:09 AUTOPILOT on by conductor boot
 - 2026-11-12T19:15 [MA.2.3.4] (lead) status review -> done
+- 2026-11-12T19:15 [MA.2.3.4] (lead) committed 865050e; reviewer MINORs -> follow-up (transaction_label BEGIN arm, untested R33 redacted guard, unchecked indexing, pyo3 attribute conformance, route
+- 2026-11-12T19:15 [MA.2.3.5] (lead) status ready -> active
+- 2026-11-12T19:15 [MA.2.3.5] (lead) attempt 1/3 started
+- 2026-11-12T19:15 [MA.2.3.5] (lead) base 865050e8f97402af820e18c71c5aa31aeb48ae55
+- 2026-11-12T19:16 [MA.3] (planner) edited fields
+- 2026-11-12T19:16 [MA.3.1] (planner) created (task) Runnable-docs harness executing README and docs snippets unprivileged
+- 2026-11-12T19:16 [MA.3.2] (planner) created (task) Reconcile docs, README and ARCHITECTURE drift with the shipped 0.1.1 CLI
+- 2026-11-12T19:16 [MA.3.3] (planner) created (task) Visual QA of the built Zensical site (desktop light/dark, mobile, Mermaid)
+- 2026-11-12T19:16 [MA.3.4] (planner) created (task) Run Docker root + rootless e2e suites and fix e2e fallout
+- 2026-11-12T19:16 [MA.3.5] (planner) created (task) Audit runnable-docs guard, critical tiers and scoped mutants
+- 2026-11-12T19:16 [MA.3.6] (planner) created (task) Bump 0.1.1 (Cargo.toml/Cargo.lock), changelog entry and wheel metadata proof
+- 2026-11-12T19:29 [MA.2.3.5] (implementer) check.rs: std::process::Command only inherits descriptors without FD_CLOEXEC (clear it on the gate socketpair end) and swapped_env rewrites away every BLASTIT_*
+- 2026-11-12T19:29 [MA.2.3.5] (implementer) this host's `uv run --no-project` has no pytest: the node's pytest acceptance lines need `--with pytest` plus PYTHONPATH=target/python-critical:python (make tes
+- 2026-11-12T19:32 [MA.2.3.5] (lead) status active -> review
+- 2026-11-12T19:38 [MA.2.3.5] (lead) REVIEW FAIL (1/3): [BLOCKER] R30 Django path missing: no one-shot 0600 setup file + no {"op":"set_db"} send, so pytest-django migrations hit the dev database; d
+- 2026-11-12T19:38 [MA.2.3.5] (lead) status review -> ready
+- 2026-11-12T19:38 [MA.2.3.5] (lead) attempt 2/3 started
+- 2026-11-12T19:38 [MA.2.3.5] (lead) retry base 865050e8f97402af820e18c71c5aa31aeb48ae55
+- 2026-11-12T19:46 [MA.2.3.5] (implementer) attempt 2: R30 Django handshake implemented — check.rs writes a 0600 django-setup.json (proxy/database/test_db/real/swapped) only when pytest_django imports AND
+- 2026-11-12T19:46 [MA.2.3.5] (implementer) attempt 2: pytest preflight (python -c import pytest in swapped_env) is exit 2 with 'install pytest: uv add --dev pytest'; FD_CLOEXEC on the suite's control end
+- 2026-11-12T19:46 [MA.2.3.5] (implementer) attempt 2: host fact (not LESSONS.md, out of paths): the critical tier's only protected test runner is 'PYTHONPATH=target/python-critical:python uv run --no-pro
+- 2026-11-12T19:48 [MA.2.3.5] (implementer) attempt 2 done: all five acceptance commands re-run (pytest lines need --with pytest + PYTHONPATH=target/python-critical:python), real PG run 5 passed, critical
+- 2026-11-12T19:49 [MA.2.3.5] (lead) status ready -> review
+- 2026-11-12T19:55 [MA.2.3.5] (lead) REVIEW FAIL (2/3): [MAJOR] _check_pytest.py:290,365-368 real credentials in os.environ for whole session when no DB-using test (no-DB Django body sees real DSN)
+- 2026-11-12T19:55 ESCALATION #6 -> expert for MA.2.3.5 by lead: pytest-django lifecycle/credential-leak bug: cheap attempts 1-2 failed on R30 handshake (env leak when no DB test; teard
+- 2026-11-12T19:55 [MA.2.3.5] (lead) edited fields
+- 2026-11-12T19:55 [MA.2.3.5] (lead) edited fields
+- 2026-11-12T19:55 [MA.2.3.5] (lead) status review -> active
+- 2026-11-12T19:55 [MA.2.3.5] (lead) attempt 1/4 started
+- 2026-11-12T19:55 [MA.2.3.5] (lead) escalated to expert; base 865050e8f97402af820e18c71c5aa31aeb48ae55
+- 2026-11-12T20:30 [MA.2.3.5] (expert) expert attempt 1: fixed all 5 R30 pytest-django review findings plus 2 real-Django traps found against Django 6.1.3 / pytest-django 4.14 / PG 15: (1) separated 
+- 2026-11-12T20:31 [MA.2.3.5] (lead) status active -> review
+- 2026-11-12T20:37 [MA.2.3.5] (lead) edited fields
+- 2026-11-12T20:37 [MA.2.3.5] (lead) status review -> done
