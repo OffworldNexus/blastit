@@ -1,22 +1,31 @@
 # The rootless image from a wheel built beforehand — `e2e/rootless/Dockerfile`
-# without the Rust build, for a CI job that has already run
+# without the Rust build, for a job that has already run
 # `scripts/build-wheel.sh` (the same split as `e2e/Dockerfile.prebuilt`).
 #
-# Exactly one cp313 wheel must be in `dist/`. The capability block is the same
+# The wheel decides the interpreter: `blastit._blastit` is not abi3, so a cp314
+# wheel only installs into CPython 3.14, and `PYTHON_VERSION` — read out of the
+# wheel's file name by the driver (`e2e/prebuilt_wheel.py`) — is the base image.
+# Nothing below names a Python version: the copy init is started from is found
+# from the image's own `python3`.
+#
+# Exactly one blastit wheel must be in `dist/`. The capability block is the same
 # as in the other rootless Dockerfile; see that file for why the capability goes
 # to a *dedicated copy* of the interpreter (never to the shared one, which every
 # process of the service uid can run).
-FROM python:3.13-slim-trixie
+ARG PYTHON_VERSION=3.13
+FROM python:${PYTHON_VERSION}-slim-trixie
 COPY e2e/demo/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
-COPY dist/blastit-*-cp313-*.whl /tmp/dist/
+# The whole directory, not a glob: a glob that matches nothing fails the build
+# with `lstat /dist`, where the check below says which wheels there are.
+COPY dist/ /tmp/dist/
 RUN set -e; \
-    wheels="$(ls /tmp/dist/*.whl)"; \
-    count="$(printf '%s\n' "$wheels" | wc -l)"; \
+    wheels="$(ls /tmp/dist/*.whl 2>/dev/null || true)"; \
+    count="$(printf '%s\n' "$wheels" | grep -c . || true)"; \
     if [ "$count" != 1 ]; then \
-        echo "e2e/rootless/Dockerfile.prebuilt wants exactly one cp313 wheel in dist/, found $count:" >&2; \
+        echo "e2e/rootless/Dockerfile.prebuilt wants exactly one blastit wheel in dist/, found $count:" >&2; \
         printf '%s\n' "$wheels" >&2; \
         exit 1; \
     fi; \
@@ -24,13 +33,13 @@ RUN set -e; \
     rm -rf /tmp/dist
 ARG BLASTIT_UID=10000
 RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit
-RUN interpreter="$(readlink -f /usr/local/bin/python3.13)" \
-    && cp "$interpreter" "${interpreter%/*}/python3.13-init" \
-    && chown "$BLASTIT_UID:$BLASTIT_UID" "${interpreter%/*}/python3.13-init" \
-    && chmod 0500 "${interpreter%/*}/python3.13-init" \
+RUN interpreter="$(readlink -f "$(command -v python3)")" \
+    && cp "$interpreter" "$interpreter-init" \
+    && chown "$BLASTIT_UID:$BLASTIT_UID" "$interpreter-init" \
+    && chmod 0500 "$interpreter-init" \
     && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
-         "${interpreter%/*}/python3.13-init" \
-    && getcap "${interpreter%/*}/python3.13-init" && getcap "$interpreter" || true
+         "$interpreter-init" \
+    && getcap "$interpreter-init" && getcap "$interpreter" || true
 COPY e2e/demo /app
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
@@ -42,5 +51,7 @@ ENV PYTHONUNBUFFERED=1 \
     PORT=8080
 EXPOSE 8080
 # The *copy* holds the capabilities; the shared interpreter stays
-# capability-free (B1).
-CMD ["/usr/local/bin/python3.13-init", "-m", "blastit"]
+# capability-free (B1). Its name carries the image's Python version, so it is
+# resolved here rather than written down (the compose service, which overrides
+# this, resolves it the same way).
+CMD exec "$(readlink -f "$(command -v python3)")-init" -m blastit

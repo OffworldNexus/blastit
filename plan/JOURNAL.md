@@ -333,3 +333,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T22:05 [MA.2.3.12] (lead) base a6c134810190bd940b0c3e94fec23268e7058f21
 - 2026-11-12T22:16 [MA.2.3.12] (lead) status active -> review
 - 2026-11-12T22:24 [MA.2.3.12] (lead) status review -> done
+- 2026-11-12T22:27 [MA.2.3.13] (lead) created (task) Make make e2e work on any CPython (prebuilt Dockerfile wheel glob)
+- 2026-11-12T22:27 [MA.2.3.13] (lead) status ready -> active
+- 2026-11-12T22:27 [MA.2.3.13] (lead) attempt 1/3 started
+- 2026-11-12T22:27 [MA.2.3.13] (lead) base 25b9de329c0547f15053f742f733cc9bf243b3b9
+- 2026-11-12T22:50 [MA.2.3.13] (lead) status active -> review
+- 2026-11-12T22:57 [MA.2.3.13] (lead) status review -> done

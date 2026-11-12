@@ -1,19 +1,30 @@
 # Same image as e2e/Dockerfile, with the wheel built beforehand on the host: the
-# CI job runs `scripts/build-wheel.sh` against the same Python 3.13 and hands the
-# `dist/*.whl` it produced to this build.
-FROM python:3.13-slim-trixie
+# driver runs `scripts/build-wheel.sh` and hands the `dist/*.whl` it produced to
+# this build.
+#
+# The wheel decides the interpreter. `blastit._blastit` is not abi3, so a cp314
+# wheel installs into CPython 3.14 and nowhere else, and the base image has to be
+# the interpreter the wheel was built for — `PYTHON_VERSION`, which the driver
+# reads out of the wheel's file name (`e2e/prebuilt_wheel.py`). 3.13 is only the
+# default for a build that names no wheel.
+ARG PYTHON_VERSION=3.13
+FROM python:${PYTHON_VERSION}-slim-trixie
 COPY e2e/demo/requirements.txt /app/requirements.txt
 COPY e2e/sqlalchemy/requirements.txt /sqlalchemy/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt -r /sqlalchemy/requirements.txt
-COPY dist/blastit-*-cp313-*.whl /tmp/dist/
-# Exactly one: two wheels of the same distribution in `dist/` (a release and a
-# development version, say) would make pip pick a fight here rather than say what
-# is wrong, and this image is meant to install *the* wheel CI just built.
+# The whole directory, not a glob: a glob that matches nothing fails the build
+# with `lstat /dist`, where the check below says which wheels there are.
+COPY dist/ /tmp/dist/
+# Exactly one: two wheels in `dist/` (a release and a development version, or a
+# stale wheel from another interpreter) would make pip pick a fight here rather
+# than say what is wrong, and this image is meant to install *the* wheel the
+# driver just built. What its tag is, is answered above; how many there are is
+# this check's.
 RUN set -e; \
-    wheels="$(ls /tmp/dist/*.whl)"; \
-    count="$(printf '%s\n' "$wheels" | wc -l)"; \
+    wheels="$(ls /tmp/dist/*.whl 2>/dev/null || true)"; \
+    count="$(printf '%s\n' "$wheels" | grep -c . || true)"; \
     if [ "$count" != 1 ]; then \
-        echo "e2e/Dockerfile.prebuilt wants exactly one cp313 wheel in dist/, found $count:" >&2; \
+        echo "e2e/Dockerfile.prebuilt wants exactly one blastit wheel in dist/, found $count:" >&2; \
         printf '%s\n' "$wheels" >&2; \
         echo "clean up dist/, or keep only the one this image should install" >&2; \
         exit 1; \
