@@ -2,7 +2,7 @@
 id: MA.2.2
 title: "Manifest 0.1.1, ingress enforcement and wire learning"
 kind: epic
-status: ready
+status: done
 priority: 2
 depends_on: [MA.2.1]
 paths:
@@ -14,7 +14,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T15:09"
 ---
 
 # Goal
