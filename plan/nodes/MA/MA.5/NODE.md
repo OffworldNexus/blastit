@@ -2,16 +2,16 @@
 id: MA.5
 title: "Write 0.1.1 technical design doc & ADRs from the accepted DX docs"
 kind: task
-status: ready
+status: done
 owner: architect
 priority: 1
 depends_on: [MA.1]
 paths: ["docs/design/**", "docs/decisions/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
-escalation: architect
+escalation: strategist
 created: "2026-11-12T01:41"
-updated: "2026-11-12T01:49"
+updated: "2026-11-12T13:10"
 ---
 
 # Goal
