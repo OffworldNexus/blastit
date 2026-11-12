@@ -2,16 +2,16 @@
 id: MA.2.1.2
 title: "Leaf 2: ingress codecs, canonical re-encode and header scrub"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MA.2.1.1]
 paths: ["crates/blastit-ingress/src/**", "crates/blastit-ingress/tests/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T13:46"
 ---
 
 # Goal
