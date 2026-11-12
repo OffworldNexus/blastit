@@ -81,6 +81,26 @@ enum Shutdown {
     Terminate(Deadline),
 }
 
+/// Why a write of one `ctl.chan` message stopped short.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CtlWriteError {
+    /// The write itself failed with this errno.
+    Write(rustix::io::Errno),
+    /// The scheduler took nothing for the whole of [`SEND_CTL_TIMEOUT`], with
+    /// the reason to log.
+    Wedged(String),
+}
+
+impl CtlWriteError {
+    /// Whether this error says the scheduler's end of `ctl.chan` is gone.
+    fn peer_gone(&self) -> bool {
+        match self {
+            CtlWriteError::Write(err) => ctl_peer_gone(err.raw_os_error()),
+            CtlWriteError::Wedged(_) => false,
+        }
+    }
+}
+
 /// The three pipes one component sends its events and output on.
 pub struct ComponentPipes {
     /// The events pipe's read end.
@@ -350,6 +370,14 @@ impl<'a> Supervisor<'a> {
             // read; `EAGAIN` here is a race that costs nothing, because the poll
             // set is level-triggered.
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return,
+            // A scheduler that closes its end while messages are still queued
+            // for it reads back as a reset, not as end-of-file. To init that is
+            // the same event, and `ctl_closed` decides what a gone scheduler
+            // costs: fatal while serving, the normal end of a drain.
+            Err(err) if ctl_read_lost_peer(&err) => {
+                self.ctl_closed();
+                return;
+            }
             Err(err) => self.fail(&format!("ctl.chan: {err}")),
         };
         // init never receives a descriptor on ctl.chan; if one arrives it is
@@ -369,7 +397,8 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// The scheduler's end of `ctl.chan` reached end-of-file.
+    /// The scheduler's end of `ctl.chan` is gone: end-of-file, or the reset a
+    /// scheduler that closed with messages still queued for it leaves behind.
     ///
     /// While shutting down that is the normal end of the drain: the scheduler
     /// left, so init stops polling a dead channel and moves on to terminating
@@ -749,12 +778,18 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// Writes one `ctl.chan` message; a failure here is fatal.
+    /// Writes one `ctl.chan` message; a failure here is fatal unless the
+    /// scheduler was already gone when the shutdown began.
     ///
     /// The socket is non-blocking, so a scheduler that stopped reading cannot
     /// wedge init: the write is retried for at most [`SEND_CTL_TIMEOUT`], and a
     /// timeout means the scheduler is gone and the whole container has to go
     /// with it (§8: init must not pretend a dead component is alive).
+    ///
+    /// The one exception is [`ctl_failure_is_fatal`]'s: a scheduler that closed
+    /// the channel during or after `drain` is the closed-fd arm by another
+    /// name, and a message nobody can act on must not turn a clean `SIGTERM`
+    /// into exit `1` (§1.1, finding F4).
     fn send_ctl(&self, message: &Ctl) {
         let Some(ctl) = self.ctl.as_ref().map(AsFd::as_fd) else {
             // The scheduler is gone; nothing can act on the message any more.
@@ -767,23 +802,18 @@ impl<'a> Supervisor<'a> {
         {
             self.fail(&format!("encoding a ctl.chan message: {err}"));
         }
-        let deadline = Deadline::after(SEND_CTL_TIMEOUT);
-        let mut written = 0;
-        while written < bytes.len() {
-            match rustix::io::write(ctl, &bytes[written..]) {
-                Ok(0) => break,
-                Ok(count) => written += count,
-                Err(rustix::io::Errno::INTR) => {}
-                Err(rustix::io::Errno::AGAIN) => self.wait_or_die(ctl, deadline),
-                Err(err) => self.fail(&format!("ctl.chan: {err}")),
-            }
+        match write_ctl(ctl, &bytes, Deadline::after(SEND_CTL_TIMEOUT)) {
+            Ok(()) => {}
+            Err(err) if !ctl_failure_is_fatal(self.shutting_down, &err) => {}
+            Err(err) => self.ctl_fail(&err),
         }
     }
 
     /// Sends `SPAWNED`, with the scheduler's end of the new `view.chan`
     /// attached (§3).
     ///
-    /// Fatal on any failure, and waited for the same way as
+    /// Fatal on any failure, except a scheduler that closed the channel after
+    /// `SIGTERM` had begun (§1.1), and waited for the same way as
     /// [`Supervisor::send_ctl`]. A view whose `SPAWNED` never arrives must not
     /// outlive init: the child's `PR_SET_PDEATHSIG` is what makes that true,
     /// and init does not get past this point anyway.
@@ -797,24 +827,27 @@ impl<'a> Supervisor<'a> {
                 Ok(written) if written == bytes.len() => return,
                 Ok(_) => self.fail("SPAWNED was written short"),
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    self.wait_or_die(ctl, deadline);
+                    if let Err(wedged) = wait_for_room(ctl, deadline) {
+                        self.ctl_fail(&wedged);
+                    }
+                }
+                // A SPAWN that raced the `SIGTERM` still gets its view, which
+                // `Terminate` kills; a scheduler that closed the channel cannot
+                // take the `SPAWNED` it is owed, and that is not a reason to
+                // fail the clean exit the signal asked for (§1.1).
+                Err(err) if self.shutting_down && err.raw_os_error().is_some_and(ctl_peer_gone) => {
+                    return;
                 }
                 Err(err) => self.fail(&format!("ctl.chan: {err}")),
             }
         }
     }
 
-    /// Waits until `fd` takes a write, or decides its peer is gone.
-    ///
-    /// Shared by both writers on `ctl.chan`. A scheduler that stopped reading is a
-    /// dead scheduler: waiting for it forever would wedge init, and init is the one
-    /// process in the container that must never wedge (§8).
-    fn wait_or_die(&self, fd: BorrowedFd<'_>, deadline: Deadline) {
-        if deadline.expired() {
-            self.fail("ctl.chan: the scheduler stopped reading; treating it as dead");
-        }
-        if let Err(err) = wait_writable(fd, deadline.left()) {
-            self.fail(&format!("ctl.chan: {err}"));
+    /// Ends init over a failed `ctl.chan` write (§8).
+    fn ctl_fail(&self, error: &CtlWriteError) -> ! {
+        match error {
+            CtlWriteError::Write(err) => self.fail(&format!("ctl.chan: {err}")),
+            CtlWriteError::Wedged(reason) => self.fail(&format!("ctl.chan: {reason}")),
         }
     }
 
@@ -901,5 +934,184 @@ pub fn frame_status(status: ExitStatus) -> blastit_frame::ExitStatus {
     match status {
         ExitStatus::Code(code) => blastit_frame::ExitStatus::Code(code),
         ExitStatus::Signal(signal) => blastit_frame::ExitStatus::Signal(signal),
+    }
+}
+
+/// Writes `bytes` to `ctl`, waiting out a full pipe for at most `deadline`.
+///
+/// `ctl` is non-blocking ([`Supervisor::new`]), so this loops rather than
+/// blocking: `EAGAIN` means the scheduler has not read yet, and the deadline is
+/// the only thing that ends the wait. `Ok(0)` is "nothing more to write", as it
+/// has always been. Whether a returned error ends the boot is
+/// [`ctl_failure_is_fatal`]'s decision, not this function's.
+fn write_ctl(fd: BorrowedFd<'_>, bytes: &[u8], deadline: Deadline) -> Result<(), CtlWriteError> {
+    let mut written = 0;
+    while written < bytes.len() {
+        match rustix::io::write(fd, &bytes[written..]) {
+            Ok(0) => return Ok(()),
+            Ok(count) => written += count,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::AGAIN) => wait_for_room(fd, deadline)?,
+            Err(err) => return Err(CtlWriteError::Write(err)),
+        }
+    }
+    Ok(())
+}
+
+/// Waits until `fd` takes a write, or reports the scheduler wedged.
+///
+/// A scheduler that stopped reading is a dead scheduler: waiting for it forever
+/// would wedge init, and init is the one process in the container that must
+/// never wedge (§8). Shared by both writers on `ctl.chan`.
+fn wait_for_room(fd: BorrowedFd<'_>, deadline: Deadline) -> Result<(), CtlWriteError> {
+    if deadline.expired() {
+        return Err(CtlWriteError::Wedged(
+            "the scheduler stopped reading; treating it as dead".to_string(),
+        ));
+    }
+    match wait_writable(fd, deadline.left()) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(CtlWriteError::Wedged(err.to_string())),
+    }
+}
+
+/// Whether a failed `ctl.chan` write ends the boot.
+///
+/// The order of the two rules is the whole point:
+///
+/// * Once `SIGTERM`/`SIGINT` has begun, the scheduler may be gone already: a
+///   view reaped during the drain still owes it an `EXITED`, and a `SPAWN` that
+///   raced the signal still owes it a `SPAWNED`. Nothing can act on either
+///   message any more, so a peer that closed the channel is the closed-fd arm by
+///   another name (`self.ctl == None`) — best effort, and never a reason to turn
+///   a clean shutdown into exit `1` (§1.1, finding F4).
+/// * Everything else stays fatal, exactly as before. Before shutdown a gone
+///   peer *is* a dead scheduler init must not pretend is alive, and a scheduler
+///   that took nothing for [`SEND_CTL_TIMEOUT`] is treated as dead whenever it
+///   happens: that budget is what keeps init from wedging with it (§8).
+fn ctl_failure_is_fatal(shutting_down: bool, error: &CtlWriteError) -> bool {
+    !(shutting_down && error.peer_gone())
+}
+
+/// Whether `raw` errno says the scheduler's end of `ctl.chan` is gone.
+///
+/// `EPIPE` is what a closed peer gives the next write; `ECONNRESET` is what a
+/// socket the peer tore down gives, on a write *and* on a read: a scheduler
+/// that exits while messages are still queued for it makes the next read reset
+/// instead of returning end-of-file. Both mean the same thing to init: nothing
+/// can read this channel or write to it any more.
+fn ctl_peer_gone(raw: i32) -> bool {
+    raw == libc::EPIPE || raw == libc::ECONNRESET
+}
+
+/// Whether a failed `ctl.chan` read says the scheduler's end is gone.
+///
+/// The reset case is the one that does not look like end-of-file, so it is
+/// named here rather than folded into the fatal arm of [`Supervisor::read_ctl`].
+fn ctl_read_lost_peer(err: &std::io::Error) -> bool {
+    err.raw_os_error().is_some_and(ctl_peer_gone)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::os::unix::net::UnixStream;
+
+    use super::*;
+
+    /// Finding F4: a view reaped after `DRAIN` still owes the scheduler an
+    /// `EXITED`, and once the scheduler has gone that write can only fail. A
+    /// closed `ctl.chan` must behave like the gone-fd arm rather than ending a
+    /// clean shutdown with exit `1`.
+    ///
+    /// Deterministic on purpose: the peer is closed before the write, so there
+    /// is no scheduling race and no sleep to tune.
+    #[test]
+    fn a_late_ctl_write_to_a_gone_scheduler_is_best_effort() {
+        let (init_end, scheduler_end) = UnixStream::pair().expect("a socketpair");
+        let deadline = Deadline::after(SEND_CTL_TIMEOUT);
+
+        // A live scheduler still takes the message in full.
+        assert_eq!(
+            write_ctl(init_end.as_fd(), b"EXITED", deadline),
+            Ok(()),
+            "a live ctl.chan must accept a message"
+        );
+
+        // The scheduler exits first, as it does between `DRAIN` and the last
+        // `EXITED` of the drain.
+        drop(scheduler_end);
+        let error = write_ctl(init_end.as_fd(), b"EXITED", deadline)
+            .expect_err("a closed peer cannot take the message");
+        assert!(error.peer_gone(), "{error:?}");
+
+        assert!(
+            !ctl_failure_is_fatal(true, &error),
+            "a late ctl.chan write during the drain must be best effort, \
+             or a clean SIGTERM exits 1 (finding F4)"
+        );
+        assert!(
+            ctl_failure_is_fatal(false, &error),
+            "the same write before shutdown is a dead scheduler init must not \
+             pretend is alive (§8)"
+        );
+    }
+
+    /// The best-effort arm is exactly a gone peer during shutdown: every other
+    /// failure keeps the exit code it always had.
+    #[test]
+    fn every_other_ctl_failure_stays_fatal() {
+        // A scheduler that stops reading for `SEND_CTL_TIMEOUT` is dead, drain
+        // or not: that budget is what keeps init from wedging with it (§8).
+        let wedged = CtlWriteError::Wedged("the scheduler stopped reading".to_string());
+        assert!(!wedged.peer_gone());
+        assert!(ctl_failure_is_fatal(false, &wedged));
+        assert!(ctl_failure_is_fatal(true, &wedged));
+
+        // A write error that is not a gone peer is not swallowed either.
+        let failed = CtlWriteError::Write(rustix::io::Errno::BADF);
+        assert!(!failed.peer_gone());
+        assert!(ctl_failure_is_fatal(false, &failed));
+        assert!(ctl_failure_is_fatal(true, &failed));
+    }
+
+    /// The half of finding F4 that does not look like end-of-file: a scheduler
+    /// that exits while `DRAIN` (or anything else) is still queued for it makes
+    /// init's next *read* of `ctl.chan` reset instead of returning `0`.
+    ///
+    /// Deterministic: the peer is closed after the message is queued, so the
+    /// kernel produces the reset with no timing window at all.
+    #[test]
+    fn a_scheduler_that_closes_with_data_queued_resets_the_channel() {
+        let (init_end, scheduler_end) = UnixStream::pair().expect("a socketpair");
+        let deadline = Deadline::after(SEND_CTL_TIMEOUT);
+
+        // init wrote a `DRAIN`; the scheduler exited without reading it.
+        assert_eq!(
+            write_ctl(init_end.as_fd(), b"DRAIN", deadline),
+            Ok(()),
+            "the message reaches the scheduler's queue"
+        );
+        drop(scheduler_end);
+
+        let mut buffer = [0u8; 64];
+        let read = loop {
+            match rustix::io::read(init_end.as_fd(), &mut buffer) {
+                Err(rustix::io::Errno::INTR) => continue,
+                other => break other,
+            }
+        };
+        let err = read.expect_err("a reset is an error, not end-of-file and not data");
+        assert_eq!(err.raw_os_error(), libc::ECONNRESET, "{err}");
+        assert!(
+            ctl_read_lost_peer(&std::io::Error::from(err)),
+            "a reset means the scheduler's end is gone, so `read_ctl` must go \
+             through `ctl_closed` (fatal while serving, the end of a drain) \
+             instead of failing the drain with exit 1"
+        );
+        // A read error that is not a lost peer stays fatal.
+        assert!(!ctl_read_lost_peer(&std::io::Error::from_raw_os_error(
+            libc::EINVAL
+        )));
     }
 }

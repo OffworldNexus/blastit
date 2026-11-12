@@ -23,3 +23,7 @@ status active -> review
 ## 2026-11-12T21:49 [lead]
 
 reviewer PASS: production fix correct, both pre-fix behaviours caught; MINOR: helper-level tests only (no Supervisor-level closed-fd test), free_port EADDRINUSE flake, LESSONS.md staged by lead, tree-wide critical_guard noise from parallel nodes
+
+## 2026-11-12T21:52 [lead]
+
+status review -> done

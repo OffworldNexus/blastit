@@ -2,7 +2,7 @@
 id: MA.2.3.8
 title: Make a clean SIGTERM to blastit dev exit 0 (late ctl.chan EPIPE is not fatal)
 kind: task
-status: review
+status: done
 owner: implementer
 priority: 1
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T20:50"
-updated: "2026-11-12T21:43"
+updated: "2026-11-12T21:52"
 ---
 
 # Goal

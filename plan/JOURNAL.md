@@ -321,3 +321,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-12T21:49 [MA.2.3.11] (lead) reviewer PASS: redaction oracle is real (removing redaction falsifies both halves), watermark pin load-bearing + fixture-only on an 89% host
 - 2026-11-12T21:52 [MA.2.3.9] (lead) status review -> done
 - 2026-11-12T21:52 [MA.2.3.11] (lead) status review -> done
+- 2026-11-12T21:52 [MA.2.3.8] (lead) status review -> done
