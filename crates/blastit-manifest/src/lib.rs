@@ -9,7 +9,12 @@
 //!   error, not a comment;
 //! * [`Manifest::validate`] checks what needs the whole document (unknown
 //!   groups, grants on unknown proxies, duplicate route names, path regexes,
-//!   method tokens, the uid range) and returns the non-fatal warnings;
+//!   method tokens, the uid range, a `module:attribute` `app`, and a
+//!   `queries` entry that inlines a value or a redacted `…`) and returns the
+//!   non-fatal warnings;
+//! * [`Manifest::app`] and [`Manifest::preload`] carry the two non-secret
+//!   wiring keys, and [`Route::ingress`] the request-body codec a route
+//!   declared;
 //! * [`Manifest::effective_grants`] unions the grants a route ends up with;
 //! * [`UidLayout`] maps a route index to the uid its process runs under;
 //! * [`RoutingTable`] matches `(method, path_info)` to a route.
@@ -63,3 +68,8 @@ pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning};
 pub use model::{Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route};
 pub use routing::{Match, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable};
 pub use uid::UidLayout;
+
+// A route's `[route.ingress]` is part of the manifest, so the policy type it
+// parses into is re-exported here: a caller that reads `Route::ingress` should
+// not have to name a second crate to match on it.
+pub use blastit_ingress::{BodyCodec, IngressPolicy};

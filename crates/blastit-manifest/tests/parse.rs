@@ -420,7 +420,7 @@ fn an_unknown_route_key_that_is_not_a_table_is_an_error() {
         ManifestErrors::from(ManifestError::WrongType {
             path: "route[0].egres".to_string(),
             expected: "one of the route keys (`name`, `path`, `methods`, `groups`, `egress`, \
-                       `prefork`) or a table holding an inline grant",
+                       `prefork`, `ingress`) or a table holding an inline grant",
             found: "a boolean",
         })
     );

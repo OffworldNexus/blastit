@@ -10,12 +10,17 @@ use blastit_manifest::{
 use common::{SECTION_5_1, SECTION_6, section_6, texts, validate_errors, validate_warnings};
 
 #[test]
-fn the_section_6_example_validates_without_warnings() {
+fn the_section_6_example_validates_with_its_documented_warnings() {
+    // §7.3: the checkout route declares `egress = true`, and `R11` says every
+    // egress route is a `manifest.warning` at boot.
+    let egress = vec![ManifestWarning::EgressRoute {
+        route: "checkout".to_string(),
+    }];
     let (manifest, warnings) = Manifest::parse_and_validate(SECTION_6, 20_000).expect("valid");
-    assert_eq!(warnings, vec![]);
-    assert_eq!(manifest.validate(20_000).expect("valid"), vec![]);
-    assert_eq!(manifest.validate_default().expect("valid"), vec![]);
-    assert_eq!(section_6().validate(20_000).expect("valid"), vec![]);
+    assert_eq!(warnings, egress);
+    assert_eq!(manifest.validate(20_000).expect("valid"), egress);
+    assert_eq!(manifest.validate_default().expect("valid"), egress);
+    assert_eq!(section_6().validate(20_000).expect("valid"), egress);
 }
 
 #[test]
@@ -276,7 +281,12 @@ fn the_last_route_uid_must_stay_below_65536() {
     );
 
     // 64532 + 1000 + 3 = 65535: exactly the last usable uid.
-    assert_eq!(section_6().validate(64_532).expect("fits"), vec![]);
+    assert_eq!(
+        section_6().validate(64_532).expect("fits"),
+        vec![ManifestWarning::EgressRoute {
+            route: "checkout".to_string(),
+        }]
+    );
 
     // A base that is already too high for dbproxy.
     assert_eq!(

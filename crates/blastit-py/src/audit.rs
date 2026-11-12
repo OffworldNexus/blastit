@@ -36,7 +36,7 @@
 //!     }
 //!   ],
 //!   "connection_setup": [
-//!     {"alias": "default", "proxy": "db", "sql": "SET application_name = 'app'", "count": 2}
+//!     {"alias": "default", "proxy": "db", "sql": "SET TIME ZONE 'UTC'", "count": 2}
 //!   ],
 //!   "unrecognised": [
 //!     {"alias": "default", "query": "Template('SELECT ...')", "count": 1}
@@ -128,8 +128,8 @@
 //!   },
 //!   "connection_setup": {
 //!     "statements": [
-//!       {"sql": "SET application_name = 'app'", "proxy": "db", "count": 2,
-//!        "wire_sql": "SET application_name = 'app'",
+//!       {"sql": "SET TIME ZONE 'UTC'", "proxy": "db", "count": 2,
+//!        "wire_sql": "SET TIME ZONE 'UTC'",
 //!        "ungranted_in": ["checkout"], "granted_in": 4}
 //!     ],
 //!     "ungranted": 1
@@ -2882,7 +2882,7 @@ mod tests {
         input = { url = "DATABASE_URL" }
 
         [group.connection.db]
-        queries = ["SET application_name = 'app'"]
+        queries = ["SET TIME ZONE 'UTC'"]
 
         [[route]]
         name = "notes"
@@ -2924,13 +2924,10 @@ mod tests {
         // No request at all: these statements are not a route's, they run when a
         // connection is established — which, under blastit, every request does
         // afresh (§6, "What the app must do").
-        let report = run(
-            SETUP,
-            &setup_document(&setup("SET application_name = 'app'", 2)),
-        );
+        let report = run(SETUP, &setup_document(&setup("SET TIME ZONE 'UTC'", 2)));
         let entry = &report["connection_setup"]["statements"][0];
-        assert_eq!(entry["sql"], "SET application_name = 'app'");
-        assert_eq!(entry["wire_sql"], "SET application_name = 'app'");
+        assert_eq!(entry["sql"], "SET TIME ZONE 'UTC'");
+        assert_eq!(entry["wire_sql"], "SET TIME ZONE 'UTC'");
         assert_eq!(entry["proxy"], "db");
         assert_eq!(entry["count"], 2);
         assert_eq!(
@@ -2949,16 +2946,16 @@ mod tests {
     #[test]
     fn connection_setup_granted_everywhere_is_clean() {
         let report = run(
-            &manifest_with_queries(&["SET application_name = 'app'".to_string()]),
-            &setup_document(&setup("SET application_name = 'app'", 1)),
+            &manifest_with_queries(&["SET TIME ZONE 'UTC'".to_string()]),
+            &setup_document(&setup("SET TIME ZONE 'UTC'", 1)),
         );
         assert_eq!(
             report["connection_setup"],
             json!({"statements": [{
-                "sql": "SET application_name = 'app'",
+                "sql": "SET TIME ZONE 'UTC'",
                 "proxy": "db",
                 "count": 1,
-                "wire_sql": "SET application_name = 'app'",
+                "wire_sql": "SET TIME ZONE 'UTC'",
                 "ungranted_in": [],
                 "granted_in": 1,
             }], "ungranted": 0})
@@ -2988,8 +2985,8 @@ mod tests {
             SETUP,
             &setup_document(&format!(
                 "{}, {}, {}",
-                setup("SET application_name = 'app'", 2),
-                r#"{"alias": "replica", "sql": "SET   application_name  =  'app' ;", "count": 3}"#,
+                setup("SET TIME ZONE 'UTC'", 2),
+                r#"{"alias": "replica", "sql": "SET   TIME   ZONE  'UTC' ;", "count": 3}"#,
                 setup("SELECT 1", 1),
             )),
         );
@@ -2999,11 +2996,11 @@ mod tests {
         assert_eq!(statements.len(), 2);
         let app = statements
             .iter()
-            .find(|entry| entry["sql"] == "SET application_name = 'app'")
+            .find(|entry| entry["sql"] == "SET TIME ZONE 'UTC'")
             .expect("the SET is there");
         assert_eq!(app["count"], 5, "2 plus a reformatted 3");
         assert_eq!(app["proxy"], "db", "inferred from the only proxy");
-        assert_eq!(app["wire_sql"], "SET application_name = 'app'");
+        assert_eq!(app["wire_sql"], "SET TIME ZONE 'UTC'");
     }
 
     /// A manifest whose *global* group is Django's connection housekeeping (§6).
@@ -3022,7 +3019,7 @@ mod tests {
         [group.connection.db]
         queries = [
           "SELECT set_config('TimeZone', $1, false)",
-          "SELECT 'never runs'",
+          'SELECT "never_runs"."id" FROM "never_runs" WHERE "never_runs"."id" = $?',
         ]
 
         [[route]]
@@ -3061,7 +3058,7 @@ mod tests {
             report["unused_global"]["statements"],
             json!([{
                 "proxy": "db",
-                "sql": "SELECT 'never runs'",
+                "sql": r#"SELECT "never_runs"."id" FROM "never_runs" WHERE "never_runs"."id" = $?"#,
                 "groups": ["connection"],
             }])
         );

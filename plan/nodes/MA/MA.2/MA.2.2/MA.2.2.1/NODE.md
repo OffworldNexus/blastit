@@ -2,7 +2,7 @@
 id: MA.2.2.1
 title: "Leaf 4: manifest 0.1.1 schema, reserved-key guard and boot warnings"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MA.2.1.2, MA.2.1.3]
@@ -13,11 +13,12 @@ paths:
   - "crates/blastit-manifest/src/validate.rs"
   - "crates/blastit-manifest/src/error.rs"
   - "crates/blastit-manifest/tests/**"
-attempts: 0
+  - "crates/blastit-py/src/audit.rs"
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T14:19"
 ---
 
 # Goal

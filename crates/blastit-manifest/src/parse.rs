@@ -12,22 +12,36 @@ use crate::error::{Location, ManifestError, ManifestErrors, escape_control};
 use crate::model::{
     Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, UnresolvedGrant,
 };
+use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 
 /// Keys allowed at the top level of the document.
-const TOP_LEVEL_KEYS: &[&str] = &["version", "groups", "proxy", "group", "route"];
+const TOP_LEVEL_KEYS: &[&str] = &[
+    "version", "app", "preload", "groups", "proxy", "group", "route",
+];
 
 /// Keys of a `[[route]]`; every other key of a route is a proxy name, so its
 /// value is an inline grant.
-const ROUTE_KEYS: &[&str] = &["name", "path", "methods", "groups", "egress", "prefork"];
+const ROUTE_KEYS: &[&str] = &[
+    "name", "path", "methods", "groups", "egress", "prefork", "ingress",
+];
+
+/// Keys that are only ever top-level, so finding one inside a table means the
+/// author wrote it after the first `[table]` and TOML attached it there (`R8`).
+const TOP_LEVEL_ONLY_KEYS: &[&str] = &["version", "app", "preload"];
 
 /// Expected value of an unknown route key, for the error message.
 const ROUTE_KEY_EXPECTED: &str = "one of the route keys (`name`, `path`, `methods`, `groups`, \
-                                   `egress`, `prefork`) or a table holding an inline grant";
+                                   `egress`, `prefork`, `ingress`) or a table holding an inline \
+                                   grant";
 
 /// Expected values of a route's `path`, for the error message of anything that
 /// is neither.
 const PATTERN_EXPECTED: &str = "a regex, or an array of them";
+
+/// Expected values of the top-level `preload`, for the error message of
+/// anything that is neither.
+const PRELOAD_EXPECTED: &str = "a module name, or an array of them";
 
 /// Parses a manifest document.
 pub(crate) fn parse(source: &str) -> Result<Manifest, ManifestErrors> {
@@ -36,8 +50,19 @@ pub(crate) fn parse(source: &str) -> Result<Manifest, ManifestErrors> {
         Err(error) => return Err(ManifestErrors::from(syntax_error(&error, source))),
     };
 
+    // A misplaced top-level key is a scoping mistake, not a value mistake: every
+    // other check would read the document the way TOML did, so the walk runs
+    // first and reports alone.
+    let mut misplaced = Vec::new();
+    check_top_level_keys(&document, &mut misplaced);
+    if !misplaced.is_empty() {
+        return Err(ManifestErrors::from(misplaced));
+    }
+
     let mut parser = Parser::default();
     let version = parser.version(&document);
+    let app = parser.app(&document);
+    let preload = parser.preload(&document);
     let global_groups = parser
         .string_list(document.get("groups"), "groups")
         .unwrap_or_default();
@@ -63,7 +88,143 @@ pub(crate) fn parse(source: &str) -> Result<Manifest, ManifestErrors> {
         groups,
         routes,
         parser.unresolved,
-    ))
+    )
+    .with_app(app)
+    .with_preload(preload))
+}
+
+/// Reports every top-level-only key that TOML attached to a table (`R8`).
+///
+/// TOML attaches `version = 1` written after `[proxy.db]` to that proxy, where
+/// it reads as a proxy field and the boot fails with a message about the wrong
+/// line. `groups` is top-level and route-level; inside any other table it is
+/// the same mistake.
+///
+/// Only *field* positions are checked. Every name in a manifest belongs to the
+/// author — proxy names, group names, the variable names in `input`/`output`,
+/// and the table names under `tables` — so `[proxy.app]`, `[group.app.db]`,
+/// `[proxy.db.output] app = "…"` and `[route.db.tables] groups = { … }` are all
+/// legal. The four keys are reserved where the schema names them, not where the
+/// author does.
+fn check_top_level_keys(document: &toml::Table, errors: &mut Vec<ManifestError>) {
+    let declared = declared_proxies(document);
+    for (key, value) in document {
+        match (key.as_str(), value) {
+            // `[proxy.<name>]`: the name is the author's, the body is a field
+            // table, and the names inside `input`/`output` are the author's
+            // again.
+            ("proxy", Value::Table(proxies)) => {
+                for proxy in proxies.values() {
+                    check_fields(proxy, errors);
+                }
+            }
+            // `[group.<name>.<proxy>]`: a group name, then a proxy name, then
+            // the grant's own fields.
+            ("group", Value::Table(groups)) => {
+                for grants in groups.values() {
+                    let Value::Table(grants) = grants else {
+                        continue;
+                    };
+                    for grant in grants.values() {
+                        check_grant(grant, errors);
+                    }
+                }
+            }
+            // `[[route]]` elements are the one place `groups` is a field.
+            ("route", Value::Array(routes)) => {
+                for route in routes {
+                    check_route(route, &declared, errors);
+                }
+            }
+            // Everything else is a scalar, a list, or a key the schema does not
+            // know; none of them can hold a misplaced top-level key.
+            _ => {}
+        }
+    }
+}
+
+/// The proxy names a document declares.
+///
+/// A route key is either a route key or a proxy name (§6), and a reserved key
+/// is only an author-chosen name when it names a declared proxy: `version = 1`
+/// below a `[[route]]` is still a misplaced top-level key, while
+/// `app = { queries = [] }` next to `[proxy.app]` is a grant.
+fn declared_proxies(document: &toml::Table) -> BTreeSet<&str> {
+    match document.get("proxy") {
+        Some(Value::Table(proxies)) => proxies.keys().map(String::as_str).collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
+/// True for the keys that belong at the top of the document, not inside a
+/// table: `version`, `app` and `preload` always, and `groups` everywhere but a
+/// `[[route]]` element (`R8`).
+///
+/// Finding one of them as a *field* means it was written after a `[table]`,
+/// where TOML attached it to that table instead of refusing.
+fn reserved(key: &str) -> bool {
+    TOP_LEVEL_ONLY_KEYS.contains(&key) || key == "groups"
+}
+
+/// The keys of one table that holds schema fields: a top-level-only key here
+/// was written after a `[table]` and TOML attached it to this one (`R8`).
+fn check_fields(value: &Value, errors: &mut Vec<ManifestError>) {
+    let Value::Table(table) = value else {
+        return;
+    };
+    for key in table.keys() {
+        if reserved(key) {
+            errors.push(ManifestError::NotTopLevel {
+                key: escape_control(key),
+            });
+        }
+    }
+}
+
+/// The body of one `[[route]]`: its route keys are fields, `groups` included,
+/// and every other key is a proxy name whose value is an inline grant (§6).
+fn check_route(value: &Value, declared: &BTreeSet<&str>, errors: &mut Vec<ManifestError>) {
+    let Value::Table(route) = value else {
+        return;
+    };
+    for (key, value) in route {
+        match key.as_str() {
+            // The one route key that is a table of fields.
+            "ingress" => check_fields(value, errors),
+            key if ROUTE_KEYS.contains(&key) => {}
+            // A grant is a table, so a reserved key with one is a proxy name
+            // only when that proxy is declared.
+            key if declared.contains(key) && value.is_table() => check_grant(value, errors),
+            key if reserved(key) => errors.push(ManifestError::NotTopLevel {
+                key: escape_control(key),
+            }),
+            _ => check_grant(value, errors),
+        }
+    }
+}
+
+/// The body of a grant: `queries`, `tables`, `functions`… are the schema's keys,
+/// and the table names inside `tables` are the author's (Django's `groups` is a
+/// table like any other).
+fn check_grant(value: &Value, errors: &mut Vec<ManifestError>) {
+    let Value::Table(grant) = value else {
+        return;
+    };
+    for (key, value) in grant {
+        if reserved(key) {
+            errors.push(ManifestError::NotTopLevel {
+                key: escape_control(key),
+            });
+            continue;
+        }
+        if key == "tables"
+            && let Value::Table(tables) = value
+        {
+            for operations in tables.values() {
+                check_fields(operations, errors);
+            }
+        }
+    }
 }
 
 /// Renders a TOML parse failure as a single line, with its position.
@@ -144,6 +305,64 @@ impl Parser {
                 1
             }
         }
+    }
+
+    /// The optional top-level `app`: the WSGI callable, kept exactly as written
+    /// (`R7`).
+    ///
+    /// The manifest deliberately does not judge the shape here. `BLASTIT_APP`
+    /// overrides this key, so the caller that merges the two is the one that
+    /// can say the final value must be `module:attribute`; validation repeats
+    /// the check for the manifest value so a file with a dot instead of a colon
+    /// fails at boot even when it is the only source.
+    fn app(&mut self, document: &toml::Table) -> Option<String> {
+        let app = self.as_str(document.get("app")?, "app")?;
+        if app.is_empty() {
+            self.error(ManifestError::Empty {
+                path: "app".to_string(),
+            });
+            return None;
+        }
+        Some(app)
+    }
+
+    /// The optional top-level `preload`: a module name, or a list of them
+    /// (`R7`).
+    ///
+    /// A string is a list of one, exactly like `path`. Duplicates keep the
+    /// first position: a module imported once before the fork gains nothing
+    /// from being named twice.
+    fn preload(&mut self, document: &toml::Table) -> Vec<String> {
+        let Some(value) = document.get("preload") else {
+            return Vec::new();
+        };
+        let list = match value {
+            Value::String(module) => vec![module.clone()],
+            Value::Array(_) => match self.string_list(Some(value), "preload") {
+                Some(list) => list,
+                None => return Vec::new(),
+            },
+            other => {
+                self.error(ManifestError::WrongType {
+                    path: "preload".to_string(),
+                    expected: PRELOAD_EXPECTED,
+                    found: type_name(other),
+                });
+                return Vec::new();
+            }
+        };
+
+        let mut modules = Vec::with_capacity(list.len());
+        for (index, module) in list.into_iter().enumerate() {
+            if module.is_empty() {
+                self.error(ManifestError::Empty {
+                    path: format!("preload[{index}]"),
+                });
+            } else if !modules.contains(&module) {
+                modules.push(module);
+            }
+        }
+        modules
     }
 
     /// The `[proxy.<name>]` declarations.
@@ -280,6 +499,7 @@ impl Parser {
             let mut groups = None;
             let mut egress = false;
             let mut prefork = false;
+            let mut ingress = None;
             for (key, value) in fields {
                 let key_path = format!("{path}.{}", escape_control(key));
                 match key.as_str() {
@@ -303,6 +523,7 @@ impl Parser {
                             prefork = value;
                         }
                     }
+                    "ingress" => ingress = self.ingress(value, &key_path),
                     _ => {}
                 }
             }
@@ -335,15 +556,18 @@ impl Parser {
                 }
             }
 
-            routes.push(Route::new(
-                name,
-                patterns.unwrap_or_default(),
-                methods,
-                groups.unwrap_or_default(),
-                egress,
-                prefork,
-                grants,
-            ));
+            routes.push(
+                Route::new(
+                    name,
+                    patterns.unwrap_or_default(),
+                    methods,
+                    groups.unwrap_or_default(),
+                    egress,
+                    prefork,
+                    grants,
+                )
+                .with_ingress(ingress),
+            );
         }
 
         routes
@@ -522,6 +746,77 @@ impl Parser {
                     path: path.to_string(),
                     expected: "the string \"*\" (every column) or a list of column names",
                     found: type_name(other),
+                });
+                None
+            }
+        }
+    }
+
+    /// A route's `[route.ingress]`: the body codec and whether `raw` is
+    /// explicitly allowed (`R11`).
+    ///
+    /// `body` is required — a table that declares nothing would read like a
+    /// policy while enforcing none. `allow_raw` exists only on `raw`: on any
+    /// other codec it is an unknown key rather than a setting that quietly does
+    /// nothing.
+    fn ingress(&mut self, value: &Value, path: &str) -> Option<IngressPolicy> {
+        let table = self.as_table(value, path)?;
+        let mut has_body = false;
+        let mut body = None;
+        let mut allow_raw = None;
+        for (key, value) in table {
+            let key_path = format!("{path}.{}", escape_control(key));
+            match key.as_str() {
+                "body" => {
+                    has_body = true;
+                    body = self.body_codec(value, &key_path);
+                }
+                // Decided once `body` is known: the table is walked in key
+                // order, so `allow_raw` arrives before `body`.
+                "allow_raw" => allow_raw = Some((value, key_path)),
+                _ => self.error(ManifestError::UnknownKey { path: key_path }),
+            }
+        }
+
+        let Some(codec) = body else {
+            if !has_body {
+                self.error(ManifestError::MissingKey {
+                    path: format!("{path}.body"),
+                });
+            }
+            return None;
+        };
+
+        let allow_raw = match allow_raw {
+            None => false,
+            Some((value, key_path)) => {
+                if codec == BodyCodec::Raw {
+                    self.as_bool(value, &key_path).unwrap_or(false)
+                } else {
+                    self.error(ManifestError::UnknownKey { path: key_path });
+                    false
+                }
+            }
+        };
+        Some(IngressPolicy {
+            body: codec,
+            allow_raw,
+        })
+    }
+
+    /// The `body` of a `[route.ingress]` table: `json`, `form`, `none` or
+    /// `raw`.
+    fn body_codec(&mut self, value: &Value, path: &str) -> Option<BodyCodec> {
+        let codec = self.as_str(value, path)?;
+        match codec.as_str() {
+            "json" => Some(BodyCodec::Json),
+            "form" => Some(BodyCodec::Form),
+            "none" => Some(BodyCodec::None),
+            "raw" => Some(BodyCodec::Raw),
+            _ => {
+                self.error(ManifestError::UnknownBodyCodec {
+                    path: path.to_string(),
+                    found: codec,
                 });
                 None
             }
