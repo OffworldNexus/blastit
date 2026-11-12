@@ -64,9 +64,8 @@ impl RouteInfo {
 /// [`RoutingTable::route`] returns indices in, and which [`UidLayout::view`]
 /// numbers uids by.
 ///
-/// Ingress policies stay unset here (`ingress = None`, the fail-closed
-/// default); the manifest's `[route.ingress]` is attached with
-/// [`RouteInfo::with_ingress`].
+/// Each route carries its `[route.ingress]` policy, so the scheduler can plan a
+/// request body from the head alone (`R12`, `R16`).
 ///
 /// [`RoutingTable::route`]: blastit_manifest::RoutingTable::route
 pub fn routes_from_manifest(manifest: &Manifest, layout: &UidLayout) -> Vec<RouteInfo> {
@@ -74,7 +73,10 @@ pub fn routes_from_manifest(manifest: &Manifest, layout: &UidLayout) -> Vec<Rout
         .routes()
         .iter()
         .enumerate()
-        .map(|(index, route)| RouteInfo::new(route.name(), route.prefork(), layout.view(index)))
+        .map(|(index, route)| {
+            RouteInfo::new(route.name(), route.prefork(), layout.view(index))
+                .with_ingress(route.ingress())
+        })
         .collect()
 }
 

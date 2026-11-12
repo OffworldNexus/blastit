@@ -2,7 +2,7 @@
 id: MA.2.2.3
 title: "Leaf 6: HTTP early upload abort and scheduler ingress enforcement"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MA.2.2.1]
@@ -11,11 +11,11 @@ paths:
   - "crates/blastit-http/tests/**"
   - "crates/blastit-scheduler/src/**"
   - "crates/blastit-scheduler/tests/**"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T13:12"
-updated: "2026-11-12T13:12"
+updated: "2026-11-12T14:47"
 ---
 
 # Goal

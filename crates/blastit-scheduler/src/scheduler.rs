@@ -115,6 +115,7 @@ use blastit_events::{
 use blastit_frame::{
     Ctl, DoneOutcome, Frame, FrameError, INITIAL_WINDOW, Limits, ReqHead, RequestCost, RespHead,
 };
+use blastit_ingress::{BodyPlan, apply_transcoded_headers, plan_body, transcode_buffered};
 use blastit_manifest::RoutingTable;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -450,6 +451,14 @@ struct Request {
     /// Body chunks held while the request is queued. Credit bounds them: http
     /// may not send more than [`Request::upload_credit`] allows (§3.1).
     body: Vec<Vec<u8>>,
+    /// How the body must be handled, decided from the head alone (`R12`, `R16`).
+    body_plan: BodyPlan,
+    /// The body is buffered and, for `json`/`form`, transcoded: the request may
+    /// be dispatched. A `Buffer` request waits here until its `REQ_END`.
+    body_ready: bool,
+    /// This request is an unrouted `--learn` request using the single fallback
+    /// slot (`R26`, design §4.2 D.2).
+    learn_fallback: bool,
     /// `REQ_END` arrived.
     end_seen: bool,
     /// A `CANCEL` arrived from http.
@@ -503,8 +512,12 @@ enum Resolution {
     Bad,
     /// The health path, answered by the scheduler itself.
     Health,
-    /// Nothing matched: a `404` (§2.4).
-    Unrouted,
+    /// Nothing matched: a `404` (§2.4), or the `--learn` fallback.
+    Unrouted {
+        /// The decoded target path, used only by the `--learn` fallback to
+        /// attribute the request (`R26`).
+        path: String,
+    },
     /// A route, one of its rules, and the `PATH_INFO` that matched.
     Routed {
         /// Route index.
@@ -537,6 +550,10 @@ struct Scheduler {
     /// Requests waiting for a worker slot, oldest first (§2.4's bounded FIFO)
     /// or in fair order (D5).
     queue: Admission,
+    /// The one unrouted `--learn` request currently served (`R26`).
+    learn_fallback_busy: bool,
+    /// Unrouted `--learn` requests waiting for that one slot, oldest first.
+    learn_fallback_queue: VecDeque<u32>,
     /// The live view per route: at most one (§2.4).
     views: HashMap<usize, View>,
     /// `(view, request id)` to http stream id: what a frame from a view means.
@@ -619,6 +636,8 @@ impl Scheduler {
             counter: 0,
             requests: HashMap::new(),
             queue,
+            learn_fallback_busy: false,
+            learn_fallback_queue: VecDeque::new(),
             views: HashMap::new(),
             dispatch: HashMap::new(),
             slots: 0,
@@ -679,7 +698,10 @@ impl Scheduler {
         if !self.draining {
             return false;
         }
-        let idle = self.slots == 0 && self.queue.is_empty();
+        let idle = self.slots == 0
+            && self.queue.is_empty()
+            && self.learn_fallback_queue.is_empty()
+            && !self.learn_fallback_busy;
         let expired = match self.drain_deadline {
             Some(deadline) => Instant::now() >= deadline,
             None => true,
@@ -700,6 +722,24 @@ impl Scheduler {
             if let Some(since) = self
                 .requests
                 .get(&stream_id)
+                .and_then(|request| request.queued_since)
+            {
+                take(since + self.cfg.queue_timeout);
+            }
+        }
+        // A structured body still being collected, and an unrouted `--learn`
+        // request waiting for the single fallback slot, both age the same way.
+        for request in self.requests.values() {
+            if !request.body_ready
+                && let Some(since) = request.queued_since
+            {
+                take(since + self.cfg.queue_timeout);
+            }
+        }
+        for stream_id in &self.learn_fallback_queue {
+            if let Some(since) = self
+                .requests
+                .get(stream_id)
                 .and_then(|request| request.queued_since)
             {
                 take(since + self.cfg.queue_timeout);
@@ -750,6 +790,7 @@ impl Scheduler {
         let now = Instant::now();
         self.backoff.retain(|_, until| *until > now);
         self.expire_queue()?;
+        self.pump_learn_fallback()?;
         self.dispatch_queued()?;
         self.expire_requests()?;
         self.retire_finished_views()?;
@@ -939,6 +980,9 @@ impl Scheduler {
             bytes_in: 0,
             bytes_out: 0,
             body: Vec::new(),
+            body_plan: BodyPlan::AllowEmptyOnly,
+            body_ready: true,
+            learn_fallback: false,
             end_seen: false,
             cancelled: false,
             view: None,
@@ -974,16 +1018,39 @@ impl Scheduler {
                 self.respond(stream_id, 200, "OK", "ok", None)?;
                 self.finish_immediately(stream_id, Outcome::Ok)
             }
-            Resolution::Unrouted => {
+            Resolution::Unrouted { path } => {
+                request.path_info = Some(path);
                 self.requests.insert(stream_id, request);
-                self.reject(
-                    stream_id,
-                    404,
-                    "Not Found",
-                    "not found\n",
-                    Outcome::Unmatched,
-                    None,
-                )
+                if self.cfg.learn_mode {
+                    // `--learn` never short-circuits an unrouted request: it is
+                    // served by the app one at a time so its SQL can be
+                    // attributed to `ObsTarget::Unrouted` (`R26`).
+                    let retry_after = retry_after_seconds(self.cfg.queue_timeout);
+                    if self.learn_fallback_queue.len() >= self.cfg.queue_size {
+                        return self.reject(
+                            stream_id,
+                            503,
+                            "Service Unavailable",
+                            "queue full\n",
+                            Outcome::QueueFull,
+                            Some(retry_after),
+                        );
+                    }
+                    if let Some(request) = self.requests.get_mut(&stream_id) {
+                        request.queued_since = Some(now);
+                    }
+                    self.learn_fallback_queue.push_back(stream_id);
+                    self.pump_learn_fallback()
+                } else {
+                    self.reject(
+                        stream_id,
+                        404,
+                        "Not Found",
+                        "not found\n",
+                        Outcome::Unmatched,
+                        None,
+                    )
+                }
             }
             Resolution::Routed {
                 route,
@@ -1001,34 +1068,172 @@ impl Scheduler {
                 request.flow =
                     self.queue
                         .resolve(&request.head.peer_addr, &request.head.headers, now);
+                // `R12`: the head alone decides whether this route may have a
+                // body at all, and `R16`: `raw` streams with zero buffering.
+                let plan = match self.plan_request_body(&request) {
+                    Ok(plan) => plan,
+                    Err(status) => {
+                        self.requests.insert(stream_id, request);
+                        return self.refuse_body(stream_id, status);
+                    }
+                };
+                request.body_plan = plan;
+                request.body_ready = !matches!(plan, BodyPlan::Buffer { .. });
                 self.requests.insert(stream_id, request);
-                let retry_after = retry_after_seconds(self.cfg.queue_timeout);
-                if self.draining {
-                    self.reject(
-                        stream_id,
-                        503,
-                        "Service Unavailable",
-                        "draining\n",
-                        Outcome::QueueFull,
-                        Some(retry_after),
-                    )
-                } else if self.can_dispatch(route) {
-                    self.dispatch(stream_id)
-                } else if self.queue.len() >= self.cfg.queue_size {
-                    self.reject(
-                        stream_id,
-                        503,
-                        "Service Unavailable",
-                        "queue full\n",
-                        Outcome::QueueFull,
-                        Some(retry_after),
-                    )
-                } else {
-                    self.enqueue(stream_id);
-                    Ok(())
+                if matches!(plan, BodyPlan::Buffer { .. }) {
+                    // A structured body is buffered up to `BLASTIT_MAX_BODY_BYTES`
+                    // and transcoded before the view sees a byte.
+                    if self.buffering_count() >= self.cfg.queue_size {
+                        return self.reject(
+                            stream_id,
+                            503,
+                            "Service Unavailable",
+                            "queue full\n",
+                            Outcome::QueueFull,
+                            Some(retry_after_seconds(self.cfg.queue_timeout)),
+                        );
+                    }
+                    if let Some(request) = self.requests.get_mut(&stream_id) {
+                        request.queued_since = Some(now);
+                    }
+                    return Ok(());
                 }
+                self.admit_ready(stream_id)
             }
         }
+    }
+
+    /// The `[route.ingress]` plan for a routed request, from its head alone.
+    ///
+    /// `Err` carries the status the scheduler answers with (`400` for a codec
+    /// mismatch, `413` for a body on a route that takes none).
+    fn plan_request_body(&self, request: &Request) -> Result<BodyPlan, u16> {
+        let route = request.route.and_then(|route| self.routes.get(route));
+        let policy = route.and_then(|route| route.ingress);
+        let method = String::from_utf8_lossy(&request.head.method).into_owned();
+        let content_type = header_text(&request.head, b"content-type");
+        let content_encoding = header_text(&request.head, b"content-encoding");
+        let content_length = request
+            .head
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(b"content-length"))
+            .map(|(_, value)| {
+                std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<u64>().ok())
+                    // A length this build cannot read is treated as unbounded:
+                    // fail closed rather than let it look like zero.
+                    .unwrap_or(u64::MAX)
+            });
+        plan_body(
+            &method,
+            policy,
+            content_type.as_deref(),
+            content_encoding.as_deref(),
+            content_length,
+        )
+        .map_err(|reject| reject.status())
+    }
+
+    /// Hands a request whose head/body is ready to the admission machinery.
+    fn admit_ready(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        let Some(route) = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.route)
+        else {
+            return Ok(());
+        };
+        let retry_after = retry_after_seconds(self.cfg.queue_timeout);
+        if self.draining {
+            self.reject(
+                stream_id,
+                503,
+                "Service Unavailable",
+                "draining\n",
+                Outcome::QueueFull,
+                Some(retry_after),
+            )
+        } else if self.can_dispatch(route) {
+            self.dispatch(stream_id)
+        } else if self.queue.len() >= self.cfg.queue_size {
+            self.reject(
+                stream_id,
+                503,
+                "Service Unavailable",
+                "queue full\n",
+                Outcome::QueueFull,
+                Some(retry_after),
+            )
+        } else {
+            self.enqueue(stream_id);
+            Ok(())
+        }
+    }
+
+    /// How many requests are still collecting a structured body.
+    fn buffering_count(&self) -> usize {
+        self.requests
+            .values()
+            .filter(|request| !request.body_ready && !request.complete && request.view.is_none())
+            .count()
+    }
+
+    /// The view an unrouted `--learn` request is served by: the first route's,
+    /// when the manifest declared one (`R26`).
+    fn learn_route(&self) -> Option<usize> {
+        (!self.routes.is_empty()).then_some(0)
+    }
+
+    /// Starts the next unrouted `--learn` request, if the single slot is free
+    /// and a view can take it (`R26`, design §4.2 D.2).
+    ///
+    /// The slot is what keeps `ObsTarget::Unrouted` attribution unambiguous:
+    /// two unrouted requests never run at once, so every statement a session
+    /// reports belongs to exactly one request.
+    fn pump_learn_fallback(&mut self) -> Result<(), SchedulerError> {
+        if !self.cfg.learn_mode || self.learn_fallback_busy {
+            return Ok(());
+        }
+        let Some(&stream_id) = self.learn_fallback_queue.front() else {
+            return Ok(());
+        };
+        if !self.requests.contains_key(&stream_id) {
+            self.learn_fallback_queue.pop_front();
+            return Ok(());
+        }
+        let Some(route) = self.learn_route() else {
+            // Nothing to run the request through: learn mode has no route to
+            // observe, so the request is still an honest `404`.
+            self.learn_fallback_queue.pop_front();
+            return self.reject(
+                stream_id,
+                404,
+                "Not Found",
+                "not found\n",
+                Outcome::Unmatched,
+                None,
+            );
+        };
+        if !self.can_dispatch(route) {
+            if !self.views.contains_key(&route) && !self.draining {
+                self.try_spawn(route)?;
+            }
+            return Ok(());
+        }
+        self.learn_fallback_queue.pop_front();
+        self.learn_fallback_busy = true;
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.learn_fallback = true;
+            request.route = Some(route);
+            // An unrouted request has no declared ingress: never short-circuit
+            // it, and never buffer it (`R26`).
+            request.body_plan = BodyPlan::StreamPassthrough;
+            request.body_ready = true;
+            request.queued_since = None;
+        }
+        self.dispatch(stream_id)
     }
 
     /// Turns the request target into a routing decision (§2.4, §6).
@@ -1048,6 +1253,9 @@ impl Scheduler {
         let Ok(path) = std::str::from_utf8(&decoded) else {
             return Resolution::Bad;
         };
+        // An unrouted request reports the path exactly as decoded, before any
+        // mount prefix is stripped: that is what the client asked for.
+        let request_path = path.to_string();
         let Ok(method) = std::str::from_utf8(&request.head.method) else {
             return Resolution::Bad;
         };
@@ -1059,7 +1267,9 @@ impl Scheduler {
         let path = match self.script_name.as_deref() {
             Some(prefix) => match strip_script_name(path, prefix) {
                 Some(rest) => rest,
-                None => return Resolution::Unrouted,
+                None => {
+                    return Resolution::Unrouted { path: request_path };
+                }
             },
             None => path,
         };
@@ -1069,7 +1279,7 @@ impl Scheduler {
                 rule: u32::try_from(matched.rule).unwrap_or(u32::MAX),
                 path_info: path.to_string(),
             },
-            None => Resolution::Unrouted,
+            None => Resolution::Unrouted { path: request_path },
         }
     }
 
@@ -1107,21 +1317,62 @@ impl Scheduler {
         if request.complete {
             return Ok(());
         }
-        let view = request.view;
-        let allowed = request.upload_credit as u64;
-        if body.len() as u64 > allowed {
-            return self.http_credit_violation(stream_id);
-        }
-        let count = body.len() as u64;
-        if let Some(request) = self.requests.get_mut(&stream_id) {
-            request.bytes_in += count;
-            request.upload_credit -= body.len() as u32;
-        }
-        match view {
-            Some((key, id)) => self.view_push(key, id, Frame::ReqBody(body)),
-            None => {
+        match request.body_plan {
+            // A route that accepts no body may see `REQ_END`, never a byte
+            // (`R12`, `ADR-0006`).
+            BodyPlan::AllowEmptyOnly => {
+                if body.is_empty() {
+                    return Ok(());
+                }
+                self.refuse_body(stream_id, 413)
+            }
+            BodyPlan::StreamPassthrough => {
+                let view = request.view;
+                let allowed = request.upload_credit as u64;
+                if body.len() as u64 > allowed {
+                    return self.http_credit_violation(stream_id);
+                }
+                let count = body.len() as u64;
                 if let Some(request) = self.requests.get_mut(&stream_id) {
+                    request.bytes_in += count;
+                    request.upload_credit -= body.len() as u32;
+                }
+                match view {
+                    Some((key, id)) => self.view_push(key, id, Frame::ReqBody(body)),
+                    None => {
+                        if let Some(request) = self.requests.get_mut(&stream_id) {
+                            request.body.push(body);
+                        }
+                        Ok(())
+                    }
+                }
+            }
+            // `R14`/`R15`: the whole body is validated and re-encoded before a
+            // view sees it, so it is buffered here — bounded, and with the
+            // consumed credit handed back so an upload may exceed one window.
+            BodyPlan::Buffer { .. } => {
+                let allowed = request.upload_credit as u64;
+                if body.len() as u64 > allowed {
+                    return self.http_credit_violation(stream_id);
+                }
+                let total = request.bytes_in.saturating_add(body.len() as u64);
+                if total > self.cfg.max_body_bytes {
+                    return self.refuse_body(stream_id, 413);
+                }
+                let credit = u32::try_from(body.len()).unwrap_or(u32::MAX);
+                let count = body.len() as u64;
+                if let Some(request) = self.requests.get_mut(&stream_id) {
+                    request.bytes_in += count;
+                    request.upload_credit = request
+                        .upload_credit
+                        .saturating_sub(credit)
+                        .saturating_add(credit);
                     request.body.push(body);
+                }
+                // The scheduler consumed those bytes, so the client may send
+                // that much more while the body is still being collected.
+                if credit > 0 {
+                    self.http_push(stream_id, Frame::Window { bytes: credit })?;
                 }
                 Ok(())
             }
@@ -1130,15 +1381,52 @@ impl Scheduler {
 
     /// Forwards `REQ_END`, or remembers it for a queued request.
     fn request_end(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
-        let Some(request) = self.requests.get_mut(&stream_id) else {
+        let Some(request) = self.requests.get(&stream_id) else {
             self.dropped += 1;
             return Ok(());
         };
-        if request.complete {
+        if request.complete || request.end_seen {
             return Ok(());
         }
-        request.end_seen = true;
-        let view = request.view;
+        if let BodyPlan::Buffer { codec } = request.body_plan {
+            // The body is complete: canonicalise it before dispatch so the view
+            // only ever sees valid, re-encoded bytes and no stale framing
+            // headers (`R14`, `R15`).
+            let method = String::from_utf8_lossy(&request.head.method).into_owned();
+            let content_type = header_text(&request.head, b"content-type");
+            let raw: Vec<u8> = request.body.iter().flatten().copied().collect();
+            if raw.len() as u64 > self.cfg.max_body_bytes {
+                return self.refuse_body(stream_id, 413);
+            }
+            let transcoded = match transcode_buffered(codec, &method, content_type.as_deref(), &raw)
+            {
+                Ok(body) => body,
+                Err(reject) => return self.refuse_body(stream_id, reject.status()),
+            };
+            if let Some(request) = self.requests.get_mut(&stream_id) {
+                apply_transcoded_headers(
+                    &mut request.head.headers,
+                    transcoded.content_type,
+                    transcoded.bytes.len(),
+                );
+                request.body = if transcoded.bytes.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![transcoded.bytes]
+                };
+                request.end_seen = true;
+                request.body_ready = true;
+                request.queued_since = None;
+            }
+            return self.admit_ready(stream_id);
+        }
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.end_seen = true;
+        }
+        let view = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.view);
         match view {
             Some((key, id)) => self.view_push(key, id, Frame::ReqEnd),
             None => Ok(()),
@@ -1449,6 +1737,45 @@ impl Scheduler {
             })
             .collect();
         for stream_id in expired {
+            self.queue.remove(stream_id);
+            self.reject(
+                stream_id,
+                503,
+                "Service Unavailable",
+                "queue timeout\n",
+                Outcome::QueueTimeout,
+                Some(retry_after),
+            )?;
+        }
+        // A structured body that never completes, and an unrouted `--learn`
+        // request that never gets the single fallback slot, are bounded by the
+        // same queue timeout.
+        let mut waiting: Vec<u32> = self
+            .requests
+            .values()
+            .filter(|request| {
+                !request.body_ready
+                    && request
+                        .queued_since
+                        .is_some_and(|since| now.duration_since(since) >= timeout)
+                    && request.view.is_none()
+            })
+            .map(|request| request.stream_id)
+            .collect();
+        waiting.extend(
+            self.learn_fallback_queue
+                .iter()
+                .copied()
+                .filter(|stream_id| {
+                    self.requests
+                        .get(stream_id)
+                        .and_then(|request| request.queued_since)
+                        .is_some_and(|since| now.duration_since(since) >= timeout)
+                }),
+        );
+        for stream_id in waiting {
+            self.learn_fallback_queue
+                .retain(|queued| *queued != stream_id);
             self.queue.remove(stream_id);
             self.reject(
                 stream_id,
@@ -2151,6 +2478,33 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Answers a request whose body the route will not take, cancelling a view
+    /// that may already have seen the head (`R12`, `R14`, `R15`).
+    ///
+    /// The view keeps its slot until its `DONE` arrives, exactly as a client
+    /// cancellation does: the response is over, but the thread is still alive.
+    fn refuse_body(&mut self, stream_id: u32, status: u16) -> Result<(), SchedulerError> {
+        let view = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.view);
+        if let Some((key, id)) = view {
+            self.view_push(key, id, Frame::Cancel)?;
+        }
+        let (reason, body) = canned(status);
+        self.respond(stream_id, status, reason, body, None)?;
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.complete = true;
+            request.outcome = Outcome::Unmatched;
+        }
+        self.mark_finished(stream_id);
+        self.emit_request(stream_id);
+        if view.is_none() {
+            self.release(stream_id);
+        }
+        Ok(())
+    }
+
     /// Marks an answer the scheduler just wrote as complete, and logs it.
     fn finish_immediately(
         &mut self,
@@ -2225,6 +2579,11 @@ impl Scheduler {
             self.slots = self.slots.saturating_sub(1);
         }
         self.queue.remove(stream_id);
+        if request.learn_fallback {
+            // The single `--learn` slot is free again; `pump` starts the next
+            // unrouted request right after this event.
+            self.learn_fallback_busy = false;
+        }
         if let Some(flow) = request.flow {
             self.queue.release_flow(flow, Instant::now());
         }
@@ -2336,6 +2695,7 @@ impl Scheduler {
         let mut event = Event::now(Component::Scheduler, EventKind::Request(info))
             .with_request_id(request.request_id.clone());
         if let Some(route) = request.route
+            && !request.learn_fallback
             && let Some(route) = self.routes.get(route)
         {
             event = event.with_route(route.name.clone());
@@ -2598,11 +2958,24 @@ fn canned(status: u16) -> (&'static str, &'static str) {
     match status {
         400 => ("Bad Request", "bad request\n"),
         404 => ("Not Found", "not found\n"),
+        413 => ("Content Too Large", "content too large\n"),
         502 => ("Bad Gateway", "bad gateway\n"),
         503 => ("Service Unavailable", "unavailable\n"),
         504 => ("Gateway Timeout", "gateway timeout\n"),
         _ => ("Error", "error\n"),
     }
+}
+
+/// The first value of `name` in `head`, as text, when it is valid UTF-8.
+///
+/// Only `Content-Type`/`Content-Encoding` are read this way, and only to hand
+/// them to `blastit-ingress`, which never echoes them back unvalidated.
+fn header_text(head: &ReqHead, name: &[u8]) -> Option<String> {
+    head.headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .and_then(|(_, value)| std::str::from_utf8(value).ok())
+        .map(str::to_owned)
 }
 
 /// Sleeps until `deadline`, or forever when there is none.

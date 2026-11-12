@@ -262,6 +262,7 @@ impl Chan {
             shared: self.shared.clone(),
             id,
             incoming,
+            pending: None,
             abort,
             aborted,
             credit: credited,
@@ -298,6 +299,14 @@ pub struct Stream {
     shared: Arc<Shared>,
     id: u32,
     incoming: mpsc::UnboundedReceiver<Frame>,
+    /// A response frame that arrived while the request body was still being
+    /// uploaded, and that [`Stream::recv`] must hand over first.
+    ///
+    /// The scheduler answers a request it can settle from the head alone (a
+    /// `400`/`404`/`413`/`503`/`504`) without waiting for the upload. Keeping
+    /// that frame here lets the connection stop reading the client socket and
+    /// relay the answer without losing the head (`R13`, design §4.2 D.1).
+    pending: Option<Frame>,
     /// Held as well as watched, so the flag's channel cannot close before the
     /// stream does: "not aborted yet" must never be mistaken for "aborted".
     abort: watch::Sender<bool>,
@@ -305,6 +314,18 @@ pub struct Stream {
     /// Total request-body credit granted for this stream, `INITIAL_WINDOW`
     /// plus every `WINDOW` the scheduler has forwarded.
     credit: watch::Receiver<u64>,
+}
+
+/// What ended a wait for response traffic while a request body is uploading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadWait {
+    /// A response frame arrived and is kept for [`Stream::recv`]: the scheduler
+    /// answered before the upload finished.
+    Response,
+    /// More request-body credit was granted.
+    Credit,
+    /// No more traffic can arrive: the stream failed, or the channel is gone.
+    Closed,
 }
 
 impl Stream {
@@ -388,6 +409,73 @@ impl Stream {
             .map_or(0, |entry| entry.buffered)
     }
 
+    /// Whether a response frame is already waiting, keeping it for [`Stream::recv`].
+    ///
+    /// An upload uses this between frames: any response that arrives while the
+    /// client body is still being read means the scheduler has answered the
+    /// request early, so the connection must stop reading the client socket
+    /// (`R13`).
+    pub fn try_peek_response(&mut self) -> bool {
+        if self.pending.is_some() {
+            return true;
+        }
+        match self.incoming.try_recv() {
+            Ok(frame) => {
+                self.pending = Some(frame);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Waits for a response frame, keeping it for [`Stream::recv`].
+    ///
+    /// `false` means no response can ever arrive — the stream failed, or the
+    /// channel is gone — which an upload treats as the end of the connection.
+    /// Cancel safe: the frame is only taken once the wait completes.
+    pub async fn wait_response(&mut self) -> bool {
+        if self.pending.is_some() {
+            return true;
+        }
+        match self.incoming.recv().await {
+            Some(frame) => {
+                self.pending = Some(frame);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Waits for whichever comes first while a body is uploading: a response
+    /// frame, more request-body credit, or the end of the stream.
+    ///
+    /// Both interests share one wait so an upload can stop reading the client
+    /// socket the moment the scheduler answers (`R13`), without a second task
+    /// racing the credit watch.
+    pub async fn wait_upload(&mut self) -> UploadWait {
+        if self.pending.is_some() {
+            return UploadWait::Response;
+        }
+        tokio::select! {
+            frame = self.incoming.recv() => match frame {
+                Some(frame) => {
+                    self.pending = Some(frame);
+                    UploadWait::Response
+                }
+                None => UploadWait::Closed,
+            },
+            changed = self.credit.changed() => {
+                if changed.is_err() {
+                    return UploadWait::Closed;
+                }
+                // Mark the grant seen, so a caller that re-arms this wait does
+                // not spin on a change it has already been told about.
+                self.credit.borrow_and_update();
+                UploadWait::Credit
+            },
+        }
+    }
+
     /// The next frame of this stream's response.
     ///
     /// `Ok(None)` means no further frame can arrive: the scheduler end is gone,
@@ -400,6 +488,15 @@ impl Stream {
     /// its hands: that is what keeps the per-stream buffer measuring bytes
     /// received but not yet written to the client.
     pub async fn recv(&mut self) -> Result<Option<Frame>, HttpError> {
+        if !self.registered() && *self.aborted.borrow() {
+            // The stream was failed: what is still queued is what must be
+            // dropped rather than written.
+            self.pending = None;
+            return Ok(None);
+        }
+        if let Some(frame) = self.pending.take() {
+            return Ok(Some(frame));
+        }
         let frame = self.incoming.recv().await;
         let Some(frame) = frame else {
             return Ok(None);

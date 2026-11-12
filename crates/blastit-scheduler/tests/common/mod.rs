@@ -540,7 +540,9 @@ impl Options {
                 request_timeout: Duration::from_secs(30),
                 ..SchedulerConfig::default()
             },
-            manifest: "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n".to_string(),
+            manifest: "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
+                 [route.ingress]\nbody = \"raw\"\nallow_raw = true\n"
+                .to_string(),
             scripts: Arc::new(Mutex::new(HashMap::new())),
             exit_on_retire: true,
             memory_model: None,

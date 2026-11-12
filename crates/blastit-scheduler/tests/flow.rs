@@ -67,7 +67,7 @@ async fn a_queued_upload_does_not_delay_another_request() {
     let gate = Arc::new(Semaphore::new(0));
     let mut options = Options::new()
         .manifest(&format!(
-            "version = 1\n{}{}",
+            "version = 1\n{}{}[route.ingress]\nbody = \"raw\"\nallow_raw = true\n",
             route("slow", "/slow/"),
             route("app", ".*")
         ))

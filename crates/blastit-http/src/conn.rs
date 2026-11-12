@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 
 use crate::Emit;
-use crate::chan::{Chan, Stream};
+use crate::chan::{Chan, Stream, UploadWait};
 use crate::chunked::{ChunkError, Dechunker, Step};
 use crate::config::HttpConfig;
 use crate::error::HttpError;
@@ -52,6 +52,9 @@ enum HeadOutcome {
 enum BodyOutcome {
     /// `REQ_END` was sent.
     Sent,
+    /// The scheduler answered from the head while the body was still arriving:
+    /// stop reading the client socket and relay that answer, closing after it.
+    Early,
     /// The client stopped sending; `CANCEL` is due.
     ClientGone,
     /// The body was refused; the request may already have reached the
@@ -73,6 +76,8 @@ enum BodyFill {
     Expired,
     /// The client is gone, or the read failed.
     Closed,
+    /// The scheduler answered while the upload was still in progress.
+    Responded,
     /// The scheduler channel failed while the body was still arriving.
     ChannelClosed,
 }
@@ -83,6 +88,8 @@ enum CreditWait {
     Granted,
     /// `body_timeout` ran out while waiting.
     Expired,
+    /// The scheduler answered while the upload was still in progress.
+    Responded,
     /// No credit can arrive any more: the stream failed, or the channel did.
     ChannelClosed,
 }
@@ -366,6 +373,18 @@ where
             .await
         {
             BodyOutcome::Sent => {}
+            // The scheduler answered from the head while the upload was still
+            // arriving: stop reading the client socket, relay the answer with
+            // `Connection: close`, and close the socket right after it (`R13`,
+            // design §4.2 D.1).
+            BodyOutcome::Early => {
+                let _ = self.relay(&mut stream, &head, true).await?;
+                // `relay` already forced the close; shut the write side so the
+                // client sees the end of the connection immediately instead of
+                // waiting for the body deadline.
+                let _ = self.io.shutdown().await;
+                return Ok(false);
+            }
             BodyOutcome::ClientGone => {
                 let _ = stream.send_cancel().await;
                 return Ok(false);
@@ -394,7 +413,7 @@ where
             }
         }
 
-        match self.relay(&mut stream, &head).await? {
+        match self.relay(&mut stream, &head, false).await? {
             Relay::KeepAlive => Ok(true),
             Relay::Close => Ok(false),
             Relay::Abort => {
@@ -438,11 +457,18 @@ where
     ) -> BodyOutcome {
         let mut remaining = len;
         while remaining > 0 {
+            // The scheduler may have answered from the head alone (a `413` for
+            // a body it will not take): stop reading this client's socket and
+            // relay that answer instead (`R13`).
+            if stream.try_peek_response() {
+                return BodyOutcome::Early;
+            }
             // Out of credit: stop reading this client's socket until the app
             // has consumed some of what it already has.
             if credit.available() == 0 {
                 match self.wait_for_credit(stream, deadline, credit).await {
                     CreditWait::Granted => continue,
+                    CreditWait::Responded => return BodyOutcome::Early,
                     CreditWait::Expired => return BodyOutcome::TimedOut,
                     CreditWait::ChannelClosed => return BodyOutcome::ChannelClosed,
                 }
@@ -450,6 +476,7 @@ where
             if self.pos == self.buf.len() {
                 match self.fill_body(stream, deadline).await {
                     BodyFill::Bytes => {}
+                    BodyFill::Responded => return BodyOutcome::Early,
                     BodyFill::Idle | BodyFill::Closed => return BodyOutcome::ClientGone,
                     BodyFill::Expired => return BodyOutcome::TimedOut,
                     BodyFill::ChannelClosed => return BodyOutcome::ChannelClosed,
@@ -488,6 +515,11 @@ where
         self.pending.clear();
         let mut done = false;
         loop {
+            // An early answer from the scheduler ends the upload here, exactly
+            // as for a fixed-length body (`R13`).
+            if stream.try_peek_response() {
+                return BodyOutcome::Early;
+            }
             // 1. Hand over what is decoded and already paid for.
             if credit.available() > 0 && !self.pending.is_empty() {
                 let take = (self.pending.len() as u64).min(credit.available()) as usize;
@@ -510,6 +542,7 @@ where
             if credit.available() == 0 {
                 match self.wait_for_credit(stream, deadline, credit).await {
                     CreditWait::Granted => continue,
+                    CreditWait::Responded => return BodyOutcome::Early,
                     CreditWait::Expired => return BodyOutcome::TimedOut,
                     CreditWait::ChannelClosed => return BodyOutcome::ChannelClosed,
                 }
@@ -522,6 +555,7 @@ where
                     // Not even half a chunk line: read more and try again.
                     match self.fill_body(stream, deadline).await {
                         BodyFill::Bytes => continue,
+                        BodyFill::Responded => return BodyOutcome::Early,
                         BodyFill::Idle | BodyFill::Closed => return BodyOutcome::ClientGone,
                         BodyFill::Expired => return BodyOutcome::TimedOut,
                         BodyFill::ChannelClosed => return BodyOutcome::ChannelClosed,
@@ -563,12 +597,17 @@ where
     ) -> CreditWait {
         let chan = self.chan;
         tokio::select! {
-            granted = stream.more_credit() => {
-                credit.refresh(stream);
-                if granted {
-                    CreditWait::Granted
-                } else {
-                    CreditWait::ChannelClosed
+            wait = stream.wait_upload() => {
+                match wait {
+                    UploadWait::Credit => {
+                        credit.refresh(stream);
+                        CreditWait::Granted
+                    }
+                    // The scheduler answered from the head while the upload was
+                    // still waiting for credit: relay that answer instead of
+                    // waiting for a window that will never come (`R13`).
+                    UploadWait::Response => CreditWait::Responded,
+                    UploadWait::Closed => CreditWait::ChannelClosed,
                 }
             }
             () = tokio::time::sleep_until(deadline) => CreditWait::Expired,
@@ -577,10 +616,15 @@ where
     }
 
     /// Relay the response frames of a request to the client.
+    ///
+    /// `force_close` is set when the scheduler answered before the upload
+    /// finished: the answer carries `Connection: close` whatever the request or
+    /// the view asked for, and the socket is closed right after it (`R13`).
     async fn relay(
         &mut self,
         stream: &mut Stream,
         request: &RequestHead,
+        force_close: bool,
     ) -> Result<Relay, HttpError> {
         let mut resp = Resp::new();
         // Response-body bytes the client has taken, not yet turned into a
@@ -608,11 +652,20 @@ where
                     let no_body = request.is_head() || matches!(head.status, 100..=199 | 204 | 304);
                     // The view may ask for the connection to be closed too,
                     // even though its own `Connection` header never reaches the
-                    // client.
-                    let may_keep_alive = request.keep_alive
+                    // client. An early answer always closes: the upload it
+                    // interrupted can never be read to its end (`R13`).
+                    let mut head = head.clone();
+                    if force_close {
+                        // Drop anything the view said about the connection; the
+                        // decision is ours.
+                        head.headers
+                            .retain(|(name, _)| !name.eq_ignore_ascii_case(b"connection"));
+                    }
+                    let may_keep_alive = !force_close
+                        && request.keep_alive
                         && !crate::headers::has_token(&head.headers, "connection", "close");
                     let prepared = match response::prepare(
-                        head,
+                        &head,
                         no_body,
                         request.version == Version::Http11,
                         may_keep_alive,
@@ -799,7 +852,7 @@ where
     /// how steadily it trickles in. Whichever comes first wins — and a channel
     /// that has failed cuts the wait short, because nobody would read the body
     /// anyway.
-    async fn fill_body(&mut self, stream: &Stream, deadline: Instant) -> BodyFill {
+    async fn fill_body(&mut self, stream: &mut Stream, deadline: Instant) -> BodyFill {
         let idle_deadline = Instant::now() + self.cfg.keepalive_timeout;
         let (filled, expired) = if idle_deadline < deadline {
             (self.fill_until(idle_deadline), false)
@@ -813,7 +866,15 @@ where
                 (Filled::Idle, false) => BodyFill::Idle,
                 (Filled::Idle, true) => BodyFill::Expired,
             },
-            () = stream.closed() => BodyFill::ChannelClosed,
+            // A response that arrives mid-upload (an early `413`, `400`, …) ends
+            // the read: the frame is kept for `relay` (`R13`).
+            responded = stream.wait_response() => {
+                if responded {
+                    BodyFill::Responded
+                } else {
+                    BodyFill::ChannelClosed
+                }
+            },
         }
     }
 

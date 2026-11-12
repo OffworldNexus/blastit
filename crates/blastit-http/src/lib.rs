@@ -117,7 +117,7 @@ mod reason;
 mod response;
 mod server;
 
-pub use crate::chan::{Chan, Stream};
+pub use crate::chan::{Chan, Stream, UploadWait};
 pub use crate::config::HttpConfig;
 pub use crate::error::HttpError;
 pub use crate::head::{BodyFraming, Reject, RequestHead, Version};

@@ -214,6 +214,20 @@ pub struct SchedulerConfig {
     pub queue_size: usize,
     /// `BLASTIT_QUEUE_TIMEOUT`: how long one of them may wait.
     pub queue_timeout: Duration,
+    /// `blastit dev --learn`: serve an unrouted request with the app instead of
+    /// answering `404`, one at a time, so its SQL can be attributed to
+    /// `ObsTarget::Unrouted` (`R26`, design §4.2 D.2).
+    ///
+    /// A `json`/`form` body on a *routed* request is still validated exactly as
+    /// in production: learn mode only relaxes the unrouted fallback.
+    pub learn_mode: bool,
+    /// `BLASTIT_MAX_BODY_BYTES`: the largest `json`/`form` body the scheduler
+    /// buffers before transcoding it (`R14`, `R15`).
+    ///
+    /// `blastit-http` enforces the same ceiling on the wire; this is the
+    /// scheduler's own fail-closed check for a body that arrived in frames
+    /// anyway.
+    pub max_body_bytes: u64,
     /// `BLASTIT_FAIR_QUEUING=on`: order the admission queue by the two-level
     /// fair scheduler instead of first-in-first-out (D5).
     ///
@@ -270,6 +284,8 @@ impl Default for SchedulerConfig {
             view_max_workers: None,
             queue_size: 256,
             queue_timeout: Duration::from_secs(10),
+            learn_mode: false,
+            max_body_bytes: 100 * 1024 * 1024,
             fair_queuing: false,
             fair: FairConfig::default(),
             request_timeout: Duration::from_secs(30),

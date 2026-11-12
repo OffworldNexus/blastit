@@ -15,7 +15,11 @@ use tokio::sync::Semaphore;
 
 /// A two-route manifest: `/a/` and everything else.
 fn two_routes() -> String {
-    format!("version = 1\n{}{}", route("a", "/a/"), route("b", ".*"))
+    format!(
+        "version = 1\n{}[route.ingress]\nbody = \"raw\"\nallow_raw = true\n{}",
+        route("a", "/a/"),
+        route("b", ".*")
+    )
 }
 
 #[tokio::test]
