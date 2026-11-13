@@ -449,3 +449,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T03:12 [MA] (conductor) conductor: MA gate escalated (#7) to strategist but the expensive tier is unusable — OpenRouter credit ceiling (~79k affordable vs 256k max_tokens). Gate blocke
 - 2026-11-13T03:16 [MA] (lead) gate packet assembled at e0bc1b3 by lead (cheap tier): make check exit 0 and make e2e exit 0 re-run here, roadmap criteria mapped, AUDIT-MA.2.3 F1-F8 and AUDIT-
 - 2026-11-13T03:16 [MA] (lead) gate packet committed as 1d5aab3 (evidence at e0bc1b3 + docs/troubleshooting.md rows); MA remains ready, awaiting the strategist gate.
+- 2026-11-13T03:17 AUTOPILOT off by conductor blocked on human: MA milestone gate needs strategist but OpenRouter credits exhausted (H-003); cargo-mutants absent (H-002)
+- 2026-11-13T09:09 AUTOPILOT on by conductor boot
+- 2026-11-13T09:09 HUMAN H-002 closed by conductor
+- 2026-11-13T09:09 HUMAN H-003 closed by conductor
