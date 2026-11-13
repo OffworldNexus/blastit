@@ -10,7 +10,6 @@ stand-in, so what is captured is visible without a whole Django request.
 import os
 
 import pytest
-
 from blastit import pytest_plugin as plugin
 
 psycopg = pytest.importorskip("psycopg")
@@ -80,7 +79,9 @@ def test_stream_is_one_statement(in_request, connection, session) -> None:
     assert in_request.statements == [("", "SELECT $1::int")]
 
 
-def test_stream_is_recorded_before_its_first_row(in_request, connection, session) -> None:
+def test_stream_is_recorded_before_its_first_row(
+    in_request, connection, session
+) -> None:
     """A lazily-consumed stream is still the request's statement."""
     cursor = connection.cursor()
     rows = cursor.stream("SELECT %s::int", [1])
@@ -107,7 +108,9 @@ def test_a_server_cursor_is_recorded_as_the_declare_it_sends(
         cursor.execute("SELECT %s::int", [1])
         assert cursor.fetchall() == [(1,)]
     _, declare = in_request.statements[0]
-    assert declare.startswith('DECLARE "blastit_test" CURSOR FOR '), in_request.statements
+    assert declare.startswith('DECLARE "blastit_test" CURSOR FOR '), (
+        in_request.statements
+    )
     assert declare.endswith("SELECT $1::int"), declare
     assert [sql for _, sql in in_request.statements[1:]] == [
         'FETCH FORWARD ALL FROM "blastit_test"',
@@ -127,7 +130,9 @@ def test_type_info_fetch_is_recorded(in_request, connection, session) -> None:
     assert "pg_type" in sql and "to_regtype($1)" in sql, sql
 
 
-def test_a_composable_query_is_rendered_before_it_is_recorded(in_request, connection, session) -> None:
+def test_a_composable_query_is_rendered_before_it_is_recorded(
+    in_request, connection, session
+) -> None:
     """psycopg renders a `Composable` itself; the placeholders survive it."""
     from psycopg import sql
 
@@ -160,12 +165,16 @@ def test_a_transaction_command_is_recorded_when_the_request_asked_for_one(
     in_request.manages_transactions = True
     connection.execute("SELECT 1")
     connection.commit()
-    assert [sql for _, sql in in_request.statements] == ["SELECT 1", "BEGIN", "COMMIT"], (
-        "the SELECT, then psycopg's own BEGIN and the COMMIT that ends it"
-    )
+    assert [sql for _, sql in in_request.statements] == [
+        "SELECT 1",
+        "BEGIN",
+        "COMMIT",
+    ], "the SELECT, then psycopg's own BEGIN and the COMMIT that ends it"
 
 
-def test_someone_elses_transaction_is_not_the_routes(in_request, connection, session) -> None:
+def test_someone_elses_transaction_is_not_the_routes(
+    in_request, connection, session
+) -> None:
     """A `BEGIN` psycopg sends for a transaction the request did not open.
 
     pytest-django opens one for every test and psycopg sends its `BEGIN` at the
@@ -178,7 +187,9 @@ def test_someone_elses_transaction_is_not_the_routes(in_request, connection, ses
     assert [sql for _, sql in in_request.statements] == ["SELECT 1"]
 
 
-def test_nothing_is_recorded_without_a_session(monkeypatch, connection, in_request) -> None:
+def test_nothing_is_recorded_without_a_session(
+    monkeypatch, connection, in_request
+) -> None:
     monkeypatch.setattr(plugin, "_SESSION", None)
     connection.execute("SELECT %s", [1])
     assert in_request.statements == []

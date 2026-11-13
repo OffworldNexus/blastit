@@ -26,6 +26,21 @@ PROJECT = HERE / "project"
 #: repository already uses (CI sets BLASTIT_TEST_PG_URL for dbproxy's tests).
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("BLASTIT_TEST_PG_URL")
 
+#: The statement the fixture's own app sends whenever a connection is
+#: established (`python/tests/project/notes/apps.py`): the `SET` a real
+#: middleware or backend makes, and the one connection-setup statement this
+#: fixture always makes PostgreSQL send.
+APP_SETUP_SQL = "SET application_name = 'blastit-test'"
+
+#: Django's own connection setup: `_configure_timezone` runs
+#: `SELECT set_config('TimeZone', …)` only when the server's `TimeZone` is not
+#: the one it wants. With `USE_TZ = True` and no per-alias `TIME_ZONE` that is
+#: `UTC` (Django 6.1, `DatabaseWrapper.timezone_name`), so a UTC PostgreSQL —
+#: the containers this is verified against — sends nothing, and a server set to
+#: another zone sends this. Whatever runs is what the report must name, and it is
+#: pinned by its exact text either way.
+TIMEZONE_SETUP_SQL = "SELECT set_config('TimeZone', $?, false)"
+
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
     reason="needs a real PostgreSQL: set DATABASE_URL or BLASTIT_TEST_PG_URL",
@@ -35,7 +50,9 @@ pytestmark = pytest.mark.skipif(
 class Outcome:
     """One inner pytest session: its exit code, its output and its report."""
 
-    def __init__(self, completed: subprocess.CompletedProcess[str], report_path: Path) -> None:
+    def __init__(
+        self, completed: subprocess.CompletedProcess[str], report_path: Path
+    ) -> None:
         self.returncode = completed.returncode
         self.stdout = completed.stdout
         self.stderr = completed.stderr
@@ -58,7 +75,9 @@ class Outcome:
         for route in self.report["routes"]:
             if route["name"] == name:
                 return route
-        raise AssertionError(f"no route {name!r} in {[r['name'] for r in self.report['routes']]}")
+        raise AssertionError(
+            f"no route {name!r} in {[r['name'] for r in self.report['routes']]}"
+        )
 
     def proxy(self, name: str, proxy: str = "db") -> dict[str, Any]:
         """One `(route, proxy)` block of the report."""
@@ -124,7 +143,7 @@ def run(
         "PYTHONDONTWRITEBYTECODE": "1",
         **(env or {}),
     }
-    completed = subprocess.run(  # noqa: S603 - sys.executable, fixed arguments
+    completed = subprocess.run(
         [sys.executable, "-m", "pytest", *args, "--blastit-report", report],
         cwd=project,
         env=environment,
@@ -171,7 +190,9 @@ def test_a_granted_route_is_clean(baseline: Outcome) -> None:
     assert baseline.route("notes")["needs_transaction_control"] is False
 
 
-def test_a_missing_grant_names_the_statement_the_test_and_the_path(baseline: Outcome) -> None:
+def test_a_missing_grant_names_the_statement_the_test_and_the_path(
+    baseline: Outcome,
+) -> None:
     """The DELETE is executed and not granted: the report says exactly where."""
     delete = 'DELETE FROM "notes_note" WHERE "notes_note"."id" = $?'
     assert baseline.missing_sql("note-delete") == [delete]
@@ -332,19 +353,36 @@ def test_a_route_that_opens_connections_needs_egress(baseline: Outcome) -> None:
         assert baseline.route(name)["egress"] == {"observed": [], "needed": False}, name
 
 
-def test_connection_setup_names_the_routes_that_do_not_grant_it(baseline: Outcome) -> None:
+def test_connection_setup_names_the_routes_that_do_not_grant_it(
+    baseline: Outcome,
+) -> None:
     """The statements every connection runs are reported apart from the requests.
 
     Under blastit every request opens its own connection, so these run on every
     route in production — while here they ran once, mostly outside any request.
+
+    The set is what the fixture actually made the server send, and every entry in
+    it is pinned: the app's own `SET` at connect, plus Django's timezone
+    `set_config` when the server's `TimeZone` is not the `UTC` Django asks for
+    (see `TIMEZONE_SETUP_SQL`). The totals are therefore driven by the report and
+    not assumed, so a PostgreSQL in another zone cannot make this a false red —
+    and neither can a Django that stops configuring the connection at all,
+    because the app's `SET` is always there.
     """
-    assert len(baseline.setup_statements()) == 2, baseline.setup_statements()
-    django_setup = baseline.setup("set_config")
-    assert django_setup["sql"] == "SELECT set_config('TimeZone', $?, false)"
-    assert django_setup["wire_sql"] == "SELECT set_config('TimeZone', $1, false)"
-    assert django_setup["proxy"] == "db"
-    assert django_setup["count"] >= 1
-    assert django_setup["ungranted_in"] == [
+    statements = baseline.setup_statements()
+    assert statements, "the fixture's connection_created receiver always runs"
+
+    timezone_setup = [
+        entry for entry in statements if entry["sql"] == TIMEZONE_SETUP_SQL
+    ]
+    app_setup = baseline.setup("application_name")
+    assert app_setup["sql"] == APP_SETUP_SQL
+    assert app_setup["wire_sql"] == APP_SETUP_SQL, (
+        "no placeholders: the text is the text"
+    )
+    assert app_setup["proxy"] == "db"
+    assert app_setup["count"] >= 1
+    assert app_setup["ungranted_in"] == [
         "notes",
         "note-create",
         "note-delete",
@@ -354,14 +392,24 @@ def test_connection_setup_names_the_routes_that_do_not_grant_it(baseline: Outcom
         "note-atomic-live",
         "orders",
     ], "every route with a listener, and not the ones with no grant at all"
-    assert django_setup["granted_in"] == 0
+    assert app_setup["granted_in"] == 0
 
-    app_setup = baseline.setup("application_name")
-    assert app_setup["sql"] == "SET application_name = 'blastit-test'"
-    assert app_setup["ungranted_in"] == django_setup["ungranted_in"]
-    assert baseline.report["connection_setup"]["ungranted"] == 2
-    assert baseline.report["totals"]["connection_setup"] == 2
-    assert baseline.report["totals"]["connection_setup_ungranted"] == 2
+    for entry in timezone_setup:
+        assert entry["wire_sql"] == "SELECT set_config('TimeZone', $1, false)"
+        assert entry["proxy"] == "db"
+        assert entry["count"] >= 1
+        assert entry["ungranted_in"] == app_setup["ungranted_in"]
+        assert entry["granted_in"] == 0
+
+    known = {APP_SETUP_SQL}
+    if timezone_setup:
+        known.add(TIMEZONE_SETUP_SQL)
+    assert {entry["sql"] for entry in statements} == known, (
+        f"only the statements the fixture makes the server send: {statements}"
+    )
+    assert baseline.report["connection_setup"]["ungranted"] == len(statements)
+    assert baseline.report["totals"]["connection_setup"] == len(statements)
+    assert baseline.report["totals"]["connection_setup_ungranted"] == len(statements)
 
 
 def test_an_unrouted_path_is_reported_with_its_test(baseline: Outcome) -> None:
@@ -409,40 +457,48 @@ def test_the_report_counts_what_the_manifest_does_not_cover(baseline: Outcome) -
     assert baseline.report["manifest"] == {
         "routes": 13,
         "proxies": {"db": "postgresql"},
-        "warnings": [],
-    }
+        "warnings": [
+            'route "note-cache": egress = true opens any outbound address and port'
+        ],
+    }, "R11: the route that may reach any address says so, in the report"
     assert baseline.report["unrecognised"] == {"statements": [], "count": 0}
     assert baseline.report["plugin_warnings"] == []
 
 
 def test_the_terminal_summary_is_short_and_actionable(baseline: Outcome) -> None:
     """What the developer sees without opening the JSON."""
-    assert "blastit: 17 requests, 21 statements, 12/13 routes exercised" in baseline.stdout
+    assert (
+        "blastit: 17 requests, 21 statements, 12/13 routes exercised" in baseline.stdout
+    )
     assert "blastit: route note-delete: 1 statement(s) missing" in baseline.stdout
     assert "blastit: route note-bulk: 2 statement(s) missing" in baseline.stdout
     assert "blastit: route note-atomic-live: 2 statement(s) missing" in baseline.stdout
-    assert "blastit: route note-atomic: needs transaction_control = true" in baseline.stdout
+    assert (
+        "blastit: route note-atomic: needs transaction_control = true"
+        in baseline.stdout
+    )
     assert (
         "blastit: route note-queue opens outbound connections (127.0.0.1:9) "
         "but has no egress = true" in baseline.stdout
     )
     assert "blastit: 1 unrouted request(s): GET /oops/" in baseline.stdout
     assert (
-        "blastit: 2 connection-setup statement(s) some routes do not grant: "
-        "put them in a group attached to every route" in baseline.stdout
-    )
+        f"blastit: {len(baseline.setup_statements())} connection-setup statement(s) "
+        "some routes do not grant: put them in a group attached to every route"
+        in baseline.stdout
+    ), baseline.stdout
     assert "blastit-report.json" in baseline.stdout
 
 
-def test_strict_fails_the_session(strict: Outcome) -> None:
+def test_strict_fails_the_session(baseline: Outcome, strict: Outcome) -> None:
     """`--blastit-strict` is the exit code a CI job can watch."""
     assert strict.returncode == 1, strict.stdout + strict.stderr
     assert (
         "blastit: --blastit-strict: 12 statement execution(s) missing, 1 unrouted "
-        "request(s), 2 connection-setup statement(s) not granted in every route, "
-        "1 route(s) opening connections without egress = true, 0 unreadable "
-        "statement(s) and 0 warning(s)" in strict.stdout
-    )
+        f"request(s), {len(baseline.setup_statements())} connection-setup statement(s) "
+        "not granted in every route, 1 route(s) opening connections without "
+        "egress = true, 0 unreadable statement(s) and 0 warning(s)" in strict.stdout
+    ), strict.stdout
     assert strict.report["totals"]["clean"] is False
 
 
@@ -475,16 +531,30 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     gives the unrouted path a route of its own. Only then do that route's own
     statements show up as missing, because until it existed nothing could
     attribute them to it.
+
+    One statement the report names is not the manifest's to fix: the fixture app
+    sends `SET application_name = 'blastit-test'` with the value inlined, and no
+    grant may hold an inlined value (`ADR-0003`, `R24` — the validator's "bind
+    the value with `$?`"). Everything a grant *can* hold converges; that one
+    stays reported, and it is the app, not the manifest, that has to change. The
+    last run proves the rest is clean: every total but that one is zero.
     """
     assert baseline.report["totals"]["clean"] is False
     copy = copy_project(project, tmp_path)
     source = (copy / "blastit.toml").read_text(encoding="utf-8")
 
     repaired = repaired_manifest(source, baseline)
-    assert "SELECT set_config('TimeZone', $?, false)" in repaired, (
-        "the connection-setup statement is in the repair"
-    )
-    assert 'egress = true' in repaired, "and so is the route that opens connections"
+    setup = [entry for entry in baseline.setup_statements() if entry["ungranted_in"]]
+    assert setup, "the fixture has connection setup no route grants"
+    for entry in setup:
+        if may_be_granted(entry["sql"]):
+            assert entry["sql"] in repaired, (
+                f"every grantable connection-setup statement is in the repair: {entry}"
+            )
+    assert [entry["sql"] for entry in setup if not may_be_granted(entry["sql"])] == [
+        APP_SETUP_SQL
+    ], "the only one a grant may not hold is the app's inlined value"
+    assert "egress = true" in repaired, "and so is the route that opens connections"
     (copy / "blastit-repaired.toml").write_text(repaired, encoding="utf-8")
     second = run(
         copy,
@@ -496,8 +566,13 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     assert second.report["totals"]["unrouted"] == 0, "the path has a route now"
     assert second.report["totals"]["needs_transaction_control"] == []
     assert second.report["totals"]["egress"] == 0, "egress = true is in the manifest"
-    assert second.report["connection_setup"]["ungranted"] == 0, (
-        "the group attached to every route covers the connection setup"
+    ungranted_setup = [
+        entry["sql"] for entry in second.setup_statements() if entry["ungranted_in"]
+    ]
+    assert ungranted_setup == [APP_SETUP_SQL], (
+        "the group attached to every route covers every connection-setup statement a "
+        "grant may hold; the app's inlined value is the one `R24` refuses, and the "
+        "report keeps naming it"
     )
     assert second.missing_sql("fallback") == ["SELECT 1"], "the new route's own SQL"
     named_cursor = second.missing_sql("note-stream")
@@ -512,7 +587,9 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     # A named cursor's `DECLARE`/`FETCH`/`CLOSE` carry a name Django generates
     # for each run — `_django_curs_<id>_sync_<n>` — so no grant can ever match
     # them (the README says what to do instead: turn server-side cursors off).
-    # Everything else converges, which is what this third run checks.
+    # Everything a grant can hold converges, which is what this third run checks —
+    # and the one statement it cannot hold is exactly what `--blastit-strict`
+    # still counts.
     (copy / "blastit-repaired.toml").write_text(
         repaired_manifest(repaired, second), encoding="utf-8"
     )
@@ -525,9 +602,41 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
         "not named_cursor",
         report="third-report.json",
     )
-    assert third.returncode == 0, third.stdout + third.stderr
-    assert third.report["totals"]["clean"] is True, json.dumps(third.report["totals"])
-    assert "blastit: the manifest covers every request that was made" in third.stdout
+    assert third.returncode == 1, (
+        "strict fails over the one statement no grant may hold\n"
+        + third.stdout
+        + third.stderr
+    )
+    totals = third.report["totals"]
+    for key, expected in (
+        ("missing", 0),
+        ("missing_distinct", 0),
+        ("unrouted", 0),
+        ("needs_transaction_control", []),
+        ("egress", 0),
+        ("unrecognised", 0),
+        ("plugin_warnings", 0),
+        ("connection_setup_ungranted", 1),
+    ):
+        assert totals[key] == expected, f"{key}: {json.dumps(totals)}"
+    assert totals["clean"] is False, "and that one is what keeps the run honest"
+    assert [
+        entry["sql"] for entry in third.setup_statements() if entry["ungranted_in"]
+    ] == [APP_SETUP_SQL], (
+        "the statement `R24` will not let a grant hold, named once more"
+    )
+    assert (
+        "blastit: --blastit-strict: 0 statement execution(s) missing, 0 unrouted "
+        "request(s), 1 connection-setup statement(s) not granted in every route, "
+        "0 route(s) opening connections without egress = true, 0 unreadable "
+        "statement(s) and 0 warning(s)" in third.stdout
+    ), third.stdout
+    assert "blastit: 1 connection-setup statement(s) some routes do not grant" in (
+        third.stdout
+    )
+    assert "blastit: the manifest covers every request that was made" not in (
+        third.stdout
+    ), "the report never claims clean while it names an uncovered statement"
 
 
 def test_atomic_requests_on_the_alias_needs_transaction_control(
@@ -550,12 +659,16 @@ def test_atomic_requests_on_the_alias_needs_transaction_control(
 def test_more_than_one_proxy_needs_a_mapping(project: Path, tmp_path: Path) -> None:
     """With two proxies, the plugin asks which one an alias talks to."""
     copy = copy_project(project, tmp_path)
-    (copy / "blastit-two-proxies.toml").write_text(two_proxy_manifest(), encoding="utf-8")
+    (copy / "blastit-two-proxies.toml").write_text(
+        two_proxy_manifest(), encoding="utf-8"
+    )
     without = run(
         copy, "--blastit-manifest", "blastit-two-proxies.toml", "-k", "test_list_notes"
     )
     assert without.returncode == 4, "a usage error, before any test runs"
-    assert "--blastit-proxy alias=proxy" in (without.stdout + without.stderr).replace("\n", " ")
+    assert "--blastit-proxy alias=proxy" in (without.stdout + without.stderr).replace(
+        "\n", " "
+    )
     with_mapping = run(
         copy,
         "--blastit-manifest",
@@ -569,10 +682,12 @@ def test_more_than_one_proxy_needs_a_mapping(project: Path, tmp_path: Path) -> N
     assert with_mapping.returncode == 0, with_mapping.stdout + with_mapping.stderr
     assert with_mapping.route("notes")["proxies"][0]["name"] == "warehouse"
     assert with_mapping.missing_sql("notes", "warehouse") == [
-        'SELECT "notes_note"."id" AS "id" FROM "notes_note" '
-        'WHERE "notes_note"."owner_id" = $?'
+        (
+            'SELECT "notes_note"."id" AS "id" FROM "notes_note" '
+            'WHERE "notes_note"."owner_id" = $?'
+        )
     ]
-    assert with_mapping.setup("set_config")["ungranted_in"] == ["notes"]
+    assert with_mapping.setup("application_name")["ungranted_in"] == ["notes"]
 
 
 def test_a_typo_in_the_mapping_is_a_usage_error(project: Path, tmp_path: Path) -> None:
@@ -588,7 +703,9 @@ def test_a_typo_in_the_mapping_is_a_usage_error(project: Path, tmp_path: Path) -
     assert "not-a-proxy" in outcome.stdout + outcome.stderr
 
 
-def test_strict_without_a_manifest_is_a_usage_error(project: Path, tmp_path: Path) -> None:
+def test_strict_without_a_manifest_is_a_usage_error(
+    project: Path, tmp_path: Path
+) -> None:
     """The plugin is inert, so asking it for anything is worth naming."""
     outcome = run(copy_project(project, tmp_path), "--blastit-strict")
     output = (outcome.stdout + outcome.stderr).replace("\n", " ")
@@ -613,10 +730,14 @@ def test_an_invalid_manifest_fails_the_session(project: Path, tmp_path: Path) ->
     assert outcome.returncode == 1
     assert "blastit: the audit failed" in outcome.stdout
     assert "invalid" in outcome.stdout, outcome.stdout
-    assert not outcome.report_path.exists(), "no report is written for an invalid manifest"
+    assert not outcome.report_path.exists(), (
+        "no report is written for an invalid manifest"
+    )
 
 
-def test_xdist_workers_are_merged(project: Path, tmp_path: Path) -> None:
+def test_xdist_workers_are_merged(
+    baseline: Outcome, project: Path, tmp_path: Path
+) -> None:
     """One report for the whole run, whatever `-n` was."""
     copy = copy_project(project, tmp_path)
     outcome = run(
@@ -634,8 +755,12 @@ def test_xdist_workers_are_merged(project: Path, tmp_path: Path) -> None:
     assert totals["statements"] == 21
     assert totals["routes_exercised"] == 12
     assert totals["missing"] == 12
-    assert totals["connection_setup_ungranted"] == 2, "counted once, not once per worker"
-    assert not list(copy.glob("xdist-report.json.gw*")), "the worker files are cleaned up"
+    assert totals["connection_setup_ungranted"] == len(baseline.setup_statements()), (
+        "counted once, not once per worker"
+    )
+    assert not list(copy.glob("xdist-report.json.gw*")), (
+        "the worker files are cleaned up"
+    )
     assert "blastit: route note-delete: 1 statement(s) missing" in outcome.stdout
 
 
@@ -680,7 +805,9 @@ def test_an_alias_without_server_side_binding_is_reported(
     assert "warning(s)" in strict.stdout
 
 
-def test_a_stray_file_next_to_the_report_is_not_merged(project: Path, tmp_path: Path) -> None:
+def test_a_stray_file_next_to_the_report_is_not_merged(
+    project: Path, tmp_path: Path
+) -> None:
     """Only worker reports of this version are merged; anything else is reported."""
     copy = copy_project(project, tmp_path)
     stray = copy / "stray.json.old"
@@ -688,24 +815,52 @@ def test_a_stray_file_next_to_the_report_is_not_merged(project: Path, tmp_path: 
         '{"version": 1, "requests": [{"method": "GET", "path_info": "/strange/"}]}',
         encoding="utf-8",
     )
-    outcome = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="stray.json")
+    outcome = run(
+        copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="stray.json"
+    )
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
     assert "stray.json.old is not a blastit worker report" in outcome.stdout
     assert stray.is_file(), "left where it was"
-    assert outcome.report["totals"]["requests"] == 17, "the workers were merged, nothing else"
-    assert outcome.report["totals"]["unrouted"] == 1, "no /strange/ request in the report"
+    assert outcome.report["totals"]["requests"] == 17, (
+        "the workers were merged, nothing else"
+    )
+    assert outcome.report["totals"]["unrouted"] == 1, (
+        "no /strange/ request in the report"
+    )
     assert outcome.report["plugin_warnings"], outcome.report["plugin_warnings"]
 
 
-def test_xdist_reports_are_not_merged_twice(project: Path, tmp_path: Path) -> None:
+def test_xdist_reports_are_not_merged_twice(
+    baseline: Outcome, project: Path, tmp_path: Path
+) -> None:
     """A second run in the same directory does not see the first run's requests."""
     copy = copy_project(project, tmp_path)
-    first = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json")
-    second = run(copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json")
+    first = run(
+        copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json"
+    )
+    second = run(
+        copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json"
+    )
     assert first.returncode == second.returncode == 0
-    assert first.report["totals"]["requests"] == second.report["totals"]["requests"] == 17
-    assert second.report["connection_setup"]["ungranted"] == 2
+    assert (
+        first.report["totals"]["requests"] == second.report["totals"]["requests"] == 17
+    )
+    assert second.report["connection_setup"]["ungranted"] == len(
+        baseline.setup_statements()
+    ), "the setup statements, counted once, not once per worker and not twice"
     assert not list(copy.glob("twice.json.gw*"))
+
+
+#: The statements a grant may hold while keeping a quoted literal:
+#: `blastit_sqlpolicy`'s `KNOWN_STATIC_SETUP_SQL`, the protocol constants of
+#: `ADR-0003`. Anything else with a literal in it is refused by the manifest
+#: validator, and `--learn` refuses to write it.
+STATIC_SETUP_GRANTS = ("SET TIME ZONE 'UTC'", TIMEZONE_SETUP_SQL)
+
+
+def may_be_granted(sql: str) -> bool:
+    """Whether a `blastit.toml` grant may hold `sql` at all (`ADR-0003`, `R24`)."""
+    return "'" not in sql or sql in STATIC_SETUP_GRANTS
 
 
 def is_transaction_control(sql: str) -> bool:
@@ -717,7 +872,15 @@ def is_transaction_control(sql: str) -> bool:
     would be meaningless.
     """
     return sql.startswith(
-        ("SAVEPOINT ", "RELEASE ", "ROLLBACK", "BEGIN", "COMMIT", "START TRANSACTION", "END")
+        (
+            "SAVEPOINT ",
+            "RELEASE ",
+            "ROLLBACK",
+            "BEGIN",
+            "COMMIT",
+            "START TRANSACTION",
+            "END",
+        )
     )
 
 
@@ -732,7 +895,9 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
     * the connection-setup statements go into a group attached to every route
       (`groups = ["connection"]`), which is what the report's
       `ungranted_in` is telling you to do: they run on every route in
-      production, so they cannot belong to one;
+      production, so they cannot belong to one. A statement that inlines a value
+      is left out, because no grant may hold one (`ADR-0003`, `R24`): the app has
+      to bind it, and the next run keeps reporting it until it does;
     * a route whose `egress.needed` is true gets `egress = true`, because it
       opened connections and the manifest does not let it;
     * a path the report calls `unrouted` gets a route of its own: blastit would
@@ -749,7 +914,10 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
         for block in reported["proxies"]:
             queries = route.setdefault(block["name"], {}).setdefault("queries", [])
             for entry in block["missing"]:
-                if not is_transaction_control(entry["sql"]) and entry["sql"] not in queries:
+                if (
+                    not is_transaction_control(entry["sql"])
+                    and entry["sql"] not in queries
+                ):
                     queries.append(entry["sql"])
             if block["transaction_control"]["needed"]:
                 route[block["name"]]["transaction_control"] = True
@@ -759,13 +927,17 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
     setup = [
         entry["sql"]
         for entry in outcome.report["connection_setup"]["statements"]
-        if entry["ungranted_in"]
+        if entry["ungranted_in"] and may_be_granted(entry["sql"])
     ]
     if setup:
         groups = document.setdefault("groups", [])
         if "connection" not in groups:
             groups.append("connection")
-        grant = document.setdefault("group", {}).setdefault("connection", {}).setdefault("db", {})
+        grant = (
+            document.setdefault("group", {})
+            .setdefault("connection", {})
+            .setdefault("db", {})
+        )
         queries = grant.setdefault("queries", [])
         queries.extend(sql for sql in setup if sql not in queries)
 
@@ -871,13 +1043,17 @@ def test_a_route_reports_the_table_grant_that_covers_it(baseline: Outcome) -> No
     """Every statement a route ran, as the smallest table grant covering it."""
     grants = baseline.proxy("notes")["table_grants"]
     assert grants["tables"] == {
-        "notes_note": {"select": ["id", "owner_id"], "insert": None, "update": None, "delete": False}
+        "notes_note": {
+            "select": ["id", "owner_id"],
+            "insert": None,
+            "update": None,
+            "delete": False,
+        }
     }
     assert grants["functions"] == []
     assert grants["unanalysable"] == []
     assert grants["toml"] == (
-        "[route.db.tables]\n"
-        'notes_note = { select = ["id", "owner_id"] }\n'
+        '[route.db.tables]\nnotes_note = { select = ["id", "owner_id"] }\n'
     )
 
 
@@ -939,19 +1115,25 @@ def test_prefer_tables_prints_the_snippet(project: Path, tmp_path: Path) -> None
         "-q",
     )
     assert "[route.db.tables]" in outcome.stdout, outcome.stdout
-    assert 'notes_note = { select = ["id"], delete = true }' in outcome.stdout, outcome.stdout
+    assert 'notes_note = { select = ["id"], delete = true }' in outcome.stdout, (
+        outcome.stdout
+    )
     # The statements are still named: the snippet is the other way to fix them.
     assert "statement(s) missing" in outcome.stdout
 
 
-def test_the_option_without_a_manifest_is_a_usage_error(project: Path, tmp_path: Path) -> None:
+def test_the_option_without_a_manifest_is_a_usage_error(
+    project: Path, tmp_path: Path
+) -> None:
     outcome = run(copy_project(project, tmp_path), "--blastit-prefer-tables")
     output = (outcome.stdout + outcome.stderr).replace("\n", " ")
     assert outcome.returncode == 4
     assert "--blastit-prefer-tables need --blastit-manifest" in output, output
 
 
-def test_a_table_grant_in_the_manifest_covers_the_route(project: Path, tmp_path: Path) -> None:
+def test_a_table_grant_in_the_manifest_covers_the_route(
+    project: Path, tmp_path: Path
+) -> None:
     """A manifest written as table grants passes the same audit (D7)."""
     copy = copy_project(project, tmp_path)
     (copy / "tables.toml").write_text(

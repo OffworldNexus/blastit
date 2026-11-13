@@ -91,6 +91,7 @@
 mod config;
 mod error;
 mod hooks;
+mod learn;
 pub mod role;
 mod server;
 mod state;
@@ -101,9 +102,11 @@ use std::sync::Arc;
 use blastit_events::Event;
 
 pub use config::{
-    DbproxyConfig, ListenerSpec, MAX_CONFIG_BYTES, ProxySpec, read_config, write_config,
+    DbproxyConfig, ListenerMode, ListenerSpec, MAX_CONFIG_BYTES, ProxySpec, RoutePolicySpec,
+    WILDCARD_ROUTE, read_config, write_config,
 };
 pub use error::DbproxyError;
+pub use learn::{ObsTarget, ObsVerdict, WireSqlObs};
 pub use server::{run, run_with_listeners, run_with_ready};
 
 /// Where dbproxy sends its events.

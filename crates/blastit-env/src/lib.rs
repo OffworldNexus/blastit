@@ -11,7 +11,9 @@
 //!   socket: `{{ field }}` and `{{ field | urlencode }}`, nothing else (§5.1);
 //! * [`build`] removes every secret from the platform environment, renders the
 //!   proxies' outputs into it, injects process-safety defaults and hands back
-//!   both halves in a [`Prepared`] (§5.1, §5.3).
+//!   both halves in a [`Prepared`] (§5.1, §5.3). [`build_with_socket_dir`] is
+//!   the same rewrite for `blastit check`, which binds the proxies' sockets
+//!   somewhere other than the view's own directory.
 //!
 //! **Secrets cannot escape.** [`Prepared::upstreams`] carries the real
 //! credentials wrapped in [`Secret`], which has no `Display`, zeroizes on drop
@@ -86,7 +88,7 @@ mod template;
 
 pub use env::{
     INJECTED_DEFAULTS, Prepared, RESERVED_PREFIX, STRIP_VAR, build, build_from_process,
-    platform_env_from_os,
+    build_with_socket_dir, platform_env_from_os,
 };
 pub use error::{EnvError, EnvErrors};
 pub use postgresql::Upstream;

@@ -8,7 +8,8 @@ use crate::model::{Manifest, PgGrant, ProxyName};
 use crate::routing::compile_pattern;
 use crate::uid::UidLayout;
 
-use blastit_sqlpolicy::is_system_table;
+use blastit_ingress::BodyCodec;
+use blastit_sqlpolicy::{KNOWN_STATIC_SETUP_SQL, has_quoted_literal, is_system_table, normalize};
 
 /// Validates a manifest and collects its warnings.
 pub(crate) fn validate(
@@ -16,10 +17,12 @@ pub(crate) fn validate(
     base: u32,
 ) -> Result<Vec<ManifestWarning>, ManifestErrors> {
     let mut errors = Vec::new();
+    check_app(manifest, &mut errors);
     check_groups(manifest, &mut errors);
     check_grants(manifest, &mut errors);
     check_unrestricted(manifest, &mut errors);
     check_table_grants(manifest, &mut errors);
+    check_queries(manifest, &mut errors);
     check_routes(manifest, &mut errors);
     check_uids(manifest, base, &mut errors);
 
@@ -27,6 +30,23 @@ pub(crate) fn validate(
         Ok(warnings(manifest))
     } else {
         Err(ManifestErrors::from(errors))
+    }
+}
+
+/// The top-level `app` has to be a `module:attribute` callable (`R7`).
+///
+/// A colon is the one rule every caller agrees on — `BLASTIT_APP` is checked
+/// the same way — and it is the mistake worth naming: Django's dotted
+/// `myshop.wsgi.application` looks right and imports as a module path, which
+/// fails much later and much less clearly.
+fn check_app(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
+    let Some(app) = manifest.app() else {
+        return;
+    };
+    if !app.contains(':') {
+        errors.push(ManifestError::InvalidApp {
+            app: app.to_string(),
+        });
     }
 }
 
@@ -157,6 +177,59 @@ fn check_table_grants(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
                     location: location.clone(),
                     proxy: proxy.clone(),
                     table: table.clone(),
+                });
+            }
+        }
+    };
+    for (name, group) in manifest.groups() {
+        for (proxy, grant) in group.grants() {
+            if let Some(grant) = grant.as_postgresql() {
+                check(&Location::Group(name.clone()), proxy, grant);
+            }
+        }
+    }
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let location = Location::Route {
+            index,
+            name: route.name().to_string(),
+        };
+        for (proxy, grant) in route.grants() {
+            if let Some(grant) = grant.as_postgresql() {
+                check(&location, proxy, grant);
+            }
+        }
+    }
+}
+
+/// A `queries` entry may never hold a redacted `…` placeholder or an inline
+/// quoted literal (`R24`, `ADR-0003`).
+///
+/// An exact grant is compared and run as written, so a statement carrying a
+/// value would both commit that value to the repository and match only that one
+/// value. `--learn` refuses such statements instead of writing them, and
+/// `KNOWN_STATIC_SETUP_SQL` is the one fixed pair of protocol statements that
+/// may keep its literal. Neither message prints the entry: printing it is what
+/// the rule forbids.
+fn check_queries(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
+    let mut check = |location: &Location, proxy: &ProxyName, grant: &PgGrant| {
+        for (rule, query) in grant.queries().iter().enumerate() {
+            // The two fixed setup statements are exempt in their normalised
+            // form: `SET TIME ZONE 'UTC'` and its `$1` spelling are the same
+            // statement on the wire and in the manifest.
+            let query = normalize(query);
+            if query.contains('…') {
+                errors.push(ManifestError::RedactedQueryPlaceholder {
+                    location: location.clone(),
+                    proxy: proxy.clone(),
+                    rule,
+                });
+            } else if has_quoted_literal(&query)
+                && !KNOWN_STATIC_SETUP_SQL.contains(&query.as_str())
+            {
+                errors.push(ManifestError::LiteralQuery {
+                    location: location.clone(),
+                    proxy: proxy.clone(),
+                    rule,
                 });
             }
         }
@@ -365,6 +438,26 @@ fn warnings(manifest: &Manifest) -> Vec<ManifestWarning> {
                     proxy: proxy.clone(),
                 });
             }
+        }
+    }
+
+    // The two route-level opt-outs, each in route order: a `raw` body reaches
+    // the app unvalidated, and `egress = true` opens any address and port.
+    for route in manifest.routes() {
+        if route
+            .ingress()
+            .is_some_and(|ingress| ingress.body == BodyCodec::Raw)
+        {
+            warnings.push(ManifestWarning::RawIngress {
+                route: route.name().to_string(),
+            });
+        }
+    }
+    for route in manifest.routes() {
+        if route.egress() {
+            warnings.push(ManifestWarning::EgressRoute {
+                route: route.name().to_string(),
+            });
         }
     }
 

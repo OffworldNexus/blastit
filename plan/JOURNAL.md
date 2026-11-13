@@ -1,0 +1,525 @@
+# Plan Journal
+
+Append-only one-line event log managed by `tools/plan.py`.
+
+- 2026-11-12T00:00 [bootstrap] Initialized DX-first autonomous plan system for Blastit
+- 2026-11-12T00:50 [MA] (strategist) created (milestone) Lean DX & Show-the-World Polish (0.1.1)
+- 2026-11-12T00:50 [MA.1] (planner) created (task) Write lean Local/CI/Deploy documentation & 0.1.1 DX design spec first
+- 2026-11-12T00:50 [MA.2] (planner) created (epic) Implement 0.1.1 DX upgrades (blastit dev, auto-manifest, --learn, check)
+- 2026-11-12T00:50 [MA.3] (planner) created (epic) Verify runnable docs, visual QA, e2e & prepare 0.1.1 release
+- 2026-11-12T00:50 [MB] (strategist) created (milestone) Modern 12-Factor Backends: Static, PHP-FPM, Vite/Node, Tomcat (0.2.x)
+- 2026-11-12T00:50 [MC] (strategist) created (milestone) Guarantee-Safe Budgeted WASM Ingress & CDR (0.3.x)
+- 2026-11-12T00:50 [MD] (strategist) created (milestone) Outgoing Capability Proxies: MySQL, MongoDB, Redis, HTTP (0.4.x)
+- 2026-11-12T01:35 AUTOPILOT on by conductor boot
+- 2026-11-12T01:39 HUMAN H-001 opened by conductor (node MA)
+- 2026-11-12T01:41 [MA.4] (planner) created (task) Fix make check on this host: PyO3 test binaries need PYTHONHOME
+- 2026-11-12T01:41 [MA.5] (planner) created (task) Write 0.1.1 technical design doc & ADRs from the accepted DX docs
+- 2026-11-12T01:41 [MA.1] (planner) edited fields
+- 2026-11-12T01:41 [MA.2] (planner) edited fields
+- 2026-11-12T01:48 HUMAN H-001 closed by conductor
+- 2026-11-12T01:49 [MA.5] (conductor) edited fields
+- 2026-11-12T01:49 ESCALATION #1 -> architect for MA.5 by conductor: core 0.1.1 DX/runtime design (unprivileged blastit dev simulation, wire-level --learn, check/test completeness, manifest
+- 2026-11-12T01:51 [MA.4] (lead) status ready -> active
+- 2026-11-12T01:51 [MA.4] (lead) attempt 1/3 started
+- 2026-11-12T01:51 [MA.4] (lead) base 225d7e1
+- 2026-11-12T01:56 [MA.4] (implementer) Fixed Makefile RUST_ENV: added PYO3_PREFIX := $(dir $(PYO3_BIN))/.. exported as PYTHONHOME (guarded) for all Rust targets; documented PyO3 PYTHONHOME requiremen
+- 2026-11-12T01:59 [MA.1] (planner) edited fields
+- 2026-11-12T01:59 [MA.1] (planner) rewrote body: user-facing docs only (Local/CI-CD/Deploy DX); design doc + ADRs now exclusively MA.5
+- 2026-11-12T02:00 [MA.4] (lead) status active -> review
+- 2026-11-12T02:05 [MA.4] (lead) reviewer VERDICT: PASS (MINOR: RESULT.md git-status wording stale due to concurrent plan churn; not a defect)
+- 2026-11-12T02:05 [MA.4] (lead) status review -> done
+- 2026-11-12T02:05 [MA.4] (lead) commit 4ee2982
+- 2026-11-12T02:05 [MA.1] (lead) status ready -> active
+- 2026-11-12T02:05 [MA.1] (lead) attempt 1/3 started
+- 2026-11-12T02:05 [MA.1] (lead) base 4ee2982
+- 2026-11-12T10:15 AUTOPILOT on by conductor boot
+- 2026-11-12T10:19 [MA.1] (doc-writer) docs pass 2: seccomp fail-closed + preset refusal, body-cap arithmetic, ingress 413/raw_ingress/allow_raw contract, egress truth, dev --host DEV_EXPOSE, stage-0
+- 2026-11-12T10:22 [MA.1] (doc-writer) docs pass 2 (attempt 2): Django admin unrestricted boxed as last resort + session group route-level only (F16/M8), frameworks app split into per-framework fence
+- 2026-11-12T10:26 [MA.1] (doc-writer) pass 3: closed B2 (severity, per-proxy counts, unsafe), M5 (proxy_unused), M2 (learn --json/--dry-run), S8 (DO migration-role secret), manifest route-level grou
+- 2026-11-12T10:33 [MA.1] (lead) REVIEW FAIL (attempt 1): (1) local.md:122 uses invalid [route.products.db] grant (boot abort) -> [route.db]; (2) ci.md fix.to '[route.catalog.db].queries' is no
+- 2026-11-12T10:33 [MA.1] (lead) status active -> ready
+- 2026-11-12T10:33 [MA.1] (lead) status ready -> active
+- 2026-11-12T10:33 [MA.1] (lead) attempt 2/3 started
+- 2026-11-12T10:36 [MA.1] (doc-writer) pass 4: fixed reviewer blockers on local.md grant, ci.md --json fix paths + allow_raw, stdout/exit-code contract, non-owner DB roles in both presets, Django CSR
+- 2026-11-12T10:43 [MA.1] (lead) status active -> done
+- 2026-11-12T10:43 [MA.1] (lead) committed ad671d6 (README.md docs/** zensical.toml + plan/MA.1)
+- 2026-11-12T10:43 [MA.5] (lead) status ready -> active
+- 2026-11-12T10:43 [MA.5] (lead) attempt 1/3 started
+- 2026-11-12T10:43 [MA.5] (lead) base ad671d6e41919d765b4eafe7ba6a114c9f15b7a0
+- 2026-11-12T12:58 ESCALATION #2 -> strategist for MA.5 by lead: core DX/runtime design acceptance: R1..R42 design + 6 ADRs are the source of truth for MA.2
+- 2026-11-12T13:07 [MA.5] (strategist) ACCEPT: R1..R42, ADR-0001..0006, 3 critic reviews, and 12-leaf MA.2 plan pass all 6 traceability/contract/security/buildability gates
+- 2026-11-12T13:10 [MA.5] (lead) status active -> done
+- 2026-11-12T13:12 [MA.2.1] (planner) created (epic) Canonical wire codecs and workspace seams (ingress + sqlpolicy)
+- 2026-11-12T13:12 [MA.2.2] (planner) created (epic) Manifest 0.1.1, ingress enforcement and wire learning
+- 2026-11-12T13:12 [MA.2.3] (planner) created (epic) CLI, unprivileged dev runtime and framework-agnostic check
+- 2026-11-12T13:12 [MA.2.1.1] (planner) created (task) Leaf 1: workspace seams, blastit-ingress stub and Cargo wiring
+- 2026-11-12T13:12 [MA.2.1.2] (planner) created (task) Leaf 2: ingress codecs, canonical re-encode and header scrub
+- 2026-11-12T13:12 [MA.2.1.3] (planner) created (task) Leaf 3: sqlpolicy literal redaction, learnable verdicts and introspection setup
+- 2026-11-12T13:12 [MA.2.2.1] (planner) created (task) Leaf 4: manifest 0.1.1 schema, reserved-key guard and boot warnings
+- 2026-11-12T13:12 [MA.2.2.2] (planner) created (task) Leaf 5: surgical comment-preserving manifest editor and atomic write
+- 2026-11-12T13:12 [MA.2.2.3] (planner) created (task) Leaf 6: HTTP early upload abort and scheduler ingress enforcement
+- 2026-11-12T13:12 [MA.2.2.4] (planner) created (task) Leaf 7: dbproxy learn, dynamic-check and literal redaction
+- 2026-11-12T13:12 [MA.2.3.1] (planner) created (task) Leaf 8: python ruff hygiene, Makefile gates and fold literal/atomic hardening
+- 2026-11-12T13:12 [MA.2.3.2] (planner) created (task) Leaf 9: CLI grammar, CWD manifest discovery, presets and seccomp gate
+- 2026-11-12T13:12 [MA.2.3.3] (planner) created (task) Leaf 10: unprivileged dev supervisor, execve barrier and dev --learn
+- 2026-11-12T13:12 [MA.2.3.4] (planner) created (task) Leaf 11: check audit engine, route inference and learn plan
+- 2026-11-12T13:12 [MA.2.3.5] (planner) created (task) Leaf 12: check orchestrator, WSGI gate and python check tests
+- 2026-11-12T13:13 [MA.2.1.1] (lead) status ready -> active
+- 2026-11-12T13:13 [MA.2.1.1] (lead) attempt 1/3 started
+- 2026-11-12T13:13 [MA.2.1.1] (lead) base c64baa8399fef889f75da920eeae48bb14a4f13e
+- 2026-11-12T13:15 [MA.2.1.1] (lead) attempt 1 ended without a report: partial work on disk (crates/blastit-ingress skeleton, crate Cargo deps, blastit-env edit), Cargo.lock not regenerated, no RES
+- 2026-11-12T13:15 [MA.2.1.1] (lead) attempt 2/3 started
+- 2026-11-12T13:22 [MA.2.1.1] (lead) status active -> review
+- 2026-11-12T13:25 [MA.2.1.1] (lead) status review -> done
+- 2026-11-12T13:25 [MA.2.1.2] (lead) status ready -> active
+- 2026-11-12T13:25 [MA.2.1.2] (lead) attempt 1/3 started
+- 2026-11-12T13:25 [MA.2.1.2] (lead) base 2438c36b5f00f4fa5b9531f2a812bc6b20507c8a
+- 2026-11-12T13:25 [MA.2.1.3] (lead) status ready -> active
+- 2026-11-12T13:25 [MA.2.1.3] (lead) attempt 1/3 started
+- 2026-11-12T13:25 [MA.2.1.3] (lead) base 2438c36b5f00f4fa5b9531f2a812bc6b20507c8a
+- 2026-11-12T13:35 [MA.2.1.2] (lead) status active -> review
+- 2026-11-12T13:35 [MA.2.1.3] (lead) status active -> review
+- 2026-11-12T13:40 [MA.2.1.3] (lead) REVIEW FAIL: (1) learn.rs Unparseable carries libpg_query 'at or near "<literal>"' => user literal bytes in --learn diagnostics; strip/redact + critical test; (
+- 2026-11-12T13:40 [MA.2.1.3] (lead) status review -> ready
+- 2026-11-12T13:40 [MA.2.1.3] (lead) status ready -> active
+- 2026-11-12T13:40 [MA.2.1.3] (lead) attempt 2/3 started
+- 2026-11-12T13:46 [MA.2.1.2] (lead) status review -> done
+- 2026-11-12T13:46 [MA.2.1.3] (lead) status active -> review
+- 2026-11-12T13:48 [MA.2.1.3] (lead) status review -> done
+- 2026-11-12T13:53 [MA.2.1.4] (test-curator) created (task) Pin canonical JSON string escaping and strict-string rejection in critical_ingress
+- 2026-11-12T13:53 [MA.2.1.5] (test-curator) created (task) Pin raw ';' as form data (R15 parser differential) in critical_ingress
+- 2026-11-12T13:53 [MA.2.1.6] (test-curator) created (task) Pin check-sample cap boundary and buffered bodyless-body 413 in critical_ingress
+- 2026-11-12T13:53 [MA.2.1.7] (test-curator) created (task) Pin schema-qualified introspection replay refusal (R31) in critical_literals
+- 2026-11-12T13:53 [MA.2.1.4] (lead) status ready -> active
+- 2026-11-12T13:53 [MA.2.1.4] (lead) attempt 1/3 started
+- 2026-11-12T13:53 [MA.2.1.4] (lead) base f571f9105ea807c8cff54f65650610e48a710331
+- 2026-11-12T13:53 [MA.2.1.5] (lead) status ready -> active
+- 2026-11-12T13:53 [MA.2.1.5] (lead) attempt 1/3 started
+- 2026-11-12T13:53 [MA.2.1.5] (lead) base f571f9105ea807c8cff54f65650610e48a710331
+- 2026-11-12T13:53 [MA.2.1.6] (lead) status ready -> active
+- 2026-11-12T13:53 [MA.2.1.6] (lead) attempt 1/3 started
+- 2026-11-12T13:53 [MA.2.1.6] (lead) base f571f9105ea807c8cff54f65650610e48a710331
+- 2026-11-12T13:53 [MA.2.1.7] (lead) status ready -> active
+- 2026-11-12T13:53 [MA.2.1.7] (lead) attempt 1/3 started
+- 2026-11-12T13:53 [MA.2.1.7] (lead) base f571f9105ea807c8cff54f65650610e48a710331
+- 2026-11-12T13:56 [MA.2.1.4] (lead) status active -> review
+- 2026-11-12T13:56 [MA.2.1.5] (lead) status active -> review
+- 2026-11-12T13:56 [MA.2.1.6] (lead) status active -> review
+- 2026-11-12T13:56 [MA.2.1.7] (lead) status active -> review
+- 2026-11-12T13:58 [MA.2.1.4] (lead) status review -> done
+- 2026-11-12T13:58 [MA.2.1.5] (lead) status review -> done
+- 2026-11-12T13:58 [MA.2.1.6] (lead) status review -> done
+- 2026-11-12T13:58 [MA.2.1.7] (lead) status review -> done
+- 2026-11-12T13:58 [MA.2.1] (lead) GATE PASS: children 1.1-1.7 done. Evidence: cargo test --workspace --all-targets --locked green (all suites ok); make check exit 0; critical_ingress 55 tests + 
+- 2026-11-12T13:58 [MA.2.1] (lead) status ready -> done
+- 2026-11-12T13:58 [MA.2.2.1] (lead) status ready -> active
+- 2026-11-12T13:58 [MA.2.2.1] (lead) attempt 1/3 started
+- 2026-11-12T13:58 [MA.2.2.1] (lead) base 62339f9114fd316484764d5169da84d2079a9611
+- 2026-11-12T14:06 [MA.2.2.1] (lead) edited fields
+- 2026-11-12T14:06 [MA.2.2.1] (lead) edited fields
+- 2026-11-12T14:09 [MA.2.2.1] (lead) status active -> review
+- 2026-11-12T14:10 [MA.2.2.1] (lead) REVIEW FAIL: parse.rs:138 walk_table applies the reserved-key check to table NAMES, so documented manifests are refused: [proxy.app], [group.app.db], [proxy.db.
+- 2026-11-12T14:10 [MA.2.2.1] (lead) status review -> ready
+- 2026-11-12T14:10 [MA.2.2.1] (lead) status ready -> active
+- 2026-11-12T14:10 [MA.2.2.1] (lead) attempt 2/3 started
+- 2026-11-12T14:19 [MA.2.2.1] (lead) status active -> done
+- 2026-11-12T14:19 [MA.2.2.2] (lead) status ready -> active
+- 2026-11-12T14:19 [MA.2.2.2] (lead) attempt 1/3 started
+- 2026-11-12T14:19 [MA.2.2.2] (lead) base 80638f175d5ca0ff5ae922bdb41220a164870be7
+- 2026-11-12T14:19 [MA.2.2.3] (lead) status ready -> active
+- 2026-11-12T14:19 [MA.2.2.3] (lead) attempt 1/3 started
+- 2026-11-12T14:19 [MA.2.2.3] (lead) base 80638f175d5ca0ff5ae922bdb41220a164870be7
+- 2026-11-12T14:19 [MA.2.2.4] (lead) status ready -> active
+- 2026-11-12T14:19 [MA.2.2.4] (lead) attempt 1/3 started
+- 2026-11-12T14:19 [MA.2.2.4] (lead) base 80638f175d5ca0ff5ae922bdb41220a164870be7
+- 2026-11-12T14:36 [MA.2.2.2] (lead) status active -> review
+- 2026-11-12T14:36 [MA.2.2.3] (lead) status active -> review
+- 2026-11-12T14:36 [MA.2.2.4] (lead) status active -> review
+- 2026-11-12T14:47 [MA.2.2.2] (lead) status review -> done
+- 2026-11-12T14:47 [MA.2.2.3] (lead) status review -> done
+- 2026-11-12T14:47 [MA.2.2.4] (lead) status review -> done
+- 2026-11-12T14:56 [MA.2.2.5] (test-curator) created (task) Protect dbproxy socket identity (uid mismatch) in the critical suite
+- 2026-11-12T14:56 [MA.2.2.6] (test-curator) created (task) Cover scheduler body cap before REQ_END and --learn queue overflow 503
+- 2026-11-12T14:56 [MA.2.2.7] (test-curator) created (task) Prove write_atomic never writes through a planted temp symlink
+- 2026-11-12T14:56 [MA.2.2.8] (test-curator) created (task) Complete R8 reserved-key and $1 setup-SQL coverage in critical_manifest_011
+- 2026-11-12T14:57 [MA.2.2.5] (lead) status ready -> active
+- 2026-11-12T14:57 [MA.2.2.5] (lead) attempt 1/3 started
+- 2026-11-12T14:57 [MA.2.2.5] (lead) base f3f26fb4cf928d24f25d1a807e9a3dc82883db82
+- 2026-11-12T14:57 [MA.2.2.6] (lead) status ready -> active
+- 2026-11-12T14:57 [MA.2.2.6] (lead) attempt 1/3 started
+- 2026-11-12T14:57 [MA.2.2.6] (lead) base f3f26fb4cf928d24f25d1a807e9a3dc82883db82
+- 2026-11-12T14:57 [MA.2.2.7] (lead) status ready -> active
+- 2026-11-12T14:57 [MA.2.2.7] (lead) attempt 1/3 started
+- 2026-11-12T14:57 [MA.2.2.7] (lead) base f3f26fb4cf928d24f25d1a807e9a3dc82883db82
+- 2026-11-12T14:57 [MA.2.2.8] (lead) status ready -> active
+- 2026-11-12T14:57 [MA.2.2.8] (lead) attempt 1/3 started
+- 2026-11-12T14:57 [MA.2.2.8] (lead) base f3f26fb4cf928d24f25d1a807e9a3dc82883db82
+- 2026-11-12T15:04 [MA.2.2.5] (lead) status active -> review
+- 2026-11-12T15:04 [MA.2.2.6] (lead) status active -> review
+- 2026-11-12T15:04 [MA.2.2.7] (lead) status active -> review
+- 2026-11-12T15:04 [MA.2.2.8] (lead) status active -> review
+- 2026-11-12T15:08 [MA.2.2.5] (lead) status review -> done
+- 2026-11-12T15:08 [MA.2.2.6] (lead) status review -> done
+- 2026-11-12T15:08 [MA.2.2.7] (lead) status review -> done
+- 2026-11-12T15:08 [MA.2.2.8] (lead) status review -> done
+- 2026-11-12T15:09 [MA.2.2] (lead) GATE PASS: children 2.2.1-.8 done. Evidence: five protected critical suites green (manifest_011 17, manifest_edit 18, early_abort 5, ingress_enforcement 9, lear
+- 2026-11-12T15:09 [MA.2.2] (lead) status ready -> done
+- 2026-11-12T15:09 [MA.2.3.1] (lead) status ready -> active
+- 2026-11-12T15:09 [MA.2.3.1] (lead) attempt 1/3 started
+- 2026-11-12T15:09 [MA.2.3.1] (lead) base aa401fd704bafcaf119c5196bf9bd447b10873f6
+- 2026-11-12T15:09 [MA.2.3.2] (lead) status ready -> active
+- 2026-11-12T15:09 [MA.2.3.2] (lead) attempt 1/3 started
+- 2026-11-12T15:09 [MA.2.3.2] (lead) base aa401fd704bafcaf119c5196bf9bd447b10873f6
+- 2026-11-12T15:17 [MA.2.3.2] (implementer) attempt 1: CLI grammar, CWD manifest discovery, preset precedence, seccomp gate and preload build landed; RESULT.md has acceptance evidence; make check green
+- 2026-11-12T15:17 [MA.2.3.2] (lead) status active -> review
+- 2026-11-12T15:18 [MA.2.3.1] (implementer) implemented: ruff clean python+tools, Makefile skip guard + offline staging, fold literal refusal + atomic write; RESULT.md written
+- 2026-11-12T15:19 [MA.2.3.1] (lead) status active -> review
+- 2026-11-12T15:19 [MA.2.3.1] (lead) owner done, sent to review (base aa401fd)
+- 2026-11-12T15:22 [MA.2.3.1] (lead) REVIEW FAIL (attempt 1): (1) MAJOR fold._write_atomic follows a planted temp symlink (must use O_CREAT|O_EXCL|O_NOFOLLOW, unlink stale temp, + planted-symlink c
+- 2026-11-12T15:22 [MA.2.3.1] (lead) status review -> ready
+- 2026-11-12T15:22 [MA.2.3.1] (lead) attempt 2/3 started
+- 2026-11-12T15:23 [MA.2.3.2] (lead) REVIEW FAIL (attempt 1): (1) MAJOR: Config::from_env(None) still reads BLASTIT_PRESET for dev/check, contradicting ADR-0005/help text (need PresetPolicy::{Env,I
+- 2026-11-12T15:23 [MA.2.3.2] (lead) status review -> ready
+- 2026-11-12T15:23 [MA.2.3.2] (lead) attempt 2/3 started
+- 2026-11-12T15:27 [MA.2.3.1] (lead) status ready -> review
+- 2026-11-12T15:27 [MA.2.3.1] (lead) attempt 2 done (symlink-safe O_EXCL/O_NOFOLLOW temp, protected negative cases, stderr literal redaction); sent to review
+- 2026-11-12T15:28 [MA.2.3.2] (unknown) attempt 2: PresetPolicy::{Env,IgnoreEnv} threaded through from_env_with_format; Config::for_dev()/for_check(); R2 twin (exported preset -> preset None, Pretty, 
+- 2026-11-12T15:28 [MA.2.3.2] (lead) status ready -> review
+- 2026-11-12T15:28 [MA.2.3.2] (lead) attempt 2 done (PresetPolicy IgnoreEnv for dev/check, real-process seccomp exit, env guard, grammar twins); sent to review
+- 2026-11-12T15:31 [MA.2.3.1] (lead) REVIEW FAIL (attempt 2): MAJOR _redact_literal is not backslash-aware so E'…' literals still leak the raw value on stderr (needs E/U& escape handling + protecte
+- 2026-11-12T15:31 [MA.2.3.1] (lead) status review -> ready
+- 2026-11-12T15:31 ESCALATION #3 -> expert for MA.2.3.1 by lead: attempt 2 failed review: fold literal redaction must be backslash-aware for E'..'/U&'..' spans (secret leak on stderr) p
+- 2026-11-12T15:31 [MA.2.3.1] (lead) edited fields
+- 2026-11-12T15:31 [MA.2.3.1] (lead) status ready -> active
+- 2026-11-12T15:31 [MA.2.3.1] (lead) attempt 3/4 started
+- 2026-11-12T15:32 [MA.2.3.2] (lead) REVIEW PASS (attempt 2). Two MINOR findings deferred to the MA.2.3 gate test-curator: (a) critical_config_and_presets.rs:547 unreachable 'stage=config' branch m
+- 2026-11-12T15:52 [MA.2.3.2] (lead) status review -> done
+- 2026-11-12T15:52 [MA.2.3.2] (lead) committed 15931c6
+- 2026-11-12T15:52 [MA.2.3.3] (lead) edited fields
+- 2026-11-12T15:52 [MA.2.3.3] (lead) lead: added crates/blastit/src/cli.rs to paths — the cli.rs run_dev seam is explicitly delegated to this leaf
+- 2026-11-12T15:52 [MA.2.3.3] (lead) status ready -> active
+- 2026-11-12T15:52 [MA.2.3.3] (lead) attempt 1/3 started
+- 2026-11-12T15:52 [MA.2.3.3] (lead) base 15931c6
+- 2026-11-12T15:57 [MA.2.3.3] (lead) attempt 2/3 started
+- 2026-11-12T15:57 [MA.2.3.3] (lead) attempt 1 session ended without producing any file or RESULT (dead session); re-dispatching attempt 2
+- 2026-11-12T16:14 [MA.2.3.1] (expert) attempt 3 complete: PG18 scan.l sql_regions shared by fold+logs (all 8 literal forms -> single ellipsis, E-string backslash + trailing placeholder safe), fchmod
+- 2026-11-12T16:14 [MA.2.3.1] (expert) attempt 3/4 done: ported PG18 scan.l literal lexer/redactor to fold.py (1:1 parity with blastit-sqlpolicy::redact_literals), preserved 0600 mode in _write_atomi
+- 2026-11-12T16:16 [MA.2.3.3] (implementer) attempt 2: dev supervisor, execve barrier, banner/expose guard, dev --learn and the protected critical_dev_and_fail_closed suite land green (7/7; make check exi
+- 2026-11-12T16:16 [MA.2.3.1] (lead) status active -> review
+- 2026-11-12T16:16 [MA.2.3.1] (lead) attempt 3 (expert) done: PG18 lexer parity for all 8 literal forms, 0600 mode preservation, offline test_fold load_tests (117 cases); sent to review
+- 2026-11-12T16:16 [MA.2.3.3] (lead) status active -> review
+- 2026-11-12T16:16 [MA.2.3.3] (lead) attempt 2 done: dev supervisor + learn + critical suite (7 tests); make check exit 0; sent to review (base 15931c6)
+- 2026-11-12T16:21 [MA.2.3.1] (lead) status review -> done
+- 2026-11-12T16:21 [MA.2.3.1] (lead) committed d291078
+- 2026-11-12T16:21 [MA.2.3.3] (lead) REVIEW FAIL (attempt 2): MAJOR dev runtime root leaked on post-adopt fatal paths (port in use/route table/memory/app import _exit without cleanup; stage0 pipe_o
+- 2026-11-12T16:21 [MA.2.3.3] (lead) status review -> ready
+- 2026-11-12T16:21 ESCALATION #4 -> expert for MA.2.3.3 by lead: attempt 2 failed review: dev runtime root leaks on every post-adopt fatal exit path and the binding critical twin is mis
+- 2026-11-12T16:21 [MA.2.3.3] (lead) edited fields
+- 2026-11-12T16:21 [MA.2.3.3] (lead) status ready -> active
+- 2026-11-12T16:21 [MA.2.3.3] (lead) attempt 3/4 started
+- 2026-11-12T16:21 [MA.2.3.3] (lead) base d291078
+- 2026-11-12T16:41 [MA.2.3.3] (expert) attempt 3: fixed R20 dev runtime root cleanup across every fatal exit in stage0/stage1/supervise, fixed dev_learn proxy-vs-route typo + unit test, grouped DevBo
+- 2026-11-12T16:45 [MA.2.3.3] (lead) status active -> review
+- 2026-11-12T16:45 [MA.2.3.3] (lead) attempt 3 done: root cleanup on all fatal paths (DevBoot/ViewSpawn structs), dev_learn route typo, port-key and --learn 413/400 assertions; sent to review
+- 2026-11-12T16:52 [MA.2.3.3] (lead) REVIEW FAIL (attempt 3): MAJOR dev --learn mis-attributes statements across live views (push_routed on spawn / pop on exit over dbproxy's global LIFO stack; rep
+- 2026-11-12T16:52 [MA.2.3.3] (lead) edited fields
+- 2026-11-12T16:52 [MA.2.3.3] (lead) status review -> ready
+- 2026-11-12T16:52 [MA.2.3.3] (lead) status ready -> active
+- 2026-11-12T16:52 [MA.2.3.3] (lead) attempt 4/4 started
+- 2026-11-12T16:52 [MA.2.3.3] (lead) lead: extended paths with crates/blastit-dbproxy/{src,tests}/** — route attribution fix lives in hooks::observe
+- 2026-11-12T17:28 [MA.2.3.3] (expert) attempt 4: attribute per-route learning observations from listener.spec.route in dbproxy hooks::observe (reserving ctl stack for '*' wildcard listeners and drop
+- 2026-11-12T17:28 [MA.2.3.3] (lead) status active -> review
+- 2026-11-12T17:28 [MA.2.3.3] (lead) attempt 4 done: dbproxy attributes from listener route (wildcard-only LIFO), stage1 privilege stamp, reproducing twin; sent to review
+- 2026-11-12T17:37 [MA.2.3.3] (lead) REVIEW FAIL (attempt 4): MAJOR dev_learn edits() skips observations whose route equals learn_route (first declared route) whenever an unrouted request exists, s
+- 2026-11-12T17:37 [MA.2.3.3] (lead) status review -> ready
+- 2026-11-12T17:37 ESCALATION #5 -> expert for MA.2.3.3 by lead: attempt 4 fixed attribution but re-review found the learn fallback still reuses a declared route name, dropping that rou
+- 2026-11-12T17:37 [MA.2.3.3] (lead) edited fields
+- 2026-11-12T17:37 [MA.2.3.3] (lead) status ready -> active
+- 2026-11-12T17:37 [MA.2.3.3] (lead) attempt 5/5 started
+- 2026-11-12T18:18 [MA.2.3.3] (expert) attempt 5: dedicate reserved slot-0 fallback identity (_learn_fallback) under dev --learn in stage0/stage1/dev_learn so the first declared route never collides 
+- 2026-11-12T18:21 [MA.2.3.3] (lead) status active -> review
+- 2026-11-12T18:21 [MA.2.3.3] (lead) attempt 5 done: reserved _learn_fallback view slot 0 + critical twin; sent to review
+- 2026-11-12T18:30 [MA.2.3.3] (lead) status review -> done
+- 2026-11-12T18:30 [MA.2.3.3] (lead) committed 0ea35c0
+- 2026-11-12T18:30 [MA.2.3.4] (lead) status ready -> active
+- 2026-11-12T18:30 [MA.2.3.4] (lead) attempt 1/3 started
+- 2026-11-12T18:30 [MA.2.3.4] (lead) base 0ea35c0
+- 2026-11-12T18:50 [MA.2.3.4] (lead) status active -> review
+- 2026-11-12T18:50 [MA.2.3.4] (lead) owner done; flagged possible pre-existing race in critical_dev_and_fail_closed::only_a_granted_route_gets_a_pg_socket under parallel rs-test
+- 2026-11-12T18:50 [MA.2.3.4] (lead) sent to review (base 0ea35c0)
+- 2026-11-12T19:09 AUTOPILOT on by conductor boot
+- 2026-11-12T19:15 [MA.2.3.4] (lead) status review -> done
+- 2026-11-12T19:15 [MA.2.3.4] (lead) committed 865050e; reviewer MINORs -> follow-up (transaction_label BEGIN arm, untested R33 redacted guard, unchecked indexing, pyo3 attribute conformance, route
+- 2026-11-12T19:15 [MA.2.3.5] (lead) status ready -> active
+- 2026-11-12T19:15 [MA.2.3.5] (lead) attempt 1/3 started
+- 2026-11-12T19:15 [MA.2.3.5] (lead) base 865050e8f97402af820e18c71c5aa31aeb48ae55
+- 2026-11-12T19:16 [MA.3] (planner) edited fields
+- 2026-11-12T19:16 [MA.3.1] (planner) created (task) Runnable-docs harness executing README and docs snippets unprivileged
+- 2026-11-12T19:16 [MA.3.2] (planner) created (task) Reconcile docs, README and ARCHITECTURE drift with the shipped 0.1.1 CLI
+- 2026-11-12T19:16 [MA.3.3] (planner) created (task) Visual QA of the built Zensical site (desktop light/dark, mobile, Mermaid)
+- 2026-11-12T19:16 [MA.3.4] (planner) created (task) Run Docker root + rootless e2e suites and fix e2e fallout
+- 2026-11-12T19:16 [MA.3.5] (planner) created (task) Audit runnable-docs guard, critical tiers and scoped mutants
+- 2026-11-12T19:16 [MA.3.6] (planner) created (task) Bump 0.1.1 (Cargo.toml/Cargo.lock), changelog entry and wheel metadata proof
+- 2026-11-12T19:29 [MA.2.3.5] (implementer) check.rs: std::process::Command only inherits descriptors without FD_CLOEXEC (clear it on the gate socketpair end) and swapped_env rewrites away every BLASTIT_*
+- 2026-11-12T19:29 [MA.2.3.5] (implementer) this host's `uv run --no-project` has no pytest: the node's pytest acceptance lines need `--with pytest` plus PYTHONPATH=target/python-critical:python (make tes
+- 2026-11-12T19:32 [MA.2.3.5] (lead) status active -> review
+- 2026-11-12T19:38 [MA.2.3.5] (lead) REVIEW FAIL (1/3): [BLOCKER] R30 Django path missing: no one-shot 0600 setup file + no {"op":"set_db"} send, so pytest-django migrations hit the dev database; d
+- 2026-11-12T19:38 [MA.2.3.5] (lead) status review -> ready
+- 2026-11-12T19:38 [MA.2.3.5] (lead) attempt 2/3 started
+- 2026-11-12T19:38 [MA.2.3.5] (lead) retry base 865050e8f97402af820e18c71c5aa31aeb48ae55
+- 2026-11-12T19:46 [MA.2.3.5] (implementer) attempt 2: R30 Django handshake implemented — check.rs writes a 0600 django-setup.json (proxy/database/test_db/real/swapped) only when pytest_django imports AND
+- 2026-11-12T19:46 [MA.2.3.5] (implementer) attempt 2: pytest preflight (python -c import pytest in swapped_env) is exit 2 with 'install pytest: uv add --dev pytest'; FD_CLOEXEC on the suite's control end
+- 2026-11-12T19:46 [MA.2.3.5] (implementer) attempt 2: host fact (not LESSONS.md, out of paths): the critical tier's only protected test runner is 'PYTHONPATH=target/python-critical:python uv run --no-pro
+- 2026-11-12T19:48 [MA.2.3.5] (implementer) attempt 2 done: all five acceptance commands re-run (pytest lines need --with pytest + PYTHONPATH=target/python-critical:python), real PG run 5 passed, critical
+- 2026-11-12T19:49 [MA.2.3.5] (lead) status ready -> review
+- 2026-11-12T19:55 [MA.2.3.5] (lead) REVIEW FAIL (2/3): [MAJOR] _check_pytest.py:290,365-368 real credentials in os.environ for whole session when no DB-using test (no-DB Django body sees real DSN)
+- 2026-11-12T19:55 ESCALATION #6 -> expert for MA.2.3.5 by lead: pytest-django lifecycle/credential-leak bug: cheap attempts 1-2 failed on R30 handshake (env leak when no DB test; teard
+- 2026-11-12T19:55 [MA.2.3.5] (lead) edited fields
+- 2026-11-12T19:55 [MA.2.3.5] (lead) edited fields
+- 2026-11-12T19:55 [MA.2.3.5] (lead) status review -> active
+- 2026-11-12T19:55 [MA.2.3.5] (lead) attempt 1/4 started
+- 2026-11-12T19:55 [MA.2.3.5] (lead) escalated to expert; base 865050e8f97402af820e18c71c5aa31aeb48ae55
+- 2026-11-12T20:30 [MA.2.3.5] (expert) expert attempt 1: fixed all 5 R30 pytest-django review findings plus 2 real-Django traps found against Django 6.1.3 / pytest-django 4.14 / PG 15: (1) separated 
+- 2026-11-12T20:31 [MA.2.3.5] (lead) status active -> review
+- 2026-11-12T20:37 [MA.2.3.5] (lead) edited fields
+- 2026-11-12T20:37 [MA.2.3.5] (lead) status review -> done
+- 2026-11-12T20:38 [MA.2.3.5] (lead) committed d73ded3
+- 2026-11-12T20:50 [MA.2.3.6] (test-curator) created (task) Repair the check-contract suite and psycopg guard so the pytest-plugin CI job is green
+- 2026-11-12T20:50 [MA.2.3.7] (test-curator) created (task) Re-pin test_pytest_plugin.py against Django 6.1 setup statements and the egress warning
+- 2026-11-12T20:50 [MA.2.3.8] (test-curator) created (task) Make a clean SIGTERM to blastit dev exit 0 (late ctl.chan EPIPE is not fatal)
+- 2026-11-12T20:50 [MA.2.3.9] (test-curator) created (task) Pin check --learn refusal exit 1 and wrote=false end to end
+- 2026-11-12T20:50 [MA.2.3.10] (test-curator) created (task) Pin three unprotected audit_v1 rules: add_query with ellipsis, no_observations zero statements, would_write zero requests
+- 2026-11-12T20:50 [MA.2.3] (test-curator) test-curator gate audit: docs/testing/AUDIT-MA.2.3.md; BLOCKED on pytest-plugin CI job (F1/F2/F3) and dev SIGTERM exit 1 (F4); mutation 9/20 killed; filed MA.2.
+- 2026-11-12T20:50 [MA.2.3.6] (lead) status ready -> active
+- 2026-11-12T20:50 [MA.2.3.6] (lead) attempt 1/3 started
+- 2026-11-12T20:50 [MA.2.3.6] (lead) base d73ded3043cc9df39d1a482bc6b7c4df449ac2b0
+- 2026-11-12T20:50 [MA.2.3.7] (lead) status ready -> active
+- 2026-11-12T20:50 [MA.2.3.7] (lead) attempt 1/3 started
+- 2026-11-12T20:50 [MA.2.3.7] (lead) base d73ded3043cc9df39d1a482bc6b7c4df449ac2b0
+- 2026-11-12T21:09 [MA.2.3.6] (lead) status active -> review
+- 2026-11-12T21:09 [MA.2.3.7] (lead) status active -> review
+- 2026-11-12T21:19 [MA.2.3.7] (lead) REVIEW (1/3) FAIL verdict driven solely by out-of-scope pre-existing issues: test_live_server.py:191,259 asserts un-redacted SELECT 'denied' (R24 redacts to SQL
+- 2026-11-12T21:19 [MA.2.3.6] (lead) reviewer PASS; minor: commit 2.3.6 paths only (test_pytest_plugin.py belongs to MA.2.3.7), RESULT hunk count 5 not 6
+- 2026-11-12T21:19 [MA.2.3.6] (lead) status review -> done
+- 2026-11-12T21:19 [MA.2.3.6] (lead) committed 39998a5
+- 2026-11-12T21:19 [MA.2.3.7] (lead) committed as lead-accepted work (out-of-scope findings moved to MA.2.3.11)
+- 2026-11-12T21:19 [MA.2.3.7] (lead) status review -> done
+- 2026-11-12T21:20 [MA.2.3.11] (lead) created (task) Fix the live-server suite: assert R24-redacted denial and pin the dev memory watermark
+- 2026-11-12T21:20 [MA.2.3.8] (lead) status ready -> active
+- 2026-11-12T21:20 [MA.2.3.8] (lead) attempt 1/3 started
+- 2026-11-12T21:20 [MA.2.3.8] (lead) base acd9289f84e9a866ea6f8083f9ca9c37682acdb5
+- 2026-11-12T21:20 [MA.2.3.11] (lead) status ready -> active
+- 2026-11-12T21:20 [MA.2.3.11] (lead) attempt 1/3 started
+- 2026-11-12T21:20 [MA.2.3.11] (lead) base acd9289f84e9a866ea6f8083f9ca9c37682acdb5
+- 2026-11-12T21:43 [MA.2.3.8] (lead) status active -> review
+- 2026-11-12T21:43 [MA.2.3.11] (lead) status active -> review
+- 2026-11-12T21:43 [MA.2.3.9] (lead) status ready -> active
+- 2026-11-12T21:43 [MA.2.3.9] (lead) attempt 1/3 started
+- 2026-11-12T21:43 [MA.2.3.9] (lead) base acd9289f84e9a866ea6f8083f9ca9c37682acdb5
+- 2026-11-12T21:49 [MA.2.3.9] (lead) status active -> review
+- 2026-11-12T21:49 [MA.2.3.8] (lead) reviewer PASS: production fix correct, both pre-fix behaviours caught; MINOR: helper-level tests only (no Supervisor-level closed-fd test), free_port EADDRINUSE
+- 2026-11-12T21:49 [MA.2.3.11] (lead) reviewer PASS: redaction oracle is real (removing redaction falsifies both halves), watermark pin load-bearing + fixture-only on an 89% host
+- 2026-11-12T21:52 [MA.2.3.9] (lead) status review -> done
+- 2026-11-12T21:52 [MA.2.3.11] (lead) status review -> done
+- 2026-11-12T21:52 [MA.2.3.8] (lead) status review -> done
+- 2026-11-12T21:52 [MA.2.3.12] (lead) created (task) Harden free_port and load isolation in the protected dev suite
+- 2026-11-12T21:52 [MA.2.3.10] (lead) status ready -> active
+- 2026-11-12T21:52 [MA.2.3.10] (lead) attempt 1/3 started
+- 2026-11-12T21:52 [MA.2.3.10] (lead) base 1c070e63f9aa3093a71ff67693147c33fe7a5bc3
+- 2026-11-12T22:02 [MA.2.3.10] (lead) status active -> review
+- 2026-11-12T22:05 [MA.2.3.10] (lead) status review -> done
+- 2026-11-12T22:05 [MA.2.3.12] (lead) status ready -> active
+- 2026-11-12T22:05 [MA.2.3.12] (lead) attempt 1/3 started
+- 2026-11-12T22:05 [MA.2.3.12] (lead) base a6c134810190bd940b0c3e94fec23268e7058f21
+- 2026-11-12T22:16 [MA.2.3.12] (lead) status active -> review
+- 2026-11-12T22:24 [MA.2.3.12] (lead) status review -> done
+- 2026-11-12T22:27 [MA.2.3.13] (lead) created (task) Make make e2e work on any CPython (prebuilt Dockerfile wheel glob)
+- 2026-11-12T22:27 [MA.2.3.13] (lead) status ready -> active
+- 2026-11-12T22:27 [MA.2.3.13] (lead) attempt 1/3 started
+- 2026-11-12T22:27 [MA.2.3.13] (lead) base 25b9de329c0547f15053f742f733cc9bf243b3b9
+- 2026-11-12T22:50 [MA.2.3.13] (lead) status active -> review
+- 2026-11-12T22:57 [MA.2.3.13] (lead) status review -> done
+- 2026-11-12T22:57 [MA.2.3] (lead) status ready -> done
+- 2026-11-12T22:58 HUMAN H-002 opened by lead (node MA)
+- 2026-11-12T22:58 [MA.2] (lead) status ready -> done
+- 2026-11-12T22:58 [MA.3.1] (lead) status ready -> active
+- 2026-11-12T22:58 [MA.3.1] (lead) attempt 1/3 started
+- 2026-11-12T22:58 [MA.3.1] (lead) base 5596dc29793945570b5836b149c5ba1e43918c37
+- 2026-11-12T23:35 [MA.3.1] (lead) status active -> review
+- 2026-11-12T23:41 [MA.3] (lead) edited fields
+- 2026-11-12T23:41 [MA.3.7] (lead) created (task) Product fixes: dev watermark boot contract, queries=[] denying listener, one-pass dev --learn
+- 2026-11-12T23:41 [MA.3.7] (lead) status ready -> active
+- 2026-11-12T23:41 [MA.3.7] (lead) attempt 1/3 started
+- 2026-11-12T23:41 [MA.3.7] (lead) base 5596dc29793945570b5836b149c5ba1e43918c37
+- 2026-11-12T23:41 [MA.3.1] (lead) REVIEW FAIL (1/3): [MAJOR] harness injects BLASTIT_MEM_HIGH_WATERMARK=100 + BLASTIT_MAX_VIEW_PROCESSES=8 (masks 503); [MAJOR] _static_command ignores 'uv run' t
+- 2026-11-12T23:41 [MA.3.1] (lead) status review -> ready
+- 2026-11-12T23:41 [MA.3.1] (lead) attempt 2/3 started
+- 2026-11-12T23:41 [MA.3.1] (lead) retry base 5596dc29793945570b5836b149c5ba1e43918c37
+- 2026-11-13T00:09 [MA.3.7] (lead) attempt 1 blocked: (a)(b)(c) fixed and pinned, but the mandated boot arm makes every dev fence fail because the watermark reads cgroup memory.current which coun
+- 2026-11-13T00:09 [MA.3.7] (lead) attempt 2/3 started
+- 2026-11-13T00:09 [MA.3.7] (lead) retry base 5596dc29793945570b5836b149c5ba1e43918c37
+- 2026-11-13T00:31 [MA.3.1] (lead) status ready -> active
+- 2026-11-13T00:31 [MA.3.1] (lead) attempt 3/3 started
+- 2026-11-13T00:31 [MA.3.1] (lead) attempt 3: delete the two expect_drift pins (MA.3.7 (b)/(c) landed; assert 42501 and the one-pass query write), per-run UV_CACHE_DIR so a rebuilt wheel cannot h
+- 2026-11-13T00:38 [MA.3.1] (lead) status active -> review
+- 2026-11-13T00:38 [MA.3.7] (lead) status active -> review
+- 2026-11-13T00:50 [MA.3.7] (lead) status review -> done
+- 2026-11-13T00:51 [MA.3.1] (lead) status review -> done
+- 2026-11-13T00:51 [MA.3.2] (lead) status ready -> active
+- 2026-11-13T00:51 [MA.3.2] (lead) attempt 1/3 started
+- 2026-11-13T00:51 [MA.3.2] (lead) base aaeadf4d0bc850a51ae8e63bd5dd1c330b1e672d
+- 2026-11-13T00:51 [MA.3.4] (lead) status ready -> active
+- 2026-11-13T00:51 [MA.3.4] (lead) attempt 1/3 started
+- 2026-11-13T00:51 [MA.3.4] (lead) base aaeadf4d0bc850a51ae8e63bd5dd1c330b1e672d
+- 2026-11-13T00:59 [MA.3.4] (lead) status active -> review
+- 2026-11-13T00:59 [MA.3.2] (lead) status active -> review
+- 2026-11-13T01:05 [MA.3.2] (lead) REVIEW FAIL (1/3): [BLOCKER] settings.md:112 + deploy/anything-else.md:56-57 say '85% of non-reclaimable memory'; binary computes 85% of total (min MemTotal/cgr
+- 2026-11-13T01:05 [MA.3.2] (lead) status review -> ready
+- 2026-11-13T01:05 [MA.3.2] (lead) attempt 2/3 started
+- 2026-11-13T01:05 [MA.3.2] (lead) retry base aaeadf4d0bc850a51ae8e63bd5dd1c330b1e672d
+- 2026-11-13T01:09 [MA.3.4] (lead) status review -> done
+- 2026-11-13T01:09 [MA.3.2] (lead) status ready -> review
+- 2026-11-13T01:14 [MA.3.2] (lead) status review -> done
+- 2026-11-13T01:14 [MA.3.3] (lead) status ready -> active
+- 2026-11-13T01:14 [MA.3.3] (lead) attempt 1/3 started
+- 2026-11-13T01:14 [MA.3.3] (lead) base dba348c5ad37091b0c510966ac6d5eedd0f8033c
+- 2026-11-13T01:14 [MA.3.5] (lead) status ready -> active
+- 2026-11-13T01:14 [MA.3.5] (lead) attempt 1/3 started
+- 2026-11-13T01:14 [MA.3.5] (lead) base dba348c5ad37091b0c510966ac6d5eedd0f8033c
+- 2026-11-13T01:19 [MA.3.8] (test-curator) created (task) Wire the docs gate and critical-test guards into CI
+- 2026-11-13T01:19 [MA.3.9] (test-curator) created (task) Account for every documented snippet shape and test the docs gate
+- 2026-11-13T01:19 [MA.3.10] (test-curator) created (task) Harden static deploy checks, wheel provenance and offline/HOME isolation
+- 2026-11-13T01:19 [MA.3.11] (test-curator) created (task) Protected critical twins for the sqlpolicy learn and table policy
+- 2026-11-13T01:19 [MA.3.12] (test-curator) created (task) Fix nothing
+- 2026-11-13T01:19 [MA.3.12] (test-curator) status proposed -> superseded
+- 2026-11-13T01:19 [MA.3.12] (test-curator) Retired: created by a stray shell invocation in MA.3.5 (no real scope). Superseded by MA.3.8..MA.3.11.
+- 2026-11-13T01:19 [MA.3.12] (test-curator) Retired: created by a stray shell invocation during the MA.3.5 audit (no real scope). Superseded by MA.3.8..MA.3.11.
+- 2026-11-13T01:20 [MA.3.5] (test-curator) Audit complete: docs/testing/AUDIT-MA.3.md; verdict BLOCKED (F1..F8), gaps filed as MA.3.8..MA.3.11. cargo-mutants still absent (H-002); anchored fallback 19/20
+- 2026-11-13T01:20 [MA.3.5] (test-curator) Audit complete: docs/testing/AUDIT-MA.3.md; verdict BLOCKED (F1..F8), gaps filed as MA.3.8..MA.3.11. cargo-mutants still absent (H-002); anchored fallback 19/20
+- 2026-11-13T01:20 [MA.3.5] (test-curator) status active -> review
+- 2026-11-13T01:20 [MA.3.5] (test-curator) Audit done: docs/testing/AUDIT-MA.3.md; verdict BLOCKED (F1..F8); gaps filed MA.3.8-MA.3.11. cargo-mutants absent (H-002); anchored fallback 19/20 killed (manif
+- 2026-11-13T01:26 [MA.3.8] (lead) status ready -> active
+- 2026-11-13T01:26 [MA.3.8] (lead) attempt 1/3 started
+- 2026-11-13T01:26 [MA.3.8] (lead) base dba348c5ad37091b0c510966ac6d5eedd0f8033c
+- 2026-11-13T01:42 [MA.3.8] (lead) status active -> review
+- 2026-11-13T01:50 [MA.3.3] (lead) status active -> done
+- 2026-11-13T01:50 [MA.3.3] (lead) visual PASS: 9 pages x 3 viewports, 3 Mermaid diagrams render, mobile nav + no horizontal scroll; MINOR: brand/logo.svg #fbfaf6 fill is low-contrast on the ligh
+- 2026-11-13T01:50 [MA.3.8] (lead) REVIEW FAIL (1/3): [MAJOR] docs-gate pins CPython 3.13 but the harness sanitises PATH (setup-python 3.13 in /opt/hostedtoolcache invisible) -> uv venv aborts; n
+- 2026-11-13T01:50 [MA.3.8] (lead) status review -> ready
+- 2026-11-13T01:50 [MA.3.8] (lead) attempt 2/3 started
+- 2026-11-13T01:50 [MA.3.8] (lead) retry base 04bed18c7304f9109d60f3a3e5c4427868246782
+- 2026-11-13T01:58 [MA.3.8] (lead) status ready -> review
+- 2026-11-13T02:05 [MA.3.8] (lead) status review -> done
+- 2026-11-13T02:05 [MA.3.9] (lead) status ready -> active
+- 2026-11-13T02:05 [MA.3.9] (lead) attempt 1/3 started
+- 2026-11-13T02:05 [MA.3.9] (lead) base 19c37b1d41c4cf5c683a16a44afa559122e46178
+- 2026-11-13T02:05 [MA.3.10] (lead) status ready -> active
+- 2026-11-13T02:05 [MA.3.10] (lead) attempt 1/3 started
+- 2026-11-13T02:05 [MA.3.10] (lead) base 19c37b1d41c4cf5c683a16a44afa559122e46178
+- 2026-11-13T02:05 [MA.3.11] (lead) status ready -> active
+- 2026-11-13T02:05 [MA.3.11] (lead) attempt 1/3 started
+- 2026-11-13T02:05 [MA.3.11] (lead) base 19c37b1d41c4cf5c683a16a44afa559122e46178
+- 2026-11-13T02:24 [MA.3.9] (lead) status active -> review
+- 2026-11-13T02:24 [MA.3.10] (lead) status active -> review
+- 2026-11-13T02:24 [MA.3.11] (lead) status active -> review
+- 2026-11-13T02:34 [MA.3.9] (lead) status review -> done
+- 2026-11-13T02:34 [MA.3.11] (lead) status review -> done
+- 2026-11-13T02:35 [MA.3.10] (lead) REVIEW FAIL (1/3): [MAJOR] harness.py:2454,2460 PSQL.booleans lists -C and -g which psql does not accept, so impossible flags pass the static check; regenerate 
+- 2026-11-13T02:35 [MA.3.10] (lead) status review -> ready
+- 2026-11-13T02:35 [MA.3.10] (lead) attempt 2/3 started
+- 2026-11-13T02:35 [MA.3.10] (lead) retry base 0cb3baff404cf57623015e644c4d2efb2a03fb0c
+- 2026-11-13T02:48 [MA.3.10] (lead) status ready -> review
+- 2026-11-13T02:51 [MA.3.10] (lead) status review -> done
+- 2026-11-13T02:51 [MA.3.5] (lead) lead accepts audit: report docs/testing/AUDIT-MA.3.md; escape gaps closed by MA.3.8/3.9/3.10/3.11; mutants blocked on H-002 (cargo-mutants absent) -> milestone 
+- 2026-11-13T02:51 [MA.3.5] (lead) status review -> done
+- 2026-11-13T02:52 [MA.3.13] (lead) created (task) Run the docs-gate unit suites in make check and pin the harness checks in-repo
+- 2026-11-13T02:52 [MA.3.6] (lead) status ready -> active
+- 2026-11-13T02:52 [MA.3.6] (lead) attempt 1/3 started
+- 2026-11-13T02:52 [MA.3.6] (lead) base 09b7ef3af3cbab74cc713b48012f1a4ddde69575
+- 2026-11-13T02:52 [MA.3.13] (lead) status ready -> active
+- 2026-11-13T02:52 [MA.3.13] (lead) attempt 1/3 started
+- 2026-11-13T02:52 [MA.3.13] (lead) base 09b7ef3af3cbab74cc713b48012f1a4ddde69575
+- 2026-11-13T03:00 [MA.3.6] (lead) status active -> review
+- 2026-11-13T03:00 [MA.3.13] (lead) status active -> review
+- 2026-11-13T03:10 [MA.3.6] (lead) status review -> done
+- 2026-11-13T03:10 [MA.3.13] (lead) status review -> done
+- 2026-11-13T03:12 [MA.3] (lead) status ready -> done
+- 2026-11-13T03:12 ESCALATION #7 -> strategist for MA by conductor: milestone gate: MA Lead DX & Show-the-World Polish 0.1.1 — all 5 children done, epic gates passed, make check + make e2e
+- 2026-11-13T03:12 HUMAN H-003 opened by conductor (node MA)
+- 2026-11-13T03:12 [MA] (conductor) conductor: MA gate escalated (#7) to strategist but the expensive tier is unusable — OpenRouter credit ceiling (~79k affordable vs 256k max_tokens). Gate blocke
+- 2026-11-13T03:16 [MA] (lead) gate packet assembled at e0bc1b3 by lead (cheap tier): make check exit 0 and make e2e exit 0 re-run here, roadmap criteria mapped, AUDIT-MA.2.3 F1-F8 and AUDIT-
+- 2026-11-13T03:16 [MA] (lead) gate packet committed as 1d5aab3 (evidence at e0bc1b3 + docs/troubleshooting.md rows); MA remains ready, awaiting the strategist gate.
+- 2026-11-13T03:17 AUTOPILOT off by conductor blocked on human: MA milestone gate needs strategist but OpenRouter credits exhausted (H-003); cargo-mutants absent (H-002)
+- 2026-11-13T09:09 AUTOPILOT on by conductor boot
+- 2026-11-13T09:09 HUMAN H-002 closed by conductor
+- 2026-11-13T09:09 HUMAN H-003 closed by conductor
+- 2026-11-13T09:39 [MA.6] (conductor) created (task) Leaf 13: backport PR #60/#61 perf work into 0.1.1
+- 2026-11-13T09:44 [MA.6] (lead) status ready -> active
+- 2026-11-13T09:44 [MA.6] (lead) attempt 1/3 started
+- 2026-11-13T09:44 [MA.6] (lead) edited fields
+- 2026-11-13T09:53 [MA.6] (implementer) Merged perf-hot-path into develop; resolved conn.rs + scheduler.rs unions (raw head + ingress plan), rebuilt events/json build line, all workspace tests green
+- 2026-11-13T09:57 [MA.6] (implementer) Acceptance verified: 4 perf suites, make check 0 (200 Rust + 50 Python critical, rebuilt wheel docs-test), make e2e 0 with 8x PASS, critical-guard 7dfa863 clean
+- 2026-11-13T10:02 [MA.6] (lead) edited fields
+- 2026-11-13T10:04 [MA.6] (lead) status active -> done
+- 2026-11-13T10:04 [MA.6] (lead) commit 341698a (merge of origin/perf-hot-path into release/0.1.1); reviewer PASS attempt 1
+- 2026-11-13T10:42 [MB.1] (strategist) created (epic) MA Gate Follow-ups: Mutation Coverage, Startup Diagnostics & Harness Hygiene
+- 2026-11-13T10:42 [MB.2] (strategist) created (epic) Static Asset Serving & Clean URL Rewriting (0.2.0)
+- 2026-11-13T10:42 [MB.3] (strategist) created (epic) PHP-FPM FastCGI Backend & php2shell Defense (0.2.1)
+- 2026-11-13T10:42 [MB.4] (strategist) created (epic) Vite & Node HTTP Upstream & node2shell Defense (0.2.2)
+- 2026-11-13T10:42 [MB.5] (strategist) created (epic) Tomcat / JVM 12-Factor Backend & Unified Multi-Backend Gate (0.2.3)
+- 2026-11-13T10:44 [MA] (strategist) status ready -> done
+- 2026-11-13T10:44 [MA] (strategist) strategist gate PASSED at 70a4357 on release/0.1.1: make check exit 0, make e2e exit 0 (8x PASS), real cargo-mutants run (blastit-manifest 437/630=69.4% whole-c
+- 2026-11-13T10:46 HUMAN H-004 opened by conductor (node MA)
+- 2026-11-13T10:46 AUTOPILOT off by conductor awaiting human merge of release PR v0.1.1
+- 2026-11-13T11:02 [MA.7] (conductor) created (task) Leaf 14: green the release CI (sudo-rs smoke job, pytest fixture collection)
+- 2026-11-13T11:02 AUTOPILOT on by conductor release CI hardening for v0.1.1
+- 2026-11-13T11:03 [MA.7] (lead) status ready -> active
+- 2026-11-13T11:03 [MA.7] (lead) attempt 1/3 started
+- 2026-11-13T11:03 [MA.7] (lead) base 01c91cd85991524af0014887f30c554c16653687
+- 2026-11-13T11:08 [MA.7] (lead) review PASS: reproduced 3 fixture collection errors without --ignore, 0 with it; make check prerequisites green; plan-validate blocked only by transitive MA.7-u
+- 2026-11-13T11:08 [MA.7] (lead) status active -> review
+- 2026-11-13T11:08 [MA.7] (lead) status review -> done
+- 2026-11-13T11:09 [MA.7] (lead) commit eacb5033130202b5856cce02a05d2ce2bc57eb67 on release/0.1.1 (make check exit 0, plan validate OK, python/tests untouched)
+- 2026-11-13T11:21 [MA.8] (conductor) created (task) Leaf 15: root-cause the two red Django check tests on the release CI
+- 2026-11-13T11:21 [MA.8] (lead) status ready -> active
+- 2026-11-13T11:21 [MA.8] (lead) attempt 1/3 started
+- 2026-11-13T11:21 [MA.8] (lead) base f97fd08d83ffcb1476f1db90ba8d5da2910adb63 (release/0.1.1, PR #62)
+- 2026-11-13T11:35 [MA.8] (lead) status active -> review
+- 2026-11-13T11:35 [MA] (lead) status done -> active
+- 2026-11-13T11:39 [MA.8] (lead) REVIEW FAIL (attempt 1): MAJOR python/tests/test_check.py:108 DJANGO_MANIFEST grants set_config('TimeZone') unconditionally -> on a UTC-spelling server (postgre
+- 2026-11-13T11:39 [MA.8] (lead) status review -> ready
+- 2026-11-13T11:39 [MA.8] (lead) status ready -> active
+- 2026-11-13T11:39 [MA.8] (lead) attempt 2/3 started
+- 2026-11-13T11:48 [MA.8] (lead) smoke (root) evidence (acceptance 6): NOT green and not a failure either — job 131823878765 is still in_progress in its 'sudo env ... cargo test -p blastit' ste
+- 2026-11-13T11:48 [MA.8] (lead) status active -> done
+- 2026-11-13T11:48 [MA] (lead) status active -> done
+- 2026-11-13T11:48 [MA] (lead) MA.8 (CI hotfix leaf, created by conductor after the 0.1.1 gate) is done with reviewer PASS; status restored to done after the validate-blocking transient where
+- 2026-11-13T11:51 [MA.8] (lead) committed d12317be3b2387ab07b476ed66f1636a11307754 on release/0.1.1 (python/tests/test_check.py, docs/knowledge/LESSONS.md, plan/)
+- 2026-11-13T11:52 [MA.9] (conductor) created (task) Leaf 16: un-hang the smoke (root) CI job and make it fail loudly
+- 2026-11-13T11:52 [MA.9] (lead) status ready -> active
+- 2026-11-13T11:52 [MA.9] (lead) attempt 1/3 started
+- 2026-11-13T11:52 [MA.9] (lead) base 599f912149b42a2e5cbc4ea14aec2108cbe318ef
+- 2026-11-13T12:08 [MA.9] (lead) status active -> review
+- 2026-11-13T12:08 [MA.9] (lead) status review -> done
+- 2026-11-13T12:08 [MA.9] (lead) committed 729f295 on release/0.1.1 (.github/workflows/ci.yml, plan/); plan.py validate ok; next CI run must settle candidate 3
+- 2026-11-13T12:15 [MA.10] (conductor) created (task) Leaf 17: run only root-valid suites in smoke (root)
+- 2026-11-13T12:16 [MA.10] (lead) status ready -> active
+- 2026-11-13T12:16 [MA.10] (lead) attempt 1/3 started
+- 2026-11-13T12:16 [MA.10] (lead) base dc553ad4a0b06c0e8df717241aab3e9ad7853f72
+- 2026-11-13T12:21 [MA] (lead) status done -> active
+- 2026-11-13T12:21 [MA.10] (lead) status active -> review
+- 2026-11-13T12:28 [MA.10] (lead) attempt 2/3 started
+- 2026-11-13T12:28 [MA.10] (lead) review PASS attempt 1; 3 MINOR findings fixed in attempt 2 (job-comment arithmetic, grown-exclusion wording, kept-budget ::warning::); re-review
+- 2026-11-13T12:34 [MA.10] (lead) status review -> done
+- 2026-11-13T12:34 [MA.10] (lead) committed 5ef8a4b on release/0.1.1 (.github/workflows/ci.yml, plan/); plan.py validate ok; next smoke (root) run must show 5 'test result: ok' and no ::error::
+- 2026-11-13T12:42 [MA.11] (conductor) created (task) Leaf 18: remove the request-line ordering race in smoke pretty-format
+- 2026-11-13T12:47 [MA.11] (lead) status ready -> active
+- 2026-11-13T12:47 [MA.11] (lead) attempt 1/3 started
+- 2026-11-13T12:47 [MA.11] (lead) base 0f926dafae617cda9d93aab98356def2a98cfc5a
+- 2026-11-13T12:52 [MA.11] (lead) status active -> review
+- 2026-11-13T12:52 [MA.11] (lead) dispatch reviewer: base 0f926da, diff = smoke.rs +38/-5 (wait_for_line poll)
+- 2026-11-13T12:57 [MA.11] (lead) REVIEW PASS (attempt 1) + 2 MINOR comment findings fixed (reworded to logs.rs single-writer/poll-order fact); gates: plan OK, guard OK, critical-guard clean, ma
+- 2026-11-13T12:57 [MA.11] (lead) status review -> done
+- 2026-11-13T12:57 [MA.11] (lead) commit 21e093b25d6a99aefb7e327b70283a7dc495c954 on release/0.1.1
+- 2026-11-13T13:07 [MA] (strategist) status active -> done
+- 2026-11-13T13:07 [MA] (strategist) incremental re-acceptance PASSED at f305e38 on release/0.1.1: MA.7..MA.11 verified CI/test-only with zero weakened guards/assertions; PR #62 16/16 checks green 

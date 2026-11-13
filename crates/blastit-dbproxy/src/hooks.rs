@@ -6,7 +6,9 @@
 //!   and otherwise hands pregresql the proxy's *real* upstream identity. The
 //!   `user` and `database` a client sends in its startup packet are ignored:
 //!   identity is the socket, never a claim.
-//! * [`DbproxyQuery`] runs every statement through the listener's allowlist.
+//! * [`DbproxyQuery`] runs every statement through the listener's allowlist —
+//!   and, in [`ListenerMode::Learn`] / [`ListenerMode::DynamicCheck`], allows
+//!   every statement and reports it instead (R26, ADR-0003).
 //!
 //! Both hooks are per process and keep only an [`Arc`] to the shared state, so
 //! a connection is never more than a few clones away from its policy.
@@ -15,13 +17,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use blastit_events::{PgRefuseReason, SqlDenied, SqlKind};
-use blastit_sqlpolicy::{Decision, normalize};
+use blastit_sqlpolicy::{Decision, normalize, redact_literals};
 use pregresql::protocol::TransactionStatus;
 use pregresql::proxy::{
     AuthContext, AuthError, AuthHook, ClientAuthMethod, Endpoint, InboundConnection, QueryContext,
     QueryDecision, QueryHook, QueryKind, UpstreamTarget,
 };
 
+use crate::learn::{is_setup_statement, observe};
 use crate::state::{Shared, connection_pid, credentials_match};
 
 /// SQLSTATE a denied statement reports (`insufficient_privilege`).
@@ -104,7 +107,11 @@ impl AuthHook for DbproxyAuth {
         let connection = ctx.connection.id;
 
         let credentials = ctx.connection.transport.message_credentials();
-        if !credentials_match(listener.spec.uid, credentials) {
+        if !credentials_match(
+            listener.spec.uid,
+            credentials,
+            self.shared.allow_root_listener(),
+        ) {
             self.refuse(
                 connection,
                 Some(route),
@@ -143,12 +150,19 @@ impl AuthHook for DbproxyAuth {
 
         proxy.store_slot(connection, slot);
         let (user, password) = proxy.credentials();
+        // `set_db` (a `blastit check` run's own database) steers this proxy's
+        // next sessions; an already-open session keeps the database it opened.
+        let database = self
+            .shared
+            .learning()
+            .database(&proxy.name)
+            .unwrap_or_else(|| proxy.database.clone());
         Ok(UpstreamTarget {
             endpoint: Endpoint::tcp(proxy.host.clone(), proxy.port),
             tls: proxy.tls.clone(),
             user,
             password: Some(password),
-            database: Some(proxy.database.clone()),
+            database: Some(database),
             params: proxy.parameters.clone(),
         })
     }
@@ -217,6 +231,16 @@ impl QueryHook for DbproxyQuery {
         let pid = connection_pid(ctx.connection);
         let in_transaction = !matches!(ctx.transaction_status, TransactionStatus::Idle);
 
+        // A learning listener never refuses: `--learn` has to run every
+        // statement of every request in one pass. It answers `Allow` and reports
+        // what it saw over `obs_fd`; no `sql.denied` is emitted (R26, ADR-0003).
+        if !self.shared.mode().enforces() {
+            if matches!(ctx.kind, QueryKind::Simple | QueryKind::Parse) {
+                self.observe(listener, &ctx);
+            }
+            return QueryDecision::Allow;
+        }
+
         match ctx.kind {
             QueryKind::Simple | QueryKind::Parse => {
                 let kind = match ctx.kind {
@@ -233,15 +257,7 @@ impl QueryHook for DbproxyQuery {
                         };
                         self.shared.emit_sql_denied(
                             route,
-                            SqlDenied::new(
-                                pid,
-                                proxy,
-                                kind,
-                                normalized,
-                                DENIED_SQLSTATE,
-                                in_transaction,
-                            )
-                            .with_reason(reason),
+                            denial(pid, proxy, kind, &normalized, in_transaction, reason),
                         );
                         QueryDecision::deny_with(
                             DENIED_SQLSTATE,
@@ -273,8 +289,14 @@ impl QueryHook for DbproxyQuery {
                 };
                 self.shared.emit_sql_denied(
                     route,
-                    SqlDenied::new(pid, proxy, kind, sql, DENIED_SQLSTATE, in_transaction)
-                        .with_reason("the statement was never authorised".to_string()),
+                    denial(
+                        pid,
+                        proxy,
+                        kind,
+                        &sql,
+                        in_transaction,
+                        "the statement was never authorised".to_string(),
+                    ),
                 );
                 QueryDecision::deny_with(
                     DENIED_SQLSTATE,
@@ -289,20 +311,94 @@ impl QueryHook for DbproxyQuery {
             QueryKind::FunctionCall => {
                 self.shared.emit_sql_denied(
                     route,
-                    SqlDenied::new(
+                    denial(
                         pid,
                         proxy,
                         SqlKind::FunctionCall,
-                        String::new(),
-                        DENIED_SQLSTATE,
+                        "",
                         in_transaction,
-                    )
-                    .with_reason(FUNCTION_CALL_MESSAGE.to_string()),
+                        FUNCTION_CALL_MESSAGE.to_string(),
+                    ),
                 );
                 QueryDecision::deny_with(DENIED_SQLSTATE, FUNCTION_CALL_MESSAGE)
             }
         }
     }
+}
+
+impl DbproxyQuery {
+    /// Reports one statement to the observation stream.
+    ///
+    /// A per-route listener (`listener.spec.route != "*"`) already identifies
+    /// the route whose private socket accepted the connection, so every
+    /// statement on it belongs to that route regardless of view spawn order
+    /// (`R26`, `R27`). On a shared wildcard listener (`"*"`), the control
+    /// channel's stack decides attribution: a request in flight names the route
+    /// (or the unrouted request); an empty stack means the statement is
+    /// connection setup, which every route reusing the session needs, or fixture
+    /// SQL, which no route needs — and which is therefore not observed at all
+    /// (ADR-0004).
+    fn observe(&self, listener: &crate::state::ListenerRuntime, ctx: &QueryContext<'_>) {
+        let target = if listener.spec.route == crate::config::WILDCARD_ROUTE {
+            self.shared.learning().current_target()
+        } else {
+            Some(crate::learn::ObsTarget::Routed {
+                route: listener.spec.route.clone(),
+            })
+        };
+        let allowed = self
+            .shared
+            .allowlist_for(listener, target.as_ref())
+            .check(ctx.sql)
+            .is_allowed();
+        let normalized = normalize(ctx.sql);
+        let base = match ctx.kind {
+            QueryKind::Parse => SqlKind::Parse,
+            _ => SqlKind::Query,
+        };
+        let kind = if is_copy(&normalized) {
+            SqlKind::Copy
+        } else {
+            base
+        };
+        let body = observe(&listener.proxy.name, kind, ctx.sql, &normalized, allowed);
+        match target {
+            Some(target) => {
+                self.shared
+                    .learning()
+                    .record_statement(ctx.connection_id, &target, body)
+            }
+            None => {
+                if is_setup_statement(&normalized) {
+                    self.shared.learning().record_setup(ctx.connection_id, body);
+                }
+            }
+        }
+    }
+}
+
+/// A denial record, with every quoted literal redacted (R24, S1).
+///
+/// A statement that inlines a value — `WHERE email = 'alice@example.com'` — must
+/// never put that value in an event that gets pasted into a ticket or shipped to
+/// a log collector, so the normalised text is redacted before it is stored.
+fn denial(
+    pid: u32,
+    proxy: &str,
+    kind: SqlKind,
+    normalized: &str,
+    in_transaction: bool,
+    reason: String,
+) -> SqlDenied {
+    SqlDenied::new(
+        pid,
+        proxy,
+        kind,
+        redact_literals(normalized),
+        DENIED_SQLSTATE,
+        in_transaction,
+    )
+    .with_reason(reason)
 }
 
 /// Whether a normalised statement is a `COPY`.
@@ -391,9 +487,27 @@ mod tests {
         }
     }
 
+    /// A shared learning listener: one socket per proxy, so no route of its own.
+    fn wildcard_listener(uid: u32) -> ListenerSpec {
+        ListenerSpec {
+            route: crate::config::WILDCARD_ROUTE.to_string(),
+            ..listener(uid, &[], false)
+        }
+    }
+
     fn state(
         proxy: ProxySpec,
         listeners: Vec<ListenerSpec>,
+    ) -> (Arc<Shared>, Arc<Mutex<Vec<Event>>>) {
+        state_with(proxy, listeners, DbproxyConfig::default())
+    }
+
+    /// [`state`] with extra configuration (mode, root opt-in), merged over the
+    /// proxies and listeners the test passes.
+    fn state_with(
+        proxy: ProxySpec,
+        listeners: Vec<ListenerSpec>,
+        extra: DbproxyConfig,
     ) -> (Arc<Shared>, Arc<Mutex<Vec<Event>>>) {
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&events);
@@ -403,6 +517,7 @@ mod tests {
         let config = DbproxyConfig {
             proxies: vec![proxy],
             listeners: listeners.clone(),
+            ..extra
         };
         let shared = Shared::build(&config, &listeners, emit).unwrap();
         (shared, events)
@@ -505,12 +620,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn root_is_refused_even_on_a_listener_that_declares_uid_zero() {
-        let (shared, _events) = state(proxy(reachable_port(), 4), vec![listener(0, &[], false)]);
-        let error = resolve(&shared, &connection(1, "0", 0))
+    async fn a_root_listener_is_refused_without_the_explicit_opt_in() {
+        // The listener declares uid 0, and the configuration did not opt in: the
+        // runtime refuses to build at all, so no root session can even be
+        // attempted (ADR-0001).
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let emit: crate::Emit = Arc::new(move |event| {
+            sink.lock().unwrap().push(event);
+        });
+        let listeners = vec![listener(0, &[], false)];
+        let config = DbproxyConfig {
+            proxies: vec![proxy(reachable_port(), 4)],
+            listeners: listeners.clone(),
+            ..DbproxyConfig::default()
+        };
+        let error = match Shared::build(&config, &listeners, emit) {
+            Ok(_) => panic!("root is not a view"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("uid 0"), "{error}");
+        assert!(!format!("{error:?}").contains("real-password"), "{error:?}");
+
+        // A root CI container opts in, and then a root client is the listener's
+        // own uid rather than a stranger.
+        let (shared, _events) = state_with(
+            proxy(reachable_port(), 4),
+            vec![listener(0, &[], false)],
+            DbproxyConfig {
+                allow_root_listener: true,
+                ..DbproxyConfig::default()
+            },
+        );
+        let target = resolve(&shared, &connection(1, "0", 0))
             .await
-            .expect_err("root is not a view");
-        assert_eq!(error.sqlstate, CREDENTIALS_SQLSTATE);
+            .expect("a root container's own uid");
+        assert_eq!(target.user, "real-user");
     }
 
     #[tokio::test]
@@ -693,6 +838,103 @@ mod tests {
             QueryDecision::deny_with(DENIED_SQLSTATE, "statement denied for route product-detail")
         );
         assert_eq!(events.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_enforced_denial_redacts_every_quoted_literal() {
+        let uid = 21_000;
+        let (shared, events) = state(
+            proxy(reachable_port(), 4),
+            vec![listener(uid, &["SELECT 1"], false)],
+        );
+        let connection = connection(1, "0", uid);
+        let hook = DbproxyQuery::new(Arc::clone(&shared));
+
+        let decision = hook
+            .authorize(query_context(
+                &connection,
+                QueryKind::Simple,
+                "SELECT 's3cr3t' FROM orders WHERE id = 1",
+                true,
+            ))
+            .await;
+        assert_eq!(
+            decision,
+            QueryDecision::deny_with(DENIED_SQLSTATE, "statement denied for route product-detail")
+        );
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let EventKind::SqlDenied(denied) = events[0].kind() else {
+            panic!("want a sql.denied event");
+        };
+        assert_eq!(denied.sql(), "SELECT … FROM orders WHERE id = 1");
+        assert!(
+            !blastit_events::encode_json(&events[0]).contains("s3cr3t"),
+            "the event must carry no literal byte"
+        );
+        assert!(!format!("{:?}", events[0]).contains("s3cr3t"));
+    }
+
+    #[tokio::test]
+    async fn a_learning_listener_allows_what_enforce_refuses_and_logs_nothing() {
+        let uid = 21_000;
+        for mode in [
+            crate::config::ListenerMode::Learn,
+            crate::config::ListenerMode::DynamicCheck,
+        ] {
+            let (shared, events) = state_with(
+                proxy(reachable_port(), 4),
+                vec![wildcard_listener(uid)],
+                DbproxyConfig {
+                    mode,
+                    route_policies: vec![crate::config::RoutePolicySpec {
+                        route: "product-detail".to_string(),
+                        proxy: "db".to_string(),
+                        queries: vec!["SELECT 1".to_string()],
+                        ..crate::config::RoutePolicySpec::default()
+                    }],
+                    ..DbproxyConfig::default()
+                },
+            );
+            let connection = connection(1, "0", uid);
+            let hook = DbproxyQuery::new(Arc::clone(&shared));
+
+            // The route a request is in flight on decides `allowed`, and the
+            // statement itself is always allowed.
+            shared
+                .learning()
+                .push(crate::learn::ObsTarget::Routed {
+                    route: "product-detail".to_string(),
+                })
+                .expect("a target");
+
+            for sql in ["SELECT 's3cr3t' FROM orders", "DROP TABLE t", "SELECT 1"] {
+                assert_eq!(
+                    hook.authorize(query_context(&connection, QueryKind::Simple, sql, true))
+                        .await,
+                    QueryDecision::Allow,
+                    "{mode:?}: {sql}"
+                );
+            }
+            // Not even the function-call sub-protocol is refused in a learning
+            // mode: one pass of the suite has to complete.
+            assert_eq!(
+                hook.authorize(query_context(
+                    &connection,
+                    QueryKind::FunctionCall,
+                    "",
+                    false
+                ))
+                .await,
+                QueryDecision::Allow,
+                "{mode:?}"
+            );
+            assert!(
+                events.lock().unwrap().is_empty(),
+                "{mode:?} emits no sql.denied"
+            );
+        }
     }
 
     #[tokio::test]
@@ -958,5 +1200,131 @@ mod tests {
             denied.sql(),
             r#"SELECT "orders_order"."total" FROM "orders_order""#
         );
+    }
+
+    #[tokio::test]
+    async fn per_route_learning_listeners_attribute_from_the_listener_not_the_stack() {
+        use std::io::{BufRead, BufReader};
+        use std::os::fd::IntoRawFd;
+
+        let uid = 21_000;
+        let mut route_a = listener(uid, &["SELECT 111"], false);
+        route_a.route = "a".to_string();
+        let mut route_b = listener(uid, &[], false);
+        route_b.route = "b".to_string();
+
+        let (obs_read, obs_write) = std::io::pipe().expect("an obs pipe");
+        let (shared, events) = state_with(
+            proxy(reachable_port(), 4),
+            vec![route_a, route_b, wildcard_listener(uid)],
+            DbproxyConfig {
+                mode: crate::config::ListenerMode::Learn,
+                obs_fd: Some(obs_write.into_raw_fd()),
+                ..DbproxyConfig::default()
+            },
+        );
+        let hook = DbproxyQuery::new(Arc::clone(&shared));
+
+        // Even with no target pushed — or with another route pushed for a
+        // wildcard listener — each per-route listener attributes to its own
+        // `ListenerSpec.route` and evaluates `allowed` against its own grants.
+        let conn_a = connection(1, "0", uid);
+        let conn_b = connection(2, "1", uid);
+        let conn_wild = connection(3, "2", uid);
+
+        assert_eq!(
+            hook.authorize(query_context(
+                &conn_a,
+                QueryKind::Simple,
+                "SELECT 111",
+                true
+            ))
+            .await,
+            QueryDecision::Allow
+        );
+        shared
+            .learning()
+            .push(crate::learn::ObsTarget::Routed {
+                route: "b".to_string(),
+            })
+            .expect("push b");
+        assert_eq!(
+            hook.authorize(query_context(
+                &conn_b,
+                QueryKind::Simple,
+                "SELECT 222",
+                true
+            ))
+            .await,
+            QueryDecision::Allow
+        );
+        // Route `a` runs a statement while `"b"` sits on top of the control
+        // stack: per-route attribution keeps it on `"a"`, while `"*"` still
+        // reads the stack.
+        assert_eq!(
+            hook.authorize(query_context(
+                &conn_a,
+                QueryKind::Simple,
+                "SELECT 333",
+                true
+            ))
+            .await,
+            QueryDecision::Allow
+        );
+        assert_eq!(
+            hook.authorize(query_context(
+                &conn_wild,
+                QueryKind::Simple,
+                "SELECT 444",
+                true
+            ))
+            .await,
+            QueryDecision::Allow
+        );
+        assert!(events.lock().unwrap().is_empty());
+
+        drop(hook);
+        drop(shared);
+        let observed: Vec<crate::learn::WireSqlObs> = BufReader::new(obs_read)
+            .lines()
+            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+            .collect();
+        assert_eq!(observed.len(), 4, "{observed:#?}");
+        assert_eq!(
+            observed[0].target,
+            crate::learn::ObsTarget::Routed {
+                route: "a".to_string()
+            }
+        );
+        assert!(observed[0].allowed, "SELECT 111 is granted on route a");
+        assert_eq!(observed[0].sql, "SELECT 111");
+
+        assert_eq!(
+            observed[1].target,
+            crate::learn::ObsTarget::Routed {
+                route: "b".to_string()
+            }
+        );
+        assert!(!observed[1].allowed);
+        assert_eq!(observed[1].sql, "SELECT 222");
+
+        assert_eq!(
+            observed[2].target,
+            crate::learn::ObsTarget::Routed {
+                route: "a".to_string()
+            },
+            "a statement on route a's listener never drifts onto b"
+        );
+        assert!(!observed[2].allowed);
+        assert_eq!(observed[2].sql, "SELECT 333");
+
+        assert_eq!(
+            observed[3].target,
+            crate::learn::ObsTarget::Routed {
+                route: "b".to_string()
+            },
+            "the wildcard listener still attributes from the control stack"
+        );
+        assert_eq!(observed[3].sql, "SELECT 444");
     }
 }

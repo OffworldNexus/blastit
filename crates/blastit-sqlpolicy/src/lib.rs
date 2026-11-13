@@ -18,9 +18,9 @@
 //! boundary a policy check depends on: which characters are whitespace
 //! (`space` = `[ \t\n\r\f\v]`, and nothing else), where a line comment ends
 //! (`\n` or `\r`), where a quoted region starts and ends (`''`, E-strings,
-//! `B'…'`/`X'…'`, `"…"`, `$tag$…$tag$`), and which `$` opens a dollar quote
-//! (`a$b$c` is one identifier). See the `lexer` module for the two deliberate
-//! divergences, neither of which can hide code or quoted data.
+//! `B'…'`/`X'…'`, `N'…'`, `U&'…'`, `"…"`, `$tag$…$tag$`), and which `$` opens a
+//! dollar quote (`a$b$c` is one identifier). See the `lexer` module for the two
+//! deliberate divergences, neither of which can hide code or quoted data.
 //!
 //! **`standard_conforming_strings = on` is assumed**, which is PostgreSQL's
 //! default and what dbproxy must force on every upstream connection (as a
@@ -75,7 +75,9 @@
 //! ```
 
 mod analysis;
+mod learn;
 mod lexer;
+mod literals;
 mod lru;
 mod normalize;
 mod statements;
@@ -85,6 +87,11 @@ pub use analysis::{
     Access, Analysis, AnalysisError, Classified, Op, SAFE_FUNCTIONS, StatementClass, StatementKind,
     analyze, cached_analyses, classify, is_safe_function, is_system_table,
 };
+pub use learn::{
+    DANGEROUS_LEARN_FUNCTIONS, LearnVerdict, RefuseReason, check_learnable,
+    is_dangerous_learn_function, is_introspection_setup_sql,
+};
+pub use literals::{KNOWN_STATIC_SETUP_SQL, has_quoted_literal, redact_literals};
 pub use normalize::normalize;
 pub use tables::{Columns, Denied, TableGrant, TableGrants};
 

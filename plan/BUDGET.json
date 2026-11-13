@@ -1,0 +1,5 @@
+{
+  "expensive_cap_usd": 200,
+  "warn_ratio": 0.8,
+  "note": "Owner-edited hard cap on cumulative expensive-tier (Gemini 4 Carbon / Opus) spend in Blastit. Past it, .opencode/plugins/autopilot blocks strategist/architect/expert and agents must request a top-up in plan/HUMAN.md."
+}

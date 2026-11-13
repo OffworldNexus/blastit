@@ -11,8 +11,8 @@ is what the attacker is holding when that happens.
 
 **Out of scope, deliberately:**
 
-* code the app runs **at import time** — imports run before the sandboxes exist,
-  with the real credentials still in the environment;
+* code the app runs **at import time** — it runs in stage 1, as init, before any
+  view exists, so there is no per-route sandbox yet;
 * **other secrets** in the environment — an API key the app must hold cannot be
   swapped, and every route can read it. `BLASTIT_ENV_STRIP` hides what you name;
   a proxy is the general answer, and only `postgresql` has one;
@@ -49,9 +49,9 @@ uids cannot signal, `ptrace` or read each other's
 `/proc/<pid>/{mem,io,cwd,root}`. Two things differ from bare Linux:
 
 * **another uid *can* read** `/proc/<pid>/{environ,cmdline,maps,auxv,stat,status}`
-  and list `/proc/<pid>/fd`. So nothing secret is ever in `environ` or `argv`,
-  and a view seeing another's file descriptors and memory layout is accepted
-  rather than fought;
+  and list `/proc/<pid>/fd`. So no secret is in any sandboxed process's
+  `environ` or `argv`, and a view seeing another's file descriptors and memory
+  layout is accepted rather than fought;
 * **`SO_PEERCRED` returns the listener's own credentials.** That is why identity
   is the [listener plus `SCM_CREDENTIALS`](how-it-works.md#identity-not-passwords):
   socket file permissions *are* enforced at `connect()`, and forging the
@@ -59,13 +59,15 @@ uids cannot signal, `ptrace` or read each other's
 
 ## The mechanisms
 
-* **The credential barrier.** No process ever holds a real secret in its `environ`
-  or `argv`; the one that does is `execve`'d with an empty environment and
-  receives them over an inherited pipe. A `fork` alone would not do it: a forked
-  child keeps showing its parent's initial environment block.
+* **The credential barrier.** No process *after* stage 0 holds a real secret in
+  its `environ` or `argv`: stage 0 keeps it only until its own `execve`, which
+  replaces that environment before any app or broker process exists. The broker
+  is `execve`'d with an empty environment and receives the secret over an
+  inherited pipe. A `fork` alone would not do it: a forked child keeps showing
+  its parent's initial environment block.
 * **Capabilities.** Every child clears every capability set it holds and sets
   `PR_SET_NO_NEW_PRIVS`, and the drop is checked, not assumed. That flag is also
-  what makes the [capable copy](infra/compose-traefik.md#rootless) harmless to a
+  what makes the [capable copy](deploy/compose-traefik.md#rootless) harmless to a
   child: the kernel refuses an `execve` of a file whose capabilities cannot be
   honoured.
 * **seccomp.** Each child installs a BPF refusal list after dropping privileges:
@@ -75,19 +77,38 @@ uids cannot signal, `ptrace` or read each other's
   the calls that read or steer another process, load kernel code or move between
   namespaces. Views may use `AF_UNIX` only, plus `AF_INET`/`AF_INET6` with
   `egress = true`; http and the scheduler may not call `socket()` at all.
+  `egress = true` is any IPv4/IPv6 address and port, cloud metadata included:
+  there is no allowlist until the HTTP proxy milestone.
 * **Filesystem and limits.** The code tree is read-only to views; each view gets a
   private `0700` scratch directory, `umask 077` and that directory as `HOME` and
   `TMPDIR`; `RLIMIT_NPROC` (counting threads) is a hard backstop *under* the
   scheduler's budget, with `RLIMIT_NOFILE` and `RLIMIT_CORE=0`;
   `PR_SET_PDEATHSIG(SIGKILL)` means no process outlives init.
+* **Ingress bodies.** A route declares how a body is handled: `json` and `form`
+  decode and re-encode it before the app sees it, `none` rejects a body, and
+  `raw` passes the bytes unchanged. A body to a route with no `[route.ingress]`
+  is a `413` at runtime; `blastit check` reports a body route that declares
+  nothing, and a `raw` route the manifest does not acknowledge. 0.1.1
+  has no multipart codec and no media or PDF decoding: an upload is `raw`, and
+  the app's parser sees the original bytes, polyglots included.
 
 ## The client address
 
 `REMOTE_ADDR` and `wsgi.url_scheme` come from one resolver, which believes a
 header only from a peer in `BLASTIT_TRUSTED_PROXIES`. Both presets use `*`: every
-peer is trusted, and the **rightmost** chain entry is the client — the one the hop
-closest to blastit added. The full rule is in
-[client IP and trusted proxies](infra/anything-else.md#client-ip-and-trusted-proxies).
+peer is trusted. `compose-traefik` reads the **rightmost** `X-Forwarded-For`
+entry — the one the hop closest to Blastit added; `digitalocean-paas` reads
+`do-connecting-ip`, which the platform's edge overwrites. The full rule is in
+[client address](reference/settings.md#client-address).
+
+## Dev mode is not a sandbox
+
+`blastit dev` shares one uid between every role. The process topology, the
+credential barrier and the grants are real, so a misconfiguration is caught
+locally, but there is no uid boundary to make a compromise stay in its route. The
+banner says so, the `boot` event reports `"privilege": "unprivileged-dev"`, and
+production `blastit` **fails closed**: without root, the capability set or
+seccomp it exits instead of serving.
 
 ## Check it yourself
 

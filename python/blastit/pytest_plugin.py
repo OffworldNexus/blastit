@@ -123,11 +123,11 @@ the tests. A project can also say it in its own ``conftest.py``::
 
 Two things it needs, because blastit is a sandbox and not a thread:
 
-* **root**, or passwordless ``sudo``: init binds listeners, makes the view
-  directories under ``/run/blastit`` and drops privileges to the view uids
-  (§2.1, §4). A machine with neither is skipped, with the reason, rather than
-  failed: what the fixture tests is the manifest, and it cannot be tested
-  without those privileges at all.
+* **root**, passwordless ``sudo``, or *no privilege at all*: production init binds
+  listeners, makes the view directories under ``/run/blastit`` and drops
+  privileges to the view uids (§2.1, §4); without root the fixture starts
+  ``blastit dev`` instead, the unprivileged single-UID simulation, and the suite
+  is served by the same five-role tree under the caller's own uid (R39).
 * the **WSGI callable** to serve: ``WSGI_APPLICATION`` in the Django settings,
   or ``--blastit-live-app module:attribute``. Without either, ``myproject.wsgi:
   application`` is guessed from ``DJANGO_SETTINGS_MODULE``. Django's setting is
@@ -311,10 +311,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
@@ -404,7 +405,7 @@ def to_wire_sql(sql: str, encoding: str = "utf-8") -> str:
     if converter is not None:
         try:
             return converter(sql.encode(encoding), encoding)[0].decode(encoding)
-        except Exception:  # noqa: BLE001 - any converter failure falls back
+        except Exception:  # noqa: BLE001, S110 - a converter failure falls back
             pass
     return _regex_wire(sql)
 
@@ -431,7 +432,9 @@ class _RequestContext:
 
 
 #: The request being handled in this thread, or `None` outside a request.
-_CURRENT: ContextVar[_RequestContext | None] = ContextVar("blastit_request", default=None)
+_CURRENT: ContextVar[_RequestContext | None] = ContextVar(
+    "blastit_request", default=None
+)
 
 #: The Django alias whose connection is being established, or `None`.
 #:
@@ -639,7 +642,9 @@ class _Session:
     def document(self) -> dict[str, Any]:
         """The observations document the extension reads."""
         with self.lock:
-            requests = [observed.as_json(self.proxy_for) for observed in self.observations]
+            requests = [
+                observed.as_json(self.proxy_for) for observed in self.observations
+            ]
             requests.extend(self.live)
             setup = sorted(self.connection_setup.items())
             unrecognised = sorted(self.unrecognised.items())
@@ -717,7 +722,9 @@ def _postgresql_proxies(manifest: str) -> list[str]:
     try:
         document = tomllib.loads(manifest)
     except tomllib.TOMLDecodeError as error:
-        raise pytest.UsageError(f"blastit: the manifest is not valid TOML: {error}") from error
+        raise pytest.UsageError(
+            f"blastit: the manifest is not valid TOML: {error}"
+        ) from error
     proxies = document.get("proxy")
     if not isinstance(proxies, dict):
         return []
@@ -852,7 +859,9 @@ def _patch_connect() -> None:
     BaseDatabaseWrapper.connect = connect
 
 
-def _capture(alias: str | None, sql: Any, params: Any, connection: Any = None) -> str | None:
+def _capture(
+    alias: str | None, sql: Any, params: Any, connection: Any = None
+) -> str | None:
     """Records one statement, wherever it came from.
 
     Called by every capture layer; the outermost one records, and the inner ones
@@ -1009,7 +1018,9 @@ def _wrap_connection(connection: Any) -> None:
             # CURSOR FOR …`, which is what dbproxy sees and what a grant has to
             # hold.
             statement = _declared_statement(dbapi, sql, _psycopg_connection(dbapi))
-        text = _capture(alias, statement, params, getattr(connection, "connection", None))
+        text = _capture(
+            alias, statement, params, getattr(connection, "connection", None)
+        )
         token = _MARK.set((text, id(params)) if text is not None else None)
         try:
             return execute(sql, params, many, context)
@@ -1178,7 +1189,9 @@ def _wrap_psycopg_method(
     setattr(target, name, wrapper)
 
 
-def _capture_unconditionally(alias: str | None, sql: Any, params: Any, connection: Any) -> None:
+def _capture_unconditionally(
+    alias: str | None, sql: Any, params: Any, connection: Any
+) -> None:
     """Records a statement even when the outermost layer marked this call.
 
     Used for the commands psycopg sends by itself: `BEGIN`, `COMMIT`,
@@ -1238,7 +1251,9 @@ def _patch_psycopg() -> None:
     if server_cursor is not None:
         _wrap_psycopg_method(server_cursor, "execute", statement=_declared_statement)
     _wrap_psycopg_method(
-        getattr(psycopg, "Connection", psycopg.Connection), "_exec_command", command=True
+        getattr(psycopg, "Connection", psycopg.Connection),
+        "_exec_command",
+        command=True,
     )
 
 
@@ -1258,7 +1273,9 @@ def _capture_command(alias: str | None, sql: Any, params: Any, connection: Any) 
     text = _sql_text(sql, connection)
     if isinstance(text, str) and _TRANSACTION_COMMAND.match(text):
         current = _CURRENT.get()
-        if _CONNECTING.get() is None and (current is None or not current.manages_transactions):
+        if _CONNECTING.get() is None and (
+            current is None or not current.manages_transactions
+        ):
             return
     _capture_unconditionally(alias, sql, params, connection)
 
@@ -1294,7 +1311,9 @@ def _patch_transactions() -> None:
         if original is None or getattr(original, "_blastit_patched", False):
             continue
 
-        def wrapper(self: Any, *args: Any, _original: Any = original, **kwargs: Any) -> Any:
+        def wrapper(
+            self: Any, *args: Any, _original: Any = original, **kwargs: Any
+        ) -> Any:
             current = _CURRENT.get()
             if current is not None:
                 current.manages_transactions = True
@@ -1327,7 +1346,10 @@ def _patch_sockets() -> None:
         _capture_egress(self, address)
         return original_connect_ex(self, address)
 
-    for wrapper, original in ((connect, original_connect), (connect_ex, original_connect_ex)):
+    for wrapper, original in (
+        (connect, original_connect),
+        (connect_ex, original_connect_ex),
+    ):
         wrapper._blastit_patched = True  # type: ignore[attr-defined]
         wrapper.__doc__ = original.__doc__
         wrapper.__wrapped__ = original  # type: ignore[attr-defined]
@@ -1335,7 +1357,9 @@ def _patch_sockets() -> None:
     socket.socket.connect_ex = connect_ex  # type: ignore[method-assign]
 
 
-def _on_connection_created(sender: Any = None, connection: Any = None, **_: Any) -> None:
+def _on_connection_created(
+    sender: Any = None, connection: Any = None, **_: Any
+) -> None:
     """Wraps every connection Django opens, in whichever thread opens it.
 
     A module-level function, and not a closure over the session: Django's signals
@@ -1458,32 +1482,44 @@ def _live_request(
     }
 
 
-def _live_server_prefix() -> list[str]:
-    """How a live server has to be started on this machine, or a skip.
+def _privileges() -> list[str] | None:
+    """The prefix production `blastit` needs here, or `None` when it cannot run.
 
-    blastit's init binds the listeners, makes the view directories under
-    `/run/blastit` and drops privileges to the view uids (§2.1, §4), so it runs
-    as root. Tests that already run as root start it directly; otherwise
-    passwordless `sudo -n` is used, with the server's environment in a file
-    written `0600` by whoever runs the tests (root reads it either way, and it is
-    removed at teardown): `sudo` resets the environment, and the test database's
-    URL — a password — has no business in `ps`.
-
-    Raises `pytest.skip` with the reason when the machine has neither.
+    Root starts it directly; otherwise passwordless `sudo -n` is used, with the
+    server's environment in a file written `0600` by whoever runs the tests
+    (root reads it either way, and it is removed at teardown): `sudo` resets the
+    environment, and the test database's URL — a password — has no business in
+    `ps`. `None` is the machine with neither (R39).
     """
     if os.geteuid() == 0:
         return []
     sudo = shutil.which("sudo")
     if sudo is not None:
-        check = subprocess.run(  # noqa: S603 - an absolute path, no shell
+        check = subprocess.run(
             [sudo, "-n", "true"], capture_output=True, check=False, text=True
         )
         if check.returncode == 0:
             return [sudo, "-n"]
-    pytest.skip(
-        "blastit: a live server needs root (view uids, listeners, /run/blastit) — "
-        "run the tests as root, or give this user passwordless sudo (`sudo -n true`)"
-    )
+    return None
+
+
+def _live_server_mode() -> tuple[list[str], bool]:
+    """How the live server is started: `(prefix, dev)` (R39).
+
+    Production `blastit` binds the listeners, makes the view directories under
+    `/run/blastit` and drops privileges to the view uids (§2.1, §4), so it runs
+    as root — directly, or through passwordless `sudo -n`.
+
+    Without either, the fixture does **not** skip (R39): it starts
+    `blastit dev`, the unprivileged single-UID simulation, which runs the same
+    five-role tree under the caller's own uid (§2, `ADR-0001`). A machine with no
+    root and no sudo can still test a project's traffic against its manifest;
+    what it cannot test is the OS isolation only production has.
+    """
+    prefix = _privileges()
+    if prefix is None:
+        return [], True
+    return prefix, False
 
 
 def _colon_spec(spec: str) -> str:
@@ -1623,6 +1659,8 @@ def _live_server_environment(
         "BLASTIT_MANIFEST": str(manifest),
         "BLASTIT_LOG_FORMAT": "json",
         "BLASTIT_HEALTH_PATH": HEALTH_PATH,
+        # Scheduler::make_room refuses spawns above the 85 % default; pin it for loaded hosts.
+        "BLASTIT_MEM_HIGH_WATERMARK": "100",
         "PORT": str(port),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
@@ -1761,6 +1799,7 @@ def _postgresql_url_variable(manifest: Path) -> str | None:
 
 def _start_live_server(
     prefix: list[str],
+    dev: bool,
     config: pytest.Config,
     project: Path,
     manifest: Path,
@@ -1784,10 +1823,15 @@ def _start_live_server(
     if variable is None and _postgresql_proxies(manifest.read_text(encoding="utf-8")):
         pytest.skip(
             "blastit: a live server needs the manifest's postgresql proxy to take its "
-            "URL from one variable (`input = { url = \"DATABASE_URL\" }`, §5.1) to be "
+            'URL from one variable (`input = { url = "DATABASE_URL" }`, §5.1) to be '
             "pointed at the test database"
         )
     environment_path = log_path.parent / "blastit-live.env"
+    # R39: a machine with neither root nor sudo serves the project through
+    # `blastit dev`, the unprivileged single-UID simulation.
+    command_shape = [sys.executable, "-m", "blastit"]
+    if dev:
+        command_shape.append("dev")
     failure = ""
     for _ in range(LIVE_SERVER_ATTEMPTS):
         port = _free_port()
@@ -1800,14 +1844,12 @@ def _start_live_server(
                     *prefix,
                     "/bin/sh",
                     "-c",
-                    f". {shlex.quote(str(environment_path))} && exec \"$@\"",
+                    f'. {shlex.quote(str(environment_path))} && exec "$@"',
                     "blastit",
-                    sys.executable,
-                    "-m",
-                    "blastit",
+                    *command_shape,
                 ]
                 process = subprocess.Popen(
-                    command,  # noqa: S603 - fixed argv, no shell
+                    command,
                     cwd=str(project),
                     stdout=log,
                     stderr=subprocess.STDOUT,
@@ -1815,8 +1857,8 @@ def _start_live_server(
                     start_new_session=True,
                 )
             else:
-                process = subprocess.Popen(  # noqa: S603 - sys.executable, fixed argv
-                    [sys.executable, "-m", "blastit"],
+                process = subprocess.Popen(
+                    command_shape,
                     cwd=str(project),
                     env=environment,
                     stdout=log,
@@ -1851,7 +1893,9 @@ def _write_environment(path: Path, environment: dict[str, str]) -> None:
     by the test user (whom root can read regardless), and removed at teardown.
     """
     path.write_text(
-        "".join(f"export {key}={shlex.quote(value)}\n" for key, value in environment.items()),
+        "".join(
+            f"export {key}={shlex.quote(value)}\n" for key, value in environment.items()
+        ),
         encoding="utf-8",
     )
     path.chmod(0o600)
@@ -1865,7 +1909,7 @@ def _wait_for_health(live: _LiveServer) -> bool:
         if live.process.poll() is not None:
             return False
         try:
-            with urllib.request.urlopen(url, timeout=2) as response:  # noqa: S310 - 127.0.0.1
+            with urllib.request.urlopen(url, timeout=2) as response:
                 if response.status == 200:
                     return True
         except (urllib.error.URLError, OSError):
@@ -1916,7 +1960,7 @@ def _clean_bytecode(prefix: list[str], project: Path) -> None:
     is. Removing root's needs the privileges the server had, which is what
     `prefix` is.
     """
-    subprocess.run(  # noqa: S603 - a fixed argv, no shell
+    subprocess.run(
         [
             *prefix,
             "find",
@@ -1950,10 +1994,10 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     is built from, so front-end traffic is diffed against the manifest like any
     other request.
 
-    It needs a manifest (`--blastit-manifest`), and the privileges blastit needs
-    to start (root, or passwordless sudo): without either it skips with the
-    reason rather than failing a suite that has nothing to do with blastit's own
-    requirements.
+    It needs a manifest (`--blastit-manifest`). It serves the project through
+    production `blastit` when it can (root, or passwordless sudo) and through the
+    unprivileged `blastit dev` simulation otherwise (R39), so a machine with
+    neither still checks a project's traffic against its manifest.
     """
     session = _SESSION
     if session is None:
@@ -1961,7 +2005,7 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
             "blastit: a live server needs --blastit-manifest (or blastit_manifest in "
             "the configuration) to serve the project with"
         )
-    prefix = _live_server_prefix()
+    prefix, dev = _live_server_mode()
     if _postgresql_url_variable(session.manifest_path) is not None:
         # The test database has to exist, and reading its name from the
         # connection is only right once pytest-django has created it.
@@ -1982,7 +2026,12 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     if temporary is not None and manifest.is_relative_to(root):
         manifest = project / manifest.relative_to(root)
     live = _start_live_server(
-        prefix, request.config, project, manifest, tmp_path / "blastit-live.log"
+        prefix,
+        dev,
+        request.config,
+        project,
+        manifest,
+        tmp_path / "blastit-live.log",
     )
     try:
         yield live
@@ -1997,7 +2046,9 @@ def blastit_live_server(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
             try:
                 state.record_live(text, state.nodeid, (HEALTH_PATH,))
             except Exception as error:  # noqa: BLE001 - reported, never raised in teardown
-                state.problems.append(f"the live server's log could not be read: {error!r}")
+                state.problems.append(
+                    f"the live server's log could not be read: {error!r}"
+                )
 
 
 class _LiveServerPlugin:
@@ -2026,7 +2077,7 @@ class _LiveServerPlugin:
             from django.test.utils import modify_settings
         except Exception:  # noqa: BLE001 - no Django settings: nothing to carry
             return blastit_live_server
-        blastit_live_server._live_server_modified_settings = modify_settings(  # noqa: SLF001
+        blastit_live_server._live_server_modified_settings = modify_settings(
             ALLOWED_HOSTS={"append": blastit_live_server.host}
         )
         return blastit_live_server
@@ -2095,7 +2146,9 @@ def pytest_configure(config: pytest.Config) -> None:
     """Starts recording, when a manifest was given. Otherwise: nothing."""
     global _SESSION
     _SESSION = None
-    if not config.getoption("blastit_manifest") and not config.getini("blastit_manifest"):
+    if not config.getoption("blastit_manifest") and not config.getini(
+        "blastit_manifest"
+    ):
         if (
             config.getoption("blastit_proxy")
             or config.getoption("blastit_strict")
@@ -2138,7 +2191,9 @@ def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) 
         _install(_SESSION)
 
 
-def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str]) -> None:
+def pytest_runtest_logfinish(
+    nodeid: str, location: tuple[str, int | None, str]
+) -> None:
     """Forgets the test, so nothing after it is attributed to it."""
     if _SESSION is not None:
         _SESSION.nodeid = None
@@ -2224,7 +2279,9 @@ def _merged_observations(session: _Session) -> dict[str, Any]:
         try:
             path.unlink()
         except OSError as error:  # pragma: no cover - best effort cleanup
-            session.warnings.append(f"could not remove the worker report {path}: {error!r}")
+            session.warnings.append(
+                f"could not remove the worker report {path}: {error!r}"
+            )
     document["workers"] = [path.name for path in merged]
     document["warnings"] = list(dict.fromkeys(session.warnings))
     return document
@@ -2234,7 +2291,9 @@ def _write_json(path: Path, document: dict[str, Any]) -> None:
     """Writes one JSON document, creating its directory if it has one."""
     if path.parent != Path():
         path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
 
 def _audit(session: _Session, document: dict[str, Any]) -> dict[str, Any]:
@@ -2257,7 +2316,11 @@ def _finish(session: pytest.Session, state: _Session) -> None:
     if not state.installed:
         state.problems.append(
             "the plugin never managed to record Django's requests"
-            + (f": {state.deferred}" if state.deferred else " (Django was never usable)")
+            + (
+                f": {state.deferred}"
+                if state.deferred
+                else " (Django was never usable)"
+            )
         )
     if state.unmapped:
         state.problems.append(
@@ -2281,19 +2344,23 @@ def _finish(session: pytest.Session, state: _Session) -> None:
     for problem in state.problems:
         lines.append((f"blastit: {problem}", True))
 
-    strict_failure = report is not None and state.strict and not report["totals"]["clean"]
+    strict_failure = (
+        report is not None and state.strict and not report["totals"]["clean"]
+    )
     if strict_failure:
         totals = report["totals"]
         lines.append(
             (
-                "blastit: --blastit-strict: "
-                f"{totals['missing']} statement execution(s) missing, "
-                f"{totals['unrouted']} unrouted request(s), "
-                f"{totals['connection_setup_ungranted']} connection-setup "
-                f"statement(s) not granted in every route, "
-                f"{totals['egress']} route(s) opening connections without egress = true, "
-                f"{totals['unrecognised']} unreadable statement(s) and "
-                f"{totals['plugin_warnings']} warning(s)",
+                (
+                    "blastit: --blastit-strict: "
+                    f"{totals['missing']} statement execution(s) missing, "
+                    f"{totals['unrouted']} unrouted request(s), "
+                    f"{totals['connection_setup_ungranted']} connection-setup "
+                    f"statement(s) not granted in every route, "
+                    f"{totals['egress']} route(s) opening connections without egress = true, "
+                    f"{totals['unrecognised']} unreadable statement(s) and "
+                    f"{totals['plugin_warnings']} warning(s)"
+                ),
                 True,
             )
         )
@@ -2303,7 +2370,9 @@ def _finish(session: pytest.Session, state: _Session) -> None:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
-def _summary(report: dict[str, Any], path: str, prefer_tables: bool = False) -> list[tuple[str, bool]]:
+def _summary(
+    report: dict[str, Any], path: str, prefer_tables: bool = False
+) -> list[tuple[str, bool]]:
     """The terminal summary: short, and actionable.
 
     Each line says what to do — add the statements a route is missing, look at
@@ -2315,22 +2384,28 @@ def _summary(report: dict[str, Any], path: str, prefer_tables: bool = False) -> 
     totals = report["totals"]
     lines: list[tuple[str, bool]] = [
         (
-            f"blastit: {totals['requests']} requests, {totals['statements']} statements, "
-            f"{totals['routes_exercised']}/{totals['routes']} routes exercised — "
-            f"report in {path}",
+            (
+                f"blastit: {totals['requests']} requests, {totals['statements']} statements, "
+                f"{totals['routes_exercised']}/{totals['routes']} routes exercised — "
+                f"report in {path}"
+            ),
             False,
         )
     ]
     if totals["clean"]:
-        lines.append(("blastit: the manifest covers every request that was made", False))
+        lines.append(
+            ("blastit: the manifest covers every request that was made", False)
+        )
     for route in report["routes"]:
         missing = sum(len(proxy["missing"]) for proxy in route["proxies"])
         unused = sum(len(proxy["unused"]) for proxy in route["proxies"])
         if missing:
             lines.append(
                 (
-                    f"blastit: route {route['name']}: {missing} statement(s) missing "
-                    f"(see {path})",
+                    (
+                        f"blastit: route {route['name']}: {missing} statement(s) missing "
+                        f"(see {path})"
+                    ),
                     True,
                 )
             )
@@ -2340,9 +2415,11 @@ def _summary(report: dict[str, Any], path: str, prefer_tables: bool = False) -> 
                     if proxy["missing"] and snippet:
                         lines.append(
                             (
-                                f"blastit: route {route['name']} (proxy "
-                                f"{proxy['name']}): a table grant covering every "
-                                f"statement it ran:\n{snippet}",
+                                (
+                                    f"blastit: route {route['name']} (proxy "
+                                    f"{proxy['name']}): a table grant covering every "
+                                    f"statement it ran:\n{snippet}"
+                                ),
                                 True,
                             )
                         )
@@ -2360,27 +2437,34 @@ def _summary(report: dict[str, Any], path: str, prefer_tables: bool = False) -> 
     if totals.get("unused_global"):
         lines.append(
             (
-                f"blastit: {totals['unused_global']} grant(s) of a global group nothing "
-                f"matched (see {path})",
+                (
+                    f"blastit: {totals['unused_global']} grant(s) of a global group nothing "
+                    f"matched (see {path})"
+                ),
                 False,
             )
         )
     if totals["unrouted"]:
         examples = ", ".join(
-            f"{entry['method']} {entry['path_info']}" for entry in report["unrouted"][:3]
+            f"{entry['method']} {entry['path_info']}"
+            for entry in report["unrouted"][:3]
         )
         lines.append(
             (
-                f"blastit: {totals['unrouted']} unrouted request(s): {examples} "
-                f"(see {path})",
+                (
+                    f"blastit: {totals['unrouted']} unrouted request(s): {examples} "
+                    f"(see {path})"
+                ),
                 True,
             )
         )
     if report["unexercised_routes"]:
         lines.append(
             (
-                f"blastit: {len(report['unexercised_routes'])} route(s) never "
-                f"exercised: {', '.join(report['unexercised_routes'])}",
+                (
+                    f"blastit: {len(report['unexercised_routes'])} route(s) never "
+                    f"exercised: {', '.join(report['unexercised_routes'])}"
+                ),
                 False,
             )
         )
@@ -2388,9 +2472,11 @@ def _summary(report: dict[str, Any], path: str, prefer_tables: bool = False) -> 
     if setup["ungranted"]:
         lines.append(
             (
-                f"blastit: {setup['ungranted']} connection-setup statement(s) some "
-                "routes do not grant: put them in a group attached to every route "
-                f"(see {path})",
+                (
+                    f"blastit: {setup['ungranted']} connection-setup statement(s) some "
+                    "routes do not grant: put them in a group attached to every route "
+                    f"(see {path})"
+                ),
                 True,
             )
         )
@@ -2400,17 +2486,21 @@ def _summary(report: dict[str, Any], path: str, prefer_tables: bool = False) -> 
             targets = ", ".join(entry["target"] for entry in egress["observed"][:3])
             lines.append(
                 (
-                    f"blastit: route {route['name']} opens outbound connections "
-                    f"({targets}) but has no egress = true",
+                    (
+                        f"blastit: route {route['name']} opens outbound connections "
+                        f"({targets}) but has no egress = true"
+                    ),
                     True,
                 )
             )
     if report["unrecognised"]["count"]:
         lines.append(
             (
-                f"blastit: {report['unrecognised']['count']} statement(s) could not be "
-                f"read (a psycopg template has no text before it is rendered): "
-                f"see {path}",
+                (
+                    f"blastit: {report['unrecognised']['count']} statement(s) could not be "
+                    f"read (a psycopg template has no text before it is rendered): "
+                    f"see {path}"
+                ),
                 True,
             )
         )

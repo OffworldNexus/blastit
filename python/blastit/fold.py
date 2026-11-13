@@ -34,6 +34,10 @@ What it folds
 * never a statement this build cannot read: `--prefer-tables` keeps those as
   exact `queries` and says so, with the reason `analyze` gave — a system
   catalogue, an unknown function, a statement kind no table grant describes;
+* never a statement that still holds a value: an inline quoted literal, or the
+  `…` dbproxy redacted one to, is refused whatever `--allow-dangerous` says,
+  because a grant is committed and must hold no value the application supplied
+  (the two fixed protocol setup statements are the only literals allowed);
 * never a statement of a kind a grant is not an allowlist for: DDL, `SET` and
   `RESET` (a `SET ROLE` above all), `COPY`, `DO`, `CALL`, `LOCK`, `GRANT`,
   `REVOKE`, `TRUNCATE`, `VACUUM`, `LISTEN`/`NOTIFY`, the transaction commands.
@@ -69,7 +73,10 @@ and blastit's own `audit` is run on it with the log's traffic as observations, s
 every statement the plan grants has to come out granted. An edit that fails any
 of that is refused, and the file is left exactly as it was. A grant written as an
 inline table (`db = { … }`, `tables = { … }`) is refused too: the line-level
-edit cannot merge into it, and a duplicate key would not parse.
+edit cannot merge into it, and a duplicate key would not parse. The file is
+replaced atomically: the edit goes to a sibling `.<name>.<pid>.tmp`, is
+`fsync`ed, renamed over the manifest, and the directory is `fsync`ed after, so
+an interrupted run leaves the old manifest or the new one and no temp file.
 """
 
 from __future__ import annotations
@@ -77,11 +84,14 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import re
+import stat
 import sys
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
 from blastit import logs
 
@@ -413,11 +423,14 @@ def _plan_route(
     new: list[_Denial] = []
     seen: set[str] = set()
     for denial in denials:
+        # Every note quotes the statement back, so a person can see which query
+        # was refused; the literal spans are redacted first (ADR-0003).
+        shown = _redact_literal(denial.sql)
         normalised = _normalise(denial.sql)
         source = existing.get(normalised)
         if source is not None:
             addition.notes.append(
-                f"{denial.sql!r}: already granted by {source} of {route_name} — the log is "
+                f"{shown!r}: already granted by {source} of {route_name} — the log is "
                 "from an older manifest, or the statement did not need the grant"
             )
             continue
@@ -427,6 +440,18 @@ def _plan_route(
         if normalised in seen:
             continue
         seen.add(normalised)
+        # `…` is a value dbproxy redacted out of the statement: the value is
+        # gone, so the statement can never match another request. It is checked
+        # before the parser, exactly as `check_learnable` does, because a
+        # redacted statement is not SQL any build can read (R25). This is not
+        # something `--allow-dangerous` reaches.
+        if "…" in normalised:
+            addition.notes.append(
+                f"{shown!r}: refused — it holds `…`, the redaction of a value the "
+                "application inlined, so it can never match another request; bind the "
+                "value as a parameter and fold the statement again"
+            )
+            continue
         # What kind of statement this is decides whether a grant may hold it at
         # all; PostgreSQL's own parser answers, never a guess from the text.
         kind = _kind(judge, denial)
@@ -434,15 +459,35 @@ def _plan_route(
             # A grant is one statement, and splitting a text is something only a
             # person can do: `--allow-dangerous` does not reach this (D3c).
             addition.notes.append(
-                f"{denial.sql!r}: refused — {kind['label']}, and a grant is one statement; "
+                f"{shown!r}: refused — {kind['label']}, and a grant is one statement; "
                 "split the text and fold it again"
+            )
+            continue
+        if kind["label"] == "unreadable":
+            why = f" ({kind['reason']})" if kind["reason"] else ""
+            addition.notes.append(
+                f"{shown!r}: refused — unreadable SQL{why}; a grant for text that is "
+                "not valid SQL can never match a request"
             )
             continue
         if not kind["plain"] and not allow_dangerous:
             why = f" ({kind['reason']})" if kind["reason"] else ""
             addition.notes.append(
-                f"{denial.sql!r}: refused — {kind['label']} is not a plain SELECT, INSERT, "
+                f"{shown!r}: refused — {kind['label']} is not a plain SELECT, INSERT, "
                 f"UPDATE or DELETE{why}; pass --allow-dangerous to grant it anyway"
+            )
+            continue
+        # A committed manifest must never hold a value the application supplied
+        # (ADR-0003): a quoted literal that survived a log from another build is
+        # the same leak `…` is. The two protocol setup statements are the only
+        # exception; `--allow-dangerous` does not reach this either.
+        if normalised not in _KNOWN_STATIC_SETUP_SQL and _has_quoted_literal(
+            normalised
+        ):
+            addition.notes.append(
+                f"{shown!r}: refused — it inlines a quoted literal, which a committed "
+                "manifest must never hold; bind the value as a parameter and fold the "
+                "statement again"
             )
             continue
         # An exact `queries` entry is trusted as it is: whatever function it
@@ -451,19 +496,19 @@ def _plan_route(
         functions = _unsafe_functions(analyse, denial)
         if functions and not allow_dangerous:
             addition.notes.append(
-                f"{denial.sql!r}: refused — it calls {', '.join(functions)}, which is outside "
+                f"{shown!r}: refused — it calls {', '.join(functions)}, which is outside "
                 "blastit's safe set, and an exact `queries` entry grants it as it is; pass "
                 "--allow-dangerous to grant it anyway"
             )
             continue
         if not kind["plain"]:
             addition.notes.append(
-                f"{denial.sql!r}: granted although it is {kind['label']}, which is not a "
+                f"{shown!r}: granted although it is {kind['label']}, which is not a "
                 "plain SELECT, INSERT, UPDATE or DELETE (--allow-dangerous)"
             )
         if functions:
             addition.notes.append(
-                f"{denial.sql!r}: granted although it calls {', '.join(functions)}, which is "
+                f"{shown!r}: granted although it calls {', '.join(functions)}, which is "
                 "outside blastit's safe set (--allow-dangerous)"
             )
         new.append(denial)
@@ -472,7 +517,9 @@ def _plan_route(
 
     cover = covering or _covering
     prefix = f"route.{proxy}"
-    existing_tables = grant.get("tables") if grant and isinstance(grant.get("tables"), dict) else {}
+    existing_tables = (
+        grant.get("tables") if grant and isinstance(grant.get("tables"), dict) else {}
+    )
     existing_functions = _text_list(grant.get("functions") if grant else None)
     kept: list[_Denial] = []
     for denial in new:
@@ -482,7 +529,8 @@ def _plan_route(
                 existing_tables, single, existing_functions
             ):
                 addition.notes.append(
-                    f"{denial.sql!r}: already covered by the route's [{prefix}.tables] grant"
+                    f"{_redact_literal(denial.sql)!r}: already covered by the route's "
+                    f"[{prefix}.tables] grant"
                 )
                 continue
         kept.append(denial)
@@ -504,12 +552,73 @@ def _plan_route(
     }
     for denial in kept:
         if denial.parseable in rejected:
-            addition.queries.append((denial.sql, reasons.get(denial.parseable, denial.reason)))
+            addition.queries.append(
+                (denial.sql, reasons.get(denial.parseable, denial.reason))
+            )
     addition.tables = _merge_tables(existing_tables, merged["tables"])
     addition.functions = sorted(
-        set(_text_list(grant.get("functions") if grant else None)) | set(merged["functions"])
+        set(_text_list(grant.get("functions") if grant else None))
+        | set(merged["functions"])
     )
     return addition
+
+
+#: The fixed protocol setup statements blastit sends (R25, ADR-0003): their
+#: literals are constants, so they are the only statements fold grants as they are.
+_KNOWN_STATIC_SETUP_SQL = frozenset(
+    {
+        "SET TIME ZONE 'UTC'",
+        "SELECT set_config('TimeZone', $?, false)",
+    }
+)
+
+
+def _has_quoted_literal(sql: str) -> bool:
+    """Whether `sql` holds any of PostgreSQL 18's 8 quoted literal forms (R24, R25).
+
+    Follows [`blastit_sqlpolicy::has_quoted_literal`] via [`logs.sql_regions`]:
+    `'…'`, `E'…'`, `B'…'`, `X'…'`, `N'…'`, `U&'…'`, `$$…$$` and `$tag$…$tag$`
+    count (including unterminated spans), while quoted identifiers (`"…"`,
+    `U&"…"`), `$` inside identifiers (`a$b$c`), placeholders (`$1`, `$?`) and
+    comments do not.
+    """
+    return any(kind == logs.SQL_LITERAL for kind, _, _ in logs.sql_regions(sql))
+
+
+def _redact_literal(sql: str) -> str:
+    """`sql` with every quoted literal token (prefix included) replaced by `…`.
+
+    Matches [`blastit_sqlpolicy::redact_literals`] (R24, ADR-0003): all 8
+    PostgreSQL literal forms (`'…'`, `E'…'` with `\\` escapes, `B'…'`, `X'…'`,
+    `N'…'`, `U&'…'`, `$$…$$` and `$tag$…$tag$`) collapse to a single `…` with no
+    surviving prefix or tag, while comments, quoted identifiers and exact
+    [`_KNOWN_STATIC_SETUP_SQL`] entries are preserved verbatim.
+    """
+    if sql in _KNOWN_STATIC_SETUP_SQL:
+        return sql
+    return "".join(
+        "…" if kind == logs.SQL_LITERAL else sql[start:end]
+        for kind, start, end in logs.sql_regions(sql)
+    )
+
+
+def _sanitize_parser_message(message: str) -> str:
+    """Strips the offending token `libpg_query` quotes (`at or near "…"`)."""
+    marker = message.find(" at or near ")
+    head = message[:marker] if marker >= 0 else message
+    out: list[str] = []
+    quoted = False
+    for char in head:
+        if char == '"':
+            if quoted:
+                out.append("…")
+            quoted = not quoted
+            out.append('"')
+        elif not quoted:
+            out.append(char)
+    if quoted:
+        out.append("…")
+    return "".join(out)
 
 
 def _kind(judge: Callable[[str], str], denial: _Denial) -> dict[str, Any]:
@@ -530,7 +639,7 @@ def _kind(judge: Callable[[str], str], denial: _Denial) -> dict[str, Any]:
         return {
             "plain": False,
             "label": "unreadable",
-            "reason": str(error),
+            "reason": _sanitize_parser_message(str(error)),
             "statements": 1,
         }
     verdict.setdefault("reason", "")
@@ -813,7 +922,7 @@ def _covered_by(existing: Any, covering: Any, functions: list[str]) -> bool:
             elif have == "*":
                 continue
             elif isinstance(have, list) and isinstance(value, list):
-                if not set(value) <= set(str(column) for column in have):
+                if not set(value) <= {str(column) for column in have}:
                     return False
             else:
                 return False
@@ -822,9 +931,7 @@ def _covered_by(existing: Any, covering: Any, functions: list[str]) -> bool:
 
 def _render_table(table: str, grant: dict[str, Any]) -> str:
     """One `table = { … }` line of a `[route.<proxy>.tables]` section."""
-    rendered = ", ".join(
-        f"{key} = {value}" for key, value in _table_operations(grant)
-    )
+    rendered = ", ".join(f"{key} = {value}" for key, value in _table_operations(grant))
     return f"{_toml_key(table)} = {{ {rendered} }}"
 
 
@@ -1171,7 +1278,9 @@ def _comment(text: str) -> str:
     a comment.
     """
     flattened = "".join(
-        " " if character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F else character
+        " "
+        if character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F
+        else character
         for character in text
     )
     return flattened.strip()[:COMMENT_LIMIT]
@@ -1299,7 +1408,9 @@ class _Grant:
         return scan.block_end(self.header.index)
 
 
-def _grant_element(scan: _Scan, route: _Line, proxy: str, addition: _Addition) -> _Grant:
+def _grant_element(
+    scan: _Scan, route: _Line, proxy: str, addition: _Addition
+) -> _Grant:
     """Where the route's `[route.<proxy>]` grant is.
 
     Raises [`_FoldError`] when the route has no grant on that proxy at all —
@@ -1370,7 +1481,9 @@ def _route_name(scan: _Scan, route: _Line) -> str:
     return "?"
 
 
-def _add_queries(scan: _Scan, grant: _Grant, queries: list[tuple[str, str]]) -> list[str]:
+def _add_queries(
+    scan: _Scan, grant: _Grant, queries: list[tuple[str, str]]
+) -> list[str]:
     """Appends statements to the grant's `queries`, or writes the array."""
     items = [_query_line(sql, reason) for sql, reason in queries]
     if grant.header is not None:
@@ -1447,7 +1560,10 @@ def _array_values(scan: _Scan, line: _Line) -> list[str]:
     name = ".".join(line.key or ())
     stop = scan.array_end(line)
     chunk = "".join(
-        other.text for other in scan.lines[line.index : (stop + 1 if stop is not None else line.index + 1)]
+        other.text
+        for other in scan.lines[
+            line.index : (stop + 1 if stop is not None else line.index + 1)
+        ]
     )
     try:
         parsed = tomllib.loads(chunk).get(name)
@@ -1510,7 +1626,11 @@ def _table_operations(grant: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def _set_tables(
-    scan: _Scan, route: _Line, grant: _Grant, proxy: str, tables: dict[str, dict[str, Any]]
+    scan: _Scan,
+    route: _Line,
+    grant: _Grant,
+    proxy: str,
+    tables: dict[str, dict[str, Any]],
 ) -> list[str]:
     """Writes a route's `[route.<proxy>.tables]` section, merged in place.
 
@@ -1563,10 +1683,13 @@ def _set_tables(
         )
         if nested is None:
             continue
-        lines = _set_nested_table(lines, _Scan("".join(lines)), nested, remaining.pop(table), table)
+        lines = _set_nested_table(
+            lines, _Scan("".join(lines)), nested, remaining.pop(table), table
+        )
     if remaining:
         additions = [
-            f"{_render_table(table, grant)}\n" for table, grant in sorted(remaining.items())
+            f"{_render_table(table, grant)}\n"
+            for table, grant in sorted(remaining.items())
         ]
         lines[end:end] = additions
         end += len(additions)
@@ -1618,6 +1741,7 @@ def apply_additions(text: str, additions: list[_Addition]) -> str:
         scan = _apply([line.text for line in scan.lines], scan, addition)
     return scan.text()
 
+
 #
 # Rendering, and writing the file.
 #
@@ -1636,8 +1760,10 @@ def render(additions: list[_Addition]) -> str:
         if addition.is_empty():
             continue
         lines: list[str] = [
-            f"# {_comment(addition.route)} (proxy {_comment(addition.proxy)}): "
-            "what the log's denials are missing",
+            (
+                f"# {_comment(addition.route)} (proxy {_comment(addition.proxy)}): "
+                "what the log's denials are missing"
+            ),
         ]
         # The grant's own section, only when something goes in it: a
         # `[route.<proxy>]` with nothing under it says nothing, and a route that
@@ -1736,7 +1862,7 @@ def _write(
     except _FoldError as error:
         raise _FoldError(f"{manifest_path}: {error}") from error
     _verify_edit(manifest_path, text, edited, document, wanted, events, denials)
-    manifest_path.write_text(edited, encoding="utf-8")
+    _write_atomic(manifest_path, edited)
     for addition in wanted:
         print(
             f"{manifest_path}: {addition.route} ({addition.proxy}): "
@@ -1746,6 +1872,82 @@ def _write(
             file=sys.stderr,
         )
     return 0
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Replaces `path` with `text` through a sibling `.<name>.<pid>.tmp` (R29).
+
+    The temp file is created `O_CREAT | O_EXCL | O_NOFOLLOW`, so an existing
+    file — or a symlink planted at the predictable temp name by anyone who can
+    write the directory — is never written through; it is removed first and a
+    fresh regular file is created in its place. The bytes are `fsync`ed before
+    `os.replace` renames the temp file over the manifest, and the directory is
+    `fsync`ed after, so a crash leaves either the old manifest or the new one —
+    never half of either. An error unlinks the temp file: a `.tmp` left next to
+    a manifest is a `guard.py` finding, and the next `git status` would show it.
+    A manifest that could not be replaced is reported, not swallowed, and the
+    old file is still the file.
+    """
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        try:
+            existing_mode: int | None = stat.S_IMODE(path.stat().st_mode)
+        except FileNotFoundError:
+            existing_mode = None
+        try:
+            # A temp file from a crashed run of this very pid (pid reuse) is
+            # stale and ours to remove; there is no second writer with this
+            # pid. A symlink planted here is removed too, never followed.
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600 if existing_mode is not None else 0o666,
+        )
+        try:
+            handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        except OSError:
+            os.close(descriptor)
+            raise
+        with handle:
+            handle.write(text)
+            handle.flush()
+            if existing_mode is not None:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(handle.fileno(), existing_mode)
+                else:
+                    os.chmod(temporary, existing_mode)
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    except OSError as error:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise _FoldError(
+            f"{path}: could not write the edit ({error}); the manifest is unchanged"
+        ) from error
+
+
+def _fsync_directory(directory: Path) -> None:
+    """`fsync`s a directory, so the rename itself is durable (R29).
+
+    Best effort: a filesystem that cannot open or sync a directory (some network
+    mounts) is not a reason to fail an edit that already renamed the file.
+    """
+    try:
+        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _verify_edit(
@@ -1773,7 +1975,9 @@ def _verify_edit(
         old = tomllib.loads(old_text)
         new = tomllib.loads(new_text)
     except tomllib.TOMLDecodeError as error:
-        raise _FoldError(f"{manifest_path}: the edit is not valid TOML: {error}") from error
+        raise _FoldError(
+            f"{manifest_path}: the edit is not valid TOML: {error}"
+        ) from error
 
     _unchanged(new.get("version"), old.get("version"), "the manifest version")
     _unchanged(new.get("groups"), old.get("groups"), "the global groups")
@@ -1795,7 +1999,9 @@ def _verify_edit(
         for key in sorted(set(before) | set(after), key=str):
             addition = planned.get((name, key))
             if addition is None:
-                _unchanged(after.get(key), before.get(key), f"the {key!r} of route {name!r}")
+                _unchanged(
+                    after.get(key), before.get(key), f"the {key!r} of route {name!r}"
+                )
                 continue
             expected = _expected_grant(before.get(key), addition)
             if after.get(key) != expected:
@@ -1805,7 +2011,8 @@ def _verify_edit(
                 )
     for route_name, proxy in planned:
         written = next(
-            (route for route in new_routes if str(route.get("name")) == route_name), None
+            (route for route in new_routes if str(route.get("name")) == route_name),
+            None,
         )
         if written is None or proxy not in written:
             raise _FoldError(
@@ -1916,7 +2123,7 @@ def _missing_after_edit(
     observations = json.dumps({"version": 1, "requests": requests})
     try:
         report = json.loads(_blastit.audit(new_text, observations))
-    except Exception as error:  # noqa: BLE001 - blastit refuses the manifest, or the audit
+    except Exception as error:
         raise _FoldError(
             f"blastit's own audit refused the edited manifest ({error}); nothing was written"
         ) from error
@@ -1933,10 +2140,7 @@ def _missing_after_edit(
             for entry in block["missing"]:
                 refused.add((name, str(block["name"]), str(entry["sql"])))
     for addition in additions:
-        if (
-            addition.route in checked
-            and (addition.route, addition.proxy) in blocks
-        ):
+        if addition.route in checked and (addition.route, addition.proxy) in blocks:
             continue
         _diagnostic(
             f"{addition.route} ({addition.proxy}): the edited manifest routes none of the "

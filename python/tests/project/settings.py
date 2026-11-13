@@ -47,7 +47,11 @@ DATABASES = {
         # §6: without this, psycopg inlines the literals and no allowlist could
         # ever match a statement. `BLASTIT_TEST_CLIENT_BINDING` leaves it out, to
         # check that the plugin says so instead of reporting invented SQL.
-        "OPTIONS": ({} if os.environ.get("BLASTIT_TEST_CLIENT_BINDING") else {"server_side_binding": True}),
+        "OPTIONS": (
+            {}
+            if os.environ.get("BLASTIT_TEST_CLIENT_BINDING")
+            else {"server_side_binding": True}
+        ),
         # §6: request threads are thrown away after every request, so a
         # persistent connection would be orphaned.
         "CONN_MAX_AGE": 0,

@@ -14,11 +14,16 @@
 //! differs between the two installations: which program the two `execve`s of §4
 //! name, and whether stage 1 finds an interpreter that is already running.
 
+pub mod audit_v1;
+pub mod check;
 pub mod cli;
+pub mod config;
 pub mod host;
+pub mod infer_routes;
+pub mod mem_usage;
 
 mod child;
-mod config;
+mod dev_learn;
 mod forking;
 mod immortal;
 mod logs;

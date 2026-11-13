@@ -22,7 +22,7 @@ def main() -> None:
 
     Raises `SystemExit`, which is what a console script's exit status is.
     """
-    import blastit._blastit as _blastit
+    from blastit import _blastit
 
     here = os.path.dirname(os.path.abspath(__file__))
     dbproxy = os.path.join(here, "_bin", "blastit-dbproxy")

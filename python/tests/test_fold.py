@@ -10,15 +10,92 @@ and by looking at the comments around it, because a fold that reorders a
 manifest or drops a comment is worse than no fold at all.
 """
 
+from __future__ import annotations
+
+import contextlib
+import importlib
+import inspect
 import io
 import json
 import subprocess
 import sys
+import tempfile
 import tomllib
+import unittest
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import pytest
+try:
+    import pytest
+
+    _OFFLINE_UNITTEST = False
+except ModuleNotFoundError:  # pragma: no cover - offline stdlib unittest fallback
+    _OFFLINE_UNITTEST = True
+    if TYPE_CHECKING:
+        import pytest
+    else:
+
+        class _ExcInfo:
+            def __init__(self) -> None:
+                self.value: BaseException | None = None
+
+        class _RaisesContext:
+            def __init__(self, expected: type[BaseException]) -> None:
+                self._expected = expected
+                self._info = _ExcInfo()
+
+            def __enter__(self) -> _ExcInfo:
+                return self._info
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                _tb: object,
+            ) -> bool:
+                if exc_type is None:
+                    msg = f"DID NOT RAISE {self._expected!r}"
+                    raise AssertionError(msg)
+                if issubclass(exc_type, self._expected):
+                    self._info.value = exc_val
+                    return True
+                return False
+
+        class _MarkNamespace:
+            @staticmethod
+            def parametrize(argnames: str, argvalues: list[Any]) -> Any:
+                names = [item.strip() for item in argnames.split(",")]
+
+                def decorator(func: Any) -> Any:
+                    func._parametrize = (names, list(argvalues))
+                    return func
+
+                return decorator
+
+        class _PytestShim:
+            mark = _MarkNamespace()
+
+            @staticmethod
+            def raises(expected: type[BaseException]) -> _RaisesContext:
+                return _RaisesContext(expected)
+
+            @staticmethod
+            def fixture(func: Any = None, *, autouse: bool = False) -> Any:
+                def decorator(target: Any) -> Any:
+                    target._fixture = True
+                    target._autouse = autouse
+                    return target
+
+                return decorator(func) if func is not None else decorator
+
+            @staticmethod
+            def importorskip(modname: str, reason: str = "") -> Any:
+                try:
+                    return importlib.import_module(modname)
+                except ImportError as exc:
+                    raise unittest.SkipTest(reason or str(exc)) from exc
+
+        pytest = _PytestShim()
 
 from blastit import fold
 
@@ -33,10 +110,10 @@ input = { url = "DATABASE_URL" }
 
 # Session housekeeping, for every route.
 [group.session.db]
-queries = ["SELECT 'session'"]
+queries = ["SELECT 40"]
 
 [group.own.db]
-queries = ["SELECT 'own'"]
+queries = ["SELECT 50"]
 
 [[route]]
 name = "notes"
@@ -44,7 +121,7 @@ path = ['/notes/.*']
 groups = ["own"]
 [route.db]
 queries = [
-  "SELECT 'granted'",
+  "SELECT 10",
 ]
 
 [[route]]
@@ -57,13 +134,15 @@ unrestricted = true
 name = "catalog"
 path = ['/catalog/']
 [route.db]
-queries = ["SELECT 'listed'"]
+queries = ["SELECT 20"]
 [route.db.tables]
 products = { select = ["id"] }
 """
 
 
-def denial(sql: str, route: str = "notes", proxy: str = "db", reason: str = "not granted") -> Any:
+def denial(
+    sql: str, route: str = "notes", proxy: str = "db", reason: str = "not granted"
+) -> Any:
     """One `sql.denied` line's worth of a denial."""
     return fold._Denial(route=route, proxy=proxy, sql=sql, reason=reason)
 
@@ -97,7 +176,14 @@ def covering_for(table: str = "orders") -> Any:
     def covering(statements: list[str], prefix: str) -> str:
         return json.dumps(
             {
-                "tables": {table: {"select": ["id"], "insert": None, "update": None, "delete": False}},
+                "tables": {
+                    table: {
+                        "select": ["id"],
+                        "insert": None,
+                        "update": None,
+                        "delete": False,
+                    }
+                },
                 "functions": ["unaccent"],
                 "toml": f"[{prefix}.tables]\n",
                 "unanalysable": [],
@@ -123,23 +209,28 @@ class TestPlanning:
         assert additions[0].functions == []
 
     def test_a_statement_the_route_already_grants_is_not_added(self) -> None:
-        additions = fold.plan(document(), [denial("SELECT 'granted';")], prefer_tables=False)
+        additions = fold.plan(document(), [denial("SELECT 10;")], prefer_tables=False)
         assert additions[0].queries == []
-        assert any("already granted by the route's own grant" in note for note in additions[0].notes)
+        assert any(
+            "already granted by the route's own grant" in note
+            for note in additions[0].notes
+        )
 
     def test_a_statement_a_group_grants_is_not_added(self) -> None:
-        additions = fold.plan(document(), [denial("SELECT 'own'")], prefer_tables=False)
+        additions = fold.plan(document(), [denial("SELECT 50")], prefer_tables=False)
         assert additions[0].queries == []
         assert any("the group 'own'" in note for note in additions[0].notes)
 
     def test_a_statement_a_global_group_grants_is_not_added(self) -> None:
-        additions = fold.plan(document(), [denial("SELECT 'session'")], prefer_tables=False)
+        additions = fold.plan(document(), [denial("SELECT 40")], prefer_tables=False)
         assert additions[0].queries == []
         assert any("the global group 'session'" in note for note in additions[0].notes)
 
     def test_an_unrestricted_route_is_never_given_a_grant(self) -> None:
         additions = fold.plan(
-            document(), [denial("SELECT 'anything'", route="admin")], prefer_tables=False
+            document(),
+            [denial("SELECT 'anything'", route="admin")],
+            prefer_tables=False,
         )
         assert additions[0].queries == []
         assert any("unrestricted" in note for note in additions[0].notes)
@@ -186,7 +277,10 @@ class TestPlanning:
                     "functions": [],
                     "toml": "",
                     "unanalysable": [
-                        {"sql": statement, "reason": "system catalogues are not grantable"}
+                        {
+                            "sql": statement,
+                            "reason": "system catalogues are not grantable",
+                        }
                         for statement in statements
                     ],
                 }
@@ -206,7 +300,11 @@ class TestPlanning:
     def test_prefer_tables_merges_into_the_routes_existing_table_grant(self) -> None:
         additions = fold.plan(
             document(),
-            [denial("INSERT INTO products (id, name) VALUES ($1, $2)", route="catalog")],
+            [
+                denial(
+                    "INSERT INTO products (id, name) VALUES ($1, $2)", route="catalog"
+                )
+            ],
             prefer_tables=True,
             covering=lambda statements, prefix: json.dumps(
                 {
@@ -264,7 +362,9 @@ class TestRender:
 
     def test_a_block_is_a_route_grant_with_the_reasons_as_comments(self) -> None:
         additions = fold.plan(
-            document(), [denial("SELECT 1", reason="the statement is not granted")], prefer_tables=False
+            document(),
+            [denial("SELECT 1", reason="the statement is not granted")],
+            prefer_tables=False,
         )
         rendered = fold.render(additions)
         assert "[route.db]" in rendered
@@ -273,24 +373,31 @@ class TestRender:
 
     def test_a_prefer_tables_block_names_the_tables_section(self) -> None:
         additions = fold.plan(
-            document(), [denial("SELECT 1")], prefer_tables=True, covering=covering_for()
+            document(),
+            [denial("SELECT 1")],
+            prefer_tables=True,
+            covering=covering_for(),
         )
         rendered = fold.render(additions)
         assert "[route.db.tables]" in rendered
         assert 'orders = { select = ["id"] }' in rendered
-        assert "functions = [\"unaccent\"]" in rendered
+        assert 'functions = ["unaccent"]' in rendered
 
     def test_nothing_to_add_is_no_output(self) -> None:
-        additions = fold.plan(document(), [denial("SELECT 'granted'")], prefer_tables=False)
+        additions = fold.plan(document(), [denial("SELECT 10")], prefer_tables=False)
         assert fold.render(additions) == ""
         assert additions[0].notes, "the reason is still said, on stderr"
 
     def test_a_note_alone_prints_no_toml(self) -> None:
-        additions = fold.plan(document(), [denial("SELECT 1", route="ghost")], prefer_tables=False)
+        additions = fold.plan(
+            document(), [denial("SELECT 1", route="ghost")], prefer_tables=False
+        )
         assert fold.render(additions) == ""
         assert additions[0].notes == [
-            "ghost: the manifest declares no route of that name — fold extends the routes "
-            "a manifest has, it never creates one"
+            (
+                "ghost: the manifest declares no route of that name — fold extends the routes "
+                "a manifest has, it never creates one"
+            )
         ]
 
 
@@ -302,13 +409,13 @@ class TestEdit:
 
     def test_a_statement_is_appended_inside_the_existing_array(self) -> None:
         edited = fold.apply_additions(MANIFEST, [self._addition(sql="SELECT 1")])
-        assert '"SELECT \'granted\'",' in edited, "the old statement is still there"
+        assert '"SELECT 10",' in edited, "the old statement is still there"
         assert '"SELECT 1",  # not granted' in edited
         assert "queries = [\n" in edited
         assert edited.count("[[route]]") == 3, "the file still has its routes"
         parsed = tomllib.loads(edited)
         queries = parsed["route"][0]["db"]["queries"]
-        assert queries == ["SELECT 'granted'", "SELECT 1"]
+        assert queries == ["SELECT 10", "SELECT 1"]
 
     def test_comments_and_order_survive(self) -> None:
         edited = fold.apply_additions(MANIFEST, [self._addition(sql="SELECT 1")])
@@ -319,7 +426,9 @@ class TestEdit:
     def test_a_route_without_a_grant_on_that_proxy_is_refused(self) -> None:
         """A denial can only come from a proxy the route is granted (§2.2)."""
         addition = fold.plan(
-            document(), [denial("SELECT 'new'", proxy="warehouse")], prefer_tables=False
+            document(),
+            [denial("SELECT id FROM notes WHERE id = $?", proxy="warehouse")],
+            prefer_tables=False,
         )[0]
         # `warehouse` is not declared by this manifest, so the plan refuses it…
         assert addition.is_empty()
@@ -331,28 +440,42 @@ class TestEdit:
             'protocol = "postgresql"\ninput = { url = "WAREHOUSE_URL" }',
         )
         addition = fold.plan(
-            document(manifest), [denial("SELECT 'new'", proxy="warehouse")], prefer_tables=False
+            document(manifest),
+            [denial("SELECT id FROM notes WHERE id = $?", proxy="warehouse")],
+            prefer_tables=False,
         )[0]
         assert addition.is_empty()
         assert any("no grant on that proxy" in note for note in addition.notes)
         with pytest.raises(fold._FoldError):
-            fold.apply_additions(manifest, [fold._Addition(
-                route="notes", proxy="warehouse", queries=[("SELECT 'new'", "")]
-            )])
+            fold.apply_additions(
+                manifest,
+                [
+                    fold._Addition(
+                        route="notes",
+                        proxy="warehouse",
+                        queries=[("SELECT id FROM notes WHERE id = $?", "")],
+                    )
+                ],
+            )
 
     def test_a_one_line_array_becomes_a_multi_line_one(self) -> None:
         text = MANIFEST.replace(
-            'queries = [\n  "SELECT \'granted\'",\n]', 'queries = ["SELECT \'granted\'"]  # one line'
+            'queries = [\n  "SELECT 10",\n]',
+            'queries = ["SELECT 10"]  # one line',
         )
         edited = fold.apply_additions(text, [self._addition(sql="SELECT 1")])
         parsed = tomllib.loads(edited)
-        assert parsed["route"][0]["db"]["queries"] == ["SELECT 'granted'", "SELECT 1"]
+        assert parsed["route"][0]["db"]["queries"] == ["SELECT 10", "SELECT 1"]
         assert "# one line" in edited
 
     def test_an_existing_table_entry_is_updated_in_place(self) -> None:
         addition = fold.plan(
             document(),
-            [denial("INSERT INTO products (id, name) VALUES ($1, $2)", route="catalog")],
+            [
+                denial(
+                    "INSERT INTO products (id, name) VALUES ($1, $2)", route="catalog"
+                )
+            ],
             prefer_tables=True,
             covering=lambda statements, prefix: json.dumps(
                 {
@@ -366,13 +489,18 @@ class TestEdit:
         edited = fold.apply_additions(MANIFEST, [addition])
         assert edited.index("products =") > edited.index("[route.db.tables]")
         parsed = tomllib.loads(edited)
-        catalog = [route for route in parsed["route"] if route["name"] == "catalog"][0]
-        assert catalog["db"]["tables"] == {"products": {"select": ["id"], "insert": ["name"]}}
-        assert "products = { select = [\"id\"], insert = [\"name\"] }" in edited
+        catalog = next(route for route in parsed["route"] if route["name"] == "catalog")
+        assert catalog["db"]["tables"] == {
+            "products": {"select": ["id"], "insert": ["name"]}
+        }
+        assert 'products = { select = ["id"], insert = ["name"] }' in edited
 
     def test_a_new_tables_section_is_written_under_the_grant(self) -> None:
         addition = fold.plan(
-            document(), [denial("SELECT 1")], prefer_tables=True, covering=covering_for()
+            document(),
+            [denial("SELECT 1")],
+            prefer_tables=True,
+            covering=covering_for(),
         )[0]
         edited = fold.apply_additions(MANIFEST, [addition])
         parsed = tomllib.loads(edited)
@@ -388,10 +516,14 @@ class TestEdit:
         parsed = tomllib.loads(edited)
         grant = parsed["route"][0]["db"]
         assert grant["queries"] == ["SELECT 1"]
-        assert grant["tables"] == {"products": {"select": ["id"]}}, "the table grant is intact"
+        assert grant["tables"] == {"products": {"select": ["id"]}}, (
+            "the table grant is intact"
+        )
         # The key is written under a `[route.db]` header of its own, before the
         # section it would otherwise have landed inside.
-        assert edited.index("[route.db]\nqueries = [") < edited.index("[route.db.tables]")
+        assert edited.index("[route.db]\nqueries = [") < edited.index(
+            "[route.db.tables]"
+        )
         assert edited.rstrip().endswith('products = { select = ["id"] }')
 
     def test_a_nested_table_section_is_a_grant_too(self) -> None:
@@ -448,7 +580,7 @@ class TestEdit:
 
     def test_a_queries_key_that_is_not_an_array_is_refused(self) -> None:
         text = MANIFEST.replace(
-            'queries = [\n  "SELECT \'granted\'",\n]', 'queries = "SELECT \'granted\'"'
+            'queries = [\n  "SELECT 10",\n]', 'queries = "SELECT 10"'
         )
         with pytest.raises(fold._FoldError):
             fold.apply_additions(text, [self._addition(sql="SELECT 1")])
@@ -457,14 +589,12 @@ class TestEdit:
 class TestCli:
     """The command itself: reading a log, printing, and `--write`."""
 
-    LOG = "\n".join(
-        [
-            '2026-10-25T14:02:11.384Z app[web.1]: {"event":"request","method":"POST",'
-            '"path":"/notes/","route":"notes"}',
-            "a line that is not an event",
-            '{"event":"sql.denied","route":"notes","proxy":"db","sql":"DELETE FROM notes",'
-            '"reason":"the statement is not granted","sqlstate":"42501"}',
-        ]
+    LOG = (
+        '2026-10-25T14:02:11.384Z app[web.1]: {"event":"request","method":"POST",'
+        '"path":"/notes/","route":"notes"}\n'
+        "a line that is not an event\n"
+        '{"event":"sql.denied","route":"notes","proxy":"db","sql":"DELETE FROM notes",'
+        '"reason":"the statement is not granted","sqlstate":"42501"}'
     )
 
     def _files(self, tmp_path: Path) -> tuple[Path, Path]:
@@ -474,7 +604,9 @@ class TestCli:
         log.write_text(self.LOG + "\n", encoding="utf-8")
         return manifest, log
 
-    def test_the_toml_to_add_is_printed(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_the_toml_to_add_is_printed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         manifest, log = self._files(tmp_path)
         assert fold.main(["fold", str(log), "--manifest", str(manifest)]) == 0
         out = capsys.readouterr().out
@@ -486,14 +618,23 @@ class TestCli:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         manifest, log = self._files(tmp_path)
-        assert fold.main(["fold", str(log), "--manifest", str(manifest), "--write"]) == 0
+        assert (
+            fold.main(["fold", str(log), "--manifest", str(manifest), "--write"]) == 0
+        )
         written = manifest.read_text(encoding="utf-8")
         assert '"DELETE FROM notes"' in written
         # The manifest is still the manifest: the routes, the comments, the
         # table grant and the groups are all where they were.
         parsed = tomllib.loads(written)
-        assert [route["name"] for route in parsed["route"]] == ["notes", "admin", "catalog"]
-        assert parsed["route"][0]["db"]["queries"] == ["SELECT 'granted'", "DELETE FROM notes"]
+        assert [route["name"] for route in parsed["route"]] == [
+            "notes",
+            "admin",
+            "catalog",
+        ]
+        assert parsed["route"][0]["db"]["queries"] == [
+            "SELECT 10",
+            "DELETE FROM notes",
+        ]
         assert parsed["groups"] == ["session"]
         assert "# A manifest with the two kinds of group" in written
 
@@ -511,8 +652,15 @@ class TestCli:
         """`python -m blastit.fold app.log …` used to refuse `app.log` as an
         invalid subcommand: the module takes fold's arguments, and nothing else."""
         manifest, log = self._files(tmp_path)
-        completed = subprocess.run(  # noqa: S603 - sys.executable, fixed argv
-            [sys.executable, "-m", "blastit.fold", str(log), "--manifest", str(manifest)],
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "blastit.fold",
+                str(log),
+                "--manifest",
+                str(manifest),
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -521,10 +669,12 @@ class TestCli:
         assert "[route.db]" in completed.stdout
         assert '"DELETE FROM notes"' in completed.stdout
 
-    def test_the_module_fails_the_way_the_console_script_does(self, tmp_path: Path) -> None:
+    def test_the_module_fails_the_way_the_console_script_does(
+        self, tmp_path: Path
+    ) -> None:
         """Same exit status, same words, for a log that is not there."""
         manifest, _ = self._files(tmp_path)
-        completed = subprocess.run(  # noqa: S603 - sys.executable, fixed argv
+        completed = subprocess.run(
             [
                 sys.executable,
                 "-m",
@@ -548,15 +698,19 @@ class TestCli:
         manifest.write_text(MANIFEST, encoding="utf-8")
         log = tmp_path / "app.log"
         log.write_text(
-            '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SELECT \'granted\'"}'
+            '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SELECT 10"}'
             + "\n",
             encoding="utf-8",
         )
-        assert fold.main(["fold", str(log), "--manifest", str(manifest), "--write"]) == 0
+        assert (
+            fold.main(["fold", str(log), "--manifest", str(manifest), "--write"]) == 0
+        )
         assert manifest.read_text(encoding="utf-8") == MANIFEST
         assert "nothing to add" in capsys.readouterr().err
 
-    def test_standard_input_is_a_log(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_standard_input_is_a_log(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         manifest = tmp_path / "blastit.toml"
         manifest.write_text(MANIFEST, encoding="utf-8")
         monkeypatch.setattr(sys, "stdin", io.StringIO(self.LOG))
@@ -567,7 +721,10 @@ class TestCli:
     ) -> None:
         manifest = tmp_path / "blastit.toml"
         manifest.write_text(MANIFEST, encoding="utf-8")
-        assert fold.main(["fold", str(tmp_path / "nope.log"), "--manifest", str(manifest)]) == 1
+        assert (
+            fold.main(["fold", str(tmp_path / "nope.log"), "--manifest", str(manifest)])
+            == 1
+        )
         assert "nope.log" in capsys.readouterr().err
 
     def test_a_manifest_that_is_not_there_is_an_error(
@@ -575,7 +732,10 @@ class TestCli:
     ) -> None:
         log = tmp_path / "app.log"
         log.write_text(self.LOG + "\n", encoding="utf-8")
-        assert fold.main(["fold", str(log), "--manifest", str(tmp_path / "nope.toml")]) == 1
+        assert (
+            fold.main(["fold", str(log), "--manifest", str(tmp_path / "nope.toml")])
+            == 1
+        )
         assert "nope.toml" in capsys.readouterr().err
 
 
@@ -602,7 +762,7 @@ class TestWithTheExtension:
         pytest.importorskip("blastit._blastit", reason="the analysis is the extension")
         additions = fold.plan(
             document(),
-            [denial('DELETE FROM products WHERE products.id IN ($?, ...)')],
+            [denial("DELETE FROM products WHERE products.id IN ($?, ...)")],
             prefer_tables=True,
         )
         assert additions[0].queries == []
@@ -619,7 +779,9 @@ class TestDangerousStatements:
 
     def classify(self, verdict: str, label: str = "SET") -> Any:
         def classify(sql: str) -> str:
-            return json.dumps({"class": verdict, "label": label, "plain": verdict != "other"})
+            return json.dumps(
+                {"class": verdict, "label": label, "plain": verdict != "other"}
+            )
 
         return classify
 
@@ -651,13 +813,21 @@ class TestDangerousStatements:
         assert additions[0].queries == [], sql
         assert additions[0].is_empty(), sql
         note = additions[0].notes[0]
-        assert "refused" in note and sql in note, note
+        assert "refused" in note and fold._redact_literal(sql) in note, note
+        assert "'admin'" not in note and "BEGIN END" not in note, note
         assert "--allow-dangerous" in note, note
 
     def test_the_label_names_the_kind_the_parser_saw(self) -> None:
-        additions = fold.plan(document(), [denial("SET ROLE admin")], prefer_tables=False)
-        assert "SET is not a plain SELECT, INSERT, UPDATE or DELETE" in additions[0].notes[0]
-        additions = fold.plan(document(), [denial("CREATE TABLE t (a int)")], prefer_tables=False)
+        additions = fold.plan(
+            document(), [denial("SET ROLE admin")], prefer_tables=False
+        )
+        assert (
+            "SET is not a plain SELECT, INSERT, UPDATE or DELETE"
+            in additions[0].notes[0]
+        )
+        additions = fold.plan(
+            document(), [denial("CREATE TABLE t (a int)")], prefer_tables=False
+        )
         assert "CREATE TABLE is not a plain" in additions[0].notes[0]
 
     def test_a_plain_statement_of_every_kind_is_granted(self) -> None:
@@ -694,7 +864,7 @@ class TestDangerousStatements:
     def test_prefer_tables_refuses_them_too(self) -> None:
         additions = fold.plan(
             document(),
-            [denial("SELECT 'x' FROM t"), denial("SET ROLE admin")],
+            [denial("SELECT id FROM t"), denial("SET ROLE admin")],
             prefer_tables=True,
             covering=covering_for("t"),
         )
@@ -720,7 +890,9 @@ class TestLogFieldsAreNotManifestText:
     def test_a_reason_becomes_one_bounded_comment(self) -> None:
         hostile = 'nope]\n[route.evil]\nqueries = ["DROP TABLE users"]\n# \x07\x01'
         rendered = fold.render(
-            fold.plan(document(), [denial("SELECT 1", reason=hostile)], prefer_tables=False)
+            fold.plan(
+                document(), [denial("SELECT 1", reason=hostile)], prefer_tables=False
+            )
         )
         assert "\x07" not in rendered and "\x01" not in rendered
         assert len(rendered.splitlines()) == 5, (
@@ -731,11 +903,15 @@ class TestLogFieldsAreNotManifestText:
             "the reason is a comment, and only a comment"
         )
         assert "evil" not in parsed["route"], "no table was opened by a log line"
-        assert [line for line in rendered.splitlines() if line.startswith("[")] == ["[route.db]"]
+        assert [line for line in rendered.splitlines() if line.startswith("[")] == [
+            "[route.db]"
+        ]
 
     def test_a_long_reason_is_cut(self) -> None:
         rendered = fold.render(
-            fold.plan(document(), [denial("SELECT 1", reason="x" * 5000)], prefer_tables=False)
+            fold.plan(
+                document(), [denial("SELECT 1", reason="x" * 5000)], prefer_tables=False
+            )
         )
         comment = next(line for line in rendered.splitlines() if "#" in line)
         assert len(comment) <= fold.COMMENT_LIMIT + 40, len(comment)
@@ -743,7 +919,7 @@ class TestLogFieldsAreNotManifestText:
     def test_a_statement_is_an_escaped_toml_string(self) -> None:
         sql = "SELECT 'a\"b', 'c\\d', 'e\nf' FROM t"
         rendered = fold.render(
-            fold.plan(document(), [denial(sql)], prefer_tables=False)
+            [fold._Addition(route="notes", proxy="db", queries=[(sql, "")])]
         )
         parsed = tomllib.loads(rendered)
         assert parsed["route"]["db"]["queries"] == [sql]
@@ -776,13 +952,17 @@ class TestLogFieldsAreNotManifestText:
 
     def test_a_route_the_manifest_does_not_declare_is_refused(self) -> None:
         additions = fold.plan(
-            document(), [denial("SELECT 1", route="ghost]\n[route.evil")], prefer_tables=False
+            document(),
+            [denial("SELECT 1", route="ghost]\n[route.evil")],
+            prefer_tables=False,
         )
         assert additions[0].is_empty()
         assert "no route of that name" in additions[0].notes[0]
 
     def test_the_notes_are_diagnostics_not_toml(self) -> None:
-        additions = fold.plan(document(), [denial("SET ROLE admin")], prefer_tables=False)
+        additions = fold.plan(
+            document(), [denial("SET ROLE admin")], prefer_tables=False
+        )
         rendered = fold.render(additions)
         assert rendered == "", "a refusal prints no TOML"
         assert additions[0].notes, "and the reason is still said"
@@ -823,9 +1003,14 @@ class TestTheScan:
 
     def test_a_bracket_inside_a_string_does_not_open_an_array(self) -> None:
         text = 'version = 1\n\n[[route]]\nname = "one"\npath = ["/one/"]\n'
-        text += '[route.db]\nqueries = ["SELECT \'[\' , \']\'"]\n[[route]]\nname = "two"\n'
+        text += (
+            "[route.db]\nqueries = [\"SELECT '[' , ']'\"]\n[[route]]\nname = \"two\"\n"
+        )
         scan = fold._Scan(text)
-        assert [line.header for line in scan.headers(("route",))] == [("route",), ("route",)]
+        assert [line.header for line in scan.headers(("route",))] == [
+            ("route",),
+            ("route",),
+        ]
         assert scan.lines[-1].depth == 0
 
     def test_find_unquoted_steps_over_quoted_regions(self) -> None:
@@ -838,9 +1023,13 @@ class TestTheScan:
         ]:
             found = fold._find_unquoted(sample, "]", 0)
             assert sample[found:] == "]", f"{sample!r}: {found}"
-        assert fold._find_unquoted('a = ["x"] # ]', "]", 9) == -1, "a comment is not a bracket"
+        assert fold._find_unquoted('a = ["x"] # ]', "]", 9) == -1, (
+            "a comment is not a bracket"
+        )
         assert fold._find_unquoted("nothing here", "]", 0) == -1
-        assert fold._find_unquoted("a = ']' ", "]", 0) == -1, "a literal is not a bracket"
+        assert fold._find_unquoted("a = ']' ", "]", 0) == -1, (
+            "a literal is not a bracket"
+        )
 
     def test_a_quoted_region_ends_where_toml_says_it_does(self) -> None:
         for text, expected_rest in [
@@ -899,17 +1088,17 @@ queries = ["SELECT 'a]b'", 'SELECT "c]d"."e" FROM "c]d"']  # two statements, one
 
     def test_an_inline_grant_is_refused_not_duplicated(self) -> None:
         text = self.ONE_LINE.replace(
-            "[route.db]\nqueries = [\"SELECT 'a]b'\", 'SELECT \"c]d\".\"e\" FROM \"c]d\"']  # two statements, one line",
+            '[route.db]\nqueries = ["SELECT \'a]b\'", \'SELECT "c]d"."e" FROM "c]d"\']  # two statements, one line',
             'db = { queries = ["SELECT 1"] }',
         )
         with pytest.raises(fold._FoldError) as refused:
-            fold.apply_additions(text, [self.addition()])
+            fold.apply_additions(text, [self.addition(sql="SELECT 2")])
         assert "inline table" in str(refused.value)
         assert "line" in str(refused.value)
 
     def test_an_inline_tables_grant_is_refused_not_duplicated(self) -> None:
         text = self.ONE_LINE.replace(
-            "queries = [\"SELECT 'a]b'\", 'SELECT \"c]d\".\"e\" FROM \"c]d\"']  # two statements, one line",
+            'queries = ["SELECT \'a]b\'", \'SELECT "c]d"."e" FROM "c]d"\']  # two statements, one line',
             'tables = { products = { select = ["id"] } }',
         )
         addition = fold.plan(
@@ -951,15 +1140,13 @@ input = { url = "DATABASE_URL" }
 name = "notes"
 path = ['/notes/']
 [route.db]
-queries = ["SELECT 'granted'"]
+queries = ["SELECT 10"]
 """
 
-    LOG = "\n".join(
-        [
-            '{"event":"request","method":"GET","path":"/notes/","route":"notes"}',
-            '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SELECT \'new\'",'
-            '"reason":"not granted"}',
-        ]
+    LOG = (
+        '{"event":"request","method":"GET","path":"/notes/","route":"notes"}\n'
+        '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SELECT id FROM notes '
+        'WHERE id = $?","reason":"not granted"}'
     )
 
     @pytest.fixture
@@ -983,7 +1170,9 @@ queries = ["SELECT 'granted'"]
     def log(self, tmp_path: Path) -> None:
         (tmp_path / "app.log").write_text(self.LOG + "\n", encoding="utf-8")
 
-    def test_an_edit_that_is_exactly_the_plan_is_accepted(self, tmp_path: Path, manifest: Path) -> None:
+    def test_an_edit_that_is_exactly_the_plan_is_accepted(
+        self, tmp_path: Path, manifest: Path
+    ) -> None:
         old = manifest.read_text(encoding="utf-8")
         events, denials, additions = self.planned(tmp_path, manifest)
         edited = fold.apply_additions(old, additions)
@@ -991,9 +1180,14 @@ queries = ["SELECT 'granted'"]
             manifest, old, edited, tomllib.loads(old), additions, events, denials
         )
         parsed = tomllib.loads(edited)
-        assert parsed["route"][0]["db"]["queries"] == ["SELECT 'granted'", "SELECT 'new'"]
+        assert parsed["route"][0]["db"]["queries"] == [
+            "SELECT 10",
+            "SELECT id FROM notes WHERE id = $?",
+        ]
 
-    def test_a_route_that_appeared_is_refused(self, tmp_path: Path, manifest: Path) -> None:
+    def test_a_route_that_appeared_is_refused(
+        self, tmp_path: Path, manifest: Path
+    ) -> None:
         old = manifest.read_text(encoding="utf-8")
         events, denials, additions = self.planned(tmp_path, manifest)
         edited = old + '\n[[route]]\nname = "extra"\npath = ["/extra/"]\n'
@@ -1009,8 +1203,8 @@ queries = ["SELECT 'granted'"]
         old = manifest.read_text(encoding="utf-8")
         events, denials, additions = self.planned(tmp_path, manifest)
         edited = fold.apply_additions(old, additions).replace(
-            '  "SELECT \'new\'",',
-            '  "SELECT \'new\'",\n  "SELECT \'unplanned\'",',
+            '  "SELECT id FROM notes WHERE id = $?",',
+            '  "SELECT id FROM notes WHERE id = $?",\n  "SELECT \'unplanned\'",',
         )
         with pytest.raises(fold._FoldError) as refused:
             fold._verify_edit(
@@ -1018,7 +1212,9 @@ queries = ["SELECT 'granted'"]
             )
         assert "not the grant the plan asked for" in str(refused.value)
 
-    def test_a_proxy_that_changed_is_refused(self, tmp_path: Path, manifest: Path) -> None:
+    def test_a_proxy_that_changed_is_refused(
+        self, tmp_path: Path, manifest: Path
+    ) -> None:
         old = manifest.read_text(encoding="utf-8")
         events, denials, additions = self.planned(tmp_path, manifest)
         edited = fold.apply_additions(old, additions).replace("proxy.db", "proxy.other")
@@ -1036,7 +1232,7 @@ queries = ["SELECT 'granted'"]
         events, denials, additions = self.planned(tmp_path, manifest)
         # A plan that claims to grant a statement the edit does not write: the
         # audit is what catches it.
-        additions[0].statements.append("SELECT 'new'")
+        additions[0].statements.append("SELECT id FROM notes WHERE id = $?")
         additions[0].queries = []
         edited = fold.apply_additions(old, additions)
         with pytest.raises(fold._FoldError) as refused:
@@ -1052,7 +1248,9 @@ queries = ["SELECT 'granted'"]
         old = manifest.read_text(encoding="utf-8")
         events, denials, additions = self.planned(tmp_path, manifest)
         monkeypatch.setattr(
-            fold, "apply_additions", lambda text, wanted: text + '\n[[route]]\nname = "x"\n'
+            fold,
+            "apply_additions",
+            lambda text, wanted: text + '\n[[route]]\nname = "x"\n',
         )
         with pytest.raises(fold._FoldError):
             fold._write(manifest, old, tomllib.loads(old), events, denials, additions)
@@ -1093,7 +1291,9 @@ class TestTheCliDiagnostics:
             encoding="utf-8",
         )
         assert (
-            fold.main(["fold", str(log), "--manifest", str(manifest), "--allow-dangerous"])
+            fold.main(
+                ["fold", str(log), "--manifest", str(manifest), "--allow-dangerous"]
+            )
             == 0
         )
         captured = capsys.readouterr()
@@ -1107,8 +1307,8 @@ class TestTheCliDiagnostics:
         manifest = tmp_path / "blastit.toml"
         manifest.write_text(
             TestTheEditIsProved.MANIFEST.replace(
-                '[route.db]\nqueries = ["SELECT \'granted\'"]',
-                'db = { queries = ["SELECT \'granted\'"] }',
+                '[route.db]\nqueries = ["SELECT 10"]',
+                'db = { queries = ["SELECT 10"] }',
             ),
             encoding="utf-8",
         )
@@ -1116,11 +1316,14 @@ class TestTheCliDiagnostics:
         log = tmp_path / "app.log"
         log.write_text(
             '{"event":"request","method":"GET","path":"/notes/","route":"notes"}\n'
-            '{"event":"sql.denied","route":"notes","proxy":"db","sql":"SELECT \'new\'",'
+            '{"event":"sql.denied","route":"notes","proxy":"db",'
+            '"sql":"SELECT id FROM notes WHERE id = $?",'
             '"reason":"not granted"}\n',
             encoding="utf-8",
         )
-        assert fold.main(["fold", str(log), "--manifest", str(manifest), "--write"]) == 1
+        assert (
+            fold.main(["fold", str(log), "--manifest", str(manifest), "--write"]) == 1
+        )
         assert "inline table" in capsys.readouterr().err
         assert manifest.read_text(encoding="utf-8") == old, "nothing was written"
 
@@ -1138,14 +1341,21 @@ class TestTheCliDiagnostics:
         )
         assert (
             fold.main(
-                ["fold", str(log), "--manifest", str(manifest), "--prefer-tables", "--write"]
+                [
+                    "fold",
+                    str(log),
+                    "--manifest",
+                    str(manifest),
+                    "--prefer-tables",
+                    "--write",
+                ]
             )
             == 0
         )
         parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
         tables = parsed["route"][0]["db"]["tables"]
         assert tables["orders"] == {"insert": ["id", "total"]}
-        assert parsed["route"][0]["db"]["queries"] == ["SELECT 'granted'"]
+        assert parsed["route"][0]["db"]["queries"] == ["SELECT 10"]
 
 
 class TestAFunctionGrantSurvives:
@@ -1163,16 +1373,14 @@ name = "search"
 path = ['/search/']
 [route.db]
 functions = ["unaccent"]
-queries = ["SELECT 'listed'"]
+queries = ["SELECT 20"]
 """
 
-    LOG = "\n".join(
-        [
-            '{"event":"request","method":"GET","path":"/search/","route":"search"}',
-            '{"event":"sql.denied","route":"search","proxy":"db",'
-            '"sql":"SELECT unaccent($1), st_distance($1, $2)",'
-            '"reason":"the function st_distance is not granted"}',
-        ]
+    LOG = (
+        '{"event":"request","method":"GET","path":"/search/","route":"search"}\n'
+        '{"event":"sql.denied","route":"search","proxy":"db",'
+        '"sql":"SELECT unaccent($1), st_distance($1, $2)",'
+        '"reason":"the function st_distance is not granted"}'
     )
 
     def test_the_union_is_written_and_the_edit_is_accepted(
@@ -1202,7 +1410,7 @@ queries = ["SELECT 'listed'"]
         assert parsed["route"][0]["db"]["functions"] == ["unaccent", "st_distance"], (
             "the route's own function stays where it is, and the plan's is appended"
         )
-        assert parsed["route"][0]["db"]["queries"] == ["SELECT 'listed'"]
+        assert parsed["route"][0]["db"]["queries"] == ["SELECT 20"]
 
 
 class TestLockGrants:
@@ -1219,16 +1427,15 @@ input = { url = "DATABASE_URL" }
 name = "users"
 path = ['/users/.*']
 [route.db]
-queries = ["SELECT 'listed'"]
+queries = ["SELECT 20"]
 """
 
     def log(self, sql: str) -> str:
-        return "\n".join(
-            [
-                '{"event":"request","method":"GET","path":"/users/","route":"users"}',
-                '{"event":"sql.denied","route":"users","proxy":"db","sql":%s,'
-                '"reason":"not granted"}' % json.dumps(sql),
-            ]
+        return (
+            '{"event":"request","method":"GET","path":"/users/","route":"users"}\n'
+            '{"event":"sql.denied","route":"users","proxy":"db","sql":'
+            f"{json.dumps(sql)},"
+            '"reason":"not granted"}'
         )
 
     def plan(self, sql: str, **kwargs: Any) -> Any:
@@ -1259,14 +1466,18 @@ queries = ["SELECT 'listed'"]
 
     def test_a_lock_that_reads_no_column_is_a_query_with_a_note(self) -> None:
         addition = self.plan('SELECT 1 FROM "auth_user" FOR UPDATE')
-        assert [sql for sql, _ in addition.queries] == ['SELECT 1 FROM "auth_user" FOR UPDATE']
+        assert [sql for sql, _ in addition.queries] == [
+            'SELECT 1 FROM "auth_user" FOR UPDATE'
+        ]
         assert "primary key" in addition.queries[0][1]
         assert not addition.tables
 
-    def test_a_statement_the_existing_table_grant_cannot_cover_is_not_dropped(self) -> None:
+    def test_a_statement_the_existing_table_grant_cannot_cover_is_not_dropped(
+        self,
+    ) -> None:
         """An empty `update` is not "already covered": it grants no column."""
         manifest = self.MANIFEST.replace(
-            'queries = ["SELECT \'listed\'"]',
+            'queries = ["SELECT 20"]',
             '[route.db.tables]\nauth_user = { select = ["id"] }',
         )
         addition = fold.plan(
@@ -1281,7 +1492,9 @@ queries = ["SELECT 'listed'"]
             ],
             prefer_tables=True,
         )[0]
-        assert [sql for sql, _ in addition.queries] == ['SELECT 1 FROM "auth_user" FOR UPDATE']
+        assert [sql for sql, _ in addition.queries] == [
+            'SELECT 1 FROM "auth_user" FOR UPDATE'
+        ]
 
     def test_never_writes_a_star_for_a_lock_in_the_written_file(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -1294,15 +1507,22 @@ queries = ["SELECT 'listed'"]
         )
         assert (
             fold.main(
-                ["fold", str(log), "--manifest", str(manifest), "--prefer-tables", "--write"]
+                [
+                    "fold",
+                    str(log),
+                    "--manifest",
+                    str(manifest),
+                    "--prefer-tables",
+                    "--write",
+                ]
             )
             == 0
         ), capsys.readouterr().err
         written = manifest.read_text(encoding="utf-8")
-        assert "update = \"*\"" not in written, written
+        assert 'update = "*"' not in written, written
         parsed = tomllib.loads(written)
         assert parsed["route"][0]["db"]["queries"] == [
-            "SELECT 'listed'",
+            "SELECT 20",
             'SELECT * FROM "auth_user" FOR UPDATE',
         ]
 
@@ -1318,7 +1538,7 @@ class TestFunctionGrants:
             ("SELECT lo_import($?)", "lo_import"),
             ("SELECT pg_terminate_backend($?)", "pg_terminate_backend"),
             ("SELECT unaccent($?)", "unaccent"),
-            ("SELECT 'x'::regclass", "regclass"),
+            ("SELECT $?::regclass", "regclass"),
         ],
     )
     def test_a_function_outside_the_safe_set_is_refused(
@@ -1343,7 +1563,9 @@ class TestFunctionGrants:
         assert any("set_config" in note for note in additions[0].notes)
 
     def test_a_safe_function_is_not_dangerous(self) -> None:
-        additions = fold.plan(document(), [denial("SELECT lower($?)")], prefer_tables=False)
+        additions = fold.plan(
+            document(), [denial("SELECT lower($?)")], prefer_tables=False
+        )
         assert [sql for sql, _ in additions[0].queries] == ["SELECT lower($?)"]
         assert additions[0].notes == []
 
@@ -1384,11 +1606,14 @@ class TestFunctionGrants:
 
     def test_a_broken_installation_is_not_a_verdict(self) -> None:
         """Only the parser's refusal is caught; anything else is the tool's problem."""
+
         def broken(sql: str) -> str:
             raise RuntimeError("no extension here")
 
         with pytest.raises(RuntimeError):
-            fold.plan(document(), [denial("SELECT 1")], prefer_tables=False, classify=broken)
+            fold.plan(
+                document(), [denial("SELECT 1")], prefer_tables=False, classify=broken
+            )
 
 
 class TestDiagnosticsAndEdits:
@@ -1402,7 +1627,7 @@ protocol = "postgresql"
 input = { url = "DATABASE_URL" }
 
 [group.session.db]
-queries = ["SELECT 'session'"]
+queries = ["SELECT 40"]
 
 [[route]]
 name = "grouped"
@@ -1416,38 +1641,39 @@ path = ['/notes/']
 functions = [
   "unaccent",  # reads a rule file
 ]
-queries = ["SELECT 'listed'"]
+queries = ["SELECT 20"]
 [route.db.tables]
 products = { select = ["id"] }
 [route.db.tables.orders]
 select = ["id"]
 """
 
-    def write(self, tmp_path: Path, sql: str, route: str, *args: str) -> tuple[int, str, str]:
+    def write(
+        self, tmp_path: Path, sql: str, route: str, *args: str
+    ) -> tuple[int, str, str]:
         manifest = tmp_path / "blastit.toml"
         manifest.write_text(self.MANIFEST, encoding="utf-8")
         path = "/grouped/" if route == "grouped" else "/notes/"
         log = tmp_path / "app.log"
         log.write_text(
-            "\n".join(
-                [
-                    '{"event":"request","method":"GET","path":"%s","route":"%s"}'
-                    % (path, route),
-                    '{"event":"sql.denied","route":"%s","proxy":"db","sql":%s,'
-                    '"reason":"not granted"}' % (route, json.dumps(sql)),
-                ]
+            (
+                '{"event":"request","method":"GET","path":'
+                f'"{path}","route":"{route}"}}\n'
+                '{"event":"sql.denied","route":'
+                f'"{route}","proxy":"db","sql":{json.dumps(sql)},'
+                '"reason":"not granted"}'
             )
             + "\n",
             encoding="utf-8",
         )
-        code = fold.main(
-            ["fold", str(log), "--manifest", str(manifest), *args]
-        )
+        code = fold.main(["fold", str(log), "--manifest", str(manifest), *args])
         return code, manifest.read_text(encoding="utf-8"), ""
 
-    def test_a_group_only_route_says_which_group(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_a_group_only_route_says_which_group(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         code, written, _ = self.write(
-            tmp_path, "SELECT 'new'", "grouped", "--write"
+            tmp_path, "SELECT id FROM notes WHERE id = $?", "grouped", "--write"
         )
         assert code == 1
         error = capsys.readouterr().err
@@ -1470,7 +1696,7 @@ input = { url = "DATABASE_URL" }
 name = "notes"
 path = ['/notes/']
 [route.db]
-queries = ["SELECT 'listed'"]
+queries = ["SELECT 20"]
 tables = { products = { select = ["id"] } }
 """,
             encoding="utf-8",
@@ -1506,7 +1732,7 @@ tables = { products = { select = ["id"] } }
         ), capsys.readouterr().err
         parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
         assert parsed["route"][0]["db"]["queries"] == [
-            "SELECT 'listed'",
+            "SELECT 20",
             'SELECT "notes"."body" FROM "notes"',
         ]
         assert parsed["route"][0]["db"]["tables"] == {"products": {"select": ["id"]}}, (
@@ -1562,14 +1788,20 @@ tables = { products = { select = ["id"] } }
         assert code == 0
         assert "2 function(s)" in capsys.readouterr().err
 
-    def test_a_control_character_is_escaped(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        sql = "SELECT 'a\x7fb', '\x01' FROM t"
-        code, written, _ = self.write(tmp_path, sql, "notes", "--write")
-        assert code == 0, capsys.readouterr().err
-        assert "\x7f" not in written and "\x01" not in written, "no raw control character"
-        assert "\\u007F" in written, written
-        parsed = tomllib.loads(written)
-        assert parsed["route"][1]["db"]["queries"] == ["SELECT 'listed'", sql]
+    def test_a_control_character_is_escaped(self) -> None:
+        # A statement out of a log can hold a quoted identifier with anything in
+        # it; rendering must make that TOML. Planning refuses the literal forms
+        # before they reach the writer (R25), so this drives the writer directly.
+        sql = 'SELECT "a\x7fb", "\x01" FROM t'
+        rendered = fold.render(
+            [fold._Addition(route="notes", proxy="db", queries=[(sql, "not granted")])]
+        )
+        assert "\x7f" not in rendered and "\x01" not in rendered, (
+            "no raw control character"
+        )
+        assert "\\u007F" in rendered, rendered
+        parsed = tomllib.loads(rendered)
+        assert parsed["route"]["db"]["queries"] == [sql]
 
 
 class TestTheAuditProofIsNotSkipped:
@@ -1588,13 +1820,13 @@ input = { url = "DATABASE_URL" }
 name = "catch-all"
 path = ['.*']
 [route.db]
-queries = ["SELECT 'catch-all'"]
+queries = ["SELECT 30"]
 
 [[route]]
 name = "notes"
 path = ['/notes/']
 [route.db]
-queries = ["SELECT 'listed'"]
+queries = ["SELECT 20"]
 """
 
     def test_the_note_says_the_audit_routed_it_elsewhere(
@@ -1619,7 +1851,7 @@ queries = ["SELECT 'listed'"]
                             "event": "sql.denied",
                             "route": "notes",
                             "proxy": "db",
-                            "sql": "SELECT 'new'",
+                            "sql": "SELECT id FROM notes WHERE id = $?",
                             "reason": "not granted",
                         }
                     ),
@@ -1634,4 +1866,149 @@ queries = ["SELECT 'listed'"]
         error = capsys.readouterr().err
         assert "routes none of the log's requests here" in error, error
         parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
-        assert parsed["route"][1]["db"]["queries"] == ["SELECT 'listed'", "SELECT 'new'"]
+        assert parsed["route"][1]["db"]["queries"] == [
+            "SELECT 20",
+            "SELECT id FROM notes WHERE id = $?",
+        ]
+
+
+class _CapturedOutErr:
+    def __init__(self, out: str, err: str) -> None:
+        self.out = out
+        self.err = err
+
+
+class _OfflineCapsys:
+    def __init__(self) -> None:
+        self.out_buf = io.StringIO()
+        self.err_buf = io.StringIO()
+
+    def readouterr(self) -> _CapturedOutErr:
+        captured = _CapturedOutErr(self.out_buf.getvalue(), self.err_buf.getvalue())
+        self.out_buf.seek(0)
+        self.out_buf.truncate(0)
+        self.err_buf.seek(0)
+        self.err_buf.truncate(0)
+        return captured
+
+
+class _OfflineMonkeyPatch:
+    def __init__(self) -> None:
+        self._patches: list[tuple[Any, str, Any]] = []
+
+    def setattr(self, target: Any, name: str, value: Any) -> None:
+        self._patches.append((target, name, getattr(target, name)))
+        setattr(target, name, value)
+
+    def undo(self) -> None:
+        for target, name, previous in reversed(self._patches):
+            setattr(target, name, previous)
+
+
+def _make_offline_case(
+    cls: type[Any],
+    method: Any,
+    fixtures: dict[str, Any],
+    autouse: list[str],
+    params: dict[str, Any],
+    label: str,
+) -> unittest.TestCase:
+    def run_case() -> None:
+        instance = cls()
+        monkeypatch = _OfflineMonkeyPatch()
+        capsys = _OfflineCapsys()
+        with tempfile.TemporaryDirectory() as directory:
+            resolved: dict[str, Any] = {
+                "tmp_path": Path(directory),
+                "monkeypatch": monkeypatch,
+                "capsys": capsys,
+                **params,
+            }
+
+            def resolve(name: str) -> Any:
+                if name in resolved:
+                    return resolved[name]
+                fixture_fn = fixtures[name]
+                kwargs = {
+                    dep: resolve(dep)
+                    for dep in inspect.signature(fixture_fn).parameters
+                    if dep != "self"
+                }
+                value = fixture_fn(instance, **kwargs)
+                resolved[name] = value
+                return value
+
+            try:
+                with (
+                    contextlib.redirect_stdout(capsys.out_buf),
+                    contextlib.redirect_stderr(capsys.err_buf),
+                ):
+                    for auto in autouse:
+                        resolve(auto)
+                    call_kwargs = {
+                        param: resolve(param)
+                        for param in inspect.signature(method).parameters
+                        if param != "self"
+                    }
+                    method(instance, **call_kwargs)
+            finally:
+                monkeypatch.undo()
+
+    run_case.__name__ = label
+    run_case.__qualname__ = label
+    return unittest.FunctionTestCase(run_case, description=label)
+
+
+def load_tests(
+    _loader: unittest.TestLoader,
+    standard_tests: unittest.TestSuite,
+    _pattern: str | None,
+) -> unittest.TestSuite:
+    """Allows `python -m unittest python/tests/test_fold.py` to run offline without pytest."""
+    if not _OFFLINE_UNITTEST:
+        return standard_tests
+    suite = unittest.TestSuite()
+    module = sys.modules[__name__]
+    for class_name, cls in inspect.getmembers(module, inspect.isclass):
+        if not class_name.startswith("Test"):
+            continue
+        fixtures: dict[str, Any] = {}
+        autouse: list[str] = []
+        for attr_name, fn in inspect.getmembers(cls, inspect.isfunction):
+            if getattr(fn, "_fixture", False):
+                fixtures[attr_name] = fn
+                if getattr(fn, "_autouse", False):
+                    autouse.append(attr_name)
+        for method_name, method in inspect.getmembers(cls, inspect.isfunction):
+            if not method_name.startswith("test_"):
+                continue
+            parametrize = getattr(method, "_parametrize", None)
+            if parametrize is None:
+                suite.addTest(
+                    _make_offline_case(
+                        cls,
+                        method,
+                        fixtures,
+                        autouse,
+                        {},
+                        f"{class_name}.{method_name}",
+                    )
+                )
+            else:
+                names, rows = parametrize
+                for idx, row in enumerate(rows):
+                    values = (
+                        row if isinstance(row, tuple) and len(names) > 1 else (row,)
+                    )
+                    params = dict(zip(names, values, strict=True))
+                    suite.addTest(
+                        _make_offline_case(
+                            cls,
+                            method,
+                            fixtures,
+                            autouse,
+                            params,
+                            f"{class_name}.{method_name}[{idx}]",
+                        )
+                    )
+    return suite

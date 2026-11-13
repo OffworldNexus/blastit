@@ -32,17 +32,13 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
 use blastit_frame::Limits;
 use blastit_http::HttpConfig;
 use blastit_manifest::{Manifest, RoutingTable, UidLayout};
-use blastit_scheduler::{
-    MEMORY_CHECK_INTERVAL, MemoryProbe, SPAWN_BACKOFF, SchedulerConfig, derived_view_cap,
-    routes_from_manifest,
-};
-use blastit_sys::mem;
+use blastit_scheduler::{MemoryProbe, SchedulerConfig, derived_view_cap, routes_from_manifest};
 use blastit_sys::{
     Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, harden_child,
     pipe, restore_signal_mask_in_child, set_dumpable, socketpair_stream,
@@ -54,7 +50,8 @@ use pyo3::types::{PyBytes, PyDict};
 use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
 use crate::immortal::{Decision, Outcome};
-use crate::logs::{Emitter, fail, output_event};
+use crate::logs::{Emitter, output_event};
+use crate::mem_usage;
 use crate::roles::{HttpFds, SchedulerFds};
 use crate::supervise::{ComponentPipes, Parts, Supervisor};
 
@@ -77,7 +74,7 @@ impl Interpreter<'_> {
 }
 
 /// Where stage 1 finds what stage 0 left it (§4).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Options {
     /// `--config-fd`: the read end of the configuration pipe.
     pub config_fd: RawFd,
@@ -89,6 +86,15 @@ pub struct Options {
     pub dbproxy_stdout_fd: Option<RawFd>,
     /// `--dbproxy-stderr-fd`: dbproxy's stderr pipe.
     pub dbproxy_stderr_fd: Option<RawFd>,
+    /// `--dev-root`: the ephemeral runtime root `blastit dev` created (`R20`).
+    /// `Some` makes this stage an unprivileged single-uid simulation.
+    pub dev_root: Option<PathBuf>,
+    /// `--dev-host`: the address the http role binds in `dev`.
+    pub dev_host: Option<std::net::IpAddr>,
+    /// `--dev-obs-fd`: the read end of dbproxy's `--learn` observation pipe.
+    pub dev_obs_fd: Option<RawFd>,
+    /// `--dev-ctl-fd`: this stage's end of the `--learn` attribution socket.
+    pub dev_ctl_fd: Option<RawFd>,
 }
 
 /// Everything a view needs of its scratch directory, in Python (§5.3).
@@ -201,7 +207,23 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     let hosted = interpreter.is_hosted();
     // The configuration itself is not known yet, so a failure here is JSON.
     let boot = Emitter::stdout(LogFormat::Json, Level::Info);
-    let config = read_config(&boot, options.config_fd);
+    // `blastit dev`: the runtime root stage 0 created, and the address http
+    // binds. Adopted first so every fatal path in stage 1 — `read_config`,
+    // `bind_tcp`, `fork`, `BLASTIT_APP` import — removes the verified `0700`
+    // directory before `_exit(1)` (`R20`).
+    let dev = match options.dev_root {
+        Some(root) => {
+            let host = options
+                .dev_host
+                .unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]));
+            match crate::dev_learn::Dev::adopt(root, host) {
+                Ok(dev) => Some(dev),
+                Err(err) => fail(&boot, None, &format!("blastit dev runtime root: {err}")),
+            }
+        }
+        None => None,
+    };
+    let config = read_config(&boot, dev.as_ref(), options.config_fd);
     let emitter = Emitter::stdout(config.log_format, config.log_level);
     // §8.1: a setting that is deprecated is the operator's to hear about, once,
     // and the log is the only place blastit can say it. The decision comes from
@@ -215,18 +237,22 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
 
     let source = match std::fs::read_to_string(&config.manifest) {
         Ok(source) => source,
-        Err(err) => fail(&emitter, &format!("{}: {err}", config.manifest.display())),
+        Err(err) => fail(
+            &emitter,
+            dev.as_ref(),
+            &format!("{}: {err}", config.manifest.display()),
+        ),
     };
     let (manifest, _warnings) = match Manifest::parse_and_validate(&source, config.uid_base) {
         Ok(parsed) => parsed,
-        Err(errors) => fail(&emitter, &errors.to_string()),
+        Err(errors) => fail(&emitter, dev.as_ref(), &errors.to_string()),
     };
     // Warnings are stage 0's: it reads and validates the manifest first, and
     // printing them twice would be noise (§8.1).
 
     let limits = match config.limits() {
         Ok(limits) => limits,
-        Err(err) => fail(&emitter, &err.to_string()),
+        Err(err) => fail(&emitter, dev.as_ref(), &err.to_string()),
     };
     // §8 Sizing: the machine's memory decides how many view processes fit.
     // `total` is a constant, so it can be read before the fork and handed to
@@ -235,49 +261,108 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     // memory cannot be read at all.
     let memory = read_memory(&emitter);
     let layout = UidLayout::new(config.uid_base);
-    let routes = routes_from_manifest(&manifest, &layout);
-    // §7.3: a view may keep `AF_INET`/`AF_INET6` only when its route says so.
-    let egress: Vec<bool> = manifest
-        .routes()
-        .iter()
-        .map(|route| route.egress())
-        .collect();
-    let table = match RoutingTable::new(&manifest) {
-        Ok(table) => table,
-        Err(errors) => fail(&emitter, &errors.to_string()),
+    let learn = options.dev_obs_fd.is_some();
+    let declared_routes = manifest.routes().len();
+    // `blastit dev` gives every role one identity — the caller's — so the uid
+    // layout is not consulted at all: every `RouteInfo` names the same uid, and
+    // the private directories are named by route index instead (`R19`, `R20`).
+    // Under `dev --learn`, slot `0` is a dedicated unrouted-request fallback
+    // view (`LEARN_FALLBACK_ROUTE`) whose routing pattern never matches, while
+    // declared routes sit at `1..=N` so no declared route collides with the
+    // scheduler's slot-0 fallback (`R26`, `R27`).
+    let dev_uid = crate::dev_learn::euid();
+    let routes: Vec<blastit_scheduler::RouteInfo> = match (&dev, learn) {
+        (Some(_), true) => std::iter::once(blastit_scheduler::RouteInfo::new(
+            crate::dev_learn::LEARN_FALLBACK_ROUTE,
+            false,
+            dev_uid,
+        ))
+        .chain(manifest.routes().iter().map(|route| {
+            blastit_scheduler::RouteInfo::new(route.name(), route.prefork(), dev_uid)
+                .with_ingress(route.ingress())
+        }))
+        .collect(),
+        (Some(_), false) => manifest
+            .routes()
+            .iter()
+            .map(|route| {
+                blastit_scheduler::RouteInfo::new(route.name(), route.prefork(), dev_uid)
+                    .with_ingress(route.ingress())
+            })
+            .collect(),
+        (None, _) => routes_from_manifest(&manifest, &layout),
+    };
+    // §7.3: a view may keep `AF_INET`/`AF_INET6` only when its route says so;
+    // the `--learn` fallback slot (`0`) never gets network egress.
+    let egress: Vec<bool> = if dev.is_some() && learn {
+        std::iter::once(false)
+            .chain(manifest.routes().iter().map(|route| route.egress()))
+            .collect()
+    } else {
+        manifest
+            .routes()
+            .iter()
+            .map(|route| route.egress())
+            .collect()
+    };
+    let table = if dev.is_some() && learn {
+        match learn_routing_table(&manifest) {
+            Ok(table) => table,
+            Err(errors) => fail(&emitter, dev.as_ref(), &errors),
+        }
+    } else {
+        match RoutingTable::new(&manifest) {
+            Ok(table) => table,
+            Err(errors) => fail(&emitter, dev.as_ref(), &errors.to_string()),
+        }
     };
 
-    let listener = match bind_tcp(
-        SocketAddr::from(([0, 0, 0, 0], config.port)),
-        config.backlog,
-    ) {
+    // `blastit dev` binds the address the operator asked for; production binds
+    // every interface and is protected by the deployment around it (`R22`).
+    let bind = match &dev {
+        Some(dev) => SocketAddr::from((dev.host(), config.port)),
+        None => SocketAddr::from(([0, 0, 0, 0], config.port)),
+    };
+    let listener = match bind_tcp(bind, config.backlog) {
         Ok(listener) => listener,
-        Err(err) => fail(&emitter, &format!("binding 0.0.0.0:{}: {err}", config.port)),
+        Err(err) => fail(&emitter, dev.as_ref(), &format!("binding {bind}: {err}")),
     };
 
     // Channels (§3): http.chan, ctl.chan, and three pipes per component.
-    let (http_end, sched_http_end) = pair_ok(&emitter, "http.chan");
-    let (ctl_end, sched_ctl_end) = pair_ok(&emitter, "ctl.chan");
-    let (http_out_read, http_out_write) = pipe_ok(&emitter, "http stdout");
-    let (http_err_read, http_err_write) = pipe_ok(&emitter, "http stderr");
-    let (http_ev_read, http_ev_write) = pipe_ok(&emitter, "http events");
-    let (sched_out_read, sched_out_write) = pipe_ok(&emitter, "scheduler stdout");
-    let (sched_err_read, sched_err_write) = pipe_ok(&emitter, "scheduler stderr");
-    let (sched_ev_read, sched_ev_write) = pipe_ok(&emitter, "scheduler events");
+    let (http_end, sched_http_end) = pair_ok(&emitter, dev.as_ref(), "http.chan");
+    let (ctl_end, sched_ctl_end) = pair_ok(&emitter, dev.as_ref(), "ctl.chan");
+    let (http_out_read, http_out_write) = pipe_ok(&emitter, dev.as_ref(), "http stdout");
+    let (http_err_read, http_err_write) = pipe_ok(&emitter, dev.as_ref(), "http stderr");
+    let (http_ev_read, http_ev_write) = pipe_ok(&emitter, dev.as_ref(), "http events");
+    let (sched_out_read, sched_out_write) = pipe_ok(&emitter, dev.as_ref(), "scheduler stdout");
+    let (sched_err_read, sched_err_write) = pipe_ok(&emitter, dev.as_ref(), "scheduler stderr");
+    let (sched_ev_read, sched_ev_write) = pipe_ok(&emitter, dev.as_ref(), "scheduler events");
 
     // The signals init supervises on have to be blocked before the children
     // exist, so every child inherits the mask and can put it back (§3).
     let signals = match SignalFd::new(&[Signal::CHILD, Signal::TERM, Signal::INT, Signal::HUP]) {
         Ok(signals) => signals,
-        Err(err) => fail(&emitter, &format!("signalfd: {err}")),
+        Err(err) => fail(&emitter, dev.as_ref(), &format!("signalfd: {err}")),
     };
     let mask = signals.previous_mask();
 
     let http_cfg = http_config(&config, limits);
-    let sched_cfg = scheduler_config(&config, limits, memory);
+    let sched_cfg = scheduler_config(&config, limits, memory, learn);
 
-    let http_pid = fork_http(
-        &emitter,
+    // Production drops each component to its layout uid before it serves;
+    // `dev` runs every role as the caller, so there is nobody to drop to and
+    // `setresuid`/`setgroups` are never called (`R21`).
+    let drop_http = if dev.is_some() {
+        None
+    } else {
+        Some(layout.http())
+    };
+    let drop_scheduler = if dev.is_some() {
+        None
+    } else {
+        Some(layout.scheduler())
+    };
+    let http_pid = match fork_http(
         ChildIo {
             stdout: Some(http_out_write),
             stderr: Some(http_err_write),
@@ -295,18 +380,20 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             events: http_ev_write.as_raw_fd(),
         },
         http_cfg,
-        layout.http(),
+        drop_http,
         mask,
         config.seccomp,
         hosted,
-    );
+    ) {
+        Ok(pid) => pid,
+        Err(err) => fail(&emitter, dev.as_ref(), &format!("forking http: {err}")),
+    };
     // The parent keeps only the read ends, and never the listening socket.
     drop(http_end);
     drop(http_ev_write);
     drop(listener);
 
-    let sched_pid = fork_scheduler(
-        &emitter,
+    let sched_pid = match fork_scheduler(
         ChildIo {
             stdout: Some(sched_out_write),
             stderr: Some(sched_err_write),
@@ -327,11 +414,18 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         routes.clone(),
         table,
         limits,
-        layout.scheduler(),
+        drop_scheduler,
         mask,
         config.seccomp,
         hosted,
-    );
+    ) {
+        Ok(pid) => pid,
+        Err(err) => fail(
+            &emitter,
+            dev.as_ref(),
+            &format!("forking the scheduler: {err}"),
+        ),
+    };
     drop(sched_http_end);
     drop(sched_ctl_end);
     drop(sched_ev_write);
@@ -381,12 +475,27 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         );
     }
 
+    // `dev --learn`: drain dbproxy's observation pipe and attribute statements
+    // to the route whose private socket served them (`R26`, `R27`).
+    let learn = match options.dev_obs_fd {
+        Some(fd) => match crate::dev_learn::Learn::adopt(fd, options.dev_ctl_fd) {
+            Ok(learn) => Some(learn),
+            Err(err) => fail(
+                &emitter,
+                dev.as_ref(),
+                &format!("blastit dev --learn: {err}"),
+            ),
+        },
+        None => None,
+    };
+
     // Everything from here on needs an interpreter, and the forks above were the
     // last thing that had to happen while init was single-threaded (§2.1).
     let serving = Serving {
         config,
         limits,
         routes,
+        declared_routes,
         egress,
         memory,
         ctl: ctl_end,
@@ -394,6 +503,8 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         mask,
         components,
         hosted: interpreter.is_hosted(),
+        dev,
+        learn,
     };
     match interpreter {
         Interpreter::Embed => {
@@ -410,12 +521,14 @@ struct Serving {
     config: Config,
     /// Frame limits of every channel.
     limits: Limits,
-    /// One entry per manifest route, in routing order.
+    /// One entry per view slot, in scheduler routing order.
     routes: Vec<blastit_scheduler::RouteInfo>,
+    /// Number of routes declared in `blastit.toml` (reported on `ready`).
+    declared_routes: usize,
     /// Whether each route may keep `AF_INET`/`AF_INET6`, by route index (§7.3).
     egress: Vec<bool>,
     /// The memory reading taken before the fork, for §8 Sizing.
-    memory: Option<mem::Sample>,
+    memory: Option<mem_usage::Usage>,
     /// init's end of `ctl.chan`.
     ctl: OwnedFd,
     /// The signalfd init listens on.
@@ -427,6 +540,10 @@ struct Serving {
     /// Whether the interpreter was started by the host rather than embedded
     /// here.
     hosted: bool,
+    /// The `blastit dev` runtime root, when this is a dev boot (`R20`).
+    dev: Option<crate::dev_learn::Dev>,
+    /// The `dev --learn` observation and attribution channels (`R29`).
+    learn: Option<crate::dev_learn::Learn>,
 }
 
 /// Loads the application, emits `ready`, and supervises. Never returns.
@@ -434,12 +551,13 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
     let app = load(
         py,
         &serving.config,
-        serving.routes.len(),
+        serving.declared_routes,
         emitter,
         serving.memory,
         serving.hosted,
+        serving.dev.as_ref(),
     );
-    emit_ready(emitter, &serving.config, serving.routes.len());
+    emit_ready(emitter, &serving.config, serving.declared_routes);
     let mut supervisor = Supervisor::new(
         Parts {
             cfg: serving.config,
@@ -451,29 +569,91 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             signals: serving.signals,
             mask: serving.mask,
             components: serving.components,
+            dev: serving.dev,
+            learn: serving.learn,
         },
         emitter,
     );
     supervisor.run(py)
 }
 
+/// Builds the routing table for `dev --learn`, reserving slot `0` for the
+/// scheduler's unrouted-request fallback (`R26`, `R27`).
+///
+/// Slot `0` carries `"a^"`, an unsatisfiable pattern (`RoutingTable::route`
+/// never matches it), and declared routes `0..N` shift to `1..=N` in exact
+/// manifest order with their original methods and patterns intact.
+fn learn_routing_table(manifest: &Manifest) -> Result<RoutingTable, String> {
+    let mut doc = format!(
+        "version = 1\n\n[[route]]\nname = {}\npath = [\"a^\"]\n",
+        toml_basic_string(crate::dev_learn::LEARN_FALLBACK_ROUTE)
+    );
+    for route in manifest.routes() {
+        doc.push_str("\n[[route]]\nname = ");
+        doc.push_str(&toml_basic_string(route.name()));
+        doc.push_str("\npath = [");
+        for (index, pattern) in route.path().iter().enumerate() {
+            if index > 0 {
+                doc.push_str(", ");
+            }
+            doc.push_str(&toml_basic_string(pattern));
+        }
+        doc.push_str("]\n");
+        if let Some(methods) = route.methods() {
+            doc.push_str("methods = [");
+            for (index, method) in methods.iter().enumerate() {
+                if index > 0 {
+                    doc.push_str(", ");
+                }
+                doc.push_str(&toml_basic_string(method));
+            }
+            doc.push_str("]\n");
+        }
+    }
+    let synthetic = Manifest::from_toml_str(&doc).map_err(|err| err.to_string())?;
+    RoutingTable::new(&synthetic).map_err(|err| err.to_string())
+}
+
+/// Escapes `value` as a TOML v1.0 basic string (`"..."`).
+fn toml_basic_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\u{0008}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{000C}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c == '\u{007F}' => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Reads the configuration document stage 0 wrote into the pipe (§4).
-fn read_config(emitter: &Emitter, fd: RawFd) -> Config {
+fn read_config(emitter: &Emitter, dev: Option<&crate::dev_learn::Dev>, fd: RawFd) -> Config {
     // SAFETY: stage 0 cleared `FD_CLOEXEC` on this descriptor and stage 1 is its
     // only owner.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     let mut bytes = Vec::new();
     if let Err(err) = file.read_to_end(&mut bytes) {
-        fail(emitter, &format!("configuration pipe: {err}"));
+        fail(emitter, dev, &format!("configuration pipe: {err}"));
     }
     drop(file);
     let value: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(value) => value,
-        Err(err) => fail(emitter, &format!("configuration document: {err}")),
+        Err(err) => fail(emitter, dev, &format!("configuration document: {err}")),
     };
     match Config::from_json(&value) {
         Ok(config) => config,
-        Err(err) => fail(emitter, &err.to_string()),
+        Err(err) => fail(emitter, dev, &err.to_string()),
     }
 }
 
@@ -501,11 +681,15 @@ fn http_config(config: &Config, limits: Limits) -> HttpConfig {
 fn scheduler_config(
     config: &Config,
     limits: Limits,
-    memory: Option<mem::Sample>,
+    memory: Option<mem_usage::Usage>,
+    learn: bool,
 ) -> SchedulerConfig {
     let watermark = memory
-        .map(|sample| (sample.total() as f64 * config.mem_high_watermark_percent / 100.0) as u64);
+        .map(|usage| (usage.total() as f64 * config.mem_high_watermark_percent / 100.0) as u64);
     SchedulerConfig {
+        // `dev --learn`: an unrouted request is served by the first route's
+        // view instead of `404` (`R26`).
+        learn_mode: learn,
         max_workers: config.max_workers,
         view_max_workers: config.view_max_workers,
         queue_size: config.queue_size,
@@ -521,31 +705,34 @@ fn scheduler_config(
         health_path: config.health_path.clone(),
         script_name: config.script_name.clone(),
         frame_limits: limits,
-        spawn_backoff: SPAWN_BACKOFF,
         memory_usage: memory.map(|_| MemoryProbe::new(current_usage)),
         mem_high_watermark_bytes: watermark,
-        memory_check_interval: MEMORY_CHECK_INTERVAL,
-        mem_total_bytes: memory.map(|sample| sample.total()),
+        mem_total_bytes: memory.map(|usage| usage.total()),
         view_mem_estimate: config.view_mem_estimate,
+        // `SPAWN_BACKOFF` and `MEMORY_CHECK_INTERVAL` are the struct defaults,
+        // so a field a later release adds needs no edit here.
+        ..SchedulerConfig::default()
     }
 }
 
 /// The machine's aggregate memory usage in bytes, or `None` when it cannot be
 /// read (§9.2 #8).
+///
+/// This is the number the scheduler compares with `BLASTIT_MEM_HIGH_WATERMARK`
+/// and derives the view cap from, so it is [`mem_usage`]'s: the cgroup's
+/// `memory.current` less the page cache and slab the kernel reclaims on
+/// demand, because a warm filesystem cache is not pressure.
 fn current_usage() -> Option<u64> {
-    mem::Reader::new("/")
-        .sample()
-        .ok()
-        .map(|sample| sample.used())
+    crate::mem_usage::read(Path::new("/")).map(|usage| usage.used())
 }
 
 /// The machine's memory, or a warning that §8 Sizing could not read it.
 ///
 /// Unreadable memory leaves the view cap alone rather than guessing (§8), so
 /// this is reported once and the caller carries on with `None`.
-fn read_memory(emitter: &Emitter) -> Option<mem::Sample> {
-    match mem::Reader::new("/").sample() {
-        Ok(sample) => Some(sample),
+fn read_memory(emitter: &Emitter) -> Option<mem_usage::Usage> {
+    match mem_usage::sample(Path::new("/")) {
+        Ok(usage) => Some(usage),
         Err(err) => {
             emitter.emit(
                 &output_event(
@@ -565,55 +752,51 @@ fn read_memory(emitter: &Emitter) -> Option<mem::Sample> {
 ///
 /// `hosted` runs the fork under CPython's protocol when an interpreter is live
 /// in this image (§9.3, [`crate::forking`]).
-#[allow(clippy::too_many_arguments)]
 fn fork_http(
-    emitter: &Emitter,
     child: ChildIo,
     fds: HttpFds,
     cfg: HttpConfig,
-    uid: u32,
+    uid: Option<u32>,
     mask: SignalMask,
     seccomp: bool,
     hosted: bool,
-) -> Pid {
-    match crate::forking::fork(hosted) {
-        Ok(Fork::Parent(pid)) => pid,
-        Ok(Fork::Child) => {
+) -> std::io::Result<Pid> {
+    match crate::forking::fork(hosted)? {
+        Fork::Parent(pid) => Ok(pid),
+        Fork::Child => {
             if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Http, seccomp) {
                 child_exit(&message, 1);
             }
             let code = crate::roles::http(fds, cfg);
             child_exit("", code)
         }
-        Err(err) => fail(emitter, &format!("forking http: {err}")),
     }
 }
 
 /// Forks the scheduler process, which drops to `uid` and routes (§4).
+// Rationale: one-shot child handover carrying owned table/routes/limits into the fork.
 #[allow(clippy::too_many_arguments)]
 fn fork_scheduler(
-    emitter: &Emitter,
     child: ChildIo,
     fds: SchedulerFds,
     cfg: SchedulerConfig,
     routes: Vec<blastit_scheduler::RouteInfo>,
     table: RoutingTable,
     limits: Limits,
-    uid: u32,
+    uid: Option<u32>,
     mask: SignalMask,
     seccomp: bool,
     hosted: bool,
-) -> Pid {
-    match crate::forking::fork(hosted) {
-        Ok(Fork::Parent(pid)) => pid,
-        Ok(Fork::Child) => {
+) -> std::io::Result<Pid> {
+    match crate::forking::fork(hosted)? {
+        Fork::Parent(pid) => Ok(pid),
+        Fork::Child => {
             if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Scheduler, seccomp) {
                 child_exit(&message, 1);
             }
             let code = crate::roles::scheduler(fds, cfg, routes, table, limits);
             child_exit("", code)
         }
-        Err(err) => fail(emitter, &format!("forking the scheduler: {err}")),
     }
 }
 
@@ -626,17 +809,21 @@ fn fork_scheduler(
 /// a child.
 fn prepare_child(
     child: ChildIo,
-    uid: u32,
+    uid: Option<u32>,
     mask: SignalMask,
     role: SeccompRole,
     seccomp: bool,
 ) -> Result<(), String> {
     let name = role.name();
-    child
-        .prepare()
+    child.prepare().map_err(|err| format!("{name}: {err}"))?;
+    // `None` is `blastit dev`: every role already runs as the caller, and
+    // `setresuid`/`setgroups` are exactly what the unprivileged simulation may
+    // not do (`R21`).
+    if let Some(uid) = uid {
+        drop_privileges(uid).map_err(|err| format!("{name}: {err}"))?;
+    }
+    harden_child(Signal::KILL)
         .map_err(|err| format!("{name}: {err}"))
-        .and_then(|()| drop_privileges(uid).map_err(|err| format!("{name}: {err}")))
-        .and_then(|()| harden_child(Signal::KILL).map_err(|err| format!("{name}: {err}")))
         .and_then(|()| install_filter(seccomp, role).map_err(|err| format!("{name}: {err}")))?;
     let _ = set_dumpable(false);
     restore_signal_mask_in_child(mask).map_err(|err| format!("{name}: {err}"))
@@ -655,8 +842,9 @@ fn load(
     config: &Config,
     routes: usize,
     emitter: &Emitter,
-    memory: Option<mem::Sample>,
+    memory: Option<mem_usage::Usage>,
     hosted: bool,
+    dev: Option<&crate::dev_learn::Dev>,
 ) -> Py<PyAny> {
     // What blastit itself puts on `sys.path` is recorded here, because a
     // directory another uid could write is refused below: the working directory
@@ -665,7 +853,7 @@ fn load(
     let scope = PyDict::new(py);
     if hosted {
         if let Err(err) = restore_sys_path(py, &config.sys_path) {
-            python_fail(py, emitter, "sys.path", &err);
+            python_fail(py, emitter, dev, "sys.path", &err);
         }
     } else {
         // §9.3: an embedded interpreter does not find the distribution's
@@ -674,45 +862,74 @@ fn load(
         let _ = py.run(SITE_PACKAGES, Some(&scope), None);
     }
     if let Err(err) = put_cwd_first(py, config.cwd.as_deref()) {
-        python_fail(py, emitter, "the working directory on sys.path", &err);
+        python_fail(py, emitter, dev, "the working directory on sys.path", &err);
     }
     // §7.2: what a view imports after the fork has to be readable by *its* uid,
     // which is not the one that installed the interpreter. A deployment that
     // fails this is refused here, at boot, rather than answering requests that
     // only some paths can serve.
-    check_view_paths(py, config, routes, &scope, emitter);
+    //
+    // `blastit dev` is the one mode where there is no other uid: every view runs
+    // as the caller, so the question has no content (`R19`).
+    if dev.is_none() {
+        check_view_paths(py, config, routes, &scope, emitter);
+    }
 
     let spec = config.app.as_deref().unwrap_or_default();
     let app = match import_callable(py, spec) {
         Ok(app) => app,
-        Err(err) => python_fail(py, emitter, &format!("BLASTIT_APP ({spec})"), &err),
+        Err(err) => python_fail(py, emitter, dev, &format!("BLASTIT_APP ({spec})"), &err),
     };
     for module in &config.preload {
         if let Err(err) = py.import(module.as_str()) {
-            python_fail(py, emitter, &format!("BLASTIT_PRELOAD ({module})"), &err);
+            python_fail(
+                py,
+                emitter,
+                dev,
+                &format!("BLASTIT_PRELOAD ({module})"),
+                &err,
+            );
         }
     }
     if let Some(warmup) = config.warmup.as_deref() {
         let callable = match import_callable(py, warmup) {
             Ok(callable) => callable,
-            Err(err) => python_fail(py, emitter, &format!("BLASTIT_WARMUP ({warmup})"), &err),
+            Err(err) => python_fail(
+                py,
+                emitter,
+                dev,
+                &format!("BLASTIT_WARMUP ({warmup})"),
+                &err,
+            ),
         };
         if let Err(err) = callable.call0(py) {
-            python_fail(py, emitter, &format!("BLASTIT_WARMUP ({warmup})"), &err);
+            python_fail(
+                py,
+                emitter,
+                dev,
+                &format!("BLASTIT_WARMUP ({warmup})"),
+                &err,
+            );
         }
     }
     if let Err(err) = py.run(CLOSE_AND_COLLECT, None, None) {
-        python_fail(py, emitter, "close_all/gc.collect", &err);
+        python_fail(py, emitter, dev, "close_all/gc.collect", &err);
     }
     // §9.2 #7, between `gc.collect()` and `gc.freeze()`: nothing left in the
     // collected heap is garbage, and every object a request could touch stops
     // counting references — on an interpreter whose marker blastit knows, which
     // `BLASTIT_IMMORTALIZE` and the version decide.
-    let outcome = immortalize(py, config, emitter);
+    let outcome = immortalize(py, config, emitter, dev);
     if let Err(err) = py.run(FREEZE, None, None) {
-        python_fail(py, emitter, "gc.freeze", &err);
+        python_fail(py, emitter, dev, "gc.freeze", &err);
     }
-    emit_preload(emitter, config, &outcome, refresh_memory(memory));
+    emit_preload(
+        emitter,
+        config,
+        &outcome,
+        refresh_memory(memory),
+        dev.is_some(),
+    );
     app
 }
 
@@ -743,10 +960,10 @@ fn check_view_paths(
     // not its caller's locals. The dict is this call's own, and nothing in it
     // travels anywhere.
     if let Err(err) = scope.set_item("blastit_app_module", module) {
-        python_fail(py, emitter, "BLASTIT_APP (the module to check)", &err);
+        python_fail(py, emitter, None, "BLASTIT_APP (the module to check)", &err);
     }
     if let Err(err) = py.run(VIEW_PATHS, Some(scope), None) {
-        python_fail(py, emitter, "the paths a view imports through", &err);
+        python_fail(py, emitter, None, "the paths a view imports through", &err);
     }
     let paths: Vec<String> =
         match scope
@@ -756,16 +973,16 @@ fn check_view_paths(
                 None => Ok(Vec::new()),
             }) {
             Ok(paths) => paths,
-            Err(err) => python_fail(py, emitter, "the paths a view imports through", &err),
+            Err(err) => python_fail(py, emitter, None, "the paths a view imports through", &err),
         };
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
     // A live interpreter is in this image — stage 1 is past the point where
     // CPython is up in both installations — and this thread holds the GIL, which
     // is what the fork protocol needs (§9.3).
     match crate::visibility::unreadable(&paths, &dropped, true) {
-        Ok(Some(blocker)) => fail(emitter, &blocker.message()),
+        Ok(Some(blocker)) => fail(emitter, None, &blocker.message()),
         Ok(None) => {}
-        Err(timed_out) => fail(emitter, &timed_out.message()),
+        Err(timed_out) => fail(emitter, None, &timed_out.message()),
     }
 
     // §5.3: the whole `sys.path` — not only the directories blastit added. An
@@ -774,7 +991,7 @@ fn check_view_paths(
     // blastit, `PYTHONPATH`, a `.pth` file, or the interpreter itself. Refused
     // at boot rather than served.
     if let Err(err) = py.run(SYS_PATH, Some(scope), None) {
-        python_fail(py, emitter, "sys.path", &err);
+        python_fail(py, emitter, None, "sys.path", &err);
     }
     match scope.get_item("blastit_sys_path") {
         Ok(Some(value)) => match value.extract::<Vec<String>>() {
@@ -792,15 +1009,15 @@ fn check_view_paths(
                     }
                 }
                 match crate::visibility::writable(&entries, &dropped, true) {
-                    Ok(Some(writable)) => fail(emitter, &writable.message()),
+                    Ok(Some(writable)) => fail(emitter, None, &writable.message()),
                     Ok(None) => {}
-                    Err(timed_out) => fail(emitter, &timed_out.message()),
+                    Err(timed_out) => fail(emitter, None, &timed_out.message()),
                 }
             }
-            Err(err) => python_fail(py, emitter, "the paths on sys.path", &err),
+            Err(err) => python_fail(py, emitter, None, "the paths on sys.path", &err),
         },
         Ok(None) => {}
-        Err(err) => python_fail(py, emitter, "the paths on sys.path", &err),
+        Err(err) => python_fail(py, emitter, None, "the paths on sys.path", &err),
     }
 }
 
@@ -895,10 +1112,15 @@ fn restore_sys_path(py: Python<'_>, entries: &[Vec<u8>]) -> PyResult<()> {
 /// preload `boot` event ([`preload_lifecycle`]). A pass that was *decided* and
 /// then failed is still fatal: a heap that was not immortalised when it could
 /// have been is the copy §9.2 #6 measured.
-fn immortalize(py: Python<'_>, config: &Config, emitter: &Emitter) -> Outcome {
+fn immortalize(
+    py: Python<'_>,
+    config: &Config,
+    emitter: &Emitter,
+    dev: Option<&crate::dev_learn::Dev>,
+) -> Outcome {
     let outcome = match crate::immortal::apply(py, config.immortalize) {
         Ok(outcome) => outcome,
-        Err(err) => python_fail(py, emitter, "heap immortalisation", &err),
+        Err(err) => python_fail(py, emitter, dev, "heap immortalisation", &err),
     };
     if let Decision::Off(reason) = &outcome.decision {
         emitter.emit(
@@ -915,9 +1137,9 @@ fn immortalize(py: Python<'_>, config: &Config, emitter: &Emitter) -> Outcome {
 /// that memory can be read: when it is `None` the machine has already said so
 /// at `warn`, and re-reading here would say it twice. When the second reading
 /// fails but the first succeeded, `before` is still a usable figure.
-fn refresh_memory(before: Option<mem::Sample>) -> Option<mem::Sample> {
+fn refresh_memory(before: Option<mem_usage::Usage>) -> Option<mem_usage::Usage> {
     let before = before?;
-    Some(mem::Reader::new("/").sample().unwrap_or(before))
+    Some(mem_usage::read(Path::new("/")).unwrap_or(before))
 }
 
 /// §8 Sizing and §9.2 #7: what the preload cost, and the view process cap the
@@ -931,11 +1153,12 @@ fn emit_preload(
     emitter: &Emitter,
     config: &Config,
     outcome: &Outcome,
-    memory: Option<mem::Sample>,
+    memory: Option<mem_usage::Usage>,
+    dev: bool,
 ) {
     emitter.emit(&Event::now(
         Component::Init,
-        EventKind::Boot(preload_lifecycle(config, outcome, memory)),
+        EventKind::Boot(preload_lifecycle(config, outcome, memory, dev)),
     ));
 }
 
@@ -945,14 +1168,24 @@ fn emit_preload(
 /// it did not; `immortalized` and `immortalize_ms` describe the pass itself
 /// and are therefore a zero and a nothing when there was none. Apart from the
 /// emitting, so that a test can read the fields back without a log.
-fn preload_lifecycle(config: &Config, outcome: &Outcome, memory: Option<mem::Sample>) -> Lifecycle {
+fn preload_lifecycle(
+    config: &Config,
+    outcome: &Outcome,
+    memory: Option<mem_usage::Usage>,
+    dev: bool,
+) -> Lifecycle {
     let mut lifecycle = Lifecycle::default()
         .with_stage("preload")
         .with_immortalize(outcome.decision.is_on())
         .with_immortalized(outcome.objects());
-    // D6: stage 0 detected the mode and put it in the configuration, so this
-    // `boot` event says the same thing as stage 0's did.
-    if let Some(privilege) = &config.privilege {
+    // `R22`, `R23`: adopting a `dev` root stamps `"unprivileged-dev"` (and the
+    // binary's build) in stage 1 itself, even if `--stage=1 --dev-root=…` was
+    // started without stage 0. Otherwise D6's stage-0 `Privilege` supplies both.
+    if dev {
+        lifecycle = lifecycle
+            .with_build(env!("CARGO_PKG_VERSION"))
+            .with_privilege(crate::dev_learn::PRIVILEGE);
+    } else if let Some(privilege) = &config.privilege {
         lifecycle = privilege.lifecycle(lifecycle);
     }
     // E1: and the preset, for the same reason — a `boot` line in the middle of a
@@ -966,13 +1199,13 @@ fn preload_lifecycle(config: &Config, outcome: &Outcome, memory: Option<mem::Sam
     if let Some(millis) = outcome.millis() {
         lifecycle = lifecycle.with_immortalize_ms(millis);
     }
-    if let Some(sample) = memory {
+    if let Some(usage) = memory {
         lifecycle = lifecycle
-            .with_mem_total(sample.total())
-            .with_mem_used(sample.used())
+            .with_mem_total(usage.total())
+            .with_mem_used(usage.used())
             .with_max_view_processes(derived_view_cap(
-                sample.total(),
-                sample.used(),
+                usage.total(),
+                usage.used(),
                 config.view_mem_estimate,
             ));
     }
@@ -1010,8 +1243,24 @@ fn emit_ready(emitter: &Emitter, config: &Config, routes: usize) {
     emitter.emit(&Event::now(Component::Init, EventKind::Ready(lifecycle)));
 }
 
-/// Prints a Python failure as events and exits non-zero (§4).
-fn python_fail(py: Python<'_>, emitter: &Emitter, what: &str, err: &PyErr) -> ! {
+/// Cleans up an adopted `dev` runtime root, if any (`R20`), then logs `message`
+/// and exits non-zero.
+fn fail(emitter: &Emitter, dev: Option<&crate::dev_learn::Dev>, message: &str) -> ! {
+    if let Some(dev) = dev {
+        dev.cleanup();
+    }
+    crate::logs::fail(emitter, message)
+}
+
+/// Prints a Python failure as events, cleans up an adopted `dev` runtime root
+/// (`R20`), and exits non-zero (§4).
+fn python_fail(
+    py: Python<'_>,
+    emitter: &Emitter,
+    dev: Option<&crate::dev_learn::Dev>,
+    what: &str,
+    err: &PyErr,
+) -> ! {
     emitter.emit(
         &output_event(
             Component::Init,
@@ -1026,6 +1275,9 @@ fn python_fail(py: Python<'_>, emitter: &Emitter, what: &str, err: &PyErr) -> ! 
         emitter.emit(
             &output_event(Component::Init, None, Stream::Stderr, line).with_level(Level::Error),
         );
+    }
+    if let Some(dev) = dev {
+        dev.cleanup();
     }
     // SAFETY: init is exiting; `_exit` runs no handler and cannot deadlock with
     // the GIL held.
@@ -1045,18 +1297,26 @@ fn component_limits(config: &Config) -> blastit_sys::Rlimits {
 }
 
 /// `blastit_sys::pipe`, fatal on failure.
-fn pipe_ok(emitter: &Emitter, what: &str) -> (OwnedFd, OwnedFd) {
+fn pipe_ok(
+    emitter: &Emitter,
+    dev: Option<&crate::dev_learn::Dev>,
+    what: &str,
+) -> (OwnedFd, OwnedFd) {
     match pipe() {
         Ok(pipe) => pipe,
-        Err(err) => fail(emitter, &format!("{what}: {err}")),
+        Err(err) => fail(emitter, dev, &format!("{what}: {err}")),
     }
 }
 
 /// `blastit_sys::socketpair_stream`, fatal on failure.
-fn pair_ok(emitter: &Emitter, what: &str) -> (OwnedFd, OwnedFd) {
+fn pair_ok(
+    emitter: &Emitter,
+    dev: Option<&crate::dev_learn::Dev>,
+    what: &str,
+) -> (OwnedFd, OwnedFd) {
     match socketpair_stream() {
         Ok(pair) => pair,
-        Err(err) => fail(emitter, &format!("{what}: {err}")),
+        Err(err) => fail(emitter, dev, &format!("{what}: {err}")),
     }
 }
 
@@ -1092,9 +1352,89 @@ mod tests {
     fn boot_json(config: &Config, outcome: &Outcome) -> serde_json::Value {
         let event = Event::now(
             Component::Init,
-            EventKind::Boot(preload_lifecycle(config, outcome, None)),
+            EventKind::Boot(preload_lifecycle(config, outcome, None, false)),
         );
         serde_json::from_str(&encode_json(&event)).unwrap()
+    }
+
+    #[test]
+    fn preload_stamps_unprivileged_dev_and_build_when_adopting_a_dev_root() {
+        let config = Config {
+            // Even if a caller forged `privilege: "root"` in `--config-fd`,
+            // adopting `--dev-root` stamps `"unprivileged-dev"`.
+            privilege: Some(crate::config::Privilege {
+                mode: crate::config::Mode::Root,
+                capabilities: Vec::new(),
+                bounding_set_dropped: true,
+            }),
+            ..Config::default()
+        };
+        let outcome = Outcome {
+            decision: Decision::Off("for the test".to_string()),
+            stats: None,
+        };
+        let event = Event::now(
+            Component::Init,
+            EventKind::Boot(preload_lifecycle(&config, &outcome, None, true)),
+        );
+        let value: serde_json::Value = serde_json::from_str(&encode_json(&event)).unwrap();
+        assert_eq!(value["stage"], "preload");
+        assert_eq!(value["privilege"], "unprivileged-dev");
+        assert_eq!(value["build"], env!("CARGO_PKG_VERSION"));
+        assert!(value.get("bounding_set").is_none(), "{value}");
+    }
+
+    #[test]
+    fn learn_routing_table_reserves_slot_zero_and_preserves_declared_matches() {
+        let source = "\
+version = 1
+
+[[route]]
+name = \"a\"
+path = ['/a/[0-9]+', '/café/1']
+methods = ['GET', 'POST']
+
+[[route]]
+name = \"b\"
+path = ['/robots\\.txt']
+";
+        let (manifest, _) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let table = learn_routing_table(&manifest).unwrap();
+        assert_eq!(
+            table.route("GET", "/a/42"),
+            Some(blastit_manifest::Match { route: 1, rule: 0 })
+        );
+        assert_eq!(
+            table.route("POST", "/café/1"),
+            Some(blastit_manifest::Match { route: 1, rule: 1 })
+        );
+        assert_eq!(table.route("DELETE", "/a/42"), None);
+        assert_eq!(
+            table.route("GET", "/robots.txt"),
+            Some(blastit_manifest::Match { route: 2, rule: 0 })
+        );
+        assert_eq!(table.route("GET", "/unrouted"), None);
+        assert_eq!(table.route("GET", "/"), None);
+    }
+
+    /// `blastit` keeps `blastit-ingress` as a direct dependency (`MA.2.1.1`):
+    /// the supervisor and `check` read the same codec the manifest writes.
+    #[test]
+    fn the_ingress_types_are_importable_and_speak_the_manifest_spelling() {
+        use blastit_ingress::{BodyCodec, IngressPolicy};
+
+        let policy = IngressPolicy {
+            body: BodyCodec::Json,
+            allow_raw: false,
+        };
+        assert_eq!(
+            serde_json::to_value(policy).unwrap(),
+            serde_json::json!({"body": "json", "allow_raw": false})
+        );
+        assert_eq!(
+            serde_json::to_value(BodyCodec::Raw).unwrap(),
+            serde_json::json!("raw")
+        );
     }
 
     #[test]
@@ -1175,7 +1515,7 @@ mod tests {
         };
         Python::initialize();
         Python::attach(|py| {
-            let (text, outcome) = capture(|emitter| immortalize(py, &config, emitter));
+            let (text, outcome) = capture(|emitter| immortalize(py, &config, emitter, None));
             assert!(!outcome.decision.is_on());
             let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
             assert_eq!(lines.len(), 1, "one warn line, got {text:?}");

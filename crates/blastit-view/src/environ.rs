@@ -1,16 +1,66 @@
 //! The WSGI `environ` of PEP 3333, built from a `REQ_HEAD`.
 
+use std::borrow::Cow;
+use std::sync::Mutex;
+
 use blastit_frame::{ReqHead, Scheme};
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyString, PyTuple};
 
 use crate::input::Input;
+use crate::sync::lock;
+
+/// The interpreter's `sys.stderr`, resolved once per process.
+///
+/// `wsgi.errors` is the same file for every request either way, but resolving
+/// it costs an `import` and an attribute lookup, and neither can change while
+/// the process lives; doing it once keeps both off the request path. The cell
+/// is only ever filled while the GIL is held — every request thread holds it as
+/// it builds an environ — and its initialiser releases the GIL rather than
+/// blocking on it, so the first thread to need the value fills the cell the
+/// others read and no thread can observe a half-written one.
+static STDERR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// `wsgi.version`, the `(1, 0)` tuple, built once per process.
+///
+/// PEP 3333 fixes both elements, so every request wants the very same object;
+/// it is built once, under the GIL, exactly as [`STDERR`] is.
+static WSGI_VERSION: PyOnceLock<Py<PyTuple>> = PyOnceLock::new();
+
+/// A bounded cache of the decimal form of a port, keyed by the port.
+///
+/// A request writes a port at most twice — `SERVER_PORT`, and `REMOTE_PORT` when
+/// the peer has one — and both draw from a small set: a process serves one
+/// listening port for as long as it lives, and a client's source port is
+/// ephemeral. Reusing the `str` saves a `String` and a Python `str` per port.
+/// The cache is **deliberately bounded**: `REMOTE_PORT` is chosen by the client,
+/// so an unbounded map keyed by it would let a peer grow this process's memory
+/// with a stream of fresh source ports. At [`PORT_CACHE`] entries the oldest is
+/// evicted, which is what caps what a peer can make this process retain; the
+/// keys are `u16` besides, so the whole key space is bounded by construction.
+static PORTS: Mutex<Vec<(u16, Py<PyString>)>> = Mutex::new(Vec::new());
+
+/// How many port strings a process keeps — see [`PORTS`].
+///
+/// Small on purpose: one entry for the process's own port and a handful for the
+/// clients a view serves at once is the whole working set.
+const PORT_CACHE: usize = 16;
 
 /// Build the `environ` dictionary for one request.
 ///
 /// Every value is a `str` (PEP 3333), decoded as latin-1 wherever the input was
 /// bytes: a request path or a header value is a byte string on the wire, and
 /// latin-1 is the bijection PEP 3333 prescribes for turning it into text.
+///
+/// Nothing here that is the same for every request is built from scratch: the
+/// keys are interned, the constant values are cached (the `(1, 0)` tuple,
+/// `sys.stderr`, the scheme names, `HTTP/1.1`) and the ports come from a bounded
+/// cache, so a request reuses objects — and their cached string hashes — instead
+/// of minting a fresh `str` for each one. The one deliberate exception is a
+/// header's own `HTTP_*` key, which is the client's to choose (see the loop
+/// below).
 ///
 /// # Errors
 ///
@@ -27,23 +77,23 @@ pub(crate) fn build<'py>(
     let (raw_path, query) = split_target(&head.target);
 
     let env = PyDict::new(py);
-    env.set_item("REQUEST_METHOD", latin1_decode(&head.method))?;
-    env.set_item("SCRIPT_NAME", script_name)?;
+    env.set_item(intern!(py, "REQUEST_METHOD"), latin1(&head.method))?;
+    env.set_item(intern!(py, "SCRIPT_NAME"), script_name)?;
     env.set_item(
-        "PATH_INFO",
-        strip_script_name(&latin1_decode(&percent_decode(raw_path)), script_name),
+        intern!(py, "PATH_INFO"),
+        strip_script_name(&latin1(&percent_decode(raw_path)), script_name),
     )?;
-    env.set_item("QUERY_STRING", latin1_decode(query))?;
+    env.set_item(intern!(py, "QUERY_STRING"), latin1(query))?;
     if let Some(value) = headers.content_type {
-        env.set_item("CONTENT_TYPE", latin1_decode(&value))?;
+        env.set_item(intern!(py, "CONTENT_TYPE"), latin1(&value))?;
     }
     if let Some(value) = headers.content_length {
-        env.set_item("CONTENT_LENGTH", latin1_decode(&value))?;
+        env.set_item(intern!(py, "CONTENT_LENGTH"), latin1(&value))?;
     }
-    env.set_item("SERVER_NAME", &head.server_name)?;
-    env.set_item("SERVER_PORT", head.server_port.to_string())?;
-    env.set_item("SERVER_PROTOCOL", "HTTP/1.1")?;
-    env.set_item("REMOTE_ADDR", &head.remote_addr)?;
+    env.set_item(intern!(py, "SERVER_NAME"), &head.server_name)?;
+    env.set_item(intern!(py, "SERVER_PORT"), port_str(py, head.server_port)?)?;
+    env.set_item(intern!(py, "SERVER_PROTOCOL"), intern!(py, "HTTP/1.1"))?;
+    env.set_item(intern!(py, "REMOTE_ADDR"), &head.remote_addr)?;
     // CGI splits the connection's address in two, and PEP 3333 keeps the split:
     // `REMOTE_ADDR` is the address, `REMOTE_PORT` is its port. The only port a
     // request carries is the connection's — a trusted client-IP chain entry is
@@ -51,30 +101,106 @@ pub(crate) fn build<'py>(
     // name) has no `REMOTE_PORT` either, and the key is absent rather than
     // empty.
     if let Some(port) = remote_port(&head.peer_addr) {
-        env.set_item("REMOTE_PORT", port.to_string())?;
+        env.set_item(intern!(py, "REMOTE_PORT"), port_str(py, port)?)?;
     }
+    // A header's name is the client's, so its `HTTP_*` key is decoded (by
+    // `latin1`, which borrows an ASCII name rather than copying it) but **not**
+    // cached: a cache keyed by it would grow with whatever a peer sends, and a
+    // view process must not be grown by its input. The values are the client's
+    // too and are minted fresh for the same reason.
     for (name, value) in &headers.http {
-        env.set_item(latin1_decode(name), latin1_decode(value))?;
+        env.set_item(latin1(name), latin1(value))?;
     }
 
-    env.set_item("wsgi.version", PyTuple::new(py, [1i32, 0i32])?)?;
-    env.set_item("wsgi.url_scheme", scheme_name(head.scheme))?;
-    env.set_item("wsgi.input", input)?;
-    env.set_item("wsgi.errors", py.import("sys")?.getattr("stderr")?)?;
-    env.set_item("wsgi.multithread", true)?;
-    env.set_item("wsgi.multiprocess", true)?;
-    env.set_item("wsgi.run_once", false)?;
-    env.set_item("wsgi.input_terminated", true)?;
-    env.set_item("blastit.route", route_name)?;
+    env.set_item(intern!(py, "wsgi.version"), wsgi_version(py)?)?;
+    env.set_item(intern!(py, "wsgi.url_scheme"), scheme(py, head.scheme))?;
+    env.set_item(intern!(py, "wsgi.input"), input)?;
+    env.set_item(intern!(py, "wsgi.errors"), stderr(py)?)?;
+    // `bool` converts to the interpreter's `True`/`False` singletons, so these
+    // two flags allocate no Python object even written per request.
+    env.set_item(intern!(py, "wsgi.multithread"), true)?;
+    env.set_item(intern!(py, "wsgi.multiprocess"), true)?;
+    env.set_item(intern!(py, "wsgi.run_once"), false)?;
+    env.set_item(intern!(py, "wsgi.input_terminated"), true)?;
+    env.set_item(intern!(py, "blastit.route"), route_name)?;
     Ok(env)
 }
 
+/// The interpreter's `sys.stderr` — `wsgi.errors` — from [`STDERR`].
+fn stderr<'py>(py: Python<'py>) -> PyResult<&'py Bound<'py, PyAny>> {
+    let cached = STDERR.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(py.import("sys")?.getattr("stderr")?.unbind())
+    })?;
+    Ok(cached.bind(py))
+}
+
+/// `wsgi.version` as the `(1, 0)` tuple, from [`WSGI_VERSION`].
+fn wsgi_version<'py>(py: Python<'py>) -> PyResult<&'py Bound<'py, PyTuple>> {
+    let cached = WSGI_VERSION.get_or_try_init(py, || -> PyResult<Py<PyTuple>> {
+        Ok(PyTuple::new(py, [1i32, 0i32])?.unbind())
+    })?;
+    Ok(cached.bind(py))
+}
+
 /// `wsgi.url_scheme` for a request's scheme.
-fn scheme_name(scheme: Scheme) -> &'static str {
+///
+/// The two values never change, so each is interned once and every request
+/// writes the same object — which is also the same cached string hash rather
+/// than one recomputed per request.
+fn scheme<'py>(py: Python<'py>, scheme: Scheme) -> &'py Bound<'py, PyString> {
     match scheme {
-        Scheme::Http => "http",
-        Scheme::Https => "https",
+        Scheme::Http => intern!(py, "http"),
+        Scheme::Https => intern!(py, "https"),
     }
+}
+
+/// The `str` for `port`, from [`PORTS`] or a fresh conversion.
+///
+/// The cache's lock is held around the lookup and around the insert, and no
+/// Python runs while it is held — the `to_string` and `PyString::new` that can
+/// allocate are called with it released — which is what keeps a lock that is
+/// not the GIL from ever being held across a Python call.
+fn port_str<'py>(py: Python<'py>, port: u16) -> PyResult<Bound<'py, PyString>> {
+    let cached = {
+        let cache = lock(&PORTS);
+        cache
+            .iter()
+            .find(|(cached, _)| *cached == port)
+            .map(|(_, text)| text.bind(py).clone())
+    };
+    if let Some(text) = cached {
+        return Ok(text);
+    }
+    let text = PyString::new(py, &port.to_string());
+    let mut cache = lock(&PORTS);
+    // Another thread may have filled the entry between the two locks.
+    cache.retain(|(cached, _)| *cached != port);
+    if cache.len() >= PORT_CACHE {
+        cache.remove(0);
+    }
+    cache.push((port, text.clone().unbind()));
+    Ok(text)
+}
+
+/// Decode bytes as latin-1 (PEP 3333's `str` for byte-ish values), borrowing
+/// when the bytes are pure ASCII.
+///
+/// A byte below `0x80` is the same character in latin-1 and in UTF-8, so an
+/// all-ASCII slice — a method, a header name, most header values — can go to
+/// Python as it is, with no intermediate `String`. A byte above `0x80` still
+/// goes the long way through [`latin1_decode`], because UTF-8 would read it as
+/// the start of a sequence rather than as the one character latin-1 says it is.
+///
+/// The decode is not done straight into a Python `str`: the only C entry point
+/// that would, `PyUnicode_DecodeLatin1`, is reachable only through `ffi`, and
+/// this crate forbids `unsafe`.
+fn latin1(bytes: &[u8]) -> Cow<'_, str> {
+    if bytes.is_ascii()
+        && let Ok(text) = std::str::from_utf8(bytes)
+    {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(latin1_decode(bytes))
 }
 
 /// The port `REMOTE_PORT` reports: the one the request arrived from.
@@ -319,6 +445,18 @@ mod tests {
     }
 
     #[test]
+    fn latin1_borrows_ascii_and_owns_the_rest() {
+        // The fast path must be invisible: `latin1` returns exactly what the
+        // character-by-character decode does, for every byte a request can
+        // carry, while borrowing when there is nothing to decode.
+        for byte in 0..=0xFFu8 {
+            assert_eq!(latin1(&[byte]), latin1_decode(&[byte]));
+        }
+        assert!(matches!(latin1(b"GET"), Cow::Borrowed("GET")));
+        assert!(matches!(latin1(&[0xE9]), Cow::Owned(ref text) if text == "é"));
+    }
+
+    #[test]
     fn the_script_name_is_stripped_only_on_a_boundary() {
         assert_eq!(strip_script_name("/app/list", "/app"), "/list");
         assert_eq!(strip_script_name("/app", "/app"), "");
@@ -399,8 +537,17 @@ mod tests {
 
     #[test]
     fn scheme_names_are_the_wsgi_ones() {
-        assert_eq!(scheme_name(Scheme::Http), "http");
-        assert_eq!(scheme_name(Scheme::Https), "https");
+        Python::attach(|py| {
+            assert_eq!(scheme(py, Scheme::Http).to_str().expect("ascii"), "http");
+            assert_eq!(scheme(py, Scheme::Https).to_str().expect("ascii"), "https");
+            // Interned: it is the same object every time, not just the same
+            // text, which is what lets a request reuse the cached string hash.
+            assert_eq!(
+                scheme(py, Scheme::Http).as_ptr(),
+                scheme(py, Scheme::Http).as_ptr(),
+                "the scheme string is interned"
+            );
+        });
     }
 
     #[test]

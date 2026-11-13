@@ -103,6 +103,7 @@
 //! still emitted when the scheduler learns the request ended — at `RESP_END`
 //! for a response, at release for everything else.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
@@ -113,8 +114,10 @@ use blastit_events::{
     Component, Event, EventKind, Outcome, ProcessCap, ProcessRetired, RequestInfo, RetireReason,
 };
 use blastit_frame::{
-    Ctl, DoneOutcome, Frame, FrameError, INITIAL_WINDOW, Limits, ReqHead, RequestCost, RespHead,
+    Ctl, DoneOutcome, Frame, FrameError, INITIAL_WINDOW, Limits, RawFrame, ReqHead, ReqHeadView,
+    RequestCost, RespHead, TypeCode,
 };
+use blastit_ingress::{BodyPlan, apply_transcoded_headers, plan_body, transcode_buffered};
 use blastit_manifest::RoutingTable;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -129,7 +132,8 @@ use crate::path::{
 };
 use crate::route::RouteInfo;
 use crate::task::{
-    OutFrame, Outbound, PushError, ctl_frame_size, read_frames, release, write_peer,
+    OutFrame, Outbound, PushError, ctl_frame_size, read_frames, read_raw_frames, release,
+    write_peer,
 };
 
 /// How many `http.chan` frames may pile up before its reader task waits.
@@ -161,8 +165,9 @@ pub type Emit = Arc<dyn Fn(Event) + Send + Sync>;
 
 /// A frame from `http.chan`, or the end of that channel.
 enum HttpIn {
-    /// One frame, muxed by the stream id http allocated.
-    Frame { id: u32, frame: Frame },
+    /// One frame, muxed by the stream id http allocated, with its payload left
+    /// as it was received (see [`Scheduler::on_http`]).
+    Frame { id: u32, raw: RawFrame },
     /// http closed its end of the channel.
     Closed,
     /// http sent bytes that are not a frame. This is blastit's own code on the
@@ -296,19 +301,24 @@ impl Admission {
     /// A FIFO queue has no flows, so this is `None` there and the caller
     /// carries nothing it will not need.
     ///
+    /// The head has not been decoded (see [`Scheduler::begin_raw`]), so the
+    /// flow is resolved from the payload's borrowed headers; `fair.rs` shares
+    /// one reader between this and the decoded form the tests use, so the key
+    /// cannot differ between the two.
+    ///
     /// `now` is the scheduler's clock, converted once: the queue stamps
     /// `last_active` from the same clock its eviction rules read, so an idle
     /// flow's debt ages against the clock the scheduler actually uses (a paused
     /// one in a test, the wall clock in production) instead of against
     /// [`std::time::Instant::now`] behind its back.
-    fn resolve(
+    fn resolve_view(
         &mut self,
         peer: &str,
-        headers: &[(Vec<u8>, Vec<u8>)],
+        head: &ReqHeadView<'_>,
         now: Instant,
     ) -> Option<FlowRef> {
         self.fair_mut()
-            .map(|queue| queue.resolve(peer, headers, now.into_std()))
+            .map(|queue| queue.resolve_view(peer, head, now.into_std()))
     }
 
     /// Queue a request that is waiting for `route`.
@@ -420,14 +430,35 @@ struct MemSample {
     views: u32,
 }
 
+/// The parts of a request head the scheduler itself reads.
+///
+/// The head is not decoded into a [`blastit_frame::ReqHead`]: its payload is
+/// forwarded to the view verbatim (see [`Scheduler::begin_raw`]), so only what
+/// routing and the `request` event need is kept here. The header list is not
+/// among them — the fair-queue flow is resolved once, at admission, from the
+/// borrowed head.
+struct RequestHead {
+    /// Request method, verbatim and case-preserved.
+    method: Vec<u8>,
+    /// Request target (origin form, e.g. `/x?y=1`), verbatim.
+    target: Vec<u8>,
+    /// Client address as the front end resolved it (ARCHITECTURE.md §2.4).
+    remote_addr: String,
+}
+
 /// One request, from its `REQ_HEAD` to the `DONE` that releases its slot.
 struct Request {
     /// http's stream id, for the response frames.
     stream_id: u32,
     /// The id reported as `request_id` in events (§8.1).
     request_id: String,
-    /// The head as it arrived; the view rebuilds its own `environ` from it.
-    head: ReqHead,
+    /// The few head fields the scheduler reads; the rest travel to the view in
+    /// `raw` untouched.
+    head: RequestHead,
+    /// The request head exactly as http sent it, forwarded to the view with
+    /// only its id rewritten. Taken here on dispatch, so the payload is moved,
+    /// never copied.
+    raw: Option<RawFrame>,
     /// The route this request was routed to, if any (`None` for the requests
     /// the scheduler answers itself: health, `400`, `404`).
     route: Option<usize>,
@@ -450,6 +481,14 @@ struct Request {
     /// Body chunks held while the request is queued. Credit bounds them: http
     /// may not send more than [`Request::upload_credit`] allows (§3.1).
     body: Vec<Vec<u8>>,
+    /// How the body must be handled, decided from the head alone (`R12`, `R16`).
+    body_plan: BodyPlan,
+    /// The body is buffered and, for `json`/`form`, transcoded: the request may
+    /// be dispatched. A `Buffer` request waits here until its `REQ_END`.
+    body_ready: bool,
+    /// This request is an unrouted `--learn` request using the single fallback
+    /// slot (`R26`, design §4.2 D.2).
+    learn_fallback: bool,
     /// `REQ_END` arrived.
     end_seen: bool,
     /// A `CANCEL` arrived from http.
@@ -503,8 +542,12 @@ enum Resolution {
     Bad,
     /// The health path, answered by the scheduler itself.
     Health,
-    /// Nothing matched: a `404` (§2.4).
-    Unrouted,
+    /// Nothing matched: a `404` (§2.4), or the `--learn` fallback.
+    Unrouted {
+        /// The decoded target path, used only by the `--learn` fallback to
+        /// attribute the request (`R26`).
+        path: String,
+    },
     /// A route, one of its rules, and the `PATH_INFO` that matched.
     Routed {
         /// Route index.
@@ -537,6 +580,10 @@ struct Scheduler {
     /// Requests waiting for a worker slot, oldest first (§2.4's bounded FIFO)
     /// or in fair order (D5).
     queue: Admission,
+    /// The one unrouted `--learn` request currently served (`R26`).
+    learn_fallback_busy: bool,
+    /// Unrouted `--learn` requests waiting for that one slot, oldest first.
+    learn_fallback_queue: VecDeque<u32>,
     /// The live view per route: at most one (§2.4).
     views: HashMap<usize, View>,
     /// `(view, request id)` to http stream id: what a frame from a view means.
@@ -619,6 +666,8 @@ impl Scheduler {
             counter: 0,
             requests: HashMap::new(),
             queue,
+            learn_fallback_busy: false,
+            learn_fallback_queue: VecDeque::new(),
             views: HashMap::new(),
             dispatch: HashMap::new(),
             slots: 0,
@@ -679,7 +728,10 @@ impl Scheduler {
         if !self.draining {
             return false;
         }
-        let idle = self.slots == 0 && self.queue.is_empty();
+        let idle = self.slots == 0
+            && self.queue.is_empty()
+            && self.learn_fallback_queue.is_empty()
+            && !self.learn_fallback_busy;
         let expired = match self.drain_deadline {
             Some(deadline) => Instant::now() >= deadline,
             None => true,
@@ -700,6 +752,24 @@ impl Scheduler {
             if let Some(since) = self
                 .requests
                 .get(&stream_id)
+                .and_then(|request| request.queued_since)
+            {
+                take(since + self.cfg.queue_timeout);
+            }
+        }
+        // A structured body still being collected, and an unrouted `--learn`
+        // request waiting for the single fallback slot, both age the same way.
+        for request in self.requests.values() {
+            if !request.body_ready
+                && let Some(since) = request.queued_since
+            {
+                take(since + self.cfg.queue_timeout);
+            }
+        }
+        for stream_id in &self.learn_fallback_queue {
+            if let Some(since) = self
+                .requests
+                .get(stream_id)
                 .and_then(|request| request.queued_since)
             {
                 take(since + self.cfg.queue_timeout);
@@ -750,6 +820,7 @@ impl Scheduler {
         let now = Instant::now();
         self.backoff.retain(|_, until| *until > now);
         self.expire_queue()?;
+        self.pump_learn_fallback()?;
         self.dispatch_queued()?;
         self.expire_requests()?;
         self.retire_finished_views()?;
@@ -780,7 +851,7 @@ impl Scheduler {
 
     /// Handles one `http.chan` frame.
     fn on_http(&mut self, event: HttpIn) -> Result<(), SchedulerError> {
-        let (id, frame) = match event {
+        let (id, raw) = match event {
             HttpIn::Closed => {
                 self.http_closed = true;
                 return Ok(());
@@ -788,15 +859,34 @@ impl Scheduler {
             // http is blastit's own code: bytes that are not frames mean the
             // build is broken, not that a peer misbehaved (§3.1).
             HttpIn::Failed(error) => return Err(SchedulerError::Frame(error)),
-            HttpIn::Frame { id, frame } => (id, frame),
+            HttpIn::Frame { id, raw } => (id, raw),
+        };
+        // A `REQ_HEAD` is read where it lies and forwarded verbatim, so the
+        // scheduler never copies and re-encodes a header it will not look at.
+        //
+        // This is safe *only* for `http.chan`: http is blastit's own Rust code
+        // — no Python, no attacker input — and it encodes from a typed `Frame`,
+        // so its bytes are well-formed by construction. `view.chan` must NOT
+        // take this shortcut: it carries frames from a sandboxed, potentially
+        // compromised process, and `on_view` still receives them fully decoded
+        // from the strict `read_frames`, which validates every field. Do not
+        // apply this trick to the view channel.
+        if raw.ty == TypeCode::ReqHead.code() {
+            return self.begin_raw(id, raw);
+        }
+        let frame = match raw.into_frame() {
+            Ok(frame) => frame,
+            // A non-head payload that does not decode is a bug in this build,
+            // exactly as a decode error used to be.
+            Err(error) => return Err(SchedulerError::Frame(error)),
         };
         match frame {
-            Frame::ReqHead(head) => self.begin(id, head),
             Frame::ReqBody(body) => self.request_body(id, body),
             Frame::ReqEnd => self.request_end(id),
             Frame::Cancel => self.client_cancel(id),
             Frame::Window { bytes } => self.client_window(id, bytes),
-            // http never sends a response frame; count it and move on.
+            // http never sends a response frame, and its head was handled
+            // above; count anything else and move on.
             _ => {
                 self.dropped += 1;
                 Ok(())
@@ -907,10 +997,43 @@ impl Scheduler {
         }
     }
 
+    /// Queues a raw frame towards one view, the same way [`Scheduler::view_push`]
+    /// does but without re-encoding it.
+    ///
+    /// The byte cap is charged as [`crate::task::Outbound::push_raw`]'s own
+    /// size, which is the size the frame will take on the wire, so recycling a
+    /// view is decided against the same budget as a decoded frame.
+    fn view_push_raw(&mut self, key: ViewKey, raw: RawFrame) -> Result<(), SchedulerError> {
+        let Some(out) = self.view_out(key) else {
+            return Ok(());
+        };
+        match out.push_raw(raw) {
+            Ok(()) => Ok(()),
+            Err(PushError::Closed) => {
+                self.view_gone(key);
+                Ok(())
+            }
+            Err(PushError::Overflow { .. }) => {
+                self.retire(key, RetireReason::Other(CREDIT_OVERFLOW.to_string()))
+            }
+            // `push_raw` does not encode, so it cannot report a frame error;
+            // treat one as the build bug it would be.
+            Err(PushError::Frame(error)) => Err(SchedulerError::Frame(error)),
+        }
+    }
+
     // --------------------------------------------------------------- request
 
-    /// Routes a new request and either dispatches it or queues it (§2.4).
-    fn begin(&mut self, stream_id: u32, head: ReqHead) -> Result<(), SchedulerError> {
+    /// Routes a new request whose head was not decoded, then dispatches or
+    /// queues it (§2.4).
+    ///
+    /// Only `http.chan` reaches here (see [`Scheduler::on_http`]). The head is
+    /// parsed just far enough to route it and to resolve its fair-queue flow,
+    /// and the raw payload is kept for the view: everything the scheduler does
+    /// not read — scheme, server name and port, and every header the app sees —
+    /// reaches the view byte for byte, and no header is copied into an owned
+    /// `Vec` on the way.
+    fn begin_raw(&mut self, stream_id: u32, raw: RawFrame) -> Result<(), SchedulerError> {
         if self.requests.contains_key(&stream_id) {
             // http's contract is that a stream id is not reused while it is in
             // flight; anything else would let one request inherit another's
@@ -919,14 +1042,41 @@ impl Scheduler {
                 "http.chan reused stream id {stream_id} while it was still in flight"
             )));
         }
+        // http encodes from a typed `Frame`, so a head that does not parse is a
+        // bug in this build, not a peer's fault (§3.1).
+        let head = ReqHeadView::parse(&raw.payload).map_err(SchedulerError::Frame)?;
         let request_id = self.next_request_id();
         // The event's one clock: `arrived` and the flow the queue stamps are
         // read from it, so a request cannot age against two clocks at once.
         let now = Instant::now();
+        let resolution = self.resolve(&head);
+        // D5: the flow is resolved once per request, from the raw peer and the
+        // headers, and it is the *same* resolution the front end used for
+        // `REMOTE_ADDR`. It is resolved for a routed request before the request
+        // is queued or refused, exactly as before. The queue is given this
+        // event's clock, so what it stamps and what it later compares are one
+        // clock.
+        let flow = match &resolution {
+            Resolution::Routed { .. } => self.queue.resolve_view(head.peer_addr(), &head, now),
+            _ => None,
+        };
+        // `R12`: the head alone decides whether this route may have a body at
+        // all, and `R16`: `raw` streams with zero buffering. It is planned from
+        // the view, before the payload is moved into the request, so the
+        // headers are never copied out to be read.
+        let plan = self.plan_request_body(&head, &resolution);
+        // The few head fields routing and the `request` event need, copied out
+        // before the raw payload is moved into the request.
+        let facts = RequestHead {
+            method: head.method().to_vec(),
+            target: head.target().to_vec(),
+            remote_addr: head.remote_addr().to_string(),
+        };
         let mut request = Request {
             stream_id,
             request_id,
-            head,
+            head: facts,
+            raw: Some(raw),
             route: None,
             rule: None,
             path_info: None,
@@ -939,6 +1089,9 @@ impl Scheduler {
             bytes_in: 0,
             bytes_out: 0,
             body: Vec::new(),
+            body_plan: BodyPlan::AllowEmptyOnly,
+            body_ready: true,
+            learn_fallback: false,
             end_seen: false,
             cancelled: false,
             view: None,
@@ -956,7 +1109,6 @@ impl Scheduler {
             upload_credit: INITIAL_WINDOW,
             download_credit: INITIAL_WINDOW,
         };
-        let resolution = self.resolve(&request);
         match resolution {
             Resolution::Bad => {
                 self.requests.insert(stream_id, request);
@@ -974,16 +1126,39 @@ impl Scheduler {
                 self.respond(stream_id, 200, "OK", "ok", None)?;
                 self.finish_immediately(stream_id, Outcome::Ok)
             }
-            Resolution::Unrouted => {
+            Resolution::Unrouted { path } => {
+                request.path_info = Some(path);
                 self.requests.insert(stream_id, request);
-                self.reject(
-                    stream_id,
-                    404,
-                    "Not Found",
-                    "not found\n",
-                    Outcome::Unmatched,
-                    None,
-                )
+                if self.cfg.learn_mode {
+                    // `--learn` never short-circuits an unrouted request: it is
+                    // served by the app one at a time so its SQL can be
+                    // attributed to `ObsTarget::Unrouted` (`R26`).
+                    let retry_after = retry_after_seconds(self.cfg.queue_timeout);
+                    if self.learn_fallback_queue.len() >= self.cfg.queue_size {
+                        return self.reject(
+                            stream_id,
+                            503,
+                            "Service Unavailable",
+                            "queue full\n",
+                            Outcome::QueueFull,
+                            Some(retry_after),
+                        );
+                    }
+                    if let Some(request) = self.requests.get_mut(&stream_id) {
+                        request.queued_since = Some(now);
+                    }
+                    self.learn_fallback_queue.push_back(stream_id);
+                    self.pump_learn_fallback()
+                } else {
+                    self.reject(
+                        stream_id,
+                        404,
+                        "Not Found",
+                        "not found\n",
+                        Outcome::Unmatched,
+                        None,
+                    )
+                }
             }
             Resolution::Routed {
                 route,
@@ -993,47 +1168,195 @@ impl Scheduler {
                 request.route = Some(route);
                 request.rule = Some(rule);
                 request.path_info = Some(path_info);
-                // D5: the flow is resolved once per request, from the raw peer
-                // and the headers, and it is the *same* resolution the front
-                // end used for `REMOTE_ADDR`. The queue is given this event's
-                // clock, so what it stamps and what it later compares are one
-                // clock.
-                request.flow =
-                    self.queue
-                        .resolve(&request.head.peer_addr, &request.head.headers, now);
+                // D5: the flow was resolved once, from the raw peer and the
+                // headers of this request's head, before it was moved here —
+                // and it is the *same* resolution the front end used for
+                // `REMOTE_ADDR`, stamped by the queue with this event's clock.
+                request.flow = flow;
+                // `R12`/`R16`: `plan` was decided from the same head, and `Err`
+                // carries the status a body this route will not take is
+                // answered with.
+                let plan = match plan {
+                    Ok(plan) => plan,
+                    Err(status) => {
+                        self.requests.insert(stream_id, request);
+                        return self.refuse_body(stream_id, status);
+                    }
+                };
+                request.body_plan = plan;
+                request.body_ready = !matches!(plan, BodyPlan::Buffer { .. });
                 self.requests.insert(stream_id, request);
-                let retry_after = retry_after_seconds(self.cfg.queue_timeout);
-                if self.draining {
-                    self.reject(
-                        stream_id,
-                        503,
-                        "Service Unavailable",
-                        "draining\n",
-                        Outcome::QueueFull,
-                        Some(retry_after),
-                    )
-                } else if self.can_dispatch(route) {
-                    self.dispatch(stream_id)
-                } else if self.queue.len() >= self.cfg.queue_size {
-                    self.reject(
-                        stream_id,
-                        503,
-                        "Service Unavailable",
-                        "queue full\n",
-                        Outcome::QueueFull,
-                        Some(retry_after),
-                    )
-                } else {
-                    self.enqueue(stream_id);
-                    Ok(())
+                if matches!(plan, BodyPlan::Buffer { .. }) {
+                    // A structured body is buffered up to `BLASTIT_MAX_BODY_BYTES`
+                    // and transcoded before the view sees a byte.
+                    if self.buffering_count() >= self.cfg.queue_size {
+                        return self.reject(
+                            stream_id,
+                            503,
+                            "Service Unavailable",
+                            "queue full\n",
+                            Outcome::QueueFull,
+                            Some(retry_after_seconds(self.cfg.queue_timeout)),
+                        );
+                    }
+                    if let Some(request) = self.requests.get_mut(&stream_id) {
+                        request.queued_since = Some(now);
+                    }
+                    return Ok(());
                 }
+                self.admit_ready(stream_id)
             }
         }
     }
 
+    /// The `[route.ingress]` plan for a routed request, from its head alone.
+    ///
+    /// The head is still the raw payload's borrowed view here (see
+    /// [`Scheduler::begin_raw`]), so the method and the three headers the plan
+    /// reads are taken from it without decoding or copying the rest — the same
+    /// head the view will receive byte for byte.
+    ///
+    /// A request the scheduler answers itself never reaches a view, so it has
+    /// no ingress to honour and may only ever hold an empty body.
+    ///
+    /// `Err` carries the status the scheduler answers with (`400` for a codec
+    /// mismatch, `413` for a body on a route that takes none).
+    fn plan_request_body(
+        &self,
+        head: &ReqHeadView<'_>,
+        resolution: &Resolution,
+    ) -> Result<BodyPlan, u16> {
+        let Resolution::Routed { route, .. } = resolution else {
+            return Ok(BodyPlan::AllowEmptyOnly);
+        };
+        let policy = self.routes.get(*route).and_then(|route| route.ingress);
+        let method = String::from_utf8_lossy(head.method()).into_owned();
+        let content_type = head_header_text(head, b"content-type");
+        let content_encoding = head_header_text(head, b"content-encoding");
+        let content_length = head
+            .headers()
+            .find(|(name, _)| name.eq_ignore_ascii_case(b"content-length"))
+            .map(|(_, value)| {
+                std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<u64>().ok())
+                    // A length this build cannot read is treated as unbounded:
+                    // fail closed rather than let it look like zero.
+                    .unwrap_or(u64::MAX)
+            });
+        plan_body(
+            &method,
+            policy,
+            content_type.as_deref(),
+            content_encoding.as_deref(),
+            content_length,
+        )
+        .map_err(|reject| reject.status())
+    }
+
+    /// Hands a request whose head/body is ready to the admission machinery.
+    fn admit_ready(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        let Some(route) = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.route)
+        else {
+            return Ok(());
+        };
+        let retry_after = retry_after_seconds(self.cfg.queue_timeout);
+        if self.draining {
+            self.reject(
+                stream_id,
+                503,
+                "Service Unavailable",
+                "draining\n",
+                Outcome::QueueFull,
+                Some(retry_after),
+            )
+        } else if self.can_dispatch(route) {
+            self.dispatch(stream_id)
+        } else if self.queue.len() >= self.cfg.queue_size {
+            self.reject(
+                stream_id,
+                503,
+                "Service Unavailable",
+                "queue full\n",
+                Outcome::QueueFull,
+                Some(retry_after),
+            )
+        } else {
+            self.enqueue(stream_id);
+            Ok(())
+        }
+    }
+
+    /// How many requests are still collecting a structured body.
+    fn buffering_count(&self) -> usize {
+        self.requests
+            .values()
+            .filter(|request| !request.body_ready && !request.complete && request.view.is_none())
+            .count()
+    }
+
+    /// The view an unrouted `--learn` request is served by: the first route's,
+    /// when the manifest declared one (`R26`).
+    fn learn_route(&self) -> Option<usize> {
+        (!self.routes.is_empty()).then_some(0)
+    }
+
+    /// Starts the next unrouted `--learn` request, if the single slot is free
+    /// and a view can take it (`R26`, design §4.2 D.2).
+    ///
+    /// The slot is what keeps `ObsTarget::Unrouted` attribution unambiguous:
+    /// two unrouted requests never run at once, so every statement a session
+    /// reports belongs to exactly one request.
+    fn pump_learn_fallback(&mut self) -> Result<(), SchedulerError> {
+        if !self.cfg.learn_mode || self.learn_fallback_busy {
+            return Ok(());
+        }
+        let Some(&stream_id) = self.learn_fallback_queue.front() else {
+            return Ok(());
+        };
+        if !self.requests.contains_key(&stream_id) {
+            self.learn_fallback_queue.pop_front();
+            return Ok(());
+        }
+        let Some(route) = self.learn_route() else {
+            // Nothing to run the request through: learn mode has no route to
+            // observe, so the request is still an honest `404`.
+            self.learn_fallback_queue.pop_front();
+            return self.reject(
+                stream_id,
+                404,
+                "Not Found",
+                "not found\n",
+                Outcome::Unmatched,
+                None,
+            );
+        };
+        if !self.can_dispatch(route) {
+            if !self.views.contains_key(&route) && !self.draining {
+                self.try_spawn(route)?;
+            }
+            return Ok(());
+        }
+        self.learn_fallback_queue.pop_front();
+        self.learn_fallback_busy = true;
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.learn_fallback = true;
+            request.route = Some(route);
+            // An unrouted request has no declared ingress: never short-circuit
+            // it, and never buffer it (`R26`).
+            request.body_plan = BodyPlan::StreamPassthrough;
+            request.body_ready = true;
+            request.queued_since = None;
+        }
+        self.dispatch(stream_id)
+    }
+
     /// Turns the request target into a routing decision (§2.4, §6).
-    fn resolve(&self, request: &Request) -> Resolution {
-        let path = path_of_target(&request.head.target);
+    fn resolve(&self, head: &ReqHeadView<'_>) -> Resolution {
+        let path = path_of_target(head.target());
         let Some(decoded) = percent_decode(path) else {
             return Resolution::Bad;
         };
@@ -1048,7 +1371,10 @@ impl Scheduler {
         let Ok(path) = std::str::from_utf8(&decoded) else {
             return Resolution::Bad;
         };
-        let Ok(method) = std::str::from_utf8(&request.head.method) else {
+        // An unrouted request reports the path exactly as decoded, before any
+        // mount prefix is stripped: that is what the client asked for.
+        let request_path = path.to_string();
+        let Ok(method) = std::str::from_utf8(head.method()) else {
             return Resolution::Bad;
         };
         // Only a GET or a HEAD is a health check; anything else is a request
@@ -1059,7 +1385,9 @@ impl Scheduler {
         let path = match self.script_name.as_deref() {
             Some(prefix) => match strip_script_name(path, prefix) {
                 Some(rest) => rest,
-                None => return Resolution::Unrouted,
+                None => {
+                    return Resolution::Unrouted { path: request_path };
+                }
             },
             None => path,
         };
@@ -1069,7 +1397,7 @@ impl Scheduler {
                 rule: u32::try_from(matched.rule).unwrap_or(u32::MAX),
                 path_info: path.to_string(),
             },
-            None => Resolution::Unrouted,
+            None => Resolution::Unrouted { path: request_path },
         }
     }
 
@@ -1107,21 +1435,62 @@ impl Scheduler {
         if request.complete {
             return Ok(());
         }
-        let view = request.view;
-        let allowed = request.upload_credit as u64;
-        if body.len() as u64 > allowed {
-            return self.http_credit_violation(stream_id);
-        }
-        let count = body.len() as u64;
-        if let Some(request) = self.requests.get_mut(&stream_id) {
-            request.bytes_in += count;
-            request.upload_credit -= body.len() as u32;
-        }
-        match view {
-            Some((key, id)) => self.view_push(key, id, Frame::ReqBody(body)),
-            None => {
+        match request.body_plan {
+            // A route that accepts no body may see `REQ_END`, never a byte
+            // (`R12`, `ADR-0006`).
+            BodyPlan::AllowEmptyOnly => {
+                if body.is_empty() {
+                    return Ok(());
+                }
+                self.refuse_body(stream_id, 413)
+            }
+            BodyPlan::StreamPassthrough => {
+                let view = request.view;
+                let allowed = request.upload_credit as u64;
+                if body.len() as u64 > allowed {
+                    return self.http_credit_violation(stream_id);
+                }
+                let count = body.len() as u64;
                 if let Some(request) = self.requests.get_mut(&stream_id) {
+                    request.bytes_in += count;
+                    request.upload_credit -= body.len() as u32;
+                }
+                match view {
+                    Some((key, id)) => self.view_push(key, id, Frame::ReqBody(body)),
+                    None => {
+                        if let Some(request) = self.requests.get_mut(&stream_id) {
+                            request.body.push(body);
+                        }
+                        Ok(())
+                    }
+                }
+            }
+            // `R14`/`R15`: the whole body is validated and re-encoded before a
+            // view sees it, so it is buffered here — bounded, and with the
+            // consumed credit handed back so an upload may exceed one window.
+            BodyPlan::Buffer { .. } => {
+                let allowed = request.upload_credit as u64;
+                if body.len() as u64 > allowed {
+                    return self.http_credit_violation(stream_id);
+                }
+                let total = request.bytes_in.saturating_add(body.len() as u64);
+                if total > self.cfg.max_body_bytes {
+                    return self.refuse_body(stream_id, 413);
+                }
+                let credit = u32::try_from(body.len()).unwrap_or(u32::MAX);
+                let count = body.len() as u64;
+                if let Some(request) = self.requests.get_mut(&stream_id) {
+                    request.bytes_in += count;
+                    request.upload_credit = request
+                        .upload_credit
+                        .saturating_sub(credit)
+                        .saturating_add(credit);
                     request.body.push(body);
+                }
+                // The scheduler consumed those bytes, so the client may send
+                // that much more while the body is still being collected.
+                if credit > 0 {
+                    self.http_push(stream_id, Frame::Window { bytes: credit })?;
                 }
                 Ok(())
             }
@@ -1130,15 +1499,79 @@ impl Scheduler {
 
     /// Forwards `REQ_END`, or remembers it for a queued request.
     fn request_end(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
-        let Some(request) = self.requests.get_mut(&stream_id) else {
+        let Some(request) = self.requests.get(&stream_id) else {
             self.dropped += 1;
             return Ok(());
         };
-        if request.complete {
+        if request.complete || request.end_seen {
             return Ok(());
         }
-        request.end_seen = true;
-        let view = request.view;
+        if let BodyPlan::Buffer { codec } = request.body_plan {
+            // The body is complete: canonicalise it before dispatch so the view
+            // only ever sees valid, re-encoded bytes and no stale framing
+            // headers (`R14`, `R15`).
+            //
+            // The head reached here as the raw payload (see
+            // [`Scheduler::begin_raw`]). Canonicalising replaces the framing
+            // headers the client sent, so this is the one place that has to
+            // decode it — the re-encoded head is what the view then reads.
+            // Routes with no ingress configured take the streaming path below
+            // and never touch their head's bytes.
+            let Some(raw) = request.raw.as_ref() else {
+                // A buffered request keeps its raw head until dispatch; losing
+                // it would be a bug in this build, not a peer's fault.
+                return Err(SchedulerError::protocol(
+                    "a buffered request reached REQ_END without its raw head",
+                ));
+            };
+            let mut head = match raw.decode().map_err(SchedulerError::Frame)? {
+                Frame::ReqHead(head) => head,
+                _ => {
+                    return Err(SchedulerError::protocol(
+                        "a request's raw head did not decode as REQ_HEAD",
+                    ));
+                }
+            };
+            let id = raw.id;
+            let method = String::from_utf8_lossy(&head.method).into_owned();
+            let content_type = header_text(&head, b"content-type");
+            let raw_body: Vec<u8> = request.body.iter().flatten().copied().collect();
+            if raw_body.len() as u64 > self.cfg.max_body_bytes {
+                return self.refuse_body(stream_id, 413);
+            }
+            let transcoded =
+                match transcode_buffered(codec, &method, content_type.as_deref(), &raw_body) {
+                    Ok(body) => body,
+                    Err(reject) => return self.refuse_body(stream_id, reject.status()),
+                };
+            apply_transcoded_headers(
+                &mut head.headers,
+                transcoded.content_type,
+                transcoded.bytes.len(),
+            );
+            let head = Frame::ReqHead(head)
+                .to_raw(id)
+                .map_err(SchedulerError::Frame)?;
+            if let Some(request) = self.requests.get_mut(&stream_id) {
+                request.raw = Some(head);
+                request.body = if transcoded.bytes.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![transcoded.bytes]
+                };
+                request.end_seen = true;
+                request.body_ready = true;
+                request.queued_since = None;
+            }
+            return self.admit_ready(stream_id);
+        }
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.end_seen = true;
+        }
+        let view = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.view);
         match view {
             Some((key, id)) => self.view_push(key, id, Frame::ReqEnd),
             None => Ok(()),
@@ -1354,7 +1787,7 @@ impl Scheduler {
             return Ok(());
         };
         let now = Instant::now();
-        let (head, body, end, extra_credit) = {
+        let (raw, body, end, extra_credit) = {
             let Some(request) = self.requests.get_mut(&stream_id) else {
                 return Ok(());
             };
@@ -1364,7 +1797,7 @@ impl Scheduler {
             request.view = Some((key, id));
             request.slots = true;
             (
-                request.head.clone(),
+                request.raw.take(),
                 std::mem::take(&mut request.body),
                 request.end_seen,
                 // A view starts with `INITIAL_WINDOW` of response credit, so
@@ -1376,7 +1809,13 @@ impl Scheduler {
         self.dispatch.insert((key, id), stream_id);
         self.slots += 1;
 
-        self.view_push(key, id, Frame::ReqHead(head))?;
+        // A routed request always carries its raw head until here, so this is
+        // the whole frame the view gets, id rewritten and payload untouched.
+        debug_assert!(raw.is_some(), "a dispatched request carries its raw head");
+        if let Some(mut raw) = raw {
+            raw.set_id(id);
+            self.view_push_raw(key, raw)?;
+        }
         if extra_credit > 0 {
             self.view_push(
                 key,
@@ -1449,6 +1888,45 @@ impl Scheduler {
             })
             .collect();
         for stream_id in expired {
+            self.queue.remove(stream_id);
+            self.reject(
+                stream_id,
+                503,
+                "Service Unavailable",
+                "queue timeout\n",
+                Outcome::QueueTimeout,
+                Some(retry_after),
+            )?;
+        }
+        // A structured body that never completes, and an unrouted `--learn`
+        // request that never gets the single fallback slot, are bounded by the
+        // same queue timeout.
+        let mut waiting: Vec<u32> = self
+            .requests
+            .values()
+            .filter(|request| {
+                !request.body_ready
+                    && request
+                        .queued_since
+                        .is_some_and(|since| now.duration_since(since) >= timeout)
+                    && request.view.is_none()
+            })
+            .map(|request| request.stream_id)
+            .collect();
+        waiting.extend(
+            self.learn_fallback_queue
+                .iter()
+                .copied()
+                .filter(|stream_id| {
+                    self.requests
+                        .get(stream_id)
+                        .and_then(|request| request.queued_since)
+                        .is_some_and(|since| now.duration_since(since) >= timeout)
+                }),
+        );
+        for stream_id in waiting {
+            self.learn_fallback_queue
+                .retain(|queued| *queued != stream_id);
             self.queue.remove(stream_id);
             self.reject(
                 stream_id,
@@ -2151,6 +2629,33 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Answers a request whose body the route will not take, cancelling a view
+    /// that may already have seen the head (`R12`, `R14`, `R15`).
+    ///
+    /// The view keeps its slot until its `DONE` arrives, exactly as a client
+    /// cancellation does: the response is over, but the thread is still alive.
+    fn refuse_body(&mut self, stream_id: u32, status: u16) -> Result<(), SchedulerError> {
+        let view = self
+            .requests
+            .get(&stream_id)
+            .and_then(|request| request.view);
+        if let Some((key, id)) = view {
+            self.view_push(key, id, Frame::Cancel)?;
+        }
+        let (reason, body) = canned(status);
+        self.respond(stream_id, status, reason, body, None)?;
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.complete = true;
+            request.outcome = Outcome::Unmatched;
+        }
+        self.mark_finished(stream_id);
+        self.emit_request(stream_id);
+        if view.is_none() {
+            self.release(stream_id);
+        }
+        Ok(())
+    }
+
     /// Marks an answer the scheduler just wrote as complete, and logs it.
     fn finish_immediately(
         &mut self,
@@ -2225,6 +2730,11 @@ impl Scheduler {
             self.slots = self.slots.saturating_sub(1);
         }
         self.queue.remove(stream_id);
+        if request.learn_fallback {
+            // The single `--learn` slot is free again; `pump` starts the next
+            // unrouted request right after this event.
+            self.learn_fallback_busy = false;
+        }
         if let Some(flow) = request.flow {
             self.queue.release_flow(flow, Instant::now());
         }
@@ -2311,31 +2821,34 @@ impl Scheduler {
         // §8.1: the `path` is the routed `PATH_INFO`, and never a query
         // string. A target the scheduler could not decode has no `PATH_INFO`
         // at all, so it reports the target with its query string removed.
-        let path = match &request.path_info {
-            Some(path_info) => path_info.clone(),
-            None => String::from_utf8_lossy(path_of_target(&request.head.target)).into_owned(),
+        //
+        // Both are handed to `from_target` as borrowed text, which is what
+        // strips the query and allocates the `path` once: cloning `path_info`
+        // first would allocate the same string twice per request.
+        let method = String::from_utf8_lossy(&request.head.method);
+        let routed_path = match &request.path_info {
+            Some(path_info) => Cow::Borrowed(path_info.as_str()),
+            None => String::from_utf8_lossy(path_of_target(&request.head.target)),
         };
-        let mut info = RequestInfo::from_target(
-            String::from_utf8_lossy(&request.head.method).into_owned(),
-            &path,
-        )
-        .with_status(request.status)
-        .with_outcome(request.outcome)
-        .with_timings(queued_ms, duration_ms)
-        .with_bytes(request.bytes_in, request.bytes_out)
-        .with_remote_addr(request.head.remote_addr.clone())
-        .with_cost(
-            request.charged_ns,
-            // The view's own CPU measurement, when it could take one: absent is
-            // not the same as zero (§8.1).
-            request.report.and_then(|report| report.cpu_ns),
-        );
+        let mut info = RequestInfo::from_target(&*method, &routed_path)
+            .with_status(request.status)
+            .with_outcome(request.outcome)
+            .with_timings(queued_ms, duration_ms)
+            .with_bytes(request.bytes_in, request.bytes_out)
+            .with_remote_addr(request.head.remote_addr.clone())
+            .with_cost(
+                request.charged_ns,
+                // The view's own CPU measurement, when it could take one:
+                // absent is not the same as zero (§8.1).
+                request.report.and_then(|report| report.cpu_ns),
+            );
         if let Some(rule) = request.rule {
             info = info.with_rule(rule);
         }
         let mut event = Event::now(Component::Scheduler, EventKind::Request(info))
             .with_request_id(request.request_id.clone());
         if let Some(route) = request.route
+            && !request.learn_fallback
             && let Some(route) = self.routes.get(route)
         {
             event = event.with_route(route.name.clone());
@@ -2598,11 +3111,36 @@ fn canned(status: u16) -> (&'static str, &'static str) {
     match status {
         400 => ("Bad Request", "bad request\n"),
         404 => ("Not Found", "not found\n"),
+        413 => ("Content Too Large", "content too large\n"),
         502 => ("Bad Gateway", "bad gateway\n"),
         503 => ("Service Unavailable", "unavailable\n"),
         504 => ("Gateway Timeout", "gateway timeout\n"),
         _ => ("Error", "error\n"),
     }
+}
+
+/// The first value of `name` in `head`, as text, when it is valid UTF-8.
+///
+/// Only `Content-Type`/`Content-Encoding` are read this way, and only to hand
+/// them to `blastit-ingress`, which never echoes them back unvalidated.
+fn header_text(head: &ReqHead, name: &[u8]) -> Option<String> {
+    head.headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .and_then(|(_, value)| std::str::from_utf8(value).ok())
+        .map(str::to_owned)
+}
+
+/// The first value of `name` in a head still in its raw payload, as text.
+///
+/// The same read as [`header_text`], over the borrowed [`ReqHeadView`] the
+/// scheduler plans a request's body from: the header list is walked in place,
+/// so neither the head nor the value is copied until it is actually needed.
+fn head_header_text(head: &ReqHeadView<'_>, name: &[u8]) -> Option<String> {
+    head.headers()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .and_then(|(_, value)| std::str::from_utf8(value).ok())
+        .map(str::to_owned)
 }
 
 /// Sleeps until `deadline`, or forever when there is none.
@@ -2691,11 +3229,16 @@ pub async fn run<C: CtlChannel + Send + 'static>(
     let (view_in_tx, mut view_in_rx) = mpsc::channel(VIEW_IN_CAPACITY);
     let (ctl_out, ctl_out_rx, ctl_pending) = Outbound::new(limits, CTL_OUTBOUND_CAP);
 
-    tokio::spawn(read_frames(
+    // http's frames are read without decoding: it is blastit's own Rust code,
+    // so its bytes are well-formed by construction, and the request head is
+    // forwarded to the view verbatim instead of being copied header by header.
+    // The view channel is read the strict way (see `view_spawned`); do not
+    // switch it to `read_raw_frames`.
+    tokio::spawn(read_raw_frames(
         http_read,
         limits,
         http_in_tx.clone(),
-        |id, frame| HttpIn::Frame { id, frame },
+        |id, raw| HttpIn::Frame { id, raw },
         |failure| match failure {
             Some(error) => HttpIn::Failed(error),
             None => HttpIn::Closed,

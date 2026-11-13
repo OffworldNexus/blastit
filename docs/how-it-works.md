@@ -101,8 +101,10 @@ proxy and `/proc/self/cwd` selects the view.
 
 ## Startup, and the `execve` barrier
 
-No process may ever hold a real secret in its `environ` or `argv`. Stage 0 reads
-them, hands them to dbproxy over a pipe, and `execve`s stage 1 without them:
+No process *after* stage 0 may hold a real secret in its `environ` or `argv`.
+Stage 0 reads them, hands them to dbproxy over a pipe, and `execve`s stage 1
+without them — its own environment is replaced before any app or broker process
+exists:
 
 * dbproxy is `fork` + `execve`'d with an **empty** environment, so its own
   `/proc/<pid>/environ` is empty;
@@ -124,7 +126,20 @@ memory copy-on-write:
 * **lazy spawning** and a cap on live view processes, derived from memory at boot
   and re-derived from what one costs on your app.
 
+## Dev mode
+
+`blastit dev` forks the same five roles from the same parent, with the same
+`execve` barrier, the same per-route sockets and the same policy checks — all
+under **your** uid, on `127.0.0.1`. The per-route sockets live in a private
+runtime directory, so nothing is written into the project. Routing, the credential
+swap and a denial are the real code paths, so a mistake shows up on localhost
+instead of in production.
+
+What it cannot do is the part that needs privilege. There is no uid boundary
+between roles, so there is no sandbox between routes; the banner says so, and
+production `blastit` exits rather than serve that way.
+
 ## Keep reading
 
 * [The security model](security.md) — the same machine, from the attacker's side.
-* [Fit it to your infra](infra/index.md) — where it runs.
+* [Deployments](deploy/index.md) — the real uid and capability path.

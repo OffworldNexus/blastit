@@ -20,13 +20,16 @@ blastit-env = { version = "0.1.0", path = "../blastit-env" }
 blastit-events = { version = "0.1.0", path = "../blastit-events" }
 blastit-frame = { version = "0.1.0", path = "../blastit-frame" }
 blastit-http = { version = "0.1.0", path = "../blastit-http" }
+blastit-ingress = { version = "0.1.0", path = "../blastit-ingress" }
 blastit-manifest = { version = "0.1.0", path = "../blastit-manifest" }
 blastit-scheduler = { version = "0.1.0", path = "../blastit-scheduler" }
+blastit-sqlpolicy = { version = "0.1.0", path = "../blastit-sqlpolicy" }
 blastit-sys = { version = "0.1.0", path = "../blastit-sys" }
 blastit-view = { version = "0.1.0", path = "../blastit-view" }
 libc = "0.2.191"
 pyo3 = "0.30.1"
 rustix = { version = "1.1.5", features = ["event", "fs", "process", "net", "pipe", "stdio"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }

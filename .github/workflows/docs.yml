@@ -9,6 +9,18 @@ name: Docs
 # index that `release.yml` used to publish was retired in E4, and releases go to
 # PyPI instead. Deploying from `develop` is also what makes the README's links
 # into the documentation live.
+#
+# `--strict` cannot see a page that `docs/` holds but the nav does not name, and
+# it publishes those pages all the same (`site/orphan/index.html`,
+# `docs/testing/AUDIT-MA.3.md` F3). The runnable-docs inventory is the list of
+# pages the gate executes, so the same inventory check `make docs-test` starts
+# with runs here, before the build, together with the assertion that closes the
+# orphan class itself: every Markdown page under `docs/` that `exclude_docs` does
+# not keep out of the build must be named by the nav. A page/nav/inventory drift
+# is then a red Docs check instead of an orphan page on the site. `ci.yml`'s
+# `docs-gate` job runs the whole gate; a job cannot `needs` another workflow's
+# job, so the check is repeated (it needs no wheel and no cargo, only the
+# repository).
 
 on:
   push:
@@ -41,6 +53,100 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - uses: astral-sh/setup-uv@v10.3.2
+      # The inventory half of `make docs-test`, which needs no wheel: the page
+      # list the gate executes must equal the public pages `zensical.toml` names,
+      # every listed page must parse into the fences the inventory indexes, and
+      # every fence mode/reason/fixture must be valid. Any problem is printed
+      # with the file to fix and fails the job before a page is published.
+      #
+      # The inventory only compares the pages it *names*, so on its own it cannot
+      # see a brand-new page that neither it nor the nav mentions (the orphan
+      # class). The second half closes that: every Markdown page under `docs_dir`
+      # that `exclude_docs` does not keep out must be named by the nav, exactly
+      # as `--strict` would publish it.
+      - name: Check the runnable-docs inventory and the page list
+        env:
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          uv run --no-project python - <<'PY'
+          import fnmatch
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          sys.path.insert(0, "python/tests/runnable_docs")
+
+          from harness import load_inventory
+          from run import INVENTORY, check_inventory
+
+          problems: list[str] = []
+          pages = load_inventory(INVENTORY)
+          problems += check_inventory(pages)
+
+          # `zensical.toml` is where the site and the gate both get their page
+          # list from, so the orphan check reads what the build reads:
+          # `docs_dir/**/*.md` minus `exclude_docs` (mkdocs syntax: a trailing
+          # `/` excludes a directory, anything else is a glob) against the nav.
+          config = tomllib.loads(Path("zensical.toml").read_text(encoding="utf-8"))
+          project = config["project"]
+          docs_dir = Path(project.get("docs_dir", "docs"))
+          excluded = [
+              rule.strip()
+              for rule in project.get("exclude_docs", "").splitlines()
+              if rule.strip()
+          ]
+
+          def excludes(page: str) -> bool:
+              for rule in excluded:
+                  rule = rule.lstrip("/")
+                  if rule.endswith("/"):
+                      if page.startswith(rule):
+                          return True
+                  elif fnmatch.fnmatchcase(page, rule):
+                      return True
+              return False
+
+          named: list[str] = []
+
+          def walk(entry: object) -> None:
+              if isinstance(entry, str):
+                  named.append((docs_dir / entry).as_posix())
+              elif isinstance(entry, dict):
+                  for value in entry.values():
+                      walk(value)
+              elif isinstance(entry, list):
+                  for value in entry:
+                      walk(value)
+
+          walk(project.get("nav", []))
+          orphans = [
+              path.as_posix()
+              for path in sorted(docs_dir.rglob("*.md"))
+              if not excludes(path.relative_to(docs_dir).as_posix())
+              and path.as_posix() not in named
+          ]
+          for orphan in orphans:
+              problems.append(
+                  f"{orphan} is published by the site but named by neither the nav "
+                  "nor the runnable-docs inventory"
+              )
+
+          for problem in problems:
+              print(f"inventory: {problem}", file=sys.stderr)
+          if problems:
+              print(
+                  "inventory: the runnable-docs gate and the site disagree; fix "
+                  "python/tests/runnable_docs/inventory.toml or zensical.toml's nav",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          fences = sum(len(page.fences) for page in pages)
+          print(
+              f"inventory: {len(pages)} pages / {fences} fences accounted, "
+              f"{len(named)} nav pages, 0 orphan pages"
+          )
+          PY
       - name: Install Zensical
         run: pipx install "zensical==$ZENSICAL_VERSION"
       # `--strict` aborts on a warning, and link validation is on by default:

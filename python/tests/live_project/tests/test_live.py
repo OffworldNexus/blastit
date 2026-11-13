@@ -24,15 +24,15 @@ two a project gets.
 """
 
 import os
-
-import pytest
 from urllib.error import HTTPError
 from urllib.request import urlopen
+
+import pytest
 
 
 def test_the_granted_route_is_served(blastit_live_server) -> None:
     """The manifest grants `SELECT 1`, so the request works end to end."""
-    with urlopen(f"{blastit_live_server.url}/live/") as response:  # noqa: S310 - 127.0.0.1
+    with urlopen(f"{blastit_live_server.url}/live/") as response:
         assert response.status == 200
         assert response.read() == b"ok"
 
@@ -40,14 +40,14 @@ def test_the_granted_route_is_served(blastit_live_server) -> None:
 def test_the_ungranted_route_is_refused(blastit_live_server) -> None:
     """`SELECT 'denied'` is not in the manifest: dbproxy refuses it, the view fails."""
     with pytest.raises(HTTPError) as refused:
-        urlopen(f"{blastit_live_server.url}/live/denied/")  # noqa: S310 - 127.0.0.1
+        urlopen(f"{blastit_live_server.url}/live/denied/")
     assert refused.value.code == 500
 
 
 def test_a_path_with_no_route_is_blastits_own_404(blastit_live_server) -> None:
     """`/live/oops/` exists in Django; blastit answers 404 before Django sees it."""
     with pytest.raises(HTTPError) as refused:
-        urlopen(f"{blastit_live_server.url}/live/oops/")  # noqa: S310 - 127.0.0.1
+        urlopen(f"{blastit_live_server.url}/live/oops/")
     assert refused.value.code == 404
 
 
@@ -59,7 +59,7 @@ def test_the_live_server_override_serves_live_server(live_server) -> None:
     would answer 200; blastit refuses the statement the manifest does not grant.
     """
     with pytest.raises(HTTPError) as refused:
-        urlopen(f"{live_server.url}/live/denied/")  # noqa: S310 - 127.0.0.1
+        urlopen(f"{live_server.url}/live/denied/")
     assert refused.value.code == 500
 
 

@@ -455,7 +455,7 @@ async fn request_events_carry_every_field() {
     let mut world = World::start(
         Options::new()
             .manifest(&format!(
-                "version = 1\n{}",
+                "version = 1\n{}[route.ingress]\nbody = \"raw\"\nallow_raw = true\n",
                 "[[route]]\nname = \"upload\"\npath = ['/upload/']\n"
             ))
             .script(

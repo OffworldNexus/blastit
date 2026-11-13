@@ -1,52 +1,69 @@
-# Fit it to your framework
+# Any WSGI app
 
-This page is what is true of Django and Flask alike.
+Blastit loads one callable and calls it. `app` names it as
+`<module>:<callable>`. There is no package to import, no `manage.py` command and
+no framework integration: Django, Flask, SQLAlchemy, raw psycopg and a
+hand-written WSGI app all look the same from here.
 
-## No framework integration
+```toml title="Django"
+app = "myshop.wsgi:application"
+```
 
-blastit loads one WSGI callable and calls it: `BLASTIT_APP`, written
-`module:attribute` — `myproject.wsgi:application` for Django, `app:app` for
-Flask. Your framework keeps its own routing, because which process serves a
-request comes from `blastit.toml`, not from your URL configuration. Nothing to
-install, nothing to import, no `manage.py` command.
+```toml title="Flask"
+app = "app:app"
+```
 
-## What blastit needs from an app
+```toml title="anything else"
+app = "wsgi:application"
+```
 
-### Send parameters separately from the SQL text
+Requests are routed by `blastit.toml`, not by your URLconf: `PATH_INFO` picks a
+route, and each route is a process and a uid with its own grants. `preload`
+imports modules once, before the fork, so every route shares one copy.
 
-Statements are matched by their text, so it must be identical on every request:
-a client that inlines literals sends a different string every time.
+## What Blastit needs from the app
 
-* **psycopg 3** used directly — fine: parameters travel as `$1`.
-* **Django with psycopg 3** —
-  `DATABASES["default"].setdefault("OPTIONS", {})["server_side_binding"] = True`.
-* **SQLAlchemy** — `postgresql+psycopg://`.
-* **psycopg2** — not usable: it cannot bind server-side.
+### Bind parameters server-side
 
-### Don't keep connections across requests
+Statements are matched by text, so the text must be identical on every request.
+A client that inlines literals sends a different string every time.
 
-Each request opens its own connection and then throws its thread away, so a
-connection that outlives the request is orphaned.
+| Client | What to do |
+|---|---|
+| psycopg 3, directly | nothing: parameters travel as `$1` |
+| Django | `OPTIONS["server_side_binding"] = True` |
+| SQLAlchemy | use `postgresql+psycopg://` |
+| psycopg2 | not usable: it cannot bind server-side; install `psycopg[binary]` |
 
-* Django: `CONN_MAX_AGE = 0`
-* SQLAlchemy: `poolclass=NullPool`
-* Flask-SQLAlchemy: `SQLALCHEMY_ENGINE_OPTIONS = {"poolclass": NullPool}`
+### Open the connection per request
 
-Pool in front of the real database: PgBouncer, or DigitalOcean's pools.
+Each request runs on a thread that is thrown away afterwards, so a connection
+that outlives the request is orphaned.
 
-## Routes and URL paths
+| Client | What to do |
+|---|---|
+| psycopg 3, directly | close it in a teardown |
+| Django | `CONN_MAX_AGE = 0` |
+| SQLAlchemy | `poolclass=NullPool` |
+| Flask-SQLAlchemy | `SQLALCHEMY_ENGINE_OPTIONS = {"poolclass": NullPool}` |
 
-A route's `path` is a list of Rust
-[regexes](https://docs.rs/regex/latest/regex/) matched against the **whole** of
-`PATH_INFO`. Routes are tried in manifest order; the first match wins, so a
-catch-all goes last.
+For pooling, put PgBouncer in front of the real database.
 
-* `methods = ["GET", "HEAD"]` is optional, and `HEAD` is not implied by `GET`.
+## Routing rules
+
+* `path` is a list of [regexes](https://docs.rs/regex/latest/regex/) matched
+  against the **whole** of `PATH_INFO`, in manifest order; the first match wins,
+  so a catch-all goes last.
+* `methods = ["GET", "HEAD"]` is optional. `HEAD` is not implied by `GET`.
 * A query string is not part of `PATH_INFO`.
-* `BLASTIT_SCRIPT_NAME` strips a mount prefix and sets `SCRIPT_NAME`.
-* `path = ['.*']` last lets your app render its own 404s.
+* A catch-all at the end lets your app render its own `404`s.
+
+## Check it
+
+`blastit check` is framework-agnostic: it runs your pytest suite through
+Blastit's brokers and checks every request and statement against the manifest.
 
 ## Next
 
-[Day-to-day life](day-to-day.md), then
-[fit it to your infra](../infra/index.md).
+[Django](django.md) · [Flask, SQLAlchemy and raw WSGI](flask.md) ·
+[local development](../local.md) · [CI/CD](../ci.md).

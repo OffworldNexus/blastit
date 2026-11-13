@@ -82,6 +82,8 @@ use std::hash::{BuildHasher, Hasher};
 use std::net::IpAddr;
 use std::time::Instant;
 
+use blastit_frame::{ReqHeadView, values_of};
+
 use crate::config::FairConfig;
 
 /// Identifies the flow a request belongs to: one client fingerprint (inner)
@@ -637,7 +639,50 @@ impl FairQueue {
         self.refresh_root();
     }
 
-    /// The flow a new request belongs to (see the module documentation).
+    /// The flow a new request belongs to, from a head built as owned pairs.
+    ///
+    /// Only the tests build a head this way; production reads it from a
+    /// [`ReqHeadView`]. Both go through [`FairQueue::resolve_iter`], so the key
+    /// this produces is the key production would produce.
+    #[cfg(test)]
+    pub(crate) fn resolve(
+        &mut self,
+        peer: &str,
+        headers: &[(Vec<u8>, Vec<u8>)],
+        now: Instant,
+    ) -> FlowRef {
+        self.resolve_iter(
+            peer,
+            headers
+                .iter()
+                .map(|(name, value)| (name.as_slice(), value.as_slice())),
+            now,
+        )
+    }
+
+    /// The flow a new request belongs to, read from a head that has not been
+    /// decoded.
+    ///
+    /// `http.chan` requests are not decoded into a [`blastit_frame::ReqHead`]
+    /// (see [`ReqHeadView`]), so the headers arrive borrowed out of the frame's
+    /// payload. This shares [`FairQueue::resolve_iter`] with
+    /// [`FairQueue::resolve`], so the flow — and hence the scheduling — is the
+    /// same whichever path read the head (D5).
+    pub(crate) fn resolve_view(
+        &mut self,
+        peer: &str,
+        head: &ReqHeadView<'_>,
+        now: Instant,
+    ) -> FlowRef {
+        self.resolve_iter(peer, head.headers(), now)
+    }
+
+    /// The flow a new request belongs to (see the module documentation), over
+    /// headers as borrowed slices.
+    ///
+    /// Both entry points above meet here, and everything that reads header
+    /// values — the client-IP resolver and the inner key — is reached only from
+    /// here, so the two paths cannot drift.
     ///
     /// This also counts the request as **admitted**: the flow is held until
     /// [`FairQueue::release`] is called for it, which is what keeps a flow that
@@ -645,14 +690,17 @@ impl FairQueue {
     ///
     /// `now` is the caller's clock, the one [`FairQueue::release`] and
     /// [`FairQueue::gc`] compare `last_active` against.
-    pub(crate) fn resolve(
-        &mut self,
-        peer: &str,
-        headers: &[(Vec<u8>, Vec<u8>)],
-        now: Instant,
-    ) -> FlowRef {
+    fn resolve_iter<'h, I>(&mut self, peer: &str, headers: I, now: Instant) -> FlowRef
+    where
+        I: Iterator<Item = (&'h [u8], &'h [u8])> + Clone,
+    {
         let burst = self.cfg.burst_ns();
-        let Some(ip) = self.cfg.client_ip.resolve(peer, headers).map(|c| c.ip()) else {
+        let Some(ip) = self
+            .cfg
+            .client_ip
+            .resolve_iter(peer, headers.clone())
+            .map(|c| c.ip())
+        else {
             // Not an address at all: the overflow flow is exactly where
             // "everything we cannot tell apart" belongs.
             return self.admit(OVERFLOW_OUTER, INNER_OVERFLOW, burst, now);
@@ -731,7 +779,10 @@ impl FairQueue {
     /// that "no `Authorization` header" and "an empty `Authorization` header"
     /// are one flow and not two, and a client cannot multiply its flows by
     /// leaving a header out.
-    fn inner_key(&self, headers: &[(Vec<u8>, Vec<u8>)], ip: IpAddr) -> u64 {
+    fn inner_key<'h, I>(&self, headers: I, ip: IpAddr) -> u64
+    where
+        I: Iterator<Item = (&'h [u8], &'h [u8])> + Clone,
+    {
         let mut hasher = self.hasher.build_hasher();
         let mut attribute = |name: &str, values: &[&str]| {
             hasher.write(name.as_bytes());
@@ -751,7 +802,7 @@ impl FairQueue {
             attribute("client-ip", &[ip.as_str()]);
         }
         for name in &self.cfg.inner_headers {
-            let values: Vec<&str> = values_of(headers, name)
+            let values: Vec<&str> = values_of(headers.clone(), name)
                 .filter_map(|value| std::str::from_utf8(value).ok())
                 .collect();
             attribute(name, &values);
@@ -793,17 +844,16 @@ impl FairQueue {
     }
 }
 
-/// The values of every instance of a header, matched case-insensitively.
-fn values_of<'a>(headers: &'a [(Vec<u8>, Vec<u8>)], name: &str) -> impl Iterator<Item = &'a [u8]> {
-    let name = name.as_bytes();
-    headers
-        .iter()
-        .filter(move |(field, _)| field.len() == name.len() && field.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_slice())
-}
-
 /// Every `name=value` pair of every `Cookie` header, in order.
-fn collect_cookies(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<(String, String)> {
+///
+/// Takes the headers as an iterator of borrowed slices so it reads the same
+/// pairs whether they were decoded into owned `Vec`s or are still in the
+/// `REQ_HEAD` payload; the `Cookie` values themselves are the only thing it
+/// copies, because a cookie name is built from several pieces of its value.
+fn collect_cookies<'h, I>(headers: I) -> Vec<(String, String)>
+where
+    I: Iterator<Item = (&'h [u8], &'h [u8])>,
+{
     let mut cookies = Vec::new();
     for value in values_of(headers, "cookie") {
         let Ok(value) = std::str::from_utf8(value) else {
@@ -1160,6 +1210,144 @@ mod tests {
             queue.resolve(&peer("10.0.0.1"), &one, Instant::now()).inner,
             queue.resolve(&peer("10.0.0.2"), &one, Instant::now()).inner
         );
+    }
+
+    /// The raw and decoded heads must resolve to the same flow (D5).
+    ///
+    /// The scheduler stopped decoding a `REQ_HEAD` before resolving its
+    /// fair-queue flow; it now hashes the headers straight out of the payload.
+    /// If the two paths hashed even one header or cookie differently, requests
+    /// would be scheduled as different clients with nothing else failing, so
+    /// this drives a corpus of awkward heads through both: the decoded form the
+    /// old code used, and the payload-view form the new code uses. The inner
+    /// key is a pure function of the input, so any `now` must do — one instant
+    /// is taken and both paths are given it.
+    #[test]
+    fn a_raw_head_and_a_decoded_head_resolve_to_the_same_flow() {
+        use blastit_frame::{Decoder, Frame, Limits, ReqHead, Scheme};
+
+        fn head(headers: Vec<(Vec<u8>, Vec<u8>)>, peer: &str) -> ReqHead {
+            ReqHead {
+                method: b"GET".to_vec(),
+                target: b"/search?q=1".to_vec(),
+                headers,
+                remote_addr: "203.0.113.7".to_string(),
+                scheme: Scheme::Https,
+                server_name: "example.com".to_string(),
+                server_port: 443,
+                peer_addr: peer.to_string(),
+            }
+        }
+        let h = |name: &str, value: &[u8]| (name.as_bytes().to_vec(), value.to_vec());
+
+        let heads: Vec<(&str, ReqHead)> = vec![
+            (
+                "the configured defaults are present",
+                head(
+                    vec![
+                        h("user-agent", b"browser"),
+                        h("accept-language", b"en-GB"),
+                        h("cookie", b"sessionid=aaa; session=bbb"),
+                        h("x-forwarded-for", b"203.0.113.7"),
+                    ],
+                    "127.0.0.1:5000",
+                ),
+            ),
+            (
+                "a repeated header keeps every value in order",
+                head(
+                    vec![
+                        h("authorization", b"one"),
+                        h("x-ignored", b"noise"),
+                        h("authorization", b"two"),
+                    ],
+                    "127.0.0.1:5000",
+                ),
+            ),
+            (
+                "header names are matched case-insensitively",
+                head(
+                    vec![
+                        h("User-Agent", b"browser"),
+                        h("AUTHORIZATION", b"Bearer"),
+                        h("CoOkIe", b"sessionid=ccc"),
+                    ],
+                    "127.0.0.1:5000",
+                ),
+            ),
+            (
+                "two cookie headers are one cookie jar",
+                head(
+                    vec![h("cookie", b"other=1"), h("cookie", b"sessionid=ddd")],
+                    "127.0.0.1:5000",
+                ),
+            ),
+            (
+                "a cookie with no value and a pair with no `=`",
+                head(
+                    vec![h("cookie", b"sessionid;other=; session=s p a c e ")],
+                    "127.0.0.1:5000",
+                ),
+            ),
+            (
+                "an empty value is an absent one, not a second flow",
+                head(
+                    vec![h("authorization", b""), h("user-agent", b"")],
+                    "127.0.0.1:5000",
+                ),
+            ),
+            (
+                "every configured header may be missing",
+                head(vec![h("host", b"example.com")], "127.0.0.1:5000"),
+            ),
+            (
+                "non-UTF-8 names and values are inert and safe",
+                head(
+                    vec![
+                        (vec![0xff, 0xfe], b"x".to_vec()),
+                        h("authorization", &[0x80, 0x81]),
+                        h("cookie", &[0xff]),
+                    ],
+                    "127.0.0.1:5000",
+                ),
+            ),
+            (
+                "an unreadable peer still shares the overflow flow",
+                head(vec![h("authorization", b"Bearer")], "unnamed-socket"),
+            ),
+        ];
+
+        let limits = Limits::default();
+        // The defaults, plus a config whose lists have missing entries and no
+        // address, so the cookie and absent-header paths are hit harder.
+        let mut custom = FairConfig::default();
+        custom.inner_headers = vec!["x-custom".to_string(), "authorization".to_string()];
+        custom.inner_cookies = vec!["session".to_string(), "sessionid".to_string()];
+        custom.inner_include_ip = false;
+        let configs = [("default", FairConfig::default()), ("custom", custom)];
+
+        for (label, head) in &heads {
+            let mut wire = Vec::new();
+            limits
+                .encode(&Frame::ReqHead(head.clone()), 7, &mut wire)
+                .unwrap();
+            let mut decoder = Decoder::new(limits);
+            decoder.push(&wire);
+            let (_, raw) = decoder.next_raw().unwrap().unwrap();
+            let view = ReqHeadView::parse(&raw.payload).unwrap();
+
+            for (config_label, config) in &configs {
+                let now = Instant::now();
+                // One queue for both: the inner key is salted with the queue's
+                // own per-process seed, so two queues could not be compared.
+                // Resolving the same head twice through one queue is also the
+                // stronger claim — the two paths agree in one scheduler.
+                let mut queue = FairQueue::new(config.clone());
+                let decoded = queue.resolve(&head.peer_addr, &head.headers, now);
+                let raw_flow = queue.resolve_view(view.peer_addr(), &view, now);
+                assert_eq!(decoded, raw_flow, "{label} / {config_label}");
+            }
+        }
     }
 
     #[test]

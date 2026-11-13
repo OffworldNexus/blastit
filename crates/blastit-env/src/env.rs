@@ -111,6 +111,34 @@ pub fn build(
     platform_env: &BTreeMap<String, String>,
     strip: Option<&str>,
 ) -> Result<Prepared, EnvErrors> {
+    build_in(manifest, platform_env, strip, postgresql::SOCKET_DIR)
+}
+
+/// [`build`] with a caller-chosen socket directory for every `postgresql`
+/// proxy's rendered endpoint (§5.1, §5.2).
+///
+/// The runtime uses each view's own working directory
+/// ([`postgresql::SOCKET_DIR`]), which every view resolves to itself. `blastit
+/// check` binds the proxies' sockets under `<runtime_dir>/pg` instead and runs
+/// `pytest` from the project directory, so its secret-free `swapped_env` has to
+/// name that directory explicitly. Everything else — the strip list, the
+/// injected defaults, the upstreams — is exactly [`build`].
+pub fn build_with_socket_dir(
+    manifest: &Manifest,
+    platform_env: &BTreeMap<String, String>,
+    strip: Option<&str>,
+    socket_dir: &str,
+) -> Result<Prepared, EnvErrors> {
+    build_in(manifest, platform_env, strip, socket_dir)
+}
+
+/// The rewrite of [`build`], rendered against `socket_dir`.
+fn build_in(
+    manifest: &Manifest,
+    platform_env: &BTreeMap<String, String>,
+    strip: Option<&str>,
+    socket_dir: &str,
+) -> Result<Prepared, EnvErrors> {
     let mut strip_names: BTreeSet<String> = BTreeSet::new();
     if let Some(extra) = strip {
         strip_names.extend(split_strip(extra));
@@ -178,7 +206,7 @@ pub fn build(
                         continue;
                     }
                 };
-                let fields = postgresql::template_fields(&upstream, port);
+                let fields = postgresql::template_fields_in(&upstream, port, socket_dir);
                 let table = if proxy.output().is_empty() {
                     postgresql::default_outputs(proxy)
                 } else {
@@ -339,7 +367,9 @@ mod tests {
 
     use blastit_manifest::Manifest;
 
-    use super::{INJECTED_DEFAULTS, build, platform_env_from_os, split_strip};
+    use super::{
+        INJECTED_DEFAULTS, build, build_with_socket_dir, platform_env_from_os, split_strip,
+    };
 
     fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -441,6 +471,51 @@ mod tests {
                 "{name} should be stripped"
             );
         }
+    }
+
+    #[test]
+    fn a_caller_chosen_socket_dir_reaches_the_rendered_url_only() {
+        let manifest = manifest(
+            "version = 1\n[proxy.db]\nprotocol = \"postgresql\"\ninput = { url = \"DATABASE_URL\" }\n",
+        );
+        let platform = env(&[
+            (
+                "DATABASE_URL",
+                "postgresql://doadmin:s3cr3t@db.example.com:25060/shop",
+            ),
+            ("PATH", "/usr/bin"),
+        ]);
+
+        // The runtime renders each view's own directory …
+        let runtime = build(&manifest, &platform, None).expect("builds");
+        assert_eq!(
+            runtime.app_env().get("DATABASE_URL").map(String::as_str),
+            Some("postgresql://blastit@/shop?host=/proc/self/cwd&port=5432")
+        );
+
+        // … and `blastit check` renders the directory it bound the proxies under.
+        let checked =
+            build_with_socket_dir(&manifest, &platform, None, "/run/blastit/pg").expect("builds");
+        assert_eq!(
+            checked.app_env().get("DATABASE_URL").map(String::as_str),
+            Some("postgresql://blastit@/shop?host=/run/blastit/pg&port=5432")
+        );
+
+        // Moving the socket directory moves no secret: the password stays in
+        // dbproxy's half of the rewrite, never in either app environment.
+        assert!(
+            !checked
+                .app_env()
+                .values()
+                .any(|value| value.contains("s3cr3t"))
+        );
+        assert_eq!(
+            checked
+                .upstream("db")
+                .map(|upstream| upstream.password().expose()),
+            Some("s3cr3t")
+        );
+        assert!(runtime.upstream("db").is_some());
     }
 
     /// A byte string that is not valid UTF-8.

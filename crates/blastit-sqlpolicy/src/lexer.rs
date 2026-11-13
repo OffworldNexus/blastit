@@ -17,6 +17,9 @@
 //!   which is why [`lex`] walks code token by token ([`code_token_end`])
 //!   instead of character by character.
 //!
+//! Every quoted form PostgreSQL 18 accepts is a region of its own: `'…'`,
+//! `E'…'`, `B'…'`, `X'…'`, `N'…'`, `U&'…'`, `"…"` and `$tag$…$tag$`.
+//!
 //! Two divergences are deliberate and cannot hide code or quoted data:
 //!
 //! * scan.l's string continuation (`'a'` + whitespace containing a newline +
@@ -51,6 +54,13 @@ pub(crate) enum RegionKind {
     /// `X'…'` / `x'…'` (`xh`): hexadecimal bytes, with **no** escape of any
     /// kind either.
     HexString,
+    /// `N'…'` / `n'…'` (`xn`): a national character string, with `''` as an
+    /// escaped quote and **no** backslash escape.
+    NationalString,
+    /// `U&'…'` / `u&'…'` (`xuf`): a Unicode escape string, with `''` as an
+    /// escaped quote and **no** backslash escape — a backslash introduces a
+    /// Unicode escape, it does not escape the quote.
+    UnicodeString,
     /// `"…"` (`xd`), with `""` as an escaped quote.
     QuotedIdent,
     /// `$$…$$` or `$tag$…$tag$` (`xdolq`): completely opaque.
@@ -65,6 +75,27 @@ pub(crate) struct Region {
     pub(crate) kind: RegionKind,
     pub(crate) start: usize,
     pub(crate) end: usize,
+}
+
+impl RegionKind {
+    /// Whether the region is a quoted **literal**: data a statement carries,
+    /// as opposed to code, a comment or a quoted identifier.
+    ///
+    /// This is the set [`crate::redact_literals`] replaces with `…` and
+    /// [`crate::has_quoted_literal`] reports, so it is the one place that
+    /// decides what "a literal" means.
+    pub(crate) const fn is_literal(self) -> bool {
+        matches!(
+            self,
+            Self::SingleQuoted
+                | Self::EString
+                | Self::BitString
+                | Self::HexString
+                | Self::NationalString
+                | Self::UnicodeString
+                | Self::DollarQuoted
+        )
+    }
 }
 
 /// Whether `c` is whitespace in PostgreSQL: scan.l's `space` = `[ \t\n\r\f\v]`.
@@ -136,6 +167,12 @@ fn construct_at(chars: &[char], i: usize) -> Option<(RegionKind, usize)> {
         }
         'x' | 'X' if chars.get(i + 1) == Some(&'\'') => {
             Some((RegionKind::HexString, skip_escapeless(chars, i + 1)))
+        }
+        'n' | 'N' if chars.get(i + 1) == Some(&'\'') => {
+            Some((RegionKind::NationalString, skip_doubled(chars, i + 1, '\'')))
+        }
+        'u' | 'U' if chars.get(i + 1) == Some(&'&') && chars.get(i + 2) == Some(&'\'') => {
+            Some((RegionKind::UnicodeString, skip_doubled(chars, i + 2, '\'')))
         }
         '$' => dollar_tag_at(chars, i).map(|(open_len, tag)| {
             let end = match find_dollar_close(chars, i + open_len, &tag) {
@@ -646,6 +683,82 @@ mod tests {
             vec![
                 (RegionKind::BitString, r"B'a\'".to_string()),
                 (RegionKind::BitString, "b'".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn national_strings_escape_only_by_doubling() {
+        assert_eq!(
+            kinds("N'x'"),
+            vec![(RegionKind::NationalString, "N'x'".to_string())]
+        );
+        assert_eq!(
+            kinds("n'x'"),
+            vec![(RegionKind::NationalString, "n'x'".to_string())]
+        );
+        assert_eq!(
+            kinds("N'it''s'"),
+            vec![(RegionKind::NationalString, "N'it''s'".to_string())]
+        );
+        // No backslash escape: the literal ends at the next quote.
+        assert_eq!(
+            kinds(r"N'a\'b'"),
+            vec![
+                (RegionKind::NationalString, r"N'a\'".to_string()),
+                (RegionKind::BitString, "b'".to_string()),
+            ]
+        );
+        // The prefix needs a token start, so an identifier keeps its `N`.
+        assert_eq!(
+            kinds("xN'y'"),
+            vec![
+                (RegionKind::Code, "xN".to_string()),
+                (RegionKind::SingleQuoted, "'y'".to_string()),
+            ]
+        );
+        // ... and a number glues a following `N` to itself (`integer_junk`).
+        assert_eq!(
+            kinds("1N'x'"),
+            vec![
+                (RegionKind::Code, "1N".to_string()),
+                (RegionKind::SingleQuoted, "'x'".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn unicode_strings_swallow_their_prefix() {
+        assert_eq!(
+            kinds(r"U&'\0041'"),
+            vec![(RegionKind::UnicodeString, r"U&'\0041'".to_string())]
+        );
+        assert_eq!(
+            kinds(r"u&'a''b'"),
+            vec![(RegionKind::UnicodeString, r"u&'a''b'".to_string())]
+        );
+        // A backslash introduces an escape, it does not escape the quote.
+        assert_eq!(
+            kinds(r"U&'a\'b'"),
+            vec![
+                (RegionKind::UnicodeString, r"U&'a\'".to_string()),
+                (RegionKind::BitString, "b'".to_string()),
+            ]
+        );
+        // `U&"ident"` is a quoted identifier: the prefix is code, not a string.
+        assert_eq!(
+            kinds(r#"U&"ident""#),
+            vec![
+                (RegionKind::Code, "U&".to_string()),
+                (RegionKind::QuotedIdent, r#""ident""#.to_string()),
+            ]
+        );
+        // A `U` glued to an identifier never starts one.
+        assert_eq!(
+            kinds("xU&'y'"),
+            vec![
+                (RegionKind::Code, "xU&".to_string()),
+                (RegionKind::SingleQuoted, "'y'".to_string()),
             ]
         );
     }

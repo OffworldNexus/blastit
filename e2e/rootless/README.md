@@ -230,8 +230,11 @@ Two conservative rules, both about what the API does not say:
 ## In CI
 
 `e2e/rootless/Dockerfile.prebuilt` installs a wheel CI has already built, so a
-job needs no Rust toolchain. The proposed job (for the orchestrator, since
-`.github/` is out of scope for this step) is the D6 analogue of `e2e`:
+job needs no Rust toolchain. Its base image is the interpreter that wheel
+targets — the driver reads the tag out of the file name — so a job that pins
+3.13 for the wheel builds on `python:3.13`. The proposed job (for the
+orchestrator, since `.github/` is out of scope for this step) is the D6 analogue
+of `e2e`:
 
 ```yaml
   rootless:

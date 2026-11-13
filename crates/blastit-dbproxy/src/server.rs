@@ -45,6 +45,7 @@ use crate::Emit;
 use crate::config::{DbproxyConfig, ListenerSpec};
 use crate::error::DbproxyError;
 use crate::hooks::{DbproxyAuth, DbproxyQuery, UPSTREAM_MESSAGE};
+use crate::learn::serve_control;
 use crate::state::{ListenerRuntime, Shared, credentials_match};
 
 /// How long a client has to finish the startup phase.
@@ -195,8 +196,17 @@ async fn serve(
     let server = Arc::new(Server {
         auth: Arc::new(DbproxyAuth::new(Arc::clone(&shared))),
         query: Arc::new(DbproxyQuery::new(Arc::clone(&shared))),
-        shared,
+        shared: Arc::clone(&shared),
     });
+
+    // The control channel is dbproxy's half of `ctl.sock`, handed over as a
+    // descriptor. It is adopted here, once, and its task runs for the life of
+    // the process: when the peer closes it (or wedges past the 5 s deadline) the
+    // task ends and the channel is closed, which is the only failure signal a
+    // peer that aborts the run needs.
+    if let Some(fd) = config.check_ctl_fd {
+        spawn_control(fd, Arc::clone(&shared))?;
+    }
 
     let mut prepared = Vec::with_capacity(listeners.len());
     for (index, (listener, _spec)) in listeners.into_iter().enumerate() {
@@ -239,6 +249,30 @@ struct Server {
     shared: Arc<Shared>,
     auth: Arc<dyn AuthHook>,
     query: Arc<dyn QueryHook>,
+}
+
+/// Adopts the control descriptor and serves the JSON-line protocol on it.
+///
+/// The descriptor is the dbproxy end of `ctl.sock`, created for dbproxy by the
+/// orchestrator. dbproxy owns it after this call: the task closes it when the
+/// peer closes the channel, and nothing else refers to it by number.
+///
+/// The task is detached on purpose. Its end is not fatal to the listeners — a
+/// control channel that went away means no request can be attributed any more,
+/// so the next statement is simply not observed, and the orchestrator that
+/// owned the other end is the one that reports the failure
+/// (§4.2 D.2: `502`/exit `3`).
+fn spawn_control(fd: i32, shared: Arc<Shared>) -> Result<(), DbproxyError> {
+    // SAFETY: `fd` was created for dbproxy and handed over exactly once; it is
+    // non-negative (checked by `DbproxyConfig::validate_learning`) and is not
+    // referred to by number anywhere else. `UnixStream` takes ownership, so the
+    // descriptor is closed when the task ends.
+    let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    stream.set_nonblocking(true)?;
+    let stream = UnixStream::from_std(stream)?;
+    let learning = Arc::clone(shared.learning());
+    tokio::spawn(serve_control(stream, learning));
+    Ok(())
 }
 
 /// Checks `SO_PASSCRED`, sets it when it is missing, and switches the listener
@@ -499,6 +533,7 @@ async fn serve_connection(
 
     proxy.release_slot(id);
     let _ = shared.take_refusal(id);
+    shared.learning().forget(id);
 
     if gate_state.upstream_failure() {
         // pregresql's own account of the failure was swallowed: the client
@@ -540,7 +575,7 @@ async fn handle_cancel(
 ) {
     let route = listener.spec.route.as_str();
     let proxy = &listener.proxy;
-    if !credentials_match(listener.spec.uid, credentials) {
+    if !credentials_match(listener.spec.uid, credentials, shared.allow_root_listener()) {
         shared.emit_pg_refused(
             Some(route),
             &proxy.name,
@@ -1102,6 +1137,7 @@ mod tests {
         let config = DbproxyConfig {
             proxies: vec![proxy.clone()],
             listeners: vec![listener(-1, "a")],
+            ..DbproxyConfig::default()
         };
         let error = run(config, Arc::clone(&emit))
             .await
@@ -1112,6 +1148,7 @@ mod tests {
         let config = DbproxyConfig {
             proxies: vec![proxy],
             listeners: vec![listener(3, "a"), listener(3, "b")],
+            ..DbproxyConfig::default()
         };
         let error = run(config, emit).await.expect_err("a repeated fd");
         assert!(error.to_string().contains("twice"), "{error}");
@@ -1148,6 +1185,7 @@ mod tests {
         let config = DbproxyConfig {
             proxies: vec![proxy],
             listeners: vec![listener.clone()],
+            ..DbproxyConfig::default()
         };
         let emit: crate::Emit = Arc::new(|_: Event| {});
         Shared::build(&config, &[listener], emit).expect("state")

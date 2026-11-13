@@ -23,7 +23,11 @@ const MIB: u64 = 1024 * 1024;
 
 /// A two-route manifest: `/a/` and `/b/`, both answering.
 fn two_routes() -> String {
-    format!("version = 1\n{}{}", route("a", "/a/"), route("b", "/b/"))
+    format!(
+        "version = 1\n{}[route.ingress]\nbody = \"raw\"\nallow_raw = true\n{}",
+        route("a", "/a/"),
+        route("b", "/b/")
+    )
 }
 
 /// A configurable world where both routes answer immediately.

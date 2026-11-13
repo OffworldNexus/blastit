@@ -15,7 +15,6 @@ import os
 
 import pytest
 
-
 if os.environ.get("BLASTIT_TEST_OWN_LIVE_SERVER"):
 
     @pytest.fixture

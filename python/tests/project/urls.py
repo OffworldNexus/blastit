@@ -1,8 +1,7 @@
 """The URLs of the tiny project, including the one blastit has no route for."""
 
-from django.urls import path
-
 import views
+from django.urls import path
 
 urlpatterns = [
     path("notes/", views.note_list),

@@ -16,11 +16,12 @@
 //! can be a credential).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use blastit_events::{Level, Lifecycle};
 use blastit_frame::{ClientIpConfig, Limits, TrustedProxies, is_header_name};
+use blastit_manifest::Manifest;
 use blastit_scheduler::{
     FQ_BURST_DEFAULT, FQ_DEBT_TTL_DEFAULT, FQ_INNER_COOKIES_DEFAULT, FQ_INNER_HEADERS_DEFAULT,
     FQ_INNER_MAX_DEFAULT, FQ_INNER_MAX_PER_OUTER_DEFAULT, FQ_MAX_DEBT_DEFAULT,
@@ -129,7 +130,7 @@ impl Preset {
 
     /// The value this preset supplies for `variable`, if any.
     ///
-    /// This is what [`Settings`] falls back to when the environment does not
+    /// This is what `Settings` falls back to when the environment does not
     /// have the variable.
     pub fn get(self, variable: &str) -> Option<&'static str> {
         self.settings
@@ -237,8 +238,17 @@ impl Privilege {
     /// lifecycle event (§8.1, D6).
     ///
     /// The one place both stages build these fields from, so the two `boot`
-    /// events cannot drift apart.
+    /// events cannot drift apart. It is also where `R23`'s build is attached:
+    /// the `preload` `boot` is the one lifecycle event that names the build it
+    /// is about to serve, and stage 1 constructs it through this method
+    /// (`crate::stage1`'s `preload_lifecycle`). Every other lifecycle event
+    /// (`stage0`, `config`, `ready`, `shutdown`) leaves `build` out.
     pub fn lifecycle(&self, lifecycle: Lifecycle) -> Lifecycle {
+        let lifecycle = if lifecycle.stage() == Some("preload") {
+            lifecycle.with_build(env!("CARGO_PKG_VERSION"))
+        } else {
+            lifecycle
+        };
         let lifecycle = lifecycle
             .with_privilege(self.mode.as_str())
             .with_bounding_set(self.bounding_set_dropped);
@@ -380,6 +390,9 @@ pub enum Warning {
     /// A preset whose values assume a rootless deployment was used where init
     /// runs as root (E1, D6).
     PresetExpectsRootless,
+    /// `BLASTIT_SECCOMP=0` was honoured outside a preset, so syscall and
+    /// `egress` filtering are off (`R18`, `S6`).
+    SeccompDisabled,
 }
 
 impl Warning {
@@ -398,6 +411,7 @@ impl Warning {
             Self::PresetFlagWins => "preset_flag_wins",
             Self::PresetExpectsRoot => "preset_expects_root",
             Self::PresetExpectsRootless => "preset_expects_rootless",
+            Self::SeccompDisabled => "seccomp_disabled",
         }
     }
 
@@ -421,6 +435,7 @@ impl Warning {
             "preset_flag_wins" => Ok(Self::PresetFlagWins),
             "preset_expects_root" => Ok(Self::PresetExpectsRoot),
             "preset_expects_rootless" => Ok(Self::PresetExpectsRootless),
+            "seccomp_disabled" => Ok(Self::SeccompDisabled),
             other => Err(document("warnings", format!("unknown token `{other}`"))),
         }
     }
@@ -484,6 +499,10 @@ impl Warning {
                  the preset assumes — start it as an unprivileged user with the \
                  capabilities it needs"
             }
+            Self::SeccompDisabled => {
+                "BLASTIT_SECCOMP=0: syscall and egress filtering are disabled, which is \
+                 for emergency debugging only — set BLASTIT_SECCOMP=1"
+            }
         }
     }
 }
@@ -521,6 +540,18 @@ pub enum ConfigError {
     /// The environment could not be read at all.
     #[error("reading the environment: {0}")]
     Io(#[from] std::io::Error),
+    /// The manifest could not be read or parsed while its `app`/`preload`
+    /// fallback was resolved (`R7`, `R9`).
+    ///
+    /// The path is the discovered one and the reason comes from the parser; no
+    /// value from the environment is ever carried.
+    #[error("manifest {}: {reason}", path.display())]
+    Manifest {
+        /// The manifest path that was read.
+        path: PathBuf,
+        /// Why it could not be used.
+        reason: String,
+    },
 }
 
 /// The preset in force, and what the configuration did with it (E1).
@@ -752,7 +783,7 @@ pub struct Config {
     ///
     /// The entries are bytes — `os.fsencode`, because a path that is not valid
     /// UTF-8 is a path like any other — while the document is JSON. Each is
-    /// carried one byte per character ([`latin1`]), which is the identity for
+    /// carried one byte per character (`latin1`), which is the identity for
     /// the ASCII of every ordinary path.
     pub sys_path: Vec<Vec<u8>>,
     /// The working directory `blastit` was launched in (D2, §5.3).
@@ -794,7 +825,7 @@ impl Default for Config {
             server_port: 8080,
             app: None,
             preload: Vec::new(),
-            manifest: PathBuf::from("/app/blastit.toml"),
+            manifest: PathBuf::from("./blastit.toml"),
             script_name: None,
             log_format: LogFormat::Json,
             log_level: Level::Info,
@@ -810,7 +841,7 @@ impl Default for Config {
             view_max_requests: 0,
             max_view_processes: None,
             view_mem_estimate: 32 * 1024 * 1024,
-            mem_high_watermark_percent: 85.0,
+            mem_high_watermark_percent: crate::mem_usage::DEFAULT_WATERMARK_PERCENT,
             immortalize: Immortalize::Auto,
             max_header_bytes: 64 * 1024,
             max_body_bytes: 100 * 1024 * 1024,
@@ -858,33 +889,61 @@ impl Default for Config {
     }
 }
 
+/// Whether a [`Config`] may take its preset from `BLASTIT_PRESET` (E1,
+/// `ADR-0005`).
+///
+/// Production `blastit` reads the variable. `blastit dev`, `blastit check` and
+/// `blastit test` never do, so a preset exported in a developer's shell cannot
+/// change a local or CI run: it would otherwise replace `dev`'s `pretty` log
+/// default with the preset's `json`, and turn a harmless `BLASTIT_SECCOMP=0`
+/// into the production abort (`R2`, `R3`, `R18`, `ADR-0005`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresetPolicy {
+    /// Honour `BLASTIT_PRESET`; `--preset` wins over it (production `blastit`).
+    Env,
+    /// Never read `BLASTIT_PRESET` (`blastit dev`, `check`, `test`).
+    IgnoreEnv,
+}
+
 impl Config {
-    /// Reads the configuration from the process environment (§8.2).
-    ///
-    /// `preset` is `--preset`'s value when the command line carried one. It
-    /// wins over `BLASTIT_PRESET`, because the command line is the more
-    /// explicit of the two — the flag is typed at the process that is being
-    /// started, the variable may well come from an image or an orchestrator —
-    /// and the `boot` event names the preset it settled on, so a flag that
-    /// disagreed with the variable is visible in the log rather than silent.
-    /// Both are *defaults*: every variable that is actually set (and `PORT`)
-    /// wins over whatever the preset supplies.
-    ///
-    /// Every problem is reported one at a time, and every message names the
-    /// variable it came from.
+    /// Production `blastit`: the process environment's configuration, with the
+    /// production log default (`json`) and `BLASTIT_PRESET` honoured (`R10`).
     ///
     /// # Errors
     ///
-    /// [`ConfigError`] for a variable that does not parse, and for a preset
-    /// name this build does not know. Nothing is reported for an unset variable
-    /// with a default.
+    /// [`ConfigError`] for a variable that does not parse, a manifest name this
+    /// build does not know, and a `BLASTIT_SECCOMP=0` that a preset forbids.
+    pub fn from_env(preset: Option<&str>) -> Result<Self, ConfigError> {
+        Self::from_env_with_format(preset, LogFormat::Json, PresetPolicy::Env)
+    }
+
+    /// The same, with the per-command `BLASTIT_LOG_FORMAT` default and an
+    /// explicit [`PresetPolicy`] (`R2`, `R3`, `R10`).
+    ///
+    /// `blastit` defaults to `json`, while `blastit dev` and `blastit check`
+    /// default to `pretty`. An explicit `BLASTIT_LOG_FORMAT` wins in all three,
+    /// which is why the default is a parameter rather than a table in here. The
+    /// policy is a parameter for the same reason: whether a command may read
+    /// `BLASTIT_PRESET` is a decision of the command, not of the environment
+    /// (`ADR-0005`), and a caller cannot leave it out.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] for a variable that does not parse, a manifest name this
+    /// build does not know, and a `BLASTIT_SECCOMP=0` that a preset forbids.
     // Each field is read from its own variable and may fail on its own, so a
     // single struct literal would have to nest every error path inside it.
     #[allow(clippy::field_reassign_with_default)]
-    pub fn from_env(preset: Option<&str>) -> Result<Self, ConfigError> {
-        let (chosen, preset_warnings) = preset_choice(preset)?;
+    pub fn from_env_with_format(
+        preset: Option<&str>,
+        default_log_format: LogFormat,
+        policy: PresetPolicy,
+    ) -> Result<Self, ConfigError> {
+        let (chosen, preset_warnings) = preset_choice(preset, policy)?;
         let settings = Settings { preset: chosen };
         let mut config = Self::default();
+        config.log_format = default_log_format;
+        config.manifest = manifest_path()?;
         config.port = settings
             .get("PORT")?
             .map_or(Ok(config.port), |value| parse_u16("PORT", &value))?;
@@ -892,19 +951,31 @@ impl Config {
             Some(value) => parse_u16("SERVER_PORT", &value)?,
             None => config.port,
         };
-        config.app = settings
-            .get("BLASTIT_APP")?
-            .filter(|value| !value.is_empty());
+        // R7/R9: the manifest's `app`/`preload` are fallbacks beneath a *set*
+        // environment variable, and a set-but-empty variable wins. The file is
+        // read only for the values the environment leaves open; the full
+        // manifest is parsed again by the stage that boots the server.
+        let app_from_env = std::env::var_os("BLASTIT_APP").is_some();
+        let preload_from_env = std::env::var_os("BLASTIT_PRELOAD").is_some();
+        let (manifest_app, manifest_preload) = if app_from_env && preload_from_env {
+            (None, Vec::new())
+        } else {
+            manifest_wiring(&config.manifest)?
+        };
+        config.app = match settings.get("BLASTIT_APP")? {
+            Some(value) if value.is_empty() => {
+                return Err(invalid(
+                    "BLASTIT_APP",
+                    "must be `module:attribute`".to_string(),
+                ));
+            }
+            Some(value) => Some(value),
+            None => manifest_app,
+        };
         config.preload = match settings.get("BLASTIT_PRELOAD")? {
             Some(value) => split_list(&value),
-            None => Vec::new(),
+            None => manifest_preload,
         };
-        if let Some(value) = settings
-            .get("BLASTIT_MANIFEST")?
-            .filter(|value| !value.is_empty())
-        {
-            config.manifest = PathBuf::from(value);
-        }
         config.script_name = settings
             .get("BLASTIT_SCRIPT_NAME")?
             .filter(|value| !value.is_empty());
@@ -1134,6 +1205,21 @@ impl Config {
             config.seccomp,
             parse_bool,
         )?;
+        // R18: a preset deployment may not run without the filters. Outside a
+        // preset the emergency value is honoured, loudly.
+        if !config.seccomp {
+            if let Some(preset) = chosen {
+                return Err(invalid(
+                    "BLASTIT_SECCOMP",
+                    format!(
+                        "must not be 0 while preset `{}` is active: remove \
+                         BLASTIT_SECCOMP or set BLASTIT_SECCOMP=1",
+                        preset.name()
+                    ),
+                ));
+            }
+            config.warnings.push(Warning::SeccompDisabled);
+        }
         config.graceful_timeout = defaulted(
             settings.get("BLASTIT_GRACEFUL_TIMEOUT")?,
             "BLASTIT_GRACEFUL_TIMEOUT",
@@ -1164,6 +1250,36 @@ impl Config {
         config.validate()?;
         config.preset = chosen.map(PresetChoice::resolve);
         Ok(config)
+    }
+
+    /// `blastit dev`: the configuration for the unprivileged single-UID
+    /// simulation (`R2`).
+    ///
+    /// Identical to a production read except in the two ways `dev` promises:
+    /// `BLASTIT_LOG_FORMAT` defaults to `pretty`, and `BLASTIT_PRESET` is never
+    /// read — no preset, no override warnings, and no
+    /// `BLASTIT_SECCOMP=0`-under-a-preset abort (`ADR-0005`).
+    ///
+    /// # Errors
+    ///
+    /// The [`ConfigError`]s [`Config::from_env`] reports, except for
+    /// `BLASTIT_PRESET`.
+    pub fn for_dev() -> Result<Self, ConfigError> {
+        Self::from_env_with_format(None, LogFormat::Pretty, PresetPolicy::IgnoreEnv)
+    }
+
+    /// `blastit check` and its exact alias `blastit test` (`R3`).
+    ///
+    /// The same contract as [`Config::for_dev`]: `pretty` by default, and an
+    /// exported `BLASTIT_PRESET` is ignored, so a CI run audits the manifest in
+    /// front of it rather than a deployment preset (`ADR-0005`).
+    ///
+    /// # Errors
+    ///
+    /// The [`ConfigError`]s [`Config::from_env`] reports, except for
+    /// `BLASTIT_PRESET`.
+    pub fn for_check() -> Result<Self, ConfigError> {
+        Self::from_env_with_format(None, LogFormat::Pretty, PresetPolicy::IgnoreEnv)
     }
 
     /// Checks the combinations of values that only make sense together, and
@@ -1857,7 +1973,7 @@ fn latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| char::from(*byte)).collect()
 }
 
-/// The inverse of [`latin1`].
+/// The inverse of `latin1`.
 ///
 /// # Errors
 ///
@@ -1884,7 +2000,7 @@ fn unlatin1(field: &'static str, value: &str) -> Result<Vec<u8>, ConfigError> {
 ///
 /// [`Config::from_env`] parses the same variable a moment later, but stage 0
 /// prints `boot` before it parses anything, so this reads the variable on its
-/// own — through the same [`parse_bool`] the rest of the configuration uses, so
+/// own — through the same `parse_bool` the rest of the configuration uses, so
 /// the two cannot drift apart. A value that is not a boolean at all means on
 /// here; [`Config::from_env`] rejects it a moment later, naming the variable.
 pub fn seccomp_requested() -> bool {
@@ -1903,19 +2019,27 @@ pub fn seccomp_requested() -> bool {
 /// that silently lost to the flag is exactly the sort of thing an operator
 /// finds out about in production.
 ///
+/// [`PresetPolicy::IgnoreEnv`] skips the variable entirely: `blastit dev`,
+/// `check` and `test` have no preset, so an exported `BLASTIT_PRESET` cannot
+/// reach their configuration at all (`ADR-0005`).
+///
 /// # Errors
 ///
 /// [`ConfigError::Invalid`] naming the source and listing the known presets.
 fn preset_choice(
     flag: Option<&str>,
+    policy: PresetPolicy,
 ) -> Result<(Option<&'static Preset>, Vec<Warning>), ConfigError> {
     // The variable is read the way the flag is: whitespace around a name is the
     // operator's — an env file or a CI variable is easy to pad by accident — and
     // a value that is only whitespace is how a deployment clears an inherited
     // one.
-    let from_env = variable("BLASTIT_PRESET")?
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty());
+    let from_env = match policy {
+        PresetPolicy::Env => variable("BLASTIT_PRESET")?
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty()),
+        PresetPolicy::IgnoreEnv => None,
+    };
     let (name, source) = match flag {
         Some(name) => {
             let warning = match &from_env {
@@ -1949,6 +2073,62 @@ fn look_up_preset(name: &str, source: &str) -> Result<Option<&'static Preset>, C
             ),
         )
     })
+}
+
+/// Where the manifest lives: `BLASTIT_MANIFEST` when set, else `./blastit.toml`
+/// in the starting working directory (`R6`, `ADR-0002`).
+///
+/// There is **no** upward search: a monorepo ancestor's policy is never picked
+/// up by accident. A set-but-empty `BLASTIT_MANIFEST` is a mistake, not a
+/// fallback (`R9`).
+fn manifest_path() -> Result<PathBuf, ConfigError> {
+    match std::env::var_os("BLASTIT_MANIFEST") {
+        Some(value) => {
+            let value = value.into_string().map_err(|_| ConfigError::NotUnicode {
+                variable: "BLASTIT_MANIFEST".to_string(),
+            })?;
+            if value.is_empty() {
+                return Err(invalid(
+                    "BLASTIT_MANIFEST",
+                    "must not be empty: put `blastit.toml` in the working directory or \
+                     name a file"
+                        .to_string(),
+                ));
+            }
+            Ok(PathBuf::from(value))
+        }
+        None => Ok(PathBuf::from("./blastit.toml")),
+    }
+}
+
+/// The manifest's top-level `app` and `preload`, for the fields the
+/// environment leaves open (`R7`, `R9`).
+///
+/// A missing file is not an error here: the boot that needs a manifest reports
+/// its absence with the path it tried. A file that exists but does not parse is
+/// an error, because silently booting with a different callable is worse than
+/// naming the parse failure.
+fn manifest_wiring(path: &Path) -> Result<(Option<String>, Vec<String>), ConfigError> {
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((None, Vec::new()));
+        }
+        Err(error) => {
+            return Err(ConfigError::Manifest {
+                path: path.to_path_buf(),
+                reason: error.to_string(),
+            });
+        }
+    };
+    let manifest = Manifest::from_toml_str(&source).map_err(|errors| ConfigError::Manifest {
+        path: path.to_path_buf(),
+        reason: errors.to_string(),
+    })?;
+    Ok((
+        manifest.app().map(str::to_string),
+        manifest.preload().to_vec(),
+    ))
 }
 
 /// Where a configuration value comes from: the environment, or the preset when
@@ -2089,7 +2269,7 @@ fn parse_u8(name: &str, value: &str) -> Result<u8, ConfigError> {
 /// a `BLASTIT_TRUSTED_PROXIES` that is also set wins, with a warning saying so.
 ///
 /// No warning is reported here for a value that is not a boolean at all:
-/// [`parse_bool`] rejects it and the error names the variable.
+/// `parse_bool` rejects it and the error names the variable.
 fn client_ip_settings(
     header: Option<String>,
     trusted: Option<String>,
@@ -2171,7 +2351,7 @@ fn parse_bool(name: &str, value: &str) -> Result<bool, ConfigError> {
     }
 }
 
-/// Parses `auto`, or any [`parse_bool`] spelling, as [`Immortalize`] (§8.2
+/// Parses `auto`, or any `parse_bool` spelling, as [`Immortalize`] (§8.2
 /// writes the booleans as `1` and `0`).
 fn parse_immortalize(name: &str, value: &str) -> Result<Immortalize, ConfigError> {
     let text = value.trim();
@@ -2479,6 +2659,7 @@ fn json_duration(value: &Value, name: &'static str) -> Result<Duration, ConfigEr
     clippy::field_reassign_with_default
 )]
 mod tests {
+    use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard};
 
     use super::*;
@@ -2489,9 +2670,53 @@ mod tests {
     /// that calls it must not run while another test is changing one.
     static ENV: Mutex<()> = Mutex::new(());
 
-    /// The lock described on [`ENV`]; a poisoned lock still runs the next test.
-    fn env() -> MutexGuard<'static, ()> {
-        ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// A `BLASTIT_MANIFEST` that names no file in this tree.
+    ///
+    /// [`Config::from_env`] falls back to `./blastit.toml` when the variable is
+    /// unset (`R6`), which would make every unit test below depend on the
+    /// directory `cargo test` happened to start in: a stray manifest there would
+    /// silently change `app` and `preload`. Pointing the variable at a path that
+    /// is never written makes discovery deterministic (`ADR-0002`).
+    const ABSENT_MANIFEST: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/absent-blastit.toml"
+    );
+
+    /// The lock described on [`ENV`], plus a deterministic `BLASTIT_MANIFEST`.
+    ///
+    /// Dropping it restores whatever the test runner had, so a developer's own
+    /// environment is left exactly as it was.
+    struct EnvGuard {
+        // Dropped after `Drop::drop` runs, so the restore below is still
+        // serialised by the suite's mutex.
+        _lock: MutexGuard<'static, ()>,
+        previous_manifest: Option<OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: `_lock` is still held while this runs (fields drop after
+            // the guard's own `Drop`), and every change to these variables in
+            // this module goes through the same mutex.
+            unsafe {
+                match self.previous_manifest.take() {
+                    Some(value) => std::env::set_var("BLASTIT_MANIFEST", value),
+                    None => std::env::remove_var("BLASTIT_MANIFEST"),
+                }
+            }
+        }
+    }
+
+    /// The lock described on [`ENV`], with `BLASTIT_MANIFEST` neutralised.
+    fn env() -> EnvGuard {
+        let lock = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_manifest = std::env::var_os("BLASTIT_MANIFEST");
+        // SAFETY: `lock` is held for as long as the returned guard lives.
+        unsafe { std::env::set_var("BLASTIT_MANIFEST", ABSENT_MANIFEST) };
+        EnvGuard {
+            _lock: lock,
+            previous_manifest,
+        }
     }
 
     /// An address, for the client-IP tests.

@@ -182,6 +182,7 @@ fn start(
         // The listeners are handed over directly, as `run_with_listeners`
         // documents.
         listeners: Vec::new(),
+        ..DbproxyConfig::default()
     };
     let task = tokio::spawn(async move {
         let _ = run_with_listeners(config, listeners, emit).await;
@@ -1068,6 +1069,7 @@ fn the_configuration_round_trips_and_never_prints_its_secrets() {
             &["SELECT 1"],
             false,
         )],
+        ..DbproxyConfig::default()
     };
 
     // Through a real pipe, exactly as init writes it.
@@ -1721,6 +1723,7 @@ async fn ready_is_called_once_the_listeners_are_adopted() {
     let config = DbproxyConfig {
         proxies: vec![proxy_spec("db", &upstream, 4)],
         listeners: vec![spec],
+        ..DbproxyConfig::default()
     };
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     let calls = Arc::new(AtomicU32::new(0));

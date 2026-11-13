@@ -10,12 +10,12 @@
 use std::io;
 
 use blastit_events::{Component, Event, EventKind, HttpRejected, RejectReason};
-use blastit_frame::{Frame, ReqHead};
+use blastit_frame::{Frame, INITIAL_WINDOW, ReqHead};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 
 use crate::Emit;
-use crate::chan::{Chan, Stream};
+use crate::chan::{Chan, Stream, UploadWait};
 use crate::chunked::{ChunkError, Dechunker, Step};
 use crate::config::HttpConfig;
 use crate::error::HttpError;
@@ -25,13 +25,19 @@ use crate::response::{self, Framing};
 /// Most bytes read from the client in one go.
 const READ_CHUNK: usize = 16 * 1024;
 
-/// Response-body bytes written before a `WINDOW` grant is batched up.
+/// Response-body credit, in bytes, at or below which the connection grants the
+/// view what it has written.
 ///
-/// Grants are what keep a view from running out of credit, so they are sent as
-/// soon as this much has been written — and once more whenever the response
-/// goes quiet, because a view that is *waiting* for credit would otherwise wait
-/// for the next byte to arrive, which is the byte it is not allowed to send.
-const WINDOW_GRANT: u64 = 64 * 1024;
+/// A `WINDOW` is a whole frame in each direction and a wakeup at each end, so
+/// the connection lets a view's credit run down toward this mark before topping
+/// it back up, rather than returning every byte the moment it is written: a
+/// response whose body stays far below it never costs a `WINDOW` at all. It is
+/// the same 64 KiB batch as before — [`INITIAL_WINDOW`] is measured in orders
+/// above it — which leaves the view ~960 KiB of batching between grants and,
+/// at the mark itself, 64 KiB of credit: far more than the round trip over the
+/// local socketpair that separates the two ends, so a grant that is still in
+/// flight cannot leave the view waiting for it.
+const WINDOW_LOW_WATER: u64 = 64 * 1024;
 
 /// Consumed bytes below this mark are not worth moving to the front of the
 /// buffer; above it, the buffer is compacted once the read cursor is past
@@ -52,6 +58,9 @@ enum HeadOutcome {
 enum BodyOutcome {
     /// `REQ_END` was sent.
     Sent,
+    /// The scheduler answered from the head while the body was still arriving:
+    /// stop reading the client socket and relay that answer, closing after it.
+    Early,
     /// The client stopped sending; `CANCEL` is due.
     ClientGone,
     /// The body was refused; the request may already have reached the
@@ -73,6 +82,8 @@ enum BodyFill {
     Expired,
     /// The client is gone, or the read failed.
     Closed,
+    /// The scheduler answered while the upload was still in progress.
+    Responded,
     /// The scheduler channel failed while the body was still arriving.
     ChannelClosed,
 }
@@ -83,6 +94,8 @@ enum CreditWait {
     Granted,
     /// `body_timeout` ran out while waiting.
     Expired,
+    /// The scheduler answered while the upload was still in progress.
+    Responded,
     /// No credit can arrive any more: the stream failed, or the channel did.
     ChannelClosed,
 }
@@ -172,6 +185,14 @@ pub(crate) struct Conn<'a, IO> {
     chan: &'a Chan,
     buf: Vec<u8>,
     pos: usize,
+    /// Per-connection scratch, reused across requests so that neither a
+    /// decoded request body nor an encoded response head has to allocate for
+    /// itself. It belongs to the connection and outlives any single request;
+    /// each user clears it before writing and is done with it before the next
+    /// user touches it. The chunked-body decoder ([`Conn::stream_chunked_body`])
+    /// and the response-head writer ([`Conn::relay`]) never run at the same
+    /// time — a body is fully streamed before its response is relayed — so one
+    /// buffer serves both.
     scratch: Vec<u8>,
     /// De-chunked body bytes that are decoded but not yet sent, because the
     /// stream has no credit left for them.
@@ -314,27 +335,23 @@ where
             peer_addr: head.peer_addr.clone(),
         };
         // A head that does not fit one frame cannot be forwarded at all.
-        // Checking here, rather than letting the writer task discover it, keeps
-        // one oversized request from looking like a dead channel.
-        self.scratch.clear();
-        let fits = self
+        // Measuring it here, rather than letting the writer task discover it,
+        // keeps one oversized request from looking like a dead channel — and
+        // measuring it with `encoded_len` rather than by encoding it into the
+        // scratch buffer means the head is never copied just to be sized.
+        let frame = Frame::ReqHead(request);
+        if self
             .cfg
             .frame_limits
-            .encode(
-                &Frame::ReqHead(request.clone()),
-                stream.id(),
-                &mut self.scratch,
-            )
-            .is_ok();
-        // The probe borrowed the body buffer; hand it back empty.
-        self.scratch.clear();
-        if !fits {
+            .encoded_len(&frame, stream.id())
+            .is_err()
+        {
             self.refuse(&head.remote_addr.clone(), 431, RejectReason::HeaderTooLarge)
                 .await;
             return Ok(false);
         }
 
-        match stream.send_head(request).await {
+        match stream.send_frame(frame).await {
             Ok(()) => {}
             // The scheduler is gone: answer the one request that is in hand,
             // and let the accept loop report the channel as fatal.
@@ -366,6 +383,18 @@ where
             .await
         {
             BodyOutcome::Sent => {}
+            // The scheduler answered from the head while the upload was still
+            // arriving: stop reading the client socket, relay the answer with
+            // `Connection: close`, and close the socket right after it (`R13`,
+            // design §4.2 D.1).
+            BodyOutcome::Early => {
+                let _ = self.relay(&mut stream, &head, true).await?;
+                // `relay` already forced the close; shut the write side so the
+                // client sees the end of the connection immediately instead of
+                // waiting for the body deadline.
+                let _ = self.io.shutdown().await;
+                return Ok(false);
+            }
             BodyOutcome::ClientGone => {
                 let _ = stream.send_cancel().await;
                 return Ok(false);
@@ -394,7 +423,7 @@ where
             }
         }
 
-        match self.relay(&mut stream, &head).await? {
+        match self.relay(&mut stream, &head, false).await? {
             Relay::KeepAlive => Ok(true),
             Relay::Close => Ok(false),
             Relay::Abort => {
@@ -438,11 +467,18 @@ where
     ) -> BodyOutcome {
         let mut remaining = len;
         while remaining > 0 {
+            // The scheduler may have answered from the head alone (a `413` for
+            // a body it will not take): stop reading this client's socket and
+            // relay that answer instead (`R13`).
+            if stream.try_peek_response() {
+                return BodyOutcome::Early;
+            }
             // Out of credit: stop reading this client's socket until the app
             // has consumed some of what it already has.
             if credit.available() == 0 {
                 match self.wait_for_credit(stream, deadline, credit).await {
                     CreditWait::Granted => continue,
+                    CreditWait::Responded => return BodyOutcome::Early,
                     CreditWait::Expired => return BodyOutcome::TimedOut,
                     CreditWait::ChannelClosed => return BodyOutcome::ChannelClosed,
                 }
@@ -450,6 +486,7 @@ where
             if self.pos == self.buf.len() {
                 match self.fill_body(stream, deadline).await {
                     BodyFill::Bytes => {}
+                    BodyFill::Responded => return BodyOutcome::Early,
                     BodyFill::Idle | BodyFill::Closed => return BodyOutcome::ClientGone,
                     BodyFill::Expired => return BodyOutcome::TimedOut,
                     BodyFill::ChannelClosed => return BodyOutcome::ChannelClosed,
@@ -488,6 +525,11 @@ where
         self.pending.clear();
         let mut done = false;
         loop {
+            // An early answer from the scheduler ends the upload here, exactly
+            // as for a fixed-length body (`R13`).
+            if stream.try_peek_response() {
+                return BodyOutcome::Early;
+            }
             // 1. Hand over what is decoded and already paid for.
             if credit.available() > 0 && !self.pending.is_empty() {
                 let take = (self.pending.len() as u64).min(credit.available()) as usize;
@@ -510,6 +552,7 @@ where
             if credit.available() == 0 {
                 match self.wait_for_credit(stream, deadline, credit).await {
                     CreditWait::Granted => continue,
+                    CreditWait::Responded => return BodyOutcome::Early,
                     CreditWait::Expired => return BodyOutcome::TimedOut,
                     CreditWait::ChannelClosed => return BodyOutcome::ChannelClosed,
                 }
@@ -522,6 +565,7 @@ where
                     // Not even half a chunk line: read more and try again.
                     match self.fill_body(stream, deadline).await {
                         BodyFill::Bytes => continue,
+                        BodyFill::Responded => return BodyOutcome::Early,
                         BodyFill::Idle | BodyFill::Closed => return BodyOutcome::ClientGone,
                         BodyFill::Expired => return BodyOutcome::TimedOut,
                         BodyFill::ChannelClosed => return BodyOutcome::ChannelClosed,
@@ -563,12 +607,17 @@ where
     ) -> CreditWait {
         let chan = self.chan;
         tokio::select! {
-            granted = stream.more_credit() => {
-                credit.refresh(stream);
-                if granted {
-                    CreditWait::Granted
-                } else {
-                    CreditWait::ChannelClosed
+            wait = stream.wait_upload() => {
+                match wait {
+                    UploadWait::Credit => {
+                        credit.refresh(stream);
+                        CreditWait::Granted
+                    }
+                    // The scheduler answered from the head while the upload was
+                    // still waiting for credit: relay that answer instead of
+                    // waiting for a window that will never come (`R13`).
+                    UploadWait::Response => CreditWait::Responded,
+                    UploadWait::Closed => CreditWait::ChannelClosed,
                 }
             }
             () = tokio::time::sleep_until(deadline) => CreditWait::Expired,
@@ -577,54 +626,104 @@ where
     }
 
     /// Relay the response frames of a request to the client.
+    ///
+    /// `force_close` is set when the scheduler answered before the upload
+    /// finished: the answer carries `Connection: close` whatever the request or
+    /// the view asked for, and the socket is closed right after it (`R13`).
+    ///
+    /// The response head is written into the connection's scratch buffer,
+    /// which the request body path has finished with by now. The buffer is
+    /// taken out of `self` for the call so the writes below can borrow `self`
+    /// mutably, and put back afterwards so the next response on this connection
+    /// reuses the same allocation; it is only ever read between the write that
+    /// fills it and the client write that consumes it, so no reused byte can be
+    /// mistaken for a new one.
+    ///
+    /// Response credit is granted lazily. A view starts each body with
+    /// [`INITIAL_WINDOW`] bytes, and this is the only granter, so the credit a
+    /// view still holds is `INITIAL_WINDOW` minus the body bytes taken off the
+    /// stream and not yet granted back. The grant goes out only once that falls
+    /// to [`WINDOW_LOW_WATER`], and it returns everything owed, restoring the
+    /// view to a full window. Checking the mark *before* waiting for the next
+    /// frame is what keeps a view that has spent its credit from deadlocking:
+    /// such a view has nothing left to send, so no frame will ever arrive to
+    /// trigger the grant it is blocked on.
     async fn relay(
         &mut self,
         stream: &mut Stream,
         request: &RequestHead,
+        force_close: bool,
+    ) -> Result<Relay, HttpError> {
+        let mut head = std::mem::take(&mut self.scratch);
+        let outcome = self
+            .relay_frames(stream, request, force_close, &mut head)
+            .await;
+        self.scratch = head;
+        outcome
+    }
+
+    /// [`Conn::relay`] proper: write the response, frame by frame, into `head`
+    /// as its reusable response-head buffer.
+    async fn relay_frames(
+        &mut self,
+        stream: &mut Stream,
+        request: &RequestHead,
+        force_close: bool,
+        head: &mut Vec<u8>,
     ) -> Result<Relay, HttpError> {
         let mut resp = Resp::new();
-        // Response-body bytes the client has taken, not yet turned into a
-        // `WINDOW` back to the scheduler.
-        let mut grant: u64 = 0;
+        // Body bytes taken off the stream, written or knowingly dropped, that
+        // have not been granted back yet. The view's remaining credit is
+        // `INITIAL_WINDOW` minus this.
+        let mut owed: u64 = 0;
         loop {
-            // Return credit in batches, and always before waiting: a view that
-            // blocked on credit has nothing left to send, so waiting for the
-            // next frame here would wait for the grant itself.
-            let bytes = grant.min(u64::from(u32::MAX)) as u32;
-            if bytes > 0 && (grant >= WINDOW_GRANT || stream.queued_bytes() == 0) {
+            // Grant only when the view is running low, and always before
+            // waiting: a small response never reaches the mark, so it never
+            // costs a `WINDOW`, and a view that has run dry is topped back up
+            // rather than left waiting for a frame it cannot send.
+            if owed > 0 && u64::from(INITIAL_WINDOW).saturating_sub(owed) <= WINDOW_LOW_WATER {
+                let bytes = owed.min(u64::from(u32::MAX)) as u32;
                 let _ = stream.send_window(bytes);
-                grant -= u64::from(bytes);
+                owed -= u64::from(bytes);
             }
             let Some(frame) = stream.recv().await? else {
                 // No answer can arrive any more.
                 return Ok(self.fail(&mut resp, 502).await);
             };
             match &frame {
-                Frame::RespHead(head) => {
+                Frame::RespHead(head_frame) => {
                     if resp.head_written {
                         // A second head would be a second response.
                         return Ok(Relay::Abort);
                     }
-                    let no_body = request.is_head() || matches!(head.status, 100..=199 | 204 | 304);
+                    let no_body =
+                        request.is_head() || matches!(head_frame.status, 100..=199 | 204 | 304);
                     // The view may ask for the connection to be closed too,
                     // even though its own `Connection` header never reaches the
-                    // client.
-                    let may_keep_alive = request.keep_alive
-                        && !crate::headers::has_token(&head.headers, "connection", "close");
+                    // client. An early answer always closes: the upload it
+                    // interrupted can never be read to its end (`R13`).
+                    //
+                    // `prepare` drops the view's hop-by-hop fields — a
+                    // `Connection` or `Keep-Alive` of its own included — as it
+                    // writes the head, and writes `Connection: close` when the
+                    // decision below is a close, so no stripped copy of the
+                    // head is built for the early answer.
+                    let may_keep_alive = !force_close
+                        && request.keep_alive
+                        && !crate::headers::has_token(&head_frame.headers, "connection", "close");
                     let prepared = match response::prepare(
-                        head,
+                        head_frame,
                         no_body,
                         request.version == Version::Http11,
                         may_keep_alive,
+                        head,
                     ) {
                         Ok(prepared) => prepared,
                         // Injection from the view: nothing is written yet, so
                         // the client gets an honest 502 instead.
                         Err(_) => return Ok(self.fail(&mut resp, 502).await),
                     };
-                    let mut out = Vec::new();
-                    response::encode_head(&prepared, &mut out);
-                    if !self.write_client(stream, &out).await {
+                    if !self.write_client(stream, head).await {
                         return Ok(Relay::Abort);
                     }
                     resp.framing = prepared.framing;
@@ -638,7 +737,7 @@ where
                     // Credit is owed for every body byte the connection has
                     // dealt with, written or knowingly dropped: the view may
                     // send that much again.
-                    grant = grant.saturating_add(chunk.len() as u64);
+                    owed = owed.saturating_add(chunk.len() as u64);
                 }
                 Frame::RespEnd => {
                     if !resp.head_written {
@@ -799,7 +898,7 @@ where
     /// how steadily it trickles in. Whichever comes first wins — and a channel
     /// that has failed cuts the wait short, because nobody would read the body
     /// anyway.
-    async fn fill_body(&mut self, stream: &Stream, deadline: Instant) -> BodyFill {
+    async fn fill_body(&mut self, stream: &mut Stream, deadline: Instant) -> BodyFill {
         let idle_deadline = Instant::now() + self.cfg.keepalive_timeout;
         let (filled, expired) = if idle_deadline < deadline {
             (self.fill_until(idle_deadline), false)
@@ -813,7 +912,15 @@ where
                 (Filled::Idle, false) => BodyFill::Idle,
                 (Filled::Idle, true) => BodyFill::Expired,
             },
-            () = stream.closed() => BodyFill::ChannelClosed,
+            // A response that arrives mid-upload (an early `413`, `400`, …) ends
+            // the read: the frame is kept for `relay` (`R13`).
+            responded = stream.wait_response() => {
+                if responded {
+                    BodyFill::Responded
+                } else {
+                    BodyFill::ChannelClosed
+                }
+            },
         }
     }
 

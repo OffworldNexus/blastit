@@ -24,22 +24,26 @@ use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::UnixListener;
+use std::path::Path;
 use std::time::Duration;
 
 use blastit_dbproxy::{DbproxyConfig, ListenerSpec, ProxySpec, write_config};
 use blastit_events::{
     Component, Event, EventKind, Level, Lifecycle, ManifestWarning as WarningEvent, Stream,
 };
-use blastit_manifest::{Manifest, UidLayout};
+use blastit_manifest::{Manifest, PgGrant, ProxyName, UidLayout};
 use blastit_sys::{
     Fork, Pid, Rlimits, Signal, bind_unix_listener, current_signal_mask, exec, harden_child,
     make_private_dir, pipe, restore_signal_mask_in_child, set_cloexec, set_dumpable,
 };
 
 use crate::child::{ChildIo, Deadline, read_one, wait_readable};
+use crate::cli::DevOptions;
 use crate::config::{Config, LogFormat, Mode, Privilege, view_dir};
+use crate::dev_learn::{DevRoot, PRIVILEGE};
 use crate::host::{EXEC, Host, Install, Placement, Reexec};
 use crate::logs::{Emitter, fail, output_event};
+use crate::mem_usage;
 
 /// How long stage 0 waits for dbproxy's ready byte before giving up (§4).
 pub const DBPROXY_READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -234,7 +238,9 @@ fn capability_advice(host: &Host, err: &std::io::Error) -> String {
              default capabilities include them — check `--cap-drop`, `--cap-add` and any \
              bounding-set restriction on the container.\n  \
              A rootless deployment gives them to a *dedicated copy* of the {} instead:\n  \
-             {}\n  {}",
+             {}\n  {}\n  \
+             To run the same tree locally without root, use `blastit dev`; it is a \
+             single-uid simulation, not a sandbox",
             install.file(),
             copy_recipe(install),
             install.naming()
@@ -243,7 +249,9 @@ fn capability_advice(host: &Host, err: &std::io::Error) -> String {
     format!(
         "init runs as uid {uid} and is missing {missing}.\n  \
          A rootless deployment gives the capabilities to a *dedicated copy* of the {}, \
-         never to the shared one:\n  {}\n  {}",
+         never to the shared one:\n  {}\n  {}\n  \
+         To run the same tree locally without root, use `blastit dev`; it is a \
+         single-uid simulation, not a sandbox",
         install.file(),
         copy_recipe(install),
         install.naming()
@@ -518,12 +526,604 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     )
 }
 
+/// Shared stage-0 context of one `blastit dev` boot, once its [`DevRoot`]
+/// exists (`R20`).
+struct DevBoot<'a> {
+    config: &'a Config,
+    host: &'a Host,
+    root: &'a DevRoot,
+}
+
+/// Fails a `blastit dev` boot with a diagnostic on stderr and exit `1`
+/// (§1.1: a startup error writes zero bytes on stdout).
+///
+/// The root is removed by [`fail_dev_root`] or [`fail_with_root`] when one
+/// exists; `_exit` runs no destructor, which is why every parent failure after
+/// [`DevRoot::create`] goes through one of those helpers.
+fn dev_fail(message: &str) -> ! {
+    eprintln!("blastit dev: {message}");
+    // SAFETY: the boot is aborting; `_exit` runs no handler.
+    unsafe { libc::_exit(1) }
+}
+
+/// Removes `root` (`R20`) and aborts via [`dev_fail`].
+fn fail_dev_root(root: &DevRoot, message: &str) -> ! {
+    root.cleanup();
+    dev_fail(message)
+}
+
+/// The sentence a `blastit dev` boot above `BLASTIT_MEM_HIGH_WATERMARK` fails
+/// with, or `None` when a view process can start (§8 Sizing).
+///
+/// The reading is taken once, at boot, and is the one the scheduler will take:
+/// [`mem_usage::read`] leaves out the page cache and slab the kernel reclaims
+/// on demand, so a machine with a warm filesystem cache is not mistaken for a
+/// machine without memory. The scheduler retires one idle view for memory
+/// pressure and refuses to *spawn* one while aggregate usage is above the
+/// watermark; with no view yet there is nothing to evict, so a boot here would
+/// serve nothing and say nothing — every request would wait out
+/// `BLASTIT_QUEUE_TIMEOUT` and answer `503`. A reading that cannot be taken is
+/// not pressure, exactly as in the scheduler (§9.2 #8).
+fn memory_reading() -> Option<mem_usage::Usage> {
+    mem_usage::read(Path::new("/"))
+}
+
+/// [`memory_reading`]'s refusal, over the same reading the advisory uses.
+fn memory_refusal(usage: &mem_usage::Usage, config: &Config) -> Option<String> {
+    mem_usage::boot_refusal(usage, config.mem_high_watermark_percent)
+}
+
+/// Removes `root` (`R20`) and aborts via [`fail`] on `emitter`.
+fn fail_with_root(emitter: &Emitter, root: &DevRoot, message: &str) -> ! {
+    root.cleanup();
+    fail(emitter, message)
+}
+
+/// `blastit_sys::pipe` for `dev` after [`DevRoot::create`]: cleans `root` on
+/// failure before exiting (`R20`).
+fn pipe_dev(emitter: &Emitter, root: &DevRoot, what: &str) -> (OwnedFd, OwnedFd) {
+    match pipe() {
+        Ok(pair) => pair,
+        Err(err) => fail_with_root(emitter, root, &format!("{what}: {err}")),
+    }
+}
+
+/// An argument or path as a [`CString`] after [`DevRoot::create`], cleaning
+/// `root` if a NUL byte makes the re-exec impossible (`R20`).
+fn cstring_dev(root: &DevRoot, value: impl AsRef<OsStr>) -> CString {
+    match CString::new(value.as_ref().as_bytes().to_vec()) {
+        Ok(value) => value,
+        Err(_) => fail_dev_root(root, "an argument contains a NUL byte"),
+    }
+}
+
+/// [`reexec_argv`] for `dev` after [`DevRoot::create`], cleaning `root` on any
+/// NUL-byte failure (`R20`).
+fn reexec_argv_dev(root: &DevRoot, reexec: &Reexec) -> Vec<CString> {
+    let mut argv = vec![cstring_dev(root, &reexec.program)];
+    argv.extend(reexec.prefix.iter().map(|arg| cstring_dev(root, arg)));
+    argv
+}
+
+/// Runs `blastit dev`: the unprivileged single-uid simulation (`R19..R22`).
+///
+/// It is the same boot shape as [`run`] with three differences, all of them the
+/// ones `ADR-0001` names. There is no capability detection and no `setresuid`:
+/// every role runs as [`crate::dev_learn::euid`]. The runtime root is ephemeral
+/// and `0700`, with one directory per route instead of one per view uid. And the
+/// `execve` barrier's environment is the app environment itself — the only one
+/// a single-uid simulation has — from which every `[proxy.*]` secret input,
+/// every `BLASTIT_*` variable and every `BLASTIT_ENV_STRIP` name is already
+/// gone.
+///
+/// `--learn` additionally hands dbproxy an observation pipe and an attribution
+/// socket, and hands both to stage 1, which drains them and writes the manifest
+/// on a clean `SIGTERM` (`R29`).
+pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
+    // `S3`: a non-loopback bind has no authentication at all, so it needs the
+    // second acknowledgement and says so before anything is written to stdout.
+    if !crate::dev_learn::is_loopback(&options.host) && !crate::dev_learn::expose_requested() {
+        eprintln!(
+            "blastit dev: {}",
+            crate::dev_learn::exposure_error(&options.host)
+        );
+        // SAFETY: nothing of blastit's is running yet; `_exit` runs no handler.
+        unsafe { libc::_exit(1) }
+    }
+    let exposed = !crate::dev_learn::is_loopback(&options.host);
+
+    // `R2`, `R10`: `pretty` by default and `BLASTIT_PRESET` never read.
+    let mut config = match Config::for_dev() {
+        Ok(config) => config,
+        Err(err) => dev_fail(&err.to_string()),
+    };
+    config.port = options.port;
+    if std::env::var_os("SERVER_PORT").is_none() {
+        config.server_port = options.port;
+    }
+    // The privilege field is `root`/`capabilities` in the document; a dev boot
+    // is neither, and stage 0 says `unprivileged-dev` in its own event below.
+    config.privilege = None;
+    let emitter = Emitter::stdout(config.log_format, config.log_level);
+    // Every fatal path before the banner writes here, on descriptor 2: a
+    // startup error has to leave stdout empty (§1.1).
+    let startup = Emitter::new(2, config.log_format, config.log_level, false);
+
+    // §8 Sizing: above `BLASTIT_MEM_HIGH_WATERMARK` the scheduler will not start
+    // a view process, so a boot that ignores the reading serves nothing and says
+    // nothing — every request waits out `BLASTIT_QUEUE_TIMEOUT` and answers
+    // `503`. Refuse at boot instead, naming the setting and the reading (§1.1,
+    // `docs/troubleshooting.md`). It is one reading for both the refusal and the
+    // advisory below, so the two cannot disagree.
+    let memory = memory_reading();
+    if let Some(message) = memory
+        .as_ref()
+        .and_then(|usage| memory_refusal(usage, &config))
+    {
+        dev_fail(&message);
+    }
+
+    if config.app.is_none() {
+        dev_fail("BLASTIT_APP: the WSGI callable (`module:attribute`) is required");
+    }
+    let source = match std::fs::read_to_string(&config.manifest) {
+        Ok(source) => source,
+        Err(err) => dev_fail(&format!("{}: {err}", config.manifest.display())),
+    };
+    let (manifest, warnings) = match Manifest::parse_and_validate(&source, config.uid_base) {
+        Ok(parsed) => parsed,
+        Err(errors) => dev_fail(&format!("{errors}")),
+    };
+    let prepared = match blastit_env::build_from_process(&manifest, config.env_strip.as_deref()) {
+        Ok(prepared) => prepared,
+        Err(errors) => dev_fail(&format!("{errors}")),
+    };
+    config.proxy_outputs = prepared
+        .outputs()
+        .iter()
+        .map(|(name, names)| (name.as_str().to_string(), names.clone()))
+        .collect();
+    config.sys_path = host.sys_path().to_vec();
+    config.cwd = std::env::current_dir()
+        .ok()
+        .map(|dir| dir.into_os_string().into_vec());
+
+    let root = match DevRoot::create() {
+        Ok(root) => root,
+        Err(err) => dev_fail(&format!("runtime root: {err}")),
+    };
+    // Under `--learn`, slot `0` (`views/0`) is the dedicated unrouted-request
+    // fallback view (`LEARN_FALLBACK_ROUTE`), and declared routes sit at
+    // `1..=N` so no declared route ever shares a socket with the fallback view.
+    let view_slots = manifest.routes().len() + usize::from(options.learn);
+    if let Err(err) = root.create_view_dirs(view_slots) {
+        fail_dev_root(&root, &format!("runtime root: {err}"));
+    }
+    let boot = DevBoot {
+        config: &config,
+        host,
+        root: &root,
+    };
+
+    // `R20`: one listener per (route, proxy) the route may use — every declared
+    // `postgresql` proxy under `--learn`, so one pass can observe them all.
+    let listeners = match dev_view_sockets(&root, &manifest, &prepared, options.learn) {
+        Ok(listeners) => listeners,
+        Err(message) => fail_dev_root(&root, &message),
+    };
+
+    // `--learn`: dbproxy writes observations to `obs_write` (attributing each
+    // statement directly from its per-route `ListenerSpec.route`) and stage 1
+    // drains `obs_read`.
+    let learn = if options.learn {
+        let (obs_read, obs_write) = match pipe() {
+            Ok(pair) => pair,
+            Err(err) => fail_dev_root(&root, &format!("dev obs pipe: {err}")),
+        };
+        Some((obs_read, obs_write))
+    } else {
+        None
+    };
+
+    let dbproxy = fork_dbproxy_dev(
+        &startup,
+        &boot,
+        interpreter,
+        &prepared,
+        listeners,
+        learn.as_ref().map(|(_, obs)| obs.as_raw_fd()),
+    );
+
+    // The parent keeps the read end only.
+    let learn = match learn {
+        Some((obs_read, obs_write)) => {
+            drop(obs_write);
+            Some(obs_read)
+        }
+        None => None,
+    };
+
+    // Only now that the boot is known-good does anything reach stdout: the
+    // banner, the boot event and the exposure warning (§1.2, §1.1).
+    if config.log_format == LogFormat::Pretty {
+        print!(
+            "{}",
+            crate::dev_learn::banner(&options.host, config.port, manifest.routes().len(), exposed)
+        );
+    }
+    emitter.emit(&Event::now(
+        Component::Init,
+        EventKind::Boot(
+            Lifecycle::default()
+                .with_stage("stage0")
+                .with_seccomp(config.seccomp)
+                .with_privilege(PRIVILEGE),
+        ),
+    ));
+    for warning in &warnings {
+        emitter.emit(&Event::now(
+            Component::Init,
+            EventKind::ManifestWarning(WarningEvent::new(warning.to_string())),
+        ));
+    }
+    // A boot above the documented default is the operator's call once they
+    // raised the knob, and it is also the state in which a view's first spawn
+    // may have to wait for memory: say so once, with the reading and the cache
+    // the reading left out (§1.1).
+    if let Some(message) = memory
+        .as_ref()
+        .and_then(|usage| mem_usage::advisory(usage, config.mem_high_watermark_percent))
+    {
+        emitter.emit(
+            &output_event(Component::Init, None, Stream::Stderr, &message).with_level(Level::Warn),
+        );
+    }
+    if exposed {
+        // Names the address, the port and the uid, and no event ever carries a
+        // `port` *field* (§1.2, `R22`, `ARCHITECTURE.md` §8.1).
+        emitter.emit(
+            &output_event(
+                Component::Init,
+                None,
+                Stream::Stderr,
+                &format!(
+                    "blastit dev is EXPOSED on {}:{} as uid {}: there is no authentication, \
+                     so anyone who reaches it drives every route ({})",
+                    options.host,
+                    config.port,
+                    crate::dev_learn::euid(),
+                    crate::dev_learn::EXPOSE_VARIABLE
+                ),
+            )
+            .with_level(Level::Warn),
+        );
+    }
+
+    exec_stage1_dev(&boot, options.host, prepared.app_env(), dbproxy, learn)
+}
+
+/// Binds the per-route sockets of a `dev` boot (`R20`).
+///
+/// In production the (route, proxy) pairs are the route's effective grants; in
+/// `dev --learn` every declared `postgresql` proxy is bound for every route, so
+/// one pass sees the statements a route would need grants for.
+fn dev_view_sockets(
+    root: &DevRoot,
+    manifest: &Manifest,
+    prepared: &blastit_env::Prepared,
+    learn: bool,
+) -> Result<Vec<(UnixListener, ListenerSpec)>, String> {
+    let uid = crate::dev_learn::euid();
+    let mut listeners: Vec<(UnixListener, ListenerSpec)> = Vec::new();
+    if learn {
+        for (proxy_index, (proxy_name, _upstream)) in prepared.upstreams().iter().enumerate() {
+            let Some(port) = blastit_env::postgresql::local_port(proxy_index) else {
+                return Err(format!(
+                    "{}: no local port left for the postgresql proxies",
+                    proxy_name.as_str()
+                ));
+            };
+            let path = root.view_dir(0).join(format!(".s.PGSQL.{port}"));
+            let listener = bind_unix_listener(&path, uid, 0o600)
+                .map_err(|err| format!("{}: {err}", path.display()))?;
+            listeners.push((
+                listener,
+                ListenerSpec::enforcing(
+                    crate::dev_learn::LEARN_FALLBACK_ROUTE,
+                    proxy_name.as_str(),
+                    uid,
+                    Vec::new(),
+                    false,
+                    false,
+                    Default::default(),
+                ),
+            ));
+        }
+    }
+    let slot_offset = usize::from(learn);
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let slot = index + slot_offset;
+        for (proxy_index, (proxy_name, _upstream)) in prepared.upstreams().iter().enumerate() {
+            let grant = manifest
+                .effective_grants(index)
+                .get(proxy_name)
+                .and_then(|grant| grant.as_postgresql())
+                .cloned();
+            // A route with no declaration at all gets no socket. A route that
+            // declares the proxy with an empty grant still gets one, so its
+            // statements are denied with `42501` instead of the connection
+            // failing with `ENOENT` (`docs/local.md`).
+            if grant.is_none() && !learn && !route_declares_proxy(manifest, index, proxy_name) {
+                continue;
+            }
+            let Some(port) = blastit_env::postgresql::local_port(proxy_index) else {
+                return Err(format!(
+                    "{}: no local port left for the postgresql proxies",
+                    proxy_name.as_str()
+                ));
+            };
+            let path = root.view_dir(slot).join(format!(".s.PGSQL.{port}"));
+            // `SO_PASSCRED` and `0600`, owned by the one uid that may connect:
+            // in `dev` that is the caller, the only identity a view has.
+            let listener = bind_unix_listener(&path, uid, 0o600)
+                .map_err(|err| format!("{}: {err}", path.display()))?;
+            let (queries, transaction_control, unrestricted, tables) = match &grant {
+                Some(grant) => (
+                    grant.queries().to_vec(),
+                    grant.transaction_control(),
+                    grant.is_unrestricted(),
+                    grant.tables().clone(),
+                ),
+                None => (Vec::new(), false, false, Default::default()),
+            };
+            listeners.push((
+                listener,
+                ListenerSpec::enforcing(
+                    route.name(),
+                    proxy_name.as_str(),
+                    uid,
+                    queries,
+                    transaction_control,
+                    unrestricted,
+                    tables,
+                ),
+            ));
+        }
+    }
+    for (listener, spec) in &mut listeners {
+        spec.fd = listener.as_raw_fd();
+    }
+    Ok(listeners)
+}
+/// Forks dbproxy for a `dev` boot (`R19`, `R21`).
+///
+/// The child is not `setresuid`'d: it already runs as the caller. Everything
+/// else is the production sequence — empty `environ`, `PDEATHSIG`, no
+/// `no_new_privs` exceptions, the role's seccomp filter — and the configuration
+/// carries the `--learn` descriptors when the boot asked for them.
+fn fork_dbproxy_dev(
+    emitter: &Emitter,
+    boot: &DevBoot<'_>,
+    interpreter: bool,
+    prepared: &blastit_env::Prepared,
+    listeners: Vec<(UnixListener, ListenerSpec)>,
+    obs_fd: Option<std::os::fd::RawFd>,
+) -> Option<DbproxyHandover> {
+    if listeners.is_empty() {
+        return None;
+    }
+    let uid = crate::dev_learn::euid();
+    let proxies: Vec<ProxySpec> = prepared
+        .upstreams()
+        .iter()
+        .map(|(name, upstream)| ProxySpec {
+            name: name.as_str().to_string(),
+            host: upstream.host().to_string(),
+            port: upstream.port(),
+            user: upstream.user().to_string(),
+            password: upstream.password().expose().to_string().into(),
+            database: upstream.database().to_string(),
+            sslmode: upstream.sslmode().map(str::to_string),
+            ca_cert: upstream.ca_cert().map(|ca| ca.expose().to_string().into()),
+            options: upstream.options().to_vec(),
+            max_connections: boot.config.max_connections_for(name.as_str()),
+        })
+        .collect();
+    let mut document = DbproxyConfig::enforcing(
+        proxies,
+        listeners.iter().map(|(_, spec)| spec.clone()).collect(),
+    );
+    document.mode = if obs_fd.is_some() {
+        blastit_dbproxy::ListenerMode::Learn
+    } else {
+        blastit_dbproxy::ListenerMode::Enforce
+    };
+    // In `dev` the listener's uid is the caller's; root is only ever the caller
+    // when the whole suite runs as root, and then it *is* the view's uid.
+    document.allow_root_listener = uid == 0;
+    document.obs_fd = obs_fd;
+
+    let (secrets_read, secrets_write) = pipe_dev(emitter, boot.root, "secrets.pipe");
+    let (events_read, events_write) = pipe_dev(emitter, boot.root, "dbproxy events pipe");
+    let (stdout_read, stdout_write) = pipe_dev(emitter, boot.root, "dbproxy stdout pipe");
+    let (stderr_read, stderr_write) = pipe_dev(emitter, boot.root, "dbproxy stderr pipe");
+    let (ready_read, ready_write) = pipe_dev(emitter, boot.root, "dbproxy ready pipe");
+
+    let mut keep = vec![
+        secrets_read.as_raw_fd(),
+        events_write.as_raw_fd(),
+        ready_write.as_raw_fd(),
+    ];
+    keep.extend(listeners.iter().map(|(listener, _)| listener.as_raw_fd()));
+    if let Some(obs) = obs_fd {
+        keep.push(obs);
+    }
+
+    let child = ChildIo {
+        stdout: Some(stdout_write),
+        stderr: Some(stderr_write),
+        keep,
+        limits: dbproxy_limits(boot.config),
+        working_dir: None,
+    };
+
+    let forked = match crate::forking::fork(interpreter) {
+        Ok(fork) => fork,
+        Err(err) => fail_with_root(emitter, boot.root, &format!("fork: {err}")),
+    };
+    match forked {
+        Fork::Parent(pid) => {
+            drop(secrets_read);
+            drop(events_write);
+            drop(ready_write);
+            drop(child);
+            drop(listeners);
+
+            let mut secrets = std::fs::File::from(secrets_write);
+            if let Err(err) = write_config(&document, &mut secrets) {
+                fail_with_root(emitter, boot.root, &format!("secrets.pipe: {err}"));
+            }
+            drop(secrets);
+
+            if let Err(reason) = wait_ready(&ready_read, DBPROXY_READY_TIMEOUT) {
+                emit_child_output(emitter, &stdout_read, Stream::Stdout);
+                emit_child_output(emitter, &stderr_read, Stream::Stderr);
+                fail_with_root(emitter, boot.root, &reason);
+            }
+            Some(DbproxyHandover {
+                pid,
+                events: events_read,
+                stdout: stdout_read,
+                stderr: stderr_read,
+            })
+        }
+        Fork::Child => {
+            let mut argv = reexec_argv(emitter, boot.host.dbproxy());
+            argv.push(cstring(emitter, "--role=dbproxy"));
+            argv.push(cstring(
+                emitter,
+                format!("--secrets-fd={}", secrets_read.as_raw_fd()),
+            ));
+            argv.push(cstring(
+                emitter,
+                format!("--events-fd={}", events_write.as_raw_fd()),
+            ));
+            argv.push(cstring(
+                emitter,
+                format!("--ready-fd={}", ready_write.as_raw_fd()),
+            ));
+            argv.push(cstring(
+                emitter,
+                format!("--seccomp={}", u8::from(boot.config.seccomp)),
+            ));
+            let outcome = child
+                .clear_cloexec(&[])
+                .and_then(|()| child.prepare())
+                .and_then(|()| harden_child(Signal::KILL));
+            if let Err(err) = outcome {
+                fail(emitter, &format!("dbproxy child: {err}"));
+            }
+            let _ = set_dumpable(false);
+            match current_signal_mask().and_then(restore_signal_mask_in_child) {
+                Ok(()) => {}
+                Err(err) => fail(emitter, &format!("dbproxy child: {err}")),
+            }
+            let err = exec(&program(emitter, boot.host.dbproxy()), &argv, &[]);
+            fail(emitter, &format!("exec dbproxy: {err}"));
+        }
+    }
+}
+
+/// Crosses the `dev` `execve` barrier into stage 1 (`R20`).
+fn exec_stage1_dev(
+    boot: &DevBoot<'_>,
+    host_addr: std::net::IpAddr,
+    app_env: &BTreeMap<String, String>,
+    dbproxy: Option<DbproxyHandover>,
+    learn: Option<OwnedFd>,
+) -> ! {
+    let document = match serde_json::to_vec(&boot.config.to_json()) {
+        Ok(document) => document,
+        Err(err) => fail_dev_root(boot.root, &format!("configuration document: {err}")),
+    };
+    if document.len() > MAX_CONFIG_DOCUMENT {
+        fail_dev_root(
+            boot.root,
+            &format!(
+                "the configuration document is {} bytes, more than the {MAX_CONFIG_DOCUMENT}-byte limit",
+                document.len()
+            ),
+        );
+    }
+    let (config_read, config_write) = match pipe() {
+        Ok(pair) => pair,
+        Err(err) => fail_dev_root(boot.root, &format!("config pipe: {err}")),
+    };
+    let mut file = std::fs::File::from(config_write);
+    if let Err(err) = file.write_all(&document) {
+        fail_dev_root(boot.root, &format!("config pipe: {err}"));
+    }
+    drop(file);
+
+    let stage1 = boot.host.stage1();
+    let mut argv = reexec_argv_dev(boot.root, stage1);
+    argv.push(cstring_dev(boot.root, "--stage=1"));
+    argv.push(cstring_dev(
+        boot.root,
+        format!("--config-fd={}", config_read.as_raw_fd()),
+    ));
+    argv.push(cstring_dev(
+        boot.root,
+        format!("--dev-root={}", boot.root.path().display()),
+    ));
+    argv.push(cstring_dev(boot.root, format!("--dev-host={host_addr}")));
+    let mut keep = vec![config_read.as_raw_fd()];
+    if let Some(dbproxy) = &dbproxy {
+        argv.push(cstring_dev(
+            boot.root,
+            format!("--dbproxy-pid={}", dbproxy.pid.as_raw()),
+        ));
+        for (flag, fd) in [
+            ("--dbproxy-events-fd", &dbproxy.events),
+            ("--dbproxy-stdout-fd", &dbproxy.stdout),
+            ("--dbproxy-stderr-fd", &dbproxy.stderr),
+        ] {
+            argv.push(cstring_dev(boot.root, format!("{flag}={}", fd.as_raw_fd())));
+            keep.push(fd.as_raw_fd());
+        }
+    }
+    if let Some(obs) = &learn {
+        argv.push(cstring_dev(
+            boot.root,
+            format!("--dev-obs-fd={}", obs.as_raw_fd()),
+        ));
+        keep.push(obs.as_raw_fd());
+    }
+    for fd in &keep {
+        // SAFETY: every descriptor in `keep` is one this function created and
+        // still owns.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(*fd) };
+        if let Err(err) = set_cloexec(borrowed, false) {
+            fail_dev_root(boot.root, &format!("config pipe: {err}"));
+        }
+    }
+
+    let env: Vec<(String, String)> = app_env
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let err = exec(&cstring_dev(boot.root, &stage1.program), &argv, &env);
+    fail_dev_root(boot.root, &format!("exec stage 1: {err}"))
+}
+
 /// Creates every view's private directory and binds the pg sockets it may use
 /// (§2.2).
 ///
-/// One listener per (route, `postgresql` proxy) the route has a grant on. The
-/// socket's port comes from `blastit_env`'s per-proxy assignment, so every
-/// process derives the same number from the same manifest (§5.2).
+/// One listener per (route, `postgresql` proxy) the route names: its effective
+/// grants, and the empty grants it declares explicitly (see
+/// [`route_declares_proxy`]). The socket's port comes from `blastit_env`'s
+/// per-proxy assignment, so every process derives the same number from the same
+/// manifest (§5.2).
 fn bind_view_sockets(
     emitter: &Emitter,
     manifest: &Manifest,
@@ -539,7 +1139,12 @@ fn bind_view_sockets(
         if let Err(err) = make_private_dir(&dir, uid, 0o700) {
             fail(emitter, &format!("{}: {err}", dir.display()));
         }
-        for (proxy_name, grant) in manifest.effective_grants(index) {
+        // Effective grants first (the order the manifest's proxies sort in),
+        // then the declared-but-empty ones, so a manifest that granted
+        // something keeps exactly the sockets it had before.
+        let effective = manifest.effective_grants(index);
+        let mut wanted: Vec<(usize, &ProxyName, Option<&PgGrant>)> = Vec::new();
+        for (proxy_name, grant) in &effective {
             let Some(pg) = grant.as_postgresql() else {
                 continue;
             };
@@ -550,6 +1155,17 @@ fn bind_view_sockets(
             else {
                 continue;
             };
+            wanted.push((proxy_index, proxy_name, Some(pg)));
+        }
+        for (proxy_index, (proxy_name, _upstream)) in prepared.upstreams().iter().enumerate() {
+            if effective.contains_key(proxy_name)
+                || !route_declares_proxy(manifest, index, proxy_name)
+            {
+                continue;
+            }
+            wanted.push((proxy_index, proxy_name, None));
+        }
+        for (proxy_index, proxy_name, grant) in wanted {
             let Some(port) = blastit_env::postgresql::local_port(proxy_index) else {
                 fail(
                     emitter,
@@ -564,18 +1180,26 @@ fn bind_view_sockets(
                 Ok(listener) => listener,
                 Err(err) => fail(emitter, &format!("{}: {err}", path.display())),
             };
+            let (queries, transaction_control, unrestricted, tables) = match grant {
+                Some(pg) => (
+                    pg.queries().to_vec(),
+                    pg.transaction_control(),
+                    pg.is_unrestricted(),
+                    pg.tables().clone(),
+                ),
+                None => (Vec::new(), false, false, Default::default()),
+            };
             listeners.push((
                 listener,
-                ListenerSpec {
-                    fd: 0,
-                    route: route.name().to_string(),
-                    proxy: proxy_name.as_str().to_string(),
+                ListenerSpec::enforcing(
+                    route.name(),
+                    proxy_name.as_str(),
                     uid,
-                    queries: pg.queries().to_vec(),
-                    transaction_control: pg.transaction_control(),
-                    unrestricted: pg.is_unrestricted(),
-                    tables: pg.tables().clone(),
-                },
+                    queries,
+                    transaction_control,
+                    unrestricted,
+                    tables,
+                ),
             ));
         }
     }
@@ -585,6 +1209,29 @@ fn bind_view_sockets(
         spec.fd = listener.as_raw_fd();
     }
     listeners
+}
+
+/// Whether the route at `index` names `proxy` at all, even with an empty grant.
+///
+/// `Manifest::effective_grants` drops an empty grant, because it grants nothing;
+/// the documentation still promises the route a listener that denies every
+/// statement (`docs/local.md`: "`queries = []` gives it a listener that denies
+/// every statement"), so the *declaration* is what decides the socket. A route
+/// with no `[route.<proxy>]` and no group that names the proxy still gets no
+/// listener, which is the other half of that page.
+fn route_declares_proxy(manifest: &Manifest, index: usize, proxy: &ProxyName) -> bool {
+    let Some(route) = manifest.routes().get(index) else {
+        return false;
+    };
+    if route.grants().contains_key(proxy) {
+        return true;
+    }
+    manifest
+        .global_groups()
+        .iter()
+        .chain(route.groups().iter())
+        .filter_map(|name| manifest.groups().get(name))
+        .any(|group| group.grants().contains_key(proxy))
 }
 
 /// Forks dbproxy, hands it the secrets and waits for its ready byte (§4).
@@ -638,10 +1285,10 @@ fn fork_dbproxy(
             max_connections: config.max_connections_for(name.as_str()),
         })
         .collect();
-    let document = DbproxyConfig {
+    let document = DbproxyConfig::enforcing(
         proxies,
-        listeners: listeners.iter().map(|(_, spec)| spec.clone()).collect(),
-    };
+        listeners.iter().map(|(_, spec)| spec.clone()).collect(),
+    );
 
     let (secrets_read, secrets_write) = pipe_ok(emitter, "secrets.pipe");
     let (events_read, events_write) = pipe_ok(emitter, "dbproxy events pipe");
@@ -1240,5 +1887,80 @@ mod tests {
         drop(write_end);
         let err = wait_ready(&ready, Duration::from_secs(30)).unwrap_err();
         assert_eq!(err, "dbproxy exited before it was ready");
+    }
+
+    /// The arithmetic and the wording live in [`crate::mem_usage`]; this pins
+    /// the wiring: `memory_refusal` compares the reading against *the config's*
+    /// `BLASTIT_MEM_HIGH_WATERMARK`, the same ceiling the scheduler uses.
+    #[test]
+    fn memory_refusal_takes_its_ceiling_from_the_config() {
+        let gib = 1024 * 1024 * 1024;
+        let mut config = Config::for_dev().expect("a dev config");
+        config.mem_high_watermark_percent = 85.0;
+        let reading = |used: u64| crate::mem_usage::Usage::new(100 * gib, used, 0);
+        assert!(memory_refusal(&reading(80 * gib), &config).is_none());
+        assert!(
+            memory_refusal(&reading(85 * gib), &config).is_none(),
+            "the watermark is a ceiling, not a trigger"
+        );
+        let message = memory_refusal(&reading(86 * gib), &config).expect("above the watermark");
+        assert!(message.contains("BLASTIT_MEM_HIGH_WATERMARK"), "{message}");
+        assert!(message.contains("(85%)"), "the knob: {message}");
+        assert!(message.contains("503"), "the symptom: {message}");
+        // A 0% watermark can never be met: it is how a test forces the high arm
+        // without faking `/proc`.
+        config.mem_high_watermark_percent = 0.0;
+        assert!(memory_refusal(&reading(1), &config).is_some());
+        // An unreadable or empty reading is not pressure.
+        assert!(memory_refusal(&reading(0), &config).is_none());
+    }
+
+    #[test]
+    fn an_explicit_empty_grant_still_names_the_proxy_for_its_route() {
+        let source = "\
+version = 1
+
+[proxy.db]
+protocol = \"postgresql\"
+input = { url = \"DATABASE_URL\" }
+
+[group.denied.db]
+queries = []
+
+[[route]]
+name = \"locked\"
+path = ['/locked/.*']
+[route.db]
+queries = []
+
+[[route]]
+name = \"grouped\"
+path = ['/grouped/.*']
+groups = [\"denied\"]
+
+[[route]]
+name = \"ungranted\"
+path = ['/ungranted/.*']
+";
+        let (manifest, _) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let db = ProxyName::new("db");
+        assert!(
+            route_declares_proxy(&manifest, 0, &db),
+            "an inline `queries = []` is a declaration"
+        );
+        assert!(
+            route_declares_proxy(&manifest, 1, &db),
+            "an attached group that names the proxy is a declaration"
+        );
+        assert!(
+            !route_declares_proxy(&manifest, 2, &db),
+            "a route that names no proxy gets no listener"
+        );
+        // The denied twin: `effective_grants` is what drops the empty grant, so
+        // the two functions disagree on `locked` on purpose.
+        assert!(
+            !manifest.effective_grants(0).contains_key(&db),
+            "the manifest model still calls an empty grant empty"
+        );
     }
 }

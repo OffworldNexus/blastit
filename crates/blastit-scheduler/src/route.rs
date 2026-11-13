@@ -4,8 +4,10 @@
 //! matches `(method, PATH_INFO)` and returns a route *index*. The scheduler
 //! keeps one [`RouteInfo`] per index, with the little that is not in the
 //! routing table but is needed to serve the request: the route's name (for
-//! events), whether its view is preforked, and the uid its process runs under.
+//! events), whether its view is preforked, the uid its process runs under, and
+//! the `[route.ingress]` policy its request bodies are decoded with.
 
+use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_manifest::{Manifest, UidLayout};
 
 /// One manifest route, in routing-table order.
@@ -20,16 +22,38 @@ pub struct RouteInfo {
     /// The uid the view process runs under, `UID_BASE + 1000 + index` (§6).
     /// The scheduler never *uses* it — only init does — but events carry it.
     pub uid: u32,
+    /// The route's `[route.ingress]` policy (§4.2 A), or `None` when the route
+    /// declared none — which is fail-closed exactly like `body = "none"`.
+    pub ingress: Option<IngressPolicy>,
 }
 
 impl RouteInfo {
-    /// A route with this name, prefork flag and uid.
+    /// A route with this name, prefork flag and uid, and no declared ingress.
     pub fn new(name: impl Into<String>, prefork: bool, uid: u32) -> Self {
         Self {
             name: name.into(),
             prefork,
             uid,
+            ingress: None,
         }
+    }
+
+    /// This route with the `[route.ingress]` policy the manifest declared
+    /// (§4.2 A).
+    pub fn with_ingress(mut self, ingress: Option<IngressPolicy>) -> Self {
+        self.ingress = ingress;
+        self
+    }
+
+    /// The policy the scheduler enforces for this route's request bodies.
+    ///
+    /// A route that declared no `[route.ingress]` takes no body at all, exactly
+    /// like `body = "none"` (§4.2 A: `None` at the use site is fail-closed).
+    pub fn ingress_policy(&self) -> IngressPolicy {
+        self.ingress.unwrap_or(IngressPolicy {
+            body: BodyCodec::None,
+            allow_raw: false,
+        })
     }
 }
 
@@ -40,13 +64,19 @@ impl RouteInfo {
 /// [`RoutingTable::route`] returns indices in, and which [`UidLayout::view`]
 /// numbers uids by.
 ///
+/// Each route carries its `[route.ingress]` policy, so the scheduler can plan a
+/// request body from the head alone (`R12`, `R16`).
+///
 /// [`RoutingTable::route`]: blastit_manifest::RoutingTable::route
 pub fn routes_from_manifest(manifest: &Manifest, layout: &UidLayout) -> Vec<RouteInfo> {
     manifest
         .routes()
         .iter()
         .enumerate()
-        .map(|(index, route)| RouteInfo::new(route.name(), route.prefork(), layout.view(index)))
+        .map(|(index, route)| {
+            RouteInfo::new(route.name(), route.prefork(), layout.view(index))
+                .with_ingress(route.ingress())
+        })
         .collect()
 }
 
@@ -75,6 +105,49 @@ mod tests {
         assert_eq!(
             routes_from_manifest(&manifest, &UidLayout::default())[0].uid,
             UidLayout::default().view(0)
+        );
+    }
+
+    #[test]
+    fn a_route_without_ingress_takes_no_body_and_with_ingress_keeps_its_codec() {
+        let json = IngressPolicy {
+            body: BodyCodec::Json,
+            allow_raw: false,
+        };
+
+        // Fail-closed: no `[route.ingress]` is `body = "none"`.
+        let plain = RouteInfo::new("plain", false, 7);
+        assert_eq!(plain.ingress, None);
+        assert_eq!(
+            plain.ingress_policy(),
+            IngressPolicy {
+                body: BodyCodec::None,
+                allow_raw: false,
+            }
+        );
+
+        // The declared policy comes back unchanged, and the manifest path keeps
+        // the fail-closed default until the manifest hands one over.
+        let declared = RouteInfo::new("api", false, 7).with_ingress(Some(json));
+        assert_eq!(declared.ingress_policy(), json);
+        let raw = IngressPolicy {
+            body: BodyCodec::Raw,
+            allow_raw: true,
+        };
+        assert_eq!(
+            RouteInfo::new("upload", true, 8)
+                .with_ingress(Some(raw))
+                .ingress_policy(),
+            raw
+        );
+
+        let manifest = blastit_manifest::Manifest::from_toml_str(
+            "version = 1\n[[route]]\nname = \"api\"\npath = ['/api']\n",
+        )
+        .unwrap();
+        assert_eq!(
+            routes_from_manifest(&manifest, &UidLayout::new(20_000))[0].ingress,
+            None
         );
     }
 }

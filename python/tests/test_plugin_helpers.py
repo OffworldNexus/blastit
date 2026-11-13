@@ -13,16 +13,16 @@ import shlex
 import shutil
 import tempfile
 import threading
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
-
 from blastit import pytest_plugin as plugin
 
 # The wire form of a statement is psycopg's, so these tests need the driver the
 # tiny project is served with (it is in the same test environment).
-pytest.importorskip("psycopg", reason="the wire form is psycopg's")
+psycopg = pytest.importorskip("psycopg", reason="the wire form is psycopg's")
 
 
 class TestWireForm:
@@ -30,17 +30,16 @@ class TestWireForm:
 
     def test_positional_placeholders_are_numbered(self) -> None:
         assert (
-            plugin.to_wire_sql('SELECT "t"."id" FROM "t" WHERE "t"."a" = %s AND "t"."b" = %s')
+            plugin.to_wire_sql(
+                'SELECT "t"."id" FROM "t" WHERE "t"."a" = %s AND "t"."b" = %s'
+            )
             == 'SELECT "t"."id" FROM "t" WHERE "t"."a" = $1 AND "t"."b" = $2'
         )
 
     def test_named_placeholders_are_numbered_in_order_of_first_use(self) -> None:
         # psycopg numbers a named parameter the first time it appears, and reuses
         # the number afterwards: the grant has to be written the same way.
-        assert (
-            plugin.to_wire_sql("SELECT %(b)s, %(a)s, %(b)s")
-            == "SELECT $1, $2, $1"
-        )
+        assert plugin.to_wire_sql("SELECT %(b)s, %(a)s, %(b)s") == "SELECT $1, $2, $1"
 
     def test_a_doubled_percent_is_one_percent(self) -> None:
         assert plugin.to_wire_sql("SELECT '100%%'") == "SELECT '100%'"
@@ -59,7 +58,7 @@ class TestWireForm:
         # Mixing positional and named placeholders is a programming error in
         # psycopg; the plugin must not turn that into a failing test run.
         mixed = "SELECT %s, %(name)s"
-        with pytest.raises(Exception):
+        with pytest.raises(psycopg.ProgrammingError):
             plugin._psycopg_converter()(mixed.encode(), "utf-8")  # type: ignore[misc]
         assert plugin.to_wire_sql(mixed) == "SELECT $1, $2"
 
@@ -154,23 +153,42 @@ class TestLiveServerManifest:
         assert plugin._postgresql_url_variable(path) is None
 
 
+class _FakeSession:
+    """The parts of a session the capture asks for."""
+
+    def __init__(self) -> None:
+        self.setup: list[tuple[str | None, str]] = []
+        self.warnings: list[str] = []
+        self.reported_bindings: set[str] = set()
+        self.lock = threading.Lock()
+        # What a live server's log folds into (D3c).
+        self.live: list[dict[str, Any]] = []
+        self.problems: list[str] = []
+
+    def record_connection_setup(self, alias: str | None, sql: str) -> None:
+        self.setup.append((alias, sql))
+
+    def record_unrecognised(self, alias: str | None, query: str) -> None:
+        self.setup.append((alias, query))
+
+
 class TestLiveObservations:
     """A live server's log, folded into the observations (D3c)."""
 
-    LOG = "\n".join(
-        [
-            '2026-10-25T14:02:11.384Z app[web.1]: {"event":"request","method":"GET",'
-            '"path":"/_blastit/health","route":null,"status":200}',
-            '{"event":"request","method":"GET","path":"/notes/","route":"notes","status":200}',
-            '{"event":"sql.denied","route":"notes","proxy":"db",'
-            '"sql":"SELECT \\"notes\\".\\"body\\" FROM \\"notes\\" WHERE \\"notes\\".\\"id\\" = $?",'
-            '"reason":"select on notes.body not granted"}',
-            '{"event":"request","method":"GET","path":"/oops/","route":null,"status":404}',
-        ]
+    LOG = (
+        '2026-10-25T14:02:11.384Z app[web.1]: {"event":"request","method":"GET",'
+        '"path":"/_blastit/health","route":null,"status":200}\n'
+        '{"event":"request","method":"GET","path":"/notes/","route":"notes","status":200}\n'
+        '{"event":"sql.denied","route":"notes","proxy":"db",'
+        '"sql":"SELECT \\"notes\\".\\"body\\" FROM \\"notes\\" WHERE \\"notes\\".\\"id\\" = $?",'
+        '"reason":"select on notes.body not granted"}\n'
+        '{"event":"request","method":"GET","path":"/oops/","route":null,"status":404}'
     )
 
     def test_a_live_request_carries_its_own_proxy_and_the_live_source(self) -> None:
-        assert plugin._live_request("GET", "/notes/", "tests/test_x.py::test_it", []) == {
+        assert plugin._live_request(
+            "GET", "/notes/", "tests/test_x.py::test_it", []
+        ) == {
             "method": "GET",
             "path_info": "/notes/",
             "nodeid": "tests/test_x.py::test_it",
@@ -195,13 +213,14 @@ class TestLiveObservations:
         assert statements[0]["proxy"] == "db"
         # The log's text is normalised; what the extension gets is its shape, so
         # the table-grant analysis has something to parse (`blastit.logs`).
-        assert statements[0]["sql"] == 'SELECT "notes"."body" FROM "notes" WHERE "notes"."id" = $1'
+        assert (
+            statements[0]["sql"]
+            == 'SELECT "notes"."body" FROM "notes" WHERE "notes"."id" = $1'
+        )
 
     def test_the_health_path_the_fixture_polls_is_not_traffic(self) -> None:
         session = _FakeSession()
-        plugin._Session.record_live(
-            session, self.LOG, None, (plugin.HEALTH_PATH,)
-        )
+        plugin._Session.record_live(session, self.LOG, None, (plugin.HEALTH_PATH,))
         assert [entry["path_info"] for entry in session.live] == ["/oops/", "/notes/"]
 
     def test_a_denial_with_no_request_event_is_a_problem(self) -> None:
@@ -241,7 +260,12 @@ class TestStatementCapture:
         connection = _FakeConnection()
         plugin._wrap_connection(connection)
         with _request() as context:
-            _execute(connection, "INSERT INTO t (a) VALUES (%s)", [(1,), (2,), (3,)], many=True)
+            _execute(
+                connection,
+                "INSERT INTO t (a) VALUES (%s)",
+                [(1,), (2,), (3,)],
+                many=True,
+            )
         assert context.statements == [("default", "INSERT INTO t (a) VALUES ($1)")]
 
     def test_a_query_without_parameters_is_left_as_it_is(self) -> None:
@@ -267,7 +291,9 @@ class TestStatementCapture:
         assert len(first.statements) == 1
         assert len(second.statements) == 1
 
-    def test_a_connection_that_would_inline_its_parameters_is_named(self, session: _FakeSession) -> None:
+    def test_a_connection_that_would_inline_its_parameters_is_named(
+        self, session: _FakeSession
+    ) -> None:
         """The `$n` text is invented when Django does not bind on the server."""
         connection = _FakeConnection()
         connection.settings_dict = {"OPTIONS": {}}
@@ -278,7 +304,9 @@ class TestStatementCapture:
         plugin._wrap_connection(connection)
         assert len(session.warnings) == 1, "said once per alias, not once per connect"
 
-    def test_a_cursor_factory_that_binds_client_side_is_named(self, session: _FakeSession) -> None:
+    def test_a_cursor_factory_that_binds_client_side_is_named(
+        self, session: _FakeSession
+    ) -> None:
         from psycopg import ClientCursor
 
         connection = _FakeConnection()
@@ -313,7 +341,9 @@ class TestStatementCapture:
         assert plugin._sql_text(object(), None) is None
         assert plugin._sql_text(None, None) is None
 
-    def test_a_statement_during_a_connect_is_connection_setup(self, session: _FakeSession) -> None:
+    def test_a_statement_during_a_connect_is_connection_setup(
+        self, session: _FakeSession
+    ) -> None:
         """It is the connection's SQL, not a route's, wherever it runs."""
         connection = _FakeConnection()
         plugin._wrap_connection(connection)
@@ -324,7 +354,9 @@ class TestStatementCapture:
             plugin._CONNECTING.reset(token)
         assert session.setup == [("default", "SET application_name = 'x'")]
 
-    def test_the_connection_that_creates_the_test_database_is_ignored(self, session: _FakeSession) -> None:
+    def test_the_connection_that_creates_the_test_database_is_ignored(
+        self, session: _FakeSession
+    ) -> None:
         """Django's `__no_db__` connection is test machinery, not the app's."""
         connection = _FakeConnection()
         plugin._wrap_connection(connection)
@@ -348,25 +380,6 @@ class _FakeConnection:
         self.connection = None
 
 
-class _FakeSession:
-    """The parts of a session the capture asks for."""
-
-    def __init__(self) -> None:
-        self.setup: list[tuple[str | None, str]] = []
-        self.warnings: list[str] = []
-        self.reported_bindings: set[str] = set()
-        self.lock = threading.Lock()
-        # What a live server's log folds into (D3c).
-        self.live: list[dict[str, Any]] = []
-        self.problems: list[str] = []
-
-    def record_connection_setup(self, alias: str | None, sql: str) -> None:
-        self.setup.append((alias, sql))
-
-    def record_unrecognised(self, alias: str | None, query: str) -> None:
-        self.setup.append((alias, query))
-
-
 @contextlib.contextmanager
 def _request() -> Iterator[Any]:
     """Installs a request context, the way `get_response` does around a request."""
@@ -378,7 +391,9 @@ def _request() -> Iterator[Any]:
         plugin._CURRENT.reset(token)
 
 
-def _execute(connection: _FakeConnection, sql: str, params: Any, many: bool = False) -> Any:
+def _execute(
+    connection: _FakeConnection, sql: str, params: Any, many: bool = False
+) -> Any:
     """Runs one statement through every wrapper of a connection, as Django does."""
 
     def executor(inner_sql: str, inner_params: Any, _many: bool, _context: Any) -> Any:
@@ -423,9 +438,14 @@ class TestObservationDocument:
             statements=[],
             egress=[],
         )
-        assert json.loads(json.dumps({"version": 1, "requests": [request.as_json(lambda _: "db")]}))[
-            "version"
-        ] == 1
+        assert (
+            json.loads(
+                json.dumps(
+                    {"version": 1, "requests": [request.as_json(lambda _: "db")]}
+                )
+            )["version"]
+            == 1
+        )
 
     def test_the_context_records_statements_in_order(self) -> None:
         context = plugin._RequestContext()
@@ -470,15 +490,21 @@ class TestTheLiveServerFilesystem:
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_a_private_project_is_copied_and_nothing_is_loosened(self, tmp_path: Path) -> None:
+    def test_a_private_project_is_copied_and_nothing_is_loosened(
+        self, tmp_path: Path
+    ) -> None:
         """pytest's `tmp_path` is `0700`: the views could not read the code at all."""
         project = self.make_project(tmp_path)
         assert plugin._traversable(project) is False
-        before = {path: path.stat().st_mode for path in [project, tmp_path, project / "sub"]}
+        before = {
+            path: path.stat().st_mode for path in [project, tmp_path, project / "sub"]
+        }
         served, temporary = plugin._serveable_project(project)
         assert served != project
         assert temporary is not None and temporary.is_dir()
-        assert plugin._traversable(served) is True, "the copy is readable by the view uids"
+        assert plugin._traversable(served) is True, (
+            "the copy is readable by the view uids"
+        )
         assert (served / "app.py").read_text(encoding="utf-8") == "x = 1\n"
         assert (served / "sub" / "mod.py").is_file()
         assert not (served / ".git").exists(), "a checkout is not what a server reads"
@@ -496,14 +522,23 @@ class TestTheLiveServerFilesystem:
         assert not temporary.exists()
         assert served.parent.exists() is False
 
-    def test_the_environment_file_is_readable_by_its_owner_only(self, tmp_path: Path) -> None:
+    def test_the_environment_file_is_readable_by_its_owner_only(
+        self, tmp_path: Path
+    ) -> None:
         url = "postgresql://user:it's-a-secret@host/db"
         path = tmp_path / "blastit-live.env"
         plugin._write_environment(path, {"DATABASE_URL": url})
-        assert path.stat().st_mode & 0o777 == 0o600, "only its owner and root may read it"
-        assert path.read_text(encoding="utf-8") == f"export DATABASE_URL={shlex.quote(url)}\n"
+        assert path.stat().st_mode & 0o777 == 0o600, (
+            "only its owner and root may read it"
+        )
+        assert (
+            path.read_text(encoding="utf-8")
+            == f"export DATABASE_URL={shlex.quote(url)}\n"
+        )
 
-    def test_only_bytecode_this_user_does_not_own_is_removed(self, tmp_path: Path) -> None:
+    def test_only_bytecode_this_user_does_not_own_is_removed(
+        self, tmp_path: Path
+    ) -> None:
         project = self.make_project(tmp_path)
         cache = project / "__pycache__"
         cache.mkdir(exist_ok=True)
@@ -545,36 +580,43 @@ class TestTheLiveServerFilesystem:
 
 
 class TestLiveServerPrivileges:
-    """When blastit cannot run here, the fixture says so instead of failing (D3c)."""
+    """How production `blastit` is started here, and when there is no way (D3c).
+
+    `_live_server_mode` turns a `None` prefix into unprivileged `blastit dev`
+    instead of a skip (R39); the allowed/denied twins of that decision live in
+    `tests/critical/test_check_contract.py`, which `make check` always runs.
+    """
 
     def test_root_starts_it_directly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(plugin.os, "geteuid", lambda: 0)
-        assert plugin._live_server_prefix() == []
+        assert plugin._privileges() == []
 
-    def test_passwordless_sudo_is_the_other_way(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_passwordless_sudo_is_the_other_way(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(plugin.os, "geteuid", lambda: 1000)
         monkeypatch.setattr(plugin.shutil, "which", lambda name: "/usr/bin/sudo")
         monkeypatch.setattr(
             plugin.subprocess, "run", lambda *args, **kwargs: _Completed(0)
         )
-        assert plugin._live_server_prefix() == ["/usr/bin/sudo", "-n"]
+        assert plugin._privileges() == ["/usr/bin/sudo", "-n"]
 
-    def test_sudo_that_wants_a_password_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_sudo_that_wants_a_password_is_no_privileged_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(plugin.os, "geteuid", lambda: 1000)
         monkeypatch.setattr(plugin.shutil, "which", lambda name: "/usr/bin/sudo")
         monkeypatch.setattr(
             plugin.subprocess, "run", lambda *args, **kwargs: _Completed(1)
         )
-        with pytest.raises(pytest.skip.Exception) as skipped:
-            plugin._live_server_prefix()
-        assert "root" in str(skipped.value) and "sudo" in str(skipped.value)
+        assert plugin._privileges() is None
 
-    def test_no_root_and_no_sudo_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_root_and_no_sudo_is_no_privileged_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(plugin.os, "geteuid", lambda: 1000)
         monkeypatch.setattr(plugin.shutil, "which", lambda name: None)
-        with pytest.raises(pytest.skip.Exception) as skipped:
-            plugin._live_server_prefix()
-        assert "passwordless sudo" in str(skipped.value)
+        assert plugin._privileges() is None
 
 
 class TestLiveAppSpec:

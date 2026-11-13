@@ -41,6 +41,8 @@ pub(crate) fn statement_count_hint(sql: &str) -> usize {
             | RegionKind::EString
             | RegionKind::BitString
             | RegionKind::HexString
+            | RegionKind::NationalString
+            | RegionKind::UnicodeString
             | RegionKind::QuotedIdent
             | RegionKind::DollarQuoted => has_content = true,
         }

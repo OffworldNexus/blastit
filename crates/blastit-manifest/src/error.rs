@@ -117,6 +117,36 @@ pub enum ManifestError {
         /// Dotted path of the offending key.
         path: String,
     },
+    /// A top-level key written after the first `[table]`, where TOML would
+    /// silently attach it to that table instead (`R8`, `ADR-0002`).
+    ///
+    /// `version`, `app` and `preload` are top-level only, and so is `groups`
+    /// outside a `[[route]]` element. The message names the key and the fix,
+    /// because the TOML error a reader would otherwise see points at a line
+    /// that looks perfectly fine.
+    #[error("{key} after a [table] is not top-level; move it above the first table")]
+    NotTopLevel {
+        /// The misplaced key, escaped.
+        key: String,
+    },
+    /// Top-level `app` is not a `module:attribute` WSGI callable (`R7`).
+    #[error("app {}: must be `module:attribute`", quoted(.app))]
+    InvalidApp {
+        /// The value as written.
+        app: String,
+    },
+    /// A `[route.ingress]` `body` names a codec this build does not have
+    /// (`R11`).
+    #[error(
+        "{path}: expected \"json\", \"form\", \"none\" or \"raw\", found {}",
+        quoted(.found)
+    )]
+    UnknownBodyCodec {
+        /// Dotted path of the offending value.
+        path: String,
+        /// The codec name as written.
+        found: String,
+    },
     /// A key of a `[route.db.tables.<table>]` entry that is not one of the four
     /// operations (§6, D7).
     #[error("{path}: unknown operation; expected select, insert, update or delete")]
@@ -343,6 +373,47 @@ pub enum ManifestError {
         /// The table as written.
         table: String,
     },
+    /// A `queries` entry still holds the `…` that redaction writes (`R24`,
+    /// `ADR-0003`).
+    ///
+    /// `blastit check --learn` refuses such a statement instead of writing it,
+    /// and a copied `sql.denied` line is redacted by construction: granting it
+    /// would allow a shape, not a statement. The entry itself is never printed
+    /// — it may still hold a value next to the placeholder — so the message
+    /// names its position instead.
+    #[error(
+        "{location}: queries[{rule}] holds a redacted `…` placeholder (grant on proxy {}); \
+         grant the exact statement, with `$?` where the values bind",
+        quoted(.proxy)
+    )]
+    RedactedQueryPlaceholder {
+        /// Where the grant is written.
+        location: Location,
+        /// The proxy the grant names.
+        proxy: ProxyName,
+        /// Index of the entry in the grant's `queries` list.
+        rule: usize,
+    },
+    /// A `queries` entry inlines a quoted literal outside
+    /// [`blastit_sqlpolicy::KNOWN_STATIC_SETUP_SQL`] (`R24`, `ADR-0003`).
+    ///
+    /// An exact grant is trusted and run as written, so a statement that
+    /// carries a value is a value committed to the repository — and the grant
+    /// would only ever match that one value. The entry is never printed, since
+    /// printing it is the very thing the rule forbids.
+    #[error(
+        "{location}: queries[{rule}] inlines a quoted literal (grant on proxy {}); \
+         bind the value with `$?` instead of writing it in the statement",
+        quoted(.proxy)
+    )]
+    LiteralQuery {
+        /// Where the grant is written.
+        location: Location,
+        /// The proxy the grant names.
+        proxy: ProxyName,
+        /// Index of the entry in the grant's `queries` list.
+        rule: usize,
+    },
 }
 
 /// Something suspicious that does not stop the server from starting (§6).
@@ -378,6 +449,29 @@ pub enum ManifestWarning {
         route: String,
         /// The proxy the route is unrestricted on.
         proxy: ProxyName,
+    },
+    /// A route that declares `body = "raw"`: the request body reaches the app
+    /// exactly as the client sent it (`R11`).
+    ///
+    /// `raw` is the loud opt-out, so a boot says so once per route: every other
+    /// codec decodes, validates and re-encodes the body before the app sees it.
+    #[error(
+        "route {}: body = \"raw\" passes the request body through unvalidated",
+        quoted(.route)
+    )]
+    RawIngress {
+        /// The route's name.
+        route: String,
+    },
+    /// A route that declares `egress = true`: it may open any outbound address
+    /// and port, cloud metadata included (`R11`).
+    #[error(
+        "route {}: egress = true opens any outbound address and port",
+        quoted(.route)
+    )]
+    EgressRoute {
+        /// The route's name.
+        route: String,
     },
 }
 

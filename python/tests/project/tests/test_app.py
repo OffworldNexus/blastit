@@ -114,7 +114,7 @@ def test_sql_outside_a_request_is_ignored():
 @pytest.mark.django_db(transaction=True)
 def test_notes_over_live_server(live_server):
     """The same granted SELECT, served over HTTP from another thread."""
-    with urlopen(f"{live_server.url}/notes/") as response:  # noqa: S310 - 127.0.0.1
+    with urlopen(f"{live_server.url}/notes/") as response:
         assert response.status == 200
 
 
@@ -125,7 +125,7 @@ def test_notes_over_live_server(live_server):
 def test_atomic_over_live_server(live_server):
     """An `atomic()` request with no test transaction around it."""
     request = Request(f"{live_server.url}/notes/atomic-live/", data=b"")
-    with urlopen(request) as response:  # noqa: S310 - 127.0.0.1
+    with urlopen(request) as response:
         assert response.status == 200
 
 
@@ -138,9 +138,8 @@ def test_the_plugin_is_inert(request):
     if request.config.getoption("blastit_manifest", None):
         pytest.skip("the plugin is active in this run")
 
-    from django.core.handlers.base import BaseHandler
-
     from blastit import pytest_plugin
+    from django.core.handlers.base import BaseHandler
 
     assert pytest_plugin._SESSION is None, "no session without a manifest"
     assert not getattr(BaseHandler.get_response, "_blastit_patched", False), (

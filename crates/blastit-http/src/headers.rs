@@ -4,8 +4,6 @@
 //! Header names travel as bytes on `http.chan`, so every comparison here is
 //! ASCII case-insensitive and works on `&[u8]`, never on `&str`.
 
-use std::collections::HashSet;
-
 /// Field names that belong to one hop and are never forwarded.
 ///
 /// `Connection` and the field names it lists, `Keep-Alive`, `Proxy-Connection`,
@@ -122,28 +120,31 @@ pub(crate) fn tokens<'a>(
 
 /// Whether any header called `name` carries `token` in a comma-separated list.
 pub(crate) fn has_token(headers: &[(Vec<u8>, Vec<u8>)], name: &str, token: &str) -> bool {
-    tokens(headers, name).any(|value| is(value, token))
+    has_token_bytes(headers, name, token.as_bytes())
 }
 
-/// The lower-cased names that must not cross a hop: the fixed list plus every
-/// field name the `Connection` header lists.
-pub(crate) fn hop_by_hop(headers: &[(Vec<u8>, Vec<u8>)]) -> HashSet<Vec<u8>> {
-    let mut names: HashSet<Vec<u8>> = HOP_BY_HOP
-        .iter()
-        .map(|name| name.as_bytes().to_vec())
-        .collect();
-    for token in tokens(headers, "connection") {
-        names.insert(token.to_ascii_lowercase());
-    }
-    names
+/// [`has_token`] over bytes, for a caller whose candidate is itself a header
+/// name rather than a string literal.
+fn has_token_bytes(headers: &[(Vec<u8>, Vec<u8>)], name: &str, token: &[u8]) -> bool {
+    tokens(headers, name).any(|value| value.eq_ignore_ascii_case(token))
+}
+
+/// Whether `name` is one of the fields that must not cross a hop.
+///
+/// This is exactly the set [`strip_hop_by_hop`] removes — the fixed list plus
+/// every field name the `Connection` header lists — but decided for one name at
+/// a time, so filtering a header list costs no allocation at all. That matters
+/// on the response path, where the filter is applied while the head is written
+/// and nothing is cloned to do it.
+pub(crate) fn is_hop_by_hop(headers: &[(Vec<u8>, Vec<u8>)], name: &[u8]) -> bool {
+    HOP_BY_HOP.iter().any(|hop| is(name, hop)) || has_token_bytes(headers, "connection", name)
 }
 
 /// The headers that may cross a hop, in the order they arrived.
 pub(crate) fn strip_hop_by_hop(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let names = hop_by_hop(headers);
     headers
         .iter()
-        .filter(|(name, _)| !names.contains(&name.to_ascii_lowercase()))
+        .filter(|(name, _)| !is_hop_by_hop(headers, name))
         .cloned()
         .collect()
 }
@@ -245,9 +246,18 @@ mod tests {
         assert!(has_token(&list, "connection", "x-private"));
         assert!(!has_token(&list, "connection", "keep-alive"));
 
+        // The same decision, one header at a time, is what the response path
+        // filters with; it must agree with the whole set.
+        assert!(is_hop_by_hop(&list, b"Connection"));
+        assert!(is_hop_by_hop(&list, b"transfer-encoding"));
+        assert!(is_hop_by_hop(&list, b"X-PRIVATE"));
+        assert!(!is_hop_by_hop(&list, b"Host"));
+        assert!(!is_hop_by_hop(&list, b"X-Kept"));
+
         // A `Connection` value that itself lists `connection` changes nothing.
         let odd = headers(&[("Connection", "connection, host"), ("Host", "h")]);
         assert!(strip_hop_by_hop(&odd).is_empty());
+        assert!(is_hop_by_hop(&odd, b"Host"));
     }
 
     #[test]

@@ -21,3 +21,11 @@ __pycache__/
 
 # The documentation site `zensical build` writes (E2).
 /site
+
+# Autonomous harness artefacts and local caches.
+/.playwright-mcp/
+**/node_modules/
+/mutants.out/
+/mutants.out.old/
+/.ruff_cache/
+/.pytest_cache/

@@ -54,7 +54,7 @@ mod json;
 mod pretty;
 mod split;
 
-pub use json::{decode_json, encode_json};
+pub use json::{decode_json, encode_json, encode_json_into, restamp_json_into};
 pub use pretty::{encode_pretty, escape_inline};
 pub use split::{split_app_output, split_app_output_at};
 
@@ -933,6 +933,12 @@ pub struct Lifecycle {
     duration_ms: Option<f64>,
     seccomp: Option<bool>,
     privilege: Option<String>,
+    /// The build the `preload` `boot` event reports (`R23`).
+    ///
+    /// Only the `preload` `boot` carries it: the version of the binary that is
+    /// about to serve. Every other lifecycle event leaves it `None`, so the line
+    /// is the one place a log reader can learn which build a deployment runs.
+    build: Option<String>,
     capabilities: Vec<String>,
     bounding_set: Option<bool>,
     immortalize: Option<bool>,
@@ -999,6 +1005,19 @@ impl Lifecycle {
     #[must_use]
     pub fn with_privilege(mut self, privilege: impl Into<String>) -> Self {
         self.privilege = Some(privilege.into());
+        self
+    }
+
+    /// Sets the build string the `preload` `boot` event reports (`R23`).
+    ///
+    /// `build` is blastit's own version (`env!("CARGO_PKG_VERSION")` in the
+    /// crate that constructs the event), never a value from the environment.
+    /// Only the `preload` `Boot` event is built with it; `stage0`, `config`,
+    /// `ready` and `shutdown` leave it out, so a reader can point at exactly one
+    /// line to learn which build is running.
+    #[must_use]
+    pub fn with_build(mut self, build: impl Into<String>) -> Self {
+        self.build = Some(build.into());
         self
     }
 
@@ -1161,6 +1180,12 @@ impl Lifecycle {
     /// (D6).
     pub fn privilege(&self) -> Option<&str> {
         self.privilege.as_deref()
+    }
+
+    /// The build the `preload` `boot` event reports, when this is that event
+    /// (`R23`).
+    pub fn build(&self) -> Option<&str> {
+        self.build.as_deref()
     }
 
     /// The capability names the process holds, `cap_...`; empty in root mode
@@ -1474,6 +1499,11 @@ pub fn strip_query(request_target: &str) -> &str {
 }
 
 /// `2026-10-25T14:02:11.384Z`: RFC 3339, UTC, always three fractional digits.
+///
+/// The JSON encoder writes these characters straight into its buffer, so that
+/// a request event allocates nothing for its timestamp; this is the same
+/// spelling as text, which the tests and the human form want.
+#[cfg(test)]
 pub(crate) fn format_timestamp(ts: OffsetDateTime) -> String {
     let ts = ts.to_offset(UtcOffset::UTC);
     format!(

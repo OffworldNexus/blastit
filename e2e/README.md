@@ -36,10 +36,12 @@ Two Dockerfiles, the same apps either way:
 * `Dockerfile` builds the wheel in the image (`scripts/build-wheel.sh`) and
   installs it with pip, so the demo runs exactly the install `pip install
   blastit` gives a project — the console script, on the image's interpreter.
-* `Dockerfile.prebuilt` installs a wheel built beforehand
-  (`dist/blastit-*-cp313-*.whl`, for the image's CPython 3.13); it is what CI
-  uses, one `maturin build` on the runner instead of a Rust toolchain in the
-  image.
+* `Dockerfile.prebuilt` installs a wheel built beforehand, and takes its base
+  image from the wheel's CPython tag (`dist/blastit-*-cp3*.whl`: `cp314` builds
+  on `python:3.14-slim-trixie`), so a developer's 3.14 works as well as the
+  runner's 3.13; it is what CI uses, one `maturin build` on the runner instead of
+  a Rust toolchain in the image. `dist/` must hold exactly one wheel — the build
+  says which ones it found rather than letting pip pick.
 
 `venv-smoke.sh` is the other half of the packaging test: the wheel installed
 into a project's *virtualenv* (uv, on the `modelw/base` image the pilot uses),

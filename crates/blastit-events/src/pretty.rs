@@ -161,6 +161,10 @@ fn lifecycle_summary(lifecycle: &Lifecycle) -> String {
     if let Some(privilege) = &lifecycle.privilege {
         parts.push(format!("privilege={privilege}"));
     }
+    // R23: the `preload` `boot` line names the build it is about to serve.
+    if let Some(build) = &lifecycle.build {
+        parts.push(format!("build={}", escape_inline(build)));
+    }
     if let Some(dropped) = lifecycle.bounding_set {
         parts.push(format!(
             "bounding_set={}",

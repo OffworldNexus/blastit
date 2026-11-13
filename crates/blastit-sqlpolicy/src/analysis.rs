@@ -804,7 +804,7 @@ fn resolve(sql: &str) -> Result<Analysis, AnalysisError> {
 /// The message is also cut short: a deeply nested statement makes the parser
 /// report its whole path back to the root, and a `sql.denied` event's `reason`
 /// is not the place for a kilobyte of it.
-fn syntax(error: &pg_query::Error) -> String {
+pub(crate) fn syntax(error: &pg_query::Error) -> String {
     const LIMIT: usize = 200;
     let text = error.to_string();
     let message = text
@@ -2658,7 +2658,7 @@ fn address(value: &Value) -> usize {
 /// A `Node` message is `{"node": <the node>}` and holds nothing else; a message
 /// body is `{"Type": body}`. Only a *pure* wrapper is unwrapped, so a message
 /// whose body happens to have a `node` field (a `SortBy`, say) keeps it.
-fn unwrap(value: &Value) -> &Value {
+pub(crate) fn unwrap(value: &Value) -> &Value {
     let mut current = value;
     for _ in 0..8 {
         let Some(map) = current.as_object() else {
@@ -2676,7 +2676,7 @@ fn unwrap(value: &Value) -> &Value {
 }
 
 /// The type and body of a node: `{"SelectStmt": { … }}`.
-fn one_of(value: &Value) -> Option<(&str, &Value)> {
+pub(crate) fn one_of(value: &Value) -> Option<(&str, &Value)> {
     let map = value.as_object()?;
     if map.len() != 1 {
         return None;

@@ -5,7 +5,8 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use blastit_sqlpolicy::TableGrants;
+use blastit_ingress::IngressPolicy;
+use blastit_sqlpolicy::{Allowlist, TableGrants};
 
 use crate::error::{ManifestErrors, ManifestWarning};
 use crate::parse;
@@ -305,6 +306,7 @@ pub struct Route {
     egress: bool,
     prefork: bool,
     grants: BTreeMap<ProxyName, Grant>,
+    ingress: Option<IngressPolicy>,
 }
 
 impl Route {
@@ -326,7 +328,18 @@ impl Route {
             egress,
             prefork,
             grants,
+            ingress: None,
         }
+    }
+
+    /// The same route with its `[route.ingress]` policy, if it declared one
+    /// (§4.2 A, `ADR-0006`).
+    ///
+    /// `None` is the fail-closed default: R12 turns any non-empty body into a
+    /// `413` for a route that declares nothing.
+    pub fn with_ingress(mut self, ingress: Option<IngressPolicy>) -> Self {
+        self.ingress = ingress;
+        self
     }
 
     /// The route's name, as it appears in `environ["blastit.route"]` and in the
@@ -371,6 +384,31 @@ impl Route {
     /// The route's inline grant on one proxy.
     pub fn grant(&self, proxy: &ProxyName) -> Option<&Grant> {
         self.grants.get(proxy)
+    }
+
+    /// The `[route.ingress]` policy, or `None` when the route declared none
+    /// (`R11`).
+    ///
+    /// `None` behaves exactly like [`blastit_ingress::BodyCodec::None`]: the
+    /// route may receive an empty body and nothing else.
+    pub fn ingress(&self) -> Option<IngressPolicy> {
+        self.ingress
+    }
+
+    /// Whether this is the method-unrestricted catch-all `--learn` inserts new
+    /// routes above (`R28`, `ADR-0003`).
+    ///
+    /// Both spellings the documentation uses count: the bare string
+    /// `path = ".*"` parses to `[".*"]`, and `path = ['.*']` is the same list.
+    /// An anchored `^.*$` matches the same requests, so it counts too. A
+    /// catch-all restricted to some methods is not unrestricted: a request
+    /// with another method still falls through to the route below it.
+    pub fn is_unrestricted_catch_all(&self) -> bool {
+        self.methods.is_none()
+            && self
+                .path
+                .iter()
+                .any(|pattern| pattern == ".*" || pattern == "^.*$")
     }
 }
 
@@ -436,6 +474,8 @@ impl UnresolvedGrant {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     version: u32,
+    app: Option<String>,
+    preload: Vec<String>,
     global_groups: Vec<String>,
     proxies: BTreeMap<ProxyName, Proxy>,
     groups: BTreeMap<String, Group>,
@@ -482,6 +522,26 @@ impl Manifest {
     /// The manifest version; always `1` for a manifest that parsed.
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// The top-level `app`: the WSGI callable, `module:attribute`, exactly as
+    /// written (`R7`).
+    ///
+    /// The manifest only carries it; `BLASTIT_APP` overrides it and the
+    /// supervisor is what turns it into a Python object. `None` means the file
+    /// names no callable, and then `BLASTIT_APP` has to.
+    pub fn app(&self) -> Option<&str> {
+        self.app.as_deref()
+    }
+
+    /// The top-level `preload` modules, in the order written, deduplicated
+    /// (`R7`).
+    ///
+    /// `preload = "mod"` and `preload = ["mod"]` are the same list. An empty
+    /// list means the manifest preloads nothing; `BLASTIT_PRELOAD` overrides
+    /// it.
+    pub fn preload(&self) -> &[String] {
+        &self.preload
     }
 
     /// The top-level `groups` list: groups attached to every route (§6).
@@ -566,6 +626,82 @@ impl Manifest {
         &self.unresolved_grants
     }
 
+    /// The same manifest with its top-level `app`; parsing is the only caller.
+    pub(crate) fn with_app(mut self, app: Option<String>) -> Self {
+        self.app = app;
+        self
+    }
+
+    /// The same manifest with its top-level `preload`; parsing is the only
+    /// caller.
+    pub(crate) fn with_preload(mut self, preload: Vec<String>) -> Self {
+        self.preload = preload;
+        self
+    }
+
+    /// Whether a statement is already allowed by the route's own table grants
+    /// or by the grants of a group it takes (`R34`).
+    ///
+    /// `blastit check` uses this to tell a `queries` entry that is really
+    /// unused from one the route may run anyway through
+    /// `[route.<db>.tables]` or an attached group: only the former is a
+    /// `dead_grant`.
+    ///
+    /// The route's own `queries` are deliberately not consulted — that entry is
+    /// the one being judged, so it cannot be its own coverage — but its table
+    /// grants are, and so are the queries, tables and `unrestricted` flag of
+    /// the global groups and the route's groups. The statement is matched
+    /// exactly after normalisation, or by analysis against those table grants.
+    pub fn is_query_covered_by_tables_or_groups(
+        &self,
+        route_index: usize,
+        proxy: &ProxyName,
+        normalized_sql: &str,
+    ) -> bool {
+        let Some(route) = self.routes.get(route_index) else {
+            return false;
+        };
+
+        let mut tables = TableGrants::default();
+        let mut queries: Vec<String> = Vec::new();
+        let mut transaction_control = false;
+        let mut unrestricted = false;
+
+        // The route's own table grants cover a statement; its `queries` do not.
+        if let Some(grant) = route.grant(proxy).and_then(Grant::as_postgresql) {
+            tables.merge_from(grant.tables());
+            transaction_control |= grant.transaction_control();
+            unrestricted |= grant.is_unrestricted();
+        }
+
+        // Every group the route takes, globally or by name.
+        for grant in self
+            .global_groups
+            .iter()
+            .chain(route.groups().iter())
+            .filter_map(|name| self.groups.get(name))
+            .filter_map(|group| group.grant(proxy))
+            .filter_map(Grant::as_postgresql)
+        {
+            for query in grant.queries() {
+                if !queries.contains(query) {
+                    queries.push(query.clone());
+                }
+            }
+            tables.merge_from(grant.tables());
+            transaction_control |= grant.transaction_control();
+            unrestricted |= grant.is_unrestricted();
+        }
+
+        if unrestricted {
+            return true;
+        }
+        Allowlist::new(queries, transaction_control)
+            .with_tables(tables)
+            .check(&parameterised(normalized_sql))
+            .is_allowed()
+    }
+
     /// Builds a manifest from its parts; parsing is the only intended caller.
     pub(crate) fn assemble(
         version: u32,
@@ -577,6 +713,8 @@ impl Manifest {
     ) -> Self {
         Self {
             version,
+            app: None,
+            preload: Vec::new(),
             global_groups,
             proxies,
             groups,
@@ -584,6 +722,53 @@ impl Manifest {
             unresolved_grants,
         }
     }
+}
+
+/// Rewrites the manifest's `$?` placeholders into the numbered form
+/// PostgreSQL's parser accepts.
+///
+/// [`blastit_sqlpolicy::normalize`] writes every bind placeholder as `$?`, which
+/// no SQL parser accepts, and the table-grant analysis parses the text it is
+/// given. A statement taken from a manifest — or from an already normalised
+/// observation — therefore has to get its numbers back before it can be
+/// analysed. Every placeholder becomes `$1`: the analysis only asks which
+/// tables, columns and functions a statement touches, and a parameter's number
+/// says nothing about that.
+///
+/// Quoted regions are copied verbatim, so a column named `"a$?"` stays the
+/// column the grant names instead of becoming `"a$1"`. This is deliberately not
+/// a SQL lexer: it exists for one check-reported finding, and a statement it
+/// rewrites imperfectly can only make the analysis deny, never allow.
+fn parameterised(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut characters = sql.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\'' | '"' => {
+                out.push(character);
+                while let Some(inner) = characters.next() {
+                    out.push(inner);
+                    if inner != character {
+                        continue;
+                    }
+                    // A doubled quote is an escaped one, not the end.
+                    if characters.peek() == Some(&character) {
+                        if let Some(second) = characters.next() {
+                            out.push(second);
+                        }
+                        continue;
+                    }
+                    break;
+                }
+            }
+            '$' if characters.peek() == Some(&'?') => {
+                characters.next();
+                out.push_str("$1");
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Unions `source` into `target`, proxy by proxy and grant by grant.

@@ -15,6 +15,6 @@ from urllib.request import urlopen
 
 def test_the_packaged_project_is_served(blastit_live_server) -> None:
     """The route the manifest grants answers, through a real blastit."""
-    with urlopen(f"{blastit_live_server.url}/packaged/") as response:  # noqa: S310 - 127.0.0.1
+    with urlopen(f"{blastit_live_server.url}/packaged/") as response:
         assert response.status == 200
         assert response.read() == b"ok"

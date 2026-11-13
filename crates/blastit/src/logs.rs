@@ -14,11 +14,12 @@
 //! another component's events: the most it can do is print lines labelled as
 //! its own app output.
 
+use std::cell::RefCell;
 use std::os::fd::{BorrowedFd, RawFd};
 
 use blastit_events::{
-    AppOutput, Component, Event, EventKind, Level, ManifestWarning, Stream, encode_json,
-    encode_pretty, split_app_output,
+    AppOutput, Component, Event, EventKind, Level, MAX_EVENT_BYTES, ManifestWarning, Stream,
+    encode_json, encode_pretty, restamp_json_into, split_app_output,
 };
 use serde_json::{Map, Value};
 
@@ -30,6 +31,16 @@ use crate::config::LogFormat;
 /// newline at all must not grow without bound: past this, the bytes are logged
 /// as a line of their own.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
+
+// One reusable line buffer per thread, for `Emitter::forward`.
+//
+// init's own thread is the only caller in production, and a forwarded line is
+// never longer than `MAX_EVENT_BYTES`; a buffer per thread keeps the canonical
+// line off the heap for every event a child forwards, and stays correct if a
+// test drives an emitter from its own thread.
+thread_local! {
+    static FORWARDED_LINE: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(MAX_EVENT_BYTES + 1));
+}
 
 /// Which pipe a line came from, which is what the event is stamped with (§8.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,42 +158,71 @@ impl Emitter {
 
     /// Forwards one line that arrived on an *events* pipe (§8.1).
     ///
-    /// The line is parsed as a JSON object, its `component` is overwritten from
-    /// the pipe it came from, and its `route` too when the pipe implies one. An
-    /// event already logged below the minimum level is dropped whole. A line
-    /// that is not a JSON object is dropped with a warning event that carries
-    /// no part of it: the line could contain anything, including a credential.
+    /// The line is read back into its members, its `component` is overwritten
+    /// from the pipe it came from, and its `route` too when the pipe implies
+    /// one. An event already logged below the minimum level is dropped whole. A
+    /// line that is not a JSON object is dropped with a warning event that
+    /// carries no part of it: the line could contain anything, including a
+    /// credential.
+    ///
+    /// In the JSON format — the hot path, one line per request — the members
+    /// are restamped and reordered straight into a reused buffer with
+    /// [`restamp_json_into`], so no `Value` tree and no per-event `String` is
+    /// built. `pretty` is for a person at a terminal, not for every request, so
+    /// it keeps the map-based path that also backs its field-dump fallback.
     pub fn forward(&self, pipe: &Pipe, line: &str) {
         let component = pipe.component();
-        let mut value = match serde_json::from_str::<Value>(line) {
-            Ok(Value::Object(object)) => object,
-            _ => {
-                self.emit(&Event::now(
-                    Component::Init,
-                    EventKind::ManifestWarning(ManifestWarning::new(format!(
-                        "{component}: dropped a line on the events pipe that is not a JSON object"
-                    ))),
-                ));
-                return;
-            }
-        };
-        value.insert("component".to_string(), Value::from(component.as_str()));
-        if let Some(route) = pipe.route() {
-            value.insert("route".to_string(), Value::from(route));
-        }
-        if !self.wants(&value) {
-            return;
-        }
         match self.format {
-            LogFormat::Json => {
-                // `serde_json` only fails on a float that is not representable
-                // in JSON, and none of the values here can be one.
-                if let Ok(text) = serde_json::to_string(&value) {
-                    self.write_line(&text);
+            LogFormat::Json => self.forward_json(pipe, line, component),
+            LogFormat::Pretty => {
+                let Some(mut value) = object_of(line) else {
+                    self.dropped_line(component);
+                    return;
+                };
+                value.insert("component".to_string(), Value::from(component.as_str()));
+                if let Some(route) = pipe.route() {
+                    value.insert("route".to_string(), Value::from(route));
+                }
+                if !self.wants(&value) {
+                    return;
+                }
+                self.write_line(&pretty_line(&value, self.color));
+            }
+        }
+    }
+
+    /// Forwards one line in the JSON format, rebuilding it in a reused buffer.
+    fn forward_json(&self, pipe: &Pipe, line: &str, component: Component) {
+        FORWARDED_LINE.with(|buffer| {
+            let mut buffer = buffer.borrow_mut();
+            buffer.clear();
+            match restamp_json_into(&mut buffer, line, component.as_str(), pipe.route()) {
+                None => {
+                    // Release the buffer before the warning, which writes a
+                    // line of its own.
+                    drop(buffer);
+                    self.dropped_line(component);
+                }
+                Some(level) => {
+                    if !passes(level, self.level) {
+                        return;
+                    }
+                    buffer.push(b'\n');
+                    let _ = write_bytes(self.fd, &buffer);
                 }
             }
-            LogFormat::Pretty => self.write_line(&pretty_line(&value, self.color)),
-        }
+        });
+    }
+
+    /// Drops one unreadable events-pipe line, with a warning that names only
+    /// the component it came from and none of the line's own text.
+    fn dropped_line(&self, component: Component) {
+        self.emit(&Event::now(
+            Component::Init,
+            EventKind::ManifestWarning(ManifestWarning::new(format!(
+                "{component}: dropped a line on the events pipe that is not a JSON object"
+            ))),
+        ));
     }
 
     /// Whether a forwarded event's `level` passes the filter.
@@ -206,6 +246,25 @@ impl Emitter {
     }
 }
 
+/// The object a forwarded line is, or `None` when it is not a JSON object.
+fn object_of(line: &str) -> Option<Map<String, Value>> {
+    match serde_json::from_str::<Value>(line) {
+        Ok(Value::Object(object)) => Some(object),
+        _ => None,
+    }
+}
+
+/// Whether the `level` a forwarded line carried passes the minimum level.
+///
+/// The same rule as [`Emitter::wants`], without a map: a missing or unreadable
+/// level passes, so a malformed line is seen rather than lost.
+fn passes(level: Option<&str>, minimum: Level) -> bool {
+    match level {
+        Some(text) => text.parse::<Level>().map_or(true, |level| level >= minimum),
+        None => true,
+    }
+}
+
 /// Writes one line, with its newline, to `fd` in a single `write`.
 ///
 /// This is how every child sends an event to init: one `write` per line means
@@ -215,21 +274,35 @@ impl Emitter {
 /// A failure is swallowed: the pipe is gone, or the process is being torn down,
 /// and losing a log line must never stop the server. `EINTR` is retried.
 pub fn write_line(fd: RawFd, line: &str) {
-    // SAFETY: the caller passes the descriptor it wants written to; nothing
-    // here takes ownership of it, and it stays open for the caller's lifetime.
-    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     let mut bytes = Vec::with_capacity(line.len() + 1);
     bytes.extend_from_slice(line.as_bytes());
     bytes.push(b'\n');
+    let _ = write_bytes(fd, &bytes);
+}
+
+/// Writes `bytes` to `fd` as-is, retrying `EINTR`.
+///
+/// [`write_line`] is this with the newline appended to a fresh buffer; the
+/// event sink owns one buffer per thread and appends its own newline, so a
+/// request costs no copy on the way to the pipe. The failure handling is
+/// [`write_line`]'s: a dead pipe must never stop the server.
+///
+/// Returns whether every byte went to the pipe, so a caller with nothing left
+/// to write to can stop trying.
+pub fn write_bytes(fd: RawFd, bytes: &[u8]) -> bool {
+    // SAFETY: the caller passes the descriptor it wants written to; nothing
+    // here takes ownership of it, and it stays open for the caller's lifetime.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     let mut written = 0;
     while written < bytes.len() {
         match rustix::io::write(borrowed, &bytes[written..]) {
-            Ok(0) => return,
+            Ok(0) => return false,
             Ok(count) => written += count,
             Err(rustix::io::Errno::INTR) => {}
-            Err(_) => return,
+            Err(_) => return false,
         }
     }
+    true
 }
 
 /// The pretty line for a forwarded event (§8.1).
@@ -563,6 +636,46 @@ mod tests {
         assert_eq!(
             value["route"], "forge",
             "an events pipe does not imply a route, so the payload keeps it"
+        );
+    }
+
+    #[test]
+    fn a_forwarded_request_line_is_emitted_byte_for_byte() {
+        // What reaches the operator is what init writes, and init emits the
+        // members sorted by key — the order a `serde_json` map gave when this
+        // went through one. The encoder's own key order is internal; this pins
+        // the line an operator reads, so the forwarding rewrite cannot change
+        // it.
+        let text = capture(LogFormat::Json, Level::Info, |emitter| {
+            emitter.forward(
+                &Pipe::Events {
+                    component: Component::Scheduler,
+                },
+                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"view","route":"forge","request_id":"01JB9","method":"GET","path":"/products/42/","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_in":0,"bytes_out":5120,"cost_ns":18400000,"cpu_ns":9100000,"remote_addr":"203.0.113.7"}"#,
+            );
+        });
+        assert_eq!(
+            text,
+            "{\"bytes_in\":0,\"bytes_out\":5120,\"component\":\"scheduler\",\"cost_ns\":18400000,\"cpu_ns\":9100000,\"duration_ms\":18.4,\"event\":\"request\",\"level\":\"info\",\"method\":\"GET\",\"outcome\":\"ok\",\"path\":\"/products/42/\",\"queued_ms\":0.1,\"remote_addr\":\"203.0.113.7\",\"request_id\":\"01JB9\",\"route\":\"forge\",\"rule\":0,\"status\":200,\"ts\":\"2026-10-25T14:02:11.384Z\"}\n"
+        );
+    }
+
+    #[test]
+    fn a_view_output_pipe_inserts_the_route_in_key_order() {
+        // A pipe that implies a route adds the member if the payload lacks one,
+        // and the result is still sorted by key.
+        let text = capture(LogFormat::Json, Level::Info, |emitter| {
+            emitter.forward(
+                &Pipe::Stdout {
+                    component: Component::View,
+                    route: Some("about".to_string()),
+                },
+                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"x","component":"view"}"#,
+            );
+        });
+        assert_eq!(
+            text,
+            "{\"component\":\"view\",\"event\":\"x\",\"level\":\"info\",\"route\":\"about\",\"ts\":\"2026-10-25T14:02:11.384Z\"}\n"
         );
     }
 

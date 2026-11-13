@@ -1,12 +1,14 @@
-# Flask and other WSGI apps
+# Flask, SQLAlchemy and raw WSGI
 
-Everything here applies to any WSGI framework; the syntax is Flask's.
+Everything here applies to any WSGI app; the syntax is Flask's.
 
-## Install and first manifest
+## Install and app
 
 ```console
-$ uv init --python 3.13 shop && cd shop
+$ uv init --app shop && cd shop
 $ uv add flask 'psycopg[binary]' blastit
+$ uv add sqlalchemy            # only if you use it
+$ uv add --dev pytest
 ```
 
 ```python title="app.py"
@@ -38,8 +40,11 @@ def products():
         return {"products": [row[0] for row in cursor.fetchall()]}
 ```
 
+## Manifest
+
 ```toml title="blastit.toml"
 version = 1
+app = "app:app"
 
 [proxy.db]
 protocol = "postgresql"
@@ -50,92 +55,61 @@ name = "products"
 path = ['/products/']
 methods = ["GET", "HEAD"]
 [route.db]
-queries = ['SELECT "shop_product"."name" FROM "shop_product"']
+queries = []
 
 [[route]]
 name = "fallback"       # everything else: no database at all
 path = ['.*']
 ```
 
+The empty `queries` list is the point: every statement is denied until a grant
+allows it. `uv run blastit check --learn` fills it in from your tests. Without a
+suite, `uv run blastit dev --learn` and click through the app.
+
 A `queries` entry is the statement as it goes on the wire, normalised: trimmed,
 whitespace collapsed, binds written `$?`.
 
-## Run it locally
+## Run it
+
+Any PostgreSQL works; [one line](../local.md#add-postgresql) starts one.
 
 ```console
 $ export DATABASE_URL=postgresql://shop:secret@127.0.0.1:5432/shop
-$ sudo env BLASTIT_APP=app:app BLASTIT_MANIFEST=$PWD/blastit.toml \
-           PORT=8080 .venv/bin/blastit
+$ uv run blastit dev
 ```
 
-`app:app` resolves from the directory you started in, on your own interpreter.
+`app:app` resolves from the directory you started in, on your project's
+interpreter.
 
-## Database clients
-
-**Bind parameters server-side.** psycopg 3 always sends them separately, so
-`cursor.execute("… WHERE id = %s", (42,))` puts `$1` on the wire and the SQL
-text is the same for every row. psycopg2 inlines the literal, which no grant
-could match. With SQLAlchemy, use `postgresql+psycopg://`.
-
-**Close the connection with the request.** Its thread is thrown away afterwards,
-so a connection that outlives the request is orphaned. A teardown, as in
-`app.py`, is enough. With SQLAlchemy: one engine, no pool.
+## SQLAlchemy
 
 ```python
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 
-engine = create_engine(os.environ["DATABASE_URL"], poolclass=NullPool)
+url = os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://", 1)
+engine = create_engine(url, poolclass=NullPool)
 ```
 
-SQLAlchemy sends `BEGIN` itself, so those routes need
-`transaction_control = true`, and its first connection runs
-`select pg_catalog.version()` before any request statement — which belongs in a
-group attached to every route:
+* The `postgresql+psycopg://` driver binds parameters server-side. Blastit hands
+  the app a plain `postgresql://` URL, hence the replacement.
+* `NullPool` gives each request its own connection.
+* SQLAlchemy sends `BEGIN` itself, so its routes need
+  `transaction_control = true`.
+* Its first connection runs `select pg_catalog.version()` before any request
+  statement. `--learn` records it; a `[group.<name>]` is where it belongs.
 
-```toml
-groups = ["connection"]
+Flask-SQLAlchemy takes the same two: `SQLALCHEMY_ENGINE_OPTIONS =
+{"poolclass": NullPool}`, and the same `postgresql+psycopg://` replacement for
+`SQLALCHEMY_DATABASE_URI`.
 
-[group.connection.db]
-queries = ["select pg_catalog.version()"]
-```
+## Any other WSGI app
 
-Flask-SQLAlchemy takes the same thing through its own setting:
-`SQLALCHEMY_ENGINE_OPTIONS = {"poolclass": NullPool}`. For pooling, put
-PgBouncer in front of the real database.
-
-## No pytest plugin for Flask
-
-The plugin is Django-only. It defines a request as Django's
-`BaseHandler.get_response`, and it knows Django's database aliases and
-`ATOMIC_REQUESTS`; asked for a manifest in a project without Django, it stops
-with `ERROR: blastit: the plugin needs Django in the test environment to record
-requests`.
-
-Fill the manifest in by hand, in this order:
-
-1. **Table grants.** Say which tables and columns each route may touch, and let
-   PostgreSQL's own parser check every statement. It is usually the fastest
-   honest start, and stronger than `unrestricted = true`:
-
-    ```toml
-    [[route]]
-    name = "products"
-    path = ['/products/']
-    [route.db.tables]
-    shop_product = { select = ["name"] }
-    ```
-
-2. **Read the denials.** Run it with `BLASTIT_LOG_FORMAT=pretty` and click
-   through the app: each `sql.denied` line is a statement a route ran and was
-   not granted yet.
-
-3. **Fold a log.** `blastit-manifest fold app.log --manifest blastit.toml`
-   prints the grants a log is missing. `--write` puts them in the file, and
-   `--prefer-tables` writes the smallest table grant instead of one statement
-   per denial.
+Serve a plain callable the same way: set `app = "wsgi:application"`, write the
+routes, and let `blastit check` fill the grants. Nothing is imported from
+Blastit.
 
 ## Next
 
-[Day-to-day life](day-to-day.md) — adding a view, reading a denial, folding a
-log — and [fit it to your infra](../infra/index.md).
+[Local development](../local.md) · [CI/CD](../ci.md) ·
+[anywhere it deploys](../deploy/index.md).

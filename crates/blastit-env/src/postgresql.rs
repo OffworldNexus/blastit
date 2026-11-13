@@ -264,16 +264,26 @@ pub fn upstream(
 /// puts through DNS. One spelling that every consumer resolves is worth more
 /// than a shorter one that one of them does not.
 pub fn template_fields(upstream: &Upstream, port: u16) -> Fields {
+    template_fields_in(upstream, port, SOCKET_DIR)
+}
+
+/// [`template_fields`] with a caller-chosen socket directory.
+///
+/// The runtime uses [`SOCKET_DIR`], each view's own directory. `blastit check`
+/// binds every proxy's socket under `<runtime_dir>/pg` instead, so its
+/// `swapped_env` has to render that directory — never `/proc/self/cwd`, which
+/// would point at the pytest process's working directory and fail to connect.
+pub(crate) fn template_fields_in(upstream: &Upstream, port: u16, socket_dir: &str) -> Fields {
     let mut fields = Fields::new();
-    fields.insert("socket_dir", SOCKET_DIR);
+    fields.insert("socket_dir", socket_dir);
     fields.insert("port", port.to_string());
-    fields.insert("socket_path", format!("{SOCKET_DIR}/.s.PGSQL.{port}"));
+    fields.insert("socket_path", format!("{socket_dir}/.s.PGSQL.{port}"));
     fields.insert("database", upstream.database.clone());
     fields.insert("user", LOCAL_USER);
     fields.insert(
         "url",
         format!(
-            "postgresql://{LOCAL_USER}@/{}?host={SOCKET_DIR}&port={port}",
+            "postgresql://{LOCAL_USER}@/{}?host={socket_dir}&port={port}",
             urlencode(&upstream.database)
         ),
     );

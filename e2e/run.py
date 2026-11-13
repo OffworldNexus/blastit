@@ -21,7 +21,10 @@ import subprocess
 import sys
 import tempfile
 
+import prebuilt_wheel
+
 HERE = os.path.dirname(os.path.abspath(__file__))
+DIST = os.path.join(os.path.dirname(HERE), "dist")
 PORT = os.environ.get("E2E_PORT", "18080")
 SQLALCHEMY_PORT = os.environ.get("E2E_SQLALCHEMY_PORT", "18081")
 # The compose project, as `compose.yaml` derives it: a run's artifacts are named
@@ -47,6 +50,16 @@ def main():
         "E2E_PORT": PORT,
         "E2E_SQLALCHEMY_PORT": SQLALCHEMY_PORT,
     }
+    # A prebuilt image installs the wheel this host built, so its base image is
+    # the interpreter that wheel targets (the extension is not abi3). The
+    # in-image `Dockerfile` builds its own wheel on its own interpreter and
+    # needs none of this.
+    if "prebuilt" in os.environ.get("E2E_DOCKERFILE", "Dockerfile"):
+        try:
+            env["E2E_PYTHON_VERSION"] = prebuilt_wheel.version(DIST)
+        except ValueError as error:
+            print(error, file=sys.stderr)
+            return 1
     os.environ.update(env)
     rc = 1
     try:

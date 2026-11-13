@@ -35,6 +35,7 @@ blastit = { version = "0.1.0", path = "../blastit" }
 # answered by blastit itself: the manifest decides what a route may do, and
 # sqlpolicy's normaliser decides how a statement is compared to a grant. Both
 # are already in this workspace, so the wheel gains no new dependency.
+blastit-ingress = { version = "0.1.0", path = "../blastit-ingress" }
 blastit-manifest = { version = "0.1.0", path = "../blastit-manifest" }
 blastit-sqlpolicy = { version = "0.1.0", path = "../blastit-sqlpolicy" }
 pyo3 = { version = "0.30.1" }

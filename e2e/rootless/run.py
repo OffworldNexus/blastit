@@ -47,6 +47,14 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 COMPOSE = os.path.join(HERE, "compose.yml")
+# The drivers share one reader for the wheel a prebuilt image installs
+# (`e2e/prebuilt_wheel.py`): `e2e/` is not a package, and this script's own
+# directory is what `sys.path` starts with.
+sys.path.insert(0, os.path.join(ROOT, "e2e"))
+import prebuilt_wheel  # noqa: E402
+
+DIST = os.path.join(ROOT, "dist")
+
 PREFIX = "blastit-d6-"
 TAG = "blastit-d6"
 REGION = "ams3"
@@ -557,7 +565,19 @@ def local(args):
     password = "e2e-" + secrets.token_hex(16)
     project = args.project or "blastit-d6-rootless"
     image = args.image or "blastit-d6-rootless:local"
+    # A prebuilt image installs the wheel this host built, so its base image has
+    # to be the interpreter that wheel targets (the extension is not abi3). The
+    # in-image Dockerfile builds its own wheel on its own interpreter.
+    version = None
+    if "prebuilt" in args.dockerfile:
+        try:
+            version = prebuilt_wheel.version(DIST)
+        except ValueError as error:
+            print(error, file=sys.stderr)
+            return 1
     env = compose_env(project, args.port, args.tls_port, image, password, args.dockerfile)
+    if version:
+        env["E2E_PYTHON_VERSION"] = version
     rc = 1
     try:
         # E1: the scenario's own helpers first — they need no stack, and a
