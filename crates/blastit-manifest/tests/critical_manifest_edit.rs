@@ -746,3 +746,281 @@ fn a_stale_regular_file_at_the_temp_name_is_replaced() {
     );
     assert_eq!(entries(dir.path()), ["blastit.toml"]);
 }
+
+//
+// Provenance and scanner state: the two ways a patch can be well-formed and
+// still wrong.
+//
+// The re-parse in `verify` compares the document with the model the edit
+// intended, so it catches a patch that corrupted the file. It cannot catch a
+// patch that *agrees* with itself: a plan built from the first `[route.<proxy>]`
+// table in the document, or from a `queries = …` line found inside a statement,
+// re-parses to exactly the model it built. These two cases state the intent —
+// which route, which proxy, which line — so such a refactor cannot pass by
+// being self-consistent.
+//
+
+/// Two routes, only the second of which has a grant table.
+const TWO_ROUTES: &str = "version = 1\n\
+    [proxy.db]\nprotocol = \"postgresql\"\n\
+    [proxy.warehouse]\nprotocol = \"postgresql\"\n\
+    \n\
+    [[route]]\nname = \"catalogue\"\npath = ['/catalogue/']\n\
+    \n\
+    [[route]]\nname = \"checkout\"\npath = ['/checkout/']\n\
+    [route.warehouse]\nqueries = ['SELECT \"shop_order\".\"id\" FROM \"shop_order\"']\n";
+
+/// `TWO_ROUTES`' existing grant, byte for byte.
+const WAREHOUSE_LINE: &str =
+    "[route.warehouse]\nqueries = ['SELECT \"shop_order\".\"id\" FROM \"shop_order\"']\n";
+
+#[test]
+fn a_grant_lands_in_the_route_and_proxy_it_was_proposed_for() {
+    let edited = apply_edits(
+        TWO_ROUTES,
+        &ManifestEdits {
+            routes: vec![],
+            grants: vec![grant("catalogue", "db", &[PRODUCT_QUERY])],
+        },
+    )
+    .expect("the edit applies");
+    let (manifest, warnings) = Manifest::parse_and_validate(&edited, BASE).expect("it boots");
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // The proposal was for `catalogue` on `db`, and that is where the grant is.
+    assert_eq!(queries(&manifest, "catalogue", "db"), [PRODUCT_QUERY]);
+    assert!(
+        route(&manifest, "catalogue")
+            .grant(&ProxyName::from("warehouse"))
+            .is_none(),
+        "the grant was copied onto every proxy the route could have"
+    );
+
+    // The neighbour keeps exactly what it had: no grant was moved, shared or
+    // copied, and its `queries` line is still the author's.
+    assert!(
+        queries(&manifest, "checkout", "db").is_empty(),
+        "the proposal on catalogue was written into checkout"
+    );
+    assert_eq!(
+        queries(&manifest, "checkout", "warehouse"),
+        [r#"SELECT "shop_order"."id" FROM "shop_order""#]
+    );
+    assert!(
+        edited.contains(WAREHOUSE_LINE),
+        "the neighbour was rewritten"
+    );
+    assert_eq!(edited.matches(WAREHOUSE_LINE).count(), 1);
+    assert_eq!(route_names(&manifest), ["catalogue", "checkout"]);
+
+    // One table, inside the proposed route's element: above the next `[[route]]`.
+    assert_eq!(edited.matches("[route.db]").count(), 1);
+    let added = edited.find("[route.db]").expect("the new table");
+    assert!(
+        added < edited.find("name = \"checkout\"").expect("the next route"),
+        "the new table was written below the route it belongs to:\n{edited}"
+    );
+    assert!(
+        edited.contains(&format!("[route.db]\nqueries = ['{PRODUCT_QUERY}']\n")),
+        "the table does not hold the proposed statement:\n{edited}"
+    );
+}
+
+/// `[route.db]` counts for the `[[route]]` element it sits under, not for the
+/// one below it. The header a patch looks for starts *after* the element's own
+/// `[[route]]` line, so a table that closes the previous element — even with no
+/// blank line between them — can never receive the learned grant.
+#[test]
+fn a_table_that_closes_the_previous_element_never_receives_the_grant() {
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  \n\
+                  [[route]]\nname = \"catalogue\"\npath = ['/catalogue/']\n\
+                  [route.db]\n\
+                  [[route]]\nname = \"checkout\"\npath = ['/checkout/']\n";
+    let edited = apply_edits(
+        source,
+        &ManifestEdits {
+            routes: vec![],
+            grants: vec![grant("checkout", "db", &[PRODUCT_QUERY])],
+        },
+    )
+    .expect("the edit applies");
+
+    // The previous element is byte-identical, empty table and all.
+    assert!(
+        edited.contains("path = ['/catalogue/']\n[route.db]\n[[route]]\n"),
+        "the previous route was rewritten:\n{edited}"
+    );
+    assert_eq!(edited.matches("[route.db]").count(), 2, "{edited}");
+    assert!(
+        edited.contains(&format!("[route.db]\nqueries = ['{PRODUCT_QUERY}']\n")),
+        "the proposal did not land under the route's own table:\n{edited}"
+    );
+
+    let (manifest, warnings) = Manifest::parse_and_validate(&edited, BASE).expect("it boots");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(queries(&manifest, "checkout", "db"), [PRODUCT_QUERY]);
+    assert!(
+        queries(&manifest, "catalogue", "db").is_empty(),
+        "the grant was written into the previous route:\n{edited}"
+    );
+    assert_eq!(route_names(&manifest), ["catalogue", "checkout"]);
+}
+
+/// Two grant tables in one element: the assignment a patch extends is the one
+/// under the table it named, not the first `queries =` line above it. Writing
+/// into the neighbouring proxy's list would hand the route a capability the
+/// operator granted to a different database.
+#[test]
+fn a_grant_is_never_written_into_the_other_proxy_s_table() {
+    let warehouse_line = "queries = ['SELECT \"shop_order\".\"id\" FROM \"shop_order\"']\n";
+    let source = format!(
+        "version = 1\n\
+         [proxy.db]\nprotocol = \"postgresql\"\n\
+         [proxy.warehouse]\nprotocol = \"postgresql\"\n\
+         [[route]]\nname = \"products\"\npath = ['/products/']\n\
+         [route.warehouse]\n{warehouse_line}\
+         [route.db]\n"
+    );
+    let edited = apply_edits(
+        &source,
+        &ManifestEdits {
+            routes: vec![],
+            grants: vec![grant("products", "db", &[PRODUCT_QUERY])],
+        },
+    )
+    .expect("the edit applies");
+
+    assert!(
+        edited.contains(&format!(
+            "[route.warehouse]\n{warehouse_line}[route.db]\nqueries = ['{PRODUCT_QUERY}']\n"
+        )),
+        "the new assignment did not go under `[route.db]`:\n{edited}"
+    );
+    let (manifest, warnings) = Manifest::parse_and_validate(&edited, BASE).expect("it boots");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        queries(&manifest, "products", "warehouse"),
+        [r#"SELECT "shop_order"."id" FROM "shop_order""#],
+        "the other proxy's grant was extended"
+    );
+    assert_eq!(queries(&manifest, "products", "db"), [PRODUCT_QUERY]);
+}
+
+#[test]
+fn a_grant_for_a_route_that_does_not_exist_is_refused_rather_than_attached() {
+    // A stale or mistyped route name is not a new route: a grant has to name a
+    // route the operator already approved, and nothing is written for a name
+    // that matches none of them.
+    let error = apply_edits(
+        TWO_ROUTES,
+        &ManifestEdits {
+            routes: vec![],
+            grants: vec![grant("catalouge", "db", &[PRODUCT_QUERY])],
+        },
+    )
+    .expect_err("no route has that name");
+
+    assert!(matches!(error, EditError::MissingRoute { .. }), "{error:?}");
+    let message = error.to_string();
+    assert!(message.contains("catalouge"), "{message}");
+    assert!(
+        message.contains("add the route first"),
+        "the message does not name the fix: {message}"
+    );
+}
+
+/// A grant table whose value is a multi-line literal: the value holds a line
+/// that reads exactly like the assignment the patcher is looking for.
+const STATEMENT_HOLDS_AN_ASSIGNMENT: &str = "version = 1\n\
+    [proxy.db]\nprotocol = \"postgresql\"\n\
+    [[route]]\nname = \"products\"\npath = ['/products/']\n\
+    [route.db]\n\
+    queries = ['''\nqueries = ['fake']\n''']\n\
+    \n\
+    [[route]]\nname = \"fallback\"\npath = \".*\"\n";
+
+/// The same, with the grant table holding no assignment at all: the only
+/// `queries = …` line left in the element is the one inside the literal.
+const ONLY_THE_STATEMENT_HAS_AN_ASSIGNMENT: &str = "version = 1\n\
+    [proxy.db]\nprotocol = \"postgresql\"\n\
+    [[route]]\nname = \"products\"\npath = ['/products/']\n\
+    [route.db]\n\
+    functions = ['''\nqueries = ['fake']\n''']\n\
+    \n\
+    [[route]]\nname = \"fallback\"\npath = \".*\"\n";
+
+/// The literal both fixtures share, byte for byte.
+const LITERAL: &str = "'''\nqueries = ['fake']\n'''";
+
+#[test]
+fn a_statement_that_reads_like_an_assignment_is_never_edited_as_one() {
+    // The allowed edit: the list is extended, and the author's statement — the
+    // one that contains the fake assignment — is preserved as a statement.
+    let edited = apply_edits(
+        STATEMENT_HOLDS_AN_ASSIGNMENT,
+        &ManifestEdits {
+            routes: vec![],
+            grants: vec![grant("products", "db", &[PRODUCT_QUERY])],
+        },
+    )
+    .expect("the edit applies");
+    let manifest = Manifest::from_toml_str(&edited).expect("the edit parses");
+    let granted = queries(&manifest, "products", "db");
+    assert_eq!(
+        granted.last(),
+        Some(&PRODUCT_QUERY.to_string()),
+        "{granted:?}"
+    );
+    assert_eq!(
+        granted.len(),
+        2,
+        "the author's statement was split: {granted:?}"
+    );
+    assert!(
+        granted
+            .iter()
+            .any(|query| query.contains("queries = ['fake']")),
+        "the author's statement was lost: {granted:?}"
+    );
+    // The fake assignment is not a grant of its own: the statement that holds
+    // it is one entry, so a plan that read it as the document's assignment would
+    // have produced a third.
+    assert_eq!(route_names(&manifest), ["products", "fallback"]);
+    assert_eq!(edited.matches("[route.db]").count(), 1);
+
+    // The denied twin: with no real assignment in the table, the patcher has to
+    // write a new one under the header. Extending the line it finds inside the
+    // literal would edit the operator's statement instead, so the literal has to
+    // come back byte for byte.
+    let edited = apply_edits(
+        ONLY_THE_STATEMENT_HAS_AN_ASSIGNMENT,
+        &ManifestEdits {
+            routes: vec![],
+            grants: vec![grant("products", "db", &[PRODUCT_QUERY])],
+        },
+    )
+    .expect("the edit applies");
+    assert!(
+        edited.contains(LITERAL),
+        "the statement was edited instead of a new assignment being written:\n{edited}"
+    );
+    assert_eq!(
+        edited.matches("[route.db]").count(),
+        1,
+        "a second grant table was written:\n{edited}"
+    );
+    let manifest = Manifest::from_toml_str(&edited).expect("the edit parses");
+    assert_eq!(queries(&manifest, "products", "db"), [PRODUCT_QUERY]);
+    let functions: Vec<String> = route(&manifest, "products")
+        .grant(&ProxyName::from("db"))
+        .and_then(Grant::as_postgresql)
+        .map(|grant| grant.tables().functions().map(str::to_string).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        functions,
+        ["queries = ['fake']\n"],
+        "the literal's contents changed"
+    );
+}

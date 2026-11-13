@@ -2,7 +2,7 @@
 id: MB.1.15
 title: "Close the remaining blastit-manifest survivors and protect the patcher's wrong-route case"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: []
@@ -10,11 +10,11 @@ paths:
   - "crates/blastit-manifest/tests/mutation_gaps.rs"
   - "crates/blastit-manifest/tests/edit_branches.rs"
   - "crates/blastit-manifest/tests/critical_manifest_edit.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T18:44"
-updated: "2026-11-13T18:44"
+updated: "2026-11-13T19:49"
 ---
 
 # Goal

@@ -9,7 +9,8 @@
 //! or refuses to.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use blastit_manifest::edit::{
     EditError, ManifestEdits, ProposedGrant, ProposedRoute, apply_edits, write_atomic,
@@ -518,6 +519,178 @@ fn a_replaced_list_does_not_add_a_newline_the_file_did_not_have() {
     assert_eq!(
         queries_in(&manifest, "products"),
         [KEPT.to_string(), ADDED_NORMALISED.to_string()]
+    );
+}
+
+//
+// The atomic write's two path branches: a bare file name, and a directory the
+// process cannot write. Both are reachable through `BLASTIT_MANIFEST` (the
+// value the operator types), so both are pinned here rather than left to the
+// shape of `Path::parent`.
+//
+
+/// Set in the child this module re-executes for the bare-name case.
+const BARE_NAME_CHILD: &str = "BLASTIT_MANIFEST_EDIT_BARE_NAME_CHILD";
+
+/// A unique directory under `$TMPDIR`, removed on drop.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(label: &str) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let path = std::env::temp_dir().join(format!(
+            "blastit-edit-branches-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("a temporary directory");
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The entries of a directory, by name.
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("the directory reads")
+        .map(|entry| {
+            entry
+                .expect("a directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// What the bare-name write puts in the file.
+fn bare_name_content() -> String {
+    format!("{HEAD}# written through a bare file name\n")
+}
+
+/// `write_atomic("blastit.toml", …)`: the shape `BLASTIT_MANIFEST=blastit.toml`
+/// produces. `Path::new("blastit.toml").parent()` is `Some("")`, not `None`, so
+/// the parent has to be replaced with `.`. Taken verbatim, the temp file is
+/// written and renamed into place and then the directory `fsync` opens `""`,
+/// which fails `ENOENT` — a completed write reported as a failed one.
+///
+/// The branch needs a process-wide working directory, so the case runs in a
+/// child re-execution of this test binary whose `cwd` is its own temporary
+/// directory: no other test in this binary can observe a changed directory, and
+/// this test does not depend on `--test-threads=1`. The parent asserts on the
+/// exit status, on the bytes the child wrote and on the directory it left
+/// behind, so a child that never ran its body fails the test instead of passing
+/// it.
+#[test]
+fn a_bare_file_name_is_written_into_the_process_directory() {
+    if std::env::var_os(BARE_NAME_CHILD).is_some() {
+        write_atomic(Path::new("blastit.toml"), &bare_name_content())
+            .expect("a bare file name is a path in the process's own directory");
+        return;
+    }
+
+    let dir = TempDir::new("bare-name");
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "a_bare_file_name_is_written_into_the_process_directory",
+            "--nocapture",
+        ])
+        .env(BARE_NAME_CHILD, "1")
+        .current_dir(dir.path())
+        .output()
+        .expect("the child test binary runs");
+
+    assert!(
+        output.status.success(),
+        "the write through a bare file name failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("blastit.toml"))
+            .expect("the manifest the child wrote"),
+        bare_name_content(),
+        "the child did not write the manifest into its own directory"
+    );
+    assert_eq!(
+        entries(dir.path()),
+        ["blastit.toml"],
+        "the write left a temporary file behind"
+    );
+}
+
+/// `write_atomic` into a directory the process cannot write. The temp file is
+/// created with `O_CREAT | O_EXCL`, so the failure is `EACCES` from `open` — an
+/// error that says nothing about a stale temp file. Retrying past it unlinks a
+/// name that was never created and reports `ENOENT` instead: a permission
+/// problem described as a missing file, and the temporary-file branch taken for
+/// the wrong reason.
+///
+/// Cargo-mutants runs unprivileged, so the mode is enforced there. Under uid 0
+/// the kernel bypasses the permission check, the write simply succeeds, and
+/// this test says so and asserts nothing: `smoke (root)` cannot observe this
+/// branch, and nothing here relies on it doing so.
+#[cfg(unix)]
+#[test]
+fn a_write_into_an_unwritable_directory_reports_permission_denied() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Puts the directory's mode back so [`TempDir`] can remove it.
+    struct RestoreMode(PathBuf);
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let dir = TempDir::new("unwritable");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))
+        .expect("chmod the directory read-only");
+    let _restore = RestoreMode(dir.path().to_path_buf());
+
+    // The check above is only meaningful when the kernel applies it: probe with
+    // the same `O_CREAT | O_EXCL` a temp file uses, and stop when even that
+    // succeeds.
+    let probe = dir.path().join("probe");
+    let privileged = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .is_ok();
+    if privileged {
+        let _ = std::fs::remove_file(&probe);
+        eprintln!("skipped: this process writes into a read-only directory (uid 0)");
+        return;
+    }
+
+    let path = dir.path().join("blastit.toml");
+    let error = write_atomic(&path, "version = 1\n").expect_err("the directory is not writable");
+
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "a refused create was reported as {error:?} instead of the permission problem"
+    );
+    assert!(!path.exists(), "the manifest was written anyway");
+    assert!(
+        entries(dir.path()).is_empty(),
+        "a temporary file was left behind: {:?}",
+        entries(dir.path())
     );
 }
 

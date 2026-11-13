@@ -670,3 +670,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T19:35 [MB.1.14] (lead) status active -> review
 - 2026-11-13T19:42 [MB.1.17] (lead) status review -> done
 - 2026-11-13T19:42 [MB.1.14] (lead) status review -> done
+- 2026-11-13T19:42 [MB.1.16] (lead) status ready -> active
+- 2026-11-13T19:42 [MB.1.16] (lead) attempt 1/3 started
+- 2026-11-13T19:42 [MB.1.16] (lead) base e50a29e
+- 2026-11-13T19:47 [MB.1.15] (implementer) Done: 637 mutants 558 caught / 6 missed / 73 unviable / 0 timeouts = 98.94% (was 550/14 = 97.52%); parse.rs:197+220, edit.rs:384+411, 794/815(+→-), 818/819 all 
+- 2026-11-13T19:48 [MB.1.15] (lead) status active -> review
+- 2026-11-13T19:49 [MB.1.15] (lead) status review -> done

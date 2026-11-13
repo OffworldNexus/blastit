@@ -427,6 +427,119 @@ fn an_invalid_regex_reports_the_engines_last_line() {
 }
 
 //
+// `R8`: where a reserved key is a name and where it is a field.
+//
+// Three keys decide a refusal's identity here: whether a route key is a grant
+// (the proxy is declared *and* the value is a table), whether a grant key is
+// the `tables` map, and whether a key inside one table row is one of the
+// schema's operation names. Each test asserts the whole error list, because a
+// scan that reports the wrong one sends the operator to a line that is correct.
+//
+
+#[test]
+fn a_declared_proxy_name_is_a_grant_only_when_it_holds_a_table() {
+    // `[proxy.app]` makes `app` a name the author chose, so a table under it is
+    // that proxy's grant and the route boots.
+    let granted = "version = 1\n\
+                   [proxy.app]\nprotocol = \"postgresql\"\n\
+                   [[route]]\nname = \"r\"\npath = ['/']\n\
+                   app = { queries = ['SELECT \"t\".\"a\" FROM \"t\"'] }\n";
+    let manifest = Manifest::from_toml_str(granted).expect("a declared proxy makes `app` a grant");
+    let grant = manifest
+        .route(0)
+        .expect("route 0")
+        .grant(&ProxyName::from("app"))
+        .and_then(Grant::as_postgresql)
+        .expect("the inline grant on the declared proxy");
+    assert_eq!(texts(grant.queries()), [r#"SELECT "t"."a" FROM "t""#]);
+
+    // The same key holding a string is not a grant: it is `app` written below
+    // the first `[table]`, which TOML attached to the proxy's own table. The
+    // refusal has to be that one, not "a table was expected".
+    let misplaced = "version = 1\n\
+                     [proxy.app]\nprotocol = \"postgresql\"\n\
+                     [[route]]\nname = \"r\"\npath = ['/']\n\
+                     app = \"shop.wsgi:application\"\n";
+    let errors = parse_errors(misplaced);
+    assert_eq!(
+        errors.errors(),
+        [ManifestError::NotTopLevel {
+            key: "app".to_string()
+        }],
+        "the declared name hid the misplaced top-level key: {errors}"
+    );
+    assert_eq!(
+        errors.to_string(),
+        "manifest has 1 error(s)\n  \
+         - app after a [table] is not top-level; move it above the first table"
+    );
+}
+
+#[test]
+fn a_reserved_key_inside_a_table_grant_row_is_a_misplaced_top_level_key() {
+    // The row `t` grants one operation; `groups` in it is not an operation and
+    // not the table named `groups` — it is the top-level key written after a
+    // `[table]`, and that is what the operator is told.
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [[route]]\nname = \"r\"\npath = ['/']\n\
+                  [route.db.tables]\nt = { select = [\"a\"], groups = [\"g\"] }\n";
+    let errors = parse_errors(source);
+    assert_eq!(
+        errors.errors(),
+        [ManifestError::NotTopLevel {
+            key: "groups".to_string()
+        }],
+        "the row's reserved key was reported as an unknown operation: {errors}"
+    );
+    assert_eq!(
+        errors.to_string(),
+        "manifest has 1 error(s)\n  \
+         - groups after a [table] is not top-level; move it above the first table"
+    );
+
+    // A table *named* `groups` is the author's, so the walk stops at the row:
+    // the legal shape has no error at all.
+    let named = "version = 1\n\
+                 [proxy.db]\nprotocol = \"postgresql\"\n\
+                 [[route]]\nname = \"r\"\npath = ['/']\n\
+                 [route.db.tables]\ngroups = { select = [\"a\"] }\n";
+    let manifest = Manifest::from_toml_str(named).expect("a table named groups is the author's");
+    assert!(
+        manifest
+            .route(0)
+            .expect("route 0")
+            .grant(&ProxyName::from("db"))
+            .and_then(Grant::as_postgresql)
+            .is_some_and(|grant| grant.tables().table("groups").is_some()),
+        "the table named `groups` was dropped"
+    );
+}
+
+#[test]
+fn an_unknown_grant_key_holding_a_table_is_reported_as_the_key_it_is() {
+    // `options` is not a grant key, and the nesting under it is the author's
+    // data: only `tables` owns a map of rows. Reporting the inner `groups` as a
+    // misplaced key would name a line that is not the mistake.
+    let source = "version = 1\n\
+                  [proxy.db]\nprotocol = \"postgresql\"\n\
+                  [[route]]\nname = \"r\"\npath = ['/']\n\
+                  [route.db.options]\nfirst = { groups = [\"x\"] }\n";
+    let errors = parse_errors(source);
+    assert_eq!(
+        errors.errors(),
+        [ManifestError::UnknownKey {
+            path: "route[0].db.options".to_string()
+        }],
+        "the inner table was walked as if it were a grant row: {errors}"
+    );
+    assert_eq!(
+        errors.to_string(),
+        "manifest has 1 error(s)\n  - route[0].db.options: unknown key"
+    );
+}
+
+//
 // The collected-error value itself.
 //
 
