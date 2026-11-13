@@ -31,3 +31,7 @@ REVIEW PASS (attempt 1) + 2 MINOR comment findings fixed (reworded to logs.rs si
 ## 2026-11-13T12:57 [lead]
 
 status review -> done
+
+## 2026-11-13T12:57 [lead]
+
+commit 21e093b25d6a99aefb7e327b70283a7dc495c954 on release/0.1.1
