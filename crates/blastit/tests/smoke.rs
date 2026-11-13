@@ -277,6 +277,35 @@ impl Server {
         false
     }
 
+    /// Waits until stdout holds a line containing every one of `needles`, and
+    /// returns that whole line.
+    ///
+    /// `wait_for_event` only answers *whether* a line has appeared; this hands
+    /// the line back so a caller can assert on its contents. It exists because
+    /// init is the only process that writes stdout (`src/logs.rs`), so an
+    /// ingress line and a forwarded component event reach it over *separate
+    /// pipes* from separate processes, and init writes whichever pipe `poll(2)`
+    /// reports ready first: there is no ordering between the two lines, so a
+    /// test needing the later one must poll for it rather than read the log
+    /// once. It returns the **first** matching line, so a caller that needs a
+    /// *later* distinct line must not reuse it as-is.
+    /// Same deadline and cadence as `wait_for_event`; `None` on timeout (the
+    /// caller prints the captured log).
+    fn wait_for_line(&self, needles: &[&str]) -> Option<String> {
+        let deadline = Instant::now() + EXIT_TIMEOUT;
+        while Instant::now() < deadline {
+            if let Some(line) = self
+                .stdout_lines()
+                .into_iter()
+                .find(|line| needles.iter().all(|needle| line.contains(*needle)))
+            {
+                return Some(line);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
     /// The exit status, if the process has already ended.
     fn exited(&mut self) -> Option<std::process::ExitStatus> {
         self.child.try_wait().ok().flatten()
@@ -1619,13 +1648,19 @@ fn pretty_renders_a_forwarded_event_as_the_human_line() {
         "{}",
         server.stdout_text()
     );
-    let log = server.stdout_text();
 
     // The request: `HH:MM:SS.mmm INFO  request  GET /query → data  200  1.2ms`.
-    let request = log
-        .lines()
-        .find(|line| line.contains(" request ") && line.contains("GET /query"))
-        .unwrap_or_else(|| panic!("no request line in:\n{log}"));
+    //
+    // Waited for, not snapshotted: the ingress line and the forwarded
+    // `sql.denied` event above arrive over separate pipes from separate
+    // processes, and init (the only process that writes stdout) writes
+    // whichever pipe `poll(2)` reports ready first — so the denied event being
+    // on stdout says nothing about whether the request line is yet. Polling for
+    // the line removes that ordering assumption without weakening what is
+    // asserted about it.
+    let request = server
+        .wait_for_line(&[" request ", "GET /query"])
+        .unwrap_or_else(|| panic!("no request line in:\n{}", server.stdout_text()));
     assert!(
         request.contains("→ data"),
         "the route reaches the line: {request}"
@@ -1640,6 +1675,10 @@ fn pretty_renders_a_forwarded_event_as_the_human_line() {
         !request.contains("\"event\":") && !request.starts_with('{'),
         "and not a JSON object: {request}"
     );
+
+    // Read once the request line is known to be present, so this log is a
+    // superset of everything asserted below.
+    let log = server.stdout_text();
 
     // The denial: `WARN sql.denied  data  db  query  SELECT 2`.
     let denied = log

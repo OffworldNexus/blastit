@@ -512,3 +512,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T12:28 [MA.10] (lead) review PASS attempt 1; 3 MINOR findings fixed in attempt 2 (job-comment arithmetic, grown-exclusion wording, kept-budget ::warning::); re-review
 - 2026-11-13T12:34 [MA.10] (lead) status review -> done
 - 2026-11-13T12:34 [MA.10] (lead) committed 5ef8a4b on release/0.1.1 (.github/workflows/ci.yml, plan/); plan.py validate ok; next smoke (root) run must show 5 'test result: ok' and no ::error::
+- 2026-11-13T12:42 [MA.11] (conductor) created (task) Leaf 18: remove the request-line ordering race in smoke pretty-format
+- 2026-11-13T12:47 [MA.11] (lead) status ready -> active
+- 2026-11-13T12:47 [MA.11] (lead) attempt 1/3 started
+- 2026-11-13T12:47 [MA.11] (lead) base 0f926dafae617cda9d93aab98356def2a98cfc5a
+- 2026-11-13T12:52 [MA.11] (lead) status active -> review
+- 2026-11-13T12:52 [MA.11] (lead) dispatch reviewer: base 0f926da, diff = smoke.rs +38/-5 (wait_for_line poll)
+- 2026-11-13T12:57 [MA.11] (lead) REVIEW PASS (attempt 1) + 2 MINOR comment findings fixed (reworded to logs.rs single-writer/poll-order fact); gates: plan OK, guard OK, critical-guard clean, ma
+- 2026-11-13T12:57 [MA.11] (lead) status review -> done
