@@ -566,3 +566,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T15:28 [MB.1.6] (lead) status ready -> active
 - 2026-11-13T15:28 [MB.1.6] (lead) attempt 2/3 started
 - 2026-11-13T15:33 [MB.1.6] (lead) status active -> done
+- 2026-11-13T15:34 AUTOPILOT on by conductor resume MB after v0.1.2 hotfix
+- 2026-11-13T15:34 [MB.1.1] (lead) status active -> review
+- 2026-11-13T15:34 [MB.1.1] (lead) implementer reported STATUS done (attempt 1); awaiting goldfish review
+- 2026-11-13T15:36 [MB.1.1] (lead) review PASS; lead addendum appended (append_to_array whitespace normalisation documented, mutation run predates final source, write_atomic survivors relabelled 
+- 2026-11-13T15:36 [MB.1.1] (lead) status review -> done

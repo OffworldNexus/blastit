@@ -56,7 +56,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
+use std::str::CharIndices;
 
 use blastit_sqlpolicy::{KNOWN_STATIC_SETUP_SQL, has_quoted_literal, normalize};
 use serde::{Deserialize, Serialize};
@@ -723,20 +725,21 @@ fn render(source: &str, plan: &Plan) -> Result<String, EditError> {
     let mut insertion = block;
     let route_count = route_starts(&scan_lines(&lines)).len();
     if plan.insert_at < route_count {
-        let Some(mut at) = route_start_line(&lines, plan.insert_at) else {
+        let Some(at) = route_start_line(&lines, plan.insert_at) else {
             return Err(EditError::Verification {
                 section: "the route order",
             });
         };
         // A comment written directly above the catch-all still documents it:
-        // the new block goes above the comment, not between the two.
-        while at > 0
-            && lines
-                .get(at - 1)
-                .is_some_and(|line| line.trim_start().starts_with('#'))
-        {
-            at -= 1;
-        }
+        // the new block goes above the comment, not between the two. One
+        // bounded pass over the lines above the header finds where that run of
+        // comments starts, so there is no cursor to step backwards.
+        let at = lines
+            .get(..at)
+            .unwrap_or_default()
+            .iter()
+            .rposition(|line| !line.trim_start().starts_with('#'))
+            .map_or(0, |last| last + 1);
         if at > 0 && lines.get(at - 1).is_some_and(|line| !is_blank(line)) {
             insertion.insert(0, String::from("\n"));
         }
@@ -849,10 +852,12 @@ fn patch_grant(lines: &mut Vec<String>, patch: &Patch) -> Result<(), EditError> 
         return Ok(());
     }
 
-    let mut stop = assignment + 1;
-    while stop < section_end && infos.get(stop - 1).is_some_and(|info| info.depth_end > 0) {
-        stop += 1;
-    }
+    // The value continues while the line before the cursor left a bracket
+    // open. Scanning the candidate ends in one bounded pass keeps the stop
+    // position a function of `section_end`, never of an accumulating step.
+    let stop = (assignment + 1..section_end)
+        .find(|&index| infos.get(index - 1).is_none_or(|info| info.depth_end == 0))
+        .unwrap_or(section_end);
     let had_newline = lines.get(stop - 1).is_some_and(|line| line.ends_with('\n'));
     let indent = lines
         .get(assignment)
@@ -882,10 +887,12 @@ fn patch_grant(lines: &mut Vec<String>, patch: &Patch) -> Result<(), EditError> 
 
 /// Appends a whole `[route.<proxy>]` table at the end of one route's block.
 fn append_grant_table(lines: &mut Vec<String>, start: usize, end: usize, patch: &Patch) {
-    let mut block_end = end;
-    while block_end > start && lines.get(block_end - 1).is_some_and(|line| is_blank(line)) {
-        block_end -= 1;
-    }
+    // The blank run that closes the route's own block; found in one pass over
+    // `start..end` so the cursor cannot step backwards.
+    let block_end = lines
+        .get(start..end)
+        .and_then(|block| block.iter().rposition(|line| !is_blank(line)))
+        .map_or(start, |last| start + last + 1);
     if let Some(previous) = block_end
         .checked_sub(1)
         .and_then(|index| lines.get_mut(index))
@@ -998,10 +1005,20 @@ fn verify(manifest: &Manifest, expected: &[Route], text: &str) -> Result<(), Edi
 //
 
 /// Which multi-line string a line is inside.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Multi {
     Basic,
     Literal,
+}
+
+impl Multi {
+    /// The quote that opens and closes this kind of string.
+    fn quote(self) -> char {
+        match self {
+            Self::Basic => '"',
+            Self::Literal => '\'',
+        }
+    }
 }
 
 /// A table header at the start of a line.
@@ -1062,82 +1079,76 @@ fn scan(lines: &[&str]) -> Vec<LineInfo> {
 
 /// Reads one line, returning the multi-line-string state and bracket depth at
 /// its end.
+///
+/// The line is consumed by a character iterator, so every iteration reads the
+/// next character and the scan cannot stall on a cursor that fails to move.
 fn walk(line: &str, mut multi: Option<Multi>, mut depth: usize) -> (Option<Multi>, usize) {
-    let chars: Vec<char> = line.chars().collect();
-    let mut index = 0;
+    let mut chars = line.char_indices().peekable();
 
-    while index < chars.len() {
+    while let Some((_, character)) = chars.next() {
         if let Some(kind) = multi {
-            match kind {
-                Multi::Basic => {
-                    if chars[index] == '\\' {
-                        index += 2;
-                        continue;
-                    }
-                    if chars[index..].starts_with(&['"', '"', '"']) {
-                        multi = None;
-                        index += 3;
-                        continue;
-                    }
-                }
-                Multi::Literal => {
-                    if chars[index..].starts_with(&['\'', '\'', '\'']) {
-                        multi = None;
-                        index += 3;
-                        continue;
-                    }
-                }
+            if kind == Multi::Basic && character == '\\' {
+                // The escaped character belongs to the string either way.
+                chars.next();
+                continue;
             }
-            index += 1;
+            if character == kind.quote() && tripled(&chars, character) {
+                chars.next();
+                chars.next();
+                multi = None;
+            }
             continue;
         }
 
-        match chars[index] {
+        match character {
             '#' => break,
-            '"' if chars[index..].starts_with(&['"', '"', '"']) => {
-                multi = Some(Multi::Basic);
-                index += 3;
+            '"' | '\'' if tripled(&chars, character) => {
+                chars.next();
+                chars.next();
+                multi = Some(if character == '"' {
+                    Multi::Basic
+                } else {
+                    Multi::Literal
+                });
             }
-            '\'' if chars[index..].starts_with(&['\'', '\'', '\'']) => {
-                multi = Some(Multi::Literal);
-                index += 3;
-            }
-            '"' => {
-                index += 1;
-                while index < chars.len() {
-                    if chars[index] == '\\' {
-                        index += 2;
-                        continue;
-                    }
-                    if chars[index] == '"' {
-                        index += 1;
-                        break;
-                    }
-                    index += 1;
-                }
-            }
-            '\'' => {
-                index += 1;
-                while index < chars.len() && chars[index] != '\'' {
-                    index += 1;
-                }
-                if index < chars.len() {
-                    index += 1;
-                }
-            }
-            '[' | '{' => {
-                depth = depth.saturating_add(1);
-                index += 1;
-            }
-            ']' | '}' => {
-                depth = depth.saturating_sub(1);
-                index += 1;
-            }
-            _ => index += 1,
+            // A single-line string: an unescaped quote of the same kind ends it.
+            '"' => skip_string(&mut chars, '"'),
+            '\'' => skip_string(&mut chars, '\''),
+            '[' | '{' => depth = depth.saturating_add(1),
+            ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
         }
     }
 
     (multi, depth)
+}
+
+/// Whether the two characters after an already-read quote are that same quote,
+/// which makes three and opens or closes a multi-line string.
+///
+/// The look-ahead works on a clone of the iterator, so it never moves the
+/// scanner: termination depends only on the `next()` calls the caller makes.
+fn tripled<I>(chars: &I, quote: char) -> bool
+where
+    I: Iterator<Item = (usize, char)> + Clone,
+{
+    let mut look = chars.clone();
+    look.next().is_some_and(|(_, second)| second == quote)
+        && look.next().is_some_and(|(_, third)| third == quote)
+}
+
+/// Consumes the rest of a string value a quote opened, so the scanner never
+/// mistakes a `#` or a bracket inside the value for structure.
+fn skip_string(chars: &mut Peekable<CharIndices<'_>>, quote: char) {
+    while let Some((_, character)) = chars.next() {
+        if quote == '"' && character == '\\' {
+            chars.next();
+            continue;
+        }
+        if character == quote {
+            return;
+        }
+    }
 }
 
 /// Parses a table header that starts the line, if there is one.
@@ -1150,19 +1161,14 @@ fn parse_header(line: &str) -> Option<Header> {
     };
     let close = if array { "]]" } else { "]" };
 
-    let mut search = 0;
-    let mut end = None;
-    while let Some(found) = body.get(search..)?.find(close) {
-        let at = search + found;
-        let rest = body.get(at + close.len()..)?.trim_start();
-        if rest.is_empty() || rest.starts_with('#') {
-            end = Some(at);
-            break;
-        }
-        search = at + 1;
-    }
-
-    let end = end?;
+    // Every non-overlapping position of the closing token, in order; the one
+    // followed only by a comment (or nothing) closes the header. `match_indices`
+    // bounds the scan, so no search offset can fail to advance.
+    let end = body.match_indices(close).map(|(at, _)| at).find(|&at| {
+        body.get(at + close.len()..)
+            .map(str::trim_start)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('#'))
+    })?;
     let name = body.get(..end)?.trim();
     if name.is_empty() {
         return None;
@@ -1251,138 +1257,125 @@ fn is_queries_assignment(line: &str) -> bool {
 
 /// The trailing `# …` comment of a single-line value, with the whitespace that
 /// preceded it, so an edited line keeps the author's note.
+///
+/// The line is consumed by a character iterator: every iteration reads the next
+/// character, so a scanner that stops stepping is not representable here.
 fn trailing_comment(line: &str) -> Option<&str> {
-    let bytes = line.as_bytes();
-    let mut index = 0;
+    let mut chars = line.char_indices().peekable();
     let mut in_basic = false;
     let mut in_literal = false;
 
-    while index < bytes.len() {
-        let byte = bytes[index];
+    while let Some((index, character)) = chars.next() {
         if in_basic {
-            if byte == b'\\' {
-                index += 2;
+            if character == '\\' {
+                chars.next();
                 continue;
             }
-            if byte == b'"' {
+            if character == '"' {
                 in_basic = false;
             }
-        } else if in_literal {
-            if byte == b'\'' {
+            continue;
+        }
+        if in_literal {
+            if character == '\'' {
                 in_literal = false;
             }
-        } else {
-            match byte {
-                b'"' => {
-                    if bytes
-                        .get(index..)
-                        .is_some_and(|rest| rest.starts_with(b"\"\"\""))
-                    {
-                        return None;
-                    }
-                    in_basic = true;
-                }
-                b'\'' => {
-                    if bytes
-                        .get(index..)
-                        .is_some_and(|rest| rest.starts_with(b"'''"))
-                    {
-                        return None;
-                    }
-                    in_literal = true;
-                }
-                b'#' => {
-                    let mut start = index;
-                    while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
-                        start -= 1;
-                    }
-                    return line.get(start..);
-                }
-                _ => {}
-            }
+            continue;
         }
-        index += 1;
+        match character {
+            // A multi-line string is not a single-line value, so there is no
+            // trailing comment on this line to keep.
+            '"' if tripled(&chars, '"') => return None,
+            '\'' if tripled(&chars, '\'') => return None,
+            '"' => {
+                in_basic = true;
+            }
+            '\'' => {
+                in_literal = true;
+            }
+            '#' => {
+                let head = line.get(..index)?;
+                let start = head.trim_end_matches([' ', '\t']).len();
+                return line.get(start..);
+            }
+            _ => {}
+        }
     }
     None
 }
 
 /// The byte index of the `]` that closes the array value on this line.
+///
+/// Like [`trailing_comment`], the line is consumed by a character iterator, so
+/// the scan is bounded by the line itself rather than by a cursor's arithmetic.
 fn closing_bracket(line: &str) -> Option<usize> {
-    let bytes = line.as_bytes();
-    let mut index = 0;
+    let mut chars = line.char_indices().peekable();
     let mut depth = 0usize;
     let mut in_basic = false;
     let mut in_literal = false;
     let mut opened = false;
 
-    while index < bytes.len() {
-        let byte = bytes[index];
+    while let Some((index, character)) = chars.next() {
         if in_basic {
-            if byte == b'\\' {
-                index += 2;
+            if character == '\\' {
+                chars.next();
                 continue;
             }
-            if byte == b'"' {
+            if character == '"' {
                 in_basic = false;
             }
-        } else if in_literal {
-            if byte == b'\'' {
+            continue;
+        }
+        if in_literal {
+            if character == '\'' {
                 in_literal = false;
             }
-        } else {
-            match byte {
-                b'#' => break,
-                b'"' => {
-                    if bytes
-                        .get(index..)
-                        .is_some_and(|rest| rest.starts_with(b"\"\"\""))
-                    {
-                        return None;
-                    }
-                    in_basic = true;
-                }
-                b'\'' => {
-                    if bytes
-                        .get(index..)
-                        .is_some_and(|rest| rest.starts_with(b"'''"))
-                    {
-                        return None;
-                    }
-                    in_literal = true;
-                }
-                b'[' => {
-                    depth = depth.saturating_add(1);
-                    opened = true;
-                }
-                b']' => {
-                    if !opened {
-                        return None;
-                    }
-                    depth = depth.checked_sub(1)?;
-                    if depth == 0 {
-                        return Some(index);
-                    }
-                }
-                _ => {}
-            }
+            continue;
         }
-        index += 1;
+        match character {
+            '#' => break,
+            '"' if tripled(&chars, '"') => return None,
+            '\'' if tripled(&chars, '\'') => return None,
+            '"' => {
+                in_basic = true;
+            }
+            '\'' => {
+                in_literal = true;
+            }
+            '[' => {
+                depth = depth.saturating_add(1);
+                opened = true;
+            }
+            ']' => {
+                if !opened {
+                    return None;
+                }
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
     }
     None
 }
 
 /// Extends a one-line `queries = [...]` value with `entries`, leaving every
 /// existing byte (and its quoting) where the author put it.
+///
+/// Only the run of spaces and tabs just before the closing bracket is the
+/// editor's: the separator decides it, so a list the author ended with a comma
+/// gets one space rather than two.
 fn append_to_array(line: &str, entries: &[String], was_empty: bool) -> Option<String> {
     if entries.is_empty() {
         return None;
     }
     let close = closing_bracket(line)?;
-    let before = line.get(..close)?;
-    let trimmed = before.trim_end();
+    let before = line.get(..close)?.trim_end_matches([' ', '\t']);
     let separator = if was_empty {
         ""
-    } else if trimmed.ends_with(',') {
+    } else if before.ends_with(',') {
         " "
     } else {
         ", "
@@ -1461,4 +1454,587 @@ fn toml_basic_string(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    //
+    // `verify` is the editor's own postcondition: it re-parses the text the
+    // splice produced and refuses to return it when anything it does not own
+    // moved. Each comparison has its own section name, so each one is checked
+    // here with a document that only that comparison can reject.
+    //
+
+    /// A document that has something for every section `verify` compares: an
+    /// `app`, a `preload`, a global group, a declared proxy, a group grant and
+    /// one route.
+    const VERIFIED: &str = "\
+version = 1
+app = \"shop.wsgi:application\"
+preload = [\"shop.boot\"]
+groups = [\"shared\"]
+
+[proxy.db]
+protocol = \"postgresql\"
+
+[group.shared.db]
+queries = []
+
+[[route]]
+name = \"products\"
+path = ['/products/']
+groups = [\"shared\"]
+";
+
+    fn verified() -> (Manifest, Vec<Route>) {
+        let manifest = Manifest::from_toml_str(VERIFIED).expect("the fixture parses");
+        let expected = manifest.routes().to_vec();
+        (manifest, expected)
+    }
+
+    /// The section a refusal names, or a panic naming what happened instead.
+    fn refusal(result: Result<(), EditError>) -> &'static str {
+        match result {
+            Err(EditError::Verification { section }) => section,
+            other => panic!("expected a verification refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_accepts_the_document_it_was_handed() {
+        let (manifest, expected) = verified();
+        assert_eq!(verify(&manifest, &expected, VERIFIED), Ok(()));
+    }
+
+    #[test]
+    fn a_parse_failure_stays_reachable_as_the_error_source() {
+        use std::error::Error as _;
+
+        let source_error = Manifest::from_toml_str("version = 1\nthis is not toml\n")
+            .expect_err("the text does not parse");
+        let edit_error = EditError::from(source_error);
+
+        assert!(matches!(edit_error, EditError::Source(_)), "{edit_error:?}");
+        assert!(
+            edit_error.source().is_some(),
+            "the parse failure is not reachable through `source`"
+        );
+        // A refusal that is the editor's own has no cause to hand out.
+        assert!(
+            EditError::Verification {
+                section: "the routes"
+            }
+            .source()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn verify_names_the_document_syntax() {
+        let (manifest, expected) = verified();
+        assert_eq!(
+            refusal(verify(&manifest, &expected, "version = 1\n[[route]\n")),
+            "the document syntax"
+        );
+    }
+
+    #[test]
+    fn verify_names_each_top_level_key_it_would_have_changed() {
+        let (manifest, expected) = verified();
+
+        // A manifest whose version differs can only be built by hand: a parsed
+        // document always reports `1`.
+        let version_two = Manifest::assemble(
+            2,
+            manifest.global_groups().to_vec(),
+            manifest.proxies().clone(),
+            manifest.groups().clone(),
+            expected.clone(),
+            Vec::new(),
+        );
+        assert_eq!(
+            refusal(verify(&version_two, &expected, VERIFIED)),
+            "the top-level keys",
+            "a changed version is not refused"
+        );
+
+        let changed_app = VERIFIED.replace("shop.wsgi:application", "shop.wsgi:other");
+        assert_ne!(changed_app, VERIFIED);
+        assert_eq!(
+            refusal(verify(&manifest, &expected, &changed_app)),
+            "the top-level keys",
+            "a changed app is not refused"
+        );
+
+        let changed_preload = VERIFIED.replacen("[\"shop.boot\"]", "[]", 1);
+        assert_ne!(changed_preload, VERIFIED);
+        assert_eq!(
+            refusal(verify(&manifest, &expected, &changed_preload)),
+            "the top-level keys",
+            "a changed preload is not refused"
+        );
+
+        let changed_groups = VERIFIED.replacen("groups = [\"shared\"]\n", "", 1);
+        assert_ne!(changed_groups, VERIFIED);
+        assert_eq!(
+            refusal(verify(&manifest, &expected, &changed_groups)),
+            "the top-level keys",
+            "a changed global group list is not refused"
+        );
+    }
+
+    #[test]
+    fn verify_names_the_proxy_declarations() {
+        let (manifest, expected) = verified();
+        let changed = VERIFIED.replace(
+            "[proxy.db]\nprotocol = \"postgresql\"",
+            "[proxy.db]\nprotocol = \"postgresql\"\noutput = { id = \"ID\" }",
+        );
+        assert_ne!(changed, VERIFIED);
+
+        assert_eq!(
+            refusal(verify(&manifest, &expected, &changed)),
+            "the proxy declarations"
+        );
+    }
+
+    #[test]
+    fn verify_names_the_groups() {
+        let (manifest, expected) = verified();
+        let changed = VERIFIED.replace(
+            "[group.shared.db]\nqueries = []",
+            "[group.shared.db]\nqueries = ['SELECT \"t\".\"a\" FROM \"t\"']",
+        );
+        assert_ne!(changed, VERIFIED);
+
+        assert_eq!(
+            refusal(verify(&manifest, &expected, &changed)),
+            "the groups"
+        );
+    }
+
+    #[test]
+    fn verify_names_the_routes() {
+        let (manifest, expected) = verified();
+        let changed = VERIFIED.replace("name = \"products\"", "name = \"catalogue\"");
+        assert_ne!(changed, VERIFIED);
+
+        assert_eq!(
+            refusal(verify(&manifest, &expected, &changed)),
+            "the routes"
+        );
+    }
+
+    //
+    // The structural scanner. A line's bracket depth and string state decide
+    // which headers the patcher can see, so each state is pinned.
+    //
+
+    #[test]
+    fn scan_tracks_bracket_depth_across_lines() {
+        let infos = scan(&["queries = [\n", "  'SELECT 1',\n", "]\n", "name = 'x'\n"]);
+
+        assert_eq!(infos.len(), 4);
+        assert_eq!((infos[0].depth_start, infos[0].depth_end), (0, 1));
+        assert!(!infos[0].in_string_at_start);
+        assert_eq!((infos[1].depth_start, infos[1].depth_end), (1, 1));
+        assert_eq!((infos[2].depth_start, infos[2].depth_end), (1, 0));
+        assert_eq!((infos[3].depth_start, infos[3].depth_end), (0, 0));
+        assert!(infos.iter().all(|info| info.header.is_none()));
+
+        // A header-shaped line inside an open value is not a header.
+        let inside = scan(&["queries = [\n", "[route.db]\n"]);
+        assert!(inside[1].depth_start > 0);
+        assert!(inside[1].header.is_none());
+    }
+
+    #[test]
+    fn scan_ignores_brackets_and_headers_inside_strings_and_comments() {
+        // A `[` in a comment, a `]` in a trailing comment, and a header-shaped
+        // string all leave the depth where it was.
+        let infos = scan(&[
+            "# a comment with [ an open bracket\n",
+            "name = 'x'  # closed with ]\n",
+            "queries = ['SELECT \"t\".\"a\" FROM \"t\" WHERE \"t\".\"b\" = \"[[']\n",
+        ]);
+        assert_eq!(infos[0].depth_end, 0);
+        assert_eq!(infos[1].depth_end, 0);
+        assert_eq!(infos[2].depth_end, 0);
+        assert!(infos.iter().all(|info| info.header.is_none()));
+    }
+
+    #[test]
+    fn a_multi_line_string_hides_the_headers_and_brackets_it_contains() {
+        let infos = scan(&[
+            "description = '''\n",
+            "[[route]]\n",
+            "  SELECT [ x ] FROM y\n",
+            "'''\n",
+            "[[route]]\n",
+        ]);
+
+        assert!(infos[1].in_string_at_start, "the string did not stay open");
+        assert!(infos[1].header.is_none(), "a header inside a string");
+        assert_eq!(infos[2].depth_end, 0, "a bracket inside a string");
+        assert!(!infos[4].in_string_at_start);
+        let header = infos[4].header.as_ref().expect("the header after it");
+        assert!(header.array);
+        assert_eq!(header.name, "route");
+    }
+
+    #[test]
+    fn walk_reads_escapes_strings_and_brackets() {
+        // Nothing is open at the end of any of these lines.
+        assert_eq!(walk("x = \"[\"", None, 0), (None, 0));
+        assert_eq!(walk("x = '['", None, 0), (None, 0));
+        assert_eq!(walk("x = \"a\\\"[\"", None, 0), (None, 0));
+        assert_eq!(walk("x = \"a\\\\\"", None, 0), (None, 0));
+        // Depth is counted outside strings, and never underflows.
+        assert_eq!(walk("x = [1, {2}] ", None, 0), (None, 0));
+        assert_eq!(walk("x = [", None, 0), (None, 1));
+        assert_eq!(walk("x = ]", None, 0), (None, 0));
+        assert_eq!(walk("x = ]", None, 0).1, 0);
+        // An `[[route]]` inside a multi-line string does not open a header.
+        assert_eq!(
+            walk("[[route]]", Some(Multi::Literal), 0),
+            (Some(Multi::Literal), 0)
+        );
+        // A `#` inside a string is not a comment: the bracket after it counts.
+        assert_eq!(walk("x = '#' [", None, 0), (None, 1));
+        assert_eq!(walk("x = \"#\" [", None, 0), (None, 1));
+        // An unterminated one-line string swallows the rest of the line.
+        assert_eq!(walk("x = '[' ", None, 0), (None, 0));
+        // A string ends at its own quote, so what follows is structure again.
+        assert_eq!(walk("x = 'a' [", None, 0), (None, 1));
+        assert_eq!(walk("x = \"a[\" [", None, 0), (None, 1));
+        // A backslash escapes only inside a basic string: in a literal one it
+        // is a character like any other, and the quote after it still closes.
+        assert_eq!(walk("x = 'a\\'b", None, 0), (None, 0));
+    }
+
+    #[test]
+    fn multi_line_delimiters_open_and_close() {
+        assert_eq!(walk("x = '''", None, 0), (Some(Multi::Literal), 0));
+        assert_eq!(walk("x = \"\"\"", None, 0), (Some(Multi::Basic), 0));
+        // Two quotes are an empty one-line string, not a delimiter.
+        assert_eq!(walk("x = ''", None, 0), (None, 0));
+        assert_eq!(walk("x = \"\"", None, 0), (None, 0));
+        // The closing delimiter of the other kind does not close this string.
+        assert_eq!(
+            walk("''' still here", Some(Multi::Basic), 0),
+            (Some(Multi::Basic), 0)
+        );
+        assert_eq!(walk("'''", Some(Multi::Literal), 0), (None, 0));
+        assert_eq!(walk("\"\"\"", Some(Multi::Basic), 0), (None, 0));
+        // Two quotes inside a multi-line string are content, not a delimiter.
+        assert_eq!(
+            walk("x''", Some(Multi::Literal), 0),
+            (Some(Multi::Literal), 0)
+        );
+        assert_eq!(
+            walk("abc\"\"\"", Some(Multi::Basic), 0),
+            (None, 0),
+            "content before the delimiter"
+        );
+        // An escape inside a basic string hides the delimiter after it.
+        assert_eq!(
+            walk("\\\"\"\" still here", Some(Multi::Basic), 0),
+            (Some(Multi::Basic), 0)
+        );
+        // A backslash in a literal string escapes nothing.
+        assert_eq!(walk("\\'''", Some(Multi::Literal), 0), (None, 0));
+    }
+
+    #[test]
+    fn header_matching_tolerates_spacing_and_quoted_keys() {
+        assert!(header_matches("route.db", "route.db"));
+        assert!(header_matches("route . db", "route.db"));
+        assert!(header_matches("route.\"db\"", "route.db"));
+        assert!(header_matches("route.'db'", "route.db"));
+        assert!(!header_matches("route.dx", "route.db"));
+        assert!(!header_matches("proxy.db", "route.db"));
+        assert_eq!(simplify_header(" route . 'db' "), "route.db");
+    }
+
+    #[test]
+    fn parse_header_reads_both_shapes_and_refuses_the_rest() {
+        let array = parse_header("  [[route]]  # the fallback\n").expect("an array header");
+        assert!(array.array);
+        assert_eq!(array.name, "route");
+
+        let table = parse_header("[ route . db ]\t# the grant\n").expect("a table header");
+        assert!(!table.array);
+        assert_eq!(table.name, "route . db");
+
+        // No bracket, no closing token, or a `]` followed by a value.
+        assert!(parse_header("name = 'route'\n").is_none());
+        assert!(parse_header("[route\n").is_none());
+        assert!(parse_header("[route] = 1\n").is_none());
+        assert!(parse_header("[]\n").is_none());
+        assert!(parse_header("[ ]\n").is_none());
+    }
+
+    #[test]
+    fn route_bounds_stop_at_the_next_element_and_the_first_foreign_table() {
+        let infos = scan(&[
+            "[[route]]\n",                 // 0
+            "name = \"a\"\n",              // 1
+            "[route.db]\n",                // 2
+            "queries = []\n",              // 3
+            "[proxy.backup]\n",            // 4, a table that does not belong to the route
+            "protocol = \"postgresql\"\n", // 5
+            "[[other]]\n",                 // 6, an array of tables that is not a route
+            "[[route]]\n",                 // 7
+            "name = \"b\"\n",              // 8
+        ]);
+
+        assert_eq!(route_starts(&infos), vec![0, 7]);
+        assert_eq!(route_end(&infos, 0), 4);
+        // A `[route.<proxy>]` table can sit after a foreign table and still
+        // belong to the element, so the element only ends at the next route.
+        assert_eq!(element_end(&infos, 0), 7);
+        assert_eq!(route_end(&infos, 7), infos.len());
+        assert_eq!(element_end(&infos, 7), infos.len());
+    }
+
+    #[test]
+    fn route_start_line_finds_the_indexed_element() {
+        let lines: Vec<String> = ["version = 1\n", "[[route]]\n", "[[route]]\n"]
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_eq!(route_start_line(&lines, 0), Some(1));
+        assert_eq!(route_start_line(&lines, 1), Some(2));
+        assert_eq!(route_start_line(&lines, 2), None);
+    }
+
+    //
+    // The single-line value scanners: a `#` or a `]` inside a string is part of
+    // the value, never structure.
+    //
+
+    #[test]
+    fn trailing_comment_keeps_the_authors_whitespace() {
+        assert_eq!(
+            trailing_comment("queries = ['a']  # keep me\n"),
+            Some("  # keep me\n")
+        );
+        assert_eq!(
+            trailing_comment("queries = ['a']\t# tab\n"),
+            Some("\t# tab\n")
+        );
+        assert_eq!(
+            trailing_comment("# only a comment\n"),
+            Some("# only a comment\n")
+        );
+        // A `#` inside a string is part of the statement…
+        assert_eq!(trailing_comment("queries = ['a # not a comment']\n"), None);
+        assert_eq!(
+            trailing_comment("queries = [\"a \\\" # still in the string\"]\n"),
+            None
+        );
+        assert_eq!(
+            trailing_comment("queries = [\"a # not a comment\"]\n"),
+            None
+        );
+        // …and a multi-line string is not a single-line value at all.
+        assert_eq!(trailing_comment("queries = ['''a''']\n"), None);
+        assert_eq!(trailing_comment("queries = [\"\"\"a\"\"\"] # keep\n"), None);
+        // A basic string that closes still leaves the comment to find, and a
+        // multi-line one swallows the `#` after it.
+        assert_eq!(
+            trailing_comment("queries = [\"a\"] # keep\n"),
+            Some(" # keep\n")
+        );
+        assert_eq!(trailing_comment("queries = ['''a''' ] # keep\n"), None);
+        // A value without a comment has none.
+        assert_eq!(trailing_comment("queries = ['a']"), None);
+    }
+
+    #[test]
+    fn closing_bracket_skips_strings_and_comments() {
+        let line = "queries = ['a', 'b']\n";
+        assert_eq!(closing_bracket(line), line.find(']'));
+        assert_eq!(
+            closing_bracket("queries = []\n"),
+            "queries = []\n".find(']')
+        );
+        assert_eq!(
+            closing_bracket("queries = [['a'], ['b']]\n"),
+            "queries = [['a'], ['b']]\n".rfind(']')
+        );
+        // A `]` inside a value is not the end of the array.
+        assert_eq!(
+            closing_bracket("queries = ['a]b']\n"),
+            "queries = ['a]b']\n".rfind(']')
+        );
+        assert_eq!(
+            closing_bracket("queries = [\"a]b\"]\n"),
+            "queries = [\"a]b\"]\n".rfind(']')
+        );
+        assert_eq!(
+            closing_bracket("queries = [\"a\\\"]b\"]\n"),
+            "queries = [\"a\\\"]b\"]\n".rfind(']')
+        );
+        // A comment ends the scan, so a `]` in it does not close anything.
+        assert_eq!(
+            closing_bracket("queries = ['a'] # ]\n"),
+            Some(
+                "queries = ['a'] # ]\n"
+                    .find(']')
+                    .expect("the array's own bracket")
+            )
+        );
+        // Unterminated, a multi-line string, or a stray bracket: no array.
+        assert_eq!(closing_bracket("queries = ['a'\n"), None);
+        assert_eq!(closing_bracket("queries = ['''a''']\n"), None);
+        assert_eq!(closing_bracket("queries = [\"\"\"a\"\"\"]\n"), None);
+        // A comment ends the scan before the bracket it mentions.
+        assert_eq!(closing_bracket("queries = [ # ]\n"), None);
+        assert_eq!(closing_bracket("] = 1\n"), None);
+        assert_eq!(closing_bracket(""), None);
+    }
+
+    #[test]
+    fn append_to_array_keeps_the_separator_right() {
+        let entry = vec![String::from("SELECT 2")];
+
+        assert_eq!(
+            append_to_array("queries = ['SELECT 1']\n", &entry, false).unwrap(),
+            "queries = ['SELECT 1', 'SELECT 2']\n"
+        );
+        // An empty list takes no leading comma…
+        assert_eq!(
+            append_to_array("queries = []\n", &entry, true).unwrap(),
+            "queries = ['SELECT 2']\n"
+        );
+        // …and a list the author left a trailing comma in needs no second one.
+        assert_eq!(
+            append_to_array("queries = ['SELECT 1', ]\n", &entry, false).unwrap(),
+            "queries = ['SELECT 1', 'SELECT 2']\n"
+        );
+        // The value after the bracket is the author's, the comment included.
+        assert_eq!(
+            append_to_array("queries = ['SELECT 1']  # learned\n", &entry, false).unwrap(),
+            "queries = ['SELECT 1', 'SELECT 2']  # learned\n"
+        );
+        // Nothing to add, or nothing to extend.
+        assert!(append_to_array("queries = ['a']\n", &[], false).is_none());
+        assert!(append_to_array("queries = ['a'\n", &entry, false).is_none());
+    }
+
+    //
+    // Rendering helpers.
+    //
+
+    #[test]
+    fn strings_prefer_literal_quoting_and_escape_basic_strings() {
+        assert_eq!(
+            toml_string("SELECT \"t\".\"a\" FROM \"t\""),
+            "'SELECT \"t\".\"a\" FROM \"t\"'"
+        );
+        assert_eq!(toml_string("don't"), "\"don't\"");
+        assert_eq!(toml_string("a\tb"), "'a\tb'");
+        assert_eq!(toml_string("a\nb"), "\"a\\nb\"");
+        assert_eq!(toml_string("\u{7f}"), "\"\\u007F\"");
+        assert_eq!(toml_string("with'quote\n"), "\"with'quote\\n\"");
+        assert_eq!(toml_basic_string("a\\b\"c\u{1}"), "\"a\\\\b\\\"c\\u0001\"");
+        assert_eq!(toml_basic_string("\r\t"), "\"\\r\\t\"");
+        assert_eq!(toml_string_array(&[]), "[]");
+        assert_eq!(
+            toml_string_array(&[String::from("a"), String::from("b")]),
+            "['a', 'b']"
+        );
+    }
+
+    #[test]
+    fn keys_are_bare_only_when_toml_allows_it() {
+        assert_eq!(toml_key("db"), "db");
+        assert_eq!(toml_key("a-b_1"), "a-b_1");
+        assert_eq!(toml_key(""), "\"\"");
+        assert_eq!(toml_key("d b"), "\"d b\"");
+        assert_eq!(toml_key("d.b"), "\"d.b\"");
+    }
+
+    #[test]
+    fn line_predicates_recognise_what_they_name() {
+        assert!(is_queries_assignment("queries = []"));
+        assert!(is_queries_assignment("  queries   = []"));
+        assert!(!is_queries_assignment("queries_extra = []"));
+        assert!(!is_queries_assignment("name = 'queries = 1'"));
+
+        assert!(is_blank("  \t\n"));
+        assert!(!is_blank(" \n# x"));
+        assert_eq!(indent_of("  queries = []"), "  ");
+        assert_eq!(indent_of("queries = []"), "");
+    }
+
+    //
+    // Proposal checks.
+    //
+
+    #[test]
+    fn normalise_queries_refuses_what_a_grant_can_never_hold() {
+        assert!(matches!(
+            normalise_queries("r", "db", &[String::from("   ")]),
+            Err(EditError::EmptyQuery { index: 0, .. })
+        ));
+        assert!(matches!(
+            normalise_queries("r", "db", &[String::from("SELECT \"t\".\"a\" = …")]),
+            Err(EditError::RedactedQuery { index: 0, .. })
+        ));
+        assert!(matches!(
+            normalise_queries("r", "db", &[String::from("SELECT \"t\".\"a\" = 'x'")]),
+            Err(EditError::LiteralQuery { index: 0, .. })
+        ));
+        // The two documented setup statements are static SQL, not literals to
+        // bind, so they are accepted.
+        assert_eq!(
+            normalise_queries("r", "db", &[String::from("SET TIME ZONE 'UTC'")]).unwrap(),
+            vec![String::from("SET TIME ZONE 'UTC'")]
+        );
+        assert_eq!(
+            normalise_queries(
+                "r",
+                "db",
+                &[String::from("SELECT set_config('TimeZone', $1, false)")]
+            )
+            .unwrap(),
+            vec![String::from("SELECT set_config('TimeZone', $?, false)")]
+        );
+        // Two bind numbers normalise to the same statement: it is written once.
+        assert_eq!(
+            normalise_queries(
+                "r",
+                "db",
+                &[String::from("SELECT $1"), String::from("SELECT $2")]
+            )
+            .unwrap(),
+            vec![String::from("SELECT $?")]
+        );
+        assert!(normalise_queries("r", "db", &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn route_names_follow_the_documented_pattern() {
+        assert!(valid_route_name("orders"));
+        assert!(valid_route_name("orders-2_x"));
+        assert!(valid_route_name("0"));
+        assert!(!valid_route_name(""));
+        assert!(!valid_route_name("Orders"));
+        assert!(!valid_route_name("_orders"));
+        assert!(!valid_route_name("orders.x"));
+        assert!(!valid_route_name("orders "));
+    }
+
+    #[test]
+    fn route_index_finds_a_declared_route_by_name() {
+        let (manifest, _) = verified();
+        assert_eq!(route_index(&manifest, "products"), Some(0));
+        assert_eq!(route_index(&manifest, "ghost"), None);
+    }
 }

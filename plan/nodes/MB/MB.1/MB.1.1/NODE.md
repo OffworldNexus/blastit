@@ -2,7 +2,7 @@
 id: MB.1.1
 title: "Bound blastit-manifest cursor loops and close edit.rs mutation survivors"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
@@ -10,11 +10,11 @@ paths:
   - "crates/blastit-manifest/src/edit.rs"
   - "crates/blastit-manifest/src/parse.rs"
   - "crates/blastit-manifest/tests/edit_branches.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T14:44"
-updated: "2026-11-13T14:44"
+updated: "2026-11-13T15:36"
 ---
 
 # Goal

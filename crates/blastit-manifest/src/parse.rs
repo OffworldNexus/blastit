@@ -247,11 +247,18 @@ fn syntax_error(error: &toml::de::Error, source: &str) -> ManifestError {
 /// The offset comes from the TOML parser and is rounded down to a character
 /// boundary, so a multi-byte character can never split a slice.
 fn position(source: &str, offset: usize) -> (usize, usize) {
-    let mut offset = offset.min(source.len());
-    while !source.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    let head = &source[..offset];
+    // The last character boundary at or below the offset is the rounded-down
+    // one. Walking the string once makes that a property of the text, so no
+    // loop can fail to step and spin on a hostile offset.
+    let limit = offset.min(source.len());
+    let offset = source
+        .char_indices()
+        .map(|(index, character)| index + character.len_utf8())
+        .take_while(|&end| end <= limit)
+        .last()
+        .unwrap_or(0);
+    debug_assert!(source.is_char_boundary(offset));
+    let head = source.get(..offset).unwrap_or_default();
     let line = head.matches('\n').count() + 1;
     let column = head
         .rfind('\n')
