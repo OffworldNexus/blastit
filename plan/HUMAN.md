@@ -28,3 +28,11 @@ OpenRouter credits exhausted: every strategist/architect/expert request fails wi
 
 **Answer:** Add $100 to the budget — `expensive_cap_usd` raised from 100 to 200 (owner answered 2026-11-13).
 
+## H-004 [open] (node MA)
+
+- asked: 2026-11-13T10:46 by conductor
+
+Release v0.1.1 is ready on branch release/0.1.1 (head 0fe016f). Review and squash-merge the Release PR into develop on GitHub — merging validates CI, Docs, and Live DigitalOcean e2e on develop and automatically publishes v0.1.1 to PyPI and GitHub Releases. This release also carries the backported PR #60/#61 hot-path performance work, so PRs #60 and #61 can be closed unmerged once the Release PR is up.
+
+**Answer:**
+

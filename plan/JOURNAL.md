@@ -469,3 +469,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T10:42 [MB.5] (strategist) created (epic) Tomcat / JVM 12-Factor Backend & Unified Multi-Backend Gate (0.2.3)
 - 2026-11-13T10:44 [MA] (strategist) status ready -> done
 - 2026-11-13T10:44 [MA] (strategist) strategist gate PASSED at 70a4357 on release/0.1.1: make check exit 0, make e2e exit 0 (8x PASS), real cargo-mutants run (blastit-manifest 437/630=69.4% whole-c
+- 2026-11-13T10:46 HUMAN H-004 opened by conductor (node MA)
+- 2026-11-13T10:46 AUTOPILOT off by conductor awaiting human merge of release PR v0.1.1
