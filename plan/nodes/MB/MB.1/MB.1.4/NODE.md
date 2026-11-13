@@ -42,17 +42,16 @@ $ mkdir -p /tmp/opencode/blastit-mutants
 $ TMPDIR=/tmp/opencode/blastit-mutants CARGO_NET_OFFLINE=true \
     cargo mutants -p blastit-sqlpolicy -f '**/src/{normalize,literals,lru}.rs' -j 2 --timeout 90 \
     -o /tmp/opencode/mb1-sql-normalize
-$ grep -c ':' /tmp/opencode/mb1-sql-normalize/mutants.out/outcomes.txt   # 128 mutants listed
+$ for f in caught missed timeout unviable; do printf '%-9s %s\n' "$f" "$(wc -l < /tmp/opencode/mb1-sql-normalize/mutants.out/$f.txt)"; done
+# caught/(caught+missed+timeout) is the killed ratio; the four counts must add to 128 and be pasted in RESULT.md
 $ test ! -s /tmp/opencode/mb1-sql-normalize/mutants.out/timeout.txt && echo "0 timeouts"
 
 # 3. Per-module killed ratio, each >= 75.0 %.
-$ for f in normalize literals lru; do
-    awk -v f="$f" '$1 ~ ("/" f "\\.rs:") {n[$NF]++} END {v=n["caught"]+n["missed"]+n["timeout"]; printf "%s: %d/%d = %.1f%%\n", f, n["caught"], v, 100*n["caught"]/v}' \
-      /tmp/opencode/mb1-sql-normalize/mutants.out/outcomes.txt
-  done
+$ for f in caught missed timeout; do echo "== $f"; cut -d: -f1 /tmp/opencode/mb1-sql-normalize/mutants.out/$f.txt | sort | uniq -c; done
+# paste the per-module counts; each module's caught/(caught+missed+timeout) must be >= 75.0 %
 
 # 4. Any survivor is either tested or documented as unreachable with a reason.
-$ awk '$NF=="missed"' /tmp/opencode/mb1-sql-normalize/mutants.out/outcomes.txt
+$ grep -c . /tmp/opencode/mb1-sql-normalize/mutants.out/missed.txt >/dev/null && cat /tmp/opencode/mb1-sql-normalize/mutants.out/missed.txt
 
 # 5. Green gate.
 $ CARGO_NET_OFFLINE=true UV_OFFLINE=1 make check

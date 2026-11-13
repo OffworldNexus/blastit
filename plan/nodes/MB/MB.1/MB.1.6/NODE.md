@@ -2,7 +2,7 @@
 id: MB.1.6
 title: "Name missing ./blastit.toml first, add group-grant hint, allocate nothing for policy-less bodies"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: []
@@ -14,11 +14,11 @@ paths:
   - crates/blastit/tests/audit_group_hint.rs
   - "crates/blastit-scheduler/tests/head_allocs.rs"
   - docs/troubleshooting.md
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-13T14:44"
-updated: "2026-11-13T14:44"
+updated: "2026-11-13T15:33"
 ---
 
 # Goal
@@ -27,7 +27,7 @@ Fix the three cheap-but-real DX defects from the `MA` gate: name the missing `./
 
 # Context
 
-- **(a) Missing manifest** (`crates/blastit/src/stage0.rs:444` production, `:666` `dev`): `config.app.is_none()` is checked before `std::fs::read_to_string(&config.manifest)`, so an empty directory reports `BLASTIT_APP: the WSGI callable ... is required` instead of the missing `./blastit.toml` (`MA/RESULT.md` §3, item 1). Check manifest existence/readability first, then `app`. Exit code/stderr-only contract unchanged (startup errors leave stdout empty).
+- **(a) Missing manifest** (`crates/blastit/src/stage0.rs:444` production, `:666` `dev`): `config.app.is_none()` is checked before `std::fs::read_to_string(&config.manifest)`, so an empty directory reports `BLASTIT_APP: the WSGI callable ... is required` instead of the missing `./blastit.toml` (`MA/RESULT.md` §3, item 1). Check manifest existence/readability first, then `app`. Exit codes and the `dev` stream contract are unchanged (`blastit dev` reports startup errors on **stderr**); production surfaces stage-0 messages as `app.output` events on **stdout** (`stage0.rs:424`), and an unprivileged production boot is refused by the capability gate (`stage0.rs:360`) **before** config is read (`:416`) — so the ordering is observable in `blastit dev` on any host and in the rooted production path.
 - **(b) Group-grant hint** (`crates/blastit/src/audit_v1.rs`, the `MissingGrant` `fix` construction around line 634): for connection-setup SQL, per-route `add_query` is the wrong advice — the statement fires on whichever route opens the connection first (Django's `SELECT set_config('TimeZone', $?, false)`, `MA.8`, `LESSONS.md` last bullet). Use `blastit_sqlpolicy::is_introspection_setup_sql` (already a dependency) to classify; emit a new `add_group` action pointing at `[group.connection.db].queries`. **Every other statement keeps `add_query`** — the Python contract asserts `{"action": "add_query", "to": "[route.db].queries"}` for `SELECT 1` (`python/tests/critical/test_check_contract.py:989`, `python/tests/test_check.py:224`).
 - **(c) Hot path** (`crates/blastit-scheduler/src/scheduler.rs::plan_request_body`, line ~1224): `method = String::from_utf8_lossy(...)` and the two header `String`s are built before `policy` is consulted. Return `Ok(BodyPlan::AllowEmptyOnly)` as soon as `policy.is_none()`.
 - Protected files: `crates/blastit/tests/critical_config_and_presets.rs` is listed in `paths` **only** to add one new test (never weaken/delete an existing one). `crates/blastit/tests/critical_check_engine.rs` is **not** in `paths` and must stay green untouched. `docs/troubleshooting.md` is the only doc file this node may edit.
@@ -40,7 +40,11 @@ $ CARGO_NET_OFFLINE=true cargo build --locked -p blastit
 $ tmp=$(mktemp -d) && ( cd "$tmp" && env -u BLASTIT_APP -u BLASTIT_MANIFEST "$OLDPWD/target/debug/blastit" dev ) >out.txt 2>err.txt
 $ grep -q 'blastit.toml' err.txt && ! grep -q 'BLASTIT_APP' err.txt && test ! -s out.txt && echo "dev names the manifest"
 $ tmp=$(mktemp -d) && ( cd "$tmp" && env -u BLASTIT_APP -u BLASTIT_MANIFEST "$OLDPWD/target/debug/blastit" ) >out.txt 2>err.txt
-$ grep -q 'blastit.toml' err.txt && ! grep -q 'BLASTIT_APP' err.txt && echo "production names the manifest"
+# unprivileged production is refused by the capability gate before config is read: that refusal must be
+# the only output, and it must NOT be a BLASTIT_APP message.
+$ grep -q 'cap_' out.txt && ! grep -q 'BLASTIT_APP' out.txt && echo "unprivileged refuses at the capability gate"
+# rooted production reads config: the manifest is named before BLASTIT_APP, as an app.output event on stdout.
+$ if sudo -n true 2>/dev/null; then tmp=$(mktemp -d); ( cd "$tmp" && sudo -n env -u BLASTIT_APP -u BLASTIT_MANIFEST "$OLDPWD/target/debug/blastit" ) >out.txt 2>err.txt; grep -q 'blastit.toml' out.txt && ! grep -q 'BLASTIT_APP' out.txt && echo "root names the manifest"; else echo "SKIP root leg: no passwordless sudo (CI smoke (root) covers it)"; fi
 
 # 2. Pinned in the protected suite (added test only; the existing 11 stay).
 $ CARGO_NET_OFFLINE=true cargo test -p blastit --test critical_config_and_presets --locked

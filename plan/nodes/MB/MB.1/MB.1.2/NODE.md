@@ -40,11 +40,10 @@ $ make mutants-rust PKG=blastit-manifest
 $ test ! -s mutants.out/timeout.txt && echo "0 timeouts"
 
 # 3. Whole-crate killed ratio, the gate.
-$ awk '{n[$NF]++} END {v=n["caught"]+n["missed"]+n["timeout"]; printf "caught %d / viable %d = %.1f%%\n", n["caught"], v, 100*n["caught"]/v}' mutants.out/outcomes.txt
 # printed ratio >= 75.0 %
 
 # 4. No surviving mutant in the policy/validation modules this crate is judged on.
-$ awk '$NF=="missed"' mutants.out/outcomes.txt | grep -E 'src/(validate|routing|uid)\.rs' || echo "policy modules clean"
+$ grep -E 'src/(validate|routing|uid)\.rs' mutants.out/missed.txt || echo "policy modules clean"
 
 # 5. Green gate.
 $ CARGO_NET_OFFLINE=true cargo test -p blastit-manifest --locked

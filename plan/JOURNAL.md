@@ -545,3 +545,24 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T14:54 [MB.1.7] (lead) attempt 1/3 started
 - 2026-11-13T14:54 [MB.1.7] (lead) base d3ac8b3
 - 2026-11-13T15:08 [MB.1.7] (lead) status active -> done
+- 2026-11-13T15:08 [MB.1.1] (lead) status ready -> active
+- 2026-11-13T15:08 [MB.1.1] (lead) attempt 1/3 started
+- 2026-11-13T15:08 [MB.1.1] (lead) base 9152197
+- 2026-11-13T15:08 [MB.1.6] (lead) status ready -> active
+- 2026-11-13T15:08 [MB.1.6] (lead) attempt 1/3 started
+- 2026-11-13T15:08 [MB.1.6] (lead) base 9152197
+- 2026-11-13T15:11 [MB.2.1] (planner) created (task) Write the lean static assets & SPA rewriting page (Local/CI/Deploy) and register it
+- 2026-11-13T15:11 [MB.2.2] (planner) created (task) Design static serving, rewrite precedence and path safety (ADR-0007)
+- 2026-11-13T15:11 [MB.2.3] (planner) created (task) Resolve and serve assets safely beneath the root (openat2, NUL, symlink, dotfiles, immutable)
+- 2026-11-13T15:11 [MB.2.3] (planner) created (task) Parse and validate [static] route blocks in blastit-manifest
+- 2026-11-13T15:11 [MB.2.4] (planner) created (task) Resolve and serve assets safely beneath the root (openat2, NUL, symlink, dotfiles, immutable)
+- 2026-11-13T15:11 [MB.2.5] (planner) created (task) Wire static serving and SPA/front-controller precedence into scheduler dispatch
+- 2026-11-13T15:11 [MB.2.6] (planner) created (task) Wire static routes into blastit dev and blastit check diagnostics
+- 2026-11-13T15:11 [MB.2.7] (planner) created (task) Prove denials, caching and documented commands end-to-end (Docker e2e + visual)
+- 2026-11-13T15:11 [MB.2.8] (planner) created (task) Release prep 0.2.0: version bump, dated changelog, ARCHITECTURE sync
+- 2026-11-13T15:20 [MB.1.10] (lead) created (task) Document the add_group fix action and record the MB.1.6 gotchas
+- 2026-11-13T15:28 [MB.1.6] (lead) REVIEW FAIL: acceptance greps err.txt but production stage-0 errors are app.output events on stdout (stage0.rs:424) and an unprivileged boot hits caps::detect (
+- 2026-11-13T15:28 [MB.1.6] (lead) status active -> ready
+- 2026-11-13T15:28 [MB.1.6] (lead) status ready -> active
+- 2026-11-13T15:28 [MB.1.6] (lead) attempt 2/3 started
+- 2026-11-13T15:33 [MB.1.6] (lead) status active -> done

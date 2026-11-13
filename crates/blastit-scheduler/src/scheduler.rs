@@ -1229,7 +1229,13 @@ impl Scheduler {
         let Resolution::Routed { route, .. } = resolution else {
             return Ok(BodyPlan::AllowEmptyOnly);
         };
-        let policy = self.routes.get(*route).and_then(|route| route.ingress);
+        // A route with no `[route.ingress]` may only ever hold an empty body,
+        // and `plan_body` says so from the policy alone: nothing in the head is
+        // read, so the method and the two header `String`s below are not built
+        // for the routes that do not declare ingress at all.
+        let Some(policy) = self.routes.get(*route).and_then(|route| route.ingress) else {
+            return Ok(BodyPlan::AllowEmptyOnly);
+        };
         let method = String::from_utf8_lossy(head.method()).into_owned();
         let content_type = head_header_text(head, b"content-type");
         let content_encoding = head_header_text(head, b"content-encoding");
@@ -1246,7 +1252,7 @@ impl Scheduler {
             });
         plan_body(
             &method,
-            policy,
+            Some(policy),
             content_type.as_deref(),
             content_encoding.as_deref(),
             content_length,

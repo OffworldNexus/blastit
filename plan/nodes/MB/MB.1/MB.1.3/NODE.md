@@ -42,16 +42,15 @@ $ mkdir -p /tmp/opencode/blastit-mutants
 $ TMPDIR=/tmp/opencode/blastit-mutants CARGO_NET_OFFLINE=true \
     cargo mutants -p blastit-sqlpolicy -f '**/src/lexer.rs' -j 2 --timeout 90 -o /tmp/opencode/mb1-sql-lexer
 $ test ! -s /tmp/opencode/mb1-sql-lexer/mutants.out/timeout.txt && echo "0 timeouts"
-$ awk '{n[$NF]++} END {v=n["caught"]+n["missed"]+n["timeout"]; printf "caught %d / viable %d = %.1f%%\n", n["caught"], v, 100*n["caught"]/v}' \
-    /tmp/opencode/mb1-sql-lexer/mutants.out/outcomes.txt    # >= 75.0 %
-$ grep -c ':' /tmp/opencode/mb1-sql-lexer/mutants.out/outcomes.txt      # 298 mutants listed
+$ for f in caught missed timeout unviable; do printf '%-9s %s\n' "$f" "$(wc -l < /tmp/opencode/mb1-sql-lexer/mutants.out/$f.txt)"; done
+# caught/(caught+missed+timeout) is the killed ratio; the four counts must add to 298 and be pasted in RESULT.md
 
 # 3. The learn.rs:661 spinner is gone (11 mutants around the loop, seconds not minutes).
 $ CARGO_NET_OFFLINE=true cargo mutants -p blastit-sqlpolicy -F 'learn\.rs:6[56][0-9]' --list | wc -l   # 11
 $ TMPDIR=/tmp/opencode/blastit-mutants CARGO_NET_OFFLINE=true \
     cargo mutants -p blastit-sqlpolicy -F 'learn\.rs:6[56][0-9]' -j 2 --timeout 90 -o /tmp/opencode/mb1-sql-learn
 $ test ! -s /tmp/opencode/mb1-sql-learn/mutants.out/timeout.txt && echo "0 timeouts"
-$ awk '$NF=="missed"' /tmp/opencode/mb1-sql-learn/mutants.out/outcomes.txt || echo "all caught"
+$ grep -c . /tmp/opencode/mb1-sql-learn/mutants.out/missed.txt >/dev/null && cat /tmp/opencode/mb1-sql-learn/mutants.out/missed.txt || echo "all caught"
 
 # 4. Green gate.
 $ CARGO_NET_OFFLINE=true UV_OFFLINE=1 make check

@@ -441,17 +441,20 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
         );
     }
 
+    // The file is named before the setting: in a directory with no
+    // `./blastit.toml` that file is what is missing, and `BLASTIT_APP` would
+    // send the operator looking for an environment variable instead of a
+    // project (`docs/troubleshooting.md`).
+    let source = match std::fs::read_to_string(&config.manifest) {
+        Ok(source) => source,
+        Err(err) => fail(&emitter, &format!("{}: {err}", config.manifest.display())),
+    };
     if config.app.is_none() {
         fail(
             &emitter,
             "BLASTIT_APP: the WSGI callable (`module:attribute`) is required",
         );
     }
-
-    let source = match std::fs::read_to_string(&config.manifest) {
-        Ok(source) => source,
-        Err(err) => fail(&emitter, &format!("{}: {err}", config.manifest.display())),
-    };
     let (manifest, warnings) = match Manifest::parse_and_validate(&source, config.uid_base) {
         Ok(parsed) => parsed,
         Err(errors) => fail(&emitter, &errors.to_string()),
@@ -663,13 +666,15 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
         dev_fail(&message);
     }
 
-    if config.app.is_none() {
-        dev_fail("BLASTIT_APP: the WSGI callable (`module:attribute`) is required");
-    }
+    // The same order as `run`: the missing file first, the missing `app`
+    // second (`docs/troubleshooting.md`).
     let source = match std::fs::read_to_string(&config.manifest) {
         Ok(source) => source,
         Err(err) => dev_fail(&format!("{}: {err}", config.manifest.display())),
     };
+    if config.app.is_none() {
+        dev_fail("BLASTIT_APP: the WSGI callable (`module:attribute`) is required");
+    }
     let (manifest, warnings) = match Manifest::parse_and_validate(&source, config.uid_base) {
         Ok(parsed) => parsed,
         Err(errors) => dev_fail(&format!("{errors}")),
