@@ -31,6 +31,15 @@ blastit's stdout afterwards; `sqlalchemy_check.py` does both for the second app
 (its port is `E2E_SQLALCHEMY_PORT`, `18081` by default). All three are
 stdlib-only.
 
+The static-assets page (`docs/frameworks/static-and-spa.md`) has a leg of its
+own, `static_assets.py`: a `[route.static]` fixture (`static_site/`) served by
+`blastit dev` in the same image, plus a second service whose route omits `spa`.
+The driver runs inside the `static` container, so the page's
+`127.0.0.1:8080` commands are verbatim; it replays every `$ ` command in the
+page's console fences and asserts the documented statuses and headers, the
+traversal/NUL/dotfile/symlink refusals, `HEAD`, `POST` and the SPA fallback.
+`E2E_STATIC_PORT` is that container's port (`8080` by default).
+
 Two Dockerfiles, the same apps either way:
 
 * `Dockerfile` builds the wheel in the image (`scripts/build-wheel.sh`) and

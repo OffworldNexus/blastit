@@ -2,16 +2,16 @@
 id: MB.2.7
 title: "Prove denials, caching and documented commands end-to-end (Docker e2e + visual)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 4
 depends_on: [MB.1, MB.2.6]
 paths: ["e2e/**", "docs/testing/VISUAL-MB.2.md"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T15:11"
+updated: "2026-11-14T00:25"
 ---
 
 # Goal

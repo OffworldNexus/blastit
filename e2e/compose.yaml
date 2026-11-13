@@ -69,3 +69,45 @@ services:
     working_dir: /sqlalchemy
     ports: ["127.0.0.1:${E2E_SQLALCHEMY_PORT:-18081}:8080"]
     depends_on: { migrate: { condition: service_completed_successfully } }
+
+  # The static-and-spa page's own manifest (MB.2.7), served by a real
+  # `blastit dev` on the loopback default the page documents. The driver runs in
+  # this container (`e2e/static_assets.py`) so `127.0.0.1:8080` is verbatim; the
+  # fixture is copied to /site by run-dev.sh so the page's decoys (`public/.env`,
+  # `public/.git/config`, a symlink to /etc/passwd) exist without being committed.
+  static:
+    image: ${E2E_IMAGE:-blastit-e2e}
+    environment:
+      BLASTIT_MANIFEST: /site/blastit.toml
+      PORT: ${E2E_STATIC_PORT:-8080}
+    working_dir: /site
+    command: ["sh", "/opt/e2e/run-dev.sh", "/fixture", "/site", "decoys"]
+    volumes:
+      - ./static_site:/fixture:ro
+      - ./static_site/run-dev.sh:/opt/e2e/run-dev.sh:ro
+      - ./static_assets.py:/opt/e2e/static_assets.py:ro
+      - ../docs/frameworks/static-and-spa.md:/opt/e2e/static-and-spa.md:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8080') + '/', timeout=2).read()"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+
+  # The same route without `spa`: a deep URL that is no file is a 404. The
+  # driver reaches it by service name, so this one binds 0.0.0.0 and `blastit
+  # dev` marks itself EXPOSED (the banner is not checked here).
+  static_nospa:
+    image: ${E2E_IMAGE:-blastit-e2e}
+    environment:
+      BLASTIT_MANIFEST: /site/blastit.toml
+      BLASTIT_DEV_EXPOSE: "1"
+    working_dir: /site
+    command: ["sh", "/opt/e2e/run-dev.sh", "/fixture", "/site", "plain", "--host", "0.0.0.0"]
+    volumes:
+      - ./static_site/nospa:/fixture:ro
+      - ./static_site/run-dev.sh:/opt/e2e/run-dev.sh:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=2).read()"]
+      interval: 1s
+      timeout: 5s
+      retries: 60

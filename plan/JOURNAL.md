@@ -840,3 +840,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T00:02 [MB.2.4.3] (lead) status review -> done
 - 2026-11-14T00:03 [MB.2.9] (lead) REVIEW PASS attempt 3 (attempts 1-2 failed on the security.md scheduler row: first it denied the scheduler's read scope, then over-corrected into claiming a fil
 - 2026-11-14T00:03 [MB.2.9] (lead) status review -> done
+- 2026-11-14T00:03 [MB.2.4.5] (lead) status ready -> active
+- 2026-11-14T00:03 [MB.2.4.5] (lead) attempt 1/3 started
+- 2026-11-14T00:03 [MB.2.4.5] (lead) base 69504ed
+- 2026-11-14T00:03 [MB.2.7] (lead) status ready -> active
+- 2026-11-14T00:03 [MB.2.7] (lead) attempt 1/3 started
+- 2026-11-14T00:03 [MB.2.7] (lead) base 69504ed
+- 2026-11-14T00:17 [MB.2.7] (implementer) e2e/static_assets.py replays every console fence against containerised blastit dev (72 checks); visual record docs/testing/VISUAL-MB.2.md
+- 2026-11-14T00:19 [MB.2.7] (lead) status active -> review
+- 2026-11-14T00:21 [MB.2.4.5] (implementer) closed G7/G8/G9 + zero-size read: 7 new flow oracles (32/32 green); 2 scheduler.rs fixes proven by hand-mutations (buffered-forward bound now counts itself like
+- 2026-11-14T00:23 [MB.2.4.4] (lead) status active -> review
+- 2026-11-14T00:23 [MB.2.4.5] (lead) status active -> review
+- 2026-11-14T00:25 [MB.2.7] (lead) REVIEW PASS attempt 1 (5 MINOR: HEAD-body assertion cannot fail; curl fences discard authority; 'no file bytes' is marker-only; VISUAL viewport mismatch + scree
+- 2026-11-14T00:25 [MB.2.7] (lead) status review -> done
