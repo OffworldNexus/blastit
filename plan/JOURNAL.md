@@ -857,3 +857,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T00:28 [MB.2.4.4] (lead) status review -> done
 - 2026-11-14T00:28 [MB.2.4.5] (lead) REVIEW PASS attempt 1 (4 MINOR: the new want==0 branch has no in-suite test that reaches it; a constant restated as a doc pin; LESSONS.md is technically outside
 - 2026-11-14T00:28 [MB.2.4.5] (lead) status review -> done
+- 2026-11-14T00:28 [MB.2.8] (lead) status ready -> active
+- 2026-11-14T00:28 [MB.2.8] (lead) attempt 1/3 started
+- 2026-11-14T00:28 [MB.2.8] (lead) base 7f1d4d0
+- 2026-11-14T00:32 [MB.2.4] (lead) status ready -> done
+- 2026-11-14T00:32 [MB.2.5] (lead) status ready -> done

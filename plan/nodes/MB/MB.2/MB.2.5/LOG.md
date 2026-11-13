@@ -15,3 +15,7 @@ Split into MB.2.5.1 (rewrite.rs Rewrite/decide + RouteInfo::with_static + the pu
 ## 2026-11-13T21:19 [lead]
 
 edited fields
+
+## 2026-11-14T00:32 [lead]
+
+status ready -> done

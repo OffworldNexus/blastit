@@ -2,7 +2,7 @@
 id: MB.2.5
 title: "Wire static serving and SPA/front-controller precedence into scheduler dispatch (split: MB.2.5.1 precedence, MB.2.5.2 dispatch)"
 kind: epic
-status: ready
+status: done
 priority: 3
 depends_on: [MB.1, MB.2.3]
 paths:
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T21:19"
+updated: "2026-11-14T00:32"
 ---
 
 # Goal
