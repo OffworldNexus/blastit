@@ -32,7 +32,9 @@ OpenRouter credits exhausted: every strategist/architect/expert request fails wi
 
 - asked: 2026-11-13T10:46 by conductor
 
-Release v0.1.1 is ready on branch release/0.1.1 (head 0fe016f). Review and squash-merge the Release PR into develop on GitHub — merging validates CI, Docs, and Live DigitalOcean e2e on develop and automatically publishes v0.1.1 to PyPI and GitHub Releases. This release also carries the backported PR #60/#61 hot-path performance work, so PRs #60 and #61 can be closed unmerged once the Release PR is up.
+Release v0.1.1 is ready: PR https://github.com/OffworldNexus/blastit/pull/62 (branch release/0.1.1, head 42bc8ac). Review and squash-merge it into develop on GitHub — merging validates CI, Docs, and Live DigitalOcean e2e on develop and automatically publishes v0.1.1 to PyPI and GitHub Releases.
+
+Done already, no action needed from you: the hot-path performance work from PR #61 was backported into this branch (commit 341698a, conflict resolutions in blastit-http/conn.rs and blastit-scheduler/scheduler.rs, perf suites riding along), and both #60 and #61 are closed with comments pointing here. #60's benchmark/ harness was intentionally left out of 0.1.1 as dev tooling, not release behaviour; its branch is untouched.
 
 **Answer:**
 
