@@ -95,8 +95,8 @@ export class Autopilot {
       `AUTOPILOT nudge (idle-without-progress ${t.idleWithoutProgress}/${MAX_IDLE_WITHOUT_PROGRESS}` +
         (t.failures ? `, after ${t.failures} failed execution(s)` : "") +
         ").",
-      "plan/AUTOPILOT is on, so do not stop. Reload skills dx-first, plan-system and dispatch if they are not in context,",
-      "then resume the conductor loop at Boot step 4 (`uv run --no-project tools/plan.py state`).",
+      "plan/AUTOPILOT is on, so do not stop. Reload skills dx-first, plan-system, dispatch and git-workflow if they are not in context,",
+      "then resume the conductor loop at Boot step 2 (release branch hygiene, then `uv run --no-project tools/plan.py validate` and `state`).",
       'If every actionable item is truly blocked on the human, run `uv run --no-project tools/plan.py --agent conductor autopilot off --reason "blocked on human"` and ask once.',
     ].join("\n");
     const timer = setTimeout(() => {

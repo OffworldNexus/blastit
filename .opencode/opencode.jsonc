@@ -44,9 +44,13 @@
     // Autonomy: subagents never ask the human directly; only the conductor may (overridden in conductor.md).
     { "action": "question", "resource": "*", "effect": "deny" },
 
-    // Git safety: local commits on develop only. Pushing to origin triggers live GitHub Pages + paid DO e2e,
-    // and tags publish to PyPI, so pushing and tagging are reserved for the human owner via HUMAN.md.
+    // Git safety: agents work on `release/<version>` branches (never pushing to `develop`).
+    // Subagents cannot push, tag, or manage PRs at all; `conductor.md` overrides ONLY
+    // `git push [-u|--set-upstream] origin release/*` and `gh pr create/view/list/checks/status/edit`.
+    // Merging the release PR into `develop` (`gh pr merge *`) is strictly reserved for a human,
+    // which validates on `develop` and triggers the automated PyPI + GitHub release pipeline.
     { "action": "shell", "resource": "git push *", "effect": "deny" },
+    { "action": "shell", "resource": "git push", "effect": "deny" },
     { "action": "shell", "resource": "git tag *", "effect": "deny" },
     { "action": "shell", "resource": "git reset --hard *", "effect": "deny" },
     { "action": "shell", "resource": "git rebase *", "effect": "deny" },

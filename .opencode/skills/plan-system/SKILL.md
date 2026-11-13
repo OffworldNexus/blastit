@@ -92,7 +92,7 @@ escalation: none
 - **Milestone gate (`strategist`, expensive tier):**
   1. Verify every `plan/ROADMAP.md` exit criterion with evidence (`make check`, `make e2e`, CVE proof suite, runnable docs check).
   2. Run a milestone `test-curator` audit (including `cargo-mutants` on critical security/policy crates).
-  3. Write `plan/nodes/<M>/RESULT.md`, update `CHANGELOG.md` / `ARCHITECTURE.md` if needed, refresh the next milestone's `NODE.md` body with concrete pointers, mark `<M>` `done`, and open a `HUMAN.md` release-ready notice so the owner can push `develop` and tag the release (`v0.1.1`, `v0.2.x`, etc.).
+  3. Write `plan/nodes/<M>/RESULT.md`, verify `Cargo.toml` version and dated `CHANGELOG.md` entry (`## <version> (YYYY-MM-DD)`), refresh the next milestone's `NODE.md` body with concrete pointers, mark `<M>` `done`, and return `RELEASE_READY: <version>` so `conductor` pushes `release/<version>` and opens the Release PR into `develop` for human merge.
 
 ## Command cheat sheet
 

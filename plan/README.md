@@ -6,7 +6,7 @@ Full specification: skill `plan-system`.
 plan/
   ROADMAP.md      milestones (MA..MD), versions, exit criteria and standing policies (strategist only)
   STATE.md        generated dashboard: `uv run --no-project tools/plan.py state`
-  HUMAN.md        inbox of requests for the owner (decisions, credentials, release tag sign-offs)
+  HUMAN.md        inbox of requests for the owner (decisions, credentials, release PR merge checkpoints)
   ESCALATIONS.md  every call to the expensive tier (strategist, architect, expert), with reason
   JOURNAL.md      append-only one-line event log (written by tools/plan.py)
   BUDGET.json     owner-edited hard cap on cumulative expensive-tier spend

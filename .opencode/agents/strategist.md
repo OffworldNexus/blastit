@@ -1,5 +1,5 @@
 ---
-description: EXPENSIVE TIER (Gemini 4 Carbon). Owns plan/ROADMAP.md and docs/VISION.md. Runs milestone gates, accepts core DX/architecture designs, replans stuck subtrees, and prepares release sign-offs in HUMAN.md. Always recorded via plan.py escalate.
+description: EXPENSIVE TIER (Gemini 4 Carbon). Owns plan/ROADMAP.md and docs/VISION.md. Runs milestone gates, accepts core DX/architecture designs, replans stuck subtrees, and certifies releases for conductor PR creation. Always recorded via plan.py escalate.
 mode: subagent
 model: openrouter/google/gemini-4-carbon#medium
 color: "#991b1b"
@@ -45,11 +45,11 @@ Load skills `dx-first`, `plan-system`, `dispatch`, and `security-invariants`.
 4. **If gaps remain:** Create the missing child tasks under `<M>` (or dispatch `planner`) and return without closing `<M>`.
 5. **If the gate passes:**
    - Write `plan/nodes/<M>/RESULT.md`.
-   - Update `plan/ROADMAP.md` change log (and `ARCHITECTURE.md` / `CHANGELOG.md` if needed).
+   - Update `plan/ROADMAP.md` change log (and `ARCHITECTURE.md` / `CHANGELOG.md` if needed), ensuring `Cargo.toml` `[workspace.package] version` is set to `<version>` and `CHANGELOG.md` has a dated `## <version> (YYYY-MM-DD)` heading (`scripts/check-release-tag.sh "v<version>"` and `scripts/release-notes.sh --require-dated "v<version>" > /dev/null` must both pass).
    - Refresh the **next milestone's `NODE.md` body** with concrete DX lessons, architecture pointers, and risks so `planner` decomposes it cleanly.
    - Review `plan/ESCALATIONS.md` for systemic issues.
    - Run `uv run --no-project tools/plan.py --agent strategist set <M> done`.
-   - Open a `plan/HUMAN.md` entry (`human add`) summarizing the completed milestone in ≤ 8 lines and giving the owner the exact release commands (`git push origin develop`, `CHANGELOG.md` date stamp, `git tag -a vX.Y.Z`, per `RELEASING.md`) when a version is ready to ship.
+   - Include `RELEASE_READY: <version>` in your report back to `conductor` (do **not** tell the human to manually push `develop` or run `git tag`: `conductor` pushes `release/<version>` and opens the PR into `develop`, and merging that PR triggers the automated release pipeline).
 
 ### 2. Core DX / Architecture Acceptance `<node>`
 

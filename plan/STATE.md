@@ -5,7 +5,7 @@
 - current milestone: MA Lean DX & Show-the-World Polish (0.1.1) [ready]
 - tasks: done=44, superseded=1
 - open human requests: 0 (answered, awaiting pickup: 0)
-- escalations to expensive model so far: 7; expensive spent: $51.38 of $200.00 cap (26%)
+- escalations to expensive model so far: 7; expensive spent: $51.96 of $200.00 cap (26%)
 
 ## Milestones
 
@@ -24,7 +24,6 @@
 
 ## Recent journal
 
-- 2026-11-13T03:12 [MA] (conductor) conductor: MA gate escalated (#7) to strategist but the expensive tier is unusable — OpenRouter credit ceiling (~79k affordable vs 256k max_tokens). Gate blocke
 - 2026-11-13T03:16 [MA] (lead) gate packet assembled at e0bc1b3 by lead (cheap tier): make check exit 0 and make e2e exit 0 re-run here, roadmap criteria mapped, AUDIT-MA.2.3 F1-F8 and AUDIT-
 - 2026-11-13T03:16 [MA] (lead) gate packet committed as 1d5aab3 (evidence at e0bc1b3 + docs/troubleshooting.md rows); MA remains ready, awaiting the strategist gate.
 - 2026-11-13T03:17 AUTOPILOT off by conductor blocked on human: MA milestone gate needs strategist but OpenRouter credits exhausted (H-003); cargo-mutants absent (H-002)
@@ -39,3 +38,4 @@
 - 2026-11-13T09:57 [MA.6] (implementer) Acceptance verified: 4 perf suites, make check 0 (200 Rust + 50 Python critical, rebuilt wheel docs-test), make e2e 0 with 8x PASS, critical-guard 7dfa863 clean
 - 2026-11-13T10:02 [MA.6] (lead) edited fields
 - 2026-11-13T10:04 [MA.6] (lead) status active -> done
+- 2026-11-13T10:04 [MA.6] (lead) commit 341698a (merge of origin/perf-hot-path into release/0.1.1); reviewer PASS attempt 1

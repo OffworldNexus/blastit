@@ -9,7 +9,7 @@ description: How Blastit agents spawn subagents. Covers the routing table, stand
 
 | Agent | Tier / Model | Responsibility | Can spawn |
 |---|---|---|---|
-| `conductor` | cheap (flash) | Top-level loop across milestones (`MA`..`MD`). Never edits code/docs. | `lead`, `planner`, `strategist`, `architect`, `expert`, `researcher`, `test-curator`, `reviewer` |
+| `conductor` | cheap (flash) | Top-level loop across milestones (`MA`..`MD`) on `release/<version>` branches; opens Release PRs into `develop` when ready. Never edits code/docs. | `lead`, `planner`, `strategist`, `architect`, `expert`, `researcher`, `test-curator`, `reviewer` |
 | `lead` | cheap (flash) | Orchestrates one subtree (`ROOT=<id>`). Runs `execute -> review -> commit` and epic gates. | `lead` (sub-epics), `planner`, `doc-writer`, `designer`, `implementer`, `researcher`, `reviewer`, `critic`, `test-curator`, `visual-checker`, `architect`, `expert`, `strategist` |
 | `planner` | cheap (flash) | Decomposes containers into DX-first child nodes (`tools/plan.py`). | `researcher`, `explore` |
 | `doc-writer` | cheap (flash) | Writes lean user-facing DX docs (`docs/**`, `README.md`, `CHANGELOG.md`) before & after code; runs DX critics. | `critic`, `researcher`, `explore` |
@@ -50,6 +50,7 @@ SUMMARY: <2-4 lines>
 EVIDENCE: <one line per # Acceptance item: PASS/FAIL + command>
 FILES: <changed paths, comma-separated>
 FOLLOWUPS: <bullets or "none">
+RELEASE_READY: <optional: version e.g. 0.1.1 when a milestone or sub-release gate passed>
 BLOCKER: <only if blocked/failed: exact cause and what unblocks it>
 SPLIT: <only if needs_split: proposed child tasks, one line each>
 ```

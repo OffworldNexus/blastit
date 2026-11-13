@@ -1,34 +1,39 @@
 name: Publish
 
-# E4: the release path. Pushing a `v*` tag publishes the manylinux wheels and the
-# sdist to PyPI through trusted publishing — OIDC, so there is no API token to
-# leak or rotate — from a GitHub environment named `pypi`. Nothing is built
-# before the tag has been checked against `Cargo.toml`, and nothing is uploaded
-# before the description has been rendered the way PyPI renders it
-# (`scripts/check-long-description.py`, in `verify`).
+# E4: the PR-driven release path.
 #
-# A tag can't be rehearsed, so the same builds also run on two other events, and
-# neither can publish a release:
+# A release starts as a `release/<version>` pull request into `develop` (opened by
+# the autonomous conductor once a milestone or sub-release gate passes). On the PR,
+# this workflow rehearses the entire release: `guard` checks that the branch name,
+# `Cargo.toml` version, and dated `CHANGELOG.md` entry agree and that `v<version>`
+# does not exist yet, then `wheels`, `sdist`, and `verify` (`check-long-description.py`)
+# prove every distribution builds, installs, and renders cleanly on PyPI.
 #
-#   * `workflow_dispatch` builds everything and stops before the upload. Uncheck
-#     `dry-run` to send the very same files to TestPyPI, from the `testpypi`
-#     environment — the dress rehearsal, with an index that takes throwaway
-#     versions. `pypi` and `release` check `github.event_name` as well as
-#     `github.ref_type`, so a dispatch on a tag cannot reach them;
-#   * a pull request that touches the packaging itself (this file, the action,
-#     pyproject.toml, scripts/, README.md — it is the long description) runs the
-#     builds, so a broken sdist or a wheel without dbproxy is found before the
-#     tag instead of during it.
+# When a human reviews and merges that PR into `develop`:
+#   1. `guard` sees that `[workspace.package] version` in `Cargo.toml` has no
+#      `v<version>` tag yet and activates the release path (an ordinary merge onto
+#      `develop` whose version is already tagged exits cleanly in seconds);
+#   2. `wheels`, `sdist`, and `verify` build and verify the exact release artifacts
+#      with README links pinned to `v<version>`, while `validate` waits in parallel
+#      for `CI`, `Docs`, and `Live (DigitalOcean)` on that merged `develop` commit
+#      to pass green;
+#   3. `pypi` publishes the wheels and sdist to PyPI via OIDC trusted publishing
+#      from the `pypi` GitHub environment;
+#   4. `release` creates and pushes the annotated `v<version>` git tag on the
+#      validated commit and publishes the GitHub Release with artifacts and the
+#      `CHANGELOG.md` notes attached.
 #
-# The development builds — the wheels every commit to `develop` builds, without
-# publishing — are `.github/workflows/wheels.yml`, and they share
-# `.github/actions/build-wheel` with this one, so the released wheel is the same
-# one every commit already built.
+# Two manual paths remain:
+#   * `workflow_dispatch` rehearses the build (and with `dry-run` unchecked uploads
+#     to TestPyPI from `testpypi`) — `pypi` and `release` refuse `workflow_dispatch`
+#     even when dispatched on a tag;
+#   * pushing an explicit `v*` tag still works as an idempotent manual fallback.
 #
 # The one-time PyPI setup (trusted publisher, environments) is in RELEASING.md.
 
 on:
   push:
+    branches: [develop]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -41,6 +46,7 @@ on:
     paths:
       - "pyproject.toml"
       - "Cargo.toml"
+      - "CHANGELOG.md"
       - "blastit_build.py"
       - "scripts/**"
       - "README.md"
@@ -49,31 +55,112 @@ on:
 
 concurrency:
   group: publish-${{ github.ref }}
-  # A tag run is left alone — it can be halfway through an upload. A rehearsal
-  # (dispatch, pull request) is superseded by the next push, like CI.
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  # Never cancel a run on `develop` or a `v*` tag — either can be halfway through
+  # an upload, and queuing serialises back-to-back pushes to `develop` so the
+  # second sees the tag the first just created. Rehearsals (PR, dispatch) cancel.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' && github.ref_type != 'tag' }}
 
 permissions:
   contents: read
 
 jobs:
   guard:
-    name: the tag names a release
+    name: release guard
     runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.plan.outputs.should_build }}
+      release: ${{ steps.plan.outputs.release }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      ref_for_links: ${{ steps.plan.outputs.ref_for_links }}
     steps:
       - uses: actions/checkout@v4
-      # Only a tag can be wrong about the version it publishes: a dispatch or a
-      # pull request rehearses the build, not a release.
-      - name: Tag vs Cargo.toml
-        if: github.ref_type == 'tag'
-        run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
-      - name: The changelog has an entry for it
-        if: github.ref_type == 'tag'
-        run: scripts/release-notes.sh "$GITHUB_REF_NAME" > /dev/null
+        with:
+          fetch-depth: 0
+      - name: Fetch all tags from origin
+        run: git fetch --tags --force origin
+      - name: Decide mode and check release invariants
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_FULL: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          version=$(awk '
+              /^\[workspace\.package\]/ { inside = 1; next }
+              /^\[/ { inside = 0 }
+              inside && /^version = "/ { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }
+          ' Cargo.toml)
+          if [[ -z $version ]]; then
+              echo "::error::no [workspace.package] version in Cargo.toml"
+              exit 1
+          fi
+          tag="v$version"
+
+          if [[ $EVENT_NAME == "push" && $REF_TYPE == "tag" ]]; then
+              scripts/check-release-tag.sh "$REF_NAME"
+              scripts/release-notes.sh --require-dated "$REF_NAME" > /dev/null
+              {
+                  echo "should_build=true"
+                  echo "release=true"
+                  echo "tag=$REF_NAME"
+                  echo "version=${REF_NAME#v}"
+                  echo "ref_for_links=$REF_NAME"
+              } >> "$GITHUB_OUTPUT"
+              echo "Tag push $REF_NAME: verified against Cargo.toml and CHANGELOG.md."
+          elif [[ $EVENT_NAME == "push" && $REF_FULL == "refs/heads/develop" ]]; then
+              scripts/check-release-tag.sh "$tag"
+              if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+                  {
+                      echo "should_build=false"
+                      echo "release=false"
+                      echo "tag=$tag"
+                      echo "version=$version"
+                      echo "ref_for_links=develop"
+                  } >> "$GITHUB_OUTPUT"
+                  echo "$tag is already tagged; skipping release pipeline on this develop push."
+              else
+                  scripts/release-notes.sh --require-dated "$tag" > /dev/null
+                  {
+                      echo "should_build=true"
+                      echo "release=true"
+                      echo "tag=$tag"
+                      echo "version=$version"
+                      echo "ref_for_links=$tag"
+                  } >> "$GITHUB_OUTPUT"
+                  echo "New release $tag landed on develop: validating CI/Docs/Live and publishing."
+              fi
+          else
+              scripts/check-release-tag.sh "$tag"
+              if [[ $EVENT_NAME == "pull_request" && $HEAD_REF == release/* ]]; then
+                  expected_branch="release/$version"
+                  if [[ $HEAD_REF != "$expected_branch" ]]; then
+                      echo "::error::release branch is \`$HEAD_REF\`, but Cargo.toml version is \`$version\` (expected branch \`$expected_branch\`)"
+                      exit 1
+                  fi
+                  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+                      echo "::error::tag \`$tag\` already exists: bump [workspace.package] version in Cargo.toml before opening a release PR"
+                      exit 1
+                  fi
+                  scripts/release-notes.sh --require-dated "$tag" > /dev/null
+                  echo "Release PR $HEAD_REF -> develop: version $version, dated changelog entry, and unused tag $tag verified."
+              fi
+              {
+                  echo "should_build=true"
+                  echo "release=false"
+                  echo "tag=$tag"
+                  echo "version=$version"
+                  echo "ref_for_links=develop"
+              } >> "$GITHUB_OUTPUT"
+          fi
 
   wheels:
     name: wheel (CPython ${{ matrix.python }})
     needs: guard
+    if: needs.guard.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     strategy:
       # x86_64 only. arm64 is a step of its own, not a matrix dimension:
@@ -91,7 +178,9 @@ jobs:
       # Before the build: the README is the wheel's long description, and PyPI
       # renders it with no repository around it.
       - name: README links, as PyPI needs them
-        run: uv run --no-project scripts/readme-absolute-links.py
+        env:
+          LINK_REF: ${{ needs.guard.outputs.ref_for_links }}
+        run: uv run --no-project scripts/readme-absolute-links.py --ref "$LINK_REF"
       - uses: ./.github/actions/build-wheel
         with:
           python: ${{ matrix.python }}
@@ -100,12 +189,15 @@ jobs:
   sdist:
     name: sdist
     needs: guard
+    if: needs.guard.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
       - name: README links, as PyPI needs them
-        run: uv run --no-project scripts/readme-absolute-links.py
+        env:
+          LINK_REF: ${{ needs.guard.outputs.ref_for_links }}
+        run: uv run --no-project scripts/readme-absolute-links.py --ref "$LINK_REF"
       # The sdist is what a platform without a wheel installs, so it has to build
       # a working wheel on its own — including the dbproxy binary, which the
       # build backend builds from the workspace in it (`blastit_build.py`).
@@ -136,7 +228,8 @@ jobs:
 
   verify:
     name: description, as PyPI renders it
-    needs: [wheels, sdist]
+    needs: [guard, wheels, sdist]
+    if: needs.guard.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -154,11 +247,102 @@ jobs:
           ls -l dist
           uv run --no-project scripts/check-long-description.py dist/*
 
+  validate:
+    name: CI, Docs & Live green on develop
+    needs: guard
+    if: needs.guard.outputs.release == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Wait for CI, Docs, and Live (DigitalOcean) on ${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import time
+
+          repo = os.environ["REPO"]
+          sha = os.environ["SHA"]
+          required = {
+              ".github/workflows/ci.yml": "CI",
+              ".github/workflows/docs.yml": "Docs",
+              ".github/workflows/live.yml": "Live (DigitalOcean)",
+          }
+
+          # Give GitHub Actions a moment to register all sibling `push` workflows.
+          time.sleep(15)
+          started = time.monotonic()
+
+          while True:
+              raw = subprocess.check_output(
+                  [
+                      "gh",
+                      "api",
+                      f"repos/{repo}/actions/runs?head_sha={sha}&event=push&per_page=50",
+                  ],
+                  text=True,
+              )
+              runs = json.loads(raw).get("workflow_runs", [])
+              latest: dict[str, dict] = {}
+              for run in runs:
+                  path = run.get("path")
+                  if path not in required or run.get("head_branch") != "develop":
+                      continue
+                  if path not in latest or int(run["id"]) > int(latest[path]["id"]):
+                      latest[path] = run
+
+              elapsed = int(time.monotonic() - started)
+              missing = [label for path, label in required.items() if path not in latest]
+              if missing and elapsed > 180:
+                  print(
+                      f"::error::workflow run(s) not found on develop@{sha[:7]} after {elapsed}s: "
+                      + ", ".join(missing),
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
+              failures = []
+              pending = list(missing)
+              summary = []
+              for path, label in required.items():
+                  run = latest.get(path)
+                  if run is None:
+                      summary.append(f"{label}=waiting-to-register")
+                      continue
+                  status = run.get("status")
+                  conclusion = run.get("conclusion")
+                  url = run.get("html_url", "")
+                  summary.append(f"{label}={conclusion or status}")
+                  if status != "completed":
+                      pending.append(label)
+                  elif conclusion != "success":
+                      failures.append(f"{label} ({conclusion}): {url}")
+
+              print(f"[{elapsed:>4}s] " + " | ".join(summary), flush=True)
+              if failures:
+                  for item in failures:
+                      print(f"::error::validation failed on develop@{sha[:7]}: {item}", file=sys.stderr)
+                  sys.exit(1)
+              if not pending:
+                  print(f"All validation workflows succeeded on develop@{sha[:7]}.")
+                  break
+              time.sleep(20)
+          PY
+
   testpypi:
     name: TestPyPI
-    needs: verify
-    # A dispatch, and only with `dry-run` unchecked; a tag never goes here.
-    if: github.event_name == 'workflow_dispatch' && !inputs.dry-run
+    needs: [guard, verify]
+    # A dispatch, and only with `dry-run` unchecked; a release never goes here.
+    if: github.event_name == 'workflow_dispatch' && !inputs.dry-run && needs.verify.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -180,13 +364,20 @@ jobs:
 
   pypi:
     name: PyPI
-    needs: verify
-    # The event is part of the guard, not only the ref type: a
-    # `workflow_dispatch` can name a tag as its ref, and GitHub reports
-    # `ref_type == 'tag'` for that too. Without `event_name`, dispatching this
-    # workflow on `v0.1.0` would publish to the real PyPI — the one thing the
-    # dispatch path must never be able to do.
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [guard, verify, validate]
+    # `event_name == 'push'` is mandatory: `workflow_dispatch` can target `develop`
+    # or a tag ref, and must never reach real PyPI. On `develop`, `validate` must
+    # have succeeded; on a manual `v*` tag push, `validate` is skipped.
+    if: >-
+      !cancelled() &&
+      needs.guard.result == 'success' &&
+      needs.guard.outputs.release == 'true' &&
+      needs.verify.result == 'success' &&
+      github.event_name == 'push' &&
+      (
+        (github.ref == 'refs/heads/develop' && needs.validate.result == 'success') ||
+        (github.ref_type == 'tag' && needs.validate.result == 'skipped')
+      )
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -208,33 +399,58 @@ jobs:
           skip-existing: true
 
   release:
-    name: GitHub release
-    needs: pypi
-    # Same guard as `pypi`: a release follows a publish, and a dispatch must
-    # not be able to create one either.
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    name: tag & GitHub release
+    needs: [guard, pypi]
+    if: >-
+      !cancelled() &&
+      needs.guard.result == 'success' &&
+      needs.guard.outputs.release == 'true' &&
+      needs.pypi.result == 'success' &&
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/develop' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Attach the wheels and the sdist to the tag
+      - name: Create git tag (if needed) and publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.guard.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.guard.outputs.version }}
+          TARGET_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # The notes are the changelog entry the guard already found.
-          scripts/release-notes.sh "$GITHUB_REF_NAME" > notes.md
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-              # A re-run of a failed publish: the release is there already.
-              gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          git fetch --tags --force origin
+          if git rev-parse -q --verify "refs/tags/$RELEASE_TAG" >/dev/null; then
+              tagged_sha=$(git rev-list -n 1 "$RELEASE_TAG")
+              if [[ $tagged_sha != "$TARGET_SHA" ]]; then
+                  echo "::error::tag $RELEASE_TAG already points to $tagged_sha, not $TARGET_SHA"
+                  exit 1
+              fi
+              echo "Tag $RELEASE_TAG already exists at $TARGET_SHA."
           else
-              gh release create "$GITHUB_REF_NAME" dist/* \
+              git -c user.name="github-actions[bot]" \
+                  -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                  tag -a "$RELEASE_TAG" "$TARGET_SHA" -m "blastit $RELEASE_VERSION"
+              git push origin "refs/tags/$RELEASE_TAG"
+              echo "Created and pushed annotated tag $RELEASE_TAG -> $TARGET_SHA."
+          fi
+
+          # The notes are the changelog entry the guard already found.
+          scripts/release-notes.sh "$RELEASE_TAG" > notes.md
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+              # A re-run of a failed publish: the release is there already.
+              gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+              gh release create "$RELEASE_TAG" dist/* \
                 --verify-tag \
-                --title "blastit $GITHUB_REF_NAME" \
+                --title "blastit $RELEASE_TAG" \
                 --notes-file notes.md
           fi

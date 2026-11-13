@@ -212,15 +212,19 @@ def _describe(finding: Finding) -> str:
 def _run(args: argparse.Namespace) -> int:
     repo = args.repo.resolve()
     changes = changed_files(repo, args.base)
+    nodes: list[str] = list(args.node or [])
     patterns: list[str] = []
-    if args.node is not None:
-        node_file = find_node_file(repo, args.node)
-        patterns = parse_node_paths(node_file)
+    node_patterns: list[tuple[str, list[str]]] = []
+    for node_id in nodes:
+        node_file = find_node_file(repo, node_id)
+        parsed = parse_node_paths(node_file)
+        node_patterns.append((node_id, parsed))
+        patterns.extend(parsed)
     findings = evaluate(changes, patterns)
 
     print(f"critical-guard: {args.base}..working tree, {len(changes)} changed file(s)")
-    if args.node is not None:
-        print(f"node {args.node}: paths {patterns or '(none)'}")
+    for node_id, parsed in node_patterns:
+        print(f"node {node_id}: paths {parsed or '(none)'}")
     if not findings:
         print("  no change to a protected critical test")
         return EXIT_OK
@@ -228,21 +232,22 @@ def _run(args: argparse.Namespace) -> int:
         print(_describe(finding))
 
     violations = [finding for finding in findings if finding.is_violation]
-    if args.node is None or args.report:
+    if not nodes or args.report:
         if violations:
             print(
                 f"  report only: {len(violations)} breaking change(s) would fail an enforced run"
             )
         return EXIT_OK
+    label = ", ".join(nodes)
     if violations:
         print(
             f"critical-guard: FAILED: {len(violations)} protected critical test(s) changed or deleted "
-            f"without a covering path in node {args.node}. Add the file to the node paths, or report "
+            f"without a covering path in node(s) {label}. Add the file to the node paths, or report "
             "STATUS: blocked and let the lead send it to the test-curator."
         )
         return EXIT_VIOLATIONS
     print(
-        f"critical-guard: OK: all {len(findings)} protected change(s) are authorized by node {args.node}"
+        f"critical-guard: OK: all {len(findings)} protected change(s) are authorized by node(s) {label}"
     )
     return EXIT_OK
 
@@ -256,8 +261,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--node",
+        action="append",
         default=None,
-        help="plan node whose NODE.md paths authorize the changes",
+        help="plan node whose NODE.md paths authorize the changes (repeatable for multi-node release PRs)",
     )
     parser.add_argument(
         "--repo",

@@ -104,6 +104,7 @@ Spawn `reviewer` (fresh-context goldfish) with `<id>` and the recorded base SHA.
   1. Verify every item in the epic's `# Acceptance` (run `make check`, plus `make e2e` if `crates/blastit`, `crates/blastit-dbproxy`, or `e2e/` changed).
   2. If the epic touched Rust or Python code, spawn `test-curator` scoped to the touched crates/modules. Any gaps it creates as child tasks keep the epic open until done.
   3. Once clean, write `plan/nodes/.../<epic>/RESULT.md` (via a quick `doc-writer` or `implementer` brief if needed, or log summary), set `<epic>` `done`, regenerate `state`, and commit `[<epic>] Gate passed: <title>`.
+  4. **Sub-release epics (`0.2.x`, `0.3.x`, `0.4.x`):** If `<epic>` cuts a new release (its children bumped `Cargo.toml` `[workspace.package] version` to an untagged `<version>` and stamped a dated `## <version> (YYYY-MM-DD)` entry in `CHANGELOG.md`), verify `scripts/check-release-tag.sh "v<version>"` and `scripts/release-notes.sh --require-dated "v<version>" > /dev/null`, stop your loop immediately after committing `<epic>`, and return to `conductor` with `RELEASE_READY: <version>` so `conductor` opens the Release PR into `develop` before the next sub-release begins.
 
 ### Design & DX Spec Acceptance
 

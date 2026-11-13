@@ -347,21 +347,32 @@ jobs:
       # R42: a protected critical test may never be skipped.
       - name: No skip construct in a protected critical test (R42)
         run: make critical-skip-check
-      # `tools/critical_guard.py` only *enforces* when it is given a node: a
-      # node's `paths` are what authorize a modified or deleted protected test,
-      # and without `--node` the guard reports every change and exits 0 (`_run`).
-      # CI has no single "current node", so it takes the task nodes this branch
-      # changes — the node that edits a protected test lists that file in its
-      # `paths` — and asks the guard about each; one authorization is enough.
+      # `tools/critical_guard.py` only *enforces* when it is given `--node`: a
+      # task node's `paths` authorize a modified or deleted protected test, and
+      # without `--node` the guard reports every change and exits 0 (`_run`).
+      # A release PR into `develop` bundles every task node of that release, so CI
+      # collects all `kind: task` nodes changed since the base ref (`origin/<base>`
+      # on a PR, `github.event.before` on a push to `develop`) and passes their
+      # union (`--node N1 --node N2 ...`) in a single guard check: every breaking
+      # change to a protected critical test must be covered by at least one task
+      # node in the diff.
       #
       # `issuer`/`epic`/`milestone` nodes are left out on purpose: their `paths`
       # are the delegation of their children (`crates/**`, `python/tests/**` in
       # `MA.3`) and their `NODE.md` changes on every status transition, so
       # including them would make this gate vacuous on every real branch.
-      - name: Protected critical tests are unchanged, or a changed node authorizes them
+      - name: Protected critical tests are unchanged, or changed task nodes authorize them
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          base="origin/${GITHUB_BASE_REF:-develop}"
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            base="origin/${GITHUB_BASE_REF}"
+          elif [ -n "${PUSH_BEFORE:-}" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            base="$PUSH_BEFORE"
+          else
+            base="origin/develop"
+          fi
           log="$RUNNER_TEMP/critical-guard.log"
           guard="tools/critical_guard.py"
           : > "$log"
@@ -375,9 +386,9 @@ jobs:
               | awk -F/ '$NF == "NODE.md" && NF > 3 { print $(NF - 1) }' \
               | sort -u
           )
-          echo "guards: base $base; plan nodes changed by this branch: ${nodes[*]:-(none)}"
+          echo "guards: base $base; plan nodes changed by this diff: ${nodes[*]:-(none)}"
 
-          failed=0
+          node_args=()
           for node in "${nodes[@]}"; do
             node_file="$(printf '%s\n' "$node_files" \
               | awk -F/ -v id="$node" '$NF == "NODE.md" && $(NF - 1) == id' | tail -1)"
@@ -392,29 +403,25 @@ jobs:
                 continue
                 ;;
             esac
-            echo "guards: node $node ($node_file) may authorize the diff; asking the guard"
-            set +e
-            uv run --no-project "$guard" --base "$base" --node "$node" 2>&1 | tee -a "$log"
-            status=${PIPESTATUS[0]}
-            set -e
-            case "$status" in
-              0)
-                echo "guards: node $node authorizes every protected critical test change since $base"
-                exit 0
-                ;;
-              1)
-                echo "guards: node $node does not cover a protected change (its report is above); trying the next node"
-                ;;
-              *)
-                echo "::error::critical_guard could not inspect $base for node $node (exit $status)"
-                failed=$status
-                ;;
-            esac
+            echo "guards: task node $node ($node_file) authorizes its paths"
+            node_args+=(--node "$node")
           done
 
-          # No changed task node authorizes the diff (or none changed at all):
-          # run the guard in its report mode so the offending files are in the
-          # log, then fail on the verdict it prints.
+          if [ "${#node_args[@]}" -gt 0 ]; then
+            set +e
+            uv run --no-project "$guard" --base "$base" "${node_args[@]}" 2>&1 | tee -a "$log"
+            status=${PIPESTATUS[0]}
+            set -e
+            if [ "$status" -eq 0 ]; then
+              echo "guards: changed task node(s) cover every protected critical test change since $base"
+              exit 0
+            fi
+            echo "::error::one or more protected critical test modifications since $base are not authorized by any changed task node (exit $status)"
+            exit "$status"
+          fi
+
+          # No task node changed at all: run the guard in report mode so any
+          # offending files are in the log, then fail on any `[VIOLATION:`.
           set +e
           uv run --no-project "$guard" --base "$base" 2>&1 | tee -a "$log"
           status=${PIPESTATUS[0]}
@@ -422,10 +429,6 @@ jobs:
           if [ "$status" -ne 0 ]; then
             echo "::error::critical_guard could not inspect $base (exit $status)"
             exit "$status"
-          fi
-          if [ "$failed" -ne 0 ]; then
-            echo "::error::critical_guard could not inspect $base for at least one changed node (exit $failed)"
-            exit "$failed"
           fi
           if ! grep -q '^critical-guard: ' "$log"; then
             echo "::error::critical_guard printed no report: the guard did not run"
