@@ -2,16 +2,16 @@
 id: MB.1.16
 title: "Pin the rooted production missing-manifest message in the Docker e2e"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: []
 paths: [e2e/rootless/run.py, e2e/rootless/README.md, e2e/README.md]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T18:44"
-updated: "2026-11-13T18:44"
+updated: "2026-11-13T19:54"
 ---
 
 # Goal

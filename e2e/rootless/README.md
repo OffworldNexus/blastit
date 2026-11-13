@@ -58,6 +58,14 @@ assertions:
   command is the capable copy, which the kernel will not even `execve` with an
   empty bounding set; the check starts the shared interpreter, the one a
   container that granted nothing can run.)
+* **the ordering**: the *same* image started as **root** in an empty directory
+  exits `1`, and its stdout's `app.output` names `./blastit.toml: No such file
+  or directory` — and never `BLASTIT_APP`. With the file present but declaring no
+  `app`, the boot names `BLASTIT_APP` and claims nothing is missing. That is the
+  production half of the ordering (`stage0::run`, `MB.1.16`); the `dev` half is
+  in the protected suite, because an unprivileged production boot is refused at
+  the capability gate before the manifest is read, and root is the identity that
+  reaches it.
 
 ## What E1 checks
 

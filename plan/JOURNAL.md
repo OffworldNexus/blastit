@@ -676,3 +676,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T19:47 [MB.1.15] (implementer) Done: 637 mutants 558 caught / 6 missed / 73 unviable / 0 timeouts = 98.94% (was 550/14 = 97.52%); parse.rs:197+220, edit.rs:384+411, 794/815(+→-), 818/819 all 
 - 2026-11-13T19:48 [MB.1.15] (lead) status active -> review
 - 2026-11-13T19:49 [MB.1.15] (lead) status review -> done
+- 2026-11-13T19:49 [MB.1.16] (implementer) check_rooted_startup(image) in e2e/rootless/run.py: image as --user 0:0 in a workdir, both directions on stdout app.output; fail-proofed twice; make e2e rc=0 (r
+- 2026-11-13T19:53 [MB.1.16] (lead) status active -> review
+- 2026-11-13T19:54 [MB.1.16] (lead) status review -> done

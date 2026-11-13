@@ -608,6 +608,129 @@ def check_negative_boot(image, uid=APP_UID):
     return 0 if ok else 1
 
 
+#: The sentence production (`stage0::run`) prints in a directory with no
+#: `./blastit.toml` (`docs/troubleshooting.md`): the file, then the reason. The
+#: `dev` entry point is pinned in the protected suite
+#: (`critical_config_and_presets.rs`); this is the same ordering at the identity
+#: that can reach the configuration in production (`MB.1.16`, AUDIT-MB1 `G5`).
+MISSING_MANIFEST = "./blastit.toml: No such file or directory"
+#: A manifest that exists and declares no `app`: then the *setting* is what is
+#: missing, and the file is not named as absent. `version` plus one route is
+#: enough — the `app` check comes before the manifest is parsed.
+MANIFEST_WITHOUT_APP = 'version = 1\n\n[[route]]\nname = "home"\npath = ["/"]\n'
+#: The container names this check uses, one per direction: they are fixed so that
+#: a run that was killed leaves a name this check removes rather than guesses at.
+ROOTED_BOOT = "blastit-d6-rooted-boot"
+
+
+def app_output_lines(stdout):
+    """The `line` field of every `app.output` event on stdout, in order.
+
+    Production logs JSON (a bare `docker run` gets no `BLASTIT_LOG_FORMAT`, so the
+    default holds), and a startup failure is an `app.output` event **on stdout**
+    (`stage0.rs`'s `Emitter::stdout`, `logs::fail`); fd 2 stays empty. Reading only
+    stdout *is* the assertion: a message that regressed to stderr leaves this list
+    empty and the check fails.
+    """
+    lines = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("event") == "app.output":
+            lines.append(str(event.get("line", "")))
+    return lines
+
+
+def rooted_boot(image, workdir, name):
+    """The image's entry point as root in `workdir`, with the manifest setting
+    cleared; `None` when it does not finish inside the timeout.
+
+    The image sets `BLASTIT_MANIFEST=/app/blastit.toml` and `BLASTIT_APP` (its demo
+    app) for the compose run, and this boot must see neither: with the manifest
+    named, the directory below is never consulted, and with `app` set the setting
+    is never what is missing. They are `unset` in the shell rather than passed as
+    `-e NAME=`: an empty `BLASTIT_APP` is still a *set* variable (it wins over the
+    manifest, as `critical_config_and_presets.rs` pins), and an empty
+    `BLASTIT_MANIFEST` is refused as a mistake of its own — neither is the boot
+    this check is about.
+
+    `--user 0:0` is the *identity*, not a capability grant: root reaches the
+    configuration in production without any capability, which is exactly why the
+    unprivileged suite cannot observe this path and this container can (`MB.1.6`'s
+    manual `sudo -n` run, now automated).
+    """
+    subprocess.run(["docker", "rm", "-f", name], text=True, capture_output=True)
+    try:
+        return subprocess.run(
+            ["docker", "run", "--rm", "--name", name, "--user", "0:0",
+             "--workdir", "/work", "-v", f"{workdir}:/work", image,
+             "sh", "-c", "unset BLASTIT_APP BLASTIT_MANIFEST; exec python3 -m blastit"],
+            text=True, capture_output=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def check_rooted_startup(image):
+    """The missing-manifest ordering at the *production* entry point, both ways.
+
+    AUDIT-MB1 `C5`/`G5`: `MB.1.6` reordered `stage0::run` and `stage0::run_dev`,
+    but only the `dev` half is in a protected test — an unprivileged production
+    boot is refused by the capability gate before the manifest is read. Rooted in
+    the container that path is reachable, on the same image the D6 refusal uses.
+
+    Both directions are asserted, and each asserts the absence of the *other*
+    message: swapping the two checks back (reading `app` first) still exits `1`
+    with a startup error, so the exit code alone would prove nothing.
+    """
+    ok = True
+    workdir = tempfile.mkdtemp(prefix=f"{ROOTED_BOOT}-")
+    try:
+        print("D6: the rooted production boot names the missing manifest first")
+        completed = rooted_boot(image, workdir, f"{ROOTED_BOOT}-missing")
+        if completed is None:
+            return 0 if check(False, "the rooted boot names the missing manifest") else 1
+        output = completed.stdout + completed.stderr
+        lines = app_output_lines(completed.stdout)
+        ok &= check(completed.returncode == 1, f"the rooted boot exits 1 ({completed.returncode})")
+        named = [line for line in lines if MISSING_MANIFEST in line]
+        ok &= check(bool(named),
+                    f"and stdout's `app.output` names the file and the reason "
+                    f"({MISSING_MANIFEST}); stderr carries {len(completed.stderr)} bytes")
+        if not named:
+            print(f"  info the boot said: {output.strip()[-1200:]}")
+        blamed = [line for line in lines if "BLASTIT_APP" in line]
+        ok &= check(not blamed and "BLASTIT_APP" not in output,
+                    f"and `BLASTIT_APP` is not blamed for the missing file ({blamed})")
+
+        # The other order: the file exists and declares no `app`.
+        with open(os.path.join(workdir, "blastit.toml"), "w", encoding="utf-8") as f:
+            f.write(MANIFEST_WITHOUT_APP)
+        print("D6: the rooted production boot with a manifest names BLASTIT_APP, not the file")
+        completed = rooted_boot(image, workdir, f"{ROOTED_BOOT}-no-app")
+        if completed is None:
+            return 0 if check(False, "the rooted boot names `BLASTIT_APP`") else 1
+        output = completed.stdout + completed.stderr
+        lines = app_output_lines(completed.stdout)
+        ok &= check(completed.returncode == 1, f"the rooted boot exits 1 ({completed.returncode})")
+        named = [line for line in lines if "BLASTIT_APP" in line]
+        ok &= check(bool(named),
+                    f"and stdout's `app.output` names `BLASTIT_APP` ({named[:1]}); "
+                    f"stderr carries {len(completed.stderr)} bytes")
+        if not named:
+            print(f"  info the boot said: {output.strip()[-1200:]}")
+        missing = [line for line in lines if "No such file" in line]
+        ok &= check(not missing and "No such file" not in output,
+                    f"and nothing claims the manifest is missing ({missing})")
+    finally:
+        # The workdir is the bind mount of the container above, which `--rm` has
+        # taken away; the directory itself is this check's to remove.
+        shutil.rmtree(workdir, ignore_errors=True)
+    return 0 if ok else 1
+
+
 def local(args):
     password = "e2e-" + secrets.token_hex(16)
     project = args.project or "blastit-d6-rootless"
@@ -651,6 +774,7 @@ def local(args):
         rc |= caps_and_limits(env)
         rc |= check_container(env, project)
         rc |= check_negative_boot(env["E2E_IMAGE"])
+        rc |= check_rooted_startup(env["E2E_IMAGE"])
     finally:
         if rc:
             compose_local(env, "logs", "--no-color", "--tail", "200", "app")
