@@ -1,10 +1,14 @@
 # Every `console` fence of the public documentation, and how the harness runs it.
 #
-# The page list is the site's navigation (`zensical.toml`) plus `README.md`.
-# `test_inventory` fails when a public page or a fence is missing here, so adding
-# a fence means adding one entry below. A fence entry names a handler (`mode`)
-# and the project fixture it runs in; `reason` is required for the modes that do
-# not execute the fence's own command, and is shown in the report.
+# The page list is every page the site publishes: `README.md` plus each
+# `docs/**/*.md` that `zensical.toml`'s `exclude_docs` does not keep out of the
+# build. It is the published tree, not the navigation, so a page the nav does
+# not name still has to be accounted for here. `test_inventory` fails when a
+# published page or a fence is missing, so adding a fence means adding one entry
+# below. A fence entry names a handler (`mode`) and the project fixture it runs
+# in; `reason` is required for the modes that do not execute the fence's own
+# command, is shown in the report, and has to say what the gate checks instead
+# (at least 15 characters: "deploy" or "TODO" is not an answer).
 #
 # One more key exists, checked by `run.py`:
 #

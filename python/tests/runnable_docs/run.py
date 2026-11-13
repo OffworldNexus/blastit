@@ -1,7 +1,8 @@
 """Run every public console fence and print the verdict table.
 
-The inventory is checked before anything runs: a public page or a fence that has
-no entry is a failure, not a silent pass. Then the harness executes the fences.
+The inventory is checked before anything runs: a published page or a fence that
+has no entry is a failure, not a silent pass, and so is a snippet shape the
+parser cannot account for (see `scan`). Then the harness executes the fences.
 """
 
 from __future__ import annotations
@@ -13,12 +14,13 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from fences import console_fences, public_pages
+from fences import console_fences, public_pages, scan_page
 from harness import (
     MODES,
     NEEDS_REASON,
     REPO,
     Failure,
+    FenceSpec,
     Harness,
     PageSpec,
     Report,
@@ -27,6 +29,12 @@ from harness import (
 
 INVENTORY = REPO / "python" / "tests" / "runnable_docs" / "inventory.toml"
 PORT_FALLBACK_MODES = {"dev-flags"}
+# A `reason` is the only thing standing between a documented command and a
+# reader copying it blind, so "deploy" or "TODO" is not an answer: the floor
+# makes an entry say what the gate checks *instead of* running the fence.
+REASON_MIN = 15
+REASON_PLACEHOLDERS = {"todo", "n/a", "-"}
+
 # Two gates on one machine would fight over the documented ports, so they queue
 # here instead of one failing the other's fence for a busy 8080.
 LOCK_TIMEOUT = 900.0
@@ -104,22 +112,63 @@ def main() -> int:
     return report_result(report, time.monotonic() - started)
 
 
-def check_inventory(pages: list[PageSpec]) -> list[str]:
+def scan(page: str, text: str, specs: tuple[FenceSpec, ...]) -> list[str]:
+    """Everything about one page that would leave a documented command unaccounted.
+
+    Two halves. The shape half is `fences.scan_page`: a block that never closes,
+    a fence marker left inside a `console` body, a `$ ` prompt in a block that is
+    not `console`, a `$ ` prompt outside every block. Each of those means a
+    command a reader would copy is read as prose or as output, so no inventory
+    entry can ever demand it. The inventory half is the `reason` floor: an entry
+    that says `deploy` instead of saying what the gate does *instead of* running
+    the fence accounts for nothing a reviewer can check.
+    """
+    problems = list(scan_page(page, text)[1])
+    for spec in specs:
+        if spec.reason is None:
+            continue
+        reason = spec.reason.strip()
+        if not reason:
+            problems.append(
+                f"{page} fence {spec.index}: the reason is blank; say what the gate "
+                "checks instead of running this fence"
+            )
+        elif reason.lower() in REASON_PLACEHOLDERS:
+            problems.append(
+                f"{page} fence {spec.index}: the reason {reason!r} is a placeholder; "
+                "say what the gate checks instead of running this fence"
+            )
+        elif len(reason) < REASON_MIN:
+            problems.append(
+                f"{page} fence {spec.index}: the reason {reason!r} is too short "
+                f"({len(reason)} of {REASON_MIN} characters); say what the gate "
+                "checks instead of running this fence"
+            )
+    return problems
+
+
+def check_inventory(pages: list[PageSpec], repo: Path = REPO) -> list[str]:
     problems: list[str] = []
-    expected = public_pages(
-        (REPO / "zensical.toml").read_text(encoding="utf-8"), "README.md"
-    )
+    expected = public_pages(repo, (repo / "zensical.toml").read_text(encoding="utf-8"))
     listed = [page.path for page in pages]
     for missing in sorted(set(expected) - set(listed)):
-        problems.append(f"the public page {missing} has no entry")
+        problems.append(
+            f"the published page {missing} has no entry; the site builds and "
+            "serves it, so its commands are unaccounted"
+        )
     for extra in sorted(set(listed) - set(expected)):
-        problems.append(f"{extra} is not a public page in zensical.toml")
+        problems.append(
+            f"{extra} is not a page the site publishes; zensical.toml's "
+            "`exclude_docs` keeps it out of the build, so drop the entry"
+        )
     for page in pages:
-        path = REPO / page.path
+        path = repo / page.path
         if not path.is_file():
             problems.append(f"{page.path} does not exist")
             continue
-        fences = console_fences(page.path, path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        problems.extend(scan(page.path, text, page.fences))
+        fences = console_fences(page.path, text)
         indexes = [spec.index for spec in page.fences]
         if indexes != list(range(1, len(fences) + 1)):
             problems.append(
@@ -145,7 +194,7 @@ def check_inventory(pages: list[PageSpec]) -> list[str]:
             if (
                 spec.fixture is not None
                 and not (
-                    REPO
+                    repo
                     / "python"
                     / "tests"
                     / "runnable_docs"
