@@ -480,3 +480,17 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T11:08 [MA.7] (lead) status active -> review
 - 2026-11-13T11:08 [MA.7] (lead) status review -> done
 - 2026-11-13T11:09 [MA.7] (lead) commit eacb5033130202b5856cce02a05d2ce2bc57eb67 on release/0.1.1 (make check exit 0, plan validate OK, python/tests untouched)
+- 2026-11-13T11:21 [MA.8] (conductor) created (task) Leaf 15: root-cause the two red Django check tests on the release CI
+- 2026-11-13T11:21 [MA.8] (lead) status ready -> active
+- 2026-11-13T11:21 [MA.8] (lead) attempt 1/3 started
+- 2026-11-13T11:21 [MA.8] (lead) base f97fd08d83ffcb1476f1db90ba8d5da2910adb63 (release/0.1.1, PR #62)
+- 2026-11-13T11:35 [MA.8] (lead) status active -> review
+- 2026-11-13T11:35 [MA] (lead) status done -> active
+- 2026-11-13T11:39 [MA.8] (lead) REVIEW FAIL (attempt 1): MAJOR python/tests/test_check.py:108 DJANGO_MANIFEST grants set_config('TimeZone') unconditionally -> on a UTC-spelling server (postgre
+- 2026-11-13T11:39 [MA.8] (lead) status review -> ready
+- 2026-11-13T11:39 [MA.8] (lead) status ready -> active
+- 2026-11-13T11:39 [MA.8] (lead) attempt 2/3 started
+- 2026-11-13T11:48 [MA.8] (lead) smoke (root) evidence (acceptance 6): NOT green and not a failure either — job 131823878765 is still in_progress in its 'sudo env ... cargo test -p blastit' ste
+- 2026-11-13T11:48 [MA.8] (lead) status active -> done
+- 2026-11-13T11:48 [MA] (lead) status active -> done
+- 2026-11-13T11:48 [MA] (lead) MA.8 (CI hotfix leaf, created by conductor after the 0.1.1 gate) is done with reviewer PASS; status restored to done after the validate-blocking transient where

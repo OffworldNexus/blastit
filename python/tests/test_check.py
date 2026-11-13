@@ -92,6 +92,31 @@ queries = ["SELECT 1"]
 """
 
 
+#: `MANIFEST` plus Django's own connection-setup statement, for the servers that
+#: actually send it: `_django_manifest` picks it per server.
+#:
+#: `CONN_MAX_AGE = 0` opens the connection *inside* the request, and Django's
+#: PostgreSQL backend re-states the session time zone whenever the server's
+#: startup `TimeZone` differs from `settings_dict["TIME_ZONE"]` (`None`, so
+#: `UTC`): Django 6.1 then sends `SELECT set_config('TimeZone', $1, false)`.
+#: Whether that happens is **decided by the server's startup zone spelling**:
+#: `postgres:18` reports `Etc/UTC` and sends the statement,
+#: `postgres:15-alpine` reports `UTC` and never does. Where it runs it is part
+#: of what the route must grant, because in production the same connection is
+#: opened inside a request and dbproxy would deny it there; where it never runs
+#: a grant for it is a `dead_grant` error, not extra safety. The documented fix
+#: is a group attached to every route (the statement runs on whichever route
+#: opens the connection first), not one query per route, so the group sits
+#: before `[[route]]` and `[route.db]` stays the manifest's last table.
+DJANGO_MANIFEST = MANIFEST.replace(
+    "\n[[route]]",
+    "\n[group.connection.db]\n"
+    "queries = [\"SELECT set_config('TimeZone', $1, false)\"]\n"
+    "\n[[route]]",
+    1,
+).replace("version = 1\n", 'version = 1\ngroups = ["connection"]\n', 1)
+
+
 def project(root: Path, manifest: str = MANIFEST, body: str = "") -> Path:
     """A pytest project: the manifest, the app, and one test that drives it."""
     root.mkdir(parents=True, exist_ok=True)
@@ -308,6 +333,26 @@ def _upstream_db_and_password() -> tuple[str, str]:
     return unquote(parts.path).lstrip("/"), unquote(parts.password or "")
 
 
+def _django_manifest() -> str:
+    """The Django manifest this server needs: `MANIFEST` or `DJANGO_MANIFEST`.
+
+    Django's PostgreSQL backend only re-states the session time zone when the
+    server's startup `TimeZone` spelling differs from Django's `UTC`
+    (`django/db/backends/postgresql/base.py::_configure_timezone`, called from
+    `init_connection_state`), so the statement exists on some images and not on
+    others — and a grant that never runs is an audit error in its own right.
+    Reading the same `parameter_status` Django reads keeps `findings == []` on
+    both `postgres:18` (`Etc/UTC`) and `postgres:15-alpine` (`UTC`).
+    """
+    import psycopg
+
+    with psycopg.connect(str(DATABASE_URL)) as connection:
+        time_zone = connection.info.parameter_status("TimeZone")
+    # Anything but an explicit `UTC` makes Django send the statement (`None`
+    # included: `None != "UTC"`).
+    return MANIFEST if time_zone == "UTC" else DJANGO_MANIFEST
+
+
 def _database_exists(datname: str) -> bool:
     """Checks `pg_database` directly on the real PostgreSQL server."""
     import psycopg
@@ -364,6 +409,7 @@ def test_pytest_django_db_suite_has_zero_teardown_warnings_and_drops_test_db(
     )
     root = django_project(
         tmp_path,
+        manifest=_django_manifest(),
         tests_body=f"""\
         import os
         import pytest
@@ -390,7 +436,7 @@ def test_pytest_django_db_suite_has_zero_teardown_warnings_and_drops_test_db(
         "error::pytest.PytestWarning",
         extra_env={"DJANGO_SETTINGS_MODULE": "djapp.settings"},
     )
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 0, f"{completed.stderr}\n{completed.stdout}"
     assert "Error when trying to teardown test databases" not in completed.stderr
     assert "cannot drop the currently open database" not in completed.stderr
     if real_password:
@@ -432,7 +478,7 @@ def test_pytest_django_denied_grant_exits_one_and_still_drops_test_db(
         "error::pytest.PytestWarning",
         extra_env={"DJANGO_SETTINGS_MODULE": "djapp.settings"},
     )
-    assert completed.returncode == 1, completed.stderr
+    assert completed.returncode == 1, f"{completed.stderr}\n{completed.stdout}"
     assert "Error when trying to teardown test databases" not in completed.stderr
     report = document(completed)
     assert report["ok"] is False
@@ -502,7 +548,7 @@ def test_pytest_django_atomic_view_still_enforces_transaction_control(
     """Flushing `TestCase`'s outer `BEGIN` never masks a view's own `transaction.atomic()`."""
     db_name, _ = _upstream_db_and_password()
     test_db = f"test_{db_name}"
-    atomic_manifest = MANIFEST.replace("path = ['/']", "path = ['/atomic/']")
+    atomic_manifest = _django_manifest().replace("path = ['/']", "path = ['/atomic/']")
     denied_root = django_project(
         tmp_path / "denied",
         manifest=atomic_manifest,
@@ -523,7 +569,7 @@ def test_pytest_django_atomic_view_still_enforces_transaction_control(
         "error::pytest.PytestWarning",
         extra_env={"DJANGO_SETTINGS_MODULE": "djapp.settings"},
     )
-    assert denied.returncode == 1, denied.stderr
+    assert denied.returncode == 1, f"{denied.stderr}\n{denied.stdout}"
     denied_report = document(denied)
     assert any(
         entry["kind"] == "missing_grant" and entry["sql"] == "SAVEPOINT"
@@ -552,7 +598,7 @@ def test_pytest_django_atomic_view_still_enforces_transaction_control(
         "error::pytest.PytestWarning",
         extra_env={"DJANGO_SETTINGS_MODULE": "djapp.settings"},
     )
-    assert granted.returncode == 0, granted.stderr
+    assert granted.returncode == 0, f"{granted.stderr}\n{granted.stdout}"
     assert document(granted)["findings"] == []
     assert not _database_exists(test_db)
 

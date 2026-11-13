@@ -23,3 +23,15 @@ status ready -> done
 ## 2026-11-13T10:44 [strategist]
 
 strategist gate PASSED at 70a4357 on release/0.1.1: make check exit 0, make e2e exit 0 (8x PASS), real cargo-mutants run (blastit-manifest 437/630=69.4% whole-crate, 304/320=95.0% policy modules; blastit-sqlpolicy 508/1019 partial 420/475=88.4%), residual edit.rs/timeout/startup/hygiene items tracked in MB.1
+
+## 2026-11-13T11:35 [lead]
+
+status done -> active
+
+## 2026-11-13T11:48 [lead]
+
+status active -> done
+
+## 2026-11-13T11:48 [lead]
+
+MA.8 (CI hotfix leaf, created by conductor after the 0.1.1 gate) is done with reviewer PASS; status restored to done after the validate-blocking transient where an open child sat under a done milestone.
