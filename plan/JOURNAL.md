@@ -746,3 +746,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T21:56 [MB.2.4.1] (lead) status review -> review
 - 2026-11-13T22:01 [MB.2.4.1] (lead) REVIEW PASS attempt 2 (2 MINOR: head_segments is a 5th doc(hidden) pub seam -> MB.2.2 should add it to design §4.2; plan/ files changed outside paths are plan.p
 - 2026-11-13T22:01 [MB.2.4.1] (lead) status review -> done
+- 2026-11-13T22:01 [MB.2.5.1] (lead) status ready -> active
+- 2026-11-13T22:01 [MB.2.5.1] (lead) attempt 1/3 started
+- 2026-11-13T22:01 [MB.2.5.1] (lead) base 7a79a95
+- 2026-11-13T22:06 [MB.2.5.1] (implementer) rewrite::decide (total §4.3/§4.4 order, all four statuses, Allow: GET, HEAD), rewrite::declares_body, RouteInfo::with_static/static_forward; 13-test protected p
+- 2026-11-13T22:06 [MB.2.5.1] (lead) status active -> review
+- 2026-11-13T22:13 [MB.2.5.1] (lead) REVIEW PASS attempt 1 (3 MINOR, all design-doc sync: add declares_body to §4.2, add the refusal-terminality row to §4.4, record that critical_rewrite.rs carries
+- 2026-11-13T22:13 [MB.2.5.1] (lead) status review -> done

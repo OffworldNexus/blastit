@@ -65,6 +65,7 @@ mod ctl;
 mod error;
 mod fair;
 mod path;
+pub mod rewrite;
 mod route;
 mod scheduler;
 pub mod static_asset;

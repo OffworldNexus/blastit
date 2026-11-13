@@ -2,7 +2,7 @@
 id: MB.2.5.1
 title: "Rewrite precedence and the static method/body gate (decide) - design MB.2.5a"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.2.4.1]
@@ -11,11 +11,11 @@ paths:
   - "crates/blastit-scheduler/src/route.rs"
   - "crates/blastit-scheduler/src/lib.rs"
   - "crates/blastit-scheduler/tests/critical_rewrite.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T20:52"
-updated: "2026-11-13T20:52"
+updated: "2026-11-13T22:13"
 ---
 
 # Goal
