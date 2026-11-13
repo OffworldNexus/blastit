@@ -23,3 +23,7 @@ status active -> review
 ## 2026-11-13T12:08 [lead]
 
 status review -> done
+
+## 2026-11-13T12:08 [lead]
+
+committed 729f295 on release/0.1.1 (.github/workflows/ci.yml, plan/); plan.py validate ok; next CI run must settle candidate 3

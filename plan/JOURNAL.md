@@ -501,3 +501,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T11:52 [MA.9] (lead) base 599f912149b42a2e5cbc4ea14aec2108cbe318ef
 - 2026-11-13T12:08 [MA.9] (lead) status active -> review
 - 2026-11-13T12:08 [MA.9] (lead) status review -> done
+- 2026-11-13T12:08 [MA.9] (lead) committed 729f295 on release/0.1.1 (.github/workflows/ci.yml, plan/); plan.py validate ok; next CI run must settle candidate 3
