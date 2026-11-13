@@ -654,16 +654,28 @@ fn parse_form(normalized: &str) -> String {
             out.extend(text);
             continue;
         }
-        let mut i = 0;
-        while i < text.len() {
-            if text[i] == '$' && text.get(i + 1) == Some(&'?') {
+        // The code text is consumed one token at a time: `rest` is the part that
+        // is left, so every step strictly shortens it and the rewrite cannot
+        // stall on a hostile statement.
+        let mut rest = text;
+        while let Some(first) = rest.first() {
+            if *first == '$' && rest.get(1) == Some(&'?') {
                 out.push_str("$1");
-                i += 2;
+                // `get(1)` proved the second character exists, so this drops
+                // both of them.
+                rest = rest.get(2..).unwrap_or_default();
                 continue;
             }
-            let end = code_token_end(text, i);
-            out.extend(&text[i..end]);
-            i = end;
+            // One whole code token, copied verbatim: `a$?` is a single
+            // identifier and keeps its `$`.
+            let end = code_token_end(rest, 0).clamp(1, rest.len());
+            let Some((token, tail)) = rest.split_at_checked(end) else {
+                // Unreachable: `end` is clamped to `1..=rest.len()`. Stopping
+                // keeps the rewrite finite rather than panicking on the way out.
+                break;
+            };
+            out.extend(token);
+            rest = tail;
         }
     }
     out

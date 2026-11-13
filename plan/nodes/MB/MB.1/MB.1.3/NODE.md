@@ -2,7 +2,7 @@
 id: MB.1.3
 title: "Bound blastit-sqlpolicy lexer and learn loops and measure lexer.rs"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: []
@@ -10,11 +10,11 @@ paths:
   - "crates/blastit-sqlpolicy/src/lexer.rs"
   - "crates/blastit-sqlpolicy/src/learn.rs"
   - "crates/blastit-sqlpolicy/tests/lexer_progress.rs"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-13T14:44"
-updated: "2026-11-13T14:44"
+updated: "2026-11-13T18:36"
 ---
 
 # Goal

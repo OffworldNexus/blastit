@@ -621,3 +621,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T18:26 [MB.1.4] (lead) lead verification: cargo test -p blastit-sqlpolicy 224+10+25+6+10+18+8 green; artefacts caught 108 / missed 1 / timeout 0 / unviable 15 = 99.1%%; single survivo
 - 2026-11-13T18:28 [MB.1.5] (lead) status active -> done
 - 2026-11-13T18:28 [MB.1.5] (lead) lead verification: cargo test -p blastit-sqlpolicy 7 suites green; artefacts caught 168 / missed 0 / timeout 0 / unviable 7 = 175 mutants, statements 100%% tabl
+- 2026-11-13T18:36 [MB.1.3] (lead) status active -> done
+- 2026-11-13T18:36 [MB.1.3] (lead) attempts 1-2 interrupted by the harness; lead completed the 298->206 mutant measurement (173 caught / 30 missed / 0 timeouts / 3 unviable = 85.2%%) and wrote RE
