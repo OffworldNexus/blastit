@@ -5,6 +5,20 @@ lives in `Cargo.toml` (`[workspace.package] version`), and a release is the tag
 `v` plus that version — `scripts/check-release-tag.sh` refuses a tag that says
 anything else, and [`RELEASING.md`](RELEASING.md) has the steps.
 
+## 0.1.2 (2026-11-13)
+
+A development-wheel fix: nothing changes for an app running under blastit.
+
+- **Manifests name the workspace version.** Every intra-workspace `path`
+  requirement now states the workspace version, so a development build resolves
+  instead of failing with
+  `failed to select a version for the requirement blastit-dbproxy = "^0.1.0"`.
+- **`scripts/dev-version.sh` rewrites the requirements it moves.** It bumped the
+  workspace version but left the crates' `version = "..."` requirements behind,
+  so any development wheel from a run that touched it was unbuildable. It now
+  rewrites them, then proves every intra-workspace requirement names the dev
+  version and fails with the offending `file:line`.
+
 ## 0.1.1 (2026-11-12)
 
 The first hour with blastit now happens on your own machine, as you, in one pass.

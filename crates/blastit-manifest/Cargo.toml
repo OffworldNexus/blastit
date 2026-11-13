@@ -11,8 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-blastit-ingress = { version = "0.1.1", path = "../blastit-ingress" }
-blastit-sqlpolicy = { version = "0.1.1", path = "../blastit-sqlpolicy" }
+blastit-ingress = { version = "0.1.2", path = "../blastit-ingress" }
+blastit-sqlpolicy = { version = "0.1.2", path = "../blastit-sqlpolicy" }
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
