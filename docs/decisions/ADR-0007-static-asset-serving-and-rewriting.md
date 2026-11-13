@@ -49,13 +49,19 @@ to delete or add a second supervisor, uid and budget for a read-only file.
    Mounts inside `root` are followed (a bind-mounted asset directory is legitimate);
    the boundary claimed is "beneath `root` in the path namespace".
 4. **Precedence is one total order, and a refusal is final.** Exact file → directory
-   `index` → SPA `index` (only when `spa = true`) → the manifest's `app` → `404`.
-   Refused and hidden paths are terminal: a `..` probe can never be masked by
-   `index.html` (the traversal-to-fallback bug) and never reaches the app.
+   `index` → SPA `index` (only when `spa = true`) → the manifest's `app` (only when
+   `spa` is unset) → `404`, and a lost SPA fallback is that `404`. Refused, hidden and
+   lost-fallback paths are terminal for **every** method and body: a `..` probe can
+   never be masked by `index.html` (the traversal-to-fallback bug) and never reaches the
+   app.
 5. **Fail-closed response semantics, and the cache key is the answer kind.** `GET`/`HEAD`
-   only on a selected target (`405` + `Allow: GET, HEAD`), a declared body is `413`;
-   `400` for traversal/NUL/control/absolute/backslash/invalid UTF-8/over-long; `404` for
-   symlinks, special files, oversize files, dotfiles and unreadable files. The
+   only on a **servable** selected target (`405` + exactly `Allow: GET, HEAD`); a
+   declared body (`Content-Length > 0` or any `Transfer-Encoding`, decided from the head
+   alone) is `413`; a refusal keeps its own status whatever the method — `400` for
+   traversal/NUL/control/absolute/backslash/invalid UTF-8/over-long, `404` for symlinks,
+   special files, oversize files, dotfiles and unreadable files — so a `POST` to a
+   refused path is `400`/`404`, never `405`. A lost SPA fallback and a miss with no
+   `app` are that same `404`. The
    404-vs-fallthrough distinction does reveal that *something* exists at a refused path
    (a symlink, an unreadable file): that is the page's own "hidden existence is 404"
    policy, it is limited to the status code, and the canned body never varies — content

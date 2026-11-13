@@ -1,4 +1,5 @@
 /target
+/target-mut/
 /e2e/app.log
 __pycache__/
 

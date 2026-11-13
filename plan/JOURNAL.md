@@ -775,3 +775,26 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T22:27 [MB.4.1] (conductor) Owner correction (supersedes the per-frame note): fair queuing charges CPU time ONLY, never bytes and never frames. Accounting is sticky/monotonic per flow (per
 - 2026-11-13T22:29 [MB.2.4.2] (lead) REVIEW PASS attempt 1 (3 MINOR, all doc sync: §5.2 F/N cells promise immutable while the frozen fixture declares none; §7.2 claims the whole 40-row matrix runs 
 - 2026-11-13T22:29 [MB.2.4.2] (lead) status review -> done
+- 2026-11-13T22:29 [MB.2.5.2] (lead) status ready -> active
+- 2026-11-13T22:29 [MB.2.5.2] (lead) attempt 1/3 started
+- 2026-11-13T22:29 [MB.2.5.2] (lead) base b8e8806
+- 2026-11-13T22:29 [MB.2.4] (lead) GATE EVIDENCE (lead, at b8e8806): cargo test -p blastit-scheduler --test critical_static_assets -> 11 passed; cargo test -p blastit-scheduler --locked -> all su
+- 2026-11-13T22:33 [MB.2.10] (designer) Synced docs/design/static-and-spa.md + ADR-0007 with shipped code (6 findings): §4.2 head_segments/declares_body/STATIC_ALLOW + MB.2.4.2 surface; §4.4 refusal t
+- 2026-11-13T22:34 [MB.2.10] (lead) status active -> review
+- 2026-11-13T22:36 [MB.2.11] (doc-writer) dx + ai-ergonomics pass 1: both FAIL; resolved all BLOCKERs/MAJORs (ALLOWED_HOST, platform-managed pool user, literal direct migrate URL, grant-stays-in-CI rule
+- 2026-11-13T22:40 [MB.2.10] (designer) Attempt 2: re-read the three suites and replaced the wrong oracle map. critical_static_assets.rs (11 tests) owns 24 200 cases (numbered rows 18,28,30,32-35,37,4
+- 2026-11-13T22:40 [MB.2.10] (lead) attempt 2/3 started
+- 2026-11-13T22:40 [MB.2.10] (lead) status review -> review
+- 2026-11-13T22:43 [MB.2.10] (designer) Attempt 3: four mechanical corrections to the oracle map. Row 20 is 400 (not 404) in R5/R6/§9; R7 negative is outcome-only (no status); fixture-D cache clause h
+- 2026-11-13T22:43 [MB.2.10] (lead) attempt 3/3 started
+- 2026-11-13T22:43 [MB.2.10] (lead) status review -> review
+- 2026-11-13T22:44 [MB.2.4] (lead) GUARD RULING (owner): the branch-wide 'critical-guard BASE=develop NODE=<one epic>' line cannot pass once several nodes legitimately edited protected files; the
+- 2026-11-13T22:48 [MB.2.5.2] (implementer) MB.2.5b landed in scheduler.rs + the flow half of critical_rewrite.rs: static roots at boot, head_segments/declares_body/If-None-Match in begin_raw, admit_stati
+- 2026-11-13T22:48 [MB.2.11] (doc-writer) owner ruling applied: allowlist untouched; role default ALTER ROLE app SET timezone='UTC' in DO role SQL, Compose db/grants.sql and index; grant rule derived fr
+- 2026-11-13T22:49 [MB.2.5.2] (lead) status active -> review
+- 2026-11-13T22:56 [MB.2.5.2] (implementer) attempt 2 review fixups: buffered Forward no longer waits for a body that already ended (falls through to admit_ready) and request_end no longer re-enqueues a q
+- 2026-11-13T22:56 [MB.2.5.2] (lead) attempt 2/3 started
+- 2026-11-13T22:56 [MB.2.5.2] (lead) status review -> review
+- 2026-11-13T23:01 [MB.2.5.2] (lead) REVIEW PASS attempt 2 (3 MINOR: the request_end no-requeue half of fix (b) is not pinned by a row; the new half-body guard counts queue_size others + itself, on
+- 2026-11-13T23:01 [MB.2.5.2] (lead) status review -> done
+- 2026-11-13T23:01 [MB.2.10] (lead) status review -> done
