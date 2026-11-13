@@ -31,3 +31,7 @@ review PASS attempt 1; 3 MINOR findings fixed in attempt 2 (job-comment arithmet
 ## 2026-11-13T12:34 [lead]
 
 status review -> done
+
+## 2026-11-13T12:34 [lead]
+
+committed 5ef8a4b on release/0.1.1 (.github/workflows/ci.yml, plan/); plan.py validate ok; next smoke (root) run must show 5 'test result: ok' and no ::error::
