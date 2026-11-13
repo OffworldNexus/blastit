@@ -8,7 +8,7 @@ depends_on: []
 paths: []
 attempts: 0
 max_attempts: 3
-escalation: none
+escalation: strategist
 created: "2026-11-12T00:50"
 updated: "2026-11-12T00:50"
 ---

@@ -444,3 +444,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T03:10 [MA.3.6] (lead) status review -> done
 - 2026-11-13T03:10 [MA.3.13] (lead) status review -> done
 - 2026-11-13T03:12 [MA.3] (lead) status ready -> done
+- 2026-11-13T03:12 ESCALATION #7 -> strategist for MA by conductor: milestone gate: MA Lead DX & Show-the-World Polish 0.1.1 — all 5 children done, epic gates passed, make check + make e2e
+- 2026-11-13T03:12 HUMAN H-003 opened by conductor (node MA)
+- 2026-11-13T03:12 [MA] (conductor) conductor: MA gate escalated (#7) to strategist but the expensive tier is unusable — OpenRouter credit ceiling (~79k affordable vs 256k max_tokens). Gate blocke
+- 2026-11-13T03:16 [MA] (lead) gate packet assembled at e0bc1b3 by lead (cheap tier): make check exit 0 and make e2e exit 0 re-run here, roadmap criteria mapped, AUDIT-MA.2.3 F1-F8 and AUDIT-

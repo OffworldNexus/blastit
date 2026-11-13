@@ -20,3 +20,11 @@ Install cargo-mutants on the dev host (or allow a one-off `cargo install cargo-m
 
 **Answer:**
 
+## H-003 [open] (node MA)
+
+- asked: 2026-11-13T03:12 by conductor
+
+OpenRouter credits exhausted: every strategist/architect/expert request fails with 'requires more credits ... you requested up to 256000 tokens, but can only afford ~79-80k' on key c048f174. The MA (0.1.1) milestone gate is mandatory for the expensive tier, so with credits gone the roadmap cannot advance past MA even though MA's work is complete and green (make check + make e2e PASS at 4338f88). Please raise the key's weekly limit (or top up credits). Also still open: H-002 install cargo-mutants for the gate's literal mutation audit.
+
+**Answer:**
+

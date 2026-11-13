@@ -7,9 +7,10 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 
 | Symptom | Fix |
 |---|---|
-| `production mode needs root or …` | run `blastit dev` locally, or give the deployment the [capabilities](deploy/anything-else.md#root-or-rootless) |
+| `init runs as uid … and is missing cap_…` | production, unprivileged: run `blastit dev` locally, or give the deployment the [capabilities](deploy/anything-else.md#root-or-rootless) |
 | `BLASTIT_SECCOMP=0` | it removes the syscall and egress wall: the boot warns, and both presets abort the boot on it. Keep it at `1` |
 | `blastit.toml: no such file` | run from the directory that holds it, or set `BLASTIT_MANIFEST` |
+| `BLASTIT_APP: the WSGI callable … is required` | there is no `./blastit.toml` in this directory, or it has no `app`: `cd` to the project, or write `app = "module:attribute"` |
 | `BLASTIT_FOO: …` | a variable that does not parse; the message names it |
 | the log stops after `stage0` | the configuration did not parse, so stage 1 never ran |
 | `config`, but no `preload` | the manifest, a proxy input variable or the db sockets: the message names it |
