@@ -410,3 +410,17 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T01:50 [MA.3.8] (lead) retry base 04bed18c7304f9109d60f3a3e5c4427868246782
 - 2026-11-13T01:58 [MA.3.8] (lead) status ready -> review
 - 2026-11-13T02:05 [MA.3.8] (lead) status review -> done
+- 2026-11-13T02:05 [MA.3.9] (lead) status ready -> active
+- 2026-11-13T02:05 [MA.3.9] (lead) attempt 1/3 started
+- 2026-11-13T02:05 [MA.3.9] (lead) base 19c37b1d41c4cf5c683a16a44afa559122e46178
+- 2026-11-13T02:05 [MA.3.10] (lead) status ready -> active
+- 2026-11-13T02:05 [MA.3.10] (lead) attempt 1/3 started
+- 2026-11-13T02:05 [MA.3.10] (lead) base 19c37b1d41c4cf5c683a16a44afa559122e46178
+- 2026-11-13T02:05 [MA.3.11] (lead) status ready -> active
+- 2026-11-13T02:05 [MA.3.11] (lead) attempt 1/3 started
+- 2026-11-13T02:05 [MA.3.11] (lead) base 19c37b1d41c4cf5c683a16a44afa559122e46178
+- 2026-11-13T02:24 [MA.3.9] (lead) status active -> review
+- 2026-11-13T02:24 [MA.3.10] (lead) status active -> review
+- 2026-11-13T02:24 [MA.3.11] (lead) status active -> review
+- 2026-11-13T02:34 [MA.3.9] (lead) status review -> done
+- 2026-11-13T02:34 [MA.3.11] (lead) status review -> done
