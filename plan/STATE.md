@@ -3,7 +3,7 @@
 - generated: 2026-11-13T19:42
 - autopilot: on
 - current milestone: MB Modern 12-Factor Backends: Static, PHP-FPM, Vite/Node, Tomcat (0.2.x) [ready]
-- tasks: ready=9, active=1, review=1, done=63, superseded=1
+- tasks: ready=9, active=1, done=64, superseded=1
 - open human requests: 0 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 7; expensive spent: $54.76 of $200.00 cap (27%)
 
@@ -16,7 +16,6 @@
 
 ## Next actionable (top 12)
 
-- review: MB.1.14 Close the sqlpolicy lexer numeric-extent survivors, re-measure learn.rs, and protect the lexer boundary oracle
 - execute: MB.1.16 Pin the rooted production missing-manifest message in the Docker e2e
 
 ## Stuck / attention
@@ -25,7 +24,6 @@
 
 ## Recent journal
 
-- 2026-11-13T18:53 [MB.1.15] (lead) status ready -> active
 - 2026-11-13T18:53 [MB.1.15] (lead) attempt 1/3 started
 - 2026-11-13T18:53 [MB.1.15] (lead) base 9c523e2
 - 2026-11-13T18:53 [MB.1.17] (lead) status ready -> active
@@ -40,3 +38,4 @@
 - 2026-11-13T19:30 [MB.1.14] (implementer) lexer.rs 202/203 viable = 99.5% (1 equivalent survivor, 0 timeouts); learn.rs whole-module 90/91 = 98.9% after four new tests (was 84/91 = 92.3%); critical_lexe
 - 2026-11-13T19:35 [MB.1.14] (lead) status active -> review
 - 2026-11-13T19:42 [MB.1.17] (lead) status review -> done
+- 2026-11-13T19:42 [MB.1.14] (lead) status review -> done

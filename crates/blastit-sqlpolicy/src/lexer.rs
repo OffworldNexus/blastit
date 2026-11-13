@@ -1003,4 +1003,156 @@ mod tests {
         assert_eq!(after_ident, chars.len());
         assert_eq!(placeholder_end(&chars, after_ident), None);
     }
+
+    //
+    // Numeric extents (MB.1.14).
+    //
+    // The extent of a numeric literal is a policy boundary: it decides where
+    // the next token starts, so a literal read one character too long swallows
+    // a `$1` (which then stops being a bind parameter) or an `E` (which then
+    // stops being an E-string prefix). The extents are asserted as *numbers*
+    // here, not only through the text they produce, because splitting one
+    // number into two adjacent tokens leaves the text unchanged — which is why
+    // 21 `number_end` mutants survived the text-level suite of MB.1.3.
+    //
+
+    /// The end of the numeric literal at the start of `sql`.
+    fn number_end_of(sql: &str) -> Option<usize> {
+        let chars: Vec<char> = sql.chars().collect();
+        number_end(&chars, 0)
+    }
+
+    #[test]
+    fn radix_literals_end_after_their_last_digit() {
+        // `{hex,oct,bin}integer` = `( _? digit )+`, so a separator only counts
+        // with a digit behind it and the literal ends after that digit.
+        for (sql, end) in [
+            ("0x1F", 4),
+            ("0X1f", 4),
+            ("0xa", 3),
+            ("0xdeadBEEF", 10),
+            ("0x1_2", 5),
+            ("0xA_B_C", 7),
+            ("0o17", 4),
+            ("0O1_7", 5),
+            ("0b1010", 6),
+            ("0B1_0", 5),
+        ] {
+            assert_eq!(number_end_of(sql), Some(end), "{sql:?}");
+        }
+        // A trailing separator is not part of the number: it belongs to the
+        // next token, so the literal ends before it.
+        for sql in ["0x1_", "0o7_", "0b1_"] {
+            assert_eq!(number_end_of(sql), Some(3), "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_radix_prefix_without_a_digit_keeps_one_separator() {
+        // The `…fail` form `0[xob]_?`: PostgreSQL rejects the statement, so the
+        // only thing that matters here is where the next token starts. Exactly
+        // one `_` belongs to the failure token; the second one starts an
+        // identifier, which is why `0x_$1` holds a parameter and `0x__$1` does
+        // not.
+        assert_eq!(number_end_of("0x_"), Some(3));
+        assert_eq!(number_end_of("0o_"), Some(3));
+        assert_eq!(number_end_of("0b_"), Some(3));
+        assert_eq!(number_end_of("0x__"), Some(3));
+        // No separator and no digit: the prefix alone.
+        assert_eq!(number_end_of("0x"), Some(2));
+        assert_eq!(number_end_of("0xz"), Some(2));
+        assert_eq!(number_end_of("0b$1"), Some(2));
+    }
+
+    #[test]
+    fn decimal_grouping_joins_exactly_one_separator() {
+        // `{decinteger}` = `{decdigit}(_?{decdigit})*`: one `_` between two
+        // digits, and the count is the number of characters consumed.
+        for (sql, end) in [
+            ("1", 1),
+            ("12", 2),
+            ("1_2", 3),
+            ("1_2_3", 5),
+            ("12_34_56", 8),
+        ] {
+            assert_eq!(number_end_of(sql), Some(end), "{sql:?}");
+        }
+        // A separator with no digit behind it ends the number before it: `1_`
+        // is `1` and an identifier, `1_2_` is `1_2` and a separator.
+        for (sql, end) in [("1_", 1), ("1__2", 1), ("1_2_", 3), ("1_$1", 1)] {
+            assert_eq!(number_end_of(sql), Some(end), "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_numeric_literal_ends_before_a_second_dot() {
+        // `{numeric}` = `.` `{decinteger}`, `{numericfail}` = `{decinteger}..`:
+        // `1.2` is one number, `1..2` is `1`, `..`, `2`.
+        assert_eq!(number_end_of("1.2"), Some(3));
+        assert_eq!(number_end_of("1.2.3"), Some(3));
+        assert_eq!(number_end_of("1..2"), Some(1));
+        // A dot with no digit behind it is the number and then the dot.
+        assert_eq!(number_end_of("1."), Some(2));
+        assert_eq!(number_end_of("1.a"), Some(2));
+        assert_eq!(number_end_of(".5"), Some(2));
+        assert_eq!(number_end_of(".5e1"), Some(4));
+        // No literal at all: a dot is not a number on its own.
+        assert_eq!(number_end_of("."), None);
+        assert_eq!(number_end_of(".a"), None);
+        assert_eq!(number_end_of("a"), None);
+    }
+
+    #[test]
+    fn an_exponent_is_part_of_the_number_only_with_its_digits() {
+        // `{real}` = `({decinteger}|{numeric})[Ee][-+]?{decinteger}`, with the
+        // `…fail` form when the digits are missing: then the number ends before
+        // its `e`, which is what lets `1e$1` glue the `$1` to the identifier.
+        for (sql, end) in [
+            ("1e2", 3),
+            ("1E2", 3),
+            ("1e+2", 4),
+            ("1e-2", 4),
+            ("12e3", 4),
+            ("12e+34", 6),
+            ("1.5e3", 5),
+            (".5e-3", 5),
+        ] {
+            assert_eq!(number_end_of(sql), Some(end), "{sql:?}");
+        }
+        for sql in ["1e", "1e+", "1e-", "1e+x", "1E"] {
+            assert_eq!(number_end_of(sql), Some(1), "{sql:?}");
+        }
+        // `1.5e` is the number `1.5`, then the `e` of the failed exponent form.
+        assert_eq!(number_end_of("1.5e"), Some(3));
+    }
+
+    #[test]
+    fn a_number_lets_the_next_token_start_where_scan_l_does() {
+        // Where the number ends is where the next token starts, and that is the
+        // boundary a policy check depends on: a `$` there is a parameter, an
+        // `E` there is a string prefix, and anything glued after the number is
+        // one error token instead (`{integer,numeric,real}_junk`).
+        fn token_end(sql: &str) -> usize {
+            let chars: Vec<char> = sql.chars().collect();
+            code_token_end(&chars, 0)
+        }
+        assert_eq!(token_end("0x1F$1"), 4);
+        assert_eq!(token_end("0x_$1"), 3);
+        assert_eq!(token_end("1_0$1"), 3);
+        assert_eq!(token_end("1..2"), 1);
+        assert_eq!(token_end("1e+2$1"), 4);
+        // Denominator of the list above: an identifier glued to the number is
+        // one token, so the `$1` behind it is identifier data, not a parameter.
+        // `1e$1` is the failed exponent form followed by an identifier.
+        assert_eq!(token_end("1e$1"), 4);
+        assert_eq!(token_end("0x1Fg$1"), 7);
+        assert_eq!(token_end("1_$1"), 4);
+        // The token after a number is a parameter only when the number ends on
+        // a digit: the placeholder starts exactly at the end.
+        let chars: Vec<char> = "0x1F$1".chars().collect();
+        assert_eq!(placeholder_end(&chars, token_end("0x1F$1")), Some(6));
+        let chars: Vec<char> = "0x__$1".chars().collect();
+        assert_eq!(code_token_end(&chars, 0), 6);
+        assert_eq!(placeholder_end(&chars, 6), None);
+    }
 }

@@ -872,4 +872,116 @@ mod tests {
         assert_eq!(parse_form("SELECT a$?"), "SELECT a$?");
         assert_eq!(parse_form("SELECT 1"), "SELECT 1");
     }
+
+    #[test]
+    fn every_refusal_names_the_reason_and_the_fix() {
+        // A refusal is printed by `blastit check --learn` and pasted into a
+        // ticket, so its text is a DX promise: it says what was refused and
+        // what to do instead. Every other test reads `Debug` or the accessors,
+        // so an empty rendering would pass all of them and only this test
+        // notices (MB.1.14).
+        assert_eq!(
+            RefuseReason::InlineLiteral.to_string(),
+            "the statement inlines a quoted literal; bind the value with a placeholder instead"
+        );
+        assert_eq!(
+            RefuseReason::RedactedPlaceholder.to_string(),
+            "the statement contains `…`, a redacted literal; bind the value with a placeholder \
+             and grant the parameterised statement"
+        );
+        assert_eq!(
+            RefuseReason::MultipleStatements(2).to_string(),
+            "the text holds 2 statements, and a grant covers exactly one"
+        );
+        assert_eq!(
+            RefuseReason::CopyProgram.to_string(),
+            "`COPY … PROGRAM` runs a command on the server; it cannot be granted"
+        );
+        assert_eq!(
+            RefuseReason::DangerousFunction("pg_read_file".to_string()).to_string(),
+            "`pg_read_file` reaches the server's files or network; it cannot be learned"
+        );
+        // The parser message is sanitised on the way out as well as on the way
+        // in: a quoted span that survives is reduced to `…`, and a reason built
+        // from an unsanitised message cannot leak the token it choked on.
+        assert_eq!(
+            RefuseReason::Unparseable("invalid input syntax for type integer: \"…\"".to_string())
+                .to_string(),
+            "the statement is not valid SQL: invalid input syntax for type integer: \"…\""
+        );
+        assert_eq!(
+            RefuseReason::Unparseable("syntax error at or near \"s3cr3t\"".to_string()).to_string(),
+            "the statement is not valid SQL: syntax error"
+        );
+    }
+
+    #[test]
+    fn a_refusal_reports_no_grant_text_and_the_query_reports_no_reason() {
+        // The accessors are what the callers branch on: a refusal must never
+        // hand over a grant text (an empty grant would be written to the
+        // manifest), and a grantable statement must never look refused.
+        let refused = check_learnable("SELECT 'x'");
+        assert!(!refused.is_query());
+        assert_eq!(refused.normalized(), None);
+        assert_eq!(refused.redacted(), Some("SELECT …"));
+        assert_eq!(refused.reason(), Some(&RefuseReason::InlineLiteral));
+
+        let query = check_learnable("SELECT id FROM t WHERE id = $1");
+        assert!(query.is_query());
+        assert_eq!(query.normalized(), Some("SELECT id FROM t WHERE id = $?"));
+        assert_eq!(query.redacted(), None);
+        assert_eq!(query.reason(), None);
+    }
+
+    #[test]
+    fn the_introspection_walk_stops_at_its_depth_bound() {
+        // The walk is recursive, so a statement nested deeper than
+        // `MAX_INTROSPECTION_DEPTH` is refused rather than allowed to exhaust
+        // the stack. The bound is the *last* acceptable depth: one more array
+        // must be refused, or the guard can never fire (or fires a level too
+        // early).
+        fn nested(arrays: usize) -> Value {
+            (0..arrays).fold(Value::from(1), |inner, _| Value::Array(vec![inner]))
+        }
+        assert!(introspection_node(&Value::from(1), 0));
+        assert!(introspection_node(&nested(MAX_INTROSPECTION_DEPTH), 0));
+        assert!(!introspection_node(&nested(MAX_INTROSPECTION_DEPTH + 1), 0));
+    }
+
+    #[test]
+    fn a_select_that_writes_is_not_session_setup() {
+        // A data-modifying `WITH` parses to a `SelectStmt` whose CTE holds a
+        // `DeleteStmt`/`InsertStmt`/`UpdateStmt`. Every other node in these
+        // statements is one this build replays (a catalogue `RangeVar` and a
+        // plain column), so the write node is the only reason they are refused
+        // — which is exactly the arm that says so.
+        for sql in [
+            "WITH d AS (DELETE FROM pg_catalog.pg_type RETURNING oid) \
+             SELECT pg_catalog.version()",
+            "WITH u AS (UPDATE pg_catalog.pg_type SET typname = typname RETURNING oid) \
+             SELECT pg_catalog.version()",
+            "WITH i AS (INSERT INTO pg_catalog.pg_type (oid) VALUES ($?) RETURNING oid) \
+             SELECT pg_catalog.version()",
+        ] {
+            assert!(!is_introspection_setup_sql(sql), "{sql:?}");
+        }
+        // `INTO`, a lock and a `CALL` are the other ways a `SELECT` reads as
+        // setup while writing or locking.
+        for sql in [
+            "SELECT pg_catalog.version() INTO new_table",
+            "SELECT * FROM pg_catalog.pg_type FOR UPDATE",
+            "SELECT * FROM pg_catalog.pg_type FOR SHARE",
+            "CALL pg_catalog.set_config($?, $?, $?)",
+        ] {
+            assert!(!is_introspection_setup_sql(sql), "{sql:?}");
+        }
+        // The read-only twin of the same shapes is replayed.
+        for sql in [
+            "WITH c AS (SELECT 1) SELECT pg_catalog.version()",
+            "SELECT pg_catalog.version() FROM pg_catalog.pg_type",
+            "SELECT * FROM pg_catalog.pg_type WHERE oid = $?",
+        ] {
+            assert!(is_introspection_setup_sql(sql), "{sql:?}");
+        }
+    }
 }

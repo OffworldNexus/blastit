@@ -2,7 +2,7 @@
 id: MB.1.14
 title: "Close the sqlpolicy lexer numeric-extent survivors, re-measure learn.rs, and protect the lexer boundary oracle"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: []
@@ -11,11 +11,11 @@ paths:
   - "crates/blastit-sqlpolicy/src/learn.rs"
   - "crates/blastit-sqlpolicy/tests/lexer_progress.rs"
   - "crates/blastit-sqlpolicy/tests/critical_lexer_boundaries.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T18:44"
-updated: "2026-11-13T18:44"
+updated: "2026-11-13T19:42"
 ---
 
 # Goal

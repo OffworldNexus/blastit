@@ -669,3 +669,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T19:30 [MB.1.14] (implementer) lexer.rs 202/203 viable = 99.5% (1 equivalent survivor, 0 timeouts); learn.rs whole-module 90/91 = 98.9% after four new tests (was 84/91 = 92.3%); critical_lexe
 - 2026-11-13T19:35 [MB.1.14] (lead) status active -> review
 - 2026-11-13T19:42 [MB.1.17] (lead) status review -> done
+- 2026-11-13T19:42 [MB.1.14] (lead) status review -> done
