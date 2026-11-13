@@ -5,7 +5,7 @@ kind: task
 status: ready
 owner: implementer
 priority: 5
-depends_on: [MB.1, MB.2.7]
+depends_on: [MB.2.7, MB.2.11]
 paths:
   - Cargo.toml
   - Cargo.lock
@@ -18,7 +18,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T15:11"
+updated: "2026-11-13T22:17"
 ---
 
 # Goal

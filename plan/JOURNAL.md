@@ -753,3 +753,25 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T22:06 [MB.2.5.1] (lead) status active -> review
 - 2026-11-13T22:13 [MB.2.5.1] (lead) REVIEW PASS attempt 1 (3 MINOR, all design-doc sync: add declares_body to §4.2, add the refusal-terminality row to §4.4, record that critical_rewrite.rs carries
 - 2026-11-13T22:13 [MB.2.5.1] (lead) status review -> done
+- 2026-11-13T22:13 [MB.2.10] (lead) created (task) Sync the static design with the shipped API surface and status rules
+- 2026-11-13T22:13 [MB.2.10] (lead) status ready -> active
+- 2026-11-13T22:13 [MB.2.10] (lead) attempt 1/3 started
+- 2026-11-13T22:13 [MB.2.10] (lead) base d37f765
+- 2026-11-13T22:13 [MB.2.4.2] (lead) status ready -> active
+- 2026-11-13T22:13 [MB.2.4.2] (lead) attempt 1/3 started
+- 2026-11-13T22:13 [MB.2.4.2] (lead) base d37f765
+- 2026-11-13T22:15 [MB.4.1] (conductor) created (task) Decide Node integration topology: napi-rs/neon embedding vs sidecar fd handoff, and the fair-queue CPU model (ADR)
+- 2026-11-13T22:17 [MB.2.11] (conductor) created (task) Default the deploy presets to a connection pooler (DO managed pooler, Compose PgBouncer)
+- 2026-11-13T22:17 [MB.2.11] (lead) status ready -> active
+- 2026-11-13T22:17 [MB.2.11] (lead) attempt 1/3 started
+- 2026-11-13T22:17 [MB.2.11] (lead) base d37f765
+- 2026-11-13T22:17 [MB.2.8] (lead) edited fields
+- 2026-11-13T22:18 [MB.2.4.2] (implementer) respond() + http_date + closed Content-Type table + (kind, answering path) cache rule + ETag/304/HEAD + over-ceiling guard; 11-test protected response suite gre
+- 2026-11-13T22:19 [MB.4.1] (conductor) Owner direction (2nd): keep standard Vite workflows seamless; a blastit-vite binary is acceptable. ADR must weigh the Vite middlewareMode seam (Blastit owns the
+- 2026-11-13T22:20 [MB.2.11] (doc-writer) research: docs/research/connection-pooling.md in progress; decided trap 3 from code: dbproxy refuses a client 'options' startup param (ALLOWED_STARTUP_PARAMETER
+- 2026-11-13T22:22 [MB.2.4.2] (lead) status active -> review
+- 2026-11-13T22:24 [MB.4.1] (conductor) Owner settled both open points: (1) CPU is debited against the flow, approximate attribution acceptable — credit still replenished on a scheduler tick, per-fram
+- 2026-11-13T22:26 [MB.2.11] (doc-writer) wrote docs/research/connection-pooling.md (researcher), both deploy pages (DO 150 lines, compose 240), index pooler rule, manifest/settings reference, e2e/docs_
+- 2026-11-13T22:27 [MB.4.1] (conductor) Owner correction (supersedes the per-frame note): fair queuing charges CPU time ONLY, never bytes and never frames. Accounting is sticky/monotonic per flow (per
+- 2026-11-13T22:29 [MB.2.4.2] (lead) REVIEW PASS attempt 1 (3 MINOR, all doc sync: §5.2 F/N cells promise immutable while the frozen fixture declares none; §7.2 claims the whole 40-row matrix runs 
+- 2026-11-13T22:29 [MB.2.4.2] (lead) status review -> done

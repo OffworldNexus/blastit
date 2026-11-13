@@ -69,6 +69,7 @@ pub mod rewrite;
 mod route;
 mod scheduler;
 pub mod static_asset;
+pub mod static_response;
 mod task;
 
 pub use crate::config::{

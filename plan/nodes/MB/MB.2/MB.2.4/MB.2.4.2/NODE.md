@@ -2,7 +2,7 @@
 id: MB.2.4.2
 title: "Build static responses: ETag/304, cache headers, Content-Type table, bounded body - design MB.2.4b"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.2.4.1, MB.2.5.1]
@@ -10,11 +10,11 @@ paths:
   - "crates/blastit-scheduler/src/static_response.rs"
   - "crates/blastit-scheduler/src/lib.rs"
   - "crates/blastit-scheduler/tests/critical_static_assets.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T20:52"
-updated: "2026-11-13T20:52"
+updated: "2026-11-13T22:29"
 ---
 
 # Goal
