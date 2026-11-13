@@ -9,6 +9,7 @@ depends_on: []
 paths:
   - "scripts/build-wheel.sh"
   - Makefile
+  - "scripts/dev-version.sh"
   - "crates/blastit-events/Cargo.toml"
   - "crates/blastit-events/src/**"
   - Cargo.lock
@@ -17,7 +18,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T14:44"
-updated: "2026-11-13T14:44"
+updated: "2026-11-13T14:54"
 ---
 
 # Goal
@@ -83,3 +84,4 @@ $ CARGO_NET_OFFLINE=true UV_OFFLINE=1 make check
 - `make check` runs `docs-test` -> `scripts/build-wheel.sh`: the README must be byte-identical afterwards, otherwise the run fails on `guard`/git status and you have a half-working trap.
 - Do not touch `docs/troubleshooting.md` (owned by `MB.1.6`), any public doc page, `crates/blastit-events/src/**` semantics, or the workspace version.
 - Removing the dependency is not a licence to add one elsewhere: `Cargo.lock` may only lose edges here.
+- **Carried over from `MB.1.9` review (MINOR, fix both while you are in `scripts/dev-version.sh`):** (a) its post-rewrite guard only scans `crates/*/Cargo.toml`, so a future `path = "../..."` requirement declared in the workspace-root `Cargo.toml` would escape both the rewrite and the check — append `Cargo.toml` to the awk scan (no such requirement exists today); (b) its failure message says a requirement "names a release version" even when the real cause is a *versionless* path dependency — reword to "names a version other than `<dev>` (or none)". Re-run the script's own proof on a `/tmp` copy afterwards.

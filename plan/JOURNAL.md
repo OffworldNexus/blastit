@@ -536,3 +536,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T14:44 [MB.1.9] (lead) status ready -> active
 - 2026-11-13T14:44 [MB.1.9] (lead) attempt 1/3 started
 - 2026-11-13T14:44 [MB.1.9] (lead) base cab377ec5b4bc00020df507b245972234c7f215b
+- 2026-11-13T14:45 [MB.1.9] (lead) base 2317493 (post-decomposition); earlier base cab377e
+- 2026-11-13T14:51 [MB.1.9] (lead) edited fields
+- 2026-11-13T14:53 AUTOPILOT off by conductor conversing with user on forum post
+- 2026-11-13T14:54 [MB.1.7] (lead) edited fields
+- 2026-11-13T14:54 [MB.1.9] (lead) status active -> done

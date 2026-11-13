@@ -2,16 +2,16 @@
 id: MB.1.9
 title: "Align intra-workspace version requirements and harden scripts/dev-version.sh"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 1
 depends_on: []
-paths: ["scripts/dev-version.sh"]
+paths: [Cargo.toml, Cargo.lock, "crates/*/Cargo.toml", "scripts/dev-version.sh"]
 attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T14:44"
-updated: "2026-11-13T14:44"
+updated: "2026-11-13T14:54"
 ---
 
 # Goal
