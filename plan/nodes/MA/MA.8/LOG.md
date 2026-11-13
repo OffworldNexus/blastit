@@ -43,3 +43,7 @@ smoke (root) evidence (acceptance 6): NOT green and not a failure either — job
 ## 2026-11-13T11:48 [lead]
 
 status active -> done
+
+## 2026-11-13T11:51 [lead]
+
+committed d12317be3b2387ab07b476ed66f1636a11307754 on release/0.1.1 (python/tests/test_check.py, docs/knowledge/LESSONS.md, plan/)

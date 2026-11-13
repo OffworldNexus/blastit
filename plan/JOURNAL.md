@@ -494,3 +494,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T11:48 [MA.8] (lead) status active -> done
 - 2026-11-13T11:48 [MA] (lead) status active -> done
 - 2026-11-13T11:48 [MA] (lead) MA.8 (CI hotfix leaf, created by conductor after the 0.1.1 gate) is done with reviewer PASS; status restored to done after the validate-blocking transient where
+- 2026-11-13T11:51 [MA.8] (lead) committed d12317be3b2387ab07b476ed66f1636a11307754 on release/0.1.1 (python/tests/test_check.py, docs/knowledge/LESSONS.md, plan/)
