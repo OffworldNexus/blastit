@@ -2,7 +2,7 @@
 id: MB.1.11
 title: Bound mutants memory and keep build scratch off tmpfs
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 1
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T18:38"
-updated: "2026-11-13T18:39"
+updated: "2026-11-13T18:50"
 ---
 
 # Goal

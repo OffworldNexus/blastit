@@ -1,5 +1,4 @@
 /target
-/.worktrees
 /e2e/app.log
 __pycache__/
 
@@ -29,3 +28,7 @@ __pycache__/
 /mutants.out.old/
 /.ruff_cache/
 /.pytest_cache/
+
+# Git worktrees live inside the checkout on disk (`git worktree add .worktrees/<slug>`),
+# never under /tmp (tmpfs = RAM) and never in $HOME: one release worktree held 12 G.
+/.worktrees/

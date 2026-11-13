@@ -4,8 +4,8 @@
 
 `cargo-mutants` no longer starts from `/tmp` and no longer runs unbounded. `make
 mutants-rust` now (1) makes its scratch under the user cache **on disk**
-(`$(XDG_CACHE_HOME:-$HOME/.cache)/blastit-mutants`, xfs on this host — not the 32 GiB
-tmpfs `/tmp`), (2) prunes the previous `mutants.out` and old `cargo-mutants-*.tmp`
+(`$(or $(XDG_CACHE_HOME),$(HOME)/.cache)/blastit-mutants`, i.e. xfs on this host — not the
+32 GiB tmpfs `/tmp`), (2) prunes the previous `mutants.out` and old `cargo-mutants-*.tmp`
 copies with bounded retention, (3) refuses to start when the scratch filesystem is
 nearly full, and (4) runs the campaign inside `systemd-run --user --scope -p
 MemoryMax=$(MUTANTS_MEMORY_MAX) -p MemorySwapMax=0` when the host can enforce it, with a
@@ -19,9 +19,9 @@ The owner's second half is the **same defect class**: a git worktree under `/tmp
 held 12 G of RAM). `.gitignore` now documents and ignores `/.worktrees/`, the in-repo
 convention is in `LESSONS.md`, and `tools/guard.py` was proven *not* to scan a checkout
 sitting at `.worktrees/<slug>` (it reads `git status --porcelain --untracked-files=all`,
-which never lists ignored paths — identical `OK (… 19 …)` with and without the checkout,
-and `make check` green with it present). No guard defect to fix; the before/after proof
-is step 6 below.
+which never lists ignored paths — identical `guard: OK (3 …)` with and without the
+checkout, and `make check` green with it present). No guard defect to fix; the proof is
+step 6 below.
 
 Measured on this 48 GiB host: `/tmp` is a 32 GiB tmpfs; a 2-job `blastit-env` campaign
 (174 mutants) held **2.2 GB** of scratch copies and peaked at **2.9 GiB** of
@@ -146,7 +146,7 @@ $ MUTANTS_KEEP_SCRATCH=2 MUTANTS_STALE_MIN=240 scripts/mutants-scratch.sh prune 
 mutants: removed /tmp/opencode/mb111-prune-test/cargo-mutants-oldb-XXXX.tmp (1.9 MiB)
 mutants: removed /tmp/opencode/mb111-prune-test/cargo-mutants-olda-XXXX.tmp (1.9 MiB)
 mutants: prune: freed 3.8 MiB; /tmp/opencode/mb111-prune-test now has 27.0 GiB free
-  (two newest copies kept — `cargo-mutants-new{c,d}-XXXX.tmp` — the two 10-hour-old ones pruned)
+# then: two newest copies kept (`cargo-mutants-new{c,d}-XXXX.tmp`), the two 10-hour-old ones pruned
 $ scripts/mutants-scratch.sh preflight /tmp/opencode/mb111-tmpfs-probe
 mutants: scratch=/tmp/opencode/mb111-tmpfs-probe fs=tmpfs
 mutants: warning: scratch /tmp/opencode/mb111-tmpfs-probe is on tmpfs (RAM, not disk): every scratch copy of the workspace costs memory. Move it with MUTANTS_TMP=/var/tmp/blastit-mutants.
@@ -168,20 +168,35 @@ mutants: clean: freed 10.1 MiB; /home/remy/.cache/blastit-mutants now has 656.4 
 
 ```console
 $ make check
-# PENDING-green-run
-$ uv run --no-project tools/plan.py validate && uv run --no-project tools/plan.py guard 2>/dev/null || uv run --no-project tools/guard.py
+uv run --no-project tools/guard.py
+guard: OK (4 staged/untracked file(s) checked)
+uv run --no-project tools/critical_guard.py --base HEAD
+critical-guard: HEAD..working tree, 4 changed file(s)
+  no change to a protected critical test
+cargo fmt --all -- --check
+… 91 × "test result: ok. … 0 failed …" (workspace unit, integration, doc and critical suites)
+38 fences: 26 executed, 12 accounted, 0 failed · 34.4s
+uv run --no-project tools/plan.py validate
 plan OK
-guard: OK (20 staged/untracked file(s) checked)
-$ make critical-guard
-critical-guard: HEAD..working tree, 12 changed file(s)
-  M  crates/blastit/tests/critical_check_engine.rs  [VIOLATION: not covered by any node path]
-  report only: 1 breaking change(s) would fail an enforced run
+$ echo $?
+0
 ```
 
-The one critical-guard line is **another agent's in-flight edit** of
-`crates/blastit/tests/critical_check_engine.rs` (a test-curator/restore session active in
-this checkout at 18:45); `critical-guard` runs report-only by default and exits 0. This
-node touches no `crates/**` file.
+```console
+$ uv run --no-project tools/plan.py validate && uv run --no-project tools/plan.py guard 2>/dev/null || uv run --no-project tools/guard.py
+plan OK
+guard: OK (3 staged/untracked file(s) checked)
+$ make critical-guard
+critical-guard: HEAD..working tree, 6 changed file(s)
+  no change to a protected critical test
+```
+
+The full `make check` ran **with `.worktrees/hygiene-check` present** (step 6) and
+exited 0. During the run two other agents' commits landed in this checkout
+(`51dced9` → `9018a8b`, MB.1.12/MB.1.13 and the epic audit), which is why the first
+`make check` attempt at 18:45 was red in `rs-fmt` on *their* then-uncommitted
+`crates/blastit/tests/*.rs`; the checkout is now clean apart from this node's files, and
+this node touches no `crates/**` file.
 
 ### 6. Worktree hygiene: ignored inside the checkout, gates tolerate it
 
@@ -192,25 +207,26 @@ HEAD is now at 51dced9 [MB.1.3] Bound the lexer and learn scans, measure lexer.r
 $ du -sh .worktrees/hygiene-check
 12M	.worktrees/hygiene-check
 $ uv run --no-project tools/guard.py           # with the checkout present
-guard: OK (19 staged/untracked file(s) checked)
-$ uv run --no-project tools/guard.py           # same tree, checkout removed
-guard: OK (19 staged/untracked file(s) checked)
+guard: OK (3 staged/untracked file(s) checked)
+$ git status --porcelain --untracked-files=all | grep -c worktrees
+0
 $ git check-ignore -v .worktrees/hygiene-check .worktrees/hygiene-check/Cargo.toml
 .gitignore:34:/.worktrees/	.worktrees/hygiene-check
 .gitignore:34:/.worktrees/	.worktrees/hygiene-check/Cargo.toml
-```
-
-Same count and same verdict with and without the 12 M checkout → `tools/guard.py` does
-**not** scan the ignored worktree (it reads `git status --porcelain --untracked-files=all`,
-which never lists ignored paths), so there was no guard defect to fix in this node. The
-`make check` in step 5 was run **with `.worktrees/hygiene-check` present**, and the
-checkout was removed afterwards:
-
-```console
+$ make check                                    # exit 0, full gate, checkout still present
 $ git worktree remove .worktrees/hygiene-check
 $ git worktree list
-/home/remy/offworld-nexus/blastit  51dced9 [release/0.2.0]
+/home/remy/offworld-nexus/blastit  9018a8b [release/0.2.0]
+$ uv run --no-project tools/guard.py           # same tree, checkout removed
+guard: OK (3 staged/untracked file(s) checked)
 ```
+
+The same count and verdict with and without the 12 M checkout (`grep -c worktrees` on
+`git status --untracked-files=all` is 0) → `tools/guard.py` does **not** scan the ignored
+worktree, because it reads `git status --porcelain --untracked-files=all`, which never
+lists ignored paths. There was therefore no guard defect to fix in this node (guard.py is
+unchanged); the proof is the identical verdict, plus the green `make check` with the
+checkout present, and the empty `.worktrees/` directory was removed afterwards.
 
 Defect class: a mutants scratch on tmpfs and a worktree on tmpfs/`$HOME` are the same
 bug — large build trees in a location nobody budgets. Both now default to disk inside
@@ -243,7 +259,11 @@ both have a one-command cleanup (`make mutants-clean`, `git worktree remove .wor
   scratch), `python/tests/runnable_docs/harness.py` (`dir="/tmp/opencode"` for fence
   temp dirs), `docs/brand/check_seams.py` (`--out` default). Small or e2e-only today, but
   the same class; worth a sweep node.
-- `make check` was green in this node's own scope but the checkout also carried another
-  agent's in-flight `crates/blastit/tests/{audit_group_hint,critical_check_engine}.rs`
-  edits (and the `critical_check_engine.rs` critical-guard report in step 5), which are
-  not this node's paths.
+- `make check` is green in this checkout (step 5), but note the two attempts: the 18:45
+  run was red only in `rs-fmt` on two other agents' then-uncommitted
+  `crates/blastit/tests/*.rs` files (MB.1.12/MB.1.13 landed at `9018a8b` during the
+  second run); the checkout now carries only this node's files, and this node touches no
+  `crates/**` file.
+- `NODE.md` `paths` lists `[Makefile, "scripts/**", docs/knowledge/LESSONS.md]`; the
+  owner's worktree directive added `.gitignore` to this node's work, so the lead should
+  add `.gitignore` to `paths` (frontmatter is not the implementer's to edit).

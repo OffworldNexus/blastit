@@ -7,7 +7,8 @@
 #   make docs-unit      # run the runnable-docs gate's own tests (offline, no wheel build)
 #   make test-critical  # run protected critical tests only (Rust + Python)
 #   make e2e            # build wheel and run Docker + rootless Docker e2e scenarios (gates)
-#   make mutants-rust   # run cargo-mutants on critical crates (PKG=blastit-sqlpolicy)
+#   make mutants-rust   # run cargo-mutants on critical crates (PKG=blastit-sqlpolicy), disk scratch + memory cap
+#   make mutants-clean  # delete mutants.out and every cargo-mutants scratch copy, report bytes freed
 
 UV ?= uv
 UVX ?= uvx --offline
@@ -24,9 +25,30 @@ PYO3_LIBDIR := $(abspath $(dir $(PYO3_BIN))/../lib)
 PYO3_PREFIX := $(if $(PYO3_BIN),$(abspath $(dir $(PYO3_BIN))/..),)
 RUST_ENV = $(if $(PYO3_PREFIX),PYTHONHOME="$(PYO3_PREFIX)") PYO3_PYTHON="$(PYO3_BIN)" LD_LIBRARY_PATH="$(PYO3_LIBDIR)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"
 
-MUTANTS_TMP ?= /tmp/opencode/blastit-mutants
+# `cargo-mutants` copies the whole workspace into "$TMPDIR/cargo-mutants-<crate>-XXXX.tmp"
+# and builds every mutant inside that copy, so TMPDIR holds multi-GiB build trees per
+# job. On this host /tmp is tmpfs (32 GiB of RAM), so the old /tmp default spent RAM
+# instead of disk; default to the user cache on disk (override with e.g.
+# MUTANTS_TMP=/var/tmp/blastit-mutants). `make -s print-mutants-tmp` prints it.
+MUTANTS_TMP ?= $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/blastit-mutants
 MUTANTS_JOBS ?= 2
 MUTANTS_TIMEOUT ?= 90
+# Hard cgroup v2 cap for one campaign on this 48 GiB host. A 2-job campaign keeps a
+# workspace copy + rustc/linker + the crate's test binaries per job: a measured 2-job
+# `blastit-env` campaign (174 mutants) peaked at 2.9 GiB in its scope with a 2.2 GB
+# scratch, and the policy crates are heavier, so 12 GiB is ~4x that while still leaving
+# >30 GiB for the tmpfs /tmp (RAM), the 48 G repo `target/` page cache and a concurrent
+# `make check`. MemorySwapMax=0 makes an overrun a clean OOM death, not thrashing.
+MUTANTS_MEMORY_MAX ?= 12G
+# Refuse to start below this much free space on the scratch filesystem: an interrupted
+# campaign leaves multi-GiB copies behind (a measured 2-job `blastit-env` campaign held
+# 2.2 GB), so 5 GiB is ~2x one campaign — the check exists to stop a start on a nearly
+# full filesystem, not to size the campaign (`scripts/mutants-scratch.sh preflight`).
+MUTANTS_MIN_FREE_GB ?= 5
+# Retention for the start-up prune: keep the newest copies, and never prune a copy
+# touched within MUTANTS_STALE_MIN minutes so a concurrent campaign keeps its scratch.
+MUTANTS_KEEP_SCRATCH ?= 2
+MUTANTS_STALE_MIN ?= 240
 
 # Where `test-critical` stages the built package and extension, so `unittest`
 # imports the real `blastit._blastit` without an install (R42, §7.1).
@@ -37,7 +59,8 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 
 .PHONY: help check clean guard critical-guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical \
-        py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust
+        py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
+        mutants-clean mutants-scope-probe print-mutants-tmp
 
 help: ## Show available Make targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -134,9 +157,19 @@ e2e: ## Build wheel and run Docker + rootless capability e2e tests
 	E2E_DOCKERFILE=Dockerfile.prebuilt $(UV) run --no-project e2e/run.py
 	$(UV) run --no-project e2e/rootless/run.py --local --dockerfile Dockerfile.prebuilt
 
-mutants-rust: ## Run cargo-mutants on Rust crates (pass PKG=<crate> to scope)
+mutants-rust: ## Run cargo-mutants with disk scratch + cgroup memory cap (PKG=<crate> to scope)
 	@mkdir -p "$(MUTANTS_TMP)"
-	@rm -rf mutants.out
-	TMPDIR="$(MUTANTS_TMP)" $(RUST_ENV) $(CARGO) mutants $(if $(PKG),-p "$(PKG)",--workspace) -j $(MUTANTS_JOBS) --timeout $(MUTANTS_TIMEOUT)
+	MUTANTS_KEEP_SCRATCH="$(MUTANTS_KEEP_SCRATCH)" MUTANTS_STALE_MIN="$(MUTANTS_STALE_MIN)" scripts/mutants-scratch.sh prune "$(MUTANTS_TMP)"
+	MUTANTS_MIN_FREE_GB="$(MUTANTS_MIN_FREE_GB)" scripts/mutants-scratch.sh preflight "$(MUTANTS_TMP)"
+	$(RUST_ENV) TMPDIR="$(MUTANTS_TMP)" MUTANTS_JOBS="$(MUTANTS_JOBS)" MUTANTS_TIMEOUT="$(MUTANTS_TIMEOUT)" MUTANTS_MEMORY_MAX="$(MUTANTS_MEMORY_MAX)" CARGO="$(CARGO)" scripts/mutants-run.sh $(if $(PKG),-p "$(PKG)",--workspace)
+
+mutants-clean: ## Delete mutants.out and every cargo-mutants scratch copy (report bytes freed)
+	scripts/mutants-scratch.sh clean "$(MUTANTS_TMP)"
+
+mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign would run under
+	TMPDIR="$(MUTANTS_TMP)" scripts/mutants-run.sh --probe --memory-max "$(MUTANTS_MEMORY_MAX)"
+
+print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
+	@echo "$(MUTANTS_TMP)"
 
 check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test plan-validate ## Full fast unprivileged check

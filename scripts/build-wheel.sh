@@ -67,7 +67,9 @@ else
     echo "the README rewrite needs uv or PYO3_PYTHON: install uv, or point PYO3_PYTHON at an interpreter" >&2
     exit 1
 fi
-readme=$(mktemp "${TMPDIR:-/tmp}/blastit-README.XXXXXX")
+# Disk-backed default scratch, like the mutants scratch: /tmp is tmpfs (RAM) on this
+# host, and this rewrite copies README.md aside for the duration of the build.
+readme=$(mktemp "${TMPDIR:-/var/tmp}/blastit-README.XXXXXX")
 cp README.md "$readme"
 restore_readme() {
     cp "$readme" README.md
