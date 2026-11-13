@@ -2,16 +2,16 @@
 id: MA.3.4
 title: Run Docker root + rootless e2e suites and fix e2e fallout
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MA.3.1]
 paths: ["e2e/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T19:16"
-updated: "2026-11-12T19:16"
+updated: "2026-11-13T01:09"
 ---
 
 # Goal

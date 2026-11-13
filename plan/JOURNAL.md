@@ -365,3 +365,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T00:38 [MA.3.7] (lead) status active -> review
 - 2026-11-13T00:50 [MA.3.7] (lead) status review -> done
 - 2026-11-13T00:51 [MA.3.1] (lead) status review -> done
+- 2026-11-13T00:51 [MA.3.2] (lead) status ready -> active
+- 2026-11-13T00:51 [MA.3.2] (lead) attempt 1/3 started
+- 2026-11-13T00:51 [MA.3.2] (lead) base aaeadf4d0bc850a51ae8e63bd5dd1c330b1e672d
+- 2026-11-13T00:51 [MA.3.4] (lead) status ready -> active
+- 2026-11-13T00:51 [MA.3.4] (lead) attempt 1/3 started
+- 2026-11-13T00:51 [MA.3.4] (lead) base aaeadf4d0bc850a51ae8e63bd5dd1c330b1e672d
+- 2026-11-13T00:59 [MA.3.4] (lead) status active -> review
+- 2026-11-13T00:59 [MA.3.2] (lead) status active -> review
+- 2026-11-13T01:05 [MA.3.2] (lead) REVIEW FAIL (1/3): [BLOCKER] settings.md:112 + deploy/anything-else.md:56-57 say '85% of non-reclaimable memory'; binary computes 85% of total (min MemTotal/cgr
+- 2026-11-13T01:05 [MA.3.2] (lead) status review -> ready
+- 2026-11-13T01:05 [MA.3.2] (lead) attempt 2/3 started
+- 2026-11-13T01:05 [MA.3.2] (lead) retry base aaeadf4d0bc850a51ae8e63bd5dd1c330b1e672d
+- 2026-11-13T01:09 [MA.3.4] (lead) status review -> done
