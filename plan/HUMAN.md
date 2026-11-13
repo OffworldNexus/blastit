@@ -38,3 +38,11 @@ Done already, no action needed from you: the hot-path performance work from PR #
 
 **Answer:**
 
+## H-005 [open] (node MB)
+
+- asked: 2026-11-14T00:55 by conductor
+
+Release v0.2.0 is ready on branch release/0.2.0. Review and squash-merge the Release PR into develop on GitHub — merging validates CI, Docs and Live DigitalOcean e2e on develop and automatically publishes v0.2.0 to PyPI and GitHub Releases. Scope: static asset serving with safe path resolution, SPA/front-controller rewrite precedence, the two-URL pooler presets (DigitalOcean managed pooler + PgBouncer), and the _check/ dev wiring.
+
+**Answer:**
+
