@@ -2,7 +2,7 @@
 id: MB.1.5
 title: "Measure blastit-sqlpolicy statements and tables mutants"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: []
@@ -10,11 +10,11 @@ paths:
   - "crates/blastit-sqlpolicy/src/statements.rs"
   - "crates/blastit-sqlpolicy/src/tables.rs"
   - "crates/blastit-sqlpolicy/tests/policy_module_tables.rs"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-13T14:44"
-updated: "2026-11-13T14:44"
+updated: "2026-11-13T18:28"
 ---
 
 # Goal

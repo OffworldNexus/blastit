@@ -619,3 +619,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T18:25 [MB.1.4] (implementer) attempt 2: 0 timeouts. Both code-region scans in normalize.rs step with enumerate+resume (no counter to mutate) => 124 mutants tested in 7m: 108 caught / 1 equi
 - 2026-11-13T18:26 [MB.1.4] (lead) status active -> done
 - 2026-11-13T18:26 [MB.1.4] (lead) lead verification: cargo test -p blastit-sqlpolicy 224+10+25+6+10+18+8 green; artefacts caught 108 / missed 1 / timeout 0 / unviable 15 = 99.1%%; single survivo
+- 2026-11-13T18:28 [MB.1.5] (lead) status active -> done
+- 2026-11-13T18:28 [MB.1.5] (lead) lead verification: cargo test -p blastit-sqlpolicy 7 suites green; artefacts caught 168 / missed 0 / timeout 0 / unviable 7 = 175 mutants, statements 100%% tabl
