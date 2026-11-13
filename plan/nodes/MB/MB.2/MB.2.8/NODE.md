@@ -2,7 +2,7 @@
 id: MB.2.8
 title: "Release prep 0.2.0: version bump, dated changelog, ARCHITECTURE sync"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 5
 depends_on: [MB.2.7, MB.2.11]
@@ -14,11 +14,11 @@ paths:
   - ARCHITECTURE.md
   - "scripts/check-release-tag.sh"
   - "scripts/release-notes.sh"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T22:17"
+updated: "2026-11-14T00:43"
 ---
 
 # Goal

@@ -323,6 +323,31 @@ http.
   `request` event keeps both numbers: `cost_ns` (what was charged) and `cpu_ns`
   (what the worker reported, `null` when it reported nothing).
 
+#### The static responder
+
+A `[route.static]` is answered by the scheduler itself: same process, same uid,
+same inherited listener — no new role, no new uid, no new socket. Each root's
+dirfd is opened once at boot (`O_PATH|O_DIRECTORY` on
+`manifest_dir.join(root)`); a request's path is resolved beneath that descriptor
+and never re-opened from a joined string.
+
+One total order decides, first match wins: the health path; a route with no
+policy is untouched; a malformed path (`400`) or a dotfile at any depth (`404`,
+except `.well-known` as the first segment); an exact regular file; a directory's
+`index`; `spa = true` and `root/index`; the manifest's `app` when it declares
+one; otherwise `404`. A refusal is terminal — never the app, never the fallback
+— and the responder answers `GET`/`HEAD` only: a servable target gives `405`
+with exactly `Allow: GET, HEAD`, and a `GET`/`HEAD` that declares a body gives
+`413`. Only a file beneath `root` is reachable: `openat2` with
+`RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS` (a per-segment
+`O_NOFOLLOW` walk where the kernel has no `openat2`), an `O_PATH` probe
+classified by `fstat`, then a read-open whose `(st_dev, st_ino)` must match the
+probe — so a symlink, FIFO, socket, device or path swapped between the two opens
+is `404` and is never read. `..`, NUL and the other malformed paths are `400`
+before any syscall, so no refusal depends on the filesystem's state. The
+year-long `Cache-Control` is keyed on the **answering** file's path: a directory
+`index` and a SPA fallback are always `no-cache`.
+
 #### Design choices
 
 * **`*` means the rightmost entry, not the leftmost.** Wherever the edge

@@ -862,3 +862,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T00:28 [MB.2.8] (lead) base 7f1d4d0
 - 2026-11-14T00:32 [MB.2.4] (lead) status ready -> done
 - 2026-11-14T00:32 [MB.2.5] (lead) status ready -> done
+- 2026-11-14T00:39 [MB.2.8] (implementer) version 0.2.0 (workspace + 28 requirements, lock 13 lines); dated CHANGELOG 2026-11-14; ARCHITECTURE static responder; make check + make e2e exit 0 (removed sta
+- 2026-11-14T00:43 [MB.2.8] (lead) GATE: workspace 0.2.0, 28/28 intra-workspace requirements, cargo metadata --locked --no-deps OK, check-release-tag v0.2.0 OK, release-notes --require-dated OK, 
+- 2026-11-14T00:43 [MB.2.8] (lead) status active -> done

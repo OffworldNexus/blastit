@@ -20,9 +20,9 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1.92"
-blastit-events = { version = "0.1.2", path = "../blastit-events" }
-blastit-sqlpolicy = { version = "0.1.2", path = "../blastit-sqlpolicy" }
-blastit-sys = { version = "0.1.2", path = "../blastit-sys" }
+blastit-events = { version = "0.2.0", path = "../blastit-events" }
+blastit-sqlpolicy = { version = "0.2.0", path = "../blastit-sqlpolicy" }
+blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
 pregresql = { git = "https://github.com/OffworldNexus/pregresql", rev = "e00e74751605193b249db31b6ea546c1522ad76a" }
 rustix = { version = "1.1.5", features = ["net", "fs"] }
 serde = { version = "1.0.229", features = ["derive"] }

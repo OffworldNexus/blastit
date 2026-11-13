@@ -11,8 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-blastit-events = { version = "0.1.2", path = "../blastit-events" }
-blastit-frame = { version = "0.1.2", path = "../blastit-frame" }
+blastit-events = { version = "0.2.0", path = "../blastit-events" }
+blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
 httparse = "1.10.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "time", "macros", "sync"] }
