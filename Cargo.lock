@@ -115,7 +115,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "blastit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blastit-dbproxy",
  "blastit-env",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-dbproxy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "blastit-events",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-env"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blastit-manifest",
  "percent-encoding",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-events"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -178,14 +178,14 @@ dependencies = [
 
 [[package]]
 name = "blastit-frame"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "blastit-http"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blastit-events",
  "blastit-frame",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-ingress"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "percent-encoding",
  "serde",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-manifest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blastit-ingress",
  "blastit-sqlpolicy",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-py"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blastit",
  "blastit-ingress",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-scheduler"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blastit-events",
  "blastit-frame",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-sqlpolicy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pg_query",
  "serde",
@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-sys"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "rustix 1.1.5",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-view"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blastit-frame",
  "pyo3",

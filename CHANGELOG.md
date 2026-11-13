@@ -5,6 +5,31 @@ lives in `Cargo.toml` (`[workspace.package] version`), and a release is the tag
 `v` plus that version — `scripts/check-release-tag.sh` refuses a tag that says
 anything else, and [`RELEASING.md`](RELEASING.md) has the steps.
 
+## 0.1.1 (2026-11-12)
+
+The first hour with blastit now happens on your own machine, as you, in one pass.
+
+- **Run it without `sudo`.** `blastit dev` runs your app the way production does
+  — its own processes per route, the credential barrier, the database proxy — as
+  your own uid, reading `./blastit.toml` and binding `127.0.0.1:8080` only
+  ([Local development](https://offworldnexus.github.io/blastit/local/)).
+- **Fill the manifest in one pass.** `blastit check --learn` with a test suite,
+  or `blastit dev --learn` while you click through the app, records the routes
+  and statements it sees instead of denying at the first gap, adds them to
+  `blastit.toml`, and prints the path it wrote
+  ([fill the manifest in one pass](https://offworldnexus.github.io/blastit/local/#fill-the-manifest-in-one-pass)).
+- **`blastit check` gates CI.** It runs `pytest -q` under blastit and reports one
+  finding per line — a statement no grant allows, a grant never used, a route no
+  test exercised, a body without a declared `[route.ingress]` — and fails the
+  run, with `--json` for the machine-readable list
+  ([CI/CD](https://offworldnexus.github.io/blastit/ci/)).
+- **Three leaner pages.** [Local
+  development](https://offworldnexus.github.io/blastit/local/), [CI/CD](https://offworldnexus.github.io/blastit/ci/)
+  and [Deployments](https://offworldnexus.github.io/blastit/deploy/) give the
+  exact commands, in order, for a laptop with no root, a pipeline, and a
+  platform, from [getting
+  started](https://offworldnexus.github.io/blastit/getting-started/).
+
 ## 0.1.0 (2026-10-27)
 
 The first release.

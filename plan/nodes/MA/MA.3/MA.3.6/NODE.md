@@ -2,16 +2,16 @@
 id: MA.3.6
 title: "Bump 0.1.1 (Cargo.toml/Cargo.lock), changelog entry and wheel metadata proof"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MA.3.1, MA.3.2, MA.3.3, MA.3.4, MA.3.5]
 paths: [Cargo.toml, Cargo.lock, CHANGELOG.md]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T19:16"
-updated: "2026-11-12T19:16"
+updated: "2026-11-13T03:10"
 ---
 
 # Goal
