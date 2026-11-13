@@ -134,6 +134,11 @@ mode = "presets"
 
 [[page.fence]]
 index = 2
+mode = "static"
+reason = "Deployment recipe: `OWNER_URL`/`APP_URL` name a managed cluster and a Compose stack this gate does not run, so the psql flags are checked against the installed binary; the zone is read on the direct port as `app`."
+
+[[page.fence]]
+index = 3
 mode = "example"
 reason = "Measures X-Forwarded-For through a real load balancer the harness does not have; the trusted-proxy decision itself is a settings and e2e concern."
 
@@ -152,12 +157,12 @@ reason = "Deployment recipe: doctl and Docker run against a registry and a cloud
 [[page.fence]]
 index = 3
 mode = "static"
-reason = "Deployment recipe: `doctl apps create` needs a DigitalOcean account and the image the previous fence builds."
+reason = "Deployment recipe: psql runs the owner's role and grant SQL against the managed database, which this gate does not have."
 
 [[page.fence]]
 index = 4
 mode = "static"
-reason = "Deployment recipe: psql runs the owner's role and grant SQL against the managed database."
+reason = "Deployment recipe: `doctl apps create` needs a DigitalOcean account, the pool created by the previous step, and the image fence 2 builds."
 
 [[page]]
 path = "docs/deploy/compose-traefik.md"

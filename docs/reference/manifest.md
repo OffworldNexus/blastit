@@ -179,6 +179,12 @@ Input slots: `url` (a libpq URI), or the same split into `host`, `port`, `user`,
 `password`, `database`, `sslmode` — not both — plus `ca_cert` (PEM for the
 upstream TLS leg).
 
+* **URL query parameters** are allowlisted: `application_name`,
+  `channel_binding`, `connect_timeout`, `sslmode`, `sslcompression`,
+  `target_session_attrs` and `keepalives*`. Anything else — `options` included —
+  aborts the boot, so a URL cannot smuggle session settings or a credential past
+  the proxy. Set a session default on the role or the database instead.
+
 Template fields: the default `url` is
 `postgresql://{{ user }}@/{{ database }}?host={{ socket_dir }}&port={{ port }}` —
 the socket directory in a **query parameter**, the one form libpq,

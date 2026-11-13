@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 
+import docs_deploy
 import prebuilt_wheel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -44,6 +45,11 @@ def scenario_self_test():
 
 
 def main():
+    # The two deploy pages promise a pooler between blastit and PostgreSQL; a
+    # regression there is a docs defect, not a container one, so it is asserted
+    # before Docker starts (no Docker, no network).
+    if docs_deploy.main() != 0:
+        return 1
     env = {
         **os.environ,
         "E2E_DB_PASSWORD": "e2e-" + secrets.token_hex(16),

@@ -47,7 +47,7 @@ uid, capability and seccomp path end to end.
 
 * **`BLASTIT_MAX_WORKERS`** — request threads alive across every view. Keep it at
   or below the database plan's connection limit: each worker holds one upstream
-  connection.
+  connection. With a pooler in front, it is the pool's client count instead.
 * **`BLASTIT_MAX_VIEW_PROCESSES`** — live view processes, derived from memory at
   boot and re-derived from what a view really costs on your app. Retiring never
   fails a request: when nothing is evictable, the request waits.

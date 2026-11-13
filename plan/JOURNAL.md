@@ -817,3 +817,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T23:35 [MB.2.6] (implementer) attempt 3 (gate regression): blastit check never required an app — split the R13 rule: static_app_refusal (all-static + set BLASTIT_APP refused by name) is chec
 - 2026-11-13T23:35 [MB.2.6] (lead) GATE: make check caught a regression the review could not (18 python contract failures: check demanded BLASTIT_APP). Fixed by splitting app_rule (boots) from st
 - 2026-11-13T23:35 [MB.2.6] (lead) status review -> done
+- 2026-11-13T23:36 [MB.2.11] (doc-writer) final: self-contained zone fence (OWNER_URL/APP_URL exports), oracle + export-order pinned, inventory reason corrected; docs-unit 63/57, docs-check clean, docs-
+- 2026-11-13T23:40 [MB.2.11] (doc-writer) final: gate pins APP_URL port/db + export order + owner-oracle rejection (41/41); research note qualified to new server sessions and cites server_lifetime; both
+- 2026-11-13T23:44 [MB.2.11] (lead) REVIEW PASS attempt 2 (3 MINOR: one stale 'options is the supported way' phrasing in the research note; ai-ergonomics line refs drifted; single app.yaml git war
+- 2026-11-13T23:44 [MB.2.11] (lead) status review -> done
