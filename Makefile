@@ -4,6 +4,7 @@
 #   make check          # fast unprivileged repo gate: guard + critical-guard + rust + python tools + docs + plan
 #   make clean          # format Rust and Python harness tools, then run lints
 #   make docs-check     # build Zensical documentation site with --strict (zero broken links/anchors)
+#   make docs-unit      # run the runnable-docs gate's own tests (offline, no wheel build)
 #   make test-critical  # run protected critical tests only (Rust + Python)
 #   make e2e            # build wheel and run Docker + rootless Docker e2e scenarios (gates)
 #   make mutants-rust   # run cargo-mutants on critical crates (PKG=blastit-sqlpolicy)
@@ -11,6 +12,9 @@
 UV ?= uv
 UVX ?= uvx --offline
 CARGO ?= cargo
+# The one pinned dependency the runnable-docs gate needs (`docs-unit`, and the
+# `blastit check` fences through the harness). Read from the uv cache, offline.
+DOCS_PYTEST ?= 9.2.0
 
 # Resolve real CPython >= 3.13 binary via uv (following symlinks so ../lib holds libpython3.X.so).
 PYO3_BIN := $(shell readlink -f "$$($(UV) python find --no-project '>=3.13' 2>/dev/null || which python3)")
@@ -33,7 +37,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 
 .PHONY: help check clean guard critical-guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical \
-        py-format py-lint test-critical docs-check docs-test e2e mutants-rust
+        py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust
 
 help: ## Show available Make targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -112,7 +116,12 @@ test-critical: critical-skip-check rs-test-critical ## Run protected critical ti
 docs-check: ## Build Zensical documentation site with --strict
 	$(UVX) zensical build --strict
 
-docs-test: ## Execute every console fence in README.md and the public docs pages
+docs-unit: ## Run the runnable-docs gate's own tests (offline, no wheel build)
+	UV_OFFLINE=1 $(UV) run --no-project --with pytest==$(DOCS_PYTEST) python -m pytest \
+		python/tests/test_runnable_docs.py \
+		python/tests/runnable_docs/test_harness.py -q
+
+docs-test: docs-unit ## Execute every console fence in README.md and the public docs pages
 	scripts/build-wheel.sh
 	$(UV) run --no-project python python/tests/runnable_docs/run.py
 
@@ -126,4 +135,4 @@ mutants-rust: ## Run cargo-mutants on Rust crates (pass PKG=<crate> to scope)
 	@rm -rf mutants.out
 	TMPDIR="$(MUTANTS_TMP)" $(RUST_ENV) $(CARGO) mutants $(if $(PKG),-p "$(PKG)",--workspace) -j $(MUTANTS_JOBS) --timeout $(MUTANTS_TIMEOUT)
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-check docs-test plan-validate ## Full fast unprivileged check
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test plan-validate ## Full fast unprivileged check

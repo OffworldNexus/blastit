@@ -432,3 +432,14 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T02:51 [MA.3.10] (lead) status review -> done
 - 2026-11-13T02:51 [MA.3.5] (lead) lead accepts audit: report docs/testing/AUDIT-MA.3.md; escape gaps closed by MA.3.8/3.9/3.10/3.11; mutants blocked on H-002 (cargo-mutants absent) -> milestone 
 - 2026-11-13T02:51 [MA.3.5] (lead) status review -> done
+- 2026-11-13T02:52 [MA.3.13] (lead) created (task) Run the docs-gate unit suites in make check and pin the harness checks in-repo
+- 2026-11-13T02:52 [MA.3.6] (lead) status ready -> active
+- 2026-11-13T02:52 [MA.3.6] (lead) attempt 1/3 started
+- 2026-11-13T02:52 [MA.3.6] (lead) base 09b7ef3af3cbab74cc713b48012f1a4ddde69575
+- 2026-11-13T02:52 [MA.3.13] (lead) status ready -> active
+- 2026-11-13T02:52 [MA.3.13] (lead) attempt 1/3 started
+- 2026-11-13T02:52 [MA.3.13] (lead) base 09b7ef3af3cbab74cc713b48012f1a4ddde69575
+- 2026-11-13T03:00 [MA.3.6] (lead) status active -> review
+- 2026-11-13T03:00 [MA.3.13] (lead) status active -> review
+- 2026-11-13T03:10 [MA.3.6] (lead) status review -> done
+- 2026-11-13T03:10 [MA.3.13] (lead) status review -> done

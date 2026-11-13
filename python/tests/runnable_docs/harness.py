@@ -45,12 +45,15 @@ its written reason, and the `static` mode parses what a reader would copy: every
 subcommand, flags and file paths, and every JSON line in the fence.
 
 **The flag tables are the tools' own.** A `static` fence passes only if the flag
-it shows is one the real command accepts, so the tables above are checked against
-the installed binaries rather than maintained by hand: `assert_flag_tables()` runs
-before anything is built (`psql --help` is complete, so it is checked on every
-run) and `harness.py --audit-flags` checks every table, accepting a flag `--help`
-does not print only when the tool itself parses it. `psql -C` — in this table,
-never in psql — is the bug that check exists for.
+it shows is one the real command accepts, so the tables are checked against the
+installed binaries rather than maintained by hand. `assert_flag_tables()` runs
+before anything is built and re-checks the tables a host can referee exactly:
+`psql --help` prints its complete option list, so `psql` is compared on every
+run, and a tool this host does not have is named in the summary instead of
+failing the run. `harness.py --audit-flags` reconciles every table (`docker`,
+`docker compose`, `psql`, `doctl`), accepting a flag `--help` does not print only
+when the tool itself parses it, and names the tools this host lacks. `psql -C` —
+in this table, never in psql — is the bug that check exists for.
 """
 
 from __future__ import annotations
@@ -548,7 +551,10 @@ class Harness:
         # installed tools' own `--help` before anything is built: a table entry a
         # tool does not accept would let an impossible command pass (see
         # `FlagAudit` for why `psql` is the table the gate itself re-checks).
-        assert_flag_tables(gate_only=True)
+        # The summary is printed so a log says which tables this run could and
+        # could not referee — including `doctl`, which many hosts lack.
+        self.flag_summary = assert_flag_tables(gate_only=True)
+        print(f"harness: {self.flag_summary}", file=sys.stderr)
         # The source tree, the release the docs announce and the artifact must
         # agree before anything is built or run.
         assert_provenance()
@@ -2575,9 +2581,10 @@ class FlagAudit:
     never run. Docker's help hides compatibility aliases (`--net`,
     `--disable-content-trust`, `-h`) and gains or loses flags between CLI
     releases, so containment alone would red the gate for a host's version
-    rather than for the table; those tables are audited by `--audit-flags`
-    instead, where a flag missing from `--help` must at least be *accepted* by
-    the installed binary.
+    rather than for the table; `doctl` is not installed everywhere for the same
+    reason. Those tables are audited by `--audit-flags` instead, where a flag
+    missing from `--help` must at least be *accepted* by the installed binary and
+    a tool the host does not have is reported, never guessed at.
     """
 
     label: str
@@ -2604,6 +2611,16 @@ FLAG_AUDIT: tuple[FlagAudit, ...] = (
     FlagAudit("docker compose ps", ("docker", "compose", "ps"), COMPOSE_PS),
     FlagAudit("docker compose pull", ("docker", "compose", "pull"), COMPOSE_PULL),
     FlagAudit("psql", ("psql",), PSQL, gate=True),
+    # `doctl` is not installed on every host the gate runs on, so its tables are
+    # audited (`--audit-flags`) and never gated: an absent binary is reported as
+    # `not installed here`, not treated as a table that passed. The deploy recipes
+    # still check every doctl command against these tables; the audit is what
+    # keeps a hand-typed entry (`--spec`, `apps delete --force`) honest.
+    FlagAudit("doctl", ("doctl",), DOCTL_GLOBAL),
+    *(
+        FlagAudit(f"doctl {' '.join(command)}", ("doctl", *command), table)
+        for command, table in DOCTL_COMMANDS.items()
+    ),
 )
 
 # A flag in a help text: `-a`, `--echo-all`, but not the `-x` in `--no-align`.
@@ -2662,13 +2679,19 @@ def _accepts(audit: FlagAudit, flag: str, takes_value: bool, home: Path) -> bool
 
 
 def assert_flag_tables(gate_only: bool = False) -> str:
-    """Every flag the gate accepts must be one the real tool accepts.
+    """Every flag in an audited table must be one the real tool accepts.
 
     The referee is the installed binary: its `--help` text, plus one parsed
     command per flag the text does not print (a hidden compatibility alias) so a
     hand-typed table entry cannot survive a tool that never heard of it. This is
     the check that would have caught `psql -C`: `psql --help` has no `-C`, and
     `psql -C x --help` exits 1 with `invalid option -- 'C'`.
+
+    `gate_only` is what a gate run calls: only the `gate` tables are compared,
+    because those are the tools whose `--help` is a complete list on every
+    release. A tool this host does not have is named in the returned summary
+    instead of failing the run, so an absent `doctl` cannot red the gate while
+    `--audit-flags` still reports it.
     """
     checked: list[str] = []
     missing: list[str] = []
@@ -3533,8 +3556,9 @@ def main(argv: list[str]) -> int:
     prerequisite `docs/testing/README.md` names. `--provenance` prints the version
     chain and the wheel the gate would test, which is what `make docs-test`'s
     verdict line and a CI log need to agree on. `--audit-flags` compares every
-    flag table with the installed `docker`/`docker compose`/`psql`, which is how a
-    hand-typed flag that no release accepts (`psql -C`) stays out of the gate.
+    flag table with the installed `docker`/`docker compose`/`psql`/`doctl`, and
+    names the tools this host does not have, which is how a hand-typed flag that
+    no release accepts (`psql -C`) stays out of the gate.
     """
     import argparse
 
