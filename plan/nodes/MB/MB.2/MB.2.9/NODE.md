@@ -5,7 +5,7 @@ kind: task
 status: ready
 owner: "doc-writer"
 priority: 3
-depends_on: [MB.2.2]
+depends_on: [MB.2.6]
 paths:
   - docs/security.md
   - "docs/how-it-works.md"
@@ -17,7 +17,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T20:44"
-updated: "2026-11-13T20:44"
+updated: "2026-11-13T21:23"
 ---
 
 # Goal

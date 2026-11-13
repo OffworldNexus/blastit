@@ -736,3 +736,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T21:33 [MB.2.3] (lead) status active -> review
 - 2026-11-13T21:40 [MB.2.3] (lead) REVIEW PASS attempt 1 (4 MINOR: R4 inherited-groups accepted case missing; R4 dead-declaration vs BLASTIT_APP precedence -> reconcile in MB.2.6/MB.2.9; [route.s
 - 2026-11-13T21:40 [MB.2.3] (lead) status review -> done
+- 2026-11-13T21:40 [MB.2.4.1] (lead) status ready -> active
+- 2026-11-13T21:40 [MB.2.4.1] (lead) attempt 1/3 started
+- 2026-11-13T21:40 [MB.2.4.1] (lead) base 40ba576
+- 2026-11-13T21:47 [MB.2.4.1] (implementer) implemented static_asset resolver (segments/classify/StaticRoot open+open_with+resolve+resolve_with, openat2+Walk, total errno table, ImmutableGlob, same_inode,
+- 2026-11-13T21:48 [MB.2.4.1] (lead) status active -> review
+- 2026-11-13T21:56 [MB.2.4.1] (implementer) attempt 2: review fixups — local segment guard in resolve_with (walk cannot escape via caller-supplied .., empty, embedded /), probe fd pinned across the read o
+- 2026-11-13T21:56 [MB.2.4.1] (lead) attempt 2/3 started
+- 2026-11-13T21:56 [MB.2.4.1] (lead) status review -> review
+- 2026-11-13T22:01 [MB.2.4.1] (lead) REVIEW PASS attempt 2 (2 MINOR: head_segments is a 5th doc(hidden) pub seam -> MB.2.2 should add it to design §4.2; plan/ files changed outside paths are plan.p
+- 2026-11-13T22:01 [MB.2.4.1] (lead) status review -> done

@@ -27,3 +27,11 @@ status active -> review
 ## 2026-11-13T18:50 [lead]
 
 status review -> done
+
+## 2026-11-13T18:50 [implementer]
+
+note for lead: my commit 4141dab captured RESULT.md before the last gate run; 10 lines are still uncommitted in plan/nodes/MB/MB.1/MB.1.11/RESULT.md - they are the final evidence (make check exit 0 on the delivered tree with .worktrees/hygiene-check present, 91 test suites, 38 fences, plan OK). Please include them in the next commit.
+
+## 2026-11-13T18:52 [lead]
+
+committed 4141dab (lead re-ran make check: exit 0, 57s)

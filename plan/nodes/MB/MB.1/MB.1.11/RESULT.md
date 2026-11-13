@@ -167,15 +167,15 @@ mutants: clean: freed 10.1 MiB; /home/remy/.cache/blastit-mutants now has 656.4 
 ```
 
 ```console
-$ make check
+$ make check                  # final tree, with .worktrees/hygiene-check present
 uv run --no-project tools/guard.py
-guard: OK (4 staged/untracked file(s) checked)
+guard: OK (3 staged/untracked file(s) checked)
 uv run --no-project tools/critical_guard.py --base HEAD
-critical-guard: HEAD..working tree, 4 changed file(s)
+critical-guard: HEAD..working tree, 9 changed file(s)
   no change to a protected critical test
 cargo fmt --all -- --check
 … 91 × "test result: ok. … 0 failed …" (workspace unit, integration, doc and critical suites)
-38 fences: 26 executed, 12 accounted, 0 failed · 34.4s
+38 fences: 26 executed, 12 accounted, 0 failed · 31.3s
 uv run --no-project tools/plan.py validate
 plan OK
 $ echo $?
@@ -192,11 +192,11 @@ critical-guard: HEAD..working tree, 6 changed file(s)
 ```
 
 The full `make check` ran **with `.worktrees/hygiene-check` present** (step 6) and
-exited 0. During the run two other agents' commits landed in this checkout
-(`51dced9` → `9018a8b`, MB.1.12/MB.1.13 and the epic audit), which is why the first
-`make check` attempt at 18:45 was red in `rs-fmt` on *their* then-uncommitted
-`crates/blastit/tests/*.rs`; the checkout is now clean apart from this node's files, and
-this node touches no `crates/**` file.
+exited 0, on the exact tree this node delivers. It was re-run once because other agents'
+commits landed in this checkout while the node was in flight (`51dced9` → `9018a8b` →
+`4141dab`, MB.1.12/MB.1.13 and the epic audit); the first attempt at 18:45 was red in
+`rs-fmt` only on *their* then-uncommitted `crates/blastit/tests/*.rs`, never on a file of
+this node. This node touches no `crates/**` file.
 
 ### 6. Worktree hygiene: ignored inside the checkout, gates tolerate it
 
@@ -216,7 +216,7 @@ $ git check-ignore -v .worktrees/hygiene-check .worktrees/hygiene-check/Cargo.to
 $ make check                                    # exit 0, full gate, checkout still present
 $ git worktree remove .worktrees/hygiene-check
 $ git worktree list
-/home/remy/offworld-nexus/blastit  9018a8b [release/0.2.0]
+/home/remy/offworld-nexus/blastit  4141dab [release/0.2.0]
 $ uv run --no-project tools/guard.py           # same tree, checkout removed
 guard: OK (3 staged/untracked file(s) checked)
 ```

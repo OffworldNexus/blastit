@@ -35,3 +35,7 @@ GATE EVIDENCE: make e2e exit 0 at 9c523e2 + dist 0.1.2 (130s): 'ok a route grant
 ## 2026-11-13T19:56 [lead]
 
 status ready -> done
+
+## 2026-11-13T19:56 [lead]
+
+GATE CLOSED 06013a6. Two test-curator audits of the same diff exist (docs/testing/AUDIT-MB.1.md F1-F10 committed at 9018a8b by a concurrent session, and AUDIT-MB1.md C1-C9/G1-G7 committed with this gate); every gap either audit filed is closed by MB.1.12-MB.1.17, so the duplication is documentation debt only - one of the two should be folded or deleted at the next plan hygiene pass.

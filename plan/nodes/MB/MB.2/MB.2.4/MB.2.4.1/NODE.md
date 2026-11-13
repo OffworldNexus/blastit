@@ -2,7 +2,7 @@
 id: MB.2.4.1
 title: "Resolve request paths beneath a static root (openat2, refusal matrix, TOCTOU) - design MB.2.4a"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.1, MB.2.3]
@@ -12,11 +12,11 @@ paths:
   - "crates/blastit-scheduler/src/lib.rs"
   - "crates/blastit-scheduler/tests/critical_static_resolve.rs"
   - "crates/blastit-scheduler/tests/common/static_fixture.rs"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-13T20:52"
-updated: "2026-11-13T20:52"
+updated: "2026-11-13T22:01"
 ---
 
 # Goal

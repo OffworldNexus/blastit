@@ -67,6 +67,7 @@ mod fair;
 mod path;
 mod route;
 mod scheduler;
+pub mod static_asset;
 mod task;
 
 pub use crate::config::{
