@@ -116,8 +116,20 @@ def main():
           "the very statement the other route was granted is refused here")
     check(not any(route == "sql" and sql == granted_text for route, sql in refusals),
           "the route that was granted the statement was never refused it")
+    # The route whose grant is `queries = []`: an ordinary statement was refused
+    # by the *proxy*, in its own words — a `sql.denied` event carrying the
+    # SQLSTATE it answered. A database permission error would leave no such line
+    # at all (only the app would hear of it), so this is what says the refusal
+    # was the allowlist's and not the server's.
+    check(any(e.get("route") == "deny" and sql.strip() == granted_text
+              and e.get("sqlstate") == "42501" for e, sql in zip(denied, sqls)),
+          "the `queries = []` route refused an ordinary statement with SQLSTATE 42501")
+    check(any(e.get("route") == "deny" and e.get("reason") == "the statement is not granted"
+              for e in denied),
+          "with the allowlist as the reason: the statement is not granted")
     routes = {e.get("route") for e in denied}
-    check(routes <= {"notes", "debug", "sql"}, f"every refusal names its own route ({routes})")
+    check(routes <= {"notes", "debug", "sql", "deny"},
+          f"every refusal names its own route ({routes})")
 
     routed = {(e.get("path"), e.get("route")) for e in events if e.get("event") == "request"}
     for path, route in [("/login/", "login"), ("/notes/", "notes"), ("/logout/", "logout"),
@@ -125,6 +137,7 @@ def main():
                         ("/debug/caps/", "debug"),
                         ("/", "fallback"), ("/notes/peek/", "notes"),
                         ("/notes/sql/", "notes"), ("/debug/sql/", "sql"),
+                        ("/deny/sql/", "deny"),
                         ("/debug/egress/", "debug"), ("/egress/probe/", "egress")]:
         check((path, route) in routed, f"{path} was routed to {route}")
 

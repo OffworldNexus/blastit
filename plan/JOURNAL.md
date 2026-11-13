@@ -596,3 +596,17 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T16:40 [MB.1.5] (lead) attempt 1/3 started
 - 2026-11-13T16:40 [MB.1.5] (lead) base 7a41f61
 - 2026-11-13T16:42 [MB.1.10] (lead) status review -> done
+- 2026-11-13T16:42 [MB.1.8] (lead) status ready -> active
+- 2026-11-13T16:42 [MB.1.8] (lead) attempt 1/3 started
+- 2026-11-13T16:42 [MB.1.8] (lead) base d84141f
+- 2026-11-13T16:47 [MB.1.5] (implementer) attempt 1: new tests/policy_module_tables.rs (18 cases) + inline statements/tables cases written; statements+tables campaign running in isolated TMPDIR /tmp/ope
+- 2026-11-13T17:02 [MB.1.8] (implementer) attempt 1: e2e deny route (queries = []) + negative --cap-drop ALL boot + learn-refusal wait; make e2e exit 0, 3x test-critical OK, critical_guard --node exit 0
+- 2026-11-13T17:30 [MB.1.5] (implementer) done: 170 mutants in 4 shards -> caught 156, missed 1 (equivalent, statements.rs:116:18), timeout 6, unviable 7; statements 91.1% / tables 100.0% (viable); crat
+- 2026-11-13T17:31 [MB.1.3] (lead) attempt 1 interrupted: lexer.rs/learn.rs bounded and lexer_progress.rs written; scope spillover (lru/statements/tables + 2 unrelated test files) reset to HEAD s
+- 2026-11-13T17:31 [MB.1.3] (lead) attempt 2/3 started
+- 2026-11-13T18:12 [MB.1.4] (lead) COLLISION: lead reset the sqlpolicy spillover (src/{lru,statements,tables}.rs + tests/policy_module_{edges,tables}.rs) at ~17:00 while this node's implementer w
+- 2026-11-13T18:12 [MB.1.4] (lead) status review -> ready
+- 2026-11-13T18:12 [MB.1.5] (lead) COLLISION: the same ~17:00 reset removed the inline statements/tables test cases and tests/policy_module_tables.rs this attempt had written, while RESULT.md cla
+- 2026-11-13T18:12 [MB.1.5] (lead) status active -> ready
+- 2026-11-13T18:12 [MB.1.8] (lead) status active -> done
+- 2026-11-13T18:12 [MB.1.8] (lead) lead verification: critical_guard --base d84141f --node MB.1.8 OK (protected change authorized, assertion unchanged, bounded wait added); make check exit 0; mak

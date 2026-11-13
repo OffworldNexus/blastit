@@ -561,6 +561,53 @@ def caps_and_limits(env, ssh=None):
     return 0 if ok else 1
 
 
+#: The sentence a boot that is neither root nor capable must fail with
+#: (`docs/troubleshooting.md`): the fact, then the capabilities it lacks in
+#: `Capability::NEEDED` order. `cap_setpcap` is not in it — without it the boot
+#: still runs, with a warning (D6/M1).
+MISSING_CAPABILITIES = (
+    "init runs as uid {uid} and is missing "
+    "cap_chown, cap_dac_override, cap_fowner, cap_kill, cap_setgid, cap_setuid"
+)
+
+
+def check_negative_boot(image, uid=APP_UID):
+    """D6's other half: without root **and** without the capabilities, no boot.
+
+    The positive path is the whole run above; this is the refusal the same image
+    must give when the deployment drops everything (`--cap-drop ALL`, as a
+    platform with a stricter policy would). It starts the *shared* interpreter,
+    which is the capability-free one: the image's default command is the
+    dedicated copy, and with an empty bounding set the kernel refuses to
+    `execve` a file whose capabilities it cannot grant at all ("Operation not
+    permitted") — a deployment error, but not the sentence an operator has to be
+    told. The shared interpreter is what a container that gave blastit nothing
+    can start, so that is the boot that must speak.
+
+    The message is asserted as well as the exit code: an exit `1` alone could be
+    a traceback, and the point is that the boot *names* the uid and the
+    capabilities it lacks, because that sentence is what sends the operator to
+    the fix. (The droplet run's image lives on the droplet; `make e2e` runs this
+    locally, which is the CI path.)
+    """
+    print("D6: an unprivileged boot with no capabilities is refused")
+    ok = True
+    completed = subprocess.run(
+        ["docker", "run", "--rm", "--cap-drop", "ALL", "--user", f"{uid}:{uid}",
+         image, "python3", "-m", "blastit"],
+        text=True, capture_output=True, timeout=180,
+    )
+    output = completed.stdout + completed.stderr
+    ok &= check(completed.returncode == 1, f"the boot exits 1 ({completed.returncode})")
+    expected = MISSING_CAPABILITIES.format(uid=uid)
+    named = expected in output
+    ok &= check(named, f"and the message names the uid and every capability it lacks "
+                       f"({expected})")
+    if not named:
+        print(f"  info the boot said: {output.strip()[-1200:]}")
+    return 0 if ok else 1
+
+
 def local(args):
     password = "e2e-" + secrets.token_hex(16)
     project = args.project or "blastit-d6-rootless"
@@ -603,6 +650,7 @@ def local(args):
         rc |= check_proxy_headers(args.tls_port, gateway)
         rc |= caps_and_limits(env)
         rc |= check_container(env, project)
+        rc |= check_negative_boot(env["E2E_IMAGE"])
     finally:
         if rc:
             compose_local(env, "logs", "--no-color", "--tail", "200", "app")

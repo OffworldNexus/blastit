@@ -4,8 +4,12 @@
 # The routes the scenario posts a form to declare `[route.ingress] body =
 # "form"`: a body on a route with no codec is a `413` (ADR-0006), so leaving it
 # out fails the scenario at the login form rather than at the database.
+#
+# Every route attaches the `connection` group itself instead of taking it from a
+# top-level `groups` key: that key attaches a group to *every* route, and the
+# `deny` route below must take none — its `[route.db] queries = []` is the
+# assertion (an empty allowlist refuses every statement with SQLSTATE 42501).
 version = 1
-groups = ["connection"]
 
 [proxy.db]
 protocol = "postgresql"
@@ -27,6 +31,7 @@ queries = [
 name = "login"
 path = ['/login/']
 methods = ["GET", "POST"]
+groups = ["connection"]
 [route.db]
 transaction_control = true
 queries = [
@@ -43,7 +48,7 @@ body = "form"
 name = "logout"
 path = ['/logout/']
 methods = ["POST"]
-groups = ["session"]
+groups = ["connection", "session"]
 [route.db]
 transaction_control = true
 queries = [
@@ -56,7 +61,7 @@ body = "form"
 [[route]]
 name = "notes"
 path = ['/notes/', '/notes/[0-9]+/delete/', '/notes/peek/', '/notes/sql/']
-groups = ["session"]
+groups = ["connection", "session"]
 [route.db]
 transaction_control = true
 queries = [
@@ -72,11 +77,13 @@ body = "form"
 name = "debug"
 path = ['/debug/env/', '/debug/request/', '/debug/caps/', '/debug/egress/']
 methods = ["GET"]
+groups = ["connection"]
 
 [[route]]
 name = "sql"
 path = ['/debug/sql/']
 methods = ["GET"]
+groups = ["connection"]
 [route.db]
 queries = [
   'SELECT count(*) FROM notes_note',
@@ -86,8 +93,17 @@ queries = [
 name = "egress"
 path = ['/egress/probe/']
 methods = ["GET"]
+groups = ["connection"]
 egress = true
+
+[[route]]
+name = "deny"
+path = ['/deny/sql/']
+methods = ["GET"]
+[route.db]
+queries = []
 
 [[route]]
 name = "fallback"
 path = ['.*']
+groups = ["connection"]

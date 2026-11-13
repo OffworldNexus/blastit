@@ -46,6 +46,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tomllib
 import types
 import unittest
@@ -1032,6 +1033,15 @@ class TestTheContract(unittest.TestCase):
         before = (refused_project.root / "blastit.toml").read_bytes()
         refused = self.run_check(refused_project, "--learn", "--json", server=server)
         self.assertEqual(refused.returncode, 1, refused.stderr.decode())
+        # The statement reaches this test's own server asynchronously: the view
+        # sends it to dbproxy, dbproxy forwards it upstream, and only then is the
+        # observation drained and the report built. Wait, bounded, for the wire
+        # statement to be on the server before asserting what reached it — the
+        # assertion is unchanged, and a timeout only means it fails with the
+        # message it always had.
+        deadline = time.monotonic() + 10
+        while server.statements != [literal] and time.monotonic() < deadline:
+            time.sleep(0.01)
         self.assertEqual(
             server.statements,
             [literal],

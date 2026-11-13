@@ -2,16 +2,16 @@
 id: MB.1.8
 title: "Permanent e2e empty-grant and negative-boot assertions plus deterministic learn-refusal test"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: []
 paths: ["e2e/**", python/tests/critical/test_check_contract.py]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T14:44"
-updated: "2026-11-13T14:44"
+updated: "2026-11-13T18:12"
 ---
 
 # Goal
