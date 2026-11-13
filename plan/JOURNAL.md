@@ -404,3 +404,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T01:42 [MA.3.8] (lead) status active -> review
 - 2026-11-13T01:50 [MA.3.3] (lead) status active -> done
 - 2026-11-13T01:50 [MA.3.3] (lead) visual PASS: 9 pages x 3 viewports, 3 Mermaid diagrams render, mobile nav + no horizontal scroll; MINOR: brand/logo.svg #fbfaf6 fill is low-contrast on the ligh
+- 2026-11-13T01:50 [MA.3.8] (lead) REVIEW FAIL (1/3): [MAJOR] docs-gate pins CPython 3.13 but the harness sanitises PATH (setup-python 3.13 in /opt/hostedtoolcache invisible) -> uv venv aborts; n
+- 2026-11-13T01:50 [MA.3.8] (lead) status review -> ready
+- 2026-11-13T01:50 [MA.3.8] (lead) attempt 2/3 started
+- 2026-11-13T01:50 [MA.3.8] (lead) retry base 04bed18c7304f9109d60f3a3e5c4427868246782
+- 2026-11-13T01:58 [MA.3.8] (lead) status ready -> review
+- 2026-11-13T02:05 [MA.3.8] (lead) status review -> done

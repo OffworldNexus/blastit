@@ -220,3 +220,229 @@ jobs:
           /tmp/blastit-tests/bin/pip install dist/blastit-*.whl pytest pytest-django pytest-xdist django 'psycopg[binary]'
       - name: Run the plugin's tests
         run: /tmp/blastit-tests/bin/pytest python/tests -q
+
+  # `make check` runs the docs gate and both critical-test guards; this job and
+  # `guards` are what run them on a pull request. Nothing else here calls `make`
+  # (`docs/testing/AUDIT-MA.3.md` finding F6), so before these two jobs a PR
+  # could ship a broken console fence or weaken a protected test and stay green.
+  docs-gate:
+    name: docs gate (every documented console fence)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # `scripts/build-wheel.sh` falls back to `uvx maturin`, which would reach
+      # the index mid-gate; the job installs maturin with pipx and names it.
+      MATURIN: maturin
+      # The harness installs `pytest==9.2.0` from the *global* uv cache and
+      # refuses the network (`Harness.install_pytest`). The path it reads is
+      # `uv cache dir`, which this variable pins at a directory we can cache, so
+      # the one dependency is filled once instead of on every PR.
+      UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # `scripts/build-wheel.sh` (via maturin) builds the extension against this
+      # interpreter, so the wheel carries the `cp${PYTHON_VERSION}` tag — and that
+      # tag is what `harness.interpreter_for` reads to decide which CPython the
+      # fences need.
+      - name: Pin PYO3_PYTHON so the wheel matches the pinned CPython
+        run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@v10.3.2
+      # Every fence runs in the environment `harness.Harness.base_env` builds:
+      # `HOME` is a throwaway directory, `PATH` is `dirname(uv)` plus
+      # `/usr/local/bin:/usr/bin:/bin`, and `UV_PYTHON_DOWNLOADS=never` forbids a
+      # download. `actions/setup-python` installs CPython under
+      # `/opt/hostedtoolcache`, which is none of those (`debian`'s `/usr/bin`
+      # holds 3.12), so `uv venv --python 3.13` inside the gate cannot see the
+      # interpreter the job pinned and the first fence aborts before it runs.
+      # Link it into a directory the sanitised `PATH` keeps.
+      - name: Put the pinned CPython on the gate's sanitised PATH
+        run: |
+          set -euo pipefail
+          interpreter="$(python -c 'import sys; print(sys.executable)')"
+          linked="/usr/local/bin/python${PYTHON_VERSION}"
+          sudo ln -sfn "$interpreter" "$linked"
+          ls -l "$linked"
+          "$linked" -c 'import sys; print("linked:", sys.version.split()[0], sys.executable)'
+      # The symlink above is load-bearing and otherwise invisible until the gate
+      # is minutes in and fails on fence 1. Reproduce the harness's environment
+      # here, byte for byte, and create a venv in it: a red probe names the fix
+      # while the job is seconds old.
+      - name: Prove the gate's sanitised environment resolves CPython ${{ env.PYTHON_VERSION }}
+        run: |
+          set -euo pipefail
+          probe="$RUNNER_TEMP/path-probe"
+          rm -rf "$probe"
+          mkdir -p "$probe/home/tmp"
+          if ! env -i \
+              HOME="$probe/home" \
+              PATH="$(dirname "$(command -v uv)"):/usr/local/bin:/usr/bin:/bin" \
+              LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+              TMPDIR="$probe/home/tmp" \
+              UV_CACHE_DIR="$probe/cache" \
+              UV_PYTHON_DOWNLOADS=never \
+              UV_LINK_MODE=copy \
+              uv venv --python "$PYTHON_VERSION" "$probe/venv" 2>&1 | tee "$probe.log"
+          then
+            echo "::error::the gate's sanitised PATH cannot resolve CPython ${PYTHON_VERSION} with UV_PYTHON_DOWNLOADS=never, so every fence would abort at 'uv venv'. /usr/local/bin/python${PYTHON_VERSION} must point at actions/setup-python's interpreter."
+            exit 1
+          fi
+          resolved="$("$probe/venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          if [ "$resolved" != "$PYTHON_VERSION" ]; then
+            echo "::error::$probe/venv/bin/python is CPython $resolved, not ${PYTHON_VERSION}: the gates would run on an interpreter the job did not pin"
+            exit 1
+          fi
+          "$probe/venv/bin/python" -c 'import sys; print("probe:", sys.version.split()[0], "resolved from the sanitised PATH")'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install maturin
+        run: pipx install maturin
+      - name: Restore the uv cache the gate reads
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.UV_CACHE_DIR }}
+          key: uv-docs-gate-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-pytest-9.2.0
+      # The gate is offline by contract, so a missing cache entry must not be
+      # discovered by the gate itself: fill it here, where the network is
+      # allowed, and let `make docs-test` read it.
+      - name: Fill the uv cache with the gate's one dependency
+        run: |
+          uv venv --python "$PYTHON_VERSION" "$RUNNER_TEMP/pytest-cache"
+          uv pip install --python "$RUNNER_TEMP/pytest-cache/bin/python" pytest==9.2.0
+          uv cache dir
+      - name: Execute every documented console fence
+        run: |
+          set -o pipefail
+          make docs-test 2>&1 | tee "$RUNNER_TEMP/docs-test.log"
+      # The verdict table is on stdout, and the harness deletes the per-fence
+      # logs with its work directory, so the tee'd stream is the only artefact.
+      - name: Upload the verdict table
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-gate-verdict
+          path: ${{ runner.temp }}/docs-test.log
+          if-no-files-found: warn
+
+  guards:
+    name: critical-test guards
+    runs-on: ubuntu-latest
+    # Every step is one diff plus one short script; five minutes turns a wedged
+    # `git diff` (a paging prompt, a stalled fetch) into a red check instead of a
+    # job that idles until the workflow's default ceiling.
+    timeout-minutes: 5
+    steps:
+      # The guard diffs `origin/<base>`: a shallow clone has neither the base
+      # branch nor its merge base, and the diff would silently be empty.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@v10.3.2
+      # R42: a protected critical test may never be skipped.
+      - name: No skip construct in a protected critical test (R42)
+        run: make critical-skip-check
+      # `tools/critical_guard.py` only *enforces* when it is given a node: a
+      # node's `paths` are what authorize a modified or deleted protected test,
+      # and without `--node` the guard reports every change and exits 0 (`_run`).
+      # CI has no single "current node", so it takes the task nodes this branch
+      # changes — the node that edits a protected test lists that file in its
+      # `paths` — and asks the guard about each; one authorization is enough.
+      #
+      # `issuer`/`epic`/`milestone` nodes are left out on purpose: their `paths`
+      # are the delegation of their children (`crates/**`, `python/tests/**` in
+      # `MA.3`) and their `NODE.md` changes on every status transition, so
+      # including them would make this gate vacuous on every real branch.
+      - name: Protected critical tests are unchanged, or a changed node authorizes them
+        run: |
+          set -euo pipefail
+          base="origin/${GITHUB_BASE_REF:-develop}"
+          log="$RUNNER_TEMP/critical-guard.log"
+          guard="tools/critical_guard.py"
+          : > "$log"
+
+          # A failing `git diff` aborts here (bad base, no such ref) rather than
+          # being read as "nothing changed": a guard that cannot see the base
+          # must never pass.
+          node_files="$(git diff --name-only "$base" -- plan/nodes)"
+          mapfile -t nodes < <(
+            printf '%s\n' "$node_files" \
+              | awk -F/ '$NF == "NODE.md" && NF > 3 { print $(NF - 1) }' \
+              | sort -u
+          )
+          echo "guards: base $base; plan nodes changed by this branch: ${nodes[*]:-(none)}"
+
+          failed=0
+          for node in "${nodes[@]}"; do
+            node_file="$(printf '%s\n' "$node_files" \
+              | awk -F/ -v id="$node" '$NF == "NODE.md" && $(NF - 1) == id' | tail -1)"
+            if [ ! -f "$node_file" ]; then
+              echo "guards: node $node has no NODE.md in this tree (deleted or renamed); skipping"
+              continue
+            fi
+            kind="$(sed -n 's/^kind:[[:space:]]*//p' "$node_file" | head -1)"
+            case "$kind" in
+              issuer | epic | milestone)
+                echo "guards: node $node is a '${kind}' container, not a task: its paths delegate, they do not authorize"
+                continue
+                ;;
+            esac
+            echo "guards: node $node ($node_file) may authorize the diff; asking the guard"
+            set +e
+            uv run --no-project "$guard" --base "$base" --node "$node" 2>&1 | tee -a "$log"
+            status=${PIPESTATUS[0]}
+            set -e
+            case "$status" in
+              0)
+                echo "guards: node $node authorizes every protected critical test change since $base"
+                exit 0
+                ;;
+              1)
+                echo "guards: node $node does not cover a protected change (its report is above); trying the next node"
+                ;;
+              *)
+                echo "::error::critical_guard could not inspect $base for node $node (exit $status)"
+                failed=$status
+                ;;
+            esac
+          done
+
+          # No changed task node authorizes the diff (or none changed at all):
+          # run the guard in its report mode so the offending files are in the
+          # log, then fail on the verdict it prints.
+          set +e
+          uv run --no-project "$guard" --base "$base" 2>&1 | tee -a "$log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error::critical_guard could not inspect $base (exit $status)"
+            exit "$status"
+          fi
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::critical_guard could not inspect $base for at least one changed node (exit $failed)"
+            exit "$failed"
+          fi
+          if ! grep -q '^critical-guard: ' "$log"; then
+            echo "::error::critical_guard printed no report: the guard did not run"
+            exit 1
+          fi
+          if grep -q '\[VIOLATION:' "$log"; then
+            grep -n '\[VIOLATION:' "$log" || true
+            echo "::error::a protected critical test was modified or deleted since $base and no task node this branch changes lists it in its paths. Fix it by adding the file's glob to the paths of the node whose task edits it (plan/nodes/**/NODE.md, kind: task), or report STATUS: blocked. Only a task node's paths authorize a protected change."
+            exit 1
+          fi
+          echo "guards: no protected critical test was modified or deleted since $base"
+      # The guard's report is the failure signal, and it only exists in the tee'd
+      # stream: keep it when the step is red.
+      - name: Upload the guard log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: critical-guard-log
+          path: ${{ runner.temp }}/critical-guard.log
+          if-no-files-found: warn
