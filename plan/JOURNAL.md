@@ -523,3 +523,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T12:57 [MA.11] (lead) commit 21e093b25d6a99aefb7e327b70283a7dc495c954 on release/0.1.1
 - 2026-11-13T13:07 [MA] (strategist) status active -> done
 - 2026-11-13T13:07 [MA] (strategist) incremental re-acceptance PASSED at f305e38 on release/0.1.1: MA.7..MA.11 verified CI/test-only with zero weakened guards/assertions; PR #62 16/16 checks green 
+- 2026-11-13T14:38 HUMAN H-004 closed by conductor
+- 2026-11-13T14:44 [MB.1.1] (planner) created (task) Bound blastit-manifest cursor loops and close edit.rs mutation survivors
+- 2026-11-13T14:44 [MB.1.2] (planner) created (task) Prove blastit-manifest whole-crate mutation kill rate past 75 percent
+- 2026-11-13T14:44 [MB.1.3] (planner) created (task) Bound blastit-sqlpolicy lexer and learn loops and measure lexer.rs
+- 2026-11-13T14:44 [MB.1.4] (planner) created (task) Measure blastit-sqlpolicy normalize, literals and lru mutants
+- 2026-11-13T14:44 [MB.1.5] (planner) created (task) Measure blastit-sqlpolicy statements and tables mutants
+- 2026-11-13T14:44 [MB.1.6] (planner) created (task) Name missing ./blastit.toml first, add group-grant hint, allocate nothing for policy-less bodies
+- 2026-11-13T14:44 [MB.1.7] (planner) created (task) Build and brand hygiene: wheel README links, CARGO_NET_OFFLINE=true, events serde, logo contrast
+- 2026-11-13T14:44 [MB.1.8] (planner) created (task) Permanent e2e empty-grant and negative-boot assertions plus deterministic learn-refusal test
+- 2026-11-13T14:44 [MB.1.9] (planner) created (task) Align intra-workspace version requirements and harden scripts/dev-version.sh
+- 2026-11-13T14:44 [MB.1.9] (lead) status ready -> active
+- 2026-11-13T14:44 [MB.1.9] (lead) attempt 1/3 started
+- 2026-11-13T14:44 [MB.1.9] (lead) base cab377ec5b4bc00020df507b245972234c7f215b

@@ -28,7 +28,7 @@ OpenRouter credits exhausted: every strategist/architect/expert request fails wi
 
 **Answer:** Add $100 to the budget — `expensive_cap_usd` raised from 100 to 200 (owner answered 2026-11-13).
 
-## H-004 [open] (node MA)
+## H-004 [closed] (node MA)
 
 - asked: 2026-11-13T10:46 by conductor
 
