@@ -4,12 +4,32 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 use crate::error::{Location, ManifestError, ManifestErrors, ManifestWarning, regex_message};
-use crate::model::{Manifest, PgGrant, ProxyName};
+use crate::model::{Manifest, PgGrant, ProxyName, Route, StaticPolicy};
 use crate::routing::compile_pattern;
 use crate::uid::UidLayout;
 
 use blastit_ingress::BodyCodec;
 use blastit_sqlpolicy::{KNOWN_STATIC_SETUP_SQL, has_quoted_literal, is_system_table, normalize};
+
+/// The fixed rules a `[route.static]` value can break (`R2`, `R3`, `R5`).
+///
+/// The design pins these phrases so a boot message reads the same everywhere
+/// and no test depends on the wording of an operating-system error.
+const RELATIVE_PATH: &str = "must be a relative path";
+const NO_PARENT_SEGMENT: &str = "must not contain ..";
+const NO_BACKSLASH: &str = "must not contain \\";
+const NO_CONTROL_BYTE: &str = "must not contain a control byte";
+const ONE_OR_MORE_SEGMENTS: &str = "must be one or more segments";
+const NO_DOTFILE_SEGMENT: &str = "must not contain a dotfile segment";
+const ANCHORED_PATTERN: &str = "must start with /";
+const AT_MOST_PATTERNS: &str = "at most 32 patterns";
+const AT_MOST_PATTERN_BYTES: &str = "at most 256 bytes";
+
+/// How many `immutable` patterns one route may declare (`R5`).
+const MAX_PATTERNS: usize = 32;
+
+/// How long one `immutable` pattern may be, in bytes (`R5`).
+const MAX_PATTERN_BYTES: usize = 256;
 
 /// Validates a manifest and collects its warnings.
 pub(crate) fn validate(
@@ -24,6 +44,7 @@ pub(crate) fn validate(
     check_table_grants(manifest, &mut errors);
     check_queries(manifest, &mut errors);
     check_routes(manifest, &mut errors);
+    check_static(manifest, &mut errors);
     check_uids(manifest, base, &mut errors);
 
     if errors.is_empty() {
@@ -316,6 +337,188 @@ fn check_routes(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
             None => {}
         }
     }
+}
+
+/// The `[route.static]` blocks: the four keys' rules and the declarations a
+/// route that can never reach the app may not make (`R1`–`R5`).
+///
+/// Existence is not checked here: a documented manifest has to validate on a
+/// machine that has not produced `public/` yet. [`Manifest::check_static_roots`]
+/// is the explicit filesystem probe.
+fn check_static(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let Some(policy) = route.static_policy() else {
+            continue;
+        };
+        let location = Location::Route {
+            index,
+            name: route.name().to_string(),
+        };
+        check_static_root(&location, policy, errors);
+        check_static_index(&location, policy, errors);
+        check_static_immutable(&location, policy, errors);
+        check_static_declarations(manifest, route, policy, location, errors);
+    }
+}
+
+/// `root` is a relative path that stays in the manifest's directory (`R2`).
+///
+/// An empty string is not a relative path either, so it shares the rule: the
+/// two are the same mistake — a root that names no directory beneath
+/// `blastit.toml`.
+fn check_static_root(location: &Location, policy: &StaticPolicy, errors: &mut Vec<ManifestError>) {
+    let root = policy.root.as_str();
+    let rule = if root.is_empty() || root.starts_with('/') {
+        Some(RELATIVE_PATH)
+    } else if root.contains('\\') {
+        Some(NO_BACKSLASH)
+    } else if has_parent_segment(root) {
+        Some(NO_PARENT_SEGMENT)
+    } else if has_control_byte(root) {
+        Some(NO_CONTROL_BYTE)
+    } else {
+        None
+    };
+    if let Some(rule) = rule {
+        errors.push(ManifestError::StaticRootInvalid {
+            location: location.clone(),
+            root: policy.root.clone(),
+            rule,
+        });
+    }
+}
+
+/// `index` is a non-empty relative path beneath `root`, and no part of it is a
+/// dotfile (`R3`).
+///
+/// A dotfile segment is refused because the index answers every miss: an
+/// `index = ".env"` would publish the manifest directory's dotfiles to the
+/// world.
+fn check_static_index(location: &Location, policy: &StaticPolicy, errors: &mut Vec<ManifestError>) {
+    let index = policy.index.as_str();
+    let rule = if index.starts_with('/') {
+        Some(RELATIVE_PATH)
+    } else if index.is_empty() || index.split('/').any(|segment| segment.is_empty()) {
+        Some(ONE_OR_MORE_SEGMENTS)
+    } else if has_parent_segment(index) {
+        Some(NO_PARENT_SEGMENT)
+    } else if index.split('/').any(|segment| segment.starts_with('.')) {
+        Some(NO_DOTFILE_SEGMENT)
+    } else if index.contains('\\') {
+        Some(NO_BACKSLASH)
+    } else if has_control_byte(index) {
+        Some(NO_CONTROL_BYTE)
+    } else {
+        None
+    };
+    if let Some(rule) = rule {
+        errors.push(ManifestError::StaticIndexInvalid {
+            location: location.clone(),
+            index: policy.index.clone(),
+            rule,
+        });
+    }
+}
+
+/// Every `immutable` pattern is a `/`-anchored glob matched whole against the
+/// answering file's path (`R5`).
+///
+/// The limit is on the list as well as on each pattern: an unbounded list is an
+/// unbounded amount of work per answer, and a pattern longer than a path
+/// component cannot name a file's path on any filesystem blastit serves.
+fn check_static_immutable(
+    location: &Location,
+    policy: &StaticPolicy,
+    errors: &mut Vec<ManifestError>,
+) {
+    if policy.immutable.len() > MAX_PATTERNS {
+        // The first pattern past the limit is the one to delete.
+        let pattern = policy
+            .immutable
+            .get(MAX_PATTERNS)
+            .cloned()
+            .unwrap_or_default();
+        errors.push(ManifestError::StaticImmutablePattern {
+            location: location.clone(),
+            pattern,
+            rule: AT_MOST_PATTERNS,
+        });
+    }
+    for pattern in &policy.immutable {
+        let rule = if pattern.len() > MAX_PATTERN_BYTES {
+            Some(AT_MOST_PATTERN_BYTES)
+        } else if !pattern.starts_with('/') {
+            Some(ANCHORED_PATTERN)
+        } else if has_parent_segment(pattern) {
+            Some(NO_PARENT_SEGMENT)
+        } else if has_control_byte(pattern) {
+            Some(NO_CONTROL_BYTE)
+        } else {
+            None
+        };
+        if let Some(rule) = rule {
+            errors.push(ManifestError::StaticImmutablePattern {
+                location: location.clone(),
+                pattern: pattern.clone(),
+                rule,
+            });
+        }
+    }
+}
+
+/// A static route that can never reach the app may not declare anything only
+/// the app could run (`R4`).
+///
+/// `spa = true` answers every miss itself, and a manifest without an `app` has
+/// nothing to forward to. An ingress codec, a prefork, an inline grant or an
+/// inline `groups` list on such a route is dead weight that reads like a
+/// capability, so it is refused with the reason and the fix. Groups inherited
+/// from the manifest-wide `groups` list are not re-checked: they are attached
+/// to the route, not declared by it.
+fn check_static_declarations(
+    manifest: &Manifest,
+    route: &Route,
+    policy: &StaticPolicy,
+    location: Location,
+    errors: &mut Vec<ManifestError>,
+) {
+    let why = if policy.spa {
+        "spa = true never reaches the app"
+    } else if manifest.app().is_none() {
+        "the manifest declares no app"
+    } else {
+        return;
+    };
+
+    let mut dead = |key: String| {
+        errors.push(ManifestError::StaticDeadDeclaration {
+            location: location.clone(),
+            key,
+            why,
+        });
+    };
+    if route.ingress().is_some() {
+        dead("[route.ingress]".to_string());
+    }
+    if route.prefork() {
+        dead("prefork = true".to_string());
+    }
+    for proxy in route.grants().keys() {
+        dead(format!("[route.{proxy}]"));
+    }
+    if !route.groups().is_empty() {
+        dead("groups".to_string());
+    }
+}
+
+/// A value holding a C0 control byte, NUL included (`R2`, `R3`, `R5`).
+fn has_control_byte(value: &str) -> bool {
+    value.bytes().any(|byte| byte < 0x20)
+}
+
+/// A `/`-separated value with a `..` segment of its own.
+fn has_parent_segment(value: &str) -> bool {
+    value.split('/').any(|segment| segment == "..")
 }
 
 /// The uid table must stay below [`UidLayout::MAX_UID_EXCLUSIVE`] (§2).

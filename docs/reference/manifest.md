@@ -10,14 +10,15 @@ error.
 | Key | Required | Meaning |
 |---|---|---|
 | `version` | yes | must be `1` |
-| `app` | yes* | the WSGI callable, `module:attribute` |
+| `app` | no* | the WSGI callable, `module:attribute`; without it every route must be a `[route.static]` |
 | `preload` | no | a module, or a list of them, imported once before the fork |
 | `groups` | no | group names attached to **every** route; route-level `groups` is narrower |
 | `[proxy.<name>]` | no | a named broker for one external service; a grant on an undeclared proxy aborts the boot |
 | `[group.<name>]` | no | grants several routes share; a group grants nothing until attached |
 | `[[route]]` | yes | one sandbox: one process, one uid |
 
-\* `BLASTIT_APP` may supply the callable instead, and it wins over `app`.
+\* `BLASTIT_APP` may supply the callable instead, and it wins over `app`. An
+all-static manifest needs no `app`: every route is a `[route.static]`.
 
 ```toml
 version = 1
@@ -72,6 +73,7 @@ egress = true                       # may open TCP connections
 | `egress` | no | `true` opens **any** IPv4/IPv6 address and port, including cloud metadata; there is no allowlist |
 | `prefork` | no | `true` forks this view at startup instead of on first use |
 | `[route.ingress]` | no | how a request body is handled; required for a route that takes one |
+| `[route.static]` | no | serve a built front end from a directory; `spa = true` answers a deep URL with its `index` |
 
 ## Ingress
 
@@ -101,6 +103,45 @@ reports `ingress_mismatch` when the suite sent something else. `raw` also needs
 `allow_raw = true` in the same table, or `blastit check` reports `raw_ingress`.
 0.1.1 has no multipart codec, so a file upload is `raw` today and the app's
 parser sees the original bytes.
+
+## Static
+
+A built front end is one route with a `[route.static]` block. Blastit serves the
+files itself: there is no server in front and no rewrite regex to write. Keys are
+in [Static assets and SPAs](../frameworks/static-and-spa.md).
+
+```toml
+[[route]]
+name = "site"
+path = ['.*']
+
+[route.static]
+root = "public"                 # required, relative to blastit.toml
+index = "index.html"            # default: a directory or the SPA fallback answers with it
+spa = true                      # default false: a deep URL answers `index`
+immutable = ["/assets/*"]       # default none: a match gets the year-long cache
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `root` | required | the directory served, relative to `blastit.toml`: no leading `/`, no `..` segment, no `\`, no control byte |
+| `index` | `index.html` | the file a directory or the SPA fallback answers with, relative to `root`; no dotfile segment |
+| `spa` | `false` | a path that is no file answers `index` instead of the app |
+| `immutable` | none | `/`-anchored globs matched whole against the answering file's path; `*` stops at `/`; a match gets `Cache-Control: public, max-age=31536000, immutable` |
+
+Only a file from `root` whose path matches a pattern is cached for a year; an
+`index` answer is always `no-cache`. A path it does not answer reaches the app
+with the route's `methods` and `[route.ingress]`, or is a `404` when the manifest
+has no `app`. `..`, NUL and other control bytes, absolute and backslash paths are
+`400`; a symlink that leaves `root` and a dotfile are `404`.
+
+The four keys are reserved: `[route.static]` is never a grant table, so
+`[route.static] queries = …` is an unknown key.
+
+A static route that can never reach the app — `spa = true`, or a manifest with no
+`app` — may not declare `[route.ingress]`, `prefork = true`, a `[route.<proxy>]`
+grant or a route-level `groups` list: each is a boot error, because nothing could
+ever run it. A front controller omits `spa` and keeps its `[route.ingress]`.
 
 ## Proxies
 
@@ -270,8 +311,16 @@ a named cursor (`QuerySet.iterator()`).
 
 Aborts the boot: an unknown key or group, a `version` that is not `1`, a grant
 on an undeclared proxy, a duplicate route name, an invalid regex or method, a
-missing proxy input variable, and `unrestricted` in a group or next to
-`queries`/`tables`/`functions`.
+missing proxy input variable, `unrestricted` in a group or next to
+`queries`/`tables`/`functions`, an unknown `[route.static]` key or a
+`root`/`index`/`immutable` that is not a relative path, is empty, names a dotfile
+`index` or a `..` segment, and a static route that can never reach the app
+declaring an ingress codec, `prefork`, a grant or inline `groups`.
+
+A static root's own existence is audited by `blastit dev`, `blastit` and
+`blastit check` before anything binds, not by validation: a manifest has to
+validate on a machine where the build has not run yet. A root that is missing,
+not a directory or unlistable stops the boot naming the route and the root.
 
 Warns and runs: a group attached nowhere, a proxy no grant uses, an unrestricted
 route, a `raw` ingress, and an `egress` route.

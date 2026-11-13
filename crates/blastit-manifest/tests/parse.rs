@@ -413,17 +413,26 @@ fn route_fields_are_required_and_typed() {
 fn an_unknown_route_key_that_is_not_a_table_is_an_error() {
     // "egres" is neither a route key nor a proxy name; a typo must not be read
     // as an inline grant.
+    let errors = parse_errors(
+        "version = 1\n[[route]]\nname = \"about\"\npath = ['/about/']\negres = true\n",
+    );
     assert_eq!(
-        parse_errors(
-            "version = 1\n[[route]]\nname = \"about\"\npath = ['/about/']\negres = true\n"
-        ),
+        errors,
         ManifestErrors::from(ManifestError::WrongType {
             path: "route[0].egres".to_string(),
             expected: "one of the route keys (`name`, `path`, `methods`, `groups`, `egress`, \
-                       `prefork`, `ingress`) or a table holding an inline grant",
+                       `prefork`, `ingress`, `static`) or a table holding an inline grant",
             found: "a boolean",
         })
     );
+
+    // The fix has to name the key the schema gained: a reader who wrote
+    // `[route.static]` in the wrong place, or mistyped it, must be told that
+    // `static` is a route key — on one line, like every manifest error.
+    let message = errors.errors()[0].to_string();
+    assert_eq!(message.lines().count(), 1, "{message}");
+    assert!(message.contains("`static`"), "{message}");
+    assert!(message.contains("holding an inline grant"), "{message}");
 }
 
 #[test]

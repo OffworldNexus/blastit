@@ -725,3 +725,14 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T21:20 [MB.2.2] (designer) Attempt 3: fixed the 4 remaining findings only. RESULT Plan state item 2 now records that MB.2.4.1/2.5.1/2.4.2/2.5.2 exist under epics MB.2.4/MB.2.5 with chain 
 - 2026-11-13T21:23 [MB.2.2] (lead) REVIEW PASS attempt 3 (1 MINOR residue: stale 'Follow-up N' refs in historical prose at RESULT:188,199,204,207 and design:684).
 - 2026-11-13T21:23 [MB.2.2] (lead) status review -> done
+- 2026-11-13T21:23 [MB.2.3] (lead) status ready -> active
+- 2026-11-13T21:23 [MB.2.3] (lead) attempt 1/3 started
+- 2026-11-13T21:23 [MB.2.3] (lead) base 31c9739
+- 2026-11-13T21:23 [MB.2.9] (lead) edited fields
+- 2026-11-13T21:23 [MB.2.9] (lead) depends moved MB.2.2 -> MB.2.6: the page's two central claims (app optional for an all-static tree, check runs no pytest) become true only when MB.2.6 lands, so
+- 2026-11-13T21:32 [MB.2.3] (implementer) Landed [route.static] grammar (StaticPolicy, Route::static_policy, Manifest::{is_all_static,static_roots,check_static_roots}, five exact errors, dead-declaratio
+- 2026-11-13T21:32 [MB.2.3] (lead) edited fields
+- 2026-11-13T21:32 [MB.2.3] (lead) lead extended paths with crates/blastit-manifest/tests/parse.rs: its ROUTE_KEY_EXPECTED message must now name the reserved 'static' key (the node's own follow-u
+- 2026-11-13T21:33 [MB.2.3] (lead) status active -> review
+- 2026-11-13T21:40 [MB.2.3] (lead) REVIEW PASS attempt 1 (4 MINOR: R4 inherited-groups accepted case missing; R4 dead-declaration vs BLASTIT_APP precedence -> reconcile in MB.2.6/MB.2.9; [route.s
+- 2026-11-13T21:40 [MB.2.3] (lead) status review -> done

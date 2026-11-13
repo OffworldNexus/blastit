@@ -2,7 +2,7 @@
 id: MB.2.3
 title: "Parse and validate [static] route blocks in blastit-manifest"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.1, MB.2.2]
@@ -14,12 +14,13 @@ paths:
   - "crates/blastit-manifest/src/lib.rs"
   - "crates/blastit-manifest/tests/critical_static_manifest.rs"
   - "crates/blastit-manifest/tests/docs_fences.rs"
+  - "crates/blastit-manifest/tests/parse.rs"
   - docs/reference/manifest.md
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T15:11"
+updated: "2026-11-13T21:40"
 ---
 
 # Goal
