@@ -2,16 +2,16 @@
 id: MB.2.5.2
 title: "Dispatch static answers and pump the body through the scheduler - design MB.2.5b"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.2.4.2, MB.2.5.1]
 paths: ["crates/blastit-scheduler/src/scheduler.rs", "crates/blastit-scheduler/tests/critical_rewrite.rs"]
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-13T20:52"
-updated: "2026-11-13T20:52"
+updated: "2026-11-13T23:01"
 ---
 
 # Goal

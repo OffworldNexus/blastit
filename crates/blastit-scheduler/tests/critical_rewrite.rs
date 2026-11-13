@@ -15,17 +15,23 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
 #[path = "common/static_fixture.rs"]
 mod static_fixture;
 
 use std::io::Read;
+use std::path::PathBuf;
+use std::time::Duration;
 
+use blastit_events::Outcome;
+use blastit_frame::{Frame, INITIAL_WINDOW, ReqHead};
 use blastit_manifest::{Manifest, RoutingTable, StaticPolicy, UidLayout};
 use blastit_scheduler::rewrite::{Rewrite, STATIC_ALLOW, decide, declares_body};
 use blastit_scheduler::routes_from_manifest;
 use blastit_scheduler::static_asset::{
     AnswerKind, Backend, StaticOutcome, StaticRefusal, StaticRoot, head_segments,
 };
+use common::{Options, Script, World, aborted, body_of, ended, head, status_of};
 use static_fixture::{
     APP_JS_BYTES, CAFE_BYTES, DOCS_HTML, Fixture, INDEX_HTML, StaticTree, TOKEN_BYTES,
 };
@@ -669,4 +675,1044 @@ fn a_static_policy_can_forward_only_without_spa_and_with_an_app() {
     );
     assert_eq!(no_app[0].static_policy, Some(policy(false)));
     assert!(!no_app[0].static_forward, "no app: nothing to forward to");
+}
+
+// ---------------------------------------------------------------------------
+// The flow half (`MB.2.5.2`, design §4.6, §7.2): admission, the pump, the slot.
+//
+// Everything below runs the real `run` loop against a fake init and a fake
+// client (`tests/common`), because what has to be proven here is not what
+// `decide` says but when the scheduler says it: that a static answer takes one
+// slot, keeps it until its read result, and gives it back exactly once.
+// ---------------------------------------------------------------------------
+
+/// The page's route over the §5.2 fixture tree, with an `app` declared so the
+/// fallback and the front controller are both armed: nothing a refusal does may
+/// be masked by either (design §4.4).
+const SITE_MANIFEST: &str = "version = 1\napp = \"app:app\"\n\n\
+     [[route]]\nname = \"site\"\npath = ['.*']\n\n\
+     [route.static]\nroot = \"root\"\nspa = true\nimmutable = [\"/assets/*\"]\n";
+
+/// The same tree with `spa` unset and no `app`: an all-static route that must
+/// never fork a view (design §4.6).
+const PUMP_MANIFEST: &str = "version = 1\n\n\
+     [[route]]\nname = \"site\"\npath = ['.*']\n\n\
+     [route.static]\nroot = \"root\"\n";
+
+/// The front controller of design §4.4: a miss forwards with the route's own
+/// `[route.ingress]`, so the static slot has to be handed back for the view to
+/// be spawned.
+const FRONT_MANIFEST: &str = "version = 1\napp = \"app:app\"\n\n\
+     [[route]]\nname = \"site\"\npath = ['.*']\n\n\
+     [route.static]\nroot = \"root\"\n\n\
+     [route.ingress]\nbody = \"raw\"\nallow_raw = true\n";
+
+/// The same front controller with a structured body: its `plan_body` error must
+/// be stored, not answered, while a `Serve` still answers the page's own rule.
+const JSON_FRONT_MANIFEST: &str = "version = 1\napp = \"app:app\"\n\n\
+     [[route]]\nname = \"site\"\npath = ['.*']\n\n\
+     [route.static]\nroot = \"root\"\n\n\
+     [route.ingress]\nbody = \"json\"\n";
+
+/// A request head carrying `headers` on top of the shared one.
+fn head_with(method: &str, target: &str, headers: &[(&str, &str)]) -> ReqHead {
+    let mut head = head(method, target);
+    for (name, value) in headers {
+        head.headers
+            .push((name.as_bytes().to_vec(), value.as_bytes().to_vec()));
+    }
+    head
+}
+
+/// The value of the first header named `name`, compared ASCII case-insensitively.
+fn header_value<'a>(headers: &'a [(Vec<u8>, Vec<u8>)], name: &[u8]) -> Option<&'a [u8]> {
+    headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_slice())
+}
+
+/// The head frame of a response.
+fn response_head(frames: &[Frame]) -> &blastit_frame::RespHead {
+    match frames.first() {
+        Some(Frame::RespHead(head)) => head,
+        other => panic!("no response head: {other:?}"),
+    }
+}
+
+/// The streams whose `RESP_HEAD` arrived and whose response has not ended: the
+/// static responses that are *in flight* right now.
+fn in_flight(world: &mut World) -> Vec<u32> {
+    let mut heads: Vec<u32> = Vec::new();
+    let mut finished: Vec<u32> = Vec::new();
+    for (id, frame) in world.http.leftover() {
+        match frame {
+            Frame::RespHead(_) => {
+                if !heads.contains(&id) {
+                    heads.push(id);
+                }
+            }
+            Frame::RespEnd | Frame::RespEndCost { .. } | Frame::RespAbort { .. } => {
+                finished.push(id);
+            }
+            _ => {}
+        }
+    }
+    heads.retain(|id| !finished.contains(id));
+    heads
+}
+
+/// Every stream that has sent the client *any* frame.
+fn streams_with_frames(world: &mut World) -> Vec<u32> {
+    let mut seen: Vec<u32> = world
+        .http
+        .leftover()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    seen.sort_unstable();
+    seen.dedup();
+    seen
+}
+
+/// How many body frames the client is holding, across every stream.
+///
+/// A static stream that has spent its credit window has pushed exactly
+/// `INITIAL_WINDOW / 64 KiB` of them, so this is how a test knows the pump has
+/// parked rather than merely started.
+fn body_frames(world: &mut World) -> usize {
+    world
+        .http
+        .leftover()
+        .iter()
+        .filter(|(_, frame)| matches!(frame, Frame::RespBody(_)))
+        .count()
+}
+
+/// The body frames of one credit window (`STATIC_CHUNK_BYTES` each).
+fn window_chunks() -> usize {
+    (INITIAL_WINDOW / 64 / 1024) as usize
+}
+
+/// Spins until `condition` holds, polling the client each turn and never
+/// letting the paused clock move (`World::until` cannot poll the client).
+///
+/// The turn count is deliberately small: inspecting the client clones the body
+/// bytes it holds, so a condition that never holds has to fail quickly rather
+/// than spend minutes cloning megabytes. A working pump needs a few dozen turns
+/// per read, and a stream is at most two windows long here.
+async fn until_pumped(world: &mut World, mut condition: impl FnMut(&mut World) -> bool) {
+    for _ in 0..4_000 {
+        world.http.poll();
+        if condition(world) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "condition never became true; heads in flight: {:?}, body frames: {}",
+        in_flight(world),
+        body_frames(world)
+    );
+}
+
+/// A tree of the sizes the pump needs, in `std::env::temp_dir()`, removed on
+/// drop.
+///
+/// The §5.2 fixture is another leaf's file and every file in it fits one credit
+/// window, so it cannot park a read: these files are what make "the slot is held
+/// until the read result" observable, and they are sparse, so a `pread` of them
+/// costs no disk.
+struct PumpTree {
+    base: PathBuf,
+}
+
+impl PumpTree {
+    /// `<base>/root/<name>`, `size` bytes of zeros, for every `(name, size)`.
+    fn build(files: &[(&str, u64)]) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let base =
+            std::env::temp_dir().join(format!("blastit-pump-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(base.join("root")).expect("pump root directory");
+        for (name, size) in files {
+            let path = base.join("root").join(name);
+            let file = std::fs::File::create(&path)
+                .unwrap_or_else(|error| panic!("pump {}: {error}", path.display()));
+            file.set_len(*size)
+                .unwrap_or_else(|error| panic!("pump {} length: {error}", path.display()));
+        }
+        // The descriptor oracle compares a target with this path, so it has to
+        // be the resolved one whatever `TMPDIR` points at.
+        let base = std::fs::canonicalize(&base).expect("canonical pump base");
+        Self { base }
+    }
+
+    /// `<base>/root/<rel>`.
+    fn path(&self, rel: &str) -> PathBuf {
+        self.base.join("root").join(rel)
+    }
+
+    /// How many open descriptors point inside this tree: one for the root's
+    /// dirfd, plus one per static body in flight or parked (design §7.1's
+    /// reader bound).
+    fn open_in_tree(&self) -> usize {
+        let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter(|entry| {
+                std::fs::read_link(entry.path())
+                    .map(|target| target.starts_with(&self.base))
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    /// Truncates a file the scheduler already holds open: the next `pread` of it
+    /// comes up short, which is the abort path of design §4.6.
+    fn truncate(&self, rel: &str) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.path(rel))
+            .expect("open the pump file")
+            .set_len(0)
+            .expect("truncate the pump file");
+    }
+}
+
+impl Drop for PumpTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+/// A world serving `PUMP_MANIFEST` over `tree`, with `max_workers` slots.
+fn pump_world(tree: &PumpTree, max_workers: u32) -> World {
+    let mut options = Options::new().manifest(PUMP_MANIFEST);
+    options.cfg.manifest_dir = tree.base.clone();
+    options.cfg.max_workers = max_workers;
+    options.cfg.queue_size = 8;
+    options.cfg.queue_timeout = Duration::from_secs(5);
+    options.cfg.request_timeout = Duration::from_secs(30);
+    World::start(options)
+}
+
+/// The bytes of a response body, checked to be the sparse file's zeros.
+fn zeros(frames: &[Frame], expected: u64) -> Vec<u8> {
+    let body = body_of(frames);
+    assert_eq!(body.len() as u64, expected, "every byte of the file");
+    assert!(
+        body.iter().all(|byte| *byte == 0),
+        "the sparse file's zeros"
+    );
+    body
+}
+
+#[tokio::test]
+async fn a_serve_reaches_the_wire_with_the_responders_own_bytes_and_headers() {
+    tokio::time::pause();
+    let tree = StaticTree::build(Fixture::S);
+    let mut options = Options::new().manifest(SITE_MANIFEST);
+    options.cfg.manifest_dir = tree.base.clone();
+    let mut world = World::start(options);
+
+    world
+        .http
+        .send_request(1, head("GET", "/assets/app.4f1c2a9b7d3e.js"), b"")
+        .await;
+    let frames = world.http.response(1).await;
+
+    assert_eq!(status_of(&frames), 200);
+    assert!(ended(&frames), "{frames:?}");
+    assert_eq!(
+        body_of(&frames),
+        APP_JS_BYTES,
+        "the exact bytes of the file the route serves"
+    );
+
+    // The head is the responder's, header for header. It is compared against a
+    // fresh `respond` of the same file — the `ETag` is size and mtime, so it is
+    // not something this test may restate — and the four documented values are
+    // also read by name so a responder that dropped one cannot pass.
+    let root = tree.open(Fixture::S, Backend::Openat2);
+    let StaticOutcome::File(file) = resolve(&root, "/assets/app.4f1c2a9b7d3e.js") else {
+        panic!("the fixture asset resolves");
+    };
+    let expected = root.respond(file, b"GET", None);
+    assert_eq!(expected.status, 200);
+    let wire = response_head(&frames);
+    assert_eq!(wire.status, expected.status);
+    assert_eq!(wire.reason, expected.reason.as_bytes());
+    assert_eq!(wire.headers, expected.headers, "the responder's own head");
+    let length = APP_JS_BYTES.len().to_string();
+    assert_eq!(
+        header_value(&wire.headers, b"Content-Type"),
+        Some(&b"text/javascript"[..]),
+        "the closed table's row for .js"
+    );
+    assert_eq!(
+        header_value(&wire.headers, b"Cache-Control"),
+        Some(&b"public, max-age=31536000, immutable"[..]),
+        "an exact `Exact` answer that matches `/assets/*`"
+    );
+    assert_eq!(
+        header_value(&wire.headers, b"X-Content-Type-Options"),
+        Some(&b"nosniff"[..])
+    );
+    assert_eq!(
+        header_value(&wire.headers, b"Content-Length"),
+        Some(length.as_bytes())
+    );
+
+    // One `request` event, with the route, the rule and `ok`; the responder is
+    // the answer, so no view was forked and no view saw a `REQ_HEAD` (design
+    // §7.2's `R12`).
+    world.until(|world| !world.requests().is_empty()).await;
+    let events = world.requests();
+    assert_eq!(events.len(), 1, "one event: {events:?}");
+    assert_eq!(events[0].rule(), Some(0));
+    assert_eq!(events[0].outcome(), Outcome::Ok);
+    assert_eq!(events[0].status(), 200);
+    assert_eq!(events[0].bytes_out(), APP_JS_BYTES.len() as u64);
+    assert_eq!(world.request_routes(), vec![Some("site".to_string())]);
+    assert!(
+        world.log.lock().unwrap().spawns.is_empty(),
+        "a pure static route never forks a view"
+    );
+    assert!(
+        world.log.lock().unwrap().received.is_empty(),
+        "no view ever saw this request"
+    );
+}
+
+#[tokio::test]
+async fn a_head_answers_the_get_head_and_never_a_body_frame() {
+    tokio::time::pause();
+    let tree = StaticTree::build(Fixture::S);
+    let mut options = Options::new().manifest(SITE_MANIFEST);
+    options.cfg.manifest_dir = tree.base.clone();
+    let mut world = World::start(options);
+
+    world
+        .http
+        .send_request(1, head("HEAD", "/assets/app.4f1c2a9b7d3e.js"), b"")
+        .await;
+    let frames = world.http.response(1).await;
+
+    assert_eq!(status_of(&frames), 200);
+    assert!(ended(&frames), "{frames:?}");
+    assert_eq!(
+        frames.len(),
+        2,
+        "a head and an end, no body frame: {frames:?}"
+    );
+    assert!(matches!(frames[1], Frame::RespEnd));
+    assert_eq!(body_of(&frames), b"", "HEAD is GET without a body");
+    // The `Content-Length` of the body it did not write is still promised.
+    let length = APP_JS_BYTES.len().to_string();
+    assert_eq!(
+        header_value(&response_head(&frames).headers, b"Content-Length"),
+        Some(length.as_bytes())
+    );
+
+    world.until(|world| !world.requests().is_empty()).await;
+    let events = world.requests();
+    assert_eq!(events.len(), 1, "one event: {events:?}");
+    assert_eq!(events[0].status(), 200);
+    assert_eq!(events[0].bytes_out(), 0, "not one byte was read out");
+}
+
+#[tokio::test]
+async fn a_static_refusal_is_one_scheduler_answer_with_no_store() {
+    tokio::time::pause();
+    let tree = StaticTree::build(Fixture::S);
+    let mut options = Options::new().manifest(SITE_MANIFEST);
+    options.cfg.manifest_dir = tree.base.clone();
+    let mut world = World::start(options);
+
+    // `(request, status, body)`: a malformed path, a dotfile, a servable path
+    // with the wrong method and one that declares a body (§4.4). The route has
+    // `spa = true` and an `app`, so a refusal that leaked into either the
+    // fallback or the app would answer 200 instead.
+    let rows: [(ReqHead, u16, &[u8]); 4] = [
+        (head("GET", "/../etc/passwd"), 400, b"bad request\n"),
+        (head("GET", "/.env"), 404, b"not found\n"),
+        (
+            head("POST", "/assets/app.4f1c2a9b7d3e.js"),
+            405,
+            b"method not allowed\n",
+        ),
+        (
+            head_with(
+                "GET",
+                "/assets/app.4f1c2a9b7d3e.js",
+                &[("Content-Length", "1")],
+            ),
+            413,
+            b"content too large\n",
+        ),
+    ];
+    for (index, (head, status, body)) in rows.into_iter().enumerate() {
+        let stream = index as u32 + 1;
+        world.http.send_request(stream, head, b"").await;
+        let frames = world.http.response(stream).await;
+        assert_eq!(status_of(&frames), status, "{frames:?}");
+        assert_eq!(body_of(&frames), body, "the canned body of {status}");
+        let wire = response_head(&frames);
+        let headers = &wire.headers;
+        if status == 405 {
+            // The real answer to a `POST` on a static path: a reason phrase and
+            // a body of its own, and exactly one `Allow` value — never the
+            // generic `Error`/`error\n` fallback.
+            assert_eq!(wire.reason, b"Method Not Allowed");
+            assert_eq!(
+                header_value(headers, b"Allow"),
+                Some(STATIC_ALLOW),
+                "the one Allow value"
+            );
+        } else {
+            assert_eq!(
+                header_value(headers, b"Allow"),
+                None,
+                "only the 405 carries Allow"
+            );
+        }
+        assert_eq!(
+            header_value(headers, b"Cache-Control"),
+            Some(&b"no-store"[..]),
+            "every scheduler-written static refusal is no-store"
+        );
+    }
+
+    // Each is one event, `unmatched`, and none of them reached a view.
+    world.until(|world| world.requests().len() == 4).await;
+    for event in world.requests() {
+        assert_eq!(event.outcome(), Outcome::Unmatched);
+        assert_eq!(
+            event.rule(),
+            Some(0),
+            "the refusal keeps its route and rule"
+        );
+    }
+    assert!(
+        world.log.lock().unwrap().spawns.is_empty(),
+        "a refusal never forks the app"
+    );
+}
+
+#[tokio::test]
+async fn more_than_max_workers_static_streams_complete_in_waves_inside_the_slot_bound() {
+    // Design §4.6, and the reason the slot is released at the read result: a
+    // pump that handed the slot back at `RESP_HEAD` would dispatch all three
+    // streams at once, so the third would have a head while the first two are
+    // parked — and the tree would hold three descriptors, not `max_workers`.
+    tokio::time::pause();
+    let window = u64::from(INITIAL_WINDOW);
+    let size = window + 64 * 1024;
+    let tree = PumpTree::build(&[
+        ("a.bin", size),
+        ("b.bin", size),
+        ("c.bin", size),
+        ("small.js", 24),
+    ]);
+    let mut world = pump_world(&tree, 2);
+
+    until_pumped(&mut world, |_| tree.open_in_tree() >= 1).await;
+    let baseline = tree.open_in_tree();
+    assert_eq!(baseline, 1, "one dirfd per declared static root");
+
+    // Three streams that need more than one credit window, and one that needs
+    // none: with two slots the last one can only answer when a slot comes back.
+    world.http.send_request(1, head("GET", "/a.bin"), b"").await;
+    world.http.send_request(2, head("GET", "/b.bin"), b"").await;
+    world.http.send_request(3, head("GET", "/c.bin"), b"").await;
+    world
+        .http
+        .send_request(4, head("GET", "/small.js"), b"")
+        .await;
+
+    // Exactly two are in flight, both have pumped their whole first window, and
+    // neither has ended: the two streams progress together on one slot each.
+    until_pumped(&mut world, |world| {
+        in_flight(world).len() == 2 && body_frames(world) == 2 * window_chunks()
+    })
+    .await;
+    assert_eq!(in_flight(&mut world), vec![1, 2]);
+    assert_eq!(
+        tree.open_in_tree(),
+        baseline + 2,
+        "at most `max_workers` static bodies hold a descriptor"
+    );
+    assert_eq!(
+        streams_with_frames(&mut world),
+        vec![1, 2],
+        "the queued streams own no descriptor and answer nothing"
+    );
+
+    // Ending one stream frees its slot, and the next queued stream takes it in
+    // the wave behind it — not a new descriptor for the one still waiting.
+    world.http.grant(1, INITIAL_WINDOW).await;
+    let first = world.http.response(1).await;
+    assert_eq!(status_of(&first), 200);
+    assert!(ended(&first), "the last chunk ends the response: {first:?}");
+    assert_eq!(zeros(&first, size).len() as u64, size);
+    until_pumped(&mut world, |world| in_flight(world) == vec![2, 3]).await;
+    assert_eq!(tree.open_in_tree(), baseline + 2);
+    assert_eq!(
+        streams_with_frames(&mut world),
+        vec![2, 3],
+        "the fourth stream is still waiting for a slot"
+    );
+
+    // Draining the parked streams lets the fourth — which needs no grant at all
+    // — answer, and every descriptor goes back.
+    world.http.grant(2, INITIAL_WINDOW).await;
+    let second = world.http.response(2).await;
+    assert!(ended(&second), "{second:?}");
+    zeros(&second, size);
+    world.http.grant(3, INITIAL_WINDOW).await;
+    let third = world.http.response(3).await;
+    assert!(ended(&third), "{third:?}");
+    zeros(&third, size);
+    let fourth = world.http.response(4).await;
+    assert_eq!(status_of(&fourth), 200);
+    assert_eq!(body_of(&fourth), vec![0u8; 24]);
+
+    world.until(|world| world.requests().len() == 4).await;
+    assert!(
+        world.log.lock().unwrap().spawns.is_empty(),
+        "an all-static route never forks a view"
+    );
+    for event in world.requests() {
+        assert_eq!(event.outcome(), Outcome::Ok);
+        assert_eq!(event.status(), 200);
+    }
+}
+
+#[tokio::test]
+async fn a_short_read_aborts_the_response_and_frees_the_slot_exactly_once() {
+    // Design §4.6: a read error or a short read is `RespAbort`, never a body
+    // shorter than the promised `Content-Length`. The slot is handed back by
+    // that result and by nothing else — a second release would let one more
+    // stream in than `max_workers` allows, and the fourth request below would
+    // answer while two are still parked.
+    tokio::time::pause();
+    let window = u64::from(INITIAL_WINDOW);
+    let size = window + 64 * 1024;
+    let tree = PumpTree::build(&[
+        ("a.bin", size),
+        ("b.bin", size),
+        ("c.bin", size),
+        ("d.bin", size),
+    ]);
+    let mut world = pump_world(&tree, 2);
+
+    for (stream, name) in [(1, "/a.bin"), (2, "/b.bin"), (3, "/c.bin"), (4, "/d.bin")] {
+        world
+            .http
+            .send_request(stream, head("GET", name), b"")
+            .await;
+    }
+    until_pumped(&mut world, |world| {
+        in_flight(world).len() == 2 && body_frames(world) == 2 * window_chunks()
+    })
+    .await;
+    assert_eq!(in_flight(&mut world), vec![1, 2]);
+
+    // The file shrinks under the read the scheduler already opened: the next
+    // `pread` returns zero bytes, which is the short read.
+    tree.truncate("a.bin");
+    world.http.grant(1, INITIAL_WINDOW).await;
+    let frames = world.http.response(1).await;
+    assert_eq!(status_of(&frames), 200, "the head was promised: {frames:?}");
+    assert!(aborted(&frames), "the response never ends: {frames:?}");
+    match frames.last() {
+        Some(Frame::RespAbort { reason }) => assert_eq!(reason, "static: read failed"),
+        other => panic!("expected a read-failure abort, got {other:?}"),
+    }
+    // Not a truncated body under the promised length.
+    assert!(body_of(&frames).len() < size as usize);
+
+    // Exactly one slot came back: the third request takes it, the fourth waits.
+    until_pumped(&mut world, |world| in_flight(world) == vec![2, 3]).await;
+    assert_eq!(
+        streams_with_frames(&mut world),
+        vec![2, 3],
+        "the fourth request still has no slot — the abort freed exactly one"
+    );
+    assert_eq!(
+        tree.open_in_tree(),
+        3,
+        "the root's dirfd and exactly two bodies"
+    );
+
+    world.until(|world| !world.requests().is_empty()).await;
+    assert_eq!(world.requests()[0].status(), 200);
+    assert_eq!(
+        world.requests()[0].outcome(),
+        Outcome::ViewDied,
+        "the response died after its head, the closed outcome for that"
+    );
+
+    // The reply of a dead stream still frees what it held: the rest of the wave
+    // completes.
+    for stream in [2, 3, 4] {
+        world.http.grant(stream, INITIAL_WINDOW).await;
+        let frames = world.http.response(stream).await;
+        assert_eq!(status_of(&frames), 200);
+        assert!(ended(&frames), "{frames:?}");
+        zeros(&frames, size);
+    }
+}
+
+#[tokio::test]
+async fn a_client_that_stops_granting_credit_is_aborted_at_request_timeout() {
+    // Design §4.6: "a parked response holds its slot"; the request timeout ends
+    // the response, the slot comes back because no read is outstanding, and
+    // another request can be served afterwards.
+    tokio::time::pause();
+    let window = u64::from(INITIAL_WINDOW);
+    let tree = PumpTree::build(&[("a.bin", window + 64 * 1024), ("small.js", 24)]);
+    let mut options = Options::new().manifest(PUMP_MANIFEST);
+    options.cfg.manifest_dir = tree.base.clone();
+    options.cfg.max_workers = 1;
+    options.cfg.queue_timeout = Duration::from_secs(5);
+    options.cfg.request_timeout = Duration::from_secs(5);
+    let mut world = World::start(options);
+
+    // The client never grants a second window, so the pump parks on credit.
+    world.http.send_request(1, head("GET", "/a.bin"), b"").await;
+    until_pumped(&mut world, |world| {
+        in_flight(world) == vec![1] && body_frames(world) == window_chunks()
+    })
+    .await;
+    let pushed: usize = world
+        .http
+        .leftover()
+        .into_iter()
+        .filter_map(|(id, frame)| match frame {
+            Frame::RespBody(body) if id == 1 => Some(body.len()),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(
+        pushed, window as usize,
+        "a full initial window and not one byte more"
+    );
+
+    // `awaited_response` parks, so the paused clock reaches the deadline.
+    let frames = world.http.awaited_response(1).await;
+    assert_eq!(status_of(&frames), 200, "the head was already out");
+    assert!(aborted(&frames), "{frames:?}");
+    match frames.last() {
+        Some(Frame::RespAbort { reason }) => assert_eq!(reason, "request timeout"),
+        other => panic!("expected the request timeout abort, got {other:?}"),
+    }
+    world.until(|world| !world.requests().is_empty()).await;
+    assert_eq!(world.requests()[0].outcome(), Outcome::Timeout);
+    assert_eq!(
+        world.requests()[0].bytes_out(),
+        window,
+        "one window, and not one byte more"
+    );
+
+    // The slot came back: the next request is answered, not queued to a 503.
+    world
+        .http
+        .send_request(2, head("GET", "/small.js"), b"")
+        .await;
+    let after = world.http.awaited_response(2).await;
+    assert_eq!(status_of(&after), 200, "{after:?}");
+    assert_eq!(body_of(&after), vec![0u8; 24]);
+}
+
+#[tokio::test]
+async fn a_forward_hands_the_slot_back_and_re_enters_the_view_path() {
+    // Design §4.6, observably at `max_workers = 1`: a `Serve`, then two
+    // `Forward`s. A static slot that was not handed back, or one counted twice,
+    // leaves the second forward queued until `queue_timeout` and answers `503`.
+    tokio::time::pause();
+    let tree = StaticTree::build(Fixture::F);
+    let mut options = Options::new().manifest(FRONT_MANIFEST).script(
+        0,
+        Script::Answer {
+            body: b"hello".to_vec(),
+        },
+    );
+    options.cfg.manifest_dir = tree.base.clone();
+    options.cfg.max_workers = 1;
+    options.cfg.queue_timeout = Duration::from_secs(5);
+    let mut world = World::start(options);
+
+    // The file answers without a view, so nothing is forked yet.
+    world
+        .http
+        .send_request(1, head("GET", "/index.html"), b"")
+        .await;
+    let served = world.http.awaited_response(1).await;
+    assert_eq!(status_of(&served), 200);
+    assert_eq!(body_of(&served), INDEX_HTML);
+    assert!(world.log.lock().unwrap().spawns.is_empty());
+
+    // A miss forwards: the slot goes back, the front controller is spawned, and
+    // the request reaches it with the route's own ingress.
+    world
+        .http
+        .send_request(2, head("GET", "/missing"), b"")
+        .await;
+    let forwarded = world.http.awaited_response(2).await;
+    assert_eq!(status_of(&forwarded), 200, "{forwarded:?}");
+    assert_eq!(body_of(&forwarded), b"hello");
+    world
+        .until(|world| world.log.lock().unwrap().spawns.len() == 1)
+        .await;
+
+    // A second forward with the view already `READY`: the slot was given back
+    // for the first one, so this one is dispatched too, not left in the queue.
+    world
+        .http
+        .send_request(3, head("GET", "/missing-again"), b"")
+        .await;
+    let second = world.http.awaited_response(3).await;
+    assert_eq!(status_of(&second), 200, "{second:?}");
+    assert_eq!(body_of(&second), b"hello");
+
+    world
+        .until(|world| world.log.lock().unwrap().request_ids(0).len() == 2)
+        .await;
+    assert_eq!(
+        world.log.lock().unwrap().spawns,
+        vec![0],
+        "one view for the route, forked by the first handback"
+    );
+    // The path the view saw is the routed one: a forward keeps the app's own
+    // `PATH_INFO` and never carries the static resolution with it.
+    let events = world.requests();
+    assert_eq!(events.len(), 3);
+    assert_eq!(world.request_routes(), vec![Some("site".to_string()); 3]);
+    for event in events {
+        assert_eq!(event.outcome(), Outcome::Ok);
+    }
+}
+
+#[tokio::test]
+async fn a_serve_outranks_the_codec_error_a_forward_stores() {
+    // Design §4.4: `plan_body` is still computed for a route with a policy, but
+    // its error is *stored* — `Serve` answers the page's method/body rule
+    // instead, and `Forward` is the only path that answers the stored status.
+    // A build that answered the codec error at the head would give `400` for
+    // the third row's twin (`POST` on a servable path), where §4.4 says `405`.
+    tokio::time::pause();
+    let tree = StaticTree::build(Fixture::F);
+    let mut options = Options::new().manifest(JSON_FRONT_MANIFEST);
+    options.cfg.manifest_dir = tree.base.clone();
+    options.cfg.max_workers = 1;
+    options.cfg.queue_timeout = Duration::from_secs(5);
+    let mut world = World::start(options);
+
+    let rows: [(ReqHead, u16, &[u8]); 4] = [
+        // `Serve`: the method gate first, whatever the codec would say.
+        (
+            head_with(
+                "POST",
+                "/assets/app.4f1c2a9b7d3e.js",
+                &[("Content-Type", "text/plain")],
+            ),
+            405,
+            b"method not allowed\n",
+        ),
+        // `Forward`: the stored codec `400`, exactly as the app path answers it.
+        (
+            head_with("POST", "/missing", &[("Content-Type", "text/plain")]),
+            400,
+            b"bad request\n",
+        ),
+        // `Forward`: a bodyless-safe method that declares a body is the stored
+        // `413`, answered before any view exists.
+        (
+            head_with("GET", "/missing", &[("Content-Length", "1")]),
+            413,
+            b"content too large\n",
+        ),
+        // `Serve`: the page's `413`, and the codec error is never reached.
+        (
+            head_with(
+                "GET",
+                "/assets/app.4f1c2a9b7d3e.js",
+                &[("Content-Length", "1")],
+            ),
+            413,
+            b"content too large\n",
+        ),
+    ];
+    for (index, (head, status, body)) in rows.into_iter().enumerate() {
+        let stream = index as u32 + 1;
+        world.http.send_request(stream, head, b"").await;
+        let frames = world.http.response(stream).await;
+        assert_eq!(status_of(&frames), status, "{frames:?}");
+        assert_eq!(body_of(&frames), body, "the {status} body");
+        if status == 405 {
+            assert_eq!(
+                header_value(&response_head(&frames).headers, b"Allow"),
+                Some(STATIC_ALLOW)
+            );
+        }
+    }
+
+    // None of these reached the app: the stored error is answered here, so no
+    // view was forked and no `REQ_HEAD` was forwarded.
+    world.until(|world| world.requests().len() == 4).await;
+    assert!(
+        world.log.lock().unwrap().spawns.is_empty(),
+        "the stored body-plan error is the scheduler's answer, not the app's"
+    );
+    assert!(world.log.lock().unwrap().received.is_empty());
+    for event in world.requests() {
+        assert_eq!(event.outcome(), Outcome::Unmatched);
+    }
+}
+
+#[tokio::test]
+async fn an_if_none_match_from_the_head_answers_304_without_a_body() {
+    // Design §4.5: the responder's `304` needs the request's `If-None-Match`,
+    // and `Request` keeps no header list — so `begin_raw` takes that one value
+    // off the borrowed head. A build that dropped it would answer a second
+    // `200` here, with the same bytes, which is the whole point of the header.
+    tokio::time::pause();
+    let tree = StaticTree::build(Fixture::S);
+    let mut options = Options::new().manifest(SITE_MANIFEST);
+    options.cfg.manifest_dir = tree.base.clone();
+    let mut world = World::start(options);
+
+    let asset = "/assets/app.4f1c2a9b7d3e.js";
+    world.http.send_request(1, head("GET", asset), b"").await;
+    let first = world.http.response(1).await;
+    assert_eq!(status_of(&first), 200);
+    let etag = header_value(&response_head(&first).headers, b"ETag")
+        .expect("a 200 carries an ETag")
+        .to_vec();
+    let cache = header_value(&response_head(&first).headers, b"Cache-Control")
+        .expect("a 200 carries a Cache-Control")
+        .to_vec();
+    let etag = std::str::from_utf8(&etag)
+        .expect("the ETag is ASCII")
+        .to_string();
+
+    world
+        .http
+        .send_request(2, head_with("GET", asset, &[("If-None-Match", &etag)]), b"")
+        .await;
+    let second = world.http.response(2).await;
+
+    assert_eq!(status_of(&second), 304);
+    assert!(ended(&second), "{second:?}");
+    assert_eq!(
+        second.len(),
+        2,
+        "a head and an end, no body frame: {second:?}"
+    );
+    assert_eq!(body_of(&second), b"");
+    let wire = response_head(&second);
+    assert_eq!(
+        header_value(&wire.headers, b"Content-Length"),
+        None,
+        "a 304 carries no Content-Length (design §4.5)"
+    );
+    assert_eq!(
+        header_value(&wire.headers, b"Cache-Control"),
+        Some(cache.as_slice()),
+        "a 304 repeats the cache header the 200 would have carried"
+    );
+    assert_eq!(header_value(&wire.headers, b"ETag"), Some(etag.as_bytes()));
+}
+
+#[tokio::test]
+async fn a_zero_length_file_is_an_ordinary_200_with_no_body_frame() {
+    // Design §4.6 step 1: a file with nothing left to read ends the response
+    // *before* any read is spawned — an ordinary `200` with `Content-Length: 0`
+    // and not one body frame.
+    tokio::time::pause();
+    let tree = PumpTree::build(&[("empty.js", 0)]);
+    let mut world = pump_world(&tree, 1);
+
+    world
+        .http
+        .send_request(1, head("GET", "/empty.js"), b"")
+        .await;
+    let frames = world.http.response(1).await;
+
+    assert_eq!(status_of(&frames), 200);
+    assert_eq!(frames.len(), 2, "a head and an end: {frames:?}");
+    assert_eq!(body_of(&frames), b"");
+    let wire = response_head(&frames);
+    assert_eq!(
+        header_value(&wire.headers, b"Content-Length"),
+        Some(&b"0"[..])
+    );
+    assert_eq!(
+        header_value(&wire.headers, b"Cache-Control"),
+        Some(&b"no-cache"[..]),
+        "an exact answer that matches no pattern"
+    );
+
+    world.until(|world| !world.requests().is_empty()).await;
+    let events = world.requests();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].outcome(), Outcome::Ok);
+    assert_eq!(events[0].bytes_out(), 0);
+}
+
+#[tokio::test]
+async fn a_buffered_forward_that_ends_while_queued_is_still_answered() {
+    // Design §4.4/§4.6, and the regression this row exists for: a `json` front
+    // controller's buffered `Forward` whose `REQ_END` lands while the request is
+    // still waiting for a slot has already been transcoded, so it must not be
+    // re-admitted (which would list it twice in the FIFO) and must not be armed
+    // to wait for a body that has arrived (nothing re-drives that, and the queue
+    // timeout answers a request that was ready). With one slot and one parked
+    // static stream, this request can only be queued when its body ends.
+    tokio::time::pause();
+    let window = u64::from(INITIAL_WINDOW);
+    let tree = PumpTree::build(&[("big.bin", window + 64 * 1024)]);
+    let mut options = Options::new().manifest(JSON_FRONT_MANIFEST).script(
+        0,
+        Script::Answer {
+            body: b"hello".to_vec(),
+        },
+    );
+    options.cfg.manifest_dir = tree.base.clone();
+    options.cfg.max_workers = 1;
+    options.cfg.queue_size = 4;
+    options.cfg.queue_timeout = Duration::from_secs(5);
+    let mut world = World::start(options);
+
+    // The parked stream holds the only slot.
+    world
+        .http
+        .send_request(1, head("GET", "/big.bin"), b"")
+        .await;
+    until_pumped(&mut world, |world| {
+        in_flight(world) == vec![1] && body_frames(world) == window_chunks()
+    })
+    .await;
+
+    // A `json` body and its end, both while the request waits behind it.
+    let body = br#"{"a":1}"#;
+    let length = body.len().to_string();
+    world
+        .http
+        .send_head(
+            2,
+            head_with(
+                "POST",
+                "/missing",
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", &length),
+                ],
+            ),
+        )
+        .await;
+    world.http.send_body(2, body).await;
+    world.http.send(2, &Frame::ReqEnd).await;
+    // Nothing may answer it while the slot is held: a 503 here would be the
+    // duplicate-enqueue/never-re-driven pair.
+    world.advance(Duration::from_millis(1)).await;
+    assert!(
+        !streams_with_frames(&mut world).contains(&2),
+        "the queued forward has not been answered: {:?}",
+        world.http.leftover()
+    );
+
+    // Freeing the slot lets the transcoded body reach the app.
+    world.http.grant(1, INITIAL_WINDOW).await;
+    let parked = world.http.response(1).await;
+    assert!(ended(&parked), "{parked:?}");
+    let forwarded = world.http.awaited_response(2).await;
+    assert_eq!(status_of(&forwarded), 200, "{forwarded:?}");
+    assert_eq!(body_of(&forwarded), b"hello");
+
+    // Exactly one head reached the view, and the body it saw is the canonical
+    // JSON of the one that was sent.
+    world
+        .until(|world| !world.log.lock().unwrap().request_ids(0).is_empty())
+        .await;
+    let received = world.log.lock().unwrap().received_by(0);
+    assert_eq!(
+        received
+            .iter()
+            .filter(|(_, frame)| matches!(frame, Frame::ReqHead(_)))
+            .count(),
+        1,
+        "one forwarded head: {received:?}"
+    );
+    let forwarded_body: Vec<u8> = received
+        .iter()
+        .filter_map(|(_, frame)| match frame {
+            Frame::ReqBody(chunk) => Some(chunk.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&forwarded_body).expect("the view got JSON"),
+        serde_json::json!({"a": 1}),
+        "the transcoded body the view received"
+    );
+}
+
+#[tokio::test]
+async fn a_full_static_queue_answers_503_with_retry_after() {
+    // Design §4.6: the same bounded queue, `queue_timeout` and `503` +
+    // `Retry-After` apply to a static answer. With one slot and `queue_size = 1`
+    // the second waiter is the last one admitted and the third is turned away.
+    tokio::time::pause();
+    let window = u64::from(INITIAL_WINDOW);
+    let tree = PumpTree::build(&[
+        ("a.bin", window + 64 * 1024),
+        ("b.bin", window + 64 * 1024),
+        ("c.bin", window + 64 * 1024),
+    ]);
+    let mut options = Options::new().manifest(PUMP_MANIFEST);
+    options.cfg.manifest_dir = tree.base.clone();
+    options.cfg.max_workers = 1;
+    options.cfg.queue_size = 1;
+    options.cfg.queue_timeout = Duration::from_secs(5);
+    let mut world = World::start(options);
+
+    // The parked stream holds the only slot, so the next request is the one
+    // waiter `queue_size = 1` admits and the one after it is turned away.
+    world.http.send_request(1, head("GET", "/a.bin"), b"").await;
+    until_pumped(&mut world, |world| {
+        in_flight(world) == vec![1] && body_frames(world) == window_chunks()
+    })
+    .await;
+    world.http.send_request(2, head("GET", "/b.bin"), b"").await;
+    world.http.send_request(3, head("GET", "/c.bin"), b"").await;
+
+    let refused = world.http.response(3).await;
+    assert_eq!(status_of(&refused), 503, "{refused:?}");
+    assert_eq!(body_of(&refused), b"queue full\n");
+    let headers = &response_head(&refused).headers;
+    assert_eq!(
+        header_value(headers, b"Retry-After"),
+        Some(&b"5"[..]),
+        "the queue timeout, in seconds"
+    );
+    assert!(
+        !streams_with_frames(&mut world).contains(&2),
+        "the admitted waiter is still waiting, not answered: {:?}",
+        world.http.leftover()
+    );
+
+    world.until(|world| !world.requests().is_empty()).await;
+    assert_eq!(world.requests()[0].outcome(), Outcome::QueueFull);
+    assert!(
+        world.log.lock().unwrap().spawns.is_empty(),
+        "a turned-away static request forks nothing"
+    );
 }
