@@ -85,6 +85,14 @@ jobs:
   smoke:
     name: smoke (root)
     runs-on: ubuntu-latest
+    # MA.9: this job once sat inside one step for 35+ minutes until the
+    # workflow's 360-minute ceiling, and an in-flight job has no downloadable
+    # log, so the only visible symptom was "still running" (run 43407063422).
+    # Every phase below is bounded, so the same regression is a red check with a
+    # log naming the phase that blocked, well inside 20 minutes. (A cold
+    # `rust-cache` is the one legitimate way to approach it: the build step
+    # below is then the long one.)
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:18
@@ -106,26 +114,163 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       # The runner image ships /opt and its tool cache world-writable; blastit refuses an
       # interpreter a view uid could plant a module in, as it should.
-      - run: sudo chmod go-w /opt && sudo chmod -R go-w /opt/hostedtoolcache
+      # This step runs before the preflight, so it must not be able to wait on
+      # anything either: `--non-interactive` turns "sudo wants a password" into an
+      # instant readable error, and the step is bounded so a wedged `chmod -R` is a
+      # red step rather than a job that idles to its timeout (MA.9).
+      - name: Make /opt and the tool cache non-world-writable (as root)
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          sudo --non-interactive chmod go-w /opt
+          sudo --non-interactive chmod -R go-w /opt/hostedtoolcache
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # init must be root (PID 1 in the container); the smoke tests start the real binary.
-      - run: cargo build -p blastit --tests --locked
-      # sudo-rs (the runner's sudo) ignores `-E`, so root inherits neither
-      # RUSTUP_HOME nor CARGO_HOME and the rustup shim finds no toolchain to run.
-      # Pass what root needs explicitly; every `${...}` is expanded by *this*
-      # shell before sudo, so the fallbacks see the runner user's homes.
-      # PYO3_PYTHON is not just the build's interpreter: `tests/smoke.rs` derives
-      # LD_LIBRARY_PATH for the binary it spawns from it, and the smoke tests read
-      # the job's PostgreSQL service from BLASTIT_TEST_PG_URL.
-      - run: |
-          sudo env \
+      # Preflight: prove, in seconds, that root is reachable *without a prompt*
+      # and that cargo resolves for root with the homes this job hands it, and
+      # echo what was resolved. `--non-interactive` is the point: a sudo that
+      # would have asked for a password now exits non-zero immediately instead of
+      # blocking on /dev/tty with nothing in the log (MA.9 candidate 1). Nothing
+      # here prints the whole environment: only the variables the test binaries
+      # need are echoed, and the PostgreSQL URL is reduced to "set".
+      - name: Preflight (sudo is non-interactive, cargo runs as root)
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          echo "sudo: $(sudo --version | head -1)"
+          if ! root_uid="$(sudo --non-interactive id -u)"; then
+            echo "::error::sudo --non-interactive id -u failed: this runner's sudo wants a password (or denies the command), so the privileged step could only block on a prompt. That is MA.9 candidate 1; the NOPASSWD rule no longer matches what this job runs."
+            exit 1
+          fi
+          echo "sudo: root uid $root_uid, resolved non-interactively"
+          echo "runner: uid=$(id -u) user=$(id -un) cwd=$PWD"
+          echo "runner cargo: $(command -v cargo) ($(cargo --version))"
+          if [ -z "${PYO3_PYTHON:-}" ]; then
+            echo "::error::PYO3_PYTHON is empty: the setup-python step did not reach GITHUB_ENV, and every test binary would lose libpython (tests/smoke.rs derives LD_LIBRARY_PATH from it)."
+            exit 1
+          fi
+          if [ -z "${BLASTIT_TEST_PG_URL:-}" ]; then
+            echo "::error::BLASTIT_TEST_PG_URL is empty: the service's URL did not reach the environment, and the smoke tests would silently skip every PostgreSQL check."
+            exit 1
+          fi
+          echo "runner python: PYO3_PYTHON=$PYO3_PYTHON"
+          echo "homes: RUSTUP_HOME=${RUSTUP_HOME:-<unset>} CARGO_HOME=${CARGO_HOME:-<unset>}"
+          echo "postgres: BLASTIT_TEST_PG_URL=set"
+          sudo --non-interactive env \
             "PATH=$HOME/.cargo/bin:$PATH" \
             "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
             "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
             "PYO3_PYTHON=$PYO3_PYTHON" \
             "BLASTIT_TEST_PG_URL=$BLASTIT_TEST_PG_URL" \
-            cargo test -p blastit --locked -- --test-threads=1
+            sh -c 'echo "root: uid=$(id -u) home=$HOME"; echo "root cargo: $(command -v cargo) ($(cargo --version))"; echo "root PYO3_PYTHON=$PYO3_PYTHON"; test -x "$PYO3_PYTHON" || { echo "::error::root cannot execute PYO3_PYTHON=$PYO3_PYTHON"; exit 1; }'
+      # Build every test target of the crate as the **runner** user, and hand the
+      # privileged step nothing but absolute binary paths: root never runs
+      # `cargo test`, so root can never start a `blastit` rebuild into the
+      # runner-owned `target/` with the runner's `CARGO_HOME` (MA.9 candidate 2:
+      # a silent rebuild behind ~31 serial smoke tests is indistinguishable from
+      # a deadlock). `--message-format=json` names every test binary; the human
+      # build progress still streams on stderr.
+      - name: Build the test binaries (runner user, no root)
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cargo test -p blastit --locked --no-run --message-format=json > "$RUNNER_TEMP/artifacts.json"
+          python3 - "$RUNNER_TEMP/artifacts.json" "$RUNNER_TEMP/test-binaries.txt" <<'PY'
+          import json
+          import sys
+
+          # `--message-format=json` is JSON Lines, not one array.
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              artifacts = [json.loads(line) for line in stream if line.strip()]
+          binaries = sorted(
+              artifact["executable"]
+              for artifact in artifacts
+              if artifact.get("reason") == "compiler-artifact"
+              and (artifact.get("profile") or {}).get("test") is True
+              and artifact.get("executable")
+          )
+          if not binaries:
+              sys.exit("no test binary in cargo's JSON: there is nothing to run as root")
+
+          with open(sys.argv[2], "w", encoding="utf-8") as out:
+              out.write("\n".join(binaries) + "\n")
+          print(f"{len(binaries)} test binaries, built as the runner user:")
+          for binary in binaries:
+              print(f"  {binary}")
+          PY
+      # The job's purpose, unchanged: init has to be PID-1's uid (root) to bind
+      # the view sockets and drop privileges, so every test binary that
+      # `cargo test -p blastit` runs is run here as uid 0, one target at a time.
+      # `--nocapture` plus `tee` make the log carry the in-flight
+      # `test <name> ...` line as it happens, so a test that blocks is named in
+      # the log while it blocks, not inferred afterwards (MA.9 candidate 3), and
+      # `timeout` bounds each binary instead of the whole step. The budget adds
+      # up: 90 s per binary, and the crate has six test binaries today, so the
+      # worst case is 9 minutes inside this step's 10-minute bound — every binary
+      # reaches its own timeout and its own `::error::` naming the blocked test
+      # instead of being cut off by the step. (The whole suite takes ~5 s when
+      # healthy, so 90 s is ~18x headroom; a seventh test target would have to
+      # raise this step's bound with it.)
+      - name: Run every test binary as root, one at a time
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          mapfile -t binaries < "$RUNNER_TEMP/test-binaries.txt"
+          log="$RUNNER_TEMP/root-tests.log"
+          # 90 s per binary: 6 × 90 s = 9 min, inside this step's 10-minute bound.
+          binary_timeout=90
+          : > "$log"
+          echo "running ${#binaries[@]} test binaries as uid 0, one at a time"
+          for binary in "${binaries[@]}"; do
+            echo "==> root: $binary"
+            set +e
+            timeout --kill-after=30s "${binary_timeout}s" \
+              sudo --non-interactive env \
+                "PATH=$HOME/.cargo/bin:$PATH" \
+                "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+                "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+                "PYO3_PYTHON=$PYO3_PYTHON" \
+                "BLASTIT_TEST_PG_URL=$BLASTIT_TEST_PG_URL" \
+                stdbuf -oL -eL "$binary" --test-threads=1 --nocapture 2>&1 \
+              | tee -a "$log"
+            status=${PIPESTATUS[0]}
+            set -e
+            if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+              echo "::error::$binary did not finish as root within ${binary_timeout}s: the last 'test <name> ...' line in root-tests.log is the test that blocked (MA.9 candidate 3), not a deadlock in the job."
+              exit 1
+            fi
+            if [ "$status" -ne 0 ]; then
+              echo "::error::$binary failed as root (exit $status)"
+              exit "$status"
+            fi
+          done
+      # `cargo test -p blastit` also runs the crate's doc tests, which are the
+      # one part that still needs cargo as root. It reports "running 0 tests"
+      # today; the step exists so a future doc test cannot silently stop running
+      # under root. rustdoc compiles each snippet, so it is bounded separately.
+      - name: Run the crate's doc tests as root
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          sudo --non-interactive env \
+            "PATH=$HOME/.cargo/bin:$PATH" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "PYO3_PYTHON=$PYO3_PYTHON" \
+            cargo test -p blastit --doc --locked -- --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/root-doctests.log"
+      # An in-flight job has no downloadable log, which is why the hang left no
+      # evidence at all; keep what the steps teed.
+      - name: Upload the root test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-root-logs
+          path: |
+            ${{ runner.temp }}/root-tests.log
+            ${{ runner.temp }}/root-doctests.log
+            ${{ runner.temp }}/artifacts.json
+          if-no-files-found: ignore
 
   e2e:
     name: e2e (Django under blastit, Docker)

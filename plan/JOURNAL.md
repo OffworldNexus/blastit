@@ -495,3 +495,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T11:48 [MA] (lead) status active -> done
 - 2026-11-13T11:48 [MA] (lead) MA.8 (CI hotfix leaf, created by conductor after the 0.1.1 gate) is done with reviewer PASS; status restored to done after the validate-blocking transient where
 - 2026-11-13T11:51 [MA.8] (lead) committed d12317be3b2387ab07b476ed66f1636a11307754 on release/0.1.1 (python/tests/test_check.py, docs/knowledge/LESSONS.md, plan/)
+- 2026-11-13T11:52 [MA.9] (conductor) created (task) Leaf 16: un-hang the smoke (root) CI job and make it fail loudly
+- 2026-11-13T11:52 [MA.9] (lead) status ready -> active
+- 2026-11-13T11:52 [MA.9] (lead) attempt 1/3 started
+- 2026-11-13T11:52 [MA.9] (lead) base 599f912149b42a2e5cbc4ea14aec2108cbe318ef
+- 2026-11-13T12:08 [MA.9] (lead) status active -> review
+- 2026-11-13T12:08 [MA.9] (lead) status review -> done
