@@ -2,7 +2,7 @@
 id: MB.1.7
 title: "Build and brand hygiene: wheel README links, CARGO_NET_OFFLINE=true, events serde, logo contrast"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
@@ -14,11 +14,11 @@ paths:
   - "crates/blastit-events/src/**"
   - Cargo.lock
   - docs/brand/logo.svg
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T14:44"
-updated: "2026-11-13T14:54"
+updated: "2026-11-13T15:08"
 ---
 
 # Goal

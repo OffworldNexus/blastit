@@ -541,3 +541,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T14:53 AUTOPILOT off by conductor conversing with user on forum post
 - 2026-11-13T14:54 [MB.1.7] (lead) edited fields
 - 2026-11-13T14:54 [MB.1.9] (lead) status active -> done
+- 2026-11-13T14:54 [MB.1.7] (lead) status ready -> active
+- 2026-11-13T14:54 [MB.1.7] (lead) attempt 1/3 started
+- 2026-11-13T14:54 [MB.1.7] (lead) base d3ac8b3
+- 2026-11-13T15:08 [MB.1.7] (lead) status active -> done

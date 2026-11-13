@@ -97,6 +97,10 @@ critical-skip-check: ## Refuse a skip construct in any protected critical test (
 	fi; \
 	echo "protected critical tests hold no skip construct"
 
+# `CARGO_NET_OFFLINE` has to be the string `true`, not `1`: cargo accepts both,
+# but maturin >= 1.16 parses the variable as a strict bool when it shells out to
+# cargo, and `make check` reaches it through `docs-test` -> `scripts/build-wheel.sh`
+# (`docs/knowledge/LESSONS.md`).
 test-critical: critical-skip-check rs-test-critical ## Run protected critical tier (Rust + Python, zero skips, offline)
 	@set -e; \
 	stage="$(CRITICAL_STAGE)"; \
@@ -105,11 +109,11 @@ test-critical: critical-skip-check rs-test-critical ## Run protected critical ti
 	mkdir -p "$$stage/blastit/_bin"; \
 	cp python/blastit/*.py "$$stage/blastit/"; \
 	echo "cargo build --locked -p blastit-py -p blastit-dbproxy"; \
-	$(RUST_ENV) CARGO_NET_OFFLINE=1 $(CARGO) build --locked -p blastit-py -p blastit-dbproxy; \
+	$(RUST_ENV) CARGO_NET_OFFLINE=true $(CARGO) build --locked -p blastit-py -p blastit-dbproxy; \
 	cp target/debug/lib_blastit.so "$$stage/blastit/_blastit$${ext}"; \
 	cp target/debug/blastit-dbproxy "$$stage/blastit/_bin/blastit-dbproxy"; \
 	echo "python -m unittest discover -s python/tests/critical"; \
-	CARGO_NET_OFFLINE=1 UV_OFFLINE=1 PYTHONPATH="$${stage}:$(CURDIR)/python" \
+	CARGO_NET_OFFLINE=true UV_OFFLINE=1 PYTHONPATH="$${stage}:$(CURDIR)/python" \
 		$(RUST_ENV) $(UV) run --no-project python -m unittest discover \
 		-s python/tests/critical -p 'test_*.py'
 

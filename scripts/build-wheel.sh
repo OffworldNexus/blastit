@@ -28,6 +28,10 @@
 # it.
 #
 # Usage: scripts/build-wheel.sh [extra arguments for `maturin build`]
+#
+# The README is rewritten to absolute links for the duration of the build and
+# restored afterwards (see the `trap` below), so the tree is unchanged when this
+# exits, successfully or not.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -42,6 +46,35 @@ fi
 
 cargo build --release --locked -p blastit-dbproxy --bin blastit-dbproxy
 install -D -m 0755 target/release/blastit-dbproxy python/blastit/_bin/blastit-dbproxy
+
+# The README is the wheel's long description, and PyPI renders it with no
+# repository around it: a GitHub-relative link is a 404 there and a relative
+# image does not render at all. A published wheel gets its rewrite from
+# `.github/workflows/publish-pypi.yml`; this script does it here so a wheel built
+# on a developer's machine is the same artifact. The rewrite is in place, so the
+# README is put back on *every* exit path — `make check` runs this from
+# `docs-test` and must not end on a dirty tree, not even when the build fails.
+#
+# `readme-absolute-links.py` is standard library only. `uv` is how this repo runs
+# Python, but the CI jobs that build an e2e wheel install maturin with pipx and
+# name `PYO3_PYTHON` instead, so that interpreter is the fallback; failing here
+# beats a wheel whose description links 404 on PyPI.
+if command -v uv >/dev/null; then
+    link_python=(uv run --no-project python)
+elif [[ -n ${PYO3_PYTHON:-} ]]; then
+    link_python=("$PYO3_PYTHON")
+else
+    echo "the README rewrite needs uv or PYO3_PYTHON: install uv, or point PYO3_PYTHON at an interpreter" >&2
+    exit 1
+fi
+readme=$(mktemp "${TMPDIR:-/tmp}/blastit-README.XXXXXX")
+cp README.md "$readme"
+restore_readme() {
+    cp "$readme" README.md
+    rm -f "$readme"
+}
+trap restore_readme EXIT
+"${link_python[@]}" scripts/readme-absolute-links.py
 
 # `blastit-py/extension-module` is deliberately not a default feature of that
 # crate: it must be on for this build alone (see `crates/blastit-py/Cargo.toml`).
