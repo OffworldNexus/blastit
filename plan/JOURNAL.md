@@ -645,3 +645,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T18:45 [MB.1.12] (lead) lead verification: critical_policy_surface.rs 22 tests; cargo test -p blastit-sqlpolicy 224+10+25+22+6+10+18+8 green, 0 failures; widening probe on a /tmp copy 
 - 2026-11-13T18:46 [MB.1.13] (lead) status active -> done
 - 2026-11-13T18:46 [MB.1.13] (lead) lead verification: critical_check_engine 19 tests (6 add_group mentions), audit_group_hint 4 green; guard authorized 2 protected changes; cargo fmt --all reform
+- 2026-11-13T18:47 [MB.1.11] (implementer) implemented: MUTANTS_TMP on disk (XDG cache), prune+preflight+retention, systemd-run --user --scope MemoryMax=12G MemorySwapMax=0 with logged fallback, mutants-
