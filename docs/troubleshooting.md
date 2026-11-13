@@ -22,6 +22,7 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | a directory `is not readable and traversable` | production only: a view uid cannot reach the interpreter, the stdlib or your project. Keep developing with `blastit dev`; for production, install Python under a world-readable prefix (`UV_PYTHON_INSTALL_DIR=/opt/uv-python` before `uv python install`) |
 | `is writable by another uid` | a directory on the import path belongs to someone else: your route uids could plant a module. `chmod go-w` it, or start Blastit in the code tree |
 | `is the uid the layout hands out` | the service uid collides with `BLASTIT_UID_BASE + 1…3` or a route's uid |
+| `memory: … is above BLASTIT_MEM_HIGH_WATERMARK` | `blastit dev` stops rather than serve `503`s: the memory the kernel cannot reclaim is over the knob. Free memory, or raise `BLASTIT_MEM_HIGH_WATERMARK` |
 
 ## `blastit check` fails
 
@@ -84,4 +85,5 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `"bounding_set": "kept"` | the platform could not give `cap_setpcap`; the children hold nothing else |
 | `permission denied` creating the runtime directory | mount a `tmpfs` owned by the service uid, or use `RuntimeDirectory=` |
 | the container is OOM-killed | the view-process cap is too high: set `BLASTIT_MAX_VIEW_PROCESSES` or raise `BLASTIT_VIEW_MEM_ESTIMATE` |
+| a `memory:` WARN, then it serves | the reading is above the `85%` default and you raised `BLASTIT_MEM_HIGH_WATERMARK` past it; the line names the knob, the measured value and the cache it left out. Free memory to quieten it |
 | a route's first request is slower | a lazy view process forking: mark hot routes `prefork = true` |

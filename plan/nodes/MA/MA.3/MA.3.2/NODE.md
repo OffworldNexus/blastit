@@ -2,7 +2,7 @@
 id: MA.3.2
 title: "Reconcile docs, README and ARCHITECTURE drift with the shipped 0.1.1 CLI"
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: [MA.3.1]
@@ -20,11 +20,11 @@ paths:
   - docs/security.md
   - docs/troubleshooting.md
   - docs/changelog.md
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-12T19:16"
-updated: "2026-11-12T19:16"
+updated: "2026-11-13T01:14"
 ---
 
 # Goal

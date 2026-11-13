@@ -35,7 +35,8 @@ never with production data or an `unrestricted` route.
 
 ## Add PostgreSQL
 
-Any PostgreSQL works. No server? One line starts one on loopback only:
+Any PostgreSQL works. No server? One line starts one on loopback only, if you
+have Docker (skip it if you already have PostgreSQL):
 
 ```console
 $ docker run --rm -d -p 127.0.0.1:5432:5432 \
@@ -72,7 +73,7 @@ environment, and `blastit.toml` holds no credentials or inline literals, so it i
 safe to commit.
 
 A route with no `[route.db]` gets no listener at all. Here `queries = []` gives
-it a listener that denies every statement — which is what the next step fixes.
+it a listener that denies every statement (`42501`) — what the next step fixes.
 
 ## Fill the manifest in one pass
 
@@ -91,6 +92,8 @@ are done:
 
 ```console
 $ uv run blastit dev --learn
+…
+learn: 2 routes, 3 queries added → /home/you/shop/blastit.toml
 ```
 
 Learn mode allows what the manifest does not cover and records it, so one pass

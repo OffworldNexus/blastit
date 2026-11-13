@@ -21,7 +21,7 @@ $ blastit dev --learn
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--port N` | `8080` | listen on `N` |
+| `--port N` | `8080`, or `PORT` | listen on `N` |
 | `--host ADDR` | `127.0.0.1` | expose the server on another address; also needs `BLASTIT_DEV_EXPOSE=1`, and the boot line names the address and your uid |
 | `--learn` | off | allow what the manifest lacks and record it; writes exact `queries` to the manifest when it stops |
 
@@ -29,6 +29,8 @@ It runs the real process topology — http, scheduler, dbproxy and one view per
 route — on your own uid, with the stage-0 secret swap and the policy checks. It
 is not a sandbox: the banner says so, and the `boot` event reports
 `"privilege": "unprivileged-dev"`. Logs are pretty; `BLASTIT_LOG_FORMAT` wins.
+A taken port exits `1` with `binding 127.0.0.1:8080: Address already in use`;
+pick another with `--port`.
 
 ## `blastit check`
 
@@ -48,14 +50,16 @@ $ blastit check -- -k products
 | `--dry-run` | off | with `--learn`: print the proposal, write nothing |
 | `-- ARGS…` | — | pass `ARGS` to pytest |
 
-`--learn` replaces the manifest atomically, and only after the suite passed: a
-failed run leaves it untouched. Add `--json` for
-`{"proposed": {"routes": N, "queries": N}, "wrote": true|false}`, its one
-document; add `--dry-run` to write nothing (with `--json`, `"wrote": false`)
-([details](../ci.md#bootstrap-an-existing-project)).
+`--json` prints one document on stdout: `schema_version`, `ok`, `requests`,
+`statements`, `routes`, `proxies`, `findings`. Under `--learn` the document is
+the proposal instead: `{"proposed": {"routes": N, "queries": N}, "wrote":
+true|false}`, and `--dry-run` writes nothing (`"wrote": false`). `--learn`
+replaces the manifest atomically, and only after the suite passed: a failed run
+leaves it untouched ([details](../ci.md#bootstrap-an-existing-project)).
 
 Exit codes: `0` clean, `1` findings, `2` it could not start, `3` the suite
-failed. [What it checks](../ci.md#what-it-fails-on) and [the `--json`
+failed (`pytest` exit `5`, no tests collected, is `3`). [What it
+checks](../ci.md#what-it-fails-on) and [the `--json`
 contract](../ci.md#for-agents-json) are on the CI page. `blastit test` is the
 same command under its other name.
 

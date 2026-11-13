@@ -62,9 +62,22 @@ because the secrets only arrive over an inherited pipe. CPython is embedded
 through `pyo3`, as in the `pywsgi` experiment. The database proxy is
 built on the [`pregresql`](https://github.com/OffworldNexus/pregresql) crate,
 used as a library. On the Python side there is no framework integration at
-all: blastit loads one standard WSGI callable (`BLASTIT_APP`) and calls it. It
-knows nothing about the framework's routing. Which process serves which
-request comes from blastit's own routing table in the manifest (§6).
+all: blastit loads one standard WSGI callable (`BLASTIT_APP`, or the manifest's
+`app`) and calls it. It knows nothing about the framework's routing. Which
+process serves which request comes from blastit's own routing table in the
+manifest (§6).
+
+**Execution modes.** Four entry points:
+
+| Entry point | Mode | Runs |
+|---|---|---|
+| `blastit` | production | stage 0, then `execve` stage 1 under real uids or capabilities; refuses to start without them |
+| `blastit dev` | single-uid simulation | the same five roles under `geteuid()`, loopback by default; a non-loopback bind needs `--host` and `BLASTIT_DEV_EXPOSE=1`, and the banner then says `EXPOSED, no auth`; `--learn` allows what the manifest lacks and records it |
+| `blastit check` (`blastit test`) | audit | `pytest` through dbproxy; `--learn` writes the missing routes and exact `queries` |
+| `blastit-manifest fold` | manifest tooling | the missing grants a log's denials name |
+
+The component table below is the production topology; `blastit dev` runs the
+same roles on one uid.
 
 | Component | Count | uid | Python? | Holds | Talks to |
 |---|---|---|---|---|---|
@@ -863,6 +876,14 @@ The manifest is a file in the image (`BLASTIT_MANIFEST`, default
 `/app/blastit.toml`). It is versioned with the code, because it describes the
 code. dbproxy reads it in stage 0; init and the scheduler read it in stage 1.
 
+`version`, `app` (`module:attribute`) and `preload` (a module, or a list of
+them, imported once before the fork) are top-level; `BLASTIT_APP` and
+`BLASTIT_PRELOAD` override the last two. A route that takes a body declares
+`[route.ingress]` with `body = "json" | "form" | "none" | "raw"`: `json` and
+`form` are decoded and re-encoded before the app sees them (a body that does not
+fit is a `400`), `none` rejects any body, and `raw` passes untouched and also
+needs `allow_raw = true`. A body to a route without that table is a `413`.
+
 It is **blastit's own routing table**, independent of the framework. Besides
 the proxies (`[proxy.*]`, §5), it has two kinds of entries.
 
@@ -884,6 +905,8 @@ them itself, exactly as it would behind any other WSGI server.
 
 ```toml
 version = 1
+app = "myshop.wsgi:application"     # WSGI callable; BLASTIT_APP overrides it
+preload = ["myshop.urls"]           # imported once, before the fork
 groups = ["session"]                # attached to every route (top-level keys come before any [table])
 
 [proxy.db]                          # see §5 for proxies and their variables
@@ -915,6 +938,8 @@ name = "checkout"
 path = ['/checkout/.*']
 groups = ["catalog"]
 egress = true                       # may open TCP connections (payment API); see §7.3
+[route.ingress]
+body = "form"                       # decoded and re-encoded before the app sees it
 [route.db]                          # inline grants, only for this route
 queries = [
   'INSERT INTO "shop_order" ("product_id", "qty") VALUES ($1, $2) RETURNING "shop_order"."id"',
@@ -1003,6 +1028,21 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
   per route: a statement it grants is in every route's effective grant, so
   listing it as unused per route would repeat one dead grant as many times as
   there are routes (D3c).
+* **The test database.** A `pytest-django` suite is the one case where the
+  secret-free environment is not enough: `django_db_setup` has to create its
+  `test_*` database on the real server, or every migration and flush lands in
+  the developer's own database. When `pytest-django` is importable and the
+  project sets `DJANGO_SETTINGS_MODULE` or has a `./manage.py`, the orchestrator
+  writes the real proxy inputs to a one-shot `0600` file instead; the plugin is
+  imported by `-p` *before* Django builds its settings, so it reads that file,
+  names it in `DJANGO_SETUP` and unlinks it, and applies the real values only
+  long enough for `DATABASES` to be evaluated. `os.environ` is then scrubbed back
+  to the secret-free `swapped` values, so no test import or body sees a real
+  credential. When `django_db_setup` runs, matching `test_*` aliases are pointed
+  at dbproxy's socket, `set_db` names the database to the proxy, and a LIFO
+  finalizer on `django_db_setup` closes proxied sessions and restores the saved
+  dictionaries just before `teardown_databases` drops `test_*` on the real
+  server (R30, ADR-0004).
 * **Global groups, in the report and in the tooling.** A statement a route is
   granted only through a group attached to every route (`groups = […]` at the
   top level) is never in that route's `unused`; the report has a section of its
@@ -1021,13 +1061,16 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
   manifest and the *test* database, waits for the health path, and on teardown
   folds the log's `request` and `sql.denied` events into the same observations
   the report is built from — so real front-end traffic is checked against the
-  manifest and a missing grant comes out as `missing`. It needs what blastit
-  itself needs (root, or passwordless sudo) and skips, with the reason, where it
-  cannot have them; it preloads the project's root URLconf, which is what this
-  section asks a Django project to do anyway; and it serves the project from a
-  copy in a temporary directory when the view uids cannot read it where it
-  lives, never changing a mode outside the project. A denial carries a route and
-  no request id, so it is attached to the first request the log shows for it.
+  manifest and a missing grant comes out as `missing`. It runs production
+  `blastit` with root or passwordless `sudo`, and otherwise `blastit dev` on one
+  uid (R39); it skips when the project passes no `--blastit-manifest`, names no
+  WSGI callable, has a postgresql proxy that does not take its URL from one
+  variable, or has no `django_db_setup` fixture to create the test database in.
+  It preloads the project's root URLconf, which is what this section asks a
+  Django project to do anyway; and it serves the project from a copy in a
+  temporary directory when the view uids cannot read it where it lives, never
+  changing a mode outside the project. A denial carries a route and no request
+  id, so it is attached to the first request the log shows for it.
 * **Folding denials from logs.** `blastit-manifest fold LOG… --manifest
   blastit.toml [--write] [--prefer-tables] [--allow-dangerous]` reads the same
   event stream and prints — or, with `--write`, merges into the file — the
@@ -1317,21 +1360,30 @@ writes to gets copied (§9.2). So:
   too big for the second reading is trimmed as later views are needed. When the
   machine's memory cannot be read at all there is no derived cap, and init says
   so once, as a `warn` line of its own output (§8.1).
-* `total` is `min(MemTotal, cgroup limit)` and `used` is the cgroup's own
-  accounting: on DO, `MemTotal` *is* the instance size and the cgroup v1
-  `memory.usage_in_bytes` is accurate (§9.2 #10). The sources, in order, are
-  `/proc/meminfo` (`MemTotal`, with `MemTotal − MemAvailable` as the fallback
-  for `used`), cgroup v2 `/sys/fs/cgroup/memory.max` and `memory.current`, then
-  cgroup v1 `/sys/fs/cgroup/memory/memory.limit_in_bytes` and
-  `memory/memory.usage_in_bytes`. `max` — or v1's page-rounded `LONG_MAX` —
-  means "no limit". The `boot` event reports `mem_total`, `mem_used` and the
-  `max_view_processes` they buy, so the sizing decision is in the log.
+* `total` is `min(MemTotal, cgroup limit)`: `MemTotal` comes from
+  `/proc/meminfo`, the limit from cgroup v2 `/sys/fs/cgroup/memory.max` with
+  cgroup v1 `memory/memory.limit_in_bytes` as the fallback; `max` — or v1's
+  page-rounded `LONG_MAX` — means "no limit". `used` is what the kernel cannot
+  reclaim: cgroup v2 `memory.current` minus `(file − shmem − file_mapped) −
+  slab_reclaimable` from `memory.stat`, so page cache and reclaimable slab are
+  left out while anonymous, tmpfs and mapped memory stay counted. A
+  `memory.stat` without `file`/`shmem` falls back to
+  `inactive_file + slab_reclaimable`; cgroup v1 keeps its raw `usage_in_bytes`
+  (spelled differently, and accurate on DO — `MemTotal` *is* the instance size,
+  §9.2 #10); a machine without cgroups keeps `MemTotal − MemAvailable`, which
+  already excludes cache. The `boot` event reports `mem_total`, `mem_used` and
+  the `max_view_processes` they buy, so the sizing decision is in the log.
 * The scheduler also watches aggregate usage on its own, which is the only
-  reliable number (`VmRSS` doesn't move under gVisor). Above
-  `BLASTIT_MEM_HIGH_WATERMARK` (a percentage of `total`) it checks every 2
-  seconds and retires **one** idle view process per check, oldest-first; a view
-  with a request in flight is never retired for memory. While usage is above
-  the watermark a new view process is only spawned if an evictable one can be
+  reliable number (`VmRSS` doesn't move under gVisor). A boot already above
+  `BLASTIT_MEM_HIGH_WATERMARK` (a percentage of `total`, over the same reading)
+  cannot start a view process, so every request would wait out
+  `BLASTIT_QUEUE_TIMEOUT` and answer `503`; `blastit dev` refuses that boot
+  instead, and prints one WARN line when it starts above the `85%` default (the
+  knob was raised), naming the setting, the measured value and the reclaimable
+  cache it left out. During a run, above the watermark it checks every 2 seconds
+  and retires **one** idle view process per check, oldest-first; a view with a
+  request in flight is never retired for memory. While usage is above the
+  watermark a new view process is only spawned if an evictable one can be
   retired first, and otherwise the request waits in the queue: pressure cannot
   become retire-then-respawn thrash. A view retired for memory pressure is not
   spawned again for its route until the spawn backoff has passed (§2.4's "don't
@@ -1472,7 +1524,7 @@ with `request` events.
 | `BLASTIT_VIEW_IDLE_TIMEOUT` / `BLASTIT_VIEW_MAX_REQUESTS` | `600s` / `0` (off) | view process recycling |
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | live view process cap (LRU retirement) |
 | `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | expected cost per view process: the starting divisor of the derived cap, and the floor of the measured one |
-| `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total` (the smaller of `MemTotal` and the cgroup limit); above it, one idle view process per 2 s check is retired |
+| `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total` (the smaller of `MemTotal` and the cgroup limit), over the non-reclaimable reading of §8 Sizing; above it one idle view process per 2 s check is retired, and `blastit dev` refuses to boot |
 | `BLASTIT_IMMORTALIZE` | `auto` | `auto` \| `1` \| `0`: mark the preloaded heap immortal before the fork (§9.2 #9), each version with the marker CPython itself writes there. `auto` and `1` both do it on 3.12–3.14 and skip any interpreter whose marker blastit does not know (32-bit, big-endian, free-threaded, `Py_TRACE_REFS`, or a version outside that range), with the reason in the `boot` event; `0` never |
 | `BLASTIT_MAX_HEADER_BYTES` / `BLASTIT_MAX_BODY_BYTES` | `64 KiB` / `100 MiB` | HTTP limits |
 | `BLASTIT_HEADER_TIMEOUT` / `BLASTIT_KEEPALIVE_TIMEOUT` | `10s` / `75s` | HTTP timeouts (keep-alive above the LB's) |

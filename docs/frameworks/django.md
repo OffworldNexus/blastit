@@ -1,9 +1,7 @@
 # Django
 
 Four settings, one manifest, one command to fill it in. Nothing here changes
-your code.
-
-Not on Django? [Flask and other WSGI apps](flask.md).
+your code. Not on Django? [Flask and other WSGI apps](flask.md).
 
 ## Install
 
@@ -12,7 +10,9 @@ $ uv add blastit 'psycopg[binary]' dj-database-url
 $ uv add --dev pytest-django
 ```
 
-`dj-database-url` only turns `DATABASE_URL` into `DATABASES`.
+`dj-database-url` only turns `DATABASE_URL` into `DATABASES`. `check` also needs
+`pytest` (`uv add --dev pytest`) and finds a Django suite by `pytest-django` plus
+a `manage.py` or `DJANGO_SETTINGS_MODULE` ([the handshake](../ci.md#your-suite)).
 
 ## Settings
 
@@ -121,10 +121,11 @@ $ uv run blastit check
 blastit check: 412 requests, 977 statements, 3/3 routes, clean
 ```
 
-`blastit check` runs your pytest suite with Blastit in front of PostgreSQL.
-`--learn` records what the manifest lacks instead of failing, then writes exact
-`queries` to `blastit.toml`. Review the diff, then run again without `--learn`:
-that second run is the gate that stays in CI.
+`blastit check` runs your pytest suite through Blastit: `--learn` records what
+the manifest lacks instead of failing, then writes exact `queries` to
+`blastit.toml`. Review the diff, then run it again without `--learn` — that is
+the gate CI keeps. Django creates `test_<database>` with the real credentials;
+the suite then runs through the proxy, never your development database.
 
 Session and user lookups happen on every authenticated request, password hash
 included. Put them in a `[group.session.db]` and attach that group to the routes

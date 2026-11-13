@@ -378,3 +378,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T01:05 [MA.3.2] (lead) attempt 2/3 started
 - 2026-11-13T01:05 [MA.3.2] (lead) retry base aaeadf4d0bc850a51ae8e63bd5dd1c330b1e672d
 - 2026-11-13T01:09 [MA.3.4] (lead) status review -> done
+- 2026-11-13T01:09 [MA.3.2] (lead) status ready -> review
+- 2026-11-13T01:14 [MA.3.2] (lead) status review -> done

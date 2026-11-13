@@ -109,7 +109,7 @@ No TLS or HTTP/2: a load balancer terminates TLS. `Upgrade` gets `501`.
 | `BLASTIT_VIEW_SPAWN` | `lazy` | `lazy` or `eager`; `prefork = true` overrides it per route |
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | the live view-process cap, with LRU retirement |
 | `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | the expected cost of one view process; the cap's starting divisor |
-| `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | above it, one idle view process per check is retired |
+| `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total`, the smaller of `MemTotal` and the cgroup limit; the non-reclaimable reading (page cache and reclaimable slab left out) is compared against it. `blastit dev` refuses a boot above it and warns once above the `85%` default; one idle view process per check is retired |
 | `BLASTIT_VIEW_IDLE_TIMEOUT` | `600s` | retire a view process idle this long |
 | `BLASTIT_VIEW_MAX_REQUESTS` | `0` (off) | retire a view process after this many requests |
 | `BLASTIT_IMMORTALIZE` | `auto` | `auto`, `1` or `0`: mark the preloaded heap immortal before the fork |

@@ -54,7 +54,9 @@ uid, capability and seccomp path end to end.
   `BLASTIT_VIEW_IDLE_TIMEOUT` (`600s`) and `BLASTIT_VIEW_MAX_REQUESTS` (`0`, off)
   retire one.
 * **Give the container a memory limit.** `BLASTIT_MEM_HIGH_WATERMARK` (default
-  `85%` of it) retires idle processes under pressure. Size
+  `85%` of `total`, the smaller of `MemTotal` and the cgroup limit; the
+  non-reclaimable reading is what the percentage is compared against) retires
+  idle processes under pressure, and a container already above it serves `503`s. Size
   `BLASTIT_MAX_BODY_BYTES` (default `100 MiB`) so the largest body × concurrent
   uploads still fits.
 
