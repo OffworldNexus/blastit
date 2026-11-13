@@ -70,6 +70,7 @@ fn covering(statements: &[&str]) -> TableGrants {
 //
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_column_list_reaches_exactly_its_columns() {
     let grants = selecting("t", &["id", "name"]);
     assert!(allowed(&grants, "SELECT id FROM t"));
@@ -86,6 +87,7 @@ fn a_column_list_reaches_exactly_its_columns() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_star_grant_reaches_every_column_but_a_list_is_not_a_star() {
     let star = TableGrants::new(
         [(
@@ -227,6 +229,7 @@ fn a_table_key_is_the_name_the_analysis_resolves() {
 //
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_read_grant_does_not_allow_the_write_twin() {
     let grants = selecting("t", &["id"]);
     assert!(allowed(&grants, "SELECT id FROM t"));
@@ -245,6 +248,7 @@ fn a_read_grant_does_not_allow_the_write_twin() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn an_insert_grant_does_not_allow_the_read_twin() {
     let insert_only = TableGrants::new(
         [(
@@ -273,6 +277,7 @@ fn an_insert_grant_does_not_allow_the_read_twin() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn an_insert_without_a_column_list_needs_the_whole_table() {
     let insert_only = TableGrants::new(
         [(
@@ -308,6 +313,7 @@ fn an_insert_without_a_column_list_needs_the_whole_table() {
 //
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_table_reached_through_a_subquery_is_reported() {
     let sql = "SELECT 1 FROM (SELECT 1 FROM u) s";
     let covering = covering(&[sql]);
@@ -322,6 +328,7 @@ fn a_table_reached_through_a_subquery_is_reported() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_join_alias_is_reported_under_its_base_table() {
     let sql = "SELECT t.id, u.id FROM t JOIN u ON u.t_id = t.id";
     let covering = covering(&[sql]);
@@ -339,6 +346,7 @@ fn a_join_alias_is_reported_under_its_base_table() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn the_read_side_of_an_insert_select_is_reported() {
     let sql = "INSERT INTO a (id) SELECT b.id FROM b";
     let covering = covering(&[sql]);
@@ -365,6 +373,7 @@ fn the_read_side_of_an_insert_select_is_reported() {
 //
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_lock_needs_update_on_one_column() {
     let read_only = selecting("t", &["id"]);
     assert_eq!(
@@ -391,6 +400,7 @@ fn a_lock_needs_update_on_one_column() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_covering_grant_writes_the_lock_it_can_name() {
     let sql = "SELECT t.id, t.status FROM t WHERE t.id = $1 FOR UPDATE";
     let covering = covering(&[sql]);
@@ -416,6 +426,7 @@ fn a_covering_grant_writes_the_lock_it_can_name() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_lock_without_a_column_is_reported_not_widened() {
     let sql = "SELECT 1 FROM (SELECT 1 FROM t) s FOR UPDATE";
     let covering = covering(&[sql]);
@@ -499,6 +510,7 @@ fn a_denial_names_the_access_that_is_missing() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn merging_unions_operations_and_absorbs_a_list_into_star() {
     let mut merged = selecting("t", &["id"]);
     merged.merge_from(&TableGrants::new(
@@ -551,6 +563,7 @@ fn merging_unions_operations_and_absorbs_a_list_into_star() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn the_transaction_grammar_allows_exactly_transaction_control() {
     let on = Allowlist::new(std::iter::empty::<&str>(), true);
     for sql in [

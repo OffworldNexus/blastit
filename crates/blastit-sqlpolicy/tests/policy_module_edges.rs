@@ -49,6 +49,7 @@ fn pair(allow: &Allowlist, allowed_sql: &str, denied_sql: &str) {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn reformatting_keeps_the_verdict_and_a_bypass_does_not() {
     let allow = grant(&[NOTES]);
 
@@ -104,6 +105,7 @@ fn reformatting_keeps_the_verdict_and_a_bypass_does_not() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn an_in_list_is_one_shape_whatever_its_length() {
     // `prefetch_related` and `__in` grow the list per request, and every extra
     // placeholder renumbers the ones after it.
@@ -148,6 +150,7 @@ fn an_in_list_is_one_shape_whatever_its_length() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn the_dot_is_the_guard_and_not_its_left_operand() {
     // A bare `in` in front of a parenthesised list is the reserved keyword
     // whatever expression precedes it, so a group or an arithmetic expression
@@ -199,6 +202,7 @@ fn the_dot_is_the_guard_and_not_its_left_operand() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn in_needs_no_space_in_front_of_it() {
     // The marker keeps the whitespace that *was* in front of the keyword: the
     // shape rules never invent one and never delete one.
@@ -244,6 +248,7 @@ fn in_needs_no_space_in_front_of_it() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn values_rows_collapse_only_as_identical_rows() {
     // `bulk_create` sends one identical row per object.
     let allow = grant(&["INSERT INTO t (a, b) VALUES ($1, $2), ($3, $4)"]);
@@ -291,6 +296,7 @@ fn values_rows_collapse_only_as_identical_rows() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_separator_is_never_collapsed_away() {
     // Dropping a row that holds a `;` would change how many statements the
     // text has, and the transaction-control grammar counts them. The rule
@@ -388,6 +394,7 @@ fn known_static_setup_sql_is_exempt_only_as_an_exact_match() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_placeholder_list_is_only_a_shape_after_the_in_keyword() {
     // A parenthesised list of placeholders anywhere else keeps its arity: the
     // arity of a call picks the overload, and a tuple is a value.
@@ -415,6 +422,7 @@ fn a_placeholder_list_is_only_a_shape_after_the_in_keyword() {
 }
 
 #[test]
+// Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_grant_matches_the_bulk_statement_and_its_shape_stays_put() {
     // The statement a real app sends, against the grant its manifest holds:
     // both sides go through the same rules, so they cannot be shaped apart.

@@ -623,3 +623,23 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T18:28 [MB.1.5] (lead) lead verification: cargo test -p blastit-sqlpolicy 7 suites green; artefacts caught 168 / missed 0 / timeout 0 / unviable 7 = 175 mutants, statements 100%% tabl
 - 2026-11-13T18:36 [MB.1.3] (lead) status active -> done
 - 2026-11-13T18:36 [MB.1.3] (lead) attempts 1-2 interrupted by the harness; lead completed the 298->206 mutant measurement (173 caught / 30 missed / 0 timeouts / 3 unviable = 85.2%%) and wrote RE
+- 2026-11-13T18:38 [MB.1.11] (lead) created (task) Bound mutants memory and keep build scratch off tmpfs
+- 2026-11-13T18:39 [MB.1] (lead) INCIDENT 17:31: a concurrent process reverted crates/blastit-sqlpolicy/src/{lru,statements,tables}.rs to HEAD and deleted the untracked tests/{policy_module_edg
+- 2026-11-13T18:39 [MB.1] (lead) OWNER DIRECTIVE: new node MB.1.11 (Bound mutants memory and keep build scratch off tmpfs) created and dispatched before any further long campaign; MB.1.3's lexe
+- 2026-11-13T18:39 [MB.1.11] (lead) status ready -> active
+- 2026-11-13T18:39 [MB.1.11] (lead) attempt 1/3 started
+- 2026-11-13T18:39 [MB.1.11] (lead) base 51dced9
+- 2026-11-13T18:42 [MB.1.12] (lead) created (task) Promote the normalize and table policy-surface oracles to the protected tier
+- 2026-11-13T18:42 [MB.1.13] (lead) created (task) Protect the add_group oracle and correct the design-doc credit
+- 2026-11-13T18:42 [MB.1.12] (lead) status ready -> active
+- 2026-11-13T18:42 [MB.1.12] (lead) attempt 1/3 started
+- 2026-11-13T18:42 [MB.1.12] (lead) base 51dced9
+- 2026-11-13T18:42 [MB.1.13] (lead) status ready -> active
+- 2026-11-13T18:42 [MB.1.13] (lead) attempt 1/3 started
+- 2026-11-13T18:42 [MB.1.13] (lead) base 51dced9
+- 2026-11-13T18:44 [MB.1.14] (test-curator) created (task) Close the sqlpolicy lexer numeric-extent survivors, re-measure learn.rs, and protect the lexer boundary oracle
+- 2026-11-13T18:44 [MB.1.15] (test-curator) created (task) Close the remaining blastit-manifest survivors and protect the patcher's wrong-route case
+- 2026-11-13T18:44 [MB.1.16] (test-curator) created (task) Pin the rooted production missing-manifest message in the Docker e2e
+- 2026-11-13T18:44 [MB.1.17] (test-curator) created (task) Regression-test the release hygiene trio in make check
+- 2026-11-13T18:45 [MB.1.12] (lead) status active -> done
+- 2026-11-13T18:45 [MB.1.12] (lead) lead verification: critical_policy_surface.rs 22 tests; cargo test -p blastit-sqlpolicy 224+10+25+22+6+10+18+8 green, 0 failures; widening probe on a /tmp copy 
