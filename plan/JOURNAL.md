@@ -821,3 +821,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T23:40 [MB.2.11] (doc-writer) final: gate pins APP_URL port/db + export order + owner-oracle rejection (41/41); research note qualified to new server sessions and cites server_lifetime; both
 - 2026-11-13T23:44 [MB.2.11] (lead) REVIEW PASS attempt 2 (3 MINOR: one stale 'options is the supported way' phrasing in the research note; ai-ergonomics line refs drifted; single app.yaml git war
 - 2026-11-13T23:44 [MB.2.11] (lead) status review -> done
+- 2026-11-13T23:44 [MB.2.4.4] (lead) status ready -> active
+- 2026-11-13T23:44 [MB.2.4.4] (lead) attempt 1/3 started
+- 2026-11-13T23:44 [MB.2.4.4] (lead) base 0796921
+- 2026-11-13T23:44 [MB.2.9] (lead) status ready -> active
+- 2026-11-13T23:44 [MB.2.9] (lead) attempt 1/3 started
+- 2026-11-13T23:44 [MB.2.9] (lead) base 0796921
+- 2026-11-13T23:48 [MB.2.9] (doc-writer) security/how-it-works/ci/cli/manifest pages now match the shipped static serving; docs-unit, docs-check, docs-test green (47 fences, 0 failed); no fence added s
+- 2026-11-13T23:49 [MB.2.9] (lead) status active -> review
+- 2026-11-13T23:53 [MB.2.4.3] (implementer) G1-G4 closed in the protected resolve suite (18 tests, was 14): recorded_backend from StaticRoot's Debug asserted per fixture + StaticRoot::open; sparse cap.bin
+- 2026-11-13T23:56 [MB.2.9] (doc-writer) attempt 2: 5 reviewer accuracy fixes (scheduler read scope, spa/app miss qualification, malformed escape + 255-byte segment, bind mounts, all-static --json/exit
+- 2026-11-13T23:56 [MB.2.4.3] (lead) status active -> review
+- 2026-11-13T23:56 [MB.2.9] (lead) attempt 2/3 started
+- 2026-11-13T23:57 [MB.2.9] (lead) status review -> review
+- 2026-11-13T23:57 [MB.2.4.5] (lead) ADDITIONAL GAP (from MB.2.4.3's campaign at 0796921):   moved CAUGHT -> TIMEOUT at this tip, i.e. pump_static parks on a zero-byte read instead of aborting. Pin
+- 2026-11-14T00:02 [MB.2.9] (doc-writer) attempt 3: scheduler 'cannot' half replaced with its uid+seccomp boundary (no path-prefix confinement claim); check exit-2 names the route for every filesystem 
+- 2026-11-14T00:02 [MB.2.4.3] (lead) REVIEW PASS attempt 1 (1 MINOR: RESULT says 'nothing was reclassified' while 40:42 moved CAUGHT->TIMEOUT and 541:5->true joined the equivalences, so 66/66 rests
+- 2026-11-14T00:02 [MB.2.4.3] (lead) status review -> done

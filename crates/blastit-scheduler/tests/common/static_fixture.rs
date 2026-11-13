@@ -38,6 +38,13 @@ pub const GIT_CONFIG: &str = ".git/config";
 pub const CAFE_NFC: &str = "café.js";
 /// The NFD spelling of the same word.
 pub const CAFE_NFD: &str = "cafe\u{301}.js";
+/// A filename with a space: `0x20` is legal, one byte above the C0 limit
+/// (design §5.1 refuses `byte < 0x20` only). Requested as `/my%20file.css`.
+pub const SPACE_CSS: &str = "my file.css";
+/// `cap.bin`: exactly `STATIC_MAX_FILE_BYTES`, the inclusive ceiling.
+pub const CAP_BIN: &str = "cap.bin";
+/// `grow.bin`: one byte, grown past the ceiling by the TOCTOU hook.
+pub const GROW_BIN: &str = "grow.bin";
 
 /// `index.html` — the root index and the SPA answer.
 pub const INDEX_HTML: &[u8] = b"<!doctype html><title>fixture root</title>\n";
@@ -53,6 +60,10 @@ pub const DOT_ENV_BYTES: &[u8] = b"SECRET=fixture-only\n";
 pub const GIT_CONFIG_BYTES: &[u8] = b"[core]\n\trepositoryformatversion = 0\n";
 /// `café.js`, NFC bytes — served only under that exact name.
 pub const CAFE_BYTES: &[u8] = b"// caf\xc3\xa9 fixture\n";
+/// `my file.css` — a space is a legal filename byte, not a control.
+pub const SPACE_CSS_BYTES: &[u8] = b"body{margin:0}\n";
+/// `grow.bin` before the TOCTOU hook grows it past the ceiling.
+pub const GROW_BIN_BYTES: &[u8] = b"g";
 /// `swap.js` — the TOCTOU substitution leaf.
 pub const SWAP_BYTES: &[u8] = b"swap-original-inode\n";
 /// `swap.js` after the hook swapped it for a different inode.
@@ -137,6 +148,19 @@ impl StaticTree {
         write(&root.join(GIT_CONFIG), GIT_CONFIG_BYTES);
         write(&root.join(CAFE_NFC), CAFE_BYTES);
         write(&root.join("swap.js"), SWAP_BYTES);
+        write(&root.join(SPACE_CSS), SPACE_CSS_BYTES);
+        write(&root.join(GROW_BIN), GROW_BIN_BYTES);
+
+        // `cap.bin` is **exactly** the default ceiling: the inclusive side of
+        // `finish`'s `len > max_bytes` (`MB.2.4.3`). `set_len` past nothing
+        // written makes it sparse (0 B on the disk this fixture runs on), so
+        // an at-cap file costs no tmpfs and is never read by the suite.
+        let cap = root.join(CAP_BIN);
+        {
+            let file = fs::File::create(&cap).expect("fixture cap.bin");
+            file.set_len(STATIC_MAX_FILE_BYTES)
+                .expect("fixture cap.bin length");
+        }
 
         // `big.bin` is larger than the default ceiling without occupying it:
         // `set_len` past a few written bytes makes it sparse.
@@ -226,6 +250,7 @@ pub fn content_of(url_path: &str) -> &'static [u8] {
         "/assets/app.4f1c2a9b7d3e.js" => APP_JS_BYTES,
         "/.well-known/acme-challenge/token" => TOKEN_BYTES,
         "/café.js" => CAFE_BYTES,
+        "/my file.css" => SPACE_CSS_BYTES,
         _ => &[],
     }
 }

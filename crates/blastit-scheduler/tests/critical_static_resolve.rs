@@ -12,6 +12,13 @@
 //!
 //! Every refused row has an accepted twin in the same table (rows 14, 18–21,
 //! 27–35, 37, 40), so a resolver that refuses everything cannot pass.
+//!
+//! `MB.2.4.3` adds the three things the audit found unobserved: the backend
+//! `open_with` **recorded** (`recorded_backend`, read from the type's own
+//! `Debug`, per fixture and for the production `open`), both sides of
+//! `static_max_bytes` (`cap.bin` exactly at the ceiling, `big.bin` one over, and
+//! a file grown past it on the same inode between probe and read), and the
+//! `0x20` boundary of the control-byte rule.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -20,6 +27,7 @@ mod static_fixture;
 
 use std::io::Read;
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -31,7 +39,8 @@ use blastit_scheduler::static_asset::{
 use rustix::fs::{FileType, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 use static_fixture::{
-    APP_JS, CAFE_BYTES, Fixture, INDEX_HTML, SWAP_BYTES, SWAPPED_BYTES, StaticTree, content_of,
+    APP_JS, CAFE_BYTES, CAP_BIN, Fixture, GROW_BIN, GROW_BIN_BYTES, INDEX_HTML, SPACE_CSS,
+    SWAP_BYTES, SWAPPED_BYTES, StaticTree, content_of,
 };
 
 // ---------------------------------------------------------------------------
@@ -90,6 +99,29 @@ fn kernel_supports_openat2(root: &Path) -> bool {
         Err(Errno::NOSYS | Errno::INVAL) => false,
         // An unrelated errno says nothing about the syscall's existence.
         Err(_) => true,
+    }
+}
+
+/// The backend `open_with` **recorded** on this root, read back from the type's
+/// own `Debug` output (`backend: Openat2`).
+///
+/// Design §4.2 keeps the selector private and forbids a `backend()` accessor, so
+/// the derived `Debug` is the only unprivileged oracle for the choice that was
+/// actually made — the one every later lookup obeys. Recomputing the predicate
+/// here would only prove this suite's copy of it is right (gap G1,
+/// `MB.2.4.3`).
+fn recorded_backend(root: &StaticRoot) -> Backend {
+    let rendered = format!("{root:?}");
+    let field = rendered
+        .split("backend: ")
+        .nth(1)
+        .and_then(|rest| rest.split([',', '}']).next())
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("StaticRoot's Debug no longer prints its backend: {rendered}"));
+    match field {
+        "Openat2" => Backend::Openat2,
+        "Walk" => Backend::Walk,
+        other => panic!("unknown backend `{other}` in {rendered}"),
     }
 }
 
@@ -211,6 +243,15 @@ fn matrix() -> Vec<Row> {
             "/%1f.js",
             Expected::Refused(StaticRefusal::Control),
             "C0 control",
+        ),
+        // 10's accepted twin: `0x20` is one byte above the C0 limit and a legal
+        // filename byte, so `%20` names the fixture's `my file.css` (gap G4,
+        // `MB.2.4.3`).
+        row(
+            10,
+            "/my%20file.css",
+            Expected::Exact("/my file.css"),
+            "a space is not a control byte",
         ),
         row(
             11,
@@ -407,21 +448,31 @@ fn check(root: &StaticRoot, checked: &Row) -> String {
 fn every_matrix_row_answers_the_same_on_both_backends() {
     let tree = StaticTree::build(Fixture::S);
     let rows = matrix();
+    let openat2 = kernel_supports_openat2(&tree.root);
     // The matrix names rows 1–40; the device row 36 is `MB.2.7`'s (needs root)
     // and is covered here only by `classify`'s `CharacterDevice` arm.
     for fixture in [Fixture::S, Fixture::F, Fixture::N, Fixture::D] {
         let mut answers: Vec<(Backend, Vec<String>)> = Vec::new();
-        let openat2 = kernel_supports_openat2(&tree.root);
         for backend in [Backend::Openat2, Backend::Walk] {
             let root = tree.open(fixture, backend);
-            // The effective backend is the same predicate `open_with` uses, so
-            // the record below is honest without widening the type's surface.
-            let effective = if backend == Backend::Walk || !openat2 {
-                Backend::Walk
-            } else {
-                Backend::Openat2
+            // The backend the resolver **recorded**, not a copy of the
+            // production predicate: a regression that silently takes `Walk` for
+            // every root loses the kernel-enforced `RESOLVE_BENEATH |
+            // NO_SYMLINKS | NO_MAGICLINKS` boundary and must fail right here
+            // (gap G1, `MB.2.4.3`).
+            let effective = recorded_backend(&root);
+            let wanted = match backend {
+                // An explicit `Walk` request is never upgraded by the probe.
+                Backend::Walk => Backend::Walk,
+                // `Openat2` is used exactly when this kernel has `openat2`.
+                Backend::Openat2 if openat2 => Backend::Openat2,
+                Backend::Openat2 => Backend::Walk,
             };
-            println!("{fixture:?}: requested {backend:?}, kernel exercised {effective:?}");
+            assert_eq!(
+                effective, wanted,
+                "{fixture:?}: requested {backend:?}, the root recorded {effective:?}"
+            );
+            println!("{fixture:?}: requested {backend:?}, recorded {effective:?}");
             let mut seen = Vec::new();
             for checked in &rows {
                 let mut checked = checked.clone();
@@ -494,6 +545,19 @@ fn segments_accepts_every_legal_shape() {
         segments("/\u{7f}.js"),
         Ok(vec!["\u{7f}.js"]),
         "DEL is not C0"
+    );
+    // Row 10's boundary, one byte at a time: `0x1f` is a C0 control and
+    // `0x20` (space) is a legal filename byte — design §5.1 refuses
+    // `< 0x20`, not `<= 0x20` (gap G4, `MB.2.4.3`).
+    assert_eq!(
+        segments("/my file.js"),
+        Ok(vec!["my file.js"]),
+        "a space is not a control byte"
+    );
+    assert_eq!(
+        segments("/my\u{1f}file.js"),
+        Err(StaticRefusal::Control),
+        "one byte below the space is still C0"
     );
 
     let longest_segment = "b".repeat(MAX_SEGMENT_BYTES);
@@ -599,6 +663,21 @@ fn the_production_head_refuses_what_segments_never_sees() {
         head_segments("/assets/app.js?v=1").ok(),
         head_segments("/assets/app.js").ok()
     );
+    // Row 10's accepted twin through the production head: `%20` decodes to a
+    // space and reaches the resolver as data, while the C0 byte beside it is
+    // still refused (gap G4, `MB.2.4.3`).
+    assert_eq!(
+        head_segments("/my%20file.css").ok(),
+        Some(vec![SPACE_CSS.to_string()]),
+        "a space is a legal filename byte"
+    );
+    assert!(
+        matches!(
+            head_segments("/my%1ffile.css"),
+            Err(StaticOutcome::Refused(StaticRefusal::Control))
+        ),
+        "0x1f is a C0 control, one byte below the space"
+    );
 
     let tree = StaticTree::build(Fixture::S);
     let root = tree.open(Fixture::S, Backend::Openat2);
@@ -698,6 +777,8 @@ fn immutable_globs_match_the_design_vectors() {
         "over 256 bytes"
     );
     assert!(ImmutableGlob::new(&format!("/{}", "a".repeat(255))).is_some());
+    // A space is a legal byte in a pattern too: the same `byte < 0x20` rule.
+    assert!(ImmutableGlob::new("/my file.css").is_some());
 }
 
 #[test]
@@ -865,4 +946,190 @@ fn the_cafe_file_is_the_nfc_bytes_and_nothing_else() {
         CAFE_BYTES
     );
     assert!(!tree.path("cafe\u{301}.js").exists());
+}
+
+// ---------------------------------------------------------------------------
+// The open contract and the two ceilings (gap G1/G2/G3, `MB.2.4.3`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn open_with_records_the_backend_it_was_asked_for_and_open_asks_for_openat2() {
+    // Design §4.2: `Walk` is selectable in tests, and `open` is
+    // `open_with(.., Backend::Openat2)`. The recorded value is what every later
+    // lookup obeys, so this is the oracle the matrix needs (gap G1).
+    let tree = StaticTree::build(Fixture::S);
+    let kernel_choice = if kernel_supports_openat2(&tree.root) {
+        Backend::Openat2
+    } else {
+        Backend::Walk
+    };
+    for fixture in [Fixture::S, Fixture::F, Fixture::N, Fixture::D] {
+        // A request for `Walk` is honoured on every kernel: the probe may not
+        // upgrade it to `Openat2` (that is the kernel boundary being tested).
+        assert_eq!(
+            recorded_backend(&tree.open(fixture, Backend::Walk)),
+            Backend::Walk,
+            "{fixture:?}: an explicit Walk root must stay Walk"
+        );
+        // A request for `Openat2` is the kernel's to grant: on a kernel with
+        // `openat2` it stays `Openat2`, and on one without it degrades to
+        // `Walk` once, at boot, for every later lookup.
+        assert_eq!(
+            recorded_backend(&tree.open(fixture, Backend::Openat2)),
+            kernel_choice,
+            "{fixture:?}: an Openat2 request must record {kernel_choice:?} on this kernel"
+        );
+        // The production `open` — the one `run` calls — never asks for `Walk`.
+        assert_eq!(
+            recorded_backend(
+                &StaticRoot::open(&tree.base, &fixture.policy()).expect("the fixture root opens")
+            ),
+            kernel_choice,
+            "{fixture:?}: StaticRoot::open must take the openat2 probe"
+        );
+    }
+}
+
+#[test]
+fn the_file_ceiling_is_inclusive_at_static_max_bytes() {
+    // Both sides of `finish`'s `len > self.max_bytes`: the fixture's `cap.bin`
+    // is exactly the ceiling and must be served, `big.bin` is one byte over and
+    // must stay `Hidden`. Neither file is read: the assertion is the
+    // classification, and both are sparse (0 B on disk) (gap G3, `MB.2.4.3`).
+    let tree = StaticTree::build(Fixture::S);
+    assert_eq!(
+        std::fs::metadata(tree.path(CAP_BIN))
+            .expect("cap.bin exists")
+            .len(),
+        STATIC_MAX_FILE_BYTES,
+        "the fixture's cap.bin is exactly STATIC_MAX_FILE_BYTES"
+    );
+    assert_eq!(
+        std::fs::metadata(tree.path("big.bin"))
+            .expect("big.bin exists")
+            .len(),
+        STATIC_MAX_FILE_BYTES + 1,
+        "the fixture's big.bin is one byte over the ceiling"
+    );
+    for fixture in [Fixture::S, Fixture::F, Fixture::N, Fixture::D] {
+        for backend in [Backend::Openat2, Backend::Walk] {
+            let root = tree.open(fixture, backend);
+            let parts = [CAP_BIN];
+            let served = root.resolve(&parts);
+            let described = describe(&served);
+            let StaticOutcome::File(file) = served else {
+                panic!(
+                    "{fixture:?}/{backend:?}: a file exactly at STATIC_MAX_FILE_BYTES must be \
+                     served, got {described}"
+                );
+            };
+            assert_eq!(
+                file.len, STATIC_MAX_FILE_BYTES,
+                "{fixture:?}/{backend:?}: the served length is the whole file"
+            );
+            assert_eq!(
+                file.meta.size, STATIC_MAX_FILE_BYTES,
+                "{fixture:?}/{backend:?}: the head is built from the same st_size"
+            );
+            assert_eq!(file.kind, AnswerKind::Exact);
+            // Dropped unread: 64 MiB of tmpfs is not what this row is about.
+            drop(file);
+            assert!(
+                matches!(root.resolve(&["big.bin"]), StaticOutcome::Hidden),
+                "{fixture:?}/{backend:?}: STATIC_MAX_FILE_BYTES + 1 must be Hidden"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_file_that_grows_past_the_ceiling_between_the_probe_and_the_read_is_hidden() {
+    // `classify` already refuses an over-cap file at the probe, so `finish`'s
+    // re-check is only reachable by a file that passes the probe and then grows
+    // on the **same inode** before the read open. `resolve_with`'s hook is the
+    // documented way to place the process there (design §4.2, §5.1's identity
+    // check), and it is what pins the second ceiling check.
+    for backend in [Backend::Openat2, Backend::Walk] {
+        let tree = StaticTree::build(Fixture::S);
+        let root = tree.open(Fixture::S, backend);
+        let inode_before = std::fs::metadata(tree.path(GROW_BIN))
+            .expect("grow.bin exists")
+            .ino();
+
+        // The control: with no hook the one-byte file is served, so a resolver
+        // that refuses everything cannot pass.
+        let served = root.resolve(&["grow.bin"]);
+        let described = describe(&served);
+        let StaticOutcome::File(file) = served else {
+            panic!("{backend:?}: grow.bin must resolve before the hook: {described}");
+        };
+        assert_eq!(read_all(file.file), GROW_BIN_BYTES);
+
+        // The growth: same inode, `STATIC_MAX_FILE_BYTES + 1` bytes by the time
+        // the read open fstats it.
+        let grown = AtomicBool::new(false);
+        let hook = || {
+            if !grown.swap(true, Ordering::SeqCst) {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(tree.path(GROW_BIN))
+                    .expect("re-open grow.bin to grow it")
+                    .set_len(STATIC_MAX_FILE_BYTES + 1)
+                    .expect("grow grow.bin past the ceiling");
+            }
+        };
+        let outcome = root.resolve_with(&["grow.bin"], Some(&hook));
+        assert!(
+            grown.load(Ordering::SeqCst),
+            "{backend:?}: the hook must run between the two opens"
+        );
+        assert!(
+            matches!(outcome, StaticOutcome::Hidden),
+            "{backend:?}: a file grown past STATIC_MAX_FILE_BYTES between the probe and the \
+             read must be Hidden, got {}",
+            describe(&outcome)
+        );
+        // The identity check passed — the inode never changed — so the ceiling
+        // is what refused it, not a substituted leaf.
+        let after = std::fs::metadata(tree.path(GROW_BIN)).expect("grow.bin still exists");
+        assert_eq!(
+            after.ino(),
+            inode_before,
+            "{backend:?}: same inode throughout"
+        );
+        assert_eq!(after.len(), STATIC_MAX_FILE_BYTES + 1);
+    }
+}
+
+#[test]
+fn a_root_declared_through_a_symlink_is_followed_at_open_and_nowhere_else() {
+    // Design §5.1: the root dirfd is opened on `manifest_dir.join(root)`, "the
+    // only place a symlink is followed, and only on the operator's own
+    // declaration" (`root = "current/public"`). The accepted side is that such a
+    // layout opens and serves; the denied side is that no symlink *inside* the
+    // root is ever followed. (Gap G2, `MB.2.4.3`.)
+    let tree = StaticTree::build(Fixture::S);
+    std::os::unix::fs::symlink("root", tree.base.join("current")).expect("fixture current -> root");
+    let mut policy = Fixture::S.policy();
+    policy.root = "current".to_string();
+    for backend in [Backend::Openat2, Backend::Walk] {
+        let root =
+            StaticRoot::open_with(&tree.base, &policy, backend).expect("a symlinked root opens");
+        let served = root.resolve(&["index.html"]);
+        let described = describe(&served);
+        let StaticOutcome::File(file) = served else {
+            panic!("{backend:?}: index.html through the declared root must resolve: {described}");
+        };
+        assert_eq!(read_all(file.file), INDEX_HTML);
+        for parts in [
+            &["link"][..],
+            &["link2", "x"][..],
+            &["proclink", "self", "fd", "0"][..],
+        ] {
+            assert!(
+                matches!(root.resolve(parts), StaticOutcome::Hidden),
+                "{backend:?}: resolve({parts:?}) inside the root must be Hidden"
+            );
+        }
+    }
 }
