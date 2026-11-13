@@ -82,6 +82,12 @@ Three things are the whole design: routing happens before Python; the listener a
 connection arrived on authorises it; and a denial is a PostgreSQL error the app
 sees, plus one log line.
 
+A `[route.static]` route answers without a view. The scheduler decodes the path
+once at the head and either refuses it there (`400` malformed, `404` hidden) or
+resolves it to a file: exact, a directory's `index`, or the SPA `index`. It then
+serves the file itself, forwards the path to the app, or is a `404`. Reads are
+64 KiB chunks on the blocking pool, under one admission slot.
+
 ## Identity, not passwords
 
 Under the sandboxed kernel `SO_PEERCRED` returns the *listener's* own

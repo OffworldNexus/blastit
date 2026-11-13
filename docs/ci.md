@@ -6,10 +6,16 @@ One command, no root, any WSGI framework:
 $ uv run blastit check
 ```
 
-It runs `pytest -q` with Blastit in front of PostgreSQL: every request the suite
-makes and every statement it sends is checked against `./blastit.toml`. A clean
-run means every route and every declared proxy was observed, and nothing **your
-suite exercised** was forgotten.
+With an `app`, it runs `pytest -q` with Blastit in front of PostgreSQL: every
+request the suite makes and every statement it sends is checked against
+`./blastit.toml`. A clean run means every route and every declared proxy was
+observed, and nothing **your suite exercised** was forgotten.
+
+An all-static manifest has no app: `check` audits every `root` (exists, a
+directory, readable), runs no `pytest`, prints nothing and exits `0` — or exits
+`2` naming the root, and the route whenever the filesystem refuses the root. With
+`--json` it is the same document, counts at zero except `routes.total`.
+Everything below is a manifest with an `app`.
 
 ## What it fails on
 
@@ -89,15 +95,16 @@ is the proposal ([below](#bootstrap-an-existing-project)).
 
 ## Exit codes
 
-`0` clean · `1` findings · `2` could not start (manifest, config, no `pytest`) · `3` suite failed.
+`0` clean · `1` findings · `2` could not start (manifest, config, a static root, no `pytest`) · `3` suite failed.
 
 ## Your suite
 
-`blastit check` runs `pytest -q`; without `pytest` it exits `2` (`uv add --dev
-pytest`). With `pytest-django` importable **and** `DJANGO_SETTINGS_MODULE` or a
-`./manage.py`, migrations and fixtures use the `test_*` database, never your
-development one. Statements outside a routed request — migrations, fixtures,
-teardown — are not audited; only a request's are. Arguments after `--` go to pytest:
+With an `app`, `blastit check` runs `pytest -q`; without `pytest` it exits `2`
+(`uv add --dev pytest`). With `pytest-django` importable **and**
+`DJANGO_SETTINGS_MODULE` or a `./manage.py`, migrations and fixtures use the
+`test_*` database, never your development one. Statements outside a routed
+request — migrations, fixtures, teardown — are not audited; only a request's are.
+Arguments after `--` go to pytest:
 
 ```console
 $ uv run blastit check -- -k products

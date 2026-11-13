@@ -2,7 +2,7 @@
 id: MB.2.9
 title: "Document the static threat list, mechanics, CLI reference and the all-static check path"
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 3
 depends_on: [MB.2.6]
@@ -13,11 +13,11 @@ paths:
   - docs/reference/cli.md
   - docs/reference/manifest.md
   - python/tests/runnable_docs/inventory.toml
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-13T20:44"
-updated: "2026-11-13T21:23"
+updated: "2026-11-14T00:03"
 ---
 
 # Goal

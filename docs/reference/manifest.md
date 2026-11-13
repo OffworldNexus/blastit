@@ -10,7 +10,7 @@ error.
 | Key | Required | Meaning |
 |---|---|---|
 | `version` | yes | must be `1` |
-| `app` | no* | the WSGI callable, `module:attribute`; without it every route must be a `[route.static]` |
+| `app` | no* | the WSGI callable, `module:attribute`; required when any route is not static |
 | `preload` | no | a module, or a list of them, imported once before the fork |
 | `groups` | no | group names attached to **every** route; route-level `groups` is narrower |
 | `[proxy.<name>]` | no | a named broker for one external service; a grant on an undeclared proxy aborts the boot |
@@ -18,7 +18,8 @@ error.
 | `[[route]]` | yes | one sandbox: one process, one uid |
 
 \* `BLASTIT_APP` may supply the callable instead, and it wins over `app`. An
-all-static manifest needs no `app`: every route is a `[route.static]`.
+all-static manifest needs no `app`: every route is a `[route.static]`. Setting
+`app` or `BLASTIT_APP` there is a boot error, because no route could reach it.
 
 ```toml
 version = 1

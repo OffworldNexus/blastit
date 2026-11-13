@@ -838,3 +838,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T00:02 [MB.2.9] (doc-writer) attempt 3: scheduler 'cannot' half replaced with its uid+seccomp boundary (no path-prefix confinement claim); check exit-2 names the route for every filesystem 
 - 2026-11-14T00:02 [MB.2.4.3] (lead) REVIEW PASS attempt 1 (1 MINOR: RESULT says 'nothing was reclassified' while 40:42 moved CAUGHT->TIMEOUT and 541:5->true joined the equivalences, so 66/66 rests
 - 2026-11-14T00:02 [MB.2.4.3] (lead) status review -> done
+- 2026-11-14T00:03 [MB.2.9] (lead) REVIEW PASS attempt 3 (attempts 1-2 failed on the security.md scheduler row: first it denied the scheduler's read scope, then over-corrected into claiming a fil
+- 2026-11-14T00:03 [MB.2.9] (lead) status review -> done
