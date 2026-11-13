@@ -143,13 +143,17 @@ test-critical: critical-skip-check rs-test-critical ## Run protected critical ti
 docs-check: ## Build Zensical documentation site with --strict
 	$(UVX) zensical build --strict
 
-docs-unit: ## Run the runnable-docs gate's own tests (offline, no wheel build)
+docs-unit: ## Run the runnable-docs and release-hygiene tests (offline, no wheel build)
 	UV_OFFLINE=1 $(UV) run --no-project --with pytest==$(DOCS_PYTEST) python -m pytest \
 		python/tests/test_runnable_docs.py \
-		python/tests/runnable_docs/test_harness.py -q
+		python/tests/runnable_docs/test_harness.py \
+		python/tests/test_docs_assets.py \
+		python/tests/test_release_scripts.py -q
 
-docs-test: docs-unit ## Execute every console fence in README.md and the public docs pages
+docs-test: docs-unit ## Execute every console fence in README.md and the public docs pages, then check the built wheel
 	scripts/build-wheel.sh
+	UV_OFFLINE=1 BLASTIT_REQUIRE_WHEEL=1 $(UV) run --no-project --with pytest==$(DOCS_PYTEST) python -m pytest -q \
+		python/tests/test_release_scripts.py::test_built_wheel_long_description_has_absolute_links
 	$(UV) run --no-project python python/tests/runnable_docs/run.py
 
 e2e: ## Build wheel and run Docker + rootless capability e2e tests

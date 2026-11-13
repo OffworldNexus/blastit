@@ -648,3 +648,24 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T18:47 [MB.1.11] (implementer) implemented: MUTANTS_TMP on disk (XDG cache), prune+preflight+retention, systemd-run --user --scope MemoryMax=12G MemorySwapMax=0 with logged fallback, mutants-
 - 2026-11-13T18:49 [MB.1.11] (lead) status active -> review
 - 2026-11-13T18:50 [MB.1.11] (lead) status review -> done
+- 2026-11-13T18:50 [MB.1.11] (implementer) note for lead: my commit 4141dab captured RESULT.md before the last gate run; 10 lines are still uncommitted in plan/nodes/MB/MB.1/MB.1.11/RESULT.md - they are 
+- 2026-11-13T18:52 [MB.1] (lead) MERGED origin/develop v0.1.2 as 9c523e2 (9 conflicts: 8 crates/*/Cargo.toml -> develop 0.1.2, scripts/dev-version.sh -> ours). Verified cargo metadata --locked 
+- 2026-11-13T18:52 [MB.1.11] (lead) committed 4141dab (lead re-ran make check: exit 0, 57s)
+- 2026-11-13T18:53 [MB.1.14] (lead) status ready -> active
+- 2026-11-13T18:53 [MB.1.14] (lead) attempt 1/3 started
+- 2026-11-13T18:53 [MB.1.14] (lead) base 9c523e2
+- 2026-11-13T18:53 [MB.1.15] (lead) status ready -> active
+- 2026-11-13T18:53 [MB.1.15] (lead) attempt 1/3 started
+- 2026-11-13T18:53 [MB.1.15] (lead) base 9c523e2
+- 2026-11-13T18:53 [MB.1.17] (lead) status ready -> active
+- 2026-11-13T18:53 [MB.1.17] (lead) attempt 1/3 started
+- 2026-11-13T18:53 [MB.1.17] (lead) base 9c523e2
+- 2026-11-13T18:57 [MB.1.14] (implementer) protected the lexer boundary oracle (critical_lexer_boundaries.rs, 7 tests, lexer_progress.rs deleted after moving all 6 cases); pinned numeric extents in lexer
+- 2026-11-13T18:57 [MB.1] (lead) GATE NOTE: after the develop merge bumped the workspace to 0.1.2, 'make e2e' refused to start - 'a prebuilt e2e image installs exactly one wheel from dist, foun
+- 2026-11-13T19:00 [MB.1.15] (implementer) Read NODE/AUDIT; added 3 parse.rs error-list tests (mutation_gaps), 2 write_atomic path-branch tests (edit_branches, re-exec child for the bare name + EACCES tw
+- 2026-11-13T19:02 [MB.1] (lead) GATE EVIDENCE: make e2e exit 0 at 9c523e2 + dist 0.1.2 (130s): 'ok a route granting queries = [] refuses an ordinary statement (SQLSTATE 42501)', the log check 
+- 2026-11-13T19:03 [MB.1.17] (implementer) Regression tests for the MB.1.7 hygiene trio: test_docs_assets.py (SVG XML + computed WCAG contrast), test_release_scripts.py (wheel README rewrite/restore, whe
+- 2026-11-13T19:07 [MB.1.17] (lead) status active -> review
+- 2026-11-13T19:30 [MB.1.14] (implementer) lexer.rs 202/203 viable = 99.5% (1 equivalent survivor, 0 timeouts); learn.rs whole-module 90/91 = 98.9% after four new tests (was 84/91 = 92.3%); critical_lexe
+- 2026-11-13T19:35 [MB.1.14] (lead) status active -> review
+- 2026-11-13T19:42 [MB.1.17] (lead) status review -> done

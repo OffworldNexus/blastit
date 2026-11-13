@@ -9,6 +9,9 @@
 # Nothing publishes it (E4).
 #
 #   scripts/dev-version.sh 42        # 0.1.1 -> 0.1.1-dev42 -> blastit-0.1.1.dev42-...whl
+#   scripts/dev-version.sh --check   # change nothing, run no cargo: exit 1 (naming
+#                                    # `file:line`) if an intra-workspace requirement
+#                                    # does not name the workspace version
 #
 # Three things move together, and all three are needed:
 #
@@ -32,8 +35,21 @@ shopt -s nullglob
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
-number=${1:?usage: scripts/dev-version.sh <build number>}
-if [[ ! $number =~ ^[0-9]+$ ]]; then
+mode=rewrite
+number=
+case "${1:-}" in
+    --check)
+        mode=check
+        ;;
+    "")
+        echo "usage: scripts/dev-version.sh <build number> | --check" >&2
+        exit 1
+        ;;
+    *)
+        number=$1
+        ;;
+esac
+if [[ $mode == rewrite && ! $number =~ ^[0-9]+$ ]]; then
     echo "the build number must be digits, not \`$number\`" >&2
     exit 1
 fi
@@ -52,6 +68,46 @@ manifests=(crates/*/Cargo.toml)
 if (( ${#manifests[@]} == 0 )); then
     echo "no crate manifests found under crates/*/Cargo.toml" >&2
     exit 1
+fi
+
+# Every intra-workspace requirement must name one version, and this is the only
+# place that knows which: it is shared by the rewrite's post-check and by
+# `--check`, so the two cannot drift. A requirement with no version at all is an
+# offender too — it cannot accept a pre-release either. Prints `file:line: line`
+# for every offender; exits 1 when there is one (or when there is no requirement
+# to check, which means the globs stopped matching).
+stale_requirements() {
+    local want=$1
+    awk -v want="$want" '
+    /path = "\.\.\// {
+        seen++
+        if (index($0, "version = \"" want "\"") == 0) {
+            printf "%s:%d: %s\n", FILENAME, FNR, $0
+            bad++
+        }
+    }
+    END {
+        if (seen == 0) {
+            print "no intra-workspace requirements found in Cargo.toml or crates/*/Cargo.toml"
+            exit 1
+        }
+        exit (bad > 0 ? 1 : 0)
+    }
+    ' Cargo.toml "${manifests[@]}"
+}
+
+# `--check` is the read-only half: the same scan before a rewrite, with no edit,
+# no `Cargo.lock` and no `cargo metadata`, so a CI audit or a test can ask "is
+# this tree resolvable?" without spending a build.
+if [[ $mode == check ]]; then
+    if ! offenders=$(stale_requirements "$version"); then
+        echo "intra-workspace requirements not naming \`${version}\`:" >&2
+        printf '%s\n' "${offenders:-no intra-workspace requirements found}" >&2
+        echo "a requirement naming a version other than \`${version}\` (or none) does not accept this workspace's version, so no build of it can resolve" >&2
+        exit 1
+    fi
+    echo "every intra-workspace requirement names \`${version}\`"
+    exit 0
 fi
 
 sed -i "0,/^version = \"${version}\"$/s//version = \"${dev}\"/" Cargo.toml
@@ -76,22 +132,7 @@ done
 # at dependency resolution with "candidate versions found which didn't match".
 # The workspace-root `Cargo.toml` is scanned too: a `path = "../…"` requirement
 # declared there would otherwise escape both the rewrite and this check.
-if ! offenders=$(awk -v dev="$dev" '
-    /path = "\.\.\// {
-        seen++
-        if (index($0, "version = \"" dev "\"") == 0) {
-            printf "%s:%d: %s\n", FILENAME, FNR, $0
-            bad++
-        }
-    }
-    END {
-        if (seen == 0) {
-            print "no intra-workspace requirements found in Cargo.toml or crates/*/Cargo.toml"
-            exit 1
-        }
-        exit (bad > 0 ? 1 : 0)
-    }
-' Cargo.toml "${manifests[@]}"); then
+if ! offenders=$(stale_requirements "$dev"); then
     echo "intra-workspace requirements not rewritten to \`${dev}\`:" >&2
     printf '%s\n' "${offenders:-no intra-workspace requirements found in Cargo.toml or crates/*/Cargo.toml}" >&2
     echo "a requirement naming a version other than \`${dev}\` (or none) does not accept the pre-release \`${dev}\`, so no build of it can resolve" >&2

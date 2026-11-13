@@ -2,7 +2,7 @@
 id: MB.1.17
 title: "Regression-test the release hygiene trio in make check"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.1.11]
@@ -13,11 +13,11 @@ paths:
   - "scripts/dev-version.sh"
   - Makefile
   - docs/brand/logo.svg
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T18:44"
-updated: "2026-11-13T18:44"
+updated: "2026-11-13T19:42"
 ---
 
 # Goal
