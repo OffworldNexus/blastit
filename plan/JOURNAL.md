@@ -380,3 +380,27 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T01:09 [MA.3.4] (lead) status review -> done
 - 2026-11-13T01:09 [MA.3.2] (lead) status ready -> review
 - 2026-11-13T01:14 [MA.3.2] (lead) status review -> done
+- 2026-11-13T01:14 [MA.3.3] (lead) status ready -> active
+- 2026-11-13T01:14 [MA.3.3] (lead) attempt 1/3 started
+- 2026-11-13T01:14 [MA.3.3] (lead) base dba348c5ad37091b0c510966ac6d5eedd0f8033c
+- 2026-11-13T01:14 [MA.3.5] (lead) status ready -> active
+- 2026-11-13T01:14 [MA.3.5] (lead) attempt 1/3 started
+- 2026-11-13T01:14 [MA.3.5] (lead) base dba348c5ad37091b0c510966ac6d5eedd0f8033c
+- 2026-11-13T01:19 [MA.3.8] (test-curator) created (task) Wire the docs gate and critical-test guards into CI
+- 2026-11-13T01:19 [MA.3.9] (test-curator) created (task) Account for every documented snippet shape and test the docs gate
+- 2026-11-13T01:19 [MA.3.10] (test-curator) created (task) Harden static deploy checks, wheel provenance and offline/HOME isolation
+- 2026-11-13T01:19 [MA.3.11] (test-curator) created (task) Protected critical twins for the sqlpolicy learn and table policy
+- 2026-11-13T01:19 [MA.3.12] (test-curator) created (task) Fix nothing
+- 2026-11-13T01:19 [MA.3.12] (test-curator) status proposed -> superseded
+- 2026-11-13T01:19 [MA.3.12] (test-curator) Retired: created by a stray shell invocation in MA.3.5 (no real scope). Superseded by MA.3.8..MA.3.11.
+- 2026-11-13T01:19 [MA.3.12] (test-curator) Retired: created by a stray shell invocation during the MA.3.5 audit (no real scope). Superseded by MA.3.8..MA.3.11.
+- 2026-11-13T01:20 [MA.3.5] (test-curator) Audit complete: docs/testing/AUDIT-MA.3.md; verdict BLOCKED (F1..F8), gaps filed as MA.3.8..MA.3.11. cargo-mutants still absent (H-002); anchored fallback 19/20
+- 2026-11-13T01:20 [MA.3.5] (test-curator) Audit complete: docs/testing/AUDIT-MA.3.md; verdict BLOCKED (F1..F8), gaps filed as MA.3.8..MA.3.11. cargo-mutants still absent (H-002); anchored fallback 19/20
+- 2026-11-13T01:20 [MA.3.5] (test-curator) status active -> review
+- 2026-11-13T01:20 [MA.3.5] (test-curator) Audit done: docs/testing/AUDIT-MA.3.md; verdict BLOCKED (F1..F8); gaps filed MA.3.8-MA.3.11. cargo-mutants absent (H-002); anchored fallback 19/20 killed (manif
+- 2026-11-13T01:26 [MA.3.8] (lead) status ready -> active
+- 2026-11-13T01:26 [MA.3.8] (lead) attempt 1/3 started
+- 2026-11-13T01:26 [MA.3.8] (lead) base dba348c5ad37091b0c510966ac6d5eedd0f8033c
+- 2026-11-13T01:42 [MA.3.8] (lead) status active -> review
+- 2026-11-13T01:50 [MA.3.3] (lead) status active -> done
+- 2026-11-13T01:50 [MA.3.3] (lead) visual PASS: 9 pages x 3 viewports, 3 Mermaid diagrams render, mobile nav + no horizontal scroll; MINOR: brand/logo.svg #fbfaf6 fill is low-contrast on the ligh

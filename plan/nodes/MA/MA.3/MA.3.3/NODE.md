@@ -2,16 +2,16 @@
 id: MA.3.3
 title: "Visual QA of the built Zensical site (desktop light/dark, mobile, Mermaid)"
 kind: task
-status: ready
+status: done
 owner: "visual-checker"
 priority: 3
 depends_on: [MA.3.2]
 paths: [zensical.toml, "docs/stylesheets/**", docs/brand/brand.css, "docs/testing/VISUAL-MA.3.md"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T19:16"
-updated: "2026-11-12T19:16"
+updated: "2026-11-13T01:50"
 ---
 
 # Goal
