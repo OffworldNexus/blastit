@@ -383,11 +383,16 @@ does what it is told. ("View" in the rest of this document means a route and
 its process.)
 
 * A Rust I/O thread reads frames from the scheduler channel. Each `REQ_HEAD`
-  starts a **new OS thread that attaches to the interpreter**. That thread
-  builds a standard WSGI `environ` and calls the WSGI callable, the same one
-  in every process, so the app does its own routing and middleware as usual.
-  It then streams the response back. blastit adds `blastit.route` (the route's
-  name) to `environ`, for logging only. `REMOTE_ADDR` is the resolved client
+  is handed to a **pooled request thread** that attaches to the interpreter:
+  one that has just finished a request parks and takes the next, retiring once
+  it has been idle for a while, so a busy view does not create and destroy a
+  thread per request. That thread builds a standard WSGI `environ` and calls
+  the WSGI callable, the same one in every process, so the app does its own
+  routing and middleware as usual. It then streams the response back. Because
+  a worker serves many requests, per-thread application state such as
+  `threading.local` persists across them, as in any threaded WSGI server.
+  blastit adds `blastit.route` (the route's name) to `environ`, for logging
+  only. `REMOTE_ADDR` is the resolved client
   address (§2.3) and `REMOTE_PORT` is the port the request arrived on: the
   peer's, when the peer had one — a client a trusted proxy named has no port of
   its own, so `REMOTE_PORT` is the connection's and `REMOTE_ADDR` is still who
@@ -528,12 +533,25 @@ buffer is bounded by a credit window instead.
   the scheduler forwards it to http, which reads more from that client's
   socket only when it has credit. A slow app slows its own client down, over
   TCP, and nothing else.
-* Response bodies: http sends `WINDOW` as it writes to the client socket; the
-  scheduler forwards it to the view, where a request thread that runs out of
-  credit blocks in its write (as it would on a socket). A slow client slows
+* Response bodies: http sends `WINDOW` as it writes to the client socket. It
+  does not return every byte as it goes: a view's remaining credit is allowed
+  to fall to a 64 KiB low-water mark, and it is then granted everything owed in
+  one frame, so a response smaller than that never costs a `WINDOW` at all. The
+  scheduler forwards the grant to the view, where a request thread that runs out
+  of credit blocks in its write (as it would on a socket). A slow client slows
   its own request thread down, and nothing else.
 * A peer that sends beyond its credit has broken the protocol: a view is
   recycled, and http aborts the stream.
+
+**Batching.** Frames are small and the work per request is dominated by the
+syscalls and wakeups around them, so neither side writes one frame and waits:
+a writer drains what is already queued on its channel into one buffer and
+writes it with a single `write_all`, capped at 64 frames or 256 KiB so a
+`CANCEL` behind a burst waits for one batch and no more. A `REQ_HEAD` goes to
+the view as the bytes http sent, decoded only as far as routing and the
+fair-queue key need, and the front end turns Nagle's algorithm off on each
+accepted socket: nothing on these connections gains from coalescing a write
+that is already whole.
 
 ### 3.2 Request lifecycle
 
@@ -559,7 +577,7 @@ sequenceDiagram
         S->>S: SPAWN via init, see §4
     end
     S->>V: REQ_HEAD (req_id rewritten)
-    V->>T: new OS thread, attached to the interpreter
+    V->>T: pooled request thread, attached to the interpreter
     T->>T: build standard WSGI environ
     T->>T: app(environ, start_response): the app routes it
     T->>D: connect /proc/self/cwd/.s.PGSQL.5432 (only its uid may)

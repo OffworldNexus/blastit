@@ -29,6 +29,14 @@ The first hour with blastit now happens on your own machine, as you, in one pass
   exact commands, in order, for a laptop with no root, a pipeline, and a
   platform, from [getting
   started](https://offworldnexus.github.io/blastit/getting-started/).
+- **Less work per request.** The scheduler and the front end now write a burst
+  of frames in one syscall, hand a request head to its view without decoding or
+  copying it, encode each response head into a buffer the connection reuses,
+  and keep Nagle's algorithm off accepted sockets. A view serves its requests on
+  pooled threads and reuses the constant parts of `environ`; body credit is
+  granted only when a view is running low on it, and an event no longer
+  allocates its way to stdout. Same behaviour, fewer syscalls and allocations
+  per request.
 
 ## 0.1.0 (2026-10-27)
 

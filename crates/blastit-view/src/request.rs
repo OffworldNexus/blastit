@@ -184,12 +184,14 @@ pub(crate) struct Worker {
 impl Worker {
     /// Serve the request and report how it ended.
     ///
-    /// The interpreter is attached for the duration of the call and released
-    /// again before it returns: whatever reports the outcome — normally the
-    /// thread's slot guard — does so only once nothing of the request still
-    /// touches Python. There is exactly one `DONE` per `REQ_HEAD`, and the
-    /// guard is what sends it.
-    pub(crate) fn run(self) -> DoneOutcome {
+    /// `py` is the worker thread's attachment to the interpreter, already held:
+    /// a worker attaches once and serves requests one after another, so it
+    /// never re-attaches here. The call leaves the interpreter attached, and
+    /// three threads may touch the request — this one, the I/O thread and
+    /// whatever application threads read `wsgi.input` — so every wait inside it
+    /// releases the GIL. There is exactly one `DONE` per `REQ_HEAD`, and the
+    /// caller's slot guard is what sends it.
+    pub(crate) fn run(self, py: Python<'_>) -> DoneOutcome {
         let Worker {
             id,
             head,
@@ -198,7 +200,7 @@ impl Worker {
             state,
             ctx,
         } = self;
-        Python::attach(|py| serve_request(py, &head, &ctx, &state, &writer, body, id))
+        serve_request(py, &head, &ctx, &state, &writer, body, id)
     }
 }
 

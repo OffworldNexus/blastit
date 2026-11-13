@@ -70,9 +70,10 @@
 //!   its own client down, over TCP; `body_timeout` still applies while the
 //!   upload waits, so a stalled app cannot hold a connection forever.
 //! * **Response bodies.** The front end grants credit back as it writes to the
-//!   client socket: batched in 64 KiB worth of writes, and once more whenever
-//!   the response goes quiet, because a view that is *waiting* for credit has
-//!   nothing left to send. A slow client slows its own request thread down.
+//!   client socket, but only once the view is short of it: it lets a view's
+//!   credit run down to a low-water mark before returning what it owes, so a
+//!   response whose body stays well below a window costs no `WINDOW` frame at
+//!   all. A slow client slows its own request thread down.
 //!
 //! The per-stream buffer cap ([`HttpConfig::stream_buffer_bytes`], the window
 //! plus one frame by default) is therefore the *protocol-violation* guard: a

@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use blastit_frame::{Ctl, Decoder, Frame, FrameError, HEADER_LEN, Limits};
+use blastit_frame::{Ctl, Decoder, Frame, FrameError, HEADER_LEN, Limits, RawFrame};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -29,6 +29,10 @@ pub(crate) enum OutFrame {
         /// The frame itself.
         frame: Frame,
     },
+    /// A frame whose payload is forwarded verbatim, textually identical to how
+    /// it arrived; only its id is rewritten. The scheduler uses this for the
+    /// request head it does not decode (see `Scheduler::begin_raw`).
+    Raw(RawFrame),
 }
 
 /// Why a push was refused.
@@ -96,6 +100,29 @@ impl Outbound {
         Ok(())
     }
 
+    /// Queues one raw frame, whose payload is written as it stands.
+    ///
+    /// The byte accounting is exactly [`HEADER_LEN`] plus the payload length,
+    /// the same figure [`Outbound::push`] would charge for the decoded frame:
+    /// the two must agree or a peer's cap would drift depending on which path
+    /// queued the frame.
+    pub(crate) fn push_raw(&self, raw: RawFrame) -> Result<(), PushError> {
+        let size = HEADER_LEN + raw.payload.len();
+        let before = self.pending.fetch_add(size, Ordering::AcqRel);
+        if before.saturating_add(size) > self.cap {
+            self.pending.fetch_sub(size, Ordering::AcqRel);
+            return Err(PushError::Overflow {
+                bytes: before.saturating_add(size),
+                cap: self.cap,
+            });
+        }
+        if self.tx.send(OutFrame::Raw(raw)).is_err() {
+            self.pending.fetch_sub(size, Ordering::AcqRel);
+            return Err(PushError::Closed);
+        }
+        Ok(())
+    }
+
     /// Whether this queue's writer is still running.
     pub(crate) fn is_open(&self) -> bool {
         !self.tx.is_closed()
@@ -104,17 +131,14 @@ impl Outbound {
 
 /// The size a frame will take on the wire, header included.
 ///
-/// Body frames are exact without encoding anything; a head or a small frame is
-/// measured by encoding it into a scratch buffer, which is cheap because those
-/// frames are small and rare.
+/// Body frames are exact without measuring anything; a head or a small frame
+/// goes through [`Limits::encoded_len`], which runs the encoder's own
+/// measuring pass rather than encoding the frame into a throwaway buffer just
+/// to read its length back.
 fn frame_size(frame: &Frame, limits: Limits) -> Result<usize, FrameError> {
     match frame {
         Frame::ReqBody(body) | Frame::RespBody(body) => Ok(HEADER_LEN + body.len()),
-        other => {
-            let mut scratch = Vec::new();
-            limits.encode(other, 0, &mut scratch)?;
-            Ok(scratch.len())
-        }
+        other => limits.encoded_len(other, 0),
     }
 }
 
@@ -138,10 +162,53 @@ pub(crate) fn ctl_frame_size(message: &Ctl, limits: Limits) -> usize {
     frame_size(&Frame::Ctl(message.clone()), limits).unwrap_or_default()
 }
 
+/// Most frames one batch may carry.
+///
+/// Batching is what turns a burst of already-queued frames into one syscall
+/// instead of one per frame, but a batch that could grow without bound would
+/// let a flood build a buffer without limit and would make the frames behind it
+/// wait for all of it. This and [`BATCH_BYTES`] stop the drain, whichever is
+/// reached first, so the worst case is one frame larger than that cap.
+const BATCH_FRAMES: usize = 64;
+
+/// Most bytes one batch may carry; see [`BATCH_FRAMES`].
+const BATCH_BYTES: usize = 256 * 1024;
+
+/// The next frame for the batch being built, or `None` once it is full.
+///
+/// Everything already queued when the writer wakes rides the same buffer, which
+/// is what collapses a burst into one `write_all`; the caps keep that buffer,
+/// and the wait for the frames queued behind it, bounded.
+fn next_batch_frame(
+    rx: &mut mpsc::UnboundedReceiver<OutFrame>,
+    frames: usize,
+    bytes: usize,
+) -> Option<OutFrame> {
+    if frames >= BATCH_FRAMES || bytes >= BATCH_BYTES {
+        return None;
+    }
+    // Empty, or the queue closed: either way this batch ends here, and a closed
+    // queue makes the next `recv` end the loop.
+    rx.try_recv().ok()
+}
+
+/// Appends one queued frame to `wire`, or `false` when it cannot be encoded.
+///
+/// Both kinds are encoded here: a decoded frame through the codec, and a raw
+/// one by writing its header and its untouched payload.
+fn append_frame(item: &OutFrame, limits: &Limits, wire: &mut Vec<u8>) -> bool {
+    match item {
+        OutFrame::Frame { id, frame } => limits.encode(frame, *id, wire).is_ok(),
+        OutFrame::Raw(raw) => raw.encode(limits, wire).is_ok(),
+    }
+}
+
 /// Writes frames to one peer until its queue closes.
 ///
 /// This is the only place a peer can block the scheduler, and it blocks only
-/// the writer for that peer.
+/// the writer for that peer. One frame waits for the queue, and everything
+/// already queued behind it is drained into the same buffer, so a burst costs
+/// one syscall rather than one per frame.
 pub(crate) async fn write_peer<W: AsyncWrite + Unpin>(
     mut write: W,
     limits: Limits,
@@ -149,11 +216,24 @@ pub(crate) async fn write_peer<W: AsyncWrite + Unpin>(
     pending: Arc<AtomicUsize>,
 ) {
     let mut wire = Vec::new();
-    while let Some(OutFrame::Frame { id, frame }) = rx.recv().await {
-        wire.clear();
-        if limits.encode(&frame, id, &mut wire).is_err() {
+    'batching: loop {
+        let Some(first) = rx.recv().await else {
             break;
+        };
+        wire.clear();
+        let mut frames = 0;
+        let mut next = Some(first);
+        while let Some(item) = next {
+            if !append_frame(&item, &limits, &mut wire) {
+                // A frame that cannot be encoded is a bug in blastit's own
+                // code, not backpressure: the channel is done for.
+                break 'batching;
+            }
+            frames += 1;
+            next = next_batch_frame(&mut rx, frames, wire.len());
         }
+        // The whole batch is out or the peer is gone; either way the bytes that
+        // left are the ones to release.
         let size = wire.len();
         if write.write_all(&wire).await.is_err() {
             break;
@@ -211,4 +291,162 @@ pub(crate) async fn read_frames<R, M, Map, End>(
         }
     }
     let _ = tx.send(end(failure)).await;
+}
+
+/// Reads frames off a channel without decoding their payloads.
+///
+/// This is for `http.chan` only. http is blastit's own Rust code — no Python,
+/// no attacker input — and encodes from a typed [`Frame`], so its bytes are
+/// well-formed by construction; keeping a `REQ_HEAD` as a [`RawFrame`] is what
+/// lets the scheduler forward it without copying every header twice. A
+/// `view.chan` must **not** be read this way: a view is sandboxed and may be
+/// compromised, so its frames keep going through [`read_frames`], which
+/// validates every field. Do not reuse this for the view channel.
+///
+/// Everything [`read_frames`] says about closing, failure and backpressure
+/// applies here unchanged; only the payload is left alone.
+pub(crate) async fn read_raw_frames<R, M, Map, End>(
+    mut read: R,
+    limits: Limits,
+    tx: mpsc::Sender<M>,
+    map: Map,
+    end: End,
+) where
+    R: AsyncRead + Unpin,
+    Map: Fn(u32, RawFrame) -> M,
+    End: Fn(Option<FrameError>) -> M,
+{
+    let mut decoder = Decoder::with_capacity(limits, 8 * 1024);
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut failure = None;
+    loop {
+        let read_bytes = match read.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        decoder.push(&buf[..read_bytes]);
+        loop {
+            match decoder.next_raw() {
+                Ok(Some((id, raw))) => {
+                    if tx.send(map(id, raw)).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        if failure.is_some() {
+            break;
+        }
+    }
+    let _ = tx.send(end(failure)).await;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::task::{Context, Poll};
+
+    /// A sink that counts its `poll_write` calls, so a test can prove a burst
+    /// of queued frames leaves as one write rather than one each.
+    #[derive(Clone, Default)]
+    struct Recorder {
+        written: Arc<Mutex<Vec<u8>>>,
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl Recorder {
+        /// How many times the writer handed bytes to the sink.
+        fn writes(&self) -> usize {
+            self.writes.load(Ordering::SeqCst)
+        }
+
+        /// Everything the sink was handed, in order.
+        fn written(&self) -> Vec<u8> {
+            self.written.lock().unwrap().clone()
+        }
+    }
+
+    impl AsyncWrite for Recorder {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_queued_frames_leaves_in_one_write() {
+        let limits = Limits::default();
+        let (out, rx, pending) = Outbound::new(limits, 1 << 20);
+        let id = 7;
+        let frames = 5usize;
+        for byte in 0..frames {
+            let pushed = out.push(id, Frame::RespBody(vec![byte as u8; 8]));
+            assert!(pushed.is_ok(), "the queue has room");
+        }
+        // Closing the queue lets `write_peer` finish once it has drained it.
+        drop(out);
+
+        let recorder = Recorder::default();
+        write_peer(recorder.clone(), limits, rx, pending.clone()).await;
+
+        assert_eq!(recorder.writes(), 1, "a drained burst is one syscall");
+        assert_eq!(
+            pending.load(Ordering::Acquire),
+            0,
+            "every byte was released"
+        );
+
+        // That one write carried every frame, in the order they were queued.
+        let mut decoder = Decoder::new(limits);
+        decoder.push(&recorder.written());
+        let mut seen = 0usize;
+        while let Some((frame_id, frame)) = decoder.next_frame().expect("decode") {
+            assert_eq!(frame_id, id);
+            assert_eq!(frame, Frame::RespBody(vec![seen as u8; 8]));
+            seen += 1;
+        }
+        assert_eq!(seen, frames);
+    }
+
+    #[tokio::test]
+    async fn a_batch_stops_at_its_frame_cap() {
+        let limits = Limits::default();
+        let (out, rx, pending) = Outbound::new(limits, 1 << 20);
+        // One more than a batch may carry: the first write takes a full batch,
+        // the rest goes out in following ones.
+        let queued = BATCH_FRAMES + 1;
+        for _ in 0..queued {
+            let pushed = out.push(1, Frame::RespEnd);
+            assert!(pushed.is_ok(), "the queue has room");
+        }
+        drop(out);
+
+        let recorder = Recorder::default();
+        write_peer(recorder.clone(), limits, rx, pending.clone()).await;
+
+        assert_eq!(recorder.writes(), 2, "the tail is a batch of its own");
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+    }
 }

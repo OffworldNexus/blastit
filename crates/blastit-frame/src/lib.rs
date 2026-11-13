@@ -44,7 +44,8 @@
 //! * [`Frame`], [`ReqHead`], [`RespHead`] — the typed vocabulary of §3.1.
 //! * [`Ctl`], [`ExitStatus`] — the `ctl.chan` messages of §3 and §4.
 //! * [`RawFrame`] — the same frames with the payload left undecoded, for the
-//!   scheduler to rewrite ids and forward.
+//!   scheduler to rewrite ids and forward, and [`ReqHeadView`] — a borrowed
+//!   view of a request head it reads where it lies.
 //! * [`Limits`], [`Decoder`], [`encode`] — the codec itself.
 //!
 //! Errors are always [`FrameError`]; nothing in this crate panics on input.
@@ -74,7 +75,7 @@ mod wire;
 
 pub use crate::clientip::{
     ClientIp, ClientIpConfig, ClientIpError, ClientIpSource, TrustedProxies, is_header_name,
-    normalize_ip, parse_addr, parse_port, peer_address,
+    normalize_ip, parse_addr, parse_port, peer_address, values_of,
 };
 pub use crate::ctl::{Ctl, ExitStatus, MAX_SIGNAL, MIN_SIGNAL};
 pub use crate::decoder::Decoder;
@@ -84,7 +85,7 @@ pub use crate::frame::{
     Scheme, TypeCode,
 };
 pub use crate::limits::{BodyChunks, Limits, MAX_FRAME_CEILING, MAX_FRAME_DEFAULT, MIN_FRAME};
-pub use crate::raw::RawFrame;
+pub use crate::raw::{RawFrame, ReqHeadView, ReqHeaders};
 pub use crate::wire::{HEADER_LEN, MIN_LENGTH};
 
 /// Encode `frame` with `id`, using the default [`Limits`].
@@ -240,6 +241,78 @@ mod tests {
             decoder.push(&wire);
             assert_eq!(decoder.next_frame().unwrap(), Some((id, frame.clone())));
         }
+    }
+
+    #[test]
+    fn encoded_len_matches_what_encode_writes() {
+        // The scheduler spends its byte cap on `encoded_len`, so it has to
+        // agree with the bytes `encode` actually writes for every frame kind.
+        // A forgotten header would under-count by nine bytes a frame, and a
+        // body frame has to be measured like any other rather than assumed.
+        let limits = Limits::default();
+        for (index, frame) in every_frame().iter().enumerate() {
+            let id = frame_id(index);
+            let mut wire = Vec::new();
+            limits.encode(frame, id, &mut wire).unwrap();
+            assert_eq!(
+                limits.encoded_len(frame, id).unwrap(),
+                wire.len(),
+                "frame {frame:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_len_rejects_exactly_what_encode_rejects() {
+        // A frame that will be refused must be refused at size time too, or the
+        // cap would be spent on a frame the writer then drops. Every refusal
+        // `encode` can make before writing a byte has to be the same refusal
+        // `encoded_len` makes.
+        let limits = Limits::new(32).unwrap();
+
+        // Too large: one payload byte past what the frame can carry.
+        let too_big = Frame::RespBody(vec![0u8; limits.max_payload() + 1]);
+        let mut out = Vec::new();
+        assert_eq!(
+            limits.encode(&too_big, 1, &mut out),
+            Err(FrameError::FrameTooLarge { size: 33, max: 32 })
+        );
+        assert_eq!(
+            limits.encoded_len(&too_big, 1),
+            Err(FrameError::FrameTooLarge { size: 33, max: 32 })
+        );
+        assert!(out.is_empty(), "a rejected frame must not be written");
+
+        // Payload errors agree too: a frame kind that cannot be encoded at all
+        // fails the same way whichever entry point is asked.
+        for frame in [
+            Frame::Window { bytes: 0 },
+            Frame::RespHead(RespHead {
+                status: 99,
+                ..RespHead::default()
+            }),
+        ] {
+            let mut out = Vec::new();
+            assert_eq!(
+                limits.encoded_len(&frame, 1),
+                limits.encode(&frame, 1, &mut out).map(|()| out.len()),
+                "frame {frame:?}"
+            );
+            assert!(out.is_empty());
+        }
+
+        // ... and a frame that must carry id 0 is refused for its id by both.
+        let zero_id = Frame::Ctl(Ctl::Drain);
+        let mut out = Vec::new();
+        assert_eq!(
+            limits.encode(&zero_id, 7, &mut out),
+            Err(FrameError::IdNotZero { id: 7 })
+        );
+        assert_eq!(
+            limits.encoded_len(&zero_id, 7),
+            Err(FrameError::IdNotZero { id: 7 })
+        );
+        assert!(out.is_empty());
     }
 
     #[test]
