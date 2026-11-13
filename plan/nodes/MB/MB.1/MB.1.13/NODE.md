@@ -2,7 +2,7 @@
 id: MB.1.13
 title: "Protect the add_group oracle and correct the design-doc credit"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 2
 depends_on: []
@@ -14,7 +14,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T18:42"
-updated: "2026-11-13T18:42"
+updated: "2026-11-13T18:46"
 ---
 
 # Goal

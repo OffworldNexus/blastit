@@ -4,8 +4,10 @@
 //!
 //! Every test pairs an allowed case with its negative twin: an `add_query` that
 //! re-parses, against a redacted `…` and a `SAVEPOINT` that must never become
-//! one; an unrouted request that proposes a route, against an unrouted SQL
-//! statement that must never produce a route-less `missing_grant`.
+//! one; the `add_group` a session-setup statement gets, against `SELECT 1` and
+//! an ordinary `DELETE` that keep the per-route `add_query`; an unrouted
+//! request that proposes a route, against an unrouted SQL statement that must
+//! never produce a route-less `missing_grant`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -564,6 +566,132 @@ fn a_lying_query_verdict_carrying_a_redaction_is_observe_never_add_query() {
         Some(&("add_query", Some("[route.db].queries".to_string()))),
         "the parameterised twin is still grantable"
     );
+}
+
+// ---------------------------------------------------------------------------
+// R33 / `MA.8`: session setup names the `connection` group, never one route
+// ---------------------------------------------------------------------------
+//
+// The protected tier owns both directions of the `add_group` oracle: the
+// `fix` a driver's own connection setup gets, and the per-route `add_query`
+// every other grantable statement keeps. The unprotected
+// `crates/blastit/tests/audit_group_hint.rs` keeps the same cases as a
+// standard-tier pointer.
+
+/// The `fix` object of the one `missing_grant` whose `sql` is `sql`, exactly
+/// as the `--json` document carries it — so an added or missing field fails
+/// the comparison too.
+fn fix_of(report: &Report, sql: &str) -> Value {
+    let found: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|finding| matches!(finding, Finding::MissingGrant { sql: text, .. } if text == sql))
+        .collect();
+    assert_eq!(found.len(), 1, "one missing_grant for {sql}: {report:?}");
+    let document = serde_json::to_value(found[0]).expect("a finding renders");
+    assert_eq!(document["kind"], "missing_grant", "{document}");
+    document["fix"].clone()
+}
+
+#[test]
+fn connection_setup_sql_names_the_connection_group_grant() {
+    // Django re-states `TimeZone` when it opens a connection (LESSONS.md), and
+    // `SET`/`SHOW` are the driver's session setup. Each runs on whichever route
+    // opens the connection first, so a per-route `[route.db].queries` grant
+    // leaves every other route denying it: the fix is the `connection` group
+    // every route attaches (`MA.8`).
+    for sql in [
+        "SELECT set_config('TimeZone', $?, false)",
+        "SET search_path = public",
+        "SHOW standard_conforming_strings",
+    ] {
+        let report = run(
+            GOLDEN_MANIFEST,
+            &[http_line("GET", "/", None, 0, None)],
+            &[routed_sql("home", "db", sql, grantable(sql), false)],
+        );
+        assert!(!report.ok, "{sql} is an ungranted statement, not advice");
+        assert_eq!(
+            fix_of(&report, sql),
+            json!({"action": "add_group", "to": "[group.connection.db].queries"}),
+            "{sql} runs on whichever route opens the connection"
+        );
+    }
+}
+
+#[test]
+fn ordinary_statements_keep_the_per_route_add_query() {
+    // The twin of the group hint: `SELECT 1` is replayable in a transaction
+    // but it belongs to the route that issued it, and `DELETE` is an ordinary
+    // statement, so neither may name a group every route attaches.
+    for sql in ["SELECT 1", DELETE] {
+        let report = run(
+            GOLDEN_MANIFEST,
+            &[http_line("GET", "/", None, 0, None)],
+            &[routed_sql("home", "db", sql, grantable(sql), false)],
+        );
+        assert_eq!(
+            fix_of(&report, sql),
+            json!({"action": "add_query", "to": "[route.db].queries"}),
+            "{sql} is one route's statement, at one route's path"
+        );
+    }
+}
+
+#[test]
+fn only_connection_setup_names_a_group_and_never_a_refusal() {
+    // One mixed run: exactly the setup statement carries `add_group`, while the
+    // per-route statements and the two `observe` cases keep their fixes — so a
+    // regression that emits `add_group` everywhere (or `add_query` for setup)
+    // fails on a single report.
+    let setup = "SELECT set_config('TimeZone', $?, false)";
+    let report = run(
+        GOLDEN_MANIFEST,
+        &[http_line("GET", "/", None, 0, None)],
+        &[
+            routed_sql("home", "db", setup, grantable(setup), false),
+            routed_sql("home", "db", "SELECT 1", grantable("SELECT 1"), false),
+            routed_sql("home", "db", DELETE, grantable(DELETE), false),
+            routed_sql("home", "db", REDACTED, refused(REDACTED), false),
+            routed_sql(
+                "home",
+                "db",
+                "SAVEPOINT s1",
+                grantable("SAVEPOINT s1"),
+                true,
+            ),
+        ],
+    );
+    let grouped: Vec<String> = report
+        .findings
+        .iter()
+        .filter_map(|finding| match finding {
+            Finding::MissingGrant { sql, fix, .. } if fix.action == "add_group" => {
+                Some(sql.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        grouped,
+        [setup.to_string()],
+        "only connection setup names a group: {report:?}"
+    );
+    assert_eq!(
+        fix_of(&report, "SELECT 1"),
+        json!({"action": "add_query", "to": "[route.db].queries"})
+    );
+    assert_eq!(
+        fix_of(&report, DELETE),
+        json!({"action": "add_query", "to": "[route.db].queries"})
+    );
+    for sql in [REDACTED, "SAVEPOINT"] {
+        assert_eq!(
+            fix_of(&report, sql),
+            json!({"action": "observe"}),
+            "{sql} is never grantable, so it is never a group's either"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

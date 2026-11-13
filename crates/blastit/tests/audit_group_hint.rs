@@ -8,6 +8,10 @@
 //! `action = "add_group"`, while every other grantable statement keeps its
 //! per-route `add_query` twin; a redacted literal and transaction control stay
 //! `observe`, exactly as before.
+//!
+//! Standard-tier twin: the protected `crates/blastit/tests/critical_check_engine.rs`
+//! owns this oracle in both directions (`MB.1.13`); these cases stay as a
+//! second, unprotected statement of the same contract.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

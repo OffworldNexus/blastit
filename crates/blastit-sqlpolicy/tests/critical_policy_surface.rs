@@ -20,7 +20,7 @@
 
 use std::collections::BTreeSet;
 
-use blastit_sqlpolicy::{analyze, normalize, Allowlist, Columns, TableGrant, TableGrants};
+use blastit_sqlpolicy::{Allowlist, Columns, TableGrant, TableGrants, analyze, normalize};
 
 //
 // Helpers.
@@ -368,9 +368,11 @@ fn values_rows_collapse_only_as_identical_rows() {
         "INSERT INTO t (a, b) VALUES ($1, $2), ($3, $4)",
         "INSERT INTO t (a, b) VALUES ($1, $2)",
     );
-    assert!(!allow
-        .check("INSERT INTO t (a, b) VALUES ($1, $2, $3), ($4, $5, $6)")
-        .is_allowed());
+    assert!(
+        !allow
+            .check("INSERT INTO t (a, b) VALUES ($1, $2, $3), ($4, $5, $6)")
+            .is_allowed()
+    );
 
     // A tuple list that does not follow the keyword is not a row list, and a
     // qualified `values` call is a call: neither loses a row.
