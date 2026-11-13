@@ -2,16 +2,16 @@
 id: MB.1.10
 title: Document the add_group fix action and record the MB.1.6 gotchas
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 2
 depends_on: [MB.1.6]
 paths: [docs/ci.md, "docs/design/ma-lean-dx.md", docs/knowledge/LESSONS.md]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:20"
-updated: "2026-11-13T15:20"
+updated: "2026-11-13T16:42"
 ---
 
 # Goal

@@ -16,7 +16,7 @@ suite exercised** was forgotten.
 | Finding | Meaning | Fix |
 |---|---|---|
 | `unrouted_request` | a path no route matches | add a route, or widen a `path` |
-| `missing_grant` | a statement no grant allows | add it to `queries` |
+| `missing_grant` | a statement no grant allows | add it to `queries`; session setup (`SET`, `SHOW`, `set_config(…)`) to the `connection` group |
 | `dead_grant` | a grant the suite never used | cover that code path, or remove the grant |
 | `unexercised_route` | a route the suite never hit | add a test |
 | `missing_ingress` | a route took a body and declares no `[route.ingress]` | declare the codec; `raw` also needs `allow_raw = true` |
@@ -71,9 +71,17 @@ $ uv run blastit check --json
 `severity` is `error` on every kind in 0.1.1, so any finding fails the run and
 `ok` is `false`; a `warning` leaves the exit code alone. `sql` is the normalised
 statement, never a literal value, and a grant finding's `fix.to` is its table in
-the manifest: `"[route.db].queries"`. `fix.action` is `add_query`, `remove_query`,
-`add_route`, `remove_route`, `add_test`, `declare_ingress`, `fix_ingress` or
-`observe`; a destructive one carries `"unsafe": true`.
+the manifest: `"[route.db].queries"`. `fix.action` is `add_query`, `add_group`,
+`remove_query`, `add_route`, `remove_route`, `add_test`, `declare_ingress`,
+`fix_ingress` or `observe`; a destructive one carries `"unsafe": true`. `add_group`
+fits only `SET`, `SHOW` or `set_config('TimeZone', …)`; another `set_config(…)` is
+`observe`. Setup runs on whichever route connects first, so `fix.to` names a group:
+
+```toml
+groups = ["connection"]                 # to every route
+[group.connection.db]
+queries = ["SELECT set_config('TimeZone', $?, false)"]
+```
 
 `--json` writes one document to stdout and nothing else: pytest output, logs and
 `learn:` lines go to stderr, exit `2` leaves stdout empty, and under `--learn` it

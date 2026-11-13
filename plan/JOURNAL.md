@@ -590,3 +590,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T16:16 [MB.1.4] (lead) base 9311ff3
 - 2026-11-13T16:38 [MB.1.4] (implementer) file-scoped campaign: 128 mutants, 110 caught / 1 equivalent missed / 2 timeouts / 15 unviable; normalize 99/102 = 97.1 %, literals 4/4 and lru 7/7 = 100 %; new
 - 2026-11-13T16:40 [MB.1.2] (lead) status review -> done
+- 2026-11-13T16:40 [MB.1.2] (lead) committed 7a41f61
+- 2026-11-13T16:40 [MB.1.4] (lead) status active -> review
+- 2026-11-13T16:40 [MB.1.5] (lead) status ready -> active
+- 2026-11-13T16:40 [MB.1.5] (lead) attempt 1/3 started
+- 2026-11-13T16:40 [MB.1.5] (lead) base 7a41f61
+- 2026-11-13T16:42 [MB.1.10] (lead) status review -> done
