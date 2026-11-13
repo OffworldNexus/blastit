@@ -39,3 +39,11 @@ MA.8 (CI hotfix leaf, created by conductor after the 0.1.1 gate) is done with re
 ## 2026-11-13T12:21 [lead]
 
 status done -> active
+
+## 2026-11-13T13:07 [strategist]
+
+status active -> done
+
+## 2026-11-13T13:07 [strategist]
+
+incremental re-acceptance PASSED at f305e38 on release/0.1.1: MA.7..MA.11 verified CI/test-only with zero weakened guards/assertions; PR #62 16/16 checks green via GitHub API; MA.8 add_group hint queued in MB.1

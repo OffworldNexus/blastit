@@ -521,3 +521,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T12:57 [MA.11] (lead) REVIEW PASS (attempt 1) + 2 MINOR comment findings fixed (reworded to logs.rs single-writer/poll-order fact); gates: plan OK, guard OK, critical-guard clean, ma
 - 2026-11-13T12:57 [MA.11] (lead) status review -> done
 - 2026-11-13T12:57 [MA.11] (lead) commit 21e093b25d6a99aefb7e327b70283a7dc495c954 on release/0.1.1
+- 2026-11-13T13:07 [MA] (strategist) status active -> done
+- 2026-11-13T13:07 [MA] (strategist) incremental re-acceptance PASSED at f305e38 on release/0.1.1: MA.7..MA.11 verified CI/test-only with zero weakened guards/assertions; PR #62 16/16 checks green 
