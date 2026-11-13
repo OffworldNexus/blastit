@@ -2,7 +2,7 @@
 id: MA
 title: "Lean DX & Show-the-World Polish (0.1.1)"
 kind: milestone
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: strategist
 created: "2026-11-12T00:50"
-updated: "2026-11-12T00:50"
+updated: "2026-11-13T10:44"
 ---
 
 # Goal

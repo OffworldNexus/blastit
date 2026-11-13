@@ -462,3 +462,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T10:02 [MA.6] (lead) edited fields
 - 2026-11-13T10:04 [MA.6] (lead) status active -> done
 - 2026-11-13T10:04 [MA.6] (lead) commit 341698a (merge of origin/perf-hot-path into release/0.1.1); reviewer PASS attempt 1
+- 2026-11-13T10:42 [MB.1] (strategist) created (epic) MA Gate Follow-ups: Mutation Coverage, Startup Diagnostics & Harness Hygiene
+- 2026-11-13T10:42 [MB.2] (strategist) created (epic) Static Asset Serving & Clean URL Rewriting (0.2.0)
+- 2026-11-13T10:42 [MB.3] (strategist) created (epic) PHP-FPM FastCGI Backend & php2shell Defense (0.2.1)
+- 2026-11-13T10:42 [MB.4] (strategist) created (epic) Vite & Node HTTP Upstream & node2shell Defense (0.2.2)
+- 2026-11-13T10:42 [MB.5] (strategist) created (epic) Tomcat / JVM 12-Factor Backend & Unified Multi-Backend Gate (0.2.3)
+- 2026-11-13T10:44 [MA] (strategist) status ready -> done
+- 2026-11-13T10:44 [MA] (strategist) strategist gate PASSED at 70a4357 on release/0.1.1: make check exit 0, make e2e exit 0 (8x PASS), real cargo-mutants run (blastit-manifest 437/630=69.4% whole-c

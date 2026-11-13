@@ -24,3 +24,4 @@ Milestones run in order (`MA` -> `MB` -> `MC` -> `MD`). Note that `v0.1.0` is al
 ## Change log
 
 - 2026-11-12: Initial DX-first autonomous harness and `MA`–`MD` roadmap created (`v0.1.0` already released; `MA` targets `0.1.1`).
+- 2026-11-13: `MA` (`0.1.1`) milestone gate passed on `release/0.1.1` (including `MA.6` hot-path backport from `origin/perf-hot-path`, real `cargo-mutants` policy/validation audits at 95.0 % on `blastit-manifest` policy modules and 88.4 % on completed `blastit-sqlpolicy` modules, and owner cap raise to `$200` in `plan/BUDGET.json`); `edit.rs`/timeout mutation hardening, missing-`./blastit.toml` startup diagnostic, and harness hygiene tracked in `MB.1` ahead of `0.2.x` backend work.

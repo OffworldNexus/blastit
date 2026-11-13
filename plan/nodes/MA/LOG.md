@@ -15,3 +15,11 @@ gate packet assembled at e0bc1b3 by lead (cheap tier): make check exit 0 and mak
 ## 2026-11-13T03:16 [lead]
 
 gate packet committed as 1d5aab3 (evidence at e0bc1b3 + docs/troubleshooting.md rows); MA remains ready, awaiting the strategist gate.
+
+## 2026-11-13T10:44 [strategist]
+
+status ready -> done
+
+## 2026-11-13T10:44 [strategist]
+
+strategist gate PASSED at 70a4357 on release/0.1.1: make check exit 0, make e2e exit 0 (8x PASS), real cargo-mutants run (blastit-manifest 437/630=69.4% whole-crate, 304/320=95.0% policy modules; blastit-sqlpolicy 508/1019 partial 420/475=88.4%), residual edit.rs/timeout/startup/hygiene items tracked in MB.1
