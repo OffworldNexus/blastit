@@ -27,3 +27,7 @@ status active -> review
 ## 2026-11-13T11:08 [lead]
 
 status review -> done
+
+## 2026-11-13T11:09 [lead]
+
+commit eacb5033130202b5856cce02a05d2ce2bc57eb67 on release/0.1.1 (make check exit 0, plan validate OK, python/tests untouched)

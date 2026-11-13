@@ -479,3 +479,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T11:08 [MA.7] (lead) review PASS: reproduced 3 fixture collection errors without --ignore, 0 with it; make check prerequisites green; plan-validate blocked only by transitive MA.7-u
 - 2026-11-13T11:08 [MA.7] (lead) status active -> review
 - 2026-11-13T11:08 [MA.7] (lead) status review -> done
+- 2026-11-13T11:09 [MA.7] (lead) commit eacb5033130202b5856cce02a05d2ce2bc57eb67 on release/0.1.1 (make check exit 0, plan validate OK, python/tests untouched)
