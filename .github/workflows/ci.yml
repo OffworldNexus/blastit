@@ -111,7 +111,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # init must be root (PID 1 in the container); the smoke tests start the real binary.
       - run: cargo build -p blastit --tests --locked
-      - run: sudo -E env "PATH=$PATH" cargo test -p blastit --locked -- --test-threads=1
+      # sudo-rs (the runner's sudo) ignores `-E`, so root inherits neither
+      # RUSTUP_HOME nor CARGO_HOME and the rustup shim finds no toolchain to run.
+      # Pass what root needs explicitly; every `${...}` is expanded by *this*
+      # shell before sudo, so the fallbacks see the runner user's homes.
+      # PYO3_PYTHON is not just the build's interpreter: `tests/smoke.rs` derives
+      # LD_LIBRARY_PATH for the binary it spawns from it, and the smoke tests read
+      # the job's PostgreSQL service from BLASTIT_TEST_PG_URL.
+      - run: |
+          sudo env \
+            "PATH=$HOME/.cargo/bin:$PATH" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "PYO3_PYTHON=$PYO3_PYTHON" \
+            "BLASTIT_TEST_PG_URL=$BLASTIT_TEST_PG_URL" \
+            cargo test -p blastit --locked -- --test-threads=1
 
   e2e:
     name: e2e (Django under blastit, Docker)
@@ -219,7 +233,14 @@ jobs:
           python -m venv /tmp/blastit-tests
           /tmp/blastit-tests/bin/pip install dist/blastit-*.whl pytest pytest-django pytest-xdist django 'psycopg[binary]'
       - name: Run the plugin's tests
-        run: /tmp/blastit-tests/bin/pytest python/tests -q
+        # `python/tests/runnable_docs/fixtures/*` are runnable-docs fixture apps,
+        # driven by the docs harness from their own directory: each fixture app
+        # that collects tests has its own `pytest.ini`, and the imports only
+        # resolve with the fixture directory on `sys.path`. Collected from here
+        # they error at collection. Ignore them here rather than in a global
+        # `norecursedirs`, which would also change what the harness collects
+        # inside those directories.
+        run: /tmp/blastit-tests/bin/pytest python/tests -q --ignore=python/tests/runnable_docs/fixtures
 
   # `make check` runs the docs gate and both critical-test guards; this job and
   # `guards` are what run them on a pull request. Nothing else here calls `make`

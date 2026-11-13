@@ -471,3 +471,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T10:44 [MA] (strategist) strategist gate PASSED at 70a4357 on release/0.1.1: make check exit 0, make e2e exit 0 (8x PASS), real cargo-mutants run (blastit-manifest 437/630=69.4% whole-c
 - 2026-11-13T10:46 HUMAN H-004 opened by conductor (node MA)
 - 2026-11-13T10:46 AUTOPILOT off by conductor awaiting human merge of release PR v0.1.1
+- 2026-11-13T11:02 [MA.7] (conductor) created (task) Leaf 14: green the release CI (sudo-rs smoke job, pytest fixture collection)
+- 2026-11-13T11:02 AUTOPILOT on by conductor release CI hardening for v0.1.1
+- 2026-11-13T11:03 [MA.7] (lead) status ready -> active
+- 2026-11-13T11:03 [MA.7] (lead) attempt 1/3 started
+- 2026-11-13T11:03 [MA.7] (lead) base 01c91cd85991524af0014887f30c554c16653687
+- 2026-11-13T11:08 [MA.7] (lead) review PASS: reproduced 3 fixture collection errors without --ignore, 0 with it; make check prerequisites green; plan-validate blocked only by transitive MA.7-u
+- 2026-11-13T11:08 [MA.7] (lead) status active -> review
+- 2026-11-13T11:08 [MA.7] (lead) status review -> done
