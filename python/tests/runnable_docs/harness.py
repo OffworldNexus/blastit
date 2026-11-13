@@ -20,10 +20,42 @@ directly, so a regression goes red at the fence that lost it.
 The wheel is built once and installed through a fresh per-run `UV_CACHE_DIR`, so
 a rebuilt same-version wheel can never be served from the global cache: the
 installed package is then compared, file by file, with the wheel that was built.
+
+**Offline and HOME contract.** Nothing here reaches the network. Every `uv`
+invocation runs with `UV_OFFLINE=1` (and `UV_PYTHON_DOWNLOADS=never` for the
+fences), the wheel comes from `dist/`, and the one pin the gate needs
+(`pytest==9.2.0`, for the `blastit check` fences) is read from the *caller's* uv
+cache. That cache is the only thing this gate asks of the machine it runs on: fill
+it once with `python python/tests/runnable_docs/harness.py --warm-cache`, or point
+`BLASTIT_DOCS_UV_CACHE` at a cache that already holds the pin. A missing entry
+fails in the first second, before the wheel is built, with the command that fixes
+it — see `docs/testing/README.md`. `HOME` is never read otherwise, and a CPython
+the uv cache does not manage is found on `PATH` instead.
+
+**Wheel provenance.** The wheel under test is `dist/blastit-<version>-*.whl` where
+`<version>` is `[workspace.package] version` in `Cargo.toml`, which must equal the
+newest release `CHANGELOG.md` announces. Two wheels for the same version and the
+host's interpreter is a failure, not a coin toss on mtime.
+
+**Every mode is honest about what it ran.** A mode that executes a fence's
+commands raises `Failure` when the fence shows lines but no `$ ` prompt, so a
+fence that lost its prompts can never report a pass. An accounted mode must carry
+its written reason, and the `static` mode parses what a reader would copy: every
+`yaml`, `ini`, `toml` and `sql` block the page shows, every command's executable,
+subcommand, flags and file paths, and every JSON line in the fence.
+
+**The flag tables are the tools' own.** A `static` fence passes only if the flag
+it shows is one the real command accepts, so the tables above are checked against
+the installed binaries rather than maintained by hand: `assert_flag_tables()` runs
+before anything is built (`psql --help` is complete, so it is checked on every
+run) and `harness.py --audit-flags` checks every table, accepting a flag `--help`
+does not print only when the tool itself parses it. `psql -C` — in this table,
+never in psql — is the bug that check exists for.
 """
 
 from __future__ import annotations
 
+import configparser
 import hashlib
 import json
 import os
@@ -34,6 +66,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -44,7 +77,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fences import Command, Fence, console_fences
+from fences import Command, Fence, console_fences, scan_page
 from pgstub import PgStub
 
 HERE = Path(__file__).resolve().parent
@@ -52,6 +85,10 @@ REPO = HERE.parents[2]
 FIXTURES = HERE / "fixtures"
 DIST = REPO / "dist"
 PYTEST_VERSION = "9.2.0"
+# The environment variable that points the gate at a uv cache which already holds
+# `pytest==9.2.0` (a shared read-only cache in CI), instead of the caller's HOME.
+CACHE_OVERRIDE = "BLASTIT_DOCS_UV_CACHE"
+
 EXECUTING = {
     "install",
     "dev",
@@ -78,9 +115,16 @@ ACCOUNTED = {"static", "example", "install-external"}
 # command is substituted (Docker for the in-process PostgreSQL stub), so the
 # fence is accounted, never counted as executed.
 SUBSTITUTED = {"pgstub"}
+# A mode whose fence is the *expected output*, not a command: `denial` starts the
+# server itself and asserts the `sql.denied` line the page prints. Such a fence
+# has no `$ ` prompt on purpose, so the empty-command rule below lets it through
+# and `mode_denial` requires a non-blank body of its own.
+PROSE_MODES = {"denial"}
 # A mode that can return "not executed" must say why in the inventory.
 NEEDS_REASON = ACCOUNTED | SUBSTITUTED
 MODES = EXECUTING | ACCOUNTED
+# The five fields `docs/reference/log-events.md` documents for a boot line.
+BOOT_KEYS = ("event", "stage", "seccomp", "privilege", "bounding_set")
 
 
 DEV_TIMEOUT = 30.0
@@ -152,26 +196,205 @@ def load_inventory(inventory: Path) -> list[PageSpec]:
     return pages
 
 
-def wheel_path() -> Path:
-    wheels = sorted(DIST.glob("blastit-*.whl"), key=lambda item: item.stat().st_mtime)
-    if not wheels:
+def _require_reason(spec: FenceSpec, where: str) -> str:
+    """An accounted mode must say, in writing, why it runs nothing."""
+    reason = (spec.reason or "").strip()
+    if not reason:
         raise Failure(
-            f"{DIST} has no blastit wheel; run scripts/build-wheel.sh (make docs-test does)"
+            f"{where}: `{spec.mode}` does not run the fence's command, so the "
+            "inventory entry must carry a written `reason` "
+            "(docs/testing/README.md)"
         )
-    return wheels[-1]
+    return reason
+
+
+def _require_commands(fence: Fence, spec: FenceSpec) -> None:
+    """No mode may report a pass for a fence it read nothing from.
+
+    A `console` fence whose `$ ` prompts were lost yields zero commands while
+    still showing output lines: an executing mode then asserted nothing and
+    reported success. The complement matters too — a mode that substitutes or
+    accounts for the command says so in the inventory, and the modes that only
+    read the body (`static`, `example`) may accept one without a command.
+    """
+    where = f"{fence.page} fence {fence.index}"
+    if spec.mode in ACCOUNTED:
+        _require_reason(spec, where)
+        return
+    if spec.mode in SUBSTITUTED:
+        _require_reason(spec, where)
+    shown = [line for line in fence.body.splitlines() if line.strip()]
+    if not shown:
+        raise Failure(
+            f"{where}: `{spec.mode}` runs something, but the fence shows nothing"
+        )
+    if spec.mode in PROSE_MODES:
+        # The body *is* the assertion here (`mode_denial` matches the printed
+        # line), so a fence without `$ ` prompts is the documented shape.
+        return
+    if not fence.commands():
+        raise Failure(
+            f"{where}: `{spec.mode}` runs the fence's commands, but none of its "
+            f"{len(shown)} non-blank lines starts with `$ `, so this mode would "
+            "run nothing and report a pass. Restore the `$ ` prompt, or declare "
+            "the fence `example`/`static` with a written reason"
+        )
+
+
+def _version_of(path: Path, key: tuple[str, ...]) -> str:
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise Failure(f"{path} cannot be read for its version: {error}") from error
+    value: object = document
+    for part in key:
+        if not isinstance(value, dict) or part not in value:
+            raise Failure(f"{path} has no {']['.join(key)} version")
+        value = value[part]
+    if not isinstance(value, str) or not re.fullmatch(r"\d+\.\d+\.\d+", value):
+        raise Failure(f"{path} names the version {value!r}, not `X.Y.Z`")
+    return value
+
+
+def planned_version() -> str:
+    """`[workspace.package] version`: the version of every artifact of this tree."""
+    return _version_of(REPO / "Cargo.toml", ("workspace", "package", "version"))
+
+
+def documented_version() -> str:
+    """The release the user docs claim: the newest `## X.Y.Z` in `CHANGELOG.md`."""
+    text = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    match = re.search(r"^## (\d+\.\d+\.\d+) ", text, re.MULTILINE)
+    if match is None:
+        raise Failure(
+            "CHANGELOG.md has no `## X.Y.Z (date)` release heading, so the version "
+            "the documentation claims cannot be read"
+        )
+    return match.group(1)
+
+
+def assert_provenance() -> str:
+    """One version for the source tree, the release the docs announce, the wheel."""
+    planned = planned_version()
+    documented = documented_version()
+    if planned != documented:
+        raise Failure(
+            f"Cargo.toml says the workspace version is {planned}, but the newest "
+            f"release CHANGELOG.md announces is {documented}: the wheel this gate "
+            f"builds would be {planned} while the docs tell a reader to expect "
+            f"{documented}. Bump both (scripts/dev-version.sh) or add the missing "
+            "CHANGELOG entry, whichever is true"
+        )
+    return planned
+
+
+def _wheel_python(name: str) -> str:
+    """`blastit-0.1.0-cp314-…whl` -> `3.14`; the ABI tag names the interpreter."""
+    match = re.search(r"-cp3(\d+)-", name)
+    if match is None:
+        raise Failure(
+            f"{name} carries no `cp3NN` ABI tag, so the interpreter to install it "
+            "into cannot be chosen"
+        )
+    return "3." + match.group(1)
+
+
+HOST_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def wheel_path() -> Path:
+    """The one wheel for the workspace version that this host can install.
+
+    `dist/` is a build directory: it may hold one wheel per CPython minor (CI
+    builds 3.13 and 3.14), and it may hold a wheel of an older release. Neither
+    the newest mtime nor the alphabet decides what is tested — the workspace
+    version does, and two wheels competing for the host's interpreter are a
+    failure rather than a guess.
+    """
+    version = planned_version()
+    candidates = sorted(DIST.glob(f"blastit-{version}-*.whl"))
+    if not candidates:
+        found = sorted(item.name for item in DIST.glob("blastit-*.whl"))
+        raise Failure(
+            f"{DIST} has no blastit-{version} wheel; it holds "
+            f"{', '.join(found) if found else 'no wheel'}. The workspace version is "
+            f"{version}, so run scripts/build-wheel.sh (`make docs-test` does)"
+        )
+    native = [wheel for wheel in candidates if _wheel_python(wheel.name) == HOST_PYTHON]
+    if native:
+        candidates = native
+    if len(candidates) > 1:
+        raise Failure(
+            f"{DIST} holds {len(candidates)} wheels for version {version}: "
+            f"{', '.join(wheel.name for wheel in candidates)}. The harness cannot "
+            "tell which one it documents: delete the ones this run did not build "
+            "(`dist/` is generated) and re-run"
+        )
+    return candidates[0]
 
 
 def interpreter_for(wheel: Path) -> str:
-    match = re.search(r"-cp3(\d+)-", wheel.name)
-    if match is None:
-        raise Failure(f"{wheel.name}: no cp3NN tag to choose an interpreter from")
-    return subprocess.check_output(
-        ["uv", "python", "find", f"==3.{match.group(1)}"], text=True
-    ).strip()
+    """The CPython the wheel's ABI tag names, through uv or else `PATH`."""
+    wanted = _wheel_python(wheel.name)
+    try:
+        return subprocess.check_output(
+            ["uv", "python", "find", f"=={wanted}"],
+            text=True,
+            stderr=subprocess.PIPE,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        found = shutil.which(f"python{wanted}")
+        if found:
+            return found
+        raise Failure(
+            f"no CPython {wanted} to install {wheel.name}: `uv python find "
+            f"=={wanted}` found none and python{wanted} is not on PATH. Install it "
+            f"once (`uv python install {wanted}`) — docs/testing/README.md names "
+            "every prerequisite of this gate"
+        ) from None
 
 
 def uv_cache_dir() -> str:
-    return subprocess.check_output(["uv", "cache", "dir"], text=True).strip()
+    try:
+        return subprocess.check_output(
+            ["uv", "cache", "dir"], text=True, stderr=subprocess.PIPE
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise Failure(
+            f"`uv cache dir` failed ({error}). This gate is offline and reads "
+            f"pytest=={PYTEST_VERSION} from the uv cache, so `uv` must be on PATH "
+            "— docs/testing/README.md lists the prerequisites"
+        ) from error
+
+
+def warm_pytest_cache() -> str:
+    """Fill the uv cache with the one pin the gate needs (this step may use the network)."""
+    cache = os.environ.get(CACHE_OVERRIDE) or uv_cache_dir()
+    target = Path(tempfile.mkdtemp(prefix="warm-")) / "wheels"
+    argv = [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        sys.executable,
+        "--target",
+        str(target),
+        f"pytest=={PYTEST_VERSION}",
+    ]
+    completed = subprocess.run(
+        argv,
+        env={**os.environ, "UV_CACHE_DIR": cache},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    shutil.rmtree(target.parent, ignore_errors=True)
+    if completed.returncode != 0:
+        raise Failure(
+            f"`{' '.join(argv)}` failed with {completed.returncode}:\n"
+            f"{completed.stderr[-2000:]}"
+        )
+    return f"{cache} now holds pytest=={PYTEST_VERSION}"
 
 
 class Shell:
@@ -321,14 +544,26 @@ class Harness:
     def __init__(self, pages: list[PageSpec], report: Report) -> None:
         self.pages = pages
         self.report = report
+        # The flag tables the static deploy checks trust are compared with the
+        # installed tools' own `--help` before anything is built: a table entry a
+        # tool does not accept would let an impossible command pass (see
+        # `FlagAudit` for why `psql` is the table the gate itself re-checks).
+        assert_flag_tables(gate_only=True)
+        # The source tree, the release the docs announce and the artifact must
+        # agree before anything is built or run.
+        assert_provenance()
         self.wheel = wheel_path()
         self.wheel_sha256 = hashlib.sha256(self.wheel.read_bytes()).hexdigest()
         self.python = interpreter_for(self.wheel)
-        self.version = self.python.split("python")[-1]
-        # `pytest` comes from the global cache (offline); everything that
-        # installs the wheel uses a cache this run created empty, so uv cannot
-        # serve a *rebuilt* same-version wheel it cached during an earlier run.
-        self.global_cache = uv_cache_dir()
+        # The wheel's `cp3NN` tag names the interpreter it was built for, and the
+        # resolved path is what `uv venv --python` gets: no discovery, so the venv
+        # does not depend on the caller's HOME holding a uv-managed interpreter.
+        self.version = _wheel_python(self.wheel.name)
+        # `pytest` comes from a cache this gate did not create (offline);
+        # everything that installs the wheel uses a cache this run created empty,
+        # so uv cannot serve a *rebuilt* same-version wheel it cached during an
+        # earlier run. The cache is the caller's HOME or `BLASTIT_DOCS_UV_CACHE`.
+        self.global_cache = os.environ.get(CACHE_OVERRIDE) or uv_cache_dir()
         self.pg_stub: PgStub | None = None
         self.pg_url = os.environ.get("BLASTIT_TEST_PG_URL", "")
         self.substitutions: list[tuple[str, str]] = []
@@ -349,6 +584,9 @@ class Harness:
         self.cache.mkdir()
         self.base = self.work / "base"
         try:
+            # Fail on a missing cached pin before the (slow) wheel install, so a
+            # cold cache costs a second rather than a build.
+            self._require_cached_pytest()
             self._build_base()
             self._start_postgres()
         except BaseException:
@@ -370,16 +608,15 @@ class Harness:
             encoding="utf-8",
         )
         env = self.base_env(self.base / "home", shared=False)
-        env["UV_OFFLINE"] = "1"
         for command in (
-            ["uv", "venv", "--python", self.version, ".venv"],
+            ["uv", "venv", "--python", self.python, ".venv"],
             ["uv", "lock"],
             ["uv", "sync"],
         ):
             self._tool(self.base, env, command, quiet=True)
         self.shared_python = self.base / ".venv" / "bin" / "python"
         self.verify_wheel_install(self.base / ".venv")
-        self.install_pytest(self.base, env)
+        self.install_pytest()
 
     def _start_postgres(self) -> None:
         self.substitutions = [
@@ -415,6 +652,12 @@ class Harness:
         No `BLASTIT_*` knob is injected: a fence runs with what the page tells a
         developer to set, so a host where `blastit dev` cannot serve its first
         view is a red fence naming the product, never a green one masking it.
+
+        `UV_OFFLINE=1` is the one thing every `uv` call here shares, so the
+        offline contract is a property of the environment rather than of the call
+        sites: a fence that would need the network fails naming `uv`, offline,
+        instead of quietly downloading. The only step outside this environment is
+        `--warm-cache`, documented as the one command that may reach the index.
         """
         uv_dir = str(Path(shutil.which("uv") or "uv").parent)
         env = {
@@ -425,6 +668,7 @@ class Harness:
             "TZ": "UTC",
             "TMPDIR": str(self.tmpdir),
             "UV_CACHE_DIR": str(self.cache),
+            "UV_OFFLINE": "1",
             "UV_PYTHON_DOWNLOADS": "never",
             "UV_LINK_MODE": "copy",
             "UV_FIND_LINKS": str(DIST),
@@ -511,36 +755,56 @@ class Harness:
         if not checked:
             raise Failure(f"{self.wheel.name} holds no installable files")
 
-    def install_pytest(self, root: Path, env: dict[str, str]) -> None:
-        """Install `pytest` from the global uv cache, or fail.
-
-        The gate is offline by contract: reaching the package index inside
-        `make check` would make a dangling network a red build and a supply-chain
-        hole. A missing cache entry names the one command that fills it. This is
-        the only command that reads the global cache, because the wheel install
-        must never see it.
-        """
-        argv = [
+    def _pytest_argv(self, python: str) -> list[str]:
+        return [
             "uv",
             "pip",
             "install",
             "--python",
-            str(root / ".venv" / "bin" / "python"),
+            python,
             f"pytest=={PYTEST_VERSION}",
         ]
-        pytest_env = {
-            **env,
-            "UV_OFFLINE": "1",
+
+    def _pytest_env(self) -> dict[str, str]:
+        return {
+            **self.base_env(self.work / "pytest-cache", shared=False),
             "UV_CACHE_DIR": self.global_cache,
         }
+
+    def _pytest_missing(self, failure: Failure) -> Failure:
+        return Failure(
+            f"pytest=={PYTEST_VERSION} is not in the uv cache this gate reads "
+            f"({self.global_cache}), and this gate never reaches the network. Run "
+            "the one documented prerequisite once for this HOME, then re-run:\n"
+            "  uv run --no-project python python/tests/runnable_docs/harness.py "
+            "--warm-cache\n"
+            "(or set BLASTIT_DOCS_UV_CACHE to a cache that already holds the pin; "
+            "docs/testing/README.md has the whole contract)\n"
+            f"the offline install said: {failure}"
+        )
+
+    def _require_cached_pytest(self) -> None:
+        """Fail in a second, with the fix, instead of after the wheel install."""
+        argv = [*self._pytest_argv(self.python), "--dry-run"]
         try:
-            self._tool(root, pytest_env, argv, quiet=True)
+            self._tool(self.work, self._pytest_env(), argv, quiet=True)
         except Failure as failure:
-            raise Failure(
-                f"pytest=={PYTEST_VERSION} is not in the uv cache, and this gate "
-                "never reaches the network. Fill the cache once with "
-                f"`uv pip install pytest=={PYTEST_VERSION}` and re-run: {failure}"
-            ) from failure
+            raise self._pytest_missing(failure) from failure
+
+    def install_pytest(self) -> None:
+        """Install `pytest` from the uv cache, or fail with the fix.
+
+        The gate is offline by contract: reaching the package index inside
+        `make check` would make a dangling network a red build and a supply-chain
+        hole. A missing cache entry names the one command that fills it. This is
+        the only install that reads the cache the caller's HOME owns, because the
+        wheel install must never see it.
+        """
+        argv = self._pytest_argv(str(self.base / ".venv" / "bin" / "python"))
+        try:
+            self._tool(self.base, self._pytest_env(), argv, quiet=True)
+        except Failure as failure:
+            raise self._pytest_missing(failure) from failure
 
     def _init_git(self, root: Path, env: dict[str, str]) -> None:
         for command in (
@@ -670,6 +934,7 @@ class Harness:
         handler = getattr(self, "mode_" + spec.mode.replace("-", "_"), None)
         if handler is None:
             raise Failure(f"unknown inventory mode {spec.mode!r}")
+        _require_commands(fence, spec)
         return handler(fence, spec)
 
     # -- modes ------------------------------------------------------------
@@ -678,7 +943,6 @@ class Harness:
         root = Path(tempfile.mkdtemp(prefix="install-", dir=self.work)) / "app"
         root.mkdir()
         env = self.base_env(root / "home", shared=False)
-        env["UV_OFFLINE"] = "1"
         shell = self.shell(root, env)
         try:
             for command in fence.commands():
@@ -1342,13 +1606,26 @@ class Harness:
         return "each preset exists and fails closed without capabilities", True
 
     def mode_static(self, fence: Fence, spec: FenceSpec) -> tuple[str, bool]:
-        reason = spec.reason or "no reason recorded"
+        """Check a deployment recipe that cannot run in this unprivileged gate.
+
+        Three things are read, not eyeballed: every command's executable,
+        subcommand, flags and file paths (against the real CLI's `--help` and this
+        table), every `yaml`/`ini`/`toml`/`sql` block the page shows, and every
+        JSON line in the fence itself.
+        """
+        reason = _require_reason(spec, f"{fence.page} fence {fence.index}")
         cli = self.cli_help()
+        titles = _static_blocks(fence)
+        skipped = 0
         for command in fence.commands():
-            _static_command(command.text, cli)
-        _static_toml(fence, REPO / fence.page)
+            skipped += _static_command(command.text, cli, titles)
         _static_json_lines(fence)
-        return f"statically checked ({reason})", False
+        detail = f"statically checked every command, flag and snippet ({reason})"
+        if skipped:
+            detail += (
+                f" · {skipped} absolute path(s) left to the reader's host, unchecked"
+            )
+        return detail, False
 
     def cli_help(self) -> CliHelp:
         """Parse the flags the installed CLI really accepts, once."""
@@ -1374,13 +1651,13 @@ class Harness:
         return self._cli
 
     def mode_example(self, fence: Fence, spec: FenceSpec) -> tuple[str, bool]:
-        if not spec.reason:
-            raise Failure("an `example` fence needs a written reason in the inventory")
-        return f"accounted: {spec.reason}", False
+        return (
+            f"accounted: {_require_reason(spec, f'{fence.page} fence {fence.index}')}",
+            False,
+        )
 
     def mode_install_external(self, fence: Fence, spec: FenceSpec) -> tuple[str, bool]:
-        if not spec.reason:
-            raise Failure("an `install-external` fence needs a written reason")
+        reason = _require_reason(spec, f"{fence.page} fence {fence.index}")
         installs_blastit = False
         for command in fence.commands():
             if "uv add" in command.text and "blastit" in command.text:
@@ -1390,7 +1667,7 @@ class Harness:
                 "an `install-external` fence must name blastit in one of its `uv add` "
                 "commands; otherwise it cannot be accounted as an install of this wheel"
             )
-        return f"accounted: {spec.reason}", False
+        return f"accounted: {reason}", False
 
     # -- helpers ----------------------------------------------------------
 
@@ -1673,28 +1950,8 @@ _SUBSTITUTION = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\$\((.*)\)$")
 # A deployment fence may pipe a command through a text filter; those are not
 # commands to check, and every other executable has to be one this harness knows.
 FILTERS = frozenset({"head", "tail", "grep", "cat", "wc", "sort"})
-DOCKER_SUBCOMMANDS = frozenset(
-    {"run", "build", "push", "pull", "compose", "logs", "exec", "image"}
-)
-COMPOSE_SUBCOMMANDS = frozenset({"up", "down", "logs", "build", "run", "ps", "pull"})
-COMPOSE_VALUE_FLAGS = frozenset(
-    {
-        "--env-file",
-        "-f",
-        "--file",
-        "--project-name",
-        "-p",
-        "--profile",
-        "--project-directory",
-        "--ansi",
-        "--progress",
-        "--parallel",
-    }
-)
-DOCTL_SUBCOMMANDS = frozenset(
-    {"apps", "registry", "auth", "compute", "databases", "account", "kubernetes"}
-)
 GIT_SUBCOMMANDS = frozenset({"rev-parse", "status", "diff", "log", "show"})
+
 UV_SUBCOMMANDS = frozenset(
     {
         "run",
@@ -1775,14 +2032,887 @@ SETPRIV_VALUE_FLAGS = frozenset(
 ENV_VALUE_FLAGS = frozenset({"-u", "--unset", "-C", "--chdir"})
 
 
-def _static_command(command: str, cli: CliHelp) -> None:
-    """Check every executable, script path and flag a non-executed fence names.
+@dataclass(frozen=True, slots=True)
+class ToolFlags:
+    """What one command of an external tool accepts, and which values are files.
+
+    The tables are deliberately explicit: a flag a page shows and this table does
+    not have is a failure, because the page and the check have to agree on what
+    the real command accepts (`docker run --help` is the referee).
+    """
+
+    booleans: frozenset[str] = frozenset()
+    values: frozenset[str] = frozenset()
+    paths: frozenset[str] = frozenset()
+
+    def plus(self, other: ToolFlags) -> ToolFlags:
+        return ToolFlags(
+            self.booleans | other.booleans,
+            self.values | other.values,
+            self.paths | other.paths,
+        )
+
+
+DOCKER_GLOBAL = ToolFlags(
+    booleans=frozenset(
+        {"-D", "--debug", "--tls", "--tlsverify", "--help", "-h", "--version", "-v"}
+    ),
+    values=frozenset(
+        {
+            "--config",
+            "-H",
+            "--host",
+            "--context",
+            "--log-level",
+            "-l",
+            "--tlscacert",
+            "--tlscert",
+            "--tlskey",
+        }
+    ),
+)
+DOCKER_RUN = ToolFlags(
+    booleans=frozenset(
+        {
+            "-d",
+            "--detach",
+            "--rm",
+            "-i",
+            "--interactive",
+            "-t",
+            "--tty",
+            "--init",
+            "--privileged",
+            "--read-only",
+            "--publish-all",
+            "-P",
+            "--no-healthcheck",
+            "--oom-kill-disable",
+            "--disable-content-trust",
+            "--help",
+            "--sig-proxy",
+            "--quiet",
+            "-q",
+        }
+    ),
+    values=frozenset(
+        {
+            "-a",
+            "--attach",
+            "--add-host",
+            "--annotation",
+            "--blkio-weight",
+            "--cap-add",
+            "--cap-drop",
+            "--cgroup-parent",
+            "--cgroupns",
+            "--cidfile",
+            "--cpu-period",
+            "--cpu-quota",
+            "--cpu-shares",
+            "-c",
+            "--cpus",
+            "--cpuset-cpus",
+            "--cpuset-mems",
+            "--device",
+            "--device-cgroup-rule",
+            "--dns",
+            "--dns-option",
+            "--dns-search",
+            "--domainname",
+            "--entrypoint",
+            "-e",
+            "--env",
+            "--env-file",
+            "--expose",
+            "--gpus",
+            "--group-add",
+            "--health-cmd",
+            "--health-interval",
+            "--health-retries",
+            "--health-start-interval",
+            "--health-start-period",
+            "--health-timeout",
+            # `-h` is `--hostname` here, not help.
+            "--hostname",
+            "-h",
+            "--ip",
+            "--ip6",
+            "--ipc",
+            "--isolation",
+            "--label",
+            "-l",
+            "--label-file",
+            "--link",
+            "--link-local-ip",
+            "--log-driver",
+            "--log-opt",
+            "--mac-address",
+            "-m",
+            "--memory",
+            "--memory-reservation",
+            "--memory-swap",
+            "--memory-swappiness",
+            "--mount",
+            "--name",
+            "--network",
+            "--net",
+            "--network-alias",
+            "--oom-score-adj",
+            "--pid",
+            "--pids-limit",
+            "--platform",
+            "--publish",
+            "-p",
+            "--pull",
+            "--restart",
+            "--runtime",
+            "--security-opt",
+            "--shm-size",
+            "--stop-signal",
+            "--stop-timeout",
+            "--storage-opt",
+            "--sysctl",
+            "--tmpfs",
+            "--ulimit",
+            "--user",
+            "-u",
+            "--userns",
+            "--uts",
+            "--volume",
+            "-v",
+            "--volumes-from",
+            "--workdir",
+            "-w",
+            "--detach-keys",
+        }
+    ),
+)
+DOCKER_BUILD = ToolFlags(
+    booleans=frozenset(
+        {
+            "--no-cache",
+            "--pull",
+            "--rm",
+            "--force-rm",
+            "--quiet",
+            "-q",
+            "--compress",
+            "--squash",
+            "--check",
+            "--help",
+        }
+    ),
+    values=frozenset(
+        {
+            "-t",
+            "--tag",
+            "-f",
+            "--file",
+            "--build-arg",
+            "--platform",
+            "--target",
+            "--network",
+            "--progress",
+            "--label",
+            "--iidfile",
+            "--cache-from",
+            "--cache-to",
+            "--secret",
+            "--ssh",
+            "--add-host",
+            "--build-context",
+            "--output",
+            "-o",
+            "--metadata-file",
+            "--shm-size",
+            "--ulimit",
+            "--allow",
+            "--annotation",
+            "--builder",
+            "--cpu-shares",
+            "-c",
+            "--memory",
+            "-m",
+            "--memory-swap",
+            "--isolation",
+            "--no-cache-filter",
+        }
+    ),
+    paths=frozenset({"-f", "--file"}),
+)
+DOCKER_PUSH = ToolFlags(
+    booleans=frozenset(
+        {"-a", "--all-tags", "-q", "--quiet", "--disable-content-trust"}
+    ),
+    values=frozenset({"--platform"}),
+)
+DOCKER_PULL = ToolFlags(
+    booleans=frozenset(
+        {"-a", "--all-tags", "-q", "--quiet", "--disable-content-trust"}
+    ),
+    values=frozenset({"--platform"}),
+)
+DOCKER_LOGS = ToolFlags(
+    booleans=frozenset({"-f", "--follow", "-t", "--timestamps", "--details"}),
+    values=frozenset({"-n", "--tail", "--since", "--until"}),
+)
+DOCKER_EXEC = ToolFlags(
+    booleans=frozenset(
+        {"-d", "--detach", "-i", "--interactive", "-t", "--tty", "--privileged"}
+    ),
+    values=frozenset(
+        {
+            "-e",
+            "--env",
+            "--env-file",
+            "--user",
+            "-u",
+            "--workdir",
+            "-w",
+            "--detach-keys",
+        }
+    ),
+)
+DOCKER_IMAGE = ToolFlags(
+    booleans=frozenset({"-a", "--all", "-q", "--quiet", "--help"}),
+    values=frozenset({"--format", "--filter", "--no-trunc"}),
+)
+DOCKER_COMMANDS = {
+    "run": DOCKER_RUN,
+    "build": DOCKER_BUILD,
+    "push": DOCKER_PUSH,
+    "pull": DOCKER_PULL,
+    "logs": DOCKER_LOGS,
+    "exec": DOCKER_EXEC,
+    "image": DOCKER_IMAGE,
+}
+COMPOSE_GLOBAL = ToolFlags(
+    booleans=frozenset(
+        {"-h", "--help", "--compatibility", "--dry-run", "--verbose", "-v", "--version"}
+    ),
+    values=frozenset(
+        {
+            "-f",
+            "--file",
+            "-p",
+            "--project-name",
+            "--project-directory",
+            "--env-file",
+            "--profile",
+            "--ansi",
+            "--progress",
+            "--parallel",
+        }
+    ),
+    paths=frozenset({"-f", "--file"}),
+)
+COMPOSE_UP = ToolFlags(
+    booleans=frozenset(
+        {
+            "-d",
+            "--detach",
+            "--build",
+            "--no-build",
+            "--force-recreate",
+            "--no-recreate",
+            "--no-deps",
+            "--remove-orphans",
+            "--abort-on-container-exit",
+            "--wait",
+            "--no-start",
+            "--quiet-pull",
+            "--always-recreate-deps",
+            "--renew-anon-volumes",
+            "-V",
+            "--attach-dependencies",
+            "--timestamps",
+            "--menu",
+        }
+    ),
+    values=frozenset(
+        {
+            "-t",
+            "--timeout",
+            "--scale",
+            "--pull",
+            "--exit-code-from",
+            "--attach",
+            "--no-attach",
+        }
+    ),
+)
+COMPOSE_DOWN = ToolFlags(
+    booleans=frozenset({"-v", "--volumes", "--remove-orphans"}),
+    values=frozenset({"-t", "--timeout", "--rmi"}),
+)
+COMPOSE_LOGS = ToolFlags(
+    booleans=frozenset(
+        {"-f", "--follow", "-t", "--timestamps", "--no-color", "--no-log-prefix"}
+    ),
+    values=frozenset({"--tail", "-n", "--since", "--until", "--index"}),
+)
+COMPOSE_BUILD = ToolFlags(
+    booleans=frozenset(
+        {"--no-cache", "--pull", "--push", "-q", "--quiet", "--with-dependencies"}
+    ),
+    values=frozenset(
+        {
+            "--build-arg",
+            "--progress",
+            "--ssh",
+        }
+    ),
+)
+COMPOSE_RUN = ToolFlags(
+    booleans=frozenset(
+        {
+            "--rm",
+            "-d",
+            "--detach",
+            "--no-deps",
+            "-T",
+            "--no-TTY",
+            "--service-ports",
+            "--use-aliases",
+            "--quiet-pull",
+        }
+    ),
+    values=frozenset(
+        {
+            "-e",
+            "--env",
+            "--name",
+            "-u",
+            "--user",
+            "-w",
+            "--workdir",
+            "--entrypoint",
+            "--volume",
+            "-v",
+            "--publish",
+            "-p",
+            "--cap-add",
+            "--cap-drop",
+            "--label",
+            "-l",
+            "--env-from-file",
+        }
+    ),
+)
+COMPOSE_PS = ToolFlags(
+    booleans=frozenset({"-q", "--quiet", "-a", "--all", "--services"}),
+    values=frozenset({"--format", "--filter", "--status", "--orphans"}),
+)
+COMPOSE_PULL = ToolFlags(
+    booleans=frozenset(
+        {
+            "--ignore-pull-failures",
+            "--include-deps",
+            "-q",
+            "--quiet",
+            "--ignore-buildable",
+        }
+    ),
+    values=frozenset({"--policy"}),
+)
+COMPOSE_COMMANDS = {
+    "up": COMPOSE_UP,
+    "down": COMPOSE_DOWN,
+    "logs": COMPOSE_LOGS,
+    "build": COMPOSE_BUILD,
+    "run": COMPOSE_RUN,
+    "ps": COMPOSE_PS,
+    "pull": COMPOSE_PULL,
+}
+# Regenerated from the real `psql --help` (`postgres:18`, the image every deploy
+# recipe names; identical in the 15/16/17 clients a distro ships). psql's help
+# prints its *complete* option list — getopt_long rejects anything else — so
+# this table is checked against that text on every gate run by
+# `assert_flag_tables()`. Do not add a flag here without pasting the `--help`
+# line that documents it: `-C`, `-g` and `--on-error-stop` were here before and
+# psql has never accepted any of them (it prints `invalid option -- 'C'`).
+PSQL = ToolFlags(
+    booleans=frozenset(
+        {
+            "-a",
+            "--echo-all",
+            "-A",
+            "--no-align",
+            "-b",
+            "--echo-errors",
+            "--csv",
+            "-e",
+            "--echo-queries",
+            "-E",
+            "--echo-hidden",
+            "-H",
+            "--html",
+            "-l",
+            "--list",
+            "-n",
+            "--no-readline",
+            "-0",
+            "--record-separator-zero",
+            "-q",
+            "--quiet",
+            "-1",
+            "--single-transaction",
+            "-s",
+            "--single-step",
+            "-S",
+            "--single-line",
+            "-t",
+            "--tuples-only",
+            "-w",
+            "--no-password",
+            "-W",
+            "--password",
+            "-x",
+            "--expanded",
+            "-X",
+            "--no-psqlrc",
+            "-z",
+            "--field-separator-zero",
+            "-?",
+            "--help",
+            "-V",
+            "--version",
+        }
+    ),
+    values=frozenset(
+        {
+            "-c",
+            "--command",
+            "-d",
+            "--dbname",
+            "-f",
+            "--file",
+            "-h",
+            "--host",
+            "-p",
+            "--port",
+            "-U",
+            "--username",
+            "--set",
+            "-v",
+            "--variable",
+            "-o",
+            "--output",
+            "-L",
+            "--log-file",
+            "-P",
+            "--pset",
+            "-T",
+            "--table-attr",
+            "-F",
+            "--field-separator",
+            "-R",
+            "--record-separator",
+        }
+    ),
+    paths=frozenset({"-f", "--file"}),
+)
+DOCTL_GLOBAL = ToolFlags(
+    booleans=frozenset({"-v", "--verbose", "--trace", "-h", "--help"}),
+    values=frozenset(
+        {"-t", "--access-token", "--api-url", "--config", "--output", "-o"}
+    ),
+)
+DOCTL_COMMANDS = {
+    ("apps", "create"): ToolFlags(
+        booleans=frozenset({"--wait", "--no-header"}),
+        values=frozenset({"--spec", "--format"}),
+        paths=frozenset({"--spec"}),
+    ),
+    ("apps", "update"): ToolFlags(
+        booleans=frozenset({"--wait", "--no-header"}),
+        values=frozenset({"--spec", "--format"}),
+        paths=frozenset({"--spec"}),
+    ),
+    ("apps", "list"): ToolFlags(
+        booleans=frozenset({"--no-header"}), values=frozenset({"--format"})
+    ),
+    ("apps", "get"): ToolFlags(values=frozenset({"--format"})),
+    ("apps", "logs"): ToolFlags(
+        booleans=frozenset({"-f", "--follow"}),
+        values=frozenset({"--type", "--deployment"}),
+    ),
+    ("apps", "delete"): ToolFlags(booleans=frozenset({"--force", "--wait"})),
+    ("apps", "spec"): ToolFlags(values=frozenset({"--format"})),
+    ("registry", "login"): ToolFlags(
+        booleans=frozenset({"--read-only"}), values=frozenset({"--expiry-seconds"})
+    ),
+    ("registry", "logout"): ToolFlags(),
+    ("registry", "create"): ToolFlags(
+        values=frozenset({"--region", "--subscription-tier"})
+    ),
+    ("registry", "delete"): ToolFlags(booleans=frozenset({"--force"})),
+    ("auth", "init"): ToolFlags(booleans=frozenset({"--interactive"})),
+    ("auth", "switch"): ToolFlags(),
+    ("auth", "list"): ToolFlags(),
+    ("account", "get"): ToolFlags(values=frozenset({"--format"})),
+    ("compute", "ssh"): ToolFlags(
+        booleans=frozenset({"-L"}),
+        values=frozenset({"--ssh-key-path", "--ssh-user", "--remote-command"}),
+    ),
+}
+
+
+def _flag_name(word: str) -> str:
+    return word.split("=", 1)[0]
+
+
+@dataclass(frozen=True, slots=True)
+class FlagAudit:
+    """One table, and the real command whose `--help` is the referee for it.
+
+    `gate` marks the tables the gate re-checks on every run: `psql` prints its
+    *complete* option list (getopt_long accepts nothing it does not print) and
+    its flag set is the same in psql 15/16/17/18, so `--help` containment is
+    exact there — a flag that table holds and psql does not print is invented,
+    which is how `-C`, `-g` and `--on-error-stop` passed every command but could
+    never run. Docker's help hides compatibility aliases (`--net`,
+    `--disable-content-trust`, `-h`) and gains or loses flags between CLI
+    releases, so containment alone would red the gate for a host's version
+    rather than for the table; those tables are audited by `--audit-flags`
+    instead, where a flag missing from `--help` must at least be *accepted* by
+    the installed binary.
+    """
+
+    label: str
+    argv: tuple[str, ...]
+    table: ToolFlags
+    gate: bool = False
+
+
+FLAG_AUDIT: tuple[FlagAudit, ...] = (
+    FlagAudit("docker", ("docker",), DOCKER_GLOBAL),
+    FlagAudit("docker run", ("docker", "run"), DOCKER_RUN),
+    FlagAudit("docker build", ("docker", "build"), DOCKER_BUILD),
+    FlagAudit("docker push", ("docker", "push"), DOCKER_PUSH),
+    FlagAudit("docker pull", ("docker", "pull"), DOCKER_PULL),
+    FlagAudit("docker logs", ("docker", "logs"), DOCKER_LOGS),
+    FlagAudit("docker exec", ("docker", "exec"), DOCKER_EXEC),
+    FlagAudit("docker image ls", ("docker", "image", "ls"), DOCKER_IMAGE),
+    FlagAudit("docker compose", ("docker", "compose"), COMPOSE_GLOBAL),
+    FlagAudit("docker compose up", ("docker", "compose", "up"), COMPOSE_UP),
+    FlagAudit("docker compose down", ("docker", "compose", "down"), COMPOSE_DOWN),
+    FlagAudit("docker compose logs", ("docker", "compose", "logs"), COMPOSE_LOGS),
+    FlagAudit("docker compose build", ("docker", "compose", "build"), COMPOSE_BUILD),
+    FlagAudit("docker compose run", ("docker", "compose", "run"), COMPOSE_RUN),
+    FlagAudit("docker compose ps", ("docker", "compose", "ps"), COMPOSE_PS),
+    FlagAudit("docker compose pull", ("docker", "compose", "pull"), COMPOSE_PULL),
+    FlagAudit("psql", ("psql",), PSQL, gate=True),
+)
+
+# A flag in a help text: `-a`, `--echo-all`, but not the `-x` in `--no-align`.
+_HELP_FLAG = re.compile(r"(?<![\w-])(--?[A-Za-z0-9][\w-]*)")
+_VALUE_FILLER = "x"
+_AUDIT_TIMEOUT = 30.0
+
+
+def _audit_env(home: Path) -> dict[str, str]:
+    """A scrubbed environment for one audit command: nothing runs, nothing is read.
+
+    `DOCKER_HOST` points at a socket that cannot exist, so even a flag the audit
+    only *parses* can never reach a daemon and start, pull or run a container.
+    """
+    return {
+        "HOME": str(home),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "TMPDIR": str(home),
+        "DOCKER_HOST": "unix:///nonexistent/blastit-flag-audit.sock",
+        "DOCKER_CLI_HINTS": "false",
+        "NO_COLOR": "1",
+    }
+
+
+def _audit_run(argv: list[str], home: Path) -> subprocess.CompletedProcess[str] | None:
+    """Run one audit command in `home`; `None` when the executable is not here."""
+    try:
+        return subprocess.run(
+            argv,
+            cwd=str(home),
+            env=_audit_env(home),
+            capture_output=True,
+            text=True,
+            timeout=_AUDIT_TIMEOUT,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _help_flags(audit: FlagAudit, home: Path) -> frozenset[str] | None:
+    """The flags `<tool> --help` prints, or `None` when that help is not here."""
+    completed = _audit_run([*audit.argv, "--help"], home)
+    if completed is None or completed.returncode != 0:
+        return None  # a tool the host does not have (`docker compose` w/o plugin)
+    return frozenset(_HELP_FLAG.findall(completed.stdout + completed.stderr))
+
+
+def _accepts(audit: FlagAudit, flag: str, takes_value: bool, home: Path) -> bool:
+    """Does the real command parse `flag`? A trailing `--help` keeps it side-effect free."""
+    words = [*audit.argv, flag, *([_VALUE_FILLER] if takes_value else []), "--help"]
+    completed = _audit_run(words, home)
+    return completed is not None and completed.returncode == 0
+
+
+def assert_flag_tables(gate_only: bool = False) -> str:
+    """Every flag the gate accepts must be one the real tool accepts.
+
+    The referee is the installed binary: its `--help` text, plus one parsed
+    command per flag the text does not print (a hidden compatibility alias) so a
+    hand-typed table entry cannot survive a tool that never heard of it. This is
+    the check that would have caught `psql -C`: `psql --help` has no `-C`, and
+    `psql -C x --help` exits 1 with `invalid option -- 'C'`.
+    """
+    checked: list[str] = []
+    missing: list[str] = []
+    home = Path(tempfile.mkdtemp(prefix="flag-audit-"))
+    try:
+        for audit in FLAG_AUDIT:
+            if gate_only and not audit.gate:
+                continue
+            printed = _help_flags(audit, home)
+            if printed is None:
+                missing.append(audit.argv[0])
+                continue
+            for flag in sorted(
+                audit.table.booleans | audit.table.values | audit.table.paths
+            ):
+                if flag in printed:
+                    continue
+                if _accepts(audit, flag, flag in audit.table.values, home):
+                    continue
+                raise Failure(
+                    f"`{audit.label} {flag}` is in the harness's `{audit.label}` "
+                    f"flag table, but `{audit.label} --help` does not print it and "
+                    f"`{' '.join([*audit.argv, flag])}` rejects it. Delete it from "
+                    "the table (a command the page cannot run must fail here) or "
+                    "replace it with the flag the tool really has"
+                )
+            checked.append(audit.label)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    summary = f"flag tables checked against --help: {', '.join(checked)}"
+    if missing:
+        summary += f" (not installed here: {', '.join(sorted(set(missing)))})"
+    return summary
+
+
+# Files a page tells the reader to create in their own project, so the gate can
+# neither have them nor expect the page to show them. `blastit.toml` is the one
+# file the product is about (`./blastit.toml` is the documented default); every
+# other file a flag names is either in this tree or shown on the page.
+READER_FILES = frozenset({"blastit.toml"})
+
+
+def _documented_path(value: str, titles: frozenset[str], line: str, flag: str) -> int:
+    """Resolve a file a flag names; count the ones that belong to the reader.
+
+    A workspace-relative path must exist, or be a file the page itself shows (the
+    `compose.yaml` above the command). An absolute path outside the repository
+    belongs to the reader's host and is not guessed at — the verdict line says
+    how many were left unchecked. A shell variable is the reader's too.
+    """
+    if not value or "$" in value or value.startswith("-"):
+        return 0
+    path = Path(value)
+    if path.is_absolute():
+        try:
+            inside = path.relative_to(REPO)
+        except ValueError:
+            return 1
+        if not (REPO / inside).exists():
+            raise Failure(f"`{line}`: `{flag} {value}` does not exist in the workspace")
+        return 0
+    if (
+        (REPO / path).exists()
+        or value in titles
+        or (
+            path.parent == Path(".")
+            and (path.name in titles or path.name in READER_FILES)
+        )
+    ):
+        return 0
+    raise Failure(
+        f"`{line}`: `{flag} {value}` names a file that neither exists in the "
+        f"workspace nor is a file the page shows "
+        f"({', '.join(sorted(titles)) or 'none'})"
+    )
+
+
+def _flag(
+    word: str,
+    following: list[str],
+    spec: ToolFlags,
+    line: str,
+    tool: str,
+    titles: frozenset[str],
+) -> tuple[int, int]:
+    """Validate one flag; return (words consumed as its value, absolute paths skipped)."""
+    if "=" in word:
+        name, value = word.split("=", 1)
+        if name in spec.values:
+            return (
+                (0, _documented_path(value, titles, line, name))
+                if name in spec.paths
+                else (0, 0)
+            )
+        if name in spec.booleans:
+            return 0, 0
+        raise Failure(f"`{line}`: `{tool} {name}` is not a flag `{tool}` accepts")
+    if len(word) > 2 and not word.startswith("--"):
+        letters = ["-" + character for character in word[1:]]
+        if all(letter in spec.booleans for letter in letters):
+            return 0, 0  # `-it` is `-i -t`
+    if word in spec.values:
+        if not following:
+            raise Failure(f"`{line}`: `{tool} {word}` has no value")
+        skipped = (
+            _documented_path(following[0], titles, line, word)
+            if word in spec.paths
+            else 0
+        )
+        return 1, skipped
+    if word in spec.booleans:
+        return 0, 0
+    raise Failure(f"`{line}`: `{tool} {word}` is not a flag `{tool}` accepts")
+
+
+def _walk_tool(
+    words: list[str],
+    spec: ToolFlags,
+    line: str,
+    tool: str,
+    titles: frozenset[str] = frozenset(),
+) -> tuple[list[str], int]:
+    positionals: list[str] = []
+    skipped = 0
+    at = 0
+    while at < len(words):
+        word = words[at]
+        if word == "--":
+            positionals.extend(words[at + 1 :])
+            break
+        if not word.startswith("-") or word == "-":
+            positionals.append(word)
+            at += 1
+            continue
+        consumed, extra = _flag(word, words[at + 1 :], spec, line, tool, titles)
+        at += 1 + consumed
+        skipped += extra
+    return positionals, skipped
+
+
+def _leading(
+    words: list[str],
+    spec: ToolFlags,
+    line: str,
+    tool: str,
+    titles: frozenset[str] = frozenset(),
+) -> tuple[list[str], int]:
+    """Consume the flags before the first positional word; return the rest."""
+    skipped = 0
+    at = 0
+    while at < len(words) and words[at].startswith("-") and words[at] != "-":
+        consumed, extra = _flag(words[at], words[at + 1 :], spec, line, tool, titles)
+        at += 1 + consumed
+        skipped += extra
+    return words[at:], skipped
+
+
+def _static_docker(words: list[str], line: str, titles: frozenset[str]) -> int:
+    rest, skipped = _leading(words[1:], DOCKER_GLOBAL, line, "docker", titles)
+    if not rest:
+        raise Failure(f"`{line}`: `docker` names no command")
+    command = rest[0]
+    tail = rest[1:]
+    if command == "compose":
+        rest, more = _leading(tail, COMPOSE_GLOBAL, line, "docker compose", titles)
+        skipped += more
+        if not rest:
+            raise Failure(f"`{line}`: `docker compose` names no command")
+        subcommand = rest[0]
+        if subcommand not in COMPOSE_COMMANDS:
+            raise Failure(
+                f"`{line}`: `docker compose {subcommand}` is not a command this "
+                "harness checks"
+            )
+        _, more = _walk_tool(
+            rest[1:],
+            COMPOSE_COMMANDS[subcommand],
+            line,
+            f"docker compose {subcommand}",
+            titles,
+        )
+        return skipped + more
+    if command not in DOCKER_COMMANDS:
+        raise Failure(
+            f"`{line}`: `docker {command}` is not a command this harness checks"
+        )
+    positionals, more = _walk_tool(
+        tail, DOCKER_COMMANDS[command], line, f"docker {command}", titles
+    )
+    if command in {"run", "build", "push", "pull", "exec"} and not positionals:
+        raise Failure(f"`{line}`: `docker {command}` names no image or container")
+    return skipped + more
+
+
+def _static_psql(words: list[str], line: str, titles: frozenset[str]) -> int:
+    positionals, skipped = _walk_tool(words[1:], PSQL, line, "psql", titles)
+    named = any(_flag_name(word) in ("-d", "--dbname") for word in words[1:])
+    if not positionals and not named:
+        raise Failure(f"`{line}`: `psql` names no database")
+    return skipped
+
+
+def _static_doctl(words: list[str], line: str, titles: frozenset[str]) -> int:
+    rest, skipped = _leading(words[1:], DOCTL_GLOBAL, line, "doctl", titles)
+    if len(rest) < 2:
+        raise Failure(
+            f"`{line}`: `doctl {' '.join(rest)}` is not a command this harness checks"
+        )
+    command = (rest[0], rest[1])
+    if command not in DOCTL_COMMANDS:
+        raise Failure(
+            f"`{line}`: `doctl {' '.join(command)}` is not a command this harness "
+            "checks; add it to the harness's doctl table with the flags `doctl "
+            "--help` prints"
+        )
+    tail = rest[2:]
+    _, more = _walk_tool(
+        tail,
+        DOCTL_COMMANDS[command].plus(DOCTL_GLOBAL),
+        line,
+        f"doctl {' '.join(command)}",
+        titles,
+    )
+    skipped += more
+    if command == ("apps", "create") and not any(
+        _flag_name(word) == "--spec" for word in tail
+    ):
+        raise Failure(f"`{line}`: `doctl apps create` needs `--spec <file>`")
+    return skipped
+
+
+def _static_command(
+    command: str, cli: CliHelp, titles: frozenset[str] = frozenset()
+) -> int:
+    """Check every executable, script path, flag and file a static fence names.
 
     Nothing is ignored for being unfamiliar: an executable the harness cannot
-    identify, a `uv run` target that does not exist, or a flag `--help` does not
-    list is a failure, because a deployment recipe that cannot be followed is a
-    documentation bug even when it cannot be run here.
+    identify, a `uv run` target that does not exist, a flag the real command does
+    not have, or a file that is neither in the tree nor on the page is a failure,
+    because a deployment recipe that cannot be followed is a documentation bug
+    even when it cannot be run here. Returns the number of absolute paths left to
+    the reader's host.
     """
+    skipped = 0
     for line in _logical_lines(command):
         head = line.split("\n", 1)[0]
         head = re.sub(r"(?<!\S)#.*$", "", head).strip()
@@ -1790,7 +2920,8 @@ def _static_command(command: str, cli: CliHelp) -> None:
         if head is None:
             continue
         for words in _segments(head):
-            _static_segment(words, cli, line)
+            skipped += _static_segment(words, cli, line, titles)
+    return skipped
 
 
 def _unwrap_substitution(head: str) -> str | None:
@@ -1842,7 +2973,9 @@ def _skip_flags(words: list[str], value: frozenset[str]) -> list[str]:
     return rest
 
 
-def _static_segment(words: list[str], cli: CliHelp, line: str) -> None:
+def _static_segment(
+    words: list[str], cli: CliHelp, line: str, titles: frozenset[str] = frozenset()
+) -> int:
     words = list(words)
     while words:
         token = words[0]
@@ -1861,37 +2994,34 @@ def _static_segment(words: list[str], cli: CliHelp, line: str) -> None:
         if token == "uv":
             words = _uv(words, line)
             if words is None:
-                return
+                return 0
             continue
         break
     if not words:
-        return
+        return 0
     executable = words[0]
     if executable == "blastit":
         _static_blastit(words, cli, line)
     elif executable == "blastit-manifest":
-        _static_manifest(words, cli, line)
+        return _static_manifest(words, cli, line, titles)
     elif executable == "docker":
-        _static_docker(words, line)
+        return _static_docker(words, line, titles)
     elif executable == "doctl":
-        if len(words) < 2 or words[1] not in DOCTL_SUBCOMMANDS:
-            raise Failure(
-                f"`{line}`: `doctl {words[1:2] or ''}` is not a known command"
-            )
+        return _static_doctl(words, line, titles)
     elif executable == "psql":
-        if not any(not word.startswith("-") for word in words[1:]) or len(words) < 2:
-            raise Failure(f"`{line}`: `psql` without a database")
+        return _static_psql(words, line, titles)
     elif executable == "git":
         if len(words) < 2 or words[1] not in GIT_SUBCOMMANDS:
             raise Failure(f"`{line}`: `git {words[1:2] or ''}` is not a known command")
     elif executable in FILTERS:
-        return
+        return 0
     else:
         raise Failure(
             f"`{line}` runs `{executable}`, which this harness cannot check. Use a "
             "command it knows (`blastit`, `blastit-manifest`, `docker`, `doctl`, "
             "`psql`, `git`, `setpriv`, `env`, `uv`) or make the fence executable"
         )
+    return 0
 
 
 def _uv(words: list[str], line: str) -> list[str] | None:
@@ -1971,7 +3101,9 @@ def _static_blastit(words: list[str], cli: CliHelp, line: str) -> None:
     raise Failure(f"`{line}`: `blastit {command}` is not one of dev, check, test")
 
 
-def _static_manifest(words: list[str], cli: CliHelp, line: str) -> None:
+def _static_manifest(
+    words: list[str], cli: CliHelp, line: str, titles: frozenset[str] = frozenset()
+) -> int:
     if words[1:2] != ["fold"]:
         raise Failure(f"`{line}` does not use `blastit-manifest fold`")
     args = words[2:]
@@ -1980,6 +3112,15 @@ def _static_manifest(words: list[str], cli: CliHelp, line: str) -> None:
         raise Failure(
             f"`{line}` has no `--manifest PATH`; the page says it is required"
         )
+    skipped = 0
+    for index, word in enumerate(args):
+        if word == "--manifest" and index + 1 < len(args):
+            skipped += _documented_path(args[index + 1], titles, line, "--manifest")
+        elif word.startswith("--manifest="):
+            skipped += _documented_path(
+                word.split("=", 1)[1], titles, line, "--manifest"
+            )
+    return skipped
 
 
 def _check_flags(
@@ -2009,26 +3150,6 @@ def _check_presets(args: list[str], cli: CliHelp, line: str) -> None:
                 f"`{line}`: preset {name!r} is not in `blastit --help` "
                 f"(it lists {', '.join(sorted(cli.presets))})"
             )
-
-
-def _static_docker(words: list[str], line: str) -> None:
-    if len(words) < 2 or words[1] not in DOCKER_SUBCOMMANDS:
-        raise Failure(f"`{line}`: `docker {words[1:2] or ''}` is not a known command")
-    if words[1] != "compose":
-        return
-    rest = list(words[2:])
-    while rest and rest[0].startswith("-"):
-        word = rest[0]
-        name = word.split("=", 1)[0]
-        takes_value = name in COMPOSE_VALUE_FLAGS and "=" not in word
-        rest = rest[1:]
-        if takes_value and rest:
-            rest = rest[1:]
-    if not rest or rest[0] not in COMPOSE_SUBCOMMANDS:
-        raise Failure(
-            f"`{line}`: `docker compose {rest[0] if rest else ''}` is not a known "
-            "command"
-        )
 
 
 def _logical_lines(command: str) -> list[str]:
@@ -2105,33 +3226,358 @@ def _page_manifest(fence: Fence) -> str:
     return body
 
 
-def _static_toml(fence: Fence, page: Path) -> None:
-    if "deploy/" not in fence.page:
-        return
-    text = page.read_text(encoding="utf-8")
-    for block in re.finditer(
-        r"^```toml[^\n]*\n(.*?)^```$", text, re.DOTALL | re.MULTILINE
-    ):
-        try:
-            tomllib.loads(block.group(1))
-        except tomllib.TOMLDecodeError as error:
+@dataclass(frozen=True, slots=True)
+class Snippet:
+    """One fenced block of a page: its language, its `title=`, its body."""
+
+    page: str
+    language: str
+    title: str
+    line: int
+    body: str
+
+    @property
+    def where(self) -> str:
+        return f"{self.page}:{self.line}"
+
+
+_BLOCK_TITLE = re.compile(r'title="([^"]+)"')
+
+
+def documented_snippets(page: str, text: str) -> list[Snippet]:
+    """Every fenced block of a page, whatever language, with its `title=`.
+
+    The recognition is `fences.scan_page`'s, not a second regex's: a block indented
+    inside a list item or an admonition (`docs/local.md`'s copy-me `toml` block) is
+    dedented by its own indentation and parsed here like a column-0 one, and a
+    block the scanner reports as unclosed cannot silently drop the snippets after
+    it — the page's inventory check fails on that, before a fence runs. `where`
+    names the block's first body line, which is the line a failure prints.
+    """
+    blocks, _ = scan_page(page, text)
+    found = []
+    for block in blocks:
+        title = _BLOCK_TITLE.search(block.info)
+        found.append(
+            Snippet(
+                page=page,
+                language=block.language.lower(),
+                title=title.group(1) if title else "",
+                line=block.line + 1,
+                body=block.body,
+            )
+        )
+    return found
+
+
+def _mapping_key(text: str) -> tuple[str, str] | None:
+    """Split `key: value` at the first colon outside quotes and flow brackets."""
+    quote: str | None = None
+    depth = 0
+    at = 0
+    while at < len(text):
+        character = text[at]
+        if quote is not None:
+            if character == "\\" and quote == '"':
+                at += 2
+                continue
+            if character == quote:
+                quote = None
+        elif character in "\"'":
+            quote = character
+        elif character in "{[":
+            depth += 1
+        elif character in "}]":
+            depth -= 1
+        elif (
+            character == ":"
+            and depth == 0
+            and (at + 1 == len(text) or text[at + 1] == " ")
+        ):
+            return text[:at].strip(), text[at + 1 :].strip()
+        at += 1
+    return None
+
+
+def _scan_flow(text: str, block: Snippet, number: int, depth: int) -> int:
+    """Track `{`/`[` depth across lines, ignoring quoted and escaped characters."""
+    quote: str | None = None
+    at = 0
+    while at < len(text):
+        character = text[at]
+        if quote is not None:
+            if character == "\\" and quote == '"':
+                at += 2
+                continue
+            if character == quote:
+                quote = None
+        elif character in "\"'":
+            quote = character
+        elif character in "{[":
+            depth += 1
+        elif character in "}]":
+            depth -= 1
+            if depth < 0:
+                raise Failure(
+                    f"{block.where}: line {number} closes a `{character}` it never "
+                    f"opened: {text.strip()}"
+                )
+        at += 1
+    if quote is not None:
+        raise Failure(
+            f"{block.where}: line {number} has an unterminated {quote} quote: "
+            f"{text.strip()}"
+        )
+    return depth
+
+
+def _yaml_structure(block: Snippet) -> None:
+    """A YAML *structure* lint, not a parser (this gate has no dependencies).
+
+    It checks the shape a compose file, a workflow or a Kubernetes document has
+    to have: space indentation only, `key: value` / `- item` / flow syntax on
+    every content line, flow collections and quotes that close, block scalars
+    that end, and a truncated top-level key with no children. Anything the
+    documents here do is covered; anything YAML allows beyond that is not
+    claimed.
+    """
+    body = block.body
+    depth = 0
+    pending: tuple[int, str, int] | None = None
+    scalar: tuple[int, str] | None = None
+    for offset, raw in enumerate(body.splitlines()):
+        number = offset + 1
+        stripped = raw.strip()
+        indent = len(raw) - len(raw.lstrip())
+        if scalar is not None:
+            if not stripped or indent > scalar[0]:
+                continue
+            scalar = None
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "\t" in raw[:indent]:
             raise Failure(
-                f"{fence.page}: a TOML block does not parse: {error}"
+                f"{block.where}: line {number} is indented with a tab: {stripped}"
+            )
+        if depth:
+            depth = _scan_flow(raw, block, number, depth)
+            continue
+        if pending is not None:
+            if indent <= pending[0]:
+                raise Failure(
+                    f"{block.where}: `{pending[1]}` on line {pending[2]} has no "
+                    "value and no indented children"
+                )
+            pending = None
+        if stripped.startswith("-"):
+            # A sequence item is a bare scalar, a flow mapping or the first key
+            # of a mapping, so its content is scanned but never demanded to be a key.
+            content = stripped[1:].strip()
+            depth = _scan_flow(content, block, number, 0)
+            key = _mapping_key(content) if content else None
+            if key is not None and key[1][:1] in ("|", ">"):
+                scalar = (indent, key[1][0])
+            elif not content and not indent:
+                pending = (indent, "- item", number)
+            elif key is not None and not key[1] and not depth and not indent:
+                pending = (indent, key[0], number)
+            continue
+        key = _mapping_key(stripped)
+        if key is None:
+            raise Failure(
+                f"{block.where}: line {number} is neither `key: value` nor "
+                f"`- item`: {stripped}"
+            )
+        name, value = key
+        depth = _scan_flow(stripped, block, number, 0)
+        if value[:1] in ("|", ">"):
+            scalar = (indent, value[0])
+        elif not value and not depth and not indent:
+            # A null value is legal YAML, so only a *top-level* key with neither
+            # a value nor children is reported: that is the truncated document.
+            pending = (indent, name, number)
+    if pending is not None:
+        raise Failure(
+            f"{block.where}: `{pending[1]}` on line {pending[2]} has no value and "
+            "no indented children: the document is truncated"
+        )
+    if depth:
+        raise Failure(f"{block.where}: the block ends inside an unclosed `{{` or `[`")
+    if scalar is not None:
+        raise Failure(f"{block.where}: a `{scalar[1]}` block scalar never ends")
+
+
+def _ini_document(block: Snippet) -> None:
+    """Parse an INI document, or a dotenv file, the way the recipe uses it."""
+    text = block.body.strip("\n")
+    if re.search(r"^[ \t]*\[[^\]\n]+\][ \t]*$", text, re.MULTILINE):
+        parser = configparser.ConfigParser(interpolation=None, strict=True)
+        try:
+            parser.read_string(text + "\n")
+        except configparser.Error as error:
+            raise Failure(
+                f"{block.where}: the INI block does not parse: {error}"
             ) from error
+        if not parser.sections():
+            raise Failure(f"{block.where}: the INI block has no section")
+        return
+    for number, raw in enumerate(text.splitlines(), start=1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            raise Failure(
+                f"{block.where}: line {number} is neither `KEY=value` nor a "
+                f"`[section]`: {stripped}"
+            )
+        name, value = stripped.split("=", 1)
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name.strip()):
+            raise Failure(
+                f"{block.where}: line {number} has no variable name: {stripped}"
+            )
+        if not value.strip():
+            raise Failure(
+                f"{block.where}: line {number} sets `{name.strip()}` to nothing"
+            )
+
+
+def _static_toml(block: Snippet) -> None:
+    try:
+        tomllib.loads(block.body)
+    except tomllib.TOMLDecodeError as error:
+        raise Failure(
+            f"{block.where}: the TOML block does not parse: {error}"
+        ) from error
+
+
+def _sql_block(block: Snippet) -> None:
+    """A SQL snippet a reader copies must be whole, not an ellipsis."""
+    text = block.body.strip()
+    if not text:
+        raise Failure(f"{block.where}: the SQL block is empty")
+    if "…" in block.body:
+        raise Failure(
+            f"{block.where}: the SQL block contains `…`, which a reader cannot copy "
+            "and run"
+        )
+    statements = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("--")
+    ]
+    if statements and not statements[-1].endswith(";"):
+        raise Failure(
+            f"{block.where}: the SQL block's last statement does not end with `;`: "
+            f"{statements[-1]}"
+        )
+
+
+BLOCK_CHECKS = {
+    "yaml": _yaml_structure,
+    "yml": _yaml_structure,
+    "ini": _ini_document,
+    "toml": _static_toml,
+    "sql": _sql_block,
+}
+
+
+def _static_blocks(fence: Fence) -> frozenset[str]:
+    """Parse every snippet the page shows; return the file names it shows.
+
+    The titles (`yaml title="compose.yaml"`) are how a command that reads a file
+    the reader has not created yet is still checked: `doctl apps create --spec
+    app.yaml` is only honest if the page shows that file, and that is what makes
+    a workspace-relative path resolvable without the reader's directory.
+    """
+    text = (REPO / fence.page).read_text(encoding="utf-8")
+    blocks = documented_snippets(fence.page, text)
+    for block in blocks:
+        check = BLOCK_CHECKS.get(block.language)
+        if check is not None:
+            check(block)
+    titles = {block.title for block in blocks if block.title}
+    for title in list(titles):
+        titles.add(Path(title).name)
+    return frozenset(titles)
 
 
 def _static_json_lines(fence: Fence) -> None:
-    for line in fence.body.splitlines():
-        stripped = line.strip()
+    """A `{`-line in a fence must be JSON, and a boot line must be complete."""
+    for offset, raw in enumerate(fence.body.splitlines(), start=1):
+        stripped = raw.strip()
         if not stripped.startswith("{"):
             continue
         try:
             document = json.loads(stripped)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as error:
+            raise Failure(
+                f"{fence.page} fence {fence.index}: the line {offset} starts with "
+                f"`{{` but is not JSON ({error}): {stripped}"
+            ) from error
+        if not isinstance(document, dict) or "event" not in document:
             continue
-        if "event" in document:
-            for key in ("event", "stage", "seccomp", "privilege", "bounding_set"):
-                if key not in document:
-                    raise Failure(
-                        f"the documented boot line has no {key!r}: {stripped}"
-                    )
+        missing = [key for key in BOOT_KEYS if key not in document]
+        if missing:
+            raise Failure(
+                f"{fence.page} fence {fence.index}: the documented event line has "
+                f"no {', '.join(repr(key) for key in missing)}: {stripped} "
+                "(docs/reference/log-events.md documents the five boot fields)"
+            )
+
+
+def main(argv: list[str]) -> int:
+    """The three things this module offers outside a full run.
+
+    `--warm-cache` fills this HOME's uv cache with the one pin the offline gate
+    reads (it is the only step in this file that may use the network). It is the
+    prerequisite `docs/testing/README.md` names. `--provenance` prints the version
+    chain and the wheel the gate would test, which is what `make docs-test`'s
+    verdict line and a CI log need to agree on. `--audit-flags` compares every
+    flag table with the installed `docker`/`docker compose`/`psql`, which is how a
+    hand-typed flag that no release accepts (`psql -C`) stays out of the gate.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="harness.py",
+        description="Prerequisites, provenance and flag tables of the runnable-docs gate.",
+    )
+    parser.add_argument(
+        "--warm-cache",
+        action="store_true",
+        help=f"install pytest=={PYTEST_VERSION} once, to fill this HOME's uv cache",
+    )
+    parser.add_argument(
+        "--provenance",
+        action="store_true",
+        help="print the version chain and the wheel under test",
+    )
+    parser.add_argument(
+        "--audit-flags",
+        action="store_true",
+        help="compare every flag table with the installed tool's own --help",
+    )
+    options = parser.parse_args(argv)
+    if not options.warm_cache and not options.provenance and not options.audit_flags:
+        parser.print_help()
+        return 2
+    try:
+        if options.warm_cache:
+            print(f"harness: {warm_pytest_cache()}")
+        if options.audit_flags:
+            print(f"harness: {assert_flag_tables()}")
+        if options.provenance:
+            version = assert_provenance()
+            wheel = wheel_path()
+            print(
+                f"harness: Cargo.toml {version} = CHANGELOG.md {version} = "
+                f"{wheel.name} (sha256 {hashlib.sha256(wheel.read_bytes()).hexdigest()[:12]})"
+            )
+    except Failure as failure:
+        print(f"harness: {failure}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
