@@ -2,7 +2,7 @@
 id: MB.1.2
 title: "Prove blastit-manifest whole-crate mutation kill rate past 75 percent"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.1.1]
@@ -10,11 +10,11 @@ paths:
   - "crates/blastit-manifest/src/model.rs"
   - "crates/blastit-manifest/src/error.rs"
   - "crates/blastit-manifest/tests/mutation_gaps.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T14:44"
-updated: "2026-11-13T14:44"
+updated: "2026-11-13T16:40"
 ---
 
 # Goal

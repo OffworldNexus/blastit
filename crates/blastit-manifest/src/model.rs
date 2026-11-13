@@ -782,3 +782,72 @@ fn merge_grants(target: &mut BTreeMap<ProxyName, Grant>, source: &BTreeMap<Proxy
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// `assemble` is the parser's constructor, so the accessor has to return
+    /// what it was handed. `parse` only ever passes `1` (validation refuses any
+    /// other version), which is why these build the value directly: a
+    /// `version()` that always answered `1` would hide a wrong version instead
+    /// of carrying it.
+    #[test]
+    fn assemble_keeps_the_version_it_was_given() {
+        fn assembled(version: u32) -> Manifest {
+            Manifest::assemble(
+                version,
+                Vec::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        }
+        assert_eq!(assembled(1).version(), 1);
+        assert_eq!(assembled(2).version(), 2);
+        assert_eq!(assembled(0).version(), 0);
+    }
+
+    /// `normalize` writes every bind placeholder as `$?`, which no SQL parser
+    /// accepts. Only that spelling is rewritten.
+    #[test]
+    fn only_the_question_mark_placeholder_is_rewritten() {
+        assert_eq!(
+            parameterised(r#"SELECT "t"."a" FROM "t" WHERE "t"."id" = $?"#),
+            r#"SELECT "t"."a" FROM "t" WHERE "t"."id" = $1"#
+        );
+        assert_eq!(parameterised("SELECT $?, $?"), "SELECT $1, $1");
+
+        // A numbered placeholder is already analysable, and a `$` that opens
+        // nothing (a dollar in an identifier, a trailing one) is not a
+        // placeholder either: inventing a `$1` there would change the table
+        // name the analysis resolves.
+        assert_eq!(parameterised("SELECT $2 FROM t"), "SELECT $2 FROM t");
+        assert_eq!(parameterised("SELECT a$ FROM t"), "SELECT a$ FROM t");
+        assert_eq!(parameterised("SELECT a$"), "SELECT a$");
+
+        // Quoted regions are copied verbatim, doubled quotes included, so a
+        // column named `"a$?"` stays the column the grant names, and a value
+        // spelled `'it''s $?'` stays one literal.
+        assert_eq!(
+            parameterised(r#"SELECT "a$?"."b" FROM "a$?""#),
+            r#"SELECT "a$?"."b" FROM "a$?""#
+        );
+        assert_eq!(
+            parameterised("SELECT 1 WHERE x = 'it''s' AND y = $?"),
+            "SELECT 1 WHERE x = 'it''s' AND y = $1"
+        );
+        assert_eq!(
+            parameterised("SELECT 1 WHERE x = 'a$?'"),
+            "SELECT 1 WHERE x = 'a$?'"
+        );
+        assert_eq!(
+            parameterised("SELECT 1 WHERE x = 'a"),
+            "SELECT 1 WHERE x = 'a"
+        );
+        assert_eq!(parameterised(""), "");
+    }
+}

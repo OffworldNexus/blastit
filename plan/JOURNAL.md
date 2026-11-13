@@ -571,3 +571,22 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T15:34 [MB.1.1] (lead) implementer reported STATUS done (attempt 1); awaiting goldfish review
 - 2026-11-13T15:36 [MB.1.1] (lead) review PASS; lead addendum appended (append_to_array whitespace normalisation documented, mutation run predates final source, write_atomic survivors relabelled 
 - 2026-11-13T15:36 [MB.1.1] (lead) status review -> done
+- 2026-11-13T15:36 [MB.1.2] (lead) status ready -> active
+- 2026-11-13T15:36 [MB.1.2] (lead) attempt 1/3 started
+- 2026-11-13T15:36 [MB.1.2] (lead) base 9311ff3
+- 2026-11-13T15:37 [MB.1.3] (lead) status ready -> active
+- 2026-11-13T15:37 [MB.1.3] (lead) attempt 1/3 started
+- 2026-11-13T15:37 [MB.1.3] (lead) base 9311ff3
+- 2026-11-13T15:49 [MB.1] (lead) MERGE HANDOVER for whoever drives this subtree next: origin/develop is ec47752 (Release v0.1.2, PR #63 merged). Merge it into release/0.2.0 ONLY when the tree i
+- 2026-11-13T15:56 [MB.1.10] (lead) status ready -> active
+- 2026-11-13T15:56 [MB.1.10] (lead) attempt 1/3 started
+- 2026-11-13T15:56 [MB.1.10] (lead) base 9311ff3 (MB.1.2/MB.1.3 work pending review in the tree; docs-only paths)
+- 2026-11-13T15:59 [MB.1] (lead) DUAL-DRIVER CONFLICT (16:00): a second LIVE opencode session is driving this same tree right now (its shell dir ~/.local/share/opencode/shell/ba94ef7b*, PIDs 35
+- 2026-11-13T15:59 [MB.1.10] (lead) doc-writer attempt 1 REPORTED DONE (docs/ci.md +8 lines naming add_group and the [group.connection.db] shape, docs/design/ma-lean-dx.md R33/R38/4.2, LESSONS.md 
+- 2026-11-13T15:59 [MB.1.10] (lead) status active -> review
+- 2026-11-13T16:16 [MB.1.2] (lead) status active -> review
+- 2026-11-13T16:16 [MB.1.4] (lead) status ready -> active
+- 2026-11-13T16:16 [MB.1.4] (lead) attempt 1/3 started
+- 2026-11-13T16:16 [MB.1.4] (lead) base 9311ff3
+- 2026-11-13T16:38 [MB.1.4] (implementer) file-scoped campaign: 128 mutants, 110 caught / 1 equivalent missed / 2 timeouts / 15 unviable; normalize 99/102 = 97.1 %, literals 4/4 and lru 7/7 = 100 %; new
+- 2026-11-13T16:40 [MB.1.2] (lead) status review -> done
