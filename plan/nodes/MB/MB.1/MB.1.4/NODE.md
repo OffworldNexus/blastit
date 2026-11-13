@@ -2,7 +2,7 @@
 id: MB.1.4
 title: "Measure blastit-sqlpolicy normalize, literals and lru mutants"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,11 +11,11 @@ paths:
   - "crates/blastit-sqlpolicy/src/literals.rs"
   - "crates/blastit-sqlpolicy/src/lru.rs"
   - "crates/blastit-sqlpolicy/tests/policy_module_edges.rs"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-13T14:44"
-updated: "2026-11-13T14:44"
+updated: "2026-11-13T18:26"
 ---
 
 # Goal
