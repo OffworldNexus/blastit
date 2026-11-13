@@ -853,3 +853,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T00:23 [MB.2.4.5] (lead) status active -> review
 - 2026-11-14T00:25 [MB.2.7] (lead) REVIEW PASS attempt 1 (5 MINOR: HEAD-body assertion cannot fail; curl fences discard authority; 'no file bytes' is marker-only; VISUAL viewport mismatch + scree
 - 2026-11-14T00:25 [MB.2.7] (lead) status review -> done
+- 2026-11-14T00:28 [MB.2.4.4] (lead) REVIEW PASS attempt 1 (2 MINOR: reuse fixture CAP_BIN instead of a second at-cap file; the trim_ows/civil_from_days follow-up needs filing).
+- 2026-11-14T00:28 [MB.2.4.4] (lead) status review -> done

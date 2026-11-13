@@ -20,7 +20,7 @@
 mod static_fixture;
 
 use std::io::Read;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -108,6 +108,13 @@ fn etag_from_path(path: &Path) -> String {
 /// A forged [`StaticFile`] over `tree.path(rel)`, for the ceiling arm that the
 /// resolver's own classification makes unreachable.
 fn forged(tree: &StaticTree, rel: &str, url_path: &str, len: u64) -> StaticFile {
+    forged_meta(tree, rel, url_path, len, len)
+}
+
+/// A forged [`StaticFile`] whose `len` and `meta.size` disagree — the only way
+/// to reach each ceiling disjunct of `respond` on its own, since `resolve`
+/// always sets `meta.size = len` (`G6`).
+fn forged_meta(tree: &StaticTree, rel: &str, url_path: &str, len: u64, size: u64) -> StaticFile {
     let file = std::fs::File::open(tree.path(rel)).expect("forged file opens");
     let meta = file.metadata().expect("forged metadata");
     let modified = meta
@@ -121,11 +128,39 @@ fn forged(tree: &StaticTree, rel: &str, url_path: &str, len: u64) -> StaticFile 
         file: OwnedFd::from(file),
         len,
         meta: StaticMeta {
-            size: len,
+            size,
             mtime_secs: i64::try_from(modified.as_secs()).unwrap_or(0),
             mtime_nsec: modified.subsec_nanos(),
         },
     }
+}
+
+/// The one [`StaticFile`] `decide` hands the responder for a servable route.
+fn resolved(root: &StaticRoot, target: &str) -> StaticFile {
+    match decide(outcome(root, target), b"GET", false, false) {
+        Rewrite::Serve(file) => file,
+        Rewrite::Reject { status, .. } => panic!("`{target}` was rejected with {status}"),
+        Rewrite::Forward => panic!("`{target}` forwarded to the app"),
+    }
+}
+
+/// How many open descriptors point inside `base`: the root's one `O_PATH`
+/// dirfd, plus one per `StaticFile`/`StaticBody` in flight (design §4.2, §7.1).
+///
+/// The filter is the fixture's own base, so descriptors other tests in this
+/// binary hold cannot move the count: every test builds its own tree. A `dup`
+/// in `respond` (or a body that outlives its response) adds exactly one here.
+fn open_in_tree(base: &Path) -> usize {
+    let base = std::fs::canonicalize(base).expect("canonical fixture base");
+    std::fs::read_dir("/proc/self/fd")
+        .expect("the descriptor oracle needs /proc/self/fd")
+        .flatten()
+        .filter(|entry| {
+            std::fs::read_link(entry.path())
+                .map(|target| target.starts_with(&base))
+                .unwrap_or(false)
+        })
+        .count()
 }
 
 // ---------------------------------------------------------------------------
@@ -721,6 +756,174 @@ fn an_oversize_file_is_a_404_and_respond_never_promises_it() {
         head(&served, "Content-Length"),
         Some(APP_JS_BYTES.len().to_string().as_bytes())
     );
+}
+
+#[test]
+fn a_response_moves_the_one_descriptor_and_never_duplicates_it() {
+    // Design §4.2: "consumes the file: the descriptor moves into `StaticBody`,
+    // never `dup`ed". A `dup` leaks one descriptor per static response and then
+    // fd exhaustion under load, and no other suite can see it.
+    let tree = StaticTree::build(Fixture::S);
+    for backend in [Backend::Openat2, Backend::Walk] {
+        let root = tree.open(Fixture::S, backend);
+        assert_eq!(
+            open_in_tree(&tree.base),
+            1,
+            "{backend:?}: the root holds exactly its one dirfd"
+        );
+
+        let file = resolved(&root, APP_URL);
+        let raw = file.file.as_raw_fd();
+        assert_eq!(
+            open_in_tree(&tree.base),
+            2,
+            "{backend:?}: resolve hands back one read descriptor"
+        );
+
+        let mut response = root.respond(file, b"GET", None);
+        assert_eq!(response.status, 200);
+        let body = response.body.take().expect("a GET has a body");
+        assert_eq!(
+            body.file.as_raw_fd(),
+            raw,
+            "{backend:?}: the resolved descriptor itself moves into StaticBody"
+        );
+        assert_eq!(
+            open_in_tree(&tree.base),
+            2,
+            "{backend:?}: a dup would make this three, and the original is gone"
+        );
+
+        drop(body);
+        assert_eq!(
+            open_in_tree(&tree.base),
+            1,
+            "{backend:?}: the body's descriptor closes with the body"
+        );
+    }
+}
+
+#[test]
+fn head_and_a_304_close_the_descriptor_instead_of_leaking_it() {
+    // The other half of §4.2: with no body there is nothing to move the
+    // descriptor into, so `respond` must drop it. Comparing the in-tree count
+    // (not the raw number) keeps the oracle immune to descriptors other tests
+    // in this binary open and close.
+    let tree = StaticTree::build(Fixture::S);
+    for backend in [Backend::Openat2, Backend::Walk] {
+        let root = tree.open(Fixture::S, backend);
+        let etag = head(&serve(&root, APP_URL, b"GET", None), "ETag")
+            .expect("an ETag")
+            .to_vec();
+
+        let file = resolved(&root, APP_URL);
+        assert_eq!(open_in_tree(&tree.base), 2, "{backend:?}");
+        let head_response = root.respond(file, b"HEAD", None);
+        assert_eq!(head_response.status, 200);
+        assert!(head_response.body.is_none(), "HEAD has no body");
+        assert_eq!(
+            open_in_tree(&tree.base),
+            1,
+            "{backend:?}: HEAD must drop the descriptor, not park it"
+        );
+
+        let file = resolved(&root, APP_URL);
+        assert_eq!(open_in_tree(&tree.base), 2, "{backend:?}");
+        let conditional = root.respond(file, b"GET", Some(&etag));
+        assert_eq!(conditional.status, 304);
+        assert!(conditional.body.is_none(), "a 304 has no body");
+        assert_eq!(
+            open_in_tree(&tree.base),
+            1,
+            "{backend:?}: a 304 must drop the descriptor, not park it"
+        );
+
+        // …and the observable consequence: many responses in a row leave the
+        // process exactly one descriptor richer in this tree, never two.
+        for _ in 0..8 {
+            let file = resolved(&root, APP_URL);
+            drop(root.respond(file, b"HEAD", None));
+            drop(root.respond(resolved(&root, APP_URL), b"GET", Some(&etag)));
+        }
+        assert_eq!(
+            open_in_tree(&tree.base),
+            1,
+            "{backend:?}: sixteen bodiless answers leak no descriptor"
+        );
+    }
+}
+
+#[test]
+fn the_ceiling_admits_the_exact_size_and_refuses_either_half_over() {
+    // `respond` refuses on `file.len > max_bytes || file.meta.size > max_bytes`
+    // (§4.6's defence-in-depth arm). With `len == meta.size` — everything
+    // `resolve` can produce — the `||` and the second disjunct are invisible,
+    // so each half is forged on its own here.
+    let tree = StaticTree::build(Fixture::N);
+    let root = tree.open(Fixture::N, Backend::Openat2);
+    let ceiling = STATIC_MAX_FILE_BYTES;
+
+    // A real, sparse file **exactly** at the ceiling: no tmpfs cost, never read.
+    std::fs::File::create(tree.path("at-cap.bin"))
+        .expect("at-cap fixture")
+        .set_len(ceiling)
+        .expect("at-cap length");
+    assert_eq!(open_in_tree(&tree.base), 1);
+
+    // The accepted twin: `>` (not `>=`) on both halves, so the ceiling itself
+    // is a normal 200 that promises exactly its size.
+    let mut served = root.respond(
+        forged(&tree, "at-cap.bin", "/at-cap.bin", ceiling),
+        b"GET",
+        None,
+    );
+    assert_eq!(
+        served.status, 200,
+        "a file exactly at static_max_bytes is served"
+    );
+    assert_eq!(
+        head(&served, "Content-Length"),
+        Some(ceiling.to_string().as_bytes())
+    );
+    let body = served.body.take().expect("a GET has a body");
+    assert_eq!(body.len, ceiling);
+    drop(body);
+    assert_eq!(
+        open_in_tree(&tree.base),
+        1,
+        "the served body's descriptor closes with it"
+    );
+
+    // The denied twins: one byte over, on both halves and on each alone.
+    for (len, size, why) in [
+        (ceiling + 1, ceiling + 1, "both halves over the ceiling"),
+        (ceiling + 1, 0, "only len over the ceiling"),
+        (0, ceiling + 1, "only meta.size over the ceiling"),
+    ] {
+        let response = root.respond(
+            forged_meta(&tree, "big.bin", "/big.bin", len, size),
+            b"GET",
+            None,
+        );
+        assert_eq!(response.status, 404, "{why}");
+        assert_eq!(response.reason, "Not Found", "{why}");
+        assert!(response.body.is_none(), "{why}: a refusal has no body");
+        assert_eq!(
+            head(&response, "Content-Length"),
+            Some(b"0".as_slice()),
+            "{why}"
+        );
+        assert_eq!(
+            head(&response, "Cache-Control"),
+            Some(b"no-store".as_slice()),
+            "{why}: a refusal is never cached"
+        );
+        assert_eq!(
+            open_in_tree(&tree.base),
+            1,
+            "{why}: the refused file's descriptor is dropped"
+        );
+    }
 }
 
 #[test]
