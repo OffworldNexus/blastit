@@ -35,3 +35,7 @@ status active -> done
 ## 2026-11-13T11:48 [lead]
 
 MA.8 (CI hotfix leaf, created by conductor after the 0.1.1 gate) is done with reviewer PASS; status restored to done after the validate-blocking transient where an open child sat under a done milestone.
+
+## 2026-11-13T12:21 [lead]
+
+status done -> active

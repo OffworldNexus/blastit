@@ -88,10 +88,13 @@ jobs:
     # MA.9: this job once sat inside one step for 35+ minutes until the
     # workflow's 360-minute ceiling, and an in-flight job has no downloadable
     # log, so the only visible symptom was "still running" (run 43407063422).
-    # Every phase below is bounded, so the same regression is a red check with a
-    # log naming the phase that blocked, well inside 20 minutes. (A cold
-    # `rust-cache` is the one legitimate way to approach it: the build step
-    # below is then the long one.)
+    # Every phase below is independently bounded, so a regression is a red phase
+    # whose log and `::error::` name what blocked (a healthy run is ~5 minutes).
+    # The bounds do not sum to a promise, though: 1 + 2 + 10 + 12 + 3 = 28
+    # worst-case minutes, so the 20-minute `timeout-minutes` below - not any
+    # single step - is the outer bound in a pathological run where several
+    # phases go long at once. (A cold `rust-cache` is the one legitimate way to
+    # approach it: the build step below is then the long one.)
     timeout-minutes: 20
     services:
       postgres:
@@ -170,56 +173,157 @@ jobs:
       # a silent rebuild behind ~31 serial smoke tests is indistinguishable from
       # a deadlock). `--message-format=json` names every test binary; the human
       # build progress still streams on stderr.
+      #
+      # MA.10: exactly one suite is deliberately not handed to root.
+      # `critical_dev_and_fail_closed::unprivileged_production_has_no_single_uid_fallback`
+      # spawns the production binary and waits for it to exit 1. Production fails
+      # closed *because capability detection refuses*, which is only true for an
+      # unprivileged caller: as uid 0 production legitimately boots and serves, so
+      # the spawned child never exits, `Command::output()` waits forever, and the
+      # per-binary timeout below names a "blocked" test that is in fact correct.
+      # The test is right and running it as root is an invalid input to it, so this
+      # job runs every other binary and the filter below *fails the step* if that
+      # one ever disappears (the exclusion would be dead and its coverage claim
+      # false) or if an exclusion is ever added silently.
       - name: Build the test binaries (runner user, no root)
         timeout-minutes: 10
         run: |
           set -euo pipefail
           cargo test -p blastit --locked --no-run --message-format=json > "$RUNNER_TEMP/artifacts.json"
-          python3 - "$RUNNER_TEMP/artifacts.json" "$RUNNER_TEMP/test-binaries.txt" <<'PY'
+          python3 - "$RUNNER_TEMP/artifacts.json" "$RUNNER_TEMP/test-binaries.txt" \
+            "$RUNNER_TEMP/excluded-binaries.txt" <<'PY'
           import json
+          import re
           import sys
+
+          # The one suite this job must not hand to root, and why (see the comment
+          # above this step): its assertion is only valid for an unprivileged
+          # caller. Keep this set exactly one entry long.
+          EXCLUDED = {"critical_dev_and_fail_closed"}
+          # cargo names a test binary `<target>-<16 hex metadata hash>`; the stem is
+          # the target name. Two targets can share a stem (this crate's lib and bin
+          # are both `blastit`), so the stem is not a unique key and the kept list
+          # keeps both.
+          HASH_SUFFIX = re.compile(r"-[0-9a-f]{8,}$")
+
+
+          def stem(executable):
+              """The target name cargo built, or a hard failure on an odd name."""
+              name = executable.rsplit("/", 1)[-1]
+              if not HASH_SUFFIX.search(name):
+                  sys.exit(
+                      f"{name} does not look like a cargo test binary name "
+                      "(<target>-<hash>), so the target name cannot be derived and an "
+                      "exclusion would silently stop matching. Fail rather than guess"
+                  )
+              return HASH_SUFFIX.sub("", name)
+
 
           # `--message-format=json` is JSON Lines, not one array.
           with open(sys.argv[1], encoding="utf-8") as stream:
               artifacts = [json.loads(line) for line in stream if line.strip()]
-          binaries = sorted(
+          binaries = sorted({
               artifact["executable"]
               for artifact in artifacts
               if artifact.get("reason") == "compiler-artifact"
               and (artifact.get("profile") or {}).get("test") is True
               and artifact.get("executable")
-          )
+          })
           if not binaries:
               sys.exit("no test binary in cargo's JSON: there is nothing to run as root")
 
+          stems = [stem(binary) for binary in binaries]
+          kept = [binary for binary, name in zip(binaries, stems) if name not in EXCLUDED]
+          excluded = [name for name in stems if name in EXCLUDED]
+
+          # The exclusion must be exactly the one known suite, and that suite must
+          # still exist: an exclusion that matches nothing is dead, and its coverage
+          # claim ("the `test` job still runs it unprivileged") would be false.
+          if set(excluded) != EXCLUDED:
+              missing = sorted(EXCLUDED - set(excluded))
+              sys.exit(
+                  f"the unprivileged-only suite(s) {missing} did not appear in cargo's "
+                  "output: renamed, removed, or not built? The root phase's exclusion is "
+                  "dead and the coverage claim is false. Update the exclusion (and the "
+                  "comment above this step) or restore the suite"
+              )
+          if len(excluded) != 1:
+              listed = len(EXCLUDED)
+              noun = "entry" if listed == 1 else "entries"
+              sys.exit(
+                  f"the exclusion would skip {len(excluded)} test binaries ({excluded}) but "
+                  f"the exclusion list has {listed} {noun}, not exactly one: every extra "
+                  "exclusion needs its own proof and comment"
+              )
+          if not kept:
+              sys.exit("every test binary was excluded: the root phase would prove nothing")
+          # Non-fatal, because this is a budget warning and not a correctness
+          # failure: each binary costs at most 120 s (90 s timeout + 30 s
+          # --kill-after), and the run step's 12-minute bound (720 s) holds only
+          # five with slack. The sixth reaches 720 s exactly, so the step's own
+          # overhead is already enough to cut it off before its `::error::`.
+          if len(kept) * 120 >= 720:
+              print(
+                  f"::warning::the root phase now runs {len(kept)} test binaries at up to "
+                  f"120 s each = {len(kept) * 120} s, at or beyond the run step's 720 s "
+                  "(12-minute) bound: raise `timeout-minutes` on 'Run every test binary as "
+                  "root, one at a time' with the count so every binary still reaches its "
+                  "own timeout error annotation"
+              )
+
           with open(sys.argv[2], "w", encoding="utf-8") as out:
-              out.write("\n".join(binaries) + "\n")
-          print(f"{len(binaries)} test binaries, built as the runner user:")
-          for binary in binaries:
+              out.write("\n".join(kept) + "\n")
+          with open(sys.argv[3], "w", encoding="utf-8") as out:
+              out.write("\n".join(sorted(set(excluded))) + "\n")
+
+          print(f"{len(binaries)} test binaries built as the runner user; {len(kept)} run as root:")
+          for binary in kept:
               print(f"  {binary}")
+          for name in sorted(set(excluded)):
+              print(f"excluded from the root phase: {name}")
+              print(
+                  "  reason: its assertion is only valid unprivileged (production "
+                  "refuses because capability detection fails; as root it serves, so "
+                  "the spawned child never exits and the suite blocks)"
+              )
+              print(
+                  "  covered unprivileged: the `test` job (cargo test --workspace "
+                  "--all-targets) in CI, and `make test-critical` locally"
+              )
           PY
       # The job's purpose, unchanged: init has to be PID-1's uid (root) to bind
-      # the view sockets and drop privileges, so every test binary that
-      # `cargo test -p blastit` runs is run here as uid 0, one target at a time.
+      # the view sockets and drop privileges, so every test binary the build step
+      # kept is run here as uid 0, one target at a time. `critical_dev_and_fail_closed`
+      # is not among them (see the build step): production failing closed depends on
+      # an *unprivileged* caller, so as root that suite would wait forever on a child
+      # that legitimately serves, and the `test` job already runs it as the runner.
       # `--nocapture` plus `tee` make the log carry the in-flight
       # `test <name> ...` line as it happens, so a test that blocks is named in
       # the log while it blocks, not inferred afterwards (MA.9 candidate 3), and
       # `timeout` bounds each binary instead of the whole step. The budget adds
-      # up: 90 s per binary, and the crate has six test binaries today, so the
-      # worst case is 9 minutes inside this step's 10-minute bound — every binary
-      # reaches its own timeout and its own `::error::` naming the blocked test
-      # instead of being cut off by the step. (The whole suite takes ~5 s when
-      # healthy, so 90 s is ~18x headroom; a seventh test target would have to
-      # raise this step's bound with it.)
+      # up: 90 s per binary, plus the up-to-30 s `--kill-after` a binary that
+      # ignores SIGTERM costs before SIGKILL, so at most 2 minutes per binary and
+      # five kept binaries is 10 minutes — inside this step's 12-minute bound, so
+      # every binary reaches its own timeout and its own `::error::` naming the
+      # blocked test instead of being cut off by the step. (The whole suite takes
+      # ~5 s when healthy, so 90 s is ~18x headroom; at six kept binaries the
+      # worst case reaches this step's whole 12-minute bound with no slack left
+      # for the loop's own overhead, so the build step prints a non-fatal
+      # `::warning::` naming the count, the budget and this step, and the bound
+      # is raised deliberately rather than a wedged binary being cut off.)
       - name: Run every test binary as root, one at a time
-        timeout-minutes: 10
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           mapfile -t binaries < "$RUNNER_TEMP/test-binaries.txt"
           log="$RUNNER_TEMP/root-tests.log"
-          # 90 s per binary: 6 × 90 s = 9 min, inside this step's 10-minute bound.
+          # 90 s per binary + up to 30 s kill-after: 5 × 2 min = 10 min, inside
+          # this step's 12-minute bound.
           binary_timeout=90
           : > "$log"
+          if [ -s "$RUNNER_TEMP/excluded-binaries.txt" ]; then
+            echo "not run as root (excluded in the build step): $(tr '\n' ' ' < "$RUNNER_TEMP/excluded-binaries.txt")"
+          fi
           echo "running ${#binaries[@]} test binaries as uid 0, one at a time"
           for binary in "${binaries[@]}"; do
             echo "==> root: $binary"
