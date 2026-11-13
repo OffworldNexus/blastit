@@ -5,11 +5,12 @@ kind: task
 status: ready
 owner: implementer
 priority: 3
-depends_on: [MB.1, MB.2.5]
+depends_on: [MB.1, MB.2.5.2]
 paths:
   - crates/blastit/src/cli.rs
   - crates/blastit/src/config.rs
   - crates/blastit/src/stage0.rs
+  - crates/blastit/src/stage1.rs
   - crates/blastit/src/check.rs
   - crates/blastit/src/audit_v1.rs
   - crates/blastit/tests/critical_static_cli.rs
@@ -17,7 +18,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T15:11"
+updated: "2026-11-13T20:52"
 ---
 
 # Goal

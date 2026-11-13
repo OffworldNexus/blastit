@@ -695,3 +695,33 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T20:18 [MB.2.1] (lead) status ready -> review
 - 2026-11-13T20:22 [MB.2.1] (lead) REVIEW PASS attempt 2 (5 MINOR follow-ups: critic artefact anchors stale after the Vite fence shifted indices; RESULT row should name dx B8; MB.2.6 NODE cites p
 - 2026-11-13T20:22 [MB.2.1] (lead) status review -> done
+- 2026-11-13T20:22 [MB.2.2] (lead) status ready -> active
+- 2026-11-13T20:22 [MB.2.2] (lead) attempt 1/3 started
+- 2026-11-13T20:22 [MB.2.2] (lead) base 3ea3c59
+- 2026-11-13T20:29 [MB.2.2] (designer) Draft docs/design/static-and-spa.md (643 lines, 152 table rows) + ADR-0007 (Proposed) + both README index rows; designs the [route.static] grammar, total rewrit
+- 2026-11-13T20:43 [MB.2.2] (designer) Design + ADR + three lens artefacts PASS after 3 passes (1 BLOCKER+15 MAJOR pass 1, 2 MAJOR+1 BLOCKER pass 2, 0 open pass 3). Settled: [route.static] grammar (5
+- 2026-11-13T20:44 [MB.2.2] (lead) status active -> review
+- 2026-11-13T20:44 [MB.2.6] (lead) edited fields
+- 2026-11-13T20:44 [MB.2.4] (lead) edited fields
+- 2026-11-13T20:44 [MB.2.6] (lead) edited fields
+- 2026-11-13T20:44 [MB.2.4] (lead) edited fields
+- 2026-11-13T20:44 [MB.2.9] (lead) created (task) Document the static threat list, mechanics, CLI reference and the all-static check path
+- 2026-11-13T20:44 [MB.2.2] (lead) lead applied its plan follow-ups: MB.2.6 paths += crates/blastit/src/stage1.rs; MB.2.4 paths += crates/blastit-scheduler/tests/common/static_fixture.rs; docs le
+- 2026-11-13T20:49 [MB.2.2] (lead) status review -> ready
+- 2026-11-13T20:49 [MB.2.2] (lead) REVIEW FAIL attempt 1: 5 MAJOR + 3 MINOR. M1 design:359 'empty segments dropped' contradicts matrix rows 5-6 (/%2Fetc/passwd, //etc/passwd -> 400) -> add 'exact
+- 2026-11-13T20:52 [MB.2.4] (planner) edited fields
+- 2026-11-13T20:52 [MB.2.5] (planner) edited fields
+- 2026-11-13T20:52 [MB.2.4.1] (planner) created (task) Resolve request paths beneath a static root (openat2, refusal matrix, TOCTOU) - design MB.2.4a
+- 2026-11-13T20:52 [MB.2.5.1] (planner) created (task) Rewrite precedence and the static method/body gate (decide) - design MB.2.5a
+- 2026-11-13T20:52 [MB.2.4.2] (planner) created (task) Build static responses: ETag/304, cache headers, Content-Type table, bounded body - design MB.2.4b
+- 2026-11-13T20:52 [MB.2.5.2] (planner) created (task) Dispatch static answers and pump the body through the scheduler - design MB.2.5b
+- 2026-11-13T20:52 [MB.2.6] (planner) edited fields
+- 2026-11-13T20:52 [MB.2.4] (planner) Split into MB.2.4.1 (resolve: segments/classify/StaticRoot open+resolve/openat2+Walk/errno table/TOCTOU identity, config fields, tests/critical_static_resolve.r
+- 2026-11-13T20:52 [MB.2.5] (planner) Split into MB.2.5.1 (rewrite.rs Rewrite/decide + RouteInfo::with_static + the pure half of tests/critical_rewrite.rs) and MB.2.5.2 (scheduler.rs: run opens the 
+- 2026-11-13T21:16 [MB.2.2] (designer) Attempt 2: all 8 review findings fixed + converged through 8 critic re-runs (passes 4-11), each artefact 0 BLOCKER/0 MAJOR, VERDICT: PASS. Fixes: leading-// Abs
+- 2026-11-13T21:16 [MB.2.2] (lead) attempt 2/3 started
+- 2026-11-13T21:16 [MB.2.2] (lead) status ready -> review
+- 2026-11-13T21:19 [MB.2.5] (lead) edited fields
+- 2026-11-13T21:20 [MB.2.2] (designer) Attempt 3: fixed the 4 remaining findings only. RESULT Plan state item 2 now records that MB.2.4.1/2.5.1/2.4.2/2.5.2 exist under epics MB.2.4/MB.2.5 with chain 
+- 2026-11-13T21:23 [MB.2.2] (lead) REVIEW PASS attempt 3 (1 MINOR residue: stale 'Follow-up N' refs in historical prose at RESULT:188,199,204,207 and design:684).
+- 2026-11-13T21:23 [MB.2.2] (lead) status review -> done

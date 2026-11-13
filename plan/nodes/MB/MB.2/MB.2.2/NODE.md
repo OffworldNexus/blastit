@@ -2,7 +2,7 @@
 id: MB.2.2
 title: "Design static serving, rewrite precedence and path safety (ADR-0007)"
 kind: task
-status: ready
+status: done
 owner: designer
 priority: 2
 depends_on: [MB.1, MB.2.1]
@@ -14,11 +14,11 @@ paths:
   - docs/design/README.md
   - "docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md"
   - docs/decisions/README.md
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T15:11"
+updated: "2026-11-13T21:23"
 ---
 
 # Goal

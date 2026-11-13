@@ -1,21 +1,23 @@
 ---
 id: MB.2.4
-title: "Resolve and serve assets safely beneath the root (openat2, NUL, symlink, dotfiles, immutable)"
-kind: task
+title: "Resolve and serve assets safely beneath the root (split: MB.2.4.1 resolve, MB.2.4.2 respond)"
+kind: epic
 status: ready
-owner: implementer
 priority: 3
 depends_on: [MB.1, MB.2.3]
 paths:
   - "crates/blastit-scheduler/src/static_asset.rs"
+  - "crates/blastit-scheduler/src/static_response.rs"
   - "crates/blastit-scheduler/src/config.rs"
   - "crates/blastit-scheduler/src/lib.rs"
+  - "crates/blastit-scheduler/tests/critical_static_resolve.rs"
   - "crates/blastit-scheduler/tests/critical_static_assets.rs"
+  - "crates/blastit-scheduler/tests/common/static_fixture.rs"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T15:11"
+updated: "2026-11-13T20:52"
 ---
 
 # Goal

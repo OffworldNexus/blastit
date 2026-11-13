@@ -5,3 +5,4 @@ Technical design documents (`<slug>.md`) and fresh-context critic reviews (`<slu
 | Document | Title | Status | Node |
 |---|---|---|---|
 | [ma-lean-dx.md](ma-lean-dx.md) | Blastit 0.1.1 Technical Design: Zero-`sudo` `blastit dev`, Auto-Manifest, Wire `--learn`, and Framework-Agnostic `blastit check` | Accepted | MA.5 |
+| [static-and-spa.md](static-and-spa.md) | Blastit 0.2.0 Technical Design: Static Asset Serving, Rewrite Precedence and Path Safety | In review | MB.2.2 |

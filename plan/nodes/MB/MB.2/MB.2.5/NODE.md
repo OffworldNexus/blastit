@@ -1,22 +1,21 @@
 ---
 id: MB.2.5
-title: "Wire static serving and SPA/front-controller precedence into scheduler dispatch"
-kind: task
+title: "Wire static serving and SPA/front-controller precedence into scheduler dispatch (split: MB.2.5.1 precedence, MB.2.5.2 dispatch)"
+kind: epic
 status: ready
-owner: implementer
 priority: 3
-depends_on: [MB.1, MB.2.4]
+depends_on: [MB.1, MB.2.3]
 paths:
   - "crates/blastit-scheduler/src/rewrite.rs"
-  - "crates/blastit-scheduler/src/path.rs"
   - "crates/blastit-scheduler/src/route.rs"
   - "crates/blastit-scheduler/src/scheduler.rs"
+  - "crates/blastit-scheduler/src/lib.rs"
   - "crates/blastit-scheduler/tests/critical_rewrite.rs"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T15:11"
+updated: "2026-11-13T21:19"
 ---
 
 # Goal
