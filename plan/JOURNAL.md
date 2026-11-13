@@ -679,3 +679,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T19:49 [MB.1.16] (implementer) check_rooted_startup(image) in e2e/rootless/run.py: image as --user 0:0 in a workdir, both directions on stdout app.output; fail-proofed twice; make e2e rc=0 (r
 - 2026-11-13T19:53 [MB.1.16] (lead) status active -> review
 - 2026-11-13T19:54 [MB.1.16] (lead) status review -> done
+- 2026-11-13T19:56 [MB.1] (lead) status ready -> done

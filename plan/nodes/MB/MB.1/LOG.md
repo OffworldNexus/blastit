@@ -19,3 +19,19 @@ INCIDENT 17:31: a concurrent process reverted crates/blastit-sqlpolicy/src/{lru,
 ## 2026-11-13T18:39 [lead]
 
 OWNER DIRECTIVE: new node MB.1.11 (Bound mutants memory and keep build scratch off tmpfs) created and dispatched before any further long campaign; MB.1.3's lexer campaign must run under the new bounded invocation.
+
+## 2026-11-13T18:52 [lead]
+
+MERGED origin/develop v0.1.2 as 9c523e2 (9 conflicts: 8 crates/*/Cargo.toml -> develop 0.1.2, scripts/dev-version.sh -> ours). Verified cargo metadata --locked --no-deps, check-release-tag.sh v0.1.2, release-notes --require-dated v0.1.2, make check exit 0 (136s).
+
+## 2026-11-13T18:57 [lead]
+
+GATE NOTE: after the develop merge bumped the workspace to 0.1.2, 'make e2e' refused to start - 'a prebuilt e2e image installs exactly one wheel from dist, found 2' (a stale blastit-0.1.1 wheel beside the new 0.1.2 one). dist/ is gitignored build output, so the fix was 'rm -f dist/blastit-0.1.1-*.whl' then re-run; worth a LESSONS bullet (and it is the kind of thing a version bump always causes locally).
+
+## 2026-11-13T19:02 [lead]
+
+GATE EVIDENCE: make e2e exit 0 at 9c523e2 + dist 0.1.2 (130s): 'ok a route granting queries = [] refuses an ordinary statement (SQLSTATE 42501)', the log check 'the queries = [] route refused an ordinary statement with SQLSTATE 42501', and D6 'an unprivileged boot with no capabilities is refused' with 'init runs as uid 10000 and is missing cap_chown, cap_dac_override, cap_fowner, cap_kill, cap_setgid, cap_setuid'. Closes audit gap G7 for e2e.
+
+## 2026-11-13T19:56 [lead]
+
+status ready -> done
