@@ -424,3 +424,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T02:24 [MA.3.11] (lead) status active -> review
 - 2026-11-13T02:34 [MA.3.9] (lead) status review -> done
 - 2026-11-13T02:34 [MA.3.11] (lead) status review -> done
+- 2026-11-13T02:35 [MA.3.10] (lead) REVIEW FAIL (1/3): [MAJOR] harness.py:2454,2460 PSQL.booleans lists -C and -g which psql does not accept, so impossible flags pass the static check; regenerate 
+- 2026-11-13T02:35 [MA.3.10] (lead) status review -> ready
+- 2026-11-13T02:35 [MA.3.10] (lead) attempt 2/3 started
+- 2026-11-13T02:35 [MA.3.10] (lead) retry base 0cb3baff404cf57623015e644c4d2efb2a03fb0c
+- 2026-11-13T02:48 [MA.3.10] (lead) status ready -> review
+- 2026-11-13T02:51 [MA.3.10] (lead) status review -> done
+- 2026-11-13T02:51 [MA.3.5] (lead) lead accepts audit: report docs/testing/AUDIT-MA.3.md; escape gaps closed by MA.3.8/3.9/3.10/3.11; mutants blocked on H-002 (cargo-mutants absent) -> milestone 
+- 2026-11-13T02:51 [MA.3.5] (lead) status review -> done

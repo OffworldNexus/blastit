@@ -2,16 +2,16 @@
 id: MA.3.5
 title: "Audit runnable-docs guard, critical tiers and scoped mutants"
 kind: task
-status: ready
+status: done
 owner: "test-curator"
 priority: 3
 depends_on: [MA.3.2, MA.3.4]
 paths: ["docs/testing/AUDIT-MA.3.md"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-12T19:16"
-updated: "2026-11-12T19:16"
+updated: "2026-11-13T02:51"
 ---
 
 # Goal
