@@ -31,3 +31,7 @@ edited fields
 ## 2026-11-13T10:04 [lead]
 
 status active -> done
+
+## 2026-11-13T10:04 [lead]
+
+commit 341698a (merge of origin/perf-hot-path into release/0.1.1); reviewer PASS attempt 1
