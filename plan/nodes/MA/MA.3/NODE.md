@@ -2,7 +2,7 @@
 id: MA.3
 title: "Verify runnable docs, visual QA, e2e & prepare 0.1.1 release"
 kind: epic
-status: ready
+status: done
 priority: 3
 depends_on: [MA.2]
 paths:
@@ -21,7 +21,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-12T00:50"
-updated: "2026-11-12T23:41"
+updated: "2026-11-13T03:12"
 ---
 
 # Goal
