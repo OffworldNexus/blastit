@@ -2394,7 +2394,15 @@ impl Scheduler {
             // sees a byte; `expire_queue` bounds a client that never ends it,
             // and the slot was handed back above. The count of half-bodies a
             // route may hold is the app path's own bound, so a static front
-            // controller cannot admit more of them than any other route.
+            // controller cannot admit more of them than any other route: that
+            // path ([`Scheduler::begin_raw`]) marks the request
+            // `body_ready = false` *before* it asks `buffering_count()`, so the
+            // request being admitted counts itself and `queue_size = N` means
+            // `N - 1` others. Asking first and clearing after would admit one
+            // more here than on any other route.
+            if let Some(request) = self.requests.get_mut(&stream_id) {
+                request.body_ready = false;
+            }
             if self.buffering_count() >= self.cfg.queue_size {
                 return self.reject(
                     stream_id,
@@ -2406,7 +2414,6 @@ impl Scheduler {
                 );
             }
             if let Some(request) = self.requests.get_mut(&stream_id) {
-                request.body_ready = false;
                 request.queued_since = Some(Instant::now());
             }
             return Ok(());
@@ -2450,6 +2457,13 @@ impl Scheduler {
             .min(usize::try_from(request.download_credit).unwrap_or(usize::MAX))
             .min(self.cfg.frame_limits.max_payload())
             .min(STATIC_CHUNK_BYTES);
+        if want == 0 {
+            // A read of nothing can never advance the offset: it would push an
+            // empty frame and ask again, leaving the response to be answered by
+            // `request_timeout` instead of the read that had already failed.
+            // Fail closed, on the same rule as a short read (design §4.6).
+            return self.abort_static(stream_id);
+        }
         let body = match self.requests.get_mut(&stream_id) {
             Some(request) if request.static_body.is_some() => {
                 request.pumping = true;

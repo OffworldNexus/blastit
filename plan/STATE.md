@@ -3,7 +3,7 @@
 - generated: 2026-11-14T00:28
 - autopilot: on
 - current milestone: MB Modern 12-Factor Backends: Static, PHP-FPM, Vite/Node, Tomcat (0.2.x) [ready]
-- tasks: ready=2, review=1, done=80, superseded=1
+- tasks: ready=2, done=81, superseded=1
 - open human requests: 0 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 7; expensive spent: $54.76 of $200.00 cap (27%)
 
@@ -16,7 +16,7 @@
 
 ## Next actionable (top 12)
 
-- review: MB.2.4.5 critical_rewrite: pin client cancel, buffered-forward queue accounting and the bound
+- gate: MB.2.4 Resolve and serve assets safely beneath the root (split: MB.2.4.1 resolve, MB.2.4.2 respond)
 - gate: MB.2.5 Wire static serving and SPA/front-controller precedence into scheduler dispatch (split: MB.2.5.1 precedence, MB.2.5.2 dispatch)
 - execute: MB.2.8 Release prep 0.2.0: version bump, dated changelog, ARCHITECTURE sync
 
@@ -26,8 +26,6 @@
 
 ## Recent journal
 
-- 2026-11-14T00:03 [MB.2.4.5] (lead) status ready -> active
-- 2026-11-14T00:03 [MB.2.4.5] (lead) attempt 1/3 started
 - 2026-11-14T00:03 [MB.2.4.5] (lead) base 69504ed
 - 2026-11-14T00:03 [MB.2.7] (lead) status ready -> active
 - 2026-11-14T00:03 [MB.2.7] (lead) attempt 1/3 started
@@ -41,3 +39,5 @@
 - 2026-11-14T00:25 [MB.2.7] (lead) status review -> done
 - 2026-11-14T00:28 [MB.2.4.4] (lead) REVIEW PASS attempt 1 (2 MINOR: reuse fixture CAP_BIN instead of a second at-cap file; the trim_ows/civil_from_days follow-up needs filing).
 - 2026-11-14T00:28 [MB.2.4.4] (lead) status review -> done
+- 2026-11-14T00:28 [MB.2.4.5] (lead) REVIEW PASS attempt 1 (4 MINOR: the new want==0 branch has no in-suite test that reaches it; a constant restated as a doc pin; LESSONS.md is technically outside
+- 2026-11-14T00:28 [MB.2.4.5] (lead) status review -> done

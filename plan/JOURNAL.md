@@ -855,3 +855,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T00:25 [MB.2.7] (lead) status review -> done
 - 2026-11-14T00:28 [MB.2.4.4] (lead) REVIEW PASS attempt 1 (2 MINOR: reuse fixture CAP_BIN instead of a second at-cap file; the trim_ows/civil_from_days follow-up needs filing).
 - 2026-11-14T00:28 [MB.2.4.4] (lead) status review -> done
+- 2026-11-14T00:28 [MB.2.4.5] (lead) REVIEW PASS attempt 1 (4 MINOR: the new want==0 branch has no in-suite test that reaches it; a constant restated as a doc pin; LESSONS.md is technically outside
+- 2026-11-14T00:28 [MB.2.4.5] (lead) status review -> done

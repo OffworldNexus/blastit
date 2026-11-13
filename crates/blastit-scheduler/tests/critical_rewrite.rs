@@ -29,7 +29,8 @@ use blastit_manifest::{Manifest, RoutingTable, StaticPolicy, UidLayout};
 use blastit_scheduler::rewrite::{Rewrite, STATIC_ALLOW, decide, declares_body};
 use blastit_scheduler::routes_from_manifest;
 use blastit_scheduler::static_asset::{
-    AnswerKind, Backend, StaticOutcome, StaticRefusal, StaticRoot, head_segments,
+    AnswerKind, Backend, STATIC_CHUNK_BYTES, StaticOutcome, StaticRefusal, StaticRoot,
+    head_segments,
 };
 use common::{Options, Script, World, aborted, body_of, ended, head, status_of};
 use static_fixture::{
@@ -1715,4 +1716,559 @@ async fn a_full_static_queue_answers_503_with_retry_after() {
         world.log.lock().unwrap().spawns.is_empty(),
         "a turned-away static request forks nothing"
     );
+}
+
+// ---------------------------------------------------------------------------
+// §4.6, the cancel and the queue: the client that goes away, the forwarded
+// body that ends while it waits, and the three bounds those two share.
+// ---------------------------------------------------------------------------
+
+/// A `POST` with a small `json` body on the static front controller, head to
+/// `REQ_END`: the buffered `Forward` the queue rows below are about.
+async fn buffered_forward(world: &mut World, stream: u32, body: &[u8]) {
+    let length = body.len().to_string();
+    world
+        .http
+        .send_head(
+            stream,
+            head_with(
+                "POST",
+                "/missing",
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", length.as_str()),
+                ],
+            ),
+        )
+        .await;
+    world.http.send_body(stream, body).await;
+    world.http.send(stream, &Frame::ReqEnd).await;
+}
+
+/// The same `json` ingress with no `[route.static]`: the app path's own
+/// half-body bound, which the static path has to meet (design §4.6).
+const JSON_APP_MANIFEST: &str = "version = 1\napp = \"app:app\"\n\n\
+     [[route]]\nname = \"app\"\npath = ['.*']\n\n\
+     [route.ingress]\nbody = \"json\"\n";
+
+/// The response of one buffered `json` `POST` and its one `request` event,
+/// through `manifest` with `queue_size` half-body slots.
+async fn buffered_forward_answer(
+    manifest: &str,
+    manifest_dir: PathBuf,
+    queue_size: usize,
+) -> (Vec<Frame>, Outcome) {
+    let mut options = Options::new().manifest(manifest).script(
+        0,
+        Script::Answer {
+            body: b"hello".to_vec(),
+        },
+    );
+    options.cfg.manifest_dir = manifest_dir;
+    options.cfg.max_workers = 4;
+    options.cfg.queue_size = queue_size;
+    options.cfg.queue_timeout = Duration::from_secs(5);
+    let mut world = World::start(options);
+
+    buffered_forward(&mut world, 1, br#"{"a":1}"#).await;
+    let frames = world.http.response(1).await;
+    world.until(|world| !world.requests().is_empty()).await;
+    let outcome = world.requests()[0].outcome();
+    (frames, outcome)
+}
+
+/// A runtime with **one** thread in its blocking pool, and a way for a test to
+/// occupy it.
+///
+/// A static body's `pread` cannot be made slow and cannot be cancelled (design
+/// §4.6), so the only deterministic way to observe one still in flight is to
+/// stop it from ever starting: with one blocking thread, a task the test
+/// submits first owns the pool, and the scheduler's `spawn_blocking` read waits
+/// behind it until the test lets go. That is the state a read parked on a
+/// stalled mount is in, without a mount.
+fn one_blocking_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("a current-thread runtime with one blocking thread")
+}
+
+/// The held blocking thread: the reads queued behind it run when this is
+/// released — or dropped, so a failing test can never leave it parked.
+struct BlockingPool {
+    release: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl BlockingPool {
+    /// Occupies the only blocking thread, and returns once it is really busy.
+    async fn occupy() -> Self {
+        let (release, held) = std::sync::mpsc::channel();
+        let (started, running) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let _ = started.send(());
+            let _ = held.recv();
+        });
+        running.await.expect("the blocking thread started");
+        Self {
+            release: Some(release),
+        }
+    }
+
+    /// Lets the queued reads run.
+    fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+impl Drop for BlockingPool {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[tokio::test]
+async fn a_client_that_goes_away_mid_body_releases_its_slot_once() {
+    // Design §4.6/§8.1: a static response the client abandons is `client_gone`,
+    // and the slot it still holds comes back exactly once. With one slot, a
+    // release that never happened leaves the next request queued until the queue
+    // timeout, and a release too many would let two bodies stream at once — the
+    // two requests after the cancel prove both directions.
+    tokio::time::pause();
+    let window = u64::from(INITIAL_WINDOW);
+    let size = window + 64 * 1024;
+    let tree = PumpTree::build(&[("a.bin", size), ("b.bin", size), ("c.bin", size)]);
+    let mut world = pump_world(&tree, 1);
+
+    world.http.send_request(1, head("GET", "/a.bin"), b"").await;
+    until_pumped(&mut world, |world| {
+        in_flight(world) == vec![1] && body_frames(world) == window_chunks()
+    })
+    .await;
+    assert_eq!(
+        tree.open_in_tree(),
+        2,
+        "the root's dirfd and the parked body"
+    );
+
+    // The client goes away while the response is parked on credit: no read is
+    // outstanding, so the slot is the client's to give back.
+    world.http.send(1, &Frame::Cancel).await;
+    world.until(|world| !world.requests().is_empty()).await;
+    let events = world.requests();
+    assert_eq!(events.len(), 1, "one event: {events:?}");
+    assert_eq!(events[0].outcome(), Outcome::ClientGone);
+    assert_eq!(events[0].status(), 200, "the head was already out");
+    assert_eq!(events[0].bytes_out(), window, "the one window it saw");
+    assert_eq!(
+        tree.open_in_tree(),
+        1,
+        "the slot and the descriptor went back with the cancel"
+    );
+
+    // The dead client is told nothing more: the frames it already has are all.
+    let pushed = world.http.take_all();
+    let heads = pushed
+        .iter()
+        .filter(|(_, frame)| matches!(frame, Frame::RespHead(_)))
+        .count();
+    let bodies = pushed
+        .iter()
+        .filter(|(_, frame)| matches!(frame, Frame::RespBody(_)))
+        .count();
+    assert_eq!(
+        (heads, bodies, pushed.len()),
+        (1, window_chunks(), 1 + window_chunks()),
+        "one head and one window of body, and no second status or abort"
+    );
+
+    // Exactly one slot came back: the two requests behind it run in waves of one.
+    world.http.send_request(2, head("GET", "/b.bin"), b"").await;
+    world.http.send_request(3, head("GET", "/c.bin"), b"").await;
+    until_pumped(&mut world, |world| {
+        in_flight(world) == vec![2] && body_frames(world) == window_chunks()
+    })
+    .await;
+    assert_eq!(
+        streams_with_frames(&mut world),
+        vec![2],
+        "the third request has no slot: the cancel released one, not two"
+    );
+    assert_eq!(tree.open_in_tree(), 2, "one body at a time");
+
+    world.http.grant(2, INITIAL_WINDOW).await;
+    let second = world.http.response(2).await;
+    assert!(ended(&second), "{second:?}");
+    zeros(&second, size);
+    until_pumped(&mut world, |world| {
+        in_flight(world) == vec![3] && body_frames(world) == window_chunks()
+    })
+    .await;
+    world.http.grant(3, INITIAL_WINDOW).await;
+    let third = world.http.response(3).await;
+    assert!(ended(&third), "{third:?}");
+    zeros(&third, size);
+    assert_eq!(tree.open_in_tree(), 1, "every descriptor went back");
+
+    world.until(|world| world.requests().len() == 3).await;
+    let outcomes: Vec<Outcome> = world
+        .requests()
+        .iter()
+        .map(|event| event.outcome())
+        .collect();
+    assert_eq!(
+        outcomes,
+        vec![Outcome::ClientGone, Outcome::Ok, Outcome::Ok],
+        "the abandoned response is the only one the client caused"
+    );
+}
+
+#[test]
+fn a_cancel_while_a_read_is_parked_keeps_the_slot_until_the_read_returns() {
+    // Design §4.6: "the result releases both, and never the timeout". A `pread`
+    // cannot be cancelled, so a cancelled request whose read is still
+    // outstanding must keep its slot *and* its descriptor until that result
+    // arrives. The blocking pool is held by the test, so the read is in flight
+    // and unable to finish: releasing the slot here (instead of deferring to
+    // the result) is visible as a second request answered while a read is
+    // parked, and a descriptor charged for nobody.
+    one_blocking_thread().block_on(async {
+        tokio::time::pause();
+        let window = u64::from(INITIAL_WINDOW);
+        let tree = PumpTree::build(&[("a.bin", window + 64 * 1024), ("small.js", 24)]);
+        let mut world = pump_world(&tree, 1);
+
+        world.http.send_request(1, head("GET", "/a.bin"), b"").await;
+        until_pumped(&mut world, |world| {
+            in_flight(world) == vec![1] && body_frames(world) == window_chunks()
+        })
+        .await;
+
+        // The grant wakes the pump, which spawns the next read; the pool is
+        // held, so that read can never return.
+        let mut pool = BlockingPool::occupy().await;
+        world.http.grant(1, INITIAL_WINDOW).await;
+        world.http.send(1, &Frame::Cancel).await;
+        world.until(|world| !world.requests().is_empty()).await;
+
+        let events = world.requests();
+        assert_eq!(events.len(), 1, "one event: {events:?}");
+        assert_eq!(events[0].outcome(), Outcome::ClientGone);
+        assert_eq!(events[0].status(), 200, "the head was already out");
+        assert_eq!(events[0].bytes_out(), window, "the one window it saw");
+
+        // A request behind it waits: the slot is still charged, and so is the
+        // descriptor the parked read holds.
+        world
+            .http
+            .send_request(2, head("GET", "/small.js"), b"")
+            .await;
+        world.advance(Duration::from_millis(1)).await;
+        assert!(
+            !streams_with_frames(&mut world).contains(&2),
+            "the slot is still the parked read's: {:?}",
+            streams_with_frames(&mut world)
+        );
+        assert_eq!(
+            tree.open_in_tree(),
+            2,
+            "the root's dirfd and the parked read's body"
+        );
+
+        // The result releases both, exactly once, and the waiter is served.
+        pool.release();
+        let second = world.http.response(2).await;
+        assert_eq!(status_of(&second), 200, "{second:?}");
+        assert_eq!(body_of(&second), vec![0u8; 24]);
+        assert_eq!(
+            tree.open_in_tree(),
+            1,
+            "the read released the slot and the descriptor"
+        );
+        world.until(|world| world.requests().len() == 2).await;
+        assert_eq!(world.requests()[1].outcome(), Outcome::Ok);
+    });
+}
+
+#[tokio::test]
+async fn a_buffered_forward_that_ends_while_queued_keeps_one_queue_entry() {
+    // Design §4.6: a `REQ_END` that lands while the request is still waiting for
+    // a slot must not re-admit it. `enqueue` lists the id a second time (the
+    // FIFO does not dedupe) and refreshes `queued_since`, so with `queue_size =
+    // 2` one queued forward would fill the queue and the request behind it would
+    // be turned away — although only one request is waiting.
+    tokio::time::pause();
+    let window = u64::from(INITIAL_WINDOW);
+    let tree = PumpTree::build(&[("big.bin", window + 64 * 1024), ("small.js", 24)]);
+    let mut options = Options::new().manifest(JSON_FRONT_MANIFEST).script(
+        0,
+        Script::Answer {
+            body: b"hello".to_vec(),
+        },
+    );
+    options.cfg.manifest_dir = tree.base.clone();
+    options.cfg.max_workers = 1;
+    options.cfg.queue_size = 2;
+    options.cfg.queue_timeout = Duration::from_secs(5);
+    let mut world = World::start(options);
+
+    // The parked stream holds the only slot.
+    world
+        .http
+        .send_request(1, head("GET", "/big.bin"), b"")
+        .await;
+    until_pumped(&mut world, |world| {
+        in_flight(world) == vec![1] && body_frames(world) == window_chunks()
+    })
+    .await;
+
+    // One buffered forward, queued, whose end lands while it waits.
+    buffered_forward(&mut world, 2, br#"{"a":1}"#).await;
+    world.advance(Duration::from_millis(1)).await;
+    assert!(
+        !streams_with_frames(&mut world).contains(&2),
+        "the queued forward is not answered while it waits: {:?}",
+        streams_with_frames(&mut world)
+    );
+
+    // A third request: one queue entry leaves room for it, a duplicate does not.
+    world
+        .http
+        .send_request(3, head("GET", "/small.js"), b"")
+        .await;
+
+    // Freeing the slot answers the one queued forward, then the request behind
+    // it — in that order, and both `200`.
+    world.http.grant(1, INITIAL_WINDOW).await;
+    let parked = world.http.response(1).await;
+    assert!(ended(&parked), "{parked:?}");
+    let forwarded = world.http.awaited_response(2).await;
+    assert_eq!(
+        status_of(&forwarded),
+        200,
+        "the queued forward, not re-queued: {forwarded:?}"
+    );
+    assert_eq!(body_of(&forwarded), b"hello");
+    let waiting = world.http.awaited_response(3).await;
+    assert_eq!(
+        status_of(&waiting),
+        200,
+        "the request behind it was admitted: {waiting:?}"
+    );
+    assert_eq!(body_of(&waiting), vec![0u8; 24]);
+}
+
+#[tokio::test]
+async fn a_buffered_forward_that_ends_while_queued_still_expires_on_queue_timeout() {
+    // The other half of the same transition (design §4.6): keeping one queue
+    // entry keeps the request's `queued_since`. A request that cleared it while
+    // queued has no deadline `expire_queue` can find, so it is never answered —
+    // not even when the slot is still held and the queue timeout has long
+    // passed. The slot holder below is untouched by that timeout.
+    tokio::time::pause();
+    let window = u64::from(INITIAL_WINDOW);
+    let tree = PumpTree::build(&[("big.bin", window + 64 * 1024)]);
+    let mut options = Options::new().manifest(JSON_FRONT_MANIFEST).script(
+        0,
+        Script::Answer {
+            body: b"hello".to_vec(),
+        },
+    );
+    options.cfg.manifest_dir = tree.base.clone();
+    options.cfg.max_workers = 1;
+    options.cfg.queue_size = 2;
+    options.cfg.queue_timeout = Duration::from_secs(5);
+    options.cfg.request_timeout = Duration::from_secs(30);
+    let mut world = World::start(options);
+
+    world
+        .http
+        .send_request(1, head("GET", "/big.bin"), b"")
+        .await;
+    until_pumped(&mut world, |world| {
+        in_flight(world) == vec![1] && body_frames(world) == window_chunks()
+    })
+    .await;
+    buffered_forward(&mut world, 2, br#"{"a":1}"#).await;
+
+    // The slot is never given back, so the queue's own deadline is the only one
+    // that can answer the waiter.
+    world.advance(Duration::from_secs(5)).await;
+    let refused = world.http.response(2).await;
+    assert_eq!(status_of(&refused), 503, "{refused:?}");
+    assert_eq!(body_of(&refused), b"queue timeout\n");
+    assert_eq!(
+        header_value(&response_head(&refused).headers, b"Retry-After"),
+        Some(&b"5"[..]),
+        "the queue timeout, in seconds"
+    );
+    assert_eq!(
+        in_flight(&mut world),
+        vec![1],
+        "the slot holder is still streaming: only the waiter timed out"
+    );
+    world.until(|world| !world.requests().is_empty()).await;
+    assert_eq!(world.requests()[0].outcome(), Outcome::QueueTimeout);
+    assert_eq!(world.requests()[0].status(), 503);
+
+    // And the slot holder still completes: the timeout freed nobody else's slot.
+    world.http.grant(1, INITIAL_WINDOW).await;
+    let parked = world.http.response(1).await;
+    assert!(ended(&parked), "{parked:?}");
+    assert_eq!(status_of(&parked), 200);
+    assert_eq!(tree.open_in_tree(), 1, "one slot, one descriptor");
+}
+
+#[tokio::test]
+async fn a_buffered_forward_counts_itself_against_the_app_paths_bound() {
+    // Design §4.6: "the count of half-bodies a route may hold is the app path's
+    // own bound". `begin_raw` inserts the request with `body_ready = false`
+    // *before* it asks `buffering_count()`, so the request counts itself and
+    // `queue_size = 1` admits none. A static front controller that asked first
+    // and cleared `body_ready` after would admit one more — and with
+    // `queue_size = 2` it would admit two where an app route admits one.
+    tokio::time::pause();
+    let tree = StaticTree::build(Fixture::F);
+    for (queue_size, status) in [(1usize, 503u16), (2, 200)] {
+        let (static_frames, static_outcome) =
+            buffered_forward_answer(JSON_FRONT_MANIFEST, tree.base.clone(), queue_size).await;
+        let (app_frames, app_outcome) =
+            buffered_forward_answer(JSON_APP_MANIFEST, tree.base.clone(), queue_size).await;
+
+        assert_eq!(
+            status_of(&static_frames),
+            status,
+            "the static path at queue_size = {queue_size}: {static_frames:?}"
+        );
+        assert_eq!(
+            status_of(&app_frames),
+            status,
+            "the app path at queue_size = {queue_size}: {app_frames:?}"
+        );
+        assert_eq!(
+            (status_of(&static_frames), static_outcome),
+            (status_of(&app_frames), app_outcome),
+            "the same bound, and the same outcome, on both paths"
+        );
+        if status == 503 {
+            assert_eq!(body_of(&static_frames), b"queue full\n");
+            assert_eq!(
+                header_value(&response_head(&static_frames).headers, b"Retry-After"),
+                Some(&b"5"[..])
+            );
+        } else {
+            assert_eq!(
+                body_of(&static_frames),
+                b"hello",
+                "the view answered the admitted body"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_pump_reads_the_documented_chunk() {
+    // `R10`/§4.6 step 2: one read is at most `STATIC_CHUNK_BYTES`, and the body
+    // frames are that read — the only place the bound is observable. A chunk of
+    // zero would ask for a zero-byte read, which can never advance the offset:
+    // the pump would push empty frames until `request_timeout` answered a stream
+    // that had already failed. Pinning the frame size makes such a chunk a fast
+    // failure rather than a hang.
+    tokio::time::pause();
+    let chunk = STATIC_CHUNK_BYTES as u64;
+    let size = 2 * chunk + 7;
+    let tree = PumpTree::build(&[("two.bin", size)]);
+    let mut world = pump_world(&tree, 1);
+
+    world
+        .http
+        .send_request(1, head("GET", "/two.bin"), b"")
+        .await;
+    let frames = world.http.response(1).await;
+    let chunks: Vec<usize> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            Frame::RespBody(body) => Some(body.len()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        ended(&frames),
+        "the response ends after {chunks:?} body frames"
+    );
+    assert_eq!(
+        chunks,
+        vec![STATIC_CHUNK_BYTES, STATIC_CHUNK_BYTES, 7],
+        "two reads of one chunk each, then the rest"
+    );
+    assert_eq!(
+        STATIC_CHUNK_BYTES,
+        64 * 1024,
+        "the chunk the frames above just proved is `R10`'s 64 KiB"
+    );
+    assert_eq!(body_of(&frames).len() as u64, size);
+    world.until(|world| !world.requests().is_empty()).await;
+    assert_eq!(world.requests()[0].outcome(), Outcome::Ok);
+    assert_eq!(world.requests()[0].bytes_out(), size);
+}
+
+#[test]
+fn a_zero_byte_read_aborts_at_once_and_never_waits_for_the_timeout() {
+    // Design §4.6: a read error or a short read aborts the response, and the
+    // scheduler never sends a truncated body under a `Content-Length` it
+    // promised. A read that returns nothing is that short read — not a silent
+    // park until `request_timeout` answers a stream that had already failed.
+    // The paused clock is never advanced, so an abort only the request timeout
+    // could produce cannot appear here.
+    one_blocking_thread().block_on(async {
+        tokio::time::pause();
+        let window = u64::from(INITIAL_WINDOW);
+        let size = window + 64 * 1024;
+        let tree = PumpTree::build(&[("a.bin", size), ("small.js", 24)]);
+        let mut world = pump_world(&tree, 1);
+
+        // The read is spawned at dispatch and cannot run while the pool is
+        // held, so the head is out and no byte of the body is.
+        let mut pool = BlockingPool::occupy().await;
+        world.http.send_request(1, head("GET", "/a.bin"), b"").await;
+        until_pumped(&mut world, |world| in_flight(world) == vec![1]).await;
+        tree.truncate("a.bin");
+        pool.release();
+
+        let frames = world.http.response(1).await;
+        assert_eq!(status_of(&frames), 200, "the head was promised: {frames:?}");
+        assert!(
+            aborted(&frames),
+            "a zero-byte read is an abort, not an end: {frames:?}"
+        );
+        assert_eq!(
+            body_of(&frames),
+            b"",
+            "not one byte under the length promised"
+        );
+        match frames.last() {
+            Some(Frame::RespAbort { reason }) => assert_eq!(reason, "static: read failed"),
+            other => panic!("expected a read-failure abort, got {other:?}"),
+        }
+
+        world.until(|world| !world.requests().is_empty()).await;
+        assert_eq!(world.requests()[0].outcome(), Outcome::ViewDied);
+        assert_eq!(world.requests()[0].bytes_out(), 0);
+        assert_eq!(
+            tree.open_in_tree(),
+            1,
+            "the slot and the descriptor went back with the abort"
+        );
+
+        // Exactly one release: the next request is served rather than queued.
+        world
+            .http
+            .send_request(2, head("GET", "/small.js"), b"")
+            .await;
+        let after = world.http.response(2).await;
+        assert_eq!(status_of(&after), 200, "{after:?}");
+        assert_eq!(body_of(&after), vec![0u8; 24]);
+    });
 }
