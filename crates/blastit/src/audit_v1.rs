@@ -487,6 +487,30 @@ pub struct Report {
 }
 
 impl Report {
+    /// The `check` document for a manifest whose every route is static (`R14`).
+    ///
+    /// There is no suite to run, and no request any in-process suite could make
+    /// against a static route: the responder answers before anything reaches a
+    /// view. So every count is zero but the one the manifest answers —
+    /// `routes.total` — and `findings` is empty: a root the run never requested
+    /// is a warning on stderr ([`unrequested_static_roots`]), never a finding
+    /// and never a reason to fail. The shape is the same document a run with an
+    /// app prints, so `--json` and the Python contract stay one schema.
+    pub fn all_static(manifest: &Manifest) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            ok: true,
+            requests: 0,
+            statements: 0,
+            routes: RouteCounts {
+                total: manifest.route_count() as u64,
+                exercised: 0,
+            },
+            proxies: BTreeMap::new(),
+            findings: Vec::new(),
+        }
+    }
+
     /// Renders the report as pretty-printed JSON.
     ///
     /// # Errors
@@ -933,12 +957,55 @@ fn unexercised_routes(
         let Some(route) = manifest.route(index) else {
             continue;
         };
+        // `R14`: a static route answers from the filesystem before anything
+        // reaches the app, so a suite cannot exercise it in-process. Its
+        // completeness warning is `unrequested_static_roots`, on stderr — never
+        // a finding, never `ok`, never the exit code.
+        if route.static_policy().is_some() {
+            continue;
+        }
         findings.push(Finding::UnexercisedRoute {
             severity: Severity::Error,
             route: route.name().to_string(),
             fix: Fix::add_test(),
         });
     }
+}
+
+/// The declared static roots no observed request reached, in manifest order
+/// (`R14`).
+///
+/// A static answer is written by the scheduler and never reaches the WSGI gate,
+/// so the observations cannot show whether the files were requested at all.
+/// `check` prints one stderr line per pair and leaves the verdict alone: the
+/// root exists (or the boot refused it), so this is a hint that the suite never
+/// touched it, not a completeness error. Suppressed when the suite observed no
+/// request at all — [`Finding::NoObservations`] already says that.
+pub fn unrequested_static_roots(
+    manifest: &Manifest,
+    table: &RoutingTable,
+    observations: &CheckObsV1,
+) -> Vec<(String, String)> {
+    if observations.http().is_empty() {
+        return Vec::new();
+    }
+    let mut requests_per_route = vec![0u64; manifest.route_count()];
+    for line in observations.http() {
+        if let Some(matched) = table.route(&line.method, &line.path) {
+            requests_per_route[matched.route] += 1;
+        }
+    }
+    manifest
+        .routes()
+        .iter()
+        .enumerate()
+        .filter(|(index, route)| route.static_policy().is_some() && requests_per_route[*index] == 0)
+        .filter_map(|(_, route)| {
+            route
+                .static_policy()
+                .map(|policy| (route.name().to_string(), policy.root.clone()))
+        })
+        .collect()
 }
 
 /// `missing_ingress` and `ingress_mismatch` (`R36`).

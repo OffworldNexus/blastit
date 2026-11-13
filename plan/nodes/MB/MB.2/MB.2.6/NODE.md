@@ -2,7 +2,7 @@
 id: MB.2.6
 title: Wire static routes into blastit dev and blastit check diagnostics
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.1, MB.2.5.2]
@@ -14,11 +14,11 @@ paths:
   - crates/blastit/src/check.rs
   - crates/blastit/src/audit_v1.rs
   - crates/blastit/tests/critical_static_cli.rs
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T20:52"
+updated: "2026-11-13T23:35"
 ---
 
 # Goal

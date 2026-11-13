@@ -271,6 +271,10 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     // declared routes sit at `1..=N` so no declared route collides with the
     // scheduler's slot-0 fallback (`R26`, `R27`).
     let dev_uid = crate::dev_learn::euid();
+    // `R13`: whether the manifest declares an app decides whether a static
+    // route with `spa` unset may forward a miss to it (design §4.6). Computed
+    // once, exactly as `routes_from_manifest` does.
+    let has_app = manifest.app().is_some();
     let routes: Vec<blastit_scheduler::RouteInfo> = match (&dev, learn) {
         (Some(_), true) => std::iter::once(blastit_scheduler::RouteInfo::new(
             crate::dev_learn::LEARN_FALLBACK_ROUTE,
@@ -280,6 +284,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         .chain(manifest.routes().iter().map(|route| {
             blastit_scheduler::RouteInfo::new(route.name(), route.prefork(), dev_uid)
                 .with_ingress(route.ingress())
+                .with_static(route.static_policy().cloned(), has_app)
         }))
         .collect(),
         (Some(_), false) => manifest
@@ -288,6 +293,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             .map(|route| {
                 blastit_scheduler::RouteInfo::new(route.name(), route.prefork(), dev_uid)
                     .with_ingress(route.ingress())
+                    .with_static(route.static_policy().cloned(), has_app)
             })
             .collect(),
         (None, _) => routes_from_manifest(&manifest, &layout),
@@ -709,6 +715,13 @@ fn scheduler_config(
         mem_high_watermark_bytes: watermark,
         mem_total_bytes: memory.map(|usage| usage.total()),
         view_mem_estimate: config.view_mem_estimate,
+        // `R2`, `R13`: the scheduler opens every `[route.static]` root beneath
+        // the manifest's directory, and the one file ceiling this release has
+        // comes from `STATIC_MAX_FILE_BYTES` alone. Both come from stage 0's
+        // configuration, so stage 1 never re-derives a path from its own
+        // working directory.
+        manifest_dir: config.manifest_dir.clone(),
+        static_max_bytes: blastit_scheduler::static_asset::STATIC_MAX_FILE_BYTES,
         // `SPAWN_BACKOFF` and `MEMORY_CHECK_INTERVAL` are the struct defaults,
         // so a field a later release adds needs no edit here.
         ..SchedulerConfig::default()
@@ -846,6 +859,12 @@ fn load(
     hosted: bool,
     dev: Option<&crate::dev_learn::Dev>,
 ) -> Py<PyAny> {
+    // `R13`: an all-static site has no app to import — every answer comes from
+    // the scheduler, so there is nothing to preload, nothing to warm up and no
+    // heap a view would inherit. `None`, never a missing callable.
+    if config.app.is_none() {
+        return py.None();
+    }
     // What blastit itself puts on `sys.path` is recorded here, because a
     // directory another uid could write is refused below: the working directory
     // it was started in, and whatever an embedded interpreter had to be told

@@ -798,3 +798,22 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T23:01 [MB.2.5.2] (lead) REVIEW PASS attempt 2 (3 MINOR: the request_end no-requeue half of fix (b) is not pinned by a row; the new half-body guard counts queue_size others + itself, on
 - 2026-11-13T23:01 [MB.2.5.2] (lead) status review -> done
 - 2026-11-13T23:01 [MB.2.10] (lead) status review -> done
+- 2026-11-13T23:01 [MB.2.6] (lead) status ready -> active
+- 2026-11-13T23:01 [MB.2.6] (lead) attempt 1/3 started
+- 2026-11-13T23:01 [MB.2.6] (lead) base cb7a1e4
+- 2026-11-13T23:02 [MB.2.11] (doc-writer) done: owner ruling applied (role default, allowlist untouched), docs-unit 63/57, docs-check clean, docs-test 47 fences 0 failed, e2e/docs_deploy 38/38; dx + ai-
+- 2026-11-13T23:06 [MB.2.11] (lead) status active -> review
+- 2026-11-13T23:09 [MB.2.6] (implementer) app optional iff is_all_static in dev+blastit (MB.1.6 order kept); check_static_roots + responder-uid probe before listeners; all-static check audits roots, no 
+- 2026-11-13T23:09 [MB.2.4.3] (test-curator) created (task) critical_static_resolve: pin the open contract and four surviving mutants
+- 2026-11-13T23:10 [MB.2.4.4] (test-curator) created (task) critical_static_assets: pin descriptor ownership and the meta.size ceiling
+- 2026-11-13T23:10 [MB.2.4.5] (test-curator) created (task) critical_rewrite: pin client cancel, buffered-forward queue accounting and the bound
+- 2026-11-13T23:16 [MB.2.11] (doc-writer) attempt 2 review fixes: research note aligned (literal migrator URL, role default, no options), compose prose moved to settings.md (255 lines; full compose bloc
+- 2026-11-13T23:21 [MB.2.6] (implementer) attempt 2: R13 step-5 probe asks the kernel in-process when probe==geteuid (dev/check) so an owned 0700 $HOME no longer refuses a readable root; production keep
+- 2026-11-13T23:21 [MB.2.6] (lead) status active -> review
+- 2026-11-13T23:21 [MB.2.4.3] (lead) status ready -> active
+- 2026-11-13T23:21 [MB.2.4.3] (lead) attempt 1/3 started
+- 2026-11-13T23:21 [MB.2.4.3] (lead) base cb7a1e4
+- 2026-11-13T23:30 [MB.2.11] (doc-writer) attempt 2 final: direct-port zone read with its own APP_URL (pool URI path is the pool name), pool recycle/restart note, research 'two destinations' + /shop, co
+- 2026-11-13T23:35 [MB.2.6] (implementer) attempt 3 (gate regression): blastit check never required an app — split the R13 rule: static_app_refusal (all-static + set BLASTIT_APP refused by name) is chec
+- 2026-11-13T23:35 [MB.2.6] (lead) GATE: make check caught a regression the review could not (18 python contract failures: check demanded BLASTIT_APP). Fixed by splitting app_rule (boots) from st
+- 2026-11-13T23:35 [MB.2.6] (lead) status review -> done
