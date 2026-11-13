@@ -680,3 +680,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T19:53 [MB.1.16] (lead) status active -> review
 - 2026-11-13T19:54 [MB.1.16] (lead) status review -> done
 - 2026-11-13T19:56 [MB.1] (lead) status ready -> done
+- 2026-11-13T19:56 [MB.2.1] (lead) status ready -> active
+- 2026-11-13T19:56 [MB.2.1] (lead) attempt 1/3 started
+- 2026-11-13T19:56 [MB.2.1] (lead) base 06013a6
+- 2026-11-13T19:56 [MB.1] (lead) GATE CLOSED 06013a6. Two test-curator audits of the same diff exist (docs/testing/AUDIT-MB.1.md F1-F10 committed at 9018a8b by a concurrent session, and AUDIT-M
+- 2026-11-13T20:07 [MB.2.1] (doc-writer) Wrote and registered docs/frameworks/static-and-spa.md (141 lines, 9 commands, 7 fences) + static-site fixture; dx and ai-ergonomics critics both PASS after two
+- 2026-11-13T20:11 [MB.2.1] (lead) status active -> review
+- 2026-11-13T20:16 [MB.2.1] (lead) REVIEW FAIL (attempt 1): 2 MAJOR + 4 MINOR. MAJOR1 inventory.toml:259-261 fence 7 registered 'static' with a false capability reason although the presets mode r
+- 2026-11-13T20:16 [MB.2.1] (lead) status review -> ready
+- 2026-11-13T20:16 [MB.2.6] (lead) acceptance extended at the MB.2.1 gate: own the all-static check path (no pytest, root audit, exit 0/2) promised by docs/frameworks/static-and-spa.md
+- 2026-11-13T20:18 [MB.2.1] (doc-writer) Attempt 2 fixes: fence 8 -> presets (now executed); all-static check wording matches extended MB.2.6 (audit exists/dir/readable, no pytest, 0/2); symlink escape
+- 2026-11-13T20:18 [MB.2.1] (doc-writer) Review artefacts after attempt 2: review-dx B1/B2 re-quoted against the final revision, review-ai-ergonomics A10 status line synced to the 404 symlink rule; no 
+- 2026-11-13T20:18 [MB.2.1] (lead) attempt 2/3 started
+- 2026-11-13T20:18 [MB.2.1] (lead) status ready -> review
+- 2026-11-13T20:22 [MB.2.1] (lead) REVIEW PASS attempt 2 (5 MINOR follow-ups: critic artefact anchors stale after the Vite fence shifted indices; RESULT row should name dx B8; MB.2.6 NODE cites p
+- 2026-11-13T20:22 [MB.2.1] (lead) status review -> done

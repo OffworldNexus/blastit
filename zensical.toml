@@ -34,6 +34,7 @@ nav = [
     "frameworks/index.md",
     { "Django" = "frameworks/django.md" },
     { "Flask, SQLAlchemy and raw WSGI" = "frameworks/flask.md" },
+    { "Static assets and SPAs" = "frameworks/static-and-spa.md" },
   ] },
   { "Reference" = [
     "reference/cli.md",

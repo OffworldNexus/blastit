@@ -49,3 +49,17 @@ $ make check
 - The critical suite proves the exit-code matrix: static-only manifest with no `app` boots under `dev`; a manifest mixing static and app routes without `app` still fails with the old message; a missing static root fails with the root path and manifest line; `blastit check` on a static route the suite never requested prints a warning and does not change `ok` or the exit code.
 - If a completeness warning cannot be expressed without a new finding kind, stop and record a follow-up instead of touching the closed `fix.action` set or the Python contract.
 - `docs/reference/cli.md` and `docs/troubleshooting.md` are **not** in `paths`; if the CLI text needs a doc change, log it as a follow-up and let the lead route it.
+
+# All-static `check` path (added at the MB.2.1 gate)
+
+`docs/frameworks/static-and-spa.md:97-99` promises the CI one-liner for a site with **no app at all**; that promise has no owner below `MB.2.6`, so this node owns it:
+
+- `blastit check` on a manifest whose routes are all static must **not** spawn pytest: there is nothing to exercise. It audits every declared `[static]` `root` (exists, is a directory, is readable) and exits `0` when they all pass, `2` when a root is missing or not a directory — the same exit code the harness already uses for a bad manifest, and the same `--json` shape (`ok`, `findings`, `schema_version` unchanged).
+- A route with no `app` in an all-static tree is `unexercised_route`-free (nothing can request it in-process); a declared root that exists but was never requested stays the warning this node already plans.
+- Pinned in the same protected suite (`critical_static_cli.rs`), both directions: all roots present → exit `0`, one root missing → exit `2` naming the root and the manifest line.
+- Extend the suite's exit-code matrix accordingly; do not change `fix.action`, the finding kinds, or the Python contract.
+
+```console
+$ CARGO_NET_OFFLINE=true cargo test -p blastit --test critical_static_cli --locked   # includes the all-static check legs
+$ ./target/debug/blastit check --json   # in an all-static fixture: exit 0, no pytest spawned, ok true
+```

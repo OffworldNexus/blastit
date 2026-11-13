@@ -2,7 +2,7 @@
 id: MB.2.1
 title: "Write the lean static assets & SPA rewriting page (Local/CI/Deploy) and register it"
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: [MB.1]
@@ -14,11 +14,11 @@ paths:
   - "python/tests/runnable_docs/fixtures/static-site/**"
   - "docs/design/static-and-spa.review-dx.md"
   - "docs/design/static-and-spa.review-ai-ergonomics.md"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-13T15:11"
-updated: "2026-11-13T15:11"
+updated: "2026-11-13T20:22"
 ---
 
 # Goal

@@ -66,4 +66,5 @@ Blastit's brokers and checks every request and statement against the manifest.
 ## Next
 
 [Django](django.md) · [Flask, SQLAlchemy and raw WSGI](flask.md) ·
+[static assets and SPAs](static-and-spa.md) ·
 [local development](../local.md) · [CI/CD](../ci.md).
