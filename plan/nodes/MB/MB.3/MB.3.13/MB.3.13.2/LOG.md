@@ -11,3 +11,7 @@ INPUT from MB.3.13.1 (2026-11-14): the loader and Config binding expect (libphp,
 ## 2026-11-14T19:29 [lead]
 
 edited fields
+
+## 2026-11-14T21:04 [lead]
+
+SCOPE ADD (2026-11-14, MB.3.10 review): ADR-0010 §2's downward workers bound belongs to this Stage-0 gate: workers > config.view_worker_cap() must be a boot error naming both numbers (and 1..=64 is already parsed). No code reads PhpPolicy.workers today, so the docs may not claim it until this lands. Add it here with the accepted/denied twins.

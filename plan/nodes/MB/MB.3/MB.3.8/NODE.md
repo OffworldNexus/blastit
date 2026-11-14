@@ -103,3 +103,10 @@ $ make e2e
   `scripts/release-notes.sh --require-dated v0.2.0` are the guards, unchanged in shape.
 - Any doc text that says "`0.2.1` adds …" becomes 0.2.0: that is `MB.3.10`/`MB.3.20`'s
   edit, and their acceptance now names it so it is verified, not remembered.
+
+## Release checklist item (owner, 2026-11-14) — certification gate
+
+> no `.php`/`.phar` under a static root is servable (404, protected `critical_static_entry`), proven before the 0.2.0 tag.
+
+Fail certification if this is not proven. Implemented by `MB.3.33`;
+`MB.9.2.2` must preserve the gate when it ports static serving.

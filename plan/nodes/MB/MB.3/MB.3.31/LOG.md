@@ -15,3 +15,7 @@ OWNER 2026-11-14: add the HISTORICAL banner to done/superseded nodes that PRESCR
 ## 2026-11-14T20:37 [lead]
 
 OWNER clarification: also purge 'retired key/legacy/deprecated/migration' framing about PHP from live briefs (nothing was ever released). Banner text stays verbatim; attack-class stays.
+
+## 2026-11-14T21:04 [lead]
+
+ADDITION: live briefs that cite docs/design/php-fastcgi.md (e.g. MB.9.2.2 Context) must be repointed to docs/design/backend-runtimes.md §4.2 + ADR-0009, because MB.3.32 deletes that file; the guard's crates dead-link scan covers code, and this purge covers plan briefs.
