@@ -80,11 +80,12 @@ pub const OUTPUT_LINE_CAP: usize = 2048;
 ///
 /// One implementation per language and linkage: threaded CPython
 /// (`WsgiRuntime`), NTS `libphp` (`PhpEmbedRuntime`), and whatever a later
-/// backend embeds. `blastit_scheduler`'s `ViewUpstream` holds the concrete type
-/// behind this trait and serves both `Executor::View` and `Executor::Php`
-/// without branching on [`kind`](WorkerRuntime::kind) in request dispatch
-/// (`MB.9.3`); the two provider kinds differ in ownership, `SeccompRole` and
-/// `max_inflight`, not in the request path.
+/// backend embeds. The scheduler-side `Upstream` implemented by `MB.9.3`
+/// consumes this trait and serves both `Executor::View` and `Executor::Php`
+/// without branching on [`kind`](WorkerRuntime::kind) in request dispatch; the
+/// two provider kinds differ in ownership, `SeccompRole` and `max_inflight`,
+/// not in the request path. Wiring the scheduler crate to `blastit-view` is
+/// `MB.9.3`'s decision, not this node's.
 ///
 /// # Implementing it from another crate
 ///
@@ -186,9 +187,10 @@ pub trait WorkerRuntime: Send + Sync + 'static {
     ///
     /// The per-route concurrency the scheduler admits, not a thread count:
     /// threaded WSGI gets `view_worker_cap`, an NTS PHP process gets `1`
-    /// because it can run one request per OS process. The scheduler's
-    /// `provider_ceiling` must cover `route_allocation` (§4, R4); this value is
-    /// what the `ViewSet` charge it against.
+    /// because it can run one request per OS process. This is a ceiling, not an
+    /// admission queue: the scheduler's `provider_ceiling` must cover
+    /// `route_allocation`, and this value is the one each `ViewSet` charges
+    /// `inflight` against (`provider_ceiling >= route_allocation`, §4 R4).
     fn max_inflight(&self) -> u32;
 
     /// Run one dispatched request to completion.
@@ -421,6 +423,13 @@ mod tests {
     }
 
     fn assert_send<T: Send>() {}
+
+    #[test]
+    fn the_output_line_cap_is_the_documented_2048() {
+        // §4.1 documents `output`'s line cap as 2048 bytes; the WSGI sink
+        // `MB.3.24` builds and the PHP sink `MB.3.13` builds must not drift.
+        assert_eq!(OUTPUT_LINE_CAP, 2048);
+    }
 
     #[test]
     fn the_seam_is_object_safe_and_its_result_can_cross_a_thread() {

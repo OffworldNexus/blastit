@@ -1324,3 +1324,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T18:20 [MB.3.23] (lead) base 2299b32; design: backend-runtimes.md §3 + ADR-0009. Prereq MB.3.11 verified DONE in code (feature gate + no_python_build).
 - 2026-11-14T18:29 [MB.3.23] (lead) status active -> done
 - 2026-11-14T18:29 [MB.3.23] (lead) commit pending; REVIEW: committed on lead verification (make check exit 0, critical_guard clean, and the doctest proved to bite by renaming serve -> E0407/E0599
+- 2026-11-14T18:31 [MB.3.13.1] (lead) edited fields
+- 2026-11-14T18:31 [MB.3.13.1] (lead) PATH REPAIR by lead (2026-11-14): the PhpEmbedRuntime worker cannot dlopen from blastit-view (#![forbid(unsafe_code)]), so the safe loader lands in blastit-php-
+- 2026-11-14T18:31 [MB.3.13.3] (lead) edited fields
+- 2026-11-14T18:31 [MB.3.13.3] (lead) PATH REPAIR by lead: added crates/blastit-php-sapi/src/** because the five vtable symbols are handed over from there (abi.rs owns the extern declarations); no C
+- 2026-11-14T18:31 [MB.3.25] (lead) edited fields
+- 2026-11-14T18:31 [MB.3.25] (lead) PATH REPAIR by lead: added crates/blastit-sys/tests/** so the protected critical_embedded_seccomp.rs named by backend-runtimes.md §7.1 R14 can exist (node accep
+- 2026-11-14T18:32 [MB.3.23] (lead) GOLDFISH REVIEW PASS (fresh-context reviewer, base 2299b32, commit 005fc67). Zero BLOCKER/MAJOR: surface names no interpreter/transport token, serve() matches d

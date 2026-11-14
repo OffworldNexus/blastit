@@ -37,7 +37,10 @@ $ cargo test -p blastit-view --locked
 $ make check
 ```
 - The trait is object-safe (`fn _obj(_: Box<dyn WorkerRuntime + Send>)`) and its returned
-  future is `Send`.
+  future is `Send`. **Superseded by design §4.1 (review 2026-11-14): `serve` is blocking
+  and returns `RequestEnd`; the asserted intent is `RequestEnd: Send` +
+  `WorkerRuntime: Send + Sync + 'static`, which is what makes a `spawn_blocking` task
+  movable.**
 - The `view.chan` framing (`wire`/`flow`, made public by `MB.3.13`'s prerequisite note) is
   the only transport the trait may name — no socket type, no language type.
 - A compile-time test that a second implementation can be written **outside** this crate
