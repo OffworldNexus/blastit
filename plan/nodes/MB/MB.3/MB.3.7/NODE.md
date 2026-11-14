@@ -44,11 +44,16 @@ wheel.
     `E19`–`E25`) match `PROBES` 1-to-1, parses the `#n` column to assert the union is exactly
     `{1..20}`, and requires every `200` probe to carry a **non-empty** discriminating
     key-value assertion.
-  - replays every `$ ` command of `docs/frameworks/php.md` verbatim (`uv init`/`uv add`
-    exempt as in `static_assets.py`; an unknown `$ ` command is a failure), including the
-    page's `mkdir -p /home/you/app/run` and absolute `listen` fence, and runs
-    `php-fpm -tt -y` on the page's INI fence **and** on the generated production pool file,
-    so a drifted `clear_env`/`listen.mode`/`pm.max_children` fails.
+  - replays every `$ ` command of `docs/frameworks/php.md` verbatim (an unknown `$ `
+    command is a failure). **Re-read after 2026-11-14 (MB.3.9.1):** the page's Local is now
+    `uv tool install blastit` then `blastit dev`, and CI is `blastit check -- <suite>`; the
+    hand-written `php-fpm.conf`, the `mkdir -p …/run` and the absolute `listen` fence are
+    **gone**, so the old "`uv init`/`uv add` exempt" clause and the `php-fpm -tt -y` run on
+    *the page's* INI no longer apply. The drifted-`clear_env`/`listen.mode`/`pm.max_children`
+    assertions move to the **generated** pool file — and only if the submitted mechanism
+    keeps a pool; if `MB.12` lands the embed model, the equivalent assertion is that
+    `blastit dev` starts the PHP worker with the derived configuration and that a second
+    route gets its own.
   - runs the two PHPUnit suites behind the page's CI fences: `uv run blastit check --
     vendor/bin/phpunit` against `e2e/php/suite/` (`24` HTTP requests →
     `blastit check: 24 requests, 0 statements, 1/1 routes, clean`) and

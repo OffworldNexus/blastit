@@ -2,7 +2,7 @@
 id: MB.3.5.1
 title: "Parse [route.fastcgi], Executor and the boot predicates in blastit-manifest - design MB.3.5 part 1"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.3.4]
@@ -13,11 +13,11 @@ paths:
   - "crates/blastit-manifest/src/error.rs"
   - "crates/blastit-manifest/src/lib.rs"
   - "crates/blastit-manifest/tests/docs_fences.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:09"
 ---
 
 # Goal

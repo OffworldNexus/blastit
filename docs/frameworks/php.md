@@ -1,6 +1,9 @@
 # PHP-FPM, Symfony and Laravel
 
-`0.2.1` adds `[route.fastcgi]`, the PHP `--learn` write and `check -- <suite>`.
+Serve a Symfony or Laravel app from `public/index.php` with one manifest block — no
+nginx, no rewrite rules. `0.2.1` adds it, with `check -- <suite>`.
+
+Write `blastit.toml` in your project root, next to `composer.json`:
 
 ```toml title="blastit.toml"
 version = 1
@@ -15,59 +18,58 @@ immutable = ["/assets/*"]
 
 [route.fastcgi]
 entry = "public/index.php"
-listen = "run/fpm.sock"
-workers = 4
+
+[route.ingress]
+body = "form"
 ```
 
-A file under `public/` is answered by the static responder; any other path reaches
-the front controller. No `.php` file under `public/` is served; only `entry` runs.
-A FastCGI route is its own executor: no `app`, and `[route.ingress]` applies to it.
+A file under `public/` is answered by the static responder; any other path reaches the
+front controller. No `.php` file under `public/` is served; only `entry` runs, and a
+`[route.fastcgi]` route needs no `app` — the front controller is the app.
 
 | Key | What it does |
 |---|---|
-| `entry` | required; the front controller, relative to `blastit.toml` (under `root` when both are set) |
-| `listen` | required; the pool's Unix socket, relative to `blastit.toml` |
-| `workers` | default `4`; requests at once; `pm.max_children` must be at least this |
+| `entry` | required; relative to `blastit.toml`, and with `[route.static]` it includes `root`: `public/index.php`, never `index.php` |
+| `workers` | optional; omit it. It caps this route at — never above — the concurrency Blastit derives; a value above the budget is a boot error |
 
-A request with a body (POST, PUT, PATCH) needs `[route.ingress]` (`form` or `json`;
-`raw` also needs `allow_raw`), or it is a `413`.
+`[route.static]` is optional: without it every path reaches the front controller.
+`path` entries are regexes matched whole, `immutable` entries are globs, and a route
+takes one codec: a JSON API beside the form app is a second `[[route]]` above this
+catch-all, with its own `name`, `path = ['/api/.*']`, `[route.fastcgi] entry` and
+`[route.ingress] body = "json"` — first match wins, in manifest order. A body that
+does not match the codec is a `400`; no `[route.ingress]` is a `413`; an upload has no
+codec: `raw` with `allow_raw = true`, scoped to its path.
+
+A route that talks to PostgreSQL needs the top-level `[proxy.db]`
+(`protocol = "postgresql"`, `input = { url = "DATABASE_URL" }`) and its own
+`[route.db]` grant; with no `[route.db]` it gets no connection. `blastit dev --learn`
+proposes a missing `root`; `check --learn` writes your queries into `blastit.toml`.
 
 ## Local
 
-Add the CLI (no `pyproject.toml` yet); run the pool and Blastit from the project
-root. No `sudo`, no `/etc`:
+PHP 8.2 or newer must already be on `PATH`, or point
+[`BLASTIT_PHP_FPM`](../reference/settings.md#backends) at it: Blastit runs it and does
+not install or upgrade it. Nothing goes in `/etc`, no `sudo`, and it reads `./blastit.toml` from here:
 
 ```console
-$ uv init --bare
-$ uv add blastit
-```
-
-```ini title="php-fpm.conf"
-[global]
-error_log = /dev/stderr
-[www]
-listen = /home/you/app/run/fpm.sock
-listen.mode = 0600
-pm = static
-pm.max_children = 4
-security.limit_extensions = .php
-catch_workers_output = yes
+$ uv tool install blastit
 ```
 
 ```console
-$ mkdir -p /home/you/app/run
-$ php-fpm -F -y php-fpm.conf
-```
-
-`-F` keeps it in the foreground; `-y` names your pool. The pool's `listen` is absolute;
-the manifest's `listen` is relative to `blastit.toml`.
-
-```console
-$ uv run blastit dev
+$ blastit dev
   blastit dev · single-uid simulation · 127.0.0.1:8080
   Not a sandbox. Production `blastit` refuses to run like this.
   http · scheduler · dbproxy · 1 route
 ```
+
+Blastit runs PHP for the route itself: one command, no server to start beside it,
+nothing left running after Ctrl-C. It does not install dependencies, migrate, warm
+caches or read `.env`; run `composer install` yourself.
+
+A manifest it cannot use stops the boot earlier, one line per error:
+`blastit dev: manifest ./blastit.toml: manifest has 1 error(s)` then
+`  - route "app" (index 0): fastcgi entry "index.php": must be under static root "public"`.
+Fix that error. With a front controller that answers `/users/42`:
 
 ```console
 $ curl -i http://127.0.0.1:8080/users/42
@@ -77,9 +79,9 @@ Content-Type: application/json
 {"route":"user.show","id":"42"}
 ```
 
-`immutable` values are served-path globs (`/assets/*` for `public/assets/`), matched
-whole: point each at fingerprinted output only — never a path that can also answer HTML
-or an unhashed original:
+`immutable` values are served-path globs (`/assets/*` for `public/assets/`, `/build/*`
+for Encore's `public/build/`), matched whole, and `*` stops at `/`: point each at
+fingerprinted output only, never a path that can answer HTML or an unhashed original.
 
 ```console
 $ curl -i http://127.0.0.1:8080/assets/app.4f1c2a9b7d3e.css
@@ -88,7 +90,8 @@ Content-Type: text/css; charset=utf-8
 Cache-Control: public, max-age=31536000, immutable
 ```
 
-A query string is data, never PHP options. The home route echoes what PHP saw:
+A query string is data, never PHP options: the front controller's `/` route echoes
+what PHP saw, and `SCRIPT_FILENAME` stays pinned to `entry` ([security](../security.md)).
 
 ```console
 $ curl -i 'http://127.0.0.1:8080/?-d+allow_url_include=1'
@@ -98,38 +101,34 @@ Content-Type: application/json
 {"route":"home","allow_url_include":"0","query_string":"-d+allow_url_include=1"}
 ```
 
-A hostile FastCGI param is refused, not forwarded; `SCRIPT_FILENAME` is pinned to
-`entry`. Mechanisms in [security](../security.md) and [how it works](../how-it-works.md).
-
-Stop the first `dev` with Ctrl-C, remove `[route.static]`, and start:
-
-```console
-$ uv run blastit dev --learn
-```
-
-Request `/assets/app.4f1c2a9b7d3e.css`: learn returns the front controller's `404` and
-records the path. Ctrl-C writes `[route.static] root = "public"`; add `immutable`.
-
 ## CI/CD
 
-Your CI image has PHP and Composer; start the pool as in Local, then one command
-serves the app, runs your suite and audits every request and query it saw:
+With `vendor/` installed, one command starts the app on loopback, runs your suite and
+audits every request and query it saw:
 
 ```console
-$ uv run blastit check -- vendor/bin/phpunit
+$ blastit check -- vendor/bin/phpunit
 blastit check: 24 requests, 0 statements, 1/1 routes, clean
 ```
 
-`check` puts the front controller on loopback as `BLASTIT_URL=http://127.0.0.1:8080`
-and runs the command after `--`: for a FastCGI manifest that is the suite, not pytest.
-The suite reads `BLASTIT_URL`, never the app; a test that does
-`file_get_contents(getenv('BLASTIT_URL').'/users/42')` speaks HTTP; an in-process test
-sends nothing. A route is exercised when its front controller ran, not by an asset;
-a route nothing requested, or a body route with no input rule, is a finding (`1`).
-If the suite only asked for assets, `--json` names the route:
+Bootstrap once, never as the gate: `--learn` records instead of denying:
 
 ```console
-$ uv run blastit check --json -- vendor/bin/phpunit
+$ blastit check --learn -- vendor/bin/phpunit
+```
+
+`check` puts the front controller on loopback as `BLASTIT_URL=http://127.0.0.1:8080`
+and runs the command after `--`, which is your suite and required: `check` exits `2`
+when no command follows it. The suite must speak HTTP: Symfony's `KernelBrowser` and
+Laravel's `$this->get()` run it in-process and send nothing, so use Symfony's
+`HttpBrowser`, Laravel's `Http::get(getenv('BLASTIT_URL').'/users/42')`, or
+`file_get_contents(getenv('BLASTIT_URL').'/users/42')`. A route is exercised when its
+front controller ran, not by an asset; an unrequested route, a body route with no input
+rule, or a codec that does not match is a finding (exit `1`). `--json` names unexercised
+routes — one document on stdout, everything else on stderr:
+
+```console
+$ blastit check --json -- vendor/bin/phpunit
 ```
 
 ```json
@@ -144,7 +143,7 @@ $ uv run blastit check --json -- vendor/bin/phpunit
 $ blastit --preset compose-traefik
 ```
 
-In the image, one pool per route runs as that route's uid, so `0600` stays private.
-Match `pm.max_children` to `workers`. Locally the preset exits `1`: production refuses
-to run without its capabilities. See [Deployments](../deploy/index.md) ·
-[the manifest](../reference/manifest.md) · [static assets](static-and-spa.md).
+The image needs the PHP Blastit runs; the first route's uid `21000` needs write access
+to Symfony's `var/` or Laravel's `storage/` and `bootstrap/cache/`. Locally the preset
+exits `1`: production refuses to run without its capabilities. See [Deployments](../deploy/index.md)
+· [the manifest](../reference/manifest.md) · [static assets](static-and-spa.md).

@@ -1113,3 +1113,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T13:54 [MB.3.9.2] (lead) attempt 2/3 started
 - 2026-11-14T13:55 [MB.13] (conductor) created (task) Rewrite the deployments index page for scannability
 - 2026-11-14T13:56 [MB.3.4.6] (lead) status review -> done
+- 2026-11-14T13:56 [MB.3.4.6] (lead) commit 5c4d8c6
+- 2026-11-14T13:56 [MB.3.9.2] (lead) status ready -> active
+- 2026-11-14T13:56 [MB.14] (conductor) created (task) Dogfood: make docs-serve builds the site and serves it through blastit
+- 2026-11-14T13:57 [MB.14] (lead) status ready -> active
+- 2026-11-14T13:57 [MB.14] (lead) attempt 1/3 started
+- 2026-11-14T13:57 [MB.14] (lead) base 5c4d8c63a6b7c0af22edb4d07c6d1c77fd9be6d3
+- 2026-11-14T13:58 [MB.15] (conductor) created (task) blastit dev must reap stage 1 on SIGTERM (no orphan, no port left open)
+- 2026-11-14T13:59 [MB.15] (lead) Premise check: could not reproduce against a freshly built target/debug/blastit. SIGTERM to the dev init pid drains in ~1s (shutdown drain -> process.exited sig
+- 2026-11-14T14:00 [MB.15] (lead) edited fields
+- 2026-11-14T14:02 [MB.3.9.2] (lead) REVIEW FAIL (attempt 2). Five of six findings verified fixed on disk. Remaining: the SAME class of drift my finding (e) named, in three places the attempt-2 swe
+- 2026-11-14T14:02 [MB.3.9.2] (lead) status active -> ready
+- 2026-11-14T14:02 [MB.3.9.2] (lead) attempt 3/3 started
+- 2026-11-14T14:04 [MB.14] (lead) status active -> review
+- 2026-11-14T14:06 [MB.3.7] (lead) node body corrected (2026-11-14) after MB.3.9.1's review: the page no longer carries php-fpm.conf/mkdir/absolute-listen and no longer uses uv init/uv add, so th
+- 2026-11-14T14:06 [MB.3.9] (lead) INSTALL-STORY follow-up (reviewer finding on MB.3.9.1, deferred not fixed): docs/frameworks/php.md teaches 'uv tool install blastit' + bare 'blastit dev', while
+- 2026-11-14T14:09 [MB.3.5.1] (lead) status review -> done
+- 2026-11-14T14:09 [MB.3.9.1] (lead) status review -> done

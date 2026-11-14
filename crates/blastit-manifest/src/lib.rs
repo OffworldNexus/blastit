@@ -60,6 +60,21 @@
 //! assert_eq!(table.route("GET", "/about/"), Some(Match { route: 0, rule: 0 }));
 //! assert_eq!(table.route("GET", "/elsewhere"), None);
 //! ```
+//!
+//! The executor kind table a backend registry checks at boot is the crate
+//! root's too:
+//!
+//! ```
+//! use blastit_manifest::{Executor, FastCgiPolicy};
+//!
+//! assert_eq!(Executor::View.kind(), "wsgi");
+//! assert!(Executor::ALL_KINDS.contains(&"fastcgi"));
+//! let pool = Executor::Pool(FastCgiPolicy {
+//!     entry: "public/index.php".to_string(),
+//!     workers: None,
+//! });
+//! assert_eq!(pool.kind(), "fastcgi");
+//! ```
 
 #![deny(missing_docs)]
 
@@ -74,7 +89,10 @@ pub mod edit;
 
 pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning};
-pub use model::{Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, StaticPolicy};
+pub use model::{
+    Executor, FastCgiPolicy, Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route,
+    StaticPolicy,
+};
 pub use routing::{Match, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable};
 pub use uid::UidLayout;
 

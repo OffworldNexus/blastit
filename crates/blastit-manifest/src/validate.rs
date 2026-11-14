@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 use crate::error::{Location, ManifestError, ManifestErrors, ManifestWarning, regex_message};
-use crate::model::{Manifest, PgGrant, ProxyName, Route, StaticPolicy};
+use crate::model::{FastCgiPolicy, Manifest, PgGrant, ProxyName, Route, StaticPolicy};
 use crate::routing::compile_pattern;
 use crate::uid::UidLayout;
 
@@ -24,6 +24,20 @@ const NO_DOTFILE_SEGMENT: &str = "must not contain a dotfile segment";
 const ANCHORED_PATTERN: &str = "must start with /";
 const AT_MOST_PATTERNS: &str = "at most 32 patterns";
 const AT_MOST_PATTERN_BYTES: &str = "at most 256 bytes";
+
+/// The fixed rules a `[route.fastcgi]` value can break (design §4.1 as amended
+/// by `MB.3.9.2`).
+const MUST_END_IN_PHP: &str = "must end in .php";
+const AT_LEAST_ONE: &str = "must be at least 1";
+const AT_MOST_WORKERS: &str = "at most 64";
+
+/// Why a `[route.fastcgi]` declaration can never run (design §4.1).
+const SPA_NEVER_REACHES_FRONT_CONTROLLER: &str = "spa = true never reaches the front controller";
+const CONNECT_CANNOT_REACH_WORKER: &str = "CONNECT cannot reach a FastCGI worker";
+const TRACE_CANNOT_REACH_WORKER: &str = "TRACE cannot reach a FastCGI worker";
+
+/// How many requests a FastCGI pool may serve at once (design §4.1).
+const MAX_WORKERS: u32 = 64;
 
 /// How many `immutable` patterns one route may declare (`R5`).
 const MAX_PATTERNS: usize = 32;
@@ -45,6 +59,7 @@ pub(crate) fn validate(
     check_queries(manifest, &mut errors);
     check_routes(manifest, &mut errors);
     check_static(manifest, &mut errors);
+    check_fastcgi(manifest, &mut errors);
     check_uids(manifest, base, &mut errors);
 
     if errors.is_empty() {
@@ -482,6 +497,12 @@ fn check_static_declarations(
     location: Location,
     errors: &mut Vec<ManifestError>,
 ) {
+    // A route with a front controller does reach an executor, so nothing on it
+    // is dead; `spa = true` beside `[route.fastcgi]` is refused by
+    // `check_fastcgi` instead (design §4.1 keeps both arms).
+    if route.fastcgi().is_some() {
+        return;
+    }
     let why = if policy.spa {
         "spa = true never reaches the app"
     } else if manifest.app().is_none() {
@@ -508,6 +529,116 @@ fn check_static_declarations(
     }
     if !route.groups().is_empty() {
         dead("groups".to_string());
+    }
+}
+
+/// The `[route.fastcgi]` blocks: the block's rules and the declarations that
+/// can never reach the front controller (design §4.1 as amended by
+/// `MB.3.9.2`).
+///
+/// Existence, symlinks and socket state are not checked here: the explicit
+/// probe call of `MB.3.5.2` owns those, so a manifest still validates on a
+/// machine that has not started the pool. There is no `listen` key to check:
+/// blastit derives the socket per route.
+fn check_fastcgi(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let Some(policy) = route.fastcgi() else {
+            continue;
+        };
+        let location = Location::Route {
+            index,
+            name: route.name().to_string(),
+        };
+        check_fastcgi_entry(&location, policy, errors);
+        check_fastcgi_workers(&location, policy, errors);
+        check_fastcgi_declarations(route, &location, errors);
+    }
+}
+
+/// `entry` is a relative `.php` path that stays in the manifest's directory
+/// (design §4.1).
+///
+/// Whether it is *under* `[route.static] root`, exists, is a regular file and is
+/// readable is the probe's; its `OutsideRoot`/`Missing`/… map onto this variant
+/// with the design's rule phrases.
+fn check_fastcgi_entry(
+    location: &Location,
+    policy: &FastCgiPolicy,
+    errors: &mut Vec<ManifestError>,
+) {
+    let entry = policy.entry.as_str();
+    let rule = if entry.is_empty() || entry.starts_with('/') {
+        Some(RELATIVE_PATH)
+    } else if entry.contains('\\') {
+        Some(NO_BACKSLASH)
+    } else if has_parent_segment(entry) {
+        Some(NO_PARENT_SEGMENT)
+    } else if has_control_byte(entry) {
+        Some(NO_CONTROL_BYTE)
+    } else if !entry.to_ascii_lowercase().ends_with(".php") {
+        Some(MUST_END_IN_PHP)
+    } else {
+        None
+    };
+    if let Some(rule) = rule {
+        errors.push(ManifestError::FastCgiEntryInvalid {
+            location: location.clone(),
+            entry: policy.entry.clone(),
+            rule: rule.to_string(),
+        });
+    }
+}
+
+/// An explicit `workers` override is the pool size, from `1` to `64` (design
+/// §4.1 as amended by `MB.3.9.2`).
+///
+/// Absent is not a rule violation: blastit derives the value from its
+/// concurrency budget, and that derivation belongs to the scheduler.
+fn check_fastcgi_workers(
+    location: &Location,
+    policy: &FastCgiPolicy,
+    errors: &mut Vec<ManifestError>,
+) {
+    let Some(workers) = policy.workers else {
+        return;
+    };
+    let why = if workers == 0 {
+        Some(AT_LEAST_ONE)
+    } else if workers > MAX_WORKERS {
+        Some(AT_MOST_WORKERS)
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        errors.push(ManifestError::FastCgiWorkersInvalid {
+            location: location.clone(),
+            workers,
+            why,
+        });
+    }
+}
+
+/// A FastCGI route may not declare a form that never reaches a worker (design
+/// §4.1): `spa = true` answers every miss itself, and `CONNECT`/`TRACE` are the
+/// two methods a front controller cannot serve.
+fn check_fastcgi_declarations(route: &Route, location: &Location, errors: &mut Vec<ManifestError>) {
+    let mut dead = |key: &str, why: &'static str| {
+        errors.push(ManifestError::FastCgiDeadDeclaration {
+            location: location.clone(),
+            key: key.to_string(),
+            why,
+        });
+    };
+    if route.static_policy().is_some_and(|policy| policy.spa) {
+        dead("spa = true", SPA_NEVER_REACHES_FRONT_CONTROLLER);
+    }
+    if let Some(methods) = route.methods() {
+        if methods.iter().any(|method| method == "CONNECT") {
+            dead("CONNECT", CONNECT_CANNOT_REACH_WORKER);
+        }
+        if methods.iter().any(|method| method == "TRACE") {
+            dead("TRACE", TRACE_CANNOT_REACH_WORKER);
+        }
     }
 }
 
@@ -669,7 +800,220 @@ fn warnings(manifest: &Manifest) -> Vec<ManifestWarning> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::{valid_method, valid_route_name};
+    use crate::Manifest;
+    use crate::UidLayout;
+    use crate::error::{Location, ManifestError};
+
+    /// A manifest with one route named `app` and the given `[route.fastcgi]`
+    /// body.
+    fn fastcgi(fields: &str) -> String {
+        format!(
+            "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
+             [route.fastcgi]\n{fields}"
+        )
+    }
+
+    fn location() -> Location {
+        Location::Route {
+            index: 0,
+            name: "app".to_string(),
+        }
+    }
+
+    fn errors(source: &str) -> Vec<ManifestError> {
+        Manifest::parse_and_validate(source, UidLayout::DEFAULT_BASE)
+            .expect_err("the manifest must not boot")
+            .into_errors()
+    }
+
+    fn manifest_ok(source: &str) {
+        let (manifest, warnings) = Manifest::parse_and_validate(source, UidLayout::DEFAULT_BASE)
+            .unwrap_or_else(|errors| panic!("the manifest must boot:\n{errors}\n{source}"));
+        assert_eq!(warnings, vec![], "the block warns about nothing");
+        assert_eq!(manifest.route_count(), 1);
+        assert!(manifest.route(0).expect("route 0").fastcgi().is_some());
+    }
+
+    fn entry_invalid(entry: &str, rule: &str) -> ManifestError {
+        ManifestError::FastCgiEntryInvalid {
+            location: location(),
+            entry: entry.to_string(),
+            rule: rule.to_string(),
+        }
+    }
+
+    /// `entry` is a relative `.php` path that stays in the manifest directory;
+    /// every refused spelling names its rule, and the accepted twins boot.
+    #[test]
+    fn fastcgi_entry_must_be_a_relative_php_path() {
+        for (entry, rule) in [
+            ("", "must be a relative path"),
+            ("/index.php", "must be a relative path"),
+            (r"public\index.php", "must not contain \\"),
+            ("../index.php", "must not contain .."),
+            ("index.txt", "must end in .php"),
+        ] {
+            let source = fastcgi(&format!("entry = {entry:?}\n"));
+            assert_eq!(
+                errors(&source),
+                vec![entry_invalid(entry, rule)],
+                "entry {entry:?}"
+            );
+        }
+
+        // A control byte cannot be written through Rust's `Debug` escaping.
+        assert_eq!(
+            errors(&fastcgi("entry = \"in\\u0001dex.php\"\n")),
+            vec![entry_invalid(
+                "in\u{1}dex.php",
+                "must not contain a control byte"
+            )]
+        );
+
+        for entry in ["index.php", "public/index.PHP"] {
+            manifest_ok(&fastcgi(&format!("entry = {entry:?}\n")));
+        }
+    }
+
+    /// `listen` is blastit's socket, not a manifest key: writing one is refused
+    /// by name and says who creates it, and the entry-only block is accepted.
+    #[test]
+    fn a_listen_key_is_refused_and_says_blastit_owns_the_socket() {
+        assert_eq!(
+            errors(&fastcgi(
+                "entry = \"index.php\"\nlisten = \"run/fpm.sock\"\n"
+            )),
+            vec![ManifestError::FastCgiListenDerived {
+                location: location(),
+            }]
+        );
+
+        manifest_ok(&fastcgi("entry = \"index.php\"\n"));
+    }
+
+    /// An explicit `workers` override is the pool size, from `1` to `64`; an
+    /// absent one is accepted and derived by blastit.
+    #[test]
+    fn fastcgi_workers_stay_between_one_and_sixty_four() {
+        for (workers, why) in [
+            (0, "must be at least 1"),
+            (65, "at most 64"),
+            (u32::MAX, "at most 64"),
+        ] {
+            let source = fastcgi(&format!("entry = \"index.php\"\nworkers = {workers}\n"));
+            assert_eq!(
+                errors(&source),
+                vec![ManifestError::FastCgiWorkersInvalid {
+                    location: location(),
+                    workers,
+                    why,
+                }],
+                "workers {workers}"
+            );
+        }
+
+        for workers in [1, 4, 64] {
+            manifest_ok(&fastcgi(&format!(
+                "entry = \"index.php\"\nworkers = {workers}\n"
+            )));
+        }
+    }
+
+    /// `spa = true` beside `[route.fastcgi]` is a FastCGI dead declaration, not
+    /// the static one; `spa = false` is the accepted twin.
+    #[test]
+    fn spa_beside_fastcgi_never_reaches_the_front_controller() {
+        let source = "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
+                      [route.static]\nroot = \"public\"\nspa = true\n\
+                      [route.fastcgi]\nentry = \"public/index.php\"\n";
+        assert_eq!(
+            errors(source),
+            vec![ManifestError::FastCgiDeadDeclaration {
+                location: location(),
+                key: "spa = true".to_string(),
+                why: "spa = true never reaches the front controller",
+            }]
+        );
+
+        manifest_ok(
+            "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
+             [route.static]\nroot = \"public\"\nspa = false\n\
+             [route.fastcgi]\nentry = \"public/index.php\"\n",
+        );
+    }
+
+    /// `CONNECT` and `TRACE` never reach a FastCGI worker; an ordinary method
+    /// set (or none at all) is the accepted twin.
+    #[test]
+    fn connect_and_trace_cannot_reach_a_fastcgi_worker() {
+        for (method, why) in [
+            ("CONNECT", "CONNECT cannot reach a FastCGI worker"),
+            ("TRACE", "TRACE cannot reach a FastCGI worker"),
+        ] {
+            let source = fastcgi("entry = \"index.php\"\n").replace(
+                "path = ['.*']",
+                &format!("path = ['.*']\nmethods = [\"{method}\"]"),
+            );
+            assert_eq!(
+                errors(&source),
+                vec![ManifestError::FastCgiDeadDeclaration {
+                    location: location(),
+                    key: method.to_string(),
+                    why,
+                }],
+                "method {method}"
+            );
+        }
+
+        for methods in ["", "methods = [\"GET\", \"POST\"]\n"] {
+            manifest_ok(&format!(
+                "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n{methods}\
+                 [route.fastcgi]\nentry = \"index.php\"\n"
+            ));
+        }
+    }
+
+    /// The four new messages render exactly as the design's table spells them.
+    #[test]
+    fn the_fastcgi_messages_match_the_design_table() {
+        assert_eq!(
+            ManifestError::FastCgiEntryInvalid {
+                location: location(),
+                entry: "index.php".to_string(),
+                rule: "must be under static root \"public\"".to_string(),
+            }
+            .to_string(),
+            "route \"app\" (index 0): fastcgi entry \"index.php\": must be under static root \"public\""
+        );
+        assert_eq!(
+            ManifestError::FastCgiListenDerived {
+                location: location(),
+            }
+            .to_string(),
+            "route \"app\" (index 0): fastcgi listen: unknown key; the pool socket is created by blastit"
+        );
+        assert_eq!(
+            ManifestError::FastCgiWorkersInvalid {
+                location: location(),
+                workers: 0,
+                why: "must be at least 1",
+            }
+            .to_string(),
+            "route \"app\" (index 0): fastcgi workers 0: must be at least 1"
+        );
+        assert_eq!(
+            ManifestError::FastCgiDeadDeclaration {
+                location: location(),
+                key: "spa = true".to_string(),
+                why: "spa = true never reaches the front controller",
+            }
+            .to_string(),
+            "route \"app\" (index 0): spa = true never reaches the front controller"
+        );
+    }
 
     #[test]
     fn route_names() {

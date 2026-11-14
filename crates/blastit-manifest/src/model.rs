@@ -318,6 +318,51 @@ pub struct StaticPolicy {
     pub immutable: Vec<String>,
 }
 
+/// A `[route.fastcgi]` block: the front controller a route hands its requests to
+/// (design §4.1 as amended by `MB.3.9.2`, `ADR-0008` decision 2).
+///
+/// The pool socket does not exist as a manifest key: blastit spawns and
+/// supervises the pool, so the socket is derived per route inside blastit's
+/// private run directory and no manifest can redirect it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FastCgiPolicy {
+    /// The front controller, relative to the directory holding `blastit.toml`
+    /// (beneath `[route.static] root` when both blocks are declared).
+    pub entry: String,
+    /// An explicit pool size, or `None` to let blastit derive one from its
+    /// concurrency budget.
+    ///
+    /// The derivation is the scheduler's (`MB.3.9.2`), not the manifest's: an
+    /// absent value is not a default this crate invents, it is "use the budget".
+    pub workers: Option<u32>,
+}
+
+/// The process a route's requests are handed to (design §4.2.1).
+///
+/// Not `Copy`: the pool arm owns a [`FastCgiPolicy`] with `String` fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Executor {
+    /// The route's WSGI view process; [`Executor::kind`] is `"wsgi"`.
+    View,
+    /// The route's FastCGI pool; [`Executor::kind`] is `"fastcgi"`.
+    Pool(FastCgiPolicy),
+}
+
+impl Executor {
+    /// Every executor kind this build has: the single source of the backend
+    /// kinds a registry accepts at boot.
+    pub const ALL_KINDS: &'static [&'static str] = &["wsgi", "fastcgi"];
+
+    /// The backend kind, spelled as `BackendBuilder::kind` spells it: `"wsgi"`
+    /// for [`Executor::View`], `"fastcgi"` for [`Executor::Pool`].
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::View => "wsgi",
+            Self::Pool(_) => "fastcgi",
+        }
+    }
+}
+
 /// A `[[route]]` entry: one sandbox, one process, one uid (§6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
@@ -330,6 +375,7 @@ pub struct Route {
     grants: BTreeMap<ProxyName, Grant>,
     ingress: Option<IngressPolicy>,
     static_policy: Option<StaticPolicy>,
+    fastcgi: Option<FastCgiPolicy>,
 }
 
 impl Route {
@@ -353,6 +399,7 @@ impl Route {
             grants,
             ingress: None,
             static_policy: None,
+            fastcgi: None,
         }
     }
 
@@ -360,6 +407,13 @@ impl Route {
     /// (`R1`). Parsing is the only caller.
     pub(crate) fn with_static(mut self, static_policy: Option<StaticPolicy>) -> Self {
         self.static_policy = static_policy;
+        self
+    }
+
+    /// The same route with its `[route.fastcgi]` block, if it declared one
+    /// (design §4.1). Parsing is the only caller.
+    pub(crate) fn with_fastcgi(mut self, fastcgi: Option<FastCgiPolicy>) -> Self {
+        self.fastcgi = fastcgi;
         self
     }
 
@@ -430,6 +484,12 @@ impl Route {
     /// none and the responder answers nothing for it (`R1`).
     pub fn static_policy(&self) -> Option<&StaticPolicy> {
         self.static_policy.as_ref()
+    }
+
+    /// The route's `[route.fastcgi]` block, or `None` when the route declares
+    /// none and its requests go to the app instead (design §4.1).
+    pub fn fastcgi(&self) -> Option<&FastCgiPolicy> {
+        self.fastcgi.as_ref()
     }
 
     /// Whether this is the method-unrestricted catch-all `--learn` inserts new
@@ -517,6 +577,7 @@ pub struct Manifest {
     proxies: BTreeMap<ProxyName, Proxy>,
     groups: BTreeMap<String, Group>,
     routes: Vec<Route>,
+    route_lines: Vec<u32>,
     unresolved_grants: Vec<UnresolvedGrant>,
 }
 
@@ -625,6 +686,10 @@ impl Manifest {
     /// True when the manifest declares no `app` and every route is static: the
     /// one shape that needs no WSGI callable (`R13`).
     ///
+    /// A route that declares `[route.fastcgi]` has its own executor too, but it
+    /// is not a static site: the front controller still runs, so it is not
+    /// all-static (design §4.2 "one predicate, one spelling").
+    ///
     /// `BLASTIT_APP` may still supply an app, so this is the manifest-level
     /// answer and the boot decides what to do with it. A manifest that mixes a
     /// static route with a route that forwards declares no app either, but it
@@ -635,7 +700,30 @@ impl Manifest {
             && self
                 .routes
                 .iter()
-                .all(|route| route.static_policy().is_some())
+                .all(|route| route.static_policy().is_some() && route.fastcgi().is_none())
+    }
+
+    /// True when every route runs on its own executor: a `[route.static]` root
+    /// or a `[route.fastcgi]` front controller (design §4.2).
+    ///
+    /// Such a manifest needs no `app` at all, so a boot may skip the WSGI
+    /// interpreter (and `check` may run an external suite instead of pytest).
+    /// An empty manifest is not bootable without an app.
+    pub fn can_boot_without_app(&self) -> bool {
+        !self.routes.is_empty()
+            && self
+                .routes
+                .iter()
+                .all(|route| route.fastcgi().is_some() || route.static_policy().is_some())
+    }
+
+    /// The one-based line of every `[[route]]` header, in routing order.
+    ///
+    /// A boot error names the manifest line it came from, and the parsed
+    /// document no longer remembers where a route was written, so parsing keeps
+    /// the header lines beside the routes.
+    pub fn route_lines(&self) -> Vec<u32> {
+        self.route_lines.clone()
     }
 
     /// The declared roots, route index and absolute path, in manifest order:
@@ -755,6 +843,13 @@ impl Manifest {
         self
     }
 
+    /// The same manifest with the lines its `[[route]]` headers were written
+    /// on; parsing is the only caller.
+    pub(crate) fn with_route_lines(mut self, route_lines: Vec<u32>) -> Self {
+        self.route_lines = route_lines;
+        self
+    }
+
     /// Whether a statement is already allowed by the route's own table grants
     /// or by the grants of a group it takes (`R34`).
     ///
@@ -835,6 +930,7 @@ impl Manifest {
             proxies,
             groups,
             routes,
+            route_lines: Vec::new(),
             unresolved_grants,
         }
     }
@@ -943,6 +1039,86 @@ mod tests {
         assert_eq!(assembled(1).version(), 1);
         assert_eq!(assembled(2).version(), 2);
         assert_eq!(assembled(0).version(), 0);
+    }
+
+    /// The executor kind table is the one place a backend registry learns the
+    /// spellings it accepts; both arms are proven, and the type is `Clone`
+    /// (not `Copy`, since the pool arm owns strings).
+    #[test]
+    fn executor_kinds_are_the_one_table() {
+        assert_eq!(Executor::ALL_KINDS, ["wsgi", "fastcgi"].as_slice());
+        assert_eq!(Executor::View.kind(), "wsgi");
+
+        let pool = Executor::Pool(FastCgiPolicy {
+            entry: "public/index.php".to_string(),
+            workers: Some(4),
+        });
+        assert_eq!(pool.kind(), "fastcgi");
+        assert_eq!(pool.clone(), pool);
+        assert_ne!(pool, Executor::View);
+    }
+
+    /// `can_boot_without_app` accepts only a manifest whose every route has its
+    /// own executor; `is_all_static` keeps its 0.2.0 meaning and rejects a route
+    /// with a front controller even when it also serves files.
+    #[test]
+    fn the_boot_predicates_read_every_routes_executor() {
+        fn parsed(source: &str) -> Manifest {
+            Manifest::from_toml_str(source).expect("the manifest parses")
+        }
+
+        let static_site = parsed(
+            "version = 1\n[[route]]\nname = \"site\"\npath = ['.*']\n\
+             [route.static]\nroot = \"public\"\n",
+        );
+        assert!(static_site.can_boot_without_app());
+        assert!(static_site.is_all_static());
+
+        // A FastCGI route is its own executor, so no app is needed — but the
+        // front controller runs, so the manifest is not a static site.
+        let php = parsed(
+            "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
+             [route.fastcgi]\nentry = \"index.php\"\n",
+        );
+        assert!(php.can_boot_without_app());
+        assert!(!php.is_all_static());
+
+        // The accepted twin of "not all-static": files and a front controller.
+        let both = parsed(
+            "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
+             [route.static]\nroot = \"public\"\n\
+             [route.fastcgi]\nentry = \"public/index.php\"\n",
+        );
+        assert!(both.can_boot_without_app());
+        assert!(!both.is_all_static());
+
+        // A plain forwarding route still needs the app, and an empty manifest
+        // needs everything.
+        let mixed = parsed(
+            "version = 1\n\n[[route]]\nname = \"site\"\npath = ['/assets/.*']\n\
+             [route.static]\nroot = 'public'\n\n[[route]]\nname = \"app\"\npath = ['.*']\n",
+        );
+        assert!(!mixed.can_boot_without_app());
+        assert!(!mixed.is_all_static());
+
+        let empty = parsed("version = 1\n");
+        assert!(!empty.can_boot_without_app());
+        assert!(!empty.is_all_static());
+    }
+
+    /// `route_lines` returns the `[[route]]` header lines in routing order, and
+    /// nothing for a manifest that declares no route.
+    #[test]
+    fn route_lines_are_the_header_lines_in_routing_order() {
+        let manifest = Manifest::from_toml_str(
+            "version = 1\n\n[[route]]\nname = \"a\"\npath = ['.*']\n\n\
+             [[route]]\nname = \"b\"\npath = ['/b']\n",
+        )
+        .expect("the manifest parses");
+        assert_eq!(manifest.route_lines(), vec![3, 7]);
+
+        let without = Manifest::from_toml_str("version = 1\n").expect("the manifest parses");
+        assert_eq!(without.route_lines(), Vec::<u32>::new());
     }
 
     /// `normalize` writes every bind placeholder as `$?`, which no SQL parser

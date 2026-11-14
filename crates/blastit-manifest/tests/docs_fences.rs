@@ -4,7 +4,7 @@
 //! Standard tier on purpose: `MA.3` owns `docs/**`, and a protected copy of this
 //! suite would make every documentation edit a `critical_guard` conflict. What
 //! it still proves is the developer experience itself — a reader who copies one
-//! of these seven blocks into `./blastit.toml` boots.
+//! of these eight blocks into `./blastit.toml` boots.
 //!
 //! Only the `toml title="blastit.toml"` fences are complete manifests. Partial
 //! fragments (`docs/reference/manifest.md`) are prose, not files.
@@ -14,15 +14,16 @@ use std::path::{Path, PathBuf};
 
 use blastit_manifest::{Manifest, ManifestError, StaticPolicy, UidLayout};
 
-/// The seven files that carry a complete `blastit.toml`, relative to the
+/// The eight files that carry a complete `blastit.toml`, relative to the
 /// workspace root.
-const FILES: [&str; 7] = [
+const FILES: [&str; 8] = [
     "README.md",
     "docs/index.md",
     "docs/getting-started.md",
     "docs/local.md",
     "docs/frameworks/django.md",
     "docs/frameworks/flask.md",
+    "docs/frameworks/php.md",
     "docs/frameworks/static-and-spa.md",
 ];
 
@@ -123,7 +124,7 @@ fn every_documented_manifest_parses_and_validates() {
             total += 1;
         }
     }
-    assert_eq!(total, 7, "the documented set is exactly seven manifests");
+    assert_eq!(total, 8, "the documented set is exactly eight manifests");
 }
 
 #[test]
