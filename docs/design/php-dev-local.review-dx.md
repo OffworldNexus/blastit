@@ -1,11 +1,15 @@
 # DX review — `docs/frameworks/php.md` (mechanism-neutral rewrite)
 
+> **HISTORICAL (MB.3.32):** this record cites the FastCGI design document,
+> which was deleted when `ADR-0010` replaced it with embedded `libphp`. Every
+> citation below is to the historical record, not to a live design.
+
 ## Round 3 — verification of D18–D28 (page still 149 lines)
 
 Checked against the text, not the fix list: `docs/frameworks/php.md` (149),
 `docs/reference/settings.md:22-26,51-56`, `docs/reference/manifest.md:68-106,205-231,308`,
 `docs/getting-started.md:34-36`, `docs/frameworks/index.md:54-61`,
-`docs/design/php-fastcgi.md:62,146,154,157,1964`, `docs/ci.md` headings.
+the retired design:62,146,154,157,1964, `docs/ci.md` headings.
 
 | Id | Status | Covered by |
 |---|---|---|
@@ -53,7 +57,7 @@ VERDICT: FAIL — 0 blocker, 1 major.
 
 Reviewed: `docs/frameworks/php.md` as it stands (149 lines),
 `docs/reference/settings.md:22-26` (§Backends),
-`docs/design/php-fastcgi.md` §1.1–§1.4 and the `MB.3.9.2` banner,
+the retired design §1.1–§1.4 and the `MB.3.9.2` banner,
 `docs/reference/manifest.md` §Proxies/§Static, `docs/ci.md`, `docs/local.md`,
 `docs/frameworks/static-and-spa.md`, `docs/VISION.md`. Mechanism test: every
 sentence must be true under both `php-fpm` spawn and embedded libphp; a sentence
@@ -207,7 +211,7 @@ Where: `docs/frameworks/php.md:122-123`
 What a reader does wrong: the nearest noun is "pytest", so "without it" reads as
 "without pytest"; the page's command has no pytest, so the reader may install pytest
 or think `check` will fail. The intended meaning is "without a command after `--`"
-(`docs/design/php-fastcgi.md:1826`: `check` with no `--` exits `2`).
+(the retired design:1826: `check` with no `--` exits `2`).
 
 Fix: "`check` exits `2` when no command follows `--`." (And delete "not pytest"; see
 D25.)
@@ -279,7 +283,7 @@ Where: `docs/frameworks/php.md:33`
 > budget Blastit derives is a boot error
 
 What a reader does wrong: an explicit value equal to the derived budget is legal
-(`docs/design/php-fastcgi.md:31-33`), but "can only lower" implies strict inequality;
+(the retired design:31-33), but "can only lower" implies strict inequality;
 a reader who wants the default number may think `workers = 16` is refused. The
 boot-error clause is correct; the first clause is not.
 
@@ -302,7 +306,7 @@ Where: `docs/frameworks/php.md:44-45`, `:115-119`
 What a reader does wrong: (a) the `root` proposal is a `dev --learn` feature
 (interactive click-through); `check --learn` runs the suite and writes queries, and
 the design does not pass `--learn` to the child `dev`
-(`docs/design/php-fastcgi.md:121-122`), so a reader who runs `check --learn` on an app
+(the retired design:121-122), so a reader who runs `check --learn` on an app
 with no `[route.static]` gets no `root` proposal. (b) The `check --learn` command sits
 under `## CI/CD`; `:45` only says "Review the diff, then run without it", which does
 not tell a CI author that the block is one-time. A reader may add it to the workflow,
@@ -354,7 +358,7 @@ mechanism-neutral. A mechanism-neutrality defect is a DX defect here: every
 sentence that commits to a pool is a sentence the reader must unlearn within days.
 
 Read for this review: the page, `docs/reference/settings.md` §Backends,
-`docs/design/php-fastcgi.md` §1.1–§1.4 and §4.1 (banner: `listen` gone, `workers`
+the retired design §1.1–§1.4 and §4.1 (banner: `listen` gone, `workers`
 optional, dev-pool lifecycle re-decided), `docs/frameworks/django.md`,
 `docs/frameworks/static-and-spa.md`, and the pages the target links
 (`docs/ci.md`, `docs/reference/manifest.md`, `docs/local.md`).

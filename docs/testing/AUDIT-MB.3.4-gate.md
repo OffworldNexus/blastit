@@ -1,5 +1,9 @@
 # AUDIT MB.3.4-gate — `blastit-fastcgi` epic gate (delta re-audit)
 
+> **HISTORICAL (MB.3.32):** this record cites the FastCGI design document,
+> which was deleted when `ADR-0010` replaced it with embedded `libphp`. Every
+> citation below is to the historical record, not to a live design.
+
 - **Date:** 2026-11-14
 - **Node / gate:** `plan/nodes/MB/MB.3/MB.3.4/NODE.md` (epic, 5 children `done`:
   `MB.3.4.1`–`MB.3.4.5`).
@@ -12,7 +16,7 @@
   `crates/blastit-manifest/**` (6 files, +1010/−15) and `plan/` bookkeeping. That does
   not touch this audit: `blastit-fastcgi` has **zero normal dependencies**, so neither
   the baseline nor the mutation campaign compiles or links the manifest crate.
-- **Requirements:** `docs/design/php-fastcgi.md` §4.5.1–§4.5.2 (codec vs scheduler
+- **Requirements:** the retired design §4.5.1–§4.5.2 (codec vs scheduler
   client; records, ids, lifetimes), §4.6.1–§4.6.3 (param contract), §4.7 (binary refusal
   matrix), §7.1 (tiers), §7.2 (`R1`–`R20` → enforcing module → suite);
   `docs/decisions/ADR-0008-*.md` (decision 4/§4 text), `docs/knowledge/LESSONS.md`

@@ -4,10 +4,12 @@
 mod common;
 
 use blastit_manifest::{
-    Columns, Manifest, ManifestError, ManifestErrors, PgGrant, Protocol, ProxyName,
+    Columns, Manifest, ManifestError, ManifestErrors, PgGrant, Protocol, ProxyName, UidLayout,
 };
 
-use common::{SECTION_5_1, SECTION_6, parse_errors, section_5_1, section_6, text_map, texts};
+use common::{
+    SECTION_5_1, SECTION_6, parse_errors, section_5_1, section_6, text_map, texts, validate_errors,
+};
 
 #[test]
 fn section_6_example_parses() {
@@ -907,34 +909,42 @@ fn functions_must_be_a_list_of_names() {
 }
 
 //
-// Retired route keys (`MB.3.17`, `ADR-0010`).
+// A retired key is an ordinary unknown key.
 //
 
-/// `[route.fastcgi]` stops existing as a key: the external `php-fpm` path was
-/// deleted (`ADR-0010` §1, "no fallback"), so a manifest that still writes the
-/// block is refused as an unknown key that names it — not silently ignored,
-/// not read as an inline grant, and not a deprecation warning.
+/// `[route.fastcgi]` is not in the grammar: a route key outside `ROUTE_KEYS` is
+/// read as a proxy name whose value is an inline grant, so the block gets
+/// exactly the sentence any typo gets (`[route.warehouse]` below) — no curated
+/// message, no alias, no deprecation path (`ADR-0010` §1: embedded PHP only, and
+/// the transport was never released).
 ///
-/// The twin in the same test is the same route with the block that replaces the
-/// fallback: `[route.php]` parses (`MB.3.5.4`), so what fails below is the
-/// retired key and not the manifest around it.
+/// The twin in the same test is the block that replaced it: `[route.php]`
+/// parses, so what fails above is the retired key and not the manifest around it.
 #[test]
-fn fastcgi_is_an_unknown_route_key_and_the_php_twin_parses() {
-    let errors = parse_errors(
-        "version = 1\n\
-         [[route]]\nname = \"app\"\npath = ['.*']\n\
-         [route.fastcgi]\nentry = \"public/index.php\"\n",
-    );
-    assert_eq!(
-        errors,
-        ManifestErrors::from(ManifestError::UnknownKey {
-            path: "route[0].fastcgi".to_string(),
-        })
-    );
-    let rendered = errors.to_string();
+fn fastcgi_is_an_ordinary_unknown_route_key_and_the_php_twin_parses() {
+    let retired = "version = 1\n\
+                   [[route]]\nname = \"app\"\npath = ['.*']\n\
+                   [route.fastcgi]\nentry = \"public/index.php\"\n";
+    // Nothing special happens at parse time ...
     assert!(
-        rendered.contains("route[0].fastcgi: unknown key"),
-        "the diagnostic names the retired key: {rendered}"
+        Manifest::from_toml_str(retired).is_ok(),
+        "the key is not special-cased: it is simply not a route key"
+    );
+
+    // ... and a typo twin gets byte-identical treatment, so a curated refusal
+    // cannot come back without this failing.
+    let typo = retired.replace("[route.fastcgi]", "[route.warehouse]");
+    let retired_errors = validate_errors(retired, UidLayout::DEFAULT_BASE);
+    let typo_errors = validate_errors(&typo, UidLayout::DEFAULT_BASE);
+    assert_eq!(
+        retired_errors.to_string(),
+        typo_errors.to_string().replace("warehouse", "fastcgi")
+    );
+    assert!(
+        retired_errors
+            .to_string()
+            .contains(r#"grant on unknown proxy "fastcgi""#),
+        "the diagnostic is the generic one: {retired_errors}"
     );
 
     // The accepted twin: the same route, with the block that replaces the

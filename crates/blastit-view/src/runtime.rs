@@ -4,7 +4,7 @@
 //! A route worker process runs exactly one [`WorkerRuntime`]: the thing that
 //! executes one route's application code, whatever language that is, on the
 //! `view.chan` transport. On the scheduler's side of the same seam,
-//! `blastit_backend::Upstream` (`ADR-0008` Decision 1, extended by `ADR-0009`)
+//! `blastit_backend::Upstream` (`ADR-0009`)
 //! decides *when* to dispatch and how to charge the result; a
 //! [`WorkerRuntime`] only answers a request once it has been dispatched.
 //!

@@ -19,3 +19,39 @@ edited fields
 ## 2026-11-14T20:37 [lead]
 
 OWNER CLARIFICATION 2026-11-14: never released, no backward compat. RETIRED_ROUTE_KEYS + its curated self-naming branch/tests are DELETED; [route.fastcgi] is an ordinary unknown key. Protected critical_php_manifest.rs edit authorized by critical_guard --node MB.3.32 (prefer deleting the pointless case). ADR-0008 becomes a 2-3 line tombstone, decisions/README row updated. No #[deprecated]/legacy alias/old-path Option anywhere. Paths now include decisions/README.md and the two manifest test files.
+
+## 2026-11-14T22:14 [lead]
+
+status ready -> active
+
+## 2026-11-14T22:14 [lead]
+
+attempt 1/3 started
+
+## 2026-11-14T22:14 [lead]
+
+base 136f2d376089ac581de7794c08ea8689f42336c3
+
+## 2026-11-14T22:14 [lead]
+
+edited fields
+
+## 2026-11-14T22:18 [planner]
+
+edited fields
+
+## 2026-11-14T22:23 [lead]
+
+edited fields
+
+## 2026-11-14T22:23 [lead]
+
+lead: no_python_build.rs added to paths (2-line asserted-sentence update, refusal behaviour unchanged, authorized but previously out of scope)
+
+## 2026-11-14T22:23 [lead]
+
+status active -> review
+
+## 2026-11-14T22:26 [lead]
+
+status review -> done

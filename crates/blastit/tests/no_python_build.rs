@@ -44,7 +44,8 @@ path = ['.*']
 ";
 
 /// One route that still asks for the external `php-fpm` pool Blastit deleted
-/// (`MB.3.17`): the key is retired, so no build — this one included — parses it.
+/// (`MB.3.17`): the key has no alias, so it is an ordinary unknown route key and
+/// no build — this one included — boots the manifest.
 const RETIRED_EXTERNAL_PHP: &str = "\
 version = 1
 
@@ -180,8 +181,8 @@ fn a_manifest_asking_for_the_retired_external_php_pool_is_refused_by_name() {
         "a startup error writes nothing on stdout (§1.1)"
     );
     assert!(
-        stderr.contains("route[0].fastcgi: unknown key"),
-        "the refusal names the retired key: {stderr}"
+        stderr.contains("grant on unknown proxy \"fastcgi\""),
+        "the refusal is the ordinary unknown-route-key one, and it names the key: {stderr}"
     );
     assert!(
         !stderr.contains(INSTALL),

@@ -401,7 +401,8 @@ e2e: ## Build wheel and run Docker + rootless capability e2e tests
 # PHP headers skips a minor with one line naming the package, so `make check`
 # stays green on a PHP-free machine: the shim is *built* here, and only
 # `php-sapi-e2e` (Docker + Debian's `libphp8.4-embed`) *proves* that it loads,
-# serves a request, contains an `exit()`, and refuses the four FastCGI names.
+# serves a request, contains an `exit()`, and refuses the four reserved CGI
+# parameter names.
 PHP_MINORS ?= 8.4 8.3 8.2
 PHP_SAPI_CRATE := $(CURDIR)/crates/blastit-php-sapi
 PHP_SAPI_OUT ?= $(CURDIR)/target/php-sapi

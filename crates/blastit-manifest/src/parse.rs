@@ -30,18 +30,6 @@ const ROUTE_KEYS: &[&str] = &[
     "name", "path", "methods", "groups", "egress", "prefork", "ingress", "static", "php",
 ];
 
-/// Route keys Blastit **retired**: a manifest that still writes one is refused
-/// as an unknown key that names it (`MB.3.17`, `ADR-0010` §1).
-///
-/// `fastcgi` was the external `php-fpm` path. Making it an unknown key — rather
-/// than a silently ignored block or a deprecation warning — is the whole point
-/// of the removal: a deployment that still asks for the fallback must fail at
-/// the manifest, not at the first request. The name stays listed here (instead
-/// of simply disappearing from [`ROUTE_KEYS`]) so that it cannot be read as a
-/// grant on a proxy an author happens to call `fastcgi`: the refusal is the
-/// same sentence wherever the block is written.
-const RETIRED_ROUTE_KEYS: &[&str] = &["fastcgi"];
-
 /// The index file a `[route.static]` block answers with when it names none.
 const DEFAULT_INDEX: &str = "index.html";
 
@@ -245,9 +233,6 @@ fn check_route(value: &Value, declared: &BTreeSet<&str>, errors: &mut Vec<Manife
             // The same for the PHP front controller's fields (`entry`,
             // `workers`); a key inside it is the parser's to refuse.
             "php" => check_fields(value, errors),
-            // A retired key has no body to check: its one diagnostic comes from
-            // the route walk, so nothing inside it is reported as a field.
-            key if RETIRED_ROUTE_KEYS.contains(&key) => {}
             key if ROUTE_KEYS.contains(&key) => {}
             // A grant is a table, so a reserved key with one is a proxy name
             // only when that proxy is declared.
@@ -592,11 +577,6 @@ impl Parser {
                     "ingress" => ingress = self.ingress(value, &key_path),
                     "static" => static_policy = self.static_policy(value, &key_path),
                     "php" => php = self.php_policy(value, &key_path),
-                    // A key Blastit retired is an unknown key, named — never a
-                    // grant on a proxy of that name (`MB.3.17`).
-                    key if RETIRED_ROUTE_KEYS.contains(&key) => {
-                        self.error(ManifestError::UnknownKey { path: key_path });
-                    }
                     _ => {}
                 }
             }
@@ -618,8 +598,7 @@ impl Parser {
             };
             let mut grants = BTreeMap::new();
             for (key, value) in fields {
-                if ROUTE_KEYS.contains(&key.as_str()) || RETIRED_ROUTE_KEYS.contains(&key.as_str())
-                {
+                if ROUTE_KEYS.contains(&key.as_str()) {
                     continue;
                 }
                 let grant_path = format!("{path}.{}", escape_control(key));

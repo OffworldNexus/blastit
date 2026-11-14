@@ -323,9 +323,8 @@ pub struct StaticPolicy {
 ///
 /// PHP runs embedded in blastit's own unprivileged `view` workers: the host's
 /// NTS `libphp.so` is `dlopen`ed inside the worker, so there is no pool, no
-/// `listen` and no socket a manifest could name. The *shape* rules are the ones
-/// the retired key's design spells out (`docs/design/php-fastcgi.md` §4.1 as
-/// amended, `MB.3.9.2`); only the transport changed.
+/// `listen` and no socket a manifest could name (`ADR-0010` §2 pins `entry` and
+/// the optional `workers` cap).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhpPolicy {
     /// The front controller, relative to the directory holding `blastit.toml`
@@ -345,9 +344,8 @@ pub struct PhpPolicy {
 ///
 /// A closed set of executor kinds rather than a `()`, so the static responder,
 /// the WSGI view and the embedded PHP worker join the same table and a backend
-/// registry is keyed by [`Executor::kind`]. No `[route.fastcgi]` block produces
-/// an arm: the key itself is retired and refused at parse time (`MB.3.17`,
-/// `ADR-0010` §1: embedded PHP only, no fallback).
+/// registry is keyed by [`Executor::kind`]. `[route.fastcgi]` is retired and
+/// produces no arm (`ADR-0010` §1: embedded PHP only, no fallback).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Executor {
     /// The route's WSGI view process; [`Executor::kind`] is `"wsgi"`.
@@ -1061,11 +1059,8 @@ mod tests {
     }
 
     /// The executor kind table is the one place a backend registry learns the
-    /// spellings it accepts. It holds exactly the executors this build has: the
-    /// external FastCGI pool is gone (`MB.3.17`), so `"fastcgi"` must not be a
-    /// kind any more — a registry that still accepted it would dispatch to a
-    /// crate that no longer exists — and the embedded PHP worker is `"php"`
-    /// (`MB.3.5.4`).
+    /// spellings it accepts; the retired `fastcgi` key is no kind at all
+    /// (`ADR-0010` §1) and the embedded PHP worker is `"php"` (`MB.3.5.4`).
     #[test]
     fn executor_kinds_are_the_one_table() {
         assert_eq!(Executor::ALL_KINDS, ["wsgi", "php"].as_slice());

@@ -1,6 +1,5 @@
 //! The `[route.php]` grammar, its fatal errors and the two boot predicates
-//! (`ADR-0010` §1/§4; design `backend-runtimes.md` `R3`/`R4`; the retired
-//! `[route.fastcgi]` §4.1 rules carry over verbatim).
+//! (`ADR-0010` §1/§4; design `backend-runtimes.md` `R3`/`R4`).
 //!
 //! Protected (critical tier). A PHP route names the one file an embedded
 //! `libphp` worker executes, so a regression here would run a file the operator
@@ -8,12 +7,9 @@
 //! its denied case **and** its accepted twin, and each family asserts the exact
 //! boot message the design pins, not merely "an error".
 //!
-//! Two promises are structural rather than per-key:
-//!
-//! * `[route.fastcgi]` stays an **unknown key that names itself** (`MB.3.17`,
-//!   "no fallback"), in the same test as the `[route.php]` block that parses;
-//! * a PHP route is its **own executor**, so a php-only manifest needs no `app`
-//!   (`can_boot_without_app`) while `is_all_static` keeps its 0.2.0 meaning.
+//! One promise is structural rather than per-key: a PHP route is its **own
+//! executor**, so a php-only manifest needs no `app` (`can_boot_without_app`)
+//! while `is_all_static` keeps its 0.2.0 meaning.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use blastit_manifest::{Executor, Location, Manifest, ManifestError, PhpPolicy, UidLayout};
@@ -290,33 +286,6 @@ fn listen_is_not_a_php_key() {
     );
 
     accepted("entry = \"index.php\"\n");
-}
-
-/// `[route.fastcgi]` stays an unknown key that names itself, while the block
-/// that replaces it parses — the accepted twin lives in the same test, so the
-/// retired key cannot be restored (or silently ignored) without this failing.
-#[test]
-fn fastcgi_stays_an_unknown_key_while_the_php_twin_parses() {
-    let retired = "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
-                   [route.fastcgi]\nentry = \"public/index.php\"\n";
-    let errors = Manifest::from_toml_str(retired)
-        .expect_err("the retired key cannot parse")
-        .into_errors();
-    assert_eq!(
-        errors,
-        vec![ManifestError::UnknownKey {
-            path: "route[0].fastcgi".to_string(),
-        }]
-    );
-    assert!(
-        errors[0]
-            .to_string()
-            .contains("route[0].fastcgi: unknown key"),
-        "the refusal names the retired key: {}",
-        errors[0]
-    );
-
-    accepted("entry = \"public/index.php\"\n");
 }
 
 /// `spa = true` beside `[route.php]` answers every miss itself, so it is a PHP

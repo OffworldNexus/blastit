@@ -6,11 +6,15 @@ status: review
 
 # `php.md` — ai-ergonomics review
 
+> **HISTORICAL (MB.3.32):** this record cites the FastCGI design document,
+> which was deleted when `ADR-0010` replaced it with embedded `libphp`. Every
+> citation below is to the historical record, not to a live design.
+
 ## Round 3 (2026-11-14) — verification after the bootstrap and ingress edits
 
 **Verdict:** FAIL — 0 BLOCKER, 1 MAJOR. The one-pass bootstrap is now scriptable (`check --learn -- <suite>`) and the DB split is PostgreSQL-only; the remaining MAJOR is that the page's own route order makes the documented second-route split dead.
 
-**Method:** I re-derived the manifest and commands from `docs/frameworks/php.md` alone (149 lines), then checked each claim against `docs/reference/manifest.md` (§Ingress, §Static, §Proxies, §Grants, §Effective grants, §Routing), `docs/reference/settings.md` §Backends, `docs/local.md` §Fill the manifest in one pass, and `docs/design/php-fastcgi.md` §4.10. I did not read the round-1/2 text except to map the findings.
+**Method:** I re-derived the manifest and commands from `docs/frameworks/php.md` alone (149 lines), then checked each claim against `docs/reference/manifest.md` (§Ingress, §Static, §Proxies, §Grants, §Effective grants, §Routing), `docs/reference/settings.md` §Backends, `docs/local.md` §Fill the manifest in one pass, and the retired design §4.10. I did not read the round-1/2 text except to map the findings.
 
 ### What the page alone produces
 
@@ -104,7 +108,7 @@ VERDICT: FAIL — 0 blocker, 1 major
 
 **Verdict:** FAIL — 0 BLOCKER, 1 MAJOR, 13 MINOR, 3 NIT. The canonical manifest now takes a POST and the page is mechanism-neutral (no pool, `pm.max_children`, socket or `listen.mode`; only the H1/nav still say PHP-FPM). One MAJOR remains: the page has no scriptable one-pass bootstrap, so an agent still fixes `missing_grant` one query per request.
 
-**Method:** I wrote the manifest and commands below from `docs/frameworks/php.md` alone, then opened `docs/reference/settings.md` §Backends, `docs/reference/manifest.md` (path/ingress/static/proxies), `docs/ci.md` and `docs/deploy/index.md` to check each inference. I did not read `php-fastcgi.md`.
+**Method:** I wrote the manifest and commands below from `docs/frameworks/php.md` alone, then opened `docs/reference/settings.md` §Backends, `docs/reference/manifest.md` (path/ingress/static/proxies), `docs/ci.md` and `docs/deploy/index.md` to check each inference. I did not read the retired design.
 
 ### What the page alone produces
 
@@ -246,7 +250,7 @@ And name both forms in the proxies paragraph: "`blastit dev --learn` (click thro
 
 **Test (the owner's):** an agent reads the page and produces a correct `blastit.toml` plus the one command, without guessing — a Symfony developer sees exactly what they must write and what Blastit figures out.
 
-**Method:** fresh context. I wrote the manifest and command sequence below from `docs/frameworks/php.md` alone, *then* opened `settings.md`, `manifest.md`, `php-fastcgi.md` §1.1–§1.4 and its amendment banner, and `VISION.md` to check each inference. Every inference is a finding. I did not read any other page.
+**Method:** fresh context. I wrote the manifest and command sequence below from `docs/frameworks/php.md` alone, *then* opened `settings.md`, `manifest.md`, the retired design §1.1–§1.4 and its amendment banner, and `VISION.md` to check each inference. Every inference is a finding. I did not read any other page.
 
 **Revision note:** the page was edited while this review ran. Every finding below is against the current text (read 2026-11-14). The earlier `entry` ambiguity is fixed at `:31` and is not counted; the earlier `KernelBrowser` gap is fixed at `:119-121`.
 
@@ -381,7 +385,7 @@ body = "form"     # or "json"; one codec per route
 
 > PHP it cannot find is one variable — `BLASTIT_PHP_FPM=/opt/php/bin/php-fpm` ([settings](../reference/settings.md#backends)).
 
-Three problems in one sentence. (a) It is false if Blastit embeds libphp: there is no `php-fpm` binary and no `PATH` lookup. (b) The brief fixes `BLASTIT_PHP_FPM` as env-only and a *reference* row, not a page knob; the page restates the assignment. (c) The design explicitly defers "the discovery order, cleanup and the error contract" to `MB.3.9.3` (`docs/design/php-fastcgi.md:34-36`), so the page promises a remedy the design has not pinned.
+Three problems in one sentence. (a) It is false if Blastit embeds libphp: there is no `php-fpm` binary and no `PATH` lookup. (b) The brief fixes `BLASTIT_PHP_FPM` as env-only and a *reference* row, not a page knob; the page restates the assignment. (c) The design explicitly defers "the discovery order, cleanup and the error contract" to `MB.3.9.3` (the retired design:34-36), so the page promises a remedy the design has not pinned.
 
 **Reader/agent gets wrong:** it treats `BLASTIT_PHP_FPM` as a normal local setting, and on a libphp build it looks for a binary that does not exist.
 
@@ -403,7 +407,7 @@ Three problems in one sentence. (a) It is false if Blastit embeds libphp: there 
 
 > Blastit runs PHP for the route itself: one command, no server to start beside it, nothing left running after Ctrl-C.
 
-**Reader/agent gets wrong:** "one command" reads as "Blastit sets up the app". It does not run `composer install`, migrations or a cache warmup, and it does not read `.env` for the app (the app's own Dotenv does). It does pass the environment through minus `BLASTIT_*` (`php-fastcgi.md:583-589`), but the page never says that either. An agent that skips `composer install` gets a 500 with no hint; an agent that sets `APP_ENV=test` cannot tell whether it reached PHP.
+**Reader/agent gets wrong:** "one command" reads as "Blastit sets up the app". It does not run `composer install`, migrations or a cache warmup, and it does not read `.env` for the app (the app's own Dotenv does). It does pass the environment through minus `BLASTIT_*` (the retired design:583-589), but the page never says that either. An agent that skips `composer install` gets a 500 with no hint; an agent that sets `APP_ENV=test` cannot tell whether it reached PHP.
 
 **Replacement:** a three-line "What `blastit dev` does not do" list: "It does not run `composer install`, migrations or a cache warmup, and it does not read `.env`; your app does. It passes your environment through, minus `BLASTIT_*`."
 
@@ -413,7 +417,7 @@ Three problems in one sentence. (a) It is false if Blastit embeds libphp: there 
 
 > `$ curl -i http://127.0.0.1:8080/users/42` … `HTTP/1.1 200 OK`
 
-**Reader/agent gets wrong:** the design pins exactly one fatal diagnostic shape, `./blastit.toml:<line>: …` (`php-fastcgi.md:87, 397`), plus `503` for a pool that is not up and `502` mid-exchange (`R20`). The page shows none of them. An agent whose `entry` is wrong, whose PHP is missing, or whose port 8080 is taken has no string to match and no next step. This is the owner's "what to do when it fails" question, unanswered.
+**Reader/agent gets wrong:** the design pins exactly one fatal diagnostic shape, `./blastit.toml:<line>: …` (the retired design:87, 397), plus `503` for a pool that is not up and `502` mid-exchange (`R20`). The page shows none of them. An agent whose `entry` is wrong, whose PHP is missing, or whose port 8080 is taken has no string to match and no next step. This is the owner's "what to do when it fails" question, unanswered.
 
 **Replacement:** one bad-manifest example and one pool example: "A manifest Blastit cannot use stops the boot before it binds: `./blastit.toml:12: route "app" (index 0): fastcgi entry "index.php": must be under static root "public"`. Fix that line. A pool that is not up answers `503`; a pool that dies mid-response answers `502`."
 
@@ -423,7 +427,7 @@ Three problems in one sentence. (a) It is false if Blastit embeds libphp: there 
 
 > A `[route.fastcgi]` route needs no `app`: the front controller is the app, and `[route.ingress]` applies to it.
 
-`docs/reference/manifest.md:13` says `app` is "required when any route is not static", and its route table (`:68-78`) has no `[route.fastcgi]` row. The design's reconciliation says `app` is "accepted and ignored" on a manifest with any `[route.fastcgi]` (`php-fastcgi.md:595-601`). The page is now correct; the reference is stale. An agent following the page's last link (`php.md:145`) is told to add an `app` the page says it does not need, and cannot tell whether setting one is fatal.
+`docs/reference/manifest.md:13` says `app` is "required when any route is not static", and its route table (`:68-78`) has no `[route.fastcgi]` row. The design's reconciliation says `app` is "accepted and ignored" on a manifest with any `[route.fastcgi]` (the retired design:595-601). The page is now correct; the reference is stale. An agent following the page's last link (`php.md:145`) is told to add an `app` the page says it does not need, and cannot tell whether setting one is fatal.
 
 **Replacement (reference, not page):** `manifest.md:13` → "required when any route declares neither `[route.static]` nor `[route.fastcgi]`"; on a manifest with any `[route.fastcgi]`, `app` is accepted and ignored. Optionally add "(ignored if set)" to `php.md:26`.
 
@@ -451,7 +455,7 @@ Three problems in one sentence. (a) It is false if Blastit embeds libphp: there 
 
 `docs/reference/manifest.md:68-78` (route key table) and `:108-145` (static section) contain no `[route.fastcgi]` row or section. `manifest.md:145` already uses the term "front controller" without defining it.
 
-**Reader/agent gets wrong:** the page's last line links `[the manifest](../reference/manifest.md)` (`php.md:145`). An agent following it to verify `entry`/`workers` finds no `[route.fastcgi]` and a top-level `app` row that says the opposite of `php.md:26`. This is transient — `MB.3.5.2` specifies the three edits (`php-fastcgi.md:592-608`) — but until it lands, the page and its reference disagree.
+**Reader/agent gets wrong:** the page's last line links `[the manifest](../reference/manifest.md)` (`php.md:145`). An agent following it to verify `entry`/`workers` finds no `[route.fastcgi]` and a top-level `app` row that says the opposite of `php.md:26`. This is transient — `MB.3.5.2` specifies the three edits (the retired design:592-608) — but until it lands, the page and its reference disagree.
 
 **Replacement (reference, not page):** apply the three §4.1 edits, especially `manifest.md:13` and the new `## FastCGI` section. Do not patch the page around a stale reference.
 
@@ -481,7 +485,7 @@ Three problems in one sentence. (a) It is false if Blastit embeds libphp: there 
 
 ### m6 — an over-budget `workers` is a boot error, not a clamp
 
-`docs/frameworks/php.md:32` — "It can only lower this route's concurrency below what Blastit derives, never raise it". **Gets wrong:** an agent setting `workers = 32` expects a silent lower and gets a boot error (`php-fastcgi.md:356`: `FastCgiWorkersOverBudget`, naming both numbers). **Replacement:** "omit it; a value above the budget is a boot error naming both numbers. The boot logs the derived value."
+`docs/frameworks/php.md:32` — "It can only lower this route's concurrency below what Blastit derives, never raise it". **Gets wrong:** an agent setting `workers = 32` expects a silent lower and gets a boot error (the retired design:356: `FastCgiWorkersOverBudget`, naming both numbers). **Replacement:** "omit it; a value above the budget is a boot error naming both numbers. The boot logs the derived value."
 
 ### m7 — `check` requires `-- <suite>` for a FastCGI manifest
 
@@ -497,11 +501,11 @@ Three problems in one sentence. (a) It is false if Blastit embeds libphp: there 
 
 ### m10 — the suite's environment is not stated
 
-`docs/frameworks/php.md:117` — "`check` puts the front controller on loopback as `BLASTIT_URL=…`". **Gets wrong:** the agent's shell variables (`APP_ENV`, `DATABASE_URL`) are dropped (`php-fastcgi.md:100-101`: `env_clear` + prepared env). **Replacement:** "The suite gets `BLASTIT_URL` and the app's prepared environment; other shell variables are not passed."
+`docs/frameworks/php.md:117` — "`check` puts the front controller on loopback as `BLASTIT_URL=…`". **Gets wrong:** the agent's shell variables (`APP_ENV`, `DATABASE_URL`) are dropped (the retired design:100-101: `env_clear` + prepared env). **Replacement:** "The suite gets `BLASTIT_URL` and the app's prepared environment; other shell variables are not passed."
 
 ### m11 — "the PHP `--learn` write" is ambiguous
 
-`docs/frameworks/php.md:4-5` — "(`0.2.1` adds it, with the PHP `--learn` write and `check -- <suite>`.)". **Gets wrong:** the agent expects `--learn` to generate `[route.fastcgi]`; it writes `[route.static]` only (`php-fastcgi.md:1431-1438`). **Replacement:** "the `--learn` static-root proposal for a PHP app".
+`docs/frameworks/php.md:4-5` — "(`0.2.1` adds it, with the PHP `--learn` write and `check -- <suite>`.)". **Gets wrong:** the agent expects `--learn` to generate `[route.fastcgi]`; it writes `[route.static]` only (the retired design:1431-1438). **Replacement:** "the `--learn` static-root proposal for a PHP app".
 
 ### m12 — "Find the asset paths" finds a root, not paths
 
@@ -521,7 +525,7 @@ Three problems in one sentence. (a) It is false if Blastit embeds libphp: there 
 
 ### m16 — `--learn`'s example path is not Encore's, and the precondition is unstated
 
-`docs/frameworks/php.md:104` — "Request any file under `public/assets/`; Ctrl-C writes `[route.static] root = "public"`." **Gets wrong:** a Symfony/Encore app's files are under `public/build/`; an agent requests `/assets/...`, gets no proposal, and does not know learn only proposes when the URL maps to a real file (`php-fastcgi.md:1435-1438`). **Replacement:** "Request a URL that maps to a real file under your static root (`public/assets/` or `public/build/`); Ctrl-C writes `root`. It proposes `root` only — add `immutable` yourself."
+`docs/frameworks/php.md:104` — "Request any file under `public/assets/`; Ctrl-C writes `[route.static] root = "public"`." **Gets wrong:** a Symfony/Encore app's files are under `public/build/`; an agent requests `/assets/...`, gets no proposal, and does not know learn only proposes when the URL maps to a real file (the retired design:1435-1438). **Replacement:** "Request a URL that maps to a real file under your static root (`public/assets/` or `public/build/`); Ctrl-C writes `root`. It proposes `root` only — add `immutable` yourself."
 
 ### m17 — the title names the mechanism under re-decision
 
@@ -571,13 +575,13 @@ Everything else is mechanism-neutral: "one command, no server to start beside it
 
 ## 7. Reference disagreements (reported, not assumed)
 
-1. **`app`** — `manifest.md:13` says "required when any route is not static"; `php.md:26` says "needs no `app`"; the design's reconciliation (`php-fastcgi.md:595-601`) says "accepted and ignored". The page is right; the reference is stale. **Counted as M5.**
+1. **`app`** — `manifest.md:13` says "required when any route is not static"; `php.md:26` says "needs no `app`"; the design's reconciliation (the retired design:595-601) says "accepted and ignored". The page is right; the reference is stale. **Counted as M5.**
 2. **No `[route.fastcgi]` section** — `manifest.md` route table `:68-78` and static section `:108-145` do not document the key the page is about. **Counted as M8.**
 3. **`BLASTIT_PHP_FPM`** — `settings.md:26` correctly owns the row ("environment-only, never a manifest key"); the page restates it as a knob. **Counted as M1.**
-4. **`--learn`** — `php.md:4` "the PHP `--learn` write" versus `php-fastcgi.md:1431-1438` (static root only, no PHP-specific line). **Counted as m11.**
-5. **Discovery/error contract** — `php.md:57` promises a `PATH` remedy; the design's amendment banner defers "the discovery order, cleanup and the error contract" to `MB.3.9.3` (`php-fastcgi.md:34-36`). **Counted as M1.**
+4. **`--learn`** — `php.md:4` "the PHP `--learn` write" versus the retired design:1431-1438 (static root only, no PHP-specific line). **Counted as m11.**
+5. **Discovery/error contract** — `php.md:57` promises a `PATH` remedy; the design's amendment banner defers "the discovery order, cleanup and the error contract" to `MB.3.9.3` (the retired design:34-36). **Counted as M1.**
 
-Positives that match the design exactly: the `--json` document (`php.md:131` = `php-fastcgi.md:1460`), the three-line banner (`php.md:51-53` = `php-fastcgi.md:72-75`), and the `check` summary line (`php.md:114` = `php-fastcgi.md:62`). Do not regress these.
+Positives that match the design exactly: the `--json` document (`php.md:131` = the retired design:1460), the three-line banner (`php.md:51-53` = the retired design:72-75), and the `check` summary line (`php.md:114` = the retired design:62). Do not regress these.
 
 ---
 

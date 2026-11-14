@@ -1,12 +1,16 @@
 # AUDIT MB.3.4 — the pure `blastit-fastcgi` crate (epic gate)
 
+> **HISTORICAL (MB.3.32):** this record cites the FastCGI design document,
+> which was deleted when `ADR-0010` replaced it with embedded `libphp`. Every
+> citation below is to the historical record, not to a live design.
+
 - **Date:** 2026-11-14
 - **Scope:** `crates/blastit-fastcgi/**` — `src/{lib,record,param,cgi,lockdown}.rs`,
   `tests/critical_fastcgi_lockdown.rs`, `Cargo.toml`. Leaves `MB.3.4.1` (`872661d`) and
   `MB.3.4.2` (`0f441af`).
 - **Base / tip read:** `0f441af` (epic head; `git status` clean apart from the `lead`'s own
   uncommitted `plan/` lines).
-- **Requirements:** `docs/design/php-fastcgi.md` §4.5.1–§4.5.2 (codec vs scheduler client),
+- **Requirements:** the retired design §4.5.1–§4.5.2 (codec vs scheduler client),
   §4.6.1–§4.6.3 (param contract), §4.7 (binary refusal matrix), §7.1 (tiers), §7.2
   (`R1`–`R20` → enforcing module → suite); `ADR-0008`; skill `testing` §1–§4, skill
   `security-invariants` §2 (headers & FastCGI param smuggling), §5 (never leak, never panic).
@@ -39,7 +43,7 @@
 
 ## Method
 
-1. Read both children's `NODE.md`/`RESULT.md`/`LOG.md`, the epic node, `docs/design/php-fastcgi.md`
+1. Read both children's `NODE.md`/`RESULT.md`/`LOG.md`, the epic node, the retired design
    §4.5–§4.7 and §7.1–§7.2, `tools/critical_guard.py`, the `Makefile` `mutants-rust` /
    `rs-test-critical` / `test-critical` / `critical-skip-check` targets, and every line of the
    five source files and the protected suite.

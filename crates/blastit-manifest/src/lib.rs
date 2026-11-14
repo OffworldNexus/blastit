@@ -72,10 +72,9 @@
 //! assert_eq!(Executor::ALL_KINDS, ["wsgi", "php"].as_slice());
 //! ```
 //!
-//! `[route.fastcgi]` is neither one of those kinds nor a key: the external
-//! `php-fpm` path was removed (`MB.3.17`, `ADR-0010` §1), and a manifest that
-//! still writes the block is refused as an unknown key that names it. `php` is
-//! the embedded worker ([`PhpPolicy`]), not the retired pool.
+//! `[route.fastcgi]` is retired: a manifest that writes it is refused like any
+//! other unknown route key (`ADR-0010` §1: embedded PHP only, no fallback), and
+//! `php` is the embedded worker ([`PhpPolicy`]), not the retired pool.
 
 #![deny(missing_docs)]
 
