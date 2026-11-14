@@ -55,3 +55,11 @@ attempt 2/3 started
 ## 2026-11-14T16:18 [implementer]
 
 attempt 2: docs_fences now carries the STALE accounting row (php.md fence must fail with 'fastcgi: unknown key'; MB.3.20 owes the entry's removal) + self-clearing test; both halves proved red (wrong needle, and an entry on a booting page) then restored. inventory.toml fence-7 reason re-worded. make check exit 0, 111 ok / 0 FAILED.
+
+## 2026-11-14T16:20 [lead]
+
+status active -> done
+
+## 2026-11-14T16:20 [lead]
+
+commit bc3b201 (make check exit 0; 4287 deletions; critical_guard authorized both protected deletions; docs_fences STALE row self-clears). Held docs half is MB.3.20 (proposed, depends MB.3.17,MB.12) -- it MUST delete the STALE row when it retargets php.md, and the self-clearing test enforces it.

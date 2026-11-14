@@ -2,7 +2,7 @@
 id: MB.3.17
 title: "Remove the external FastCGI path: delete blastit-fastcgi, drop [route.fastcgi], the ALLOW flag and every doc that sanctions it"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.12]
@@ -24,7 +24,7 @@ attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T15:14"
-updated: "2026-11-14T16:12"
+updated: "2026-11-14T16:20"
 ---
 
 # Goal

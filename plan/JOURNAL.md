@@ -1274,3 +1274,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T16:12 [MB.3.17] (lead) attempt 2/3 started
 - 2026-11-14T16:16 [MB.3.20] (implementer) OWED BY THIS NODE: delete the STALE row in crates/blastit-manifest/tests/docs_fences.rs — const STALE = [("docs/frameworks/php.md", "fastcgi: unknown key", "MB.
 - 2026-11-14T16:18 [MB.3.17] (implementer) attempt 2: docs_fences now carries the STALE accounting row (php.md fence must fail with 'fastcgi: unknown key'; MB.3.20 owes the entry's removal) + self-cleari
+- 2026-11-14T16:20 [MB.3.17] (lead) status active -> done
+- 2026-11-14T16:20 [MB.3.17] (lead) commit bc3b201 (make check exit 0; 4287 deletions; critical_guard authorized both protected deletions; docs_fences STALE row self-clears). Held docs half is MB.
