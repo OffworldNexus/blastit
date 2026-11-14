@@ -55,3 +55,7 @@ status active -> review
 ## 2026-11-14T22:26 [lead]
 
 status review -> done
+
+## 2026-11-14T22:29 [lead]
+
+commit e730527 (docs+manifest+Makefile); plan folder in the same commit
