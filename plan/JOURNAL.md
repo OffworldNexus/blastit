@@ -875,3 +875,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T01:04 [MB.7] (lead) attempt 1/3 started
 - 2026-11-14T01:04 [MB.7] (lead) base 0a2778c
 - 2026-11-14T01:06 [MB.7] (lead) status active -> done
+- 2026-11-14T01:09 [MB.3.1] (planner) created (task) Research FastCGI wire, non-root php-fpm and php2shell techniques with cited sources
+- 2026-11-14T01:09 [MB.3.2] (planner) created (task) Write the lean PHP-FPM page (Local/CI/Deploy), register it, pass dx+ai-ergonomics
+- 2026-11-14T01:09 [MB.3.3] (planner) created (task) Design the FastCGI session, [route.fastcgi] grammar and param lockdown (ADR-0008)
+- 2026-11-14T01:09 [MB.3.4] (planner) created (task) Add the pure blastit-fastcgi crate: record framing, params codec, lockdown matrix
+- 2026-11-14T01:09 [MB.3.5] (planner) created (task) Parse and validate [route.fastcgi] blocks in blastit-manifest
+- 2026-11-14T01:09 [MB.3.6] (planner) created (task) Dispatch FastCGI routes and wire dev/check/--learn PHP attribution
+- 2026-11-14T01:09 [MB.3.7] (planner) created (task) Prove FastCGI, the documented commands and the php2shell suite end-to-end in Docker
+- 2026-11-14T01:09 [MB.3.8] (planner) created (task) Release prep 0.2.1: version bump, dated changelog, ARCHITECTURE sync
+- 2026-11-14T01:09 [MB.3.1] (lead) status ready -> active
+- 2026-11-14T01:09 [MB.3.1] (lead) attempt 1/3 started
+- 2026-11-14T01:09 [MB.3.1] (lead) base 3cfea613f4deaff471e5876523be808115b4181a
+- 2026-11-14T01:20 [MB.3.1] (lead) status active -> review
+- 2026-11-14T01:29 [MB.3.1] (lead) status review -> done
