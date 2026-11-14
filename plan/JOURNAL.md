@@ -1414,3 +1414,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T21:46 [MB.3.29] (lead) base f4bfcbe; REDDENED make check AGAIN during MB.3.33 (rs-test-critical Error 101, an_unsupported_minor_is_refused_by_name expected UnsupportedVersion got NotF
 - 2026-11-14T22:06 [MB.3.34] (planner) created (task) build.rs PHP toolchain probe: do not cache a no-toolchain world on a transient spawn failure
 - 2026-11-14T22:12 [MB.3.29] (lead) status active -> done
+- 2026-11-14T22:12 [MB.3.33] (lead) status active -> done

@@ -18,6 +18,14 @@
 //! Never `canonicalize()` plus a string prefix: that resolves one path and
 //! opens another (TOCTOU), follows symlinks, and is the check the
 //! traversal CVE class defeats.
+//!
+//! A final segment ending in `.php`, `.phtml` or `.phar` (ASCII
+//! case-insensitively) is never served (`MB.3.33`): [`head_segments`] and
+//! [`StaticRoot::resolve`] answer [`StaticOutcome::Hidden`] before any
+//! descriptor is opened, so the canonical layout (`[route.static] root =
+//! "public"` beside `[route.php] entry = "public/index.php"`) cannot disclose
+//! the front controller's source. The rule is a per-request `404`, not a boot
+//! refusal: `entry` legitimately lives under `root`.
 
 use std::io;
 use std::os::fd::OwnedFd;
@@ -100,7 +108,8 @@ pub enum StaticOutcome {
     Missing,
     /// `spa = true` and `root/index` is missing: `404`, final.
     SpaLost,
-    /// The entry exists but is not servable: `404`, final.
+    /// The entry exists but is not servable (a dotfile, a PHP source, a
+    /// symlink, a special or oversize file): `404`, final.
     Hidden,
     /// The path itself was malformed: `400`, final.
     Refused(StaticRefusal),
@@ -320,6 +329,10 @@ impl StaticRoot {
     }
 
     /// Resolves `segments` (already decoded, already split by [`segments`]).
+    ///
+    /// A final PHP-source segment (`.php`/`.phtml`/`.phar`) is
+    /// [`StaticOutcome::Hidden`] before any descriptor is opened, and so is any
+    /// candidate answer (`index`, SPA fallback) that ends that way.
     pub fn resolve(&self, segments: &[&str]) -> StaticOutcome {
         self.resolve_with(segments, None)
     }
@@ -443,7 +456,15 @@ impl StaticRoot {
     }
 
     /// Classifies one `O_PATH` probe.
+    ///
+    /// A final PHP-source segment (`.php`/`.phtml`/`.phar`) answers `Hidden`
+    /// before this function opens anything, so a source file under `root` is
+    /// neither probed nor read — a `000`-mode source is therefore a `404`, not
+    /// a read failure (`MB.3.33`).
     fn probe(&self, rel: &str) -> Landing {
+        if rel.rsplit('/').next().is_some_and(is_php_source) {
+            return Landing::Hidden;
+        }
         let descriptor = match self.open_beneath(rel, OFlags::PATH | OFlags::CLOEXEC) {
             Ok(descriptor) => descriptor,
             Err(Errno::NOENT | Errno::NOTDIR) => return Landing::Missing,
@@ -605,12 +626,13 @@ pub fn segments(decoded: &str) -> Result<Vec<&str>, StaticRefusal> {
 
 /// The scheduler's head half of design §4.3 (steps 3–4), on a raw request
 /// target: cut at `?`, exactly one percent-decode, [`segments`], then the
-/// [`is_dotfile`] rule.
+/// [`is_dotfile`] rule and the [`is_php_source`] rule.
 ///
 /// `Ok` is the segment list to hand to [`StaticRoot::resolve`]; `Err` is the
 /// final outcome for that path (`Refused` for a malformed one, `Hidden` for a
-/// dotfile). `#[doc(hidden)] pub` so the protected suite table-drives the
-/// production decode and dotfile wiring instead of restating them.
+/// dotfile or a `.php`/`.phtml`/`.phar` source). `#[doc(hidden)] pub` so the
+/// protected suite table-drives the production decode and dotfile wiring
+/// instead of restating them.
 #[doc(hidden)]
 pub fn head_segments(target: &str) -> Result<Vec<String>, StaticOutcome> {
     let decoded = percent_decode(path_of_target(target.as_bytes()))
@@ -620,6 +642,12 @@ pub fn head_segments(target: &str) -> Result<Vec<String>, StaticOutcome> {
     };
     let parts = segments(&decoded).map_err(StaticOutcome::Refused)?;
     if is_dotfile(&parts) {
+        return Err(StaticOutcome::Hidden);
+    }
+    // `404`, final, before the method and body gates: a `POST /index.php` with
+    // a body is a source-disclosure probe, never a `405`/`413` (design
+    // §4.4, `MB.3.33`). The file is not opened here or later.
+    if parts.last().is_some_and(|segment| is_php_source(segment)) {
         return Err(StaticOutcome::Hidden);
     }
     Ok(parts.into_iter().map(str::to_string).collect())
@@ -636,6 +664,25 @@ pub fn is_dotfile(segments: &[&str]) -> bool {
     segments.iter().enumerate().any(|(position, segment)| {
         segment.starts_with('.') && !(position == 0 && *segment == ".well-known")
     })
+}
+
+/// Whether one path segment names PHP source: its final `.`-separated
+/// extension is `php`, `phtml` or `phar`, ASCII case-insensitively
+/// (`MB.3.33`).
+///
+/// A static root never answers such a path, whatever the method or body, and
+/// never opens it: the file may legitimately be the route's `entry` living
+/// beneath `root`, but its bytes are not public. `.php5`, `php` and
+/// `manual.php.txt` are not PHP source by this rule.
+pub fn is_php_source(segment: &str) -> bool {
+    match segment.rsplit_once('.') {
+        Some((_, extension)) => {
+            extension.eq_ignore_ascii_case("php")
+                || extension.eq_ignore_ascii_case("phtml")
+                || extension.eq_ignore_ascii_case("phar")
+        }
+        None => false,
+    }
 }
 
 /// The whole-file classification, pure: the row a `fstat` result lands in.

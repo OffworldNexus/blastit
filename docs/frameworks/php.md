@@ -25,8 +25,8 @@ body = "form"
 
 A file under `public/` is answered by the static responder; every other path reaches the
 front controller. Blastit executes only `entry`, and a `[route.php]` route needs no
-`app` — the front controller is the app. `[route.static]` serves regular files as bytes,
-`entry` included: keep other application sources out of `public/`.
+`app` — the front controller is the app. `.php`/`.phar`/`.phtml` files under a static
+root are refused with `404`; only `entry` runs, so keep other sources out of `public/`.
 
 | Key | What it does |
 |---|---|

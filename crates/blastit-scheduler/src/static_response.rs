@@ -40,10 +40,10 @@ const OCTET_STREAM: &str = "application/octet-stream";
 /// One complete static head, plus the body source when there is a body.
 ///
 /// `status` is `200` or `304`; the only other value is the `404` of the
-/// defence-in-depth arm for a [`StaticFile`] already above
-/// `static_max_bytes` (§4.6 says such a file is `404`, and `classify` refuses
-/// it before it can become a [`StaticFile`], so the arm is unreachable through
-/// `resolve` + `decide`).
+/// defence-in-depth arms for a [`StaticFile`] already above
+/// `static_max_bytes` or naming a `.php`/`.phtml`/`.phar` source (§4.6 says
+/// such a file is `404`, and `resolve` refuses both before they can become a
+/// [`StaticFile`], so the arm is unreachable through `resolve` + `decide`).
 pub struct StaticResponse {
     /// The status to answer with.
     pub status: u16,
@@ -94,6 +94,20 @@ impl StaticRoot {
         if file.len > self.max_bytes || file.meta.size > self.max_bytes {
             return refusal_not_found();
         }
+        // Defence in depth: `resolve` never hands over a `.php`/`.phar`/
+        // `.phtml` path (`MB.3.33`), but a caller that constructs a
+        // `StaticFile` directly must still never stream source. The gate reads
+        // the final non-empty segment of the URL path, so a forged trailing `/`
+        // or query cannot hide the extension.
+        let answered = file.url_path.split('?').next().unwrap_or(&file.url_path);
+        if answered
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .is_some_and(crate::static_asset::is_php_source)
+        {
+            return refusal_not_found();
+        }
 
         let etag = etag(&file.meta);
         let last_modified = http_date(file.meta.mtime_secs);
@@ -140,7 +154,9 @@ impl StaticRoot {
     }
 }
 
-/// The one `404` this responder can build: a file above the ceiling.
+/// The one `404` this responder can build: a file above the ceiling, or a
+/// `.php`/`.phtml`/`.phar` source path (defence in depth; `resolve` refuses it
+/// first).
 fn refusal_not_found() -> StaticResponse {
     StaticResponse {
         status: 404,

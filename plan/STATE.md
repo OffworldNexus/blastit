@@ -3,7 +3,7 @@
 - generated: 2026-11-14T22:12
 - autopilot: on
 - current milestone: MB Modern 12-Factor Backends: Static, PHP-FPM, Vite/Node, Tomcat (0.2.x) [ready]
-- tasks: proposed=1, ready=38, active=1, done=110, superseded=11
+- tasks: proposed=1, ready=38, done=111, superseded=11
 - open human requests: 1 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 10; expensive spent: $107.46 of $200.00 cap (54%)
 
@@ -36,7 +36,6 @@
 
 ## Recent journal
 
-- 2026-11-14T21:04 [MB.3.8] (lead) INPUT from MB.3.10 review (2026-11-14): docs/design/static-and-spa.md:41 still says the PHP worker is 0.2.1; the release folded into 0.2.0. static-and-spa.md is
 - 2026-11-14T21:10 [MB.3.33] (planner) created (task) Static root must never serve .php/.phar source (per-request 404, protected)
 - 2026-11-14T21:10 [MB.3.33] (lead) created (owner 2026-11-14, security-first order) because MB.9.2.2 is blocked behind the whole MB.9 static-port chain (MB.9.2.1.3<-1.2<-1.1<-MB.9.1.1<-MB.9.1.2, 
 - 2026-11-14T21:10 [MB.9.2.2] (lead) SUPERSEDED IN PART (2026-11-14): the EntryScript behaviour lands EARLY as MB.3.33 (surgical, in the current static_asset/rewrite path, with protected critical_s
@@ -51,3 +50,4 @@
 - 2026-11-14T21:46 [MB.3.29] (lead) base f4bfcbe; REDDENED make check AGAIN during MB.3.33 (rs-test-critical Error 101, an_unsupported_minor_is_refused_by_name expected UnsupportedVersion got NotF
 - 2026-11-14T22:06 [MB.3.34] (planner) created (task) build.rs PHP toolchain probe: do not cache a no-toolchain world on a transient spawn failure
 - 2026-11-14T22:12 [MB.3.29] (lead) status active -> done
+- 2026-11-14T22:12 [MB.3.33] (lead) status active -> done

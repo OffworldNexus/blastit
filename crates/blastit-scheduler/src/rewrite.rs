@@ -114,8 +114,8 @@ pub fn decide(outcome: StaticOutcome, method: &[u8], has_body: bool, has_app: bo
             allow: None,
         },
         // Step 11: the entry exists but is not servable. Final, like every
-        // other refusal, so a hidden `.env` cannot be answered by `index` or
-        // the app.
+        // other refusal, so a hidden `.env` or `.php`/`.phtml`/`.phar` source
+        // cannot be answered by `index` or the app.
         StaticOutcome::Hidden => Rewrite::Reject {
             status: 404,
             allow: None,

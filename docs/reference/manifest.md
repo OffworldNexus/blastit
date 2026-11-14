@@ -135,7 +135,8 @@ Only a file from `root` whose path matches a pattern is cached for a year; an
 `index` answer is always `no-cache`. A path it does not answer reaches the app — or the
 `[route.php]` front controller — with the route's `methods` and `[route.ingress]`, and
 is a `404` when the route has neither. `..`, NUL and other control bytes, absolute and
-backslash paths are `400`; a symlink that leaves `root` and a dotfile are `404`.
+backslash paths are `400`; a symlink that leaves `root` and a dotfile are `404`, and
+so are `.php`/`.phar`/`.phtml` files.
 
 The four keys are reserved: `[route.static]` is never a grant table, so
 `[route.static] queries = …` is an unknown key.
@@ -169,9 +170,8 @@ entry = "public/index.php"      # required, relative to blastit.toml
 A `[route.php]` route needs no `app`: the front controller is the app. `spa = true`,
 `CONNECT` and `TRACE` never reach a worker and are boot errors, and so is an `entry`
 that is absolute, holds `..`, a backslash or a control byte, does not end in `.php`,
-or is not beneath `root`. Blastit executes only `entry`, and `[route.static]` serves
-any regular file under `root` — `entry` included — as bytes: keep application sources
-out of a served root.
+or is not beneath `root`. Blastit executes only `entry`; `.php`/`.phar`/`.phtml` files
+under a static root are refused with `404`, so keep other sources out of `root`.
 
 ## Proxies
 

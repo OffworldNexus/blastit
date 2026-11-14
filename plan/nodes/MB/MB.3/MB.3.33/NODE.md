@@ -2,7 +2,7 @@
 id: MB.3.33
 title: "Static root must never serve .php/.phar source (per-request 404, protected)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 0
 depends_on: []
@@ -13,11 +13,11 @@ paths:
   - "crates/blastit-scheduler/tests/critical_static_entry.rs"
   - docs/frameworks/php.md
   - docs/reference/manifest.md
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T21:10"
-updated: "2026-11-14T21:10"
+updated: "2026-11-14T22:12"
 ---
 
 # Goal
