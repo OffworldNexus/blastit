@@ -311,7 +311,7 @@ That route may run any statement on that proxy, transaction control included.
 
 A route's allowlist for a proxy is the **union** of its own grant, its groups'
 grants and the global groups'; `transaction_control` is on if any turns it on.
-**A route with no grant for a proxy gets no listener**, so a catch-all fallback
+**A route with no grant for a proxy gets no listener**, so a catch-all route
 cannot reach the database.
 
 ## How a statement matches

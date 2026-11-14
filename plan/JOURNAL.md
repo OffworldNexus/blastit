@@ -1447,3 +1447,26 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T22:25 [MB.3.22] (planner) edited fields
 - 2026-11-14T22:26 [MB.3.31] (lead) status active -> done
 - 2026-11-14T22:26 [MB.3.32] (lead) status review -> done
+- 2026-11-14T22:29 [MB.3.32] (lead) commit e730527 (docs+manifest+Makefile); plan folder in the same commit
+- 2026-11-14T22:29 [MB.3.31] (lead) commit 66fccd5 (plan-only, 33 live briefs + 27 banners)
+- 2026-11-14T22:30 [MB.3.30] (lead) edited fields
+- 2026-11-14T22:30 [MB.3.30] (lead) status ready -> active
+- 2026-11-14T22:30 [MB.3.30] (lead) attempt 1/3 started
+- 2026-11-14T22:30 [MB.3.30] (lead) base 66fccd512b4855ca43ba461cfb1627da93024801; lead widened paths with docs/VISION.md: its two denial lines (33,47) name the retired words and the always-fail r
+- 2026-11-14T22:38 [MB.3.30] (lead) status active -> review
+- 2026-11-14T22:40 [MB.3.30] (lead) REVIEW FAIL (attempt 1): (1) MAJOR the fallback-offer scan is line-based and cuts at any '.', so realistic offers pass ('Fall back to a daemon, e.g. for PHP rou
+- 2026-11-14T22:40 [MB.3.30] (lead) status review -> ready
+- 2026-11-14T22:40 [MB.3.30] (lead) status ready -> active
+- 2026-11-14T22:41 [MB.3.30] (lead) attempt 2/3 started
+- 2026-11-14T22:48 [MB.3.30] (lead) REVIEW FAIL (attempt 2): FALLBACK_DENIAL (:203) treats any no|not|never|without|zero earlier in the sentence as a denial, so conditional offers pass silently: '
+- 2026-11-14T22:48 [MB.3.30] (lead) status active -> ready
+- 2026-11-14T22:48 [MB.3.30] (lead) status ready -> active
+- 2026-11-14T22:48 [MB.3.30] (lead) attempt 3/3 started
+- 2026-11-14T22:55 [MB.3.30] (lead) REVIEW FAIL (attempt 3): denial is sentence-scoped so a contrasting clause's offer passes ('no fallback — you may fall back to a daemon for PHP', 'no fallback e
+- 2026-11-14T22:55 [MB.3.30] (lead) edited fields
+- 2026-11-14T22:55 [MB.3.30] (lead) status active -> ready
+- 2026-11-14T22:55 [MB.3.30] (lead) status ready -> active
+- 2026-11-14T22:55 [MB.3.30] (lead) attempt 4/4 started
+- 2026-11-14T23:03 [MB.3.30] (lead) edited fields
+- 2026-11-14T23:03 [MB.3.30] (lead) lead: paths widened for the two prose edits the rule forced (docs/reference/manifest.md:314, MB.3.20 brief) — reviewer flagged them as silent edits
+- 2026-11-14T23:06 [MB.3.30] (lead) status active -> done

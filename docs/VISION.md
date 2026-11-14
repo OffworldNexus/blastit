@@ -30,7 +30,7 @@ Security tools that require 40 environment variables, `sudo` on a laptop, manual
 Blastit deliberately targets **modern, testable, 12-factor applications** — not legacy un-12-factorizable monoliths such as WordPress. We embrace modern framework idioms natively:
 
 - **Python (WSGI):** Django, Flask, SQLAlchemy, psycopg 3.
-- **PHP (embedded `libphp`):** Symfony, Laravel, Slim, PSR-7 / PSR-15 front controllers (`[route.php] entry = "public/index.php"`) running in unprivileged per-route view workers — no `php-fpm`, no FastCGI surface — with clean URL rewriting and static asset serving without nginx boilerplate.
+- **PHP (embedded `libphp`):** Symfony, Laravel, Slim, PSR-7 / PSR-15 front controllers (`[route.php] entry = "public/index.php"`) running in unprivileged per-route view workers — no PHP daemon beside them and no CGI parameter surface — with clean URL rewriting and static asset serving without nginx boilerplate.
 - **Node & Frontend (Vite + HTTP SSR/API):** Vite assets & dev/preview integration, SvelteKit, Remix / React Router, Nuxt, Hono, Next standalone.
 - **JVM (Tomcat / Spring Boot):** Modern 12-factor Servlet / Spring Boot services.
 
@@ -44,7 +44,7 @@ Reimagine and ship the sharpest possible developer experience for Python WSGI + 
 ### Milestone B (`0.2.0` & `0.2.x` — Modern Backends: Embedded PHP, Vite/Node, Tomcat & Static Assets)
 Expand Blastit across focused `0.2.x` releases (`0.2.0` shipping static/SPA and embedded PHP as one release, followed by Node/Vite and JVM) from a Python-only WSGI server into a multi-backend zero-trust harness:
 - First-class static asset serving & clean SPA/front-controller URL rewriting.
-- **Embedded PHP** (host NTS `libphp` inside unprivileged per-route view workers via `[route.php] entry`, PSR/Symfony/Laravel zero-footgun defaults, no `php-fpm` daemon and no FastCGI parameter surface).
+- **Embedded PHP** (host NTS `libphp` inside unprivileged per-route view workers via `[route.php] entry`, PSR/Symfony/Laravel zero-footgun defaults, no daemon beside it and no CGI parameter surface).
 - **Vite & Node** (HTTP upstream per route/worker, SSR + static split, clean dev & prod workflows).
 - **Tomcat / JVM** (12-factor Servlet / Spring Boot integration) and other high-value modern HTTP backends where appropriate.
 - Language-agnostic wire learning (`--learn`) and CI completeness checks across every backend.
@@ -54,7 +54,7 @@ Ensure **every single byte** reaching an application backend has been decoded, v
 - **Safe decompression:** Memory-safe gzip/deflate/brotli/zstd decompression with strict size and expansion-ratio caps.
 - **Structured payloads:** JSON and XML decoded, validated against JSON Schema and custom **stateless** WASM functions, and canonically re-encoded (eliminating parser differentials, duplicate keys, XXE, and prototype-pollution keys).
 - **Media & PDF Content Disarm & Reconstruction (CDR):** Images (JPEG, PNG, WebP, GIF, BMP, TIFF, HEIC/HEIF, JP2) and PDFs decoded to raw page/frame bitmaps inside a zero-filesystem WASM reactor sandbox one page at a time (`O(1 page)` bounded memory, per-page instruction fuel caps) and cleanly re-encoded from scratch — stripping all metadata, scripts, embedded objects, and polyglots.
-- **Strict HTTP header & protocol mechanics:** Drop unexpected headers, canonicalize expected headers, statelessly validate cookies/auth/content-types, and block CGI/FastCGI/proxy header tricks.
+- **Strict HTTP header & protocol mechanics:** Drop unexpected headers, canonicalize expected headers, statelessly validate cookies/auth/content-types, and block CGI/FastCGI/proxy header smuggling.
 - **Scanner rules & honeypots:** Fast built-in rejection/honeypots against vulnerability scanners before any backend code runs.
 
 ### Milestone D (`0.4.x` — Outgoing Capability Proxies)

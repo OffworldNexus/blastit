@@ -1,6 +1,6 @@
 ---
 id: MB.3.20
-title: "Held docs pass for MB.3.17: php.md fence and fallback note, design/ADR supersession lines, AUDIT note"
+title: "Held docs pass for MB.3.17: php.md fence and its removed setting's note, design/ADR supersession lines, AUDIT note"
 kind: task
 status: proposed
 owner: "doc-writer"
@@ -55,7 +55,7 @@ $ make docs-check
 ```
 
 - `docs/frameworks/php.md`: the fence is the `[route.php]` the code accepts, the retired
-  setting and its fallback note are gone, and the page says embedded `libphp` is the only PHP
+  setting and its note are gone, and the page says embedded `libphp` is the only PHP
   story and names the boot refusal (`MB.3.10` did this; re-verify, do not redo).
 - `docs/reference/settings.md`: `## Backends` gets the real setting (`BLASTIT_LIBPHP`) or the
   heading and the `#backends` link go together — never an empty section left behind.
@@ -70,7 +70,7 @@ $ make docs-check
 
 # Notes
 
-- Do not re-add a fallback, a `listen` key, or any sentence offering `uv add blastit` as the
+- Never add a fallback, a `listen` key, or any sentence offering `uv add blastit` as the
   cure for a host without `libphp`.
 - `crates/blastit-php-sapi`'s sentences about the four reserved CGI parameter names stay:
   that line names the attack class the shim must refuse, not the deleted transport.

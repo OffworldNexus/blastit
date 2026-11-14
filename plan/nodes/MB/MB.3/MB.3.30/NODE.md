@@ -2,16 +2,20 @@
 id: MB.3.30
 title: "Docs + plan guard: the retired PHP transport vocabulary and PHP fallbacks cannot return"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.10, MB.3.31]
-paths: [python/tests/test_docs_assets.py]
-attempts: 0
-max_attempts: 3
+paths:
+  - python/tests/test_docs_assets.py
+  - docs/VISION.md
+  - docs/reference/manifest.md
+  - plan/nodes/MB/MB.3/MB.3.20/NODE.md
+attempts: 4
+max_attempts: 4
 escalation: none
 created: "2026-11-14T19:49"
-updated: "2026-11-14T20:33"
+updated: "2026-11-14T23:06"
 ---
 
 # Goal
