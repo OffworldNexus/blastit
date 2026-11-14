@@ -302,17 +302,79 @@ pub(crate) fn static_app_refusal(config: &Config, manifest: &Manifest) -> Option
 /// `R13`: the app rule a **boot** refuses with (`blastit`, `blastit dev`).
 ///
 /// Both halves: a `BLASTIT_APP` no route could reach is refused
-/// ([`static_app_refusal`]), and a tree that is not all-static needs a callable
-/// to forward to. `blastit check` must not take the second half — a suite brings
-/// its own `app` — so it calls [`static_app_refusal`] directly.
+/// ([`static_app_refusal`]), and a manifest whose routes do **not** all run
+/// their own executor needs a callable to forward to. The second half asks
+/// [`Manifest::can_boot_without_app`] — "every route is its own executor" —
+/// rather than "every route is static": a `[route.php]` route forks its own
+/// embedded-PHP worker, so a PHP-only manifest boots with no `app` at all
+/// (`ADR-0010` §2). `blastit check` must not take the second half — a suite
+/// brings its own `app` — so it calls [`static_app_refusal`] directly.
 pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), String> {
     if let Some(message) = static_app_refusal(config, manifest) {
         return Err(message);
     }
-    if !manifest.is_all_static() && config.app.is_none() {
+    if !manifest.can_boot_without_app() && config.app.is_none() {
         return Err("BLASTIT_APP: the WSGI callable (`module:attribute`) is required".to_string());
     }
     Ok(())
+}
+
+/// `ADR-0009` §5: what a build with no Python support cannot serve, and the
+/// sentence that names the artifact which can (`MB.3.11`).
+///
+/// A build with `python` off — the standalone archive of `ADR-0010` §4 — has no
+/// interpreter in any role, so a manifest that needs one is refused **here, in
+/// stage 0, before a listener is bound**, rather than at the first request or at
+/// a fork that has already happened. The rule this replaces is
+/// [`app_rule`]'s "the WSGI callable is required": on this build setting
+/// `BLASTIT_APP` cannot help, so telling the operator to set it would send them
+/// the wrong way.
+///
+/// An all-static manifest needs no interpreter at all and is left to
+/// [`static_app_refusal`], which keeps its `BLASTIT_APP`-on-a-static-tree
+/// sentence in both builds. So does a `[route.php]` route: it runs in a `view`
+/// worker with no interpreter anywhere near it, so a PHP-only manifest returns
+/// `None` here and boots (`MB.3.5.4`). The `python` build has nothing to refuse;
+/// the function is compiled for the tests that keep the sentences honest.
+///
+/// The retired external-PHP key (`MB.3.17`) needs no sentence here: the parser
+/// refuses it as an unknown key before a boot gets this far.
+#[cfg(any(not(feature = "python"), test))]
+pub(crate) fn no_python_support(
+    config: &Config,
+    manifest: &Manifest,
+    learn: bool,
+) -> Option<String> {
+    const INSTALL: &str = "install the Python package: uv add blastit";
+    if learn {
+        return Some(format!(
+            "dev --learn: this build has no Python support (built without feature \
+             \"python\") and --learn needs the interpreter for its gate; {INSTALL}, or \
+             run a build with --features python"
+        ));
+    }
+    if manifest.can_boot_without_app() {
+        return None;
+    }
+    if let Some(app) = config.app.as_deref() {
+        return Some(format!(
+            "BLASTIT_APP ({app}): this build has no Python support (built without feature \
+             \"python\"), so it cannot import a WSGI application; {INSTALL}"
+        ));
+    }
+    // The first route that is not its own executor: a `[route.static]` root and
+    // a `[route.php]` front controller both answer without an interpreter, so
+    // only a route that declares neither is a WSGI view this build cannot fork.
+    let route = manifest
+        .routes()
+        .iter()
+        .find(|route| route.static_policy().is_none() && route.php().is_none())?;
+    Some(format!(
+        "route {:?}: this build has no Python support (built without feature \"python\"), \
+         and the route declares no [route.static] block, so it needs a runtime this build \
+         does not carry; {INSTALL}, or add a [route.static] block",
+        route.name()
+    ))
 }
 
 /// `R13` step 5: the first declared static root the responder's uid could not
@@ -559,6 +621,14 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // manifest is parsed first, because "is every route static" is a property of
     // the file, not of the environment — and a missing `./blastit.toml` is still
     // named before the setting (`MB.1.6`).
+    // `ADR-0009` §5: a build with no Python support (`ADR-0010` §4's standalone
+    // archive) refuses a manifest that needs an interpreter here, before any
+    // listener is bound, naming the artifact that has one. Ahead of `app_rule`
+    // on purpose: on this build "set BLASTIT_APP" is advice that cannot work.
+    #[cfg(not(feature = "python"))]
+    if let Some(message) = no_python_support(&config, &manifest, false) {
+        fail(&emitter, &message);
+    }
     if let Err(message) = app_rule(&config, &manifest) {
         fail(&emitter, &message);
     }
@@ -800,6 +870,15 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
     // `R13`: a site whose every route is static needs no `app`; anything else
     // still names the setting as before (`MB.1.6`), and a `BLASTIT_APP` that
     // could never run is refused rather than ignored.
+    //
+    // Before it: `ADR-0009` §5's capability gate, so a python-less build says
+    // "install the Python package: uv add blastit" (or "add a [route.static]
+    // block") instead of sending the operator to a `BLASTIT_APP` that cannot
+    // work there.
+    #[cfg(not(feature = "python"))]
+    if let Some(message) = no_python_support(&config, &manifest, options.learn) {
+        dev_fail(&message);
+    }
     if let Err(message) = app_rule(&config, &manifest) {
         dev_fail(&message);
     }
@@ -2103,6 +2182,292 @@ path = ['/ungranted/.*']
         assert!(
             !manifest.effective_grants(0).contains_key(&db),
             "the manifest model still calls an empty grant empty"
+        );
+    }
+}
+
+/// `ADR-0009` §5: the boot gate of a build with no Python support (`MB.3.11`).
+///
+/// What it allows is as much a part of the gate as what it refuses: a
+/// static-only manifest has to boot in the standalone archive, or the artifact
+/// serves nothing at all.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod no_python_capability {
+    use super::*;
+
+    /// A static-only manifest: one `[route.static]` root, no app.
+    const STATIC_ONLY: &str = "\
+version = 1
+
+[[route]]
+name = \"docs\"
+path = ['.*']
+
+[route.static]
+root = \"site\"
+";
+
+    /// One route that declares no executor of its own: a WSGI view.
+    const WITH_A_VIEW: &str = "\
+version = 1
+
+[[route]]
+name = \"web\"
+path = ['.*']
+";
+
+    /// One PHP route and no app: its own executor (`ADR-0010` §2), so this
+    /// build can serve it without an interpreter anywhere in the image.
+    const PHP_ONLY: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.php]
+entry = \"public/index.php\"
+";
+
+    /// The page's shape: files from disk, everything else to the front
+    /// controller. Still no interpreter.
+    const STATIC_AND_PHP: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.static]
+root = \"public\"
+
+[route.php]
+entry = \"public/index.php\"
+";
+
+    fn manifest(source: &str) -> Manifest {
+        let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        manifest
+    }
+
+    #[test]
+    fn a_static_only_boot_is_allowed() {
+        assert_eq!(
+            no_python_support(&Config::default(), &manifest(STATIC_ONLY), false),
+            None
+        );
+    }
+
+    #[test]
+    fn an_app_is_refused_and_names_the_package_to_install() {
+        let config = Config {
+            app: Some("web.wsgi:app".to_string()),
+            ..Config::default()
+        };
+        let message = no_python_support(&config, &manifest(WITH_A_VIEW), false).unwrap();
+        assert!(message.contains("BLASTIT_APP (web.wsgi:app)"), "{message}");
+        assert!(
+            message.contains("install the Python package: uv add blastit"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_route_with_no_static_block_is_refused_by_name() {
+        let message = no_python_support(&Config::default(), &manifest(WITH_A_VIEW), false).unwrap();
+        assert!(message.contains("route \"web\""), "{message}");
+        assert!(
+            message.contains("install the Python package: uv add blastit"),
+            "{message}"
+        );
+        assert!(message.contains("[route.static]"), "{message}");
+    }
+
+    #[test]
+    fn learn_needs_the_gate_and_says_so() {
+        let message = no_python_support(&Config::default(), &manifest(STATIC_ONLY), true).unwrap();
+        assert!(message.starts_with("dev --learn"), "{message}");
+        assert!(
+            message.contains("install the Python package: uv add blastit"),
+            "{message}"
+        );
+    }
+
+    /// The one combination the gate deliberately leaves alone: a
+    /// `BLASTIT_APP` on an all-static tree keeps `static_app_refusal`'s
+    /// sentence in both builds, because installing the wheel would not make
+    /// that app reachable either.
+    #[test]
+    fn an_app_on_a_static_tree_keeps_the_rule_that_already_explains_it() {
+        let config = Config {
+            app: Some("web.wsgi:app".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            no_python_support(&config, &manifest(STATIC_ONLY), false),
+            None
+        );
+        assert!(
+            static_app_refusal(&config, &manifest(STATIC_ONLY))
+                .unwrap()
+                .starts_with("BLASTIT_APP: every route is static"),
+        );
+    }
+
+    /// A PHP route runs in a `view` worker with no interpreter, so this build
+    /// (`--no-default-features --features php`) can serve it and must say
+    /// nothing about installing Python (`MB.3.5.4`).
+    ///
+    /// The denied twin in the same test is the manifest that *is* WSGI-shaped:
+    /// a route with no `[route.static]` and no `[route.php]` keeps the gate's
+    /// sentence, so the early return cannot have swallowed the whole rule.
+    #[test]
+    fn a_php_only_manifest_is_not_refused_by_the_capability_gate() {
+        assert_eq!(
+            no_python_support(&Config::default(), &manifest(PHP_ONLY), false),
+            None
+        );
+        assert_eq!(
+            no_python_support(&Config::default(), &manifest(STATIC_AND_PHP), false),
+            None
+        );
+
+        let message = no_python_support(&Config::default(), &manifest(WITH_A_VIEW), false).unwrap();
+        assert!(message.contains("route \"web\""), "{message}");
+        assert!(
+            message.contains("install the Python package: uv add blastit"),
+            "a WSGI view keeps the sentence that names the artifact: {message}"
+        );
+    }
+}
+
+/// `R13` after `ADR-0010` §2: a `[route.php]` route is its own executor, so the
+/// app rule must never demand the WSGI callable for it (`MB.3.5.4`).
+///
+/// The old predicate was "every route is static", which read "not all-static"
+/// as "needs an app" and refused a PHP-only manifest with
+/// `BLASTIT_APP: the WSGI callable (…) is required` — advice that cannot make a
+/// PHP route serve. What the rule actually asks is whether every route runs its
+/// own executor.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod app_rule_executors {
+    use super::*;
+
+    /// A PHP route with no app: the manifest `blastit dev` must boot.
+    const PHP_ONLY: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.php]
+entry = \"public/index.php\"
+";
+
+    /// Files from disk, everything else to the front controller: also no app.
+    const STATIC_AND_PHP: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.static]
+root = \"public\"
+
+[route.php]
+entry = \"public/index.php\"
+";
+
+    /// One route that declares no executor: a WSGI view, which needs the app.
+    const WITH_A_VIEW: &str = "\
+version = 1
+
+[[route]]
+name = \"web\"
+path = ['.*']
+";
+
+    /// A PHP route beside a WSGI view: the view still needs the callable, so one
+    /// own-executor route cannot excuse the manifest.
+    const PHP_AND_A_VIEW: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.php]
+entry = \"public/index.php\"
+
+[[route]]
+name = \"web\"
+path = ['/api/.*']
+";
+
+    /// The sentence the rule refuses with, exactly.
+    const REQUIRE_APP: &str = "BLASTIT_APP: the WSGI callable (`module:attribute`) is required";
+
+    fn manifest(source: &str) -> Manifest {
+        let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        manifest
+    }
+
+    /// Every own-executor shape boots with no `app`: PHP only, and the page's
+    /// static-plus-PHP route.
+    #[test]
+    fn a_php_manifest_boots_without_an_app() {
+        for source in [PHP_ONLY, STATIC_AND_PHP] {
+            assert_eq!(
+                app_rule(&Config::default(), &manifest(source)),
+                Ok(()),
+                "{source}"
+            );
+        }
+    }
+
+    /// The refusal case did not vanish: a manifest with no `app` and no route
+    /// that runs its own executor still refuses, with the sentence that names
+    /// the setting — and never the Python-free build's `uv add` advice, which
+    /// would send a PHP developer to install a package the route cannot use.
+    #[test]
+    fn a_manifest_with_no_executor_still_requires_the_callable() {
+        for source in [
+            WITH_A_VIEW,
+            PHP_AND_A_VIEW,
+            "version = 1\n",
+            "version = 1\n\n[[route]]\nname = \"web\"\npath = ['.*']\n\
+             [route.ingress]\nbody = \"json\"\n",
+        ] {
+            let message = app_rule(&Config::default(), &manifest(source)).unwrap_err();
+            assert_eq!(message, REQUIRE_APP, "{source}");
+            assert!(
+                !message.contains("uv add"),
+                "the app rule never names the package: {message}"
+            );
+        }
+    }
+
+    /// `BLASTIT_APP` still satisfies the rule for a WSGI view, and the
+    /// all-static-with-an-app refusal is untouched by the wider predicate.
+    #[test]
+    fn the_two_halves_of_the_rule_still_hold() {
+        let with_app = Config {
+            app: Some("web.wsgi:app".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(app_rule(&with_app, &manifest(WITH_A_VIEW)), Ok(()));
+
+        let static_only = "version = 1\n\n[[route]]\nname = \"docs\"\npath = ['.*']\n\
+                           [route.static]\nroot = \"site\"\n";
+        assert_eq!(app_rule(&Config::default(), &manifest(static_only)), Ok(()));
+        let message = app_rule(&with_app, &manifest(static_only)).unwrap_err();
+        assert!(
+            message.starts_with("BLASTIT_APP: every route is static"),
+            "{message}"
         );
     }
 }

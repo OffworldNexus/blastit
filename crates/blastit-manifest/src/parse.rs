@@ -10,7 +10,7 @@ use toml::Value;
 
 use crate::error::{Location, ManifestError, ManifestErrors, escape_control};
 use crate::model::{
-    Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, StaticPolicy,
+    Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route, StaticPolicy,
     UnresolvedGrant,
 };
 use blastit_ingress::{BodyCodec, IngressPolicy};
@@ -24,11 +24,23 @@ const TOP_LEVEL_KEYS: &[&str] = &[
 /// Keys of a `[[route]]`; every other key of a route is a proxy name, so its
 /// value is an inline grant.
 ///
-/// `static` is reserved (`R1`): it is always the `[route.static]` block, even
-/// when a proxy of that name is declared.
+/// `static` and `php` are reserved (`R1`, `ADR-0010` §2): each is always the
+/// block of that name, even when a proxy of that name is declared.
 const ROUTE_KEYS: &[&str] = &[
-    "name", "path", "methods", "groups", "egress", "prefork", "ingress", "static",
+    "name", "path", "methods", "groups", "egress", "prefork", "ingress", "static", "php",
 ];
+
+/// Route keys Blastit **retired**: a manifest that still writes one is refused
+/// as an unknown key that names it (`MB.3.17`, `ADR-0010` §1).
+///
+/// `fastcgi` was the external `php-fpm` path. Making it an unknown key — rather
+/// than a silently ignored block or a deprecation warning — is the whole point
+/// of the removal: a deployment that still asks for the fallback must fail at
+/// the manifest, not at the first request. The name stays listed here (instead
+/// of simply disappearing from [`ROUTE_KEYS`]) so that it cannot be read as a
+/// grant on a proxy an author happens to call `fastcgi`: the refusal is the
+/// same sentence wherever the block is written.
+const RETIRED_ROUTE_KEYS: &[&str] = &["fastcgi"];
 
 /// The index file a `[route.static]` block answers with when it names none.
 const DEFAULT_INDEX: &str = "index.html";
@@ -39,8 +51,8 @@ const TOP_LEVEL_ONLY_KEYS: &[&str] = &["version", "app", "preload"];
 
 /// Expected value of an unknown route key, for the error message.
 const ROUTE_KEY_EXPECTED: &str = "one of the route keys (`name`, `path`, `methods`, `groups`, \
-                                   `egress`, `prefork`, `ingress`, `static`) or a table holding an \
-                                   inline grant";
+                                   `egress`, `prefork`, `ingress`, `static`, `php`) or a table \
+                                   holding an inline grant";
 
 /// Expected values of a route's `path`, for the error message of anything that
 /// is neither.
@@ -97,7 +109,37 @@ pub(crate) fn parse(source: &str) -> Result<Manifest, ManifestErrors> {
         parser.unresolved,
     )
     .with_app(app)
-    .with_preload(preload))
+    .with_preload(preload)
+    .with_route_lines(route_lines(source)))
+}
+
+/// The one-based line of every `[[route]]` header in `source`, in document
+/// order — which is routing order.
+///
+/// The parsed document keeps values but not where they were written, and a boot
+/// error prints `./blastit.toml:<line>`, so the header lines are scanned from
+/// the text itself. Whitespace inside the brackets is accepted (`[[ route ]]`),
+/// as TOML allows. A `[[route]]` written inside a multi-line string would be
+/// counted; no documentation or test manifest does that.
+fn route_lines(source: &str) -> Vec<u32> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| is_route_header(line.trim()))
+        .map(|(index, _)| u32::try_from(index + 1).unwrap_or(u32::MAX))
+        .collect()
+}
+
+/// True for a line that opens a `[[route]]` array-of-tables header.
+fn is_route_header(line: &str) -> bool {
+    let trimmed = line.trim();
+    let Some(rest) = trimmed.strip_prefix("[[") else {
+        return false;
+    };
+    let Some(end) = rest.find("]]") else {
+        return false;
+    };
+    rest[..end].trim() == "route"
 }
 
 /// Reports every top-level-only key that TOML attached to a table (`R8`).
@@ -200,6 +242,12 @@ fn check_route(value: &Value, declared: &BTreeSet<&str>, errors: &mut Vec<Manife
             "ingress" => check_fields(value, errors),
             // Reserved like `ingress`: its body is the static block's fields.
             "static" => check_fields(value, errors),
+            // The same for the PHP front controller's fields (`entry`,
+            // `workers`); a key inside it is the parser's to refuse.
+            "php" => check_fields(value, errors),
+            // A retired key has no body to check: its one diagnostic comes from
+            // the route walk, so nothing inside it is reported as a field.
+            key if RETIRED_ROUTE_KEYS.contains(&key) => {}
             key if ROUTE_KEYS.contains(&key) => {}
             // A grant is a table, so a reserved key with one is a proxy name
             // only when that proxy is declared.
@@ -517,6 +565,7 @@ impl Parser {
             let mut prefork = false;
             let mut ingress = None;
             let mut static_policy = None;
+            let mut php = None;
             for (key, value) in fields {
                 let key_path = format!("{path}.{}", escape_control(key));
                 match key.as_str() {
@@ -542,6 +591,12 @@ impl Parser {
                     }
                     "ingress" => ingress = self.ingress(value, &key_path),
                     "static" => static_policy = self.static_policy(value, &key_path),
+                    "php" => php = self.php_policy(value, &key_path),
+                    // A key Blastit retired is an unknown key, named — never a
+                    // grant on a proxy of that name (`MB.3.17`).
+                    key if RETIRED_ROUTE_KEYS.contains(&key) => {
+                        self.error(ManifestError::UnknownKey { path: key_path });
+                    }
                     _ => {}
                 }
             }
@@ -563,7 +618,8 @@ impl Parser {
             };
             let mut grants = BTreeMap::new();
             for (key, value) in fields {
-                if ROUTE_KEYS.contains(&key.as_str()) {
+                if ROUTE_KEYS.contains(&key.as_str()) || RETIRED_ROUTE_KEYS.contains(&key.as_str())
+                {
                     continue;
                 }
                 let grant_path = format!("{path}.{}", escape_control(key));
@@ -585,7 +641,8 @@ impl Parser {
                     grants,
                 )
                 .with_ingress(ingress)
-                .with_static(static_policy),
+                .with_static(static_policy)
+                .with_php(php),
             );
         }
 
@@ -891,6 +948,77 @@ impl Parser {
         })
     }
 
+    /// A route's `[route.php]`: the front controller and its optional cap
+    /// (`ADR-0010` §2).
+    ///
+    /// Only the shape is read here — `entry` is a string and `workers` a
+    /// `u32` — because the rules a value has to obey (a relative `.php` path
+    /// beneath the manifest's directory, `1..=64`) belong to validation, so one
+    /// bad value never hides the others. `listen` is not a key: there is no pool
+    /// and no socket, so it is refused by name like any other unknown key.
+    fn php_policy(&mut self, value: &Value, path: &str) -> Option<PhpPolicy> {
+        let table = self.as_table(value, path)?;
+        let mut entry = None;
+        let mut has_entry = false;
+        let mut workers = None;
+        for (key, value) in table {
+            let key_path = format!("{path}.{}", escape_control(key));
+            match key.as_str() {
+                "entry" => {
+                    has_entry = true;
+                    entry = self.as_str(value, &key_path);
+                }
+                "workers" => workers = self.workers(value, &key_path),
+                _ => self.error(ManifestError::UnknownKey { path: key_path }),
+            }
+        }
+        if !has_entry {
+            self.error(ManifestError::MissingKey {
+                path: format!("{path}.entry"),
+            });
+        }
+
+        Some(PhpPolicy {
+            entry: entry?,
+            workers,
+        })
+    }
+
+    /// An explicit `[route.php]` `workers` cap: a TOML integer that fits a
+    /// `u32`. `None` is "no cap" — the route's concurrency is blastit's to
+    /// derive, not a default this parser invents.
+    ///
+    /// The range rule (`1..=64`) is validation's; a negative or too-large
+    /// integer cannot be carried in the policy at all, so it is a type error
+    /// here instead of a value error that has nowhere to go.
+    fn workers(&mut self, value: &Value, path: &str) -> Option<u32> {
+        match value {
+            Value::Integer(number) => match u32::try_from(*number) {
+                Ok(number) => Some(number),
+                Err(_) => {
+                    self.error(ManifestError::WrongType {
+                        path: path.to_string(),
+                        expected: "an integer between 1 and 64",
+                        found: if *number < 0 {
+                            "a negative integer"
+                        } else {
+                            "an integer above 4294967295"
+                        },
+                    });
+                    None
+                }
+            },
+            other => {
+                self.error(ManifestError::WrongType {
+                    path: path.to_string(),
+                    expected: "an integer between 1 and 64",
+                    found: type_name(other),
+                });
+                None
+            }
+        }
+    }
+
     /// A route's `path`: a list of regexes, or the one regex a bare string
     /// holds.
     ///
@@ -1046,7 +1174,29 @@ fn type_name(value: &Value) -> &'static str {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::position;
+    use super::{is_route_header, position};
+
+    /// A `[[route]]` header is recognised line by line, whitespace inside the
+    /// brackets included; every other header shape is not one.
+    #[test]
+    fn a_route_header_is_the_bracketed_array_of_tables() {
+        for line in [
+            "[[route]]",
+            "  [[ route ]]",
+            "[[route]] # the front controller",
+        ] {
+            assert!(is_route_header(line), "{line:?}");
+        }
+        for line in [
+            "[route.static]",
+            "[[route.sub]]",
+            "[[routes]]",
+            "[[route]",
+            "",
+        ] {
+            assert!(!is_route_header(line), "{line:?}");
+        }
+    }
 
     #[test]
     fn position_is_one_based() {

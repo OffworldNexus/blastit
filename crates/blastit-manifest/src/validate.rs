@@ -3,8 +3,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
-use crate::error::{Location, ManifestError, ManifestErrors, ManifestWarning, regex_message};
-use crate::model::{Manifest, PgGrant, ProxyName, Route, StaticPolicy};
+use crate::error::{
+    Location, ManifestError, ManifestErrors, ManifestWarning, quoted, regex_message,
+};
+use crate::model::{Manifest, PgGrant, PhpPolicy, ProxyName, Route, StaticPolicy};
 use crate::routing::compile_pattern;
 use crate::uid::UidLayout;
 
@@ -24,6 +26,27 @@ const NO_DOTFILE_SEGMENT: &str = "must not contain a dotfile segment";
 const ANCHORED_PATTERN: &str = "must start with /";
 const AT_MOST_PATTERNS: &str = "at most 32 patterns";
 const AT_MOST_PATTERN_BYTES: &str = "at most 256 bytes";
+
+/// The fixed rules a `[route.php]` value can break (`ADR-0010` §2; the shape
+/// rules of §4.1 transferred verbatim from the retired key).
+const MUST_END_IN_PHP: &str = "must end in .php";
+const AT_LEAST_ONE: &str = "must be at least 1";
+const AT_MOST_WORKERS: &str = "at most 64";
+
+/// Why a `[route.php]` declaration can never run (`ADR-0010` §2).
+///
+/// `spa = true` answers every miss itself, and `CONNECT`/`TRACE` are the two
+/// methods a front controller cannot serve.
+const SPA_NEVER_REACHES_FRONT_CONTROLLER: &str = "spa = true never reaches the front controller";
+const CONNECT_CANNOT_REACH_WORKER: &str = "CONNECT cannot reach a PHP worker";
+const TRACE_CANNOT_REACH_WORKER: &str = "TRACE cannot reach a PHP worker";
+
+/// The largest `[route.php]` `workers` cap (`ADR-0010` §2).
+///
+/// A grammar bound, not the deployment's: a value above the route's per-view
+/// budget is a separate boot check that has a `Config` (and so is not
+/// `validate`'s, which must keep parsing on a machine with no deployment).
+const MAX_WORKERS: u32 = 64;
 
 /// How many `immutable` patterns one route may declare (`R5`).
 const MAX_PATTERNS: usize = 32;
@@ -45,6 +68,7 @@ pub(crate) fn validate(
     check_queries(manifest, &mut errors);
     check_routes(manifest, &mut errors);
     check_static(manifest, &mut errors);
+    check_php(manifest, &mut errors);
     check_uids(manifest, base, &mut errors);
 
     if errors.is_empty() {
@@ -482,6 +506,12 @@ fn check_static_declarations(
     location: Location,
     errors: &mut Vec<ManifestError>,
 ) {
+    // A route with a front controller does reach an executor, so nothing on it
+    // is dead; `spa = true` beside `[route.php]` is refused by `check_php`
+    // instead (the retired key kept both arms the same way).
+    if route.php().is_some() {
+        return;
+    }
     let why = if policy.spa {
         "spa = true never reaches the app"
     } else if manifest.app().is_none() {
@@ -511,11 +541,144 @@ fn check_static_declarations(
     }
 }
 
+/// The `[route.php]` blocks: the block's rules and the declarations that can
+/// never reach the front controller (`ADR-0010` §2; the shape rules of the
+/// retired key's §4.1, transferred verbatim).
+///
+/// Existence, symlinks and readability are not checked here: an explicit probe
+/// owns those (`MB.3.5.2`), so a manifest still validates on a machine that has
+/// not produced `public/` yet. There is no `listen` key to check — the
+/// transport is a `socketpair` blastit owns.
+fn check_php(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let Some(policy) = route.php() else {
+            continue;
+        };
+        let location = Location::Route {
+            index,
+            name: route.name().to_string(),
+        };
+        let root = route
+            .static_policy()
+            .map(|static_policy| static_policy.root.as_str());
+        check_php_entry(&location, policy, root, errors);
+        check_php_workers(&location, policy, errors);
+        check_php_declarations(route, &location, errors);
+    }
+}
+
+/// `entry` is a relative `.php` path that stays in the manifest's directory, and
+/// beneath `[route.static] root` when the route declares both (`ADR-0010` §2).
+///
+/// Whether it exists, is a regular file and is readable by the route uid is the
+/// probe's: its `OutsideRoot`/`Missing`/… map onto this variant with the same
+/// rule phrases, so one message reads the same at parse time and at boot. The
+/// root comparison is by whole path segment, not by string prefix: `publicity/`
+/// is not beneath `public/`.
+fn check_php_entry(
+    location: &Location,
+    policy: &PhpPolicy,
+    root: Option<&str>,
+    errors: &mut Vec<ManifestError>,
+) {
+    let entry = policy.entry.as_str();
+    let rule = if entry.is_empty() || entry.starts_with('/') {
+        Some(RELATIVE_PATH.to_string())
+    } else if entry.contains('\\') {
+        Some(NO_BACKSLASH.to_string())
+    } else if has_parent_segment(entry) {
+        Some(NO_PARENT_SEGMENT.to_string())
+    } else if has_control_byte(entry) {
+        Some(NO_CONTROL_BYTE.to_string())
+    } else if !entry.to_ascii_lowercase().ends_with(".php") {
+        Some(MUST_END_IN_PHP.to_string())
+    } else if let Some(root) = root
+        && !entry_is_under_root(entry, root)
+    {
+        Some(format!("must be under static root {}", quoted(root)))
+    } else {
+        None
+    };
+    if let Some(rule) = rule {
+        errors.push(ManifestError::PhpEntryInvalid {
+            location: location.clone(),
+            entry: policy.entry.clone(),
+            rule,
+        });
+    }
+}
+
+/// True when `entry` names a file beneath `root`, compared by whole segments.
+///
+/// Both are already known to be relative paths without `..`; `root` may be `.`
+/// (the manifest's own directory), and empty or `.` segments add nothing.
+fn entry_is_under_root(entry: &str, root: &str) -> bool {
+    let root = path_segments(root);
+    let entry = path_segments(entry);
+    root.len() < entry.len() && entry[..root.len()] == root[..]
+}
+
+/// The segments of a `/`-separated relative path, without empty or `.` ones.
+fn path_segments(value: &str) -> Vec<&str> {
+    value
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect()
+}
+
+/// An explicit `workers` cap is the route's ceiling, from `1` to `64`
+/// (`ADR-0010` §2).
+///
+/// Absent is not a rule violation: blastit derives the value from its
+/// concurrency budget, and `workers` may only lower it.
+fn check_php_workers(location: &Location, policy: &PhpPolicy, errors: &mut Vec<ManifestError>) {
+    let Some(workers) = policy.workers else {
+        return;
+    };
+    let why = if workers == 0 {
+        Some(AT_LEAST_ONE)
+    } else if workers > MAX_WORKERS {
+        Some(AT_MOST_WORKERS)
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        errors.push(ManifestError::PhpWorkersInvalid {
+            location: location.clone(),
+            workers,
+            why,
+        });
+    }
+}
+
+/// A PHP route may not declare a form that never reaches a worker
+/// (`ADR-0010` §2): `spa = true` answers every miss itself, and
+/// `CONNECT`/`TRACE` are the two methods a front controller cannot serve.
+fn check_php_declarations(route: &Route, location: &Location, errors: &mut Vec<ManifestError>) {
+    let mut dead = |key: &str, why: &'static str| {
+        errors.push(ManifestError::PhpDeadDeclaration {
+            location: location.clone(),
+            key: key.to_string(),
+            why,
+        });
+    };
+    if route.static_policy().is_some_and(|policy| policy.spa) {
+        dead("spa = true", SPA_NEVER_REACHES_FRONT_CONTROLLER);
+    }
+    if let Some(methods) = route.methods() {
+        if methods.iter().any(|method| method == "CONNECT") {
+            dead("CONNECT", CONNECT_CANNOT_REACH_WORKER);
+        }
+        if methods.iter().any(|method| method == "TRACE") {
+            dead("TRACE", TRACE_CANNOT_REACH_WORKER);
+        }
+    }
+}
+
 /// A value holding a C0 control byte, NUL included (`R2`, `R3`, `R5`).
 fn has_control_byte(value: &str) -> bool {
     value.bytes().any(|byte| byte < 0x20)
 }
-
 /// A `/`-separated value with a `..` segment of its own.
 fn has_parent_segment(value: &str) -> bool {
     value.split('/').any(|segment| segment == "..")
@@ -669,6 +832,8 @@ fn warnings(manifest: &Manifest) -> Vec<ManifestWarning> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::{valid_method, valid_route_name};
 
     #[test]

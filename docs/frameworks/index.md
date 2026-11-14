@@ -5,6 +5,8 @@ Blastit loads one callable and calls it. `app` names it as
 no framework integration: Django, Flask, SQLAlchemy, raw psycopg and a
 hand-written WSGI app all look the same from here.
 
+PHP is the other backend: [PHP-FPM, Symfony and Laravel](php.md).
+
 ```toml title="Django"
 app = "myshop.wsgi:application"
 ```
@@ -60,11 +62,12 @@ For pooling, put PgBouncer in front of the real database.
 
 ## Check it
 
-`blastit check` is framework-agnostic: it runs your pytest suite through
+`blastit check` is framework-agnostic: it runs your suite through
 Blastit's brokers and checks every request and statement against the manifest.
 
 ## Next
 
 [Django](django.md) · [Flask, SQLAlchemy and raw WSGI](flask.md) ·
+[PHP-FPM, Symfony and Laravel](php.md) ·
 [static assets and SPAs](static-and-spa.md) ·
 [local development](../local.md) · [CI/CD](../ci.md).

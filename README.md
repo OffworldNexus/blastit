@@ -52,6 +52,10 @@ The server keeps the terminal; `curl` goes in another one.
 For this hello world: no `sudo`, no `chmod`, no environment variables. `blastit
 dev` finds `./blastit.toml`, runs the app as you, and says so in the banner.
 
+Our own documentation site is served the same way: `make docs-serve` builds it
+with Zensical and hands it to a freshly built `blastit dev` (`PORT=8080`), and
+`make docs-serve-check` smoke-tests that stack.
+
 ## Three places it has to work
 
 | Where | Command | What it gives you |

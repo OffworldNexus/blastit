@@ -50,6 +50,16 @@
 //! not own.
 //! The first path that fails is the one the message names, because it is the one
 //! an operator has to change.
+//!
+//! # Builds without an interpreter
+//!
+//! A `python`-less build (`MB.3.11`) serves no WSGI view, so nothing calls the
+//! writability half — [`writable`], [`Writable`] and the helpers behind them —
+//! and the read/execute checks keep running for `dbproxy` and the scheduler.
+//! Those items stay **compiled** in that build (`cfg_attr(…allow(dead_code))`
+//! per item, never a `cfg` on the module): a check that stops being compiled is a
+//! check nobody notices changing, and `MB.3.13`'s embedded-PHP worker imports
+//! through `sys.path` exactly as a view does.
 
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -175,6 +185,7 @@ impl Blocker {
 /// that is not `path` itself — an entry *below* a writable directory, one that
 /// could be replaced, or created if it is not there yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub struct Writable {
     /// What has to stop being writable.
     pub path: PathBuf,
@@ -193,6 +204,7 @@ pub struct Writable {
 
 impl Writable {
     /// The sentence an operator reads for a writable `sys.path` path.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     pub fn message(&self) -> String {
         let answer = match self.probed_uid {
             Some(uid) => format!("`access(2)` says uid {uid} may write it ({})", self.why),
@@ -278,6 +290,7 @@ pub enum Probe {
     Execute,
     /// Write to it: what no path on `sys.path` — and no directory above one —
     /// may allow another uid.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     Write,
 }
 
@@ -581,6 +594,7 @@ fn sticky_protects(owner: u32, child: &Option<PathBuf>, uid: u32, dropped: &Drop
 
 /// The same, for every uid blastit drops to: the fallback's exemption holds
 /// only when no dropped-to uid can take the entry over.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
 fn sticky_protects_for_all(owner: u32, child: &Option<PathBuf>, dropped: &DroppedTo) -> bool {
     if dropped.uids.contains(&owner) {
         return false;
@@ -802,6 +816,7 @@ fn targets_of(paths: &[PathBuf]) -> Vec<Target> {
 /// `/a/b` and put its own directory back. The entry itself comes first, then its
 /// parents, and each parent carries the child below it — the one a sticky
 /// directory would protect.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
 fn targets_above(entries: &[PathBuf]) -> Vec<Target> {
     let mut targets = Vec::new();
     for entry in entries {
@@ -915,6 +930,7 @@ pub fn unexecutable(
 /// [`TimedOut`], when a probe did not answer: a `sys.path` that hung is a boot
 /// that has to stop, not one that may guess from the mode bits through the same
 /// filesystem.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub fn writable(
     paths: &[PathBuf],
     dropped: &DroppedTo,
@@ -993,6 +1009,7 @@ pub fn writable(
 /// The uid is named when the group class is what answered, because the mode bits
 /// were the only witness: the message has to say which uid a deployment has to
 /// keep out.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
 fn writable_by_mode(mode: u32, gid: u32, uid: u32) -> Option<String> {
     if mode & Access::Write.bit() != 0 {
         return Some(

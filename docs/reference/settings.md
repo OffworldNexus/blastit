@@ -19,6 +19,8 @@ counts the same. `--preset` is a flag; `--port` belongs to `blastit dev`.
 importable in Blastit's own environment: the project's virtualenv. Blastit reads
 the process environment only; `uv run --env-file .env blastit dev` loads a file.
 
+## Backends
+
 ## Port and health
 
 | Setting | Default | What it does |

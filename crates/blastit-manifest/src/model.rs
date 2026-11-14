@@ -318,6 +318,62 @@ pub struct StaticPolicy {
     pub immutable: Vec<String>,
 }
 
+/// A `[route.php]` block: the front controller a route's embedded PHP workers
+/// run (`ADR-0010` §2).
+///
+/// PHP runs embedded in blastit's own unprivileged `view` workers: the host's
+/// NTS `libphp.so` is `dlopen`ed inside the worker, so there is no pool, no
+/// `listen` and no socket a manifest could name. The *shape* rules are the ones
+/// the retired key's design spells out (`docs/design/php-fastcgi.md` §4.1 as
+/// amended, `MB.3.9.2`); only the transport changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhpPolicy {
+    /// The front controller, relative to the directory holding `blastit.toml`
+    /// (beneath `[route.static] root` when both blocks are declared).
+    pub entry: String,
+    /// An optional **cap** on the route's derived concurrency, or `None` to let
+    /// blastit use the route's per-view budget unchanged.
+    ///
+    /// Downward only: an explicit value can lower the ceiling the deployment
+    /// allows, never raise the deployment's admission ceiling. The derivation is
+    /// the scheduler's, not the manifest's — an absent value is "use the
+    /// budget", not a default this crate invents.
+    pub workers: Option<u32>,
+}
+
+/// The process a route's requests are handed to (design §4.2.1).
+///
+/// A closed set of executor kinds rather than a `()`, so the static responder,
+/// the WSGI view and the embedded PHP worker join the same table and a backend
+/// registry is keyed by [`Executor::kind`]. No `[route.fastcgi]` block produces
+/// an arm: the key itself is retired and refused at parse time (`MB.3.17`,
+/// `ADR-0010` §1: embedded PHP only, no fallback).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Executor {
+    /// The route's WSGI view process; [`Executor::kind`] is `"wsgi"`.
+    View,
+    /// The route's embedded PHP workers; [`Executor::kind`] is `"php"`.
+    ///
+    /// The policy travels with the plan, so a dispatcher never re-reads the
+    /// route to find out what it is running.
+    Php(PhpPolicy),
+}
+
+impl Executor {
+    /// Every executor kind this build has: the single source of the backend
+    /// kinds a registry accepts at boot.
+    pub const ALL_KINDS: &'static [&'static str] = &["wsgi", "php"];
+
+    /// The backend kind, spelled as `BackendBuilder::kind` spells it: `"wsgi"`
+    /// for [`Executor::View`], `"php"` for [`Executor::Php`].
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::View => "wsgi",
+            Self::Php(_) => "php",
+        }
+    }
+}
+
 /// A `[[route]]` entry: one sandbox, one process, one uid (§6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
@@ -330,6 +386,7 @@ pub struct Route {
     grants: BTreeMap<ProxyName, Grant>,
     ingress: Option<IngressPolicy>,
     static_policy: Option<StaticPolicy>,
+    php: Option<PhpPolicy>,
 }
 
 impl Route {
@@ -353,6 +410,7 @@ impl Route {
             grants,
             ingress: None,
             static_policy: None,
+            php: None,
         }
     }
 
@@ -360,6 +418,13 @@ impl Route {
     /// (`R1`). Parsing is the only caller.
     pub(crate) fn with_static(mut self, static_policy: Option<StaticPolicy>) -> Self {
         self.static_policy = static_policy;
+        self
+    }
+
+    /// The same route with its `[route.php]` block, if it declared one
+    /// (`ADR-0010` §2). Parsing is the only caller.
+    pub(crate) fn with_php(mut self, php: Option<PhpPolicy>) -> Self {
+        self.php = php;
         self
     }
 
@@ -430,6 +495,16 @@ impl Route {
     /// none and the responder answers nothing for it (`R1`).
     pub fn static_policy(&self) -> Option<&StaticPolicy> {
         self.static_policy.as_ref()
+    }
+
+    /// The route's `[route.php]` block, or `None` when the route is not a PHP
+    /// route (`ADR-0010` §2).
+    ///
+    /// `Some` makes the route its own executor ([`Executor::Php`]): it needs no
+    /// `app`, and every request the responder does not answer from
+    /// `[route.static]` reaches `entry` inside an embedded `libphp` worker.
+    pub fn php(&self) -> Option<&PhpPolicy> {
+        self.php.as_ref()
     }
 
     /// Whether this is the method-unrestricted catch-all `--learn` inserts new
@@ -517,6 +592,7 @@ pub struct Manifest {
     proxies: BTreeMap<ProxyName, Proxy>,
     groups: BTreeMap<String, Group>,
     routes: Vec<Route>,
+    route_lines: Vec<u32>,
     unresolved_grants: Vec<UnresolvedGrant>,
 }
 
@@ -629,13 +705,44 @@ impl Manifest {
     /// answer and the boot decides what to do with it. A manifest that mixes a
     /// static route with a route that forwards declares no app either, but it
     /// is not all-static: the forwarding route still needs a callable.
+    ///
+    /// A `[route.php]` route needs no app either, but its requests reach PHP
+    /// rather than the filesystem, so this stays `false` for it — and for a
+    /// route that declares **both** blocks, which serves its files from disk but
+    /// still reaches the front controller. [`Manifest::can_boot_without_app`] is
+    /// the predicate that covers both own executors.
     pub fn is_all_static(&self) -> bool {
         self.app.is_none()
             && !self.routes.is_empty()
             && self
                 .routes
                 .iter()
-                .all(|route| route.static_policy().is_some())
+                .all(|route| route.static_policy().is_some() && route.php().is_none())
+    }
+
+    /// True when every route runs on its own executor: a `[route.static]` root
+    /// or a `[route.php]` front controller (design §4.2, `ADR-0010` §2).
+    ///
+    /// Such a manifest needs no `app` at all, so a boot may skip the WSGI
+    /// interpreter (and `check` may run an external suite instead of pytest).
+    /// A PHP route is its own executor even though it is not static, which is
+    /// why this predicate is not [`Manifest::is_all_static`]. An empty manifest
+    /// is not bootable without an app.
+    pub fn can_boot_without_app(&self) -> bool {
+        !self.routes.is_empty()
+            && self
+                .routes
+                .iter()
+                .all(|route| route.static_policy().is_some() || route.php().is_some())
+    }
+
+    /// The one-based line of every `[[route]]` header, in routing order.
+    ///
+    /// A boot error names the manifest line it came from, and the parsed
+    /// document no longer remembers where a route was written, so parsing keeps
+    /// the header lines beside the routes.
+    pub fn route_lines(&self) -> Vec<u32> {
+        self.route_lines.clone()
     }
 
     /// The declared roots, route index and absolute path, in manifest order:
@@ -755,6 +862,13 @@ impl Manifest {
         self
     }
 
+    /// The same manifest with the lines its `[[route]]` headers were written
+    /// on; parsing is the only caller.
+    pub(crate) fn with_route_lines(mut self, route_lines: Vec<u32>) -> Self {
+        self.route_lines = route_lines;
+        self
+    }
+
     /// Whether a statement is already allowed by the route's own table grants
     /// or by the grants of a group it takes (`R34`).
     ///
@@ -835,6 +949,7 @@ impl Manifest {
             proxies,
             groups,
             routes,
+            route_lines: Vec::new(),
             unresolved_grants,
         }
     }
@@ -943,6 +1058,80 @@ mod tests {
         assert_eq!(assembled(1).version(), 1);
         assert_eq!(assembled(2).version(), 2);
         assert_eq!(assembled(0).version(), 0);
+    }
+
+    /// The executor kind table is the one place a backend registry learns the
+    /// spellings it accepts. It holds exactly the executors this build has: the
+    /// external FastCGI pool is gone (`MB.3.17`), so `"fastcgi"` must not be a
+    /// kind any more — a registry that still accepted it would dispatch to a
+    /// crate that no longer exists — and the embedded PHP worker is `"php"`
+    /// (`MB.3.5.4`).
+    #[test]
+    fn executor_kinds_are_the_one_table() {
+        assert_eq!(Executor::ALL_KINDS, ["wsgi", "php"].as_slice());
+        assert_eq!(Executor::View.kind(), "wsgi");
+        assert!(!Executor::ALL_KINDS.contains(&"fastcgi"));
+
+        let php = Executor::Php(PhpPolicy {
+            entry: "public/index.php".to_string(),
+            workers: Some(4),
+        });
+        assert_eq!(php.kind(), "php");
+        assert_eq!(php.clone(), php);
+        assert_ne!(php, Executor::View);
+    }
+
+    /// `can_boot_without_app` accepts only a manifest whose every route has its
+    /// own executor, and `is_all_static` the subset that declares no `app`.
+    #[test]
+    fn the_boot_predicates_read_every_routes_executor() {
+        fn parsed(source: &str) -> Manifest {
+            Manifest::from_toml_str(source).expect("the manifest parses")
+        }
+
+        let static_site = parsed(
+            "version = 1\n[[route]]\nname = \"site\"\npath = ['.*']\n\
+             [route.static]\nroot = \"public\"\n",
+        );
+        assert!(static_site.can_boot_without_app());
+        assert!(static_site.is_all_static());
+
+        // A plain forwarding route still needs the app, and an empty manifest
+        // needs everything.
+        let mixed = parsed(
+            "version = 1\n\n[[route]]\nname = \"site\"\npath = ['/assets/.*']\n\
+             [route.static]\nroot = 'public'\n\n[[route]]\nname = \"app\"\npath = ['.*']\n",
+        );
+        assert!(!mixed.can_boot_without_app());
+        assert!(!mixed.is_all_static());
+
+        // A PHP route is its own executor, so it needs no app — and it is still
+        // not a static site (`MB.3.5.4`).
+        let php_site = parsed(
+            "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
+             [route.php]\nentry = \"public/index.php\"\n",
+        );
+        assert!(php_site.can_boot_without_app());
+        assert!(!php_site.is_all_static());
+
+        let empty = parsed("version = 1\n");
+        assert!(!empty.can_boot_without_app());
+        assert!(!empty.is_all_static());
+    }
+
+    /// `route_lines` returns the `[[route]]` header lines in routing order, and
+    /// nothing for a manifest that declares no route.
+    #[test]
+    fn route_lines_are_the_header_lines_in_routing_order() {
+        let manifest = Manifest::from_toml_str(
+            "version = 1\n\n[[route]]\nname = \"a\"\npath = ['.*']\n\n\
+             [[route]]\nname = \"b\"\npath = ['/b']\n",
+        )
+        .expect("the manifest parses");
+        assert_eq!(manifest.route_lines(), vec![3, 7]);
+
+        let without = Manifest::from_toml_str("version = 1\n").expect("the manifest parses");
+        assert_eq!(without.route_lines(), Vec::<u32>::new());
     }
 
     /// `normalize` writes every bind placeholder as `$?`, which no SQL parser

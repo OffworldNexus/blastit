@@ -888,3 +888,413 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T01:09 [MB.3.1] (lead) base 3cfea613f4deaff471e5876523be808115b4181a
 - 2026-11-14T01:20 [MB.3.1] (lead) status active -> review
 - 2026-11-14T01:29 [MB.3.1] (lead) status review -> done
+- 2026-11-14T01:29 [MB.3.1] (lead) commit 1e307d6
+- 2026-11-14T01:29 [MB.3.2] (lead) status ready -> active
+- 2026-11-14T01:29 [MB.3.2] (lead) attempt 1/3 started
+- 2026-11-14T01:29 [MB.3.2] (lead) base 1e307d6c33b31827a587d6c705bf8a6661fbda8f
+- 2026-11-14T01:53 [MB.3.2] (lead) status active -> review
+- 2026-11-14T01:54 [MB.9] (planner) created (epic) Backend Upstream Contract (DI/IoC): one trait for static, WSGI and FastCGI
+- 2026-11-14T01:54 [MB.9.1] (planner) created (task) Add crates/blastit-backend: the upstream contract trait, types, boot factory and conformance table
+- 2026-11-14T01:54 [MB.9.2] (planner) created (task) Port static serving onto the injected Upstream trait without behaviour change
+- 2026-11-14T01:54 [MB.9.3] (planner) created (task) Port the WSGI forwarding path onto the injected Upstream trait
+- 2026-11-14T01:54 [MB.9.4] (planner) created (task) Run one shared conformance table against every implementation and gate make check
+- 2026-11-14T01:54 [MB.3.3] (planner) edited fields
+- 2026-11-14T01:54 [MB.3.6] (planner) edited fields
+- 2026-11-14T01:54 [MB.4] (planner) edited fields
+- 2026-11-14T01:54 [MB.3] (planner) Owner requirement 2026-11-14: every backend (static, WSGI, FastCGI) must be an injected implementation of one language-agnostic Upstream trait. Design extended 
+- 2026-11-14T01:54 [MB.3.3] (planner) Body rewritten: FastCGI session/param design plus the normative backend-contract section (trait Upstream, Arc<dyn Upstream> per route, boot factory, crate layer
+- 2026-11-14T01:54 [MB.9] (planner) Created on owner requirement: contract crate + static port + WSGI port + shared conformance suite land here, under MB and before MB.4, while FastCGI implements 
+- 2026-11-14T01:59 [MB.3.2] (lead) REVIEW FAIL: (MAJOR) php.md:50 relative pool listen=run/fpm.sock resolves under php-fpm's compile prefix and dies at step 2, so the zero-sudo Local flow and inv
+- 2026-11-14T01:59 [MB.3.2] (lead) status review -> ready
+- 2026-11-14T02:03 [MB.3.2] (lead) attempt 2/3 started
+- 2026-11-14T02:03 [MB.3.2] (lead) status ready -> review
+- 2026-11-14T02:09 [MB.3.2] (lead) status review -> done
+- 2026-11-14T02:09 [MB.3.3] (lead) status ready -> active
+- 2026-11-14T02:09 [MB.3.3] (lead) attempt 1/3 started
+- 2026-11-14T02:09 [MB.3.3] (lead) base 7d3e7c1f2b726242989d2acf1aacaaf8218d31b8
+- 2026-11-14T03:07 ESCALATION #8 -> expert for MB.3.3 by lead: attempt 1: identical BLOCKER/MAJOR classes repeated across two critic rounds on the 0.2.1 FastCGI + Upstream design (poo
+- 2026-11-14T03:07 [MB.3.3] (planner) edited fields
+- 2026-11-14T03:36 [MB.3.4] (planner) edited fields
+- 2026-11-14T03:37 [MB.3.6] (planner) edited fields
+- 2026-11-14T03:37 [MB.9.2] (planner) edited fields
+- 2026-11-14T03:37 [MB.3.4.1] (planner) created (task) Create the pure blastit-fastcgi crate: manifest, records, name-value codec, CGI head parser - design MB.3.4a
+- 2026-11-14T03:37 [MB.3.4.2] (planner) created (task) Param builder, allowlist wall and protected lockdown matrix - design MB.3.4b
+- 2026-11-14T03:37 [MB.3.6.1] (planner) created (task) Pool ctl frames, workspace deps/lock and scheduler AF_UNIX seccomp - design MB.3.6a1
+- 2026-11-14T03:37 [MB.3.6.2] (planner) created (task) FastCgiUpstream: session pump, /proc/self/fd connect and conformance row - design MB.3.6a2
+- 2026-11-14T03:37 [MB.3.6.3] (planner) created (task) stage0 no-app boot, parentfd freeze and supervise::spawn_pool single *at sequence + PoolReady - design MB.3.6b
+- 2026-11-14T03:37 [MB.9.2.1] (planner) created (task) UpstreamHead, RouteRuntime.stages, run_with and the Done slot rule - design MB.9.2a
+- 2026-11-14T03:37 [MB.3.6.4] (planner) created (task) check::serve_and_run, the 3-way check branch order and PHP learn attribution - design MB.3.6c
+- 2026-11-14T03:37 [MB.9.2.2] (planner) created (task) StaticUpstream adapter and deletion of the static dispatch branches - design MB.9.2b
+- 2026-11-14T03:37 [MB.3.7] (planner) edited fields
+- 2026-11-14T03:37 [MB.3.8] (planner) edited fields
+- 2026-11-14T04:00 AUTOPILOT on by conductor resume MB.3 after restart
+- 2026-11-14T04:01 ESCALATION #9 -> architect for MB.3.3 by conductor: Three critic rounds still FAIL with the same core defect: the FastCGI pool socket lifecycle/pivot is not closed (who bin
+- 2026-11-14T04:47 [MB.3.3] (lead) edited fields
+- 2026-11-14T04:47 [MB.3.3] (lead) Round-4 security critic: 0 BLOCKER, 2 MAJOR (MAJOR-A dev/check parentfd O_CLOEXEC cannot cross stage-0->stage-1 execve, no fd handoff specified; MAJOR-B S0 rout
+- 2026-11-14T04:54 [MB.3.3] (designer) Round-4 security fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-A pinned the parentfd handoff (internal argv --fastcgi-parent-fd acro
+- 2026-11-14T05:08 [MB.3.3] (designer) Round-5 security fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-A residual (init keeps one Arc<OwnedFd> per route for the process lif
+- 2026-11-14T05:15 [MB.3.3] (designer) Round-5 follow-up: fixed MINOR-31..37 in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect. 31: child dev spawned as Host::stage1() Reexec (/proc/self/e
+- 2026-11-14T05:37 [MB.3.3] (lead) Round-4 implementability critic (steps exhausted before writing review-implementability.md; content captured): 0 BLOCKER, 12 MAJOR, 16 MINOR. M1 BootError.line 
+- 2026-11-14T05:42 [MB.3.3] (designer) Round-4 implementability fixes (M1-M12 + one-liners) in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: M1 RouteSpec.line from SchedulerConfig.route_
+- 2026-11-14T05:58 [MB.3.3] (designer) Round-5 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 PinnedSocket::new now takes Arc<OwnedFd> and parent_fd uses
+- 2026-11-14T06:13 [MB.3.3] (lead) Round-6 implementability critic (steps exhausted mid-file; analysis captured): 0 BLOCKER, 4 MAJOR, ~14 MINOR. MAJOR-A Executor/SpawnMode derives unpinned across
+- 2026-11-14T06:17 [MB.3.3] (designer) Round-6 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-A Executor/FastCgiPolicy derive Debug+Clone+PartialEq+Eq (not
+- 2026-11-14T06:33 [MB.3.3] (designer) Round-7 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 the contract now defines BodySource (BoxFuture next + cance
+- 2026-11-14T06:50 [MB.3.3] (designer) Round-8 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 builtin_registry() is defined in scheduler.rs (MB.9.2.1.2, 
+- 2026-11-14T07:06 [MB.3.3] (designer) Round-9 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 module declarations now have one owner each - MB.3.4.2 owns
+- 2026-11-14T07:24 [MB.3.3] (designer) Round-10 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 blastit-fastcgi now defines codec-local LockdownError/CgiE
+- 2026-11-14T07:40 [MB.3.3] (designer) Round-11 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 MB.3.6.1.2 adds blastit-backend to crates/blastit/Cargo.to
+- 2026-11-14T07:58 [MB.3.3] (designer) Round-12 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 mod upstream; is declared in crates/blastit-scheduler/src/
+- 2026-11-14T08:14 [MB.3.3] (designer) Round-13 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 MB.3.5.1 now adds Executor/FastCgiPolicy to crates/blastit
+- 2026-11-14T08:28 [MB.3.3] (designer) Round-14 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 the entry check is now injected - SocketProbe gains check_
+- 2026-11-14T08:42 [MB.3.3] (designer) Round-15 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 ProductionProbe::check_entry now brackets openat2 + facces
+- 2026-11-14T08:56 [MB.3.3] (designer) Round-16 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 replaced the impossible setfsuid bracket with a short-live
+- 2026-11-14T09:11 [MB.3.3] (designer) Round-17 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 faccessat2 is now called via unsafe libc::syscall(SYS_facc
+- 2026-11-14T09:24 [MB.3.3] (designer) Round-18 implementability one-liners in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: (1) the reply contract is now exactly one byte from O/U/N/S/R
+- 2026-11-14T09:38 [MB.3.3] (designer) Round-4 testability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-T1 added crates/blastit/tests/critical_fastcgi_parent_fd.rs as MB.
+- 2026-11-14T09:53 [MB.3.3] (designer) Round-5 testability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-T1 pinned the view/zygote ChildIo.keep rule (omit pinned_socket_fd
+- 2026-11-14T10:06 [MB.3.3] (designer) Round-6 testability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-T1 pinned two oracles for the External promise - critical_fastcgi_
+- 2026-11-14T10:20 [MB.3.3] (designer) Round-7 testability one-liners in docs/design/php-fastcgi.md + resolve-architect: MINOR-T1 external_pool_never_spawns_php_fpm now states the 200 fake-peer preco
+- 2026-11-14T10:36 [MB.3.3] (designer) Round-3 consistency fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: C8-M1 env[HOME] is <runtime>/views/<uid>/tmp in 4.1, 4.8.2, 7.2 and ADR;
+- 2026-11-14T10:50 [MB.3.5] (planner) edited fields
+- 2026-11-14T10:50 [MB.9.1] (planner) edited fields
+- 2026-11-14T10:50 [MB.9.2.1] (planner) edited fields
+- 2026-11-14T10:50 [MB.3.6.1] (planner) edited fields
+- 2026-11-14T10:50 [MB.3.6.2] (planner) edited fields
+- 2026-11-14T10:50 [MB.3.6.3] (planner) edited fields
+- 2026-11-14T10:50 [MB.3.6.4] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.5.1] (planner) created (task) Parse [route.fastcgi], Executor and the boot predicates in blastit-manifest - design MB.3.5 part 1
+- 2026-11-14T10:51 [MB.3.5.2] (planner) created (task) SocketProbe, boot probes and the manifest reference entry - design MB.3.5 part 2
+- 2026-11-14T10:51 [MB.9.1.1] (planner) created (task) Add crates/blastit-backend: Upstream trait, contract types, PinnedSocket, Registry - design MB.9.1 part 1
+- 2026-11-14T10:51 [MB.9.1.2] (planner) created (task) Conformance case table, IMPLEMENTATIONS and cases() in blastit-backend - design MB.9.1 part 2
+- 2026-11-14T10:51 [MB.9.2.1.1] (planner) created (task) Scheduler config and head plumbing: UpstreamHead accessors, RouteInfo.executor, SchedulerConfig fields - design MB.9.2a part 1
+- 2026-11-14T10:51 [MB.9.2.1.2] (planner) created (task) RouteRuntime.stages, ViewHub/SessionPort, session task, run_with and builtin_registry - design MB.9.2a part 2
+- 2026-11-14T10:51 [MB.9.2.1.3] (planner) created (task) Re-export the boot surface and wire roles::scheduler to run_with - design MB.9.2a part 3
+- 2026-11-14T10:51 [MB.3.6.1.1] (planner) created (task) Scheduler AF_UNIX seccomp, pool ctl frames and HTTP head refusals - design MB.3.6a1 part 1
+- 2026-11-14T10:51 [MB.3.6.1.2] (planner) created (task) Workspace Cargo edges, Cargo.lock and the fastcgi-codec conformance driver - design MB.3.6a1 part 2
+- 2026-11-14T10:51 [MB.3.6.2.1] (planner) created (task) FastCgiUpstream session pump, PinnedSocket connect and fastcgi registration - design MB.3.6a2 part 1
+- 2026-11-14T10:51 [MB.3.6.2.2] (planner) created (task) FastCGI dispatch and conformance suites plus the 5-binary Makefile gate - design MB.3.6a2 part 2
+- 2026-11-14T10:51 [MB.3.6.3.1] (planner) created (task) stage0 B1-B3 boot, parentfd argv handoff and the protected parent-fd suite - design MB.3.6b part 1
+- 2026-11-14T10:51 [MB.3.6.3.2] (planner) created (task) render_pool_conf, the S0-S7/U1 spawn sequence and the fake php-fpm helper - design MB.3.6b part 2
+- 2026-11-14T10:51 [MB.3.6.3.3] (planner) created (task) Protected critical_fastcgi_pool suite: fd table, pgid, escapee and U1 - design MB.3.6b part 3
+- 2026-11-14T10:51 [MB.3.6.4.1] (planner) created (task) Two-shape http_obs reader, executor_ran accounting and the learn static proposal - design MB.3.6c part 1
+- 2026-11-14T10:51 [MB.3.6.4.2] (planner) created (task) check::serve_and_run, the 3-way branch order and the protected learn suite - design MB.3.6c part 2
+- 2026-11-14T10:51 [MB.3.4.2] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.5] (planner) edited fields
+- 2026-11-14T10:51 [MB.9.2.2] (planner) edited fields
+- 2026-11-14T10:51 [MB.9.3] (planner) edited fields
+- 2026-11-14T10:51 [MB.9.4] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.8] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.6] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.6.1] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.6.2] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.6.3] (planner) edited fields
+- 2026-11-14T10:51 [MB.9.2] (planner) edited fields
+- 2026-11-14T10:51 [MB.9.2.1] (planner) edited fields
+- 2026-11-14T10:53 [MB.3.3] (planner) Applied design §8/§8.1/§8.2 plan hygiene: converted MB.3.5/9.1/9.2.1/3.6.1-4 to epics; created 16 leaves (MB.3.5.1-2, 9.1.1-2, 9.2.1.1-3, 3.6.1.1-2, 3.6.2.1-2, 
+- 2026-11-14T11:02 [MB.3.3] (lead) status active -> review
+- 2026-11-14T11:02 [MB.3.3] (lead) status review -> done
+- 2026-11-14T11:02 [MB.3.3] (lead) committed dbbf619 (design + ADR-0008 + 4 PASS reviews + resolve note + §8.1/§8.2 plan hygiene; make check green, guard OK, critical-guard clean)
+- 2026-11-14T11:02 [MB.3.4.1] (lead) status ready -> active
+- 2026-11-14T11:02 [MB.3.4.1] (lead) attempt 1/3 started
+- 2026-11-14T11:02 [MB.3.4.1] (lead) base dbbf6196e4f7e933a2687928883380702542f361
+- 2026-11-14T11:12 [MB.3.4.1] (lead) DEVIATION: changed lines ~1430 vs design's <=550 cap, entirely rustdoc + 34 in-module tests over 4 source files; no record type, cap or refusal dropped. Accepte
+- 2026-11-14T11:12 [MB.3.4.1] (lead) status active -> review
+- 2026-11-14T11:21 [MB.3.4.1] (lead) REVIEW FAIL: [MAJOR] record.rs:114-133 + lib.rs:64 MAX_PARAMS_BYTES=65535 unreachable — Header::new rejects 65529..65535 because aligned padding pushes CL+PL ov
+- 2026-11-14T11:21 [MB.3.4.1] (lead) status review -> ready
+- 2026-11-14T11:30 [MB.3.4.1] (lead) attempt 2 done: 65 535 PARAMS cap now reachable (zero padding at max size, decode accepts both), Field Debug is log-safe, pair-budget doc fixed, test renamed to
+- 2026-11-14T11:30 [MB.3.4.1] (lead) status ready -> review
+- 2026-11-14T11:39 [MB.3.4.1] (lead) attempt 2/3 started
+- 2026-11-14T11:39 [MB.3.4.1] (lead) attempt 2 review PASS (all 8 acceptance commands re-run by reviewer; 65 535 round-trip proven for all seven record types; budget deviation accepted). Three MINO
+- 2026-11-14T11:39 [MB.3.4.1] (lead) status review -> ready
+- 2026-11-14T11:47 [MB.3.4.1] (lead) status ready -> review
+- 2026-11-14T11:55 [MB.3.4.1] (lead) status review -> done
+- 2026-11-14T11:55 [MB.3.4.1] (lead) committed 872661d
+- 2026-11-14T11:55 [MB.3.4.2] (lead) status ready -> active
+- 2026-11-14T11:55 [MB.3.4.2] (lead) attempt 1/3 started
+- 2026-11-14T11:55 [MB.3.4.2] (lead) base 872661db52414c7d9a5fd6535d9ed121dce683f0
+- 2026-11-14T12:05 [MB.3.4.2] (lead) status active -> review
+- 2026-11-14T12:05 [MB.3.4.2] (lead) budgets: 1189 added lines vs the design's 550; every §4.7 row for this leaf landed, none dropped (declared in RESULT.md).
+- 2026-11-14T12:14 [MB.3.4.2] (lead) attempt 2/3 started
+- 2026-11-14T12:14 [MB.3.4.2] (lead) REVIEW PASS with 3 MINORs to close in attempt 2: (1) lockdown.rs:215 Params::insert is public and accepts/emits PHP_VALUE, HTTP_PROXY, SCRIPT_FILENAME=/etc/pass
+- 2026-11-14T12:14 [MB.3.4.2] (lead) status review -> ready
+- 2026-11-14T12:23 [MB.3.4.2] (lead) status ready -> review
+- 2026-11-14T12:31 [MB.3.4.2] (lead) status review -> done
+- 2026-11-14T12:31 [MB.3.4.2] (lead) committed 0f441af; two accepted MINORs recorded for the epic gate: (a) the 65 535 total-byte cap is only driven through build via the pair cap, so add an 8x8192
+- 2026-11-14T12:36 [MB.3.4.3] (test-curator) created (task) Harden the protected lockdown suite: SCRIPT_NAME query, total-byte cap via build, Params Debug, hop-by-hop names, Error/LockdownError Display
+- 2026-11-14T12:36 [MB.3.4.4] (test-curator) created (task) Harden the CGI head parser: reject a ':' in Status, pin the field-less head, protected codec suite for the proxy-control names
+- 2026-11-14T12:36 [MB.3.4.5] (test-curator) created (task) Apply the 8192-byte value rule inside lockdown::resolve so no public function returns an over-long CONTENT_TYPE
+- 2026-11-14T12:41 [MB.3.4] (lead) gate audit (docs/testing/AUDIT-MB.3.4.md): 66 tests, critical 25, fluff 0, mutants 97.3% killed (321/330); 3 gap children filed (MB.3.4.3 lockdown suite, MB.3.4
+- 2026-11-14T12:42 [MB.3.4.3] (lead) status ready -> active
+- 2026-11-14T12:42 [MB.3.4.3] (lead) attempt 1/3 started
+- 2026-11-14T12:42 [MB.3.4.3] (lead) base 5ab9043
+- 2026-11-14T12:45 [MB.3.4.3] (implementer) appended five protected tests (SCRIPT_NAME query, total-byte cap via build, Params Debug, nine hop-by-hop names, Error/LockdownError Display/source); crate suit
+- 2026-11-14T12:46 [MB.10] (conductor) created (task) Agent scratch on disk: one scratch root, retention cleanup, LESSONS entry
+- 2026-11-14T12:46 [MB.3.4.3] (implementer) acceptance green: 30 critical / 41+30+1 crate / critical-guard OK (enforced) / mutants 348 tested 4 missed (cgi parse_status owned by MB.3.4.4) / rs-lint clean 
+- 2026-11-14T12:46 [MB.3.4.3] (lead) status active -> review
+- 2026-11-14T12:49 [MB.3.4.3] (implementer) reviewer MINOR cleared: dropped the derived encoded_len assert
+- 2026-11-14T12:50 [MB.3.4.3] (lead) status review -> done
+- 2026-11-14T12:50 [MB.3.4.3] (lead) commit 7af86b2
+- 2026-11-14T12:50 [MB.3.4.4] (lead) status ready -> active
+- 2026-11-14T12:50 [MB.3.4.4] (lead) attempt 1/3 started
+- 2026-11-14T12:50 [MB.3.4.4] (lead) base 7af86b2
+- 2026-11-14T12:53 [MB.3.4.4] (implementer) implemented: 2 cgi unit tests (':' in Status, field-less head), new critical_fastcgi_codec.rs (12 tests); 43/12/30/1 green, guard OK, mutants 3 missed/327 caugh
+- 2026-11-14T12:55 [MB.3.4.4] (lead) status active -> review
+- 2026-11-14T12:56 [MB.11] (conductor) created (task) Rewrite the DigitalOcean roles/pooler section for clarity (backport to 0.2.0)
+- 2026-11-14T12:59 [MB.3.4.4] (implementer) reviewer MINORs cleared: exact 100-field/8192-byte assertions + named literals, dropped redundant header(name) loop; 43/12/30/1 green, rs-lint clean
+- 2026-11-14T13:00 [MB.3.4.4] (lead) status review -> done
+- 2026-11-14T13:00 [MB.3.4.4] (lead) commit 612ecad
+- 2026-11-14T13:00 [MB.3.4.5] (lead) status ready -> active
+- 2026-11-14T13:00 [MB.3.4.5] (lead) attempt 1/3 started
+- 2026-11-14T13:00 [MB.3.4.5] (lead) base 612ecad
+- 2026-11-14T13:02 [MB.3.4.5] (implementer) move the 8192-byte CONTENT_TYPE cap into resolve, record the drop in build, add the boundary unit test (44/12/30/1); mutants 3 tolerated missed, 18 unviable
+- 2026-11-14T13:04 [MB.3.4.5] (lead) status active -> review
+- 2026-11-14T13:09 [MB.3.4.5] (lead) status review -> done
+- 2026-11-14T13:09 [MB.3.4.5] (lead) commit cad3b72
+- 2026-11-14T13:10 [MB.12] (conductor) created (epic) Distribution per backend: PyPI wheel, npm package, standalone binary (no Python for static/Node)
+- 2026-11-14T13:12 [MB.3.5.1] (lead) status ready -> active
+- 2026-11-14T13:12 [MB.3.5.1] (lead) attempt 1/3 started
+- 2026-11-14T13:12 ESCALATION #10 -> architect for MB.12 by conductor: Owner asks for a real architecture of serving different language runtimes (who owns app code/process lifecycle, secrets,
+- 2026-11-14T13:12 [MB.3.5.1] (lead) base 2ad094b
+- 2026-11-14T13:12 [MB.3.4] (lead) epic gate: cargo test -p blastit-fastcgi (44/12/30/1), zero deps, no-I/O grep, make check EXIT=0 verified; test-curator gate audit dispatched; stale acceptance 
+- 2026-11-14T13:13 [MB.3] (lead) architect context (2026-11-14): epic MB.12 will land docs/design/backend-runtimes.md + an ADR defining the runtime-provider contract (app-process ownership, sec
+- 2026-11-14T13:13 [MB.3.5] (lead) design-of-record is ADR-0008 + php-fastcgi.md 4.1 as accepted. Do NOT invent a key or a rule: three keys only (entry, listen, workers=4), no [route.fastcgi.env]
+- 2026-11-14T13:15 [MB.3.4.6] (test-curator) created (task) Pin the last two unprotected branches in the fastcgi protected suites: head_end at MAX_HEAD_BYTES and a digit-leading header name
+- 2026-11-14T13:16 [MB.3.4.6] (lead) status ready -> active
+- 2026-11-14T13:16 [MB.3.4.6] (lead) attempt 1/3 started
+- 2026-11-14T13:16 [MB.3.4.6] (lead) base 2ad094b
+- 2026-11-14T13:17 [MB.3.9] (lead) created (epic) blastit dev spawns, configures, supervises and cleans up the php-fpm pool itself
+- 2026-11-14T13:17 [MB.3.9.1] (lead) created (task) Rewrite the PHP page Local section for the automatic dev pool (two commands, dx + ai-ergonomics acceptance)
+- 2026-11-14T13:17 [MB.3.9.2] (lead) created (task) Design + ADR amendment: dev lifecycle, provider reuse, discovery order, cleanup and error contract
+- 2026-11-14T13:18 [MB.3.9.2] (unknown) edited fields
+- 2026-11-14T13:18 [MB.3.9.3] (lead) created (task) Amend design 4.8.1 + ADR-0008: dev spawns the pool via the runtime provider (discovery, cleanup, error contract)
+- 2026-11-14T13:19 [MB.3.9.4] (lead) created (task) blastit dev spawns/supervises/cleans up the php-fpm pool via the runtime provider (no listen, derived workers)
+- 2026-11-14T13:19 [MB.3.9.5] (lead) created (task) Protected critical_fastcgi_dev_pool suite: missing binary, immediate exit, two pools, SIGTERM cleanup, grammar
+- 2026-11-14T13:19 [MB.3.9.2] (lead) status ready -> active
+- 2026-11-14T13:19 [MB.3.9.2] (lead) attempt 1/3 started
+- 2026-11-14T13:19 [MB.3.9.2] (lead) base 2ad094b; owner decision 2026-11-14: listen is removed from [route.fastcgi], workers optional and derived from blastit's view worker budget; MB.3.5.1 is imp
+- 2026-11-14T13:19 [MB.3.5] (lead) GRAMMAR CHANGED 2026-11-14 (owner): [route.fastcgi] is now { entry, workers? } -- 'listen' is REMOVED (blastit derives <run>/<route>/fpm.sock inside a 0700 dir)
+- 2026-11-14T13:19 [MB.3.5.2] (lead) DO NOT START until MB.3.9.2 and MB.3.9.3 land: this node's brief derives from the old grammar (user-authored listen, DevProbe::check = 'socket must already exis
+- 2026-11-14T13:20 [MB.3.9.1] (unknown) edited fields
+- 2026-11-14T13:20 [MB.3.9] (lead) OWNER SPEC (runtime discovery), 2026-11-14 -- folded into MB.3.9.1/.3/.4/.5: the runtime binary is resolved ONCE at boot by a GENERIC, provider-declared resolve
+- 2026-11-14T13:22 [MB.3.6.3] (lead) BINDING OWNER CONSTRAINTS (2026-11-14, design-level -- record now, land later).
+- 2026-11-14T13:22 [MB.3.6.4] (lead) BINDING OWNER CONSTRAINTS (2026-11-14) for check/learn and the observation path -- these are design-level, record now and land later.
+- 2026-11-14T13:22 [MB.3.9] (lead) OWNER SPEC (CPU accounting + who limits parallelism), 2026-11-14 -- binding on MB.3.6.3/MB.3.6.4 (logs written there) and owned generically by MB.12's provider 
+- 2026-11-14T13:22 [MB.3.5.1] (lead) attempt 1: code complete against the owned-socket grammar in all 6 paths (FastCgiPolicy{entry, workers:Option<u32>}, listen refused via FastCgiListenDerived nam
+- 2026-11-14T13:22 [MB.3.5.1] (lead) status active -> blocked
+- 2026-11-14T13:22 [MB.3.5.3] (lead) created (task) Name fastcgi in ROUTE_KEY_EXPECTED and move the pinned expectation in tests/parse.rs
+- 2026-11-14T13:22 [MB.3.9.1] (lead) status ready -> active
+- 2026-11-14T13:22 [MB.3.9.1] (lead) attempt 1/3 started
+- 2026-11-14T13:22 [MB.3.9.1] (lead) base 2ad094b; this leaf is now the unblocker for MB.3.5.1: docs_fences boots docs/frameworks/php.md, which still shows listen = run/fpm.sock and workers = 4. MB
+- 2026-11-14T13:23 [MB.3.6.3] (lead) SUPERSEDED (2026-11-14, owner): rule (3) of my earlier note -- 'charge observed wall time, cpu_ns: null, optional production-only cgroup cpu.stat refinement' --
+- 2026-11-14T13:23 [MB.3.6.4] (lead) SUPERSEDED (2026-11-14, owner): my earlier note (1) said a FastCGI route's honest value is observed wall time with cpu_ns:null. That is now the FALLBACK ONLY, n
+- 2026-11-14T13:23 [MB.3.4.6] (lead) attempt 1 report: 2 protected files, +25/-1, no src change, 44/12/30/1 green, mutants 3/331/18 unchanged, critical-guard OK for both files. make check fails ONL
+- 2026-11-14T13:23 [MB.3.4.6] (lead) status active -> review
+- 2026-11-14T13:24 [MB.3.6] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3.9.3] (lead) HELD pending MB.12's embed-vs-pool decision. This node was written for a spawned php-fpm pool (generated conf, provider spawn, discovery via BLASTIT_PHP_FPM). I
+- 2026-11-14T13:24 [MB.3.6.1] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3.9.4] (lead) HELD pending MB.12's embed-vs-pool decision. This node was written for a spawned php-fpm pool (generated conf, provider spawn, discovery via BLASTIT_PHP_FPM). I
+- 2026-11-14T13:24 [MB.3.6.2] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3.9.5] (lead) HELD pending MB.12's embed-vs-pool decision. This node was written for a spawned php-fpm pool (generated conf, provider spawn, discovery via BLASTIT_PHP_FPM). I
+- 2026-11-14T13:24 [MB.3.6.3] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3.9] (lead) HELD pending MB.12 embed-vs-pool decision. MB.3.9.1 (page) is running and is treated as a DRAFT: its mechanism-neutral parts (one-line manifest, one command) su
+- 2026-11-14T13:24 [MB.3.6.4] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3.7] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3] (lead) INVENTORY for the architect (embed-vs-pool), 2026-11-14. What I believe survives either way, and why:
+- 2026-11-14T13:39 [MB.3] (lead) FOLLOW-UP for the embed-vs-pool decision: docs/frameworks/php.md's H1 is 'PHP-FPM, Symfony and Laravel' and the nav label 'PHP-FPM' lives in zensical.toml:37 + 
+- 2026-11-14T13:39 [MB.3] (lead) RENAME RISK from the architect's research (docs/research/php-embed-sapi.md, MB.12): the embed model names the block '[route.php] entry = ...' and the override '
+- 2026-11-14T13:50 [MB.3.9.2] (lead) landed: grammar = entry + optional workers; listen gone (derived <run>/fastcgi/<route_index>/fpm.sock); workers from view_worker_cap(), 1..=64, over-budget/over
+- 2026-11-14T13:50 [MB.3.9.1] (lead) status active -> review
+- 2026-11-14T13:50 [MB.3.5.1] (lead) status blocked -> active
+- 2026-11-14T13:50 [MB.3.5.1] (lead) unblocked: docs/frameworks/php.md landed the entry-only manifest (MB.3.9.1), so docs_fences is green in the working tree. Attempt 1's code is unchanged; this is
+- 2026-11-14T13:50 [MB.3.5.1] (lead) status active -> review
+- 2026-11-14T13:54 [MB.3.9.2] (lead) REVIEW FAIL (attempt 1). MAJOR: design:1445 'a leaf that cannot be freed never fails the boot' (B3 failure cell :1396 = warn + route Busy/503, never exit 1) has
+- 2026-11-14T13:54 [MB.3.9.2] (lead) status active -> ready
+- 2026-11-14T13:54 [MB.3.9.2] (lead) attempt 2/3 started
+- 2026-11-14T13:55 [MB.13] (conductor) created (task) Rewrite the deployments index page for scannability
+- 2026-11-14T13:56 [MB.3.4.6] (lead) status review -> done
+- 2026-11-14T13:56 [MB.3.4.6] (lead) commit 5c4d8c6
+- 2026-11-14T13:56 [MB.3.9.2] (lead) status ready -> active
+- 2026-11-14T13:56 [MB.14] (conductor) created (task) Dogfood: make docs-serve builds the site and serves it through blastit
+- 2026-11-14T13:57 [MB.14] (lead) status ready -> active
+- 2026-11-14T13:57 [MB.14] (lead) attempt 1/3 started
+- 2026-11-14T13:57 [MB.14] (lead) base 5c4d8c63a6b7c0af22edb4d07c6d1c77fd9be6d3
+- 2026-11-14T13:58 [MB.15] (conductor) created (task) blastit dev must reap stage 1 on SIGTERM (no orphan, no port left open)
+- 2026-11-14T13:59 [MB.15] (lead) Premise check: could not reproduce against a freshly built target/debug/blastit. SIGTERM to the dev init pid drains in ~1s (shutdown drain -> process.exited sig
+- 2026-11-14T14:00 [MB.15] (lead) edited fields
+- 2026-11-14T14:02 [MB.3.9.2] (lead) REVIEW FAIL (attempt 2). Five of six findings verified fixed on disk. Remaining: the SAME class of drift my finding (e) named, in three places the attempt-2 swe
+- 2026-11-14T14:02 [MB.3.9.2] (lead) status active -> ready
+- 2026-11-14T14:02 [MB.3.9.2] (lead) attempt 3/3 started
+- 2026-11-14T14:04 [MB.14] (lead) status active -> review
+- 2026-11-14T14:06 [MB.3.7] (lead) node body corrected (2026-11-14) after MB.3.9.1's review: the page no longer carries php-fpm.conf/mkdir/absolute-listen and no longer uses uv init/uv add, so th
+- 2026-11-14T14:06 [MB.3.9] (lead) INSTALL-STORY follow-up (reviewer finding on MB.3.9.1, deferred not fixed): docs/frameworks/php.md teaches 'uv tool install blastit' + bare 'blastit dev', while
+- 2026-11-14T14:09 [MB.3.5.1] (lead) status review -> done
+- 2026-11-14T14:09 [MB.3.9.1] (lead) status review -> done
+- 2026-11-14T14:09 [MB.3.5.1] (lead) commit 0bbb877 (atomic with MB.3.9.1: each alone leaves docs_fences/parser red)
+- 2026-11-14T14:09 [MB.3.9.1] (lead) commit 0bbb877 (atomic with MB.3.5.1: each alone leaves docs_fences/parser red). Open follow-ups: (a) install story uv tool vs uv add -- belongs to MB.12 distri
+- 2026-11-14T14:09 [MB.3.9.2] (lead) status ready -> active
+- 2026-11-14T14:12 [MB.3.5.2] (unknown) edited fields
+- 2026-11-14T14:12 [MB.3.5.2] (lead) paths extended (2026-11-14) to crates/blastit-manifest/src/error.rs: the review of MB.3.9.2 found the design attributes FastCgiPoolSocketInvalid to MB.3.5.1 (do
+- 2026-11-14T14:12 [MB.3.9.2] (unknown) edited fields
+- 2026-11-14T14:12 [MB.3.9.2] (lead) REVIEW FAIL (attempt 3). The three-line sweep landed (grep: 0 oracles attributed to MB.3.5.1/.2) but one REAL plan error surfaced: design:2046/:2191/:2256 attri
+- 2026-11-14T14:12 [MB.3.9.2] (lead) status active -> ready
+- 2026-11-14T14:12 [MB.3.9.2] (lead) attempt 4/4 started
+- 2026-11-14T14:19 [MB.3.9.2] (lead) status ready -> done
+- 2026-11-14T14:20 [MB.14] (lead) status review -> done
+- 2026-11-14T14:20 [MB.14] (lead) commit 9fab605 (gates: plan validate OK, guard OK, make check exit 0 at 0bbb877)
+- 2026-11-14T14:20 [MB.15] (lead) status ready -> active
+- 2026-11-14T14:20 [MB.15] (lead) attempt 1/3 started
+- 2026-11-14T14:20 [MB.15] (lead) base 9fab605 (after MB.14 commit)
+- 2026-11-14T14:21 [MB.3.4] (lead) status ready -> done
+- 2026-11-14T14:22 [MB.3.4] (lead) status done -> done
+- 2026-11-14T14:22 [MB.3] (lead) BATCH 3 CLOSED (commits 5c4d8c6, 0bbb877, 0637f89, 4cd727b). MB.3.4 epic gate PASSED: 44/12/30/1, zero deps, pure codec, 3/331/18 mutants, gate audit 0 fluff/0 
+- 2026-11-14T14:23 [MB.16] (conductor) created (task) Deterministic ctl-write-to-gone-scheduler test (flake at supervise.rs:1045)
+- 2026-11-14T14:32 [MB.15] (lead) status active -> review
+- 2026-11-14T14:39 [MB.3.6.3] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.6.3] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.6.3.1] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.6.3.1] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.6.3.2] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.6.3.2] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.6.3.3] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.6.3.3] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.9.3] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.9.3] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.9.4] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.9.4] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.9.5] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.9.5] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.5.4] (lead) created (task) Add [route.php] (PhpPolicy, Executor::Php) and narrow [route.fastcgi] to external-only; drop FastCgiPoolSocketInvalid
+- 2026-11-14T14:39 [MB.3.10] (lead) created (task) Retarget the PHP page and reference onto [route.php] + libphp-embed + BLASTIT_LIBPHP (ADR-0010)
+- 2026-11-14T14:39 [MB.3.11] (lead) created (task) Feature-gate pyo3 (feature=python); decouple RawFrame transport and forking from the GIL
+- 2026-11-14T14:39 [MB.3.12] (lead) created (task) crates/blastit-php-sapi: per-minor Apache-2.0 C SAPI shims (blastit_php_abi_v1) + critical tests
+- 2026-11-14T14:39 [MB.3.13] (lead) created (task) PhpEmbedRuntime: embedded view worker loop + stage0 BLASTIT_LIBPHP discovery and ABI boot gate
+- 2026-11-14T14:39 [MB.3.5] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.5.2] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.5.3] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.6] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.6.1] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.6.2] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.7] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.8] (unknown) edited fields
+- 2026-11-14T14:39 [MB.9.3] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.5] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.5.2] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.5.3] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.6] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.6.1] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.6.2] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.6.4] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.7] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.8] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.9.3] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.11] (lead) status ready -> active
+- 2026-11-14T14:39 [MB.3.11] (lead) attempt 1/3 started
+- 2026-11-14T14:39 [MB.3.11] (lead) base 4cd727b; ADR-0010 §4: standalone archive must ship php with python OFF (zero libpython). This leaf unblocks the shim (MB.3.12) and the Python-free binary; 
+- 2026-11-14T14:42 [MB.3] (lead) PLAN FREEZE (2026-11-14, owner): no further ADR-driven renames/supersedes until the ADR reconciliation lands. THERE ARE NOW TWO ADR-0010 FILES: docs/decisions/A
+- 2026-11-14T14:43 [MB.3.14] (lead) created (task) Record the design-doc collision in LESSONS: one writer per design doc, incremental .part writes, dispatch order
+- 2026-11-14T14:43 [MB.3] (lead) CHECKPOINT (owner instruction 2026-11-14): when the architect finishes regenerating docs/design/backend-runtimes.md and consolidating the two ADR-0010 files, th
+- 2026-11-14T14:43 [MB.3.14] (lead) status ready -> active
+- 2026-11-14T14:43 [MB.3.14] (lead) attempt 1/3 started
+- 2026-11-14T14:43 [MB.3.14] (lead) base 4cd727b
+- 2026-11-14T14:43 [MB.15] (lead) status review -> done
+- 2026-11-14T14:44 [MB.15] (lead) commit dc05a48 (gates: plan validate OK, guard OK, make check exit 0 at 4cd727b)
+- 2026-11-14T14:52 [MB.3.14] (lead) status active -> done
+- 2026-11-14T14:52 [MB.3.14] (lead) bullet is IN HEAD (verified: git show HEAD:docs/knowledge/LESSONS.md contains it) but it landed inside dc05a48 [MB.15] -- another agent's commit swept my workin
+- 2026-11-14T14:52 [MB.3.14] (lead) status done -> ready
+- 2026-11-14T14:52 [MB.3.14] (lead) status ready -> active
+- 2026-11-14T14:52 [MB.3.14] (lead) attempt 2/3 started
+- 2026-11-14T14:54 [MB.3] (lead) RECONCILIATION LANDED (2026-11-14) -- 3ce74a6's PROVISIONAL marker is CLOSED, CONFIRMED AS A NO-OP. Canonical ADR is docs/decisions/ADR-0010-php-embedded-via-li
+- 2026-11-14T14:55 [MB.3.11] (lead) status active -> review
+- 2026-11-14T14:55 [MB.3.11] (lead) attempt 1 report: feature gate + interpreter-free build proven by serving a static 200 from the no-libpython binary; pyo3 tree count 0; one fork call site; make
+- 2026-11-14T15:01 [MB.3.11] (unknown) edited fields
+- 2026-11-14T15:01 [MB.3.11] (lead) status review -> ready
+- 2026-11-14T15:01 [MB.3.11] (lead) status ready -> active
+- 2026-11-14T15:01 [MB.3.11] (lead) REVIEW PASS (attempt 1) with two MINORs to clear before commit: (a) stage0.rs:362 gives a [route.fastcgi]-only manifest advice that cannot work ('install the Py
+- 2026-11-14T15:07 [MB.3.11] (lead) status active -> done
+- 2026-11-14T15:07 [MB.3.11] (lead) commit 90056a7 (make check exit 0, rs-no-python green, 0 pyo3 deps). Both review MINORs cleared: the [route.fastcgi]-only refusal now names MB.3.13's wiring ins
+- 2026-11-14T15:08 [MB.3.15] (lead) created (task) Protected critical_backend_capability suite: the design R12 refusal matrix in both build configurations
+- 2026-11-14T15:08 [MB.3.16] (lead) created (task) Refuse (or prove) blastit check on an all-static Python-less manifest, pretty and --json
+- 2026-11-14T15:08 [MB.3.12] (lead) status ready -> active
+- 2026-11-14T15:08 [MB.3.12] (lead) attempt 1/3 started
+- 2026-11-14T15:08 [MB.3.12] (lead) base b2890c4; host has NO PHP toolchain (no php/php-config/libphp/headers) -- build.rs must degrade (cfg no_php_toolchain + a Rust refusal naming php-config + t
+- 2026-11-14T15:14 [MB.3.17] (lead) created (task) Remove the external FastCGI path: delete blastit-fastcgi, drop [route.fastcgi], the ALLOW flag and every doc that sanctions it
+- 2026-11-14T15:14 [MB.3.6.1] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.1] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.6.1.1] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.1.1] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.6.1.2] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.1.2] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.6.2] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.2] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.6.2.1] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.2.1] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.6.2.2] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.2.2] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.5.4] (lead) RETARGETED (owner 2026-11-14, 'No fallback please'): this leaf is now [route.php] ONLY. [route.fastcgi] stops existing as a key -- refused as an unknown key nam
+- 2026-11-14T15:14 [MB.3.10] (lead) RETARGETED (owner 2026-11-14, 'No fallback please'): the docs retarget teaches [route.php] + libphp-embed + BLASTIT_LIBPHP ONLY. The fail-closed switch (BLASTIT
+- 2026-11-14T15:14 [MB.3] (lead) OWNER DECISION (2026-11-14): NO FastCGI fallback at all. MB.3.17 created (remove the external FastCGI path: delete crates/blastit-fastcgi, drop [route.fastcgi] 
+- 2026-11-14T15:14 [MB.3.4] (lead) NOTE for the record: this epic's crate (crates/blastit-fastcgi) is being DELETED by MB.3.17 under the owner's 2026-11-14 'No fallback please' decision. The gate
+- 2026-11-14T15:17 [MB.3.18] (lead) created (task) Build and publish the Linux packaging matrix: x86_64/aarch64 x glibc/musl, wheels + standalone binaries + PHP shims
+- 2026-11-14T15:17 [MB.3.18] (lead) QUEUED, not started (owner 2026-11-14): Linux only; aarch64 and Alpine/musl in scope. Runs AFTER MB.3.12 (Cargo.toml/lock + shims) and MB.3.17 (removes a worksp
+- 2026-11-14T15:19 [MB.3.18] (lead) ACCEPTANCE TIGHTENED (owner 2026-11-14, 'drop musl if it cannot be made secure'): the musl leg's gate is SECURITY, not 'it runs'. Six items must hold on the Alp
+- 2026-11-14T15:29 [MB.3.12] (unknown) edited fields
+- 2026-11-14T15:29 [MB.3.12] (lead) status active -> review
+- 2026-11-14T15:29 [MB.3.12] (lead) attempt 1 report: crate lands zero-dep (17 KiB shim, no DT_NEEDED on libphp, zend_first_try, SAPI_OPTION_NO_CHDIR, startup-stage INI lockdown, CLOCK_PROCESS_CPU
+- 2026-11-14T15:30 [MB.3.18] (lead) PROVEN-COUNT RULE (owner 2026-11-14): MB.3.12 built and probed 8.4 only; 8.2/8.3 are source-guarded but UNBUILT. This node's first job is first build + probe of
+- 2026-11-14T15:30 [MB.3.14] (lead) status active -> ready
+- 2026-11-14T15:30 [MB.3.14] (lead) status ready -> active
+- 2026-11-14T15:30 [MB.3.14] (lead) attempt 3/3 started
+- 2026-11-14T15:31 [MB.3.14] (lead) attempt 3: two more bullets appended from MB.3.12 (php_execute_script swallows the bailout -> false is the signal; CLOCK_PROCESS_CPUTIME_ID is tick-granular -> 
+- 2026-11-14T15:31 [MB.3.14] (lead) status active -> done
+- 2026-11-14T15:33 [MB.3.12] (lead) REVIEW FAIL (attempt 1). Two MAJORs, both ADR-0010 SS2 deviations: (1) request.rs:23 DISABLED_FUNCTIONS omits pcntl_signal, posix_kill, posix_getpgid which the 
+- 2026-11-14T15:33 [MB.3.12] (lead) status review -> ready
+- 2026-11-14T15:33 [MB.3.12] (lead) attempt 2/3 started
+- 2026-11-14T15:46 [MB.3.12] (lead) status ready -> review
+- 2026-11-14T15:46 [MB.3.12] (lead) attempt 2: both MAJORs + four MINORs fixed. CRITICAL FINDING: sapi_startup() NULLS ini_entries, so attempt 1's entire INI lockdown was silently absent (open_bas
+- 2026-11-14T15:52 [MB.3.14] (lead) status done -> ready
+- 2026-11-14T15:52 [MB.3.14] (lead) status ready -> active
+- 2026-11-14T15:52 [MB.3.14] (lead) attempt 4/3 started
+- 2026-11-14T15:52 [MB.3.14] (lead) status active -> done
+- 2026-11-14T15:52 [MB.3.14] (lead) attempt 4 refused by the attempt cap (4/3, ESCALATE) -- correctly: a one-bullet docs addition is not worth an expensive-tier escalation. The third trap is carri
+- 2026-11-14T15:52 [MB.3.17] (lead) ADDITIONAL LESSONS bullet to append alongside this node's own one-liner (the attempt cap on MB.3.14 refused a fourth reopen, correctly): **sapi_startup() nulls 
+- 2026-11-14T15:57 [MB.3.12] (lead) status review -> done
+- 2026-11-14T15:57 [MB.3.12] (lead) commit d990e0e (make check exit 0 on a PHP-free host; Docker probe green with the three new ini_get rows). Four review MINORs cleared: three INI keys now assert
+- 2026-11-14T15:57 [MB.3.17] (unknown) edited fields
+- 2026-11-14T15:57 [MB.3.17] (lead) status ready -> active
+- 2026-11-14T15:57 [MB.3.17] (lead) attempt 1/3 started
+- 2026-11-14T15:57 [MB.3.17] (lead) base 9889a29; SPLIT agreed: code now, docs after MB.12's lenses (docs/frameworks|design|decisions are the architect's paths). docs/reference/settings.md is ours
+- 2026-11-14T16:09 [MB.3.20] (implementer) created (task) Held docs pass for MB.3.17: php.md fence and fallback note, design/ADR supersession lines, AUDIT note
+- 2026-11-14T16:11 [MB.3.17] (implementer) attempt 1: code half landed (crate+lock+Executor/parse/validate/error/stage0/no_python_build, settings.md row, LESSONS). critical_guard --node MB.3.17 base 9889
+- 2026-11-14T16:12 [MB.3.17] (lead) attempt 1: CODE HALF COMPLETE, blocked on ONE held docs path. Crate deleted (7 files, 3495 lines) + Cargo.lock; Executor::Pool/FastCgiPolicy/Route::fastcgi and 
+- 2026-11-14T16:12 [MB.3.17] (lead) status active -> blocked
+- 2026-11-14T16:12 [MB.3.17] (unknown) edited fields
+- 2026-11-14T16:12 [MB.3.17] (lead) status blocked -> ready
+- 2026-11-14T16:12 [MB.3.17] (lead) status ready -> active
+- 2026-11-14T16:12 [MB.3.17] (lead) attempt 2/3 started
+- 2026-11-14T16:16 [MB.3.20] (implementer) OWED BY THIS NODE: delete the STALE row in crates/blastit-manifest/tests/docs_fences.rs — const STALE = [("docs/frameworks/php.md", "fastcgi: unknown key", "MB.
+- 2026-11-14T16:18 [MB.3.17] (implementer) attempt 2: docs_fences now carries the STALE accounting row (php.md fence must fail with 'fastcgi: unknown key'; MB.3.20 owes the entry's removal) + self-cleari
+- 2026-11-14T16:20 [MB.3.17] (lead) status active -> done
+- 2026-11-14T16:20 [MB.3.17] (lead) commit bc3b201 (make check exit 0; 4287 deletions; critical_guard authorized both protected deletions; docs_fences STALE row self-clears). Held docs half is MB.
+- 2026-11-14T16:20 [MB.3.5.4] (lead) RE-SCOPED after MB.3.17 (commit bc3b201): the fastcgi half is gone, so this leaf is [route.php] ONLY -- PhpPolicy { entry, workers }, Executor::Php, and it must
+- 2026-11-14T16:20 [MB.3.5.4] (lead) status ready -> active
+- 2026-11-14T16:20 [MB.3.5.4] (lead) attempt 1/3 started
+- 2026-11-14T16:20 [MB.3.5.4] (lead) base 5dcf16d; scope guards added from the owner: one key (entry, under static.root when both set), optional downward workers only, Executor::Php typed, fastcgi 
+- 2026-11-14T16:21 [MB.3.20] (lead) requirement added: the retarget must be VERIFIED by a test (php.md no longer mentions [route.fastcgi]; its manifest fence boots as [route.php] once MB.3.5.4 lan
+- 2026-11-14T16:32 [MB.3.5.4] (unknown) edited fields
+- 2026-11-14T16:32 [MB.3.5.4] (lead) status active -> ready
+- 2026-11-14T16:32 [MB.3.5.4] (lead) status ready -> active
+- 2026-11-14T16:32 [MB.3.5.4] (lead) attempt 2/3 started
+- 2026-11-14T16:32 [MB.3.5.4] (lead) paths extended to crates/blastit/src/stage0.rs + crates/blastit/tests/no_python_build.rs: the predicates landed but stage0::app_rule/no_python_support still key
+- 2026-11-14T16:32 [MB.3.6.4] (lead) FOLLOW-UP from MB.3.5.4: crates/blastit-manifest/src/edit.rs::expected_routes drops static_policy (pre-existing) and will drop [route.php] on a --learn rewrite 
+- 2026-11-14T16:36 [MB.3.5.4] (lead) status active -> review
+- 2026-11-14T16:36 [MB.3.5.4] (lead) attempt 2: boot decisions fixed -- app_rule refuses only when !can_boot_without_app() && app.is_none(); no_python_support returns None for can_boot_without_app(
+- 2026-11-14T16:36 [MB.3.21] (lead) created (task) check --learn must not drop a route's executor block: edit.rs expected_routes loses [route.static] today and [route.php] next
+- 2026-11-14T16:36 [MB.3.21] (lead) created on owner instruction (2026-11-14) after the finding was folded into MB.3.6.4 once and stayed there: a --learn rewrite that silently deletes a [route.sta
+- 2026-11-14T16:36 [MB.3.6.4] (lead) OWNERSHIP: the edit.rs --learn route-dropping bug is MB.3.21 now, NOT this node (it stayed folded in once and that was wrong). Do not fix or duplicate it here; 
+- 2026-11-14T16:36 [MB.3.8] (unknown) edited fields
+- 2026-11-14T16:36 [MB.3] (lead) RELEASE FOLDED (owner 2026-11-14): there is no separate 0.2.1 release -- everything goes into 0.2.0. Cargo.toml already reads 0.2.0 and must not bump. MB.3.8 re
+- 2026-11-14T16:38 [MB.17] (conductor) created (task) Default build must be the portable standalone binary (no libpython, no cache RUNPATH)
+- 2026-11-14T16:39 [MB.3.22] (lead) created (task) Close MB.3.5.4 review MINORs: PHP-only BLASTIT_APP refusal, check's pytest branch, Route::executor, dead key field
+- 2026-11-14T16:39 [MB.3.5.4] (lead) status review -> done
+- 2026-11-14T16:39 [MB.3.5.4] (lead) REVIEW PASS (attempt 2). Five MINORs deferred to MB.3.22 (two behavioural: stage0::static_app_refusal still keys on is_all_static so a PHP-only manifest silentl

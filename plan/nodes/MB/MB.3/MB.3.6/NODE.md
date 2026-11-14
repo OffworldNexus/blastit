@@ -1,92 +1,111 @@
 ---
 id: MB.3.6
-title: "Dispatch FastCGI routes and wire dev/check/--learn PHP attribution"
-kind: task
+title: "Dispatch [route.php] and wire dev/check/--learn PHP attribution (external FastCGI fallback kept)"
+kind: epic
 status: ready
-owner: implementer
 priority: 3
-depends_on: [MB.3.5]
+depends_on: []
 paths:
+  - Cargo.lock
+  - "crates/blastit-scheduler/Cargo.toml"
   - "crates/blastit-scheduler/src/**"
   - "crates/blastit-scheduler/tests/critical_fastcgi_dispatch.rs"
+  - "crates/blastit-scheduler/tests/conformance_fastcgi.rs"
+  - "crates/blastit-scheduler/tests/common/mod.rs"
+  - "crates/blastit-fastcgi/Cargo.toml"
+  - "crates/blastit-fastcgi/tests/conformance.rs"
+  - crates/blastit/Cargo.toml
   - "crates/blastit/src/**"
+  - crates/blastit/tests/critical_fastcgi_pool.rs
   - crates/blastit/tests/critical_fastcgi_learn.rs
+  - crates/blastit/tests/critical_fastcgi_parent_fd.rs
+  - crates/blastit/tests/support/fake_php_fpm.rs
+  - crates/blastit/tests/fake_php_fpm_smoke.rs
+  - "crates/blastit-sys/src/seccomp.rs"
+  - "crates/blastit-frame/src/ctl.rs"
+  - "crates/blastit-frame/src/frame.rs"
+  - "crates/blastit-http/tests/critical_head_refusals.rs"
+  - Makefile
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T01:09"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal
 
-Make the PHP route real end to end inside the product: the scheduler connects to the
-route's `php-fpm` pool over its Unix socket, sends `BEGIN_REQUEST` → `PARAMS` →
-`STDIN`, pumps `STDOUT` back as the HTTP response, turns `STDERR` into `app.output`
-events and `END_REQUEST` into accounting; `blastit dev` runs a PHP route beside
-`php-fpm` with zero `sudo`, and `blastit check` / `--learn` attribute PHP routes and
-their grants like every other backend.
+Make the PHP route real end to end inside the product — **as an implementation of the
+shared `Upstream` contract**, not as a branch in dispatch: the scheduler connects to the
+route's `php-fpm` pool over its pinned Unix socket, sends `BEGIN_REQUEST` → `PARAMS` →
+`STDIN`, pumps `STDOUT` back as the HTTP response, turns `STDERR` into `app.output` events
+and `END_REQUEST` into accounting; init pins and freezes the pool parent; `blastit dev`
+runs a PHP route beside `php-fpm` with zero `sudo`; and `blastit check` / `--learn`
+attribute PHP routes and their grants like every other backend.
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` (accepted) — session/framing contract,
-  per-route pool ownership, and the exact `--learn`/`check` attribution rules. The
-  grammar arrives from `MB.3.5`, the codec and guards from `MB.3.4`; this node wires
-  them and adds no third copy of either.
-- **Scheduler** (`crates/blastit-scheduler`): extend the route info with the FastCGI
-  policy; a dispatched request opens a session, sends the param stream produced by
-  `blastit-fastcgi`'s lockdown, streams the request body as `STDIN` under the existing
-  credit, parses the CGI-style `STDOUT` head (`Status:` or the design's default,
-  `Content-Type`, hop-by-hop stripping), pumps the body under the existing response
-  credit, and finishes on `END_REQUEST`. Client disconnect sends `ABORT_REQUEST` and
-  releases the slot; a worker that closes mid-response is a `502`, never a hang and
-  never a leaked slot (see `docs/knowledge/LESSONS.md` on slots that are never
-  released). `STDERR` lines become `app.output` events with the existing cap.
-- **Pool workers**: spawn/connect per the design (who owns the child, which uid, socket
-  permission check, restart, `BLASTIT_MAX_WORKERS` accounting). If the design places
-  the spawn in the supervisor rather than the scheduler, that is still this node.
-- **Static interaction**: the `0.2.0` responder keeps answering `public/` assets; the
-  entry script (`*.php` under the static root) must never be served as a file — prove
-  the rule at this boundary as well as in the manifest test.
-- **CLI** (`crates/blastit`): `dev` boots a route whose backend is `fastcgi` (no
-  Python callable required, no `app` line), `--learn` records the request and every
-  outgoing operation with PHP route attribution and writes manifest edits in the same
-  one-pass shape as the WSGI path, and `check` reports an unexercised PHP route, a
-  missing grant and a dead grant with the documented `--json` finding shape and exit
-  code. PHP has no pytest suite: `check` must not treat "no pytest" as "nothing to
-  check" — the design says what replaces it.
-- Protected tests in the same node: `crates/blastit-scheduler/tests/critical_fastcgi_dispatch.rs`
-  (new) and `crates/blastit/tests/critical_fastcgi_learn.rs` (new). Both are additions;
-  no existing `critical_*.rs` may change.
+- Design of record: `docs/design/php-fastcgi.md` §4.2 (injection: the handle lives in
+  `RouteRuntime.stages` beside `RouteInfo`, never a field on it), §4.5 (the session and its
+  ctl frames), §4.8 (pool lifecycle, `parentfd` handoff, unwind), §4.10 (`check`/`--learn`
+  attribution) and §8's leaf table. Grammar arrives from `MB.3.5`, codec and guards from
+  `MB.3.4`; this epic adds no third copy of either.
+- **The contract shape (do not re-pin it here).** FastCGI implements
+  `blastit_backend::Upstream`: `plan(&self, head: &UpstreamHead)`,
+  `exchange(&self, plan: UpstreamPlan, body: Box<dyn BodySource + Send>, sink: Box<dyn
+  ResponseSink + Send>) -> BoxFuture<'_, Result<ExchangeOutcome, UpstreamError>>`,
+  `capacity`/`ensure_ready`/`signal`. `ExchangeOutcome::{Answered { status, bytes_in,
+  bytes_out, protocol_status, dropped, observations }, Declined { next, plan }}`;
+  `Observation { target, #[serde(flatten)] kind }`. `Scheduler::session(upstream, plan,
+  body, sink, permit: RoutePermit)` is **`pub(crate)`** — tests assert behaviour, never
+  name the types. Dispatch runs `plan`/`exchange` and contains **no `match` on backend
+  kind**, no `cfg!` and no direct call into the pool.
+- **The fake peer is never a `socketpair`.** Tests bind a hand-rolled temporary-directory
+  `UnixListener` and wrap it in `PinnedSocket`; the client connects only through
+  `/proc/self/fd/<parentfd>/<sock_name>`.
+- **`Cargo.lock` is single-owner.** `MB.3.6.1.2` is the **fourth and only** link of the
+  release chain that touches it here (`MB.3.4.1` → `MB.9.1.1` → `MB.9.2.1.1` →
+  `MB.3.6.1.2` → `MB.3.8`); no other child lists `Cargo.lock`.
+
+| Plan id | Lands | Depends |
+|---|---|---|
+| `MB.3.6.1.1` | scheduler `AF_UNIX` + `bind`/`listen` `EPERM`, `0x45`–`0x47` pool ctl frames, HTTP head refusals, both exhaustive `Ctl` matches | `MB.3.5`, `MB.9` |
+| `MB.3.6.1.2` | workspace Cargo edges + `Cargo.lock`, `"fastcgi-codec"` driver, `Makefile` | `MB.3.6.1.1` |
+| `MB.3.6.2.1` | `FastCgiUpstream` pump + builder, `PinnedSocket` connect + `C1`, `"fastcgi"` registered | `MB.3.6.1.2` |
+| `MB.3.6.2.2` | dispatch + conformance suites, 5-binary `Makefile` gate | `MB.3.6.2.1` |
+| `MB.3.6.3.1` | `B1`–`B3`, `parentfd` argv handoff, `BLASTIT_CHECK_*`, protected parent-fd suite | `MB.3.6.2.2` |
+| `MB.3.6.3.2` | `render_pool_conf`, `S0`–`S7`/`U1`, fake `php-fpm` helper | `MB.3.6.3.1` |
+| `MB.3.6.3.3` | protected `critical_fastcgi_pool` suite | `MB.3.6.3.2` |
+| `MB.3.6.4.1` | two-shape `http_obs` reader, `executor_ran`, learn static proposal | `MB.3.6.3.3` |
+| `MB.3.6.4.2` | `check::serve_and_run`, 3-way branch order, protected learn suite | `MB.3.6.4.1` |
+
+`MB.3.6.1`–`MB.3.6.4` are sub-epics; the nine leaves above are their children.
 
 # Acceptance
 
+- [ ] All nine leaves `done` with `RESULT.md` evidence, and the epic gate confirms:
 ```console
-$ CARGO_NET_OFFLINE=true cargo test -p blastit-scheduler --test critical_fastcgi_dispatch --locked
-$ CARGO_NET_OFFLINE=true cargo test -p blastit --test critical_fastcgi_learn --locked
-$ CARGO_NET_OFFLINE=true cargo test -p blastit-scheduler --locked
-$ CARGO_NET_OFFLINE=true cargo test -p blastit --locked
-$ make rs-lint
-$ make critical-guard BASE=develop NODE=MB.3.6
-$ make rs-test
+$ cargo test -p blastit-fastcgi --test conformance --locked
+$ cargo test -p blastit-scheduler --test critical_fastcgi_dispatch --test conformance_fastcgi --locked
+$ cargo test -p blastit --test critical_fastcgi_pool --test critical_fastcgi_parent_fd --test critical_fastcgi_learn --locked
+$ cargo test -p blastit-sys --locked && cargo test -p blastit-frame --locked
+$ grep -rq 'impl Upstream for' crates/blastit-scheduler/src && echo "FastCGI is an Upstream implementation"
+$ ! grep -rn 'backend_kind' crates/blastit-scheduler/src && echo "no backend-kind dispatch"
 $ make check
 ```
+- [ ] The pool runs as the route's uid with no `sudo`, `PoolReady` is published only after
+  the socket is `0600` scheduler-owned and `parentfd` is restored to `init_uid:init_gid`
+  `0555`, and every failure path leaves no `PoolReady` behind.
+- [ ] `blastit check -- <suite>` runs a real suite against the documented `dev` server,
+  records the observations, starts no parent dbproxy, and maps a non-zero suite exit to `3`.
 
 # Notes
 
-- Use an **in-process fake FastCGI peer** (a Unix socketpair serving canned
-  `STDOUT`/`END_REQUEST` frames) for the scheduler suite: deterministic, no Docker, no
-  `php-fpm` in the unit gate. The real `php-fpm` image is `MB.3.7`'s job only.
-- Every failure mode needs a test: bad `BEGIN_REQUEST` reply, `STDOUT` with no
-  `Content-Type`, body larger than the credit, worker exit before `END_REQUEST`,
-  client cancel, `STDERR` flood, and a refused param reaching the wire (it must not).
-- Do not touch `crates/blastit-fastcgi/**`, `crates/blastit-manifest/**`,
-  `docs/**`, `e2e/**`, or `Cargo.toml`/`Cargo.lock` — if a dependency is genuinely
-  required, stop and log a follow-up (the lockfile is `MB.3.4`'s and `MB.3.8`'s).
-- The no-sudo `dev` promise is the page's headline: if the pool cannot be started
-  unprivileged as designed, stop and `human add` the conflict instead of documenting
-  or shipping a `sudo` step.
-- Budget ~600 changed lines. If the CLI half would push past it, land the scheduler
-  session + dispatch + its critical suite first, leave `check`/`--learn` attribution
-  as an explicit follow-up child in `RESULT.md`, and say so — a half-wired `check`
-  that reports PHP routes as unexercised-but-green is worse than a scoped gap.
+- **Protected tests: add, never weaken.** New files: `critical_fastcgi_dispatch.rs`,
+  `critical_fastcgi_pool.rs`, `critical_fastcgi_parent_fd.rs`, `critical_fastcgi_learn.rs`
+  and `critical_head_refusals.rs`. `critical_static_manifest.rs` and
+  `critical_static_cli.rs` stay green without an edit.
+- Budget: each leaf ≤ 7 files and ≤ 550 changed lines, each new `src/upstream/<kind>.rs`
+  ≤ 500 production lines. Never merge a later leaf into an earlier one.
+- The no-sudo `dev` promise is the page's headline: if the pool cannot start unprivileged
+  as designed, stop and `human add` the conflict instead of shipping a `sudo` step.

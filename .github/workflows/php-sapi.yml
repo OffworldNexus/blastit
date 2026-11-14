@@ -1,0 +1,62 @@
+# The real proof for `crates/blastit-php-sapi` (node MB.3.12).
+#
+# `make check` runs on a host without PHP and can only prove that the Rust side
+# degrades honestly: the C shim is not built there, and nothing loads it. This
+# job is the acceptance that counts — it builds `libblastit_php8.4.so` against
+# Debian's own headers, `dlopen`s the host's NTS `libphp8.4.so`, and runs real
+# requests through the shim: body, head, status, exact `cpu_ns`, the four
+# reserved-name drops, an `exit()` and a fatal that must leave the worker able
+# to serve the next request, and a `readelf -d` check that the shim carries no
+# `DT_NEEDED` on libphp.
+#
+# Kept out of `make check` (Docker + a PHP image + a Rust toolchain in the
+# image), exactly like `e2e/`, so the shim cannot rot unnoticed between gates.
+name: PHP SAPI
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: php-sapi-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  shim:
+    name: build libblastit_php8.4.so and load it
+    runs-on: ubuntu-latest
+    # The image installs PHP 8.4 + rustup and builds the workspace's one crate:
+    # ~8 minutes cold, ~2 cached. 30 is the outer bound, not a promise.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # The probe binary lives behind `--features probe`, so plain `make check`
+      # never lints it; this is the job that does.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt + clippy (including the probe behind its feature)
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy -p blastit-php-sapi --all-targets --locked -- -D warnings
+          cargo clippy -p blastit-php-sapi --features probe --all-targets --locked -- -D warnings
+      # The e2e seccomp harness is a standalone package (it links blastit-sys to
+      # install the real filter), so `cargo fmt/clippy --workspace` never sees it.
+      - name: fmt + clippy (the e2e seccomp harness)
+        run: |
+          cargo fmt --manifest-path e2e/php-sapi/seccomp-exec/Cargo.toml -- --check
+          cargo clippy --manifest-path e2e/php-sapi/seccomp-exec/Cargo.toml -- -D warnings
+      - name: make php-sapi-e2e (Docker: debian:trixie-slim + php8.4-dev + libphp8.4-embed)
+        run: make php-sapi-e2e

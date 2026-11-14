@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(feature = "python")]
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
@@ -38,20 +39,27 @@ use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
 use blastit_frame::Limits;
 use blastit_http::HttpConfig;
 use blastit_manifest::{Manifest, RoutingTable, UidLayout};
-use blastit_scheduler::{MemoryProbe, SchedulerConfig, derived_view_cap, routes_from_manifest};
+#[cfg(feature = "python")]
+use blastit_scheduler::derived_view_cap;
+use blastit_scheduler::{MemoryProbe, SchedulerConfig, routes_from_manifest};
 use blastit_sys::{
     Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, harden_child,
     pipe, restore_signal_mask_in_child, set_dumpable, socketpair_stream,
 };
+#[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::{PyBytes, PyDict};
 
 use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
+#[cfg(feature = "python")]
 use crate::immortal::{Decision, Outcome};
 use crate::logs::{Emitter, output_event};
 use crate::mem_usage;
+use crate::py::Python;
 use crate::roles::{HttpFds, SchedulerFds};
 use crate::supervise::{ComponentPipes, Parts, Supervisor};
 
@@ -98,6 +106,7 @@ pub struct Options {
 }
 
 /// Everything a view needs of its scratch directory, in Python (§5.3).
+#[cfg(feature = "python")]
 const SITE_PACKAGES: &std::ffi::CStr = c"
 try:
     import os, sys, sysconfig
@@ -118,6 +127,7 @@ except Exception:
 /// writing a module another route imports — so the boot asks about all of them.
 /// `abspath` resolves the empty entry to the working directory, which is what
 /// the interpreter does with it.
+#[cfg(feature = "python")]
 const SYS_PATH: &std::ffi::CStr = c"
 import os, sys
 blastit_sys_path = []
@@ -144,6 +154,7 @@ for _entry in sys.path:
 /// traversable. `blastit_app_module` is the module of `BLASTIT_APP` and is set
 /// by the caller; a module that cannot be found at all is not this check's
 /// business — the import right after says so, in its own words.
+#[cfg(feature = "python")]
 const VIEW_PATHS: &std::ffi::CStr = c"
 import importlib.util, os, sys, sysconfig
 blastit_view_paths = []
@@ -176,6 +187,7 @@ if blastit_app_module:
 /// dangerously — by every view. `gc.collect()` comes straight after, so the set
 /// `gc.freeze()` freezes a moment later is as small as it can be, and so the
 /// immortalisation pass walks a heap with no garbage in it.
+#[cfg(feature = "python")]
 const CLOSE_AND_COLLECT: &std::ffi::CStr = c"
 import gc, sys
 if 'django' in sys.modules:
@@ -191,6 +203,7 @@ gc.collect()
 /// because an immortal object is never freed and its address can therefore
 /// never be reused by a later allocation; when the pass is skipped
 /// ([`crate::immortal::Decision::Off`]), the heap is frozen all the same.
+#[cfg(feature = "python")]
 const FREEZE: &std::ffi::CStr = c"
 import gc
 gc.freeze()
@@ -275,6 +288,14 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     // route with `spa` unset may forward a miss to it (design §4.6). Computed
     // once, exactly as `routes_from_manifest` does.
     let has_app = manifest.app().is_some();
+    // `ADR-0009` §5: stage 0 already refused such a boot, and this is the same
+    // refusal one process later — stage 1 is the process that would have to fork
+    // a view, so it repeats the gate rather than trusting a `--config-fd` it
+    // cannot see the origin of. Compiled out on the `python` build.
+    #[cfg(not(feature = "python"))]
+    if let Some(message) = crate::stage0::no_python_support(&config, &manifest, learn) {
+        fail(&emitter, dev.as_ref(), &message);
+    }
     let routes: Vec<blastit_scheduler::RouteInfo> = match (&dev, learn) {
         (Some(_), true) => std::iter::once(blastit_scheduler::RouteInfo::new(
             crate::dev_learn::LEARN_FALLBACK_ROUTE,
@@ -508,10 +529,17 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         signals,
         mask,
         components,
+        #[cfg(feature = "python")]
         hosted: interpreter.is_hosted(),
         dev,
         learn,
     };
+    // Everything from here on needs an interpreter for a WSGI view, and the
+    // forks above were the last thing that had to happen while init was
+    // single-threaded (§2.1). A build with no interpreter supervises exactly
+    // the roles it forked: the boot gate refused every route that would need a
+    // view, so the scheduler asks for none (`MB.3.11`).
+    #[cfg(feature = "python")]
     match interpreter {
         Interpreter::Embed => {
             Python::initialize();
@@ -519,6 +547,42 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         }
         Interpreter::Hosted(py) => serve(py, &emitter, serving),
     }
+    #[cfg(not(feature = "python"))]
+    {
+        // There is no interpreter to be hosted by: a `python`-less build can
+        // only ever be handed `Embed`, and the variant carries nothing to use.
+        let _ = interpreter;
+        serve_without_interpreter(&emitter, serving)
+    }
+}
+
+/// Supervises the forked roles in a build that carries no interpreter
+/// (`MB.3.11`). Never returns.
+///
+/// Nothing here can start a view: [`crate::stage0::no_python_support`] refused
+/// every route that would need one before a listener was bound, so the
+/// scheduler only holds `[route.static]` policies. A `SPAWN` on `ctl.chan`
+/// would therefore be a protocol violation, and [`Supervisor`] fails the boot on
+/// it rather than ignoring it.
+#[cfg(not(feature = "python"))]
+fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> ! {
+    emit_ready(emitter, &serving.config, serving.declared_routes);
+    let mut supervisor = Supervisor::new(
+        Parts {
+            cfg: serving.config,
+            limits: serving.limits,
+            routes: serving.routes,
+            egress: serving.egress,
+            ctl: serving.ctl,
+            signals: serving.signals,
+            mask: serving.mask,
+            components: serving.components,
+            dev: serving.dev,
+            learn: serving.learn,
+        },
+        emitter,
+    );
+    supervisor.run(crate::py::no_interpreter())
 }
 
 /// Everything stage 1 needs once an interpreter is available (§4).
@@ -532,8 +596,12 @@ struct Serving {
     /// Number of routes declared in `blastit.toml` (reported on `ready`).
     declared_routes: usize,
     /// Whether each route may keep `AF_INET`/`AF_INET6`, by route index (§7.3).
+    /// Only a build that forks a view reads it (`MB.3.11`).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     egress: Vec<bool>,
-    /// The memory reading taken before the fork, for §8 Sizing.
+    /// The memory reading taken before the fork, for §8 Sizing. Reported by the
+    /// preload event, which only a build with an interpreter emits.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     memory: Option<mem_usage::Usage>,
     /// init's end of `ctl.chan`.
     ctl: OwnedFd,
@@ -544,7 +612,8 @@ struct Serving {
     /// The components to supervise, by pid.
     components: BTreeMap<i32, (Component, ComponentPipes)>,
     /// Whether the interpreter was started by the host rather than embedded
-    /// here.
+    /// here. Only a build with one can ask the question.
+    #[cfg(feature = "python")]
     hosted: bool,
     /// The `blastit dev` runtime root, when this is a dev boot (`R20`).
     dev: Option<crate::dev_learn::Dev>,
@@ -553,6 +622,7 @@ struct Serving {
 }
 
 /// Loads the application, emits `ready`, and supervises. Never returns.
+#[cfg(feature = "python")]
 fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
     let app = load(
         py,
@@ -850,6 +920,7 @@ fn prepare_child(
 /// `hosted` is `true` when the interpreter is the one the wheel was installed
 /// into: its `site-packages` are already on `sys.path`, and what `-I` dropped —
 /// `PYTHONPATH`, the working directory — is put back before the first import.
+#[cfg(feature = "python")]
 fn load(
     py: Python<'_>,
     config: &Config,
@@ -963,6 +1034,7 @@ fn load(
 ///
 /// A module that cannot be found at all is skipped: the import right after says
 /// so, with the name of the variable an operator has to fix.
+#[cfg(feature = "python")]
 fn check_view_paths(
     py: Python<'_>,
     config: &Config,
@@ -1060,6 +1132,7 @@ fn check_view_paths(
 ///
 /// Whatever the interpreter raises while `sys.path` is edited, which is a boot
 /// that cannot say where its own application lives.
+#[cfg(feature = "python")]
 fn put_cwd_first(py: Python<'_>, cwd: Option<&[u8]>) -> PyResult<()> {
     let Some(cwd) = cwd else {
         return Ok(());
@@ -1103,6 +1176,7 @@ fn put_cwd_first(py: Python<'_>, cwd: Option<&[u8]>) -> PyResult<()> {
 ///
 /// Whatever the interpreter raises when `sys.path` is not what CPython promises
 /// it is.
+#[cfg(feature = "python")]
 fn restore_sys_path(py: Python<'_>, entries: &[Vec<u8>]) -> PyResult<()> {
     if entries.is_empty() {
         return Ok(());
@@ -1131,6 +1205,7 @@ fn restore_sys_path(py: Python<'_>, entries: &[Vec<u8>]) -> PyResult<()> {
 /// preload `boot` event ([`preload_lifecycle`]). A pass that was *decided* and
 /// then failed is still fatal: a heap that was not immortalised when it could
 /// have been is the copy §9.2 #6 measured.
+#[cfg(feature = "python")]
 fn immortalize(
     py: Python<'_>,
     config: &Config,
@@ -1156,6 +1231,7 @@ fn immortalize(
 /// that memory can be read: when it is `None` the machine has already said so
 /// at `warn`, and re-reading here would say it twice. When the second reading
 /// fails but the first succeeded, `before` is still a usable figure.
+#[cfg(feature = "python")]
 fn refresh_memory(before: Option<mem_usage::Usage>) -> Option<mem_usage::Usage> {
     let before = before?;
     Some(mem_usage::read(Path::new("/")).unwrap_or(before))
@@ -1168,6 +1244,7 @@ fn refresh_memory(before: Option<mem_usage::Usage>) -> Option<mem_usage::Usage> 
 /// alone on purpose — so `mem_used` is the number §8 asks for ("usage after
 /// preload") and the derived cap is the one the scheduler measures for itself,
 /// from the same function.
+#[cfg(feature = "python")]
 fn emit_preload(
     emitter: &Emitter,
     config: &Config,
@@ -1187,6 +1264,7 @@ fn emit_preload(
 /// it did not; `immortalized` and `immortalize_ms` describe the pass itself
 /// and are therefore a zero and a nothing when there was none. Apart from the
 /// emitting, so that a test can read the fields back without a log.
+#[cfg(feature = "python")]
 fn preload_lifecycle(
     config: &Config,
     outcome: &Outcome,
@@ -1237,6 +1315,7 @@ fn preload_lifecycle(
 ///
 /// A [`PyValueError`] when the spec is malformed, and whatever the import or
 /// the attribute lookup raises.
+#[cfg(feature = "python")]
 fn import_callable(py: Python<'_>, spec: &str) -> PyResult<Py<PyAny>> {
     let Some((module, attribute)) = spec.split_once(':') else {
         return Err(PyValueError::new_err(format!(
@@ -1273,6 +1352,7 @@ fn fail(emitter: &Emitter, dev: Option<&crate::dev_learn::Dev>, message: &str) -
 
 /// Prints a Python failure as events, cleans up an adopted `dev` runtime root
 /// (`R20`), and exits non-zero (§4).
+#[cfg(feature = "python")]
 fn python_fail(
     py: Python<'_>,
     emitter: &Emitter,
@@ -1339,7 +1419,7 @@ fn pair_ok(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "python"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::fs::File;
