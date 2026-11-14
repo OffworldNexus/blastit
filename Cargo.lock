@@ -124,6 +124,7 @@ dependencies = [
  "blastit-http",
  "blastit-ingress",
  "blastit-manifest",
+ "blastit-php-sapi",
  "blastit-scheduler",
  "blastit-sqlpolicy",
  "blastit-sys",
@@ -269,6 +270,7 @@ name = "blastit-view"
 version = "0.2.0"
 dependencies = [
  "blastit-frame",
+ "blastit-php-sapi",
  "pyo3",
  "thiserror 2.0.21",
 ]

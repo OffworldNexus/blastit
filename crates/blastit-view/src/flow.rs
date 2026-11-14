@@ -140,6 +140,23 @@ impl Credit {
         }
     }
 
+    /// Take up to `want` bytes of credit without blocking.
+    ///
+    /// `Some(0)` means the window is closed and empty (the stream is over);
+    /// `None` means it is open but holds no credit yet, so a caller that can
+    /// only make progress by reading more frames (a single-threaded worker
+    /// transport) can go and read them instead of parking here.
+    #[cfg(any(feature = "php", test))]
+    pub(crate) fn try_take(&self, want: usize) -> Option<usize> {
+        let mut available = lock(&self.available);
+        if *available > 0 {
+            let taken = (want as u64).min(*available);
+            *available -= taken;
+            return Some(taken as usize);
+        }
+        self.closed.load(Ordering::SeqCst).then_some(0)
+    }
+
     /// Grant `bytes` more credit.
     pub(crate) fn grant(&self, bytes: u32) {
         {
@@ -205,6 +222,23 @@ mod tests {
         // only the closed case can be tested inline.
         credit.close();
         assert_eq!(credit.take(1), 0, "a closed empty window ends the write");
+    }
+
+    #[test]
+    fn a_non_blocking_take_says_when_to_read_instead() {
+        // The single-threaded PHP transport must be able to ask "is there
+        // credit right now?" and read a WINDOW frame when there is not.
+        let credit = Credit::new(4);
+        assert_eq!(credit.try_take(10), Some(4));
+        assert_eq!(credit.try_take(1), None, "open, but nothing to spend");
+        credit.grant(2);
+        assert_eq!(credit.try_take(10), Some(2));
+        credit.close();
+        assert_eq!(
+            credit.try_take(1),
+            Some(0),
+            "closed and empty ends the write"
+        );
     }
 
     #[test]

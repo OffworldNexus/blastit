@@ -137,6 +137,11 @@ mod error;
 mod flow;
 #[cfg(feature = "python")]
 mod input;
+// Embedded PHP (`MB.3.13`): `PhpEmbedRuntime` and the single-request channel
+// loop. The crate stays `#![forbid(unsafe_code)]`; the `dlopen` and the C sink
+// trampolines are in `blastit-php-sapi`.
+#[cfg(feature = "php")]
+pub mod php;
 #[cfg(feature = "python")]
 mod request;
 #[cfg(feature = "python")]
@@ -163,7 +168,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 #[cfg(feature = "python")]
-use blastit_frame::{Decoder, DoneOutcome, Frame, HEADER_LEN, Limits, ReqHead, RespHead, TypeCode};
+use blastit_frame::{Decoder, DoneOutcome, HEADER_LEN, Limits, ReqHead, RespHead};
+#[cfg(any(feature = "python", feature = "php"))]
+use blastit_frame::{Frame, TypeCode};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
@@ -925,9 +932,9 @@ impl Drop for SlotGuard<'_> {
     }
 }
 
-/// The name of a frame's kind, for a protocol error.
-#[cfg(feature = "python")]
-fn frame_kind(frame: &Frame) -> &'static str {
+/// The name of a frame's kind, for a protocol error (never its payload bytes).
+#[cfg(any(feature = "python", feature = "php"))]
+pub(crate) fn frame_kind(frame: &Frame) -> &'static str {
     TypeCode::from_code(frame.code())
         .map(TypeCode::name)
         .unwrap_or("unknown")

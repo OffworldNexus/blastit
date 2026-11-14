@@ -22,8 +22,14 @@
 //!   `PHP_ADMIN_VALUE`, `REDIRECT_STATUS` and `HTTP_PROXY` cannot be
 //!   constructed, and a `Proxy:` header can never become `HTTP_PROXY`) and
 //!   [`IniPolicy`] (the `ZEND_INI_SYSTEM` lockdown, rendered once at startup).
-//! * `abi` — the `#[repr(C)]` mirror of `c/include/blastit_php_abi_v1.h`,
-//!   compiled only when a toolchain exists (or the `probe` feature is on).
+//! * [`loader`] — the one `dlopen`/`dlsym` module: it opens the host's NTS
+//!   `libphp.so` and the matching shim, verifies the ABI and the minor, and
+//!   exposes `worker_init`/`request`/`worker_shutdown` as safe wrappers over a
+//!   [`Sink`]. It is compiled on every host; nothing in it runs until a worker
+//!   calls it.
+//! * `abi` — the `#[repr(C)]` mirror of `c/include/blastit_php_abi_v1.h`.
+//!   Pure declarations and layout pins, compiled on every host so the loader
+//!   has a type to speak.
 //!
 //! The C shim lives in `c/blastit_php_sapi.c` and is built by `make php-sapi`,
 //! never by this crate's `build.rs`: it is a separate `.so` with no `DT_NEEDED`
@@ -60,12 +66,13 @@
 //! assert_eq!(Minor::Php84.shim_file(), "libblastit_php84.so");
 //! ```
 
-#[cfg(any(php_toolchain, feature = "probe"))]
 #[allow(unsafe_code)]
 pub mod abi;
+pub mod loader;
 pub mod request;
 pub mod toolchain;
 
+pub use loader::{LoadError, Loaded, SharedObject, Sink};
 pub use request::{
     DISABLED_FUNCTIONS, DropReason, Egress, HeaderOutcome, IniError, IniPolicy, PINNED_INI,
     ReservedVar, ServerVar, ServerVarError, ServerVars,

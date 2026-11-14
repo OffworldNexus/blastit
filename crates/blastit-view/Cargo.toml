@@ -17,9 +17,16 @@ default = ["python"]
 # channel framing (`wire`, `flow`) stays compiled either way because it is the
 # worker transport, not the interpreter binding (ADR-0010 §4, `MB.3.11`).
 python = ["dep:pyo3"]
+# Embedded PHP: `PhpEmbedRuntime` over the same `view.chan` framing. It needs
+# `libphp` only through `dlopen` inside the worker (`MB.3.13`), so this feature
+# adds no link-time dependency and the standalone binary stays portable.
+php = ["dep:blastit-php-sapi"]
 
 [dependencies]
 blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
+# The frozen `blastit_php_abi_v1` surface and the one `dlopen` module. Optional:
+# a build with no PHP route pays for neither.
+blastit-php-sapi = { version = "0.2.0", path = "../blastit-php-sapi", optional = true }
 # No `auto-initialize`: a view process is forked from an interpreter that
 # `init` has already initialised (§4, §9.3), and library code must never
 # start or stop one.

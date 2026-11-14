@@ -1338,3 +1338,36 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T18:54 [MB.3.8] (lead) INPUT from MB.3.25 review (2026-11-14): ARCHITECTURE.md §7.3 is now stale against seccomp.rs — it says every refusal is EPERM with no clone3->ENOSYS exception, 
 - 2026-11-14T18:54 [MB.3.25] (lead) GOLDFISH REVIEW PASS (fresh eyes). Zero BLOCKER/MAJOR; 5 MINORs being fixed: the zero-widening oracle was self-referential (reviewer mutated a DENIED number and
 - 2026-11-14T19:02 [MB.3.25] (lead) status active -> done
+- 2026-11-14T19:04 [MB.3.13.1] (lead) status active -> ready
+- 2026-11-14T19:04 [MB.3.13.1] (lead) edited fields
+- 2026-11-14T19:04 [MB.3.13.1] (lead) status ready -> active
+- 2026-11-14T19:04 [MB.3.13.1] (lead) attempt 1/3 started
+- 2026-11-14T19:04 [MB.3.13.1] (lead) base ecd797d; attempt 1 reset because the previous 'attempt' was a lead sequencing error (prereqs not landed), no code was touched. HOST NOW HAS php-config 8.4.
+- 2026-11-14T19:06 [MB.3.7] (lead) INPUT from MB.3.25/native probe (2026-11-14): e2e/php-sapi/seccomp-exec installs SeccompRole::View{egress} because the harness predates MB.3.25. The PHP worker 
+- 2026-11-14T19:28 [MB.3.13.1] (lead) REVIEW FAIL (attempt 1, fresh eyes, base 9e52b34). Acceptance all green, but 6 MAJOR + 12 MINOR. MAJOR: (1) php_view ChildIo.keep misses libphp/shim fds -> prod
+- 2026-11-14T19:28 [MB.3.13.1] (lead) edited fields
+- 2026-11-14T19:28 [MB.3.13.1] (lead) status active -> ready
+- 2026-11-14T19:28 [MB.3.13.1] (lead) attempt 2/3 started
+- 2026-11-14T19:28 [MB.3.13.1] (lead) attempt 2/3 started; dispatch carries the reviewer's exact MAJOR/MINOR list. Paths add crates/blastit-php-sapi/tests/** for the native harness the leaf genuinel
+- 2026-11-14T19:28 [MB.3.13.3] (lead) HARD REQUIREMENT carried from MB.3.13.1 review (2026-11-14, MAJOR 5): fork_php_view now EXISTS but has NO caller. Today a [route.php] manifest is accepted at bo
+- 2026-11-14T19:28 [MB.3.13.2] (lead) INPUT from MB.3.13.1 (2026-11-14): the loader and Config binding expect (libphp, shim) as either path or fd-pinned SharedObject; production passes OwnedFd via C
+- 2026-11-14T19:29 [MB.3.28] (planner) created (task) Interim fail-closed refusal: [route.php] in an unwired build exits 1 and never falls through to WSGI
+- 2026-11-14T19:29 [MB.3.13.2] (lead) edited fields
+- 2026-11-14T19:29 [MB.3.13.3] (lead) edited fields
+- 2026-11-14T19:29 [MB.3.13.4] (lead) edited fields
+- 2026-11-14T19:29 [MB.3.28] (lead) created (owner 2026-11-14). Interim fail-closed guard between MB.3.13.1 and MB.3.13.3: [route.php] currently parses and then Ctl::Spawn kills the container (no-
+- 2026-11-14T19:46 [MB.3.13.1] (lead) REVIEW FAIL (attempt 2, fresh eyes). All 17 pass-1 items genuinely FIXED (M1 fd keep verified by a real re-exec'd ChildIo::prepare test that runs in make check;
+- 2026-11-14T19:46 [MB.3.29] (planner) created (task) Toolchain::probe must not read a transient fork/exec failure as not-found (flaky critical_shim_contract)
+- 2026-11-14T19:48 [MB.18] (lead) edited fields
+- 2026-11-14T19:48 [MB.18] (lead) PATH REPAIR by lead: the runnable-docs inventory registers fences by per-page INDEX (docs/deploy/index.md has fences 1-4, digitalocean 1-7, compose 1-2, anythin
+- 2026-11-14T19:49 [MB.3.10] (lead) edited fields
+- 2026-11-14T19:49 [MB.3.10] (lead) RETARGETED by lead to the owner's 2026-11-14 directive: PHP is supported (embedded libphp) and php-fpm/FastCGI/[route.fastcgi] must disappear from what blastit 
+- 2026-11-14T19:49 [MB.19] (lead) edited fields
+- 2026-11-14T19:49 [MB.19] (lead) copied into release/0.2.0 from the owner's release/0.2.1 checkout; PATH REPAIR: added python/tests/runnable_docs/inventory.toml (fences are registered by per-pa
+- 2026-11-14T19:49 [MB.3.30] (planner) created (task) Docs guard: php-fpm/FastCGI/[route.fastcgi] cannot return to user-facing pages
+- 2026-11-14T19:54 [MB.3.13.1] (lead) REVIEW FAIL (attempt 3). Delta verified: all 6 items fixed except the CANCEL class is INCOMPLETE: an idle Frame::Cancel (no request in flight) still hits the Pr
+- 2026-11-14T19:54 ESCALATION #10 -> expert for MB.3.13.1 by lead: attempts exhausted; CANCEL-must-not-be-view-fatal resurfaced on the idle/stale path (3-line fix + test assertion). Passe
+- 2026-11-14T19:54 [MB.3.13.1] (lead) edited fields
+- 2026-11-14T19:54 [MB.3.13.1] (lead) attempt 3/4 started
+- 2026-11-14T19:57 [ME] (conductor) created (milestone) Coding agent integrations: llms.txt, portable manifest skill, plugins/MCP (Claude Code, OpenCode, Codex, Junie) (0.5.x)
+- 2026-11-14T20:21 [MB.3.13.1] (lead) status ready -> done

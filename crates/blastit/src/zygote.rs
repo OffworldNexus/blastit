@@ -190,7 +190,10 @@ fn child_main(py: Python<'_>, spawn: ViewSpawn<'_>, child: ChildIo, view_end: Ow
             1,
         ),
         Err(payload) => child_exit(
-            &format!("view {name}: panicked: {}", panic_message(&payload)),
+            &format!(
+                "view {name}: panicked: {}",
+                crate::child::panic_message(&payload)
+            ),
             70,
         ),
     }
@@ -216,24 +219,13 @@ fn serve_forever(py: Python<'_>, spawn: &ViewSpawn<'_>, view_end: OwnedFd) {
     std::mem::forget(view_end);
     let view_cfg = ViewConfig {
         route_name: spawn.info.name.clone(),
-        script_name: mount_point(spawn.cfg.script_name.as_deref()),
+        script_name: crate::config::mount_point(spawn.cfg.script_name.as_deref()),
         frame_limits: spawn.limits,
         max_threads: Some(spawn.cfg.view_worker_cap()),
     };
     match blastit_view::serve(py, chan, spawn.app.clone_ref(py), view_cfg) {
         Ok(()) => child_exit("", 0),
         Err(err) => child_exit(&format!("view {}: {err}", spawn.info.name), 1),
-    }
-}
-
-/// The text of a panic payload, for the log.
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(text) = payload.downcast_ref::<&str>() {
-        (*text).to_string()
-    } else if let Some(text) = payload.downcast_ref::<String>() {
-        text.clone()
-    } else {
-        "a panic with no message".to_string()
     }
 }
 
@@ -249,25 +241,6 @@ fn set_view_environment(py: Python<'_>, dir: &Path) -> PyResult<()> {
     environ.set_item("HOME", &path)?;
     environ.set_item("TMPDIR", &path)?;
     Ok(())
-}
-
-/// The mount point a view reports as `SCRIPT_NAME`.
-///
-/// The same normalisation [`blastit_scheduler`] applies to
-/// `BLASTIT_SCRIPT_NAME`: trailing slashes are dropped, a missing leading slash
-/// is added, and an empty result means "mounted at the root".
-pub fn mount_point(script_name: Option<&str>) -> String {
-    let Some(value) = script_name else {
-        return String::new();
-    };
-    let trimmed = value.trim_end_matches('/');
-    if trimmed.is_empty() {
-        String::new()
-    } else if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
-    }
 }
 
 /// Formats a Python error with its traceback, for the log (§4).

@@ -144,6 +144,23 @@ pub fn install_filter(enabled: bool, role: SeccompRole) -> io::Result<()> {
     Ok(())
 }
 
+/// The text of a panic payload, for the log a forked child writes.
+///
+/// A view child this crate forks wraps its work in `catch_unwind` (the
+/// workspace cannot set `panic = "abort"` from one crate), and the exit message
+/// has to say what happened rather than "a panic". A build with neither fork
+/// path (`zygote` for WSGI, `php_view` for PHP) has no caller.
+#[cfg_attr(not(any(feature = "python", feature = "php")), allow(dead_code))]
+pub fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "a panic with no message".to_string()
+    }
+}
+
 /// `poll(2)` for readability, with a timeout.
 ///
 /// Returns `false` when the timeout expired. Used by stage 0 to wait for

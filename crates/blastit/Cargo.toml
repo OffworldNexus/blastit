@@ -28,10 +28,11 @@ default = ["php"]
 # which carries no `libpython` and refuses a manifest that needs an interpreter
 # (ADR-0010 §4, `MB.3.11`).
 python = ["dep:pyo3", "blastit-view/python"]
-# Embedded PHP routes (`[route.php]`, ADR-0010). Empty here on purpose: the
-# `libphp` SAPI shim is `MB.3.12` and the worker runtime is `MB.3.13`, and both
-# are `dlopen`ed inside a view, never linked.
-php = []
+# Embedded PHP routes (`[route.php]`, ADR-0010). `libphp` is never linked: a
+# view `dlopen`s the host's NTS library and the per-minor shim, and the loader
+# that does it lives in `blastit-php-sapi`. The standalone binary therefore
+# carries no `DT_NEEDED` on `libphp` (`make rs-no-python`).
+php = ["blastit-view/php", "dep:blastit-php-sapi"]
 
 [dependencies]
 blastit-dbproxy = { version = "0.2.0", path = "../blastit-dbproxy" }
@@ -41,6 +42,7 @@ blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
 blastit-http = { version = "0.2.0", path = "../blastit-http" }
 blastit-ingress = { version = "0.2.0", path = "../blastit-ingress" }
 blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+blastit-php-sapi = { version = "0.2.0", path = "../blastit-php-sapi", optional = true }
 blastit-scheduler = { version = "0.2.0", path = "../blastit-scheduler" }
 blastit-sqlpolicy = { version = "0.2.0", path = "../blastit-sqlpolicy" }
 blastit-sys = { version = "0.2.0", path = "../blastit-sys" }

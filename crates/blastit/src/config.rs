@@ -2680,6 +2680,27 @@ fn json_duration(value: &Value, name: &'static str) -> Result<Duration, ConfigEr
     seconds(name, millis / 1000.0).map_err(|_| document(name, "is out of range".to_string()))
 }
 
+/// The mount point a view reports as `SCRIPT_NAME`.
+///
+/// The same normalisation `blastit_scheduler` applies to
+/// `BLASTIT_SCRIPT_NAME`: trailing slashes are dropped, a missing leading slash
+/// is added, and an empty result means "mounted at the root". Both the WSGI
+/// view (`zygote`) and the embedded-PHP view (`php_view`) report the mount
+/// point from this one implementation.
+pub fn mount_point(script_name: Option<&str>) -> String {
+    let Some(value) = script_name else {
+        return String::new();
+    };
+    let trimmed = value.trim_end_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

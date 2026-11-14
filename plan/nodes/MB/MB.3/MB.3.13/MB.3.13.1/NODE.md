@@ -2,7 +2,7 @@
 id: MB.3.13.1
 title: "MB.3.13 part 1: PhpEmbedRuntime worker loop over view.chan: route_uid, EmbeddedView filter, max_requests recycling"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 1
 depends_on: []
@@ -13,12 +13,13 @@ paths:
   - "crates/blastit/src/**"
   - crates/blastit/Cargo.toml
   - "crates/blastit-php-sapi/src/**"
+  - "crates/blastit-php-sapi/tests/**"
   - Cargo.lock
-attempts: 1
-max_attempts: 3
-escalation: none
+attempts: 3
+max_attempts: 4
+escalation: expert
 created: "2026-11-14T17:04"
-updated: "2026-11-14T18:31"
+updated: "2026-11-14T20:21"
 ---
 
 # Goal

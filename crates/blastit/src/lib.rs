@@ -22,8 +22,10 @@
 //! archive of `ADR-0010` §4 — links no `libpython`, serves no WSGI route, and
 //! refuses a manifest that declares one, at boot, with the message naming the
 //! package that can serve it. `php` is the embedded-PHP worker (`MB.3.12`,
-//! `MB.3.13`): it is declared here and empty, and nothing in this crate links
-//! `libphp` — the shim is `dlopen`ed inside a view.
+//! `MB.3.13`): it forwards `blastit-view/php` and adds `blastit-php-sapi` (the
+//! frozen ABI plus the `dlopen` loader), and nothing in this crate links
+//! `libphp` — the host's NTS library and the per-minor shim are `dlopen`ed
+//! inside a view, so the standalone binary keeps no `DT_NEEDED` on either.
 
 // A build with no interpreter compiles the same modules; what only an
 // interpreter can reach carries its own `allow(dead_code)` where it lives, so an
@@ -43,6 +45,14 @@ mod forking;
 #[cfg(feature = "python")]
 mod immortal;
 mod logs;
+// Embedded PHP view workers (`MB.3.13`): the fork path sibling to `zygote`'s
+// WSGI one. It compiles only when PHP routes can be served, and `libphp`
+// itself is `dlopen`ed inside the worker, never linked here. The supervisor's
+// `Ctl::Spawn` picks a route's binding (`MB.3.13.3`); until then nothing in
+// this crate calls the fork, so the seam is explicit rather than a warning.
+#[cfg(feature = "php")]
+#[allow(dead_code)]
+mod php_view;
 mod py;
 mod roles;
 mod stage0;
