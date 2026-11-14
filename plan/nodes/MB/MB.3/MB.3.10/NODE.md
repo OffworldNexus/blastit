@@ -41,6 +41,14 @@ fallback.
   `[route.fastcgi]` row; keep every `[route.static]` sentence exactly as it is.
 - The page's H1 and the nav label still say "PHP-FPM": retitle to PHP (Symfony, Laravel)
   in `docs/frameworks/php.md`, `docs/frameworks/index.md` and `zensical.toml`.
+- **The external fallback is a security switch, and the page must say so.** ADR-0010
+  reconciliation (2026-11-14): `[route.fastcgi]` **fails closed** — `exit 1` in
+  `Production` and under every preset — unless `BLASTIT_ALLOW_EXTERNAL_FASTCGI=1` is set
+  **and** no preset is active. Document it as a security switch, not a convenience:
+  one row in `docs/reference/settings.md` (variable → what it opens → the two conditions →
+  what it costs: no `execve` env strip, no CPU metering), and one short, unmistakable
+  sentence in the page's fallback note. Do not bury it in a table cell or call it a
+  "compatibility option".
 - Keep the page lean: two steps in Local (write the one-line manifest, run `blastit dev`),
   install line honest, fences accounted or executed truthfully.
 

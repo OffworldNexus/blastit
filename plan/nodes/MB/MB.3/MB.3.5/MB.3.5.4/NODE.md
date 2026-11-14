@@ -40,6 +40,11 @@ ADR-0010 §5: `PhpPolicy { entry, workers }`, `Executor::Php`, and the drop of
   (blastit does not size a pool it does not own), and a loud weaker-mode warning at boot
   (no `execve` env strip, no CPU metering). A manifest that sets `workers` on
   `[route.fastcgi]` is an unknown key naming the key.
+- **It fails closed.** ADR-0010 reconciliation (2026-11-14): a `[route.fastcgi]` route is
+  `exit 1` in `Production` and under every preset unless `BLASTIT_ALLOW_EXTERNAL_FASTCGI=1`
+  is set **and** no preset is active. The boot refusal must name the route, the manifest
+  line, the variable and the two conditions, and state what the operator loses by setting
+  it (no `execve` env strip, no per-request CPU metering) — never a bare "not allowed".
 - `Executor::Php` joins `ALL_KINDS`; `Executor::View` stays the WSGI kind.
 - Drop `FastCgiPoolSocketInvalid` (the ADR deletes the bind window it described); keep
   `FastCgiListenDerived` for the narrowed block.
