@@ -32,8 +32,8 @@ use crate::{MAX_PARAM_PAIR_BYTES, MAX_PARAMS_BYTES};
 /// Largest number of params one request may carry (design §4.6.2).
 pub const MAX_PARAMS: usize = 128;
 
-/// Largest client header value that becomes an `HTTP_*` param; a longer value
-/// is dropped, never refused (design §4.6.2).
+/// Largest client value that becomes an `HTTP_*` param or `CONTENT_TYPE`; a
+/// longer value is dropped, never refused (design §4.6.2).
 pub const MAX_PARAM_VALUE_BYTES: usize = 8_192;
 
 /// The pinned paths a FastCGI route was validated against at boot.
@@ -261,6 +261,14 @@ const PARAM_ORDER: [&[u8]; 18] = [
 /// The closed allowlist: one bare name → its value, or `Ok(None)` when the
 /// request has none (`CONTENT_TYPE`/`CONTENT_LENGTH`).
 ///
+/// `CONTENT_TYPE` is the one derived value that comes from a request header, so
+/// it also honours the §4.6.2 value rule: a value above
+/// [`MAX_PARAM_VALUE_BYTES`] answers `Ok(None)` — the same call [`build`]
+/// records as a drop — and no caller of this public function ever receives an
+/// over-long `CONTENT_TYPE`. `CONTENT_LENGTH` is a decimal `u64` (at most 20
+/// bytes), and `REQUEST_URI`/`QUERY_STRING` are target bytes, not header
+/// values, so they stay verbatim.
+///
 /// A name outside `PARAM_ORDER` is [`LockdownError::UnknownParam`]: there is
 /// no caller-named-param API, so this is a builder-programming error, never a
 /// client status (design §4.7 row 18).
@@ -283,7 +291,13 @@ pub fn resolve(
             facts.method.to_vec()
         }
         b"SERVER_PROTOCOL" => b"HTTP/1.1".to_vec(),
-        b"CONTENT_TYPE" => return facts.content_type.map(fact_value).transpose(),
+        b"CONTENT_TYPE" => {
+            return match facts.content_type {
+                Some(value) if value.len() > MAX_PARAM_VALUE_BYTES => Ok(None),
+                Some(value) => Ok(Some(fact_value(value)?)),
+                None => Ok(None),
+            };
+        }
         b"CONTENT_LENGTH" => {
             return Ok(facts.content_length.map(|len| len.to_string().into_bytes()));
         }
@@ -314,21 +328,15 @@ pub fn resolve(
 pub fn build(paths: &FastCgiPaths, facts: &RequestFacts<'_>) -> Result<Params, LockdownError> {
     let mut params = Params::new();
     for name in PARAM_ORDER {
-        // §4.6.2: a client header value above 8 KiB is dropped and recorded,
-        // never refused. `CONTENT_TYPE` is the one derived value that comes
-        // from a request header; `CONTENT_LENGTH` is a decimal `u64` (at most
-        // 20 bytes), and `REQUEST_URI`/`QUERY_STRING` are target bytes, not
-        // header values, so they stay verbatim.
-        if name == b"CONTENT_TYPE"
-            && facts
-                .content_type
-                .is_some_and(|value| value.len() > MAX_PARAM_VALUE_BYTES)
-        {
-            params.dropped.push(b"CONTENT_TYPE".to_vec());
-            continue;
-        }
-        if let Some(value) = resolve(name, paths, facts)? {
-            params.insert(name, &value)?;
+        match resolve(name, paths, facts)? {
+            Some(value) => params.insert(name, &value)?,
+            // §4.6.2: a client header value above 8 KiB is dropped and
+            // recorded, never refused. `resolve` owns the cap, so its `None`
+            // for a *present* `CONTENT_TYPE` is exactly the value rule.
+            None if name == b"CONTENT_TYPE" && facts.content_type.is_some() => {
+                params.dropped.push(b"CONTENT_TYPE".to_vec());
+            }
+            None => {}
         }
     }
     for (name, value) in facts.headers {
@@ -702,5 +710,59 @@ mod tests {
             );
             assert!(params.is_empty());
         }
+    }
+
+    /// One set of facts that differ only in `CONTENT_TYPE`.
+    fn facts_with_content_type(content_type: Option<&[u8]>) -> RequestFacts<'_> {
+        RequestFacts {
+            method: b"GET",
+            target: b"/",
+            headers: &[],
+            server_name: "example.test",
+            server_port: 80,
+            remote_addr: "192.0.2.1",
+            remote_port: 44_444,
+            scheme: Scheme::Http,
+            content_type,
+            content_length: None,
+        }
+    }
+
+    /// §4.6.2's value rule belongs to `resolve`, not only to `build`: the
+    /// public lookup answers `Ok(None)` for an over-long `CONTENT_TYPE`, and
+    /// `build` records that same value as a drop — once — while an 8 192-byte
+    /// value is emitted unchanged.
+    #[test]
+    fn resolve_applies_the_value_cap_to_content_type() {
+        let paths = FastCgiPaths {
+            script_filename: PathBuf::from("/app/public/index.php"),
+            document_root: PathBuf::from("/app/public"),
+            script_name: "/index.php".to_string(),
+        };
+        let exact = vec![b'v'; MAX_PARAM_VALUE_BYTES];
+        let over = vec![b'v'; MAX_PARAM_VALUE_BYTES + 1];
+
+        // The boundary itself: 8 192 bytes is emitted, not dropped.
+        let at_limit = facts_with_content_type(Some(&exact));
+        assert_eq!(
+            resolve(b"CONTENT_TYPE", &paths, &at_limit),
+            Ok(Some(exact.clone()))
+        );
+        let params = build(&paths, &at_limit).expect("builds");
+        assert_eq!(params.get(b"CONTENT_TYPE"), Some(exact.as_slice()));
+        assert!(params.dropped().is_empty());
+
+        // One byte over: the public lookup returns no value, and `build`
+        // records exactly one `CONTENT_TYPE` drop.
+        let over_limit = facts_with_content_type(Some(&over));
+        assert_eq!(resolve(b"CONTENT_TYPE", &paths, &over_limit), Ok(None));
+        let params = build(&paths, &over_limit).expect("builds");
+        assert!(params.get(b"CONTENT_TYPE").is_none());
+        assert_eq!(params.dropped(), [b"CONTENT_TYPE".to_vec()]);
+
+        // An absent header is `Ok(None)` too, but is not a drop.
+        let absent = facts_with_content_type(None);
+        assert_eq!(resolve(b"CONTENT_TYPE", &paths, &absent), Ok(None));
+        assert!(build(&paths, &absent).expect("builds").dropped().is_empty());
     }
 }

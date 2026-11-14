@@ -31,3 +31,7 @@ reviewer MINORs cleared: exact 100-field/8192-byte assertions + named literals, 
 ## 2026-11-14T13:00 [lead]
 
 status review -> done
+
+## 2026-11-14T13:00 [lead]
+
+commit 612ecad

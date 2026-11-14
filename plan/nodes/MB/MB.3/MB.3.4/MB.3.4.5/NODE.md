@@ -2,16 +2,16 @@
 id: MB.3.4.5
 title: "Apply the 8192-byte value rule inside lockdown::resolve so no public function returns an over-long CONTENT_TYPE"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.3.4.2]
 paths: ["crates/blastit-fastcgi/src/lockdown.rs"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T12:36"
-updated: "2026-11-14T12:36"
+updated: "2026-11-14T13:09"
 ---
 
 # Goal

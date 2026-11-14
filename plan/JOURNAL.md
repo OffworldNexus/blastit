@@ -1043,3 +1043,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T12:56 [MB.11] (conductor) created (task) Rewrite the DigitalOcean roles/pooler section for clarity (backport to 0.2.0)
 - 2026-11-14T12:59 [MB.3.4.4] (implementer) reviewer MINORs cleared: exact 100-field/8192-byte assertions + named literals, dropped redundant header(name) loop; 43/12/30/1 green, rs-lint clean
 - 2026-11-14T13:00 [MB.3.4.4] (lead) status review -> done
+- 2026-11-14T13:00 [MB.3.4.4] (lead) commit 612ecad
+- 2026-11-14T13:00 [MB.3.4.5] (lead) status ready -> active
+- 2026-11-14T13:00 [MB.3.4.5] (lead) attempt 1/3 started
+- 2026-11-14T13:00 [MB.3.4.5] (lead) base 612ecad
+- 2026-11-14T13:02 [MB.3.4.5] (implementer) move the 8192-byte CONTENT_TYPE cap into resolve, record the drop in build, add the boundary unit test (44/12/30/1); mutants 3 tolerated missed, 18 unviable
+- 2026-11-14T13:04 [MB.3.4.5] (lead) status active -> review
+- 2026-11-14T13:09 [MB.3.4.5] (lead) status review -> done
