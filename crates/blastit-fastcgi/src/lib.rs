@@ -19,6 +19,9 @@
 //! * [`cgi`] — the CGI response head on `STDOUT`: `Status:` in `200..=599`,
 //!   control-byte-free values, the four proxy-control names refused, every
 //!   other `X-Accel-*` name dropped, and the head caps.
+//! * [`lockdown`] — the request's param map → the exact `PARAMS` bytes: pinned
+//!   `SCRIPT_FILENAME`/`DOCUMENT_ROOT`, the closed non-`HTTP_` allowlist, the
+//!   `HTTP_*` header derivation, and the count/byte budgets.
 //!
 //! Nothing here maps to an HTTP status: the codec-local [`RecordError`] and
 //! [`CgiError`] are what the adapter turns into `UpstreamError::Fault` (`502`),
@@ -46,6 +49,7 @@
 use core::fmt;
 
 pub mod cgi;
+pub mod lockdown;
 pub mod param;
 pub mod record;
 

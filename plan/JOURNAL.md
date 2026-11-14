@@ -1009,3 +1009,14 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T11:39 [MB.3.4.1] (lead) status review -> ready
 - 2026-11-14T11:47 [MB.3.4.1] (lead) status ready -> review
 - 2026-11-14T11:55 [MB.3.4.1] (lead) status review -> done
+- 2026-11-14T11:55 [MB.3.4.1] (lead) committed 872661d
+- 2026-11-14T11:55 [MB.3.4.2] (lead) status ready -> active
+- 2026-11-14T11:55 [MB.3.4.2] (lead) attempt 1/3 started
+- 2026-11-14T11:55 [MB.3.4.2] (lead) base 872661db52414c7d9a5fd6535d9ed121dce683f0
+- 2026-11-14T12:05 [MB.3.4.2] (lead) status active -> review
+- 2026-11-14T12:05 [MB.3.4.2] (lead) budgets: 1189 added lines vs the design's 550; every §4.7 row for this leaf landed, none dropped (declared in RESULT.md).
+- 2026-11-14T12:14 [MB.3.4.2] (lead) attempt 2/3 started
+- 2026-11-14T12:14 [MB.3.4.2] (lead) REVIEW PASS with 3 MINORs to close in attempt 2: (1) lockdown.rs:215 Params::insert is public and accepts/emits PHP_VALUE, HTTP_PROXY, SCRIPT_FILENAME=/etc/pass
+- 2026-11-14T12:14 [MB.3.4.2] (lead) status review -> ready
+- 2026-11-14T12:23 [MB.3.4.2] (lead) status ready -> review
+- 2026-11-14T12:31 [MB.3.4.2] (lead) status review -> done

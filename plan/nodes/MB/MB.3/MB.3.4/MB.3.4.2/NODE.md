@@ -2,7 +2,7 @@
 id: MB.3.4.2
 title: "Param builder, allowlist wall and protected lockdown matrix - design MB.3.4b"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.3.4.1]
@@ -10,11 +10,11 @@ paths:
   - "crates/blastit-fastcgi/src/lib.rs"
   - "crates/blastit-fastcgi/src/lockdown.rs"
   - "crates/blastit-fastcgi/tests/critical_fastcgi_lockdown.rs"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T03:37"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T12:31"
 ---
 
 # Goal
