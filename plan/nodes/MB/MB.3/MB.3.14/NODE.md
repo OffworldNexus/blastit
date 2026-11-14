@@ -7,11 +7,11 @@ owner: "doc-writer"
 priority: 1
 depends_on: []
 paths: [docs/knowledge/LESSONS.md]
-attempts: 3
+attempts: 4
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:43"
-updated: "2026-11-14T15:31"
+updated: "2026-11-14T15:52"
 ---
 
 # Goal

@@ -19,3 +19,11 @@ epic gate: cargo test -p blastit-fastcgi (44/12/30/1), zero deps, no-I/O grep, m
 ## 2026-11-14T14:21 [lead]
 
 status ready -> done
+
+## 2026-11-14T14:22 [lead]
+
+status done -> done
+
+## 2026-11-14T15:14 [lead]
+
+NOTE for the record: this epic's crate (crates/blastit-fastcgi) is being DELETED by MB.3.17 under the owner's 2026-11-14 'No fallback please' decision. The gate did its job -- it audited and hardened a crate that was later shown to be the wrong code -- and its record stays as history, not as a live claim. crates/blastit-fastcgi/tests/critical_*.rs are protected, so the deletion runs critical_guard with MB.3.17 as authorizer.

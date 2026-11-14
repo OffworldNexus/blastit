@@ -2,7 +2,7 @@
 id: MB.3.6.1.2
 title: "Workspace Cargo edges, Cargo.lock and the fastcgi-codec conformance driver - design MB.3.6a1 part 2"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.6.1.1]
@@ -17,7 +17,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T15:14"
 ---
 
 # Goal

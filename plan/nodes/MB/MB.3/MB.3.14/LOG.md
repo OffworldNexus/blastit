@@ -55,3 +55,23 @@ attempt 3: two more bullets appended from MB.3.12 (php_execute_script swallows t
 ## 2026-11-14T15:31 [lead]
 
 status active -> done
+
+## 2026-11-14T15:52 [lead]
+
+status done -> ready
+
+## 2026-11-14T15:52 [lead]
+
+status ready -> active
+
+## 2026-11-14T15:52 [lead]
+
+attempt 4/3 started
+
+## 2026-11-14T15:52 [lead]
+
+status active -> done
+
+## 2026-11-14T15:52 [lead]
+
+attempt 4 refused by the attempt cap (4/3, ESCALATE) -- correctly: a one-bullet docs addition is not worth an expensive-tier escalation. The third trap is carried by MB.3.17 instead (docs/knowledge/LESSONS.md is in its paths and it already appends a LESSONS sentence).

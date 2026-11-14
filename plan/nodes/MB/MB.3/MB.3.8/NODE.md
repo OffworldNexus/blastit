@@ -1,6 +1,6 @@
 ---
 id: MB.3.8
-title: "Release prep 0.2.1: version bump, dated changelog, ARCHITECTURE sync (embedded PHP)"
+title: "Release prep 0.2.0: dated changelog covering static + presets + PHP, ARCHITECTURE sync, release-tag guard"
 kind: task
 status: ready
 owner: implementer
@@ -21,7 +21,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T14:39"
+updated: "2026-11-14T16:36"
 ---
 
 # Goal
@@ -90,3 +90,16 @@ $ make e2e
 - Record in `RESULT.md`: the version, the date, the requirement count, the exact script
   output tails, and the `make check` / `make e2e` tails. Leave the tag and the Release PR to
   `conductor`.
+
+## Release target: 0.2.0, not 0.2.1 (owner, 2026-11-14)
+
+"There's no point opening a PR for 0.2.1, just put everything into 0.2.0."
+
+- `Cargo.toml`'s `[workspace.package] version` stays **0.2.0**; nothing bumps to 0.2.1.
+- The `CHANGELOG.md` `## 0.2.0 (YYYY-MM-DD)` entry must cover **static serving + the pooler
+  presets + PHP (`[route.php]`, embedded `libphp`)**, so it **cannot be finalized until
+  `MB.3.13` lands** — do not write a dated entry for a feature that is still being built.
+- `scripts/check-release-tag.sh v0.2.0` and
+  `scripts/release-notes.sh --require-dated v0.2.0` are the guards, unchanged in shape.
+- Any doc text that says "`0.2.1` adds …" becomes 0.2.0: that is `MB.3.10`/`MB.3.20`'s
+  edit, and their acceptance now names it so it is verified, not remembered.

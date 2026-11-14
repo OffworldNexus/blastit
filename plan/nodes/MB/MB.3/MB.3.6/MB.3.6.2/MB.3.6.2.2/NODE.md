@@ -2,7 +2,7 @@
 id: MB.3.6.2.2
 title: "FastCGI dispatch and conformance suites plus the 5-binary Makefile gate - design MB.3.6a2 part 2"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.6.2.1]
@@ -14,7 +14,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T15:14"
 ---
 
 # Goal

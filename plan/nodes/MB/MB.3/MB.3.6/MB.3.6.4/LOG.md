@@ -31,3 +31,11 @@ HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn 
 ## 2026-11-14T14:39 [lead]
 
 ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.fastcgi] is an external operator-managed fallback (entry + listen, no workers, loud weaker-mode warning); php-fpm pool machinery is dropped, not deferred. Retarget this node per the ADR's Node Changes table; do not implement pool ctl/PoolReady/parentfd.
+
+## 2026-11-14T16:32 [lead]
+
+FOLLOW-UP from MB.3.5.4: crates/blastit-manifest/src/edit.rs::expected_routes drops static_policy (pre-existing) and will drop [route.php] on a --learn rewrite -- i.e. blastit check --learn can silently delete a php route block from blastit.toml. Fix + test when this epic's learn attribution work lands: a rewrite must preserve every route's executor block byte-for-byte, asserted on a php+static manifest.
+
+## 2026-11-14T16:36 [lead]
+
+OWNERSHIP: the edit.rs --learn route-dropping bug is MB.3.21 now, NOT this node (it stayed folded in once and that was wrong). Do not fix or duplicate it here; if the learn work touches expected_routes, stop and hand it to MB.3.21.

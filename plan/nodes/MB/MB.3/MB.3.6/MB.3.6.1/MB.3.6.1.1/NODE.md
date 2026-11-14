@@ -2,7 +2,7 @@
 id: MB.3.6.1.1
 title: "Scheduler AF_UNIX seccomp, pool ctl frames and HTTP head refusals - design MB.3.6a1 part 1"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.5, MB.9]
@@ -17,7 +17,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T15:14"
 ---
 
 # Goal

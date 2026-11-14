@@ -41,14 +41,11 @@ fallback.
   `[route.fastcgi]` row; keep every `[route.static]` sentence exactly as it is.
 - The page's H1 and the nav label still say "PHP-FPM": retitle to PHP (Symfony, Laravel)
   in `docs/frameworks/php.md`, `docs/frameworks/index.md` and `zensical.toml`.
-- **The external fallback is a security switch, and the page must say so.** ADR-0010
-  reconciliation (2026-11-14): `[route.fastcgi]` **fails closed** — `exit 1` in
-  `Production` and under every preset — unless `BLASTIT_ALLOW_EXTERNAL_FASTCGI=1` is set
-  **and** no preset is active. Document it as a security switch, not a convenience:
-  one row in `docs/reference/settings.md` (variable → what it opens → the two conditions →
-  what it costs: no `execve` env strip, no CPU metering), and one short, unmistakable
-  sentence in the page's fallback note. Do not bury it in a table cell or call it a
-  "compatibility option".
+- **There is no external fallback** (owner decision 2026-11-14, "No fallback please"):
+  `[route.php]` is the only PHP block in the page and the reference. Do not document
+  `[route.fastcgi]`, a `listen` key, or a `BLASTIT_ALLOW_EXTERNAL_FASTCGI` switch anywhere;
+  if the page needs to say what happened to it, one clause at most, pointing at
+  `[route.php]`. The removal itself is `MB.3.17`'s — this leaf only stops teaching it.
 - Keep the page lean: two steps in Local (write the one-line manifest, run `blastit dev`),
   install line honest, fences accounted or executed truthfully.
 
@@ -72,3 +69,10 @@ $ make check
 - Do not invent package-manager commands beyond the ADR's distro package names
   (`libphp-embed`, `php-embedded`); the wheel/standalone split is the ADR's §4 table and is
   `MB.3.8`'s or the distribution node's, not this page's.
+
+## Release fold (owner, 2026-11-14)
+
+There is no 0.2.1 release: everything goes into **0.2.0**. Every sentence of the form
+"`0.2.1` adds …" on the pages you touch becomes **0.2.0**. Add a grep to the acceptance
+(`grep -rn '0\.2\.1' docs/frameworks/php.md docs/reference/`) so it is verified, not
+remembered.

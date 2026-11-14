@@ -23,3 +23,11 @@ edited fields
 ## 2026-11-14T14:39 [lead]
 
 ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.fastcgi] is an external operator-managed fallback (entry + listen, no workers, loud weaker-mode warning); php-fpm pool machinery is dropped, not deferred. Retarget this node per the ADR's Node Changes table; do not implement pool ctl/PoolReady/parentfd.
+
+## 2026-11-14T15:14 [lead]
+
+SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal, not a default-off switch); the BLASTIT_ALLOW_EXTERNAL_FASTCGI switch and every doc sentence sanctioning the fallback are deleted. Removal is MB.3.17 (depends MB.3.12). Kept: crates/blastit-php-sapi, PhpEmbedRuntime, view.chan framing, the Upstream/WorkerRuntime contract and MB.9.3 -- this removes one backend implementation, not the abstraction.
+
+## 2026-11-14T15:14 [lead]
+
+status ready -> superseded

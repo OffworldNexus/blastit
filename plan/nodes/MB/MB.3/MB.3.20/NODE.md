@@ -71,3 +71,18 @@ $ make docs-check
   cure for a host without `libphp`.
 - `crates/blastit-php-sapi`'s "refuses the four FastCGI names" sentences stay: they describe
   the CVE surface the shim must refuse, not the deleted transport.
+
+## Verified, not reported (owner, 2026-11-14)
+
+Use the shape that made `docs_fences`' `STALE` row trustworthy: the retarget is **verified
+by a test**, not asserted in a commit message. Add a test that `docs/frameworks/php.md` no
+longer mentions `[route.fastcgi]` (and, once `MB.3.5.4` lands, that its manifest fence
+boots as `[route.php]`), and delete the `STALE` entry in the same change — the self-clearing
+test in `docs_fences.rs` already reds if the entry outlives its reason, so the two must be
+removed together or the build stays red.
+
+## Release fold (owner, 2026-11-14)
+
+No 0.2.1: everything is **0.2.0**. When you retarget the page, every "`0.2.1` adds …"
+becomes 0.2.0 in the files you touch, and the acceptance carries a
+`grep -rn "0\.2\.1" docs/frameworks/php.md` so the claim is checked rather than assumed.
