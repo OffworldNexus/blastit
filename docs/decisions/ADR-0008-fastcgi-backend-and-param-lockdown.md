@@ -1,7 +1,6 @@
 # ADR-0008: Injected `Upstream` Contract and FastCGI Param Lockdown
 
-- **Status:** Proposed (this amendment takes effect with the same acceptance; it does not
-  change the status line)
+- **Status:** Partially Superseded — **Decision 1 (`Upstream` dispatch contract & conformance table) remains active as amended by [ADR-0009](ADR-0009-runtime-providers-and-capability-gating.md) (ignoring historical mentions of `blastit-fastcgi` / `FastCgiPolicy` / `PoolSpawn` / `Ctl::Pool*` / "`SessionPort` is WSGI-only" inside Decision 1's prose — `SessionPort` now serves all `ViewSet` backends); ALL FastCGI, `[route.fastcgi]`, param-lockdown, and `php-fpm` pool decisions (Decisions 2–8) are fully superseded by [ADR-0010](ADR-0010-php-embedded-via-libphp-embed.md)** (no FastCGI backend or fallback is shipped)
 - **Date:** 2026-11-14
 - **Node:** MB.3.3
 - **Owner:** architect
