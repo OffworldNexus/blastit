@@ -35,3 +35,7 @@ reviewer MINOR cleared: dropped the derived encoded_len assert
 ## 2026-11-14T12:50 [lead]
 
 status review -> done
+
+## 2026-11-14T12:50 [lead]
+
+commit 7af86b2

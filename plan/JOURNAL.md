@@ -1034,3 +1034,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T12:46 [MB.3.4.3] (lead) status active -> review
 - 2026-11-14T12:49 [MB.3.4.3] (implementer) reviewer MINOR cleared: dropped the derived encoded_len assert
 - 2026-11-14T12:50 [MB.3.4.3] (lead) status review -> done
+- 2026-11-14T12:50 [MB.3.4.3] (lead) commit 7af86b2
+- 2026-11-14T12:50 [MB.3.4.4] (lead) status ready -> active
+- 2026-11-14T12:50 [MB.3.4.4] (lead) attempt 1/3 started
+- 2026-11-14T12:50 [MB.3.4.4] (lead) base 7af86b2
+- 2026-11-14T12:53 [MB.3.4.4] (implementer) implemented: 2 cgi unit tests (':' in Status, field-less head), new critical_fastcgi_codec.rs (12 tests); 43/12/30/1 green, guard OK, mutants 3 missed/327 caugh
+- 2026-11-14T12:55 [MB.3.4.4] (lead) status active -> review
+- 2026-11-14T12:56 [MB.11] (conductor) created (task) Rewrite the DigitalOcean roles/pooler section for clarity (backport to 0.2.0)
+- 2026-11-14T12:59 [MB.3.4.4] (implementer) reviewer MINORs cleared: exact 100-field/8192-byte assertions + named literals, dropped redundant header(name) loop; 43/12/30/1 green, rs-lint clean
+- 2026-11-14T13:00 [MB.3.4.4] (lead) status review -> done

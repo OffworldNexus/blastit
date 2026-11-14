@@ -2,16 +2,16 @@
 id: MB.3.4.4
 title: "Harden the CGI head parser: reject a ':' in Status, pin the field-less head, protected codec suite for the proxy-control names"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.3.4.2]
 paths: ["crates/blastit-fastcgi/src/cgi.rs", "crates/blastit-fastcgi/tests/critical_fastcgi_codec.rs"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T12:36"
-updated: "2026-11-14T12:36"
+updated: "2026-11-14T13:00"
 ---
 
 # Goal

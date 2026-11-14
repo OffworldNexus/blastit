@@ -616,4 +616,39 @@ mod tests {
             assert_eq!(error.to_string(), expected);
         }
     }
+
+    #[test]
+    fn status_with_a_non_digit_byte_is_bad_head() {
+        // `':'` is byte 58, and `58 - b'0' == 10`: a `<= 10` digit filter would
+        // accept it, reading `Status: 2:0` as 300 and `Status: 20:` as 210. The
+        // design says three *digits* in `200..=599`, so each is `BadHead`.
+        for line in ["Status: 2:0", "Status: 20:", "Status: :00"] {
+            assert_eq!(parse(&[line]), Err(CgiError::BadHead), "{line}");
+        }
+        // The accepted twin: real digits still parse.
+        for (line, status) in [
+            ("Status: 200", 200u16),
+            ("Status: 200 OK", 200),
+            ("Status: 599", 599),
+        ] {
+            assert_eq!(parse(&[line]).expect("parses").status, status, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_blank_line_only_head_is_200_text_html() {
+        // A field-less head starts with the blank line; `head_end` must stop at
+        // the first CRLF (2), not search for the generic `\r\n\r\n` (4), or the
+        // legal empty head would reach `parse_head` as an empty interior line
+        // and become a 502.
+        assert_eq!(head_end(b"\r\n"), Some(2));
+        assert_eq!(head_end(b"\r\n\r\n"), Some(2));
+        let raw = b"\r\n\r\nbody";
+        let end = head_end(raw).expect("terminated");
+        assert_eq!(end, 2);
+        let head = parse_head(&raw[..end]).expect("parses");
+        assert_eq!(head.status, DEFAULT_STATUS);
+        assert_eq!(head.content_type, DEFAULT_CONTENT_TYPE);
+        assert!(head.headers.is_empty());
+    }
 }
