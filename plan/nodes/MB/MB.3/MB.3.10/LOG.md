@@ -23,3 +23,19 @@ edited fields
 ## 2026-11-14T20:37 [lead]
 
 OWNER 2026-11-14: the docs_fences STALE row for php.md is deleted in THIS change (not kept as a compat shim) since the page is retargeted here; added crates/blastit-manifest/tests/docs_fences.rs. MB.3.20 no longer owns that row.
+
+## 2026-11-14T20:43 [lead]
+
+status ready -> active
+
+## 2026-11-14T20:43 [lead]
+
+attempt 1/3 started
+
+## 2026-11-14T20:43 [lead]
+
+base e489e4e; .28 landed 39c02f7 (php refused until .3 wires it); owner directive: PHP IS supported via embedded libphp, no fallback, zero php-fpm/FastCGI hits in the three framework pages, and the docs_fences STALE row goes in this same change.
+
+## 2026-11-14T21:25 [lead]
+
+status active -> done

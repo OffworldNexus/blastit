@@ -1392,3 +1392,17 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T20:37 [MB.3.10] (lead) OWNER 2026-11-14: the docs_fences STALE row for php.md is deleted in THIS change (not kept as a compat shim) since the page is retargeted here; added crates/bla
 - 2026-11-14T20:37 [MB.3.31] (lead) OWNER clarification: also purge 'retired key/legacy/deprecated/migration' framing about PHP from live briefs (nothing was ever released). Banner text stays verb
 - 2026-11-14T20:43 [MB.3.28] (lead) status active -> done
+- 2026-11-14T20:43 [MB.3.10] (lead) status ready -> active
+- 2026-11-14T20:43 [MB.3.10] (lead) attempt 1/3 started
+- 2026-11-14T20:43 [MB.3.10] (lead) base e489e4e; .28 landed 39c02f7 (php refused until .3 wires it); owner directive: PHP IS supported via embedded libphp, no fallback, zero php-fpm/FastCGI hits 
+- 2026-11-14T21:04 [MB.9.2.2] (lead) RELEASE GATE (2026-11-14, from MB.3.10 review): the / EntryScript 404 gate in this node's  is now load-bearing documentation. The static responder currently ser
+- 2026-11-14T21:04 [MB.3.31] (lead) ADDITION: live briefs that cite docs/design/php-fastcgi.md (e.g. MB.9.2.2 Context) must be repointed to docs/design/backend-runtimes.md §4.2 + ADR-0009, because
+- 2026-11-14T21:04 [MB.3.13.2] (lead) SCOPE ADD (2026-11-14, MB.3.10 review): ADR-0010 §2's downward workers bound belongs to this Stage-0 gate: workers > config.view_worker_cap() must be a boot err
+- 2026-11-14T21:04 [MB.9.2.2] (lead) Correction to the line above (shell ate the backticked names): the `.php`/`.phar` EntryScript 404 gate in this node`s `plan` is the release-gated claim. Yes.
+- 2026-11-14T21:04 [MB.3.8] (lead) INPUT from MB.3.10 review (2026-11-14): docs/design/static-and-spa.md:41 still says the PHP worker is 0.2.1; the release folded into 0.2.0. static-and-spa.md is
+- 2026-11-14T21:10 [MB.3.33] (planner) created (task) Static root must never serve .php/.phar source (per-request 404, protected)
+- 2026-11-14T21:10 [MB.3.33] (lead) created (owner 2026-11-14, security-first order) because MB.9.2.2 is blocked behind the whole MB.9 static-port chain (MB.9.2.1.3<-1.2<-1.1<-MB.9.1.1<-MB.9.1.2, 
+- 2026-11-14T21:10 [MB.9.2.2] (lead) SUPERSEDED IN PART (2026-11-14): the EntryScript behaviour lands EARLY as MB.3.33 (surgical, in the current static_asset/rewrite path, with protected critical_s
+- 2026-11-14T21:10 [MB.3.8] (lead) RELEASE CHECKLIST ITEM (owner 2026-11-14, verbatim): add to the 0.2.0 certification: 'no / under a static root is servable (404, protected ), proven before the 
+- 2026-11-14T21:10 [MB.3.8] (lead) RELEASE CHECKLIST ITEM (owner 2026-11-14, verbatim): add to the 0.2.0 certification: "no `.php`/`.phar` under a static root is servable (404, protected `critica
+- 2026-11-14T21:25 [MB.3.10] (lead) status active -> done

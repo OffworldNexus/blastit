@@ -10,7 +10,7 @@ error.
 | Key | Required | Meaning |
 |---|---|---|
 | `version` | yes | must be `1` |
-| `app` | no* | the WSGI callable, `module:attribute`; required when any route is not static |
+| `app` | no* | the WSGI callable, `module:attribute`; required when a route declares neither `[route.static]` nor `[route.php]` |
 | `preload` | no | a module, or a list of them, imported once before the fork |
 | `groups` | no | group names attached to **every** route; route-level `groups` is narrower |
 | `[proxy.<name>]` | no | a named broker for one external service; a grant on an undeclared proxy aborts the boot |
@@ -75,6 +75,7 @@ egress = true                       # may open TCP connections
 | `prefork` | no | `true` forks this view at startup instead of on first use |
 | `[route.ingress]` | no | how a request body is handled; required for a route that takes one |
 | `[route.static]` | no | serve a built front end from a directory; `spa = true` answers a deep URL with its `index` |
+| `[route.php]` | no | run a PHP front controller in the route's own embedded PHP worker |
 
 ## Ingress
 
@@ -131,10 +132,10 @@ immutable = ["/assets/*"]       # default none: a match gets the year-long cache
 | `immutable` | none | `/`-anchored globs matched whole against the answering file's path; `*` stops at `/`; a match gets `Cache-Control: public, max-age=31536000, immutable` |
 
 Only a file from `root` whose path matches a pattern is cached for a year; an
-`index` answer is always `no-cache`. A path it does not answer reaches the app
-with the route's `methods` and `[route.ingress]`, or is a `404` when the manifest
-has no `app`. `..`, NUL and other control bytes, absolute and backslash paths are
-`400`; a symlink that leaves `root` and a dotfile are `404`.
+`index` answer is always `no-cache`. A path it does not answer reaches the app — or the
+`[route.php]` front controller — with the route's `methods` and `[route.ingress]`, and
+is a `404` when the route has neither. `..`, NUL and other control bytes, absolute and
+backslash paths are `400`; a symlink that leaves `root` and a dotfile are `404`.
 
 The four keys are reserved: `[route.static]` is never a grant table, so
 `[route.static] queries = …` is an unknown key.
@@ -143,6 +144,34 @@ A static route that can never reach the app — `spa = true`, or a manifest with
 `app` — may not declare `[route.ingress]`, `prefork = true`, a `[route.<proxy>]`
 grant or a route-level `groups` list: each is a boot error, because nothing could
 ever run it. A front controller omits `spa` and keeps its `[route.ingress]`.
+
+## PHP
+
+A Symfony or Laravel front controller is one route with a `[route.php]` block.
+Blastit embeds the host's NTS `libphp.so` in the route's own worker and runs
+`entry`: there is no pool and no socket, and a host without a usable NTS `libphp`
+is a boot refusal, not a degraded mode.
+
+```toml
+[[route]]
+name = "app"
+path = ['.*']
+
+[route.php]
+entry = "public/index.php"      # required, relative to blastit.toml
+```
+
+| Key | Required | Meaning |
+|---|---|---|
+| `entry` | yes | the front controller, relative to `blastit.toml`; must end in `.php`, and beneath `[route.static] root` when both blocks are declared |
+| `workers` | no | an optional value from 1 to 64; omit it and Blastit uses the per-route budget |
+
+A `[route.php]` route needs no `app`: the front controller is the app. `spa = true`,
+`CONNECT` and `TRACE` never reach a worker and are boot errors, and so is an `entry`
+that is absolute, holds `..`, a backslash or a control byte, does not end in `.php`,
+or is not beneath `root`. Blastit executes only `entry`, and `[route.static]` serves
+any regular file under `root` — `entry` included — as bytes: keep application sources
+out of a served root.
 
 ## Proxies
 

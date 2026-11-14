@@ -610,3 +610,202 @@ The page correctly does **not** ask for `sudo`, `/etc`, a hand-written pool file
 ---
 
 VERDICT: FAIL — 0 blocker, 1 major, 13 minor, 3 nit
+
+---
+
+## Round 4 — retarget onto `[route.php]` (MB.3.10)
+
+**Verdict:** FAIL — 1 BLOCKER, 3 MAJOR, 7 MINOR, 2 NIT.
+
+**The manifest is right; the boot is not runnable on this branch.** The page's one fence (`docs/frameworks/php.md:9-25`) has exactly the shape `critical_php_manifest.rs::php_entry_is_under_static_root_when_both_blocks_are_set` accepts (`entry` under `root`, no `app`, ingress beside `[route.php]`), and `docs_fences.rs:26` lists the page. But `php_backend_unavailable` refuses every `[route.php]` before bind (`stage0.rs:407-417`, called at `:676` and `:932`; `check.rs:153`). That is **B1**, not a parser error.
+
+**No fallback, no pool — PASS.** The page says "there is no pool, no server and nothing to start beside Blastit" (`:51-52`) and "No usable NTS `libphp` is not a degraded mode" (`:57`); a grep of the page, `docs/frameworks/index.md`, `docs/frameworks/static-and-spa.md` and `zensical.toml` for `php-fpm|fastcgi|route\.fastcgi|listen` is 0. Nothing on the page promises a second backend. Keep it.
+
+### BLOCKER
+
+#### B1 — the page's `blastit dev`/`curl` transcript cannot run: a `[route.php]` boot is refused by an interim guard that names `MB.3.13.3`, not `libphp`
+
+- `docs/frameworks/php.md:4-5` — "`0.2.0` ships it, with `check -- <suite>`."
+- `docs/frameworks/php.md:57-59` — "No usable NTS `libphp` is not a degraded mode: the boot stops before it binds, naming the package and that variable."
+- `docs/frameworks/php.md:66-70` — the `blastit dev` banner; `:82-87` — `HTTP/1.1 200 OK` from `curl`.
+- `crates/blastit/src/stage0.rs:407-417` — every PHP route returns `route "app": the embedded PHP backend is not available in this build ([route.php] entry "public/index.php"); the per-route worker wiring lands in MB.3.13.3`; `:676` (production), `:932` (`dev`), and `crates/blastit/src/check.rs:153` all call it.
+
+**Wrong outcome:** on this branch the documented manifest parses and validates, then `blastit dev` exits `1` with a plan-node message. The page's failure paragraph promises a different message (the package + `BLASTIT_LIBPHP`), so an agent cannot tell whether to install a package, set a variable, or wait for a build; the CI and Deploy transcripts are equally unreachable.
+
+**Fix (release gate, not a page edit):** land `MB.3.13.3` (`SpawnSpec::Php`) before `0.2.0` ships this page, and have it produce the loader's package/`BLASTIT_LIBPHP` refusal the page documents. Until then the page's `0.2.0` claim is false; do not paper over it with a "coming soon" note in user docs.
+
+### MAJOR
+
+#### M1 — "`blastit dev --learn` proposes a missing `root`" is false; both `--learn` modes add routes and queries, and a missing root stops the boot first
+
+- `docs/frameworks/php.md:46-47` — "`blastit dev --learn` proposes a missing `root`; `check --learn` writes your queries into `blastit.toml`."
+- `crates/blastit/src/dev_learn.rs:425-470` — `finish()` writes `edits.routes` and `edits.grants`; there is no `root` edit. `crates/blastit/src/check.rs:1018-1025` — the summary is `learn: N routes, M queries added → <path>`.
+- `docs/reference/manifest.md:354-357` — "A root that is missing, not a directory or unlistable stops the boot"; a missing `public/` stops `dev` before `--learn` can propose anything.
+
+**Wrong outcome:** an agent with no `public/` runs `dev --learn`, gets no proposal, and still cannot boot; an agent with a missing route hand-writes it because the page credits `--learn` only with queries. These two forms are the VISION's one-pass bootstrap; understating them is the difference between one pass and whack-a-mole.
+
+**Replacement:** "`blastit dev --learn` and `check --learn` add the routes and exact `queries` they observed (`check` writes only after a passing suite); neither invents a static `root` — a missing `public/` stops the boot, so fix `root` or create it."
+
+#### M2 — "no `sudo`" is false for the documented install: `libphp-embed`/`php84-embed`/`php-embedded` is a root package install
+
+- `docs/frameworks/php.md:51-55` — "The library is a distro package — `libphp-embed` on Debian/Ubuntu, `php84-embed` on Alpine, `php-embedded` on Fedora/RHEL — and `BLASTIT_LIBPHP=/path/to/libphp.so` names another one."
+- `docs/frameworks/php.md:57-59` — "Nothing goes in `/etc`, no `sudo`, and it reads `./blastit.toml` from here:"
+
+**Wrong outcome:** on a laptop or CI image without `libphp`, the page's own next action (`apt install`, `apk add`, `dnf install`) requires root; an agent in an unprivileged sandbox reads "no `sudo`" and concludes the package is optional or already installed. The local flow then dies at boot with the libphp refusal, and the agent has no honest next step.
+
+**Replacement:** "Blastit never writes `/etc` and needs no `sudo` to run; installing the distro package is a one-time root step (`sudo apt install libphp-embed`), or point `BLASTIT_LIBPHP` at a library you already have."
+
+#### M3 — the CI section's `check -- <suite>` and `BLASTIT_URL` are not implemented on this branch, and `docs/ci.md` says the opposite
+
+- `docs/frameworks/php.md:113-143` — `blastit check -- vendor/bin/phpunit`, `blastit check --learn -- vendor/bin/phpunit`, `blastit check --json -- vendor/bin/phpunit`, and `BLASTIT_URL=http://127.0.0.1:8080`.
+- `crates/blastit/src/check.rs:14-16` — "**`pytest -q -p no:blastit -p blastit._check_pytest`** runs unprivileged"; `crates/blastit/src/cli.rs:80` — "Everything after `--`, passed to `pytest -q` verbatim"; `check.rs:322-329` — a missing pytest is exit `2`.
+- `grep -r BLASTIT_URL crates python` = 0. `docs/ci.md:9,98,102` — "With an `app`, it runs `pytest -q`"; exit `2` includes "no `pytest`".
+
+**Wrong outcome:** a Symfony agent's first CI command exits `2` ("pytest is not installed in the interpreter blastit runs on"), or its PHPUnit arguments are passed to pytest; even if the suite ran, `getenv('BLASTIT_URL')` is `false`, so the `Http::get(...)`/`file_get_contents(...)` recipes the page teaches cannot reach a server. The agent cannot verify 1/1 routes or any query — the page's only completeness gate — and the cheapest escape is to stop running `check` (or widen a grant).
+
+**Fix:** land `MB.3.6.4` (`check -- <suite>`, `BLASTIT_URL`, `executor_ran`) and make `docs/ci.md` state the PHP form in the same release. Do not leave the page pointing at a CI reference that says `check` runs pytest. Until that lands, the page must not present the section as shipped (`:4-5`).
+
+### MINOR
+
+#### m1 — `manifest.md:13` still says `app` is "required when any route is not static", contradicting the page and its own §PHP
+
+- `docs/frameworks/php.md:28-29` — "a `[route.php]` route needs no `app` — the front controller is the app."
+- `docs/reference/manifest.md:13` — "`app` | no* | ... required when any route is not static"; but `:169` — "A `[route.php]` route needs no `app`".
+- `crates/blastit/src/stage0.rs:314-321` — `app_rule` uses `can_boot_without_app`, true for a PHP-only manifest; adding `app` is accepted but no route reaches it.
+
+**Wrong outcome:** an agent that checks the top-level table first adds a dead `app` to a PHP-only manifest, or doubts the page. **Fix:** `manifest.md:13` → "required when any route declares neither `[route.static]` nor `[route.php]`".
+
+#### m2 — `workers` omits the parser's `1..=64` bound and names a different error
+
+- `docs/frameworks/php.md:34` — "optional; omit it. It caps this route at — never above — the concurrency Blastit derives; a value above the budget is a boot error".
+- `crates/blastit-manifest/src/validate.rs:49,634-651` — `MAX_WORKERS = 64`; `0` is "must be at least 1", `>64` is "at most 64"; the deployment budget is a separate boot check.
+
+**Wrong outcome:** an agent writing `workers = 100` expects the page's "above the budget" error and gets "at most 64"; the page never says `64` is the grammar ceiling. **Replacement:** "optional; omit it. `1`–`64`, and never above the concurrency Blastit derives: a value above that budget is a boot error."
+
+#### m3 — `spa`, `CONNECT` and `TRACE` are boot errors beside `[route.php]`, and the page never says so
+
+- `docs/frameworks/php.md:36` — "`[route.static]` is optional: without it every path reaches the front controller."
+- `crates/blastit-manifest/src/validate.rs:657-676` — `spa = true`, `CONNECT` and `TRACE` are `PhpDeadDeclaration`; `docs/reference/manifest.md:169-172` lists them.
+
+**Wrong outcome:** an agent copies `spa = true` from `static-and-spa.md`'s SPA block into the PHP route and gets a boot refusal the PHP page never predicted. **Replacement:** one clause after `:36`: "A `[route.php]` route keeps `spa = false`; `spa = true`, `CONNECT` and `TRACE` are boot errors."
+
+#### m4 — "a second `[[route]]` above this catch-all" is self-contradictory; an agent may append it after `.*`
+
+- `docs/frameworks/php.md:38-40` — "a JSON API beside the form app is a second `[[route]]` above this catch-all ... — first match wins, in manifest order."
+
+**Wrong outcome:** "second" reads as "append", while "above" reads as "before"; an LLM that appends puts `/api/.*` after `.*`, so the JSON route never matches and JSON POSTs hit the form codec (`400`). **Replacement:** "a JSON API is **another** `[[route]]` **before** this catch-all".
+
+#### m5 — the deploy note installs `libphp` on the "host", not in the image
+
+- `docs/frameworks/php.md:152-153` — "The image needs the host NTS `libphp` Blastit embeds; the first route's uid `21000` needs write access..."
+
+**Wrong outcome:** an agent building a Dockerfile may install/mount `libphp` on the host and ship an image without it; the boot then refuses inside the container. **Replacement:** "Your image must contain the NTS `libphp` package; the first route's uid `21000` needs write access..."
+
+#### m6 — the page never names the supported PHP minors (`8.2`–`8.4`)
+
+- `docs/frameworks/php.md:51-55` — "the host's NTS `libphp.so`" and three distro packages, no version.
+- `crates/blastit-php-sapi/src/loader.rs:179-183` — a mismatched minor fails with "which this build has no ABI for (8.2, 8.3 and 8.4 are supported)".
+
+**Wrong outcome:** an agent on a distro that ships 8.5 installs the named package and gets an ABI refusal; the page's "naming the package and that variable" paragraph does not prepare it for a version refusal. **Replacement:** say "the host's NTS `libphp` (8.2–8.4)" once, at `:51`.
+
+#### m7 — the `entry` row omits the `.php`/path-shape rules and overgeneralizes "never `index.php`"
+
+- `docs/frameworks/php.md:33` — "required; relative to `blastit.toml`, and with `[route.static]` it includes `root`: `public/index.php`, never `index.php`".
+- `crates/blastit-manifest/src/validate.rs:585-598` — entry must be a relative path, no `\`, no `..`, no control byte, end in `.php`, and be under `root`.
+- `crates/blastit-manifest/tests/critical_php_manifest.rs:209` — `accepted("entry = \"index.php\"")` with no static block; `index.php` is valid when there is no `root`.
+
+**Wrong outcome:** an agent without `[route.static]` believes `index.php` is always refused and invents a `public/` root; an agent writing `entry = "public/index"` gets "must end in .php" that the page did not predict. **Replacement:** "required; a relative `.php` path (no `..`), and with `root = "public"` it is `public/index.php`, not `index.php`."
+
+### NIT
+
+#### n1 — `uv tool install blastit` is the only install line and never says `uv` is a prerequisite
+
+- `docs/frameworks/php.md:62` — "`$ uv tool install blastit`"; `docs/getting-started.md:9` uses `uv add blastit` and `docs/frameworks/static-and-spa.md:46` uses `uvx blastit dev`. An agent on a machine without `uv` cannot run the page's only install line. **Replacement:** "With `uv` installed: `uv tool install blastit`."
+
+#### n2 — a fixed `:8080` with no `--port` escape
+
+- `docs/frameworks/php.md:66-67` — "`blastit dev · single-uid simulation · 127.0.0.1:8080`"; no `--port` on the page. An agent with 8080 busy has no documented next step (other pages show `--port`). **Replacement:** one clause: "`--port N` moves it if 8080 is taken."
+
+**Smallest set to PASS:** land `MB.3.13.3` (B1) and `MB.3.6.4` + the `ci.md` update (M3); fix the `--learn` sentence (M1) and the `no sudo` sentence (M2); the seven MINORs are one-line edits in `php.md`/`manifest.md`.
+
+---
+
+## Round 5 — verification (MB.3.10)
+
+**Verdict:** PASS — 0 BLOCKER, 0 MAJOR, 1 MINOR (m8), 2 NITs carried (n1, n2).
+
+**Manifest first-try:** confirmed. The fence (`docs/frameworks/php.md:9-25`) is the mixed `[route.static]`+`[route.php]` shape `critical_php_manifest.rs:184-205` accepts; `[route.ingress] body = "form"` is allowed because `check_static_declarations` returns early for a PHP route and `check_php_declarations` refuses only `spa`/`CONNECT`/`TRACE`. The green `docs_fences`/`docs-check` runs you cite make it first-try.
+
+| Round 4 id | Status | Evidence |
+|---|---|---|
+| B1 | deferred — known gate | `MB.3.13.3`; not counted per brief |
+| M1 | resolved | `:48-51` now routes + exact queries, no `root`; `:50-51` says create `public/` |
+| M2 | resolved | `:59-60` "the one privileged step"; `:63` `composer install` before `:72` `blastit dev` |
+| M3 | deferred — known gate | `MB.3.6.4` + `ci.md`; not counted per brief |
+| m1 | resolved | `manifest.md:13` now excludes `[route.php]` |
+| m2 | resolved | page `:34` gives `1`–`64`; ref `:167` |
+| m3 | resolved | page `:36-38` states `spa`/`CONNECT`/`TRACE` are boot errors |
+| m4 | resolved | page `:39-40` "**another** ... **before** this catch-all" |
+| m5 | resolved | page `:159` image carries the same NTS `libphp` |
+| m6 | resolved | page `:55` "(8.2–8.4)" |
+| m7 | resolved | page `:33` relative `.php`, `public/index.php` not `index.php` |
+| n1 | not resolved — NIT | page `:66` still has no `uv` prerequisite |
+| n2 | not resolved — NIT | page `:73` still fixed `:8080`, no `--port` |
+
+### New findings
+
+#### m8 — MINOR — `manifest.md` §Static still says a static miss is a `404` when the manifest has no `app`, contradicting the PHP route
+
+- `docs/frameworks/php.md:27-29` — "A file under `public/` other than `entry` is answered by the static responder; every other path reaches the front controller. Only `entry` runs ... a `[route.php]` route needs no `app` — the front controller is the app."
+- `docs/reference/manifest.md:134-138` — "A path it does not answer reaches the app with the route's `methods` and `[route.ingress]`, or is a `404` when the manifest has no `app`."
+- `docs/reference/manifest.md:169` — "A `[route.php]` route needs no `app`: the front controller is the app."
+
+**Wrong outcome:** an agent cross-checking the canonical static+php fence finds two answers for a static miss; the cheapest reconciliation is a dead top-level `app` (accepted but unreachable) or a `404` the page says cannot happen. **Replacement:** "A path it does not answer reaches the route's executor — its `app`, or its `[route.php]` front controller — with the route's `methods` and `[route.ingress]`; it is a `404` when the route has neither."
+
+**Carried:** n1 (`:66` `uv tool install blastit` still has no `uv` prerequisite) and n2 (`:73` still `:8080` with no `--port`); both NIT, neither blocks.
+
+---
+
+## Round 6 — final text (MB.3.10)
+
+**Verdict:** PASS — 0 BLOCKER, 0 MAJOR, 3 MINOR, 2 NIT.
+
+**Fence re-check:** `docs/frameworks/php.md:9-25` was re-read against `validate.rs`: `check_php_entry` (`:578-609`) accepts `public/index.php` under `root = "public"`; `check_php_workers` (`:634-651`) accepts the omitted `workers`; `check_php_declarations` (`:657-676`) accepts the route (no `spa`/`CONNECT`/`TRACE`); `check_static_declarations` (`:502-514`) returns early for PHP, so `[route.ingress] body = "form"` is not a static dead declaration. `docs_fences.rs:26` lists the page. The canonical fence is first-try.
+
+**Answers:** yes for the canonical manifest; the JSON API extension has m1. No PHP fallback or pool: `manifest.md` §PHP says "there is no pool and no socket", the page has no `fastcgi`/`listen`/`php-fpm`, and `spa = true` beside PHP is a boot error.
+
+### MINOR
+
+#### m1 — the JSON API route prose omits `name`; a copied block duplicates `name = "app"`
+
+- `docs/frameworks/php.md:40-42` — "a JSON API ... is **another** `[[route]]` **before** this catch-all, with its own `path = ['/api/.*']`, `[route.php]` (`entry = "public/index.php"`) and `[route.ingress]` (`body = "json"`)".
+- `docs/reference/manifest.md:70` — "`name` | yes | ... duplicates abort the boot"; `validate.rs:313-321` (`DuplicateRouteName`).
+
+**Wrong outcome:** an agent copies the canonical route, changes `path`/`[route.php]`/`[route.ingress]`, leaves `name = "app"`, and the second route is a duplicate-name boot error. **Replacement:** "with its own `name`, `path = ...`".
+
+#### m2 — Local's adjacent fences skip `composer install` and never state `blastit dev`'s cwd
+
+- `docs/frameworks/php.md:61-73` — "Install Blastit, then run `composer install` in the project root:" then only `$ uv tool install blastit` and `$ blastit dev`.
+- `docs/frameworks/php.md:7` says the manifest is in the project root, but the `blastit dev` fence has no "from the project root".
+
+**Wrong outcome:** an agent that follows the console fences runs `uv tool install` then `blastit dev`, skipping `composer install` (missing `vendor/`) or runs `blastit dev` outside the manifest directory. **Replacement:** add a `$ composer install` fence between them and "From the project root:" before `blastit dev`.
+
+#### m3 — `php8X-embed` is formatted as a literal package name
+
+- `docs/frameworks/php.md:55-57` — "`php8X-embed` for your minor on Alpine (e.g. `php84-embed`)".
+- The package the ADR names is `php84-embed`; `apk add php8X-embed` is not a package.
+
+**Wrong outcome:** an agent copies `php8X-embed` and the install fails. **Replacement:** "`php84-embed` on Alpine (use the package matching your minor)" — no fake literal.
+
+### NIT
+
+#### n1 — `BLASTIT_LIBPHP` links to `settings.md` whose `## Backends` is still empty
+
+- `docs/frameworks/php.md:57` — "[`BLASTIT_LIBPHP`](../reference/settings.md)"; `docs/reference/settings.md:22` — "## Backends" with no row.
+- The page's own "point `BLASTIT_LIBPHP` at yours" carries the meaning, so this is not blocking. Add the row (MB.3.13.2) or drop the link until it exists.
+
+#### n2 — `manifest.md` §Ingress still says "0.1.1 has no multipart codec" while the page is 0.2.0
+
+- `docs/reference/manifest.md:106` — "0.1.1 has no multipart codec"; `docs/frameworks/php.md:44` — "an upload has no codec: `raw` with `allow_raw = true`". **Fix:** say "0.2.0 has no multipart codec" or drop the version.
+
+**Known gates:** B1 (`php_backend_unavailable`, MB.3.13.3) and M3 (`check -- <suite>`/`BLASTIT_URL` + `ci.md`, MB.3.6.4) remain code-side; not counted.

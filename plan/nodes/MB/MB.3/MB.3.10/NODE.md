@@ -2,7 +2,7 @@
 id: MB.3.10
 title: "Retarget the PHP page and reference onto [route.php] + libphp-embed + BLASTIT_LIBPHP (ADR-0010)"
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: [MB.3.9.1]
@@ -16,11 +16,11 @@ paths:
   - python/tests/runnable_docs/inventory.toml
   - "crates/blastit-manifest/tests/docs_fences.rs"
   - "docs/design/php-dev-local.review-*.md"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:39"
-updated: "2026-11-14T20:37"
+updated: "2026-11-14T21:25"
 ---
 
 # Goal

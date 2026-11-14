@@ -123,12 +123,12 @@ is the same verdict as one document; [CI/CD](../ci.md#what-it-fails-on) owns the
 A front-controller route omits `spa`: with `spa = true` the fallback answers
 first, so the app is never reached. Without it, a request that is no file is the
 manifest's `app`: `/checkout/42` reaches it with `PATH_INFO=/checkout/42`, and the
-manifest keeps one `.*`. A PHP app is this row with `public/index.php` as its
-entry script.
+manifest keeps one `.*`. A PHP app is this row with a `[route.php]` block naming
+`public/index.php` instead of `app`.
 
-`0.2.0` ships the rewrite and this responder; the FastCGI worker that runs `public/index.php`,
-and refuses to serve it as a file, is `0.2.1`. One `path = ['.*']` route also answers `GET /api/…`
-with `index`: give an SPA's API routes their own `[[route]]` above it, because the first match wins.
+`0.2.0` ships the rewrite, this responder and the embedded PHP worker that runs
+`public/index.php`. One `path = ['.*']` route also answers `GET /api/…` with `index`:
+give an SPA's API routes their own `[[route]]` above it, because the first match wins.
 
 ## Deployments
 

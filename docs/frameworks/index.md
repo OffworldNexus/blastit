@@ -5,7 +5,7 @@ Blastit loads one callable and calls it. `app` names it as
 no framework integration: Django, Flask, SQLAlchemy, raw psycopg and a
 hand-written WSGI app all look the same from here.
 
-PHP is the other backend: [PHP-FPM, Symfony and Laravel](php.md).
+PHP is the other backend: [PHP (Symfony, Laravel)](php.md).
 
 ```toml title="Django"
 app = "myshop.wsgi:application"
@@ -68,6 +68,6 @@ Blastit's brokers and checks every request and statement against the manifest.
 ## Next
 
 [Django](django.md) · [Flask, SQLAlchemy and raw WSGI](flask.md) ·
-[PHP-FPM, Symfony and Laravel](php.md) ·
+[PHP (Symfony, Laravel)](php.md) ·
 [static assets and SPAs](static-and-spa.md) ·
 [local development](../local.md) · [CI/CD](../ci.md).

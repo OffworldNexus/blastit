@@ -668,3 +668,132 @@ reference pages owned elsewhere. The manifest, the two-step local flow, the knob
 discipline (`workers` "usually omit") and the deploy story are right.
 
 VERDICT: FAIL — 0 BLOCKER, 3 MAJOR, 13 MINOR, 1 NIT.
+
+---
+
+## Round 4 — retarget onto `[route.php]` (MB.3.10)
+
+**VERDICT: FAIL — 0 BLOCKER, 2 MAJOR, 9 MINOR, 5 NIT.**
+
+Read: `docs/frameworks/php.md` (161 lines), `docs/frameworks/index.md`, `docs/frameworks/static-and-spa.md` §Front controller, `docs/reference/manifest.md` §PHP/§Routes/§Ingress, `docs/reference/settings.md` (§Backends empty, as briefed), `zensical.toml`, ADR-0010 §1–§2, `docs/knowledge/LESSONS.md`, `MB.3.10/NODE.md`. `make docs-check` (Zensical `--strict`) prints **No issues found**, so no broken link or anchor is counted.
+
+### The two questions
+
+- **Obvious in 60 seconds?** Yes. The H1, the 16-line manifest and the `[route.php]` table (`:20-34`) say one thing: embedded `libphp`, `entry`, optional `workers`. `grep -niE 'php[-_ ]?fpm|fastcgi|route\.fastcgi|listen'` on the changed pages is zero; `pool` appears only in the negation at `:52`.
+- **Fallback or pool promised?** No. `:57` says "No usable NTS `libphp` is not a degraded mode"; `:52` says "no pool". That part is correct and is the page's strongest paragraph.
+
+### Steps counted
+
+| Environment | Commands in the text | Actions the reader must supply |
+|---|---|---|
+| Local | `uv tool install blastit` (`:62`), `blastit dev` (`:66`) | write the manifest (`:7-25`), host NTS `libphp` (`:51-55`), `composer install` (`:74`), `DATABASE_URL` in the process env (`:44-47`) |
+| CI/CD | `blastit check -- vendor/bin/phpunit` (`:117`) | `vendor/` (`:113`), a suite that speaks HTTP (`:127-135`) |
+| Deploy | `blastit --preset compose-traefik` (`:150`) | NTS `libphp` in the image, uid `21000` writable dirs (`:153-155`) |
+
+The two Blastit steps (manifest, `blastit dev`) are right. The prerequisites are not all honest: one is claimed to need no `sudo` when the distro package does, and `composer install` is ordered after the command it must precede.
+
+### MAJOR
+
+#### M1. The runtime prerequisite says "no `sudo`" while the supported path needs a distro package install [MAJOR]
+
+Where: `docs/frameworks/php.md:57-66`
+
+> No usable NTS `libphp` is not a degraded mode: the boot stops before it binds, naming the package and that variable. Nothing goes in `/etc`, no `sudo`, and it reads `./blastit.toml` from here:
+
+> `$ uv tool install blastit` … `$ blastit dev`
+
+What a reader does wrong: a Debian/Ubuntu host with the PHP CLI but no `libphp-embed` (the common Symfony host) must run `sudo apt install libphp-embed`; the page says "no `sudo`". The colon's "from here" introduces `uv tool install`, which does not read the manifest, so the install is mislabeled as the manifest-reading step. The page names the package but never says to install it, and it assumes `uv`/CPython 3.13 without naming either. Result: the first `blastit dev` is a boot refusal, and the reader has been told the flow is no-sudo.
+
+Fix: replace `:57-59` with:
+
+> No usable NTS `libphp` is not a degraded mode: the boot stops before it binds, naming the package and `BLASTIT_LIBPHP`. Blastit itself needs no `sudo` and writes nothing under `/etc`; installing the distro `libphp` package is the one privileged step. Install `uv` once, then `uv tool install blastit`, and run it from the directory that holds `./blastit.toml`:
+
+Then keep the `blastit dev` block. This makes the package a stated prerequisite, keeps Blastit's own zero-sudo guarantee true, and fixes the antecedent.
+
+#### M2. `composer install` is taught after the command that needs it [MAJOR]
+
+Where: `docs/frameworks/php.md:65-74`
+
+> `$ blastit dev` … One command: no server to start beside it, nothing left running after Ctrl-C. Blastit does not install dependencies, migrate, warm caches or read `.env`; run `composer install` yourself.
+
+What a reader does wrong: a fresh Symfony/Laravel checkout has no `vendor/`. The page starts `blastit dev` first, then says `composer install`; the first request to `/users/42` (`:82`) fatals on `vendor/autoload.php` before the reader reaches line 74. The "One command" claim is true only after a step that appears below it.
+
+Fix: move the composer sentence above the `blastit dev` block: "Before the first run, `composer install`; Blastit does not install dependencies, migrate, warm caches or read `.env`." Keep "One command: no server to start beside it, nothing left running after Ctrl-C" after the block.
+
+### MINOR and NIT
+
+| Id | Where | Quote / issue | Fix |
+|---|---|---|---|
+| m1 | `php.md:47` | "`blastit dev --learn` proposes a missing `root`" — false: `dev_learn.rs::edits` writes only routes and exact `queries` (`R27`); no static-root proposal exists. | "`blastit dev --learn` records the routes and queries you click through; `check --learn` records them from your suite into `blastit.toml`." |
+| m2 | `php.md:39-40` | "`[route.php] entry`" is not TOML; a copy-paster cannot write it. Ordering ("above this catch-all") is now correct. | "with its own `name`, `path = ['/api/.*']`, `[route.php]` (`entry = "public/index.php"`) and `[route.ingress]` (`body = "json"`)" |
+| m3 | `php.md:27` | "A file under `public/` is answered by the static responder" includes `public/index.php`; the next sentence correctly says it is never served. | "A file under `public/` other than `entry` is answered by the static responder; any other path reaches the front controller." |
+| m4 | `php.md:153-155` | "The image needs the host NTS `libphp` Blastit embeds" — an image has its own library; the linked recipe's `python:3.13-slim` + `pip install blastit` has none, and the uid write access has no `chown`. | "The image needs its own NTS `libphp` (`apt-get install libphp-embed`); `chown -R 21000 var/` (Laravel: `storage/ bootstrap/cache/`)." |
+| m5 | `php.md:93-109` | The asset curl uses a fixture hash (`app.4f1c2a9b7d3e.css`) and the second curl's `{"route":"home",…}` is a fixture response; only the first says "with a front controller that answers `/users/42`". | "any file `ls public/assets` prints"; label the second "A fixture front controller that echoes what PHP saw returns:". |
+| m6 | `php.md:161` (and `:52`,`:72`) | 161 lines, 11 over the 150-line aim; "no server … nothing left running" is stated twice. | Cut the duplicate at `:52` or `:72`, and compress `:44-47`; no content is lost. |
+| m7 | `manifest.md:13` | "`app` … required when any route is not static" contradicts the page's `[route.php]` route with no `app` and `manifest.md:169` ("A `[route.php]` route needs no `app`"). | Add "and has no `[route.php]`" or a footnote naming the executor. |
+| m8 | `static-and-spa.md:126` | "A PHP app is this row with `public/index.php` as its entry script" — the table row answers with "the manifest's `app`", and `entry` is a `[route.php]` key, not a static key. | "A PHP app is this row with a `[route.php] entry = "public/index.php"` block; the front controller is the app." |
+| m9 | `php.md:44-47`, `:66` | The DB paragraph names `input = { url = "DATABASE_URL" }`, but the Local command is bare `blastit dev`; `:73` says Blastit does not read `.env` without giving the remedy. A Doctrine/Eloquent boot aborts "missing input variable". | Add: "`DATABASE_URL` must be in Blastit's environment: `uv run --env-file .env blastit dev` (or export it); Blastit reads the process environment only." |
+| n1 | `php.md:4` | "`0.2.0` ships it, with `check -- <suite>`" is a release note before the example; "it" is ambiguous, and CI already shows `-- <suite>`. | Move it after the example or delete the clause. |
+| n2 | `php.md:78` | The quoted error ends `"public".`; `PhpEntryInvalid`'s `Display` has no trailing period. A reader matching the string will not find it. | Drop the period inside the code span. |
+| n3 | `php.md:101` | "`SCRIPT_FILENAME` stays pinned to `entry`" is PHP-internal detail on a user page; the curl is the durable lesson. | "A query string is data, never PHP options; the front controller's `/` route echoes what PHP saw." (mechanism in `security.md`) |
+| n4 | `php.md:90` | "`/build/*` for Encore's `public/build/`" omits Laravel Vite, which writes the same `public/build/`; the page claims Laravel support. | "Encore's and Laravel Vite's `public/build/`". |
+| n5 | `manifest.md:106` | "0.1.1 has no multipart codec" — the release is `0.2.0`; the PHP page's upload sentence relies on this reference. | `0.1.1` → `0.2.0`. |
+
+### Verdict
+
+The page now answers both questions correctly: PHP is supported exactly one way and nothing promises a pool or an external fallback. It fails on the Local prerequisite contract: a first-run Symfony/Laravel developer is told the path is no-sudo while it needs a distro `libphp` install, and the `composer install` prerequisite is ordered after the command it gates. Fix M1/M2 and the page is lean, honest and copy-pasteable; the remaining items are one-clause corrections.
+
+---
+
+## Round 5 — verification (MB.3.10)
+
+**VERDICT: PASS** — 0 BLOCKER, 0 MAJOR, 3 MINOR (m4 remainder, m6 length, m9), 2 NIT.
+
+Re-read `docs/frameworks/php.md` (163 lines), `docs/reference/manifest.md` §PHP/§Routes and `docs/frameworks/static-and-spa.md` §Front controller. `make docs-check` prints **No issues found**; no `php-fpm`/`fastcgi`/`listen` string remains (`pool` only in the negation at `:56`).
+
+| Round 4 id | Status | Evidence |
+|---|---|---|
+| M1 | resolved | `:59-60` "Installing it is the one privileged step; Blastit itself … needs no `sudo`"; `:69` now attaches "from the directory" to `blastit dev`, not the install. |
+| M2 | resolved | `:63` "Install Blastit, and run `composer install` once" now precedes `blastit dev` at `:72`. |
+| m1 | resolved | `:48-51` both modes record routes and exact queries; "Neither invents a static `root`". |
+| m2 | resolved | `:40-42` "**another** … **before**" plus `[route.php]` (`entry = "public/index.php"`) and `[route.ingress]` (`body = "json"`); the full block is at `:20-24`. |
+| m3 | resolved | `:27` "A file under `public/` other than `entry`"; `:37` states `spa = true`, `CONNECT`, `TRACE` are boot errors. |
+| m4 | not fully — **MINOR** | `:159` now says the image must carry the "same NTS `libphp`"; `:160` still gives only "needs write access", with no `chown` command. |
+| m5 | accepted (deliberate) | `:100` fixture hash `app.4f1c2a9b7d3e.css` and `:114` fixture JSON remain. |
+| m6 | not fully — **MINOR** | The duplicate "no server … nothing left running" is gone (`:56` vs `:78`); the page is 163 lines, 13 over the 150-line aim. |
+| m7 | resolved | `manifest.md:13` now says "when a route declares neither `[route.static]` nor `[route.php]`". |
+| m8 | resolved | `static-and-spa.md:126-127` now says a PHP app is that row with a `[route.php]` block naming `public/index.php` instead of `app`. |
+| m9 | not resolved — **MINOR** | `:46-51`/`:79` still give no `DATABASE_URL` remedy; a `.env`-only Doctrine/Eloquent boot aborts until the reader guesses `uv run --env-file .env` or export. |
+| n1 | accepted (deliberate) | `uv` prerequisite still unnamed. |
+| n2 | resolved | `:83` no period inside the code span. |
+| n3 | resolved | `:106-107` has no `SCRIPT_FILENAME`. |
+| n4 | resolved | `:94-95` says "Encore's and Laravel Vite's `public/build/`". |
+| n5 | accepted (deliberate) | `manifest.md:106` still says `0.1.1`; another node's release sweep. |
+
+### New findings
+
+- **N1 [NIT]** `php.md:57` — "`php84-embed` on Alpine" is the 8.4 package while `:55` promises 8.2–8.4; on 8.3 the package is `php83-embed`. Fix: "`php8X-embed` for the minor you run (e.g. `php84-embed` on 8.4)."
+- **N2 [NIT]** `php.md:37` — "A `[route.php]` route keeps `spa = false`" reads as a PHP-route key; `spa` is a `[route.static]` key, and writing it under `[route.php]` is an unknown-key boot error. Fix: "Leave `[route.static] spa` at its default `false`; `spa = true` there, or `CONNECT`/`TRACE` in `methods`, is a boot error."
+
+The two original questions are now answered cleanly: the supported story is obvious in 60 seconds, and nothing promises a fallback or a pool. M1/M2 are resolved; the residuals are prose polish, not blockers. Accept.
+
+---
+
+## Round 6 — final text (MB.3.10)
+
+**VERDICT: PASS** — 0 BLOCKER, 0 MAJOR, 4 MINOR, 2 NIT.
+
+Read `docs/frameworks/php.md` (150 lines), `manifest.md` §Routes/§Static/§Ingress/§PHP, `static-and-spa.md` §Front controller, `index.md`, `zensical.toml`, ADR-0010 §1–§2 and `MB.3.10/NODE.md`. `make docs-check` prints **No issues found**.
+
+**The two questions.** Obvious in 60 seconds: yes — the H1, the 16-line manifest and the `[route.php]` table (`:20-35`); no `php-fpm`/`fastcgi`/`listen` string remains. Fallback or pool: no — `:3-4` says "no PHP server beside it", and the page never names a pool, socket or `listen`. Verified: `workers` is only "optional, `1`–`64`; omit it — Blastit derives the per-route budget" (`:35`), matching `manifest.md`; no boot-error claim. `entry` is a regular file the static responder serves as bytes (`:29-30`), not refused. `BLASTIT_LIBPHP` links to `settings.md` without `#backends`.
+
+| Id | Severity | Where | Quote / issue | Fix |
+|---|---|---|---|---|
+| F1 | MINOR | `php.md:61-73` | "Install Blastit, then run `composer install` in the project root:" then fence `uv tool install blastit`, then fence `blastit dev` with no second lead-in. The composer command is inline, not between the fences; a reader can skip it or run `blastit dev` outside the project root. | Add "Then, from the project root, run `composer install` and `blastit dev`:" or put `$ composer install` in the first fence and a "Then, from the project root:" lead-in before the dev fence. |
+| F2 | MINOR | `php.md:40-42` | "**another** `[[route]]` **before** this catch-all, with its own `path = ['/api/.*']`, `[route.php]` … and `[route.ingress]` …" — `name` is required (`manifest.md` §Routes); a copy omits it or reuses `name = "app"` (duplicate aborts). | Add "`name = "api"`" to the list (or "its own `name`"). |
+| F3 | MINOR | `php.md:46-50`, `:75-76` | The DB paragraph names `input = { url = "DATABASE_URL" }`, but Local is bare `blastit dev` and only says Blastit does not read `.env`. A `.env`-only Doctrine/Eloquent app aborts "missing input variable DATABASE_URL". | Add: "`DATABASE_URL` must be in Blastit's environment — `uv run --env-file .env blastit dev` (or export it); Blastit reads the process environment only." |
+| F4 | MINOR | `php.md:146-148` | "the first route's uid `21000` needs write access to Symfony's `var/` or Laravel's `storage/` and `bootstrap/cache/`" — direction, no command. | Show `chown -R 21000 var/` (Laravel: `storage/ bootstrap/cache/`) in the image build. |
+| N1 | NIT | `php.md:135` | The `--json` document is one ~250-character line; the one field a reader wants (`"exercised":0`) wraps off-screen. | Pretty-print it, or show only `routes` and `findings`. |
+| N2 | NIT | `php.md:34` | "with `root = "public"` it is `public/index.php`, not `index.php`" is example-specific; the rule is "beneath `[route.static] root`". A reader with `root = "web"` can write `public/index.php` and hit the boot error at `:80`. | "when a `[route.static]` block is present it must be beneath its `root` (`root = "public"` → `public/index.php`)" |
+
+The page passes both questions. The four minors are copy-paste/prose (second-route `name`, composer/dev fence lead-in, env remedy, deploy `chown`); none changes what PHP is or how it is served. Accept.
