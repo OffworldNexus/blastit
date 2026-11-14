@@ -11,6 +11,7 @@ paths:
   - Cargo.lock
   - crates/blastit/Cargo.toml
   - "crates/blastit/src/**"
+  - "crates/blastit/tests/**"
   - "crates/blastit-view/Cargo.toml"
   - "crates/blastit-view/src/**"
   - Makefile
@@ -18,7 +19,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:39"
-updated: "2026-11-14T14:39"
+updated: "2026-11-14T15:01"
 ---
 
 # Goal

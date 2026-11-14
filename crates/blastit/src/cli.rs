@@ -27,9 +27,8 @@
 use std::net::IpAddr;
 use std::os::fd::RawFd;
 
-use pyo3::Python;
-
 use crate::host::Host;
+use crate::py::Python;
 use crate::stage0;
 use crate::stage1;
 

@@ -183,6 +183,10 @@ impl Dev {
     }
 
     /// The route's private directory, `<root>/views/<index>`.
+    ///
+    /// Read by the view fork (`Supervisor::spawn_now`), which only a build with
+    /// an interpreter has.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     pub fn view_dir(&self, index: usize) -> PathBuf {
         self.root.join("views").join(index.to_string())
     }

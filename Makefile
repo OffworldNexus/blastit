@@ -89,7 +89,7 @@ CRITICAL_STAGE ?= $(CURDIR)/target/python-critical
 CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytest\.mark\.skip|pytest\.skip[[:space:]]*\(|importorskip[[:space:]]*\(|unittest\.skip
 
 .PHONY: help check clean guard critical-guard critical-skip-check plan-validate \
-        rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical \
+        rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check \
         mutants-clean mutants-scope-probe print-mutants-tmp
@@ -123,6 +123,34 @@ rs-doc: ## Check rustdoc across workspace with warnings denied
 rs-test: ## Run all unprivileged Rust unit, integration, and doc tests
 	$(RUST_ENV) $(CARGO) test --workspace --all-targets --locked
 	$(RUST_ENV) $(CARGO) test --workspace --doc --locked
+
+# The standalone archive's build (ADR-0010 §4): every embedded-CPython role off,
+# so nothing in the graph links `libpython`, and the `view.chan` framing, the
+# stage-0 env strip, the seccomp roles and the supervisor still compile. The
+# unit tests that need no interpreter run here too, so the gate proves the split
+# rather than only compiling it; the integration suites all need a live CPython
+# and belong to the default build. `cargo tree -e normal` excludes dev- and
+# build-dependencies, which is exactly "what the binary links".
+rs-no-python: ## Compile + test the interpreter-free (standalone/PHP) build
+	@echo "cargo check -p blastit --no-default-features --features php"
+	$(CARGO) check -p blastit --no-default-features --features php --locked
+	@echo "cargo check -p blastit-view --no-default-features"
+	$(CARGO) check -p blastit-view --no-default-features --locked
+	@echo "cargo test  -p blastit --no-default-features --features php --lib"
+	$(CARGO) test -p blastit --no-default-features --features php --locked --lib
+	@echo "cargo test  -p blastit --no-default-features --features php --test no_python_build"
+	$(CARGO) test -p blastit --no-default-features --features php --locked --test no_python_build
+	$(CARGO) test -p blastit-view --no-default-features --locked --lib
+	@echo "clippy      -p blastit{,-view} --no-default-features"
+	$(CARGO) clippy -p blastit --no-default-features --features php --all-targets --locked -- -D warnings
+	$(CARGO) clippy -p blastit-view --no-default-features --lib --locked -- -D warnings
+	@count=$$($(CARGO) tree -p blastit --no-default-features --features php -e normal \
+		| grep -c pyo3 || true); \
+	if [ "$$count" -ne 0 ]; then \
+		echo "error: the interpreter-free build depends on pyo3 ($$count): it would link libpython" >&2; \
+		exit 1; \
+	fi; \
+	echo "interpreter-free build: 0 pyo3 dependencies (no libpython linked)"
 
 rs-test-critical: ## Run every crates/*/tests/critical_*.rs suite
 	@set -e; found=0; for file in crates/*/tests/critical_*.rs; do \
@@ -354,4 +382,4 @@ mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign 
 print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 	@echo "$(MUTANTS_TMP)"
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test plan-validate ## Full fast unprivileged check
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python plan-validate ## Full fast unprivileged check

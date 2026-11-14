@@ -37,11 +37,14 @@ use blastit_scheduler::RouteInfo;
 use blastit_sys::{
     ExitStatus, Pid, Signal, SignalFd, SignalMask, kill, reap, recv_with_fd, send_with_fd,
 };
-use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::{Py, PyAny};
 
 use crate::child::{Deadline, wait_writable};
 use crate::config::Config;
 use crate::logs::{Emitter, LineBuffer, Pipe, lossy};
+use crate::py::Python;
+#[cfg(feature = "python")]
 use crate::zygote;
 
 /// How long the surviving children get after `SIGTERM` before `SIGKILL`, once
@@ -122,7 +125,9 @@ pub struct Parts {
     /// One entry per manifest route, in routing order: whether its view may
     /// reach the network (§7.3).
     pub egress: Vec<bool>,
-    /// The imported WSGI callable.
+    /// The imported WSGI callable. Only a build with an interpreter can import
+    /// one, and only a WSGI view can be forked from it (`MB.3.11`).
+    #[cfg(feature = "python")]
     pub app: Py<PyAny>,
     /// init's end of `ctl.chan`.
     pub ctl: OwnedFd,
@@ -143,13 +148,20 @@ pub struct Supervisor<'a> {
     cfg: Config,
     limits: Limits,
     routes: Vec<RouteInfo>,
+    /// Whether each route's view may reach the network: only the view fork
+    /// reads it, and only a build with an interpreter forks one (`MB.3.11`).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     egress: Vec<bool>,
+    /// The imported WSGI callable, in a build that has an interpreter.
+    #[cfg(feature = "python")]
     app: Py<PyAny>,
     emitter: &'a Emitter,
     ctl: Option<OwnedFd>,
     decoder: Decoder,
     sources: Vec<Source>,
     signals: SignalFd,
+    /// The mask a forked view puts back: read by the view fork alone.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     mask: SignalMask,
     components: BTreeMap<i32, Component>,
     views: HashMap<i32, ViewChild>,
@@ -215,6 +227,7 @@ impl<'a> Supervisor<'a> {
             limits: parts.limits,
             routes: parts.routes,
             egress: parts.egress,
+            #[cfg(feature = "python")]
             app: parts.app,
             emitter,
             ctl: Some(parts.ctl),
@@ -465,6 +478,7 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Forks the view for `index`, hands its channel over, and records it.
+    #[cfg(feature = "python")]
     fn spawn_now(&mut self, py: Python<'_>, index: usize, info: &RouteInfo) {
         let route = index as u32;
         let egress = self.egress.get(index).copied().unwrap_or(false);
@@ -543,6 +557,23 @@ impl<'a> Supervisor<'a> {
         )
         .with_route(info.name.clone());
         self.emitter.emit(&event);
+    }
+
+    /// A build with no interpreter has no worker runtime to fork, so a `SPAWN`
+    /// on `ctl.chan` is a protocol violation, not something to drop.
+    ///
+    /// It cannot happen from a boot this build accepts: the routes that would
+    /// ask for a view were refused before a listener was bound
+    /// ([`crate::stage0::no_python_support`]), so the scheduler holds
+    /// only `[route.static]` policies. Failing the boot keeps that true: a
+    /// scheduler that asks anyway is one the manifest gate never admitted.
+    #[cfg(not(feature = "python"))]
+    fn spawn_now(&mut self, _py: Python<'_>, index: usize, info: &RouteInfo) {
+        self.fail(&format!(
+            "route {:?} (slot {index}): ctl.chan asked for a view and this blastit build \
+             has no Python worker runtime",
+            info.name
+        ));
     }
 
     /// Forks the views of every route whose SPAWN had to wait.
@@ -817,6 +848,7 @@ impl<'a> Supervisor<'a> {
     /// [`Supervisor::send_ctl`]. A view whose `SPAWNED` never arrives must not
     /// outlive init: the child's `PR_SET_PDEATHSIG` is what makes that true,
     /// and init does not get past this point anyway.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     fn send_spawned(&self, bytes: &[u8], fd: BorrowedFd<'_>) {
         let Some(ctl) = self.ctl.as_ref().map(AsFd::as_fd) else {
             self.fail("ctl.chan is closed; SPAWNED cannot be sent");

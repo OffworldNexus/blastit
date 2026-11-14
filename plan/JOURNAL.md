@@ -1205,3 +1205,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T14:52 [MB.3.14] (lead) status ready -> active
 - 2026-11-14T14:52 [MB.3.14] (lead) attempt 2/3 started
 - 2026-11-14T14:54 [MB.3] (lead) RECONCILIATION LANDED (2026-11-14) -- 3ce74a6's PROVISIONAL marker is CLOSED, CONFIRMED AS A NO-OP. Canonical ADR is docs/decisions/ADR-0010-php-embedded-via-li
+- 2026-11-14T14:55 [MB.3.11] (lead) status active -> review
+- 2026-11-14T14:55 [MB.3.11] (lead) attempt 1 report: feature gate + interpreter-free build proven by serving a static 200 from the no-libpython binary; pyo3 tree count 0; one fork call site; make
+- 2026-11-14T15:01 [MB.3.11] (unknown) edited fields
+- 2026-11-14T15:01 [MB.3.11] (lead) status review -> ready
+- 2026-11-14T15:01 [MB.3.11] (lead) status ready -> active
+- 2026-11-14T15:01 [MB.3.11] (lead) REVIEW PASS (attempt 1) with two MINORs to clear before commit: (a) stage0.rs:362 gives a [route.fastcgi]-only manifest advice that cannot work ('install the Py

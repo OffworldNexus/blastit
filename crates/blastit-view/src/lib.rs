@@ -124,39 +124,63 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
+// The framing (`wire`, `flow`) and the configuration are the worker transport:
+// they are compiled and tested in both builds, but with `python` off there is
+// no `serve` to write through them, so only their own tests reach them until
+// `MB.3.13` drives the same transport from the embedded-PHP worker.
+#![cfg_attr(not(feature = "python"), allow(dead_code))]
 
 mod config;
+#[cfg(feature = "python")]
 mod environ;
 mod error;
 mod flow;
+#[cfg(feature = "python")]
 mod input;
+#[cfg(feature = "python")]
 mod request;
+#[cfg(feature = "python")]
 mod response;
 mod sync;
 mod wire;
 
+#[cfg(feature = "python")]
 use std::collections::{HashMap, VecDeque};
+#[cfg(feature = "python")]
 use std::io::{ErrorKind, Read};
+#[cfg(feature = "python")]
 use std::os::unix::net::UnixStream;
+#[cfg(feature = "python")]
 use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(feature = "python")]
 use std::sync::mpsc::{Receiver, Sender, channel};
+#[cfg(feature = "python")]
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
+#[cfg(feature = "python")]
 use std::thread::JoinHandle;
+#[cfg(feature = "python")]
 use std::time::Duration;
 
+#[cfg(feature = "python")]
 use blastit_frame::{Decoder, DoneOutcome, Frame, HEADER_LEN, Limits, ReqHead, RespHead, TypeCode};
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 pub use crate::config::ViewConfig;
 pub use crate::error::ViewError;
 
+#[cfg(feature = "python")]
 use crate::input::BodyMsg;
+#[cfg(feature = "python")]
 use crate::request::{AppContext, RequestState, Worker};
+#[cfg(feature = "python")]
 use crate::sync::lock;
+#[cfg(feature = "python")]
 use crate::wire::Writer;
 
 /// How much of the channel is read at once. One frame's worth or more, so a
 /// full frame usually arrives in one syscall.
+#[cfg(feature = "python")]
 const READ_SIZE: usize = 64 * 1024;
 
 /// How long a parked worker waits for another request before retiring.
@@ -166,6 +190,7 @@ const READ_SIZE: usize = 64 * 1024;
 /// its stacks back. This is the "keep a small stack, not a whole pool" half of
 /// §1's memory-frugal goal: a view idle for the keep-alive holds no worker at
 /// all.
+#[cfg(feature = "python")]
 const IDLE_KEEPALIVE: Duration = Duration::from_secs(30);
 
 /// The most workers that stay parked between requests.
@@ -174,6 +199,7 @@ const IDLE_KEEPALIVE: Duration = Duration::from_secs(30);
 /// many as its concurrency once reached: a burst of a hundred requests would
 /// otherwise leave a hundred stacks behind. Workers beyond this retire as soon
 /// as their request is done rather than park.
+#[cfg(feature = "python")]
 const IDLE_POOL_MAX: usize = 8;
 
 /// Serve one view process on `chan` until the scheduler's end closes.
@@ -201,6 +227,7 @@ const IDLE_POOL_MAX: usize = 8;
 /// frame stream, the scheduler sent a frame a view may not receive or more body
 /// than its credit allowed, or the configuration cannot be served. The
 /// interpreter is left as it was found, and the caller owns the process's exit.
+#[cfg(feature = "python")]
 pub fn serve(
     py: Python<'_>,
     chan: UnixStream,
@@ -222,12 +249,14 @@ pub fn serve(
 /// callable from the standard library, so measuring costs no new dependency and
 /// no new syscall wrapper; `None` when the interpreter does not have it, in
 /// which case views report no CPU time at all.
+#[cfg(feature = "python")]
 fn thread_clock(py: Python<'_>) -> Option<Py<PyAny>> {
     let module = py.import("time").ok()?;
     module.getattr("thread_time_ns").ok().map(Bound::unbind)
 }
 
 /// The body of [`serve`], with the GIL released.
+#[cfg(feature = "python")]
 fn serve_detached(
     chan: UnixStream,
     app: Py<PyAny>,
@@ -263,6 +292,7 @@ fn serve_detached(
 }
 
 /// One request waiting for a worker, or already being served by one.
+#[cfg(feature = "python")]
 struct Job {
     /// The request's id on `view.chan`.
     id: u32,
@@ -275,6 +305,7 @@ struct Job {
 }
 
 /// One live request's handles, as the I/O thread knows them.
+#[cfg(feature = "python")]
 struct Live {
     /// The far end of the request's `wsgi.input`.
     tx: Sender<BodyMsg>,
@@ -283,11 +314,13 @@ struct Live {
 }
 
 /// Every request that is still running.
+#[cfg(feature = "python")]
 struct Registry {
     live: HashMap<u32, Live>,
 }
 
 /// The hand-off between the I/O thread and the parked workers.
+#[cfg(feature = "python")]
 struct Park {
     /// The jobs waiting for a worker, and the workers waiting for a job.
     inner: Mutex<PoolInner>,
@@ -296,6 +329,7 @@ struct Park {
 }
 
 /// What the I/O thread and the parked workers share.
+#[cfg(feature = "python")]
 struct PoolInner {
     /// Jobs waiting for a worker. A job usually skips this queue — it is handed
     /// straight to a parked worker — so it is almost always empty.
@@ -307,6 +341,7 @@ struct PoolInner {
     closing: bool,
 }
 
+#[cfg(feature = "python")]
 impl PoolInner {
     /// Whether a parked worker is waiting and not already matched to a job.
     ///
@@ -337,6 +372,7 @@ impl PoolInner {
 /// change — still one request at a time on its thread, with its own
 /// `wsgi.input` and its own response — but per-thread state the application
 /// keeps (`threading.local`) now lives as long as the worker does.
+#[cfg(feature = "python")]
 struct Pool {
     /// The hand-off the workers park on.
     park: Arc<Park>,
@@ -353,6 +389,7 @@ struct Pool {
 }
 
 /// The state of one view process between `READY` and the channel's end.
+#[cfg(feature = "python")]
 struct View {
     /// The worker stack, and the process-wide handles it shares.
     pool: Pool,
@@ -361,6 +398,7 @@ struct View {
     max_threads: Option<u32>,
 }
 
+#[cfg(feature = "python")]
 impl View {
     /// Read and dispatch frames until the scheduler's end closes.
     fn read_requests(&mut self, chan: &mut UnixStream, limits: Limits) -> Result<(), ViewError> {
@@ -579,6 +617,7 @@ impl View {
     }
 }
 
+#[cfg(feature = "python")]
 impl Pool {
     /// A worker stack with nothing in it: workers are started as demand comes.
     fn new(writer: Arc<Writer>, registry: Arc<Mutex<Registry>>, ctx: Arc<AppContext>) -> Self {
@@ -694,6 +733,7 @@ impl Pool {
     }
 }
 
+#[cfg(feature = "python")]
 impl Park {
     /// The next job for the calling worker, or `None` when the view is closing
     /// or the worker has been idle for longer than [`IDLE_KEEPALIVE`].
@@ -736,6 +776,7 @@ impl Park {
 ///
 /// The attachment is pyo3's, never a second initialisation or finalisation of
 /// the interpreter: the interpreter is inherited from the fork (§4, §9.3).
+#[cfg(feature = "python")]
 fn worker_loop(
     park: Arc<Park>,
     writer: Arc<Writer>,
@@ -766,6 +807,7 @@ fn worker_loop(
 ///
 /// Takes the token the worker already holds: attaching once for the life of the
 /// worker, rather than once per request, is where most of the saving is.
+#[cfg(feature = "python")]
 fn serve_one(
     py: Python<'_>,
     writer: &Arc<Writer>,
@@ -805,6 +847,7 @@ fn serve_one(
 /// one `DONE { Errored }` that frees the scheduler's slot. The caller must
 /// retire the worker when this returns `true`: the slot is released, but the
 /// thread is not handed another request.
+#[cfg(feature = "python")]
 fn guarded<F>(
     id: u32,
     state: Arc<RequestState>,
@@ -830,6 +873,7 @@ where
 }
 
 /// Releases a request's slot however its thread ends, panics included.
+#[cfg(feature = "python")]
 struct SlotGuard<'a> {
     id: u32,
     state: &'a Arc<RequestState>,
@@ -839,6 +883,7 @@ struct SlotGuard<'a> {
     done: bool,
 }
 
+#[cfg(feature = "python")]
 impl SlotGuard<'_> {
     /// Report how the request ended and drop out of the registry.
     ///
@@ -855,6 +900,7 @@ impl SlotGuard<'_> {
     }
 }
 
+#[cfg(feature = "python")]
 impl Drop for SlotGuard<'_> {
     fn drop(&mut self) {
         if self.done {
@@ -876,13 +922,14 @@ impl Drop for SlotGuard<'_> {
 }
 
 /// The name of a frame's kind, for a protocol error.
+#[cfg(feature = "python")]
 fn frame_kind(frame: &Frame) -> &'static str {
     TypeCode::from_code(frame.code())
         .map(TypeCode::name)
         .unwrap_or("unknown")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "python"))]
 mod tests {
     use super::*;
 

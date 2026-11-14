@@ -315,6 +315,78 @@ pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), Strin
     Ok(())
 }
 
+/// `ADR-0009` §5: what a build with no Python support cannot serve, and the
+/// sentence that names the artifact which can (`MB.3.11`).
+///
+/// A build with `python` off — the standalone archive of `ADR-0010` §4 — has no
+/// interpreter in any role, so a manifest that needs one is refused **here, in
+/// stage 0, before a listener is bound**, rather than at the first request or at
+/// a fork that has already happened. The rule this replaces is
+/// [`app_rule`]'s "the WSGI callable is required": on this build setting
+/// `BLASTIT_APP` cannot help, so telling the operator to set it would send them
+/// the wrong way.
+///
+/// An all-static manifest needs no interpreter at all and is left to
+/// [`static_app_refusal`], which keeps its `BLASTIT_APP`-on-a-static-tree
+/// sentence in both builds. A route that declares `[route.fastcgi]` is refused
+/// on its own terms, before the "no executor" advice: the external fallback is
+/// not this build's either, and `uv add blastit` cannot reach an
+/// operator-managed `php-fpm` socket. The `python` build has nothing to refuse;
+/// there the function is compiled for the tests that keep the sentences honest.
+#[cfg(any(not(feature = "python"), test))]
+pub(crate) fn no_python_support(
+    config: &Config,
+    manifest: &Manifest,
+    learn: bool,
+) -> Option<String> {
+    const INSTALL: &str = "install the Python package: uv add blastit";
+    if learn {
+        return Some(format!(
+            "dev --learn: this build has no Python support (built without feature \
+             \"python\") and --learn needs the interpreter for its gate; {INSTALL}, or \
+             run a build with --features python"
+        ));
+    }
+    if manifest.is_all_static() {
+        return None;
+    }
+    if let Some(app) = config.app.as_deref() {
+        return Some(format!(
+            "BLASTIT_APP ({app}): this build has no Python support (built without feature \
+             \"python\"), so it cannot import a WSGI application; {INSTALL}"
+        ));
+    }
+    // An external `[route.fastcgi]` route is not a WSGI view, and neither fix
+    // below can make one work here: the external fallback (`ADR-0010` §4,
+    // `MB.3.13`'s wiring) is not in this build either, and its future gate
+    // (`BLASTIT_ALLOW_EXTERNAL_FASTCGI`) is not a setting this artifact has.
+    // Saying "uv add blastit" would send the operator to a wheel that still
+    // cannot reach an operator-managed `php-fpm` socket.
+    if let Some(route) = manifest
+        .routes()
+        .iter()
+        .find(|route| route.fastcgi().is_some())
+    {
+        return Some(format!(
+            "route {:?}: this build cannot serve an external [route.fastcgi] route; the \
+             external fallback is MB.3.13's wiring and BLASTIT_ALLOW_EXTERNAL_FASTCGI is \
+             the gate it will arrive behind, not a setting this artifact has; add a \
+             [route.static] block, or serve it from a build that has both",
+            route.name()
+        ));
+    }
+    let route = manifest
+        .routes()
+        .iter()
+        .find(|route| route.static_policy().is_none())?;
+    Some(format!(
+        "route {:?}: this build has no Python support (built without feature \"python\"), \
+         and the route declares no [route.static] block, so it needs a runtime this build \
+         does not carry; {INSTALL}, or add a [route.static] block",
+        route.name()
+    ))
+}
+
 /// `R13` step 5: the first declared static root the responder's uid could not
 /// read, as the sentence a boot refuses with.
 ///
@@ -559,6 +631,14 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // manifest is parsed first, because "is every route static" is a property of
     // the file, not of the environment — and a missing `./blastit.toml` is still
     // named before the setting (`MB.1.6`).
+    // `ADR-0009` §5: a build with no Python support (`ADR-0010` §4's standalone
+    // archive) refuses a manifest that needs an interpreter here, before any
+    // listener is bound, naming the artifact that has one. Ahead of `app_rule`
+    // on purpose: on this build "set BLASTIT_APP" is advice that cannot work.
+    #[cfg(not(feature = "python"))]
+    if let Some(message) = no_python_support(&config, &manifest, false) {
+        fail(&emitter, &message);
+    }
     if let Err(message) = app_rule(&config, &manifest) {
         fail(&emitter, &message);
     }
@@ -800,6 +880,15 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
     // `R13`: a site whose every route is static needs no `app`; anything else
     // still names the setting as before (`MB.1.6`), and a `BLASTIT_APP` that
     // could never run is refused rather than ignored.
+    //
+    // Before it: `ADR-0009` §5's capability gate, so a python-less build says
+    // "install the Python package: uv add blastit" (or "add a [route.static]
+    // block") instead of sending the operator to a `BLASTIT_APP` that cannot
+    // work there.
+    #[cfg(not(feature = "python"))]
+    if let Some(message) = no_python_support(&config, &manifest, options.learn) {
+        dev_fail(&message);
+    }
     if let Err(message) = app_rule(&config, &manifest) {
         dev_fail(&message);
     }
@@ -2103,6 +2192,138 @@ path = ['/ungranted/.*']
         assert!(
             !manifest.effective_grants(0).contains_key(&db),
             "the manifest model still calls an empty grant empty"
+        );
+    }
+}
+
+/// `ADR-0009` §5: the boot gate of a build with no Python support (`MB.3.11`).
+///
+/// What it allows is as much a part of the gate as what it refuses: a
+/// static-only manifest has to boot in the standalone archive, or the artifact
+/// serves nothing at all.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod no_python_capability {
+    use super::*;
+
+    /// A static-only manifest: one `[route.static]` root, no app.
+    const STATIC_ONLY: &str = "\
+version = 1
+
+[[route]]
+name = \"docs\"
+path = ['.*']
+
+[route.static]
+root = \"site\"
+";
+
+    /// One route that declares no executor of its own: a WSGI view.
+    const WITH_A_VIEW: &str = "\
+version = 1
+
+[[route]]
+name = \"web\"
+path = ['.*']
+";
+
+    /// One route served by an operator-managed `php-fpm` pool: an external
+    /// executor this build does not carry either.
+    const WITH_EXTERNAL_FASTCGI: &str = "\
+version = 1
+
+[[route]]
+name = \"php\"
+path = ['.*']
+
+[route.fastcgi]
+entry = \"public/index.php\"
+";
+
+    fn manifest(source: &str) -> Manifest {
+        let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        manifest
+    }
+
+    #[test]
+    fn a_static_only_boot_is_allowed() {
+        assert_eq!(
+            no_python_support(&Config::default(), &manifest(STATIC_ONLY), false),
+            None
+        );
+    }
+
+    #[test]
+    fn an_app_is_refused_and_names_the_package_to_install() {
+        let config = Config {
+            app: Some("web.wsgi:app".to_string()),
+            ..Config::default()
+        };
+        let message = no_python_support(&config, &manifest(WITH_A_VIEW), false).unwrap();
+        assert!(message.contains("BLASTIT_APP (web.wsgi:app)"), "{message}");
+        assert!(
+            message.contains("install the Python package: uv add blastit"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_route_with_no_static_block_is_refused_by_name() {
+        let message = no_python_support(&Config::default(), &manifest(WITH_A_VIEW), false).unwrap();
+        assert!(message.contains("route \"web\""), "{message}");
+        assert!(
+            message.contains("install the Python package: uv add blastit"),
+            "{message}"
+        );
+        assert!(message.contains("[route.static]"), "{message}");
+    }
+
+    /// An external `[route.fastcgi]` route is not a WSGI view, and neither
+    /// "install the wheel" nor "add a `[route.static]` block" is what fixes it:
+    /// the sentence has to say what the build lacks, name the future gate as a
+    /// gate, and never offer `uv add blastit` as the cure.
+    #[test]
+    fn an_external_fastcgi_route_is_refused_on_its_own_terms() {
+        let message =
+            no_python_support(&Config::default(), &manifest(WITH_EXTERNAL_FASTCGI), false).unwrap();
+        assert_eq!(
+            message,
+            "route \"php\": this build cannot serve an external [route.fastcgi] route; the \
+             external fallback is MB.3.13's wiring and BLASTIT_ALLOW_EXTERNAL_FASTCGI is the \
+             gate it will arrive behind, not a setting this artifact has; add a \
+             [route.static] block, or serve it from a build that has both"
+        );
+        assert!(!message.contains("uv add blastit"), "{message}");
+    }
+
+    #[test]
+    fn learn_needs_the_gate_and_says_so() {
+        let message = no_python_support(&Config::default(), &manifest(STATIC_ONLY), true).unwrap();
+        assert!(message.starts_with("dev --learn"), "{message}");
+        assert!(
+            message.contains("install the Python package: uv add blastit"),
+            "{message}"
+        );
+    }
+
+    /// The one combination the gate deliberately leaves alone: a
+    /// `BLASTIT_APP` on an all-static tree keeps `static_app_refusal`'s
+    /// sentence in both builds, because installing the wheel would not make
+    /// that app reachable either.
+    #[test]
+    fn an_app_on_a_static_tree_keeps_the_rule_that_already_explains_it() {
+        let config = Config {
+            app: Some("web.wsgi:app".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            no_python_support(&config, &manifest(STATIC_ONLY), false),
+            None
+        );
+        assert!(
+            static_app_refusal(&config, &manifest(STATIC_ONLY))
+                .unwrap()
+                .starts_with("BLASTIT_APP: every route is static"),
         );
     }
 }
