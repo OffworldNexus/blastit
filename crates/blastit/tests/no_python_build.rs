@@ -8,12 +8,17 @@
 //! build's normal path and has its own suites.
 //!
 //! What it holds down is the **wiring**, not only the words. Without the stage-0
-//! gate both manifests below still exit `1` — `app_rule` refuses them with
+//! gate the WSGI manifest below still exits `1` — `app_rule` refuses it with
 //! "BLASTIT_APP: the WSGI callable (`module:attribute`) is required" — and that
 //! is advice no operator of this artifact can act on. Each case therefore
 //! asserts the gate's own sentence *and* the absence of that one, so deleting
 //! either call site fails here instead of passing on an exit code both paths
 //! happen to return.
+//!
+//! The retired external-PHP key (`MB.3.17`) is the second case: this build must
+//! still refuse it at exit `1`, but the sentence is now the **parser's** — the
+//! key stops existing, so the manifest is refused as an unknown key that names
+//! it, before the capability gate is consulted at all.
 #![cfg(not(feature = "python"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -33,9 +38,9 @@ name = \"web\"
 path = ['.*']
 ";
 
-/// One route served by an operator-managed `php-fpm` pool: an external executor
-/// this build does not carry either.
-const EXTERNAL_FASTCGI: &str = "\
+/// One route that still asks for the external `php-fpm` pool Blastit deleted
+/// (`MB.3.17`): the key is retired, so no build — this one included — parses it.
+const RETIRED_EXTERNAL_PHP: &str = "\
 version = 1
 
 [[route]]
@@ -136,8 +141,8 @@ fn a_wsgi_manifest_is_refused_by_the_capability_gate() {
 }
 
 #[test]
-fn an_external_fastcgi_manifest_is_refused_on_its_own_terms() {
-    let scratch = Scratch::new("fastcgi", EXTERNAL_FASTCGI);
+fn a_manifest_asking_for_the_retired_external_php_pool_is_refused_by_name() {
+    let scratch = Scratch::new("fastcgi", RETIRED_EXTERNAL_PHP);
     let (code, stdout, stderr) = dev(&scratch.dir);
     assert_eq!(code, Some(1), "stdout={stdout:?} stderr={stderr:?}");
     assert_eq!(
@@ -145,20 +150,15 @@ fn an_external_fastcgi_manifest_is_refused_on_its_own_terms() {
         "a startup error writes nothing on stdout (§1.1)"
     );
     assert!(
-        stderr.contains("route \"php\": this build cannot serve an external [route.fastcgi] route"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("MB.3.13's wiring"), "{stderr}");
-    assert!(
-        stderr.contains("BLASTIT_ALLOW_EXTERNAL_FASTCGI is the gate it will arrive behind"),
-        "{stderr}"
+        stderr.contains("route[0].fastcgi: unknown key"),
+        "the refusal names the retired key: {stderr}"
     );
     assert!(
         !stderr.contains(INSTALL),
-        "installing the wheel cannot reach an operator-managed pool: {stderr}"
+        "installing the wheel cannot bring the key back: {stderr}"
     );
     assert!(
         !stderr.contains(APP_RULE),
-        "the capability gate answered, not `app_rule`: {stderr}"
+        "the parser answered, not `app_rule`: {stderr}"
     );
 }

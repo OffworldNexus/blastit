@@ -1260,3 +1260,17 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T15:52 [MB.3.17] (lead) ADDITIONAL LESSONS bullet to append alongside this node's own one-liner (the attempt cap on MB.3.14 refused a fourth reopen, correctly): **sapi_startup() nulls 
 - 2026-11-14T15:57 [MB.3.12] (lead) status review -> done
 - 2026-11-14T15:57 [MB.3.12] (lead) commit d990e0e (make check exit 0 on a PHP-free host; Docker probe green with the three new ini_get rows). Four review MINORs cleared: three INI keys now assert
+- 2026-11-14T15:57 [MB.3.17] (unknown) edited fields
+- 2026-11-14T15:57 [MB.3.17] (lead) status ready -> active
+- 2026-11-14T15:57 [MB.3.17] (lead) attempt 1/3 started
+- 2026-11-14T15:57 [MB.3.17] (lead) base 9889a29; SPLIT agreed: code now, docs after MB.12's lenses (docs/frameworks|design|decisions are the architect's paths). docs/reference/settings.md is ours
+- 2026-11-14T16:09 [MB.3.20] (implementer) created (task) Held docs pass for MB.3.17: php.md fence and fallback note, design/ADR supersession lines, AUDIT note
+- 2026-11-14T16:11 [MB.3.17] (implementer) attempt 1: code half landed (crate+lock+Executor/parse/validate/error/stage0/no_python_build, settings.md row, LESSONS). critical_guard --node MB.3.17 base 9889
+- 2026-11-14T16:12 [MB.3.17] (lead) attempt 1: CODE HALF COMPLETE, blocked on ONE held docs path. Crate deleted (7 files, 3495 lines) + Cargo.lock; Executor::Pool/FastCgiPolicy/Route::fastcgi and 
+- 2026-11-14T16:12 [MB.3.17] (lead) status active -> blocked
+- 2026-11-14T16:12 [MB.3.17] (unknown) edited fields
+- 2026-11-14T16:12 [MB.3.17] (lead) status blocked -> ready
+- 2026-11-14T16:12 [MB.3.17] (lead) status ready -> active
+- 2026-11-14T16:12 [MB.3.17] (lead) attempt 2/3 started
+- 2026-11-14T16:16 [MB.3.20] (implementer) OWED BY THIS NODE: delete the STALE row in crates/blastit-manifest/tests/docs_fences.rs — const STALE = [("docs/frameworks/php.md", "fastcgi: unknown key", "MB.
+- 2026-11-14T16:18 [MB.3.17] (implementer) attempt 2: docs_fences now carries the STALE accounting row (php.md fence must fail with 'fastcgi: unknown key'; MB.3.20 owes the entry's removal) + self-cleari

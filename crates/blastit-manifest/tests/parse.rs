@@ -905,3 +905,53 @@ fn functions_must_be_a_list_of_names() {
     let grant = inline(&manifest_with("functions = [\"unaccent\", \"unaccent\"]\n"));
     assert_eq!(Vec::from_iter(grant.tables().functions()), ["unaccent"]);
 }
+
+//
+// Retired route keys (`MB.3.17`, `ADR-0010`).
+//
+
+/// `[route.fastcgi]` stops existing as a key: the external `php-fpm` path was
+/// deleted (`ADR-0010` §1, "no fallback"), so a manifest that still writes the
+/// block is refused as an unknown key that names it — not silently ignored,
+/// not read as an inline grant, and not a deprecation warning.
+///
+/// The twin in the same test is a route of the same shape that *is* accepted:
+/// `[route.static]` parses, so what fails below is the retired key and not the
+/// manifest around it. (`[route.php]`, the per-route form that replaces the
+/// fallback, is `MB.3.5.4`'s and does not parse on this base yet; asserting it
+/// here would be a failing test rather than a twin.)
+#[test]
+fn fastcgi_is_an_unknown_route_key_and_the_static_twin_parses() {
+    let errors = parse_errors(
+        "version = 1\n\
+         [[route]]\nname = \"app\"\npath = ['.*']\n\
+         [route.fastcgi]\nentry = \"public/index.php\"\n",
+    );
+    assert_eq!(
+        errors,
+        ManifestErrors::from(ManifestError::UnknownKey {
+            path: "route[0].fastcgi".to_string(),
+        })
+    );
+    let rendered = errors.to_string();
+    assert!(
+        rendered.contains("route[0].fastcgi: unknown key"),
+        "the diagnostic names the retired key: {rendered}"
+    );
+
+    // The accepted twin: the same route, with the block that still exists.
+    let twin = Manifest::from_toml_str(
+        "version = 1\n\
+         [[route]]\nname = \"app\"\npath = ['.*']\n\
+         [route.static]\nroot = \"public\"\n",
+    )
+    .expect("the static twin parses");
+    assert_eq!(
+        twin.route(0)
+            .expect("route 0")
+            .static_policy()
+            .expect("the static block")
+            .root,
+        "public"
+    );
+}

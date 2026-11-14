@@ -328,11 +328,11 @@ pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), Strin
 ///
 /// An all-static manifest needs no interpreter at all and is left to
 /// [`static_app_refusal`], which keeps its `BLASTIT_APP`-on-a-static-tree
-/// sentence in both builds. A route that declares `[route.fastcgi]` is refused
-/// on its own terms, before the "no executor" advice: the external fallback is
-/// not this build's either, and `uv add blastit` cannot reach an
-/// operator-managed `php-fpm` socket. The `python` build has nothing to refuse;
-/// there the function is compiled for the tests that keep the sentences honest.
+/// sentence in both builds. The `python` build has nothing to refuse; there the
+/// function is compiled for the tests that keep the sentences honest.
+///
+/// The retired external-PHP key (`MB.3.17`) needs no sentence here: the parser
+/// refuses it as an unknown key before a boot gets this far.
 #[cfg(any(not(feature = "python"), test))]
 pub(crate) fn no_python_support(
     config: &Config,
@@ -354,25 +354,6 @@ pub(crate) fn no_python_support(
         return Some(format!(
             "BLASTIT_APP ({app}): this build has no Python support (built without feature \
              \"python\"), so it cannot import a WSGI application; {INSTALL}"
-        ));
-    }
-    // An external `[route.fastcgi]` route is not a WSGI view, and neither fix
-    // below can make one work here: the external fallback (`ADR-0010` §4,
-    // `MB.3.13`'s wiring) is not in this build either, and its future gate
-    // (`BLASTIT_ALLOW_EXTERNAL_FASTCGI`) is not a setting this artifact has.
-    // Saying "uv add blastit" would send the operator to a wheel that still
-    // cannot reach an operator-managed `php-fpm` socket.
-    if let Some(route) = manifest
-        .routes()
-        .iter()
-        .find(|route| route.fastcgi().is_some())
-    {
-        return Some(format!(
-            "route {:?}: this build cannot serve an external [route.fastcgi] route; the \
-             external fallback is MB.3.13's wiring and BLASTIT_ALLOW_EXTERNAL_FASTCGI is \
-             the gate it will arrive behind, not a setting this artifact has; add a \
-             [route.static] block, or serve it from a build that has both",
-            route.name()
         ));
     }
     let route = manifest
@@ -2227,19 +2208,6 @@ name = \"web\"
 path = ['.*']
 ";
 
-    /// One route served by an operator-managed `php-fpm` pool: an external
-    /// executor this build does not carry either.
-    const WITH_EXTERNAL_FASTCGI: &str = "\
-version = 1
-
-[[route]]
-name = \"php\"
-path = ['.*']
-
-[route.fastcgi]
-entry = \"public/index.php\"
-";
-
     fn manifest(source: &str) -> Manifest {
         let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
         manifest
@@ -2276,24 +2244,6 @@ entry = \"public/index.php\"
             "{message}"
         );
         assert!(message.contains("[route.static]"), "{message}");
-    }
-
-    /// An external `[route.fastcgi]` route is not a WSGI view, and neither
-    /// "install the wheel" nor "add a `[route.static]` block" is what fixes it:
-    /// the sentence has to say what the build lacks, name the future gate as a
-    /// gate, and never offer `uv add blastit` as the cure.
-    #[test]
-    fn an_external_fastcgi_route_is_refused_on_its_own_terms() {
-        let message =
-            no_python_support(&Config::default(), &manifest(WITH_EXTERNAL_FASTCGI), false).unwrap();
-        assert_eq!(
-            message,
-            "route \"php\": this build cannot serve an external [route.fastcgi] route; the \
-             external fallback is MB.3.13's wiring and BLASTIT_ALLOW_EXTERNAL_FASTCGI is the \
-             gate it will arrive behind, not a setting this artifact has; add a \
-             [route.static] block, or serve it from a build that has both"
-        );
-        assert!(!message.contains("uv add blastit"), "{message}");
     }
 
     #[test]

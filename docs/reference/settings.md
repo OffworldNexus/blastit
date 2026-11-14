@@ -21,10 +21,6 @@ the process environment only; `uv run --env-file .env blastit dev` loads a file.
 
 ## Backends
 
-| Setting | Default | What it does |
-|---|---|---|
-| `BLASTIT_PHP_FPM` | `php-fpm`, then versioned names on `PATH` | the PHP Blastit runs for a `[route.fastcgi]` route; environment-only, never a manifest key |
-
 ## Port and health
 
 | Setting | Default | What it does |

@@ -485,63 +485,6 @@ pub enum ManifestError {
         /// Why the route can never reach the app.
         why: &'static str,
     },
-    /// A `[route.fastcgi]` `entry` is not a relative `.php` path (design §4.1).
-    ///
-    /// `rule` is one of the fixed phrases the design pins — `must be a relative
-    /// path`, `must not contain ..`, `must not contain \`, `must not contain a
-    /// control byte`, `must end in .php` — and the probe adds `must exist`,
-    /// `must be a regular file`, `must be readable by uid <uid>`, `must be
-    /// stat-able` and `must be under static root "<root>"`. It is a `String`
-    /// because those last phrases interpolate a value.
-    #[error("{location}: fastcgi entry {}: {rule}", quoted(.entry))]
-    FastCgiEntryInvalid {
-        /// Where the `[route.fastcgi]` block is written.
-        location: Location,
-        /// The entry as written.
-        entry: String,
-        /// The fixed rule the entry breaks.
-        rule: String,
-    },
-    /// A `[route.fastcgi]` block still writes `listen` (design §4.1 as amended
-    /// by `MB.3.9.2`).
-    ///
-    /// blastit spawns and supervises the pool, so the socket is derived per
-    /// route inside blastit's private run directory: a manifest that tries to
-    /// choose it is refused by name, and the message says who owns it.
-    #[error("{location}: fastcgi listen: unknown key; the pool socket is created by blastit")]
-    FastCgiListenDerived {
-        /// Where the `[route.fastcgi]` block is written.
-        location: Location,
-    },
-    /// An explicit `[route.fastcgi]` `workers` override is outside `1..=64`
-    /// (design §4.1 as amended).
-    ///
-    /// An absent `workers` is not an error: blastit derives the pool size from
-    /// its concurrency budget. `why` is `must be at least 1` or `at most 64`.
-    #[error("{location}: fastcgi workers {workers}: {why}")]
-    FastCgiWorkersInvalid {
-        /// Where the `[route.fastcgi]` block is written.
-        location: Location,
-        /// The worker count as written.
-        workers: u32,
-        /// Why the count is refused.
-        why: &'static str,
-    },
-    /// A `[route.fastcgi]` block is combined with a declaration that never
-    /// reaches the front controller (design §4.1).
-    ///
-    /// `key` names the declaration (`spa = true`, `CONNECT`, `TRACE`) and `why`
-    /// is the fixed sentence the design pins; the message is
-    /// `route "app" (index 0): <why>`, exactly as the design's table renders it.
-    #[error("{location}: {why}")]
-    FastCgiDeadDeclaration {
-        /// Where the `[route.fastcgi]` block is written.
-        location: Location,
-        /// The declaration that can never run.
-        key: String,
-        /// Why it can never reach a worker.
-        why: &'static str,
-    },
 }
 
 /// Something suspicious that does not stop the server from starting (§6).

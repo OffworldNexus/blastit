@@ -10,8 +10,8 @@ use toml::Value;
 
 use crate::error::{Location, ManifestError, ManifestErrors, escape_control};
 use crate::model::{
-    FastCgiPolicy, Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route,
-    StaticPolicy, UnresolvedGrant,
+    Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, StaticPolicy,
+    UnresolvedGrant,
 };
 use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
@@ -24,11 +24,23 @@ const TOP_LEVEL_KEYS: &[&str] = &[
 /// Keys of a `[[route]]`; every other key of a route is a proxy name, so its
 /// value is an inline grant.
 ///
-/// `static` and `fastcgi` are reserved (`R1`, design §4.1): they are always the
-/// blocks of those names, even when a proxy of that name is declared.
+/// `static` is reserved (`R1`, design §4.1): it is always the block of that
+/// name, even when a proxy of that name is declared.
 const ROUTE_KEYS: &[&str] = &[
-    "name", "path", "methods", "groups", "egress", "prefork", "ingress", "static", "fastcgi",
+    "name", "path", "methods", "groups", "egress", "prefork", "ingress", "static",
 ];
+
+/// Route keys Blastit **retired**: a manifest that still writes one is refused
+/// as an unknown key that names it (`MB.3.17`, `ADR-0010` §1).
+///
+/// `fastcgi` was the external `php-fpm` path. Making it an unknown key — rather
+/// than a silently ignored block or a deprecation warning — is the whole point
+/// of the removal: a deployment that still asks for the fallback must fail at
+/// the manifest, not at the first request. The name stays listed here (instead
+/// of simply disappearing from [`ROUTE_KEYS`]) so that it cannot be read as a
+/// grant on a proxy an author happens to call `fastcgi`: the refusal is the
+/// same sentence wherever the block is written.
+const RETIRED_ROUTE_KEYS: &[&str] = &["fastcgi"];
 
 /// The index file a `[route.static]` block answers with when it names none.
 const DEFAULT_INDEX: &str = "index.html";
@@ -230,8 +242,9 @@ fn check_route(value: &Value, declared: &BTreeSet<&str>, errors: &mut Vec<Manife
             "ingress" => check_fields(value, errors),
             // Reserved like `ingress`: its body is the static block's fields.
             "static" => check_fields(value, errors),
-            // Reserved too: its body is the FastCGI block's fields (design §4.1).
-            "fastcgi" => check_fields(value, errors),
+            // A retired key has no body to check: its one diagnostic comes from
+            // the route walk, so nothing inside it is reported as a field.
+            key if RETIRED_ROUTE_KEYS.contains(&key) => {}
             key if ROUTE_KEYS.contains(&key) => {}
             // A grant is a table, so a reserved key with one is a proxy name
             // only when that proxy is declared.
@@ -549,7 +562,6 @@ impl Parser {
             let mut prefork = false;
             let mut ingress = None;
             let mut static_policy = None;
-            let mut fastcgi_value = None;
             for (key, value) in fields {
                 let key_path = format!("{path}.{}", escape_control(key));
                 match key.as_str() {
@@ -575,9 +587,11 @@ impl Parser {
                     }
                     "ingress" => ingress = self.ingress(value, &key_path),
                     "static" => static_policy = self.static_policy(value, &key_path),
-                    // Read after the name, so the block's errors can name the
-                    // route they came from.
-                    "fastcgi" => fastcgi_value = Some((value, key_path)),
+                    // A key Blastit retired is an unknown key, named — never a
+                    // grant on a proxy of that name (`MB.3.17`).
+                    key if RETIRED_ROUTE_KEYS.contains(&key) => {
+                        self.error(ManifestError::UnknownKey { path: key_path });
+                    }
                     _ => {}
                 }
             }
@@ -597,11 +611,10 @@ impl Parser {
                 index,
                 name: name.clone(),
             };
-            let fastcgi = fastcgi_value
-                .and_then(|(value, path)| self.fastcgi_policy(value, &path, &location));
             let mut grants = BTreeMap::new();
             for (key, value) in fields {
-                if ROUTE_KEYS.contains(&key.as_str()) {
+                if ROUTE_KEYS.contains(&key.as_str()) || RETIRED_ROUTE_KEYS.contains(&key.as_str())
+                {
                     continue;
                 }
                 let grant_path = format!("{path}.{}", escape_control(key));
@@ -623,8 +636,7 @@ impl Parser {
                     grants,
                 )
                 .with_ingress(ingress)
-                .with_static(static_policy)
-                .with_fastcgi(fastcgi),
+                .with_static(static_policy),
             );
         }
 
@@ -930,85 +942,6 @@ impl Parser {
         })
     }
 
-    /// A route's `[route.fastcgi]`: the front controller and the optional pool
-    /// size (design §4.1 as amended by `MB.3.9.2`).
-    ///
-    /// Only the shape is read here. The rules a value has to obey — a relative
-    /// `.php` entry and an override in `1..=64` — belong to validation, so one
-    /// bad value never hides the others. `listen` is not a key at all: the
-    /// socket belongs to blastit, so writing one is refused by name even though
-    /// it is the only shape the old grammar had.
-    fn fastcgi_policy(
-        &mut self,
-        value: &Value,
-        path: &str,
-        location: &Location,
-    ) -> Option<FastCgiPolicy> {
-        let table = self.as_table(value, path)?;
-        let mut entry = None;
-        let mut has_entry = false;
-        let mut workers = None;
-        for (key, value) in table {
-            let key_path = format!("{path}.{}", escape_control(key));
-            match key.as_str() {
-                "entry" => {
-                    has_entry = true;
-                    entry = self.as_str(value, &key_path);
-                }
-                "listen" => self.error(ManifestError::FastCgiListenDerived {
-                    location: location.clone(),
-                }),
-                "workers" => workers = self.workers(value, &key_path),
-                _ => self.error(ManifestError::UnknownKey { path: key_path }),
-            }
-        }
-        if !has_entry {
-            self.error(ManifestError::MissingKey {
-                path: format!("{path}.entry"),
-            });
-        }
-
-        Some(FastCgiPolicy {
-            entry: entry?,
-            workers,
-        })
-    }
-
-    /// An explicit `[route.fastcgi]` `workers` override: a TOML integer that
-    /// fits a `u32`. `None` is "no override" — the pool size is blastit's to
-    /// derive, not a default this parser invents.
-    ///
-    /// The range rule (`1..=64`) is validation's; a negative or too-large
-    /// integer cannot be carried in the policy at all, so it is a type error
-    /// here instead of a value error that has nowhere to go.
-    fn workers(&mut self, value: &Value, path: &str) -> Option<u32> {
-        match value {
-            Value::Integer(number) => match u32::try_from(*number) {
-                Ok(number) => Some(number),
-                Err(_) => {
-                    self.error(ManifestError::WrongType {
-                        path: path.to_string(),
-                        expected: "an integer between 1 and 64",
-                        found: if *number < 0 {
-                            "a negative integer"
-                        } else {
-                            "an integer above 4294967295"
-                        },
-                    });
-                    None
-                }
-            },
-            other => {
-                self.error(ManifestError::WrongType {
-                    path: path.to_string(),
-                    expected: "an integer between 1 and 64",
-                    found: type_name(other),
-                });
-                None
-            }
-        }
-    }
-
     /// A route's `path`: a list of regexes, or the one regex a bare string
     /// holds.
     ///
@@ -1165,15 +1098,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{is_route_header, position};
-    use crate::Manifest;
-    use crate::error::ManifestError;
-    use crate::model::FastCgiPolicy;
-
-    /// A manifest with one route named `app` and the given `[route.fastcgi]`
-    /// body.
-    fn fastcgi(fields: &str) -> String {
-        format!("version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n[route.fastcgi]\n{fields}")
-    }
 
     /// A `[[route]]` header is recognised line by line, whitespace inside the
     /// brackets included; every other header shape is not one.
@@ -1194,119 +1118,6 @@ mod tests {
             "",
         ] {
             assert!(!is_route_header(line), "{line:?}");
-        }
-    }
-
-    /// `entry` is required and `workers` is optional: absent carries `None` so
-    /// blastit derives the pool size, an explicit value is carried as `Some`.
-    #[test]
-    fn fastcgi_block_carries_entry_and_optional_workers() {
-        let policy = |fields: &str| {
-            Manifest::from_toml_str(&fastcgi(fields))
-                .expect("the manifest parses")
-                .route(0)
-                .expect("route 0")
-                .fastcgi()
-                .cloned()
-                .expect("a fastcgi policy")
-        };
-
-        assert_eq!(
-            policy("entry = \"public/index.php\"\n"),
-            FastCgiPolicy {
-                entry: "public/index.php".to_string(),
-                workers: None,
-            }
-        );
-        assert_eq!(
-            policy("entry = \"index.php\"\nworkers = 1\n").workers,
-            Some(1)
-        );
-        assert_eq!(
-            policy("entry = \"index.php\"\nworkers = 64\n").workers,
-            Some(64)
-        );
-    }
-
-    /// `entry` is the one required key; `listen` is refused by name because
-    /// blastit owns the socket; an unknown fourth key says so.
-    #[test]
-    fn fastcgi_block_requires_entry_and_has_no_listen() {
-        let errors = |fields: &str| {
-            Manifest::from_toml_str(&fastcgi(fields))
-                .expect_err("the block must not parse")
-                .into_errors()
-        };
-
-        assert_eq!(
-            errors("workers = 1\n"),
-            vec![ManifestError::MissingKey {
-                path: "route[0].fastcgi.entry".to_string(),
-            }]
-        );
-        assert_eq!(
-            errors("entry = \"index.php\"\nlisten = \"run/fpm.sock\"\n"),
-            vec![ManifestError::FastCgiListenDerived {
-                location: crate::error::Location::Route {
-                    index: 0,
-                    name: "app".to_string(),
-                },
-            }]
-        );
-        assert_eq!(
-            errors("entry = \"index.php\"\nenv = \"A=B\"\n"),
-            vec![ManifestError::UnknownKey {
-                path: "route[0].fastcgi.env".to_string(),
-            }]
-        );
-    }
-
-    /// `fastcgi` is reserved like `static`: the block is never a grant, even
-    /// when a proxy of that name is declared.
-    #[test]
-    fn fastcgi_is_a_reserved_route_key() {
-        let manifest = Manifest::from_toml_str(
-            "version = 1\n[proxy.fastcgi]\nprotocol = \"postgresql\"\ninput = { url = \"URL\" }\n\
-             [[route]]\nname = \"app\"\npath = ['.*']\n[route.fastcgi]\nentry = \"index.php\"\n",
-        )
-        .expect("the manifest parses");
-        let route = manifest.route(0).expect("route 0");
-        assert!(route.fastcgi().is_some(), "the block, not a grant");
-        assert!(route.grants().is_empty());
-    }
-
-    /// `workers` is a TOML integer that fits a `u32`; the range rule itself is
-    /// validation's (`0` and `65` parse). A negative, oversized, string or float
-    /// value is a type error instead.
-    #[test]
-    fn fastcgi_workers_must_fit_a_u32() {
-        let errors = |value: &str| {
-            Manifest::from_toml_str(&fastcgi(&format!(
-                "entry = \"index.php\"\nworkers = {value}\n"
-            )))
-            .expect_err("the value must not parse")
-            .into_errors()
-        };
-
-        for value in ["-1", "4294967296", "\"4\"", "4.5"] {
-            assert!(
-                matches!(errors(value).as_slice(), [ManifestError::WrongType { path, .. }] if path == "route[0].fastcgi.workers"),
-                "workers = {value} must be a type error"
-            );
-        }
-
-        // The accepted twin: every in-range integer parses and is carried.
-        for value in ["1", "4", "64"] {
-            let workers = Manifest::from_toml_str(&fastcgi(&format!(
-                "entry = \"index.php\"\nworkers = {value}\n"
-            )))
-            .expect("an in-range integer parses")
-            .route(0)
-            .expect("route 0")
-            .fastcgi()
-            .expect("policy")
-            .workers;
-            assert_eq!(workers, Some(value.parse::<u32>().expect("a number")));
         }
     }
 

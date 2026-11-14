@@ -310,7 +310,7 @@ reason = "The all-static `check` path (no pytest, no proxy) is owned by MB.2.6 a
 [[page.fence]]
 index = 7
 mode = "static"
-reason = "0.2.0 ships the rewrite, but the FastCGI worker that serves public/index.php is 0.2.1, so this fence checks the command and the page's block; MB.2.7 replays the check command on the static fixture, and 0.2.1's e2e adds the PHP worker replay."
+reason = "0.2.0 ships the rewrite, but the embedded-PHP worker that serves public/index.php arrives with MB.3.13 and MB.3.7 (0.2.1), so this fence checks the command and the page's block; MB.2.7 replays the check command on the static fixture, and 0.2.1's e2e adds the PHP worker replay."
 
 [[page.fence]]
 index = 8

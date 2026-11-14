@@ -65,16 +65,15 @@
 //! root's too:
 //!
 //! ```
-//! use blastit_manifest::{Executor, FastCgiPolicy};
+//! use blastit_manifest::Executor;
 //!
 //! assert_eq!(Executor::View.kind(), "wsgi");
-//! assert!(Executor::ALL_KINDS.contains(&"fastcgi"));
-//! let pool = Executor::Pool(FastCgiPolicy {
-//!     entry: "public/index.php".to_string(),
-//!     workers: None,
-//! });
-//! assert_eq!(pool.kind(), "fastcgi");
+//! assert_eq!(Executor::ALL_KINDS, ["wsgi"].as_slice());
 //! ```
+//!
+//! `[route.fastcgi]` is not one of those kinds, or a key: the external
+//! `php-fpm` path was removed (`MB.3.17`, `ADR-0010` §1), and a manifest that
+//! still writes the block is refused as an unknown key that names it.
 
 #![deny(missing_docs)]
 
@@ -90,8 +89,7 @@ pub mod edit;
 pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning};
 pub use model::{
-    Executor, FastCgiPolicy, Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route,
-    StaticPolicy,
+    Executor, Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, StaticPolicy,
 };
 pub use routing::{Match, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable};
 pub use uid::UidLayout;
