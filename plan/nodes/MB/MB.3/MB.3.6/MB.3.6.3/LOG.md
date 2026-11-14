@@ -33,3 +33,11 @@ SUPERSEDED (2026-11-14, owner): rule (3) of my earlier note -- 'charge observed 
 ## 2026-11-14T13:24 [lead]
 
 HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do not delete work: the node is frozen as-designed against the FastCGI/php-fpm model and will be re-read, amended or superseded once the architect decides. If a sub-item reads as 'needed regardless' (e.g. the pure codec crate), it is called out in the MB.3 inventory log.
+
+## 2026-11-14T14:39 [lead]
+
+SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-minor C SAPI shim) inside the per-route view worker; there is no php-fpm pool. This node's machinery (parentfd argv handoff, render_pool_conf, S0-S7/U1 bind window, PoolReady, pool discovery/cleanup) is deleted by the ADR, not deferred. History kept: MB.3.9.2's grammar (entry, no listen, optional workers capped by view_worker_cap) transfers verbatim to [route.php]; the rest is not to be implemented. Do not start.
+
+## 2026-11-14T14:39 [lead]
+
+status ready -> superseded

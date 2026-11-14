@@ -1146,3 +1146,61 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T14:20 [MB.15] (lead) attempt 1/3 started
 - 2026-11-14T14:20 [MB.15] (lead) base 9fab605 (after MB.14 commit)
 - 2026-11-14T14:21 [MB.3.4] (lead) status ready -> done
+- 2026-11-14T14:22 [MB.3.4] (lead) status done -> done
+- 2026-11-14T14:22 [MB.3] (lead) BATCH 3 CLOSED (commits 5c4d8c6, 0bbb877, 0637f89, 4cd727b). MB.3.4 epic gate PASSED: 44/12/30/1, zero deps, pure codec, 3/331/18 mutants, gate audit 0 fluff/0 
+- 2026-11-14T14:23 [MB.16] (conductor) created (task) Deterministic ctl-write-to-gone-scheduler test (flake at supervise.rs:1045)
+- 2026-11-14T14:32 [MB.15] (lead) status active -> review
+- 2026-11-14T14:39 [MB.3.6.3] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.6.3] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.6.3.1] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.6.3.1] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.6.3.2] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.6.3.2] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.6.3.3] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.6.3.3] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.9.3] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.9.3] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.9.4] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.9.4] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.9.5] (lead) SUPERSEDED by ADR-0010 (docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md, owner decision 2026-11-14): PHP executes embedded (host NTS libphp.so + per-mi
+- 2026-11-14T14:39 [MB.3.9.5] (lead) status ready -> superseded
+- 2026-11-14T14:39 [MB.3.5.4] (lead) created (task) Add [route.php] (PhpPolicy, Executor::Php) and narrow [route.fastcgi] to external-only; drop FastCgiPoolSocketInvalid
+- 2026-11-14T14:39 [MB.3.10] (lead) created (task) Retarget the PHP page and reference onto [route.php] + libphp-embed + BLASTIT_LIBPHP (ADR-0010)
+- 2026-11-14T14:39 [MB.3.11] (lead) created (task) Feature-gate pyo3 (feature=python); decouple RawFrame transport and forking from the GIL
+- 2026-11-14T14:39 [MB.3.12] (lead) created (task) crates/blastit-php-sapi: per-minor Apache-2.0 C SAPI shims (blastit_php_abi_v1) + critical tests
+- 2026-11-14T14:39 [MB.3.13] (lead) created (task) PhpEmbedRuntime: embedded view worker loop + stage0 BLASTIT_LIBPHP discovery and ABI boot gate
+- 2026-11-14T14:39 [MB.3.5] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.5.2] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.5.3] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.6] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.6.1] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.6.2] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.7] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.8] (unknown) edited fields
+- 2026-11-14T14:39 [MB.9.3] (unknown) edited fields
+- 2026-11-14T14:39 [MB.3.5] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.5.2] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.5.3] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.6] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.6.1] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.6.2] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.6.4] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.7] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.8] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.9.3] (lead) ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.
+- 2026-11-14T14:39 [MB.3.11] (lead) status ready -> active
+- 2026-11-14T14:39 [MB.3.11] (lead) attempt 1/3 started
+- 2026-11-14T14:39 [MB.3.11] (lead) base 4cd727b; ADR-0010 §4: standalone archive must ship php with python OFF (zero libpython). This leaf unblocks the shim (MB.3.12) and the Python-free binary; 
+- 2026-11-14T14:42 [MB.3] (lead) PLAN FREEZE (2026-11-14, owner): no further ADR-driven renames/supersedes until the ADR reconciliation lands. THERE ARE NOW TWO ADR-0010 FILES: docs/decisions/A
+- 2026-11-14T14:43 [MB.3.14] (lead) created (task) Record the design-doc collision in LESSONS: one writer per design doc, incremental .part writes, dispatch order
+- 2026-11-14T14:43 [MB.3] (lead) CHECKPOINT (owner instruction 2026-11-14): when the architect finishes regenerating docs/design/backend-runtimes.md and consolidating the two ADR-0010 files, th
+- 2026-11-14T14:43 [MB.3.14] (lead) status ready -> active
+- 2026-11-14T14:43 [MB.3.14] (lead) attempt 1/3 started
+- 2026-11-14T14:43 [MB.3.14] (lead) base 4cd727b
+- 2026-11-14T14:43 [MB.15] (lead) status review -> done
+- 2026-11-14T14:44 [MB.15] (lead) commit dc05a48 (gates: plan validate OK, guard OK, make check exit 0 at 4cd727b)
+- 2026-11-14T14:52 [MB.3.14] (lead) status active -> done
+- 2026-11-14T14:52 [MB.3.14] (lead) bullet is IN HEAD (verified: git show HEAD:docs/knowledge/LESSONS.md contains it) but it landed inside dc05a48 [MB.15] -- another agent's commit swept my workin
+- 2026-11-14T14:52 [MB.3.14] (lead) status done -> ready
+- 2026-11-14T14:52 [MB.3.14] (lead) status ready -> active
+- 2026-11-14T14:52 [MB.3.14] (lead) attempt 2/3 started

@@ -2,7 +2,7 @@
 id: MB.3.6.3.3
 title: "Protected critical_fastcgi_pool suite: fd table, pgid, escapee and U1 - design MB.3.6b part 3"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.6.3.2]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

@@ -2,7 +2,7 @@
 id: MB.3.6.3.1
 title: "stage0 B1-B3 boot, parentfd argv handoff and the protected parent-fd suite - design MB.3.6b part 1"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.6.2.2]
@@ -17,7 +17,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

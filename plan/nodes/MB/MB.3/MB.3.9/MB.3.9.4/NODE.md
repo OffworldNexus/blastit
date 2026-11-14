@@ -2,7 +2,7 @@
 id: MB.3.9.4
 title: "blastit dev spawns/supervises/cleans up the php-fpm pool via the runtime provider (no listen, derived workers)"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 1
 depends_on: [MB.3.6.3, MB.3.9.3]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T13:19"
-updated: "2026-11-14T13:19"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

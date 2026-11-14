@@ -2,7 +2,7 @@
 id: MB.3.9.3
 title: "Amend design 4.8.1 + ADR-0008: dev spawns the pool via the runtime provider (discovery, cleanup, error contract)"
 kind: task
-status: ready
+status: superseded
 owner: designer
 priority: 1
 depends_on: [MB.12, MB.3.9.2]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T13:18"
-updated: "2026-11-14T13:18"
+updated: "2026-11-14T14:39"
 ---
 # Goal
 

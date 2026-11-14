@@ -1,6 +1,6 @@
 ---
 id: MB.3.6.1
-title: "Pool ctl frames, workspace deps/lock and scheduler AF_UNIX seccomp - design MB.3.6a1"
+title: "Workspace deps/lock and the external-fallback edges (no pool ctl frames)"
 kind: epic
 status: ready
 priority: 3
@@ -22,7 +22,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T03:37"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

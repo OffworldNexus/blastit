@@ -1,6 +1,6 @@
 ---
 id: MB.3.5.2
-title: "SocketProbe, boot probes and the manifest reference entry - design MB.3.5 part 2"
+title: "Entry + libphp probes, boot predicates and the manifest reference entry for [route.php]"
 kind: task
 status: ready
 owner: implementer
@@ -19,7 +19,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T14:12"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

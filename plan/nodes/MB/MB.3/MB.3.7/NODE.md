@@ -1,6 +1,6 @@
 ---
 id: MB.3.7
-title: "Prove FastCGI, the documented commands and the php2shell suite end-to-end in Docker"
+title: "Prove embedded PHP, the documented commands and the php2shell suite end-to-end (wheel + Python-free binary)"
 kind: task
 status: ready
 owner: implementer
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T03:37"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

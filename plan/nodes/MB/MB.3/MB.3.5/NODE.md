@@ -1,6 +1,6 @@
 ---
 id: MB.3.5
-title: "Parse and validate [route.fastcgi] blocks in blastit-manifest"
+title: "Parse and validate [route.php] (and the external [route.fastcgi] fallback) in blastit-manifest"
 kind: epic
 status: ready
 priority: 2
@@ -22,7 +22,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

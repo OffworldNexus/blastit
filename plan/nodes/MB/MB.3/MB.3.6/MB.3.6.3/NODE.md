@@ -2,7 +2,7 @@
 id: MB.3.6.3
 title: "stage0 no-app boot, parentfd freeze and supervise::spawn_pool single *at sequence + PoolReady - design MB.3.6b"
 kind: epic
-status: ready
+status: superseded
 priority: 3
 depends_on: [MB.3.6.2]
 paths:
@@ -20,7 +20,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T03:37"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

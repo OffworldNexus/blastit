@@ -1,6 +1,6 @@
 ---
 id: MB.3.8
-title: "Release prep 0.2.1: version bump, dated changelog, ARCHITECTURE sync"
+title: "Release prep 0.2.1: version bump, dated changelog, ARCHITECTURE sync (embedded PHP)"
 kind: task
 status: ready
 owner: implementer
@@ -21,7 +21,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

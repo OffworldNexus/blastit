@@ -2,7 +2,7 @@
 id: MB.3.6.3.2
 title: "render_pool_conf, the S0-S7/U1 spawn sequence and the fake php-fpm helper - design MB.3.6b part 2"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.6.3.1]
@@ -14,7 +14,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

@@ -1,6 +1,6 @@
 ---
 id: MB.3.6
-title: "Dispatch FastCGI routes and wire dev/check/--learn PHP attribution (split: MB.3.6.1 ctl/seccomp, MB.3.6.2 session, MB.3.6.3 pool, MB.3.6.4 check/learn)"
+title: "Dispatch [route.php] and wire dev/check/--learn PHP attribution (external FastCGI fallback kept)"
 kind: epic
 status: ready
 priority: 3
@@ -30,7 +30,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal

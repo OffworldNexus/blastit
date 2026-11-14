@@ -1,6 +1,6 @@
 ---
 id: MB.3.6.2
-title: "FastCgiUpstream: session pump, /proc/self/fd connect and conformance row - design MB.3.6a2"
+title: "FastCgiUpstream for the external fallback only: session pump, PinnedSocket connect, conformance row"
 kind: epic
 status: ready
 priority: 3
@@ -18,7 +18,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T03:37"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:39"
 ---
 
 # Goal
