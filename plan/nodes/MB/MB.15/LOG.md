@@ -11,3 +11,23 @@ Premise check: could not reproduce against a freshly built target/debug/blastit.
 ## 2026-11-14T14:00 [lead]
 
 edited fields
+
+## 2026-11-14T14:20 [lead]
+
+status ready -> active
+
+## 2026-11-14T14:20 [lead]
+
+attempt 1/3 started
+
+## 2026-11-14T14:20 [lead]
+
+base 9fab605 (after MB.14 commit)
+
+## 2026-11-14T14:32 [lead]
+
+status active -> review
+
+## 2026-11-14T14:43 [lead]
+
+status review -> done
