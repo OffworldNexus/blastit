@@ -135,12 +135,17 @@ mode = "presets"
 [[page.fence]]
 index = 2
 mode = "static"
-reason = "Deployment recipe: `OWNER_URL`/`APP_URL` name a managed cluster and a Compose stack this gate does not run, so the psql flags are checked against the installed binary; the zone is read on the direct port as `app`."
+reason = "Deployment recipe: `APP_URL` is a managed cluster's direct port or a container on a Compose network, neither of which this gate has, so the psql flags and the `SHOW TimeZone` read-back are checked against the installed binary."
 
 [[page.fence]]
 index = 3
 mode = "example"
 reason = "Measures X-Forwarded-For through a real load balancer the harness does not have; the trusted-proxy decision itself is a settings and e2e concern."
+
+[[page.fence]]
+index = 4
+mode = "static"
+reason = "The log viewers are checked against the installed docker/doctl flag tables, and the event shown is the shape docs/reference/log-events.md documents; this gate runs no live ingress to grep."
 
 [[page]]
 path = "docs/deploy/digitalocean-paas.md"

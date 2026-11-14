@@ -225,12 +225,11 @@ def index_checks(checks: Checks) -> None:
         "SHOW TimeZone" in flat and "It must print exactly `UTC`" in flat,
         "index: the session zone is read on the direct port, not guessed",
     )
+    exported = flat.find("export APP_URL=")
+    read = flat.find('psql "$APP_URL"')
     checks.that(
-        "export APP_URL=" in flat
-        and flat.index("export APP_URL=") < flat.index('psql "$APP_URL"')
-        and "export OWNER_URL=" in flat
-        and flat.index("export OWNER_URL=") < flat.index('psql "$OWNER_URL"'),
-        "index: both URLs are exported before the commands that read them",
+        0 <= exported < read,
+        "index: `APP_URL` is exported before the command that reads it",
     )
     checks.that(
         re.search(r"export APP_URL='postgresql://app:[^']*:25060/defaultdb", flat)
@@ -238,16 +237,24 @@ def index_checks(checks: Checks) -> None:
         "index: `APP_URL` is the direct port and the real database, not the pool's URI",
     )
     checks.that(
-        'psql "$APP_URL" -A -t -c' in flat and 'psql "$OWNER_URL" -A -t' not in flat,
-        "index: the zone is read as `app` on the direct port, never as the owner",
+        'psql "$APP_URL" -A -t -c' in flat
+        and flat.count('"$OWNER_URL"') == 1
+        and "ALTER ROLE app SET timezone" in flat,
+        "index: the zone is read as `app`; the only owner command is the `ALTER`",
     )
     checks.that(
         "docker compose exec db psql -U app -d shop" in flat,
         "index: the Compose read runs as `app` on the direct service",
     )
     checks.that(
-        "Two destinations" in flat,
-        "index: the app and the one-off jobs are described as two destinations",
+        "Both recipes already put the zone on the role" in flat
+        and "db/grants.sql" in flat,
+        "index: the zone is the role's, written by the recipe, not a step the reader redoes",
+    )
+    checks.that(
+        "only the app's `DATABASE_URL` names the pool" in flat
+        and "migrations and grants name the database" in flat,
+        "index: the app names the pool, migrations and grants name the database",
     )
 
 
