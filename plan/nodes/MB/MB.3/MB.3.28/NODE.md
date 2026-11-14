@@ -2,19 +2,20 @@
 id: MB.3.28
 title: "Interim fail-closed refusal: [route.php] in an unwired build exits 1 and never falls through to WSGI"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.13.1]
 paths:
   - crates/blastit/src/stage0.rs
+  - crates/blastit/src/check.rs
   - crates/blastit/tests/critical_php_backend.rs
   - crates/blastit/tests/no_python_build.rs
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T19:29"
-updated: "2026-11-14T19:29"
+updated: "2026-11-14T20:43"
 ---
 
 # Goal

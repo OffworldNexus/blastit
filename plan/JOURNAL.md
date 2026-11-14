@@ -1371,3 +1371,24 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T19:54 [MB.3.13.1] (lead) attempt 3/4 started
 - 2026-11-14T19:57 [ME] (conductor) created (milestone) Coding agent integrations: llms.txt, portable manifest skill, plugins/MCP (Claude Code, OpenCode, Codex, Junie) (0.5.x)
 - 2026-11-14T20:21 [MB.3.13.1] (lead) status ready -> done
+- 2026-11-14T20:21 [MB.3.28] (lead) status ready -> active
+- 2026-11-14T20:21 [MB.3.28] (lead) attempt 1/3 started
+- 2026-11-14T20:21 [MB.3.28] (lead) base a04ad51; .1 committed 341bf72 (loader+runtime+fork, 3 review passes, 22 defects). This guard is the interim safety: php is accepted at boot but unserved.
+- 2026-11-14T20:30 [MB.3.28] (lead) edited fields
+- 2026-11-14T20:30 [MB.3.28] (lead) PATH REPAIR by lead: added crates/blastit/src/check.rs. The guard is wired on both boot paths (run/run_dev) but blastit check calls static_app_refusal directly 
+- 2026-11-14T20:33 [MB.3.31] (planner) created (task) Purge the retired PHP transport vocabulary from live plan briefs (one-and-only-one-way invariant)
+- 2026-11-14T20:33 [MB.3.30] (lead) edited fields
+- 2026-11-14T20:33 [MB.3.30] (lead) OWNER REITERATION 2026-11-14: the guard now also covers the PLAN. No live NODE.md (status not done/superseded; LOG/RESULT are records) may contain php-fpm/PHP-F
+- 2026-11-14T20:33 [MB.3.30] (lead) edited fields
+- 2026-11-14T20:33 [MB.3.31] (lead) RECONCILIATION (owner 2026-11-14): the earlier owner-dispatched planner stood down WITHOUT touching anything (no edits, no commit). Its read-only survey is the 
+- 2026-11-14T20:33 [MB.3.31] (lead) OWNER 2026-11-14: add the HISTORICAL banner to done/superseded nodes that PRESCRIBE the retired mechanism (not every token match; MB.3.1/.2/.3/.4*/.5.1/.6.1-.6.
+- 2026-11-14T20:35 [MB.3.32] (planner) created (task) Delete the dead php-fastcgi design corpus (18 files) and repoint every reference
+- 2026-11-14T20:36 [MB.3.32] (lead) edited fields
+- 2026-11-14T20:36 [MB.3.32] (lead) OWNER 2026-11-14 'deep cleanup of this idea': scope extended from the 18 design files to every prescriptive trace. Keep exactly (1) RETIRED_ROUTE_KEYS + its tes
+- 2026-11-14T20:36 [MB.3.30] (lead) OWNER 2026-11-14: guard now also fails on crates/**/*.rs citing docs/design/php-fastcgi.md (dead-link trap). Runs in make check via docs-unit. No attack-class a
+- 2026-11-14T20:37 [MB.3.32] (lead) edited fields
+- 2026-11-14T20:37 [MB.3.32] (lead) OWNER CLARIFICATION 2026-11-14: never released, no backward compat. RETIRED_ROUTE_KEYS + its curated self-naming branch/tests are DELETED; [route.fastcgi] is an
+- 2026-11-14T20:37 [MB.3.10] (lead) edited fields
+- 2026-11-14T20:37 [MB.3.10] (lead) OWNER 2026-11-14: the docs_fences STALE row for php.md is deleted in THIS change (not kept as a compat shim) since the page is retargeted here; added crates/bla
+- 2026-11-14T20:37 [MB.3.31] (lead) OWNER clarification: also purge 'retired key/legacy/deprecated/migration' framing about PHP from live briefs (nothing was ever released). Banner text stays verb
+- 2026-11-14T20:43 [MB.3.28] (lead) status active -> done

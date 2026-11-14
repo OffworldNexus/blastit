@@ -305,10 +305,12 @@ pub(crate) fn static_app_refusal(config: &Config, manifest: &Manifest) -> Option
 /// ([`static_app_refusal`]), and a manifest whose routes do **not** all run
 /// their own executor needs a callable to forward to. The second half asks
 /// [`Manifest::can_boot_without_app`] — "every route is its own executor" —
-/// rather than "every route is static": a `[route.php]` route forks its own
-/// embedded-PHP worker, so a PHP-only manifest boots with no `app` at all
-/// (`ADR-0010` §2). `blastit check` must not take the second half — a suite
-/// brings its own `app` — so it calls [`static_app_refusal`] directly.
+/// rather than "every route is static": a `[route.php]` route is its own
+/// executor, so the *rule* demands no `app` for a PHP-only manifest
+/// (`ADR-0010` §2). Until `MB.3.13.3` wires `SpawnSpec::Php`,
+/// [`php_backend_unavailable`] refuses such a boot for the missing worker, not
+/// for the missing callable. `blastit check` must not take the second half — a
+/// suite brings its own `app` — so it calls [`static_app_refusal`] directly.
 pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), String> {
     if let Some(message) = static_app_refusal(config, manifest) {
         return Err(message);
@@ -333,9 +335,12 @@ pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), Strin
 /// An all-static manifest needs no interpreter at all and is left to
 /// [`static_app_refusal`], which keeps its `BLASTIT_APP`-on-a-static-tree
 /// sentence in both builds. So does a `[route.php]` route: it runs in a `view`
-/// worker with no interpreter anywhere near it, so a PHP-only manifest returns
-/// `None` here and boots (`MB.3.5.4`). The `python` build has nothing to refuse;
-/// the function is compiled for the tests that keep the sentences honest.
+/// worker with no interpreter anywhere near it, so this gate returns `None`
+/// for a PHP-only manifest (`MB.3.5.4`) — the separate
+/// [`php_backend_unavailable`] guard is what refuses that boot until
+/// `MB.3.13.3` wires the worker, and it must not be mistaken for this one. The
+/// `python` build has nothing to refuse; the function is compiled for the
+/// tests that keep the sentences honest.
 ///
 /// The retired external-PHP key (`MB.3.17`) needs no sentence here: the parser
 /// refuses it as an unknown key before a boot gets this far.
@@ -374,6 +379,41 @@ pub(crate) fn no_python_support(
          and the route declares no [route.static] block, so it needs a runtime this build \
          does not carry; {INSTALL}, or add a [route.static] block",
         route.name()
+    ))
+}
+
+/// `MB.3.28` interim: a `[route.php]` route is refused at boot until the
+/// composition root can spawn an embedded-PHP worker (`MB.3.13.3`).
+///
+/// The embedded-PHP fork path and `PhpEmbedRuntime` exist (`MB.3.13.1`), but
+/// `Ctl::Spawn` has no PHP arm yet: a boot that accepted
+/// this manifest would either fail the first spawn and take the container down
+/// (the standalone build) or fork a **WSGI** worker for a PHP route (the wheel
+/// build). A manifest that looks like PHP support and silently runs the wrong
+/// runtime is worse than a refusal, so stage 0 refuses it **here, before a
+/// listener is bound or anything is forked**, naming the route and its
+/// `entry`. The sentence is a build/wiring fact, not a missing package: it
+/// deliberately does **not** send the operator to `apt install libphp` (that
+/// sentence belongs to `MB.3.13.2`, for a host that wires PHP but has no
+/// usable library). `ADR-0010` §1 gives PHP exactly one backend, so the
+/// sentence names no alternative either: naming one would read as a recipe.
+/// It stops at the route, its `entry`, and the missing wiring.
+///
+/// **Interim.** `MB.3.13.3` wires `SpawnSpec::Php`, deletes this function and
+/// its three call sites (`stage0::run`, `stage0::run_dev`, and `check`'s
+/// `execute`), and rewrites `tests/critical_php_backend.rs` to prove a
+/// PHP route boots and serves `200` over `view.chan` (authorized with
+/// `critical_guard --node MB.3.13.3`). Do not keep the guard past that wiring.
+pub(crate) fn php_backend_unavailable(manifest: &Manifest) -> Option<String> {
+    let (route, php) = manifest
+        .routes()
+        .iter()
+        .find_map(|route| route.php().map(|php| (route, php)))?;
+    Some(format!(
+        "route {:?}: the embedded PHP backend is not available in this build \
+         ([route.php] entry {:?}); the per-route worker wiring lands in MB.3.13.3",
+        route.name(),
+        php.entry
     ))
 }
 
@@ -629,6 +669,13 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     if let Some(message) = no_python_support(&config, &manifest, false) {
         fail(&emitter, &message);
     }
+    // `MB.3.28`: a `[route.php]` route has no worker to spawn yet, so the boot
+    // is refused before a listener is bound — ahead of `app_rule`, whose
+    // "set BLASTIT_APP" advice cannot make a PHP route serve. Delete this call
+    // with the function when `MB.3.13.3` wires `SpawnSpec::Php`.
+    if let Some(message) = php_backend_unavailable(&manifest) {
+        fail(&emitter, &message);
+    }
     if let Err(message) = app_rule(&config, &manifest) {
         fail(&emitter, &message);
     }
@@ -877,6 +924,12 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
     // work there.
     #[cfg(not(feature = "python"))]
     if let Some(message) = no_python_support(&config, &manifest, options.learn) {
+        dev_fail(&message);
+    }
+    // `MB.3.28`: same refusal one boot path over — a PHP route is not served
+    // in this build, and `Ctl::Spawn` would fork a WSGI view for it. Delete
+    // this call with the function when `MB.3.13.3` wires `SpawnSpec::Php`.
+    if let Some(message) = php_backend_unavailable(&manifest) {
         dev_fail(&message);
     }
     if let Err(message) = app_rule(&config, &manifest) {
@@ -2315,9 +2368,11 @@ entry = \"public/index.php\"
         );
     }
 
-    /// A PHP route runs in a `view` worker with no interpreter, so this build
-    /// (`--no-default-features --features php`) can serve it and must say
-    /// nothing about installing Python (`MB.3.5.4`).
+    /// A PHP route runs in a `view` worker with no interpreter, so **this**
+    /// gate and the python-less build must say nothing about installing
+    /// Python (`MB.3.5.4`). The boot itself is refused by
+    /// [`php_backend_unavailable`] until `MB.3.13.3` wires the worker — a
+    /// different gate, with a different sentence.
     ///
     /// The denied twin in the same test is the manifest that *is* WSGI-shaped:
     /// a route with no `[route.static]` and no `[route.php]` keeps the gate's
@@ -2342,6 +2397,119 @@ entry = \"public/index.php\"
     }
 }
 
+/// `MB.3.28`: the interim refusal a `[route.php]` route gets until the
+/// composition root spawns an embedded-PHP worker (`MB.3.13.3`).
+///
+/// The allowed twin matters as much as the refusal: a static-only manifest and
+/// a WSGI-shaped manifest have their own sentences, and this gate must not
+/// answer for them.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod php_backend_gate {
+    use super::*;
+
+    /// The page's shape: files from disk, the rest to the front controller.
+    const STATIC_AND_PHP: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.static]
+root = \"public\"
+
+[route.php]
+entry = \"public/index.php\"
+";
+
+    /// Two PHP routes: the gate names the **first** one, so the sentence is
+    /// actionable and stable.
+    const TWO_PHP_ROUTES: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.php]
+entry = \"public/index.php\"
+
+[[route]]
+name = \"api\"
+path = ['/api/.*']
+
+[route.php]
+entry = \"api/index.php\"
+";
+
+    const STATIC_ONLY: &str = "\
+version = 1
+
+[[route]]
+name = \"docs\"
+path = ['.*']
+
+[route.static]
+root = \"site\"
+";
+
+    const WITH_A_VIEW: &str = "\
+version = 1
+
+[[route]]
+name = \"web\"
+path = ['.*']
+";
+
+    fn manifest(source: &str) -> Manifest {
+        let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        manifest
+    }
+
+    #[test]
+    fn a_php_route_is_refused_naming_its_entry_and_the_missing_wiring() {
+        for source in [STATIC_AND_PHP, TWO_PHP_ROUTES] {
+            let message = php_backend_unavailable(&manifest(source)).expect("a PHP route");
+            assert!(message.contains("route \"app\""), "{message}");
+            assert!(
+                message.contains("[route.php] entry \"public/index.php\""),
+                "{message}"
+            );
+            assert!(
+                message.contains("embedded PHP backend is not available in this build"),
+                "{message}"
+            );
+            assert!(message.contains("MB.3.13.3"), "the wiring: {message}");
+            // One PHP backend, one sentence: naming an alternative — even to
+            // deny it — would hand an agent a fallback recipe (`ADR-0010` §1).
+            let lower = message.to_ascii_lowercase();
+            for banned in [
+                "php-fpm",
+                "fastcgi",
+                "route.fastcgi",
+                "wsgi",
+                "meanwhile",
+                "libphp",
+            ] {
+                assert!(
+                    !lower.contains(banned),
+                    "the sentence names a fallback recipe ({banned}): {message}"
+                );
+            }
+            // The second route is never the one named.
+            assert!(!message.contains("api/index.php"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_manifest_without_a_php_route_is_left_to_the_other_gates() {
+        for source in [STATIC_ONLY, WITH_A_VIEW] {
+            assert_eq!(php_backend_unavailable(&manifest(source)), None, "{source}");
+        }
+    }
+}
+
 /// `R13` after `ADR-0010` §2: a `[route.php]` route is its own executor, so the
 /// app rule must never demand the WSGI callable for it (`MB.3.5.4`).
 ///
@@ -2355,7 +2523,9 @@ entry = \"public/index.php\"
 mod app_rule_executors {
     use super::*;
 
-    /// A PHP route with no app: the manifest `blastit dev` must boot.
+    /// A PHP route with no app: the app rule must not demand the callable.
+    /// (The boot is refused by [`php_backend_unavailable`] until `MB.3.13.3`
+    /// wires the worker; that is a different gate and a different sentence.)
     const PHP_ONLY: &str = "\
 version = 1
 
@@ -2416,10 +2586,10 @@ path = ['/api/.*']
         manifest
     }
 
-    /// Every own-executor shape boots with no `app`: PHP only, and the page's
+    /// Every own-executor shape needs no `app`: PHP only, and the page's
     /// static-plus-PHP route.
     #[test]
-    fn a_php_manifest_boots_without_an_app() {
+    fn a_php_manifest_needs_no_app() {
         for source in [PHP_ONLY, STATIC_AND_PHP] {
             assert_eq!(
                 app_rule(&Config::default(), &manifest(source)),

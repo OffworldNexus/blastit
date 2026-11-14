@@ -63,7 +63,7 @@ use crate::audit_v1::{self, CheckObsV1, ObsError, Report};
 use crate::cli::CheckOptions;
 use crate::config::Config;
 use crate::host::{Host, Install};
-use crate::stage0::{static_app_refusal, static_root_permission};
+use crate::stage0::{php_backend_unavailable, static_app_refusal, static_root_permission};
 
 /// The process exited cleanly: pytest passed and no finding fails the run.
 const CLEAN: u8 = 0;
@@ -142,6 +142,15 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     // brings its own WSGI callable — so this half of the boot's rule is the
     // only one it applies.
     if let Some(message) = static_app_refusal(&config, &manifest) {
+        return Err(message);
+    }
+    // `MB.3.28`: the same interim refusal as the boot's (`stage0::run`,
+    // `stage0::run_dev`). `check` must not hand pytest a manifest it would
+    // then exercise as if the PHP route were served: this build has no worker
+    // to spawn, so the audit would mis-route exactly as a boot would. A
+    // configuration error is exit `2` with nothing on stdout; delete this
+    // block with the function when `MB.3.13.3` wires `SpawnSpec::Php`.
+    if let Some(message) = php_backend_unavailable(&manifest) {
         return Err(message);
     }
     manifest

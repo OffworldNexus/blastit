@@ -19,6 +19,11 @@
 //! still refuse it at exit `1`, but the sentence is now the **parser's** — the
 //! key stops existing, so the manifest is refused as an unknown key that names
 //! it, before the capability gate is consulted at all.
+//!
+//! The `[route.php]` case (`MB.3.28`) is the third: the capability gate must
+//! stay silent (a PHP route needs no interpreter), but the boot is refused by
+//! the separate interim guard that names the missing worker wiring — not by
+//! `app_rule`, and not by installing Python.
 #![cfg(not(feature = "python"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -52,9 +57,10 @@ entry = \"public/index.php\"
 ";
 
 /// One `[route.php]` route and no app: an embedded-PHP route is its own
-/// executor (`ADR-0010` §2), so this build carries everything it needs and the
-/// capability gate must not fire. The fixture became expressible in
-/// `MB.3.5.4`, which is exactly why the refusal it used to get went unnoticed.
+/// executor (`ADR-0010` §2), so **this** gate must not fire. The boot itself is
+/// refused by stage 0's separate interim guard (`MB.3.28`) until `MB.3.13.3`
+/// wires `SpawnSpec::Php`; `dev` therefore says the PHP sentence, never the
+/// capability gate's.
 const PHP_ONLY: &str = "\
 version = 1
 
@@ -72,6 +78,11 @@ const CAPABILITY_GATE: &str = "this build has no Python support (built without f
 
 /// The sentence that names the artifact which *can* serve a WSGI manifest.
 const INSTALL: &str = "install the Python package: uv add blastit";
+
+/// `MB.3.28`'s interim refusal: `[route.php]` has no worker in this build yet
+/// (`MB.3.13.3` wires it), so the boot fails closed rather than reaching
+/// `Ctl::Spawn`.
+const PHP_GATE: &str = "embedded PHP backend is not available in this build";
 
 /// `app_rule`'s pre-existing refusal, which the capability gate must get in
 /// front of: on this build "set `BLASTIT_APP`" is not a fix.
@@ -182,36 +193,35 @@ fn a_manifest_asking_for_the_retired_external_php_pool_is_refused_by_name() {
     );
 }
 
-/// A PHP-only manifest is **not** a WSGI manifest: this build serves it, so the
-/// capability gate must not fire and nothing may suggest installing Python
-/// (`MB.3.5.4`, `ADR-0010` §2).
+/// A PHP-only manifest is **not** a WSGI manifest: the capability gate must not
+/// fire and nothing may suggest installing Python (`MB.3.5.4`, `ADR-0010` §2).
 ///
-/// The boot still fails here, and for a reason this file controls: the test
-/// holds the port open, so a boot that got past both gates cannot bind it. That
-/// is the point — what is asserted is *which* sentence was **not** printed, so a
-/// gate that came back fails instead of passing on an exit code every path
-/// happens to return. The WSGI case above stays the denied twin: same harness,
-/// same held port, gate's sentence.
+/// The boot is still refused, now by `MB.3.28`'s interim stage-0 guard: this
+/// build has no PHP worker to spawn, so refusing before a listener beats
+/// reaching `Ctl::Spawn` and taking the container down. What is asserted is
+/// *which* sentence was printed and which was not — a capability gate that came
+/// back would name the wrong artifact, and `app_rule` would send a PHP
+/// developer to set `BLASTIT_APP`. The WSGI case above stays the denied twin:
+/// same harness, same held port, capability gate's sentence.
 #[test]
-fn a_php_only_manifest_is_not_refused_by_the_capability_gate() {
+fn a_php_only_manifest_is_refused_by_the_interim_php_gate() {
     let scratch = Scratch::new("php", PHP_ONLY);
     let (code, stdout, stderr) = dev(&scratch.dir);
+    assert_eq!(code, Some(1), "stdout={stdout:?} stderr={stderr:?}");
     assert_eq!(
-        code,
-        Some(1),
-        "the held port is what refuses this boot: stdout={stdout:?} stderr={stderr:?}"
+        stdout, "",
+        "a startup error writes nothing on stdout (§1.1)"
     );
-    // Unlike the two refusals above, this boot gets **past** the banner: the
-    // route is counted (`1 route`) and the failure is the bind, so the events
-    // land on stdout. That is the proof the gates let it through.
+    assert!(stderr.contains("route \"app\""), "{stderr}");
     assert!(
-        stdout.contains("1 route"),
-        "the boot reached its banner with the PHP route counted: {stdout}"
+        stderr.contains("[route.php] entry \"public/index.php\""),
+        "{stderr}"
     );
+    assert!(stderr.contains(PHP_GATE), "{stderr}");
     let all = format!("{stdout}{stderr}");
     assert!(
         !all.contains(CAPABILITY_GATE),
-        "a PHP route needs no interpreter, so the gate must not fire: {all}"
+        "a PHP route needs no interpreter, so the capability gate must not fire: {all}"
     );
     assert!(
         !all.contains(INSTALL),
