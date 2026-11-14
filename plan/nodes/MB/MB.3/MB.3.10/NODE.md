@@ -14,12 +14,13 @@ paths:
   - docs/reference/settings.md
   - zensical.toml
   - python/tests/runnable_docs/inventory.toml
+  - "crates/blastit-manifest/tests/docs_fences.rs"
   - "docs/design/php-dev-local.review-*.md"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:39"
-updated: "2026-11-14T19:49"
+updated: "2026-11-14T20:37"
 ---
 
 # Goal

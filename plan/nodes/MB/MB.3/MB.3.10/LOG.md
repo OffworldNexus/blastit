@@ -15,3 +15,11 @@ edited fields
 ## 2026-11-14T19:49 [lead]
 
 RETARGETED by lead to the owner's 2026-11-14 directive: PHP is supported (embedded libphp) and php-fpm/FastCGI/[route.fastcgi] must disappear from what blastit does. Removed the stale 'short documented external [route.fastcgi] fallback' from the Goal and the acceptance (it contradicted the Context's own 'no fallback' note), added docs/frameworks/static-and-spa.md (line 129 'the FastCGI worker' -> embedded PHP worker), and made the acceptance a ZERO-hit grep on php-fpm/php_fpm/FastCGI/route.fastcgi across php.md+index.md+static-and-spa.md+zensical.toml. settings.md stays MB.3.13.2's row (one owner); php.md links without the #backends anchor if it would be empty. The durable guard is MB.3.30.
+
+## 2026-11-14T20:37 [lead]
+
+edited fields
+
+## 2026-11-14T20:37 [lead]
+
+OWNER 2026-11-14: the docs_fences STALE row for php.md is deleted in THIS change (not kept as a compat shim) since the page is retargeted here; added crates/blastit-manifest/tests/docs_fences.rs. MB.3.20 no longer owns that row.
