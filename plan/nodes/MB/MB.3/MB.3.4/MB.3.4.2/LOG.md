@@ -47,3 +47,7 @@ status ready -> review
 ## 2026-11-14T12:31 [lead]
 
 status review -> done
+
+## 2026-11-14T12:31 [lead]
+
+committed 0f441af; two accepted MINORs recorded for the epic gate: (a) the 65 535 total-byte cap is only driven through build via the pair cap, so add an 8x8192-value build case, (b) resolve() returns an over-long CONTENT_TYPE while build drops it.

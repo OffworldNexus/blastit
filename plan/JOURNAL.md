@@ -1020,3 +1020,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T12:14 [MB.3.4.2] (lead) status review -> ready
 - 2026-11-14T12:23 [MB.3.4.2] (lead) status ready -> review
 - 2026-11-14T12:31 [MB.3.4.2] (lead) status review -> done
+- 2026-11-14T12:31 [MB.3.4.2] (lead) committed 0f441af; two accepted MINORs recorded for the epic gate: (a) the 65 535 total-byte cap is only driven through build via the pair cap, so add an 8x8192
+- 2026-11-14T12:36 [MB.3.4.3] (test-curator) created (task) Harden the protected lockdown suite: SCRIPT_NAME query, total-byte cap via build, Params Debug, hop-by-hop names, Error/LockdownError Display
+- 2026-11-14T12:36 [MB.3.4.4] (test-curator) created (task) Harden the CGI head parser: reject a ':' in Status, pin the field-less head, protected codec suite for the proxy-control names
+- 2026-11-14T12:36 [MB.3.4.5] (test-curator) created (task) Apply the 8192-byte value rule inside lockdown::resolve so no public function returns an over-long CONTENT_TYPE
+- 2026-11-14T12:41 [MB.3.4] (lead) gate audit (docs/testing/AUDIT-MB.3.4.md): 66 tests, critical 25, fluff 0, mutants 97.3% killed (321/330); 3 gap children filed (MB.3.4.3 lockdown suite, MB.3.4
