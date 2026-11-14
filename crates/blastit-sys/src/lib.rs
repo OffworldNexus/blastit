@@ -138,8 +138,8 @@ mod sock;
 pub mod caps;
 pub mod mem;
 
-#[cfg(test)]
-mod testutil;
+#[cfg(any(test, feature = "testutil"))]
+pub mod testutil;
 
 pub use crate::caps::{CapSet, Capabilities, Capability, Held, PrivilegeMode};
 pub use crate::error::Error;

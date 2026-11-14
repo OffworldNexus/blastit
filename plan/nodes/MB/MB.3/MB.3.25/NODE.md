@@ -2,7 +2,7 @@
 id: MB.3.25
 title: "SeccompRole::{View, EmbeddedView} and feature = testutil without widening View"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.3.23]
@@ -12,11 +12,11 @@ paths:
   - "crates/blastit-sys/Cargo.toml"
   - "crates/blastit/src/**"
   - crates/blastit/Cargo.toml
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T17:04"
-updated: "2026-11-14T18:31"
+updated: "2026-11-14T19:02"
 ---
 
 # Goal

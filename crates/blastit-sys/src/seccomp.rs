@@ -20,8 +20,9 @@
 //!   written in, so there is nothing to compare it against. Nothing legitimate
 //!   reaches either branch.
 //! * **The filter is a refusal list of numbers, not of names.** `socket` and
-//!   `socketpair` are the only syscalls whose arguments matter: `args[0]` is
-//!   the address family, and the family is what allows egress (§7.3).
+//!   `socketpair` are the syscalls whose *address family* matters, and `clone`
+//!   is the one whose *flags* matter: `args[0]` is the address family for the
+//!   first two and the `CLONE_*` flags for the last (§7.3).
 //!
 //! The filter cannot be removed once installed, and it applies to every thread
 //! that exists when it is installed as well as every thread created later, so
@@ -41,6 +42,19 @@ pub enum SeccompRole {
         /// Whether the route may create `AF_INET` and `AF_INET6` sockets.
         egress: bool,
     },
+    /// A PHP view process (ADR-0010 §1). It has every [`SeccompRole::View`]
+    /// rule, and it also may not create a process or a new program image.
+    ///
+    /// NTS `libphp` serves one request per OS process, and a route's workers
+    /// are forked **before** this filter goes on, so a request that reaches
+    /// `execve`, `execveat`, `fork`, `vfork` or a process-creating `clone`
+    /// is trying to escape the process-wide CPU charge rather than to serve
+    /// the request (§7.3, `R14`). Threads stay allowed: PHP extensions and
+    /// glibc itself start them.
+    EmbeddedView {
+        /// Whether the route may create `AF_INET` and `AF_INET6` sockets.
+        egress: bool,
+    },
     /// The HTTP front end (§2.3): it parses bytes on inherited descriptors and
     /// must not be able to open a socket of its own.
     Http,
@@ -56,6 +70,7 @@ impl SeccompRole {
     pub const fn name(self) -> &'static str {
         match self {
             Self::View { .. } => "view",
+            Self::EmbeddedView { .. } => "embedded-view",
             Self::Http => "http",
             Self::Scheduler => "scheduler",
             Self::DbProxy => "dbproxy",
@@ -68,7 +83,7 @@ impl SeccompRole {
     /// job is to reach the upstream database (§2.2).
     pub const fn egress(self) -> bool {
         match self {
-            Self::View { egress } => egress,
+            Self::View { egress } | Self::EmbeddedView { egress } => egress,
             Self::DbProxy => true,
             Self::Http | Self::Scheduler => false,
         }
@@ -77,6 +92,14 @@ impl SeccompRole {
     /// Whether this role may create sockets at all.
     pub const fn sockets(self) -> bool {
         !matches!(self, Self::Http | Self::Scheduler)
+    }
+
+    /// Whether this role refuses to create a process or a new program image.
+    ///
+    /// Only [`SeccompRole::EmbeddedView`] does; its workers were forked before
+    /// the filter went on, so nothing legitimate in a request creates one.
+    const fn embedded(self) -> bool {
+        matches!(self, Self::EmbeddedView { .. })
     }
 }
 
@@ -92,12 +115,30 @@ impl SeccompRole {
 /// process reads or writes another's memory, loads code into the kernel, or
 /// reaches for namespaces and mounts; none of them is part of serving a request.
 ///
-/// What each role additionally refuses:
+/// What every role additionally refuses:
+///
+/// * `clone3` fails with `ENOSYS` — the one refusal that is not `EPERM`:
+///   glibc's `pthread_create` tries `clone3` first and must fall back to
+///   `clone`, which is still allowed.
+/// * `clone` fails with `EPERM` when `args[0]` sets any `CLONE_NEW*` flag
+///   (including `CLONE_NEWTIME`): a process may not reach for a namespace.
+/// * `setsid` and `setpgid` fail with `EPERM`: a worker cannot leave init's
+///   supervision by starting a new session or process group — init signals it
+///   by pid and by process-group id. A view's own `setpgid(0, 0)` happens in
+///   child setup *before* this filter is installed, so the call being refused
+///   is never the legitimate one.
+///
+/// [`SeccompRole::EmbeddedView`] additionally refuses process creation and a
+/// new program image — `execve`, `execveat`, `fork`, `vfork` and `clone`
+/// without `CLONE_THREAD` all fail with `EPERM`; a thread-creating `clone`
+/// stays allowed. [`SeccompRole::View`] keeps all of them.
 ///
 /// | Role | `socket()` | `socketpair()` |
 /// |---|---|---|
 /// | view, no egress | every family but `AF_UNIX` | `AF_UNIX` only |
 /// | view, egress | every family but `AF_UNIX`, `AF_INET`, `AF_INET6` | `AF_UNIX` only |
+/// | embedded view, no egress | every family but `AF_UNIX` | `AF_UNIX` only |
+/// | embedded view, egress | every family but `AF_UNIX`, `AF_INET`, `AF_INET6` | `AF_UNIX` only |
 /// | http, scheduler | every `socket()` | `AF_UNIX` only |
 /// | dbproxy | every family but `AF_UNIX`, `AF_INET`, `AF_INET6` | `AF_UNIX` only |
 ///
@@ -245,6 +286,25 @@ const DENIED: &[(&str, libc::c_long)] = &[
     ("open_by_handle_at", libc::SYS_open_by_handle_at),
 ];
 
+/// The extra syscalls [`SeccompRole::EmbeddedView`] refuses beyond
+/// [`DENIED`], with each name for documentation.
+///
+/// `fork` and `vfork` have no syscall number on an architecture whose table
+/// does not define one (`aarch64`): there glibc's `fork`/`vfork` compile to
+/// `clone`, which the role's `CLONE_THREAD` check already refuses.
+#[cfg(target_arch = "x86_64")]
+const EMBEDDED_DENIED: &[(&str, libc::c_long)] = &[
+    ("execve", libc::SYS_execve),
+    ("execveat", libc::SYS_execveat),
+    ("fork", libc::SYS_fork),
+    ("vfork", libc::SYS_vfork),
+];
+#[cfg(not(target_arch = "x86_64"))]
+const EMBEDDED_DENIED: &[(&str, libc::c_long)] = &[
+    ("execve", libc::SYS_execve),
+    ("execveat", libc::SYS_execveat),
+];
+
 /// The offsets of the fields this filter reads, inside `struct seccomp_data`.
 ///
 /// ```text
@@ -259,7 +319,8 @@ mod data {
     pub const NR: u32 = 0;
     /// The architecture the syscall was made from.
     pub const ARCH: u32 = 4;
-    /// `args[0]`, the address family of `socket`/`socketpair`.
+    /// `args[0]`: the address family of `socket`/`socketpair`, or the
+    /// `CLONE_*` flags of `clone`.
     pub const ARG0: u32 = 16;
 }
 
@@ -274,12 +335,31 @@ const JA: u16 = (libc::BPF_JMP | libc::BPF_JA) as u16;
 /// `BPF_RET | BPF_K`: return the action in `k`.
 const RET: u16 = (libc::BPF_RET | libc::BPF_K) as u16;
 
-/// The longest program [`program`] builds, in instructions.
+/// The longest program [`build`] builds, in instructions.
 ///
 /// `install` runs in a freshly forked child, where allocating is not safe, so
-/// the program lives on the stack; the current worst case is 54 instructions
-/// (`View { egress: true }`) and there is room for the list to grow.
+/// the program lives on the stack; the current worst case is **66**
+/// instructions (`EmbeddedView { egress: true }` on `x86_64`, 63 on
+/// `aarch64`) and there is room for the list to grow.
 const MAX_PROGRAM: usize = 96;
+
+/// `CLONE_NEW*` in `clone`'s `flags`: every flag that creates a namespace.
+///
+/// `CLONE_NEWTIME` (`0x80`), `CLONE_NEWNS` (`0x0002_0000`), `CLONE_NEWCGROUP`
+/// (`0x0200_0000`), `CLONE_NEWUTS` (`0x0400_0000`), `CLONE_NEWIPC`
+/// (`0x0800_0000`), `CLONE_NEWUSER` (`0x1000_0000`), `CLONE_NEWPID`
+/// (`0x2000_0000`) and `CLONE_NEWNET` (`0x4000_0000`).
+const CLONE_NEW_MASK: u32 = 0x7E02_0080;
+
+/// `CLONE_THREAD`: the child is a thread in this process, not a new process.
+const CLONE_THREAD: u32 = 0x0001_0000;
+
+/// `SECCOMP_RET_ERRNO | ENOSYS`: "this kernel does not have that syscall".
+///
+/// libc's `pthread_create` probes `clone3` and falls back to `clone` on
+/// `ENOSYS`, which is the only reason [`SeccompRole`] refuses it that way
+/// instead of with `EPERM`.
+const RET_ENOSYS: u32 = libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32;
 
 /// Where a branch goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -304,6 +384,10 @@ enum Label {
     Allow,
     /// `SECCOMP_RET_ERRNO(EPERM)`.
     Deny,
+    /// `SECCOMP_RET_ERRNO(ENOSYS)`.
+    Enosys,
+    /// The `clone()` checks on `args[0]`.
+    Clone,
     /// `SECCOMP_RET_KILL_PROCESS`.
     Kill,
 }
@@ -459,8 +543,9 @@ fn labelled(label: Label, step: Step) -> Step {
 /// Builds the filter for `role`, in the order the kernel walks it.
 ///
 /// The shape is: check the architecture, then the syscall number against the
-/// refusal list, then the address family for the two socket calls, and finally
-/// the shared actions. Every branch is forward, which is all classic BPF has.
+/// refusal list, then the address family of the two socket calls and the flags
+/// of `clone`, and finally the shared actions. Every branch is forward, which
+/// is all classic BPF has.
 fn build(role: SeccompRole, program: &mut Program) -> io::Result<()> {
     build_for(role, AUDIT_ARCH, program)
 }
@@ -503,6 +588,19 @@ fn build_for(role: SeccompRole, arch: u32, program: &mut Program) -> io::Result<
         ))?;
     }
 
+    // `EmbeddedView` adds its own refusals on top of the shared list; `View`
+    // never sees one of these numbers, so it cannot widen by accident.
+    if role.embedded() {
+        for (_name, number) in EMBEDDED_DENIED {
+            program.push(compare(
+                JEQ,
+                *number as u32,
+                Target::Label(Label::Deny),
+                Target::Next,
+            ))?;
+        }
+    }
+
     // `socket()` is the only way to reach the network, and the role decides
     // whether there is one at all.
     let socket = if role.sockets() {
@@ -515,6 +613,34 @@ fn build_for(role: SeccompRole, arch: u32, program: &mut Program) -> io::Result<
         JEQ,
         libc::SYS_socketpair as u32,
         Target::Label(Label::SocketPair),
+        Target::Next,
+    ))?;
+
+    // `clone3` is answered with `ENOSYS` so glibc's `pthread_create` falls
+    // back to `clone`; `clone`, `setsid` and `setpgid` fail with `EPERM` for
+    // every view (§7.3, `R14`).
+    program.push(compare(
+        JEQ,
+        libc::SYS_clone3 as u32,
+        Target::Label(Label::Enosys),
+        Target::Next,
+    ))?;
+    program.push(compare(
+        JEQ,
+        libc::SYS_clone as u32,
+        Target::Label(Label::Clone),
+        Target::Next,
+    ))?;
+    program.push(compare(
+        JEQ,
+        libc::SYS_setsid as u32,
+        Target::Label(Label::Deny),
+        Target::Next,
+    ))?;
+    program.push(compare(
+        JEQ,
+        libc::SYS_setpgid as u32,
+        Target::Label(Label::Deny),
         Target::Next,
     ))?;
     // Anything else is allowed: the default action of the filter.
@@ -552,6 +678,31 @@ fn build_for(role: SeccompRole, arch: u32, program: &mut Program) -> io::Result<
     ))?;
     program.push(branch(Target::Label(Label::Deny)))?;
 
+    // `clone` may create a thread; it may not reach for a namespace. A role
+    // that may not create a process must also see `CLONE_THREAD`, so the one
+    // `clone` shape it keeps is a thread.
+    program.push(labelled(Label::Clone, load(data::ARG0)))?;
+    let after_namespace = if role.embedded() {
+        Target::Next
+    } else {
+        Target::Label(Label::Allow)
+    };
+    program.push(compare(
+        JSET,
+        CLONE_NEW_MASK,
+        Target::Label(Label::Deny),
+        after_namespace,
+    ))?;
+    if role.embedded() {
+        program.push(compare(
+            JSET,
+            CLONE_THREAD,
+            Target::Label(Label::Allow),
+            Target::Label(Label::Deny),
+        ))?;
+    }
+
+    program.push(labelled(Label::Enosys, action(RET_ENOSYS)))?;
     program.push(labelled(Label::Allow, action(libc::SECCOMP_RET_ALLOW)))?;
     program.push(labelled(
         Label::Deny,
@@ -596,9 +747,23 @@ mod tests {
     const ROLES: &[SeccompRole] = &[
         SeccompRole::View { egress: false },
         SeccompRole::View { egress: true },
+        SeccompRole::EmbeddedView { egress: false },
+        SeccompRole::EmbeddedView { egress: true },
         SeccompRole::Http,
         SeccompRole::Scheduler,
         SeccompRole::DbProxy,
+    ];
+
+    /// The eight `CLONE_NEW*` flags, as `clone(2)` reads them in `args[0]`.
+    const CLONE_NEW_FLAGS: [libc::c_ulong; 8] = [
+        0x0000_0080, // CLONE_NEWTIME
+        0x0002_0000, // CLONE_NEWNS
+        0x0200_0000, // CLONE_NEWCGROUP
+        0x0400_0000, // CLONE_NEWUTS
+        0x0800_0000, // CLONE_NEWIPC
+        0x1000_0000, // CLONE_NEWUSER
+        0x2000_0000, // CLONE_NEWPID
+        0x4000_0000, // CLONE_NEWNET
     ];
 
     /// `socket(domain, SOCK_STREAM, 0)`, closing what it created.
@@ -650,6 +815,184 @@ mod tests {
         }
     }
 
+    /// The `errno` of the last failed call.
+    fn errno() -> Option<i32> {
+        io::Error::last_os_error().raw_os_error()
+    }
+
+    /// Reap a child this test created, and return `None` ("the call was
+    /// permitted"); a `waitpid` that fails for any other reason is `EINVAL`,
+    /// which no test accepts.
+    fn reap(pid: libc::pid_t) -> Option<i32> {
+        let mut status = 0;
+        loop {
+            // SAFETY: `waitpid` writes one status word into the valid storage
+            // `status`; only this process's own child is waited for.
+            let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+            if waited == pid {
+                return None;
+            }
+            if errno() != Some(libc::EINTR) {
+                return Some(libc::EINVAL);
+            }
+        }
+    }
+
+    /// `clone(flags, NULL, NULL, NULL, 0)`.
+    ///
+    /// Returns the refusal's `errno`, or `None` when a process child was
+    /// created — the child `_exit`s immediately and the parent reaps it.
+    fn try_clone(flags: libc::c_ulong) -> Option<i32> {
+        // SAFETY: the five arguments are the flags, three optionally-null
+        // pointer arguments and the TLS value; without `CLONE_VM` the null
+        // stack makes this a process fork, which is what the child body
+        // (one `_exit`) is safe for.
+        let pid = unsafe {
+            libc::syscall(
+                libc::SYS_clone,
+                flags,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+                0 as libc::c_ulong,
+            )
+        };
+        if pid == -1 {
+            return errno();
+        }
+        if pid == 0 {
+            // SAFETY: this is the new process; `_exit` never returns and runs
+            // no destructors.
+            unsafe { libc::_exit(0) }
+        }
+        reap(pid as libc::pid_t)
+    }
+
+    /// `clone3(NULL, 0)`: `EFAULT` on a kernel without the filter, `ENOSYS`
+    /// once the filter answers it.
+    fn try_clone3() -> Option<i32> {
+        // SAFETY: `clone3` takes the `args` pointer and its size; a null
+        // pointer is rejected by the kernel with `EFAULT` before it is read.
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_clone3,
+                std::ptr::null_mut::<libc::c_void>(),
+                0_usize,
+            )
+        };
+        if ret == -1 { errno() } else { None }
+    }
+
+    /// `fork(2)`, on the architecture whose syscall table has it.
+    #[cfg(target_arch = "x86_64")]
+    fn try_fork() -> Option<i32> {
+        // SAFETY: `fork` takes no arguments; the child only `_exit`s.
+        let pid = unsafe { libc::syscall(libc::SYS_fork) };
+        if pid == -1 {
+            return errno();
+        }
+        if pid == 0 {
+            // SAFETY: this is the new process; `_exit` never returns.
+            unsafe { libc::_exit(0) }
+        }
+        reap(pid as libc::pid_t)
+    }
+
+    /// `vfork(2)`, on the architecture whose syscall table has it.
+    ///
+    /// Only ever called against `EmbeddedView`, where the filter refuses it
+    /// before a child exists: a real `vfork` child shares this stack.
+    #[cfg(target_arch = "x86_64")]
+    fn try_vfork() -> Option<i32> {
+        // SAFETY: `vfork` takes no arguments. The child body is one `_exit`.
+        let pid = unsafe { libc::syscall(libc::SYS_vfork) };
+        if pid == -1 {
+            return errno();
+        }
+        if pid == 0 {
+            // SAFETY: this is the new process; `_exit` never returns.
+            unsafe { libc::_exit(0) }
+        }
+        reap(pid as libc::pid_t)
+    }
+
+    /// `execve("/nonexistent", ...)`: `ENOENT` when permitted, `EPERM` when
+    /// the role refuses it.
+    fn try_execve() -> Option<i32> {
+        let path = b"/nonexistent-blastit-seccomp\0";
+        let argv = [std::ptr::null::<libc::c_char>()];
+        let envp = [std::ptr::null::<libc::c_char>()];
+        // SAFETY: `path` is NUL-terminated and both arrays are
+        // NULL-terminated; a missing file is `ENOENT` before any image runs.
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_execve,
+                path.as_ptr().cast::<libc::c_char>(),
+                argv.as_ptr(),
+                envp.as_ptr(),
+            )
+        };
+        if ret == -1 { errno() } else { None }
+    }
+
+    /// `execveat(AT_FDCWD, "/nonexistent", ...)`.
+    fn try_execveat() -> Option<i32> {
+        let path = b"/nonexistent-blastit-seccomp\0";
+        let argv = [std::ptr::null::<libc::c_char>()];
+        let envp = [std::ptr::null::<libc::c_char>()];
+        // SAFETY: the same NUL- and NULL-terminated arguments as `try_execve`,
+        // resolved from the current directory.
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_execveat,
+                libc::AT_FDCWD,
+                path.as_ptr().cast::<libc::c_char>(),
+                argv.as_ptr(),
+                envp.as_ptr(),
+                0 as libc::c_int,
+            )
+        };
+        if ret == -1 { errno() } else { None }
+    }
+
+    /// `setsid()`.
+    fn try_setsid() -> Option<i32> {
+        // SAFETY: `setsid` takes no arguments.
+        if unsafe { libc::setsid() } == -1 {
+            errno()
+        } else {
+            None
+        }
+    }
+
+    /// `setpgid(0, 0)`, the calling process into its own group.
+    fn try_setpgid() -> Option<i32> {
+        // SAFETY: `setpgid` takes two pids; 0 means the calling process.
+        if unsafe { libc::setpgid(0, 0) } == -1 {
+            errno()
+        } else {
+            None
+        }
+    }
+
+    /// The syscall numbers the filter's comparison chain tests, in order.
+    ///
+    /// The `JEQ` on `seccomp_data.arch` is skipped: it compares an
+    /// `AUDIT_ARCH_*` value, not a syscall number.
+    fn compared_syscalls(role: SeccompRole) -> Vec<u32> {
+        let mut program = Program::new();
+        build(role, &mut program).unwrap();
+        let end = program.steps[..program.len]
+            .iter()
+            .position(|step| step.code == JA)
+            .unwrap();
+        program.steps[..end]
+            .iter()
+            .filter(|step| step.code == JEQ && step.k != AUDIT_ARCH)
+            .map(|step| step.k)
+            .collect()
+    }
+
     #[test]
     fn a_view_without_egress_keeps_unix_and_loses_inet() {
         child_ok("view socket", || {
@@ -684,6 +1027,14 @@ mod tests {
         for (label, role) in [
             ("view socketpair", SeccompRole::View { egress: false }),
             ("egress view socketpair", SeccompRole::View { egress: true }),
+            (
+                "embedded view socketpair",
+                SeccompRole::EmbeddedView { egress: false },
+            ),
+            (
+                "egress embedded view socketpair",
+                SeccompRole::EmbeddedView { egress: true },
+            ),
             ("http socketpair", SeccompRole::Http),
             ("dbproxy socketpair", SeccompRole::DbProxy),
         ] {
@@ -775,6 +1126,10 @@ mod tests {
         for (label, role) in [
             ("view ptrace", SeccompRole::View { egress: false }),
             ("egress view ptrace", SeccompRole::View { egress: true }),
+            (
+                "embedded view ptrace",
+                SeccompRole::EmbeddedView { egress: false },
+            ),
             ("http ptrace", SeccompRole::Http),
             ("dbproxy ptrace", SeccompRole::DbProxy),
         ] {
@@ -793,6 +1148,7 @@ mod tests {
     #[test]
     fn the_refusal_list_names_the_documented_syscalls() {
         let names: Vec<&str> = DENIED.iter().map(|(name, _)| *name).collect();
+        assert_eq!(DENIED.len(), 35, "the shared refusal list changed size");
         for expected in [
             "ptrace",
             "pidfd_getfd",
@@ -878,21 +1234,199 @@ mod tests {
         }
     }
 
+    /// The widest `View` filter, pinned exactly, in instructions.
+    ///
+    /// The count differs by architecture because x86_64 carries the x32
+    /// check; the test below is what keeps this number and `MAX_PROGRAM`'s
+    /// doc honest.
+    #[cfg(target_arch = "x86_64")]
+    const WIDEST_VIEW: usize = 61;
+    #[cfg(target_arch = "aarch64")]
+    const WIDEST_VIEW: usize = 60;
+
+    /// The widest `EmbeddedView` filter, pinned exactly, in instructions.
+    #[cfg(target_arch = "x86_64")]
+    const WIDEST_EMBEDDED: usize = 66;
+    #[cfg(target_arch = "aarch64")]
+    const WIDEST_EMBEDDED: usize = 63;
+
+    /// The length of `build(role)`.
+    fn program_len(role: SeccompRole) -> usize {
+        let mut program = Program::new();
+        build(role, &mut program).unwrap();
+        program.len
+    }
+
     #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn the_widest_program_is_the_size_the_comment_claims() {
         // `MAX_PROGRAM` and its doc name a number, and a program that grew past
         // that buffer would otherwise only fail inside a forked child. This is
-        // the one place that keeps the two honest.
-        let widest = ROLES
-            .iter()
-            .map(|role| {
-                let mut program = Program::new();
-                build(*role, &mut program).unwrap();
-                program.len
-            })
+        // the one place that keeps the two honest, and it pins each role's
+        // widest configuration so a new rule cannot arrive unmeasured.
+        let widest_view = [false, true]
+            .into_iter()
+            .map(|egress| program_len(SeccompRole::View { egress }))
             .max()
             .unwrap();
-        assert_eq!(widest, 54, "the widest filter changed size");
+        let widest_embedded = [false, true]
+            .into_iter()
+            .map(|egress| program_len(SeccompRole::EmbeddedView { egress }))
+            .max()
+            .unwrap();
+        assert_eq!(
+            widest_view, WIDEST_VIEW,
+            "the widest View filter changed size"
+        );
+        assert_eq!(
+            widest_embedded, WIDEST_EMBEDDED,
+            "the widest EmbeddedView filter changed size"
+        );
+        assert!(widest_view <= MAX_PROGRAM);
+        assert!(widest_embedded <= MAX_PROGRAM);
+    }
+
+    /// The 35 shared refusals as the kernel numbers them, **sorted**, spelled
+    /// out here rather than read from `libc`.
+    ///
+    /// This is what makes the zero-widening oracle independent of the table it
+    /// checks: editing a `libc::SYS_*` number in `DENIED` changes the built
+    /// filter but not this list, so the test below fails instead of agreeing
+    /// with the edit. The numbers are the two architectures this module has an
+    /// `AUDIT_ARCH_*` for.
+    #[cfg(target_arch = "x86_64")]
+    const SHARED_DENIED_NUMBERS: [u32; 35] = [
+        101, 155, 165, 166, 167, 168, 169, 175, 176, 246, 248, 249, 250, 272, 298, 304, 308, 310,
+        311, 312, 313, 320, 321, 323, 425, 426, 427, 428, 429, 430, 431, 432, 433, 438, 440,
+    ];
+    #[cfg(target_arch = "aarch64")]
+    const SHARED_DENIED_NUMBERS: [u32; 35] = [
+        39, 40, 41, 97, 104, 105, 106, 117, 142, 217, 218, 219, 224, 225, 241, 265, 268, 270, 271,
+        272, 273, 280, 282, 294, 425, 426, 427, 428, 429, 430, 431, 432, 433, 438, 440,
+    ];
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn the_shared_refusal_table_pins_the_kernel_numbers() {
+        // A copy is sorted for the comparison: the table itself is grouped by
+        // theme, not by number.
+        let mut declared: Vec<u32> = DENIED.iter().map(|(_, number)| *number as u32).collect();
+        declared.sort_unstable();
+        assert_eq!(
+            declared, SHARED_DENIED_NUMBERS,
+            "a shared refusal changed number or disappeared"
+        );
+
+        // The installed programs must test exactly those numbers, which is the
+        // step that connects this literal list to the filter the kernel runs.
+        for role in [
+            SeccompRole::View { egress: false },
+            SeccompRole::EmbeddedView { egress: false },
+        ] {
+            let compared: std::collections::BTreeSet<u32> =
+                compared_syscalls(role).into_iter().collect();
+            for number in SHARED_DENIED_NUMBERS {
+                assert!(
+                    compared.contains(&number),
+                    "{role:?} does not test {number}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_view_table_is_unchanged_and_embedded_only_adds_its_documented_calls() {
+        use std::collections::BTreeSet;
+
+        let shared: BTreeSet<u32> = DENIED
+            .iter()
+            .map(|(_, number)| *number as u32)
+            .chain([
+                libc::SYS_socket as u32,
+                libc::SYS_socketpair as u32,
+                libc::SYS_clone3 as u32,
+                libc::SYS_clone as u32,
+                libc::SYS_setsid as u32,
+                libc::SYS_setpgid as u32,
+            ])
+            .collect();
+
+        // The failure this test exists for: a PHP-only call smuggled into the
+        // role that also runs WSGI, Node and the JVM.
+        let view: BTreeSet<u32> = compared_syscalls(SeccompRole::View { egress: false })
+            .into_iter()
+            .collect();
+        assert_eq!(view, shared, "the View refusal table changed");
+        for (name, number) in EMBEDDED_DENIED {
+            assert!(
+                !view.contains(&(*number as u32)),
+                "View must not refuse {name}"
+            );
+        }
+
+        let mut expected = shared.clone();
+        expected.extend(EMBEDDED_DENIED.iter().map(|(_, number)| *number as u32));
+        let embedded = compared_syscalls(SeccompRole::EmbeddedView { egress: false })
+            .into_iter()
+            .collect::<BTreeSet<u32>>();
+        assert_eq!(
+            embedded, expected,
+            "EmbeddedView must add exactly its documented calls"
+        );
+
+        // Egress changes the socket handler, never the syscall list.
+        assert_eq!(
+            compared_syscalls(SeccompRole::View { egress: true }),
+            compared_syscalls(SeccompRole::View { egress: false })
+        );
+        assert_eq!(
+            compared_syscalls(SeccompRole::EmbeddedView { egress: true }),
+            compared_syscalls(SeccompRole::EmbeddedView { egress: false })
+        );
+    }
+
+    #[test]
+    fn the_clone_handler_carries_the_namespace_mask_and_embedded_the_thread_bit() {
+        let bitsets = |role: SeccompRole| {
+            let mut program = Program::new();
+            build(role, &mut program).unwrap();
+            let masks: Vec<u32> = program.steps[..program.len]
+                .iter()
+                .filter(|step| step.code == JSET)
+                .map(|step| step.k)
+                .collect();
+            let actions: Vec<u32> = program.steps[..program.len]
+                .iter()
+                .filter(|step| step.code == RET)
+                .map(|step| step.k)
+                .collect();
+            (masks, actions)
+        };
+
+        for role in [
+            SeccompRole::View { egress: false },
+            SeccompRole::EmbeddedView { egress: false },
+        ] {
+            let (masks, actions) = bitsets(role);
+            assert!(
+                masks.contains(&CLONE_NEW_MASK),
+                "{role:?} does not test the clone namespace mask"
+            );
+            assert!(
+                actions.contains(&RET_ENOSYS),
+                "{role:?} has no ENOSYS action for clone3"
+            );
+            assert_eq!(
+                masks.contains(&CLONE_THREAD),
+                matches!(role, SeccompRole::EmbeddedView { .. }),
+                "{role:?}: only EmbeddedView tests CLONE_THREAD"
+            );
+        }
+        // The mask is exactly the eight namespace flags the design names.
+        let union = CLONE_NEW_FLAGS
+            .iter()
+            .fold(0_u32, |acc, flag| acc | *flag as u32);
+        assert_eq!(union, CLONE_NEW_MASK);
     }
 
     #[test]
@@ -989,19 +1523,209 @@ mod tests {
     }
 
     #[test]
+    fn clone3_is_enosys_and_a_thread_still_starts_on_both_views() {
+        // `ENOSYS` is what makes glibc's `pthread_create` fall back to
+        // `clone`, so the two facts belong in one child: the refusal, then a
+        // thread that really starts.
+        for (label, role) in [
+            ("view clone3", SeccompRole::View { egress: false }),
+            (
+                "embedded view clone3",
+                SeccompRole::EmbeddedView { egress: false },
+            ),
+        ] {
+            child_ok(label, move || {
+                if install(role).is_err() {
+                    return 1;
+                }
+                match try_clone3() {
+                    Some(libc::ENOSYS) => {}
+                    _ => return 2,
+                }
+                match std::thread::spawn(|| 7).join() {
+                    Ok(7) => 0,
+                    _ => 3,
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn every_new_namespace_clone_flag_is_refused_by_both_views() {
+        for (label, role) in [
+            ("view namespaces", SeccompRole::View { egress: false }),
+            (
+                "embedded view namespaces",
+                SeccompRole::EmbeddedView { egress: false },
+            ),
+        ] {
+            child_ok(label, move || {
+                if install(role).is_err() {
+                    return 1;
+                }
+                for flag in CLONE_NEW_FLAGS {
+                    match try_clone(flag) {
+                        Some(libc::EPERM) => {}
+                        _ => return 2,
+                    }
+                }
+                0
+            });
+        }
+    }
+
+    #[test]
+    fn setsid_and_setpgid_are_refused_by_both_views() {
+        for (label, role) in [
+            ("view session", SeccompRole::View { egress: false }),
+            (
+                "embedded view session",
+                SeccompRole::EmbeddedView { egress: false },
+            ),
+        ] {
+            child_ok(label, move || {
+                if install(role).is_err() {
+                    return 1;
+                }
+                match try_setsid() {
+                    Some(libc::EPERM) => {}
+                    _ => return 2,
+                }
+                match try_setpgid() {
+                    Some(libc::EPERM) => {}
+                    _ => return 3,
+                }
+                // The accepted twin: reading the ids is still allowed.
+                // SAFETY: `getpgrp` takes no arguments and cannot fail.
+                if unsafe { libc::getpgrp() } < 0 {
+                    return 4;
+                }
+                0
+            });
+        }
+    }
+
+    #[test]
+    fn embedded_view_refuses_process_creation_and_exec_while_view_keeps_them() {
+        child_ok("embedded view exec", || {
+            if install(SeccompRole::EmbeddedView { egress: false }).is_err() {
+                return 1;
+            }
+            match try_execve() {
+                Some(libc::EPERM) => {}
+                _ => return 2,
+            }
+            match try_execveat() {
+                Some(libc::EPERM) => {}
+                _ => return 3,
+            }
+            // A `clone` without `CLONE_THREAD` is a new process.
+            match try_clone(libc::SIGCHLD as libc::c_ulong) {
+                Some(libc::EPERM) => {}
+                _ => return 4,
+            }
+            #[cfg(target_arch = "x86_64")]
+            {
+                match try_fork() {
+                    Some(libc::EPERM) => {}
+                    _ => return 5,
+                }
+                match try_vfork() {
+                    Some(libc::EPERM) => {}
+                    _ => return 6,
+                }
+            }
+            0
+        });
+
+        child_ok("view exec", || {
+            if install(SeccompRole::View { egress: false }).is_err() {
+                return 1;
+            }
+            // The same two calls are permitted: a missing file is `ENOENT`,
+            // which only an image lookup can produce.
+            match try_execve() {
+                Some(libc::ENOENT) => {}
+                _ => return 2,
+            }
+            match try_execveat() {
+                Some(libc::ENOENT) => {}
+                _ => return 3,
+            }
+            // And a process-creating `clone` still works.
+            if try_clone(libc::SIGCHLD as libc::c_ulong).is_some() {
+                return 4;
+            }
+            #[cfg(target_arch = "x86_64")]
+            if try_fork().is_some() {
+                return 5;
+            }
+            0
+        });
+    }
+
+    #[test]
+    fn embedded_view_egress_reflects_the_flag() {
+        child_ok("embedded view no egress", || {
+            if install(SeccompRole::EmbeddedView { egress: false }).is_err() {
+                return 1;
+            }
+            if try_socket(libc::AF_UNIX).is_some() {
+                return 2;
+            }
+            match try_socket(libc::AF_INET) {
+                Some(libc::EPERM) => {}
+                _ => return 3,
+            }
+            match try_socket(libc::AF_INET6) {
+                Some(libc::EPERM) => {}
+                _ => return 4,
+            }
+            match try_socketpair(libc::AF_UNIX) {
+                None => 0,
+                _ => 5,
+            }
+        });
+
+        child_ok("embedded view egress", || {
+            if install(SeccompRole::EmbeddedView { egress: true }).is_err() {
+                return 1;
+            }
+            if try_socket(libc::AF_INET).is_some() {
+                return 2;
+            }
+            if try_socket(libc::AF_INET6).is_some() {
+                return 3;
+            }
+            // Egress is a permission, not a requirement.
+            match try_socket(libc::AF_NETLINK) {
+                Some(libc::EPERM) => 0,
+                _ => 4,
+            }
+        });
+    }
+
+    #[test]
     fn the_roles_describe_themselves() {
         assert_eq!(SeccompRole::View { egress: true }.name(), "view");
+        assert_eq!(
+            SeccompRole::EmbeddedView { egress: true }.name(),
+            "embedded-view"
+        );
         assert_eq!(SeccompRole::Http.name(), "http");
         assert_eq!(SeccompRole::Scheduler.name(), "scheduler");
         assert_eq!(SeccompRole::DbProxy.name(), "dbproxy");
         assert!(!SeccompRole::View { egress: false }.egress());
         assert!(SeccompRole::View { egress: true }.egress());
+        assert!(!SeccompRole::EmbeddedView { egress: false }.egress());
+        assert!(SeccompRole::EmbeddedView { egress: true }.egress());
         assert!(SeccompRole::DbProxy.egress());
         assert!(!SeccompRole::Http.egress());
         assert!(!SeccompRole::Scheduler.egress());
         assert!(!SeccompRole::Http.sockets());
         assert!(!SeccompRole::Scheduler.sockets());
         assert!(SeccompRole::View { egress: false }.sockets());
+        assert!(SeccompRole::EmbeddedView { egress: false }.sockets());
         assert!(SeccompRole::DbProxy.sockets());
     }
 }

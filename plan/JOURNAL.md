@@ -1332,3 +1332,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T18:31 [MB.3.25] (lead) PATH REPAIR by lead: added crates/blastit-sys/tests/** so the protected critical_embedded_seccomp.rs named by backend-runtimes.md §7.1 R14 can exist (node accep
 - 2026-11-14T18:32 [MB.3.23] (lead) GOLDFISH REVIEW PASS (fresh-context reviewer, base 2299b32, commit 005fc67). Zero BLOCKER/MAJOR: surface names no interpreter/transport token, serve() matches d
 - 2026-11-14T18:39 [MB.3.23] (lead) review MINORs committed 59e7999 (runtime.rs + node acceptance annotation); make check exit 0, guard OK, plan OK. Node stays done.
+- 2026-11-14T18:39 [MB.3.25] (lead) status ready -> active
+- 2026-11-14T18:39 [MB.3.25] (lead) attempt 1/3 started
+- 2026-11-14T18:39 [MB.3.25] (lead) base e486b54; prereq MB.3.23 reviewed PASS (005fc67 + 59e7999). Brief carries design R14's shared rules (clone3 ENOSYS, clone CLONE_NEW* EPERM, setsid/setpgid E
+- 2026-11-14T18:54 [MB.3.8] (lead) INPUT from MB.3.25 review (2026-11-14): ARCHITECTURE.md §7.3 is now stale against seccomp.rs — it says every refusal is EPERM with no clone3->ENOSYS exception, 
+- 2026-11-14T18:54 [MB.3.25] (lead) GOLDFISH REVIEW PASS (fresh eyes). Zero BLOCKER/MAJOR; 5 MINORs being fixed: the zero-widening oracle was self-referential (reviewer mutated a DENIED number and
+- 2026-11-14T19:02 [MB.3.25] (lead) status active -> done
