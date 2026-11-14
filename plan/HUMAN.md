@@ -42,7 +42,9 @@ Done already, no action needed from you: the hot-path performance work from PR #
 
 - asked: 2026-11-14T00:55 by conductor
 
-Release v0.2.0 is ready on branch release/0.2.0. Review and squash-merge the Release PR into develop on GitHub — merging validates CI, Docs and Live DigitalOcean e2e on develop and automatically publishes v0.2.0 to PyPI and GitHub Releases. Scope: static asset serving with safe path resolution, SPA/front-controller rewrite precedence, the two-URL pooler presets (DigitalOcean managed pooler + PgBouncer), and the _check/ dev wiring.
+Release v0.2.0 is ready: https://github.com/OffworldNexus/blastit/pull/64 — branch release/0.2.0, CI 16/16 green (at 1e307d6: smoke root, pytest plugin, docs gate, e2e Django, e2e rootless, wheels 3.13/3.14/uv, sdist, fmt+clippy+doc, msrv, release guard, critical-test guards, build --strict). Review and squash-merge it on GitHub — merging validates CI, Docs and Live DigitalOcean e2e on develop and automatically publishes v0.2.0 to PyPI and GitHub Releases.
+
+Scope: static asset serving with safe path resolution, SPA/front-controller rewrite precedence, the two-URL pooler presets (DigitalOcean managed pooler + PgBouncer), and the dev/check wiring. Two things to know when reading it: (1) the `smoke (root)` job now excludes `critical_static_cli` alongside `critical_dev_and_fail_closed`, because both assert what an *unprivileged* caller sees (root can list anything), and both run unprivileged in `test-critical`; the exclusion list is guarded against silent growth. (2) The branch also carries MB.3.1's FastCGI/php2shell research note under `docs/research/`, which is excluded from the public site — harmless in 0.2.0, but the PHP feature work itself continues on `release/0.2.1`.
 
 **Answer:**
 
