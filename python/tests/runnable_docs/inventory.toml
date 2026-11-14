@@ -157,12 +157,27 @@ reason = "Deployment recipe: doctl and Docker run against a registry and a cloud
 [[page.fence]]
 index = 3
 mode = "static"
-reason = "Deployment recipe: psql runs the owner's role and grant SQL against the managed database, which this gate does not have."
+reason = "Deployment recipe: `doctl databases create` needs a DigitalOcean account, so the command is statically checked instead of executed."
 
 [[page.fence]]
 index = 4
 mode = "static"
-reason = "Deployment recipe: `doctl apps create` needs a DigitalOcean account, the pool created by the previous step, and the image fence 2 builds."
+reason = "Deployment recipe: `doctl databases user create` needs the cluster that fence 3 creates in a DigitalOcean account."
+
+[[page.fence]]
+index = 5
+mode = "static"
+reason = "Deployment recipe: psql runs the owner's role and grant SQL against the managed database, which this gate does not have."
+
+[[page.fence]]
+index = 6
+mode = "static"
+reason = "Deployment recipe: `doctl databases pool create` needs the cluster and the app user the fences above create."
+
+[[page.fence]]
+index = 7
+mode = "static"
+reason = "Deployment recipe: `doctl apps create` needs a DigitalOcean account, the pool from fence 6, and the image fence 2 builds."
 
 [[page]]
 path = "docs/deploy/compose-traefik.md"
@@ -236,37 +251,26 @@ reason = "Vite writes `dist/` and this page serves `public/`; MB.2.7's e2e build
 
 [[page.fence]]
 index = 2
-mode = "install"
+mode = "example"
+reason = "`uvx` installs blastit from the package index, which this offline gate does not have; the same banner runs from the built wheel in Getting started and is compared verbatim by MB.2.7's e2e/static_assets.py."
 
 [[page.fence]]
 index = 3
-mode = "static"
-fixture = "static-site"
-reason = "`[route.static]` is parsed in MB.2.3 and served in MB.2.4/MB.2.5, so this fence checks the documented dev command and its flags, not a boot; MB.2.7's e2e/static_assets.py replays this page's own commands in a container against the fixture."
-
-[[page.fence]]
-index = 4
 mode = "example"
 reason = "The static responder ships in MB.2.4/MB.2.5, so this fence cannot answer yet; MB.2.7's e2e/static_assets.py replays this `curl -i` command and asserts the 200 with the immutable cache header."
 
 [[page.fence]]
-index = 5
+index = 4
 mode = "example"
 reason = "The SPA fallback ships in MB.2.4/MB.2.5, so this fence cannot answer yet; MB.2.7's e2e/static_assets.py replays this `curl -i` command and asserts the 200 with `text/html` and `no-cache`."
 
 [[page.fence]]
+index = 5
+mode = "example"
+reason = "`uvx` reaches the package index, which the offline gate does not have; docs/ci.md runs the same `blastit check` and `--json` from the built wheel, and MB.2.7 replays both on the static fixture."
+
+[[page.fence]]
 index = 6
-mode = "static"
-fixture = "static-site"
-reason = "The all-static `check` path (no pytest, no proxy) is owned by MB.2.6 and the grammar by MB.2.3, so this fence checks both commands and their flags against the installed CLI; MB.2.7 replays them on the fixture in the container e2e."
-
-[[page.fence]]
-index = 7
-mode = "static"
-reason = "0.2.0 ships the rewrite, but the FastCGI worker that serves public/index.php is 0.2.1, so this fence checks the command and the page's block; MB.2.7 replays the check command on the static fixture, and 0.2.1's e2e adds the PHP worker replay."
-
-[[page.fence]]
-index = 8
 mode = "presets"
 
 [[page]]

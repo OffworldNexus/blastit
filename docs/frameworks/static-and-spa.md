@@ -1,7 +1,6 @@
 # Static assets and SPAs
 
-Serve a built front end and clean URLs from `blastit.toml`. No nginx, no regex
-soup.
+Serve a built front end and clean URLs from `blastit.toml`. No nginx, no regex soup.
 
 ```toml title="blastit.toml"
 version = 1
@@ -27,25 +26,30 @@ An all-static manifest needs no `app`: every route is a `[route.static]`.
 
 ## Run it
 
-A Vite build writes `dist/`; one flag puts it where `root` looks:
+A `blastit.toml` beside `package.json` is the whole configuration: one `[[route]]`
+matching every path, and its `[route.static]` naming `root = "public"`. The manifest needs nothing else.
+
+`uvx` is `npx` for Python tools: [install `uv`](https://docs.astral.sh/uv/getting-started/installation/)
+once, and it fetches blastit and the Python it needs into a throwaway cache — no
+`pyproject.toml`, no venv, no Python project. Blastit is a Python package today; a
+standalone binary and an npm package are planned, so that install will go away.
+
+From `package.json` and `blastit.toml`'s directory, a Vite build writes `dist/`; one flag puts it
+where `root` looks. Vite's own `public/` is its `publicDir`, and the build empties it first: move
+what you keep there to `static/` and set `publicDir: "static"` in `vite.config.ts`.
 
 ```console
 $ npx vite build --outDir public
 ```
 
-In a project with no `pyproject.toml` yet:
-
 ```console
-$ uv init --app
-$ uv add blastit
-```
-
-```console
-$ uv run blastit dev
+$ uvx blastit dev
   blastit dev · single-uid simulation · 127.0.0.1:8080
   Not a sandbox. Production `blastit` refuses to run like this.
   http · scheduler · dbproxy · 1 route
 ```
+
+`blastit dev` serves the files it finds, re-reading them per request; keep `vite dev` for hot reload.
 
 ## Local
 
@@ -101,17 +105,18 @@ list in the [security model](../security.md).
 
 An all-static manifest has no app: `check` audits every `root` (exists, a
 directory, readable) instead of running pytest, and exits `0`. A root that is
-missing or not a directory stops it before anything runs (`2`). Every manifest
-with an `app` runs the suite as [CI/CD](../ci.md) describes.
+missing or not a directory stops it before anything runs (`2`), so build first.
+Run them where `blastit.toml` is, with `uv` in the job (`astral-sh/setup-uv`); no lockfile or
+`uv sync` is involved. Every manifest with an `app` runs the suite as [CI/CD](../ci.md) describes.
 
 ```console
-$ uv run blastit check
-$ uv run blastit check --json
+$ uvx blastit check
+$ uvx blastit check --json
 ```
 
-With an `app`, a path no route matched is a finding (`1`) and the suite runs as
-usual. `--json` is the same verdict as one document, for an agent; [CI/CD](../ci.md#what-it-fails-on)
-owns the list and the [exit codes](../ci.md#exit-codes).
+With an `app`, a path no route matched is a finding (`1`) and the suite runs as usual. `--json`
+is the same verdict as one document; [CI/CD](../ci.md#what-it-fails-on) owns the list and the
+[exit codes](../ci.md#exit-codes).
 
 ## Front controller
 
@@ -121,13 +126,9 @@ manifest's `app`: `/checkout/42` reaches it with `PATH_INFO=/checkout/42`, and t
 manifest keeps one `.*`. A PHP app is this row with `public/index.php` as its
 entry script.
 
-`0.2.0` ships the rewrite and this responder; the FastCGI worker that runs
-`public/index.php`, and refuses to serve it as a file, is `0.2.1`. The block above
-has no app, so `spa` answers every missing path and `check` proves only its root:
-
-```console
-$ uv run blastit check
-```
+`0.2.0` ships the rewrite and this responder; the FastCGI worker that runs `public/index.php`,
+and refuses to serve it as a file, is `0.2.1`. One `path = ['.*']` route also answers `GET /api/…`
+with `index`: give an SPA's API routes their own `[[route]]` above it, because the first match wins.
 
 ## Deployments
 
@@ -137,9 +138,9 @@ In the container image, under an existing preset:
 $ blastit --preset compose-traefik
 ```
 
-Locally that exits `1` on purpose: production refuses to start without its
-capabilities. `0.2.0` adds no deployment story; a preset already runs the site.
-See [Deployments](../deploy/index.md).
+`uvx blastit --preset compose-traefik` on a laptop exits `1` on purpose: production refuses to
+start without its capabilities, and the recipe's `db`, `pgbouncer` and `migrate` services are the
+parts an all-static site does not need. See [Deployments](../deploy/index.md).
 
 ## Next
 

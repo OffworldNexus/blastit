@@ -2546,6 +2546,40 @@ DOCTL_COMMANDS = {
     ),
     ("apps", "delete"): ToolFlags(booleans=frozenset({"--force", "--wait"})),
     ("apps", "spec"): ToolFlags(values=frozenset({"--format"})),
+    # `databases` subcommands are keyed two words deep, like `apps`: the page
+    # fenced `databases create`, `databases user create` and `databases pool
+    # create`, so their flags come from the doctl v2.5.0 reference.
+    ("databases", "create"): ToolFlags(
+        booleans=frozenset({"--wait"}),
+        values=frozenset(
+            {
+                "--engine",
+                "--num-nodes",
+                "--private-network-uuid",
+                "--region",
+                "--restore-from-cluster-name",
+                "--restore-from-timestamp",
+                "--size",
+                "--storage-size-mib",
+                "--tag",
+                "--version",
+                "--wait-timeout",
+            }
+        ),
+    ),
+    ("databases", "list"): ToolFlags(
+        booleans=frozenset({"--no-header"}), values=frozenset({"--format"})
+    ),
+    ("databases", "user"): ToolFlags(
+        booleans=frozenset({"--no-header"}),
+        values=frozenset(
+            {"--acl", "--format", "--mysql-auth-plugin", "--opensearch-acl"}
+        ),
+    ),
+    ("databases", "pool"): ToolFlags(
+        booleans=frozenset({"--no-header"}),
+        values=frozenset({"--db", "--format", "--mode", "--size", "--user"}),
+    ),
     ("registry", "login"): ToolFlags(
         booleans=frozenset({"--read-only"}), values=frozenset({"--expiry-seconds"})
     ),

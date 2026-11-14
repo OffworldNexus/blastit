@@ -10,19 +10,21 @@ page, extracts every `$ ` command from its ```` ```console ```` fences, and
 replays the ones a running static site can answer against the container's own
 `blastit dev`:
 
-* the banner fence (`uv run blastit dev`) matches the process's first three lines;
+* the banner fence (`uvx blastit dev`) matches the process's first three lines;
 * each `curl -i` fence is sent at the page's own path and must return the page's
   own status line and every header line it shows;
 * the `spa = true` deep URL's body is `public/index.html`, not a rewritten file;
 * the hashed asset's body is the file, under the year-long immutable cache;
-* `uv run blastit check` exits `0` with no output, and `--json` is one document;
+* `uvx blastit check` exits `0` with no output, and `--json` is one document;
 * the refusals the page's threat list names answer their documented status:
   `..`, percent-encoded `..`, NUL and backslash are `400`; a dotfile and a symlink
   that leaves `root` are `404`; none of them ever carries file bytes.
 
-Commands that need a project or a network (`npx vite build`, `uv init`, `uv add`)
-or a production host (`blastit --preset compose-traefik`) are listed as skipped
-with the reason; the last one is owned by `e2e/rootless` (E1). An unknown `$ `
+Commands that need Node or a production host (`npx vite build`,
+`blastit --preset compose-traefik`) are listed as skipped with the reason; the last
+one is owned by `e2e/rootless` (E1). The page's `uvx` prefix is not executed: the
+driver compares the page's banner with the container's own `blastit dev` and runs
+its own `blastit check`. An unknown `$ `
 command is a failure: a page edit cannot silently stop being replayed.
 
 Stdlib only, no network beyond loopback/compose DNS, no fixed sleep: readiness is
@@ -81,8 +83,6 @@ DENIALS = (
 #: of the page; the reason says which leg owns it instead.
 SKIPS = {
     "npx vite build --outDir public": "needs Node and a Vite project; the fixture is a build output",
-    "uv init --app": "creates a project on a developer's machine; needs a writable project and the network",
-    "uv add blastit": "installs from PyPI; this leg is offline by design",
     "blastit --preset compose-traefik": "a production preset; e2e/rootless (E1) proves it",
 }
 
@@ -165,11 +165,11 @@ def documented_head(output: list[str]) -> tuple[int, str, list[tuple[str, str]]]
 def command_kind(command: str) -> str | None:
     if command.startswith("curl -i "):
         return "curl"
-    if command == "uv run blastit dev":
+    if command in ("uvx blastit dev", "uv run blastit dev", "blastit dev"):
         return "dev"
-    if command == "uv run blastit check --json":
+    if command in ("uvx blastit check --json", "uv run blastit check --json"):
         return "check-json"
-    if command in ("uv run blastit check", "blastit check"):
+    if command in ("uvx blastit check", "uv run blastit check", "blastit check"):
         return "check"
     if command in SKIPS:
         return "skip"
@@ -493,11 +493,11 @@ def self_test() -> int:
         kinds.count("dev") == 1, "the page still shows the `blastit dev` banner fence"
     )
     checks.that(
-        kinds.count("check") == 2, "the page still shows two `blastit check` fences"
+        kinds.count("check") == 1, "the page still shows a `blastit check` fence"
     )
     checks.that(kinds.count("check-json") == 1, "the page still shows `check --json`")
     checks.that(
-        kinds.count("skip") == 4, "the page still shows the four build/deploy commands"
+        kinds.count("skip") == 2, "the page still shows its build and deploy commands"
     )
 
     urls = [
