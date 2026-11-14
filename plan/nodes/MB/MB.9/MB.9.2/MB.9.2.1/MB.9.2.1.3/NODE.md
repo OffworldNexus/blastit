@@ -23,10 +23,10 @@ Expose the scheduler's new boot surface and wire the composition root: `lib.rs` 
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.2 (`run_with`, `RunError`,
-  `builtin_registry`, the `roles::scheduler` composition root) and §8's `MB.9.2.1.3` row;
-  §8.2's `MB.9.2.1` row: "`.3` only re-exports `builtin_registry` from `lib.rs` and adds
-  the `roles::scheduler` `RunError` print".
+- Design of record: `ADR-0008`'s surviving `Upstream` contract (`run_with`, `RunError`,
+  `builtin_registry`, the `roles::scheduler` composition root); the retired design is
+  deleted with `ADR-0010`. Scope: "`.3` only re-exports `builtin_registry` from `lib.rs` and
+  adds the `roles::scheduler` `RunError` print".
 - Files (the whole leaf, 2): `crates/blastit-scheduler/src/lib.rs`,
   `crates/blastit/src/roles.rs`.
 - What lands:

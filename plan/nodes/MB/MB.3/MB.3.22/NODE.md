@@ -12,18 +12,17 @@ paths:
   - "crates/blastit-manifest/src/model.rs"
   - "crates/blastit-manifest/src/error.rs"
   - "crates/blastit-manifest/tests/critical_php_manifest.rs"
-  - plan/nodes/MB/MB.3/MB.3.5/MB.3.5.4/NODE.md
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T16:39"
-updated: "2026-11-14T16:39"
+updated: "2026-11-14T22:25"
 ---
 
 # Goal
 
-Close the five MINORs from `MB.3.5.4`'s review. Two are behavioural; three are dead-surface or
-stale text.
+Close the open MINORs from `MB.3.5.4`'s review. Two are behavioural; the other two are a dead
+field and a missing accessor.
 
 # Context
 
@@ -44,9 +43,6 @@ stale text.
    asserted from a parsed manifest (`critical_php_manifest.rs:90-116` hand-builds it and would
    pass if no route ever became a php one). Add `Route::executor()` (`Php(policy)` when the
    block is set, else `View`) and assert it there.
-5. `plan/nodes/MB/MB.3/MB.3.5/MB.3.5.4/NODE.md:61` still carries a stale acceptance clause
-   ("`[route.fastcgi]` … with `listen` alone it parses") that contradicts the shipped
-   unknown-key rule. Delete it — plan text, not code.
 
 # Acceptance
 
@@ -63,4 +59,4 @@ $ make check
 
 # Notes
 
-- Do not expand into `MB.3.20`/`MB.3.10` doc work; item 5 is this node's file only.
+- Do not expand into `MB.3.20`/`MB.3.10` doc work; this node is code plus the named tests only.

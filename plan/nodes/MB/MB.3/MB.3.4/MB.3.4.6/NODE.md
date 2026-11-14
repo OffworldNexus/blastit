@@ -16,6 +16,8 @@ created: "2026-11-14T13:15"
 updated: "2026-11-14T13:56"
 ---
 
+HISTORICAL — written for the retired FastCGI/php-fpm design. ADR-0010 replaced it (embedded host NTS libphp in per-route view workers). Do not implement from this node.
+
 # Goal
 
 Two documented behaviours in `crates/blastit-fastcgi` still have no oracle after

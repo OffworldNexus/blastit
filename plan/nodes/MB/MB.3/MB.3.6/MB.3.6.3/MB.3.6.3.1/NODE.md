@@ -20,6 +20,8 @@ created: "2026-11-14T10:51"
 updated: "2026-11-14T14:39"
 ---
 
+HISTORICAL — written for the retired FastCGI/php-fpm design. ADR-0010 replaced it (embedded host NTS libphp in per-route view workers). Do not implement from this node.
+
 # Goal
 
 Give the FastCGI route a boot that needs no `app` and a `parentfd` that crosses the

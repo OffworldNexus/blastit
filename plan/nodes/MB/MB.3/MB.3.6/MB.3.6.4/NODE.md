@@ -10,7 +10,7 @@ paths:
   - crates/blastit/src/check.rs
   - crates/blastit/src/audit_v1.rs
   - crates/blastit/src/dev_learn.rs
-  - crates/blastit/tests/critical_fastcgi_learn.rs
+  - crates/blastit/tests/critical_php_learn.rs
 attempts: 0
 max_attempts: 3
 escalation: none
@@ -33,29 +33,28 @@ backend.
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §1.3, §4.10.1 (one file, two line shapes,
-  one write path), §4.10.2 (`--learn` proposals), §4.10.3 (`check` reporting and
-  `serve_and_run`) and §8's two rows; §8.2's `MB.3.6.4` row.
+- Design of record: `ADR-0010` §1 (the embedded worker whose observations `check` reads),
+  and this brief's §4.10.1 (one file, two line shapes, one write path), §4.10.2 (`--learn`
+  proposals), §4.10.3 (`check` reporting and `serve_and_run`); the retired design that
+  first wrote those shapes is deleted with `ADR-0010`.
 - **`.2` owns the handoff.** `<CheckRoot>/dev` via `BLASTIT_CHECK_DEV_ROOT`;
-  `check::POOL_PARENT_FD` (`BLASTIT_CHECK_POOL_PARENT_FD`) threads the
-  `Vec<(usize, OwnedFd)>` from `check_fastcgi_sockets` with `clear_cloexec` **immediately
-  before** spawning the child `dev`; `blastit check -- <suite>` maps a non-zero suite exit
-  to `3`; `executor_ran` drives the exercise count (`false` only for a pre-executor `plan`
-  head `413`).
+  `blastit check -- <suite>` maps a non-zero suite exit to `3`; `executor_ran` drives the
+  exercise count (`false` only for a pre-executor `plan` head `413`). There is no pool
+  parent fd to thread: the child `dev` discovers `libphp` itself (ADR-0010 §3).
 - The **three-way branch order** is (1) `is_all_static()` → `0`; (2)
   `config.app.is_none() && can_boot_without_app()` → external-executor mode (empty `--`
-  exits `2` naming the first FastCGI route); (3) everything else → the existing pytest path
+  exits `2` naming the first `[route.php]` route); (3) everything else → the existing pytest path
   with `--` forwarded **verbatim**. `docs/ci.md` must keep working verbatim.
 - Neither leaf edits a `Cargo.toml` or lists `Cargo.lock`; both edit
   `crates/blastit/src/check.rs` and are serialized by `depends_on`.
-- `critical_fastcgi_learn.rs` is a **new** protected file; `critical_static_cli.rs` (MIXED
+- `critical_php_learn.rs` is a **new** protected file; `critical_static_cli.rs` (MIXED
   `"no interpreter to run pytest on"`) and `critical_static_manifest.rs` stay unmodified.
 
 # Acceptance
 
 - [ ] Both children `done` with `RESULT.md` evidence, and the epic gate confirms:
 ```console
-$ cargo test -p blastit --test critical_fastcgi_learn --locked
+$ cargo test -p blastit --test critical_php_learn --locked
 $ cargo test -p blastit --locked
 $ cargo clippy -p blastit --all-targets --locked -- -D warnings
 $ grep -q 'fn serve_and_run' crates/blastit/src/check.rs && echo "external-executor mode exists"

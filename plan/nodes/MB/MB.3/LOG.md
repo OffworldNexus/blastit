@@ -57,3 +57,7 @@ OWNER DECISION (2026-11-14): NO FastCGI fallback at all. MB.3.17 created (remove
 ## 2026-11-14T16:36 [lead]
 
 RELEASE FOLDED (owner 2026-11-14): there is no separate 0.2.1 release -- everything goes into 0.2.0. Cargo.toml already reads 0.2.0 and must not bump. MB.3.8 retargeted to 'release prep 0.2.0' with the CHANGELOG rule (its 0.2.0 entry covers static + pooler presets + PHP and cannot be finalized before MB.3.13 lands). MB.3.10/MB.3.20 must rewrite any '0.2.1 adds ...' text to 0.2.0. MERGE STATUS: release/0.2.1 is NOT a fast-forward from release/0.2.0 -- 0.2.0 carries 2 commits 0.2.1 lacks (aa94c58 [MB.13], f430031 [MB.11], both docs rewrites) and 0.2.1 carries 26. merge-tree reports exactly ONE conflicted path: python/tests/runnable_docs/inventory.toml. STOPPED per the owner's rule (no non-trivial merge under a moving tree) pending a decision.
+
+## 2026-11-14T22:18 [planner]
+
+edited fields

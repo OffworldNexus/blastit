@@ -28,9 +28,9 @@ returns `Declined { next, plan }` and 0.2.0's behaviour stays byte-identical (de
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.3 (the static port table and the
-  `Forward` protocol), §4.2 (stage chain built by `Registry::build_route`) and §8's
-  `MB.9.2.2` row; §8.2's `MB.9.2.2` row is the brief re-sync.
+- Design of record: `ADR-0008`'s surviving `Upstream` contract, with the static port table,
+  the `Forward` protocol and the stage chain built by `Registry::build_route` restated here;
+  the retired design is deleted with `ADR-0010`.
 - Files (the whole leaf, 5): `crates/blastit-scheduler/src/upstream/{mod,static}.rs`,
   `crates/blastit-scheduler/src/scheduler.rs`,
   `crates/blastit-scheduler/tests/conformance_static.rs`,

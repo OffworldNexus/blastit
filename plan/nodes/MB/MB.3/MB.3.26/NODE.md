@@ -26,8 +26,9 @@ opt-in, the `R4` budget, and the 4×3 residue matrix.
 - `PR_SET_CHILD_SUBREAPER` makes init the reaper for anything a worker spawns, so a
   grandchild cannot outlive the route; `WNOWAIT` lets the supervisor read a status (uid,
   signalled-ness, cgroup membership) **before** the pid is recycled.
-- `BLASTIT_ALLOW_EGRESS=1` is a security switch like `BLASTIT_ALLOW_EXTERNAL_FASTCGI` was —
-  it must be documented as one, refused under a preset, and named in the log.
+- `BLASTIT_ALLOW_EGRESS=1` is a security switch of the same class as the retired external-PHP
+  allow flag (`MB.3.17`) — it must be documented as one, refused under a preset, and named
+  in the log.
 - `R4` is the per-request budget row in the design; the 4×3 residue matrix is the four
   crash shapes × three roles, each with the residue it is allowed to leave (none, a pid to
   reap, a socket to unlink).

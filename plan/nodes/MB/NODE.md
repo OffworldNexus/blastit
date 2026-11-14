@@ -1,6 +1,6 @@
 ---
 id: MB
-title: "Modern 12-Factor Backends: Static, PHP-FPM, Vite/Node, Tomcat (0.2.x)"
+title: "Modern 12-Factor Backends: Static, PHP (embedded libphp), Vite/Node, Tomcat (0.2.x)"
 kind: milestone
 status: ready
 priority: 2
@@ -10,14 +10,14 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-12T00:50"
-updated: "2026-11-12T00:50"
+updated: "2026-11-14T22:18"
 ---
 
 # Goal
 
 Expand Blastit across focused `0.2.x` sub-releases into a **multi-backend zero-trust application harness** supporting modern 12-factor ecosystems beyond Python WSGI:
 1. Safe built-in **static asset serving** and clean front-controller / SPA **URL rewriting** (no nginx regex soup).
-2. **PHP-FPM** (`FastCGI` protocol, PSR-7/15 front controllers, Symfony & Laravel idioms, locked-down `SCRIPT_FILENAME` & FastCGI params).
+2. **PHP** (host NTS `libphp` embedded in per-route view workers — `[route.php]` with `entry` and an optional `workers` cap, ADR-0010; PSR-7/15 front controllers, Symfony & Laravel idioms, `SCRIPT_FILENAME`/`DOCUMENT_ROOT` pinned in C memory, no parameter stream to inject into).
 3. **Vite & Node** (HTTP upstream per route/worker, seamless Vite asset + SSR split for SvelteKit, Remix/React Router, Nuxt, Hono, Next standalone).
 4. **Tomcat / JVM** (modern 12-factor Servlet / Spring Boot integration) and other evaluated popular 12-factor HTTP backends.
 5. Unified language-agnostic `blastit dev --learn` and `blastit check` workflows across Python, PHP, Node, and JVM, plus baseline `php2shell` and `node2shell` exploit neutralization tests.
@@ -25,21 +25,21 @@ Expand Blastit across focused `0.2.x` sub-releases into a **multi-backend zero-t
 # Context
 
 - Vision & rules: `docs/VISION.md`, skill `dx-first`, skill `security-invariants`.
-- **Mandatory DX-First law:** Before designing internals or coding any sub-release (`0.2.0`, `0.2.1`, `0.2.2`...), **start by writing the lean user documentation** showing how that backend looks on the **local machine** (zero `sudo`), in **CI/CD** (completeness verification), and in **deployments** — critiqued by `dx`, `ai-ergonomics`, and `security` goldfish critics!
+- **Mandatory DX-First law:** Before designing internals or coding any sub-release (`0.2.0` and later `0.2.x`), **start by writing the lean user documentation** showing how that backend looks on the **local machine** (zero `sudo`), in **CI/CD** (completeness verification), and in **deployments** — critiqued by `dx`, `ai-ergonomics`, and `security` goldfish critics!
 - Modern 12-factor scope only: play natively with PSR, modern frameworks, static assets, and URL rewriting, without supporting legacy un-12-factorizable monoliths like WordPress.
 
 # Acceptance
 
 - [ ] Each `0.2.x` sub-epic begins with accepted lean user documentation (`docs/frameworks/...`) covering Local, CI/CD, and Deployments, verified by `dx` and `ai-ergonomics` critics before Rust code is written.
 - [ ] Static asset serving + URL rewriting handle SPA fallbacks, hashed immutable assets, and PHP `public/index.php` front-controller routing safely (immune to path traversal, null bytes, symlink escapes, and dotfile leaks).
-- [ ] PHP-FPM FastCGI backend serves real PSR / Symfony- or Laravel-style routes isolated per route, strips real DB secrets via stage-0 `execve`, enforces `blastit.toml` PostgreSQL grants, and blocks `php2shell` / CVE-2024-4577 FastCGI/CGI argument & `PHP_VALUE` injection attacks in automated `e2e/` tests.
+- [ ] The embedded PHP backend serves real PSR / Symfony- or Laravel-style routes isolated per route (one `[route.php]` front controller, its own forked `EmbeddedView` workers), strips real DB secrets via stage-0 `execve`, enforces `blastit.toml` PostgreSQL grants, and blocks `php2shell` / CVE-2024-4577 CGI argument & `PHP_VALUE` injection attacks in automated `e2e/` tests.
 - [ ] Vite + Node SSR/API backend serves static + dynamic routes cleanly in `blastit dev` and production containers, enforces per-route DB grants & egress lockdown, and blocks `node2shell` reverse-shell / env / `/@fs/` traversal vectors in `e2e/`.
 - [ ] Tomcat / JVM 12-factor backend runs cleanly under Blastit with per-route sandboxing/routing, env secret swapping, and wire-level `--learn` + `blastit check`.
 - [ ] `make check`, `make docs-check`, `visual-checker`, `make e2e`, and `test-curator` milestone audit all pass.
 
 # Notes
 
-- May be shipped as multiple `0.2.x` sub-releases (`0.2.0`, `0.2.1`, `0.2.2`, `0.2.3`); `strategist` refreshes concrete pointers here at the `MA` gate.
+- May be shipped as multiple `0.2.x` sub-releases (`0.2.0` first, then `0.2.2`+ as needed; there is no `0.2.1`); `strategist` refreshes concrete pointers here at the `MA` gate.
 
 ## Starting points (written at the MA gate, 2026-11-13)
 
@@ -50,7 +50,7 @@ Expand Blastit across focused `0.2.x` sub-releases into a **multi-backend zero-t
 - wire-level `--learn` + `blastit check` (`--json` v1 schema), and
 - `MA.6`'s zero-copy `ReqHeadView` / `RawFrame` forwarding, 64-frame / 256 KiB channel batching (`chan.rs`), lazy 64 KiB response credit (`WINDOW_LOW_WATER`), and pooled view threads (`blastit-view`).
 
-A Static, PHP-FPM (`FastCGI`), Vite/Node (HTTP upstream), or Tomcat/JVM view is a **new backend kind behind the existing supervisor and `RawFrame` scheduler channel**, not a second supervisor: reuse the role split, UID layout (`UID_BASE + 1000 + i`), seccomp baseline, per-route socket rule, and secret barrier before inventing anything.
+A static, PHP (embedded `libphp` in a view worker, ADR-0010), Vite/Node (HTTP upstream), or Tomcat/JVM view is a **new `Upstream` implementation behind the existing supervisor and `RawFrame` scheduler channel**, not a second supervisor: reuse the role split, UID layout (`UID_BASE + 1000 + i`), seccomp baseline, per-route socket rule, and secret barrier before inventing anything.
 
 **Mandatory DX-First sequence per sub-release (non-negotiable).**
 1. One lean user page per backend under `docs/frameworks/` covering Local (zero `sudo`), CI/CD (`blastit check`), and Deployments → `dx` + `ai-ergonomics` goldfish critics.

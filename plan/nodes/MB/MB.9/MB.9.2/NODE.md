@@ -50,10 +50,11 @@ title and body carry the design's lettering. `MB.9.2.1` depends on `MB.9.1`;
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.2 (`RouteRuntime`, `Request.stage`,
-  `with_fastcgi` after `with_static`), §4.2.1 (`UpstreamHead`, `SessionPort`), §4.3 (the
-  static port and the `Forward` protocol) and §4.5 (`ViewHub`, the session task);
-  `ADR-0008`. The trait, the registry and the case table come from `MB.9.1`; this epic
+- Design of record: `ADR-0008`'s surviving `Upstream` contract and `ADR-0009`'s
+  `WorkerRuntime`/`ViewUpstream`, with the shapes restated here (`RouteRuntime`,
+  `Request.stage`, `with_php` after `with_static`, `UpstreamHead`, `SessionPort`, the static
+  `Forward` protocol, `ViewHub` + the session task); the retired design that first wrote
+  them is deleted with `ADR-0010`. The trait, the registry and the case table come from `MB.9.1`; this epic
   adds the first implementation and changes no contract.
 - **The handle lives beside the descriptor.** `RouteRuntime { info: RouteInfo, stages:
   Vec<Arc<dyn Upstream>> }` (1 or 2), not a field on `RouteInfo`: adding

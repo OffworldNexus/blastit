@@ -18,6 +18,8 @@ created: "2026-11-14T10:51"
 updated: "2026-11-14T15:14"
 ---
 
+HISTORICAL — written for the retired FastCGI/php-fpm design. ADR-0010 replaced it (embedded host NTS libphp in per-route view workers). Do not implement from this node.
+
 # Goal
 
 Make the PHP route real inside the scheduler **as an `Upstream` implementation**:

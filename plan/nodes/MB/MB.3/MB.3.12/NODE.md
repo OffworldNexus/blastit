@@ -102,7 +102,7 @@ and that loading the shim *before* libphp fails cleanly instead of crashing.
 ## Container + probe (the acceptance that counts)
 
 - `e2e/php-sapi/`: a `Dockerfile` on `debian:trixie-slim` installing
-  `php8.4-dev libphp8.4-embed gcc make pkg-config libc6-dev` (no `php-fpm`), copying the
+  `php8.4-dev libphp8.4-embed gcc make pkg-config libc6-dev` (no external PHP server), copying the
   repo read-only, running `make php-sapi` inside, then building and running the probe.
   `ARG PHP_MINOR=8.4` so a second minor is a build arg, not a rewrite.
 - `e2e/php_sapi_probe.py` (stdlib only, same shape as the other e2e drivers): builds the

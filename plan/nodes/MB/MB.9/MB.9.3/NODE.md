@@ -28,10 +28,10 @@ leaf `MB.9.3`).
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.4 (the WSGI port), §4.2.1
-  (`SessionPort`/`ExchangeChannel`), §4.2 (the transitional rule and its deletion) and
-  §8's `MB.9.3` row; §8.2's `MB.9.3` row is the brief re-sync: narrow `paths` to the five
-  files, register `"wsgi"`, delete the fallback.
+- Design of record: `ADR-0008`'s surviving `Upstream` contract and `ADR-0009`'s
+  `WorkerRuntime`, with the WSGI port, `SessionPort`/`ExchangeChannel` and the transitional
+  rule restated here; the retired design is deleted with `ADR-0010`. Scope: narrow `paths`
+  to the five files, register `"wsgi"`, delete the fallback.
 - Files (the whole leaf, 5): `crates/blastit-scheduler/src/{upstream/wsgi,upstream/mod,scheduler,lib}.rs`
   and `crates/blastit-scheduler/tests/conformance_wsgi.rs`.
 - What lands:
@@ -53,11 +53,11 @@ leaf `MB.9.3`).
     (a missing builder becomes `RunError::Boot`; `stages` is never empty afterwards).
   - `conformance_wsgi.rs`: iterates `blastit_backend::conformance::cases()` against the WSGI
     implementation using the existing in-process view harness (no Docker, no real Python
-    pool where the harness already fakes it), keeps the fake `Upstream` double for the
+    worker where the harness already fakes it), keeps the fake `Upstream` double for the
     dispatch assertions, and asserts the learn-record `Observation` list is identical
     before/after the port. No `case.id` literals.
 - `ObservationKind::Query` is **reserved**: WSGI does not emit it and no implementation may
-  emit it in 0.2.1.
+  emit it in `0.2.0`.
 - No `Cargo.toml`, no `Cargo.lock`: this leaf adds no dependency and no member.
 
 # Acceptance

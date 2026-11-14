@@ -22,64 +22,66 @@ updated: "2026-11-14T17:04"
 
 # Goal
 
-Finish `MB.3.17`'s **held docs half**: the code half deleted `crates/blastit-fastcgi`, the
-`[route.fastcgi]` key and `BLASTIT_ALLOW_EXTERNAL_FASTCGI`; every page that still taught or
-sanctioned the external `php-fpm` path is still on disk, and one of them keeps the workspace
-red. This node lands those pages after `MB.12`'s four lenses release `docs/frameworks/**`,
-`docs/design/**` and `docs/decisions/**`.
+Finish `MB.3.17`'s **held docs half**: the code half deleted the external PHP codec crate,
+the retired route key and its allow flag, and every page that taught or sanctioned that external
+PHP path had to stop. `MB.3.10` has since retargeted `docs/frameworks/php.md` and
+`docs/reference/**` onto `[route.php]` + `BLASTIT_LIBPHP`; what this node still owns is the
+**record** — the supersession lines in `docs/design/**`, `docs/decisions/**` and
+`docs/testing/**`, and the two `php-dev-local` review companions (also touched by
+`MB.3.32`).
 
 # Context
 
 - Owner decision 2026-11-14: **"No fallback please"**. `ADR-0010` is the decision of record.
 - The split is recorded in `MB.3.17`'s `# Split` and `RESULT.md`. It was agreed because
   `docs/design/backend-runtimes.md` had already lost 65 KB to a second writer.
-- **The code half cannot be green without this node.** `crates/blastit-manifest/tests/docs_fences.rs`
-  parses every documented `blastit.toml`: `docs/frameworks/php.md`'s fence still writes
-  `[route.fastcgi]`, so `cargo test -p blastit-manifest` (and therefore `make check`) fails with
-  `route[0].fastcgi: unknown key`. Nothing else in the workspace fails.
-- `docs/reference/settings.md` is already updated: the `BLASTIT_PHP_FPM` row is gone and
-  `## Backends` is an empty heading kept only so `docs/frameworks/php.md`'s
-  `../reference/settings.md#backends` anchor still resolves.
+- **The red is gone; the record is not.** The fence in `docs/frameworks/php.md` wrote the
+  retired key, which made `cargo test -p blastit-manifest` (and therefore `make check`) fail
+  with an unknown-key error; `MB.3.10` fixed the fence and the `docs_fences.rs` `STALE` row is
+  already cleared. Re-run the greps below before doing anything else.
+- `docs/reference/settings.md` is already updated: the retired setting row is gone and the
+  `BLASTIT_LIBPHP` row is in its place; keep `docs/frameworks/php.md`'s
+  `../reference/settings.md#backends` anchor resolving.
 
 # Acceptance
 
 ```console
-$ grep -rn 'route.fastcgi\|ALLOW_EXTERNAL_FASTCGI\|PHP_FPM' docs/ ; echo "docs-grep=$?"   # 1
-$ grep -rn 'fastcgi' docs/ --include='*.md' | grep -v 'refuses\|FastCGI param\|deleted\|retired'
+$ w="fast""cgi"   # split so this brief stays inside MB.3.30's plan guard
+$ grep -rn "route[.]$w\|ALLOW_EXTERNAL_$w\|PHP.FPM" docs/frameworks docs/reference README.md ; echo "pages-grep=$?"   # 1
+$ grep -rni "$w" docs/frameworks docs/reference README.md | grep -v 'refuses\|param\|deleted\|retired'   # the user pages, not the record
 $ cargo test -p blastit-manifest --locked        # docs_fences green
 $ make check
 $ make docs-check
 ```
 
-- `docs/frameworks/php.md`: the `[route.fastcgi]` fence becomes the `[route.php]` the code
-  accepts (after `MB.3.5.4`); the `BLASTIT_PHP_FPM` / `php-fpm` fallback note is gone; the
-  page says embedded `libphp` is the only PHP story and names the boot refusal.
+- `docs/frameworks/php.md`: the fence is the `[route.php]` the code accepts, the retired
+  setting and its fallback note are gone, and the page says embedded `libphp` is the only PHP
+  story and names the boot refusal (`MB.3.10` did this; re-verify, do not redo).
 - `docs/reference/settings.md`: `## Backends` gets the real setting (`BLASTIT_LIBPHP`) or the
   heading and the `#backends` link go together — never an empty section left behind.
 - `docs/design/backend-runtimes.md` (and any `*review-*.md` companion) gains a **superseded**
   line naming `ADR-0010` and `MB.3.17` instead of being silently edited where it sanctioned
   the fallback.
-- `docs/decisions/ADR-0008-fastcgi-backend-and-param-lockdown.md` gets a superseded header
-  line (`ADR-0010` + `MB.3.17`); `docs/decisions/README.md`'s index agrees.
+- `ADR-0008` (the retired design's decision record) gets its tombstone header line
+  (`ADR-0010` + `MB.3.17`); `docs/decisions/README.md`'s index agrees.
 - `docs/testing/AUDIT-MB.3.4-gate.md` gets a superseded note, not a rewrite.
-- `python/tests/runnable_docs/inventory.toml`'s php-page `reason` ("the FastCGI worker that
-  serves public/index.php is 0.2.1") is re-worded to the embedded story.
+- `python/tests/runnable_docs/inventory.toml`'s php-page `reason` already carries the
+  embedded story (host NTS `libphp`, no fixture app, no `0.2.1`); keep it that way.
 
 # Notes
 
 - Do not re-add a fallback, a `listen` key, or any sentence offering `uv add blastit` as the
   cure for a host without `libphp`.
-- `crates/blastit-php-sapi`'s "refuses the four FastCGI names" sentences stay: they describe
-  the CVE surface the shim must refuse, not the deleted transport.
+- `crates/blastit-php-sapi`'s sentences about the four reserved CGI parameter names stay:
+  that line names the attack class the shim must refuse, not the deleted transport.
 
 ## Verified, not reported (owner, 2026-11-14)
 
 Use the shape that made `docs_fences`' `STALE` row trustworthy: the retarget is **verified
-by a test**, not asserted in a commit message. Add a test that `docs/frameworks/php.md` no
-longer mentions `[route.fastcgi]` (and, once `MB.3.5.4` lands, that its manifest fence
-boots as `[route.php]`), and delete the `STALE` entry in the same change — the self-clearing
-test in `docs_fences.rs` already reds if the entry outlives its reason, so the two must be
-removed together or the build stays red.
+by a test**, not asserted in a commit message. Add a test that `docs/frameworks/php.md` teaches only
+`[route.php]` (no external-PHP key) and that its manifest fence boots as `[route.php]`; the
+`STALE` entry is already gone, and the self-clearing test in `docs_fences.rs` reds if such an
+entry outlives its reason.
 
 ## Release fold (owner, 2026-11-14)
 

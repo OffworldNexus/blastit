@@ -29,10 +29,11 @@ only event that releases a slot (design leaf `MB.9.2a`, part 2).
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.2 (the dispatch call site, the
+- Design of record: `ADR-0008`'s surviving `Upstream` contract and `ADR-0009`'s
+  `WorkerRuntime`, with the shapes restated here (the dispatch call site, the
   `Session`/`SessionMsg` seam, `run_with`/`RunError`/`builtin_registry`, the transitional
-  `stages.is_empty()` rule), §4.2.1 (`ResponseSink` proxy-control denial),
-  §4.5 (`ViewHub`, the session task) and §8's `MB.9.2.1.2` row; §8.2's `MB.9.2.1` row.
+  `stages.is_empty()` rule, `ResponseSink` proxy-control denial, `ViewHub` + the session
+  task); the retired design is deleted with `ADR-0010`.
 - Files (the whole leaf, 5): `crates/blastit-scheduler/src/{upstream/mod,scheduler,error,lib}.rs`
   and `crates/blastit-scheduler/tests/head_allocs.rs`.
 - What lands:

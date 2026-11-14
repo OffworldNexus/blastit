@@ -18,22 +18,22 @@ updated: "2026-11-14T10:51"
 
 Turn the shared conformance table into the drift barrier: one behavioural suite driven
 from the contract's case table, run against every implementation, wired into `make check`.
-A new backend that misses a row fails the gate; a FastCGI that behaves differently from
-static/WSGI cannot merge (design leaf `MB.9.4`).
+A new backend that misses a row fails the gate; a PHP implementation that behaves
+differently from static/WSGI cannot merge (design leaf `MB.9.4`).
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.11 (the table, the drivers, the
-  anti-drift rule), §7.1 (`blastit-backend` in-module + `tests/conformance_table.rs`),
-  §7.2 (`R13`–`R15`) and §8's `MB.9.4` row; §8.2's `MB.9.4` row is the brief re-sync:
-  **exact** `IMPLEMENTATIONS` assertion, per-class `Expect` completeness, not a generic
-  "some cases exist" check.
+- Design of record: `ADR-0008`'s surviving `Upstream` contract (the table, the drivers, the
+  anti-drift rule), with the in-module contract test plus `tests/conformance_table.rs`
+  restated here; the retired design is deleted with `ADR-0010`. Scope: **exact**
+  `IMPLEMENTATIONS` assertion, per-class `Expect` completeness, not a generic "some cases
+  exist" check.
 - Files (the whole leaf, 2): `crates/blastit-backend/tests/conformance_table.rs` and
   `Makefile`.
 - What lands:
   - `conformance_table.rs`:
-    - `assert_eq!(IMPLEMENTATIONS, …)` against the exact 5-entry slice (kind + capability
-      bits), so dropping any capability bit fails the test;
+    - `assert_eq!(IMPLEMENTATIONS, …)` against the exact slice (`static`, `wsgi`, `php`,
+      `fake`, with kind + capability bits), so dropping any capability bit fails the test;
     - per-class `Expect` completeness invariants (every class the design names has ≥ 1
       case, every expected status is client-visible, ids unique);
     - a fake `Upstream` double in the test that satisfies the runner contract without I/O,
@@ -42,9 +42,9 @@ static/WSGI cannot merge (design leaf `MB.9.4`).
     - `decline_identity`, plan-rebuild equality, and a missing builder with its manifest
       line.
   - `Makefile`: a `rs-test-conformance` target running the backend table test plus both
-    scheduler drivers, offline and `--locked` (`3` binaries now; `MB.3.6.1.2` bumps it to
-    `4`, `MB.3.6.2.2` to `5`), added to the `check` dependency line so the suite gates every
-    change.
+    scheduler drivers, offline and `--locked` (`3` binaries; the retired `MB.3.6.1.2`/
+    `MB.3.6.2.2` bumps went with the external PHP path, `MB.3.17`), added to the `check`
+    dependency line so the suite gates every change.
 - No `Cargo.toml`, no `Cargo.lock`: this leaf adds no dependency and no member.
 
 # Acceptance

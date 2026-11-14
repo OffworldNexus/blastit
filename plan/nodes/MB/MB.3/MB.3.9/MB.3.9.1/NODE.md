@@ -19,6 +19,8 @@ created: "2026-11-14T13:17"
 updated: "2026-11-14T14:09"
 ---
 
+HISTORICAL — written for the retired FastCGI/php-fpm design. ADR-0010 replaced it (embedded host NTS libphp in per-route view workers). Do not implement from this node.
+
 # Goal
 
 Rewrite `docs/frameworks/php.md` for the two decisions that landed on 2026-11-14: the

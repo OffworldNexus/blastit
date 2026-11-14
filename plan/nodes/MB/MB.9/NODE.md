@@ -1,6 +1,6 @@
 ---
 id: MB.9
-title: "Backend Upstream Contract (DI/IoC): one trait for static, WSGI and FastCGI"
+title: "Backend Upstream Contract (DI/IoC): one trait for static, WSGI and embedded PHP"
 kind: epic
 status: ready
 priority: 2
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:54"
-updated: "2026-11-14T01:54"
+updated: "2026-11-14T22:18"
 ---
 
 # Goal
@@ -21,14 +21,14 @@ request/response/observation/error types, the boot factory/registry and the shar
 conformance case table. Static and WSGI stop being branches in dispatch and become
 implementations of that trait, constructed once at boot from the manifest and held
 per route as `Arc<dyn Upstream>`; dispatch calls the trait and never branches on
-backend kind. After this epic a new backend (FastCGI in `MB.3.6`, Node in `MB.4`) is
+backend kind. After this epic a new backend (embedded PHP in `MB.3.6`, Node in `MB.4`) is
 a new implementation plus a registered builder — not a new arm in the scheduler.
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §Backend contract and
-  `ADR-0008` (both produced by `MB.3.3`); this epic may not invent a different trait,
-  registry shape or crate layering. If the design is unimplementable inside the
+- Design of record: `ADR-0008`'s surviving `Upstream` contract and `ADR-0009`'s
+  runtime-provider model (the retired design that first wrote those shapes is deleted with
+  `ADR-0010`); this epic may not invent a different trait, registry shape or crate layering. If the design is unimplementable inside the
   seams below, stop and `human add` the conflict instead of widening them silently.
 - **Honest starting point.** Static is not injected today:
   `crates/blastit-scheduler/src/static_asset.rs` (`AnswerKind`, resolution) and
@@ -45,13 +45,13 @@ a new implementation plus a registered builder — not a new arm in the schedule
   must change, stop and report it as its own node.
 - **Dependency direction.** `blastit-backend` → `blastit-http` + `blastit-manifest`
   types only. Implementations depend inward on the contract, never the reverse.
-  `blastit-scheduler` depends on the contract, never on `blastit-fastcgi`.
+  `blastit-scheduler` depends on the contract, never on a backend implementation.
 - **Sequencing.** `MB.9.1` (contract) → `MB.9.2` (`MB.9.2.1` head/stages, `MB.9.2.2`
   `StaticUpstream`) → `MB.9.3` (WSGI) → `MB.9.4` (conformance wired into `make check`).
   `MB.9.1` depends on `MB.3.4` for one reason only: the design's serialized
   `Cargo.lock` chain (`MB.3.4.1` → `MB.9.1` → `MB.9.2.1` → `MB.3.6.1` → `MB.3.8`), and the
   lockfile must stay single-owner (`MB.3.4.1` = design leaf `MB.3.4a`). `MB.3.6` then
-  adds the FastCGI row, and `MB.4` must not start implementation before this epic closes.
+  adds the `php` row, and `MB.4` must not start implementation before this epic closes.
 
 # Acceptance
 
@@ -71,7 +71,7 @@ $ make check
 # Notes
 
 - No docs, no manifest grammar, no e2e: this epic is Rust seams and tests only.
-- FastCGI is **not** part of this epic: `MB.3.6` implements the same trait and adds
+- PHP is **not** part of this epic: `MB.3.6` implements the same trait and adds
   the third conformance row. Node (`MB.4`) implements it later and must not need a
   new dispatch branch either.
 - Engine changes outside the contract (new dependency, new crate beyond

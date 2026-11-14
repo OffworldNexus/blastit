@@ -38,8 +38,8 @@ $ cargo test -p blastit --locked
 $ make check
 ```
 - Denied cases (each asserting exit 1 + the sentence, not just a non-zero code): a WSGI
-  `app` in a `python`-less build; `--learn`; an external `[route.fastcgi]` route in a
-  `python`-less build (naming `MB.3.13`'s wiring, never `uv add`).
+  `app` in a `python`-less build; `--learn`; a `[route.php]` route in a `python`-less
+  build (served by the embedded `libphp` worker of `MB.3.13`, never `uv add`).
 - Accepted twins: a static-only manifest boots and serves 200 in the same binary; a
   `[route.php]` manifest once `MB.3.13` lands is not refused by *this* gate.
 - The suite must fail if the gate is removed (comment the call site and it goes red) —

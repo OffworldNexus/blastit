@@ -27,8 +27,9 @@ no sockets, no filesystem, no subprocess, no language or server knowledge.
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.2, §4.2.1 (exact shapes), §4.2 "crates
-  by seam", §4.11 and §8's two rows; `ADR-0008`. §8.2's `MB.9.1` row is the brief re-sync:
+- Design of record: `ADR-0008`'s surviving `Upstream` contract and `ADR-0009`'s
+  runtime-provider model; the exact shapes are restated in this brief, because the retired
+  design that first wrote them is deleted with `ADR-0010`.
   `MB.3.5.1` is in `MB.9.1.1`'s `depends_on`, the single source of executor kinds is
   `Executor::kind()` (never "keyed by the manifest backend name"), the first build runs
   **without** `--locked` then `--locked`, and `RouteId`, `RouteState`
@@ -36,13 +37,13 @@ no sockets, no filesystem, no subprocess, no language or server knowledge.
   `UpstreamSignal::ExecutorReady { socket_inode }` and `WireRequest.executor_ran` are all in
   this epic.
 - **Dependency direction.** `blastit-backend` → `blastit-http` (`BodyFraming`) +
-  `blastit-manifest` *types* (`Executor`, `FastCgiPolicy`, `IngressPolicy`, `StaticPolicy`)
-  + `serde` only. It never depends on `blastit-scheduler`, `blastit-view`,
-  `blastit-fastcgi` or `blastit`, and contains no I/O syscall, no `tokio` socket type, no
+  `blastit-manifest` *types* (`Executor`, `PhpPolicy`, `IngressPolicy`, `StaticPolicy`)
+  + `serde` only. It never depends on `blastit-scheduler`, `blastit-view` or `blastit`, and
+  contains no I/O syscall, no `tokio` socket type, no
   `unsafe`.
 - **`Cargo.lock` is single-owner.** `MB.9.1.1` is the second link of the release chain
-  (`MB.3.4.1` → `MB.9.1.1` → `MB.9.2.1.1` → `MB.3.6.1.2` → `MB.3.8`); `MB.9.1.2` lists
-  neither `Cargo.toml` nor `Cargo.lock`.
+  (`MB.3.4.1` → `MB.9.1.1` → `MB.9.2.1.1` → `MB.3.8`; the retired `MB.3.6.1.2` link went with
+  the external PHP path, `MB.3.17`); `MB.9.1.2` lists neither `Cargo.toml` nor `Cargo.lock`.
 - **No behaviour change downstream.** The contract is consumed by `MB.9.2`/`MB.9.3` and
   `MB.3.6`; the protected scheduler suites are not touched by this epic.
 - **Sequencing.** `MB.9.1.1` → `MB.9.1.2` → `MB.9.2.1.1`; `MB.9` must complete **before
@@ -69,4 +70,4 @@ $ make check
   composition root names its builders explicitly.
 - Fallback split of `MB.9.1.1` if it overruns 550 lines: `.1a` (crate + `types.rs`, owns
   `Cargo.lock`) + `.1b` (`registry.rs` + `lib.rs`, no lock) — mechanical, no path change.
-- `ObservationKind::Query` is reserved: no implementation emits it in 0.2.1.
+- `ObservationKind::Query` is reserved: no implementation emits it in `0.2.0`.

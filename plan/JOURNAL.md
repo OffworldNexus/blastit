@@ -1415,3 +1415,35 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T22:06 [MB.3.34] (planner) created (task) build.rs PHP toolchain probe: do not cache a no-toolchain world on a transient spawn failure
 - 2026-11-14T22:12 [MB.3.29] (lead) status active -> done
 - 2026-11-14T22:12 [MB.3.33] (lead) status active -> done
+- 2026-11-14T22:14 [MB.3.32] (lead) status ready -> active
+- 2026-11-14T22:14 [MB.3.32] (lead) attempt 1/3 started
+- 2026-11-14T22:14 [MB.3.32] (lead) base 136f2d376089ac581de7794c08ea8689f42336c3
+- 2026-11-14T22:14 [MB.3.32] (lead) edited fields
+- 2026-11-14T22:14 [MB.3.31] (lead) status ready -> active
+- 2026-11-14T22:14 [MB.3.31] (lead) attempt 1/3 started
+- 2026-11-14T22:14 [MB.3.31] (lead) base 136f2d376089ac581de7794c08ea8689f42336c3
+- 2026-11-14T22:18 [MB] (planner) edited fields
+- 2026-11-14T22:18 [MB.12] (planner) edited fields
+- 2026-11-14T22:18 [MB.3] (planner) edited fields
+- 2026-11-14T22:18 [MB.3.5] (planner) edited fields
+- 2026-11-14T22:18 [MB.3.5.3] (planner) edited fields
+- 2026-11-14T22:18 [MB.3.6] (planner) edited fields
+- 2026-11-14T22:18 [MB.3.9] (planner) edited fields
+- 2026-11-14T22:18 [MB.3.32] (planner) edited fields
+- 2026-11-14T22:18 [MB.9] (planner) edited fields
+- 2026-11-14T22:19 [MB.12] (planner) edited fields
+- 2026-11-14T22:20 [MB.3.31] (lead) status active -> review
+- 2026-11-14T22:22 [MB.3.31] (lead) REVIEW FAIL (attempt 1): (1) MAJOR MB.3.5.4 is done but still prescribes the retired fallback (lines 29,48,80) and was skipped for the banner; (2) MAJOR MB.3.8:
+- 2026-11-14T22:22 [MB.3.31] (lead) status review -> ready
+- 2026-11-14T22:22 [MB.3.31] (lead) status ready -> active
+- 2026-11-14T22:22 [MB.3.31] (lead) attempt 2/3 started
+- 2026-11-14T22:23 [MB.3.32] (lead) edited fields
+- 2026-11-14T22:23 [MB.3.32] (lead) lead: no_python_build.rs added to paths (2-line asserted-sentence update, refusal behaviour unchanged, authorized but previously out of scope)
+- 2026-11-14T22:23 [MB.3.32] (lead) status active -> review
+- 2026-11-14T22:24 [MB.3.31] (lead) REVIEW FAIL (attempt 2): (4) MB.3.22 item 5 orders deletion of MB.3.5.4:61, which is the LIVE [route.php] entry/workers acceptance; the stale clause it describe
+- 2026-11-14T22:24 [MB.3.31] (lead) status active -> ready
+- 2026-11-14T22:24 [MB.3.31] (lead) status ready -> active
+- 2026-11-14T22:24 [MB.3.31] (lead) attempt 3/3 started
+- 2026-11-14T22:25 [MB.3.22] (planner) edited fields
+- 2026-11-14T22:26 [MB.3.31] (lead) status active -> done
+- 2026-11-14T22:26 [MB.3.32] (lead) status review -> done

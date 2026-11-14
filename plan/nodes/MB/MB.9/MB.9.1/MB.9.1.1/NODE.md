@@ -29,9 +29,9 @@ knowledge.
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.2, §4.2.1 (exact shapes), §4.2
-  "crates by seam" and §8's `MB.9.1.1` row; `ADR-0008`. §8.2's `MB.9.1` row is the
-  brief re-sync: `depends_on` includes `MB.3.5.1`, the single source is
+- Design of record: `ADR-0008`'s surviving `Upstream` contract and `ADR-0009`'s
+  runtime-provider model; every exact shape is restated in this brief, because the retired
+  design that first wrote them is deleted with `ADR-0010`. The brief carries: `depends_on` includes `MB.3.5.1`, the single source is
   `Executor::kind()`, the first build runs **without** `--locked`, and `RouteId`,
   `RouteState`, `PinnedSocket`, `UpstreamSignal::ExecutorReady { socket_inode }` and
   `WireRequest.executor_ran` are all in this leaf.
@@ -72,9 +72,10 @@ knowledge.
   no `cfg!` feature switch, no globals/`lazy_static`/`OnceCell`.
 - Dependencies: `blastit-http` (`BodyFraming`), `blastit-manifest` **types** and
   `serde = { version = "1.0.229", features = ["derive"] }` only. Never
-  `blastit-scheduler`, `blastit-view`, `blastit-fastcgi` or `blastit`.
+  `blastit-scheduler`, `blastit-view` or `blastit`.
 - **`Cargo.lock` is yours and this is the second link of the release chain**
-  (`MB.3.4.1` → `MB.9.1.1` → `MB.9.2.1.1` → `MB.3.6.1.2` → `MB.3.8`): run the first
+  (`MB.3.4.1` → `MB.9.1.1` → `MB.9.2.1.1` → `MB.3.8`; the retired `MB.3.6.1.2` link went with
+  the external PHP path, `MB.3.17`): run the first
   build offline **without** `--locked` to write the lock, then every later command with
   `--locked`. `members = ["crates/*"]` means no root `Cargo.toml` edit.
 

@@ -21,6 +21,8 @@ created: "2026-11-14T01:09"
 updated: "2026-11-14T14:22"
 ---
 
+HISTORICAL — written for the retired FastCGI/php-fpm design. ADR-0010 replaced it (embedded host NTS libphp in per-route view workers). Do not implement from this node.
+
 # Goal
 
 Add the new **pure** crate `crates/blastit-fastcgi` — FastCGI record framing, the PARAMS

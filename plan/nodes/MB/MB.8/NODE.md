@@ -39,4 +39,4 @@ What no e2e covers: a **Django app whose `STATIC_ROOT` is served by `[static]`**
 
 - Do not duplicate the SPA leg: this is the "app + static in one routes table" shape.
 - Keep it fast (the whole e2e gate is ~30-60 s today) and Docker-only, like its neighbours.
-- The PHP equivalent belongs to MB.3 once PHP-FPM exists; note it there rather than faking it here.
+- The PHP equivalent belongs to MB.3 once embedded PHP exists (`[route.php]`, ADR-0010); note it there rather than faking it here.

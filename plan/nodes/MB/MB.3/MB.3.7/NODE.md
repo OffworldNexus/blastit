@@ -16,24 +16,26 @@ updated: "2026-11-14T14:39"
 
 # Goal
 
-Prove on a live, **unpatched** `php-fpm` that the epic's promises hold: a Symfony/Laravel
-style `public/index.php` front controller runs under `blastit dev` and `blastit check` with
-zero `sudo`, and every `php2shell` probe in the design's refusal matrix fails harmlessly.
+Prove on a live, **unpatched** PHP runtime that the epic's promises hold: a Symfony/Laravel
+style `public/index.php` front controller runs embedded under `blastit dev` and
+`blastit check` with zero `sudo`, and every `php2shell` probe in the refusal matrix fails
+harmlessly.
 Replay `docs/frameworks/php.md`'s own commands verbatim, in a container, against the shipped
 wheel.
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §7.3 (the e2e replay and the fixture
-  contract), §4.7 (the `E1`–`E25` probe table), §5.2 (the CVE defence table) and §8's
-  `MB.3.7` row. Everything is proven here, not taken on trust: the page (`MB.3.2`), the
-  design (`MB.3.3`), the codec (`MB.3.4`), the grammar (`MB.3.5`) and the session/CLI
-  (`MB.3.6`).
+- Design of record: `ADR-0010` §1–§3 (the embedded worker, the Stage-0/Stage-1 `libphp`
+  checks, the C-memory `$_SERVER`), `docs/research/php2shell.md` (the `E1`–`E25` probe table
+  and the CVE defence table) and `docs/frameworks/php.md`. Everything is proven here, not
+  taken on trust: the page (`MB.3.2`/`MB.3.10`), the worker (`MB.3.13`), the grammar
+  (`MB.3.5`) and the exchange/CLI (`MB.3.6`).
 - Files (the whole leaf, 5 path entries): `e2e/php/**`, `e2e/php2shell.py`,
   `e2e/compose.yaml`, `e2e/run.py`, `e2e/rootless/**`.
-- Fixture (`e2e/php/**`): a pinned **unpatched** `php:7.4-fpm`-style image (record the
-  digest and why that tag; the point is that the runtime is not what saves us), a non-root
-  pool listening on a Unix socket in a writable dir, `public/index.php` answering
+- Fixture (`e2e/php/**`): a pinned **unpatched** `php:8.2`-style image that ships the NTS
+  `libphp` (record the digest and why that tag; the point is that the runtime is not what
+  saves us), a non-root `EmbeddedView` worker running as the route's uid, `public/index.php`
+  answering
   `GET`/`POST /__inspect` with exactly `{"script_filename","script_name","path_info",
   "document_root","request_uri","query_string","request_method","content_length",
   "allow_url_include","http_proxy","user_ini","server_keys"}` (`server_keys` is
@@ -47,13 +49,11 @@ wheel.
   - replays every `$ ` command of `docs/frameworks/php.md` verbatim (an unknown `$ `
     command is a failure). **Re-read after 2026-11-14 (MB.3.9.1):** the page's Local is now
     `uv tool install blastit` then `blastit dev`, and CI is `blastit check -- <suite>`; the
-    hand-written `php-fpm.conf`, the `mkdir -p …/run` and the absolute `listen` fence are
-    **gone**, so the old "`uv init`/`uv add` exempt" clause and the `php-fpm -tt -y` run on
-    *the page's* INI no longer apply. The drifted-`clear_env`/`listen.mode`/`pm.max_children`
-    assertions move to the **generated** pool file — and only if the submitted mechanism
-    keeps a pool; if `MB.12` lands the embed model, the equivalent assertion is that
-    `blastit dev` starts the PHP worker with the derived configuration and that a second
-    route gets its own.
+    the hand-written PHP server config, the `mkdir -p …/run` and the absolute `listen` fence
+    are **gone**, so the old "`uv init`/`uv add` exempt" clause and the hand-written-INI run
+    no longer apply. The equivalent assertion is that `blastit dev` starts one `EmbeddedView`
+    PHP worker set per `[route.php]` route from the manifest's `entry`/`workers`, and that a
+    second route gets its own (ADR-0010 §1–§2).
   - runs the two PHPUnit suites behind the page's CI fences: `uv run blastit check --
     vendor/bin/phpunit` against `e2e/php/suite/` (`24` HTTP requests →
     `blastit check: 24 requests, 0 statements, 1/1 routes, clean`) and
@@ -64,14 +64,14 @@ wheel.
     **except `P4b`**, whose canary must be **present** (the positive control of §5.2,
     excluded from the absent assertion). `P12` includes a raw-socket malformed/proxy-control
     CGI-head responder for row 24.
-- `e2e/rootless/**`: `check_fastcgi_parent_pivot_leaves_sentinel_untouched` (after
-  `PoolReady`, a privileged harness binds a decoy listener at `/sentinel/fpm.sock`, renames
-  `run` aside and symlinks `run -> /sentinel` → the live `GET /users/42` answers `200` from
-  the pinned `entry` while `/sentinel/fpm.sock` records **0** `accept`s; `RETIRE`/respawn
-  while symlinked fails closed with `503` + Unwind `U1`; restoring `run` and respawning binds
-  a fresh `(sock_dev, sock_ino)` inside `parentfd`), `check_fastcgi_entry_0000_refused_for_route_uid`,
+- `e2e/rootless/**`: `check_php_entry_swap_leaves_sentinel_untouched` (after the worker is
+  ready, a privileged harness renames the route's `public/` aside and symlinks it to a decoy
+  tree → the live `GET /users/42` still answers `200` from the `entry` inode pinned at boot,
+  and the decoy records **0** opens; a worker recycled while symlinked fails closed with
+  `503`; restoring `public/` and recycling re-opens a fresh `(st_dev, st_ino)` inside the
+  route's manifest dir, ADR-0010 §3), `check_php_entry_0000_refused_for_route_uid`,
   the route-uid `chmod`/`O_CREAT`/`unlink` `EPERM`/`EACCES` negatives, and cross-route
-  isolation (route A's uid cannot `connect` to pool B → `EACCES`).
+  isolation (route A's uid cannot read route B's `manifest_dir` → `EACCES`).
 - Registration: one `php` service in `e2e/compose.yaml` and one leg in `e2e/run.py`,
   additive to the existing static/sqlalchemy/rootless legs, so bare `make e2e` covers it.
   Keep the leg's wall time small (reuse the prebuilt wheel image pattern).
@@ -82,7 +82,7 @@ wheel.
 $ uv run --no-project e2e/php2shell.py --self-test
 $ grep -q 'docs/frameworks/php.md' e2e/php2shell.py && echo "driver replays the page"
 $ grep -q 'php' e2e/compose.yaml && grep -q 'php2shell' e2e/run.py
-$ grep -q 'check_fastcgi_parent_pivot_leaves_sentinel_untouched' e2e/rootless/run.py
+$ grep -q 'check_php_entry_swap_leaves_sentinel_untouched' e2e/rootless/run.py
 $ make e2e
 $ make check
 ```

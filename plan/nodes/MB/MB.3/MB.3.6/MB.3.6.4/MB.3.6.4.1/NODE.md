@@ -23,9 +23,10 @@ Make the observation path honest for a route with no Python: the two-shape
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.10.1 (one file, two line shapes, one
-  write path), §4.10.2 (`--learn` proposals), §4.10.3 (`check` reporting) and §8's
-  `MB.3.6.4.1` row; §8.2's `MB.3.6.4` row.
+- Design of record: this brief's §4.10.1 (one file, two line shapes, one write path),
+  §4.10.2 (`--learn` proposals) and §4.10.3 (`check` reporting), over the embedded worker's
+  observations (`ADR-0010` §1); the retired design that first wrote those shapes is deleted
+  with `ADR-0010`.
 - Files (the whole leaf, 3): `crates/blastit/src/{audit_v1,dev_learn,check}.rs`.
 - What lands:
   - The two-shape reader: a legacy `HttpObsLine` **without** `kind` still parses, unchanged;
@@ -56,7 +57,7 @@ $ make check
 
 # Notes
 
-- `cli.rs`, `check::serve_and_run`, the 3-way branch order and `critical_fastcgi_learn.rs`
+- `cli.rs`, `check::serve_and_run`, the 3-way branch order and `critical_php_learn.rs`
   are `MB.3.6.4.2`'s; this leaf is the reader and the pure audit logic only.
 - `crates/blastit/src/check.rs` is shared with `.2`; the two leaves are serialized by
   `depends_on`, so land the reader side and leave the CLI half untouched.

@@ -19,3 +19,7 @@ HELD pending MB.12 embed-vs-pool decision. MB.3.9.1 (page) is running and is tre
 ## 2026-11-14T14:06 [lead]
 
 INSTALL-STORY follow-up (reviewer finding on MB.3.9.1, deferred not fixed): docs/frameworks/php.md teaches 'uv tool install blastit' + bare 'blastit dev', while README/getting-started teach 'uv add blastit' + 'uv run blastit'; the page's fence is accounted (static) rather than executed, so nothing proves the tool install. This is a cross-page DX inconsistency, not a php-specific one -- it belongs with MB.12's distribution decision (and the same decision owns BLASTIT_PHP_FPM vs BLASTIT_LIBPHP). When that lands, align all three pages and make the chosen install line an EXECUTED fence, not an accounted one.
+
+## 2026-11-14T22:18 [planner]
+
+edited fields

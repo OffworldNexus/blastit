@@ -25,16 +25,16 @@ updated: "2026-11-14T10:51"
 
 Land the scheduler-side configuration and head plumbing the contract needs: the
 `blastit-backend` + `blastit-http` dependency edges and lock, `ReqHeadView::scheme()`,
-`server_name`/`server_port`, `RouteInfo.executor` with `with_fastcgi` after
+`server_name`/`server_port`, `RouteInfo.executor` with `with_php` after
 `with_static`, and the four new `SchedulerConfig` fields that `stage1` must populate
 (design leaf `MB.9.2a`, part 1).
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.2.1 (`UpstreamHead`),
-  §4.2 "where the handle lives" (`RouteInfo.executor`, `with_fastcgi` **after**
-  `with_static`, the exact `static_forward` expression) and §8's `MB.9.2.1.1` row;
-  §8.2's `MB.9.2.1` row is the brief re-sync.
+- Design of record: `ADR-0008`'s surviving `Upstream` contract, with the shapes restated
+  here (`UpstreamHead`; the handle lives in `RouteInfo.executor`, `with_php` **after**
+  `with_static`, the exact `static_forward` expression); the retired design is deleted with
+  `ADR-0010`.
 - Files (the whole leaf, 7): `Cargo.lock`, `crates/blastit-scheduler/Cargo.toml`,
   `crates/blastit-scheduler/src/{route,config,lib}.rs`, `crates/blastit-frame/src/raw.rs`,
   `crates/blastit/src/stage1.rs`.
@@ -48,7 +48,7 @@ Land the scheduler-side configuration and head plumbing the contract needs: the
     scheduler never reads it is updated. Plus `server_name`/`server_port` accessors.
   - `crates/blastit-scheduler/src/route.rs`: `RouteInfo.executor: Option<Executor>`
     (`RouteInfo::new` defaults to `Some(Executor::View)`), `with_static` then
-    `with_fastcgi` in `routes_from_manifest`, `static_policy`/`static_forward` **stay** on
+    `with_php` in `routes_from_manifest`, `static_policy`/`static_forward` **stay** on
     the descriptor (protected suites read them).
   - `crates/blastit-scheduler/src/config.rs`: `SchedulerConfig.{http_obs: Option<PathBuf>,
     pool_spawn, pinned_sockets, route_lines}` (`http_obs` is `None` until `MB.3.6.3.1`

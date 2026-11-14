@@ -26,53 +26,61 @@ updated: "2026-11-14T16:36"
 
 # Goal
 
-Make `0.2.1` releasable: bump the workspace version and every intra-workspace requirement,
-write the dated changelog entry, and sync `ARCHITECTURE.md`, `docs/security.md`,
+Make `0.2.0` releasable: confirm the workspace version (already `0.2.0` — the release was
+folded, so there is no `0.2.1` bump) and every intra-workspace requirement, write the dated
+changelog entry, and sync `ARCHITECTURE.md`, `docs/security.md`,
 `docs/design/static-and-spa.md` and the one-line `ADR-0007` amendment banner with the shipped
-FastCGI backend. Release gate only — no feature work, no new dependency.
+embedded PHP backend. Release gate only — no feature work, no new dependency.
 
 # Context
 
-- `Cargo.toml`: `[workspace.package] version = "0.2.1"`. Every intra-workspace
-  `version = "<old>", path = "../…"` requirement in `crates/*/Cargo.toml` must name `0.2.1`
-  — including `crates/blastit-fastcgi/Cargo.toml` and `crates/blastit-backend/Cargo.toml`.
-  Count them from the tree; do not assume the `0.2.0` count.
+- `Cargo.toml`: `[workspace.package] version = "0.2.0"` and it must **not** bump (release
+  fold, `MB.3/LOG.md` 2026-11-14T16:36). Every intra-workspace `version = "<old>",
+  path = "../…"` requirement in `crates/*/Cargo.toml` must name `0.2.0` — including
+  `crates/blastit-php-sapi/Cargo.toml` and `crates/blastit-view/Cargo.toml`. Count them from
+  the tree; do not assume a stale count.
 - `Cargo.lock` is rewritten line by line (the version fields of the workspace packages),
   never with `cargo update --workspace`, so the tested dependency graph does not drift;
   `--locked` builds must pass. This is the **last** link of the serialized lock chain
-  (`MB.3.4.1` → `MB.9.1.1` → `MB.9.2.1.1` → `MB.3.6.1.2` → `MB.3.8`): every crate and
-  dependency edge already has its lock entry; you only move versions.
-- `CHANGELOG.md`: `## 0.2.1 (YYYY-MM-DD)` with the real date, same voice and length as
-  `## 0.2.0` — PHP-FPM/FastCGI routes for Symfony/Laravel/PSR-15, one-manifest `public/`
+  (`MB.3.4.1` → `MB.9.1.1` → `MB.9.2.1.1` → `MB.3.8`; the retired `MB.3.6.1.2` link went with
+  the external PHP path, `MB.3.17`): every crate and dependency edge already has its lock
+  entry; you only move versions.
+- `CHANGELOG.md`: the dated `## 0.2.0 (YYYY-MM-DD)` entry (finalize the date; it already
+  covers static + pooler presets and gains PHP), same voice and length as the rest of the
+  file — embedded PHP routes (host NTS `libphp`, one `[route.php]` front controller with
+  `entry` and an optional `workers` cap) for Symfony/Laravel/PSR-15, one-manifest `public/`
   static + front controller, the refusal classes (`SCRIPT_FILENAME`, `PHP_VALUE`/
-  `PHP_ADMIN_VALUE`, `-d` gadget probes, `httpoxy`), zero-`sudo` local pool, and the
+  `PHP_ADMIN_VALUE`, `-d` gadget probes, `httpoxy`), zero-`sudo` local dev, and the
   `dev --learn` / `check` experience for PHP routes.
-- `ARCHITECTURE.md` §7.3: one terse section for the FastCGI backend — the pure codec crate,
-  the scheduler session, who owns the pool child and its uid, the socket permission rule, the
-  param allowlist/canonicalisation boundary, and `STDERR`/`END_REQUEST` accounting. Match the
-  code, not the design's intentions; if they differ, say so in `RESULT.md`.
-- `docs/security.md` and `docs/design/static-and-spa.md` §5.1: record the scheduler's
-  `AF_UNIX` seccomp allowance together with `SYS_bind`/`SYS_listen` `EPERM` (ADR-0008
-  decision 7, which amends ADR-0007 decision 1). State that the BPF wall is
-  `args[0] == AF_UNIX` only and that the path wall is the pinned `parentfd` + the `0600`
-  scheduler-owned socket.
-- `docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md`: add the **1-line**
-  `Amended by ADR-0008` banner — nothing else in that ADR changes.
-- `scripts/check-release-tag.sh v0.2.1` and `scripts/release-notes.sh --require-dated v0.2.1`
+- `ARCHITECTURE.md` §7.3: one terse section for the embedded PHP backend — the `view.chan`
+  `RawFrame` exchange, the per-minor SAPI shim, who owns the `EmbeddedView` child and its uid,
+  the `libphp` fd-verification rule, the C-memory `$_SERVER` boundary, and the
+  `app.output`/CPU-ns accounting. Match the code, not the design's intentions; if they
+  differ, say so in `RESULT.md`.
+- `docs/security.md` and `docs/design/static-and-spa.md` §5.1: record only what `ADR-0010`
+  states — `SeccompRole::Scheduler` keeps zero `socket()` (§2, Consequences) and the PHP route
+  runs under `SeccompRole::EmbeddedView { egress }` (§1), citing `ADR-0010` §1 and §2 plus
+  `ARCHITECTURE.md` §1. This node writes no new security decision: anything not in those
+  places stays out.
+- `docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md`: **no banner.** `ADR-0010`
+  does not amend it — §1–§2 restore decision 1's zero-`socket()` scheduler (the ADR-0008
+  decision 7 `AF_UNIX` allowance went with the pool, `MB.3.17`). Never write an amendment
+  note into a decision record that did not happen.
+- `scripts/check-release-tag.sh v0.2.0` and `scripts/release-notes.sh --require-dated v0.2.0`
   are the release gates. Run them; never `git tag`, `git push`, or `gh pr`.
 
 # Acceptance
 
 ```console
 $ CARGO_NET_OFFLINE=true cargo check --workspace
-$ grep -q '^version = "0.2.1"$' Cargo.toml && echo "workspace version bumped"
-$ ! grep -rn 'path = "\.\./' crates/*/Cargo.toml | grep 'version = ' | grep -v 'version = "0.2.1"' && echo "every intra-workspace requirement names 0.2.1"
+$ grep -q '^version = "0.2.0"$' Cargo.toml && echo "workspace version is 0.2.0 (no bump)"
+$ ! grep -rn 'path = "\.\./' crates/*/Cargo.toml | grep 'version = ' | grep -v 'version = "0.2.0"' && echo "every intra-workspace requirement names 0.2.0"
 $ cargo metadata --locked --no-deps --format-version 1 > /dev/null && echo "lockfile agrees"
-$ grep -q '^## 0.2.1 (' CHANGELOG.md && echo "dated changelog entry"
-$ grep -q 'FastCGI' ARCHITECTURE.md && grep -qi 'php' ARCHITECTURE.md
-$ grep -q 'Amended by ADR-0008' docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md
-$ scripts/check-release-tag.sh v0.2.1
-$ scripts/release-notes.sh --require-dated v0.2.1 > /dev/null && echo "release notes accept the entry"
+$ grep -q '^## 0.2.0 (' CHANGELOG.md && echo "dated changelog entry"
+$ grep -q 'libphp' ARCHITECTURE.md && grep -qi 'php' ARCHITECTURE.md
+$ grep -q 'may not call' docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md && grep -q 'socket()' docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md && ! grep -q 'Amended by ADR-0010' docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md && echo "ADR-0007 decision 1 stands unamended"
+$ scripts/check-release-tag.sh v0.2.0
+$ scripts/release-notes.sh --require-dated v0.2.0 > /dev/null && echo "release notes accept the entry"
 $ make check
 $ make e2e
 ```

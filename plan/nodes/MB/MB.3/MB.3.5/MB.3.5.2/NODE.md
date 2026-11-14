@@ -13,7 +13,7 @@ paths:
   - crates/blastit/src/probe.rs
   - crates/blastit/src/lib.rs
   - crates/blastit/src/supervise.rs
-  - "crates/blastit-manifest/tests/critical_fastcgi_manifest.rs"
+  - "crates/blastit-manifest/tests/critical_php_manifest.rs"
   - docs/reference/manifest.md
 attempts: 0
 max_attempts: 3
@@ -24,28 +24,30 @@ updated: "2026-11-14T14:39"
 
 # Goal
 
-Add the pure `SocketProbe` seam and the boot probes for `[route.fastcgi]`, then document
+Add the pure `EntryProbe` seam and the boot probes for `[route.php]`, then document
 the block: `blastit-manifest/src/probe.rs` holds the trait and errors,
 `crates/blastit/src/probe.rs` holds the syscall bodies (`DevProbe`/`ProductionProbe`),
 `crates/blastit/src/lib.rs` becomes the single owner of the module list, `supervise.rs`
-narrows its public surface, and `docs/reference/manifest.md` gets all three §4.1 edits
-(design leaf `MB.3.5`, part 2).
+keeps `Parts`/`Supervisor` out of the manifest's dependency graph, and
+`docs/reference/manifest.md` gets the `[route.php]` entry (design leaf `MB.3.5`, part 2).
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.1 (probe rules and the exact fatal
-  messages), §4.8.1/§4.8.2 (parent and ancestor validation), §8's `MB.3.5.2` row and
-  §8.2's `MB.3.5` row.
+- Design of record: `ADR-0010` §2 (`entry` required, optional downward `workers`, no
+  `listen`/`socket`/`port`/`env`) and §3 (Stage-0 `libphp` discovery plus the Stage-1
+  `(st_dev, st_ino)` re-check this leaf's probe mirrors); the retired external-PHP design is
+  deleted with `ADR-0010` and is not a source.
 - Files (the whole leaf, 7): `crates/blastit-manifest/src/{probe,lib}.rs`,
   `crates/blastit/src/{probe,lib,supervise}.rs`,
-  `crates/blastit-manifest/tests/critical_fastcgi_manifest.rs`,
+  `crates/blastit-manifest/tests/critical_php_manifest.rs`,
   `docs/reference/manifest.md`.
 - What lands:
-  - `blastit-manifest/src/probe.rs`: pure `SocketProbe` (`check` + `check_entry`) and
-    `SocketProbeError` (`Missing`/`NotSocket`/`NotRegularFile`/`Unreadable{uid}`/
+  - `blastit-manifest/src/probe.rs`: pure `EntryProbe` (`check` + `check_entry`) and
+    `EntryProbeError` (`Missing`/`NotRegularFile`/`NotPhpFile`/`Unreadable{uid}`/
     `OutsideRoot`/`Timeout`/`ForeignOwner{uid}`/`Symlink`/`ParentWritableOrSymlink`/`Io`),
-    `ProbeUid`, `check_fastcgi_entries(.., probe, uid)` and
-    `check_fastcgi_sockets -> Vec<(usize, OwnedFd)>`. `lib.rs` appends **only**
+    `ProbeUid` and `check_php_entries(.., probe, uid)`. There is no socket and no parent-fd
+    handoff: `[route.php]` is served over the worker's `view.chan` `socketpair`
+    (ADR-0010 §1). `lib.rs` appends **only**
     `pub mod probe;` — the two `pub use model::{…}` names are `MB.3.5.1`'s.
   - `crates/blastit/src/probe.rs`: the syscall bodies of `check_entry` plus
     `DevProbe`/`ProductionProbe`. `rustix` is already a dependency there, so
@@ -53,23 +55,24 @@ narrows its public surface, and `docs/reference/manifest.md` gets all three §4.
     `Cargo.toml` change).
   - `crates/blastit/src/lib.rs` (single owner): `pub mod probe;` + `pub mod supervise;`.
   - `crates/blastit/src/supervise.rs`: `Parts`, `Supervisor` and `Supervisor::new`
-    become **`pub(crate)`** so `private_interfaces` stays silent; `render_pool_conf`
-    (added by `MB.3.6.3.2`) and the later inline `pool_test` module stay `pub`.
-  - Protected `crates/blastit-manifest/tests/critical_fastcgi_manifest.rs` (new file):
-    `connect_and_trace_are_boot_fatal`, `workers_zero_and_sixty_five_are_boot_fatal`,
-    `shared_listen_parent_is_boot_fatal`, `probe_timeout_is_boot_fatal` (a fake probe
-    that never replies → `Timeout`, boot-fatal), the `NotRegularFile` /
+    become **`pub(crate)`** so `private_interfaces` stays silent; there is no pool config
+    and no `pool_test` module (both went with the external path, `MB.3.17`).
+  - Protected `crates/blastit-manifest/tests/critical_php_manifest.rs` (this leaf's cases):
+    `entry_missing_is_boot_fatal`, `workers_zero_and_sixty_five_are_boot_fatal`,
+    `entry_outside_root_is_boot_fatal`, `entry_writable_by_route_uid_is_boot_fatal`,
+    `probe_timeout_is_boot_fatal` (a fake probe that never replies → `Timeout`, boot-fatal),
+    the `NotRegularFile` /
     `Unreadable { uid }` / `OutsideRoot` injections through the fake `check_entry`, the
     positive page manifest, and the two `StaticDeadDeclaration` twins.
-  - `docs/reference/manifest.md`: all three §4.1 edits (the `[route.fastcgi]` entry, the
-    static-interaction lines, the reference row).
-- The `supervise.rs` clippy gate belongs to `MB.3.6.3.2`, not here. No `Cargo.toml`, no
-  `Cargo.lock`.
+  - `docs/reference/manifest.md`: the `[route.php]` entry (`entry` required, optional
+    `workers`, the rejected keys), the static-interaction lines and the reference row.
+- No pool config and no `supervise.rs` clippy gate belong here (that owner node is
+  superseded). No `Cargo.toml`, no `Cargo.lock`.
 
 # Acceptance
 
 ```console
-$ cargo test -p blastit-manifest --test critical_fastcgi_manifest --locked
+$ cargo test -p blastit-manifest --test critical_php_manifest --locked
 $ cargo test -p blastit --locked
 $ ! grep -qE 'rustix|libc' crates/blastit-manifest/Cargo.toml && echo "manifest stays syscall-free"
 $ grep -q 'pub mod probe;' crates/blastit/src/lib.rs && grep -q 'pub mod supervise;' crates/blastit/src/lib.rs && echo "single owner of lib.rs"
@@ -79,9 +82,9 @@ $ make check
 
 # Notes
 
-- `critical_fastcgi_manifest.rs` is a **new** file (additions are free);
-  `critical_static_manifest.rs` stays untouched and green.
-- `check_fastcgi_sockets` returns `Vec<(usize, OwnedFd)>`; `MB.3.6.4.2` threads it to the
-  child `dev` as `BLASTIT_CHECK_POOL_PARENT_FD`.
+- `critical_php_manifest.rs` is already protected (`MB.3.5.4`); this leaf adds cases to it
+  and leaves `critical_static_manifest.rs` untouched and green.
+- There is no socket to hand over: the child `dev` reads the manifest and discovers `libphp`
+  itself (ADR-0010 §3), so `MB.3.6.4.2` threads no parent fd.
 - No `std::fs::canonicalize()`: the design refuses caller-path resolution; the parent is
   pinned by descriptor and re-verified by inode.

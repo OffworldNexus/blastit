@@ -40,10 +40,11 @@ only event that releases a slot, and expose the boot surface to the composition 
 
 # Context
 
-- Design of record: `docs/design/php-fastcgi.md` §4.2 (injection, the dispatch call site, the
+- Design of record: `ADR-0008`'s surviving `Upstream` contract and `ADR-0009`'s
+  `WorkerRuntime`, with the shapes restated here (injection, the dispatch call site, the
   `Session`/`SessionMsg` seam, `run_with`/`RunError`/`builtin_registry`, the transitional
-  rule), §4.2.1 (`UpstreamHead`, `SessionPort`, `PoolPort`), §4.5 (`ViewHub`, the session
-  task) and §8's three rows; §8.2's `MB.9.2.1` row is the brief re-sync.
+  rule, `UpstreamHead`, `SessionPort`, `ViewHub` + the session task); the retired design is
+  deleted with `ADR-0010`.
 - **`.1` runs its first cargo command offline without `--locked`** (it owns the third lock
   link) then `--locked`; it adds `SchedulerConfig.route_lines` and owns
   `crates/blastit/src/stage1.rs` (the `SchedulerConfig` literal ends in
@@ -78,6 +79,6 @@ $ make check
 - The static-specific slot plumbing (`Request.pumping`, `Scheduler.static_in`,
   `release_static_slot`) can only be deleted with the last static branch, so it survives
   until `MB.9.2.2`.
-- `StaticUpstream` is `MB.9.2.2`'s; `"wsgi"` is `MB.9.3`'s; `"fastcgi"` is `MB.3.6.2.1`'s.
-  This epic registers nothing.
-- Determinism: no Docker, no pool, no sleeping.
+- `StaticUpstream` is `MB.9.2.2`'s; `"wsgi"` is `MB.9.3`'s; `"php"` is `MB.3.6`'s
+  (`PhpEmbedRuntime`, `MB.3.13`). This epic registers nothing.
+- Determinism: no Docker, no PHP runtime, no sleeping.
