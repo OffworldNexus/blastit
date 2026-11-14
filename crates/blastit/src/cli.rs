@@ -519,6 +519,23 @@ fn role_is_allowed(role: &str, hosted: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The one flag an operator carries over from `blastit dev` (`MB.17`).
+///
+/// `blastit --port 4242` is the command an owner actually typed, and the
+/// generic "`…` is not `--key=value`" names neither the command that has the
+/// flag nor the setting production reads instead. `--port`/`-p` never belongs
+/// to this grammar at all — stage 0 carries the port to stage 1 inside the
+/// config descriptor — so this sentence is the whole answer, and the generic
+/// message stays for genuine key/value mistakes.
+const PORT_IS_DEV_ONLY: &str =
+    "`--port` is a `blastit dev` flag; production takes `PORT=<n>` or `--preset`";
+
+/// Whether `argument` is the dev-only port flag, with or without a value.
+fn is_dev_only_flag(argument: &str) -> bool {
+    let key = argument.split_once('=').map_or(argument, |(key, _)| key);
+    matches!(key, "--port" | "-p")
+}
+
 /// Parses `--key=value` arguments — and `--preset NAME`, which people type —
 /// refusing anything else.
 ///
@@ -544,6 +561,9 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
             index += 1;
             args.preset = Some(preset_name(value)?);
             continue;
+        }
+        if is_dev_only_flag(argument) {
+            return Err(PORT_IS_DEV_ONLY.to_string());
         }
         let Some((key, value)) = argument.split_once('=') else {
             return Err(format!("`{argument}` is not `--key=value`"));
@@ -732,6 +752,25 @@ mod tests {
                 "--seccomp=1".to_string(),
             ])
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_dev_only_port_flag_is_answered_with_the_two_places_it_belongs() {
+        // The command an owner typed (`MB.17`) must name both the command that
+        // has the flag and the setting production reads, never "not
+        // `--key=value`", which answers a question nobody asked.
+        for argument in ["--port", "--port=4242", "-p", "-p=4242"] {
+            let message = parse(&[argument.to_string()]).expect_err(argument);
+            assert_eq!(message, PORT_IS_DEV_ONLY, "{argument}");
+            assert!(message.contains("blastit dev"), "{message}");
+            assert!(message.contains("PORT="), "{message}");
+        }
+        // A genuine key/value mistake keeps the generic sentence: it is a
+        // different bug and the fix is different too.
+        assert_eq!(
+            parse(&["--stage".to_string()]).expect_err("a bare --stage"),
+            "`--stage` is not `--key=value`"
         );
     }
 

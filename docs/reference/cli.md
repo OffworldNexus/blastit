@@ -77,6 +77,10 @@ $ blastit --help
 | `--preset NAME`, `--preset=NAME` | one platform's defaults; a set `BLASTIT_*` or `PORT` still wins |
 | `--help`, `-h` | prints the usage and the preset list |
 
+There is no `--port` here: the listener is a [setting](settings.md) (`PORT`, or
+`BLASTIT_*`), and `blastit --port 8080` exits `1` with the usage. `--port` is
+`blastit dev`'s flag.
+
 Production **fails closed**: without root or the capability set in
 [the settings](settings.md#privileges-and-the-uid-layout), and without seccomp,
 it exits `1` and points at `blastit dev`. `--preset` belongs to stage 0;

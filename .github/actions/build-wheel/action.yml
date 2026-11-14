@@ -31,7 +31,14 @@ runs:
       uses: PyO3/maturin-action@v1
       with:
         manylinux: ${{ inputs.manylinux }}
-        args: --release --out dist --interpreter python${{ inputs.python }} --features blastit-py/extension-module
+        # Both capabilities are named here, not inherited by accident: the wheel
+        # is `python, php` (`ADR-0010` §4), and `blastit-py`'s dependency on
+        # `blastit` enables `python` today only because that manifest says so
+        # (`crates/blastit-py/Cargo.toml`). Passing `blastit/python` here too
+        # means a future reshuffle of that dependency — or a `--no-default-features`
+        # flag — cannot silently produce a wheel whose extension loads no
+        # interpreter, which would refuse every WSGI route at Stage 0.
+        args: --release --out dist --interpreter python${{ inputs.python }} --features blastit-py/extension-module,blastit/python
         # Inside the container, so the Python-free dbproxy binary the wheel
         # carries is built against the same old glibc as the extension.
         before-script-linux: |

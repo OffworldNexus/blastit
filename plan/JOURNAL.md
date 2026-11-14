@@ -1298,3 +1298,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T16:39 [MB.3.22] (lead) created (task) Close MB.3.5.4 review MINORs: PHP-only BLASTIT_APP refusal, check's pytest branch, Route::executor, dead key field
 - 2026-11-14T16:39 [MB.3.5.4] (lead) status review -> done
 - 2026-11-14T16:39 [MB.3.5.4] (lead) REVIEW PASS (attempt 2). Five MINORs deferred to MB.3.22 (two behavioural: stage0::static_app_refusal still keys on is_all_static so a PHP-only manifest silentl
+- 2026-11-14T17:04 [MB.3.20] (unknown) edited fields
+- 2026-11-14T17:04 [MB.3.20] (unknown) edited fields
+- 2026-11-14T17:04 [MB.3.20] (lead) acceptance extended (owner 2026-11-14): after the retarget grep -rn '0\.2\.1' docs/ may hit ONLY docs/design/*.review-*.md -- accepted ADRs must not name a stal
+- 2026-11-14T17:04 [MB.17] (lead) status ready -> active
+- 2026-11-14T17:04 [MB.17] (lead) attempt 1/3 started
+- 2026-11-14T17:04 [MB.17] (lead) base 8e657ca on release/0.2.0 (worktree .worktrees/release-0.2.0); owner-blocking: plain cargo build must not link libpython or embed a uv-cache RUNPATH.
+- 2026-11-14T17:24 [MB.17] (unknown) edited fields
+- 2026-11-14T17:31 [MB.17] (unknown) edited fields
+- 2026-11-14T17:38 [MB.3.23] (lead) created (task) Scope the WSGI-bound protected suites to feature=python (default build made cargo test -p blastit red)
+- 2026-11-14T17:38 [MB.3.27] (lead) created (task) Scope the WSGI-bound protected suites to feature=python (default build made cargo test -p blastit red)
+- 2026-11-14T17:43 [MB.17] (lead) status active -> done
+- 2026-11-14T17:43 [MB.3.27] (lead) status active -> done

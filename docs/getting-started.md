@@ -12,6 +12,10 @@ $ uv add blastit
 Wheels cover Linux x86_64 on CPython 3.13 and 3.14; elsewhere the sdist builds
 from source and needs a Rust toolchain and libclang.
 
+Without Python at all, build the standalone binary from this repository:
+`cargo build -p blastit --locked` writes `target/debug/blastit`, a plain Rust
+binary with no `libpython` to install and no `PATH` to configure.
+
 ## 2. Write two files
 
 Any WSGI callable works. This one is the whole app:
@@ -52,7 +56,7 @@ hello from blastit
 `blastit dev` reads `./blastit.toml` and runs as you: no `sudo`, no setup, no
 environment variables. It forks the same processes production does, on one uid,
 so a real request takes a real route. A path no route matches gets Blastit's own
-`404`, with no Python at all.
+`404`, with no Python at all. `blastit dev --port N` moves it off `8080`.
 
 ## Where next
 

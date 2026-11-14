@@ -28,6 +28,11 @@ PYO3_LIBDIR := $(abspath $(dir $(PYO3_BIN))/../lib)
 # at runtime, otherwise they cannot find the uv-managed stdlib ("No module named 'encodings'").
 PYO3_PREFIX := $(if $(PYO3_BIN),$(abspath $(dir $(PYO3_BIN))/..),)
 RUST_ENV = $(if $(PYO3_PREFIX),PYTHONHOME="$(PYO3_PREFIX)") PYO3_PYTHON="$(PYO3_BIN)" LD_LIBRARY_PATH="$(PYO3_LIBDIR)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"
+# A **standalone** build links no `libpython`, so it is not handed an interpreter
+# either: `crates/blastit/build.rs` now gates its `-Wl,-rpath,<prefix>/lib` on the
+# `python` feature (`MB.17`), and this is belt and braces — a `PYO3_PYTHON`
+# exported in a developer's shell cannot take part in the artifact's build.
+STANDALONE_ENV = env -u PYO3_PYTHON -u PYTHONHOME
 
 # `cargo-mutants` copies the whole workspace into "$TMPDIR/cargo-mutants-<crate>-XXXX.tmp"
 # and builds every mutant inside that copy, so TMPDIR holds multi-GiB build trees per
@@ -53,6 +58,18 @@ MUTANTS_MIN_FREE_GB ?= 5
 # touched within MUTANTS_STALE_MIN minutes so a concurrent campaign keeps its scratch.
 MUTANTS_KEEP_SCRATCH ?= 2
 MUTANTS_STALE_MIN ?= 240
+# `blastit`'s default build is the standalone artifact (`MB.17`): with `python` off,
+# every decorated role — the WSGI views, the immortalisation pass, the `learn` path —
+# is compiled out of the mutant build, so its mutants are generated but no test ever
+# exercises them, and the campaign reports them as survivors: a green-looking number
+# that covers half the crate. The capability therefore follows `PKG`.
+#
+# `--features python`, not `--all-features`: that also turns on
+# `blastit-py/extension-module`, whose test binaries cannot link (the interpreter
+# supplies those symbols). Not `blastit/python` either: cargo refuses a
+# package-qualified feature for a graph that does not contain the package, which is
+# why a workspace campaign is split below instead.
+MUTANTS_FEATURE_ARGS := $(if $(filter blastit,$(PKG)),--features python)
 
 # Dogfood the static backend: our own documentation site, built by Zensical and
 # served by a freshly built `blastit dev` through the real `[route.static]` path
@@ -116,51 +133,56 @@ rs-format: ## Format Rust workspace
 rs-fmt: ## Check Rust workspace formatting
 	$(CARGO) fmt --all -- --check
 
-rs-lint: ## Clippy workspace with warnings denied
-	$(RUST_ENV) $(CARGO) clippy --workspace --all-targets --locked -- -D warnings
+rs-lint: ## Clippy workspace with warnings denied (python capability on, like the wheel)
+	$(RUST_ENV) $(CARGO) clippy --workspace --all-targets --locked --features python -- -D warnings
 
 rs-doc: ## Check rustdoc across workspace with warnings denied
-	$(RUST_ENV) RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --locked
+	$(RUST_ENV) RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --locked --features python
 
-rs-test: ## Run all unprivileged Rust unit, integration, and doc tests
-	$(RUST_ENV) $(CARGO) test --workspace --all-targets --locked
-	$(RUST_ENV) $(CARGO) test --workspace --doc --locked
+rs-test: ## Run all unprivileged Rust unit, integration, and doc tests (python capability on)
+	$(RUST_ENV) $(CARGO) test --workspace --all-targets --locked --features python
+	$(RUST_ENV) $(CARGO) test --workspace --doc --locked --features python
 
-# The standalone archive's build (ADR-0010 §4): every embedded-CPython role off,
-# so nothing in the graph links `libpython`, and the `view.chan` framing, the
-# stage-0 env strip, the seccomp roles and the supervisor still compile. The
-# unit tests that need no interpreter run here too, so the gate proves the split
-# rather than only compiling it; the integration suites all need a live CPython
-# and belong to the default build. `cargo tree -e normal` excludes dev- and
-# build-dependencies, which is exactly "what the binary links".
-rs-no-python: ## Compile + test the interpreter-free (standalone/PHP) build
-	@echo "cargo check -p blastit --no-default-features --features php"
-	$(CARGO) check -p blastit --no-default-features --features php --locked
+# The default `cargo build -p blastit` **is** the standalone artifact (`MB.17`,
+# ADR-0010 §4): `blastit`'s default features are `php`, which needs nothing at
+# link time, while `python` links `libpython` and a `RUNPATH` into the uv
+# interpreter cache of whoever built it. This target is that build's guard — it
+# compiles the default, inspects the ELF (`readelf`: no `libpython`, no
+# `RPATH`/`RUNPATH`), and runs the suites that need no interpreter. The
+# interpreter-bound suites belong to the python configuration, which `rs-test`
+# builds; `make check` runs both, so neither can silently disappear.
+# `cargo tree -e normal` excludes dev- and build-dependencies, which is exactly
+# "what the binary links".
+rs-no-python: ## Build + inspect the default (standalone) binary: no libpython, no RUNPATH
+	@echo "cargo build -p blastit --locked            # the default build is the standalone artifact"
+	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked
+	scripts/check-portable-elf.sh "$(CURDIR)/target/debug/blastit"
 	@echo "cargo check -p blastit-view --no-default-features"
 	$(CARGO) check -p blastit-view --no-default-features --locked
-	@echo "cargo test  -p blastit --no-default-features --features php --lib"
-	$(CARGO) test -p blastit --no-default-features --features php --locked --lib
-	@echo "cargo test  -p blastit --no-default-features --features php --test no_python_build"
-	$(CARGO) test -p blastit --no-default-features --features php --locked --test no_python_build
+	@echo "cargo test  -p blastit --lib --locked      # the default configuration"
+	$(STANDALONE_ENV) $(CARGO) test -p blastit --locked --lib
+	@echo "cargo test  -p blastit --test no_python_build"
+	$(STANDALONE_ENV) $(CARGO) test -p blastit --locked --test no_python_build
 	$(CARGO) test -p blastit-view --no-default-features --locked --lib
-	@echo "clippy      -p blastit{,-view} --no-default-features"
-	$(CARGO) clippy -p blastit --no-default-features --features php --all-targets --locked -- -D warnings
+	@echo "clippy      -p blastit{,-view} (standalone)"
+	$(STANDALONE_ENV) $(CARGO) clippy -p blastit --all-targets --locked -- -D warnings
 	$(CARGO) clippy -p blastit-view --no-default-features --lib --locked -- -D warnings
-	@count=$$($(CARGO) tree -p blastit --no-default-features --features php -e normal \
+	@count=$$($(CARGO) tree -p blastit -e normal \
 		| grep -c pyo3 || true); \
 	if [ "$$count" -ne 0 ]; then \
-		echo "error: the interpreter-free build depends on pyo3 ($$count): it would link libpython" >&2; \
+		echo "error: the default build depends on pyo3 ($$count): it would link libpython" >&2; \
 		exit 1; \
 	fi; \
-	echo "interpreter-free build: 0 pyo3 dependencies (no libpython linked)"
+	echo "default build: 0 pyo3 dependencies (no libpython linked)"
 
 rs-test-critical: ## Run every crates/*/tests/critical_*.rs suite
 	@set -e; found=0; for file in crates/*/tests/critical_*.rs; do \
 		[ -e "$$file" ] || continue; found=1; \
 		crate=$$(basename $$(dirname $$(dirname "$$file"))); \
 		name=$$(basename "$$file" .rs); \
-		echo "cargo test -p $$crate --test $$name"; \
-		$(RUST_ENV) $(CARGO) test -p "$$crate" --test "$$name" --locked; \
+		features=""; if [ "$$crate" = "blastit" ]; then features="--features python"; fi; \
+		echo "cargo test -p $$crate $$features --test $$name"; \
+		$(RUST_ENV) $(CARGO) test -p "$$crate" $$features --test "$$name" --locked; \
 	done; [ "$$found" -eq 1 ] || echo "no Rust critical tests yet (crates/*/tests/critical_*.rs)"
 
 py-format: ## Format Python harness tools and the published package
@@ -193,8 +215,8 @@ test-critical: critical-skip-check rs-test-critical ## Run protected critical ti
 	rm -rf "$$stage"; \
 	mkdir -p "$$stage/blastit/_bin"; \
 	cp python/blastit/*.py "$$stage/blastit/"; \
-	echo "cargo build --locked -p blastit-py -p blastit-dbproxy"; \
-	$(RUST_ENV) CARGO_NET_OFFLINE=true $(CARGO) build --locked -p blastit-py -p blastit-dbproxy; \
+	echo "cargo build --locked -p blastit-py -p blastit-dbproxy --features blastit/python"; \
+	$(RUST_ENV) CARGO_NET_OFFLINE=true $(CARGO) build --locked -p blastit-py -p blastit-dbproxy --features blastit/python; \
 	cp target/debug/lib_blastit.so "$$stage/blastit/_blastit$${ext}"; \
 	cp target/debug/blastit-dbproxy "$$stage/blastit/_bin/blastit-dbproxy"; \
 	echo "python -m unittest discover -s python/tests/critical"; \
@@ -222,6 +244,10 @@ docs-test: docs-unit ## Execute every console fence in README.md and the public 
 # `site/` and a generated manifest beside them. Non-strict on purpose —
 # `docs-check` owns `--strict`; a preview should still show a page whose
 # neighbour has a broken link.
+# Dogfooding builds the **standalone** artifact (`MB.17`): a plain
+# `cargo build -p blastit` carries `php` and links no interpreter, and the
+# `readelf` check below keeps this preview from reintroducing a dependency on a
+# dev machine's libpython.
 docs-serve-stage:
 	@set -eu; \
 	echo "zensical build   -> site/"; \
@@ -241,7 +267,9 @@ docs-serve-stage:
 		'root = "site"' \
 		> "$(DOCS_SERVE_MANIFEST)"; \
 	echo "cargo build      -> $(DOCS_SERVE_BIN)"; \
-	$(RUST_ENV) $(CARGO) build -p blastit --locked
+	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked; \
+	echo "portable check   -> $(DOCS_SERVE_BIN)"; \
+	scripts/check-portable-elf.sh "$(DOCS_SERVE_BIN)"
 
 docs-serve: docs-serve-stage ## Build the docs site and serve it through `blastit dev` (PORT=8080)
 	@echo ""
@@ -420,7 +448,22 @@ mutants-rust: ## Run cargo-mutants with disk scratch + cgroup memory cap (PKG=<c
 	@mkdir -p "$(MUTANTS_TMP)"
 	MUTANTS_KEEP_SCRATCH="$(MUTANTS_KEEP_SCRATCH)" MUTANTS_STALE_MIN="$(MUTANTS_STALE_MIN)" scripts/mutants-scratch.sh prune "$(MUTANTS_TMP)"
 	MUTANTS_MIN_FREE_GB="$(MUTANTS_MIN_FREE_GB)" scripts/mutants-scratch.sh preflight "$(MUTANTS_TMP)"
-	$(RUST_ENV) TMPDIR="$(MUTANTS_TMP)" MUTANTS_JOBS="$(MUTANTS_JOBS)" MUTANTS_TIMEOUT="$(MUTANTS_TIMEOUT)" MUTANTS_MEMORY_MAX="$(MUTANTS_MEMORY_MAX)" CARGO="$(CARGO)" scripts/mutants-run.sh $(if $(PKG),-p "$(PKG)",--workspace)
+	@set -eu; \
+	run() { \
+		$(RUST_ENV) TMPDIR="$(MUTANTS_TMP)" MUTANTS_JOBS="$(MUTANTS_JOBS)" \
+			MUTANTS_TIMEOUT="$(MUTANTS_TIMEOUT)" MUTANTS_MEMORY_MAX="$(MUTANTS_MEMORY_MAX)" \
+			CARGO="$(CARGO)" scripts/mutants-run.sh "$$@"; \
+	}; \
+	if [ -n "$(PKG)" ]; then \
+		run -p "$(PKG)" $(MUTANTS_FEATURE_ARGS); \
+	else \
+		others="$$($(CARGO) metadata --no-deps --format-version 1 \
+			| $(UV) run --no-project python -c 'import json, sys; print(" ".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"] if p["name"] != "blastit")))')"; \
+		set --; \
+		for package in $$others; do set -- "$$@" -p "$$package"; done; \
+		run "$$@"; \
+		run -p blastit --features python; \
+	fi
 
 mutants-clean: ## Delete mutants.out and every cargo-mutants scratch copy (report bytes freed)
 	scripts/mutants-scratch.sh clean "$(MUTANTS_TMP)"

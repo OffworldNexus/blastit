@@ -71,16 +71,23 @@ fi
 # host, and this rewrite copies README.md aside for the duration of the build.
 readme=$(mktemp "${TMPDIR:-/var/tmp}/blastit-README.XXXXXX")
 cp README.md "$readme"
+scratch=$(mktemp -d "${TMPDIR:-/var/tmp}/blastit-wheel.XXXXXX")
 restore_readme() {
     cp "$readme" README.md
     rm -f "$readme"
+    rm -rf "$scratch"
 }
 trap restore_readme EXIT
 "${link_python[@]}" scripts/readme-absolute-links.py
 
 # `blastit-py/extension-module` is deliberately not a default feature of that
 # crate: it must be on for this build alone (see `crates/blastit-py/Cargo.toml`).
-"${maturin[@]}" build --release --out dist --features blastit-py/extension-module "$@"
+# `blastit/python` is the wheel's half of `ADR-0010` §4 (wheels are `python,
+# php`): `blastit`'s default features are `php` only, so the wheel — the one
+# artifact that *has* an interpreter — names the capability here, and
+# `cargo build -p blastit --locked` stays the portable standalone binary.
+"${maturin[@]}" build --release --out dist \
+    --features blastit-py/extension-module,blastit/python "$@"
 
 # The wheel is useless without the dbproxy binary — a blastit started from it
 # refuses to boot — and maturin only puts it in because `pyproject.toml` names it
@@ -90,4 +97,47 @@ wheel=$(ls -t dist/blastit-*.whl | head -1)
 if ! grep -qa "blastit/_bin/blastit-dbproxy" "$wheel"; then
     echo "the wheel has no dbproxy binary in it: $wheel" >&2
     exit 1
+fi
+
+# `pyo3/extension-module` is what keeps the extension off `libpython`, but the
+# artifact is only portable if that is true of the *file in the wheel*, not of the
+# intent in `Cargo.toml` (`MB.17`). Extract every `blastit/_blastit*.so` and run
+# the same `readelf` assertions the standalone binary gets: no `libpython`, no
+# `RUNPATH`/`RPATH` into this machine's uv cache.
+#
+# A wheel is a zip by definition, and maturin always writes one. The only
+# non-zip `*.whl` in reach is the stub maturin `python/tests/test_release_scripts.py`
+# writes to exercise this script's README restore: there is no extension inside
+# it to inspect, so the note below is that case and nothing else. It is printed
+# (not silent) so a reader of a build log can see which path ran.
+"${link_python[@]}" - "$wheel" "$scratch" <<'PY'
+import sys
+import zipfile
+from pathlib import Path
+
+wheel, scratch = Path(sys.argv[1]), Path(sys.argv[2])
+if not zipfile.is_zipfile(wheel):
+    print(f"note: {wheel} is not a zip archive (a stub build); no extension to inspect")
+    sys.exit(0)
+with zipfile.ZipFile(wheel) as archive:
+    members = [
+        name
+        for name in archive.namelist()
+        if name.startswith("blastit/") and "_blastit" in name and name.endswith(".so")
+    ]
+    if not members:
+        sys.exit(f"{wheel} carries no blastit/_blastit*.so: there is no extension to check")
+    with (scratch / "members").open("w", encoding="utf-8") as members_file:
+        for index, name in enumerate(members):
+            target = scratch / f"_blastit{index}.so"
+            target.write_bytes(archive.read(name))
+            members_file.write(f"{name}\t{target}\n")
+PY
+# `members` is written only by the zip path above, so an empty or absent file
+# means the note already said why there is nothing to check.
+if [ -s "$scratch/members" ]; then
+    while IFS=$'\t' read -r member extracted; do
+        echo "wheel: $member"
+        scripts/check-portable-elf.sh "$extracted"
+    done < "$scratch/members"
 fi
