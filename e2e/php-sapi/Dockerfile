@@ -10,7 +10,9 @@
 #
 #   docker build -f e2e/php-sapi/Dockerfile --build-arg PHP_MINOR=8.4 -t blastit-php-sapi-e2e .
 #   docker run --rm blastit-php-sapi-e2e            # one JSON line on stdout
-#   docker run --rm blastit-php-sapi-e2e readelf -d target/php-sapi/libblastit_php84.so
+#   docker run --rm blastit-php-sapi-e2e readelf -d target/php-sapi/libblastit_php84-x86_64-gnu.so
+# (`-aarch64-gnu` on an arm64 image: `make php-sapi` names the shim for the
+# image's own `cc -dumpmachine`, see `run-probe.sh`.)
 #
 # The context is the repository root (`Dockerfile.dockerignore` beside this file
 # keeps the host's `target/`, `site/` and `plan/` out of it); `make php-sapi`

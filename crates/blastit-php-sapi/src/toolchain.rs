@@ -58,6 +58,15 @@ impl Minor {
         }
     }
 
+    /// The `<major><minor>` infix of the shim name (`"84"`).
+    pub(crate) const fn digits(self) -> &'static str {
+        match self {
+            Self::Php82 => "82",
+            Self::Php83 => "83",
+            Self::Php84 => "84",
+        }
+    }
+
     /// The dotted minor (`"8.4"`), for messages and package names.
     pub fn dotted(self) -> &'static str {
         match self {
@@ -67,13 +76,19 @@ impl Minor {
         }
     }
 
-    /// The shipped shim for this minor, `libblastit_php84.so`.
-    pub fn shim_file(self) -> &'static str {
-        match self {
-            Self::Php82 => "libblastit_php82.so",
-            Self::Php83 => "libblastit_php83.so",
-            Self::Php84 => "libblastit_php84.so",
-        }
+    /// The shipped shim for this minor on this build's target, e.g.
+    /// `libblastit_php84-x86_64-gnu.so` (`ADR-0010` §4.1).
+    ///
+    /// The `<arch>` and `<libc>` come from the compile-time target, not from a
+    /// runtime probe, so the name the boot selects and the name `make php-sapi`
+    /// writes cannot disagree on a native build.
+    pub fn shim_file(self) -> String {
+        format!(
+            "libblastit_php{}-{}-{}.so",
+            self.digits(),
+            target_arch(),
+            target_libc()
+        )
     }
 
     /// Whether a shim reporting `code` may serve a host of this minor.
@@ -99,6 +114,31 @@ impl Minor {
 impl fmt::Display for Minor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.dotted())
+    }
+}
+
+/// The compile-time target's architecture, as the shim name spells it.
+///
+/// `ADR-0010` §4.1: a shim is named for the `(arch, libc)` the *boot* was
+/// compiled for, so the boot can combine that tuple with the host `libphp`'s
+/// probed minor. This is therefore `cfg!(target_arch)` and never a runtime
+/// `uname`, exactly as `stage0` spells it.
+const fn target_arch() -> &'static str {
+    if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        std::env::consts::ARCH
+    }
+}
+
+/// The compile-time target's libc, as the shim name spells it (`gnu`/`musl`).
+const fn target_libc() -> &'static str {
+    if cfg!(target_env = "musl") {
+        "musl"
+    } else {
+        "gnu"
     }
 }
 
@@ -262,8 +302,8 @@ impl Toolchain {
         self.minor
     }
 
-    /// The shim this toolchain builds, `libblastit_php84.so`.
-    pub fn shim_file(&self) -> &'static str {
+    /// The shim this toolchain builds, e.g. `libblastit_php84-x86_64-gnu.so`.
+    pub fn shim_file(&self) -> String {
         self.minor.shim_file()
     }
 

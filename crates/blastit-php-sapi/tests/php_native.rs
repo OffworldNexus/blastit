@@ -5,9 +5,13 @@
 //! ```console
 //! $ make php-sapi
 //! $ BLASTIT_LIBPHP=/usr/lib/libphp8.4.so \
-//!   BLASTIT_PHP_SHIM="$PWD/target/php-sapi/libblastit_php84.so" \
+//!   BLASTIT_PHP_SHIM="$PWD/target/php-sapi/libblastit_php84-<arch>-<libc>.so" \
 //!   cargo test -p blastit-php-sapi --test php_native -- --ignored --nocapture
 //! ```
+//!
+//! `<arch>-<libc>` is this build's tuple (`x86_64-gnu` on this host);
+//! `Minor::Php84.shim_file()` prints the exact name, and the missing-variable
+//! panic below does that for you.
 //!
 //! It is a harness, not a skip: with `--ignored` and a missing variable it
 //! fails with the usage above rather than returning success, so a green
@@ -19,7 +23,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use blastit_php_sapi::abi::{OUTCOME_OK, RequestV1, ServerVarV1};
-use blastit_php_sapi::{Egress, IniPolicy, Loaded, ServerVars, SharedObject, Sink};
+use blastit_php_sapi::{Egress, IniPolicy, Loaded, Minor, ServerVars, SharedObject, Sink};
 
 /// Records what the shim's callbacks produced, in order.
 #[derive(Default)]
@@ -59,8 +63,9 @@ fn required(name: &str) -> PathBuf {
             panic!(
                 "{name} is not set; run `make php-sapi` first, then \
                  BLASTIT_LIBPHP=/usr/lib/libphp8.4.so \
-                 BLASTIT_PHP_SHIM=$PWD/target/php-sapi/libblastit_php84.so \
-                 cargo test -p blastit-php-sapi --test php_native -- --ignored"
+                 BLASTIT_PHP_SHIM=$PWD/target/php-sapi/{} \
+                 cargo test -p blastit-php-sapi --test php_native -- --ignored",
+                Minor::Php84.shim_file()
             )
         },
         PathBuf::from,

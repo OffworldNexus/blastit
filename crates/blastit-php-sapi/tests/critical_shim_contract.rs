@@ -505,7 +505,22 @@ fn a_fake_toolchain_is_discovered_on_path() {
     .expect("a php8.4 toolchain on PATH is usable");
     assert_eq!(toolchain.minor(), Minor::Php84);
     assert_eq!(toolchain.version(), "8.4.27");
-    assert_eq!(toolchain.shim_file(), "libblastit_php84.so");
+    // ADR-0010 §4.1: the shipped name is
+    // `libblastit_php<major><minor>-<arch>-<libc>.so`, so the literal is per
+    // supported `(arch, libc)` tuple: swapping either one in `shim_file()`
+    // cannot pass.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        #[cfg(all(target_arch = "x86_64", not(target_env = "musl")))]
+        const SHIM: &str = "libblastit_php84-x86_64-gnu.so";
+        #[cfg(all(target_arch = "x86_64", target_env = "musl"))]
+        const SHIM: &str = "libblastit_php84-x86_64-musl.so";
+        #[cfg(all(target_arch = "aarch64", not(target_env = "musl")))]
+        const SHIM: &str = "libblastit_php84-aarch64-gnu.so";
+        #[cfg(all(target_arch = "aarch64", target_env = "musl"))]
+        const SHIM: &str = "libblastit_php84-aarch64-musl.so";
+        assert_eq!(toolchain.shim_file(), SHIM);
+    }
     assert!(toolchain.include_dir().is_dir());
     assert!(toolchain.php_config().ends_with("php-config8.4"));
 

@@ -409,6 +409,14 @@ const PHP_PACKAGES: &str = "install the PHP embed package — Debian/Ubuntu: \
 const PHP_OVERRIDE: &str = "set BLASTIT_LIBPHP=/path/to/libphp.so";
 
 /// The compile-time target's architecture, as the shim name spells it.
+///
+/// Deliberately a second spelling of the tuple in `crates/blastit-php-sapi`
+/// (`Minor::shim_file()`): that crate is an *optional* dependency of this
+/// binary (`php` feature) while this discovery gate compiles on every build, so
+/// its tuple cannot be imported here unconditionally (and the no-load guard
+/// below bans naming the loader crate at all).
+/// `the_shim_name_matches_the_adr_literal` pins this spelling to the ADR-0010
+/// §4.1 literals, so the two cannot drift.
 const fn target_arch() -> &'static str {
     if cfg!(target_arch = "x86_64") {
         "x86_64"
@@ -420,6 +428,9 @@ const fn target_arch() -> &'static str {
 }
 
 /// The compile-time target's libc, as the shim name spells it (`ADR-0010` §4).
+///
+/// Pinned by `the_shim_name_matches_the_adr_literal` for the same reason as
+/// [`target_arch`].
 const fn target_libc() -> &'static str {
     if cfg!(target_env = "musl") {
         "musl"
@@ -745,7 +756,13 @@ pub(crate) enum PhpBoot {
     /// `MB.3.28`'s interim refusal ([`php_backend_unavailable`]) — the route is
     /// not served until `MB.3.13.3` wires the worker — so a host that can embed
     /// PHP, and a `dev` host where nothing is installed yet, both stop there.
-    Proceed,
+    ///
+    /// The resolved runtime travels with it: `MB.3.13.3` forks the worker from
+    /// exactly this pair, and the boot line naming the shim (`MB.3.35`) is why a
+    /// `dev` boot with and without `target/php-sapi/…so` no longer reads the
+    /// same. `None` is the "nothing is installed yet" half of `dev`, which is
+    /// deliberately not fatal there.
+    Proceed(Option<PhpRuntime>),
     /// The host cannot embed PHP: the sentence names the route, the package,
     /// `BLASTIT_LIBPHP` and — when it is known — the `(PHP X.Y, <arch>-<libc>)`
     /// tuple.
@@ -761,7 +778,7 @@ impl PhpBoot {
     #[cfg(test)]
     fn refusal(&self) -> Option<&str> {
         match self {
-            Self::Absent | Self::Proceed => None,
+            Self::Absent | Self::Proceed(_) => None,
             Self::Refused(message) => Some(message),
         }
     }
@@ -806,13 +823,13 @@ fn php_boot(
         return PhpBoot::Refused(message);
     }
     match discover_php(search) {
-        Ok(_runtime) => PhpBoot::Proceed,
+        Ok(runtime) => PhpBoot::Proceed(Some(runtime)),
         Err(refusal) if refusal.is_fatal(scope) => {
             PhpBoot::Refused(php_refusal_message(route, entry, &refusal))
         }
         // Nothing this scope must refuse: `dev` is left to the interim
         // `MB.3.28` refusal the caller applies next.
-        Err(_) => PhpBoot::Proceed,
+        Err(_) => PhpBoot::Proceed(None),
     }
 }
 
@@ -905,12 +922,11 @@ fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
         }
     }
     let version = version.ok_or_else(|| PhpRefusal::NoVersion { path: path.clone() })?;
-    // One spelling, the `ADR-0010` §4.1 one. `make php-sapi` still writes
-    // `target/php-sapi/libblastit_php84.so` (`Minor::shim_file()`), so a
-    // developer who has just built a shim can see "no shim for the tuple" until
-    // the Makefile's output is renamed — that rename is `MB.3.13.3`/`MB.3.18`'s
-    // hand-off, already logged, and this lookup never accepts two spellings for
-    // the same tuple.
+    // One spelling, the `ADR-0010` §4.1 one: `make php-sapi` writes the same
+    // `libblastit_php<minor>-<arch>-<libc>.so` that `Minor::shim_file()` names,
+    // so a developer who has just built a shim is found here with no
+    // `BLASTIT_PHP_SHIM_DIR` (`MB.3.35`). This lookup never accepts two
+    // spellings for the same tuple.
     let shim = shim_name(version);
     let shim_path = search
         .shim_dirs
@@ -1251,6 +1267,24 @@ fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(slice))
 }
 
+/// The one line a boot emits when `[route.php]` discovery resolved a runtime
+/// (`MB.3.35`): the shim path and this build's `<arch>-<libc>` tuple.
+///
+/// It is what makes the native DX observable — a `dev` boot that found
+/// `target/php-sapi/libblastit_php84-x86_64-gnu.so` must not read like one that
+/// did not — and it is the line `MB.3.13.3` starts from when it wires the
+/// worker to the [`PhpRuntime`] the gate now carries. It names no library and no
+/// alternative transport, so `critical_php_backend.rs`'s "no fallback recipe"
+/// contract still holds for the whole boot output.
+fn php_runtime_line(runtime: &PhpRuntime) -> String {
+    format!(
+        "the [route.php] shim is {} (PHP {}, {})",
+        runtime.shim.display(),
+        runtime.version.dotted(),
+        target_tuple()
+    )
+}
+
 /// `MB.3.28` interim: a `[route.php]` route is refused at boot until the
 /// composition root can spawn an embedded-PHP worker (`MB.3.13.3`).
 ///
@@ -1555,9 +1589,18 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     match php_boot_gate(&config, &manifest, PhpShimScope::Deployment) {
         PhpBoot::Absent => {}
         PhpBoot::Refused(message) => fail(&emitter, &message),
-        // `MB.3.28`'s refusal, unchanged: the gate only reaches `Proceed` for a
-        // manifest that declares a `[route.php]` route, so this is `Some`.
-        PhpBoot::Proceed => {
+        // `MB.3.28`'s refusal, unchanged: in `Deployment` a missing library or
+        // shim is already fatal, so a `Proceed` here always carries the runtime.
+        PhpBoot::Proceed(runtime) => {
+            if let Some(runtime) = runtime.as_ref() {
+                // One line naming what was resolved (`MB.3.35`): the same
+                // sentence `dev` prints, so a boot log names the shim it
+                // selected instead of leaving discovery invisible.
+                emitter.emit(&Event::now(
+                    Component::Init,
+                    EventKind::ManifestWarning(WarningEvent::new(php_runtime_line(runtime))),
+                ));
+            }
             if let Some(message) = php_backend_unavailable(&manifest) {
                 fail(&emitter, &message);
             }
@@ -1823,8 +1866,20 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
         PhpBoot::Absent => {}
         PhpBoot::Refused(message) => dev_fail(&message),
         // The gate only reaches `Proceed` for a manifest with a `[route.php]`
-        // route, so this sentence always exists.
-        PhpBoot::Proceed => {
+        // route. `Some` names the shim `make php-sapi` built; `None` is a host
+        // where nothing is installed yet, which `dev` reports only as the
+        // interim refusal below.
+        PhpBoot::Proceed(runtime) => {
+            if let Some(runtime) = runtime.as_ref() {
+                // Descriptor 2, like every pre-banner line: stdout stays empty
+                // until the boot is known-good (§1.1), and the interim refusal
+                // below is still a fatal path. Without this line `dev` reads
+                // byte-identically with and without the built shim (`MB.3.35`).
+                startup.emit(&Event::now(
+                    Component::Init,
+                    EventKind::ManifestWarning(WarningEvent::new(php_runtime_line(runtime))),
+                ));
+            }
             if let Some(message) = php_backend_unavailable(&manifest) {
                 dev_fail(&message);
             }
@@ -3349,6 +3404,44 @@ path = ['/api/.*']
 entry = \"api/index.php\"
 ";
 
+    /// The ADR-0010 §4.1 name, pinned to literals rather than to this module's
+    /// own helpers: `target_arch`/`target_libc` are the second spelling of the
+    /// tuple (see their docs), so this test is what keeps the boot's name and
+    /// `Minor::shim_file()`'s name in step for every supported target. The
+    /// php-sapi half of the same literals lives in
+    /// `crates/blastit-php-sapi/tests/critical_shim_contract.rs`.
+    #[test]
+    fn the_shim_name_matches_the_adr_literal() {
+        #[cfg(all(target_arch = "x86_64", not(target_env = "musl")))]
+        const SHIM_84: &str = "libblastit_php84-x86_64-gnu.so";
+        #[cfg(all(target_arch = "x86_64", target_env = "musl"))]
+        const SHIM_84: &str = "libblastit_php84-x86_64-musl.so";
+        #[cfg(all(target_arch = "aarch64", not(target_env = "musl")))]
+        const SHIM_84: &str = "libblastit_php84-aarch64-gnu.so";
+        #[cfg(all(target_arch = "aarch64", target_env = "musl"))]
+        const SHIM_84: &str = "libblastit_php84-aarch64-musl.so";
+
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            assert_eq!(shim_name(PhpVersion::new(8, 4)), SHIM_84);
+            // Only the infix moves between minors: the tuple is the build's.
+            assert_eq!(
+                shim_name(PhpVersion::new(8, 2)),
+                SHIM_84.replace("php84-", "php82-")
+            );
+            assert_eq!(
+                shim_name(PhpVersion::new(8, 3)),
+                SHIM_84.replace("php84-", "php83-")
+            );
+            // A minor with no shim ABI keeps the same shape, so the refusal can
+            // still name the file the host would need.
+            assert_eq!(
+                shim_name(PhpVersion::new(8, 5)),
+                SHIM_84.replace("php84-", "php85-")
+            );
+        }
+    }
+
     /// A PHP route with a cap the tests compare against the budget.
     fn php_with_workers(workers: u32) -> String {
         format!(
@@ -3600,7 +3693,7 @@ path = ['.*']
                     Some(16),
                     PhpShimScope::Development
                 ),
-                PhpBoot::Proceed
+                PhpBoot::Proceed(_)
             ),
             "a PHP-free dev host is left to the interim refusal"
         );
@@ -3664,7 +3757,7 @@ path = ['.*']
                     Some(16),
                     PhpShimScope::Deployment
                 ),
-                PhpBoot::Proceed
+                PhpBoot::Proceed(_)
             ),
             "the host resolves; the wiring refusal is the callers' next step"
         );
@@ -3817,7 +3910,7 @@ path = ['.*']
                     Some(16),
                     PhpShimScope::Development
                 ),
-                PhpBoot::Proceed
+                PhpBoot::Proceed(_)
             ),
             "a dev host without the shim is left to the interim refusal"
         );
@@ -3875,7 +3968,7 @@ path = ['.*']
                         Some(8),
                         PhpShimScope::Deployment
                     ),
-                    PhpBoot::Proceed
+                    PhpBoot::Proceed(_)
                 ),
                 "{source}: the cap passed"
             );
@@ -3909,7 +4002,7 @@ path = ['.*']
                     Some(16),
                     PhpShimScope::Deployment
                 ),
-                PhpBoot::Proceed
+                PhpBoot::Proceed(_)
             ),
             "the second route at exactly the budget passes"
         );
@@ -3998,7 +4091,7 @@ path = ['.*']
                 assert!(
                     matches!(
                         php_boot(&manifest(PHP_ONLY), &search, None, PhpShimScope::Deployment),
-                        PhpBoot::Proceed
+                        PhpBoot::Proceed(_)
                     ),
                     "this host resolves the pair"
                 );

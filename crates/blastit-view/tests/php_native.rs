@@ -5,9 +5,12 @@
 //! ```console
 //! $ make php-sapi
 //! $ BLASTIT_LIBPHP=/usr/lib/libphp8.4.so \
-//!   BLASTIT_PHP_SHIM="$PWD/target/php-sapi/libblastit_php84.so" \
+//!   BLASTIT_PHP_SHIM="$PWD/target/php-sapi/libblastit_php84-<arch>-<libc>.so" \
 //!   cargo test -p blastit-view --features php --test php_native -- --ignored --nocapture
 //! ```
+//!
+//! `<arch>-<libc>` is this build's tuple (`x86_64-gnu` on this host);
+//! `blastit_php_sapi::Minor::Php84.shim_file()` prints the exact name.
 //!
 //! It is a harness, not a skip: run with `--ignored` and a missing variable, it
 //! fails with that usage instead of reporting success.

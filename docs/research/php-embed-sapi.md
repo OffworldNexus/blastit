@@ -83,13 +83,13 @@ Comparing [`PHP-8.2/main/SAPI.h`](https://github.com/php/php-src/blob/PHP-8.2/ma
 ## Concrete Recommendations for Blastit
 
 1. Make **Embedded NTS `libphp` in dedicated per-route `view` workers (`[route.php] entry = "public/index.php"`)** the sole PHP backend for `0.2.1`.
-2. Ship tiny (~25 KiB) Apache-2.0 `libblastit_php82.so`, `libblastit_php83.so`, `libblastit_php84.so` SAPI bridge modules alongside `blastit`, dynamically `dlopen`ing the host's NTS `libphp` (`BLASTIT_LIBPHP` override) strictly inside unprivileged per-route worker processes — **never** linking `libphp` into `blastit` (`init`/`http`/`scheduler`/`dbproxy`).
+2. Ship tiny (~25 KiB) Apache-2.0 `libblastit_php82-<arch>-<libc>.so`, `libblastit_php83-<arch>-<libc>.so`, `libblastit_php84-<arch>-<libc>.so` SAPI bridge modules alongside `blastit`, dynamically `dlopen`ing the host's NTS `libphp` (`BLASTIT_LIBPHP` override) strictly inside unprivileged per-route worker processes — **never** linking `libphp` into `blastit` (`init`/`http`/`scheduler`/`dbproxy`).
 3. Wrap every request in `zend_first_try` / `zend_catch` + `setitimer(ITIMER_PROF)` / scheduler timeout backstop so `exit()`, `die()`, fatal errors, and `memory_limit` cleanly terminate the current request (or recycle the worker on hard bailout) without breaking `view.chan` framing.
 4. Measure exact worker CPU via `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` before `php_request_startup` and after `php_request_shutdown` (including `fastcgi_finish_request` post-response work) and report it via `RESP_END_COST` on `view.chan`.
 
 ## Unverified / Open Questions
 
-- **PHP 8.5 SAPI struct:** Ubuntu 26.04 (`resolute`) ships `libphp8.5-embed`; adding `libblastit_php85.so` requires checking `PHP-8.5/main/SAPI.h` once 8.5 headers are targeted in CI.
+- **PHP 8.5 SAPI struct:** Ubuntu 26.04 (`resolute`) ships `libphp8.5-embed`; adding `libblastit_php85-<arch>-<libc>.so` requires checking `PHP-8.5/main/SAPI.h` once 8.5 headers are targeted in CI.
 - **OPcache SHM across per-route PHP zygote forks:** `opcache.enable=1` mmaps shared memory during `php_module_startup`; a quick Linux + gVisor probe during `MB.3` implementation should verify `mmap(MAP_SHARED | MAP_ANONYMOUS)` behavior under `SeccompRole::View` when a per-route PHP zygote forks sibling workers.
 
 ## Sources

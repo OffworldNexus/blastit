@@ -2,7 +2,7 @@
 id: MB.3.35
 title: "Name the shipped PHP shims per ADR-0010 s4.1 (libblastit_php<minor>-<arch>-<libc>.so) everywhere"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.13.2]
@@ -15,11 +15,16 @@ paths:
   - "crates/blastit-php-sapi/tests/critical_shim_contract.rs"
   - "crates/blastit-php-sapi/tests/php_native.rs"
   - "crates/blastit-php-sapi/c/include/blastit_php_abi_v1.h"
-attempts: 0
+  - crates/blastit/src/stage0.rs
+  - "crates/blastit-view/tests/php_native.rs"
+  - "docs/research/php-embed-sapi.md"
+  - docs/knowledge/LESSONS.md
+  - ".github/workflows/php-sapi.yml"
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T23:17"
-updated: "2026-11-14T23:17"
+updated: "2026-11-15T00:08"
 ---
 
 ## Goal

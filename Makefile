@@ -403,13 +403,61 @@ e2e: ## Build wheel and run Docker + rootless capability e2e tests
 # `php-sapi-e2e` (Docker + Debian's `libphp8.4-embed`) *proves* that it loads,
 # serves a request, contains an `exit()`, and refuses the four reserved CGI
 # parameter names.
+#
+# One artifact, one name (ADR-0010 §4.1): the file is
+# `libblastit_php<major><minor>-<arch>-<libc>.so` and its `DT_SONAME` is that
+# same string, because the boot selects exactly that name from its compile-time
+# `(target_arch, target_env)` — `Minor::shim_file()` in
+# `crates/blastit-php-sapi/src/toolchain.rs` and `stage0`'s `shim_name()`.
+#
+# `<arch>`/`<libc>` are read from the compiler that builds the shim
+# (`$(PHP_SAPI_CC) -dumpmachine`, e.g. `x86_64-linux-gnu`,
+# `aarch64-alpine-linux-musl`), never from the filesystem: a glibc host that has
+# Debian's musl package installed has a musl *loader* while `cc`/`php-config`
+# still build glibc, and the gnu boot could never select the `-musl` name such a
+# probe would produce. `PHP_SAPI_ARCH`/`PHP_SAPI_LIBC` override the tuple for a
+# cross build; an overlay of the wrong libc is refused rather than shipped.
 PHP_MINORS ?= 8.4 8.3 8.2
 PHP_SAPI_CRATE := $(CURDIR)/crates/blastit-php-sapi
 PHP_SAPI_OUT ?= $(CURDIR)/target/php-sapi
 PHP_SAPI_CC ?= $(CC)
+# Empty means "ask `$(PHP_SAPI_CC) -dumpmachine`". Set both to cross-build
+# (`MB.3.18` owns the full matrix).
+PHP_SAPI_ARCH ?=
+PHP_SAPI_LIBC ?=
 
 php-sapi: ## Build the C SAPI shims whose php-config exists; name the absent ones
 	@set -eu; \
+	cc="$(PHP_SAPI_CC)"; \
+	machine="$$("$$cc" -dumpmachine 2>/dev/null || true)"; \
+	arch="$(PHP_SAPI_ARCH)"; \
+	libc="$(PHP_SAPI_LIBC)"; \
+	if [ -z "$$machine" ] && [ -z "$$arch" ]; then \
+		echo "php-sapi: '$$cc' does not answer -dumpmachine; set PHP_SAPI_ARCH and PHP_SAPI_LIBC" >&2; exit 1; \
+	fi; \
+	if [ -z "$$arch" ]; then arch="$${machine%%-*}"; fi; \
+	if [ -z "$$libc" ]; then \
+		case "$$machine" in \
+			*musl*) libc=musl ;; \
+			*gnu*) libc=gnu ;; \
+			*) echo "php-sapi: cannot tell the libc of '$$cc' ($$machine); set PHP_SAPI_LIBC=gnu|musl" >&2; exit 1 ;; \
+		esac; \
+	fi; \
+	case "$$arch" in \
+		x86_64|aarch64) ;; \
+		*) echo "php-sapi: unsupported architecture '$$arch' (supported: x86_64, aarch64)" >&2; exit 1 ;; \
+	esac; \
+	case "$$libc" in \
+		gnu|musl) ;; \
+		*) echo "php-sapi: unsupported libc '$$libc' (supported: gnu, musl)" >&2; exit 1 ;; \
+	esac; \
+	if [ "$$libc" = musl ] && [ -z "$(PHP_SAPI_LIBC)" ]; then \
+		musl_loader=0; \
+		for loader in /lib/ld-musl-*.so.1; do [ -e "$$loader" ] && musl_loader=1; done; \
+		if [ "$$musl_loader" -eq 0 ]; then \
+			echo "php-sapi: '$$cc' targets musl but no /lib/ld-musl-*.so.1 is installed, so this host could not load the shim; set PHP_SAPI_LIBC=musl only for a cross artifact" >&2; exit 1; \
+		fi; \
+	fi; \
 	mkdir -p "$(PHP_SAPI_OUT)"; \
 	built=0; skipped=""; \
 	explicit="$(PHP_CONFIG)"; \
@@ -426,7 +474,8 @@ php-sapi: ## Build the C SAPI shims whose php-config exists; name the absent one
 			done; \
 		fi; \
 		digits="$$(printf '%s' "$$minor" | tr -d '.')"; \
-		out="$(PHP_SAPI_OUT)/libblastit_php$$digits.so"; \
+		soname="libblastit_php$$digits-$$arch-$$libc.so"; \
+		out="$(PHP_SAPI_OUT)/$$soname"; \
 		if [ -z "$$cfg" ]; then \
 			echo "php-sapi: skipped $$minor: no php-config for PHP $$minor (Debian/Ubuntu: apt install php$$minor-dev libphp$$minor-embed)"; \
 			skipped="$$skipped $$minor"; \
@@ -434,13 +483,13 @@ php-sapi: ## Build the C SAPI shims whose php-config exists; name the absent one
 		fi; \
 		echo "php-sapi: cc -> $$out ($$cfg reports $$("$$cfg" --version))"; \
 		"$(PHP_SAPI_CC)" -O2 -D_GNU_SOURCE -fPIC -shared -Wall -Wextra -Werror \
-			-Wl,-soname,libblastit_php$$digits.so \
+			-Wl,-soname,"$$soname" \
 			-I"$(PHP_SAPI_CRATE)/c/include" \
 			$$("$$cfg" --includes) \
 			-o "$$out" "$(PHP_SAPI_CRATE)/c/blastit_php_sapi.c"; \
 		built=$$((built + 1)); \
 	done; \
-	echo "php-sapi: $$built shim(s) in $(PHP_SAPI_OUT); skipped:$${skipped:- none}"
+	echo "php-sapi: $$built shim(s) for $$arch-$$libc in $(PHP_SAPI_OUT); skipped:$${skipped:- none}"
 
 php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (not in `check`)
 	$(UV) run --no-project e2e/php_sapi_probe.py $(if $(PHP_MINOR),--minor $(PHP_MINOR))

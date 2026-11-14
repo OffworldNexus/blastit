@@ -11,9 +11,10 @@ part of `make check` (Docker + a Debian PHP image), exactly like `e2e/`.
 
 Four separate `docker run`s, because they answer different questions:
 
-1. `readelf -d libblastit_php84.so` — the shim must carry **no** `DT_NEEDED` on
-   `libphp`. Linking PHP into whatever loads the shim is the one thing that
-   would silently link PHP into `init`, `http`, `scheduler` and `dbproxy`.
+1. `readelf -d libblastit_php84-<arch>-<libc>.so` — the shim must carry **no**
+   `DT_NEEDED` on `libphp`. Linking PHP into whatever loads the shim is the one
+   thing that would silently link PHP into `init`, `http`, `scheduler` and
+   `dbproxy`.
 2. The probe — `dlopen(libphp, RTLD_NOW|RTLD_GLOBAL)`, then `dlopen(shim,
    RTLD_NOW|RTLD_LOCAL)`, six requests, one JSON line. It asserts the load
    order, the body, the head, the status, `cpu_ns`, the reserved-name drop, the
@@ -132,14 +133,39 @@ def build(image, minor):
     return True, ""
 
 
-def shim_name(minor):
-    """`8.4` -> `libblastit_php84.so`."""
-    return f"libblastit_php{minor.replace('.', '')}.so"
+def image_tuple(image):
+    """The image's `<arch>-<libc>`, asked of `run-probe.sh --print-tuple`.
+
+    Both halves come from the compiler that built the shim (`cc -dumpmachine`),
+    exactly as `make php-sapi` derived them, so the `readelf` path and the probe
+    cannot disagree and no `uname` guess is repeated here.
+    """
+    result = docker(
+        "run",
+        "--rm",
+        image,
+        "sh",
+        "/src/e2e/php-sapi/run-probe.sh",
+        "--print-tuple",
+        capture_output=True,
+    )
+    tuple_ = (result.stdout or "").strip()
+    if result.returncode != 0 or tuple_.count("-") != 1:
+        return None, (
+            f"cannot read <arch>-<libc> from {image}:\n"
+            f"{tail(result.stdout + result.stderr)}"
+        )
+    return tuple_, ""
 
 
-def check_linkage(image, minor):
+def shim_name(minor, tuple_):
+    """`("8.4", "x86_64-gnu")` -> `libblastit_php84-x86_64-gnu.so`."""
+    return f"libblastit_php{minor.replace('.', '')}-{tuple_}.so"
+
+
+def check_linkage(image, minor, tuple_):
     """`readelf -d` on the shim: no `NEEDED` entry names libphp."""
-    shim = f"target/php-sapi/{shim_name(minor)}"
+    shim = f"target/php-sapi/{shim_name(minor, tuple_)}"
     result = docker("run", "--rm", image, "readelf", "-d", shim, capture_output=True)
     if result.returncode != 0:
         return (
@@ -404,8 +430,14 @@ def main(argv=None):
         print(log, file=sys.stderr)
         return 1
 
-    print(f"php-sapi-e2e: readelf -d {shim_name(args.minor)}")
-    ok, detail = check_linkage(args.image, args.minor)
+    tuple_, error = image_tuple(args.image)
+    if tuple_ is None:
+        print("php-sapi-e2e: FAIL cannot read the image's target", file=sys.stderr)
+        print(f"  {error}", file=sys.stderr)
+        return 1
+
+    print(f"php-sapi-e2e: readelf -d {shim_name(args.minor, tuple_)}")
+    ok, detail = check_linkage(args.image, args.minor, tuple_)
     if not ok:
         print("php-sapi-e2e: FAIL the shim's dynamic linkage", file=sys.stderr)
         print(f"  {detail}", file=sys.stderr)

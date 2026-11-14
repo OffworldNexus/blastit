@@ -12,8 +12,8 @@
 //! `libphp.so` inside a forked, unprivileged `view` worker (ADR-0010 §1). Rust
 //! cannot declare `sapi_globals_struct` or `EG(bailout)` by hand and survive a
 //! PHP minor bump (`docs/research/php-embed-sapi.md` §2), so each minor gets one
-//! ~25 KiB Apache-2.0 C shim, `libblastit_php8{2,3,4}.so`, compiled against that
-//! minor's headers. This crate holds:
+//! ~25 KiB Apache-2.0 C shim, `libblastit_php8{2,3,4}-<arch>-<libc>.so`,
+//! compiled against that minor's headers. This crate holds:
 //!
 //! * [`toolchain`] — finds `php-config` (`PHP_CONFIG`, then `php-config`,
 //!   `php-config8.4`, `php-config8.3`, `php-config8.2`), refuses an unsupported
@@ -63,7 +63,13 @@
 //! // And the CGI/FastCGI escalation names cannot be built at all.
 //! assert_eq!(ServerVar::new("PHP_VALUE", "allow_url_include=1"), Err(ReservedVar::PhpValue.into()));
 //! assert_eq!(Minor::parse("8.4.27"), Some(Minor::Php84));
-//! assert_eq!(Minor::Php84.shim_file(), "libblastit_php84.so");
+//! // The shipped name carries this build's `(arch, libc)`, the tuple the boot
+//! // selects by: `libblastit_php84-x86_64-gnu.so` on a glibc x86_64 host.
+//! let libc = if cfg!(target_env = "musl") { "musl" } else { "gnu" };
+//! assert_eq!(
+//!     Minor::Php84.shim_file(),
+//!     format!("libblastit_php84-{}-{libc}.so", std::env::consts::ARCH),
+//! );
 //! ```
 
 #[allow(unsafe_code)]

@@ -1480,3 +1480,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T23:24 [MB.3.13.2] (lead) status active -> review
 - 2026-11-14T23:24 [MB.3.13.3] (lead) hand-off from MB.3.13.2: step 3 (the MB.3.28 interim refusal) is the last boot step and it is what keeps the dev/prod asymmetry. When you delete it, also delete
 - 2026-11-14T23:30 [MB.3.13.2] (lead) status review -> done
+- 2026-11-14T23:32 [MB.3.35] (lead) status ready -> active
+- 2026-11-14T23:32 [MB.3.35] (lead) attempt 1/3 started
+- 2026-11-14T23:32 [MB.3.35] (lead) base 71eed2f3a9b9772748f0c17b8cdbe57c658c0e9e
+- 2026-11-14T23:32 [MB.3.13.3] (lead) edited fields
+- 2026-11-14T23:32 [MB.3.13.3] (lead) lead: paths widened to crates/blastit/tests/** — deleting the MB.3.28 refusal makes the protected critical_php_backend.rs (and no_python_build.rs) red; their re
+- 2026-11-14T23:45 [MB.3.35] (lead) edited fields
+- 2026-11-14T23:45 [MB.3.35] (lead) lead: paths widened for the comment-only edits the worker made (stage0.rs, blastit-view php_native.rs, php-embed-sapi.md) + LESSONS.md + the CI workflow whose c
+- 2026-11-14T23:45 [MB.3.35] (lead) status active -> review
+- 2026-11-14T23:53 [MB.3.35] (lead) REVIEW FAIL (attempt 1): MAJOR Makefile:427-428 derives <libc> from a filesystem probe while the boot uses cfg!(target_env), so on a glibc host with Debian's mu
+- 2026-11-14T23:53 [MB.3.35] (lead) status review -> ready
+- 2026-11-14T23:53 [MB.3.35] (lead) status ready -> active
+- 2026-11-14T23:53 [MB.3.35] (lead) attempt 2/3 started
+- 2026-11-15T00:00 [MB.3.35] (lead) status active -> review
+- 2026-11-15T00:00 [MB.3.13.3] (lead) carry from MB.3.35: on successful discovery nothing logs the resolved tuple, so 'found the shim' is invisible without gdb. Emit one line (boot event) naming (PH
+- 2026-11-15T00:08 [MB.3.35] (lead) status review -> done

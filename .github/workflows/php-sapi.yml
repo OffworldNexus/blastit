@@ -2,12 +2,13 @@
 #
 # `make check` runs on a host without PHP and can only prove that the Rust side
 # degrades honestly: the C shim is not built there, and nothing loads it. This
-# job is the acceptance that counts — it builds `libblastit_php8.4.so` against
-# Debian's own headers, `dlopen`s the host's NTS `libphp8.4.so`, and runs real
-# requests through the shim: body, head, status, exact `cpu_ns`, the four
-# reserved-name drops, an `exit()` and a fatal that must leave the worker able
-# to serve the next request, and a `readelf -d` check that the shim carries no
-# `DT_NEEDED` on libphp.
+# job is the acceptance that counts — it builds the ADR-0010 §4.1 shim
+# `libblastit_php<major><minor>-<arch>-<libc>.so` (on this host
+# `libblastit_php84-x86_64-gnu.so`) against Debian's own headers, `dlopen`s the
+# host's NTS `libphp8.4.so`, and runs real requests through the shim: body, head,
+# status, exact `cpu_ns`, the four reserved-name drops, an `exit()` and a fatal
+# that must leave the worker able to serve the next request, and a `readelf -d`
+# check that the shim carries no `DT_NEEDED` on libphp.
 #
 # Kept out of `make check` (Docker + a PHP image + a Rust toolchain in the
 # image), exactly like `e2e/`, so the shim cannot rot unnoticed between gates.

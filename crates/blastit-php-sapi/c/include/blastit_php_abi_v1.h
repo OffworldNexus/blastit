@@ -1,6 +1,8 @@
 /*
  * blastit_php_abi_v1.h — the frozen C ABI between a Blastit view worker and one
- * per-minor PHP SAPI shim (`libblastit_php8{2,3,4}.so`).
+ * per-minor PHP SAPI shim (`libblastit_php8{2,3,4}-<arch>-<libc>.so`, e.g.
+ * `libblastit_php84-x86_64-gnu.so`; the file is named by ADR-0010 §4.1 and its
+ * `DT_SONAME` is that same string).
  *
  * SPDX-License-Identifier: Apache-2.0
  *
