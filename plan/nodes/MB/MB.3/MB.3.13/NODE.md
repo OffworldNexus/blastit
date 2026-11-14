@@ -66,3 +66,30 @@ $ make check
 - OPcache zygote/pre-fork startup order is an ADR open question; choose the post-fork
   `php_module_startup` path unless `docs/design/backend-runtimes.md` settles it otherwise,
   and say which in the RESULT.
+
+## Egress doctrine (from MB.3.12)
+
+The boundary is the **seccomp filter** — `SeccompRole::View { egress: false }` refusing
+`socket(AF_INET)`/`AF_INET6` with `EPERM`. The INI policy (`allow_url_fopen=0`) is
+**defence in depth, never the wall**: it does not stop the `curl` extension, `sockets`, or
+a PDO driver opening its own connection. `MB.3.12` proves both layers and proves the strong
+one holds with the weak one removed; this worker must install the real filter at the real
+install site and pass `Egress` from the manifest, so the INI value and the filter can never
+disagree. If a test can only show one layer, say which one it proves.
+
+## Prerequisite from MB.3.12 (vtable contract)
+
+Call the five vtable symbols and check `blastit_php_minor()` against the loaded
+`php_version()` **before the first request** — a mismatch is a boot refusal naming the
+host's PHP minor and the shim that was found, never a first-request fault. `MB.3.12`
+also proved that `php_execute_script` **swallows** the bailout (returns `false`; the outer
+`zend_first_try` does not fire for `exit()`/fatals): treat a `false` return as a status,
+not as success.
+
+## Prerequisite from MB.3.11
+
+`MB.3.11` made `python` a cargo feature and kept `blastit-view`'s `RawFrame` framing
+(`wire`/`flow`) compiled in both builds, but its items are crate-private. This node needs
+them **public**: expose the framing surface (and whatever `view.chan` types `MB.3.12`'s
+vtable sinks need) from `blastit-view` as part of this node, with a doctest that proves an
+external crate can name them. Do not re-implement framing here — one transport.

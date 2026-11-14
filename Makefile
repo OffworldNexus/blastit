@@ -9,6 +9,8 @@
 #   make docs-serve-check # bounded smoke test of that serve stack (binds a port; not part of `check`)
 #   make test-critical  # run protected critical tests only (Rust + Python)
 #   make e2e            # build wheel and run Docker + rootless Docker e2e scenarios (gates)
+#   make php-sapi       # build the per-minor C SAPI shims this host has headers for
+#   make php-sapi-e2e   # Docker: build one shim and prove it with the real-load probe
 #   make mutants-rust   # run cargo-mutants on critical crates (PKG=blastit-sqlpolicy), disk scratch + memory cap
 #   make mutants-clean  # delete mutants.out and every cargo-mutants scratch copy, report bytes freed
 
@@ -91,7 +93,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 .PHONY: help check clean guard critical-guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
-        docs-serve docs-serve-stage docs-serve-check \
+        docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
         mutants-clean mutants-scope-probe print-mutants-tmp
 
 help: ## Show available Make targets
@@ -366,6 +368,53 @@ e2e: ## Build wheel and run Docker + rootless capability e2e tests
 	scripts/build-wheel.sh
 	E2E_DOCKERFILE=Dockerfile.prebuilt $(UV) run --no-project e2e/run.py
 	$(UV) run --no-project e2e/rootless/run.py --local --dockerfile Dockerfile.prebuilt
+
+# Per-minor PHP SAPI shims (MB.3.12, `crates/blastit-php-sapi`). A host without
+# PHP headers skips a minor with one line naming the package, so `make check`
+# stays green on a PHP-free machine: the shim is *built* here, and only
+# `php-sapi-e2e` (Docker + Debian's `libphp8.4-embed`) *proves* that it loads,
+# serves a request, contains an `exit()`, and refuses the four FastCGI names.
+PHP_MINORS ?= 8.4 8.3 8.2
+PHP_SAPI_CRATE := $(CURDIR)/crates/blastit-php-sapi
+PHP_SAPI_OUT ?= $(CURDIR)/target/php-sapi
+PHP_SAPI_CC ?= $(CC)
+
+php-sapi: ## Build the C SAPI shims whose php-config exists; name the absent ones
+	@set -eu; \
+	mkdir -p "$(PHP_SAPI_OUT)"; \
+	built=0; skipped=""; \
+	explicit="$(PHP_CONFIG)"; \
+	for minor in $(PHP_MINORS); do \
+		cfg=""; \
+		if [ -n "$$explicit" ] && [ "$$("$$explicit" --version 2>/dev/null | cut -d. -f1-2)" = "$$minor" ]; then \
+			cfg="$$explicit"; \
+		fi; \
+		if [ -z "$$cfg" ]; then \
+			for candidate in "php-config$$minor" php-config; do \
+				path="$$(command -v "$$candidate" 2>/dev/null || true)"; \
+				[ -n "$$path" ] || continue; \
+				if [ "$$("$$path" --version 2>/dev/null | cut -d. -f1-2)" = "$$minor" ]; then cfg="$$path"; break; fi; \
+			done; \
+		fi; \
+		digits="$$(printf '%s' "$$minor" | tr -d '.')"; \
+		out="$(PHP_SAPI_OUT)/libblastit_php$$digits.so"; \
+		if [ -z "$$cfg" ]; then \
+			echo "php-sapi: skipped $$minor: no php-config for PHP $$minor (Debian/Ubuntu: apt install php$$minor-dev libphp$$minor-embed)"; \
+			skipped="$$skipped $$minor"; \
+			continue; \
+		fi; \
+		echo "php-sapi: cc -> $$out ($$cfg reports $$("$$cfg" --version))"; \
+		"$(PHP_SAPI_CC)" -O2 -D_GNU_SOURCE -fPIC -shared -Wall -Wextra -Werror \
+			-Wl,-soname,libblastit_php$$digits.so \
+			-I"$(PHP_SAPI_CRATE)/c/include" \
+			$$("$$cfg" --includes) \
+			-o "$$out" "$(PHP_SAPI_CRATE)/c/blastit_php_sapi.c"; \
+		built=$$((built + 1)); \
+	done; \
+	echo "php-sapi: $$built shim(s) in $(PHP_SAPI_OUT); skipped:$${skipped:- none}"
+
+php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (not in `check`)
+	$(UV) run --no-project e2e/php_sapi_probe.py $(if $(PHP_MINOR),--minor $(PHP_MINOR))
 
 mutants-rust: ## Run cargo-mutants with disk scratch + cgroup memory cap (PKG=<crate> to scope)
 	@mkdir -p "$(MUTANTS_TMP)"

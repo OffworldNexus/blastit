@@ -1,0 +1,28 @@
+[package]
+name = "blastit-php-sapi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# No dependencies, by design: the crate is the frozen ABI description plus the
+# security types the worker fills in, and the probe behind `probe` talks to
+# `libdl`/`libc` through hand-written `extern "C"` declarations. `cargo tree -p
+# blastit-php-sapi` must stay empty so the shim can be built and loaded in a
+# container that has PHP and nothing else.
+
+[features]
+# Builds the `php-sapi-probe` binary: the real `dlopen(libphp) -> dlopen(shim)`
+# load that `make php-sapi-e2e` asserts. Off by default because it needs a PHP
+# toolchain to be meaningful; `make check` on a PHP-less host never enables it.
+probe = []
+
+[[bin]]
+name = "php-sapi-probe"
+path = "src/probe/main.rs"
+required-features = ["probe"]

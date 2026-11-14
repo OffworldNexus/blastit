@@ -1247,3 +1247,14 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T15:30 [MB.3.14] (lead) attempt 3/3 started
 - 2026-11-14T15:31 [MB.3.14] (lead) attempt 3: two more bullets appended from MB.3.12 (php_execute_script swallows the bailout -> false is the signal; CLOCK_PROCESS_CPUTIME_ID is tick-granular -> 
 - 2026-11-14T15:31 [MB.3.14] (lead) status active -> done
+- 2026-11-14T15:33 [MB.3.12] (lead) REVIEW FAIL (attempt 1). Two MAJORs, both ADR-0010 SS2 deviations: (1) request.rs:23 DISABLED_FUNCTIONS omits pcntl_signal, posix_kill, posix_getpgid which the 
+- 2026-11-14T15:33 [MB.3.12] (lead) status review -> ready
+- 2026-11-14T15:33 [MB.3.12] (lead) attempt 2/3 started
+- 2026-11-14T15:46 [MB.3.12] (lead) status ready -> review
+- 2026-11-14T15:46 [MB.3.12] (lead) attempt 2: both MAJORs + four MINORs fixed. CRITICAL FINDING: sapi_startup() NULLS ini_entries, so attempt 1's entire INI lockdown was silently absent (open_bas
+- 2026-11-14T15:52 [MB.3.14] (lead) status done -> ready
+- 2026-11-14T15:52 [MB.3.14] (lead) status ready -> active
+- 2026-11-14T15:52 [MB.3.14] (lead) attempt 4/3 started
+- 2026-11-14T15:52 [MB.3.14] (lead) status active -> done
+- 2026-11-14T15:52 [MB.3.14] (lead) attempt 4 refused by the attempt cap (4/3, ESCALATE) -- correctly: a one-bullet docs addition is not worth an expensive-tier escalation. The third trap is carri
+- 2026-11-14T15:52 [MB.3.17] (lead) ADDITIONAL LESSONS bullet to append alongside this node's own one-liner (the attempt cap on MB.3.14 refused a fourth reopen, correctly): **sapi_startup() nulls 

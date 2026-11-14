@@ -1,0 +1,328 @@
+//! The per-minor PHP toolchain: discovery, refusal, and the shim filename.
+//!
+//! Discovery is the composition root's job, so this module reads the
+//! environment only through [`Env`]: [`Toolchain::discover`] is the real one and
+//! tests inject their own (a temporary directory holding a fake `php-config`
+//! proves the allowed path; an empty `PATH` proves the refusal).
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The PHP minors this crate has a shim ABI for, newest first.
+pub const SUPPORTED_MINORS: [Minor; 3] = [Minor::Php84, Minor::Php83, Minor::Php82];
+
+/// The `php-config` names searched on `PATH`, in order.
+pub const CONFIG_NAMES: [&str; 4] = [
+    "php-config",
+    "php-config8.4",
+    "php-config8.3",
+    "php-config8.2",
+];
+
+/// One supported PHP minor. The shim is compiled once per variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Minor {
+    /// PHP 8.2 — `ZEND_MODULE_API_NO` 20220829.
+    Php82,
+    /// PHP 8.3 — `ZEND_MODULE_API_NO` 20230831.
+    Php83,
+    /// PHP 8.4 — `ZEND_MODULE_API_NO` 20240924.
+    Php84,
+}
+
+impl Minor {
+    /// Parses a `php-config --version` reply (`"8.4.27"`, `"8.4"`).
+    ///
+    /// Anything whose first two components are not `8.2`, `8.3` or `8.4` is
+    /// `None`: a PHP 8.5 host is refused, not guessed at.
+    pub fn parse(version: &str) -> Option<Self> {
+        let mut parts = version.trim().split('.');
+        let major = parts.next()?.parse::<u32>().ok()?;
+        let minor = parts.next()?.parse::<u32>().ok()?;
+        match (major, minor) {
+            (8, 2) => Some(Self::Php82),
+            (8, 3) => Some(Self::Php83),
+            (8, 4) => Some(Self::Php84),
+            _ => None,
+        }
+    }
+
+    /// The code `blastit_php_minor()` returns from a shim of this minor.
+    pub fn code(self) -> u32 {
+        match self {
+            Self::Php82 => 802,
+            Self::Php83 => 803,
+            Self::Php84 => 804,
+        }
+    }
+
+    /// The dotted minor (`"8.4"`), for messages and package names.
+    pub fn dotted(self) -> &'static str {
+        match self {
+            Self::Php82 => "8.2",
+            Self::Php83 => "8.3",
+            Self::Php84 => "8.4",
+        }
+    }
+
+    /// The shipped shim for this minor, `libblastit_php84.so`.
+    pub fn shim_file(self) -> &'static str {
+        match self {
+            Self::Php82 => "libblastit_php82.so",
+            Self::Php83 => "libblastit_php83.so",
+            Self::Php84 => "libblastit_php84.so",
+        }
+    }
+
+    /// Whether a shim reporting `code` may serve a host of this minor.
+    ///
+    /// The worker asks the shim for `blastit_php_minor()` and refuses a
+    /// mismatch before the first request: a 8.3 shim against an 8.4 `libphp`
+    /// reads `EG(bailout)` at the wrong offset, which turns `exit()` into a
+    /// `SIGSEGV` (ADR-0010 §3).
+    pub fn accepts(self, shim_code: u32) -> bool {
+        shim_code == self.code()
+    }
+
+    /// The `php-config` names that provide this minor, most specific first.
+    pub fn config_names(self) -> [&'static str; 2] {
+        match self {
+            Self::Php82 => ["php-config8.2", "php-config"],
+            Self::Php83 => ["php-config8.3", "php-config"],
+            Self::Php84 => ["php-config8.4", "php-config"],
+        }
+    }
+}
+
+impl fmt::Display for Minor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.dotted())
+    }
+}
+
+/// The one environment seam [`Toolchain::discover_with`] needs.
+pub trait Env {
+    /// The value of an environment variable, or `None` when unset.
+    fn var(&self, name: &str) -> Option<String>;
+}
+
+/// The process environment: used by [`Toolchain::discover`] only.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcessEnv;
+
+impl Env for ProcessEnv {
+    fn var(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+}
+
+/// A usable per-minor PHP development toolchain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Toolchain {
+    minor: Minor,
+    php_config: PathBuf,
+    include_dir: PathBuf,
+    version: String,
+}
+
+impl Toolchain {
+    /// Finds a supported `php-config` in the real process environment.
+    pub fn discover() -> Result<Self, ToolchainError> {
+        Self::discover_with(&ProcessEnv)
+    }
+
+    /// Finds a supported `php-config` through an injected [`Env`].
+    ///
+    /// `PHP_CONFIG` wins when it works. Otherwise every directory on `PATH` is
+    /// tried, once per name in [`CONFIG_NAMES`] order, so an unversioned
+    /// `php-config` that is not one of ours does not hide a versioned one.
+    pub fn discover_with(env: &dyn Env) -> Result<Self, ToolchainError> {
+        let mut unsupported_version: Option<(PathBuf, String)> = None;
+        let mut include_error: Option<(PathBuf, String)> = None;
+
+        if let Some(explicit) = env.var("PHP_CONFIG")
+            && !explicit.is_empty()
+        {
+            match Self::from_exe(Path::new(&explicit)) {
+                Ok(toolchain) => return Ok(toolchain),
+                Err(ToolchainError::UnsupportedVersion { path, version }) => {
+                    unsupported_version = Some((path, version));
+                }
+                Err(ToolchainError::IncludeDir { path, detail }) => {
+                    include_error = Some((path, detail));
+                }
+                // A PHP_CONFIG pointing at nothing is a typo; PATH still gets
+                // its turn, and `NotFound` names `PHP_CONFIG` too.
+                Err(_) => {}
+            }
+        }
+
+        let path = env.var("PATH").unwrap_or_default();
+        for name in CONFIG_NAMES {
+            for dir in path.split(':') {
+                if dir.is_empty() {
+                    continue;
+                }
+                match Self::from_exe(&Path::new(dir).join(name)) {
+                    Ok(toolchain) => return Ok(toolchain),
+                    Err(ToolchainError::UnsupportedVersion { path, version }) => {
+                        if unsupported_version.is_none() {
+                            unsupported_version = Some((path, version));
+                        }
+                    }
+                    Err(ToolchainError::IncludeDir { path, detail }) => {
+                        if include_error.is_none() {
+                            include_error = Some((path, detail));
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+
+        // Report the most actionable failure: a PHP the crate has no shim for
+        // before a toolchain whose headers are missing.
+        if let Some((path, version)) = unsupported_version {
+            return Err(ToolchainError::UnsupportedVersion { path, version });
+        }
+        if let Some((path, detail)) = include_error {
+            return Err(ToolchainError::IncludeDir { path, detail });
+        }
+        Err(ToolchainError::NotFound)
+    }
+
+    /// Validates one `php-config` path: version, then include directory.
+    fn from_exe(exe: &Path) -> Result<Self, ToolchainError> {
+        if !exe.is_file() {
+            return Err(ToolchainError::NotExecutable {
+                path: exe.to_path_buf(),
+            });
+        }
+        let version = run(exe, "--version").map_err(|_detail| ToolchainError::NotExecutable {
+            path: exe.to_path_buf(),
+        })?;
+        let version = version.trim().to_owned();
+        let minor = Minor::parse(&version).ok_or_else(|| ToolchainError::UnsupportedVersion {
+            path: exe.to_path_buf(),
+            version: version.clone(),
+        })?;
+        let include = run(exe, "--include-dir").map_err(|detail| ToolchainError::IncludeDir {
+            path: exe.to_path_buf(),
+            detail,
+        })?;
+        let include_dir = PathBuf::from(include.trim());
+        if !include_dir.is_dir() {
+            return Err(ToolchainError::IncludeDir {
+                path: exe.to_path_buf(),
+                detail: format!("--include-dir returned {}", include_dir.display()),
+            });
+        }
+        Ok(Self {
+            minor,
+            php_config: exe.to_path_buf(),
+            include_dir,
+            version,
+        })
+    }
+
+    /// The minor this toolchain builds for.
+    pub fn minor(&self) -> Minor {
+        self.minor
+    }
+
+    /// The shim this toolchain builds, `libblastit_php84.so`.
+    pub fn shim_file(&self) -> &'static str {
+        self.minor.shim_file()
+    }
+
+    /// The `php-config` that was found.
+    pub fn php_config(&self) -> &Path {
+        &self.php_config
+    }
+
+    /// The `--include-dir` holding this minor's `php.h`.
+    pub fn include_dir(&self) -> &Path {
+        &self.include_dir
+    }
+
+    /// The full version string `php-config --version` printed.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+/// Why no usable toolchain was found. Every message names the fix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolchainError {
+    /// No `php-config` on `PATH` and none through `PHP_CONFIG`.
+    NotFound,
+    /// A path that is not an executable, or did not answer `--version`.
+    NotExecutable {
+        /// The candidate that failed.
+        path: PathBuf,
+    },
+    /// A working `php-config` for a minor this crate has no shim for.
+    UnsupportedVersion {
+        /// The `php-config` that answered.
+        path: PathBuf,
+        /// What it reported.
+        version: String,
+    },
+    /// `--include-dir` failed or does not name a directory.
+    IncludeDir {
+        /// The `php-config` that answered.
+        path: PathBuf,
+        /// What went wrong.
+        detail: String,
+    },
+}
+
+impl fmt::Display for ToolchainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => write!(
+                f,
+                "no php-config found (searched PHP_CONFIG, then {} on PATH); install the PHP embed \
+                 development package — Debian/Ubuntu: apt install php8.4-dev libphp8.4-embed, \
+                 Alpine: apk add php84-dev php84-embed, Fedora/RHEL: dnf install php84-php-devel \
+                 php-embedded — or set PHP_CONFIG=/path/to/php-config8.4",
+                CONFIG_NAMES.join(", ")
+            ),
+            Self::NotExecutable { path } => write!(
+                f,
+                "{} is not an executable php-config (or it did not answer --version)",
+                path.display()
+            ),
+            Self::UnsupportedVersion { path, version } => write!(
+                f,
+                "{} reports PHP {version}; this build has SAPI shims for 8.2, 8.3 and 8.4 only \
+                 (install the matching php8.X-dev package, or set PHP_CONFIG to one of them)",
+                path.display()
+            ),
+            Self::IncludeDir { path, detail } => write!(
+                f,
+                "{} --include-dir is unusable ({detail}); install the matching php8.X-dev package",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ToolchainError {}
+
+/// Runs `exe <flag>` and returns its stdout, or the reason it failed.
+fn run(exe: &Path, flag: &str) -> Result<String, String> {
+    let output = Command::new(exe)
+        .arg(flag)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        let status = match output.status.code() {
+            Some(code) => code.to_string(),
+            None => "a signal".to_owned(),
+        };
+        return Err(format!("{flag} exited with {status}"));
+    }
+    String::from_utf8(output.stdout).map_err(|_| format!("{flag} returned non-UTF-8 output"))
+}

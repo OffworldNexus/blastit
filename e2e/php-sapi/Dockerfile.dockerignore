@@ -1,0 +1,15 @@
+# Build context for the php-sapi image: the workspace manifests, the crate and
+# the fixtures. Everything heavy or unrelated (the host's target/, the built
+# site, the plan tree, the published package) stays out, so a rebuild after a
+# fixture tweak is seconds instead of a copy of a 48 GiB target directory.
+.git
+target
+target-mut
+mutants.out
+dist
+site
+tmp
+plan
+docs
+python
+**/__pycache__

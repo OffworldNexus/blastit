@@ -1,0 +1,13 @@
+# `e2e/php-sapi/seccomp-exec/` is a standalone cargo package (its own
+# `[workspace]` table), so `make check` never builds it and the root ignore for
+# `/target` does not reach it: a local
+# `cargo build --manifest-path e2e/php-sapi/seccomp-exec/Cargo.toml` would drop
+# untracked output into the repository.
+target/
+
+# The harness lock is **ignored, not committed**: it is a non-published e2e tool
+# whose dependency set is exactly `crates/blastit-sys`, so a committed lock would
+# churn on every blastit-sys dependency move while pinning nothing that ships.
+# The image builds it unlocked on purpose (and the CI job calls clippy without
+# `--locked` for the same reason).
+Cargo.lock

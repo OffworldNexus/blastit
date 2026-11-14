@@ -2,16 +2,23 @@
 id: MB.3.12
 title: "crates/blastit-php-sapi: per-minor Apache-2.0 C SAPI shims (blastit_php_abi_v1) + critical tests"
 kind: task
-status: ready
+status: review
 owner: implementer
 priority: 1
 depends_on: [MB.3.11]
-paths: ["crates/blastit-php-sapi/**", Cargo.toml, Cargo.lock, Makefile]
-attempts: 0
+paths:
+  - "crates/blastit-php-sapi/**"
+  - "e2e/php-sapi/**"
+  - e2e/php_sapi_probe.py
+  - ".github/workflows/**"
+  - Cargo.toml
+  - Cargo.lock
+  - Makefile
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:39"
-updated: "2026-11-14T14:39"
+updated: "2026-11-14T15:46"
 ---
 
 # Goal
@@ -63,3 +70,66 @@ $ make check
 - Hosts without `php-dev` headers for a minor: that shim is skipped with a clear Makefile
   line, never a silent half-build. `MB.3.13` decides what a missing shim means at boot.
 - No Rust `unsafe` outside the FFI boundary module, each with a `// SAFETY:` comment.
+
+## Toolchain reality (checked by the owner on this host, Debian 13 trixie)
+
+**This machine has no PHP toolchain at all**: no `php`, no `php-config`, no `libphp.so`,
+no `/usr/include/php`. Therefore:
+
+- **Never `apt install` a system package** to make this build pass: that needs `sudo` the
+  loop does not have, and it would make the build depend on a machine mutation.
+- **`build.rs` degrades honestly.** Find `php-config` via `PHP_CONFIG`, then `PATH`
+  (`php-config`, `php-config8.4`, `8.3`, `8.2`, in that order). When none exists, emit a
+  warning, define a cfg (e.g. `no_php_toolchain`), compile the crate **without** the ABI
+  surface, and let the Rust side refuse the PHP backend with a message naming the missing
+  toolchain and the package. A C dependency that breaks `make check` on a machine without
+  PHP would make the whole repo unbuildable for contributors — that is forbidden.
+- **The shim is built and exercised only in the container, by design.** A green
+  `make check` here proves the *Rust* degrades correctly, never that the C works. Say that
+  in the node, the crate docs and the RESULT in those words.
+- **CI carries the real proof**: a Docker job (image + `--locked` build + the probe below),
+  kept **out of `make check`** exactly like `e2e/` (Docker + a PHP image), so the shim
+  cannot rot unnoticed.
+
+### Linkage rule to verify, not assume
+
+The shim must not carry a `DT_NEEDED` on `libphp` (that would link PHP into whatever loads
+it). The worker `dlopen`s `libphp.so` `RTLD_NOW | RTLD_GLOBAL` **inside the view worker
+only**, then `dlopen`s the shim `RTLD_NOW | RTLD_LOCAL`, whose undefined Zend/SAPI symbols
+resolve against the global handle. Prove the shim's `readelf -d` has no `NEEDED libphp`,
+and that loading the shim *before* libphp fails cleanly instead of crashing.
+
+## Container + probe (the acceptance that counts)
+
+- `e2e/php-sapi/`: a `Dockerfile` on `debian:trixie-slim` installing
+  `php8.4-dev libphp8.4-embed gcc make pkg-config libc6-dev` (no `php-fpm`), copying the
+  repo read-only, running `make php-sapi` inside, then building and running the probe.
+  `ARG PHP_MINOR=8.4` so a second minor is a build arg, not a rewrite.
+- `e2e/php_sapi_probe.py` (stdlib only, same shape as the other e2e drivers): builds the
+  image, runs it, parses one JSON line, fails non-zero with the container log on mismatch.
+- **The probe is a real load, not a header-only compile.** A small Rust binary (in the
+  image, `crates/blastit-php-sapi/tests/probe` or a `--bin` behind the cfg) that:
+  1. `dlopen`s `libphp.so` (`BLASTIT_LIBPHP`/arg), then the shim;
+  2. creates a `socketpair(AF_UNIX)` to stand in for `view.chan`;
+  3. for a fixture `public/index.php` that `echo "hello from php"` and
+     `header('X-Probe: 1')`, calls shim `worker_init` → `request(entry, server_vars, sink)`;
+  4. asserts status `200`, head contains `X-Probe: 1`, body contains `hello from php`,
+     and `cpu_ns` is present, `> 0` and `<= wall_ns`;
+  5. asserts a `PHP_VALUE` entry placed in `server_vars` is **structurally dropped**;
+  6. runs a fixture that `exit()`s and one that raises a fatal: both return a status code
+     (no unwind, no process death) and the **next** request still serves — re-entrancy
+     proved by two consecutive requests;
+  7. prints one JSON line (`{status, head, body, cpu_ns, wall_ns, contained}`).
+- CI: a job running `make php-sapi-e2e` (`--locked`), separate from `make check`.
+
+## Acceptance (this node)
+
+```console
+$ make check                      # degrades honestly here: no PHP toolchain, crate compiles, Rust refuses with the package name
+$ make php-sapi-e2e               # Docker: builds libblastit_php8.4.so and runs the probe above
+$ cargo test -p blastit-php-sapi --locked
+```
+- On this host: `make check` green **without** PHP installed, and the refusal message names
+  `php-config` and the distro package.
+- In the container: the seven probe assertions pass, and the reported `cpu_ns` is non-zero.
+- `readelf -d libblastit_php8.4.so | grep NEEDED` shows no `libphp`.
