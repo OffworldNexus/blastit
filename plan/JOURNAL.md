@@ -888,3 +888,23 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T01:09 [MB.3.1] (lead) base 3cfea613f4deaff471e5876523be808115b4181a
 - 2026-11-14T01:20 [MB.3.1] (lead) status active -> review
 - 2026-11-14T01:29 [MB.3.1] (lead) status review -> done
+- 2026-11-14T01:29 [MB.3.1] (lead) commit 1e307d6
+- 2026-11-14T01:29 [MB.3.2] (lead) status ready -> active
+- 2026-11-14T01:29 [MB.3.2] (lead) attempt 1/3 started
+- 2026-11-14T01:29 [MB.3.2] (lead) base 1e307d6c33b31827a587d6c705bf8a6661fbda8f
+- 2026-11-14T01:53 [MB.3.2] (lead) status active -> review
+- 2026-11-14T01:54 [MB.9] (planner) created (epic) Backend Upstream Contract (DI/IoC): one trait for static, WSGI and FastCGI
+- 2026-11-14T01:54 [MB.9.1] (planner) created (task) Add crates/blastit-backend: the upstream contract trait, types, boot factory and conformance table
+- 2026-11-14T01:54 [MB.9.2] (planner) created (task) Port static serving onto the injected Upstream trait without behaviour change
+- 2026-11-14T01:54 [MB.9.3] (planner) created (task) Port the WSGI forwarding path onto the injected Upstream trait
+- 2026-11-14T01:54 [MB.9.4] (planner) created (task) Run one shared conformance table against every implementation and gate make check
+- 2026-11-14T01:54 [MB.3.3] (planner) edited fields
+- 2026-11-14T01:54 [MB.3.6] (planner) edited fields
+- 2026-11-14T01:54 [MB.4] (planner) edited fields
+- 2026-11-14T01:54 [MB.3] (planner) Owner requirement 2026-11-14: every backend (static, WSGI, FastCGI) must be an injected implementation of one language-agnostic Upstream trait. Design extended 
+- 2026-11-14T01:54 [MB.3.3] (planner) Body rewritten: FastCGI session/param design plus the normative backend-contract section (trait Upstream, Arc<dyn Upstream> per route, boot factory, crate layer
+- 2026-11-14T01:54 [MB.9] (planner) Created on owner requirement: contract crate + static port + WSGI port + shared conformance suite land here, under MB and before MB.4, while FastCGI implements 
+- 2026-11-14T01:59 [MB.3.2] (lead) REVIEW FAIL: (MAJOR) php.md:50 relative pool listen=run/fpm.sock resolves under php-fpm's compile prefix and dies at step 2, so the zero-sudo Local flow and inv
+- 2026-11-14T01:59 [MB.3.2] (lead) status review -> ready
+- 2026-11-14T02:03 [MB.3.2] (lead) attempt 2/3 started
+- 2026-11-14T02:03 [MB.3.2] (lead) status ready -> review
