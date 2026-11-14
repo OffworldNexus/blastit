@@ -421,7 +421,7 @@ fn an_unknown_route_key_that_is_not_a_table_is_an_error() {
         ManifestErrors::from(ManifestError::WrongType {
             path: "route[0].egres".to_string(),
             expected: "one of the route keys (`name`, `path`, `methods`, `groups`, `egress`, \
-                       `prefork`, `ingress`, `static`) or a table holding an inline grant",
+                       `prefork`, `ingress`, `static`, `php`) or a table holding an inline grant",
             found: "a boolean",
         })
     );
@@ -915,13 +915,11 @@ fn functions_must_be_a_list_of_names() {
 /// block is refused as an unknown key that names it — not silently ignored,
 /// not read as an inline grant, and not a deprecation warning.
 ///
-/// The twin in the same test is a route of the same shape that *is* accepted:
-/// `[route.static]` parses, so what fails below is the retired key and not the
-/// manifest around it. (`[route.php]`, the per-route form that replaces the
-/// fallback, is `MB.3.5.4`'s and does not parse on this base yet; asserting it
-/// here would be a failing test rather than a twin.)
+/// The twin in the same test is the same route with the block that replaces the
+/// fallback: `[route.php]` parses (`MB.3.5.4`), so what fails below is the
+/// retired key and not the manifest around it.
 #[test]
-fn fastcgi_is_an_unknown_route_key_and_the_static_twin_parses() {
+fn fastcgi_is_an_unknown_route_key_and_the_php_twin_parses() {
     let errors = parse_errors(
         "version = 1\n\
          [[route]]\nname = \"app\"\npath = ['.*']\n\
@@ -939,19 +937,22 @@ fn fastcgi_is_an_unknown_route_key_and_the_static_twin_parses() {
         "the diagnostic names the retired key: {rendered}"
     );
 
-    // The accepted twin: the same route, with the block that still exists.
+    // The accepted twin: the same route, with the block that replaces the
+    // retired one.
     let twin = Manifest::from_toml_str(
         "version = 1\n\
          [[route]]\nname = \"app\"\npath = ['.*']\n\
-         [route.static]\nroot = \"public\"\n",
+         [route.static]\nroot = \"public\"\n\n\
+         [route.php]\nentry = \"public/index.php\"\n",
     )
-    .expect("the static twin parses");
+    .expect("the php twin parses");
+    let route = twin.route(0).expect("route 0");
     assert_eq!(
-        twin.route(0)
-            .expect("route 0")
-            .static_policy()
-            .expect("the static block")
-            .root,
+        route.static_policy().expect("the static block").root,
         "public"
+    );
+    assert_eq!(
+        route.php().expect("the php block").entry,
+        "public/index.php"
     );
 }

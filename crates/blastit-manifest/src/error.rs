@@ -485,6 +485,56 @@ pub enum ManifestError {
         /// Why the route can never reach the app.
         why: &'static str,
     },
+    /// A `[route.php]` `entry` is not a relative `.php` path beneath the
+    /// manifest's directory (`ADR-0010` §2; design §4.1, unchanged from the
+    /// retired key).
+    ///
+    /// `rule` is one of the fixed phrases the design pins — `must be a relative
+    /// path`, `must not contain ..`, `must not contain \`, `must not contain a
+    /// control byte`, `must end in .php` — and `must be under static root
+    /// "<root>"` when the route also declares `[route.static]`. It is a
+    /// `String` because that last phrase interpolates a value, and because the
+    /// entry probe adds `must exist`, `must be a regular file`, `must be
+    /// readable by uid <uid>` and `must be stat-able` to the same variant.
+    #[error("{location}: php entry {}: {rule}", quoted(.entry))]
+    PhpEntryInvalid {
+        /// Where the `[route.php]` block is written.
+        location: Location,
+        /// The entry as written.
+        entry: String,
+        /// The fixed rule the entry breaks.
+        rule: String,
+    },
+    /// An explicit `[route.php]` `workers` cap is outside `1..=64`
+    /// (`ADR-0010` §2).
+    ///
+    /// An absent `workers` is not an error: blastit derives the route's
+    /// concurrency from its per-view budget, and `workers` may only lower it.
+    /// `why` is `must be at least 1` or `at most 64`.
+    #[error("{location}: php workers {workers}: {why}")]
+    PhpWorkersInvalid {
+        /// Where the `[route.php]` block is written.
+        location: Location,
+        /// The cap as written.
+        workers: u32,
+        /// Why the cap is refused.
+        why: &'static str,
+    },
+    /// A `[route.php]` route carries a declaration that never reaches the front
+    /// controller (`ADR-0010` §2).
+    ///
+    /// `key` names the declaration (`spa = true`, `CONNECT`, `TRACE`) and `why`
+    /// is the fixed sentence the design pins; the message is
+    /// `route "app" (index 0): <why>`, exactly as the design's table renders it.
+    #[error("{location}: {why}")]
+    PhpDeadDeclaration {
+        /// Where the `[route.php]` block is written.
+        location: Location,
+        /// The declaration that can never run.
+        key: String,
+        /// Why it can never reach the front controller.
+        why: &'static str,
+    },
 }
 
 /// Something suspicious that does not stop the server from starting (§6).

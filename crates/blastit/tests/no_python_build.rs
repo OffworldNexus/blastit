@@ -51,6 +51,25 @@ path = ['.*']
 entry = \"public/index.php\"
 ";
 
+/// One `[route.php]` route and no app: an embedded-PHP route is its own
+/// executor (`ADR-0010` §2), so this build carries everything it needs and the
+/// capability gate must not fire. The fixture became expressible in
+/// `MB.3.5.4`, which is exactly why the refusal it used to get went unnoticed.
+const PHP_ONLY: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.php]
+entry = \"public/index.php\"
+";
+
+/// The sentence the capability gate speaks when it refuses: this build has no
+/// interpreter, so it must never say it about a PHP route.
+const CAPABILITY_GATE: &str = "this build has no Python support (built without feature \"python\")";
+
 /// The sentence that names the artifact which *can* serve a WSGI manifest.
 const INSTALL: &str = "install the Python package: uv add blastit";
 
@@ -160,5 +179,46 @@ fn a_manifest_asking_for_the_retired_external_php_pool_is_refused_by_name() {
     assert!(
         !stderr.contains(APP_RULE),
         "the parser answered, not `app_rule`: {stderr}"
+    );
+}
+
+/// A PHP-only manifest is **not** a WSGI manifest: this build serves it, so the
+/// capability gate must not fire and nothing may suggest installing Python
+/// (`MB.3.5.4`, `ADR-0010` §2).
+///
+/// The boot still fails here, and for a reason this file controls: the test
+/// holds the port open, so a boot that got past both gates cannot bind it. That
+/// is the point — what is asserted is *which* sentence was **not** printed, so a
+/// gate that came back fails instead of passing on an exit code every path
+/// happens to return. The WSGI case above stays the denied twin: same harness,
+/// same held port, gate's sentence.
+#[test]
+fn a_php_only_manifest_is_not_refused_by_the_capability_gate() {
+    let scratch = Scratch::new("php", PHP_ONLY);
+    let (code, stdout, stderr) = dev(&scratch.dir);
+    assert_eq!(
+        code,
+        Some(1),
+        "the held port is what refuses this boot: stdout={stdout:?} stderr={stderr:?}"
+    );
+    // Unlike the two refusals above, this boot gets **past** the banner: the
+    // route is counted (`1 route`) and the failure is the bind, so the events
+    // land on stdout. That is the proof the gates let it through.
+    assert!(
+        stdout.contains("1 route"),
+        "the boot reached its banner with the PHP route counted: {stdout}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        !all.contains(CAPABILITY_GATE),
+        "a PHP route needs no interpreter, so the gate must not fire: {all}"
+    );
+    assert!(
+        !all.contains(INSTALL),
+        "no Python package can serve a [route.php] route: {all}"
+    );
+    assert!(
+        !all.contains(APP_RULE),
+        "a PHP route is its own executor: {all}"
     );
 }

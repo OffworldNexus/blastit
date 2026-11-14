@@ -14,8 +14,9 @@
 //!   non-fatal warnings;
 //! * [`Manifest::app`] and [`Manifest::preload`] carry the two non-secret
 //!   wiring keys, [`Route::ingress`] the request-body codec a route declared,
-//!   and [`Route::static_policy`] the `[route.static]` block it serves files
-//!   with;
+//!   [`Route::static_policy`] the `[route.static]` block it serves files with
+//!   and [`Route::php`] the `[route.php]` front controller an embedded `libphp`
+//!   worker runs;
 //! * [`Manifest::is_all_static`], [`Manifest::static_roots`] and
 //!   [`Manifest::check_static_roots`] answer the app-less static site: no `app`
 //!   is needed once every route is static, and the roots are audited by an
@@ -68,12 +69,13 @@
 //! use blastit_manifest::Executor;
 //!
 //! assert_eq!(Executor::View.kind(), "wsgi");
-//! assert_eq!(Executor::ALL_KINDS, ["wsgi"].as_slice());
+//! assert_eq!(Executor::ALL_KINDS, ["wsgi", "php"].as_slice());
 //! ```
 //!
-//! `[route.fastcgi]` is not one of those kinds, or a key: the external
+//! `[route.fastcgi]` is neither one of those kinds nor a key: the external
 //! `php-fpm` path was removed (`MB.3.17`, `ADR-0010` §1), and a manifest that
-//! still writes the block is refused as an unknown key that names it.
+//! still writes the block is refused as an unknown key that names it. `php` is
+//! the embedded worker ([`PhpPolicy`]), not the retired pool.
 
 #![deny(missing_docs)]
 
@@ -89,7 +91,8 @@ pub mod edit;
 pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning};
 pub use model::{
-    Executor, Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, StaticPolicy,
+    Executor, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route,
+    StaticPolicy,
 };
 pub use routing::{Match, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable};
 pub use uid::UidLayout;

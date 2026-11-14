@@ -1276,3 +1276,25 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T16:18 [MB.3.17] (implementer) attempt 2: docs_fences now carries the STALE accounting row (php.md fence must fail with 'fastcgi: unknown key'; MB.3.20 owes the entry's removal) + self-cleari
 - 2026-11-14T16:20 [MB.3.17] (lead) status active -> done
 - 2026-11-14T16:20 [MB.3.17] (lead) commit bc3b201 (make check exit 0; 4287 deletions; critical_guard authorized both protected deletions; docs_fences STALE row self-clears). Held docs half is MB.
+- 2026-11-14T16:20 [MB.3.5.4] (lead) RE-SCOPED after MB.3.17 (commit bc3b201): the fastcgi half is gone, so this leaf is [route.php] ONLY -- PhpPolicy { entry, workers }, Executor::Php, and it must
+- 2026-11-14T16:20 [MB.3.5.4] (lead) status ready -> active
+- 2026-11-14T16:20 [MB.3.5.4] (lead) attempt 1/3 started
+- 2026-11-14T16:20 [MB.3.5.4] (lead) base 5dcf16d; scope guards added from the owner: one key (entry, under static.root when both set), optional downward workers only, Executor::Php typed, fastcgi 
+- 2026-11-14T16:21 [MB.3.20] (lead) requirement added: the retarget must be VERIFIED by a test (php.md no longer mentions [route.fastcgi]; its manifest fence boots as [route.php] once MB.3.5.4 lan
+- 2026-11-14T16:32 [MB.3.5.4] (unknown) edited fields
+- 2026-11-14T16:32 [MB.3.5.4] (lead) status active -> ready
+- 2026-11-14T16:32 [MB.3.5.4] (lead) status ready -> active
+- 2026-11-14T16:32 [MB.3.5.4] (lead) attempt 2/3 started
+- 2026-11-14T16:32 [MB.3.5.4] (lead) paths extended to crates/blastit/src/stage0.rs + crates/blastit/tests/no_python_build.rs: the predicates landed but stage0::app_rule/no_python_support still key
+- 2026-11-14T16:32 [MB.3.6.4] (lead) FOLLOW-UP from MB.3.5.4: crates/blastit-manifest/src/edit.rs::expected_routes drops static_policy (pre-existing) and will drop [route.php] on a --learn rewrite 
+- 2026-11-14T16:36 [MB.3.5.4] (lead) status active -> review
+- 2026-11-14T16:36 [MB.3.5.4] (lead) attempt 2: boot decisions fixed -- app_rule refuses only when !can_boot_without_app() && app.is_none(); no_python_support returns None for can_boot_without_app(
+- 2026-11-14T16:36 [MB.3.21] (lead) created (task) check --learn must not drop a route's executor block: edit.rs expected_routes loses [route.static] today and [route.php] next
+- 2026-11-14T16:36 [MB.3.21] (lead) created on owner instruction (2026-11-14) after the finding was folded into MB.3.6.4 once and stayed there: a --learn rewrite that silently deletes a [route.sta
+- 2026-11-14T16:36 [MB.3.6.4] (lead) OWNERSHIP: the edit.rs --learn route-dropping bug is MB.3.21 now, NOT this node (it stayed folded in once and that was wrong). Do not fix or duplicate it here; 
+- 2026-11-14T16:36 [MB.3.8] (unknown) edited fields
+- 2026-11-14T16:36 [MB.3] (lead) RELEASE FOLDED (owner 2026-11-14): there is no separate 0.2.1 release -- everything goes into 0.2.0. Cargo.toml already reads 0.2.0 and must not bump. MB.3.8 re
+- 2026-11-14T16:38 [MB.17] (conductor) created (task) Default build must be the portable standalone binary (no libpython, no cache RUNPATH)
+- 2026-11-14T16:39 [MB.3.22] (lead) created (task) Close MB.3.5.4 review MINORs: PHP-only BLASTIT_APP refusal, check's pytest branch, Route::executor, dead key field
+- 2026-11-14T16:39 [MB.3.5.4] (lead) status review -> done
+- 2026-11-14T16:39 [MB.3.5.4] (lead) REVIEW PASS (attempt 2). Five MINORs deferred to MB.3.22 (two behavioural: stage0::static_app_refusal still keys on is_all_static so a PHP-only manifest silentl
