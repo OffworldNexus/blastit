@@ -23,3 +23,7 @@ ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded
 ## 2026-11-14T16:36 [unknown]
 
 edited fields
+
+## 2026-11-14T18:54 [lead]
+
+INPUT from MB.3.25 review (2026-11-14): ARCHITECTURE.md §7.3 is now stale against seccomp.rs — it says every refusal is EPERM with no clone3->ENOSYS exception, and lists neither clone CLONE_NEW* EPERM, setsid/setpgid EPERM, nor SeccompRole::EmbeddedView (execve/execveat/fork/vfork/non-thread clone). Update §7.3 in this node's ARCHITECTURE sync; design R14/§5.1.3 is the truth.

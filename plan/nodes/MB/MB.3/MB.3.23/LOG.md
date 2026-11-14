@@ -27,3 +27,7 @@ commit pending; REVIEW: committed on lead verification (make check exit 0, criti
 ## 2026-11-14T18:32 [lead]
 
 GOLDFISH REVIEW PASS (fresh-context reviewer, base 2299b32, commit 005fc67). Zero BLOCKER/MAJOR: surface names no interpreter/transport token, serve() matches design §4.1 (blocking; NODE's 'Send future' line was stale and is resolved in favour of the design), object safety and RequestEnd: Send asserted at the NODE's exact shape, doctest is an external-crate proof. 4 MINORs being fixed in a follow-up commit: grammar at runtime.rs:190; the doc asserts a blastit-scheduler->blastit-view crate edge that §4.2's DAG does not have (reword to consumer role; the edge is MB.9.3's decision); add assert_eq!(OUTPUT_LINE_CAP, 2048); NODE acceptance annotated as superseded.
+
+## 2026-11-14T18:39 [lead]
+
+review MINORs committed 59e7999 (runtime.rs + node acceptance annotation); make check exit 0, guard OK, plan OK. Node stays done.
