@@ -141,6 +141,7 @@ mod input;
 mod request;
 #[cfg(feature = "python")]
 mod response;
+mod runtime;
 mod sync;
 mod wire;
 
@@ -168,6 +169,9 @@ use pyo3::prelude::*;
 
 pub use crate::config::ViewConfig;
 pub use crate::error::ViewError;
+// The worker-side runtime seam (`MB.3.23`, design §4.1): what a route worker
+// implements, so the scheduler never learns which language it is serving.
+pub use crate::runtime::{OUTPUT_LINE_CAP, OutputStream, RequestEnd, RequestIo, WorkerRuntime};
 
 #[cfg(feature = "python")]
 use crate::input::BodyMsg;

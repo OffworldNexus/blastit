@@ -2,16 +2,16 @@
 id: MB.3.23
 title: "WorkerRuntime: the worker-side contract paired with Upstream (design backend-runtimes §3)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.3.11]
 paths: ["crates/blastit-view/src/**", "crates/blastit/src/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T17:04"
-updated: "2026-11-14T17:04"
+updated: "2026-11-14T18:29"
 ---
 
 # Goal

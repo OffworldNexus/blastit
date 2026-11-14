@@ -1319,3 +1319,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T18:20 [MB.3.13.4] (unknown) edited fields
 - 2026-11-14T18:20 [MB.3.13.1] (lead) OWNERSHIP RESOLVED (owner, 2026-11-14): PhpEmbedRuntime + the php feature wiring are THIS leaf's; MB.3.13.4 owns only the protected suite. backend-runtimes.md §
 - 2026-11-14T18:20 [MB.3.13.4] (lead) OWNERSHIP: you own the protected suite ONLY. PhpEmbedRuntime and php = [dep:blastit-php-sapi] are MB.3.13.1's (design §5 row 7 amended). Do not build the runtim
+- 2026-11-14T18:20 [MB.3.23] (lead) status ready -> active
+- 2026-11-14T18:20 [MB.3.23] (lead) attempt 1/3 started
+- 2026-11-14T18:20 [MB.3.23] (lead) base 2299b32; design: backend-runtimes.md §3 + ADR-0009. Prereq MB.3.11 verified DONE in code (feature gate + no_python_build).
+- 2026-11-14T18:29 [MB.3.23] (lead) status active -> done
+- 2026-11-14T18:29 [MB.3.23] (lead) commit pending; REVIEW: committed on lead verification (make check exit 0, critical_guard clean, and the doctest proved to bite by renaming serve -> E0407/E0599
