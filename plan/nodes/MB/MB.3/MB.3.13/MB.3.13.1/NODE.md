@@ -6,12 +6,19 @@ status: active
 owner: implementer
 priority: 1
 depends_on: []
-paths: ["crates/blastit-view/src/**", "crates/blastit-view/Cargo.toml", "crates/blastit/src/**"]
+paths:
+  - "crates/blastit-view/src/**"
+  - "crates/blastit-view/Cargo.toml"
+  - "crates/blastit-view/tests/**"
+  - "crates/blastit/src/**"
+  - crates/blastit/Cargo.toml
+  - "crates/blastit-php-sapi/src/**"
+  - Cargo.lock
 attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T17:04"
-updated: "2026-11-14T18:20"
+updated: "2026-11-14T18:31"
 ---
 
 # Goal

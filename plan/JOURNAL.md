@@ -1331,3 +1331,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T18:31 [MB.3.25] (lead) edited fields
 - 2026-11-14T18:31 [MB.3.25] (lead) PATH REPAIR by lead: added crates/blastit-sys/tests/** so the protected critical_embedded_seccomp.rs named by backend-runtimes.md §7.1 R14 can exist (node accep
 - 2026-11-14T18:32 [MB.3.23] (lead) GOLDFISH REVIEW PASS (fresh-context reviewer, base 2299b32, commit 005fc67). Zero BLOCKER/MAJOR: surface names no interpreter/transport token, serve() matches d
+- 2026-11-14T18:39 [MB.3.23] (lead) review MINORs committed 59e7999 (runtime.rs + node acceptance annotation); make check exit 0, guard OK, plan OK. Node stays done.

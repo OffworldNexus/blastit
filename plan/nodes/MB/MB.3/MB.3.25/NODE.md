@@ -8,6 +8,7 @@ priority: 2
 depends_on: [MB.3.23]
 paths:
   - "crates/blastit-sys/src/**"
+  - "crates/blastit-sys/tests/**"
   - "crates/blastit-sys/Cargo.toml"
   - "crates/blastit/src/**"
   - crates/blastit/Cargo.toml
@@ -15,7 +16,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T17:04"
-updated: "2026-11-14T17:04"
+updated: "2026-11-14T18:31"
 ---
 
 # Goal

@@ -27,3 +27,11 @@ edited fields
 ## 2026-11-14T18:20 [lead]
 
 OWNERSHIP RESOLVED (owner, 2026-11-14): PhpEmbedRuntime + the php feature wiring are THIS leaf's; MB.3.13.4 owns only the protected suite. backend-runtimes.md §5 row 7 amended to say so, MB.3.13.4 retitled, and this leaf is the Cargo.toml/Cargo.lock lock owner for the split (paths now include crates/blastit-view/Cargo.toml).
+
+## 2026-11-14T18:31 [lead]
+
+edited fields
+
+## 2026-11-14T18:31 [lead]
+
+PATH REPAIR by lead (2026-11-14): the PhpEmbedRuntime worker cannot dlopen from blastit-view (#![forbid(unsafe_code)]), so the safe loader lands in blastit-php-sapi (as abi.rs:7 already says MB.3.13 owns the dlopen handle); added crates/blastit-php-sapi/src/**, crates/blastit/Cargo.toml (php = [blastit-view/php, dep:blastit-php-sapi]) and Cargo.lock (adding a dep edge rewrites blastit-view's [[package]] entry; --locked would otherwise fail). crates/blastit-view/tests/** added for the non-critical loop tests.
