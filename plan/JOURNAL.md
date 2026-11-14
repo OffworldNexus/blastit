@@ -868,3 +868,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T00:45 [MB.2] (lead) status ready -> done
 - 2026-11-14T00:55 HUMAN H-005 opened by conductor (node MB)
 - 2026-11-14T00:55 AUTOPILOT off by conductor awaiting human review and merge of release PR v0.2.0
+- 2026-11-14T00:58 [MB.6] (conductor) created (task) Static files beside a Python/PHP app + the hashed-asset caching contract
+- 2026-11-14T01:02 [MB.7] (conductor) created (task) Exclude critical_static_cli from the root CI phase (root can list anything)
+- 2026-11-14T01:03 [MB.8] (conductor) created (task) e2e: Django collectstatic served by [static] beside the WSGI app
+- 2026-11-14T01:04 [MB.7] (lead) status ready -> active
+- 2026-11-14T01:04 [MB.7] (lead) attempt 1/3 started
+- 2026-11-14T01:04 [MB.7] (lead) base 0a2778c
+- 2026-11-14T01:06 [MB.7] (lead) status active -> done
