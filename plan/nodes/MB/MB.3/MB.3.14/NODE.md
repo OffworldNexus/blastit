@@ -2,22 +2,36 @@
 id: MB.3.14
 title: "Record the design-doc collision in LESSONS: one writer per design doc, incremental .part writes, dispatch order"
 kind: task
-status: active
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: []
 paths: [docs/knowledge/LESSONS.md]
-attempts: 2
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:43"
-updated: "2026-11-14T14:52"
+updated: "2026-11-14T15:31"
 ---
 
 # Goal
 
-Record the 2026-11-14 design-document collision in `docs/knowledge/LESSONS.md`, with the
-rule that prevents a repeat. Three lessons, one bullet.
+Record, in `docs/knowledge/LESSONS.md`, the lessons this batch paid for. Four bullets were
+appended; no existing bullet is edited.
+
+1. **A design doc is a single-writer artefact** — the untracked
+   `docs/design/backend-runtimes.md` was overwritten by a second writer and the ~65 KB
+   original was irrecoverable.
+2. **Stage explicit paths, never a glob** — a broad stage absorbed this very file twice
+   (`9fab605`, `dc05a48`).
+3. **`php_execute_script` swallows the bailout** — `exit()`/`die()`/fatal comes back as
+   `false`, not as a `longjmp` into `zend_first_try`; the guard stays mandatory, but the
+   status must be read.
+4. **`CLOCK_PROCESS_CPUTIME_ID` is tick-granular** — a trivial fixture can legitimately
+   measure 0 ns, so `cpu_ns > 0` flakes on fast hosts; burn ≥1 tick or document the floor.
+
+(Attempt 1 wrote bullet 1; attempt 2 added bullet 2 and the staging clause; attempt 3
+added bullets 3 and 4 from `MB.3.12`.)
 
 # Context
 

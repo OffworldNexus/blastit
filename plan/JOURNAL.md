@@ -1213,3 +1213,37 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T15:01 [MB.3.11] (lead) REVIEW PASS (attempt 1) with two MINORs to clear before commit: (a) stage0.rs:362 gives a [route.fastcgi]-only manifest advice that cannot work ('install the Py
 - 2026-11-14T15:07 [MB.3.11] (lead) status active -> done
 - 2026-11-14T15:07 [MB.3.11] (lead) commit 90056a7 (make check exit 0, rs-no-python green, 0 pyo3 deps). Both review MINORs cleared: the [route.fastcgi]-only refusal now names MB.3.13's wiring ins
+- 2026-11-14T15:08 [MB.3.15] (lead) created (task) Protected critical_backend_capability suite: the design R12 refusal matrix in both build configurations
+- 2026-11-14T15:08 [MB.3.16] (lead) created (task) Refuse (or prove) blastit check on an all-static Python-less manifest, pretty and --json
+- 2026-11-14T15:08 [MB.3.12] (lead) status ready -> active
+- 2026-11-14T15:08 [MB.3.12] (lead) attempt 1/3 started
+- 2026-11-14T15:08 [MB.3.12] (lead) base b2890c4; host has NO PHP toolchain (no php/php-config/libphp/headers) -- build.rs must degrade (cfg no_php_toolchain + a Rust refusal naming php-config + t
+- 2026-11-14T15:14 [MB.3.17] (lead) created (task) Remove the external FastCGI path: delete blastit-fastcgi, drop [route.fastcgi], the ALLOW flag and every doc that sanctions it
+- 2026-11-14T15:14 [MB.3.6.1] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.1] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.6.1.1] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.1.1] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.6.1.2] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.1.2] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.6.2] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.2] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.6.2.1] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.2.1] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.6.2.2] (lead) SUPERSEDED by owner decision 2026-11-14 ('No fallback please'): there is NO external FastCGI path. [route.fastcgi] stops existing as a key (unknown-key refusal,
+- 2026-11-14T15:14 [MB.3.6.2.2] (lead) status ready -> superseded
+- 2026-11-14T15:14 [MB.3.5.4] (lead) RETARGETED (owner 2026-11-14, 'No fallback please'): this leaf is now [route.php] ONLY. [route.fastcgi] stops existing as a key -- refused as an unknown key nam
+- 2026-11-14T15:14 [MB.3.10] (lead) RETARGETED (owner 2026-11-14, 'No fallback please'): the docs retarget teaches [route.php] + libphp-embed + BLASTIT_LIBPHP ONLY. The fail-closed switch (BLASTIT
+- 2026-11-14T15:14 [MB.3] (lead) OWNER DECISION (2026-11-14): NO FastCGI fallback at all. MB.3.17 created (remove the external FastCGI path: delete crates/blastit-fastcgi, drop [route.fastcgi] 
+- 2026-11-14T15:14 [MB.3.4] (lead) NOTE for the record: this epic's crate (crates/blastit-fastcgi) is being DELETED by MB.3.17 under the owner's 2026-11-14 'No fallback please' decision. The gate
+- 2026-11-14T15:17 [MB.3.18] (lead) created (task) Build and publish the Linux packaging matrix: x86_64/aarch64 x glibc/musl, wheels + standalone binaries + PHP shims
+- 2026-11-14T15:17 [MB.3.18] (lead) QUEUED, not started (owner 2026-11-14): Linux only; aarch64 and Alpine/musl in scope. Runs AFTER MB.3.12 (Cargo.toml/lock + shims) and MB.3.17 (removes a worksp
+- 2026-11-14T15:19 [MB.3.18] (lead) ACCEPTANCE TIGHTENED (owner 2026-11-14, 'drop musl if it cannot be made secure'): the musl leg's gate is SECURITY, not 'it runs'. Six items must hold on the Alp
+- 2026-11-14T15:29 [MB.3.12] (unknown) edited fields
+- 2026-11-14T15:29 [MB.3.12] (lead) status active -> review
+- 2026-11-14T15:29 [MB.3.12] (lead) attempt 1 report: crate lands zero-dep (17 KiB shim, no DT_NEEDED on libphp, zend_first_try, SAPI_OPTION_NO_CHDIR, startup-stage INI lockdown, CLOCK_PROCESS_CPU
+- 2026-11-14T15:30 [MB.3.18] (lead) PROVEN-COUNT RULE (owner 2026-11-14): MB.3.12 built and probed 8.4 only; 8.2/8.3 are source-guarded but UNBUILT. This node's first job is first build + probe of
+- 2026-11-14T15:30 [MB.3.14] (lead) status active -> ready
+- 2026-11-14T15:30 [MB.3.14] (lead) status ready -> active
+- 2026-11-14T15:30 [MB.3.14] (lead) attempt 3/3 started
+- 2026-11-14T15:31 [MB.3.14] (lead) attempt 3: two more bullets appended from MB.3.12 (php_execute_script swallows the bailout -> false is the signal; CLOCK_PROCESS_CPUTIME_ID is tick-granular -> 
+- 2026-11-14T15:31 [MB.3.14] (lead) status active -> done

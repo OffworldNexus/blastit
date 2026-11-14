@@ -35,3 +35,23 @@ status ready -> active
 ## 2026-11-14T14:52 [lead]
 
 attempt 2/3 started
+
+## 2026-11-14T15:30 [lead]
+
+status active -> ready
+
+## 2026-11-14T15:30 [lead]
+
+status ready -> active
+
+## 2026-11-14T15:30 [lead]
+
+attempt 3/3 started
+
+## 2026-11-14T15:31 [lead]
+
+attempt 3: two more bullets appended from MB.3.12 (php_execute_script swallows the bailout -> false is the signal; CLOCK_PROCESS_CPUTIME_ID is tick-granular -> a trivial fixture can measure 0 ns, so cpu_ns>0 flakes on fast hosts). NODE.md body rewritten to describe all four bullets (the node previously described only the design-doc one). docs-check green, plan OK; full make check deferred to MB.3.12's commit which covers the same tree.
+
+## 2026-11-14T15:31 [lead]
+
+status active -> done
