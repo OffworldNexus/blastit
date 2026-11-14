@@ -2,7 +2,7 @@
 id: MB.3.4
 title: "Add the pure blastit-fastcgi crate: records, params codec, CGI head parser, lockdown matrix (split: MB.3.4.1 codec, MB.3.4.2 lockdown)"
 kind: epic
-status: ready
+status: done
 priority: 2
 depends_on: [MB.3.3]
 paths:
@@ -18,7 +18,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T03:36"
+updated: "2026-11-14T14:21"
 ---
 
 # Goal

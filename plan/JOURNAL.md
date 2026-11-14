@@ -1140,3 +1140,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T14:12 [MB.3.9.2] (lead) status active -> ready
 - 2026-11-14T14:12 [MB.3.9.2] (lead) attempt 4/4 started
 - 2026-11-14T14:19 [MB.3.9.2] (lead) status ready -> done
+- 2026-11-14T14:20 [MB.14] (lead) status review -> done
+- 2026-11-14T14:20 [MB.14] (lead) commit 9fab605 (gates: plan validate OK, guard OK, make check exit 0 at 0bbb877)
+- 2026-11-14T14:20 [MB.15] (lead) status ready -> active
+- 2026-11-14T14:20 [MB.15] (lead) attempt 1/3 started
+- 2026-11-14T14:20 [MB.15] (lead) base 9fab605 (after MB.14 commit)
+- 2026-11-14T14:21 [MB.3.4] (lead) status ready -> done
