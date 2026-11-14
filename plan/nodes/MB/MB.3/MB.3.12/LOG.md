@@ -47,3 +47,11 @@ status ready -> review
 ## 2026-11-14T15:46 [lead]
 
 attempt 2: both MAJORs + four MINORs fixed. CRITICAL FINDING: sapi_startup() NULLS ini_entries, so attempt 1's entire INI lockdown was silently absent (open_basedir unset, allow_url_fopen=On, disable_functions empty) while everything looked green -- now assigned AFTER sapi_startup with the ordering pinned by a critical test. Egress proven in two layers: the real SeccompRole::View{egress:false} filter (installed by an e2e harness linking blastit-sys, so the shim crate stays zero-dep) refuses socket(AF_INET) with EPERM in the same process that runs PHP, INCLUDING with allow_url_fopen=1 (strong layer holds with the weak one removed). PHP loses errno on socket() failure, so the sandbox claim is carried by the in-process socket errno and the driver says which half proves what.
+
+## 2026-11-14T15:57 [lead]
+
+status review -> done
+
+## 2026-11-14T15:57 [lead]
+
+commit d990e0e (make check exit 0 on a PHP-free host; Docker probe green with the three new ini_get rows). Four review MINORs cleared: three INI keys now asserted via ini_get not the rendered string, cfg->ini NULL refused before sapi_startup (-1, pinned by a critical case), absolute_value rejects ':' so open_basedir can never render two entries, and e2e/php-sapi/.gitignore covers target/ + the harness lock (lock ignored, not committed: unpublished e2e tool).

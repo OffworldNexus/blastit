@@ -2,7 +2,7 @@
 id: MB.3.12
 title: "crates/blastit-php-sapi: per-minor Apache-2.0 C SAPI shims (blastit_php_abi_v1) + critical tests"
 kind: task
-status: review
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.11]
@@ -18,7 +18,7 @@ attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:39"
-updated: "2026-11-14T15:46"
+updated: "2026-11-14T15:57"
 ---
 
 # Goal

@@ -1258,3 +1258,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T15:52 [MB.3.14] (lead) status active -> done
 - 2026-11-14T15:52 [MB.3.14] (lead) attempt 4 refused by the attempt cap (4/3, ESCALATE) -- correctly: a one-bullet docs addition is not worth an expensive-tier escalation. The third trap is carri
 - 2026-11-14T15:52 [MB.3.17] (lead) ADDITIONAL LESSONS bullet to append alongside this node's own one-liner (the attempt cap on MB.3.14 refused a fourth reopen, correctly): **sapi_startup() nulls 
+- 2026-11-14T15:57 [MB.3.12] (lead) status review -> done
+- 2026-11-14T15:57 [MB.3.12] (lead) commit d990e0e (make check exit 0 on a PHP-free host; Docker probe green with the three new ini_get rows). Four review MINORs cleared: three INI keys now assert
