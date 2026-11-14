@@ -2,7 +2,7 @@
 id: MB.3.11
 title: "Feature-gate pyo3 (feature=python); decouple RawFrame transport and forking from the GIL"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.5.1]
@@ -19,7 +19,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:39"
-updated: "2026-11-14T15:01"
+updated: "2026-11-14T15:07"
 ---
 
 # Goal

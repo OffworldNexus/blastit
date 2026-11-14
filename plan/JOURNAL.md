@@ -1211,3 +1211,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T15:01 [MB.3.11] (lead) status review -> ready
 - 2026-11-14T15:01 [MB.3.11] (lead) status ready -> active
 - 2026-11-14T15:01 [MB.3.11] (lead) REVIEW PASS (attempt 1) with two MINORs to clear before commit: (a) stage0.rs:362 gives a [route.fastcgi]-only manifest advice that cannot work ('install the Py
+- 2026-11-14T15:07 [MB.3.11] (lead) status active -> done
+- 2026-11-14T15:07 [MB.3.11] (lead) commit 90056a7 (make check exit 0, rs-no-python green, 0 pyo3 deps). Both review MINORs cleared: the [route.fastcgi]-only refusal now names MB.3.13's wiring ins
