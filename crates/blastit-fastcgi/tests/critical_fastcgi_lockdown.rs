@@ -301,7 +301,17 @@ fn nul_in_header_value_is_malformed() {
 /// Row 16's lockdown half: an unrepresentable header name is dropped, not refused.
 #[test]
 fn unrepresentable_header_name_is_dropped() {
-    let headers: [(&[u8], &[u8]); 3] = [(b"X.Foo", b"1"), (b"-x", b"2"), (b"\xC3\x9Cnicode", b"3")];
+    let headers: [(&[u8], &[u8]); 5] = [
+        (b"X.Foo", b"1"),
+        (b"-x", b"2"),
+        (b"\xC3\x9Cnicode", b"3"),
+        // A digit-leading name is a legal RFC 7230 token from the front end and
+        // still starts with a digit after folding (§4.6.2), so it is dropped.
+        (b"1x", b"4"),
+        // The empty name is reachable only through this builder API; it folds to
+        // nothing, so the `HTTP_` prefix alone is unrepresentable too.
+        (b"", b"4"),
+    ];
     let params = params_for(b"/", &headers);
     assert_eq!(params.len(), 16, "only the fixed params");
     assert_eq!(
@@ -310,8 +320,17 @@ fn unrepresentable_header_name_is_dropped() {
             b"HTTP_X.FOO".to_vec(),
             b"HTTP__X".to_vec(),
             b"HTTP_\xC3\x9CNICODE".to_vec(),
+            b"HTTP_1X".to_vec(),
+            b"HTTP_".to_vec(),
         ]
     );
+    for name in [&b"HTTP_1X"[..], b"HTTP_"] {
+        assert!(
+            params.get(name).is_none(),
+            "{}",
+            String::from_utf8_lossy(name)
+        );
+    }
 }
 
 /// Design §4.6.2: a header value above 8 KiB is dropped, the request proceeds.

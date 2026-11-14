@@ -1051,3 +1051,65 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T13:04 [MB.3.4.5] (lead) status active -> review
 - 2026-11-14T13:09 [MB.3.4.5] (lead) status review -> done
 - 2026-11-14T13:09 [MB.3.4.5] (lead) commit cad3b72
+- 2026-11-14T13:10 [MB.12] (conductor) created (epic) Distribution per backend: PyPI wheel, npm package, standalone binary (no Python for static/Node)
+- 2026-11-14T13:12 [MB.3.5.1] (lead) status ready -> active
+- 2026-11-14T13:12 [MB.3.5.1] (lead) attempt 1/3 started
+- 2026-11-14T13:12 ESCALATION #10 -> architect for MB.12 by conductor: Owner asks for a real architecture of serving different language runtimes (who owns app code/process lifecycle, secrets,
+- 2026-11-14T13:12 [MB.3.5.1] (lead) base 2ad094b
+- 2026-11-14T13:12 [MB.3.4] (lead) epic gate: cargo test -p blastit-fastcgi (44/12/30/1), zero deps, no-I/O grep, make check EXIT=0 verified; test-curator gate audit dispatched; stale acceptance 
+- 2026-11-14T13:13 [MB.3] (lead) architect context (2026-11-14): epic MB.12 will land docs/design/backend-runtimes.md + an ADR defining the runtime-provider contract (app-process ownership, sec
+- 2026-11-14T13:13 [MB.3.5] (lead) design-of-record is ADR-0008 + php-fastcgi.md 4.1 as accepted. Do NOT invent a key or a rule: three keys only (entry, listen, workers=4), no [route.fastcgi.env]
+- 2026-11-14T13:15 [MB.3.4.6] (test-curator) created (task) Pin the last two unprotected branches in the fastcgi protected suites: head_end at MAX_HEAD_BYTES and a digit-leading header name
+- 2026-11-14T13:16 [MB.3.4.6] (lead) status ready -> active
+- 2026-11-14T13:16 [MB.3.4.6] (lead) attempt 1/3 started
+- 2026-11-14T13:16 [MB.3.4.6] (lead) base 2ad094b
+- 2026-11-14T13:17 [MB.3.9] (lead) created (epic) blastit dev spawns, configures, supervises and cleans up the php-fpm pool itself
+- 2026-11-14T13:17 [MB.3.9.1] (lead) created (task) Rewrite the PHP page Local section for the automatic dev pool (two commands, dx + ai-ergonomics acceptance)
+- 2026-11-14T13:17 [MB.3.9.2] (lead) created (task) Design + ADR amendment: dev lifecycle, provider reuse, discovery order, cleanup and error contract
+- 2026-11-14T13:18 [MB.3.9.2] (unknown) edited fields
+- 2026-11-14T13:18 [MB.3.9.3] (lead) created (task) Amend design 4.8.1 + ADR-0008: dev spawns the pool via the runtime provider (discovery, cleanup, error contract)
+- 2026-11-14T13:19 [MB.3.9.4] (lead) created (task) blastit dev spawns/supervises/cleans up the php-fpm pool via the runtime provider (no listen, derived workers)
+- 2026-11-14T13:19 [MB.3.9.5] (lead) created (task) Protected critical_fastcgi_dev_pool suite: missing binary, immediate exit, two pools, SIGTERM cleanup, grammar
+- 2026-11-14T13:19 [MB.3.9.2] (lead) status ready -> active
+- 2026-11-14T13:19 [MB.3.9.2] (lead) attempt 1/3 started
+- 2026-11-14T13:19 [MB.3.9.2] (lead) base 2ad094b; owner decision 2026-11-14: listen is removed from [route.fastcgi], workers optional and derived from blastit's view worker budget; MB.3.5.1 is imp
+- 2026-11-14T13:19 [MB.3.5] (lead) GRAMMAR CHANGED 2026-11-14 (owner): [route.fastcgi] is now { entry, workers? } -- 'listen' is REMOVED (blastit derives <run>/<route>/fpm.sock inside a 0700 dir)
+- 2026-11-14T13:19 [MB.3.5.2] (lead) DO NOT START until MB.3.9.2 and MB.3.9.3 land: this node's brief derives from the old grammar (user-authored listen, DevProbe::check = 'socket must already exis
+- 2026-11-14T13:20 [MB.3.9.1] (unknown) edited fields
+- 2026-11-14T13:20 [MB.3.9] (lead) OWNER SPEC (runtime discovery), 2026-11-14 -- folded into MB.3.9.1/.3/.4/.5: the runtime binary is resolved ONCE at boot by a GENERIC, provider-declared resolve
+- 2026-11-14T13:22 [MB.3.6.3] (lead) BINDING OWNER CONSTRAINTS (2026-11-14, design-level -- record now, land later).
+- 2026-11-14T13:22 [MB.3.6.4] (lead) BINDING OWNER CONSTRAINTS (2026-11-14) for check/learn and the observation path -- these are design-level, record now and land later.
+- 2026-11-14T13:22 [MB.3.9] (lead) OWNER SPEC (CPU accounting + who limits parallelism), 2026-11-14 -- binding on MB.3.6.3/MB.3.6.4 (logs written there) and owned generically by MB.12's provider 
+- 2026-11-14T13:22 [MB.3.5.1] (lead) attempt 1: code complete against the owned-socket grammar in all 6 paths (FastCgiPolicy{entry, workers:Option<u32>}, listen refused via FastCgiListenDerived nam
+- 2026-11-14T13:22 [MB.3.5.1] (lead) status active -> blocked
+- 2026-11-14T13:22 [MB.3.5.3] (lead) created (task) Name fastcgi in ROUTE_KEY_EXPECTED and move the pinned expectation in tests/parse.rs
+- 2026-11-14T13:22 [MB.3.9.1] (lead) status ready -> active
+- 2026-11-14T13:22 [MB.3.9.1] (lead) attempt 1/3 started
+- 2026-11-14T13:22 [MB.3.9.1] (lead) base 2ad094b; this leaf is now the unblocker for MB.3.5.1: docs_fences boots docs/frameworks/php.md, which still shows listen = run/fpm.sock and workers = 4. MB
+- 2026-11-14T13:23 [MB.3.6.3] (lead) SUPERSEDED (2026-11-14, owner): rule (3) of my earlier note -- 'charge observed wall time, cpu_ns: null, optional production-only cgroup cpu.stat refinement' --
+- 2026-11-14T13:23 [MB.3.6.4] (lead) SUPERSEDED (2026-11-14, owner): my earlier note (1) said a FastCGI route's honest value is observed wall time with cpu_ns:null. That is now the FALLBACK ONLY, n
+- 2026-11-14T13:23 [MB.3.4.6] (lead) attempt 1 report: 2 protected files, +25/-1, no src change, 44/12/30/1 green, mutants 3/331/18 unchanged, critical-guard OK for both files. make check fails ONL
+- 2026-11-14T13:23 [MB.3.4.6] (lead) status active -> review
+- 2026-11-14T13:24 [MB.3.6] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3.9.3] (lead) HELD pending MB.12's embed-vs-pool decision. This node was written for a spawned php-fpm pool (generated conf, provider spawn, discovery via BLASTIT_PHP_FPM). I
+- 2026-11-14T13:24 [MB.3.6.1] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3.9.4] (lead) HELD pending MB.12's embed-vs-pool decision. This node was written for a spawned php-fpm pool (generated conf, provider spawn, discovery via BLASTIT_PHP_FPM). I
+- 2026-11-14T13:24 [MB.3.6.2] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3.9.5] (lead) HELD pending MB.12's embed-vs-pool decision. This node was written for a spawned php-fpm pool (generated conf, provider spawn, discovery via BLASTIT_PHP_FPM). I
+- 2026-11-14T13:24 [MB.3.6.3] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3.9] (lead) HELD pending MB.12 embed-vs-pool decision. MB.3.9.1 (page) is running and is treated as a DRAFT: its mechanism-neutral parts (one-line manifest, one command) su
+- 2026-11-14T13:24 [MB.3.6.4] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3.7] (lead) HELD pending MB.12's embed-vs-pool decision (owner 2026-11-14: 'use the goddamn libphp and bypass php-fpm if you need to'). Do not implement, do not fail, do no
+- 2026-11-14T13:24 [MB.3] (lead) INVENTORY for the architect (embed-vs-pool), 2026-11-14. What I believe survives either way, and why:
+- 2026-11-14T13:39 [MB.3] (lead) FOLLOW-UP for the embed-vs-pool decision: docs/frameworks/php.md's H1 is 'PHP-FPM, Symfony and Laravel' and the nav label 'PHP-FPM' lives in zensical.toml:37 + 
+- 2026-11-14T13:39 [MB.3] (lead) RENAME RISK from the architect's research (docs/research/php-embed-sapi.md, MB.12): the embed model names the block '[route.php] entry = ...' and the override '
+- 2026-11-14T13:50 [MB.3.9.2] (lead) landed: grammar = entry + optional workers; listen gone (derived <run>/fastcgi/<route_index>/fpm.sock); workers from view_worker_cap(), 1..=64, over-budget/over
+- 2026-11-14T13:50 [MB.3.9.1] (lead) status active -> review
+- 2026-11-14T13:50 [MB.3.5.1] (lead) status blocked -> active
+- 2026-11-14T13:50 [MB.3.5.1] (lead) unblocked: docs/frameworks/php.md landed the entry-only manifest (MB.3.9.1), so docs_fences is green in the working tree. Attempt 1's code is unchanged; this is
+- 2026-11-14T13:50 [MB.3.5.1] (lead) status active -> review
+- 2026-11-14T13:54 [MB.3.9.2] (lead) REVIEW FAIL (attempt 1). MAJOR: design:1445 'a leaf that cannot be freed never fails the boot' (B3 failure cell :1396 = warn + route Busy/503, never exit 1) has
+- 2026-11-14T13:54 [MB.3.9.2] (lead) status active -> ready
+- 2026-11-14T13:54 [MB.3.9.2] (lead) attempt 2/3 started
+- 2026-11-14T13:55 [MB.13] (conductor) created (task) Rewrite the deployments index page for scannability
+- 2026-11-14T13:56 [MB.3.4.6] (lead) status review -> done

@@ -224,6 +224,9 @@ fn head_total_cap_is_exactly_64_kib() {
     // No literal 65 536 needed: this buffer is a fixed 7·8 199 + 8 141 + 2, so
     // this line already fails if `MAX_HEAD_BYTES` drifts.
     assert_eq!(at_cap.len(), MAX_HEAD_BYTES);
+    // §4.5.2 is "≤ 64 KiB total", so an end offset *equal* to the cap is a
+    // complete head: a `<` on that boundary would fault a legal 64 KiB head.
+    assert_eq!(head_end(&at_cap), Some(at_cap.len()));
     let parsed = parse_head(&at_cap).expect("exactly MAX_HEAD_BYTES parses");
     assert_eq!(parsed.headers.len(), 8);
 
@@ -235,6 +238,8 @@ fn head_total_cap_is_exactly_64_kib() {
     over_cap.extend_from_slice(b"\r\n");
     assert_eq!(over_cap.len(), MAX_HEAD_BYTES + 1);
     assert_eq!(parse_head(&over_cap), Err(CgiError::BadHead));
+    // Its terminator lies one byte past the searched window: still incomplete.
+    assert_eq!(head_end(&over_cap), None);
 }
 
 /// `END_REQUEST.protocolStatus` other than Complete is
