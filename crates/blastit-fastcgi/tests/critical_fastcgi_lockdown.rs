@@ -614,3 +614,190 @@ fn malformed_pinned_paths_are_refused() {
         );
     }
 }
+
+/// Design §4.6.2: `SCRIPT_NAME` is `?`-free; a query in the pinned value is a
+/// builder error, never a param byte.
+#[test]
+fn script_name_with_a_query_is_malformed() {
+    let mut queried = paths();
+    queried.script_name = "/index.php?x".into();
+    assert_eq!(
+        build(&queried, &facts(b"/", &[])),
+        Err(LockdownError::Malformed)
+    );
+
+    // The accepted twin still builds, and only the verbatim query carriers hold
+    // a `?` — never the pinned script name.
+    let params = build(&paths(), &facts(b"/", &[])).expect("builds");
+    assert_eq!(value(&params, b"SCRIPT_NAME"), b"/index.php");
+    assert!(!value(&params, b"SCRIPT_NAME").contains(&b'?'));
+    assert_eq!(value(&params, b"QUERY_STRING"), b"");
+}
+
+/// `R19` (design §4.6.2): the encoded ≤ 65 535 **total** cap fires through the
+/// public `build`, while one pair stays below the 65 531 pair cap and every
+/// 8 192-byte value is legal (only a value above 8 192 is dropped).
+#[test]
+fn the_total_param_byte_budget_is_enforced_through_build() {
+    // Eight headers `X-A` .. `X-H` of exactly 8 192 value bytes. Each folds to
+    // the 8-byte param `HTTP_X_A`, so its encoded pair is
+    // 1 (name length) + 4 (value length) + 8 + 8 192 = 8 205 bytes — well under
+    // the 65 531 pair cap, so the pair branch can never fire. The 16 fixed
+    // params of this request encode to 340 bytes, so seven pairs are
+    // 340 + 57 435 = 57 775 (fits) and eight are 65 980 (over 65 535): only the
+    // total branch can refuse, and only on the eighth pair.
+    const NAME_PREFIX: &[u8] = b"HTTP_X_";
+    let names = ["X-A", "X-B", "X-C", "X-D", "X-E", "X-F", "X-G", "X-H"];
+    let value = [b'v'; 8_192];
+
+    let mut fixed = None;
+    let mut pair = None;
+    let mut seven = None;
+    for count in 0..=names.len() {
+        let headers: Vec<(&[u8], &[u8])> = names[..count]
+            .iter()
+            .map(|name| (name.as_bytes(), &value[..]))
+            .collect();
+        let built = build(&paths(), &facts(b"/", &headers));
+        if count < names.len() {
+            let params = built.expect("seven 8 192-byte values fit");
+            let carried: Vec<&Vec<u8>> = params
+                .pairs()
+                .iter()
+                .filter(|(name, _)| name.starts_with(NAME_PREFIX))
+                .map(|(_, carried)| carried)
+                .collect();
+            assert_eq!(carried.len(), count);
+            assert!(
+                carried.iter().all(|carried| carried.len() == 8_192),
+                "a legal 8 192-byte value is carried whole, never truncated"
+            );
+            assert!(
+                params.dropped().is_empty(),
+                "8 192 bytes is legal, never dropped"
+            );
+            if count == 0 {
+                fixed = Some(params.encoded_len());
+            }
+            if count == 1 {
+                // Measured, not assumed: the pair width must sit under the cap.
+                pair = Some(params.encoded_len() - fixed.expect("the zero-header case built"));
+            }
+            seven = Some(params.encoded_len());
+        } else {
+            assert_eq!(built, Err(LockdownError::ParamsTooLarge));
+        }
+    }
+
+    // The boundary is the total, not the pair: each measured pair is under the
+    // pair cap, and the eighth one still pushes the encoded set past the total.
+    let fixed = fixed.expect("the zero-header case built");
+    let pair = pair.expect("the one-header case built");
+    let seven = seven.expect("the seven-header case built");
+    assert_eq!(pair, 1 + 4 + 8 + 8_192);
+    assert!(pair < blastit_fastcgi::MAX_PARAM_PAIR_BYTES);
+    assert_eq!(seven, fixed + 7 * pair);
+    assert!(seven < blastit_fastcgi::MAX_PARAMS_BYTES);
+    assert!(seven + pair > blastit_fastcgi::MAX_PARAMS_BYTES);
+}
+
+/// `R18` (design §4.6.2): the log-safe `Debug` view prints the param names and
+/// never a value — a value routinely carries a cookie.
+#[test]
+fn params_debug_prints_names_never_values() {
+    let headers: [(&[u8], &[u8]); 2] = [(b"Cookie", b"session=secret"), (b"X-Foo", b"1")];
+    let params = params_for(b"/", &headers);
+    assert_eq!(value(&params, b"HTTP_COOKIE"), b"session=secret");
+
+    let debug = format!("{params:?}");
+    assert!(debug.contains("names"), "{debug}");
+    assert!(debug.contains("HTTP_COOKIE"), "{debug}");
+    assert!(debug.contains("HTTP_X_FOO"), "{debug}");
+    assert!(!debug.contains("session"), "{debug}");
+    assert!(!debug.contains("secret"), "{debug}");
+}
+
+/// Design §4.6.1/§4.6.2: every hop-by-hop name is dropped before `HTTP_*`
+/// derivation, ASCII case-insensitively, and recorded as its folded name.
+#[test]
+fn every_hop_by_hop_name_is_dropped() {
+    let headers: [(&[u8], &[u8]); 9] = [
+        (b"Connection", b"close"),
+        (b"kEeP-aLiVe", b"timeout=5"),
+        (b"PROXY-Authenticate", b"Basic"),
+        (b"proxy-AUTHORIZATION", b"Basic x"),
+        (b"Proxy-Connection", b"keep-alive"),
+        (b"Te", b"trailers"),
+        (b"TRAILER", b"x"),
+        (b"transfer-ENCODING", b"chunked"),
+        (b"UpGrade", b"websocket"),
+    ];
+    let params = params_for(b"/", &headers);
+    assert_eq!(
+        params.dropped(),
+        [
+            b"HTTP_CONNECTION".to_vec(),
+            b"HTTP_KEEP_ALIVE".to_vec(),
+            b"HTTP_PROXY_AUTHENTICATE".to_vec(),
+            b"HTTP_PROXY_AUTHORIZATION".to_vec(),
+            b"HTTP_PROXY_CONNECTION".to_vec(),
+            b"HTTP_TE".to_vec(),
+            b"HTTP_TRAILER".to_vec(),
+            b"HTTP_TRANSFER_ENCODING".to_vec(),
+            b"HTTP_UPGRADE".to_vec(),
+        ]
+    );
+    for name in [
+        &b"HTTP_CONNECTION"[..],
+        b"HTTP_KEEP_ALIVE",
+        b"HTTP_PROXY_AUTHENTICATE",
+        b"HTTP_PROXY_AUTHORIZATION",
+        b"HTTP_PROXY_CONNECTION",
+        b"HTTP_TE",
+        b"HTTP_TRAILER",
+        b"HTTP_TRANSFER_ENCODING",
+        b"HTTP_UPGRADE",
+    ] {
+        assert!(
+            params.get(name).is_none(),
+            "{}",
+            String::from_utf8_lossy(name)
+        );
+    }
+    // The nine headers add no param at all: only the 16 fixed params remain.
+    assert_eq!(params.len(), 16);
+}
+
+/// `R18`/§4.5.1: the crate-wide error surface formats its inner error and
+/// exposes it through `source`, and the four `LockdownError` phrases are
+/// non-empty and pairwise distinct.
+#[test]
+fn error_display_and_source_are_not_empty() {
+    let record = blastit_fastcgi::Error::from(blastit_fastcgi::record::RecordError::Truncated);
+    assert_eq!(
+        record.to_string(),
+        blastit_fastcgi::record::RecordError::Truncated.to_string()
+    );
+    assert!(std::error::Error::source(&record).is_some());
+
+    let cgi = blastit_fastcgi::Error::from(blastit_fastcgi::cgi::CgiError::BadHead);
+    assert_eq!(
+        cgi.to_string(),
+        blastit_fastcgi::cgi::CgiError::BadHead.to_string()
+    );
+    assert!(std::error::Error::source(&cgi).is_some());
+
+    let phrases = [
+        LockdownError::Malformed.to_string(),
+        LockdownError::UnknownParam.to_string(),
+        LockdownError::ParamsTooLarge.to_string(),
+        LockdownError::DuplicateParam.to_string(),
+    ];
+    assert!(phrases.iter().all(|phrase| !phrase.is_empty()));
+    for (index, phrase) in phrases.iter().enumerate() {
+        assert!(
+            !phrases[..index].contains(phrase),
+            "the phrases must be pairwise distinct, duplicate: {phrase}"
+        );
+    }
+}

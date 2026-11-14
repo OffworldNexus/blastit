@@ -2,16 +2,16 @@
 id: MB.3.4.3
 title: "Harden the protected lockdown suite: SCRIPT_NAME query, total-byte cap via build, Params Debug, hop-by-hop names, Error/LockdownError Display"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.3.4.2]
 paths: ["crates/blastit-fastcgi/tests/critical_fastcgi_lockdown.rs"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T12:36"
-updated: "2026-11-14T12:36"
+updated: "2026-11-14T12:50"
 ---
 
 # Goal

@@ -1025,3 +1025,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T12:36 [MB.3.4.4] (test-curator) created (task) Harden the CGI head parser: reject a ':' in Status, pin the field-less head, protected codec suite for the proxy-control names
 - 2026-11-14T12:36 [MB.3.4.5] (test-curator) created (task) Apply the 8192-byte value rule inside lockdown::resolve so no public function returns an over-long CONTENT_TYPE
 - 2026-11-14T12:41 [MB.3.4] (lead) gate audit (docs/testing/AUDIT-MB.3.4.md): 66 tests, critical 25, fluff 0, mutants 97.3% killed (321/330); 3 gap children filed (MB.3.4.3 lockdown suite, MB.3.4
+- 2026-11-14T12:42 [MB.3.4.3] (lead) status ready -> active
+- 2026-11-14T12:42 [MB.3.4.3] (lead) attempt 1/3 started
+- 2026-11-14T12:42 [MB.3.4.3] (lead) base 5ab9043
+- 2026-11-14T12:45 [MB.3.4.3] (implementer) appended five protected tests (SCRIPT_NAME query, total-byte cap via build, Params Debug, nine hop-by-hop names, Error/LockdownError Display/source); crate suit
+- 2026-11-14T12:46 [MB.10] (conductor) created (task) Agent scratch on disk: one scratch root, retention cleanup, LESSONS entry
+- 2026-11-14T12:46 [MB.3.4.3] (implementer) acceptance green: 30 critical / 41+30+1 crate / critical-guard OK (enforced) / mutants 348 tested 4 missed (cgi parse_status owned by MB.3.4.4) / rs-lint clean 
+- 2026-11-14T12:46 [MB.3.4.3] (lead) status active -> review
+- 2026-11-14T12:49 [MB.3.4.3] (implementer) reviewer MINOR cleared: dropped the derived encoded_len assert
+- 2026-11-14T12:50 [MB.3.4.3] (lead) status review -> done
