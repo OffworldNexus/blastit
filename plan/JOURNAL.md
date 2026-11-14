@@ -994,3 +994,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T10:53 [MB.3.3] (planner) Applied design §8/§8.1/§8.2 plan hygiene: converted MB.3.5/9.1/9.2.1/3.6.1-4 to epics; created 16 leaves (MB.3.5.1-2, 9.1.1-2, 9.2.1.1-3, 3.6.1.1-2, 3.6.2.1-2, 
 - 2026-11-14T11:02 [MB.3.3] (lead) status active -> review
 - 2026-11-14T11:02 [MB.3.3] (lead) status review -> done
+- 2026-11-14T11:02 [MB.3.3] (lead) committed dbbf619 (design + ADR-0008 + 4 PASS reviews + resolve note + §8.1/§8.2 plan hygiene; make check green, guard OK, critical-guard clean)
+- 2026-11-14T11:02 [MB.3.4.1] (lead) status ready -> active
+- 2026-11-14T11:02 [MB.3.4.1] (lead) attempt 1/3 started
+- 2026-11-14T11:02 [MB.3.4.1] (lead) base dbbf6196e4f7e933a2687928883380702542f361
+- 2026-11-14T11:12 [MB.3.4.1] (lead) DEVIATION: changed lines ~1430 vs design's <=550 cap, entirely rustdoc + 34 in-module tests over 4 source files; no record type, cap or refusal dropped. Accepte
+- 2026-11-14T11:12 [MB.3.4.1] (lead) status active -> review
+- 2026-11-14T11:21 [MB.3.4.1] (lead) REVIEW FAIL: [MAJOR] record.rs:114-133 + lib.rs:64 MAX_PARAMS_BYTES=65535 unreachable — Header::new rejects 65529..65535 because aligned padding pushes CL+PL ov
+- 2026-11-14T11:21 [MB.3.4.1] (lead) status review -> ready
+- 2026-11-14T11:30 [MB.3.4.1] (lead) attempt 2 done: 65 535 PARAMS cap now reachable (zero padding at max size, decode accepts both), Field Debug is log-safe, pair-budget doc fixed, test renamed to
+- 2026-11-14T11:30 [MB.3.4.1] (lead) status ready -> review
+- 2026-11-14T11:39 [MB.3.4.1] (lead) attempt 2/3 started
+- 2026-11-14T11:39 [MB.3.4.1] (lead) attempt 2 review PASS (all 8 acceptance commands re-run by reviewer; 65 535 round-trip proven for all seven record types; budget deviation accepted). Three MINO
+- 2026-11-14T11:39 [MB.3.4.1] (lead) status review -> ready
+- 2026-11-14T11:47 [MB.3.4.1] (lead) status ready -> review
+- 2026-11-14T11:55 [MB.3.4.1] (lead) status review -> done

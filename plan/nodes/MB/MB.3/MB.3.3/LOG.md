@@ -147,3 +147,7 @@ status active -> review
 ## 2026-11-14T11:02 [lead]
 
 status review -> done
+
+## 2026-11-14T11:02 [lead]
+
+committed dbbf619 (design + ADR-0008 + 4 PASS reviews + resolve note + §8.1/§8.2 plan hygiene; make check green, guard OK, critical-guard clean)

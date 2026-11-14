@@ -2,7 +2,7 @@
 id: MB.3.4.1
 title: "Create the pure blastit-fastcgi crate: manifest, records, name-value codec, CGI head parser - design MB.3.4a"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.3.3]
@@ -13,11 +13,11 @@ paths:
   - "crates/blastit-fastcgi/src/record.rs"
   - "crates/blastit-fastcgi/src/param.rs"
   - "crates/blastit-fastcgi/src/cgi.rs"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T03:37"
-updated: "2026-11-14T03:37"
+updated: "2026-11-14T11:55"
 ---
 
 # Goal
