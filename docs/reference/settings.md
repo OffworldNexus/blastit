@@ -21,6 +21,10 @@ the process environment only; `uv run --env-file .env blastit dev` loads a file.
 
 ## Backends
 
+| Setting | Default | What it does |
+|---|---|---|
+| `BLASTIT_LIBPHP` | the distro package's library | names the NTS `libphp` to embed for `[route.php]` |
+
 ## Port and health
 
 | Setting | Default | What it does |

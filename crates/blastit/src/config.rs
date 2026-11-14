@@ -638,6 +638,101 @@ impl Config {
     }
 }
 
+/// The PHP version a host `libphp` is, `major.minor` (`ADR-0010` §3).
+///
+/// Stage 0 derives it from the object it opened — its file name, or the name
+/// its descriptor resolves to — because the alternative (calling
+/// `php_version()`) is a `dlopen`, and a `dlopen` in stage 0 is exactly what
+/// `ADR-0010` §3 forbids. It is therefore *what the file says it is*, and the
+/// `(major, minor)` is checked against the shim's own `blastit_php_minor()`
+/// again in stage 1, where a wrong guess becomes a refusal rather than a
+/// crash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PhpVersion {
+    major: u8,
+    minor: u8,
+}
+
+impl PhpVersion {
+    /// The version `major.minor`, when both fit a `u8`.
+    #[must_use]
+    pub const fn new(major: u8, minor: u8) -> Self {
+        Self { major, minor }
+    }
+
+    /// The version a `libphp` file name states: `libphp8.4.so`, `libphp-8.4.so`,
+    /// or a soname such as `libphp8.4.so.0`.
+    ///
+    /// `None` for a name that carries no version (`libphp.so`), which is a
+    /// refusal rather than a guess: the shim is chosen by this number.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        let name = name.rsplit('/').next()?;
+        let rest = name.strip_prefix("libphp")?;
+        let rest = rest.strip_prefix('-').unwrap_or(rest);
+        let (major, rest) = rest.split_once('.')?;
+        let minor = rest.split(|c: char| !c.is_ascii_digit()).next()?;
+        let major = major.parse::<u8>().ok()?;
+        let minor = minor.parse::<u8>().ok()?;
+        Some(Self { major, minor })
+    }
+
+    /// The major version.
+    #[must_use]
+    pub const fn major(self) -> u8 {
+        self.major
+    }
+
+    /// The minor version.
+    #[must_use]
+    pub const fn minor(self) -> u8 {
+        self.minor
+    }
+
+    /// `"8.4"`, for messages, `(PHP 8.4, …)` tuples and package names.
+    #[must_use]
+    pub fn dotted(self) -> String {
+        format!("{}.{}", self.major, self.minor)
+    }
+
+    /// The version `"8.4"` states, the form the stage-1 document carries.
+    #[must_use]
+    pub fn from_dotted(text: &str) -> Option<Self> {
+        let (major, minor) = text.split_once('.')?;
+        Some(Self {
+            major: major.parse().ok()?,
+            minor: minor.parse().ok()?,
+        })
+    }
+
+    /// `"84"`, the `libblastit_php84-<arch>-<libc>.so` infix.
+    #[must_use]
+    pub fn number(self) -> String {
+        format!("{}{}", self.major, self.minor)
+    }
+}
+
+/// What stage 0 resolved for `[route.php]` before a listener was bound
+/// (`ADR-0010` §3).
+///
+/// The identity (`dev`, `ino`) travels with the path because stage 1 re-opens
+/// the file `O_RDONLY | O_CLOEXEC | O_NOFOLLOW` and compares the two: a path
+/// that changed between the stages is a boot refusal, never a load of whatever
+/// is there now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhpRuntime {
+    /// The absolute path of the NTS `libphp` stage 0 opened and inspected.
+    pub libphp: PathBuf,
+    /// `st_dev` of that inode.
+    pub dev: u64,
+    /// `st_ino` of that inode.
+    pub ino: u64,
+    /// The version the file name states (see [`PhpVersion`]).
+    pub version: PhpVersion,
+    /// The absolute path of the shim for `(version, target arch, target libc)`.
+    pub shim: PathBuf,
+}
+
 /// Everything `BLASTIT_*` and `PORT` describe (§8.2).
 ///
 /// The defaults are the ones §8.2 documents; each field names the variable it
@@ -809,6 +904,29 @@ pub struct Config {
     /// path is bytes; `None` when stage 0 could not read the working directory
     /// at all, which is a boot about to fail for other reasons.
     pub cwd: Option<Vec<u8>>,
+    /// `BLASTIT_LIBPHP`: the NTS `libphp` a `[route.php]` route embeds
+    /// (`ADR-0010` §3).
+    ///
+    /// An absolute path, and stage 0's only candidate: set, it *is* the
+    /// library, and a host where it is not a usable NTS `libphp` is refused
+    /// rather than served by a distro copy the operator did not name. Read
+    /// here, in the configuration composition root, because
+    /// `blastit_env::build_from_process` strips every `BLASTIT_*` variable
+    /// across the stage-1 `execve` — the discovery has to happen before that
+    /// (`docs/knowledge/LESSONS.md`).
+    pub libphp: Option<PathBuf>,
+    /// `BLASTIT_PHP_SHIM_DIR`: the directory holding the `libblastit_php*.so`
+    /// shims when they are not beside the executable (`MB.3.12`), `dev` and
+    /// `check` only (`R8`).
+    pub php_shim_dir: Option<PathBuf>,
+    /// What stage 0 resolved for the first `[route.php]` route: the NTS
+    /// `libphp`, its inode, its version and the matching shim.
+    ///
+    /// Another field that comes from no environment variable: [`Config::from_env`]
+    /// only carries the settings, while the discovery needs the manifest (does a
+    /// route ask for PHP at all?) and the filesystem. Stage 1 reads this to
+    /// re-open the recorded inode and load the exact shim (`ADR-0010` §3).
+    pub php: Option<PhpRuntime>,
     /// D6: the privilege mode init detected, and the capabilities it holds.
     ///
     /// Another field that comes from no environment variable: stage 0 reads
@@ -891,6 +1009,9 @@ impl Default for Config {
             proxy_outputs: BTreeMap::new(),
             sys_path: Vec::new(),
             cwd: None,
+            libphp: None,
+            php_shim_dir: None,
+            php: None,
             privilege: None,
             preset: None,
         }
@@ -985,6 +1106,20 @@ impl Config {
             Some(value) => split_list(&value),
             None => manifest_preload,
         };
+        // `ADR-0010` §3: the backend override and the shim directory are read
+        // here, in the composition root, and *only* here — stage 0's discovery
+        // runs before `blastit_env::build_from_process` strips every
+        // `BLASTIT_*` variable across the stage-1 `execve`, and no child ever
+        // sees either name again. Both are absolute: a relative path would be
+        // resolved against a working directory stage 1 does not share.
+        config.libphp = settings
+            .get("BLASTIT_LIBPHP")?
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        config.php_shim_dir = settings
+            .get("BLASTIT_PHP_SHIM_DIR")?
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
         config.script_name = settings
             .get("BLASTIT_SCRIPT_NAME")?
             .filter(|value| !value.is_empty());
@@ -1401,6 +1536,27 @@ impl Config {
         if let Err(reason) = check_trusted_proxies(&self.trusted_proxies) {
             return Err(invalid("BLASTIT_TRUSTED_PROXIES", reason));
         }
+        // `ADR-0010` §3: the host `libphp` and the shim directory are absolute
+        // paths, and nothing else. A relative one would be resolved against a
+        // working directory the stage-1 image does not share with whoever
+        // started the boot, so the file that was inspected and the file that is
+        // loaded could differ.
+        if let Some(path) = &self.libphp
+            && !path.is_absolute()
+        {
+            return Err(invalid(
+                "BLASTIT_LIBPHP",
+                "must be an absolute path to a libphp.so".to_string(),
+            ));
+        }
+        if let Some(dir) = &self.php_shim_dir
+            && !dir.is_absolute()
+        {
+            return Err(invalid(
+                "BLASTIT_PHP_SHIM_DIR",
+                "must be an absolute directory holding the libblastit_php*.so shims".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -1548,6 +1704,44 @@ impl Config {
         object.insert(
             "manifest_dir".into(),
             Value::from(self.manifest_dir.to_string_lossy().into_owned()),
+        );
+        // `ADR-0010` §3: the two settings stage 0's discovery read, and what it
+        // resolved. A path is not a secret, and stage 1 needs both the path and
+        // the inode identity to re-open exactly the file stage 0 inspected.
+        object.insert(
+            "libphp".into(),
+            self.libphp
+                .as_ref()
+                .map(|path| Value::from(path.to_string_lossy().into_owned()))
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "php_shim_dir".into(),
+            self.php_shim_dir
+                .as_ref()
+                .map(|path| Value::from(path.to_string_lossy().into_owned()))
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "php".into(),
+            match &self.php {
+                None => Value::Null,
+                Some(runtime) => {
+                    let mut php = Map::new();
+                    php.insert(
+                        "libphp".into(),
+                        Value::from(runtime.libphp.to_string_lossy().into_owned()),
+                    );
+                    php.insert("dev".into(), Value::from(runtime.dev));
+                    php.insert("ino".into(), Value::from(runtime.ino));
+                    php.insert("version".into(), Value::from(runtime.version.dotted()));
+                    php.insert(
+                        "shim".into(),
+                        Value::from(runtime.shim.to_string_lossy().into_owned()),
+                    );
+                    Value::Object(php)
+                }
+            },
         );
         object.insert(
             "script_name".into(),
@@ -1815,6 +2009,9 @@ impl Config {
         config.preload = json_string_list(value, "preload")?;
         config.manifest = PathBuf::from(json_string(value, "manifest")?);
         config.manifest_dir = PathBuf::from(json_string(value, "manifest_dir")?);
+        config.libphp = optional_path(value, "libphp")?;
+        config.php_shim_dir = optional_path(value, "php_shim_dir")?;
+        config.php = php_runtime_from_json(value)?;
         config.script_name = json_opt_string(value, "script_name")?;
         config.log_format = match json_string(value, "log_format")?.as_str() {
             "json" => LogFormat::Json,
@@ -2542,6 +2739,48 @@ fn json_opt_string(value: &Value, name: &'static str) -> Result<Option<String>, 
         Value::String(text) => Ok(Some(text.clone())),
         _ => Err(document(name, "must be a string or null".to_string())),
     }
+}
+
+/// A path field that a document written before the field simply does not have.
+///
+/// Unlike [`json_opt_string`], a *missing* key is `None` rather than an error:
+/// `BLASTIT_LIBPHP` and `BLASTIT_PHP_SHIM_DIR` were added to the stage-1
+/// document after the first documents were written, and "the boot did not set
+/// it" is exactly what a missing key means.
+fn optional_path(value: &Value, name: &'static str) -> Result<Option<PathBuf>, ConfigError> {
+    match value.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(PathBuf::from(text))),
+        Some(_) => Err(document(name, "must be a string or null".to_string())),
+    }
+}
+
+/// The resolved backend, or `None` when this boot resolved none.
+///
+/// `ADR-0010` §3 records the path, the inode identity and the shim, so stage 1
+/// can re-open the same file and load the same shim rather than rediscover
+/// either.
+fn php_runtime_from_json(value: &Value) -> Result<Option<PhpRuntime>, ConfigError> {
+    let Some(php) = value.get("php") else {
+        return Ok(None);
+    };
+    if php.is_null() {
+        return Ok(None);
+    }
+    let libphp = PathBuf::from(json_string(php, "libphp")?);
+    let dev = json_u64(php, "dev")?;
+    let ino = json_u64(php, "ino")?;
+    let version = json_string(php, "version")?;
+    let version = PhpVersion::from_dotted(&version)
+        .ok_or_else(|| document("php", "version must be `major.minor`".to_string()))?;
+    let shim = PathBuf::from(json_string(php, "shim")?);
+    Ok(Some(PhpRuntime {
+        libphp,
+        dev,
+        ino,
+        version,
+        shim,
+    }))
 }
 
 fn json_string_list(value: &Value, name: &'static str) -> Result<Vec<String>, ConfigError> {
@@ -4086,5 +4325,111 @@ mod tests {
         }
         assert!(Preset::find("nope").is_none());
         assert_eq!(PRESETS.len(), 2);
+    }
+}
+
+/// `ADR-0010` §3: the two PHP settings and the resolved backend the stage-1
+/// document carries (`MB.3.13.2`).
+///
+/// The denied cases are the ones a boot must not guess at: a relative
+/// `BLASTIT_LIBPHP` (the file inspected and the file loaded could differ), a
+/// version a file name does not state, and a shim directory outside the
+/// absolute-path rule. The accepted twins are the distro spellings and a full
+/// round trip of a resolved `libphp` + shim.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod php_settings {
+    use super::*;
+
+    #[test]
+    fn a_version_is_read_from_the_distro_spellings() {
+        for (name, expected) in [
+            ("libphp8.4.so", PhpVersion::new(8, 4)),
+            ("libphp-8.4.so", PhpVersion::new(8, 4)),
+            ("libphp8.3.so", PhpVersion::new(8, 3)),
+            ("libphp8.4.so.0", PhpVersion::new(8, 4)),
+            (
+                "/usr/lib/x86_64-linux-gnu/libphp8.2.so",
+                PhpVersion::new(8, 2),
+            ),
+        ] {
+            assert_eq!(PhpVersion::parse(name), Some(expected), "{name}");
+        }
+        for name in ["libphp.so", "libphp8.so", "php8.4.so", "libphp.so.8"] {
+            assert_eq!(PhpVersion::parse(name), None, "{name}");
+        }
+        assert_eq!(PhpVersion::new(8, 4).dotted(), "8.4");
+        assert_eq!(PhpVersion::new(8, 4).number(), "84");
+        assert_eq!(PhpVersion::from_dotted("8.4"), Some(PhpVersion::new(8, 4)));
+        assert_eq!(PhpVersion::from_dotted("8"), None);
+    }
+
+    /// A relative path is refused by the configuration, before any discovery
+    /// could open it; absolute ones are what the boot documents.
+    #[test]
+    fn the_libphp_paths_must_be_absolute() {
+        let mut config = Config {
+            libphp: Some(PathBuf::from("libphp.so")),
+            ..Config::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("BLASTIT_LIBPHP"), "{err}");
+        config.libphp = Some(PathBuf::from("/usr/lib/libphp8.4.so"));
+        config
+            .validate()
+            .expect("an absolute path is what is documented");
+
+        let mut config = Config {
+            php_shim_dir: Some(PathBuf::from("target/php-sapi")),
+            ..Config::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("BLASTIT_PHP_SHIM_DIR"), "{err}");
+        config.php_shim_dir = Some(PathBuf::from("/opt/blastit/shims"));
+        config.validate().expect("an absolute directory");
+    }
+
+    /// The document carries both settings and the resolved `(path, dev, ino,
+    /// version, shim)`, and a document written before them still reads.
+    #[test]
+    fn the_resolved_backend_round_trips_and_an_older_document_still_reads() {
+        let mut config = Config {
+            libphp: Some(PathBuf::from("/usr/lib/libphp8.4.so")),
+            php_shim_dir: Some(PathBuf::from("/opt/blastit/shims")),
+            ..Config::default()
+        };
+        assert_eq!(config.to_json()["php"], serde_json::Value::Null);
+        config.php = Some(PhpRuntime {
+            libphp: PathBuf::from("/usr/lib/libphp8.4.so"),
+            dev: 66306,
+            ino: 123_456,
+            version: PhpVersion::new(8, 4),
+            shim: PathBuf::from("/opt/blastit/shims/libblastit_php84-x86_64-gnu.so"),
+        });
+        for config in [config.clone(), Config::default()] {
+            let json = config.to_json();
+            assert_eq!(Config::from_json(&json).unwrap(), config);
+        }
+        let json = config.to_json();
+        assert_eq!(json["libphp"], serde_json::json!("/usr/lib/libphp8.4.so"));
+        assert_eq!(json["php"]["version"], serde_json::json!("8.4"));
+        assert_eq!(json["php"]["ino"], serde_json::json!(123_456));
+
+        // A document that predates the fields reads as "nothing was resolved".
+        let mut older = json.clone();
+        let object = older.as_object_mut().unwrap();
+        for key in ["libphp", "php_shim_dir", "php"] {
+            object.remove(key);
+        }
+        let back = Config::from_json(&older).unwrap();
+        assert_eq!(back.libphp, None);
+        assert_eq!(back.php_shim_dir, None);
+        assert_eq!(back.php, None);
+
+        // A version the document cannot carry names the field.
+        let mut broken = json;
+        broken["php"]["version"] = serde_json::json!("8");
+        let err = Config::from_json(&broken).unwrap_err();
+        assert!(err.to_string().contains("php"), "{err}");
     }
 }

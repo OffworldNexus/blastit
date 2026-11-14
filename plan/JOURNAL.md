@@ -1470,3 +1470,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T23:03 [MB.3.30] (lead) edited fields
 - 2026-11-14T23:03 [MB.3.30] (lead) lead: paths widened for the two prose edits the rule forced (docs/reference/manifest.md:314, MB.3.20 brief) — reviewer flagged them as silent edits
 - 2026-11-14T23:06 [MB.3.30] (lead) status active -> done
+- 2026-11-14T23:07 [MB.3.13.2] (lead) status ready -> active
+- 2026-11-14T23:07 [MB.3.13.2] (lead) attempt 1/3 started
+- 2026-11-14T23:07 [MB.3.13.2] (lead) base e85a83823f92edc304005aa1dcbdae6c5642685e
+- 2026-11-14T23:17 [MB.3.13.2] (lead) LEAD CORRECTION (not a blocker): item 6 of my brief was wrong. Keep MB.3.28's interim refusal and its sentence — MB.3.13.3 deletes it. Discovery, the two s4.1 m
+- 2026-11-14T23:17 [MB.3.35] (lead) created (task) Name the shipped PHP shims per ADR-0010 s4.1 (libblastit_php<minor>-<arch>-<libc>.so) everywhere
+- 2026-11-14T23:17 [MB.3.21] (lead) edited fields
+- 2026-11-14T23:17 [MB.3.21] (lead) lead: paths corrected before dispatch — there is no crates/blastit/src/edit.rs; expected_routes/apply_edits/write_atomic live in crates/blastit-manifest/src/edi
+- 2026-11-14T23:24 [MB.3.13.2] (lead) status active -> review
+- 2026-11-14T23:24 [MB.3.13.3] (lead) hand-off from MB.3.13.2: step 3 (the MB.3.28 interim refusal) is the last boot step and it is what keeps the dev/prod asymmetry. When you delete it, also delete
+- 2026-11-14T23:30 [MB.3.13.2] (lead) status review -> done

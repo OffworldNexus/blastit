@@ -2,7 +2,7 @@
 id: MB.3.13.2
 title: "MB.3.13 part 2: stage0 BLASTIT_LIBPHP / distro NTS libphp discovery and the NTS+minor ABI boot gate, with ADR-0010 s4's two exact messages"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.13.1, MB.3.28]
@@ -11,11 +11,11 @@ paths:
   - crates/blastit/src/config.rs
   - crates/blastit/src/cli.rs
   - docs/reference/settings.md
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T17:04"
-updated: "2026-11-14T19:29"
+updated: "2026-11-14T23:30"
 ---
 
 # Goal

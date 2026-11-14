@@ -15,3 +15,27 @@ edited fields
 ## 2026-11-14T21:04 [lead]
 
 SCOPE ADD (2026-11-14, MB.3.10 review): ADR-0010 §2's downward workers bound belongs to this Stage-0 gate: workers > config.view_worker_cap() must be a boot error naming both numbers (and 1..=64 is already parsed). No code reads PhpPolicy.workers today, so the docs may not claim it until this lands. Add it here with the accepted/denied twins.
+
+## 2026-11-14T23:07 [lead]
+
+status ready -> active
+
+## 2026-11-14T23:07 [lead]
+
+attempt 1/3 started
+
+## 2026-11-14T23:07 [lead]
+
+base e85a83823f92edc304005aa1dcbdae6c5642685e
+
+## 2026-11-14T23:17 [lead]
+
+LEAD CORRECTION (not a blocker): item 6 of my brief was wrong. Keep MB.3.28's interim refusal and its sentence — MB.3.13.3 deletes it. Discovery, the two s4.1 messages and the workers bound run BEFORE it, so no protected/adjacent test needs to change. Defer the shim-filename gap to a new node.
+
+## 2026-11-14T23:24 [lead]
+
+status active -> review
+
+## 2026-11-14T23:30 [lead]
+
+status review -> done

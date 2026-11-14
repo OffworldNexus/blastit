@@ -23,8 +23,9 @@ use std::ffi::{CString, OsStr};
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use blastit_dbproxy::{DbproxyConfig, ListenerSpec, ProxySpec, write_config};
@@ -39,7 +40,7 @@ use blastit_sys::{
 
 use crate::child::{ChildIo, Deadline, read_one, wait_readable};
 use crate::cli::DevOptions;
-use crate::config::{Config, LogFormat, Mode, Privilege, view_dir};
+use crate::config::{Config, LogFormat, Mode, PhpRuntime, PhpVersion, Privilege, view_dir};
 use crate::dev_learn::{DevRoot, PRIVILEGE};
 use crate::host::{EXEC, Host, Install, Placement, Reexec};
 use crate::logs::{Emitter, fail, output_event};
@@ -382,6 +383,874 @@ pub(crate) fn no_python_support(
     ))
 }
 
+/// The distro file names a host NTS `libphp` is looked for under, newest first
+/// (`ADR-0010` §3).
+///
+/// A fixed list rather than a directory scan: the order *is* the preference, so
+/// a `libphp8.5.so` somebody dropped into `/usr/local/lib` never changes which
+/// library an 8.4 host embeds.
+pub(crate) const LIBPHP_CANDIDATES: [&str; 7] = [
+    "libphp8.4.so",
+    "libphp-8.4.so",
+    "libphp8.3.so",
+    "libphp-8.3.so",
+    "libphp8.2.so",
+    "libphp-8.2.so",
+    "libphp.so",
+];
+
+/// The distributions' PHP embed packages, named once so every refusal says the
+/// same thing (`ADR-0010` §4.1).
+const PHP_PACKAGES: &str = "install the PHP embed package — Debian/Ubuntu: \
+     apt install libphp-embed, Alpine: apk add php84-embed, Fedora/RHEL: \
+     dnf install php-embedded";
+
+/// The one override `ADR-0010` §3 allows.
+const PHP_OVERRIDE: &str = "set BLASTIT_LIBPHP=/path/to/libphp.so";
+
+/// The compile-time target's architecture, as the shim name spells it.
+const fn target_arch() -> &'static str {
+    if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        std::env::consts::ARCH
+    }
+}
+
+/// The compile-time target's libc, as the shim name spells it (`ADR-0010` §4).
+const fn target_libc() -> &'static str {
+    if cfg!(target_env = "musl") {
+        "musl"
+    } else {
+        "gnu"
+    }
+}
+
+/// `x86_64-gnu`: the half of the ABI tuple that is fixed at compile time.
+fn target_tuple() -> String {
+    format!("{}-{}", target_arch(), target_libc())
+}
+
+/// `x86_64-linux-gnu`: the multi-arch directory name a distro installs into.
+fn multiarch_triplet() -> String {
+    format!("{}-linux-{}", target_arch(), target_libc())
+}
+
+/// The shim for one host version: `libblastit_php84-x86_64-gnu.so`.
+fn shim_name(version: PhpVersion) -> String {
+    format!("libblastit_php{}-{}.so", version.number(), target_tuple())
+}
+
+/// The multi-arch library directories a distro may put `libphp` in, in order
+/// (`ADR-0010` §3).
+fn library_dirs() -> Vec<PathBuf> {
+    let triplet = multiarch_triplet();
+    [
+        format!("/usr/lib/{triplet}"),
+        "/usr/lib64".to_string(),
+        "/usr/lib".to_string(),
+        format!("/usr/local/lib/{triplet}"),
+        "/usr/local/lib".to_string(),
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+/// Whether the discovery may look in the development shim directory.
+///
+/// `ADR-0010` §4 and `R8`: `BLASTIT_PHP_SHIM_DIR` and `target/php-sapi` are the
+/// development and `check` seams. A deployed boot takes the shims the artifact
+/// ships — beside the executable — and nothing an environment variable names,
+/// because a shim is code that runs inside every PHP worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PhpShimScope {
+    /// `blastit`: beside the executable only.
+    Deployment,
+    /// `blastit dev` and `blastit check`: `BLASTIT_PHP_SHIM_DIR`, then beside
+    /// the executable, then the `target/php-sapi` directory `make php-sapi`
+    /// writes.
+    Development,
+}
+
+/// Everything the `[route.php]` discovery looks at, injectable so a test never
+/// depends on the host's `/usr/lib`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PhpSearch {
+    /// `BLASTIT_LIBPHP`: when set, the only candidate.
+    pub libphp: Option<PathBuf>,
+    /// The directories a shim is looked for in, in order.
+    pub shim_dirs: Vec<PathBuf>,
+    /// The directories the fixed names in [`LIBPHP_CANDIDATES`] are looked for
+    /// in, in order.
+    pub lib_dirs: Vec<PathBuf>,
+}
+
+impl PhpSearch {
+    /// The real directories for `scope`, with an explicit override.
+    fn new(libphp: Option<PathBuf>, shim_dir: Option<PathBuf>, scope: PhpShimScope) -> Self {
+        let mut shim_dirs = Vec::new();
+        if scope == PhpShimScope::Development {
+            shim_dirs.extend(shim_dir);
+        }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            shim_dirs.push(dir.to_path_buf());
+        }
+        // `make php-sapi` writes `target/php-sapi`; finding it from the running
+        // executable is what makes it independent of the working directory a
+        // developer started the boot in.
+        if scope == PhpShimScope::Development
+            && let Ok(exe) = std::env::current_exe()
+            && let Some(target) = exe
+                .ancestors()
+                .find(|dir| dir.file_name() == Some(OsStr::new("target")))
+        {
+            shim_dirs.push(target.join("php-sapi"));
+        }
+        Self {
+            libphp,
+            shim_dirs,
+            lib_dirs: library_dirs(),
+        }
+    }
+
+    /// What a boot's configuration names, and the host's fixed directories.
+    fn from_config(config: &Config, scope: PhpShimScope) -> Self {
+        Self::new(config.libphp.clone(), config.php_shim_dir.clone(), scope)
+    }
+}
+
+/// What the static `.dynsym` inspection says about one shared object
+/// (`ADR-0010` §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ZendAbi {
+    /// `executor_globals` is exported and `tsrm_startup` is not: the
+    /// Non-Thread-Safe build, the only one an embedded worker may load.
+    Nts,
+    /// `tsrm_startup` is exported: a thread-safe (ZTS) build.
+    Zts,
+    /// Neither symbol is exported: not a `libphp` at all.
+    NotLibphp,
+}
+
+/// Why the `[route.php]` gate refused, before the sentence names the route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PhpRefusal {
+    /// No `BLASTIT_LIBPHP` and no candidate file: nothing to embed.
+    Missing {
+        /// The directories that were searched.
+        searched: Vec<PathBuf>,
+    },
+    /// `BLASTIT_LIBPHP` is not an absolute path.
+    NotAbsolute {
+        /// The value, as given.
+        path: PathBuf,
+    },
+    /// The file could not be opened, or is not a regular file.
+    NotAFile {
+        /// The candidate.
+        path: PathBuf,
+        /// The kernel's reason.
+        detail: String,
+    },
+    /// The file is not an ELF shared object this build can inspect.
+    NotElf {
+        /// The candidate.
+        path: PathBuf,
+        /// What the walk found instead.
+        detail: String,
+        /// The version its name states, when it states one.
+        version: Option<PhpVersion>,
+    },
+    /// The object is a ZTS (thread-safe) `libphp`.
+    ThreadSafe {
+        /// The candidate.
+        path: PathBuf,
+        /// The version its name states, when it states one.
+        version: Option<PhpVersion>,
+    },
+    /// The object exports neither Zend global, so it is not a `libphp`.
+    NotLibphp {
+        /// The candidate.
+        path: PathBuf,
+        /// The version its name states, when it states one.
+        version: Option<PhpVersion>,
+    },
+    /// The file name carries no PHP major.minor, so no shim can be chosen.
+    NoVersion {
+        /// The candidate.
+        path: PathBuf,
+    },
+    /// The host version is known but no shim for its tuple was found.
+    NoShim {
+        /// The NTS `libphp` that was found.
+        libphp: PathBuf,
+        /// Its version.
+        version: PhpVersion,
+        /// The file name that was looked for.
+        shim: String,
+        /// The directories that were searched.
+        searched: Vec<PathBuf>,
+    },
+}
+
+impl PhpRefusal {
+    /// Whether this refusal ends a boot in `scope` (`ADR-0010` §4.1).
+    ///
+    /// In [`PhpShimScope::Deployment`] every one of them does: a deployment that
+    /// declares `[route.php]` either embeds PHP or fails closed naming the
+    /// package and the tuple, before it binds.
+    ///
+    /// In [`PhpShimScope::Development`] the two "nothing is installed yet"
+    /// outcomes — no `libphp` at all, and no shim built for the tuple — are
+    /// **not** fatal, because `blastit dev` cannot serve the route before
+    /// `MB.3.13.3` wires the worker either way: the `MB.3.28` interim refusal is
+    /// the truthful answer there, and sending a developer to install a package
+    /// for a boot that would still refuse is exactly the confusion
+    /// `docs/design/php-dev-local.md` rejects. A library that *is* there and is
+    /// wrong — not a regular file, not an ELF, ZTS, no version in its name — is
+    /// still named, because that is the mistake to fix and the sentence is the
+    /// fix.
+    fn is_fatal(&self, scope: PhpShimScope) -> bool {
+        match scope {
+            PhpShimScope::Deployment => true,
+            PhpShimScope::Development => {
+                !matches!(self, Self::Missing { .. } | Self::NoShim { .. })
+            }
+        }
+    }
+}
+
+/// `(PHP 8.4, x86_64-gnu)` and the shim that tuple needs.
+///
+/// The two halves `ADR-0010` §4.1 requires every version-specific refusal to
+/// name, built in one place so they cannot disagree.
+fn abi_tuple(version: Option<PhpVersion>) -> Option<(String, String)> {
+    let version = version?;
+    Some((version.dotted(), shim_name(version)))
+}
+
+/// The sentence a `[route.php]` boot fails with (`ADR-0010` §4.1).
+///
+/// Both shapes name the route and its `entry`, the distro package that provides
+/// the library, and `BLASTIT_LIBPHP`. The version-specific shape also names the
+/// `(PHP X.Y, <arch>-<libc>)` tuple and the shim that tuple needs, because
+/// "wrong minor" and "no shim" are the two failures an operator can fix by
+/// installing a package, and neither is diagnosable without the tuple.
+fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String {
+    match refusal {
+        PhpRefusal::Missing { searched } => format!(
+            "route {route:?}: no usable NTS libphp was found for [route.php] entry {entry:?} \
+             (searched BLASTIT_LIBPHP, then {} in {}); {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+            LIBPHP_CANDIDATES.join(", "),
+            display_paths(searched),
+        ),
+        PhpRefusal::NotAbsolute { path } => format!(
+            "route {route:?}: BLASTIT_LIBPHP ({}) is not an absolute path, so the library the \
+             boot inspected and the one a worker loads could differ; {PHP_PACKAGES}, or \
+             {PHP_OVERRIDE}",
+            path.display()
+        ),
+        PhpRefusal::NotAFile { path, detail } => format!(
+            "route {route:?}: BLASTIT_LIBPHP ({}) cannot be opened or is not a regular file \
+             ({detail}); {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+            path.display()
+        ),
+        PhpRefusal::NotElf {
+            path,
+            detail,
+            version,
+        } => present_refusal(
+            route,
+            &format!("{} is not an ELF shared object ({detail})", path.display()),
+            *version,
+        ),
+        PhpRefusal::ThreadSafe { path, version } => present_refusal(
+            route,
+            &format!(
+                "{} is a ZTS (thread-safe) libphp, and the embedded worker needs the NTS \
+                 build of the same version",
+                path.display()
+            ),
+            *version,
+        ),
+        PhpRefusal::NotLibphp { path, version } => present_refusal(
+            route,
+            &format!(
+                "{} exports neither executor_globals nor tsrm_startup, so it is not a PHP \
+                 embed library",
+                path.display()
+            ),
+            *version,
+        ),
+        PhpRefusal::NoVersion { path } => format!(
+            "route {route:?}: {} is an NTS libphp whose file name names no PHP major.minor, so \
+             no shim can be chosen for it; keep the distro name (libphp8.4.so, libphp-8.4.so, \
+             …) or {PHP_OVERRIDE} with a versioned one; {PHP_PACKAGES}",
+            path.display()
+        ),
+        PhpRefusal::NoShim {
+            libphp,
+            version,
+            shim,
+            searched,
+        } => format!(
+            "route {route:?}: no shim {shim} was found for the NTS libphp {} (looked in {}); \
+             this host is (PHP {}, {}), and {shim} is what that tuple needs; {PHP_PACKAGES}, \
+             or {PHP_OVERRIDE}",
+            libphp.display(),
+            display_paths(searched),
+            version.dotted(),
+            target_tuple(),
+        ),
+    }
+}
+
+/// The version-specific half of [`php_refusal_message`]: the problem, then the
+/// tuple, the shim, the package and the override.
+fn present_refusal(route: &str, problem: &str, version: Option<PhpVersion>) -> String {
+    match abi_tuple(version) {
+        Some((dotted, shim)) => format!(
+            "route {route:?}: {problem}; this host is (PHP {dotted}, {}), whose embedded shim \
+             is {shim}; {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+            target_tuple(),
+        ),
+        None => format!(
+            "route {route:?}: {problem}; this host is (PHP ?, {}), so no shim can be chosen \
+             until the object's version is known; {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+            target_tuple(),
+        ),
+    }
+}
+
+/// The directories as one comma-separated list, for a refusal.
+fn display_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// What a boot's `[route.php]` gate says before a listener may bind.
+#[derive(Debug)]
+pub(crate) enum PhpBoot {
+    /// No route declares `[route.php]`: nothing to discover.
+    Absent,
+    /// Nothing this scope must refuse here. Both boot paths then apply
+    /// `MB.3.28`'s interim refusal ([`php_backend_unavailable`]) — the route is
+    /// not served until `MB.3.13.3` wires the worker — so a host that can embed
+    /// PHP, and a `dev` host where nothing is installed yet, both stop there.
+    Proceed,
+    /// The host cannot embed PHP: the sentence names the route, the package,
+    /// `BLASTIT_LIBPHP` and — when it is known — the `(PHP X.Y, <arch>-<libc>)`
+    /// tuple.
+    Refused(String),
+}
+
+impl PhpBoot {
+    /// The sentence this gate refuses with, or `None` when it proceeds.
+    ///
+    /// `MB.3.13.3`'s wiring refusal is the callers' step after `Proceed`, not
+    /// this gate's, so it is not returned here — which is what keeps the order
+    /// "discovery, then wiring" visible at each call site.
+    #[cfg(test)]
+    fn refusal(&self) -> Option<&str> {
+        match self {
+            Self::Absent | Self::Proceed => None,
+            Self::Refused(message) => Some(message),
+        }
+    }
+}
+
+/// `ADR-0010` §3/§4.1: the discovery gate a `[route.php]` manifest is resolved
+/// by, before any listener binds.
+///
+/// Runs in the stage-0 image and never loads anything: the `libphp` is opened,
+/// `fstat`ed and read as an ELF `.dynsym` table — `dlopen` happens inside a
+/// view worker, never here.
+///
+/// The order is the order an operator can act on, and the order the two boot
+/// paths apply: an over-budget `workers` first (nothing about the host can fix
+/// it), then the library (missing, a directory, not an ELF, ZTS, no version)
+/// and the shim for the tuple, and only then the `MB.3.28` wiring refusal
+/// [`php_backend_unavailable`] — which is the callers' step, so a host that
+/// *can* embed PHP still fails closed instead of serving a route this build has
+/// no worker for.
+pub(crate) fn php_boot_gate(config: &Config, manifest: &Manifest, scope: PhpShimScope) -> PhpBoot {
+    php_boot(
+        manifest,
+        &PhpSearch::from_config(config, scope),
+        Some(config.view_worker_cap()),
+        scope,
+    )
+}
+
+/// The same gate for a caller with the search and the budget spelled out.
+fn php_boot(
+    manifest: &Manifest,
+    search: &PhpSearch,
+    cap: Option<u32>,
+    scope: PhpShimScope,
+) -> PhpBoot {
+    let Some((route, entry, _workers)) = first_php_route(manifest) else {
+        return PhpBoot::Absent;
+    };
+    if let Some(cap) = cap
+        && let Some(message) = php_worker_budget(manifest, cap)
+    {
+        return PhpBoot::Refused(message);
+    }
+    match discover_php(search) {
+        Ok(_runtime) => PhpBoot::Proceed,
+        Err(refusal) if refusal.is_fatal(scope) => {
+            PhpBoot::Refused(php_refusal_message(route, entry, &refusal))
+        }
+        // Nothing this scope must refuse: `dev` is left to the interim
+        // `MB.3.28` refusal the caller applies next.
+        Err(_) => PhpBoot::Proceed,
+    }
+}
+
+/// `ADR-0010` §2: `workers` is a cap on **that route's** concurrency and it is
+/// downward only, so every `[route.php]` route is checked, in manifest order,
+/// and the first one above the deployment's per-view budget is refused naming
+/// its own name and both numbers.
+///
+/// Checking only the route the discovery sentence would name leaves a manifest
+/// whose *second* PHP route asks for more than the deployment allows booting
+/// with an accepted budget; the cap is a manifest rule, so it is applied to the
+/// whole manifest before any host question is asked.
+fn php_worker_budget(manifest: &Manifest, cap: u32) -> Option<String> {
+    manifest.routes().iter().find_map(|route| {
+        let workers = route.php()?.workers?;
+        (workers > cap).then(|| {
+            format!(
+                "route {:?}: [route.php] workers = {workers} is above this deployment's \
+                     per-view budget of {cap} (BLASTIT_VIEW_MAX_WORKERS, from \
+                     BLASTIT_MAX_WORKERS); lower workers to {cap} or raise the budget",
+                route.name()
+            )
+        })
+    })
+}
+
+/// The first `[route.php]` route: its name, its `entry` and its `workers` cap.
+///
+/// One route names the refusal, and it is the first one, so the sentence is
+/// stable across a boot with several PHP routes.
+fn first_php_route(manifest: &Manifest) -> Option<(&str, &str, Option<u32>)> {
+    manifest.routes().iter().find_map(|route| {
+        route
+            .php()
+            .map(|php| (route.name(), php.entry.as_str(), php.workers))
+    })
+}
+
+/// Resolves the NTS `libphp` and its shim, or names why not (`ADR-0010` §3).
+///
+/// `BLASTIT_LIBPHP` is the only candidate when set — a boot never falls back to
+/// a distro copy the operator did not name. Otherwise the fixed names are tried
+/// in [`LIBPHP_CANDIDATES`] order, each in every directory of
+/// [`PhpSearch::lib_dirs`], so the *version* preference wins over the directory.
+fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
+    let path = match &search.libphp {
+        Some(path) => {
+            if !path.is_absolute() {
+                return Err(PhpRefusal::NotAbsolute { path: path.clone() });
+            }
+            path.clone()
+        }
+        None => first_existing(search).ok_or_else(|| PhpRefusal::Missing {
+            searched: search.lib_dirs.clone(),
+        })?,
+    };
+    let mut file = std::fs::File::open(&path).map_err(|err| PhpRefusal::NotAFile {
+        path: path.clone(),
+        detail: err.to_string(),
+    })?;
+    let metadata = file.metadata().map_err(|err| PhpRefusal::NotAFile {
+        path: path.clone(),
+        detail: err.to_string(),
+    })?;
+    if !metadata.is_file() {
+        return Err(PhpRefusal::NotAFile {
+            path: path.clone(),
+            detail: "not a regular file".to_string(),
+        });
+    }
+    let version = version_of(&path, &file);
+    let abi = zend_abi(&mut file).map_err(|detail| PhpRefusal::NotElf {
+        path: path.clone(),
+        detail,
+        version,
+    })?;
+    match abi {
+        ZendAbi::Nts => {}
+        ZendAbi::Zts => {
+            return Err(PhpRefusal::ThreadSafe {
+                path: path.clone(),
+                version,
+            });
+        }
+        ZendAbi::NotLibphp => {
+            return Err(PhpRefusal::NotLibphp {
+                path: path.clone(),
+                version,
+            });
+        }
+    }
+    let version = version.ok_or_else(|| PhpRefusal::NoVersion { path: path.clone() })?;
+    // One spelling, the `ADR-0010` §4.1 one. `make php-sapi` still writes
+    // `target/php-sapi/libblastit_php84.so` (`Minor::shim_file()`), so a
+    // developer who has just built a shim can see "no shim for the tuple" until
+    // the Makefile's output is renamed — that rename is `MB.3.13.3`/`MB.3.18`'s
+    // hand-off, already logged, and this lookup never accepts two spellings for
+    // the same tuple.
+    let shim = shim_name(version);
+    let shim_path = search
+        .shim_dirs
+        .iter()
+        .map(|dir| dir.join(&shim))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| PhpRefusal::NoShim {
+            libphp: path.clone(),
+            version,
+            shim,
+            searched: search.shim_dirs.clone(),
+        })?;
+    Ok(PhpRuntime {
+        libphp: path,
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        version,
+        shim: shim_path,
+    })
+}
+
+/// The first fixed name that exists, in name-major order.
+fn first_existing(search: &PhpSearch) -> Option<PathBuf> {
+    LIBPHP_CANDIDATES.iter().find_map(|name| {
+        search
+            .lib_dirs
+            .iter()
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+    })
+}
+
+/// The version the file's name states, or the name its descriptor resolves to.
+///
+/// `libphp.so` is usually a symlink to `libphp8.4.so`, and a descriptor's link
+/// target says so even when the path does not — a `readlink`, never a load.
+fn version_of(path: &Path, file: &std::fs::File) -> Option<PhpVersion> {
+    let named = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(PhpVersion::parse);
+    named.or_else(|| {
+        let link = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
+        link.file_name()
+            .and_then(OsStr::to_str)
+            .and_then(PhpVersion::parse)
+    })
+}
+
+/// The largest section this walk will read into memory: a `libphp`'s `.dynsym`
+/// is tens of kilobytes, and this is the bound that keeps a hostile file from
+/// being an allocation.
+const MAX_SECTION_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The ELF class a walk is reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ElfClass {
+    /// 32-bit (`e_ident[EI_CLASS] == 1`).
+    Elf32,
+    /// 64-bit (`e_ident[EI_CLASS] == 2`).
+    Elf64,
+}
+
+/// The header fields the `.dynsym` walk needs.
+struct ElfHeader {
+    class: ElfClass,
+    /// Offset of the section header table.
+    shoff: u64,
+    /// Size of one section header.
+    shentsize: usize,
+    /// Number of section headers.
+    shnum: usize,
+    /// The file's size, for the bounds checks.
+    size: u64,
+}
+
+/// `SHT_DYNSYM`: the dynamic symbol table.
+const SHT_DYNSYM: u32 = 11;
+/// `SHT_STRTAB`: a string table.
+const SHT_STRTAB: u32 = 3;
+
+/// Reads the `.dynsym` names of `file` and reports which Zend globals it
+/// exports (`ADR-0010` §3).
+///
+/// No dependency, no `dlopen`, no `mmap`: `seek`/`read` of the section header
+/// table, the dynamic symbol table and its string table, with every offset
+/// bounds-checked. A file that is not a little-endian ELF, has no `.dynsym`, or
+/// is truncated is an `Err` naming what was wrong.
+fn zend_abi(file: &mut std::fs::File) -> Result<ZendAbi, String> {
+    let header = read_elf_header(file)?;
+    let table_len = header
+        .shentsize
+        .checked_mul(header.shnum)
+        .ok_or_else(|| "the section header table is too large".to_string())?;
+    let table_end = header
+        .shoff
+        .checked_add(
+            u64::try_from(table_len)
+                .map_err(|_| "the section header table is too large".to_string())?,
+        )
+        .ok_or_else(|| "the section header table is too large".to_string())?;
+    if table_end > header.size {
+        return Err("the section header table is past the end of the file".to_string());
+    }
+    let table = read_at(file, header.shoff, table_len)?;
+    let (dynsym, strtab_index) = find_dynsym(&header, &table)?;
+    let strtab = find_strtab(&header, &table, strtab_index)?;
+    let symbols = read_at(file, dynsym.offset, dynsym.len)?;
+    let names = read_at(file, strtab.offset, strtab.len)?;
+    let (executor_globals, tsrm_startup) =
+        scan_symbols(&header.class, &symbols, dynsym.entsize, &names)?;
+    Ok(match (executor_globals, tsrm_startup) {
+        (true, false) => ZendAbi::Nts,
+        (false, false) => ZendAbi::NotLibphp,
+        (_, true) => ZendAbi::Zts,
+    })
+}
+
+/// One section's location, bounded by [`MAX_SECTION_BYTES`].
+#[derive(Clone, Copy, Debug)]
+struct Section {
+    offset: u64,
+    len: usize,
+    entsize: usize,
+}
+
+/// Parses and bounds-checks the ELF header.
+fn read_elf_header(file: &mut std::fs::File) -> Result<ElfHeader, String> {
+    let size = file
+        .metadata()
+        .map_err(|err| format!("the file could not be inspected ({err})"))?
+        .len();
+    if size < 16 {
+        return Err("it is shorter than an ELF identification".to_string());
+    }
+    let ident = read_at(file, 0, 16)?;
+    if ident.get(..4) != Some(b"\x7fELF") {
+        return Err("no ELF magic".to_string());
+    }
+    let class = match ident.get(4) {
+        Some(1) => ElfClass::Elf32,
+        Some(2) => ElfClass::Elf64,
+        _ => return Err("not an ELF file: unknown class".to_string()),
+    };
+    if ident.get(5) != Some(&1) {
+        return Err("a big-endian ELF object: only little-endian objects are embedded".to_string());
+    }
+    let (head_len, shoff_off, shentsize_off, shnum_off, min_shentsize) = match class {
+        ElfClass::Elf64 => (64usize, 0x28, 0x3a, 0x3c, 64usize),
+        ElfClass::Elf32 => (52usize, 0x20, 0x2e, 0x30, 40usize),
+    };
+    if size < u64::try_from(head_len).map_err(|_| "the header is too large".to_string())? {
+        return Err("the header is truncated".to_string());
+    }
+    let head = read_at(file, 0, head_len)?;
+    let missing = || "the header is truncated".to_string();
+    let shoff = match class {
+        ElfClass::Elf64 => le_u64(&head, shoff_off),
+        ElfClass::Elf32 => le_u32(&head, shoff_off).map(u64::from),
+    }
+    .ok_or_else(missing)?;
+    let shentsize = le_u16(&head, shentsize_off).ok_or_else(missing)?;
+    let shnum = le_u16(&head, shnum_off).ok_or_else(missing)?;
+    let shentsize = usize::from(shentsize);
+    let shnum = usize::from(shnum);
+    if shnum == 0 {
+        return Err("it has no section headers".to_string());
+    }
+    if shentsize < min_shentsize {
+        return Err("a section header table whose entries are too small".to_string());
+    }
+    Ok(ElfHeader {
+        class,
+        shoff,
+        shentsize,
+        shnum,
+        size,
+    })
+}
+
+/// The `.dynsym` section and the index of its string table.
+fn find_dynsym(header: &ElfHeader, table: &[u8]) -> Result<(Section, usize), String> {
+    for index in 0..header.shnum {
+        let at = index.saturating_mul(header.shentsize);
+        let Some(kind) = le_u32(table, at.saturating_add(4)) else {
+            continue;
+        };
+        if kind != SHT_DYNSYM {
+            continue;
+        }
+        let Some((offset, size, link, entsize)) = section_fields(header.class, table, at) else {
+            return Err("the .dynsym section header is truncated".to_string());
+        };
+        let len = bounded_section(offset, size, header.size)?;
+        let entsize = usize::try_from(entsize)
+            .map_err(|_| "the .dynsym entry size does not fit this build".to_string())?;
+        return Ok((
+            Section {
+                offset,
+                len,
+                entsize,
+            },
+            usize::try_from(link).map_err(|_| {
+                "the .dynsym string-table index does not fit this build".to_string()
+            })?,
+        ));
+    }
+    Err("it has no .dynsym section".to_string())
+}
+
+/// The string table `index` names, checked to be one.
+fn find_strtab(header: &ElfHeader, table: &[u8], index: usize) -> Result<Section, String> {
+    if index >= header.shnum {
+        return Err("the .dynsym string-table index is past the section table".to_string());
+    }
+    let at = index.saturating_mul(header.shentsize);
+    let kind = le_u32(table, at.saturating_add(4))
+        .ok_or_else(|| "the .dynstr section header is truncated".to_string())?;
+    if kind != SHT_STRTAB {
+        return Err("the .dynsym string table is not a string table".to_string());
+    }
+    let (offset, size, _, _) = section_fields(header.class, table, at)
+        .ok_or_else(|| "the .dynstr section header is truncated".to_string())?;
+    let len = bounded_section(offset, size, header.size)?;
+    Ok(Section {
+        offset,
+        len,
+        entsize: 0,
+    })
+}
+
+/// `(sh_offset, sh_size, sh_link, sh_entsize)` of the section at `at`.
+fn section_fields(class: ElfClass, table: &[u8], at: usize) -> Option<(u64, u64, u32, u64)> {
+    match class {
+        ElfClass::Elf64 => Some((
+            le_u64(table, at.saturating_add(0x18))?,
+            le_u64(table, at.saturating_add(0x20))?,
+            le_u32(table, at.saturating_add(0x28))?,
+            le_u64(table, at.saturating_add(0x38))?,
+        )),
+        ElfClass::Elf32 => Some((
+            u64::from(le_u32(table, at.saturating_add(0x10))?),
+            u64::from(le_u32(table, at.saturating_add(0x14))?),
+            le_u32(table, at.saturating_add(0x18))?,
+            u64::from(le_u32(table, at.saturating_add(0x24))?),
+        )),
+    }
+}
+
+/// A section's length in memory, refused when it is absurd or past the file.
+fn bounded_section(offset: u64, size: u64, file_size: u64) -> Result<usize, String> {
+    if size > MAX_SECTION_BYTES {
+        return Err(format!(
+            "a {size}-byte section is larger than this build will inspect"
+        ));
+    }
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| "a section runs past the end of the file".to_string())?;
+    if end > file_size {
+        return Err("a section runs past the end of the file".to_string());
+    }
+    usize::try_from(size).map_err(|_| "a section is larger than this build can address".to_string())
+}
+
+/// Whether the dynamic symbol table exports the two Zend globals.
+fn scan_symbols(
+    class: &ElfClass,
+    dynsym: &[u8],
+    entsize: usize,
+    strtab: &[u8],
+) -> Result<(bool, bool), String> {
+    let minimum = match class {
+        ElfClass::Elf64 => 24usize,
+        ElfClass::Elf32 => 16usize,
+    };
+    if entsize < minimum {
+        return Err("a .dynsym entry is too small to be a symbol".to_string());
+    }
+    let mut executor_globals = false;
+    let mut tsrm_startup = false;
+    for index in 0..dynsym.len() / entsize {
+        let at = index.saturating_mul(entsize);
+        let Some(name) = le_u32(dynsym, at).and_then(|offset| {
+            usize::try_from(offset)
+                .ok()
+                .map(|offset| c_str(strtab, offset))
+        }) else {
+            continue;
+        };
+        match name {
+            b"executor_globals" => executor_globals = true,
+            b"tsrm_startup" => tsrm_startup = true,
+            _ => {}
+        }
+    }
+    Ok((executor_globals, tsrm_startup))
+}
+
+/// The NUL-terminated string at `offset`, or an empty slice.
+fn c_str(bytes: &[u8], offset: usize) -> &[u8] {
+    let Some(rest) = bytes.get(offset..) else {
+        return &[];
+    };
+    let end = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(rest.len());
+    rest.get(..end).unwrap_or_default()
+}
+
+/// `len` bytes at `offset`, from a file this process has open read-only.
+fn read_at(file: &mut std::fs::File, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|err| format!("the file could not be read ({err})"))?;
+    let mut bytes = vec![0u8; len];
+    file.read_exact(&mut bytes)
+        .map_err(|err| format!("the file is truncated ({err})"))?;
+    Ok(bytes)
+}
+
+/// A little-endian `u16` at `offset`, or `None` past the end.
+fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let slice: [u8; 2] = bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
+    Some(u16::from_le_bytes(slice))
+}
+
+/// A little-endian `u32` at `offset`, or `None` past the end.
+fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let slice: [u8; 4] = bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_le_bytes(slice))
+}
+
+/// A little-endian `u64` at `offset`, or `None` past the end.
+fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    let slice: [u8; 8] = bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
+    Some(u64::from_le_bytes(slice))
+}
+
 /// `MB.3.28` interim: a `[route.php]` route is refused at boot until the
 /// composition root can spawn an embedded-PHP worker (`MB.3.13.3`).
 ///
@@ -398,6 +1267,11 @@ pub(crate) fn no_python_support(
 /// usable library). `ADR-0010` §1 gives PHP exactly one backend, so the
 /// sentence names no alternative either: naming one would read as a recipe.
 /// It stops at the route, its `entry`, and the missing wiring.
+///
+/// `MB.3.13.2` runs [`php_boot_gate`] **before** this function on both boot
+/// paths, so a host with no usable NTS `libphp` gets `ADR-0010` §4.1's
+/// package sentence instead of this one, and a host that has one still stops
+/// here rather than serving a route this build cannot fork.
 ///
 /// **Interim.** `MB.3.13.3` wires `SpawnSpec::Php`, deletes this function and
 /// its three call sites (`stage0::run`, `stage0::run_dev`, and `check`'s
@@ -669,12 +1543,25 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     if let Some(message) = no_python_support(&config, &manifest, false) {
         fail(&emitter, &message);
     }
-    // `MB.3.28`: a `[route.php]` route has no worker to spawn yet, so the boot
-    // is refused before a listener is bound — ahead of `app_rule`, whose
-    // "set BLASTIT_APP" advice cannot make a PHP route serve. Delete this call
-    // with the function when `MB.3.13.3` wires `SpawnSpec::Php`.
-    if let Some(message) = php_backend_unavailable(&manifest) {
-        fail(&emitter, &message);
+    // `ADR-0010` §3, §4.1, then `MB.3.28`: before any listener binds, (1) a
+    // `workers` cap above the view budget is refused naming both numbers,
+    // (2) the NTS `libphp` and the shim for its tuple are resolved statically —
+    // a host that cannot embed PHP gets §4.1's package sentence — and (3) a
+    // host that *can* still stops on the interim wiring refusal below, so this
+    // boot never accepts a PHP route it cannot serve. Ahead of `app_rule`, whose
+    // "set BLASTIT_APP" advice cannot make a PHP route serve, and before
+    // `bind_view_sockets`. The gate only reads the ELF: the `dlopen` happens
+    // inside a view worker.
+    match php_boot_gate(&config, &manifest, PhpShimScope::Deployment) {
+        PhpBoot::Absent => {}
+        PhpBoot::Refused(message) => fail(&emitter, &message),
+        // `MB.3.28`'s refusal, unchanged: the gate only reaches `Proceed` for a
+        // manifest that declares a `[route.php]` route, so this is `Some`.
+        PhpBoot::Proceed => {
+            if let Some(message) = php_backend_unavailable(&manifest) {
+                fail(&emitter, &message);
+            }
+        }
     }
     if let Err(message) = app_rule(&config, &manifest) {
         fail(&emitter, &message);
@@ -926,11 +1813,22 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
     if let Some(message) = no_python_support(&config, &manifest, options.learn) {
         dev_fail(&message);
     }
-    // `MB.3.28`: same refusal one boot path over — a PHP route is not served
-    // in this build, and `Ctl::Spawn` would fork a WSGI view for it. Delete
-    // this call with the function when `MB.3.13.3` wires `SpawnSpec::Php`.
-    if let Some(message) = php_backend_unavailable(&manifest) {
-        dev_fail(&message);
+    // Same order as `run`: (1) the `workers` budget, (2) the `libphp`/shim
+    // discovery, (3) `MB.3.28`'s interim refusal. `dev` may also look in
+    // `BLASTIT_PHP_SHIM_DIR` and the `target/php-sapi` directory `make php-sapi`
+    // writes (`R8`), which is the only difference. Nothing has been forked or
+    // bound yet, so a refusal here starts nothing (`Ctl::Spawn` would otherwise
+    // fork a WSGI view for a PHP route).
+    match php_boot_gate(&config, &manifest, PhpShimScope::Development) {
+        PhpBoot::Absent => {}
+        PhpBoot::Refused(message) => dev_fail(&message),
+        // The gate only reaches `Proceed` for a manifest with a `[route.php]`
+        // route, so this sentence always exists.
+        PhpBoot::Proceed => {
+            if let Some(message) = php_backend_unavailable(&manifest) {
+                dev_fail(&message);
+            }
+        }
     }
     if let Err(message) = app_rule(&config, &manifest) {
         dev_fail(&message);
@@ -2397,15 +3295,23 @@ entry = \"public/index.php\"
     }
 }
 
-/// `MB.3.28`: the interim refusal a `[route.php]` route gets until the
-/// composition root spawns an embedded-PHP worker (`MB.3.13.3`).
+/// `ADR-0010` §3/§4.1: the `[route.php]` discovery gate and its two exact
+/// sentences.
 ///
-/// The allowed twin matters as much as the refusal: a static-only manifest and
-/// a WSGI-shaped manifest have their own sentences, and this gate must not
-/// answer for them.
+/// Every rule here has a denied case and an accepted twin: a host with no
+/// `libphp` at all, one whose object is ZTS or not an ELF at all, one whose
+/// version no shim matches, and a `workers` cap above the view budget — beside
+/// the manifest that declares no PHP route and must be left alone, and the
+/// versioned NTS object with its shim that resolves.
+///
+/// The library fixtures are written out byte by byte (an ELF64 header plus a
+/// `.dynsym` and its `.dynstr`), so the inline suite needs no C toolchain and
+/// every case chooses exactly the exported names it needs. The `cc`-built
+/// constructor-canary stubs — proving zero stage-0 `dlopen` from the outside —
+/// belong to the protected suite (`MB.3.13.4`).
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod php_backend_gate {
+mod php_boot_gate {
     use super::*;
 
     /// The page's shape: files from disk, the rest to the front controller.
@@ -2443,6 +3349,36 @@ path = ['/api/.*']
 entry = \"api/index.php\"
 ";
 
+    /// A PHP route with a cap the tests compare against the budget.
+    fn php_with_workers(workers: u32) -> String {
+        format!(
+            "version = 1\n\n[[route]]\nname = \"app\"\npath = ['.*']\n\n[route.php]\n\
+             entry = \"public/index.php\"\nworkers = {workers}\n"
+        )
+    }
+
+    /// Two PHP routes where **the second** carries the cap: the budget rule is a
+    /// manifest rule, so it must not stop at the first route.
+    fn two_php_routes_with_second_workers(workers: u32) -> String {
+        format!(
+            "version = 1\n\n[[route]]\nname = \"app\"\npath = ['.*']\n\n[route.php]\n\
+             entry = \"public/index.php\"\n\n[[route]]\nname = \"api\"\npath = ['/api/.*']\n\n\
+             [route.php]\nentry = \"api/index.php\"\nworkers = {workers}\n"
+        )
+    }
+
+    /// A PHP route with no cap at all: the deployment's budget is the budget.
+    const PHP_ONLY: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.php]
+entry = \"public/index.php\"
+";
+
     const STATIC_ONLY: &str = "\
 version = 1
 
@@ -2467,45 +3403,640 @@ path = ['.*']
         manifest
     }
 
-    #[test]
-    fn a_php_route_is_refused_naming_its_entry_and_the_missing_wiring() {
-        for source in [STATIC_AND_PHP, TWO_PHP_ROUTES] {
-            let message = php_backend_unavailable(&manifest(source)).expect("a PHP route");
-            assert!(message.contains("route \"app\""), "{message}");
-            assert!(
-                message.contains("[route.php] entry \"public/index.php\""),
-                "{message}"
-            );
-            assert!(
-                message.contains("embedded PHP backend is not available in this build"),
-                "{message}"
-            );
-            assert!(message.contains("MB.3.13.3"), "the wiring: {message}");
-            // One PHP backend, one sentence: naming an alternative — even to
-            // deny it — would hand an agent a fallback recipe (`ADR-0010` §1).
-            let lower = message.to_ascii_lowercase();
-            for banned in [
-                "php-fpm",
-                "fastcgi",
-                "route.fastcgi",
-                "wsgi",
-                "meanwhile",
-                "libphp",
-            ] {
-                assert!(
-                    !lower.contains(banned),
-                    "the sentence names a fallback recipe ({banned}): {message}"
-                );
-            }
-            // The second route is never the one named.
-            assert!(!message.contains("api/index.php"), "{message}");
+    /// A directory under the test temp dir, removed on drop.
+    struct Scratch {
+        dir: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("blastit-php-gate-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self { dir }
+        }
+
+        /// Writes `contents` as `name` and returns the path.
+        fn file(&self, name: &str, contents: &[u8]) -> PathBuf {
+            let path = self.dir.join(name);
+            std::fs::write(&path, contents).unwrap();
+            path
         }
     }
 
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A little-endian ELF64 shared object whose `.dynsym` exports `names`.
+    ///
+    /// Layout: the 64-byte ELF header, the dynamic symbol table (a null symbol
+    /// then one per name), its string table, and three section headers (null,
+    /// `SHT_DYNSYM`, `SHT_STRTAB`). Nothing is loaded: the gate reads these
+    /// bytes the way it reads a distro `libphp`.
+    fn shared_object(names: &[&str]) -> Vec<u8> {
+        let mut strtab = vec![0u8];
+        let mut dynsym = vec![0u8; 24];
+        for name in names {
+            let mut entry = vec![0u8; 24];
+            entry[..4].copy_from_slice(&u32::try_from(strtab.len()).unwrap().to_le_bytes());
+            dynsym.extend_from_slice(&entry);
+            strtab.extend_from_slice(name.as_bytes());
+            strtab.push(0);
+        }
+        let dynsym_off = 64usize;
+        let strtab_off = dynsym_off + dynsym.len();
+        let shoff = (strtab_off + strtab.len() + 7) & !7;
+        let mut file = vec![0u8; shoff + 3 * 64];
+        file[..4].copy_from_slice(b"\x7fELF");
+        file[4] = 2; // ELFCLASS64
+        file[5] = 1; // ELFDATA2LSB
+        file[6] = 1; // EV_CURRENT
+        file[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
+        file[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        file[0x28..0x30].copy_from_slice(&u64::try_from(shoff).unwrap().to_le_bytes());
+        file[0x34..0x36].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+        file[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+        file[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes()); // e_shnum
+        file[64..strtab_off].copy_from_slice(&dynsym);
+        file[strtab_off..strtab_off + strtab.len()].copy_from_slice(&strtab);
+        let dynsym_header = shoff + 64;
+        file[dynsym_header + 4..dynsym_header + 8].copy_from_slice(&SHT_DYNSYM.to_le_bytes());
+        file[dynsym_header + 0x18..dynsym_header + 0x20]
+            .copy_from_slice(&u64::try_from(dynsym_off).unwrap().to_le_bytes());
+        file[dynsym_header + 0x20..dynsym_header + 0x28]
+            .copy_from_slice(&u64::try_from(dynsym.len()).unwrap().to_le_bytes());
+        file[dynsym_header + 0x28..dynsym_header + 0x2c].copy_from_slice(&2u32.to_le_bytes());
+        file[dynsym_header + 0x38..dynsym_header + 0x40].copy_from_slice(&24u64.to_le_bytes());
+        let strtab_header = shoff + 128;
+        file[strtab_header + 4..strtab_header + 8].copy_from_slice(&SHT_STRTAB.to_le_bytes());
+        file[strtab_header + 0x18..strtab_header + 0x20]
+            .copy_from_slice(&u64::try_from(strtab_off).unwrap().to_le_bytes());
+        file[strtab_header + 0x20..strtab_header + 0x28]
+            .copy_from_slice(&u64::try_from(strtab.len()).unwrap().to_le_bytes());
+        file
+    }
+
+    /// A search over one explicit NTS object and the shims in `shim_dir`.
+    fn search_for(libphp: &Path, shim_dir: &Path) -> PhpSearch {
+        PhpSearch {
+            libphp: Some(libphp.to_path_buf()),
+            shim_dirs: vec![shim_dir.to_path_buf()],
+            lib_dirs: Vec::new(),
+        }
+    }
+
+    /// An 8.4 NTS object and its correctly named shim, both under `scratch`.
+    fn resolved_84(scratch: &Scratch) -> (PathBuf, PhpSearch) {
+        let libphp = scratch.file("libphp8.4.so", &shared_object(&["executor_globals"]));
+        let shims = scratch.dir.join("shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::write(
+            shims.join(shim_name(PhpVersion::new(8, 4))),
+            b"the shim is not loaded here",
+        )
+        .unwrap();
+        (
+            libphp.clone(),
+            PhpSearch {
+                libphp: Some(libphp),
+                shim_dirs: vec![shims],
+                lib_dirs: Vec::new(),
+            },
+        )
+    }
+
+    /// A host with nothing to embed refuses **only** when a route asks for PHP.
+    ///
+    /// The refusal is `ADR-0010` §4.1's missing-library sentence: the route and
+    /// its `entry`, the names that were searched and where, the three distro
+    /// packages and `BLASTIT_LIBPHP`. A static tree and a WSGI-shaped manifest
+    /// boot as before — the same `stage_0` must not refuse a site that never
+    /// asked for PHP.
     #[test]
-    fn a_manifest_without_a_php_route_is_left_to_the_other_gates() {
+    fn a_host_with_no_libphp_refuses_only_when_a_php_route_exists() {
+        let empty = Scratch::new("empty");
+        let search = PhpSearch {
+            libphp: None,
+            shim_dirs: vec![empty.dir.clone()],
+            lib_dirs: vec![empty.dir.clone()],
+        };
         for source in [STATIC_ONLY, WITH_A_VIEW] {
-            assert_eq!(php_backend_unavailable(&manifest(source)), None, "{source}");
+            assert!(
+                matches!(
+                    php_boot(
+                        &manifest(source),
+                        &search,
+                        Some(16),
+                        PhpShimScope::Deployment
+                    ),
+                    PhpBoot::Absent
+                ),
+                "{source}"
+            );
+        }
+        let message = php_boot(
+            &manifest(STATIC_AND_PHP),
+            &search,
+            Some(16),
+            PhpShimScope::Deployment,
+        )
+        .refusal()
+        .expect("a PHP route")
+        .to_string();
+        assert!(message.contains("route \"app\""), "{message}");
+        assert!(
+            message.contains("[route.php] entry \"public/index.php\""),
+            "{message}"
+        );
+        assert!(message.contains("no usable NTS libphp"), "{message}");
+        assert!(
+            message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
+            "{message}"
+        );
+        for package in [
+            "apt install libphp-embed",
+            "apk add php84-embed",
+            "dnf install php-embedded",
+        ] {
+            assert!(
+                message.contains(package),
+                "the refusal names {package}: {message}"
+            );
+        }
+        assert!(
+            message.contains(&empty.dir.display().to_string()),
+            "the refusal names the directories that were searched: {message}"
+        );
+        assert!(
+            !message.contains("MB.3.13.3"),
+            "a host with no library gets the package sentence, never the wiring one: {message}"
+        );
+
+        // The first PHP route is the one named, never the second.
+        let two = php_boot(
+            &manifest(TWO_PHP_ROUTES),
+            &search,
+            Some(16),
+            PhpShimScope::Deployment,
+        )
+        .refusal()
+        .expect("a PHP route")
+        .to_string();
+        assert!(two.contains("route \"app\""), "{two}");
+        assert!(!two.contains("api/index.php"), "{two}");
+
+        // The `dev` twin: nothing installed is not a `dev` refusal, because the
+        // `MB.3.28` interim sentence the caller prints next already says why the
+        // route cannot serve.
+        assert!(
+            matches!(
+                php_boot(
+                    &manifest(PHP_ONLY),
+                    &search,
+                    Some(16),
+                    PhpShimScope::Development
+                ),
+                PhpBoot::Proceed
+            ),
+            "a PHP-free dev host is left to the interim refusal"
+        );
+        let interim = php_backend_unavailable(&manifest(PHP_ONLY)).expect("a PHP route");
+        assert!(interim.contains("MB.3.13.3"), "{interim}");
+    }
+
+    /// A ZTS build is refused with the tuple and the shim it would need — and
+    /// the same object with `tsrm_startup` gone resolves.
+    #[test]
+    fn a_zts_libphp_is_refused_naming_the_tuple_and_the_shim() {
+        let scratch = Scratch::new("zts");
+        let zts = scratch.file(
+            "libphp8.4.so",
+            &shared_object(&["executor_globals", "tsrm_startup"]),
+        );
+        let shims = Scratch::new("zts-shims");
+        let shim = shims.file(
+            &shim_name(PhpVersion::new(8, 4)),
+            b"never loaded in stage 0",
+        );
+        let search = search_for(&zts, &shims.dir);
+        let message = php_boot(
+            &manifest(PHP_ONLY),
+            &search,
+            Some(16),
+            PhpShimScope::Deployment,
+        )
+        .refusal()
+        .expect("a ZTS host is refused")
+        .to_string();
+        assert!(message.contains("ZTS (thread-safe)"), "{message}");
+        assert!(
+            message.contains(&format!("(PHP 8.4, {})", target_tuple())),
+            "the tuple: {message}"
+        );
+        assert!(
+            message.contains(&format!("libblastit_php84-{}.so", target_tuple())),
+            "the shim that tuple needs: {message}"
+        );
+        assert!(
+            message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
+            "{message}"
+        );
+        assert!(message.contains("apt install libphp-embed"), "{message}");
+        assert!(shim.is_file(), "the shim exists: ZTS is the refusal");
+
+        // The accepted twin: the same file name without `tsrm_startup`.
+        let nts = scratch.file("libphp-8.4.so", &shared_object(&["executor_globals"]));
+        let search = search_for(&nts, &shims.dir);
+        let runtime = discover_php(&search).expect("an NTS 8.4 object with its shim");
+        assert_eq!(runtime.version, PhpVersion::new(8, 4));
+        assert_eq!(runtime.libphp, nts);
+        assert_eq!(runtime.shim, shim);
+        assert!(runtime.ino > 0, "the inode is recorded for stage 1");
+        assert!(
+            matches!(
+                php_boot(
+                    &manifest(PHP_ONLY),
+                    &search,
+                    Some(16),
+                    PhpShimScope::Deployment
+                ),
+                PhpBoot::Proceed
+            ),
+            "the host resolves; the wiring refusal is the callers' next step"
+        );
+        // Step 3, unchanged: `MB.3.28`'s sentence, and it names no package.
+        let interim = php_backend_unavailable(&manifest(PHP_ONLY)).expect("a PHP route");
+        assert!(interim.contains("MB.3.13.3"), "{interim}");
+        assert!(
+            !interim.to_ascii_lowercase().contains("libphp"),
+            "the wiring sentence is not a package sentence: {interim}"
+        );
+    }
+
+    /// An object that is not an ELF — a text file, a directory, a path that is
+    /// not there — is refused, never guessed at.
+    #[test]
+    fn a_libphp_that_is_not_an_elf_object_is_refused() {
+        let scratch = Scratch::new("notelf");
+        let shims = Scratch::new("notelf-shims");
+        let _ = shims.file(&shim_name(PhpVersion::new(8, 4)), b"never loaded");
+        let cases = [
+            (
+                scratch.file("libphp8.4.so", b"this is not an ELF shared object"),
+                "not an ELF shared object",
+            ),
+            (scratch.dir.join("libphp-8.4.so"), "cannot be opened"),
+        ];
+        for (path, expected) in cases {
+            let message = php_boot(
+                &manifest(PHP_ONLY),
+                &search_for(&path, &shims.dir),
+                Some(16),
+                PhpShimScope::Deployment,
+            )
+            .refusal()
+            .expect("an unusable path is refused")
+            .to_string();
+            assert!(message.contains(expected), "{path:?}: {message}");
+            assert!(
+                message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
+                "{message}"
+            );
+        }
+        // A directory named like the library.
+        let directory = scratch.dir.join("libphp8.3.so");
+        std::fs::create_dir_all(&directory).unwrap();
+        let message = php_boot(
+            &manifest(PHP_ONLY),
+            &search_for(&directory, &shims.dir),
+            Some(16),
+            PhpShimScope::Deployment,
+        )
+        .refusal()
+        .expect("a directory is not a library")
+        .to_string();
+        assert!(message.contains("not a regular file"), "{message}");
+    }
+
+    /// The version comes from the file name (in either spelling), and a name
+    /// that carries none is refused rather than guessed.
+    #[test]
+    fn the_version_comes_from_the_file_name() {
+        let scratch = Scratch::new("version");
+        let shims = Scratch::new("version-shims");
+        let _ = shims.file(&shim_name(PhpVersion::new(8, 3)), b"never loaded");
+
+        let unversioned = scratch.file("libphp.so", &shared_object(&["executor_globals"]));
+        let message = php_boot(
+            &manifest(PHP_ONLY),
+            &search_for(&unversioned, &shims.dir),
+            Some(16),
+            PhpShimScope::Deployment,
+        )
+        .refusal()
+        .expect("an unversioned name cannot choose a shim")
+        .to_string();
+        assert!(message.contains("names no PHP major.minor"), "{message}");
+        assert!(
+            message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
+            "{message}"
+        );
+
+        // The accepted twin, in the distro's hyphenated spelling.
+        let hyphenated = scratch.file("libphp-8.3.so", &shared_object(&["executor_globals"]));
+        let runtime =
+            discover_php(&search_for(&hyphenated, &shims.dir)).expect("libphp-8.3.so and its shim");
+        assert_eq!(runtime.version, PhpVersion::new(8, 3));
+        assert_eq!(
+            runtime.shim.file_name().unwrap().to_str().unwrap(),
+            format!("libblastit_php83-{}.so", target_tuple())
+        );
+    }
+
+    /// Nothing matched to the tuple is a refusal that names the shim, the
+    /// tuple, the directories and the package; a shim in a later directory is
+    /// the accepted twin.
+    #[test]
+    fn the_shim_is_chosen_by_the_tuple_and_a_missing_one_names_it() {
+        let scratch = Scratch::new("shim");
+        let libphp = scratch.file("libphp8.4.so", &shared_object(&["executor_globals"]));
+        let first = Scratch::new("shim-first");
+        let second = Scratch::new("shim-second");
+        let search = PhpSearch {
+            libphp: Some(libphp.clone()),
+            shim_dirs: vec![first.dir.clone(), second.dir.clone()],
+            lib_dirs: Vec::new(),
+        };
+        let message = php_boot(
+            &manifest(PHP_ONLY),
+            &search,
+            Some(16),
+            PhpShimScope::Deployment,
+        )
+        .refusal()
+        .expect("no shim for the tuple")
+        .to_string();
+        assert!(
+            message.contains(&format!("no shim libblastit_php84-{}.so", target_tuple())),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("(PHP 8.4, {})", target_tuple())),
+            "{message}"
+        );
+        assert!(
+            message.contains(&first.dir.display().to_string())
+                && message.contains(&second.dir.display().to_string()),
+            "the refusal names every directory it looked in: {message}"
+        );
+        assert!(message.contains("apt install libphp-embed"), "{message}");
+
+        // The accepted twin: the shim in the second directory is found.
+        let shim = second.file(&shim_name(PhpVersion::new(8, 4)), b"never loaded");
+        let runtime = discover_php(&search).expect("the shim in the second directory");
+        assert_eq!(runtime.shim, shim);
+
+        // And the `dev` twin of the missing shim: `make php-sapi` is optional in
+        // a development checkout, so a `dev` boot without the shim is left to
+        // the interim refusal while a deployment may not bind at all.
+        let empty = Scratch::new("shim-dev-empty");
+        let dev_search = PhpSearch {
+            libphp: Some(libphp),
+            shim_dirs: vec![empty.dir.clone()],
+            lib_dirs: Vec::new(),
+        };
+        assert!(
+            matches!(
+                php_boot(
+                    &manifest(PHP_ONLY),
+                    &dev_search,
+                    Some(16),
+                    PhpShimScope::Development
+                ),
+                PhpBoot::Proceed
+            ),
+            "a dev host without the shim is left to the interim refusal"
+        );
+        assert!(
+            matches!(
+                php_boot(
+                    &manifest(PHP_ONLY),
+                    &dev_search,
+                    Some(16),
+                    PhpShimScope::Deployment
+                ),
+                PhpBoot::Refused(_)
+            ),
+            "a deployment may not bind without the shim"
+        );
+    }
+
+    /// `ADR-0010` §2: `workers` is downward only. The error names both
+    /// numbers, and comes before the discovery so the operator fixes the
+    /// manifest first; `workers == cap` (and no `workers` at all) passes it.
+    #[test]
+    fn a_workers_cap_above_the_view_budget_names_both_numbers() {
+        let scratch = Scratch::new("workers");
+        let (_, resolved) = resolved_84(&scratch);
+
+        let config = Config {
+            max_workers: 8,
+            view_max_workers: None,
+            ..Config::default()
+        };
+        let gate = php_boot_gate(
+            &config,
+            &manifest(&php_with_workers(9)),
+            PhpShimScope::Deployment,
+        );
+        let message = gate
+            .refusal()
+            .expect("9 is above the budget of 8")
+            .to_string();
+        assert!(message.contains("workers = 9"), "{message}");
+        assert!(message.contains("budget of 8"), "{message}");
+        assert!(message.contains("BLASTIT_VIEW_MAX_WORKERS"), "{message}");
+        assert!(
+            !message.contains("apt install"),
+            "the budget is named before any discovery: {message}"
+        );
+
+        // The accepted twins: exactly the budget, and no cap at all.
+        for source in [php_with_workers(8), PHP_ONLY.to_string()] {
+            assert!(
+                matches!(
+                    php_boot(
+                        &manifest(&source),
+                        &resolved,
+                        Some(8),
+                        PhpShimScope::Deployment
+                    ),
+                    PhpBoot::Proceed
+                ),
+                "{source}: the cap passed"
+            );
+        }
+        // And the third step still refuses it, with the wiring sentence.
+        let interim = php_backend_unavailable(&manifest(PHP_ONLY)).expect("a PHP route");
+        assert!(interim.contains("MB.3.13.3"), "{interim}");
+
+        // The second PHP route is checked too: the budget is a manifest rule,
+        // so an over-budget route behind an accepted one is still refused, and
+        // it is *that* route and both numbers that are named.
+        let second = php_boot(
+            &manifest(&two_php_routes_with_second_workers(20)),
+            &resolved,
+            Some(16),
+            PhpShimScope::Deployment,
+        );
+        let message = second
+            .refusal()
+            .expect("the second route's 20 is above the budget of 16")
+            .to_string();
+        assert!(message.contains("route \"api\""), "{message}");
+        assert!(!message.contains("route \"app\""), "{message}");
+        assert!(message.contains("workers = 20"), "{message}");
+        assert!(message.contains("budget of 16"), "{message}");
+        assert!(
+            matches!(
+                php_boot(
+                    &manifest(&two_php_routes_with_second_workers(16)),
+                    &resolved,
+                    Some(16),
+                    PhpShimScope::Deployment
+                ),
+                PhpBoot::Proceed
+            ),
+            "the second route at exactly the budget passes"
+        );
+    }
+
+    /// The version-less refusal still carries the `ADR-0010` §4.1 tuple shape,
+    /// with the version marked unknown; a name that states no `major.minor` is
+    /// exactly that case.
+    #[test]
+    fn a_version_less_refusal_still_names_the_tuple_with_a_question_mark() {
+        let scratch = Scratch::new("no-version");
+        let shims = Scratch::new("no-version-shims");
+        let _ = shims.file(&shim_name(PhpVersion::new(8, 4)), b"never loaded");
+        let unversioned = scratch.file("libphp.so", b"this is not an ELF shared object");
+        let message = php_boot(
+            &manifest(PHP_ONLY),
+            &search_for(&unversioned, &shims.dir),
+            Some(16),
+            PhpShimScope::Deployment,
+        )
+        .refusal()
+        .expect("not an ELF, and its name states no version")
+        .to_string();
+        assert!(
+            message.contains(&format!("(PHP ?, {})", target_tuple())),
+            "the tuple shape survives an unknown version: {message}"
+        );
+        assert!(message.contains("apt install libphp-embed"), "{message}");
+        assert!(
+            message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
+            "{message}"
+        );
+    }
+
+    /// `Config::validate` refuses a relative `BLASTIT_LIBPHP` before a boot
+    /// reaches the gate, and the gate refuses it too: `php_boot` is a pure
+    /// function and the search is injectable, so the defence is tested where it
+    /// lives rather than assumed.
+    #[test]
+    fn a_relative_libphp_is_refused_by_the_gate_too() {
+        let search = PhpSearch {
+            libphp: Some(PathBuf::from("libphp.so")),
+            shim_dirs: Vec::new(),
+            lib_dirs: Vec::new(),
+        };
+        let message = php_boot(
+            &manifest(PHP_ONLY),
+            &search,
+            Some(16),
+            PhpShimScope::Development,
+        )
+        .refusal()
+        .expect("a relative override cannot be the library the boot inspected")
+        .to_string();
+        assert!(message.contains("BLASTIT_LIBPHP"), "{message}");
+        assert!(message.contains("not an absolute path"), "{message}");
+        assert!(message.contains("apt install libphp-embed"), "{message}");
+    }
+
+    /// The native twin: on this host the real distro library is inspected
+    /// statically and resolves, and on a host without one the same gate names
+    /// the package. Both branches are an assertion — neither is a skip.
+    #[test]
+    fn the_host_library_resolves_or_the_refusal_names_the_package() {
+        let shims = Scratch::new("host-shims");
+        for minor in [2u8, 3, 4] {
+            let _ = shims.file(
+                &shim_name(PhpVersion::new(8, minor)),
+                b"never loaded at boot",
+            );
+        }
+        let search = PhpSearch {
+            libphp: None,
+            shim_dirs: vec![shims.dir.clone()],
+            lib_dirs: library_dirs(),
+        };
+        match discover_php(&search) {
+            Ok(runtime) => {
+                assert!(runtime.libphp.is_file(), "{:?}", runtime.libphp);
+                assert!(runtime.dev > 0 && runtime.ino > 0);
+                assert_eq!(
+                    PhpVersion::parse(runtime.libphp.file_name().unwrap().to_str().unwrap()),
+                    Some(runtime.version),
+                    "the version comes from the file name that was opened"
+                );
+                assert!(
+                    matches!(
+                        php_boot(&manifest(PHP_ONLY), &search, None, PhpShimScope::Deployment),
+                        PhpBoot::Proceed
+                    ),
+                    "this host resolves the pair"
+                );
+                let interim = php_backend_unavailable(&manifest(PHP_ONLY))
+                    .expect("the route is not served yet");
+                assert!(interim.contains("MB.3.13.3"), "{interim}");
+                assert!(
+                    !interim.to_ascii_lowercase().contains("libphp"),
+                    "the wiring sentence names no library: {interim}"
+                );
+            }
+            Err(refusal) => {
+                let message = php_refusal_message("app", "public/index.php", &refusal);
+                assert!(message.contains("apt install libphp-embed"), "{message}");
+                assert!(message.contains("BLASTIT_LIBPHP"), "{message}");
+            }
+        }
+    }
+
+    /// `ADR-0010` §3: zero `dlopen` in stage 0. The gate opens, `fstat`s and
+    /// reads the ELF; the load happens inside a view worker. A constructor
+    /// canary proves this from the outside (`MB.3.13.4`); this proves it by
+    /// construction, so no one adds the call while that suite is not looking.
+    #[test]
+    fn the_gate_reads_the_elf_and_never_loads_it() {
+        const SOURCE: &str = include_str!("stage0.rs");
+        // The needles are split so this test's own source does not match them.
+        for banned in [
+            concat!("dl", "open("),
+            concat!("dlm", "open("),
+            concat!("lib", "loading"),
+            concat!("blastit_php", "_sapi"),
+            concat!("Loaded", "::load"),
+        ] {
+            assert!(
+                !SOURCE.contains(banned),
+                "stage 0 must not load the library: found `{banned}`"
+            );
         }
     }
 }
