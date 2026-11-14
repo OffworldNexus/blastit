@@ -13,8 +13,13 @@
 //!   `queries` entry that inlines a value or a redacted `…`) and returns the
 //!   non-fatal warnings;
 //! * [`Manifest::app`] and [`Manifest::preload`] carry the two non-secret
-//!   wiring keys, and [`Route::ingress`] the request-body codec a route
-//!   declared;
+//!   wiring keys, [`Route::ingress`] the request-body codec a route declared,
+//!   and [`Route::static_policy`] the `[route.static]` block it serves files
+//!   with;
+//! * [`Manifest::is_all_static`], [`Manifest::static_roots`] and
+//!   [`Manifest::check_static_roots`] answer the app-less static site: no `app`
+//!   is needed once every route is static, and the roots are audited by an
+//!   explicit call rather than by validation;
 //! * [`Manifest::effective_grants`] unions the grants a route ends up with;
 //! * [`edit::apply_edits`] and [`edit::write_atomic`] are how `--learn` writes
 //!   the manifest back without reformatting it;
@@ -69,7 +74,7 @@ pub mod edit;
 
 pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning};
-pub use model::{Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route};
+pub use model::{Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, StaticPolicy};
 pub use routing::{Match, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable};
 pub use uid::UidLayout;
 

@@ -523,3 +523,368 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-13T12:57 [MA.11] (lead) commit 21e093b25d6a99aefb7e327b70283a7dc495c954 on release/0.1.1
 - 2026-11-13T13:07 [MA] (strategist) status active -> done
 - 2026-11-13T13:07 [MA] (strategist) incremental re-acceptance PASSED at f305e38 on release/0.1.1: MA.7..MA.11 verified CI/test-only with zero weakened guards/assertions; PR #62 16/16 checks green 
+- 2026-11-13T14:38 HUMAN H-004 closed by conductor
+- 2026-11-13T14:44 [MB.1.1] (planner) created (task) Bound blastit-manifest cursor loops and close edit.rs mutation survivors
+- 2026-11-13T14:44 [MB.1.2] (planner) created (task) Prove blastit-manifest whole-crate mutation kill rate past 75 percent
+- 2026-11-13T14:44 [MB.1.3] (planner) created (task) Bound blastit-sqlpolicy lexer and learn loops and measure lexer.rs
+- 2026-11-13T14:44 [MB.1.4] (planner) created (task) Measure blastit-sqlpolicy normalize, literals and lru mutants
+- 2026-11-13T14:44 [MB.1.5] (planner) created (task) Measure blastit-sqlpolicy statements and tables mutants
+- 2026-11-13T14:44 [MB.1.6] (planner) created (task) Name missing ./blastit.toml first, add group-grant hint, allocate nothing for policy-less bodies
+- 2026-11-13T14:44 [MB.1.7] (planner) created (task) Build and brand hygiene: wheel README links, CARGO_NET_OFFLINE=true, events serde, logo contrast
+- 2026-11-13T14:44 [MB.1.8] (planner) created (task) Permanent e2e empty-grant and negative-boot assertions plus deterministic learn-refusal test
+- 2026-11-13T14:44 [MB.1.9] (planner) created (task) Align intra-workspace version requirements and harden scripts/dev-version.sh
+- 2026-11-13T14:44 [MB.1.9] (lead) status ready -> active
+- 2026-11-13T14:44 [MB.1.9] (lead) attempt 1/3 started
+- 2026-11-13T14:44 [MB.1.9] (lead) base cab377ec5b4bc00020df507b245972234c7f215b
+- 2026-11-13T14:45 [MB.1.9] (lead) base 2317493 (post-decomposition); earlier base cab377e
+- 2026-11-13T14:51 [MB.1.9] (lead) edited fields
+- 2026-11-13T14:53 AUTOPILOT off by conductor conversing with user on forum post
+- 2026-11-13T14:54 [MB.1.7] (lead) edited fields
+- 2026-11-13T14:54 [MB.1.9] (lead) status active -> done
+- 2026-11-13T14:54 [MB.1.7] (lead) status ready -> active
+- 2026-11-13T14:54 [MB.1.7] (lead) attempt 1/3 started
+- 2026-11-13T14:54 [MB.1.7] (lead) base d3ac8b3
+- 2026-11-13T15:08 [MB.1.7] (lead) status active -> done
+- 2026-11-13T15:08 [MB.1.1] (lead) status ready -> active
+- 2026-11-13T15:08 [MB.1.1] (lead) attempt 1/3 started
+- 2026-11-13T15:08 [MB.1.1] (lead) base 9152197
+- 2026-11-13T15:08 [MB.1.6] (lead) status ready -> active
+- 2026-11-13T15:08 [MB.1.6] (lead) attempt 1/3 started
+- 2026-11-13T15:08 [MB.1.6] (lead) base 9152197
+- 2026-11-13T15:11 [MB.2.1] (planner) created (task) Write the lean static assets & SPA rewriting page (Local/CI/Deploy) and register it
+- 2026-11-13T15:11 [MB.2.2] (planner) created (task) Design static serving, rewrite precedence and path safety (ADR-0007)
+- 2026-11-13T15:11 [MB.2.3] (planner) created (task) Resolve and serve assets safely beneath the root (openat2, NUL, symlink, dotfiles, immutable)
+- 2026-11-13T15:11 [MB.2.3] (planner) created (task) Parse and validate [static] route blocks in blastit-manifest
+- 2026-11-13T15:11 [MB.2.4] (planner) created (task) Resolve and serve assets safely beneath the root (openat2, NUL, symlink, dotfiles, immutable)
+- 2026-11-13T15:11 [MB.2.5] (planner) created (task) Wire static serving and SPA/front-controller precedence into scheduler dispatch
+- 2026-11-13T15:11 [MB.2.6] (planner) created (task) Wire static routes into blastit dev and blastit check diagnostics
+- 2026-11-13T15:11 [MB.2.7] (planner) created (task) Prove denials, caching and documented commands end-to-end (Docker e2e + visual)
+- 2026-11-13T15:11 [MB.2.8] (planner) created (task) Release prep 0.2.0: version bump, dated changelog, ARCHITECTURE sync
+- 2026-11-13T15:20 [MB.1.10] (lead) created (task) Document the add_group fix action and record the MB.1.6 gotchas
+- 2026-11-13T15:28 [MB.1.6] (lead) REVIEW FAIL: acceptance greps err.txt but production stage-0 errors are app.output events on stdout (stage0.rs:424) and an unprivileged boot hits caps::detect (
+- 2026-11-13T15:28 [MB.1.6] (lead) status active -> ready
+- 2026-11-13T15:28 [MB.1.6] (lead) status ready -> active
+- 2026-11-13T15:28 [MB.1.6] (lead) attempt 2/3 started
+- 2026-11-13T15:33 [MB.1.6] (lead) status active -> done
+- 2026-11-13T15:34 AUTOPILOT on by conductor resume MB after v0.1.2 hotfix
+- 2026-11-13T15:34 [MB.1.1] (lead) status active -> review
+- 2026-11-13T15:34 [MB.1.1] (lead) implementer reported STATUS done (attempt 1); awaiting goldfish review
+- 2026-11-13T15:36 [MB.1.1] (lead) review PASS; lead addendum appended (append_to_array whitespace normalisation documented, mutation run predates final source, write_atomic survivors relabelled 
+- 2026-11-13T15:36 [MB.1.1] (lead) status review -> done
+- 2026-11-13T15:36 [MB.1.2] (lead) status ready -> active
+- 2026-11-13T15:36 [MB.1.2] (lead) attempt 1/3 started
+- 2026-11-13T15:36 [MB.1.2] (lead) base 9311ff3
+- 2026-11-13T15:37 [MB.1.3] (lead) status ready -> active
+- 2026-11-13T15:37 [MB.1.3] (lead) attempt 1/3 started
+- 2026-11-13T15:37 [MB.1.3] (lead) base 9311ff3
+- 2026-11-13T15:49 [MB.1] (lead) MERGE HANDOVER for whoever drives this subtree next: origin/develop is ec47752 (Release v0.1.2, PR #63 merged). Merge it into release/0.2.0 ONLY when the tree i
+- 2026-11-13T15:56 [MB.1.10] (lead) status ready -> active
+- 2026-11-13T15:56 [MB.1.10] (lead) attempt 1/3 started
+- 2026-11-13T15:56 [MB.1.10] (lead) base 9311ff3 (MB.1.2/MB.1.3 work pending review in the tree; docs-only paths)
+- 2026-11-13T15:59 [MB.1] (lead) DUAL-DRIVER CONFLICT (16:00): a second LIVE opencode session is driving this same tree right now (its shell dir ~/.local/share/opencode/shell/ba94ef7b*, PIDs 35
+- 2026-11-13T15:59 [MB.1.10] (lead) doc-writer attempt 1 REPORTED DONE (docs/ci.md +8 lines naming add_group and the [group.connection.db] shape, docs/design/ma-lean-dx.md R33/R38/4.2, LESSONS.md 
+- 2026-11-13T15:59 [MB.1.10] (lead) status active -> review
+- 2026-11-13T16:16 [MB.1.2] (lead) status active -> review
+- 2026-11-13T16:16 [MB.1.4] (lead) status ready -> active
+- 2026-11-13T16:16 [MB.1.4] (lead) attempt 1/3 started
+- 2026-11-13T16:16 [MB.1.4] (lead) base 9311ff3
+- 2026-11-13T16:38 [MB.1.4] (implementer) file-scoped campaign: 128 mutants, 110 caught / 1 equivalent missed / 2 timeouts / 15 unviable; normalize 99/102 = 97.1 %, literals 4/4 and lru 7/7 = 100 %; new
+- 2026-11-13T16:40 [MB.1.2] (lead) status review -> done
+- 2026-11-13T16:40 [MB.1.2] (lead) committed 7a41f61
+- 2026-11-13T16:40 [MB.1.4] (lead) status active -> review
+- 2026-11-13T16:40 [MB.1.5] (lead) status ready -> active
+- 2026-11-13T16:40 [MB.1.5] (lead) attempt 1/3 started
+- 2026-11-13T16:40 [MB.1.5] (lead) base 7a41f61
+- 2026-11-13T16:42 [MB.1.10] (lead) status review -> done
+- 2026-11-13T16:42 [MB.1.8] (lead) status ready -> active
+- 2026-11-13T16:42 [MB.1.8] (lead) attempt 1/3 started
+- 2026-11-13T16:42 [MB.1.8] (lead) base d84141f
+- 2026-11-13T16:47 [MB.1.5] (implementer) attempt 1: new tests/policy_module_tables.rs (18 cases) + inline statements/tables cases written; statements+tables campaign running in isolated TMPDIR /tmp/ope
+- 2026-11-13T17:02 [MB.1.8] (implementer) attempt 1: e2e deny route (queries = []) + negative --cap-drop ALL boot + learn-refusal wait; make e2e exit 0, 3x test-critical OK, critical_guard --node exit 0
+- 2026-11-13T17:30 [MB.1.5] (implementer) done: 170 mutants in 4 shards -> caught 156, missed 1 (equivalent, statements.rs:116:18), timeout 6, unviable 7; statements 91.1% / tables 100.0% (viable); crat
+- 2026-11-13T17:31 [MB.1.3] (lead) attempt 1 interrupted: lexer.rs/learn.rs bounded and lexer_progress.rs written; scope spillover (lru/statements/tables + 2 unrelated test files) reset to HEAD s
+- 2026-11-13T17:31 [MB.1.3] (lead) attempt 2/3 started
+- 2026-11-13T18:12 [MB.1.4] (lead) COLLISION: lead reset the sqlpolicy spillover (src/{lru,statements,tables}.rs + tests/policy_module_{edges,tables}.rs) at ~17:00 while this node's implementer w
+- 2026-11-13T18:12 [MB.1.4] (lead) status review -> ready
+- 2026-11-13T18:12 [MB.1.5] (lead) COLLISION: the same ~17:00 reset removed the inline statements/tables test cases and tests/policy_module_tables.rs this attempt had written, while RESULT.md cla
+- 2026-11-13T18:12 [MB.1.5] (lead) status active -> ready
+- 2026-11-13T18:12 [MB.1.8] (lead) status active -> done
+- 2026-11-13T18:12 [MB.1.8] (lead) lead verification: critical_guard --base d84141f --node MB.1.8 OK (protected change authorized, assertion unchanged, bounded wait added); make check exit 0; mak
+- 2026-11-13T18:12 [MB.1.4] (lead) status ready -> active
+- 2026-11-13T18:12 [MB.1.4] (lead) attempt 2/3 started
+- 2026-11-13T18:12 [MB.1.4] (lead) base 686b5b7
+- 2026-11-13T18:12 [MB.1.5] (lead) status ready -> active
+- 2026-11-13T18:12 [MB.1.5] (lead) attempt 2/3 started
+- 2026-11-13T18:12 [MB.1.5] (lead) base 686b5b7
+- 2026-11-13T18:25 [MB.1.4] (implementer) attempt 2: 0 timeouts. Both code-region scans in normalize.rs step with enumerate+resume (no counter to mutate) => 124 mutants tested in 7m: 108 caught / 1 equi
+- 2026-11-13T18:26 [MB.1.4] (lead) status active -> done
+- 2026-11-13T18:26 [MB.1.4] (lead) lead verification: cargo test -p blastit-sqlpolicy 224+10+25+6+10+18+8 green; artefacts caught 108 / missed 1 / timeout 0 / unviable 15 = 99.1%%; single survivo
+- 2026-11-13T18:28 [MB.1.5] (lead) status active -> done
+- 2026-11-13T18:28 [MB.1.5] (lead) lead verification: cargo test -p blastit-sqlpolicy 7 suites green; artefacts caught 168 / missed 0 / timeout 0 / unviable 7 = 175 mutants, statements 100%% tabl
+- 2026-11-13T18:36 [MB.1.3] (lead) status active -> done
+- 2026-11-13T18:36 [MB.1.3] (lead) attempts 1-2 interrupted by the harness; lead completed the 298->206 mutant measurement (173 caught / 30 missed / 0 timeouts / 3 unviable = 85.2%%) and wrote RE
+- 2026-11-13T18:38 [MB.1.11] (lead) created (task) Bound mutants memory and keep build scratch off tmpfs
+- 2026-11-13T18:39 [MB.1] (lead) INCIDENT 17:31: a concurrent process reverted crates/blastit-sqlpolicy/src/{lru,statements,tables}.rs to HEAD and deleted the untracked tests/{policy_module_edg
+- 2026-11-13T18:39 [MB.1] (lead) OWNER DIRECTIVE: new node MB.1.11 (Bound mutants memory and keep build scratch off tmpfs) created and dispatched before any further long campaign; MB.1.3's lexe
+- 2026-11-13T18:39 [MB.1.11] (lead) status ready -> active
+- 2026-11-13T18:39 [MB.1.11] (lead) attempt 1/3 started
+- 2026-11-13T18:39 [MB.1.11] (lead) base 51dced9
+- 2026-11-13T18:42 [MB.1.12] (lead) created (task) Promote the normalize and table policy-surface oracles to the protected tier
+- 2026-11-13T18:42 [MB.1.13] (lead) created (task) Protect the add_group oracle and correct the design-doc credit
+- 2026-11-13T18:42 [MB.1.12] (lead) status ready -> active
+- 2026-11-13T18:42 [MB.1.12] (lead) attempt 1/3 started
+- 2026-11-13T18:42 [MB.1.12] (lead) base 51dced9
+- 2026-11-13T18:42 [MB.1.13] (lead) status ready -> active
+- 2026-11-13T18:42 [MB.1.13] (lead) attempt 1/3 started
+- 2026-11-13T18:42 [MB.1.13] (lead) base 51dced9
+- 2026-11-13T18:44 [MB.1.14] (test-curator) created (task) Close the sqlpolicy lexer numeric-extent survivors, re-measure learn.rs, and protect the lexer boundary oracle
+- 2026-11-13T18:44 [MB.1.15] (test-curator) created (task) Close the remaining blastit-manifest survivors and protect the patcher's wrong-route case
+- 2026-11-13T18:44 [MB.1.16] (test-curator) created (task) Pin the rooted production missing-manifest message in the Docker e2e
+- 2026-11-13T18:44 [MB.1.17] (test-curator) created (task) Regression-test the release hygiene trio in make check
+- 2026-11-13T18:45 [MB.1.12] (lead) status active -> done
+- 2026-11-13T18:45 [MB.1.12] (lead) lead verification: critical_policy_surface.rs 22 tests; cargo test -p blastit-sqlpolicy 224+10+25+22+6+10+18+8 green, 0 failures; widening probe on a /tmp copy 
+- 2026-11-13T18:46 [MB.1.13] (lead) status active -> done
+- 2026-11-13T18:46 [MB.1.13] (lead) lead verification: critical_check_engine 19 tests (6 add_group mentions), audit_group_hint 4 green; guard authorized 2 protected changes; cargo fmt --all reform
+- 2026-11-13T18:47 [MB.1.11] (implementer) implemented: MUTANTS_TMP on disk (XDG cache), prune+preflight+retention, systemd-run --user --scope MemoryMax=12G MemorySwapMax=0 with logged fallback, mutants-
+- 2026-11-13T18:49 [MB.1.11] (lead) status active -> review
+- 2026-11-13T18:50 [MB.1.11] (lead) status review -> done
+- 2026-11-13T18:50 [MB.1.11] (implementer) note for lead: my commit 4141dab captured RESULT.md before the last gate run; 10 lines are still uncommitted in plan/nodes/MB/MB.1/MB.1.11/RESULT.md - they are 
+- 2026-11-13T18:52 [MB.1] (lead) MERGED origin/develop v0.1.2 as 9c523e2 (9 conflicts: 8 crates/*/Cargo.toml -> develop 0.1.2, scripts/dev-version.sh -> ours). Verified cargo metadata --locked 
+- 2026-11-13T18:52 [MB.1.11] (lead) committed 4141dab (lead re-ran make check: exit 0, 57s)
+- 2026-11-13T18:53 [MB.1.14] (lead) status ready -> active
+- 2026-11-13T18:53 [MB.1.14] (lead) attempt 1/3 started
+- 2026-11-13T18:53 [MB.1.14] (lead) base 9c523e2
+- 2026-11-13T18:53 [MB.1.15] (lead) status ready -> active
+- 2026-11-13T18:53 [MB.1.15] (lead) attempt 1/3 started
+- 2026-11-13T18:53 [MB.1.15] (lead) base 9c523e2
+- 2026-11-13T18:53 [MB.1.17] (lead) status ready -> active
+- 2026-11-13T18:53 [MB.1.17] (lead) attempt 1/3 started
+- 2026-11-13T18:53 [MB.1.17] (lead) base 9c523e2
+- 2026-11-13T18:57 [MB.1.14] (implementer) protected the lexer boundary oracle (critical_lexer_boundaries.rs, 7 tests, lexer_progress.rs deleted after moving all 6 cases); pinned numeric extents in lexer
+- 2026-11-13T18:57 [MB.1] (lead) GATE NOTE: after the develop merge bumped the workspace to 0.1.2, 'make e2e' refused to start - 'a prebuilt e2e image installs exactly one wheel from dist, foun
+- 2026-11-13T19:00 [MB.1.15] (implementer) Read NODE/AUDIT; added 3 parse.rs error-list tests (mutation_gaps), 2 write_atomic path-branch tests (edit_branches, re-exec child for the bare name + EACCES tw
+- 2026-11-13T19:02 [MB.1] (lead) GATE EVIDENCE: make e2e exit 0 at 9c523e2 + dist 0.1.2 (130s): 'ok a route granting queries = [] refuses an ordinary statement (SQLSTATE 42501)', the log check 
+- 2026-11-13T19:03 [MB.1.17] (implementer) Regression tests for the MB.1.7 hygiene trio: test_docs_assets.py (SVG XML + computed WCAG contrast), test_release_scripts.py (wheel README rewrite/restore, whe
+- 2026-11-13T19:07 [MB.1.17] (lead) status active -> review
+- 2026-11-13T19:30 [MB.1.14] (implementer) lexer.rs 202/203 viable = 99.5% (1 equivalent survivor, 0 timeouts); learn.rs whole-module 90/91 = 98.9% after four new tests (was 84/91 = 92.3%); critical_lexe
+- 2026-11-13T19:35 [MB.1.14] (lead) status active -> review
+- 2026-11-13T19:42 [MB.1.17] (lead) status review -> done
+- 2026-11-13T19:42 [MB.1.14] (lead) status review -> done
+- 2026-11-13T19:42 [MB.1.16] (lead) status ready -> active
+- 2026-11-13T19:42 [MB.1.16] (lead) attempt 1/3 started
+- 2026-11-13T19:42 [MB.1.16] (lead) base e50a29e
+- 2026-11-13T19:47 [MB.1.15] (implementer) Done: 637 mutants 558 caught / 6 missed / 73 unviable / 0 timeouts = 98.94% (was 550/14 = 97.52%); parse.rs:197+220, edit.rs:384+411, 794/815(+→-), 818/819 all 
+- 2026-11-13T19:48 [MB.1.15] (lead) status active -> review
+- 2026-11-13T19:49 [MB.1.15] (lead) status review -> done
+- 2026-11-13T19:49 [MB.1.16] (implementer) check_rooted_startup(image) in e2e/rootless/run.py: image as --user 0:0 in a workdir, both directions on stdout app.output; fail-proofed twice; make e2e rc=0 (r
+- 2026-11-13T19:53 [MB.1.16] (lead) status active -> review
+- 2026-11-13T19:54 [MB.1.16] (lead) status review -> done
+- 2026-11-13T19:56 [MB.1] (lead) status ready -> done
+- 2026-11-13T19:56 [MB.2.1] (lead) status ready -> active
+- 2026-11-13T19:56 [MB.2.1] (lead) attempt 1/3 started
+- 2026-11-13T19:56 [MB.2.1] (lead) base 06013a6
+- 2026-11-13T19:56 [MB.1] (lead) GATE CLOSED 06013a6. Two test-curator audits of the same diff exist (docs/testing/AUDIT-MB.1.md F1-F10 committed at 9018a8b by a concurrent session, and AUDIT-M
+- 2026-11-13T20:07 [MB.2.1] (doc-writer) Wrote and registered docs/frameworks/static-and-spa.md (141 lines, 9 commands, 7 fences) + static-site fixture; dx and ai-ergonomics critics both PASS after two
+- 2026-11-13T20:11 [MB.2.1] (lead) status active -> review
+- 2026-11-13T20:16 [MB.2.1] (lead) REVIEW FAIL (attempt 1): 2 MAJOR + 4 MINOR. MAJOR1 inventory.toml:259-261 fence 7 registered 'static' with a false capability reason although the presets mode r
+- 2026-11-13T20:16 [MB.2.1] (lead) status review -> ready
+- 2026-11-13T20:16 [MB.2.6] (lead) acceptance extended at the MB.2.1 gate: own the all-static check path (no pytest, root audit, exit 0/2) promised by docs/frameworks/static-and-spa.md
+- 2026-11-13T20:18 [MB.2.1] (doc-writer) Attempt 2 fixes: fence 8 -> presets (now executed); all-static check wording matches extended MB.2.6 (audit exists/dir/readable, no pytest, 0/2); symlink escape
+- 2026-11-13T20:18 [MB.2.1] (doc-writer) Review artefacts after attempt 2: review-dx B1/B2 re-quoted against the final revision, review-ai-ergonomics A10 status line synced to the 404 symlink rule; no 
+- 2026-11-13T20:18 [MB.2.1] (lead) attempt 2/3 started
+- 2026-11-13T20:18 [MB.2.1] (lead) status ready -> review
+- 2026-11-13T20:22 [MB.2.1] (lead) REVIEW PASS attempt 2 (5 MINOR follow-ups: critic artefact anchors stale after the Vite fence shifted indices; RESULT row should name dx B8; MB.2.6 NODE cites p
+- 2026-11-13T20:22 [MB.2.1] (lead) status review -> done
+- 2026-11-13T20:22 [MB.2.2] (lead) status ready -> active
+- 2026-11-13T20:22 [MB.2.2] (lead) attempt 1/3 started
+- 2026-11-13T20:22 [MB.2.2] (lead) base 3ea3c59
+- 2026-11-13T20:29 [MB.2.2] (designer) Draft docs/design/static-and-spa.md (643 lines, 152 table rows) + ADR-0007 (Proposed) + both README index rows; designs the [route.static] grammar, total rewrit
+- 2026-11-13T20:43 [MB.2.2] (designer) Design + ADR + three lens artefacts PASS after 3 passes (1 BLOCKER+15 MAJOR pass 1, 2 MAJOR+1 BLOCKER pass 2, 0 open pass 3). Settled: [route.static] grammar (5
+- 2026-11-13T20:44 [MB.2.2] (lead) status active -> review
+- 2026-11-13T20:44 [MB.2.6] (lead) edited fields
+- 2026-11-13T20:44 [MB.2.4] (lead) edited fields
+- 2026-11-13T20:44 [MB.2.6] (lead) edited fields
+- 2026-11-13T20:44 [MB.2.4] (lead) edited fields
+- 2026-11-13T20:44 [MB.2.9] (lead) created (task) Document the static threat list, mechanics, CLI reference and the all-static check path
+- 2026-11-13T20:44 [MB.2.2] (lead) lead applied its plan follow-ups: MB.2.6 paths += crates/blastit/src/stage1.rs; MB.2.4 paths += crates/blastit-scheduler/tests/common/static_fixture.rs; docs le
+- 2026-11-13T20:49 [MB.2.2] (lead) status review -> ready
+- 2026-11-13T20:49 [MB.2.2] (lead) REVIEW FAIL attempt 1: 5 MAJOR + 3 MINOR. M1 design:359 'empty segments dropped' contradicts matrix rows 5-6 (/%2Fetc/passwd, //etc/passwd -> 400) -> add 'exact
+- 2026-11-13T20:52 [MB.2.4] (planner) edited fields
+- 2026-11-13T20:52 [MB.2.5] (planner) edited fields
+- 2026-11-13T20:52 [MB.2.4.1] (planner) created (task) Resolve request paths beneath a static root (openat2, refusal matrix, TOCTOU) - design MB.2.4a
+- 2026-11-13T20:52 [MB.2.5.1] (planner) created (task) Rewrite precedence and the static method/body gate (decide) - design MB.2.5a
+- 2026-11-13T20:52 [MB.2.4.2] (planner) created (task) Build static responses: ETag/304, cache headers, Content-Type table, bounded body - design MB.2.4b
+- 2026-11-13T20:52 [MB.2.5.2] (planner) created (task) Dispatch static answers and pump the body through the scheduler - design MB.2.5b
+- 2026-11-13T20:52 [MB.2.6] (planner) edited fields
+- 2026-11-13T20:52 [MB.2.4] (planner) Split into MB.2.4.1 (resolve: segments/classify/StaticRoot open+resolve/openat2+Walk/errno table/TOCTOU identity, config fields, tests/critical_static_resolve.r
+- 2026-11-13T20:52 [MB.2.5] (planner) Split into MB.2.5.1 (rewrite.rs Rewrite/decide + RouteInfo::with_static + the pure half of tests/critical_rewrite.rs) and MB.2.5.2 (scheduler.rs: run opens the 
+- 2026-11-13T21:16 [MB.2.2] (designer) Attempt 2: all 8 review findings fixed + converged through 8 critic re-runs (passes 4-11), each artefact 0 BLOCKER/0 MAJOR, VERDICT: PASS. Fixes: leading-// Abs
+- 2026-11-13T21:16 [MB.2.2] (lead) attempt 2/3 started
+- 2026-11-13T21:16 [MB.2.2] (lead) status ready -> review
+- 2026-11-13T21:19 [MB.2.5] (lead) edited fields
+- 2026-11-13T21:20 [MB.2.2] (designer) Attempt 3: fixed the 4 remaining findings only. RESULT Plan state item 2 now records that MB.2.4.1/2.5.1/2.4.2/2.5.2 exist under epics MB.2.4/MB.2.5 with chain 
+- 2026-11-13T21:23 [MB.2.2] (lead) REVIEW PASS attempt 3 (1 MINOR residue: stale 'Follow-up N' refs in historical prose at RESULT:188,199,204,207 and design:684).
+- 2026-11-13T21:23 [MB.2.2] (lead) status review -> done
+- 2026-11-13T21:23 [MB.2.3] (lead) status ready -> active
+- 2026-11-13T21:23 [MB.2.3] (lead) attempt 1/3 started
+- 2026-11-13T21:23 [MB.2.3] (lead) base 31c9739
+- 2026-11-13T21:23 [MB.2.9] (lead) edited fields
+- 2026-11-13T21:23 [MB.2.9] (lead) depends moved MB.2.2 -> MB.2.6: the page's two central claims (app optional for an all-static tree, check runs no pytest) become true only when MB.2.6 lands, so
+- 2026-11-13T21:32 [MB.2.3] (implementer) Landed [route.static] grammar (StaticPolicy, Route::static_policy, Manifest::{is_all_static,static_roots,check_static_roots}, five exact errors, dead-declaratio
+- 2026-11-13T21:32 [MB.2.3] (lead) edited fields
+- 2026-11-13T21:32 [MB.2.3] (lead) lead extended paths with crates/blastit-manifest/tests/parse.rs: its ROUTE_KEY_EXPECTED message must now name the reserved 'static' key (the node's own follow-u
+- 2026-11-13T21:33 [MB.2.3] (lead) status active -> review
+- 2026-11-13T21:40 [MB.2.3] (lead) REVIEW PASS attempt 1 (4 MINOR: R4 inherited-groups accepted case missing; R4 dead-declaration vs BLASTIT_APP precedence -> reconcile in MB.2.6/MB.2.9; [route.s
+- 2026-11-13T21:40 [MB.2.3] (lead) status review -> done
+- 2026-11-13T21:40 [MB.2.4.1] (lead) status ready -> active
+- 2026-11-13T21:40 [MB.2.4.1] (lead) attempt 1/3 started
+- 2026-11-13T21:40 [MB.2.4.1] (lead) base 40ba576
+- 2026-11-13T21:47 [MB.2.4.1] (implementer) implemented static_asset resolver (segments/classify/StaticRoot open+open_with+resolve+resolve_with, openat2+Walk, total errno table, ImmutableGlob, same_inode,
+- 2026-11-13T21:48 [MB.2.4.1] (lead) status active -> review
+- 2026-11-13T21:56 [MB.2.4.1] (implementer) attempt 2: review fixups — local segment guard in resolve_with (walk cannot escape via caller-supplied .., empty, embedded /), probe fd pinned across the read o
+- 2026-11-13T21:56 [MB.2.4.1] (lead) attempt 2/3 started
+- 2026-11-13T21:56 [MB.2.4.1] (lead) status review -> review
+- 2026-11-13T22:01 [MB.2.4.1] (lead) REVIEW PASS attempt 2 (2 MINOR: head_segments is a 5th doc(hidden) pub seam -> MB.2.2 should add it to design §4.2; plan/ files changed outside paths are plan.p
+- 2026-11-13T22:01 [MB.2.4.1] (lead) status review -> done
+- 2026-11-13T22:01 [MB.2.5.1] (lead) status ready -> active
+- 2026-11-13T22:01 [MB.2.5.1] (lead) attempt 1/3 started
+- 2026-11-13T22:01 [MB.2.5.1] (lead) base 7a79a95
+- 2026-11-13T22:06 [MB.2.5.1] (implementer) rewrite::decide (total §4.3/§4.4 order, all four statuses, Allow: GET, HEAD), rewrite::declares_body, RouteInfo::with_static/static_forward; 13-test protected p
+- 2026-11-13T22:06 [MB.2.5.1] (lead) status active -> review
+- 2026-11-13T22:13 [MB.2.5.1] (lead) REVIEW PASS attempt 1 (3 MINOR, all design-doc sync: add declares_body to §4.2, add the refusal-terminality row to §4.4, record that critical_rewrite.rs carries
+- 2026-11-13T22:13 [MB.2.5.1] (lead) status review -> done
+- 2026-11-13T22:13 [MB.2.10] (lead) created (task) Sync the static design with the shipped API surface and status rules
+- 2026-11-13T22:13 [MB.2.10] (lead) status ready -> active
+- 2026-11-13T22:13 [MB.2.10] (lead) attempt 1/3 started
+- 2026-11-13T22:13 [MB.2.10] (lead) base d37f765
+- 2026-11-13T22:13 [MB.2.4.2] (lead) status ready -> active
+- 2026-11-13T22:13 [MB.2.4.2] (lead) attempt 1/3 started
+- 2026-11-13T22:13 [MB.2.4.2] (lead) base d37f765
+- 2026-11-13T22:15 [MB.4.1] (conductor) created (task) Decide Node integration topology: napi-rs/neon embedding vs sidecar fd handoff, and the fair-queue CPU model (ADR)
+- 2026-11-13T22:17 [MB.2.11] (conductor) created (task) Default the deploy presets to a connection pooler (DO managed pooler, Compose PgBouncer)
+- 2026-11-13T22:17 [MB.2.11] (lead) status ready -> active
+- 2026-11-13T22:17 [MB.2.11] (lead) attempt 1/3 started
+- 2026-11-13T22:17 [MB.2.11] (lead) base d37f765
+- 2026-11-13T22:17 [MB.2.8] (lead) edited fields
+- 2026-11-13T22:18 [MB.2.4.2] (implementer) respond() + http_date + closed Content-Type table + (kind, answering path) cache rule + ETag/304/HEAD + over-ceiling guard; 11-test protected response suite gre
+- 2026-11-13T22:19 [MB.4.1] (conductor) Owner direction (2nd): keep standard Vite workflows seamless; a blastit-vite binary is acceptable. ADR must weigh the Vite middlewareMode seam (Blastit owns the
+- 2026-11-13T22:20 [MB.2.11] (doc-writer) research: docs/research/connection-pooling.md in progress; decided trap 3 from code: dbproxy refuses a client 'options' startup param (ALLOWED_STARTUP_PARAMETER
+- 2026-11-13T22:22 [MB.2.4.2] (lead) status active -> review
+- 2026-11-13T22:24 [MB.4.1] (conductor) Owner settled both open points: (1) CPU is debited against the flow, approximate attribution acceptable — credit still replenished on a scheduler tick, per-fram
+- 2026-11-13T22:26 [MB.2.11] (doc-writer) wrote docs/research/connection-pooling.md (researcher), both deploy pages (DO 150 lines, compose 240), index pooler rule, manifest/settings reference, e2e/docs_
+- 2026-11-13T22:27 [MB.4.1] (conductor) Owner correction (supersedes the per-frame note): fair queuing charges CPU time ONLY, never bytes and never frames. Accounting is sticky/monotonic per flow (per
+- 2026-11-13T22:29 [MB.2.4.2] (lead) REVIEW PASS attempt 1 (3 MINOR, all doc sync: §5.2 F/N cells promise immutable while the frozen fixture declares none; §7.2 claims the whole 40-row matrix runs 
+- 2026-11-13T22:29 [MB.2.4.2] (lead) status review -> done
+- 2026-11-13T22:29 [MB.2.5.2] (lead) status ready -> active
+- 2026-11-13T22:29 [MB.2.5.2] (lead) attempt 1/3 started
+- 2026-11-13T22:29 [MB.2.5.2] (lead) base b8e8806
+- 2026-11-13T22:29 [MB.2.4] (lead) GATE EVIDENCE (lead, at b8e8806): cargo test -p blastit-scheduler --test critical_static_assets -> 11 passed; cargo test -p blastit-scheduler --locked -> all su
+- 2026-11-13T22:33 [MB.2.10] (designer) Synced docs/design/static-and-spa.md + ADR-0007 with shipped code (6 findings): §4.2 head_segments/declares_body/STATIC_ALLOW + MB.2.4.2 surface; §4.4 refusal t
+- 2026-11-13T22:34 [MB.2.10] (lead) status active -> review
+- 2026-11-13T22:36 [MB.2.11] (doc-writer) dx + ai-ergonomics pass 1: both FAIL; resolved all BLOCKERs/MAJORs (ALLOWED_HOST, platform-managed pool user, literal direct migrate URL, grant-stays-in-CI rule
+- 2026-11-13T22:40 [MB.2.10] (designer) Attempt 2: re-read the three suites and replaced the wrong oracle map. critical_static_assets.rs (11 tests) owns 24 200 cases (numbered rows 18,28,30,32-35,37,4
+- 2026-11-13T22:40 [MB.2.10] (lead) attempt 2/3 started
+- 2026-11-13T22:40 [MB.2.10] (lead) status review -> review
+- 2026-11-13T22:43 [MB.2.10] (designer) Attempt 3: four mechanical corrections to the oracle map. Row 20 is 400 (not 404) in R5/R6/§9; R7 negative is outcome-only (no status); fixture-D cache clause h
+- 2026-11-13T22:43 [MB.2.10] (lead) attempt 3/3 started
+- 2026-11-13T22:43 [MB.2.10] (lead) status review -> review
+- 2026-11-13T22:44 [MB.2.4] (lead) GUARD RULING (owner): the branch-wide 'critical-guard BASE=develop NODE=<one epic>' line cannot pass once several nodes legitimately edited protected files; the
+- 2026-11-13T22:48 [MB.2.5.2] (implementer) MB.2.5b landed in scheduler.rs + the flow half of critical_rewrite.rs: static roots at boot, head_segments/declares_body/If-None-Match in begin_raw, admit_stati
+- 2026-11-13T22:48 [MB.2.11] (doc-writer) owner ruling applied: allowlist untouched; role default ALTER ROLE app SET timezone='UTC' in DO role SQL, Compose db/grants.sql and index; grant rule derived fr
+- 2026-11-13T22:49 [MB.2.5.2] (lead) status active -> review
+- 2026-11-13T22:56 [MB.2.5.2] (implementer) attempt 2 review fixups: buffered Forward no longer waits for a body that already ended (falls through to admit_ready) and request_end no longer re-enqueues a q
+- 2026-11-13T22:56 [MB.2.5.2] (lead) attempt 2/3 started
+- 2026-11-13T22:56 [MB.2.5.2] (lead) status review -> review
+- 2026-11-13T23:01 [MB.2.5.2] (lead) REVIEW PASS attempt 2 (3 MINOR: the request_end no-requeue half of fix (b) is not pinned by a row; the new half-body guard counts queue_size others + itself, on
+- 2026-11-13T23:01 [MB.2.5.2] (lead) status review -> done
+- 2026-11-13T23:01 [MB.2.10] (lead) status review -> done
+- 2026-11-13T23:01 [MB.2.6] (lead) status ready -> active
+- 2026-11-13T23:01 [MB.2.6] (lead) attempt 1/3 started
+- 2026-11-13T23:01 [MB.2.6] (lead) base cb7a1e4
+- 2026-11-13T23:02 [MB.2.11] (doc-writer) done: owner ruling applied (role default, allowlist untouched), docs-unit 63/57, docs-check clean, docs-test 47 fences 0 failed, e2e/docs_deploy 38/38; dx + ai-
+- 2026-11-13T23:06 [MB.2.11] (lead) status active -> review
+- 2026-11-13T23:09 [MB.2.6] (implementer) app optional iff is_all_static in dev+blastit (MB.1.6 order kept); check_static_roots + responder-uid probe before listeners; all-static check audits roots, no 
+- 2026-11-13T23:09 [MB.2.4.3] (test-curator) created (task) critical_static_resolve: pin the open contract and four surviving mutants
+- 2026-11-13T23:10 [MB.2.4.4] (test-curator) created (task) critical_static_assets: pin descriptor ownership and the meta.size ceiling
+- 2026-11-13T23:10 [MB.2.4.5] (test-curator) created (task) critical_rewrite: pin client cancel, buffered-forward queue accounting and the bound
+- 2026-11-13T23:16 [MB.2.11] (doc-writer) attempt 2 review fixes: research note aligned (literal migrator URL, role default, no options), compose prose moved to settings.md (255 lines; full compose bloc
+- 2026-11-13T23:21 [MB.2.6] (implementer) attempt 2: R13 step-5 probe asks the kernel in-process when probe==geteuid (dev/check) so an owned 0700 $HOME no longer refuses a readable root; production keep
+- 2026-11-13T23:21 [MB.2.6] (lead) status active -> review
+- 2026-11-13T23:21 [MB.2.4.3] (lead) status ready -> active
+- 2026-11-13T23:21 [MB.2.4.3] (lead) attempt 1/3 started
+- 2026-11-13T23:21 [MB.2.4.3] (lead) base cb7a1e4
+- 2026-11-13T23:30 [MB.2.11] (doc-writer) attempt 2 final: direct-port zone read with its own APP_URL (pool URI path is the pool name), pool recycle/restart note, research 'two destinations' + /shop, co
+- 2026-11-13T23:35 [MB.2.6] (implementer) attempt 3 (gate regression): blastit check never required an app — split the R13 rule: static_app_refusal (all-static + set BLASTIT_APP refused by name) is chec
+- 2026-11-13T23:35 [MB.2.6] (lead) GATE: make check caught a regression the review could not (18 python contract failures: check demanded BLASTIT_APP). Fixed by splitting app_rule (boots) from st
+- 2026-11-13T23:35 [MB.2.6] (lead) status review -> done
+- 2026-11-13T23:36 [MB.2.11] (doc-writer) final: self-contained zone fence (OWNER_URL/APP_URL exports), oracle + export-order pinned, inventory reason corrected; docs-unit 63/57, docs-check clean, docs-
+- 2026-11-13T23:40 [MB.2.11] (doc-writer) final: gate pins APP_URL port/db + export order + owner-oracle rejection (41/41); research note qualified to new server sessions and cites server_lifetime; both
+- 2026-11-13T23:44 [MB.2.11] (lead) REVIEW PASS attempt 2 (3 MINOR: one stale 'options is the supported way' phrasing in the research note; ai-ergonomics line refs drifted; single app.yaml git war
+- 2026-11-13T23:44 [MB.2.11] (lead) status review -> done
+- 2026-11-13T23:44 [MB.2.4.4] (lead) status ready -> active
+- 2026-11-13T23:44 [MB.2.4.4] (lead) attempt 1/3 started
+- 2026-11-13T23:44 [MB.2.4.4] (lead) base 0796921
+- 2026-11-13T23:44 [MB.2.9] (lead) status ready -> active
+- 2026-11-13T23:44 [MB.2.9] (lead) attempt 1/3 started
+- 2026-11-13T23:44 [MB.2.9] (lead) base 0796921
+- 2026-11-13T23:48 [MB.2.9] (doc-writer) security/how-it-works/ci/cli/manifest pages now match the shipped static serving; docs-unit, docs-check, docs-test green (47 fences, 0 failed); no fence added s
+- 2026-11-13T23:49 [MB.2.9] (lead) status active -> review
+- 2026-11-13T23:53 [MB.2.4.3] (implementer) G1-G4 closed in the protected resolve suite (18 tests, was 14): recorded_backend from StaticRoot's Debug asserted per fixture + StaticRoot::open; sparse cap.bin
+- 2026-11-13T23:56 [MB.2.9] (doc-writer) attempt 2: 5 reviewer accuracy fixes (scheduler read scope, spa/app miss qualification, malformed escape + 255-byte segment, bind mounts, all-static --json/exit
+- 2026-11-13T23:56 [MB.2.4.3] (lead) status active -> review
+- 2026-11-13T23:56 [MB.2.9] (lead) attempt 2/3 started
+- 2026-11-13T23:57 [MB.2.9] (lead) status review -> review
+- 2026-11-13T23:57 [MB.2.4.5] (lead) ADDITIONAL GAP (from MB.2.4.3's campaign at 0796921):   moved CAUGHT -> TIMEOUT at this tip, i.e. pump_static parks on a zero-byte read instead of aborting. Pin
+- 2026-11-14T00:02 [MB.2.9] (doc-writer) attempt 3: scheduler 'cannot' half replaced with its uid+seccomp boundary (no path-prefix confinement claim); check exit-2 names the route for every filesystem 
+- 2026-11-14T00:02 [MB.2.4.3] (lead) REVIEW PASS attempt 1 (1 MINOR: RESULT says 'nothing was reclassified' while 40:42 moved CAUGHT->TIMEOUT and 541:5->true joined the equivalences, so 66/66 rests
+- 2026-11-14T00:02 [MB.2.4.3] (lead) status review -> done
+- 2026-11-14T00:03 [MB.2.9] (lead) REVIEW PASS attempt 3 (attempts 1-2 failed on the security.md scheduler row: first it denied the scheduler's read scope, then over-corrected into claiming a fil
+- 2026-11-14T00:03 [MB.2.9] (lead) status review -> done
+- 2026-11-14T00:03 [MB.2.4.5] (lead) status ready -> active
+- 2026-11-14T00:03 [MB.2.4.5] (lead) attempt 1/3 started
+- 2026-11-14T00:03 [MB.2.4.5] (lead) base 69504ed
+- 2026-11-14T00:03 [MB.2.7] (lead) status ready -> active
+- 2026-11-14T00:03 [MB.2.7] (lead) attempt 1/3 started
+- 2026-11-14T00:03 [MB.2.7] (lead) base 69504ed
+- 2026-11-14T00:17 [MB.2.7] (implementer) e2e/static_assets.py replays every console fence against containerised blastit dev (72 checks); visual record docs/testing/VISUAL-MB.2.md
+- 2026-11-14T00:19 [MB.2.7] (lead) status active -> review
+- 2026-11-14T00:21 [MB.2.4.5] (implementer) closed G7/G8/G9 + zero-size read: 7 new flow oracles (32/32 green); 2 scheduler.rs fixes proven by hand-mutations (buffered-forward bound now counts itself like
+- 2026-11-14T00:23 [MB.2.4.4] (lead) status active -> review
+- 2026-11-14T00:23 [MB.2.4.5] (lead) status active -> review
+- 2026-11-14T00:25 [MB.2.7] (lead) REVIEW PASS attempt 1 (5 MINOR: HEAD-body assertion cannot fail; curl fences discard authority; 'no file bytes' is marker-only; VISUAL viewport mismatch + scree
+- 2026-11-14T00:25 [MB.2.7] (lead) status review -> done
+- 2026-11-14T00:28 [MB.2.4.4] (lead) REVIEW PASS attempt 1 (2 MINOR: reuse fixture CAP_BIN instead of a second at-cap file; the trim_ows/civil_from_days follow-up needs filing).
+- 2026-11-14T00:28 [MB.2.4.4] (lead) status review -> done
+- 2026-11-14T00:28 [MB.2.4.5] (lead) REVIEW PASS attempt 1 (4 MINOR: the new want==0 branch has no in-suite test that reaches it; a constant restated as a doc pin; LESSONS.md is technically outside
+- 2026-11-14T00:28 [MB.2.4.5] (lead) status review -> done
+- 2026-11-14T00:28 [MB.2.8] (lead) status ready -> active
+- 2026-11-14T00:28 [MB.2.8] (lead) attempt 1/3 started
+- 2026-11-14T00:28 [MB.2.8] (lead) base 7f1d4d0
+- 2026-11-14T00:32 [MB.2.4] (lead) status ready -> done
+- 2026-11-14T00:32 [MB.2.5] (lead) status ready -> done
+- 2026-11-14T00:39 [MB.2.8] (implementer) version 0.2.0 (workspace + 28 requirements, lock 13 lines); dated CHANGELOG 2026-11-14; ARCHITECTURE static responder; make check + make e2e exit 0 (removed sta
+- 2026-11-14T00:43 [MB.2.8] (lead) GATE: workspace 0.2.0, 28/28 intra-workspace requirements, cargo metadata --locked --no-deps OK, check-release-tag v0.2.0 OK, release-notes --require-dated OK, 
+- 2026-11-14T00:43 [MB.2.8] (lead) status active -> done
+- 2026-11-14T00:45 [MB.2] (lead) status ready -> done
+- 2026-11-14T00:55 HUMAN H-005 opened by conductor (node MB)
+- 2026-11-14T00:55 AUTOPILOT off by conductor awaiting human review and merge of release PR v0.2.0
+- 2026-11-14T00:58 [MB.6] (conductor) created (task) Static files beside a Python/PHP app + the hashed-asset caching contract
+- 2026-11-14T01:02 [MB.7] (conductor) created (task) Exclude critical_static_cli from the root CI phase (root can list anything)
+- 2026-11-14T01:03 [MB.8] (conductor) created (task) e2e: Django collectstatic served by [static] beside the WSGI app
+- 2026-11-14T01:04 [MB.7] (lead) status ready -> active
+- 2026-11-14T01:04 [MB.7] (lead) attempt 1/3 started
+- 2026-11-14T01:04 [MB.7] (lead) base 0a2778c
+- 2026-11-14T01:06 [MB.7] (lead) status active -> done
+- 2026-11-14T01:09 [MB.3.1] (planner) created (task) Research FastCGI wire, non-root php-fpm and php2shell techniques with cited sources
+- 2026-11-14T01:09 [MB.3.2] (planner) created (task) Write the lean PHP-FPM page (Local/CI/Deploy), register it, pass dx+ai-ergonomics
+- 2026-11-14T01:09 [MB.3.3] (planner) created (task) Design the FastCGI session, [route.fastcgi] grammar and param lockdown (ADR-0008)
+- 2026-11-14T01:09 [MB.3.4] (planner) created (task) Add the pure blastit-fastcgi crate: record framing, params codec, lockdown matrix
+- 2026-11-14T01:09 [MB.3.5] (planner) created (task) Parse and validate [route.fastcgi] blocks in blastit-manifest
+- 2026-11-14T01:09 [MB.3.6] (planner) created (task) Dispatch FastCGI routes and wire dev/check/--learn PHP attribution
+- 2026-11-14T01:09 [MB.3.7] (planner) created (task) Prove FastCGI, the documented commands and the php2shell suite end-to-end in Docker
+- 2026-11-14T01:09 [MB.3.8] (planner) created (task) Release prep 0.2.1: version bump, dated changelog, ARCHITECTURE sync
+- 2026-11-14T01:09 [MB.3.1] (lead) status ready -> active
+- 2026-11-14T01:09 [MB.3.1] (lead) attempt 1/3 started
+- 2026-11-14T01:09 [MB.3.1] (lead) base 3cfea613f4deaff471e5876523be808115b4181a
+- 2026-11-14T01:20 [MB.3.1] (lead) status active -> review
+- 2026-11-14T01:29 [MB.3.1] (lead) status review -> done

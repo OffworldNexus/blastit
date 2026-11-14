@@ -14,10 +14,9 @@ $ blastit --preset compose-traefik
 | `BLASTIT_LOG_FORMAT` | `json` | stdout is the container's log |
 | *(assumption)* | `capabilities` | the rootless deployment: a dedicated uid with seven capabilities |
 
-`*` reads the **rightmost** entry. A list of private Docker ranges is worse:
-when every entry is inside it, the resolver reads the leftmost one, which the
-client invented. Traefik overwrites `X-Forwarded-Proto`, so `wsgi.url_scheme` is
-`https` behind its TLS entry point and a client cannot choose it.
+`*` reads the **rightmost** entry; [client address](../reference/settings.md#client-address)
+says why a private-range list is worse. Traefik overwrites `X-Forwarded-Proto`,
+so `wsgi.url_scheme` is `https` behind its TLS entry point.
 
 !!! warning "The assumption is the deployment's to keep"
 
@@ -53,18 +52,43 @@ Mount this as `dynamic.yml` and name it in the provider:
 `--providers.file.filename=/etc/traefik/dynamic.yml`. (`traefik.yml` is the
 static file; Traefik exits if a dynamic document is there.) The `tls: {}` router
 serves Traefik's self-signed certificate: add a `certificatesResolvers` block for
-ACME, or mount your own certificate before exposing it.
+ACME, or mount your own certificate before exposing it. `shop.example.com` is
+your host: change it in both rules **and** in `ALLOWED_HOST`;
+`registry.example.com` is your registry, here and in every `image:` line.
+
+## Values
+
+Create `.env` and git-ignore it before the first build; every `${...:?}` is in
+it:
+
+```dotenv title=".env"
+DB_OWNER_PASSWORD=REPLACE_WITH_OWNER_PASSWORD
+DB_PASSWORD=REPLACE_WITH_APP_PASSWORD
+DJANGO_SECRET_KEY=REPLACE_WITH_50_CHAR_SECRET
+TAG=REPLACE_WITH_GIT_SHA
+```
+
+`openssl rand -hex 16` twice fills the passwords, `openssl rand -base64 50` the
+key; `TAG` is `git rev-parse --short HEAD`. Load the file into your shell
+(`set -a; . ./.env; set +a`) so the build and `up` share it. Never commit it.
 
 ## Compose
+
+The manifest is the [Django guide](../frameworks/django.md#manifest)'s:
+`[proxy.db] input = { url = "DATABASE_URL" }` (`ca_cert` only for a network
+database, with `sslmode=verify-full`).
 
 ```yaml title="compose.yaml"
 name: shop
 
 x-app-env: &app-env
-  DATABASE_URL: postgresql://app:${DB_PASSWORD:?}@db:5432/shop?sslmode=disable
+  # The pool's host, not `db`.
+  DATABASE_URL: postgresql://app:${DB_PASSWORD:?}@pgbouncer:5432/shop?sslmode=disable
+  # Must equal `Host(...)` in dynamic.yml, or Django answers 400.
+  ALLOWED_HOST: shop.example.com
   DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?}
   BLASTIT_PRESET: compose-traefik
-  BLASTIT_VIEW_MEM_ESTIMATE: 140MiB
+  BLASTIT_VIEW_MEM_ESTIMATE: 140MiB  # one view; ~7 in 1 GB
 
 services:
   db:
@@ -77,10 +101,35 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql
 
+  # The pool. App -> here; migrations -> db, because DDL and session state do
+  # not survive transaction pooling.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.1-p0
+    environment:
+      DB_HOST: db
+      DB_USER: app
+      DB_PASSWORD: ${DB_PASSWORD:?}
+      DB_NAME: shop
+      # md5 (the image default) fails against PostgreSQL 18's SCRAM passwords.
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      MAX_PREPARED_STATEMENTS: "200"
+      DEFAULT_POOL_SIZE: "20"
+      MAX_CLIENT_CONN: "100"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "app", "-d", "shop"]
+      retries: 60
+    depends_on:
+      db: { condition: service_healthy }
+
+  # The image ships no HEALTHCHECK; `pg_isready` on the pool's own port is the
+  # portable probe, and `app` never dials a pool that is not listening.
+
   # The schema owner, used by migrations only: its own DATABASE_URL, never the
   # web service's. Trusted code, run outside blastit.
   migrate:
     image: registry.example.com/shop:${TAG:?}
+    # Not init's uid: a migration bug cannot run the capable copy.
     user: "10001:10001"
     environment:
       DATABASE_URL: postgresql://owner:${DB_OWNER_PASSWORD:?}@db:5432/shop?sslmode=disable
@@ -115,6 +164,7 @@ services:
     expose: ["8080"]
     depends_on:
       grant: { condition: service_completed_successfully }
+      pgbouncer: { condition: service_healthy }
 
   traefik:
     image: traefik:v3.7.16
@@ -133,26 +183,31 @@ volumes:
 
 ```sql title="db/grants.sql"
 -- One GRANT per table and verb your blastit.toml grants; add columns when the
--- grant is narrower than the table.
+-- grant is narrower than the table. `grant` runs with ON_ERROR_STOP=1 and `app`
+-- waits for it: replace `shop_product` (a table this repo does not create) or
+-- the job aborts the deploy before the app starts. Re-run it after migrations
+-- that add a table.
 DO $$ BEGIN
   CREATE ROLE app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER ROLE app PASSWORD :'pw';
+-- Every pooled session inherits this; a connect-time set_config would not.
+ALTER ROLE app SET timezone = 'UTC';
 GRANT CONNECT ON DATABASE shop TO app;
 GRANT USAGE ON SCHEMA public TO app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON shop_product TO app;
 ```
 
 No `ports:` on the app, and `user:` is a **dedicated** uid: it can run the
-capable copy below, so nothing else may use it. `sslmode=disable` means the
-password and every query cross the compose bridge in plaintext: fine while `db`
-is on that same host, never for a database reached over a network — give
-`[proxy.db] input` a `ca_cert`, as [the DigitalOcean
-page](digitalocean-paas.md#spec) shows. `owner` creates the schema and is used
-only by `migrate`; `app` owns no table and has no DDL, and `db/grants.sql` gives
-it exactly what the manifest grants. The proxy's role is the backstop; the
-per-route grants stay the wall. `mem_limit: 1g` matches the `140MiB` estimate
-with room for the workers.
+capable copy below, so nothing else may use it. The app's `DATABASE_URL` names
+`pgbouncer`; `migrate` and `grant` name `db`. Never swap the two. `ALLOWED_HOST`
+must equal the `Host(...)` in `dynamic.yml`, or Django answers `400`.
+
+`db/grants.sql` sets `ALTER ROLE app SET timezone = 'UTC'`, so Django sends no
+`set_config` and the `connection` group's grant for it is a `dead_grant` here
+([the zone rule](index.md#pooler)). `sslmode=disable` is plaintext on the
+compose bridge: for a network database, set `sslmode=verify-full` **and** a
+`ca_cert` ([pooling and TLS](../reference/settings.md#behind-a-connection-pooler)).
 
 ## Image
 
@@ -188,21 +243,17 @@ EXPOSE 8080
 Blastit refuses a deployment where a shared interpreter carries those
 capabilities; [the security model](../security.md#the-mechanisms) says why.
 
+`--env-file .env` supplies all four values, so none reaches your shell history;
+the compose file reads each with `${VAR:?}`.
+
 ```console
-$ TAG=$(git rev-parse --short HEAD)
 $ docker build -t registry.example.com/shop:$TAG . && docker push registry.example.com/shop:$TAG
 $ docker compose --env-file .env up -d
 $ docker compose logs app | head -1
 {"event":"boot","stage":"stage0","seccomp":true,"privilege":"capabilities","bounding_set":"dropped"}
 ```
 
-`--env-file` keeps `DB_PASSWORD` and `DJANGO_SECRET_KEY` out of your shell
-history; the compose file reads them with `${DB_PASSWORD:?}`.
-
 ## Rootless
 
-The file carries seven capabilities: six required (`setuid`, `setgid`, `chown`,
-`fowner`, `dac_override`, `kill`) and `cap_setpcap`, which is wanted. Give them to
-a **dedicated copy** of the file init starts from — mode `0500`, owned by init's
-uid, next to the original. A file with capabilities turns any process of its uid
-into init, which is why the uid must be dedicated.
+A file with capabilities turns any process of its uid into init;
+[the security model](../security.md#the-mechanisms) says why.

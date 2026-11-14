@@ -147,6 +147,31 @@ client invented. That is why both presets use `*` and publish no port.
 A proxy's protocol, inputs and outputs live in the
 [manifest](manifest.md#proxies).
 
+## Behind a connection pooler
+
+`BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` is **per instance**: keep it at the worker
+count and let the pool accept `workers × instances` clients (`MAX_CLIENT_CONN`,
+100 by default) while it keeps `DEFAULT_POOL_SIZE` (20) server connections. A
+managed pool's `size` is its *minimum*; its maximum follows the cluster's RAM
+(about 25 connections per GB, 3 reserved), so raise the plan when the pool's
+`size` approaches that.
+
+A transaction pool keeps no session state: `SET` and `set_config` do not survive
+it. Set the session zone on the role (`ALTER ROLE app SET timezone = 'UTC'`) and
+read it back on the **direct** port as the app's own role — a pool's open
+backends keep the zone they logged in with until they are recycled
+(`server_lifetime`, one hour by default), so restart the pooler after changing
+the role ([the rule](../deploy/index.md#pooler)).
+
+Django's PostgreSQL backend sends no prepared statements
+(`prepare_threshold=None`). A raw psycopg 3 client prepares after five
+executions: `max_prepared_statements` on PgBouncer ≥ 1.22 with libpq ≥ 17 rewrites
+them, or connect with `prepare_threshold=None`.
+
+`ca_cert` is a PEM bundle for the upstream TLS leg. It only matters when the URL
+asks for verification (`sslmode=verify-full`), and through a pooler it validates
+the pooler's certificate, not the origin.
+
 ## Presets
 
 | Setting | Default | What it does |

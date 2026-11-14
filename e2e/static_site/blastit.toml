@@ -1,0 +1,10 @@
+version = 1
+
+[[route]]
+name = "site"
+path = ['.*']
+
+[route.static]
+root = "public"
+spa = true
+immutable = ["/assets/*"]

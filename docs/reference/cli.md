@@ -44,9 +44,9 @@ $ blastit check -- -k products
 
 | Flag | Default | What it does |
 |---|---|---|
-| *(none)* | — | run `pytest -q`, then check every request and statement against the manifest |
+| *(none)* | — | run `pytest -q`, then check every request and statement against the manifest; an all-static manifest audits every `root` and runs no `pytest` |
 | `--json` | off | one JSON document on stdout; everything else on stderr |
-| `--learn` | off | record instead of failing, and write the missing routes and exact `queries` |
+| `--learn` | off | record instead of failing, and write the missing routes and exact `queries`; an all-static manifest has nothing to learn (`2`) |
 | `--dry-run` | off | with `--learn`: print the proposal, write nothing |
 | `-- ARGS…` | — | pass `ARGS` to pytest |
 
@@ -58,10 +58,10 @@ replaces the manifest atomically, and only after the suite passed: a failed run
 leaves it untouched ([details](../ci.md#bootstrap-an-existing-project)).
 
 Exit codes: `0` clean, `1` findings, `2` it could not start, `3` the suite
-failed (`pytest` exit `5`, no tests collected, is `3`). [What it
-checks](../ci.md#what-it-fails-on) and [the `--json`
-contract](../ci.md#for-agents-json) are on the CI page. `blastit test` is the
-same command under its other name.
+failed (`pytest` exit `5`, no tests collected, is `3`). An all-static manifest
+stops at `0` or `2`, with nothing run. [What it checks](../ci.md#what-it-fails-on)
+and [the `--json` contract](../ci.md#for-agents-json) are on the CI page.
+`blastit test` is the same command under its other name.
 
 ## `blastit`
 

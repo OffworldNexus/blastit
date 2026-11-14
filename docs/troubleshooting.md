@@ -9,8 +9,8 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 |---|---|
 | `init runs as uid … and is missing cap_…` | production, unprivileged: run `blastit dev` locally, or give the deployment the [capabilities](deploy/anything-else.md#root-or-rootless) |
 | `BLASTIT_SECCOMP=0` | it removes the syscall and egress wall: the boot warns, and both presets abort the boot on it. Keep it at `1` |
-| `blastit.toml: no such file` | run from the directory that holds it, or set `BLASTIT_MANIFEST` |
-| `BLASTIT_APP: the WSGI callable … is required` | there is no `./blastit.toml` in this directory, or it has no `app`: `cd` to the project, or write `app = "module:attribute"` |
+| `blastit.toml: no such file` | there is no manifest in this directory: `cd` to the project, or set `BLASTIT_MANIFEST` |
+| `BLASTIT_APP: the WSGI callable … is required` | the manifest exists but declares no `app`: write `app = "module:attribute"`, or set `BLASTIT_APP` |
 | `BLASTIT_FOO: …` | a variable that does not parse; the message names it |
 | the log stops after `stage0` | the configuration did not parse, so stage 1 never ran |
 | `config`, but no `preload` | the manifest, a proxy input variable or the db sockets: the message names it |
@@ -30,6 +30,7 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | Symptom | Fix |
 |---|---|
 | a statement is not granted | add it to `queries`, or rerun with `--learn` |
+| a setup statement (`SELECT set_config(…)`, `SET …`, `SHOW …`) is not granted | it runs on whichever route opens the connection: one group serves them all — `[group.connection.db]` with the statement, and top-level `groups = ["connection"]` ([groups](reference/manifest.md#groups)) |
 | a grant is never used | delete it, or test the code path it covers |
 | a route is never exercised | add a test, or delete the route |
 | a route took a body and declares no ingress | add `[route.ingress]` with `body = "json"`, `"form"`, `"none"`, or `"raw"` plus `allow_raw = true` |

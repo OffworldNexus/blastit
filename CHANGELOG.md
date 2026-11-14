@@ -5,6 +5,40 @@ lives in `Cargo.toml` (`[workspace.package] version`), and a release is the tag
 `v` plus that version — `scripts/check-release-tag.sh` refuses a tag that says
 anything else, and [`RELEASING.md`](RELEASING.md) has the steps.
 
+## 0.2.0 (2026-11-14)
+
+Your built front end now runs under blastit, and an all-static site needs no app
+at all.
+
+- **Serve a built front end from the manifest.** A `[route.static]` with a
+  `root` serves that directory itself — no nginx, no extra process, no uid of
+  its own — in one fixed order: an existing file, a directory's `index`, the SPA
+  fallback, the app, then `404` ([static assets and
+  SPAs](https://offworldnexus.github.io/blastit/frameworks/static-and-spa/)).
+- **SPAs and front controllers are one flag apart.** `spa = true` answers a path
+  that is no file with `index.html`; with `spa` unset the same miss reaches the
+  manifest's `app` with the URL as `PATH_INFO`, so `/checkout/42` stays the app's
+  business. A served file never reaches the app, and neither does a refusal.
+- **`..` cannot leave `root`.** Plain and percent-encoded `..`, NUL and other
+  control bytes, absolute and backslash paths are `400`; a symlink that leaves
+  the tree, and a dotfile such as `.env` or `.git`, are `404` — `/.well-known/`
+  excepted. A refusal is final: never the app, never `index.html`.
+- **A fingerprinted file is cached for a year.** Only a file whose *answering*
+  path matches `immutable` gets
+  `Cache-Control: public, max-age=31536000, immutable`; every other answer,
+  `index.html` included, is `no-cache`, and an `ETag`/`Last-Modified` makes the
+  revalidation a `304`.
+- **A static-only site is a manifest and nothing else.** No `app`, no `pytest`:
+  `blastit dev` serves the tree as your own uid, `blastit check` audits every
+  root instead of running a suite and exits `0` (`2` when a root is missing or
+  not a directory), and `--json` gives an agent the same verdict as one document.
+  A route with an app still runs the suite as before.
+- **Both deployment recipes put a pooler in front.** The DigitalOcean App
+  Platform spec and the Compose/Traefik recipe now connect the app to a
+  connection pooler — DigitalOcean's managed pooler, one setting; a PgBouncer
+  service — while migrations connect to PostgreSQL directly
+  ([Deployments](https://offworldnexus.github.io/blastit/deploy/)).
+
 ## 0.1.2 (2026-11-13)
 
 A development-wheel fix: nothing changes for an app running under blastit.

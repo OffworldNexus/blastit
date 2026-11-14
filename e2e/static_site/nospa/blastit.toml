@@ -1,0 +1,8 @@
+version = 1
+
+[[route]]
+name = "plain"
+path = ['.*']
+
+[route.static]
+root = "public"

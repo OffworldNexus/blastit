@@ -112,6 +112,12 @@ pub(crate) fn is_space(c: char) -> bool {
 /// Unterminated constructs run to the end of the text: nothing here panics or
 /// fails, because a hostile or truncated statement only has to be *denied*, not
 /// understood.
+///
+/// Every scanner below reports an end that is past the token it scanned, and
+/// the walk keeps a floor of one character on top of that. The floor is what
+/// makes termination structural rather than a property of each scanner: a
+/// hostile statement can cost one region per character, but it cannot stall the
+/// lexer, whatever a scanner returns.
 pub(crate) fn lex(chars: &[char]) -> Vec<Region> {
     let mut regions = Vec::new();
     let mut code_start = 0;
@@ -132,10 +138,10 @@ pub(crate) fn lex(chars: &[char]) -> Vec<Region> {
                     start: i,
                     end,
                 });
-                i = end;
-                code_start = end;
+                i = end.max(i.saturating_add(1));
+                code_start = i;
             }
-            None => i = code_token_end(chars, i),
+            None => i = code_token_end(chars, i).max(i.saturating_add(1)),
         }
     }
 
@@ -209,14 +215,12 @@ pub(crate) fn placeholder_end(chars: &[char], i: usize) -> Option<usize> {
     if chars.get(i) != Some(&'$') {
         return None;
     }
-    let mut j = i + 1;
-    if !matches!(chars.get(j), Some(c) if c.is_ascii_digit()) {
-        return None;
-    }
-    while matches!(chars.get(j), Some(c) if c.is_ascii_digit()) {
-        j += 1;
-    }
-    Some(j)
+    // `{decdigit}+`: the run is counted off the slice, so there is no cursor to
+    // leave standing still when the digits run to the end of the text.
+    let start = i.saturating_add(1);
+    let digits = chars.get(start..).unwrap_or_default();
+    let run = digits.iter().take_while(|c| c.is_ascii_digit()).count();
+    (run > 0).then_some(start.saturating_add(run))
 }
 
 /// Length of the code token starting at `chars[i]`.
@@ -227,27 +231,33 @@ pub(crate) fn placeholder_end(chars: &[char], i: usize) -> Option<usize> {
 /// character at a time, which also keeps comment detection (`--`, `/*`) and the
 /// operator rule's back-up behaviour equivalent.
 pub(crate) fn code_token_end(chars: &[char], i: usize) -> usize {
+    // An identifier is `{ident_start}{ident_cont}*`: the continuation run is
+    // measured off the slice ([`run_end`]), so the token end is an index and
+    // never a cursor that has to move.
     if matches!(chars.get(i), Some(c) if is_ident_start(*c)) {
-        let mut j = i + 1;
-        while matches!(chars.get(j), Some(c) if is_ident_cont(*c)) {
-            j += 1;
-        }
-        return j;
+        return run_end(chars, i.saturating_add(1), is_ident_cont);
     }
 
     if let Some(end) = number_end(chars, i) {
-        let mut j = end;
         // scan.l `{integer,numeric,real}_junk`: an identifier glued to a number
         // is a single (error) token, so the identifier cannot start a new one.
-        if matches!(chars.get(j), Some(c) if is_ident_start(*c)) {
-            while matches!(chars.get(j), Some(c) if is_ident_cont(*c)) {
-                j += 1;
-            }
+        if matches!(chars.get(end), Some(c) if is_ident_start(*c)) {
+            return run_end(chars, end.saturating_add(1), is_ident_cont);
         }
-        return j;
+        return end;
     }
 
-    i + 1
+    i.saturating_add(1)
+}
+
+/// End of the run of characters starting at `from` that `accept`s.
+///
+/// The run is counted by consuming the slice once, so an empty run is the worst
+/// case and the caller still advances past the character it already matched.
+fn run_end(chars: &[char], from: usize, accept: impl Fn(char) -> bool) -> usize {
+    let rest = chars.get(from..).unwrap_or_default();
+    let run = rest.iter().take_while(|c| accept(**c)).count();
+    from.saturating_add(run)
 }
 
 /// End of a numeric literal starting at `chars[i]`, or `None` when none starts
@@ -307,45 +317,54 @@ fn decimal_end(chars: &[char], i: usize) -> Option<usize> {
     if !matches!(chars.get(i), Some(c) if c.is_ascii_digit()) {
         return None;
     }
-    let mut k = i + 1;
-    loop {
-        let mut next = k;
-        if chars.get(next) == Some(&'_') {
-            next += 1;
-        }
-        if matches!(chars.get(next), Some(c) if c.is_ascii_digit()) {
-            k = next + 1;
-        } else {
-            break;
-        }
-    }
-    Some(k)
+    let start = i.saturating_add(1);
+    let rest = chars.get(start..).unwrap_or_default();
+    let run = grouped_digits(rest, |c: char| c.is_ascii_digit());
+    Some(start.saturating_add(run))
 }
 
 /// End of a `0x`/`0o`/`0b` literal: scan.l's `{hex,oct,bin}integer`
 /// (`( _? digit )+`), or its `…fail` form `0[xob]_?` when no digit follows.
 fn radix_end(chars: &[char], start: usize, is_digit: impl Fn(char) -> bool) -> usize {
-    let mut k = start;
-    let mut matched = false;
-    loop {
-        let mut next = k;
-        if chars.get(next) == Some(&'_') {
-            next += 1;
-        }
-        if matches!(chars.get(next), Some(c) if is_digit(*c)) {
-            k = next + 1;
-            matched = true;
+    let rest = chars.get(start..).unwrap_or_default();
+    let run = grouped_digits(rest, &is_digit);
+    if run > 0 {
+        start.saturating_add(run)
+    } else if chars.get(start) == Some(&'_') {
+        // The `…fail` form keeps the separator, so `0x_` is `0x_`, not `0x`.
+        start.saturating_add(1)
+    } else {
+        start
+    }
+}
+
+/// Length of the `(_? digit)*` run at the start of `rest`.
+///
+/// This is the body of scan.l's `{decinteger}` and `{hex,oct,bin}integer`
+/// rules: a separator only counts when a digit follows it, so a trailing `_`
+/// belongs to the next token. The run is read once, front to back, so its
+/// length cannot come from a cursor that failed to move — the loop is over the
+/// slice, not over an index.
+fn grouped_digits(rest: &[char], is_digit: impl Fn(char) -> bool) -> usize {
+    let mut len = 0;
+    let mut separator = false;
+    for c in rest {
+        if separator {
+            if !is_digit(*c) {
+                break;
+            }
+            // The `_` and the digit it joins.
+            len += 2;
+            separator = false;
+        } else if *c == '_' {
+            separator = true;
+        } else if is_digit(*c) {
+            len += 1;
         } else {
             break;
         }
     }
-    if matched {
-        k
-    } else if chars.get(start) == Some(&'_') {
-        start + 1
-    } else {
-        start
-    }
+    len
 }
 
 /// Skips `'…'` (scan.l `xq`), starting at the opening quote: `''` is an escaped
@@ -361,87 +380,109 @@ fn skip_quoted_ident(chars: &[char], i: usize) -> usize {
 }
 
 /// Skips a `''`-or-`""`-style quoted region, starting at its opening quote.
-fn skip_doubled(chars: &[char], mut i: usize, quote: char) -> usize {
-    i += 1;
-    while i < chars.len() {
-        if chars[i] == quote {
-            if chars.get(i + 1) == Some(&quote) {
-                i += 2;
-                continue;
+///
+/// The search for the closing quote consumes the slice — an escaped quote is
+/// two characters, a plain one ends the region — so the scan has no cursor of
+/// its own and cannot stall on an unterminated literal.
+fn skip_doubled(chars: &[char], quote_index: usize, quote: char) -> usize {
+    let mut at = quote_index.saturating_add(1);
+    let mut rest = chars.get(at..).unwrap_or_default();
+    loop {
+        match rest.iter().position(|c| *c == quote) {
+            // `''` is one escaped quote: step over both and keep looking.
+            Some(index) if rest.get(index.saturating_add(1)) == Some(&quote) => {
+                at = at.saturating_add(index).saturating_add(2);
+                rest = rest.get(index.saturating_add(2)..).unwrap_or_default();
             }
-            return i + 1;
+            Some(index) => return at.saturating_add(index).saturating_add(1),
+            None => return at.saturating_add(rest.len()),
         }
-        i += 1;
     }
-    i
 }
 
 /// Skips `B'…'` or `X'…'` (scan.l `xb`/`xh`), starting at the opening quote:
 /// the contents are `[^']*` and there is no escape at all.
 fn skip_escapeless(chars: &[char], quote_index: usize) -> usize {
-    let mut i = quote_index + 1;
-    while i < chars.len() && chars[i] != '\'' {
-        i += 1;
-    }
-    if i < chars.len() { i + 1 } else { i }
+    let start = quote_index.saturating_add(1);
+    let rest = chars.get(start..).unwrap_or_default();
+    let run = rest.iter().position(|c| *c == '\'').unwrap_or(rest.len());
+    // A closing quote belongs to the region; without one the run is already the
+    // end of the text.
+    start
+        .saturating_add(run)
+        .saturating_add(usize::from(run < rest.len()))
 }
 
 /// Skips `E'…'` (scan.l `xe`), starting at the `E`. A backslash escapes the
 /// next character (whatever it is) and `''` is an escaped quote.
-fn skip_e_string(chars: &[char], mut i: usize) -> usize {
-    i += 2; // the E and the opening quote
-    while i < chars.len() {
-        match chars[i] {
-            '\'' => {
-                if chars.get(i + 1) == Some(&'\'') {
-                    i += 2;
-                    continue;
-                }
-                return i + 1;
-            }
-            '\\' => {
-                if i + 1 >= chars.len() {
-                    return chars.len();
-                }
-                i += 2;
-            }
-            _ => i += 1,
+///
+/// The walk is one pass over the slice with an "escaped" flag, so it has no
+/// cursor to advance and a trailing backslash simply ends the text.
+fn skip_e_string(chars: &[char], e_index: usize) -> usize {
+    let start = e_index.saturating_add(2); // the `E` and the opening quote
+    let rest = chars.get(start..).unwrap_or_default();
+    let mut escaped = false;
+    for (index, c) in rest.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match *c {
+            '\\' => escaped = true,
+            '\'' if rest.get(index.saturating_add(1)) == Some(&'\'') => escaped = true,
+            '\'' => return start.saturating_add(index).saturating_add(1),
+            _ => {}
         }
     }
-    i
+    chars.len()
 }
 
 /// Skips a `--` comment, starting at the first `-`, up to and including the
 /// newline that ends it. scan.l's `comment` is `--{non_newline}*`, so either
 /// `\n` or `\r` ends it.
-fn skip_line_comment(chars: &[char], mut i: usize) -> usize {
-    i += 2;
-    while i < chars.len() && !matches!(chars[i], '\n' | '\r') {
-        i += 1;
-    }
-    if i < chars.len() {
-        i += 1;
-    }
-    i
+fn skip_line_comment(chars: &[char], dashes: usize) -> usize {
+    let start = dashes.saturating_add(2);
+    let rest = chars.get(start..).unwrap_or_default();
+    // The first non-newline character ends the comment's body; the newline that
+    // ends it is part of the comment. Finding it consumes the slice, so there is
+    // no cursor to leave behind.
+    let body = rest
+        .iter()
+        .position(|c| matches!(c, '\n' | '\r'))
+        .unwrap_or(rest.len());
+    start
+        .saturating_add(body)
+        .saturating_add(usize::from(body < rest.len()))
 }
 
 /// Skips a `/* … */` comment, starting at the `/`, honouring PostgreSQL's
 /// nesting. An unterminated comment runs to the end of the text.
-fn skip_block_comment(chars: &[char], mut i: usize) -> usize {
-    i += 2;
+///
+/// Each iteration consumes at least one character of the text whatever the
+/// nesting depth does, so an unterminated or hostile comment cannot stall the
+/// scan.
+fn skip_block_comment(chars: &[char], slash: usize) -> usize {
+    let mut at = slash.saturating_add(2);
+    let mut rest = chars.get(at..).unwrap_or_default();
     let mut depth = 1usize;
-    while i < chars.len() && depth > 0 {
-        if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+    while depth > 0 {
+        let Some(first) = rest.first().copied() else {
+            break;
+        };
+        let second = rest.get(1).copied();
+        let step = if first == '/' && second == Some('*') {
             depth += 1;
-            i += 2;
-        } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+            2
+        } else if first == '*' && second == Some('/') {
             depth -= 1;
-            i += 2;
+            2
         } else {
-            i += 1;
-        }
+            1
+        };
+        at = at.saturating_add(step);
+        rest = rest.get(step..).unwrap_or_default();
     }
-    i
+    at
 }
 
 /// If a dollar-quote opening delimiter starts at `chars[i]` (`$$`, `$tag$`),
@@ -455,20 +496,21 @@ pub(crate) fn dollar_tag_at(chars: &[char], i: usize) -> Option<(usize, String)>
     if chars.get(i) != Some(&'$') {
         return None;
     }
-    let mut j = i + 1;
-    if chars.get(j) == Some(&'$') {
+    let start = i.saturating_add(1);
+    if chars.get(start) == Some(&'$') {
         return Some((2, String::new()));
     }
-    let start = j;
-    if !matches!(chars.get(j), Some(c) if is_dolq_start(*c)) {
+    if !matches!(chars.get(start), Some(c) if is_dolq_start(*c)) {
         return None;
     }
-    j += 1;
-    while matches!(chars.get(j), Some(c) if is_dolq_cont(*c)) {
-        j += 1;
-    }
-    if chars.get(j) == Some(&'$') {
-        Some((j - i + 1, chars[start..j].iter().collect()))
+    // `dolq_cont*`: the run is counted off the slice, so the tag has no cursor
+    // that could stand still.
+    let end = run_end(chars, start.saturating_add(1), is_dolq_cont);
+    if chars.get(end) == Some(&'$') {
+        Some((
+            end.saturating_sub(i).saturating_add(1),
+            chars[start..end].iter().collect(),
+        ))
     } else {
         None
     }
@@ -484,14 +526,13 @@ pub(crate) fn find_dollar_close(chars: &[char], from: usize, tag: &str) -> Optio
     let needle: Vec<char> = needle.chars().collect();
     let len = needle.len();
 
-    let mut k = from;
-    while k + len <= chars.len() {
-        if chars[k..k + len] == needle[..] {
-            return Some(k);
-        }
-        k += 1;
-    }
-    None
+    // `windows` walks every candidate position once, so the search cannot stall
+    // and needs no cursor of its own. `len` is at least 2 (`$$`), so it is never
+    // zero.
+    let rest = chars.get(from..)?;
+    rest.windows(len)
+        .position(|window| window == needle.as_slice())
+        .map(|index| from.saturating_add(index))
 }
 
 /// scan.l `ident_start` / `dolq_start`: `[A-Za-z\200-\377_]`, that is ASCII
@@ -961,5 +1002,157 @@ mod tests {
         let after_ident = code_token_end(&chars, 0);
         assert_eq!(after_ident, chars.len());
         assert_eq!(placeholder_end(&chars, after_ident), None);
+    }
+
+    //
+    // Numeric extents (MB.1.14).
+    //
+    // The extent of a numeric literal is a policy boundary: it decides where
+    // the next token starts, so a literal read one character too long swallows
+    // a `$1` (which then stops being a bind parameter) or an `E` (which then
+    // stops being an E-string prefix). The extents are asserted as *numbers*
+    // here, not only through the text they produce, because splitting one
+    // number into two adjacent tokens leaves the text unchanged — which is why
+    // 21 `number_end` mutants survived the text-level suite of MB.1.3.
+    //
+
+    /// The end of the numeric literal at the start of `sql`.
+    fn number_end_of(sql: &str) -> Option<usize> {
+        let chars: Vec<char> = sql.chars().collect();
+        number_end(&chars, 0)
+    }
+
+    #[test]
+    fn radix_literals_end_after_their_last_digit() {
+        // `{hex,oct,bin}integer` = `( _? digit )+`, so a separator only counts
+        // with a digit behind it and the literal ends after that digit.
+        for (sql, end) in [
+            ("0x1F", 4),
+            ("0X1f", 4),
+            ("0xa", 3),
+            ("0xdeadBEEF", 10),
+            ("0x1_2", 5),
+            ("0xA_B_C", 7),
+            ("0o17", 4),
+            ("0O1_7", 5),
+            ("0b1010", 6),
+            ("0B1_0", 5),
+        ] {
+            assert_eq!(number_end_of(sql), Some(end), "{sql:?}");
+        }
+        // A trailing separator is not part of the number: it belongs to the
+        // next token, so the literal ends before it.
+        for sql in ["0x1_", "0o7_", "0b1_"] {
+            assert_eq!(number_end_of(sql), Some(3), "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_radix_prefix_without_a_digit_keeps_one_separator() {
+        // The `…fail` form `0[xob]_?`: PostgreSQL rejects the statement, so the
+        // only thing that matters here is where the next token starts. Exactly
+        // one `_` belongs to the failure token; the second one starts an
+        // identifier, which is why `0x_$1` holds a parameter and `0x__$1` does
+        // not.
+        assert_eq!(number_end_of("0x_"), Some(3));
+        assert_eq!(number_end_of("0o_"), Some(3));
+        assert_eq!(number_end_of("0b_"), Some(3));
+        assert_eq!(number_end_of("0x__"), Some(3));
+        // No separator and no digit: the prefix alone.
+        assert_eq!(number_end_of("0x"), Some(2));
+        assert_eq!(number_end_of("0xz"), Some(2));
+        assert_eq!(number_end_of("0b$1"), Some(2));
+    }
+
+    #[test]
+    fn decimal_grouping_joins_exactly_one_separator() {
+        // `{decinteger}` = `{decdigit}(_?{decdigit})*`: one `_` between two
+        // digits, and the count is the number of characters consumed.
+        for (sql, end) in [
+            ("1", 1),
+            ("12", 2),
+            ("1_2", 3),
+            ("1_2_3", 5),
+            ("12_34_56", 8),
+        ] {
+            assert_eq!(number_end_of(sql), Some(end), "{sql:?}");
+        }
+        // A separator with no digit behind it ends the number before it: `1_`
+        // is `1` and an identifier, `1_2_` is `1_2` and a separator.
+        for (sql, end) in [("1_", 1), ("1__2", 1), ("1_2_", 3), ("1_$1", 1)] {
+            assert_eq!(number_end_of(sql), Some(end), "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_numeric_literal_ends_before_a_second_dot() {
+        // `{numeric}` = `.` `{decinteger}`, `{numericfail}` = `{decinteger}..`:
+        // `1.2` is one number, `1..2` is `1`, `..`, `2`.
+        assert_eq!(number_end_of("1.2"), Some(3));
+        assert_eq!(number_end_of("1.2.3"), Some(3));
+        assert_eq!(number_end_of("1..2"), Some(1));
+        // A dot with no digit behind it is the number and then the dot.
+        assert_eq!(number_end_of("1."), Some(2));
+        assert_eq!(number_end_of("1.a"), Some(2));
+        assert_eq!(number_end_of(".5"), Some(2));
+        assert_eq!(number_end_of(".5e1"), Some(4));
+        // No literal at all: a dot is not a number on its own.
+        assert_eq!(number_end_of("."), None);
+        assert_eq!(number_end_of(".a"), None);
+        assert_eq!(number_end_of("a"), None);
+    }
+
+    #[test]
+    fn an_exponent_is_part_of_the_number_only_with_its_digits() {
+        // `{real}` = `({decinteger}|{numeric})[Ee][-+]?{decinteger}`, with the
+        // `…fail` form when the digits are missing: then the number ends before
+        // its `e`, which is what lets `1e$1` glue the `$1` to the identifier.
+        for (sql, end) in [
+            ("1e2", 3),
+            ("1E2", 3),
+            ("1e+2", 4),
+            ("1e-2", 4),
+            ("12e3", 4),
+            ("12e+34", 6),
+            ("1.5e3", 5),
+            (".5e-3", 5),
+        ] {
+            assert_eq!(number_end_of(sql), Some(end), "{sql:?}");
+        }
+        for sql in ["1e", "1e+", "1e-", "1e+x", "1E"] {
+            assert_eq!(number_end_of(sql), Some(1), "{sql:?}");
+        }
+        // `1.5e` is the number `1.5`, then the `e` of the failed exponent form.
+        assert_eq!(number_end_of("1.5e"), Some(3));
+    }
+
+    #[test]
+    fn a_number_lets_the_next_token_start_where_scan_l_does() {
+        // Where the number ends is where the next token starts, and that is the
+        // boundary a policy check depends on: a `$` there is a parameter, an
+        // `E` there is a string prefix, and anything glued after the number is
+        // one error token instead (`{integer,numeric,real}_junk`).
+        fn token_end(sql: &str) -> usize {
+            let chars: Vec<char> = sql.chars().collect();
+            code_token_end(&chars, 0)
+        }
+        assert_eq!(token_end("0x1F$1"), 4);
+        assert_eq!(token_end("0x_$1"), 3);
+        assert_eq!(token_end("1_0$1"), 3);
+        assert_eq!(token_end("1..2"), 1);
+        assert_eq!(token_end("1e+2$1"), 4);
+        // Denominator of the list above: an identifier glued to the number is
+        // one token, so the `$1` behind it is identifier data, not a parameter.
+        // `1e$1` is the failed exponent form followed by an identifier.
+        assert_eq!(token_end("1e$1"), 4);
+        assert_eq!(token_end("0x1Fg$1"), 7);
+        assert_eq!(token_end("1_$1"), 4);
+        // The token after a number is a parameter only when the number ends on
+        // a digit: the placeholder starts exactly at the end.
+        let chars: Vec<char> = "0x1F$1".chars().collect();
+        assert_eq!(placeholder_end(&chars, token_end("0x1F$1")), Some(6));
+        let chars: Vec<char> = "0x__$1".chars().collect();
+        assert_eq!(code_token_end(&chars, 0), 6);
+        assert_eq!(placeholder_end(&chars, 6), None);
     }
 }

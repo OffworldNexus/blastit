@@ -1348,4 +1348,47 @@ mod tests {
         assert_eq!(string_toml("a\u{85}b"), "\"a\\u0085b\"");
         assert_eq!(string_toml("héllo — ok"), "\"héllo — ok\"");
     }
+
+    #[test]
+    fn a_toml_key_is_bare_only_when_it_can_be() {
+        // Bare exactly for `[A-Za-z0-9_-]`, and never for the empty key: a
+        // manifest key is what a grant is looked up by, so quoting has to round
+        // trip the same name.
+        for key in ["plain", "a_b", "orders-order9", "A1"] {
+            assert_eq!(key_toml(key), key, "{key:?} is a bare key");
+        }
+        for key in ["audit.users", "a b", "", "a\u{7f}b", "a\"b"] {
+            assert_eq!(key_toml(key), string_toml(key), "{key:?} is quoted");
+        }
+    }
+
+    #[test]
+    fn columns_serde_uses_the_two_manifest_spellings() {
+        assert_eq!(
+            serde_json::from_str::<Columns>("\"*\"").expect("the star spelling"),
+            Columns::All
+        );
+        assert_eq!(
+            serde_json::to_string(&Columns::All).expect("serialises"),
+            "\"*\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Columns>("[\"id\", \"name\"]").expect("the list spelling"),
+            Columns::list(["id", "name"])
+        );
+        assert_eq!(
+            serde_json::to_string(&Columns::list(["id", "name"])).expect("serialises"),
+            "[\"id\",\"name\"]"
+        );
+        // Anything else is refused, and the refusal says what the field wanted.
+        for bad in ["\"id\"", "5", "{}", "true"] {
+            let error = serde_json::from_str::<Columns>(bad).expect_err("not a column grant");
+            assert!(
+                error
+                    .to_string()
+                    .contains("the string \"*\" or a list of column names"),
+                "{bad}: {error}"
+            );
+        }
+    }
 }

@@ -48,7 +48,24 @@ assertions:
   compose file, and that is the uid the check uses;
 * as a worker's uid: a plain `python3`, and a `manage.py`, hold nothing and
   cannot `setuid(0)`: the *shared* interpreter grants nothing, and the uid that
-  can run the copy is a dedicated one (B1).
+  can run the copy is a dedicated one (B1);
+* **the refusal**: the same image started with `--cap-drop ALL` as the service
+  uid — neither root nor a single capability — exits `1` and prints the
+  sentence `docs/troubleshooting.md` sends that deployment to: `init runs as
+  uid 10000 and is missing cap_chown, cap_dac_override, cap_fowner, cap_kill,
+  cap_setgid, cap_setuid`. A deployment that asked for nothing gets a refusal
+  that names what it did not give, not a traceback. (The image's default
+  command is the capable copy, which the kernel will not even `execve` with an
+  empty bounding set; the check starts the shared interpreter, the one a
+  container that granted nothing can run.)
+* **the ordering**: the *same* image started as **root** in an empty directory
+  exits `1`, and its stdout's `app.output` names `./blastit.toml: No such file
+  or directory` — and never `BLASTIT_APP`. With the file present but declaring no
+  `app`, the boot names `BLASTIT_APP` and claims nothing is missing. That is the
+  production half of the ordering (`stage0::run`, `MB.1.16`); the `dev` half is
+  in the protected suite, because an unprivileged production boot is refused at
+  the capability gate before the manifest is read, and root is the identity that
+  reaches it.
 
 ## What E1 checks
 

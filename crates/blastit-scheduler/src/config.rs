@@ -6,6 +6,7 @@
 //! defaults of those variables.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -275,6 +276,16 @@ pub struct SchedulerConfig {
     /// `BLASTIT_VIEW_MEM_ESTIMATE`, in bytes: what one more view process is
     /// expected to cost.
     pub view_mem_estimate: u64,
+    /// The directory holding `blastit.toml`, absolute: static roots are
+    /// declared relative to it (design §4.7).
+    ///
+    /// Stage 1 sets it once, from the manifest path it discovered; the
+    /// scheduler never re-derives it. Empty means "not set", which only
+    /// matters to a route that declares `[route.static]`.
+    pub manifest_dir: PathBuf,
+    /// The largest static file served, in bytes: `STATIC_MAX_FILE_BYTES`, with
+    /// no environment variable and no manifest key (design §4.6).
+    pub static_max_bytes: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -303,6 +314,8 @@ impl Default for SchedulerConfig {
             memory_check_interval: MEMORY_CHECK_INTERVAL,
             mem_total_bytes: None,
             view_mem_estimate: 32 * 1024 * 1024,
+            manifest_dir: PathBuf::new(),
+            static_max_bytes: crate::static_asset::STATIC_MAX_FILE_BYTES,
         }
     }
 }

@@ -639,6 +639,26 @@ def main():
     else:
         check(status == 200 and body.get("ok") is True, "baseline: no allowlist, so it runs anywhere")
 
+    # A route whose grant is *explicitly* empty: `[route.db] queries = []` and no
+    # group. blastit still binds a listener for it (the route names the proxy),
+    # and the listener's allowlist holds nothing — so an ordinary statement, the
+    # one the `sql` route is granted above, is refused by the proxy with SQLSTATE
+    # 42501. A missing socket would be a connection error, and a database
+    # permission error would not carry the proxy's own answer.
+    #
+    # A fresh client: the deny route takes no group, so a session cookie would
+    # make Django read the session table — a statement the route refuses before
+    # the view this probe is here for even runs.
+    status, body = raw(Client(args.base), "/deny/sql/", granted)
+    if under_blastit:
+        check(status == 200 and body.get("ok") is False and body.get("sqlstate") == "42501",
+              "a route granting `queries = []` refuses an ordinary statement (SQLSTATE 42501)")
+        check(body.get("route") == "deny",
+              "and the refusal came from the deny route's own process")
+    else:
+        check(status == 200 and body.get("ok") is True,
+              "baseline: the same statement is not refused anywhere")
+
     status, body = raw(alice, "/debug/sql/", other)
     if under_blastit:
         check(status == 200 and body.get("ok") is False and body.get("sqlstate") == "42501",

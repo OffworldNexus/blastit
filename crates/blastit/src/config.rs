@@ -655,6 +655,13 @@ pub struct Config {
     pub preload: Vec<String>,
     /// `BLASTIT_MANIFEST`: the manifest path.
     pub manifest: PathBuf,
+    /// The directory holding the manifest, absolute: the base every
+    /// `[route.static]` `root` is resolved against (`R2`, `R13`).
+    ///
+    /// Set once, when the manifest path is discovered, and carried in the
+    /// stage-1 document, because the manifest path is relative to the boot
+    /// working directory and stage 1 must not re-derive it from its own.
+    pub manifest_dir: PathBuf,
     /// `BLASTIT_SCRIPT_NAME`: the mount prefix stripped before routing.
     pub script_name: Option<String>,
     /// `BLASTIT_LOG_FORMAT`.
@@ -826,6 +833,7 @@ impl Default for Config {
             app: None,
             preload: Vec::new(),
             manifest: PathBuf::from("./blastit.toml"),
+            manifest_dir: PathBuf::new(),
             script_name: None,
             log_format: LogFormat::Json,
             log_level: Level::Info,
@@ -944,6 +952,7 @@ impl Config {
         let mut config = Self::default();
         config.log_format = default_log_format;
         config.manifest = manifest_path()?;
+        config.manifest_dir = manifest_dir(&config.manifest);
         config.port = settings
             .get("PORT")?
             .map_or(Ok(config.port), |value| parse_u16("PORT", &value))?;
@@ -1537,6 +1546,10 @@ impl Config {
             Value::from(self.manifest.to_string_lossy().into_owned()),
         );
         object.insert(
+            "manifest_dir".into(),
+            Value::from(self.manifest_dir.to_string_lossy().into_owned()),
+        );
+        object.insert(
             "script_name".into(),
             self.script_name.clone().map_or(Value::Null, Value::from),
         );
@@ -1801,6 +1814,7 @@ impl Config {
         config.app = json_opt_string(value, "app")?;
         config.preload = json_string_list(value, "preload")?;
         config.manifest = PathBuf::from(json_string(value, "manifest")?);
+        config.manifest_dir = PathBuf::from(json_string(value, "manifest_dir")?);
         config.script_name = json_opt_string(value, "script_name")?;
         config.log_format = match json_string(value, "log_format")?.as_str() {
             "json" => LogFormat::Json,
@@ -2099,6 +2113,20 @@ fn manifest_path() -> Result<PathBuf, ConfigError> {
         }
         None => Ok(PathBuf::from("./blastit.toml")),
     }
+}
+
+/// The directory the manifest lives in, absolute: what a `[route.static]`
+/// `root` is relative to (`R2`, `R13`).
+///
+/// A bare `blastit.toml` has an empty parent, which means the working
+/// directory. The path is made absolute once, here, because stage 1 runs from a
+/// different working directory and the responder opens `root` beneath it.
+fn manifest_dir(path: &Path) -> PathBuf {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::path::absolute(parent).unwrap_or_else(|_| parent.to_path_buf())
 }
 
 /// The manifest's top-level `app` and `preload`, for the fields the

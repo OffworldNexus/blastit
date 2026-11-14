@@ -414,6 +414,77 @@ pub enum ManifestError {
         /// Index of the entry in the grant's `queries` list.
         rule: usize,
     },
+    /// A `[route.static]` `root` is not a path the responder can serve (`R2`).
+    ///
+    /// `rule` is one of the fixed phrases the design pins — `must be a relative
+    /// path`, `must not contain ..`, `must not contain \`, `must not contain a
+    /// control byte` — so the message reads the same on every host.
+    #[error("{location}: static root {}: {rule}", quoted(.root))]
+    StaticRootInvalid {
+        /// Where the `[route.static]` block is written.
+        location: Location,
+        /// The root as written.
+        root: String,
+        /// The fixed rule the root breaks.
+        rule: &'static str,
+    },
+    /// A `[route.static]` `root` passes the syntax but the filesystem refuses
+    /// it: missing, a file, or unlistable (`R2`, `R13`).
+    ///
+    /// Checked by [`crate::Manifest::check_static_roots`], never by validation:
+    /// a manifest must validate before the build that creates the directory has
+    /// run. `reason` is a fixed phrase (`no such file or directory`, `not a
+    /// directory`, `permission denied`), never `strerror`.
+    #[error("{location}: static root {}: {reason}", quoted(.root))]
+    StaticRootUnusable {
+        /// Where the `[route.static]` block is written.
+        location: Location,
+        /// The root as written.
+        root: String,
+        /// The fixed reason the filesystem gave.
+        reason: &'static str,
+    },
+    /// A `[route.static]` `index` is not a file path beneath `root` (`R3`).
+    #[error("{location}: static index {}: {rule}", quoted(.index))]
+    StaticIndexInvalid {
+        /// Where the `[route.static]` block is written.
+        location: Location,
+        /// The index as written.
+        index: String,
+        /// The fixed rule the index breaks.
+        rule: &'static str,
+    },
+    /// An `immutable` pattern cannot be matched against an answering path
+    /// (`R5`).
+    ///
+    /// For the count rule the value is the first pattern past the limit, the
+    /// one an operator can delete.
+    #[error("{location}: static immutable {}: {rule}", quoted(.pattern))]
+    StaticImmutablePattern {
+        /// Where the `[route.static]` block is written.
+        location: Location,
+        /// The pattern as written.
+        pattern: String,
+        /// The fixed rule the pattern breaks.
+        rule: &'static str,
+    },
+    /// A static route that can never reach the app still declares something
+    /// only the app could use (`R4`).
+    ///
+    /// `why` is `spa = true never reaches the app` or `the manifest declares no
+    /// app`; `key` is the declaration, as the operator wrote it:
+    /// `[route.ingress]`, `prefork = true`, `groups`, or the grant's
+    /// `[route.<proxy>]`. Each is dead weight that reads like a capability, so
+    /// the boot refuses it rather than let it look like it runs.
+    #[error("{location}: {why}; {} can never run", escape_control(.key))]
+    StaticDeadDeclaration {
+        /// Where the `[route.static]` block is written.
+        location: Location,
+        /// The dead declaration, as written.
+        key: String,
+        /// Why the route can never reach the app.
+        why: &'static str,
+    },
 }
 
 /// Something suspicious that does not stop the server from starting (§6).

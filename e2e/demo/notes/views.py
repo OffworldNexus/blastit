@@ -28,6 +28,7 @@ import os
 import socket
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+import psycopg
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
@@ -159,6 +160,31 @@ def raw_sql(request):
     except DatabaseError as e:
         sqlstate = getattr(e, "sqlstate", None) or getattr(e.__cause__, "sqlstate", None)
         return JsonResponse({"ok": False, "route": route, "sqlstate": sqlstate})
+
+
+def deny_sql(request):
+    """Run ``q`` on the route whose grant is *explicitly* empty (``queries = []``).
+
+    ``/deny/sql/`` names the proxy but grants no statement and takes no group,
+    so blastit gives it a listener with an empty allowlist: the connection is
+    accepted, and the first statement is refused by the proxy with SQLSTATE
+    ``42501``. That is a different listener from the routes above, whose grants
+    are non-empty and whose refusals are single statements.
+
+    The statement goes through psycopg directly, not Django's ``connection``: a
+    Django connection sends its own housekeeping first (``SELECT
+    set_config('TimeZone', …)``), which this route grants no more than anything
+    else — and a refusal of *that* would not prove the ordinary statement was
+    refused. In autocommit mode psycopg sends the statement and nothing else.
+    """
+    route = request.META.get("blastit.route")
+    statement = request.GET.get("q") or "SELECT count(*) FROM notes_note"
+    try:
+        with psycopg.connect(os.environ.get("DATABASE_URL", ""), autocommit=True) as client:
+            client.execute(statement)
+    except psycopg.Error as error:
+        return JsonResponse({"ok": False, "route": route, "sqlstate": error.sqlstate})
+    return JsonResponse({"ok": True, "route": route})
 
 
 # `/proc/self/status` is not the only place these answers live, and on gVisor

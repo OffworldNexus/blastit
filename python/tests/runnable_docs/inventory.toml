@@ -134,8 +134,18 @@ mode = "presets"
 
 [[page.fence]]
 index = 2
+mode = "static"
+reason = "Deployment recipe: `APP_URL` is a managed cluster's direct port or a container on a Compose network, neither of which this gate has, so the psql flags and the `SHOW TimeZone` read-back are checked against the installed binary."
+
+[[page.fence]]
+index = 3
 mode = "example"
 reason = "Measures X-Forwarded-For through a real load balancer the harness does not have; the trusted-proxy decision itself is a settings and e2e concern."
+
+[[page.fence]]
+index = 4
+mode = "static"
+reason = "The log viewers are checked against the installed docker/doctl flag tables, and the event shown is the shape docs/reference/log-events.md documents; this gate runs no live ingress to grep."
 
 [[page]]
 path = "docs/deploy/digitalocean-paas.md"
@@ -152,12 +162,27 @@ reason = "Deployment recipe: doctl and Docker run against a registry and a cloud
 [[page.fence]]
 index = 3
 mode = "static"
-reason = "Deployment recipe: `doctl apps create` needs a DigitalOcean account and the image the previous fence builds."
+reason = "Deployment recipe: `doctl databases create` needs a DigitalOcean account, so the command is statically checked instead of executed."
 
 [[page.fence]]
 index = 4
 mode = "static"
-reason = "Deployment recipe: psql runs the owner's role and grant SQL against the managed database."
+reason = "Deployment recipe: `doctl databases user create` needs the cluster that fence 3 creates in a DigitalOcean account."
+
+[[page.fence]]
+index = 5
+mode = "static"
+reason = "Deployment recipe: psql runs the owner's role and grant SQL against the managed database, which this gate does not have."
+
+[[page.fence]]
+index = 6
+mode = "static"
+reason = "Deployment recipe: `doctl databases pool create` needs the cluster and the app user the fences above create."
+
+[[page.fence]]
+index = 7
+mode = "static"
+reason = "Deployment recipe: `doctl apps create` needs a DigitalOcean account, the pool from fence 6, and the image fence 2 builds."
 
 [[page]]
 path = "docs/deploy/compose-traefik.md"
@@ -220,6 +245,38 @@ reason = "Installs flask, psycopg and SQLAlchemy from the package index; only bl
 index = 2
 mode = "dev"
 fixture = "shop"
+
+[[page]]
+path = "docs/frameworks/static-and-spa.md"
+
+[[page.fence]]
+index = 1
+mode = "example"
+reason = "Vite writes `dist/` and this page serves `public/`; MB.2.7's e2e builds the static site and proves the files land where `root` looks, so this fence names the flag instead of running npm in the gate."
+
+[[page.fence]]
+index = 2
+mode = "example"
+reason = "`uvx` installs blastit from the package index, which this offline gate does not have; the same banner runs from the built wheel in Getting started and is compared verbatim by MB.2.7's e2e/static_assets.py."
+
+[[page.fence]]
+index = 3
+mode = "example"
+reason = "The static responder ships in MB.2.4/MB.2.5, so this fence cannot answer yet; MB.2.7's e2e/static_assets.py replays this `curl -i` command and asserts the 200 with the immutable cache header."
+
+[[page.fence]]
+index = 4
+mode = "example"
+reason = "The SPA fallback ships in MB.2.4/MB.2.5, so this fence cannot answer yet; MB.2.7's e2e/static_assets.py replays this `curl -i` command and asserts the 200 with `text/html` and `no-cache`."
+
+[[page.fence]]
+index = 5
+mode = "example"
+reason = "`uvx` reaches the package index, which the offline gate does not have; docs/ci.md runs the same `blastit check` and `--json` from the built wheel, and MB.2.7 replays both on the static fixture."
+
+[[page.fence]]
+index = 6
+mode = "presets"
 
 [[page]]
 path = "docs/reference/cli.md"

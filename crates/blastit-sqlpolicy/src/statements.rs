@@ -93,11 +93,20 @@ impl Parser {
         }
     }
 
+    /// The characters from the cursor on.
+    fn rest(&self) -> &[char] {
+        &self.chars[self.pos..]
+    }
+
     /// Skips scan.l whitespace.
+    ///
+    /// The count comes from `take_while`, not from a hand-stepped index: there
+    /// is no loop here whose only exit is the cursor moving, so a step that a
+    /// later edit (or a mutation testing exactly that step) turns into a no-op
+    /// can only make the count wrong, never make the parser spin.
     fn skip_ws(&mut self) {
-        while matches!(self.chars.get(self.pos), Some(c) if is_space(*c)) {
-            self.pos += 1;
-        }
+        let skipped = self.rest().iter().take_while(|c| is_space(**c)).count();
+        self.pos += skipped;
     }
 
     /// Skips whitespace and reports whether the cursor reached the end.
@@ -107,18 +116,22 @@ impl Parser {
     }
 
     /// Consumes a bare identifier (`[A-Za-z_][A-Za-z0-9_]*`) and returns it.
+    ///
+    /// The run is collected by `take_while` and its length taken from the
+    /// result, so no cursor step has to terminate a loop.
     fn eat_word(&mut self) -> Option<String> {
         self.skip_ws();
-        if !matches!(self.chars.get(self.pos), Some(c) if c.is_ascii_alphabetic() || *c == '_') {
+        let first = *self.rest().first()?;
+        if !(first.is_ascii_alphabetic() || first == '_') {
             return None;
         }
-        let start = self.pos;
-        self.pos += 1;
-        while matches!(self.chars.get(self.pos), Some(c) if c.is_ascii_alphanumeric() || *c == '_')
-        {
-            self.pos += 1;
-        }
-        Some(self.chars[start..self.pos].iter().collect())
+        let word: String = self
+            .rest()
+            .iter()
+            .take_while(|c| c.is_ascii_alphanumeric() || **c == '_')
+            .collect();
+        self.pos += word.chars().count();
+        Some(word)
     }
 
     /// Consumes `keyword` (case-insensitively) if it comes next.
@@ -138,26 +151,13 @@ impl Parser {
     fn eat_ident(&mut self) -> bool {
         self.skip_ws();
         if self.chars.get(self.pos) == Some(&'"') {
-            let mut i = self.pos + 1;
-            let mut len = 0usize;
-            while i < self.chars.len() {
-                if self.chars[i] == '"' {
-                    if self.chars.get(i + 1) == Some(&'"') {
-                        len += 1;
-                        i += 2;
-                        continue;
-                    }
-                    if len == 0 {
-                        // `""` is not a valid identifier.
-                        return false;
-                    }
-                    self.pos = i + 1;
-                    return true;
+            return match quoted_ident_end(&self.chars, self.pos) {
+                Some(end) => {
+                    self.pos = end;
+                    true
                 }
-                len += 1;
-                i += 1;
-            }
-            return false;
+                None => false,
+            };
         }
         self.eat_word().is_some()
     }
@@ -213,7 +213,15 @@ impl Parser {
             if self.at_end() {
                 return true;
             }
+            let before = self.pos;
             if !self.parse_mode() {
+                return false;
+            }
+            // Every mode starts with a keyword, so a successful `parse_mode`
+            // always moves the cursor. A mode that reports success without
+            // consuming anything would make this loop spin forever; refusing it
+            // makes that a denial instead of a hang.
+            if self.pos == before {
                 return false;
             }
             self.skip_ws();
@@ -245,6 +253,37 @@ impl Parser {
         }
         false
     }
+}
+
+/// The index just past the closing quote of the double-quoted identifier whose
+/// opening quote is at `start`, or `None` when the text ends inside it or the
+/// identifier is empty (`""` is not a valid identifier).
+///
+/// The body is walked with an iterator, so the scan ends when the characters
+/// do — never because a hand-stepped index happens to move. `""` is one escaped
+/// quote, and an identifier of nothing but escaped quotes is a non-empty one.
+fn quoted_ident_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut body = chars[start + 1..].iter();
+    let mut width = 0usize;
+    let mut consumed = 0usize;
+    while let Some(c) = body.next() {
+        consumed += 1;
+        if *c != '"' {
+            width += 1;
+            continue;
+        }
+        if body.as_slice().first() == Some(&'"') {
+            let _ = body.next();
+            consumed += 1;
+            width += 1;
+            continue;
+        }
+        if width == 0 {
+            return None;
+        }
+        return Some(start + 1 + consumed);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -310,6 +349,10 @@ mod tests {
         count("\"a;b\"", 1);
         count("SELECT E'a\\';b'", 1);
         count("SELECT B'a;b'", 1);
+        // ... nor do the national and unicode string prefixes, which are their
+        // own lexer regions.
+        count("SELECT N'a;b'", 1);
+        count("SELECT U&'a;b'", 1);
         count("SELECT $tag$a; b$tag$", 1);
         count("SELECT 1 -- ;\nDROP TABLE t", 1);
         count("SELECT 1 /* ; */ DROP TABLE t", 1);
@@ -365,6 +408,11 @@ mod tests {
             "ROLLBACK TO SAVEPOINT s1",
             "ROLLBACK WORK TO SAVEPOINT s1",
             "ROLLBACK TRANSACTION TO s1",
+            // `""` inside the name is one escaped quote, so the identifier
+            // continues past it — and a name of nothing but escaped quotes is
+            // still a name.
+            "SAVEPOINT \"s\"\"x\"",
+            "SAVEPOINT \"\"\"\"",
         ] {
             assert!(tc(sql), "should accept {sql:?}");
         }
@@ -424,6 +472,10 @@ mod tests {
             "END WORK EXTRA",
             "BEGIN READ",
             "BEGIN READ SOMETHING",
+            // A mode that parsed is not the last word: what follows has to be
+            // a mode too (or a comma), not a stray token.
+            "BEGIN READ ONLY X",
+            "START TRANSACTION READ WRITE X",
             "BEGIN ISOLATION",
             "BEGIN ISOLATION LEVEL",
             "BEGIN ISOLATION LEVEL BOGUS",
@@ -434,6 +486,9 @@ mod tests {
             "SAVEPOINT s1 extra",
             "SAVEPOINT \"\"",
             "SAVEPOINT \"unterminated",
+            // An escaped quote does not close the name, so these are still
+            // unterminated.
+            "SAVEPOINT \"s\"\"",
             "RELEASE",
             "RELEASE SAVEPOINT",
             "RELEASE s1 s2",
@@ -441,6 +496,8 @@ mod tests {
             "ROLLBACK TO SAVEPOINT",
             "ROLLBACK SAVEPOINT s1",
             "ROLLBACK TO 1",
+            "ROLLBACK TO s1 extra",
+            "ROLLBACK TO SAVEPOINT s1 extra",
             "DROP TABLE t",
             "VACUUM",
             "",

@@ -105,7 +105,9 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
+use std::io;
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
@@ -130,7 +132,12 @@ use crate::fair::{Cost, FairQueue, FlowRef, NextFlow};
 use crate::path::{
     is_control_byte, normalize_script_name, path_of_target, percent_decode, strip_script_name,
 };
+use crate::rewrite::{Rewrite, decide, declares_body};
 use crate::route::RouteInfo;
+use crate::static_asset::{
+    STATIC_CHUNK_BYTES, StaticFile, StaticOutcome, StaticRefusal, StaticRoot, head_segments,
+};
+use crate::static_response::{StaticBody, StaticResponse};
 use crate::task::{
     OutFrame, Outbound, PushError, ctl_frame_size, read_frames, read_raw_frames, release,
     write_peer,
@@ -154,6 +161,32 @@ const CTL_OUTBOUND_CAP: usize = 1024 * 1024;
 /// The `reason` a view is retired with when it breaks flow control, or when
 /// its outbound queue overflows (§8.1's reasons are init's).
 const CREDIT_OVERFLOW: &str = "credit_overflow";
+/// How many finished static reads may wait for the scheduler before a blocking
+/// task waits. At most one read per admission slot can ever be outstanding, so
+/// this is a handful of windows rather than a queue.
+const STATIC_IN_CAPACITY: usize = 64;
+/// The `reason` a static response is aborted with when its file cannot be read
+/// in full (design §4.6): a short read is never answered with a body shorter
+/// than the `Content-Length` the head promised.
+const STATIC_READ_FAILED: &str = "static: read failed";
+
+/// One finished static read, on its way back to the scheduler.
+///
+/// The [`StaticBody`] travels with the bytes so the descriptor the resolver
+/// opened is never duplicated: a blocked read keeps it, and the scheduler's next
+/// read takes it back from here.
+struct StaticRead {
+    /// The `http.chan` stream this read belongs to.
+    stream_id: u32,
+    /// The body source, with its `offset` still at the byte this read started
+    /// from; the scheduler advances it when it accepts the bytes.
+    body: StaticBody,
+    /// How many bytes were asked for. Anything else — an error, or a read that
+    /// returned fewer bytes than this — aborts the response.
+    want: usize,
+    /// The bytes read, or why the read failed.
+    result: io::Result<Vec<u8>>,
+}
 
 /// Where a `request` or `process.retired` event goes.
 ///
@@ -483,9 +516,34 @@ struct Request {
     body: Vec<Vec<u8>>,
     /// How the body must be handled, decided from the head alone (`R12`, `R16`).
     body_plan: BodyPlan,
+    /// The status `body_plan` refused with, stored rather than answered on a
+    /// route with `[route.static]` (design §4.4): the responder's method/body
+    /// gate outranks a codec error on a path it answers, and only a `Forward`
+    /// ever answers this.
+    body_plan_error: Option<u16>,
     /// The body is buffered and, for `json`/`form`, transcoded: the request may
     /// be dispatched. A `Buffer` request waits here until its `REQ_END`.
     body_ready: bool,
+    /// The matched route declares `[route.static]` and the head passed design
+    /// §4.3 steps 3–4: `dispatch_static` is what admits it, and no view is
+    /// involved until a `Forward` (design §4.6).
+    static_pending: bool,
+    /// The `head_segments` result, kept until `dispatch_static` borrows it for
+    /// `StaticRoot::resolve`; a queued static request therefore opens no
+    /// descriptor (design §4.6).
+    static_parts: Option<Vec<String>>,
+    /// `rewrite::declares_body` for this head: `Request` keeps no header list,
+    /// so the one bit the answer needs is taken from the borrowed head.
+    static_has_body: bool,
+    /// The request's `If-None-Match`, for the responder's `304` (design §4.5).
+    /// `None` unless a static route asked for it.
+    static_if_none_match: Option<Vec<u8>>,
+    /// The bytes still owed for a static `GET`, from the descriptor the
+    /// resolver opened. `Some` only after `StaticRoot::respond` handed it over.
+    static_body: Option<StaticBody>,
+    /// One static read is in flight for this request: its result is what
+    /// releases the slot, never a timeout or a cancellation (design §4.6).
+    pumping: bool,
     /// This request is an unrouted `--learn` request using the single fallback
     /// slot (`R26`, design §4.2 D.2).
     learn_fallback: bool,
@@ -559,6 +617,35 @@ enum Resolution {
     },
 }
 
+/// The head half of a request to a route with `[route.static]` (design §4.3
+/// steps 3–4, §4.4).
+///
+/// Built in [`Scheduler::begin_raw`] while the head is still the borrowed
+/// payload, so [`Request`] keeps no header list: the answer is built from the
+/// two facts this carries and the segments the resolver takes.
+enum StaticHead {
+    /// Steps 3–4 passed: `dispatch_static` resolves these segments once the
+    /// request holds a slot, so a queued request opens no descriptor.
+    Resolve {
+        /// The `head_segments` result, borrowed once as `&[&str]` for
+        /// `StaticRoot::resolve`.
+        segments: Vec<String>,
+        /// `rewrite::declares_body` for this head.
+        has_body: bool,
+        /// The `If-None-Match` the responder honours for a `304` (§4.5).
+        if_none_match: Option<Vec<u8>>,
+    },
+    /// Steps 3–4 refused the path: the refusal `decide` chose, answered here
+    /// before `admit_ready` — no slot, no queue entry, no descriptor.
+    Answer {
+        /// The status (`400` for a malformed path, `404` for a dotfile).
+        status: u16,
+        /// The `Allow` value, which a head refusal never carries (`400`/`404`
+        /// only, §4.4).
+        allow: Option<&'static [u8]>,
+    },
+}
+
 /// The scheduler's whole state.
 struct Scheduler {
     cfg: SchedulerConfig,
@@ -573,6 +660,13 @@ struct Scheduler {
     ctl_out: Outbound,
     /// The normalised `BLASTIT_SCRIPT_NAME` mount prefix (§6), if any.
     script_name: Option<String>,
+    /// One static root per route, opened by [`run`] before the listeners are
+    /// served: `None` for a route that declares no `[route.static]` (design
+    /// §4.6). A declared root that cannot be opened exits the role.
+    static_roots: Vec<Option<Arc<StaticRoot>>>,
+    /// The sending half of the static read results, cloned into one blocking
+    /// task per read.
+    static_in: mpsc::Sender<StaticRead>,
     started: Instant,
     counter: u64,
     /// Every request that has not been released yet, by http stream id.
@@ -644,6 +738,8 @@ impl Scheduler {
         http_out: Outbound,
         view_in: mpsc::Sender<ViewIn>,
         ctl_out: Outbound,
+        static_roots: Vec<Option<Arc<StaticRoot>>>,
+        static_in: mpsc::Sender<StaticRead>,
     ) -> Self {
         let script_name = cfg.script_name.as_deref().and_then(normalize_script_name);
         let fair_queuing = cfg.fair_queuing;
@@ -661,6 +757,8 @@ impl Scheduler {
             http_out,
             view_in,
             ctl_out,
+            static_roots,
+            static_in,
             script_name,
             started: Instant::now(),
             counter: 0,
@@ -713,11 +811,28 @@ impl Scheduler {
         self.derive_view_cap(false);
         let wanted: Vec<usize> = (0..self.routes.len())
             .filter(|route| self.cfg.eager_spawn || self.routes[*route].prefork)
+            // A route the responder answers on its own has no view to fork:
+            // `Forward` is the only static verdict that reaches the app, so a
+            // pure static route is never spawned, here or by either queue walk
+            // (design §4.6).
+            .filter(|route| self.spawnable(*route))
             .collect();
         for route in wanted {
             self.try_spawn(route)?;
         }
         Ok(())
+    }
+
+    /// Whether a view for `route` can ever serve a request.
+    ///
+    /// A route with `[route.static]` and no way to forward — `spa = true`, or a
+    /// manifest that declares no `app` — is answered by the responder alone, so
+    /// it never gets a view. Every other route can.
+    fn spawnable(&self, route: usize) -> bool {
+        match self.routes.get(route) {
+            Some(route) => route.static_policy.is_none() || route.static_forward,
+            None => false,
+        }
     }
 
     /// Whether the run is over.
@@ -1065,6 +1180,11 @@ impl Scheduler {
         // the view, before the payload is moved into the request, so the
         // headers are never copied out to be read.
         let plan = self.plan_request_body(&head, &resolution);
+        // Design §4.3 steps 3–4, and §4.4's `has_body`: on a route with
+        // `[route.static]` the head is also decoded to segments here — before a
+        // slot, a queue entry or any descriptor — so a `..` or a dotfile is
+        // answered without ever reaching `admit_ready`.
+        let static_head = self.static_head(&head, &resolution);
         // The few head fields routing and the `request` event need, copied out
         // before the raw payload is moved into the request.
         let facts = RequestHead {
@@ -1090,7 +1210,14 @@ impl Scheduler {
             bytes_out: 0,
             body: Vec::new(),
             body_plan: BodyPlan::AllowEmptyOnly,
+            body_plan_error: None,
             body_ready: true,
+            static_pending: false,
+            static_parts: None,
+            static_has_body: false,
+            static_if_none_match: None,
+            static_body: None,
+            pumping: false,
             learn_fallback: false,
             end_seen: false,
             cancelled: false,
@@ -1173,6 +1300,40 @@ impl Scheduler {
                 // and it is the *same* resolution the front end used for
                 // `REMOTE_ADDR`, stamped by the queue with this event's clock.
                 request.flow = flow;
+                // Design §4.4: a route with a policy is admitted at the head,
+                // without waiting for its body. The plan is still computed (a
+                // `Forward` needs it) but its error is *stored*, not answered:
+                // the responder's method/body gate outranks a codec error on a
+                // path it answers.
+                if let Some(static_head) = static_head {
+                    return match static_head {
+                        StaticHead::Answer { status, allow } => {
+                            self.requests.insert(stream_id, request);
+                            self.refuse_static(stream_id, status, allow)
+                        }
+                        StaticHead::Resolve {
+                            segments,
+                            has_body,
+                            if_none_match,
+                        } => {
+                            request.static_pending = true;
+                            request.static_parts = Some(segments);
+                            request.static_has_body = has_body;
+                            request.static_if_none_match = if_none_match;
+                            request.body_plan = match plan {
+                                Ok(plan) => plan,
+                                // Nothing is buffered or transcoded for a
+                                // static answer; the plan's error is what a
+                                // `Forward` answers (§4.4).
+                                Err(_) => BodyPlan::AllowEmptyOnly,
+                            };
+                            request.body_plan_error = plan.err();
+                            request.body_ready = true;
+                            self.requests.insert(stream_id, request);
+                            self.admit_ready(stream_id)
+                        }
+                    };
+                }
                 // `R12`/`R16`: `plan` was decided from the same head, and `Err`
                 // carries the status a body this route will not take is
                 // answered with.
@@ -1209,6 +1370,69 @@ impl Scheduler {
         }
     }
 
+    /// The static head half of design §4.3 (steps 3–4) and §4.4's `has_body`.
+    ///
+    /// Runs while the head is still the borrowed payload, so nothing it returns
+    /// borrows the request: [`Request`] keeps no header list, and this is where
+    /// the one `declares_body` bit and the `If-None-Match` the responder honours
+    /// come from. `None` for a route that declares no `[route.static]`, which
+    /// takes the unchanged path.
+    ///
+    /// A path the decode refuses (`400`) or hides (`404`) is answered here,
+    /// before `admit_ready`: no slot is taken, nothing queues, and no `..` probe
+    /// can turn into a `503` (design §4.3).
+    fn static_head(&self, head: &ReqHeadView<'_>, resolution: &Resolution) -> Option<StaticHead> {
+        let Resolution::Routed { route, .. } = resolution else {
+            return None;
+        };
+        // A route with no policy never reaches the responder, so it pays for
+        // none of this.
+        self.routes.get(*route)?.static_policy.as_ref()?;
+        let headers: Vec<(Vec<u8>, Vec<u8>)> = head
+            .headers()
+            .map(|(name, value)| (name.to_vec(), value.to_vec()))
+            .collect();
+        let has_body = declares_body(&headers);
+        let if_none_match = head
+            .headers()
+            .find(|(name, _)| name.eq_ignore_ascii_case(b"if-none-match"))
+            .map(|(_, value)| value.to_vec());
+        // The request target is bytes, so an invalid one is `Refused(Encoding)`
+        // — a `400` — and never `from_utf8_lossy`, which would turn an invalid
+        // byte into U+FFFD and a forward (design §4.3).
+        let segments = match std::str::from_utf8(head.target()) {
+            Ok(target) => head_segments(target),
+            Err(_) => Err(StaticOutcome::Refused(StaticRefusal::Encoding)),
+        };
+        Some(match segments {
+            Ok(segments) => StaticHead::Resolve {
+                segments,
+                has_body,
+                if_none_match,
+            },
+            Err(outcome) => {
+                let has_app = self
+                    .routes
+                    .get(*route)
+                    .is_some_and(|route| route.static_forward);
+                match decide(outcome, head.method(), has_body, has_app) {
+                    Rewrite::Reject { status, allow } => StaticHead::Answer { status, allow },
+                    // `head_segments` answers only `Refused` or `Hidden`, and
+                    // `decide` rejects both (§4.4): serving or forwarding here
+                    // would be a bug in this build, so the closed answer is a
+                    // refusal — never a file without a slot.
+                    Rewrite::Serve(_) | Rewrite::Forward => {
+                        debug_assert!(false, "a refused static path was not rejected by `decide`");
+                        StaticHead::Answer {
+                            status: 404,
+                            allow: None,
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     /// The `[route.ingress]` plan for a routed request, from its head alone.
     ///
     /// The head is still the raw payload's borrowed view here (see
@@ -1229,7 +1453,13 @@ impl Scheduler {
         let Resolution::Routed { route, .. } = resolution else {
             return Ok(BodyPlan::AllowEmptyOnly);
         };
-        let policy = self.routes.get(*route).and_then(|route| route.ingress);
+        // A route with no `[route.ingress]` may only ever hold an empty body,
+        // and `plan_body` says so from the policy alone: nothing in the head is
+        // read, so the method and the two header `String`s below are not built
+        // for the routes that do not declare ingress at all.
+        let Some(policy) = self.routes.get(*route).and_then(|route| route.ingress) else {
+            return Ok(BodyPlan::AllowEmptyOnly);
+        };
         let method = String::from_utf8_lossy(head.method()).into_owned();
         let content_type = head_header_text(head, b"content-type");
         let content_encoding = head_header_text(head, b"content-encoding");
@@ -1246,7 +1476,7 @@ impl Scheduler {
             });
         plan_body(
             &method,
-            policy,
+            Some(policy),
             content_type.as_deref(),
             content_encoding.as_deref(),
             content_length,
@@ -1255,6 +1485,10 @@ impl Scheduler {
     }
 
     /// Hands a request whose head/body is ready to the admission machinery.
+    ///
+    /// A request to a route with `[route.static]` is admitted by the slot alone
+    /// (design §4.6): its static branch comes before `can_dispatch`, because no
+    /// view exists to be asked.
     fn admit_ready(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         let Some(route) = self
             .requests
@@ -1263,6 +1497,9 @@ impl Scheduler {
         else {
             return Ok(());
         };
+        if self.static_pending(stream_id) {
+            return self.admit_static(stream_id);
+        }
         let retry_after = retry_after_seconds(self.cfg.queue_timeout);
         if self.draining {
             self.reject(
@@ -1288,6 +1525,96 @@ impl Scheduler {
             self.enqueue(stream_id);
             Ok(())
         }
+    }
+
+    /// Admits a request a route with `[route.static]` may answer itself
+    /// (design §4.6): the same bounded queue, `queue_timeout` and `503` +
+    /// `Retry-After` as the view path, with the slot as the only eligibility.
+    fn admit_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        let retry_after = retry_after_seconds(self.cfg.queue_timeout);
+        if self.draining {
+            self.reject(
+                stream_id,
+                503,
+                "Service Unavailable",
+                "draining\n",
+                Outcome::QueueFull,
+                Some(retry_after),
+            )
+        } else if self.can_dispatch_static() {
+            self.dispatch_static(stream_id)
+        } else if self.queue.len() >= self.cfg.queue_size {
+            self.reject(
+                stream_id,
+                503,
+                "Service Unavailable",
+                "queue full\n",
+                Outcome::QueueFull,
+                Some(retry_after),
+            )
+        } else {
+            self.enqueue(stream_id);
+            Ok(())
+        }
+    }
+
+    /// Whether a static answer may take a slot: `slots < max_workers`, with no
+    /// view involved (design §4.6).
+    ///
+    /// Because a static response keeps its slot until its last byte — or its
+    /// read result — this bound is also the reader and descriptor bound: at most
+    /// `max_workers` reads and `max_workers` static descriptors.
+    fn can_dispatch_static(&self) -> bool {
+        self.slots < self.cfg.max_workers
+    }
+
+    /// Whether `stream_id` has matched a static route and not resolved yet.
+    fn static_pending(&self, stream_id: u32) -> bool {
+        self.requests
+            .get(&stream_id)
+            .is_some_and(|request| request.static_pending)
+    }
+
+    /// Whether a static read still owns `stream_id`.
+    ///
+    /// A `pread` cannot be cancelled, so a timed-out or cancelled request keeps
+    /// its slot and its descriptor until the read returns: the result releases
+    /// both, and never the timeout (design §4.6).
+    fn static_read_parked(&self, stream_id: u32) -> bool {
+        self.requests
+            .get(&stream_id)
+            .is_some_and(|request| request.pumping)
+    }
+
+    /// Asks for the view a queued static request may still need, when its route
+    /// can forward.
+    ///
+    /// A pure static route never gets one (design §4.6); a front controller
+    /// route does, so its `Forward` handback can be dispatched as soon as the
+    /// view is `READY`.
+    fn spawn_for_static(&mut self, route: usize) -> Result<(), SchedulerError> {
+        if self
+            .routes
+            .get(route)
+            .is_some_and(|route| route.static_forward)
+            && !self.views.contains_key(&route)
+            && !self.draining
+        {
+            self.try_spawn(route)?;
+        }
+        Ok(())
+    }
+
+    /// The first queued request that still has to resolve against a static root.
+    ///
+    /// Only used by the fair walk, whose ordering is a view-budget decision and
+    /// has nothing to say about a request that never touches a view.
+    fn first_static_queued(&self) -> Option<u32> {
+        self.queue.ids().into_iter().find(|stream_id| {
+            self.requests.get(stream_id).is_some_and(|request| {
+                request.static_pending && request.static_parts.is_some() && request.route.is_some()
+            })
+        })
     }
 
     /// How many requests are still collecting a structured body.
@@ -1552,6 +1879,12 @@ impl Scheduler {
             let head = Frame::ReqHead(head)
                 .to_raw(id)
                 .map_err(SchedulerError::Frame)?;
+            // A request already waiting for a slot keeps its one queue entry,
+            // its `queued_since` and its timeout: `enqueue` would list a FIFO
+            // id a second time (the `VecDeque` does not dedupe), so the
+            // transcoded body is what the walk will hand over, not a second
+            // admission (design §4.6: "no re-drive").
+            let queued = self.queue.contains(stream_id);
             if let Some(request) = self.requests.get_mut(&stream_id) {
                 request.raw = Some(head);
                 request.body = if transcoded.bytes.is_empty() {
@@ -1561,7 +1894,12 @@ impl Scheduler {
                 };
                 request.end_seen = true;
                 request.body_ready = true;
-                request.queued_since = None;
+                if !queued {
+                    request.queued_since = None;
+                }
+            }
+            if queued {
+                return Ok(());
             }
             return self.admit_ready(stream_id);
         }
@@ -1603,6 +1941,12 @@ impl Scheduler {
         self.emit_request(stream_id);
         if view.is_none() {
             // Never dispatched: it leaves the queue, and no slot was ever held.
+            // A static read that is still parked keeps both the slot and the
+            // descriptor until it returns (design §4.6).
+            if self.static_read_parked(stream_id) {
+                return Ok(());
+            }
+            self.release_static_slot(stream_id);
             self.release(stream_id);
         }
         Ok(())
@@ -1610,6 +1954,9 @@ impl Scheduler {
 
     /// http granted the stream more response-body credit (§3.1): the view gets
     /// to send that much more.
+    ///
+    /// A static answer has no view to tell: the credit is what the pump was
+    /// waiting for, so it is woken directly.
     fn client_window(&mut self, stream_id: u32, bytes: u32) -> Result<(), SchedulerError> {
         let Some(request) = self.requests.get(&stream_id) else {
             self.dropped += 1;
@@ -1624,7 +1971,7 @@ impl Scheduler {
         }
         match view {
             Some((key, id)) => self.view_push(key, id, Frame::Window { bytes }),
-            None => Ok(()),
+            None => self.pump_static(stream_id),
         }
     }
 
@@ -1669,6 +2016,12 @@ impl Scheduler {
     /// requests are considered in arrival order, and one that cannot be served
     /// — its route's view is not ready — is skipped rather than allowed to hold
     /// up the ones behind it.
+    ///
+    /// A queued request a static route matched is taken through
+    /// [`Scheduler::dispatch_static`] once a slot is free, never through the
+    /// view walk: that is what makes "more than `max_workers` static streams
+    /// complete in waves" true, and it is why a pure static route never reaches
+    /// [`Scheduler::try_spawn`] (design §4.6).
     fn dispatch_queued(&mut self) -> Result<(), SchedulerError> {
         if self.queue.is_fair() {
             return self.dispatch_queued_fair();
@@ -1687,6 +2040,19 @@ impl Scheduler {
             };
             if self.slots >= self.cfg.max_workers {
                 return Ok(());
+            }
+            if self.static_pending(stream_id) {
+                if !self.can_dispatch_static() {
+                    self.spawn_for_static(route)?;
+                    continue;
+                }
+                self.dispatch_static(stream_id)?;
+                // A `Forward` hands the slot back and puts the request in the
+                // queue again as an ordinary one: it leaves for its view in
+                // this same walk, or nothing would fork one for it.
+                if !self.queue.contains(stream_id) {
+                    continue;
+                }
             }
             if self.can_dispatch(route) {
                 self.dispatch(stream_id)?;
@@ -1717,6 +2083,17 @@ impl Scheduler {
         loop {
             if self.slots >= self.cfg.max_workers {
                 return Ok(());
+            }
+            // A static request never competes for a view's budget, which is the
+            // only thing the fair order decides: its eligibility is the slot
+            // (`can_dispatch_static`), so it is admitted here and only the view
+            // path below is ordered (design §4.6). A `Forward` clears its
+            // `static_pending` first, so a handback is ordered like any other
+            // request for that route.
+            if let Some(stream_id) = self.first_static_queued() {
+                self.queue.remove(stream_id);
+                self.dispatch_static(stream_id)?;
+                continue;
             }
             let mut best: Option<(NextFlow, u32)> = None;
             for route in self.queue.routes() {
@@ -1868,6 +2245,412 @@ impl Scheduler {
             .and_then(|view| view.out.clone())
     }
 
+    // ---------------------------------------------------------------- static
+
+    /// Admits one request to a route with `[route.static]` (design §4.6).
+    ///
+    /// This is the one function that takes a static admission slot: it sets
+    /// `slots`, `view = None`, `dispatched_at` and `deadline` exactly as
+    /// [`Scheduler::dispatch`] does — or `next_deadline` and `expire_requests`
+    /// would never fire for it — and then runs the filesystem half of design
+    /// §4.3 (steps 5–11) to produce the one verdict `decide` settles.
+    fn dispatch_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        let Some(request) = self.requests.get_mut(&stream_id) else {
+            return Ok(());
+        };
+        let Some(route) = request.route else {
+            return Ok(());
+        };
+        let Some(parts) = request.static_parts.take() else {
+            return Ok(());
+        };
+        let method = request.head.method.clone();
+        let has_body = request.static_has_body;
+        let if_none_match = request.static_if_none_match.take();
+        debug_assert!(
+            !request.slots,
+            "a static request takes exactly one admission slot"
+        );
+        let now = Instant::now();
+        request.queued_since = None;
+        request.dispatched_at = Some(now);
+        request.deadline = Some(now + self.cfg.request_timeout);
+        request.view = None;
+        request.static_pending = false;
+        request.slots = true;
+        self.queue.remove(stream_id);
+        self.slots += 1;
+
+        let Some(root) = self
+            .static_roots
+            .get(route)
+            .and_then(Option::as_ref)
+            .cloned()
+        else {
+            // A route with a policy and no root is a boot-order bug; fail
+            // closed rather than answer a file this role never proved it can
+            // read.
+            return self.refuse_static(stream_id, 404, None);
+        };
+        let borrowed: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let outcome = root.resolve(&borrowed);
+        let static_forward = self
+            .routes
+            .get(route)
+            .is_some_and(|route| route.static_forward);
+        match decide(outcome, &method, has_body, static_forward) {
+            Rewrite::Serve(file) => self.serve_static(
+                stream_id,
+                root.as_ref(),
+                file,
+                &method,
+                if_none_match.as_deref(),
+            ),
+            Rewrite::Reject { status, allow } => self.refuse_static(stream_id, status, allow),
+            Rewrite::Forward => self.forward_static(stream_id),
+        }
+    }
+
+    /// Pushes a static head and starts its body pump (design §4.6).
+    ///
+    /// Only the status and the header **names** are ever recorded anywhere:
+    /// `StaticResponse` has no `Debug` on purpose (`MB.2.4.2`), and a header
+    /// value may be content-derived, so the response is never formatted.
+    fn serve_static(
+        &mut self,
+        stream_id: u32,
+        root: &StaticRoot,
+        file: StaticFile,
+        method: &[u8],
+        if_none_match: Option<&[u8]>,
+    ) -> Result<(), SchedulerError> {
+        let StaticResponse {
+            status,
+            reason,
+            headers,
+            body,
+        } = root.respond(file, method, if_none_match);
+        let has_body = body.is_some();
+        let head = RespHead {
+            status,
+            reason: reason.as_bytes().to_vec(),
+            headers,
+        };
+        self.http_push(stream_id, Frame::RespHead(head))?;
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.head_sent = true;
+            request.status = status;
+            request.static_body = body;
+            // Nothing of the app's plan survives an answer: a served path never
+            // buffers, transcodes or forwards, whatever the head declared.
+            request.body_plan = BodyPlan::AllowEmptyOnly;
+            request.body_plan_error = None;
+        }
+        if has_body {
+            self.pump_static(stream_id)
+        } else {
+            // `HEAD` and `304`: the head is the whole answer, and no read is
+            // ever spawned for it.
+            self.finish_static(stream_id)
+        }
+    }
+
+    /// Hands the slot back and re-enters the ordinary path (design §4.6).
+    ///
+    /// A `Forward` is the only verdict that reaches the app, and it must release
+    /// its static slot first: the view path takes its own, from its own queue
+    /// dispatch. That is the only way a front controller's *first* request can
+    /// spawn its view — a slot-holder that never entered the queue could not.
+    fn forward_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        self.release_static_slot(stream_id);
+        let (error, buffered_wait) = match self.requests.get_mut(&stream_id) {
+            Some(request) => {
+                request.static_pending = false;
+                // The view queue measures its own timeout from its own
+                // dispatch, so this request carries neither of these any more.
+                request.dispatched_at = None;
+                request.deadline = None;
+                (
+                    request.body_plan_error.take(),
+                    // Only a body that has NOT arrived yet is waited for: a
+                    // `REQ_END` that landed while the request was queued has
+                    // already transcoded it, so there is nothing left to wait
+                    // for and the request must fall through to `admit_ready`
+                    // (otherwise nothing would ever re-drive it and the queue
+                    // timeout would answer a request that was ready).
+                    matches!(request.body_plan, BodyPlan::Buffer { .. }) && !request.end_seen,
+                )
+            }
+            None => return Ok(()),
+        };
+        self.queue.remove(stream_id);
+        if let Some(status) = error {
+            // The stored codec error is the app path's own answer, exactly as
+            // before this route gained a policy (design §4.4).
+            return self.refuse_body(stream_id, status);
+        }
+        if buffered_wait {
+            // A structured body is collected and transcoded before the view
+            // sees a byte; `expire_queue` bounds a client that never ends it,
+            // and the slot was handed back above. The count of half-bodies a
+            // route may hold is the app path's own bound, so a static front
+            // controller cannot admit more of them than any other route: that
+            // path ([`Scheduler::begin_raw`]) marks the request
+            // `body_ready = false` *before* it asks `buffering_count()`, so the
+            // request being admitted counts itself and `queue_size = N` means
+            // `N - 1` others. Asking first and clearing after would admit one
+            // more here than on any other route.
+            if let Some(request) = self.requests.get_mut(&stream_id) {
+                request.body_ready = false;
+            }
+            if self.buffering_count() >= self.cfg.queue_size {
+                return self.reject(
+                    stream_id,
+                    503,
+                    "Service Unavailable",
+                    "queue full\n",
+                    Outcome::QueueFull,
+                    Some(retry_after_seconds(self.cfg.queue_timeout)),
+                );
+            }
+            if let Some(request) = self.requests.get_mut(&stream_id) {
+                request.queued_since = Some(Instant::now());
+            }
+            return Ok(());
+        }
+        self.admit_ready(stream_id)
+    }
+
+    /// Pumps one static body on the existing credit/window path (design §4.6).
+    ///
+    /// Steps 1–3 of the design, in order: a body with nothing left ends the
+    /// response **before** any read; a read in flight is waited for; otherwise,
+    /// with credit available, the [`StaticBody`] moves into one blocking
+    /// `pread`, whose result comes back over `static_in`. Nothing here loops or
+    /// spawns a thread per request: one read is ever outstanding per slot, and
+    /// `slots <= max_workers` is therefore the reader bound as well.
+    fn pump_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        let Some(request) = self.requests.get(&stream_id) else {
+            return Ok(());
+        };
+        if request.complete {
+            return Ok(());
+        }
+        let Some(body) = request.static_body.as_ref() else {
+            return Ok(());
+        };
+        let remaining = body.len.saturating_sub(body.offset);
+        if remaining == 0 {
+            // Step 1: a zero-length file is an ordinary `200` with
+            // `Content-Length: 0` and no body frame; the slot goes back here,
+            // before any read.
+            return self.finish_static(stream_id);
+        }
+        if request.pumping || request.download_credit == 0 {
+            // Step 3: wait for the read result or for `WINDOW`.
+            return Ok(());
+        }
+        // Step 2: one `pread` of at most the remaining bytes, the credit http
+        // granted, one frame and one chunk — never more than any of them.
+        let want = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(usize::try_from(request.download_credit).unwrap_or(usize::MAX))
+            .min(self.cfg.frame_limits.max_payload())
+            .min(STATIC_CHUNK_BYTES);
+        if want == 0 {
+            // A read of nothing can never advance the offset: it would push an
+            // empty frame and ask again, leaving the response to be answered by
+            // `request_timeout` instead of the read that had already failed.
+            // Fail closed, on the same rule as a short read (design §4.6).
+            return self.abort_static(stream_id);
+        }
+        let body = match self.requests.get_mut(&stream_id) {
+            Some(request) if request.static_body.is_some() => {
+                request.pumping = true;
+                request.static_body.take()
+            }
+            _ => None,
+        };
+        let Some(body) = body else {
+            return Ok(());
+        };
+        let sender = self.static_in.clone();
+        tokio::task::spawn_blocking(move || {
+            // A `pread` on a stalled mount cannot be cancelled, which is why the
+            // body travels with the read: the scheduler's slot stays charged
+            // until this result arrives.
+            let file = std::fs::File::from(body.file);
+            let mut buf = vec![0u8; want];
+            let result = file.read_at(&mut buf, body.offset);
+            let file: OwnedFd = file.into();
+            let body = StaticBody {
+                file,
+                offset: body.offset,
+                len: body.len,
+            };
+            // The scheduler may be gone (a shutdown): the frame is dropped with
+            // the body then, which closes the descriptor.
+            let _ = sender.blocking_send(StaticRead {
+                stream_id,
+                body,
+                want,
+                result: result.map(|read| {
+                    buf.truncate(read);
+                    buf
+                }),
+            });
+        });
+        Ok(())
+    }
+
+    /// One finished static read: push its bytes, or abort the response.
+    ///
+    /// The short-read rule is design §4.6's: a body is never truncated under a
+    /// `Content-Length` the head already promised, so an error or fewer bytes
+    /// than were asked for is `RespAbort` and never a silently short `200`.
+    fn on_static_read(&mut self, read: StaticRead) -> Result<(), SchedulerError> {
+        let stream_id = read.stream_id;
+        let forward = match self.requests.get_mut(&stream_id) {
+            Some(request) => {
+                // The read result is what clears `pumping`: only now may the
+                // slot be handed back (design §4.6).
+                request.pumping = false;
+                !request.complete
+            }
+            None => {
+                // A request that is already gone: nothing may answer it, and
+                // its body is dropped with the descriptor.
+                self.dropped += 1;
+                return Ok(());
+            }
+        };
+        let mut body = read.body;
+        let bytes = match read.result {
+            Ok(bytes) if forward && bytes.len() == read.want => bytes,
+            _ => {
+                drop(body);
+                if forward {
+                    return self.abort_static(stream_id);
+                }
+                return self.release_finished_static(stream_id);
+            }
+        };
+        let count = bytes.len() as u64;
+        body.offset = body.offset.saturating_add(count);
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.static_body = Some(body);
+            request.download_credit = request
+                .download_credit
+                .saturating_sub(u32::try_from(bytes.len()).unwrap_or(u32::MAX));
+            request.bytes_out = request.bytes_out.saturating_add(count);
+        }
+        self.http_push(stream_id, Frame::RespBody(bytes))?;
+        self.pump_static(stream_id)
+    }
+
+    /// Ends a static response whose bytes are all out: `RESP_END`, the slot and
+    /// the request.
+    fn finish_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        self.http_push(stream_id, Frame::RespEnd)?;
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.complete = true;
+            request.static_body = None;
+            if !request.cancelled {
+                request.outcome = Outcome::Ok;
+            }
+        }
+        self.mark_finished(stream_id);
+        self.release_finished_static(stream_id)
+    }
+
+    /// Aborts a static response whose bytes cannot be delivered in full.
+    ///
+    /// The head is always out before a read is spawned, so this is always a
+    /// `RESP_ABORT` and never a second status. §8.1's outcome list is closed and
+    /// has no "the responder failed" member, so this reports `view_died`: the
+    /// response died mid-stream, exactly as a view's thread would.
+    fn abort_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        self.http_push(
+            stream_id,
+            Frame::RespAbort {
+                reason: STATIC_READ_FAILED.to_string(),
+            },
+        )?;
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.complete = true;
+            request.static_body = None;
+            request.outcome = Outcome::ViewDied;
+        }
+        self.mark_finished(stream_id);
+        self.release_finished_static(stream_id)
+    }
+
+    /// Charges, logs and releases one static request that is over.
+    ///
+    /// The slot goes back exactly once — [`Scheduler::release_static_slot`] is
+    /// the only place that decrements it, and it is a no-op on a request that
+    /// already let go — and the request is only dropped when it did.
+    fn release_finished_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        // The last byte — or the abort — is where the cost is fixed, exactly as
+        // a streamed view response does at its `RESP_END`.
+        self.charge(stream_id);
+        self.emit_request(stream_id);
+        if self.release_static_slot(stream_id) {
+            self.release(stream_id);
+        }
+        Ok(())
+    }
+
+    /// Hands a static admission slot back, once.
+    ///
+    /// The only place `slots` is decremented for a static answer. `false` when
+    /// the request holds no slot, or when a read is still parked on it: the
+    /// read result owns the transition then, so a timeout or a cancellation can
+    /// never free a descriptor that is still in use (design §4.6).
+    fn release_static_slot(&mut self, stream_id: u32) -> bool {
+        let Some(request) = self.requests.get_mut(&stream_id) else {
+            return false;
+        };
+        if !slot_releasable(request.slots, request.pumping) {
+            return false;
+        }
+        request.slots = false;
+        self.slots = self.slots.saturating_sub(1);
+        true
+    }
+
+    /// Answers a request the static responder refused (design §4.4).
+    ///
+    /// The one helper for all four refusals: `canned` supplies the reason and
+    /// body, `Allow` is added only for the `405` the caller chose (with its one
+    /// value, `GET, HEAD`), and `Cache-Control: no-store` is added to every one
+    /// of them.
+    fn refuse_static(
+        &mut self,
+        stream_id: u32,
+        status: u16,
+        allow: Option<&'static [u8]>,
+    ) -> Result<(), SchedulerError> {
+        // The slot goes back before the status is written, so the answer never
+        // holds admission capacity while it is being framed.
+        self.release_static_slot(stream_id);
+        let (reason, body) = canned(status);
+        let mut extra: Vec<(&[u8], &[u8])> = Vec::with_capacity(2);
+        if let Some(allow) = allow {
+            extra.push((&b"Allow"[..], allow));
+        }
+        extra.push((&b"Cache-Control"[..], &b"no-store"[..]));
+        self.respond_with(stream_id, status, reason, body, None, &extra)?;
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.complete = true;
+            request.outcome = Outcome::Unmatched;
+        }
+        self.mark_finished(stream_id);
+        self.emit_request(stream_id);
+        self.release(stream_id);
+        Ok(())
+    }
+
     // ---------------------------------------------------------------- timers
 
     /// Rejects queued requests whose wait exceeded `BLASTIT_QUEUE_TIMEOUT`.
@@ -1996,6 +2779,16 @@ impl Scheduler {
             self.emit_request(stream_id);
             if let Some((key, id)) = view {
                 self.view_push(key, id, Frame::Cancel)?;
+            } else {
+                // A view-less request has no `DONE` coming. Its static slot is
+                // handed back here, unless a read is parked on it: that read
+                // cannot be cancelled, so its result releases the slot and the
+                // descriptor (design §4.6).
+                if self.static_read_parked(stream_id) {
+                    continue;
+                }
+                self.release_static_slot(stream_id);
+                self.release(stream_id);
             }
         }
         for key in affected {
@@ -2266,6 +3059,12 @@ impl Scheduler {
     /// killing in a loop.
     fn try_spawn(&mut self, route: usize) -> Result<(), SchedulerError> {
         if self.views.contains_key(&route) {
+            return Ok(());
+        }
+        if !self.spawnable(route) {
+            // A route the responder answers on its own never gets a view
+            // (design §4.6): asking init for one would fork a process no
+            // request could ever be dispatched to.
             return Ok(());
         }
         if let Some(until) = self.backoff.get(&route).copied() {
@@ -2566,6 +3365,24 @@ impl Scheduler {
         body: &str,
         retry_after: Option<u64>,
     ) -> Result<(), SchedulerError> {
+        self.respond_with(stream_id, status, reason, body, retry_after, &[])
+    }
+
+    /// [`Scheduler::respond`], with headers the caller adds after the two the
+    /// canned answers always carry.
+    ///
+    /// The static refusals are the one caller: `Allow` on the `405`, and
+    /// `Cache-Control: no-store` on all four (design §4.4). The app path passes
+    /// no extra header, so its bytes are unchanged.
+    fn respond_with(
+        &mut self,
+        stream_id: u32,
+        status: u16,
+        reason: &str,
+        body: &str,
+        retry_after: Option<u64>,
+        extra: &[(&[u8], &[u8])],
+    ) -> Result<(), SchedulerError> {
         let mut headers = vec![
             (
                 b"Content-Type".to_vec(),
@@ -2578,6 +3395,9 @@ impl Scheduler {
         ];
         if let Some(seconds) = retry_after {
             headers.push((b"Retry-After".to_vec(), seconds.to_string().into_bytes()));
+        }
+        for (name, value) in extra {
+            headers.push((name.to_vec(), value.to_vec()));
         }
         let head = RespHead {
             status,
@@ -3091,6 +3911,21 @@ fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+/// Whether a static admission slot may be handed back now (design §4.6).
+///
+/// `holds_slot && !pumping`: a request that never took a slot has nothing to
+/// give back, and one whose `pread` is still parked keeps it until the read
+/// result arrives — a `pread` on a stalled mount cannot be cancelled, so
+/// releasing it earlier would free the slot (and the descriptor) while the
+/// blocking task still owns it.
+///
+/// It is the one predicate [`Scheduler::release_static_slot`] consults, and the
+/// timeout and cancellation paths reach the slot through that function, so a
+/// figure that disagrees with this one cannot free a parked request.
+fn slot_releasable(holds_slot: bool, pumping: bool) -> bool {
+    holds_slot && !pumping
+}
+
 /// The `Retry-After` a `503` carries, in seconds: §2.4's queue timeout rounded
 /// up, never less than one second (§8: "`503` with `Retry-After`").
 ///
@@ -3107,10 +3942,16 @@ fn retry_after_seconds(timeout: Duration) -> u64 {
 }
 
 /// The reason phrase and body of a status the scheduler writes itself.
+///
+/// `405` is the static responder's method gate (`rewrite::decide`, design §4.4)
+/// and the only status here that is not also an app-path refusal: a `POST` to a
+/// path the responder serves is answered `Method Not Allowed`, with the one
+/// `Allow: GET, HEAD` the rejection helper adds.
 fn canned(status: u16) -> (&'static str, &'static str) {
     match status {
         400 => ("Bad Request", "bad request\n"),
         404 => ("Not Found", "not found\n"),
+        405 => ("Method Not Allowed", "method not allowed\n"),
         413 => ("Content Too Large", "content too large\n"),
         502 => ("Bad Gateway", "bad gateway\n"),
         503 => ("Service Unavailable", "unavailable\n"),
@@ -3252,7 +4093,36 @@ pub async fn run<C: CtlChannel + Send + 'static>(
     // Held for the whole run, so `http_in_rx` only ever ends with an explicit
     // `HttpIn::Closed`.
     let _keepalive = http_in_tx;
-    let mut scheduler = Scheduler::new(cfg, routes, table, emit, http_out, view_in_tx, ctl_out);
+    // One static root per route, opened here as the scheduler's uid and before
+    // a single request is served: a root that cannot be opened is a broken
+    // declaration, not a degraded answer, so it exits the role (design §4.6,
+    // §4.7).
+    let mut static_roots: Vec<Option<Arc<StaticRoot>>> = Vec::with_capacity(routes.len());
+    for route in &routes {
+        match route.static_policy.as_ref() {
+            Some(policy) => {
+                let mut root = StaticRoot::open(&cfg.manifest_dir, policy)
+                    .map_err(|error| SchedulerError::protocol(error.to_string()))?;
+                // The one source of the per-file ceiling: no environment
+                // variable and no manifest key (design §4.6).
+                root.max_bytes = cfg.static_max_bytes;
+                static_roots.push(Some(Arc::new(root)));
+            }
+            None => static_roots.push(None),
+        }
+    }
+    let (static_in, mut static_in_rx) = mpsc::channel(STATIC_IN_CAPACITY);
+    let mut scheduler = Scheduler::new(
+        cfg,
+        routes,
+        table,
+        emit,
+        http_out,
+        view_in_tx,
+        ctl_out,
+        static_roots,
+        static_in,
+    );
     scheduler.start()?;
 
     loop {
@@ -3265,11 +4135,33 @@ pub async fn run<C: CtlChannel + Send + 'static>(
             },
             Some(event) = http_in_rx.recv() => scheduler.on_http(event)?,
             Some(event) = view_in_rx.recv() => scheduler.on_view(event)?,
+            Some(read) = static_in_rx.recv() => scheduler.on_static_read(read)?,
             () = sleep_until(deadline) => {}
         }
         scheduler.pump()?;
         if scheduler.done() {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::slot_releasable;
+
+    /// Design §4.6's table for the one predicate that frees a static slot.
+    ///
+    /// The protected `critical_rewrite.rs` cannot reach a private item, and
+    /// `lib.rs` (which would have to export it) is outside this leaf's paths,
+    /// so the three rows live here: a request that holds a slot and has no read
+    /// parked gives it back; one with a read parked gives it back only when
+    /// that read returns; one that never took a slot gives back nothing.
+    #[test]
+    fn a_static_slot_is_releasable_only_when_its_read_is_not_parked() {
+        assert!(slot_releasable(true, false), "(true, false) → true");
+        assert!(!slot_releasable(true, true), "(true, true) → false");
+        assert!(!slot_releasable(false, false), "(false, false) → false");
+        assert!(!slot_releasable(false, true), "(false, true) → false");
     }
 }

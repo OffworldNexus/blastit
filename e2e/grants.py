@@ -7,6 +7,20 @@ used by several routes goes to the "session" group, attached to those routes;
 the rest is inline.
 Statements seen only on paths listed in DENY_PATHS are left out on purpose:
 those endpoints exist to prove that ungranted SQL is refused.
+
+Two things are fixed here rather than harvested, because what they must *lack*
+is the point:
+
+* `deny` is a `[route.db]` with `queries = []` and **no group**. The route names
+  the proxy, so it still gets a listener of its own; the listener's allowlist is
+  empty, and blastit's proxy refuses every statement on it with SQLSTATE
+  `42501`. `e2e/scenario.py` sends one ordinary statement on it and checks that
+  the refusal is the proxy's (a `sql.denied` event), never the database's own
+  permissions.
+* every other route attaches the `connection` group **itself** (`groups =
+  ["connection"]`) instead of taking it from the top-level key: that key attaches
+  a group to *every* route, which would hand the `deny` route the connection
+  statements and make its empty grant a listener with two statements in it.
 """
 
 import json
@@ -24,14 +38,29 @@ ROUTES = [
         True,
         False,
     ),
-    ("debug", [r"/debug/env/", r"/debug/caps/", r"/debug/egress/"], ["GET"], False, False),
+    (
+        "debug",
+        [r"/debug/env/", r"/debug/request/", r"/debug/caps/", r"/debug/egress/"],
+        ["GET"],
+        False,
+        False,
+    ),
     ("sql", [r"/debug/sql/"], ["GET"], False, False),
     # The only route that may reach the network (§7.3), and it has no grants:
     # the probe opens no database connection at all.
     ("egress", [r"/egress/probe/"], ["GET"], False, True),
+    # The route whose grant is *explicitly* empty — `queries = []` and no group —
+    # so its listener exists and refuses everything (SQLSTATE 42501).
+    ("deny", [r"/deny/sql/"], ["GET"], False, False),
     ("fallback", [r".*"], None, False, False),
 ]
-DENY_PATHS = {"/notes/peek/", "/notes/sql/", "/debug/sql/"}
+DENY_PATHS = {"/notes/peek/", "/notes/sql/", "/debug/sql/", "/deny/sql/"}
+#: The routes that take no group at all, written with `queries = []`: their
+#: empty grant is the assertion, so nothing may fill it in (see the docstring).
+EMPTY_GRANT = {"deny"}
+#: The group every other route attaches by name — the connection-setup
+#: statements, which belong to whichever route opens the connection.
+CONNECTION_GROUP = "connection"
 # The routes that take a request body, and the codec it is validated and
 # re-encoded with: Django's login, logout, note-add and note-delete forms are
 # `application/x-www-form-urlencoded` (docs/frameworks/django.md).
@@ -46,8 +75,12 @@ HEADER = """\
 # The routes the scenario posts a form to declare `[route.ingress] body =
 # "form"`: a body on a route with no codec is a `413` (ADR-0006), so leaving it
 # out fails the scenario at the login form rather than at the database.
+#
+# Every route attaches the `connection` group itself instead of taking it from a
+# top-level `groups` key: that key attaches a group to *every* route, and the
+# `deny` route below must take none — its `[route.db] queries = []` is the
+# assertion (an empty allowlist refuses every statement with SQLSTATE 42501).
 version = 1
-groups = ["connection"]
 
 [proxy.db]
 protocol = "postgresql"
@@ -86,9 +119,13 @@ def main():
 
     granted = {}
     for route, stmts in per_route.items():
-        granted[route] = [sql for sql, paths in stmts.items() if not paths <= DENY_PATHS]
+        granted[route] = [
+            sql for sql, paths in stmts.items() if not paths <= DENY_PATHS
+        ]
     order = [q for r in granted for q in granted[r]]
-    shared = [q for q in dict.fromkeys(order) if sum(q in granted[r] for r in granted) >= 2]
+    shared = [
+        q for q in dict.fromkeys(order) if sum(q in granted[r] for r in granted) >= 2
+    ]
 
     out = [HEADER]
     if shared:
@@ -100,17 +137,25 @@ def main():
         out.append("path = [" + ", ".join(f"'{p}'" for p in patterns) + "]")
         if methods:
             out.append("methods = [" + ", ".join(f'"{m}"' for m in methods) + "]")
+        attached = [] if name in EMPTY_GRANT else [CONNECTION_GROUP]
         if any(q in shared for q in granted[name]):
-            out.append('groups = ["session"]')
+            attached.append("session")
+        if attached:
+            out.append("groups = [" + ", ".join(f'"{g}"' for g in attached) + "]")
         if egress:
             out.append("egress = true")
         inline = [q for q in granted[name] if q not in shared] + EXTRA.get(name, [])
-        if inline or tx:
+        if inline or tx or name in EMPTY_GRANT:
             out.append("[route.db]")
             if tx:
                 out.append("transaction_control = true")
             if inline:
                 out.append(f"queries = {toml_list(inline)}")
+            elif name in EMPTY_GRANT:
+                # Written out, not left off: the route declares the proxy with a
+                # grant of nothing, so blastit gives it a listener that refuses
+                # every statement instead of no listener at all.
+                out.append("queries = []")
         if name in INGRESS:
             out.append("[route.ingress]")
             out.append(f'body = "{INGRESS[name]}"')

@@ -113,6 +113,53 @@ mod tests {
     }
 
     #[test]
+    fn a_reinserted_key_counts_as_a_use_and_evicts_nothing() {
+        // Storing a value under a key that is already there is a use of that
+        // key: it neither evicts anything nor leaves the cache over capacity,
+        // and the *other* key becomes the one an eviction takes.
+        let mut cache: Lru<u32, u32> = Lru::new(2);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(1, 11);
+        assert_eq!(cache.len(), 2, "the re-insert added no entry");
+        cache.insert(3, 30);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            cache.get(&2),
+            None,
+            "2 is the least recently used, because 1 was used again"
+        );
+        assert_eq!(cache.get(&1), Some(&11), "the stored value is replaced");
+        assert_eq!(cache.get(&3), Some(&30));
+    }
+
+    #[test]
+    fn a_capacity_of_one_keeps_only_the_last_key() {
+        let mut cache: Lru<u32, u32> = Lru::new(1);
+        cache.insert(1, 10);
+        assert_eq!(cache.len(), 1);
+        cache.insert(2, 20);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(&1), None);
+        assert_eq!(cache.get(&2), Some(&20));
+    }
+
+    #[test]
+    fn a_key_that_is_not_found_is_never_inserted() {
+        // A miss is not a use: it creates no entry and leaves the order an
+        // eviction reads exactly as it was.
+        let mut cache: Lru<u32, u32> = Lru::new(2);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        assert_eq!(cache.get(&99), None);
+        assert_eq!(cache.len(), 2, "a miss stored nothing");
+        cache.insert(3, 30);
+        assert_eq!(cache.get(&1), None, "1 is still the least recently used");
+        assert_eq!(cache.get(&2), Some(&20));
+        assert_eq!(cache.get(&3), Some(&30));
+    }
+
+    #[test]
     fn a_zero_capacity_cache_stores_nothing() {
         let mut cache: Lru<u32, u32> = Lru::new(0);
         cache.insert(1, 10);

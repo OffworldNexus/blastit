@@ -22,6 +22,12 @@
 //!   literal, and every transaction-control denial, names `observe` instead, so
 //!   every `add_query` this engine emits passes
 //!   [`Manifest::parse_and_validate`] once written (`R33`);
+//! * a grantable statement that is the driver's own session setup — `SELECT
+//!   set_config('TimeZone', $?, false)`, `SET …`, `SHOW …` — names `add_group`
+//!   and a `[group.connection.<proxy>]` table instead of one route's `queries`:
+//!   it runs on whichever route opens the connection first, so a per-route
+//!   grant would leave every other route denying it, so the hint is the group
+//!   one every route attaches (`MA.8`);
 //! * SQL under [`ObsTarget::Unrouted`] counts towards `statements`/`denied`
 //!   and never produces a route-less `missing_grant` (`R32`).
 //!
@@ -52,7 +58,7 @@ use blastit_ingress::{
 };
 use blastit_manifest::edit::{ManifestEdits, ProposedGrant, ProposedRoute};
 use blastit_manifest::{Grant, Manifest, PgGrant, ProxyName, RoutingTable};
-use blastit_sqlpolicy::{Allowlist, normalize};
+use blastit_sqlpolicy::{Allowlist, KNOWN_STATIC_SETUP_SQL, is_introspection_setup_sql, normalize};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -227,9 +233,11 @@ pub enum Severity {
 
 /// The machine-readable `fix` object of a finding.
 ///
-/// `action` is one of the closed set of `R38`; `to` names the manifest table to
-/// edit, `codecs`/`allow_raw` an ingress declaration, and `unsafe` marks the
-/// destructive `remove_query`/`remove_route` actions.
+/// `action` is one of the closed set of `R38` — `add_query`, its group-scoped
+/// twin `add_group`, `remove_query`, `add_route`, `remove_route`, `add_test`,
+/// `declare_ingress`, `fix_ingress` and `observe`; `to` names the manifest
+/// table to edit, `codecs`/`allow_raw` an ingress declaration, and `unsafe`
+/// marks the destructive `remove_query`/`remove_route` actions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Fix {
     /// The closed action name.
@@ -275,6 +283,15 @@ impl Fix {
         Self {
             to: Some(to),
             ..Self::new("add_query")
+        }
+    }
+
+    /// The connection-setup hint: a group every route attaches, because the
+    /// statement runs on whichever route opens the connection first.
+    fn add_group(to: String) -> Self {
+        Self {
+            to: Some(to),
+            ..Self::new("add_group")
         }
     }
 
@@ -325,7 +342,7 @@ pub enum Finding {
         proxy: String,
         /// The normalised statement, or the transaction-control label.
         sql: String,
-        /// `add_query` when bootable, `observe` otherwise.
+        /// `add_query`, `add_group` for connection setup, or `observe`.
         fix: Fix,
     },
     /// A grant nothing used (`R34`).
@@ -470,6 +487,30 @@ pub struct Report {
 }
 
 impl Report {
+    /// The `check` document for a manifest whose every route is static (`R14`).
+    ///
+    /// There is no suite to run, and no request any in-process suite could make
+    /// against a static route: the responder answers before anything reaches a
+    /// view. So every count is zero but the one the manifest answers —
+    /// `routes.total` — and `findings` is empty: a root the run never requested
+    /// is a warning on stderr ([`unrequested_static_roots`]), never a finding
+    /// and never a reason to fail. The shape is the same document a run with an
+    /// app prints, so `--json` and the Python contract stay one schema.
+    pub fn all_static(manifest: &Manifest) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            ok: true,
+            requests: 0,
+            statements: 0,
+            routes: RouteCounts {
+                total: manifest.route_count() as u64,
+                exercised: 0,
+            },
+            proxies: BTreeMap::new(),
+            findings: Vec::new(),
+        }
+    }
+
     /// Renders the report as pretty-printed JSON.
     ///
     /// # Errors
@@ -641,10 +682,16 @@ pub fn evaluate(manifest: &Manifest, observations: &CheckObsV1) -> Result<Report
         } else if let ObsVerdict::Query { normalized } = &statement.verdict
             && !normalized.contains('\u{2026}')
         {
-            (
-                normalized.clone(),
-                Fix::add_query(format!("[route.{proxy}].queries")),
-            )
+            // A connection-setup statement is not a route's statement: it runs
+            // on whichever route opens the connection first, so a per-route
+            // grant would leave the others denying it (`MA.8`). The documented
+            // fix is one `connection` group attached to every route.
+            let fix = if is_connection_setup(normalized) {
+                Fix::add_group(format!("[group.connection.{proxy}].queries"))
+            } else {
+                Fix::add_query(format!("[route.{proxy}].queries"))
+            };
+            (normalized.clone(), fix)
         } else {
             (statement.sql.clone(), Fix::observe())
         };
@@ -742,6 +789,29 @@ fn transaction_label(sql: &str) -> &'static str {
         "RELEASE" => "RELEASE",
         _ => "TRANSACTION",
     }
+}
+
+/// Whether a denied statement is the driver's own connection setup.
+///
+/// `blastit check` learned the statement on one route, but a session-setup
+/// statement is not that route's: it runs on whichever route opens the
+/// connection first, and every other route would still deny it. The manifest
+/// fix is one group attached to all of them, so the `fix` names
+/// `[group.connection.<proxy>]` instead of `[route.<proxy>].queries` (`MA.8`).
+///
+/// The learn policy's replay list is wider than this on purpose: a constant
+/// `SELECT 1` and a catalogue read are replayable too, but they are ordinary
+/// statements whose per-route grant is correct — only the static setup
+/// constants (`SELECT set_config('TimeZone', $?, false)`,
+/// `SET TIME ZONE 'UTC'`) and a single `SET`/`SHOW` are session setup.
+fn is_connection_setup(normalized: &str) -> bool {
+    let text = normalize(normalized);
+    if KNOWN_STATIC_SETUP_SQL.contains(&text.as_str()) {
+        return true;
+    }
+    let first = text.split_whitespace().next().unwrap_or_default();
+    (first.eq_ignore_ascii_case("SET") || first.eq_ignore_ascii_case("SHOW"))
+        && is_introspection_setup_sql(&text)
 }
 
 /// `dead_grant` for the routes' own `queries` entries (`R34`).
@@ -887,12 +957,55 @@ fn unexercised_routes(
         let Some(route) = manifest.route(index) else {
             continue;
         };
+        // `R14`: a static route answers from the filesystem before anything
+        // reaches the app, so a suite cannot exercise it in-process. Its
+        // completeness warning is `unrequested_static_roots`, on stderr — never
+        // a finding, never `ok`, never the exit code.
+        if route.static_policy().is_some() {
+            continue;
+        }
         findings.push(Finding::UnexercisedRoute {
             severity: Severity::Error,
             route: route.name().to_string(),
             fix: Fix::add_test(),
         });
     }
+}
+
+/// The declared static roots no observed request reached, in manifest order
+/// (`R14`).
+///
+/// A static answer is written by the scheduler and never reaches the WSGI gate,
+/// so the observations cannot show whether the files were requested at all.
+/// `check` prints one stderr line per pair and leaves the verdict alone: the
+/// root exists (or the boot refused it), so this is a hint that the suite never
+/// touched it, not a completeness error. Suppressed when the suite observed no
+/// request at all — [`Finding::NoObservations`] already says that.
+pub fn unrequested_static_roots(
+    manifest: &Manifest,
+    table: &RoutingTable,
+    observations: &CheckObsV1,
+) -> Vec<(String, String)> {
+    if observations.http().is_empty() {
+        return Vec::new();
+    }
+    let mut requests_per_route = vec![0u64; manifest.route_count()];
+    for line in observations.http() {
+        if let Some(matched) = table.route(&line.method, &line.path) {
+            requests_per_route[matched.route] += 1;
+        }
+    }
+    manifest
+        .routes()
+        .iter()
+        .enumerate()
+        .filter(|(index, route)| route.static_policy().is_some() && requests_per_route[*index] == 0)
+        .filter_map(|(_, route)| {
+            route
+                .static_policy()
+                .map(|policy| (route.name().to_string(), policy.root.clone()))
+        })
+        .collect()
 }
 
 /// `missing_ingress` and `ingress_mismatch` (`R36`).

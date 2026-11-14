@@ -63,6 +63,7 @@ use crate::audit_v1::{self, CheckObsV1, ObsError, Report};
 use crate::cli::CheckOptions;
 use crate::config::Config;
 use crate::host::{Host, Install};
+use crate::stage0::{static_app_refusal, static_root_permission};
 
 /// The process exited cleanly: pytest passed and no finding fails the run.
 const CLEAN: u8 = 0;
@@ -136,6 +137,38 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     // a pattern that cannot compile fails before pytest starts.
     let table = RoutingTable::new(&manifest)
         .map_err(|errors| format!("{}: {errors}", config.manifest.display()))?;
+    // `R13`: a `BLASTIT_APP` no route of an all-static manifest could reach is
+    // refused by name. `check` does not demand an app otherwise — the suite
+    // brings its own WSGI callable — so this half of the boot's rule is the
+    // only one it applies.
+    if let Some(message) = static_app_refusal(&config, &manifest) {
+        return Err(message);
+    }
+    manifest
+        .check_static_roots(&config.manifest_dir)
+        .map_err(|errors| format!("{}: {errors}", config.manifest.display()))?;
+    if let Some(message) = static_root_permission(
+        &manifest,
+        &config.manifest_dir,
+        rustix::process::geteuid().as_raw(),
+        host.install() == Install::Wheel,
+    ) {
+        return Err(message);
+    }
+    // `R14`: an all-static site has nothing to exercise — no pytest, no
+    // dbproxy, no observation file. Every root is audited above; the report is
+    // the same document a run with an app prints, with the counts at zero.
+    if manifest.is_all_static() {
+        if options.learn {
+            return Err("nothing to learn: every route is static".to_string());
+        }
+        // `--json` prints exactly one document; the human form prints nothing
+        // at all, because every root was audited and nothing ran.
+        if options.json {
+            emit_report(&audit_v1::Report::all_static(&manifest), true)?;
+        }
+        return Ok(CLEAN);
+    }
 
     let runtime = CheckRoot::create()?;
     let socket_dir = runtime.postgres_dir()?;
@@ -236,6 +269,12 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     }
 
     let report = audit_v1::evaluate(&manifest, &observations).map_err(|error| error.to_string())?;
+    // `R14`: a declared static root the suite never requested is a line on
+    // stderr — never a finding, never `ok`, never the exit code. It is the
+    // scheduler that answers those files, so the observations cannot see them.
+    for (route, root) in audit_v1::unrequested_static_roots(&manifest, &table, &observations) {
+        eprintln!("  route \"{route}\": static root \"{root}\" was never requested");
+    }
     emit_report(&report, options.json)?;
     Ok(if report.ok { CLEAN } else { FINDINGS })
 }

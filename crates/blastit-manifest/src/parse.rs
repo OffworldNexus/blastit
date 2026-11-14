@@ -10,7 +10,8 @@ use toml::Value;
 
 use crate::error::{Location, ManifestError, ManifestErrors, escape_control};
 use crate::model::{
-    Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, UnresolvedGrant,
+    Grant, Group, Manifest, PgGrant, Protocol, Proxy, ProxyName, Route, StaticPolicy,
+    UnresolvedGrant,
 };
 use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
@@ -22,9 +23,15 @@ const TOP_LEVEL_KEYS: &[&str] = &[
 
 /// Keys of a `[[route]]`; every other key of a route is a proxy name, so its
 /// value is an inline grant.
+///
+/// `static` is reserved (`R1`): it is always the `[route.static]` block, even
+/// when a proxy of that name is declared.
 const ROUTE_KEYS: &[&str] = &[
-    "name", "path", "methods", "groups", "egress", "prefork", "ingress",
+    "name", "path", "methods", "groups", "egress", "prefork", "ingress", "static",
 ];
+
+/// The index file a `[route.static]` block answers with when it names none.
+const DEFAULT_INDEX: &str = "index.html";
 
 /// Keys that are only ever top-level, so finding one inside a table means the
 /// author wrote it after the first `[table]` and TOML attached it there (`R8`).
@@ -32,8 +39,8 @@ const TOP_LEVEL_ONLY_KEYS: &[&str] = &["version", "app", "preload"];
 
 /// Expected value of an unknown route key, for the error message.
 const ROUTE_KEY_EXPECTED: &str = "one of the route keys (`name`, `path`, `methods`, `groups`, \
-                                   `egress`, `prefork`, `ingress`) or a table holding an inline \
-                                   grant";
+                                   `egress`, `prefork`, `ingress`, `static`) or a table holding an \
+                                   inline grant";
 
 /// Expected values of a route's `path`, for the error message of anything that
 /// is neither.
@@ -189,8 +196,10 @@ fn check_route(value: &Value, declared: &BTreeSet<&str>, errors: &mut Vec<Manife
     };
     for (key, value) in route {
         match key.as_str() {
-            // The one route key that is a table of fields.
+            // The route keys that are tables of fields.
             "ingress" => check_fields(value, errors),
+            // Reserved like `ingress`: its body is the static block's fields.
+            "static" => check_fields(value, errors),
             key if ROUTE_KEYS.contains(&key) => {}
             // A grant is a table, so a reserved key with one is a proxy name
             // only when that proxy is declared.
@@ -247,11 +256,18 @@ fn syntax_error(error: &toml::de::Error, source: &str) -> ManifestError {
 /// The offset comes from the TOML parser and is rounded down to a character
 /// boundary, so a multi-byte character can never split a slice.
 fn position(source: &str, offset: usize) -> (usize, usize) {
-    let mut offset = offset.min(source.len());
-    while !source.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    let head = &source[..offset];
+    // The last character boundary at or below the offset is the rounded-down
+    // one. Walking the string once makes that a property of the text, so no
+    // loop can fail to step and spin on a hostile offset.
+    let limit = offset.min(source.len());
+    let offset = source
+        .char_indices()
+        .map(|(index, character)| index + character.len_utf8())
+        .take_while(|&end| end <= limit)
+        .last()
+        .unwrap_or(0);
+    debug_assert!(source.is_char_boundary(offset));
+    let head = source.get(..offset).unwrap_or_default();
     let line = head.matches('\n').count() + 1;
     let column = head
         .rfind('\n')
@@ -500,6 +516,7 @@ impl Parser {
             let mut egress = false;
             let mut prefork = false;
             let mut ingress = None;
+            let mut static_policy = None;
             for (key, value) in fields {
                 let key_path = format!("{path}.{}", escape_control(key));
                 match key.as_str() {
@@ -524,6 +541,7 @@ impl Parser {
                         }
                     }
                     "ingress" => ingress = self.ingress(value, &key_path),
+                    "static" => static_policy = self.static_policy(value, &key_path),
                     _ => {}
                 }
             }
@@ -566,7 +584,8 @@ impl Parser {
                     prefork,
                     grants,
                 )
-                .with_ingress(ingress),
+                .with_ingress(ingress)
+                .with_static(static_policy),
             );
         }
 
@@ -821,6 +840,55 @@ impl Parser {
                 None
             }
         }
+    }
+
+    /// A route's `[route.static]`: the directory served and its three optional
+    /// keys (`R1`).
+    ///
+    /// Only the shape is read here. The rules a value has to obey — a relative
+    /// `root`, an `index` beneath it, `/`-anchored patterns — belong to
+    /// validation, so one bad value never hides the others.
+    fn static_policy(&mut self, value: &Value, path: &str) -> Option<StaticPolicy> {
+        let table = self.as_table(value, path)?;
+        let mut root = None;
+        let mut has_root = false;
+        let mut index = None;
+        let mut spa = false;
+        let mut immutable = Vec::new();
+        for (key, value) in table {
+            let key_path = format!("{path}.{}", escape_control(key));
+            match key.as_str() {
+                "root" => {
+                    has_root = true;
+                    root = self.as_str(value, &key_path);
+                }
+                "index" => index = self.as_str(value, &key_path),
+                "spa" => {
+                    if let Some(value) = self.as_bool(value, &key_path) {
+                        spa = value;
+                    }
+                }
+                "immutable" => {
+                    if let Some(list) = self.string_list(Some(value), &key_path) {
+                        immutable = list;
+                    }
+                }
+                _ => self.error(ManifestError::UnknownKey { path: key_path }),
+            }
+        }
+        if !has_root {
+            self.error(ManifestError::MissingKey {
+                path: format!("{path}.root"),
+            });
+        }
+
+        let root = root?;
+        Some(StaticPolicy {
+            root,
+            index: index.unwrap_or_else(|| DEFAULT_INDEX.to_string()),
+            spa,
+            immutable,
+        })
     }
 
     /// A route's `path`: a list of regexes, or the one regex a bare string

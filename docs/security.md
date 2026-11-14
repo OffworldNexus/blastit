@@ -29,7 +29,7 @@ is what the attacker is holding when that happens.
 |---|---|---|
 | **a view** (request-time RCE) | that route's allowlisted statements; its scratch directory; **every file its uid can open** — the code tree, the virtualenv, `/tmp`; all the CPU and memory the container has; egress only with `egress = true` | run any other statement; read the real database credentials; `ptrace` another process; connect to another route's socket or channel; hold more threads than its `RLIMIT_NPROC`; take another route's worker slot |
 | **http** | the raw bytes of in-flight HTTP traffic | reach the database; run Python; spawn processes |
-| **the scheduler** | it can send any request to any view | do anything a view could not already be made to do by an HTTP request |
+| **the scheduler** | it can send any request to any view; every file beneath each declared static `root` — dotfiles and symlinks included | read the real database credentials; reach another route's socket or a view's memory; go beyond what its uid and a socket-less seccomp role allow |
 | **dbproxy** | the real database credentials | — it runs no app code, is not dumpable, and is kept small |
 | **init** | everything | — it runs only blastit code after stage 1's imports |
 
@@ -91,6 +91,33 @@ uids cannot signal, `ptrace` or read each other's
   nothing, and a `raw` route the manifest does not acknowledge. 0.1.1
   has no multipart codec and no media or PDF decoding: an upload is `raw`, and
   the app's parser sees the original bytes, polyglots included.
+
+## Static files
+
+A `[route.static]` route serves files from one declared `root`, answered by the
+scheduler as its own uid (`UID_BASE+2`) — no new process, socket or uid.
+
+| What arrives | Answer |
+|---|---|
+| `..` (plain or percent-encoded), NUL and other control bytes, an absolute or backslash path, invalid UTF-8, a malformed percent escape, a segment over 255 bytes, a path over 4096 bytes | `400` |
+| a dotfile such as `.env` or `.git`, a symlink, a FIFO, socket or device, an unreadable or oversize file — and, on a route with no `spa` and no `app`, any path that is no file | `404` |
+
+`/.well-known/` is the one dotfile exception. A refusal is final: never the app,
+never `index.html`, whatever the method, so a traversal probe cannot be answered
+with the SPA shell. The `404`-vs-fallback distinction reveals that *something*
+exists at a hidden path — that is the policy, and the canned body never varies.
+
+The boundary is structural, not a string prefix. One directory descriptor per
+root is opened at boot; every candidate is
+`openat2(dirfd, path, RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)`,
+classified by `fstat`, and read-opened only when it is a regular file whose
+`(st_dev, st_ino)` still matches — a swapped path or a device node is never read.
+A bind mount under `root` is followed: the boundary is the path namespace, not
+one filesystem. One percent-decode, no dot-segment resolution, no Unicode
+normalization.
+
+[ADR-0007](https://github.com/OffworldNexus/blastit/blob/develop/docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md)
+holds the decision and its trade-offs.
 
 ## The client address
 

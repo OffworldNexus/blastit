@@ -281,6 +281,108 @@ fn copy_recipe(install: Install) -> String {
     }
 }
 
+/// The half of `R13`'s app rule that every caller owns: an all-static manifest
+/// needs no `app`, and a `BLASTIT_APP` that names one there is refused rather
+/// than ignored.
+///
+/// Every route answers from the filesystem before an app could run, so the
+/// setting can never take effect; a boot or a `check` that silently dropped it
+/// would leave its operator believing an app was serving. The message names the
+/// variable, never its value. `check` takes *only* this half — see
+/// [`app_rule`] — because `blastit check` never demanded an `app`: the suite's
+/// own configuration supplies the WSGI callable.
+pub(crate) fn static_app_refusal(config: &Config, manifest: &Manifest) -> Option<String> {
+    (manifest.is_all_static() && config.app.is_some()).then(|| {
+        "BLASTIT_APP: every route is static, so no route can reach an app: \
+         unset BLASTIT_APP, or declare a route without [route.static]"
+            .to_string()
+    })
+}
+
+/// `R13`: the app rule a **boot** refuses with (`blastit`, `blastit dev`).
+///
+/// Both halves: a `BLASTIT_APP` no route could reach is refused
+/// ([`static_app_refusal`]), and a tree that is not all-static needs a callable
+/// to forward to. `blastit check` must not take the second half — a suite brings
+/// its own `app` — so it calls [`static_app_refusal`] directly.
+pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), String> {
+    if let Some(message) = static_app_refusal(config, manifest) {
+        return Err(message);
+    }
+    if !manifest.is_all_static() && config.app.is_none() {
+        return Err("BLASTIT_APP: the WSGI callable (`module:attribute`) is required".to_string());
+    }
+    Ok(())
+}
+
+/// `R13` step 5: the first declared static root the responder's uid could not
+/// read, as the sentence a boot refuses with.
+///
+/// `probe` is the scheduler's uid in production — the process that answers every
+/// static request — and the caller's in `dev` and `check`, where the prober *is*
+/// the responder. The scheduler's own `StaticRoot::open` stays the final
+/// authority; this exists so a deployment whose `0750` build output the
+/// scheduler cannot read is refused before a listener is bound, rather than
+/// serving a tree only some identities can see.
+pub(crate) fn static_root_permission(
+    manifest: &Manifest,
+    manifest_dir: &Path,
+    probe: u32,
+    interpreter: bool,
+) -> Option<String> {
+    // `dev` and `check`: the prober *is* the responder, and an unprivileged
+    // process may not call `setgroups(2)`, so the dropped-to probe cannot
+    // answer at all and `visibility::unreadable` falls back to reading mode
+    // bits as a *foreign* uid would — which refuses an ordinary `$HOME`
+    // (0700, owned by the caller) over a perfectly readable `public/`. Ask the
+    // kernel here instead, in this process's own identity: the same `read_dir`
+    // the responder's `O_PATH|O_DIRECTORY` open performs.
+    if probe == current_uid() {
+        return manifest
+            .static_roots(manifest_dir)
+            .into_iter()
+            .find(|(_, path)| !listable(path))
+            .map(|(index, _)| static_root_refusal(manifest, index));
+    }
+    let dropped = crate::visibility::DroppedTo {
+        uids: std::collections::BTreeSet::from([probe]),
+        probe,
+    };
+    for (index, path) in manifest.static_roots(manifest_dir) {
+        let refused =
+            match crate::visibility::unreadable(std::slice::from_ref(&path), &dropped, interpreter)
+            {
+                Ok(None) => false,
+                // A probe that could not answer is refused rather than assumed
+                // fine: a root nobody proved readable is one nobody serves.
+                Ok(Some(_)) | Err(_) => true,
+            };
+        if refused {
+            return Some(static_root_refusal(manifest, index));
+        }
+    }
+    None
+}
+
+/// Whether this process can list `path`: a root the responder cannot open is
+/// one it cannot serve, and an `O_PATH|O_DIRECTORY` open needs exactly what a
+/// directory listing needs on the directory and `x` on every ancestor.
+fn listable(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => !matches!(entries.next(), Some(Err(_))),
+        Err(_) => false,
+    }
+}
+
+/// The declared root, as written, in the sentence a boot refuses with.
+fn static_root_refusal(manifest: &Manifest, index: usize) -> String {
+    let root = manifest
+        .route(index)
+        .and_then(|route| route.static_policy())
+        .map_or_else(String::new, |policy| policy.root.clone());
+    format!("static root {root:?}: permission denied")
+}
+
 /// Which layout process, if any, already runs under `uid` (D6).
 ///
 /// Pure, so the collision check is a unit test rather than a deployment
@@ -441,13 +543,10 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
         );
     }
 
-    if config.app.is_none() {
-        fail(
-            &emitter,
-            "BLASTIT_APP: the WSGI callable (`module:attribute`) is required",
-        );
-    }
-
+    // The file is named before the setting: in a directory with no
+    // `./blastit.toml` that file is what is missing, and `BLASTIT_APP` would
+    // send the operator looking for an environment variable instead of a
+    // project (`docs/troubleshooting.md`).
     let source = match std::fs::read_to_string(&config.manifest) {
         Ok(source) => source,
         Err(err) => fail(&emitter, &format!("{}: {err}", config.manifest.display())),
@@ -456,6 +555,31 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
         Ok(parsed) => parsed,
         Err(errors) => fail(&emitter, &errors.to_string()),
     };
+    // `R13`: `BLASTIT_APP` is required unless every route is static. The
+    // manifest is parsed first, because "is every route static" is a property of
+    // the file, not of the environment — and a missing `./blastit.toml` is still
+    // named before the setting (`MB.1.6`).
+    if let Err(message) = app_rule(&config, &manifest) {
+        fail(&emitter, &message);
+    }
+    // `R13` step 4: a static root that is missing, a file or unlistable is
+    // named with the manifest that declares it, before any listener is bound.
+    if let Err(errors) = manifest.check_static_roots(&config.manifest_dir) {
+        fail(
+            &emitter,
+            &format!("{}: {errors}", config.manifest.display()),
+        );
+    }
+    // `R13` step 5: and one the responder's own uid could not read is the same
+    // refusal, before anything is forked to serve it.
+    if let Some(message) = static_root_permission(
+        &manifest,
+        &config.manifest_dir,
+        UidLayout::new(config.uid_base).scheduler(),
+        interpreter,
+    ) {
+        fail(&emitter, &message);
+    }
     for warning in &warnings {
         emitter.emit(&Event::now(
             Component::Init,
@@ -663,9 +787,8 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
         dev_fail(&message);
     }
 
-    if config.app.is_none() {
-        dev_fail("BLASTIT_APP: the WSGI callable (`module:attribute`) is required");
-    }
+    // The same order as `run`: the missing file first, the missing `app`
+    // second (`docs/troubleshooting.md`).
     let source = match std::fs::read_to_string(&config.manifest) {
         Ok(source) => source,
         Err(err) => dev_fail(&format!("{}: {err}", config.manifest.display())),
@@ -674,6 +797,25 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
         Ok(parsed) => parsed,
         Err(errors) => dev_fail(&format!("{errors}")),
     };
+    // `R13`: a site whose every route is static needs no `app`; anything else
+    // still names the setting as before (`MB.1.6`), and a `BLASTIT_APP` that
+    // could never run is refused rather than ignored.
+    if let Err(message) = app_rule(&config, &manifest) {
+        dev_fail(&message);
+    }
+    // `R13` steps 4–5: the root has to exist, be listable, and be readable by
+    // the uid that answers, which in `dev` is the caller (`R19`).
+    if let Err(errors) = manifest.check_static_roots(&config.manifest_dir) {
+        dev_fail(&format!("{}: {errors}", config.manifest.display()));
+    }
+    if let Some(message) = static_root_permission(
+        &manifest,
+        &config.manifest_dir,
+        crate::dev_learn::euid(),
+        interpreter,
+    ) {
+        dev_fail(&message);
+    }
     let prepared = match blastit_env::build_from_process(&manifest, config.env_strip.as_deref()) {
         Ok(prepared) => prepared,
         Err(errors) => dev_fail(&format!("{errors}")),

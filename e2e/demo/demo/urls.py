@@ -10,6 +10,7 @@ urlpatterns = [
     path("notes/<int:note_id>/delete/", views.delete_note),
     path("notes/peek/", views.peek),
     path("notes/sql/", views.raw_sql),
+    path("deny/sql/", views.deny_sql),
     path("debug/sql/", views.raw_sql),
     path("debug/env/", views.env),
     path("debug/request/", views.request_probe),

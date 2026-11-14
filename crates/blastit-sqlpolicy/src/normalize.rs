@@ -118,11 +118,22 @@ pub fn normalize(sql: &str) -> String {
                 pending_space = true;
             }
             RegionKind::Code => {
-                let mut i = 0;
-                while i < text.len() {
-                    if is_space(text[i]) {
+                // The scan visits every character of the region in order, so
+                // the *step* is the position the iterator reports and never a
+                // counter this loop adds to: a step that fails to advance is
+                // the one way the pass could stop terminating, and a counter
+                // increment is exactly the arithmetic a mutation can leave
+                // standing (MB.1.4). `resume` only says how many of the
+                // characters the iterator is about to reach are already in
+                // `out`, because one token can be several characters long
+                // (`a$1`, `f(`, `::`).
+                let mut resume = 0;
+                for (i, &c) in text.iter().enumerate() {
+                    if i < resume {
+                        continue;
+                    }
+                    if is_space(c) {
                         pending_space = true;
-                        i += 1;
                         continue;
                     }
                     out.flush_space(&mut pending_space);
@@ -131,7 +142,7 @@ pub fn normalize(sql: &str) -> String {
                         // the result again changes nothing.
                         out.push('$', true);
                         out.push('?', true);
-                        i = end;
+                        resume = end;
                         continue;
                     }
                     // One whole code token, copied verbatim: `a$1` is a single
@@ -140,7 +151,7 @@ pub fn normalize(sql: &str) -> String {
                     for c in &text[i..end] {
                         out.push(*c, true);
                     }
-                    i = end;
+                    resume = end;
                 }
             }
             RegionKind::SingleQuoted
@@ -307,16 +318,22 @@ fn tokenize(chars: &[char]) -> Vec<Token> {
         match region.kind {
             RegionKind::Comment => pending_space = true,
             RegionKind::Code => {
-                let mut i = 0;
-                while i < text.len() {
-                    if is_space(text[i]) {
+                // The same shape as the scan in `normalize`: the iterator is
+                // the step, `resume` is only the end of the token just taken,
+                // so a token that spans several characters cannot keep the
+                // loop on one position (MB.1.4).
+                let mut resume = 0;
+                for (i, &c) in text.iter().enumerate() {
+                    if i < resume {
+                        continue;
+                    }
+                    if is_space(c) {
                         pending_space = true;
-                        i += 1;
                         continue;
                     }
                     let (kind, end) = code_token(text, i);
                     tokens.push(Token::new(kind, &text[i..end], &mut pending_space));
-                    i = end;
+                    resume = end;
                 }
             }
             RegionKind::SingleQuoted

@@ -2,7 +2,7 @@
 id: MB.1
 title: "MA Gate Follow-ups: Mutation Coverage, Startup Diagnostics & Harness Hygiene"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths: ["docs/**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T10:42"
-updated: "2026-11-13T10:42"
+updated: "2026-11-13T19:56"
 ---
 
 # Goal

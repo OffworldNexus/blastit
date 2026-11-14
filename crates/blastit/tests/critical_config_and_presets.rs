@@ -583,3 +583,43 @@ fn top_level_help_lists_the_three_commands_and_the_presets() {
         assert!(stdout.contains(expected), "{argv:?}: {stdout}");
     }
 }
+
+#[test]
+fn an_empty_directory_names_the_missing_manifest_before_the_app() {
+    let sandbox = Sandbox::new("no-manifest");
+
+    // `blastit dev` reaches its configuration without capabilities, so it is
+    // the entry point an unprivileged suite can observe: in a directory with no
+    // `./blastit.toml` the file is what is missing, and `BLASTIT_APP` must not
+    // be blamed for its absence (MA gate, `MB.1.6`).
+    let output = sandbox.run_cli_env(&[("BLASTIT_MEM_HIGH_WATERMARK", "100")], &["dev"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "a startup error writes nothing to stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("blastit.toml"), "{stderr}");
+    assert!(
+        !stderr.contains("BLASTIT_APP"),
+        "the file is missing, not the app: {stderr}"
+    );
+
+    // The other order still holds: a manifest that exists and declares no `app`
+    // is the setting's problem, and the file is not named as missing.
+    sandbox.write_manifest("version = 1\n\n[[route]]\nname = \"home\"\npath = [\"/\"]\n");
+    let output = sandbox.run_cli_env(&[("BLASTIT_MEM_HIGH_WATERMARK", "100")], &["dev"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "a startup error writes nothing to stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("BLASTIT_APP"), "{stderr}");
+    assert!(
+        !stderr.contains("No such file"),
+        "the manifest exists, so nothing is missing: {stderr}"
+    );
+}

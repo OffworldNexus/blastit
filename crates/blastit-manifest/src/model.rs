@@ -4,11 +4,13 @@
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use blastit_ingress::IngressPolicy;
 use blastit_sqlpolicy::{Allowlist, TableGrants};
 
-use crate::error::{ManifestErrors, ManifestWarning};
+use crate::error::{Location, ManifestError, ManifestErrors, ManifestWarning};
 use crate::parse;
 use crate::validate;
 
@@ -296,6 +298,26 @@ impl Grant {
     }
 }
 
+/// A `[route.static]` block: what the responder serves for one route (`R1`–`R5`).
+///
+/// The values are kept exactly as written. Their syntax is checked by
+/// [`Manifest::validate`], and whether the directory exists by
+/// [`Manifest::check_static_roots`] — never by validation, because a manifest
+/// has to parse on a machine that has not run the build yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaticPolicy {
+    /// The directory served, relative to the directory holding `blastit.toml`.
+    pub root: String,
+    /// The file a directory or the SPA fallback answers with, relative to
+    /// `root`. `index.html` unless the manifest says otherwise.
+    pub index: String,
+    /// Whether a path that is no file answers `index` instead of the app.
+    pub spa: bool,
+    /// `/`-anchored whole-match globs against the answering file's path; a
+    /// match gets the year-long cache (`R5`).
+    pub immutable: Vec<String>,
+}
+
 /// A `[[route]]` entry: one sandbox, one process, one uid (§6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
@@ -307,6 +329,7 @@ pub struct Route {
     prefork: bool,
     grants: BTreeMap<ProxyName, Grant>,
     ingress: Option<IngressPolicy>,
+    static_policy: Option<StaticPolicy>,
 }
 
 impl Route {
@@ -329,7 +352,15 @@ impl Route {
             prefork,
             grants,
             ingress: None,
+            static_policy: None,
         }
+    }
+
+    /// The same route with its `[route.static]` block, if it declared one
+    /// (`R1`). Parsing is the only caller.
+    pub(crate) fn with_static(mut self, static_policy: Option<StaticPolicy>) -> Self {
+        self.static_policy = static_policy;
+        self
     }
 
     /// The same route with its `[route.ingress]` policy, if it declared one
@@ -393,6 +424,12 @@ impl Route {
     /// route may receive an empty body and nothing else.
     pub fn ingress(&self) -> Option<IngressPolicy> {
         self.ingress
+    }
+
+    /// The route's `[route.static]` block, or `None` when the route declares
+    /// none and the responder answers nothing for it (`R1`).
+    pub fn static_policy(&self) -> Option<&StaticPolicy> {
+        self.static_policy.as_ref()
     }
 
     /// Whether this is the method-unrestricted catch-all `--learn` inserts new
@@ -585,6 +622,85 @@ impl Manifest {
         self.routes.get(index)
     }
 
+    /// True when the manifest declares no `app` and every route is static: the
+    /// one shape that needs no WSGI callable (`R13`).
+    ///
+    /// `BLASTIT_APP` may still supply an app, so this is the manifest-level
+    /// answer and the boot decides what to do with it. A manifest that mixes a
+    /// static route with a route that forwards declares no app either, but it
+    /// is not all-static: the forwarding route still needs a callable.
+    pub fn is_all_static(&self) -> bool {
+        self.app.is_none()
+            && !self.routes.is_empty()
+            && self
+                .routes
+                .iter()
+                .all(|route| route.static_policy().is_some())
+    }
+
+    /// The declared roots, route index and absolute path, in manifest order:
+    /// the input of [`Manifest::check_static_roots`] and of the responder-uid
+    /// visibility probe (`R13`).
+    pub fn static_roots(&self, manifest_dir: &Path) -> Vec<(usize, PathBuf)> {
+        self.routes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, route)| {
+                route
+                    .static_policy()
+                    .map(|policy| (index, manifest_dir.join(&policy.root)))
+            })
+            .collect()
+    }
+
+    /// Checks that every declared static root exists, is a directory and can be
+    /// listed, relative to `manifest_dir` (`R2`, `R13`).
+    ///
+    /// Deliberately separate from [`Manifest::validate`]: a manifest has to
+    /// validate before its build output exists (the documentation fences are
+    /// parsed from the repository root, where no `public/` does), while a boot
+    /// or `check` must refuse a root it could never serve. Symlinks are
+    /// followed, so a `current/public` deployment works.
+    pub fn check_static_roots(&self, manifest_dir: &Path) -> Result<(), ManifestErrors> {
+        let mut errors = Vec::new();
+        for (index, route) in self.routes.iter().enumerate() {
+            let Some(policy) = route.static_policy() else {
+                continue;
+            };
+            let root = manifest_dir.join(&policy.root);
+            let reason = match std::fs::metadata(&root) {
+                Err(error) => Some(root_reason(&error)),
+                Ok(metadata) if !metadata.is_dir() => Some(NOT_A_DIRECTORY),
+                Ok(_) => match std::fs::read_dir(&root) {
+                    Err(error) => Some(root_reason(&error)),
+                    // A directory that answers its first entry with an error is
+                    // not listable, and a root the responder cannot list is one
+                    // it cannot serve.
+                    Ok(mut entries) => match entries.next() {
+                        Some(Err(error)) => Some(root_reason(&error)),
+                        Some(Ok(_)) | None => None,
+                    },
+                },
+            };
+            if let Some(reason) = reason {
+                errors.push(ManifestError::StaticRootUnusable {
+                    location: Location::Route {
+                        index,
+                        name: route.name().to_string(),
+                    },
+                    root: policy.root.clone(),
+                    reason,
+                });
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ManifestErrors::new(errors))
+        }
+    }
+
     /// The union of the grants a route ends up with, per proxy (§6).
     ///
     /// The union is taken in a stable order — the global groups in order, then
@@ -771,6 +887,24 @@ fn parameterised(sql: &str) -> String {
     out
 }
 
+/// The fixed reason for a root that is a file: the design pins the phrases so a
+/// test never depends on `strerror` (`R2`).
+const NOT_A_DIRECTORY: &str = "not a directory";
+
+/// The fixed reason for a root the filesystem refuses (`R2`).
+///
+/// The three documented kinds are named exactly; anything else (a symlink loop,
+/// a broken mount) is still reported without `strerror`, because the message is
+/// part of the boot contract and must read the same on every host.
+fn root_reason(error: &io::Error) -> &'static str {
+    match error.kind() {
+        io::ErrorKind::NotFound => "no such file or directory",
+        io::ErrorKind::NotADirectory => NOT_A_DIRECTORY,
+        io::ErrorKind::PermissionDenied => "permission denied",
+        _ => "cannot be read",
+    }
+}
+
 /// Unions `source` into `target`, proxy by proxy and grant by grant.
 fn merge_grants(target: &mut BTreeMap<ProxyName, Grant>, source: &BTreeMap<ProxyName, Grant>) {
     for (proxy, grant) in source {
@@ -780,5 +914,74 @@ fn merge_grants(target: &mut BTreeMap<ProxyName, Grant>, source: &BTreeMap<Proxy
                 target.insert(proxy.clone(), grant.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// `assemble` is the parser's constructor, so the accessor has to return
+    /// what it was handed. `parse` only ever passes `1` (validation refuses any
+    /// other version), which is why these build the value directly: a
+    /// `version()` that always answered `1` would hide a wrong version instead
+    /// of carrying it.
+    #[test]
+    fn assemble_keeps_the_version_it_was_given() {
+        fn assembled(version: u32) -> Manifest {
+            Manifest::assemble(
+                version,
+                Vec::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        }
+        assert_eq!(assembled(1).version(), 1);
+        assert_eq!(assembled(2).version(), 2);
+        assert_eq!(assembled(0).version(), 0);
+    }
+
+    /// `normalize` writes every bind placeholder as `$?`, which no SQL parser
+    /// accepts. Only that spelling is rewritten.
+    #[test]
+    fn only_the_question_mark_placeholder_is_rewritten() {
+        assert_eq!(
+            parameterised(r#"SELECT "t"."a" FROM "t" WHERE "t"."id" = $?"#),
+            r#"SELECT "t"."a" FROM "t" WHERE "t"."id" = $1"#
+        );
+        assert_eq!(parameterised("SELECT $?, $?"), "SELECT $1, $1");
+
+        // A numbered placeholder is already analysable, and a `$` that opens
+        // nothing (a dollar in an identifier, a trailing one) is not a
+        // placeholder either: inventing a `$1` there would change the table
+        // name the analysis resolves.
+        assert_eq!(parameterised("SELECT $2 FROM t"), "SELECT $2 FROM t");
+        assert_eq!(parameterised("SELECT a$ FROM t"), "SELECT a$ FROM t");
+        assert_eq!(parameterised("SELECT a$"), "SELECT a$");
+
+        // Quoted regions are copied verbatim, doubled quotes included, so a
+        // column named `"a$?"` stays the column the grant names, and a value
+        // spelled `'it''s $?'` stays one literal.
+        assert_eq!(
+            parameterised(r#"SELECT "a$?"."b" FROM "a$?""#),
+            r#"SELECT "a$?"."b" FROM "a$?""#
+        );
+        assert_eq!(
+            parameterised("SELECT 1 WHERE x = 'it''s' AND y = $?"),
+            "SELECT 1 WHERE x = 'it''s' AND y = $1"
+        );
+        assert_eq!(
+            parameterised("SELECT 1 WHERE x = 'a$?'"),
+            "SELECT 1 WHERE x = 'a$?'"
+        );
+        assert_eq!(
+            parameterised("SELECT 1 WHERE x = 'a"),
+            "SELECT 1 WHERE x = 'a"
+        );
+        assert_eq!(parameterised(""), "");
     }
 }
