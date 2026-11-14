@@ -1406,3 +1406,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T21:10 [MB.3.8] (lead) RELEASE CHECKLIST ITEM (owner 2026-11-14, verbatim): add to the 0.2.0 certification: 'no / under a static root is servable (404, protected ), proven before the 
 - 2026-11-14T21:10 [MB.3.8] (lead) RELEASE CHECKLIST ITEM (owner 2026-11-14, verbatim): add to the 0.2.0 certification: "no `.php`/`.phar` under a static root is servable (404, protected `critica
 - 2026-11-14T21:25 [MB.3.10] (lead) status active -> done
+- 2026-11-14T21:25 [MB.3.33] (lead) status ready -> active
+- 2026-11-14T21:25 [MB.3.33] (lead) attempt 1/3 started
+- 2026-11-14T21:25 [MB.3.33] (lead) base f4bfcbe; .10 landed 578b2bd (PHP page truthful, no source-served claim). This node makes the claim true.
+- 2026-11-14T21:46 [MB.3.29] (lead) status ready -> active
+- 2026-11-14T21:46 [MB.3.29] (lead) attempt 1/3 started
+- 2026-11-14T21:46 [MB.3.29] (lead) base f4bfcbe; REDDENED make check AGAIN during MB.3.33 (rs-test-critical Error 101, an_unsupported_minor_is_refused_by_name expected UnsupportedVersion got NotF
+- 2026-11-14T22:06 [MB.3.34] (planner) created (task) build.rs PHP toolchain probe: do not cache a no-toolchain world on a transient spawn failure
+- 2026-11-14T22:12 [MB.3.29] (lead) status active -> done

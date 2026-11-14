@@ -2,16 +2,16 @@
 id: MB.3.29
 title: "Toolchain::probe must not read a transient fork/exec failure as not-found (flaky critical_shim_contract)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: []
 paths: ["crates/blastit-php-sapi/src/toolchain.rs", "crates/blastit-php-sapi/tests/critical_shim_contract.rs"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-14T19:46"
-updated: "2026-11-14T19:46"
+updated: "2026-11-14T22:12"
 ---
 
 # Goal

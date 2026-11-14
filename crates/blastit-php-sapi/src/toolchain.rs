@@ -6,6 +6,7 @@
 //! proves the allowed path; an empty `PATH` proves the refusal).
 
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -140,6 +141,7 @@ impl Toolchain {
     pub fn discover_with(env: &dyn Env) -> Result<Self, ToolchainError> {
         let mut unsupported_version: Option<(PathBuf, String)> = None;
         let mut include_error: Option<(PathBuf, String)> = None;
+        let mut spawn_failure: Option<(PathBuf, String)> = None;
 
         if let Some(explicit) = env.var("PHP_CONFIG")
             && !explicit.is_empty()
@@ -153,8 +155,13 @@ impl Toolchain {
                     include_error = Some((path, detail));
                 }
                 // A PHP_CONFIG pointing at nothing is a typo; PATH still gets
-                // its turn, and `NotFound` names `PHP_CONFIG` too.
-                Err(_) => {}
+                // its turn, and `NotFound` names `PHP_CONFIG` too. A spawn
+                // failure is *not* such a typo: it is remembered, because
+                // "could not be started" must never become "not found".
+                Err(ToolchainError::Spawn { path, detail }) => {
+                    spawn_failure = Some((path, detail));
+                }
+                Err(ToolchainError::NotFound | ToolchainError::NotExecutable { .. }) => {}
             }
         }
 
@@ -176,18 +183,28 @@ impl Toolchain {
                             include_error = Some((path, detail));
                         }
                     }
-                    Err(_) => {}
+                    Err(ToolchainError::Spawn { path, detail }) => {
+                        if spawn_failure.is_none() {
+                            spawn_failure = Some((path, detail));
+                        }
+                    }
+                    Err(ToolchainError::NotFound | ToolchainError::NotExecutable { .. }) => {}
                 }
             }
         }
 
-        // Report the most actionable failure: a PHP the crate has no shim for
-        // before a toolchain whose headers are missing.
+        // Report the most actionable failure: a PHP the crate has no shim for,
+        // then a toolchain whose headers are missing, then a candidate the
+        // kernel would not start (the last is "we could not ask", so it must
+        // never collapse into `NotFound`).
         if let Some((path, version)) = unsupported_version {
             return Err(ToolchainError::UnsupportedVersion { path, version });
         }
         if let Some((path, detail)) = include_error {
             return Err(ToolchainError::IncludeDir { path, detail });
+        }
+        if let Some((path, detail)) = spawn_failure {
+            return Err(ToolchainError::Spawn { path, detail });
         }
         Err(ToolchainError::NotFound)
     }
@@ -199,18 +216,32 @@ impl Toolchain {
                 path: exe.to_path_buf(),
             });
         }
-        let version = run(exe, "--version").map_err(|_detail| ToolchainError::NotExecutable {
-            path: exe.to_path_buf(),
-        })?;
+        let version = match run(exe, "--version") {
+            Ok(version) => version,
+            // It exists but did not answer: a PATH entry that is not our
+            // `php-config`, so the search keeps going.
+            Err(RunError::Failed(_detail)) => {
+                return Err(ToolchainError::NotExecutable {
+                    path: exe.to_path_buf(),
+                });
+            }
+            Err(RunError::Spawn(err)) => return Err(spawn_error(exe, err)),
+        };
         let version = version.trim().to_owned();
         let minor = Minor::parse(&version).ok_or_else(|| ToolchainError::UnsupportedVersion {
             path: exe.to_path_buf(),
             version: version.clone(),
         })?;
-        let include = run(exe, "--include-dir").map_err(|detail| ToolchainError::IncludeDir {
-            path: exe.to_path_buf(),
-            detail,
-        })?;
+        let include = match run(exe, "--include-dir") {
+            Ok(include) => include,
+            Err(RunError::Failed(detail)) => {
+                return Err(ToolchainError::IncludeDir {
+                    path: exe.to_path_buf(),
+                    detail,
+                });
+            }
+            Err(RunError::Spawn(err)) => return Err(spawn_error(exe, err)),
+        };
         let include_dir = PathBuf::from(include.trim());
         if !include_dir.is_dir() {
             return Err(ToolchainError::IncludeDir {
@@ -262,6 +293,16 @@ pub enum ToolchainError {
         /// The candidate that failed.
         path: PathBuf,
     },
+    /// The kernel would not start this candidate, so whether it is usable is
+    /// unknown: a transient `fork`/`exec` failure (`EAGAIN` under load,
+    /// `ETXTBSY` while another writer held the file) that outlived the
+    /// bounded retries.
+    Spawn {
+        /// The candidate that could not be started.
+        path: PathBuf,
+        /// The operating system's reason.
+        detail: String,
+    },
     /// A working `php-config` for a minor this crate has no shim for.
     UnsupportedVersion {
         /// The `php-config` that answered.
@@ -294,6 +335,13 @@ impl fmt::Display for ToolchainError {
                 "{} is not an executable php-config (or it did not answer --version)",
                 path.display()
             ),
+            Self::Spawn { path, detail } => write!(
+                f,
+                "could not run {} ({detail}): the host refused to start it, so this build cannot \
+                 tell whether it is a usable php-config — retry, or set PHP_CONFIG to a php-config \
+                 that runs",
+                path.display()
+            ),
             Self::UnsupportedVersion { path, version } => write!(
                 f,
                 "{} reports PHP {version}; this build has SAPI shims for 8.2, 8.3 and 8.4 only \
@@ -311,18 +359,104 @@ impl fmt::Display for ToolchainError {
 
 impl std::error::Error for ToolchainError {}
 
+/// Why one `php-config <flag>` invocation did not produce an answer.
+enum RunError {
+    /// The kernel never started the process (`fork`/`exec` failed), so the
+    /// candidate has not said anything about itself yet.
+    Spawn(io::Error),
+    /// The process ran and exited non-zero, or printed something unusable.
+    Failed(String),
+}
+
+/// Maps a spawn failure onto the honest [`ToolchainError`].
+///
+/// `ENOENT` (the path vanished between `is_file` and `exec`), `EACCES`/`EPERM`
+/// (present, not executable), a symlink loop, and `ENOEXEC` (a text file named
+/// `php-config8.4`, with no ELF header and no `#!`) are facts about this PATH
+/// entry. Every other reason means the kernel refused to start a file this
+/// crate believes exists; that is "could not ask", never "not installed".
+fn spawn_error(exe: &Path, err: io::Error) -> ToolchainError {
+    let not_a_program = matches!(
+        err.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+    ) || matches!(err.raw_os_error(), Some(ENOEXEC | ELOOP));
+    if not_a_program {
+        ToolchainError::NotExecutable {
+            path: exe.to_path_buf(),
+        }
+    } else {
+        ToolchainError::Spawn {
+            path: exe.to_path_buf(),
+            detail: err.to_string(),
+        }
+    }
+}
+
+/// `ENOEXEC`: the file exists and is executable but is not a program the
+/// kernel can run. `std` has no `ErrorKind` for it, and the number is the same
+/// on Linux and every other unix this crate builds for.
+const ENOEXEC: i32 = 8;
+
+/// `ELOOP`: the path is a symlink loop. `is_file()` already refuses a loop, so
+/// this only covers the path changing between the check and `exec`; like
+/// `ENOEXEC` it is a fact about the file, not a busy host.
+const ELOOP: i32 = 40;
+
+/// Whether a spawn failure is a host hiccup that a short wait can clear.
+///
+/// `WouldBlock` is `EAGAIN` (`fork` hit the process/thread limit under load)
+/// and `ExecutableFileBusy` is `ETXTBSY`: some file description on this inode
+/// is still open for writing. The fd table is shared by every thread, so a
+/// child another thread forked while the file was open inherits that handle
+/// (close-on-exec only takes effect when the child reaches `exec`); the write
+/// reference can therefore outlive our own close by one fork window. Neither
+/// reason says anything about the program.
+fn is_transient_spawn(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::ExecutableFileBusy | io::ErrorKind::Interrupted
+    )
+}
+
+/// Extra attempts after a transient spawn failure: the first try plus three.
+const SPAWN_RETRIES: u32 = 3;
+
+/// How long a transient spawn failure waits before the next attempt: enough
+/// for a child forked in that window to reach `exec` and release the handle,
+/// and for a short `EAGAIN` burst to pass.
+const SPAWN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
+
 /// Runs `exe <flag>` and returns its stdout, or the reason it failed.
-fn run(exe: &Path, flag: &str) -> Result<String, String> {
+///
+/// A transient spawn failure is retried a bounded number of times; anything
+/// that survives those attempts is returned as [`RunError::Spawn`], so the
+/// caller never has to guess between "busy host" and "not installed".
+fn run(exe: &Path, flag: &str) -> Result<String, RunError> {
+    let mut retries = SPAWN_RETRIES;
+    loop {
+        match run_once(exe, flag) {
+            Err(RunError::Spawn(err)) if retries > 0 && is_transient_spawn(&err) => {
+                retries -= 1;
+                std::thread::sleep(SPAWN_RETRY_DELAY);
+            }
+            other => return other,
+        }
+    }
+}
+
+/// A single attempt at `exe <flag>`; [`run`] owns the retry.
+fn run_once(exe: &Path, flag: &str) -> Result<String, RunError> {
     let output = Command::new(exe)
         .arg(flag)
         .output()
-        .map_err(|err| err.to_string())?;
+        .map_err(RunError::Spawn)?;
     if !output.status.success() {
         let status = match output.status.code() {
             Some(code) => code.to_string(),
             None => "a signal".to_owned(),
         };
-        return Err(format!("{flag} exited with {status}"));
+        return Err(RunError::Failed(format!("{flag} exited with {status}")));
     }
-    String::from_utf8(output.stdout).map_err(|_| format!("{flag} returned non-UTF-8 output"))
+    String::from_utf8(output.stdout)
+        .map_err(|_| RunError::Failed(format!("{flag} returned non-UTF-8 output")))
 }

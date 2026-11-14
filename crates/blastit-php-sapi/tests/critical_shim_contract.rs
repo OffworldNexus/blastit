@@ -12,6 +12,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use blastit_php_sapi::toolchain::Env;
 use blastit_php_sapi::{
@@ -302,40 +303,67 @@ impl Env for FakeEnv {
     }
 }
 
+/// Makes every [`FakeConfig`] directory unique inside this process, even when
+/// two tests construct one in the same nanosecond.
+static NEXT_FAKE_CONFIG: AtomicU64 = AtomicU64::new(0);
+
 /// A temporary directory holding one fake `php-config`, removed on drop.
 struct FakeConfig {
     dir: PathBuf,
+    script: PathBuf,
 }
 
 impl FakeConfig {
     fn new(version: &str, include_dir: bool) -> Self {
+        // `pid` separates test processes, the counter separates tests (and
+        // threads) in this one, and the timestamp keeps a directory from a
+        // crashed run with a recycled pid from being reused with stale
+        // contents. Two tests once shared a pid+nanos name, and one `Drop`
+        // deleted the other's script mid-run.
         let unique = format!(
-            "blastit-php-sapi-{}-{}",
+            "blastit-php-sapi-{}-{}-{}",
             std::process::id(),
+            NEXT_FAKE_CONFIG.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_nanos())
                 .unwrap_or(0)
         );
         let dir = std::env::temp_dir().join(unique);
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let include = dir.join("include");
         if include_dir {
-            std::fs::create_dir_all(&include).unwrap();
+            std::fs::create_dir_all(dir.join("include")).unwrap();
         }
-        let script = format!(
+        let config = Self {
+            script: dir.join("php-config8.4"),
+            dir,
+        };
+        config.write_script(version);
+        config
+    }
+
+    /// (Re)writes the fake `php-config` body; `--version` prints `version`.
+    ///
+    /// A test that needs an executable file which is *not* a program
+    /// overwrites this with plain text; the `0o755` mode is kept by
+    /// `std::fs::write` truncating in place.
+    fn write_script(&self, version: &str) {
+        let body = format!(
             "#!/bin/sh\ncase \"$1\" in\n  --version) echo {version} ;;\n  --include-dir) echo {} ;;\n  *) exit 1 ;;\nesac\n",
-            include.display()
+            self.dir.join("include").display()
         );
-        let path = dir.join("php-config8.4");
-        std::fs::write(&path, script).unwrap();
+        std::fs::write(&self.script, body).unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Self { dir }
+        std::fs::set_permissions(&self.script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     fn path(&self) -> String {
         self.dir.display().to_string()
+    }
+
+    fn script(&self) -> &Path {
+        &self.script
     }
 }
 
@@ -382,6 +410,89 @@ fn an_unsupported_minor_is_refused_by_name() {
         ToolchainError::UnsupportedVersion { version, .. } => assert_eq!(version, "8.5.0"),
         other => panic!("expected UnsupportedVersion, got {other:?}"),
     }
+}
+
+#[test]
+fn a_spawn_failure_is_not_reported_as_not_found() {
+    // The real race behind this file's flake: the script exists and is
+    // executable, but the kernel refuses to start it (`ETXTBSY` while a write
+    // handle is open — the fd table is process-wide, so even another test's
+    // just-forked child inherits the handle `FakeConfig::new` opens between
+    // `write` and its first exec — or `EAGAIN` when `fork` hits the process
+    // limit). "Could not ask" must never read as "no toolchain installed".
+    let fake = FakeConfig::new("8.4.27", true);
+    let script = fake.script().to_path_buf();
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&script)
+        .expect("hold the fake php-config open for writing");
+    let error = Toolchain::discover_with(&FakeEnv {
+        path: Some(fake.path()),
+        php_config: None,
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&error, ToolchainError::Spawn { path, .. } if path == &script),
+        "a spawn failure must be its own error, got {error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(&script.display().to_string()),
+        "the refusal must name the candidate: {message}"
+    );
+    assert!(
+        message.contains("PHP_CONFIG"),
+        "the refusal must name the override: {message}"
+    );
+    assert!(
+        !message.contains("no php-config found"),
+        "a spawn failure is not a missing toolchain: {message}"
+    );
+
+    // The typed refusal is not a permanent lie: release the writer and the
+    // same path is a usable toolchain (the allowed half).
+    drop(writer);
+    let toolchain = Toolchain::discover_with(&FakeEnv {
+        path: Some(fake.path()),
+        php_config: None,
+    })
+    .expect("the same php-config is usable once the writer is gone");
+    assert_eq!(toolchain.minor(), Minor::Php84);
+    assert_eq!(toolchain.php_config(), script.as_path());
+}
+
+#[test]
+fn a_text_file_named_php_config_is_not_a_spawn_failure() {
+    // A file that exists and is executable but is not a program — no ELF
+    // header, no `#!` — fails `exec` with `ENOEXEC`. That is a fact about the
+    // file, not a busy host: it stays `NotExecutable` (skipped like any other
+    // PATH entry), never `Spawn` with advice to retry.
+    let fake = FakeConfig::new("8.4.27", true);
+    std::fs::write(fake.script(), "not a program\n").unwrap();
+    let error = Toolchain::discover_with(&FakeEnv {
+        path: Some(fake.path()),
+        php_config: None,
+    })
+    .unwrap_err();
+    assert_eq!(
+        error,
+        ToolchainError::NotFound,
+        "a text file is a bad candidate, not an unanswered one"
+    );
+    assert!(
+        error.to_string().contains("no php-config found"),
+        "a text file must not produce the spawn sentence: {error}"
+    );
+
+    // The allowed half: the same path is a usable toolchain once it is a
+    // `php-config` program again.
+    fake.write_script("8.4.27");
+    let toolchain = Toolchain::discover_with(&FakeEnv {
+        path: Some(fake.path()),
+        php_config: None,
+    })
+    .expect("the same path is a usable toolchain once it is a php-config script");
+    assert_eq!(toolchain.minor(), Minor::Php84);
 }
 
 #[test]
