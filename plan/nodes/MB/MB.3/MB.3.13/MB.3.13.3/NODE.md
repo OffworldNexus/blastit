@@ -5,7 +5,7 @@ kind: task
 status: ready
 owner: implementer
 priority: 1
-depends_on: []
+depends_on: [MB.3.13.1, MB.3.13.2, MB.3.28]
 paths:
   - "crates/blastit-view/src/**"
   - "crates/blastit-view/Cargo.toml"
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T17:04"
-updated: "2026-11-14T18:31"
+updated: "2026-11-14T19:29"
 ---
 
 # Goal

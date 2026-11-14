@@ -11,3 +11,7 @@ edited fields
 ## 2026-11-14T18:20 [lead]
 
 OWNERSHIP: you own the protected suite ONLY. PhpEmbedRuntime and php = [dep:blastit-php-sapi] are MB.3.13.1's (design §5 row 7 amended). Do not build the runtime here.
+
+## 2026-11-14T19:29 [lead]
+
+edited fields

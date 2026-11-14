@@ -23,3 +23,7 @@ edited fields
 ## 2026-11-14T14:39 [lead]
 
 ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded NTS libphp.so + per-minor C SAPI shim in the unprivileged view worker); [route.fastcgi] is an external operator-managed fallback (entry + listen, no workers, loud weaker-mode warning); php-fpm pool machinery is dropped, not deferred. Retarget this node per the ADR's Node Changes table; do not implement pool ctl/PoolReady/parentfd.
+
+## 2026-11-14T19:06 [lead]
+
+INPUT from MB.3.25/native probe (2026-11-14): e2e/php-sapi/seccomp-exec installs SeccompRole::View{egress} because the harness predates MB.3.25. The PHP worker now installs EmbeddedView, and EmbeddedView denies execve (R14) BY DESIGN, so no harness can install it and then exec the probe ('Operation not permitted (os error 1)' at execve — itself correct). To make the shipped e2e test the exact PHP role, the probe must accept --role embedded-view and install the filter itself at startup (single-threaded, before php_module_startup), not inherit it across exec. Today the egress proof transfers because View and EmbeddedView share the identical socket/egress branch (MB.3.25's pinned tables); the exact-role proof is native in-process: AF_INET=EPERM(1), AF_UNIX=0, clone3=ENOSYS(38), execve=EPERM(1).
