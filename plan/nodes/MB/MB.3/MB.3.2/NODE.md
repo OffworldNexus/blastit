@@ -2,7 +2,7 @@
 id: MB.3.2
 title: "Write the lean PHP-FPM page (Local/CI/Deploy), register it, pass dx+ai-ergonomics"
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: [MB.3.1]
@@ -13,11 +13,11 @@ paths:
   - python/tests/runnable_docs/inventory.toml
   - "docs/design/php.review-dx.md"
   - "docs/design/php.review-ai-ergonomics.md"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T01:09"
+updated: "2026-11-14T02:09"
 ---
 
 # Goal

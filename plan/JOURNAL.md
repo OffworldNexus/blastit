@@ -908,3 +908,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T01:59 [MB.3.2] (lead) status review -> ready
 - 2026-11-14T02:03 [MB.3.2] (lead) attempt 2/3 started
 - 2026-11-14T02:03 [MB.3.2] (lead) status ready -> review
+- 2026-11-14T02:09 [MB.3.2] (lead) status review -> done

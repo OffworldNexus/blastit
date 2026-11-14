@@ -227,6 +227,57 @@ mode = "dev"
 fixture = "shop"
 
 [[page]]
+path = "docs/frameworks/php.md"
+
+[[page.fence]]
+index = 1
+mode = "install"
+
+[[page.fence]]
+index = 2
+mode = "example"
+reason = "php-fpm is not a dependency of this unprivileged gate and is not installed on the host, so the pool line cannot start here; MB.3.7's e2e/php2shell.py starts the same non-root pool shape in the pinned PHP image with the image's own absolute socket path, and asserts that socket exists and belongs to that user."
+
+[[page.fence]]
+index = 3
+mode = "static"
+reason = "The FastCGI worker lands in MB.3.4-MB.3.6, so this fence checks the documented dev command and its flags, not a boot; MB.3.7's e2e/php2shell.py replays it verbatim and asserts `/users/42` answers with the front controller's own body."
+
+[[page.fence]]
+index = 4
+mode = "example"
+reason = "The worker that forwards this path to public/index.php is MB.3.6; MB.3.7's e2e/php2shell.py replays this curl verbatim and asserts the 200, `application/json`, and the fixture's `{\"route\":\"user.show\",\"id\":\"42\"}` body."
+
+[[page.fence]]
+index = 5
+mode = "example"
+reason = "The static responder ships in 0.2.0, but the PHP fixture's asset is MB.3.7; e2e/php2shell.py replays this curl and asserts the 200, `text/css; charset=utf-8`, and the year-long immutable cache header."
+
+[[page.fence]]
+index = 6
+mode = "example"
+reason = "A hostile query string must stay data: MB.3.7's e2e/php2shell.py replays this curl verbatim and asserts the front controller's own JSON still reports `allow_url_include` as `0` and echoes the query string, never a phpinfo dump."
+
+[[page.fence]]
+index = 7
+mode = "static"
+reason = "PHP `--learn` attribution is MB.3.6, so this fence checks the documented dev flag, not a run; MB.3.7 drives one asset and one dynamic request, stops with Ctrl-C, and asserts the manifest gained `[route.static] root = \"public\"` (the `immutable` line stays hand-written)."
+
+[[page.fence]]
+index = 8
+mode = "static"
+reason = "PHP `check` attribution is MB.3.6, so this fence checks the documented check command, the `--` split and the suite path, not a run; MB.3.7 runs the same command with a driver that reads `BLASTIT_URL` and asserts the audit sees both the asset and the worker."
+
+[[page.fence]]
+index = 9
+mode = "static"
+reason = "The `--json` document for a PHP route is MB.3.6's; this fence checks the command and `--json` against the installed CLI, and MB.3.7 replays it and asserts one document whose finding names the unexercised route."
+
+[[page.fence]]
+index = 10
+mode = "presets"
+
+[[page]]
 path = "docs/frameworks/static-and-spa.md"
 
 [[page.fence]]
