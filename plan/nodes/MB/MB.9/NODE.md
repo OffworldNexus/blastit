@@ -46,11 +46,12 @@ a new implementation plus a registered builder — not a new arm in the schedule
 - **Dependency direction.** `blastit-backend` → `blastit-http` + `blastit-manifest`
   types only. Implementations depend inward on the contract, never the reverse.
   `blastit-scheduler` depends on the contract, never on `blastit-fastcgi`.
-- **Sequencing.** `MB.9.1` (contract) → `MB.9.2` (static) → `MB.9.3` (WSGI) →
-  `MB.9.4` (conformance wired into `make check`). `MB.9.1` depends on `MB.3.4` for
-  one reason only: `MB.3.4` also owns `Cargo.lock`, and the lockfile must stay
-  single-owner. `MB.3.6` then adds the FastCGI row, and `MB.4` must not start
-  implementation before this epic closes.
+- **Sequencing.** `MB.9.1` (contract) → `MB.9.2` (`MB.9.2.1` head/stages, `MB.9.2.2`
+  `StaticUpstream`) → `MB.9.3` (WSGI) → `MB.9.4` (conformance wired into `make check`).
+  `MB.9.1` depends on `MB.3.4` for one reason only: the design's serialized
+  `Cargo.lock` chain (`MB.3.4.1` → `MB.9.1` → `MB.9.2.1` → `MB.3.6.1` → `MB.3.8`), and the
+  lockfile must stay single-owner (`MB.3.4.1` = design leaf `MB.3.4a`). `MB.3.6` then
+  adds the FastCGI row, and `MB.4` must not start implementation before this epic closes.
 
 # Acceptance
 

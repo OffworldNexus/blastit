@@ -909,3 +909,88 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T02:03 [MB.3.2] (lead) attempt 2/3 started
 - 2026-11-14T02:03 [MB.3.2] (lead) status ready -> review
 - 2026-11-14T02:09 [MB.3.2] (lead) status review -> done
+- 2026-11-14T02:09 [MB.3.3] (lead) status ready -> active
+- 2026-11-14T02:09 [MB.3.3] (lead) attempt 1/3 started
+- 2026-11-14T02:09 [MB.3.3] (lead) base 7d3e7c1f2b726242989d2acf1aacaaf8218d31b8
+- 2026-11-14T03:07 ESCALATION #8 -> expert for MB.3.3 by lead: attempt 1: identical BLOCKER/MAJOR classes repeated across two critic rounds on the 0.2.1 FastCGI + Upstream design (poo
+- 2026-11-14T03:07 [MB.3.3] (planner) edited fields
+- 2026-11-14T03:36 [MB.3.4] (planner) edited fields
+- 2026-11-14T03:37 [MB.3.6] (planner) edited fields
+- 2026-11-14T03:37 [MB.9.2] (planner) edited fields
+- 2026-11-14T03:37 [MB.3.4.1] (planner) created (task) Create the pure blastit-fastcgi crate: manifest, records, name-value codec, CGI head parser - design MB.3.4a
+- 2026-11-14T03:37 [MB.3.4.2] (planner) created (task) Param builder, allowlist wall and protected lockdown matrix - design MB.3.4b
+- 2026-11-14T03:37 [MB.3.6.1] (planner) created (task) Pool ctl frames, workspace deps/lock and scheduler AF_UNIX seccomp - design MB.3.6a1
+- 2026-11-14T03:37 [MB.3.6.2] (planner) created (task) FastCgiUpstream: session pump, /proc/self/fd connect and conformance row - design MB.3.6a2
+- 2026-11-14T03:37 [MB.3.6.3] (planner) created (task) stage0 no-app boot, parentfd freeze and supervise::spawn_pool single *at sequence + PoolReady - design MB.3.6b
+- 2026-11-14T03:37 [MB.9.2.1] (planner) created (task) UpstreamHead, RouteRuntime.stages, run_with and the Done slot rule - design MB.9.2a
+- 2026-11-14T03:37 [MB.3.6.4] (planner) created (task) check::serve_and_run, the 3-way check branch order and PHP learn attribution - design MB.3.6c
+- 2026-11-14T03:37 [MB.9.2.2] (planner) created (task) StaticUpstream adapter and deletion of the static dispatch branches - design MB.9.2b
+- 2026-11-14T03:37 [MB.3.7] (planner) edited fields
+- 2026-11-14T03:37 [MB.3.8] (planner) edited fields
+- 2026-11-14T04:00 AUTOPILOT on by conductor resume MB.3 after restart
+- 2026-11-14T04:01 ESCALATION #9 -> architect for MB.3.3 by conductor: Three critic rounds still FAIL with the same core defect: the FastCGI pool socket lifecycle/pivot is not closed (who bin
+- 2026-11-14T04:47 [MB.3.3] (lead) edited fields
+- 2026-11-14T04:47 [MB.3.3] (lead) Round-4 security critic: 0 BLOCKER, 2 MAJOR (MAJOR-A dev/check parentfd O_CLOEXEC cannot cross stage-0->stage-1 execve, no fd handoff specified; MAJOR-B S0 rout
+- 2026-11-14T04:54 [MB.3.3] (designer) Round-4 security fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-A pinned the parentfd handoff (internal argv --fastcgi-parent-fd acro
+- 2026-11-14T05:08 [MB.3.3] (designer) Round-5 security fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-A residual (init keeps one Arc<OwnedFd> per route for the process lif
+- 2026-11-14T05:15 [MB.3.3] (designer) Round-5 follow-up: fixed MINOR-31..37 in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect. 31: child dev spawned as Host::stage1() Reexec (/proc/self/e
+- 2026-11-14T05:37 [MB.3.3] (lead) Round-4 implementability critic (steps exhausted before writing review-implementability.md; content captured): 0 BLOCKER, 12 MAJOR, 16 MINOR. M1 BootError.line 
+- 2026-11-14T05:42 [MB.3.3] (designer) Round-4 implementability fixes (M1-M12 + one-liners) in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: M1 RouteSpec.line from SchedulerConfig.route_
+- 2026-11-14T05:58 [MB.3.3] (designer) Round-5 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 PinnedSocket::new now takes Arc<OwnedFd> and parent_fd uses
+- 2026-11-14T06:13 [MB.3.3] (lead) Round-6 implementability critic (steps exhausted mid-file; analysis captured): 0 BLOCKER, 4 MAJOR, ~14 MINOR. MAJOR-A Executor/SpawnMode derives unpinned across
+- 2026-11-14T06:17 [MB.3.3] (designer) Round-6 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-A Executor/FastCgiPolicy derive Debug+Clone+PartialEq+Eq (not
+- 2026-11-14T06:33 [MB.3.3] (designer) Round-7 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 the contract now defines BodySource (BoxFuture next + cance
+- 2026-11-14T06:50 [MB.3.3] (designer) Round-8 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 builtin_registry() is defined in scheduler.rs (MB.9.2.1.2, 
+- 2026-11-14T07:06 [MB.3.3] (designer) Round-9 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 module declarations now have one owner each - MB.3.4.2 owns
+- 2026-11-14T07:24 [MB.3.3] (designer) Round-10 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 blastit-fastcgi now defines codec-local LockdownError/CgiE
+- 2026-11-14T07:40 [MB.3.3] (designer) Round-11 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 MB.3.6.1.2 adds blastit-backend to crates/blastit/Cargo.to
+- 2026-11-14T07:58 [MB.3.3] (designer) Round-12 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 mod upstream; is declared in crates/blastit-scheduler/src/
+- 2026-11-14T08:14 [MB.3.3] (designer) Round-13 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 MB.3.5.1 now adds Executor/FastCgiPolicy to crates/blastit
+- 2026-11-14T08:28 [MB.3.3] (designer) Round-14 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 the entry check is now injected - SocketProbe gains check_
+- 2026-11-14T08:42 [MB.3.3] (designer) Round-15 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 ProductionProbe::check_entry now brackets openat2 + facces
+- 2026-11-14T08:56 [MB.3.3] (designer) Round-16 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 replaced the impossible setfsuid bracket with a short-live
+- 2026-11-14T09:11 [MB.3.3] (designer) Round-17 implementability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-1 faccessat2 is now called via unsafe libc::syscall(SYS_facc
+- 2026-11-14T09:24 [MB.3.3] (designer) Round-18 implementability one-liners in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: (1) the reply contract is now exactly one byte from O/U/N/S/R
+- 2026-11-14T09:38 [MB.3.3] (designer) Round-4 testability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-T1 added crates/blastit/tests/critical_fastcgi_parent_fd.rs as MB.
+- 2026-11-14T09:53 [MB.3.3] (designer) Round-5 testability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-T1 pinned the view/zygote ChildIo.keep rule (omit pinned_socket_fd
+- 2026-11-14T10:06 [MB.3.3] (designer) Round-6 testability fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: MAJOR-T1 pinned two oracles for the External promise - critical_fastcgi_
+- 2026-11-14T10:20 [MB.3.3] (designer) Round-7 testability one-liners in docs/design/php-fastcgi.md + resolve-architect: MINOR-T1 external_pool_never_spawns_php_fpm now states the 200 fake-peer preco
+- 2026-11-14T10:36 [MB.3.3] (designer) Round-3 consistency fixes in docs/design/php-fastcgi.md + ADR-0008 + resolve-architect: C8-M1 env[HOME] is <runtime>/views/<uid>/tmp in 4.1, 4.8.2, 7.2 and ADR;
+- 2026-11-14T10:50 [MB.3.5] (planner) edited fields
+- 2026-11-14T10:50 [MB.9.1] (planner) edited fields
+- 2026-11-14T10:50 [MB.9.2.1] (planner) edited fields
+- 2026-11-14T10:50 [MB.3.6.1] (planner) edited fields
+- 2026-11-14T10:50 [MB.3.6.2] (planner) edited fields
+- 2026-11-14T10:50 [MB.3.6.3] (planner) edited fields
+- 2026-11-14T10:50 [MB.3.6.4] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.5.1] (planner) created (task) Parse [route.fastcgi], Executor and the boot predicates in blastit-manifest - design MB.3.5 part 1
+- 2026-11-14T10:51 [MB.3.5.2] (planner) created (task) SocketProbe, boot probes and the manifest reference entry - design MB.3.5 part 2
+- 2026-11-14T10:51 [MB.9.1.1] (planner) created (task) Add crates/blastit-backend: Upstream trait, contract types, PinnedSocket, Registry - design MB.9.1 part 1
+- 2026-11-14T10:51 [MB.9.1.2] (planner) created (task) Conformance case table, IMPLEMENTATIONS and cases() in blastit-backend - design MB.9.1 part 2
+- 2026-11-14T10:51 [MB.9.2.1.1] (planner) created (task) Scheduler config and head plumbing: UpstreamHead accessors, RouteInfo.executor, SchedulerConfig fields - design MB.9.2a part 1
+- 2026-11-14T10:51 [MB.9.2.1.2] (planner) created (task) RouteRuntime.stages, ViewHub/SessionPort, session task, run_with and builtin_registry - design MB.9.2a part 2
+- 2026-11-14T10:51 [MB.9.2.1.3] (planner) created (task) Re-export the boot surface and wire roles::scheduler to run_with - design MB.9.2a part 3
+- 2026-11-14T10:51 [MB.3.6.1.1] (planner) created (task) Scheduler AF_UNIX seccomp, pool ctl frames and HTTP head refusals - design MB.3.6a1 part 1
+- 2026-11-14T10:51 [MB.3.6.1.2] (planner) created (task) Workspace Cargo edges, Cargo.lock and the fastcgi-codec conformance driver - design MB.3.6a1 part 2
+- 2026-11-14T10:51 [MB.3.6.2.1] (planner) created (task) FastCgiUpstream session pump, PinnedSocket connect and fastcgi registration - design MB.3.6a2 part 1
+- 2026-11-14T10:51 [MB.3.6.2.2] (planner) created (task) FastCGI dispatch and conformance suites plus the 5-binary Makefile gate - design MB.3.6a2 part 2
+- 2026-11-14T10:51 [MB.3.6.3.1] (planner) created (task) stage0 B1-B3 boot, parentfd argv handoff and the protected parent-fd suite - design MB.3.6b part 1
+- 2026-11-14T10:51 [MB.3.6.3.2] (planner) created (task) render_pool_conf, the S0-S7/U1 spawn sequence and the fake php-fpm helper - design MB.3.6b part 2
+- 2026-11-14T10:51 [MB.3.6.3.3] (planner) created (task) Protected critical_fastcgi_pool suite: fd table, pgid, escapee and U1 - design MB.3.6b part 3
+- 2026-11-14T10:51 [MB.3.6.4.1] (planner) created (task) Two-shape http_obs reader, executor_ran accounting and the learn static proposal - design MB.3.6c part 1
+- 2026-11-14T10:51 [MB.3.6.4.2] (planner) created (task) check::serve_and_run, the 3-way branch order and the protected learn suite - design MB.3.6c part 2
+- 2026-11-14T10:51 [MB.3.4.2] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.5] (planner) edited fields
+- 2026-11-14T10:51 [MB.9.2.2] (planner) edited fields
+- 2026-11-14T10:51 [MB.9.3] (planner) edited fields
+- 2026-11-14T10:51 [MB.9.4] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.8] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.6] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.6.1] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.6.2] (planner) edited fields
+- 2026-11-14T10:51 [MB.3.6.3] (planner) edited fields
+- 2026-11-14T10:51 [MB.9.2] (planner) edited fields
+- 2026-11-14T10:51 [MB.9.2.1] (planner) edited fields
+- 2026-11-14T10:53 [MB.3.3] (planner) Applied design §8/§8.1/§8.2 plan hygiene: converted MB.3.5/9.1/9.2.1/3.6.1-4 to epics; created 16 leaves (MB.3.5.1-2, 9.1.1-2, 9.2.1.1-3, 3.6.1.1-2, 3.6.2.1-2, 
+- 2026-11-14T11:02 [MB.3.3] (lead) status active -> review
+- 2026-11-14T11:02 [MB.3.3] (lead) status review -> done

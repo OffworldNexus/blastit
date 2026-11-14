@@ -2,7 +2,7 @@
 id: MB.3.3
 title: "Design the FastCGI session, param lockdown and the injected Upstream backend contract (ADR-0008)"
 kind: task
-status: ready
+status: done
 owner: designer
 priority: 1
 depends_on: [MB.3.2]
@@ -12,14 +12,15 @@ paths:
   - "docs/design/php-fastcgi.review-implementability.md"
   - "docs/design/php-fastcgi.review-testability.md"
   - "docs/design/php-fastcgi.review-consistency.md"
+  - "docs/design/php-fastcgi.resolve-architect.md"
   - docs/design/README.md
   - "docs/decisions/ADR-0008-fastcgi-backend-and-param-lockdown.md"
   - docs/decisions/README.md
-attempts: 0
-max_attempts: 3
-escalation: none
+attempts: 1
+max_attempts: 4
+escalation: architect
 created: "2026-11-14T01:09"
-updated: "2026-11-14T01:54"
+updated: "2026-11-14T11:02"
 ---
 
 # Goal
@@ -47,17 +48,26 @@ supervisor and no second static responder.
   The design may not contradict the page; if it must, `human add` the conflict rather
   than weakening either silently.
 - **Grammar to pin** (exact keys, defaults, error messages, and what fails at boot):
-  the `[route.fastcgi]` block — entry script (`public/index.php`), pool `listen`
-  socket path, `workers`, and the environment map — plus how it composes with
+  the `[route.fastcgi]` block — exactly `entry` (`public/index.php`), the relative pool
+  `listen` socket path and `workers` (default `4`). There is **no `env` key**: the pool's
+  `env[…]` lines are derived from init's sanitized environment minus every `BLASTIT_*`
+  name (the page's table has three keys; a fourth is a page change with its own DX node,
+  and `env` or any other key is an unknown-key error). The block composes with
   `[route.static]` on the same route (`root = "public"` serving assets while the
   entry script and dynamic paths reach the worker). Decide and justify per-route
   `[route.fastcgi]` (like `[route.static]`) versus a named top-level block; the page
   shows per-route, so per-route wins unless there is a real reason.
-  Boot-fatal list: missing/absolute/`..` entry script; entry script outside the
-  static root when both are declared; a socket path that is relative, missing, not a
-  socket, or not owned by the route uid when production; `workers = 0`; unknown keys;
-  a `[route.fastcgi]` on a route whose `methods` include something the worker cannot
-  answer. State what `blastit check`/`dev` validate as the invoking uid.
+  Boot-fatal list: missing/**absolute**/`..` entry script (`listen` is relative, so an
+  absolute `listen` is the fatal one); entry script outside the
+  static root when both are declared; an empty/`..`/`\`/control-byte `listen`, a
+  directory, a symlink, no parent segment, or a parent that is the manifest dir,
+  `static.root` (or beneath it), an ancestor of `entry` or shared with another route;
+  `dev`/`check`: absent, not a socket, or not connectable by the invoking uid;
+  production: a parent or ancestor writable by a route uid/gid or containing a symlink,
+  and an existing non-socket/foreign-uid entry at the socket name; `workers = 0` or
+  `> 64`; unknown keys; `spa = true` with `[route.fastcgi]`; a `[route.fastcgi]` on a
+  route whose `methods` include something the worker cannot answer (`CONNECT`/`TRACE`).
+  State what `blastit check`/`dev` validate as the invoking uid.
 - **Wire contract:** which record types blastit emits and consumes; one `BEGIN_REQUEST`
   per request; `requestId` strategy (strictly increasing per connection, wrap or
   reconnect at exhaustion), whether a connection is reused or one-per-request; PARAMS
@@ -124,41 +134,56 @@ interface provides a same trait implementation."* The design must pin all of thi
   `MB.9`; the design must not describe today's code as if it were already DI.
 - **The trait.** `pub trait Upstream` in `crates/blastit-backend`, object-safe,
   knowing nothing about PHP, Python, static files or any server:
-  - `fn kind(&self) -> &'static str` — the manifest backend name, for events only.
-  - `fn plan(&self, head: &RequestHead) -> Result<UpstreamPlan, UpstreamError>` —
+  - `fn kind(&self) -> &'static str` — for diagnostics and tests only; never logged,
+    the `request` event has no backend field.
+  - `fn plan(&self, head: &UpstreamHead) -> Result<UpstreamPlan, UpstreamError>` —
     validate the request head and state body/ingress expectations
     (`BodyMode::None | Buffered { max } | Stream { credit }`, `expects_continue`,
     method/body refusal). Planning is synchronous and allocation-bounded; a refusal
     is a client-visible `400`/`405`/`413`, never an internal drop with no status.
-  - `fn exchange<'a>(&'a self, plan: UpstreamPlan, body: BodyStream<'a>,
-    sink: &'a mut dyn ResponseSink) -> BoxFuture<'a, Result<ExchangeOutcome,
+  - `fn exchange(&self, plan: UpstreamPlan, body: Box<dyn BodySource + Send>,
+    sink: Box<dyn ResponseSink + Send>) -> BoxFuture<'_, Result<ExchangeOutcome,
     UpstreamError>>` — perform the exchange under the existing credits and return
-    what the implementation observed. Object safety is explicit: a `BoxFuture`
+    what the implementation observed. Body and sink are boxed trait objects so the
+    session task owns them (`'static`). Object safety is explicit: a `BoxFuture`
     alias (`Pin<Box<dyn Future<Output = …> + Send + 'a>>`), **no `async_trait`, no
     new dependency**; the document names the fallback if the alias cannot be made
     to work on MSRV 1.88.
-  - `ExchangeOutcome { status, bytes_in, bytes_out, protocol_status,
-    observations: Vec<Observation> }`; an implementation may not write events,
-    push metrics or touch the manifest — it returns data.
-  - `Observation` is **language-agnostic**: `kind ∈ { WireRequest, Query, Param,
-    StaticFile, Output }` plus `target`, optional `detail`. There is no
+  - `ExchangeOutcome::{Answered { status, bytes_in, bytes_out, protocol_status,
+    dropped, observations }, Declined { next, plan }}`; `Declined` writes no head.
+    An implementation may not write events, push metrics or touch the manifest — it
+    returns data.
+  - `Observation { target, #[serde(flatten)] kind }` is **language-agnostic**:
+    `ObservationKind` is internally tagged (`#[serde(tag = "kind", …)]`) with
+    `kind ∈ { WireRequest, Query, Param, StaticFile, Output }`. There is no
     `PhpParam`/`SqlQuery` variant; `--learn`/`check` consume the same records
     whatever implements the trait, so neither grows a PHP-specific code path.
   - `UpstreamError` carries the **client-visible** status (`Refused { status,
-    reason }`, `Unavailable`, `Fault`). Error mapping lives in the contract crate so
-    the conformance table can assert it once for every implementation.
-- **Injection, not selection.** `RouteInfo` holds `upstream: Arc<dyn Upstream>`
-  (non-optional, no `Option<Box<dyn …>>` unwrapped on the hot path), built exactly
-  once at boot. Dispatch calls `plan` then `exchange`; the document states, in one
-  sentence, that dispatch **never `match`es on backend kind** — no `cfg!`, no
-  `match backend_kind`, no globals/`lazy_static`/`OnceCell` registry lookup per
-  request. An unknown backend fails closed **at boot** with an error naming the
-  manifest line (`./blastit.toml:<line>: unknown backend "<kind>" …`).
+    reason }`, `Unavailable { retry_after }`, `Fault`, `Cancelled`). Error mapping lives
+    in the contract crate so the conformance table can assert it once for every
+    implementation; `Cancelled` is the one error with no status.
+- **Injection, not selection.** The per-route handle lives **beside** the descriptor in
+  the scheduler: `struct RouteRuntime { info: RouteInfo, stages: Vec<Arc<dyn
+  Upstream>> }` (1 or 2 stages, `Request.stage` indexes them), built exactly once at
+  boot. `RouteInfo` stays the manifest-derived descriptor (its `Eq` derive and the
+  protected value comparisons depend on that) and gains `executor: Option<Executor>`;
+  adding `Arc<dyn Upstream>` to `RouteInfo` itself is not the shape. Dispatch calls
+  `plan` then `exchange`; the document states, in one sentence, that dispatch **never
+  `match`es on backend kind** — no `cfg!`, no `match backend_kind`, no
+  globals/`lazy_static`/`OnceCell` registry lookup per request. An unknown backend fails
+  closed **at boot** with an error naming the manifest line
+  (`./blastit.toml:<line>: no builder registered for backend "<kind>" …`).
+  `Scheduler::session(upstream, plan, body, sink, permit: RoutePermit)` is **`pub(crate)`**:
+  one `tokio::spawn`ed task per request owns the `RoutePermit`, and `SessionMsg::Done` is
+  the only event that releases the slot.
 - **Factory/registry.** `crates/blastit-backend` defines `BackendBuilder` (name →
-  `Arc<dyn Upstream>`) and `Registry::build(&Manifest) -> Result<Vec<Arc<dyn
-  Upstream>>, BootError>`; the composition root (`crates/blastit`) registers static,
-  WSGI and (later) FastCGI builders. Duplicate registration and unknown kind are
-  boot errors naming the manifest line; there is no fallback backend.
+  `Arc<dyn Upstream>`) and `Registry::new(Vec<Arc<dyn BackendBuilder>>)` +
+  `Registry::build_route(&RouteSpec, &BuildCtx) -> Result<Vec<Arc<dyn Upstream>>,
+  BootError>` (executor first, then the `static` stage in front when
+  `static_policy.is_some()`); the composition root `crates/blastit/src/roles.rs` calls
+  `run_with(builtin_registry(), …)` and registers static, WSGI and (later) FastCGI
+  builders. Duplicate kinds and a kind with no builder are boot errors naming the
+  manifest line; there is no fallback backend.
 - **Crates by seam, dependencies inward.** `blastit-backend` depends only on
   `blastit-http` (head/status types) and `blastit-manifest` *types*; it may never
   depend on `blastit-scheduler`, `blastit-view`, `blastit-fastcgi` or `blastit`.
