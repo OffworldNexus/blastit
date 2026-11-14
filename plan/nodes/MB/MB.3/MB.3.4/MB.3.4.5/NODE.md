@@ -42,12 +42,13 @@ from `plan.head`" (`MB.3.6.2.1`), so the hole is reachable by the next leaf.
 
 ```console
 $ cargo test -p blastit-fastcgi --locked
-test result: ok. 42 passed; ...        # unittests: 41 + the new resolve test
-test result: ok. 25 passed; ...        # critical_fastcgi_lockdown, UNMODIFIED
+test result: ok. 44 passed; ...        # unittests: 43 + the new resolve test
+test result: ok. 12 passed; ...        # critical_fastcgi_codec (MB.3.4.4)
+test result: ok. 30 passed; ...        # critical_fastcgi_lockdown, UNMODIFIED
 test result: ok. 1 passed; ...         # doc-test
 
 $ cargo test -p blastit-fastcgi --test critical_fastcgi_lockdown --locked
-test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 $ make rs-lint
 cargo clippy --workspace --all-targets --locked -- -D warnings   # clean

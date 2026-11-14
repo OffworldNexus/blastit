@@ -2,16 +2,16 @@
 id: MB.3.9.2
 title: "Amend ADR-0008 + design 4.1: drop listen, derive the pool socket, optional budgeted workers"
 kind: task
-status: ready
+status: done
 owner: designer
 priority: 1
 depends_on: []
 paths: ["docs/design/php-fastcgi.md", "docs/decisions/**", "docs/design/php-fastcgi.review-*.md"]
-attempts: 3
-max_attempts: 3
+attempts: 4
+max_attempts: 4
 escalation: none
 created: "2026-11-14T13:17"
-updated: "2026-11-14T14:02"
+updated: "2026-11-14T14:19"
 ---
 # Goal
 

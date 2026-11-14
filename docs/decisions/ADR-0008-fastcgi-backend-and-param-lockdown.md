@@ -1,6 +1,7 @@
 # ADR-0008: Injected `Upstream` Contract and FastCGI Param Lockdown
 
-- **Status:** Proposed
+- **Status:** Proposed (this amendment takes effect with the same acceptance; it does not
+  change the status line)
 - **Date:** 2026-11-14
 - **Node:** MB.3.3
 - **Owner:** architect
@@ -85,7 +86,8 @@ trait implementation per language/server, injected — DI/IoC in the spirit.
    deletes that fallback and a missing builder becomes `RunError::Boot` — no fallback backend
    is ever added.
 2. **Per-route `[route.fastcgi]`, three keys.** `entry`, `listen`, `workers` (default
-   `4`), matching `[route.static]` and `[route.ingress]`. `entry` is a `.php` file beneath
+   `4`), matching `[route.static]` and `[route.ingress]`. **(Amended 2026-11-14 by
+   `MB.3.9.2`: `listen` is removed and `workers` is optional - see *Amends* below.)** `entry` is a `.php` file beneath
    `static.root` when both blocks are declared, checked through the injected
    `SocketProbe::check_entry` (`openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)`, final
    component not a symlink, regular file, readable as the route/invoking uid; never
@@ -155,7 +157,12 @@ trait implementation per language/server, injected — DI/IoC in the spirit.
 5. **For a route with `[route.fastcgi]`, a `.php`/`.phar` path under `root` is a final
    `404` (`Refusal::EntryScript`) before method (`405`), body (`413`) and `Content-Type`
    checks.** Only `entry` executes, and `entry` is never served as a file.
-6. **Pool ownership reuses the view role with a pinned-fd/inode socket lifecycle.** No new
+6. **Pool ownership reuses the view role with a pinned-fd/inode socket lifecycle.**
+   *(`MB.3.9.2` amendment: every `0555` in this decision is the pre-amendment value. The
+   amended modes are `<runtime>` root `0755`, a new `<runtime>/fastcgi` container
+   `init_uid:init_gid 0711` and `<runtime>/fastcgi/<i>` `0700` → `0755 route_uid` in the
+   bind window → `init_uid:init_gid 0511` steady; `dev`/`check` stay `0700` and run the
+   single-uid variant. See **Amends** below, which is authoritative.)* No new
    role, uid or supervisor (ADR-0001, ADR-0007): init spawns `php-fpm -F -y` per route as
    `UID_BASE+1000+i` in its own process group (child `setpgid(0, 0)` **and** parent
    `setpgid(child_pid, child_pid)` right after the fork, `EACCES` ignored, so `pgid` exists
@@ -218,7 +225,9 @@ trait implementation per language/server, injected — DI/IoC in the spirit.
    **restore owner and mode** `init_uid:init_gid 0555` + post-freeze `fstatat` re-verify
    **plus a re-run of the pgid-membership check** →
    `Ctl::PoolReady { route, sock_dev, sock_ino }` over private `ctl.chan`. Every failure
-   runs Unwind `U1` (`kill(-pgid, SIGKILL)`, **freeze first** `init_uid:init_gid 0555`, then
+   runs Unwind `U1` (`kill(-pgid, SIGKILL)`, **freeze first** `init_uid:init_gid 0555`,
+   **amended: `0511`, and `dev`/`check` run the single-uid variant (no `S2`/`S5`/`S6`) so `U1`
+   unlinks as the owner**, then
    `unlinkat` — `CAP_DAC_OVERRIDE` lets init unlink in `0555`, and freezing first leaves no
    `0755 route_uid` gap to rebind in — no `PoolReady`); a failed group kill never skips the
    freeze/unlink, and a `setsid()` child is bounded by `RLIMIT_NPROC`, cannot write `0555`
@@ -268,6 +277,100 @@ trait implementation per language/server, injected — DI/IoC in the spirit.
    deletes that fallback so a missing builder is `RunError::Boot`.
 
 **Amends.**
+- **Decision 2 of this ADR (amended 2026-11-14 by `MB.3.9.2`, owner decision):** the
+  `[route.fastcgi]` grammar loses `listen`. `blastit dev` spawns and supervises the pool,
+  so blastit owns the socket; the remaining keys are `entry` and an **optional**
+  `workers`. The socket is derived, never authored: `<runtime>/fastcgi/<route_index>/fpm.sock`
+  in production (`<runtime>` is `/run/blastit`, `ARCHITECTURE.md` §2.2) and
+  `<run_root>/fastcgi/<route_index>/fpm.sock` in `dev`/`check` (`<run_root>` is the run root
+  blastit itself created for the invocation: `Dev::adopt`'s, or `check`'s `<CheckRoot>/dev`;
+  `MB.3.9.3` may move it and that is its call), where `<route_index>` is the index of the
+  `Route` in `Manifest::routes` — the integer `--fastcgi-parent-fd=<route>:<n>` already
+  carries, never the FastCGI-only ordinal — so
+  no route name is ever interpolated into a path. Three modes, one per level (design §4.8.3):
+  `<runtime>` keeps the shipped **root-owned `0755`** (`php-fpm`'s absolute path walk needs
+  `x`; `blastit-sys::sock::create_parents` already creates it so and keeps it out of any
+  route's hands), `<runtime>/fastcgi` is `init_uid:init_gid 0711` (traverse-only for
+  everyone else, init the only writer, not listable), and `<runtime>/fastcgi/<i>` is created
+  `0700 init`, `0755 route_uid` only inside the §4.8.3 bind window, `init_uid:init_gid 0511`
+  steady (traversable by the scheduler's `/proc/self/fd/<parentfd>/fpm.sock` lookup, not
+  listable, not writable; the socket inside is `scheduler_uid 0600`). `dev`/`check` never
+  enter the bind window — the pool binds as the uid that owns the run root, so both levels
+  stay `0700 invoking_uid`. Consequence: `listen.mode`, a shared parent
+  between two routes, a route-writable parent and the whole ancestor-policing walk over
+  the repository cease to be expressible — `B1`/`B2` anchor on blastit's own runtime dir
+  and `S0`–`S7`/`U1`/`C1` are unchanged because they were always written against
+  `parentfd` and a leaf name. A manifest that writes `listen = "…"` is
+  `ManifestError::FastCgiListenDerived`, which carries **no** value and answers
+  `route "app" (index 0): fastcgi listen: unknown key; the pool socket is created by blastit`
+  (the hint is kept because the key appears in the `0.2.1` drafts; `0.2.1` never shipped it,
+  so there is no alias or migration path). `FastCgiListenInvalid` and
+  `FastCgiListenParentInvalid` are deleted with the rules they enforced (no surviving rule
+  needs them); the derived-parent probe failures are one new variant,
+  `FastCgiPoolSocketInvalid { location, path, rule }`, naming the derived path.
+  **`workers` mapping:** absent means the **per-view cap** of the same budget WSGI uses (not
+  a divided share) —
+  `Config::view_worker_cap()` (`crates/blastit/src/config.rs:1407-1411`) =
+  `BLASTIT_VIEW_MAX_WORKERS`, defaulting to `BLASTIT_MAX_WORKERS` (fields `config.rs:674,677`;
+  defaults `16`/`None` at `config.rs:841-842`; env parse `config.rs:1014-1023`; the
+  `checked_add(16)` validation is `config.rs:1301-1321`). Resolution is one pure formula,
+  `FastCgiPolicy::resolved_workers(cap) = workers.unwrap_or(cap)`, called by init (for
+  `pm.max_children` and `RLIMIT_NPROC`) and by `run_with` (for `RouteState.worker_cap`);
+  an explicit `workers ∈ 1..=64` that **exceeds** the budget is a **boot error naming both
+  numbers** (`FastCgiWorkersOverBudget`), never a clamp: a clamp would silently deliver a
+  concurrency the manifest does not declare — the exact defect class that removed `listen`
+  — and would make `pm.max_children`, `RLIMIT_NPROC` and `worker_cap` disagree across
+  processes. The resolved value is itself bounded: `pub const MAX_POOL_WORKERS: u32 = 64` in
+  `blastit-manifest`, because `pm = static` **pre-forks** `pm.max_children` children, so an
+  omission under a 512-worker budget would spawn 513 processes and size both rlimits from
+  that number; `FastCgiWorkersCapExceeded` refuses it. `Manifest::check_fastcgi_workers(budget)`
+  is the pure check (`stage0` in production and `dev`, and `check::execute`, pass
+  `view_worker_cap()`); `Manifest::validate` stays config-free. `RLIMIT_NPROC` follows the **resolved** value (`<resolved> + 2`, tighter
+  than a view's `view_worker_cap + 16` at `zygote.rs:52`/`:115-121` because a `pm = static`
+  pool is a master plus exactly `<resolved>` children, while CPython needs interpreter
+  headroom). **Two FastCGI routes do not divide the budget:** each resolves to the full
+  `cap`, their `pm.max_children` sum is `2 × cap` (the same arithmetic as two WSGI views),
+  and the scheduler's global `slots < max_workers` gate plus each route's own permit stays
+  the admission truth — so a pool is never saturated by admitted requests and never becomes
+  a second budget. `workers` stays **only** as a downward per-route override for a real
+  deployment constraint (PHP worker RSS is tens of MB, so a memory-heavy route may need four
+  workers under a sixteen-worker deployment without shrinking every WSGI view); it is
+  documented as **usually omit**, and the resolved value is shown by `dev` once per route
+  on the existing dev-diagnostic channel (`eprintln!("blastit dev: fastcgi route \"app\": pool
+  workers 16 (derived from BLASTIT_VIEW_MAX_WORKERS=16)")`; stderr, no new event, no new JSON
+  key, and the named variable is the one that supplied the cap) and durably as `pm.max_children` in the generated pool file
+  — not as a banner line, which stays exactly three (`dev_learn::banner` untouched).
+  Production prints nothing extra: its record is the pool file, and its over-budget
+  refusal names both numbers. The
+  `dev`/`check` lifecycle that follows from this (who spawns, discovery order, cleanup,
+  error contract) is `MB.3.9.3`'s amendment; this one pins the grammar, the derivation and
+  the socket's provenance only.
+- **Decisions 1 and 6 of this ADR (amended 2026-11-14 by `MB.3.9.2`):** the two sentences that
+  resolve a **manifest** parent (`openat2` from `manifest_dirfd`, sticky-bit walk from `/`
+  to `manifest_dir`, "not `manifest_dir`, `static.root` or an `entry` ancestor", "unique per
+  route") and the two that size the pool from the manifest (`pm.max_children = workers`,
+  `RLIMIT_NPROC = workers + 2`), plus decision 1's
+  `RouteState::new(pool_spawn == PoolSpawn::External, workers)`, read as amended above:
+  `B1`/`B2` anchor on `<runtime>` and create `<runtime>/fastcgi/<i>`, and
+  `<resolved> = workers.unwrap_or(view_worker_cap())` replaces `workers` everywhere it
+  sized a pool or a permit. The
+  pinned-descriptor lifecycle, the argv handoff, the pgid-membership check, `Ctl::PoolReady`,
+  `SO_PEERCRED` and the seccomp addition are unchanged; the freeze/bind window keeps its
+  **shape** and changes its **modes** (the note on decision 6 is authoritative), and `dev`/`check`
+  run the single-uid variant that skips `drop_privileges`, `S2`, `S5`, `S6` and `U1`'s freeze.
+  Three further sentences in decisions 1, 2 and 6 are **retracted with this bullet**, because
+  they assert that `dev`/`check` never spawn a pool: decision 1's "`ensure_ready` never
+  spawns a pool in `dev`/`check`", decision 6's "`dev`/`check` … never spawn pools", and
+  decision 2's "The External promise" with
+  `critical_fastcgi_learn::external_pool_never_spawns_php_fpm`. Once blastit owns the pool,
+  `PoolSpawn::Managed` is the only shipped mode (production, `dev`, and `check`'s child
+  `dev`), `external_executor` is always `false`, and the retired oracle is replaced by
+  `MB.3.9.5`'s `dev_starts_one_pool_per_route`; the mode's own removal is `MB.3.9.4`'s call.
+  Two names in those decisions are also superseded: `DevProbe::check` is
+  `DevProbe::parent` (phase 1) + `DevProbe::check_leaf` (phase 2), and decision 6's
+  `PoolConf`'s `listen: &str` field is replaced by `runtime: &Path` + `route_index: u32`, so
+  the renderer itself builds `listen=<runtime>/fastcgi/<route_index>/fpm.sock` from `R3` and
+  no caller can supply a path.
 - **ADR-0007 decision 1:** Decision 7 supersedes decision 1's "no new socket/filter"
   sentence for `SeccompRole::Scheduler` only (`socket(AF_UNIX)` allowed, `bind`/`listen`
   `EPERM`).

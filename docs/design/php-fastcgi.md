@@ -2,6 +2,7 @@
 status: In review
 owner: architect
 node: MB.3.3
+amended: MB.3.9.2
 reviewers: [security, implementability, testability, consistency]
 ---
 # Blastit 0.2.1 Technical Design: FastCGI, Param Lockdown and the Injected Upstream Contract
@@ -19,6 +20,23 @@ object-safe `Upstream` trait in `crates/blastit-backend`, one injected
 conformance table. Static, WSGI and FastCGI are all implementations of that trait
 (owner requirement, 2026-11-14).
 
+> **Amended 2026-11-14 (`MB.3.9.2`, owner decision).** `[route.fastcgi]` has **no
+> `listen` key**. `blastit dev` spawns and supervises the pool, so blastit owns the
+> socket; a user-authored path could point two routes at one pool, mis-set
+> `listen.mode`, or place the socket's parent somewhere a route uid can write, and
+> blastit would then have to police all of it. The socket is **derived** per route
+> inside blastit's private run directory (`<runtime>/fastcgi/<route_index>/fpm.sock`,
+> §4.1 `R3`, §4.8.1), and a manifest that still writes `listen = "…"` is an unknown
+> key naming the key (no `0.2.1` release ever carried it, so there is no migration
+> class). `workers` is **optional**: absent means the route's per-view cap of the *same*
+> budget WSGI already uses (`Config::view_worker_cap()`, the full per-view cap — not a
+> divided share), and an explicit value above
+> that budget is a boot error naming both numbers (§4.1 `R4`). `ADR-0008` decisions 1, 2 and
+> 6 carry the dated amendment (`Amends`). Who spawns the pool in `dev`/`check`, the discovery
+> order, cleanup and the error contract are **`MB.3.9.3`**'s amendment (it depends on
+> `MB.12`'s runtime-provider contract); this document pins only the grammar, the
+> derivation and the socket's provenance.
+
 Companion ADR: [ADR-0008](../decisions/ADR-0008-fastcgi-backend-and-param-lockdown.md).
 
 ---
@@ -29,12 +47,13 @@ Companion ADR: [ADR-0008](../decisions/ADR-0008-fastcgi-backend-and-param-lockdo
 
 | Page promise (`docs/frameworks/php.md`) | Settled by |
 |---|---|
-| the manifest with `[route.static]` + `[route.fastcgi]` (`entry`, `listen`, `workers = 4`) | §4.1 |
+| the manifest with `[route.static]` + `[route.fastcgi]` (`entry`, optional `workers`; **no `listen`**) | §4.1 |
 | "a file under `public/` is answered by the static responder; any other path reaches the front controller" | §4.9 |
 | "No `.php` file under `public/` is served; only `entry` runs" | §4.9 (`Refusal::EntryScript`, `404`) |
 | "A FastCGI route is its own executor: no `app`" | §4.2, §4.8 |
 | "`[route.ingress]` applies to it; a body without one is a `413`" | §4.5, §4.10.3 |
-| Local: `php-fpm -F -y php-fpm.conf` started by the developer, no `sudo`, no `/etc` | §4.8.1 |
+| Local: no `sudo`, no `/etc`, no hand-written pool file; `blastit dev` owns the pool and derives its socket (page steps: `MB.3.9.1`; spawn/cleanup: `MB.3.9.3`) | §4.1 `R3`, §4.8.1 |
+| Local: `workers` omitted → the deployment's per-view budget sizes the pool, and `dev` prints the number it chose | §1.2, §4.1 `R4`, §4.8.1 |
 | Local: `blastit dev` banner, `1 route` | §1.2 |
 | `curl /users/42` → `200 application/json` from `public/index.php` | §4.5, §4.10 |
 | `immutable` asset → `public, max-age=31536000, immutable` | §4.9 (shipped responder, unchanged) |
@@ -45,7 +64,7 @@ Companion ADR: [ADR-0008](../decisions/ADR-0008-fastcgi-backend-and-param-lockdo
 | `BLASTIT_URL=http://127.0.0.1:8080` for the suite | §4.10.3 |
 | a route nothing requested, or a body route with no input rule, is a finding (`1`) | §4.10.3 |
 | `check --json` document with `unexercised_route` / `fix.action: add_test` | §4.10.3 |
-| Deployments: one pool per route, as that route's uid, `0600` stays private | §4.8.2 |
+| Deployments: one pool per route, as that route's uid, derived `0600` socket, parent `0511` init-owned | §4.8.2 |
 | `blastit --preset compose-traefik`; production still exits `1` unprivileged | unchanged (`ADR-0005`), §4.8.2 |
 | "`0.2.1` adds `[route.fastcgi]`, the PHP `--learn` write and `check -- <suite>`" | §4.1, §4.10 |
 
@@ -53,8 +72,29 @@ Companion ADR: [ADR-0008](../decisions/ADR-0008-fastcgi-backend-and-param-lockdo
 
 The page's banner is exactly three lines, the third carrying `1 route`
 (`crates/blastit/src/dev_learn.rs::banner`). A FastCGI route is a route and is counted;
-no pool line, no worker count, no "waiting for php-fpm" line. The only new boot output
-is a fatal diagnostic in the existing `./blastit.toml:<line>: …` shape (§4.2).
+no pool line and no "waiting for php-fpm" line. `dev_learn::banner` is untouched, so the
+protected exact-three-line assertion in `critical_fastcgi_learn.rs` still passes.
+
+Boot output gains exactly two things, neither of them a banner line:
+
+1. **`dev` prints one line per FastCGI route naming the resolved pool size**, on the
+   existing dev-diagnostic channel (`eprintln!("blastit dev: …")`, exactly the channel
+   `dev_fail` and the `BLASTIT_DEV_EXPOSE` guard already use):
+   `blastit dev: fastcgi route "app": pool workers 16 (derived from BLASTIT_VIEW_MAX_WORKERS=16)`
+   — where the named variable is **the one that actually supplied the cap**, so an
+   unset `BLASTIT_VIEW_MAX_WORKERS` prints `(derived from BLASTIT_MAX_WORKERS=16)` instead of
+   a variable nobody set — or `… pool workers 8 (workers = 8, budget 16)` when the key is
+   written. **stderr**, not stdout; **no new structured event, no new JSON key for the
+   resolved worker count, no new event kind**, and the banner's stdout stays the same three
+   lines. `dev` is where the developer has no other way to see the
+   number, so it is where the line goes; **production prints nothing extra**, because its
+   durable record is the generated pool file's `pm.max_children=<resolved>` (§4.8.2) and
+   the over-budget refusal names both numbers (§4.1 `R4`).
+2. **one fatal diagnostic** in the existing `./blastit.toml:<line>: …` shape (§4.2).
+
+The derived socket path appears **only in a boot diagnostic on stderr** (`exit 1`/`2`) — never
+in success output, `--json`, `http_obs.jsonl` or a `--learn` proposal; it is inside blastit's
+private run directory and the developer cannot act on it (§4.8.1, R3).
 
 ### 1.3 CI/CD
 
@@ -67,10 +107,13 @@ prepared app environment, and the child's dbproxy sockets; the suite speaks HTTP
 front controller runs.
 
 Before branching to a runner, `check::execute` validates FastCGI routes alongside static
-roots (`for i in fastcgi_routes { manifest.check_fastcgi_entries(&config.manifest_dir, &DevProbe { uid: euid }, i, ProbeUid::Dev) }` and
-`manifest.check_fastcgi_sockets(&config.manifest_dir, &DevProbe { uid: euid })`), so a
-missing `entry` or stopped `php-fpm` fails immediately with exit `2` naming
-`./blastit.toml:<line>`.
+roots — `for i in fastcgi_routes { manifest.check_fastcgi_entries(&config.manifest_dir, &DevProbe { uid: euid }, i, ProbeUid::Dev) }`
+and `manifest.check_fastcgi_workers(config.view_worker_cap())` (the **pool leaf's** function, gated
+on `MB.12`) — so a missing `entry` or an
+explicit `workers` above the budget fails immediately with exit `2` naming
+`./blastit.toml:<line>`. The **socket** probe and the `BLASTIT_CHECK_POOL_PARENT_FD`
+handoff keep their shape but follow the derived path (`R3`); their ordering (the leaf exists
+only after the dev pool starts) is `MB.3.9.3`'s amendment.
 
 `check::serve_and_run` (`crates/blastit/src/check.rs`, `MB.3.6.4.2`) owns the observation
 and runtime-root handoff: it creates `<CheckRoot>/dev` (`0700`, owned by `euid()`),
@@ -91,7 +134,7 @@ per FastCGI route; §4.8.1). `Config::for_dev()`
 (`MB.3.6.3.1`) reads all four `BLASTIT_CHECK_*` variables in `stage0::run_dev` before
 `BLASTIT_*` environment stripping: `stage0::run_dev` immediately restores `FD_CLOEXEC` on
 `check_sql_obs_fd` (`fcntl(F_SETFD, FD_CLOEXEC)`), adopts `<CheckRoot>/dev` via
-`DevRoot::adopt` (`verify_private_dir`) instead of minting a random nonce root, binds every
+`Dev::adopt` (`verify_private_dir`) instead of minting a random nonce root, binds every
 declared `postgresql` proxy in `<CheckRoot>/dev/views/<i>/.s.PGSQL.<port>` when
 `options.learn || config.check_sql_obs_fd.is_some()` (so `prepared` and the child's
 `views/0` listener agree even under `check --learn -- <suite>`), passes `check_sql_obs_fd`
@@ -127,57 +170,110 @@ exit); the `--json` document is unchanged (§4.10.3).
 
 The production `blastit` starts one `php-fpm` master per FastCGI route as that route's
 uid, under the existing **view** role — no new role, uid, supervisor or socket family
-(§4.8.2). Init resolves and freezes the `listen` parent from the manifest dirfd at boot
-before any route process exists, makes each bound pool socket `0600` owned by the
-scheduler, and re-freezes the parent `init_uid:init_gid 0555` before publishing
-`Ctl::PoolReady`; no other route's process can reach or pivot it. `blastit --preset …`
-prints the same preset as today and refuses to run unprivileged (`exit 1`), unchanged.
+(§4.8.2). Init creates the derived per-route pool directory `<runtime>/fastcgi/<route>`
+(`0700`, init-owned) from its own runtime dirfd at boot, **before any route process
+exists**, pins it, makes each bound pool socket `0600` owned by the scheduler, and
+re-freezes the parent `init_uid:init_gid 0511` before publishing `Ctl::PoolReady`; no
+manifest value contributes a byte of that path, so no other route's process can reach or
+pivot it. `blastit --preset …` prints the same preset as today and refuses to run
+unprivileged (`exit 1`), unchanged.
 
 ---
 
 ## 2. Goals & Non-Goals
 
-**Goals.** `[route.fastcgi]` with the page's three keys; a FastCGI session that cannot
+**Goals.** `[route.fastcgi]` with the page's keys — `entry` and an optional `workers`;
+a FastCGI session that cannot
 send a param the harness did not compute; one language-agnostic backend contract with
 **all three** implementations injected per route; crate-by-seam layering; one
 conformance table; honest `dev`/`check`/`--learn` attribution for a route with no
-Python; a pool that runs as the route's uid without `sudo` and without weakening the
-role model beyond one recorded seccomp addition.
+Python; a pool that runs as the route's uid without `sudo`, with a socket blastit itself
+derives, and without weakening the role model beyond one recorded seccomp addition.
 
 **Non-Goals.** No `php-cgi`, no CGI `argv` path, no query rewriting (`CVE-2012-1823` is
 impossible by construction). No connection reuse or multiplexing (§4.5.2). No top-level
 `[fastcgi.<name>]` block, no `env` key, no per-route `php.ini`, no `fastcgi_param`-style
-user map (§6). No new role, no root php-fpm, no second static responder, no change to
+user map (§6). **No user-authored socket path, socket name or socket mode:** `listen` is
+not a key, and no manifest value reaches the pool socket's path, parent, owner or mode.
+No new role, no root php-fpm, no second static responder, no change to
 the static responder's behaviour on a route without `[route.fastcgi]`.
 
 ---
 
 ## 3. Requirements
 
-- **R1 Grammar.** `[route.fastcgi]` has exactly `entry` (required string), `listen`
-  (required string), `workers` (integer, default `4`). Unknown key fatal. `fastcgi` is a
-  reserved route key. `[route.static]` keeps its 0.2.0 keys.
+- **R1 Grammar.** `[route.fastcgi]` has exactly `entry` (required string) and `workers`
+  (optional integer). `listen` is **not** a key: a manifest that writes it gets
+  `ManifestError::FastCgiListenDerived` (`route "app" (index 0): fastcgi listen: unknown
+  key; the pool socket is created by blastit`), which carries no value, and no manifest
+  value can influence the socket (R3). Unknown key fatal. `fastcgi` is a reserved route key.
+  `[route.static]` keeps its 0.2.0 keys.
 - **R2 Entry.** `entry` is relative to `blastit.toml`, ends in `.php` (ASCII
   case-insensitive), has no `..`, `\`, control byte, is not absolute, resolves to a
   regular file **beneath** `root` (when both blocks are declared) or beneath its parent
   (otherwise) with `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)` and no symlink in the
   final component; readable by the route uid (production) or invoking uid
   (`dev`/`check`).
-- **R3 Listen.** `listen` is relative to `blastit.toml`, has at least one parent segment,
-  no `..`, `\`, control byte, is not absolute, is not a directory and is not a symlink;
-  its parent may not be the manifest directory, `static.root` (or beneath it), an
-  ancestor of `entry`, or shared with another FastCGI route. `dev`/`check`: the resolved
-  path exists, is a socket, is not a symlink, and is connectable by the invoking uid.
-  Production: init resolves and creates (if final leaf absent) the parent from the
-  manifest dirfd at boot before any route process exists, requires every ancestor from `/`
-  through `manifest_dir` (sticky-bit rule above `manifest_dir` per `ARCHITECTURE.md` §5.3)
-  down to `listen`'s parent to be non-symlink and not writable by any route uid/gid, freezes
-  the parent `init_uid:init_gid 0555`, and makes the bound socket `0600` owned by the
-  scheduler before publishing `Ctl::PoolReady` with the bound socket's `(st_dev, st_ino)`
-  (§4.8.3).
-- **R4 Workers.** `workers ∈ 1..=64`. It is the route's admission cap and is written to
-  `pm.max_children`; it does not add a boot-time refusal (the global
-  `BLASTIT_MAX_WORKERS` admission budget remains a runtime `503`).
+- **R3 Derived socket.** The pool socket is a **pure function of the route's index and
+  blastit's run directory**; no manifest value is an input:
+  - production: `<runtime>/fastcgi/<route_index>/fpm.sock` under `/run/blastit`, created by
+    init (§4.8.3 `B1`/`B2`);
+  - `dev`/`check`: `<run_root>/fastcgi/<route_index>/fpm.sock`, where `<run_root>` is the
+    run root **blastit itself created for this invocation** — `Dev::adopt`'s `0700`
+    caller-owned root (`dev_learn.rs:180`), or `<CheckRoot>/dev` for `check`. Which root
+    `MB.3.9.3`'s provider hands the `dev` pool (it may move it to a project-local
+    `.blastit/run`) is that node's call; the suffix `fastcgi/<route_index>/fpm.sock` and
+    the "created by blastit, `0700`, caller-owned" predicate are this document's;
+  - `<route_index>` is the index of the `Route` in `Manifest::routes` (routing order) —
+    the same integer `--fastcgi-parent-fd=<route>:<n>`, `PinnedSocket` and
+    `SchedulerConfig.pinned_sockets` already carry — **never** the FastCGI-only ordinal
+    (a manifest of `fastcgi, wsgi, fastcgi` pins `0` and `2`). So no route *name* is ever
+    interpolated into a path and there is no name-escaping rule.
+  The path is never **derived from** `blastit.toml` and no key, environment variable or CLI
+  flag selects it. It may appear **only in a boot diagnostic** (stderr, `exit 1`/`2`) and
+  never in success output, `--json`, `http_obs.jsonl` or a `--learn` proposal (§1.2).
+  Modes, one per level (§4.8.3): `<runtime>` keeps the shipped root-owned `0755`
+  (`php-fpm`'s absolute path walk needs `x`), `<runtime>/fastcgi` is
+  `init_uid:init_gid 0711` (traverse-only, init the only writer), and
+  `<runtime>/fastcgi/<i>` is created `0700 init`, `0755 route_uid` only in the bind window,
+  `0511 init` steady. `dev`/`check` never enter that window: both stay
+  `0700 invoking_uid`. The socket is `0600` owned by the scheduler (production) or the
+  invoking uid (`dev`/`check`). `listen.mode` is therefore not a manifest concept:
+  blastit's `0600` plus the §4.8.3 owner discipline *is* the mode.
+  The `dev`/`check` probe is **two-phased**: phase 1 (`SocketProbe::parent`) creates and pins
+  the parent **before** the pool starts; phase 2 (`SocketProbe::check_leaf`) runs **after**
+  it and requires the leaf to exist, be a socket, not be a symlink, be `0600`, and be
+  connectable by the invoking uid (`R20`). Who starts the pool, and in what order, is
+  `MB.3.9.3`'s amendment.
+- **R4 Workers.** The **key** — optional, and an explicit value in `1..=64` —
+  is this node's. The **resolution** and the pool **ceiling** below belong to the **pool
+  mechanism**: they are implemented by the pool leaf and are **gated on `MB.12`**'s
+  embed-vs-pool decision (an embedded SAPI has no `pm.max_children` for `workers` to size,
+  in which case `MB.12` retires the resolution and keeps only the grammar). For the pool
+  mechanism: both an explicit `workers` and the resolved size are bounded by `1..=64`
+  (`pub const MAX_POOL_WORKERS: u32 = 64` — pool leaf, gated on `MB.12`). The ceiling is not
+  cosmetic — `pm = static` **pre-forks** `pm.max_children` children at bind time, so an
+  omission under `BLASTIT_MAX_WORKERS=512` would spawn 513 `php-fpm` processes per route and
+  size `RLIMIT_NPROC`/`RLIMIT_NOFILE` from the same number. `Manifest::check_fastcgi_workers`
+  therefore refuses `policy.resolved_workers(cap) > MAX_POOL_WORKERS` with
+  `FastCgiWorkersCapExceeded` (naming the resolved value, the ceiling, and the budget
+  variable), and refuses an explicit `workers` outside `1..=64` with
+  `FastCgiWorkersInvalid`. The **resolved** pool size is
+  `policy.workers.unwrap_or(cap)` — one pure formula owned by the **pool leaf, gated on `MB.12`**
+  — where `cap` is
+  `Config::view_worker_cap()` (`crates/blastit/src/config.rs:1407-1411`) =
+  `BLASTIT_VIEW_MAX_WORKERS`, defaulting to `BLASTIT_MAX_WORKERS`
+  (`config.rs:674,677`; defaults `16`/`None` at `config.rs:841-842`). The resolved value
+  is written to `pm.max_children`, is `RouteState.worker_cap` (that route's admission
+  cap, exactly as `view_worker_cap` is a view's), and sizes `RLIMIT_NPROC` (§4.8.2).
+  **An explicit `workers` above `cap` is a boot error naming both numbers** — never a
+  clamp (§4.1's key table, `ADR-0008` *Amends*), because a clamp would silently deliver a
+  concurrency the manifest does not declare and make `pm.max_children`, `RLIMIT_NPROC` and
+  `RouteState.worker_cap` disagree. Two FastCGI routes do **not** divide the budget:
+  each resolves to the **per-view cap** (`view_worker_cap()`, not a divided share), so their
+  `pm.max_children` sum is `2 × cap`, the same arithmetic as two WSGI views; the scheduler's
+  global `slots < max_workers` gate plus each route's own permit stays the admission truth
+  for every backend (§4.2.1 `Capacity`).
 - **R5 Composition.** `entry` is under `static.root` when both blocks are declared.
   `spa = true` with `[route.fastcgi]` is fatal. `prefork = true` starts the pool at boot.
   `[route.ingress]`, `prefork`, grants and inline `groups` are legal on a FastCGI route
@@ -202,8 +298,9 @@ the static responder's behaviour on a route without `[route.fastcgi]`.
   `ABORT_REQUEST` best-effort, closes the connection, and releases the slot only when
   the session task reports `Done` (a parked file read keeps its slot, exactly 0.2.0).
 - **R11 Pool.** No new role: one `php-fpm -F -y` master per route as the view role's
-  uid/gid, a private runtime dir, a generated pool file (§4.8.2), restart with backoff,
-  `pm = static`, `pm.max_children = workers`,
+  uid/gid, a private runtime dir, a generated pool file whose `listen=` line is the
+  derived path of `R3` (§4.8.2), restart with backoff, `pm = static`,
+  `pm.max_children = <resolved workers>` (`R4`),
   `pm.max_requests = max(BLASTIT_VIEW_MAX_REQUESTS, 500)` (a pool always recycles; the
   scheduler's view counter keeps its own `0`-means-off semantics), `clear_env = yes`,
   `security.limit_extensions = .php`, `catch_workers_output = yes`, the
@@ -245,8 +342,13 @@ the static responder's behaviour on a route without `[route.fastcgi]`.
   FastCGI request, bounded across the process by `BLASTIT_MAX_WORKERS ×
   BLASTIT_MAX_BODY_BYTES` under the existing half-body queue cap; response credit and
   `BLASTIT_MAX_WORKERS` unchanged.
-- **R20 Fail closed.** A listener missing, not a socket, a symlink, or owned by another
-  uid is a boot error (`dev`/`check`); a pool that died after boot (`Unavailable`,
+- **R20 Fail closed.** The **derived** pool leaf (`R3`) missing, not a socket, a symlink,
+  over-permissive or owned by another uid is a **boot error in `dev`** (`exit 1`, phase 2 of
+  §4.8.1 runs in the same process that spawned the pool) and an **early child exit → `exit 2`**
+  in `check` (`check` observes its child `dev` exiting, exactly like a busy port); a derived
+  parent that is not the private directory blastit created is a boot error in every mode; an explicit
+  `workers` above the budget is a boot error (`R4`); a pool that died after boot
+  (`Unavailable`,
   including `connect` `ENOENT`/`ECONNREFUSED` before any head) is `503` with backoff; a
   mid-exchange upstream failure (`Fault`) before any head is `502`; the first request to
   a lazy pool waits for bind (bounded 5 s), then `503` + `Retry-After: 1` — never a
@@ -269,15 +371,33 @@ immutable = ["/assets/*"]
 
 [route.fastcgi]
 entry = "public/index.php"
-listen = "run/fpm.sock"
-workers = 4
+```
+
+`workers` is optional and usually omitted; the pool is sized from the deployment's
+per-view budget (§4.8.1). There is no `listen`: the socket is derived and blastit owns
+it (`R3`), so a manifest cannot point two routes at one pool, choose a socket mode, or
+place a world-writable parent:
+
+```toml
+[route.fastcgi]
+entry = "public/index.php"
+workers = 8   # optional; must be <= BLASTIT_VIEW_MAX_WORKERS (default BLASTIT_MAX_WORKERS)
 ```
 
 | Key | Type | Default | Meaning | Fatal at boot |
 |---|---|---|---|---|
 | `entry` | string | required | front controller, relative to `blastit.toml` | missing, empty, absolute, `..`, `\`, control byte, not `.php`, not a regular file, symlink final component, outside `root`, unreadable by the route uid |
-| `listen` | string | required | pool Unix socket, relative to `blastit.toml` | missing, empty, absolute, `..`, `\`, control byte, a directory, a symlink, no parent segment, or a resolved parent that is the manifest directory, `static.root` (or beneath it), an ancestor of `entry`, or shared with another FastCGI route; production boot: any ancestor from `/` to `manifest_dir` violates `ARCHITECTURE.md` §5.3's sticky-bit rule, or any segment from `manifest_dir` down to the parent is writable by a route uid/gid or is a symlink (§4.8.3 `B1`/`B2`); `dev`/`check`: absent, not a socket, not connectable by the invoking uid; production: an existing non-socket or foreign-uid entry at the socket name |
-| `workers` | integer | `4` | concurrent requests; `pm.max_children` | `0`, `> 64`, non-integer |
+| `workers` | integer | **derived** = `Config::view_worker_cap()` (`BLASTIT_VIEW_MAX_WORKERS`, else `BLASTIT_MAX_WORKERS`, default `16`) | the route's per-view cap (**not** a divided share): `pm.max_children`, `RouteState.worker_cap`, `RLIMIT_NPROC` base | explicit `0` or `> 64` (`FastCgiWorkersInvalid`); **`resolved_workers(cap) > 64`**, which an omission can hit under a large budget (`FastCgiWorkersCapExceeded`, naming the value, the ceiling and the variable); **an explicit value above `view_worker_cap()`** (`FastCgiWorkersOverBudget`, naming both numbers); a non-integer/negative/`> u32::MAX` is the parser's existing `WrongType`. *(The derivation, the ceiling and the two budget variants are the **pool leaf**'s, gated on `MB.12`; the key and its `1..=64` grammar bound are this node's.)* |
+| `listen` | — | — | **not a key.** The socket is derived per route (`R3`); it is never printed | writing it is `ManifestError::FastCgiListenDerived`, which carries **no** `listen` value: `route "app" (index 0): fastcgi listen: unknown key; the pool socket is created by blastit` |
+
+`workers` is the one value a deployment may legitimately need to lower: PHP worker RSS
+is tens of megabytes, so a route whose front controller is memory-heavy may need four
+workers where the deployment's budget is sixteen, without shrinking every WSGI view's
+concurrency (the only other knob, `BLASTIT_VIEW_MAX_WORKERS`, is deployment-global). It
+is documented as **usually omit**, blastit logs the resolved value once at boot (§1.2),
+and it can only ever *lower* the route below the budget it inherits — never raise the
+deployment's admission ceiling. Delete it and the operator's only tool would be a global
+knob that taxes every route.
 
 Per-route, not a named top-level block: the page writes `[route.fastcgi]`, like
 `[route.static]` and `[route.ingress]`; `app` is manifest-global and a FastCGI route has
@@ -287,31 +407,57 @@ decision 2). Error variants carry the route and the manifest line:
 | Variant | Example message |
 |---|---|
 | `FastCgiEntryInvalid { location, entry, rule: String }` | `route "app" (index 0): fastcgi entry "index.php": must be under static root "public"` |
-| `FastCgiListenInvalid { location, listen, rule }` | `route "app" (index 0): fastcgi listen "../run/fpm.sock": must not contain ..` |
-| `FastCgiListenParentInvalid { location, listen, parent, why }` | `route "app" (index 0): fastcgi listen "run/fpm.sock": parent "run" is writable by the route uid / contains a symlink` |
 | `FastCgiWorkersInvalid { location, workers, why }` | `route "app" (index 0): fastcgi workers 0: must be at least 1` |
+| `FastCgiWorkersCapExceeded { location, workers, limit }` *(pool leaf, gated on `MB.12`)* | `route "app" (index 0): fastcgi pool size 512 exceeds the FastCGI pool ceiling 64 (pm = static pre-forks every worker): set workers, or lower BLASTIT_VIEW_MAX_WORKERS / BLASTIT_MAX_WORKERS` |
+| `FastCgiWorkersOverBudget { location, workers, budget }` *(pool leaf, gated on `MB.12`)* | `route "app" (index 0): fastcgi workers 32 exceeds this deployment's per-view worker budget 16 (BLASTIT_VIEW_MAX_WORKERS / BLASTIT_MAX_WORKERS); lower workers or raise the budget` |
+| `FastCgiPoolSocketInvalid { location, path, rule }` *(implemented by `MB.3.5.2`)* | `route "app" (index 0): pool socket "<run>/fastcgi/0/fpm.sock": is not a socket` (the path is the `dev`/`check` run root's; production uses the stage-0 boot diagnostic instead, `stage0::fail_pool_parent`) |
 | `FastCgiDeadDeclaration { location, key, why }` | `route "app" (index 0): spa = true never reaches the front controller` |
+| `FastCgiListenDerived { location }` | `route "app" (index 0): fastcgi listen: unknown key; the pool socket is created by blastit` |
+| *(removed)* `FastCgiListenInvalid`, `FastCgiListenParentInvalid` | **deleted.** Every rule they carried was a rule about a manifest-authored socket path (`must be a relative path`, `must not contain ..`, `must have a dedicated parent directory`, `is writable by the route uid / contains a symlink`, `is shared with another route`). With no path in the manifest there is no such input to reject, so no surviving rule needs either variant. The one `listen` refusal is `FastCgiListenDerived`: it carries **no** value (so it cannot smuggle a path), names the rejected key, and says who owns the socket. The one-line hint is kept because the key appears in the `0.2.1` drafts of the page and of this design, so the message saves a support question; `0.2.1` never shipped the key, so no migration path or alias is added. |
 
-`rule`/`why` are fixed phrases (`must be a relative path`, `must end in .php`, `must exist`,
-`must be a regular file`, `must be readable by uid <uid>`, `must be stat-able`,
-`must be under static root "…"` (`OutsideRoot`), `must not contain ..`, `must not be a symlink`,
-`must have a dedicated parent directory`, `must be at least 1`, `at most 64`,
-`spa = true never reaches the front controller`, `CONNECT cannot reach a FastCGI worker`,
-`is writable by the route uid / contains a symlink`, `is shared with another route`).
+`rule`/`why` are **exactly** the phrases in the two `rule` columns below (the `entry` mapping
+table and the derived-parent mapping table) — no other phrase exists, and neither table has a
+phrase the other one shares. `FastCgiListenDerived` is produced by the strict parser (before any key is typed), so it
+cannot carry a user value. `Manifest::check_fastcgi_workers` (the **pool leaf's**, gated on `MB.12`) evaluates its three arms in one
+fixed order — explicit range (`FastCgiWorkersInvalid`), explicit budget
+(`FastCgiWorkersOverBudget`), derived ceiling (`FastCgiWorkersCapExceeded`) — so
+`workers = 65` under a 16 budget is always the range error, never the ceiling one; the
+range arm duplicates `validate` deliberately (defence in depth: the boot check is total on
+its own). `FastCgiWorkersOverBudget` is **not** a `Manifest::validate` error: `validate`
+has no `Config` and must keep parsing a manifest on a machine with no deployment
+(`docs_fences.rs`). It is a separate pure check,
+`Manifest::check_fastcgi_workers(&self, budget: u32) -> Result<(), ManifestErrors>`, called
+once at boot with `config.view_worker_cap()` by `stage0` (production **and** `dev`) and by
+`check::execute`; the function interpolates both numbers, so the message never needs the
+budget's source. `FastCgiPoolSocketInvalid` (`MB.3.5.2`'s) names the **derived** path, never a manifest
+value, and is emitted by the `dev`/`check` probe path only (production reports a derived
+parent that is not blastit's private directory as a stage-0 boot diagnostic with the same
+`./blastit.toml:<line>: route "app" (index 0): …` shape, not as a `ManifestErrors`
+variant, because it is an environment fault rather than manifest syntax).
 `FastCgiDeadDeclaration` fires **only** when `fastcgi.is_some()` and
 `static_policy.is_some_and(|p| p.spa)`; the 0.2.0 `StaticDeadDeclaration` keeps its exact
 existing `why` phrases (`spa = true never reaches the app` / `the manifest declares no
 app`) for `static_policy.is_some() && fastcgi.is_none() && (spa || app.is_none())`, so no
-protected string in `critical_static_manifest.rs` changes. Existence and ancestor safety
-are probed by two explicit calls, never by `validate` (so `docs_fences.rs` needs no
-socket):
+protected string in `critical_static_manifest.rs` changes. Existence, readability and the
+derived parent are probed by explicit calls, never by `validate` (so `docs_fences.rs`
+needs no socket and no run directory):
 
 ```rust
 pub trait SocketProbe {
-    /// Validates the route's `listen`; `DevProbe` returns the `parentfd` it opened (the
-    /// caller owns it), `ProductionProbe` returns `None` (production resolves in `B1`/`B2`).
-    fn check(&self, manifest_dir: &Path, listen: &str, route_index: usize)
+    /// Creates (when absent) and pins the **derived** pool parent of `R3`:
+    /// `<run_root>/fastcgi/<route_index>`, two `mkdirat(0o700)` steps from `run_root`,
+    /// opened `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC` after `openat2(RESOLVE_BENEATH|
+    /// RESOLVE_NO_SYMLINKS)`, required `0700` and owned by the invoking uid. `DevProbe`
+    /// returns the opened `parentfd` (the caller owns it) and **must** run before the pool
+    /// starts — `php-fpm` cannot bind into a directory that does not exist;
+    /// `ProductionProbe` returns `None` (stage 0 runs `B1`/`B2` on its runtime dirfd).
+    fn parent(&self, run_root: &Path, route_index: usize)
         -> Result<Option<OwnedFd>, SocketProbeError>;
+    /// The derived leaf inside a pinned parent: `fstatat(parent, "fpm.sock",
+    /// AT_SYMLINK_NOFOLLOW)` is `S_ISSOCK`, `st_uid == uid`, `(st_mode & 0o777) == 0o600`,
+    /// and connectable as `uid`. The caller runs this **after** the pool has started
+    /// (who starts it, and in what order, is `MB.3.9.3`).
+    fn check_leaf(&self, parent: BorrowedFd<'_>, uid: u32) -> Result<(), SocketProbeError>;
     /// R2: `entry` resolved with openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS) from a
     /// `manifest_dirfd` opened `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, final component
     /// not a symlink, regular file, readable as `uid`.
@@ -321,17 +467,24 @@ pub trait SocketProbe {
     /// probe that returns `false` (a `ManifestErrors` programmer error).
     fn provides_parent_fd(&self) -> bool { false }
 }
+/// The pure parent-side half of the probe child's reply: one byte → the variant it reports
+/// (`O` is success and returns `None`; any byte outside the pinned set is `Io` with the
+/// distinct message `probe child exited without a reply`). Living in `blastit-manifest`
+/// (no `libc`) is what lets `critical_fastcgi_manifest` test the mapping.
+pub fn from_reply_byte(byte: u8, uid: u32) -> Option<SocketProbeError>;
 #[derive(Debug)]
 pub enum SocketProbeError {
     Missing,
     NotSocket,
     NotRegularFile,
+    NotDirectory,
+    InsecureMode { mode: u32 },
+    NotConnectable { uid: u32 },
     Unreadable { uid: u32 },
     OutsideRoot,
     Timeout,
     ForeignOwner { uid: u32 },
     Symlink,
-    ParentWritableOrSymlink,
     Io(std::io::Error),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,17 +495,42 @@ pub enum ProbeUid {
     Route(u32),
 }
 pub struct DevProbe { pub uid: u32 }
-// opens manifest_dirfd (O_NOFOLLOW) + openat2 parent, checks socket exists, S_ISSOCK,
-// not symlink, connect as uid, and returns Some(parentfd)
+// `parent`: resolves <run_root> as the private dir the caller owns (0700, no symlink,
+// fstat/lstat inode equality), mkdirat "fastcgi"/"<route_index>" 0700 when absent, then
+// openat2 O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC (per-segment O_NOFOLLOW fallback on
+// ENOSYS), verifies owner/mode, and returns Some(parentfd).
+// `check_leaf`: fstatat(parentfd, "fpm.sock", AT_SYMLINK_NOFOLLOW) is S_ISSOCK,
+// invoking-uid-owned, 0600, and connectable as `uid`.
+// `ParentWritableOrSymlink` is gone with the manifest path it described: a foreign-owned
+// derived parent is `ForeignOwner { uid }`, a group/world-writable or over-permissive one is
+// `InsecureMode { mode }`, a planted symlink is `Symlink`, and a regular file where the
+// directory belongs is `NotDirectory`.
 pub struct ProductionProbe { pub init_uid: u32, pub scheduler_uid: u32, pub layout: UidLayout, pub routes: usize, pub seccomp: bool }
-// `check` returns Ok(None); B1/B2 run in `stage0` (`MB.3.6.3.1`).
+// `parent`/`check_leaf` return Ok(()) / Ok(None); B1/B2 run in `stage0` (`MB.3.6.3.1`)
+// on the runtime dirfd, and the leaf is verified by `C1` on every connect.
 impl Manifest {
     /// `ProbeUid::Dev` = the invoking uid; `ProbeUid::Route(i)` = route `i`'s uid.
     /// Validates **one** route's `entry`; call once per FastCGI route with that route's uid.
     pub fn check_fastcgi_entries(&self, manifest_dir: &Path, probe: &dyn SocketProbe,
                                   route_index: usize, uid: ProbeUid) -> Result<(), ManifestErrors>;
-    pub fn check_fastcgi_sockets(&self, manifest_dir: &Path, probe: &dyn SocketProbe)
+    /// Implemented by the **pool leaf, gated on `MB.12`** (the manifest crate gains it then).
+    /// `R4`, three arms in this order: an explicit `workers` outside `1..=64` is
+    /// `FastCgiWorkersInvalid`; an explicit value above `budget` is
+    /// `FastCgiWorkersOverBudget`; and `resolved_workers(budget) > MAX_POOL_WORKERS` is
+    /// `FastCgiWorkersCapExceeded` — so **omitting** `workers` is not automatically fine (it is
+    /// refused when the deployment's own budget is above the pool ceiling).
+    /// Pure: no probe, no I/O, no `Config` — the caller passes `view_worker_cap()`.
+    pub fn check_fastcgi_workers(&self, budget: u32) -> Result<(), ManifestErrors>;
+    /// Creates and pins every route's **derived** pool parent (`R3`) and returns it per
+    /// route (`Vec::new()` for `ProductionProbe`, which returns `None`); the leaf check is
+    /// `check_fastcgi_leaf`, run after the pool starts.
+    pub fn check_fastcgi_sockets(&self, run_root: &Path, probe: &dyn SocketProbe)
         -> Result<Vec<(usize, OwnedFd)>, ManifestErrors>;
+    /// Phase 2: `probe.check_leaf(parent, euid)` for one route, mapped to
+    /// `FastCgiPoolSocketInvalid { location, path: <run_root>/fastcgi/<i>/fpm.sock, rule }`
+    /// — the **one** mapper, so the derived path in the message comes from one place.
+    pub fn check_fastcgi_leaf(&self, run_root: &Path, route_index: usize,
+        parent: BorrowedFd<'_>, probe: &dyn SocketProbe) -> Result<(), ManifestErrors>;
     pub fn route_lines(&self) -> Vec<u32>;
 }
 ```
@@ -401,8 +579,8 @@ check_entry` therefore forks a **probe child** from single-threaded stage 0 over
    non-`O` byte still aborts boot, **never** "readable".
 
 `DevProbe` needs no child (it already runs as the invoking uid) and calls the same
-`O_PATH`/`fstat`/`faccessat2` sequence inline. `ProductionProbe::check` returns `Ok(None)`;
-`B1`/`B2` run in `stage0` (`MB.3.6.3.1`).
+`O_PATH`/`fstat`/`faccessat2` sequence inline. `ProductionProbe::parent`/`check_leaf` return
+`Ok(None)`/`Ok(())`; `B1`/`B2` run in `stage0` (`MB.3.6.3.1`).
 
 **`ENOSYS` policy.** `openat2` has the per-segment `O_NOFOLLOW` fallback (`B2`), but
 `faccessat2` is **required**: on `ENOSYS` the probe refuses to boot with
@@ -427,29 +605,51 @@ No caller-path `chown`/`chmod`/`connect` is introduced, and `blastit-manifest` s
 | `Io(_)` | `must be stat-able` |
 | `Timeout` | `must be stat-able (probe timed out)` |
 
-`rule` is a `String` (the phrases interpolate `uid`/`root`), never `&'static str`.
+The fake probe's `Timeout`→rule mapping is one oracle; the real 5 s path (`child::wait_readable` →
+`kill(SIGKILL)` → `waitpid` → `Timeout`) is the one that can hang a boot, so it carries its own
+`#[ignore] requires-root` test, `probe_child_that_never_replies_is_killed_at_five_seconds`
+(`critical_fastcgi_manifest` cannot fork `blastit`; it lives in `MB.3.6.3.1`'s `crates/blastit`
+tests and runs in `e2e/rootless` for the full boot).
+
+`rule` is a `String` (the phrases interpolate `uid`/`root`), never `&'static str`. The
+derived-parent path of `check` maps to its own variant and its own fixed phrases:
+
+| `SocketProbeError` (derived-parent path) | `FastCgiPoolSocketInvalid.rule` |
+|---|---|
+| `Missing` | `does not exist` |
+| `NotSocket` | `is not a socket` |
+| `NotDirectory` | `is not the private directory blastit created` |
+| `Symlink` | `is a symlink` |
+| `ForeignOwner { uid }` | `is owned by uid <uid>` |
+| `InsecureMode { mode }` | `is not 0700` (`mode` is the observed mask) |
+| `NotConnectable { uid }` | `is not connectable by uid <uid>` |
+| `Io(_)` | `must be stat-able` |
+| `Timeout` | `must be stat-able (probe timed out)` |
 
 `SocketProbe` and `check_fastcgi_sockets` stay **pure** in `crates/blastit-manifest/src/probe.rs`
-(they call the injected probe and validate names/duplicates; no syscalls). The two probe
+(they call the injected probe and validate state; no syscalls). The two probe
 implementations live in `crates/blastit/src/probe.rs` (`MB.3.5.2`), where `rustix` is already
 a dependency: `blastit-manifest` gains **no** `libc`/`rustix` edge and no `Cargo.toml` change.
 `check_fastcgi_sockets` returns `Vec::new()` for `ProductionProbe` (`check` → `Ok(None)`) and
 one `(route_index, parentfd)` per FastCGI route for `DevProbe`; a probe that returns `Some(fd)` while `provides_parent_fd()` is `false` is a `ManifestErrors`
 programmer error (checked in `check_fastcgi_sockets`, not by downcasting).
 A test injects a fake `SocketProbe` returning `ForeignOwner { uid: other_uid }` / `NotSocket` /
-`Symlink` / `ParentWritableOrSymlink` from `check`, and `NotRegularFile` / `Unreadable { uid }` /
-`OutsideRoot` from `check_entry`, without needing root; the real multi-uid pivot case is
-in `e2e/rootless` (§7.2).
+`Symlink` / `NotDirectory` from `check`, and `NotRegularFile` / `Unreadable { uid }` /
+`OutsideRoot` from `check_entry`, without needing root; the real multi-uid case (a route uid
+that cannot traverse or rebind the derived parent) is in `e2e/rootless` (§7.2).
 
 `ProbeUid` is authoritative for readability; `DevProbe.uid` is used only by `check`'s
-connect-as-uid, and `check_entry` uses its `uid` argument. `DevProbe::check` is the **one**
+connect-as-uid, and `check_entry` uses its `uid` argument. `DevProbe::parent` is the **one**
 resolver for `dev`/`check`: `stage0::run_dev` takes its
 `Some(parentfd)` as the descriptor it hands over (§4.8.1), and `check::execute` collects the
 `Vec<(usize, OwnedFd)>` from `check_fastcgi_sockets` and passes it to `serve_and_run`, which
 `clear_cloexec`s each right before spawning the child `dev` (`BLASTIT_CHECK_POOL_PARENT_FD`).
 The child re-validates the received fd (`fstat` `S_ISDIR`, `fstatat` `S_ISSOCK`) but never
 calls `openat2` again, so there is exactly one resolution per parent and no second handoff
-source.
+source. Because the leaf must already exist when `check` runs (`R3`, `R20`), the **call site
+now follows the pool's start**: `MB.3.9.3` owns that ordering in `dev` and `check`; this
+document pins only what `check` proves (`R3`) and that its input is `<run_root>`, never a
+manifest string.
 
 **The environment map is derived, not a key.** Production writes the pool's
 `env[…]` lines from the environment init itself holds (the sanitized stage-1
@@ -458,9 +658,9 @@ ambient proxy variable cannot re-open `httpoxy`), rewriting any `host=/proc/self
 proxy outputs to `host=<runtime>/views/<uid>` (because PHP's SAPI `chdir`s to
 `dirname(SCRIPT_FILENAME)` on each request) and setting `env[HOME]=<runtime>/views/<uid>/tmp`
 and `env[TMPDIR]=<runtime>/views/<uid>/tmp`, INI-escaped; `clear_env = yes` stays.
-There is no `[route.fastcgi.env]`, no `BLASTIT_ROUTE`: the page's table has three keys,
-and a fourth is a page change with its own DX node. `env` (or any other key) is an
-unknown-key error.
+There is no `[route.fastcgi.env]`, no `BLASTIT_ROUTE`: the page's table has two keys,
+and a third is a page change with its own DX node. `env` and any other key are `UnknownKey`
+errors; `listen` has its own refusal (`FastCgiListenDerived`, above).
 
 **Exact `docs/reference/manifest.md` reconciliation (`MB.3.5.2`).** Three surgical edits
 keep `manifest.md`, `docs/frameworks/php.md` and `blastit-manifest` identical without
@@ -473,8 +673,9 @@ touching `MB.6`'s `[route.static]` prose:
    *static-only* of ADR-0008; on a manifest with any `[route.fastcgi]`, `app` is accepted
    and ignored for those routes).
 2. Routes table (`manifest.md:77`) + new `## FastCGI` section: add the `[route.fastcgi]`
-   row (`entry`, `listen`, `workers = 4`) and a concise section mirroring `php.md`'s
-   3-key table, `[route.static]` composition, and the `.php`-never-served rule.
+   row (`entry`, optional `workers` derived from `BLASTIT_VIEW_MAX_WORKERS` /
+   `BLASTIT_MAX_WORKERS`; no socket key) and a concise section mirroring `php.md`'s 2-key
+   table, `[route.static]` composition, and the `.php`-never-served rule.
 3. Static dead-declaration & Validation at boot (`manifest.md:142-145, 324-325`): change
    "a manifest with no `app`" to "a static route with neither `app` nor `[route.fastcgi]`"
    (and state `spa = true` cannot combine with `[route.fastcgi]`).
@@ -522,8 +723,8 @@ Future + Send + 'a>>` is stable on MSRV 1.88; there is no second path.
 |---|---|---|
 | `RouteId` | `#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)] pub struct RouteId(u32)` | minted only by `Registry::build_route` / `BuildCtx` (`pub const fn index(self) -> usize`); adapters cannot forge another route's index |
 | `Capacity` | `enum Capacity { Ready, Busy }` (`Debug, Clone, Copy, PartialEq, Eq`) | `Busy` means queue; the scheduler keeps the global slot/memory gate (`slots < max_workers`, `mem_high_watermark`) while `capacity()` delegates to the shared `Arc<RouteState>` (zero I/O); `ensure_ready` runs at most once per admission tick |
-| `RouteState` | `pub struct RouteState { ready: AtomicBool, inflight: AtomicU32, worker_cap: u32 }` (`new(ready, worker_cap)`, `capacity(&self) -> Capacity`, `set_ready(bool)`, **`try_acquire(self: &Arc<Self>) -> Option<RoutePermit>`**) where `RoutePermit { state: Arc<RouteState> }` is `Send + 'static` and its `Drop` decrements `inflight` | **one** shared `Arc<RouteState>` per stage, created by the scheduler (`worker_cap = view_worker_cap` for WSGI, `policy.workers` for FastCGI, `u32::MAX` for static; `ready = true` for static, `false` for WSGI views, and `cfg.pool_spawn == PoolSpawn::External` for FastCGI pools) and passed in `BuildCtx.state` so the scheduler and adapter read the exact same state. `try_acquire` takes `&Arc<Self>` (not `&self`) so a `'static` `tokio::spawn` task can hold the permit: the permit owns a clone of the `Arc`, never a borrow; `None` means `inflight >= worker_cap` and dispatch answers `Unavailable { retry_after: Some(1) }` (`503`) |
-| `PinnedSocket` | `#[cfg(unix)] #[derive(Clone, Debug)]` (**not** `PartialEq`/`Eq`: it holds `Arc<OwnedFd>`/`Mutex`) `pub struct PinnedSocket { parent: Arc<OwnedFd>, name: CString, parent_dev: u64, parent_ino: u64, expected_uid: u32, peer_uid: u32, peer_gid: u32, enforce_socket_inode: bool, bound_inode: Arc<Mutex<Option<(u64, u64)>>> }` with `pub fn new(parent: Arc<OwnedFd>, name: CString, parent_dev: u64, parent_ino: u64, expected_uid: u32, peer_uid: u32, peer_gid: u32, enforce_socket_inode: bool) -> Result<Self, PinnedSocketError>` and accessors `parent_fd(&self) -> BorrowedFd<'_> { self.parent.as_fd() }`, `name(&self) -> &CStr`, `parent_inode(&self) -> (u64, u64)`, `expected_uid(&self) -> u32`, `peer(&self) -> (u32, u32)`, `enforce_inode(&self) -> bool`, `bound_inode(&self) -> Option<(u64, u64)>`, `set_bound_inode(&self, (u64, u64))` | server-agnostic `std` descriptor + validated leaf filename (no `'/'`, non-empty, not `"."`/`".."`); `new` is **pure** (name validation only — `PinnedSocketError::BadName` for empty/`..`/`/`-bearing names — so `blastit-backend` stays zero-I/O) and the caller passes the already-`fstat`ed `(parent_dev, parent_ino)`; `set_bound_inode`/`bound_inode` lock the `Mutex` and **map `PoisonError` to `PinnedSocketError::Poisoned`** (no `unwrap`); `new` takes the same `Arc<OwnedFd>` the caller keeps (no `try_unwrap`, no `dup`, no `unsafe`), so `SchedulerConfig.pinned_sockets: Vec<(usize, PinnedSocket)>` and init's per-route pool state share one descriptor; `MB.3.6.2`'s tests build one from a hand-rolled temporary directory (no `tempfile` crate) and a `UnixListener` via `new`; carries the `O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC` `parentfd` that stage 0 pinned at boot, crossed the stage-0→stage-1 `execve` as an internal `--fastcgi-parent-fd=<route>:<n>` argv entry (§4.8.1), and reaches `SchedulerConfig.pinned_sockets` → `BuildCtx.socket` by fork. `expected_uid` is the **socket owner** (`scheduler_uid` in production, `invoking_uid` in `dev`/`check`); `peer_uid`/`peer_gid` are the **listening pool master's** credentials — the socket creator that `SO_PEERCRED` reports — `RouteSpec.uid` and its layout `route_gid` in production (the `php-fpm` master creates the socket as `route_uid:route_gid`), `invoking_uid`/`invoking_gid` in `dev`/`check`; setting `peer_uid = scheduler_uid` in production is a bug that `502`s every request. In production (`enforce_socket_inode = true`), `bound_inode` holds the exact `(sock_dev, sock_ino)` received in `Ctl::PoolReady`; in `dev`/`check` (`enforce_socket_inode = false`), `parentfd` + `expected_uid` stay pinned while allowing the developer to restart `php-fpm` in place. **No implementation may ever `open`, `openat` or `connect` a `listen` path string, and no code path re-opens the parent segment after boot** |
+| `RouteState` | `pub struct RouteState { ready: AtomicBool, inflight: AtomicU32, worker_cap: u32 }` (`new(ready, worker_cap)`, `capacity(&self) -> Capacity`, `set_ready(bool)`, **`try_acquire(self: &Arc<Self>) -> Option<RoutePermit>`**) where `RoutePermit { state: Arc<RouteState> }` is `Send + 'static` and its `Drop` decrements `inflight` | **one** shared `Arc<RouteState>` per stage, created by the scheduler (`worker_cap = view_worker_cap` for WSGI, `policy.resolved_workers(cfg.view_worker_cap())` for FastCGI (**pool leaf's** resolution, gated on `MB.12`) — the same number `pm.max_children` gets, §4.8.1, `u32::MAX` for static; `ready = true` for static, `false` for WSGI views, and `false` for every FastCGI pool once `MB.3.9.4` makes `dev`/`check` `Managed` too — a pool is never `Ready` before its `Ctl::PoolReady`/leaf proof) and passed in `BuildCtx.state` so the scheduler and adapter read the exact same state. `try_acquire` takes `&Arc<Self>` (not `&self`) so a `'static` `tokio::spawn` task can hold the permit: the permit owns a clone of the `Arc`, never a borrow; `None` means `inflight >= worker_cap` and dispatch answers `Unavailable { retry_after: Some(1) }` (`503`) |
+| `PinnedSocket` | `#[cfg(unix)] #[derive(Clone, Debug)]` (**not** `PartialEq`/`Eq`: it holds `Arc<OwnedFd>`/`Mutex`) `pub struct PinnedSocket { parent: Arc<OwnedFd>, name: CString, parent_dev: u64, parent_ino: u64, expected_uid: u32, peer_uid: u32, peer_gid: u32, enforce_socket_inode: bool, bound_inode: Arc<Mutex<Option<(u64, u64)>>> }` with `pub fn new(parent: Arc<OwnedFd>, name: CString, parent_dev: u64, parent_ino: u64, expected_uid: u32, peer_uid: u32, peer_gid: u32, enforce_socket_inode: bool) -> Result<Self, PinnedSocketError>` and accessors `parent_fd(&self) -> BorrowedFd<'_> { self.parent.as_fd() }`, `name(&self) -> &CStr`, `parent_inode(&self) -> (u64, u64)`, `expected_uid(&self) -> u32`, `peer(&self) -> (u32, u32)`, `enforce_inode(&self) -> bool`, `bound_inode(&self) -> Option<(u64, u64)>`, `set_bound_inode(&self, (u64, u64))` | server-agnostic `std` descriptor + validated leaf filename (no `'/'`, non-empty, not `"."`/`".."`); `new` is **pure** (name validation only — `PinnedSocketError::BadName` for empty/`..`/`/`-bearing names — so `blastit-backend` stays zero-I/O) and the caller passes the already-`fstat`ed `(parent_dev, parent_ino)`; `set_bound_inode`/`bound_inode` lock the `Mutex` and **map `PoisonError` to `PinnedSocketError::Poisoned`** (no `unwrap`); `new` takes the same `Arc<OwnedFd>` the caller keeps (no `try_unwrap`, no `dup`, no `unsafe`), so `SchedulerConfig.pinned_sockets: Vec<(usize, PinnedSocket)>` and init's per-route pool state share one descriptor; `MB.3.6.2`'s tests build one from a hand-rolled temporary directory (no `tempfile` crate) and a `UnixListener` via `new`; carries the `O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC` `parentfd` that stage 0 pinned at boot, crossed the stage-0→stage-1 `execve` as an internal `--fastcgi-parent-fd=<route>:<n>` argv entry (§4.8.1), and reaches `SchedulerConfig.pinned_sockets` → `BuildCtx.socket` by fork. `expected_uid` is the **socket owner** (`scheduler_uid` in production, `invoking_uid` in `dev`/`check`); `peer_uid`/`peer_gid` are the **listening pool master's** credentials — the socket creator that `SO_PEERCRED` reports — `RouteSpec.uid` and its layout `route_gid` in production (the `php-fpm` master creates the socket as `route_uid:route_gid`), `invoking_uid`/`invoking_gid` in `dev`/`check`; setting `peer_uid = scheduler_uid` in production is a bug that `502`s every request. In production (`enforce_socket_inode = true`), `bound_inode` holds the exact `(sock_dev, sock_ino)` received in `Ctl::PoolReady`; in `dev`/`check` (`enforce_socket_inode = false`), `parentfd` + `expected_uid` stay pinned while allowing the pool to be restarted in place. **No implementation may ever `open`, `openat` or `connect` a `listen` path string, and no code path re-opens the parent segment after boot** |
 | `UpstreamSignal` | `enum { ExecutorReady { socket_inode: Option<(u64, u64)> }, ExecutorExited }` | sent by the scheduler's `on_ctl` on **both** view `Ready`/`Exited` (`socket_inode: None`) and pool `PoolReady`/`PoolExited` (`socket_inode: Some((sock_dev, sock_ino))`); `FastCgiUpstream::signal` stores `socket_inode` before `self.state.set_ready(true)` and clears it on `ExecutorExited` |
 | `UpstreamHead` | `#[derive(Debug, Clone, PartialEq, Eq)] struct { method: Vec<u8>, target: Vec<u8>, headers: Vec<(Vec<u8>, Vec<u8>)>, scheme: Tls, server_name: String, server_port: u16, remote_addr: String, peer_addr: String, body: BodyFraming, expect_continue: bool }` | built once in `begin_raw` from `ReqHeadView` (`scheme() -> Scheme` (the frame-owned **`blastit_frame::Scheme`** root re-export; inside `raw.rs` it is `crate::frame::Scheme`; `begin_raw` maps `Scheme::Http&#124;Https → Tls::Http&#124;Https`), `server_name`/`server_port` accessors added in `MB.9.2.1.1`; `body: BodyFraming` and `expect_continue: bool` derived in `begin_raw` from `Content-Length`/`Transfer-Encoding` and `Expect: 100-continue` before `Expect` is stripped); **not** `blastit_http::RequestHead`; `Tls { Http, Https }` is contract-owned, `BodyFraming` from `blastit-http`. Every `String` field is converted with `String::from_utf8_lossy` (never `from_utf8` unwrap). `tests/head_allocs.rs` documents the bounded copy (`MB.9.2.1.2`). WSGI re-encodes `REQ_HEAD` from these fields |
 | `UpstreamPlan` | `{ head: UpstreamHead, body: BodyMode, expects_continue: bool }` | by value, so a `Declined` stage hands the head on |
@@ -549,7 +750,7 @@ Future + Send + 'a>>` is stable on MSRV 1.88; there is no second path.
 | `Session` / `SessionMsg` | `pub(crate) struct Session { id: u64, done: mpsc::Receiver<SessionMsg> }`; `pub(crate) enum SessionMsg { Done { id: u64, result: Result<ExchangeOutcome, UpstreamError> } }`; `pub(crate) fn Scheduler::session(upstream: Arc<dyn Upstream>, plan: UpstreamPlan, body: Box<dyn BodySource + Send>, sink: Box<dyn ResponseSink + Send>, permit: RoutePermit) -> Session` | scheduler-side (not contract), **`pub(crate)`** so `private_interfaces` stays silent and `MB.3.6.2.2` tests behaviour only (never names the types); one `tokio::spawn`ed task per request owns all arguments (including the `RoutePermit`) and a `SessionDoneGuard`; the scheduler keeps `done` in `self.sessions`; `Done` is delivered exactly once (normal `finish` or panic `Drop`) on a bounded `mpsc::Sender<SessionMsg>` (capacity `1`) and is the only slot-release event |
 | `BackendBuilder` | `trait: Send + Sync { fn kind(&self) -> &'static str; fn build(&self, spec: &RouteSpec<'_>, ctx: &BuildCtx<'_>, next: Option<Arc<dyn Upstream>>) -> Result<Arc<dyn Upstream>, BootError>; }` | `next` is the executor a static layer forwards to |
 | `RouteSpec<'a>` | `{ name: &'a str, route: RouteId, uid: u32, line: u32, ingress: Option<&'a IngressPolicy>, static_policy: Option<&'a StaticPolicy>, static_forward: bool, executor: Option<&'a Executor> }` | manifest types only (`blastit_manifest::Executor`, re-exported at the crate root by `MB.3.5.1`; `FastCgiPolicy` likewise); built by `run_with` from `RouteInfo` plus `SchedulerConfig.route_lines[index]` (built by `stage1` from `Manifest::route_lines()`, routing order), so every `BootError` can print `./blastit.toml:<line>`; a short/missing `route_lines` entry is itself a `BootError` naming the route; `static_forward` says “a miss may reach an executor” |
-| `BuildCtx<'a>` | `{ manifest_dir: &'a Path, route: RouteId, uid: u32, limits: BuildLimits, state: Arc<RouteState>, socket: Option<PinnedSocket>, session: Arc<dyn SessionPort>, pool: Option<Arc<dyn PoolPort>>, external_executor: bool }` where `BuildLimits { max_body_bytes: u64, static_max_bytes: u64, request_timeout: Duration }` | carries the route's shared `Arc<RouteState>` and (for FastCGI) the boot-pinned `PinnedSocket` from `SchedulerConfig.pinned_sockets`; `FastCgiBuilder` requires `ctx.socket.clone()` and `ctx.pool.clone()` by construction (`None` → `BootError`). `external_executor` is **contract-owned** (not `SpawnMode`, which is a scheduler type) and set by `run_with` from `cfg.pool_spawn == PoolSpawn::External`; `FastCgiUpstream::ensure_ready` returns `Ok(())` immediately when it is `true`, so `dev`/`check` never call `SessionPort::spawn` and never boot a pool as the developer |
+| `BuildCtx<'a>` | `{ manifest_dir: &'a Path, route: RouteId, uid: u32, limits: BuildLimits, state: Arc<RouteState>, socket: Option<PinnedSocket>, session: Arc<dyn SessionPort>, pool: Option<Arc<dyn PoolPort>>, external_executor: bool }` where `BuildLimits { max_body_bytes: u64, static_max_bytes: u64, request_timeout: Duration }` | carries the route's shared `Arc<RouteState>` and (for FastCGI) the boot-pinned `PinnedSocket` from `SchedulerConfig.pinned_sockets`; `FastCgiBuilder` requires `ctx.socket.clone()` and `ctx.pool.clone()` by construction (`None` → `BootError`). `external_executor` is **contract-owned** (not `SpawnMode`, which is a scheduler type) and set by `run_with` from `cfg.pool_spawn == PoolSpawn::External`; it is `false` in every shipped mode after `MB.3.9.4`, so `ensure_ready` always reaches `PoolPort::ensure_pool` and blastit always starts the pool it owns |
 | `Registry` | `fn new(Vec<Arc<dyn BackendBuilder>>) -> Result<Self, BootError>; fn build_route(&self, &RouteSpec, &BuildCtx) -> Result<Vec<Arc<dyn Upstream>>, BootError>` | looks up `executor.kind()` (single source of executor kinds), then wraps with `"static"` when `spec.static_policy.is_some()`; returns `[static?, executor?]` |
 | `BootError` | `{ manifest: PathBuf, line: u32, route: String, kind: String, detail: String }` | `./blastit.toml:<line>: <detail>`; hand-written `Display` |
 
@@ -681,8 +882,8 @@ directly unit-tested in `MB.9.1.1` with an incomplete `Registry`).
 Builders run in the scheduler process **after** the role fork (so static roots are opened
 by the scheduler role, while FastCGI `PinnedSocket`s in `SchedulerConfig.pinned_sockets`
 wrap the `parentfd`s that stage 0 pinned before the `execve` and handed over as
-`--fastcgi-parent-fd` entries — `FastCgiBuilder` and `FastCgiUpstream` **never** open or
-connect `listen` by path), before any listener is served. `crates/blastit/src/roles.rs` (`scheduler`, forked by `stage1.rs`)
+`--fastcgi-parent-fd` entries — `FastCgiBuilder` and `FastCgiUpstream` **never** resolve the
+socket or its parent by path), before any listener is served. `crates/blastit/src/roles.rs` (`scheduler`, forked by `stage1.rs`)
 is the single composition-root call site: it calls
 `blastit_scheduler::run_with(blastit_scheduler::builtin_registry()?, …)` and writes any
 `RunError::Boot` (`eprintln!("{err}")`, captured by init's stderr pipe as `app.output` in
@@ -824,7 +1025,7 @@ slot. `critical_ingress_enforcement.rs` and `critical_rewrite.rs` pass unmodifie
 | Param map → bytes, allowlist, canonicalisation, caps, refusals | `blastit-fastcgi::lockdown` | pure; every §4.7 `lockdown` row is a `Result<_, LockdownError>` |
 | CGI `STDOUT` head parse (`Status:`, headers, the four forbidden proxy-control names, default `200`, caps) | `blastit-fastcgi::cgi` (`MB.3.4.1`) | pure state machine; a bad head, a header **name** that is not an RFC 7230 `tchar` token (empty, NUL/CTL, space, `:`, obs-fold), or one of `X-Accel-Redirect`/`X-Sendfile`/`X-Lighttpd-Send-File`/`X-Rewrite-URL` (compared on the token name, case-insensitively) is `Err(CgiError::BadHead &#124; CgiError::NonTokenName &#124; CgiError::ForbiddenProxyHeader)`, never a partial head; any other `X-Accel-*` name is dropped, not an error |
 | `END_REQUEST` decode; `appStatus`/`reserved[3]` ignored | `blastit-fastcgi::record` | `protocol_status != Complete` is `Err(RecordError::ProtocolStatus)` |
-| `PinnedSocket` connect, write, body pump, read pump, credit, abort, accounting, backoff | `blastit-scheduler::upstream::fastcgi` (`MB.3.6.2.1`) | sockets and time only; takes `PinnedSocket` by construction, never opens `listen` by path |
+| `PinnedSocket` connect, write, body pump, read pump, credit, abort, accounting, backoff | `blastit-scheduler::upstream::fastcgi` (`MB.3.6.2.1`) | sockets and time only; takes `PinnedSocket` by construction and never resolves the socket by path |
 
 **Codec-local errors (no `blastit-backend` edge).** `blastit-fastcgi` is zero-dependency in
 production, so it never names `Refusal`/`UpstreamError`. It defines
@@ -852,11 +1053,11 @@ filesystem access.
 
 | Item | Pinned behaviour | Source |
 |---|---|---|
-| Connection | one per request, `AF_UNIX` `SOCK_STREAM`, `SOCK_CLOEXEC`; `connect()` exclusively to `/proc/self/fd/<PinnedSocket.parent>/<PinnedSocket.name>` (`FastCgiUpstream` holds `PinnedSocket` from `BuildCtx.socket`, never the `listen` path string) | nginx/Apache default (`fastcgi_keep_conn off`) |
+| Connection | one per request, `AF_UNIX` `SOCK_STREAM`, `SOCK_CLOEXEC`; `connect()` exclusively to `/proc/self/fd/<PinnedSocket.parent>/<PinnedSocket.name>` (`FastCgiUpstream` holds `PinnedSocket` from `BuildCtx.socket`; no path string, no name and no mode ever comes from the manifest) | nginx/Apache default (`fastcgi_keep_conn off`) |
 | Scheduler socket | in `crates/blastit-sys/src/seccomp.rs`: (1) `SeccompRole::sockets()` allows `Scheduler` (`!matches!(self, Self::Http)`) so `socket(args[0] == AF_UNIX)` is permitted while `AF_INET`/`AF_INET6`/`AF_NETLINK` stay `EPERM` (classic BPF filters `args[0]` only, not `SOCK_STREAM`/`SOCK_CLOEXEC` or `connect` paths — the `0600` socket in pinned `PinnedSocket.parent` is the path wall); (2) `build()` adds an `if matches!(role, SeccompRole::Scheduler)` block denying `SYS_bind` and `SYS_listen` (`EPERM`), keeping `bind`/`listen` allowed for `SeccompRole::View`; (3) unit tests assert `Scheduler` (`AF_UNIX` allowed, `AF_INET`/`bind`/`listen` `EPERM`) and `View { egress: false }` (`AF_UNIX` `bind`/`listen` allowed). Recorded in `ADR-0008` decision 7, `ARCHITECTURE.md` §7.3 and `static-and-spa` §5.1 by `MB.3.8` | C-B1, S5 |
-| Socket identity | exact single sequence in §4.8.3: stage 0 (init in production, `stage0::run_dev` in `dev`/`check`) resolves `parentfd` (`O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC`) from `manifest_dirfd` at boot before any route process exists, and hands it across the stage-0→stage-1 `execve` as the internal argv entry `--fastcgi-parent-fd=<route>:<n>` (§4.8.1) — never an env var, never a path re-open — from which `SchedulerConfig.pinned_sockets` is built and `roles::scheduler` receives it inside `PinnedSocket`. Before each `connect()`, `FastCgiUpstream` `fstat`s `PinnedSocket.parent` (`(st_dev, st_ino) == (parent_dev, parent_ino)`) and `fstatat`s `(PinnedSocket.parent, PinnedSocket.name, AT_SYMLINK_NOFOLLOW)` (`S_ISSOCK`, `st_uid == expected_uid`, `(st_mode & 0o777) == 0o600` in production, and `(st_dev, st_ino) == bound_inode` when `enforce_socket_inode` is set), connects via `/proc/self/fd/<fd>/<name>`, and checks `SO_PEERCRED`: the accepted set is **exactly** `{route_uid:route_gid}` in production (`peer_uid = RouteSpec.uid`, `peer_gid = route_gid` — the **listening** `php-fpm` master, i.e. the socket creator, since `SO_PEERCRED` reports the creator and not the accepting worker; `expected_uid` is the socket owner `scheduler_uid`) and `{invoking_uid:invoking_gid}` in `dev`/`check` (`peer_uid = expected_uid = invoking_uid`); `scheduler_uid` is **not** accepted in production, there is no gVisor tolerance (gVisor reports the listener's creds, which is already `route_uid`), and any other uid/gid → `Fault` (`502`). Only `php-fpm` itself binds its configured absolute `listen` path (safe because `B1` applies `ARCHITECTURE.md` §5.3's sticky-bit rule from `/` to `manifest_dir` and `B2` requires every segment from `manifest_dir` down to `parentfd` to be non-route-writable; a route that owns `manifest_dir` can rename the parent, which the pinned descriptor turns into a self-DoS `503`, never a redirect); Blastit itself performs **no caller-path-resolved** `chown`/`chmod`/`openat`/`connect` — every operation is on `parentfd` with `AT_SYMLINK_NOFOLLOW`, or the one mode change `chmod("/proc/self/fd/<sockfd>")` on an `O_PATH` fd whose `(st_dev, st_ino)` was just verified (`S5`), which is descriptor-derived and never resolves a manifest path | S-2 |
-| Pool readiness | init sends `Ctl::PoolReady { route, sock_dev, sock_ino }` over the private `ctl.chan` socketpair strictly after the socket is `0600` scheduler-owned, `parentfd` is restored to `init_uid:init_gid 0555`, and `(sock_dev, sock_ino)` is re-verified post-freeze; until then `RouteState` (`capacity()`) is `Busy`, so no request ever sees an unfrozen parent or unverified socket | S1 |
-| Ownership window | the single `*at(parentfd, …)` sequence of §4.8.3 hands `parentfd` to `(route_uid, route_gid)` `0755` only for the bind, verifies and hands the socket to `scheduler_uid`, and restores `parentfd` to `(init_uid, init_gid)` `0555` on both success and every failure path; another route's uid is never the owner, and no application request runs before `PoolReady` | S1 |
+| Socket identity | exact single sequence in §4.8.3: stage 0 (init in production, `stage0::run_dev` in `dev`/`check`) creates and resolves the **derived** per-route pair directory `<run>/fastcgi/<route_index>` (`R3`) from its own run-directory descriptor at boot before any route process exists, opens `parentfd` (`O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC`), and hands it across the stage-0→stage-1 `execve` as the internal argv entry `--fastcgi-parent-fd=<route>:<n>` (§4.8.1) — never an env var, never a path re-open — from which `SchedulerConfig.pinned_sockets` is built and `roles::scheduler` receives it inside `PinnedSocket`. Before each `connect()`, `FastCgiUpstream` `fstat`s `PinnedSocket.parent` (`(st_dev, st_ino) == (parent_dev, parent_ino)`) and `fstatat`s `(PinnedSocket.parent, PinnedSocket.name, AT_SYMLINK_NOFOLLOW)` (`S_ISSOCK`, `st_uid == expected_uid`, `(st_mode & 0o777) == 0o600` in production, and `(st_dev, st_ino) == bound_inode` when `enforce_socket_inode` is set), connects via `/proc/self/fd/<fd>/<name>`, and checks `SO_PEERCRED`: the accepted set is **exactly** `{route_uid:route_gid}` in production (`peer_uid = RouteSpec.uid`, `peer_gid = route_gid` — the **listening** `php-fpm` master, i.e. the socket creator, since `SO_PEERCRED` reports the creator and not the accepting worker; `expected_uid` is the socket owner `scheduler_uid`) and `{invoking_uid:invoking_gid}` in `dev`/`check` (`peer_uid = expected_uid = invoking_uid`); `scheduler_uid` is **not** accepted in production, there is no gVisor tolerance (gVisor reports the listener's creds, which is already `route_uid`), and any other uid/gid → `Fault` (`502`). Only `php-fpm` itself binds the path in its generated pool file's `listen=` line, and that line is **always** the derived path of `R3` — no manifest byte reaches it (safe because `B1` proves `<runtime>` is blastit's own non-route-writable directory with no route-writable ancestor, and `B2` creates and pins `<runtime>/fastcgi/<route_index>` itself; a route uid cannot rename or plant in either, so the pre-`MB.3.9.2` "route owns `manifest_dir`" pivot class ceases to exist); Blastit itself performs **no caller-path-resolved** `chown`/`chmod`/`openat`/`connect` — every operation is on `parentfd` with `AT_SYMLINK_NOFOLLOW`, or the one mode change `chmod("/proc/self/fd/<sockfd>")` on an `O_PATH` fd whose `(st_dev, st_ino)` was just verified (`S5`), which is descriptor-derived and never resolves a manifest path | S-2 |
+| Pool readiness | init sends `Ctl::PoolReady { route, sock_dev, sock_ino }` over the private `ctl.chan` socketpair strictly after the socket is `0600` scheduler-owned, `parentfd` is restored to `init_uid:init_gid 0511`, and `(sock_dev, sock_ino)` is re-verified post-freeze; until then `RouteState` (`capacity()`) is `Busy`, so no request ever sees an unfrozen parent or unverified socket | S1 |
+| Ownership window | the single `*at(parentfd, …)` sequence of §4.8.3 hands `parentfd` to `(route_uid, route_gid)` `0755` only for the bind, verifies and hands the socket to `scheduler_uid`, and restores `parentfd` to `(init_uid, init_gid)` `0511` on both success and every failure path; another route's uid is never the owner, and no application request runs before `PoolReady` | S1 |
 | `BEGIN_REQUEST` | exactly one, `role = RESPONDER (1)`, `flags = 0`, 8-byte body, `reserved[5] = 0` | spec §5.1; research §C |
 | `requestId` | `1` on every request; `keepConn = 0` and one request per connection, so the counter never advances. If reuse is ever added: strictly increasing `1..=65535`, wrap to `1` (never `0`), close at exhaustion | research §E, §L |
 | `PARAMS` | **one** record when encoded ≤ 65 535 plus a zero-length terminator; a set that would exceed is `Refused { 400, ParamsTooLarge }` before `connect`. One pair ≤ 65 531 including its length prefixes. (The “split between pairs” branch is deleted: unreachable under the total cap and untestable.) | spec §3.4; php-fpm's per-record parser |
@@ -968,22 +1169,69 @@ discriminating key-value subset from `/__inspect` (enforced by `e2e/php2shell.py
 
 ### 4.8 Pool workers
 
-#### 4.8.1 Local and CI: the developer's pool
+#### 4.8.1 Local and CI: the pool blastit owns
 
-The page's Local section is verbatim: the developer writes `php-fpm.conf`, runs
-`php-fpm -F -y php-fpm.conf`, and the manifest's `listen` resolves to that socket.
-`blastit dev` and `check` **never spawn a pool**. At boot, stage 0 (`stage0::run_dev`) opens
-`manifest_dirfd` (`O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, with the `B1` `fstat`/`lstat`
-inode equality) and resolves `parentfd = openat2(manifest_dirfd, rel_parent,
-O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC,
-RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)` (per-segment `O_NOFOLLOW`
-fallback on `ENOSYS`), verifies `fstatat(parentfd, sock_name, AT_SYMLINK_NOFOLLOW)` is
-`S_ISSOCK`, `st_uid == invoking_uid`, and connectable as `invoking_uid` (else boot-fatal
-`./blastit.toml:<line>: fastcgi listen "run/fpm.sock": not a socket`).
+The grammar has **no socket key** (`R1`). The page's Local/CI steps are `MB.3.9.1`'s, and
+who starts, supervises and stops the pool in `dev`/`check` — discovery order, cleanup and
+the failure contract — is **`MB.3.9.3`**'s amendment (it depends on `MB.12`'s runtime
+provider). This section pins only what both nodes build on: the **derivation** of the
+socket, the **provenance** of its parent, the **resolution** of `workers`, and the
+descriptor handoff that carries the parent from stage 0 to the scheduler.
+
+**The derivation.** In `dev`/`check`, stage 0 (`stage0::run_dev`) resolves the run root it
+already owns — `Dev::adopt`'s root (`dev_learn.rs:180`; `0700`, caller-owned, `O_NOFOLLOW`
+on the leaf) for plain `dev`, or the adopted `<CheckRoot>/dev` for `check` — and uses the
+probe in **two phases**, because the parent must exist before the pool and the leaf can only be checked
+after it:
+
+- **phase 1, `SocketProbe::parent(run_root, route_index)`, before the pool starts** — the
+  step that makes `php-fpm`'s bind target reachable:
+  1. re-prove the run root is the private directory the caller owns (`0700`, no symlink,
+     `fstat`/`lstat` inode equality, absolute `/proc/self/fd` readlink) through **one**
+     predicate: `MB.3.5.2` moves `verify_private_dir` into `crates/blastit/src/probe.rs` as
+     `pub(crate) fn verify_private_dir` and `Dev::adopt` calls it (no duplicate), so the socket's
+     neighbourhood is blastit's own state, never the repository;
+  2. `mkdirat(run_rootfd, "fastcgi", 0o700)` and `mkdirat(fastcgifd, "<route_index>",
+     0o700)`, treating `EEXIST` as success, then
+     `openat2(run_rootfd, "fastcgi/<route_index>",
+     O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC, RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)`
+     (per-segment `O_NOFOLLOW` fallback on `ENOSYS`), requiring
+     `st_uid == invoking_uid`, `(st_mode & 0o777) == 0o700`, `!S_ISLNK` — a planted
+     symlink, a foreign owner or a regular file at either derived segment is boot-fatal
+     (`FastCgiPoolSocketInvalid`) — and returning the pinned `parentfd`;
+- **phase 2, `SocketProbe::check_leaf(parentfd, invoking_uid)`, after the pool starts** —
+  `fstatat(parentfd, "fpm.sock", AT_SYMLINK_NOFOLLOW)` must be `S_ISSOCK`,
+  `st_uid == invoking_uid`, `(st_mode & 0o777) == 0o600`, and connectable as the invoking
+  uid; the failure is boot-fatal
+  `./blastit.toml:<line>: route "app" (index 0): pool socket "<run>/fastcgi/0/fpm.sock":
+  <rule>`.
+
+`Manifest::check_fastcgi_sockets(run_root, probe)` is phase 1 for every FastCGI route (it
+returns the parent fds `check` hands to the child `dev`); **who calls phase 2 and when is
+`MB.3.9.3`'s** ordering. Nothing in either phase reads a manifest string: `run_root` comes
+from blastit, `<route_index>` from `RouteInfo` order, `fpm.sock` is the constant in `R3`.
+
+**`workers`, resolved once — by the pool leaf.** `resolved(cap) = workers.unwrap_or(cap)`
+with `cap = view_worker_cap()` is one formula, resolved **by the leaf that owns the pool
+path** (`MB.3.6.3.1`/`MB.3.6.3.2`), used by init when it renders `pm.max_children` and
+`RLIMIT_NPROC` and by `run_with` when it builds the route's `Arc<RouteState>`
+(`worker_cap = resolved`). It is **not** hosted in `blastit-manifest` and **not**
+`MB.3.5.1`'s: the manifest crate stores only `workers: Option<u32>`, and the whole pool
+path is frozen pending `MB.12`'s embed-vs-pool decision (see R4 and §8.1 item 4), where
+`workers` may lose its meaning entirely. `Manifest::check_fastcgi_workers(cap)` runs at boot
+(`stage0`, production and `dev`, and `check::execute`) and refuses an explicit value above
+`cap` **before** either consumer runs, so the two call sites cannot disagree and
+`unwrap_or` is the whole rule — there is no `min`. `SchedulerConfig` carries the same
+`max_workers`/`view_max_workers` from the same stage-1 document, so the scheduler derives
+the identical `cap`; one shared pure helper — wherever the pool leaf puts it — is called by
+both, never duplicated, which is what makes a missing `.unwrap_or` impossible. The
+`model.rs` comment that says "the derivation is the scheduler's" is `MB.3.5.1`'s one-line
+follow-up; the design's rule is the sentence above.
 
 **The `parentfd` handoff — one mechanism, production and `dev`/`check` alike.** Stage 0 is
-the only process that resolves the parent, and stage 0 does **not** fork stage 1: it
-`execve`s it, so an `O_CLOEXEC` descriptor is closed at the barrier (`stage0::exec_stage1_dev`
+the only process that creates and resolves the parent, and stage 0 does **not** fork stage
+1: it `execve`s it, so an `O_CLOEXEC` descriptor is closed at the barrier
+(`stage0::exec_stage1_dev`
 and `exec_stage1` pass descriptors only through argv — `--config-fd`, `--dbproxy-*-fd`,
 `--dev-obs-fd`). The design reuses that exact pattern; it never uses `SCM_RIGHTS` (the
 `ctl.chan` socketpair does not exist yet at this `execve` — stage 1 creates it) and never
@@ -1010,7 +1258,7 @@ re-opens the parent by path:
    per-route state hold the **same** descriptor.
 3. `FastCgiBuilder` requires exactly one descriptor per `[route.fastcgi]` route. A missing
    entry — or one step 2 already rejected — is a boot error naming the manifest line
-   (`./blastit.toml:<line>: fastcgi listen "run/fpm.sock": no pinned parent descriptor`),
+   (`./blastit.toml:<line>: route "app" (index 0): no pinned pool parent descriptor`),
    never a path fallback.
 4. **Ownership for the whole lifetime.** `init` (stage 1) keeps its own `Arc<OwnedFd>` per
    FastCGI route in the pool supervisor's per-route state for the process lifetime: `S1`–`S7`
@@ -1043,49 +1291,60 @@ handoff and dbproxy is the only `WireSqlObs` writer; `critical_fastcgi_learn::
 config_document_carries_no_check_fd` asserts the serialized document has no `check_*` or
 `obs_fd` key.
 When the variable is absent (plain `blastit dev`), stage 0 resolves the parent itself via
-`DevProbe::check` (which returns the `OwnedFd`); when it is present but an entry is not a
+`DevProbe::parent` (which returns the `OwnedFd`); when it is present but an entry is not a
 directory or names a route the manifest does not have, `dev` exits `1` naming the route —
 never a path connect.
 
 **Negative rule.** After boot no code path calls `open`/`openat`/`openat2` on the parent
-segment or on `listen`: the only socket operation is `connect("/proc/self/fd/<parentfd>/
-<name>")` (`C1`), and `FastCgiBuilder`/`FastCgiUpstream` never re-resolve `rel_parent`. The
-descriptor that crossed the barrier is the only way the scheduler can name the parent.
+segment or on the derived leaf: the only socket operation is
+`connect("/proc/self/fd/<parentfd>/<name>")` (`C1`), and
+`FastCgiBuilder`/`FastCgiUpstream` never re-resolve a directory. The descriptor that
+crossed the barrier is the only way the scheduler can name the parent.
 
 `PinnedSocket` is built with `expected_uid = invoking_uid`, `peer_uid = invoking_uid`,
-`peer_gid = invoking_gid` (single-UID simulation: the developer's `php-fpm` runs as the
-caller) and
+`peer_gid = invoking_gid` (single-UID simulation: the pool runs as the caller) and
 `enforce_socket_inode = false`, so **`dev`/`check` also connect exclusively via
-`/proc/self/fd/<parentfd>/<sock_name>`** while allowing the developer to restart `php-fpm`
-in place during a `dev` session.
+`/proc/self/fd/<parentfd>/<sock_name>`**. `MB.3.9.3` owns whether `dev` keeps that flag at
+`false` (today: a hand-restarted `php-fpm`) or flips it to `true` once blastit itself owns
+the `dev` pool's lifetime; this amendment does not pre-empt it.
+
+Until `MB.3.9.4`, `stage1` sets `pool_spawn = PoolSpawn::External` for `dev` and for
+`check`'s child `dev` (owner of `stage1.rs`: `MB.3.6.3.1`), so the `Managed` default never
+sends `Ctl::Spawn` for a pool nobody would start in that window.
 
 `SchedulerConfig` defines `#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum PoolSpawn {
-Managed, External }` on `pub pool_spawn: PoolSpawn` (default `Managed`; `External` in
-`dev`/`check`, scoped strictly to `Pool` routes so WSGI views still lazy-spawn via `dev`'s
-zygote). The name is `PoolSpawn`, not `SpawnMode`, because `crate::config::SpawnMode`
+Managed, External }` on `pub pool_spawn: PoolSpawn` (default `Managed`). **`External` is the
+transitional, pre-`MB.3.9.4` value**: it existed because a human started `php-fpm`, and that
+premise is exactly what this amendment removes. After `MB.3.9.4` every mode — production,
+`dev` and `check`'s child `dev` — is `Managed`, so `external_executor` is always `false` and
+`ensure_ready` always reaches `PoolPort::ensure_pool`; whether the now-unused variant is
+deleted is `MB.3.9.4`'s call. `PoolSpawn` still scopes to `Pool` routes only, so WSGI views
+keep lazy-spawning via `dev`'s zygote. The name is `PoolSpawn`, not `SpawnMode`, because `crate::config::SpawnMode`
 (`Lazy`/`Eager`) already exists. `run_with` copies it into the
 contract-owned `BuildCtx.external_executor`; `FastCgiBuilder` stores that flag and
 `FastCgiUpstream::ensure_ready` returns `Ok(())` immediately when it is `true` (never
-`PoolPort::ensure_pool`), while in `Managed` mode it calls `ctx.pool.ensure_pool(route)`
+`PoolPort::ensure_pool`) — a mode no shipped configuration may use for a pool after
+`MB.3.9.4` — while in `Managed` mode it calls `ctx.pool.ensure_pool(route)`
 (one `Ctl::Spawn`) and the first request waits for `PoolReady` (bounded 5 s) under
-`request_timeout`; `Pool` routes construct `RouteState::new(pool_spawn == PoolSpawn::External, policy.workers)`:
-`Ready` immediately in `dev`/`check` (the developer's pool is already up and validated at
-boot), `Busy` in `Managed` until the verified `Ctl::PoolReady` (`sock_dev`, `sock_ino`)
-arrives; `capacity()` reads only `RouteState` atomics, zero I/O.
+`request_timeout`; `Pool` routes construct
+`RouteState::new(false, policy.resolved_workers(cfg.view_worker_cap()))` after `MB.3.9.4`
+(the `External` value was the pre-amendment `true`): `Busy` until the verified
+`Ctl::PoolReady { sock_dev, sock_ino }` arrives — in `dev` the equivalent proof is §4.8.1
+phase 2 (`MB.3.9.3`) — and then `Ready`; `capacity()` reads only `RouteState` atomics, zero I/O.
 
 #### 4.8.2 Production: one pool per route, as the route's uid
 
 | Question | Decision |
 |---|---|
 | Who spawns | init, on first request (or at boot with `prefork = true`), from `RouteInfo.executor = Some(Pool(…))` — a typed plan, not a backend string. A new `Ctl::Spawn` handler `supervise::spawn_pool` forks and `execve`s on **init's own `Arc<OwnedFd>`** from the per-route pool state (§4.8.1 step 4; never a re-open); it does not use the Python zygote. The fork goes through **`crate::forking::fork(true)`** — the GIL is held for the whole `Supervisor::run(py)` loop, so `PyOS_BeforeFork`/`PyOS_AfterFork_{Parent,Child}` are the matching halves — exactly as `zygote::fork_view` does, never a raw `libc::fork`; the child then runs `ChildIo::prepare` (after `PyOS_AfterFork_Child` reset the interpreter's locks), `drop_privileges`, `harden_child`, `install_filter`, `execve`, and `child_exit` on failure |
-| Command | `php-fpm -F -y <runtime>/views/<uid>/php-fpm.conf` with empty `envp`, forked through the full `child::ChildIo { stdout: Some(pipe), stderr: Some(pipe), keep: vec![], limits: Rlimits { nproc: Some(workers + 2), nofile: Some(max(1024, workers*4 + 32)), core_zero: true }, working_dir: Some(<runtime>/views/<uid>) }` literal so `close_fds_except` leaves **only** fd 0/1/2 (`parentfd`, `ctl.chan`, the events pipes and any `BLASTIT_CHECK_*` observation fd are never inherited), then `setpgid(0, 0)` in the child **and** `setpgid(child_pid, child_pid)` in the parent immediately after the fork (ignoring `EACCES`, which means the child already did it), so `pgid` is known before any `kill(-pgid)`, `drop_privileges(route_uid)` (`route_uid:route_gid`, empty supplementary groups), `harden_child(Signal::KILL)`, `SeccompRole::View { egress }` (`AF_UNIX` `socket`/`bind`/`listen` allowed, no INET unless `egress`), `set_dumpable(false)`, `RLIMIT_NPROC = workers + 2`, `RLIMIT_NOFILE = max(1024, workers*4 + 32)`, `RLIMIT_CORE = 0`, `umask(0o077)`, `chdir(<runtime>/views/<uid>)`. Init signals the whole **process group** (`kill(-pgid, SIGTERM)` then `kill(-pgid, SIGKILL)` on drain; immediate `kill(-pgid, SIGKILL)` on `RETIRE`, crash cleanup or failed spawn). A compromised worker that called `setsid()` to leave `-pgid` is capped by `route_uid`'s `RLIMIT_NPROC = workers + 2` and cannot unlink/rebind/chmod inside `0555` `parentfd` **outside the bind window**. The bind window is the real opening: `S2` makes `parentfd` `route_uid:route_gid 0755`, so a surviving escapee (same uid) can `unlink` + `bind` the leaf before `S4`. That is closed by the **new-pgid membership check** (§4.8.3 `S4`/`S6`): a socket is published only if its inode is held by a task whose `/proc/<pid>/stat` `pgrp` equals the new `master_pid`; an escapee's socket is not, so `S4`/`S6` fail and `U1` runs. Residual after that: an escapee that can inject an fd into, or `ptrace`, a new-pgid task (same-uid, beyond this model) — same-route persistence/DoS only, never cross-route access. Proven by `critical_fastcgi_pool::pool_ready_inode_is_held_by_a_task_in_the_new_pgid` and `critical_fastcgi_pool::setsid_escapee_is_never_published` (`MB.3.6.3.2`) + `e2e/rootless/run.py::check_fastcgi_setsid_escapee_contained` (`MB.3.7`) |
+| Command | `php-fpm -F -y <runtime>/views/<uid>/php-fpm.conf` with empty `envp`, forked through the full `child::ChildIo { stdout: Some(pipe), stderr: Some(pipe), keep: vec![], limits: Rlimits { nproc: Some(<resolved> + 2), nofile: Some(max(1024, <resolved>*4 + 32)), core_zero: true }, working_dir: Some(<runtime>/views/<uid>) }` literal so `close_fds_except` leaves **only** fd 0/1/2 (`parentfd`, `ctl.chan`, the events pipes and any `BLASTIT_CHECK_*` observation fd are never inherited), then `setpgid(0, 0)` in the child **and** `setpgid(child_pid, child_pid)` in the parent immediately after the fork (ignoring `EACCES`, which means the child already did it), so `pgid` is known before any `kill(-pgid)`, `drop_privileges(route_uid)` (`route_uid:route_gid`, empty supplementary groups), `harden_child(Signal::KILL)`, `SeccompRole::View { egress }` (`AF_UNIX` `socket`/`bind`/`listen` allowed, no INET unless `egress`), `set_dumpable(false)`, `RLIMIT_NPROC = <resolved> + 2`, `RLIMIT_NOFILE = max(1024, <resolved>*4 + 32)`, `RLIMIT_CORE = 0`, `umask(0o077)`, `chdir(<runtime>/views/<uid>)`. Init signals the whole **process group** (`kill(-pgid, SIGTERM)` then `kill(-pgid, SIGKILL)` on drain; immediate `kill(-pgid, SIGKILL)` on `RETIRE`, crash cleanup or failed spawn). A compromised worker that called `setsid()` to leave `-pgid` is capped by `route_uid`'s `RLIMIT_NPROC = <resolved> + 2` and cannot unlink/rebind/chmod inside `0511` `parentfd` **outside the bind window**. The bind window is the real opening: `S2` makes `parentfd` `route_uid:route_gid 0755`, so a surviving escapee (same uid) can `unlink` + `bind` the leaf before `S4`. That is closed by the **new-pgid membership check** (§4.8.3 `S4`/`S6`): a socket is published only if its inode is held by a task whose `/proc/<pid>/stat` `pgrp` equals the new `master_pid`; an escapee's socket is not, so `S4`/`S6` fail and `U1` runs. Residual after that: an escapee that can inject an fd into, or `ptrace`, a new-pgid task (same-uid, beyond this model) — same-route persistence/DoS only, never cross-route access. Proven by `critical_fastcgi_pool::pool_ready_inode_is_held_by_a_task_in_the_new_pgid` and `critical_fastcgi_pool::setsid_escapee_is_never_published` (`MB.3.6.3.2`) + `e2e/rootless/run.py::check_fastcgi_setsid_escapee_contained` (`MB.3.7`) |
 | New role? | **No.** Same uid/gid as the route's view (`UID_BASE+1000+i`), same supervisor, same `process.*`/`app.output` pipes. ADR-0001's five roles and ADR-0007's "no second supervisor" hold; the only role-level change is the scheduler's `socket(AF_UNIX)` with `SYS_bind`/`SYS_listen` `EPERM` (decision 7) |
-| Pool file | `<runtime>/views/<uid>/php-fpm.conf`, `0600` route uid (rendered by `supervise::render_pool_conf`, `MB.3.6.3.2`), alongside private temp dir `<runtime>/views/<uid>/tmp` (`0700` route uid): `[global] daemonize=no`, `pid=<dir>/fpm.pid`, `error_log=/dev/stderr`, `[www] listen=<absolute manifest listen>`, `listen.mode=0600`, `clear_env=yes`, `pm=static`, `pm.max_children=<workers>`, `pm.max_requests=<pool_max_requests>` = `max(BLASTIT_VIEW_MAX_REQUESTS, 500)` (`supervise::DEFAULT_POOL_MAX_REQUESTS`, defined in `supervise.rs` and owned by `MB.3.6.3.2`; for a pool `0` does **not** mean "never", unlike the view cap, so a future param-wall regression cannot persist for the process lifetime — one worker recycles every `pool_max_requests` requests), `security.limit_extensions=.php`, `catch_workers_output=yes`, `chdir=<manifest_dir>`, `request_terminate_timeout=<BLASTIT_REQUEST_TIMEOUT + 5s>`, `php_admin_value[allow_url_include]=0`, `php_admin_value[auto_prepend_file]=`, `php_admin_value[user_ini.filename]=`, `php_admin_value[cgi.fix_pathinfo]=0`, `php_admin_value[open_basedir]=<manifest_dir>:<runtime>/views/<uid>/tmp`, `env[HOME]=<runtime>/views/<uid>/tmp` (the private `TMPDIR` root, so `$HOME/.cache`/`.config` writes stay inside `open_basedir`; the private dir itself is deliberately **not** added to `open_basedir`, so the app can neither read nor rewrite its own `php-fpm.conf`), `env[TMPDIR]=<runtime>/views/<uid>/tmp`, `env[...]` = sanitized stage-1 environment (minus every `BLASTIT_*` and minus `HTTP_PROXY`/`http_proxy`, with proxy `host=/proc/self/cwd` rewritten to `host=<runtime>/views/<uid>` so `libpq`/`PDO` finds `.s.PGSQL.<port>` after PHP's SAPI `chdir`s to `dirname(SCRIPT_FILENAME)`), INI-escaped. **No** `user`/`group`, **no** `listen.owner`/`listen.group` |
-| `workers` vs `pm.max_children` | equal, written from one key; `workers` is also `RouteState.worker_cap` (sessions in flight, including cancelled ones until `Done`). No boot-time sum against `BLASTIT_MAX_WORKERS`: each session takes one global slot, so the runtime budget is the real bound. `pm.max_requests` (per worker) is `max(BLASTIT_VIEW_MAX_REQUESTS, 500)`, so the pool always recycles even when the view counter is `0`; `request_terminate_timeout` bounds hung workers |
+| Pool file | `<runtime>/views/<uid>/php-fpm.conf`, `0600` route uid (rendered by `supervise::render_pool_conf`, `MB.3.6.3.2`), alongside private temp dir `<runtime>/views/<uid>/tmp` (`0700` route uid): `[global] daemonize=no`, `pid=<dir>/fpm.pid`, `error_log=/dev/stderr`, `[www] listen=/run/blastit/fastcgi/<route_index>/fpm.sock` (**always** the derived path of `R3`; no manifest byte reaches this line), `listen.mode=0600`, `clear_env=yes`, `pm=static`, `pm.max_children=<resolved>`, `pm.max_requests=<pool_max_requests>` = `max(BLASTIT_VIEW_MAX_REQUESTS, 500)` (`supervise::DEFAULT_POOL_MAX_REQUESTS`, defined in `supervise.rs` and owned by `MB.3.6.3.2`; for a pool `0` does **not** mean "never", unlike the view cap, so a future param-wall regression cannot persist for the process lifetime — one worker recycles every `pool_max_requests` requests), `security.limit_extensions=.php`, `catch_workers_output=yes`, `chdir=<manifest_dir>`, `request_terminate_timeout=<BLASTIT_REQUEST_TIMEOUT + 5s>`, `php_admin_value[allow_url_include]=0`, `php_admin_value[auto_prepend_file]=`, `php_admin_value[user_ini.filename]=`, `php_admin_value[cgi.fix_pathinfo]=0`, `php_admin_value[open_basedir]=<manifest_dir>:<runtime>/views/<uid>/tmp`, `env[HOME]=<runtime>/views/<uid>/tmp` (the private `TMPDIR` root, so `$HOME/.cache`/`.config` writes stay inside `open_basedir`; the private dir itself is deliberately **not** added to `open_basedir`, so the app can neither read nor rewrite its own `php-fpm.conf`), `env[TMPDIR]=<runtime>/views/<uid>/tmp`, `env[...]` = sanitized stage-1 environment (minus every `BLASTIT_*` and minus `HTTP_PROXY`/`http_proxy`, with proxy `host=/proc/self/cwd` rewritten to `host=<runtime>/views/<uid>` so `libpq`/`PDO` finds `.s.PGSQL.<port>` after PHP's SAPI `chdir`s to `dirname(SCRIPT_FILENAME)`), INI-escaped. **No** `user`/`group`, **no** `listen.owner`/`listen.group`. `listen.mode=0600` and the §4.8.3 `S5`/`S6` owner discipline are one invariant stated twice (php-fpm's own umask, then init's verified `0600`), and a manifest cannot influence either |
+| `workers` vs `pm.max_children` | equal, both the **resolved** value (`policy.resolved_workers(view_worker_cap())`, resolved by the **pool leaf**, gated on `MB.12`), never `Option`-dependent; `RLIMIT_NPROC` and `RLIMIT_NOFILE` are sized from the same number, so one boot-time value governs the pool, the admission permit and both rlimits. The resolved value is also `RouteState.worker_cap` (sessions in flight, including cancelled ones until `Done`), which is why the pool can never be saturated by admitted requests: per-route admission stops at the same number. No boot-time **sum** against `BLASTIT_MAX_WORKERS`: each session takes one global slot, so the runtime budget is the real bound, exactly as `N` WSGI views each get `view_worker_cap`. `RLIMIT_NPROC = <resolved> + 2` is deliberately tighter than a view's `view_worker_cap + 16` (`zygote.rs:52` `VIEW_PROCESS_MARGIN`): a `pm = static` pool is a master plus exactly `<resolved>` children (one spare for the fork-to-`execve` window), while the CPython view needs 16 for its interpreter threads. `pm.max_requests` (per worker) is `max(BLASTIT_VIEW_MAX_REQUESTS, 500)`, so the pool always recycles even when the view counter is `0`; `request_terminate_timeout` bounds hung workers |
 | Socket lifecycle | governed exclusively by the normative syscall table in **§4.8.3** (zero variants) |
-| Restart / rebind | on master exit or `Ctl::Retire`, init runs **Unwind U1** (`kill(-pgid, SIGKILL)`, `unlinkat(parentfd, sock_name, 0)`, keep `parentfd` `init_uid:init_gid 0555`, emit `Ctl::PoolExited`) and, for crash restart after backoff (not `RETIRE`), runs steps `S0`–`S7` of §4.8.3 from the top |
+| Restart / rebind | on master exit or `Ctl::Retire`, init runs **Unwind U1** (`kill(-pgid, SIGKILL)`, `remove_entry(parentfd, sock_name)`, keep `parentfd` `init_uid:init_gid 0511`, emit `Ctl::PoolExited`) and, for crash restart after backoff (not `RETIRE`), runs steps `S0`–`S7` of §4.8.3 from the top |
 | Cold start / readiness | `capacity` stays `Busy` until `Ctl::PoolReady { route, sock_dev, sock_ino }` arrives; `ensure_ready` waits up to 5 s for it, then `503` + `Retry-After: 1`. The first request therefore waits or gets a `503`, never a spurious `502`. At boot, init validates `php-fpm -t -y` for each FastCGI route in a forked `route_uid` child before opening any bind window, so a missing `php-fpm` binary or invalid pool config is an immediate **boot error** naming the route |
-| `dev` | no spawn, no uid change, one identity; `DevProbe` pins `parentfd` into `PinnedSocket` (`enforce_socket_inode = false`) at boot and hands it over via the §4.8.1 handoff |
+| `dev` | no uid change, one identity; who spawns/restarts the pool is `MB.3.9.3`, and the socket is the derived `<run_root>/fastcgi/<route_index>/fpm.sock`; `DevProbe` pins `parentfd` into `PinnedSocket` (`enforce_socket_inode = false`, §4.8.1) at boot and hands it over via the §4.8.1 handoff |
 | `--learn` | the pool's stderr is attributed to the route by init's pipe label, exactly as a view's |
 
 **`render_pool_conf` — the one public renderer.** It is a pure function of std types (no
@@ -1102,7 +1361,13 @@ pub struct PoolConf<'a> {
     pub workers: u32,
     pub max_requests: u32,
     pub request_timeout: Duration,
-    pub listen: &'a str,
+    /// The derived pool directory's parent (`<runtime>`) and the route index: the renderer
+    /// builds `listen=<runtime>/fastcgi/<route_index>/fpm.sock` itself. The fixed suffix is
+    /// spelled in four places (`R3`, `B2`, `render_pool_conf`, `check_fastcgi_leaf`), and **no**
+    /// caller ever supplies a path — each takes `(runtime|run_root, route_index)`, so drift is a
+    /// literal typo in tests, not a value a manifest can reach.
+    pub runtime: &'a Path,
+    pub route_index: u32,
     pub entry: &'a str,
     pub env: &'a BTreeMap<String, String>,
 }
@@ -1110,7 +1375,11 @@ pub struct PoolConf<'a> {
 pub fn render_pool_conf(spec: &PoolConf<'_>) -> String;
 ```
 
-It lives in `supervise.rs` (`MB.3.6.3.2`), which is `pub mod` only so
+Every interpolated value goes through one `write_ini_value` helper that quotes/escapes it
+(php-fpm value syntax) — for **keys as well as values** — and refuses either containing
+`\n`/`\r`/NUL, so `manifest_dir` in `chdir=`/`open_basedir=` and an `env[NAME]` key cannot inject a
+second directive (S-5). It lives in `supervise.rs`
+(`MB.3.6.3.2`), which is `pub mod` only so
 `blastit::supervise::{render_pool_conf, PoolConf}` are reachable; `Parts`, `Supervisor` and
 `Supervisor::new` stay `pub(crate)`. `MB.3.6.3.2`'s acceptance runs
 `cargo clippy -p blastit --all-targets --locked -- -D warnings`, so the leaf that adds the
@@ -1118,30 +1387,106 @@ function is the leaf that proves it lint-clean.
 
 #### 4.8.3 Normative pool socket lifecycle, syscall invariants and unwind matrix
 
-`php-fpm` (compiled without `libsystemd`, as in `php:8.4-fpm-alpine`) always `bind(2)`s its
-configured absolute `listen` path itself (`fpm_sockets.c`); Blastit never calls a
+`php-fpm` (compiled without `libsystemd`, as in `php:8.4-fpm-alpine`) always `bind(2)`s the
+path in its generated pool file's `listen=` line itself (`fpm_sockets.c`), and that line is
+**always** the derived `R3` path — `<runtime>/fastcgi/<route_index>/fpm.sock`, a value no
+manifest byte can reach. Blastit never calls a
 **caller-path-resolved** `chown`, `chmod`, `unlink`, `open` or `connect`: every operation is
 on `parentfd` (`*at` with `AT_SYMLINK_NOFOLLOW`), or the one descriptor-derived mode change
 `chmod("/proc/self/fd/<sockfd>")` on an `O_PATH` fd whose inode was just verified (`S5`). Safety holds by combining **non-route-writable
 ancestors from `/` to `parentfd`** (so `php-fpm`'s own path walk cannot be redirected by any
 route uid) with **fd/inode-only operations on `parentfd`** and **post-freeze `(st_dev, st_ino)`
-verification**:
+verification**. Because `<runtime>` is blastit's own non-route-writable directory and
+`<runtime>/fastcgi/<route_index>` is created by init, the ancestor rule is *satisfied by
+construction* rather than checked against an operator-chosen path — that is the whole point
+of deriving the socket, and it is why `B2` no longer has to police `manifest_dir`:
 
 | Step | Exact syscall(s) & flags | Caller | Invariant preserved / race closed | Failure action & residual state on disk |
 |---|---|---|---|---|
-| **B1** Anchor | `fstat` walk from `/` to `manifest_dir`; `manifest_dirfd = open(manifest_dir, O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC)`; then `fstat(manifest_dirfd)` and `lstat(manifest_dir)` must agree on `(st_dev, st_ino)`, `S_ISDIR` must hold, `S_ISLNK` must not, and `readlink("/proc/self/fd/<manifest_dirfd>")` must be an absolute path (never a `(deleted)` suffix) | `init` (boot, pre-fork) | Above `manifest_dir`, every ancestor satisfies `ARCHITECTURE.md` §5.3's sticky-bit rule (non-route-writable, or `+t` with non-route-owned child); anchors relative walk so `php-fpm`'s absolute `bind()` cannot be redirected above `manifest_dir`. `O_NOFOLLOW` + the `lstat` inode equality enforce "`manifest_dir` itself is not a symlink"; intermediate components above it stay operator-controlled and are covered only by the sticky-bit rule | Boot error naming offending path, `exit 1`; nothing created |
-| **B2** Resolve `parentfd` | Walk `rel_parent` segments from `manifest_dirfd` via `openat2(cur, seg, O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC, RESOLVE_BENEATH\|RESOLVE_NO_SYMLINKS\|RESOLVE_NO_MAGICLINKS)` (per-segment `openat(…, O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC)` fallback on `ENOSYS`); if final leaf is `ENOENT` in production, `mkdirat(penultimate_fd, leaf, 0o555)` then open; `fstat` every segment | `init` (boot, pre-fork) | Closes symlink/magic-link traversal; requires `manifest_dir` (already proven non-symlink by `B1`) **and every segment below it through `parentfd`** to be non-symlink, not writable by **any** route uid/gid (`st_uid` outside `uid_base+1000..+routes`, `(mode & 0o002)==0`, `(mode & 0o020)==0` if `st_gid` is a route gid), and `parentfd` `(parent_dev, parent_ino)` distinct from `manifest_dirfd`, any `static.root` (or beneath), any `entry` ancestor, and any other route's `parentfd`. Opened `O_RDONLY\|O_DIRECTORY` (never `O_PATH`, where `fchmod` is `EBADF`) | `FastCgiListenParentInvalid` naming route + manifest line, `exit 1` (best-effort `unlinkat(AT_REMOVEDIR)` if B2 created an empty leaf); zero processes, zero sockets |
-| **B3** Boot freeze & pin | `fchownat(parentfd, c"", init_uid, init_gid, AT_EMPTY_PATH)` → `fchmodat(parentfd, c".", 0o555, 0)`; `fstatat(parentfd, sock_name, AT_SYMLINK_NOFOLLOW)` (`ENOENT` ok; stale `init`/`scheduler`/`route` `S_ISSOCK` → `unlinkat(parentfd, sock_name, 0)`; else error); hand `parentfd` to stage 1 as the internal argv entry `--fastcgi-parent-fd=<route>:<n>` (§4.8.1) and share one `Arc<OwnedFd>` per route between `SchedulerConfig.pinned_sockets` and init's per-route pool state (kept for the process lifetime), closed in `http`/`dbproxy`/`view`/`pool` | `init` (boot, pre-fork) | Any `EPERM`/error on `fchownat`/`fchmodat` exits `1` naming `CAP_CHOWN`/`CAP_FOWNER` (never a silent runtime `503`). Locks `parentfd` `init_uid:init_gid 0555` empty of sockets before any untrusted process exists. The descriptor crosses the stage-0→stage-1 `execve` exactly once, as an argv number with `FD_CLOEXEC` cleared for that `execve` and re-set in stage 1 before any fork, so no later `execve` (view, `php-fpm -t`, `php-fpm -F`) inherits it | Boot error naming capability or foreign entry at `sock_name`, `exit 1`; nothing usable left on disk |
-| **S0** Config test | Render `<runtime>/views/<uid>/php-fpm.conf` (`0600`) + `tmp/` (`0700`); fork a `route_uid` child running `php-fpm -t -y <conf>` (creates no socket/pidfile) through the §4.8.2 `ChildIo` literal (`keep: vec![]`, only stdio) — `close_fds_except` leaves only fd 0/1/2, so **`ctl.chan`, `parentfd`, the events pipes and every `BLASTIT_CHECK_*` observation fd are closed before the `execve`** — then `drop_privileges(route_uid)`, `harden_child(Signal::KILL)`, `SeccompRole::View { egress }`, `set_dumpable(false)`, exactly S3's sequence | `init` (boot & pre-spawn) | Validates the `php-fpm` binary and pool directives **before** opening the bind window (`parentfd` stays `0555`); the app-controlled binary never holds init's end of `ctl.chan`, so it cannot forge `PoolSpawned`/`PoolReady`/`PoolExited` | Boot error (`exit 1`) at startup, or spawn failure (`parentfd` untouched `init_uid:init_gid 0555`, `Busy` → `503`). Asserted by `critical_fastcgi_pool::config_test_and_pool_child_exec_with_only_stdio`: the fake `php-fpm` helper's first calls are `fcntl(3, F_GETFD)` and `read(3, …)`, both of which must return `EBADF`, and it scans `/proc/self/fd` for any target equal to the pinned parent path or matching `socket:[<ino>]`; the exact `{0,1,2}` set is **not** asserted because a wrapper's own script fd and the scanning child's directory handle make it unobservable |
-| **S1** Pre-clean | If a previous pool existed: `kill(-old_pgid, SIGKILL)` then `waitpid(-old_pgid, WNOHANG)` until `ECHILD` (bounded 100 ms; not `ECHILD` → **Unwind U1**, the window never opens). Then `fstat(parentfd)` asserts `(st_dev, st_ino) == (parent_dev, parent_ino)`; `unlinkat(parentfd, sock_name, 0)` (`ENOENT` ok) | `init` (`spawn_pool`) | Confirms pinned directory inode and clears any stale entry before granting write permission; no live task of the old pgid can race the bind window | **Unwind U1** |
+| **B1** Anchor | `fstat` walk from `/` to `<runtime>`; `runtimefd = open(<runtime>, O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC)`; then `fstat(runtimefd)` and `lstat(<runtime>)` must agree on `(st_dev, st_ino)`, `S_ISDIR`, `!S_ISLNK`, and `readlink("/proc/self/fd/<runtimefd>")` must be an absolute path (never a `(deleted)` suffix) | `init` (boot, pre-fork) | `<runtime>` is the tree blastit already creates: root-owned (`0`) `0755`, **not** `0700` — `blastit-sys::sock::make_private_dir`'s `create_parents` mkdirs every missing parent `0755` and the shipped `/run/blastit` must stay `0755` so a `route_uid` can path-walk into its own `views/<uid>` (`sock.rs:452-454,497-519`). B1 therefore requires, in this order: no segment from `/` to `<runtime>` is writable by any route uid/gid (`ARCHITECTURE.md` §5.3's sticky-bit rule); `<runtime>` is **traversable** (`o+x`) by every route uid, because `php-fpm` `bind(2)`s an absolute path beneath it; and `<runtime>` is not itself a route-owned directory. In `dev`/`check` the same predicate runs against `Dev::adopt`'s `0700` caller-owned root (`dev_learn.rs:180`), where owner and user coincide | Boot error naming the offending path, `exit 1`; nothing created |
+| **B2** Create & normalise `parentfd` | `mkdirat(runtimefd, "fastcgi", 0o711)` (`EEXIST` ok) → `fastcgifd = openat(runtimefd, "fastcgi", O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC)` → `fchownat(fastcgifd, c"", init_uid, init_gid, AT_EMPTY_PATH)` + `fchmodat(fastcgifd, c".", 0o711, 0)` → `mkdirat(fastcgifd, "<route_index>", 0o700)` (`EEXIST` ok) → `parentfd = openat2(fastcgifd, "<route_index>", O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC, RESOLVE_BENEATH\|RESOLVE_NO_SYMLINKS\|RESOLVE_NO_MAGICLINKS)` (per-segment `openat(…, O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC)` fallback on `ENOSYS`) → **normalise, then verify**: `fchownat(parentfd, c"", init_uid, init_gid, AT_EMPTY_PATH)` + `fchmodat(parentfd, c".", 0o700, 0)`, then `fstat(parentfd)` requires `S_ISDIR`, `!S_ISLNK`, `st_uid == init_uid`, `(st_mode & 0o777) == 0o700`, and `(st_dev, st_ino)` distinct from every other route's `parentfd` | `init` (boot, pre-fork) | The path is a pure function of the route index (`R3`): **no manifest segment exists**, so there is no symlink/magic-link input to traverse and no `manifest_dir`-ownership question. The `fastcgi` container is `init_uid:init_gid 0711`: **traverse-only for everyone else** (so `php-fpm`'s absolute path walk reaches `<i>`), writable by nobody but init (so no route can plant or rename an entry there), and not listable. Normalising before verifying is what makes the cycle **re-entrant**: a second boot over a preserved `<runtime>` finds `<i>` frozen at `0511` by `B3`/`S6` and must be able to bring it back to `0700` (init owns it; `CAP_CHOWN`/`CAP_FOWNER` as in `B3`) instead of failing boot forever. Opened `O_RDONLY\|O_DIRECTORY` (never `O_PATH`, where `fchmod` is `EBADF`) | Boot diagnostic naming the route and the derived path, `exit 1`; zero processes, zero sockets, nothing usable left |
+| **B3** Boot freeze & pin | `fchownat(parentfd, c"", init_uid, init_gid, AT_EMPTY_PATH)` → `fchmodat(parentfd, c".", 0o511, 0)`; **type-agnostic stale cleanup**: `fstatat(parentfd, sock_name, AT_SYMLINK_NOFOLLOW)` (`ENOENT` ok; any removable entry — socket, regular file, symlink, **empty directory** — is removed by `remove_entry(parentfd, sock_name)`, below, whose failure semantics are per-route and never `exit 1`); hand `parentfd` to stage 1 as the internal argv entry `--fastcgi-parent-fd=<route>:<n>` (§4.8.1) and share one `Arc<OwnedFd>` per route between `SchedulerConfig.pinned_sockets` and init's per-route pool state (kept for the process lifetime), closed in `http`/`dbproxy`/`view`/`pool` | `init` (boot, pre-fork) | Any `EPERM`/error on `fchownat`/`fchmodat` exits `1` naming `CAP_CHOWN`/`CAP_FOWNER` (never a silent runtime `503`). Locks `parentfd` `init_uid:init_gid 0511` (owner `r-x`, everyone else `--x`: traversable by the scheduler's `/proc/self/fd` lookup, not listable, not writable) and empties it before any untrusted process exists. The descriptor crosses the stage-0→stage-1 `execve` exactly once, as an argv number with `FD_CLOEXEC` cleared for that `execve` and re-set in stage 1 before any fork, so no later `execve` (view, `php-fpm -t`, `php-fpm -F`) inherits it | A `fchownat`/`fchmodat` `EPERM` is a boot error naming `CAP_CHOWN`/`CAP_FOWNER`, `exit 1`. A **leaf that cannot be freed** is **not**: `remove_entry`'s `ENOTEMPTY`/occupied-rename-slot outcome skips this route's pool (a boot **warning** naming the route and the entry; the route stays `Busy` → `503` + `Retry-After: 1`) and `B3` continues with the other routes — one compromised worker never bricks the boot (§4.8.3, "A leaf that cannot be freed never fails the boot") |
+| **S0** Config test | Render `<runtime>/views/<uid>/php-fpm.conf` (`0600`) + `tmp/` (`0700`); fork a `route_uid` child running `php-fpm -t -y <conf>` (creates no socket/pidfile) through the §4.8.2 `ChildIo` literal (`keep: vec![]`, only stdio) — `close_fds_except` leaves only fd 0/1/2, so **`ctl.chan`, `parentfd`, the events pipes and every `BLASTIT_CHECK_*` observation fd are closed before the `execve`** — then `drop_privileges(route_uid)`, `harden_child(Signal::KILL)`, `SeccompRole::View { egress }`, `set_dumpable(false)`, exactly S3's sequence | `init` (boot & pre-spawn) | Validates the `php-fpm` binary and pool directives **before** opening the bind window (`parentfd` stays `0511`); the app-controlled binary never holds init's end of `ctl.chan`, so it cannot forge `PoolSpawned`/`PoolReady`/`PoolExited` | Boot error (`exit 1`) at startup, or spawn failure (`parentfd` untouched `init_uid:init_gid 0511`, `Busy` → `503`). Asserted by `critical_fastcgi_pool::config_test_and_pool_child_exec_with_only_stdio`: the fake `php-fpm` helper's first calls are `fcntl(3, F_GETFD)` and `read(3, …)`, both of which must return `EBADF`, and it scans `/proc/self/fd` for any target equal to the pinned parent path or matching `socket:[<ino>]`; the exact `{0,1,2}` set is **not** asserted because a wrapper's own script fd and the scanning child's directory handle make it unobservable |
+| **S1** Pre-clean | If a previous pool existed: `kill(-old_pgid, SIGKILL)` then `waitpid(-old_pgid, WNOHANG)` until `ECHILD` (bounded 100 ms; not `ECHILD` → **Unwind U1**, the window never opens). Then `fstat(parentfd)` asserts `(st_dev, st_ino) == (parent_dev, parent_ino)`; `remove_entry(parentfd, sock_name)` (`ENOENT` ok) | `init` (`spawn_pool`) | Confirms pinned directory inode and clears any stale entry before granting write permission; no live task of the old pgid can race the bind window | **Unwind U1** |
 | **S2** Bind window | `fchownat(parentfd, c"", route_uid, route_gid, AT_EMPTY_PATH)` → `fchmodat(parentfd, c".", 0o755, 0)` | `init` (`spawn_pool`) | Opens only after `S1` reached `ECHILD`. Grants `wx` on `parentfd` solely to this route's `route_uid:route_gid` (never `o+w`, never another route) while `RouteState.ready == false` (`Busy`), so scheduler never calls `connect()` during `S2`–`S6`. A surviving `setsid()` escapee is the **same uid**, so DAC cannot exclude it from this window: the exclusion is `S4`/`S6`'s pgid-membership check | **Unwind U1** |
-| **S3** Spawn & poll | Fork via `crate::forking::fork(true)` (the GIL is held in `Supervisor::run(py)`; same pattern as `zygote::fork_view`), then the child runs the §4.8.2 `ChildIo` literal (`keep: vec![]`; only fd 0/1/2 survive; the pool needs only its own listening socket, so `ctl.chan` and `parentfd` are closed by `close_fds_except`), `setpgid(0,0)` in the child **and** `setpgid(child_pid, child_pid)` in the parent right after the fork (`EACCES` = already set, ignored), `RLIMIT_NPROC=workers+2`, drop caps/uid/gid, `SeccompRole::View { egress }`, `execve` `php-fpm -F -y`; emit `Ctl::PoolSpawned { route, pid }`; non-blocking event-loop poll of `fstatat(parentfd, sock_name, AT_SYMLINK_NOFOLLOW)` + `waitpid(pid, WNOHANG)` up to 5 s | `init` (`spawn_pool`) | Master + workers isolated in `-pgid` with zero caps/secrets and no `ctl.chan`/`parentfd`; the parent-side `setpgid` closes the fork→`setpgid` window in which `kill(-pgid)` would be `ESRCH`; non-blocking poll never stalls PID 1 reaping or other routes | Early exit or 5 s timeout → **Unwind U1** |
+| **S3** Spawn & poll | Fork via `crate::forking::fork(true)` (the GIL is held in `Supervisor::run(py)`; same pattern as `zygote::fork_view`), then the child runs the §4.8.2 `ChildIo` literal (`keep: vec![]`; only fd 0/1/2 survive; the pool needs only its own listening socket, so `ctl.chan` and `parentfd` are closed by `close_fds_except`), `setpgid(0,0)` in the child **and** `setpgid(child_pid, child_pid)` in the parent right after the fork (`EACCES` = already set, ignored), `RLIMIT_NPROC=<resolved>+2`, drop caps/uid/gid, `SeccompRole::View { egress }`, `execve` `php-fpm -F -y`; emit `Ctl::PoolSpawned { route, pid }`; non-blocking event-loop poll of `fstatat(parentfd, sock_name, AT_SYMLINK_NOFOLLOW)` + `waitpid(pid, WNOHANG)` up to 5 s | `init` (`spawn_pool`) | Master + workers isolated in `-pgid` with zero caps/secrets and no `ctl.chan`/`parentfd`; the parent-side `setpgid` closes the fork→`setpgid` window in which `kill(-pgid)` would be `ESRCH`; non-blocking poll never stalls PID 1 reaping or other routes | Early exit or 5 s timeout → **Unwind U1** |
 | **S4** Verify by inode | `st1 = fstatat(parentfd, sock_name, AT_SYMLINK_NOFOLLOW)`: require `S_ISSOCK(st1.st_mode)`, `st1.st_uid == route_uid`, `st1.st_gid == route_gid`, `st1.st_nlink == 1`; **and** require `(st1.st_dev, st1.st_ino)` to appear as `socket:[<ino>]` in the fd table of at least one task whose `/proc/<pid>/stat` `pgrp` (field 5, parsed after the final `)`) equals `master_pid` (the new pgid; bounded `/proc` scan, no per-request cost); record `(sock_dev, sock_ino) = (st1.st_dev, st1.st_ino)` | `init` (`spawn_pool`) | Rejects planted symlinks, regular files, FIFOs, devices, foreign-uid entries and hardlinked sockets (`st_nlink > 1`) without following symlinks, **and rejects an escapee's rebind**: a socket held only by a `setsid()` process outside the new pgid is never recorded, so it can never be published | **Unwind U1** |
 | **S5** Chown/chmod `0600` | `fchownat(parentfd, sock_name, scheduler_uid, scheduler_gid, AT_SYMLINK_NOFOLLOW)` → `fchmodat(parentfd, sock_name, 0o600, AT_SYMLINK_NOFOLLOW)` (on `EOPNOTSUPP`: `sockfd = openat(parentfd, sock_name, O_PATH\|O_NOFOLLOW\|O_CLOEXEC)`, `fstat(sockfd)` must match `(sock_dev, sock_ino)` + `S_ISSOCK`, `chmod("/proc/self/fd/<sockfd>", 0o600)`, `close(sockfd)`) | `init` (`spawn_pool`) | Closes the `S4`→`S5` symlink-swap TOCTOU race while `route_uid` still writes `parentfd`; makes the socket `scheduler_uid:scheduler_gid 0600` so neither `route_uid` nor any other route uid can `connect()` | **Unwind U1** |
-| **S6** Re-freeze & re-verify | `fchownat(parentfd, c"", init_uid, init_gid, AT_EMPTY_PATH)` → `fchmodat(parentfd, c".", 0o555, 0)`; `st2 = fstatat(parentfd, sock_name, AT_SYMLINK_NOFOLLOW)` must match `(sock_dev, sock_ino)`, `S_ISSOCK`, `st_uid == scheduler_uid`, `st_gid == scheduler_gid`, `st_nlink == 1`, `(st_mode & 0o777) == 0o600`; **and** re-run `S4`'s pgid-membership check on `(sock_dev, sock_ino)` after the freeze | `init` (`spawn_pool`) | Restoring **both** owner and mode revokes `route_uid`'s `chmod`/`unlink`/`rename`/`creat` rights permanently; post-freeze `st2` closes the `S5`→`S6` replacement race where `route_uid` swapped the socket one instant before the freeze; the re-run membership check closes a swap by an escapee in the same window | **Unwind U1** |
+| **S6** Re-freeze & re-verify | `fchownat(parentfd, c"", init_uid, init_gid, AT_EMPTY_PATH)` → `fchmodat(parentfd, c".", 0o511, 0)`; `st2 = fstatat(parentfd, sock_name, AT_SYMLINK_NOFOLLOW)` must match `(sock_dev, sock_ino)`, `S_ISSOCK`, `st_uid == scheduler_uid`, `st_gid == scheduler_gid`, `st_nlink == 1`, `(st_mode & 0o777) == 0o600`; **and** re-run `S4`'s pgid-membership check on `(sock_dev, sock_ino)` after the freeze | `init` (`spawn_pool`) | Restoring **both** owner and mode revokes `route_uid`'s `chmod`/`unlink`/`rename`/`creat` rights permanently; post-freeze `st2` closes the `S5`→`S6` replacement race where `route_uid` swapped the socket one instant before the freeze; the re-run membership check closes a swap by an escapee in the same window | **Unwind U1** |
 | **S7** Publish | Send `Ctl::PoolReady { route, sock_dev, sock_ino }` (`0x46`) over `ctl.chan`; `scheduler::on_ctl` checks `executor == Pool` and active `PoolSpawned`, stores `(sock_dev, sock_ino)` in `PinnedSocket`, then sets `RouteState.set_ready(true)` | `init` → `scheduler` | Unspoofable: `ctl.chan` is an unnamed `socketpair` held **only** by `init` and `scheduler` — `S0` and `S3` fork through `child::ChildIo`, whose `close_fds_except` leaves only stdio, so no `route_uid` process (including the app-controlled `php-fpm` binary) ever holds an end — and cannot arrive early (emitted only at `S7`, gated on `PoolSpawned`) | Channel close → container teardown (`ARCHITECTURE.md` §8) |
-| **U1** Unwind | If forked: `kill(-pgid, SIGKILL)` + reap (`SIGTERM`→grace→`SIGKILL` on `DRAIN`); **then freeze first** — `fchownat(parentfd, c"", init_uid, init_gid, AT_EMPTY_PATH)` + `fchmodat(parentfd, c".", 0o555, 0)`; **then** `unlinkat(parentfd, sock_name, 0)` (`ENOENT` ok; succeeds in `0555` because init holds `CAP_DAC_OVERRIDE`, the capability the boot freeze already requires); emit `Ctl::PoolExited` (never `PoolReady`) | `init` | Leaves **nothing usable**: empty `init_uid:init_gid 0555` directory, zero connectable socket, `RouteState` `Busy` (`503` + `Retry-After: 1`). Freeze-before-unlink is deliberate: unlink-then-freeze leaves a `0755 route_uid` window in which a `setsid()` escapee could `bind` again. A failed group kill (`ESRCH`/`EPERM`) **never skips** the rest; an escapee keeps at most an unlinked socket inode and cannot rebind in `0555` | If `fchownat`/`fchmodat` itself fails on unwind, init exits non-zero (fail-fast container abort) |
+| **U1** Unwind | If forked: `kill(-pgid, SIGKILL)` + reap (`SIGTERM`→grace→`SIGKILL` on `DRAIN`); **then freeze first** — `fchownat(parentfd, c"", init_uid, init_gid, AT_EMPTY_PATH)` + `fchmodat(parentfd, c".", 0o511, 0)`; **then** `remove_entry(parentfd, sock_name)` (`ENOENT` ok; in `0511` the owner's `w` is gone, so the unlink/rename succeeds **only** because init holds `CAP_DAC_OVERRIDE`, the capability the boot freeze already requires); emit `Ctl::PoolExited` (never `PoolReady`) | `init` | Leaves **nothing usable**: `init_uid:init_gid 0511` directory whose leaf name is free (an inert `stale.<pid>` from a rename-aside may remain, and that is fine — nothing connects to it), zero connectable socket, `RouteState` `Busy` (`503` + `Retry-After: 1`). Freeze-before-unlink is deliberate: unlink-then-freeze leaves a `0755 route_uid` window in which a `setsid()` escapee could `bind` again. A failed group kill (`ESRCH`/`EPERM`) **never skips** the rest; an escapee keeps at most an unlinked socket inode and cannot rebind in `0511` | If `fchownat`/`fchmodat` itself fails on unwind, init exits non-zero (fail-fast container abort) |
 | **C1** Connect | `fstat(parent)` == `(parent_dev, parent_ino)`; `fstatat(parent, name, AT_SYMLINK_NOFOLLOW)` == `S_ISSOCK`, `expected_uid`, `0600` (prod), and `bound_inode` (`(sock_dev, sock_ino)` when `enforce_socket_inode`); `connect("/proc/self/fd/<parent>/<name>")`; verify `SO_PEERCRED` against the exact accepted set — production `{route_uid:route_gid}` (`peer_uid = RouteSpec.uid`, `peer_gid = route_gid`; the listening `php-fpm` master is the socket creator, and `SO_PEERCRED` reports the creator), `dev`/`check` `{invoking_uid:invoking_gid}`; `scheduler_uid` is rejected in production and there is no gVisor tolerance | `scheduler` (`FastCgiUpstream`) | Proves directory inode, socket inode, DAC owner/mode and peer credentials before sending `BEGIN_REQUEST`; `parent` is the descriptor stage 0 handed over as `--fastcgi-parent-fd` (§4.8.1) and is never re-opened; `SeccompRole::Scheduler` forbids `AF_INET*` and `bind`/`listen` | Pre-connect `ENOENT`/`ECONNREFUSED` → `Unavailable` (`503` + respawn); inode/owner/`SO_PEERCRED` mismatch → `Fault` (`502`); foreign-uid peer covered by `critical_fastcgi_dispatch::foreign_uid_peer_is_fault_502` (`MB.3.6.2.2`) |
+
+**The three modes, and who must traverse what.** Every process that reaches
+`<runtime>/fastcgi/<i>/fpm.sock` does so by a different right, and one mode cannot serve all
+three:
+
+| Path | Steady owner:mode | Why |
+|---|---|---|
+| `<runtime>` (`/run/blastit`) | `0:0 0755` (the shipped tree) | `php-fpm`'s **absolute** path walk needs `x` from every ancestor of `fpm.sock`, including `<runtime>`; `blastit-sys::sock::make_private_dir`'s `create_parents` already mkdirs it `0755` and keeps it out of any route's hands (`sock.rs:452-454,497-519`). It is not writable by any route uid, so the walk cannot be redirected — that is the invariant, not `0700` |
+| `<runtime>/fastcgi` | `init_uid:init_gid 0711` | traversable by `php-fpm` (needed) and by the scheduler (not needed — it holds `<i>` directly), writable by **nobody but init** (so no route can plant `fastcgi2` or rename `<i>`), not listable |
+| `<runtime>/fastcgi/<i>` | `init_uid:init_gid 0511` | `x` for the scheduler's `/proc/self/fd/<parentfd>/fpm.sock` lookup, no `r` (no `readdir`: route count/layout is not public), no `w` outside the bind window. Created `0700`, `0755 route_uid:route_gid` only during `S2`–`S6`, restored `0511` by `S6`/`U1` |
+
+`dev`/`check` run a **single-uid variant** with four named deltas from the production sequence,
+because every identity step is a no-op for a pool that already runs as the caller (and some would
+fail: `drop_privileges(euid)` calls `setgroups(0, NULL)`, which an unprivileged uid cannot do —
+`privs.rs:418-438`):
+
+| Step | Production | `dev`/`check` variant |
+|---|---|---|
+| `S0` / `S3` | fork a `route_uid` child, `drop_privileges(route_uid)`, then execute | fork as the invoking uid and **skip `drop_privileges`**; `harden_child`, `install_filter`, `set_dumpable(false)` still run |
+| `S2` / `S5` / `S6` | chown the parent to `route_uid`, chown the socket to the scheduler, freeze `init 0511` | **skipped**: the pool binds as the uid that already owns `<run_root>/fastcgi/<i>` (`0700`), the socket is `0600` that uid because the generated pool file still sets `listen.mode=0600` (§4.8.2), and nothing is frozen |
+| `S1`, `S4`, `S7` | as written | as written (`S4`'s pgid check still runs) |
+| `U1` | kill, **freeze `0511`**, remove the leaf | kill, **no freeze**, `remove_entry` — it runs as the **owner** with `w` on the directory |
+
+`DevProbe`'s predicate is therefore exactly `0700` + invoking-uid owner; a `0511` freeze in
+`dev` would both fail that predicate and make the retire path `EACCES`. The `0511` steady mode,
+the `0711` container, `S2`/`S5`/`S6` and the `drop_privileges` call are **production-only**.
+
+`remove_entry(parentfd, name)` is the one removal helper used by `B3`, `S1` and `U1` (owned by
+`MB.3.6.3.1`, with the unprivileged unit `planted_entry_at_the_leaf_is_removed`: socket,
+symlink, regular file, empty directory, **non-empty directory**, `ENOENT`): it tries
+`unlinkat(parentfd, name, 0)`; on `EISDIR` retries with `AT_REMOVEDIR`; on `ENOTEMPTY` — an
+escapee that planted a directory *with a child* inside it during the `S2` window — it does
+**not** recurse: it atomically renames the entry aside
+(`renameat(parentfd, name, parentfd, "stale.<pid>")`, a single `renameat` on `parentfd`, no
+traversal of the stale tree), trying `stale.<pid>.1` … `stale.<pid>.7` when the destination is
+occupied, which frees the leaf name for the fresh bind and leaves an inert entry nothing can
+connect to; `ENOENT` is success.
+
+**A leaf that cannot be freed never fails the boot.** If all eight rename slots are occupied the
+leaf name is still taken, so that **route's pool cannot bind** — and the outcome is exactly the
+existing one for a pool that cannot start: `U1` runs, `Ctl::PoolExited` is emitted, the route
+stays `Busy` (`503` + `Retry-After: 1`), and a boot **warning** names the route and the entry.
+`B3` continues with the other routes and the process serves. One compromised worker must never be
+able to brick every other route on a preserved `<runtime>` — that is the whole rule, and its oracle
+is `eight_planted_stale_entries_leave_only_that_route_503` (a temp `parentfd` with eight
+`stale.*` entries plus a `fpm.sock`: `remove_entry` frees nothing, the **only** outcome is a
+warning, that route's `PoolExited`/`Busy`/`503` + `Retry-After: 1`, and every other route still
+boots and serves; no root needed); empty `stale.*` entries are removed
+opportunistically (`AT_REMOVEDIR`, `ENOTEMPTY` ignored) and a non-empty one is left inert with no
+ceiling that can turn into an `exit 1`. It is what makes a hostile leftover at the leaf a *cleaned* boot
+rather than a wedged one: without it, `unlinkat(…, 0)` on a planted directory returns
+`EISDIR`, `B3`'s old "else error" exits `1`, and — with a preserved `<runtime>` — every
+route fails boot behind one route's compromised worker.
+
+**Dev/check ordering (this document) vs who starts the pool (`MB.3.9.3`).** The parent must
+exist before `php-fpm` binds and the leaf can only be checked after it has bound, so the probe
+is two-phased (`parent` then `check_leaf`, §4.8.1) and `dev`/`check` run phase 1 before the
+pool and phase 2 after it. `check`'s own preflight needs no pool: it runs phase 1, creates
+`<CheckRoot>/dev/fastcgi/<i>` and passes those directory fds to its child `dev`
+(`BLASTIT_CHECK_POOL_PARENT_FD`, unchanged) — one resolution, no circular handoff. **Who
+starts the pool in `dev` and in `check`'s child, and where phase 2 is invoked, is
+`MB.3.9.3`'s** amendment.
+
+**What this amendment moved, and what it did not.** Only the **provenance** of `parentfd`
+changed: `B1`/`B2` now anchor on blastit's runtime directory and create the per-route
+directory themselves, instead of resolving a manifest-relative parent from `manifest_dirfd`.
+`S0`–`S7`, `U1` and `C1` are unchanged — same freeze, same bind window, same pgid-membership
+check, same `0600` chown to the scheduler, same `PoolReady` inode, same connect-time
+verification — because they were already written against `parentfd` and a leaf name, never
+against a manifest path. That is why deleting the key costs no socket invariant, and why the
+`fastcgi` container is the only genuinely new directory the amendment introduces.
 
 **Integration-test seam (`MB.3.6.3.2`).** `Supervisor::run` returns `!`, `on_ctl`/`spawn_pool`
 are private and `Parts` holds private types (`SignalFd`/`SignalMask`), so the protected pool
@@ -1439,13 +1784,17 @@ double, never a pool.
 - **The pool receives a fixed param stream**, one script path and a body under credit.
   `security.limit_extensions = .php`, the pinned `SCRIPT_FILENAME`, the `openat2`-checked
   entry and `cgi.fix_pathinfo = 0` close the truncation class.
-- **The pool runs as the route's uid**, socket `0600` scheduler-owned inside a dedicated
-  `parentfd` (`O_RDONLY|O_DIRECTORY`) that init resolved from `manifest_dirfd` at boot
-  before any route process existed with `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)`,
-  verified non-symlink, with `B1`'s `ARCHITECTURE.md` §5.3 sticky-bit rule above
-  `manifest_dir` and non-route-writable segments from `manifest_dir` down to `parentfd`
-  (a route that owns `manifest_dir` can rename the parent: the pinned descriptor makes that
-  a self-DoS `503`, never a redirect), and restored to `init_uid:init_gid 0555` (both owner
+- **The pool runs as the route's uid**, on a socket `0600` scheduler-owned inside a derived
+  per-route `parentfd` (`O_RDONLY|O_DIRECTORY`) that init **creates and pins itself** at boot
+  before any route process exists — `<runtime>/fastcgi/<route_index>`, a pure function of
+  the route index with no manifest segment in it (`R3`) — with `B1`'s `ARCHITECTURE.md` §5.3
+  sticky-bit rule above `<runtime>`, a `fastcgi` container `init_uid:init_gid 0711`, and a per-route
+  directory `init_uid` `0700`→`0511` (§4.8.3). The
+  socket's path, name, parent, owner and mode are therefore **not steerable by the app's
+  configuration at all**: the pre-`MB.3.9.2` classes (two routes pointing at one pool, a
+  world-writable parent, a route-owned directory renamed under the pool) cannot be
+  expressed, rather than being policed. The parent is restored to `init_uid:init_gid 0511`
+  (both owner
   and mode, plus post-freeze socket inode re-verification) on both bind completion and every
   error path; a
   compromised pool gains only what that route's view already had and cannot reach or pivot
@@ -1513,7 +1862,7 @@ Every rejected option names the non-negotiable invariant that killed it:
 1. **Top-level `[fastcgi.<name>]`** — killed by **DX single-rule manifest grammar
    (`docs/frameworks/php.md`)**: the accepted page writes `[route.fastcgi]`; a named block
    adds a second indirection for zero config reduction (`ADR-0008` decision 2).
-2. **`[route.fastcgi].env`** — killed by **zero-secret-in-manifest & 3-key DX bar**:
+2. **`[route.fastcgi].env`** — killed by **zero-secret-in-manifest & 2-key DX bar**:
    `blastit.toml` holds no inline environment literals and the pool derives `env[…]` from
    init's already-swapped stage-1 environment.
 3. **Forward all params and filter `PHP_VALUE`** — killed by **worker-state isolation &
@@ -1528,13 +1877,14 @@ Every rejected option names the non-negotiable invariant that killed it:
 6. **Pre-binding the Unix listener in `init` via `LISTEN_FDS` (`systemd` socket
    activation)** — killed by **12-factor container portability**: upstream/Alpine `php-fpm`
    (`php:8.4-fpm-alpine`) omits `--with-fpm-systemd` and unconditionally `unlink` + `bind`s
-   its configured `listen` path in `fpm_sockets.c`, failing `EACCES` on a frozen `0555`
-   directory; §4.8.3's pinned-`parentfd` bind-then-freeze works on every `php-fpm` build.
-7. **Freezing `parentfd` with `chmod 0555` while leaving `st_uid == route_uid`, or opening
+   the path in its generated pool file in `fpm_sockets.c`, failing `EACCES` on a frozen
+   non-writable directory; §4.8.3's pinned-`parentfd` bind-then-freeze works on every `php-fpm`
+   build, and with a derived path (`R3`) the bind target is blastit's own directory.
+7. **Freezing `parentfd` with `chmod 0511` while leaving `st_uid == route_uid`, or opening
    `parentfd` with `O_PATH`** — killed by **DAC immutability & Linux syscall semantics
-   (`LESSONS.md` #34)**: the owner of a `0555` directory can `chmod(0755)` and replace the
+   (`LESSONS.md` #34)**: the owner of a `0511` directory can `chmod(0755)` and replace the
    socket at will, and `fchmod` on `O_PATH` fails with `EBADF`; `S6` restores `init_uid:init_gid`
-   **and** `0555` on an `O_RDONLY|O_DIRECTORY` fd.
+   **and** `0511` on an `O_RDONLY|O_DIRECTORY` fd.
 8. **A per-route relay process as the FastCGI client** — rejected for 0.2.1: keeps the
    scheduler socket-free but adds a sixth process per route and a second parser; allowing
    `socket(AF_UNIX)` while denying `AF_INET*` and `SYS_bind`/`SYS_listen` on
@@ -1550,6 +1900,23 @@ Every rejected option names the non-negotiable invariant that killed it:
 12. **Stream `raw` bodies to FastCGI** — killed by **FastCGI protocol completeness**:
     `php://input` ignores `STDIN` beyond `CONTENT_LENGTH` (`research/php-fastcgi-wire.md`
     §H), so FastCGI buffers up to `BLASTIT_MAX_BODY_BYTES`.
+13. **Keep a user-authored `listen` path (the 0.2.1 draft's third key)** — killed by
+    **DX-of-one-knob & blastit-owns-the-socket**: blastit spawns and supervises the pool, so
+    the socket is blastit's to name. A user path immediately creates three failure classes
+    the harness would have to police — two routes aimed at one pool (one route's identity
+    used by another), a socket mode the manifest could contradict (`listen.mode`), and a
+    parent the manifest could place anywhere writable — plus an ancestor-safety walk over
+    the repository (`manifest_dir` → parent) whose exploit surface was exactly the
+    `storage/framework -> /sentinel` pivot. A knob the developer cannot act on correctly is
+    a defect, not an option: the derived path is one line of code, needs no documentation,
+    and removes the class instead of guarding it (`MB.3.9.2`).
+14. **Keep `workers` as the pool's *own* separate budget** (a second admission number) —
+    killed by **one budget invariant**: the scheduler's global `slots < max_workers` gate is
+    the admission truth for every backend, and the per-route `RouteState` permit is the same
+    `view_worker_cap` shape WSGI already uses. A second budget would let a manifest raise
+    concurrency the scheduler will never grant, and a pool sized above its route permit
+    would only idle. `workers` survives **only** as a downward override inside the one
+    budget, which is why a value above it is a boot error rather than a clamp.
 
 ---
 
@@ -1559,13 +1926,13 @@ Every rejected option names the non-negotiable invariant that killed it:
 
 | Tier | Where | Proves |
 |---|---|---|
-| unit (pure) | `blastit-fastcgi` in-module + `critical_fastcgi_lockdown.rs` (`MB.3.4.1`, `MB.3.4.2`), `critical_fastcgi_manifest.rs` (`check_entry` `ENOSYS` refusal + reply-byte parser `O/U/N/S/R/M/I/T`) | `#![forbid(unsafe_code)]`, zero production deps (`cargo tree -p blastit-fastcgi -e normal`), record round-trip, name-value forms, `lockdown` rows, `cgi` head parser (`Status: 200..=599`, CTL + proxy-control header refusal, caps), the page's exact param stream |
+| unit (pure) | `blastit-fastcgi` in-module + `critical_fastcgi_lockdown.rs` (`MB.3.4.1`, `MB.3.4.2`), `critical_fastcgi_manifest.rs` (`check_entry` `ENOSYS` refusal + the **pure** `from_reply_byte` mapping `O/U/N/S/R/M/I/T`, which lives in `blastit-manifest::probe` so this crate can test it; the real forked timeout path is `MB.3.6.3.1`'s `requires-root` leg) | `#![forbid(unsafe_code)]`, zero production deps (`cargo tree -p blastit-fastcgi -e normal`), record round-trip, name-value forms, `lockdown` rows, `cgi` head parser (`Status: 200..=599`, CTL + proxy-control header refusal, caps), the page's exact param stream |
 | unit (contract) | `blastit-backend` in-module + `tests/conformance_table.rs` (`MB.9.1.1`, `MB.9.1.2`, `MB.9.4`) | `#![forbid(unsafe_code)]`, zero I/O in its own source (`crates/blastit-backend/src`), object safety + `Send`, registry/line errors, `Refusal` mapping, exact `IMPLEMENTATIONS` slice, fake double |
 | critical (protected, existing) | `critical_static_assets.rs`, `critical_static_resolve.rs`, `critical_rewrite.rs`, `critical_ingress_enforcement.rs`, `critical_static_manifest.rs`, `critical_static_cli.rs` | the ports and CLI branch order changed no protected behaviour — **unmodified** |
-| critical (new) | `critical_fastcgi_lockdown.rs` (`MB.3.4.2`), `critical_fastcgi_manifest.rs` (`MB.3.5.2`), `blastit-http/tests/critical_head_refusals.rs` (`MB.3.6.1.1`, new file), `critical_fastcgi_dispatch.rs` (`MB.3.6.2.2`), `critical_fastcgi_parent_fd.rs` (`MB.3.6.3.1`), `critical_fastcgi_pool.rs` (`MB.3.6.3.3`), `critical_fastcgi_learn.rs` (`MB.3.6.4.2`) | lockdown stream & builder guards; grammar/fatal messages; HTTP head refusals; session, credit, abort, `504` timeout, proxy-control `502`, non-UTF-8 & panic slot guard, post-`PoolReady` parent-rename sentinel test; parent-fd argv validation + `cli::parse` guard + the mixed-manifest view fd oracle (`/proc/<view_pid>/fd` holds neither the pinned parent inode nor init's `ctl.chan` inode); pool file, parent `openat2`/freeze/unwind; `dev` banner + `check`/`--learn` |
+| critical (new) | `critical_fastcgi_lockdown.rs` (`MB.3.4.2`), `critical_fastcgi_manifest.rs` (`MB.3.5.2`), `blastit-http/tests/critical_head_refusals.rs` (`MB.3.6.1.1`, new file), `critical_fastcgi_dispatch.rs` (`MB.3.6.2.2`), `critical_fastcgi_parent_fd.rs` (`MB.3.6.3.1`), `critical_fastcgi_pool.rs` (`MB.3.6.3.3`), `critical_fastcgi_dev_pool.rs` (`MB.3.9.5`), `critical_fastcgi_learn.rs` (`MB.3.6.4.2`) | lockdown stream & builder guards; grammar/fatal messages; HTTP head refusals; session, credit, abort, `504` timeout, proxy-control `502`, non-UTF-8 & panic slot guard, post-`PoolReady` parent-rename sentinel test; parent-fd argv validation + `cli::parse` guard + the mixed-manifest view fd oracle (`/proc/<view_pid>/fd` holds neither the pinned parent inode nor init's `ctl.chan` inode); pool file, parent `openat2`/freeze/unwind; `dev` banner + `check`/`--learn` |
 | conformance | five drivers (§4.11) | one table + exact `IMPLEMENTATIONS` slice + explicit `Makefile` `--test` gate for static, WSGI, FastCGI (codec + session) and fake |
 | docs | `docs_fences.rs` (`FILES` bumped `7 → 8` adding `docs/frameworks/php.md` for the TOML fence in `MB.3.5.1`), `e2e/php2shell.py` (non-TOML `curl`/`check`/`--json` fences in `MB.3.7`; the whole `--json` document is asserted, and the Deployments `blastit --preset compose-traefik` fence is explicitly exempt) | the page parses and its commands replay |
-| e2e | `e2e/php2shell.py`, `e2e/php/**`, `e2e/rootless/run.py` (`MB.3.7`) | the page's fences, every client CVE probe (`E1`–`E17`, `E19`–`E25`), production multi-uid pool isolation + pre-resolution & post-`PoolReady` parent-pivot exploit reproductions |
+| e2e | `e2e/php2shell.py`, `e2e/php/**`, `e2e/rootless/run.py` (`MB.3.7`) | the page's fences, every client CVE probe (`E1`–`E17`, `E19`–`E25`), production multi-uid pool isolation, the route-uid traversable-but-not-writable pool-directory leg and the post-`PoolReady` sentinel checks |
 
 Scheduler tests use an in-process fake peer: a `UnixListener` bound in a `TempDir` opened as
 a `PinnedSocket` (never a `socketpair`: the client `connect`s exclusively via
@@ -1578,16 +1945,16 @@ before replying**, and a fake `Upstream` double. `ensure_ready`/backoff is drive
 
 | Reqs | Enforcing | Suite | Positive / negative twins |
 |---|---|---|---|
-| `R1`–`R6` | `blastit-manifest` | `critical_fastcgi_manifest.rs` (`connect_and_trace_are_boot_fatal`, `workers_zero_and_sixty_five_are_boot_fatal`, `shared_listen_parent_is_boot_fatal`, `probe_timeout_is_boot_fatal`; `blastit-sys` seccomp fn `scheduler_af_unix_allowed_bind_listen_denied` + `view_twin`) | *(+)* the page's block (`!manifest.is_all_static()` and `manifest.can_boot_without_app()`); defaults; entry under root; `prefork`; the page's shape **plus** `[route.ingress] body="json"`, `[route.db]`, `groups`, `prefork`, no `app` boots clean.<br/>*(−)* missing/absolute/`..`/`\`/NUL/`?` entry, non-`.php`, symlink entry, outside root, unreadable `entry` mode `0000` → boot error naming `entry`, `spa=true` (`FastCgiDeadDeclaration`), `workers=0`/`65`, `CONNECT`/`TRACE`, absolute/symlink/no-parent/shared-parent `listen`, unknown key; the static-only app-less route and `spa = true` route without `fastcgi` still get `StaticDeadDeclaration` with its exact 0.2.0 `why` strings |
+| `R1`–`R6` | `blastit-manifest` | `critical_fastcgi_manifest.rs` (`connect_and_trace_are_boot_fatal`, `workers_zero_and_sixty_five_are_boot_fatal`, `listen_is_refused_by_name`, `planted_symlink_in_the_run_dir_is_refused`, `group_or_world_writable_segment_is_refused`, `regular_file_at_a_segment_is_refused`, `probe_timeout_is_boot_fatal`; `blastit-sys` seccomp fn `scheduler_af_unix_allowed_bind_listen_denied` + `view_twin`) | *(+)* the page's block (`!manifest.is_all_static()` and `manifest.can_boot_without_app()`); defaults; entry under root; `prefork`; the page's shape **plus** `[route.ingress] body="json"`, `[route.db]`, `groups`, `prefork`, no `app` boots clean.<br/>*(−)* missing/absolute/`..`/`\`/NUL/`?` entry, non-`.php`, symlink entry, outside root, unreadable `entry` mode `0000` → boot error naming `entry`, `spa=true` (`FastCgiDeadDeclaration`), `workers=0`/`65`, `workers = 16` with `BLASTIT_VIEW_MAX_WORKERS=8` (`FastCgiWorkersOverBudget` names both numbers; `critical_fastcgi_learn::dev_exits_1_when_workers_exceed_budget` and `check_exits_2_when_workers_exceed_budget`, `MB.3.6.4.2`; the production leg is `e2e/rootless/run.py::check_fastcgi_production_workers_over_budget_exits_1`, `requires-root`), `workers = 8` at a budget of `8` accepted (`workers_at_budget_is_accepted`), **`workers` omitted under `BLASTIT_MAX_WORKERS=512` refused** (pure unit `absent_workers_under_a_512_budget_is_boot_fatal` — an oracle of the deferred budget resolution, owned by the **pool leaf, gated on `MB.12`**; `FastCgiWorkersCapExceeded` names `512` and `64` — and the boot leg `critical_fastcgi_learn::dev_exits_1_under_a_512_budget` in `MB.3.6.4.2`) and `workers = 64` under the same budget accepted, `CONNECT`/`TRACE`, a `listen = "run/fpm.sock"` line (`FastCgiListenDerived`, exact message, and the same block without it boots clean), `env` as an unknown key; `resolved_workers_table`: `None -> cap`, `Some(1) -> 1`, `Some(cap) -> cap` (never `None -> 0`) — pool leaf, gated on `MB.12`;  the static-only app-less route and `spa = true` route without `fastcgi` still get `StaticDeadDeclaration` with its exact 0.2.0 `why` strings |
 | `R7`, `R8` (rows 1,3,5–14,17,18,23), `R19` params | `blastit-fastcgi::{record,param,lockdown}` | `critical_fastcgi_lockdown.rs` | *(+)* exact page param stream; `HTTP_*` derivation; 128/65 535 boundaries; `X-Foo`+`X_Foo` first-wins (`Param { Dropped }`); a header value **`> 8192` bytes is dropped** (`200`, `Param { Dropped }`, `over_long_header_value_is_dropped_not_refused`); split deleted (over-budget → 400).<br/>*(−)* every lockdown row by named test fn (§4.7), including row 11 (`REDIRECT_STATUS` absent from stream) and row 18 (`unknown_bare_param_is_refused_500`, internal builder guard); `PHP_*_VALUE`; NUL/CR-LF; `HTTP_PROXY`/`Proxy`; no value in `Param` |
 | `R8` rows 15,16,21,22 | `blastit-http` head rules | new `critical_head_refusals.rs` | *(−)* NUL/CR-LF header (`400`), `65 KiB` header name (`> 64 KiB` → `431`), `CL`+`TE` and duplicate `CL` (`400`) by §4.7 named test fns |
 | `R8` rows 2,4,19,20, `R12` | `StaticUpstream` + FastCGI path guard | `conformance_static` + `critical_fastcgi_dispatch` | *(−)* `.php`/`.phar` under root (`GET` and `POST` with body) → `404` (`EntryScript`, before `405`/`413`), `no-store`, zero source bytes, never forwarded |
-| `R9`, `R10`, `R11`, `R19` caps, `R20`, `R8` rows 24,25 | `blastit-scheduler::upstream::fastcgi`, `cgi`, `ResponseSink` | `critical_fastcgi_dispatch.rs` | *(+)* record order, one connection, `Status: 200..=599`/default `200`, re-assembly of 1-byte/8184/65535-byte chunks, non-UTF-8 `Content-Type` & `STDERR` lossy conversion (zero panic), exact `CONTENT_LENGTH`, `requestId=1`, `prefork` spawn, cold-start waits for `PoolReady`; **post-build parent rename + symlink to sentinel `UnixListener` still serves `200` from `PinnedSocket` while sentinel records `0` `accept`s**.<br/>*(−)* no `END_REQUEST` (`502`/`RespAbort`), bad `protocol_status`, final `1xx` (`502`), non-HTAB CTL/DEL (`502`), the four proxy-control response headers (`X-Accel-Redirect`, `X-Sendfile`, `X-Lighttpd-Send-File`, `X-Rewrite-URL` → `502`) while a benign `X-Accel-Buffering: no` stays `200` with the header absent, missing colon/CRLF/1000 headers/64 KiB head (`502`), **a non-token CGI header name (`X-Accel-Redirect\x00: /x`, ` X-Accel-Redirect: /x`) → `502`** (`blastit-fastcgi` unit `cgi::tests::non_token_header_name_is_fault` + `critical_fastcgi_dispatch::malformed_or_proxy_control_cgi_head_is_502`), over-2048-byte unterminated `STDERR` capped in `O(1)` (`dropped` incremented), **60-lines/request `STDERR` cap**, **8 KiB CGI value cap**, **`BLASTIT_MAX_WORKERS × BLASTIT_MAX_BODY_BYTES` aggregate**, **`drain` and a parked static read keeps its slot**, `CL`/`TE` stripped, `appStatus`/`reserved` ignored, connect `ENOENT`/`ECONNREFUSED` → `503` + backoff, cancel → `ABORT_REQUEST`, **row 25 declared `Content-Length` stalled past `request_timeout` → `504` before head + `ABORT_REQUEST` observed on fake peer + close + slot released once**, **`external_mode_never_calls_ensure_pool`** (recording `PoolPort` fake with `Arc<AtomicUsize>` + panic-on-call; `external_executor = true`, one request → `200` from the scripted fake peer, counter `== 0`; the `false` twin → counter `== 1` and the request waits for `PoolReady`), **`lazy_pool_bind_timeout_is_503_retry_after_never_502`** (no `PoolReady`, advance `5 s + 1 ms`: `503`, `Retry-After: 1`, `UpstreamError::Unavailable { retry_after: Some(1) }`, no `502`, slot released; a later `PoolReady` admits the next request; the never-`PoolReady` `PoolPort` fake is named in §7.1), **`workers_cap_answers_503_for_the_second_concurrent_request`** (`workers = 2`, three concurrent held by a `tokio::sync::Barrier` in the fake `exchange`: two admitted, third `503` before connect, exactly two `connect`s observed, slot released, `capacity()` equals the policy's `workers` for `Pool` and `View`), **panicking fake `Upstream` → `SessionDoneGuard` `Drop` synthesises `Done(Fault)` once, releases global slot & `RoutePermit`, emits no partial `app.output`**, inode/symlink/other-uid socket → `Fault` (`502`), two fake pools (A cannot reach B) |
-| `R11` pool file | `supervise::render_pool_conf` (pure) + `critical_fastcgi_pool.rs` | `critical_fastcgi_pool.rs` | *(+)* every directive, `pm.max_children == workers`, `pm.max_requests == max(BLASTIT_VIEW_MAX_REQUESTS, 500)` (never `0`), no `listen.owner`, `env[]` has no `BLASTIT_*` and no `HTTP_PROXY`/`http_proxy`, `HOME == TMPDIR == <runtime>/views/<uid>/tmp` (both inside `open_basedir`), `host=<runtime>/views/<uid>` rewrite, INI escaping; mode constants `0600`/`0555`; two routes never share a parent inode.<br/>*(−)* value with `"`/newline inert; `workers` mismatch fails |
+| `R9`, `R10`, `R11`, `R19` caps, `R20`, `R8` rows 24,25 | `blastit-scheduler::upstream::fastcgi`, `cgi`, `ResponseSink` | `critical_fastcgi_dispatch.rs` | *(+)* record order, one connection, `Status: 200..=599`/default `200`, re-assembly of 1-byte/8184/65535-byte chunks, non-UTF-8 `Content-Type` & `STDERR` lossy conversion (zero panic), exact `CONTENT_LENGTH`, `requestId=1`, `prefork` spawn, cold-start waits for `PoolReady`; **post-build parent rename + symlink to sentinel `UnixListener` still serves `200` from `PinnedSocket` while sentinel records `0` `accept`s**.<br/>*(−)* no `END_REQUEST` (`502`/`RespAbort`), bad `protocol_status`, final `1xx` (`502`), non-HTAB CTL/DEL (`502`), the four proxy-control response headers (`X-Accel-Redirect`, `X-Sendfile`, `X-Lighttpd-Send-File`, `X-Rewrite-URL` → `502`) while a benign `X-Accel-Buffering: no` stays `200` with the header absent, missing colon/CRLF/1000 headers/64 KiB head (`502`), **a non-token CGI header name (`X-Accel-Redirect\x00: /x`, ` X-Accel-Redirect: /x`) → `502`** (`blastit-fastcgi` unit `cgi::tests::non_token_header_name_is_fault` + `critical_fastcgi_dispatch::malformed_or_proxy_control_cgi_head_is_502`), over-2048-byte unterminated `STDERR` capped in `O(1)` (`dropped` incremented), **60-lines/request `STDERR` cap**, **8 KiB CGI value cap**, **`BLASTIT_MAX_WORKERS × BLASTIT_MAX_BODY_BYTES` aggregate**, **`drain` and a parked static read keeps its slot**, `CL`/`TE` stripped, `appStatus`/`reserved` ignored, connect `ENOENT`/`ECONNREFUSED` → `503` + backoff, cancel → `ABORT_REQUEST`, **row 25 declared `Content-Length` stalled past `request_timeout` → `504` before head + `ABORT_REQUEST` observed on fake peer + close + slot released once**, **`external_mode_never_calls_ensure_pool`** (recording `PoolPort` fake with `Arc<AtomicUsize>` + panic-on-call; `external_executor = true`, one request → `200` from the scripted fake peer, counter `== 0`; the `false` twin → counter `== 1` and the request waits for `PoolReady`), **`lazy_pool_bind_timeout_is_503_retry_after_never_502`** (no `PoolReady`, advance `5 s + 1 ms`: `503`, `Retry-After: 1`, `UpstreamError::Unavailable { retry_after: Some(1) }`, no `502`, slot released; a later `PoolReady` admits the next request; the never-`PoolReady` `PoolPort` fake is named in §7.1), **`workers_cap_answers_503_for_the_second_concurrent_request`** (`workers = 2`, three concurrent held by a `tokio::sync::Barrier` in the fake `exchange`: two admitted, third `503` before connect, exactly two `connect`s observed, slot released, `try_acquire` yields exactly the route's resolved cap for `Pool` and then `None`) and **`capacity_is_the_resolved_budget_when_workers_are_omitted`** (same shape with `workers` omitted and `BLASTIT_VIEW_MAX_WORKERS=8`: eight permits, ninth `None`; `Capacity` is `Ready`/`Busy` and carries no number, so the oracle is the permit count), both owned by `MB.3.6.2.1`, **panicking fake `Upstream` → `SessionDoneGuard` `Drop` synthesises `Done(Fault)` once, releases global slot & `RoutePermit`, emits no partial `app.output`**, inode/symlink/other-uid socket → `Fault` (`502`), two fake pools (A cannot reach B) |
+| `R11` pool file | `supervise::render_pool_conf` (pure) + `critical_fastcgi_pool.rs` | `critical_fastcgi_pool.rs` | *(+)* every directive, `pool_conf_is_fully_rendered` (every directive), `pm.max_children == policy.resolved_workers(view_worker_cap())` (the **pool leaf's** resolution, gated on `MB.12`) in both the omitted and the explicit case (the omitted case is the default `16`), and `pool_conf_uses_the_env_budget` (the renderer is pure and takes `workers: u32`, so this leg builds it from `Config::from_env` with `BLASTIT_VIEW_MAX_WORKERS=8` and asserts `pm.max_children=8`), `pool_rlimits_table` (`nproc`/`nofile` for resolved `2`, `8`, `64`, plus the formula-only `300` — at `resolved ≤ 64` the `max(1024, …)` branch is unreachable, so `nofile` is effectively the constant `1024`), and `fake_pool_child_has_the_resolved_rlimits` (the **unprivileged `PoolHarness`'s forked fake pool child**, which the harness forks through `ChildIo { limits: pool_rlimits(resolved), .. }`, reads `getrlimit(RLIMIT_NPROC).rlim_cur == <resolved>+2` and `RLIMIT_NOFILE` and reports on a pipe; `S3` itself is `requires-root`), `pm.max_requests == max(BLASTIT_VIEW_MAX_REQUESTS, 500)` (never `0`), no `listen.owner`, `env[]` has no `BLASTIT_*` and no `HTTP_PROXY`/`http_proxy`, `HOME == TMPDIR == <runtime>/views/<uid>/tmp` (both inside `open_basedir`), `host=<runtime>/views/<uid>` rewrite, INI escaping; `pool_parent_modes_are_0600_0511_0711` (the parent directory, the socket and the `fastcgi` container: exact masks after `S6`, and `getdents` on `<i>` from a foreign uid is `EACCES`); two routes never share a parent inode.<br/>*(−)* value with `"`/newline inert; a `pm.max_children` that disagrees with the resolved value fails; an explicit `workers = 32` under a budget of `16` never reaches `render_pool_conf` (boot error) |
 | `R13`–`R15` | `blastit-backend` + scheduler | `conformance_*`, `conformance_table.rs` | *(+)* `#![forbid(unsafe_code)]` + zero I/O in `blastit-backend/src` (`R14`); exact `IMPLEMENTATIONS` slice equality; each driver's `ran` equals `implementation(kind)`'s matching cases with zero `Skipped`; `Makefile` `rs-test-conformance` names all five binaries; two `kind()`-only fakes identical; `decline_identity`; plan rebuild equality; missing builder with line.<br/>*(−)* dropping any capability bit fails `conformance_table.rs`; `Expect` class-completeness invariants enforced |
 | `R16` | `StaticUpstream`, `WsgiUpstream` | existing protected suites + `conformance_static`/`conformance_wsgi` | unmodified protected suites (retained symbols `rewrite::decide`, `static_response::StaticBody`, `head_segments`, `resolve`), including **app-less plain route → `[wsgi]`** (`critical_ingress_enforcement`), `critical_static_cli` app-less `MIXED`, and `critical_rewrite` slot/forward/timeout cases |
-| `R17`, `R18` | scheduler writer, `audit_v1`, `dev_learn`, `check::serve_and_run` | `critical_fastcgi_learn.rs` | *(+)* fast unprivileged `dev` boot on the page's static+fastcgi manifest (exact 3-line banner, `1 route`, no `BLASTIT_APP`); `check` with no `--` on the page's manifest exits `2` (`runs an external executor: blastit check -- <suite>`); `app` + `[route.static]` manifest and app-less `MIXED` manifest keep the pytest path (`MIXED`'s `api` route declares neither `[route.static]` nor `[route.fastcgi]`, so `can_boot_without_app()` is false and branch 3 keeps `"no interpreter to run pytest on"`); page's JSON (3 assets → `requests:3, exercised:0, unexercised_route`); one `/users/42` → `requests:1, exercised:1`; one SQL statement via `<CheckRoot>/dev/views/0` child dbproxy → `statements:1` (`check_sql_obs_fd` closed outside dbproxy); head `413` (`executor_ran: false`) emits `missing_ingress` while keeping `exercised: 0`; learn proposes `[route.static] root = "public"`; `Param` no value; legacy `HttpObsLine` without `kind` parses; `check -- <suite>` maps non-zero suite exit to `3`; `config_document_carries_no_check_fd` (the stage-1 document has no `check_*`/`obs_fd` key); `dev` with `BLASTIT_CHECK_POOL_PARENT_FD=0:/etc` or `=99:/run` exits `1` naming the route and never connects by path; **`external_pool_never_spawns_php_fpm`** — after one request to the FastCGI route under `dev` that returned `200` from the fixture's fake peer, the scanner walks `/proc/<init_pid>/task/*/children` **transitively** (a double-forked `php-fpm` is not a direct child of the main thread) and finds no pid whose `/proc/<pid>/comm` is `php-fpm`; a **positive control** proves the scanner can see one (it spawns a deliberately renamed `/bin/sleep` child and asserts the same walk finds it). Each suite carries its own `children()`/`fds()` helpers locally (precedent: `critical_dev_and_fail_closed.rs:482`), because `smoke.rs` is a separate test binary and cannot be imported.<br/>*(−)* sentinel `?token=`/header/cookie never in `http_obs.jsonl`; asset-only suite flags the route |
-| `R2`, `R3`, `R20` production | manifest probe + boot + `supervise::spawn_pool` + `e2e/rootless/run.py` | `critical_fastcgi_pool.rs`, `critical_fastcgi_parent_fd.rs` + `e2e/rootless/run.py` (single-UID fixture: `fchownat`/`0555`/`0600` assertions are `#[ignore]`d as `requires-root` and the root-only legs run in `e2e/rootless`) | *(+)* one-component `run/fpm.sock` boots, binds, freezes `init_uid:init_gid 0555`, hands `0600` to scheduler, publishes `PoolReady { route, sock_dev, sock_ino }`, serves.<br/>*(−)* `dev` with missing/foreign-uid socket exits `1`; unreadable `entry` (`0000`) as route uid exits `1`; missing `CAP_CHOWN`/`CAP_FOWNER` at boot freeze exits `1` naming capability; route A's uid `connect` to pool B → `EACCES`; **after `PoolReady`, `route_uid` attempts `chmod(parent, 0755)`, `open(parent/x, O_CREAT)`, and `unlink(parent/fpm.sock)` → all fail `EPERM`/`EACCES`**; failed verify/bind runs Unwind U1 (`kill(-pgid, SIGKILL)`, `unlinkat`, restore `init_uid:init_gid 0555`, no `PoolReady`); **pre-resolution boot refusal** (`critical_fastcgi_pool.rs::parent_symlink_or_writable_ancestor_refused_before_spawn_leaves_sentinel_untouched`): intermediate symlink `storage/framework -> /sentinel` or route-writable ancestor refused before `openat2` finishes with `FastCgiListenParentInvalid`, zero processes spawned; **post-`PoolReady` pivot reproduction** (`e2e/rootless/run.py::check_fastcgi_parent_pivot_leaves_sentinel_untouched`): after `PoolReady`, privileged harness binds a decoy listener at `/sentinel/fpm.sock`, renames `run` aside and symlinks `run -> /sentinel` → live `GET /users/42` answers `200` from pinned `entry` while `/sentinel/fpm.sock` records **`0` `accept`s**; `RETIRE`/respawn while symlinked fails closed (`503`, Unwind U1, `/sentinel/fpm.sock` still **`0` `accept`s**); restoring `run` and respawning binds a fresh `(sock_dev, sock_ino)` inside `parentfd` and answers `200` (the init-side assertion — `/proc/<init_pid>/fd` still resolves the pinned parent after `PoolReady` and after `RETIRE`/respawn — is `requires-root` and lives in `e2e/rootless`; the unprivileged `dev` addition checks `/proc/<init_pid>/fd` holds a directory fd whose `st_dev`/`st_ino` equal the fixture's `run/` inode); **`critical_fastcgi_parent_fd::view_child_holds_neither_parentfd_nor_ctl_chan`** (mixed `[route.fastcgi]` + WSGI manifest: the fixture binds a `UnixListener` at `listen` in its temp dir, writes a `smoke.rs`-style `app`, and never starts `php-fpm`; preconditions asserted — WSGI response `200`, view pid found via `/proc/<init_pid>/task/<init_pid>/children`, fd set non-empty and containing `view.chan` + stdio; the predicate is **inode identity on both halves**: (a) the `(st_dev, st_ino)` of the pinned parent directory and (b) the inode read from init's `ctl.chan` entry before the request are both absent from the view's table, while the view's `view.chan` inode **is** present; no `#[ignore]`/skip), **`S0`'s `php-fpm -t` child and the `S3` pool master exec with only fd 0/1/2** (`critical_fastcgi_pool::config_test_and_pool_child_exec_with_only_stdio`: the fake `php-fpm` helper's first `fcntl(3, F_GETFD)`/`read(3, …)` returns `EBADF`, and no `/proc/self/fd` target equals the pinned parent path or a `socket:[<ino>]`; the exact `{0,1,2}` set is not asserted because a wrapper's own script fd and the scanner's directory handle make it unobservable); **`setsid()` escapee containment** (`critical_fastcgi_pool::pool_ready_inode_is_held_by_a_task_in_the_new_pgid` + `critical_fastcgi_pool::setsid_escapee_is_never_published` + `e2e/rootless/run.py::check_fastcgi_setsid_escapee_contained`): the fake pool records the inode it bound on a pipe and the test asserts `PoolReady.sock_ino` **equals that inode** (not merely "a different one") and that `/proc/<master_pid>/fd` contains `socket:[<ino>]`; then a fake worker `setsid()`s and keeps/rebinds a listener at `parentfd/fpm.sock` during the next `S2`, and the test asserts **no** `PoolReady` is emitted, `U1` runs (kill, freeze `0555`, unlink, `PoolExited`), `RouteState` stays `Busy` → `503` + `Retry-After: 1`, and the escapee's listener records **`0` `accept`s**; only after the harness kills the escapee does a clean respawn publish the new master's own inode |
+| `R17`, `R18` | scheduler writer, `audit_v1`, `dev_learn`, `check::serve_and_run` | `critical_fastcgi_learn.rs` | *(+)* fast unprivileged `dev` boot on the page's static+fastcgi manifest (exact 3-line banner, `1 route`, no `BLASTIT_APP`); `check` with no `--` on the page's manifest exits `2` (`runs an external executor: blastit check -- <suite>`); `app` + `[route.static]` manifest and app-less `MIXED` manifest keep the pytest path (`MIXED`'s `api` route declares neither `[route.static]` nor `[route.fastcgi]`, so `can_boot_without_app()` is false and branch 3 keeps `"no interpreter to run pytest on"`); page's JSON (3 assets → `requests:3, exercised:0, unexercised_route`); one `/users/42` → `requests:1, exercised:1`; one SQL statement via `<CheckRoot>/dev/views/0` child dbproxy → `statements:1` (`check_sql_obs_fd` closed outside dbproxy); head `413` (`executor_ran: false`) emits `missing_ingress` while keeping `exercised: 0`; learn proposes `[route.static] root = "public"`; `Param` no value; legacy `HttpObsLine` without `kind` parses; `check -- <suite>` maps non-zero suite exit to `3`; `config_document_carries_no_check_fd` (the stage-1 document has no `check_*`/`obs_fd` key); `dev` with `BLASTIT_CHECK_POOL_PARENT_FD=0:/etc` or `=99:/run` exits `1` naming the route and never connects by path; **`dev_prints_resolved_pool_workers`** (`MB.3.9.5`; two legs — omitted `workers` with `BLASTIT_VIEW_MAX_WORKERS=8` prints `pool workers 8 (derived from BLASTIT_VIEW_MAX_WORKERS=8)`, explicit `workers = 2` prints `pool workers 2 (workers = 2, budget 8)`, and a third leg with `BLASTIT_VIEW_MAX_WORKERS` unset and `BLASTIT_MAX_WORKERS=8` prints `(derived from BLASTIT_MAX_WORKERS=8)`; once per FastCGI route, and stdout is still exactly the three banner lines); **`dev_starts_one_pool_per_route`** (replaces the retired `external_pool_never_spawns_php_fpm`, which asserted the opposite of the amendment: `dev` never spawning `php-fpm`) — `MB.3.9.5`'s protected suite asserts that a two-FastCGI-route manifest under `dev` yields **two** `php-fpm` masters, each in its own pgid and its own `<route_index>` directory, and that `SIGTERM` to `dev` leaves neither; the `/proc/<init_pid>/task/*/children` walk is transitive (a double-forked `php-fpm` is not a direct child of the main thread) and a **positive control** proves the scanner can see one (a deliberately renamed `/bin/sleep` child found by the same walk). Each suite carries its own `children()`/`fds()` helpers locally (precedent: `critical_dev_and_fail_closed.rs:482`), because `smoke.rs` is a separate test binary and cannot be imported.<br/>*(−)* sentinel `?token=`/header/cookie never in `http_obs.jsonl`; asset-only suite flags the route |
+| `R2`, `R3`, `R20` production | manifest probe + boot + `supervise::spawn_pool` + `e2e/rootless/run.py` | `critical_fastcgi_pool.rs`, `critical_fastcgi_parent_fd.rs` + `e2e/rootless/run.py` (single-UID fixture: `fchownat`/`0511`/`0600` assertions are `#[ignore]`d as `requires-root` and the root-only legs run in `e2e/rootless`) | *(+)* init creates `<runtime>/fastcgi/0` (`0700`, `init_uid`), pins it, the pool binds the derived `fpm.sock`, the parent is frozen `init_uid:init_gid 0511`, the socket is handed to the scheduler `0600`, `PoolReady { route, sock_dev, sock_ino }` is published and the route serves; `render_pool_conf`'s `listen=` line equals the derived path and `pm.max_children` equals `resolved_workers`.<br/>*(−)* `dev` with a missing/foreign-uid/`0755` socket exits `1` (`MB.3.9.5`'s `leaf_missing_after_spawn_exits_1_in_dev`, which also proves the `check` twin: `critical_fastcgi_learn::check_child_leaf_failure_exits_2_naming_the_derived_socket` in `MB.3.6.4.2`); unreadable `entry` (`0000`) as route uid exits `1`; missing `CAP_CHOWN`/`CAP_FOWNER` at boot freeze exits `1` naming capability; route A's uid `connect` to pool B → `EACCES`; **after `PoolReady`, `route_uid` attempts `chmod(parent, 0755)`, `open(parent/x, O_CREAT)`, and `unlink(parent/fpm.sock)` → all fail `EPERM`/`EACCES`**; failed verify/bind runs Unwind U1 (`kill(-pgid, SIGKILL)`, `unlinkat`, restore `init_uid:init_gid 0511`, no `PoolReady`); **derived-parent refusal**, three unprivileged legs plus one root-only: `planted_symlink_in_the_run_dir_is_refused` (a symlink at `<run>/fastcgi` or `<run>/fastcgi/<i>` → `Symlink`), `group_or_world_writable_segment_is_refused` (a `0755`/`0777` derived segment → `InsecureMode { mode }`, exactly), `regular_file_at_a_segment_is_refused` (`NotDirectory`), and `check_fastcgi_b2_foreign_owner_segment_refused` in `e2e/rootless` for the root-only `ForeignOwner` leg; the **three `dev` legs** refuse through `FastCgiPoolSocketInvalid` before the pin finishes and leave the sentinel untouched, while the **production** legs (`check_fastcgi_second_boot_normalises_a_frozen_parent`, `check_fastcgi_b2_foreign_owner_segment_refused`) are stage-0 boot diagnostics through `stage0::fail_pool_parent` (`./blastit.toml:<line>: route … pool socket "<segment>": <rule>`, `exit 1`), **not** a `ManifestError`; `foreign_owner_segment_is_refused` is `#[ignore] requires-root` (a non-root fixture cannot create a foreign-owned directory) and its `B2` twin runs in `e2e/rootless`; **`eight_planted_stale_entries_leave_only_that_route_503`** (temp `parentfd` + eight `stale.*` entries: a boot **warning**, `PoolExited`, that route `Busy` → `503` + `Retry-After: 1`, and the other routes still boot and serve — never `exit 1`); **the route uid traverses but cannot write the pool directory** (`e2e/rootless/run.py::check_fastcgi_pool_dir_is_traversable_but_not_writable_for_the_route_uid`, exact three-way predicate: `stat`/`openat(O_PATH)` on `<runtime>/fastcgi/<i>/fpm.sock` **succeeds**; `readdir(<runtime>/fastcgi)` is `EACCES`; `O_CREAT`/`unlinkat`/`renameat`/`symlinkat` inside `<i>` and `mkdirat`/`renameat` in `fastcgi` fail `EPERM`/`EACCES`), a decoy listener pre-bound at `/sentinel/fpm.sock` records **`0` `accept`s**, and the live `GET /users/42` still answers `200` from the pinned `entry`; `RETIRE`/respawn binds a fresh `(sock_dev, sock_ino)` inside the same `parentfd` and answers `200`; **`e2e/rootless/run.py::check_fastcgi_second_boot_normalises_a_frozen_parent`** (`requires-root`) re-runs `B1`–`B3` over a preserved `<runtime>` whose `<i>` was left `0511` and asserts a normalised `0700` pin, `PoolReady` and `200`, and **`check_fastcgi_b2_foreign_owner_segment_refused`** refuses a foreign-owned `fastcgi`/`<i>` segment (the init-side assertion — `/proc/<init_pid>/fd` still resolves the pinned parent after `PoolReady` and after `RETIRE`/respawn — is `requires-root` and lives in `e2e/rootless`; the unprivileged `dev` addition checks `/proc/<init_pid>/fd` holds a directory fd whose `st_dev`/`st_ino` equal the fixture's `run/` inode); **`critical_fastcgi_parent_fd::view_child_holds_neither_parentfd_nor_ctl_chan`** (mixed `[route.fastcgi]` + WSGI manifest: the fixture binds a `UnixListener` at the derived `<run_root>/fastcgi/0/fpm.sock` in its temp dir, writes a `smoke.rs`-style `app`, and never starts `php-fpm`; preconditions asserted — WSGI response `200`, view pid found via `/proc/<init_pid>/task/<init_pid>/children`, fd set non-empty and containing `view.chan` + stdio; the predicate is **inode identity on both halves**: (a) the `(st_dev, st_ino)` of the pinned parent directory and (b) the inode read from init's `ctl.chan` entry before the request are both absent from the view's table, while the view's `view.chan` inode **is** present; no `#[ignore]`/skip), **`S0`'s `php-fpm -t` child and the `S3` pool master exec with only fd 0/1/2** (`critical_fastcgi_pool::config_test_and_pool_child_exec_with_only_stdio`: the fake `php-fpm` helper's first `fcntl(3, F_GETFD)`/`read(3, …)` returns `EBADF`, and no `/proc/self/fd` target equals the pinned parent path or a `socket:[<ino>]`; the exact `{0,1,2}` set is not asserted because a wrapper's own script fd and the scanner's directory handle make it unobservable); **`setsid()` escapee containment** (`critical_fastcgi_pool::pool_ready_inode_is_held_by_a_task_in_the_new_pgid` + `critical_fastcgi_pool::setsid_escapee_is_never_published` + `e2e/rootless/run.py::check_fastcgi_setsid_escapee_contained`): the fake pool records the inode it bound on a pipe and the test asserts `PoolReady.sock_ino` **equals that inode** (not merely "a different one") and that `/proc/<master_pid>/fd` contains `socket:[<ino>]`; then a fake worker `setsid()`s and keeps/rebinds a listener at `parentfd/fpm.sock` during the next `S2`, and the test asserts **no** `PoolReady` is emitted, `U1` runs (kill, freeze `0511`, unlink, `PoolExited`), `RouteState` stays `Busy` → `503` + `Retry-After: 1`, and the escapee's listener records **`0` `accept`s**; only after the harness kills the escapee does a clean respawn publish the new master's own inode |
 
 No new critical test weakens an existing one; `tools/critical_guard.py` covers the
 existing `critical_*.rs` files, none of which is edited by `MB.9` or `MB.3`.
@@ -1596,11 +1963,18 @@ existing `critical_*.rs` files, none of which is edited by `MB.9` or `MB.3`.
 
 `e2e/php2shell.py` runs in an image with unpatched `php-fpm`, the shipped wheel and a
 Symfony-style `public/index.php` as uid 1000, `HOME=/home/you`, `WORKDIR
-/home/you/app`, so the page's `mkdir -p /home/you/app/run` and absolute `listen` fence
-are literal. It replays the page's Local/CI fences (`uv init`/`uv add` exempt as in
-`static_assets.py`, an unknown `$ ` command is a failure), runs `php-fpm -tt -y` on the
-page's INI fence **and** on the generated production pool file, so a drifted
-`clear_env`/`listen.mode`/`pm.max_children` fails, and parses `N` in `check: N requests, …`.
+/home/you/app`. It replays the page's Local/CI fences (`uv init`/`uv add` exempt as in
+`static_assets.py`, an unknown `$ ` command is a failure) — the page's Local section is
+`MB.3.9.1`'s, and with the `MB.3.9.2` grammar it contains no hand-written pool file and no
+socket path, so the replay asserts what the page shows and what needs no dev-pool provider: `dev` answers and
+the **generated** pool files are correct. "The pool `dev` started exists" is `MB.3.9.5`'s
+protected assertion (`dev_starts_one_pool_per_route`) and only holds **after `MB.3.9.4`** flips
+`dev` to `PoolSpawn::Managed`; before that, `stage1` sets `External` for `dev`/`check`
+(§4.8.1) and `MB.3.7` runs before `.4`. It then renders **the generated** pool files (`dev`'s and production's) with
+`render_pool_conf`, runs `php-fpm -tt -y` on them, and asserts `listen=` is
+`<runtime>/fastcgi/<route_index>/fpm.sock`, `pm.max_children` is the resolved worker count,
+`listen.mode=0600`, `clear_env=yes` and the `php_admin_value` backstops — so a drifted
+directive fails, and parses `N` in `check: N requests, …`.
 
 The fixture's front controller answers `GET`/`POST /__inspect` with exactly
 `{"script_filename","script_name","path_info","document_root","request_uri",
@@ -1669,8 +2043,8 @@ first command.
 |---|---|---|---|
 | `MB.3.4.1` | `Cargo.lock`, `crates/blastit-fastcgi/{Cargo.toml,src/{lib,record,param,cgi}.rs}` (6) | `#![forbid(unsafe_code)]`, records, name-value codec, CGI head parser (`Status: 200..=599`, CTL & proxy-control refusal, caps), `RecordError`/`CgiError`, zero deps | `CARGO_NET_OFFLINE=true cargo test -p blastit-fastcgi && cargo test -p blastit-fastcgi --locked && test -z "$(cargo tree -p blastit-fastcgi -e normal --prefix none \| tail -n +2)"` |
 | `MB.3.4.2` | `crates/blastit-fastcgi/src/{lib,lockdown}.rs`, `crates/blastit-fastcgi/tests/critical_fastcgi_lockdown.rs` (3) | `pub mod lockdown;` in `src/lib.rs` (the file `MB.3.4.1` created), param builder, allowlist, `LockdownError`, `FastCgiPaths` (defined here), every §4.7 `lockdown` row (asserts `LockdownError::*`, never `Refusal`) | `cargo test -p blastit-fastcgi --test critical_fastcgi_lockdown --locked` |
-| `MB.3.5.1` | `crates/blastit-manifest/src/{model,parse,validate,error,lib}.rs`, `crates/blastit-manifest/tests/docs_fences.rs` (6) | `FastCgiPolicy` (`#[derive(Debug, Clone, PartialEq, Eq)]`), `Executor` (`#[derive(Debug, Clone, PartialEq, Eq)]`, **not** `Copy`; `ALL_KINDS`, `kind()`), **both added to `lib.rs`'s `pub use model::{…}` list** (the crate root path `blastit_manifest::Executor`), `Route::fastcgi()`, `can_boot_without_app()`, `is_all_static()`, error variants, `route_lines()`, dead-declaration rule, `docs_fences.rs` (three edits: `const FILES: [&str; 7]` → `8` with the new path, `assert_eq!(total, 7)` → `8`, and the module-doc "seven" → "eight") | `cargo test -p blastit-manifest --locked` (includes the `lib.rs` doctest `use blastit_manifest::{Executor, FastCgiPolicy}; assert_eq!(Executor::View.kind(), "wsgi"); assert!(Executor::ALL_KINDS.contains(&"fastcgi"));`) |
-| `MB.3.5.2` | `crates/blastit-manifest/src/{probe,lib}.rs` (`.1` first appends the two `pub use model::{…}` names; `.2` then appends `pub mod probe;`), `crates/blastit/src/{probe,lib,supervise}.rs`, `crates/blastit-manifest/tests/critical_fastcgi_manifest.rs`, `docs/reference/manifest.md` (7) | pure `SocketProbe` (`check` + `check_entry`) + `SocketProbeError` (`Missing`/`NotSocket`/`NotRegularFile`/`Unreadable{uid}`/`OutsideRoot`/`Timeout`/`ForeignOwner{uid}`/`Symlink`/`ParentWritableOrSymlink`/`Io`), `ProbeUid`, `check_fastcgi_entries(.., probe, uid)` and `check_fastcgi_sockets -> Vec<(usize, OwnedFd)>` in `blastit-manifest` (the trait lives here, not in `MB.3.5.1`); the syscall bodies of `check_entry` are in `crates/blastit/src/probe.rs`; `DevProbe`/`ProductionProbe` in `crates/blastit/src/probe.rs` (`rustix` already a dep; **no** manifest `Cargo.toml` change); `crates/blastit/src/lib.rs` gains `pub mod probe;` and `pub mod supervise;` (the single owner of `lib.rs`); in `supervise.rs`, `Parts`, `Supervisor` and `Supervisor::new` become **`pub(crate)`** while `render_pool_conf` (added by `MB.3.6.3.2`) and the later inline `pool_test` module are `pub` (so `private_interfaces` stays silent); protected `critical_fastcgi_manifest.rs` (injects `NotRegularFile`/`Unreadable { uid }`/`OutsideRoot` through the fake `check_entry`, and `probe_timeout_is_boot_fatal` — a fake probe that never replies → `Timeout`, boot-fatal), the 3 §4.1 edits in `docs/reference/manifest.md` | `cargo test -p blastit-manifest --test critical_fastcgi_manifest --locked && cargo test -p blastit --locked && ! grep -qE 'rustix&#124;libc' crates/blastit-manifest/Cargo.toml && make docs-check` |
+| `MB.3.5.1` | `crates/blastit-manifest/src/{model,parse,validate,error,lib}.rs`, `crates/blastit-manifest/tests/docs_fences.rs` (6) | `FastCgiPolicy` (`#[derive(Debug, Clone, PartialEq, Eq)]`) as `{ entry: String, workers: Option<u32> }` — **no `listen` field**, `Option` because absent means derived — **without** the pool-path resolution (`resolved_workers`, `MAX_POOL_WORKERS`, the budget check and its two variants are the **pool leaf's**, gated on `MB.12` — see §8.1 item 4), `Executor` (`#[derive(Debug, Clone, PartialEq, Eq)]`, **not** `Copy`; `ALL_KINDS`, `kind()`), **both added to `lib.rs`'s `pub use model::{…}` list** (the crate root path `blastit_manifest::Executor`), `Route::fastcgi()`, `can_boot_without_app()`, `is_all_static()`, **grammar only**: `FastCgiListenDerived` (landed), `FastCgiDeadDeclaration`, `FastCgiWorkersInvalid` for an explicit value outside `1..=64`, and deletion of `FastCgiListenInvalid`/`FastCgiListenParentInvalid`; **`FastCgiPoolSocketInvalid` is `MB.3.5.2`'s** (the probe's refusal, below), `route_lines()`, dead-declaration rule, the strict parser's `fastcgi_policy` reading only `entry`/`workers` and refusing `listen` with the landed `FastCgiListenDerived` (no value; exact message as §4.1), `docs_fences.rs` (three edits: `const FILES: [&str; 7]` → `8` with the new path, `assert_eq!(total, 7)` → `8`, and the module-doc "seven" → "eight") | `cargo test -p blastit-manifest --locked` (includes the `lib.rs` doctest `use blastit_manifest::{Executor, FastCgiPolicy}; assert_eq!(Executor::View.kind(), "wsgi"); assert!(Executor::ALL_KINDS.contains(&"fastcgi"));`) |
+| `MB.3.5.2` | `crates/blastit-manifest/src/{probe,lib}.rs` (`.1` first appends the two `pub use model::{…}` names; `.2` then appends `pub mod probe;`), `crates/blastit/src/{probe,lib,supervise}.rs`, `crates/blastit-manifest/tests/critical_fastcgi_manifest.rs`, `crates/blastit-manifest/src/error.rs`, `docs/reference/manifest.md` (8) | `ManifestError::FastCgiPoolSocketInvalid { location, path, rule }` (the probe's refusal; `MB.3.5.1` landed the grammar only), pure `SocketProbe` (`parent(run_root, route_index)` + `check_leaf(parent, uid)` + `check_entry` + `provides_parent_fd`) + `SocketProbeError` (`Missing`/`NotSocket`/`NotRegularFile`/`NotDirectory`/`InsecureMode{mode}`/`NotConnectable{uid}`/`Unreadable{uid}`/`OutsideRoot`/`Timeout`/`ForeignOwner{uid}`/`Symlink`/`Io`; **no** `ParentWritableOrSymlink`) + `from_reply_byte`, `ProbeUid`, `check_fastcgi_entries(.., probe, uid)`, `check_fastcgi_sockets(run_root, probe) -> Vec<(usize, OwnedFd)>` and `check_fastcgi_leaf(run_root, route_index, parent, probe)`, plus the private `probe::pool_socket_invalid(route_index, run_root, rule)` both of them format through in `blastit-manifest` (the trait lives here, not in `MB.3.5.1`); the syscall bodies of `check_entry` are in `crates/blastit/src/probe.rs`; `DevProbe`/`ProductionProbe` in `crates/blastit/src/probe.rs` (`rustix` already a dep; **no** manifest `Cargo.toml` change); `crates/blastit/src/lib.rs` gains `pub mod probe;` and `pub mod supervise;` (the single owner of `lib.rs`); in `supervise.rs`, `Parts`, `Supervisor` and `Supervisor::new` become **`pub(crate)`** while `render_pool_conf` (added by `MB.3.6.3.2`) and the later inline `pool_test` module are `pub` (so `private_interfaces` stays silent); protected `critical_fastcgi_manifest.rs` (injects `NotRegularFile`/`Unreadable { uid }`/`OutsideRoot` through the fake `check_entry`, `ForeignOwner`/`NotSocket`/`Symlink`/`NotDirectory` through the fake `parent(run_root, i)`, `NotConnectable`/`NotSocket` through the fake `check_leaf`, then **exactly** §7.2's `critical_fastcgi_manifest.rs` inventory — `connect_and_trace_are_boot_fatal`, `workers_zero_and_sixty_five_are_boot_fatal`, `listen_is_refused_by_name` (exact message), `planted_symlink_in_the_run_dir_is_refused`, `group_or_world_writable_segment_is_refused`, `regular_file_at_a_segment_is_refused`, `probe_timeout_is_boot_fatal` — the grammar/parse-bound rows only, because the **budget-aware** `Manifest::check_fastcgi_workers(budget)` does not exist until the pool leaf lands it (the private grammar-only `validate::check_fastcgi_workers(&location, policy, errors)` at `validate.rs:597` is a different function); while `resolved_workers_table`, `workers_at_budget_is_accepted`, `workers_over_budget_is_boot_fatal`, `absent_workers_under_a_512_budget_is_boot_fatal` (**pool leaf, gated on `MB.12`**) and `capacity_is_the_resolved_budget_when_workers_are_omitted` (`MB.3.6.2.1`) are that leaf's/that unit's, never rows here), the 3 §4.1 edits in `docs/reference/manifest.md` | `cargo test -p blastit-manifest --test critical_fastcgi_manifest --locked && cargo test -p blastit --locked && ! grep -qE 'rustix&#124;libc' crates/blastit-manifest/Cargo.toml && make docs-check` |
 | `MB.9.1.1` | `Cargo.lock`, `crates/blastit-backend/{Cargo.toml,src/{lib,types,registry}.rs}` (5) | `#![forbid(unsafe_code)]`, `Upstream`, §4.2.1 types (`RouteId`, `RouteState` with `try_acquire(self: &Arc<Self>) -> Option<RoutePermit>` (`Send`, owns the `Arc`), `PinnedSocket::new(Arc<OwnedFd>)` + accessors + `PinnedSocketError::{BadName,Poisoned}`, `UpstreamHead`, `ResponseSink`, `Observation`, `UpstreamError`, `Refusal`), `Registry`, `BootError` (+ `std::error::Error`), object-safety/`Send`/line tests | `CARGO_NET_OFFLINE=true cargo test -p blastit-backend && cargo test -p blastit-backend --locked && ! grep -rn 'UnixStream\|TcpStream\|std::fs\|Command::new\|tokio' crates/blastit-backend/src` |
 | `MB.9.1.2` | `crates/blastit-backend/src/{lib,conformance}.rs` (2) | `Case`, `Class`, `Capability`, `Expect`, `Inject`, `RouteFixture`, `HeadSpec`, `OutcomeKind`, `PeerScript`, `CancelAt`, `IMPLEMENTATIONS`, `implementation()`, `cases()` | `cargo test -p blastit-backend --locked` |
 | `MB.9.2.1.1` | `Cargo.lock`, `crates/blastit-scheduler/{Cargo.toml,src/{route,config,lib}.rs}`, `crates/blastit-frame/src/raw.rs`, `crates/blastit/src/stage1.rs` (7) | `blastit-backend` + **`blastit-http`** deps + lock (the latter for `BodyFraming`), `ReqHeadView` `scheme() -> Scheme` (frame-owned; no new `blastit-frame` edge; `parse` stores `scheme: Scheme` via `Scheme::from_code(..)?`, rejecting an unknown code with `FrameError::BadEnum`, and the stale `parse` doc comment saying the scheduler never reads it is updated), `server_name`/`server_port`, `RouteInfo.executor` (`with_fastcgi` after `with_static`), `SchedulerConfig.{http_obs: Option<PathBuf>, pool_spawn, pinned_sockets, route_lines}` (`http_obs` is `None` until `MB.3.6.3.1` wires `Config.check_http_obs`) plus `pinned_socket_fds() -> Vec<RawFd>` and `#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum PoolSpawn { Managed, External }` (`stage1.rs` sets `route_lines` from `Manifest::route_lines()` and forwards `pool_spawn`/`pinned_sockets`/`http_obs`; the literal ends in `..SchedulerConfig::default()`, so omitting them is a silent empty `route_lines` and every route is a `BootError`) | `CARGO_NET_OFFLINE=true cargo test -p blastit-scheduler && cargo test -p blastit-scheduler --locked && cargo tree -p blastit-scheduler -e normal \| grep -q blastit-http && cargo test -p blastit --locked` |
@@ -1681,15 +2055,15 @@ first command.
 | `MB.9.4` | `crates/blastit-backend/tests/conformance_table.rs`, `Makefile` (2) | exact `IMPLEMENTATIONS` assertion, `Expect` class invariants, fake double, `rs-test-conformance` (3 binaries; `MB.3.6.1.2` bumps it to 4, `MB.3.6.2.2` to 5) in `make check` | `make rs-test-conformance && ! grep -rn 'case\.id' crates/*/tests/conformance*.rs` |
 | `MB.3.6.1.1` | `crates/blastit-sys/src/seccomp.rs`, `crates/blastit-frame/src/{ctl,frame}.rs`, `crates/blastit-http/tests/critical_head_refusals.rs`, `crates/blastit-scheduler/tests/common/mod.rs`, `crates/blastit/src/supervise.rs` (6) | scheduler `AF_UNIX` + `SYS_bind`/`SYS_listen` `EPERM` + `Scheduler`/`View` twins, **`Ctl::Spawn`'s doc comment updated to "view or pool, chosen by the route's executor"**, `PoolSpawned`/`PoolReady { route, sock_dev, sock_ino }`/`PoolExited` (`0x45`–`0x47`), HTTP head refusal rows, **the exhaustive `Ctl` matches in `tests/common/mod.rs` and `crates/blastit/src/supervise.rs:430-443` gain `Ctl::PoolSpawned { .. } \| Ctl::PoolReady { .. } \| Ctl::PoolExited { .. } => {}`** (otherwise `E0004`; `scheduler.rs:1043` already has an `other =>` catch-all) | `cargo test -p blastit-sys --locked && cargo test -p blastit-frame --locked && cargo test -p blastit-http --test critical_head_refusals --locked && cargo test -p blastit --locked && cargo test -p blastit-scheduler --test critical_rewrite --locked` |
 | `MB.3.6.1.2` | `Cargo.lock`, `crates/blastit-scheduler/Cargo.toml`, `crates/blastit-fastcgi/{Cargo.toml,tests/conformance.rs}`, `crates/blastit/Cargo.toml`, `Makefile` (6) | workspace Cargo edges + lock — **`blastit-backend = { version = "0.2.0", path = "../blastit-backend" }` added to `crates/blastit/Cargo.toml`**, `blastit-fastcgi` dev-edge, `"fastcgi-codec"` conformance driver, append `-p blastit-fastcgi --test conformance` to `Makefile` | `CARGO_NET_OFFLINE=true cargo test -p blastit-fastcgi --test conformance && cargo test -p blastit --locked && cargo tree -p blastit -e normal \| grep -q blastit-backend && make rs-test-conformance` |
-| `MB.3.6.2.1` | `crates/blastit-scheduler/src/{upstream/fastcgi,upstream/fastcgi_builder,upstream/mod,scheduler}.rs` (4) | `FastCgiUpstream` session pump: builds `FastCgiPaths`, maps `LockdownError`/`CgiError`/`RecordError` to `Refusal`/`UpstreamError::Fault`, `PinnedSocket` `/proc/self/fd` connect + `C1` (inode/owner/`0600`/exact `SO_PEERCRED`), params, `CONTENT_LENGTH` buffering, `STDIN`/`STDOUT`/`STDERR` pumps, `END_REQUEST`, `ABORT_REQUEST`, credit, `ensure_ready` (`PoolPort::ensure_pool` only when `!external_executor`), `on_ctl` handling of `Ctl::PoolSpawned`/`PoolReady`/`PoolExited` (stores `bound_inode`, sets `RouteState.ready`, backoff on exit), `RouteState::new(pool_spawn == PoolSpawn::External, workers)` (Busy in `Managed` until `PoolReady`), `"fastcgi"` appended to `builtin_registry()`'s list **in `scheduler.rs`** | `cargo test -p blastit-scheduler --locked` |
+| `MB.3.6.2.1` | `crates/blastit-scheduler/src/{upstream/fastcgi,upstream/fastcgi_builder,upstream/mod,scheduler}.rs` (4) | `FastCgiUpstream` session pump: builds `FastCgiPaths`, maps `LockdownError`/`CgiError`/`RecordError` to `Refusal`/`UpstreamError::Fault`, `PinnedSocket` `/proc/self/fd` connect + `C1` (inode/owner/`0600`/exact `SO_PEERCRED`), params, `CONTENT_LENGTH` buffering, `STDIN`/`STDOUT`/`STDERR` pumps, `END_REQUEST`, `ABORT_REQUEST`, credit, `ensure_ready` (`PoolPort::ensure_pool` only when `!external_executor`), `on_ctl` handling of `Ctl::PoolSpawned`/`PoolReady`/`PoolExited` (stores `bound_inode`, sets `RouteState.ready`, backoff on exit), `RouteState::new(pool_spawn == PoolSpawn::External, policy.resolved_workers(cfg.view_worker_cap()))` (Busy in `Managed` until `PoolReady`), `"fastcgi"` appended to `builtin_registry()`'s list **in `scheduler.rs`** | `cargo test -p blastit-scheduler --locked` |
 | `MB.3.6.2.2` | `crates/blastit-scheduler/tests/{critical_fastcgi_dispatch,conformance_fastcgi}.rs`, `Makefile` (3) | dispatch + conformance suites: record order, chunk re-assembly, non-UTF-8, row 24/25, sentinel parent-rename, panic/`SessionDoneGuard`, `foreign_uid_peer_is_fault_502`, `"fastcgi-session"` driver, `Makefile` append + 5-binary assertion | `make rs-test-conformance && cargo test -p blastit-scheduler --test critical_fastcgi_dispatch --locked && cargo clippy -p blastit-scheduler --all-targets --locked -- -D warnings && ! grep -rn 'case\.id' crates/blastit-scheduler/tests/conformance_fastcgi.rs` |
-| `MB.3.6.3.1` | `crates/blastit/src/{stage0,stage1,config,cli,dev_learn}.rs`, `crates/blastit/tests/critical_fastcgi_parent_fd.rs` (6) | `B1`–`B3` (stage 0), `check_fastcgi_entries(…, i, ProbeUid::Route(uid))` per FastCGI route in production and `stage0::run_dev` with `ProbeUid::Dev`, **`critical_fastcgi_parent_fd.rs`** (one row per §4.8.1 validation rule driven through the pure `validate_parent_fds(&[(usize, RawFd)], config_fd, dbproxy_fds) -> Result<(), BootError>` — so "no descriptor wrapped" is unit-tested before any `OwnedFd` — plus `cli::parse` rejects `--fastcgi-parent-fd` without `--stage=1` and `--help` lacks the string, and `view_child_holds_neither_parentfd_nor_ctl_chan`: mixed FastCGI+WSGI fixture (bind a `UnixListener` at `listen`, `smoke.rs`-style `app`, one WSGI request, enumerate `/proc/<view_pid>/fd`); ~150 lines of harness, within the 550-line cap), `--fastcgi-parent-fd` argv + `Options.fastcgi_parent_fds` + validate-before-wrap + `Arc` sharing (stage 1), `SchedulerConfig.{route_lines, pinned_sockets, pool_spawn}`, `Config.check_*` (never in `to_json`), `cli.rs` internal arm, `DevRoot::adopt` wiring (`dev_learn.rs:180` already has it), `BLASTIT_CHECK_*` plumbing | `cargo test -p blastit --test critical_fastcgi_parent_fd --locked && cargo test -p blastit --locked` |
-| `MB.3.6.3.2` | `crates/blastit/src/supervise.rs`, `crates/blastit/tests/{support/fake_php_fpm.rs,fake_php_fpm_smoke.rs}` (3) | `render_pool_conf`, `S0`–`S7`/`U1` (reap-to-`ECHILD`, pgid membership, freeze-before-unlink, `forking::fork(true)`), the inline `#[doc(hidden)] pub mod pool_test` harness, the fake `php-fpm` helper, and a one-line `tests/fake_php_fpm_smoke.rs` (`#[path = "support/fake_php_fpm.rs"] mod fake_php_fpm;`) so Cargo actually builds the helper | `cargo test -p blastit --test fake_php_fpm_smoke --locked && cargo test -p blastit --locked && cargo clippy -p blastit --all-targets --locked -- -D warnings` |
-| `MB.3.6.3.3` | `crates/blastit/tests/critical_fastcgi_pool.rs` (1) | the protected pool suite: `S0`/`S3` fd-table negative oracle, pgid membership, escapee non-publication, `U1` freeze/unlink, `PoolReady` inode equality | `cargo test -p blastit --test critical_fastcgi_pool --locked && cargo clippy -p blastit --all-targets --locked -- -D warnings` |
+| `MB.3.6.3.1` | `crates/blastit/src/{stage0,stage1,config,cli,dev_learn}.rs`, `crates/blastit/tests/critical_fastcgi_parent_fd.rs` (6) | `B1`–`B3` (stage 0; the derived-parent boot diagnostic is `stage0::fail_pool_parent(line, route, path, rule)`, asserted by `critical_fastcgi_parent_fd::production_parent_failure_names_line_route_and_rule`), `remove_entry` and its two units — `planted_entry_at_the_leaf_is_removed` (socket/symlink/regular file/empty dir/non-empty dir/`ENOENT`) and `eight_planted_stale_entries_leave_only_that_route_503` (a boot warning + that route's `Busy`/`503`, other routes unaffected, **never** `exit 1`), `check_fastcgi_entries(…, i, ProbeUid::Route(uid))` per FastCGI route in production and `stage0::run_dev` with `ProbeUid::Dev` and `check_fastcgi_workers(config.view_worker_cap())` in both, **and the §1.2 `dev` line** (`blastit dev: fastcgi route "…": pool workers N (…)`, emitted once per FastCGI route on stderr through the existing `eprintln!("blastit dev: …")` channel, naming the variable that supplied the cap), **`critical_fastcgi_parent_fd.rs`** (one row per §4.8.1 validation rule driven through the pure `validate_parent_fds(&[(usize, RawFd)], config_fd, dbproxy_fds) -> Result<(), BootError>` — so "no descriptor wrapped" is unit-tested before any `OwnedFd` — plus `cli::parse` rejects `--fastcgi-parent-fd` without `--stage=1` and `--help` lacks the string, and `view_child_holds_neither_parentfd_nor_ctl_chan`: mixed FastCGI+WSGI fixture (bind a `UnixListener` at the derived `<run_root>/fastcgi/0/fpm.sock`, `smoke.rs`-style `app`, one WSGI request, enumerate `/proc/<view_pid>/fd`); ~150 lines of harness, within the 550-line cap), `--fastcgi-parent-fd` argv + `Options.fastcgi_parent_fds` + validate-before-wrap + `Arc` sharing (stage 1), `SchedulerConfig.{route_lines, pinned_sockets, pool_spawn}`, `Config.check_*` (never in `to_json`), `cli.rs` internal arm, `Dev::adopt` wiring (`dev_learn.rs:180` already has it), `BLASTIT_CHECK_*` plumbing | `cargo test -p blastit --test critical_fastcgi_parent_fd --locked && cargo test -p blastit --locked` |
+| `MB.3.6.3.2` | `crates/blastit/src/supervise.rs`, `crates/blastit/tests/{support/fake_php_fpm.rs,fake_php_fpm_smoke.rs}` (3) | `render_pool_conf`, `pool_rlimits` + `pool_rlimits_table`, `S0`–`S7`/`U1` (reap-to-`ECHILD`, pgid membership, freeze-before-unlink, `forking::fork(true)`), the inline `#[doc(hidden)] pub mod pool_test` harness (whose fake pool child is forked through the `S3` `ChildIo` literal with `limits: pool_rlimits(workers)` and reports `getrlimit(RLIMIT_NPROC/NOFILE)` on a pipe — `fake_pool_child_has_the_resolved_rlimits`), the fake `php-fpm` helper, and a one-line `tests/fake_php_fpm_smoke.rs` (`#[path = "support/fake_php_fpm.rs"] mod fake_php_fpm;`) so Cargo actually builds the helper | `cargo test -p blastit --test fake_php_fpm_smoke --locked && cargo test -p blastit --locked && cargo clippy -p blastit --all-targets --locked -- -D warnings` |
+| `MB.3.6.3.3` | `crates/blastit/tests/critical_fastcgi_pool.rs` (1) | the protected pool suite: `S0`/`S3` fd-table negative oracle, pgid membership, escapee non-publication, `U1` freeze/unlink, `PoolReady` inode equality, `pool_parent_modes_are_0600_0511_0711`, `planted_entry_at_the_leaf_is_removed`'s non-empty-directory leg, `fake_pool_child_has_the_resolved_rlimits` | `cargo test -p blastit --test critical_fastcgi_pool --locked && cargo clippy -p blastit --all-targets --locked -- -D warnings` |
 | `MB.3.6.4.1` | `crates/blastit/src/{audit_v1,dev_learn,check}.rs` (3) | two-shape `http_obs.jsonl` reader (`HttpObsLine` unchanged), `CheckObsV1::new_with_upstream`, combined-set guards, `executor_requests_per_route` (`executor_ran`), `413` `missing_ingress`, `--learn` static proposal | `cargo test -p blastit --locked` |
 | `MB.3.6.4.2` | `crates/blastit/src/{cli,check}.rs`, `crates/blastit/tests/critical_fastcgi_learn.rs` (3) | 3-way `check` branch order, `check::{DEV_ROOT, SQL_OBS_FD, POOL_PARENT_FD}`, `check::serve_and_run` (`<CheckRoot>/dev` handoff, `Vec<(usize, OwnedFd)>` from `check_fastcgi_sockets` → `clear_cloexec` → child `dev`, `--port 8080`, no parent dbproxy, exit `3`), `critical_fastcgi_learn.rs` | `cargo test -p blastit --test critical_fastcgi_learn --locked && cargo test -p blastit --locked && cargo clippy -p blastit --all-targets --locked -- -D warnings` |
-| `MB.3.7` | `e2e/php/**`, `e2e/php2shell.py`, `e2e/compose.yaml`, `e2e/run.py`, `e2e/rootless/**` (5 globs) | page fences (`e2e/php/suite/` + `e2e/php/assets/`), `P1`–`P12` (`24` client `E` probes), `e2e/rootless/run.py::check_fastcgi_parent_pivot_leaves_sentinel_untouched` + `check_fastcgi_entry_0000_refused_for_route_uid` + route-uid `chmod`/`O_CREAT`/`unlink` negatives + cross-route isolation | `make e2e` |
-| `MB.3.8` | `Cargo.toml`, `Cargo.lock`, `crates/*/Cargo.toml`, `CHANGELOG.md`, `ARCHITECTURE.md`, `docs/{security.md,decisions/ADR-0007-static-asset-serving-and-rewriting.md,design/static-and-spa.md}`, `scripts/{check-release-tag,release-notes}.sh` (7 path entries / 9 files; the release leaf is exempt from the file cap) | 0.2.1 version bump (first cargo run unlocked, then `--locked`), changelog, `ARCHITECTURE.md` §7.3 + `docs/security.md` + `static-and-spa.md` §5.1 + 1-line `ADR-0007` amendment banner | `CARGO_NET_OFFLINE=true cargo check --workspace && make check && make e2e` |
+| `MB.3.7` | `e2e/php/**`, `e2e/php2shell.py`, `e2e/compose.yaml`, `e2e/run.py`, `e2e/rootless/**` (5 globs) | page fences (`e2e/php/suite/` + `e2e/php/assets/`), `P1`–`P12` (`24` client `E` probes), `e2e/rootless/run.py::`check_fastcgi_pool_dir_is_traversable_but_not_writable_for_the_route_uid` + `check_fastcgi_setsid_escapee_contained` + `check_fastcgi_second_boot_normalises_a_frozen_parent` + `check_fastcgi_b2_foreign_owner_segment_refused` + `check_fastcgi_production_workers_over_budget_exits_1` + `check_fastcgi_entry_0000_refused_for_route_uid` + route-uid `chmod`/`O_CREAT`/`unlink`/`renameat` negatives + cross-route isolation | `make e2e` |
+| `MB.3.8` | `Cargo.toml`, `Cargo.lock`, `crates/*/Cargo.toml`, `CHANGELOG.md`, `ARCHITECTURE.md`, `docs/{security.md,decisions/ADR-0007-static-asset-serving-and-rewriting.md,design/static-and-spa.md}`, `scripts/{check-release-tag,release-notes}.sh` (7 path entries / 9 files; the release leaf is exempt from the file cap) | 0.2.1 version bump (first cargo run unlocked, then `--locked`), changelog, `ARCHITECTURE.md` **§2.2 (the `<runtime>/fastcgi/<route_index>/` layout and its three modes)** and §7.3, `docs/security.md`, `static-and-spa.md` §5.1, 1-line `ADR-0007` amendment banner | `CARGO_NET_OFFLINE=true cargo check --workspace && make check && make e2e` |
 
 **Type-ownership matrix (single source of truth for assignments).** A type is defined in
 exactly one crate and owned by exactly one leaf; every other leaf that names it is a
@@ -1701,7 +2075,7 @@ file is a path violation.
 |---|---|---|---|
 | `Upstream`, `UpstreamPlan`, `UpstreamHead` | `blastit-backend` | `MB.9.1.1` | `MB.9.1.2`, `MB.9.2.1.2`, `MB.9.2.2`, `MB.9.3`, `MB.3.6.1.2`, `MB.3.6.2.1`, `MB.3.6.2.2` |
 | `RouteId`, `RouteState`, `RoutePermit` | `blastit-backend` | `MB.9.1.1` | `MB.9.2.1.2`, `MB.9.2.2`, `MB.9.3`, `MB.3.6.2.1` |
-| `PinnedSocket` | `blastit-backend` | `MB.9.1.1` | `MB.9.2.1.1` (`config.rs`), `MB.3.6.2.1`, `MB.3.6.2.2`, `MB.3.6.3.1` (`stage1.rs`) |
+| `PinnedSocket` | `blastit-backend` | `MB.9.1.1` (also owns `bad_socket_names_are_refused`: `PinnedSocketError::BadName` for empty/`.`/`..`/`/`-bearing names — the structural reason a manifest can never be a socket path) | `MB.9.2.1.1` (`config.rs`), `MB.3.6.2.1`, `MB.3.6.2.2`, `MB.3.6.3.1` (`stage1.rs`) |
 | `PoolPort` | `blastit-backend` | `MB.9.1.1` | `MB.9.2.1.2`, `MB.3.6.2.1` |
 | `BodySource`, `CancelToken` | `blastit-backend` | `MB.9.1.1` | `MB.9.2.1.2`, `MB.9.2.2`, `MB.9.3`, `MB.3.6.2.1` |
 | `Observation`, `ObservationKind` | `blastit-backend` | `MB.9.1.1` | `MB.9.2.2`, `MB.9.3`, `MB.3.6.2.1`, `MB.3.6.4.1` |
@@ -1709,7 +2083,8 @@ file is a path violation.
 | `BackendBuilder`, `Registry`, `BootError` | `blastit-backend` | `MB.9.1.1` | `MB.9.2.1.2`, `MB.9.2.2`, `MB.9.3`, `MB.3.6.2.1` (`MB.9.2.1.3` only re-exports `builtin_registry`, whose return type is `Registry`) |
 | `Capability`, `HeadSpec`, `OutcomeKind`, `PeerScript`, `CancelAt` | `blastit-backend::conformance` | `MB.9.1.2` | `MB.9.4`, `MB.9.2.2`, `MB.9.3`, `MB.3.6.1.2`, `MB.3.6.2.2` |
 | `RunError` | `blastit-scheduler::error` | `MB.9.2.1.2` | `MB.9.2.1.3` (`roles.rs`) |
-| `FastCgiPolicy`, `Executor` | `blastit-manifest` | `MB.3.5.1` | `MB.9.1.1`, `MB.9.2.1.1`, `MB.3.6.2.1`, `MB.3.5.2`, `MB.3.6.3.1`, `MB.3.6.3.2` |
+| `FastCgiPolicy` (`entry`, `workers: Option<u32>`), `Executor` | `blastit-manifest` | `MB.3.5.1` | `MB.9.1.1`, `MB.9.2.1.1`, `MB.3.6.2.1`, `MB.3.5.2`, `MB.3.6.3.1`, `MB.3.6.3.2`, `MB.3.6.4.2` (call site only) |
+| `resolved(cap)`, `MAX_POOL_WORKERS`, `Manifest::check_fastcgi_workers` | `blastit-manifest` (added by the pool leaf) | **pool leaf, gated on `MB.12`** | `MB.3.6.3.1`, `MB.3.6.3.2`, `MB.3.6.4.2` |
 | `PoolSpawn` | `blastit-scheduler::config` | `MB.9.2.1.1` | `MB.9.2.1.2`, `MB.3.6.2.1`, `MB.3.6.3.1` (`stage1.rs`) |
 | `SocketProbe`, `SocketProbeError`, `ProbeUid` | `blastit-manifest::probe` | `MB.3.5.2` | `MB.3.6.3.1`, `MB.3.6.4.2` |
 | `FastCgiPaths`, `LockdownError` | `blastit-fastcgi::lockdown` | `MB.3.4.2` | `MB.3.6.2.1`, `MB.3.4.2` tests |
@@ -1810,6 +2185,57 @@ stale brief.**
    - `MB.3.8`: add `docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md` (for the 1-line `Amended by ADR-0008` banner) alongside `docs/security.md` and `docs/design/static-and-spa.md`.
 3. **Fallback splits for the remaining near-cap leaves** (each is **two numeric `new` children**, e.g. `MB.9.2.1.2.1`/`MB.9.2.1.2.2` — `plan.py`'s `ID_RE` rejects letter suffixes): `MB.9.2.1.2` → `.1` (`UpstreamHead` + `RouteRuntime.stages` + `ViewHub`/`SessionPort`) + `.2` (session task/`SessionDoneGuard` + `http_obs` writer + `run_with`/`RunError` + `builtin_registry()` + `run` + `BuildCtx.external_executor` + the transitional `stages.is_empty()` path); `MB.3.6.3.2` → `.1` (`render_pool_conf` + `PoolConf` + `pool_test` harness) + `.2` (`S0`–`S7`/`U1` + fake helper + smoke test); `MB.3.6.2.1` → `.1` (`fastcgi.rs` pump) + `.2` (`fastcgi_builder.rs`: `FastCgiPaths`, mapping, `ensure_ready`/`on_ctl`/registration; that file is in `.1`'s paths, so this split adds no path); `MB.3.5.2` → `.1` (`blastit-manifest/src/probe.rs` + `lib.rs` `pub mod probe;` + protected suite) + `.2` (`crates/blastit/src/probe.rs` + `lib.rs` `pub mod supervise;` + `supervise.rs` narrowing + `manifest.md`); `MB.3.6.3.1` → `.1` (`B1`–`B3`, `config`, `cli`) + `.2` (`stage1` handoff, `dev_learn`, entry call, parent-fd suite); `MB.9.2.2` → `.1` (`StaticUpstream`) + `.2` (deleted branches + `"static"` registration); `MB.9.3` → `.1` (`WsgiUpstream`) + `.2` (`ExchangeChannel` + registration); `MB.9.1.1` → `.1` (crate + `types.rs`, owns `Cargo.lock`) + `.2` (`registry.rs`/`lib.rs`, no lock). `MB.9.2.1.2`/`.3` and `MB.3.6.3.2`/`.3` are **already split unconditionally** (item 1), not fallbacks. Each split is mechanical and changes no path.
 
+4. **Amendment sync (`MB.3.9.2`, 2026-11-14).** Every leaf below lands the amendment in the
+   same change as its original scope; none of them re-opens a design question.
+   - `MB.3.5.1` (**landed: grammar only**): `FastCgiPolicy { entry: String, workers: Option<u32> }`
+     (**no `listen`**), `FastCgiListenDerived`, `FastCgiDeadDeclaration`, and deletion of
+     `FastCgiListenInvalid` / `FastCgiListenParentInvalid`; the parser keeps the landed
+     `FastCgiListenDerived` arm (it carries no value) and loses `!has_listen` `MissingKey`
+     and `DEFAULT_WORKERS = 4`; `model.rs`'s doc comment names the derived socket. **Not
+     this leaf's:** `resolved_workers`, `MAX_POOL_WORKERS`, `check_fastcgi_workers`,
+     `FastCgiWorkersOverBudget`/`FastCgiWorkersCapExceeded` — they belong to the pool leaf
+     below.
+   - **Pool leaf (gated on `MB.12`)** — the pool path is frozen pending the embed-vs-pool
+     decision, so these land with whichever leaf implements that mechanism (today
+     `MB.3.6.3.1`/`MB.3.6.3.2`), in a change that also touches
+     `crates/blastit-manifest/src/{model,error}.rs`: the `resolved(cap)` helper,
+     `MAX_POOL_WORKERS`, `Manifest::check_fastcgi_workers` and its three ordered arms, the
+     two worker-budget variants, and their oracles `workers_at_budget_is_accepted`,
+     `workers_over_budget_is_boot_fatal` and `absent_workers_under_a_512_budget_is_boot_fatal`
+     (plus `resolved_workers_table`). `workers` keeps its grammar meaning regardless; under
+     an embedded SAPI `MB.12` may retire the resolution, the ceiling and the variants and
+     leave the key inert. That leaf also fixes `model.rs`'s "the derivation is the
+     scheduler's" comment to match §4.8.1.
+   - `MB.3.5.2`: `ManifestError::FastCgiPoolSocketInvalid { location, path, rule }` in
+     `crates/blastit-manifest/src/error.rs` (added to its files; the three `dev` refusal legs
+     below need it), `SocketProbe::parent(run_root, route_index)` + `check_leaf(parent, uid)`,
+     `check_fastcgi_sockets(run_root, probe)`, `DevProbe` creating and owning
+     `<run_root>/fastcgi/<i>` (`0700`); the suite rows listed in §7.2; `manifest.md` item 2
+     with **no** socket key.
+   - `MB.3.6.3.1`: `stage0` calls `check_fastcgi_workers(config.view_worker_cap())`
+     (production **and** `dev`) before any route process exists, runs `B1`/`B2` against
+     `<runtime>` (not `manifest_dir`), and passes the run root to `DevProbe`.
+   - `MB.3.6.3.2`: `render_pool_conf` writes `listen=<derived>` and `pm.max_children=<resolved>`
+     (a conf file cannot carry an rlimit), and a separate `#[doc(hidden)] pub fn
+     pool_rlimits(resolved: u32) -> Rlimits` is the one place `RLIMIT_NPROC=<resolved>+2` and
+     `RLIMIT_NOFILE=max(1024, <resolved>*4+32)` are computed for `ChildIo.limits`.
+   - `MB.3.6.4.2`: `critical_fastcgi_learn::{dev,check}_exits_n_when_workers_exceed_budget`,
+     `dev_exits_1_under_a_512_budget` and
+     `check_child_leaf_failure_exits_2_naming_the_derived_socket`; `check::execute` calls
+     `check_fastcgi_workers`, then phase 1
+     `check_fastcgi_sockets(&dev_root, …)` **before** `serve_and_run` (the returned fds are
+     what it `clear_cloexec`s for the child); `MB.3.9.3` runs phase 2 `check_fastcgi_leaf`
+     once that child's own pool reports ready — the failure `check` observes is the child
+     `dev` exiting `1`, which `check` maps to `exit 2` (R20).
+   - `MB.3.7`: replace the hand-written-pool/`listen` e2e legs with the derived-parent
+     refusal and the traversable-but-not-writable pool-directory legs of §7.2; the **generated** pool file
+     is the fence.
+   - `MB.3.9.5` (dev pool suite) asserts `leaf_missing_after_spawn_exits_1_in_dev` and the §1.2 line: `dev_prints_resolved_pool_workers`
+     (env-derived and explicit legs, exact stderr substring, once per FastCGI route, stdout
+     still exactly three lines).
+   - `MB.3.9.1` (page) and `MB.3.9.3`/`.4`/`.5` (dev pool lifecycle) are the sibling nodes;
+     this document is their input, and none of them may reintroduce a socket key.
+
 ### 8.2 Brief re-sync before dispatch
 
 | Plan node | Stale text on disk | Required brief sync |
@@ -1828,7 +2254,12 @@ stale brief.**
 | `MB.9.4` | generic `IMPLEMENTATIONS` check | exact 5-entry `assert_eq!(IMPLEMENTATIONS, …)` + per-class `Expect` completeness assertions |
 | `MB.3.6.1` (`.1`/`.2`) | 9 files; `PoolReady { route }` only; first cmd `--locked`; no `Makefile` | split `.1`/`.2`; `PoolReady { route, sock_dev, sock_ino }`; `.1` also owns `crates/blastit/src/supervise.rs` (production `Ctl` match) and its acceptance builds `-p blastit`; `.2` runs unlocked once to write `Cargo.lock` and appends `blastit-fastcgi --test conformance` to `Makefile` |
 | `MB.3.6.2` (`.1`/`.2`) | "(canonicalised, R2-checked)"; "in-process socketpair fake peer"; no `Makefile` | `.1` = session pump (`FastCgiPaths` from `openat2`-checked relative segments, **never** `canonicalize()`; `PinnedSocket` `/proc/self/fd` connect + `C1` + exact `SO_PEERCRED`; `external_executor` early return; `"fastcgi"` registered). `.2` = suites + `Makefile`: fake peer is a `TempDir` `UnixListener` wrapped in a `PinnedSocket` built via `PinnedSocket::new` (never a `socketpair`, never a path string); 5-binary `rs-test-conformance` check + post-ready parent-rename sentinel + row 25 `504`/`ABORT_REQUEST` + panic/non-UTF-8 + `foreign_uid_peer_is_fault_502` |
-| `MB.3.6.3` (`.1`/`.2`/`.3`) | `BLASTIT_CHECK_HTTP_OBS`/`SQL_OBS_FD` only; no `DEV_ROOT` or `obs_fd` close; paths list a stale `zygote.rs` | `.1` = `B1`–`B3`, `render_pool_conf` is in `.2`, `BLASTIT_CHECK_*` (`DevRoot::adopt` already at `dev_learn.rs:180`; `bind_all` at `slot_offset = 0`), close `check_sql_obs_fd` after `fork_dbproxy_dev`, `CAP_CHOWN` boot error, `host=<runtime>/views/<uid>` + private `TMPDIR`, the `parentfd` handoff (`--fastcgi-parent-fd` in `exec_stage1`/`exec_stage1_dev`, `cli.rs` internal arm only with `--stage=1` and invisible in `--help`, `Options.fastcgi_parent_fds` validated **before** `OwnedFd`, `Arc<OwnedFd>` shared with init's pool state, `ChildIo.keep` via `pinned_socket_fds()`, `Config::for_dev()` reading `POOL_PARENT_FD_ENV` (`pub(crate) const` in `config.rs`) before `BLASTIT_*` stripping (`MB.3.6.4.2` aliases it as `check::POOL_PARENT_FD`), `Config::to_json` excludes it, `B1` `O_NOFOLLOW`+`lstat`). `.2` = `render_pool_conf`, `S0`–`S7`/`U1` (parent-side `setpgid`, `S1` reap-to-`ECHILD`, `S4`/`S6` pgid-membership, freeze-before-unlink `U1`, `forking::fork(true)`), `HOME=<runtime>/views/<uid>/tmp`, `pm.max_requests=max(BLASTIT_VIEW_MAX_REQUESTS, 500)`, the fake `php-fpm` helper (`tests/support/fake_php_fpm.rs`), the `tests/fake_php_fpm_smoke.rs` one-line include, and the inline `#[doc(hidden)] pub mod pool_test` harness; `.3` duplicates the `children()`/`fds()` helpers locally (no `smoke.rs` import); `.3` = `critical_fastcgi_pool.rs` (the `S0` fd-table / `setsid()` escapee / pgid-membership / `U1` suite) |
+| `MB.3.6.3` (`.1`/`.2`/`.3`) | `BLASTIT_CHECK_HTTP_OBS`/`SQL_OBS_FD` only; no `DEV_ROOT` or `obs_fd` close; paths list a stale `zygote.rs` | `.1` = `B1`–`B3`, `render_pool_conf` is in `.2`, `BLASTIT_CHECK_*` (`Dev::adopt` already at `dev_learn.rs:180`; `bind_all` at `slot_offset = 0`), close `check_sql_obs_fd` after `fork_dbproxy_dev`, `CAP_CHOWN` boot error, `host=<runtime>/views/<uid>` + private `TMPDIR`, the `parentfd` handoff (`--fastcgi-parent-fd` in `exec_stage1`/`exec_stage1_dev`, `cli.rs` internal arm only with `--stage=1` and invisible in `--help`, `Options.fastcgi_parent_fds` validated **before** `OwnedFd`, `Arc<OwnedFd>` shared with init's pool state, `ChildIo.keep` via `pinned_socket_fds()`, `Config::for_dev()` reading `POOL_PARENT_FD_ENV` (`pub(crate) const` in `config.rs`) before `BLASTIT_*` stripping (`MB.3.6.4.2` aliases it as `check::POOL_PARENT_FD`), `Config::to_json` excludes it, `B1` `O_NOFOLLOW`+`lstat`). `.2` = `render_pool_conf`, `S0`–`S7`/`U1` (parent-side `setpgid`, `S1` reap-to-`ECHILD`, `S4`/`S6` pgid-membership, freeze-before-unlink `U1`, `forking::fork(true)`), `HOME=<runtime>/views/<uid>/tmp`, `pm.max_requests=max(BLASTIT_VIEW_MAX_REQUESTS, 500)`, the fake `php-fpm` helper (`tests/support/fake_php_fpm.rs`), the `tests/fake_php_fpm_smoke.rs` one-line include, and the inline `#[doc(hidden)] pub mod pool_test` harness; `.3` duplicates the `children()`/`fds()` helpers locally (no `smoke.rs` import); `.3` = `critical_fastcgi_pool.rs` (the `S0` fd-table / `setsid()` escapee / pgid-membership / `U1` suite) |
+| `MB.3.5` (`.1`/`.2`) — **amended 2026-11-14, re-scoped 2026-11-14 (attempt 2)** | a `listen` field on `FastCgiPolicy`, a `listen` arm plus `!has_listen` `MissingKey` in `parse::fastcgi_policy`, `FastCgiListenInvalid`/`FastCgiListenParentInvalid`, `SocketProbe::check(manifest_dir, listen, route_index)`, `check_fastcgi_sockets(manifest_dir, probe)`, `workers: u32` with `DEFAULT_WORKERS = 4`; **(attempt 2)** a brief that also demands `resolved_workers`/`MAX_POOL_WORKERS`/`check_fastcgi_workers`/`FastCgiWorkersOverBudget`/`FastCgiWorkersCapExceeded` | drop the field, the two variants and `DEFAULT_WORKERS`; **keep** the landed `FastCgiListenDerived` arm (it carries no value) and lose only `!has_listen` `MissingKey`: `FastCgiPolicy { entry, workers: Option<u32> }` (**only** the optional value; the resolution, ceiling, check and two variants are the pool leaf's, **gated on `MB.12`** — not `MB.3.5.1`'s); `parent(run_root, route_index)`; `check_fastcgi_sockets(run_root, probe)`; this epic's `.1` lands grammar only and `.2` lands `FastCgiPoolSocketInvalid` (plus `crates/blastit-manifest/src/error.rs` in its files); the **pool leaf, gated on `MB.12`**, adds `Manifest::check_fastcgi_workers(budget)`, `FastCgiWorkersOverBudget`/`FastCgiWorkersCapExceeded` and their oracles; §7.2 names the suite rows |
+| `MB.3.5.2` — **amended 2026-11-14** | brief still requires `shared_listen_parent_is_boot_fatal`, `ParentWritableOrSymlink`, `SocketProbe::check(manifest_dir, listen, route_index)` | delete all three; the suite's rows are **exactly** §7.2's `critical_fastcgi_manifest.rs` inventory (9 names, quoted there) plus the fake-probe legs for `parent`/`check_leaf`; `SocketProbeError` loses `ParentWritableOrSymlink` and gains `NotDirectory`/`InsecureMode`/`NotConnectable` |
+| `MB.3.9.5` — **sibling node (new)** | brief does not name the amendment's two oracles | its protected suite `crates/blastit/tests/critical_fastcgi_dev_pool.rs` must include `dev_prints_resolved_pool_workers` (three legs) and `dev_starts_one_pool_per_route` (two routes → two masters in two `<route_index>` dirs, none after `SIGTERM`); §7.1 lists the file |
+| `MB.3.9.3`/`MB.3.9.4` — **sibling nodes (new)** | briefs say `<run>/<route>/fpm.sock` (two segments), a project-local `.blastit/run`, and `dev`/`check` `External` | the normative path is `<run_root>/fastcgi/<route_index>/fpm.sock` with `<route_index>` = `Manifest::routes` index; `<run_root>` is whatever blastit-created root the provider uses (`Dev::adopt`'s, or `.blastit/run` if that node chooses it — its call); `dev` and `check`'s child `dev` are `PoolSpawn::Managed`, `dev` starts/stops the pool it owns, phase 1 of §4.8.1 runs before the pool and phase 2 after it, and `dev_starts_one_pool_per_route` (`MB.3.9.5`) replaces `external_pool_never_spawns_php_fpm` |
+| `MB.3.6.3`/`MB.3.6.4` — **amended 2026-11-14** | `B1`/`B2` resolve a manifest parent from `manifest_dirfd`; `render_pool_conf` takes a manifest `listen`; `RouteState::new(…, workers)`; `check` probes a manifest socket | `B1`/`B2` anchor on `<runtime>` and create `<runtime>/fastcgi/<i>`; `render_pool_conf`/`RouteState::new` use `resolved_workers(view_worker_cap())`; `stage0` and `check::execute` call `check_fastcgi_workers`; who starts the `dev` pool is `MB.3.9.3` |
 | `MB.3.6.4` (`.1`/`.2`) | unsplit; no `BLASTIT_CHECK_DEV_ROOT`; `-- <command>` | split `.1`/`.2`; `<CheckRoot>/dev` handoff via `BLASTIT_CHECK_DEV_ROOT`; `check::POOL_PARENT_FD` (`BLASTIT_CHECK_POOL_PARENT_FD`): thread the `Vec<(usize, OwnedFd)>` from `check_fastcgi_sockets`, `clear_cloexec` immediately before spawning child `dev`; `blastit check -- <suite>`; `executor_ran` exercise count |
 
 ---
@@ -1891,7 +2322,7 @@ stale brief.**
 | `testability` m1..m5 | MINOR | **All 5 accepted:** m1 (`critical_fastcgi_lockdown.rs` in `critical (new)`, §7.1); m2 (`critical_head_refusals.rs` marked "new file", §7.1/§7.2); m3 (strict per-class `Expect` assertions, §4.11); m4 (ADR-0008 Consequences narrowed to contract/refusal/body-cap/observation); m5 (Round 1–3 dispositions recorded here). |
 | `implementability` M2 | MAJOR | **Accepted → §4.2.1 (`RouteState`, `BuildCtx.state`), §4.4, §4.8.1.** One shared `Arc<RouteState>` created by the scheduler and passed in `BuildCtx.state`; both scheduler and adapters read the exact same atomics. |
 | `implementability` M3 | MAJOR | **Accepted → §8, §8.1.** Split all 5 over-budget leaves (`MB.3.5` → `.1`/`.2`, `MB.9.1` → `.1`/`.2`, `MB.9.2.1` → `.1`/`.2`, `MB.3.6.1` → `.1`/`.2`, `MB.3.6.4` → `.1`/`.2`) so every leaf is ≤ 7 files and ≤ 550 lines. |
-| `implementability` M4 | MAJOR | **Accepted → §1.3, §4.10.3, §8 (`MB.3.6.3`, `MB.3.6.4.2`).** Added `BLASTIT_CHECK_DEV_ROOT=<CheckRoot>/dev` (`check::DEV_ROOT`) + `DevRoot::adopt` + `bind_all` at `slot_offset = 0` so `prepare_env` and child `dev`'s `<CheckRoot>/dev/views/0/.s.PGSQL.<port>` match. |
+| `implementability` M4 | MAJOR | **Accepted → §1.3, §4.10.3, §8 (`MB.3.6.3`, `MB.3.6.4.2`).** Added `BLASTIT_CHECK_DEV_ROOT=<CheckRoot>/dev` (`check::DEV_ROOT`) + `Dev::adopt` + `bind_all` at `slot_offset = 0` so `prepare_env` and child `dev`'s `<CheckRoot>/dev/views/0/.s.PGSQL.<port>` match. |
 | `implementability` M5 | MAJOR | **Accepted → §4.2, §8.** Documented and wrote into every lock-owning leaf's acceptance cell the two-step rule: first build runs offline without `--locked` to update `Cargo.lock`, then `--locked` and `make check`. |
 | `implementability` M6 | MAJOR | **Accepted → §8, §8.1, §8.2.** Added `MB.3.5.1` to `MB.9.1.1`'s `depends_on` so `blastit_manifest::Executor` exists before `blastit-backend` compiles. |
 | `implementability` MINOR-1..5 | MINOR | **All 5 accepted:** 1 (numeric plan IDs everywhere, §8); 2 (`roles::scheduler` calls `builtin_registry()`, `SchedulerConfig.pinned_sockets` avoids premature Cargo edge, 3-kind assertion in `MB.3.6.2`); 3 (`SchedulerConfig.pool_spawn: PoolSpawn { Managed, External }` scoped to `Pool` routes, §4.8.1); 4 (boot + lifecycle kind sites named explicitly vs dispatch, §4.2/ADR-0008); 5 ("zero I/O in its own source", R14/§7.1). |
@@ -1945,7 +2376,7 @@ stale brief.**
 | `implementability` M6 (manifest crate has no `libc`/`rustix`) | MAJOR | **Accepted → §4.1, §8 (`MB.3.5.2`), §8.1.** `SocketProbe`/`SocketProbeError`/`check_fastcgi_sockets` stay pure in `blastit-manifest`; `DevProbe`/`ProductionProbe` move to `crates/blastit/src/probe.rs` (`rustix` already a dep), so no `Cargo.toml`/lock leaf is needed. |
 | `implementability` M7 (`Ctl` breaks `tests/common/mod.rs`) | MAJOR | **Accepted → §8 (`MB.3.6.1.1`), §8.1.** `crates/blastit-scheduler/tests/common/mod.rs` is added to `MB.3.6.1.1`'s paths with the arm `Ctl::PoolSpawned { .. } \| Ctl::PoolReady { .. } \| Ctl::PoolExited { .. } => {}`. |
 | `implementability` M8 (`peer_gid` typo) | MAJOR | **Accepted → §4.8.1.** `peer_uid = invoking_uid`, `peer_gid = invoking_gid` (was `peer_gid = invoking_uid`, which `502`s every `dev`/`check` request). |
-| `implementability` M9 (`MB.3.6.3` paths) | MAJOR | **Accepted → §8 (`MB.3.6.3.1`/`.2`), §8.1, §8.2.** `cli.rs` and `dev_learn.rs` added (the internal `--fastcgi-parent-fd` arm and `DevRoot::adopt`, which already lives at `dev_learn.rs:180`); stale `zygote.rs` dropped; §8.1 item 2 lists the change. |
+| `implementability` M9 (`MB.3.6.3` paths) | MAJOR | **Accepted → §8 (`MB.3.6.3.1`/`.2`), §8.1, §8.2.** `cli.rs` and `dev_learn.rs` added (the internal `--fastcgi-parent-fd` arm and `Dev::adopt`, which already lives at `dev_learn.rs:180`); stale `zygote.rs` dropped; §8.1 item 2 lists the change. |
 | `implementability` M10 (leaf budgets) | MAJOR | **Accepted → §8, §8.1, §8.2.** `MB.3.6.2` → `MB.3.6.2.1` (session pump) + `MB.3.6.2.2` (suites/`Makefile`); `MB.3.6.3` → `MB.3.6.3.1` (`B1`–`B3`, handoff, `cli`/`config`/`stage0`) + `MB.3.6.3.2` (`S0`–`S7`/`U1` + pool tests + fake helper); Order line, §8.1 sub-splits and §8.2 rows updated; lock ownership stays in the one serialized chain. |
 | `implementability` M11 (undefined conformance types) | MAJOR | **Accepted → §4.11.** `Capability(u32)` (hand-rolled `const` bits, `union`, `contains`, `BitOr`, `ALL`; no `bitflags`), `HeadSpec`, `OutcomeKind`, `PeerScript`, `CancelAt` defined in the shared block. |
 | `implementability` M12 (transitional registry) | MAJOR | **Accepted → §4.2 (transitional rule), §8 (`MB.9.2.2`, `MB.9.3`).** Until `MB.9.3`, `run_with` builds a stage only for a route with a registered builder and leaves `stages` empty (0.2.0 path serves it); `MB.9.3` deletes the fallback and a missing builder becomes `RunError::Boot`. No fallback backend is added. |
@@ -2147,11 +2578,11 @@ stale brief.**
 | `testability` MINOR-T5 | MINOR | **Accepted → §4.11.** `conformance_table.rs` asserts the exact `cases()` id set as well as `IMPLEMENTATIONS`. |
 | `testability` MINOR-T6 | MINOR | **Accepted → §7.1 (docs row).** The whole `--json` document is asserted; the Deployments `blastit --preset compose-traefik` fence is explicitly exempt. |
 | `testability` MINOR-T7 | MINOR | **Accepted → §7.1 (unit row).** `critical_fastcgi_manifest.rs` covers the `check_entry` `ENOSYS` refusal and the reply-byte parser (`O/U/N/S/R/M/I/T`). |
-| `testability` MINOR-T8 | MINOR | **Accepted → §7.2 (`R1`–`R6`).** Named fns: `connect_and_trace_are_boot_fatal`, `workers_zero_and_sixty_five_are_boot_fatal`, `shared_listen_parent_is_boot_fatal`, `probe_timeout_is_boot_fatal`; `blastit-sys` `scheduler_af_unix_allowed_bind_listen_denied` + `view_twin`. |
+| `testability` MINOR-T8 | MINOR | **Accepted → §7.2 (`R1`–`R6`).** Named fns: `connect_and_trace_are_boot_fatal`, `workers_zero_and_sixty_five_are_boot_fatal`, `probe_timeout_is_boot_fatal`; `blastit-sys` `scheduler_af_unix_allowed_bind_listen_denied` + `view_twin`. *(Superseded by `MB.3.9.2`: the shared-parent case no longer exists — the parent is derived — and `listen_key_is_unknown` + `workers_over_budget_is_boot_fatal` replace it; the latter is now the **pool leaf's**, gated on `MB.12`.)* |
 | `testability` MINOR-T9 | MINOR | **Accepted → §8.2 (`MB.3.4.2`).** Plan `paths` drift is fixed by §8.1 item 2 (`src/lib.rs`). |
 | `testability` MINOR-T10 | MINOR | **Accepted → §7.2 (`R16`).** Retained symbols named: `rewrite::decide`, `static_response::StaticBody`, `head_segments`, `resolve`. |
 | `testability` MINOR-T11 | MINOR | **Accepted → §7.2 (`R19`/`R10`/`R18`).** Tests for the 60-lines/request `STDERR` cap, the 8 KiB CGI value cap, the `BLASTIT_MAX_WORKERS × BLASTIT_MAX_BODY_BYTES` aggregate, `drain`, and the parked-static-read slot; body sentinel in `http_obs.jsonl`. |
-| `testability` MINOR-T12 | MINOR | **Accepted → §7.2 (`R2,R3,R20`).** The pool suite's single-UID fixture pins `fchownat`/`0555`/`0600` assertions as `#[ignore]`d `requires-root`; the root-only legs run in `e2e/rootless`. |
+| `testability` MINOR-T12 | MINOR | **Accepted → §7.2 (`R2,R3,R20`).** *(Superseded by `MB.3.9.2`: the modes are `0711`/`0511`/`0600` and the oracle is `pool_parent_modes_are_0600_0511_0711`.)* The pool suite's single-UID fixture pins `fchownat`/`0555`/`0600` assertions as `#[ignore]`d `requires-root`; the root-only legs run in `e2e/rootless`. |
 
 ### Disposition of Round-5 `testability` findings (MAJOR-T1 + MINOR-T1..T10)
 
@@ -2173,19 +2604,19 @@ stale brief.**
 
 | Lens & ID | Grade | Resolution & exact section |
 |---|---|---|
-| `testability` MAJOR-T1 | MAJOR | **Accepted → §7.1, §7.2 (`R9`/`R20`, `R17`/`R18`), §8 (`MB.3.6.2.2`, `MB.3.6.4.2`), ADR-0008 decision 6.** (a) `critical_fastcgi_dispatch::external_mode_never_calls_ensure_pool` — recording `PoolPort` fake (`Arc<AtomicUsize>` + panic-on-call), `external_executor = true`, one request → `200`, counter `0`; the `false` twin → counter `1` and waits for `PoolReady`. (b) `critical_fastcgi_learn::external_pool_never_spawns_php_fpm` — after one request under `dev`, `/proc/<init_pid>/task/<init_pid>/children` has no pid whose `/proc/<pid>/comm` is `php-fpm` (`children()` in `smoke.rs`). Both unprivileged, in `make check`. |
+| `testability` MAJOR-T1 | MAJOR | **Accepted → §7.1, §7.2 (`R9`/`R20`, `R17`/`R18`), §8 (`MB.3.6.2.2`, `MB.3.6.4.2`), ADR-0008 decision 6.** (a) `critical_fastcgi_dispatch::external_mode_never_calls_ensure_pool` *(superseded for the `dev` half by `MB.3.9.2`: `dev` is `Managed` after `MB.3.9.4`, so and after `MB.3.9.4` no shipped mode keeps the external flag — see §7.2 and ADR `Amends`)* — recording `PoolPort` fake (`Arc<AtomicUsize>` + panic-on-call), `external_executor = true`, one request → `200`, counter `0`; the `false` twin → counter `1` and waits for `PoolReady`. (b) `critical_fastcgi_learn::external_pool_never_spawns_php_fpm` — after one request under `dev`, `/proc/<init_pid>/task/<init_pid>/children` has no pid whose `/proc/<pid>/comm` is `php-fpm` (`children()` in `smoke.rs`). Both unprivileged, in `make check`. |
 | `testability` MINOR-T1 | MINOR | **Accepted → §7.1.** A "Proves" clause for `critical_fastcgi_parent_fd.rs`: parent-fd argv validation + `cli::parse` guard + the mixed-manifest view fd oracle. |
-| `testability` MINOR-T2 | MINOR | **Accepted → §8 (`MB.3.6.3.1`).** The `Lands` cell names `view_child_holds_neither_parentfd_nor_ctl_chan` (mixed fixture, `UnixListener` at `listen`, `smoke.rs`-style `app`, one WSGI request, `/proc/<view_pid>/fd`), ~150 lines within the cap. |
+| `testability` MINOR-T2 | MINOR | **Accepted → §8 (`MB.3.6.3.1`).** The `Lands` cell names `view_child_holds_neither_parentfd_nor_ctl_chan` (mixed fixture, `UnixListener` at the derived socket path, `smoke.rs`-style `app`, one WSGI request, `/proc/<view_pid>/fd`), ~150 lines within the cap. |
 | `testability` MINOR-T3 | MINOR | **Accepted → §7.2 (`R2`/`R3`).** The predicate is inode identity: the inode read from init's `ctl.chan` entry before the request is absent from the view's table; the view's `view.chan` inode **is** present (a socketpair's two ends share an inode, so "no socket in common with init" would fail on the correct program). |
 | `testability` MINOR-T4 | MINOR | **Accepted → §7.2 (`R2`/`R3`).** Preconditions asserted: WSGI response `200`, view pid found via `/proc/<init_pid>/task/<init_pid>/children`, fd set non-empty and containing `view.chan` + stdio; no `#[ignore]`/skip (the test is unprivileged and `critical-skip-check` would flag it). |
-| `testability` MINOR-T5 | MINOR | **Accepted → §7.2 (`R2`/`R3`).** Fixture contract named: the manifest needs `app` (a WSGI route with neither block makes `can_boot_without_app()` false); the test binds a `UnixListener` at `listen` in its temp dir even though it never speaks FastCGI; it never starts `php-fpm`; it reuses `smoke.rs`'s `Fixture`/`fds()`/`children()`. |
+| `testability` MINOR-T5 | MINOR | **Accepted → §7.2 (`R2`/`R3`).** Fixture contract named: the manifest needs `app` (a WSGI route with neither block makes `can_boot_without_app()` false); the test binds a `UnixListener` at the derived `<run_root>/fastcgi/0/fpm.sock` in its temp dir even though it never speaks FastCGI; it never starts `php-fpm`; it reuses `smoke.rs`'s `Fixture`/`fds()`/`children()`. |
 | `testability` MINOR-T6 | MINOR | **Accepted → §7.2 (`R2`/`R3`).** The init-side assertion (`/proc/<init_pid>/fd` still resolves the pinned parent after `PoolReady` and after `RETIRE`/respawn) is `requires-root` and lives in `e2e/rootless`; the unprivileged `dev` addition checks `/proc/<init_pid>/fd` holds a directory fd whose `st_dev`/`st_ino` equal the fixture's `run/` inode. |
 
 ### Disposition of Round-7 `testability` findings (MINOR-T1..T4; lens PASSES)
 
 | Lens & ID | Grade | Resolution & exact section |
 |---|---|---|
-| `testability` MINOR-T1 | MINOR | **Accepted → §7.2 (`R17`/`R18`).** `external_pool_never_spawns_php_fpm` now states the `200` fake-peer precondition, walks `/proc/<init_pid>/task/*/children` **transitively** (a double-forked `php-fpm` is not a direct child of the main thread), and adds a **positive control** (a deliberately renamed `/bin/sleep` child the same walk finds). |
+| `testability` MINOR-T1 | MINOR | **Accepted → §7.2 (`R17`/`R18`).** `external_pool_never_spawns_php_fpm` *(superseded by `MB.3.9.2`; replaced by `dev_starts_one_pool_per_route` in `MB.3.9.5`)*: it stated the `200` fake-peer precondition, walked `/proc/<init_pid>/task/*/children` **transitively** (a double-forked `php-fpm` is not a direct child of the main thread), and adds a **positive control** (a deliberately renamed `/bin/sleep` child the same walk finds). |
 | `testability` MINOR-T2 | MINOR | **Accepted → §7.2 (`R2`/`R3`).** The view predicate asserts **both** halves: the pinned parent's `(st_dev, st_ino)` and init's `ctl.chan` inode are absent from the view's table, while `view.chan` is present. |
 | `testability` MINOR-T3 | MINOR | **Accepted → §7.2 (`R2`/`R3`/`R20` Suite column).** `critical_fastcgi_parent_fd.rs` added. |
 | `testability` MINOR-T4 | MINOR | **Accepted → §7.2, §8.1 item 2, §8.2 (`MB.3.6.3`).** `smoke.rs` is a separate test binary and cannot be imported; `MB.3.6.3.1`/`MB.3.6.4.2` duplicate the `children()`/`fds()` helpers locally (precedent `critical_dev_and_fail_closed.rs:482`), so no path changes are needed and the ≤ 7-file cap is untouched. |
@@ -2200,10 +2631,68 @@ stale brief.**
 | `consistency` C8-M4 | MAJOR | **Accepted → §8.1 item 1.** Every split bullet now says "exactly the `Files` cell of §8's row for that id"; the §8 cells are complete and each acceptance file is in its leaf's `paths`. |
 | `consistency` C8-m1 | MINOR | **Accepted → §4.10.3.** `BLASTIT_CHECK_POOL_PARENT_FD=<route_index>:<fd>` in both places. |
 | `consistency` C8-m2 | MINOR | **Accepted → §4.1.** Fixed-phrase list adds `must exist`/`must be stat-able`, drops the duplicate `must be under static root`, and prefixes the `FastCgiListenParentInvalid` example with `route "app" (index 0):`. |
-| `consistency` C8-m3 | MINOR | **Accepted → §4.1 (`listen` row).** The ancestor rule is `B1`'s sticky-bit walk from `/` to `manifest_dir` plus `B2`'s non-route-writable segments down to the parent. |
+| `consistency` C8-m3 | MINOR | **Accepted → §4.1 (`listen` row).** The ancestor rule is `B1`'s sticky-bit walk from `/` to `manifest_dir` plus `B2`'s non-route-writable segments down to the parent. *(Superseded by `MB.3.9.2`: the row is gone with the key, and `B1`/`B2` now anchor on `<runtime>` and create `<runtime>/fastcgi/<i>`.)* |
 | `consistency` C8-m4 | MINOR | **Accepted → §4.1 (`manifest.md` edit 1).** The app-present rule uses the predicate it actually implements — "every route is `[route.static]` and none is `[route.fastcgi]`" — and says `app` is accepted and ignored on a manifest with any `[route.fastcgi]`. |
 | `consistency` C8-m5 | MINOR | **Accepted → §9 history.** The stale `SpawnMode` spelling is `PoolSpawn`. |
 | `consistency` C8-m6 | MINOR | **Accepted → §8.1 item 3.** Fallback splits are "two numeric `new` children" (`MB.x.y.1`/`.2`); `plan.py`'s `ID_RE` rejects letter suffixes. |
 | `consistency` C8-m7 | MINOR | **Accepted → §8.2.** Three rows added: `MB.3.3` `kind()` wording, `MB.3.6.3` §4.4 predicate, `MB.3.6` parent (`check -- <suite>`, temp-dir `UnixListener` fake peer). |
 | `consistency` C8-m8 | MINOR | **Accepted → ADR-0008 decision 1.** `Registry::new` rejects duplicate kinds and any kind outside `"static"` ∪ `Executor::ALL_KINDS`. |
 | `consistency` C8-m9 | MINOR | **Accepted → §8 (`MB.3.6.1.1`).** `Ctl::Spawn`'s doc comment is updated to "view or pool, chosen by the route's executor". |
+
+---
+
+### Amendment round (`MB.3.9.2`, 2026-11-14): scope, two review passes and the round-3 verification
+
+**Scope of this amendment.** Only the **manifest grammar and the socket's identity** changed:
+no `listen`, a derived per-route socket keyed by the route's index, `workers` optional and
+bounded by the deployment budget, and the error variants that say so. Everything here is
+**mechanism-independent**: `MB.12` may replace `php-fpm` with an embedded PHP SAPI, and the
+manifest, the derived path, the error messages and the worker bound survive that change
+unchanged. Findings that depend on *whether a pool process exists at all* — who spawns it in
+`dev`/`check`, the pool file's ownership, dev inode pinning, deleting `PoolSpawn::External` —
+are recorded in `RESULT.md` as **deferred to `MB.12`'s embed-vs-pool decision**, not decided
+here; the `dev`/`check` sequencing itself is `MB.3.9.3`'s.
+
+| Pass | Lens | Verdict | BLOCKER / MAJOR opened | Disposition |
+|---|---|---|---|---|
+| 1 | `implementability` | FAIL | A1 directory modes (a `0700` container makes `php-fpm`'s absolute `bind` `EACCES`), A2 the probe conflated create-parent with leaf-exists | both fixed: the three-mode table (`<runtime>` root `0755`, `fastcgi` `0711`, `<i>` `0700`→`0755 route_uid`→`0511`; `dev`/`check` `0700`, no window) and the two-phase probe (`parent` then `check_leaf`) |
+| 1 | `security` | FAIL | S-1 omission bypasses the `1..=64` ceiling (`pm = static` pre-forks), S-2 pin/freeze not re-entrant over a preserved `<runtime>`, S-3 a planted non-empty directory wedges every route | S-1 `MAX_POOL_WORKERS = 64` *(now owned by the pool leaf, gated on `MB.12` — attempt 3)* + `FastCgiWorkersCapExceeded`; S-2 normalise-before-verify in `B2`; S-3 `remove_entry` (unlink → `AT_REMOVEDIR` → rename-aside, bounded) |
+| 1 | `testability` | FAIL | T1 the design pinned `UnknownKey` while the shipped parser returns `FastCgiListenDerived`; T2–T8 unowned/absent oracles | T1 adopted the shipped variant (it carries no value and names the owner); T2–T8 each got one named test with an owner leaf (inventory lives in §7.2) |
+| 1 | `consistency` | FAIL | C-01 the same mode error as A1 plus an ADR that said `0555`; C-02…C-04 surviving "`dev` never spawns a pool"; C-05 `ARCHITECTURE.md` §2.2; C-06 path shape | all fixed; `MB.3.8` now owns the §2.2 layout row, and the ADR carries dated retractions |
+| 2 | `implementability` | FAIL | I-1 residual `0700`/`0555` in the ADR, I-2 unowned phase-2 mapper, I-3 `check` ordering, I-4 un-ordered worker arms, I-5 inventory count, I-6 the `External`→`Managed` transition unpinned, I-7 `check` mode vs the sibling briefs, I-8 the e2e oracle named the pre-fix invariant | all fixed; the design is declared normative over the two stale brief sentences (recorded in §8.2 and `RESULT.md`) |
+| 2 | `security` | FAIL | SEC-R2-1 `remove_entry` still failed on a **non-empty** planted directory, SEC-R2-2 `dev`/`check` would inherit `S2`/`S6` and then `EACCES` their own retire | rename-aside for `ENOTEMPTY`; the single-uid variant (`S0`,`S1`,`S3`,`S4`,`S7`,`U1`; no `S2`/`S5`/`S6`) |
+| 2 | `testability` | FAIL | T17 the `MB.3.5.1` leaf row and ADR still said `UnknownKey`; T19 ADR `0555`; T20 a `capacity()` assertion that cannot compile; T21–T27 ownerless oracles | T17/T18 already resolved by the pass-1 fix (verified on disk); T19–T27 fixed (permit-count oracle, call-site owners, `InsecureMode`, `remove_entry`/`B2`/`check_leaf` oracles, one inventory) |
+| 2 | `consistency` | FAIL | F1 three spellings of the `listen` refusal, F2 `0o555` vs `0511` + ADR modes, F3 residual `0700` prose, F4 §9 rows still asserting the retired dev oracle | all fixed |
+| 3 | `implementability` | FAIL | R3-1 decision 6's `0555` + a self-contradicting `U1` sentence; R3-2 the retired "unreachable" e2e leg name and a duplicated `verify_private_dir`; R3-4 `check_fastcgi_workers`' doc comment inverted the arms *(the function itself is now the pool leaf's, gated on `MB.12` — attempt 3)* | all fixed: decision 6 opens with a mode note; the leg is renamed `…_traversable_but_not_writable_…`; `verify_private_dir` moved to one home; the doc comment states the three arms |
+| 3 | `security` | FAIL | SEC-R3-1 the rename-aside still moved the wedge; SEC-R3-2 the "single-uid variant" kept `drop_privileges` and `U1`'s freeze | both fixed: eight rename slots, empty `stale.*` cleaned, an unfreeable leaf fails **one route's pool** (warning + `503`), never the boot; the variant is a delta table (no `drop_privileges`, no `S2`/`S5`/`S6`, `U1` without the freeze) |
+| 3 | `testability` | FAIL | R3-1 the mode trio had no named oracle; R3-2 `check_leaf`'s exit codes had no named test | `pool_parent_modes_are_0600_0511_0711`; `leaf_missing_after_spawn_exits_1_in_dev` + `check_child_leaf_failure_exits_2_naming_the_derived_socket` |
+| 3 | `consistency` | **PASS** | none | M1–M3 taken |
+| 3b | `consistency` re-verify | FAIL | one MAJOR, introduced by the pass-3 `B3` rewrite (a non-`ENOENT` removal still called a boot error) | fixed: `B3` defers to `remove_entry`, and its failure cell splits capability `EPERM` (`exit 1`) from an unfreeable leaf (warning + that route's pool `Busy`/`503`) |
+
+**The critic cap, stated so the record cannot be misread.** The node's acceptance asks for
+"fresh goldfish critics PASS". Round 3 ended **FAIL** on three lenses (implementability,
+security, testability) and PASS on consistency; the `3b` re-verify then found one MAJOR. Every
+one of those findings was resolved and **verified by the reviewer's next read, not by a fourth
+critic round** — the lead capped review at round 3. So the last artifacts on disk are not a
+clean critics-PASS: they are `FAIL` rounds whose BLOCKER/MAJOR/agreed-MINOR findings are closed,
+plus a reviewer-verified sweep (attempts 3 and 4). Attempt 4's three edits (the
+`FastCgiPoolSocketInvalid` owner, the `validate::check_fastcgi_workers` wording, this note) are
+likewise reviewer-verified, not critic-verified.
+
+**MINORs.** The two passes opened 46 MINORs between them. All were accepted and applied
+except the following, which are recorded rather than edited: (a) §9's **historical** rows keep
+their original `0555` / `external_pool_never_spawns_php_fpm` text, because rewriting a past
+disposition would falsify the record — each is annotated "superseded by `MB.3.9.2`" at the
+point where a reader would otherwise follow it; (b) the two sibling briefs
+(`MB.3.9.3`/`MB.3.9.4`) still say "`PoolSpawn::External` survives for `check`", which this
+document contradicts deliberately (§8.2 marks this document normative there, because an
+external pool no longer exists); (c) the real 5 s probe-timeout path is a `requires-root`
+leg, because no unprivileged test can hold a silent child for five seconds and observe the
+`SIGKILL`.
+
+**Deferred (recorded in `RESULT.md`, not decided here).** Whether a pool process exists at
+all is `MB.12`'s embed-vs-pool decision, so these stay open: the pool file's ownership
+hardening (it is `0600` route-uid today and protected only by `open_basedir`), `dev`'s
+`enforce_socket_inode` value, deleting `PoolSpawn::External`, and any `php-fpm.conf` path or
+directive. The grammar, the derived path, the error messages and the worker bound do not
+depend on that decision.

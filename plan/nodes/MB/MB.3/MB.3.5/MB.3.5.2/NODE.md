@@ -9,6 +9,7 @@ depends_on: [MB.3.5.1]
 paths:
   - "crates/blastit-manifest/src/probe.rs"
   - "crates/blastit-manifest/src/lib.rs"
+  - "crates/blastit-manifest/src/error.rs"
   - crates/blastit/src/probe.rs
   - crates/blastit/src/lib.rs
   - crates/blastit/src/supervise.rs
@@ -18,7 +19,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-14T14:12"
 ---
 
 # Goal

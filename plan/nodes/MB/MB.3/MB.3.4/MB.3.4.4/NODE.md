@@ -54,12 +54,12 @@ test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 $ cargo test -p blastit-fastcgi --locked
 test result: ok. 43 passed; ...        # unittests: 41 + the two new cgi tests
-test result: ok. 25 passed; ...        # critical_fastcgi_lockdown, unmodified
+test result: ok. 30 passed; ...        # critical_fastcgi_lockdown, unmodified
 test result: ok. 12 passed; ...        # the new protected codec suite
 test result: ok. 1 passed; ...         # doc-test
 
 $ MUTANTS_TMP=$HOME/.cache/blastit-mutants/mb34-4-mut make mutants-rust PKG=blastit-fastcgi
-348 mutants tested in ~60s: 8 missed, 322 caught, 18 unviable
+352 mutants tested in ~60s: 3 missed, 331 caught, 18 unviable
 # cgi.rs:221:66 must move from missed.txt to caught.txt; no other file's count may drop
 ```
 

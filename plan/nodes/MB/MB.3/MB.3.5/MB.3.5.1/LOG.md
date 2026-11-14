@@ -39,3 +39,7 @@ status active -> review
 ## 2026-11-14T14:09 [lead]
 
 status review -> done
+
+## 2026-11-14T14:09 [lead]
+
+commit 0bbb877 (atomic with MB.3.9.1: each alone leaves docs_fences/parser red)

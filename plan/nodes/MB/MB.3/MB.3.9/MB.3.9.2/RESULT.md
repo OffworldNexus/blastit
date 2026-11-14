@@ -344,6 +344,80 @@ EXIT=0
 
 `grep -c 'test result: FAILED'` = `0`; `grep -c '^FAIL '` over the fence report = `0`.
 
+## Attempt 4 (owner correction and two wording fixes, 2026-11-14)
+
+The reviewer's attempt-3 FAIL was one real plan error plus two wording items. Three edits, no
+restructure:
+
+1. **[MAJOR] `FastCgiPoolSocketInvalid`'s owner is `MB.3.5.2`.** It was attributed to
+   `MB.3.5.1`, which is done and does not carry it (`crates/blastit-manifest/src/error.rs`
+   has only the four grammar variants), while §7.2's three `dev` refusal legs need it inside
+   `MB.3.5.2`'s protected suite. Moved in all three places (§8 Lands, §8.1 item 4, §8.2), and
+   `crates/blastit-manifest/src/error.rs` is now in `MB.3.5.2`'s Files cell (7 → 8; the lead
+   added the path to the node itself). `MB.3.5.1` is recorded as having landed **grammar
+   only**: `entry`, `workers: Option<u32>`, `FastCgiListenDerived`, `FastCgiDeadDeclaration`
+   (and the `1..=64` validation for an explicit value).
+2. **[MINOR] the wording that said `check_fastcgi_workers` "does not exist".** The **budget-aware**
+   `Manifest::check_fastcgi_workers(budget)` is what is missing; the private grammar-only
+   `validate::check_fastcgi_workers(&location, policy, errors)` exists at `validate.rs:597`.
+   §8's `MB.3.5.2` cell says so.
+3. **[MINOR] the critic cap, recorded in §9** ("the critic cap, stated so the record cannot be
+   misread"): round 3 ended FAIL on three lenses and PASS on one, the `3b` re-verify found one
+   MAJOR, and every fix — through attempts 3 and 4 — was verified by the reviewer's next read,
+   **not** by a fourth critic round. The artifacts on disk are therefore not a clean
+   critics-PASS, and the record says so.
+
+**Proof.**
+
+```console
+$ grep -n 'FastCgiPoolSocketInvalid' docs/design/php-fastcgi.md | cut -c1-180
+413:| `FastCgiPoolSocketInvalid { location, path, rule }` *(implemented by `MB.3.5.2`)* | `route "app" (index 0): pool socket "<run>/fastcgi/0/fpm.sock": is not a socket` (the path
+432:budget's source. `FastCgiPoolSocketInvalid` (`MB.3.5.2`'s) names the **derived** path, never a manifest
+530:    /// `FastCgiPoolSocketInvalid { location, path: <run_root>/fastcgi/<i>/fpm.sock, rule }`
+617:| `SocketProbeError` (derived-parent path) | `FastCgiPoolSocketInvalid.rule` |
+1201:     (`FastCgiPoolSocketInvalid`) — and returning the pinned `parentfd`;
+1957:| `R2`, `R3`, `R20` production | manifest probe + boot + `supervise::spawn_pool` + `e2e/rootless/run.py` | `critical_fastcgi_pool.rs`, `critical_fastcgi_parent_fd.rs` + `e2e/r
+2046:| `MB.3.5.1` | `crates/blastit-manifest/src/{model,parse,validate,error,lib}.rs`, `crates/blastit-manifest/tests/docs_fences.rs` (6) | `FastCgiPolicy` (`#[derive(Debug, Clone,
+2047:| `MB.3.5.2` | `crates/blastit-manifest/src/{probe,lib}.rs` (`.1` first appends the two `pub use model::{…}` names; `.2` then appends `pub mod probe;`), `crates/blastit/src/
+2209:   - `MB.3.5.2`: `ManifestError::FastCgiPoolSocketInvalid { location, path, rule }` in
+2258:| `MB.3.5` (`.1`/`.2`) — **amended 2026-11-14, re-scoped 2026-11-14 (attempt 2)** | a `listen` field on `FastCgiPolicy`, a `listen` arm plus `!has_listen` `MissingKey` in `p
+2679:`FastCgiPoolSocketInvalid` owner, the `validate::check_fastcgi_workers` wording, this note) are
+
+$ grep -n 'error.rs' docs/design/php-fastcgi.md | cut -c1-180
+898:`crates/blastit-scheduler/src/error.rs` (both files owned by `MB.9.2.1.2`). `SchedulerError::Boot`
+2047:| `MB.3.5.2` | `crates/blastit-manifest/src/{probe,lib}.rs` (`.1` first appends the two `pub use model::{…}` names; `.2` then appends `pub mod probe;`), `crates/blastit/src/
+2051:| `MB.9.2.1.2` | `crates/blastit-scheduler/{src/{upstream/mod,scheduler,error,lib}.rs,tests/head_allocs.rs}` (5) | `UpstreamHead` (`from_utf8_lossy`), `RouteRuntime.stages`, `
+2210:     `crates/blastit-manifest/src/error.rs` (added to its files; the three `dev` refusal legs
+2251:| `MB.9.2.1` (`.1`/`.2`/`.3`) | 11 files; first cmd `--locked`; `stage1.rs` vs `roles.rs` root; no `SessionDoneGuard` or proxy-control strip; no `mod upstream;` site | split `
+2258:| `MB.3.5` (`.1`/`.2`) — **amended 2026-11-14, re-scoped 2026-11-14 (attempt 2)** | a `listen` field on `FastCgiPolicy`, a `listen` arm plus `!has_listen` `MissingKey` in `p
+2372:| `implementability` M2 (`run_with` vs `run`) | MAJOR | **Accepted → §4.2 (new `run_with` paragraph), §8 (`MB.9.2.1.2`).** `run_with(...) -> Result<(), RunError>` with `Ru
+```
+
+Every `FastCgiPoolSocketInvalid` hit that has an owner names `MB.3.5.2` (the definition cells
+and §7.2's behaviour cell name no leaf, correctly); **no hit names `MB.3.5.1`**. Of the
+`error.rs` hits, `crates/blastit-manifest/src/error.rs` is `MB.3.5.2`'s (two places), while
+`crates/blastit-scheduler/src/error.rs` belongs to `MB.9.2.1.2` and one §9 history row names the
+attempt-4 edit itself — neither is the variant's owner.
+
+Gates on the attempt-4 tree:
+
+```console
+$ uvx --offline zensical build --strict
+No issues found
+
+$ uv run --no-project tools/plan.py validate
+plan OK
+
+$ make check
+56 fences: 29 executed, 27 accounted, 0 failed · 109.9s
+uv run --no-project tools/plan.py validate
+plan OK
+EXIT=0
+```
+
+`grep -c 'test result: FAILED'` = `0`; `grep -c '^FAIL '` over the fence report = `0`. The design
+is **2698 lines**; `ADR-0008` is **409**.
+
 ## Out-of-scope observations
 
 - `ADR-0008`'s frontmatter is `Status: Proposed`, while the node text calls it accepted. I did not

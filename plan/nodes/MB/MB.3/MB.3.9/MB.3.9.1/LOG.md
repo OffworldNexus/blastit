@@ -27,3 +27,7 @@ status active -> review
 ## 2026-11-14T14:09 [lead]
 
 status review -> done
+
+## 2026-11-14T14:09 [lead]
+
+commit 0bbb877 (atomic with MB.3.5.1: each alone leaves docs_fences/parser red). Open follow-ups: (a) install story uv tool vs uv add -- belongs to MB.12 distribution, recorded on MB.3.9; (b) MB.3.7 node body corrected (stale mkdir/listen/php-fpm.conf replay clauses); (c) H1/nav still say PHP-FPM -- rename after MB.12 decides.

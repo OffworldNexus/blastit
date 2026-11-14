@@ -51,3 +51,27 @@ status active -> ready
 ## 2026-11-14T14:02 [lead]
 
 attempt 3/3 started
+
+## 2026-11-14T14:09 [lead]
+
+status ready -> active
+
+## 2026-11-14T14:12 [unknown]
+
+edited fields
+
+## 2026-11-14T14:12 [lead]
+
+REVIEW FAIL (attempt 3). The three-line sweep landed (grep: 0 oracles attributed to MB.3.5.1/.2) but one REAL plan error surfaced: design:2046/:2191/:2256 attribute ManifestError::FastCgiPoolSocketInvalid to MB.3.5.1, which is done and lacks it (error.rs:497-537 has only Entry/ListenDerived/WorkersInvalid/DeadDeclaration; grep -rn FastCgiPoolSocketInvalid crates/ = empty), while :1957 needs the three dev legs to refuse through it inside MB.3.5.2's protected suite whose Files omit error.rs -> that suite cannot compile. LEAD ACTION taken: MB.3.5.2's paths now include crates/blastit-manifest/src/error.rs and its LOG says this leaf adds the variant. Attempt 4 required: move the variant to MB.3.5.2 in :2046/:2191/:2256, add error.rs to its Files cell, state MB.3.5.1 landed grammar only; fix the MINOR that says check_fastcgi_workers 'does not exist' (validate::check_fastcgi_workers(&location, policy, errors) DOES exist at validate.rs:597 -- reword to the budget-aware Manifest::check_fastcgi_workers(budget)); and record the critic cap in the §9 record so it does not read as 'fresh critics PASS'. Not escalating: each round is converging on a 2700-line doc and the remaining edits are line-level.
+
+## 2026-11-14T14:12 [lead]
+
+status active -> ready
+
+## 2026-11-14T14:12 [lead]
+
+attempt 4/4 started
+
+## 2026-11-14T14:19 [lead]
+
+status ready -> done

@@ -1130,3 +1130,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T14:06 [MB.3.9] (lead) INSTALL-STORY follow-up (reviewer finding on MB.3.9.1, deferred not fixed): docs/frameworks/php.md teaches 'uv tool install blastit' + bare 'blastit dev', while
 - 2026-11-14T14:09 [MB.3.5.1] (lead) status review -> done
 - 2026-11-14T14:09 [MB.3.9.1] (lead) status review -> done
+- 2026-11-14T14:09 [MB.3.5.1] (lead) commit 0bbb877 (atomic with MB.3.9.1: each alone leaves docs_fences/parser red)
+- 2026-11-14T14:09 [MB.3.9.1] (lead) commit 0bbb877 (atomic with MB.3.5.1: each alone leaves docs_fences/parser red). Open follow-ups: (a) install story uv tool vs uv add -- belongs to MB.12 distri
+- 2026-11-14T14:09 [MB.3.9.2] (lead) status ready -> active
+- 2026-11-14T14:12 [MB.3.5.2] (unknown) edited fields
+- 2026-11-14T14:12 [MB.3.5.2] (lead) paths extended (2026-11-14) to crates/blastit-manifest/src/error.rs: the review of MB.3.9.2 found the design attributes FastCgiPoolSocketInvalid to MB.3.5.1 (do
+- 2026-11-14T14:12 [MB.3.9.2] (unknown) edited fields
+- 2026-11-14T14:12 [MB.3.9.2] (lead) REVIEW FAIL (attempt 3). The three-line sweep landed (grep: 0 oracles attributed to MB.3.5.1/.2) but one REAL plan error surfaced: design:2046/:2191/:2256 attri
+- 2026-11-14T14:12 [MB.3.9.2] (lead) status active -> ready
+- 2026-11-14T14:12 [MB.3.9.2] (lead) attempt 4/4 started
+- 2026-11-14T14:19 [MB.3.9.2] (lead) status ready -> done

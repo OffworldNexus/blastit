@@ -67,7 +67,8 @@ $ uv run --no-project tools/critical_guard.py --base HEAD --node MB.3.4.3
 $ MUTANTS_TMP=$HOME/.cache/blastit-mutants/mb34-3-mut make mutants-rust PKG=blastit-fastcgi
 348 mutants tested in ~60s: 4 missed, 326 caught, 18 unviable
 # the 4 remaining are the two `|`->`^` equivalences, `Params::is_empty`, and
-# lib.rs:96 `source -> None`; every one of #1,#2,#4,#5,#7 above must be caught
+# cgi.rs:221 `<` -> `<=` in parse_status (owned by MB.3.4.4); every one of
+# #1,#2,#4,#5,#7 above must be caught
 ```
 
 Use a **private** `MUTANTS_TMP` (LESSONS #26/#29) and never delete another campaign's scratch.
