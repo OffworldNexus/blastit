@@ -1,9 +1,8 @@
 ---
 id: MB.3.13
 title: "PhpEmbedRuntime: embedded view worker loop + stage0 BLASTIT_LIBPHP discovery and ABI boot gate"
-kind: task
+kind: epic
 status: ready
-owner: implementer
 priority: 2
 depends_on: [MB.3.11, MB.3.12, MB.3.5.4]
 paths:
@@ -15,7 +14,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:39"
-updated: "2026-11-14T14:39"
+updated: "2026-11-14T18:18"
 ---
 
 # Goal

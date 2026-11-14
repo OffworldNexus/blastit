@@ -1310,3 +1310,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T17:38 [MB.3.27] (lead) created (task) Scope the WSGI-bound protected suites to feature=python (default build made cargo test -p blastit red)
 - 2026-11-14T17:43 [MB.17] (lead) status active -> done
 - 2026-11-14T17:43 [MB.3.27] (lead) status active -> done
+- 2026-11-14T18:18 [MB.3.13] (unknown) edited fields
+- 2026-11-14T18:18 [MB.3.13.1] (lead) status ready -> active
+- 2026-11-14T18:18 [MB.3.13.1] (lead) attempt 1/3 started
+- 2026-11-14T18:18 [MB.3.13.1] (lead) base 9e83cc0; milestone: a PHP fixture answers through view.chan. Prereqs: MB.3.11, MB.3.12, MB.3.5.4, MB.3.23, MB.3.25.
