@@ -1,6 +1,6 @@
 ---
 id: MB.3.13.4
-title: "MB.3.13 part 4: Protected critical_php_embed suite: boot refusals, exit()/fatal containment, exact cpu_ns, and no libphp in init/http/scheduler/dbproxy"
+title: "Protected critical_php_embed suite: boot refusals, exit()/fatal containment, exact cpu_ns, no libphp above the worker"
 kind: task
 status: ready
 owner: implementer
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T17:04"
-updated: "2026-11-14T17:04"
+updated: "2026-11-14T18:20"
 ---
 
 # Goal

@@ -1314,3 +1314,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-14T18:18 [MB.3.13.1] (lead) status ready -> active
 - 2026-11-14T18:18 [MB.3.13.1] (lead) attempt 1/3 started
 - 2026-11-14T18:18 [MB.3.13.1] (lead) base 9e83cc0; milestone: a PHP fixture answers through view.chan. Prereqs: MB.3.11, MB.3.12, MB.3.5.4, MB.3.23, MB.3.25.
+- 2026-11-14T18:20 [MB.3.13.1] (lead) BLOCKED correctly (attempt 1): my brief claimed prereqs had landed, but MB.3.23 (WorkerRuntime), MB.3.24, MB.3.25 (EmbeddedView) are all 'ready', not done -- gr
+- 2026-11-14T18:20 [MB.3.13.1] (unknown) edited fields
+- 2026-11-14T18:20 [MB.3.13.4] (unknown) edited fields
+- 2026-11-14T18:20 [MB.3.13.1] (lead) OWNERSHIP RESOLVED (owner, 2026-11-14): PhpEmbedRuntime + the php feature wiring are THIS leaf's; MB.3.13.4 owns only the protected suite. backend-runtimes.md §
+- 2026-11-14T18:20 [MB.3.13.4] (lead) OWNERSHIP: you own the protected suite ONLY. PhpEmbedRuntime and php = [dep:blastit-php-sapi] are MB.3.13.1's (design §5 row 7 amended). Do not build the runtim
