@@ -1495,3 +1495,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T00:00 [MB.3.35] (lead) status active -> review
 - 2026-11-15T00:00 [MB.3.13.3] (lead) carry from MB.3.35: on successful discovery nothing logs the resolved tuple, so 'found the shim' is invisible without gdb. Emit one line (boot event) naming (PH
 - 2026-11-15T00:08 [MB.3.35] (lead) status review -> done
+- 2026-11-15T00:09 [MB.3.13.3] (lead) status ready -> active
+- 2026-11-15T00:09 [MB.3.13.3] (lead) attempt 1/3 started
+- 2026-11-15T00:09 [MB.3.13.3] (lead) base 34d0bb7ade2fac13fa2376936f698c95fb050be2
+- 2026-11-15T00:23 [MB.3.13.3] (lead) status active -> review
+- 2026-11-15T00:28 [MB.3.13.3] (lead) REVIEW FAIL (attempt 1): MAJOR discovery follows symlinks while stage 1 opens O_NOFOLLOW, so a symlinked libphp passes stage 0 then dies after the dev banner wi
+- 2026-11-15T00:28 [MB.3.13.3] (lead) status review -> ready
+- 2026-11-15T00:28 [MB.3.13.3] (lead) status ready -> active
+- 2026-11-15T00:28 [MB.3.13.3] (lead) attempt 2/3 started
+- 2026-11-15T00:36 [MB.3.13.3] (lead) status active -> review
+- 2026-11-15T00:40 [MB.3.13.3] (lead) edited fields
+- 2026-11-15T00:40 [MB.3.13.3] (lead) lead: paths widened by crates/blastit-scheduler/src/route.rs + its tests — reviewer MINOR 2: the static_forward rule stage1 now patches belongs in RouteInfo::wi
+- 2026-11-15T00:46 [MB.3.13.3] (lead) status review -> done

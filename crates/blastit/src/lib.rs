@@ -45,13 +45,12 @@ mod forking;
 #[cfg(feature = "python")]
 mod immortal;
 mod logs;
-// Embedded PHP view workers (`MB.3.13`): the fork path sibling to `zygote`'s
-// WSGI one. It compiles only when PHP routes can be served, and `libphp`
-// itself is `dlopen`ed inside the worker, never linked here. The supervisor's
-// `Ctl::Spawn` picks a route's binding (`MB.3.13.3`); until then nothing in
-// this crate calls the fork, so the seam is explicit rather than a warning.
+// Embedded PHP view workers (`MB.3.13`): the boot half that pins the host's
+// NTS `libphp` and its shim into a per-route binding, and the fork path
+// sibling to `zygote`'s WSGI one. It compiles only when PHP routes can be
+// served, and `libphp` itself is `dlopen`ed inside the worker, never linked
+// here. `init`'s `Ctl::Spawn` reads the binding this module built (`MB.3.13.3`).
 #[cfg(feature = "php")]
-#[allow(dead_code)]
 mod php_view;
 mod py;
 mod roles;

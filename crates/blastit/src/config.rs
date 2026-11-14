@@ -715,10 +715,11 @@ impl PhpVersion {
 /// What stage 0 resolved for `[route.php]` before a listener was bound
 /// (`ADR-0010` §3).
 ///
-/// The identity (`dev`, `ino`) travels with the path because stage 1 re-opens
-/// the file `O_RDONLY | O_CLOEXEC | O_NOFOLLOW` and compares the two: a path
-/// that changed between the stages is a boot refusal, never a load of whatever
-/// is there now.
+/// Both objects — the NTS `libphp` and the shim for its tuple — carry their
+/// identity (`dev`, `ino`) beside their path because stage 1 re-opens each
+/// `O_RDONLY | O_CLOEXEC | O_NOFOLLOW` and compares the two: a path that
+/// changed between the stages is a boot refusal, never a load of whatever is
+/// there now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhpRuntime {
     /// The absolute path of the NTS `libphp` stage 0 opened and inspected.
@@ -731,6 +732,10 @@ pub struct PhpRuntime {
     pub version: PhpVersion,
     /// The absolute path of the shim for `(version, target arch, target libc)`.
     pub shim: PathBuf,
+    /// `st_dev` of the shim's inode.
+    pub shim_dev: u64,
+    /// `st_ino` of the shim's inode.
+    pub shim_ino: u64,
 }
 
 /// Everything `BLASTIT_*` and `PORT` describe (§8.2).
@@ -1739,6 +1744,8 @@ impl Config {
                         "shim".into(),
                         Value::from(runtime.shim.to_string_lossy().into_owned()),
                     );
+                    php.insert("shim_dev".into(), Value::from(runtime.shim_dev));
+                    php.insert("shim_ino".into(), Value::from(runtime.shim_ino));
                     Value::Object(php)
                 }
             },
@@ -2774,12 +2781,16 @@ fn php_runtime_from_json(value: &Value) -> Result<Option<PhpRuntime>, ConfigErro
     let version = PhpVersion::from_dotted(&version)
         .ok_or_else(|| document("php", "version must be `major.minor`".to_string()))?;
     let shim = PathBuf::from(json_string(php, "shim")?);
+    let shim_dev = json_u64(php, "shim_dev")?;
+    let shim_ino = json_u64(php, "shim_ino")?;
     Ok(Some(PhpRuntime {
         libphp,
         dev,
         ino,
         version,
         shim,
+        shim_dev,
+        shim_ino,
     }))
 }
 
@@ -4405,6 +4416,8 @@ mod php_settings {
             ino: 123_456,
             version: PhpVersion::new(8, 4),
             shim: PathBuf::from("/opt/blastit/shims/libblastit_php84-x86_64-gnu.so"),
+            shim_dev: 66306,
+            shim_ino: 654_321,
         });
         for config in [config.clone(), Config::default()] {
             let json = config.to_json();
@@ -4414,6 +4427,7 @@ mod php_settings {
         assert_eq!(json["libphp"], serde_json::json!("/usr/lib/libphp8.4.so"));
         assert_eq!(json["php"]["version"], serde_json::json!("8.4"));
         assert_eq!(json["php"]["ino"], serde_json::json!(123_456));
+        assert_eq!(json["php"]["shim_ino"], serde_json::json!(654_321));
 
         // A document that predates the fields reads as "nothing was resolved".
         let mut older = json.clone();

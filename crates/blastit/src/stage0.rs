@@ -308,10 +308,10 @@ pub(crate) fn static_app_refusal(config: &Config, manifest: &Manifest) -> Option
 /// [`Manifest::can_boot_without_app`] — "every route is its own executor" —
 /// rather than "every route is static": a `[route.php]` route is its own
 /// executor, so the *rule* demands no `app` for a PHP-only manifest
-/// (`ADR-0010` §2). Until `MB.3.13.3` wires `SpawnSpec::Php`,
-/// [`php_backend_unavailable`] refuses such a boot for the missing worker, not
-/// for the missing callable. `blastit check` must not take the second half — a
-/// suite brings its own `app` — so it calls [`static_app_refusal`] directly.
+/// (`ADR-0010` §2); what such a boot needs instead is a usable NTS `libphp`,
+/// and [`php_boot_gate`] is what refuses a host that has none.
+/// `blastit check` must not take the second half — a suite brings its own
+/// `app` — so it calls [`static_app_refusal`] directly.
 pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), String> {
     if let Some(message) = static_app_refusal(config, manifest) {
         return Err(message);
@@ -337,9 +337,9 @@ pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), Strin
 /// [`static_app_refusal`], which keeps its `BLASTIT_APP`-on-a-static-tree
 /// sentence in both builds. So does a `[route.php]` route: it runs in a `view`
 /// worker with no interpreter anywhere near it, so this gate returns `None`
-/// for a PHP-only manifest (`MB.3.5.4`) — the separate
-/// [`php_backend_unavailable`] guard is what refuses that boot until
-/// `MB.3.13.3` wires the worker, and it must not be mistaken for this one. The
+/// for a PHP-only manifest (`MB.3.5.4`) — [`php_boot_gate`] is the separate
+/// gate that refuses such a boot when the host has no usable NTS `libphp`, and
+/// it must not be mistaken for this one. The
 /// `python` build has nothing to refuse; the function is compiled for the
 /// tests that keep the sentences honest.
 ///
@@ -609,33 +609,6 @@ enum PhpRefusal {
     },
 }
 
-impl PhpRefusal {
-    /// Whether this refusal ends a boot in `scope` (`ADR-0010` §4.1).
-    ///
-    /// In [`PhpShimScope::Deployment`] every one of them does: a deployment that
-    /// declares `[route.php]` either embeds PHP or fails closed naming the
-    /// package and the tuple, before it binds.
-    ///
-    /// In [`PhpShimScope::Development`] the two "nothing is installed yet"
-    /// outcomes — no `libphp` at all, and no shim built for the tuple — are
-    /// **not** fatal, because `blastit dev` cannot serve the route before
-    /// `MB.3.13.3` wires the worker either way: the `MB.3.28` interim refusal is
-    /// the truthful answer there, and sending a developer to install a package
-    /// for a boot that would still refuse is exactly the confusion
-    /// `docs/design/php-dev-local.md` rejects. A library that *is* there and is
-    /// wrong — not a regular file, not an ELF, ZTS, no version in its name — is
-    /// still named, because that is the mistake to fix and the sentence is the
-    /// fix.
-    fn is_fatal(&self, scope: PhpShimScope) -> bool {
-        match scope {
-            PhpShimScope::Deployment => true,
-            PhpShimScope::Development => {
-                !matches!(self, Self::Missing { .. } | Self::NoShim { .. })
-            }
-        }
-    }
-}
-
 /// `(PHP 8.4, x86_64-gnu)` and the shim that tuple needs.
 ///
 /// The two halves `ADR-0010` §4.1 requires every version-specific refusal to
@@ -653,21 +626,25 @@ fn abi_tuple(version: Option<PhpVersion>) -> Option<(String, String)> {
 /// "wrong minor" and "no shim" are the two failures an operator can fix by
 /// installing a package, and neither is diagnosable without the tuple.
 fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String {
+    // Every shape names the route **and** its `entry`: a manifest with two PHP
+    // routes must let the operator tell which front controller the host cannot
+    // serve, and the entry is the only thing that distinguishes them.
+    let prefix = format!("route {route:?}: [route.php] entry {entry:?}: ");
     match refusal {
         PhpRefusal::Missing { searched } => format!(
-            "route {route:?}: no usable NTS libphp was found for [route.php] entry {entry:?} \
-             (searched BLASTIT_LIBPHP, then {} in {}); {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+            "{prefix}no usable NTS libphp was found (searched BLASTIT_LIBPHP, then {} in {}); \
+             {PHP_PACKAGES}, or {PHP_OVERRIDE}",
             LIBPHP_CANDIDATES.join(", "),
             display_paths(searched),
         ),
         PhpRefusal::NotAbsolute { path } => format!(
-            "route {route:?}: BLASTIT_LIBPHP ({}) is not an absolute path, so the library the \
+            "{prefix}BLASTIT_LIBPHP ({}) is not an absolute path, so the library the \
              boot inspected and the one a worker loads could differ; {PHP_PACKAGES}, or \
              {PHP_OVERRIDE}",
             path.display()
         ),
         PhpRefusal::NotAFile { path, detail } => format!(
-            "route {route:?}: BLASTIT_LIBPHP ({}) cannot be opened or is not a regular file \
+            "{prefix}BLASTIT_LIBPHP ({}) cannot be opened or is not a regular file \
              ({detail}); {PHP_PACKAGES}, or {PHP_OVERRIDE}",
             path.display()
         ),
@@ -676,12 +653,12 @@ fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String
             detail,
             version,
         } => present_refusal(
-            route,
+            &prefix,
             &format!("{} is not an ELF shared object ({detail})", path.display()),
             *version,
         ),
         PhpRefusal::ThreadSafe { path, version } => present_refusal(
-            route,
+            &prefix,
             &format!(
                 "{} is a ZTS (thread-safe) libphp, and the embedded worker needs the NTS \
                  build of the same version",
@@ -690,7 +667,7 @@ fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String
             *version,
         ),
         PhpRefusal::NotLibphp { path, version } => present_refusal(
-            route,
+            &prefix,
             &format!(
                 "{} exports neither executor_globals nor tsrm_startup, so it is not a PHP \
                  embed library",
@@ -699,7 +676,7 @@ fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String
             *version,
         ),
         PhpRefusal::NoVersion { path } => format!(
-            "route {route:?}: {} is an NTS libphp whose file name names no PHP major.minor, so \
+            "{prefix}{} is an NTS libphp whose file name names no PHP major.minor, so \
              no shim can be chosen for it; keep the distro name (libphp8.4.so, libphp-8.4.so, \
              …) or {PHP_OVERRIDE} with a versioned one; {PHP_PACKAGES}",
             path.display()
@@ -710,7 +687,7 @@ fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String
             shim,
             searched,
         } => format!(
-            "route {route:?}: no shim {shim} was found for the NTS libphp {} (looked in {}); \
+            "{prefix}no shim {shim} was found for the NTS libphp {} (looked in {}); \
              this host is (PHP {}, {}), and {shim} is what that tuple needs; {PHP_PACKAGES}, \
              or {PHP_OVERRIDE}",
             libphp.display(),
@@ -723,15 +700,15 @@ fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String
 
 /// The version-specific half of [`php_refusal_message`]: the problem, then the
 /// tuple, the shim, the package and the override.
-fn present_refusal(route: &str, problem: &str, version: Option<PhpVersion>) -> String {
+fn present_refusal(prefix: &str, problem: &str, version: Option<PhpVersion>) -> String {
     match abi_tuple(version) {
         Some((dotted, shim)) => format!(
-            "route {route:?}: {problem}; this host is (PHP {dotted}, {}), whose embedded shim \
+            "{prefix}{problem}; this host is (PHP {dotted}, {}), whose embedded shim \
              is {shim}; {PHP_PACKAGES}, or {PHP_OVERRIDE}",
             target_tuple(),
         ),
         None => format!(
-            "route {route:?}: {problem}; this host is (PHP ?, {}), so no shim can be chosen \
+            "{prefix}{problem}; this host is (PHP ?, {}), so no shim can be chosen \
              until the object's version is known; {PHP_PACKAGES}, or {PHP_OVERRIDE}",
             target_tuple(),
         ),
@@ -752,17 +729,10 @@ fn display_paths(paths: &[PathBuf]) -> String {
 pub(crate) enum PhpBoot {
     /// No route declares `[route.php]`: nothing to discover.
     Absent,
-    /// Nothing this scope must refuse here. Both boot paths then apply
-    /// `MB.3.28`'s interim refusal ([`php_backend_unavailable`]) — the route is
-    /// not served until `MB.3.13.3` wires the worker — so a host that can embed
-    /// PHP, and a `dev` host where nothing is installed yet, both stop there.
-    ///
-    /// The resolved runtime travels with it: `MB.3.13.3` forks the worker from
-    /// exactly this pair, and the boot line naming the shim (`MB.3.35`) is why a
-    /// `dev` boot with and without `target/php-sapi/…so` no longer reads the
-    /// same. `None` is the "nothing is installed yet" half of `dev`, which is
-    /// deliberately not fatal there.
-    Proceed(Option<PhpRuntime>),
+    /// The host can embed PHP: this is the NTS `libphp` and the shim every PHP
+    /// route's worker will load, recorded as `(path, st_dev, st_ino)` in
+    /// [`Config::php`] so stage 1 re-opens exactly these files (`ADR-0010` §3).
+    Proceed(PhpRuntime),
     /// The host cannot embed PHP: the sentence names the route, the package,
     /// `BLASTIT_LIBPHP` and — when it is known — the `(PHP X.Y, <arch>-<libc>)`
     /// tuple.
@@ -771,10 +741,6 @@ pub(crate) enum PhpBoot {
 
 impl PhpBoot {
     /// The sentence this gate refuses with, or `None` when it proceeds.
-    ///
-    /// `MB.3.13.3`'s wiring refusal is the callers' step after `Proceed`, not
-    /// this gate's, so it is not returned here — which is what keeps the order
-    /// "discovery, then wiring" visible at each call site.
     #[cfg(test)]
     fn refusal(&self) -> Option<&str> {
         match self {
@@ -791,29 +757,23 @@ impl PhpBoot {
 /// `fstat`ed and read as an ELF `.dynsym` table — `dlopen` happens inside a
 /// view worker, never here.
 ///
-/// The order is the order an operator can act on, and the order the two boot
-/// paths apply: an over-budget `workers` first (nothing about the host can fix
-/// it), then the library (missing, a directory, not an ELF, ZTS, no version)
-/// and the shim for the tuple, and only then the `MB.3.28` wiring refusal
-/// [`php_backend_unavailable`] — which is the callers' step, so a host that
-/// *can* embed PHP still fails closed instead of serving a route this build has
-/// no worker for.
+/// The order is the order an operator can act on: an over-budget `workers` first
+/// (nothing about the host can fix it), then the library (missing, a directory,
+/// not an ELF, ZTS, no version) and the shim for the tuple. Every one of those
+/// is fatal in **both** scopes: `ADR-0010` §1 gives PHP one backend, so a host
+/// that cannot serve a declared `[route.php]` route gets §4.1's package
+/// sentence — in `blastit dev` and `blastit check` as much as in a deployment.
+/// There is no development mode that serves a PHP route another way.
 pub(crate) fn php_boot_gate(config: &Config, manifest: &Manifest, scope: PhpShimScope) -> PhpBoot {
     php_boot(
         manifest,
         &PhpSearch::from_config(config, scope),
         Some(config.view_worker_cap()),
-        scope,
     )
 }
 
 /// The same gate for a caller with the search and the budget spelled out.
-fn php_boot(
-    manifest: &Manifest,
-    search: &PhpSearch,
-    cap: Option<u32>,
-    scope: PhpShimScope,
-) -> PhpBoot {
+fn php_boot(manifest: &Manifest, search: &PhpSearch, cap: Option<u32>) -> PhpBoot {
     let Some((route, entry, _workers)) = first_php_route(manifest) else {
         return PhpBoot::Absent;
     };
@@ -823,13 +783,8 @@ fn php_boot(
         return PhpBoot::Refused(message);
     }
     match discover_php(search) {
-        Ok(runtime) => PhpBoot::Proceed(Some(runtime)),
-        Err(refusal) if refusal.is_fatal(scope) => {
-            PhpBoot::Refused(php_refusal_message(route, entry, &refusal))
-        }
-        // Nothing this scope must refuse: `dev` is left to the interim
-        // `MB.3.28` refusal the caller applies next.
-        Err(_) => PhpBoot::Proceed(None),
+        Ok(runtime) => PhpBoot::Proceed(runtime),
+        Err(refusal) => PhpBoot::Refused(php_refusal_message(route, entry, &refusal)),
     }
 }
 
@@ -874,6 +829,18 @@ fn first_php_route(manifest: &Manifest) -> Option<(&str, &str, Option<u32>)> {
 /// a distro copy the operator did not name. Otherwise the fixed names are tried
 /// in [`LIBPHP_CANDIDATES`] order, each in every directory of
 /// [`PhpSearch::lib_dirs`], so the *version* preference wins over the directory.
+///
+/// # Both records are the *resolved* path
+///
+/// Stage 0 may follow symlinks (`/usr/lib/libphp8.so -> libphp8.4.so` is a
+/// normal distro layout), but stage 1 re-opens each object
+/// `O_NOFOLLOW`-strictly so a link cannot be swapped in between the two
+/// stages. Recording the path as given therefore makes a legitimate symlink
+/// die in stage 1 with `ELOOP` — after the banner, with no §4.1 sentence. So
+/// the record holds `canonicalize`'s answer for both objects: the two stages
+/// open the same real file, a link in the distro keeps working, and a link
+/// planted after stage 0 is still refused (`ENOENT`/`ELOOP` on the real name
+/// is the inode record's job, not the link's).
 fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
     let path = match &search.libphp {
         Some(path) => {
@@ -900,6 +867,9 @@ fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
             detail: "not a regular file".to_string(),
         });
     }
+    // The path stage 1 will re-open. A name that cannot be resolved is a §4.1
+    // refusal here, never an `ELOOP` after the banner.
+    let path = resolve(&path)?;
     let version = version_of(&path, &file);
     let abi = zend_abi(&mut file).map_err(|detail| PhpRefusal::NotElf {
         path: path.clone(),
@@ -939,12 +909,35 @@ fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
             shim,
             searched: search.shim_dirs.clone(),
         })?;
+    let shim_metadata = std::fs::metadata(&shim_path).map_err(|err| PhpRefusal::NotAFile {
+        path: shim_path.clone(),
+        detail: err.to_string(),
+    })?;
+    // The shim's own identity, recorded beside the library's: stage 1 re-opens
+    // both and compares each against the record (`ADR-0010` §3), because a shim
+    // is code that runs inside every PHP worker and a path is not an identity.
+    let shim_path = resolve(&shim_path)?;
     Ok(PhpRuntime {
         libphp: path,
         dev: metadata.dev(),
         ino: metadata.ino(),
         version,
         shim: shim_path,
+        shim_dev: shim_metadata.dev(),
+        shim_ino: shim_metadata.ino(),
+    })
+}
+
+/// The path a record stores: `canonicalize`'s answer, or a §4.1 refusal.
+///
+/// [`PhpRefusal::NotAFile`] carries the sentence an operator can act on — the
+/// route, its `entry`, the path, the reason, the distro package and
+/// `BLASTIT_LIBPHP` — which is the whole point: a link that cannot be resolved
+/// must read as "this host cannot embed PHP", not as `errno` in a worker.
+fn resolve(path: &Path) -> Result<PathBuf, PhpRefusal> {
+    std::fs::canonicalize(path).map_err(|err| PhpRefusal::NotAFile {
+        path: path.to_path_buf(),
+        detail: format!("its path cannot be resolved ({err})"),
     })
 }
 
@@ -1268,61 +1261,23 @@ fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 }
 
 /// The one line a boot emits when `[route.php]` discovery resolved a runtime
-/// (`MB.3.35`): the shim path and this build's `<arch>-<libc>` tuple.
+/// (`MB.3.35`): the *resolved* `libphp`, the shim and this build's
+/// `<arch>-<libc>` tuple.
 ///
 /// It is what makes the native DX observable — a `dev` boot that found
 /// `target/php-sapi/libblastit_php84-x86_64-gnu.so` must not read like one that
-/// did not — and it is the line `MB.3.13.3` starts from when it wires the
-/// worker to the [`PhpRuntime`] the gate now carries. It names no library and no
-/// alternative transport, so `critical_php_backend.rs`'s "no fallback recipe"
-/// contract still holds for the whole boot output.
+/// did not — and a `libphp8.so -> libphp8.4.so` symlink has to be visible as
+/// the real file the workers will load. It names no alternative transport, so
+/// `critical_php_backend.rs`'s "no fallback recipe" contract still holds for the
+/// whole boot output.
 fn php_runtime_line(runtime: &PhpRuntime) -> String {
     format!(
-        "the [route.php] shim is {} (PHP {}, {})",
+        "the [route.php] runtime is libphp {} and shim {} (PHP {}, {})",
+        runtime.libphp.display(),
         runtime.shim.display(),
         runtime.version.dotted(),
         target_tuple()
     )
-}
-
-/// `MB.3.28` interim: a `[route.php]` route is refused at boot until the
-/// composition root can spawn an embedded-PHP worker (`MB.3.13.3`).
-///
-/// The embedded-PHP fork path and `PhpEmbedRuntime` exist (`MB.3.13.1`), but
-/// `Ctl::Spawn` has no PHP arm yet: a boot that accepted
-/// this manifest would either fail the first spawn and take the container down
-/// (the standalone build) or fork a **WSGI** worker for a PHP route (the wheel
-/// build). A manifest that looks like PHP support and silently runs the wrong
-/// runtime is worse than a refusal, so stage 0 refuses it **here, before a
-/// listener is bound or anything is forked**, naming the route and its
-/// `entry`. The sentence is a build/wiring fact, not a missing package: it
-/// deliberately does **not** send the operator to `apt install libphp` (that
-/// sentence belongs to `MB.3.13.2`, for a host that wires PHP but has no
-/// usable library). `ADR-0010` §1 gives PHP exactly one backend, so the
-/// sentence names no alternative either: naming one would read as a recipe.
-/// It stops at the route, its `entry`, and the missing wiring.
-///
-/// `MB.3.13.2` runs [`php_boot_gate`] **before** this function on both boot
-/// paths, so a host with no usable NTS `libphp` gets `ADR-0010` §4.1's
-/// package sentence instead of this one, and a host that has one still stops
-/// here rather than serving a route this build cannot fork.
-///
-/// **Interim.** `MB.3.13.3` wires `SpawnSpec::Php`, deletes this function and
-/// its three call sites (`stage0::run`, `stage0::run_dev`, and `check`'s
-/// `execute`), and rewrites `tests/critical_php_backend.rs` to prove a
-/// PHP route boots and serves `200` over `view.chan` (authorized with
-/// `critical_guard --node MB.3.13.3`). Do not keep the guard past that wiring.
-pub(crate) fn php_backend_unavailable(manifest: &Manifest) -> Option<String> {
-    let (route, php) = manifest
-        .routes()
-        .iter()
-        .find_map(|route| route.php().map(|php| (route, php)))?;
-    Some(format!(
-        "route {:?}: the embedded PHP backend is not available in this build \
-         ([route.php] entry {:?}); the per-route worker wiring lands in MB.3.13.3",
-        route.name(),
-        php.entry
-    ))
 }
 
 /// `R13` step 5: the first declared static root the responder's uid could not
@@ -1577,33 +1532,30 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     if let Some(message) = no_python_support(&config, &manifest, false) {
         fail(&emitter, &message);
     }
-    // `ADR-0010` §3, §4.1, then `MB.3.28`: before any listener binds, (1) a
-    // `workers` cap above the view budget is refused naming both numbers,
-    // (2) the NTS `libphp` and the shim for its tuple are resolved statically —
-    // a host that cannot embed PHP gets §4.1's package sentence — and (3) a
-    // host that *can* still stops on the interim wiring refusal below, so this
-    // boot never accepts a PHP route it cannot serve. Ahead of `app_rule`, whose
-    // "set BLASTIT_APP" advice cannot make a PHP route serve, and before
-    // `bind_view_sockets`. The gate only reads the ELF: the `dlopen` happens
-    // inside a view worker.
+    // `ADR-0010` §3, §4.1: before any listener binds, (1) a `workers` cap above
+    // the view budget is refused naming both numbers, and (2) the NTS `libphp`
+    // and the shim for its tuple are resolved statically — a host that cannot
+    // embed PHP gets §4.1's package sentence, in `dev` as much as here. Ahead of
+    // `app_rule`, whose "set BLASTIT_APP" advice cannot make a PHP route serve,
+    // and before `bind_view_sockets`. The gate only reads the ELF: the `dlopen`
+    // happens inside a view worker. What follows: `config.php` carries the
+    // record, stage 1 re-opens it into the per-route bindings, and `Ctl::Spawn`
+    // forks from those.
     match php_boot_gate(&config, &manifest, PhpShimScope::Deployment) {
         PhpBoot::Absent => {}
         PhpBoot::Refused(message) => fail(&emitter, &message),
-        // `MB.3.28`'s refusal, unchanged: in `Deployment` a missing library or
-        // shim is already fatal, so a `Proceed` here always carries the runtime.
         PhpBoot::Proceed(runtime) => {
-            if let Some(runtime) = runtime.as_ref() {
-                // One line naming what was resolved (`MB.3.35`): the same
-                // sentence `dev` prints, so a boot log names the shim it
-                // selected instead of leaving discovery invisible.
-                emitter.emit(&Event::now(
-                    Component::Init,
-                    EventKind::ManifestWarning(WarningEvent::new(php_runtime_line(runtime))),
-                ));
-            }
-            if let Some(message) = php_backend_unavailable(&manifest) {
-                fail(&emitter, &message);
-            }
+            // One line naming what was resolved (`MB.3.35`): the same
+            // sentence `dev` prints, so a boot log names the library and the
+            // shim it selected instead of leaving discovery invisible.
+            emitter.emit(&Event::now(
+                Component::Init,
+                EventKind::ManifestWarning(WarningEvent::new(php_runtime_line(&runtime))),
+            ));
+            // The `(path, st_dev, st_ino)` record stage 1 re-opens and every
+            // PHP worker's fork is built from (`ADR-0010` §3). A host without
+            // a usable library never reaches here: the gate refused above.
+            config.php = Some(runtime);
         }
     }
     if let Err(message) = app_rule(&config, &manifest) {
@@ -1857,32 +1809,26 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
         dev_fail(&message);
     }
     // Same order as `run`: (1) the `workers` budget, (2) the `libphp`/shim
-    // discovery, (3) `MB.3.28`'s interim refusal. `dev` may also look in
-    // `BLASTIT_PHP_SHIM_DIR` and the `target/php-sapi` directory `make php-sapi`
-    // writes (`R8`), which is the only difference. Nothing has been forked or
-    // bound yet, so a refusal here starts nothing (`Ctl::Spawn` would otherwise
-    // fork a WSGI view for a PHP route).
+    // discovery. `dev` may also look in `BLASTIT_PHP_SHIM_DIR` and the
+    // `target/php-sapi` directory `make php-sapi` writes (`R8`), which is the
+    // only difference, and a host without a usable library is refused here
+    // exactly as in a deployment (`ADR-0010` §1: one backend, no fallback).
+    // Nothing has been forked or bound yet.
     match php_boot_gate(&config, &manifest, PhpShimScope::Development) {
         PhpBoot::Absent => {}
         PhpBoot::Refused(message) => dev_fail(&message),
-        // The gate only reaches `Proceed` for a manifest with a `[route.php]`
-        // route. `Some` names the shim `make php-sapi` built; `None` is a host
-        // where nothing is installed yet, which `dev` reports only as the
-        // interim refusal below.
         PhpBoot::Proceed(runtime) => {
-            if let Some(runtime) = runtime.as_ref() {
-                // Descriptor 2, like every pre-banner line: stdout stays empty
-                // until the boot is known-good (§1.1), and the interim refusal
-                // below is still a fatal path. Without this line `dev` reads
-                // byte-identically with and without the built shim (`MB.3.35`).
-                startup.emit(&Event::now(
-                    Component::Init,
-                    EventKind::ManifestWarning(WarningEvent::new(php_runtime_line(runtime))),
-                ));
-            }
-            if let Some(message) = php_backend_unavailable(&manifest) {
-                dev_fail(&message);
-            }
+            // Descriptor 2, like every pre-banner line: stdout stays empty
+            // until the boot is known-good (§1.1). Without this line `dev`
+            // reads byte-identically with and without the built shim
+            // (`MB.3.35`).
+            startup.emit(&Event::now(
+                Component::Init,
+                EventKind::ManifestWarning(WarningEvent::new(php_runtime_line(&runtime))),
+            ));
+            // Stage 1 re-opens these and every PHP worker is forked from the
+            // binding built there (`ADR-0010` §3).
+            config.php = Some(runtime);
         }
     }
     if let Err(message) = app_rule(&config, &manifest) {
@@ -3323,9 +3269,8 @@ entry = \"public/index.php\"
 
     /// A PHP route runs in a `view` worker with no interpreter, so **this**
     /// gate and the python-less build must say nothing about installing
-    /// Python (`MB.3.5.4`). The boot itself is refused by
-    /// [`php_backend_unavailable`] until `MB.3.13.3` wires the worker — a
-    /// different gate, with a different sentence.
+    /// Python (`MB.3.5.4`). The boot's own answer for such a route is
+    /// [`php_boot_gate`]'s — a different gate, with a different sentence.
     ///
     /// The denied twin in the same test is the manifest that *is* WSGI-shaped:
     /// a route with no `[route.static]` and no `[route.php]` keeps the gate's
@@ -3602,6 +3547,83 @@ path = ['.*']
         )
     }
 
+    /// A `BLASTIT_LIBPHP` that is a symlink — the distro's
+    /// `libphp8.so -> libphp8.4.so` shape — is recorded as its **target**: stage
+    /// 1 re-opens each object `O_NOFOLLOW`-strictly, so recording the link
+    /// itself would kill the worker with `ELOOP` after the banner instead of
+    /// loading the library the gate inspected.
+    #[test]
+    fn a_symlinked_libphp_and_shim_are_recorded_as_their_targets() {
+        let scratch = Scratch::new("symlink");
+        let real = scratch.file("libphp8.4.so", &shared_object(&["executor_globals"]));
+        let link = scratch.dir.join("libphp8.so");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let shims = Scratch::new("symlink-shims");
+        let real_shim = shims.file(&shim_name(PhpVersion::new(8, 4)), b"never loaded here");
+        let linked_dir = Scratch::new("symlink-shim-dir");
+        let linked_shim = linked_dir.dir.join(shim_name(PhpVersion::new(8, 4)));
+        std::os::unix::fs::symlink(&real_shim, &linked_shim).unwrap();
+
+        let search = search_for(&link, &linked_dir.dir);
+        let runtime = discover_php(&search).expect("a link to an NTS 8.4 object and its shim");
+        assert_eq!(runtime.libphp, real, "the record is the resolved library");
+        assert_eq!(runtime.shim, real_shim, "and the resolved shim");
+        for path in [&runtime.libphp, &runtime.shim] {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            assert!(
+                !metadata.file_type().is_symlink(),
+                "{} is still a link, so stage 1's O_NOFOLLOW open would fail",
+                path.display()
+            );
+        }
+        assert!(
+            matches!(
+                php_boot(&manifest(PHP_ONLY), &search, Some(16)),
+                PhpBoot::Proceed(_)
+            ),
+            "a legitimately symlinked distro library keeps booting"
+        );
+    }
+
+    /// The link that goes nowhere is a §4.1 refusal, not an `errno` in a
+    /// worker: the route, its `entry`, the path, the package and
+    /// `BLASTIT_LIBPHP`.
+    #[test]
+    fn a_dangling_symlink_is_refused_with_the_package_sentence() {
+        let scratch = Scratch::new("dangling");
+        let link = scratch.dir.join("libphp8.4.so");
+        std::os::unix::fs::symlink(scratch.dir.join("not-installed.so"), &link).unwrap();
+        let shims = Scratch::new("dangling-shims");
+
+        let message = php_boot(
+            &manifest(PHP_ONLY),
+            &search_for(&link, &shims.dir),
+            Some(16),
+        )
+        .refusal()
+        .expect("a dangling link cannot be embedded")
+        .to_string();
+        assert!(message.contains("route \"app\""), "{message}");
+        assert!(
+            message.contains("[route.php] entry \"public/index.php\""),
+            "{message}"
+        );
+        assert!(message.contains(&link.display().to_string()), "{message}");
+        assert!(
+            message.contains("install the PHP embed package"),
+            "{message}"
+        );
+        assert!(
+            message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("Too many levels of symbolic links"),
+            "the refusal is the sentence, not a raw errno: {message}"
+        );
+    }
+
     /// A host with nothing to embed refuses **only** when a route asks for PHP.
     ///
     /// The refusal is `ADR-0010` §4.1's missing-library sentence: the route and
@@ -3620,26 +3642,16 @@ path = ['.*']
         for source in [STATIC_ONLY, WITH_A_VIEW] {
             assert!(
                 matches!(
-                    php_boot(
-                        &manifest(source),
-                        &search,
-                        Some(16),
-                        PhpShimScope::Deployment
-                    ),
+                    php_boot(&manifest(source), &search, Some(16)),
                     PhpBoot::Absent
                 ),
                 "{source}"
             );
         }
-        let message = php_boot(
-            &manifest(STATIC_AND_PHP),
-            &search,
-            Some(16),
-            PhpShimScope::Deployment,
-        )
-        .refusal()
-        .expect("a PHP route")
-        .to_string();
+        let message = php_boot(&manifest(STATIC_AND_PHP), &search, Some(16))
+            .refusal()
+            .expect("a PHP route")
+            .to_string();
         assert!(message.contains("route \"app\""), "{message}");
         assert!(
             message.contains("[route.php] entry \"public/index.php\""),
@@ -3670,35 +3682,25 @@ path = ['.*']
         );
 
         // The first PHP route is the one named, never the second.
-        let two = php_boot(
-            &manifest(TWO_PHP_ROUTES),
-            &search,
-            Some(16),
-            PhpShimScope::Deployment,
-        )
-        .refusal()
-        .expect("a PHP route")
-        .to_string();
+        let two = php_boot(&manifest(TWO_PHP_ROUTES), &search, Some(16))
+            .refusal()
+            .expect("a PHP route")
+            .to_string();
         assert!(two.contains("route \"app\""), "{two}");
         assert!(!two.contains("api/index.php"), "{two}");
 
-        // The `dev` twin: nothing installed is not a `dev` refusal, because the
-        // `MB.3.28` interim sentence the caller prints next already says why the
-        // route cannot serve.
+        // The `dev` twin is the same refusal: `ADR-0010` §1 gives PHP one
+        // backend, so a developer host with nothing installed gets the package
+        // sentence too, not a boot that serves the route another way.
+        let dev = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+            .refusal()
+            .expect("a PHP-free dev host is refused")
+            .to_string();
+        assert!(dev.contains("no usable NTS libphp"), "{dev}");
         assert!(
-            matches!(
-                php_boot(
-                    &manifest(PHP_ONLY),
-                    &search,
-                    Some(16),
-                    PhpShimScope::Development
-                ),
-                PhpBoot::Proceed(_)
-            ),
-            "a PHP-free dev host is left to the interim refusal"
+            dev.contains("apt install libphp-embed"),
+            "dev names the package: {dev}"
         );
-        let interim = php_backend_unavailable(&manifest(PHP_ONLY)).expect("a PHP route");
-        assert!(interim.contains("MB.3.13.3"), "{interim}");
     }
 
     /// A ZTS build is refused with the tuple and the shim it would need — and
@@ -3716,15 +3718,10 @@ path = ['.*']
             b"never loaded in stage 0",
         );
         let search = search_for(&zts, &shims.dir);
-        let message = php_boot(
-            &manifest(PHP_ONLY),
-            &search,
-            Some(16),
-            PhpShimScope::Deployment,
-        )
-        .refusal()
-        .expect("a ZTS host is refused")
-        .to_string();
+        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+            .refusal()
+            .expect("a ZTS host is refused")
+            .to_string();
         assert!(message.contains("ZTS (thread-safe)"), "{message}");
         assert!(
             message.contains(&format!("(PHP 8.4, {})", target_tuple())),
@@ -3751,22 +3748,10 @@ path = ['.*']
         assert!(runtime.ino > 0, "the inode is recorded for stage 1");
         assert!(
             matches!(
-                php_boot(
-                    &manifest(PHP_ONLY),
-                    &search,
-                    Some(16),
-                    PhpShimScope::Deployment
-                ),
+                php_boot(&manifest(PHP_ONLY), &search, Some(16)),
                 PhpBoot::Proceed(_)
             ),
-            "the host resolves; the wiring refusal is the callers' next step"
-        );
-        // Step 3, unchanged: `MB.3.28`'s sentence, and it names no package.
-        let interim = php_backend_unavailable(&manifest(PHP_ONLY)).expect("a PHP route");
-        assert!(interim.contains("MB.3.13.3"), "{interim}");
-        assert!(
-            !interim.to_ascii_lowercase().contains("libphp"),
-            "the wiring sentence is not a package sentence: {interim}"
+            "the host resolves, so the boot proceeds to stage 1's binding"
         );
     }
 
@@ -3789,7 +3774,6 @@ path = ['.*']
                 &manifest(PHP_ONLY),
                 &search_for(&path, &shims.dir),
                 Some(16),
-                PhpShimScope::Deployment,
             )
             .refusal()
             .expect("an unusable path is refused")
@@ -3807,7 +3791,6 @@ path = ['.*']
             &manifest(PHP_ONLY),
             &search_for(&directory, &shims.dir),
             Some(16),
-            PhpShimScope::Deployment,
         )
         .refusal()
         .expect("a directory is not a library")
@@ -3828,7 +3811,6 @@ path = ['.*']
             &manifest(PHP_ONLY),
             &search_for(&unversioned, &shims.dir),
             Some(16),
-            PhpShimScope::Deployment,
         )
         .refusal()
         .expect("an unversioned name cannot choose a shim")
@@ -3864,15 +3846,10 @@ path = ['.*']
             shim_dirs: vec![first.dir.clone(), second.dir.clone()],
             lib_dirs: Vec::new(),
         };
-        let message = php_boot(
-            &manifest(PHP_ONLY),
-            &search,
-            Some(16),
-            PhpShimScope::Deployment,
-        )
-        .refusal()
-        .expect("no shim for the tuple")
-        .to_string();
+        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+            .refusal()
+            .expect("no shim for the tuple")
+            .to_string();
         assert!(
             message.contains(&format!("no shim libblastit_php84-{}.so", target_tuple())),
             "{message}"
@@ -3894,37 +3871,22 @@ path = ['.*']
         assert_eq!(runtime.shim, shim);
 
         // And the `dev` twin of the missing shim: `make php-sapi` is optional in
-        // a development checkout, so a `dev` boot without the shim is left to
-        // the interim refusal while a deployment may not bind at all.
+        // a development checkout, and `ADR-0010` §1 gives PHP one backend — so
+        // `dev` refuses a missing shim exactly as a deployment does, naming the
+        // tuple and the `make php-sapi` artifact that fixes it.
         let empty = Scratch::new("shim-dev-empty");
         let dev_search = PhpSearch {
             libphp: Some(libphp),
             shim_dirs: vec![empty.dir.clone()],
             lib_dirs: Vec::new(),
         };
+        let dev = php_boot(&manifest(PHP_ONLY), &dev_search, Some(16))
+            .refusal()
+            .expect("dev refuses a missing shim too")
+            .to_string();
         assert!(
-            matches!(
-                php_boot(
-                    &manifest(PHP_ONLY),
-                    &dev_search,
-                    Some(16),
-                    PhpShimScope::Development
-                ),
-                PhpBoot::Proceed(_)
-            ),
-            "a dev host without the shim is left to the interim refusal"
-        );
-        assert!(
-            matches!(
-                php_boot(
-                    &manifest(PHP_ONLY),
-                    &dev_search,
-                    Some(16),
-                    PhpShimScope::Deployment
-                ),
-                PhpBoot::Refused(_)
-            ),
-            "a deployment may not bind without the shim"
+            dev.contains(&format!("libblastit_php84-{}.so", target_tuple())),
+            "{dev}"
         );
     }
 
@@ -3962,29 +3924,17 @@ path = ['.*']
         for source in [php_with_workers(8), PHP_ONLY.to_string()] {
             assert!(
                 matches!(
-                    php_boot(
-                        &manifest(&source),
-                        &resolved,
-                        Some(8),
-                        PhpShimScope::Deployment
-                    ),
+                    php_boot(&manifest(&source), &resolved, Some(8)),
                     PhpBoot::Proceed(_)
                 ),
                 "{source}: the cap passed"
             );
         }
-        // And the third step still refuses it, with the wiring sentence.
-        let interim = php_backend_unavailable(&manifest(PHP_ONLY)).expect("a PHP route");
-        assert!(interim.contains("MB.3.13.3"), "{interim}");
-
-        // The second PHP route is checked too: the budget is a manifest rule,
-        // so an over-budget route behind an accepted one is still refused, and
-        // it is *that* route and both numbers that are named.
+        // And the second route's over-budget cap is still refused below.
         let second = php_boot(
             &manifest(&two_php_routes_with_second_workers(20)),
             &resolved,
             Some(16),
-            PhpShimScope::Deployment,
         );
         let message = second
             .refusal()
@@ -3999,8 +3949,7 @@ path = ['.*']
                 php_boot(
                     &manifest(&two_php_routes_with_second_workers(16)),
                     &resolved,
-                    Some(16),
-                    PhpShimScope::Deployment
+                    Some(16)
                 ),
                 PhpBoot::Proceed(_)
             ),
@@ -4021,7 +3970,6 @@ path = ['.*']
             &manifest(PHP_ONLY),
             &search_for(&unversioned, &shims.dir),
             Some(16),
-            PhpShimScope::Deployment,
         )
         .refusal()
         .expect("not an ELF, and its name states no version")
@@ -4048,15 +3996,10 @@ path = ['.*']
             shim_dirs: Vec::new(),
             lib_dirs: Vec::new(),
         };
-        let message = php_boot(
-            &manifest(PHP_ONLY),
-            &search,
-            Some(16),
-            PhpShimScope::Development,
-        )
-        .refusal()
-        .expect("a relative override cannot be the library the boot inspected")
-        .to_string();
+        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+            .refusal()
+            .expect("a relative override cannot be the library the boot inspected")
+            .to_string();
         assert!(message.contains("BLASTIT_LIBPHP"), "{message}");
         assert!(message.contains("not an absolute path"), "{message}");
         assert!(message.contains("apt install libphp-embed"), "{message}");
@@ -4090,17 +4033,10 @@ path = ['.*']
                 );
                 assert!(
                     matches!(
-                        php_boot(&manifest(PHP_ONLY), &search, None, PhpShimScope::Deployment),
+                        php_boot(&manifest(PHP_ONLY), &search, None),
                         PhpBoot::Proceed(_)
                     ),
                     "this host resolves the pair"
-                );
-                let interim = php_backend_unavailable(&manifest(PHP_ONLY))
-                    .expect("the route is not served yet");
-                assert!(interim.contains("MB.3.13.3"), "{interim}");
-                assert!(
-                    !interim.to_ascii_lowercase().contains("libphp"),
-                    "the wiring sentence names no library: {interim}"
                 );
             }
             Err(refusal) => {
@@ -4148,8 +4084,8 @@ mod app_rule_executors {
     use super::*;
 
     /// A PHP route with no app: the app rule must not demand the callable.
-    /// (The boot is refused by [`php_backend_unavailable`] until `MB.3.13.3`
-    /// wires the worker; that is a different gate and a different sentence.)
+    /// (What a `[route.php]` boot does need is a usable NTS `libphp`, and
+    /// [`php_boot_gate`] is the gate that asks; that is a different sentence.)
     const PHP_ONLY: &str = "\
 version = 1
 

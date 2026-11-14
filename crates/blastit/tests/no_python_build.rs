@@ -20,10 +20,10 @@
 //! key stops existing, so the manifest is refused as an unknown key that names
 //! it, before the capability gate is consulted at all.
 //!
-//! The `[route.php]` case (`MB.3.28`) is the third: the capability gate must
-//! stay silent (a PHP route needs no interpreter), but the boot is refused by
-//! the separate interim guard that names the missing worker wiring — not by
-//! `app_rule`, and not by installing Python.
+//! The `[route.php]` case (`MB.3.13.3`) is the third: the capability gate must
+//! stay silent (a PHP route needs no interpreter), and the boot is refused by
+//! the `[route.php]` discovery gate for the library this build does not bundle
+//! — never by `app_rule`, and never by installing Python.
 #![cfg(not(feature = "python"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -58,10 +58,10 @@ entry = \"public/index.php\"
 ";
 
 /// One `[route.php]` route and no app: an embedded-PHP route is its own
-/// executor (`ADR-0010` §2), so **this** gate must not fire. The boot itself is
-/// refused by stage 0's separate interim guard (`MB.3.28`) until `MB.3.13.3`
-/// wires `SpawnSpec::Php`; `dev` therefore says the PHP sentence, never the
-/// capability gate's.
+/// executor (`ADR-0010` §2), so **this** gate must not fire. The boot is refused
+/// by the separate `[route.php]` discovery gate when the host has no usable NTS
+/// `libphp` (the case below pins one that cannot be a library); `dev` therefore
+/// says that sentence, never the capability gate's.
 const PHP_ONLY: &str = "\
 version = 1
 
@@ -79,11 +79,6 @@ const CAPABILITY_GATE: &str = "this build has no Python support (built without f
 
 /// The sentence that names the artifact which *can* serve a WSGI manifest.
 const INSTALL: &str = "install the Python package: uv add blastit";
-
-/// `MB.3.28`'s interim refusal: `[route.php]` has no worker in this build yet
-/// (`MB.3.13.3` wires it), so the boot fails closed rather than reaching
-/// `Ctl::Spawn`.
-const PHP_GATE: &str = "embedded PHP backend is not available in this build";
 
 /// `app_rule`'s pre-existing refusal, which the capability gate must get in
 /// front of: on this build "set `BLASTIT_APP`" is not a fix.
@@ -117,10 +112,15 @@ impl Drop for Scratch {
 /// The port is one this test holds open: a boot that got past the gate cannot
 /// bind it, so a gate that went missing fails the assertion instead of serving
 /// forever and hanging the suite. The wait is bounded either way.
-fn dev(dir: &Path) -> (Option<i32>, String, String) {
+///
+/// `env` is applied on top of an empty environment, which is how the PHP case
+/// pins a `BLASTIT_LIBPHP` that cannot be a library — the boot must refuse it
+/// before the held port or a fork is reached.
+fn dev(dir: &Path, env: &[(&str, &str)]) -> (Option<i32>, String, String) {
     let held = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = held.local_addr().unwrap().port().to_string();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_blastit"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
+    command
         .args(["dev", "--port", &port])
         .env_clear()
         // A loaded host must not turn this into the memory-watermark refusal.
@@ -128,9 +128,11 @@ fn dev(dir: &Path) -> (Option<i32>, String, String) {
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if child.try_wait().unwrap().is_some() {
@@ -153,7 +155,7 @@ fn dev(dir: &Path) -> (Option<i32>, String, String) {
 #[test]
 fn a_wsgi_manifest_is_refused_by_the_capability_gate() {
     let scratch = Scratch::new("wsgi", WSGI_ONLY);
-    let (code, stdout, stderr) = dev(&scratch.dir);
+    let (code, stdout, stderr) = dev(&scratch.dir, &[]);
     assert_eq!(code, Some(1), "stdout={stdout:?} stderr={stderr:?}");
     assert_eq!(
         stdout, "",
@@ -174,7 +176,7 @@ fn a_wsgi_manifest_is_refused_by_the_capability_gate() {
 #[test]
 fn a_manifest_asking_for_the_retired_external_php_pool_is_refused_by_name() {
     let scratch = Scratch::new("fastcgi", RETIRED_EXTERNAL_PHP);
-    let (code, stdout, stderr) = dev(&scratch.dir);
+    let (code, stdout, stderr) = dev(&scratch.dir, &[]);
     assert_eq!(code, Some(1), "stdout={stdout:?} stderr={stderr:?}");
     assert_eq!(
         stdout, "",
@@ -197,17 +199,24 @@ fn a_manifest_asking_for_the_retired_external_php_pool_is_refused_by_name() {
 /// A PHP-only manifest is **not** a WSGI manifest: the capability gate must not
 /// fire and nothing may suggest installing Python (`MB.3.5.4`, `ADR-0010` §2).
 ///
-/// The boot is still refused, now by `MB.3.28`'s interim stage-0 guard: this
-/// build has no PHP worker to spawn, so refusing before a listener beats
-/// reaching `Ctl::Spawn` and taking the container down. What is asserted is
-/// *which* sentence was printed and which was not — a capability gate that came
-/// back would name the wrong artifact, and `app_rule` would send a PHP
-/// developer to set `BLASTIT_APP`. The WSGI case above stays the denied twin:
-/// same harness, same held port, capability gate's sentence.
+/// This build does embed PHP (`--features php`), so the PHP route is not refused
+/// for the missing interpreter — it is refused by the `[route.php]` discovery
+/// gate, because `BLASTIT_LIBPHP` here is a text file and no NTS `libphp` is
+/// bundled (`ADR-0010` §1: one backend, no fallback). What is asserted is
+/// *which* sentence was printed and which was not: a capability gate that came
+/// back would name the wrong artifact, and `app_rule` would send a PHP developer
+/// to set `BLASTIT_APP`. The WSGI case above stays the denied twin: same
+/// harness, same held port, capability gate's sentence. The served case — a host
+/// with a usable library — is `critical_php_backend.rs`'s.
 #[test]
-fn a_php_only_manifest_is_refused_by_the_interim_php_gate() {
+fn a_php_only_manifest_is_refused_by_the_php_discovery_gate() {
     let scratch = Scratch::new("php", PHP_ONLY);
-    let (code, stdout, stderr) = dev(&scratch.dir);
+    let not_a_library = scratch.dir.join("libphp.so");
+    std::fs::write(&not_a_library, b"not an ELF object").unwrap();
+    let (code, stdout, stderr) = dev(
+        &scratch.dir,
+        &[("BLASTIT_LIBPHP", &not_a_library.to_string_lossy())],
+    );
     assert_eq!(code, Some(1), "stdout={stdout:?} stderr={stderr:?}");
     assert_eq!(
         stdout, "",
@@ -218,7 +227,10 @@ fn a_php_only_manifest_is_refused_by_the_interim_php_gate() {
         stderr.contains("[route.php] entry \"public/index.php\""),
         "{stderr}"
     );
-    assert!(stderr.contains(PHP_GATE), "{stderr}");
+    assert!(
+        stderr.contains("install the PHP embed package"),
+        "the discovery gate named the package: {stderr}"
+    );
     let all = format!("{stdout}{stderr}");
     assert!(
         !all.contains(CAPABILITY_GATE),

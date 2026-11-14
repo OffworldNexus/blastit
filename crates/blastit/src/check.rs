@@ -63,7 +63,9 @@ use crate::audit_v1::{self, CheckObsV1, ObsError, Report};
 use crate::cli::CheckOptions;
 use crate::config::Config;
 use crate::host::{Host, Install};
-use crate::stage0::{php_backend_unavailable, static_app_refusal, static_root_permission};
+use crate::stage0::{
+    PhpBoot, PhpShimScope, php_boot_gate, static_app_refusal, static_root_permission,
+};
 
 /// The process exited cleanly: pytest passed and no finding fails the run.
 const CLEAN: u8 = 0;
@@ -144,14 +146,15 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     if let Some(message) = static_app_refusal(&config, &manifest) {
         return Err(message);
     }
-    // `MB.3.28`: the same interim refusal as the boot's (`stage0::run`,
-    // `stage0::run_dev`). `check` must not hand pytest a manifest it would
-    // then exercise as if the PHP route were served: this build has no worker
-    // to spawn, so the audit would mis-route exactly as a boot would. A
-    // configuration error is exit `2` with nothing on stdout; delete this
-    // block with the function when `MB.3.13.3` wires `SpawnSpec::Php`.
-    if let Some(message) = php_backend_unavailable(&manifest) {
-        return Err(message);
+    // `ADR-0010` §3, §4.1: the same `[route.php]` discovery gate the boot runs,
+    // so `blastit check` reaches the package sentence rather than handing pytest
+    // a manifest no worker of this host could serve. `check` looks where `dev`
+    // does (`BLASTIT_PHP_SHIM_DIR`, the `target/php-sapi` `make php-sapi`
+    // writes), because it runs on the machine that builds the site. A
+    // configuration error is exit `2` with nothing on stdout.
+    match php_boot_gate(&config, &manifest, PhpShimScope::Development) {
+        PhpBoot::Absent | PhpBoot::Proceed(_) => {}
+        PhpBoot::Refused(message) => return Err(message),
     }
     manifest
         .check_static_roots(&config.manifest_dir)

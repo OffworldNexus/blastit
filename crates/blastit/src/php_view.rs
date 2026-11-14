@@ -29,36 +29,39 @@
 //!
 //! # What this module does not do
 //!
-//! It does not discover `libphp` (`MB.3.13.2` resolves it and the shim at
-//! stage 0/1 and hands the descriptors here) and it does not render the INI
-//! policy (`IniPolicy` does, at the composition root). It forks what the
-//! binding says, so the same function serves production's fd-pinned objects and
-//! native development's paths.
+//! It does not inspect ELF symbols or pick a library: stage 0's discovery gate
+//! does that statically, and [`boot_bindings`] re-opens exactly what it
+//! recorded. It also never `dlopen`s anything itself — the load happens in the
+//! child, inside [`SeccompRole::EmbeddedView`], which is why no `libphp` symbol
+//! is reachable in `init`, `http`, `scheduler` or `dbproxy`.
 //!
-//! # Interim state: no caller, and a `[route.php]` route is not served yet
+//! # Two halves, decided once each
 //!
-//! Nothing in this crate calls [`fork_php_view`] yet. `init`'s `Ctl::Spawn`
-//! still forks only [`crate::zygote`]'s WSGI path, and stage 0 does not yet
-//! resolve `BLASTIT_LIBPHP`/the shim into a [`PhpBinding`] (`MB.3.13.2`).
-//! **A manifest with a `[route.php]` route is accepted at boot but is not
-//! served**: no PHP worker is forked, and the route's requests fail rather than
-//! reaching PHP. `MB.3.13.3` owns both halves of the fix — selecting
-//! `SpawnSpec::Php` in `Ctl::Spawn` and the boot refusal that names the route
-//! and the package when `libphp` is missing, ZTS or the wrong minor — and
-//! neither may be missing from a release that ships a PHP route. Until then the
-//! module is gated `#[allow(dead_code)]` so the seam is explicit rather than a
-//! warning.
+//! [`boot_bindings`] is the boot half (`ADR-0010` §3): stage 1 re-opens the
+//! `libphp` and the shim stage 0 inspected, asserts `(st_dev, st_ino)` against
+//! the record it inherited, renders the `ZEND_INI_SYSTEM` blob once, and hands
+//! the supervisor one [`PhpBinding`] per PHP route slot. From then on
+//! `Ctl::Spawn` looks the slot up in that vector instead of asking what kind of
+//! backend the route is — the choice is data, not a branch in dispatch
+//! (`ADR-0009`, design §4.3). [`fork_php_view`] is the per-spawn half.
+//!
+//! **A host without a usable NTS `libphp` is not a fallback path**: stage 0's
+//! discovery gate (`crate::stage0::php_boot_gate`) refuses it before a listener
+//! binds, and a binding that cannot be built here is the same refusal one
+//! process later.
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 
 use blastit_frame::Limits;
-use blastit_php_sapi::SharedObject;
+use blastit_manifest::Manifest;
+use blastit_php_sapi::{Egress, IniPolicy, SharedObject};
 use blastit_scheduler::RouteInfo;
 use blastit_sys::{
     Fork, Pid, Rlimits, SeccompRole, Signal, SignalMask, harden_child, pipe,
     restore_signal_mask_in_child, set_dumpable, socketpair_stream,
 };
+use rustix::fs::{Mode, OFlags};
 
 use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::Config;
@@ -71,56 +74,28 @@ const VIEW_PROCESS_MARGIN: u32 = 16;
 /// granted proxy sockets, `libphp` and its extensions).
 const VIEW_NOFILE: u64 = 1024;
 
-/// Where one shared object the child loads comes from.
-///
-/// Production passes the descriptor stage 0 opened and stage 1 re-verified: the
-/// child keeps it open across `ChildIo::prepare`, and `dlopen` names it
-/// `/proc/self/fd/<n>` so the file cannot be swapped between the verification
-/// and the load. A [`PhpObject::Path`] exists for native development and the
-/// harness, never as a fallback for a missing descriptor.
-#[derive(Debug)]
-pub enum PhpObject {
-    /// An owned, already-verified descriptor.
-    Fd(OwnedFd),
-    /// A path (native development only).
-    Path(PathBuf),
-}
-
-impl PhpObject {
-    /// The raw descriptor, when this object is one.
-    pub fn raw_fd(&self) -> Option<RawFd> {
-        match self {
-            Self::Fd(fd) => Some(fd.as_raw_fd()),
-            Self::Path(_) => None,
-        }
-    }
-
-    /// The handle the loader is given.
-    fn shared(&self) -> SharedObject {
-        match self {
-            Self::Fd(fd) => SharedObject::Fd(fd.as_raw_fd()),
-            Self::Path(path) => SharedObject::Path(path.clone()),
-        }
-    }
-}
-
 /// Everything the child needs to load and run `[route.php]`.
+///
+/// Both shared objects are **descriptors**, never paths: the child keeps them
+/// across `ChildIo::prepare` and `dlopen`s `/proc/self/fd/<n>`, so the file
+/// cannot be swapped between the `(st_dev, st_ino)` verification and the load
+/// (`ADR-0010` §3). There is no path variant and therefore no fallback: a
+/// missing descriptor is a boot refusal, not a load of something unverified.
 #[derive(Debug)]
 pub struct PhpBinding {
-    /// The host's NTS `libphp.so`: an fd-pinned object in production, a path
-    /// for native development. Never a `dlopen` of an unverified path in
-    /// `Production` (ADR-0010 §3).
-    pub libphp: PhpObject,
+    /// The host's NTS `libphp.so`, opened and identity-checked at boot.
+    pub libphp: OwnedFd,
     /// The matching `libblastit_php8X.so` shim (`MB.3.12`).
-    pub shim: PhpObject,
+    pub shim: OwnedFd,
     /// Absolute `SCRIPT_FILENAME`, pinned at boot (`[route.php] entry`).
     pub entry: PathBuf,
     /// The application root (`DOCUMENT_ROOT`, `open_basedir`).
     pub document_root: PathBuf,
     /// The `ZEND_INI_SYSTEM` blob the composition root rendered.
     pub ini: String,
-    /// The view's private scratch directory: the child's `HOME`, `TMPDIR` and
-    /// PHP's `sys_temp_dir` (`<runtime>/views/<slot>/tmp` in production).
+    /// The view's private scratch directory: the child's `chdir`, `HOME`,
+    /// `TMPDIR` and PHP's `sys_temp_dir` (`<runtime>/views/<uid>` in
+    /// production).
     pub view_tmp: PathBuf,
     /// Requests per process before it retires.
     pub max_requests: u32,
@@ -130,15 +105,179 @@ pub struct PhpBinding {
 
 impl PhpBinding {
     /// The descriptors the child must keep across `ChildIo::prepare`: the
-    /// fd-pinned `libphp` and shim. Without them `close_fds_except` closes
-    /// exactly the files the child is about to `dlopen` through
-    /// `/proc/self/fd/<n>`.
+    /// pinned `libphp` and shim. Without them `close_fds_except` closes exactly
+    /// the files the child is about to `dlopen` through `/proc/self/fd/<n>`.
     fn pinned_fds(&self) -> Vec<RawFd> {
-        [&self.libphp, &self.shim]
-            .into_iter()
-            .filter_map(PhpObject::raw_fd)
-            .collect()
+        vec![self.libphp.as_raw_fd(), self.shim.as_raw_fd()]
     }
+}
+
+/// `ADR-0010` §3: builds every PHP slot's [`PhpBinding`], or the sentence the
+/// boot refuses with.
+///
+/// Stage 0 recorded `(path, st_dev, st_ino)` for the NTS `libphp` and the shim
+/// it inspected in [`crate::config::Config::php`]; this re-opens both with
+/// `O_RDONLY | O_CLOEXEC | O_NOFOLLOW` and refuses a file whose identity moved
+/// (a package upgraded between the two stages would otherwise run something
+/// nobody inspected). Nothing is loaded here: the descriptors travel into the
+/// view child through [`PhpBinding::pinned_fds`] and the worker `dlopen`s
+/// `/proc/self/fd/<n>`.
+///
+/// `routes` is the supervisor's slot list, so a `dev --learn` boot — whose slot
+/// `0` is the unrouted-request fallback view — keeps its numbering. `dev` also
+/// decides where the view's private scratch directory is: the caller's
+/// per-slot directory there, `<runtime>/views/<uid>` in production.
+///
+/// # Errors
+///
+/// A message naming the route, the file and the fix. Every case is a boot
+/// refusal (`exit 1`, no listener bound), never a first-request fault.
+pub fn boot_bindings(
+    config: &Config,
+    manifest: &Manifest,
+    routes: &[RouteInfo],
+    dev: Option<&crate::dev_learn::Dev>,
+) -> Result<Vec<Option<PhpBinding>>, String> {
+    let mut bindings: Vec<Option<PhpBinding>> = routes.iter().map(|_| None).collect();
+    // The manifest's route `i` is slot `i + offset`.
+    let offset = routes.len().saturating_sub(manifest.routes().len());
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let Some(php) = route.php() else {
+            continue;
+        };
+        let slot = index + offset;
+        let Some(info) = routes.get(slot) else {
+            return Err(format!(
+                "route {:?}: no view slot for [route.php] entry {:?}; the manifest and the \
+                 scheduler's routing table disagree",
+                route.name(),
+                php.entry
+            ));
+        };
+        let Some(record) = config.php.as_ref() else {
+            return Err(format!(
+                "route {:?}: stage 0 recorded no NTS libphp for [route.php] entry {:?}, so there \
+                 is nothing to load; restart blastit so the discovery gate runs again",
+                route.name(),
+                php.entry
+            ));
+        };
+        let document_root = config.manifest_dir.clone();
+        let entry = document_root.join(&php.entry);
+        if !entry.is_file() {
+            return Err(format!(
+                "route {:?}: [route.php] entry {:?} is not a file ({}); SCRIPT_FILENAME is \
+                 pinned to it and never taken from the request",
+                route.name(),
+                php.entry,
+                entry.display()
+            ));
+        }
+        if !entry.starts_with(&document_root) {
+            return Err(format!(
+                "route {:?}: [route.php] entry {:?} leaves the application root {}; a script \
+                 outside it would also be outside open_basedir",
+                route.name(),
+                php.entry,
+                document_root.display()
+            ));
+        }
+        // The same private directory the fork makes the child's `chdir`,
+        // `HOME` and `TMPDIR`, so `sys_temp_dir` cannot disagree with them.
+        let dir = match dev {
+            Some(dev) => dev.view_dir(slot),
+            None => crate::config::view_dir(info.uid),
+        };
+        let egress = if route.egress() {
+            Egress::Allowed
+        } else {
+            Egress::Denied
+        };
+        let ini = IniPolicy::new(&document_root, &dir, request_timeout_s(config), egress).map_err(
+            |err| {
+                format!(
+                    "route {:?}: the INI lockdown for {} could not be rendered: {err}",
+                    route.name(),
+                    dir.display()
+                )
+            },
+        )?;
+        bindings[slot] = Some(PhpBinding {
+            libphp: open_pinned(
+                &record.libphp,
+                record.dev,
+                record.ino,
+                route.name(),
+                "libphp",
+            )?,
+            shim: open_pinned(
+                &record.shim,
+                record.shim_dev,
+                record.shim_ino,
+                route.name(),
+                "shim",
+            )?,
+            entry,
+            document_root,
+            ini: ini.as_str().to_owned(),
+            view_tmp: dir,
+            max_requests: max_requests(config),
+            max_body_bytes: max_body_bytes(config),
+        });
+    }
+    Ok(bindings)
+}
+
+/// Re-opens one inspected object and refuses a file that is not the one stage 0
+/// read (`ADR-0010` §3).
+fn open_pinned(
+    path: &Path,
+    dev: u64,
+    ino: u64,
+    route: &str,
+    what: &str,
+) -> Result<OwnedFd, String> {
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|err| format!("route {route:?}: {what} {}: {err}", path.display()))?;
+    let stat = rustix::fs::fstat(&fd)
+        .map_err(|err| format!("route {route:?}: {what} {}: {err}", path.display()))?;
+    if stat.st_dev != dev || stat.st_ino != ino {
+        return Err(format!(
+            "route {route:?}: {what} {} is not the file stage 0 inspected (st_dev/st_ino \
+             moved), so the worker would load something nobody verified; restore the package \
+             and restart blastit",
+            path.display()
+        ));
+    }
+    Ok(fd)
+}
+
+/// `max_execution_time`, in whole seconds, from the scheduler's wall clock: a
+/// runaway script bails out as a contained fatal instead of a stuck worker.
+fn request_timeout_s(config: &Config) -> u32 {
+    let seconds = config.request_timeout.as_secs();
+    u32::try_from(seconds).unwrap_or(u32::MAX).max(1)
+}
+
+/// Requests per worker before it retires. `0` means "no cap" in the
+/// configuration and `u32::MAX` in the worker, which is the same rule.
+fn max_requests(config: &Config) -> u32 {
+    if config.view_max_requests == 0 {
+        u32::MAX
+    } else {
+        u32::try_from(config.view_max_requests).unwrap_or(u32::MAX)
+    }
+}
+
+/// The body the worker buffers before PHP runs (`post_max_size`'s twin).
+fn max_body_bytes(config: &Config) -> usize {
+    usize::try_from(config.max_body_bytes)
+        .unwrap_or(usize::MAX)
+        .max(1)
 }
 
 /// Everything the fork needs about the route it is forking (§4.3's `SpawnSpec`
@@ -182,23 +321,13 @@ pub struct ForkedPhpView {
 /// `interpreter_live` is `true` exactly when CPython is initialised in this
 /// image and the caller holds the GIL — a wheel install, where init forks on
 /// the interpreter's thread (§9.3). The standalone binary forks with `false`
-/// and has no interpreter to stop.
+/// and has no interpreter to stop. [`crate::supervise::Supervisor`] passes
+/// [`crate::supervise::interpreter_live`], which is the same answer the WSGI
+/// zygote gives.
 ///
 /// The configuration is validated **before** the fork, so a bad entry or an
 /// empty INI is an error the parent can log rather than a child that dies on
 /// its own.
-///
-/// # No caller yet (`MB.3.13.3`)
-///
-/// Nothing in this crate calls this function. `init`'s `Ctl::Spawn` still forks
-/// only the WSGI path ([`crate::zygote`]), and stage 0 does not yet resolve
-/// `BLASTIT_LIBPHP`/the shim into a [`PhpBinding`] (`MB.3.13.2`). The interim
-/// consequence is explicit: **a `[route.php]` manifest is accepted at boot but
-/// is not served** — the route's view is the WSGI fork with no application, so
-/// its requests fail rather than reaching PHP. `MB.3.13.3` must add the
-/// `SpawnSpec::Php` selection *and* the boot refusal (missing/ZTS/mismatched
-/// `libphp` names the route and the package) before any release ships a PHP
-/// route; until then this module is the seam, gated `#[allow(dead_code)]`.
 ///
 /// # Errors
 ///
@@ -336,8 +465,8 @@ fn serve(
     view_end: OwnedFd,
 ) -> Result<(), String> {
     let runtime = blastit_view::php::PhpEmbedRuntime::load(
-        spawn.binding.libphp.shared(),
-        spawn.binding.shim.shared(),
+        SharedObject::Fd(spawn.binding.libphp.as_raw_fd()),
+        SharedObject::Fd(spawn.binding.shim.as_raw_fd()),
         config,
     )
     .map_err(|err| format!("{err}"))?;
@@ -421,6 +550,200 @@ mod tests {
         }
     }
 
+    /// A `[route.php]` manifest, its front controller on disk, a `libphp`-shaped
+    /// file, and a shim for 8.4 — the whole input of [`boot_bindings`].
+    struct Boot {
+        dir: PathBuf,
+        config: Config,
+        manifest: Manifest,
+        routes: Vec<RouteInfo>,
+    }
+
+    const PAGE: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.php]
+entry = \"public/index.php\"
+";
+
+    impl Boot {
+        /// `name` keeps two runs in one process apart.
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("blastit-php-binding-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("public")).expect("app dir");
+            std::fs::create_dir_all(dir.join("shims")).expect("shim dir");
+            std::fs::write(dir.join("public/index.php"), b"<?php echo 1;\n").expect("entry");
+            let libphp = dir.join("libphp8.4.so");
+            std::fs::write(&libphp, b"the library stage 0 inspected").expect("libphp");
+            let shim = dir.join("shims").join("libblastit_php84-x86_64-gnu.so");
+            std::fs::write(&shim, b"the shim stage 0 inspected").expect("shim");
+            let (manifest, _warnings) =
+                Manifest::parse_and_validate(PAGE, 20_000).expect("the page's manifest");
+            let config = Config {
+                manifest_dir: dir.clone(),
+                php: Some(record(&libphp, &shim, 8, 4)),
+                ..Config::default()
+            };
+            let routes = vec![RouteInfo::new("app", false, config.uid_base + 1000)];
+            Self {
+                dir,
+                config,
+                manifest,
+                routes,
+            }
+        }
+
+        /// The paths `boot_bindings` reads back from the record.
+        fn libphp(&self) -> PathBuf {
+            self.dir.join("libphp8.4.so")
+        }
+
+        fn shim(&self) -> PathBuf {
+            self.dir
+                .join("shims")
+                .join("libblastit_php84-x86_64-gnu.so")
+        }
+
+        fn bindings(&self) -> Result<Vec<Option<PhpBinding>>, String> {
+            boot_bindings(&self.config, &self.manifest, &self.routes, None)
+        }
+    }
+
+    impl Drop for Boot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A `PhpRuntime` recording what `ADR-0010` §3 records for both objects.
+    fn record(libphp: &Path, shim: &Path, major: u8, minor: u8) -> crate::config::PhpRuntime {
+        use std::os::unix::fs::MetadataExt;
+        let library = std::fs::metadata(libphp).expect("libphp metadata");
+        let shim = std::fs::metadata(shim).expect("shim metadata");
+        crate::config::PhpRuntime {
+            libphp: libphp.to_path_buf(),
+            dev: library.dev(),
+            ino: library.ino(),
+            version: crate::config::PhpVersion::new(major, minor),
+            shim: shim_path_of(libphp),
+            shim_dev: shim.dev(),
+            shim_ino: shim.ino(),
+        }
+    }
+
+    /// The shim path a `PhpRuntime` for `libphp` names, so a test can replace it.
+    fn shim_path_of(libphp: &Path) -> PathBuf {
+        libphp
+            .parent()
+            .expect("a directory")
+            .join("shims")
+            .join("libblastit_php84-x86_64-gnu.so")
+    }
+
+    /// The accept branch: one binding per PHP slot, with the manifest's absolute
+    /// `entry`, the rendered INI, the view's own directory, and the two
+    /// descriptors the child loads through `/proc/self/fd/<n>`.
+    #[test]
+    fn a_php_slot_gets_one_binding_and_a_wsgi_slot_none() {
+        let boot = Boot::new("accept");
+        let bindings = boot.bindings().expect("the recorded pair resolves");
+        assert_eq!(bindings.len(), 1);
+
+        let binding = bindings[0].as_ref().expect("the PHP slot has a binding");
+        assert_eq!(binding.entry, boot.dir.join("public/index.php"));
+        assert_eq!(binding.document_root, boot.dir);
+        assert_eq!(
+            binding.view_tmp,
+            crate::config::view_dir(boot.routes[0].uid)
+        );
+        assert!(
+            binding.ini.contains("open_basedir=") && binding.ini.contains("sys_temp_dir="),
+            "the INI lockdown is rendered once here: {}",
+            binding.ini
+        );
+        assert_eq!(binding.max_requests, u32::MAX, "0 means no cap");
+
+        // The descriptors are the *files* stage 0 inspected, not paths.
+        let fds = binding.pinned_fds();
+        assert_eq!(fds.len(), 2);
+        let library = std::fs::read(format!("/proc/self/fd/{}", fds[0])).expect("the library fd");
+        assert_eq!(library, b"the library stage 0 inspected");
+        let shim = std::fs::read(format!("/proc/self/fd/{}", fds[1])).expect("the shim fd");
+        assert_eq!(shim, b"the shim stage 0 inspected");
+
+        // A route with no `[route.php]` policy is a WSGI slot and gets nothing.
+        let (wsgi, _warnings) = Manifest::parse_and_validate(
+            "version = 1\n\n[[route]]\nname = \"web\"\npath = ['.*']\n",
+            20_000,
+        )
+        .expect("a WSGI manifest");
+        let routes = vec![RouteInfo::new("web", false, boot.config.uid_base + 1000)];
+        let none = boot_bindings(&boot.config, &wsgi, &routes, None).expect("nothing to do");
+        assert_eq!(none.len(), 1);
+        assert!(none[0].is_none(), "a WSGI slot carries no PHP binding");
+    }
+
+    /// The denied twin, per object: a file replaced between the record and the
+    /// open has a new inode, so the load would not be the one stage 0 inspected.
+    /// Each object is checked on its own — a record that verified only the
+    /// library would pass the shim half of this test.
+    #[test]
+    fn a_replaced_libphp_or_shim_is_refused_by_name() {
+        let boot = Boot::new("replaced");
+        let library = boot.libphp();
+        std::fs::remove_file(&library).expect("remove the recorded library");
+        std::fs::write(&library, b"a different library").expect("a new file");
+        let message = boot
+            .bindings()
+            .expect_err("a replaced library is not the inspected one");
+        assert!(message.contains("libphp"), "{message}");
+        assert!(
+            message.contains("not the file stage 0 inspected"),
+            "{message}"
+        );
+        assert!(
+            !message.contains(": shim"),
+            "the library is the culprit: {message}"
+        );
+
+        let boot = Boot::new("replaced-shim");
+        let shim = boot.shim();
+        std::fs::remove_file(&shim).expect("remove the recorded shim");
+        std::fs::write(&shim, b"a different shim").expect("a new file");
+        let message = boot
+            .bindings()
+            .expect_err("a replaced shim is not the inspected one");
+        assert!(message.contains("shim"), "{message}");
+        assert!(
+            message.contains("not the file stage 0 inspected"),
+            "{message}"
+        );
+        assert!(
+            !message.contains(": libphp"),
+            "the shim is the culprit: {message}"
+        );
+    }
+
+    /// A boot that lost stage 0's record cannot load anything: that is a
+    /// refusal naming the route, never a first-request fault.
+    #[test]
+    fn a_missing_record_is_refused_by_route() {
+        let mut boot = Boot::new("no-record");
+        boot.config.php = None;
+        let message = boot.bindings().expect_err("no record, no worker");
+        assert!(message.contains("route \"app\""), "{message}");
+        assert!(
+            message.contains("stage 0 recorded no NTS libphp"),
+            "{message}"
+        );
+    }
+
     #[test]
     fn a_pinned_descriptor_survives_the_child_sequence() {
         // A real `fork` refuses a multi-threaded image, so the child sequence
@@ -468,8 +791,8 @@ mod tests {
         let tmp = env_path(TMP);
 
         let binding = PhpBinding {
-            libphp: PhpObject::Fd(std::fs::File::open(&file).expect("pin libphp").into()),
-            shim: PhpObject::Fd(std::fs::File::open(&file).expect("pin shim").into()),
+            libphp: std::fs::File::open(&file).expect("pin libphp").into(),
+            shim: std::fs::File::open(&file).expect("pin shim").into(),
             entry: PathBuf::from("/entry.php"),
             document_root: PathBuf::from("/"),
             ini: "memory_limit=256M\n".to_string(),
@@ -487,14 +810,13 @@ mod tests {
         // `close_fds_except` must have left the pinned descriptors alone, and
         // the loader is handed an fd (not a path) so it can name them through
         // `/proc/self/fd/<n>`.
-        let raw = binding.libphp.raw_fd().expect("an fd-pinned libphp");
+        let raw = binding.libphp.as_raw_fd();
         let kept = std::fs::read(format!("/proc/self/fd/{raw}")).expect("/proc/self/fd/<n>");
         assert_eq!(
             kept,
             std::fs::read(&file).expect("the file"),
             "the fd moved"
         );
-        assert!(matches!(binding.libphp.shared(), SharedObject::Fd(fd) if fd == raw));
 
         set_view_environment(&tmp).expect("HOME/TMPDIR");
         let home = std::env::var("HOME").expect("HOME");

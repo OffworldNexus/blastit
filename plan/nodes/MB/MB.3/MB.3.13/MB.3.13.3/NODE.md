@@ -2,7 +2,7 @@
 id: MB.3.13.3
 title: "MB.3.13 part 3: Vtable wiring: the five shim symbols, blastit_php_minor() vs php_version() before the first request, and the tick floor for cpu_ns"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.13.1, MB.3.13.2, MB.3.28]
@@ -11,11 +11,14 @@ paths:
   - "crates/blastit-view/Cargo.toml"
   - "crates/blastit/src/**"
   - "crates/blastit-php-sapi/src/**"
-attempts: 0
+  - "crates/blastit/tests/**"
+  - "crates/blastit-scheduler/src/route.rs"
+  - "crates/blastit-scheduler/tests/**"
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T17:04"
-updated: "2026-11-14T19:29"
+updated: "2026-11-15T00:46"
 ---
 
 # Goal

@@ -73,6 +73,64 @@ struct ViewChild {
     uid: u32,
 }
 
+/// A freshly forked worker of either runtime, as the parent sees it.
+///
+/// `ForkedView` (WSGI) and `ForkedPhpView` (embedded PHP) describe the same
+/// five things, so the supervisor's bookkeeping — `SPAWNED`, the two log pipes,
+/// the pid maps, the `process.spawned` event — is written once instead of once
+/// per backend (§4.3).
+struct Forked {
+    pid: Pid,
+    scheduler_end: OwnedFd,
+    stdout: OwnedFd,
+    stderr: OwnedFd,
+    fork_ms: f64,
+}
+
+#[cfg(feature = "python")]
+impl From<zygote::ForkedView> for Forked {
+    fn from(view: zygote::ForkedView) -> Self {
+        Self {
+            pid: view.pid,
+            scheduler_end: view.scheduler_end,
+            stdout: view.stdout,
+            stderr: view.stderr,
+            fork_ms: view.fork_ms,
+        }
+    }
+}
+
+#[cfg(feature = "php")]
+impl From<crate::php_view::ForkedPhpView> for Forked {
+    fn from(view: crate::php_view::ForkedPhpView) -> Self {
+        Self {
+            pid: view.pid,
+            scheduler_end: view.scheduler_end,
+            stdout: view.stdout,
+            stderr: view.stderr,
+            fork_ms: view.fork_ms,
+        }
+    }
+}
+
+/// Whether CPython is live in this image and the caller holds the GIL — the
+/// `interpreter_live` [`crate::forking::fork`] documents.
+///
+/// init holds the GIL for its whole loop (`Supervisor::run`), and a build with
+/// `python` off has no interpreter in any role, so this is exactly the
+/// installation question: a wheel install forks under CPython's protocol and
+/// the standalone binary has nothing to stop (§9.3).
+#[cfg(all(feature = "php", feature = "python"))]
+fn interpreter_live(_py: Python<'_>) -> bool {
+    true
+}
+
+/// The token of a build that carries no interpreter: there is nothing to stop.
+#[cfg(all(feature = "php", not(feature = "python")))]
+fn interpreter_live(_py: Python<'_>) -> bool {
+    false
+}
+
 /// Where the shutdown is.
 #[derive(Clone, Copy, Debug)]
 enum Shutdown {
@@ -122,6 +180,13 @@ pub struct Parts {
     pub limits: Limits,
     /// One entry per manifest route, in routing order.
     pub routes: Vec<RouteInfo>,
+    /// One entry per route slot, in routing order: the embedded-PHP worker this
+    /// slot forks, or `None` for a WSGI slot (`ADR-0010` §1, design §4.3).
+    ///
+    /// Built and verified at boot by [`crate::php_view::boot_bindings`], so the
+    /// `SPAWN` path is a lookup and never a question about the backend kind.
+    #[cfg(feature = "php")]
+    pub php: Vec<Option<crate::php_view::PhpBinding>>,
     /// One entry per manifest route, in routing order: whether its view may
     /// reach the network (§7.3).
     pub egress: Vec<bool>,
@@ -148,6 +213,10 @@ pub struct Supervisor<'a> {
     cfg: Config,
     limits: Limits,
     routes: Vec<RouteInfo>,
+    /// One entry per route slot: the PHP worker it forks, decided at boot
+    /// (`ADR-0010` §1). Empty slots are WSGI views.
+    #[cfg(feature = "php")]
+    php: Vec<Option<crate::php_view::PhpBinding>>,
     /// Whether each route's view may reach the network: only the view fork
     /// reads it, and only a build with an interpreter forks one (`MB.3.11`).
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -226,6 +295,8 @@ impl<'a> Supervisor<'a> {
             cfg: parts.cfg,
             limits: parts.limits,
             routes: parts.routes,
+            #[cfg(feature = "php")]
+            php: parts.php,
             egress: parts.egress,
             #[cfg(feature = "python")]
             app: parts.app,
@@ -478,9 +549,13 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Forks the view for `index`, hands its channel over, and records it.
-    #[cfg(feature = "python")]
+    ///
+    /// Which runtime to fork is **boot data**, not a question asked here: a
+    /// slot with a [`crate::php_view::PhpBinding`] forks the embedded-PHP worker
+    /// (`ADR-0010` §1) and every other slot the WSGI zygote. The binding was
+    /// verified at boot (`st_dev`/`st_ino` against stage 0's record), so a
+    /// `SPAWN` can only ever start the runtime this boot already admitted.
     fn spawn_now(&mut self, py: Python<'_>, index: usize, info: &RouteInfo) {
-        let route = index as u32;
         let egress = self.egress.get(index).copied().unwrap_or(false);
         // Production gives each route its own uid and `<scratch>/views/<uid>`;
         // `dev` gives every view the caller's uid and names the directory by
@@ -489,23 +564,88 @@ impl<'a> Supervisor<'a> {
             Some(dev) => (dev.view_dir(index), false),
             None => (crate::config::view_dir(info.uid), true),
         };
-        let child = match zygote::fork_view(
-            py,
-            zygote::ViewSpawn {
-                cfg: &self.cfg,
-                limits: self.limits,
-                info,
-                app: &self.app,
-                mask: self.mask,
-                egress,
-                dir,
-                drop_privileges,
-            },
-        ) {
+        let child = match self.fork_view(py, index, info, egress, &dir, drop_privileges) {
             Ok(child) => child,
-            Err(err) => self.fail(&format!("forking a view: {err}")),
+            Err(err) => self.fail(&err.to_string()),
         };
+        self.record_view(index, info, child);
+    }
 
+    /// Forks the worker this slot was assigned at boot (§4.3).
+    ///
+    /// The PHP arm reads the binding the boot stored; the WSGI arm is the
+    /// zygote. Neither is reached by asking what backend a request is — the
+    /// scheduler sends `SPAWN { route }` and the slot's own data decides.
+    fn fork_view(
+        &self,
+        py: Python<'_>,
+        index: usize,
+        info: &RouteInfo,
+        egress: bool,
+        dir: &std::path::Path,
+        drop_privileges: bool,
+    ) -> std::io::Result<Forked> {
+        #[cfg(feature = "php")]
+        if let Some(binding) = self.php.get(index).and_then(Option::as_ref) {
+            return crate::php_view::fork_php_view(
+                crate::php_view::PhpViewSpawn {
+                    cfg: &self.cfg,
+                    limits: self.limits,
+                    info,
+                    binding,
+                    mask: self.mask,
+                    egress,
+                    // The binding's directory is the one its INI pins as
+                    // `sys_temp_dir`, so the fork cannot disagree with it.
+                    dir: binding.view_tmp.clone(),
+                    drop_privileges,
+                },
+                interpreter_live(py),
+            )
+            .map(Forked::from)
+            .map_err(|err| {
+                std::io::Error::other(format!("forking the PHP view for {:?}: {err}", info.name))
+            });
+        }
+        #[cfg(feature = "python")]
+        {
+            zygote::fork_view(
+                py,
+                zygote::ViewSpawn {
+                    cfg: &self.cfg,
+                    limits: self.limits,
+                    info,
+                    app: &self.app,
+                    mask: self.mask,
+                    egress,
+                    dir: dir.to_path_buf(),
+                    drop_privileges,
+                },
+            )
+            .map(Forked::from)
+            .map_err(|err| std::io::Error::other(format!("forking a view: {err}")))
+        }
+        #[cfg(not(feature = "python"))]
+        {
+            // A `python`-less build has no WSGI worker to fork. It cannot happen
+            // from a boot this build accepts: the routes that would ask for one
+            // were refused before a listener was bound
+            // ([`crate::stage0::no_python_support`]). Failing the boot keeps it
+            // true: a scheduler that asks anyway is one the manifest gate never
+            // admitted.
+            let _ = (py, dir, drop_privileges, egress);
+            Err(std::io::Error::other(format!(
+                "route {:?} (slot {index}): ctl.chan asked for a view and this blastit build \
+                 has no Python worker runtime",
+                info.name
+            )))
+        }
+    }
+
+    /// Tells the scheduler where the new view is, then records the process and
+    /// its two log pipes (§3, §4).
+    fn record_view(&mut self, index: usize, info: &RouteInfo, child: Forked) {
+        let route = index as u32;
         // The scheduler's end of `view.chan` travels next to `SPAWNED` (§3).
         let mut bytes = Vec::new();
         if let Err(err) = self.limits.encode(
@@ -557,23 +697,6 @@ impl<'a> Supervisor<'a> {
         )
         .with_route(info.name.clone());
         self.emitter.emit(&event);
-    }
-
-    /// A build with no interpreter has no worker runtime to fork, so a `SPAWN`
-    /// on `ctl.chan` is a protocol violation, not something to drop.
-    ///
-    /// It cannot happen from a boot this build accepts: the routes that would
-    /// ask for a view were refused before a listener was bound
-    /// ([`crate::stage0::no_python_support`]), so the scheduler holds
-    /// only `[route.static]` policies. Failing the boot keeps that true: a
-    /// scheduler that asks anyway is one the manifest gate never admitted.
-    #[cfg(not(feature = "python"))]
-    fn spawn_now(&mut self, _py: Python<'_>, index: usize, info: &RouteInfo) {
-        self.fail(&format!(
-            "route {:?} (slot {index}): ctl.chan asked for a view and this blastit build \
-             has no Python worker runtime",
-            info.name
-        ));
     }
 
     /// Forks the views of every route whose SPAWN had to wait.

@@ -305,7 +305,14 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         .chain(manifest.routes().iter().map(|route| {
             blastit_scheduler::RouteInfo::new(route.name(), route.prefork(), dev_uid)
                 .with_ingress(route.ingress())
-                .with_static(route.static_policy().cloned(), has_app)
+                .with_static(
+                    route.static_policy().cloned(),
+                    // `docs/frameworks/php.md`: a `[route.static]` + `[route.php]`
+                    // page sends every non-file path to the front controller, and a
+                    // PHP route needs no `BLASTIT_APP` (`ADR-0010` §2) — the same
+                    // rule `routes_from_manifest` applies for production.
+                    has_app || route.php().is_some(),
+                )
         }))
         .collect(),
         (Some(_), false) => manifest
@@ -314,7 +321,14 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             .map(|route| {
                 blastit_scheduler::RouteInfo::new(route.name(), route.prefork(), dev_uid)
                     .with_ingress(route.ingress())
-                    .with_static(route.static_policy().cloned(), has_app)
+                    .with_static(
+                        route.static_policy().cloned(),
+                        // `docs/frameworks/php.md`: a `[route.static]` + `[route.php]`
+                        // page sends every non-file path to the front controller, and a
+                        // PHP route needs no `BLASTIT_APP` (`ADR-0010` §2) — the same
+                        // rule `routes_from_manifest` applies for production.
+                        has_app || route.php().is_some(),
+                    )
             })
             .collect(),
         (None, _) => routes_from_manifest(&manifest, &layout),
@@ -331,6 +345,17 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             .iter()
             .map(|route| route.egress())
             .collect()
+    };
+    // `ADR-0010` §3: stage 1 re-opens the NTS `libphp` and the shim stage 0
+    // inspected, asserts `(st_dev, st_ino)` against that record, renders the INI
+    // lockdown once and holds the descriptors every PHP worker is forked with.
+    // A file that moved between the two stages is refused here — before the
+    // listener binds — never by a worker that loads something nobody inspected.
+    // A host with no usable library never reaches stage 1: stage 0 refused it.
+    #[cfg(feature = "php")]
+    let php = match crate::php_view::boot_bindings(&config, &manifest, &routes, dev.as_ref()) {
+        Ok(bindings) => bindings,
+        Err(message) => fail(&emitter, dev.as_ref(), &message),
     };
     let table = if dev.is_some() && learn {
         match learn_routing_table(&manifest) {
@@ -522,6 +547,8 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         config,
         limits,
         routes,
+        #[cfg(feature = "php")]
+        php,
         declared_routes,
         egress,
         memory,
@@ -572,6 +599,8 @@ fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> ! {
             cfg: serving.config,
             limits: serving.limits,
             routes: serving.routes,
+            #[cfg(feature = "php")]
+            php: serving.php,
             egress: serving.egress,
             ctl: serving.ctl,
             signals: serving.signals,
@@ -593,6 +622,10 @@ struct Serving {
     limits: Limits,
     /// One entry per view slot, in scheduler routing order.
     routes: Vec<blastit_scheduler::RouteInfo>,
+    /// One entry per view slot: the embedded-PHP worker it forks, or `None`
+    /// for a WSGI view (`ADR-0010` §1). Built and verified at boot.
+    #[cfg(feature = "php")]
+    php: Vec<Option<crate::php_view::PhpBinding>>,
     /// Number of routes declared in `blastit.toml` (reported on `ready`).
     declared_routes: usize,
     /// Whether each route may keep `AF_INET`/`AF_INET6`, by route index (§7.3).
@@ -639,6 +672,8 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             cfg: serving.config,
             limits: serving.limits,
             routes: serving.routes,
+            #[cfg(feature = "php")]
+            php: serving.php,
             egress: serving.egress,
             app,
             ctl: serving.ctl,
