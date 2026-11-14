@@ -584,6 +584,8 @@ fn top_level_help_lists_the_three_commands_and_the_presets() {
     }
 }
 
+// `MB.17`: this case asserts the WSGI `BLASTIT_APP` sentence, which the standalone stage-0 gate replaces.
+#[cfg(feature = "python")]
 #[test]
 fn an_empty_directory_names_the_missing_manifest_before_the_app() {
     let sandbox = Sandbox::new("no-manifest");

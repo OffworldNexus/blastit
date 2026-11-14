@@ -13,6 +13,8 @@
 //! get `ENOENT` from its socket, an `egress = false` view must get
 //! `EPERM | ENOSYS` from `socket(AF_INET)`, and `--host 0.0.0.0` without
 //! `BLASTIT_DEV_EXPOSE=1` must exit `1` with an empty stdout.
+// `MB.17`: every case boots `blastit dev` on a WSGI app — only with feature = "python" (ADR-0010 §4).
+#![cfg(feature = "python")]
 
 mod common;
 

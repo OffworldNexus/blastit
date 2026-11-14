@@ -11,3 +11,7 @@ OWED BY THIS NODE: delete the STALE row in crates/blastit-manifest/tests/docs_fe
 ## 2026-11-14T16:21 [lead]
 
 requirement added: the retarget must be VERIFIED by a test (php.md no longer mentions [route.fastcgi]; its manifest fence boots as [route.php] once MB.3.5.4 lands), and the docs_fences STALE row is deleted in the same change -- the self-clearing test reds if the entry outlives its reason.
+
+## 2026-11-14T17:04 [unknown]
+
+edited fields

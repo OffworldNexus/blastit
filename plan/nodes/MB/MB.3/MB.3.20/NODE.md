@@ -8,16 +8,16 @@ priority: 2
 depends_on: [MB.3.17, MB.12]
 paths:
   - docs/frameworks/php.md
+  - docs/reference/manifest.md
   - docs/reference/settings.md
-  - "docs/design/**"
-  - "docs/decisions/**"
-  - "docs/testing/AUDIT-MB.3.4-gate.md"
+  - "crates/blastit-manifest/tests/docs_fences.rs"
   - python/tests/runnable_docs/inventory.toml
+  - "docs/design/php.review-*.md"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T16:09"
-updated: "2026-11-14T16:09"
+updated: "2026-11-14T17:04"
 ---
 
 # Goal

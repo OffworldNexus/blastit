@@ -312,6 +312,8 @@ fn an_all_static_site_boots_under_dev_with_no_app() {
     }
 }
 
+// `MB.17`: the `BLASTIT_APP` WSGI sentence is a python-build contract; the standalone gate speaks first.
+#[cfg(feature = "python")]
 #[test]
 fn a_mixed_tree_without_an_app_still_names_blastit_app() {
     let fixture = Fixture::new("dev-mixed");
