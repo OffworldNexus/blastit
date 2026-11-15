@@ -67,9 +67,9 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE = ROOT / "docs" / "frameworks" / "php.md"
@@ -744,7 +744,7 @@ class Server:
         environment = dict(os.environ)
         environment["BLASTIT_LOG_FORMAT"] = "json"
         self.log = open(log, "wb")  # noqa: SIM115 - closed in `stop`
-        self.process = subprocess.Popen(  # noqa: S603 - the page's own command
+        self.process = subprocess.Popen(
             self.arguments,
             cwd=site,
             env=environment,
@@ -781,9 +781,6 @@ class Server:
                 found.append(event)
         return found
 
-    def text(self) -> str:
-        return self.log_path.read_text(errors="replace")
-
     def stop(self, sig: int = signal.SIGTERM, timeout: float = 30.0) -> int:
         if self.process.poll() is None:
             self.process.send_signal(sig)
@@ -795,7 +792,7 @@ class Server:
         self.log.close()
         return code
 
-    def __enter__(self) -> Server:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -910,7 +907,7 @@ def positive_control(checks: Checks, site: Path) -> None:
     target = site / "canaries" / "prepend-target.php"
     target.write_text('<?php echo "TARGET-RAN\\n";\n', encoding="utf-8")
     try:
-        completed = subprocess.run(  # noqa: S603 - the control, not the product
+        completed = subprocess.run(
             [
                 "php",
                 "-d",
@@ -976,6 +973,22 @@ def check_learn(checks: Checks, site: Path) -> None:
         except SystemExit as error:
             checks.that(False, f"`blastit dev --learn` starts: {error}")
             return
+        # The live process's own argv, not the vector this script built: stage 0
+        # re-execs into stage 1 with `--dev-obs-fd` **only** for a `--learn`
+        # boot (`stage0::exec_stage1_dev`), and the pid is stable across that
+        # `execve`. A `blastit` that ignored `--learn` would leave no such
+        # argument, while `command_kind` on the constructor's list could never notice.
+        try:
+            cmdline = [
+                arg
+                for arg in Path(f"/proc/{server.process.pid}/cmdline")
+                .read_bytes()
+                .split(b"\0")
+                if arg
+            ]
+        except OSError as error:
+            cmdline = []
+            checks.that(False, f"reading the live argv: {error}")
         for target in (b"/users/42", b"/api/x"):
             response = request("127.0.0.1", PORT, Exchange(target), b"")
             checks.that(
@@ -984,11 +997,14 @@ def check_learn(checks: Checks, site: Path) -> None:
             )
         code = server.stop(sig=signal.SIGINT)
         events = server.events()
-        text = server.text()
     checks.that(code == 0, f"`blastit dev --learn` exits 0 on SIGINT ({code})")
+    # The boot's own `ready` event, read as a JSON event: a text grep for
+    # `ready ` also matches an unrelated line, and one for the encoded spelling
+    # is what a broken log format would not produce anyway.
+    ready = [event for event in events if event.get("event") == "ready"]
     checks.that(
-        '"event":"ready"' in text or "ready " in text,
-        "`blastit dev --learn` reported itself ready",
+        len(ready) >= 1,
+        f"`blastit dev --learn` reported itself ready ({len(ready)} `ready` event(s))",
     )
     spawned = [event for event in events if event.get("event") == "process.spawned"]
     routes = sorted({event.get("route") for event in spawned if event.get("route")})
@@ -1005,15 +1021,20 @@ def check_learn(checks: Checks, site: Path) -> None:
         (site / "blastit.toml").read_bytes() == before,
         "`--learn` records nothing: this manifest's routes run no query",
     )
+    # `--learn`'s own observable, from the process that actually ran: stage 1's
+    # argv carries `--dev-obs-fd=` only for a `--learn` boot. (`command_kind` on
+    # `server.arguments` was the constructor's vector classified against a
+    # literal — it could not fail if `blastit` ignored the flag.)
+    flags = [arg.decode(errors="replace") for arg in cmdline if arg.startswith(b"--")]
     checks.that(
-        command_kind("blastit dev --learn") == "dev-learn",
-        "the page's `--learn` command is the one replayed",
+        any(arg.startswith(b"--dev-obs-fd=") for arg in cmdline),
+        f"the live boot ran as `--learn` (`--dev-obs-fd` in its argv: {flags})",
     )
 
 
 def check_check(checks: Checks, site: Path) -> None:
     """The page's §8 sentence: `check` exits `2` without pytest, audits nothing."""
-    completed = subprocess.run(  # noqa: S603 - the page's own command
+    completed = subprocess.run(
         ["blastit", "check"],
         cwd=site,
         capture_output=True,

@@ -22,7 +22,7 @@ def main() -> int:
         return 2
     url = sys.argv[1]
     try:
-        with urllib.request.urlopen(url, timeout=20) as response:  # noqa: S310 - loopback
+        with urllib.request.urlopen(url, timeout=20) as response:
             body = response.read(65536).decode("utf-8", errors="replace")
             print(json.dumps({"status": response.status, "body": body}))
     except urllib.error.HTTPError as error:

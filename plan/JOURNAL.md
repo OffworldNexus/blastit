@@ -1749,3 +1749,21 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T10:11 [MB.3.7] (lead) attempt 2/3 started
 - 2026-11-15T10:26 [MB.3.7] (lead) status active -> review
 - 2026-11-15T10:33 [MB.3.7] (lead) status review -> done
+- 2026-11-15T10:35 [MB.3.56] (lead) edited fields
+- 2026-11-15T10:35 [MB.3.56] (lead) FOLDED IN from MB.3.7's review (same files, same purpose — an e2e suite where every assertion can fail), so this node is the only one touching them before the r
+- 2026-11-15T10:35 [MB.3.56] (lead) status ready -> active
+- 2026-11-15T10:35 [MB.3.56] (lead) attempt 1/3 started
+- 2026-11-15T10:35 [MB.3.56] (lead) base c24d0c5
+- 2026-11-15T10:50 [MB.3.56] (lead) status active -> review
+- 2026-11-15T10:57 [MB.3.56] (lead) edited fields
+- 2026-11-15T10:57 [MB.3.56] (lead) REVIEW FAIL (attempt 1) — one MAJOR, and it is the substance of the node: the pin is IDENTITY-ONLY.
+- 2026-11-15T10:57 [MB.3.56] (lead) status review -> ready
+- 2026-11-15T10:57 [MB.3.56] (lead) status ready -> active
+- 2026-11-15T10:57 [MB.3.56] (lead) attempt 2/3 started
+- 2026-11-15T11:09 [MB.3.56] (lead) status active -> review
+- 2026-11-15T11:09 [MB.3.56] (lead) edited fields
+- 2026-11-15T11:09 [MB.3.56] (lead) OWNER RULING: SHIP it, with the residual documented where an operator reads it. The reasoning to record (not to re-derive): exploiting the coarse-`st_ctime` win
+- 2026-11-15T11:09 [MB.3.56] (lead) status review -> active
+- 2026-11-15T11:09 [MB.3.56] (lead) attempt 3/3 started
+- 2026-11-15T11:31 [MB.3.56] (lead) Accepted residual, recorded rather than chased: `docs/security.md:155` says "as the boot's own `stat`", but the tick is anchored to the FILE's recorded status-c
+- 2026-11-15T11:31 [MB.3.56] (lead) status active -> done

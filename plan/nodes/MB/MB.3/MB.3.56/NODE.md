@@ -2,7 +2,7 @@
 id: MB.3.56
 title: "Pin [route.php] entry by (st_dev, st_ino) at boot: the ADR wins over the gap (H-007)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.7]
@@ -10,13 +10,17 @@ paths:
   - "crates/blastit/src/**"
   - "crates/blastit-view/src/**"
   - "crates/blastit/tests/**"
+  - docs/security.md
   - "e2e/rootless/**"
   - "e2e/php/**"
-attempts: 0
+  - e2e/php2shell.py
+  - docs/knowledge/LESSONS.md
+  - plan/nodes/MB/MB.3/MB.3.7/RESULT.md
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-15T10:05"
-updated: "2026-11-15T10:05"
+updated: "2026-11-15T11:31"
 ---
 
 # Goal

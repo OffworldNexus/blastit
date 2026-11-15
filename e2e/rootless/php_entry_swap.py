@@ -15,13 +15,24 @@ The observed facts it reports, all measured (MB.3.7):
 * a worker recycled while the symlink is in place refuses the same way;
 * restoring `public/` and recycling serves again, from an entry whose
   `(st_dev, st_ino)` is the application's own, inside the route's manifest dir;
+* a decoy **inside** the manifest dir is refused the same way, and putting the
+  application's own inode back serves again — the boot's record is re-checked
+  before every request (`MB.3.56`);
+* a rewrite **in place** (the same inode — what `cp`, `tar -x` and a deploy
+  script do) is refused too, because the record carries `st_size`/`st_ctime`;
+  putting the page back does not revive it, so a restart records the tree as it
+  is (the sentence's fix);
 * the route uid cannot `chmod`, create in or unlink the application tree
   (`EPERM`/`EACCES`), which is the permission half `ADR-0010` §2 relies on.
 
-What it does **not** claim: that `[route.php] entry` is pinned by inode at boot.
-It is a path the worker resolves per request (only `libphp` and the shim are
-fd-pinned, `ADR-0010` §1), so a decoy *inside* the application root would run;
-the check measures and prints that case instead of asserting it away.
+What it does **not** claim: that the entry is fd-pinned the way `libphp` and the
+shim are. It cannot be — `SCRIPT_FILENAME` must stay the path the application
+reads, and `open_basedir` is written in terms of it — so the pin is the boot's
+**record** (inode, `st_size`, `st_ctime`) with that inode held open, re-checked
+before every request (`MB.3.56`, `ADR-0010` §3). The inside-decoy and in-place
+legs are therefore assertions, not `info` lines: a decoy is refused whether it is
+renamed over the entry or written through it, and a changed entry only serves
+again after a boot records the tree as it is.
 """
 
 from __future__ import annotations
@@ -172,7 +183,15 @@ def _install_fixture() -> bool:
         f"file_put_contents('{DECOY}/opens.log', $_SERVER['REQUEST_URI'].\"\\n\", FILE_APPEND);\n"
         'echo "DECOY-RAN\\n";\n'
         "PHP\n"
-        f"chmod 0777 {DECOY}; chmod 0644 {DECOY}/index.php"
+        # The in-place decoy: `cp` of this over `/app/public/index.php` writes
+        # THROUGH the existing inode, which is what a deploy script, `tar -x` and
+        # `cp` do — the shape an identity-only pin ran (MB.3.56 attempt 2).
+        "cat > " + DECOY + "/inplace.php <<'PHP'\n"
+        "<?php\n"
+        f"file_put_contents('{DECOY}/opens.log', 'IN-PLACE '.$_SERVER['REQUEST_URI'].\"\\n\", FILE_APPEND);\n"
+        'echo "IN-PLACE-DECOY-RAN\\n";\n'
+        "PHP\n"
+        f"chmod 0777 {DECOY}; chmod 0644 {DECOY}/index.php {DECOY}/inplace.php"
     )
     completed = _exec("sh", "-c", script)
     return completed.returncode == 0
@@ -183,12 +202,17 @@ def check_entry_0000_refused_for_route_uid(report, server) -> bool:
 
     The root harness `chmod 000`s the manifest's `entry` and the live route must
     answer a `5xx` with **zero body bytes** — no PHP warning, no path, nothing —
-    and the decoy must still show 0 opens. Restoring the mode serves again.
+    and the decoy must still show 0 opens. Restoring the mode does not revive the
+    route by itself: `chmod` moves the entry's ctime, so the boot's record is
+    gone and only a restart records the tree again (the sentence's fix), which is
+    the last leg.
     `server.wait_head()` gates each step: a dead server answers `0`, which must
     not be read as "fails closed".
     """
     chmod = _exec("sh", "-c", "chmod 000 /app/public/index.php")
-    if not report(chmod.returncode == 0, "a privileged harness makes the entry unreadable"):
+    if not report(
+        chmod.returncode == 0, "a privileged harness makes the entry unreadable"
+    ):
         print(chmod.stderr[-400:])
         return False
     if not report(server.wait_head(), "the unreadable entry still answers a head"):
@@ -207,7 +231,21 @@ def check_entry_0000_refused_for_route_uid(report, server) -> bool:
     ok &= report(_opens() == 0, f"the decoy recorded 0 opens ({_opens()})")
     restored = _exec("sh", "-c", "chmod 0644 /app/public/index.php")
     ok &= report(restored.returncode == 0, "restoring the entry's mode succeeds")
-    if not report(server.wait_head(), "the restored entry answers a head"):
+    if not report(
+        server.wait_head(), "the entry with its mode restored answers a head"
+    ):
+        return False
+    # The pin is the boot's record, and `chmod` moves the file's own ctime, so
+    # the recorded file is gone: the route keeps refusing until a boot records
+    # the tree as it is now — the sentence's fix, and what the restart proves.
+    still = get("/users/42")
+    ok &= report(
+        _refused(still),
+        f"and it stays refused until a restart ({_status(still)})",
+    )
+    server.stop()
+    server.start()
+    if not report(server.wait_ready(), "a restart serves the restored entry"):
         return False
     back = get("/users/42")
     ok &= report(
@@ -274,12 +312,16 @@ def check(image: str) -> int:
             print(swapped.stderr[-400:])
             return 1
         if not report(
-            server.wait_head(), "the swapped route still answers a head (not a dead server)"
+            server.wait_head(),
+            "the swapped route still answers a head (not a dead server)",
         ):
             print(server.log()[-1200:])
             return 1
         after = get("/users/42")
-        report(_refused(after), f"the live route fails closed while swapped ({_status(after)})")
+        report(
+            _refused(after),
+            f"the live route fails closed while swapped ({_status(after)})",
+        )
         report(
             "DECOY-RAN" not in after.get("body", ""),
             "and the decoy's marker never reaches the client",
@@ -365,29 +407,133 @@ def check(image: str) -> int:
             f"({(unlink.stderr or unlink.stdout).strip()[-120:]})",
         )
 
-        # MB.3.56's witness, kept on purpose. The entry is a *path*, so a decoy
-        # inside the application root is executed (`ADR-0010` §1 pins `libphp`
-        # and the shim by descriptor, not the script). This is `info`, not an
-        # accepted behaviour: MB.3.56 pins the entry by `(st_dev, st_ino)` and
-        # this line is what that node must flip to a refusal.
+        # MB.3.56's witness, now an assertion: the entry is pinned by
+        # `(st_dev, st_ino)` at boot and re-checked before every request, so a
+        # decoy **inside** the manifest dir is refused exactly like one outside
+        # it — the case this check used to print as an `info` line.
         inside = _exec(
             "sh",
             "-c",
             "mkdir -p /app/decoy && cp " + DECOY + "/index.php /app/decoy/index.php && "
             "mv /app/public /app/public.real && ln -s /app/decoy /app/public",
         )
-        if inside.returncode == 0:
-            measured = get("/users/42")
-            print(
-                f"  info a decoy *inside* the manifest dir answers {measured.get('status')} "
-                f"({'DECOY-RAN' if 'DECOY-RAN' in measured.get('body', '') else 'no decoy marker'}): "
-                "MB.3.56's witness, not an accepted behaviour — the entry is a path "
-                "the worker re-resolves per request, so only `libphp`/the shim are "
-                "fd-pinned (ADR-0010 §1); MB.3.56 pins the entry by (st_dev, st_ino) "
-                "and must flip this line to a refusal",
-                flush=True,
-            )
-            _exec("sh", "-c", "rm -f /app/public && mv /app/public.real /app/public")
+        if not report(
+            inside.returncode == 0,
+            "a privileged harness points `public/` at a decoy inside the manifest dir",
+        ):
+            print(inside.stderr[-400:])
+            return 1
+        if not report(
+            server.wait_head(),
+            "the inside-decoy route still answers a head (not a dead server)",
+        ):
+            print(server.log()[-1200:])
+            return 1
+        measured = get("/users/42")
+        report(
+            _refused(measured),
+            f"a decoy inside `manifest_dir` is refused ({_status(measured)})",
+        )
+        report(
+            "DECOY-RAN" not in measured.get("body", ""),
+            "and the decoy's marker never reaches the client",
+        )
+        report(_opens() == 0, f"the decoy recorded 0 opens ({_opens()})")
+        refusal = server.log()
+        report(
+            "[route.php] entry" in refusal
+            and "restart blastit to run the file as it is now" in refusal,
+            "and the worker names the entry and the fix in its log",
+        )
+        # What is pinned is the inode: putting the application's own file back
+        # (`mv`, so the same inode) serves again from the same worker, which is
+        # what makes the refusal a property of the swap and not of the worker.
+        restored = _exec(
+            "sh", "-c", "rm -f /app/public && mv /app/public.real /app/public"
+        )
+        if not report(restored.returncode == 0, "restoring the tree succeeds"):
+            print(restored.stderr[-400:])
+            return 1
+        if not report(server.wait_head(), "the restored entry answers a head"):
+            return 1
+        back = get("/users/42")
+        report(
+            _status(back) == 200 and "front-controller" in back.get("body", ""),
+            f"and the application's own inode serves again ({_status(back)})",
+        )
+        report(_opens() == 0, f"still 0 decoy opens ({_opens()})")
+
+        # MB.3.56 attempt 2: a rewrite IN PLACE keeps the inode — it is what
+        # `cp`, `tar -x` and a deploy script do — and an identity-only pin ran it
+        # (200 IN-PLACE-DECOY-RAN). The record carries st_size/st_ctime, so the
+        # same inode with different bytes is refused too.
+        inode_before = _stat("/app/public/index.php")
+        rewritten = _exec(
+            "sh",
+            "-c",
+            f"cp -p /app/public/index.php {DECOY}/page.orig && "
+            f"cp {DECOY}/inplace.php /app/public/index.php",
+        )
+        if not report(
+            rewritten.returncode == 0,
+            "a privileged harness rewrites the entry in place (what `cp` does)",
+        ):
+            print(rewritten.stderr[-400:])
+            return 1
+        inode_after = _stat("/app/public/index.php")
+        report(
+            inode_before is not None and inode_after == inode_before,
+            f"and the inode is unchanged ({inode_before} -> {inode_after})",
+        )
+        if not report(
+            server.wait_head(),
+            "the rewritten entry still answers a head (not a dead server)",
+        ):
+            print(server.log()[-1200:])
+            return 1
+        inplace = get("/users/42")
+        report(
+            _refused(inplace),
+            f"an entry rewritten in place is refused ({_status(inplace)})",
+        )
+        report(
+            "IN-PLACE-DECOY-RAN" not in inplace.get("body", ""),
+            "and the in-place decoy never reaches the client",
+        )
+        report(
+            "DECOY-RAN" not in inplace.get("body", ""),
+            "and no decoy marker at all",
+        )
+        report(_opens() == 0, f"the decoy recorded 0 opens ({_opens()})")
+        refusal = server.log()
+        report(
+            "changed since this boot recorded it" in refusal
+            and "restart blastit" in refusal,
+            "and the worker names the change and the fix in its log",
+        )
+        # The fix is the restart: putting the page back in place cannot restore
+        # the ctime it was pinned to, so only a boot that records it again serves.
+        restored = _exec("sh", "-c", f"cp -p {DECOY}/page.orig /app/public/index.php")
+        if not report(restored.returncode == 0, "restoring the page in place succeeds"):
+            print(restored.stderr[-400:])
+            return 1
+        if not report(server.wait_head(), "the restored page still answers a head"):
+            return 1
+        still = get("/users/42")
+        report(
+            _refused(still),
+            f"and it stays refused until a restart ({_status(still)})",
+        )
+        server.stop()
+        server.start()
+        if not report(server.wait_ready(), "a restart serves the page as it is now"):
+            return 1
+        clean = get("/users/42")
+        report(
+            _status(clean) == 200 and "front-controller" in clean.get("body", ""),
+            f"and the restarted boot serves it ({_status(clean)})",
+        )
+        report(_opens() == 0, f"still 0 decoy opens ({_opens()})")
     finally:
         server.stop()
         if os.environ.get("E2E_KEEP_PHP_SWAP"):

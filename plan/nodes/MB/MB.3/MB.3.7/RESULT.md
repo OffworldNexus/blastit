@@ -100,7 +100,7 @@ INFO: E14 — only 'one entry' is observable; which duplicate value wins is Rust
 | E8 | P5 | 200 | `query_string` = the literal `-d …`, `allow_url_include` = `0` |
 | E9 | P6 | 200 | `allow_url_include` = `0`, `script_filename` = `<root>/api/index.php` — *cannot fail on Linux NTS* |
 | E10 | P6 | 200 ×2 | `allow_url_include` = `0` — *same caveat* |
-| E11 | P9 | 200 | body **is** the twelve-key JSON, `script_filename` pinned, `REDIRECT_STATUS` ∉ `server_keys` |
+| E11 | P9 | 200 | body is a JSON document carrying `script_filename` (the exact-twelve-key assertion is `check_static`), `REDIRECT_STATUS` ∉ `server_keys` |
 | E12 | P8 | 200 | `document_root` = `<root>`, `user_ini` = `""` |
 | E13 | P7 | 200 | `http_proxy` = `false`, `HTTP_PROXY` ∉ `server_keys` |
 | E14 | P10 | 200 | `HTTP_X_FOO` exactly once; the *winning* value is Rust-only (caveat) |

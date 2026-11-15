@@ -82,14 +82,36 @@ const VIEW_NOFILE: u64 = 1024;
 /// cannot be swapped between the `(st_dev, st_ino)` verification and the load
 /// (`ADR-0010` §3). There is no path variant and therefore no fallback: a
 /// missing descriptor is a boot refusal, not a load of something unverified.
+///
+/// `entry` is pinned by its **record**, not by a descriptor, because
+/// `SCRIPT_FILENAME` has to stay the path the application reads (and the path
+/// `open_basedir` is written in terms of): the boot records the resolved file's
+/// `(st_dev, st_ino)` **and** `st_size`/`st_ctime` here, holds an `O_PATH`
+/// descriptor so that inode cannot be freed and its number handed back, and
+/// every worker compares the file at that path against the record **before each
+/// request** (`PinnedEntryRuntime`). A file that was replaced *or rewritten in
+/// place* is a `500`, never a silent re-resolution to whatever is there now.
 #[derive(Debug)]
 pub struct PhpBinding {
     /// The host's NTS `libphp.so`, opened and identity-checked at boot.
     pub libphp: OwnedFd,
     /// The matching `libblastit_php8X.so` shim (`MB.3.12`).
     pub shim: OwnedFd,
-    /// Absolute `SCRIPT_FILENAME`, pinned at boot (`[route.php] entry`).
+    /// Absolute `SCRIPT_FILENAME` (`[route.php] entry`), pinned at boot: the
+    /// record is [`PhpBinding::entry_pin`] beside it, and every request
+    /// re-checks the file at this path against that record.
     pub entry: PathBuf,
+    /// The record of the resolved `entry` taken at boot (`ADR-0010` §3): the
+    /// inode, its size and its `st_ctime`. Every request compares against it
+    /// before the script runs.
+    pub entry_pin: EntryPin,
+    /// `O_PATH | O_CLOEXEC` on that same inode, held from boot to the worker.
+    ///
+    /// Keeping the file open is what makes the record's `(st_dev, st_ino)`
+    /// meaningful: without a reference, an unlinked inode may be freed and its
+    /// number handed back to the next `create` (a measured 4-in-20 on xfs), and
+    /// then a `rm` + recreate looks identical to the file the boot recorded.
+    pub entry_fd: OwnedFd,
     /// The application root (`DOCUMENT_ROOT`, `open_basedir`).
     pub document_root: PathBuf,
     /// The `ZEND_INI_SYSTEM` blob the composition root rendered.
@@ -106,10 +128,59 @@ pub struct PhpBinding {
 
 impl PhpBinding {
     /// The descriptors the child must keep across `ChildIo::prepare`: the
-    /// pinned `libphp` and shim. Without them `close_fds_except` closes exactly
-    /// the files the child is about to `dlopen` through `/proc/self/fd/<n>`.
+    /// pinned `libphp` and shim, and the `O_PATH` descriptor on the entry.
+    ///
+    /// Without the first two `close_fds_except` closes exactly the files the
+    /// child is about to `dlopen` through `/proc/self/fd/<n>`; without the third
+    /// the recorded inode could be freed and its number reused between the
+    /// per-request check and PHP's own open.
     fn pinned_fds(&self) -> Vec<RawFd> {
-        vec![self.libphp.as_raw_fd(), self.shim.as_raw_fd()]
+        vec![
+            self.libphp.as_raw_fd(),
+            self.shim.as_raw_fd(),
+            self.entry_fd.as_raw_fd(),
+        ]
+    }
+}
+
+/// The `[route.php] entry` as the boot recorded it (`MB.3.56`, `ADR-0010` §3).
+///
+/// `(st_dev, st_ino)` says *which* file, and the pair alone is not enough: a
+/// rewrite **in place** — what `cp`, `tar -x` and a deploy script do — keeps the
+/// inode and changes only the bytes. `st_size` catches a rewrite that changes
+/// length; `st_ctime` catches one that does not **unless it lands inside the
+/// same coarse-clock tick (~1–4 ms) as this record** — the documented residual,
+/// `docs/security.md` "PHP front controllers" — because the kernel stamps it on
+/// every write and on every metadata change, and unlike `st_mtime` no user can
+/// set it back (only the clock can). The two together are the content half; the
+/// `O_PATH` descriptor held beside them (`PhpBinding::entry_fd`) is the identity
+/// half, so a freed inode number cannot be handed back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryPin {
+    /// `st_dev` of the recorded file.
+    pub dev: u64,
+    /// `st_ino` of the recorded file.
+    pub ino: u64,
+    /// `st_size` at record time.
+    pub size: u64,
+    /// `st_ctime`, whole seconds.
+    pub ctime_s: i64,
+    /// `st_ctime`, nanoseconds.
+    pub ctime_ns: i64,
+}
+
+impl EntryPin {
+    /// The record of `metadata` — the same five numbers the boot reads.
+    #[must_use]
+    pub fn of(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            size: metadata.size(),
+            ctime_s: metadata.ctime(),
+            ctime_ns: metadata.ctime_nsec(),
+        }
     }
 }
 
@@ -165,15 +236,6 @@ pub fn boot_bindings(
         };
         let document_root = config.manifest_dir.clone();
         let entry = document_root.join(&php.entry);
-        if !entry.is_file() {
-            return Err(format!(
-                "route {:?}: [route.php] entry {:?} is not a file ({}); SCRIPT_FILENAME is \
-                 pinned to it and never taken from the request",
-                route.name(),
-                php.entry,
-                entry.display()
-            ));
-        }
         if !entry.starts_with(&document_root) {
             return Err(format!(
                 "route {:?}: [route.php] entry {:?} leaves the application root {}; a script \
@@ -183,6 +245,7 @@ pub fn boot_bindings(
                 document_root.display()
             ));
         }
+        let (entry_pin, entry_fd) = pin_entry(&entry, route.name(), &php.entry)?;
         // The same private directory the fork makes the child's `chdir`,
         // `HOME` and `TMPDIR`, so `sys_temp_dir` cannot disagree with them.
         let dir = match dev {
@@ -219,6 +282,8 @@ pub fn boot_bindings(
                 "shim",
             )?,
             entry,
+            entry_pin,
+            entry_fd,
             document_root,
             ini: ini.as_str().to_owned(),
             view_tmp: dir,
@@ -255,6 +320,162 @@ fn open_pinned(
         ));
     }
     Ok(fd)
+}
+
+/// `ADR-0010` §3: records the resolved `[route.php] entry` — the same record the
+/// pair carries, plus `st_size`/`st_ctime` and an `O_PATH` descriptor — or the
+/// sentence the boot refuses with.
+///
+/// The path is followed (`stat(2)`, not `lstat`): `SCRIPT_FILENAME` is a path
+/// `libphp` opens, so a deploy that reaches its front controller through a
+/// symlinked `current/` has a perfectly ordinary entry. What is recorded is the
+/// **inode at the end of that path**, which is what every request re-checks, and
+/// what the descriptor keeps allocated.
+///
+/// The descriptor is `O_PATH`, not the script's own `SCRIPT_FILENAME`:
+/// `SCRIPT_FILENAME` must stay the application's own path (a script reads it, and
+/// `open_basedir` is written in terms of it), so a descriptor cannot stand in for
+/// it the way `/proc/self/fd/<n>` does for `libphp` and the shim. It is held for
+/// one reason — an `O_PATH` reference on the inode stops the kernel handing that
+/// inode number to a later `create` after an `unlink`, which is the one way a
+/// `rm` + recreate could present the recorded `(st_dev, st_ino)` again.
+fn pin_entry(entry: &Path, route: &str, declared: &str) -> Result<(EntryPin, OwnedFd), String> {
+    let not_a_file = |detail: String| {
+        format!(
+            "route {route:?}: [route.php] entry {declared:?} is not a file ({}: {detail}); \
+             SCRIPT_FILENAME is pinned to it and never taken from the request",
+            entry.display()
+        )
+    };
+    let fd = rustix::fs::open(entry, OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
+        .map_err(|err| not_a_file(err.to_string()))?;
+    // One resolution: the record is `fstat` of the descriptor that is kept, so
+    // the numbers and the reference cannot disagree.
+    let stat = rustix::fs::fstat(&fd).map_err(|err| not_a_file(err.to_string()))?;
+    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() {
+        return Err(not_a_file("it is not a regular file".to_string()));
+    }
+    let pin = EntryPin {
+        dev: stat.st_dev,
+        ino: stat.st_ino,
+        size: u64::try_from(stat.st_size)
+            .map_err(|_| not_a_file("its st_size is negative".to_string()))?,
+        ctime_s: stat.st_ctime,
+        ctime_ns: i64::try_from(stat.st_ctime_nsec)
+            .map_err(|_| not_a_file("its st_ctime is out of range".to_string()))?,
+    };
+    Ok((pin, fd))
+}
+
+/// `ADR-0010` §3, the per-request half: is the file at `entry` still the one the
+/// boot recorded?
+///
+/// Compares the whole record — `(st_dev, st_ino)`, `st_size` and `st_ctime` — of
+/// the path as it resolves **now** against what [`boot_bindings`] recorded, so
+/// both shapes of swap are refused instead of executed: a decoy inode *renamed*
+/// over the entry (`MB.3.7`'s inside-`manifest_dir` case) and a **rewrite in
+/// place**, which keeps the inode and changes only the bytes (what `cp`, `tar -x`
+/// and a deploy script do). The comparison follows symlinks because PHP does.
+///
+/// # Errors
+///
+/// The refusal sentence: the route, the entry, why it no longer matches, and the
+/// fix. It names no secret — every part of it is in the manifest.
+#[cfg(feature = "php")]
+fn verify_entry(route: &str, entry: &Path, pin: EntryPin) -> Result<(), String> {
+    let changed = |why: String| {
+        format!(
+            "route {route:?}: [route.php] entry {} changed since this boot recorded it ({why}), \
+             so this worker will not run it; restart blastit to run the file as it is now, and \
+             restore it first if you did not change it",
+            entry.display()
+        )
+    };
+    let metadata =
+        std::fs::metadata(entry).map_err(|err| changed(format!("cannot be read now: {err}")))?;
+    if !metadata.is_file() {
+        return Err(changed("it is not a regular file now".to_string()));
+    }
+    let now = EntryPin::of(&metadata);
+    if now != pin {
+        let why = if now.dev != pin.dev || now.ino != pin.ino {
+            "its st_dev/st_ino moved: it is another file"
+        } else {
+            "its st_size/st_ctime moved: it was rewritten in place"
+        };
+        return Err(changed(why.to_string()));
+    }
+    Ok(())
+}
+
+/// The worker's runtime, wrapped so the pinned `entry` is re-checked before every
+/// request (`MB.3.56`, `ADR-0010` §3).
+///
+/// The boot records the entry beside the pair's and holds its inode; this is that
+/// record applied at the start of every request — before the request body is
+/// read, before `Prepared::new` and before `libphp` re-opens `SCRIPT_FILENAME`. A
+/// mismatch answers `500` (with the sentence on the worker's stderr, never in the
+/// body) instead of running whatever is at the path now. The wrapper is a
+/// passthrough for everything else, so `kind()`, concurrency and recycling stay
+/// the PHP runtime's own.
+///
+/// The check runs here, not inside `PhpEmbedRuntime::serve`'s last line: the pin
+/// is the composition root's record, and the view crate's `PhpRuntimeConfig` is
+/// the wrong place for a value only a boot can produce (a runtime that could be
+/// built without one would be a fail-open seam). The window between this check
+/// and PHP's open is the client-paced body read plus `php_request_startup`,
+/// bounded by `max_body_bytes` and `request_timeout`; closing it entirely means
+/// moving the comparison beside `handle.request`, which is a change to the view
+/// crate's seam, not to the pin.
+#[cfg(feature = "php")]
+struct PinnedEntryRuntime {
+    /// The runtime this wraps: [`blastit_view::php::PhpEmbedRuntime`].
+    inner: blastit_view::php::PhpEmbedRuntime,
+    /// The route whose entry is pinned, for the refusal.
+    route: String,
+    /// The absolute `SCRIPT_FILENAME` the boot resolved.
+    entry: PathBuf,
+    /// The record the boot took of it.
+    pin: EntryPin,
+}
+
+#[cfg(feature = "php")]
+impl blastit_view::WorkerRuntime for PinnedEntryRuntime {
+    fn kind(&self) -> &'static str {
+        self.inner.kind()
+    }
+
+    fn max_inflight(&self) -> u32 {
+        self.inner.max_inflight()
+    }
+
+    fn serve(
+        &self,
+        req: blastit_frame::ReqHead,
+        io: &mut dyn blastit_view::RequestIo,
+    ) -> blastit_view::RequestEnd {
+        if let Err(sentence) = verify_entry(&self.route, &self.entry, self.pin) {
+            // The response is an empty `500`: the reason belongs in the log, not
+            // in an answer a client can steer (the path is the operator's, but
+            // the rule is the same one every refusal follows).
+            io.output(blastit_view::OutputStream::Stderr, &sentence);
+            let head = blastit_frame::RespHead {
+                status: 500,
+                reason: Vec::new(),
+                headers: Vec::new(),
+            };
+            let outcome = match io.write_head(head).and_then(|()| io.flush_response()) {
+                Ok(()) => blastit_frame::DoneOutcome::Completed,
+                Err(_) => blastit_frame::DoneOutcome::Aborted,
+            };
+            return blastit_view::RequestEnd::new(outcome, None);
+        }
+        self.inner.serve(req, io)
+    }
+
+    fn recycle(&self) -> bool {
+        self.inner.recycle()
+    }
 }
 
 /// Everything a boot's `[route.php]` probe needs (`ADR-0010` §3).
@@ -807,6 +1028,15 @@ fn serve(
         config,
     )
     .map_err(|err| format!("{err}"))?;
+    // `ADR-0010` §3 / `MB.3.56`: every request re-checks the resolved entry
+    // against the record (`(st_dev, st_ino)`, `st_size`, `st_ctime`) this boot
+    // took, before `libphp` opens `SCRIPT_FILENAME` for it.
+    let pinned = PinnedEntryRuntime {
+        inner: runtime,
+        route: spawn.info.name.clone(),
+        entry: spawn.binding.entry.clone(),
+        pin: spawn.binding.entry_pin,
+    };
 
     // SAFETY: `view_end` is this process's end of `view.chan`, created for it
     // before the fork; nothing else in this process owns the number.
@@ -815,7 +1045,7 @@ fn serve(
     // The stream owns the descriptor from here and `serve_forever` closes it
     // when it is done, so the `OwnedFd` must not close it a second time.
     std::mem::forget(view_end);
-    blastit_view::php::serve_forever(chan, std::sync::Arc::new(runtime), spawn.limits)
+    blastit_view::php::serve_forever(chan, std::sync::Arc::new(pinned), spawn.limits)
         .map_err(|err| format!("{err}"))
 }
 
@@ -1047,10 +1277,29 @@ entry = \"public/index.php\"
             binding.ini
         );
         assert_eq!(binding.max_requests, u32::MAX, "0 means no cap");
+        // `MB.3.56`: the entry's whole record is taken beside the pair's, so a
+        // worker that loses any half of it would be checking less than it says.
+        // The protected legs (`critical_php_embed`) prove the refusals end to
+        // end; this proves the boot records what it resolved, and holds it.
+        assert_eq!(
+            binding.entry_pin,
+            EntryPin::of(&std::fs::metadata(&binding.entry).expect("the entry the boot recorded")),
+            "the boot must record the resolved entry's identity, size and ctime"
+        );
+        // The `O_PATH` descriptor is on that same inode: this is the reference
+        // that stops the kernel handing the number to a later `create`.
+        let held = std::fs::read_link(format!("/proc/self/fd/{}", binding.entry_fd.as_raw_fd()))
+            .expect("the entry's O_PATH descriptor");
+        assert_eq!(
+            held,
+            std::fs::canonicalize(&binding.entry).expect("the entry's canonical path"),
+            "the kept descriptor names the entry the boot pinned"
+        );
 
-        // The descriptors are the *files* stage 0 inspected, not paths.
+        // The descriptors are the *files* stage 0 inspected, not paths, plus the
+        // held entry.
         let fds = binding.pinned_fds();
-        assert_eq!(fds.len(), 2);
+        assert_eq!(fds.len(), 3, "libphp, shim and the pinned entry");
         let library = std::fs::read(format!("/proc/self/fd/{}", fds[0])).expect("the library fd");
         assert_eq!(library, b"the library stage 0 inspected");
         let shim = std::fs::read(format!("/proc/self/fd/{}", fds[1])).expect("the shim fd");
@@ -1066,6 +1315,155 @@ entry = \"public/index.php\"
         let none = boot_bindings(&boot.config, &wsgi, &routes, None).expect("nothing to do");
         assert_eq!(none.len(), 1);
         assert!(none[0].is_none(), "a WSGI slot carries no PHP binding");
+    }
+
+    /// `MB.3.56`'s per-request half, without a `libphp`: the file at the pinned
+    /// path is the recorded file, and anything else at that path is the sentence
+    /// (route, entry, fix) — never `Ok`. Two shapes, because one is not the
+    /// other: a **rename** (another inode, the shape this check's identity half
+    /// catches) and a **rewrite in place** (the same inode, which only the
+    /// size/ctime half catches — the gap attempt 1's review measured).
+    #[test]
+    fn a_swapped_entry_is_refused_with_the_route_the_entry_and_the_fix() {
+        let boot = Boot::new("entry-pin");
+        let bindings = boot.bindings().expect("the recorded pair resolves");
+        let binding = bindings[0].as_ref().expect("the PHP slot has a binding");
+        let recorded = binding.entry_pin;
+        assert_eq!(
+            recorded,
+            EntryPin::of(&std::fs::metadata(&binding.entry).expect("the entry")),
+            "the record is the entry the boot resolved"
+        );
+        assert_eq!(
+            verify_entry("app", &binding.entry, recorded),
+            Ok(()),
+            "the pinned entry verifies before anything swaps it"
+        );
+
+        replace_by_rename(
+            &binding.entry,
+            (recorded.dev, recorded.ino),
+            b"<?php echo 'DECOY-RAN';\n",
+        );
+        let refusal = verify_entry("app", &binding.entry, recorded)
+            .expect_err("a different inode at the pinned path must be refused");
+        assert!(
+            refusal.contains("route \"app\""),
+            "the sentence names the route: {refusal}"
+        );
+        assert!(
+            refusal.contains(&binding.entry.display().to_string()),
+            "and the entry: {refusal}"
+        );
+        assert!(
+            refusal.contains("changed since this boot recorded it")
+                && refusal.contains("another file"),
+            "and what moved: {refusal}"
+        );
+        assert!(
+            refusal.contains("restart blastit to run the file as it is now"),
+            "and the fix: {refusal}"
+        );
+
+        // An entry that is gone is the same refusal, not a re-resolution.
+        std::fs::remove_file(&binding.entry).expect("removing the entry");
+        let missing = verify_entry("app", &binding.entry, recorded)
+            .expect_err("a missing entry must be refused");
+        assert!(
+            missing.contains("cannot be read now")
+                && missing.contains("restart blastit to run the file as it is now"),
+            "a missing entry is refused with the fix: {missing}"
+        );
+    }
+
+    /// The shape attempt 1 missed: a **rewrite in place**. `cp`, `tar -x` and a
+    /// deploy script open the entry and write through it, so the inode does not
+    /// change and an identity-only pin sees nothing; `st_size`/`st_ctime` are
+    /// what catch it.
+    ///
+    /// The rewrite is same-length in one leg and longer in the other, so neither
+    /// half of the content record is decorative: a same-size rewrite still moves
+    /// `st_ctime`, and a longer one moves both.
+    ///
+    /// Mutation this kills: comparing only `(st_dev, st_ino)` (attempt 1) leaves
+    /// this test red on the same-size leg, which is exactly the live
+    /// `200 IN-PLACE-DECOY-RAN` the reviewer measured.
+    #[test]
+    fn an_entry_rewritten_in_place_is_refused() {
+        let boot = Boot::new("entry-in-place");
+        let bindings = boot.bindings().expect("the recorded pair resolves");
+        let binding = bindings[0].as_ref().expect("the PHP slot has a binding");
+        let recorded = binding.entry_pin;
+        let inode = |path: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = std::fs::metadata(path).expect("the entry's metadata");
+            (metadata.dev(), metadata.ino())
+        };
+        // The page the boot recorded is `<?php echo 1;\n` (14 bytes, `Boot`'s
+        // fixture); this decoy is the same length, so only `st_ctime` can catch
+        // it. The assertion is on the fixture: change `Boot`'s page and this leg
+        // must change with it instead of silently testing the easy case.
+        let original = std::fs::read(&binding.entry).expect("the entry");
+        let same_length = b"<?php echo 2;\n";
+        assert_eq!(
+            same_length.len(),
+            original.len(),
+            "the same-length leg must keep st_size"
+        );
+        assert_ne!(
+            same_length.as_slice(),
+            original.as_slice(),
+            "the decoy must actually differ from the recorded bytes"
+        );
+        // `st_ctime` comes from the kernel's *coarse* clock, which advances one
+        // tick (~1–4 ms) at a time: two writes inside one tick carry the same
+        // stamp, and a same-size rewrite between them would be invisible to any
+        // metadata record (`LESSONS.md`, `MB.3.56`). A live swap is always later
+        // than the boot's own `stat`; this fixture has to cross a tick to model
+        // that, or it measures the tick rather than the pin.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&binding.entry, same_length).expect("rewriting the entry in place");
+        assert_eq!(
+            inode(&binding.entry),
+            (recorded.dev, recorded.ino),
+            "a write in place must keep the inode, or this is the rename leg again"
+        );
+        let same_size_now = EntryPin::of(&std::fs::metadata(&binding.entry).expect("the entry"));
+        assert_eq!(
+            same_size_now.size, recorded.size,
+            "the fixture must keep st_size so only st_ctime can catch it"
+        );
+        assert_ne!(
+            (same_size_now.ctime_s, same_size_now.ctime_ns),
+            (recorded.ctime_s, recorded.ctime_ns),
+            "a write in place must move st_ctime, or nothing can catch it"
+        );
+        let refusal = verify_entry("app", &binding.entry, recorded)
+            .expect_err("a same-inode rewrite must be refused");
+        assert!(
+            refusal.contains("rewritten in place"),
+            "the sentence names the shape: {refusal}"
+        );
+        assert!(
+            refusal.contains("restart blastit to run the file as it is now"),
+            "and the fix: {refusal}"
+        );
+
+        // And a longer rewrite (a real deploy) is the same refusal.
+        std::fs::write(
+            &binding.entry,
+            b"<?php echo 'IN-PLACE-DECOY-RAN';\n/* longer */\n",
+        )
+        .expect("a longer rewrite");
+        assert_eq!(
+            inode(&binding.entry),
+            (recorded.dev, recorded.ino),
+            "still the same inode"
+        );
+        assert!(
+            verify_entry("app", &binding.entry, recorded).is_err(),
+            "a longer rewrite is refused too"
+        );
     }
 
     /// The denied twin, per object: a file replaced between the record and the
@@ -1186,10 +1584,17 @@ entry = \"public/index.php\"
         let report_path = env_path(REPORT);
         let tmp = env_path(TMP);
 
+        // A real entry this child can pin: the same file the pair uses, so the
+        // `O_PATH` descriptor has something to hold. Its record is taken the way
+        // a boot takes it.
+        let (entry_pin, entry_fd) =
+            pin_entry(&file, "app", "entry.php").expect("pinning the entry");
         let binding = PhpBinding {
             libphp: std::fs::File::open(&file).expect("pin libphp").into(),
             shim: std::fs::File::open(&file).expect("pin shim").into(),
-            entry: PathBuf::from("/entry.php"),
+            entry: file.clone(),
+            entry_pin,
+            entry_fd,
             document_root: PathBuf::from("/"),
             ini: "memory_limit=256M\n".to_string(),
             view_tmp: tmp.clone(),
@@ -1197,7 +1602,11 @@ entry = \"public/index.php\"
             max_body_bytes: 1024,
         };
         let mut keep = binding.pinned_fds();
-        assert_eq!(keep.len(), 2, "both objects are descriptors");
+        assert_eq!(
+            keep.len(),
+            3,
+            "libphp, the shim and the pinned entry are all descriptors"
+        );
         let report = std::fs::File::create(&report_path).expect("report");
         keep.push(report.as_raw_fd());
 
@@ -1212,6 +1621,17 @@ entry = \"public/index.php\"
             kept,
             std::fs::read(&file).expect("the file"),
             "the fd moved"
+        );
+        // The entry's `O_PATH` descriptor is the identity half of the pin
+        // (`MB.3.56`): if `close_fds_except` dropped it, the recorded inode could
+        // be freed and its number handed back between two requests.
+        let entry_raw = binding.entry_fd.as_raw_fd();
+        let entry_kept = std::fs::read_link(format!("/proc/self/fd/{entry_raw}"))
+            .expect("the entry descriptor survives the child sequence");
+        assert_eq!(
+            entry_kept,
+            std::fs::canonicalize(&binding.entry).expect("the entry's canonical path"),
+            "the kept entry descriptor is not the pinned entry"
         );
 
         set_view_environment(&tmp).expect("HOME/TMPDIR");

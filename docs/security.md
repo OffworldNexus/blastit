@@ -148,6 +148,14 @@ FastCGI deployment has to defend are not defended here because they do not exist
   `clone` refused. NTS `libphp` serves one request per process, so a request that
   tried to fork would be escaping its CPU charge.
 
+The front controller itself is pinned at boot by its inode, its size and its
+status-change time, and the worker re-checks that record before every request: a
+script that was replaced **or rewritten in place** is refused (`500`) until a
+restart records the tree again. One residual: a **same-size** rewrite in place
+that lands inside the same coarse-clock tick (1–4 ms) as the boot's own `stat` is
+invisible to that record — and it takes write access to `manifest_dir`, which
+production denies to every route uid.
+
 `libphp` is the host's: blastit does not bundle it and has no fallback. It is opened
 and `(st_dev, st_ino)`-verified at boot, passed to the child as a descriptor and
 `dlopen`ed through `/proc/self/fd/<n>`, so a swapped file cannot be loaded; no

@@ -189,20 +189,29 @@ header('Content-Type: text/plain');
 echo \"blastit-php-ok\\n\";
 ";
 
-/// `exit()` deep enough into the script that `CLOCK_PROCESS_CPUTIME_ID` crosses
-/// a tick (`LESSONS.md`, `MB.3.12`: a cheap script may legitimately report `0`).
-const EXIT_PHP: &str = "\
+/// A decoy front controller (`MB.3.56`): a body carrying this marker is a decoy
+/// that ran, from an inode the boot never recorded.
+const DECOY_PHP: &str = "\
 <?php
-for ($i = 0; $i < 500000; $i++) { $x = $i * $i; }
-exit(0);
+header('Content-Type: text/plain');
+echo \"DECOY-RAN\\n\";
 ";
 
-/// A contained fatal: `E_USER_ERROR` calls `zend_bailout()`.
-const FATAL_PHP: &str = "\
-<?php
+/// `exit()` deep enough into the script that `CLOCK_PROCESS_CPUTIME_ID` crosses
+/// a tick (`LESSONS.md`, `MB.3.12`: a cheap script may legitimately report `0`).
+///
+/// These are crash **bodies**, not pages: [`crash_page`] puts one behind a
+/// `/crash` guard in the one front controller, because a containment leg may not
+/// rewrite the entry between its two requests — an in-place rewrite is refused
+/// by `MB.3.56`'s pin, and a leg that needs one would be testing the refusal.
+const EXIT_BODY: &str = "\
 for ($i = 0; $i < 500000; $i++) { $x = $i * $i; }
-trigger_error('blastit fatal', E_USER_ERROR);
-";
+exit(0);";
+
+/// A contained fatal: `E_USER_ERROR` calls `zend_bailout()`.
+const FATAL_BODY: &str = "\
+for ($i = 0; $i < 500000; $i++) { $x = $i * $i; }
+trigger_error('blastit fatal', E_USER_ERROR);";
 
 /// A contained bailout whose wall time is spent **sleeping**, so wall and CPU
 /// cannot be confused: `usleep` parks the process for 60 ms and burns almost no
@@ -216,11 +225,30 @@ trigger_error('blastit fatal', E_USER_ERROR);
 /// other side: a *fixture* must never use `usleep` when it needs CPU time,
 /// because sleeping spends wall time, not CPU. That is exactly why it is the
 /// right fixture for an assertion about the wall charge.
-const SLEEP_PHP: &str = "\
-<?php
+const SLEEP_BODY: &str = "\
 usleep(60000);
-exit(0);
-";
+exit(0);";
+
+/// The containment legs' front controller: `body` runs for `/crash` and nothing
+/// else, so the second request reaches the **same pinned file** as the first.
+///
+/// Rewriting the entry to a normal page between the two requests was the old
+/// shape; it cannot exist under `MB.3.56`'s pin, and it was never the point of
+/// the leg (the point is that the respawned worker serves). The guard is also
+/// what lets the crash legs share one page with the charge assertions: only
+/// `/crash` crashes.
+fn crash_page(body: &str) -> String {
+    format!(
+        "\
+<?php
+header('Content-Type: text/plain');
+if (($_SERVER['PATH_INFO'] ?? '/') === '/crash') {{
+{body}
+}}
+echo \"blastit-php-ok\\n\";
+"
+    )
+}
 
 /// How long the `cpu_ns`-vs-wall leg parks its front controller: long enough
 /// that the request's wall time is dominated by the sleep, and a `cpu_ns` taken
@@ -2230,7 +2258,7 @@ fn no_libphp_is_mapped_above_the_view_worker() {
 #[test]
 fn an_exit_is_contained_and_the_next_request_is_served() {
     let _root = StubRootGuard::start();
-    containment(EXIT_PHP, "exit()", "containment-exit", None);
+    containment(EXIT_BODY, "exit()", "containment-exit", None);
 }
 
 /// The fatal twin: `trigger_error(..., E_USER_ERROR)` reaches `zend_bailout()`,
@@ -2238,7 +2266,7 @@ fn an_exit_is_contained_and_the_next_request_is_served() {
 #[test]
 fn a_fatal_is_contained_and_the_next_request_is_served() {
     let _root = StubRootGuard::start();
-    containment(FATAL_PHP, "fatal", "containment-fatal", None);
+    containment(FATAL_BODY, "fatal", "containment-fatal", None);
 }
 
 /// The same bailout with almost no CPU in it: 60 ms of `usleep` and an `exit()`.
@@ -2246,11 +2274,11 @@ fn a_fatal_is_contained_and_the_next_request_is_served() {
 /// This is the leg that makes `cost_ns >= wall_ns` an oracle: a charge taken
 /// from `cpu_ns` is a small fraction of the wall time here (this host measures
 /// ~1/700 of it), so it misses the epic's sentence by orders of magnitude rather
-/// than by a rounding error. See [`SLEEP_PHP`].
+/// than by a rounding error. See [`SLEEP_BODY`].
 #[test]
 fn a_sleeping_bailout_is_charged_its_wall_time_and_not_its_cpu_time() {
     let _root = StubRootGuard::start();
-    containment(SLEEP_PHP, "usleep()", "containment-sleep", Some(60));
+    containment(SLEEP_BODY, "usleep()", "containment-sleep", Some(60));
 }
 
 /// One slot, two requests: the crash answers `5xx` with its cost, the next
@@ -2267,7 +2295,7 @@ fn containment(crash: &str, what: &str, name: &str, sleeps_ms: Option<u64>) {
         return;
     };
     let scratch = Scratch::new(name, ONE_WORKER_MANIFEST);
-    scratch.write(ENTRY, crash);
+    scratch.write(ENTRY, &crash_page(crash));
 
     let mut boot = Boot::start(
         &scratch.dir,
@@ -2381,8 +2409,9 @@ fn containment(crash: &str, what: &str, name: &str, sleeps_ms: Option<u64>) {
         .unwrap_or_else(|| panic!("{what}: a worker exit without a pid: {crashed_pid}"))
         as u32;
 
-    // The slot still answers: the same route, a fresh process, the same uid.
-    scratch.write(ENTRY, NORMAL_PHP);
+    // The slot still answers: the same route, a fresh process, the same uid —
+    // and, because the entry is pinned (`MB.3.56`), the same page the crashed
+    // worker ran: the fixture dispatches on the path instead of being rewritten.
     let after = boot.get("/after");
     assert!(
         after.starts_with("HTTP/1.1 200") && after.contains(BODY),
@@ -2658,6 +2687,311 @@ fn a_form_body_reaches_the_front_controller() {
          still answered x=2",
         oversized.len(),
         refused.lines().next().unwrap_or_default()
+    );
+}
+
+/// `MB.3.56`, `ADR-0010` §3: the boot records `[route.php] entry` beside the
+/// pair's and every request re-checks it — so a decoy **inside `manifest_dir`**
+/// is refused instead of executed.
+///
+/// This is the case `MB.3.7` measured and left as an `info` line: moving
+/// `public/` aside to a decoy *outside* the root already fails closed through
+/// `open_basedir`, but nothing recorded the entry, so a swap to another file
+/// inside the root answered `200 DECOY-RAN`. The pin is what makes the ADR
+/// sentence true, and the marker is the witness: if `DECOY-RAN` reaches the
+/// client, the check did not run.
+///
+/// The swap is a **rename** of a different inode over the same path — the shape
+/// the identity half catches; the in-place shape has its own leg below, because a
+/// witness that only covers what the mechanism happens to catch is how attempt
+/// 1's gap survived. Here the original is renamed aside first, so the restore
+/// puts the recorded inode back.
+///
+/// The accepted twin is the **restart**, not the same worker: `rename(2)` stamps
+/// the moved file's own `st_ctime`, so putting the inode back moves the record
+/// too — and the sentence's fix ("restart blastit to run the file as it is now")
+/// is then what serves. A refusal that outlives a restore-rename is the pin
+/// being honest, not a stuck worker.
+///
+/// Mutations this leg kills: dropping the identity comparison makes it answer
+/// `200 DECOY-RAN`; dropping only the content half leaves it green (that is the
+/// in-place leg's job).
+#[test]
+fn a_decoy_inside_the_manifest_dir_is_refused_and_a_restart_serves() {
+    let _root = StubRootGuard::start();
+    let Some(host) = host_php() else {
+        refused_without_a_host("entry pin", "entry-pin");
+        return;
+    };
+    let scratch = Scratch::new("entry-pin", PHP_MANIFEST);
+    let entry = scratch.write(ENTRY, NORMAL_PHP);
+    let pinned = std::fs::metadata(&entry).expect("the entry's metadata");
+    let mut boot = Boot::start(
+        &scratch.dir,
+        &[
+            ("BLASTIT_LIBPHP", &host.libphp.to_string_lossy()),
+            (
+                "BLASTIT_PHP_SHIM_DIR",
+                &host
+                    .shim
+                    .parent()
+                    .expect("a shim directory")
+                    .to_string_lossy(),
+            ),
+        ],
+    );
+    assert!(
+        boot.await_boot().is_none(),
+        "this host has {} and {}, so the route must be served: {}",
+        host.libphp.display(),
+        host.shim.display(),
+        boot.stderr_text()
+    );
+
+    // Accepted twin, first half: the untouched tree serves from the pinned inode.
+    let served = boot.get("/users/42");
+    assert!(
+        served.starts_with("HTTP/1.1 200") && served.contains(BODY),
+        "an untouched tree must serve its own entry: {served}"
+    );
+
+    // The swap: another inode at the same path, inside `manifest_dir`.
+    let decoy = scratch.write("public/decoy.php", DECOY_PHP);
+    let aside = scratch.dir.join("public/index.php.pinned");
+    std::fs::rename(&entry, &aside).expect("the real entry aside");
+    std::fs::rename(&decoy, &entry).expect("the decoy into place");
+    let swapped = std::fs::metadata(&entry).expect("the swapped entry's metadata");
+    assert!(
+        swapped.dev() != pinned.dev() || swapped.ino() != pinned.ino(),
+        "the fixture did not actually swap the inode, so nothing is being measured"
+    );
+
+    let refused = boot.get("/users/42");
+    assert!(
+        refused.starts_with("HTTP/1.1 5"),
+        "a decoy inside `manifest_dir` must be refused, not served: {refused}"
+    );
+    assert!(
+        !refused.contains("DECOY-RAN"),
+        "the decoy ran: the entry was re-resolved instead of checked against the boot's \
+         `(st_dev, st_ino)`: {refused}"
+    );
+    assert!(
+        !refused.contains(BODY),
+        "the refusal answered with the app's own body: {refused}"
+    );
+
+    // The sentence names the route, the entry and the fix, and stays out of the
+    // response (it is an `app.output` line).
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    loop {
+        let logged = refusal_text(&boot);
+        if logged.contains("changed since this boot recorded it")
+            && logged.contains(&entry.display().to_string())
+            && logged.contains("restart blastit to run the file as it is now")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the worker never said which entry moved and how to fix it: {logged:?}\n{}",
+            boot.stdout_text()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // The documented fix, and the accepted twin: a restart records the tree as
+    // it is and serves. The rename round-trip itself is *not* enough — `rename`
+    // moves the file's own `st_ctime`, so the record it was pinned to is gone.
+    std::fs::rename(&aside, &entry).expect("the real entry back");
+    let back = std::fs::metadata(&entry).expect("the restored entry's metadata");
+    assert_eq!(
+        (back.dev(), back.ino()),
+        (pinned.dev(), pinned.ino()),
+        "the restore must put the recorded inode back"
+    );
+    let still = boot.get("/users/42");
+    assert!(
+        still.starts_with("HTTP/1.1 5"),
+        "a rename moves the entry's ctime, so the recorded file is gone: the route must keep \
+         refusing until a boot records it again: {still}"
+    );
+    boot.stop();
+    drop(boot);
+    let mut fresh = Boot::start(
+        &scratch.dir,
+        &[
+            ("BLASTIT_LIBPHP", &host.libphp.to_string_lossy()),
+            (
+                "BLASTIT_PHP_SHIM_DIR",
+                &host
+                    .shim
+                    .parent()
+                    .expect("a shim directory")
+                    .to_string_lossy(),
+            ),
+        ],
+    );
+    assert!(
+        fresh.await_boot().is_none(),
+        "a boot of the restored tree must serve: {}",
+        fresh.stderr_text()
+    );
+    let again = fresh.get("/users/42");
+    assert!(
+        again.starts_with("HTTP/1.1 200") && again.contains(BODY),
+        "a restart must serve the restored entry (the sentence's fix): {again}"
+    );
+    fresh.stop();
+    println!(
+        "a decoy inside manifest_dir is refused; the restored tree serves after a restart \
+         ({} -> {} -> {})",
+        served.lines().next().unwrap_or_default(),
+        refused.lines().next().unwrap_or_default(),
+        again.lines().next().unwrap_or_default()
+    );
+}
+
+/// `MB.3.56` attempt 2, the review's MAJOR: a **rewrite in place** keeps the
+/// inode and changes only the bytes — `cp`, `tar -x` and a deploy script all do
+/// it — so an identity-only pin executes the new content (`200
+/// IN-PLACE-DECOY-RAN`, measured on a live route). `st_size` and `st_ctime` are
+/// the content half of the record; the held `O_PATH` descriptor is the identity
+/// half that makes a freed inode number un-reusable.
+///
+/// The decoy is **the same length** as the page it replaces, so `st_size` alone
+/// cannot catch it and `st_ctime` is what must: that is the leg an identity-only
+/// pin fails, and the reason the record carries both numbers.
+///
+/// Mutations this leg kills: dropping the content comparison (attempt 1) makes
+/// it answer `200` with the marker; dropping the `O_PATH` descriptor alone does
+/// not (no `rm` here), which is why that half is asserted where it can be seen —
+/// `php_view`'s unit test reads `/proc/self/fd/<entry>` through the kept
+/// descriptor and the child-sequence test proves it survives `close_fds_except`.
+#[test]
+fn an_entry_rewritten_in_place_is_refused_and_a_restart_serves_the_new_file() {
+    let _root = StubRootGuard::start();
+    let Some(host) = host_php() else {
+        refused_without_a_host("entry in place", "entry-in-place");
+        return;
+    };
+    let scratch = Scratch::new("entry-in-place", PHP_MANIFEST);
+    let entry = scratch.write(ENTRY, NORMAL_PHP);
+    let pinned = std::fs::metadata(&entry).expect("the entry's metadata");
+    let libphp = host.libphp.to_string_lossy().into_owned();
+    let shim_dir = host
+        .shim
+        .parent()
+        .expect("a shim directory")
+        .to_string_lossy()
+        .into_owned();
+    let boot_env = [
+        ("BLASTIT_LIBPHP", libphp.as_str()),
+        ("BLASTIT_PHP_SHIM_DIR", shim_dir.as_str()),
+    ];
+    let mut boot = Boot::start(&scratch.dir, &boot_env);
+    assert!(
+        boot.await_boot().is_none(),
+        "this host has {} and {}, so the route must be served: {}",
+        host.libphp.display(),
+        host.shim.display(),
+        boot.stderr_text()
+    );
+    let served = boot.get("/users/42");
+    assert!(
+        served.starts_with("HTTP/1.1 200") && served.contains(BODY),
+        "an untouched tree must serve its own entry: {served}"
+    );
+
+    // The rewrite: the SAME inode, the same size, another script. `cp` and
+    // `tar -x` write through the existing file; nothing is renamed.
+    let original = std::fs::read(&entry).expect("the recorded page");
+    let mut decoy = String::from("<?php echo \"IN-PLACE-DECOY-RAN\\n\"; //");
+    while decoy.len() < original.len() {
+        decoy.push('x');
+    }
+    assert_eq!(
+        decoy.len(),
+        original.len(),
+        "the decoy must be the same length, or st_size alone would catch it"
+    );
+    // Cross the kernel's coarse timestamp tick before rewriting: `st_ctime`
+    // advances one tick (~1–4 ms) at a time, and a same-size rewrite inside the
+    // tick the boot stamped would be invisible to any metadata record
+    // (`LESSONS.md`, `MB.3.56`). A live swap is always later than the boot.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&entry, &decoy).expect("rewriting the entry in place");
+    let rewritten = std::fs::metadata(&entry).expect("the rewritten entry's metadata");
+    assert_eq!(
+        (rewritten.dev(), rewritten.ino()),
+        (pinned.dev(), pinned.ino()),
+        "a write in place must keep the inode, or this is the rename leg"
+    );
+    assert_eq!(
+        rewritten.len(),
+        pinned.len(),
+        "and it must keep st_size, so only st_ctime can catch it"
+    );
+    // The premise the refusal rests on, stated here rather than inferred from the
+    // `500`: a same-size rewrite moves `st_ctime`, and the sleep above is what
+    // makes that true on a coarse tick. Without this assert a filesystem with a
+    // tick longer than the sleep would redden this leg for the tick, not the pin.
+    assert_ne!(
+        (rewritten.ctime(), rewritten.ctime_nsec()),
+        (pinned.ctime(), pinned.ctime_nsec()),
+        "a write in place must move st_ctime, or this leg measures the clock tick"
+    );
+
+    let refused = boot.get("/users/42");
+    assert!(
+        refused.starts_with("HTTP/1.1 5"),
+        "an entry rewritten in place must be refused, not served: {refused}"
+    );
+    assert!(
+        !refused.contains("IN-PLACE-DECOY-RAN"),
+        "the in-place decoy ran: the pin compared identity only, not size/ctime: {refused}"
+    );
+    assert!(
+        !refused.contains(BODY),
+        "the refusal answered with the app's own body: {refused}"
+    );
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    loop {
+        let logged = refusal_text(&boot);
+        if logged.contains("rewritten in place") && logged.contains("restart blastit") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the worker never named an in-place rewrite and the fix: {logged:?}\n{}",
+            boot.stdout_text()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // The fix the sentence names: put the page back (in place) and restart, so
+    // the boot records what is there now. That is the deploy/restore path.
+    std::fs::write(&entry, NORMAL_PHP).expect("restoring the page in place");
+    boot.stop();
+    drop(boot);
+    let mut fresh = Boot::start(&scratch.dir, &boot_env);
+    assert!(
+        fresh.await_boot().is_none(),
+        "a restart must serve the restored page: {}",
+        fresh.stderr_text()
+    );
+    let again = fresh.get("/users/42");
+    assert!(
+        again.starts_with("HTTP/1.1 200") && again.contains(BODY),
+        "a restart must serve the file as it is now: {again}"
+    );
+    fresh.stop();
+    println!(
+        "an in-place rewrite is refused; the restored page serves after a restart \
+         ({} -> {} -> {})",
+        served.lines().next().unwrap_or_default(),
+        refused.lines().next().unwrap_or_default(),
+        again.lines().next().unwrap_or_default()
     );
 }
 
