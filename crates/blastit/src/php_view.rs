@@ -983,6 +983,48 @@ entry = \"public/index.php\"
             .join("libblastit_php84-x86_64-gnu.so")
     }
 
+    /// The `(st_dev, st_ino)` stage 0 records for `path` and `open_pinned` checks.
+    fn identity(path: &Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path)
+            .unwrap_or_else(|err| panic!("{} must exist to be recorded: {err}", path.display()));
+        (metadata.dev(), metadata.ino())
+    }
+
+    /// Replaces `path`'s contents with `contents` **and** proves the result is a
+    /// different file from the one recorded as `recorded`.
+    ///
+    /// Write a side path in the same directory while the recorded object is still
+    /// allocated, then `rename()` it over the recorded path: the replacement's
+    /// inode exists while the recorded one is live, and POSIX only promises
+    /// distinct inode numbers among files that are simultaneously alive, so the
+    /// two cannot be equal. `remove_file()` followed by `fs::write()` is **not**
+    /// a way to obtain a new inode — a filesystem may hand the freed number
+    /// straight back, and then a pin that correctly saw a new file and one that
+    /// saw the old file are indistinguishable.
+    ///
+    /// The trailing assertion is for the fixture, not the implementation: if it
+    /// ever trips, this test stopped replacing anything and must fail here rather
+    /// than accuse `open_pinned` of not noticing.
+    fn replace_by_rename(path: &Path, recorded: (u64, u64), contents: &[u8]) {
+        let name = path
+            .file_name()
+            .expect("the recorded path names a file")
+            .to_string_lossy()
+            .into_owned();
+        let side = path.with_file_name(format!(".{name}.replacement"));
+        std::fs::write(&side, contents).expect("the replacement's side path");
+        std::fs::rename(&side, path).expect("renaming the replacement over the recorded file");
+        let replaced = identity(path);
+        assert_ne!(
+            replaced,
+            recorded,
+            "the fixture did not replace the file {}: it still has stage 0's (st_dev, st_ino) \
+             {recorded:?}, so this test would assert nothing",
+            path.display()
+        );
+    }
+
     /// The accept branch: one binding per PHP slot, with the manifest's absolute
     /// `entry`, the rendered INI, the view's own directory, and the two
     /// descriptors the child loads through `/proc/self/fd/<n>`.
@@ -1027,15 +1069,29 @@ entry = \"public/index.php\"
     }
 
     /// The denied twin, per object: a file replaced between the record and the
-    /// open has a new inode, so the load would not be the one stage 0 inspected.
+    /// open is not the *file* stage 0 inspected, so the boot refuses it by name.
+    ///
+    /// The premise is a file identity, not a permission: `(st_dev, st_ino)` tells
+    /// the inspected object apart from every other file at every uid, so this
+    /// holds unprivileged and as root alike and belongs in no privileged tier.
+    /// That also means the replacement has to be a genuinely different file —
+    /// see [`replace_by_rename`], which writes a side path while the recorded
+    /// object is still allocated and `rename()`s it over the recorded path. Do
+    /// not "simplify" that back to `remove_file()` + `fs::write()`: an unlinked
+    /// inode number may be handed straight back, the pin would then correctly see
+    /// the same identity, and the fixture would silently test nothing.
+    ///
     /// Each object is checked on its own — a record that verified only the
     /// library would pass the shim half of this test.
     #[test]
     fn a_replaced_libphp_or_shim_is_refused_by_name() {
         let boot = Boot::new("replaced");
-        let library = boot.libphp();
-        std::fs::remove_file(&library).expect("remove the recorded library");
-        std::fs::write(&library, b"a different library").expect("a new file");
+        let record = boot.config.php.as_ref().expect("stage 0's record");
+        replace_by_rename(
+            &boot.libphp(),
+            (record.dev, record.ino),
+            b"a different library",
+        );
         let message = boot
             .bindings()
             .expect_err("a replaced library is not the inspected one");
@@ -1050,9 +1106,12 @@ entry = \"public/index.php\"
         );
 
         let boot = Boot::new("replaced-shim");
-        let shim = boot.shim();
-        std::fs::remove_file(&shim).expect("remove the recorded shim");
-        std::fs::write(&shim, b"a different shim").expect("a new file");
+        let record = boot.config.php.as_ref().expect("stage 0's record");
+        replace_by_rename(
+            &boot.shim(),
+            (record.shim_dev, record.shim_ino),
+            b"a different shim",
+        );
         let message = boot
             .bindings()
             .expect_err("a replaced shim is not the inspected one");

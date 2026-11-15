@@ -1555,3 +1555,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T02:44 [MB.3.40] (lead) status active -> review
 - 2026-11-15T02:44 [MB.3.42] (lead) status ready -> active
 - 2026-11-15T02:48 [MB.3.40] (lead) status review -> done
+- 2026-11-15T02:51 [MB.3.40] (lead) reviewer PASS (attempt 1), 5 MINORs filed as MB.3.43; committed 9b77ad2
+- 2026-11-15T02:51 [MB.3.42] (lead) status active -> review
+- 2026-11-15T02:52 [MB.3.43] (lead) created (task) Close MB.3.40 review MINORs: the gate's call site needs a protected witness, and two new unit tests assert nothing
+- 2026-11-15T02:55 [MB.3.43] (lead) edited fields
+- 2026-11-15T02:55 [MB.3.43] (lead) reviewer of MB.3.42 left two evidence-hygiene MINORs in its RESULT.md (clippy was recorded red from MB.3.40's in-flight host.rs, now green; make check was skipp
+- 2026-11-15T02:55 [MB.3.42] (lead) status review -> done
