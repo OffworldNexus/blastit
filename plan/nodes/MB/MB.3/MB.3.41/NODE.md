@@ -2,7 +2,7 @@
 id: MB.3.41
 title: "A completed 5xx must say why it failed: contained bailout vs the app's own 500, and the scheduler's 502/504 must not pay for queue wait"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.38]
@@ -14,11 +14,11 @@ paths:
   - "crates/blastit-events/src/**"
   - ARCHITECTURE.md
   - crates/blastit/tests/critical_php_embed.rs
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-15T02:02"
-updated: "2026-11-15T02:02"
+updated: "2026-11-15T04:06"
 ---
 
 ## Goal

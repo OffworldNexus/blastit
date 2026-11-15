@@ -39,6 +39,14 @@
 //! `READY` is what a freshly forked view sends on `view.chan` before the
 //! scheduler may dispatch to it (§4); it is view-chan only.
 //!
+//! `DONE`'s `outcome` says how the request's worker thread ended, which is a
+//! different fact from the status it may have answered: `completed` (the
+//! handler returned), `aborted` (the client went away), `errored` (the
+//! runtime's own failure) or `bailed` (`MB.3.41`: a contained
+//! `exit()`/`die()`/fatal). A `500` an app answers itself and a `500` a dying
+//! handler leaves behind are identical on `RESP_HEAD`, so the outcome — not the
+//! status — is what the scheduler may trust for "the view failed mid-request".
+//!
 //! `WINDOW` is per-stream flow control (§3.1): it grants the receiver of a
 //! body permission to send `bytes` more body bytes on that stream. Towards
 //! the client (http → scheduler → view) it credits the response body; towards
@@ -245,8 +253,14 @@ impl Scheme {
 
 /// How a request's worker thread finished, carried by [`Frame::Done`].
 ///
-/// It only tells the scheduler whether the slot may be reused and what to log;
-/// the response itself was already streamed to the client.
+/// It tells the scheduler whether the slot may be reused, what to log, and —
+/// since `MB.3.41` — whether the handler **returned** (`Completed`), so a `5xx`
+/// it answered itself is an answer the app produced, or **bailed**
+/// (`Bailed`: a contained `exit()`/`die()`/fatal that the SAPI shim trapped),
+/// which is the one thing the scheduler bills as `R19`'s crash. The response
+/// itself was already streamed to the client, which is why the status alone
+/// cannot say this: a `500` an app answers and a `500` a dying handler leaves
+/// behind look identical on `RESP_HEAD`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DoneOutcome {
     /// The response was written out in full.
@@ -256,6 +270,15 @@ pub enum DoneOutcome {
     Aborted,
     /// The WSGI callable raised.
     Errored,
+    /// The handler bailed out — `exit()`, `die()`, or a fatal — and the shim
+    /// contained it (`zend_bailout` was trapped), so the thread finished
+    /// without returning.
+    ///
+    /// Not the same fact as [`Completed`](Self::Completed): an app that answers
+    /// `http_response_code(500)` (or a framework's own `500`) returned, and its
+    /// request is an ordinary completion. Not [`Errored`](Self::Errored)
+    /// either: that is the runtime's own failure, not the handler's.
+    Bailed,
 }
 
 impl DoneOutcome {
@@ -265,6 +288,7 @@ impl DoneOutcome {
             Self::Completed => 0,
             Self::Aborted => 1,
             Self::Errored => 2,
+            Self::Bailed => 3,
         }
     }
 
@@ -272,12 +296,13 @@ impl DoneOutcome {
     ///
     /// # Errors
     ///
-    /// [`FrameError::BadEnum`] for any value other than `0`, `1` or `2`.
+    /// [`FrameError::BadEnum`] for any value other than `0`, `1`, `2` or `3`.
     pub const fn from_code(value: u8) -> Result<Self, FrameError> {
         match value {
             0 => Ok(Self::Completed),
             1 => Ok(Self::Aborted),
             2 => Ok(Self::Errored),
+            3 => Ok(Self::Bailed),
             other => Err(FrameError::BadEnum {
                 field: "outcome",
                 value: other as u64,

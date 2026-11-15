@@ -178,7 +178,10 @@ impl Stream {
 /// How a request ended, for `request` events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Outcome {
-    /// The view answered.
+    /// The view answered: it produced a complete response, whatever its status
+    /// — a `5xx` an application answers itself (a framework's `500`, a
+    /// script's `http_response_code(500)`) is still an answer, and `status`
+    /// carries the failure.
     Ok,
     /// No route matched, `404`.
     Unmatched,
@@ -190,6 +193,14 @@ pub enum Outcome {
     Timeout,
     /// The view process died mid-request, `502`.
     ViewDied,
+    /// The handler bailed out of the request — `exit()`, `die()`, or a fatal
+    /// the SAPI shim contained — and it had already answered with a `5xx`.
+    ///
+    /// Distinct from [`Ok`](Self::Ok) because the handler never returned (the
+    /// request is a failed one, and `R19` bills it its wall time) and from
+    /// [`ViewDied`](Self::ViewDied) because the view process is still alive and
+    /// serves the next request.
+    Bailed,
     /// The client went away before the response was complete.
     ClientGone,
 }
@@ -204,6 +215,7 @@ impl Outcome {
             Self::QueueTimeout => "queue_timeout",
             Self::Timeout => "timeout",
             Self::ViewDied => "view_died",
+            Self::Bailed => "bailed",
             Self::ClientGone => "client_gone",
         }
     }
@@ -476,7 +488,13 @@ impl RequestInfo {
     /// This is what the scheduler charged for the request: the view's own
     /// measurement, clamped between the time up to the view's first response
     /// frame and the time the scheduler observed between dispatch and
-    /// completion, or that observed time when no report arrived.
+    /// completion, or that observed time when no report arrived. The exception
+    /// is a contained bailout ([`Outcome::Bailed`]): a view that answers a
+    /// `5xx` without returning has its report disbelieved and is charged the
+    /// request's wall time, `R19`'s crash ceiling. A `5xx` an app *answered*
+    /// is charged the clamp like any other answer, and a `5xx` the scheduler
+    /// wrote itself (`502`/`503`/`504`) is charged dispatch to completion, so
+    /// a request the scheduler failed never pays for the queue wait.
     pub fn cost_ns(&self) -> u64 {
         self.cost_ns
     }
@@ -1718,6 +1736,11 @@ mod tests {
     fn reason_enums_render_snake_case_and_escape_hatches() {
         assert_eq!(Outcome::QueueTimeout.as_str(), "queue_timeout");
         assert_eq!(Outcome::ViewDied.as_str(), "view_died");
+        // `MB.3.41`: a contained bailout is its own outcome, and every name is
+        // distinct so no reader has to guess which failure it saw.
+        assert_eq!(Outcome::Bailed.as_str(), "bailed");
+        assert_ne!(Outcome::Bailed.as_str(), Outcome::ViewDied.as_str());
+        assert_ne!(Outcome::Bailed.as_str(), Outcome::Ok.as_str());
         assert_eq!(SqlKind::FunctionCall.as_str(), "function_call");
         assert_eq!(SqlKind::Other("listen".to_owned()).as_str(), "listen");
         assert_eq!(

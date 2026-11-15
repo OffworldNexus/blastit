@@ -1581,3 +1581,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T03:31 [MB.3.44] (lead) base 304c5b1
 - 2026-11-15T03:37 [MB.3.44] (lead) status active -> review
 - 2026-11-15T03:41 [MB.3.44] (lead) status review -> done
+- 2026-11-15T03:43 [MB.3.41] (lead) status ready -> active
+- 2026-11-15T03:43 [MB.3.41] (lead) attempt 1/3 started
+- 2026-11-15T03:43 [MB.3.41] (lead) base d1a016b
+- 2026-11-15T03:51 [MB.3.41] (lead) CI flake folded into this node (owner's session): the `test` job went red on `php::tests::a_response_body_before_the_head_is_a_protocol_error` at php.rs:1138:43
+- 2026-11-15T03:58 [MB.3.41] (lead) status active -> review
+- 2026-11-15T04:06 [MB.3.41] (lead) status review -> done

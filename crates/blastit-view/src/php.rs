@@ -44,6 +44,7 @@ use blastit_frame::{
     Decoder, DoneOutcome, Frame, HEADER_LEN, Limits, ReqHead, RequestCost, RespHead,
 };
 use blastit_php_sapi::abi::{OUTCOME_BAILOUT, OUTCOME_OK, RequestV1, ServerVarV1};
+use blastit_php_sapi::loader::bailed_out;
 use blastit_php_sapi::{LoadError, Loaded, ServerVars, SharedObject, Sink};
 
 use crate::error::ViewError;
@@ -279,14 +280,11 @@ impl WorkerRuntime for PhpEmbedRuntime {
         // not reach the wire.
         let flushed = io.flush_response();
 
-        let (outcome, bailout, cpu_ns) = match &result {
-            Ok(result) if result.outcome == OUTCOME_OK && head_sent => {
-                (DoneOutcome::Completed, false, cpu(result))
+        let (outcome, retire, cpu_ns) = match &result {
+            Ok(result) => {
+                let (outcome, retire) = ended(result, head_sent);
+                (outcome, retire, cpu(result))
             }
-            Ok(result) if result.outcome == OUTCOME_BAILOUT => {
-                (DoneOutcome::Errored, true, cpu(result))
-            }
-            Ok(result) => (DoneOutcome::Errored, false, cpu(result)),
             Err(err) => {
                 io.output(OutputStream::Stderr, &format!("php: {err}"));
                 (DoneOutcome::Errored, true, None)
@@ -297,13 +295,39 @@ impl WorkerRuntime for PhpEmbedRuntime {
         } else {
             outcome
         };
-        worker.bailed |= bailout;
+        worker.bailed |= retire;
         RequestEnd::new(outcome, cpu_ns)
     }
 
     fn recycle(&self) -> bool {
         let worker = lock(&self.worker);
         should_recycle(worker.bailed, worker.served, self.cfg.max_requests)
+    }
+}
+
+/// What `serve` reports for one shim result: the `DONE` outcome, and whether
+/// the worker must retire because the handler bailed out of a request.
+///
+/// `MB.3.41`: the return value of `php_execute_script` (and the shim's
+/// `contained` flag) is the only thing that separates a `500` an app answered
+/// from a `500` a dying handler left behind — both travel as a real
+/// `RESP_HEAD`. The handler that bailed never returned, so its request is
+/// [`DoneOutcome::Bailed`]; one that answered and returned is a completed
+/// request whatever its status.
+fn ended(result: &blastit_php_sapi::abi::ResultV1, head_sent: bool) -> (DoneOutcome, bool) {
+    if bailed_out(result) {
+        // A contained `exit()`/`die()`/fatal: the interpreter is left in a
+        // state the worker cannot reuse, so it retires after this request.
+        (DoneOutcome::Bailed, true)
+    } else if result.outcome == OUTCOME_BAILOUT {
+        // A shim reporting a bailout it says it did not contain is a shim this
+        // side does not trust: report it as a failure, never as `Bailed`.
+        (DoneOutcome::Errored, true)
+    } else if result.outcome == OUTCOME_OK && head_sent {
+        (DoneOutcome::Completed, false)
+    } else {
+        // No head reached the client: the request was never answered.
+        (DoneOutcome::Errored, false)
     }
 }
 
@@ -1083,6 +1107,7 @@ pub fn is_serveable_entry(path: &Path) -> bool {
 mod tests {
     use super::*;
     use blastit_frame::INITIAL_WINDOW;
+    use blastit_php_sapi::abi::ResultV1;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -1138,6 +1163,22 @@ mod tests {
             self.stream.write_all(&bytes).expect("write");
         }
 
+        /// [`Peer::send`], with a **gone peer** returning its error instead of
+        /// panicking.
+        ///
+        /// Only for a call site where the view ending is what is being
+        /// asserted. Every other call site keeps [`Peer::send`]: a closed peer
+        /// there would be a real failure, not a tolerated outcome.
+        fn send_to_a_gone_peer(&mut self, id: u32, frame: Frame) -> io::Result<()> {
+            let mut bytes = Vec::new();
+            self.limits.encode(&frame, id, &mut bytes).expect("encode");
+            match self.stream.write_all(&bytes) {
+                Ok(()) => Ok(()),
+                Err(err) if peer_is_gone(&err) => Err(err),
+                Err(err) => panic!("write: {err}"),
+            }
+        }
+
         fn drain(&mut self) -> Vec<(u32, Frame)> {
             let mut buf = [0u8; 4096];
             loop {
@@ -1154,6 +1195,19 @@ mod tests {
             }
             frames
         }
+    }
+
+    /// Whether a write failed because the view's end of `view.chan` is gone.
+    ///
+    /// Three names for one situation: an `AF_UNIX` peer that exits with data
+    /// still queued reports `ECONNRESET` (or `UnexpectedEof`) as readily as
+    /// `EPIPE` (`LESSONS.md`), so a test helper that only named `BrokenPipe`
+    /// would be the same flake in a smaller box.
+    fn peer_is_gone(err: &io::Error) -> bool {
+        matches!(
+            err.kind(),
+            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof
+        )
     }
 
     fn pair(limits: Limits) -> (UnixStream, Peer) {
@@ -1715,6 +1769,40 @@ mod tests {
     }
 
     #[test]
+    fn a_contained_bailout_is_its_own_done_outcome() {
+        // `MB.3.41`: the shim is the only place that knows a `zend_bailout`
+        // was trapped (`contained`), and `DONE` is the only frame that carries
+        // how the handler ended. A script's own `500` is `Completed` (it
+        // returned) — the two must never collapse into one outcome.
+        let ok = |status: i32| ResultV1 {
+            outcome: OUTCOME_OK,
+            status,
+            contained: 0,
+            reserved: 0,
+            cpu_ns: 7,
+            body_bytes: 0,
+        };
+        let bailed = |contained: i32| ResultV1 {
+            outcome: OUTCOME_BAILOUT,
+            status: 500,
+            contained,
+            reserved: 0,
+            cpu_ns: 7,
+            body_bytes: 0,
+        };
+
+        // The app answered `500` and returned: an ordinary completion.
+        assert_eq!(ended(&ok(500), true), (DoneOutcome::Completed, false));
+        // A contained `exit()`/`die()`/fatal: the handler never returned.
+        assert_eq!(ended(&bailed(1), true), (DoneOutcome::Bailed, true));
+        // A shim that reports a bailout it did not contain is a shim this side
+        // does not trust: it stays `Errored` (and retires), never `Bailed`.
+        assert_eq!(ended(&bailed(0), true), (DoneOutcome::Errored, true));
+        // A script that answered nothing at all is a failure, not a bailout.
+        assert_eq!(ended(&ok(0), false), (DoneOutcome::Errored, false));
+    }
+
+    #[test]
     fn a_request_body_past_the_worker_budget_is_refused() {
         // The accepted twin first: the same body fits a larger budget.
         let mut io = FakeIo::with_body(vec![vec![0x41; 64], vec![0x42; 64]]);
@@ -1798,10 +1886,28 @@ mod tests {
         let handle = serve_in_background(worker, runtime, limits);
         let _ = wait_for(&mut peer, 1);
         peer.send(4, Frame::ReqHead(ReqHead::default()));
-        peer.send(4, Frame::ReqEnd);
-        drop(peer.stream);
-        // The transport records the refusal and ends the view.
-        assert!(handle.join().expect("worker thread").is_err());
+        // Order, do not tolerate: the head-less body is refused the moment the
+        // head arrives, and the transport then ends the whole view, so joining
+        // it here is what makes the next write deterministic instead of a race
+        // between this thread and the worker's retirement. The refusal is
+        // asserted by name, and the write after it is *expected* to find the
+        // peer gone — that closed channel is the evidence the view ended, not a
+        // flake (`MB.3.41`).
+        //
+        // This path reports no `DoneOutcome`: `serve_forever` takes the
+        // recorded protocol error and returns it before it can write
+        // `RESP_END_COST`/`DONE`, which is why the half that is asserted is the
+        // returned [`ViewError::Protocol`] and the closed peer.
+        let ended = handle.join().expect("worker thread");
+        assert!(
+            matches!(&ended, Err(err) if err.to_string().contains("RESP_BODY before RESP_HEAD")),
+            "a body before the head is the transport's protocol error: {ended:?}"
+        );
+        let gone = peer.send_to_a_gone_peer(4, Frame::ReqEnd);
+        assert!(
+            gone.is_err(),
+            "the view ended, so its end of the channel is closed: {gone:?}"
+        );
     }
 
     #[test]

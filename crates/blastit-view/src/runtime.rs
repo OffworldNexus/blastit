@@ -228,10 +228,11 @@ pub trait WorkerRuntime: Send + Sync + 'static {
 
 /// How one dispatched request ended.
 ///
-/// The same two facts `RESP_END`/`RESP_END_COST` and `DONE` carry: whether the
-/// response was completed, abandoned or errored, and what the request cost in
-/// CPU time. The wall time on the wire is the transport's business, and the
-/// scheduler ignores it (`R18`), so it is not here.
+/// The same two facts `RESP_END`/`RESP_END_COST` and `DONE` carry: how the
+/// request ended — completed, abandoned, errored, or bailed out of a handler
+/// that never returned (`DoneOutcome::Bailed`, `MB.3.41`) — and what the
+/// request cost in CPU time. The wall time on the wire is the transport's
+/// business, and the scheduler ignores it (`R18`), so it is not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestEnd {
     /// What to report in `DONE`, which is what frees the scheduler's slot.

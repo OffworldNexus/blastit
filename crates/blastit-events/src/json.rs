@@ -998,6 +998,7 @@ fn parse_outcome(text: &str) -> Option<Outcome> {
         "queue_timeout" => Outcome::QueueTimeout,
         "timeout" => Outcome::Timeout,
         "view_died" => Outcome::ViewDied,
+        "bailed" => Outcome::Bailed,
         "client_gone" => Outcome::ClientGone,
         _ => return None,
     })
@@ -1412,6 +1413,22 @@ mod tests {
     }
 
     #[test]
+    fn a_bailed_request_decodes_with_its_own_outcome() {
+        // `MB.3.41`: the decoder's vocabulary is the encoder's, so a reader
+        // never falls back to a field dump for the outcome this build writes.
+        let event = fixture::event(EventKind::Request(
+            RequestInfo::from_target("GET", "/crash")
+                .with_status(500)
+                .with_outcome(Outcome::Bailed)
+                .with_timings(1.0, 18.0)
+                .with_cost(18_000_000, Some(3_200_000)),
+        ));
+        let line = encode_json(&event);
+        assert!(line.contains(r#""outcome":"bailed""#), "{line}");
+        assert_eq!(decode_json(&line), Some(event), "{line}");
+    }
+
+    #[test]
     fn a_line_this_build_did_not_write_is_not_an_event() {
         // Every one of these is a line the *pretty* path has to fall back on the
         // field dump for, so none of them may decode into an invented event.
@@ -1562,6 +1579,27 @@ mod tests {
                 .with_request_id("01JBC")
                 .with_route("product-detail"),
                 r#"{"ts":"2026-10-25T14:02:11.384Z","level":"warn","event":"request","component":"scheduler","route":"product-detail","request_id":"01JBC","method":"GET","path":"/oops","status":502,"outcome":"view_died","queued_ms":1.0,"duration_ms":5.0,"bytes_in":0,"bytes_out":0,"cost_ns":5000000,"cpu_ns":null,"remote_addr":"203.0.113.7"}"#,
+            ),
+            (
+                // `MB.3.41`: a contained bailout — the handler never returned —
+                // is `bailed`, not `view_died` (the process is alive) and not
+                // `ok` (the request failed).
+                Event::at(
+                    fixture::request_ts(),
+                    Component::Scheduler,
+                    EventKind::Request(
+                        RequestInfo::from_target("GET", "/crash")
+                            .with_status(500)
+                            .with_outcome(Outcome::Bailed)
+                            .with_timings(14.7, 18.0)
+                            .with_bytes(0, 0)
+                            .with_cost(18_000_000, Some(3_200_000))
+                            .with_remote_addr("203.0.113.7"),
+                    ),
+                )
+                .with_request_id("01JBD")
+                .with_route("product-detail"),
+                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"warn","event":"request","component":"scheduler","route":"product-detail","request_id":"01JBD","method":"GET","path":"/crash","status":500,"outcome":"bailed","queued_ms":14.7,"duration_ms":18.0,"bytes_in":0,"bytes_out":0,"cost_ns":18000000,"cpu_ns":3200000,"remote_addr":"203.0.113.7"}"#,
             ),
         ];
 

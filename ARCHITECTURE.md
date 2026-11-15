@@ -322,6 +322,26 @@ http.
   that went away, a view that died — charges that observed time instead. The
   `request` event keeps both numbers: `cost_ns` (what was charged) and `cpu_ns`
   (what the worker reported, `null` when it reported nothing).
+* **A `5xx` says which failure it was, and only a crash pays the wall.** A
+  status alone cannot tell an application's own server error from a handler
+  that never returned, and both leave the same `RESP_HEAD`, so `DONE` carries
+  the missing fact (`MB.3.41`): `bailed` means a contained `exit()`/`die()`/a
+  fatal was trapped by the SAPI shim. Three rules follow, one per kind:
+  * an app that **answers** a `5xx` itself (a framework's `500`, a script's
+    `http_response_code(500)`) returned from its handler: the request is
+    `outcome: "ok"` — the view answered — with that `status`, and `cost_ns`
+    keeps the clamp above, exactly as a `200` does;
+  * a **contained bailout** answers its `5xx` without returning: `outcome:
+    "bailed"`, and `cost_ns` is the request's own wall time (arrival to last
+    byte) — `R19`'s crash ceiling at the one live thread such a worker has —
+    so a crash loop can never cost less than the client waited, and the view's
+    report is not believed at all;
+  * a `5xx` the **scheduler** wrote itself (the `502` of a view that never
+    answered, the `504` of `BLASTIT_REQUEST_TIMEOUT`, a `503` refusal) keeps its
+    own outcome (`view_died`, `timeout`, `queue_full`/`queue_timeout`) and is
+    charged dispatch to completion, because no view answered it and it never
+    held the worker its arrival span covers. `view_died` therefore still means
+    only "the view process died mid-request".
 
 #### The static responder
 
@@ -360,7 +380,10 @@ year-long `Cache-Control` is keyed on the **answering** file's path: a directory
   cannot report zero for a request it took real time to answer. It can only buy
   itself the gap between its first frame and its last one — that is, exactly the
   time its own client was waiting for it. A view that says nothing is charged what
-  the scheduler saw.
+  the scheduler saw. The one exception is a view that **bails out** of a `5xx` it
+  had answered (`DONE`'s `bailed`): its report is not believed at all, and it is
+  charged its own wall time instead, because the one report that must never be
+  cheap is a crash loop's.
 * **One lane per route, and one worker budget across routes.** The queue only
   ever serves the route a queued request belongs to, so the lanes are the routes;
   the best flow is compared across them because they all compete for
@@ -530,6 +553,15 @@ version does not know is still forwarded byte for byte by the raw layer.
 zero it did not take. The scheduler clamps `cost_ns` between the time up to
 this view's first response frame and the time it observed itself, and only
 reports `cpu_ns` — never schedules on it.
+
+`DONE`'s `outcome` is `completed`, `aborted`, `errored` or — since `MB.3.41` —
+`bailed`: a contained `exit()`/`die()`/fatal the SAPI shim trapped, so the
+handler never returned. It is the one fact a response's status cannot carry,
+and both a `5xx` an app answers itself and a `5xx` a dying handler leaves behind
+look identical on `RESP_HEAD`. So a `5xx` a view answered is labelled and
+charged when its `DONE` arrives (one frame later, on the same channel): `bailed`
+for the crash, and `ok` with that status for an answer. See "What a request
+costs" above for the three charge rules.
 
 `REQ_HEAD`'s `peer_addr` is the address of the socket the request arrived on,
 exactly as the kernel reported it — `ip:port`, or an address alone for a peer
@@ -1481,7 +1513,7 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 
 | Event | From | Level | Fields | Emitted when |
 |---|---|---|---|---|
-| `request` | scheduler | info (warn for 5xx) | `request_id`, `method`, `path`, `route` (null if unmatched), `rule` (index of the matching `path` regex), `status`, `outcome` (`ok`, `unmatched`, `queue_full`, `queue_timeout`, `timeout`, `view_died`, `client_gone`), `queued_ms`, `duration_ms`, `bytes_in`, `bytes_out`, `cost_ns`, `cpu_ns`, `remote_addr` | once per request, at the end; this is the routing decision |
+| `request` | scheduler | info (warn for 5xx) | `request_id`, `method`, `path`, `route` (null if unmatched), `rule` (index of the matching `path` regex), `status`, `outcome` (`ok`, `unmatched`, `queue_full`, `queue_timeout`, `timeout`, `view_died`, `bailed`, `client_gone`), `queued_ms`, `duration_ms`, `bytes_in`, `bytes_out`, `cost_ns`, `cpu_ns`, `remote_addr` | once per request, at the end; this is the routing decision |
 | `sql.denied` | dbproxy | warn | `route`, `pid` (view process), `proxy`, `kind` (`query`, `parse`, `function_call`, `copy`, …), `sql` (normalised), `sqlstate`, `in_transaction`, `reason` (the policy's explanation, for example `select on auth_user.password not granted`; never a parameter value) | a statement was rejected |
 | `pg.refused` | dbproxy | warn | `route`, `proxy`, `reason` (`credentials_mismatch`, `too_many_connections`, `upstream_unreachable`, …) | a connection to the proxy was refused |
 | `http.rejected` | http | info | `remote_addr`, `status` (400, 413, 431, 501…), `reason` | a request was refused before reaching the scheduler |
@@ -1498,11 +1530,19 @@ key of `environ`, not of an event, and it reaches the app and nothing else.
 process's own measurement, clamped between the time from dispatch to the
 view's first response frame and the time the scheduler observed to the end
 of the response, or that observed time when no report arrived. It is always a
-number. `cpu_ns` is the thread CPU time the view measured over the same span,
-and `null` when the view had none to report — no `RESP_END_COST`, or no thread
-clock on its interpreter — so a reader never has to guess which happened.
-`duration_ms` still ends at the last response byte, whether or not the number
-arrives with it.
+number. Three shapes fall outside that clamp, and none of them is decided by
+the status alone: a `5xx` a view **bails out of** (`outcome: "bailed"`) is
+charged its own wall time, arrival to last byte, so a crash loop cannot cost
+less than the client waited; a `5xx` an app **answers** itself
+(`outcome: "ok"` with that status) is charged the clamp like any other answer;
+and a `5xx` the scheduler wrote itself (`502`/`503`/`504`, `outcome:
+"view_died"`/`"queue_full"`/`"timeout"`) is charged dispatch to completion, so
+a request the scheduler failed never pays the queue wait it spent before it
+reached a worker. `cpu_ns` is the thread CPU time the view measured over the
+same span, and `null` when the view had none to report — no `RESP_END_COST`, or
+no thread clock on its interpreter — so a reader never has to guess which
+happened. `duration_ms` still ends at the last response byte, whether or not the
+number arrives with it.
 
 The `boot` event of the **`preload`** stage is the one that says what the app
 cost before the fork: `immortalized` and `immortalize_ms` for §9.2 #9's pass

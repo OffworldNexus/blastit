@@ -29,7 +29,8 @@
 //!   two requests: the crash is answered with a `5xx` (never a `200`), is
 //!   charged **at least the wall time its client waited** (`MB.3.13`'s own
 //!   sentence, `R19`'s crash charge at one live thread) and is reported as a
-//!   failed request — `outcome` is never `ok` — and the next request is served
+//!   bailed request — `outcome` is `bailed` (`MB.3.41`), never `ok` and never
+//!   `view_died` — and the next request is served
 //!   by the **only** live worker of that route — a new pid, a direct child of
 //!   init, with the crashed process gone (`workers = 1` caps the slot, and the
 //!   uid is one constant in single-UID `dev`, so it proves nothing). A third
@@ -2267,16 +2268,17 @@ fn containment(crash: &str, what: &str, name: &str, sleeps_ms: Option<u64>) {
         status >= 500,
         "{what}: the crash is reported as a server failure, not success: {event}"
     );
-    // The label and the bill are one decision (`MB.3.38`): a request a view
-    // ended with a `5xx` failed, so §8.1's closed outcome list reports it as
-    // `view_died` — never `ok`, which is what it was before the charge was
-    // fixed.
+    // `MB.3.38`'s label, narrowed by `MB.3.41`: the handler did not return, so
+    // §8.1 reports the request as `bailed` — never `ok` (the request failed),
+    // and never `view_died` (a contained bailout leaves the view process alive,
+    // and that word is for a process that died mid-request). The status alone
+    // cannot say this, which is why `DONE` carries it.
     let outcome = event["outcome"]
         .as_str()
         .unwrap_or_else(|| panic!("{what}: no outcome: {event}"));
-    assert_ne!(
-        outcome, "ok",
-        "{what}: a {status} bailout is a failed request, not `ok`: {event}"
+    assert_eq!(
+        outcome, "bailed",
+        "{what}: a {status} contained bailout is a handler that never returned: {event}"
     );
     let cpu_ns = event["cpu_ns"]
         .as_u64()

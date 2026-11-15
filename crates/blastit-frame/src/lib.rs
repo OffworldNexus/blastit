@@ -156,6 +156,9 @@ mod tests {
             Frame::Done {
                 outcome: DoneOutcome::Errored,
             },
+            Frame::Done {
+                outcome: DoneOutcome::Bailed,
+            },
             Frame::RespEndCost {
                 cost: RequestCost::new(12_500_000, Some(3_000_000)),
             },
@@ -528,6 +531,11 @@ mod tests {
         }
         assert_eq!(DoneOutcome::from_code(0), Ok(DoneOutcome::Completed));
         assert_eq!(DoneOutcome::from_code(2), Ok(DoneOutcome::Errored));
+        // `MB.3.41`: the handler bailed (a contained `exit()`/`die()`/fatal).
+        // It is its own code because the scheduler must not confuse it with a
+        // completed `5xx` an app answered itself.
+        assert_eq!(DoneOutcome::from_code(3), Ok(DoneOutcome::Bailed));
+        assert_eq!(DoneOutcome::Bailed.code(), 3);
         assert_eq!(
             DoneOutcome::from_code(9),
             Err(FrameError::BadEnum {
