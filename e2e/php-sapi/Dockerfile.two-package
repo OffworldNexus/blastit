@@ -1,6 +1,7 @@
 # The **two embed packages** host (`MB.3.61`): `php82-embed` and `php84-embed`
-# installed together on Alpine 3.21, `BLASTIT_LIBPHP` unset, and the boot must
-# serve from the 8.4 library beside the 8.2 object it must not prefer.
+# installed together on Alpine 3.21, `BLASTIT_LIBPHP` unset for the suites, so
+# their probe must resolve the 8.4 library beside the 8.2 object it must not
+# prefer — and a boot handed that path must serve it.
 #
 # The defect this image is for: Alpine's `php82-embed` installs
 # `/usr/lib/libphp82.so` (an object with no `php_version`, so a boot that picks
@@ -21,8 +22,10 @@
 # content-checked when it runs as root.
 #
 # `run-two-package.sh` is the witness: it refuses to pass unless the suites ran
-# their **served** branch, and unless the library the boot resolved is the 8.4
-# one.
+# their **served** branch, and unless the library their own probe resolved on
+# this layout is the 8.4 one — probe order on a real Alpine host, plus boot
+# agreement with the probe. Stage 0's *unset*-override walk is pinned by
+# `stage0.rs`'s unit test, not by this image (`MB.3.62`).
 ARG BASE=alpine:3.21
 FROM ${BASE}
 

@@ -1,15 +1,30 @@
 #!/bin/sh
-# The two-package witness (`MB.3.61`): with `php82-embed` **and** `php84-embed`
-# installed and `BLASTIT_LIBPHP` unset, the boot must serve from
-# `/usr/lib/php84/libphp.so` — the library a name-major walk never reached,
-# because it found `/usr/lib/libphp82.so` (an object with no `php_version`)
-# first and refused.
+# The two-package witness (`MB.3.61`; caption corrected by `MB.3.62`):
+# `php82-embed` **and** `php84-embed` installed on one Alpine host, so
+# `/usr/lib/libphp82.so` (an object with no `php_version`) sits beside
+# `/usr/lib/php84/libphp.so` (which serves). A name-major discovery walk reaches
+# the 8.2 object first and refuses a host that could serve; the version-major
+# walk (`MB.3.61`) must reach the 8.4 library.
 #
 # Runs inside `e2e/php-sapi/Dockerfile.two-package`, where both packages and
 # both suites this image compiled are present. Exit 0 only when the suites took
-# their **served** branch and the resolved library is the 8.4 one: a suite that
-# silently skipped would otherwise look green (its refusal branch is a valid
+# their **served** branch and the library they resolved is the 8.4 one: a suite
+# that silently skipped would otherwise look green (its refusal branch is a valid
 # outcome on a host with no pair at all).
+#
+# What this image proves, precisely: with `BLASTIT_LIBPHP` unset, each suite's
+# own probe walks this host's real library directories and resolves
+# `/usr/lib/php84/libphp.so`, and a boot **handed that path** — which is what
+# both suites do — serves the route. So it proves the probe order on a real
+# Alpine layout, and that the boot agrees with the probe.
+#
+# What it does **not** prove: stage 0's own *unset*-override walk. No `blastit
+# dev` here runs without `BLASTIT_LIBPHP`, so the walk over
+# `PhpSearch::lib_dirs` is pinned only by `stage0.rs`'s unit test
+# `two_embed_packages_serve_from_the_newer_library` (injected directories). The
+# suites' copy of that order is tied to `stage0.rs`'s `LIBPHP_PROBES` by
+# `crates/blastit/tests/common/libphp_probes.rs`, so the order itself is checked
+# (`MB.3.62`) — but by `cargo test`, not by this image.
 #
 #   docker run --rm --cap-add SYS_PTRACE blastit-php-two:local
 #
@@ -18,6 +33,15 @@
 # role above the view is content-checked when it runs as root (the same reason
 # `make rs-test-php-image` passes `--cap-add SYS_PTRACE`).
 set -eu
+
+# The premise of the whole image, asserted rather than assumed: with
+# `BLASTIT_LIBPHP` set the suites' probe would simply believe it, and this
+# helper would say nothing about the host's layout.
+if [ -n "${BLASTIT_LIBPHP:-}" ]; then
+    echo "two-package: FAIL — BLASTIT_LIBPHP is set (${BLASTIT_LIBPHP}), so the suites'" >&2
+    echo "  probe would not walk the host's directories at all" >&2
+    exit 1
+fi
 
 old=/usr/lib/libphp82.so
 new=/usr/lib/php84/libphp.so
@@ -61,9 +85,11 @@ for binary in $(cat /src/target/php-suite-executables); do
     fi
 done
 
-# The served branch proves the boot resolved a library it could use; the path in
-# the boot's own `manifest.warning` proves *which* one, and the refusal marker
-# must be absent.
+# What the suites' output proves: their `served:` line names the library their
+# own probe resolved on this host, and each suite itself asserts that the boot's
+# log names the same pair (a non-zero suite exit fails this helper). So `$new` in
+# the log is the probe's answer on this layout — not a sweep of stage 0's
+# directories, which no boot here performs.
 if grep -q "refused (no usable libphp" "$log"; then
     echo "two-package: FAIL — the boot refused on a host whose 8.4 library serves:" >&2
     grep "refused (no usable libphp" "$log" >&2
@@ -75,8 +101,8 @@ grep -q "served: HTTP/1.1 200" "$log" || {
     exit 1
 }
 grep -q "$new" "$log" || {
-    echo "two-package: FAIL — the boot never named $new, so it may have served from" >&2
-    echo "  another library; the manifest warning names the resolved pair" >&2
+    echo "two-package: FAIL — no suite's probe resolved $new on this host, so the version-" >&2
+    echo "  major order did not reach the 8.4 library (a skipped suite is not a witness)" >&2
     exit 1
 }
 if grep -q "$old is an NTS libphp" "$log"; then
@@ -85,5 +111,7 @@ if grep -q "$old is an NTS libphp" "$log"; then
     exit 1
 fi
 
-echo "two-package: ok — with php82-embed and php84-embed installed and no BLASTIT_LIBPHP,"
-echo "  the boot served from $new (the 8.2 object at $old was not preferred)"
+echo "two-package: ok — with php82-embed and php84-embed installed and BLASTIT_LIBPHP unset,"
+echo "  each suite's probe resolved $new on this host and a boot handed that path served"
+echo "  the route: probe order on a real Alpine layout, and boot agreement with the probe."
+echo "  (Stage 0's own unset-override walk is pinned by stage0.rs's unit test, not here.)"

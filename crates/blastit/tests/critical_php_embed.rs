@@ -128,6 +128,9 @@ use std::time::{Duration, Instant};
 
 use blastit::host::{Claim, Provenance};
 
+#[path = "common/libphp_probes.rs"]
+mod libphp_probes;
+
 /// The route the fixture declares.
 const ROUTE: &str = "app";
 
@@ -848,40 +851,67 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+/// The discovery order this probe walks: a file name, and the per-minor
+/// directory it is looked for in (`None`: every directory of [`libphp_path`]'s
+/// list, in its order).
+///
+/// Version-major, then spelling (`MB.3.61`): the *minor* is preferred and the
+/// name only breaks a tie within it, so a host with two embed packages probes the
+/// library the boot will serve — the newest — instead of the first name in a
+/// list. A name-major walk would probe `/usr/lib/libphp82.so`, an object with no
+/// `php_version`, and then report "no usable library" on a host whose
+/// `/usr/lib/php84/libphp.so` serves.
+///
+/// It is a **copy** of `stage0.rs`'s `LIBPHP_PROBES`, because this suite may not
+/// lean on the code under test; [`the_probe_table_matches_stage0`] is what keeps
+/// the copy honest (`MB.3.62`).
+const PROBES: [(&str, Option<&str>); 13] = [
+    ("libphp8.4.so", None),
+    ("libphp-8.4.so", None),
+    ("libphp84.so", None),
+    ("libphp.so", Some("php84")),
+    ("libphp8.3.so", None),
+    ("libphp-8.3.so", None),
+    ("libphp83.so", None),
+    ("libphp.so", Some("php83")),
+    ("libphp8.2.so", None),
+    ("libphp-8.2.so", None),
+    ("libphp82.so", None),
+    ("libphp.so", Some("php82")),
+    ("libphp.so", None),
+];
+
+/// `MB.3.62`: [`PROBES`] is `stage0.rs`'s discovery order, read from that source
+/// at compile time and compared entry by entry — a change to either side fails
+/// here instead of letting this probe walk a host differently from the boot.
+///
+/// The check's own oracle (a dropped per-minor constraint, the fallback turned
+/// into a constrained probe, two entries out of order) is
+/// `crates/blastit/tests/common/libphp_probes.rs`'s `a_changed_entry_is_reported_at_its_index`,
+/// which runs in this binary too.
+#[test]
+fn the_probe_table_matches_stage0() {
+    if let Err(drift) = libphp_probes::assert_matches(&PROBES, include_str!("../src/stage0.rs")) {
+        panic!("{drift}");
+    }
+}
+
 /// `BLASTIT_LIBPHP` when it is a file, else the version-major probe order in the
 /// library directories (`ADR-0010` §3) — the resolved path.
 ///
 /// The names, directories and order are the ones `blastit` itself uses,
 /// including Alpine's packed `libphp83.so` and its per-minor `/usr/lib/php84`
 /// (`MB.3.59`), and they are tried minor-by-minor rather than name-by-name
-/// (`MB.3.61`), so this probe and the boot cannot disagree about a host with two
-/// embed packages installed.
+/// (`MB.3.61`). The table below is a **copy** of `stage0.rs`'s `LIBPHP_PROBES` —
+/// this probe may not lean on the code under test — so
+/// [`the_probe_table_matches_stage0`] reads that source at compile time and
+/// fails when an entry differs, in order or in its per-minor constraint
+/// (`MB.3.62`).
 fn libphp_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("BLASTIT_LIBPHP") {
         let path = PathBuf::from(path);
         return path.is_file().then(|| path.canonicalize().ok()).flatten();
     }
-    // Version-major, then spelling (`MB.3.61`): the minor is preferred and the
-    // name only breaks a tie within it, so a host with two embed packages probes
-    // the library the boot will serve — the newest — instead of the first name
-    // in a list. A name-major walk would probe `/usr/lib/libphp82.so`, an object
-    // with no `php_version`, and then report "no usable library" on a host whose
-    // `/usr/lib/php84/libphp.so` serves.
-    const PROBES: [(&str, Option<&str>); 13] = [
-        ("libphp8.4.so", None),
-        ("libphp-8.4.so", None),
-        ("libphp84.so", None),
-        ("libphp.so", Some("php84")),
-        ("libphp8.3.so", None),
-        ("libphp-8.3.so", None),
-        ("libphp83.so", None),
-        ("libphp.so", Some("php83")),
-        ("libphp8.2.so", None),
-        ("libphp-8.2.so", None),
-        ("libphp82.so", None),
-        ("libphp.so", Some("php82")),
-        ("libphp.so", None),
-    ];
     let libc = if cfg!(target_env = "musl") {
         "musl"
     } else {

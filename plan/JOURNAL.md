@@ -1844,3 +1844,19 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T20:24 [MB.3.61] (lead) base 490bb9b
 - 2026-11-15T20:50 [MB.3.61] (lead) status active -> review
 - 2026-11-15T20:55 [MB.3.61] (lead) status review -> done
+- 2026-11-15T20:57 [MB.3.62] (lead) created (task) The two-package image must prove what it claims, and its probe table must not be able to drift
+- 2026-11-15T20:57 [MB.3.62] (lead) status ready -> active
+- 2026-11-15T20:57 [MB.3.62] (lead) attempt 1/3 started
+- 2026-11-15T20:57 [MB.3.62] (lead) base 71dcaf8
+- 2026-11-15T21:06 [MB.3.63] (lead) created (task) Make the standalone build container own its caches (read-only CARGO_HOME in manylinux)
+- 2026-11-15T21:06 [MB.3.64] (lead) created (task) Give the shim-swap boot test a deterministic seam instead of a 20-second race
+- 2026-11-15T21:06 [MB.3.62] (lead) NOTE: two runner failures on 71dcaf8 (MB.3.63 = standalone read-only CARGO_HOME; MB.3.64 = the shim-swap race in smoke (root)) are release-blocking and take the
+- 2026-11-15T21:40 [MB.3.62] (lead) attempt 2/3 started
+- 2026-11-15T21:40 [MB.3.62] (lead) attempt 2/3 started; attempt 1 died with no work on disk (git status clean under crates/blastit/tests and e2e/php-sapi). base 71dcaf8
+- 2026-11-15T21:43 [MB.3.65] (lead) created (task) Descope PHP 8.2: supported versions are 8.3 and 8.4
+- 2026-11-15T21:43 [MB.3.65] (lead) edited fields
+- 2026-11-15T21:44 [MB.3.65] (lead) owner addition: (A) no apology language in user-facing docs — php.md:46-48 deleted, the 'not a degraded mode' lines kept; (B) narrow banned-phrase guard in make
+- 2026-11-15T21:46 [MB.3.62] (lead) status active -> review
+- 2026-11-15T21:50 [MB.20] (planner) created (task) Regroup /frameworks by connector: python/ and php/ groups over the nine slots (docs-only)
+- 2026-11-15T21:51 [MB.3.62] (lead) reviewer VERDICT: PASS (base 71dcaf8; drift bite reproduced at entry 4; make check exit 0 at review time). LEAD make check after review: exit 2 on ONE finding o
+- 2026-11-15T21:51 [MB.3.62] (lead) status review -> done
