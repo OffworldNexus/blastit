@@ -220,18 +220,8 @@ path = "docs/frameworks/django.md"
 
 [[page.fence]]
 index = 1
-mode = "install-external"
-reason = "Installs psycopg and dj-database-url from the package index; only blastit comes from this workspace. blastit's own install runs in README.md and Getting started."
-
-[[page.fence]]
-index = 2
-mode = "example"
-reason = "Needs a Django project with migrations, which is not a blastit dependency; the same `blastit dev` command runs against the stdlib WSGI fixtures in local.md and flask.md."
-
-[[page.fence]]
-index = 3
-mode = "learn-then-check"
-fixture = "learn"
+mode = "check"
+fixture = "shop"
 
 [[page]]
 path = "docs/frameworks/flask.md"
@@ -239,12 +229,7 @@ path = "docs/frameworks/flask.md"
 [[page.fence]]
 index = 1
 mode = "install-external"
-reason = "Installs flask, psycopg and SQLAlchemy from the package index; only blastit comes from this workspace."
-
-[[page.fence]]
-index = 2
-mode = "dev"
-fixture = "shop"
+reason = "Installs flask, psycopg and pytest from the package index; only blastit comes from this workspace. blastit's own install runs in README.md and Getting started."
 
 [[page]]
 path = "docs/frameworks/php.md"
@@ -252,40 +237,15 @@ path = "docs/frameworks/php.md"
 [[page.fence]]
 index = 1
 mode = "static"
-reason = "A PHP project has no pyproject.toml, so `uv tool install blastit` is not this gate's install path: README.md, Getting started and Local install the wheel this run built, and the standalone and distro story is MB.3.18's. This fence checks the one install command the page teaches."
+reason = "A PHP project has no pyproject.toml, so `uv tool install blastit` reaches the package index, which this offline gate does not have: README.md and Getting started install the wheel this run built. This fence checks the documented `uv tool install` subcommand against the installed uv."
 
 [[page.fence]]
 index = 2
 mode = "static"
-reason = "The gate builds no PHP project fixture: a `[route.php]` route needs a `public/index.php` app and a host NTS `libphp`, and this offline gate installs neither. It checks the documented `blastit dev` command against the installed CLI and parses the page's manifest block."
+reason = "The gate builds no PHP project fixture: a `[route.php]` route needs a `public/index.php` app and a host NTS `libphp`, and this offline gate installs neither. It checks the documented `blastit dev --learn` command and its flags against the installed CLI, and parses the page's manifest block."
 
 [[page.fence]]
 index = 3
-mode = "example"
-reason = "This gate has no PHP app to answer the request (no `vendor/` tree, no host NTS `libphp` route). `make php-sapi-e2e` proves the embedded worker's body and head for a fixture front controller on the same shim and host library."
-
-[[page.fence]]
-index = 4
-mode = "example"
-reason = "The year-long cache header is the static responder's, which `e2e/static_assets.py` proves on the static-and-spa page; this page's PHP app has no fixture in the gate."
-
-[[page.fence]]
-index = 5
-mode = "static"
-reason = "Checks the documented `check` command, the `--` split and the suite path against the installed CLI; the gate has no `vendor/` tree and runs no PHPUnit, so nothing runs after `--`."
-
-[[page.fence]]
-index = 6
-mode = "static"
-reason = "Checks the documented `check --learn -- <suite>` command and `--learn` against the installed CLI; with no `vendor/` tree the gate runs no suite, so nothing is written into a manifest here."
-
-[[page.fence]]
-index = 7
-mode = "static"
-reason = "Checks the documented `--json` command against the installed CLI; this page has no PHP route in the gate to leave unexercised, and the document's shape is checked on the findings fixture in docs/ci.md."
-
-[[page.fence]]
-index = 8
 mode = "presets"
 
 [[page]]
@@ -294,27 +254,27 @@ path = "docs/frameworks/static-and-spa.md"
 [[page.fence]]
 index = 1
 mode = "example"
-reason = "Vite writes `dist/` and this page serves `public/`; MB.2.7's e2e builds the static site and proves the files land where `root` looks, so this fence names the flag instead of running npm in the gate."
+reason = "`uvx` installs blastit from the package index, which this offline gate does not have; e2e/static_assets.py compares this banner with a container's own `blastit dev`, line for line."
 
 [[page.fence]]
 index = 2
 mode = "example"
-reason = "`uvx` installs blastit from the package index, which this offline gate does not have; the same banner runs from the built wheel in Getting started and is compared verbatim by MB.2.7's e2e/static_assets.py."
+reason = "Vite writes `dist/` and this page serves `public/`; e2e/static_assets.py names this command as its one Node skip, and its fixture is that build output."
 
 [[page.fence]]
 index = 3
-mode = "example"
-reason = "The static responder ships in MB.2.4/MB.2.5, so this fence cannot answer yet; MB.2.7's e2e/static_assets.py replays this `curl -i` command and asserts the 200 with the immutable cache header."
+mode = "dev-curl"
+fixture = "static-site"
 
 [[page.fence]]
 index = 4
-mode = "example"
-reason = "The SPA fallback ships in MB.2.4/MB.2.5, so this fence cannot answer yet; MB.2.7's e2e/static_assets.py replays this `curl -i` command and asserts the 200 with `text/html` and `no-cache`."
+mode = "dev-curl"
+fixture = "static-site"
 
 [[page.fence]]
 index = 5
 mode = "example"
-reason = "`uvx` reaches the package index, which the offline gate does not have; docs/ci.md runs the same `blastit check` and `--json` from the built wheel, and MB.2.7 replays both on the static fixture."
+reason = "`uvx` reaches the package index, which the offline gate does not have; e2e/static_assets.py runs the same `blastit check` and `--json` in its container and asserts the exit code and the document."
 
 [[page.fence]]
 index = 6

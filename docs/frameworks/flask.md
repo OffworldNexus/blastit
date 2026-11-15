@@ -1,15 +1,44 @@
 # Flask, SQLAlchemy and raw WSGI
 
-Everything here applies to any WSGI app; the syntax is Flask's.
+One callable, one manifest. The code below is Flask's; a bare WSGI app is the same file
+without the decorator, and SQLAlchemy changes two lines.
 
-## Install and app
+## 1. Executor
+
+```toml title="blastit.toml"
+version = 1
+app = "app:app"
+
+[proxy.db]
+protocol = "postgresql"
+input = { url = "DATABASE_URL" }
+
+[[route]]
+name = "products"
+path = ['/products/']
+[route.db]
+queries = []
+
+[[route]]
+name = "fallback"       # everything else: no database at all
+path = ['.*']
+```
 
 ```console
-$ uv init --app shop && cd shop
 $ uv add flask 'psycopg[binary]' blastit
-$ uv add sqlalchemy            # only if you use it
 $ uv add --dev pytest
 ```
+
+`app:app` must be importable from the directory you start in, on your project's
+interpreter; add `uv add sqlalchemy` if you use it, and `uv run blastit dev` serves it.
+
+## 2. Static assets
+
+A WSGI app has no static story of its own: `[route.static]` serves the files itself and
+forwards everything else to the app — a route above the catch-all, or a page of its own
+([static assets and SPAs](static-and-spa.md)).
+
+## 3. Database
 
 ```python title="app.py"
 import os
@@ -27,89 +56,57 @@ def connection():
 
 
 @app.teardown_appcontext
-def close_connection(_exception=None):
-    db = g.pop("db", None)
-    if db is not None:
+def close(_error=None):
+    if (db := g.pop("db", None)) is not None:
         db.close()
-
-
-@app.get("/products/")
-def products():
-    with connection().cursor() as cursor:
-        cursor.execute('SELECT "shop_product"."name" FROM "shop_product"')
-        return {"products": [row[0] for row in cursor.fetchall()]}
 ```
 
-## Manifest
+One connection per request, closed in the teardown: a connection that outlives the
+request is orphaned when its thread ends. psycopg 3 binds parameters server-side
+(`%s` becomes `$1`), so a statement's text is the same every time.
 
-```toml title="blastit.toml"
-version = 1
-app = "app:app"
-
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-
-[[route]]
-name = "products"
-path = ['/products/']
-methods = ["GET", "HEAD"]
-[route.db]
-queries = []
-
-[[route]]
-name = "fallback"       # everything else: no database at all
-path = ['.*']
-```
-
-The empty `queries` list is the point: every statement is denied until a grant
-allows it. `uv run blastit check --learn` fills it in from your tests. Without a
-suite, `uv run blastit dev --learn` and click through the app.
-
-A `queries` entry is the statement as it goes on the wire, normalised: trimmed,
-whitespace collapsed, binds written `$?`.
-
-## Run it
-
-Any PostgreSQL works; [one line](../local.md#add-postgresql) starts one.
-
-```console
-$ export DATABASE_URL=postgresql://shop:secret@127.0.0.1:5432/shop
-$ uv run blastit dev
-```
-
-`app:app` resolves from the directory you started in, on your project's
-interpreter.
-
-## SQLAlchemy
+With SQLAlchemy, two lines and one key:
 
 ```python
-from sqlalchemy import create_engine
-from sqlalchemy.pool import NullPool
-
 url = os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://", 1)
 engine = create_engine(url, poolclass=NullPool)
 ```
 
-* The `postgresql+psycopg://` driver binds parameters server-side. Blastit hands
-  the app a plain `postgresql://` URL, hence the replacement.
-* `NullPool` gives each request its own connection.
-* SQLAlchemy sends `BEGIN` itself, so its routes need
-  `transaction_control = true`.
-* Its first connection runs `select pg_catalog.version()` before any request
-  statement. `--learn` records it; a `[group.<name>]` is where it belongs.
+The `postgresql+psycopg://` driver keeps parameters out of the text, `NullPool` gives
+each request its own connection, and SQLAlchemy's own `BEGIN` needs
+`transaction_control = true`. Its first connection runs `select pg_catalog.version()`
+before any request statement: put it in `[group.connection.db]` and attach
+`groups = ["connection"]` wherever the app connects ([groups](../reference/manifest.md#groups)).
+Flask-SQLAlchemy takes `SQLALCHEMY_ENGINE_OPTIONS = {"poolclass": NullPool}` and the same
+URL replacement for `SQLALCHEMY_DATABASE_URI`.
 
-Flask-SQLAlchemy takes the same two: `SQLALCHEMY_ENGINE_OPTIONS =
-{"poolclass": NullPool}`, and the same `postgresql+psycopg://` replacement for
-`SQLALCHEMY_DATABASE_URI`.
+## 4. Ingress
 
-## Any other WSGI app
+Declare the codec the route receives; a body of the wrong shape is a `400` before Flask
+sees it.
 
-Serve a plain callable the same way: set `app = "wsgi:application"`, write the
-routes, and let `blastit check` fill the grants. Nothing is imported from
-Blastit.
+## 5. Environment and secrets
 
-## Next
+`os.environ["DATABASE_URL"]` is the local socket URL blastit rendered. Read every other
+secret from the environment the same way, and never write the database URL into a
+response, a log line or a subprocess.
 
-[Local development](../local.md) · [CI/CD](../ci.md) ·
-[anywhere it deploys](../deploy/index.md).
+## 6. Health
+
+Do not add a view for `/_blastit/health`: the scheduler answers it before your routes are
+consulted, so it never runs.
+
+## 7. Migrations
+
+Run Flask-Migrate's `uv run flask db upgrade` outside blastit, before the new code boots.
+
+## 8. Learn and check
+
+`check` runs your pytest suite, so keep `app.py` importable from the project root: the
+suite imports the same callable the manifest names
+([CI/CD](../ci.md#what-it-fails-on)).
+
+## 9. Deployment notes
+
+A catch-all route is one process for the whole app; give a hot or risky path its own
+`[[route]]` above it to get its own process, uid and grants.

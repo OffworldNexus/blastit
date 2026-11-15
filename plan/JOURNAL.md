@@ -1647,3 +1647,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T07:20 [MB.3.50] (lead) status active -> review
 - 2026-11-15T07:24 [MB.3.50] (lead) Reviewer PASS on attempt 2 with one MINOR accepted as a residual rather than a new node (this node exists to stop the treadmill, and one module-doc sentence in 
 - 2026-11-15T07:24 [MB.3.50] (lead) status review -> done
+- 2026-11-15T07:26 [MB.19] (lead) status ready -> active
+- 2026-11-15T07:26 [MB.19] (lead) attempt 1/3 started
+- 2026-11-15T07:26 [MB.19] (lead) base 872f523
+- 2026-11-15T07:46 [MB.19] (lead) status active -> review
+- 2026-11-15T07:46 [MB.3.51] (lead) created (task) Does check --learn fulfil the single-pass promise? Decide (a) restore it, or (b) amend VISION, and rule on MB.3.19's mismatch inventory
+- 2026-11-15T07:46 [MB.3.51] (lead) status ready -> active
+- 2026-11-15T07:46 [MB.3.51] (lead) attempt 1/3 started
+- 2026-11-15T07:46 [MB.3.51] (lead) base 872f523
+- 2026-11-15T07:52 [MB.19] (lead) REVIEW FAIL (attempt 1), two MAJORs and three MINORs, all on the pages:
+- 2026-11-15T07:52 [MB.19] (lead) status review -> ready
+- 2026-11-15T07:52 [MB.19] (lead) status ready -> active
+- 2026-11-15T07:52 [MB.19] (lead) attempt 2/3 started
+- 2026-11-15T07:55 [MB.19] (lead) visual-checker PASS on the attempt-1 pages (it ran while attempt 2 was in flight, so it judged the structure, not the corrected sentences): /frameworks/ intro a
+- 2026-11-15T07:55 [MB.19] (lead) status active -> review
+- 2026-11-15T07:59 [MB.19] (lead) status review -> done

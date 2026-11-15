@@ -2,16 +2,16 @@
 id: MB.19
 title: "Restructure /frameworks: one 'adapting your app' page + nine capability slots per framework"
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 2
 depends_on: []
 paths: ["docs/frameworks/**", python/tests/runnable_docs/inventory.toml]
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T19:48"
-updated: "2026-11-14T19:49"
+updated: "2026-11-15T07:59"
 ---
 
 # Goal
