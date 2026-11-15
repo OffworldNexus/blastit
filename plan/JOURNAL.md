@@ -1688,3 +1688,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T08:12 [MB.3.51] (lead) attempt 3/3 started
 - 2026-11-15T08:14 [MB.3.51] (lead) status active -> review
 - 2026-11-15T08:21 [MB.3.52] (lead) status review -> done
+- 2026-11-15T08:21 [MB.3.51] (lead) REVIEW FAIL (attempt 3): four of five points PASS, including the four-call-site wording, leaf 9/ADR, §5.2 caps and the 9 -> 8 order. ONE MAJOR remains, and it i
+- 2026-11-15T08:21 [MB.3.51] (lead) status review -> ready
+- 2026-11-15T08:21 [MB.3.51] (lead) status ready -> active
+- 2026-11-15T08:21 [MB.3.51] (lead) edited fields
+- 2026-11-15T08:21 [MB.3.51] (lead) attempt 4/4 started
+- 2026-11-15T08:22 [MB.3.51] (lead) status active -> review
+- 2026-11-15T08:22 [MB.3.53] (lead) status active -> review
+- 2026-11-15T08:26 [MB.3.51] (lead) Reviewer PASS on attempt 4 with one MINOR accepted as a recorded residual rather than a fifth attempt: `:426-427` says "all `plan.json(plan.would_write(false))`
+- 2026-11-15T08:26 [MB.3.51] (lead) status review -> done

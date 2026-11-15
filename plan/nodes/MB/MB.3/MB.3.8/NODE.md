@@ -118,3 +118,7 @@ $ make e2e
 
 Fail certification if this is not proven. Implemented by `MB.3.33`;
 `MB.9.2.2` must preserve the gate when it ports static serving.
+
+> `body = "raw"` without `allow_raw` refuses at boot in production (stage 0 and stage 1), proved by a protected test.
+
+Fail certification if this is not proven. Implemented by MB.3.53; the decision is documented in docs/design/learn-single-pass.md (ruling 4) and docs/decisions/ADR-0011-*.md.
