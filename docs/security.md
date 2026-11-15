@@ -29,7 +29,7 @@ is what the attacker is holding when that happens.
 |---|---|---|
 | **a view** (request-time RCE) | that route's allowlisted statements; its scratch directory; **every file its uid can open** — the code tree, the virtualenv, `/tmp`; all the CPU and memory the container has; egress only with `egress = true` | run any other statement; read the real database credentials; `ptrace` another process; connect to another route's socket or channel; hold more threads than its `RLIMIT_NPROC`; take another route's worker slot |
 | **http** | the raw bytes of in-flight HTTP traffic | reach the database; run Python; spawn processes |
-| **the scheduler** | it can send any request to any view; every file beneath each declared static `root` — dotfiles and symlinks included | read the real database credentials; reach another route's socket or a view's memory; go beyond what its uid and a socket-less seccomp role allow |
+| **the scheduler** | it can send any request to any view; every file beneath each declared static `root` — dotfiles and symlinks included, but never a `.php`/`.phtml`/`.phar` source, which is `404` | read the real database credentials; reach another route's socket or a view's memory; go beyond what its uid and a socket-less seccomp role allow |
 | **dbproxy** | the real database credentials | — it runs no app code, is not dumpable, and is kept small |
 | **init** | everything | — it runs only blastit code after stage 1's imports |
 
@@ -77,8 +77,12 @@ uids cannot signal, `ptrace` or read each other's
   the calls that read or steer another process, load kernel code or move between
   namespaces. Views may use `AF_UNIX` only, plus `AF_INET`/`AF_INET6` with
   `egress = true`; http and the scheduler may not call `socket()` at all.
-  `egress = true` is any IPv4/IPv6 address and port, cloud metadata included:
-  there is no allowlist until the HTTP proxy milestone.
+  `clone3` is the one non-`EPERM` refusal (`ENOSYS`, so glibc falls back to
+  `clone`), a `clone` requesting any `CLONE_NEW*` flag and `setsid`/`setpgid`
+  are `EPERM`, and a PHP view additionally refuses `execve`, `fork` and the
+  other process-creating calls. `egress = true` is any IPv4/IPv6 address and
+  port, cloud metadata included: there is no allowlist until the HTTP proxy
+  milestone.
 * **Filesystem and limits.** The code tree is read-only to views; each view gets a
   private `0700` scratch directory, `umask 077` and that directory as `HOME` and
   `TMPDIR`; `RLIMIT_NPROC` (counting threads) is a hard backstop *under* the
@@ -93,7 +97,7 @@ uids cannot signal, `ptrace` or read each other's
   acknowledgement **and** a gate: `body = "raw"` without `allow_raw = true` is
   **refused at a production boot** (stage 0, and again by stage 1's re-read of
   the same file, before a listener exists), while `blastit dev` warns and serves
-  and `blastit check` reports `raw_ingress`. 0.1.1
+  and `blastit check` reports `raw_ingress`. 0.2.0
   has no multipart codec and no media or PDF decoding: an upload is `raw`, and
   the app's parser sees the original bytes, polyglots included.
 
@@ -123,6 +127,41 @@ normalization.
 
 [ADR-0007](https://github.com/OffworldNexus/blastit/blob/develop/docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md)
 holds the decision and its trade-offs.
+
+## PHP front controllers
+
+A `[route.php]` route runs `public/index.php` in the route's own unprivileged view
+worker, with the host's NTS `libphp` embedded in it. The three things a CGI or
+FastCGI deployment has to defend are not defended here because they do not exist:
+
+* **No CGI surface.** There is no CGI binary and no argv, so a query string cannot
+  become `-d` flags (`php2shell`, CVE-2012-1823 and CVE-2024-4577).
+* **No request-parameter stream.** `$_SERVER` is built in C from the request and the
+  manifest, and `SCRIPT_FILENAME`/`DOCUMENT_ROOT` are pinned at boot from `entry` and
+  the application root, never from the path or a header. `PHP_VALUE`,
+  `PHP_ADMIN_VALUE` and `REDIRECT_STATUS` have no API by which they could arrive, and
+  a `Proxy:` header is dropped before it could become `HTTP_PROXY` (`httpoxy`). The
+  INI blob is rendered once and a request cannot change it; `exec`, `shell_exec`,
+  `proc_open`, `dl` and the `pcntl`/`posix` process calls are disabled.
+* **No process escape.** The worker runs under `SeccompRole::EmbeddedView { egress }`:
+  every view rule, plus `execve`, `execveat`, `fork`, `vfork` and a process-creating
+  `clone` refused. NTS `libphp` serves one request per process, so a request that
+  tried to fork would be escaping its CPU charge.
+
+`libphp` is the host's: blastit does not bundle it and has no fallback. It is opened
+and `(st_dev, st_ino)`-verified at boot, passed to the child as a descriptor and
+`dlopen`ed through `/proc/self/fd/<n>`, so a swapped file cannot be loaded; no
+`libphp` symbol is reachable in init, http, the scheduler or dbproxy. Without a usable
+NTS library the boot refuses, naming the distro package (`libphp-embed`,
+`php84-embed`, `php-embedded`) or `BLASTIT_LIBPHP`.
+
+`.php`/`.phtml`/`.phar` under a static root is `404` whatever its case, so a front
+controller's source is never served as a file. Until Milestone C's CDR, an upload is
+`raw`: PHP's own parser sees the original bytes, a polyglot included, which is why
+`phar.readonly`/`phar.require_hash` are pinned and the route declares its ingress
+codec. [`ARCHITECTURE.md` §2.6](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md#26-php-embedded)
+has the mechanism; [`ADR-0010`](https://github.com/OffworldNexus/blastit/blob/develop/docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md)
+§1–§2 the decision.
 
 ## The client address
 

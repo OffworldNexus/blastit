@@ -59,7 +59,9 @@ A single Rust binary, `blastit`, plays every role. Most roles are chosen by
 their position in the process tree. The exception is dbproxy, which is
 re-exec'd with `--role=dbproxy` (§4); that flag grants nothing by itself,
 because the secrets only arrive over an inherited pipe. CPython is embedded
-through `pyo3`, as in the `pywsgi` experiment. The database proxy is
+through `pyo3` for a Python route, the host's NTS `libphp` is `dlopen`ed in a
+PHP route (§2.6), and a `[route.static]` is answered by the scheduler (§2.4), so
+an all-static site needs no interpreter at all. The database proxy is
 built on the [`pregresql`](https://github.com/OffworldNexus/pregresql) crate,
 used as a library. On the Python side there is no framework integration at
 all: blastit loads one standard WSGI callable (`BLASTIT_APP`, or the manifest's
@@ -73,19 +75,20 @@ manifest (§6).
 |---|---|---|
 | `blastit` | production | stage 0, then `execve` stage 1 under real uids or capabilities; refuses to start without them |
 | `blastit dev` | single-uid simulation | the same five roles under `geteuid()`, loopback by default; a non-loopback bind needs `--host` and `BLASTIT_DEV_EXPOSE=1`, and the banner then says `EXPOSED, no auth`; `--learn` allows what the manifest lacks and records it |
-| `blastit check` (`blastit test`) | audit | `pytest` through dbproxy; `--learn` writes the missing routes and exact `queries` |
+| `blastit check` (`blastit test`) | audit | `pytest` through dbproxy; `--learn` proposes new routes with their exact `queries`, never a grant on an existing route (`dev --learn` does that) |
 | `blastit-manifest fold` | manifest tooling | the missing grants a log's denials name |
 
 The component table below is the production topology; `blastit dev` runs the
-same roles on one uid.
+same roles on one uid. A `[route.static]` adds no row: the scheduler answers it
+itself (§2.4).
 
-| Component | Count | uid | Python? | Holds | Talks to |
+| Component | Count | uid | Interpreter? | Holds | Talks to |
 |---|---|---|---|---|---|
 | **init** | 1 (PID 1) | 0, or the uid it was started as (D6) | stage 1 only | listen socket, all internal socket ends while forking, preloaded app | everyone (control) |
 | **dbproxy** | 1 (own `execve`) | `UID_BASE+3` | no | **the real DB credentials**, the query policy, one listener per view | views (Unix sockets), PostgreSQL (TCP/TLS) |
 | **http** | 1 | `UID_BASE+1` | no | the listening TCP socket | load balancer, scheduler |
 | **scheduler** | 1 | `UID_BASE+2` | no | the manifest's routing table, worker budget, one channel per view process | http, init, view processes |
-| **view** | 1 per view (lazy) | `UID_BASE+1000+i` | yes | nothing but its own channel | scheduler, dbproxy |
+| **view** | 1 per view (lazy) | `UID_BASE+1000+i` | CPython, or the host's `libphp` for `[route.php]` (§2.6) | nothing but its own channel | scheduler, dbproxy |
 
 `UID_BASE` defaults to `20000`. DO maps the full 32-bit uid range (the spike
 used uids up to 2³²−2), but we stay below 65536 for portability. None of these
@@ -457,6 +460,66 @@ mistakes safe. If the manifest's regexes and the app's own URL routing
 disagree, a request lands in a process whose allowlist doesn't fit, and its
 queries are denied. It fails closed; it never gains a privilege.
 
+### 2.6 php (embedded)
+
+A `[route.php]` route executes a front controller (`entry`, for example
+`public/index.php`) inside a normal view process: one unprivileged process per
+slot under `UID_BASE+1000+i`, forked by the stage-1 supervisor exactly like a
+CPython view (`1..=workers`, `max_requests` recycling, the scheduler's queue and
+`ctl.chan` lifecycle). There is no `php-fpm`, no FastCGI stream and no second
+server: NTS `libphp` serves one request per process, so a route's concurrency is
+its worker count, and `workers` (1–64) can only lower the cap blastit derives.
+
+**One transport, one runtime.** The worker is an ordinary `WorkerRuntime`
+(`blastit-view`'s `PhpEmbedRuntime`) on the same unnamed `view.chan`
+`socketpair` and the same frames as a WSGI view (§3.1): the scheduler's
+upstream session forwards `ReqHead`/`ReqBody` — as `RawFrame`s wherever it does
+not need to decode them — the runtime answers `RESP_HEAD`/`RESP_BODY` under the
+response credit window, and the transport writes `RESP_END_COST` + `DONE`. The
+request body is buffered in full before PHP starts (the C ABI takes one slice),
+bounded by `max_body_bytes`; `app.output` lines from the request thread reach
+the log pipes like any view's stdout or stderr.
+
+**The load is fd-verified twice.** Stage 0 resolves the host's NTS `libphp`
+(static `.dynsym` inspection: `executor_globals` present, `tsrm_startup` absent)
+and the matching per-PHP-minor shim (`libblastit_php8X-<arch>-<libc>.so`) by
+opening and `fstat`ing them, records `(path, st_dev, st_ino)` in the
+configuration, and never `dlopen`s. Stage 1 re-opens each
+`O_RDONLY|O_CLOEXEC|O_NOFOLLOW`, asserts the identity against that record, and
+passes the descriptors to the child in `ChildIo.keep`; the child `dlopen`s
+`/proc/self/fd/<n>` (libphp `RTLD_NOW|RTLD_GLOBAL`, shim
+`RTLD_NOW|RTLD_LOCAL`), so a file swapped after inspection cannot be loaded.
+No `libphp` symbol is reachable in init, http, scheduler or dbproxy, and there
+is no path variant to fall back to: a host without a usable NTS `libphp` is a
+boot refusal naming the package (`libphp-embed`, `php84-embed`, `php-embedded`)
+or `BLASTIT_LIBPHP`, never a degraded mode. Before the listener binds, stage 1
+forks one contained probe child per `[route.php]` route (`EmbeddedView`, the
+route's uid, `PR_SET_PDEATHSIG`, `BLASTIT_PROBE_TIMEOUT_MS`) that runs
+`blastit_php_worker_init` + `shutdown`; a shim that cannot start is that boot's
+`exit 1`, not a first request's fault.
+
+**`$_SERVER` is C memory, not a request stream.** The shim builds it from the
+request and the manifest's fixed facts; `SCRIPT_FILENAME` and `DOCUMENT_ROOT`
+come from `entry` and the application root at boot, never from the path or a
+header. There is no argv, no FastCGI `PHP_VALUE`/`PHP_ADMIN_VALUE`, no
+`REDIRECT_STATUS`, and a `Proxy:` header is dropped before it could become
+`HTTP_PROXY`. The `ZEND_INI_SYSTEM` blob — `open_basedir`, `post_max_size` and
+`upload_max_filesize`, `disable_functions` (`exec`, `shell_exec`, `proc_open`,
+`dl`, the `pcntl`/`posix` process calls), `phar.readonly`/`phar.require_hash`,
+`ffi.enable=0`, `allow_url_include=0`, the opcache and assertion switches — is
+rendered once from `IniPolicy` and cannot be changed per request.
+`php_module_startup` runs once per forked worker, on its own main thread, after
+the privilege drop; the seccomp role (`SeccompRole::EmbeddedView { egress }`)
+keeps every view rule and additionally refuses `execve`, `execveat`, `fork`,
+`vfork` and a process-creating `clone` (§7.3).
+
+**What it costs.** The shim measures `CLOCK_PROCESS_CPUTIME_ID` around
+`php_request_startup`..`php_request_shutdown` outside PHP userland, so `cpu_ns`
+cannot be forged by a script; a zero reading is `null`, never "free". A
+contained `exit()`/`die()`/fatal trapped by `zend_first_try`/`zend_catch` ends
+the request as `DoneOutcome::Bailed` (§2.4): the scheduler charges its wall time,
+and `view_died` keeps meaning only that the process died.
+
 ---
 
 ## 3. Process tree and channels
@@ -775,6 +838,17 @@ reported as kept when it could not be (M1).
 
 If anything in a stage fails, the whole container exits non-zero. A
 half-started sandbox is worse than a crash loop that the platform can see.
+
+**The serve path's manifest gates are a value, not a statement.** The production
+serve path parses and validates the manifest, then takes its gates before it
+binds a view socket: `ServeGates::clear` is the only constructor and it *is*
+`raw_ingress_gate` (`ADR-0011`), and `bind_view_sockets` takes `&ServeGates`. A
+boot therefore cannot bind without the gates having passed in this process, and
+deleting the call site is a compile error rather than a silent fail-open. The
+gate's process behaviour is measured through stage 1's re-read of the same
+manifest (`critical_raw_ingress`), because an unprivileged `cargo test` cannot
+reach a stage-0 gate that lives after the capability check; the ordering half is
+the type, which is why it is the witness.
 
 ---
 
@@ -1330,11 +1404,12 @@ that it is the default rather than an option, and the `boot` event says
 whether the filters are on.
 
 The filter is a **refusal list**: the default action is allow, and what it
-refuses it refuses with `EPERM`, so a syscall it says nothing about cannot be
-what breaks a request. It is installed while the child is still
-single-threaded — in the zygote before a view serves anything, and in http,
-scheduler and dbproxy before their runtime exists — because it cannot be
-removed and applies to every thread, present or future.
+refuses it refuses with `EPERM` — `clone3` is the one exception, below — so a
+syscall it says nothing about cannot be what breaks a request. It is installed
+while the child is still single-threaded — in the zygote or the PHP fork before
+a view serves anything, and in http, scheduler and dbproxy before their runtime
+exists — because it cannot be removed and applies to every thread, present or
+future.
 
 * **Every role** refuses `ptrace`, `process_vm_readv`, `process_vm_writev`,
   `bpf`, `keyctl`, `add_key`, `request_key`, `perf_event_open`, `userfaultfd`,
@@ -1359,6 +1434,22 @@ removed and applies to every thread, present or future.
 * **`socketpair()`** stays `AF_UNIX`-only for every role, http and scheduler
   included: a pair of descriptors the process already owns is not a new way
   out of it, and std and tokio create one internally on some platforms.
+* **`clone3` is the one refusal that is not `EPERM`.** It fails with `ENOSYS`
+  so glibc's `pthread_create` falls back to the still-allowed `clone`; a
+  `clone` that requests any `CLONE_NEW*` flag (including `CLONE_NEWTIME`) is
+  `EPERM` for every role, because a process may not reach for a namespace.
+  `setsid` and `setpgid` are `EPERM` too: a worker cannot leave init's
+  supervision by starting a new session or process group. A view's own
+  `setpgid(0, 0)` runs in child setup *before* the filter is installed, so the
+  call being refused is never the legitimate one.
+* **`SeccompRole::EmbeddedView` (a PHP view, §2.6)** keeps every rule above and
+  the view's `socket()` families, and additionally refuses `execve`, `execveat`,
+  `fork`, `vfork` and a `clone` without `CLONE_THREAD` with `EPERM`. Its workers
+  are forked **before** the filter goes on, so nothing legitimate in a request
+  creates a process; a request that tries is escaping the process-wide CPU
+  charge, which is the one thing that would make a crash loop cheap (`R14`).
+  Thread-creating `clone` stays allowed: PHP extensions and glibc itself start
+  threads.
 * **A foreign architecture is fatal.** The filter compares
   `seccomp_data.arch` against the build's `AUDIT_ARCH_*`
   (`AUDIT_ARCH_X86_64`/`AUDIT_ARCH_AARCH64`) and kills the process when it

@@ -38,7 +38,7 @@ Companion ADR: [ADR-0007](../decisions/ADR-0007-static-asset-serving-and-rewriti
 | symlink escape and dotfiles → `404`; `/.well-known/` public; refusal final | §5.2 rows 15–25, §4.3 steps 3–4 |
 | all-static `check`: audits every `root`, no pytest, exit `0`; missing/non-directory exit `2`; `--json` shape unchanged | §4.7 |
 | front controller: omit `spa`, `/checkout/42` reaches `app` with `PATH_INFO=/checkout/42`, one `.*`, PHP = `public/index.php` | §4.3 step 9, §4.4, §2 |
-| `0.2.0` ships the rewrite and this responder; the `public/index.php` worker is `0.2.1` | §2 non-goals |
+| `0.2.0` ships the rewrite, this responder and the `public/index.php` worker | §2 non-goals |
 | "a preset already runs the site"; production still fails closed | unchanged (`ADR-0005`); §5.1 states the uid the responder runs as |
 
 ### 1.2 What the `blastit dev` banner does **not** gain
@@ -77,8 +77,9 @@ rewrite order; an escape-proof resolver that survives `..`, encoded slashes, NUL
 symlinks, dotfiles, and unicode tricks; hashed-asset caching keyed on the file that
 actually answered; honest `dev`/`check` behaviour for a site with no app.
 
-**Non-goals (0.2.0).** No FastCGI worker and no `public/index.php` execution
-(`0.2.1`, §Front controller of the page); no directory listing; no redirects (`/docs`
+**Non-goals (0.2.0).** No FastCGI worker and no external PHP process: the
+`public/index.php` front controller runs in the embedded `libphp` view worker
+(`ADR-0010`, §Front controller of the page); no directory listing; no redirects (`/docs`
 answers `200`); no `Range`/`206`, no `If-Modified-Since`, no `If-Match`, no `If-Range`,
 no `Accept-Encoding` negotiation or `.gz` siblings; no `fallback`, `cache_max_age`,
 `max_bytes` or `dotfiles` key (the page has four keys); no `**` recursive glob (the page
@@ -830,7 +831,10 @@ with `1` (a race against steps 4–5, since both ran before the listeners).
   (`ARCHITECTURE.md` §2.4), with the seccomp role that may not call `socket()`. It can
   read exactly what that uid can read, so the root must be `0755`/`0644`-readable by it;
   §4.7 step 5 proves that before any listener is bound, and a file it still cannot read
-  is `Hidden` (`404`).
+  is `Hidden` (`404`). Static serving never needs a socket (`ADR-0010` §2). A
+  `[route.php]` on the same route runs in the embedded `libphp` worker under
+  `SeccompRole::EmbeddedView { egress }`, which adds the process/image-creation
+  refusals to the view's rules (`ADR-0010` §1, `ARCHITECTURE.md` §2.6).
 - One dirfd per static root, opened at boot with `O_PATH|O_DIRECTORY|O_CLOEXEC` on
   `manifest_dir.join(root)` (the only place a symlink is followed, and only on the
   operator's own declaration). Every candidate is then
@@ -970,8 +974,9 @@ executable unprivileged; it is `MB.2.7`'s.
 - **NUL truncation (`/etc/passwd%00.html`):** refused as a control byte before the path
   exists as bytes; the kernel never sees a truncated C string.
 - **`php2shell` LFI/polyglot class (`/uploads/x.jpg/../../…`, `/.git` leaks):** the
-  responder never executes anything and never serves a dotfile; the 0.2.1 FastCGI
-  worker inherits the refusals, since a refused path is never forwarded.
+  responder never executes anything and never serves a dotfile or a
+  `.php`/`.phtml`/`.phar` source (`404`, `MB.3.33`); the embedded `libphp` front
+  controller inherits both refusals, since a refused path is never forwarded.
 - **Vite `/@fs/` dev-server traversal probes:** `/@fs/..` is a `..` refusal.
 - **FIFO/socket/device DoS and tty capture:** classified through an `O_PATH` probe and
   never read-opened; the read open adds `O_NOCTTY|O_NONBLOCK`.

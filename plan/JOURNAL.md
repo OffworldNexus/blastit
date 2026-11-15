@@ -1718,3 +1718,17 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T08:57 [MB.18] (lead) attempt 2/3 started
 - 2026-11-15T09:00 [MB.18] (lead) status active -> review
 - 2026-11-15T09:06 [MB.18] (lead) status review -> done
+- 2026-11-15T09:18 [MB.3.55] (lead) edited fields
+- 2026-11-15T09:18 [MB.3.55] (lead) Two more small items, both found after MB.3.54/18 landed (they are in this node's paths now, added by the lead):
+- 2026-11-15T09:18 [MB.3.8] (lead) status ready -> active
+- 2026-11-15T09:18 [MB.3.8] (lead) attempt 1/3 started
+- 2026-11-15T09:18 [MB.3.8] (lead) base 6ba10d3
+- 2026-11-15T09:25 [MB.3.8] (lead) status active -> review
+- 2026-11-15T09:28 [MB.3.8] (lead) edited fields
+- 2026-11-15T09:28 [MB.3.8] (lead) REVIEW FAIL (attempt 1) — the owner has already ruled on how to close it, so follow this exactly:
+- 2026-11-15T09:28 [MB.3.8] (lead) status review -> ready
+- 2026-11-15T09:28 [MB.3.8] (lead) status ready -> active
+- 2026-11-15T09:28 [MB.3.8] (lead) attempt 2/3 started
+- 2026-11-15T09:31 [MB.3.8] (lead) status active -> review
+- 2026-11-15T09:31 [MB.3.8] (lead) OWNER RULING on the 0.1.1 changelog entry (supersedes attempt 2's in-place rewrite):
+- 2026-11-15T09:35 [MB.3.8] (lead) status review -> done

@@ -5,10 +5,11 @@ lives in `Cargo.toml` (`[workspace.package] version`), and a release is the tag
 `v` plus that version — `scripts/check-release-tag.sh` refuses a tag that says
 anything else, and [`RELEASING.md`](RELEASING.md) has the steps.
 
-## 0.2.0 (2026-11-14)
+## 0.2.0 (2026-11-15)
 
-Your built front end now runs under blastit, and an all-static site needs no app
-at all.
+Your built front end now runs under blastit, an all-static site needs no app at
+all, and a Symfony or Laravel front controller runs in its own worker instead of
+`php-fpm`.
 
 - **Serve a built front end from the manifest.** A `[route.static]` with a
   `root` serves that directory itself — no nginx, no extra process, no uid of
@@ -33,6 +34,41 @@ at all.
   root instead of running a suite and exits `0` (`2` when a root is missing or
   not a directory), and `--json` gives an agent the same verdict as one document.
   A route with an app still runs the suite as before.
+- **PHP runs in the same worker.** A `[route.php]` with
+  `entry = "public/index.php"` runs the front controller in the route's own
+  unprivileged worker — no `php-fpm`, no FastCGI, no nginx rewrite, no second
+  server to supervise. A `[route.static]` with `root = "public"` beside it
+  serves the assets, and an optional `workers` (1–64) only lowers the per-route
+  concurrency blastit derives. Symfony, Laravel and any PSR-15 front controller
+  are the same block.
+- **PHP is the host's, and the boot names the package.** Blastit embeds the
+  host's NTS `libphp`; it does not bundle PHP and has no fallback. Install
+  `libphp-embed` on Debian/Ubuntu, `php84-embed` on Alpine or `php-embedded` on
+  Fedora/RHEL, or point `BLASTIT_LIBPHP` at one. Without it the boot stops
+  before it binds and says which package and which `(PHP X.Y, <arch>-<libc>)`
+  is missing.
+- **The CGI surface is absent, not filtered.** There is no CGI binary and no
+  FastCGI parameter stream: `$_SERVER` is built in C with `SCRIPT_FILENAME` and
+  `DOCUMENT_ROOT` pinned at boot, so `PHP_VALUE`, `PHP_ADMIN_VALUE`,
+  `REDIRECT_STATUS` and `-d` gadgets have no way in, and a `Proxy:` header never
+  becomes `HTTP_PROXY`. A `.php`/`.phar`/`.phtml` file under a static root is
+  `404`, and the worker's seccomp role refuses `execve` and process creation.
+- **`dev --learn` and `check` know about PHP routes.** `blastit dev --learn`
+  records the routes and the exact statements the PHP app runs and writes them
+  into `blastit.toml`; `blastit check --learn` proposes new routes only, so a
+  grant for a statement on an existing route is still a 0.2.x gap. `blastit
+  check` validates the manifest, the static roots and the `libphp` gate. The
+  request-level audit stays a Python-suite feature in 0.2.0.
+- **The binary a plain build makes is portable.** `cargo build -p blastit` now
+  produces the standalone artifact — no `libpython`, no `RUNPATH` into a build
+  host's interpreter cache — so you can copy it onto a server that never had
+  Python and serve a static site, or a PHP route with the host's `libphp`. CI
+  proves it by running it in an image with no CPython at all.
+- **`body = "raw"` is refused at boot, not warned about.** A route that declares
+  `body = "raw"` without `allow_raw = true` now fails a production boot, before
+  the listener binds and naming the route and the key, instead of serving and
+  handing unvalidated bytes to the app's parser. `blastit dev` still warns and
+  serves, and `blastit check` still reports `raw_ingress`.
 - **Both deployment recipes put a pooler in front.** The DigitalOcean App
   Platform spec and the Compose/Traefik recipe now connect the app to a
   connection pooler — DigitalOcean's managed pooler, one setting; a PgBouncer
@@ -85,6 +121,10 @@ The first hour with blastit now happens on your own machine, as you, in one pass
   granted only when a view is running low on it, and an event no longer
   allocates its way to stdout. Same behaviour, fewer syscalls and allocations
   per request.
+
+(corrected in 0.2.0: `check --learn` proposes new routes; grants for statements
+on an existing route are written by `dev --learn` and are the 0.2.x gap —
+MB.3.51.)
 
 ## 0.1.0 (2026-10-27)
 

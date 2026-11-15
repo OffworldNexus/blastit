@@ -6,12 +6,16 @@ status: ready
 owner: implementer
 priority: 3
 depends_on: [MB.3.54]
-paths: [crates/blastit/tests/critical_raw_ingress.rs, crates/blastit/src/stage0.rs]
+paths:
+  - crates/blastit/tests/critical_raw_ingress.rs
+  - crates/blastit/src/stage0.rs
+  - docs/deploy/index.md
+  - docs/knowledge/LESSONS.md
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-15T08:46"
-updated: "2026-11-15T08:46"
+updated: "2026-11-15T09:18"
 ---
 
 # Goal

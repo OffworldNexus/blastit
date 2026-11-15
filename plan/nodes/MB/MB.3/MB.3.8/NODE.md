@@ -2,7 +2,7 @@
 id: MB.3.8
 title: "Release prep 0.2.0: dated changelog covering static + presets + PHP, ARCHITECTURE sync, release-tag guard"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 5
 depends_on: [MB.3.7]
@@ -14,14 +14,16 @@ paths:
   - ARCHITECTURE.md
   - docs/security.md
   - "docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md"
+  - docs/decisions/README.md
+  - "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md"
   - "docs/design/static-and-spa.md"
   - "scripts/check-release-tag.sh"
   - "scripts/release-notes.sh"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T16:36"
+updated: "2026-11-15T09:35"
 ---
 
 # Goal
@@ -119,6 +121,6 @@ $ make e2e
 Fail certification if this is not proven. Implemented by `MB.3.33`;
 `MB.9.2.2` must preserve the gate when it ports static serving.
 
-> `body = "raw"` without `allow_raw` refuses at boot in production (stage 0 and stage 1), proved by a protected test.
+> `body = "raw"` without `allow_raw` refuses at boot in production — stage 1 by protected test (`critical_raw_ingress`), stage 0 by the `ServeGates` type (`clear` is its only constructor and *is* `raw_ingress_gate`; `bind_view_sockets` demands the token, so deleting or reordering the gate is a compile error rather than a runtime test; stage 0's call site is unwitnessed at runtime).
 
 Fail certification if this is not proven. Implemented by MB.3.53; the decision is documented in docs/design/learn-single-pass.md (ruling 4) and docs/decisions/ADR-0011-*.md.
