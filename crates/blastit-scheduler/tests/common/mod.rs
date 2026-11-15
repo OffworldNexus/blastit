@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use blastit_events::Event;
 use blastit_frame::{
-    Ctl, Decoder, DoneOutcome, ExitStatus, Frame, INITIAL_WINDOW, Limits, ReqHead, RequestCost,
-    RespHead, Scheme,
+    Ctl, Decoder, DoneOutcome, ExitStatus, Frame, INITIAL_WINDOW, Limits, MIN_LENGTH, ReqHead,
+    RequestCost, RespHead, Scheme, TypeCode,
 };
 use blastit_manifest::{Manifest, RoutingTable, UidLayout};
 use blastit_scheduler::{
@@ -92,6 +92,38 @@ pub enum Script {
         cost: RequestCost,
         gate: Arc<Semaphore>,
     },
+    /// `READY`, then a response with **any** status, and a `DONE` carrying a
+    /// chosen outcome: the frames `MB.3.41` moved a completed `5xx`'s label and
+    /// its `R19` charge onto.
+    ///
+    /// The head and body go out the moment the request arrives, so the
+    /// scheduler's floor — dispatch to the view's first frame — stays at
+    /// nothing. With a `gate`, the response *end* and then the `DONE` each wait
+    /// for a permit, so a test places both on the paused clock; without one,
+    /// both follow immediately. That is what lets a test tell the three spans
+    /// apart: the report the view sends, the time the scheduler observed
+    /// (dispatch to `DONE`), and the event's own arrival-to-last-byte
+    /// `duration_ms`.
+    AnswerStatus {
+        status: u16,
+        body: Vec<u8>,
+        /// `RESP_END_COST`'s report when set, a plain `RESP_END` when not.
+        cost: Option<RequestCost>,
+        /// What the `DONE` says: `Bailed` for a contained `exit()`/`die()`/
+        /// fatal, `Completed` for a handler that returned — even out of a
+        /// `5xx` it answered itself.
+        outcome: DoneOutcome,
+        /// One permit per frame that waits, in order: the response end, then
+        /// the `DONE`.
+        gate: Option<Arc<Semaphore>>,
+    },
+    /// `READY`, then a `status` head and a `DONE` whose outcome byte is `code`,
+    /// written raw.
+    ///
+    /// The typed encoder only produces the four outcomes this build defines, so
+    /// this is the one way to put a value it does not (`4`) on a `view.chan` —
+    /// which only a compromised, or a later, view would send.
+    RawDone { status: u16, code: u8 },
 }
 
 /// What a script wants the view task to do after handling a frame.
@@ -441,6 +473,30 @@ impl Http {
         }
         self.inbox = rest;
         Some(frames)
+    }
+
+    /// Waits for the response head for `id`, spinning so time stands still.
+    ///
+    /// This is what a test waits on when the *head* is the thing that must be on
+    /// the wire before it moves the clock: the view's own log entry is written
+    /// before it sends anything, so it cannot say the floor exists yet. The head
+    /// stays in the inbox, where [`Http::response`] picks it up.
+    pub async fn await_head(&mut self, id: u32) -> RespHead {
+        for _ in 0..SPIN_BUDGET {
+            self.poll();
+            let head = self.inbox.iter().find_map(|(stream, frame)| match frame {
+                Frame::RespHead(head) if *stream == id => Some(head.clone()),
+                _ => None,
+            });
+            if let Some(head) = head {
+                return head;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "no response head for stream {id}; inbox holds {:?}",
+            self.inbox
+        );
     }
 
     /// Waits for a complete response for `id`, spinning so time stands still.
@@ -1104,6 +1160,38 @@ impl Script {
                     }
                 }
             }
+            Script::AnswerStatus {
+                status,
+                body,
+                cost,
+                outcome,
+                gate,
+            } => {
+                if head {
+                    let (status, body, cost, outcome) = (*status, body.clone(), *cost, *outcome);
+                    send_frame(write, id, &resp_head(status, body.len())).await;
+                    if !body.is_empty() {
+                        send_frame(write, id, &Frame::RespBody(body)).await;
+                    }
+                    // The response end, then the `DONE`: each waits for its own
+                    // permit, so the two frames land wherever the test puts
+                    // them on the paused clock.
+                    wait_gate(gate).await;
+                    match cost {
+                        Some(cost) => send_frame(write, id, &Frame::RespEndCost { cost }).await,
+                        None => send_frame(write, id, &Frame::RespEnd).await,
+                    }
+                    wait_gate(gate).await;
+                    send_frame(write, id, &Frame::Done { outcome }).await;
+                }
+            }
+            Script::RawDone { status, code } => {
+                if head {
+                    let (status, code) = (*status, *code);
+                    send_frame(write, id, &resp_head(status, 0)).await;
+                    send_raw_done(write, id, code).await;
+                }
+            }
             Script::Deaf { window } => {
                 if head {
                     // Hand out credit and then never read again: the process is
@@ -1203,6 +1291,31 @@ async fn send_frame(write: &mut tokio::net::unix::OwnedWriteHalf, id: u32, frame
     if Limits::default().encode(frame, id, &mut wire).is_err() {
         return;
     }
+    let _ = write.write_all(&wire).await;
+}
+
+/// Waits for one permit from `gate`, when the script has one, and consumes it.
+async fn wait_gate(gate: &Option<Arc<Semaphore>>) {
+    if let Some(gate) = gate
+        && let Ok(permit) = gate.clone().acquire_owned().await
+    {
+        permit.forget();
+    }
+}
+
+/// Writes a `DONE` frame with a raw outcome byte, which the typed encoder
+/// refuses.
+///
+/// A `DONE` is `u32 length | u8 type | u32 id | u8 outcome`, so an outcome this
+/// build does not define is one byte the scheduler's decoder must reject
+/// instead of guessing at.
+async fn send_raw_done(write: &mut tokio::net::unix::OwnedWriteHalf, id: u32, code: u8) {
+    let mut wire = Vec::new();
+    let length = MIN_LENGTH + 1;
+    wire.extend_from_slice(&length.to_le_bytes());
+    wire.push(TypeCode::Done.code());
+    wire.extend_from_slice(&id.to_le_bytes());
+    wire.push(code);
     let _ = write.write_all(&wire).await;
 }
 

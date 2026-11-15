@@ -4,7 +4,7 @@ title: "MB.3.41 review MINORs: bailed in the public outcome table, the flake ass
 kind: task
 status: ready
 owner: implementer
-priority: 3
+priority: 2
 depends_on: [MB.3.41]
 paths:
   - "crates/blastit-view/src/php.rs"
@@ -14,7 +14,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-15T04:11"
-updated: "2026-11-15T04:11"
+updated: "2026-11-15T04:28"
 ---
 
 # Goal

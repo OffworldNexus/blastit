@@ -1590,3 +1590,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T04:11 [MB.3.45] (lead) created (task) MB.3.41 review MINORs: bailed in the public outcome table, the flake asserts by type, and the release claim
 - 2026-11-15T04:14 [MB.3.46] (test-curator) created (task) The bailed charge and label need an unprivileged witness: scheduler DONE legs (critical_charge)
 - 2026-11-15T04:14 [MB.3.47] (test-curator) created (task) critical_php_embed's CI-coverage note is false since MB.3.39 (protected file, doc-only)
+- 2026-11-15T04:28 [MB.3.45] (lead) MB.3.46 (the scheduler DONE legs) could only close two of its four legs and found two production facts; both belong to this node, which is why it is the schedul
+- 2026-11-15T04:28 [MB.3.45] (lead) edited fields
+- 2026-11-15T04:28 [MB.3.46] (lead) status ready -> review
+- 2026-11-15T04:33 [MB.3.46] (lead) status review -> done

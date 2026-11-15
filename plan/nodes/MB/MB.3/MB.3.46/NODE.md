@@ -2,7 +2,7 @@
 id: MB.3.46
 title: "The bailed charge and label need an unprivileged witness: scheduler DONE legs (critical_charge)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.3.13, MB.3.41]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-15T04:14"
-updated: "2026-11-15T04:14"
+updated: "2026-11-15T04:33"
 ---
 
 # Goal
