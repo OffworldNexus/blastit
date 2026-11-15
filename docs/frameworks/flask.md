@@ -18,6 +18,8 @@ name = "products"
 path = ['/products/']
 [route.db]
 queries = []
+[route.ingress]                 # 4. ingress: json, form, none, raw
+body = "form"                   # the search form posts URL-encoded
 
 [[route]]
 name = "fallback"       # everything else: no database at all
@@ -82,8 +84,9 @@ URL replacement for `SQLALCHEMY_DATABASE_URI`.
 
 ## 4. Ingress
 
-Declare the codec the route receives; a body of the wrong shape is a `400` before Flask
-sees it.
+The `products` route declares `body = "form"`, so a URL-encoded POST reaches the view;
+declare the codec each route that takes a body receives, and a body of the wrong shape is
+a `400` before Flask sees it.
 
 ## 5. Environment and secrets
 

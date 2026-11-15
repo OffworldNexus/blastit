@@ -49,13 +49,16 @@ path = ['/static/.*']
 
 [route.static]
 root = "staticfiles"
-immutable = ["/static/*", "/static/*/*", "/static/*/*/*"]
+immutable = ["/static/*", "/static/*/*", "/static/*/*/*",
+             "/static/*/*/*/*", "/static/*/*/*/*/*", "/static/*/*/*/*/*/*"]
 ```
 
 Add it above the catch-all, and set `STATIC_ROOT = BASE_DIR / "staticfiles"` beside
 `STATIC_URL = "/static/"` so `collectstatic` writes there — the root must exist before
 `blastit dev` starts. List `immutable` only for fingerprinted output, one pattern per
-depth: `collectstatic` nests twice under `admin/`.
+depth, and as deep as the deepest fingerprinted file: Django's admin ships
+`admin/js/vendor/select2/i18n/<lang>.js`, six segments under `/static/`, so a depth you
+leave out revalidates those hashed files on every request.
 
 ## 3. Database
 

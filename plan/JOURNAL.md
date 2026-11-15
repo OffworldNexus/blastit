@@ -1662,3 +1662,29 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T07:55 [MB.19] (lead) visual-checker PASS on the attempt-1 pages (it ran while attempt 2 was in flight, so it judged the structure, not the corrected sentences): /frameworks/ intro a
 - 2026-11-15T07:55 [MB.19] (lead) status active -> review
 - 2026-11-15T07:59 [MB.19] (lead) status review -> done
+- 2026-11-15T08:01 [MB.3.52] (lead) created (task) MB.19 review MINORs: the canonical manifest fence is untested, plus three page corrections
+- 2026-11-15T08:01 [MB.3.52] (lead) status ready -> active
+- 2026-11-15T08:01 [MB.3.52] (lead) attempt 1/3 started
+- 2026-11-15T08:01 [MB.3.52] (lead) base b2d0fa2
+- 2026-11-15T08:02 [MB.3.52] (lead) status active -> review
+- 2026-11-15T08:04 [MB.3.51] (lead) status active -> review
+- 2026-11-15T08:05 [MB.3.53] (lead) created (task) body = raw without allow_raw must refuse at boot in production (stage 0 and stage 1), not just warn in check
+- 2026-11-15T08:05 [MB.3.53] (lead) status ready -> active
+- 2026-11-15T08:05 [MB.3.53] (lead) attempt 1/3 started
+- 2026-11-15T08:05 [MB.3.53] (lead) base b2d0fa2
+- 2026-11-15T08:07 [MB.3.52] (lead) REVIEW FAIL (attempt 1). Item 2 (the canonical fence) is accepted — the reviewer reproduced both reds and confirmed the fence is parsed and validated, not count
+- 2026-11-15T08:07 [MB.3.52] (lead) status review -> ready
+- 2026-11-15T08:07 [MB.3.52] (lead) status ready -> active
+- 2026-11-15T08:07 [MB.3.52] (lead) attempt 2/3 started
+- 2026-11-15T08:08 [MB.3.51] (lead) REVIEW FAIL (attempt 1). DECISION (a) is accepted and all four of your fact corrections hold (the reviewer re-verified each in code, including `[route.db]` bein
+- 2026-11-15T08:08 [MB.3.51] (lead) status review -> ready
+- 2026-11-15T08:08 [MB.3.51] (lead) status ready -> active
+- 2026-11-15T08:08 [MB.3.51] (lead) attempt 2/3 started
+- 2026-11-15T08:08 [MB.3.52] (lead) status active -> review
+- 2026-11-15T08:10 [MB.3.51] (lead) status active -> review
+- 2026-11-15T08:12 [MB.3.51] (lead) REVIEW FAIL (attempt 2): three MAJORs from attempt 1 are CLOSED and verified (exit-code row, leaf 8 no longer naming validate.rs so the protected app+spa fixtur
+- 2026-11-15T08:12 [MB.3.51] (lead) status review -> ready
+- 2026-11-15T08:12 [MB.3.51] (lead) status ready -> active
+- 2026-11-15T08:12 [MB.3.51] (lead) attempt 3/3 started
+- 2026-11-15T08:14 [MB.3.51] (lead) status active -> review
+- 2026-11-15T08:21 [MB.3.52] (lead) status review -> done

@@ -21,7 +21,7 @@ planned for 0.2.x and will fill the same nine slots.
 
 Every page writes the same blocks in the same order:
 
-```toml
+```toml title="blastit.toml"
 version = 1
 app = "myshop.wsgi:application"   # 1. executor: or [route.php], or [route.static]
 
@@ -79,8 +79,9 @@ rather not pass on.
 ## 6. Health
 
 `/_blastit/health` (`BLASTIT_HEALTH_PATH`), answered by the scheduler for `GET` and `HEAD`
-before routing, from no worker. Point the platform's check at it; a route for it never
-runs, and a check that queries the database reports the pool's health, not the app's.
+before routing, from no worker. Point the platform's check at it — a route for it never
+runs — and keep database queries out of any health route: the platform check then learns
+blastit is up, not the pool's health.
 
 ## 7. Migrations
 

@@ -4,23 +4,26 @@
 //! Standard tier on purpose: `MA.3` owns `docs/**`, and a protected copy of this
 //! suite would make every documentation edit a `critical_guard` conflict. What
 //! it still proves is the developer experience itself — a reader who copies one
-//! of these eight blocks into `./blastit.toml` boots.
+//! of these nine blocks into `./blastit.toml` boots.
 //!
 //! Only the `toml title="blastit.toml"` fences are complete manifests. Partial
-//! fragments (`docs/reference/manifest.md`) are prose, not files.
+//! fragments (`docs/reference/manifest.md`) are prose, not files — except the
+//! `[route.static]` block `docs/frameworks/django.md` shows on its own, which is
+//! parsed under a minimal header so its `immutable` depth cannot drift.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
 
 use blastit_manifest::{Manifest, ManifestError, StaticPolicy, UidLayout};
 
-/// The eight files that carry a complete `blastit.toml`, relative to the
+/// The nine files that carry a complete `blastit.toml`, relative to the
 /// workspace root.
-const FILES: [&str; 8] = [
+const FILES: [&str; 9] = [
     "README.md",
     "docs/index.md",
     "docs/getting-started.md",
     "docs/local.md",
+    "docs/frameworks/index.md",
     "docs/frameworks/django.md",
     "docs/frameworks/flask.md",
     "docs/frameworks/php.md",
@@ -30,6 +33,9 @@ const FILES: [&str; 8] = [
 /// The opening line of a complete manifest fence, exactly as written.
 const OPENING: &str = "```toml title=\"blastit.toml\"";
 
+/// The opening line of a plain `toml` fence: a manifest fragment, no header.
+const FRAGMENT_OPENING: &str = "```toml";
+
 /// The repository root, from this crate's manifest directory.
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -38,13 +44,13 @@ fn workspace_root() -> PathBuf {
         .expect("the workspace root exists")
 }
 
-/// Every complete `blastit.toml` fence in `document`, in order, without the
-/// fence markers.
-fn blastit_fences(document: &str) -> Vec<String> {
+/// Every fence in `document` whose opening line trims to `opening`, in order,
+/// without the fence markers.
+fn collect_fences(document: &str, opening: &str) -> Vec<String> {
     let mut fences = Vec::new();
     let mut lines = document.lines();
     while let Some(line) = lines.next() {
-        if line.trim() != OPENING {
+        if line.trim() != opening {
             continue;
         }
         let mut fence = String::new();
@@ -57,10 +63,51 @@ fn blastit_fences(document: &str) -> Vec<String> {
             fence.push_str(line);
             fence.push('\n');
         }
-        assert!(closed, "unclosed {OPENING} fence");
+        assert!(closed, "unclosed {opening} fence");
         fences.push(fence);
     }
     fences
+}
+
+/// Every complete `blastit.toml` fence in `document`, in order, without the
+/// fence markers.
+fn blastit_fences(document: &str) -> Vec<String> {
+    collect_fences(document, OPENING)
+}
+
+/// Every plain `toml` fragment in `document`, in order, without the markers.
+fn toml_fragments(document: &str) -> Vec<String> {
+    collect_fences(document, FRAGMENT_OPENING)
+}
+
+/// The one plain `toml` fragment of `docs/frameworks/django.md`, its
+/// `[route.static]` block.
+fn django_static_fragment() -> String {
+    let path = workspace_root().join("docs/frameworks/django.md");
+    let document = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let fences = toml_fragments(&document);
+    assert_eq!(
+        fences.len(),
+        1,
+        "the Django page carries exactly one plain toml fragment"
+    );
+    fences.into_iter().next().expect("one fence")
+}
+
+/// The `immutable` list `docs/frameworks/django.md` documents: one pattern per
+/// depth, as deep as the deepest fingerprinted file Django's admin ships.
+fn documented_immutable_depths() -> Vec<String> {
+    [
+        "/static/*",
+        "/static/*/*",
+        "/static/*/*/*",
+        "/static/*/*/*/*",
+        "/static/*/*/*/*/*",
+        "/static/*/*/*/*/*/*",
+    ]
+    .map(str::to_string)
+    .to_vec()
 }
 
 /// The one complete manifest fence of `docs/frameworks/static-and-spa.md`.
@@ -124,7 +171,7 @@ fn every_documented_manifest_parses_and_validates() {
             total += 1;
         }
     }
-    assert_eq!(total, 8, "the documented set is exactly eight manifests");
+    assert_eq!(total, 9, "the documented set is exactly nine manifests");
 }
 
 #[test]
@@ -161,6 +208,37 @@ fn a_drifted_static_block_does_not_satisfy_the_documented_shape() {
             "a block with {to} is no longer the documented shape"
         );
     }
+}
+
+#[test]
+fn the_django_static_fragment_pins_its_documented_depth() {
+    // The page shows `[route.static]` on its own; a reader pastes it under a
+    // manifest that already has a header, so parse it that way.
+    let fragment = django_static_fragment();
+    let document = format!("version = 1\napp = \"app:app\"\n\n{fragment}");
+    let (manifest, warnings) = Manifest::parse_and_validate(&document, UidLayout::DEFAULT_BASE)
+        .unwrap_or_else(|errors| {
+            panic!("the Django static fragment does not boot:\n{errors}\n{document}")
+        });
+    assert_eq!(warnings, vec![], "the fragment warns about nothing");
+    assert_eq!(
+        manifest.route_count(),
+        1,
+        "the fragment documents one route"
+    );
+    let route = manifest.route(0).expect("the fragment documents a route");
+    assert_eq!(route.name(), "static");
+    assert_eq!(route.path(), ["/static/.*".to_string()]);
+    let policy = route
+        .static_policy()
+        .expect("the fragment documents a [route.static] block");
+    assert_eq!(policy.root, "staticfiles");
+    assert_eq!(
+        policy.immutable,
+        documented_immutable_depths(),
+        "the page lists one immutable glob per depth, as deep as the deepest \
+         fingerprinted file Django's admin ships"
+    );
 }
 
 #[test]
