@@ -2,16 +2,16 @@
 id: MB.3.13.4
 title: "Protected critical_php_embed suite: boot refusals, exit()/fatal containment, exact cpu_ns, no libphp above the worker"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.13.1, MB.3.13.3]
 paths: [crates/blastit/tests/critical_php_embed.rs]
-attempts: 0
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-14T17:04"
-updated: "2026-11-14T19:29"
+updated: "2026-11-15T01:38"
 ---
 
 # Goal

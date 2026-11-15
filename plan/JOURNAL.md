@@ -1507,3 +1507,26 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T00:40 [MB.3.13.3] (lead) edited fields
 - 2026-11-15T00:40 [MB.3.13.3] (lead) lead: paths widened by crates/blastit-scheduler/src/route.rs + its tests — reviewer MINOR 2: the static_forward rule stage1 now patches belongs in RouteInfo::wi
 - 2026-11-15T00:46 [MB.3.13.3] (lead) status review -> done
+- 2026-11-15T00:48 [MB.3.13.4] (lead) status ready -> active
+- 2026-11-15T00:48 [MB.3.13.4] (lead) attempt 1/3 started
+- 2026-11-15T00:48 [MB.3.13.4] (lead) base 72e6d1fece8878466d418a5e278c4c5af856d74b
+- 2026-11-15T00:48 [MB.3.13.4] (lead) edited fields
+- 2026-11-15T00:59 [MB.3.13.4] (lead) status active -> review
+- 2026-11-15T00:59 [MB.3.36] (lead) created (task) Stage-1 probe child: load the shim and prove the minor before the listener binds (ADR-0010 s3)
+- 2026-11-15T01:04 [MB.3.13.4] (lead) REVIEW FAIL (attempt 1): MAJOR the shim-minor leg passes a boot-then-500, so the epic's 'mismatch exits 1 and starts no listener' is unpinned; MAJOR its empty-s
+- 2026-11-15T01:04 [MB.3.13.4] (lead) status review -> ready
+- 2026-11-15T01:04 [MB.3.36] (lead) status ready -> active
+- 2026-11-15T01:04 [MB.3.36] (lead) attempt 1/3 started
+- 2026-11-15T01:04 [MB.3.36] (lead) base 72e6d1fece8878466d418a5e278c4c5af856d74b
+- 2026-11-15T01:17 [MB.3.13.4] (lead) MB.3.36 landed the probe child and tightened the shim-minor leg (Some(1), no ready/request, connect refused, load only below a fork, plus a 250ms timeout leg). 
+- 2026-11-15T01:17 [MB.3.13.4] (lead) status ready -> active
+- 2026-11-15T01:17 [MB.3.13.4] (lead) attempt 2/3 started
+- 2026-11-15T01:25 [MB.3.13.4] (lead) REVIEW FAIL (attempt 2): MAJOR --test-threads=1 (which ci.yml:359 uses for every binary, and 1-vCPU hosts default to) fails 3/8 because StubRootGuard deletes th
+- 2026-11-15T01:25 [MB.3.13.4] (lead) status active -> ready
+- 2026-11-15T01:25 [MB.3.13.4] (lead) status ready -> active
+- 2026-11-15T01:25 [MB.3.13.4] (lead) attempt 3/3 started
+- 2026-11-15T01:34 [MB.3.36] (lead) edited fields
+- 2026-11-15T01:34 [MB.3.36] (lead) lead: docs/knowledge/LESSONS.md added to paths — the reviewer found the one-bullet edit was outside them
+- 2026-11-15T01:34 [MB.3.36] (lead) status active -> review
+- 2026-11-15T01:38 [MB.3.36] (lead) status review -> done
+- 2026-11-15T01:38 [MB.3.13.4] (lead) status active -> done
