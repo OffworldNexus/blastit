@@ -1548,3 +1548,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T02:12 [MB.3.13] (lead) gate is held by the MB.3.13 audit (docs/testing/AUDIT-MB.3.13.md): 6 critical + 1 CI gap. Its children MB.3.37/.39/.40/.41 must land first, so they are listed i
 - 2026-11-15T02:17 [MB.3.39] (lead) status active -> review
 - 2026-11-15T02:24 [MB.3.39] (lead) status review -> done
+- 2026-11-15T02:26 [MB.3.40] (lead) status ready -> active
+- 2026-11-15T02:26 [MB.3.40] (lead) attempt 1/3 started
+- 2026-11-15T02:26 [MB.3.40] (lead) base 99557d1
+- 2026-11-15T02:35 [MB.3.42] (lead) created (task) The replaced-file premise in php_view's pin test must not depend on the allocator (red smoke (root) on PR #64)
+- 2026-11-15T02:44 [MB.3.40] (lead) status active -> review
+- 2026-11-15T02:44 [MB.3.42] (lead) status ready -> active
+- 2026-11-15T02:48 [MB.3.40] (lead) status review -> done

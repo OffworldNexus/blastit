@@ -42,7 +42,7 @@ use crate::child::{ChildIo, Deadline, read_one, wait_readable};
 use crate::cli::DevOptions;
 use crate::config::{Config, LogFormat, Mode, PhpRuntime, PhpVersion, Privilege, view_dir};
 use crate::dev_learn::{DevRoot, PRIVILEGE};
-use crate::host::{EXEC, Host, Install, Placement, Reexec};
+use crate::host::{Claim, EXEC, Host, Install, Placement, Provenance, Reexec};
 use crate::logs::{Emitter, fail, output_event};
 use crate::mem_usage;
 
@@ -848,15 +848,56 @@ impl PhpBoot {
 /// sentence — in `blastit dev` and `blastit check` as much as in a deployment.
 /// There is no development mode that serves a PHP route another way.
 pub(crate) fn php_boot_gate(config: &Config, manifest: &Manifest, scope: PhpShimScope) -> PhpBoot {
-    php_boot(
+    // `R7`/`B2-R5` are `Production` rules (`ADR-0010` §3): a deployed boot
+    // authorises every path a route uid must not be able to write, while `dev`
+    // and `check` do not. That is not a convenience — the shim a developer has
+    // just built lives in `target/php-sapi`, inside a checkout its own uid owns
+    // and writes, so "no other uid can replace it" cannot hold there and would
+    // refuse every development boot while protecting nothing: the uid that
+    // could replace the shim is the uid that already runs the boot. A
+    // deployment has no such coincidence — its route uids (`UID_BASE + 1000 +
+    // i`) are not the uid that owns `$BLASTIT_EXEC`, the shims or
+    // `blastit.toml`'s tree.
+    let deployment = (scope == PhpShimScope::Deployment).then(|| Deployment {
+        init_uid: current_uid(),
+        manifest_dir: config.manifest_dir.clone(),
+    });
+    php_boot_in(
         manifest,
         &PhpSearch::from_config(config, scope),
         Some(config.view_worker_cap()),
+        deployment.as_ref(),
     )
 }
 
-/// The same gate for a caller with the search and the budget spelled out.
+/// What a **deployment** boot checks that `dev` and `check` do not: the uid that
+/// must own every path, and the directory the manifest was read from
+/// (`ADR-0010` §3, design `R7`/`B2-R5`).
+struct Deployment {
+    /// The uid init runs as: root, or init's own in `rootless` mode.
+    init_uid: u32,
+    /// The directory `blastit.toml` came from — every PHP worker's `cwd` and
+    /// `include_path` (`ADR-0010` §2).
+    manifest_dir: PathBuf,
+}
+
+/// The same gate for a `dev`/`check` caller: no production provenance.
+///
+/// The unit tests use it as the seam they have always used; a boot reaches the
+/// gate through [`php_boot_gate`], which decides the scope.
+#[cfg(test)]
 fn php_boot(manifest: &Manifest, search: &PhpSearch, cap: Option<u32>) -> PhpBoot {
+    php_boot_in(manifest, search, cap, None)
+}
+
+/// The same gate for a caller with the search, the budget, and — for a
+/// deployment — the provenance to authorise spelled out.
+fn php_boot_in(
+    manifest: &Manifest,
+    search: &PhpSearch,
+    cap: Option<u32>,
+    deployment: Option<&Deployment>,
+) -> PhpBoot {
     let Some((route, entry, _workers)) = first_php_route(manifest) else {
         return PhpBoot::Absent;
     };
@@ -866,9 +907,100 @@ fn php_boot(manifest: &Manifest, search: &PhpSearch, cap: Option<u32>) -> PhpBoo
         return PhpBoot::Refused(message);
     }
     match discover_php(search) {
-        Ok(runtime) => PhpBoot::Proceed(runtime),
+        Ok(runtime) => {
+            // The authorisation comes after discovery — it needs the *resolved*
+            // paths — and before the record is handed to stage 1, so a
+            // deployment whose pair or tree a route uid could replace never
+            // reaches `bind_view_sockets` (`R7`, `B2-R5`).
+            if let Some(deployment) = deployment
+                && let Some(message) =
+                    deployment_refusal(manifest, deployment, &runtime, route, entry)
+            {
+                return PhpBoot::Refused(message);
+            }
+            PhpBoot::Proceed(runtime)
+        }
         Err(refusal) => PhpBoot::Refused(php_refusal_message(route, entry, &refusal)),
     }
+}
+
+/// `R7`/`B2-R5`: the sentence a deployment boot refuses this pair and tree with.
+///
+/// The **pair** is checked first and keeps `ADR-0010` §4.1's shape — the route,
+/// its `entry`, the offending path, the fix, the `(PHP X.Y, <arch>-<libc>)`
+/// tuple, the distro package and `BLASTIT_LIBPHP` — because every way an
+/// operator can fix a library is one of those names. The **tree** is a
+/// different sentence: nothing about it is fixed by installing a package, so it
+/// names what the path is (the directory holding `blastit.toml`, a
+/// `[route.php] entry`, a `[route.static] root`), the directory itself, and the
+/// `chown`/`chmod` that fixes it.
+fn deployment_refusal(
+    manifest: &Manifest,
+    deployment: &Deployment,
+    runtime: &PhpRuntime,
+    route: &str,
+    entry: &str,
+) -> Option<String> {
+    let objects = Provenance {
+        init_uid: deployment.init_uid,
+        objects: vec![
+            Claim::new("the NTS libphp", runtime.libphp.clone()),
+            Claim::new("the embedded shim", runtime.shim.clone()),
+        ],
+        trees: Vec::new(),
+    };
+    if let Err(detail) = objects.check_objects() {
+        let prefix = format!("route {route:?}: [route.php] entry {entry:?}: ");
+        return Some(present_refusal(
+            &prefix,
+            detail.as_str(),
+            Some(runtime.version),
+        ));
+    }
+    let trees = Provenance {
+        init_uid: deployment.init_uid,
+        trees: php_trees(manifest, deployment),
+        objects: Vec::new(),
+    };
+    trees.check_trees().err()
+}
+
+/// The tree claims a deployment boot authorises: the directory the workers'
+/// `cwd`/`include_path` is, every `[route.php] entry`, and every
+/// `[route.static] root` (`ADR-0010` §3, design `B2-R5`).
+///
+/// A worker can `include` any file those paths reach, so a route uid that can
+/// write one of them chooses PHP code the worker will run — which is why the
+/// rule is the same one [`host::plain_is_protected`] applies to the binary a
+/// child executes, minus the file-capability half (a tree is read, not loaded).
+fn php_trees(manifest: &Manifest, deployment: &Deployment) -> Vec<Claim> {
+    let mut claims = vec![Claim::new(
+        "the directory holding blastit.toml (the PHP worker's cwd and include_path)",
+        deployment.manifest_dir.clone(),
+    )];
+    for route in manifest.routes() {
+        if let Some(php) = route.php() {
+            claims.push(Claim::new(
+                format!(
+                    "route {:?}: [route.php] entry {:?}",
+                    route.name(),
+                    php.entry
+                ),
+                deployment.manifest_dir.join(&php.entry),
+            ));
+        }
+        if let Some(policy) = route.static_policy() {
+            claims.push(Claim::new(
+                format!(
+                    "route {:?}: [route.static] root {:?}",
+                    route.name(),
+                    policy.root
+                ),
+                deployment.manifest_dir.join(&policy.root),
+            ));
+        }
+    }
+    claims
 }
 
 /// `ADR-0010` §2: `workers` is a cap on **that route's** concurrency and it is
@@ -4158,6 +4290,342 @@ path = ['.*']
                 "stage 0 must not load the library: found `{banned}`"
             );
         }
+    }
+
+    // ------------------------------------------- production provenance (R7)
+
+    /// A `Scratch` under a directory only root or this process's uid can write,
+    /// or `None` when this host has none (a shared build directory, an odd
+    /// `$HOME`): the tests that need a *protected* tree print and pass, the way
+    /// `host`'s own unit tests do.
+    ///
+    /// Not [`Scratch`] itself: that one lives in `temp_dir()`, and `/tmp` is
+    /// `1777` — a `0755` fixture *under* it is still a tree another uid could
+    /// replace, which is exactly what these tests measure (`LESSONS.md`,
+    /// `MB.3.40`).
+    fn protected_scratch(tag: &str) -> Option<Scratch> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::var_os("HOME").map(PathBuf::from)?;
+        let dir = root.join(format!(
+            "blastit-php-gate-protected-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).ok()?;
+        let probe = dir.join("probe");
+        std::fs::write(&probe, b"#!/bin/sh\n").ok()?;
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).ok()?;
+        if let Err(err) = crate::host::plain_is_protected(&probe, current_uid()) {
+            let _ = std::fs::remove_dir_all(&dir);
+            println!("skipped: no directory only its owner can write here ({err})");
+            return None;
+        }
+        let _ = std::fs::remove_file(&probe);
+        Some(Scratch { dir })
+    }
+
+    /// The accepted pair: a NTS stub `libphp` and the shim for its tuple.
+    fn stub_pair(scratch: &Scratch) -> PhpSearch {
+        let libphp = scratch.file("libphp8.4.so", &shared_object(&["executor_globals"]));
+        scratch.file(&shim_name(PhpVersion::new(8, 4)), &shared_object(&[]));
+        search_for(&libphp, &scratch.dir)
+    }
+
+    /// `R7`/`B2-R5`: the deployment gate refuses a pair another uid could
+    /// replace, keeping `ADR-0010` §4.1's sentence — and the *same* pair in a
+    /// directory only root or init's uid can write proceeds, so the permission
+    /// bits are the decision and not the path.
+    #[test]
+    fn a_deployment_boot_refuses_a_pair_a_route_uid_could_replace() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(protected) = protected_scratch("pair") else {
+            return;
+        };
+        let good = stub_pair(&protected);
+        // `PHP_ONLY`'s front controller, at the accepted shape: a tree claim
+        // that does not exist is a refusal of its own (`facts_of`'s error).
+        std::fs::create_dir_all(protected.dir.join("public")).unwrap();
+        let entry = protected.dir.join("public/index.php");
+        std::fs::write(&entry, b"<?php echo 1;\n").unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let runtime = discover_php(&good).expect("a stub pair this host accepts");
+        assert!(
+            crate::host::Provenance {
+                init_uid: current_uid(),
+                objects: vec![
+                    Claim::new("the NTS libphp", runtime.libphp.clone()),
+                    Claim::new("the embedded shim", runtime.shim.clone()),
+                ],
+                trees: Vec::new(),
+            }
+            .check_objects()
+            .is_ok(),
+            "a 0755 pair owned by init's uid is the accepted shape"
+        );
+
+        // The library's directory, writable by another uid.
+        let shared = Scratch::new("pair-shared");
+        std::fs::set_permissions(&shared.dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let search = stub_pair(&shared);
+        let deployment = Deployment {
+            init_uid: current_uid(),
+            manifest_dir: protected.dir.clone(),
+        };
+        let message = php_boot_in(&manifest(PHP_ONLY), &search, Some(16), Some(&deployment))
+            .refusal()
+            .expect("a writable libphp directory cannot be a deployment")
+            .to_string();
+        // `ADR-0010` §4.1's shape: the route, its entry, the offending path, the
+        // tuple and the shim, the package, and the override.
+        assert!(message.contains("route \"app\""), "{message}");
+        assert!(
+            message.contains("[route.php] entry \"public/index.php\""),
+            "{message}"
+        );
+        assert!(message.contains("the NTS libphp"), "{message}");
+        assert!(
+            message.contains(&search.libphp.as_ref().unwrap().display().to_string()),
+            "the offending library is named: {message}"
+        );
+        assert!(
+            message.contains("could be replaced by another uid"),
+            "{message}"
+        );
+        assert!(message.contains("chown"), "and the fix: {message}");
+        assert!(message.contains("(PHP 8.4, "), "{message}");
+        assert!(
+            message.contains(&shim_name(PhpVersion::new(8, 4))),
+            "{message}"
+        );
+        assert!(
+            message.contains("install the PHP embed package"),
+            "{message}"
+        );
+        assert!(
+            message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
+            "{message}"
+        );
+
+        // The shim is the pair's other half: a protected library with a shim in
+        // a writable directory is still a pair a route uid owns.
+        let shims = protected.dir.join("shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::set_permissions(&shims, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let shim = shims.join(shim_name(PhpVersion::new(8, 4)));
+        std::fs::write(&shim, shared_object(&[])).unwrap();
+        let search = search_for(&protected.dir.join("libphp8.4.so"), &shims);
+        let message = php_boot_in(&manifest(PHP_ONLY), &search, Some(16), Some(&deployment))
+            .refusal()
+            .expect("a writable shim directory cannot be a deployment")
+            .to_string();
+        assert!(message.contains("the embedded shim"), "{message}");
+        assert!(
+            message.contains(&shim.display().to_string()),
+            "the offending shim is named: {message}"
+        );
+        assert!(
+            message.contains("could be replaced by another uid"),
+            "{message}"
+        );
+
+        // And the same pair, once its directories are the accepted shape, is
+        // what a deployment boots: nothing in `dev`'s answer changed.
+        assert!(
+            matches!(
+                php_boot_in(&manifest(PHP_ONLY), &good, Some(16), Some(&deployment)),
+                PhpBoot::Proceed(_)
+            ),
+            "a 0755 pair plus a protected tree must not be refused"
+        );
+    }
+
+    /// `B2-R5`: the tree the worker's `cwd`/`include_path` is — `blastit.toml`'s
+    /// directory, each `[route.php] entry` and each `[route.static] root` — is
+    /// refused when a route uid could write it, in its own sentence (this one is
+    /// fixed by `chown`/`chmod`, not by installing a package).
+    #[test]
+    fn a_deployment_boot_refuses_a_tree_a_route_uid_could_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(protected) = protected_scratch("tree") else {
+            return;
+        };
+        let search = stub_pair(&protected);
+        // One PHP route and one static route, on disjoint trees: a manifest that
+        // declares both blocks on *one* route must keep the entry under the
+        // root, which would make the two legs interfere.
+        let manifest_source = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.php]
+entry = \"public/index.php\"
+
+[[route]]
+name = \"docs\"
+path = ['/assets/.*']
+
+[route.static]
+root = \"site\"
+";
+        // The accepted shape this test starts from: the entry at `0644`, the
+        // static root at `0755`, both owned by init's uid.
+        std::fs::create_dir_all(protected.dir.join("public")).unwrap();
+        let entry = protected.dir.join("public/index.php");
+        std::fs::write(&entry, b"<?php echo 1;\n").unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let root = protected.dir.join("site");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let accepted = Deployment {
+            init_uid: current_uid(),
+            manifest_dir: protected.dir.clone(),
+        };
+        assert!(
+            matches!(
+                php_boot_in(
+                    &manifest(manifest_source),
+                    &search,
+                    Some(16),
+                    Some(&accepted)
+                ),
+                PhpBoot::Proceed(_)
+            ),
+            "a 0755 tree owned by init's uid is the accepted shape: {:?}",
+            php_boot_in(
+                &manifest(manifest_source),
+                &search,
+                Some(16),
+                Some(&accepted)
+            )
+        );
+
+        // 1. The directory the manifest was read from.
+        let shared = Scratch::new("tree-shared");
+        std::fs::set_permissions(&shared.dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let message = php_boot_in(
+            &manifest(manifest_source),
+            &search,
+            Some(16),
+            Some(&Deployment {
+                init_uid: current_uid(),
+                manifest_dir: shared.dir.clone(),
+            }),
+        )
+        .refusal()
+        .expect("a writable manifest directory cannot be a deployment")
+        .to_string();
+        assert!(
+            message.contains("the directory holding blastit.toml"),
+            "the tree is named for what it is: {message}"
+        );
+        assert!(
+            message.contains(&shared.dir.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains("could be replaced by another uid"),
+            "{message}"
+        );
+        assert!(message.contains("chown"), "the fix: {message}");
+        assert!(
+            !message.contains("install the PHP embed package"),
+            "a tree is not fixed by a package: {message}"
+        );
+
+        // 2. The front controller itself, world-writable inside a protected tree.
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let message = php_boot_in(
+            &manifest(manifest_source),
+            &search,
+            Some(16),
+            Some(&accepted),
+        )
+        .refusal()
+        .expect("a writable front controller cannot be a deployment")
+        .to_string();
+        assert!(
+            message.contains("route \"app\": [route.php] entry \"public/index.php\""),
+            "the entry is named with its route: {message}"
+        );
+        assert!(message.contains(&entry.display().to_string()), "{message}");
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // 3. A static root: the responder reads it, and the manifest declares
+        // one next to the PHP route.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let message = php_boot_in(
+            &manifest(manifest_source),
+            &search,
+            Some(16),
+            Some(&accepted),
+        )
+        .refusal()
+        .expect("a writable static root cannot be a deployment")
+        .to_string();
+        assert!(
+            message.contains("route \"docs\": [route.static] root \"site\""),
+            "the static root is named with its route: {message}"
+        );
+        assert!(message.contains(&root.display().to_string()), "{message}");
+
+        // The same tree at `0755` is accepted: the bits, not the path.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(
+                php_boot_in(
+                    &manifest(manifest_source),
+                    &search,
+                    Some(16),
+                    Some(&accepted)
+                ),
+                PhpBoot::Proceed(_)
+            ),
+            "the same tree at 0755 is what a deployment boots"
+        );
+    }
+
+    /// The other half of the scope rule: a `dev`/`check` boot is handed the very
+    /// same paths and must not ask the production question at all — the shim a
+    /// developer just built lives in a checkout that uid writes.
+    #[test]
+    fn a_development_boot_does_not_apply_the_production_rule() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let shared = Scratch::new("dev-scope");
+        std::fs::set_permissions(&shared.dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let search = stub_pair(&shared);
+        assert!(
+            matches!(
+                php_boot(&manifest(PHP_ONLY), &search, Some(16)),
+                PhpBoot::Proceed(_)
+            ),
+            "`dev`/`check` must keep booting out of a world-writable checkout"
+        );
+        // And the production question about those same bytes is a refusal, so
+        // this test cannot pass by the fixture being acceptable after all.
+        let message = php_boot_in(
+            &manifest(PHP_ONLY),
+            &search,
+            Some(16),
+            Some(&Deployment {
+                init_uid: current_uid(),
+                manifest_dir: shared.dir.clone(),
+            }),
+        )
+        .refusal()
+        .expect("the same bytes are refused by a deployment")
+        .to_string();
+        assert!(
+            message.contains("could be replaced by another uid"),
+            "{message}"
+        );
     }
 }
 

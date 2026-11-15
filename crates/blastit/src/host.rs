@@ -626,6 +626,548 @@ fn capable_copy_advice(install: Install, shared: &Path) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Production provenance (`ADR-0010` §3, design `R7` / `B2-R5`)
+// ---------------------------------------------------------------------------
+//
+// A deployment boot hands its workers two kinds of path: files a worker
+// `dlopen`s (`libphp`, the per-minor shim, an interpreter) and trees it reads
+// (`manifest_dir` — every PHP worker's `cwd` and `include_path` — plus a route's
+// `entry` and `static.root`). Every one of them is chosen by the route uids'
+// code at some point, so the boot authorises them once, in stage 0, before a
+// listener binds. `blastit dev` and `blastit check` deliberately do not: the
+// shim a developer just built lives in `target/php-sapi`, inside a checkout that
+// uid owns and writes, so the same rule would refuse every development boot
+// while protecting nothing (the uid that could replace the shim is the uid that
+// already runs the boot). A deployment has no such coincidence.
+
+/// `DT_RPATH`: the search path the legacy linker writes for the loader.
+const DT_RPATH: u64 = 15;
+
+/// `DT_RUNPATH`: the same for the modern linker (`--enable-new-dtags`).
+const DT_RUNPATH: u64 = 29;
+
+/// `SHT_DYNAMIC`: the section holding an object's dynamic array.
+const SHT_DYNAMIC: u32 = 6;
+
+/// `SHT_STRTAB`: a string table.
+const SHT_STRTAB: u32 = 3;
+
+/// The largest dynamic string table this walk will read into memory. An object's
+/// `DT_STRTAB` is a few hundred bytes; this is the bound that keeps a hostile
+/// file from being an allocation.
+const MAX_DYNAMIC_STRTAB: u64 = 4 * 1024 * 1024;
+
+/// The directories an ELF object's `DT_RPATH`/`DT_RUNPATH` add to the dynamic
+/// loader's search path, read from the file itself.
+///
+/// This is the static half of design `R7`: an object whose search path names a
+/// directory a route uid can write is one that uid chooses the `DT_NEEDED`
+/// resolution of, so the boot refuses it. **Nothing is loaded** — no `dlopen`,
+/// no `mmap`: the section header table and the `SHT_DYNAMIC` array are
+/// `seek`/`read` with every offset bounds-checked, the same shape as
+/// `stage0::zend_abi`'s `.dynsym` walk. The two readers are separate on
+/// purpose: that one is private to the PHP gate and answers "which Zend globals
+/// does this export", this one answers a provenance question and has to be
+/// reachable from the protected suite, which can only see this public module.
+///
+/// # Errors
+///
+/// A sentence naming what could not be read: a file that is not a
+/// little-endian ELF, one with no section headers or no dynamic section, and one
+/// that is truncated. A search path that cannot be read must never be read as
+/// "no search path" — that is the difference between a check and an assumption.
+pub fn dynamic_search_paths(path: &Path) -> Result<Vec<String>, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
+    let size = file
+        .metadata()
+        .map_err(|err| format!("{}: it cannot be inspected ({err})", path.display()))?
+        .len();
+    let ident = read_exact_at(&mut file, 0, usize::try_from(size.min(16)).unwrap_or(16))
+        .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
+    if ident.get(..4) != Some(b"\x7fELF") {
+        return Err(format!(
+            "{}: it is not an ELF object (no ELF magic)",
+            path.display()
+        ));
+    }
+    if ident.len() < 16 {
+        return Err(format!(
+            "{}: its ELF identification is truncated",
+            path.display()
+        ));
+    }
+    // 1 is `ELFCLASS32`, 2 is `ELFCLASS64`; the two differ only in the width of
+    // the fields below.
+    let wide = match ident.get(4) {
+        Some(1) => false,
+        Some(2) => true,
+        _ => {
+            return Err(format!(
+                "{}: it is not an ELF object (unknown class)",
+                path.display()
+            ));
+        }
+    };
+    if ident.get(5) != Some(&1) {
+        return Err(format!(
+            "{}: it is a big-endian ELF object, and only little-endian objects are embedded",
+            path.display()
+        ));
+    }
+    let (head_len, shoff_at, shentsize_at, shnum_at, min_entsize) = if wide {
+        (64usize, 0x28usize, 0x3ausize, 0x3cusize, 64usize)
+    } else {
+        (52usize, 0x20usize, 0x2eusize, 0x30usize, 40usize)
+    };
+    if size < u64::try_from(head_len).unwrap_or(u64::MAX) {
+        return Err(format!("{}: its ELF header is truncated", path.display()));
+    }
+    let head = read_exact_at(&mut file, 0, head_len)
+        .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
+    let truncated = || format!("{}: its ELF header is truncated", path.display());
+    let shoff = if wide {
+        le_u64(&head, shoff_at)
+    } else {
+        le_u32(&head, shoff_at).map(u64::from)
+    }
+    .ok_or_else(truncated)?;
+    let shentsize = usize::from(le_u16(&head, shentsize_at).ok_or_else(truncated)?);
+    let shnum = usize::from(le_u16(&head, shnum_at).ok_or_else(truncated)?);
+    if shnum == 0 {
+        return Err(format!(
+            "{}: it has no section headers, so its dynamic section cannot be read",
+            path.display()
+        ));
+    }
+    if shentsize < min_entsize {
+        return Err(format!(
+            "{}: its section header table's entries are too small to be section headers",
+            path.display()
+        ));
+    }
+    let table_len = shentsize
+        .checked_mul(shnum)
+        .ok_or_else(|| format!("{}: its section header table is too large", path.display()))?;
+    let table_end = shoff
+        .checked_add(u64::try_from(table_len).unwrap_or(u64::MAX))
+        .ok_or_else(|| format!("{}: its section header table is too large", path.display()))?;
+    if table_end > size {
+        return Err(format!(
+            "{}: its section header table is past the end of the file",
+            path.display()
+        ));
+    }
+    let table = read_exact_at(&mut file, shoff, table_len)
+        .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
+
+    let mut paths = Vec::new();
+    for index in 0..shnum {
+        let at = index.saturating_mul(shentsize);
+        let Some(kind) = le_u32(&table, at.saturating_add(4)) else {
+            continue;
+        };
+        if kind != SHT_DYNAMIC {
+            continue;
+        }
+        let Some((offset, dyn_len, link, entsize)) = dynamic_fields(wide, &table, at) else {
+            return Err(format!(
+                "{}: its dynamic section header is truncated",
+                path.display()
+            ));
+        };
+        let dyn_len = bounded_dynamic(offset, dyn_len, size)
+            .ok_or_else(|| format!("{}: its dynamic section is unusable", path.display()))?;
+        let strtab = dynamic_strtab(&mut file, wide, &table, shnum, shentsize, link, size)
+            .map_err(|reason| format!("{}: {reason}", path.display()))?;
+        let entries = read_exact_at(&mut file, offset, dyn_len)
+            .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
+        let entsize = usize::try_from(entsize).unwrap_or(0);
+        let minimum = if wide { 16 } else { 8 };
+        let entry_size = if entsize >= minimum { entsize } else { minimum };
+        for entry in 0..entries.len() / entry_size {
+            let at = entry.saturating_mul(entry_size);
+            let Some(tag) = dynamic_tag(wide, &entries, at) else {
+                break;
+            };
+            // `DT_NULL` ends the array; everything after it is padding.
+            if tag == 0 {
+                break;
+            }
+            if tag != i64::try_from(DT_RPATH).unwrap_or(i64::MAX)
+                && tag != i64::try_from(DT_RUNPATH).unwrap_or(i64::MAX)
+            {
+                continue;
+            }
+            let Some(value) = (if wide {
+                le_u64(&entries, at.saturating_add(8))
+            } else {
+                le_u32(&entries, at.saturating_add(4)).map(u64::from)
+            }) else {
+                break;
+            };
+            let offset = usize::try_from(value).map_err(|_| {
+                format!(
+                    "{}: a search-path offset does not fit this build",
+                    path.display()
+                )
+            })?;
+            let text = c_str(&strtab, offset).ok_or_else(|| {
+                format!(
+                    "{}: a DT_RPATH/DT_RUNPATH entry is not a string this build can read",
+                    path.display()
+                )
+            })?;
+            paths.extend(text.split(':').map(ToOwned::to_owned));
+        }
+    }
+    Ok(paths)
+}
+
+/// `(sh_offset, sh_size, sh_link, sh_entsize)` of the `SHT_DYNAMIC` section
+/// header at `at`.
+fn dynamic_fields(wide: bool, table: &[u8], at: usize) -> Option<(u64, u64, u32, u64)> {
+    if wide {
+        Some((
+            le_u64(table, at.saturating_add(0x18))?,
+            le_u64(table, at.saturating_add(0x20))?,
+            le_u32(table, at.saturating_add(0x28))?,
+            le_u64(table, at.saturating_add(0x38))?,
+        ))
+    } else {
+        Some((
+            u64::from(le_u32(table, at.saturating_add(0x10))?),
+            u64::from(le_u32(table, at.saturating_add(0x14))?),
+            le_u32(table, at.saturating_add(0x18))?,
+            u64::from(le_u32(table, at.saturating_add(0x24))?),
+        ))
+    }
+}
+
+/// A dynamic section's length in memory, refused when it is absurd or past the
+/// end of the file.
+fn bounded_dynamic(offset: u64, size: u64, file_size: u64) -> Option<usize> {
+    if size > MAX_DYNAMIC_STRTAB {
+        return None;
+    }
+    if offset.checked_add(size)? > file_size {
+        return None;
+    }
+    usize::try_from(size).ok()
+}
+
+/// The dynamic string table `SHT_DYNAMIC`'s `sh_link` names, read into memory.
+fn dynamic_strtab(
+    file: &mut std::fs::File,
+    wide: bool,
+    table: &[u8],
+    shnum: usize,
+    shentsize: usize,
+    link: u32,
+    file_size: u64,
+) -> Result<Vec<u8>, String> {
+    let index = usize::try_from(link)
+        .map_err(|_| "its dynamic string-table index does not fit this build".to_string())?;
+    if index >= shnum {
+        return Err("its dynamic string-table index is past the section table".to_string());
+    }
+    let at = index.saturating_mul(shentsize);
+    let kind = le_u32(table, at.saturating_add(4))
+        .ok_or_else(|| "its dynamic string table's section header is truncated".to_string())?;
+    if kind != SHT_STRTAB {
+        return Err("its dynamic section does not link a string table".to_string());
+    }
+    let (offset, size) = if wide {
+        (
+            le_u64(table, at.saturating_add(0x18)),
+            le_u64(table, at.saturating_add(0x20)),
+        )
+    } else {
+        (
+            le_u32(table, at.saturating_add(0x10)).map(u64::from),
+            le_u32(table, at.saturating_add(0x14)).map(u64::from),
+        )
+    };
+    let (Some(offset), Some(size)) = (offset, size) else {
+        return Err("its dynamic string table's section header is truncated".to_string());
+    };
+    if size > MAX_DYNAMIC_STRTAB {
+        return Err(format!(
+            "a {size}-byte dynamic string table is larger than this build will inspect"
+        ));
+    }
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| "its dynamic string table runs past the end of the file".to_string())?;
+    if end > file_size {
+        return Err("its dynamic string table runs past the end of the file".to_string());
+    }
+    let len = usize::try_from(size).map_err(|_| {
+        "its dynamic string table is larger than this build can address".to_string()
+    })?;
+    read_exact_at(file, offset, len).map_err(|err| format!("it cannot be read ({err})"))
+}
+
+/// The `d_tag` of one dynamic array entry.
+fn dynamic_tag(wide: bool, entries: &[u8], at: usize) -> Option<i64> {
+    if wide {
+        let bytes: [u8; 8] = entries.get(at..at.checked_add(8)?)?.try_into().ok()?;
+        Some(i64::from_le_bytes(bytes))
+    } else {
+        let bytes: [u8; 4] = entries.get(at..at.checked_add(4)?)?.try_into().ok()?;
+        Some(i64::from(i32::from_le_bytes(bytes)))
+    }
+}
+
+/// `len` bytes at `offset`, from a file this process has open read-only.
+fn read_exact_at(file: &mut std::fs::File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = vec![0u8; len];
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// The NUL-terminated UTF-8 string at `offset`, or `None`.
+fn c_str(bytes: &[u8], offset: usize) -> Option<String> {
+    let rest = bytes.get(offset..)?;
+    let end = rest.iter().position(|byte| *byte == 0)?;
+    std::str::from_utf8(rest.get(..end)?)
+        .ok()
+        .map(ToOwned::to_owned)
+}
+
+/// A little-endian `u16` at `offset`, or `None` past the end.
+fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let slice: [u8; 2] = bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
+    Some(u16::from_le_bytes(slice))
+}
+
+/// A little-endian `u32` at `offset`, or `None` past the end.
+fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let slice: [u8; 4] = bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_le_bytes(slice))
+}
+
+/// A little-endian `u64` at `offset`, or `None` past the end.
+fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    let slice: [u8; 8] = bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
+    Some(u64::from_le_bytes(slice))
+}
+
+/// One path a deployment boot authorises before a worker is given it
+/// (`ADR-0010` §3, design `R7`/`B2-R5`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Claim {
+    /// How a refusal names it: `the NTS libphp`, `route "app": [route.php]
+    /// entry "public/index.php"`, ….
+    pub what: String,
+    /// The path, resolved as the boot will open it.
+    pub path: PathBuf,
+}
+
+impl Claim {
+    /// A claim on `path`, named `what` in every refusal.
+    #[must_use]
+    pub fn new(what: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self {
+            what: what.into(),
+            path: path.into(),
+        }
+    }
+}
+
+/// The paths a deployment boot hands its workers, and the uid that must own them
+/// (design `R7`/`B2-R5`).
+///
+/// Two lists, because the two questions differ:
+///
+/// * [`objects`](Self::objects) are files a worker `dlopen`s or `execve`s
+///   (`libphp`, a shim, an interpreter). Besides "no other uid can replace it"
+///   they may carry no file capabilities a child's emptied bounding set cannot
+///   honour, and no `DT_RPATH`/`DT_RUNPATH` entry into a directory a route uid
+///   can write — the loader resolves their `DT_NEEDED` from there;
+/// * [`trees`](Self::trees) are read, never loaded (`manifest_dir`, a route's
+///   `entry`, a `static.root`): a PHP worker's `cwd` and `include_path` are that
+///   tree, so a route uid that can write a file into it chooses what the worker
+///   will `include`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Provenance {
+    /// The uid that owns the installation: root, or init's own uid in a
+    /// rootless deployment. Only root and this uid may own the paths.
+    pub init_uid: u32,
+    /// The files a worker loads.
+    pub objects: Vec<Claim>,
+    /// The trees a worker reads.
+    pub trees: Vec<Claim>,
+}
+
+impl Provenance {
+    /// Authorises [`Self::objects`]: ownership and permissions, no file
+    /// capabilities, and zero writable `DT_RPATH`/`DT_RUNPATH` entries.
+    ///
+    /// # Errors
+    ///
+    /// The first refusal, naming the claim, its path, what is wrong with it and
+    /// the command that fixes it.
+    pub fn check_objects(&self) -> Result<(), String> {
+        for claim in &self.objects {
+            self.cannot_be_replaced(claim)?;
+            match has_file_caps(&claim.path) {
+                Ok(false) => {}
+                Ok(true) => {
+                    return Err(format!(
+                        "{} ({}) carries file capabilities (security.capability), and a child \
+                         whose bounding set is empty cannot honour them: strip them with \
+                         `setcap -r {}`, and give the capability to the file init runs instead \
+                         (D6/B1)",
+                        claim.what,
+                        claim.path.display(),
+                        claim.path.display()
+                    ));
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "{} ({}): its file capabilities cannot be read ({err}), so the boot \
+                         cannot tell whether a child would inherit a privilege it must not have",
+                        claim.what,
+                        claim.path.display()
+                    ));
+                }
+            }
+            self.no_writable_search_path(claim)?;
+        }
+        Ok(())
+    }
+
+    /// Authorises [`Self::trees`]: ownership and permissions only, because the
+    /// tree is read rather than loaded.
+    ///
+    /// # Errors
+    ///
+    /// The first refusal, naming the claim, its path, what is wrong with it and
+    /// the command that fixes it.
+    pub fn check_trees(&self) -> Result<(), String> {
+        for claim in &self.trees {
+            self.cannot_be_replaced(claim)?;
+        }
+        Ok(())
+    }
+
+    /// `B2`: one path another uid could replace, and the fix.
+    fn cannot_be_replaced(&self, claim: &Claim) -> Result<(), String> {
+        let facts = facts_of(&claim.path).map_err(|err| {
+            format!(
+                "{} ({}): it cannot be inspected ({err}), so the boot cannot tell whether \
+                 another uid could replace it",
+                claim.what,
+                claim.path.display()
+            )
+        })?;
+        protected(&facts, self.init_uid).map_err(|wrong| {
+            format!(
+                "{} ({}) could be replaced by another uid: {wrong}. chown it to root (or to \
+                 init's uid, {}), remove the group and other write bits (chmod 0644 for a file, \
+                 0755 for a directory), and do the same to every directory above it",
+                claim.what,
+                claim.path.display(),
+                self.init_uid
+            )
+        })
+    }
+
+    /// `R7`: zero `DT_RPATH`/`DT_RUNPATH` entries into a directory another uid
+    /// can write, decided from the file's dynamic section without loading it.
+    fn no_writable_search_path(&self, claim: &Claim) -> Result<(), String> {
+        let origin = std::fs::canonicalize(&claim.path)
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        for entry in dynamic_search_paths(&claim.path)? {
+            let Some(directory) = resolve_search_entry(&entry, origin.as_deref()) else {
+                return Err(format!(
+                    "{} ({}) has a DT_RPATH/DT_RUNPATH entry {entry:?} this boot cannot resolve \
+                     statically — a relative path, an empty element (the loader reads that as \
+                     the worker's own working directory), or a token other than `$ORIGIN` — so \
+                     the boot cannot tell where the loader would look: relink it with no \
+                     `-rpath` (a distro package does), or with an absolute directory only root \
+                     or init's uid can write",
+                    claim.what,
+                    claim.path.display()
+                ));
+            };
+            let facts = self.facts_of_nearest(&directory).map_err(|err| {
+                format!(
+                    "{} ({}) has a DT_RPATH/DT_RUNPATH entry {entry:?} naming {}: {err}",
+                    claim.what,
+                    claim.path.display(),
+                    directory.display()
+                )
+            })?;
+            if let Err(wrong) = protected(&facts, self.init_uid) {
+                return Err(format!(
+                    "{} ({}) has a DT_RPATH/DT_RUNPATH entry {entry:?} naming {}, which another \
+                     uid could write: {wrong}. The loader resolves the object's DT_NEEDED from \
+                     there, so that uid chooses code this worker loads: relink it with no \
+                     `-rpath` (a distro package does), or with a directory only root or init's \
+                     uid can write",
+                    claim.what,
+                    claim.path.display(),
+                    directory.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// [`facts_of`] for a directory that need not be there.
+    ///
+    /// A search path naming a directory that does not exist is not a place
+    /// anything can be loaded from *today* — what decides is the nearest
+    /// existing directory above it, because a writable one means a route uid
+    /// could create the rest and drop a `DT_NEEDED` object in it.
+    fn facts_of_nearest(&self, directory: &Path) -> Result<Facts, String> {
+        let mut candidate = directory;
+        loop {
+            match facts_of(candidate) {
+                Ok(facts) => return Ok(facts),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    candidate = candidate.parent().ok_or_else(|| {
+                        format!("{} cannot be inspected ({err})", directory.display())
+                    })?;
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "{} cannot be inspected ({err})",
+                        directory.display()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Where one `DT_RPATH`/`DT_RUNPATH` element points, or `None` when the boot
+/// cannot resolve it without the loader.
+///
+/// `$ORIGIN` (and `${ORIGIN}`) is the one token that is decidable statically —
+/// it is the directory the object itself was loaded from — so it is expanded.
+/// Everything else is refused rather than guessed: `$LIB`, `$PLATFORM`, a bare
+/// relative path and the empty element are all resolved by the dynamic loader
+/// against state the stage-0 process does not share with the worker.
+fn resolve_search_entry(entry: &str, origin: Option<&Path>) -> Option<PathBuf> {
+    let mut text = entry.to_owned();
+    if let Some(origin) = origin {
+        let origin = origin.to_string_lossy();
+        text = text.replace("${ORIGIN}", &origin);
+        text = text.replace("$ORIGIN", &origin);
+    }
+    if text.is_empty() || text.contains('$') || !Path::new(&text).is_absolute() {
+        return None;
+    }
+    Some(PathBuf::from(text))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1267,5 +1809,284 @@ mod tests {
             !plain_is_protected(&inside, init_uid()).is_ok(),
             "and that is a refusal"
         );
+    }
+
+    // ------------------------------------------------ production provenance
+
+    /// A little-endian ELF shared object with one `.dynamic` section whose
+    /// entry is `tag` → `search`, and nothing else.
+    ///
+    /// `tag = 0` writes `DT_NULL` first, which is an object with **no** search
+    /// path at all. Layout: the ELF header, the dynamic string table, the
+    /// dynamic array, then three section headers (null, `SHT_STRTAB`,
+    /// `SHT_DYNAMIC` linked to it). Nothing is loaded: the walk reads these bytes
+    /// the way it reads a distro `libphp`.
+    fn object_with_search_path(wide: bool, tag: u64, search: &str) -> Vec<u8> {
+        let head_len = if wide { 64usize } else { 52 };
+        let shentsize = if wide { 64usize } else { 40 };
+        let entry_size = if wide { 16usize } else { 8 };
+
+        let mut strtab = vec![0u8];
+        let value = strtab.len() as u64;
+        strtab.extend_from_slice(search.as_bytes());
+        strtab.push(0);
+
+        let strtab_off = head_len as u64;
+        let dynamic_off = strtab_off + strtab.len() as u64;
+        let dynamic_len = (2 * entry_size) as u64;
+        let shoff = dynamic_off + dynamic_len;
+
+        let mut file = vec![0u8; (shoff + 3 * shentsize as u64) as usize];
+        file[..4].copy_from_slice(b"\x7fELF");
+        file[4] = if wide { 2 } else { 1 };
+        file[5] = 1;
+        file[6] = 1;
+        if wide {
+            file[0x28..0x30].copy_from_slice(&shoff.to_le_bytes());
+            file[0x3a..0x3c].copy_from_slice(&(shentsize as u16).to_le_bytes());
+            file[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes());
+        } else {
+            file[0x20..0x24].copy_from_slice(&(shoff as u32).to_le_bytes());
+            file[0x2e..0x30].copy_from_slice(&(shentsize as u16).to_le_bytes());
+            file[0x30..0x32].copy_from_slice(&3u16.to_le_bytes());
+        }
+        let at = strtab_off as usize;
+        file[at..at + strtab.len()].copy_from_slice(&strtab);
+
+        let at = dynamic_off as usize;
+        if wide {
+            file[at..at + 8].copy_from_slice(&(tag as i64).to_le_bytes());
+            file[at + 8..at + 16].copy_from_slice(&value.to_le_bytes());
+        } else {
+            file[at..at + 4].copy_from_slice(&(tag as u32).to_le_bytes());
+            file[at + 4..at + 8].copy_from_slice(&(value as u32).to_le_bytes());
+        }
+
+        // Section 1 is the string table, section 2 the dynamic array linked to
+        // it; section 0 stays the all-zero null section.
+        let at = shoff as usize + shentsize;
+        write_section(
+            &mut file,
+            wide,
+            at,
+            &SectionHeader {
+                kind: SHT_STRTAB,
+                offset: strtab_off,
+                size: strtab.len() as u64,
+                link: 0,
+                entsize: 0,
+            },
+        );
+        let at = at + shentsize;
+        write_section(
+            &mut file,
+            wide,
+            at,
+            &SectionHeader {
+                kind: SHT_DYNAMIC,
+                offset: dynamic_off,
+                size: dynamic_len,
+                link: 1,
+                entsize: entry_size as u64,
+            },
+        );
+        file
+    }
+
+    /// The fields one section header needs, grouped because they are one
+    /// record: `rust-standards` §3's rule about a parameter clump.
+    struct SectionHeader {
+        kind: u32,
+        offset: u64,
+        size: u64,
+        link: u32,
+        entsize: u64,
+    }
+
+    /// Writes `header` as the section header at `at`.
+    fn write_section(file: &mut [u8], wide: bool, at: usize, header: &SectionHeader) {
+        file[at + 4..at + 8].copy_from_slice(&header.kind.to_le_bytes());
+        if wide {
+            file[at + 0x18..at + 0x20].copy_from_slice(&header.offset.to_le_bytes());
+            file[at + 0x20..at + 0x28].copy_from_slice(&header.size.to_le_bytes());
+            file[at + 0x28..at + 0x2c].copy_from_slice(&header.link.to_le_bytes());
+            file[at + 0x38..at + 0x40].copy_from_slice(&header.entsize.to_le_bytes());
+        } else {
+            file[at + 0x10..at + 0x14].copy_from_slice(&(header.offset as u32).to_le_bytes());
+            file[at + 0x14..at + 0x18].copy_from_slice(&(header.size as u32).to_le_bytes());
+            file[at + 0x18..at + 0x1c].copy_from_slice(&header.link.to_le_bytes());
+            file[at + 0x24..at + 0x28].copy_from_slice(&(header.entsize as u32).to_le_bytes());
+        }
+    }
+
+    /// The search path is read from the file, for `DT_RPATH`, `DT_RUNPATH` and
+    /// both ELF classes — and an object with neither tag reports none.
+    #[test]
+    fn dynamic_search_paths_reads_both_tags_and_both_classes() {
+        let dir = safe_dir("dtags").expect("a directory only its owner can write");
+        for (name, image, expected) in [
+            (
+                "elftwo",
+                object_with_search_path(false, DT_RPATH, "/opt/one:/opt/two"),
+                vec!["/opt/one".to_string(), "/opt/two".to_string()],
+            ),
+            (
+                "elfwide",
+                object_with_search_path(true, DT_RUNPATH, "/opt/three"),
+                vec!["/opt/three".to_string()],
+            ),
+            (
+                "none",
+                object_with_search_path(true, 0, "/opt/never"),
+                Vec::<String>::new(),
+            ),
+        ] {
+            let path = dir.path.join(name);
+            std::fs::write(&path, &image).unwrap();
+            assert_eq!(
+                dynamic_search_paths(&path).unwrap(),
+                expected,
+                "{}",
+                path.display()
+            );
+        }
+        // Not an ELF object is an *error*, never "no search path": a check that
+        // cannot be made must not be read as an answer.
+        let text = dir.file("text", 0o644);
+        let err = dynamic_search_paths(&text).unwrap_err();
+        assert!(err.contains("no ELF magic"), "{err}");
+    }
+
+    /// `$ORIGIN` is the one token the boot can resolve; everything else is
+    /// refused rather than guessed.
+    #[test]
+    fn a_search_entry_is_resolved_only_when_the_boot_can() {
+        let origin = Path::new("/usr/lib");
+        assert_eq!(
+            resolve_search_entry("$ORIGIN/../lib", Some(origin)),
+            Some(PathBuf::from("/usr/lib/../lib"))
+        );
+        assert_eq!(
+            resolve_search_entry("${ORIGIN}/lib", Some(origin)),
+            Some(PathBuf::from("/usr/lib/lib"))
+        );
+        assert_eq!(
+            resolve_search_entry("/opt/lib", None),
+            Some(PathBuf::from("/opt/lib"))
+        );
+        for unresolved in ["", "relative/lib", "$LIB", "$PLATFORM/lib", "$ORIGIN/lib"] {
+            assert_eq!(
+                resolve_search_entry(unresolved, Some(origin)),
+                if unresolved == "$ORIGIN/lib" {
+                    Some(PathBuf::from("/usr/lib/lib"))
+                } else {
+                    None
+                },
+                "{unresolved:?}"
+            );
+        }
+        assert_eq!(resolve_search_entry("$ORIGIN/lib", None), None);
+    }
+
+    /// A `DT_RUNPATH` into a directory anyone can write is refused, naming the
+    /// entry and the fix; the same object in a protected directory is not.
+    #[test]
+    fn a_writable_search_path_is_refused_and_a_protected_one_is_not() {
+        let dir = safe_dir("dtags-policy").expect("a directory only its owner can write");
+        let shared = dir.dir("shared", 0o777);
+        let entry = shared.display().to_string();
+
+        let writable = dir.path.join("writable.so");
+        std::fs::write(&writable, object_with_search_path(true, DT_RUNPATH, &entry)).unwrap();
+        let claim = Claim::new("the embedded shim", writable.clone());
+        let err = Provenance {
+            init_uid: init_uid(),
+            objects: vec![claim.clone()],
+            trees: Vec::new(),
+        }
+        .check_objects()
+        .unwrap_err();
+        assert!(err.contains("the embedded shim"), "{err}");
+        assert!(err.contains(&entry), "the refusal names the entry: {err}");
+        assert!(err.contains("DT_RPATH/DT_RUNPATH"), "{err}");
+        assert!(err.contains("-rpath"), "and the fix: {err}");
+
+        // The same object with no search path at all: accepted, so the refusal
+        // above is the search path and not the empty file capabilities.
+        let clean = dir.path.join("clean.so");
+        std::fs::write(&clean, object_with_search_path(true, 0, "")).unwrap();
+        assert!(
+            Provenance {
+                init_uid: init_uid(),
+                objects: vec![Claim::new("the embedded shim", clean)],
+                trees: Vec::new(),
+            }
+            .check_objects()
+            .is_ok()
+        );
+    }
+
+    /// A tree anyone can write is refused with the path and the `chmod`; the
+    /// same tree at `0755` is accepted. The **bits** are the decision.
+    #[test]
+    fn a_writable_tree_is_refused_and_a_protected_one_is_not() {
+        let dir = safe_dir("tree").expect("a directory only its owner can write");
+        let tree = dir.dir("app", 0o755);
+        let checked = |path: &Path| {
+            Provenance {
+                init_uid: init_uid(),
+                objects: Vec::new(),
+                trees: vec![Claim::new("route \"app\": [route.php] entry", path)],
+            }
+            .check_trees()
+        };
+        assert!(checked(&tree).is_ok(), "0755, owned by init's uid");
+        std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let err = checked(&tree).unwrap_err();
+        assert!(err.contains(&tree.display().to_string()), "{err}");
+        assert!(err.contains("could be replaced by another uid"), "{err}");
+        assert!(err.contains("chown"), "the fix is a chown/chmod: {err}");
+    }
+
+    /// A file capability is refused before anything can hand the file to a
+    /// child whose bounding set is empty. Root-only: `setxattr` on
+    /// `security.capability` needs `CAP_SETFCAP`, which no unprivileged test has.
+    #[test]
+    fn a_capable_object_is_refused() {
+        if !rustix::process::geteuid().is_root() {
+            println!("skipped: setting security.capability needs CAP_SETFCAP");
+            return;
+        }
+        let dir = safe_dir("caps-object").expect("a directory only its owner can write");
+        let path = dir.path.join("shim.so");
+        std::fs::write(&path, object_with_search_path(true, 0, "")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut value = [0_u8; 20];
+        value[..4].copy_from_slice(&0x0200_0001_u32.to_le_bytes());
+        value[4..8].copy_from_slice(&1_u32.to_le_bytes());
+        let name = c"security.capability";
+        let path_c = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `setxattr` takes a NUL-terminated path, a NUL-terminated name,
+        // a buffer of the length given and a flags word.
+        let wrote = unsafe {
+            libc::setxattr(
+                path_c.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        assert_eq!(wrote, 0, "setxattr: {}", io::Error::last_os_error());
+        let err = Provenance {
+            init_uid: init_uid(),
+            objects: vec![Claim::new("the embedded shim", path.clone())],
+            trees: Vec::new(),
+        }
+        .check_objects()
+        .unwrap_err();
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("file capabilities"), "{err}");
+        assert!(err.contains("setcap -r"), "and the fix: {err}");
     }
 }

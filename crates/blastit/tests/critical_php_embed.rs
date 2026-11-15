@@ -75,13 +75,15 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use blastit::host::{Claim, Provenance};
 
 /// The route the fixture declares.
 const ROUTE: &str = "app";
@@ -611,9 +613,15 @@ fn quote(value: &str) -> String {
 /// A missing compiler or a failed compile is a panic: the stub ELFs are the
 /// fixture, and a suite that skipped them would assert nothing.
 fn compile(source: &Path, out: &Path, defines: &[(&str, String)]) {
+    compile_linked(source, out, defines, &[]);
+}
+
+/// The same, plus linker arguments — the `-Wl,-rpath,…` that writes a
+/// `DT_RPATH`/`DT_RUNPATH` into the object it produces.
+fn compile_linked(source: &Path, out: &Path, defines: &[(&str, String)], linker: &[String]) {
     let mut command = Command::new("cc");
     command.args(["-shared", "-fPIC", "-O0", "-o"]);
-    command.arg(out).arg(source).arg("-lc");
+    command.arg(out).arg(source).arg("-lc").args(linker);
     for (name, value) in defines {
         command.arg(format!("-D{name}={value}"));
     }
@@ -2004,4 +2012,519 @@ fn refused_without_a_host(what: &str, name: &str) {
     assert_no_fallback_recipe(&stderr);
     assert_no_serving_surface(&mut boot, what);
     println!("refused (no usable libphp + shim on this host): {stderr}");
+}
+
+// ----------------------------------- production provenance (`R7`, `B2-R5`)
+
+/// Distinguishes fixtures of one binary run.
+static FIXTURES: AtomicUsize = AtomicUsize::new(0);
+
+/// A directory a **deployment** boot would accept as a tree: `0755`, owned by
+/// this process, with no directory above it that another uid can write.
+///
+/// **Not `temp_dir()`**, and that is the whole point of this helper: `/tmp` is
+/// `1777`, `host::facts_of` walks every ancestor, so a `0755` fixture *under*
+/// `/tmp` is still a tree a route uid could replace — which is exactly the
+/// refusal these legs are about (`LESSONS.md`, `MB.3.40`). The candidates are
+/// the ones the other critical suites already use: the build's own `target/tmp`,
+/// `$HOME`, and the three system directories a single uid usually owns. A host
+/// where all five are group- or other-writable is a host a deployment boot could
+/// not run on either, which is why this is a panic and never a skip.
+fn protected_root(tag: &str) -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Some(dir) = std::env::var_os("CARGO_TARGET_TMPDIR") {
+        candidates.push(PathBuf::from(dir));
+    }
+    if let Some(dir) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(dir));
+    }
+    for dir in ["/opt", "/usr/local", "/srv"] {
+        candidates.push(PathBuf::from(dir));
+    }
+    let mut refused = Vec::new();
+    for parent in candidates {
+        if !parent.is_dir() {
+            continue;
+        }
+        let dir = parent.join(format!(
+            "blastit-php-provenance-{}-{tag}-{}",
+            std::process::id(),
+            FIXTURES.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        set_mode(&dir, 0o755);
+        let probe = dir.join("probe");
+        let accepted = std::fs::write(&probe, b"#!/bin/sh\n").is_ok()
+            && std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).is_ok()
+            && blastit::host::plain_is_protected(&probe, effective_uid()).is_ok();
+        let _ = std::fs::remove_file(&probe);
+        if accepted {
+            return dir;
+        }
+        refused.push(dir.display().to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    panic!(
+        "no directory on this host is one uid's alone (tried {}): a deployment boot could not \
+         run on this host either, so the accepted twin has nothing to accept",
+        refused.join(", ")
+    );
+}
+
+/// `chmod path mode`.
+fn set_mode(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .unwrap_or_else(|err| panic!("chmod {mode:o} {}: {err}", path.display()));
+}
+
+/// The **deployment** authorisation of a set of trees (`R7`, `B2-R5`), exactly as
+/// `stage0::deployment_refusal` builds it: `host::Provenance` against init's uid.
+fn trees_refusal(claims: Vec<Claim>) -> Result<(), String> {
+    Provenance {
+        init_uid: effective_uid(),
+        objects: Vec::new(),
+        trees: claims,
+    }
+    .check_trees()
+}
+
+/// The same for the objects a PHP worker `dlopen`s: the NTS `libphp` and its
+/// per-minor shim, which are also asked for file capabilities and a search path.
+fn objects_refusal(claims: Vec<Claim>) -> Result<(), String> {
+    Provenance {
+        init_uid: effective_uid(),
+        objects: claims,
+        trees: Vec::new(),
+    }
+    .check_objects()
+}
+
+/// The first non-empty HTTP answer from a served boot, retried a bounded number
+/// of times.
+///
+/// A request that beats the `http` role's first `accept` can come back as an
+/// empty stream; that is a harness race, not a refusal, and the leg that uses
+/// this is about the **gate** (does a deployment rule refuse this tree?) rather
+/// than about accept latency. Five seconds is far longer than the boot's own
+/// `ready`, so a boot that died says so through the timeout's message.
+fn first_answer(boot: &Boot) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = boot.get("/");
+        if !response.is_empty() {
+            return response;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the dev boot never answered over HTTP, so it never served:\n{}",
+            boot.stderr_text()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// A fixture `blastit.toml` directory, at `mode`, with a `0644` front controller
+/// and the manifest the documented page uses.
+fn manifest_tree(root: &Path, mode: u32) -> PathBuf {
+    let app = root.join("app");
+    std::fs::create_dir_all(app.join("public")).expect("a fixture directory");
+    std::fs::write(app.join("blastit.toml"), PHP_MANIFEST).expect("the manifest");
+    std::fs::write(app.join(ENTRY), NORMAL_PHP).expect("the front controller");
+    set_mode(&app.join(ENTRY), 0o644);
+    set_mode(&app, mode);
+    app
+}
+
+/// **`R7`/`B2-R5`, the tree half.** A deployment refuses a `blastit.toml`
+/// directory a route uid could write, because that directory is every PHP
+/// worker's `cwd` and `include_path` (`ADR-0010` §2): a route uid that can write
+/// a file there chooses what the worker `include`s.
+///
+/// **Unit-level, and it says so.** An unprivileged process cannot reach the
+/// `Production` half of stage 0 at all — `caps::detect` refuses the boot before
+/// `Config::from_env` (`LESSONS.md`, `MB.1.6`) — so this leg drives the gate's
+/// own decision function, `blastit::host::Provenance::check_trees`, which is the
+/// call `stage0::deployment_refusal` makes before `Provenance` is handed to
+/// stage 1. The sentence and the order are pinned by
+/// `stage0::php_boot_gate`'s `a_deployment_boot_refuses_a_tree_a_route_uid_could_write`,
+/// and the **end-to-end** half is
+/// [`a_dev_boot_of_a_world_writable_tree_still_serves`] below. Removing the
+/// check fails this leg (see `RESULT.md`'s red run).
+#[test]
+fn a_world_writable_manifest_root_refuses_a_production_boot() {
+    let root = protected_root("manifest");
+    let app = manifest_tree(&root, 0o755);
+    let what = "the directory holding blastit.toml";
+
+    // The permission bits, not the path, are the decision: the same tree the
+    // same fixture just created is the accepted shape at 0755.
+    assert!(
+        trees_refusal(vec![Claim::new(what, &app)]).is_ok(),
+        "a 0755 tree owned by init's uid is what a deployment boots"
+    );
+    assert!(
+        trees_refusal(vec![Claim::new("[route.php] entry", app.join(ENTRY))]).is_ok(),
+        "and its 0644 front controller is part of the accepted tree"
+    );
+
+    set_mode(&app, 0o777);
+    let err = trees_refusal(vec![Claim::new(what, &app)])
+        .expect_err("a world-writable manifest directory must refuse a deployment boot");
+    assert!(
+        err.contains(&app.display().to_string()),
+        "the refusal names the offending path: {err}"
+    );
+    assert!(
+        err.contains("could be replaced by another uid"),
+        "and what is wrong with it: {err}"
+    );
+    assert!(
+        err.contains("chown") && err.contains("chmod"),
+        "and the fix: {err}"
+    );
+    assert!(
+        !err.contains("install the PHP embed package"),
+        "a tree is not fixed by installing a package: {err}"
+    );
+
+    // The front controller inside a protected tree is the same refusal: a
+    // `0666` `index.php` is a file any route uid can rewrite.
+    set_mode(&app, 0o755);
+    set_mode(&app.join(ENTRY), 0o666);
+    let err = trees_refusal(vec![Claim::new(
+        "route \"app\": [route.php] entry \"public/index.php\"",
+        app.join(ENTRY),
+    )])
+    .expect_err("a world-writable front controller must refuse a deployment boot");
+    assert!(
+        err.contains(&app.join(ENTRY).display().to_string()),
+        "{err}"
+    );
+    assert!(err.contains("[route.php] entry"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&root);
+    println!("refused (production provenance, tree half): {err}");
+}
+
+/// **`R7`, the pair half.** A shim (or `libphp`) whose directory a route uid can
+/// write is a file that uid owns the contents of, and every `[route.php]` worker
+/// `dlopen`s it — so a deployment refuses it, at the shim, not at the library
+/// that is fine.
+///
+/// Unit-level for the same reason as the leg above: the decision is
+/// `blastit::host::Provenance::check_objects`, the call `stage0` makes on the
+/// resolved pair before the `(path, st_dev, st_ino)` record is written.
+#[test]
+fn a_world_writable_shim_directory_refuses_a_production_boot() {
+    let _root = StubRootGuard::start();
+    let stubs = stubs();
+    let root = protected_root("shim");
+    let libs = root.join("lib");
+    let shims = root.join("shims");
+    std::fs::create_dir_all(&libs).expect("a library directory");
+    std::fs::create_dir_all(&shims).expect("a shim directory");
+    set_mode(&libs, 0o755);
+    set_mode(&shims, 0o777);
+    let libphp = libs.join("libphp8.4.so");
+    let shim = shims.join(shim_name(84));
+    std::fs::copy(&stubs.nts_libphp, &libphp).expect("the stub library");
+    std::fs::copy(&stubs.nts_shim, &shim).expect("the stub shim");
+    set_mode(&libphp, 0o755);
+    set_mode(&shim, 0o755);
+
+    // The library on its own, in a directory only init's uid can write, is the
+    // accepted shape — so what the assertion below catches is the shim.
+    assert!(
+        objects_refusal(vec![Claim::new("the NTS libphp", &libphp)]).is_ok(),
+        "a 0755 pair in a protected directory is what a deployment boots"
+    );
+
+    let err = objects_refusal(vec![
+        Claim::new("the NTS libphp", &libphp),
+        Claim::new("the embedded shim", &shim),
+    ])
+    .expect_err("a shim in a world-writable directory must refuse a deployment boot");
+    assert!(
+        err.contains(&shim.display().to_string()),
+        "the refusal names the shim: {err}"
+    );
+    assert!(err.contains("the embedded shim"), "{err}");
+    assert!(err.contains("could be replaced by another uid"), "{err}");
+    assert!(err.contains("chown"), "and the fix: {err}");
+
+    // The bits are the decision: the same shim in a 0755 directory is accepted.
+    set_mode(&shims, 0o755);
+    assert!(
+        objects_refusal(vec![
+            Claim::new("the NTS libphp", &libphp),
+            Claim::new("the embedded shim", &shim),
+        ])
+        .is_ok(),
+        "the same pair at 0755 is what a deployment boots"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    println!("refused (production provenance, pair half): {err}");
+}
+
+/// **`R7`, the dynamic half.** An object whose `DT_RPATH`/`DT_RUNPATH` names a
+/// directory a route uid can write is one that uid chooses the `DT_NEEDED`
+/// resolution of: it drops `libz.so.1` there and the worker loads it. The
+/// fixture is a real ELF this suite links itself, and the search path is read
+/// from the file (`host::dynamic_search_paths`), never by loading it.
+///
+/// Both spellings are covered, because the two linkers disagree:
+/// `--disable-new-dtags` writes `DT_RPATH` and the modern default writes
+/// `DT_RUNPATH`. The same source with no `-rpath` at all is accepted, so the
+/// refusal is the tag and not the stub.
+#[test]
+fn a_runpath_into_a_writable_directory_refuses_a_production_boot() {
+    let root = protected_root("runpath");
+    let evil = root.join("evil");
+    let libs = root.join("lib");
+    std::fs::create_dir_all(&evil).expect("a writable directory");
+    std::fs::create_dir_all(&libs).expect("a library directory");
+    set_mode(&evil, 0o777);
+    set_mode(&libs, 0o755);
+    let source = root.join("libphp_stub.c");
+    std::fs::write(&source, LIBPHP_STUB_C).expect("the stub source");
+    let defines = [
+        ("BT_CANARY", quote("/nonexistent/canary")),
+        ("BT_TAG", quote("libphp")),
+        ("BT_VERSION", quote("8.4.27")),
+    ];
+    let entry = evil.display().to_string();
+
+    let legacy = libs.join("libphp8.4-rpath.so");
+    compile_linked(
+        &source,
+        &legacy,
+        &defines,
+        &[format!("-Wl,--disable-new-dtags,-rpath,{entry}")],
+    );
+    let modern = libs.join("libphp8.4-runpath.so");
+    compile_linked(&source, &modern, &defines, &[format!("-Wl,-rpath,{entry}")]);
+    let clean = libs.join("libphp8.4.so");
+    compile(&source, &clean, &defines);
+
+    // The walk reads what `readelf -d` reads, and nothing else is in the string
+    // table: this is the assertion that makes the refusals below about the tag.
+    for object in [&legacy, &modern] {
+        assert_eq!(
+            blastit::host::dynamic_search_paths(object).expect("a search path this build reads"),
+            vec![entry.clone()],
+            "{}",
+            object.display()
+        );
+        assert!(
+            std::fs::read(object)
+                .expect("the object")
+                .windows(b"blastit-php-provenance".len())
+                .any(|window| window == b"blastit-php-provenance"),
+            "the fixture really is the directory this test made writable"
+        );
+    }
+    assert_eq!(
+        blastit::host::dynamic_search_paths(&clean).expect("no search path"),
+        Vec::<String>::new(),
+        "the accepted twin carries no DT_RPATH/DT_RUNPATH at all"
+    );
+
+    for object in [&legacy, &modern] {
+        let err = objects_refusal(vec![Claim::new("the NTS libphp", object)])
+            .expect_err("a writable search path must refuse a deployment boot");
+        assert!(
+            err.contains(&entry),
+            "{}: the refusal names the entry: {err}",
+            object.display()
+        );
+        assert!(
+            err.contains("DT_RPATH/DT_RUNPATH"),
+            "{}: and the tag: {err}",
+            object.display()
+        );
+        assert!(
+            err.contains("-rpath"),
+            "{}: and the fix: {err}",
+            object.display()
+        );
+    }
+    assert!(
+        objects_refusal(vec![Claim::new("the NTS libphp", &clean)]).is_ok(),
+        "the same object with no search path is what a deployment boots"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    println!(
+        "refused (DT_RPATH and DT_RUNPATH into {entry}); the same object without -rpath is \
+         accepted"
+    );
+}
+
+/// **The accepted twin** (`R7`, `B2-R5`): a whole deployment — the pair, the
+/// manifest directory, the front controller and a `[route.static]` root — at the
+/// modes an install has, owned by init's uid, is accepted. Then one directory is
+/// made world-writable and the same check refuses, so the acceptance is the
+/// permission bits and cannot be vacuous.
+#[test]
+fn the_same_tree_owned_by_init_is_accepted() {
+    let _root = StubRootGuard::start();
+    let stubs = stubs();
+    let root = protected_root("accepted");
+    let app = manifest_tree(&root, 0o755);
+    let site = app.join("site");
+    std::fs::create_dir_all(&site).expect("a static root");
+    std::fs::write(site.join("index.html"), b"<!doctype html>\n").expect("a static page");
+    set_mode(&site, 0o755);
+    let libs = root.join("lib");
+    std::fs::create_dir_all(&libs).expect("a library directory");
+    set_mode(&libs, 0o755);
+    let libphp = libs.join("libphp8.4.so");
+    let shim = libs.join(shim_name(84));
+    std::fs::copy(&stubs.nts_libphp, &libphp).expect("the stub library");
+    std::fs::copy(&stubs.nts_shim, &shim).expect("the stub shim");
+    set_mode(&libphp, 0o755);
+    set_mode(&shim, 0o755);
+
+    let objects = || {
+        vec![
+            Claim::new("the NTS libphp", &libphp),
+            Claim::new("the embedded shim", &shim),
+        ]
+    };
+    let trees = || {
+        vec![
+            Claim::new("the directory holding blastit.toml", &app),
+            Claim::new(
+                "route \"app\": [route.php] entry \"public/index.php\"",
+                app.join(ENTRY),
+            ),
+            Claim::new("route \"app\": [route.static] root \"site\"", &site),
+        ]
+    };
+    assert!(
+        objects_refusal(objects()).is_ok() && trees_refusal(trees()).is_ok(),
+        "an install at 0755/0644 owned by init's uid is what a deployment boots: {:?} {:?}",
+        objects_refusal(objects()),
+        trees_refusal(trees())
+    );
+    // Every path is owned by init's uid (this process), which is the ownership
+    // rule's allowed branch rather than an accident of the fixture.
+    for path in [&libphp, &shim, &app, &app.join(ENTRY), &site] {
+        assert_eq!(
+            std::fs::metadata(path).expect("the fixture").uid(),
+            effective_uid(),
+            "{} is owned by init's uid",
+            path.display()
+        );
+    }
+
+    // One directory at 0777 and the same check refuses: the bits, not the path.
+    set_mode(&site, 0o777);
+    let err = trees_refusal(trees()).expect_err("a 0777 static root must refuse");
+    assert!(err.contains(&site.display().to_string()), "{err}");
+
+    let _ = std::fs::remove_dir_all(&root);
+    println!("accepted at 0755/0644 owned by init's uid; refused once one directory is 0777");
+}
+
+/// **The `Production`-scoped twin, end to end.** The same `0777` fixture the
+/// legs above refuse — a `blastit.toml` directory a route uid can write, with
+/// the stub pair inside it — still boots and serves under `blastit dev`, because
+/// `ADR-0010` §3's provenance rule is a deployment rule (`R7`). A developer's
+/// shim lives in a checkout their own uid owns and writes, so asking "could
+/// another uid replace it" there protects nothing and would refuse every
+/// development boot.
+///
+/// This is the leg that is end to end: a real `blastit dev`, a real listener, a
+/// real answering port. Removing the scope split (applying the rule in
+/// `Development` too) makes it fail.
+#[test]
+fn a_dev_boot_of_a_world_writable_tree_still_serves() {
+    let scratch = Scratch::new("dev-provenance", PHP_MANIFEST);
+    scratch.write(ENTRY, NORMAL_PHP);
+    // The stub pair is compiled *here*, with this fixture's own canaries: the
+    // shared `stubs()` pair is the ZTS and inode-swap legs' evidence, and a boot
+    // that loaded it would write into their files.
+    let source = scratch.write("libphp_stub.c", LIBPHP_STUB_C);
+    let libphp = scratch.dir.join("libphp8.4.so");
+    compile(
+        &source,
+        &libphp,
+        &[
+            (
+                "BT_CANARY",
+                quote(&scratch.dir.join("libphp.canary").display().to_string()),
+            ),
+            ("BT_TAG", quote("libphp")),
+            ("BT_VERSION", quote("8.4.27")),
+        ],
+    );
+    let shim_source = scratch.write("shim_stub.c", SHIM_STUB_C);
+    let shim = scratch.dir.join(shim_name(84));
+    compile(
+        &shim_source,
+        &shim,
+        &[
+            (
+                "BT_CANARY",
+                quote(&scratch.dir.join("shim.canary").display().to_string()),
+            ),
+            ("BT_TAG", quote("shim84")),
+            ("BT_MINOR", "804".to_string()),
+        ],
+    );
+    // The fixture is exactly what the legs above refuse: the tree and the pair
+    // live in a directory any uid can write.
+    set_mode(&scratch.dir, 0o777);
+    assert_eq!(
+        std::fs::metadata(&scratch.dir).expect("the fixture").mode() & 0o777,
+        0o777,
+        "the fixture must be the world-writable tree the other legs refuse"
+    );
+    assert!(
+        trees_refusal(vec![Claim::new(
+            "the directory holding blastit.toml",
+            &scratch.dir
+        )])
+        .is_err(),
+        "and it really is refused by the deployment rule"
+    );
+
+    let mut boot = Boot::start(
+        &scratch.dir,
+        &[
+            ("BLASTIT_LIBPHP", &libphp.to_string_lossy()),
+            ("BLASTIT_PHP_SHIM_DIR", &scratch.dir.to_string_lossy()),
+        ],
+    );
+    assert!(
+        boot.await_boot().is_none(),
+        "`blastit dev` must still serve a 0777 checkout (the rule is Production-only): {}",
+        boot.stderr_text()
+    );
+    // The port accepts before stage 1's `ready`, so the event is *waited* for
+    // rather than snapshotted: `await_boot` returns the moment anything accepts.
+    assert!(
+        boot.wait_event(BOOT_TIMEOUT, |event| event["event"] == "ready")
+            .is_some(),
+        "a dev boot that serves announces `ready`: {}",
+        boot.stdout_text()
+    );
+    // It answers: a listener that binds and then refuses is not "serving". The
+    // stub shim has no request entry, so the answer is a `5xx` — what matters is
+    // that the boot accepted the request instead of refusing to start.
+    let response = first_answer(&boot);
+    assert!(
+        response.starts_with("HTTP/1.1 "),
+        "the dev boot answered over HTTP: {response}"
+    );
+    boot.stop();
+    println!(
+        "`blastit dev` served a 0777 tree the deployment rule refuses: {}",
+        response.lines().next().unwrap_or_default()
+    );
 }
