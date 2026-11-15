@@ -11,6 +11,8 @@
 #   make e2e            # build wheel and run Docker + rootless Docker e2e scenarios (gates)
 #   make php-sapi       # build the per-minor C SAPI shims this host has headers for
 #   make php-sapi-e2e   # Docker: build one shim and prove it with the real-load probe
+#   make rs-test-php    # real-pair PHP legs: critical_php_backend + critical_php_embed
+#   make rs-test-php-image # those two legs inside the php-sapi-e2e image (what CI runs)
 #   make mutants-rust   # run cargo-mutants on critical crates (PKG=blastit-sqlpolicy), disk scratch + memory cap
 #   make mutants-clean  # delete mutants.out and every cargo-mutants scratch copy, report bytes freed
 
@@ -111,6 +113,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
+        rs-test-php rs-test-php-image \
         mutants-clean mutants-scope-probe print-mutants-tmp
 
 help: ## Show available Make targets
@@ -425,6 +428,10 @@ PHP_SAPI_CC ?= $(CC)
 # (`MB.3.18` owns the full matrix).
 PHP_SAPI_ARCH ?=
 PHP_SAPI_LIBC ?=
+# Keep the e2e image after the probe (`php_sapi_probe.py --keep`), because
+# `rs-test-php-image` runs the two protected suites against its pair (`MB.3.39`):
+# it is the one environment with both the NTS `libphp8.4.so` and the shim.
+PHP_SAPI_KEEP ?=
 
 php-sapi: ## Build the C SAPI shims whose php-config exists; name the absent ones
 	@set -eu; \
@@ -492,7 +499,84 @@ php-sapi: ## Build the C SAPI shims whose php-config exists; name the absent one
 	echo "php-sapi: $$built shim(s) for $$arch-$$libc in $(PHP_SAPI_OUT); skipped:$${skipped:- none}"
 
 php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (not in `check`)
-	$(UV) run --no-project e2e/php_sapi_probe.py $(if $(PHP_MINOR),--minor $(PHP_MINOR))
+	$(UV) run --no-project e2e/php_sapi_probe.py \
+		$(if $(PHP_MINOR),--minor $(PHP_MINOR)) \
+		--image "$(PHP_SAPI_IMAGE)" \
+		$(if $(PHP_SAPI_KEEP),--keep)
+
+# The real-pair half of the two protected PHP suites (node MB.3.39).
+#
+# `make check` runs both files on a host with **no** PHP, so every CI run of it
+# exercises their refusal branch only (`refused … install the PHP embed
+# package`). These targets run the same two suites against a real NTS `libphp`
+# plus the shim built for it — the `[route.php]` page answering `200` through
+# `view.chan` with `cpu_ns`, the `exit()`/fatal containment and the slot
+# respawn, and the maps leg — which is what `MB.3.13`'s acceptance claims.
+#
+# `--nocapture` is load-bearing, not decoration: the evidence lines
+# (`served: HTTP/1.1 200 OK  cpu_ns=…`, `retired pid … respawned pid …`) are
+# `println!`s of **passing** tests, which cargo captures and drops. Both suites
+# choose their branch from an independent `host_php()` probe, so on a host
+# without the pair the same command is green and says `refused`: that is why
+# `.github/workflows/php-sapi.yml` greps the log for the refusal markers and for
+# the served ones instead of trusting the exit status.
+#
+# `BLASTIT_PHP_SHIM_DIR` is set here (not left to the suites' `target/php-sapi`
+# fallback) so the shim this host just built is the one the boot loads.
+PHP_SUITE_ARGS := --test critical_php_backend --test critical_php_embed
+# `php-sapi-e2e` builds this tag (forwarded to `php_sapi_probe.py --image`, so
+# the variable is the truth for both targets); `rs-test-php-image` runs the legs
+# against the pair inside it. Debian's `libphp8.4-embed` puts the library at
+# `/usr/lib/libphp8.4.so` (no multi-arch directory — checked in
+# `debian:trixie-slim`), and the image's own `make php-sapi` leaves the shim at
+# `/src/target/php-sapi`, which `docker cp` hands to the host run below.
+#
+# The test binaries are built **here** and only executed in the image: that
+# image is deliberately minimal (Debian slim + PHP + a Rust toolchain) and
+# cannot compile `blastit` — `pg_query`'s bindgen wants libclang, which it does
+# not install. Nothing else crosses the boundary: the binaries need only glibc
+# (checked with `ldd`), and the guest is newer than the host.
+PHP_SAPI_IMAGE ?= blastit-php-sapi-e2e:local
+PHP_SAPI_IMAGE_MINOR ?= 8.4
+PHP_SAPI_IMAGE_LIBPHP ?= /usr/lib/libphp$(PHP_SAPI_IMAGE_MINOR).so
+# Where the image's shim is copied so the suites' `BLASTIT_PHP_SHIM_DIR` names a
+# host path that is bind-mounted at the same absolute path inside the container.
+PHP_SAPI_IMAGE_SHIM_DIR ?= $(CURDIR)/target/php-sapi-image
+
+rs-test-php: php-sapi ## Real-pair PHP legs: critical_php_backend + critical_php_embed
+	@echo "BLASTIT_PHP_SHIM_DIR=$(PHP_SAPI_OUT) cargo test -p blastit $(PHP_SUITE_ARGS) -- --nocapture"
+	BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_OUT)" \
+		$(RUST_ENV) $(CARGO) test -p blastit --locked $(PHP_SUITE_ARGS) -- --nocapture
+
+rs-test-php-image: ## Docker: the same two PHP legs, run against the php-sapi-e2e image's pair (what CI runs)
+	@docker image inspect "$(PHP_SAPI_IMAGE)" >/dev/null 2>&1 || { \
+		echo "rs-test-php-image: no image '$(PHP_SAPI_IMAGE)'; build it first:" >&2; \
+		echo "  make php-sapi-e2e PHP_SAPI_KEEP=1" >&2; \
+		exit 1; \
+	}
+	@set -eu; \
+	echo "cargo test -p blastit $(PHP_SUITE_ARGS) --no-run   # build here, run in the image"; \
+	binaries=""; \
+	for binary in $$(CARGO_TERM_COLOR=never $(RUST_ENV) $(CARGO) test -p blastit --locked $(PHP_SUITE_ARGS) --no-run 2>&1 \
+		| awk '/Executable/{ if (match($$0, /\([^)]*\)$$/)) print substr($$0, RSTART+1, RLENGTH-2) }' ); do \
+		[ -x "$$binary" ] || { echo "rs-test-php-image: not an executable: $$binary" >&2; exit 1; }; \
+		binaries="$$binaries $$binary"; \
+	done; \
+	set -- $$binaries; \
+	[ "$$#" -eq 2 ] || { echo "rs-test-php-image: expected 2 test executables, got $$# ($$binaries)" >&2; exit 1; }; \
+	container=$$(docker create "$(PHP_SAPI_IMAGE)"); \
+	rm -rf "$(PHP_SAPI_IMAGE_SHIM_DIR)"; \
+	mkdir -p "$(PHP_SAPI_IMAGE_SHIM_DIR)"; \
+	docker cp "$$container:/src/target/php-sapi/." "$(PHP_SAPI_IMAGE_SHIM_DIR)/"; \
+	docker rm -f "$$container" >/dev/null; \
+	for binary in "$$@"; do \
+		echo "docker run $(PHP_SAPI_IMAGE) $$binary --nocapture"; \
+		docker run --rm --user "$$(id -u):$$(id -g)" \
+			-v "$(CURDIR):$(CURDIR)" -w "$(CURDIR)" \
+			-e BLASTIT_LIBPHP="$(PHP_SAPI_IMAGE_LIBPHP)" \
+			-e BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_IMAGE_SHIM_DIR)" \
+			"$(PHP_SAPI_IMAGE)" "$$binary" --nocapture; \
+	done
 
 mutants-rust: ## Run cargo-mutants with disk scratch + cgroup memory cap (PKG=<crate> to scope)
 	@mkdir -p "$(MUTANTS_TMP)"

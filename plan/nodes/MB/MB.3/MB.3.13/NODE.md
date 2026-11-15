@@ -4,7 +4,7 @@ title: "PhpEmbedRuntime: embedded view worker loop + stage0 BLASTIT_LIBPHP disco
 kind: epic
 status: ready
 priority: 2
-depends_on: [MB.3.11, MB.3.12, MB.3.5.4]
+depends_on: [MB.3.11, MB.3.12, MB.3.5.4, MB.3.37, MB.3.39, MB.3.40, MB.3.41]
 paths:
   - "crates/blastit-view/src/**"
   - "crates/blastit/src/**"
@@ -14,7 +14,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:39"
-updated: "2026-11-14T18:18"
+updated: "2026-11-15T02:12"
 ---
 
 # Goal

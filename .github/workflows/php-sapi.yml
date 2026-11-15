@@ -10,6 +10,13 @@
 # that must leave the worker able to serve the next request, and a `readelf -d`
 # check that the shim carries no `DT_NEEDED` on libphp.
 #
+# The two protected PHP suites (`MB.3.39`) then run against that image's pair:
+# `crates/blastit/tests/critical_php_backend.rs` and
+# `crates/blastit/tests/critical_php_embed.rs` boot `blastit` for real, which the
+# shim-level probe above cannot (no view fork, no `view.chan`, no scheduler
+# `cpu_ns`, no respawn). The guard step after them fails this job if they take
+# their no-PHP refusal branch instead of serving.
+#
 # Kept out of `make check` (Docker + a PHP image + a Rust toolchain in the
 # image), exactly like `e2e/`, so the shim cannot rot unnoticed between gates.
 name: PHP SAPI
@@ -37,7 +44,10 @@ jobs:
     name: build libblastit_php8.4.so and load it
     runs-on: ubuntu-latest
     # The image installs PHP 8.4 + rustup and builds the workspace's one crate:
-    # ~8 minutes cold, ~2 cached. 30 is the outer bound, not a promise.
+    # ~8 minutes cold, ~2 cached, plus the two protected PHP suites (`MB.3.39`:
+    # the runner builds their binaries and the image's pair serves them; the
+    # suites themselves are ~2 s, the build is cached after the first run).
+    # 30 is the outer bound, not a promise.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -59,5 +69,76 @@ jobs:
         run: |
           cargo fmt --manifest-path e2e/php-sapi/seccomp-exec/Cargo.toml -- --check
           cargo clippy --manifest-path e2e/php-sapi/seccomp-exec/Cargo.toml -- -D warnings
-      - name: make php-sapi-e2e (Docker: debian:trixie-slim + php8.4-dev + libphp8.4-embed)
-        run: make php-sapi-e2e
+      # Quoted: a plain scalar may not hold `: ` (this line was invalid YAML before
+      # `MB.3.39`; `yaml.safe_load` refused the whole workflow).
+      - name: 'make php-sapi-e2e (Docker: debian:trixie-slim + php8.4-dev + libphp8.4-embed)'
+        run: make php-sapi-e2e PHP_SAPI_KEEP=1
+      # `MB.3.39`: the real-pair half of the two protected suites.
+      #
+      # Every other job in CI runs `make check` on a host with no PHP, so
+      # `critical_php_backend` and `critical_php_embed` can only prove their
+      # refusal branch there (`refused … install the PHP embed package`). Three
+      # of the epic's acceptance bullets — the `[route.php]` page answering `200`
+      # through `view.chan` with `cpu_ns`, the `exit()`/fatal containment and the
+      # slot respawn, and the maps leg — need a real NTS `libphp` plus the shim,
+      # which only the image `make php-sapi-e2e` just built has
+      # (`php-sapi-e2e --keep` leaves it). So the suites run **against that
+      # image's pair**: it is the Debian trixie pair ADR-0010 §4.2 asks a host to
+      # install, and `libphp8.4-dev`/`libphp8.4-embed` are not in the runner's own
+      # Ubuntu archive (they would need a third-party PPA). The host builds the
+      # test binaries (`make rs-test-php-image` runs `cargo test --no-run` here)
+      # and the image executes them, because that minimal image cannot compile
+      # `blastit` (`pg_query`'s bindgen wants libclang).
+      # `make rs-test-php-image` is the one command, and it runs anywhere Docker is.
+      - name: make rs-test-php-image (critical_php_backend + critical_php_embed on the real pair)
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          make rs-test-php-image 2>&1 | tee "$RUNNER_TEMP/php-pair.log"
+          seconds=$(( $(date +%s) - start ))
+          {
+            echo "### The real PHP pair (\`MB.3.39\`)"
+            echo ""
+            echo "| what | value |"
+            echo "|---|---|"
+            echo "| libphp | \`/usr/lib/libphp8.4.so\` (\`libphp8.4-embed\`, in the image) |"
+            echo "| shim | \`/src/target/php-sapi/libblastit_php84-x86_64-gnu.so\` |"
+            echo "| wall time of this step | **${seconds} s** (job bound: 30 min) |"
+            echo "| suites | \`critical_php_backend\`, \`critical_php_embed\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      # A runner that silently has no PHP must never report green: both suites
+      # pick their branch from their own `host_php()` probe, so a missing pair is
+      # a *passing* test run that prints these lines. The served evidence is
+      # required as well, so "the markers changed wording" fails closed too.
+      #
+      # The refusal pattern is anchored on the **suites' own printout**
+      # (`refused (no usable …` / `refused: …`), never on a bare boot sentence:
+      # `no usable NTS libphp was found`, `no shim libblastit_php…` and
+      # `install the PHP embed package` are all stage-0 text that a *healthy*
+      # leg's captured output can contain (the ZTS, not-a-library, another-minor,
+      # inode-pin and probe-timeout legs refuse on purpose and print it), so
+      # grepping those would false-fail a good run.
+      - name: 'guard: the pair legs must serve, not refuse'
+        run: |
+          log="$RUNNER_TEMP/php-pair.log"
+          status=0
+          if refuses=$(grep -nE \
+                '^refused( \(no usable libphp \+ shim on this host|: .*no usable NTS libphp was found)' \
+                "$log"); then
+            echo "::error::the PHP pair legs took the refusal branch: this runner has no usable libphp + shim, so nothing was proved"
+            echo "$refuses"
+            status=1
+          fi
+          for evidence in 'served: HTTP/1\.1 200 OK' 'retired pid .* respawned pid'; do
+            if ! grep -qE "$evidence" "$log"; then
+              echo "::error::the real-pair evidence is missing from the suites' output: $evidence"
+              status=1
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
+            echo "--- $log (tail) ---"
+            tail -n 60 "$log"
+            exit 1
+          fi
+          echo "the pair legs served: $(grep -cE 'served: HTTP/1\.1 200 OK' "$log") 200(s), $(grep -cE 'respawned pid' "$log") respawn(s)"
