@@ -47,6 +47,22 @@ Version needs section '.gnu.version_r' contains 1 entry:
   0x0040:   Name: GCC_3.3  Flags: none  Version: 2
 """
 
+# The same shape one step further: a **non-glibc** version script that declares an
+# ABI node instead of a `GLIBC_<x.y>` one. `GLIBC_ABI_DT_RELR` is the name glibc
+# gives its DT_RELR *feature*, so a library that is not glibc can list it without
+# the file depending on glibc at all — and a musl ELF carrying it was still read
+# as "needs glibc 2.36" and refused in `alpine:3.21` (`MB.3.66`).
+MUSL_ABI_NODE_TRANSCRIPT = """\
+Version symbols section '.gnu.version' contains 311 entries:
+ Addr: 0x000000000000302e  Offset: 0x0000302e  Link: 27 (.dynsym)
+  000:   0 (*local*)       1 (*global*)       2 (GLIBC_ABI_DT_RELR)  1 (*global*)
+
+Version needs section '.gnu.version_r' contains 1 entry:
+ Addr: 0x0000000000002140  Offset: 0x00002140  Link: 5 (.dynstr)
+  000000: Version: 1  File: libgcc_s-69c45f16.so.1  Cnt: 1
+  0x0010:   Name: GLIBC_ABI_DT_RELR  Flags: none  Version: 2
+"""
+
 
 def _copy_workflow_fixture(dst: Path) -> Path:
     root = dst / "repo"
@@ -818,9 +834,9 @@ def _run_exec_env(env: dict[str, str], binary: Path, image: str = "alpine:3.21")
 
 
 def test_exec_env_cases() -> int:
-    """`MB.3.63`: the judge reads the binary's own libc, and cannot decide is 2.
+    """`MB.3.63`/`MB.3.66`: the judge reads the binary's own libc, and cannot decide is 2.
 
-    Four cases, each one a verdict the gate used to get wrong in some shape:
+    Ten cases, each one a verdict the gate used to get wrong in some shape:
 
     * a file `readelf` cannot parse is exit **2** (cannot decide), never 1 (too
       old) — the direction `MB.3.61` documented and this test pins;
@@ -832,7 +848,11 @@ def test_exec_env_cases() -> int:
       refuses a musl image, because the rule keys on the ELF's libc and not on
       the spelling of a version node;
     * a musl interpreter beside `NEEDED libc.so.6` is contradictory evidence and
-      is exit 2, not a silently chosen half.
+      is exit 2, not a silently chosen half;
+    * a musl ELF whose only version needs are a non-glibc `GLIBC_ABI_DT_RELR`
+      node passes in `alpine:3.21` rather than being read as a 2.36 floor, while
+      the same node on a **glibc** ELF keeps its floor and is refused by 2.31
+      (`MB.3.66`).
     """
     cases_run = 0
     if shutil.which("readelf") is None:
@@ -1006,6 +1026,90 @@ def test_exec_env_cases() -> int:
             "contradicts itself" in res.stderr,
             "the name-free contradiction must be refused as such, not passed as "
             "static/no-glibc",
+            res.stderr,
+        )
+        cases_run += 1
+
+        # (d) the last false refusal of its class (`MB.3.66`): a **non-glibc**
+        #     version script declaring an ABI node — `GLIBC_ABI_DT_RELR`, no
+        #     `GLIBC_<x.y>` name at all — on a musl ELF. The ABI-node loop used to
+        #     run whatever the loader said, so this file was read as "needs glibc
+        #     2.36" and refused in the one image that can run it. The libc is a
+        #     fact in `INTERP`/`NEEDED`, so a glibc feature name from a library
+        #     that is not glibc is no more a floor than `GLIBC_2.0` is, and the
+        #     ignored name is printed rather than dropped.
+        musl_abi_env = _fake_env(
+            root / "musl-with-abi-node",
+            interp="/lib/ld-musl-aarch64.so.1",
+            needed="libgcc_s.so.1\nlibc.musl-aarch64.so.1",
+            version_info=MUSL_ABI_NODE_TRANSCRIPT,
+        )
+        res = _run_exec_env(musl_abi_env, binary)
+        _expect(
+            res.returncode == 0,
+            "a musl artifact whose version needs carry only a GLIBC_ABI_* node "
+            "must pass in a musl image, not be read as a 2.36 glibc floor "
+            f"(MB.3.66); got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "links musl" in res.stdout + res.stderr
+            and "GLIBC_ABI_DT_RELR" in res.stdout + res.stderr
+            and "2.36" not in res.stdout + res.stderr,
+            "the pass must name the GLIBC_ABI_* node it ignored and must not "
+            "quote a 2.36 floor for a file that loads no glibc",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        #     The skip is the *loop*, not a whitelist of known nodes: an ABI name
+        #     this check has never heard of is also not a glibc floor on a file
+        #     that loads no glibc, and refusing it with "cannot decide" would be
+        #     the same false refusal wearing exit 2. It is still reported.
+        unknown_abi_transcript = MUSL_ABI_NODE_TRANSCRIPT.replace(
+            "GLIBC_ABI_DT_RELR", "GLIBC_ABI_FUTURE_FEATURE"
+        )
+        musl_unknown_abi_env = _fake_env(
+            root / "musl-with-unknown-abi-node",
+            interp="/lib/ld-musl-x86_64.so.1",
+            needed="libgcc_s.so.1",
+            version_info=unknown_abi_transcript,
+        )
+        res = _run_exec_env(musl_unknown_abi_env, binary)
+        _expect(
+            res.returncode == 0,
+            "an ABI node this check does not know is still not a glibc floor on "
+            f"a musl ELF: the loop is skipped, not filtered; got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "GLIBC_ABI_FUTURE_FEATURE" in res.stdout + res.stderr,
+            "the skipped node must be named, not dropped",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        #     ... and the same node on a **glibc** ELF keeps its floor: 2.36 from
+        #     `GLIBC_ABI_DT_RELR`, so a 2.31 image is still refused. This is the
+        #     leg that forbids the shortcut of exempting ABI nodes outright.
+        glibc_abi_env = _fake_env(
+            root / "glibc-with-abi-node",
+            machine="Advanced Micro Devices X86-64",
+            interp="/lib64/ld-linux-x86-64.so.2",
+            needed="libgcc_s.so.1\nlibc.so.6",
+            version_info=MUSL_ABI_NODE_TRANSCRIPT,
+            image_libc="2.31",
+        )
+        res = _run_exec_env(glibc_abi_env, binary, image="debian:bullseye-slim")
+        _expect(
+            res.returncode == 1,
+            "a glibc ELF that genuinely needs GLIBC_ABI_DT_RELR must keep its "
+            f"2.36 floor and be refused by a 2.31 image; got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "needs glibc 2.36" in res.stderr and "GLIBC_ABI_DT_RELR" in res.stderr,
+            "the glibc refusal must name the ABI node the loader would not find",
             res.stderr,
         )
         cases_run += 1

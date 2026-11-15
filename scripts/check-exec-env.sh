@@ -58,6 +58,13 @@
 # `NEEDED libc.musl-*`, with or without any `GLIBC_*` name) the verdict is 2
 # "cannot decide", never 1 "too old" and never a chosen half.
 #
+# The same holds for a `GLIBC_ABI_*` node: it names a glibc *feature*, not a
+# version of anything, so a non-glibc version script may declare one without the
+# file depending on glibc at all. A musl ELF carrying `GLIBC_ABI_DT_RELR` and no
+# `GLIBC_<x.y>` name was read as "needs glibc 2.36" and refused in `alpine:3.21`
+# (`MB.3.66`); the ABI-node loop now runs only for an ELF whose loader is glibc,
+# and a glibc ELF that really needs the node keeps its 2.36 floor.
+#
 # A tag that exists only on this machine (an image a `docker build` just made) is
 # refused for the same reason a wrong tag is: the pull is what proves the tag the
 # user will actually get. Push it, or point the check at the public base image.
@@ -140,6 +147,10 @@ done
 #   GLIBC_ABI_DT_RELR  -> 2.36 (relative relocations, glibc 2.36)
 #   any other GLIBC_ABI_* -> refused: this check does not know that feature's
 #                            floor, and guessing it is how a gate goes vacuous.
+#
+# Both readings are glibc *floors*, so they are read only from an ELF whose loader
+# is glibc: on a musl file the whole block is skipped and the names are reported
+# as ignored (see the musl paragraph above).
 #
 # **A file `readelf` cannot read is exit 2 ("cannot decide"), never exit 1
 # ("too old").** `readelf --version-info README.md` writes "Error: Not an ELF
@@ -245,47 +256,60 @@ required=$(
 # belong to the version script of `libgcc_s`/`libunwind`, which on aarch64
 # spells one of them `GLIBC_2.0`. The slot stays empty so a musl image is not
 # refused for it, and the ignored names are printed rather than dropped.
-ignored_glibc_names=""
-if [ -n "$required" ] && [ -n "$musl_evidence" ]; then
-    ignored_glibc_names=$(
-        printf '%s\n' "$version_info" \
-            | sed -n 's/.*Name: \(GLIBC_[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
-            | sort -u | tr '\n' ' ' | sed 's/ *$//'
+#
+# A non-glibc version script can also declare an ABI *node* (`GLIBC_ABI_DT_RELR`),
+# which is the name glibc gives a feature and not a version of anything: on a musl
+# ELF it belongs to a library that is not glibc, so it is no more a floor than
+# `GLIBC_2.0` is, and the ABI-node loop below is skipped for the same reason
+# (`MB.3.66`). Both spellings are ignored together, because the question they
+# would answer — "which glibc does this file need?" — was already answered by the
+# loader and `NEEDED`: none.
+ignored_names=""
+abi_nodes=""
+abi_floor=""
+abi_decides=0
+if [ -n "$musl_evidence" ]; then
+    ignored_names=$(
+        {
+            printf '%s\n' "$version_info" \
+                | sed -n 's/.*Name: \(GLIBC_[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p'
+            printf '%s\n' "$version_info" \
+                | sed -n 's/.*Name: \(GLIBC_ABI_[A-Za-z0-9_]*\).*/\1/p'
+        } | sort -u | tr '\n' ' ' | sed 's/ *$//'
     )
     required=""
-fi
-if [ -n "$ignored_glibc_names" ] && [ "$quiet" -eq 0 ]; then
-    echo "check-exec-env: $(basename "$binary") links musl ($musl_evidence), so $ignored_glibc_names in .gnu.version_r is not a glibc requirement"
-    echo "  those names are the version script of a library that is not glibc (libgcc_s/libunwind); machine ${elf_machine:-unknown}"
-fi
-abi_nodes=$(
-    printf '%s\n' "$version_info" \
-        | sed -n 's/.*Name: \(GLIBC_ABI_[A-Za-z0-9_]*\).*/\1/p' \
-        | sort -u
-)
-abi_floor=""
-while IFS= read -r node; do
-    case "$node" in
-        "") continue ;;
-        GLIBC_ABI_DT_RELR) abi_floor=2.36 ;;
-        *)
-            echo "check-exec-env: FAIL — $(basename "$binary") needs $node, whose glibc floor this check does not know" >&2
-            echo "  add it to scripts/check-exec-env.sh with the glibc release that introduced it" >&2
-            exit 2
-            ;;
-    esac
-done <<EOF
+    if [ -n "$ignored_names" ] && [ "$quiet" -eq 0 ]; then
+        echo "check-exec-env: $(basename "$binary") links musl ($musl_evidence), so $ignored_names in .gnu.version_r is not a glibc requirement"
+        echo "  those names are the version script of a library that is not glibc (libgcc_s/libunwind); machine ${elf_machine:-unknown}"
+    fi
+else
+    abi_nodes=$(
+        printf '%s\n' "$version_info" \
+            | sed -n 's/.*Name: \(GLIBC_ABI_[A-Za-z0-9_]*\).*/\1/p' \
+            | sort -u
+    )
+    while IFS= read -r node; do
+        case "$node" in
+            "") continue ;;
+            GLIBC_ABI_DT_RELR) abi_floor=2.36 ;;
+            *)
+                echo "check-exec-env: FAIL — $(basename "$binary") needs $node, whose glibc floor this check does not know" >&2
+                echo "  add it to scripts/check-exec-env.sh with the glibc release that introduced it" >&2
+                exit 2
+                ;;
+        esac
+    done <<EOF
 $abi_nodes
 EOF
-# The two floors are compared as versions, not as strings: `2.4 < 2.36 < 2.39`.
-abi_decides=0
-if [ -n "$abi_floor" ]; then
-    highest=$(printf '%s\n%s\n' "${required:-0}" "$abi_floor" | sort -V | tail -n 1)
-    if [ "$highest" = "$abi_floor" ] && [ "${required:-0}" != "$abi_floor" ]; then
-        abi_decides=1
+    # The two floors are compared as versions, not as strings: `2.4 < 2.36 < 2.39`.
+    if [ -n "$abi_floor" ]; then
+        highest=$(printf '%s\n%s\n' "${required:-0}" "$abi_floor" | sort -V | tail -n 1)
+        if [ "$highest" = "$abi_floor" ] && [ "${required:-0}" != "$abi_floor" ]; then
+            abi_decides=1
+        fi
+        required=$highest
+        [ "$required" = "0" ] && required=""
     fi
-    required=$highest
-    [ "$required" = "0" ] && required=""
 fi
 
 # One image, one verdict: prints the passing line or the refusal and returns

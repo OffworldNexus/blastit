@@ -1891,3 +1891,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T23:18 [MB.3.65] (lead) attempt 1/3 started; base 2419971
 - 2026-11-16T00:11 [MB.3.65] (lead) status active -> review
 - 2026-11-16T00:19 [MB.3.65] (lead) status review -> done
+- 2026-11-16T00:19 [MB.3.68] (lead) created (task) The unsupported-minor sentence must not fire on a supported library at an unprobed name
+- 2026-11-16T00:19 [MB.3.69] (lead) created (task) Run the rewritten two-package witness, and correct the grepped-set list
+- 2026-11-16T00:19 [MB.3.65] (lead) commit fa91776; reviewer MINORs filed as MB.3.68 (installed_unsupported names a stray 8.2 object when a supported lib sits at an unprobed spelling) and MB.3.69 
+- 2026-11-16T00:19 [MB.3.66] (lead) status ready -> active
+- 2026-11-16T00:19 [MB.3.66] (lead) attempt 1/3 started
+- 2026-11-16T00:19 [MB.3.66] (lead) attempt 1/3 started; base fa91776
+- 2026-11-16T00:28 [MB.3.66] (lead) the docs-unit red it reported was MY brief: plan/nodes/MB/MB.3/MB.3.68/NODE.md:31 quoted 'fall back' (a retired PHP vocabulary the guard bans in live briefs). R
+- 2026-11-16T00:28 [MB.3.66] (lead) status active -> review
+- 2026-11-16T00:33 [MB.3.66] (lead) status review -> done
