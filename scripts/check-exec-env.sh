@@ -124,14 +124,36 @@ done
 #   GLIBC_ABI_DT_RELR  -> 2.36 (relative relocations, glibc 2.36)
 #   any other GLIBC_ABI_* -> refused: this check does not know that feature's
 #                            floor, and guessing it is how a gate goes vacuous.
+#
+# **A file `readelf` cannot read is exit 2 ("cannot decide"), never exit 1
+# ("too old").** `readelf --version-info README.md` writes "Error: Not an ELF
+# file" to stderr and exits 1; under `set -euo pipefail` that used to abort the
+# assignment with no message at all, so the caller saw the *wrong verdict* with
+# no reason — the same class of false reason this check exists to remove
+# (`MB.3.61`). The header documents 2 as "an image whose C library could not be
+# read"; a binary readelf cannot parse has no C library requirement to read, and
+# reporting one would be a guess.
+read_version_info() {
+    local output
+    if ! output=$(readelf --version-info "$binary" 2>&1); then
+        echo "check-exec-env: FAIL — cannot read symbol versions from '$(basename "$binary")', so its glibc requirement is unknown:" >&2
+        printf '%s\n' "$output" | sed 's/^/  /' >&2
+        echo "  a file readelf cannot parse has no version requirement to compare, and" >&2
+        echo "  reporting one would be a guess. Pass the ELF binary this check is about." >&2
+        exit 2
+    fi
+    printf '%s\n' "$output"
+}
+
+version_info=$(read_version_info)
 required=$(
-    readelf --version-info "$binary" 2>/dev/null \
+    printf '%s\n' "$version_info" \
         | sed -n 's/.*Name: GLIBC_\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
         | sort -V \
         | tail -n 1
 )
 abi_nodes=$(
-    readelf --version-info "$binary" 2>/dev/null \
+    printf '%s\n' "$version_info" \
         | sed -n 's/.*Name: \(GLIBC_ABI_[A-Za-z0-9_]*\).*/\1/p' \
         | sort -u
 )

@@ -452,6 +452,10 @@ pub(crate) fn no_python_support(
 /// dotted Debian/Ubuntu name and the **packed** Alpine 8.3 one (`libphp83.so`;
 /// Alpine's 8.4 states its minor in `/usr/lib/php84` instead, `MB.3.59`), so a
 /// host with `BLASTIT_LIBPHP` unset reaches Alpine's package without a copy.
+///
+/// The unversioned `libphp.so` is last here because on its own it states no
+/// minor; the per-minor directory it sits in states one, which is why
+/// [`LIBPHP_PROBES`] also tries it there, under that minor (`MB.3.61`).
 pub(crate) const LIBPHP_CANDIDATES: [&str; 10] = [
     "libphp8.4.so",
     "libphp-8.4.so",
@@ -463,6 +467,87 @@ pub(crate) const LIBPHP_CANDIDATES: [&str; 10] = [
     "libphp-8.2.so",
     "libphp82.so",
     "libphp.so",
+];
+
+/// One step of the discovery order: a file name, and which of
+/// [`PhpSearch::lib_dirs`] it is looked for in (`MB.3.61`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LibphpProbe {
+    /// The file name, as [`LIBPHP_CANDIDATES`] spells it.
+    name: &'static str,
+    /// `None`: every directory, in [`PhpSearch::lib_dirs`] order. `Some("php84")`:
+    /// only the per-minor embed directories whose last component is that name, so
+    /// a `libphp.so` there is the 8.4 library the *path* names.
+    per_minor_dir: Option<&'static str>,
+}
+
+/// The order [`first_existing`] walks: **version-major**, then spelling
+/// (`MB.3.61`).
+///
+/// Each minor's own spellings — dotted, hyphenated, packed, and the per-minor
+/// `libphp.so` — are all tried before the next minor's, so the newest *library*
+/// wins rather than the first name in a list. That is what makes a host with two
+/// embed packages installed serve from the newest one: Alpine's `php82-embed`
+/// puts `libphp82.so` in `/usr/lib` and `php84-embed` puts `libphp.so` in
+/// `/usr/lib/php84`, and a name-major walk preferred `libphp82.so` — an object
+/// with no `php_version`, refused, while the 8.4 library beside it would serve.
+///
+/// The unversioned `libphp.so` in the plain directories stays last: its minor is
+/// only known from the descriptor's link target or the object's own bytes, so it
+/// is a fallback, not a preference.
+const LIBPHP_PROBES: [LibphpProbe; 13] = [
+    LibphpProbe {
+        name: "libphp8.4.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp-8.4.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp84.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp.so",
+        per_minor_dir: Some("php84"),
+    },
+    LibphpProbe {
+        name: "libphp8.3.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp-8.3.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp83.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp.so",
+        per_minor_dir: Some("php83"),
+    },
+    LibphpProbe {
+        name: "libphp8.2.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp-8.2.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp82.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp.so",
+        per_minor_dir: Some("php82"),
+    },
+    LibphpProbe {
+        name: "libphp.so",
+        per_minor_dir: None,
+    },
 ];
 
 /// The distributions' PHP embed packages, named once so every refusal says the
@@ -611,6 +696,10 @@ fn shim_name(version: PhpVersion) -> String {
 /// with `BLASTIT_LIBPHP` unset a fixed name alone cannot reach it — the
 /// directory is half of the package's spelling (`MB.3.59`). `/usr/local/lib/php8x`
 /// is the twin of a copy an operator put there.
+///
+/// The directory order is *within* one minor: [`LIBPHP_PROBES`] picks the minor
+/// first, so `/usr/lib/php84` outranks `/usr/lib/libphp82.so` even though it is
+/// listed later (`MB.3.61`).
 fn library_dirs() -> Vec<PathBuf> {
     let triplet = multiarch_triplet();
     [
@@ -752,8 +841,11 @@ enum PhpRefusal {
         /// The version its name states, when it states one.
         version: Option<PhpVersion>,
     },
-    /// The object exports no `php_version`, so the worker cannot read its
-    /// minor at load time (`MB.3.59`; PHP 8.2 and earlier ship it that way).
+    /// The object's `.dynsym` has no `php_version` **name**, so the worker
+    /// cannot resolve the symbol it reads its minor from at load time
+    /// (`MB.3.59`; PHP 8.2 and earlier ship it that way). An object that exports
+    /// the name but whose body this walk cannot read is [`Self::NoVersion`], not
+    /// this (`MB.3.61`).
     NoPhpVersion {
         /// The candidate.
         path: PathBuf,
@@ -771,8 +863,10 @@ enum PhpRefusal {
         /// What the object's compile-time version string says, when readable.
         measured: Option<PhpVersion>,
     },
-    /// `php_version` is exported but the compile-time version string could not
-    /// be read from the object, and the path states no minor either.
+    /// `php_version` is exported in the `.dynsym`, but the version it returns
+    /// could not be read from the object — no readable `return PHP_VERSION;`
+    /// body, an `STT_NOTYPE` symbol, or `st_size == 0` — and the path states no
+    /// minor either (`MB.3.61`).
     NoVersion {
         /// The candidate.
         path: PathBuf,
@@ -896,10 +990,11 @@ fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String
             )
         }
         PhpRefusal::NoVersion { path } => format!(
-            "{prefix}{} is an NTS libphp that exports `php_version` in its `.dynsym`, but its \
-             compile-time version string could not be read from its sections and neither its \
-             file name nor its directory states a PHP major.minor, so no shim can be chosen \
-             for it; give it a versioned name (libphp8.4.so, libphp-8.4.so, …), or \
+            "{prefix}{} is an NTS libphp that exports `php_version` in its `.dynsym`, but the \
+             version that symbol returns could not be read from its sections (no readable \
+             `return PHP_VERSION;` body — a symbol typed `STT_NOTYPE` or sized `0` is one), and \
+             neither its file name nor its directory states a PHP major.minor, so no shim can \
+             be chosen for it; give it a versioned name (libphp8.4.so, libphp-8.4.so, …), or \
              {PHP_OVERRIDE}; {PHP_PACKAGES}",
             path.display()
         ),
@@ -1274,9 +1369,10 @@ fn first_php_route(manifest: &Manifest) -> Option<(&str, &str, Option<u32>)> {
 /// Resolves the NTS `libphp` and its shim, or names why not (`ADR-0010` §3).
 ///
 /// `BLASTIT_LIBPHP` is the only candidate when set — a boot never falls back to
-/// a distro copy the operator did not name. Otherwise the fixed names are tried
-/// in [`LIBPHP_CANDIDATES`] order, each in every directory of
-/// [`PhpSearch::lib_dirs`], so the *version* preference wins over the directory.
+/// a distro copy the operator did not name. Otherwise [`LIBPHP_PROBES`] is
+/// walked version-major — every 8.4 spelling, then every 8.3 one, then 8.2 —
+/// each in every directory of [`PhpSearch::lib_dirs`], so the *library's*
+/// version wins over both its name and its directory (`MB.3.61`).
 ///
 /// # Both records are the *resolved* path
 ///
@@ -1347,8 +1443,11 @@ fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
         }
     }
     // The worker resolves `php_version` before it can start anything, so an
-    // object without it is refused here — whatever its file name says
-    // (`MB.3.59`; PHP 8.2 and earlier are the builds that ship it that way).
+    // object whose `.dynsym` has no such **name** is refused here — whatever
+    // its file name says (`MB.3.59`; PHP 8.2 and earlier are the builds that
+    // ship it that way). Presence is the name alone: an odd object that exports
+    // it as `STT_NOTYPE` or with no size is refused later, and for the reason
+    // that is actually true (`MB.3.61`).
     if !facts.exports_php_version {
         return Err(PhpRefusal::NoPhpVersion {
             path: path.clone(),
@@ -1405,13 +1504,21 @@ fn resolve(path: &Path) -> Result<PathBuf, PhpRefusal> {
     })
 }
 
-/// The first fixed name that exists, in name-major order.
+/// The first probe of [`LIBPHP_PROBES`] that exists, in its own order.
+///
+/// Version-major, then spelling (`MB.3.61`): the *minor* is preferred, and the
+/// name only breaks a tie within it, so a host carrying two embed packages
+/// serves from the newer one instead of preferring whichever name came first.
 fn first_existing(search: &PhpSearch) -> Option<PathBuf> {
-    LIBPHP_CANDIDATES.iter().find_map(|name| {
+    LIBPHP_PROBES.iter().find_map(|probe| {
         search
             .lib_dirs
             .iter()
-            .map(|dir| dir.join(name))
+            .filter(|dir| match probe.per_minor_dir {
+                None => true,
+                Some(minor) => dir.file_name() == Some(OsStr::new(minor)),
+            })
+            .map(|dir| dir.join(probe.name))
             .find(|path| path.is_file())
     })
 }
@@ -1561,6 +1668,11 @@ struct ObjectFacts {
     abi: ZendAbi,
     /// Whether `php_version` is exported — the symbol the worker resolves before
     /// `php_module_startup`. Its absence is PHP 8.2-and-earlier's signature.
+    ///
+    /// Presence comes from the **name** in the `.dynsym` and nothing else: an
+    /// object that exports it as `STT_NOTYPE`, or with `st_size == 0`, does
+    /// export it, and refusing it as "exports no `php_version`" was a false
+    /// sentence (`MB.3.61`). What the body says is [`ObjectFacts::version`].
     exports_php_version: bool,
     /// The compile-time version `php_version()` returns, read from the string
     /// its body points at; `None` when the body is not the shape this walk
@@ -1604,11 +1716,11 @@ fn inspect_object(file: &mut std::fs::File) -> Result<ObjectFacts, String> {
         (_, true) => ZendAbi::Zts,
     };
     let version = symbols
-        .php_version
+        .php_version_body
         .and_then(|symbol| php_version_string(file, &header, &table, symbol));
     Ok(ObjectFacts {
         abi,
-        exports_php_version: symbols.php_version.is_some(),
+        exports_php_version: symbols.exports_php_version,
         version,
     })
 }
@@ -1791,9 +1903,14 @@ struct DynSymbols {
     executor_globals: bool,
     /// `tsrm_startup` is exported (a ZTS build).
     tsrm_startup: bool,
-    /// `php_version` is exported **as a function**, with `(st_value, st_size)`:
-    /// the symbol the worker's loader resolves before `php_module_startup`.
-    php_version: Option<(u64, u64)>,
+    /// The `.dynsym` exports the **name** `php_version`: the symbol the worker's
+    /// loader resolves before `php_module_startup`, and the only fact PHP 8.2's
+    /// absence is read from. Presence is the name alone, whatever the symbol is
+    /// typed or sized (`MB.3.61`).
+    exports_php_version: bool,
+    /// `php_version`'s `(st_value, st_size)` — its *body*, and a separate fact:
+    /// set only for a symbol typed `STT_FUNC` whose fields the walk could read.
+    php_version_body: Option<(u64, u64)>,
 }
 
 /// Which of the symbols above the dynamic table exports.
@@ -1813,7 +1930,8 @@ fn scan_symbols(
     let mut symbols = DynSymbols {
         executor_globals: false,
         tsrm_startup: false,
-        php_version: None,
+        exports_php_version: false,
+        php_version_body: None,
     };
     for index in 0..dynsym.len() / entsize {
         let at = index.saturating_mul(entsize);
@@ -1827,12 +1945,20 @@ fn scan_symbols(
         match name {
             b"executor_globals" => symbols.executor_globals = true,
             b"tsrm_startup" => symbols.tsrm_startup = true,
-            b"php_version" if symbol_is_function(*class, dynsym, at) => {
-                if let (Some(value), Some(size)) = (
-                    symbol_value(*class, dynsym, at),
-                    symbol_size(*class, dynsym, at),
-                ) {
-                    symbols.php_version = Some((value, size));
+            b"php_version" => {
+                // Presence is the name alone (`MB.3.61`): an object that exports
+                // `php_version` as `STT_NOTYPE`, or with `st_size == 0`, still
+                // exports it, and saying otherwise is a false sentence. The body
+                // is a second fact, read only when it is the shape the version
+                // decode understands.
+                symbols.exports_php_version = true;
+                if symbol_is_function(*class, dynsym, at)
+                    && let (Some(value), Some(size)) = (
+                        symbol_value(*class, dynsym, at),
+                        symbol_size(*class, dynsym, at),
+                    )
+                {
+                    symbols.php_version_body = Some((value, size));
                 }
             }
             _ => {}
@@ -4315,10 +4441,41 @@ path = ['.*']
         shared_object_with(names, None, false)
     }
 
+    /// How the fixture types the `php_version` symbol (`MB.3.61`).
+    ///
+    /// Presence is read from the **name**, so every shape below is an object
+    /// that exports `php_version`; only the body fact differs.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum PhpVersionSymbol {
+        /// `STT_FUNC` with the body's true size — what a distro build produces.
+        Function,
+        /// `STT_NOTYPE`, the body bytes still in `.text`: an odd but valid
+        /// object that does export the symbol.
+        NotType,
+        /// `STT_FUNC` with `st_size == 0`: the body is there, its extent is not
+        /// stated.
+        ZeroSize,
+    }
+
     fn shared_object_with(
         names: &[&str],
         version: Option<&str>,
         exports_php_version: bool,
+    ) -> Vec<u8> {
+        shared_object_in(
+            names,
+            version,
+            exports_php_version,
+            PhpVersionSymbol::Function,
+        )
+    }
+
+    /// The same object with `php_version` typed/shaped by `symbol` (`MB.3.61`).
+    fn shared_object_in(
+        names: &[&str],
+        version: Option<&str>,
+        exports_php_version: bool,
+        symbol: PhpVersionSymbol,
     ) -> Vec<u8> {
         let machine: u16 = if cfg!(target_arch = "aarch64") {
             EM_AARCH64
@@ -4371,14 +4528,23 @@ path = ['.*']
             let mut entry = vec![0u8; 24];
             entry[..4].copy_from_slice(&offset.to_le_bytes());
             entry[4] = if exports[index] == "php_version" {
-                0x12 // STB_GLOBAL | STT_FUNC
+                // `STT_NOTYPE` (0) or `STB_GLOBAL | STT_FUNC` (0x12): both
+                // export the *name*, which is the fact the gate reads.
+                match symbol {
+                    PhpVersionSymbol::NotType => 0x10,
+                    PhpVersionSymbol::Function | PhpVersionSymbol::ZeroSize => 0x12,
+                }
             } else {
                 0x11 // STB_GLOBAL | STT_OBJECT
             };
             if exports[index] == "php_version" && version.is_some() {
                 entry[6..8].copy_from_slice(&3u16.to_le_bytes()); // .text
                 entry[8..16].copy_from_slice(&u64::try_from(text_off).unwrap().to_le_bytes());
-                entry[16..24].copy_from_slice(&u64::try_from(code_len).unwrap().to_le_bytes());
+                let stated = match symbol {
+                    PhpVersionSymbol::ZeroSize => 0,
+                    PhpVersionSymbol::Function | PhpVersionSymbol::NotType => code_len,
+                };
+                entry[16..24].copy_from_slice(&u64::try_from(stated).unwrap().to_le_bytes());
             }
             dynsym.extend_from_slice(&entry);
         }
@@ -4918,6 +5084,157 @@ path = ['.*']
         };
         assert!(position("/usr/lib") < position("/usr/lib/php84"));
         assert!(position("/usr/lib/php84") < position("/usr/local/lib"));
+    }
+
+    /// `MB.3.61`: a host carrying **two** embed packages must serve from the
+    /// newer library, not from the first name in the list.
+    ///
+    /// The reproduced shape is Alpine's: `php82-embed` installs
+    /// `/usr/lib/libphp82.so` (an object with no `php_version`, refused on its
+    /// own) and `php84-embed` installs `/usr/lib/php84/libphp.so` (which serves).
+    /// With `BLASTIT_LIBPHP` unset the old name-major walk found `libphp82.so`
+    /// first and refused the boot, although the 8.4 library was right there.
+    #[test]
+    fn two_embed_packages_serve_from_the_newer_library() {
+        let scratch = Scratch::new("two-packages");
+        let shims = Scratch::new("two-packages-shims");
+        for minor in [2u8, 4] {
+            let _ = shims.file(&shim_name(PhpVersion::new(8, minor)), b"never loaded");
+        }
+        // The two packages' own paths, in the directories `library_dirs()`
+        // names — the same layout an Alpine 3.21 host gets.
+        std::fs::create_dir_all(scratch.dir.join("php84")).unwrap();
+        let old = scratch.file(
+            "libphp82.so",
+            &shared_object_without_php_version(&["executor_globals"]),
+        );
+        let new = scratch.file("php84/libphp.so", &shared_object(&["executor_globals"]));
+        assert!(
+            old.is_file() && new.is_file(),
+            "both packages are installed"
+        );
+
+        // `BLASTIT_LIBPHP` unset: `PhpSearch::new(None, …)` is exactly the
+        // library half of that, and the directories are the host's order.
+        let mut search = PhpSearch::new(None, None, PhpShimScope::Development);
+        assert!(
+            search.libphp.is_none(),
+            "an unset BLASTIT_LIBPHP is no override at all"
+        );
+        search.lib_dirs = vec![scratch.dir.clone(), scratch.dir.join("php84")];
+        search.shim_dirs = vec![shims.dir.clone()];
+
+        let boot = php_boot(&manifest(PHP_ONLY), &search, Some(16));
+        let PhpBoot::Proceed(runtime) = boot else {
+            panic!("two packages, and the 8.4 library serves: {boot:?}");
+        };
+        assert_eq!(runtime.version, PhpVersion::new(8, 4), "the newer library");
+        assert_eq!(
+            runtime.libphp, new,
+            "the served library is the 8.4 one, not the 8.2 name that came first"
+        );
+
+        // The single-package twin, unchanged: the 8.2 library alone is still
+        // refused, naming the symbol it really lacks.
+        let only_old = Scratch::new("only-8.2");
+        let old = only_old.file(
+            "libphp82.so",
+            &shared_object_without_php_version(&["executor_globals"]),
+        );
+        let mut search = PhpSearch::new(None, None, PhpShimScope::Development);
+        search.lib_dirs = vec![only_old.dir.clone()];
+        search.shim_dirs = vec![shims.dir.clone()];
+        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+            .refusal()
+            .expect("8.2 alone is still refused")
+            .to_string();
+        assert!(message.contains("exports no `php_version`"), "{message}");
+        assert!(message.contains(&old.display().to_string()), "{message}");
+
+        // And the 8.4 package alone still serves, from its own directory.
+        let only_new = Scratch::new("only-8.4");
+        std::fs::create_dir_all(only_new.dir.join("php84")).unwrap();
+        let new = only_new.file("php84/libphp.so", &shared_object(&["executor_globals"]));
+        let mut search = PhpSearch::new(None, None, PhpShimScope::Development);
+        search.lib_dirs = vec![only_new.dir.join("php84")];
+        search.shim_dirs = vec![shims.dir.clone()];
+        let runtime = discover_php(&search).expect("8.4 alone still serves");
+        assert_eq!(runtime.version, PhpVersion::new(8, 4));
+        assert_eq!(runtime.libphp, new);
+    }
+
+    /// `MB.3.61`: `php_version` **presence** is the name in the `.dynsym`, so an
+    /// odd object that exports it as `STT_NOTYPE` or with `st_size == 0` is not
+    /// told it "exports no `php_version`" — a sentence about a symbol it has.
+    /// The body is a separate fact: a versioned path still serves, and with no
+    /// minor anywhere the refusal names the unreadable body (`NoVersion`).
+    #[test]
+    fn php_version_presence_is_the_name_not_the_body_shape() {
+        let shims = Scratch::new("odd-symbols-shims");
+        let _ = shims.file(&shim_name(PhpVersion::new(8, 4)), b"never loaded");
+
+        for (shape, label) in [
+            (PhpVersionSymbol::NotType, "STT_NOTYPE"),
+            (PhpVersionSymbol::ZeroSize, "st_size-zero"),
+        ] {
+            let scratch = Scratch::new(&format!("odd-symbols-{label}"));
+            // A versioned name: the symbol's presence is enough, and the minor
+            // comes from the path because the body states nothing.
+            let versioned = scratch.file(
+                "libphp8.4.so",
+                &shared_object_in(&["executor_globals"], None, true, shape),
+            );
+            let runtime = discover_php(&search_for(&versioned, &shims.dir))
+                .unwrap_or_else(|refusal| panic!("{label}: refused as {refusal:?}"));
+            assert_eq!(runtime.version, PhpVersion::new(8, 4), "{label}");
+
+            // The unversioned twin: no body version, no minor in the path, so
+            // the only true sentence is the one that names the body it cannot
+            // read — never that the symbol is absent.
+            let unversioned = scratch.file(
+                "libphp.so",
+                &shared_object_in(&["executor_globals"], None, true, shape),
+            );
+            let message = php_boot(
+                &manifest(PHP_ONLY),
+                &search_for(&unversioned, &shims.dir),
+                Some(16),
+            )
+            .refusal()
+            .unwrap_or_else(|| panic!("{label}: no version anywhere cannot choose a shim"))
+            .to_string();
+            assert!(
+                !message.contains("exports no `php_version`"),
+                "{label}: the object does export it, so that sentence is false: {message}"
+            );
+            assert!(
+                message.contains("exports `php_version` in its `.dynsym`"),
+                "{label}: the real cause is the unreadable body: {message}"
+            );
+            assert!(
+                message.contains("could not be read from its sections"),
+                "{label}: {message}"
+            );
+
+            // The genuinely missing symbol keeps its own sentence: the two
+            // refusals stay distinguishable.
+            let absent = scratch.file(
+                "libphp8.2.so",
+                &shared_object_without_php_version(&["executor_globals"]),
+            );
+            let message = php_boot(
+                &manifest(PHP_ONLY),
+                &search_for(&absent, &shims.dir),
+                Some(16),
+            )
+            .refusal()
+            .expect("no php_version name at all is refused")
+            .to_string();
+            assert!(
+                message.contains("exports no `php_version`"),
+                "{label}: the absence sentence still belongs to the absent symbol: {message}"
+            );
+        }
     }
 
     /// The two `php_version` bodies the resolver decodes, on both architectures

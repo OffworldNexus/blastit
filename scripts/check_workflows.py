@@ -74,9 +74,14 @@ What it checks across `.github/workflows/*.yml` and `.github/actions/*/action.ym
     artefact is compiled **in the oldest image it claims** and the floor is
     asserted by the build rather than inherited from the runner (`MB.3.60`, the
     third instance of the runner-leak class after `manylinux_2_39` wheels and
-    host-built test binaries). Covered at run time by
-    `scripts/build-standalone.sh --max-glibc` (refuses a binary that outgrew the
-    floor) and `scripts/check-exec-env.sh` (executes the archive in that image).
+    host-built test binaries). The host build has two spellings —
+    `scripts/build-standalone.sh` and the `make standalone` target that calls
+    it — and both are refused; `make standalone-glibc` is the in-image wrapper
+    and is not (`MB.3.61`). The recognizer is self-tested at the top of every
+    run, so renaming the target cannot quietly empty the rule. Covered at run
+    time by `scripts/build-standalone.sh --max-glibc` (refuses a binary that
+    outgrew the floor) and `scripts/check-exec-env.sh` (executes the archive in
+    that image).
     **What this cannot see**: whether the named image's glibc really is the
     declared floor (the two run-time checks above answer that), and a build
     driven from Python.
@@ -128,6 +133,13 @@ EXEC_ENV_CHECK = "check-exec-env.sh"
 # floor. `\b` after `.sh` keeps the wrapper's name out of the first pattern.
 STANDALONE_BUILD = re.compile(r"scripts/build-standalone\.sh\b")
 STANDALONE_IN_IMAGE = re.compile(r"scripts/build-standalone-in-image\.sh\b")
+# `make standalone` is the same host build behind a Makefile target, and the
+# literal above does not see it: `make standalone` in `publish-pypi.yml` would
+# have compiled the "portable" archive against the runner's glibc and passed this
+# audit (`MB.3.61`, the same wrong-reason class as MB.3.60's pull/exit-2 fold).
+# The lookahead keeps the *shipped* target out: `make standalone-glibc` runs
+# `scripts/build-standalone-in-image.sh`, so it is not this shape.
+STANDALONE_MAKE = re.compile(r"\bmake\b[^\n;&|]*?\bstandalone(?![-\w])")
 
 GENERATOR = "scripts/platform_matrix.py"
 OUTPUT_SPECS: dict[str, tuple[str, str]] = {
@@ -426,6 +438,16 @@ def checks_exec_env(job: dict) -> bool:
     )
 
 
+def runs_host_standalone_build(text: str) -> bool:
+    """Whether `text` builds the standalone archive on the calling host.
+
+    Two spellings, one shape: the script itself, and the Makefile target that
+    calls it (`MB.3.61`). `make standalone-glibc` is not this — it runs
+    `scripts/build-standalone-in-image.sh`.
+    """
+    return bool(STANDALONE_BUILD.search(text) or STANDALONE_MAKE.search(text))
+
+
 def check_standalone_build(
     workflow: str,
     job_name: str,
@@ -442,9 +464,10 @@ def check_standalone_build(
     never executes comes back a fourth time, so every step of the shipping
     workflow that builds a standalone archive is asked two questions:
 
-    * it must not run `scripts/build-standalone.sh` on the runner — that
-      compiles against the runner's C library. The wrapper
-      `scripts/build-standalone-in-image.sh` builds inside an image instead;
+    * it must not build on the runner — neither `scripts/build-standalone.sh`
+      nor `make standalone` (`MB.3.61`) — because that compiles against the
+      runner's C library. The wrapper `scripts/build-standalone-in-image.sh`
+      builds inside an image instead;
     * every `-gnu` leg it builds for must name **that leg's** `builder_image`
       and `glibc_floor` from `scripts/platform_matrix.py`, so the floor is
       declared once and *asserted by the build* (`--max-glibc`) rather than
@@ -457,18 +480,19 @@ def check_standalone_build(
     """
     for idx, step in enumerate(job.get("steps") or [], 1):
         run = str(step.get("run") or "")
-        if not (STANDALONE_BUILD.search(run) or STANDALONE_IN_IMAGE.search(run)):
+        if not (runs_host_standalone_build(run) or STANDALONE_IN_IMAGE.search(run)):
             continue
         scope = f"{workflow}: job {job_name} step {idx}"
         folded = join_shell_continuations(run)
-        if STANDALONE_BUILD.search(folded):
+        if runs_host_standalone_build(folded):
             report.check(
                 bool(DOCKER_EXEC.search(folded)),
-                f"{scope}: runs scripts/build-standalone.sh on the runner, which compiles "
-                "against the runner's C library — a 'portable' archive then needs the "
-                "runner's glibc (MB.3.60: GLIBC_2.39 in an archive that claims older "
-                "systems). Build inside scripts/build-standalone-in-image.sh, or inside a "
-                "`docker run` of the image whose glibc is the floor",
+                f"{scope}: runs scripts/build-standalone.sh on the runner (or `make "
+                "standalone`, the same host build), which compiles against the runner's C "
+                "library — a 'portable' archive then needs the runner's glibc (MB.3.60: "
+                "GLIBC_2.39 in an archive that claims older systems). Build inside "
+                "scripts/build-standalone-in-image.sh (or `make standalone-glibc`), or "
+                "inside a `docker run` of the image whose glibc is the floor",
             )
         for entry in entries or [{}]:
             if not entry.get("target", "").endswith("-gnu"):
@@ -522,6 +546,62 @@ def check_step_scripts(step: dict, scope: str, report: Report) -> None:
     check_maturin_platform_tag(step, scope, report)
 
 
+def self_test_rule15() -> list[str]:
+    """Prove rule 15 still recognises a host standalone build (`MB.3.61`).
+
+    Rule 15 is the only thing standing between a shipping workflow and an
+    archive compiled against the runner's glibc, so its recognizer is tested
+    here, inside the audit that runs in `make check` — never only in a fixture
+    whose anchor a later edit can rename. Two halves:
+
+    * the recognizer sees every spelling of the host build, and not the shipped
+      `make standalone-glibc` / `scripts/build-standalone-in-image.sh` pair;
+    * a synthetic shipping job running one of them actually produces a problem.
+    """
+    problems: list[str] = []
+    host_shapes = [
+        "make standalone",
+        "make -s standalone",
+        "make -C . standalone",
+        "make standalone PHP_SAPI_ARCH=x86_64",
+        "scripts/build-standalone.sh --target x86_64-unknown-linux-gnu",
+    ]
+    shipped_shapes = [
+        "make standalone-glibc",
+        "make php-sapi && make standalone-glibc",
+        "scripts/build-standalone-in-image.sh --image quay.io/pypa/manylinux_2_28_x86_64",
+    ]
+    for shape in host_shapes:
+        if not runs_host_standalone_build(shape):
+            problems.append(f"rule 15 no longer sees {shape!r} as a host build")
+        inner = Report(quiet=True)
+        check_standalone_build(
+            "publish-pypi.yml",
+            "self-test",
+            {"steps": [{"run": shape}]},
+            None,
+            inner,
+        )
+        if not inner.problems:
+            problems.append(f"rule 15 passed a shipping step running {shape!r}")
+    for shape in shipped_shapes:
+        if runs_host_standalone_build(shape):
+            problems.append(f"rule 15 calls the shipped build {shape!r} a host build")
+        inner = Report(quiet=True)
+        check_standalone_build(
+            "publish-pypi.yml",
+            "self-test",
+            {"steps": [{"run": shape}]},
+            None,
+            inner,
+        )
+        if inner.problems:
+            problems.append(
+                f"rule 15 refused the shipped build {shape!r}: {inner.problems}"
+            )
+    return problems
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", default=".", help="repository root")
@@ -529,6 +609,24 @@ def main(argv: list[str] | None = None) -> int:
         "--quiet", action="store_true", help="only problems and the summary"
     )
     args = parser.parse_args(argv)
+
+    # A broken recognizer makes every verdict below worthless, so it is answered
+    # first and separately (`MB.3.61`).
+    self_test_problems = self_test_rule15()
+    if self_test_problems:
+        for problem in self_test_problems:
+            print(f"FAIL {problem}")
+        print(
+            f"workflow-check: FAIL — rule 15's own self-test is broken "
+            f"({len(self_test_problems)} problem(s)); no workflow verdict below it is worth "
+            "anything until it is fixed",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.quiet:
+        print(
+            "workflow-check: rule 15 self-test ok — `make standalone` is a host build"
+        )
 
     repo = Path(args.repo).resolve()
     report = Report(args.quiet)

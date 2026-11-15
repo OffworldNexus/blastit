@@ -189,31 +189,46 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// `BLASTIT_LIBPHP` when it is a file, else the distro's fixed names, newest
-/// first, in the library directories (`ADR-0010` §3) — the resolved path.
+/// `BLASTIT_LIBPHP` when it is a file, else the version-major probe order in the
+/// library directories (`ADR-0010` §3) — the resolved path.
 ///
-/// The names and directories are the ones `blastit` itself looks in, including
-/// Alpine's packed `libphp83.so` and its per-minor `/usr/lib/php84`
-/// (`MB.3.59`), so this probe and the boot cannot disagree about a host with
-/// the distro's own package.
+/// The names, directories and order are the ones `blastit` itself uses,
+/// including Alpine's packed `libphp83.so` and its per-minor `/usr/lib/php84`
+/// (`MB.3.59`), and they are tried minor-by-minor rather than name-by-name
+/// (`MB.3.61`), so this probe and the boot cannot disagree about a host with two
+/// embed packages installed.
 fn libphp_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("BLASTIT_LIBPHP") {
         let path = PathBuf::from(path);
         return path.is_file().then(|| path.canonicalize().ok()).flatten();
     }
-    const NAMES: [&str; 10] = [
-        "libphp8.4.so",
-        "libphp-8.4.so",
-        "libphp84.so",
-        "libphp8.3.so",
-        "libphp-8.3.so",
-        "libphp83.so",
-        "libphp8.2.so",
-        "libphp-8.2.so",
-        "libphp82.so",
-        "libphp.so",
+    // Version-major, then spelling (`MB.3.61`): the minor is preferred and the
+    // name only breaks a tie within it, so a host with two embed packages probes
+    // the library the boot will serve — the newest — instead of the first name
+    // in a list. A name-major walk would probe `/usr/lib/libphp82.so`, an object
+    // with no `php_version`, and then report "no usable library" on a host whose
+    // `/usr/lib/php84/libphp.so` serves.
+    const PROBES: [(&str, Option<&str>); 13] = [
+        ("libphp8.4.so", None),
+        ("libphp-8.4.so", None),
+        ("libphp84.so", None),
+        ("libphp.so", Some("php84")),
+        ("libphp8.3.so", None),
+        ("libphp-8.3.so", None),
+        ("libphp83.so", None),
+        ("libphp.so", Some("php83")),
+        ("libphp8.2.so", None),
+        ("libphp-8.2.so", None),
+        ("libphp82.so", None),
+        ("libphp.so", Some("php82")),
+        ("libphp.so", None),
     ];
-    let triplet = format!("{}-linux-gnu", std::env::consts::ARCH);
+    let libc = if cfg!(target_env = "musl") {
+        "musl"
+    } else {
+        "gnu"
+    };
+    let triplet = format!("{}-linux-{libc}", std::env::consts::ARCH);
     let dirs = [
         format!("/usr/lib/{triplet}"),
         "/usr/lib64".to_string(),
@@ -227,11 +242,22 @@ fn libphp_path() -> Option<PathBuf> {
         "/usr/local/lib/php83".to_string(),
         "/usr/local/lib/php82".to_string(),
     ];
-    NAMES
-        .iter()
-        .flat_map(|name| dirs.iter().map(move |dir| Path::new(dir).join(name)))
-        .find(|path| path.is_file())
-        .and_then(|path| path.canonicalize().ok())
+    for (name, minor) in PROBES {
+        let found = dirs
+            .iter()
+            .filter(|dir| match minor {
+                Some(minor) => {
+                    Path::new(dir).file_name().and_then(|name| name.to_str()) == Some(minor)
+                }
+                None => true,
+            })
+            .map(|dir| Path::new(dir).join(name))
+            .find(|path| path.is_file());
+        if let Some(path) = found {
+            return path.canonicalize().ok();
+        }
+    }
+    None
 }
 
 /// The `(major, minor)` the path states: a dotted name (`libphp8.4.so`,

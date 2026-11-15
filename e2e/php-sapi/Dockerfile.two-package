@@ -1,0 +1,80 @@
+# The **two embed packages** host (`MB.3.61`): `php82-embed` and `php84-embed`
+# installed together on Alpine 3.21, `BLASTIT_LIBPHP` unset, and the boot must
+# serve from the 8.4 library beside the 8.2 object it must not prefer.
+#
+# The defect this image is for: Alpine's `php82-embed` installs
+# `/usr/lib/libphp82.so` (an object with no `php_version`, so a boot that picks
+# it refuses) and `php84-embed` installs `/usr/lib/php84/libphp.so` (which
+# serves). A name-major discovery walk — the pre-`MB.3.61` order — found
+# `libphp82.so` first and refused a host that could serve; the fixed walk is
+# version-major and reaches `/usr/lib/php84/libphp.so`.
+#
+# It is **not** a `scripts/platform_matrix.py` leg (that file is the one place a
+# leg is declared, and this is not an artifact promise), so it is run by hand:
+#
+#   docker build -f e2e/php-sapi/Dockerfile.two-package -t blastit-php-two:local .
+#   docker run --rm --cap-add SYS_PTRACE blastit-php-two:local
+#
+# `--cap-add SYS_PTRACE` is load-bearing, exactly as in `make rs-test-php-image`:
+# Docker's default root set cannot read the maps of a `PR_SET_DUMPABLE(0)` role,
+# and `critical_php_embed`'s maps leg asserts every role above the view is
+# content-checked when it runs as root.
+#
+# `run-two-package.sh` is the witness: it refuses to pass unless the suites ran
+# their **served** branch, and unless the library the boot resolved is the 8.4
+# one.
+ARG BASE=alpine:3.21
+FROM ${BASE}
+
+ARG RUST_TOOLCHAIN=stable
+
+ENV PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LIBCLANG_PATH=/usr/lib/llvm19/lib
+
+# Both minors, dev *and* embed: the two dev packages coexist (Alpine's headers
+# live under `/usr/include/php82`, `/usr/include/php84`, and `php-config84` /
+# `php-config82` are separate binaries), which is exactly the host this image is
+# about. `clang`/`llvm-dev`/`clang19-libclang` are what the suites' `pg_query`
+# bindgen needs by name on Alpine (`MB.3.59`).
+RUN set -eux; \
+    apk add --no-cache \
+        php82-dev php82-embed php82-curl \
+        php84-dev php84-embed php84-curl \
+        gcc make pkgconf musl-dev binutils ca-certificates curl bash tar xz \
+        clang llvm-dev clang19-libclang
+
+RUN if ! command -v cargo >/dev/null; then \
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | bash -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"; \
+    fi \
+    && cargo --version
+
+WORKDIR /src
+COPY e2e/php-sapi/fixtures /fixtures
+COPY . /src
+
+# The musl build must be dynamic or `dlopen` is unavailable at all (a static
+# musl binary answers `Dynamic loading not supported`): the shim, the suites and
+# the `blastit` they run are all built with `-crt-static` off (`MB.3.18`).
+# `bash -euo pipefail` and the explicit count, not `sh`: a failed `cargo test
+# --no-run` must not be masked by the `sed` at the end of the pipe (`MB.3.58`).
+RUN bash -euo pipefail -c '\
+        export RUSTFLAGS="-C target-feature=-crt-static"; \
+        make php-sapi PHP_MINORS="8.4"; \
+        cargo test --locked -p blastit --test critical_php_backend --test critical_php_embed --no-run \
+            2>&1 | tee /dev/stderr \
+            | sed -n "s/^[[:space:]]*Executable [^(]*(\(.*\))\$/\1/p" \
+            > /src/target/php-suite-executables; \
+        count=$(wc -l < /src/target/php-suite-executables); \
+        if [ "$count" -ne 2 ]; then \
+            echo "expected 2 suite executables, recorded $count:" >&2; \
+            cat /src/target/php-suite-executables >&2; \
+            exit 1; \
+        fi' \
+ && chmod -R a+rX /src/target/php-suite-executables /src/target/php-sapi
+
+# No `BLASTIT_LIBPHP`: the whole point is the discovery walk. The shim directory
+# is the one `make php-sapi` just wrote.
+ENV BLASTIT_PHP_SHIM_DIR=/src/target/php-sapi
+
+CMD ["sh", "/src/e2e/php-sapi/run-two-package.sh"]

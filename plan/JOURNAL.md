@@ -1837,3 +1837,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T19:36 [MB.3.60] (lead) base 755281c
 - 2026-11-15T20:14 [MB.3.60] (lead) status active -> review
 - 2026-11-15T20:22 [MB.3.60] (lead) status review -> done
+- 2026-11-15T20:24 [MB.3.61] (lead) edited fields
+- 2026-11-15T20:24 [MB.3.61] (lead) FOLDED IN from MB.3.60's review (same spirit — a guard that reports the wrong reason), both now in this node's paths:
+- 2026-11-15T20:24 [MB.3.61] (lead) status ready -> active
+- 2026-11-15T20:24 [MB.3.61] (lead) attempt 1/3 started
+- 2026-11-15T20:24 [MB.3.61] (lead) base 490bb9b
+- 2026-11-15T20:50 [MB.3.61] (lead) status active -> review
+- 2026-11-15T20:55 [MB.3.61] (lead) status review -> done
