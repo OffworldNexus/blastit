@@ -322,6 +322,32 @@ pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), Strin
     Ok(())
 }
 
+/// `ADR-0011` (superseding `ADR-0006` decision 3): the ingress gate the
+/// **production** path refuses with.
+///
+/// `body = "raw"` is the one ingress declaration nothing gates at run time —
+/// `plan_body` streams the bytes into the application's own parser unchanged —
+/// so the acknowledgement in the manifest is the whole of the decision, and an
+/// unacknowledged one is a boot refusal naming the route and the key, before any
+/// listener is bound. The rule is a sibling of [`app_rule`] rather than part of
+/// it because only the serve path takes it: `blastit dev` is the local
+/// single-uid simulation and keeps `ManifestWarning::RawIngress` (emitted with
+/// the rest of the boot's warnings), and `blastit check` keeps the `raw_ingress`
+/// finding so CI reports the same rule before anyone deploys.
+///
+/// Stage 1 calls this too, immediately after its own `parse_and_validate` of the
+/// file: the configuration document carries the manifest's *path*, not a digest
+/// of what stage 0 approved, so the re-read is a real checkpoint and not
+/// belt-and-braces.
+pub(crate) fn raw_ingress_gate(manifest: &Manifest) -> Result<(), String> {
+    let refusals = manifest.raw_ingress_refusals();
+    if refusals.is_empty() {
+        Ok(())
+    } else {
+        Err(refusals.join("\n"))
+    }
+}
+
 /// `ADR-0009` §5: what a build with no Python support cannot serve, and the
 /// sentence that names the artifact which can (`MB.3.11`).
 ///
@@ -1867,6 +1893,15 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
         }
     }
     if let Err(message) = app_rule(&config, &manifest) {
+        fail(&emitter, &message);
+    }
+    // `ADR-0011` (superseding `ADR-0006` decision 3): `body = "raw"` is the one
+    // ingress declaration nothing gates at run time, so the manifest's
+    // acknowledgement is the whole of the decision. On **this** path — the serve
+    // path, which `dev` does not take — an unacknowledged one is a boot refusal
+    // before any listener is bound. `dev` keeps its warning and `check` keeps
+    // its finding (`MB.3.53`).
+    if let Err(message) = raw_ingress_gate(&manifest) {
         fail(&emitter, &message);
     }
     // `R13` step 4: a static root that is missing, a file or unlistable is
@@ -5074,6 +5109,105 @@ path = ['/api/.*']
         let message = app_rule(&with_app, &manifest(static_only)).unwrap_err();
         assert!(
             message.starts_with("BLASTIT_APP: every route is static"),
+            "{message}"
+        );
+    }
+}
+
+/// `ADR-0011` (`MB.3.53`): the production path's ingress rule, as the serve path
+/// calls it.
+///
+/// The stage-1 half is measured by a real production process
+/// (`crates/blastit/tests/critical_raw_ingress.rs`); this half is the rule the
+/// serve path calls, and it is a unit test because an unprivileged `cargo test`
+/// cannot reach a stage-0 gate that lives after the manifest parse — stage 0
+/// reads its capability sets first and refuses an unprivileged boot there
+/// (`blastit_sys::caps::detect`).
+#[cfg(test)]
+mod raw_ingress_gate_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{Manifest, raw_ingress_gate};
+
+    fn manifest(source: &str) -> Manifest {
+        let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        manifest
+    }
+
+    const REFUSED: &str = "\
+version = 1
+app = \"app:app\"
+
+[[route]]
+name = \"upload\"
+path = ['/upload']
+methods = [\"POST\"]
+
+[route.ingress]
+body = \"raw\"
+";
+
+    const ACCEPTED: &str = "\
+version = 1
+app = \"app:app\"
+
+[[route]]
+name = \"upload\"
+path = ['/upload']
+methods = [\"POST\"]
+
+[route.ingress]
+body = \"raw\"
+allow_raw = true
+";
+
+    /// The gate has exactly one refusal and it names the route and the key; the
+    /// acknowledgement opens it, which is what makes this a gate rather than a
+    /// blanket refusal of the codec.
+    #[test]
+    fn an_unacknowledged_raw_route_is_refused_and_an_acknowledged_one_is_not() {
+        let message = raw_ingress_gate(&manifest(REFUSED)).unwrap_err();
+        assert!(message.contains("route \"upload\""), "{message}");
+        assert!(message.contains("allow_raw = true"), "{message}");
+        assert!(message.contains("[route.ingress]"), "{message}");
+        assert_eq!(raw_ingress_gate(&manifest(ACCEPTED)), Ok(()));
+    }
+
+    /// A structured codec is untouched by the gate: only `raw` has no runtime
+    /// validation for the acknowledgement to stand in for.
+    #[test]
+    fn every_other_codec_and_no_ingress_at_all_pass_the_gate() {
+        for body in ["json", "form", "none"] {
+            let source = format!(
+                "version = 1\napp = \"app:app\"\n\n[[route]]\nname = \"upload\"\n\
+                 path = ['/upload']\nmethods = [\"POST\"]\n\n[route.ingress]\nbody = \"{body}\"\n"
+            );
+            assert_eq!(
+                raw_ingress_gate(&manifest(&source)),
+                Ok(()),
+                "body = {body} needs no acknowledgement"
+            );
+        }
+        let no_ingress = "version = 1\napp = \"app:app\"\n\n[[route]]\nname = \"home\"\n\
+                          path = ['.*']\n";
+        assert_eq!(raw_ingress_gate(&manifest(no_ingress)), Ok(()));
+    }
+
+    /// Every offender is named, in route order, so a manifest edited in two
+    /// places is fixed in one boot rather than one denial at a time.
+    #[test]
+    fn every_unacknowledged_route_is_named_in_route_order() {
+        let source = REFUSED.replace("name = \"upload\"", "name = \"first\"")
+            + "\n[[route]]\nname = \"second\"\npath = ['/second']\nmethods = [\"POST\"]\n\
+               \n[route.ingress]\nbody = \"raw\"\n";
+        let message = raw_ingress_gate(&manifest(&source)).unwrap_err();
+        assert_eq!(message.lines().count(), 2, "{message}");
+        assert!(
+            message.lines().next().unwrap().contains("\"first\""),
+            "{message}"
+        );
+        assert!(
+            message.lines().nth(1).unwrap().contains("\"second\""),
             "{message}"
         );
     }

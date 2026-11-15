@@ -1,6 +1,10 @@
 # ADR-0006: Fail-Closed `[route.ingress]` Body Validation and Canonical Re-Encoding
 
-- **Status:** Accepted
+- **Status:** Accepted; **decision 3 is superseded by
+  [ADR-0011](ADR-0011-raw-ingress-boot-refusal.md)** — `body = "raw"` without
+  `allow_raw = true` is now refused at a production boot (stage 0 and stage 1's
+  re-read), not only warned about. The rest of this record stands unchanged, and
+  the text below is kept as written.
 - **Date:** 2026-11-12
 - **Node:** MA.5
 - **Owner:** architect

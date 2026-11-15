@@ -88,7 +88,12 @@ uids cannot signal, `ptrace` or read each other's
   decode and re-encode it before the app sees it, `none` rejects a body, and
   `raw` passes the bytes unchanged. A body to a route with no `[route.ingress]`
   is a `413` at runtime; `blastit check` reports a body route that declares
-  nothing, and a `raw` route the manifest does not acknowledge. 0.1.1
+  nothing, and a `raw` route the manifest does not acknowledge. `raw` is the one
+  codec nothing validates at run time, so it is the one that needs an
+  acknowledgement **and** a gate: `body = "raw"` without `allow_raw = true` is
+  **refused at a production boot** (stage 0, and again by stage 1's re-read of
+  the same file, before a listener exists), while `blastit dev` warns and serves
+  and `blastit check` reports `raw_ingress`. 0.1.1
   has no multipart codec and no media or PDF decoding: an upload is `raw`, and
   the app's parser sees the original bytes, polyglots included.
 

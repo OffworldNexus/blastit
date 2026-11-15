@@ -265,6 +265,18 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     };
     // Warnings are stage 0's: it reads and validates the manifest first, and
     // printing them twice would be noise (§8.1).
+    //
+    // `ADR-0011` (`MB.3.53`): the gate stage 0 refuses with, repeated here
+    // because this is the re-read. `config` carries the manifest's *path* and no
+    // digest of what stage 0 approved, so a file swapped between the two stages
+    // would otherwise serve a `body = "raw"` route stage 0 never saw. Gated on
+    // `dev.is_none()` for the same reason stage 0 is: `blastit dev` is the local
+    // simulation and keeps its warning, which stage 0 already printed.
+    if dev.is_none()
+        && let Err(message) = crate::stage0::raw_ingress_gate(&manifest)
+    {
+        fail(&emitter, dev.as_ref(), &message);
+    }
 
     let limits = match config.limits() {
         Ok(limits) => limits,

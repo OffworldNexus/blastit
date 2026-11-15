@@ -98,13 +98,29 @@ body = "json"      # decoded and re-encoded before the app sees it
 | `json` | only a valid JSON body, re-encoded canonically; anything else is a `400` |
 | `form` | only `application/x-www-form-urlencoded`, decoded and re-encoded; anything else is a `400` |
 | `none` | no body at all; a request with one is a `413` |
-| `raw` | the bytes unchanged — the loud opt-out, flagged at boot |
+| `raw` | the bytes unchanged — the loud opt-out, refused at a production boot unless it is acknowledged |
 
 The declared codec must match what the route really receives: `blastit check`
-reports `ingress_mismatch` when the suite sent something else. `raw` also needs
-`allow_raw = true` in the same table, or `blastit check` reports `raw_ingress`.
-0.1.1 has no multipart codec, so a file upload is `raw` today and the app's
-parser sees the original bytes.
+reports `ingress_mismatch` when the suite sent something else.
+
+`raw` also needs `allow_raw = true` in the same table:
+
+```toml
+[route.ingress]
+body = "raw"
+allow_raw = true   # the request body reaches the app unvalidated
+```
+
+`body = "raw"` is the one codec nothing validates at run time, so the key is the
+whole of the decision and each command treats it differently. Without it, a
+production boot (`blastit`, and its stage-1 re-read of the same file) **refuses
+the manifest**, naming the route and the key, before it binds a listener;
+`blastit dev` **warns** (`body = "raw" passes the request body through
+unvalidated`) and serves, because it is the local simulation; and `blastit check`
+fails with the `raw_ingress` finding so CI reports the same rule before anyone
+deploys. 0.1.1 has no multipart codec, so a file upload is `raw` today and the
+app's parser sees the original bytes: acknowledge the route's own parsing, and
+prefer `json` or `form` wherever the body is one of them.
 
 ## Static
 
