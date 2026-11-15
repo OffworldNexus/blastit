@@ -34,8 +34,11 @@
 //! is untouched by it (the allowed twin).
 //!
 //! The real load — `make php-sapi-e2e` in a container with the packaged
-//! `libphp-embed` — is CI's proof; this suite proves the composition root wires
-//! the worker on a host that builds it.
+//! `libphp-embed` — proves the packaged library, and `MB.3.39`'s
+//! `make rs-test-php-image` runs **this** suite inside that image against its
+//! `libphp8.4.so` and shim, so CI's `php-sapi` job is where the composition root
+//! is proved on a host that has the pair; `make check`'s PHP-free run is the
+//! refusal half.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Write};
@@ -269,8 +272,16 @@ struct Dev {
     /// Every stdout line, in order: the event stream (and, in the human format,
     /// the banner).
     stdout: Receiver<String>,
+    /// Fired by the stdout reader once it has consumed the pipe to end of file,
+    /// with whether the stream ended cleanly (`MB.3.48`).
+    stdout_end: Receiver<bool>,
     /// Everything stderr has said so far.
     stderr: std::sync::Arc<std::sync::Mutex<String>>,
+    /// The same handshake for stderr, which is where a refusal is written.
+    stderr_end: Receiver<bool>,
+    /// Stdout lines [`Dev::await_boot`] took out of the channel while it was
+    /// waiting for `ready`, so that the caller's own snapshot still sees them.
+    stdout_seen: Vec<String>,
     port: u16,
 }
 
@@ -303,53 +314,120 @@ impl Dev {
         let mut child = command.spawn().unwrap();
 
         let (tx, rx) = std::sync::mpsc::channel();
+        let (stdout_end_tx, stdout_end) = std::sync::mpsc::channel();
         let stdout = child.stdout.take().unwrap();
         std::thread::spawn(move || {
             use std::io::BufRead;
+            let mut clean = true;
             for line in std::io::BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
+                let Ok(line) = line else {
+                    clean = false;
+                    break;
+                };
                 if tx.send(line).is_err() {
                     break;
                 }
             }
+            let _ = stdout_end_tx.send(clean);
         });
         let stderr_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let collected = std::sync::Arc::clone(&stderr_text);
+        let (stderr_end_tx, stderr_end) = std::sync::mpsc::channel();
         let stderr = child.stderr.take().unwrap();
         std::thread::spawn(move || {
             use std::io::BufRead;
+            let mut clean = true;
             for line in std::io::BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
+                let Ok(line) = line else {
+                    clean = false;
+                    break;
+                };
                 let mut text = collected.lock().unwrap();
                 text.push_str(&line);
                 text.push('\n');
             }
+            let _ = stderr_end_tx.send(clean);
         });
         Self {
             child,
             stdout: rx,
+            stdout_end,
             stderr: stderr_text,
+            stderr_end,
+            stdout_seen: Vec::new(),
             port,
         }
     }
 
     /// Everything stderr has said so far.
+    ///
+    /// "So far" is the whole of it once [`Dev::await_boot`] has returned the
+    /// exit status: that path waits for both readers to reach end of file, so a
+    /// boot that has already written its refusal cannot be read as an empty
+    /// string (`MB.3.48`). While the boot is still running this is a snapshot.
     fn stderr(&self) -> String {
         self.stderr.lock().unwrap().clone()
     }
 
-    /// Waits for the boot to either accept a connection or exit.
+    /// Waits for both pipe readers to reach end of file.
+    ///
+    /// Reaping the child says nothing about the two reader threads: they are
+    /// scheduled independently and can still be behind a pipe that already
+    /// holds the last line. A snapshot taken at that instant reads a boot's
+    /// refusal as nothing — exactly the `not a library: the route is named: `
+    /// red `MB.3.48` reproduced — so every wait on the exit status is followed
+    /// by this handshake. It is **not** a retry or a tuned delay: a child that
+    /// is gone has closed its descriptors, so the readers reach end of file and
+    /// their lines are then in full.
+    ///
+    /// Bounded by [`BOOT_TIMEOUT`]: a pipe that has not reached end of file by
+    /// then is held open by a process the boot itself forked, which makes the
+    /// snapshot incomplete rather than late, and that is a failure worth naming.
+    fn await_readers(&self) {
+        for (stream, end) in [("stdout", &self.stdout_end), ("stderr", &self.stderr_end)] {
+            match end.recv_timeout(BOOT_TIMEOUT) {
+                Ok(true) => {}
+                Ok(false) => panic!(
+                    "`blastit dev`'s {stream} reader stopped on a read error, so what it read is \
+                     not the whole stream"
+                ),
+                Err(RecvTimeoutError::Disconnected) => panic!(
+                    "`blastit dev`'s {stream} reader died before end of file, so what it read is \
+                     not the whole stream"
+                ),
+                Err(RecvTimeoutError::Timeout) => panic!(
+                    "`blastit dev` is gone but its {stream} pipe never reached end of file within \
+                     {BOOT_TIMEOUT:?}: a process it forked still holds that descriptor"
+                ),
+            }
+        }
+    }
+
+    /// Waits for the boot to either announce `ready` or exit.
     ///
     /// A boot that refuses never binds — the gate runs before the listener — so
-    /// "the port accepts" and "the process is gone" is a complete partition of
-    /// the two `ADR-0010` §1 outcomes.
+    /// "the boot says it is serving" and "the process is gone" is a complete
+    /// partition of the two `ADR-0010` §1 outcomes. Both halves are the boot's
+    /// own word, and neither is the port: the port is an ephemeral one this
+    /// harness picks by binding and releasing it, so a *foreign* listener that
+    /// takes it in the window makes "something accepts on 127.0.0.1" true for a
+    /// boot that refuses. That misread cost 1 run in 1200 of the "not a library"
+    /// leg under 24-way pressure (`MB.3.48`), and `MB.3.40`'s follow-up 4
+    /// recorded the same shape for the sibling suite. `ready` is emitted by init
+    /// only after the listener is bound and the roles are forked, so it is also
+    /// the moment a `get` can succeed.
+    ///
+    /// The exit branch then waits for both readers to drain their pipe
+    /// (`MB.3.48`): the reaped process has written its refusal, and the caller
+    /// is about to assert on it.
     fn await_boot(&mut self) -> Option<Option<i32>> {
         let deadline = Instant::now() + BOOT_TIMEOUT;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
+                self.await_readers();
                 return Some(status.code());
             }
-            if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
+            if self.take_ready() {
                 return None;
             }
             assert!(
@@ -360,6 +438,22 @@ impl Dev {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Reads what stdout has said that this wait has not consumed yet, keeping
+    /// every line for the caller, and reports whether `ready` was among them.
+    ///
+    /// Awaiting the boot must not eat the evidence it is waiting for: a refusal
+    /// leg asserts that a boot which exits wrote **nothing** on stdout, so the
+    /// lines are buffered in [`Dev::stdout_seen`] and handed back by
+    /// [`Dev::drain_stdout`].
+    fn take_ready(&mut self) -> bool {
+        let mut ready = false;
+        while let Ok(line) = self.stdout.try_recv() {
+            ready |= is_ready(&line);
+            self.stdout_seen.push(line);
+        }
+        ready
     }
 
     /// `GET <path>` over a fresh connection, as the raw response.
@@ -378,6 +472,12 @@ impl Dev {
 
     /// The `request` event for `path`, or `None`.
     fn request_event(&mut self, path: &str) -> Option<serde_json::Value> {
+        // Anything the boot announced before `ready` is already in hand; a
+        // `request` cannot be, but the scan keeps the two sources one event
+        // stream instead of one that silently drops its first line.
+        if let Some(event) = request_event_in(&self.stdout_seen, path) {
+            return Some(event);
+        }
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -397,6 +497,10 @@ impl Dev {
     /// Everything stdout has said so far, for a failure message.
     fn drain_stdout(&mut self) -> String {
         let mut text = String::new();
+        for line in std::mem::take(&mut self.stdout_seen) {
+            text.push_str(&line);
+            text.push('\n');
+        }
         while let Ok(line) = self.stdout.try_recv() {
             text.push_str(&line);
             text.push('\n');
@@ -435,6 +539,27 @@ impl Drop for Dev {
             let _ = self.child.wait();
         }
     }
+}
+
+/// Whether `line` is the boot's `ready` announcement, in either log format.
+///
+/// JSON (the legs that assert on events) carries `"event": "ready"`; the human
+/// format prints `12:34:56.789 INFO  ready       serving  routes=1  workers=16`.
+/// Both are emitted by init *after* the listener is bound, which is what makes
+/// this the partition line between "served" and "refused" (`MB.3.48`).
+fn is_ready(line: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+        return value["event"] == "ready";
+    }
+    line.split_whitespace().nth(2) == Some("ready")
+}
+
+/// The first `request` event for `path` in `lines`, if one is there.
+fn request_event_in(lines: &[String], path: &str) -> Option<serde_json::Value> {
+    lines.iter().find_map(|line| {
+        let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        (value["event"] == "request" && value["path"] == path).then_some(value)
+    })
 }
 
 /// One PHP backend, one sentence (`ADR-0010` §1): the refusal must not name an

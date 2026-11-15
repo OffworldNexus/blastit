@@ -67,10 +67,13 @@
 //! `a_fatal_is_contained_and_the_next_request_is_served`,
 //! `a_sleeping_bailout_is_charged_its_wall_time_and_not_its_cpu_time`),
 //! `a_blocking_script_is_charged_cpu_time_not_wall_time` and
-//! `a_form_body_reaches_the_front_controller` (plus the sibling suite's served
-//! leg), while the stub-refusal and probe legs, the provenance legs and the
-//! `egress` twin run everywhere, and `make rs-test-php` is the same pair legs on
-//! a host that has the pair.
+//! `a_form_body_reaches_the_front_controller`, plus `critical_php_backend`'s
+//! two pair-gated legs —
+//! `a_php_route_is_served_or_the_boot_refuses_naming_the_package` and
+//! `a_symlinked_blastit_libphp_is_resolved_before_it_is_served` — while the
+//! stub-refusal and probe legs, the provenance legs and the `egress` twin run
+//! everywhere, and `make rs-test-php` is the same pair legs on a host that has
+//! the pair.
 //!
 //! `cc` is a **hard requirement**: this suite builds its stub ELFs at test time,
 //! so a missing compiler is a failure, never a skip.
@@ -1058,18 +1061,22 @@ impl Boot {
         self.child.id()
     }
 
-    /// Waits for the boot to either accept a connection or exit.
+    /// Waits for the boot to either announce `ready` or exit.
     ///
     /// A gate that refuses never binds — every §4.1 gate runs before the
-    /// listener — so "the port accepts" and "the process is gone" is a complete
-    /// partition of the two `ADR-0010` §1 outcomes.
+    /// listener — so "the boot says it is serving" and "the process is gone" is a
+    /// complete partition of the two `ADR-0010` §1 outcomes. The first half is
+    /// [`Boot::ready`] and not a connect to the port, which this harness picked
+    /// by binding and releasing it: a foreign listener on that port made a
+    /// refusing boot read as served (`MB.3.40` follow-up 4), and a boot that
+    /// serves is the one that has the standing to say so (`MB.3.48`).
     fn await_boot(&mut self) -> Option<Option<i32>> {
         let deadline = Instant::now() + BOOT_TIMEOUT;
         loop {
             if let Some(status) = self.child.try_wait().expect("waiting for the boot") {
                 return Some(status.code());
             }
-            if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
+            if self.ready() {
                 return None;
             }
             assert!(
@@ -1130,6 +1137,20 @@ impl Boot {
             .iter()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .collect()
+    }
+
+    /// Whether init has announced `ready`.
+    ///
+    /// This is the "served" half of [`Boot::await_boot`]'s partition, not the
+    /// port: the port is an ephemeral one this harness picks by binding and
+    /// releasing it, so a *foreign* listener that takes it in the window makes
+    /// "something accepts on 127.0.0.1" true for a boot that refuses — observed
+    /// once in ~12 in `a_non_library_blastit_libphp_refuses_before_anything_loads`
+    /// (`MB.3.40` follow-up 4). `ready` is emitted by init after the listener is
+    /// bound and the roles are forked, so it is the boot answering for itself and
+    /// also the moment a `get` can succeed (`MB.3.48`).
+    fn ready(&self) -> bool {
+        self.events().iter().any(|event| event["event"] == "ready")
     }
 
     /// The first event matching `wanted`, waiting up to `within` for it.

@@ -1602,3 +1602,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T04:36 [MB.3.45] (lead) edited fields
 - 2026-11-15T04:37 [MB.3.47] (lead) status active -> review
 - 2026-11-15T04:44 [MB.3.47] (lead) status review -> done
+- 2026-11-15T04:46 [MB.3.48] (lead) created (task) The two PHP suites are flaky: a boot refusal read before it is written, and a 1-in-7 bailout outcome
+- 2026-11-15T04:46 [MB.3.48] (lead) status ready -> active
+- 2026-11-15T04:46 [MB.3.48] (lead) attempt 1/3 started
+- 2026-11-15T04:46 [MB.3.48] (lead) base 5710182
+- 2026-11-15T04:46 [MB.3.47] (lead) post-commit note: 5710182's gate was red on a retry-proof-unrelated flake (critical_php_backend a_blastit_libphp_that_is_not_a_library_refuses_the_boot read its
+- 2026-11-15T05:20 [MB.3.48] (lead) status active -> review
+- 2026-11-15T05:20 [MB.3.45] (lead) BINDING ITEM 7 (found by MB.3.48, scheduler-only, this node owns it): the required `php-sapi` job can STILL flake until this lands. `supervise.rs:805` pushes `C
+- 2026-11-15T05:26 [MB.3.48] (lead) status review -> done
