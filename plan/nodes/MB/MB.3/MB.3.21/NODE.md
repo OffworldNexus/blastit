@@ -43,7 +43,8 @@ must leave every route's executor block byte-for-byte intact.
 
 ```console
 $ cargo test -p blastit --locked
-$ cargo test -p blastit --test edit_roundtrip --locked
+$ cargo test -p blastit-manifest --test critical_manifest_edit_executor --locked
+$ cargo test -p blastit --features python --test critical_learn_executor_blocks --locked
 $ make check
 ```
 - A manifest containing `[route.php] entry = …` (optionally `workers`) **and**

@@ -1634,3 +1634,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T06:43 [MB.3.21] (lead) attempt 2/3 started
 - 2026-11-15T06:48 [MB.3.21] (lead) status active -> review
 - 2026-11-15T06:54 [MB.3.21] (lead) status review -> done
+- 2026-11-15T06:55 [MB.3.50] (lead) edited fields
+- 2026-11-15T06:55 [MB.3.50] (lead) Three more stale claims were found by MB.3.21's attempt-2 reviewer; they belong in this sweep rather than a new node, because they are the same defect class (a 
+- 2026-11-15T06:55 [MB.3.50] (lead) status ready -> active
+- 2026-11-15T06:55 [MB.3.50] (lead) attempt 1/3 started
+- 2026-11-15T07:11 [MB.3.50] (lead) status active -> review
+- 2026-11-15T07:14 [MB.3.50] (lead) edited fields
+- 2026-11-15T07:14 [MB.3.50] (lead) REVIEW FAIL (attempt 1) — one MAJOR, and it is the node's own thesis:
+- 2026-11-15T07:14 [MB.3.50] (lead) status review -> ready
+- 2026-11-15T07:14 [MB.3.50] (lead) status ready -> active
+- 2026-11-15T07:14 [MB.3.50] (lead) attempt 2/3 started
+- 2026-11-15T07:20 [MB.3.50] (lead) status active -> review
+- 2026-11-15T07:24 [MB.3.50] (lead) Reviewer PASS on attempt 2 with one MINOR accepted as a residual rather than a new node (this node exists to stop the treadmill, and one module-doc sentence in 
+- 2026-11-15T07:24 [MB.3.50] (lead) status review -> done

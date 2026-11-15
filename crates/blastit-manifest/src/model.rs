@@ -413,14 +413,19 @@ impl Route {
     }
 
     /// The same route with its `[route.static]` block, if it declared one
-    /// (`R1`). Parsing is the only caller.
+    /// (`R1`). Parsing sets it, and so must any rebuild of an existing route:
+    /// `edit.rs`'s `expected_routes` chains it for every route it patches, so
+    /// a block the writer cannot reproduce fails the postcondition instead of
+    /// vanishing (`MB.3.21`).
     pub(crate) fn with_static(mut self, static_policy: Option<StaticPolicy>) -> Self {
         self.static_policy = static_policy;
         self
     }
 
     /// The same route with its `[route.php]` block, if it declared one
-    /// (`ADR-0010` §2). Parsing is the only caller.
+    /// (`ADR-0010` §2). Parsing sets it, and so must any rebuild of an
+    /// existing route: `edit.rs`'s `expected_routes` chains it for every route
+    /// it patches (`MB.3.21`).
     pub(crate) fn with_php(mut self, php: Option<PhpPolicy>) -> Self {
         self.php = php;
         self

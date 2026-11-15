@@ -30,17 +30,19 @@ Coverage at two levels:
   `[route.static] root = "public"` and no `[route.db]`; the ungranted `SELECT 1` is learned on
   `SIGTERM`, and the static block's raw lines must be byte-identical afterwards. This is the
   write path `supervise.rs`'s `finish` runs (`dev_learn::LearnRun::finish` → `apply_edits` →
-  `write_atomic`).
+  `write_atomic`). `MB.3.50` later seeded the fixture with `[route.db] queries =
+  ['SELECT 42']`, so the same case now also proves the learned query **extends** an existing
+  list instead of creating the table.
 * `crates/blastit/src/dev_learn.rs` unit test: the same php+static manifest through
   `LearnRun::finish` directly, plus the refused-statement and malformed-manifest twins (both
   write nothing).
 
 ## Acceptance command of record
 
-`NODE.md`'s `cargo test -p blastit --test edit_roundtrip` is **stale**: there is no such
-target (exit `101`, "no test target named `edit_roundtrip`"). The lead's LOG entry
-`REVIEW FAIL (attempt 1)` / "paths corrected before dispatch" is the correction of record.
-The command actually run, and the one that guards this data, is:
+`NODE.md`'s acceptance command names a test target that does not exist. The lead's LOG entry
+`REVIEW FAIL (attempt 1)` (`2026-11-15T06:43`, MAJOR 1) is the correction of record, and its
+"never the stale one" is why the target is not repeated here. The command actually run, and
+the one that guards this data, is:
 
 ```console
 $ cargo test -p blastit-manifest --test critical_manifest_edit_executor --locked

@@ -1,17 +1,22 @@
 ---
 id: MB.3.50
-title: "Sweep the scheduler's charge/outcome/release doc claims instead of patching three more"
+title: Sweep the stale claims left by MB.3.45/.49/.21 instead of patching points
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.3.49]
-paths: ["crates/blastit-scheduler/src/scheduler.rs"]
-attempts: 0
+paths:
+  - "crates/blastit-scheduler/src/scheduler.rs"
+  - "crates/blastit-manifest/src/model.rs"
+  - crates/blastit/tests/critical_learn_executor_blocks.rs
+  - docs/knowledge/LESSONS.md
+  - plan/nodes/MB/MB.3/MB.3.21/RESULT.md
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-15T06:25"
-updated: "2026-11-15T06:25"
+updated: "2026-11-15T07:24"
 ---
 
 # Goal
@@ -19,7 +24,11 @@ updated: "2026-11-15T06:25"
 Stop the treadmill: the scheduler's doc comments about charging, outcomes and release
 keep describing the code as it was before `MB.3.45`/`MB.3.49`, and each review pass finds
 three more. Sweep the whole surface in one go, grep-driven, and make every claim about
-`charge`/`emit`/`release`/`bailed`/`view_died` match the code that ships.
+`charge`/`emit`/`release`/`bailed`/`view_died` match the code that ships. The protected
+`crates/blastit/tests/critical_learn_executor_blocks.rs` is edited by this node because its
+`[route.db] queries = ['SELECT 42']` seed plus the learned `SELECT 1` are what make that leg
+cover an extend-array splice rather than only a new-table insert — without the seed the
+fixture would stop asserting what it claims.
 
 # Context
 

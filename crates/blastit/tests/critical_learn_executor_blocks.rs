@@ -12,16 +12,19 @@
 //!
 //! The fixture is the documented shape (`docs/frameworks/php.md`,
 //! `docs/frameworks/static-and-spa.md`): one WSGI route with
-//! `[route.static] root = "public"` and no `[route.db]`, so the request's
-//! `SELECT 1` is ungranted and `--learn` writes it. A route with a static block
-//! and an app view is legal (`validate.rs`'s `check_static_declarations`
-//! returns early for a route with a front controller, and a plain app forwards
-//! every non-file path to the view), and needs no PHP binary.
+//! `[route.static] root = "public"` and one `[route.db] queries = ['SELECT 42']`
+//! the author already granted, so the request's `SELECT 1` is ungranted and
+//! `--learn` has to **extend** that list — a fixture with no `[route.db]` only
+//! proves a table can be created. A route with a static block and an app view
+//! is legal (`validate.rs`'s `check_static_declarations` returns early for a
+//! route with a front controller, and a plain app forwards every non-file path
+//! to the view), and needs no PHP binary.
 //!
 //! It pairs the promise with its twin: the learned query must be in the file
-//! (the fix cannot be "make the writer a no-op"), and the static block's lines
-//! must be byte-identical (the bug was the rewriter rebuilding the route
-//! without the block's keys).
+//! **as well as** the grant that was already there (the fix cannot be "make the
+//! writer a no-op", nor "replace the list"), and the static block's lines must
+//! be byte-identical (the bug was the rewriter rebuilding the route without the
+//! block's keys).
 //!
 //! `dev --learn` itself needs the interpreter-backed dev build
 //! (`features = "python"`; the standalone artifact refuses `--learn` with the
@@ -65,6 +68,12 @@ const ROUTES: &str = "\
 [[route]]
 name = \"sql\"
 path = ['/sql']
+
+# One statement is already granted, so the learned one has to be spliced onto
+# this list: a new table would be a second `[route.db]`, and replacing the list
+# would drop the grant the author wrote.
+[route.db]
+queries = ['SELECT 42']
 
 # Built assets are served by the responder; every other path is the view's.
 [route.static]
@@ -174,6 +183,17 @@ fn static_block(document: &str) -> Vec<&str> {
     block
 }
 
+/// How many times `header` appears as a table header.
+///
+/// A mention in prose does not count — a comment may legitimately name the
+/// table — so only a line that *is* the header declares one.
+fn table_headers(document: &str, header: &str) -> usize {
+    document
+        .lines()
+        .filter(|line| line.trim() == header)
+        .count()
+}
+
 #[test]
 fn dev_learn_writes_the_query_and_keeps_the_static_block_byte_for_byte() {
     let server = MockPgServer::start();
@@ -231,10 +251,11 @@ fn dev_learn_writes_the_query_and_keeps_the_static_block_byte_for_byte() {
     );
 
     let learned = fs::read_to_string(dev.manifest()).expect("the manifest is readable");
-    // Direction the fix must keep: the statement landed.
+    // Direction the fix must keep: the statement landed, and the seed grant is
+    // still there beside it.
     assert!(
-        learned.contains("SELECT 1"),
-        "the learned statement was written:\n{learned}"
+        learned.contains("SELECT 1") && learned.contains("SELECT 42"),
+        "the learned statement was written beside the seeded one:\n{learned}"
     );
     // Direction the bug broke: the static block is the author's bytes.
     assert_eq!(
@@ -243,12 +264,12 @@ fn dev_learn_writes_the_query_and_keeps_the_static_block_byte_for_byte() {
         "the [route.static] block changed:\n{learned}"
     );
     assert_eq!(
-        learned.matches("[route.static]").count(),
+        table_headers(&learned, "[route.static]"),
         1,
         "a static block was duplicated:\n{learned}"
     );
     assert_eq!(
-        learned.matches("[route.db]").count(),
+        table_headers(&learned, "[route.db]"),
         1,
         "the learned grant is one table:\n{learned}"
     );
@@ -270,7 +291,13 @@ fn dev_learn_writes_the_query_and_keeps_the_static_block_byte_for_byte() {
         .and_then(Grant::as_postgresql)
         .map(|grant| grant.queries().to_vec())
         .unwrap_or_default();
-    assert_eq!(queries, vec!["SELECT 1".to_string()]);
+    // The learned statement extends the author's list, in place: the patch is
+    // a splice of one entry, not a rewritten table.
+    assert_eq!(
+        queries,
+        vec!["SELECT 42".to_string(), "SELECT 1".to_string()],
+        "the learned query extends the seeded grant"
+    );
 }
 
 /// The `DATABASE_URL` the child gets: a real-looking credential for a
