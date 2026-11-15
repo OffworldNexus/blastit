@@ -42,7 +42,31 @@ What it checks across `.github/workflows/*.yml` and `.github/actions/*/action.ym
 11. no `#` comment line sits inside a `\\` line continuation in any workflow
     step, composite action `runs.steps` step, or `before-script-linux` script;
 12. every `inputs.<k>` referenced inside a composite action is declared, and
-    every `./.github/actions/<name>` call site passes valid, complete inputs.
+    every `./.github/actions/<name>` call site passes valid, complete inputs;
+13. no step gives maturin **two** platform tags: `maturin-action`'s `manylinux:`
+    input names the container *and* the wheel's platform, so the same step must
+    not also pass `--compatibility` (`MB.3.58`: maturin fails the build with
+    `Expected only one platform tag but found 2`). An unset `manylinux:` is
+    refused too: that is a host build in a step that has none of its flags;
+14. no job **executes anything in a container** after building Rust for the host,
+    unless the same job runs `scripts/check-exec-env.sh` — a container may only
+    run a binary it built itself, or one whose glibc floor it still meets
+    (`MB.3.58`, the `weak version 'GLIBC_2.39' not found` failure). Two markers,
+    because the defect had the second shape only: a literal `cargo build|test|…`
+    in a `run:` block (the pre-node `cargo test --no-run` + `docker run "$binary"`
+    pair), or a build artefact path (`target/debug/…`, `target/release/…`,
+    `/tmp/artifact`) mounted or copied into a `docker run`/`docker exec`. The
+    runtime check reads the two version numbers and refuses a mismatch; this
+    audit is what makes sure the check is *there*, because a rule no workflow
+    executes is a rule that will come back.
+
+    **What this cannot see** (stated so nobody trusts it further than it goes):
+    a job that shells out to a `scripts/build-*.sh` wrapper instead of naming
+    `cargo` (the wrapper exits non-zero on a bad floor, so the failure is loud),
+    and a `docker run` issued from Python inside the e2e drivers. Those two
+    shapes are covered at run time by `scripts/check-exec-env.sh` where it is
+    wired, and by `e2e/prebuilt_wheel.py`, which refuses a wheel whose platform
+    tag is above the image it installs into.
 """
 
 from __future__ import annotations
@@ -69,6 +93,23 @@ EXPR_OUTPUT = re.compile(r"\bneeds\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)"
 FROM_JSON = re.compile(r"fromJSON\(needs\.([\w-]+)\.outputs\.(\w+)\)")
 TEMPLATE = re.compile(r"\$\{\{[^}]*\}\}")
 LEG_CALL = re.compile(r"platform_matrix\.py\b([^\n;|`]*)")
+DOCKER_EXEC = re.compile(r"\bdocker\s+(?:run|exec)\b")
+# A path to a binary the *runner* compiled: a `cargo` output or the directory a
+# job untars an archive into. A wheel or a source tree is not this (those are
+# covered by their own tags), and `/src/target` inside a container is the
+# container's own build, so neither matches.
+RUNNER_ARTEFACT = re.compile(
+    r"(?:\$PWD|\$\{PWD\}|\.)?/?(?:target/(?:debug|release)/|/tmp/artifact\b)"
+)
+# The other marker: the job itself builds Rust, so *any* `docker run` after it may
+# be executing a host binary — which is the shape the pre-node php-sapi step had
+# (`cargo test --no-run`, then `docker run "$binary"`): no `target/debug` in the
+# step text, so an artefact-path rule alone reported "358 checks ok" on it.
+HOST_RUST_BUILD = re.compile(
+    r"\bcargo\s+(?:build|test|bench|run|nextest|rustc|clippy|doc|install)\b"
+)
+COMPATIBILITY_FLAG = re.compile(r"(?:^|\s)--compatibility(?:\s|=|$)")
+EXEC_ENV_CHECK = "check-exec-env.sh"
 
 GENERATOR = "scripts/platform_matrix.py"
 OUTPUT_SPECS: dict[str, tuple[str, str]] = {
@@ -312,6 +353,56 @@ def has_double_cp_prefix(text: str) -> bool:
     return False
 
 
+def check_maturin_platform_tag(step: dict, scope: str, report: Report) -> None:
+    """One platform tag per step: `manylinux:` or `--compatibility`, never both.
+
+    `maturin-action`'s `manylinux:` input does not just pick the container: the
+    wheel it builds is named for it. Passing `--compatibility manylinux_<tag>`
+    as well gives maturin the platform twice and it refuses the whole build
+    (`Expected only one platform tag but found 2`) after a full compile — the
+    first failure of the first real matrix run (`MB.3.58`).
+    """
+    uses = str(step.get("uses", ""))
+    if "maturin-action" not in uses:
+        return
+    with_ = step.get("with") or {}
+    manylinux = str(with_.get("manylinux") or "").strip()
+    args = str(with_.get("args") or "")
+    report.check(
+        bool(manylinux),
+        f"{scope}: {uses} sets no `manylinux:`, so maturin builds on the host and the wheel "
+        "carries the runner's glibc tag; name the container (it is the platform tag)",
+    )
+    report.check(
+        not (manylinux and COMPATIBILITY_FLAG.search(args)),
+        f"{scope}: {uses} passes both `manylinux:` and `--compatibility`, which is two platform "
+        "tags: maturin fails with `Expected only one platform tag but found 2`. Drop "
+        "`--compatibility` where the image is named; a host build passes it in "
+        "scripts/build-wheel.sh instead",
+    )
+
+
+def executes_runner_artefact(run_text: str) -> bool:
+    """Does this `run:` block hand a runner-built binary to a container?"""
+    folded = join_shell_continuations(run_text)
+    return bool(DOCKER_EXEC.search(folded)) and bool(RUNNER_ARTEFACT.search(folded))
+
+
+def builds_rust_for_host(run_text: str) -> bool:
+    """Does this `run:` block build Rust on the runner?"""
+    return bool(HOST_RUST_BUILD.search(join_shell_continuations(run_text)))
+
+
+def runs_a_container(run_text: str) -> bool:
+    return bool(DOCKER_EXEC.search(join_shell_continuations(run_text)))
+
+
+def checks_exec_env(job: dict) -> bool:
+    return any(
+        EXEC_ENV_CHECK in str(step.get("run") or "") for step in job.get("steps") or []
+    )
+
+
 def check_step_scripts(step: dict, scope: str, report: Report) -> None:
     run = step.get("run")
     if isinstance(run, str):
@@ -337,6 +428,7 @@ def check_step_scripts(step: dict, scope: str, report: Report) -> None:
                 f"{scope} (before-script-linux): a `#` comment inside a `\\` continuation "
                 f"({line[:60]!r}) ends the command there"
             )
+    check_maturin_platform_tag(step, scope, report)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -578,6 +670,25 @@ def main(argv: list[str] | None = None) -> int:
                         "on an arm64 runner (`externals/node20_alpine` is absent on linux-arm64); "
                         "use `docker run alpine:...` on the runner instead"
                     )
+
+            # A binary the runner built may only run in a container that also
+            # checks the C library relation (`MB.3.58`). Two markers, because the
+            # defect had the second shape only: a literal `cargo build|test` in a
+            # `run:` block, or a `target/`/`/tmp/artifact` path handed to
+            # `docker run`. Either way, the job must carry the runtime check.
+            run_blocks = [str(step.get("run") or "") for step in job.get("steps") or []]
+            if any(runs_a_container(block) for block in run_blocks) and (
+                any(builds_rust_for_host(block) for block in run_blocks)
+                or any(executes_runner_artefact(block) for block in run_blocks)
+            ):
+                report.check(
+                    checks_exec_env(job),
+                    f"{path.name}: job {job_name} builds Rust on the runner (or hands a "
+                    f"build artefact to a container) and then runs a container, without "
+                    f"`scripts/{EXEC_ENV_CHECK}`; a container may only run a binary it built "
+                    "itself, or one whose glibc floor it still meets. Add the check (it names "
+                    "both versions and the fix), or build inside the image",
+                )
 
             upstream = transitive_needs(job_name, jobs_needing)
             for idx, step in enumerate(job.get("steps") or [], 1):

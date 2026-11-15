@@ -84,6 +84,13 @@ PYTHONS = ("3.13", "3.14")
 # that minor: no single distro ships 8.2, 8.3 and 8.4, and Alpine and Debian
 # disagree about both the package names (`php82-dev` vs `php8.2-dev`) and where
 # the library lives (`/usr/lib/php82/libphp.so` vs `/usr/lib/libphp8.2.so`).
+#
+# `suites` is whether this leg also compiles and runs the two protected suites
+# (`critical_php_backend`, `critical_php_embed`) **in its own image**
+# (`MB.3.58`). A leg whose distro cannot carry them says why in
+# `suites_because`, and the reason is part of the matrix rather than a step
+# condition buried in a workflow: "the shim builds and probes here, but the
+# worker-level suites cannot run" is a claim a reader has to be able to see.
 PHP_BUILDS = {
     ("8.2", "gnu"): {
         "base": "debian:bookworm",
@@ -91,6 +98,20 @@ PHP_BUILDS = {
         "embed": "libphp8.2-embed",
         "curl": "php8.2-curl",
         "libphp": "/usr/lib/libphp8.2.so",
+        "suites": False,
+        # Measured in the leg's own image: `dlsym(libphp, "php_version")` is
+        # `undefined symbol` on Debian bookworm's libphp8.2 (PHP 8.2 keeps it as
+        # a hidden data symbol; it is an exported function only from 8.3), and
+        # `crates/blastit-php-sapi/src/loader.rs` resolves it before
+        # `php_module_startup`, so `blastit dev` refuses this pair by name. The
+        # shim still builds, `readelf -d` still proves no `DT_NEEDED` on libphp,
+        # and the real-load probe still serves 200 — that is the leg's proof.
+        "suites_because": (
+            "Debian bookworm's libphp8.2 exports no `php_version`, and blastit's "
+            "stage-1 loader resolves it before `php_module_startup`, so the boot "
+            "refuses this pair (a `libphp` fact, not a build-host fact); the shim "
+            "and its real-load probe still build and run in the image"
+        ),
     },
     ("8.3", "gnu"): {
         "base": "ubuntu:24.04",
@@ -98,6 +119,7 @@ PHP_BUILDS = {
         "embed": "libphp8.3-embed",
         "curl": "php8.3-curl",
         "libphp": "/usr/lib/libphp8.3.so",
+        "suites": True,
     },
     ("8.4", "gnu"): {
         "base": "debian:trixie-slim",
@@ -105,6 +127,7 @@ PHP_BUILDS = {
         "embed": "libphp8.4-embed",
         "curl": "php8.4-curl",
         "libphp": "/usr/lib/libphp8.4.so",
+        "suites": True,
     },
     ("8.2", "musl"): {
         "base": "alpine:3.20",
@@ -114,6 +137,18 @@ PHP_BUILDS = {
         # Alpine's layout is per-minor and not uniform: 8.2 and 8.3 install
         # `libphpXY.so` at `/usr/lib`, 8.4 installs `/usr/lib/php84/libphp.so`.
         "libphp": "/usr/lib/libphp82.so",
+        "suites": False,
+        # Two facts, because one sentence used to blame only the toolchain: the
+        # Alpine image carries no libclang (so it does not build `blastit`), and
+        # PHP 8.2's `libphp82` exports no `php_version`, which `loader.rs`
+        # requires — the boot refuses this pair wherever it runs (measured by
+        # `MB.3.58` in this image).
+        "suites_because": (
+            "the Alpine image builds no `blastit` (no libclang) and PHP 8.2's "
+            "`libphp82` exports no `php_version`, which blastit's stage-1 loader "
+            "requires — `MB.3.58` measured the refusal in this image; the shim "
+            "and its real-load probe still build and run"
+        ),
     },
     ("8.3", "musl"): {
         "base": "alpine:3.21",
@@ -121,6 +156,12 @@ PHP_BUILDS = {
         "embed": "php83-embed",
         "curl": "php83-curl",
         "libphp": "/usr/lib/libphp83.so",
+        "suites": False,
+        "suites_because": (
+            "the Alpine leg builds the shim and the probe (both musl) but not the "
+            "worker-level suites: they need libclang to compile `blastit`, and the "
+            "musl half of `MB.3.39` is unchanged scope"
+        ),
     },
     ("8.4", "musl"): {
         "base": "alpine:3.21",
@@ -128,6 +169,12 @@ PHP_BUILDS = {
         "embed": "php84-embed",
         "curl": "php84-curl",
         "libphp": "/usr/lib/php84/libphp.so",
+        "suites": False,
+        "suites_because": (
+            "the Alpine leg builds the shim and the probe (both musl) but not the "
+            "worker-level suites: they need libclang to compile `blastit`, and the "
+            "musl half of `MB.3.39` is unchanged scope"
+        ),
     },
 }
 
@@ -161,6 +208,65 @@ PROVEN: dict[tuple, str] = {
     ("archives", "x86_64", "gnu"): "MB.3.18",
     ("archives", "x86_64", "musl"): "MB.3.18",
 }
+
+# --- what each built shim leg actually reached (`MB.3.58` review) -------------
+#
+# `PROVEN` says an artifact was "built and exercised"; this says what *exercised*
+# reached, because "6 built & exercised" reads as six working shims and four of
+# them are not usable for `[route.php]` today. One row per built leg; an absent
+# key is a leg that has not been built at all (declared, unbuilt), and the
+# aarch64 legs are therefore absent.
+#
+#   built    the image produced `libblastit_php<minor>-<arch>-<libc>.so`; nothing
+#            ran it
+#   probed   `php-sapi-probe` served real requests through `libphp` + the shim
+#            (the shim-level proof `PROVEN` records), but `blastit`'s own boot
+#            did not serve with the distro's own package path
+#   served   a `[route.php]` request went through `blastit`'s worker with the
+#            distro's own package path — what the install docs tell a user to do
+#   refused  a boot refused the pair; the sentence and its cause are measured
+#
+# `served` is the support statement: 2 of the 12 declared shims are served today
+# (4 once the aarch64 gnu legs run), so the docs may say "PHP 8.3/8.4 on
+# glibc" and must not say "PHP 8.3/8.4 anywhere".
+SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
+    ("8.4", "gnu", "x86_64"): (
+        "served",
+        "MB.3.12's protected suite, re-measured by MB.3.58 in the `debian:trixie` "
+        "image: `GET / → app 200` through the worker (5 + 21 tests)",
+    ),
+    ("8.3", "gnu", "x86_64"): (
+        "served",
+        "MB.3.58 in the `ubuntu:24.04` image: `critical_php_backend` 5/5 and "
+        "`critical_php_embed` 21/21, `served: HTTP/1.1 200 OK`",
+    ),
+    ("8.2", "gnu", "x86_64"): (
+        "refused",
+        "measured by MB.3.58: Debian bookworm's `libphp8.2` exports no "
+        "`php_version`, so the worker's `dlopen` of the shim fails with "
+        "`Symbol not found: php_version` and the boot refuses the pair; the "
+        "real-load probe still serves",
+    ),
+    ("8.4", "musl", "x86_64"): (
+        "probed",
+        "measured by MB.3.58: the probe serves 200, and `blastit dev` serves "
+        "`GET / → app 200` when `BLASTIT_LIBPHP` names a *versioned* file — "
+        "Alpine's own `/usr/lib/php84/libphp.so` carries no major.minor, so the "
+        "boot refuses it (`no shim can be chosen`)",
+    ),
+    ("8.3", "musl", "x86_64"): (
+        "probed",
+        "as 8.4: probe 200, `blastit dev` 200 with a versioned `BLASTIT_LIBPHP`, "
+        "refused with Alpine's own `/usr/lib/libphp83.so`",
+    ),
+    ("8.2", "musl", "x86_64"): (
+        "refused",
+        "measured by MB.3.58 in `alpine:3.20`: `the loaded images have no "
+        "php_version: Symbol not found`, and `/usr/lib/libphp82.so` names no "
+        "major.minor either",
+    ),
+}
+REACHES = ("built", "probed", "served", "refused")
 
 # Consumer images (`ADR-0010` §4.3), one tag per libc.
 IMAGES = (
@@ -229,6 +335,14 @@ def shim_legs() -> list[dict]:
             "embed": PHP_BUILDS[(minor, leg["libc"])]["embed"],
             "curl": PHP_BUILDS[(minor, leg["libc"])]["curl"],
             "libphp": PHP_BUILDS[(minor, leg["libc"])]["libphp"],
+            # A JSON string, not a bool: GitHub compares `matrix.suites` to
+            # `'true'`, and the workflow auditor stringifies every matrix value,
+            # so one spelling has to work for both.
+            "suites": "true" if PHP_BUILDS[(minor, leg["libc"])]["suites"] else "false",
+            # `built|probed|served|refused`, empty when this leg has never been
+            # built — the support statement a reader needs before choosing a
+            # minor (`MB.3.58` review).
+            "reaches": SHIM_REACHES.get((minor, leg["libc"], leg["arch"]), ("",))[0],
             "runs_on": ARCHES[leg["arch"]]["runs_on"],
         }
         for leg in enabled_legs()
@@ -247,6 +361,49 @@ def proved(family: str) -> list[tuple]:
 
 def proven_count(family: str) -> int:
     return len(proved(family))
+
+
+def reached(reaches: str) -> list[dict]:
+    """The shim legs that reached `reaches` (the support statement)."""
+    return [leg for leg in shim_legs() if leg["reaches"] == reaches]
+
+
+def reaches_counts() -> dict[str, int]:
+    return {name: len(reached(name)) for name in REACHES} | {
+        "unbuilt": len(shim_legs()) - len(reached_any())
+    }
+
+
+def reached_any() -> list[dict]:
+    return [leg for leg in shim_legs() if leg["reaches"]]
+
+
+def reaches_sentence() -> str:
+    """The one sentence `--check`, `--summary` and the release notes print.
+
+    `MB.3.58` review: the gate and the summary disagreed in wording, so a number a
+    reader quoted could be one no gate printed. One function, one string — the
+    counts and the arm-runner projection included.
+    """
+    counts = reaches_counts()
+    total = len(shim_legs())
+    prospective = counts["served"] + len(
+        [
+            leg
+            for leg in shim_legs()
+            # Unbuilt, but its (minor, libc) is served on x86_64: the arm runners
+            # will add it, so the sentence says what the number becomes.
+            if not leg["reaches"] and PHP_BUILDS[(leg["minor"], leg["libc"])]["suites"]
+        ]
+    )
+    sentence = (
+        f"served {counts['served']} of {total} shims, "
+        f"{counts['probed']} probed, {counts['refused']} refused, "
+        f"{counts['unbuilt']} unbuilt"
+    )
+    if prospective > counts["served"]:
+        sentence += f"; {prospective} served once the aarch64 gnu legs run"
+    return sentence
 
 
 # --- the check --------------------------------------------------------------
@@ -417,6 +574,26 @@ def check(problems: list[str], notes: list[str]) -> None:
                 problems.append(
                     f"PHP {minor} on {libc}: no {key}: the leg cannot be built"
                 )
+        # `MB.3.58`: whether the worker-level suites run in this leg's image is a
+        # matrix fact, so a leg that cannot carry them says so where the leg is
+        # declared. A silent `False` and a `True` that carries a reason are both
+        # refusals: the reason is either needed or it is stale.
+        if not isinstance(spec.get("suites"), bool):
+            problems.append(
+                f"PHP {minor} on {libc}: `suites` must be True or False, not "
+                f"{spec.get('suites')!r}: the workflow picks a matrix value, not a step condition"
+            )
+        if not spec.get("suites") and not spec.get("suites_because"):
+            problems.append(
+                f"PHP {minor} on {libc}: the protected suites do not run here and no "
+                "`suites_because` says why: a dropped proof keeps its reason, or it is "
+                "read as a pass"
+            )
+        if spec.get("suites") and spec.get("suites_because"):
+            problems.append(
+                f"PHP {minor} on {libc}: `suites` is True and `suites_because` says why "
+                "it is not: the reason is stale"
+            )
     for minor in PHP_MINORS:
         for leg in LEGS:
             if (minor, leg["libc"]) not in PHP_BUILDS:
@@ -433,6 +610,37 @@ def check(problems: list[str], notes: list[str]) -> None:
             r"libblastit_php8\d-(x86_64|aarch64)-(gnu|musl)\.so", leg["shim"]
         ):
             problems.append(f"{leg['name']}: {leg['shim']} is not the §4.1 name")
+
+    # `SHIM_REACHES` is the support statement (`MB.3.58` review): a row must name
+    # a leg this matrix builds, say what it reached, and say how that was
+    # measured. A `served` row without a CI suite would be a claim no leg
+    # re-proves, and a leg with suites must be `served` — otherwise CI runs the
+    # suites for a leg whose own row says the boot refuses.
+    for (minor, libc, arch), (value, because) in SHIM_REACHES.items():
+        where = f"SHIM_REACHES {minor}/{libc}/{arch}"
+        if minor not in PHP_MINORS:
+            problems.append(f"{where}: unknown PHP minor")
+        if libc not in LIBCS:
+            problems.append(f"{where}: unknown libc")
+        if arch not in ARCHES:
+            problems.append(f"{where}: unknown arch")
+        if value not in REACHES:
+            problems.append(f"{where}: {value!r} is not one of {REACHES}")
+        if not because:
+            problems.append(f"{where}: no reason recorded for {value!r}")
+        if value == "served" and not PHP_BUILDS.get((minor, libc), {}).get("suites"):
+            problems.append(
+                f"{where}: claims `served` for a leg whose `suites` is false, so no CI "
+                "leg re-proves it; run the suites there or record `probed`"
+            )
+    for leg in shim_legs():
+        spec = PHP_BUILDS[(leg["minor"], leg["libc"])]
+        if spec["suites"] and leg["arch"] == "x86_64" and leg["reaches"] != "served":
+            problems.append(
+                f"{leg['name']}: `suites` is true, so CI runs the worker-level suites "
+                f"here, but `SHIM_REACHES` says {leg['reaches'] or 'nothing'}: the two "
+                "cannot both be right"
+            )
 
     # Every declared artifact has a place in PROVEN or it is a promise; every
     # PROVEN key names an artifact the matrix actually builds.
@@ -572,6 +780,47 @@ def summary() -> str:
             f"| `{leg['shim']}` | {leg['base']} ({leg['runs_on']}) | "
             f"{'proved by ' + node if node else 'declared, unbuilt'} |"
         )
+    lines.append("")
+    lines.append(
+        "The two protected PHP suites (`MB.3.39`) run **in the leg's own image**, "
+        "so a leg may only claim them if that image builds them (`MB.3.58`):"
+    )
+    lines.append("")
+    lines.append("| (minor, libc) | suites in its image |")
+    lines.append("|---|---|")
+    for minor in PHP_MINORS:
+        for libc in LIBCS:
+            spec = PHP_BUILDS[(minor, libc)]
+            cell = "yes" if spec["suites"] else f"no — {spec['suites_because']}"
+            lines.append(f"| PHP {minor}, {libc} | {cell} |")
+    counts = reaches_counts()
+    lines.append("")
+    lines.append("## Which PHP a user can actually run (measured, `SHIM_REACHES`)")
+    lines.append("")
+    lines.append(f"reaches: {reaches_sentence()}.")
+    lines.append("")
+    lines.append(
+        "`PROVEN` says an artefact was built and exercised; this table says what the "
+        "boot did with it, because the two are different claims."
+    )
+    lines.append("")
+    lines.append("| shim leg | reaches | why (measured) |")
+    lines.append("|---|---|---|")
+    for leg in shim_legs():
+        value, because = SHIM_REACHES.get(
+            (leg["minor"], leg["libc"], leg["arch"]),
+            ("unbuilt", "declared, never built"),
+        )
+        lines.append(f"| `{leg['shim']}` | {value} | {because} |")
+    lines.append("")
+    lines.append("| PHP minor | glibc (Debian/Ubuntu) | musl (Alpine) |")
+    lines.append("|---|---|---|")
+    for minor in PHP_MINORS:
+        cells = [
+            SHIM_REACHES.get((minor, libc, "x86_64"), ("unbuilt", ""))[0]
+            for libc in LIBCS
+        ]
+        lines.append(f"| {minor} | {cells[0]} | {cells[1]} |")
     return "\n".join(lines)
 
 
@@ -718,6 +967,7 @@ def main(argv: list[str] | None = None) -> int:
             f"built and exercised: {proven_count('wheels')}/{len(wheel_legs())} wheels, "
             f"{proven_count('archives')}/{len(binary_legs())} archives, "
             f"{proven_count('shims')}/{len(shim_legs())} shims; "
+            f"reaches: {reaches_sentence()}; "
             f"{len([leg for leg in LEGS if not leg['enabled']])} leg(s) dropped"
         )
     return 0

@@ -72,3 +72,36 @@ Release v0.2.0 is ready on branch release/0.2.0 (tip 73960fc). Review and squash
 
 **Answer:**
 
+## H-009 [open]
+
+- asked: 2026-11-15T17:36 by implementer
+
+MB.3.58 attempt 2: four edits this node cannot make (its paths are .github/**, scripts/**, e2e/**, Makefile), all of them measured in the legs' own images. The gate now prints the support fact (`scripts/platform_matrix.py --summary`: `served: 2 of 12`), but prose needs an owner.
+
+1. `docs/frameworks/php.md` (the PHP support/install table) must say, not a footnote: PHP 8.3 and 8.4 are supported on Debian/Ubuntu; PHP 8.2 is BUILT BUT REFUSED, because the distro's `libphp8.2` exports no `php_version`, which `crates/blastit-php-sapi/src/loader.rs` requires before `php_module_startup` (a host-package fact, not a blastit bug — the shim's real-load probe still serves); on Alpine, 8.3/8.4 serve only when `BLASTIT_LIBPHP` names a versioned file, because Alpine's `/usr/lib/libphp83.so` and `/usr/lib/php84/libphp.so` carry no major.minor and the boot refuses ("no shim can be chosen"). Measured: 8.3/8.4 gnu `served: HTTP/1.1 200 OK` through the worker (5 + 21 tests each); ALPINE 8.3/8.4 `GET / -> app 200` with `/tmp/libphp8.4.so` copied from the distro file; 8.2 gnu and musl both `the loaded images have no php_version: Symbol not found`.
+
+2. `plan/HUMAN.md` H-008 says "4 / 2 / 6 built+exercised on x86_64"; that reads as six working shims. Measured: 6 built and exercised at the probe level, and 2 of 12 SERVED (x86_64 gnu 8.3/8.4; 4 of 12 once the aarch64 gnu legs run). Please add: "of the 6 x86_64 shims, 2 serve `[route.php]` (8.3/8.4 gnu), 2 are refused (8.2 both libcs), 2 are probed only (Alpine 8.3/8.4 need a versioned BLASTIT_LIBPHP)".
+
+3. `docs/knowledge/LESSONS.md` (the bullet starting "A \"directory only one uid can write\" fixture") still says `make rs-test-php-image` runs already-built binaries with `--user <host uid>:<host gid> -v $CURDIR:$CURDIR`. Since MB.3.58 the leg image builds the suites and the target runs them as the image's root (plus one unprivileged single-test run for the `PR_SET_DUMPABLE(0)` witness), so `target/tmp` is the image's own; the reason the container cannot use `/tmp` is unchanged.
+
+4. `crates/blastit/tests/critical_php_embed.rs` lines ~44-47 ("# CI coverage ... closed by MB.3.39") still imply the runner builds the suites. They are now compiled inside the leg image (`e2e/php-sapi/Dockerfile`, `PHP_SAPI_SUITES=1`) and only where `matrix.suites` is true: gnu 8.3/8.4.
+
+Separately, a crates-side limitation this node measured (crates/** is out of its paths): `stage0.rs`'s PHP discovery reads the minor from the libphp FILE NAME, so Alpine's own package paths are refused even though the pair serves. Reading the version from the ELF (or accepting `libphpXY.so`) is the fix if Alpine PHP is meant to be supported out of the box.
+
+**Update (implementer, attempt 3).** The node's `paths` were widened to `docs/frameworks/php.md` and
+`docs/knowledge/LESSONS.md`, so items **1 and 3 are done here** and there is nothing left for you on
+them: `docs/frameworks/php.md` §1 now carries the support line (8.3/8.4 supported; 8.2 built but not
+served, because `libphp8.2` exports no `php_version`; on Alpine, `libphp83.so` /
+`/usr/lib/php84/libphp.so` are refused with `no shim can be chosen` and `BLASTIT_LIBPHP` must name a
+versioned file), and the LESSONS bullet now describes the in-image build, the root run, the
+unprivileged maps leg and the missing `CAP_SYS_PTRACE`. **Still yours:** item 2 (the H-008 sentence:
+"of the 6 x86_64 shims, 2 serve `[route.php]`, 2 are refused, 2 are probed only" — the gate's exact
+sentence is now `reaches: served 2 of 12 shims, 2 probed, 2 refused, 6 unbuilt; 4 served once the
+aarch64 gnu legs run`, printed identically by `--check` and `--summary`) and item 4 (a two-line
+comment in `crates/blastit/tests/critical_php_embed.rs`). The discovery limitation is now **MB.3.59**
+(priority 1, `depends_on: [MB.3.58]`), which the owner ruled release-blocking: the Alpine naming
+refusal and 8.2's missing `php_version` are one defect, and the minor must come from the library
+rather than its file name.
+
+**Answer:**
+

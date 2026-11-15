@@ -24,6 +24,15 @@
 #     `*.dist-info/WHEEL`, prints the actual `Tag:`, refuses unversioned `linux_*`,
 #     and enforces `--max-glibc ${BLASTIT_WHEEL_MAX_GLIBC:-2_41}`.
 #
+# **One platform tag, from one place (`MB.3.58`).** A tag reaches maturin through
+# exactly one route: `--compatibility` here (this script enters
+# `quay.io/pypa/manylinux_<tag>_<arch>` itself and invokes maturin directly), or
+# `maturin-action`'s `manylinux:` input, which names the container maturin runs
+# in. Supplying both — as `.github/actions/build-wheel` did — makes maturin see
+# two platform tags and it refuses the build (`Expected only one platform tag but
+# found 2`). So this script refuses `--compatibility` from its caller when
+# `--manylinux` already chose one.
+#
 # Usage: scripts/build-wheel.sh [--manylinux 2_28] [extra arguments for `maturin build`]
 #
 # The README is rewritten to absolute links for the duration of the build and
@@ -72,6 +81,22 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+# `--manylinux` already chose the platform, and the path below passes it to
+# maturin as `--compatibility manylinux_<tag>`. A caller that also passed
+# `--compatibility` would hand maturin two tags and it refuses the build
+# (`MB.3.58`: `Expected only one platform tag but found 2`), after a full compile.
+if [[ -n $manylinux_ver ]]; then
+    for arg in ${extra_args[@]+"${extra_args[@]}"}; do
+        case "$arg" in
+            --compatibility|--compatibility=*)
+                echo "error: --manylinux $manylinux_ver already sets the platform tag;" >&2
+                echo "  do not also pass $arg — maturin refuses two platform tags" >&2
+                exit 2
+                ;;
+        esac
+    done
+fi
 
 # `MATURIN` overrides how maturin is found: `uvx maturin` by default (nothing to
 # install), `maturin` in a build image that already has it on PATH.

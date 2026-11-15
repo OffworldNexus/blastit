@@ -585,54 +585,101 @@ PHP_SUITE_ARGS := --test critical_php_backend --test critical_php_embed
 # against the pair inside it. Debian's `libphp8.4-embed` puts the library at
 # `/usr/lib/libphp8.4.so` (no multi-arch directory — checked in
 # `debian:trixie-slim`), and the image's own `make php-sapi` leaves the shim at
-# `/src/target/php-sapi`, which `docker cp` hands to the host run below.
+# `/src/target/php-sapi`, which is the path the suites are pointed at below.
 #
-# The test binaries are built **here** and only executed in the image: that
-# image is deliberately minimal (Debian slim + PHP + a Rust toolchain) and
-# cannot compile `blastit` — `pg_query`'s bindgen wants libclang, which it does
-# not install. Nothing else crosses the boundary: the binaries need only glibc
-# (checked with `ldd`), and the guest is newer than the host.
+# **The suites are built in the image, not here** (`MB.3.58`). They used to be
+# compiled on the runner and executed inside the leg image, which only works
+# while the runner's glibc is no newer than the leg's: on the `debian:bookworm`
+# leg (glibc 2.36) an Ubuntu 24.04 runner (2.39) produced a binary that could not
+# start —
+#
+#   /lib/x86_64-linux-gnu/libc.so.6: weak version 'GLIBC_2.39' not found
+#   (required by target/debug/blastit)
+#
+# — and raising the leg's base would have proved nothing about the older distros
+# the shim is shipped for. `e2e/php-sapi/Dockerfile` now installs libclang and
+# compiles both suites, so the image executes what it built; it records the two
+# executables in `/src/target/php-suite-executables` and this target runs exactly
+# those (a musl leg records none, and is refused by name instead of passing).
 PHP_SAPI_IMAGE ?= blastit-php-sapi-e2e:local
 PHP_SAPI_IMAGE_MINOR ?= 8.4
 PHP_SAPI_IMAGE_LIBPHP ?= /usr/lib/libphp$(PHP_SAPI_IMAGE_MINOR).so
-# Where the image's shim is copied so the suites' `BLASTIT_PHP_SHIM_DIR` names a
-# host path that is bind-mounted at the same absolute path inside the container.
-PHP_SAPI_IMAGE_SHIM_DIR ?= $(CURDIR)/target/php-sapi-image
+# The shim directory **inside** the image: the one its own `make php-sapi` wrote
+# and the probe loaded. Nothing is copied out to a host path any more, so the
+# suites cannot be pointed at a shim from a different build.
+PHP_SAPI_IMAGE_SHIM_DIR ?= /src/target/php-sapi
 
 rs-test-php: php-sapi ## Real-pair PHP legs: critical_php_backend + critical_php_embed
 	@echo "BLASTIT_PHP_SHIM_DIR=$(PHP_SAPI_OUT) cargo test -p blastit $(PHP_SUITE_ARGS) -- --nocapture"
 	BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_OUT)" \
 		$(RUST_ENV) $(CARGO) test -p blastit --locked $(PHP_SUITE_ARGS) -- --nocapture
 
-rs-test-php-image: ## Docker: the same two PHP legs, run against the php-sapi-e2e image's pair (what CI runs)
+rs-test-php-image: ## Docker: the two PHP legs, in the image that built them (what CI runs)
 	@docker image inspect "$(PHP_SAPI_IMAGE)" >/dev/null 2>&1 || { \
 		echo "rs-test-php-image: no image '$(PHP_SAPI_IMAGE)'; build it first:" >&2; \
 		echo "  make php-sapi-e2e PHP_SAPI_KEEP=1" >&2; \
+		echo "  (the image is where the suites are compiled: MB.3.58)" >&2; \
 		exit 1; \
 	}
+	# Two runs, and the second one is not optional (`MB.3.58` review).
+	#
+	# The first runs the whole suite as the image's own root: the tree the suites
+	# were built in is root-owned `0755`, and `critical_php_embed`'s provenance
+	# legs need a fixture parent they can create and whose ancestors no other uid
+	# can write. `--cap-add SYS_PTRACE` lets root read the maps of the
+	# `PR_SET_DUMPABLE(0)` roles (Docker's default root set has no such
+	# capability), so `no_libphp_is_mapped_above_the_view_worker` can *content*-check
+	# each role above the view instead of skipping them.
+	#
+	# **That is not the witness for `PR_SET_DUMPABLE(0)`.** Under root the suite
+	# takes its `euid == 0` branch, which never asserts `denied > 0`; the only
+	# assertion of that invariant is the unprivileged branch, and `ci.yml`'s root
+	# run never reaches it (no `libphp` on the runner). So the second run executes
+	# the same test as the caller's uid, where the roles answer `EACCES`, and this
+	# target refuses to pass unless the suite reports at least one denied read:
+	# dropping `set_dumpable(false)` in `php_view.rs` must fail here.
 	@set -eu; \
-	echo "cargo test -p blastit $(PHP_SUITE_ARGS) --no-run   # build here, run in the image"; \
-	binaries=""; \
-	for binary in $$(CARGO_TERM_COLOR=never $(RUST_ENV) $(CARGO) test -p blastit --locked $(PHP_SUITE_ARGS) --no-run 2>&1 \
-		| awk '/Executable/{ if (match($$0, /\([^)]*\)$$/)) print substr($$0, RSTART+1, RLENGTH-2) }' ); do \
-		[ -x "$$binary" ] || { echo "rs-test-php-image: not an executable: $$binary" >&2; exit 1; }; \
-		binaries="$$binaries $$binary"; \
-	done; \
-	set -- $$binaries; \
-	[ "$$#" -eq 2 ] || { echo "rs-test-php-image: expected 2 test executables, got $$# ($$binaries)" >&2; exit 1; }; \
-	container=$$(docker create "$(PHP_SAPI_IMAGE)"); \
-	rm -rf "$(PHP_SAPI_IMAGE_SHIM_DIR)"; \
-	mkdir -p "$(PHP_SAPI_IMAGE_SHIM_DIR)"; \
-	docker cp "$$container:/src/target/php-sapi/." "$(PHP_SAPI_IMAGE_SHIM_DIR)/"; \
-	docker rm -f "$$container" >/dev/null; \
-	for binary in "$$@"; do \
-		echo "docker run $(PHP_SAPI_IMAGE) $$binary --nocapture"; \
-		docker run --rm --user "$$(id -u):$$(id -g)" \
-			-v "$(CURDIR):$(CURDIR)" -w "$(CURDIR)" \
-			-e BLASTIT_LIBPHP="$(PHP_SAPI_IMAGE_LIBPHP)" \
-			-e BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_IMAGE_SHIM_DIR)" \
-			"$(PHP_SAPI_IMAGE)" "$$binary" --nocapture; \
-	done
+	echo "docker run $(PHP_SAPI_IMAGE)  # the suites this image built (root)"; \
+	docker run --rm --cap-add SYS_PTRACE \
+		-e BLASTIT_LIBPHP="$(PHP_SAPI_IMAGE_LIBPHP)" \
+		-e BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_IMAGE_SHIM_DIR)" \
+		"$(PHP_SAPI_IMAGE)" \
+		sh -eu -c ' \
+			set --; \
+			while IFS= read -r binary; do set -- "$$@" "$$binary"; done \
+				< /src/target/php-suite-executables; \
+			if [ "$$#" -ne 2 ]; then \
+				echo "rs-test-php-image: the image records $$# suite executable(s), expected 2" >&2; \
+				echo "  a musl leg or a leg with suites:false builds none (MB.3.39/MB.3.58)" >&2; \
+				exit 1; \
+			fi; \
+			for binary in "$$@"; do \
+				echo "$$binary --nocapture"; \
+				"$$binary" --nocapture; \
+			done'
+	@set -eu; \
+	echo "docker run --user $$(id -u):$$(id -g) $(PHP_SAPI_IMAGE)  # the PR_SET_DUMPABLE(0) witness"; \
+	out=$$(docker run --rm --user "$$(id -u):$$(id -g)" \
+		-e BLASTIT_LIBPHP="$(PHP_SAPI_IMAGE_LIBPHP)" \
+		-e BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_IMAGE_SHIM_DIR)" \
+		"$(PHP_SAPI_IMAGE)" \
+		sh -eu -c ' \
+			binary=$$(grep -m1 critical_php_embed /src/target/php-suite-executables); \
+			[ -n "$$binary" ] || { \
+				echo "rs-test-php-image: the image records no critical_php_embed executable" >&2; \
+				exit 1; \
+			}; \
+			exec "$$binary" no_libphp_is_mapped_above_the_view_worker --exact --nocapture' \
+		2>&1) && rc=0 || rc=$$?; \
+	printf '%s\n' "$$out"; \
+	[ "$$rc" -eq 0 ] || { echo "rs-test-php-image: the unprivileged maps leg failed (exit $$rc)" >&2; exit 1; }; \
+	denied=$$(printf '%s\n' "$$out" | sed -n 's/.* \([0-9][0-9]*\) denied (EACCES).*/\1/p' | tail -n 1); \
+	if [ -z "$$denied" ] || [ "$$denied" -lt 1 ]; then \
+		echo "rs-test-php-image: NO role was denied its maps to an unprivileged caller ($${denied:-none} denied):" >&2; \
+		echo "  that is the assertion of PR_SET_DUMPABLE(0) (ADR-0010 §2) and it did not fire" >&2; \
+		exit 1; \
+	fi; \
+	echo "rs-test-php-image: PR_SET_DUMPABLE(0) witness — $$denied role(s) denied (EACCES) to uid $$(id -u)"
 
 mutants-rust: ## Run cargo-mutants with disk scratch + cgroup memory cap (PKG=<crate> to scope)
 	@mkdir -p "$(MUTANTS_TMP)"

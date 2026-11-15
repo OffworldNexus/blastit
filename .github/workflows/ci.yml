@@ -473,6 +473,12 @@ jobs:
   # second is the one that would have caught 0.2.0's shipped binary: it linked
   # `libpython3.14.so.1.0` *and* a `RUNPATH` pointing at one developer's
   # `~/.local/share/uv/python/...`.
+  #
+  # This binary is built **on the runner** and executed in `debian:trixie-slim`,
+  # which is allowed by the only arm of `MB.3.58`'s rule that permits it: the
+  # image's glibc (2.41) is at least the runner's (2.39). Being newer is a
+  # property of today's runner, not a promise, so the step below reads both
+  # numbers and fails with them named.
   standalone:
     name: standalone binary (no libpython, no Python in the image)
     runs-on: ubuntu-latest
@@ -500,6 +506,16 @@ jobs:
               fi
             done
             echo "debian:trixie-slim: no CPython on PATH"'
+      # `MB.3.58`: this binary was built on the runner (glibc 2.39 today), and a
+      # container only runs what it built itself or what needs no more than it
+      # has. The check reads the floor out of the ELF and the version out of the
+      # image, so the day `ubuntu-latest` outgrows `debian:trixie-slim` this job
+      # says which two numbers disagree instead of failing at `execve` with
+      # `weak version 'GLIBC_…' not found`.
+      - name: The runtime image is not older than the builder
+        run: >-
+          scripts/check-exec-env.sh --image debian:trixie-slim
+          --binary target/debug/blastit
       - name: Serve a static fixture where no Python exists
         run: |
           set -euo pipefail

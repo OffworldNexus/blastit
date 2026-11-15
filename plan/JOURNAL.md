@@ -1799,3 +1799,28 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T16:26 [MB.3.18] (lead) status review -> done
 - 2026-11-15T16:28 HUMAN H-008 opened by conductor (node MB)
 - 2026-11-15T16:28 AUTOPILOT off by conductor awaiting human review and merge of release PR #64 (v0.2.0)
+- 2026-11-15T16:38 [MB.3.58] (lead) created (task) Every matrix leg must build where it runs, and no leg may pass two platform tags
+- 2026-11-15T16:38 [MB.3.18] (lead) CI (first real matrix run) invalidated this node's 'built and exercised' claim on the RUNNER: the wheel job passed --compatibility alongside a manylinux: image 
+- 2026-11-15T16:38 [MB.3.58] (lead) status ready -> active
+- 2026-11-15T16:38 [MB.3.58] (lead) attempt 1/3 started
+- 2026-11-15T16:38 [MB.3.58] (lead) base 73960fc
+- 2026-11-15T17:20 [MB.3.58] (lead) status active -> review
+- 2026-11-15T17:27 [MB.3.58] (lead) REVIEW FAIL (attempt 1). One BLOCKER, two MAJORs.
+- 2026-11-15T17:27 [MB.3.58] (lead) status review -> ready
+- 2026-11-15T17:27 [MB.3.58] (lead) status ready -> active
+- 2026-11-15T17:27 [MB.3.58] (lead) attempt 2/3 started
+- 2026-11-15T17:28 [MB.3.58] (lead) edited fields
+- 2026-11-15T17:28 [MB.3.58] (lead) Lead: item 3's support statement lives in docs/frameworks/php.md (the page a user reads before choosing a minor — it already names libphp-embed/php84-embed at :
+- 2026-11-15T17:36 HUMAN H-009 opened by implementer
+- 2026-11-15T17:56 [MB.3.59] (implementer) created (task) The Alpine libphp cannot be versioned by name: the boot refuses 'no shim can be chosen' unless BLASTIT_LIBPHP is versioned
+- 2026-11-15T18:01 [MB.3.58] (lead) status active -> review
+- 2026-11-15T18:05 [MB.3.58] (lead) REVIEW FAIL (attempt 3): the support line is user-facing advice and one of its two sentences is wrong for the first library it names; MB.3.59's body also carrie
+- 2026-11-15T18:05 [MB.3.58] (lead) status review -> ready
+- 2026-11-15T18:05 [MB.3.58] (lead) status ready -> active
+- 2026-11-15T18:05 [MB.3.58] (lead) attempt 3/3 started
+- 2026-11-15T18:05 [MB.3.59] (lead) edited fields
+- 2026-11-15T18:05 [MB.3.59] (lead) Lead: paths widened for what this node actually needs — docs/frameworks/php.md (acceptance 4 edits that page), crates/blastit-php-sapi/src/** (the refusal sente
+- 2026-11-15T18:06 [MB.3.59] (lead) edited fields
+- 2026-11-15T18:06 [MB.3.59] (lead) Lead: paths re-applied — the planner's body rewrite wrote its own (stale) frontmatter back over my earlier edit, which is the two-writers-on-one-file hazard thi
+- 2026-11-15T18:23 [MB.3.59] (lead) Reviewer PASS on attempt 4 with six MINORs, all folded here rather than fixed twice — this node's discovery fix will rewrite `docs/frameworks/php.md`'s passage 
+- 2026-11-15T18:23 [MB.3.58] (lead) status active -> done

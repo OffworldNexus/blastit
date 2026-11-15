@@ -172,6 +172,12 @@ def leg(minor, libc="gnu", arch=None):
 def build(image, minor, libc="gnu"):
     """Builds the image from the repo root; returns `(ok, report)`."""
     spec = leg(minor, libc)
+    # `matrix.suites` decides whether this image compiles the two protected
+    # suites at all (`MB.3.58` review): PHP 8.2's `libphp` exports no
+    # `php_version` and the Alpine legs carry no libclang, so building `blastit`
+    # there is ~7 minutes spent on a leg that can never pass. The shim and the
+    # probe are built either way.
+    suites = "1" if spec.get("suites", "true") == "true" else "0"
     result = docker(
         "build",
         "-f",
@@ -188,6 +194,8 @@ def build(image, minor, libc="gnu"):
         f"PHP_CURL={spec.get('curl', spec['dev'].replace('-dev', '-curl'))}",
         "--build-arg",
         f"LIBPHP={spec['libphp']}",
+        "--build-arg",
+        f"PHP_SAPI_SUITES={suites}",
         "-t",
         image,
         REPO,

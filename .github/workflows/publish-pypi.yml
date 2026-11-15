@@ -264,6 +264,13 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/artifact
           tar -C /tmp/artifact -xzf "dist/${{ matrix.archive }}"
+          # `MB.3.58`: this archive was built here, on the runner, and the image
+          # that runs it must not be older. `scripts/check-exec-env.sh` reads the
+          # glibc floor out of the binary and the version out of the image, so a
+          # runner upgrade that outgrows `debian:trixie-slim` names the two
+          # numbers instead of failing at `execve`.
+          scripts/check-exec-env.sh --image "${{ matrix.runtime_image }}" \
+              --binary "/tmp/artifact/blastit-${{ matrix.target }}/blastit"
           # The extracted binary, in a distro with no CPython: a static route,
           # its own 404, and a WSGI manifest refused at exit 1. The archive's
           # root is `blastit-<target>` (`scripts/build-standalone.sh`), not the
@@ -345,6 +352,12 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/artifact
           tar -C /tmp/artifact -xzf "dist/${{ matrix.archive }}"
+          # `MB.3.58`: the archive was built *in* `alpine:3.21` above and this is
+          # the same image, so the rule holds by construction; the check says so
+          # out loud (a musl binary carries no glibc symbol versions, and musl is
+          # ABI-stable within 1.x, so no version floor can refuse it).
+          scripts/check-exec-env.sh --image "${{ matrix.runtime_image }}" \
+              --binary "/tmp/artifact/blastit-${{ matrix.target }}/blastit"
           # `libgcc` is the one runtime package a dynamically linked musl Rust
           # binary needs (`libgcc_s.so.1`) and the base Alpine image does not
           # carry it. Run in a fresh image because `clang`'s tooling in the build

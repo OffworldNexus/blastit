@@ -263,6 +263,99 @@ def test_workflow_auditor_cases() -> int:
         )
         cases_run += 1
 
+        # 9. MB.3.58 failure 1: maturin gets the platform tag twice. `manylinux:`
+        #    names the container *and* the wheel's tag, so `--compatibility`
+        #    beside it is the `Expected only one platform tag but found 2` build.
+        case_dir = Path(tmp) / "double-platform-tag"
+        shutil.copytree(base, case_dir)
+        act = case_dir / ".github" / "actions" / "build-wheel" / "action.yml"
+        act.write_text(
+            act.read_text(encoding="utf-8").replace(
+                "--interpreter python${{ inputs.python }} --features",
+                "--interpreter python${{ inputs.python }} "
+                "--compatibility ${{ inputs.platform }} --features",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1
+            and "passes both `manylinux:` and `--compatibility`" in res.stdout,
+            "auditor must reject a maturin step that supplies two platform tags",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # 10. ... and the other half of the same rule: a maturin step with no
+        #     `manylinux:` builds on the host, so the wheel carries the runner's
+        #     glibc tag.
+        case_dir = Path(tmp) / "no-manylinux-image"
+        shutil.copytree(base, case_dir)
+        act = case_dir / ".github" / "actions" / "build-wheel" / "action.yml"
+        act.write_text(
+            act.read_text(encoding="utf-8").replace(
+                "        manylinux: ${{ inputs.manylinux }}\n", "", 1
+            ),
+            encoding="utf-8",
+        )
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "sets no `manylinux:`" in res.stdout,
+            "auditor must reject a maturin step that names no manylinux image",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # 11. MB.3.58 failure 2: the job runs a runner-built binary in a container
+        #     without checking that the container's glibc is at least the
+        #     builder's. Deleting the check must fail, not quietly bless it.
+        case_dir = Path(tmp) / "no-exec-env-guard"
+        shutil.copytree(base, case_dir)
+        ci = case_dir / ".github" / "workflows" / "ci.yml"
+        guard = (
+            "      - name: The runtime image is not older than the builder\n"
+            "        run: >-\n"
+            "          scripts/check-exec-env.sh --image debian:trixie-slim\n"
+            "          --binary target/debug/blastit\n"
+        )
+        text = ci.read_text(encoding="utf-8")
+        _expect(guard in text, "the ci.yml fixture no longer contains the guard step")
+        ci.write_text(text.replace(guard, "", 1), encoding="utf-8")
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "without `scripts/check-exec-env.sh`" in res.stdout,
+            "auditor must require a glibc check where a runner-built binary enters a container",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # 12. The exact pre-node shape that rule 14 exists for: the job builds the
+        #     test binaries on the runner and `docker run`s one, with no literal
+        #     `target/debug` and no `check-exec-env.sh` anywhere. An artefact-path
+        #     rule alone reported "ok" on this.
+        case_dir = Path(tmp) / "host-build-then-docker"
+        shutil.copytree(base, case_dir)
+        php = case_dir / ".github" / "workflows" / "php-sapi.yml"
+        anchor = "      - name: 'guard: the pair legs must serve, not refuse'\n"
+        restored = (
+            "      - name: the pre-node shape (host build, then container run)\n"
+            "        run: |\n"
+            "          set -eu\n"
+            "          cargo test -p blastit --locked --test critical_php_backend --no-run\n"
+            '          docker run --rm "$IMAGE" target/debug/blastit --version\n'
+        )
+        text = php.read_text(encoding="utf-8")
+        _expect(anchor in text, "the php-sapi fixture no longer has the guard anchor")
+        php.write_text(text.replace(anchor, restored + anchor, 1), encoding="utf-8")
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "builds Rust on the runner" in res.stdout,
+            "auditor must reject a host Rust build followed by `docker run` without the check",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
     return cases_run
 
 
@@ -400,6 +493,30 @@ def test_platform_matrix_cases() -> int:
             and "('archives', 'riscv64', 'gnu')" in res.stderr
             and "enabled and dropped at the same time" in res.stderr,
             "matrix check must reject unknown PROVEN entry and enabled+dropped leg",
+            res.stderr,
+        )
+        cases_run += 1
+
+        # MB.3.58: a leg that does not run the protected suites must say why.
+        # Dropping the reason (not the leg) has to fail, or the drop reads as a
+        # pass the next time someone reads `--summary`.
+        case_dir = Path(tmp) / "suites-without-reason"
+        shutil.copytree(base, case_dir)
+        pm = case_dir / "scripts" / "platform_matrix.py"
+        text = pm.read_text(encoding="utf-8")
+        reason = (
+            '        "suites_because": (\n'
+            '            "the Alpine leg builds the shim and the probe (both musl) but not the "\n'
+            '            "worker-level suites: they need libclang to compile `blastit`, and the "\n'
+            '            "musl half of `MB.3.39` is unchanged scope"\n'
+            "        ),\n"
+        )
+        _expect(reason in text, "the matrix fixture no longer carries the musl reason")
+        pm.write_text(text.replace(reason, "", 1), encoding="utf-8")
+        res = _run_matrix(case_dir, "--check", "--quiet")
+        _expect(
+            res.returncode == 1 and "no `suites_because` says why" in res.stderr,
+            "matrix check must reject a leg whose suites are dropped without a reason",
             res.stderr,
         )
         cases_run += 1
