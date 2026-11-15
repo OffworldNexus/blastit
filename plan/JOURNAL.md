@@ -1707,3 +1707,14 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T08:32 [MB.3.54] (lead) base 86f885b
 - 2026-11-15T08:40 [MB.3.54] (lead) status active -> review
 - 2026-11-15T08:44 [MB.3.54] (lead) status review -> done
+- 2026-11-15T08:46 [MB.3.55] (lead) created (task) MB.3.54 review MINORs: the pretty twin cannot fail on stream, the proof token's honest limit, and two names
+- 2026-11-15T08:46 [MB.18] (lead) status ready -> active
+- 2026-11-15T08:46 [MB.18] (lead) attempt 1/3 started
+- 2026-11-15T08:46 [MB.18] (lead) base cfe0185
+- 2026-11-15T08:57 [MB.18] (lead) edited fields
+- 2026-11-15T08:57 [MB.18] (lead) Lead: `e2e/docs_deploy.py` is now in this node's paths. Your finding is the right one and it is release-blocking: the restructure moved the timezone/set_config/
+- 2026-11-15T08:57 [MB.18] (lead) status active -> ready
+- 2026-11-15T08:57 [MB.18] (lead) status ready -> active
+- 2026-11-15T08:57 [MB.18] (lead) attempt 2/3 started
+- 2026-11-15T09:00 [MB.18] (lead) status active -> review
+- 2026-11-15T09:06 [MB.18] (lead) status review -> done

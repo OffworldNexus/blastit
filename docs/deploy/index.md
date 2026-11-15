@@ -1,120 +1,91 @@
 # Deployments
 
-Production Blastit is not `blastit dev`: it runs the app under real uids and
-**refuses to start** without root or the capability set, and without a seccomp
-filter — no silent fallback.
+Production Blastit is not `blastit dev`: every route runs under its own uid, and
+the process **refuses to start** without root or the capability set, and without a
+seccomp filter. There is no single-uid fallback.
 
-## Pick a preset
+## What you are deploying
 
-| Preset | For | Privilege | Who may reach the port |
-|---|---|---|---|
-| [`digitalocean-paas`](digitalocean-paas.md) | DigitalOcean App Platform | root | DO's edge and its own services |
-| [`compose-traefik`](compose-traefik.md) | Docker Compose behind Traefik v3 | capabilities (rootless) | the app's own compose network |
+**One container.** `blastit` is PID 1 and your framework runs inside it: one view
+process per route namespace, forked from `blastit` on demand, under that route's
+uid.
 
-```console
-$ blastit --preset digitalocean-paas
-$ blastit --preset compose-traefik
+**Blastit is the front door.** The ingress takes the connection and decodes the
+body, the scheduler admits the request and owns the worker budget, the view runs
+your code. Nothing reaches your app before the first two are done.
+
+**Credentials never enter your app's memory.** Each route gets its own socket to
+a proxy; `dbproxy` holds the real role, the password and the allowlist of what
+the route may run. Your app's `DATABASE_URL` points at a local socket, not at the
+database.
+
+## A pooler in front of the database { #pooler }
+
+A pool keeps a small set of server connections and shares them: sixteen workers
+per instance take most of a 1 GB cluster's ~22 backends, and a second instance
+would exhaust them. So there are two URLs, and swapping them is the failure this
+page is about — only the app's `DATABASE_URL` names the pool, while migrations and
+grants name the database on its direct port, as a role of their own, because DDL
+and session state do not survive transaction pooling. Sizing and the session zone:
+[the pooler](anything-else.md#pooler).
+
+## The topology
+
+```mermaid
+flowchart TB
+    client(["client"])
+    edge["edge · TLS"]
+    subgraph box["one container"]
+        ingress["ingress · validates"]
+        sched["scheduler · fair queue"]
+        view["view · one uid per route"]
+        dbproxy["dbproxy · credentials"]
+    end
+    migrate["migrations · own role"]
+    pooler["pooler"]
+    db[("database")]
+
+    client --> edge --> ingress --> sched --> view
+    view -- "socket" --> dbproxy
+    dbproxy -- "TCP + TLS" --> pooler --> db
+    migrate -. "direct, no pool" .-> db
 ```
 
-A preset only supplies defaults: any `BLASTIT_*` you set wins, even if it is
-empty. The deploy files choose the preset with `BLASTIT_PRESET`;
-[settings](../reference/settings.md) lists the rest.
+The edge speaks plain HTTP/1.1 to Blastit, a view dials no TCP socket unless its
+route sets `egress = true`, and only `dbproxy` reaches the database. `postgresql`
+is 0.2.0's only proxy protocol.
 
-## Two databases, two URLs
+## Fair queuing is part of the model
 
-| Connects | To | DO port | Compose service | Used by |
-|---|---|---|---|---|
-| `app` | the **pool** | 25061 | `pgbouncer:5432` | every request |
-| migrations | the **database** | 25060 | `db:5432` | the `migrate` job |
-| grants | the **database** | 25060 | `db:5432` | the one-off grant |
+The scheduler, not the framework, decides what runs next. Every request is charged
+the CPU it actually cost, and the queue is ordered by client flow instead of by
+arrival — so one client cannot starve the rest: a scraper's export burst queues
+behind other people's landing pages. A full queue answers `503` with `Retry-After`.
+Both presets turn it on; [fair queuing](fair-queuing.md) has the flows and knobs.
 
-DDL and session state do not survive transaction pooling, so only the app's
-`DATABASE_URL` names the pool; migrations and grants name the database. On DO
-both come from Connection Details (the pool URI's path is the pool name); the
-Compose file already writes both.
+## The choices you make
 
-### Pooler
+| Choice | The options | Decided in |
+|---|---|---|
+| Preset or by hand | `digitalocean-paas`, `compose-traefik`, or your platform's own values | [App Platform](digitalocean-paas.md) · [Compose](compose-traefik.md) · [anywhere else](anything-else.md) |
+| Root or capabilities | the container starts as root, or a dedicated uid carries the capability set | [root or rootless](anything-else.md#root-or-rootless) |
+| Pooler or direct | a pool in transaction mode, session mode for prepared statements, advisory locks or `LISTEN`, or workers straight to the database | [the pooler](anything-else.md#pooler) |
+| How peers reach the port | publish nothing and trust every peer, or name the addresses your ingress connects from | [client address](anything-else.md#client-ip-header) |
+| Where migrations run | a job or step outside Blastit, as its own role, on the database's direct URL | [migrations](anything-else.md#migrations) |
+| Where TLS ends | at the edge: Blastit speaks HTTP/1.1 only, has no TLS, and answers `501` to `Upgrade` | [edge and TLS](anything-else.md#edge-and-tls) |
 
-**1. Both recipes already put the zone on the role** — DO roles default to `UTC`
-and Compose's `db/grants.sql` runs the `ALTER`.
+A preset is defaults, not a mode: any `BLASTIT_*` you set wins, even an empty
+one, and the deploy files choose it with `BLASTIT_PRESET`.
 
-**2. Read it back as `app` on the direct port, never the pool** — open backends
-keep the zone they logged in with. It must print exactly `UTC`; if it prints
-anything else, set it on the role as the owner
-(`psql "$OWNER_URL" -c "ALTER ROLE app SET timezone = 'UTC'"`) and read again.
+## Verify the client address { #measure-your-ingress }
 
-```console
-# DigitalOcean: the `app` user on the direct port (25060), not the pool
-$ export APP_URL='postgresql://app:<password>@<host>:25060/defaultdb?sslmode=require'
-$ psql "$APP_URL" -A -t -c 'SHOW TimeZone'
-# Compose, from `db`: docker compose exec db psql -U app -d shop -A -t -c 'SHOW TimeZone'
-```
-
-**3. Changed a live role? Restart the pooler** — `docker compose restart
-pgbouncer` drops in-flight transactions; DO creates the pool after the role.
-
-Both recipes set the zone before your first `uv run blastit check`, so on a
-database that says `UTC` the `connection` group's grant for
-`set_config('TimeZone', …)` is a `dead_grant`: remove it there, and keep it only
-where `check` runs against a database that says otherwise
-([CI](../ci.md#what-it-fails-on)).
-
-## What a preset cannot do for you
-
-1. **Keep untrusted peers off the port.** Both presets trust every peer (`*`): on
-   Compose publish no port and keep foreign containers off its network; on App
-   Platform only DigitalOcean reaches it ([client address](../reference/settings.md#client-address)).
-2. **Size the pool.** Each worker holds one upstream connection
-   (`BLASTIT_MAX_WORKERS`, 16 by default), so workers × instances is the client
-   count the pool must accept, and a managed pool's `size` is its minimum *server*
-   connections ([pooling](../reference/settings.md#behind-a-connection-pooler)).
-3. **Give the database a non-owner role.** The proxy holds the real credentials:
-   keep `SUPERUSER` and `CREATEROLE` off, give migrations a role of their own, and
-   narrow the recipe's broad backstop to one `GRANT` per table and verb after each
-   migration ([DO](digitalocean-paas.md#cluster-roles-and-the-pooler),
-   [Compose](compose-traefik.md#compose)).
-4. **Read the ingress decision once it is live.** A header name is a guess until
-   one real request has been through the ingress ([below](#measure-your-ingress)).
-
-## Check that the ingress is live { #measure-your-ingress }
-
-**1. Send one request to a routed route** (here `/products/`) carrying the header
-the preset reads:
-
-```console
-# Compose: the preset reads the rightmost X-Forwarded-For
-$ curl -sS -H 'X-Forwarded-For: 6.6.6.6' https://shop.example.com/products/
-# DigitalOcean: the edge overwrites do-connecting-ip with the real address
-$ curl -sS -H 'do-connecting-ip: 6.6.6.6' https://myshop.ondigitalocean.app/products/
-```
-
-**2. Read `remote_addr` in the `request` event** — both presets log JSON, and the
-sample is trimmed (`ts`, `level`, `component` and `request_id` elided):
-
-```console
-$ docker compose logs app | grep '"event":"request"' | tail -1    # Compose
-$ doctl apps logs <app-id> --type run | grep '"event":"request"' | tail -1  # DO
-```
-
-```json
-{"event":"request","method":"GET","path":"/products/","route":"catalog","status":200,"remote_addr":"203.0.113.7"}
-```
-
-It must be your public address, not `6.6.6.6` or a `10.x`/`172.x` container
-address. If `6.6.6.6` appears the ingress trusted a client-supplied entry:
-`BLASTIT_CLIENT_IP_HEADER` must name the header your edge **sets** —
-`do-connecting-ip` on DO; on Compose keep `x-forwarded-for`
-([client address](../reference/settings.md#client-address)).
-
-## Before the first deploy
-
-- [ ] `uv run blastit check` is clean.
-- [ ] The first (`stage0`) `boot` event reports the `privilege` you expected; the
-      second (`config`) event reports the `preset` you asked for (`preset` is
-      `null` on `stage0`).
-- [ ] The health path (`/_blastit/health`) answers.
+Fair queuing, `remote_addr` and every log line key on it, and a preset can only
+guess which header your edge writes. After the first deploy, forge one and read
+`remote_addr` back: [the check and the lever](anything-else.md#client-ip-header).
 
 ## Where next
 
-[App Platform](digitalocean-paas.md) · [Compose + Traefik](compose-traefik.md) ·
-[Anywhere else](anything-else.md) · [Fair queuing](fair-queuing.md).
+- [DigitalOcean App Platform](digitalocean-paas.md): root, a managed cluster and pool, `do-connecting-ip`.
+- [Docker Compose behind Traefik](compose-traefik.md): capabilities, PgBouncer, `X-Forwarded-For`.
+- [Anywhere else](anything-else.md): every lever, plus Docker, systemd and Kubernetes.
+- [Fair queuing](fair-queuing.md): what happens to a burst under load.

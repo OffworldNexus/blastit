@@ -2,16 +2,16 @@
 id: MB.18
 title: "Restructure /deploy: architecture + topology model first, preset mirrors second, generic levers third"
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: []
-paths: ["docs/deploy/**", python/tests/runnable_docs/inventory.toml]
-attempts: 0
+paths: ["docs/deploy/**", python/tests/runnable_docs/inventory.toml, e2e/docs_deploy.py]
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T19:47"
-updated: "2026-11-14T19:48"
+updated: "2026-11-15T09:06"
 ---
 
 # Goal

@@ -7,6 +7,13 @@ points the app at the database, or swaps the two URLs. This reads the pages' own
 `compose.yaml` / `app.yaml` blocks and asserts the wiring, so the recipe a
 developer copies matches what the page claims.
 
+The session zone is the same trap one layer down, and `MB.18` moved it out of the
+index: `docs/deploy/index.md` sets the two-URL expectation, and
+`docs/deploy/anything-else.md#session-state` owns the procedure (role default, the
+direct-port read-back, the `dead_grant`). So the index is also asserted to *not*
+carry that material again — the duplication the restructure removed cannot come
+back silently.
+
 It runs first in `e2e/run.py`, before any container starts: no Docker, no
 network, ~1 ms. A page edit that breaks the two-URL rule fails the gate at the
 line that names the rule.
@@ -24,6 +31,7 @@ DOCS = Path(__file__).resolve().parents[1] / "docs" / "deploy"
 INDEX = DOCS / "index.md"
 COMPOSE = DOCS / "compose-traefik.md"
 DIGITALOCEAN = DOCS / "digitalocean-paas.md"
+ANYTHING_ELSE = DOCS / "anything-else.md"
 
 #: The files the pages show, by the `title=` of their fenced block.
 _BLOCK = re.compile(
@@ -218,49 +226,87 @@ def digitalocean_checks(checks: Checks) -> None:
     )
 
 
+#: The session-zone material, as `docs/deploy/index.md` used to teach it and as
+#: `anything-else.md#session-state` teaches it now. The index sets the expectation
+#: and hands off; a page that spells any of this out again is the duplication
+#: `MB.18` removed.
+_ZONE_MATERIAL = (
+    "SHOW TimeZone",
+    "set_config",
+    "dead_grant",
+    "ALTER ROLE",
+    "options=-c",
+)
+
+
 def index_checks(checks: Checks) -> None:
     page = INDEX.read_text(encoding="utf-8")
     flat = " ".join(page.split())
     checks.that(
-        "SHOW TimeZone" in flat and "It must print exactly `UTC`" in flat,
-        "index: the session zone is read on the direct port, not guessed",
-    )
-    exported = flat.find("export APP_URL=")
-    read = flat.find('psql "$APP_URL"')
-    checks.that(
-        0 <= exported < read,
-        "index: `APP_URL` is exported before the command that reads it",
-    )
-    checks.that(
-        re.search(r"export APP_URL='postgresql://app:[^']*:25060/defaultdb", flat)
-        is not None,
-        "index: `APP_URL` is the direct port and the real database, not the pool's URI",
-    )
-    checks.that(
-        'psql "$APP_URL" -A -t -c' in flat
-        and flat.count('"$OWNER_URL"') == 1
-        and "ALTER ROLE app SET timezone" in flat,
-        "index: the zone is read as `app`; the only owner command is the `ALTER`",
-    )
-    checks.that(
-        "docker compose exec db psql -U app -d shop" in flat,
-        "index: the Compose read runs as `app` on the direct service",
-    )
-    checks.that(
-        "Both recipes already put the zone on the role" in flat
-        and "db/grants.sql" in flat,
-        "index: the zone is the role's, written by the recipe, not a step the reader redoes",
-    )
-    checks.that(
         "only the app's `DATABASE_URL` names the pool" in flat
         and "migrations and grants name the database" in flat,
         "index: the app names the pool, migrations and grants name the database",
+    )
+    checks.that(
+        "anything-else.md#pooler" in page,
+        "index: the pooler decision hands off to the page that explains it",
+    )
+    carried = [needle for needle in _ZONE_MATERIAL if needle in flat]
+    checks.that(
+        not carried,
+        "index: the session-zone procedure is not taught here "
+        f"({', '.join(carried) if carried else 'none of setup/read-back/dead_grant found'})",
+    )
+
+
+def anything_else_checks(checks: Checks) -> None:
+    page = ANYTHING_ELSE.read_text(encoding="utf-8")
+    flat = " ".join(page.split())
+    checks.that(
+        "{ #session-state }" in page,
+        "anything-else: the session-state anchor the other pages link to exists",
+    )
+    checks.that(
+        "SHOW TimeZone" in flat and "must print exactly `UTC`" in flat,
+        "anything-else: the session zone is read back, with the exact value it must print",
+    )
+    # The read-back has to be the app's own role on the database's direct port:
+    # a pool's open backends keep the zone they logged in with, and the pool's
+    # URI names the pool in its path, so a pool URL would prove nothing.
+    read_back = next(
+        (line.strip() for line in page.splitlines() if "SHOW TimeZone" in line),
+        "",
+    )
+    checks.that(
+        read_back.startswith("$ psql 'postgresql://app:")
+        and ":5432/" in read_back
+        and "-A -t -c 'SHOW TimeZone'" in read_back
+        and "pgbouncer" not in read_back.lower(),
+        "anything-else: the read-back runs as `app` on the direct port, never the pool: "
+        + (read_back or "(no `SHOW TimeZone` command)"),
+    )
+    checks.that(
+        "ALTER ROLE app SET timezone = 'UTC'" in flat,
+        "anything-else: the fix is the role's default, not a per-request `SET`",
+    )
+    checks.that(
+        "options=-c timezone=UTC" in flat and "refused" in flat,
+        "anything-else: the URL route to a session setting is documented as refused",
+    )
+    checks.that(
+        "Restart the pooler" in flat,
+        "anything-else: a live role change says the pool must be restarted",
+    )
+    checks.that(
+        "dead_grant" in flat and "../ci.md#what-it-fails-on" in page,
+        "anything-else: the `UTC` database's group grant is a `dead_grant`, with the CI link",
     )
 
 
 def main() -> int:
     checks = Checks()
     index_checks(checks)
+    anything_else_checks(checks)
     compose_checks(checks)
     digitalocean_checks(checks)
     failures = len(checks.failures)
