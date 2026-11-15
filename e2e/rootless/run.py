@@ -52,6 +52,7 @@ COMPOSE = os.path.join(HERE, "compose.yml")
 # directory is what `sys.path` starts with.
 sys.path.insert(0, os.path.join(ROOT, "e2e"))
 import prebuilt_wheel  # noqa: E402
+import php_entry_swap  # noqa: E402
 
 DIST = os.path.join(ROOT, "dist")
 
@@ -731,6 +732,27 @@ def check_rooted_startup(image):
     return 0 if ok else 1
 
 
+def check_php_entry_swap_leaves_sentinel_untouched(args, version):
+    """MB.3.7's rootless half, in its own container (`php_entry_swap.py`).
+
+    The container is built from `e2e/php/Dockerfile` when the `php` leg's own
+    build has not already provided the image (it has, under `make e2e`: compose
+    keeps the tag), and the swap itself is a `docker exec -u 0` against that
+    container's own filesystem — never a bind mount, so nothing here touches
+    the checkout.
+    """
+    image = args.php_image or os.environ.get("E2E_PHP_IMAGE") or "blastit-e2e-php"
+    present = subprocess.run(
+        ["docker", "image", "inspect", image], capture_output=True, text=True
+    )
+    if present.returncode != 0:
+        print(f"PHP: building the fixture image {image}")
+        if php_entry_swap.build(image, ROOT, version) != 0:
+            print(f"PHP: the fixture image {image} could not be built")
+            return 1
+    return php_entry_swap.check(image)
+
+
 def local(args):
     password = "e2e-" + secrets.token_hex(16)
     project = args.project or "blastit-d6-rootless"
@@ -775,6 +797,9 @@ def local(args):
         rc |= check_container(env, project)
         rc |= check_negative_boot(env["E2E_IMAGE"])
         rc |= check_rooted_startup(env["E2E_IMAGE"])
+        # MB.3.7: the PHP fixture's own container, its own uid, and a
+        # privileged harness swapping `public/` aside (`php_entry_swap.py`).
+        rc |= check_php_entry_swap_leaves_sentinel_untouched(args, version)
     finally:
         if rc:
             compose_local(env, "logs", "--no-color", "--tail", "200", "app")
@@ -1139,6 +1164,10 @@ def main():
     ap.add_argument("--project", help="compose project name")
     ap.add_argument("--image", help="image tag for the app service")
     ap.add_argument("--dockerfile", default="Dockerfile", help="Dockerfile under e2e/rootless/")
+    ap.add_argument("--php-image",
+                    help="image for the PHP entry-swap check (default "
+                         "E2E_PHP_IMAGE or blastit-e2e-php, which the e2e "
+                         "`php` leg builds)")
     ap.add_argument("--port", type=int, default=int(os.environ.get("E2E_PORT", "18080")),
                     help="host port Traefik publishes its entry point on")
     ap.add_argument("--tls-port", type=int,

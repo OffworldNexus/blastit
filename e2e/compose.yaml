@@ -111,3 +111,24 @@ services:
       interval: 1s
       timeout: 5s
       retries: 60
+
+  # The PHP leg (MB.3.7): the wheel this build produced against a real NTS
+  # `libphp` (Debian's `libphp8.4-embed`, pinned by the base digest) and the
+  # `php2shell` fixture. The container runs no server of its own: the driver
+  # starts `blastit dev` itself, in this container's network namespace, so the
+  # page's own `127.0.0.1:8080` is verbatim and the driver owns the process it
+  # sends `SIGINT` to for the `--learn` fence.
+  php:
+    build:
+      context: ..
+      dockerfile: e2e/php/Dockerfile
+      # The wheel decides the interpreter: `blastit._blastit` is not abi3, so
+      # the base image has to be the CPython the wheel targets (run.py reads it
+      # out of the wheel's file name).
+      args: { PYTHON_VERSION: "${E2E_PYTHON_VERSION:-3.14}" }
+    image: ${E2E_PHP_IMAGE:-blastit-e2e-php}
+    volumes:
+      - ./php2shell.py:/opt/e2e/php2shell.py:ro
+      - ./php/probes.md:/opt/e2e/probes.md:ro
+      - ../docs/frameworks/php.md:/opt/e2e/php.md:ro
+    command: ["sleep", "infinity"]

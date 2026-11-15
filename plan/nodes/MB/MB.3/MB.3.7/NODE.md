@@ -2,16 +2,16 @@
 id: MB.3.7
 title: "Prove embedded PHP, the documented commands and the php2shell suite end-to-end (wheel + Python-free binary)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 4
 depends_on: [MB.3.6]
 paths: ["e2e/php/**", e2e/php2shell.py, e2e/compose.yaml, e2e/run.py, "e2e/rootless/**"]
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T14:39"
+updated: "2026-11-15T10:33"
 ---
 
 # Goal

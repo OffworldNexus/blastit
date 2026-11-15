@@ -48,3 +48,19 @@ Scope: static asset serving with safe path resolution, SPA/front-controller rewr
 
 **Answer:**
 
+## H-006 [closed] (node MB.3.7)
+
+- asked: 2026-11-15T10:02 by implementer
+
+MB.3.7 (Measured, not fixed here — crates/** is out of its paths): ADR-0010 §1/§2 and MB.3.7's §7.3 sentence describe [route.php] entry as 'pinned at boot / the entry inode'; it is not. crates/blastit/src/php_view.rs holds PhpBinding.entry as a PathBuf and crates/blastit-php-sapi/c/blastit_php_sapi.c sets SG(request_info).path_translated and zend_stream_init_filename to that path per request, so PHP re-opens the script each time. Only libphp and the shim are fd-pinned (ADR-0010 §1). Measured by e2e/rootless/php_entry_swap.py: a symlink to a decoy outside the manifest dir fails closed with 500 (open_basedir; decoy 0 opens), a decoy INSIDE the manifest dir executes (200 + DECOY-RAN), and the status is 500 not 503. The guarantee that does hold is ADR-0010 §2's permission half (the route uid cannot chmod/create/unlink the tree) and that is what the check asserts. Decide: pin entry by descriptor like libphp/the shim, or correct the claim in ADR-0010 and the node text.
+
+**Answer:**
+
+## H-007 [closed] (node MB.3.7)
+
+- asked: 2026-11-15T10:05 by lead
+
+MB.3.7 filed H-006: [route.php] entry is re-resolved per request, not pinned by descriptor as ADR-0010 §3 claims. Measured: swapping public/ aside outside the manifest dir gives 500 (fail-closed), but a decoy INSIDE manifest_dir answers 200 DECOY-RAN. Decide: pin the entry by (st_dev, st_ino) at boot like libphp/the shim, or amend ADR-0010 §3 and the node's §7.3 to what the code does — and say whether the provenance gate (manifest_dir not writable by a route uid, MB.3.40) is considered sufficient mitigation.
+
+**Answer:**
+

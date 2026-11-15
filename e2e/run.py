@@ -5,14 +5,19 @@
 Stdlib only. The database password is random per run, and the checks prove it
 never reaches the app or the logs.
 
-Two apps run on the same image and the same database:
+Two apps run on the same image and the same database, and two pages replay
+in containers of their own:
 
 * the Django demo (`e2e/demo/`), driven by `scenario.py` and checked by
   `check_logs.py`;
 * the Flask + SQLAlchemy app (`e2e/sqlalchemy/`, E2b), driven and checked by
   `sqlalchemy_check.py` — the proof that a non-Django WSGI app with its own URL
   parsing and its own connection statements is served by the same manifest
-  design.
+  design;
+* the static site (`e2e/static_site/`) and the PHP front controller
+  (`e2e/php/`), each replayed by its own docs page — `static_assets.py` and
+  `php2shell.py` — inside the container the page's `127.0.0.1:8080` names;
+  the PHP one also sends the 24 `php2shell` rows.
 """
 
 import os
@@ -104,6 +109,48 @@ def static_checks():
     ).returncode
 
 
+def php_self_test():
+    """`php2shell.py --self-test`: the matrix, `PROBES` and the page's shape.
+
+    Runs on the host first, like the other two self-tests: a `PROBES` row that
+    no longer matches the matrix has to fail before Docker is asked for a build
+    (MB.3.7). The container's own run repeats it, so the copy that actually
+    replays is the one that was checked.
+    """
+    return subprocess.run(
+        [sys.executable, os.path.join(HERE, "php2shell.py"), "--self-test"],
+        check=False,
+        text=True,
+    ).returncode
+
+
+def php_checks():
+    """Replay the `php2shell` matrix and `docs/frameworks/php.md` in the `php` leg.
+
+    The driver runs in that container and starts `blastit dev` itself: the
+    page's commands say `127.0.0.1:8080`, which is verbatim inside the
+    container's network namespace and reachable from nothing else. The fixture
+    is copied to a scratch directory by the driver (so `--learn` can write), and
+    the image's `BLASTIT_LIBPHP`/`BLASTIT_PHP_SHIM_DIR` are what the boot
+    resolves — never a path this script supplies.
+    """
+    return compose(
+        "exec",
+        "-T",
+        "php",
+        "python",
+        "/opt/e2e/php2shell.py",
+        "--fixture",
+        "/fixture",
+        "--site",
+        "/tmp/php2shell-site",
+        "--page",
+        "/opt/e2e/php.md",
+        "--matrix",
+        "/opt/e2e/probes.md",
+    ).returncode
+
+
 def main():
     # The two deploy pages promise a pooler between blastit and PostgreSQL; a
     # regression there is a docs defect, not a container one, so it is asserted
@@ -120,13 +167,17 @@ def main():
     # A prebuilt image installs the wheel this host built, so its base image is
     # the interpreter that wheel targets (the extension is not abi3). The
     # in-image `Dockerfile` builds its own wheel on its own interpreter and
-    # needs none of this.
-    if "prebuilt" in os.environ.get("E2E_DOCKERFILE", "Dockerfile"):
-        try:
-            env["E2E_PYTHON_VERSION"] = prebuilt_wheel.version(DIST)
-        except ValueError as error:
+    # needs none of this — but the `php` leg's image always installs a prebuilt
+    # one, so `dist/` has to hold exactly one wheel either way;
+    # `prebuilt_wheel.version` names what is wrong when it does not.
+    try:
+        env["E2E_PYTHON_VERSION"] = prebuilt_wheel.version(DIST)
+    except ValueError as error:
+        if "prebuilt" in os.environ.get("E2E_DOCKERFILE", "Dockerfile"):
             print(error, file=sys.stderr)
             return 1
+        # The in-image leg builds its own wheel; the php leg's image cannot,
+        # and its Dockerfile fails by name rather than guessing an interpreter.
     os.environ.update(env)
     rc = 1
     try:
@@ -139,6 +190,7 @@ def main():
                 "sqlalchemy",
                 "static",
                 "static_nospa",
+                "php",
             ).returncode
             != 0
         ):
@@ -155,14 +207,17 @@ def main():
                 "90",
                 "static",
                 "static_nospa",
+                "php",
             ).returncode
             != 0
         ):
-            print("the static services did not become healthy")
+            print("the static and php services did not become ready")
             return 1
         rc = scenario_self_test()
         rc |= static_self_test()
         rc |= static_checks()
+        rc |= php_self_test()
+        rc |= php_checks()
         rc |= subprocess.run(
             [
                 sys.executable,

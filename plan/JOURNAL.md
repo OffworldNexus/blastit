@@ -1732,3 +1732,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T09:31 [MB.3.8] (lead) status active -> review
 - 2026-11-15T09:31 [MB.3.8] (lead) OWNER RULING on the 0.1.1 changelog entry (supersedes attempt 2's in-place rewrite):
 - 2026-11-15T09:35 [MB.3.8] (lead) status review -> done
+- 2026-11-15T09:37 [MB.3.7] (lead) status ready -> active
+- 2026-11-15T09:37 [MB.3.7] (lead) attempt 1/3 started
+- 2026-11-15T09:37 [MB.3.7] (lead) base 466a9a1
+- 2026-11-15T10:02 HUMAN H-006 opened by implementer (node MB.3.7)
+- 2026-11-15T10:05 [MB.3.7] (lead) status active -> review
+- 2026-11-15T10:05 HUMAN H-007 opened by lead (node MB.3.7)
+- 2026-11-15T10:05 HUMAN H-007 closed by conductor
+- 2026-11-15T10:05 [MB.3.56] (lead) created (task) Pin [route.php] entry by (st_dev, st_ino) at boot: the ADR wins over the gap (H-007)
+- 2026-11-15T10:05 [MB.3.7] (lead) H-007 answered and closed by the owner (conductor): THE ADR WINS — pin the entry by (st_dev, st_ino) at boot, do not amend ADR-0010 §3. Reasons: the mechanism a
+- 2026-11-15T10:11 HUMAN H-006 closed by conductor
+- 2026-11-15T10:11 [MB.3.56] (lead) CITATION CORRECTION (the decision does not change): MB.3.7's reviewer checked where the entry-pin claim actually lives. ADR-0010 §3 claims `(path, st_dev, st_in
+- 2026-11-15T10:11 [MB.3.7] (lead) REVIEW FAIL (attempt 1). The suite is real (121 checks, all 24 probes at expected status, P4b control, swap leg, `make e2e` and `make check` green) and the thre
+- 2026-11-15T10:11 [MB.3.7] (lead) status review -> ready
+- 2026-11-15T10:11 [MB.3.7] (lead) status ready -> active
+- 2026-11-15T10:11 [MB.3.7] (lead) attempt 2/3 started
+- 2026-11-15T10:26 [MB.3.7] (lead) status active -> review
+- 2026-11-15T10:33 [MB.3.7] (lead) status review -> done
