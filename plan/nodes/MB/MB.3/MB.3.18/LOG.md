@@ -123,3 +123,7 @@ status review -> review
 ## 2026-11-15T16:26 [lead]
 
 status review -> done
+
+## 2026-11-15T16:38 [lead]
+
+CI (first real matrix run) invalidated this node's 'built and exercised' claim on the RUNNER: the wheel job passed --compatibility alongside a manylinux: image (maturin: 'Expected only one platform tag but found 2'), and the bookworm shim+probe legs executed runner-built (glibc 2.39) binaries in a 2.36 image. The local evidence stands for this host; the CI claim moves to MB.3.58. RELEASE_READY is WITHDRAWN until the matrix is green on CI.
