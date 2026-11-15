@@ -11,40 +11,40 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The PHP minors this crate has a shim ABI for, newest first.
-pub const SUPPORTED_MINORS: [Minor; 3] = [Minor::Php84, Minor::Php83, Minor::Php82];
+pub const SUPPORTED_MINORS: [Minor; 3] = [Minor::Php85, Minor::Php84, Minor::Php83];
 
 /// The `php-config` names searched on `PATH`, in order.
 pub const CONFIG_NAMES: [&str; 4] = [
     "php-config",
+    "php-config8.5",
     "php-config8.4",
     "php-config8.3",
-    "php-config8.2",
 ];
 
 /// One supported PHP minor. The shim is compiled once per variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Minor {
-    /// PHP 8.2 — `ZEND_MODULE_API_NO` 20220829.
-    Php82,
     /// PHP 8.3 — `ZEND_MODULE_API_NO` 20230831.
     Php83,
     /// PHP 8.4 — `ZEND_MODULE_API_NO` 20240924.
     Php84,
+    /// PHP 8.5 — `ZEND_MODULE_API_NO` 20250925.
+    Php85,
 }
 
 impl Minor {
-    /// Parses a `php-config --version` reply (`"8.4.27"`, `"8.4"`).
+    /// Parses a `php-config --version` reply (`"8.5.4"`, `"8.5"`).
     ///
-    /// Anything whose first two components are not `8.2`, `8.3` or `8.4` is
-    /// `None`: a PHP 8.5 host is refused, not guessed at.
+    /// Anything whose first two components are not `8.3`, `8.4` or `8.5` is
+    /// `None`: an older or newer minor is refused, not guessed at.
     pub fn parse(version: &str) -> Option<Self> {
         let mut parts = version.trim().split('.');
         let major = parts.next()?.parse::<u32>().ok()?;
         let minor = parts.next()?.parse::<u32>().ok()?;
         match (major, minor) {
-            (8, 2) => Some(Self::Php82),
             (8, 3) => Some(Self::Php83),
             (8, 4) => Some(Self::Php84),
+            (8, 5) => Some(Self::Php85),
             _ => None,
         }
     }
@@ -52,27 +52,27 @@ impl Minor {
     /// The code `blastit_php_minor()` returns from a shim of this minor.
     pub fn code(self) -> u32 {
         match self {
-            Self::Php82 => 802,
             Self::Php83 => 803,
             Self::Php84 => 804,
+            Self::Php85 => 805,
         }
     }
 
     /// The `<major><minor>` infix of the shim name (`"84"`).
     pub(crate) const fn digits(self) -> &'static str {
         match self {
-            Self::Php82 => "82",
             Self::Php83 => "83",
             Self::Php84 => "84",
+            Self::Php85 => "85",
         }
     }
 
     /// The dotted minor (`"8.4"`), for messages and package names.
     pub fn dotted(self) -> &'static str {
         match self {
-            Self::Php82 => "8.2",
             Self::Php83 => "8.3",
             Self::Php84 => "8.4",
+            Self::Php85 => "8.5",
         }
     }
 
@@ -104,9 +104,9 @@ impl Minor {
     /// The `php-config` names that provide this minor, most specific first.
     pub fn config_names(self) -> [&'static str; 2] {
         match self {
-            Self::Php82 => ["php-config8.2", "php-config"],
             Self::Php83 => ["php-config8.3", "php-config"],
             Self::Php84 => ["php-config8.4", "php-config"],
+            Self::Php85 => ["php-config8.5", "php-config"],
         }
     }
 }
@@ -365,9 +365,9 @@ impl fmt::Display for ToolchainError {
             Self::NotFound => write!(
                 f,
                 "no php-config found (searched PHP_CONFIG, then {} on PATH); install the PHP embed \
-                 development package — Debian/Ubuntu: apt install php8.4-dev libphp8.4-embed, \
-                 Alpine: apk add php84-dev php84-embed, Fedora/RHEL: dnf install php84-php-devel \
-                 php-embedded — or set PHP_CONFIG=/path/to/php-config8.4",
+                 development package — Debian/Ubuntu: apt install php8.5-dev libphp8.5-embed, \
+                 Alpine: apk add php85-dev php85-embed, Fedora/RHEL: dnf install php85-php-devel \
+                 php-embedded — or set PHP_CONFIG=/path/to/php-config8.5",
                 CONFIG_NAMES.join(", ")
             ),
             Self::NotExecutable { path } => write!(
@@ -384,7 +384,7 @@ impl fmt::Display for ToolchainError {
             ),
             Self::UnsupportedVersion { path, version } => write!(
                 f,
-                "{} reports PHP {version}; this build has SAPI shims for 8.2, 8.3 and 8.4 only \
+                "{} reports PHP {version}; this build has SAPI shims for 8.3, 8.4 and 8.5 only \
                  (install the matching php8.X-dev package, or set PHP_CONFIG to one of them)",
                 path.display()
             ),

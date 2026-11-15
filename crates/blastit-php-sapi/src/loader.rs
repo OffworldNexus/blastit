@@ -117,7 +117,7 @@ pub enum LoadError {
     },
     /// `blastit_php_minor()` is not one of [`SUPPORTED_MINORS`].
     MinorUnsupported {
-        /// What `blastit_php_minor()` returned (`802`, `803`, `804`, …).
+        /// What `blastit_php_minor()` returned (`803`, `804`, `805`, …).
         found: u32,
         /// The shim that reported it.
         path: PathBuf,
@@ -179,7 +179,7 @@ impl fmt::Display for LoadError {
             Self::MinorUnsupported { found, path } => write!(
                 f,
                 "{} was built for PHP minor {found}, which this build has no ABI for \
-                 (8.2, 8.3 and 8.4 are supported)",
+                 (8.3, 8.4 and 8.5 are supported)",
                 path.display()
             ),
             Self::MinorMismatch { shim, host } => write!(

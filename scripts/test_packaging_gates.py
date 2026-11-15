@@ -603,20 +603,25 @@ def test_platform_matrix_cases() -> int:
 
         # MB.3.58: a leg that does not run the protected suites must say why.
         # Dropping the reason (not the leg) has to fail, or the drop reads as a
-        # pass the next time someone reads `--summary`.
+        # pass the next time someone reads `--summary`. The fixture turns the
+        # 8.5/gnu leg's `suites` off, so the case does not depend on any one
+        # leg's prose.
         case_dir = Path(tmp) / "suites-without-reason"
         shutil.copytree(base, case_dir)
         pm = case_dir / "scripts" / "platform_matrix.py"
         text = pm.read_text(encoding="utf-8")
-        reason = (
-            '        "suites_because": (\n'
-            '            "PHP 8.2\'s `libphp82` exports no `php_version`, so stage 0 refuses the "\n'
-            '            "pair (`MB.3.59` measured the sentence in this image); the shim and its "\n'
-            '            "real-load probe still build and run"\n'
-            "        ),\n"
+        suites_on = '        "suites": True,\n    },\n    ("8.3", "gnu"): {'
+        _expect(
+            suites_on in text, "the matrix fixture no longer carries the 8.5/gnu leg"
         )
-        _expect(reason in text, "the matrix fixture no longer carries the musl reason")
-        pm.write_text(text.replace(reason, "", 1), encoding="utf-8")
+        pm.write_text(
+            text.replace(
+                suites_on,
+                '        "suites": False,\n    },\n    ("8.3", "gnu"): {',
+                1,
+            ),
+            encoding="utf-8",
+        )
         res = _run_matrix(case_dir, "--check", "--quiet")
         _expect(
             res.returncode == 1 and "no `suites_because` says why" in res.stderr,

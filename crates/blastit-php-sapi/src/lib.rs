@@ -12,11 +12,11 @@
 //! `libphp.so` inside a forked, unprivileged `view` worker (ADR-0010 §1). Rust
 //! cannot declare `sapi_globals_struct` or `EG(bailout)` by hand and survive a
 //! PHP minor bump (`docs/research/php-embed-sapi.md` §2), so each minor gets one
-//! ~25 KiB Apache-2.0 C shim, `libblastit_php8{2,3,4}-<arch>-<libc>.so`,
+//! ~25 KiB Apache-2.0 C shim, `libblastit_php8{3,4,5}-<arch>-<libc>.so`,
 //! compiled against that minor's headers. This crate holds:
 //!
 //! * [`toolchain`] — finds `php-config` (`PHP_CONFIG`, then `php-config`,
-//!   `php-config8.4`, `php-config8.3`, `php-config8.2`), refuses an unsupported
+//!   `php-config8.5`, `php-config8.4`, `php-config8.3`), refuses an unsupported
 //!   minor with the package to install, and maps a version to a shim filename.
 //! * [`request`] — [`ServerVars`] (a `$_SERVER` entry list where `PHP_VALUE`,
 //!   `PHP_ADMIN_VALUE`, `REDIRECT_STATUS` and `HTTP_PROXY` cannot be

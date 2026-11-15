@@ -6,8 +6,9 @@
 
 The probe image's base distro and its four package names come from
 `scripts/platform_matrix.py --leg shims --minor <m>`, never from a second list
-here: no distro ships PHP 8.2, 8.3 *and* 8.4 (Debian bookworm is 8.2, Ubuntu
-noble is 8.3, Debian trixie is 8.4), so `MB.3.18` runs this driver once per leg.
+here: no distro ships PHP 8.3, 8.4 *and* 8.5 (Ubuntu noble is 8.3, Debian
+trixie is 8.4, Ubuntu 26.04 and Alpine 3.23 are 8.5), so `MB.3.18` runs this
+driver once per leg.
 
 Stdlib only, same shape as the other e2e drivers: build the image, run it,
 parse the one JSON line the probe prints, and fail non-zero with the container
@@ -136,7 +137,7 @@ def leg(minor, libc="gnu", arch=None):
     """The one minor's build tuple, read from the matrix (MB.3.18).
 
     `scripts/platform_matrix.py` is the single place a leg is declared, and no
-    single distro ships PHP 8.2, 8.3 *and* 8.4: the probe image for each minor is
+    single distro ships PHP 8.3, 8.4 *and* 8.5: the probe image for each minor is
     therefore a different base image with different package names. Reading them
     from the matrix is what keeps this driver from growing a second copy of that
     table — and from silently probing Debian trixie's 8.3, which does not exist.
@@ -173,10 +174,10 @@ def build(image, minor, libc="gnu"):
     """Builds the image from the repo root; returns `(ok, report)`."""
     spec = leg(minor, libc)
     # `matrix.suites` decides whether this image compiles the two protected
-    # suites at all (`MB.3.58` review): PHP 8.2's `libphp` exports no
-    # `php_version`, so stage 0 refuses its pair and building `blastit` there
-    # would prove nothing. The musl legs carry the suites too since `MB.3.59`;
-    # the shim and the probe are built either way.
+    # suites at all (`MB.3.58` review): a leg whose pair the boot refuses would
+    # only take their refusal branch, so building `blastit` there would prove
+    # nothing. The musl legs carry the suites too since `MB.3.59`; the shim and
+    # the probe are built either way.
     suites = "1" if spec.get("suites", "true") == "true" else "0"
     result = docker(
         "build",
@@ -329,7 +330,7 @@ def verify(report):
 
     want(report.get("abi") == 1, f"ABI version {report.get('abi')!r} is not 1")
     want(
-        str(report.get("php_minor")) in {"802", "803", "804"},
+        str(report.get("php_minor")) in {"803", "804", "805"},
         f"php_minor {report.get('php_minor')!r} is not a supported minor",
     )
     want(

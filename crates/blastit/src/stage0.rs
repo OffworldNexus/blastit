@@ -450,22 +450,23 @@ pub(crate) fn no_python_support(
 /// a `libphp8.5.so` somebody dropped into `/usr/local/lib` never changes which
 /// library an 8.4 host embeds. Both spellings the distros install are here: the
 /// dotted Debian/Ubuntu name and the **packed** Alpine 8.3 one (`libphp83.so`;
-/// Alpine's 8.4 states its minor in `/usr/lib/php84` instead, `MB.3.59`), so a
-/// host with `BLASTIT_LIBPHP` unset reaches Alpine's package without a copy.
+/// Alpine's 8.4 and 8.5 state their minor in `/usr/lib/php84` and
+/// `/usr/lib/php85` instead, `MB.3.59`), so a host with `BLASTIT_LIBPHP` unset
+/// reaches Alpine's package without a copy.
 ///
 /// The unversioned `libphp.so` is last here because on its own it states no
 /// minor; the per-minor directory it sits in states one, which is why
 /// [`LIBPHP_PROBES`] also tries it there, under that minor (`MB.3.61`).
 pub(crate) const LIBPHP_CANDIDATES: [&str; 10] = [
+    "libphp8.5.so",
+    "libphp-8.5.so",
+    "libphp85.so",
     "libphp8.4.so",
     "libphp-8.4.so",
     "libphp84.so",
     "libphp8.3.so",
     "libphp-8.3.so",
     "libphp83.so",
-    "libphp8.2.so",
-    "libphp-8.2.so",
-    "libphp82.so",
     "libphp.so",
 ];
 
@@ -487,15 +488,31 @@ struct LibphpProbe {
 /// Each minor's own spellings — dotted, hyphenated, packed, and the per-minor
 /// `libphp.so` — are all tried before the next minor's, so the newest *library*
 /// wins rather than the first name in a list. That is what makes a host with two
-/// embed packages installed serve from the newest one: Alpine's `php82-embed`
-/// puts `libphp82.so` in `/usr/lib` and `php84-embed` puts `libphp.so` in
-/// `/usr/lib/php84`, and a name-major walk preferred `libphp82.so` — an object
-/// with no `php_version`, refused, while the 8.4 library beside it would serve.
+/// embed packages installed serve from the newest one: Alpine's `php83-embed`
+/// puts `libphp83.so` in `/usr/lib` and `php85-embed` puts `libphp.so` in
+/// `/usr/lib/php85`, and a name-major walk preferred `libphp83.so` — an older
+/// library — while the 8.5 library beside it would serve.
 ///
 /// The unversioned `libphp.so` in the plain directories stays last: its minor is
 /// only known from the descriptor's link target or the object's own bytes, so it
 /// is a fallback, not a preference.
 const LIBPHP_PROBES: [LibphpProbe; 13] = [
+    LibphpProbe {
+        name: "libphp8.5.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp-8.5.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp85.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp.so",
+        per_minor_dir: Some("php85"),
+    },
     LibphpProbe {
         name: "libphp8.4.so",
         per_minor_dir: None,
@@ -529,22 +546,6 @@ const LIBPHP_PROBES: [LibphpProbe; 13] = [
         per_minor_dir: Some("php83"),
     },
     LibphpProbe {
-        name: "libphp8.2.so",
-        per_minor_dir: None,
-    },
-    LibphpProbe {
-        name: "libphp-8.2.so",
-        per_minor_dir: None,
-    },
-    LibphpProbe {
-        name: "libphp82.so",
-        per_minor_dir: None,
-    },
-    LibphpProbe {
-        name: "libphp.so",
-        per_minor_dir: Some("php82"),
-    },
-    LibphpProbe {
         name: "libphp.so",
         per_minor_dir: None,
     },
@@ -553,8 +554,15 @@ const LIBPHP_PROBES: [LibphpProbe; 13] = [
 /// The distributions' PHP embed packages, named once so every refusal says the
 /// same thing (`ADR-0010` §4.1).
 const PHP_PACKAGES: &str = "install the PHP embed package — Debian/Ubuntu: \
-     apt install libphp-embed, Alpine: apk add php84-embed, Fedora/RHEL: \
+     apt install libphp-embed, Alpine: apk add php85-embed, Fedora/RHEL: \
      dnf install php-embedded";
+
+/// The minors this build ships a shim for, as one sentence.
+///
+/// `docs/frameworks/php.md` states the same three minors and nothing else; a
+/// host on another minor is refused with exactly this sentence
+/// ([`PhpRefusal::UnsupportedVersion`]).
+const SUPPORTED_PHP: &str = "PHP 8.3, 8.4 and 8.5";
 
 /// The one override `ADR-0010` §3 allows.
 const PHP_OVERRIDE: &str = "set BLASTIT_LIBPHP=/path/to/libphp.so";
@@ -730,13 +738,14 @@ fn shim_name(version: PhpVersion) -> String {
 /// (`ADR-0010` §3).
 ///
 /// The per-minor directories come after the plain `/usr/lib` and before the
-/// `/usr/local` half: Alpine installs 8.4 as `/usr/lib/php84/libphp.so`, and
-/// with `BLASTIT_LIBPHP` unset a fixed name alone cannot reach it — the
-/// directory is half of the package's spelling (`MB.3.59`). `/usr/local/lib/php8x`
-/// is the twin of a copy an operator put there.
+/// `/usr/local` half: Alpine installs 8.4 as `/usr/lib/php84/libphp.so` and 8.5
+/// as `/usr/lib/php85/libphp.so`, and with `BLASTIT_LIBPHP` unset a fixed name
+/// alone cannot reach them — the directory is half of the package's spelling
+/// (`MB.3.59`). `/usr/local/lib/php8x` is the twin of a copy an operator put
+/// there.
 ///
 /// The directory order is *within* one minor: [`LIBPHP_PROBES`] picks the minor
-/// first, so `/usr/lib/php84` outranks `/usr/lib/libphp82.so` even though it is
+/// first, so `/usr/lib/php85` outranks `/usr/lib/libphp84.so` even though it is
 /// listed later (`MB.3.61`).
 fn library_dirs() -> Vec<PathBuf> {
     let triplet = multiarch_triplet();
@@ -744,14 +753,14 @@ fn library_dirs() -> Vec<PathBuf> {
         format!("/usr/lib/{triplet}"),
         "/usr/lib64".to_string(),
         "/usr/lib".to_string(),
+        "/usr/lib/php85".to_string(),
         "/usr/lib/php84".to_string(),
         "/usr/lib/php83".to_string(),
-        "/usr/lib/php82".to_string(),
         format!("/usr/local/lib/{triplet}"),
         "/usr/local/lib".to_string(),
+        "/usr/local/lib/php85".to_string(),
         "/usr/local/lib/php84".to_string(),
         "/usr/local/lib/php83".to_string(),
-        "/usr/local/lib/php82".to_string(),
     ]
     .into_iter()
     .map(PathBuf::from)
@@ -881,15 +890,23 @@ enum PhpRefusal {
     },
     /// The object's `.dynsym` has no `php_version` **name**, so the worker
     /// cannot resolve the symbol it reads its minor from at load time
-    /// (`MB.3.59`; PHP 8.2 and earlier ship it that way). An object that exports
-    /// the name but whose body this walk cannot read is [`Self::NoVersion`], not
-    /// this (`MB.3.61`).
+    /// (`MB.3.59`). An object that exports the name but whose body this walk
+    /// cannot read is [`Self::NoVersion`], not this (`MB.3.61`).
     NoPhpVersion {
         /// The candidate.
         path: PathBuf,
         /// The version the path itself states, when it states one — named in
         /// the sentence so an operator sees that the file name does not help.
         named: Option<PhpVersion>,
+    },
+    /// The host's `libphp` is a PHP minor this build ships no shim for.
+    ///
+    /// The supported set is stated once, in [`SUPPORTED_PHP`], and the refusal
+    /// is that sentence: a user does not have to learn `.dynsym` inspection to
+    /// hear that their PHP is too old (or too new).
+    UnsupportedVersion {
+        /// The minor the object or its path states.
+        version: PhpVersion,
     },
     /// The path states two different minors, or the path and the object's own
     /// bytes disagree, so no single shim can be chosen.
@@ -999,10 +1016,14 @@ fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String
                 "{prefix}{} is an NTS libphp whose `.dynsym` exports no `php_version` — the \
                  symbol the embedded worker resolves before `php_module_startup` — so the worker \
                  cannot determine its minor at load time and no shim can be chosen for it{name}; \
-                 PHP 8.2 and earlier ship it that way; {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+                 {PHP_PACKAGES}, or {PHP_OVERRIDE}",
                 path.display()
             )
         }
+        PhpRefusal::UnsupportedVersion { version } => format!(
+            "{prefix}PHP {} is not supported — Blastit supports {SUPPORTED_PHP}",
+            version.dotted()
+        ),
         PhpRefusal::VersionConflict {
             path,
             stated,
@@ -1408,7 +1429,7 @@ fn first_php_route(manifest: &Manifest) -> Option<(&str, &str, Option<u32>)> {
 ///
 /// `BLASTIT_LIBPHP` is the only candidate when set — a boot never falls back to
 /// a distro copy the operator did not name. Otherwise [`LIBPHP_PROBES`] is
-/// walked version-major — every 8.4 spelling, then every 8.3 one, then 8.2 —
+/// walked version-major — every 8.5 spelling, then every 8.4 one, then 8.3 —
 /// each in every directory of [`PhpSearch::lib_dirs`], so the *library's*
 /// version wins over both its name and its directory (`MB.3.61`).
 ///
@@ -1431,9 +1452,21 @@ fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
             }
             path.clone()
         }
-        None => first_existing(search).ok_or_else(|| PhpRefusal::Missing {
-            searched: search.lib_dirs.clone(),
-        })?,
+        None => match first_existing(search) {
+            Some(path) => path,
+            None => {
+                // No supported spelling was found. An installed *unsupported*
+                // minor is a different failure from "no libphp at all", and the
+                // fix is a different package — so say which one it is rather
+                // than sending the operator to look for a library they have.
+                if let Some(version) = installed_unsupported(search) {
+                    return Err(PhpRefusal::UnsupportedVersion { version });
+                }
+                return Err(PhpRefusal::Missing {
+                    searched: search.lib_dirs.clone(),
+                });
+            }
+        },
     };
     let mut file = std::fs::File::open(&path).map_err(|err| PhpRefusal::NotAFile {
         path: path.clone(),
@@ -1480,12 +1513,24 @@ fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
             });
         }
     }
+    // A minor this build has no shim for is refused by name before the
+    // `.dynsym` story. The object's own `php_version` body is the most
+    // authoritative answer; the path's file name or per-minor directory is the
+    // fallback for an object whose body the walk cannot read.
+    let stated_version = facts
+        .version
+        .or(named)
+        .or_else(|| stated.first().map(|stated| stated.version));
+    if let Some(version) = stated_version
+        && !version.supported()
+    {
+        return Err(PhpRefusal::UnsupportedVersion { version });
+    }
     // The worker resolves `php_version` before it can start anything, so an
     // object whose `.dynsym` has no such **name** is refused here — whatever
-    // its file name says (`MB.3.59`; PHP 8.2 and earlier are the builds that
-    // ship it that way). Presence is the name alone: an odd object that exports
-    // it as `STT_NOTYPE` or with no size is refused later, and for the reason
-    // that is actually true (`MB.3.61`).
+    // its file name says (`MB.3.59`). Presence is the name alone: an odd object
+    // that exports it as `STT_NOTYPE` or with no size is refused later, and for
+    // the reason that is actually true (`MB.3.61`).
     if !facts.exports_php_version {
         return Err(PhpRefusal::NoPhpVersion {
             path: path.clone(),
@@ -1559,6 +1604,46 @@ fn first_existing(search: &PhpSearch) -> Option<PathBuf> {
             .map(|dir| dir.join(probe.name))
             .find(|path| path.is_file())
     })
+}
+
+/// The newest unsupported PHP minor installed in [`PhpSearch::lib_dirs`], when
+/// no supported one was found.
+///
+/// This is a **refusal** scan, not a discovery one: it runs only after
+/// [`first_existing`] found nothing, so it cannot change which library a host
+/// with a supported package serves. Its one job is to turn "no usable NTS
+/// `libphp` was found" into the true sentence for a host whose PHP is simply not
+/// a minor this build ships — the version comes from the file name
+/// (`libphp8.2.so`, `libphp82.so`) or, for an unversioned `libphp.so`, from the
+/// per-minor directory it sits in (`/usr/lib/php82`).
+fn installed_unsupported(search: &PhpSearch) -> Option<PhpVersion> {
+    let mut found: Vec<PhpVersion> = Vec::new();
+    for dir in &search.lib_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let directory_minor = dir
+            .file_name()
+            .and_then(OsStr::to_str)
+            .and_then(PhpVersion::parse_directory);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let version = entry
+                .file_name()
+                .to_str()
+                .and_then(PhpVersion::parse)
+                .or(directory_minor);
+            if let Some(version) = version
+                && !version.supported()
+            {
+                found.push(version);
+            }
+        }
+    }
+    found.into_iter().max()
 }
 
 /// The version the file's name states, or the name its descriptor resolves to.
@@ -1705,7 +1790,7 @@ struct ObjectFacts {
     /// Which Zend build the `.dynsym` names.
     abi: ZendAbi,
     /// Whether `php_version` is exported — the symbol the worker resolves before
-    /// `php_module_startup`. Its absence is PHP 8.2-and-earlier's signature.
+    /// `php_module_startup`.
     ///
     /// Presence comes from the **name** in the `.dynsym` and nothing else: an
     /// object that exports it as `STT_NOTYPE`, or with `st_size == 0`, does
@@ -1942,9 +2027,8 @@ struct DynSymbols {
     /// `tsrm_startup` is exported (a ZTS build).
     tsrm_startup: bool,
     /// The `.dynsym` exports the **name** `php_version`: the symbol the worker's
-    /// loader resolves before `php_module_startup`, and the only fact PHP 8.2's
-    /// absence is read from. Presence is the name alone, whatever the symbol is
-    /// typed or sized (`MB.3.61`).
+    /// loader resolves before `php_module_startup`. Presence is the name alone,
+    /// whatever the symbol is typed or sized (`MB.3.61`).
     exports_php_version: bool,
     /// `php_version`'s `(st_value, st_size)` — its *body*, and a separate fact:
     /// set only for a symbol typed `STT_FUNC` whose fields the walk could read.
@@ -4355,18 +4439,18 @@ entry = \"api/index.php\"
             assert_eq!(shim_name(PhpVersion::new(8, 4)), SHIM_84);
             // Only the infix moves between minors: the tuple is the build's.
             assert_eq!(
-                shim_name(PhpVersion::new(8, 2)),
-                SHIM_84.replace("php84-", "php82-")
-            );
-            assert_eq!(
                 shim_name(PhpVersion::new(8, 3)),
                 SHIM_84.replace("php84-", "php83-")
+            );
+            assert_eq!(
+                shim_name(PhpVersion::new(8, 5)),
+                SHIM_84.replace("php84-", "php85-")
             );
             // A minor with no shim ABI keeps the same shape, so the refusal can
             // still name the file the host would need.
             assert_eq!(
-                shim_name(PhpVersion::new(8, 5)),
-                SHIM_84.replace("php84-", "php85-")
+                shim_name(PhpVersion::new(8, 6)),
+                SHIM_84.replace("php84-", "php86-")
             );
         }
     }
@@ -4473,8 +4557,7 @@ path = ['.*']
         shared_object_with(names, Some(version), true)
     }
 
-    /// The 8.2-and-earlier signature: an NTS object with **no** `php_version`
-    /// in its `.dynsym` at all.
+    /// An NTS object with **no** `php_version` in its `.dynsym` at all.
     fn shared_object_without_php_version(names: &[&str]) -> Vec<u8> {
         shared_object_with(names, None, false)
     }
@@ -4802,7 +4885,7 @@ path = ['.*']
         );
         for package in [
             "apt install libphp-embed",
-            "apk add php84-embed",
+            "apk add php85-embed",
             "dnf install php-embedded",
         ] {
             assert!(
@@ -5059,15 +5142,16 @@ path = ['.*']
         assert!(message.contains("apt install libphp-embed"), "{message}");
     }
 
-    /// `MB.3.59`: PHP 8.2's signature is the missing `php_version` symbol, and
-    /// a file name that **does** carry the minor does not change the sentence.
+    /// `MB.3.59`: an NTS object whose `.dynsym` carries no `php_version` is
+    /// refused naming the symbol, and a file name that **does** carry a
+    /// supported minor does not change the sentence.
     #[test]
     fn a_libphp_without_php_version_is_refused_naming_the_symbol() {
         let scratch = Scratch::new("no-php-version");
         let shims = Scratch::new("no-php-version-shims");
-        let _ = shims.file(&shim_name(PhpVersion::new(8, 2)), b"never loaded");
+        let _ = shims.file(&shim_name(PhpVersion::new(8, 4)), b"never loaded");
         let versioned_name = scratch.file(
-            "libphp8.2.so",
+            "libphp8.4.so",
             &shared_object_without_php_version(&["executor_globals"]),
         );
         let message = php_boot(
@@ -5083,7 +5167,7 @@ path = ['.*']
             "the missing symbol is named: {message}"
         );
         assert!(
-            message.contains("its file name states PHP 8.2"),
+            message.contains("its file name states PHP 8.4"),
             "the name is named, but does not rescue it: {message}"
         );
         assert!(
@@ -5097,14 +5181,75 @@ path = ['.*']
         assert!(message.contains("apt install libphp-embed"), "{message}");
     }
 
+    /// An installed minor this build ships no shim for is refused with the
+    /// support sentence, not with the `.dynsym` story of a symbol it may or may
+    /// not export — and the same holds when `BLASTIT_LIBPHP` names it.
+    #[test]
+    fn an_unsupported_minor_is_refused_with_the_support_sentence() {
+        let scratch = Scratch::new("unsupported-minor");
+        let shims = Scratch::new("unsupported-minor-shims");
+        let old = scratch.file(
+            "libphp8.2.so",
+            &shared_object_without_php_version(&["executor_globals"]),
+        );
+        let sentence = "PHP 8.2 is not supported — Blastit supports PHP 8.3, 8.4 and 8.5";
+
+        // `BLASTIT_LIBPHP` names it: the object is opened, and the version its
+        // own name states is refused before the symbol walk.
+        let message = php_boot(&manifest(PHP_ONLY), &search_for(&old, &shims.dir), Some(16))
+            .refusal()
+            .expect("an unsupported minor cannot be embedded")
+            .to_string();
+        assert!(message.ends_with(sentence), "{message}");
+        assert!(
+            !message.contains("exports no `php_version`"),
+            "the support sentence replaces the symbol story: {message}"
+        );
+
+        // No supported spelling exists, and the only installed library is the
+        // unsupported one: the refusal scan finds it and says the same thing.
+        let only_old = Scratch::new("only-unsupported");
+        let _ = only_old.file(
+            "libphp8.2.so",
+            &shared_object_without_php_version(&["executor_globals"]),
+        );
+        let mut search = PhpSearch::new(None, None, PhpShimScope::Development);
+        search.lib_dirs = vec![only_old.dir.clone()];
+        search.shim_dirs = vec![shims.dir.clone()];
+        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+            .refusal()
+            .expect("an 8.2-only host is refused")
+            .to_string();
+        assert!(message.ends_with(sentence), "{message}");
+
+        // The per-minor directory spelling states the same minor, so an
+        // unversioned `libphp.so` in `/usr/lib/php82` is refused the same way.
+        let per_minor = Scratch::new("only-unsupported-per-minor");
+        std::fs::create_dir_all(per_minor.dir.join("php82")).unwrap();
+        let _ = per_minor.file(
+            "php82/libphp.so",
+            &shared_object_without_php_version(&["executor_globals"]),
+        );
+        let mut search = PhpSearch::new(None, None, PhpShimScope::Development);
+        search.lib_dirs = vec![per_minor.dir.join("php82")];
+        search.shim_dirs = vec![shims.dir.clone()];
+        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+            .refusal()
+            .expect("the per-minor directory states the minor")
+            .to_string();
+        assert!(message.ends_with(sentence), "{message}");
+    }
+
     /// `MB.3.59`: the discovery directories include Alpine's per-minor embed
     /// directories, so an unset `BLASTIT_LIBPHP` can reach its own package.
     #[test]
     fn the_alpine_embed_directories_are_searched() {
         let dirs = library_dirs();
         for wanted in [
+            "/usr/lib/php85",
             "/usr/lib/php84",
             "/usr/lib/php83",
+            "/usr/local/lib/php85",
             "/usr/local/lib/php84",
             "/usr/local/lib/php83",
         ] {
@@ -5120,33 +5265,30 @@ path = ['.*']
                 .position(|dir| dir == Path::new(wanted))
                 .unwrap_or(usize::MAX)
         };
-        assert!(position("/usr/lib") < position("/usr/lib/php84"));
-        assert!(position("/usr/lib/php84") < position("/usr/local/lib"));
+        assert!(position("/usr/lib") < position("/usr/lib/php85"));
+        assert!(position("/usr/lib/php85") < position("/usr/local/lib"));
     }
 
     /// `MB.3.61`: a host carrying **two** embed packages must serve from the
     /// newer library, not from the first name in the list.
     ///
-    /// The reproduced shape is Alpine's: `php82-embed` installs
-    /// `/usr/lib/libphp82.so` (an object with no `php_version`, refused on its
-    /// own) and `php84-embed` installs `/usr/lib/php84/libphp.so` (which serves).
-    /// With `BLASTIT_LIBPHP` unset the old name-major walk found `libphp82.so`
-    /// first and refused the boot, although the 8.4 library was right there.
+    /// The reproduced shape is Alpine's: `php83-embed` installs
+    /// `/usr/lib/libphp83.so` (packed name) and `php85-embed` installs
+    /// `/usr/lib/php85/libphp.so` (per-minor directory). With
+    /// `BLASTIT_LIBPHP` unset a name-major walk found `libphp83.so` first and
+    /// served 8.3, although the 8.5 library was right there.
     #[test]
     fn two_embed_packages_serve_from_the_newer_library() {
         let scratch = Scratch::new("two-packages");
         let shims = Scratch::new("two-packages-shims");
-        for minor in [2u8, 4] {
+        for minor in [3u8, 5] {
             let _ = shims.file(&shim_name(PhpVersion::new(8, minor)), b"never loaded");
         }
         // The two packages' own paths, in the directories `library_dirs()`
-        // names — the same layout an Alpine 3.21 host gets.
-        std::fs::create_dir_all(scratch.dir.join("php84")).unwrap();
-        let old = scratch.file(
-            "libphp82.so",
-            &shared_object_without_php_version(&["executor_globals"]),
-        );
-        let new = scratch.file("php84/libphp.so", &shared_object(&["executor_globals"]));
+        // names — the same layout an Alpine host gets.
+        std::fs::create_dir_all(scratch.dir.join("php85")).unwrap();
+        let old = scratch.file("libphp83.so", &shared_object(&["executor_globals"]));
+        let new = scratch.file("php85/libphp.so", &shared_object(&["executor_globals"]));
         assert!(
             old.is_file() && new.is_file(),
             "both packages are installed"
@@ -5159,45 +5301,38 @@ path = ['.*']
             search.libphp.is_none(),
             "an unset BLASTIT_LIBPHP is no override at all"
         );
-        search.lib_dirs = vec![scratch.dir.clone(), scratch.dir.join("php84")];
+        search.lib_dirs = vec![scratch.dir.clone(), scratch.dir.join("php85")];
         search.shim_dirs = vec![shims.dir.clone()];
 
         let boot = php_boot(&manifest(PHP_ONLY), &search, Some(16));
         let PhpBoot::Proceed(runtime) = boot else {
-            panic!("two packages, and the 8.4 library serves: {boot:?}");
+            panic!("two packages, and the 8.5 library serves: {boot:?}");
         };
-        assert_eq!(runtime.version, PhpVersion::new(8, 4), "the newer library");
+        assert_eq!(runtime.version, PhpVersion::new(8, 5), "the newer library");
         assert_eq!(
             runtime.libphp, new,
-            "the served library is the 8.4 one, not the 8.2 name that came first"
+            "the served library is the 8.5 one, not the 8.3 name that came first"
         );
 
-        // The single-package twin, unchanged: the 8.2 library alone is still
-        // refused, naming the symbol it really lacks.
-        let only_old = Scratch::new("only-8.2");
-        let old = only_old.file(
-            "libphp82.so",
-            &shared_object_without_php_version(&["executor_globals"]),
-        );
+        // The single-package twin: the packed 8.3 name alone still serves.
+        let only_old = Scratch::new("only-8.3");
+        let old = only_old.file("libphp83.so", &shared_object(&["executor_globals"]));
         let mut search = PhpSearch::new(None, None, PhpShimScope::Development);
         search.lib_dirs = vec![only_old.dir.clone()];
         search.shim_dirs = vec![shims.dir.clone()];
-        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
-            .refusal()
-            .expect("8.2 alone is still refused")
-            .to_string();
-        assert!(message.contains("exports no `php_version`"), "{message}");
-        assert!(message.contains(&old.display().to_string()), "{message}");
+        let runtime = discover_php(&search).expect("8.3 alone still serves");
+        assert_eq!(runtime.version, PhpVersion::new(8, 3));
+        assert_eq!(runtime.libphp, old);
 
-        // And the 8.4 package alone still serves, from its own directory.
-        let only_new = Scratch::new("only-8.4");
-        std::fs::create_dir_all(only_new.dir.join("php84")).unwrap();
-        let new = only_new.file("php84/libphp.so", &shared_object(&["executor_globals"]));
+        // And the 8.5 package alone still serves, from its own directory.
+        let only_new = Scratch::new("only-8.5");
+        std::fs::create_dir_all(only_new.dir.join("php85")).unwrap();
+        let new = only_new.file("php85/libphp.so", &shared_object(&["executor_globals"]));
         let mut search = PhpSearch::new(None, None, PhpShimScope::Development);
-        search.lib_dirs = vec![only_new.dir.join("php84")];
+        search.lib_dirs = vec![only_new.dir.join("php85")];
         search.shim_dirs = vec![shims.dir.clone()];
-        let runtime = discover_php(&search).expect("8.4 alone still serves");
-        assert_eq!(runtime.version, PhpVersion::new(8, 4));
+        let runtime = discover_php(&search).expect("8.5 alone still serves");
+        assert_eq!(runtime.version, PhpVersion::new(8, 5));
         assert_eq!(runtime.libphp, new);
     }
 
@@ -5257,7 +5392,7 @@ path = ['.*']
             // The genuinely missing symbol keeps its own sentence: the two
             // refusals stay distinguishable.
             let absent = scratch.file(
-                "libphp8.2.so",
+                "libphp8.4.so",
                 &shared_object_without_php_version(&["executor_globals"]),
             );
             let message = php_boot(

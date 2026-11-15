@@ -279,10 +279,10 @@ fn ini_policy_refuses_to_render_an_injection() {
 
 #[test]
 fn php_versions_parse_only_where_a_shim_exists() {
+    assert_eq!(Minor::parse("8.5.4"), Some(Minor::Php85));
     assert_eq!(Minor::parse("8.4.27"), Some(Minor::Php84));
     assert_eq!(Minor::parse("8.3.11\n"), Some(Minor::Php83));
-    assert_eq!(Minor::parse("8.2"), Some(Minor::Php82));
-    for refused in ["8.5.0", "7.4.33", "9.0.0", "", "php", "8", "8.x.1"] {
+    for refused in ["8.2.29", "7.4.33", "9.0.0", "", "php", "8", "8.x.1"] {
         assert_eq!(Minor::parse(refused), None, "{refused:?} must be refused");
     }
 }
@@ -382,7 +382,7 @@ fn a_missing_toolchain_names_php_config_and_the_package() {
     .unwrap_err();
     assert_eq!(error, ToolchainError::NotFound);
     let message = error.to_string();
-    for needle in ["php-config", "libphp8.4-embed", "PHP_CONFIG"] {
+    for needle in ["php-config", "libphp8.5-embed", "PHP_CONFIG"] {
         assert!(
             message.contains(needle),
             "the refusal must name {needle}: {message}"
@@ -400,14 +400,14 @@ fn a_missing_toolchain_names_php_config_and_the_package() {
 
 #[test]
 fn an_unsupported_minor_is_refused_by_name() {
-    let fake = FakeConfig::new("8.5.0", true);
+    let fake = FakeConfig::new("8.6.0", true);
     let error = Toolchain::discover_with(&FakeEnv {
         path: Some(fake.path()),
         php_config: None,
     })
     .unwrap_err();
     match error {
-        ToolchainError::UnsupportedVersion { version, .. } => assert_eq!(version, "8.5.0"),
+        ToolchainError::UnsupportedVersion { version, .. } => assert_eq!(version, "8.6.0"),
         other => panic!("expected UnsupportedVersion, got {other:?}"),
     }
 }

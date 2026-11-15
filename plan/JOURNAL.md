@@ -1884,3 +1884,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T22:53 [MB.3.64] (lead) owner addition: prove the seam is ABSENT from the shipped binary (strings/grep -a the release standalone artifact for BLASTIT_TEST_SWAP_POINT -> 0 hits) AND PRE
 - 2026-11-15T23:09 [MB.3.64] (lead) status active -> review
 - 2026-11-15T23:18 [MB.3.64] (lead) status review -> done
+- 2026-11-15T23:18 [MB.3.67] (lead) created (task) An unreadable artifact must not read as an absent seam, and the wheel gets the same gate
+- 2026-11-15T23:18 [MB.3.64] (lead) commit 2419971; reviewer MINORs filed as MB.3.67 (unreadable artifact reads as 'absent' rc 0; wheel not measured)
+- 2026-11-15T23:18 [MB.3.65] (lead) status ready -> active
+- 2026-11-15T23:18 [MB.3.65] (lead) attempt 1/3 started
+- 2026-11-15T23:18 [MB.3.65] (lead) attempt 1/3 started; base 2419971
+- 2026-11-16T00:11 [MB.3.65] (lead) status active -> review
+- 2026-11-16T00:19 [MB.3.65] (lead) status review -> done

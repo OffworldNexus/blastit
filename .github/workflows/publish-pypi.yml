@@ -204,7 +204,7 @@ jobs:
       # Built **natively** in this leg's own distro image: `php_config.h` encodes
       # platform type widths and `ZEND_MM_ALIGNMENT`, so a cross-compiled shim
       # fails at `dlopen` rather than at compile (`ADR-0010` §4.2). No distro
-      # ships 8.2, 8.3 and 8.4, and Alpine and Debian name the packages
+      # ships 8.3, 8.4 and 8.5, and Alpine and Debian name the packages
       # differently, hence one leg per (minor, libc).
       - name: build the shim and run the real-load probe
         run: >-

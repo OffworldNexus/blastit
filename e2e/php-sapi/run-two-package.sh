@@ -1,10 +1,10 @@
 #!/bin/sh
-# The two-package witness (`MB.3.61`; caption corrected by `MB.3.62`):
-# `php82-embed` **and** `php84-embed` installed on one Alpine host, so
-# `/usr/lib/libphp82.so` (an object with no `php_version`) sits beside
-# `/usr/lib/php84/libphp.so` (which serves). A name-major discovery walk reaches
-# the 8.2 object first and refuses a host that could serve; the version-major
-# walk (`MB.3.61`) must reach the 8.4 library.
+# The two-package witness (`MB.3.61`; caption corrected by `MB.3.62`, packages
+# updated by `MB.3.65`): `php83-embed` **and**
+# `php84-embed` installed on one Alpine host, so `/usr/lib/libphp83.so` (the
+# packed name) sits beside `/usr/lib/php84/libphp.so` (the per-minor directory).
+# A name-major discovery walk reaches the 8.3 object first and serves the older
+# minor; the version-major walk (`MB.3.61`) must reach the 8.4 library.
 #
 # Runs inside `e2e/php-sapi/Dockerfile.two-package`, where both packages and
 # both suites this image compiled are present. Exit 0 only when the suites took
@@ -43,30 +43,23 @@ if [ -n "${BLASTIT_LIBPHP:-}" ]; then
     exit 1
 fi
 
-old=/usr/lib/libphp82.so
+old=/usr/lib/libphp83.so
 new=/usr/lib/php84/libphp.so
 
 echo "two-package: the host's own layout"
 ls -l "$old" "$new"
 
-# The two facts that make the ordering matter, measured rather than assumed: the
-# 8.2 object exports no `php_version` (so a boot that picks it must refuse), and
-# the 8.4 one does (so it serves).
+# Both objects are usable, so only the *order* decides which one serves: that is
+# what makes this image a witness for the version-major walk rather than for a
+# symbol one of them lacks.
 for lib in "$old" "$new"; do
-    if readelf --dyn-syms "$lib" | grep -qw php_version; then
-        echo "two-package: $lib exports php_version"
-    else
-        echo "two-package: $lib exports NO php_version"
-    fi
+    readelf --dyn-syms "$lib" | grep -qw php_version || {
+        echo "two-package: FAIL — $lib exports no php_version, so this image cannot" >&2
+        echo "  show which library the order prefers (both must be usable)" >&2
+        exit 1
+    }
+    echo "two-package: $lib exports php_version"
 done
-if readelf --dyn-syms "$old" | grep -qw php_version; then
-    echo "two-package: FAIL — $old exports php_version, so this image cannot show the defect" >&2
-    exit 1
-fi
-readelf --dyn-syms "$new" | grep -qw php_version || {
-    echo "two-package: FAIL — $new exports no php_version, so it cannot serve either" >&2
-    exit 1
-}
 
 log=/tmp/two-package-suites.log
 : >"$log"
@@ -105,13 +98,15 @@ grep -q "$new" "$log" || {
     echo "  major order did not reach the 8.4 library (a skipped suite is not a witness)" >&2
     exit 1
 }
-if grep -q "$old is an NTS libphp" "$log"; then
-    echo "two-package: FAIL — the boot refused the 8.2 object on a host where the 8.4" >&2
+# The 8.3 library was found first by name: a boot that picked it would have no
+# shim (this image builds only the 8.4 one) and say so by name.
+if grep -q "libblastit_php83-" "$log"; then
+    echo "two-package: FAIL — the boot resolved the 8.3 library on a host where the 8.4" >&2
     echo "  library serves: that is the MB.3.61 defect" >&2
     exit 1
 fi
 
-echo "two-package: ok — with php82-embed and php84-embed installed and BLASTIT_LIBPHP unset,"
+echo "two-package: ok — with php83-embed and php84-embed installed and BLASTIT_LIBPHP unset,"
 echo "  each suite's probe resolved $new on this host and a boot handed that path served"
 echo "  the route: probe order on a real Alpine layout, and boot agreement with the probe."
 echo "  (Stage 0's own unset-override walk is pinned by stage0.rs's unit test, not here.)"

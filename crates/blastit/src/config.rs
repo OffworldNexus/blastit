@@ -742,6 +742,17 @@ impl PhpVersion {
         })
     }
 
+    /// Whether this build ships a shim for this minor (`ADR-0010` §4.1).
+    ///
+    /// The supported set is `8.3`, `8.4` and `8.5` — the minors
+    /// `crates/blastit-php-sapi` has an ABI for. A host on any other minor is
+    /// refused with one sentence naming that set, never with the `.dynsym`
+    /// story of a symbol it may or may not export.
+    #[must_use]
+    pub const fn supported(self) -> bool {
+        self.major == 8 && self.minor >= 3 && self.minor <= 5
+    }
+
     /// `"84"`, the `libblastit_php84-<arch>-<libc>.so` infix.
     #[must_use]
     pub fn number(self) -> String {
@@ -4414,8 +4425,8 @@ mod php_settings {
             ("libphp84.so", PhpVersion::new(8, 4)),
             ("/usr/lib/libphp83.so", PhpVersion::new(8, 3)),
             (
-                "/usr/lib/x86_64-linux-gnu/libphp8.2.so",
-                PhpVersion::new(8, 2),
+                "/usr/lib/x86_64-linux-gnu/libphp8.5.so",
+                PhpVersion::new(8, 5),
             ),
         ] {
             assert_eq!(PhpVersion::parse(name), Some(expected), "{name}");

@@ -108,9 +108,9 @@ PYTHONS = ("3.13", "3.14")
 
 # The distro that carries the headers *and* the embedded SAPI for each
 # (minor, libc). Every entry is a signed distro package on a distro that ships
-# that minor: no single distro ships 8.2, 8.3 and 8.4, and Alpine and Debian
-# disagree about both the package names (`php82-dev` vs `php8.2-dev`) and where
-# the library lives (`/usr/lib/php82/libphp.so` vs `/usr/lib/libphp8.2.so`).
+# that minor: no single distro ships 8.3, 8.4 and 8.5, and Alpine and Debian
+# disagree about both the package names (`php85-dev` vs `php8.5-dev`) and where
+# the library lives (`/usr/lib/php85/libphp.so` vs `/usr/lib/libphp8.5.so`).
 #
 # `suites` is whether this leg also compiles and runs the two protected suites
 # (`critical_php_backend`, `critical_php_embed`) **in its own image**
@@ -119,26 +119,14 @@ PYTHONS = ("3.13", "3.14")
 # condition buried in a workflow: "the shim builds and probes here, but the
 # worker-level suites cannot run" is a claim a reader has to be able to see.
 PHP_BUILDS = {
-    ("8.2", "gnu"): {
-        "base": "debian:bookworm",
-        "dev": "php8.2-dev",
-        "embed": "libphp8.2-embed",
-        "curl": "php8.2-curl",
-        "libphp": "/usr/lib/libphp8.2.so",
-        "suites": False,
-        # Measured in the leg's own image: `dlsym(libphp, "php_version")` is
-        # `undefined symbol` on Debian bookworm's libphp8.2 (PHP 8.2 keeps it as
-        # a hidden data symbol; it is an exported function only from 8.3), and
-        # `crates/blastit-php-sapi/src/loader.rs` resolves it before
-        # `php_module_startup`, so `blastit dev` refuses this pair by name. The
-        # shim still builds, `readelf -d` still proves no `DT_NEEDED` on libphp,
-        # and the real-load probe still serves 200 — that is the leg's proof.
-        "suites_because": (
-            "Debian bookworm's libphp8.2 exports no `php_version`, and blastit's "
-            "stage-1 loader resolves it before `php_module_startup`, so the boot "
-            "refuses this pair (a `libphp` fact, not a build-host fact); the shim "
-            "and its real-load probe still build and run in the image"
-        ),
+    ("8.5", "gnu"): {
+        # `dpkg -L libphp8.5-embed` in `ubuntu:26.04`: `/usr/lib/libphp8.5.so`.
+        "base": "ubuntu:26.04",
+        "dev": "php8.5-dev",
+        "embed": "libphp8.5-embed",
+        "curl": "php8.5-curl",
+        "libphp": "/usr/lib/libphp8.5.so",
+        "suites": True,
     },
     ("8.3", "gnu"): {
         "base": "ubuntu:24.04",
@@ -156,25 +144,14 @@ PHP_BUILDS = {
         "libphp": "/usr/lib/libphp8.4.so",
         "suites": True,
     },
-    ("8.2", "musl"): {
-        "base": "alpine:3.20",
-        "dev": "php82-dev",
-        "embed": "php82-embed",
-        "curl": "php82-curl",
-        # Alpine's layout is per-minor and not uniform: 8.2 and 8.3 install
-        # `libphpXY.so` at `/usr/lib`, 8.4 installs `/usr/lib/php84/libphp.so`.
-        "libphp": "/usr/lib/libphp82.so",
-        "suites": False,
-        # PHP 8.2's `libphp82` exports no `php_version`, which blastit's stage-0
-        # gate requires before it can choose a shim (measured by `MB.3.58` and
-        # `MB.3.59` in this image) — so the pair is refused wherever it runs and
-        # the worker-level suites would only take their refusal branch. The shim
-        # and its real-load probe still build and run.
-        "suites_because": (
-            "PHP 8.2's `libphp82` exports no `php_version`, so stage 0 refuses the "
-            "pair (`MB.3.59` measured the sentence in this image); the shim and its "
-            "real-load probe still build and run"
-        ),
+    ("8.5", "musl"): {
+        # `apk info -L php85-embed` in `alpine:3.23`: `/usr/lib/php85/libphp.so`.
+        "base": "alpine:3.23",
+        "dev": "php85-dev",
+        "embed": "php85-embed",
+        "curl": "php85-curl",
+        "libphp": "/usr/lib/php85/libphp.so",
+        "suites": True,
     },
     ("8.3", "musl"): {
         "base": "alpine:3.21",
@@ -198,7 +175,7 @@ PHP_BUILDS = {
     },
 }
 
-PHP_MINORS = {"8.2": "82", "8.3": "83", "8.4": "84"}
+PHP_MINORS = {"8.5": "85", "8.4": "84", "8.3": "83"}
 
 # A leg is `(arch, libc)`. `enabled` is the switch that turns a target into an
 # artifact; a disabled leg must say why in one sentence.
@@ -217,10 +194,10 @@ PROVEN: dict[tuple, str] = {
     # `MB.3.12` built and probed 8.4 on x86_64-gnu; `MB.3.18` did the rest.
     ("shims", "8.4", "x86_64", "gnu"): "MB.3.12",
     ("shims", "8.3", "x86_64", "gnu"): "MB.3.18",
-    ("shims", "8.2", "x86_64", "gnu"): "MB.3.18",
+    ("shims", "8.5", "x86_64", "gnu"): "MB.3.65",
     ("shims", "8.4", "x86_64", "musl"): "MB.3.18",
     ("shims", "8.3", "x86_64", "musl"): "MB.3.18",
-    ("shims", "8.2", "x86_64", "musl"): "MB.3.18",
+    ("shims", "8.5", "x86_64", "musl"): "MB.3.65",
     ("wheels", "3.13", "x86_64", "gnu"): "MB.3.18",
     ("wheels", "3.14", "x86_64", "gnu"): "MB.3.18",
     ("wheels", "3.13", "x86_64", "musl"): "MB.3.18",
@@ -246,10 +223,15 @@ PROVEN: dict[tuple, str] = {
 #            distro's own package path — what the install docs tell a user to do
 #   refused  a boot refused the pair; the sentence and its cause are measured
 #
-# `served` is the support statement: 4 of the 12 declared shims are served today
-# (8 once the aarch64 legs run), so the docs may say "PHP 8.3/8.4 anywhere" and
-# must not say "PHP 8.2 anywhere".
+# `served` is the support statement: 6 of the 12 declared shims are served today
+# (12 once the aarch64 legs run), so the docs may say "PHP 8.3/8.4/8.5 anywhere".
 SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
+    ("8.5", "gnu", "x86_64"): (
+        "served",
+        "measured by MB.3.65 in the `ubuntu:26.04` image: with `BLASTIT_LIBPHP` "
+        "unset the boot reaches `/usr/lib/libphp8.5.so` and serves `GET / → app "
+        "200`; `critical_php_backend` and `critical_php_embed` pass in the same image",
+    ),
     ("8.4", "gnu", "x86_64"): (
         "served",
         "MB.3.12's protected suite, re-measured by MB.3.58 in the `debian:trixie` "
@@ -260,11 +242,12 @@ SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
         "MB.3.58 in the `ubuntu:24.04` image: `critical_php_backend` 5/5 and "
         "`critical_php_embed` 21/21, `served: HTTP/1.1 200 OK`",
     ),
-    ("8.2", "gnu", "x86_64"): (
-        "refused",
-        "measured by MB.3.59: Debian bookworm's `libphp8.2` exports no "
-        "`php_version`, so stage 0 refuses the pair naming the missing symbol "
-        "(a `libphp` fact, not a naming one); the real-load probe still serves",
+    ("8.5", "musl", "x86_64"): (
+        "served",
+        "measured by MB.3.65 in the `alpine:3.23` image: with `BLASTIT_LIBPHP` "
+        "unset the boot reaches `/usr/lib/php85/libphp.so` through the per-minor "
+        "directory and serves `GET / → app 200`; both protected suites pass in the "
+        "same image",
     ),
     ("8.4", "musl", "x86_64"): (
         "served",
@@ -279,12 +262,6 @@ SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
         "unset the boot reaches `/usr/lib/libphp83.so` through the packed name "
         "and serves `GET / → app 200`; both protected suites pass in the same "
         "image",
-    ),
-    ("8.2", "musl", "x86_64"): (
-        "refused",
-        "measured by MB.3.59 in `alpine:3.20`: `/usr/lib/libphp82.so` exports no "
-        "`php_version`, so stage 0 refuses it naming the missing symbol; the shim "
-        "and its real-load probe still build and run",
     ),
 }
 REACHES = ("built", "probed", "served", "refused")
@@ -525,7 +502,7 @@ PINNED: tuple[tuple[str, str, str], ...] = (
     (
         "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
         "`3` shims",
-        "per-tuple shim count (8.2/8.3/8.4)",
+        "per-tuple shim count (8.3/8.4/8.5)",
     ),
     (
         "docs/design/backend-runtimes.md",
@@ -899,7 +876,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--minor",
         default="",
-        help="with --leg/--count shims: filter by PHP minor (8.2, 8.3, 8.4)",
+        help="with --leg/--count shims: filter by PHP minor (8.3, 8.4, 8.5)",
     )
     parser.add_argument(
         "--python",

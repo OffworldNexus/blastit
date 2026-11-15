@@ -8,8 +8,9 @@
 # documentation is allowed to state.
 #
 # Each leg builds the ADR-0010 §4.1 shim `libblastit_php<major><minor>-<arch>-<libc>.so`
-# natively, in the **distro that ships that PHP minor** — Debian bookworm is 8.2,
-# Ubuntu noble is 8.3, Debian trixie is 8.4, and no single distro ships all three.
+# natively, in the **distro that ships that PHP minor** — Ubuntu noble is 8.3,
+# Debian trixie is 8.4, Ubuntu 26.04 and Alpine 3.23 are 8.5, and no single
+# distro ships all three.
 # A shim is never cross-compiled against a foreign `php_config.h`: its type
 # widths and `ZEND_MM_ALIGNMENT` only disagree at `dlopen`. The shim is then
 # `dlopen`ed beside that distro's signed NTS `libphp` and real requests run
@@ -127,19 +128,17 @@ jobs:
       # installs libclang and compiles `critical_php_backend` +
       # `critical_php_embed` itself, and `make rs-test-php-image` runs the two
       # executables it recorded. A runner-built binary cannot be executed here
-      # (`MB.3.58`): the runner is Ubuntu 24.04 (glibc 2.39) and the bookworm leg
-      # is 2.36, so it dies at `execve` with
+      # (`MB.3.58`): the runner is Ubuntu 24.04 (glibc 2.39) and a leg whose base
+      # is older (Debian trixie, 2.41, is newer; the Alpine legs have no glibc at
+      # all) would die at `execve` with
       # `weak version 'GLIBC_2.39' not found` — and raising the leg's base would
       # prove nothing about the distros the shim ships to.
       #
       # **Suites only where the leg's own image can carry them.** `matrix.suites`
       # is a fact from `scripts/platform_matrix.py` (`--leg shims`), not a step
-      # condition invented here: PHP 8.2 on Debian bookworm cannot host the
-      # worker-level suites at all (its `libphp8.2` exports no `php_version`, so
-      # `blastit`'s stage-1 loader refuses the pair before `php_module_startup`),
-      # and the Alpine legs build no `blastit` (no libclang) — both say so where
-      # the leg is declared, and both are limited to the shim-level probe above,
-      # which is what `PROVEN` records.
+      # condition invented here: a leg whose pair the boot refuses, or whose
+      # image cannot build `blastit`, says so where the leg is declared and is
+      # limited to the shim-level probe above, which is what `PROVEN` records.
       - name: make rs-test-php-image (critical_php_backend + critical_php_embed on the real pair)
         if: matrix.suites == 'true'
         timeout-minutes: 15

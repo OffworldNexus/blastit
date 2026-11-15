@@ -137,7 +137,7 @@ fn run() -> Result<String, String> {
         .copied()
         .find(|minor| minor.accepts(minor_code))
         .ok_or_else(|| {
-            format!("the shim reports PHP minor {minor_code}; this build has 8.2, 8.3 and 8.4")
+            format!("the shim reports PHP minor {minor_code}; this build has 8.3, 8.4 and 8.5")
         })?;
 
     // 3. The real lockdown, rendered by the Rust side under test.

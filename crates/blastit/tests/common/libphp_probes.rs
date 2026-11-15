@@ -138,6 +138,10 @@ mod tests {
     /// spellings before the next minor's, and the unversioned `libphp.so` last
     /// with no directory constraint.
     const EXPECTED: [(&str, Option<&str>); 13] = [
+        ("libphp8.5.so", None),
+        ("libphp-8.5.so", None),
+        ("libphp85.so", None),
+        ("libphp.so", Some("php85")),
         ("libphp8.4.so", None),
         ("libphp-8.4.so", None),
         ("libphp84.so", None),
@@ -146,10 +150,6 @@ mod tests {
         ("libphp-8.3.so", None),
         ("libphp83.so", None),
         ("libphp.so", Some("php83")),
-        ("libphp8.2.so", None),
-        ("libphp-8.2.so", None),
-        ("libphp82.so", None),
-        ("libphp.so", Some("php82")),
         ("libphp.so", None),
     ];
 
@@ -186,15 +186,15 @@ mod tests {
     /// two entries out of order.
     #[test]
     fn a_changed_entry_is_reported_at_its_index() {
-        let dropped_constraint = STAGE0.replacen(CONSTRAINT_SOME_84, CONSTRAINT_NONE, 1);
+        let dropped_constraint = STAGE0.replacen(CONSTRAINT_SOME_85, CONSTRAINT_NONE, 1);
         assert_ne!(
             dropped_constraint, STAGE0,
-            "the source states `Some(\"php84\")`"
+            "the source states `Some(\"php85\")`"
         );
         assert!(
             assert_matches(&EXPECTED, &dropped_constraint)
                 .is_err_and(|drift| drift.contains("entry 3")),
-            "`libphp.so` outside `/usr/lib/php84` must be entry 3's difference"
+            "`libphp.so` outside `/usr/lib/php85` must be entry 3's difference"
         );
 
         let fallback_constrained = constrain_the_fallback(STAGE0);
@@ -209,8 +209,8 @@ mod tests {
         );
 
         let reordered = STAGE0
-            .replacen("name: \"libphp8.4.so\",", "name: \"libphp84.so\",", 1)
-            .replacen("name: \"libphp-8.4.so\",", "name: \"libphp8.4.so\",", 1);
+            .replacen("name: \"libphp8.5.so\",", "name: \"libphp85.so\",", 1)
+            .replacen("name: \"libphp-8.5.so\",", "name: \"libphp8.5.so\",", 1);
         assert_ne!(
             reordered, STAGE0,
             "the first two entries are dotted then hyphenated"
@@ -221,9 +221,9 @@ mod tests {
         );
     }
 
-    /// The `per_minor_dir` field of the 8.4 per-minor entry, as `stage0.rs`
+    /// The `per_minor_dir` field of the 8.5 per-minor entry, as `stage0.rs`
     /// spells it.
-    const CONSTRAINT_SOME_84: &str = "per_minor_dir: Some(\"php84\")";
+    const CONSTRAINT_SOME_85: &str = "per_minor_dir: Some(\"php85\")";
 
     /// The same field unconstrained.
     const CONSTRAINT_NONE: &str = "per_minor_dir: None";
@@ -240,7 +240,7 @@ mod tests {
             .expect("the fallback states its constraint");
         let mut out = String::with_capacity(source.len());
         out.push_str(&source[..at + field]);
-        out.push_str("per_minor_dir: Some(\"php82\")");
+        out.push_str("per_minor_dir: Some(\"php83\")");
         out.push_str(&source[at + field + CONSTRAINT_NONE.len()..]);
         out
     }

@@ -37,24 +37,23 @@ other sources out of `public/`.
 $ uv tool install blastit
 ```
 
-Blastit embeds the host's NTS `libphp` — `libphp-embed` on Debian/Ubuntu, `php84-embed`
-(or `php83-embed`) on Alpine, `php-embedded` on Fedora/RHEL — or `BLASTIT_LIBPHP` names
-one. Installing that package (`apt install libphp-embed php-pgsql`) is the one privileged
-step for PHP itself; Blastit never writes `/etc`. Without it the boot stops before it binds
-and names the package: it is not a degraded mode.
+Blastit embeds the host's NTS `libphp` — `libphp-embed` on Debian/Ubuntu,
+`php85-embed` (or `php84-embed`, `php83-embed`) on Alpine, `php-embedded` on
+Fedora/RHEL — or `BLASTIT_LIBPHP` names one. Installing that package
+(`apt install libphp-embed php-pgsql`) is the one privileged step for PHP itself;
+Blastit never writes `/etc`. Without it the boot stops before it binds and names
+the package: it is not a degraded mode.
 
-The supported versions are PHP **8.3 and 8.4**. 8.2 is not supported yet: its package
-(`libphp8.2-embed` on Debian 12, `php82-embed` on Alpine 3.20) ships no `php_version`
-symbol for Blastit to read — a host-package fact, not a Blastit bug.
+We support supported PHP versions: 8.3, 8.4 and 8.5.
 
 The boot reads the minor from the distro's own package, so the install is enough. It
-understands the dotted names (`libphp8.4.so`, `libphp-8.4.so`), Alpine's packed
-`libphp83.so`, and the per-minor directory (`/usr/lib/php84/libphp.so`), and it looks
+understands the dotted names (`libphp8.5.so`, `libphp-8.5.so`), Alpine's packed
+`libphp83.so`, and the per-minor directory (`/usr/lib/php85/libphp.so`), and it looks
 where each distro installs. A library whose path states one minor and whose own bytes
 state another is refused before the first request, with both named.
 
 To use a library the distro did not install, put a root-owned `0644` copy in
-`/usr/local/lib` (or `/usr/local/lib/php84`), never `/tmp`: the copy is enough. Set
+`/usr/local/lib` (or `/usr/local/lib/php85`), never `/tmp`: the copy is enough. Set
 `BLASTIT_LIBPHP` only if it lives elsewhere — it must be an absolute path.
 
 ## 2. Static assets

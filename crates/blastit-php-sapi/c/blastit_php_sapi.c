@@ -460,14 +460,7 @@ int32_t blastit_php_worker_init(const blastit_php_config_v1 *cfg)
      * worker silently runs the host's `php.ini`: `open_basedir` unset,
      * `allow_url_fopen=On`, `disable_functions` empty. `php_embed.c` documents
      * the same rule. */
-#if PHP_VERSION_ID >= 80300
     bt_sapi.ini_entries = cfg->ini;
-#else
-    /* PHP 8.2 declares `char *ini_entries`; 8.3 changed it to `const char *`.
-     * This cast is the whole per-minor difference in this file, and is why one
-     * source is compiled once per minor instead of once for all of them. */
-    bt_sapi.ini_entries = (char *)cfg->ini;
-#endif
 
     /* `php_module_startup` runs every MINIT and can `zend_bailout` (a module's
      * MINIT failing, a `memory_limit` hit during startup). Not attacker-

@@ -3,10 +3,11 @@
 #
 # The base image and the four package names are build args because **no single
 # distro ships all three minors, and Alpine and Debian disagree about the
-# names**: Debian bookworm is PHP 8.2, Ubuntu noble is 8.3, Debian trixie and
-# Alpine 3.21 are 8.4, Alpine 3.20 is 8.2 — each with its own signed
-# `libphpX.Y-embed` (Debian/Ubuntu: `/usr/lib/libphp8.2.so`) or `phpXY-embed`
-# (Alpine: `/usr/lib/libphp82.so` for 8.2/8.3, `/usr/lib/php84/libphp.so` for 8.4).
+# names**: Debian trixie is PHP 8.4, Ubuntu noble is 8.3, Ubuntu 26.04 and
+# Alpine 3.23 are 8.5, Alpine 3.21 is 8.4/8.3 — each with its own signed
+# `libphpX.Y-embed` (Debian/Ubuntu: `/usr/lib/libphp8.5.so`) or `phpXY-embed`
+# (Alpine: `/usr/lib/libphp83.so` for 8.3, `/usr/lib/php8X/libphp.so` for 8.4
+# and 8.5).
 # They come from `scripts/platform_matrix.py` (the one place a leg is declared),
 # never from a second list here.
 #
@@ -125,8 +126,8 @@ RUN extra=""; \
 # shim is built.
 #
 # `PHP_SAPI_SUITES=0` (`matrix.suites == "false"`) skips the build altogether:
-# PHP 8.2's `libphp` exports no `php_version`, so stage 0 refuses its pair and
-# its suites are not run in a leg that can never serve.
+# a leg whose pair the boot refuses cannot serve, so its suites would only take
+# their refusal branch.
 #
 # A musl Rust binary defaults to static-pie, and a static musl binary cannot
 # `dlopen`: the test binaries load `libphp` for real, so they need the same

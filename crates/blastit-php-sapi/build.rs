@@ -10,7 +10,7 @@
 //! worlds, so the degrade is tested rather than assumed.
 //!
 //! Search order (the plan's "Toolchain reality" section): `PHP_CONFIG`, then
-//! `php-config`, `php-config8.4`, `php-config8.3`, `php-config8.2` on `PATH`.
+//! `php-config`, `php-config8.5`, `php-config8.4`, `php-config8.3` on `PATH`.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -19,13 +19,13 @@ use std::process::Command;
 /// The unversioned name first, then one per supported minor, newest first.
 const CANDIDATES: [&str; 4] = [
     "php-config",
+    "php-config8.5",
     "php-config8.4",
     "php-config8.3",
-    "php-config8.2",
 ];
 
 /// The minors this crate has an ABI for, newest first.
-const SUPPORTED: [&str; 3] = ["8.4", "8.3", "8.2"];
+const SUPPORTED: [&str; 3] = ["8.5", "8.4", "8.3"];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -44,11 +44,11 @@ fn main() {
         None => {
             println!(
                 "cargo:warning=no PHP development toolchain found (looked for PHP_CONFIG, then \
-                 php-config, php-config8.4, php-config8.3, php-config8.2 on PATH): the C SAPI shim \
+                 php-config, php-config8.5, php-config8.4, php-config8.3 on PATH): the C SAPI shim \
                  is not built and the ABI surface is not compiled. Install it with `apt install \
-                 php8.4-dev libphp8.4-embed` (Debian/Ubuntu), `apk add php84-dev php84-embed` \
-                 (Alpine) or `dnf install php84-php-devel php-embedded` (Fedora/RHEL), or set \
-                 PHP_CONFIG=/path/to/php-config8.4. `make php-sapi-e2e` builds and exercises the \
+                 php8.5-dev libphp8.5-embed` (Debian/Ubuntu), `apk add php85-dev php85-embed` \
+                 (Alpine) or `dnf install php85-php-devel php-embedded` (Fedora/RHEL), or set \
+                 PHP_CONFIG=/path/to/php-config8.5. `make php-sapi-e2e` builds and exercises the \
                  shim in its container."
             );
         }

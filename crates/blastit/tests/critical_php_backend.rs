@@ -173,10 +173,10 @@ fn host_php() -> Option<HostPhp> {
     if !contains(&bytes, b"executor_globals") || contains(&bytes, b"tsrm_startup") {
         return None;
     }
-    // PHP 8.2 and earlier export no `php_version` — the symbol the worker
-    // resolves before `php_module_startup` — so a boot refuses them in stage 0
-    // (`MB.3.59`). The exact name needs its NUL: `php_version_compare` exists
-    // in every version and must not count as the symbol.
+    // An object that exports no `php_version` — the symbol the worker resolves
+    // before `php_module_startup` — is refused by stage 0 (`MB.3.59`). The exact
+    // name needs its NUL: `php_version_compare` exists in every version and
+    // must not count as the symbol.
     if !contains(&bytes, b"php_version\0") {
         return None;
     }
@@ -199,14 +199,17 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// Version-major, then spelling (`MB.3.61`): the *minor* is preferred and the
 /// name only breaks a tie within it, so a host with two embed packages probes the
 /// library the boot will serve — the newest — instead of the first name in a
-/// list. A name-major walk would probe `/usr/lib/libphp82.so`, an object with no
-/// `php_version`, and then report "no usable library" on a host whose
-/// `/usr/lib/php84/libphp.so` serves.
+/// list. A name-major walk would probe `/usr/lib/libphp83.so` before a host's
+/// `/usr/lib/php85/libphp.so`, and serve the older minor.
 ///
 /// It is a **copy** of `stage0.rs`'s `LIBPHP_PROBES`, because this suite may not
 /// lean on the code under test; [`the_probe_table_matches_stage0`] is what keeps
 /// the copy honest (`MB.3.62`).
 const PROBES: [(&str, Option<&str>); 13] = [
+    ("libphp8.5.so", None),
+    ("libphp-8.5.so", None),
+    ("libphp85.so", None),
+    ("libphp.so", Some("php85")),
     ("libphp8.4.so", None),
     ("libphp-8.4.so", None),
     ("libphp84.so", None),
@@ -215,10 +218,6 @@ const PROBES: [(&str, Option<&str>); 13] = [
     ("libphp-8.3.so", None),
     ("libphp83.so", None),
     ("libphp.so", Some("php83")),
-    ("libphp8.2.so", None),
-    ("libphp-8.2.so", None),
-    ("libphp82.so", None),
-    ("libphp.so", Some("php82")),
     ("libphp.so", None),
 ];
 
@@ -263,14 +262,14 @@ fn libphp_path() -> Option<PathBuf> {
         format!("/usr/lib/{triplet}"),
         "/usr/lib64".to_string(),
         "/usr/lib".to_string(),
+        "/usr/lib/php85".to_string(),
         "/usr/lib/php84".to_string(),
         "/usr/lib/php83".to_string(),
-        "/usr/lib/php82".to_string(),
         format!("/usr/local/lib/{triplet}"),
         "/usr/local/lib".to_string(),
+        "/usr/local/lib/php85".to_string(),
         "/usr/local/lib/php84".to_string(),
         "/usr/local/lib/php83".to_string(),
-        "/usr/local/lib/php82".to_string(),
     ];
     for (name, minor) in PROBES {
         let found = dirs

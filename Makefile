@@ -114,7 +114,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
         rs-test-php rs-test-php-image platform-matrix-check standalone standalone-glibc workflow-check \
-        packaging-gates-test mutants-clean mutants-scope-probe print-mutants-tmp
+        packaging-gates-test doc-tone mutants-clean mutants-scope-probe print-mutants-tmp
 
 help: ## Show available Make targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -149,6 +149,12 @@ workflow-check: ## Refuse a workflow whose job graph cannot run (offline, locked
 
 packaging-gates-test: ## Run positive + negative self-tests for workflow, matrix, and wheel-tag guards
 	UV_OFFLINE=1 $(UV) run --no-project scripts/test_packaging_gates.py
+
+# The tone rule (`MB.3.65` part B): no apology language on a page a user reads.
+# The list is narrow and literal (`scripts/check_doc_tone.py`), and its negative
+# self-tests run with the rest of `docs-unit`'s pytest files.
+doc-tone: ## Refuse apology language in the user-facing docs
+	$(UV) run --no-project scripts/check_doc_tone.py
 
 rs-format: ## Format Rust workspace
 	$(CARGO) fmt --all
@@ -302,7 +308,8 @@ docs-unit: ## Run the runnable-docs and release-hygiene tests (offline, no wheel
 		python/tests/test_runnable_docs.py \
 		python/tests/runnable_docs/test_harness.py \
 		python/tests/test_docs_assets.py \
-		python/tests/test_release_scripts.py -q
+		python/tests/test_release_scripts.py \
+		scripts/test_doc_tone.py -q
 
 # `docs-test` builds its host-native wheel into a scratch directory under
 # `target/docs-wheel` (`-o`), stashes any pre-existing release `dist/` aside for
@@ -511,7 +518,13 @@ e2e: ## Build manylinux_2_28 wheel and run Docker + rootless capability e2e test
 # still build glibc, and the gnu boot could never select the `-musl` name such a
 # probe would produce. `PHP_SAPI_ARCH`/`PHP_SAPI_LIBC` override the tuple for a
 # cross build; an overlay of the wrong libc is refused rather than shipped.
-PHP_MINORS ?= 8.4 8.3 8.2
+#
+# The PHP headers are passed as `-isystem`, not `-I`: PHP 8.5's
+# `Zend/zend_operators.h` declares a `static inline` with an unused parameter,
+# which `-Wextra -Werror` (kept on for *our* file) would reject as a build error
+# in a header we do not own. System-header treatment suppresses their warnings
+# without lowering the bar for `c/blastit_php_sapi.c`.
+PHP_MINORS ?= 8.5 8.4 8.3
 PHP_SAPI_CRATE := $(CURDIR)/crates/blastit-php-sapi
 PHP_SAPI_OUT ?= $(CURDIR)/target/php-sapi
 PHP_SAPI_CC ?= $(CC)
@@ -586,7 +599,7 @@ php-sapi: ## Build the C SAPI shims whose php-config exists; name the absent one
 		"$(PHP_SAPI_CC)" -O2 -D_GNU_SOURCE -fPIC -shared -Wall -Wextra -Werror \
 			-Wl,-soname,"$$soname" \
 			-I"$(PHP_SAPI_CRATE)/c/include" \
-			$$("$$cfg" --includes) \
+			$$("$$cfg" --includes | sed 's/-I/-isystem /g') \
 			-o "$$out" "$(PHP_SAPI_CRATE)/c/blastit_php_sapi.c"; \
 		built=$$((built + 1)); \
 	done; \
@@ -750,4 +763,4 @@ mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign 
 print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 	@echo "$(MUTANTS_TMP)"
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python seam-check platform-matrix-check workflow-check packaging-gates-test plan-validate ## Full fast unprivileged check
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python seam-check platform-matrix-check workflow-check packaging-gates-test doc-tone plan-validate ## Full fast unprivileged check

@@ -491,7 +491,7 @@ passes the descriptors to the child in `ChildIo.keep`; the child `dlopen`s
 `RTLD_NOW|RTLD_LOCAL`), so a file swapped after inspection cannot be loaded.
 No `libphp` symbol is reachable in init, http, scheduler or dbproxy, and there
 is no path variant to fall back to: a host without a usable NTS `libphp` is a
-boot refusal naming the package (`libphp-embed`, `php84-embed`, `php-embedded`)
+boot refusal naming the package (`libphp-embed`, `php85-embed`, `php-embedded`)
 or `BLASTIT_LIBPHP`, never a degraded mode. Before the listener binds, stage 1
 forks one contained probe child per `[route.php]` route (`EmbeddedView`, the
 route's uid, `PR_SET_PDEATHSIG`, `BLASTIT_PROBE_TIMEOUT_MS`) that runs
