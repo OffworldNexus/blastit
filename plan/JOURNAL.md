@@ -1698,3 +1698,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T08:26 [MB.3.51] (lead) Reviewer PASS on attempt 4 with one MINOR accepted as a recorded residual rather than a fifth attempt: `:426-427` says "all `plan.json(plan.would_write(false))`
 - 2026-11-15T08:26 [MB.3.51] (lead) status review -> done
 - 2026-11-15T08:30 [MB.3.53] (lead) status review -> done
+- 2026-11-15T08:32 [MB.3.54] (lead) created (task) MB.3.53 review MINORs: two assertions that cannot fail, the unwitnessed stage-0 call site, and a page that contradicts the new gate
+- 2026-11-15T08:32 [MB.3.53] (lead) reviewer PASS (attempt 1); 4 MINORs filed as MB.3.54 (two assertions that cannot fail, the stage-0 call site, docs/frameworks/index.md's contradiction). Committ
+- 2026-11-15T08:32 [MB.3.53] (lead) RECORDED LIMITATION, kept in this node's history deliberately: no unprivileged suite witnesses stage 0's CALL to `raw_ingress_gate`, nor its position before `bi
+- 2026-11-15T08:32 [MB.3.8] (lead) TWO REQUIREMENTS CARRIED IN BY THE OWNER FOR THIS NODE (binding, not optional):
+- 2026-11-15T08:32 [MB.3.54] (lead) status ready -> active
+- 2026-11-15T08:32 [MB.3.54] (lead) attempt 1/3 started
+- 2026-11-15T08:32 [MB.3.54] (lead) base 86f885b
+- 2026-11-15T08:40 [MB.3.54] (lead) status active -> review
+- 2026-11-15T08:44 [MB.3.54] (lead) status review -> done

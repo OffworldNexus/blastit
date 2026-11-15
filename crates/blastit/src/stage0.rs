@@ -348,6 +348,40 @@ pub(crate) fn raw_ingress_gate(manifest: &Manifest) -> Result<(), String> {
     }
 }
 
+/// `MB.3.54`: the serve path's manifest gates, as a value [`bind_view_sockets`]
+/// will not accept any other way.
+///
+/// The gate used to be a bare `if let Err(..)` statement in [`run`], between the
+/// manifest parse and the first listener: deleting it — or letting it drift
+/// after the bind — left every test green, because an unprivileged `cargo test`
+/// cannot run stage 0 past [`blastit_sys::caps::detect`] (the suite that
+/// measures the gate spells that out:
+/// `crates/blastit/tests/critical_raw_ingress.rs`). The witness is the type
+/// system instead: [`ServeGates::clear`] is the only constructor and it *is*
+/// [`raw_ingress_gate`], and [`bind_view_sockets`] takes `&ServeGates`, so no
+/// boot can bind a view socket without the gate having passed first in this
+/// process — and removing the call site is a compile error rather than a silent
+/// fail-open.
+///
+/// Crate-private on purpose, which is stronger than a `#[doc(hidden)] pub` seam:
+/// nothing outside this crate can hold the proof or mint one, so the ordering
+/// holds for every caller for as long as the crate compiles. What a privileged
+/// run is still the only witness for is stage 0's *own* refusal message (the
+/// gate's one home is unit-tested, and the refusal's process behaviour is
+/// measured through stage 1's re-read of the same file).
+pub(crate) struct ServeGates {
+    /// Uninhabited outside this module: [`ServeGates::clear`] is the only way in.
+    _private: (),
+}
+
+impl ServeGates {
+    /// Runs the serve path's manifest gates and returns the proof they passed.
+    fn clear(manifest: &Manifest) -> Result<Self, String> {
+        raw_ingress_gate(manifest)?;
+        Ok(Self { _private: () })
+    }
+}
+
 /// `ADR-0009` §5: what a build with no Python support cannot serve, and the
 /// sentence that names the artifact which can (`MB.3.11`).
 ///
@@ -1901,9 +1935,16 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // path, which `dev` does not take — an unacknowledged one is a boot refusal
     // before any listener is bound. `dev` keeps its warning and `check` keeps
     // its finding (`MB.3.53`).
-    if let Err(message) = raw_ingress_gate(&manifest) {
-        fail(&emitter, &message);
-    }
+    //
+    // `MB.3.54`: the gate returns the proof `bind_view_sockets` demands, so this
+    // statement cannot be deleted or moved after the bind without a compile
+    // error — the witness an unprivileged test cannot be here, because `run`'s
+    // first act (`caps::detect`) refuses an unprivileged boot before the
+    // manifest is even read.
+    let serve_gates = match ServeGates::clear(&manifest) {
+        Ok(cleared) => cleared,
+        Err(message) => fail(&emitter, &message),
+    };
     // `R13` step 4: a static root that is missing, a file or unlistable is
     // named with the manifest that declares it, before any listener is bound.
     if let Err(errors) = manifest.check_static_roots(&config.manifest_dir) {
@@ -1957,7 +1998,7 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
         );
     }
 
-    let listeners = bind_view_sockets(&emitter, &manifest, &prepared, &layout);
+    let listeners = bind_view_sockets(&emitter, &manifest, &prepared, &layout, &serve_gates);
     let dbproxy = fork_dbproxy(
         &emitter,
         &config,
@@ -2644,11 +2685,18 @@ fn exec_stage1_dev(
 /// [`route_declares_proxy`]). The socket's port comes from `blastit_env`'s
 /// per-proxy assignment, so every process derives the same number from the same
 /// manifest (§5.2).
+///
+/// `_serve_gates` is the point of the signature (`MB.3.54`): it can only be
+/// built by [`ServeGates::clear`], which runs [`raw_ingress_gate`], so no caller
+/// can reach a bound view socket without the `ADR-0011` gate having run first.
+/// The ordering is checked by the compiler — an unprivileged test cannot stand
+/// where stage 0's refusal lives.
 fn bind_view_sockets(
     emitter: &Emitter,
     manifest: &Manifest,
     prepared: &blastit_env::Prepared,
     layout: &UidLayout,
+    _serve_gates: &ServeGates,
 ) -> Vec<(UnixListener, ListenerSpec)> {
     let mut listeners = Vec::new();
     for (index, route) in manifest.routes().iter().enumerate() {
@@ -5127,7 +5175,7 @@ path = ['/api/.*']
 mod raw_ingress_gate_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{Manifest, raw_ingress_gate};
+    use super::{Manifest, ServeGates, raw_ingress_gate};
 
     fn manifest(source: &str) -> Manifest {
         let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
@@ -5209,6 +5257,24 @@ allow_raw = true
         assert!(
             message.lines().nth(1).unwrap().contains("\"second\""),
             "{message}"
+        );
+    }
+
+    /// `MB.3.54` (item 3): the serve path cannot reach a bound view socket
+    /// without the gate. The ordering half is [`bind_view_sockets`]'s
+    /// `&ServeGates` parameter — a compile error, not a test, which is why it is
+    /// the witness an unprivileged suite cannot be. This is the half a test can
+    /// hold: the proof is withheld from exactly the manifest the gate refuses,
+    /// and granted to the acknowledged one.
+    #[test]
+    fn the_serve_path_proof_is_withheld_from_a_refused_manifest() {
+        assert!(
+            ServeGates::clear(&manifest(REFUSED)).is_err(),
+            "an unacknowledged raw route must not hand out the proof the bind needs"
+        );
+        assert!(
+            ServeGates::clear(&manifest(ACCEPTED)).is_ok(),
+            "the acknowledgement is what opens the gate"
         );
     }
 }

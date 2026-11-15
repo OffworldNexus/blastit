@@ -64,9 +64,11 @@ listener that denies everything (`42501`).
 ## 4. Ingress
 
 `json` and `form` are decoded and re-encoded before the app sees them, and `none` refuses
-any body. `raw` forwards the bytes unchanged and the boot warns either way;
-`allow_raw = true` is what stops `blastit check` reporting `raw_ingress`. A body to a
-route with no `[route.ingress]` is a `413`, and `check` fails the route that took one.
+any body. `raw` forwards the bytes unchanged, and it is the one codec nothing validates at
+run time: a production boot **refuses** it without `allow_raw = true` — naming the route and
+the key, before it binds a listener — while `blastit dev` warns and serves, and `blastit
+check` fails with `raw_ingress`. A body to a route with no `[route.ingress]` is a `413`, and
+`check` fails the route that took one.
 
 ## 5. Environment and secrets
 

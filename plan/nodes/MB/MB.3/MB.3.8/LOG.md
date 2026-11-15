@@ -39,3 +39,9 @@ RELEASE CHECKLIST ITEM (owner 2026-11-14, verbatim): add to the 0.2.0 certificat
 ## 2026-11-14T21:10 [lead]
 
 RELEASE CHECKLIST ITEM (owner 2026-11-14, verbatim): add to the 0.2.0 certification: "no `.php`/`.phar` under a static root is servable (404, protected `critical_static_entry`), proven before the 0.2.0 tag." Certification fails without it. Implemented by MB.3.33; MB.9.2.2 must preserve it. (Reposted because the shell ate the backticked names in the first line.)
+
+## 2026-11-15T08:32 [lead]
+
+TWO REQUIREMENTS CARRIED IN BY THE OWNER FOR THIS NODE (binding, not optional):
+(1) The 0.2.0 CHANGELOG entry must cover: static assets, the pooler presets, embedded PHP, the portable standalone binary, and the fail-open fix (MB.3.53: `body = "raw"` without `allow_raw` now refuses at boot in production). It must be honest that PHP needs the host's `libphp` — no bundling, no fallback — and name the package to install per distro.
+(2) The VISION/ARCHITECTURE/security sync (m11-R7) is in scope, and `docs/security.md` now has two things it did not have before: (a) `raw` refuses at boot without `allow_raw` (ADR-0011, MB.3.53) and (b) the embedded-PHP threat model — no CGI surface, no request-parameter stream, SCRIPT_FILENAME pinned in C (ADR-0010). If those pages still describe the pre-0.2.0 world, the release ships documentation that contradicts the code, which this milestone has already paid for twice.

@@ -17,6 +17,7 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `must be \`module:attribute\`` | a colon, not Django's dots: `myshop.wsgi:application` |
 | `No module named 'app'` | not importable from Blastit's directory: start next to `app.py`, or install the project |
 | an unknown key, a bad regex, a duplicate route | the manifest; the message names the key |
+| `body = "raw" … without the acknowledgement` | the production boot refuses an unacknowledged `raw` route before it binds a listener: add `allow_raw = true` to that `[route.ingress]` table ([ingress](reference/manifest.md#ingress)) |
 | a proxy input variable is missing | `[proxy.db] input` names one the environment lacks |
 | `is not a trusted proxy` | an entry is not an address or CIDR; a port is not a network |
 | `carries file capabilities` | a rootless start used the shared interpreter: use a [dedicated copy](deploy/compose-traefik.md#rootless) |
@@ -34,7 +35,7 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | a grant is never used | delete it, or test the code path it covers |
 | a route is never exercised | add a test, or delete the route |
 | a route took a body and declares no ingress | add `[route.ingress]` with `body = "json"`, `"form"`, `"none"`, or `"raw"` plus `allow_raw = true` |
-| `blastit check` reports `raw_ingress` | the route declares `body = "raw"` without `allow_raw = true`: acknowledge it knowingly, or pick `json` or `form` |
+| `blastit check` reports `raw_ingress` | the route declares `body = "raw"` without `allow_raw = true`: acknowledge it knowingly, or pick `json` or `form` — the production boot refuses the same route |
 | exit `2` | the manifest or the configuration did not parse; run `blastit dev` once to see the message |
 | exit `3` and the suite failed | fix the suite: Blastit reports no audit for a run that never got there |
 | pytest exits `5`, "no tests ran" | nothing was collected, so `blastit check` exits `3` with no audit: add a test, or bootstrap with `blastit dev --learn` |

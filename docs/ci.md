@@ -27,13 +27,15 @@ Everything below is a manifest with an `app`.
 | `unexercised_route` | a route the suite never hit | add a test |
 | `missing_ingress` | a route took a body and declares no `[route.ingress]` | declare the codec; `raw` also needs `allow_raw = true` |
 | `ingress_mismatch` | the declared codec is not what the suite sent | fix the `body` value |
-| `raw_ingress` | a route declares `body = "raw"` without acknowledging it | add `allow_raw = true`, or use a codec |
+| `raw_ingress` | a route declares `body = "raw"` without acknowledging it | add `allow_raw = true`, or use a codec — the production boot refuses the manifest until you do |
 | `no_observations` | the suite reached no route or no proxy | check the test database and `DATABASE_URL` |
 | `proxy_unused` | a declared proxy saw zero statements | fix the suite's URL, or remove the proxy by hand |
 
 Production enforces the same declaration: a body to a route without
-`[route.ingress]` is a `413` there, not a warning. Deleting a route or a grant is
-never safe automatically: the path becomes `404`, the statement is denied.
+`[route.ingress]` is a `413` there, not a warning, and an unacknowledged `raw`
+route refuses the boot before it binds a listener — so a deployment that never ran
+`check` still fails closed. Deleting a route or a grant is never safe
+automatically: the path becomes `404`, the statement is denied.
 
 ## What you see
 

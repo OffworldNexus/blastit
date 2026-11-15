@@ -34,10 +34,24 @@
 //! the real binary. Stage 0's call site shares the same predicate
 //! (`Manifest::raw_ingress_refusals`, unit-tested in `blastit-manifest`), so the
 //! two stages cannot disagree about what is refused.
+//!
+//! # Why "nothing was bound" is measured as "no `ready`"
+//!
+//! `MB.3.54`: the three refusal cases used to assert `!listening(port)` — but
+//! that probe runs *after* the child has exited, and a boot that bound a
+//! listener and then exited frees the port again, so the assertion could not
+//! fail on the exact state this suite exists to catch. `ready` is the ordered
+//! signal instead: init emits it only after `bind_tcp` and the forks
+//! (`stage1.rs`'s `emit_ready`), so a boot that announces it served, and a boot
+//! that refuses at a gate never does. [`announced_ready`] is also asserted
+//! *true* on the serving twins below, so the predicate is not one that can only
+//! ever say "no".
 
 use std::fs;
 use std::io::Read;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
+#[cfg(feature = "python")]
+use std::net::TcpStream;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -227,13 +241,32 @@ fn finish(mut child: Child) -> (Option<i32>, String, String) {
     (code, stdout, stderr)
 }
 
-/// The `line` fields of every `app.output` event on `stdout`, joined — what a
-/// reader of the log (or `blastit check --json`) would see.
-fn app_output(stdout: &str) -> String {
+/// Every line of `stdout` that parses as an event, in order.
+fn events(stdout: &str) -> Vec<serde_json::Value> {
     stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect()
+}
+
+/// The `app.output` events on `stdout`, parsed — one per line of a refusal.
+///
+/// Asserting on the event rather than on the joined sentence is what makes the
+/// *fields* assertable: the emitter writes one descriptor in both formats and
+/// records the originating stream as a field (`MB.3.53`), so `stream` is
+/// `stderr` for a refusal even though the bytes are on stdout.
+fn app_output_events(stdout: &str) -> Vec<serde_json::Value> {
+    events(stdout)
+        .into_iter()
         .filter(|event| event.get("event").and_then(|kind| kind.as_str()) == Some("app.output"))
+        .collect()
+}
+
+/// The `line` fields of every `app.output` event on `stdout`, joined — what a
+/// reader of the log (or `blastit check --json`) would see.
+fn app_output(stdout: &str) -> String {
+    app_output_events(stdout)
+        .iter()
         .filter_map(|event| {
             event
                 .get("line")
@@ -244,16 +277,35 @@ fn app_output(stdout: &str) -> String {
         .join("\n")
 }
 
-/// Whether anything accepts a connection on `port`.
-fn listening(port: u16) -> bool {
-    TcpStream::connect(("127.0.0.1", port)).is_ok()
+/// Whether the boot announced `ready` — the **ordered** signal, not a port
+/// probe (`MB.3.54`).
+///
+/// Init emits `ready` after `bind_tcp` and the forks, so it is the boot
+/// answering for itself: a boot that refuses at a gate never writes it, whereas
+/// `!listening(port)` measured after the child exited is also satisfied by a
+/// boot that bound and *then* exited (`MB.3.48`'s `ready`-partition —
+/// `critical_php_embed`'s `Boot::await_boot` — is the same rule, and the same
+/// reason a foreign listener on an ephemeral port cannot be trusted).
+///
+/// Both formats are read: JSON records it as `"event":"ready"`, and pretty
+/// spells it in the event-name column (`… INFO  ready       …`) with no JSON at
+/// all. Matching the *word* there is precise enough — the name is its own
+/// token in that column and the sentences asserted here contain no bare
+/// `ready`.
+fn announced_ready(stdout: &str) -> bool {
+    events(stdout)
+        .iter()
+        .any(|event| event.get("event").and_then(|kind| kind.as_str()) == Some("ready"))
+        || stdout
+            .lines()
+            .any(|line| line.split_whitespace().any(|word| word == "ready"))
 }
 
 /// **The refusal.** A production stage 1 refuses a manifest whose raw route has
 /// no acknowledgement: exit `1`, the sentence on stdout as an `app.output` event
 /// (the JSON default, `"stream":"stderr"` — the stream field is written into the
 /// event, not into the descriptor), naming **both** the route and the key, and
-/// no listener bound.
+/// no `ready` — the ordered signal, because init emits it only after the bind.
 ///
 /// The pretty-format twin below asserts the *other* stream, so neither case can
 /// pass by grepping the descriptor its format never writes to.
@@ -286,17 +338,34 @@ fn production_stage_one_refuses_raw_ingress_without_allow_raw() {
         refusal.contains("[route.ingress]"),
         "the refusal names the table to edit: {refusal}"
     );
+    // `MB.3.54` (item 2): the *event's* `stream` field, parsed — the descriptor
+    // is stdout in both formats, so `stderr.is_empty()` below could hold with
+    // this field flipped. The event is found by its sentence so the assertion
+    // cannot pass on some other `app.output` line.
+    let event = app_output_events(&stdout)
+        .into_iter()
+        .find(|event| {
+            event
+                .get("line")
+                .and_then(|line| line.as_str())
+                .is_some_and(|line| line.contains("allow_raw = true"))
+        })
+        .unwrap_or_else(|| panic!("the refusal is an `app.output` event naming the key: {stdout}"));
+    assert_eq!(
+        event["level"], "error",
+        "a refusal is an error-level event: {event}"
+    );
+    assert_eq!(
+        event["stream"], "stderr",
+        "the refusal records the stream it came from as a field: {event}"
+    );
     assert!(
         stderr.is_empty(),
         "JSON events go to the emitter's descriptor, so stderr stays empty: {stderr}"
     );
     assert!(
-        !stdout.contains("\"event\":\"ready\"") && !stdout.contains("\"event\": \"ready\""),
-        "a refused boot never reports ready: {stdout}"
-    );
-    assert!(
-        !listening(port),
-        "a refused boot binds no listener on {port}\nstdout:\n{stdout}"
+        !announced_ready(&stdout),
+        "a refused boot never announces `ready` — it is emitted only after the bind: {stdout}"
     );
 }
 
@@ -332,15 +401,15 @@ fn the_pretty_refusal_is_plain_text_naming_the_same_route() {
         "the stream field names stderr; the descriptor is still stdout: {stderr}"
     );
     assert!(
-        !listening(port),
-        "a refused boot binds no listener on {port}\nstdout:\n{stdout}"
+        !announced_ready(&stdout),
+        "a refused boot never announces `ready`, in either format: {stdout}"
     );
 }
 
 /// **Stage 1's re-read.** `config` carries the manifest's path and nothing that
 /// records what stage 0 approved, so a file swapped between the two stages
 /// reaches stage 1 as an unvalidated declaration. The edited file is refused
-/// with the same sentence, and nothing is bound.
+/// with the same sentence, and the boot never announces `ready`.
 ///
 /// This is the shape `docs/design/learn-single-pass.md` §7.2 makes the second
 /// checkpoint necessary for; the document is built for the acknowledged file,
@@ -378,8 +447,8 @@ fn production_stage_one_refuses_a_manifest_edited_after_stage_zero_approved_it()
         "the re-read names the route and the key: {refusal}\nstdout:\n{stdout}"
     );
     assert!(
-        !listening(port),
-        "the edited manifest never reaches a listener on {port}"
+        !announced_ready(&stdout),
+        "the edited manifest never reaches a serving boot on {port}: {stdout}"
     );
 }
 
@@ -430,9 +499,13 @@ impl Dev {
             stdout_reader,
             stderr_reader,
         };
+        // The ordered signal, not the port (`MB.3.54`): `ready` is emitted after
+        // the bind and the forks, so waiting for it is what makes the absence
+        // assertions in the refusal cases mean "this boot never served". It also
+        // keeps this predicate honest — a serving boot must make it true.
         let deadline = Instant::now() + TIMEOUT;
         while Instant::now() < deadline {
-            if dev.stdout_text().contains("\"event\":\"ready\"") || listening(port) {
+            if announced_ready(&dev.stdout_text()) {
                 return dev;
             }
             if let Some(status) = dev.child.try_wait().expect("the dev exit status") {
