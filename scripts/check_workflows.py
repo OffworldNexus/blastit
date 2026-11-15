@@ -67,6 +67,19 @@ What it checks across `.github/workflows/*.yml` and `.github/actions/*/action.ym
     shapes are covered at run time by `scripts/check-exec-env.sh` where it is
     wired, and by `e2e/prebuilt_wheel.py`, which refuses a wheel whose platform
     tag is above the image it installs into.
+
+15. in the shipping workflow (`publish-pypi.yml`), no step builds a standalone
+    archive on the runner, and every `-gnu` leg it builds for names that leg's
+    `builder_image` and `glibc_floor` from `scripts/platform_matrix.py` — so the
+    artefact is compiled **in the oldest image it claims** and the floor is
+    asserted by the build rather than inherited from the runner (`MB.3.60`, the
+    third instance of the runner-leak class after `manylinux_2_39` wheels and
+    host-built test binaries). Covered at run time by
+    `scripts/build-standalone.sh --max-glibc` (refuses a binary that outgrew the
+    floor) and `scripts/check-exec-env.sh` (executes the archive in that image).
+    **What this cannot see**: whether the named image's glibc really is the
+    declared floor (the two run-time checks above answer that), and a build
+    driven from Python.
 """
 
 from __future__ import annotations
@@ -110,6 +123,11 @@ HOST_RUST_BUILD = re.compile(
 )
 COMPATIBILITY_FLAG = re.compile(r"(?:^|\s)--compatibility(?:\s|=|$)")
 EXEC_ENV_CHECK = "check-exec-env.sh"
+# The in-place build (`scripts/build-standalone.sh`) compiles on whatever host
+# runs it; the wrapper builds the same archive inside an image whose glibc is the
+# floor. `\b` after `.sh` keeps the wrapper's name out of the first pattern.
+STANDALONE_BUILD = re.compile(r"scripts/build-standalone\.sh\b")
+STANDALONE_IN_IMAGE = re.compile(r"scripts/build-standalone-in-image\.sh\b")
 
 GENERATOR = "scripts/platform_matrix.py"
 OUTPUT_SPECS: dict[str, tuple[str, str]] = {
@@ -123,6 +141,11 @@ OUTPUT_SPECS: dict[str, tuple[str, str]] = {
     "binaries_musl": ("binaries", "musl"),
 }
 PUBLISH_SINKS = frozenset({"testpypi", "release"})
+# The workflows that hand an artefact to somebody else's machine. A standalone
+# archive built here is a promise to a server this repository will never see,
+# which is what `MB.3.60`'s build-image rule is about; a test-only binary in
+# `ci.yml` is rule 14's business (it is thrown away after its run).
+SHIPPING_WORKFLOWS = frozenset({"publish-pypi.yml"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +424,74 @@ def checks_exec_env(job: dict) -> bool:
     return any(
         EXEC_ENV_CHECK in str(step.get("run") or "") for step in job.get("steps") or []
     )
+
+
+def check_standalone_build(
+    workflow: str,
+    job_name: str,
+    job: dict,
+    entries: list[dict[str, str]] | None,
+    report: Report,
+) -> None:
+    """`MB.3.60`: a shipped archive is built in the image whose C library it claims.
+
+    The third instance of one defect class: an artefact compiled **on the
+    runner** and shipped to older systems. First `manylinux_2_39` wheels, then
+    host-built test binaries, then a "portable" standalone archive that needed
+    the runner's glibc 2.39 and refused to start on Debian 12. A rule a workflow
+    never executes comes back a fourth time, so every step of the shipping
+    workflow that builds a standalone archive is asked two questions:
+
+    * it must not run `scripts/build-standalone.sh` on the runner — that
+      compiles against the runner's C library. The wrapper
+      `scripts/build-standalone-in-image.sh` builds inside an image instead;
+    * every `-gnu` leg it builds for must name **that leg's** `builder_image`
+      and `glibc_floor` from `scripts/platform_matrix.py`, so the floor is
+      declared once and *asserted by the build* (`--max-glibc`) rather than
+      inherited from whichever runner picked up the job.
+
+    What this cannot see: whether the image named really has that glibc (the
+    build refuses a binary that outgrew `--max-glibc`, and `check-exec-env.sh`
+    executes the result in that same image), and a build issued from Python
+    inside `e2e/`.
+    """
+    for idx, step in enumerate(job.get("steps") or [], 1):
+        run = str(step.get("run") or "")
+        if not (STANDALONE_BUILD.search(run) or STANDALONE_IN_IMAGE.search(run)):
+            continue
+        scope = f"{workflow}: job {job_name} step {idx}"
+        folded = join_shell_continuations(run)
+        if STANDALONE_BUILD.search(folded):
+            report.check(
+                bool(DOCKER_EXEC.search(folded)),
+                f"{scope}: runs scripts/build-standalone.sh on the runner, which compiles "
+                "against the runner's C library — a 'portable' archive then needs the "
+                "runner's glibc (MB.3.60: GLIBC_2.39 in an archive that claims older "
+                "systems). Build inside scripts/build-standalone-in-image.sh, or inside a "
+                "`docker run` of the image whose glibc is the floor",
+            )
+        for entry in entries or [{}]:
+            if not entry.get("target", "").endswith("-gnu"):
+                continue
+            expanded = expand_matrix_text(folded, entry)
+            floor = entry.get("glibc_floor", "")
+            builder = entry.get("builder_image", "")
+            label = entry.get("name") or "the gnu leg"
+            report.check(
+                bool(floor)
+                and re.search(rf"--max-glibc\s+\"?{re.escape(floor)}\"?", expanded)
+                is not None,
+                f"{scope}: the {label} leg declares glibc_floor {floor or '<none>'!r} in "
+                "scripts/platform_matrix.py, but this step never passes it as "
+                "`--max-glibc`: then nothing measures the archive's floor and it silently "
+                "keeps the builder's",
+            )
+            report.check(
+                bool(builder) and builder in expanded,
+                f"{scope}: the {label} leg declares builder_image {builder or '<none>'!r} in "
+                "scripts/platform_matrix.py, but this step builds with another image: the "
+                "image is the claim, so it comes from the matrix rather than from a literal",
+            )
 
 
 def check_step_scripts(step: dict, scope: str, report: Report) -> None:
@@ -691,6 +782,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             upstream = transitive_needs(job_name, jobs_needing)
+            if path.name in SHIPPING_WORKFLOWS:
+                check_standalone_build(path.name, job_name, job, entries, report)
             for idx, step in enumerate(job.get("steps") or [], 1):
                 scope = f"{path.name}: job {job_name} step {idx}"
                 check_step_scripts(step, scope, report)

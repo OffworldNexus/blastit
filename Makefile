@@ -113,7 +113,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
-        rs-test-php rs-test-php-image platform-matrix-check standalone workflow-check \
+        rs-test-php rs-test-php-image platform-matrix-check standalone standalone-glibc workflow-check \
         packaging-gates-test mutants-clean mutants-scope-probe print-mutants-tmp
 
 help: ## Show available Make targets
@@ -200,11 +200,27 @@ rs-no-python: ## Build + inspect the default (standalone) binary: no libpython, 
 
 # The standalone archive (`ADR-0010` §4, `MB.3.18`): the release binary with
 # `python` off, the shims this host has built for its own tuple, a LICENSE and a
-# checksum file — `scripts/build-standalone.sh`. The release pipeline runs it
-# once per leg with `--require-shims N`; locally it packages whatever
-# `make php-sapi` left behind, so the archive is inspectable before a tag.
+# checksum file — `scripts/build-standalone.sh`. Locally it packages whatever
+# `make php-sapi` left behind, so the archive is inspectable before a tag; the
+# release pipeline builds it in an image instead (see `standalone-glibc`), and it
+# reads that host's glibc floor from the finished binary either way.
 standalone: ## Package the standalone archive (release binary + proven shims + checksum)
 	scripts/build-standalone.sh
+
+# The shipped way: the archive is built inside the image whose glibc it claims,
+# so the floor is a property of the build and not of this machine. `make
+# standalone` above keeps the host build for a quick local look — its README
+# says which host it came from, and `--max-glibc` is what makes the shipped one
+# refuse a binary that outgrew the claim.
+STANDALONE_ARCH ?= $(shell uname -m)
+STANDALONE_TARGET ?= $(STANDALONE_ARCH)-unknown-linux-gnu
+STANDALONE_BUILDER ?= quay.io/pypa/manylinux_2_28_$(STANDALONE_ARCH)
+
+standalone-glibc: ## Build the gnu archive inside the manylinux_2_28 image (as CI ships it)
+	scripts/build-standalone-in-image.sh \
+		--image "$(STANDALONE_BUILDER)" \
+		--target "$(STANDALONE_TARGET)" \
+		--max-glibc 2_28
 
 rs-test-critical: ## Run every crates/*/tests/critical_*.rs suite
 	@set -e; found=0; for file in crates/*/tests/critical_*.rs; do \

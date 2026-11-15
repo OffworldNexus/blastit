@@ -234,13 +234,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
-      - name: C and libclang toolchain (for pg_query bindgen on arm64 runners)
-        run: |
-          set -euo pipefail
-          if ! dpkg -s libclang-dev >/dev/null 2>&1; then
-              sudo apt-get update
-              sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev pkg-config
-          fi
+      # The Rust toolchain is the **host** one, mounted read-only into the
+      # builder image by `scripts/build-standalone-in-image.sh`: no second
+      # toolchain download per leg, and the C compiler is the image's, on native
+      # hardware (an emulated compiler would make the floor evidence about qemu).
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v4
@@ -251,36 +248,53 @@ jobs:
       # `--no-default-features --features php` is the standalone artifact
       # (`ADR-0010` §4): no `python`, so no `libpython`, and a WSGI manifest is
       # refused at exit 1 by the capability gate instead of failing later.
-      - name: Package the archive with every shim this tuple owes
+      #
+      # `MB.3.60`: the archive is built **inside `matrix.builder_image`**, whose
+      # glibc *is* `matrix.glibc_floor`, and `--max-glibc` refuses the build if
+      # the binary outgrew it. Building on the runner is what made a "portable"
+      # archive need the runner's glibc 2.39 and refuse to start on Debian 12.
+      - name: Build the archive inside the image whose glibc it claims
         run: |
           set -euo pipefail
           owed=$(uv run --no-project scripts/platform_matrix.py --count shims \
               --libc gnu --arch "${{ matrix.arch }}")
           echo "this tuple owes $owed shim(s)"
-          scripts/build-standalone.sh --target "${{ matrix.target }}" \
+          scripts/build-standalone-in-image.sh \
+              --image "${{ matrix.builder_image }}" \
+              --target "${{ matrix.target }}" \
+              --max-glibc "${{ matrix.glibc_floor }}" \
               --shim-dir dist/shims --require-shims "$owed"
-      - name: Prove the shipped archive without an interpreter
+      # The version relation for the builder and every image the docs claim
+      # (`check-exec-env.sh` pulls each image before reading its glibc, so a tag
+      # that does not exist is a refusal, never a version), then the execution
+      # proof in each smoke image: a static route, its own 404, and a WSGI
+      # manifest refused at exit 1, in a distro with no CPython on PATH.
+      #
+      # The builder is checked but not *executed* here: a manylinux image ships
+      # `/usr/bin/python3` for wheel builds, so `--require-no-python` would be a
+      # statement about the image rather than about the artifact.
+      - name: Prove the shipped archive in every image it claims
         run: |
           set -euo pipefail
           mkdir -p /tmp/artifact
           tar -C /tmp/artifact -xzf "dist/${{ matrix.archive }}"
-          # `MB.3.58`: this archive was built here, on the runner, and the image
-          # that runs it must not be older. `scripts/check-exec-env.sh` reads the
-          # glibc floor out of the binary and the version out of the image, so a
-          # runner upgrade that outgrows `debian:trixie-slim` names the two
-          # numbers instead of failing at `execve`.
-          scripts/check-exec-env.sh --image "${{ matrix.runtime_image }}" \
-              --binary "/tmp/artifact/blastit-${{ matrix.target }}/blastit"
-          # The extracted binary, in a distro with no CPython: a static route,
-          # its own 404, and a WSGI manifest refused at exit 1. The archive's
-          # root is `blastit-<target>` (`scripts/build-standalone.sh`), not the
-          # leg name: `x86_64-gnu` is the leg, `x86_64-unknown-linux-gnu` is the
-          # directory inside the tarball.
-          docker run --rm \
-              -v /tmp/artifact:/art:ro -v "$PWD:/src:ro" \
-              "${{ matrix.runtime_image }}" \
-              bash /src/scripts/standalone-runtime-check.sh --require-no-python \
-              "/art/blastit-${{ matrix.target }}/blastit"
+          binary="/tmp/artifact/blastit-${{ matrix.target }}/blastit"
+          IFS=, read -ra smoke <<< "${{ matrix.smoke_images }}"
+          images=("${{ matrix.builder_image }}" "${smoke[@]}")
+          args=()
+          for image in "${images[@]}"; do
+              args+=(--image "$image")
+          done
+          scripts/check-exec-env.sh "${args[@]}" --binary "$binary"
+          for image in "${smoke[@]}"; do
+              echo "::group::$image"
+              docker run --rm \
+                  -v /tmp/artifact:/art:ro -v "$PWD:/src:ro" \
+                  "$image" \
+                  bash /src/scripts/standalone-runtime-check.sh --require-no-python \
+                  "/art/blastit-${{ matrix.target }}/blastit"
+              echo "::endgroup::"
+          done
       # Per target: `release` downloads every artifact with `merge-multiple`, so
       # four files all called `SHA256SUMS` would leave one of them.
       - name: Name the checksum file after its target
@@ -330,9 +344,10 @@ jobs:
               -e HOST_GID="$(id -g)" \
               -e TARGET="${{ matrix.target }}" \
               -e OWED="$owed" \
+              -e BUILDER_IMAGE="${{ matrix.builder_image }}" \
               -v "$PWD:/src" \
               -w /src \
-              alpine:3.21 \
+              "${{ matrix.builder_image }}" \
               sh -eu -c '
                   cleanup_owner() {
                       chown -R "$HOST_UID:$HOST_GID" /src/dist /src/target 2>/dev/null || true
@@ -345,25 +360,26 @@ jobs:
                       | bash -s -- -y --profile minimal --default-toolchain stable >/dev/null
                   export PATH="$HOME/.cargo/bin:$PATH"
                   bash scripts/build-standalone.sh --target "$TARGET" \
-                      --shim-dir dist/shims --require-shims "$OWED"
+                      --shim-dir dist/shims --require-shims "$OWED" \
+                      --builder-image "$BUILDER_IMAGE"
               '
       - name: Prove the shipped musl archive in a bare Alpine (no CPython)
         run: |
           set -euo pipefail
           mkdir -p /tmp/artifact
           tar -C /tmp/artifact -xzf "dist/${{ matrix.archive }}"
-          # `MB.3.58`: the archive was built *in* `alpine:3.21` above and this is
+          # `MB.3.58`: the archive was built *in* this image above and this is
           # the same image, so the rule holds by construction; the check says so
           # out loud (a musl binary carries no glibc symbol versions, and musl is
           # ABI-stable within 1.x, so no version floor can refuse it).
-          scripts/check-exec-env.sh --image "${{ matrix.runtime_image }}" \
+          scripts/check-exec-env.sh --image "${{ matrix.builder_image }}" \
               --binary "/tmp/artifact/blastit-${{ matrix.target }}/blastit"
           # `libgcc` is the one runtime package a dynamically linked musl Rust
           # binary needs (`libgcc_s.so.1`) and the base Alpine image does not
           # carry it. Run in a fresh image because `clang`'s tooling in the build
           # container drags CPython in, which `--require-no-python` refuses.
           docker run --rm -v /tmp/artifact:/art:ro -v "$PWD:/src:ro" \
-              "${{ matrix.runtime_image }}" \
+              "${{ matrix.builder_image }}" \
               sh -eu -c 'apk add --no-cache bash libgcc >/dev/null 2>&1
                          bash /src/scripts/standalone-runtime-check.sh --require-no-python \
                            "/art/blastit-${{ matrix.target }}/blastit"'

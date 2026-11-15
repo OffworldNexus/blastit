@@ -356,6 +356,53 @@ def test_workflow_auditor_cases() -> int:
         )
         cases_run += 1
 
+        # 13. MB.3.60 defect 1, restored: the gnu archive built on the runner
+        #     again. That is what gave every "portable" archive the runner's
+        #     glibc 2.39; the wrapper builds it inside the image whose glibc is
+        #     the declared floor.
+        case_dir = Path(tmp) / "standalone-built-on-runner"
+        shutil.copytree(base, case_dir)
+        pub = case_dir / ".github" / "workflows" / "publish-pypi.yml"
+        text = pub.read_text(encoding="utf-8")
+        _expect(
+            "          scripts/build-standalone-in-image.sh \\\n" in text,
+            "the publish fixture no longer builds the gnu archive in an image",
+        )
+        pub.write_text(
+            text.replace(
+                "          scripts/build-standalone-in-image.sh \\\n",
+                "          scripts/build-standalone.sh \\\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1
+            and "runs scripts/build-standalone.sh on the runner" in res.stdout,
+            "auditor must reject a standalone archive built on the runner",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # 14. ... and the other half: a container build that never names the
+        #     floor. Without `--max-glibc` nothing measures the binary, so the
+        #     number the matrix declares is a comment.
+        case_dir = Path(tmp) / "standalone-without-floor"
+        shutil.copytree(base, case_dir)
+        pub = case_dir / ".github" / "workflows" / "publish-pypi.yml"
+        text = pub.read_text(encoding="utf-8")
+        floor_line = '              --max-glibc "${{ matrix.glibc_floor }}" \\\n'
+        _expect(floor_line in text, "the publish fixture no longer passes --max-glibc")
+        pub.write_text(text.replace(floor_line, "", 1), encoding="utf-8")
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "never passes it as" in res.stdout,
+            "auditor must require the matrix's glibc floor to be asserted by the build",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
     return cases_run
 
 

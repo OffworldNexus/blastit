@@ -66,14 +66,41 @@ LIBCS = {
     "gnu": {
         "wheel_tag": "manylinux_2_28",
         "manylinux": "2_28",
-        # The image a packaged archive is *executed* in for its runtime proof: a
-        # distro with the matching C library and no CPython at all.
-        "runtime_image": "debian:trixie-slim",
+        # The glibc floor the gnu artifacts are allowed to need, in the
+        # `<major>_<minor>` spelling `check_wheel_tag.py --max-glibc` and
+        # `build-standalone.sh --max-glibc` both take. These two artifact
+        # families share it on purpose: a wheel tagged `manylinux_2_28` and an
+        # archive that needs glibc 2.39 are two different promises about one
+        # program, and only the lower one is true.
+        "glibc_floor": "2_28",
+        # Where a glibc artifact is **built**: the image whose glibc *is* the
+        # floor, so the floor is a property of the build rather than of whichever
+        # runner happened to pick up the job (`MB.3.60`: `ubuntu-24.04` gave
+        # every archive `GLIBC_2.39`, which then refused to start on Debian 12).
+        # One image per arch, because a gcc on native hardware is the only
+        # compiler that proves anything.
+        "builder_image": "quay.io/pypa/manylinux_2_28_{arch}",
+        # Every image the archive is *executed* in, oldest first: Debian 12
+        # (glibc 2.36) and 13 (2.41), the two glibc distros whose libc the docs
+        # are about. A tag added here is a claim CI then executes.
+        #
+        # The builder image is checked separately (`check-exec-env.sh` is handed
+        # `builder_image` as well): it compiled the binary, so it must run it, but
+        # it cannot be the *execution* proof here because a manylinux image ships
+        # `/usr/bin/python3` for wheels and `--require-no-python` would be about
+        # the image instead of the artifact.
+        "smoke_images": "debian:bookworm-slim,debian:trixie-slim",
     },
     "musl": {
         "wheel_tag": "musllinux_1_2",
         "musllinux": "1_2",
-        "runtime_image": "alpine:3.21",
+        # No glibc at all: musl does not version its symbols, and
+        # `libc.musl-<arch>.so.1` is ABI-stable across musl 1.x, so there is no
+        # floor to state. The runtime package a dynamic musl Rust binary needs is
+        # `libgcc` (`apk add libgcc`), which the archive README says.
+        "glibc_floor": "",
+        "builder_image": "alpine:3.21",
+        "smoke_images": "alpine:3.21",
     },
 }
 
@@ -300,18 +327,29 @@ def wheel_legs() -> list[dict]:
 
 def binary_legs() -> list[dict]:
     """One archive per enabled (arch, libc)."""
-    return [
-        {
-            "name": leg["id"],
-            "arch": leg["arch"],
-            "libc": leg["libc"],
-            "target": f"{leg['arch']}-unknown-linux-{leg['libc']}",
-            "archive": f"blastit-{leg['arch']}-unknown-linux-{leg['libc']}.tar.gz",
-            "runtime_image": LIBCS[leg["libc"]]["runtime_image"],
-            "runs_on": ARCHES[leg["arch"]]["runs_on"],
-        }
-        for leg in enabled_legs()
-    ]
+    legs = []
+    for leg in enabled_legs():
+        libc = LIBCS[leg["libc"]]
+        legs.append(
+            {
+                "name": leg["id"],
+                "arch": leg["arch"],
+                "libc": leg["libc"],
+                "target": f"{leg['arch']}-unknown-linux-{leg['libc']}",
+                "archive": f"blastit-{leg['arch']}-unknown-linux-{leg['libc']}.tar.gz",
+                # Where the archive is built, and the first image it is executed
+                # in: the container that compiled it is the only one that may
+                # run it on faith (`MB.3.60`).
+                "builder_image": libc["builder_image"].format(arch=leg["arch"]),
+                # `<major>_<minor>` for glibc, empty for musl (no floor exists).
+                # `build-standalone.sh --max-glibc` refuses a binary above it.
+                "glibc_floor": libc["glibc_floor"],
+                # Every image the archive is executed in, oldest first.
+                "smoke_images": libc["smoke_images"].format(arch=leg["arch"]),
+                "runs_on": ARCHES[leg["arch"]]["runs_on"],
+            }
+        )
+    return legs
 
 
 def shim_legs() -> list[dict]:

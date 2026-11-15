@@ -1831,3 +1831,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T18:33 [MB.3.60] (lead) Queued behind MB.3.59 (one gate owner at a time). Owner's report requirement: after the fix, report the floor each archive actually needs (readelf --version-inf
 - 2026-11-15T19:22 [MB.3.59] (lead) status active -> review
 - 2026-11-15T19:34 [MB.3.59] (lead) status review -> done
+- 2026-11-15T19:36 [MB.3.61] (lead) created (task) Discovery must prefer a library that can serve, and the php_version sentence must not lie
+- 2026-11-15T19:36 [MB.3.60] (lead) status ready -> active
+- 2026-11-15T19:36 [MB.3.60] (lead) attempt 1/3 started
+- 2026-11-15T19:36 [MB.3.60] (lead) base 755281c
+- 2026-11-15T20:14 [MB.3.60] (lead) status active -> review
+- 2026-11-15T20:22 [MB.3.60] (lead) status review -> done

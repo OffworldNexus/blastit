@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Refuses to run a binary in a container older than the one that built it.
 #
-#   scripts/check-exec-env.sh --image IMAGE --binary PATH
+#   scripts/check-exec-env.sh --image IMAGE [--image IMAGE ...] --binary PATH
 #
 # The rule (`MB.3.58`): **a container that runs our binary must be the one that
 # built it, or must have a C library at least as new as the builder's.** A
@@ -16,8 +16,18 @@
 # trusting that "the image is fairly new". Both numbers are printed either way,
 # so a passing run says *why* it passed.
 #
-# Nothing here needs a build-tool container of its own: one `docker run` of the
-# image answers with its own glibc, and `readelf` is on the host.
+# **The image is pulled first, and a pull that fails is a failure.** `docker run`
+# on an image that is not local prints
+#
+#   Unable to find image 'debian:trixie-slim' locally
+#
+# on stderr and then fails; the pre-`MB.3.60` version of this script folded that
+# message into the "image's glibc" slot and reported it as the version. That
+# was a false negative in CI, and the same fold on a cached-but-stale image
+# would have been a false **pass**. So: pull (loudly failing with docker's own
+# message when the tag is wrong or the registry is unreachable), and then accept
+# only a glibc `<major>.<minor>` or `musl` as the answer — anything else is a
+# refusal, never a comparison.
 #
 # What it deliberately accepts:
 #
@@ -28,33 +38,41 @@
 #   * an image with a glibc at least as new as the binary needs, even when the
 #     image is not the builder. That is the second half of the rule, and the only
 #     reason a leg may run a runner-built binary at all.
+#   * several `--image` values: every image the artifact claims to run in is
+#     checked, and the first one that is too old fails the run. A duplicate is
+#     inspected once.
 #
-# Exit: 0 the two agree, 1 the image is too old (or has no glibc for a glibc
-# binary), 2 usage or a missing tool/image.
+# A tag that exists only on this machine (an image a `docker build` just made) is
+# refused for the same reason a wrong tag is: the pull is what proves the tag the
+# user will actually get. Push it, or point the check at the public base image.
+#
+# Exit: 0 every image agrees, 1 an image is too old (or has no glibc for a glibc
+# binary), 2 usage, a missing tool, an image that could not be pulled, or an
+# image whose C library could not be read.
 #
 #   scripts/check-exec-env.sh --image debian:trixie-slim --binary target/debug/blastit
-#   scripts/check-exec-env.sh --image "${{ matrix.runtime_image }}" \
+#   scripts/check-exec-env.sh --image debian:bookworm-slim --image debian:trixie-slim \
 #       --binary "/tmp/artifact/blastit-x86_64-unknown-linux-gnu/blastit"
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 --image IMAGE --binary PATH [--quiet]" >&2
-    echo "       (the image must be able to run the binary that built it, or be newer)" >&2
+    echo "usage: $0 --image IMAGE [--image IMAGE ...] --binary PATH [--quiet]" >&2
+    echo "       (every image must be able to run the binary that built it, or be newer)" >&2
     exit 2
 }
 
-image=""
+images=()
 binary=""
 quiet=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --image)
             [ "$#" -ge 2 ] || usage
-            image=$2
+            images+=("$2")
             shift 2
             ;;
         --image=*)
-            image=${1#--image=}
+            images+=("${1#--image=}")
             shift
             ;;
         --binary)
@@ -71,7 +89,7 @@ while [ "$#" -gt 0 ]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,/^set -euo/{ /^set -euo/d; s/^# \{0,1\}//; p }' "${BASH_SOURCE[0]}"
             exit 0
             ;;
         *)
@@ -80,7 +98,7 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
-if [ -z "$image" ] || [ -z "$binary" ]; then
+if [ "${#images[@]}" -eq 0 ] || [ -z "$binary" ]; then
     echo "check-exec-env: --image and --binary are both required" >&2
     usage
 fi
@@ -142,59 +160,117 @@ if [ -n "$abi_floor" ]; then
     [ "$required" = "0" ] && required=""
 fi
 
-# The image's own glibc, asked of the image. `getconf` is in glibc itself; the
-# fallback executes the C library, which prints "GNU C Library (… GLIBC 2.41-…)
-# stable release version 2.41." and works on images trimmed of coreutils. A musl
-# image answers `musl`, which is not a glibc at all.
-provided=$(
-    docker run --rm --entrypoint sh "$image" -c '
-        if command -v getconf >/dev/null 2>&1; then
-            version=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
-            case "$version" in
-                glibc\ *) printf "%s\n" "${version#glibc }"; exit 0 ;;
-            esac
+# One image, one verdict: prints the passing line or the refusal and returns
+# 0 (agrees), 1 (too old / no glibc for a glibc binary) or 2 (cannot decide), so
+# the caller only aggregates.
+inspect_image() {
+    local image=$1 provided err_file status=0
+    err_file=$(mktemp "${TMPDIR:-/tmp}/check-exec-env.XXXXXX")
+    # `docker pull` first, for the reason in the header: a run on a missing image
+    # prints docker's "Unable to find image" into the answer slot. A pull that
+    # cannot complete means this check has *no* version to compare, which is a
+    # refusal — never a silent "the image is not old".
+    if ! docker pull --quiet "$image" >/dev/null 2>"$err_file"; then
+        echo "check-exec-env: FAIL — cannot pull image '$image', so its C library version is unknown:" >&2
+        sed 's/^/  /' "$err_file" >&2
+        echo "  an image this check cannot obtain has no glibc to compare: reporting a version here" >&2
+        echo "  would be a guess. Fix the tag or the registry access, or pre-pull '$image'" >&2
+        rm -f "$err_file"
+        return 2
+    fi
+
+    # The image's own glibc, asked of the image. `getconf` is in glibc itself; the
+    # fallback executes the C library, which prints "GNU C Library (… GLIBC 2.41-…)
+    # stable release version 2.41." and works on images trimmed of coreutils. A musl
+    # image answers `musl`, which is not a glibc at all.
+    #
+    # stdout is captured alone: docker's own chatter on stderr must never reach the
+    # version slot, and `set -e`-safe because the failure is handled by `status`.
+    provided=$(
+        docker run --rm --entrypoint sh "$image" -c '
+            if command -v getconf >/dev/null 2>&1; then
+                version=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+                case "$version" in
+                    glibc\ *) printf "%s\n" "${version#glibc }"; exit 0 ;;
+                esac
+            fi
+            for lib in /lib/*/libc.so.6 /lib/libc.so.6 /usr/lib/*/libc.so.6; do
+                [ -e "$lib" ] || continue
+                version=$("$lib" 2>/dev/null | sed -n "s/.*version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p" | head -n 1)
+                if [ -n "$version" ]; then printf "%s\n" "$version"; exit 0; fi
+            done
+            for loader in /lib/ld-musl-*.so.1; do
+                [ -e "$loader" ] && { printf "musl\n"; exit 0; }
+            done
+            printf "unreadable\n"
+        ' 2>"$err_file"
+    ) || status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "check-exec-env: FAIL — cannot inspect image '$image' (docker run exited $status), so its C library version is unknown:" >&2
+        sed 's/^/  /' "$err_file" >&2
+        rm -f "$err_file"
+        return 2
+    fi
+    # Only a real answer is compared. `unreadable`, an empty line, or anything else
+    # the image printed is a refusal: a gate that treats "no answer" as a version
+    # is a gate that has already passed something it did not read.
+    if [ "$provided" != "musl" ] && ! printf '%s' "$provided" | grep -qE '^[0-9]+\.[0-9]+$'; then
+        echo "check-exec-env: FAIL — image '$image' did not answer with a C library version, so this check cannot decide:" >&2
+        sed 's/^/  /' "$err_file" >&2
+        echo "  it answered: ${provided:-<nothing>}" >&2
+        echo "  an unreadable version is never compared (a missing image once read as a version)" >&2
+        rm -f "$err_file"
+        return 2
+    fi
+    rm -f "$err_file"
+
+    if [ -z "$required" ]; then
+        [ "$quiet" -eq 1 ] || echo "check-exec-env: ok — $(basename "$binary") requires no glibc symbol version (musl or static), image $image provides $provided"
+        return 0
+    fi
+    if [ "$provided" = "musl" ]; then
+        echo "check-exec-env: FAIL — $(basename "$binary") needs glibc $required, and $image provides musl" >&2
+        echo "  a glibc ELF cannot start where there is no glibc: the loader is missing, not older" >&2
+        echo "  fix: run this binary in a glibc image, or build it inside the musl image" >&2
+        return 1
+    fi
+
+    local newest
+    newest=$(printf '%s\n%s\n' "$required" "$provided" | sort -V | tail -n 1)
+    if [ "$newest" != "$provided" ]; then
+        local loader_says
+        if [ "$abi_decides" -eq 1 ]; then
+            loader_says="version '$(printf '%s\n' "$abi_nodes" | tr '\n' ' ' | sed 's/ *$//')' not found"
+        else
+            loader_says="weak version 'GLIBC_$required' not found"
         fi
-        for lib in /lib/*/libc.so.6 /lib/libc.so.6 /usr/lib/*/libc.so.6; do
-            [ -e "$lib" ] || continue
-            version=$("$lib" 2>/dev/null | sed -n "s/.*version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p" | head -n 1)
-            if [ -n "$version" ]; then printf "%s\n" "$version"; exit 0; fi
-        done
-        for loader in /lib/ld-musl-*.so.1; do
-            [ -e "$loader" ] && { printf "musl\n"; exit 0; }
-        done
-        printf "unknown\n"
-    ' 2>&1
-) || {
-    echo "check-exec-env: cannot inspect image '$image':" >&2
-    printf '%s\n' "$provided" | sed 's/^/  /' >&2
-    exit 2
+        echo "check-exec-env: FAIL — $(basename "$binary") needs glibc $required, $image has $provided" >&2
+        echo "  running it there fails at execve with:" >&2
+        echo "    $loader_says (required by $(basename "$binary"))" >&2
+        echo "  fix: build the binary inside $image (or a builder no older than it), or" >&2
+        echo "       raise the image to glibc >= $required — never the binary's floor" >&2
+        return 1
+    fi
+
+    [ "$quiet" -eq 1 ] || echo "check-exec-env: ok — $(basename "$binary") needs glibc $required, $image provides $provided"
+    return 0
 }
 
-if [ -z "$required" ]; then
-    [ "$quiet" -eq 1 ] || echo "check-exec-env: ok — $(basename "$binary") requires no glibc symbol version (musl or static), image $image provides $provided"
-    exit 0
-fi
-if [ "$provided" = "musl" ] || [ "$provided" = "unknown" ]; then
-    echo "check-exec-env: FAIL — $(basename "$binary") needs glibc $required, and $image provides $provided" >&2
-    echo "  a glibc ELF cannot start where there is no glibc: the loader is missing, not older" >&2
-    echo "  fix: run this binary in a glibc image, or build it inside the musl image" >&2
-    exit 1
-fi
-
-newest=$(printf '%s\n%s\n' "$required" "$provided" | sort -V | tail -n 1)
-if [ "$newest" != "$provided" ]; then
-    if [ "$abi_decides" -eq 1 ]; then
-        loader_says="version '$(printf '%s\n' "$abi_nodes" | tr '\n' ' ' | sed 's/ *$//')' not found"
-    else
-        loader_says="weak version 'GLIBC_$required' not found"
+overall=0
+seen=" "
+for image in "${images[@]}"; do
+    # One inspection per distinct image, in the order given: the same image twice
+    # (a libc whose floor and smoke image coincide) says nothing new.
+    case "$seen" in
+        *" $image "*) continue ;;
+    esac
+    seen="$seen$image "
+    status=0
+    inspect_image "$image" || status=$?
+    if [ "$status" -eq 2 ]; then
+        overall=2
+    elif [ "$status" -ne 0 ] && [ "$overall" -eq 0 ]; then
+        overall=1
     fi
-    echo "check-exec-env: FAIL — $(basename "$binary") needs glibc $required, $image has $provided" >&2
-    echo "  running it there fails at execve with:" >&2
-    echo "    $loader_says (required by $(basename "$binary"))" >&2
-    echo "  fix: build the binary inside $image (or a builder no older than it), or" >&2
-    echo "       raise the image to glibc >= $required — never the binary's floor" >&2
-    exit 1
-fi
-
-[ "$quiet" -eq 1 ] || echo "check-exec-env: ok — $(basename "$binary") needs glibc $required, $image provides $provided"
-exit 0
+done
+exit "$overall"
