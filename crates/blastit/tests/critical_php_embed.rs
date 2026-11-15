@@ -71,6 +71,29 @@
 //! ([`a_probe_that_hangs_is_killed_and_refuses_the_boot`]). The child is a fork
 //! of init, so the canary still says the load happened only *below* the fork —
 //! it no longer says nothing was loaded.
+//!
+//! # The four legs `MB.3.37` added, and the mutation each one kills
+//!
+//! `AUDIT-MB.3.13` found four rules this suite claimed but did not own, each a
+//! deletion or inversion that left `make check` green:
+//!
+//! * [`a_shim_replaced_between_the_stages_refuses_the_boot`] — the shim's half
+//!   of the `(path, st_dev, st_ino)` pin. Dropping the shim comparison in
+//!   `php_view::open_pinned` made the boot serve instead;
+//! * [`an_egress_route_lets_the_probe_open_a_socket`] — the `egress = true`
+//!   direction, which `probe_bindings`' `unwrap_or(false)` hardcodes to
+//!   `false`: the probe's `socket(AF_INET)` would be `EPERM` while the same
+//!   route's INI says `allow_url_fopen=1`;
+//! * [`a_blocking_script_is_charged_cpu_time_not_wall_time`] — `cpu_ns` is
+//!   `CLOCK_PROCESS_CPUTIME_ID`, not the request's duration: a shim that
+//!   reported the wall clock as `cpu_ns` is red here and green everywhere else;
+//! * [`a_form_body_reaches_the_front_controller`] — a request body reaches
+//!   `$_POST` (`R12`): a `RequestV1` without its body pointer would serve every
+//!   form as an empty `$_POST`.
+//!
+//! The first two need no host PHP; the last two are real-pair legs and take the
+//! [`refused_without_a_host`] branch on a PHP-free host, like every other
+//! real-pair leg here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Write};
@@ -177,6 +200,81 @@ const SLEEP_PHP: &str = "\
 <?php
 usleep(60000);
 exit(0);
+";
+
+/// How long the `cpu_ns`-vs-wall leg parks its front controller: long enough
+/// that the request's wall time is dominated by the sleep, and a `cpu_ns` taken
+/// from the clock the C shim documents cannot reach a quarter of it.
+const BLOCK_MS: u64 = 200;
+
+/// The fraction of the wall time the leg above allows the CPU reading: a
+/// `CLOCK_PROCESS_CPUTIME_ID` delta over a 200 ms `usleep` is a few milliseconds
+/// of PHP startup, so a quarter of the wall is a wide margin for a loaded CI
+/// host — and a `cpu_ns` that reported the request's duration misses it by the
+/// whole block.
+const CPU_WALL_SHARE: u64 = 4;
+
+/// A front controller that **blocks** and then answers normally: the wall time
+/// is spent parked, so the CPU reading and the request's duration are different
+/// numbers by construction (`ADR-0010` §1.1, `R19`).
+///
+/// Every other fixture in this suite is a busy loop, where `cpu_ns ≈ wall_ns`
+/// and an implementation that reported the request's duration as `cpu_ns`
+/// satisfies every existing assertion (`cpu_ns <= wall_ns`, `cpu_ns > 0`,
+/// `cost_ns >= cpu_ns`). This is the fixture that tells the two clocks apart.
+const BLOCKING_PHP: &str = "\
+<?php
+usleep(200000);
+header('Content-Type: text/plain');
+echo \"blastit-php-ok\\n\";
+";
+
+/// The form leg's front controller: whatever reached `$_POST` is what answers,
+/// so an empty `$_POST` — a `RequestV1` without its body — is visible in the
+/// response instead of being inferred.
+const FORM_PHP: &str = "\
+<?php
+header('Content-Type: text/plain');
+echo 'x=' . (isset($_POST['x']) ? $_POST['x'] : 'absent') . \"\\n\";
+";
+
+/// The documented manifest plus its ingress codec (`docs/frameworks/php.md`,
+/// `MB.3.13`'s gap G4): a `form` route refuses a body of another type with
+/// `400`, so the `Content-Type` the leg posts is part of the fixture.
+const FORM_MANIFEST: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+[route.php]
+entry = \"public/index.php\"
+
+[route.ingress]
+body = \"form\"
+";
+
+/// The worker's whole-body budget for the form leg (`BLASTIT_MAX_BODY_BYTES`).
+///
+/// It is deliberately small: `BodyPlan::Buffer` bounds the buffered body with
+/// this same number in the scheduler and in the view (`R14`/`R15`), so one
+/// 8 KiB post is past the cap both of them apply.
+const FORM_BODY_MAX: usize = 4096;
+
+/// `PHP_MANIFEST` with `egress = true` (`ADR-0010` §3, design §7.3): the route
+/// keeps `AF_INET`/`AF_INET6` in its filter, and the INI renders
+/// `allow_url_fopen=1` for the same route. The two must never disagree.
+const EGRESS_MANIFEST: &str = "\
+version = 1
+
+[[route]]
+name = \"app\"
+path = ['.*']
+egress = true
+
+[route.php]
+entry = \"public/index.php\"
 ";
 
 // --------------------------------------------------------------- stub ELFs
@@ -799,7 +897,7 @@ struct Swap {
     needle: &'static str,
     /// The file to rename over `to`.
     from: PathBuf,
-    /// The `libphp` path stage 1 will re-open.
+    /// The pinned path stage 1 will re-open: the `libphp` or the shim.
     to: PathBuf,
 }
 
@@ -957,6 +1055,30 @@ impl Boot {
         .expect("writing the request");
         let mut response = Vec::new();
         stream.read_to_end(&mut response).expect("the response");
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    /// `POST <path>` with `content_type` and `body` over a fresh connection, as
+    /// the raw response.
+    ///
+    /// A body the scheduler refuses past `BLASTIT_MAX_BODY_BYTES` is answered
+    /// before the client has finished writing, so a write error here is the
+    /// refusal arriving early and not a harness failure; the response is read
+    /// either way and asserted by the caller.
+    fn post(&self, path: &str, content_type: &str, body: &str) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("connecting");
+        stream
+            .set_read_timeout(Some(REQUEST_TIMEOUT))
+            .expect("a read timeout");
+        let _ = write!(
+            stream,
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: {content_type}\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(body.as_bytes());
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
         String::from_utf8_lossy(&response).into_owned()
     }
 
@@ -1157,6 +1279,50 @@ fn canary_writes(path: &Path) -> Vec<(u32, u32)> {
 /// Removes a canary so the next boot's writes are the only ones in the file.
 fn clear(canary: &Path) {
     let _ = std::fs::remove_file(canary);
+}
+
+/// The text of the shape file a hanging shim writes, and the fields of its
+/// `probe` line — `pid`, `ppid`, `pgid`, `uid`, `euid`, `inet` — from the path
+/// `HANG_SHIM_STUB_C` bakes in at compile time.
+///
+/// The shape is read here once for **both** probe legs (the denied
+/// `EmbeddedView { egress: false }` and its `egress = true` twin), so the field
+/// names and the parse cannot drift between two stubs: a shape the C stub
+/// changed fails both legs at once.
+fn probe_shape(stubs: &Stubs, all: &str) -> (String, std::collections::BTreeMap<String, u32>) {
+    let shape = std::fs::read_to_string(&stubs.hang_shape).unwrap_or_else(|err| {
+        panic!(
+            "no probe shape was written ({}): {err}\n{all}",
+            stubs.hang_shape.display()
+        )
+    });
+    let mut fields = std::collections::BTreeMap::new();
+    for field in shape
+        .lines()
+        .find(|line| line.starts_with("probe "))
+        .unwrap_or_else(|| panic!("no `probe` line in the shape file: {shape}"))
+        .split_whitespace()
+    {
+        if let Some((key, value)) = field.split_once('=') {
+            fields.insert(key.to_string(), value.parse::<u32>().expect("a u32 field"));
+        }
+    }
+    (shape, fields)
+}
+
+/// The lock the two probe legs take for their whole body.
+///
+/// `HANG_SHIM_STUB_C` bakes **one** shape path in (`BT_SHAPE`), so the hang leg
+/// and its `egress = true` twin write the same file: they must not clear or
+/// read it while the other's boot is running. `Boot`'s own lock is not enough —
+/// it is taken *after* the `clear` and released only when the `Boot` drops,
+/// after the read — so this closes exactly that window, poisoned-proof like
+/// [`boot_lock`].
+fn hang_shape_lock() -> std::sync::MutexGuard<'static, ()> {
+    static SHAPE: Mutex<()> = Mutex::new(());
+    SHAPE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// `PPid:` from `/proc/<pid>/status`.
@@ -1400,6 +1566,8 @@ fn a_shim_for_another_minor_refuses_the_boot_before_the_listener() {
 #[test]
 fn a_probe_that_hangs_is_killed_and_refuses_the_boot() {
     let _root = StubRootGuard::start();
+    // The `egress = true` twin writes the same shape file; see [`probe_shape`].
+    let _shape_guard = hang_shape_lock();
     let stubs = stubs();
     clear(&stubs.hang_shape);
     let scratch = Scratch::new("hang", PHP_MANIFEST);
@@ -1446,23 +1614,7 @@ fn a_probe_that_hangs_is_killed_and_refuses_the_boot() {
     );
     assert_no_serving_surface(&mut boot, "probe timeout");
 
-    let shape = std::fs::read_to_string(&stubs.hang_shape).unwrap_or_else(|err| {
-        panic!(
-            "no probe shape was written ({}): {err}\n{all}",
-            stubs.hang_shape.display()
-        )
-    });
-    let mut fields = std::collections::BTreeMap::new();
-    for field in shape
-        .lines()
-        .find(|line| line.starts_with("probe "))
-        .unwrap_or_else(|| panic!("no `probe` line in the shape file: {shape}"))
-        .split_whitespace()
-    {
-        if let Some((key, value)) = field.split_once('=') {
-            fields.insert(key.to_string(), value.parse::<u32>().expect("a u32 field"));
-        }
-    }
+    let (shape, fields) = probe_shape(&stubs, &all);
     let pid = fields["pid"];
     assert_ne!(pid, init, "the probe is a fork, not the boot: {shape}");
     assert_eq!(fields["ppid"], init, "the probe is init's child: {shape}");
@@ -1496,6 +1648,109 @@ fn a_probe_that_hangs_is_killed_and_refuses_the_boot() {
     println!(
         "killed at BLASTIT_PROBE_TIMEOUT_MS=250 after {elapsed:?}; probe pid {pid} ppid {} \
          pgid {} uid {} seccomp EPERM, gone from /proc\n{refusal}",
+        fields["ppid"], fields["pgid"], fields["uid"]
+    );
+}
+
+/// The **allowed** twin of the leg above (`ADR-0010` §3, design §7.3): the same
+/// hanging shim under `egress = true`, so the probe child's
+/// `SeccompRole::EmbeddedView` keeps `AF_INET` and `socket(AF_INET)` succeeds.
+///
+/// The denied half alone is satisfied by an implementation that hardcodes
+/// `egress: false` — which is exactly `probe_bindings`'s
+/// `egress.get(slot).copied().unwrap_or(false)` — while the INI for the same
+/// route renders `allow_url_fopen=1`. That pair (a filter that denies and an
+/// INI that permits) is the disagreement the epic's Egress doctrine forbids and
+/// the one that silently breaks every PHP route that legitimately needs the
+/// network. This leg is therefore a shape assertion on the filter and not a
+/// second containment test: the boot must still refuse at the probe timeout,
+/// naming it, with nothing bound.
+#[test]
+fn an_egress_route_lets_the_probe_open_a_socket() {
+    let _root = StubRootGuard::start();
+    // The same shape file the denied twin writes; see [`probe_shape`].
+    let _shape_guard = hang_shape_lock();
+    let stubs = stubs();
+    clear(&stubs.hang_shape);
+    let scratch = Scratch::new("egress-hang", EGRESS_MANIFEST);
+    scratch.write(ENTRY, NORMAL_PHP);
+    let libphp = scratch.copy(&stubs.hang_libphp, "libphp8.4.so");
+    scratch.copy(&stubs.hang_shim, &shim_name(84));
+    let route_uid = std::fs::metadata(&scratch.dir).expect("the scratch").uid();
+
+    let started = Instant::now();
+    let mut boot = Boot::start(
+        &scratch.dir,
+        &[
+            ("BLASTIT_LIBPHP", &libphp.to_string_lossy()),
+            ("BLASTIT_PHP_SHIM_DIR", &scratch.dir.to_string_lossy()),
+            ("BLASTIT_PROBE_TIMEOUT_MS", "250"),
+        ],
+    );
+    let init = boot.pid();
+    let code = boot
+        .await_boot()
+        .expect("a probe that never returns must refuse the boot, not hang it");
+    let elapsed = started.elapsed();
+    boot.stop();
+    let stdout = boot.stdout_text();
+    let stderr = boot.stderr_text();
+    let all = format!("{stdout}\n{stderr}");
+
+    assert_eq!(code, Some(1), "stdout={stdout:?} stderr={stderr:?}");
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the 250 ms probe timeout did not bound the egress boot either: it took {elapsed:?}:\n{all}"
+    );
+    let refusal = refusal_text(&boot);
+    assert_package_sentence(&refusal, "egress probe timeout");
+    assert_no_fallback_recipe(&refusal);
+    assert!(
+        all.contains("250 ms"),
+        "the refusal names the timeout it applied: {all}"
+    );
+    assert!(
+        all.contains("BLASTIT_PROBE_TIMEOUT_MS"),
+        "and the knob that would raise it: {all}"
+    );
+    assert_no_serving_surface(&mut boot, "egress probe timeout");
+
+    let (shape, fields) = probe_shape(&stubs, &all);
+    let pid = fields["pid"];
+    // The containment is the same one the denied twin asserts, because it is
+    // the same stub and the same fork path: only `inet` may differ.
+    assert_ne!(pid, init, "the probe is a fork, not the boot: {shape}");
+    assert_eq!(fields["ppid"], init, "the probe is init's child: {shape}");
+    assert_eq!(
+        fields["pgid"], pid,
+        "the probe leads its own process group: {shape}"
+    );
+    assert_eq!(
+        fields["uid"], route_uid,
+        "the probe runs as the route's uid: {shape}"
+    );
+    assert_eq!(fields["euid"], route_uid, "and owns nothing more: {shape}");
+    // The route's `Egress` reaches the filter: `socket(AF_INET)` returns a
+    // descriptor (0), not EPERM (1). A hardcoded `egress: false` answers 1 here
+    // while the same route's INI says `allow_url_fopen=1`.
+    assert_eq!(
+        fields["inet"], 0,
+        "`egress = true` must let the probe child open an `AF_INET` socket (0), so the \
+         filter and the route's INI cannot disagree: {shape}"
+    );
+    let reaped = Instant::now() + Duration::from_secs(2);
+    while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < reaped {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "the boot refused but its egress probe child (pid {pid}, pgid {}) is still in \
+         `/proc`:\n{all}",
+        fields["pgid"]
+    );
+    println!(
+        "killed at BLASTIT_PROBE_TIMEOUT_MS=250 after {elapsed:?}; probe pid {pid} ppid {} \
+         pgid {} uid {} egress socket allowed (inet 0), gone from /proc\n{refusal}",
         fields["ppid"], fields["pgid"], fields["uid"]
     );
 }
@@ -1621,6 +1876,147 @@ fn a_libphp_replaced_between_the_stages_refuses_the_boot() {
          compares the re-opened file's `(st_dev, st_ino)` against stage 0's record \
          (`php_view::boot_bindings`/`open_pinned`). If that comparison is gone, this is the \
          regression the test exists to catch, not a lost race:\n{}",
+        served.join("\n")
+    );
+}
+
+/// The **shim** half of the same pin (`ADR-0010` §3, `R7`): stage 0 records
+/// `(path, st_dev, st_ino)` for **both** objects — the library and the
+/// `libblastit_php<minor>-<arch>-<libc>.so` shim — and stage 1 re-opens each and
+/// compares it against its **own** record.
+///
+/// The library's half is the leg above; without this one, deleting the shim
+/// comparison (or comparing the shim against the library's pair — the bug
+/// `MB.3.13.3`'s first run found, which refused every boot) leaves every
+/// protected assertion green, because the library's pin still refuses its own
+/// swap. The shim is code that runs inside every PHP worker, so its identity is
+/// the same boundary the library's is.
+///
+/// The fixture is the same shape as the library leg, with the two objects
+/// exchanged: a **copy of the same stub** is renamed over the recorded shim
+/// between stage 0's announcement and stage 1's re-open, so the file's content —
+/// and therefore the pair's validity — is unchanged and only the inode moves.
+/// That is what makes "served" the signature of a removed pin rather than of a
+/// fixture that could not have loaded. The retry bound, the two real-failure
+/// panics and the "a removed pin produces the same served attempts" warning are
+/// the library leg's, for the same reason: the window is a race between two
+/// stages of one process.
+#[test]
+fn a_shim_replaced_between_the_stages_refuses_the_boot() {
+    let _root = StubRootGuard::start();
+    let stubs = stubs();
+    let mut served = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut attempt = 0;
+    while attempt < 4 && Instant::now() < deadline {
+        attempt += 1;
+        clear(&stubs.nts_libphp_canary);
+        clear(&stubs.nts_shim_canary);
+        let scratch = Scratch::new("swap-shim", PHP_MANIFEST);
+        scratch.write(ENTRY, NORMAL_PHP);
+        let libphp = scratch.copy(&stubs.nts_libphp, "libphp8.4.so");
+        let shim = scratch.copy(&stubs.nts_shim, &shim_name(84));
+        let spare = scratch.copy(&stubs.nts_shim, "replacement-shim.so");
+        // The premise the assertion below rests on: the replacement is the
+        // recorded shim byte for byte, so the refusal can only be the inode.
+        assert_eq!(
+            std::fs::read(&spare).expect("the spare shim"),
+            std::fs::read(&shim).expect("the recorded shim"),
+            "the replacement must be a copy of the same stub, not a different shim"
+        );
+        // Stage 0 records the path it resolved, which is the canonical one.
+        let recorded = std::fs::canonicalize(&shim).expect("the shim stage 0 records");
+
+        let mut boot = Boot::start_swapping(
+            &scratch.dir,
+            &[
+                ("BLASTIT_LIBPHP", &libphp.to_string_lossy()),
+                ("BLASTIT_PHP_SHIM_DIR", &scratch.dir.to_string_lossy()),
+            ],
+            Swap {
+                needle: "[route.php] runtime is",
+                from: spare,
+                to: shim.clone(),
+            },
+        );
+        let code = boot.await_boot();
+        let swapped = boot.swapped();
+        boot.stop();
+        let stdout = boot.stdout_text();
+        let stderr = boot.stderr_text();
+        let all = format!("{stdout}\n{stderr}");
+
+        if !swapped {
+            panic!(
+                "attempt {attempt}: stage 0 never announced the pair it inspected, so the shim \
+                 swap could not be placed at all — this is not the timing race, it is the \
+                 fixture or the gate:\n{all}"
+            );
+        }
+        // The sentence that separates the shim's pin from the library's: it
+        // names the shim, and only the shim.
+        let inode = all
+            .lines()
+            .find(|line| line.contains("is not the file stage 0 inspected"));
+        let Some(inode) = inode else {
+            match code {
+                // A refusal with another sentence is a real failure.
+                Some(code) => panic!(
+                    "attempt {attempt}: the boot refused (exit {code:?}) with a sentence that is \
+                     not the inode pin's, which is not the timing race:\n{all}"
+                ),
+                // Served: the rename landed after stage 1 opened the file.
+                None => served.push(format!("attempt {attempt}: {all}")),
+            }
+            continue;
+        };
+        assert_eq!(
+            code,
+            Some(Some(1)),
+            "the shim's inode refusal is a boot refusal (exit 1): {all}"
+        );
+        assert!(
+            inode.contains(&format!("shim {}", recorded.display())),
+            "the refusal names the **shim** that moved ({}) and not the library: {inode}",
+            recorded.display()
+        );
+        assert!(
+            !inode.contains(&libphp.display().to_string()),
+            "the refusal is the shim's comparison, not the library's (the library did not \
+             move): {inode}"
+        );
+        assert!(
+            inode.contains("restore the package and restart blastit"),
+            "and the fix: {inode}"
+        );
+        assert!(
+            !boot.events().iter().any(|event| event["event"] == "ready"),
+            "no listener is bound before stage 1 verifies the shim's inode: {all}"
+        );
+        assert_no_serving_surface(&mut boot, "shim inode swap");
+        assert_never_loaded(
+            &[&stubs.nts_libphp_canary, &stubs.nts_shim_canary],
+            "shim inode swap",
+        );
+        println!("refused (stage 1 shim inode pin) on attempt {attempt}: {all}");
+        return;
+    }
+    assert!(
+        !served.is_empty(),
+        "the retry bound (4 attempts, 20 s) ended after {attempt} attempt(s) without a boot to \
+         judge"
+    );
+    panic!(
+        "the stage-0→stage-1 window was missed in {attempt} attempt(s) inside 20 s: the rename \
+         landed after stage 1 had already opened the pinned shim, so every attempt served the \
+         route and the shim's inode pin was never exercised. This is a timing race in the \
+         harness (the swap is triggered by stage 0's own announcement; there is no deterministic \
+         seam without a `src/` change) — BUT a **removed inode pin** produces exactly these same \
+         served attempts, so do not dismiss this as harness noise before checking that stage 1 \
+         still compares the re-opened **shim**'s `(st_dev, st_ino)` against stage 0's record \
+         (`php_view::boot_bindings`/`open_pinned`, the `shim` call's `record.shim_dev`/\
+         `record.shim_ino`). If that comparison is gone, or compares the shim against the \
+         library's pair, this is the regression the test exists to catch, not a lost race:\n{}",
         served.join("\n")
     );
 }
@@ -1988,6 +2384,212 @@ fn containment(crash: &str, what: &str, name: &str, sleeps_ms: Option<u64>) {
          cost_ns={cost_ns}  retired pid {crashed_pid}  respawned pid {second_pid} (ppid {init}) \
          uid {}  live={live:?}",
         second["uid"]
+    );
+}
+
+/// `ADR-0010` §1.1 / `R19`: the `cpu_ns` on a completion is the worker's
+/// **process CPU** (`CLOCK_PROCESS_CPUTIME_ID`), not the request's duration.
+///
+/// Every other fixture in this suite computes, so `cpu_ns ≈ wall_ns` by
+/// construction and `cpu_ns = duration` satisfies all of them
+/// (`cpu_ns <= wall_ns`, `cpu_ns > 0`, `cost_ns >= cpu_ns`). This leg's front
+/// controller parks for 200 ms in `usleep`, which spends wall time and almost no
+/// CPU, so the two clocks are orders of magnitude apart and the assertion is a
+/// real discriminator: a shim that reported the request's wall clock fails it by
+/// the whole block.
+///
+/// The wall time is the `request` event's `duration_ms` — arrival to last byte,
+/// the number `LESSONS.md` (`MB.3.38`) records as *not* the dispatch span — and
+/// never `cost_ns`, which is the charge.
+#[test]
+fn a_blocking_script_is_charged_cpu_time_not_wall_time() {
+    let _root = StubRootGuard::start();
+    let Some(host) = host_php() else {
+        refused_without_a_host("blocking script", "cpu-vs-wall");
+        return;
+    };
+    let scratch = Scratch::new("cpu-vs-wall", PHP_MANIFEST);
+    scratch.write(ENTRY, BLOCKING_PHP);
+
+    let mut boot = Boot::start(
+        &scratch.dir,
+        &[
+            ("BLASTIT_LIBPHP", &host.libphp.to_string_lossy()),
+            (
+                "BLASTIT_PHP_SHIM_DIR",
+                &host
+                    .shim
+                    .parent()
+                    .expect("a shim directory")
+                    .to_string_lossy(),
+            ),
+        ],
+    );
+    assert!(
+        boot.await_boot().is_none(),
+        "this host has {} and {}, so the route must be served: {}",
+        host.libphp.display(),
+        host.shim.display(),
+        boot.stderr_text()
+    );
+    let started = Instant::now();
+    let response = boot.get("/block");
+    let elapsed = started.elapsed();
+    assert!(
+        response.starts_with("HTTP/1.1 200") && response.contains(BODY),
+        "the blocking front controller did not answer: {response}"
+    );
+    let event = boot.request_event("/block");
+    assert_eq!(event["status"], 200, "the event agrees: {event}");
+    let cpu_ns = event["cpu_ns"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the worker reported no CPU cost: {event}"));
+    let wall_ns = (event["duration_ms"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("no duration: {event}"))
+        * 1e6) as u64;
+    // The block really is in the wall time this leg compares against: without
+    // it, a `cpu_ns` that was the duration would be indistinguishable again.
+    let block_ns = BLOCK_MS.saturating_mul(1_000_000);
+    assert!(
+        wall_ns >= block_ns,
+        "the {BLOCK_MS} ms block is not in the {wall_ns} ns wall time this leg asserts against: \
+         {event}"
+    );
+    assert!(
+        cpu_ns.saturating_mul(CPU_WALL_SHARE) < wall_ns,
+        "`cpu_ns` ({cpu_ns} ns) must be under a {CPU_WALL_SHARE}th of the wall time \
+         ({wall_ns} ns) for a {BLOCK_MS} ms `usleep`: the reading is one process's \
+         `CLOCK_PROCESS_CPUTIME_ID` delta, and a shim that reported the request's own duration \
+         here is charging wall time as CPU time: {event}"
+    );
+    boot.stop();
+    println!(
+        "blocked {BLOCK_MS} ms in usleep: status 200  cpu_ns={cpu_ns}  wall_ns={wall_ns}  \
+         cpu/wall=1/{}  answered in {elapsed:?}",
+        wall_ns / cpu_ns.max(1)
+    );
+}
+
+/// `R12` / the documented `[route.ingress] body = "form"` page
+/// (`docs/frameworks/php.md`): a request body reaches PHP's `$_POST`.
+///
+/// The transport buffers the whole body and hands `RequestV1` a pointer and a
+/// length (`blastit-view/src/php.rs`), and `php2shell`'s class is request data
+/// reaching PHP — so a `RequestV1` that dropped its body would serve every form
+/// as an empty `$_POST` with nothing in this suite failing. The echo is the
+/// witness: the front controller answers with what it actually received.
+///
+/// The second half is the cap. `BLASTIT_MAX_BODY_BYTES` is one number applied
+/// in two places — the scheduler's `BodyPlan::Buffer` bound (`R14`/`R15`, which
+/// answers first) and the worker's own `max_body_bytes` — so a body past it is a
+/// `4xx`/`5xx`, and the slot must still serve the request after it.
+#[test]
+fn a_form_body_reaches_the_front_controller() {
+    let _root = StubRootGuard::start();
+    let Some(host) = host_php() else {
+        refused_without_a_host("form body", "form-body");
+        return;
+    };
+    const FORM: &str = "application/x-www-form-urlencoded";
+    let scratch = Scratch::new("form-body", FORM_MANIFEST);
+    scratch.write(ENTRY, FORM_PHP);
+    let max_body = FORM_BODY_MAX.to_string();
+
+    let mut boot = Boot::start(
+        &scratch.dir,
+        &[
+            ("BLASTIT_LIBPHP", &host.libphp.to_string_lossy()),
+            (
+                "BLASTIT_PHP_SHIM_DIR",
+                &host
+                    .shim
+                    .parent()
+                    .expect("a shim directory")
+                    .to_string_lossy(),
+            ),
+            ("BLASTIT_MAX_BODY_BYTES", &max_body),
+        ],
+    );
+    assert!(
+        boot.await_boot().is_none(),
+        "this host has {} and {}, so the route must be served: {}",
+        host.libphp.display(),
+        host.shim.display(),
+        boot.stderr_text()
+    );
+
+    // The allowed path: the body arrives, the codec accepts it, and PHP parses
+    // it into `$_POST`.
+    let response = boot.post("/form", FORM, "x=1");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "a `form` route must answer a canonical form body: {response}"
+    );
+    assert!(
+        response.contains("x=1"),
+        "the body did not reach `$_POST`: the front controller echoed {response:?}"
+    );
+    let event = boot.request_event("/form");
+    assert_eq!(event["status"], 200, "the event agrees: {event}");
+    assert_eq!(
+        event["method"], "POST",
+        "the event names the method: {event}"
+    );
+    assert!(
+        event["bytes_in"].as_u64().unwrap_or(0) >= 3,
+        "the request's body bytes reached the scheduler: {event}"
+    );
+
+    // The denied path: one byte past the worker's budget. The scheduler buffers
+    // the body under the same number and refuses it before dispatch, so the
+    // answer is its `413` (any `4xx`/`5xx` is the contract, and it must not be a
+    // `200` carrying a truncated `$_POST`).
+    let oversized = format!("x={}", "a".repeat(FORM_BODY_MAX * 2));
+    let refused = boot.post("/form", FORM, &oversized);
+    assert!(
+        refused.starts_with("HTTP/1.1 4") || refused.starts_with("HTTP/1.1 5"),
+        "a body past the {FORM_BODY_MAX}-byte cap must be refused, not served: {refused}"
+    );
+    assert!(
+        !refused.starts_with("HTTP/1.1 200"),
+        "and never truncated into a `200`: {refused}"
+    );
+
+    // The slot survives the refusal: the next request is answered by the same
+    // route, with its body parsed again.
+    let after = boot.post("/form", FORM, "x=2");
+    assert!(
+        after.starts_with("HTTP/1.1 200") && after.contains("x=2"),
+        "the slot stopped serving after an oversized body: {after}"
+    );
+    // And the scheduler agrees it served two of them: the refused body was
+    // never dispatched, so the route's `200`s are the two form requests.
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    loop {
+        let served = boot
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event["event"] == "request" && event["path"] == "/form" && event["status"] == 200
+            })
+            .count();
+        if served >= 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "only {served} form request(s) were reported served: {}",
+            boot.stdout_text()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    boot.stop();
+    println!(
+        "form body reached `$_POST` (x=1, 200); a {}-byte body was refused with `{}`; the slot \
+         still answered x=2",
+        oversized.len(),
+        refused.lines().next().unwrap_or_default()
     );
 }
 

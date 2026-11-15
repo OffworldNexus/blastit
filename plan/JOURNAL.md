@@ -1561,3 +1561,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T02:55 [MB.3.43] (lead) edited fields
 - 2026-11-15T02:55 [MB.3.43] (lead) reviewer of MB.3.42 left two evidence-hygiene MINORs in its RESULT.md (clippy was recorded red from MB.3.40's in-flight host.rs, now green; make check was skipp
 - 2026-11-15T02:55 [MB.3.42] (lead) status review -> done
+- 2026-11-15T02:56 [MB.3.37] (lead) status ready -> active
+- 2026-11-15T02:56 [MB.3.37] (lead) attempt 1/3 started
+- 2026-11-15T02:56 [MB.3.37] (lead) base 55a3380
+- 2026-11-15T03:05 [MB.3.43] (lead) ROOT CAUSE of the red php-sapi job (run 43665450916, head c56b1e1): the four MB.3.40 legs panic at critical_php_embed.rs:2070 'no directory on this host is one 
+- 2026-11-15T03:05 [MB.3.43] (lead) CORRECTION to the mangled entry above (a backtick in a double-quoted plan.py argument was executed by the shell; ignore the injected text). The diagnosis itself
+- 2026-11-15T03:07 [MB.3.37] (lead) status active -> review
+- 2026-11-15T03:11 [MB.3.43] (lead) MB.3.37 reviewer PASSed (attempt 1) with four MINORs, three of which are this file's honesty and belong in the same pass as this node's own items (they are all 
+- 2026-11-15T03:11 [MB.3.37] (lead) status review -> done
