@@ -6,12 +6,18 @@ status: ready
 owner: implementer
 priority: 1
 depends_on: []
-paths: [crates/blastit/src/edit.rs, "crates/blastit/tests/**", "python/tests/**", "e2e/**"]
+paths:
+  - "crates/blastit-manifest/src/edit.rs"
+  - "crates/blastit-manifest/tests/**"
+  - "crates/blastit/src/**"
+  - "crates/blastit/tests/**"
+  - "python/tests/**"
+  - "e2e/**"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T16:36"
-updated: "2026-11-14T16:36"
+updated: "2026-11-14T23:17"
 ---
 
 # Goal
