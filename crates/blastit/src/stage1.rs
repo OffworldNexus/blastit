@@ -34,6 +34,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(feature = "python")]
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
 use blastit_frame::Limits;
@@ -236,7 +237,9 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         }
         None => None,
     };
-    let config = read_config(&boot, dev.as_ref(), options.config_fd);
+    let (config, php_probe_timeout) = read_config(&boot, dev.as_ref(), options.config_fd);
+    #[cfg(not(feature = "php"))]
+    let _ = php_probe_timeout;
     let emitter = Emitter::stdout(config.log_format, config.log_level);
     // §8.1: a setting that is deprecated is the operator's to hear about, once,
     // and the log is the only place blastit can say it. The decision comes from
@@ -357,6 +360,24 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         Ok(bindings) => bindings,
         Err(message) => fail(&emitter, dev.as_ref(), &message),
     };
+    // `ADR-0010` §3: a contained probe child per `[route.php]` route loads the
+    // pair stage 0 inspected and starts the module **before** anything listens.
+    // A shim that will not load, an ABI this build does not speak, a minor that
+    // disagrees with the library, or a `worker_init` that hangs is this boot's
+    // `exit 1` with §4.1's sentence — never a worker's first request. The
+    // `dlopen` happens below the fork; no `libphp` symbol is reachable here.
+    #[cfg(feature = "php")]
+    if let Err(message) = crate::php_view::probe_bindings(crate::php_view::PhpProbeBoot {
+        cfg: &config,
+        routes: &routes,
+        bindings: &php,
+        egress: &egress,
+        timeout: php_probe_timeout,
+        interpreter_live: hosted,
+        drop_privileges: dev.is_none(),
+    }) {
+        fail(&emitter, dev.as_ref(), &message);
+    }
     let table = if dev.is_some() && learn {
         match learn_routing_table(&manifest) {
             Ok(table) => table,
@@ -748,8 +769,18 @@ fn toml_basic_string(value: &str) -> String {
     out
 }
 
-/// Reads the configuration document stage 0 wrote into the pipe (§4).
-fn read_config(emitter: &Emitter, dev: Option<&crate::dev_learn::Dev>, fd: RawFd) -> Config {
+/// Reads the configuration document stage 0 wrote into the pipe (§4), and the
+/// `[route.php]` probe timeout that travelled with it (`ADR-0010` §3).
+///
+/// The timeout is a **stage-0 decision**: `BLASTIT_PROBE_TIMEOUT_MS` is read
+/// before the `execve` that swaps this process's environment, because
+/// `blastit-env` strips every `BLASTIT_*` variable (`R12`), so stage 1 finds it
+/// in the document and nowhere else.
+fn read_config(
+    emitter: &Emitter,
+    dev: Option<&crate::dev_learn::Dev>,
+    fd: RawFd,
+) -> (Config, Duration) {
     // SAFETY: stage 0 cleared `FD_CLOEXEC` on this descriptor and stage 1 is its
     // only owner.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -762,8 +793,12 @@ fn read_config(emitter: &Emitter, dev: Option<&crate::dev_learn::Dev>, fd: RawFd
         Ok(value) => value,
         Err(err) => fail(emitter, dev, &format!("configuration document: {err}")),
     };
+    let probe_timeout = value
+        .get(crate::stage0::PROBE_TIMEOUT_MEMBER)
+        .and_then(serde_json::Value::as_u64)
+        .map_or(crate::stage0::PROBE_TIMEOUT_DEFAULT, Duration::from_millis);
     match Config::from_json(&value) {
-        Ok(config) => config,
+        Ok(config) => (config, probe_timeout),
         Err(err) => fail(emitter, dev, &err.to_string()),
     }
 }

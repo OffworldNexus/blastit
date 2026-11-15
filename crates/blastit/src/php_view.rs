@@ -50,20 +50,21 @@
 //! binds, and a binding that cannot be built here is the same refusal one
 //! process later.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use blastit_frame::Limits;
 use blastit_manifest::Manifest;
 use blastit_php_sapi::{Egress, IniPolicy, SharedObject};
 use blastit_scheduler::RouteInfo;
 use blastit_sys::{
-    Fork, Pid, Rlimits, SeccompRole, Signal, SignalMask, harden_child, pipe,
+    ExitStatus, Fork, Pid, Rlimits, SeccompRole, Signal, SignalMask, harden_child, pipe,
     restore_signal_mask_in_child, set_dumpable, socketpair_stream,
 };
 use rustix::fs::{Mode, OFlags};
 
-use crate::child::{ChildIo, child_exit, install_filter};
+use crate::child::{ChildIo, child_exit, install_filter, wait_readable};
 use crate::config::Config;
 
 /// How many extra processes a view's uid may have beyond its workers (§7.2:
@@ -254,6 +255,342 @@ fn open_pinned(
         ));
     }
     Ok(fd)
+}
+
+/// Everything a boot's `[route.php]` probe needs (`ADR-0010` §3).
+///
+/// `bindings` is what [`boot_bindings`] built — the **pinned** descriptors stage
+/// 0 inspected — so the probe loads exactly the files the workers will, one step
+/// earlier. A slot without a binding is another backend and has nothing to
+/// prove.
+pub struct PhpProbeBoot<'a> {
+    /// Process-wide configuration (`BLASTIT_SECCOMP`, the view worker cap).
+    pub cfg: &'a Config,
+    /// The supervisor's slot list: the probe names the route it refuses.
+    pub routes: &'a [RouteInfo],
+    /// One binding per PHP slot, `None` for every other backend.
+    pub bindings: &'a [Option<PhpBinding>],
+    /// Whether each slot's filter keeps `AF_INET`/`AF_INET6` (§7.3).
+    pub egress: &'a [bool],
+    /// `BLASTIT_PROBE_TIMEOUT_MS`, parsed by stage 0 (`stage0`'s default).
+    pub timeout: Duration,
+    /// `true` while CPython is live in this image and the GIL is held (§9.3).
+    pub interpreter_live: bool,
+    /// `true` in production (`setresuid` + `RLIMIT_NPROC`), `false` in `dev`.
+    pub drop_privileges: bool,
+}
+
+/// The most of a probe child's stderr a refusal quotes: PHP's own startup log
+/// can be long, and this becomes one log line (≤ 2048 bytes, §1.1).
+const PROBE_MESSAGE_MAX: usize = 512;
+
+/// `ADR-0010` §3: one contained probe child per `[route.php]` route, forked
+/// **before** `bind_tcp`, that loads the pair stage 0 inspected and runs
+/// `blastit_php_worker_init` + `blastit_php_worker_shutdown` in it.
+///
+/// The load stays below the fork. Nothing in stage 0 or stage 1 proper reaches a
+/// `libphp` symbol, and a pair that cannot start is this boot's refusal — `exit
+/// 1` with `ADR-0010` §4.1's sentence — instead of a worker's first request.
+///
+/// The child is contained exactly as its worker will be: its own process group,
+/// the route's uid (production), `PR_SET_PDEATHSIG(SIGKILL)`, the route's
+/// `RLIMIT_*` and [`SeccompRole::EmbeddedView`] with the route's `egress`.
+///
+/// # Errors
+///
+/// The refusal sentence: the route, `(PHP X.Y, <arch>-<libc>)`, the distro
+/// package and `BLASTIT_LIBPHP`, plus what the child said (or that it hung).
+pub fn probe_bindings(probe: PhpProbeBoot<'_>) -> Result<(), String> {
+    for (slot, binding) in probe.bindings.iter().enumerate() {
+        let Some(binding) = binding else {
+            continue;
+        };
+        let Some(info) = probe.routes.get(slot) else {
+            return Err(format!(
+                "PHP view slot {slot} holds a libphp binding but no route; the manifest and the \
+                 scheduler's routing table disagree"
+            ));
+        };
+        let egress = probe.egress.get(slot).copied().unwrap_or(false);
+        probe_route(&probe, info, binding, egress)?;
+    }
+    Ok(())
+}
+
+/// Forks `info`'s probe child and reads the verdict.
+fn probe_route(
+    probe: &PhpProbeBoot<'_>,
+    info: &RouteInfo,
+    binding: &PhpBinding,
+    egress: bool,
+) -> Result<(), String> {
+    let (message, message_write) = pipe().map_err(|err| {
+        format!(
+            "route {:?}: the [route.php] probe child's diagnostic pipe: {err}",
+            info.name
+        )
+    })?;
+    // The child keeps the pinned descriptors and nothing else: no channel, no
+    // config pipe, no listener. Its stdout is `/dev/null`; its stderr is the
+    // pipe this reads, so the reason a load failed comes back with the verdict.
+    let child = ChildIo {
+        stdout: None,
+        stderr: Some(message_write),
+        keep: binding.pinned_fds(),
+        limits: Rlimits {
+            nproc: probe.drop_privileges.then(|| {
+                probe
+                    .cfg
+                    .view_worker_cap()
+                    .saturating_add(VIEW_PROCESS_MARGIN) as u64
+            }),
+            nofile: Some(VIEW_NOFILE),
+            core_zero: true,
+        },
+        working_dir: Some(binding.view_tmp.clone()),
+    };
+    let fork = crate::forking::fork(probe.interpreter_live).map_err(|err| {
+        format!(
+            "route {:?}: the [route.php] probe child could not be forked: {err}",
+            info.name
+        )
+    })?;
+    let pid = match fork {
+        Fork::Parent(pid) => {
+            // The write end is the child's alone: holding a copy here would make
+            // the read below wait for a writer that never closes.
+            drop(child);
+            pid
+        }
+        Fork::Child => probe_child(probe, info, binding, egress, child, message),
+    };
+    // Best effort, and the child asks for the same group a moment later: this
+    // closes the window in which the timeout's `kill(-pid)` would name a group
+    // that does not exist yet.
+    join_group(pid);
+    await_probe(pid, &message, probe.timeout).map_or_else(
+        |problem| {
+            // The manifest's `entry`, as written: the absolute path is what the
+            // worker uses, and the operator edits the manifest.
+            let declared = binding
+                .entry
+                .strip_prefix(&binding.document_root)
+                .unwrap_or(&binding.entry);
+            Err(crate::stage0::php_probe_refusal(
+                &info.name,
+                &declared.display().to_string(),
+                &problem,
+                probe.cfg.php.as_ref().map(|record| record.version),
+            ))
+        },
+        |()| Ok(()),
+    )
+}
+
+/// Everything the probe child does after the fork. Never returns.
+fn probe_child(
+    probe: &PhpProbeBoot<'_>,
+    info: &RouteInfo,
+    binding: &PhpBinding,
+    egress: bool,
+    child: ChildIo,
+    message: OwnedFd,
+) -> ! {
+    // `ChildIo::prepare` closes every descriptor that is not in `keep`, this one
+    // included; the `OwnedFd` must not drop afterwards or it would close a
+    // number the child may since have reused.
+    std::mem::forget(message);
+    // The parent composes the sentence (it knows the route and the manifest's
+    // `entry`), so the child says only what went wrong.
+    let fail = |what: &str| -> ! { child_exit(what, 1) };
+    // `setpgid(0, 0)` before the filter, which refuses it afterwards (§7.3).
+    if let Err(err) = child.prepare().and_then(|()| own_process_group()) {
+        fail(&err.to_string());
+    }
+    if probe.drop_privileges
+        && let Err(err) = blastit_sys::drop_privileges(info.uid)
+    {
+        fail(&format!("dropping to uid {}: {err}", info.uid));
+    }
+    if let Err(err) = harden_child(Signal::KILL) {
+        fail(&format!("{err}"));
+    }
+    if let Err(err) = install_filter(probe.cfg.seccomp, SeccompRole::EmbeddedView { egress }) {
+        fail(&format!("{err}"));
+    }
+    // Re-applied after `drop_privileges`, which clears the flag (ADR-0010 §2).
+    let _ = set_dumpable(false);
+    if let Err(err) = set_view_environment(&binding.view_tmp) {
+        fail(&format!("HOME/TMPDIR: {err}"));
+    }
+    match load_and_shut_down(binding) {
+        Ok(()) => child_exit("", 0),
+        Err(message) => fail(&message),
+    }
+}
+
+/// Loads the pinned pair, starts the module, and shuts it down again: the whole
+/// of what `ADR-0010` §3 asks a probe to prove.
+///
+/// [`blastit_php_sapi::Loaded::load`] is the ABI check
+/// (`blastit_php_abi_version() == 1`) and the minor check
+/// (`blastit_php_minor()` against the host's `php_version()`), so a pair that
+/// disagrees never reaches `worker_init`; `worker_init` is what proves the
+/// module and the INI lockdown actually start on this host.
+fn load_and_shut_down(binding: &PhpBinding) -> Result<(), String> {
+    let mut loaded = blastit_php_sapi::Loaded::load(
+        SharedObject::Fd(binding.libphp.as_raw_fd()),
+        SharedObject::Fd(binding.shim.as_raw_fd()),
+    )
+    .map_err(|err| err.to_string())?;
+    loaded
+        .worker_init(&binding.ini, &binding.view_tmp)
+        .map_err(|err| err.to_string())?;
+    loaded.worker_shutdown();
+    Ok(())
+}
+
+/// Makes the calling process the leader of a new process group.
+///
+/// Runs in the child, **before** the filter: [`SeccompRole::EmbeddedView`]
+/// refuses `setpgid` once installed, so the one legitimate call cannot be the
+/// one the filter answers.
+fn own_process_group() -> std::io::Result<()> {
+    // SAFETY: `setpgid` takes two pids by value; 0 means the calling process, so
+    // this is the child putting itself in a group of its own.
+    if unsafe { libc::setpgid(0, 0) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The parent's half of [`own_process_group`], for the fork's race.
+///
+/// `EACCES`/`ESRCH` mean the child already did it or has exited, which is the
+/// answer this asked for.
+fn join_group(pid: Pid) {
+    // SAFETY: `setpgid` takes two pids by value, and the second names this boot's
+    // own child.
+    let _ = unsafe { libc::setpgid(pid.as_raw(), pid.as_raw()) };
+}
+
+/// Waits for `pid` to finish, or kills its group at `cap`.
+///
+/// The verdict is the child's own exit plus what it printed: a clean `0` is the
+/// only success. Every other outcome — a non-zero exit, a signal, a child that
+/// never returns — is a boot refusal, and the timeout kills `-pgid` (then the
+/// pid, if the group never came to exist) and reaps before answering.
+fn await_probe(pid: Pid, message: &OwnedFd, cap: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + cap;
+    let mut text = Vec::new();
+    loop {
+        if let Some(status) = try_wait(pid) {
+            // The child is gone, so it holds no writer: this reads to end of
+            // file instead of blocking on a live process.
+            drain_to_end(message, &mut text);
+            return match status {
+                ExitStatus::Code(0) => Ok(()),
+                other => Err(format!(
+                    "the probe child (pid {pid}) {other}{}",
+                    detail(&text)
+                )),
+            };
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            kill_probe(pid);
+            return Err(format!(
+                "the probe child (pid {pid}) did not load `libphp` and its shim within {} ms, \
+                 so it was killed; raise BLASTIT_PROBE_TIMEOUT_MS if this host needs longer",
+                cap.as_millis()
+            ));
+        }
+        let wait = (deadline - now).min(Duration::from_millis(20));
+        if wait_readable(message.as_fd(), wait)
+            .map_err(|err| format!("the probe child (pid {pid}) diagnostic pipe: {err}"))?
+        {
+            read_available(message, &mut text);
+        }
+    }
+}
+
+/// `waitpid(pid, WNOHANG)`: the child's status once it ended, `None` while it is
+/// still running.
+fn try_wait(pid: Pid) -> Option<ExitStatus> {
+    let mut status = 0;
+    // SAFETY: `waitpid` writes one status word into `status`; `WNOHANG` makes it
+    // return immediately, and the pid is this boot's own child.
+    let waited = unsafe { libc::waitpid(pid.as_raw(), &mut status, libc::WNOHANG) };
+    if waited == pid.as_raw() {
+        ExitStatus::from_raw(status)
+    } else {
+        None
+    }
+}
+
+/// `SIGKILL`s the probe's process group, then reaps it.
+///
+/// The group is what the child made for itself; the single-pid `kill` is the
+/// fallback for the race where the parent's `setpgid` and the child's have not
+/// landed. Reaping is bounded, so a child stuck in uninterruptible sleep cannot
+/// hold the boot that is refusing on its account — `PR_SET_PDEATHSIG` is the
+/// backstop.
+fn kill_probe(pid: Pid) {
+    // SAFETY: a negative pid names a process group and a positive one a process;
+    // both are this boot's own child's.
+    unsafe {
+        libc::kill(-pid.as_raw(), libc::SIGKILL);
+        libc::kill(pid.as_raw(), libc::SIGKILL);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if try_wait(pid).is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Reads what is already in the pipe, without waiting for more.
+fn read_available(fd: &OwnedFd, text: &mut Vec<u8>) {
+    let mut buf = [0u8; 256];
+    if let Ok(read) = rustix::io::read(fd, &mut buf) {
+        keep_probe_text(text, &buf[..read]);
+    }
+}
+
+/// Reads the pipe to end of file: only correct once every writer is gone.
+fn drain_to_end(fd: &OwnedFd, text: &mut Vec<u8>) {
+    let mut buf = [0u8; 256];
+    loop {
+        match rustix::io::read(fd, &mut buf) {
+            Ok(0) => return,
+            Ok(read) => keep_probe_text(text, &buf[..read]),
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+/// Appends at most [`PROBE_MESSAGE_MAX`] bytes: the rest is read and dropped, so
+/// a chatty child never fills the pipe and blocks.
+fn keep_probe_text(text: &mut Vec<u8>, bytes: &[u8]) {
+    let room = PROBE_MESSAGE_MAX.saturating_sub(text.len());
+    if room > 0 {
+        text.extend_from_slice(&bytes[..bytes.len().min(room)]);
+    }
+}
+
+/// The child's stderr as one clause: whitespace collapsed (PHP prints several
+/// lines), empty when it said nothing.
+fn detail(text: &[u8]) -> String {
+    let text = String::from_utf8_lossy(text);
+    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if words.is_empty() {
+        String::new()
+    } else {
+        format!(": {words}")
+    }
 }
 
 /// `max_execution_time`, in whole seconds, from the scheduler's wall clock: a

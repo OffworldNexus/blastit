@@ -408,6 +408,89 @@ const PHP_PACKAGES: &str = "install the PHP embed package — Debian/Ubuntu: \
 /// The one override `ADR-0010` §3 allows.
 const PHP_OVERRIDE: &str = "set BLASTIT_LIBPHP=/path/to/libphp.so";
 
+/// The variable that tunes how long a stage-1 `[route.php]` probe may take
+/// (`ADR-0010` §3).
+pub(crate) const PROBE_TIMEOUT_VAR: &str = "BLASTIT_PROBE_TIMEOUT_MS";
+
+/// Its default: `ADR-0010` §3's `5000` ms.
+pub(crate) const PROBE_TIMEOUT_DEFAULT: Duration = Duration::from_millis(5000);
+
+/// The document member that carries the probe timeout across the `execve`.
+///
+/// `blastit-env` strips every `BLASTIT_*` variable from the stage-1 environment
+/// (`ADR-0010` §3), so the knob is read here and travels in the configuration
+/// document stage 0 writes — the same way `seccomp` and the warnings do.
+pub(crate) const PROBE_TIMEOUT_MEMBER: &str = "php_probe_timeout_ms";
+
+/// Reads `BLASTIT_PROBE_TIMEOUT_MS`, the one place a probe's patience is
+/// decided.
+///
+/// `None` when it is unset: the document then says nothing, and stage 1 uses
+/// [`PROBE_TIMEOUT_DEFAULT`] — one number in one place either way. A value that
+/// is not a positive whole number of milliseconds is refused while the operator
+/// can still see the sentence.
+fn probe_timeout() -> Result<Option<Duration>, String> {
+    let Some(text) = std::env::var_os(PROBE_TIMEOUT_VAR) else {
+        return Ok(None);
+    };
+    let text = text.to_string_lossy();
+    let millis: u64 = text.trim().parse().map_err(|_| {
+        format!(
+            "{PROBE_TIMEOUT_VAR}={text:?} is not a whole number of milliseconds; set it to e.g. \
+             5000, or unset it for the default"
+        )
+    })?;
+    if millis == 0 {
+        return Err(format!(
+            "{PROBE_TIMEOUT_VAR}=0 would kill every [route.php] probe before it starts; set it \
+             to e.g. 5000, or unset it for the default"
+        ));
+    }
+    Ok(Some(Duration::from_millis(millis)))
+}
+
+/// The configuration document stage 1 boots from, with the probe timeout folded
+/// in.
+///
+/// # Errors
+///
+/// [`probe_timeout`]'s refusal for a `BLASTIT_PROBE_TIMEOUT_MS` that is not a
+/// positive whole number of milliseconds.
+fn config_document(config: &Config) -> Result<serde_json::Value, String> {
+    let mut value = config.to_json();
+    if let Some(timeout) = probe_timeout()?
+        && let Some(object) = value.as_object_mut()
+    {
+        let millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        object.insert(
+            PROBE_TIMEOUT_MEMBER.to_string(),
+            serde_json::Value::from(millis),
+        );
+    }
+    Ok(value)
+}
+
+/// `ADR-0010` §4.1's sentence for a **stage-1 probe** refusal.
+///
+/// The stage-0 gate builds the same shape from the same two halves
+/// ([`present_refusal`]); this is the post-barrier twin, so a shim that will not
+/// load, an ABI this build does not speak, a minor that disagrees with the
+/// library, or a `worker_init` that hangs reads exactly like a discovery
+/// refusal and names the same fix.
+#[cfg(feature = "php")]
+pub(crate) fn php_probe_refusal(
+    route: &str,
+    entry: &str,
+    problem: &str,
+    version: Option<PhpVersion>,
+) -> String {
+    present_refusal(
+        &format!("route {route:?}: [route.php] entry {entry:?}: "),
+        problem,
+        version,
+    )
+}
+
 /// The compile-time target's architecture, as the shim name spells it.
 ///
 /// Deliberately a second spelling of the tuple in `crates/blastit-php-sapi`
@@ -2215,7 +2298,11 @@ fn exec_stage1_dev(
     dbproxy: Option<DbproxyHandover>,
     learn: Option<OwnedFd>,
 ) -> ! {
-    let document = match serde_json::to_vec(&boot.config.to_json()) {
+    let document_value = match config_document(boot.config) {
+        Ok(value) => value,
+        Err(message) => fail_dev_root(boot.root, &message),
+    };
+    let document = match serde_json::to_vec(&document_value) {
         Ok(document) => document,
         Err(err) => fail_dev_root(boot.root, &format!("configuration document: {err}")),
     };
@@ -2679,7 +2766,11 @@ fn exec_stage1(
     app_env: &BTreeMap<String, String>,
     dbproxy: Option<DbproxyHandover>,
 ) -> ! {
-    let document = match serde_json::to_vec(&config.to_json()) {
+    let document_value = match config_document(config) {
+        Ok(value) => value,
+        Err(message) => fail(emitter, &message),
+    };
+    let document = match serde_json::to_vec(&document_value) {
         Ok(document) => document,
         Err(err) => fail(emitter, &format!("configuration document: {err}")),
     };
