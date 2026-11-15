@@ -1587,3 +1587,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T03:51 [MB.3.41] (lead) CI flake folded into this node (owner's session): the `test` job went red on `php::tests::a_response_body_before_the_head_is_a_protocol_error` at php.rs:1138:43
 - 2026-11-15T03:58 [MB.3.41] (lead) status active -> review
 - 2026-11-15T04:06 [MB.3.41] (lead) status review -> done
+- 2026-11-15T04:11 [MB.3.45] (lead) created (task) MB.3.41 review MINORs: bailed in the public outcome table, the flake asserts by type, and the release claim
+- 2026-11-15T04:14 [MB.3.46] (test-curator) created (task) The bailed charge and label need an unprivileged witness: scheduler DONE legs (critical_charge)
+- 2026-11-15T04:14 [MB.3.47] (test-curator) created (task) critical_php_embed's CI-coverage note is false since MB.3.39 (protected file, doc-only)
