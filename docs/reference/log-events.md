@@ -38,7 +38,8 @@ and `parts`.
 
 `outcome` is one of `ok`, `unmatched`, `queue_full`, `queue_timeout`, `timeout`,
 `view_died`, `bailed`, `client_gone`. `bailed` — the handler exited, died or
-fataled out of a `5xx` it had answered; the view process is still alive.
+fataled out of a `5xx` it had answered: it answered before it went away, which
+is not a death mid-request.
 `cost_ns` is what the request was charged for fair queuing; `cpu_ns` is `null`
 when the view had no thread clock to report. A request the scheduler answered
 itself is charged the time it held a worker — dispatch to completion, never the

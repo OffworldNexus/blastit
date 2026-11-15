@@ -1615,3 +1615,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T05:27 [MB.3.45] (lead) base 88874a4
 - 2026-11-15T05:57 [MB.3.45] (lead) status active -> review
 - 2026-11-15T06:10 [MB.3.45] (lead) status review -> done
+- 2026-11-15T06:12 [MB.3.45] (lead) LEAD ACCEPTANCE, asked for explicitly by the reviewer (finding 7): item 5's requested red run (feed `view_answered` from `head_sent` and watch a leg go red) doe
+- 2026-11-15T06:12 [MB.3.49] (lead) created (task) MB.3.45 review MINORs: can_dispatch's guard has no leg, a DEBUG print in a protected test, and four stale claims
+- 2026-11-15T06:12 [MB.3.49] (lead) status ready -> active
+- 2026-11-15T06:12 [MB.3.49] (lead) attempt 1/3 started
+- 2026-11-15T06:12 [MB.3.49] (lead) base 5ee6a57
+- 2026-11-15T06:18 [MB.3.49] (lead) status active -> review
+- 2026-11-15T06:23 [MB.3.49] (lead) status review -> done

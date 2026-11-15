@@ -198,8 +198,8 @@ pub enum Outcome {
     ///
     /// Distinct from [`Ok`](Self::Ok) because the handler never returned (the
     /// request is a failed one, and `R19` bills it its wall time) and from
-    /// [`ViewDied`](Self::ViewDied) because the view process is still alive and
-    /// serves the next request.
+    /// [`ViewDied`](Self::ViewDied) because it answered before it went away —
+    /// not a death mid-request.
     Bailed,
     /// The client went away before the response was complete.
     ClientGone,

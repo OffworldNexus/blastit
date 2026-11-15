@@ -55,3 +55,7 @@ status active -> review
 ## 2026-11-15T06:10 [lead]
 
 status review -> done
+
+## 2026-11-15T06:12 [lead]
+
+LEAD ACCEPTANCE, asked for explicitly by the reviewer (finding 7): item 5's requested red run (feed `view_answered` from `head_sent` and watch a leg go red) does NOT exist after item 4, because the event is emitted before the late `DONE`. ACCEPTED as a substitution: the reviewer confirmed the conflation is inert (the charge at the 504 sees `bailed = false`), so the predicate table plus the leg's property assertions are the false branch's guard, and MB.3.49 carries the quota of a leg that reads the fair-queue debit. This is a recorded acceptance, not a waiver of the item.

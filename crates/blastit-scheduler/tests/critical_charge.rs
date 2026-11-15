@@ -34,6 +34,11 @@
 //! design** is `bailed` with its cost, though init's `Ctl::Exited` may reach the
 //! scheduler first — while a view whose channel closes with nothing written is
 //! still `view_died` (the `MB.3.48` flake).
+//!
+//! `MB.3.49` pins the half `MB.3.45` left to its own words: between `Ctl::Exited`
+//! and the ordered close, `can_dispatch`'s `view.exited.is_none()` is what
+//! keeps a second request off a process init has already reported gone, even
+//! with a free worker slot.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -68,6 +73,13 @@ const QUEUE_WAIT: Duration = Duration::from_millis(5);
 /// The request timeout both worlds run with (`Options::new`).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How many scheduler turns a spin-wait gives an event that must *not* happen.
+///
+/// A dispatch the scheduler is wrong to make happens in the first handful of
+/// turns, so a leg that waits this long and still sees nothing has shown the
+/// request stayed queued; a shorter wait would pass by being early.
+const SETTLE: usize = 256;
+
 /// The two routes the queue-wait legs need: `first`'s view takes the only
 /// worker slot, `second`'s request waits behind it — which is the queue wait a
 /// scheduler-written answer must never bill (`MB.3.45`).
@@ -101,7 +113,6 @@ async fn queued_second_request(second: Script) -> World {
 
     world.http.send_request(1, head("GET", "/first"), b"").await;
     world.until(|world| dispatched(world, 0) == 1).await;
-    eprintln!("DEBUG first dispatched");
     let first = world.http.response(1).await;
     assert!(
         ended(&first),
@@ -673,5 +684,88 @@ async fn a_view_that_answers_then_retires_is_billed_for_its_answer_not_a_death()
         died.cost_ns() > 0,
         "the worker span it held before it died is charged: {}ns",
         died.cost_ns()
+    );
+}
+
+#[tokio::test]
+async fn a_view_init_reported_gone_is_never_given_a_second_request() {
+    tokio::time::pause();
+    // `can_dispatch`'s `view.exited.is_none()` (`MB.3.45`, pinned here by
+    // `MB.3.49`): once init has reported the process gone, no more work goes to
+    // it, even though its `view.chan` is still open for the frames it wrote and
+    // the route's view is still `ready`. What keeps the second request queued
+    // is that fact alone: a second worker slot is free, so `max_workers` and
+    // the worker cap cannot be what turns it away.
+    //
+    // The view holds its requests but keeps reading, so a request dispatched to
+    // it is visible in the view's own log — that is the fact the assertion
+    // below reads, not a scheduler-internal one.
+    let gate = Arc::new(Semaphore::new(0));
+    let mut options = Options::new().script(
+        0,
+        Script::Hold {
+            body: b"first".to_vec(),
+            gate: gate.clone(),
+        },
+    );
+    options.cfg.max_workers = 2;
+    let mut world = World::start(options);
+    world.http.send_request(1, head("GET", "/bail"), b"").await;
+    world.until(|world| dispatched(world, 0) == 1).await;
+    world.advance(HELD).await;
+
+    let pid = world.log.lock().unwrap().pids[0].1;
+    // init reports the process gone *before* the view writes anything. The
+    // channel stays open — the view is still reading — so this is the
+    // ctl-before-frames window, not the ordered close.
+    world.ctl_send(Ctl::Exited {
+        route: 0,
+        pid,
+        status: ExitStatus::Signal(9),
+    });
+    for _ in 0..SETTLE {
+        tokio::task::yield_now().await;
+    }
+
+    // A slot is free and the route still has a view, so a dispatch here would
+    // be to the process init just reported gone — exactly what `can_dispatch`
+    // must refuse.
+    world
+        .http
+        .send_request(2, head("GET", "/second"), b"")
+        .await;
+    for _ in 0..SETTLE {
+        tokio::task::yield_now().await;
+        assert!(
+            dispatched(&world, 0) == 1,
+            "a view init reported gone was given the second request: {:?}",
+            world.log.lock().unwrap().request_ids(0)
+        );
+    }
+
+    // The held answer releases the worker slot; the view stays alive, so what
+    // lets the queued request leave is the close of its channel.
+    world.set_script(
+        0,
+        Script::Answer {
+            body: b"next".to_vec(),
+        },
+    );
+    gate.add_permits(1);
+    let frames = world.http.response(1).await;
+    assert_eq!(status_of(&frames), 200, "the held request's answer");
+    assert!(ended(&frames), "the held response: {frames:?}");
+
+    world.stop_view(pid);
+    world.until(|world| dispatched(world, 0) == 2).await;
+    assert_eq!(
+        status_of(&world.http.response(2).await),
+        200,
+        "the queued request was served by the process that replaced the exited view"
+    );
+    assert_eq!(
+        world.log.lock().unwrap().pids.len(),
+        2,
+        "one replacement was forked for the queued request"
     );
 }

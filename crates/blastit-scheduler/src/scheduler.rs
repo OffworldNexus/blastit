@@ -116,8 +116,8 @@
 //! away mid-request. The event keeps both numbers as `cost_ns` (what was
 //! charged) and `cpu_ns` (what the worker reported, `null` when it had no
 //! thread clock to read), and it is still emitted when the scheduler learns the
-//! request ended — at `RESP_END` for a response, at release for everything
-//! else.
+//! request ended — at `RESP_END` for a response, otherwise at the statement
+//! that concludes it (the scheduler's own answer, a cancellation, or release).
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
@@ -1998,8 +1998,11 @@ impl Scheduler {
         }
         self.mark_finished(stream_id);
         // The response ends here, so its span is final: charge before the event
-        // that reports it (`MB.3.45`). `charge` is idempotent, so the `DONE`
-        // that releases the slot later charges nothing more.
+        // that reports it (`MB.3.45`). The fair-queue debit lands here, while
+        // the slot is still held to the view's `DONE`, not at the later
+        // release: the span billed is the request's own and the debit belongs
+        // to the charge (`MB.3.49`, [`Scheduler::charge`]). `charge` is
+        // idempotent, so that `DONE` charges nothing more.
         self.charge(stream_id);
         self.emit_request(stream_id);
         if view.is_none() {
@@ -3607,6 +3610,10 @@ impl Scheduler {
             request.outcome = Outcome::Unmatched;
         }
         self.mark_finished(stream_id);
+        // The response is over, so its span is final here even though the slot
+        // is not: charge and emit now (`MB.3.45`). The fair-queue debit lands
+        // at this refusal, not at the `DONE` that frees the slot (`MB.3.49`,
+        // [`Scheduler::charge`]).
         self.charge(stream_id);
         self.emit_request(stream_id);
         if view.is_none() {
@@ -3745,12 +3752,21 @@ impl Scheduler {
     /// there is nothing of its to distrust, and the request never had the
     /// worker it would have been charged for.
     ///
-    /// It is idempotent, and it is called from two places: at the response end
-    /// — with the report when the view sent one, with the observed time when it
-    /// did not — and at release, for a request whose response never ends (a
-    /// `504`, a cancellation, a view that died). A response that answered a
-    /// `5xx` skips the first: it is charged at release instead, once its `DONE`
-    /// has said whether the handler returned or bailed (`MB.3.41`).
+    /// It is idempotent, and every path that concludes a request charges before
+    /// it emits that request's `request` event (`MB.3.45`): the response end,
+    /// the scheduler's own answer, a cancellation, a refusal, a view failure.
+    /// [`Scheduler::release`] charges again as the fallback for a request that
+    /// reaches it uncharged — the completed `5xx` whose `DONE` decides its
+    /// label (`MB.3.41`), and a view that went away before any of the paths
+    /// above could run.
+    ///
+    /// The fair-queue debit therefore lands at the first of those charges, not
+    /// at the release that frees the slot: a client cancellation and a refused
+    /// body both leave the slot held to the view's `DONE`, so the flow is
+    /// debited when the response ends and its release comes later (`MB.3.49`).
+    /// That endpoint is deliberate: the span billed is the request's own, and
+    /// splitting the debit from the charge would need a residual carried to
+    /// release while the event must already report the charge.
     fn charge(&mut self, stream_id: u32) {
         let Some(request) = self.requests.get(&stream_id) else {
             return;
@@ -4075,9 +4091,10 @@ impl Scheduler {
         // with the view's report when it sent one, with the time the scheduler
         // observed itself when it did not — so the event carries what was
         // actually charged, and the flow is behind the others before its thread
-        // even exits. [`Scheduler::charge`] is idempotent, and
-        // [`Scheduler::release`] charges the requests that never end a response
-        // at all (a `504`, a cancellation, a view that died).
+        // even exits. Every path that concludes a request charges before it
+        // emits (`MB.3.45`), so [`Scheduler::release`] only charges a request
+        // that reaches it uncharged — this deferred `5xx` once its `DONE`
+        // labels it, and a view that died with nothing written.
         if let Some(cost) = cost
             && let Some(request) = self.requests.get_mut(&stream_id)
         {
@@ -4568,8 +4585,10 @@ mod tests {
     /// `MB.3.41`: only a `5xx` a view **answered by bailing** is the `R19`
     /// crash case.
     ///
-    /// `head_sent` is the flag that says a `RESP_HEAD` came from the view and
-    /// `bailed` is the `DONE` that says the handler never returned. Both are
+    /// `view_answered` is the flag that says the `RESP_HEAD` came from the view
+    /// (`view_head`), and `bailed` is the `DONE` that says the handler never
+    /// returned. `head_sent` is not that flag: `respond`, the scheduler's own
+    /// answer, sets it too (`MB.3.45`). `view_answered` and `bailed` are both
     /// required, and that keeps the scheduler's own `502`/`504`/`503` out of
     /// it — a timed-out request must not be charged the queue wait it spent
     /// before it ever reached a worker — while a script's own `500` is charged
