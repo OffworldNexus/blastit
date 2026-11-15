@@ -19,6 +19,55 @@ use std::os::unix::ffi::OsStrExt;
 
 use crate::Error;
 
+/// A control-message length, as `usize`.
+///
+/// `struct msghdr::msg_controllen` and `struct cmsghdr::cmsg_len` are `size_t`
+/// in glibc's headers and `socklen_t` (a `u32`) in musl's; a 32-bit target
+/// narrows `size_t` to those same 32 bits. No code here may name one of those
+/// typedefs, because the same source compiles against either libc: every length
+/// is *read* through this function and *written* through [`set_control_len`] or
+/// [`set_cmsg_len`], which resolve to whatever type the header in front of them
+/// declares. A value that cannot be a `usize` saturates, and the caller's
+/// buffer bound then clamps it — the same refusal a forged length already
+/// gets, one step earlier.
+#[inline]
+fn control_len<T>(value: T) -> usize
+where
+    usize: TryFrom<T>,
+{
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+/// Write `msg_controllen` for a control buffer of `bytes` bytes.
+///
+/// `as _` writes the field in the type the header declares (`size_t` in glibc,
+/// `socklen_t` in musl) instead of in the type one libc happens to call it, so
+/// there is no `cfg` and no second copy of the send path. The buffer is
+/// [`CmsgBuffer::LEN`] bytes and that length is asserted below to fit a
+/// `socklen_t`, so the narrowing cannot lose anything on any target.
+#[inline]
+fn set_control_len(msg: &mut libc::msghdr, bytes: usize) {
+    msg.msg_controllen = bytes as _;
+}
+
+/// Write `cmsg_len` for a control message that carries `payload` bytes.
+///
+/// # Safety
+///
+/// `header` must point at a `cmsghdr` that lies inside a control buffer this
+/// process owns and that is alive for the write.
+unsafe fn set_cmsg_len(header: *mut libc::cmsghdr, payload: usize) {
+    // `CMSG_LEN` takes a `c_uint` and returns one on every Linux libc.
+    let payload = u32::try_from(payload).unwrap_or(u32::MAX);
+    // SAFETY: `CMSG_LEN` is arithmetic from libc's headers; it reads no memory
+    // and its argument is a length, not a pointer.
+    let len = unsafe { libc::CMSG_LEN(payload) };
+    // SAFETY: the caller guarantees `header` points at a live `cmsghdr`. The
+    // write stays a raw-pointer write — the same buffer is also reached through
+    // `CMSG_DATA` — so no `&mut` is created that would claim the whole header.
+    unsafe { (*header).cmsg_len = len as _ };
+}
+
 /// The backlog used by [`bind_unix_listener`].
 ///
 /// A view's pg listeners see one connection per request at most, so the queue is
@@ -95,7 +144,7 @@ pub fn send_with_fd(sock: BorrowedFd<'_>, bytes: &[u8], fd: BorrowedFd<'_>) -> i
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = buffer.0.as_mut_ptr().cast::<libc::c_void>();
-    msg.msg_controllen = buffer.0.len();
+    set_control_len(&mut msg, buffer.0.len());
 
     // SAFETY: `msg_control` points at `buffer`, which is at least
     // `CMSG_SPACE(size_of::<c_int>())` bytes of aligned storage, and
@@ -109,12 +158,14 @@ pub fn send_with_fd(sock: BorrowedFd<'_>, bytes: &[u8], fd: BorrowedFd<'_>) -> i
     unsafe {
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len =
-            libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as libc::size_t;
+        // SAFETY: `cmsg` points into `buffer`, which is alive here.
+        set_cmsg_len(cmsg, std::mem::size_of::<libc::c_int>());
         ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<libc::c_int>(), fd.as_raw_fd());
     }
-    msg.msg_controllen =
-        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) } as usize;
+    // SAFETY: `CMSG_SPACE` is arithmetic from libc's headers; it reads no
+    // memory.
+    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) };
+    set_control_len(&mut msg, control_len(space));
 
     // SAFETY: `msg` describes one valid iovec and one valid control message,
     // both alive for the duration of the call.
@@ -144,7 +195,7 @@ pub fn recv_with_fd(sock: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<(usize, 
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = buffer.0.as_mut_ptr().cast::<libc::c_void>();
-    msg.msg_controllen = buffer.0.len();
+    set_control_len(&mut msg, buffer.0.len());
 
     // SAFETY: `msg` describes one valid iovec and one valid control buffer,
     // both alive for the duration of the call.
@@ -198,18 +249,23 @@ unsafe fn collect_fds(msg: &libc::msghdr) -> Vec<OwnedFd> {
     // The buffer the kernel was allowed to write into, as bounds to check the
     // peer's `cmsg_len` against.
     let buffer_start = msg.msg_control as usize;
-    let buffer_end = buffer_start.saturating_add(msg.msg_controllen);
+    let buffer_end = buffer_start.saturating_add(control_len(msg.msg_controllen));
     // SAFETY: the caller guarantees `msg` describes a valid control buffer
     // that outlives this function.
     let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
     while !cmsg.is_null() {
         // SAFETY: `cmsg` points inside the control buffer `msg` describes.
-        let (level, kind, len) =
-            unsafe { ((*cmsg).cmsg_level, (*cmsg).cmsg_type, (*cmsg).cmsg_len) };
+        let (level, kind, len) = unsafe {
+            (
+                (*cmsg).cmsg_level,
+                (*cmsg).cmsg_type,
+                control_len((*cmsg).cmsg_len),
+            )
+        };
         if level == libc::SOL_SOCKET && kind == libc::SCM_RIGHTS {
             // SAFETY: `CMSG_LEN(0)` is the header length of an empty control
             // message; what is left after the header is the payload.
-            let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
+            let header_len = control_len(unsafe { libc::CMSG_LEN(0) });
             let payload = len.saturating_sub(header_len);
             // SAFETY: the header is inside the buffer, so its data pointer is
             // inside it too.
@@ -254,6 +310,13 @@ impl CmsgBuffer {
         Self([0_u8; Self::LEN])
     }
 }
+
+/// The control buffer must fit the narrowest length field any Linux libc
+/// declares for it (`socklen_t`, `u32`, in musl), or [`set_control_len`] would
+/// truncate the length it writes. Two headers and a descriptor are a few dozen
+/// bytes, so this holds with room to spare on every target — and now it is
+/// checked at compile time instead of being a comment.
+const _: () = assert!(CmsgBuffer::LEN <= libc::socklen_t::MAX as usize);
 
 /// Bind `addr` with `SO_REUSEADDR`, close-on-exec, and listen.
 ///
@@ -373,10 +436,27 @@ pub fn bind_unix_listener(path: &Path, owner_uid: u32, mode: u32) -> io::Result<
 
 /// Set the mode of the socket file `name` inside `dir`, without following a
 /// symlink at the last component.
+///
+/// # Kernels without `fchmodat2`
+///
+/// `fchmodat2` is Linux 6.5 and newer, and gVisor does not have it. The
+/// decision here is to **degrade, not refuse**: `ENOSYS`/`EINVAL` falls back to
+/// [`chmod_socket_via_proc`], which reaches the same inode through an
+/// `O_PATH|O_NOFOLLOW` descriptor and a `/proc/self/fd/<n>` magic link, and so
+/// keeps the no-symlink-follow guarantee this function exists for. Refusing
+/// would make every pre-6.5 kernel (and every gVisor host) unable to start a
+/// pg proxy at all, for a guarantee the fallback also provides.
+///
+/// The fallback failing is still fatal — the caller returns before `listen`, so
+/// a socket never becomes reachable with the umask's mode. On a host with no
+/// `/proc` both routes are unavailable and that error is what the caller sees;
+/// it names a requirement we cannot meet rather than serving a too-open socket.
 fn chmod_socket(dir: BorrowedFd<'_>, name: &OsStr, path: &Path, mode: u32) -> io::Result<()> {
     match fchmodat2(dir, name, mode) {
         Ok(()) => Ok(()),
-        // No `fchmodat2`: Linux before 6.5, and gVisor today.
+        // No `fchmodat2`: an architecture whose syscall number this crate
+        // cannot trust, a kernel before 6.5, gVisor, or a seccomp filter that
+        // answers `EINVAL`.
         Err(err) if matches!(err.raw_os_error(), Some(libc::ENOSYS) | Some(libc::EINVAL)) => {
             chmod_socket_via_proc(dir, name, path, mode)
         }
@@ -384,8 +464,52 @@ fn chmod_socket(dir: BorrowedFd<'_>, name: &OsStr, path: &Path, mode: u32) -> io
     }
 }
 
+/// `fchmodat2`'s syscall number, where this crate can state it.
+///
+/// `fchmodat2` was added to Linux's *unified* syscall table, where one number
+/// serves every architecture: 452. `libc` 0.2.191 only publishes
+/// `SYS_fchmodat2` for some of those architectures (x86, x86_64, m68k, s390x,
+/// loongarch64) — aarch64, arm and riscv are missing it, which is what broke
+/// the aarch64 build — so the number is written here.
+///
+/// The list is deliberately the architectures that share the unified table.
+/// alpha, mips, parisc and sparc keep their own numbering, where 452 is some
+/// *other* syscall: guessing there would not compile-fail, it would call
+/// something unrelated. On those the constant is `None`, [`fchmodat2`] reports
+/// `ENOSYS` without making a call, and [`chmod_socket`] takes the `/proc`
+/// route it already takes on pre-6.5 kernels.
+#[cfg(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "arm",
+    target_arch = "riscv32",
+    target_arch = "riscv64",
+    target_arch = "s390x",
+    target_arch = "loongarch64",
+))]
+const FCHMODAT2_SYSCALL: Option<libc::c_long> = Some(452);
+
+/// See the unified-table constant above.
+#[cfg(not(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "arm",
+    target_arch = "riscv32",
+    target_arch = "riscv64",
+    target_arch = "s390x",
+    target_arch = "loongarch64",
+)))]
+const FCHMODAT2_SYSCALL: Option<libc::c_long> = None;
+
 /// `fchmodat2(dirfd, name, mode, AT_SYMLINK_NOFOLLOW)`.
 fn fchmodat2(dir: BorrowedFd<'_>, name: &OsStr, mode: u32) -> io::Result<()> {
+    let Some(number) = FCHMODAT2_SYSCALL else {
+        // Not available as a trustworthy number on this architecture; the
+        // caller reads `ENOSYS` as "no `fchmodat2` here" and falls back.
+        return Err(io::Error::from_raw_os_error(libc::ENOSYS));
+    };
     let name = CString::new(name.as_bytes())
         .map_err(|_| io::Error::other("a file name cannot contain a NUL byte"))?;
     // SAFETY: `fchmodat2` takes a descriptor, a NUL-terminated path, a mode and
@@ -393,7 +517,7 @@ fn fchmodat2(dir: BorrowedFd<'_>, name: &OsStr, mode: u32) -> io::Result<()> {
     // that makes it refuse a symlink at the last component.
     let ret = unsafe {
         libc::syscall(
-            libc::SYS_fchmodat2,
+            number,
             dir.as_raw_fd(),
             name.as_ptr(),
             mode as libc::mode_t,
@@ -591,6 +715,102 @@ mod tests {
         assert_eq!(read_to_end(log_read), b"through the received fd");
     }
 
+    /// The length one end writes must be the length the other end computes.
+    ///
+    /// `msg_controllen` and `cmsg_len` are `size_t` fields in glibc's headers
+    /// and `socklen_t` fields in musl's, so a target can *compile* while
+    /// truncating a length — and a truncated `cmsg_len` silently drops the
+    /// descriptor payload. This walks the real kernel path (`send_with_fd` out,
+    /// a raw `recvmsg` in) and pins the arithmetic rather than the typedef, so
+    /// a third target cannot break it unnoticed.
+    #[test]
+    fn control_message_lengths_agree_on_both_ends() {
+        let (sender, receiver) = must(socketpair_stream());
+        let (payload_read, payload_write) = must(pipe());
+        assert_eq!(
+            must(send_with_fd(sender.as_fd(), b"xy", payload_write.as_fd())),
+            2
+        );
+
+        #[repr(align(8))]
+        struct Buffer([u8; CmsgBuffer::LEN]);
+        let mut buffer = Buffer([0_u8; CmsgBuffer::LEN]);
+        let mut bytes = [0_u8; 8];
+        let mut iov = libc::iovec {
+            iov_base: bytes.as_mut_ptr().cast::<libc::c_void>(),
+            iov_len: bytes.len(),
+        };
+        // SAFETY: `msghdr` is a plain C struct of integers and pointers; all
+        // zero is a valid empty header, which the fields below fill in.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = buffer.0.as_mut_ptr().cast::<libc::c_void>();
+        set_control_len(&mut msg, buffer.0.len());
+        // SAFETY: `msg` describes one valid iovec and one valid control buffer,
+        // both alive for the duration of the call.
+        let read = unsafe { libc::recvmsg(receiver.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC) };
+        assert_eq!(read, 2, "the plain payload must arrive with the descriptor");
+        assert_eq!(&bytes[..2], b"xy");
+
+        // SAFETY: `msg` describes the control buffer above, which is still
+        // alive and which the kernel has just filled in.
+        let (cmsg_len, controllen, level, kind, data_start) = unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            assert!(!cmsg.is_null(), "the kernel must attach a header");
+            (
+                control_len((*cmsg).cmsg_len),
+                control_len(msg.msg_controllen),
+                (*cmsg).cmsg_level,
+                (*cmsg).cmsg_type,
+                libc::CMSG_DATA(cmsg) as usize,
+            )
+        };
+        let header_len = control_len(unsafe { libc::CMSG_LEN(0) });
+        let one_fd =
+            control_len(unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) });
+        assert_eq!(level, libc::SOL_SOCKET);
+        assert_eq!(kind, libc::SCM_RIGHTS);
+        assert_eq!(
+            cmsg_len, one_fd,
+            "the length the sender wrote must be the length the receiver computes"
+        );
+        assert_eq!(
+            cmsg_len.saturating_sub(header_len),
+            std::mem::size_of::<libc::c_int>(),
+            "exactly one descriptor of payload"
+        );
+        // `msg_controllen` is the *padded* `CMSG_SPACE` and `cmsg_len` the
+        // unpadded `CMSG_LEN`: the difference is alignment padding, never a
+        // whole descriptor, and it still fits the buffer that was filled in.
+        assert_eq!(
+            controllen,
+            control_len(unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) }),
+            "the kernel reports the padded space for one descriptor"
+        );
+        assert!(
+            controllen >= cmsg_len && controllen - cmsg_len < std::mem::size_of::<usize>(),
+            "control data is the header length plus alignment padding"
+        );
+        assert!(
+            data_start + cmsg_len.saturating_sub(header_len)
+                <= msg.msg_control as usize + controllen,
+            "the descriptor must end inside the control data the kernel reported"
+        );
+
+        // SAFETY: the header describes a control buffer that is alive for this
+        // call and holds a descriptor the kernel installed for this process.
+        let fds = unsafe { collect_fds(&msg) };
+        assert_eq!(fds.len(), 1, "one descriptor, because one fits the length");
+        let received = must_some(fds.into_iter().next());
+        // A length that survived the round trip also survived it as a working
+        // descriptor: writing through it reaches the far end of the pipe.
+        drop(payload_write);
+        write_all(received.as_fd(), b"intact");
+        drop(received);
+        assert_eq!(read_to_end(payload_read), b"intact");
+    }
+
     #[test]
     fn recv_with_fd_returns_none_when_no_descriptor_arrives() {
         let (sender, receiver) = must(socketpair_stream());
@@ -663,7 +883,7 @@ mod tests {
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = buffer.0.as_mut_ptr().cast::<libc::c_void>();
-        msg.msg_controllen = buffer.0.len();
+        set_control_len(&mut msg, buffer.0.len());
         // SAFETY: the control buffer is large enough for the descriptors we
         // write into it, and it outlives the call below.
         unsafe {
@@ -672,12 +892,14 @@ mod tests {
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
             (*cmsg).cmsg_type = libc::SCM_RIGHTS;
             let payload = std::mem::size_of_val(fds);
-            (*cmsg).cmsg_len = libc::CMSG_LEN(payload as u32) as libc::size_t;
+            // SAFETY: `cmsg` points into `buffer`, which is alive here.
+            set_cmsg_len(cmsg, payload);
             let data = libc::CMSG_DATA(cmsg).cast::<libc::c_int>();
             for (index, fd) in fds.iter().enumerate() {
                 ptr::write_unaligned(data.add(index), *fd);
             }
-            msg.msg_controllen = libc::CMSG_SPACE(payload as u32) as usize;
+            let space = libc::CMSG_SPACE(u32::try_from(payload).unwrap_or(u32::MAX));
+            set_control_len(&mut msg, control_len(space));
             let written = libc::sendmsg(sock.as_raw_fd(), &msg, 0);
             assert_eq!(written as usize, bytes.len());
         }
@@ -735,7 +957,7 @@ mod tests {
         let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
         msg.msg_iov = &mut iov;
         msg.msg_control = buffer.0.as_mut_ptr().cast::<libc::c_void>();
-        msg.msg_controllen = buffer.0.len();
+        set_control_len(&mut msg, buffer.0.len());
         // SAFETY: the control buffer is 64 bytes, and the header plus one
         // descriptor fits in the first 20 bytes the kernel would have filled.
         unsafe {
@@ -744,15 +966,16 @@ mod tests {
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
             (*cmsg).cmsg_type = libc::SCM_RIGHTS;
             // Claims two descriptors...
-            (*cmsg).cmsg_len =
-                libc::CMSG_LEN((2 * std::mem::size_of::<libc::c_int>()) as u32) as libc::size_t;
+            // SAFETY: `cmsg` points into `buffer`, which is alive here.
+            set_cmsg_len(cmsg, 2 * std::mem::size_of::<libc::c_int>());
             let data = libc::CMSG_DATA(cmsg).cast::<libc::c_int>();
             ptr::write_unaligned(data, first);
             ptr::write_unaligned(data.add(1), second);
         }
         // ... but the buffer that was filled in only has room for one.
-        msg.msg_controllen =
-            unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) } as usize;
+        let one_fd =
+            control_len(unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) });
+        set_control_len(&mut msg, one_fd);
 
         // SAFETY: the header describes a control buffer that is alive for the
         // duration of the call and holds descriptors this process owns.

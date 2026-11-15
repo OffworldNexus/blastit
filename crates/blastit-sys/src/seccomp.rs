@@ -242,6 +242,25 @@ const AUDIT_ARCH: u32 = 0;
 #[cfg(target_arch = "x86_64")]
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
+/// `kexec_file_load`'s syscall number.
+///
+/// The number is per architecture, and it is not one of the unified ones:
+/// `kexec_file_load` arrived in 3.17, before new syscalls were numbered alike
+/// everywhere, so it is **320** on x86_64 and **294** on aarch64's asm-generic
+/// table. `libc` 0.2.191 publishes `SYS_kexec_file_load` for x86_64 in both
+/// libcs and for aarch64 in glibc, but not for `aarch64-unknown-linux-musl`,
+/// which is what makes that target fail to compile. The number is therefore
+/// spelled out for the two architectures this module can filter — the same two
+/// values `SHARED_DENIED_NUMBERS` pins below — and read from `libc` elsewhere,
+/// where [`install`] refuses with [`Error::UnsupportedArchitecture`] before any
+/// table is compared.
+#[cfg(target_arch = "x86_64")]
+const SYS_KEXEC_FILE_LOAD: libc::c_long = 320;
+#[cfg(target_arch = "aarch64")]
+const SYS_KEXEC_FILE_LOAD: libc::c_long = 294;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const SYS_KEXEC_FILE_LOAD: libc::c_long = libc::SYS_kexec_file_load;
+
 /// The syscalls every role refuses, with the name of each for documentation.
 ///
 /// The names are not part of the filter — a filter compares numbers — but they
@@ -265,7 +284,7 @@ const DENIED: &[(&str, libc::c_long)] = &[
     ("io_uring_enter", libc::SYS_io_uring_enter),
     ("io_uring_register", libc::SYS_io_uring_register),
     ("kexec_load", libc::SYS_kexec_load),
-    ("kexec_file_load", libc::SYS_kexec_file_load),
+    ("kexec_file_load", SYS_KEXEC_FILE_LOAD),
     ("init_module", libc::SYS_init_module),
     ("finit_module", libc::SYS_finit_module),
     ("delete_module", libc::SYS_delete_module),

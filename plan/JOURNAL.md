@@ -1767,3 +1767,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T11:09 [MB.3.56] (lead) attempt 3/3 started
 - 2026-11-15T11:31 [MB.3.56] (lead) Accepted residual, recorded rather than chased: `docs/security.md:155` says "as the boot's own `stat`", but the tick is anchored to the FILE's recorded status-c
 - 2026-11-15T11:31 [MB.3.56] (lead) status active -> done
+- 2026-11-15T11:33 [MB.3.18] (lead) status ready -> active
+- 2026-11-15T11:33 [MB.3.18] (lead) attempt 1/3 started
+- 2026-11-15T11:33 [MB.3.18] (lead) base a86fd31
+- 2026-11-15T11:55 [MB.3.18] (lead) status active -> review
+- 2026-11-15T11:56 [MB.3.57] (lead) created (task) Port blastit-sys to aarch64-gnu and x86_64-musl so the 4-leg matrix can exist
+- 2026-11-15T11:56 [MB.3.18] (lead) Owner ruling: the 2-wheel/1-archive/3-shim matrix is a report of a BLOCKER, not the release (aarch64 and Alpine/musl are in scope by explicit decision). MB.3.57
+- 2026-11-15T11:56 [MB.3.57] (lead) status ready -> active
+- 2026-11-15T11:56 [MB.3.57] (lead) attempt 1/3 started
+- 2026-11-15T11:56 [MB.3.57] (lead) base a86fd31
+- 2026-11-15T12:02 [MB.3.18] (lead) REVIEW FAIL (attempt 1) — and it is the failure mode the "CI-only" label exists for: the authorised-but-never-run publish workflow has two bugs that would make 
+- 2026-11-15T12:02 [MB.3.18] (lead) edited fields
+- 2026-11-15T12:02 [MB.3.18] (lead) status review -> ready
+- 2026-11-15T12:12 [MB.3.57] (lead) status active -> review
+- 2026-11-15T12:17 [MB.3.57] (lead) Reviewer PASS, five MINORs recorded for the tail (none blocks the port): (1) `sock.rs:37-41` says a saturated `control_len` is "clamped by the caller's buffer b
+- 2026-11-15T12:17 [MB.3.57] (lead) status review -> done
