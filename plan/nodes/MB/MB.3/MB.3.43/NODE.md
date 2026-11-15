@@ -2,7 +2,7 @@
 id: MB.3.43
 title: "Close MB.3.40 review MINORs: the gate's call site needs a protected witness, and two new unit tests assert nothing"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.3.40]
@@ -10,13 +10,14 @@ paths:
   - crates/blastit/src/stage0.rs
   - crates/blastit/src/host.rs
   - crates/blastit/tests/critical_php_embed.rs
+  - docs/knowledge/LESSONS.md
   - plan/nodes/MB/MB.3/MB.3.40/RESULT.md
   - plan/nodes/MB/MB.3/MB.3.42/RESULT.md
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-15T02:52"
-updated: "2026-11-15T02:55"
+updated: "2026-11-15T03:29"
 ---
 
 # Goal

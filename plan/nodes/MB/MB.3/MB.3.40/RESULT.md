@@ -115,8 +115,11 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out
 ```
 
 **M4 (extra) — the gate's *call site* removed** (`php_boot_in` stops calling
-`deployment_refusal`), which the protected file cannot see because an unprivileged
-process cannot reach the `Production` gate at all (see "which half is unit-level"):
+`deployment_refusal`). When this node landed, the protected file could not see this
+because an unprivileged process cannot reach the `Production` gate at all (see
+"which half is unit-level"); **since `MB.3.43` it can** — the protected leg
+`the_deployment_gate_is_invoked_behind_its_sentence` reddens on exactly this
+mutation, and the run below is the unit-level half of the same control:
 
 ```console
 $ cargo test -p blastit --locked --lib stage0::php_boot_gate
@@ -176,10 +179,17 @@ $ cargo clippy --workspace --all-targets --locked --features python -- -D warnin
 exit=0
 ```
 
-No new dependency (`git diff Cargo.toml Cargo.lock` is empty) and no new `unsafe`:
-the dynamic-section walk is `File::seek`/`read_exact` only; the single `unsafe` in
-`host.rs` is the pre-existing `getxattr` in `has_file_caps`. (A sibling's clippy run
-caught `write_section`'s 8 arguments at `host.rs:1893`; that test helper now takes a
+No new dependency (`git diff Cargo.toml Cargo.lock` is empty) and no new `unsafe` on
+a non-test path: the dynamic-section walk is `File::seek`/`read_exact` only, and the
+only non-test `unsafe` in `host.rs` is the pre-existing `getxattr` in
+`has_file_caps`. **Correction (`MB.3.43`)**: the sentence above said "the single
+`unsafe` in `host.rs`", which was wrong. There are three: the `getxattr` above, a
+`setxattr` in the root-only `has_file_caps_sees_one_that_is_there` (still there,
+still SAFETY-commented), and — from this node until `MB.3.43` — a second `setxattr`
+in `a_capable_object_is_refused` at `host.rs:2072`, which `MB.3.43` removed by
+injecting the capability predicate. So the rule that held is "one non-test `unsafe`,
+plus SAFETY-commented test ones", not "one". (A sibling's clippy run caught
+`write_section`'s 8 arguments at `host.rs:1893`; that test helper now takes a
 `SectionHeader` struct — `rust-standards` §3 — instead of an `#[allow]`.)
 
 ### 6. `tools/critical_guard.py --base 99557d1 --node MB.3.40`
@@ -195,24 +205,38 @@ exit=0
 
 ## Which half is end to end, and which is unit-level
 
-Stated plainly, because the node asks for it:
+Stated plainly, because the node asks for it. **Corrected by `MB.3.43`**: this
+section used to say "the four named legs drive `Provenance`" as if that were only
+about the refusals, and it read `the_same_tree_owned_by_init_is_accepted` as if it
+were stronger than the other three. It is not: that leg also never boots. A leg is
+end to end only when a process serves.
 
 * **End to end**: `a_dev_boot_of_a_world_writable_tree_still_serves` — a real
   `blastit dev` process, a real listener, a real HTTP answer, on the `0777` fixture
-  the other legs refuse. That is what proves the rule is `Production`-scoped, which is
-  half of the node's claim.
-* **Unit-level, by necessity**: every *refusal* leg. An unprivileged process cannot
-  reach the `Production` half of stage 0 at all — `blastit_sys::caps::detect` fails and
-  `fail_early` exits **before** `Config::from_env` (measured; `LESSONS.md` `MB.1.6`),
-  and running the gate as root is not something `make check` may depend on. So the
-  four named legs drive `blastit::host::Provenance` — the exact function
-  `stage0::deployment_refusal` calls, in the exact order it calls it — and the
-  *sentence and the call site* are pinned by `stage0::php_boot_gate`'s
+  the other legs refuse. That is the only leg here that observes a boot, and it is
+  what proves the rule is `Production`-scoped, which is half of the node's claim.
+* **Unit-level**, all four named legs including
+  `the_same_tree_owned_by_init_is_accepted`: each drives
+  `blastit::host::Provenance` (the accepted twin through `check_objects` **and**
+  `check_trees`) and none of them starts a boot, binds a listener or answers a
+  request — the accepted twin's `assert!(…)` is about the decision, not about a
+  serving process. An unprivileged process cannot reach the `Production` half of
+  stage 0 at all — `blastit_sys::caps::detect` fails and `fail_early` exits
+  **before** `Config::from_env` (measured; `LESSONS.md` `MB.1.6`) — and running the
+  gate as root is not something `make check` may depend on.
+* **The sentence and the call**: pinned by `stage0::php_boot_gate`'s
   `a_deployment_boot_refuses_a_pair_a_route_uid_could_replace`,
-  `…_tree_a_route_uid_could_write` and `a_development_boot_does_not_apply_the_production_rule`.
-  That is why M4 above exists: it is the control for the half the protected file
-  cannot see. **"No listener"** for these refusals is therefore argued, not observed by
-  a new leg: `php_boot_in` returns `Refused` from the same `php_boot_gate` call site
+  `…_tree_a_route_uid_could_write` and `a_development_boot_does_not_apply_the_production_rule`
+  (unit tests), and — since `MB.3.43` — by the **protected** leg
+  `critical_php_embed::the_deployment_gate_is_invoked_behind_its_sentence`, which
+  runs `php_boot_in` with a `Deployment` through
+  `blastit::host::deployment_boot_check`. M4 above was therefore the *only* control
+  for the call site when this node landed; it is no longer: deleting the
+  `deployment_refusal` invocation reddens that protected leg (`MB.3.43`'s
+  `RESULT.md`), while the four legs here stay green — which is exactly the gap the
+  reviewer measured.
+* **"No listener"** for these refusals is argued, not observed by their own leg:
+  `php_boot_in` returns `Refused` from the same `php_boot_gate` call site
   (`stage0.rs`, before `bind_view_sockets`) that the suite's existing stage-0 refusal
   legs (`a_zts_libphp_refuses_before_anything_loads`,
   `a_non_library_blastit_libphp_refuses_before_anything_loads`) already prove leaves

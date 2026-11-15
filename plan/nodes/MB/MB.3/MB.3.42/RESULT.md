@@ -80,10 +80,10 @@ error: this function has too many arguments (8/7)   # crates/blastit/src/host.rs
 error: could not compile `blastit` (lib test) due to 1 previous error
 ```
 
-`--all-targets` cannot be green in this worktree for a reason outside this node: the single
-diagnostic is `clippy::too_many_arguments` in the **test module of
-`crates/blastit/src/host.rs`**, which is sibling node MB.3.40's in-flight work (816 added
-lines, 0 from me). It is out of this node's `paths`. Filtered evidence that this change is
+`--all-targets` could not be green in this worktree **at the time**, for a reason outside
+this node: the single diagnostic was `clippy::too_many_arguments` in the **test module of
+`crates/blastit/src/host.rs`**, which was sibling node MB.3.40's in-flight work (816 added
+lines, 0 from me). It was out of this node's `paths`. Filtered evidence that this change was
 clean:
 
 ```console
@@ -94,13 +94,32 @@ error: could not compile `blastit` (lib test) due to 1 previous error
 error: this function has too many arguments (8/7)
 ```
 
-Zero diagnostics mention `php_view.rs`; the lib-only (non-test) clippy is fully green.
+Zero diagnostics mention `php_view.rs`; the lib-only (non-test) clippy was fully green.
 
-### 5. `make check` — deliberately not run by me
+**Correction (`MB.3.43`, after MB.3.40 landed)**: that diagnostic was fixed by MB.3.40
+(its `write_section` helper now takes a `SectionHeader` struct), so the workspace-wide
+gate this node could not run is green on the merged tree, recorded here rather than left
+as "red":
 
-Not run: sibling node MB.3.40 is mid-flight in this same worktree, and two concurrent
+```console
+$ cargo clippy --workspace --all-targets --locked --features python -- -D warnings
+    Checking blastit-view v0.2.0 (…/crates/blastit-view)
+    Checking blastit-py v0.2.0 (…/crates/blastit-py)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.38s
+exit=0
+```
+
+### 5. `make check` — not run by this node's owner (run green afterwards)
+
+Not run: sibling node MB.3.40 was mid-flight in this same worktree, and two concurrent
 `make check` runs race on the shared wheel / `uv` cache. The lead runs the full gate serially
-before committing. Running it here would risk corrupting the sibling's build artefacts.
+before committing. Running it here would have risked corrupting the sibling's build artefacts.
+
+**Correction (`MB.3.43`)**: the gate has now been run on the merged tree and is green —
+`make check` exits `0` with `cargo test --workspace --all-targets --locked --features python`
+green, including `critical_php_backend` (5 passed) and `critical_php_embed` (19 passed).
+MB.3.43's `RESULT.md` holds the command and its output tail; this node's contribution
+(`php_view`'s side path + `rename`) is covered by it and by the suites above.
 
 ### 6. Honest limits of this evidence (important)
 

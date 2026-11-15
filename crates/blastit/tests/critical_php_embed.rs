@@ -96,6 +96,7 @@
 //! real-pair leg here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -222,12 +223,22 @@ const CPU_WALL_SHARE: u64 = 4;
 /// and an implementation that reported the request's duration as `cpu_ns`
 /// satisfies every existing assertion (`cpu_ns <= wall_ns`, `cpu_ns > 0`,
 /// `cost_ns >= cpu_ns`). This is the fixture that tells the two clocks apart.
-const BLOCKING_PHP: &str = "\
+///
+/// Built from [`BLOCK_MS`] rather than spelling the number again: `200000`
+/// written here let the constant document one block while the fixture slept
+/// another (the reviewer's MINOR on `MB.3.37`), and a leg whose wall-time guard
+/// moves with the constant must sleep what the constant says.
+fn blocking_php() -> String {
+    format!(
+        "\
 <?php
-usleep(200000);
+usleep({});
 header('Content-Type: text/plain');
 echo \"blastit-php-ok\\n\";
-";
+",
+        BLOCK_MS.saturating_mul(1000)
+    )
+}
 
 /// The form leg's front controller: whatever reached `$_POST` is what answers,
 /// so an empty `$_POST` — a `RequestV1` without its body — is visible in the
@@ -1289,14 +1300,14 @@ fn clear(canary: &Path) {
 /// `EmbeddedView { egress: false }` and its `egress = true` twin), so the field
 /// names and the parse cannot drift between two stubs: a shape the C stub
 /// changed fails both legs at once.
-fn probe_shape(stubs: &Stubs, all: &str) -> (String, std::collections::BTreeMap<String, u32>) {
+fn probe_shape(stubs: &Stubs, all: &str) -> (String, BTreeMap<String, u32>) {
     let shape = std::fs::read_to_string(&stubs.hang_shape).unwrap_or_else(|err| {
         panic!(
             "no probe shape was written ({}): {err}\n{all}",
             stubs.hang_shape.display()
         )
     });
-    let mut fields = std::collections::BTreeMap::new();
+    let mut fields = BTreeMap::new();
     for field in shape
         .lines()
         .find(|line| line.starts_with("probe "))
@@ -1308,6 +1319,51 @@ fn probe_shape(stubs: &Stubs, all: &str) -> (String, std::collections::BTreeMap<
         }
     }
     (shape, fields)
+}
+
+/// The containment both probe twins must show — asserted **once**, because the
+/// two legs run one C shim source through one fork path, and a containment claim
+/// that drifted between them would be two weaker assertions wearing one name
+/// (the reviewer's MINOR on `MB.3.37`).
+///
+/// The load is below the fork (`pid != init`, `ppid == init`), the child leads
+/// its **own** process group (`pgid == pid`, which is what `kill(-pgid)` names),
+/// it runs as the route's uid and owns nothing more, and the boot **reaped** it
+/// instead of leaving the parked child behind — a boot that exits while its
+/// `pause()` child lives on is a leak the next boot would inherit. `inet` is the
+/// one field the two legs disagree about, so it stays in each of them.
+fn assert_probe_containment(
+    fields: &BTreeMap<String, u32>,
+    init: u32,
+    route_uid: u32,
+    shape: &str,
+    all: &str,
+) {
+    let pid = fields["pid"];
+    assert_ne!(pid, init, "the probe is a fork, not the boot: {shape}");
+    assert_eq!(fields["ppid"], init, "the probe is init's child: {shape}");
+    assert_eq!(
+        fields["pgid"], pid,
+        "the probe leads its own process group, which is what `kill(-pgid)` names: {shape}"
+    );
+    assert_eq!(
+        fields["uid"], route_uid,
+        "the probe runs as the route's uid: {shape}"
+    );
+    assert_eq!(fields["euid"], route_uid, "and owns nothing more: {shape}");
+    // The timeout must also be a *reap*, not a refusal that leaves the parked
+    // child behind: `/proc/<pid>` gone is the observable end of it.
+    let reaped = Instant::now() + Duration::from_secs(2);
+    while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < reaped {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "the boot refused but its probe child (pid {pid}, pgid {} uid {}) is still in \
+         `/proc`, so `BLASTIT_PROBE_TIMEOUT_MS` did not reap what it killed:\n{all}",
+        fields["pgid"],
+        fields["uid"]
+    );
 }
 
 /// The lock the two probe legs take for their whole body.
@@ -1615,35 +1671,11 @@ fn a_probe_that_hangs_is_killed_and_refuses_the_boot() {
     assert_no_serving_surface(&mut boot, "probe timeout");
 
     let (shape, fields) = probe_shape(&stubs, &all);
+    assert_probe_containment(&fields, init, route_uid, &shape, &all);
     let pid = fields["pid"];
-    assert_ne!(pid, init, "the probe is a fork, not the boot: {shape}");
-    assert_eq!(fields["ppid"], init, "the probe is init's child: {shape}");
-    assert_eq!(
-        fields["pgid"], pid,
-        "the probe leads its own process group, which is what `kill(-pgid)` names: {shape}"
-    );
-    assert_eq!(
-        fields["uid"], route_uid,
-        "the probe runs as the route's uid: {shape}"
-    );
-    assert_eq!(fields["euid"], route_uid, "and owns nothing more: {shape}");
     assert_eq!(
         fields["inet"], 1,
         "`EmbeddedView` must answer `socket(AF_INET)` with EPERM (1) before `worker_init`: {shape}"
-    );
-    // The timeout must also be a *reap*, not a refusal that leaves the parked
-    // child behind: a boot that exits while its `pause()` child lives on is a
-    // leak that the next boot would inherit (and a `kill(-pgid)` that missed).
-    let reaped = Instant::now() + Duration::from_secs(2);
-    while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < reaped {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        !Path::new(&format!("/proc/{pid}")).exists(),
-        "the boot refused but its probe child (pid {pid}, pgid {} uid {}) is still in \
-         `/proc`, so `BLASTIT_PROBE_TIMEOUT_MS` did not reap what it killed:\n{all}",
-        fields["pgid"],
-        fields["uid"]
     );
     println!(
         "killed at BLASTIT_PROBE_TIMEOUT_MS=250 after {elapsed:?}; probe pid {pid} ppid {} \
@@ -1716,20 +1748,8 @@ fn an_egress_route_lets_the_probe_open_a_socket() {
     assert_no_serving_surface(&mut boot, "egress probe timeout");
 
     let (shape, fields) = probe_shape(&stubs, &all);
+    assert_probe_containment(&fields, init, route_uid, &shape, &all);
     let pid = fields["pid"];
-    // The containment is the same one the denied twin asserts, because it is
-    // the same stub and the same fork path: only `inet` may differ.
-    assert_ne!(pid, init, "the probe is a fork, not the boot: {shape}");
-    assert_eq!(fields["ppid"], init, "the probe is init's child: {shape}");
-    assert_eq!(
-        fields["pgid"], pid,
-        "the probe leads its own process group: {shape}"
-    );
-    assert_eq!(
-        fields["uid"], route_uid,
-        "the probe runs as the route's uid: {shape}"
-    );
-    assert_eq!(fields["euid"], route_uid, "and owns nothing more: {shape}");
     // The route's `Egress` reaches the filter: `socket(AF_INET)` returns a
     // descriptor (0), not EPERM (1). A hardcoded `egress: false` answers 1 here
     // while the same route's INI says `allow_url_fopen=1`.
@@ -1737,16 +1757,6 @@ fn an_egress_route_lets_the_probe_open_a_socket() {
         fields["inet"], 0,
         "`egress = true` must let the probe child open an `AF_INET` socket (0), so the \
          filter and the route's INI cannot disagree: {shape}"
-    );
-    let reaped = Instant::now() + Duration::from_secs(2);
-    while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < reaped {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        !Path::new(&format!("/proc/{pid}")).exists(),
-        "the boot refused but its egress probe child (pid {pid}, pgid {}) is still in \
-         `/proc`:\n{all}",
-        fields["pgid"]
     );
     println!(
         "killed at BLASTIT_PROBE_TIMEOUT_MS=250 after {elapsed:?}; probe pid {pid} ppid {} \
@@ -1886,11 +1896,18 @@ fn a_libphp_replaced_between_the_stages_refuses_the_boot() {
 /// compares it against its **own** record.
 ///
 /// The library's half is the leg above; without this one, deleting the shim
-/// comparison (or comparing the shim against the library's pair — the bug
-/// `MB.3.13.3`'s first run found, which refused every boot) leaves every
-/// protected assertion green, because the library's pin still refuses its own
-/// swap. The shim is code that runs inside every PHP worker, so its identity is
-/// the same boundary the library's is.
+/// comparison leaves every **other** protected assertion green, because the
+/// library's pin still refuses its own swap and nothing else looks at the shim.
+/// The shim is code that runs inside every PHP worker, so its identity is the
+/// same boundary the library's is.
+///
+/// The miscompare — the shim re-opened and compared against the **library's**
+/// `(st_dev, st_ino)`, the bug `MB.3.13.3`'s first run found — is a different
+/// mutation and this leg does **not** own it: it refuses *every* boot, so this
+/// leg still finds the sentence it looks for and stays green (measured by
+/// `MB.3.37`'s reviewer). What catches that one is the legs that require a
+/// route to be **served** (a refused boot serves nothing), plus the probe twins,
+/// which require the timeout's own sentence rather than any refusal.
 ///
 /// The fixture is the same shape as the library leg, with the two objects
 /// exchanged: a **copy of the same stub** is renamed over the recorded shim
@@ -2409,7 +2426,7 @@ fn a_blocking_script_is_charged_cpu_time_not_wall_time() {
         return;
     };
     let scratch = Scratch::new("cpu-vs-wall", PHP_MANIFEST);
-    scratch.write(ENTRY, BLOCKING_PHP);
+    scratch.write(ENTRY, &blocking_php());
 
     let mut boot = Boot::start(
         &scratch.dir,
@@ -2627,53 +2644,108 @@ static FIXTURES: AtomicUsize = AtomicUsize::new(0);
 /// **Not `temp_dir()`**, and that is the whole point of this helper: `/tmp` is
 /// `1777`, `host::facts_of` walks every ancestor, so a `0755` fixture *under*
 /// `/tmp` is still a tree a route uid could replace — which is exactly the
-/// refusal these legs are about (`LESSONS.md`, `MB.3.40`). The candidates are
-/// the ones the other critical suites already use: the build's own `target/tmp`,
-/// `$HOME`, and the three system directories a single uid usually owns. A host
-/// where all five are group- or other-writable is a host a deployment boot could
-/// not run on either, which is why this is a panic and never a skip.
-fn protected_root(tag: &str) -> PathBuf {
+/// refusal these legs are about (`LESSONS.md`, `MB.3.40`). The candidates, in
+/// order: the build's own `target/tmp` (`CARGO_TARGET_TMPDIR` under `cargo`,
+/// and the workspace's `target/tmp` when the binaries are run *without* cargo —
+/// `make rs-test-php-image` runs them in a container that bind-mounts the
+/// checkout at the same absolute path as the runner's uid, while `$HOME` there
+/// is the image's unwritable `/root`), `$HOME`, and the three system
+/// directories a single uid usually owns.
+///
+/// Every rejected candidate is recorded with its reason — "not a directory",
+/// `create_dir_all`'s errno, or `host::protected`'s own sentence — so the panic
+/// names what was tried instead of printing `(tried )` (`LESSONS.md`,
+/// `MB.3.43`). A host where all of them are unusable is a host a deployment boot
+/// could not run on either, which is why this is a panic and never a skip.
+fn protected_root(tag: &str) -> ProtectedRoot {
     let mut candidates = Vec::new();
     if let Some(dir) = std::env::var_os("CARGO_TARGET_TMPDIR") {
         candidates.push(PathBuf::from(dir));
     }
+    if let Ok(dir) = std::env::current_dir() {
+        candidates.push(dir.join("target/tmp"));
+    }
+    // The checkout the binary was *compiled* against: the same absolute path the
+    // image bind-mounts, so it is owned by the test's uid with no world-writable
+    // ancestor — the one candidate that survives a container with no cargo.
+    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp"));
     if let Some(dir) = std::env::var_os("HOME") {
         candidates.push(PathBuf::from(dir));
     }
     for dir in ["/opt", "/usr/local", "/srv"] {
         candidates.push(PathBuf::from(dir));
     }
-    let mut refused = Vec::new();
+    let mut tried = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
     for parent in candidates {
         if !parent.is_dir() {
+            tried.push(format!("{}: not a directory", parent.display()));
             continue;
         }
+        let parent = std::fs::canonicalize(&parent).unwrap_or(parent);
+        if seen.contains(&parent) {
+            continue;
+        }
+        seen.push(parent.clone());
         let dir = parent.join(format!(
             "blastit-php-provenance-{}-{tag}-{}",
             std::process::id(),
             FIXTURES.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        if std::fs::create_dir_all(&dir).is_err() {
+        if let Err(err) = std::fs::create_dir_all(&dir) {
+            tried.push(format!("{}: create_dir_all failed ({err})", dir.display()));
             continue;
         }
         set_mode(&dir, 0o755);
         let probe = dir.join("probe");
-        let accepted = std::fs::write(&probe, b"#!/bin/sh\n").is_ok()
-            && std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).is_ok()
-            && blastit::host::plain_is_protected(&probe, effective_uid()).is_ok();
+        let reason = match std::fs::write(&probe, b"#!/bin/sh\n") {
+            Err(err) => Some(format!("a probe file cannot be written ({err})")),
+            Ok(()) => {
+                match std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)) {
+                    Err(err) => Some(format!("the probe cannot be made 0755 ({err})")),
+                    Ok(()) => match blastit::host::facts_of(&probe) {
+                        Err(err) => Some(format!("the probe cannot be inspected ({err})")),
+                        Ok(facts) => blastit::host::protected(&facts, effective_uid()).err(),
+                    },
+                }
+            }
+        };
         let _ = std::fs::remove_file(&probe);
-        if accepted {
-            return dir;
+        if let Some(reason) = reason {
+            tried.push(format!("{}: {reason}", dir.display()));
+            let _ = std::fs::remove_dir_all(&dir);
+            continue;
         }
-        refused.push(dir.display().to_string());
-        let _ = std::fs::remove_dir_all(&dir);
+        return ProtectedRoot(dir);
     }
     panic!(
-        "no directory on this host is one uid's alone (tried {}): a deployment boot could not \
+        "no directory on this host is one uid's alone (tried [{}]): a deployment boot could not \
          run on this host either, so the accepted twin has nothing to accept",
-        refused.join(", ")
+        tried.join("; ")
     );
+}
+
+/// The tree [`protected_root`] accepted, removed when the leg ends.
+///
+/// Every leg that builds a fixture under it creates `0777` directories on
+/// purpose, so a fixture that outlived a panicking test would leave a writable
+/// tree behind for the next run — and for the host, if it is the checkout's own
+/// `target/tmp`. The guard removes it on the pass *and* on the panic path.
+struct ProtectedRoot(PathBuf);
+
+impl std::ops::Deref for ProtectedRoot {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ProtectedRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// `chmod path mode`.
@@ -2807,7 +2879,7 @@ fn a_world_writable_manifest_root_refuses_a_production_boot() {
     );
     assert!(err.contains("[route.php] entry"), "{err}");
 
-    let _ = std::fs::remove_dir_all(&root);
+    // `root` is a `ProtectedRoot`: it removes the fixture, panic path included.
     println!("refused (production provenance, tree half): {err}");
 }
 
@@ -2868,7 +2940,6 @@ fn a_world_writable_shim_directory_refuses_a_production_boot() {
         "the same pair at 0755 is what a deployment boots"
     );
 
-    let _ = std::fs::remove_dir_all(&root);
     println!("refused (production provenance, pair half): {err}");
 }
 
@@ -2959,10 +3030,100 @@ fn a_runpath_into_a_writable_directory_refuses_a_production_boot() {
         "the same object with no search path is what a deployment boots"
     );
 
-    let _ = std::fs::remove_dir_all(&root);
     println!(
         "refused (DT_RPATH and DT_RUNPATH into {entry}); the same object without -rpath is \
          accepted"
+    );
+}
+
+/// **`R7`/`B2-R5`, the gate's *call site*.** The three legs above drive
+/// `host::Provenance` — the decision `stage0::deployment_refusal` makes — and
+/// cannot see whether the boot **makes** that call: deleting it from
+/// `php_boot_in` leaves them green, which is `MB.3.40`'s reviewer's first
+/// finding and the reason this leg exists.
+///
+/// It runs the same function a deployment boot runs — `stage0::php_boot_in` with
+/// a `Deployment` — through the one seam that reaches it,
+/// `blastit::host::deployment_boot_check` (`#[doc(hidden)]`: `stage0` is a
+/// private module and an unprivileged test cannot reach a `Production` boot at
+/// all, `LESSONS.md` `MB.1.6`). It requires **Refused** in front of
+/// **Proceed**: the world-writable tree and the world-writable shim directory
+/// are each refused with their own sentence, and the same fixture is accepted
+/// before and after, so the refusals are the authorisation and not the fixture.
+#[test]
+fn the_deployment_gate_is_invoked_behind_its_sentence() {
+    let _root = StubRootGuard::start();
+    let stubs = stubs();
+    let root = protected_root("gate");
+    let app = manifest_tree(&root, 0o755);
+    let libs = root.join("lib");
+    std::fs::create_dir_all(&libs).expect("a library directory");
+    set_mode(&libs, 0o755);
+    let libphp = libs.join("libphp8.4.so");
+    let shim = libs.join(shim_name(84));
+    std::fs::copy(&stubs.nts_libphp, &libphp).expect("the stub library");
+    std::fs::copy(&stubs.nts_shim, &shim).expect("the stub shim");
+    set_mode(&libphp, 0o755);
+    set_mode(&shim, 0o755);
+
+    // `stage0`'s own unit tests parse these manifests with the same base; this
+    // one names no uid, so the value only has to be a legal base.
+    let check = |dir: &Path, shim_dir: &Path| {
+        blastit::host::deployment_boot_check(PHP_MANIFEST, dir, &libphp, shim_dir, 20_000)
+    };
+
+    assert_eq!(
+        check(&app, &libs),
+        Ok(()),
+        "a 0755 tree and pair owned by init's uid is what a deployment boots: {:?}",
+        check(&app, &libs)
+    );
+
+    // 1. The tree: the accepted manifest directory, world-writable.
+    set_mode(&app, 0o777);
+    let err = check(&app, &libs).expect_err("a deployment boot must run the tree authorisation");
+    assert!(
+        err.contains(&app.display().to_string()),
+        "the offending tree is named: {err}"
+    );
+    assert!(
+        err.contains("could be replaced by another uid"),
+        "and what is wrong with it: {err}"
+    );
+    assert!(err.contains("chown"), "and the fix: {err}");
+    set_mode(&app, 0o755);
+
+    // 2. The pair: a 0755 tree and library, with the shim in a world-writable
+    // directory — so the refusal is the shim's and not the library's.
+    let shims = root.join("shims");
+    std::fs::create_dir_all(&shims).expect("a shim directory");
+    set_mode(&shims, 0o777);
+    let shim_in_shims = shims.join(shim_name(84));
+    std::fs::copy(&stubs.nts_shim, &shim_in_shims).expect("the stub shim");
+    set_mode(&shim_in_shims, 0o755);
+    let err = check(&app, &shims).expect_err("a deployment boot must run the pair authorisation");
+    assert!(err.contains("the embedded shim"), "{err}");
+    assert!(
+        err.contains(&shim_in_shims.display().to_string()),
+        "the offending shim is named: {err}"
+    );
+    assert!(
+        !err.contains(&shim.display().to_string()),
+        "the shim in the protected directory is not the one refused: {err}"
+    );
+    assert!(err.contains("could be replaced by another uid"), "{err}");
+    set_mode(&shims, 0o755);
+
+    // 3. The bits are the decision: the same fixture at 0755 proceeds.
+    assert_eq!(
+        check(&app, &libs),
+        Ok(()),
+        "the same tree and pair at 0755 must proceed: {:?}",
+        check(&app, &libs)
+    );
+    println!(
+        "the deployment gate refused the 0777 tree and the 0777 shim directory, and proceeded \
+         once both were 0755"
     );
 }
 
@@ -3029,7 +3190,6 @@ fn the_same_tree_owned_by_init_is_accepted() {
     let err = trees_refusal(trees()).expect_err("a 0777 static root must refuse");
     assert!(err.contains(&site.display().to_string()), "{err}");
 
-    let _ = std::fs::remove_dir_all(&root);
     println!("accepted at 0755/0644 owned by init's uid; refused once one directory is 0777");
 }
 

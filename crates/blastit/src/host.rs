@@ -55,6 +55,23 @@ use blastit_sys::exe_path;
 /// `blastit-dbproxy` it ships.
 pub const EXEC: &str = "BLASTIT_EXEC";
 
+/// `R7`/`B2-R5`: the **deployment** half of the `[route.php]` gate, for the
+/// protected suite.
+///
+/// `stage0` is a private module, so `tests/critical_php_embed.rs` cannot call
+/// `stage0::php_boot_in`; this re-export is the seam that runs the *same*
+/// function a deployment boot runs, with a `Deployment`. Without it a leg can
+/// only drive [`Provenance`] — the decision — so deleting the call *inside*
+/// `php_boot_in` would leave the protected tier green, which is the defect this
+/// seam closes (`MB.3.43`).
+///
+/// Hidden because it is not part of the published API: a `dev`/`check` boot
+/// never passes a deployment, and an unprivileged process cannot reach a
+/// `Production` boot at all (`LESSONS.md`, `MB.1.6`), so no other caller can
+/// exist. It lives in `host` because [`Provenance`] is the decision it applies.
+#[doc(hidden)]
+pub use crate::stage0::deployment_boot_check;
+
 /// A program that plays one of blastit's roles, and how to ask it for one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reexec {
@@ -1012,9 +1029,25 @@ impl Provenance {
     /// The first refusal, naming the claim, its path, what is wrong with it and
     /// the command that fixes it.
     pub fn check_objects(&self) -> Result<(), String> {
+        self.check_objects_with(has_file_caps)
+    }
+
+    /// [`check_objects`](Self::check_objects) with the capability predicate
+    /// **injected**, the way [`placement`] takes `caps_of`.
+    ///
+    /// `setxattr` on `security.capability` needs `CAP_SETFCAP`, so no
+    /// unprivileged test can put the attribute on a file it made — and a test
+    /// that early-returns when it is not root leaves the `!has_file_caps`
+    /// refusal with no witness in `make check` (`MB.3.43`). Private on purpose:
+    /// the only caller besides [`check_objects`](Self::check_objects) is this
+    /// module's tests, and the boot always reads the real attribute.
+    fn check_objects_with(
+        &self,
+        caps_of: impl Fn(&Path) -> io::Result<bool>,
+    ) -> Result<(), String> {
         for claim in &self.objects {
             self.cannot_be_replaced(claim)?;
-            match has_file_caps(&claim.path) {
+            match caps_of(&claim.path) {
                 Ok(false) => {}
                 Ok(true) => {
                     return Err(format!(
@@ -1232,21 +1265,17 @@ mod tests {
         rustix::process::geteuid().as_raw()
     }
 
-    /// A [`TempDir`] whose paths no other uid can write, or `None` when this
-    /// environment has none (an odd `$HOME`, a shared build directory): the tests
-    /// that need one print and pass, the way a root-only test does.
-    fn safe_dir(tag: &str) -> Option<TempDir> {
+    /// A [`TempDir`] whose paths no other uid can write, or the reason this
+    /// environment has none (an odd `$HOME`, a shared build directory).
+    ///
+    /// A `Result` rather than the `Option` a test could silently `return` on:
+    /// the caller that *needs* one panics with the reason (`MB.3.43`), the way
+    /// the protected suite's `protected_root` does.
+    fn safe_dir(tag: &str) -> Result<TempDir, String> {
         let dir = TempDir::new(tag);
         let probe = dir.file("probe", 0o755);
-        match plain_is_protected(&probe, init_uid()) {
-            Ok(()) => Some(dir),
-            Err(err) => {
-                println!(
-                    "skipped: no directory only its owner can write, in this environment ({err})"
-                );
-                None
-            }
-        }
+        plain_is_protected(&probe, init_uid())?;
+        Ok(dir)
     }
 
     /// `caps_of` for the pure `placement` tests: exactly these paths carry file
@@ -1309,9 +1338,7 @@ mod tests {
     #[test]
     fn a_rootless_binary_plays_dbproxy_as_the_capability_free_copy() {
         let _env = env();
-        let Some(dir) = safe_dir("rootless-binary") else {
-            return;
-        };
+        let dir = safe_dir("rootless-binary").expect("a directory only its owner can write");
         let plain = dir.file("blastit", 0o755);
         // SAFETY: `env()` is held, so no other test reads or writes the variable.
         unsafe { std::env::set_var(EXEC, &plain) };
@@ -1441,9 +1468,7 @@ mod tests {
             println!("skipped: setting security.capability needs CAP_SETFCAP");
             return;
         }
-        let Some(dir) = safe_dir("names") else {
-            return;
-        };
+        let dir = safe_dir("names").expect("a directory only its owner can write");
         let real = dir.file("python3.13", 0o755);
         // The two other names a project's interpreter is reached by: relative
         // symlinks, which is what a distribution ships.
@@ -2049,44 +2074,44 @@ mod tests {
     }
 
     /// A file capability is refused before anything can hand the file to a
-    /// child whose bounding set is empty. Root-only: `setxattr` on
-    /// `security.capability` needs `CAP_SETFCAP`, which no unprivileged test has.
+    /// child whose bounding set is empty.
+    ///
+    /// The capability predicate is **injected** the way [`placement`] takes
+    /// `caps_of`: `setxattr` on `security.capability` needs `CAP_SETFCAP`, which
+    /// no unprivileged test has, so a `geteuid().is_root()` early return here
+    /// would leave this refusal with no witness in `make check` (`MB.3.43`).
+    /// The real attribute — that `has_file_caps` sees one that is there — is
+    /// [`has_file_caps_sees_one_that_is_there`]'s half, which is root-only by
+    /// nature because the attribute is what needs the capability.
     #[test]
     fn a_capable_object_is_refused() {
-        if !rustix::process::geteuid().is_root() {
-            println!("skipped: setting security.capability needs CAP_SETFCAP");
-            return;
-        }
         let dir = safe_dir("caps-object").expect("a directory only its owner can write");
         let path = dir.path.join("shim.so");
         std::fs::write(&path, object_with_search_path(true, 0, "")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut value = [0_u8; 20];
-        value[..4].copy_from_slice(&0x0200_0001_u32.to_le_bytes());
-        value[4..8].copy_from_slice(&1_u32.to_le_bytes());
-        let name = c"security.capability";
-        let path_c = CString::new(path.as_os_str().as_bytes()).unwrap();
-        // SAFETY: `setxattr` takes a NUL-terminated path, a NUL-terminated name,
-        // a buffer of the length given and a flags word.
-        let wrote = unsafe {
-            libc::setxattr(
-                path_c.as_ptr(),
-                name.as_ptr(),
-                value.as_ptr().cast(),
-                value.len(),
-                0,
-            )
-        };
-        assert_eq!(wrote, 0, "setxattr: {}", io::Error::last_os_error());
-        let err = Provenance {
+        let provenance = Provenance {
             init_uid: init_uid(),
             objects: vec![Claim::new("the embedded shim", path.clone())],
             trees: Vec::new(),
-        }
-        .check_objects()
-        .unwrap_err();
+        };
+        // The accepted shape first: the same file with no capability, read
+        // through the boot's own predicate.
+        assert!(
+            provenance.check_objects().is_ok(),
+            "the fixture is a 0755 object with no attribute"
+        );
+        let err = provenance
+            .check_objects_with(caps_of(&[path.to_str().expect("a UTF-8 fixture path")]))
+            .expect_err("a capable object must be refused");
         assert!(err.contains(&path.display().to_string()), "{err}");
         assert!(err.contains("file capabilities"), "{err}");
         assert!(err.contains("setcap -r"), "and the fix: {err}");
+        // And an attribute that cannot be read is a refusal too, never "no
+        // capabilities" (`caps_from_errno`'s own rule, applied by the gate).
+        let err = provenance
+            .check_objects_with(|_| Err(io::Error::other("no xattr for you")))
+            .expect_err("an unreadable attribute must refuse");
+        assert!(err.contains("cannot be read"), "{err}");
+        assert!(err.contains("no xattr for you"), "{err}");
     }
 }

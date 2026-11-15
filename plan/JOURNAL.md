@@ -1569,3 +1569,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T03:07 [MB.3.37] (lead) status active -> review
 - 2026-11-15T03:11 [MB.3.43] (lead) MB.3.37 reviewer PASSed (attempt 1) with four MINORs, three of which are this file's honesty and belong in the same pass as this node's own items (they are all 
 - 2026-11-15T03:11 [MB.3.37] (lead) status review -> done
+- 2026-11-15T03:13 [MB.3.43] (lead) status ready -> active
+- 2026-11-15T03:13 [MB.3.43] (lead) attempt 1/3 started
+- 2026-11-15T03:13 [MB.3.43] (lead) base 4749882
+- 2026-11-15T03:26 [MB.3.43] (lead) status active -> review
+- 2026-11-15T03:29 [MB.3.43] (lead) edited fields
+- 2026-11-15T03:29 [MB.3.43] (lead) status review -> done

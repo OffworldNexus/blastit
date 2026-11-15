@@ -924,6 +924,50 @@ fn php_boot_in(
     }
 }
 
+/// `R7`/`B2-R5`: the **deployment** half of the `[route.php]` gate, run over one
+/// manifest directory and one pair — the seam the protected suite needs.
+///
+/// It runs the same function a deployment boot runs, `php_boot_in` with a
+/// `Deployment`, because an unprivileged test process cannot reach a deployment
+/// boot at all: `caps::detect` refuses it before `Config::from_env`
+/// (`LESSONS.md`, `MB.1.6`). Driving [`crate::host::Provenance`] directly — which the
+/// protected legs also do — pins the *decision* but not the *call*: with this
+/// seam deleted from `php_boot_in`, `tests/critical_php_embed.rs`'s
+/// `the_deployment_gate_is_invoked_behind_its_sentence` is the leg that fails,
+/// and without it only this module's unit tests would.
+///
+/// `Ok(())` is "the gate proceeds"; `Err(message)` is the sentence the boot
+/// refuses with — the same one `php_boot`'s callers print — or, for a manifest
+/// with no `[route.php]` route, a sentence saying so (a deployment treats that
+/// as "absent" and boots).
+///
+/// Not part of the published API: the only caller is the protected suite, which
+/// reaches it through `blastit::host::deployment_boot_check`.
+pub fn deployment_boot_check(
+    manifest_source: &str,
+    manifest_dir: &Path,
+    libphp: &Path,
+    shim_dir: &Path,
+    uid_base: u32,
+) -> Result<(), String> {
+    let (manifest, _warnings) = Manifest::parse_and_validate(manifest_source, uid_base)
+        .map_err(|errors| errors.to_string())?;
+    let search = PhpSearch {
+        libphp: Some(libphp.to_path_buf()),
+        shim_dirs: vec![shim_dir.to_path_buf()],
+        lib_dirs: Vec::new(),
+    };
+    let deployment = Deployment {
+        init_uid: current_uid(),
+        manifest_dir: manifest_dir.to_path_buf(),
+    };
+    match php_boot_in(&manifest, &search, None, Some(&deployment)) {
+        PhpBoot::Proceed(_) => Ok(()),
+        PhpBoot::Refused(message) => Err(message),
+        PhpBoot::Absent => Err("the manifest declares no [route.php] route".to_string()),
+    }
+}
+
 /// `R7`/`B2-R5`: the sentence a deployment boot refuses this pair and tree with.
 ///
 /// The **pair** is checked first and keeps `ADR-0010` §4.1's shape — the route,
@@ -957,12 +1001,54 @@ fn deployment_refusal(
             Some(runtime.version),
         ));
     }
-    let trees = Provenance {
-        init_uid: deployment.init_uid,
-        trees: php_trees(manifest, deployment),
-        objects: Vec::new(),
-    };
-    trees.check_trees().err()
+    let trees = php_trees(manifest, deployment);
+    // One claim at a time, in this order: the first refusal wins, exactly as
+    // `check_trees` reports it, but a claim whose path is not there gets the
+    // missing-path sentence (see [`missing_claim`]).
+    for claim in &trees {
+        if let Some(message) = missing_claim(claim) {
+            return Some(message);
+        }
+        let checked = Provenance {
+            init_uid: deployment.init_uid,
+            trees: vec![claim.clone()],
+            objects: Vec::new(),
+        };
+        if let Err(detail) = checked.check_trees() {
+            return Some(detail);
+        }
+    }
+    None
+}
+
+/// `R13`: the sentence a manifest-named path that is **not there** refuses with.
+///
+/// Asked before [`host::Provenance::check_trees`] for the same claim because
+/// that check's sentence for a missing path — "it cannot be inspected (No such
+/// file or directory)" — reads as a permission problem and sends the operator to
+/// `chmod` a file that does not exist. A path the manifest names is *missing* or
+/// it is *unprotected*; this is the missing half, and a path that is there but
+/// unreadable still goes to the provenance check, which is the one that can say
+/// what is wrong with it.
+///
+/// The test is [`std::fs::metadata`], the same call `host::facts_of` makes, so
+/// "missing" here means exactly the path the provenance check could not inspect
+/// — never a broken symlink, which resolves to the `ENOENT` that sentence is
+/// right about.
+fn missing_claim(claim: &Claim) -> Option<String> {
+    let missing = matches!(
+        std::fs::metadata(&claim.path),
+        Err(ref err) if err.kind() == std::io::ErrorKind::NotFound
+    );
+    missing.then(|| {
+        format!(
+            "{} ({}) is missing (no such file or directory): the manifest names a path this boot \
+             cannot read, so a deployment would hand its workers nothing; create it, or correct \
+             the path the manifest names",
+            claim.what,
+            claim.path.display()
+        )
+    })
 }
 
 /// The tree claims a deployment boot authorises: the directory the workers'
@@ -4294,36 +4380,84 @@ path = ['.*']
 
     // ------------------------------------------- production provenance (R7)
 
-    /// A `Scratch` under a directory only root or this process's uid can write,
-    /// or `None` when this host has none (a shared build directory, an odd
-    /// `$HOME`): the tests that need a *protected* tree print and pass, the way
-    /// `host`'s own unit tests do.
+    /// A `Scratch` under a directory only root or this process's uid can write.
+    ///
+    /// **A panic, never a `None`**: a `None` returned into a test body that then
+    /// `return`s early is a test that asserts nothing on exactly the hosts where
+    /// the rule is hardest to check (the reviewer's MINOR on `MB.3.40`). A host
+    /// with no such directory is a host a deployment boot could not run on
+    /// either, so the call-site tests would prove nothing there — and every
+    /// rejected candidate is named with its reason, so the panic says why.
     ///
     /// Not [`Scratch`] itself: that one lives in `temp_dir()`, and `/tmp` is
     /// `1777` — a `0755` fixture *under* it is still a tree another uid could
     /// replace, which is exactly what these tests measure (`LESSONS.md`,
-    /// `MB.3.40`).
-    fn protected_scratch(tag: &str) -> Option<Scratch> {
+    /// `MB.3.40`). The candidates are the protected suite's
+    /// (`tests/critical_php_embed.rs::protected_root`); the fixture is a
+    /// [`Scratch`], so it is removed on the panic path too.
+    fn protected_scratch(tag: &str) -> Scratch {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = std::env::var_os("HOME").map(PathBuf::from)?;
-        let dir = root.join(format!(
-            "blastit-php-gate-protected-{}-{tag}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).ok()?;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).ok()?;
-        let probe = dir.join("probe");
-        std::fs::write(&probe, b"#!/bin/sh\n").ok()?;
-        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).ok()?;
-        if let Err(err) = crate::host::plain_is_protected(&probe, current_uid()) {
-            let _ = std::fs::remove_dir_all(&dir);
-            println!("skipped: no directory only its owner can write here ({err})");
-            return None;
+        let mut candidates = Vec::new();
+        if let Some(dir) = std::env::var_os("CARGO_TARGET_TMPDIR") {
+            candidates.push(PathBuf::from(dir));
         }
-        let _ = std::fs::remove_file(&probe);
-        Some(Scratch { dir })
+        candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp"));
+        if let Some(dir) = std::env::var_os("HOME") {
+            candidates.push(PathBuf::from(dir));
+        }
+        for root in ["/opt", "/usr/local", "/srv"] {
+            candidates.push(PathBuf::from(root));
+        }
+        let mut tried = Vec::new();
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for root in candidates {
+            if !root.is_dir() {
+                tried.push(format!("{}: not a directory", root.display()));
+                continue;
+            }
+            let root = std::fs::canonicalize(&root).unwrap_or(root);
+            if seen.contains(&root) {
+                continue;
+            }
+            seen.push(root.clone());
+            let dir = root.join(format!(
+                "blastit-php-gate-protected-{}-{tag}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            if let Err(err) = std::fs::create_dir_all(&dir) {
+                tried.push(format!("{}: create_dir_all failed ({err})", dir.display()));
+                continue;
+            }
+            if let Err(err) = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+            {
+                tried.push(format!("{}: chmod 0755 failed ({err})", dir.display()));
+                let _ = std::fs::remove_dir_all(&dir);
+                continue;
+            }
+            let probe = dir.join("probe");
+            let reason = match std::fs::write(&probe, b"#!/bin/sh\n") {
+                Err(err) => Some(format!("a probe file cannot be written ({err})")),
+                Ok(()) => match crate::host::facts_of(&probe) {
+                    Err(err) => Some(format!("the probe cannot be inspected ({err})")),
+                    Ok(facts) => crate::host::protected(&facts, current_uid()).err(),
+                },
+            };
+            let _ = std::fs::remove_file(&probe);
+            match reason {
+                Some(reason) => {
+                    tried.push(format!("{}: {reason}", dir.display()));
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+                None => return Scratch { dir },
+            }
+        }
+        panic!(
+            "no directory on this host is one uid's alone (tried [{}]), so a deployment boot \
+             could not run on this host either and these tests would assert nothing",
+            tried.join("; ")
+        );
     }
 
     /// The accepted pair: a NTS stub `libphp` and the shim for its tuple.
@@ -4341,9 +4475,7 @@ path = ['.*']
     fn a_deployment_boot_refuses_a_pair_a_route_uid_could_replace() {
         use std::os::unix::fs::PermissionsExt;
 
-        let Some(protected) = protected_scratch("pair") else {
-            return;
-        };
+        let protected = protected_scratch("pair");
         let good = stub_pair(&protected);
         // `PHP_ONLY`'s front controller, at the accepted shape: a tree claim
         // that does not exist is a refusal of its own (`facts_of`'s error).
@@ -4450,9 +4582,7 @@ path = ['.*']
     fn a_deployment_boot_refuses_a_tree_a_route_uid_could_write() {
         use std::os::unix::fs::PermissionsExt;
 
-        let Some(protected) = protected_scratch("tree") else {
-            return;
-        };
+        let protected = protected_scratch("tree");
         let search = stub_pair(&protected);
         // One PHP route and one static route, on disjoint trees: a manifest that
         // declares both blocks on *one* route must keep the entry under the
@@ -4588,6 +4718,105 @@ root = \"site\"
                 PhpBoot::Proceed(_)
             ),
             "the same tree at 0755 is what a deployment boots"
+        );
+    }
+
+    /// `R13`: a path a PHP manifest names that is **not there** is refused with
+    /// the path and "no such file or directory", not with the provenance
+    /// sentence's "it cannot be inspected (No such file or directory)" — which
+    /// reads as a permissions problem and sends the operator to `chmod` a file
+    /// that does not exist (the reviewer's MINOR on `MB.3.40`).
+    #[test]
+    fn a_missing_entry_or_static_root_names_the_missing_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let protected = protected_scratch("missing");
+        let search = stub_pair(&protected);
+        std::fs::create_dir_all(protected.dir.join("public")).unwrap();
+        let entry = protected.dir.join("public/index.php");
+        std::fs::write(&entry, b"<?php echo 1;\n").unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let deployment = Deployment {
+            init_uid: current_uid(),
+            manifest_dir: protected.dir.clone(),
+        };
+        // A PHP route and a static route, as in the tree test above: the gate
+        // only runs for a manifest with a `[route.php]`, so the static half must
+        // ride beside one.
+        let source = |entry: &str, root: &str| {
+            format!(
+                "version = 1\n\n[[route]]\nname = \"app\"\npath = ['.*']\n\n[route.php]\nentry = \
+                 \"{entry}\"\n\n[[route]]\nname = \"docs\"\npath = ['/assets/.*']\n\n\
+                 [route.static]\nroot = \"{root}\"\n"
+            )
+        };
+        let refuse = |source: &str| {
+            php_boot_in(&manifest(source), &search, Some(16), Some(&deployment))
+                .refusal()
+                .expect("a manifest naming a path that is not there cannot be a deployment")
+                .to_string()
+        };
+
+        // 1. The front controller.
+        let absent = "public/missing.php";
+        let missing = protected.dir.join(absent);
+        std::fs::create_dir_all(protected.dir.join("site")).unwrap();
+        std::fs::set_permissions(
+            protected.dir.join("site"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let message = refuse(&source(absent, "site"));
+        assert!(message.contains(absent), "the entry is named: {message}");
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "and the path it resolves to: {message}"
+        );
+        assert!(
+            message.contains("no such file or directory"),
+            "a missing path says so: {message}"
+        );
+        assert!(
+            !message.contains("cannot be inspected"),
+            "a path that is not there is not an unreadable one: {message}"
+        );
+
+        // 2. A `[route.static] root`.
+        std::fs::remove_dir_all(protected.dir.join("site")).unwrap();
+        let site = protected.dir.join("site");
+        let message = refuse(&source("public/index.php", "site"));
+        assert!(
+            message.contains("route \"docs\": [route.static] root \"site\""),
+            "the static root is named with its route: {message}"
+        );
+        assert!(
+            message.contains(&site.display().to_string()),
+            "and the path it resolves to: {message}"
+        );
+        assert!(
+            message.contains("no such file or directory"),
+            "a missing path says so: {message}"
+        );
+        assert!(
+            !message.contains("cannot be inspected"),
+            "a path that is not there is not an unreadable one: {message}"
+        );
+
+        // And the same manifest with both paths created is what a deployment
+        // boots, so the two refusals are the missing path and nothing else.
+        std::fs::create_dir_all(&site).unwrap();
+        std::fs::set_permissions(&site, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(
+                php_boot_in(
+                    &manifest(&source("public/index.php", "site")),
+                    &search,
+                    Some(16),
+                    Some(&deployment)
+                ),
+                PhpBoot::Proceed(_)
+            ),
+            "the same manifest with both paths there is what a deployment boots"
         );
     }
 
