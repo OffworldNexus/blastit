@@ -2,7 +2,7 @@
 id: MB.3.21
 title: "check --learn must not drop a route's executor block: edit.rs expected_routes loses [route.static] today and [route.php] next"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
@@ -13,11 +13,11 @@ paths:
   - "crates/blastit/tests/**"
   - "python/tests/**"
   - "e2e/**"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-14T16:36"
-updated: "2026-11-14T23:17"
+updated: "2026-11-15T06:54"
 ---
 
 # Goal

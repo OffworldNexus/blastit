@@ -353,7 +353,10 @@ impl From<ManifestErrors> for EditError {
 /// the end of the file when there is none; a grant already listed for that
 /// route is not added twice. The result is re-parsed and compared with the
 /// model the edit intended, so an edit that would change anything else fails
-/// with [`EditError::Verification`] and no output.
+/// with [`EditError::Verification`] and no output. A route's executor blocks
+/// (`[route.ingress]`, `[route.static]`, `[route.php]`) travel with it into
+/// that postcondition: an edit that cannot reproduce one refuses the write
+/// instead of dropping it from the author's file (`R28`, `R29`, `ADR-0010`).
 ///
 /// An edits set with nothing to add returns the source unchanged, which makes
 /// repeated learning runs byte-identical.
@@ -933,6 +936,12 @@ fn expected_routes(manifest: &Manifest, plan: &Plan) -> Vec<Route> {
             route.prefork(),
             grants,
         )
+        // Every executor key the route carries travels with it. The edit only
+        // ever splices a `queries` entry, so an `[route.static]` or
+        // `[route.php]` block it cannot reproduce must make verification fail
+        // rather than vanish from the postcondition (`R28`, `R29`).
+        .with_static(route.static_policy().cloned())
+        .with_php(route.php().cloned())
         .with_ingress(route.ingress());
         if let Some(slot) = routes.get_mut(patch.route_index) {
             *slot = rebuilt;

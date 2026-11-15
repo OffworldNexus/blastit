@@ -951,4 +951,156 @@ queries = [\"SELECT 1\"]
             edits.grants
         );
     }
+
+    /// The `dev --learn` write path (`docs/frameworks/php.md`: "records the
+    /// routes and exact queries you click through") against the documented
+    /// PHP-shaped manifest: the learned query must land, and the route's
+    /// `[route.static]` and `[route.php]` blocks must be the bytes they were.
+    ///
+    /// This is [`LearnRun::finish`], the one function the supervisor calls on
+    /// `SIGTERM`; no PHP binary takes part in writing a manifest.
+    #[test]
+    fn a_learned_query_keeps_the_route_s_executor_blocks_on_disk() {
+        const PHP_STATIC: &str = "\
+# The shop: Symfony serves it from one front controller.
+version = 1
+
+# One database, one credential.
+[proxy.db]
+protocol = \"postgresql\"
+input = { url = \"DATABASE_URL\" }
+
+[[route]]
+name = \"app\"
+path = ['.*']
+
+# Only fingerprinted output is cached for a year.
+[route.static]
+root = \"public\"
+index = \"index.html\"
+spa = false
+immutable = [\"/assets/*\", \"/build/*\"]
+
+# The front controller; 4 is a cap, the budget is derived.
+[route.php]
+entry = \"public/index.php\"
+workers = 4
+
+[route.db]
+queries = ['SELECT \"shop_product\".\"id\" FROM \"shop_product\"']
+";
+        const LEARNED: &str =
+            r#"SELECT "shop_product"."sku" FROM "shop_product" WHERE "shop_product"."id" = $?"#;
+
+        let dir = std::env::temp_dir().join(format!(
+            "blastit-mb321-learn-{}-{}",
+            std::process::id(),
+            LEARNED.len()
+        ));
+        std::fs::create_dir_all(&dir).expect("a fresh fixture directory");
+        let manifest = dir.join("blastit.toml");
+        std::fs::write(&manifest, PHP_STATIC).expect("write the fixture");
+
+        let mut run = LearnRun::new();
+        let obs = serde_json::json!({
+            "target": {"scope": "routed", "route": "app"},
+            "proxy": "db",
+            "kind": "query",
+            "sql": LEARNED,
+            "is_tx": false,
+            "allowed": false,
+            "verdict": {"kind": "query", "normalized": LEARNED}
+        });
+        run.push_bytes(format!("{obs}\n").as_bytes());
+
+        let status = run.finish(&manifest, 20_000, false);
+        let written = std::fs::read_to_string(&manifest).expect("read the manifest back");
+        let without_queries = |document: &str| -> String {
+            document
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("queries"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        assert_eq!(status, 0, "the learn write succeeds:\n{written}");
+        assert!(written.contains(LEARNED), "the query landed:\n{written}");
+        assert_eq!(
+            without_queries(&written),
+            without_queries(PHP_STATIC),
+            "an executor block or another author line changed:\n{written}"
+        );
+        assert_eq!(written.matches("[route.static]").count(), 1, "{written}");
+        assert_eq!(written.matches("[route.php]").count(), 1, "{written}");
+        let (parsed, _warnings) =
+            Manifest::parse_and_validate(&written, 20_000).expect("the written manifest boots");
+        let app = parsed
+            .routes()
+            .iter()
+            .find(|route| route.name() == "app")
+            .expect("the route is still declared");
+        assert_eq!(
+            app.static_policy().map(|policy| policy.root.as_str()),
+            Some("public")
+        );
+        assert_eq!(
+            app.php()
+                .map(|policy| (policy.entry.as_str(), policy.workers)),
+            Some(("public/index.php", Some(4)))
+        );
+
+        // The denied twin: a statement the policy refused is never written, and
+        // the file (both blocks included) stays exactly as it was.
+        let refused_dir = dir.join("refused");
+        std::fs::create_dir_all(&refused_dir).expect("a second fixture directory");
+        let refused_manifest = refused_dir.join("blastit.toml");
+        std::fs::write(&refused_manifest, PHP_STATIC).expect("write the second fixture");
+        let mut refused_run = LearnRun::new();
+        let refused = serde_json::json!({
+            "target": {"scope": "routed", "route": "app"},
+            "proxy": "db",
+            "kind": "query",
+            "sql": "SELECT 1 WHERE … = …",
+            "is_tx": false,
+            "allowed": false,
+            "verdict": {
+                "kind": "refused",
+                "redacted": "SELECT 1 WHERE … = …",
+                "reason": "the literal was inlined"
+            }
+        });
+        refused_run.push_bytes(format!("{refused}\n").as_bytes());
+        assert_eq!(
+            refused_run.finish(&refused_manifest, 20_000, false),
+            1,
+            "a refused statement is an exit-1 learn, not a silent write"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&refused_manifest).expect("read the second fixture back"),
+            PHP_STATIC,
+            "a refusal writes nothing"
+        );
+
+        // A malformed executor block is refused by the parse, so `finish`
+        // returns `1` with no writer reachable and the file untouched.
+        let broken_dir = dir.join("broken");
+        std::fs::create_dir_all(&broken_dir).expect("a third fixture directory");
+        let broken_manifest = broken_dir.join("blastit.toml");
+        let broken = PHP_STATIC.replace("entry = \"public/index.php\"", "entry = 4");
+        std::fs::write(&broken_manifest, &broken).expect("write the third fixture");
+        let mut broken_run = LearnRun::new();
+        broken_run.push_bytes(format!("{obs}\n").as_bytes());
+        assert_eq!(
+            broken_run.finish(&broken_manifest, 20_000, false),
+            1,
+            "a manifest that does not parse is an exit-1 learn"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&broken_manifest).expect("read the third fixture back"),
+            broken,
+            "a parse refusal writes nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
