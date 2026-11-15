@@ -1622,3 +1622,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T06:12 [MB.3.49] (lead) base 5ee6a57
 - 2026-11-15T06:18 [MB.3.49] (lead) status active -> review
 - 2026-11-15T06:23 [MB.3.49] (lead) status review -> done
+- 2026-11-15T06:25 [MB.3.50] (lead) created (task) Sweep the scheduler's charge/outcome/release doc claims instead of patching three more
+- 2026-11-15T06:25 [MB.3.13] (lead) status ready -> done
