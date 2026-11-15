@@ -1875,3 +1875,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T22:18 [MB.3.63] (lead) attempt 2/3 started; base 637aa97
 - 2026-11-15T22:22 [MB.3.63] (lead) status active -> review
 - 2026-11-15T22:52 [MB.3.63] (lead) status review -> done
+- 2026-11-15T22:52 [MB.3.66] (lead) created (task) The judge must not read GLIBC_ABI_* from a non-glibc version script as a floor
+- 2026-11-15T22:52 [MB.3.63] (lead) commit fedd78e
+- 2026-11-15T22:52 [MB.3.64] (lead) status ready -> active
+- 2026-11-15T22:52 [MB.3.64] (lead) attempt 1/3 started
+- 2026-11-15T22:52 [MB.3.64] (lead) attempt 1/3 started; base fedd78e
+- 2026-11-15T22:52 [MB.3.64] (lead) edited fields
+- 2026-11-15T22:53 [MB.3.64] (lead) owner addition: prove the seam is ABSENT from the shipped binary (strings/grep -a the release standalone artifact for BLASTIT_TEST_SWAP_POINT -> 0 hits) AND PRE
+- 2026-11-15T23:09 [MB.3.64] (lead) status active -> review
+- 2026-11-15T23:18 [MB.3.64] (lead) status review -> done

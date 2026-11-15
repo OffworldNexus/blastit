@@ -1073,15 +1073,28 @@ impl Drop for Scratch {
 
 // ----------------------------------------------------------------- a boot
 
-/// A rename to perform the instant stage 0 announces the pair it inspected: the
-/// only way to land a swap between stage 0's `fstat` and stage 1's re-open.
+/// A rename to perform while the boot is paused at the test-only rendezvous
+/// (`MB.3.64`): the one way to land a swap between stage 0's `fstat` and stage
+/// 1's re-open, because the boot says when it is there.
 struct Swap {
-    /// The line that means stage 0 has recorded `(dev, ino)` and moved on.
-    needle: &'static str,
+    /// The rendezvous path `BLASTIT_TEST_SWAP_POINT` names. Stage 1 creates
+    /// `<point>.ready` after stage 0 has recorded the pair and before it
+    /// re-opens it; writing `<point>.go` releases the boot.
+    point: PathBuf,
     /// The file to rename over `to`.
     from: PathBuf,
     /// The pinned path stage 1 will re-open: the `libphp` or the shim.
     to: PathBuf,
+}
+
+/// `MB.3.64`: the seam the two inode-pin legs share — `<point>.ready` means
+/// "stage 1 is between stage 0's record and the re-open", `<point>.go` releases
+/// it.
+fn swap_point_sidecar(point: &Path, suffix: &str) -> PathBuf {
+    let mut name = point.as_os_str().to_os_string();
+    name.push(".");
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 /// A `blastit dev` boot under test: its process, both streams, and its port.
@@ -1120,8 +1133,8 @@ impl Boot {
         Self::launch(dir, env, None)
     }
 
-    /// The same, renaming `swap.from` over `swap.to` the instant `swap.needle`
-    /// appears on stderr.
+    /// The same, renaming `swap.from` over `swap.to` while the boot is paused at
+    /// the test-only rendezvous `<point>.ready`.
     fn start_swapping(dir: &Path, env: &[(&str, &str)], swap: Swap) -> Self {
         Self::launch(dir, env, Some(swap))
     }
@@ -1148,6 +1161,13 @@ impl Boot {
         for (key, value) in env {
             command.env(key, value);
         }
+        // `MB.3.64`: stage 0 reads this before the `execve` whose environment has
+        // every `BLASTIT_*` stripped, and carries it in the configuration
+        // document — so the point reaches stage 1 without the seam needing to
+        // cross a barrier that exists to stop exactly that.
+        if let Some(swap) = &swap {
+            command.env("BLASTIT_TEST_SWAP_POINT", &swap.point);
+        }
         let mut child = command.spawn().expect("spawning `blastit dev`");
 
         let stdout_lines = Arc::new(Mutex::new(Vec::new()));
@@ -1165,7 +1185,6 @@ impl Boot {
         })];
 
         let collected = Arc::clone(&stderr_lines);
-        let trigger = swap.map(|swap| (swap, Arc::clone(swapped.as_ref().expect("a swap flag"))));
         let stderr = child.stderr.take().expect("stderr");
         let mut readers = readers;
         readers.push(std::thread::spawn(move || {
@@ -1176,14 +1195,32 @@ impl Boot {
                     .lock()
                     .expect("the stderr buffer")
                     .push(line.clone());
-                if let Some((swap, done)) = &trigger
-                    && line.contains(swap.needle)
-                    && !done.swap(true, Ordering::SeqCst)
-                {
-                    let _ = std::fs::rename(&swap.from, &swap.to);
-                }
             }
         }));
+
+        // The other half of the rendezvous: nothing here watches a log line. The
+        // swap waits for stage 1 to say it is paused and then says go, so the
+        // rename is inside the window because both sides say so.
+        if let Some((swap, done)) = swap.zip(swapped.clone()) {
+            readers.push(std::thread::spawn(move || {
+                let released = swap_point_sidecar(&swap.point, "go");
+                let deadline = Instant::now() + BOOT_TIMEOUT;
+                let ready = swap_point_sidecar(&swap.point, "ready");
+                while !ready.exists() {
+                    if Instant::now() > deadline {
+                        // Never reached the point: release a boot that somehow
+                        // is waiting, and let `swapped()` report the miss.
+                        let _ = std::fs::write(&released, b"go\n");
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                if std::fs::rename(&swap.from, &swap.to).is_ok() {
+                    done.store(true, Ordering::SeqCst);
+                }
+                let _ = std::fs::write(&released, b"go\n");
+            }));
+        }
 
         Self {
             child,
@@ -1959,22 +1996,16 @@ fn an_egress_route_lets_the_probe_open_a_socket() {
 /// between stage 0's `fstat` and stage 1's `O_NOFOLLOW` re-open must refuse the
 /// boot — the worker would otherwise load a file nobody inspected.
 ///
-/// The swap is driven from the boot's own announcement of the pair it inspected,
-/// because that line is the only observable end of stage 0: `src/` is not this
-/// node's path, so there is no seam to open the window deterministically. The
-/// window is a race between two stages of one process, so the test retries —
-/// **bounded** to 4 attempts and 20 s — and only a *lost race* is retried:
-///
-/// * stage 0 never announces the pair → a broken fixture or a regressed gate,
-///   which panics at once instead of being retried;
-/// * the boot refuses with a different sentence → a real failure, which panics
-///   at once;
-/// * the boot **serves** → the rename landed after stage 1 had already opened
-///   the pinned file, which is the harness losing the race and is the only
-///   reason to try again; if every attempt serves, the failure says exactly that
-///   the window was missed **and** that a removed inode pin produces the same
-///   four served attempts, so it can never read as harness noise when it is a
-///   regression.
+/// The rename is placed **deterministically** (`MB.3.64`): stage 0 reads
+/// `BLASTIT_TEST_SWAP_POINT` before the `execve` that strips every `BLASTIT_*`
+/// variable and carries the path in the configuration document, and stage 1
+/// pauses at that point — after stage 0 recorded `(path, st_dev, st_ino)`, before
+/// [`php_view::boot_bindings`] re-opens either object. The boot creates
+/// `<point>.ready`; this test waits for it, renames, and writes `<point>.go`.
+/// Neither side can be early, so the window does not depend on how fast the
+/// runner is — and a boot that **serves** is not a lost race but the regression
+/// this test exists to catch (a stage 1 that no longer compares the re-opened
+/// file's `(st_dev, st_ino)` against stage 0's record).
 ///
 /// This is the one refusal in this suite that stage **1** makes, so unlike a
 /// stage-0 refusal the `dev` boot has already confirmed itself on stdout: the
@@ -1985,99 +2016,82 @@ fn an_egress_route_lets_the_probe_open_a_socket() {
 fn a_libphp_replaced_between_the_stages_refuses_the_boot() {
     let _root = StubRootGuard::start();
     let stubs = stubs();
-    let mut served = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut attempt = 0;
-    while attempt < 4 && Instant::now() < deadline {
-        attempt += 1;
-        clear(&stubs.nts_libphp_canary);
-        clear(&stubs.nts_shim_canary);
-        let scratch = Scratch::new("swap", PHP_MANIFEST);
-        scratch.write(ENTRY, NORMAL_PHP);
-        let libphp = scratch.copy(&stubs.nts_libphp, "libphp8.4.so");
-        scratch.copy(&stubs.nts_shim, &shim_name(84));
-        let spare = scratch.copy(&stubs.nts_libphp, "replacement.so");
+    clear(&stubs.nts_libphp_canary);
+    clear(&stubs.nts_shim_canary);
+    let scratch = Scratch::new("swap", PHP_MANIFEST);
+    scratch.write(ENTRY, NORMAL_PHP);
+    let libphp = scratch.copy(&stubs.nts_libphp, "libphp8.4.so");
+    scratch.copy(&stubs.nts_shim, &shim_name(84));
+    let spare = scratch.copy(&stubs.nts_libphp, "replacement.so");
 
-        let mut boot = Boot::start_swapping(
-            &scratch.dir,
-            &[
-                ("BLASTIT_LIBPHP", &libphp.to_string_lossy()),
-                ("BLASTIT_PHP_SHIM_DIR", &scratch.dir.to_string_lossy()),
-            ],
-            Swap {
-                needle: "[route.php] runtime is",
-                from: spare,
-                to: libphp.clone(),
-            },
-        );
-        let code = boot.await_boot();
-        let swapped = boot.swapped();
-        boot.stop();
-        let stdout = boot.stdout_text();
-        let stderr = boot.stderr_text();
-        let all = format!("{stdout}\n{stderr}");
+    let mut boot = Boot::start_swapping(
+        &scratch.dir,
+        &[
+            ("BLASTIT_LIBPHP", &libphp.to_string_lossy()),
+            ("BLASTIT_PHP_SHIM_DIR", &scratch.dir.to_string_lossy()),
+        ],
+        Swap {
+            point: scratch.dir.join("swap-point"),
+            from: spare,
+            to: libphp.clone(),
+        },
+    );
+    let code = boot.await_boot();
+    let swapped = boot.swapped();
+    boot.stop();
+    let stdout = boot.stdout_text();
+    let stderr = boot.stderr_text();
+    let all = format!("{stdout}\n{stderr}");
 
-        if !swapped {
-            panic!(
-                "attempt {attempt}: stage 0 never announced the pair it inspected, so the swap \
-                 could not be placed at all — this is not the timing race, it is the fixture or \
-                 the gate:\n{all}"
-            );
-        }
-        if !all.contains("is not the file stage 0 inspected") {
-            match code {
-                // A refusal with another sentence is a real failure.
-                Some(code) => panic!(
-                    "attempt {attempt}: the boot refused (exit {code:?}) with a sentence that is \
-                     not the inode pin's, which is not the timing race:\n{all}"
-                ),
-                // Served: the rename landed after stage 1 opened the file.
-                None => served.push(format!("attempt {attempt}: {all}")),
-            }
-            continue;
-        }
-        assert_eq!(
-            code,
-            Some(Some(1)),
-            "the inode refusal is a boot refusal (exit 1): {all}"
-        );
-        assert!(
-            !boot.events().iter().any(|event| event["event"] == "ready"),
-            "no listener is bound before stage 1 verifies the inode: {all}"
-        );
-        assert_no_serving_surface(&mut boot, "inode swap");
-        assert!(
-            all.contains(&libphp.display().to_string()),
-            "the refusal names the library that moved: {all}"
-        );
-        assert!(
-            all.contains("restore the package and restart blastit"),
-            "and the fix: {all}"
-        );
-        assert_never_loaded(
-            &[&stubs.nts_libphp_canary, &stubs.nts_shim_canary],
-            "inode swap",
-        );
-        println!("refused (stage 1 inode pin) on attempt {attempt}: {all}");
-        return;
-    }
     assert!(
-        !served.is_empty(),
-        "the retry bound (4 attempts, 20 s) ended after {attempt} attempt(s) without a boot to \
-         judge"
+        swapped,
+        "stage 1 never reached the swap point, so nothing was renamed — this is the fixture or \
+         the gate, not a race (the seam is a rendezvous, not a timing window):\n{all}"
     );
-    panic!(
-        "the stage-0→stage-1 window was missed in {attempt} attempt(s) inside 20 s: the rename \
-         landed after stage 1 had already opened the pinned file, so every attempt served the \
-         route and the inode pin was never exercised. This is a timing race in the harness (the \
-         swap is triggered by stage 0's own announcement; there is no deterministic seam without \
-         a `src/` change) — BUT a **removed inode pin** produces exactly these same served \
-         attempts, so do not dismiss this as harness noise before checking that stage 1 still \
-         compares the re-opened file's `(st_dev, st_ino)` against stage 0's record \
-         (`php_view::boot_bindings`/`open_pinned`). If that comparison is gone, this is the \
-         regression the test exists to catch, not a lost race:\n{}",
-        served.join("\n")
+    let Some(inode) = all
+        .lines()
+        .find(|line| line.contains("is not the file stage 0 inspected"))
+    else {
+        match code {
+            // A refusal with another sentence is a real failure.
+            Some(code) => panic!(
+                "the boot refused (exit {code:?}) with a sentence that is not the inode pin's:\n{all}"
+            ),
+            // Served: the seam held the boot and the rename still served, which
+            // only a removed (or miscompared) pin can do.
+            None => panic!(
+                "the boot served the route even though the seam paused it between stage 0's \
+                 record and stage 1's re-open: the rename landed inside the window by \
+                 construction, so this is **not** a lost race. A boot that serves here means \
+                 stage 1 no longer compares the re-opened `libphp`'s `(st_dev, st_ino)` against \
+                 stage 0's record (`php_view::boot_bindings`/`open_pinned`) — the regression this \
+                 test exists to catch:\n{all}"
+            ),
+        }
+    };
+    assert_eq!(
+        code,
+        Some(Some(1)),
+        "the inode refusal is a boot refusal (exit 1): {all}"
     );
+    assert!(
+        !boot.events().iter().any(|event| event["event"] == "ready"),
+        "no listener is bound before stage 1 verifies the inode: {all}"
+    );
+    assert_no_serving_surface(&mut boot, "inode swap");
+    assert!(
+        inode.contains(&libphp.display().to_string()),
+        "the refusal names the library that moved: {inode}"
+    );
+    assert!(
+        inode.contains("restore the package and restart blastit"),
+        "and the fix: {all}"
+    );
+    assert_never_loaded(
+        &[&stubs.nts_libphp_canary, &stubs.nts_shim_canary],
+        "inode swap",
+    );
+    println!("refused (stage 1 inode pin): {all}");
 }
 
 /// The **shim** half of the same pin (`ADR-0010` §3, `R7`): stage 0 records
@@ -2101,131 +2115,110 @@ fn a_libphp_replaced_between_the_stages_refuses_the_boot() {
 ///
 /// The fixture is the same shape as the library leg, with the two objects
 /// exchanged: a **copy of the same stub** is renamed over the recorded shim
-/// between stage 0's announcement and stage 1's re-open, so the file's content —
-/// and therefore the pair's validity — is unchanged and only the inode moves.
-/// That is what makes "served" the signature of a removed pin rather than of a
-/// fixture that could not have loaded. The retry bound, the two real-failure
-/// panics and the "a removed pin produces the same served attempts" warning are
-/// the library leg's, for the same reason: the window is a race between two
-/// stages of one process.
+/// between stage 0's record and stage 1's re-open — the rendezvous of
+/// [`a_libphp_replaced_between_the_stages_refuses_the_boot`] says exactly when —
+/// so the file's content, and therefore the pair's validity, is unchanged and
+/// only the inode moves. That is what makes "served" the signature of a removed
+/// pin rather than of a fixture that could not have loaded.
 #[test]
 fn a_shim_replaced_between_the_stages_refuses_the_boot() {
     let _root = StubRootGuard::start();
     let stubs = stubs();
-    let mut served = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut attempt = 0;
-    while attempt < 4 && Instant::now() < deadline {
-        attempt += 1;
-        clear(&stubs.nts_libphp_canary);
-        clear(&stubs.nts_shim_canary);
-        let scratch = Scratch::new("swap-shim", PHP_MANIFEST);
-        scratch.write(ENTRY, NORMAL_PHP);
-        let libphp = scratch.copy(&stubs.nts_libphp, "libphp8.4.so");
-        let shim = scratch.copy(&stubs.nts_shim, &shim_name(84));
-        let spare = scratch.copy(&stubs.nts_shim, "replacement-shim.so");
-        // The premise the assertion below rests on: the replacement is the
-        // recorded shim byte for byte, so the refusal can only be the inode.
-        assert_eq!(
-            std::fs::read(&spare).expect("the spare shim"),
-            std::fs::read(&shim).expect("the recorded shim"),
-            "the replacement must be a copy of the same stub, not a different shim"
-        );
-        // Stage 0 records the path it resolved, which is the canonical one.
-        let recorded = std::fs::canonicalize(&shim).expect("the shim stage 0 records");
+    clear(&stubs.nts_libphp_canary);
+    clear(&stubs.nts_shim_canary);
+    let scratch = Scratch::new("swap-shim", PHP_MANIFEST);
+    scratch.write(ENTRY, NORMAL_PHP);
+    let libphp = scratch.copy(&stubs.nts_libphp, "libphp8.4.so");
+    let shim = scratch.copy(&stubs.nts_shim, &shim_name(84));
+    let spare = scratch.copy(&stubs.nts_shim, "replacement-shim.so");
+    // The premise the assertion below rests on: the replacement is the
+    // recorded shim byte for byte, so the refusal can only be the inode.
+    assert_eq!(
+        std::fs::read(&spare).expect("the spare shim"),
+        std::fs::read(&shim).expect("the recorded shim"),
+        "the replacement must be a copy of the same stub, not a different shim"
+    );
+    // Stage 0 records the path it resolved, which is the canonical one.
+    let recorded = std::fs::canonicalize(&shim).expect("the shim stage 0 records");
 
-        let mut boot = Boot::start_swapping(
-            &scratch.dir,
-            &[
-                ("BLASTIT_LIBPHP", &libphp.to_string_lossy()),
-                ("BLASTIT_PHP_SHIM_DIR", &scratch.dir.to_string_lossy()),
-            ],
-            Swap {
-                needle: "[route.php] runtime is",
-                from: spare,
-                to: shim.clone(),
-            },
-        );
-        let code = boot.await_boot();
-        let swapped = boot.swapped();
-        boot.stop();
-        let stdout = boot.stdout_text();
-        let stderr = boot.stderr_text();
-        let all = format!("{stdout}\n{stderr}");
+    let mut boot = Boot::start_swapping(
+        &scratch.dir,
+        &[
+            ("BLASTIT_LIBPHP", &libphp.to_string_lossy()),
+            ("BLASTIT_PHP_SHIM_DIR", &scratch.dir.to_string_lossy()),
+        ],
+        Swap {
+            point: scratch.dir.join("swap-point"),
+            from: spare,
+            to: shim.clone(),
+        },
+    );
+    let code = boot.await_boot();
+    let swapped = boot.swapped();
+    boot.stop();
+    let stdout = boot.stdout_text();
+    let stderr = boot.stderr_text();
+    let all = format!("{stdout}\n{stderr}");
 
-        if !swapped {
-            panic!(
-                "attempt {attempt}: stage 0 never announced the pair it inspected, so the shim \
-                 swap could not be placed at all — this is not the timing race, it is the \
-                 fixture or the gate:\n{all}"
-            );
-        }
-        // The sentence that separates the shim's pin from the library's: it
-        // names the shim, and only the shim.
-        let inode = all
-            .lines()
-            .find(|line| line.contains("is not the file stage 0 inspected"));
-        let Some(inode) = inode else {
-            match code {
-                // A refusal with another sentence is a real failure.
-                Some(code) => panic!(
-                    "attempt {attempt}: the boot refused (exit {code:?}) with a sentence that is \
-                     not the inode pin's, which is not the timing race:\n{all}"
-                ),
-                // Served: the rename landed after stage 1 opened the file.
-                None => served.push(format!("attempt {attempt}: {all}")),
-            }
-            continue;
-        };
-        assert_eq!(
-            code,
-            Some(Some(1)),
-            "the shim's inode refusal is a boot refusal (exit 1): {all}"
-        );
-        assert!(
-            inode.contains(&format!("shim {}", recorded.display())),
-            "the refusal names the **shim** that moved ({}) and not the library: {inode}",
-            recorded.display()
-        );
-        assert!(
-            !inode.contains(&libphp.display().to_string()),
-            "the refusal is the shim's comparison, not the library's (the library did not \
-             move): {inode}"
-        );
-        assert!(
-            inode.contains("restore the package and restart blastit"),
-            "and the fix: {inode}"
-        );
-        assert!(
-            !boot.events().iter().any(|event| event["event"] == "ready"),
-            "no listener is bound before stage 1 verifies the shim's inode: {all}"
-        );
-        assert_no_serving_surface(&mut boot, "shim inode swap");
-        assert_never_loaded(
-            &[&stubs.nts_libphp_canary, &stubs.nts_shim_canary],
-            "shim inode swap",
-        );
-        println!("refused (stage 1 shim inode pin) on attempt {attempt}: {all}");
-        return;
-    }
     assert!(
-        !served.is_empty(),
-        "the retry bound (4 attempts, 20 s) ended after {attempt} attempt(s) without a boot to \
-         judge"
+        swapped,
+        "stage 1 never reached the swap point, so the shim swap could not be placed at all — \
+         this is the fixture or the gate, not a race (the seam is a rendezvous, not a timing \
+         window):\n{all}"
     );
-    panic!(
-        "the stage-0→stage-1 window was missed in {attempt} attempt(s) inside 20 s: the rename \
-         landed after stage 1 had already opened the pinned shim, so every attempt served the \
-         route and the shim's inode pin was never exercised. This is a timing race in the \
-         harness (the swap is triggered by stage 0's own announcement; there is no deterministic \
-         seam without a `src/` change) — BUT a **removed inode pin** produces exactly these same \
-         served attempts, so do not dismiss this as harness noise before checking that stage 1 \
-         still compares the re-opened **shim**'s `(st_dev, st_ino)` against stage 0's record \
-         (`php_view::boot_bindings`/`open_pinned`, the `shim` call's `record.shim_dev`/\
-         `record.shim_ino`). If that comparison is gone, or compares the shim against the \
-         library's pair, this is the regression the test exists to catch, not a lost race:\n{}",
-        served.join("\n")
+    // The sentence that separates the shim's pin from the library's: it names
+    // the shim, and only the shim.
+    let Some(inode) = all
+        .lines()
+        .find(|line| line.contains("is not the file stage 0 inspected"))
+    else {
+        match code {
+            // A refusal with another sentence is a real failure.
+            Some(code) => panic!(
+                "the boot refused (exit {code:?}) with a sentence that is not the inode pin's:\n{all}"
+            ),
+            // Served: the seam held the boot and the rename still served, which
+            // only a removed (or miscompared) pin can do.
+            None => panic!(
+                "the boot served the route even though the seam paused it between stage 0's \
+                 record and stage 1's re-open: the rename landed inside the window by \
+                 construction, so this is **not** a lost race. A boot that serves here means \
+                 stage 1 no longer compares the re-opened **shim**'s `(st_dev, st_ino)` against \
+                 stage 0's record (`php_view::boot_bindings`/`open_pinned`, the `shim` call's \
+                 `record.shim_dev`/`record.shim_ino`), or compares it against the library's pair \
+                 — the regression this test exists to catch:\n{all}"
+            ),
+        }
+    };
+    assert_eq!(
+        code,
+        Some(Some(1)),
+        "the shim's inode refusal is a boot refusal (exit 1): {all}"
     );
+    assert!(
+        inode.contains(&format!("shim {}", recorded.display())),
+        "the refusal names the **shim** that moved ({}) and not the library: {inode}",
+        recorded.display()
+    );
+    assert!(
+        !inode.contains(&libphp.display().to_string()),
+        "the refusal is the shim's comparison, not the library's (the library did not \
+         move): {inode}"
+    );
+    assert!(
+        inode.contains("restore the package and restart blastit"),
+        "and the fix: {inode}"
+    );
+    assert!(
+        !boot.events().iter().any(|event| event["event"] == "ready"),
+        "no listener is bound before stage 1 verifies the shim's inode: {all}"
+    );
+    assert_no_serving_surface(&mut boot, "shim inode swap");
+    assert_never_loaded(
+        &[&stubs.nts_libphp_canary, &stubs.nts_shim_canary],
+        "shim inode swap",
+    );
+    println!("refused (stage 1 shim inode pin): {all}");
 }
 
 /// `R11`: no `libphp` above the worker. With a real pair the route answers `200`

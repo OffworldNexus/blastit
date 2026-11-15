@@ -25,6 +25,7 @@ CHECK_WORKFLOWS = REPO / "scripts" / "check_workflows.py"
 PLATFORM_MATRIX = REPO / "scripts" / "platform_matrix.py"
 CHECK_WHEEL_TAG = REPO / "scripts" / "check_wheel_tag.py"
 CHECK_EXEC_ENV = REPO / "scripts" / "check-exec-env.sh"
+CHECK_NO_TEST_SEAM = REPO / "scripts" / "check-no-test-seam.sh"
 
 # Recorded verbatim from the shipped `aarch64-unknown-linux-musl` artifact of
 # `0.2.0` (`readelf --version-info blastit/_blastit.cpython-314-aarch64-linux-musl.so`):
@@ -1007,15 +1008,107 @@ def test_exec_env_cases() -> int:
     return cases_run
 
 
+def test_test_seam_cases() -> int:
+    """`MB.3.64`: the shipped artifact's absence of the test-only boot seam.
+
+    `#[cfg(debug_assertions)]` is an assertion until a check looks at a file, so
+    `scripts/check-no-test-seam.sh` is run here against four synthetic "binaries"
+    — real files, never a real build — to prove it is not vacuous:
+
+    * the name present → `--absent` (the shipped direction) must exit **1**;
+    * the name absent → `--absent` must exit **0**;
+    * the name absent → `--present` (the debug direction) must exit **1**, so the
+      absence check cannot pass by the seam having been deleted everywhere;
+    * a path that does not exist, and no argument at all, are exit **2**.
+    """
+    cases_run = 0
+    with tempfile.TemporaryDirectory(prefix="blastit-seam-gate-") as tmp:
+        root = Path(tmp)
+        seam = "BLASTIT_TEST_SWAP_POINT"
+        # A file shaped like a real ELF's `.rodata`: the name is a contiguous
+        # ASCII literal, which is exactly what the guard's byte search reads.
+        with_name = root / "debug-blastit"
+        with_name.write_bytes(
+            b"\x7fELF\x02\x01\x01\x00"
+            + b"\x00" * 61
+            + f"stage 1 is at {seam}\n".encode()
+            + b"\x00" * 61
+            + f"{seam}=\n".encode()
+        )
+        without_name = root / "release-blastit"
+        without_name.write_bytes(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 120)
+
+        def run(*args: str):
+            return subprocess.run(
+                ["bash", str(CHECK_NO_TEST_SEAM), *args],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        res = run(str(with_name))
+        _expect(
+            res.returncode == 1 and "denial-of-service" in res.stderr,
+            "the shipped direction must refuse a binary that carries the seam, "
+            f"and say why; got exit {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        res = run("--absent", str(without_name))
+        _expect(
+            res.returncode == 0 and "no BLASTIT_TEST_SWAP_POINT" in res.stdout,
+            f"a release binary must pass; got exit {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        res = run("--present", str(with_name))
+        _expect(
+            res.returncode == 0,
+            f"a debug binary must pass --present; got exit {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        res = run("--present", str(without_name))
+        _expect(
+            res.returncode == 1 and "not in a debug build either" in res.stderr,
+            "the debug direction must refuse a binary without the seam, so a seam "
+            f"deleted from the source cannot look green; got exit {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        res = run(str(root / "does-not-exist"))
+        _expect(
+            res.returncode == 2,
+            f"a missing artifact must be exit 2 (cannot decide); got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        res = run()
+        _expect(
+            res.returncode == 2 and "usage:" in res.stderr,
+            f"no argument must be exit 2 with usage; got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+    return cases_run
+
+
 def main() -> int:
     wf = test_workflow_auditor_cases()
     pm = test_platform_matrix_cases()
     wt = test_wheel_tag_guard_cases()
     ee = test_exec_env_cases()
-    total = wf + pm + wt + ee
+    ts = test_test_seam_cases()
+    total = wf + pm + wt + ee + ts
     print(
         f"packaging-gates-test: ok — {total} cases passed "
-        f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, exec-env={ee})"
+        f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, exec-env={ee}, test-seam={ts})"
     )
     return 0
 

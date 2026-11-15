@@ -110,7 +110,7 @@ CRITICAL_STAGE ?= $(CURDIR)/target/python-critical
 CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytest\.mark\.skip|pytest\.skip[[:space:]]*\(|importorskip[[:space:]]*\(|unittest\.skip
 
 .PHONY: help check clean guard critical-guard critical-skip-check plan-validate \
-        rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python \
+        rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python seam-check \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
         rs-test-php rs-test-php-image platform-matrix-check standalone standalone-glibc workflow-check \
@@ -197,6 +197,29 @@ rs-no-python: ## Build + inspect the default (standalone) binary: no libpython, 
 		exit 1; \
 	fi; \
 	echo "default build: 0 pyo3 dependencies (no libpython linked)"
+
+# The test-only boot seam (`MB.3.64`) is a debug build's: `#[cfg(debug_assertions)]`
+# compiles the rendezvous — and the variable's name — out of a release build, and
+# `BLASTIT_TEST_SWAP_POINT` in a shipped binary would pause a boot before the
+# listener binds, which is a denial-of-service surface. `scripts/check-no-test-seam.sh`
+# measures both directions on real files, because either alone can pass vacuously:
+# `--present` on the debug standalone binary `rs-no-python` just built (so a renamed
+# variable, or a seam deleted from the source, cannot look green), and the absent
+# direction on a release artifact when this checkout has one. The absent direction
+# that governs a *shipped* file is unconditional in `scripts/build-standalone.sh`,
+# which every archive goes through.
+seam-check: ## Prove the test-only boot seam is in the debug build and not in a release one
+	@if [ ! -x "$(CURDIR)/target/debug/blastit" ]; then \
+		echo "cargo build -p blastit --locked                    # the debug binary to compare"; \
+		$(STANDALONE_ENV) $(CARGO) build -p blastit --locked; \
+	fi
+	scripts/check-no-test-seam.sh --present "$(CURDIR)/target/debug/blastit"
+	@if [ -x "$(CURDIR)/target/release/blastit" ]; then \
+		scripts/check-no-test-seam.sh "$(CURDIR)/target/release/blastit"; \
+	else \
+		echo "note: no target/release/blastit in this checkout; the shipped artifact's absence"; \
+		echo "      is checked by scripts/build-standalone.sh, which packages it"; \
+	fi
 
 # The standalone archive (`ADR-0010` §4, `MB.3.18`): the release binary with
 # `python` off, the shims this host has built for its own tuple, a LICENSE and a
@@ -727,4 +750,4 @@ mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign 
 print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 	@echo "$(MUTANTS_TMP)"
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python platform-matrix-check workflow-check packaging-gates-test plan-validate ## Full fast unprivileged check
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python seam-check platform-matrix-check workflow-check packaging-gates-test plan-validate ## Full fast unprivileged check

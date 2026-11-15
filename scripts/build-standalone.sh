@@ -135,6 +135,12 @@ if [ ! -x "$binary" ]; then
     exit 1
 fi
 scripts/check-portable-elf.sh "$binary"
+# The test-only boot seam must not be in what this archive ships (`MB.3.64`):
+# `BLASTIT_TEST_SWAP_POINT` pauses a boot before the listener binds, which is a
+# denial-of-service surface for a production binary. The seam is compiled under
+# `debug_assertions` alone; this measures the artifact instead of trusting it,
+# and fails if `RUSTFLAGS` turned debug assertions back on for a release build.
+scripts/check-no-test-seam.sh "$binary"
 
 # The floor, measured once and used twice: `--max-glibc` refuses a build that
 # outgrew the image it is shipped for, and the same number goes into the

@@ -600,8 +600,34 @@ fn probe_timeout() -> Result<Option<Duration>, String> {
     Ok(Some(Duration::from_millis(millis)))
 }
 
-/// The configuration document stage 1 boots from, with the probe timeout folded
-/// in.
+/// `MB.3.64`: the test-only rendezvous that gives `critical_php_embed`'s
+/// inode-pin legs a deterministic window between stage 0's record and stage 1's
+/// re-open.
+///
+/// This is a **test seam, not a setting**. It exists only in a
+/// `debug_assertions` build — every `cargo test` binary — and the constant
+/// itself does not exist in a release build, so a shipped artifact has no name
+/// to read: `scripts/check-no-test-seam.sh` measures that absence on the
+/// packaged binary instead of trusting the gate.
+///
+/// It is read *here*, in the composition root, because the stage 0→1 `execve`
+/// hands stage 1 an environment from which `blastit-env` has stripped every
+/// `BLASTIT_*` variable (`R12`). The value therefore crosses the barrier in the
+/// configuration document, exactly as [`PROBE_TIMEOUT_VAR`] does — and for the
+/// same reason a route process never sees either name.
+#[cfg(debug_assertions)]
+pub(crate) const TEST_SWAP_POINT_VAR: &str = "BLASTIT_TEST_SWAP_POINT";
+
+/// The configuration document member [`TEST_SWAP_POINT_VAR`] travels under.
+///
+/// Stage 1 reads it back (`stage1::read_config`) and pauses at
+/// [`crate::php_view::await_test_swap`]; a release build has neither constant,
+/// so the member is never written and never honoured.
+#[cfg(debug_assertions)]
+pub(crate) const TEST_SWAP_POINT_MEMBER: &str = "test_swap_point";
+
+/// The configuration document stage 1 boots from, with the probe timeout — and,
+/// in a debug build, the test-only swap point — folded in.
 ///
 /// # Errors
 ///
@@ -616,6 +642,18 @@ fn config_document(config: &Config) -> Result<serde_json::Value, String> {
         object.insert(
             PROBE_TIMEOUT_MEMBER.to_string(),
             serde_json::Value::from(millis),
+        );
+    }
+    // `MB.3.64`: a path a test owns, carried across the `execve` for the same
+    // reason the probe timeout is. Compiled out of every release build, so the
+    // variable cannot name anything a shipped binary would act on.
+    #[cfg(debug_assertions)]
+    if let Some(point) = std::env::var_os(TEST_SWAP_POINT_VAR)
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            TEST_SWAP_POINT_MEMBER.to_string(),
+            serde_json::Value::from(point.to_string_lossy().into_owned()),
         );
     }
     Ok(value)

@@ -237,7 +237,8 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         }
         None => None,
     };
-    let (config, php_probe_timeout) = read_config(&boot, dev.as_ref(), options.config_fd);
+    let (config, php_probe_timeout, test_swap_point) =
+        read_config(&boot, dev.as_ref(), options.config_fd);
     #[cfg(not(feature = "php"))]
     let _ = php_probe_timeout;
     let emitter = Emitter::stdout(config.log_format, config.log_level);
@@ -361,6 +362,14 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             .map(|route| route.egress())
             .collect()
     };
+    // `MB.3.64`: the debug-only test seam. Stage 0 recorded `(st_dev, st_ino)`
+    // for the pair and carried `BLASTIT_TEST_SWAP_POINT` in the configuration
+    // document; this is the one point between that record and the re-open below,
+    // so a `cargo test` boot pauses here until the test has renamed an object.
+    // The rename is then inside the window by construction — the test cannot be
+    // early, this process cannot be early — instead of by how fast the runner
+    // happens to be. Unset (and, in a release build, absent) it does nothing.
+    test_swap_pause(&emitter, dev.as_ref(), test_swap_point.as_deref());
     // `ADR-0010` §3: stage 1 re-opens the NTS `libphp` and the shim stage 0
     // inspected, asserts `(st_dev, st_ino)` against that record, renders the INI
     // lockdown once and holds the descriptors every PHP worker is forked with.
@@ -781,18 +790,20 @@ fn toml_basic_string(value: &str) -> String {
     out
 }
 
-/// Reads the configuration document stage 0 wrote into the pipe (§4), and the
-/// `[route.php]` probe timeout that travelled with it (`ADR-0010` §3).
+/// Reads the configuration document stage 0 wrote into the pipe (§4), the
+/// `[route.php]` probe timeout that travelled with it (`ADR-0010` §3), and —
+/// in a debug build — the test-only swap point (`MB.3.64`).
 ///
 /// The timeout is a **stage-0 decision**: `BLASTIT_PROBE_TIMEOUT_MS` is read
 /// before the `execve` that swaps this process's environment, because
 /// `blastit-env` strips every `BLASTIT_*` variable (`R12`), so stage 1 finds it
-/// in the document and nowhere else.
+/// in the document and nowhere else. The swap point crosses the same barrier for
+/// the same reason, and only a `debug_assertions` build has the member at all.
 fn read_config(
     emitter: &Emitter,
     dev: Option<&crate::dev_learn::Dev>,
     fd: RawFd,
-) -> (Config, Duration) {
+) -> (Config, Duration, Option<PathBuf>) {
     // SAFETY: stage 0 cleared `FD_CLOEXEC` on this descriptor and stage 1 is its
     // only owner.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -809,10 +820,47 @@ fn read_config(
         .get(crate::stage0::PROBE_TIMEOUT_MEMBER)
         .and_then(serde_json::Value::as_u64)
         .map_or(crate::stage0::PROBE_TIMEOUT_DEFAULT, Duration::from_millis);
+    #[cfg(debug_assertions)]
+    let swap_point = value
+        .get(crate::stage0::TEST_SWAP_POINT_MEMBER)
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+    #[cfg(not(debug_assertions))]
+    let swap_point: Option<PathBuf> = None;
     match Config::from_json(&value) {
-        Ok(config) => (config, probe_timeout),
+        Ok(config) => (config, probe_timeout, swap_point),
         Err(err) => fail(emitter, dev, &err.to_string()),
     }
+}
+
+/// `MB.3.64`: pauses stage 1 at the test-only rendezvous, when — and only when —
+/// a `debug_assertions` build with the `php` capability was handed one.
+///
+/// Stage 0 read `BLASTIT_TEST_SWAP_POINT` before the barrier and carried the
+/// path in the configuration document; the wait itself
+/// ([`crate::php_view::await_test_swap`]) sits between stage 0's inode record
+/// and the re-open `boot_bindings` performs, so a rename the test makes while
+/// the boot is paused is *in* the window by construction.
+///
+/// A failure to create the rendezvous, or to be released from it, is this boot's
+/// refusal through [`fail`] (`exit 1`, before any listener) — never a hang.
+#[cfg(all(debug_assertions, feature = "php"))]
+fn test_swap_pause(emitter: &Emitter, dev: Option<&crate::dev_learn::Dev>, point: Option<&Path>) {
+    if let Some(point) = point
+        && let Err(message) = crate::php_view::await_test_swap(point)
+    {
+        fail(emitter, dev, &message);
+    }
+}
+
+/// The other two configurations — a release build, or one without the `php`
+/// capability — have no seam to pause at: their whole body is this.
+#[cfg(not(all(debug_assertions, feature = "php")))]
+fn test_swap_pause(
+    _emitter: &Emitter,
+    _dev: Option<&crate::dev_learn::Dev>,
+    _point: Option<&Path>,
+) {
 }
 
 /// The front end's configuration (§8.2).

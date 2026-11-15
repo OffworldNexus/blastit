@@ -184,6 +184,85 @@ impl EntryPin {
     }
 }
 
+/// `MB.3.64`: how long the test-only rendezvous may hold a boot before the wait
+/// becomes a refusal rather than a hang.
+///
+/// Longer than any `cargo test` needs to rename one file (milliseconds), short
+/// enough that a stale variable in a developer's shell is a boot failure with a
+/// sentence instead of a process nobody can explain.
+#[cfg(all(debug_assertions, feature = "php"))]
+const TEST_SWAP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `<point>.<suffix>`: the two sidecars that make the rendezvous an ordinary
+/// pair of files, so both sides talk about the same path without a socket, a
+/// pipe, or a second descriptor to pass.
+#[cfg(all(debug_assertions, feature = "php"))]
+fn swap_sidecar(point: &Path, suffix: &str) -> PathBuf {
+    let mut name = point.as_os_str().to_os_string();
+    name.push(".");
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// `MB.3.64`: the deterministic window `critical_php_embed`'s inode-pin legs
+/// need between stage 0's record and stage 1's re-open.
+///
+/// Stage 0 read `BLASTIT_TEST_SWAP_POINT` before the `execve` that strips every
+/// `BLASTIT_*` variable and carried the path in the configuration document
+/// ([`crate::stage0::TEST_SWAP_POINT_MEMBER`]); stage 1 reaches this once,
+/// immediately before [`boot_bindings`] opens the pair. The boot announces
+/// itself by creating `<point>.ready`, then blocks until `<point>.go` exists.
+/// The test therefore cannot be early (it waits for `.ready`) and stage 1 cannot
+/// be early (it waits for `.go`), so a rename the test makes in between is
+/// inside the window because the two sides say so — not because the runner was
+/// slow.
+///
+/// **A test seam with no production arm.** The whole function — and the
+/// variable's name in [`crate::stage0::TEST_SWAP_POINT_VAR`] — exists only under
+/// `debug_assertions`, which is what a `cargo test` build is; a release artifact
+/// compiles it out and carries no name to act on, which
+/// `scripts/check-no-test-seam.sh` measures on the packaged binary instead of
+/// trusting the `cfg`. Nothing here is reachable from a route process either:
+/// the value lives in the stage-0/stage-1 configuration document, and
+/// `blastit-env` strips every `BLASTIT_*` variable from the environment a view
+/// or http child is given.
+///
+/// # Errors
+///
+/// A sentence naming the point and the fix when `<point>.ready` cannot be
+/// written or `<point>.go` does not arrive within [`TEST_SWAP_TIMEOUT`]. Every
+/// call site turns that into this boot's `exit 1` before any listener binds.
+#[cfg(all(debug_assertions, feature = "php"))]
+pub fn await_test_swap(point: &Path) -> Result<(), String> {
+    let ready = swap_sidecar(point, "ready");
+    let go = swap_sidecar(point, "go");
+    let refuse = |what: &str, path: &Path, err: &str| {
+        format!(
+            "BLASTIT_TEST_SWAP_POINT={}: {what} {}: {err}; this is a test-only rendezvous and a \
+             boot that waits at it never serves — unset it to boot normally",
+            point.display(),
+            path.display()
+        )
+    };
+    if let Err(err) = std::fs::write(&ready, b"stage 1 is at the swap point\n") {
+        return Err(refuse("creating", &ready, &err.to_string()));
+    }
+    let deadline = Instant::now() + TEST_SWAP_TIMEOUT;
+    loop {
+        if go.exists() {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            return Err(refuse(
+                "waited",
+                &go,
+                &format!("for {TEST_SWAP_TIMEOUT:?} without the test releasing the boot"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// `ADR-0010` §3: builds every PHP slot's [`PhpBinding`], or the sentence the
 /// boot refuses with.
 ///
