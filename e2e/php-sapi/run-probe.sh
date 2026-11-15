@@ -65,7 +65,11 @@ if [ "$libc" = musl ] && [ -z "${PHP_SAPI_LIBC:-}" ]; then
     fi
 fi
 shim="target/php-sapi/libblastit_php${digits}-${arch}-${libc}.so"
-libphp="/usr/lib/libphp${minor}.so"
+# The image's own `LIBPHP` (a build arg from the matrix) wins: Ubuntu noble and
+# Debian bookworm install `libphp8.3.so`/`libphp8.2.so` at the same `/usr/lib`
+# path Debian trixie uses for 8.4, but a distro that moves it must not need a
+# second spelling here. `MB.3.18`.
+libphp="${LIBPHP:-/usr/lib/libphp${minor}.so}"
 
 # The e2e driver asks for the same tuple the build derived, rather than
 # re-deriving it from `uname`: one derivation, so `readelf` and the probe can

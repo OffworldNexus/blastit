@@ -113,8 +113,8 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
-        rs-test-php rs-test-php-image \
-        mutants-clean mutants-scope-probe print-mutants-tmp
+        rs-test-php rs-test-php-image platform-matrix-check standalone workflow-check \
+        packaging-gates-test mutants-clean mutants-scope-probe print-mutants-tmp
 
 help: ## Show available Make targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -129,6 +129,26 @@ critical-guard: ## Protect critical tests (report by default; pass BASE=<rev> NO
 
 plan-validate: ## Validate plan/nodes consistency
 	$(UV) run --no-project tools/plan.py validate
+
+# The packaging matrix (`MB.3.18`): the one place a wheel/archive/shim leg is
+# declared, and the guard on what a published page may claim. `ADR-0010` §4 is
+# the table of record for what an artifact *contains*; `scripts/platform_matrix.py`
+# is the table of record for which targets are attempted, and for how many shims
+# are built *and* probed — the proven-count rule (4 until 8.2/8.3 existed, now
+# whatever `PROVEN` names) is enforced here rather than in prose, so a page
+# cannot promise a leg the matrix does not build.
+platform-matrix-check: ## Refuse a packaging matrix a published page over-claims
+	$(UV) run --no-project scripts/platform_matrix.py --check
+
+# The workflows as a graph (`MB.3.18`): `scripts/check_workflows.py` reads the
+# YAML (`pyyaml==6.0.3` pinned and hash-locked in `scripts/check_workflows.py.lock`,
+# executed offline with `UV_OFFLINE=1 --locked`) and `scripts/test_packaging_gates.py`
+# runs mutated negative self-tests for the workflow, matrix, and wheel-tag guards.
+workflow-check: ## Refuse a workflow whose job graph cannot run (offline, locked)
+	UV_OFFLINE=1 $(UV) run --no-project --locked scripts/check_workflows.py
+
+packaging-gates-test: ## Run positive + negative self-tests for workflow, matrix, and wheel-tag guards
+	UV_OFFLINE=1 $(UV) run --no-project scripts/test_packaging_gates.py
 
 rs-format: ## Format Rust workspace
 	$(CARGO) fmt --all
@@ -177,6 +197,14 @@ rs-no-python: ## Build + inspect the default (standalone) binary: no libpython, 
 		exit 1; \
 	fi; \
 	echo "default build: 0 pyo3 dependencies (no libpython linked)"
+
+# The standalone archive (`ADR-0010` §4, `MB.3.18`): the release binary with
+# `python` off, the shims this host has built for its own tuple, a LICENSE and a
+# checksum file — `scripts/build-standalone.sh`. The release pipeline runs it
+# once per leg with `--require-shims N`; locally it packages whatever
+# `make php-sapi` left behind, so the archive is inspectable before a tag.
+standalone: ## Package the standalone archive (release binary + proven shims + checksum)
+	scripts/build-standalone.sh
 
 rs-test-critical: ## Run every crates/*/tests/critical_*.rs suite
 	@set -e; found=0; for file in crates/*/tests/critical_*.rs; do \
@@ -237,10 +265,34 @@ docs-unit: ## Run the runnable-docs and release-hygiene tests (offline, no wheel
 		python/tests/test_docs_assets.py \
 		python/tests/test_release_scripts.py -q
 
+# `docs-test` builds its host-native wheel into a scratch directory under
+# `target/docs-wheel` (`-o`), stashes any pre-existing release `dist/` aside for
+# the two readers that hardcode `REPO / "dist"`, and restores `dist/` on every
+# exit path — so `make check` never deletes a `manylinux_2_28` wheel in `dist/`
+# or leaves a host `manylinux_2_39` wheel behind.
+DOCS_WHEEL_STAGE ?= $(CURDIR)/target/docs-wheel
+docs-test: SHELL := /bin/bash
 docs-test: docs-unit ## Execute every console fence in README.md and the public docs pages, then check the built wheel
-	scripts/build-wheel.sh
+	scripts/build-wheel.sh -o "$(DOCS_WHEEL_STAGE)"
+	@set -euo pipefail; \
+	saved=""; had_dist=0; \
+	if [ -d "$(CURDIR)/dist" ]; then \
+		had_dist=1; \
+		saved=$$(mktemp -d "$${TMPDIR:-/var/tmp}/blastit-saved-dist.XXXXXX"); \
+		mv "$(CURDIR)/dist" "$$saved/dist"; \
+	fi; \
+	restore_dist() { \
+		rm -rf "$(CURDIR)/dist"; \
+		if [ "$$had_dist" -eq 1 ] && [ -d "$$saved/dist" ]; then \
+			mv "$$saved/dist" "$(CURDIR)/dist"; \
+		fi; \
+		[ -n "$$saved" ] && rm -rf "$$saved" || true; \
+	}; \
+	trap restore_dist EXIT; \
+	mkdir -p "$(CURDIR)/dist"; \
+	cp "$(DOCS_WHEEL_STAGE)"/blastit-*.whl "$(CURDIR)/dist/"; \
 	UV_OFFLINE=1 BLASTIT_REQUIRE_WHEEL=1 $(UV) run --no-project --with pytest==$(DOCS_PYTEST) python -m pytest -q \
-		python/tests/test_release_scripts.py::test_built_wheel_long_description_has_absolute_links
+		python/tests/test_release_scripts.py::test_built_wheel_long_description_has_absolute_links; \
 	$(UV) run --no-project python python/tests/runnable_docs/run.py
 
 # Build the site, then stage exactly what blastit serves: the files under
@@ -395,8 +447,8 @@ docs-serve-check: docs-serve-stage ## Bounded smoke test of the docs serve stack
 	fi; \
 	echo "docs-serve-check: 4/4 checks passed (server log: $$log)"
 
-e2e: ## Build wheel and run Docker + rootless capability e2e tests
-	scripts/build-wheel.sh
+e2e: ## Build manylinux_2_28 wheel and run Docker + rootless capability e2e tests
+	scripts/build-wheel.sh --manylinux 2_28
 	E2E_DOCKERFILE=Dockerfile.prebuilt $(UV) run --no-project e2e/run.py
 	$(UV) run --no-project e2e/rootless/run.py --local --dockerfile Dockerfile.prebuilt
 
@@ -424,8 +476,11 @@ PHP_MINORS ?= 8.4 8.3 8.2
 PHP_SAPI_CRATE := $(CURDIR)/crates/blastit-php-sapi
 PHP_SAPI_OUT ?= $(CURDIR)/target/php-sapi
 PHP_SAPI_CC ?= $(CC)
-# Empty means "ask `$(PHP_SAPI_CC) -dumpmachine`". Set both to cross-build
-# (`MB.3.18` owns the full matrix).
+# Empty means "ask `$(PHP_SAPI_CC) -dumpmachine`". Set both to cross-build.
+# `PHP_SAPI_LIBC` doubles as the *leg selector* for `php-sapi-e2e`: the matrix has
+# one shim leg per (minor, libc), and the probe image has to be the distro that
+# carries that libc (`debian:trixie` vs `alpine:3.21`), so
+# `make php-sapi-e2e PHP_MINOR=8.4 PHP_SAPI_LIBC=musl` is the Alpine leg.
 PHP_SAPI_ARCH ?=
 PHP_SAPI_LIBC ?=
 # Keep the e2e image after the probe (`php_sapi_probe.py --keep`), because
@@ -469,22 +524,22 @@ php-sapi: ## Build the C SAPI shims whose php-config exists; name the absent one
 	built=0; skipped=""; \
 	explicit="$(PHP_CONFIG)"; \
 	for minor in $(PHP_MINORS); do \
+		digits="$$(printf '%s' "$$minor" | tr -d '.')"; \
 		cfg=""; \
 		if [ -n "$$explicit" ] && [ "$$("$$explicit" --version 2>/dev/null | cut -d. -f1-2)" = "$$minor" ]; then \
 			cfg="$$explicit"; \
 		fi; \
 		if [ -z "$$cfg" ]; then \
-			for candidate in "php-config$$minor" php-config; do \
+			for candidate in "php-config$$minor" "php-config$$digits" php-config; do \
 				path="$$(command -v "$$candidate" 2>/dev/null || true)"; \
 				[ -n "$$path" ] || continue; \
 				if [ "$$("$$path" --version 2>/dev/null | cut -d. -f1-2)" = "$$minor" ]; then cfg="$$path"; break; fi; \
 			done; \
 		fi; \
-		digits="$$(printf '%s' "$$minor" | tr -d '.')"; \
 		soname="libblastit_php$$digits-$$arch-$$libc.so"; \
 		out="$(PHP_SAPI_OUT)/$$soname"; \
 		if [ -z "$$cfg" ]; then \
-			echo "php-sapi: skipped $$minor: no php-config for PHP $$minor (Debian/Ubuntu: apt install php$$minor-dev libphp$$minor-embed)"; \
+			echo "php-sapi: skipped $$minor: no php-config for PHP $$minor (Debian/Ubuntu: apt install php$$minor-dev libphp$$minor-embed; Alpine: php$$digits-dev php$$digits-embed)"; \
 			skipped="$$skipped $$minor"; \
 			continue; \
 		fi; \
@@ -501,6 +556,7 @@ php-sapi: ## Build the C SAPI shims whose php-config exists; name the absent one
 php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (not in `check`)
 	$(UV) run --no-project e2e/php_sapi_probe.py \
 		$(if $(PHP_MINOR),--minor $(PHP_MINOR)) \
+		$(if $(PHP_SAPI_LIBC),--libc $(PHP_SAPI_LIBC)) \
 		--image "$(PHP_SAPI_IMAGE)" \
 		$(if $(PHP_SAPI_KEEP),--keep)
 
@@ -608,4 +664,4 @@ mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign 
 print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 	@echo "$(MUTANTS_TMP)"
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python plan-validate ## Full fast unprivileged check
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python platform-matrix-check workflow-check packaging-gates-test plan-validate ## Full fast unprivileged check

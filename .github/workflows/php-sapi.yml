@@ -1,21 +1,34 @@
-# The real proof for `crates/blastit-php-sapi` (node MB.3.12).
+# The real proof for `crates/blastit-php-sapi` (nodes MB.3.12 and MB.3.18).
 #
 # `make check` runs on a host without PHP and can only prove that the Rust side
 # degrades honestly: the C shim is not built there, and nothing loads it. This
-# job is the acceptance that counts — it builds the ADR-0010 §4.1 shim
-# `libblastit_php<major><minor>-<arch>-<libc>.so` (on this host
-# `libblastit_php84-x86_64-gnu.so`) against Debian's own headers, `dlopen`s the
-# host's NTS `libphp8.4.so`, and runs real requests through the shim: body, head,
-# status, exact `cpu_ns`, the four reserved-name drops, an `exit()` and a fatal
-# that must leave the worker able to serve the next request, and a `readelf -d`
-# check that the shim carries no `DT_NEEDED` on libphp.
+# workflow is the acceptance that counts, and it runs **once per leg** —
+# `scripts/platform_matrix.py --matrix shims` is the list, so a leg is added in
+# one place and appears here, in the publish pipeline and in the counts the
+# documentation is allowed to state.
 #
-# The two protected PHP suites (`MB.3.39`) then run against that image's pair:
+# Each leg builds the ADR-0010 §4.1 shim `libblastit_php<major><minor>-<arch>-<libc>.so`
+# natively, in the **distro that ships that PHP minor** — Debian bookworm is 8.2,
+# Ubuntu noble is 8.3, Debian trixie is 8.4, and no single distro ships all three.
+# A shim is never cross-compiled against a foreign `php_config.h`: its type
+# widths and `ZEND_MM_ALIGNMENT` only disagree at `dlopen`. The shim is then
+# `dlopen`ed beside that distro's signed NTS `libphp` and real requests run
+# through it: body, head, status, exact `cpu_ns`, the four reserved-name drops,
+# an `exit()` and a fatal that must leave the worker able to serve the next
+# request, and a `readelf -d` check that the shim carries no `DT_NEEDED` on
+# libphp.
+#
+# The two protected PHP suites (`MB.3.39`) then run against that leg's pair:
 # `crates/blastit/tests/critical_php_backend.rs` and
 # `crates/blastit/tests/critical_php_embed.rs` boot `blastit` for real, which the
 # shim-level probe above cannot (no view fork, no `view.chan`, no scheduler
-# `cpu_ns`, no respawn). The guard step after them fails this job if they take
-# their no-PHP refusal branch instead of serving.
+# `cpu_ns`, no respawn). They are also where the security checklist is evinced
+# per leg — the worker's environment (M-1), the per-route uid and the real
+# `SeccompRole::View` (M-2/M-3), `CLOCK_PROCESS_CPUTIME_ID` reaching `cpu_ns`
+# (M-4), `dlopen` of a distro-signed libphp with no compatibility shim (M-5) and
+# the effective INI values read back with `ini_get` (M-6). The guard step after
+# them fails this job if they take their no-PHP refusal branch instead of
+# serving, so a runner without a pair can never report green.
 #
 # Kept out of `make check` (Docker + a PHP image + a Rust toolchain in the
 # image), exactly like `e2e/`, so the shim cannot rot unnoticed between gates.
@@ -40,24 +53,37 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  shim:
-    name: build libblastit_php8.4.so and load it
+  matrix:
+    name: the legs (scripts/platform_matrix.py)
     runs-on: ubuntu-latest
-    # The image installs PHP 8.4 + rustup and builds the workspace's one crate:
-    # ~8 minutes cold, ~2 cached, plus the two protected PHP suites (`MB.3.39`:
-    # the runner builds their binaries and the image's pair serves them; the
-    # suites themselves are ~2 s, the build is cached after the first run).
-    # 30 is the outer bound, not a promise.
-    timeout-minutes: 30
+    outputs:
+      legs: ${{ steps.legs.outputs.legs }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
-      # The probe binary lives behind `--features probe`, so plain `make check`
-      # never lints it; this is the job that does.
+      # A broken matrix fails here, once, before any container is pulled.
+      - name: The matrix and the published counts agree
+        run: uv run --no-project scripts/platform_matrix.py --check
+      - id: legs
+        run: |
+          set -euo pipefail
+          echo "legs=$(uv run --no-project scripts/platform_matrix.py --matrix shims)" >> "$GITHUB_OUTPUT"
+
+  # The probe binary lives behind `--features probe`, so plain `make check` never
+  # lints it; this job is the one that does. It runs once, not per leg.
+  lint:
+    name: fmt + clippy (the probe and the e2e seccomp harness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The matrix and every published count, before a container is pulled.
+      - name: The matrix and the published counts agree
+        run: uv run --no-project scripts/platform_matrix.py --check
       - name: fmt + clippy (including the probe behind its feature)
         run: |
           cargo fmt --all -- --check
@@ -69,41 +95,69 @@ jobs:
         run: |
           cargo fmt --manifest-path e2e/php-sapi/seccomp-exec/Cargo.toml -- --check
           cargo clippy --manifest-path e2e/php-sapi/seccomp-exec/Cargo.toml -- -D warnings
-      # Quoted: a plain scalar may not hold `: ` (this line was invalid YAML before
-      # `MB.3.39`; `yaml.safe_load` refused the whole workflow).
-      - name: 'make php-sapi-e2e (Docker: debian:trixie-slim + php8.4-dev + libphp8.4-embed)'
-        run: make php-sapi-e2e PHP_SAPI_KEEP=1
-      # `MB.3.39`: the real-pair half of the two protected suites.
+
+  legs:
+    name: shim + probe (${{ matrix.shim }} on ${{ matrix.base }})
+    needs: [lint, matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.legs) }}
+    runs-on: ${{ matrix.runs_on }}
+    # The image installs PHP + rustup and builds the workspace's one crate:
+    # ~8 minutes cold, ~2 cached, plus the two protected PHP suites. 30 is the
+    # outer bound, not a promise.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # One image per leg: build the shim against this distro's headers and probe
+      # it beside this distro's signed NTS libphp.
+      - name: 'make php-sapi-e2e (Docker: the leg''s own distro + PHP ${{ matrix.minor }})'
+        run: >-
+          make php-sapi-e2e PHP_MINOR=${{ matrix.minor }} PHP_SAPI_LIBC=${{ matrix.libc }}
+          PHP_SAPI_KEEP=1 PHP_SAPI_IMAGE=blastit-php-sapi-e2e:${{ matrix.name }}
+      # `MB.3.39`: the real-pair half of the two protected suites, against the
+      # image the probe just proved. The host builds the test binaries
+      # (`make rs-test-php-image` runs `cargo test --no-run` here) and the image
+      # executes them, because that minimal image cannot compile `blastit`
+      # (`pg_query`'s bindgen wants libclang).
       #
-      # Every other job in CI runs `make check` on a host with no PHP, so
-      # `critical_php_backend` and `critical_php_embed` can only prove their
-      # refusal branch there (`refused … install the PHP embed package`). Three
-      # of the epic's acceptance bullets — the `[route.php]` page answering `200`
-      # through `view.chan` with `cpu_ns`, the `exit()`/fatal containment and the
-      # slot respawn, and the maps leg — need a real NTS `libphp` plus the shim,
-      # which only the image `make php-sapi-e2e` just built has
-      # (`php-sapi-e2e --keep` leaves it). So the suites run **against that
-      # image's pair**: it is the Debian trixie pair ADR-0010 §4.2 asks a host to
-      # install, and `libphp8.4-dev`/`libphp8.4-embed` are not in the runner's own
-      # Ubuntu archive (they would need a third-party PPA). The host builds the
-      # test binaries (`make rs-test-php-image` runs `cargo test --no-run` here)
-      # and the image executes them, because that minimal image cannot compile
-      # `blastit` (`pg_query`'s bindgen wants libclang).
-      # `make rs-test-php-image` is the one command, and it runs anywhere Docker is.
+      # **glibc legs only.** Those binaries are built against the runner's glibc,
+      # and `Makefile`'s target asserts it: a glibc ELF cannot start in Alpine
+      # (`No such file or directory` for its interpreter). The musl legs get their
+      # worker-level proof from a different job — the Alpine image would have to
+      # carry a Rust toolchain and libclang to build the suites itself, which is a
+      # follow-up, and the shim-level probe above still runs on every leg.
+      - name: C and libclang toolchain (for pg_query bindgen on arm64 runners)
+        if: matrix.libc == 'gnu'
+        run: |
+          set -euo pipefail
+          if ! dpkg -s libclang-dev >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev pkg-config
+          fi
       - name: make rs-test-php-image (critical_php_backend + critical_php_embed on the real pair)
+        if: matrix.libc == 'gnu'
         timeout-minutes: 15
         run: |
           set -o pipefail
           start=$(date +%s)
-          make rs-test-php-image 2>&1 | tee "$RUNNER_TEMP/php-pair.log"
+          make rs-test-php-image \
+            PHP_SAPI_IMAGE=blastit-php-sapi-e2e:${{ matrix.name }} \
+            PHP_SAPI_IMAGE_MINOR=${{ matrix.minor }} \
+            PHP_SAPI_IMAGE_LIBPHP=${{ matrix.libphp }} \
+            2>&1 | tee "$RUNNER_TEMP/php-pair.log"
           seconds=$(( $(date +%s) - start ))
           {
-            echo "### The real PHP pair (\`MB.3.39\`)"
+            echo "### The real PHP pair (\`MB.3.39\`), leg ${{ matrix.name }}"
             echo ""
             echo "| what | value |"
             echo "|---|---|"
-            echo "| libphp | \`/usr/lib/libphp8.4.so\` (\`libphp8.4-embed\`, in the image) |"
-            echo "| shim | \`/src/target/php-sapi/libblastit_php84-x86_64-gnu.so\` |"
+            echo "| base | \`${{ matrix.base }}\` |"
+            echo "| libphp | \`${{ matrix.libphp }}\` (in the image) |"
+            echo "| shim | \`target/php-sapi/${{ matrix.shim }}\` |"
             echo "| wall time of this step | **${seconds} s** (job bound: 30 min) |"
             echo "| suites | \`critical_php_backend\`, \`critical_php_embed\` |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -120,6 +174,7 @@ jobs:
       # inode-pin and probe-timeout legs refuse on purpose and print it), so
       # grepping those would false-fail a good run.
       - name: 'guard: the pair legs must serve, not refuse'
+        if: matrix.libc == 'gnu'
         run: |
           log="$RUNNER_TEMP/php-pair.log"
           status=0
@@ -142,3 +197,14 @@ jobs:
             exit 1
           fi
           echo "the pair legs served: $(grep -cE 'served: HTTP/1\.1 200 OK' "$log") 200(s), $(grep -cE 'respawned pid' "$log") respawn(s)"
+      # Built *and* probed is the release bar: the shim leaves the image under
+      # the name this leg owes, and the publish pipeline ships that same file.
+      - name: take the probed shim out of its image
+        run: >-
+          scripts/collect-shim.sh blastit-php-sapi-e2e:${{ matrix.name }}
+          target/proven-shims --minor ${{ matrix.minor }} --libc ${{ matrix.libc }} --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shim-${{ matrix.name }}
+          path: target/proven-shims/*.so
+          if-no-files-found: error

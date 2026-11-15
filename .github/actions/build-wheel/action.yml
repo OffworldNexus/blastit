@@ -22,6 +22,15 @@ inputs:
     description: manylinux tag to build in
     required: false
     default: "2_28"
+  platform:
+    description: >
+      The wheel tag the leg promises (`manylinux_2_28`, `musllinux_1_2`), from
+      `scripts/platform_matrix.py`. The built file must carry exactly this
+      prefix: a wheel built for one libc and named for the other installs and
+      then fails at `import`, which is the failure mode a matrix produces when
+      it grows a leg nobody checked.
+    required: false
+    default: "manylinux_2_28"
 
 runs:
   using: composite
@@ -38,13 +47,25 @@ runs:
         # means a future reshuffle of that dependency — or a `--no-default-features`
         # flag — cannot silently produce a wheel whose extension loads no
         # interpreter, which would refuse every WSGI route at Stage 0.
-        args: --release --out dist --interpreter python${{ inputs.python }} --features blastit-py/extension-module,blastit/python
+        args: --release --out dist --interpreter python${{ inputs.python }} --compatibility ${{ inputs.platform }} --features blastit-py/extension-module,blastit/python
         # Inside the container, so the Python-free dbproxy binary the wheel
         # carries is built against the same old glibc as the extension.
         before-script-linux: |
           dnf install -y --setopt=install_weak_deps=False clang && dnf clean all
           cargo build --release --locked -p blastit-dbproxy --bin blastit-dbproxy
           install -D -m 0755 target/release/blastit-dbproxy python/blastit/_bin/blastit-dbproxy
+    - name: The wheel's tag is the platform this leg promised (and never above manylinux_2_28)
+      shell: bash
+      run: |
+        set -euo pipefail
+        for wheel in dist/*.whl; do
+            unzip -p "$wheel" '*.dist-info/WHEEL' | grep '^Tag:'
+        done
+        python3 scripts/check_wheel_tag.py \
+            --max-glibc 2_28 \
+            --platform "${{ inputs.platform }}" \
+            dist/*.whl
+
     - name: The wheel carries dbproxy, executable
       shell: bash
       run: |
@@ -63,7 +84,29 @@ runs:
             fi
             echo "$wheel ok"
         done
+    # Installed and smoked here, in a bare CPython image, for every leg: a wheel
+    # whose `cp3NN` tag does not match what it can load, or one that lost the
+    # dbproxy binary on the way out of the container, is caught on the commit
+    # that built it and again on the tag that publishes it (`MB.3.18`,
+    # acceptance 1). The image follows the wheel's own tag: a non-abi3 wheel's
+    # tag *is* the interpreter it needs.
+    - name: Install the wheel and serve one static route (bare CPython image)
+      shell: bash
+      run: |
+        set -euo pipefail
+        for wheel in dist/*.whl; do
+            tag=$(basename "$wheel" | grep -oE 'cp3[0-9]+' | head -1)
+            py="${tag#cp}"
+            python="${py:0:1}.${py:1}"
+            echo "wheel-smoke: $(basename "$wheel") on python:${python}-slim"
+            docker run --rm \
+                -v "$PWD/dist:/dist:ro" -v "$PWD:/src:ro" \
+                "python:${python}-slim" \
+                bash /src/scripts/wheel-smoke.sh "/dist/$(basename "$wheel")"
+        done
+
     - uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact }}
         path: dist/*.whl
+        if-no-files-found: error

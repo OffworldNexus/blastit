@@ -22,15 +22,20 @@ import re
 WHEEL = re.compile(
     r"blastit-(?P<version>[^-]+)-(?P<python>cp3(?P<minor>\d+))-(?P<abi>[^-]+)-(?P<platform>.+)\.whl"
 )
+MANYLINUX_GLIBC = re.compile(
+    r"^manylinux_(?P<major>\d+)_(?P<minor>\d+)_(?P<arch>x86_64|aarch64)$"
+)
+# Every prebuilt e2e image is Debian trixie (`glibc 2.41`).
+TRIXIE_GLIBC = (2, 41)
 
 
 def version(dist):
     """The CPython version (`"3.14"`) of the single blastit wheel in `dist`.
 
     Raises `ValueError` naming what `dist/` holds rather than guessing: none (a
-    build that has not run yet) and two both refuse, and a tag this cannot read
-    (abi3, free-threaded) does too — the image would install a wheel it cannot
-    import.
+    build that has not run yet) and two both refuse, a tag this cannot read
+    (abi3, free-threaded) refuses, and a musllinux or too-new manylinux platform
+    tag refuses before Docker runs `pip install`.
     """
     wheels = sorted(glob.glob(os.path.join(dist, "blastit-*.whl")))
     if len(wheels) != 1:
@@ -54,4 +59,17 @@ def version(dist):
             f"{name} targets {match['abi']}, and the e2e images are built for the ordinary "
             f"{match['python']} build: the wheel has to match the interpreter it installs into"
         )
+    plat = match["platform"]
+    if plat.startswith("musllinux_"):
+        raise ValueError(
+            f"{name} is a musl wheel ({plat}), and the prebuilt e2e images are Debian trixie (glibc)"
+        )
+    many = MANYLINUX_GLIBC.fullmatch(plat)
+    if many is not None:
+        glibc = (int(many.group("major")), int(many.group("minor")))
+        if glibc > TRIXIE_GLIBC:
+            raise ValueError(
+                f"{name} requires glibc {glibc[0]}.{glibc[1]} ({plat}), above the Debian trixie "
+                "e2e base image floor (2.41); build with `scripts/build-wheel.sh --manylinux 2_28`"
+            )
     return f"3.{match['minor']}"

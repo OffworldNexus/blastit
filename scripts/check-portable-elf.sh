@@ -18,11 +18,25 @@
 # `libc`/`libm`/`libgcc_s`/`ld-linux` and needs no search path at all, and "no
 # RUNPATH" is the assertion a reviewer can check without judging a path.
 #
-# Usage: scripts/check-portable-elf.sh PATH [PATH...]
+# `--allow-origin-rpath` relaxes exactly one thing, for one caller: a musllinux
+# wheel. There is no auditwheel for musl, so maturin extracts the non-system
+# objects into `blastit.libs/` and points `$ORIGIN/../blastit.libs` at them — a
+# *relative* path that makes the wheel relocatable, and the opposite of the
+# build-host path this script exists to refuse. Absolute paths stay refused
+# everywhere, and the standalone artifact (the default, no flag) still carries no
+# search path at all.
+#
+# Usage: scripts/check-portable-elf.sh [--allow-origin-rpath] PATH [PATH...]
 set -euo pipefail
 
+allow_origin=0
+if [ "${1:-}" = "--allow-origin-rpath" ]; then
+    allow_origin=1
+    shift
+fi
+
 if [ "$#" -eq 0 ]; then
-    echo "usage: $0 PATH [PATH...]" >&2
+    echo "usage: $0 [--allow-origin-rpath] PATH [PATH...]" >&2
     exit 2
 fi
 
@@ -46,6 +60,13 @@ for artifact in "$@"; do
     fi
 
     runpath="$(printf '%s\n' "$dynamic" | grep -E '\((RUNPATH|RPATH)\)' || true)"
+    if [ "$allow_origin" -eq 1 ] && [ -n "$runpath" ]; then
+        # Keep only the entries that are not purely `$ORIGIN`-relative.
+        filtered="$(printf '%s\n' "$runpath" | sed 's/\$ORIGIN[^ :]*//g')"
+        if ! printf '%s' "$filtered" | grep -qE '\$|/'; then
+            runpath=""
+        fi
+    fi
     if [ -n "$runpath" ]; then
         echo "error: $artifact carries a library search path from its build host:" >&2
         printf '  %s\n' "$runpath" >&2

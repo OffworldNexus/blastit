@@ -154,4 +154,54 @@ if [ "$fail" -ne 0 ]; then
     tail -n 30 "$log" >&2
     exit 1
 fi
-echo "standalone-runtime-check: 2/2 passed without touching an interpreter"
+echo "ok   2/2 static responses without touching an interpreter"
+
+# The second half of the promise: a manifest that *needs* Python is refused at
+# exit 1 by the capability gate — on this artifact, not only in the integration
+# test that builds one from source (`crates/blastit/tests/no_python_build.rs`).
+# A shipped archive that silently served a WSGI route would mean `python` leaked
+# back into the release build.
+mkdir -p "$work/wsgi"
+cat > "$work/wsgi/blastit.toml" <<'TOML'
+version = 1
+
+[[route]]
+name = "web"
+path = [".*"]
+TOML
+
+wsgi_port=""
+for candidate in $(seq 18460 18500); do
+    if ! (exec 3<>"/dev/tcp/127.0.0.1/$candidate") 2>/dev/null; then
+        wsgi_port="$candidate"
+        break
+    fi
+done
+if [ -z "$wsgi_port" ]; then
+    echo "error: no free port in 18460..18500" >&2
+    exit 1
+fi
+
+set +e
+BLASTIT_MANIFEST="$work/wsgi/blastit.toml" "$binary" dev --port "$wsgi_port" \
+    > "$work/wsgi.out" 2> "$work/wsgi.err"
+wsgi_rc=$?
+set -e
+
+if [ "$wsgi_rc" -ne 1 ]; then
+    echo "FAIL a WSGI manifest wanted exit 1 from the capability gate, got $wsgi_rc" >&2
+    tail -n 20 "$work/wsgi.out" "$work/wsgi.err" >&2
+    exit 1
+fi
+if ! grep -q 'this build has no Python support' "$work/wsgi.err" "$work/wsgi.out"; then
+    echo "FAIL the WSGI refusal does not name the capability gate:" >&2
+    tail -n 20 "$work/wsgi.out" "$work/wsgi.err" >&2
+    exit 1
+fi
+if ! grep -q 'uv add blastit' "$work/wsgi.err" "$work/wsgi.out"; then
+    echo "FAIL the WSGI refusal does not name the artifact that can serve it:" >&2
+    tail -n 20 "$work/wsgi.out" "$work/wsgi.err" >&2
+    exit 1
+fi
+echo "ok   exit 1 for a WSGI manifest (capability gate, names 'uv add blastit')"
+echo "standalone-runtime-check: 3/3 passed without touching an interpreter"

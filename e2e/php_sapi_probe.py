@@ -4,6 +4,11 @@
     php_sapi_probe.py --minor 8.4     # one minor is a build arg, not a rewrite
     php_sapi_probe.py --keep          # leave the image for debugging
 
+The probe image's base distro and its four package names come from
+`scripts/platform_matrix.py --leg shims --minor <m>`, never from a second list
+here: no distro ships PHP 8.2, 8.3 *and* 8.4 (Debian bookworm is 8.2, Ubuntu
+noble is 8.3, Debian trixie is 8.4), so `MB.3.18` runs this driver once per leg.
+
 Stdlib only, same shape as the other e2e drivers: build the image, run it,
 parse the one JSON line the probe prints, and fail non-zero with the container
 output on a mismatch. `make php-sapi-e2e` runs this; it is deliberately **not**
@@ -40,6 +45,7 @@ the ones that separate the layers.
 import argparse
 import json
 import os
+import platform
 import subprocess
 import sys
 
@@ -115,14 +121,73 @@ def tail(text, lines=40):
     return "\n".join(f"  {line}" for line in stripped[-lines:])
 
 
-def build(image, minor):
+MATRIX = os.path.join(REPO, "scripts", "platform_matrix.py")
+
+
+MACHINE = {
+    "x86_64": "x86_64",
+    "amd64": "x86_64",
+    "aarch64": "aarch64",
+    "arm64": "aarch64",
+}
+
+
+def leg(minor, libc="gnu", arch=None):
+    """The one minor's build tuple, read from the matrix (MB.3.18).
+
+    `scripts/platform_matrix.py` is the single place a leg is declared, and no
+    single distro ships PHP 8.2, 8.3 *and* 8.4: the probe image for each minor is
+    therefore a different base image with different package names. Reading them
+    from the matrix is what keeps this driver from growing a second copy of that
+    table — and from silently probing Debian trixie's 8.3, which does not exist.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            MATRIX,
+            "--leg",
+            "shims",
+            "--minor",
+            minor,
+            "--libc",
+            libc,
+            "--arch",
+            arch or MACHINE.get(platform.machine(), platform.machine()),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise SystemExit(
+            f"php-sapi-e2e: the matrix has no enabled shim leg for PHP {minor} on {libc}:\n"
+            f"{tail(result.stdout + result.stderr)}"
+        )
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    return fields
+
+
+def build(image, minor, libc="gnu"):
     """Builds the image from the repo root; returns `(ok, report)`."""
+    spec = leg(minor, libc)
     result = docker(
         "build",
         "-f",
         DOCKERFILE,
         "--build-arg",
+        f"BASE={spec['base']}",
+        "--build-arg",
         f"PHP_MINOR={minor}",
+        "--build-arg",
+        f"PHP_DEV={spec['dev']}",
+        "--build-arg",
+        f"PHP_EMBED={spec['embed']}",
+        "--build-arg",
+        f"PHP_CURL={spec.get('curl', spec['dev'].replace('-dev', '-curl'))}",
+        "--build-arg",
+        f"LIBPHP={spec['libphp']}",
         "-t",
         image,
         REPO,
@@ -363,13 +428,31 @@ def verify_egress(report, case):
     # the rendered string: these are exactly the directives attempt 1 rendered
     # and never applied (`sapi_startup` nul'd them).
     view_tmp = str(report.get("view_tmp", ""))
-    for key, expected in (
-        ("open_basedir", f"/fixtures:{view_tmp}"),
-        ("ffi_enable", "0"),
-        ("phar_require_hash", "1"),
+    basedir = egress.get("open_basedir")
+    if basedir != f"/fixtures:{view_tmp}":
+        problems.append(
+            f"ini_get('open_basedir') is {basedir!r}, expected "
+            f"{f'/fixtures:{view_tmp}'!r}"
+        )
+    # `ffi.enable=0` / `phar.require_hash=1`, or the extension absent entirely:
+    # Alpine's `php84-embed` ships neither, so `ini_get` answers `false`. That is
+    # a stronger lockdown than the pinned value — no `ffi` to enable, no `phar`
+    # whose hash could be skipped — but it is a *different* fact, so both halves
+    # are checked: an absent extension passes, an extension that is loaded with a
+    # value the INI pin did not hold still fails.
+    for key, extension, expected in (
+        ("ffi_enable", "ffi", "0"),
+        ("phar_require_hash", "phar", "1"),
     ):
-        got = str(egress.get(key))
-        if got != expected:
+        got = egress.get(key)
+        loaded = egress.get(f"{extension}_loaded")
+        if got is False or got == "":
+            if loaded is not False:
+                problems.append(
+                    f"extension {extension!r} is loaded but ini_get({key!r}) is "
+                    f"{got!r}: the INI pin did not hold"
+                )
+        elif str(got) != expected:
             problems.append(f"ini_get({key!r}) is {got!r}, expected {expected!r}")
     attempts = egress.get("attempts") or {}
     for name in case["must_fail"]:
@@ -415,16 +498,24 @@ def main(argv=None):
         default=os.environ.get("PHP_MINOR", "8.4"),
         help="PHP minor to build and probe (default 8.4)",
     )
+    parser.add_argument(
+        "--libc",
+        default=os.environ.get("PHP_SAPI_LIBC", "gnu"),
+        choices=("gnu", "musl"),
+        help="which libc leg to build (the matrix has one leg per libc)",
+    )
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="image tag to build")
     parser.add_argument(
         "--keep", action="store_true", help="do not remove the image afterwards"
     )
     args = parser.parse_args(argv)
 
+    spec = leg(args.minor, args.libc)
     print(
-        f"php-sapi-e2e: docker build --build-arg PHP_MINOR={args.minor} -t {args.image}"
+        f"php-sapi-e2e: docker build --build-arg BASE={spec['base']} "
+        f"--build-arg PHP_MINOR={args.minor} -t {args.image}"
     )
-    ok, log = build(args.image, args.minor)
+    ok, log = build(args.image, args.minor, args.libc)
     if not ok:
         print("php-sapi-e2e: FAIL the image did not build", file=sys.stderr)
         print(log, file=sys.stderr)

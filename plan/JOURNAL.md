@@ -1782,3 +1782,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T12:12 [MB.3.57] (lead) status active -> review
 - 2026-11-15T12:17 [MB.3.57] (lead) Reviewer PASS, five MINORs recorded for the tail (none blocks the port): (1) `sock.rs:37-41` says a saturated `control_len` is "clamped by the caller's buffer b
 - 2026-11-15T12:17 [MB.3.57] (lead) status review -> done
+- 2026-11-15T12:18 [MB.3.18] (lead) status ready -> active
+- 2026-11-15T12:18 [MB.3.18] (lead) attempt 2/3 started
+- 2026-11-15T12:18 [MB.3.18] (lead) rebased on 05ab3ea (MB.3.57 ported blastit-sys: all four targets check clean, x86_64-musl executes, aarch64 seccomp is CI-only under qemu). The full 4-leg matri
+- 2026-11-15T14:55 [MB.3.18] (lead) status active -> review
+- 2026-11-15T14:58 [MB.3.18] (lead) REVIEW FAIL (attempt 2): one BLOCKER, six MAJORs. Every one is in the class "authored and never run", and the systemic answer is in item (7) below.
+- 2026-11-15T14:58 [MB.3.18] (lead) status review -> ready
+- 2026-11-15T14:58 [MB.3.18] (lead) status ready -> active
+- 2026-11-15T14:58 [MB.3.18] (lead) attempt 3/3 started
+- 2026-11-15T15:04 [MB.3.18] (lead) status active -> review
+- 2026-11-15T15:10 [MB.3.18] (lead) REVIEW FAIL (attempt 3): one BLOCKER and two MAJORs remain, all specified precisely by the reviewer, all still in "authored, never run" code. Escalating to the 
+- 2026-11-15T15:10 ESCALATION #11 -> expert for MB.3.18 by lead: attempt 3 of 3 failed: release pipeline still cannot publish (--leg exit 2 kills both binaries jobs; auditor blind to me
+- 2026-11-15T15:10 [MB.3.18] (lead) edited fields
+- 2026-11-15T15:10 [MB.3.18] (lead) attempt 4/4 started
+- 2026-11-15T16:12 [MB.3.18] (lead) status review -> review
+- 2026-11-15T16:26 [MB.3.18] (lead) status review -> done

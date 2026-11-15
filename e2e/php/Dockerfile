@@ -28,8 +28,18 @@
 # suite's "canary absent" means "the channel is absent", not "the canary is
 # broken". Rows 9 and 10 say in their note that on Linux NTS they cannot fail at
 # all (no Windows best-fit, no argv).
+# The wheel decides the interpreter (`prebuilt_wheel.py`): `blastit._blastit` is
+# not abi3, so the base has to be the CPython the wheel targets. Each supported
+# minor has its own multi-arch OCI index digest: putting `@sha256:...` on a
+# single `FROM python:${PYTHON_VERSION}-slim-trixie@sha256:...` line causes
+# Docker to ignore `${PYTHON_VERSION}` completely and pull the digest's minor
+# (breaking CI's `cp313` wheel against a hardcoded `3.14` digest). Selecting
+# `FROM base-${PYTHON_VERSION}` keeps both digest pins while actually honouring
+# `PYTHON_VERSION`.
 ARG PYTHON_VERSION=3.14
-FROM python:${PYTHON_VERSION}-slim-trixie@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f
+FROM python:3.13-slim-trixie@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS base-3.13
+FROM python:3.14-slim-trixie@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f AS base-3.14
+FROM base-${PYTHON_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
 

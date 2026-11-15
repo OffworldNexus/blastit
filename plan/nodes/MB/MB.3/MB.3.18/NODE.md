@@ -2,16 +2,24 @@
 id: MB.3.18
 title: "Build and publish the Linux packaging matrix: x86_64/aarch64 x glibc/musl, wheels + standalone binaries + PHP shims"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
-depends_on: [MB.3.13, MB.3.17]
-paths: [".github/workflows/**", "scripts/**", "e2e/**", Cargo.toml, Makefile]
-attempts: 0
-max_attempts: 3
-escalation: none
+depends_on: [MB.3.13, MB.3.17, MB.3.57]
+paths:
+  - ".github/workflows/**"
+  - "scripts/**"
+  - "e2e/**"
+  - Cargo.toml
+  - Makefile
+  - "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md"
+  - "docs/design/backend-runtimes.md"
+  - docs/knowledge/LESSONS.md
+attempts: 4
+max_attempts: 4
+escalation: expert
 created: "2026-11-14T15:17"
-updated: "2026-11-14T15:17"
+updated: "2026-11-15T16:26"
 ---
 
 # Goal

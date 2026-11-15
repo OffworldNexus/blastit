@@ -53,3 +53,73 @@ edited fields
 ## 2026-11-15T12:02 [lead]
 
 status review -> ready
+
+## 2026-11-15T12:18 [lead]
+
+status ready -> active
+
+## 2026-11-15T12:18 [lead]
+
+attempt 2/3 started
+
+## 2026-11-15T12:18 [lead]
+
+rebased on 05ab3ea (MB.3.57 ported blastit-sys: all four targets check clean, x86_64-musl executes, aarch64 seccomp is CI-only under qemu). The full 4-leg matrix is now buildable — attempt 2 must build it, and must also fix the three MAJORs from the attempt-1 review (publish-pypi.yml:254's artifact path, :463's missing download-artifact pattern, and the ADR-0010/backend-runtimes 8/4/12 counts).
+
+## 2026-11-15T14:55 [lead]
+
+status active -> review
+
+## 2026-11-15T14:58 [lead]
+
+REVIEW FAIL (attempt 2): one BLOCKER, six MAJORs. Every one is in the class "authored and never run", and the systemic answer is in item (7) below.
+BLOCKER `.github/workflows/publish-pypi.yml:454` — `verify: needs: [guard, wheels, sdist]` names `wheels`, which was split into `wheels_gnu`/`wheels_musl`. GitHub rejects the whole workflow, so the rehearsal and every publish path are dead. Fix to `[guard, wheels_gnu, wheels_musl, sdist]`.
+MAJOR 1 `publish-pypi.yml:403-410` — `#` comment lines inside `docker run … \` continuations; the shell ends the command at `alpine:3.21`, so the `sh -c` proof runs on the RUNNER and `verify_musl` always fails (reviewer verified). Move the comment above the `docker run`.
+MAJOR 2 `publish-pypi.yml:273-275,320-322,681-684` — all four `binaries_*` jobs upload `dist/SHA256SUMS`; `release` downloads with `merge-multiple: true`, so 3 of 4 checksums are silently overwritten. Use `SHA256SUMS.${{ matrix.target }}` and concatenate in `release`.
+MAJOR 3 `.github/workflows/php-sapi.yml:118-124` — the suite half runs the Ubuntu-built (glibc) test binaries inside Alpine/musl legs, where they cannot start (`Makefile:558` even asserts glibc). Skip the suite half for `libc=musl` or build the suites inside the Alpine image.
+MAJOR 4 `scripts/platform_matrix.py:272-281` — `CLAIM`/`PROVEN_CLAIM` require a BARE digit but every live count in ADR-0010 §4 / backend-runtimes is BACKTICKED, so `--check` matches 1 count repo-wide (`0 shims`, skipped) and the gate is vacuous on the documents it exists to guard. Accept optional backticks/`**`, and add the real ADR/design lines to a repo-level test so the gate cannot go vacuous again.
+MAJOR 5 `docs/design/backend-runtimes.md:328,373,397,410,411` and `ADR-0010:47` still cite `scripts/platform-matrix.json`, `tools/check_platform_matrix.py` and `python/tests/critical/test_platform_matrix.py` — none exist, and §7.2 claims a protected critical test and a sha256 gate that were never written. Describe only `scripts/platform_matrix.py` / `make platform-matrix-check`.
+MAJOR 6 `.github/workflows/wheels.yml:11-15` says aarch64 and musl are "declared and dropped with a written reason (the code does not compile there)" while the same file runs `wheels_musl` on `ubuntu-24.04-arm` and `LEGS` enables all four. Delete the clause; say the arm/musl legs are CI-only.
+MINORs: RESULT cites `docs/getting-started.md:69` in a 67-line file and claims a `note` per stated count while zero notes are emitted; `scripts/build-standalone.sh:78-83` says `-static-libgcc` "drops the extra runtime dependency" but the shipped musl binary has `NEEDED libgcc_s.so.1` and the ADR correctly requires `apk add libgcc`; `platform_matrix.py:258-265` scans 6 hand-picked pages of 92 (ADR-0009:29's "up to 3 proven shims" is unchecked).
+(7) SYSTEMIC REQUIREMENT — this is the third review finding workflow defects that a machine should have caught. Extend the job-graph auditor so it validates, at minimum: every `needs:` target names an existing job; every `${{ matrix.<k> }}` reference belongs to a job with a `strategy.matrix` carrying that key; every `download-artifact` name/pattern matches an `upload-artifact` name; every `paths`/artifact path a job consumes exists in what its `needs` produce; and no `#` line sits inside a line-continuation. Wire it into `make check` and prove it by re-introducing two of the defects above in a /tmp copy and watching it fail. Report the count of checks it performs.
+SHIPPING (reviewer): No until the BLOCKER is fixed. Matrix and proven counts are honest; `make check` green.
+
+## 2026-11-15T14:58 [lead]
+
+status review -> ready
+
+## 2026-11-15T14:58 [lead]
+
+status ready -> active
+
+## 2026-11-15T14:58 [lead]
+
+attempt 3/3 started
+
+## 2026-11-15T15:04 [lead]
+
+status active -> review
+
+## 2026-11-15T15:10 [lead]
+
+REVIEW FAIL (attempt 3): one BLOCKER and two MAJORs remain, all specified precisely by the reviewer, all still in "authored, never run" code. Escalating to the expensive tier per the ladder (attempt 3 of 3 exhausted) rather than a fourth cheap patch.
+BLOCKER `publish-pypi.yml:250,312` — `owed=$(… platform_matrix.py --leg shims --libc gnu --arch ${{ matrix.arch }} | grep -c "^shim=")`: that tuple has THREE minors, so `--leg` exits 2 ("--leg matched 3 legs … pass --arch") with EMPTY stdout, and `set -euo pipefail` kills the step (reviewer measured STEP_EXIT=1) → both `binaries_*` jobs fail → `verify_musl`/`testpypi`/`pypi`/`release` never run → a tag uploads NOTHING. Fix: add `--count shims [--libc] [--arch]` to `platform_matrix.py` (or `--matrix shims … | grep -o '"name"' | wc -l`) and use it in both steps; ALSO make the auditor refuse a `--leg shims` invocation that omits `--minor` — the auditor should have caught this.
+MAJOR 1 `scripts/check_workflows.py:309-321` — the duplicate check compares upload `name:`, not the FILE names inside artifacts: re-introducing attempt-2's MAJOR 2 (all legs upload `dist/SHA256SUMS`, release merges with `merge-multiple`) still reports 207/0, so RESULT:33's claim is false. For every consumer with `merge-multiple: true`, refuse two producers whose literal `path:` basenames collide.
+MAJOR 2 `scripts/check_workflows.py:262-269` — the `#`-in-continuation scan runs only over `jobs.*.steps`, never `runs.steps` of the composite action, so a `#` inside a `\` continuation in `.github/actions/build-wheel/action.yml` passes 207/0 while the header claims "…and 1 action". Run the same loop over action steps.
+MINORs: five uploads lack `if-no-files-found: error` (an empty artifact warns and ships nothing); the auditor has no checked-in self-test — the /tmp negative proof runs in no gate, the same vacuity mode as attempt 2's MAJOR 4, so move it into a script `make check` runs; `check_workflows.py` fetches pyyaml at check time (`uv run --no-project --offline` fails with a cold cache), so `make check` becomes the one gate needing the network — pin it in the lock instead.
+
+## 2026-11-15T15:10 [lead]
+
+edited fields
+
+## 2026-11-15T15:10 [lead]
+
+attempt 4/4 started
+
+## 2026-11-15T16:12 [lead]
+
+status review -> review
+
+## 2026-11-15T16:26 [lead]
+
+status review -> done

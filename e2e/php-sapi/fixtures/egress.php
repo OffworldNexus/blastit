@@ -25,8 +25,15 @@ $report = [
     // The three directives attempt 1 rendered but never applied: read back the
     // *effective* values, not the string we asked for.
     'open_basedir' => ini_get('open_basedir'),
+    // `ini_get` answers `false` when the directive does not exist, which is what
+    // a distro build without the extension returns (Alpine's `php84-embed`
+    // ships neither `phar` nor `ffi`). "Absent" is a stronger lockdown than
+    // "pinned to 0", but it is a *different* fact: report both, so the check can
+    // tell "no phar to poison" from "a phar the INI pin failed to hold".
     'ffi_enable' => ini_get('ffi.enable'),
     'phar_require_hash' => ini_get('phar.require_hash'),
+    'ffi_loaded' => extension_loaded('ffi'),
+    'phar_loaded' => extension_loaded('phar'),
     'attempts' => [],
 ];
 
