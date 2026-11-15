@@ -64,3 +64,11 @@ MB.3.7 filed H-006: [route.php] entry is re-resolved per request, not pinned by 
 
 **Answer:**
 
+## H-008 [open] (node MB)
+
+- asked: 2026-11-15T16:28 by conductor
+
+Release v0.2.0 is ready on branch release/0.2.0 (tip 73960fc). Review and squash-merge PR #64 into develop — merging validates CI, Docs and Live DigitalOcean e2e on develop and publishes v0.2.0 to PyPI + GitHub Releases. Scope: safe static serving (no .php source servable), SPA/rewrite precedence, pooler presets (DO managed + PgBouncer), embedded PHP via host libphp (no php-fpm, no fallback), portable Python-free binary, and the raw-ingress fail-open fix. Matrix: 8 wheels / 4 archives / 12 shims declared, 4 / 2 / 6 built+exercised on x86_64 (aarch64 CI-only).
+
+**Answer:**
+

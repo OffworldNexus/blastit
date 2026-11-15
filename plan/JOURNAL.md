@@ -1797,3 +1797,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T15:10 [MB.3.18] (lead) attempt 4/4 started
 - 2026-11-15T16:12 [MB.3.18] (lead) status review -> review
 - 2026-11-15T16:26 [MB.3.18] (lead) status review -> done
+- 2026-11-15T16:28 HUMAN H-008 opened by conductor (node MB)
+- 2026-11-15T16:28 AUTOPILOT off by conductor awaiting human review and merge of release PR #64 (v0.2.0)
