@@ -1860,3 +1860,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T21:50 [MB.20] (planner) created (task) Regroup /frameworks by connector: python/ and php/ groups over the nine slots (docs-only)
 - 2026-11-15T21:51 [MB.3.62] (lead) reviewer VERDICT: PASS (base 71dcaf8; drift bite reproduced at entry 4; make check exit 0 at review time). LEAD make check after review: exit 2 on ONE finding o
 - 2026-11-15T21:51 [MB.3.62] (lead) status review -> done
+- 2026-11-15T21:51 [MB.3.62] (lead) commit 646c4aa
+- 2026-11-15T21:51 [MB.3.63] (lead) status ready -> active
+- 2026-11-15T21:51 [MB.3.63] (lead) attempt 1/3 started
+- 2026-11-15T21:51 [MB.3.63] (lead) attempt 1/3 started; base 637aa97
+- 2026-11-15T21:53 [MB.3.65] (lead) edited fields
+- 2026-11-15T21:53 [MB.3.65] (lead) owner addition 2: MB.3.65 becomes a SWAP — 8.2 out, 8.5 in. Matrix stays 12 shims (8.3/8.4/8.5); 8.5 legs are ubuntu:26.04 (libphp8.5-embed/php8.5-dev) and alpi
+- 2026-11-15T21:54 [MB.3.63] (lead) owner addition: the aarch64-musl red is NOT the manylinux CARGO_HOME — CI shows a musl artifact (NEEDED libc.musl-aarch64.so.1) called 'glibc 2.0' by check-exec
+- 2026-11-15T22:10 [MB.3.63] (lead) status active -> review
+- 2026-11-15T22:18 [MB.3.63] (lead) status review -> ready
+- 2026-11-15T22:18 [MB.3.63] (lead) attempt 2/3 started
+- 2026-11-15T22:18 [MB.3.63] (lead) REVIEW FAIL (attempt 1): (1) check-exec-env.sh:205-223 reverse contradiction is a false pass — glibc INTERP + NEEDED libc.musl-* exits 0, and musl INTERP + libc
+- 2026-11-15T22:18 [MB.3.63] (lead) status ready -> active
+- 2026-11-15T22:18 [MB.3.63] (lead) attempt 2/3 started; base 637aa97
+- 2026-11-15T22:22 [MB.3.63] (lead) status active -> review
+- 2026-11-15T22:52 [MB.3.63] (lead) status review -> done

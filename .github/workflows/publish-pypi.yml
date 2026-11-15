@@ -368,12 +368,23 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/artifact
           tar -C /tmp/artifact -xzf "dist/${{ matrix.archive }}"
+          binary="/tmp/artifact/blastit-${{ matrix.target }}/blastit"
+          # `MB.3.63`: the verdict below is only worth what its reading is worth, and
+          # on this leg it once read a musl artifact as a glibc ELF needing 2.0 —
+          # a floor no aarch64 glibc has. Print the ELF's own answer first, so a
+          # future failure names its reason instead of a bare sentence.
+          echo "::group::ELF evidence for $binary"
+          readelf -h "$binary"
+          readelf -l "$binary" | sed -n '/INTERP/,+2p'
+          readelf -d "$binary" | grep -E 'NEEDED|SONAME|RPATH|RUNPATH' || true
+          readelf --version-info "$binary" | sed -n '/^Version needs section/,$p'
+          echo "::endgroup::"
           # `MB.3.58`: the archive was built *in* this image above and this is
           # the same image, so the rule holds by construction; the check says so
           # out loud (a musl binary carries no glibc symbol versions, and musl is
           # ABI-stable within 1.x, so no version floor can refuse it).
           scripts/check-exec-env.sh --image "${{ matrix.builder_image }}" \
-              --binary "/tmp/artifact/blastit-${{ matrix.target }}/blastit"
+              --binary "$binary"
           # `libgcc` is the one runtime package a dynamically linked musl Rust
           # binary needs (`libgcc_s.so.1`) and the base Alpine image does not
           # carry it. Run in a fresh image because `clang`'s tooling in the build

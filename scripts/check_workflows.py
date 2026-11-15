@@ -546,6 +546,109 @@ def check_step_scripts(step: dict, scope: str, report: Report) -> None:
     check_maturin_platform_tag(step, scope, report)
 
 
+# `MB.3.63`: a container that *builds* must own what it writes. Cargo extracts
+# `registry/src/<crate>` and `git/checkouts/<dep>` into `CARGO_HOME`, so a
+# `CARGO_HOME` whose subdirectories are symlinks into the read-only host cache
+# makes the first cold-cache extraction die with
+# `failed to create directory … Read-only file system (os error 30)` — and the
+# defect passed review because the author's cache was warm: the crates were
+# already extracted on the host, so nothing wrote through the link. Seeding a
+# *writable* `CARGO_HOME` by copying is the fix; this rule keeps the link out.
+CARGO_HOME_ASSIGNED = re.compile(r"CARGO_HOME=(?P<path>/[^\s\"'\\]+)")
+SYMLINK = re.compile(r"\bln\s+-s(?:f)?\s+(?P<target>\S+)\s+(?P<dest>\S+)")
+
+
+def container_cache_problems(text: str) -> list[str]:
+    """Every symlink a text puts under a container `CARGO_HOME` that it declares.
+
+    What this cannot see: whether some other reason makes the cache writable (a
+    container that runs as root has no such problem), and whether the target
+    really is on a read-only mount. It keys on the shape that failed — a link
+    under `CARGO_HOME` — because a copy is the only seeding that is safe whether
+    or not the source is writable.
+    """
+    problems: list[str] = []
+    homes = {
+        match.group("path").rstrip("/") for match in CARGO_HOME_ASSIGNED.finditer(text)
+    }
+    if not homes:
+        return problems
+    for match in SYMLINK.finditer(text):
+        dest = match.group("dest").strip("\"'")
+        if not any(dest == home or dest.startswith(home + "/") for home in homes):
+            continue
+        problems.append(
+            f"`{match.group(0).strip()}` symlinks {match.group('target')} under "
+            "CARGO_HOME: cargo extracts `registry/src/<crate>` and "
+            "`git/checkouts/<dep>` there, so a link into a read-only mount makes the "
+            "first cold-cache extraction fail with `Read-only file system (os error "
+            "30)` (MB.3.63) — seed a writable CARGO_HOME by copying instead"
+        )
+    return problems
+
+
+def check_container_caches(repo: Path, report: Report) -> None:
+    """`MB.3.63`: no build container may write through a symlink into `CARGO_HOME`.
+
+    Rule 16, over the scripts and workflows rather than over a job graph: the
+    `CARGO_HOME` a container is given lives inside `scripts/build-standalone-in-image.sh`,
+    where no YAML rule can see it, so this reads the shell and workflow text of
+    the repository. `self_test_rule16` keeps the recognizer honest.
+    """
+    files = sorted((repo / "scripts").glob("*.sh")) + sorted(
+        (repo / ".github").rglob("*.yml")
+    )
+    scanned = 0
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        scanned += 1
+        for problem in container_cache_problems(text):
+            report.fail(f"{path.relative_to(repo)}: {problem}")
+    report.check(
+        scanned > 0,
+        "no build scripts or workflows were scanned for a container CARGO_HOME",
+    )
+
+
+def self_test_rule16() -> list[str]:
+    """Prove rule 16 still refuses a symlink under a container `CARGO_HOME`.
+
+    The negative is the broken shape verbatim (`MB.3.63`); the positives are the
+    fix (a copy from the read-only mount) and a symlink that has nothing to do
+    with cargo's cache, so the rule cannot pass by refusing everything.
+    """
+    problems: list[str] = []
+    buggy = (
+        "docker run --rm -e CARGO_HOME=/tmp/cargo-home "
+        '-v "$HOME/.cargo:/host-cargo:ro" img \\\n'
+        "  bash -c 'mkdir -p /tmp/cargo-home && "
+        "ln -s /host-cargo/registry /tmp/cargo-home/registry'\n"
+    )
+    fixed = (
+        "docker run --rm -e CARGO_HOME=/tmp/build-cargo-home "
+        '-v "$HOME/.cargo:/host-cargo:ro" img \\\n'
+        "  bash -c 'cp -a /host-cargo/registry/. \"$CARGO_HOME/registry/\"'\n"
+    )
+    unrelated = (
+        "docker run --rm -e CARGO_HOME=/tmp/build-cargo-home img \\\n"
+        "  bash -c 'ln -s /host-rustup/toolchains /tmp/toolchains'\n"
+    )
+    if not container_cache_problems(buggy):
+        problems.append(
+            "rule 16 no longer refuses a symlink under the container CARGO_HOME"
+        )
+    refused = container_cache_problems(fixed)
+    if refused:
+        problems.append(f"rule 16 refused the copy-seeded CARGO_HOME: {refused}")
+    refused = container_cache_problems(unrelated)
+    if refused:
+        problems.append(f"rule 16 refused an unrelated symlink: {refused}")
+    return problems
+
+
 def self_test_rule15() -> list[str]:
     """Prove rule 15 still recognises a host standalone build (`MB.3.61`).
 
@@ -628,8 +731,25 @@ def main(argv: list[str] | None = None) -> int:
             "workflow-check: rule 15 self-test ok — `make standalone` is a host build"
         )
 
+    cache_problems = self_test_rule16()
+    if cache_problems:
+        for problem in cache_problems:
+            print(f"FAIL {problem}")
+        print(
+            f"workflow-check: FAIL — rule 16's own self-test is broken "
+            f"({len(cache_problems)} problem(s)); the container-cache scan below it "
+            "would not be worth anything",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.quiet:
+        print(
+            "workflow-check: rule 16 self-test ok — a CARGO_HOME symlink is a read-only write"
+        )
+
     repo = Path(args.repo).resolve()
     report = Report(args.quiet)
+    check_container_caches(repo, report)
     workflows = sorted(repo.glob(".github/workflows/*.yml"))
     actions = sorted(repo.glob(".github/actions/*/action.yml"))
 

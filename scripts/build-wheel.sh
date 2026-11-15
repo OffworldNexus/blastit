@@ -204,9 +204,19 @@ DOCKER
         -w /src \
         "$builder_image" \
         bash -euo pipefail -c '
-            mkdir -p /tmp/cargo-home
-            ln -s /host-cargo/registry /tmp/cargo-home/registry 2>/dev/null || true
-            ln -s /host-cargo/git /tmp/cargo-home/git 2>/dev/null || true
+            # `MB.3.63`: cargo extracts `registry/src/<crate>` and
+            # `git/checkouts/<dep>` into CARGO_HOME, so CARGO_HOME has to be a
+            # writable *copy* of the read-only host cache. Symlinking those two
+            # at the mount made the first cold-cache extraction die with
+            # `failed to create directory ... Read-only file system (os error 30)`
+            # on a runner whose cache held the tarballs but not the extraction.
+            mkdir -p /tmp/cargo-home/registry /tmp/cargo-home/git
+            if [ -d /host-cargo/registry ]; then
+                cp -a /host-cargo/registry/. /tmp/cargo-home/registry/
+            fi
+            if [ -d /host-cargo/git ]; then
+                cp -a /host-cargo/git/. /tmp/cargo-home/git/
+            fi
             [ -f /host-cargo/config.toml ] && cp /host-cargo/config.toml /tmp/cargo-home/config.toml || true
             export PATH="/host-rustup/toolchains/stable-'"${arch}"'-unknown-linux-gnu/bin:$PATH"
             if ! command -v cargo >/dev/null 2>&1; then

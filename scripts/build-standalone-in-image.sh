@@ -31,6 +31,16 @@
 # glibc, and reusing one would put the runner's floor back into an artifact
 # whose whole purpose is a lower one.
 #
+# **The container owns what it writes (`MB.3.63`).** The host cache is mounted
+# read-only and *seeds* a writable `CARGO_HOME` under `/tmp` by copying, because
+# cargo extracts `registry/src/<crate>` and `git/checkouts/<dep>` into it — a
+# symlink to the mount made the first cold-cache extraction die with
+# `failed to create directory ... Read-only file system (os error 30)` while a
+# warm cache (already extracted on the host) hid it. Root installs the C
+# toolchain and then `setpriv`s to the caller's uid, so one identity writes the
+# cache, the target dir and `--out`; nothing is `chown`ed afterwards, and the
+# build leaves no stray file in the repository.
+#
 # A musl archive does not need this: it has no glibc floor to hit, and the Alpine
 # leg already builds it natively in `alpine:3.21` (the image it claims).
 set -euo pipefail
@@ -166,6 +176,24 @@ fi
 # never be linked into this one.
 target_subdir="standalone-${max_glibc//./_}"
 
+# One identity writes and reads the build (`MB.3.63`). The container is handed
+# `HOST_UID`/`HOST_GID` and drops to them *before the first cargo*, so the cache
+# it extracts into, `CARGO_TARGET_DIR` and `--out` all belong to the caller:
+# there is no root phase to `chown` back at the end, and no path cargo writes can
+# be root-owned or read-only. That starts here — the two bind-mounted
+# directories are created by the invoking user, so a directory an older,
+# root-running build left behind is refused with the fix named instead of
+# failing halfway through a compile.
+for d in "$out" "target/$target_subdir"; do
+    if ! mkdir -p "$d" 2>/dev/null || [ ! -w "$d" ]; then
+        echo "$(basename "$0"): '$d' cannot be written by $(id -un) ($(id -u))" >&2
+        echo "  the container builds as uid $(id -u) and writes cargo's target directory" >&2
+        echo "  and the archive through this mount; a directory left behind by an older" >&2
+        echo "  root-run build must be removed, not reused" >&2
+        exit 2
+    fi
+done
+
 # The trailing space inside the array is load-bearing: `test_release_scripts.py`
 # scans every `CARGO_NET_OFFLINE=<value>` in the scripts and requires a strict
 # boolean, and its `\S*` capture would otherwise take the closing `)` as part of
@@ -186,9 +214,8 @@ docker run --rm \
     -e OWED="$require_shims" \
     -e BUILDER_IMAGE="$image" \
     -e RUSTUP_HOME=/host-rustup \
-    -e CARGO_HOME=/tmp/cargo-home \
+    -e CARGO_HOME=/tmp/build-cargo-home \
     -e CARGO_TARGET_DIR="/src/target/$target_subdir" \
-    -e TARGET_SUBDIR="$target_subdir" \
     "${offline_env[@]}" \
     -v "$root:/src" \
     -v "$rustup_home:/host-rustup:ro" \
@@ -196,14 +223,10 @@ docker run --rm \
     -w /src \
     "$image" \
     bash -euo pipefail -c '
-        cleanup_owner() {
-            chown -R "$HOST_UID:$HOST_GID" "/src/$OUT" "/src/target/$TARGET_SUBDIR" 2>/dev/null || true
-        }
-        trap cleanup_owner EXIT
-
-        # The C toolchain: the image supplies the C library (that is why it was
-        # chosen), the compiler, and libclang — `pg_query` builds libpg_query
-        # from source and its bindgen step needs the clang C API by name.
+        # Root does exactly two things in this container: install the C
+        # toolchain the image does not carry (`pg_query` builds libpg_query and
+        # its bindgen step needs the clang C API by name), and hand the build to
+        # HOST_UID. Everything cargo writes afterwards belongs to one identity.
         if command -v apk >/dev/null 2>&1; then
             apk add --no-cache build-base musl-dev pkgconf clang llvm-dev clang19-libclang \
                 binutils ca-certificates bash tar gzip xz git >/dev/null
@@ -220,22 +243,61 @@ docker run --rm \
             exit 1
         fi
 
-        mkdir -p /tmp/cargo-home
-        ln -s /host-cargo/registry /tmp/cargo-home/registry 2>/dev/null || true
-        ln -s /host-cargo/git /tmp/cargo-home/git 2>/dev/null || true
-        [ -f /host-cargo/config.toml ] && cp /host-cargo/config.toml /tmp/cargo-home/config.toml || true
+        # Dropping to HOST_UID is the point, so an image without a way to do it
+        # is refused by name rather than silently building as root.
+        command -v setpriv >/dev/null 2>&1 || {
+            echo "error: $BUILDER_IMAGE has no setpriv (util-linux), so this build cannot" >&2
+            echo "  drop to uid $HOST_UID: one identity must write the cache, the target" >&2
+            echo "  directory and the archive (MB.3.63)" >&2
+            exit 1
+        }
+
+        # No second Rust toolchain: the host one is mounted read-only, and this
+        # is the one PATH entry both the container and the dropped process use.
         export PATH="/host-rustup/toolchains/stable-$(uname -m)-unknown-linux-gnu/bin:$PATH"
         if ! command -v cargo >/dev/null 2>&1; then
             toolchain_bin=$(find /host-rustup/toolchains -maxdepth 2 -type d -name bin | head -1)
             export PATH="$toolchain_bin:$PATH"
         fi
-        cargo --version
-        echo "build-standalone-in-image: glibc $(getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version | head -1)"
 
-        build=(--target "$TARGET" --out "$OUT" --require-shims "$OWED"
-               --max-glibc "$MAX_GLIBC" --builder-image "$BUILDER_IMAGE")
-        [ -n "$SHIM_DIR" ] && build+=(--shim-dir "$SHIM_DIR")
-        bash scripts/build-standalone.sh "${build[@]}"
+        # The build body is a heredoc because it runs as HOST_UID. `CARGO_HOME`
+        # is a *writable* directory **seeded by copying** the read-only host
+        # cache: cargo extracts `registry/src/<crate>` and `git/checkouts/<dep>`
+        # into `CARGO_HOME`, so symlinking those at the read-only mount is what
+        # made the first cold-cache extraction die with
+        #
+        #   failed to create directory `/tmp/cargo-home/registry/src/...`
+        #   Read-only file system (os error 30)
+        #
+        # (`MB.3.63`). Nothing below writes outside `$CARGO_HOME` (in /tmp),
+        # `$CARGO_TARGET_DIR` and `$OUT`; the repository is only read.
+        build_body=$(cat <<\BUILD_BODY
+set -euo pipefail
+mkdir -p "$HOME" "$CARGO_HOME/registry" "$CARGO_HOME/git"
+if [ -d /host-cargo/registry ]; then
+    cp -a /host-cargo/registry/. "$CARGO_HOME/registry/"
+fi
+if [ -d /host-cargo/git ]; then
+    cp -a /host-cargo/git/. "$CARGO_HOME/git/"
+fi
+if [ -f /host-cargo/config.toml ]; then
+    cp /host-cargo/config.toml "$CARGO_HOME/config.toml"
+fi
+cargo --version
+echo "build-standalone-in-image: building as uid $(id -u):$(id -g), cache $CARGO_HOME"
+echo "build-standalone-in-image: glibc $(getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version | head -1)"
+build=(--target "$TARGET" --out "$OUT" --require-shims "$OWED"
+       --max-glibc "$MAX_GLIBC" --builder-image "$BUILDER_IMAGE")
+if [ -n "$SHIM_DIR" ]; then
+    build+=(--shim-dir "$SHIM_DIR")
+fi
+bash scripts/build-standalone.sh "${build[@]}"
+BUILD_BODY
+        )
+
+        exec setpriv --reuid "$HOST_UID" --regid "$HOST_GID" --clear-groups \
+            env HOME=/tmp/build-home \
+            bash -euo pipefail -c "$build_body"
     '
 
 echo "build-standalone-in-image: $out/blastit-$target.tar.gz"

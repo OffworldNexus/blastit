@@ -42,6 +42,22 @@
 #     checked, and the first one that is too old fails the run. A duplicate is
 #     inspected once.
 #
+# **A `GLIBC_*` name is not proof of a glibc dependency.** `.gnu.version_r` lists
+# the version nodes of *every* library the binary needs, including ones that are
+# not glibc: Alpine's aarch64 `libgcc_s` declares a node spelled `GLIBC_2.0`, so
+# the shipped `aarch64-unknown-linux-musl` artifact — `NEEDED
+# libc.musl-aarch64.so.1`, interpreter `/lib/ld-musl-aarch64.so.1` — was reported as
+# "needs glibc 2.0" and refused in the one image that can run it, while the
+# x86_64 musl leg (whose `libgcc_s` needs only `GCC_*` nodes) passed the same
+# check (`MB.3.63`). 2.0 is also a floor no aarch64 glibc has (2.17 is the
+# architectural minimum), so the number was the parser's, not the file's. The
+# libc is read from the ELF itself (`INTERP`, which `readelf` prints as an
+# **absolute** path, and `NEEDED libc.*`); when it says musl, the glibc names are
+# reported as ignored and never compared — and when the two readings contradict
+# each other (a musl loader beside `NEEDED libc.so.6`, or a glibc loader beside
+# `NEEDED libc.musl-*`, with or without any `GLIBC_*` name) the verdict is 2
+# "cannot decide", never 1 "too old" and never a chosen half.
+#
 # A tag that exists only on this machine (an image a `docker build` just made) is
 # refused for the same reason a wrong tag is: the pull is what proves the tag the
 # user will actually get. Push it, or point the check at the public base image.
@@ -146,12 +162,102 @@ read_version_info() {
 }
 
 version_info=$(read_version_info)
+
+# The libc is a fact in the binary's own headers, and only that decides whether
+# a `GLIBC_*` name below means a glibc dependency (`MB.3.63`). All three reads
+# are guarded: an ELF `readelf --version-info` could parse may still have no
+# program headers, and under `set -euo pipefail` an unguarded pipeline would end
+# the run with no verdict at all.
+elf_machine=""
+elf_interp=""
+elf_needed=""
+if header_out=$(readelf -h "$binary" 2>/dev/null); then
+    elf_machine=$(printf '%s\n' "$header_out" | sed -n 's/^ *Machine: *//p' | head -n 1 || true)
+fi
+if program_out=$(readelf -l "$binary" 2>/dev/null); then
+    elf_interp=$(
+        printf '%s\n' "$program_out" \
+            | sed -n 's/.*Requesting program interpreter: \(.*\)\]$/\1/p' \
+            | head -n 1 || true
+    )
+fi
+if dynamic_out=$(readelf -d "$binary" 2>/dev/null); then
+    elf_needed=$(printf '%s\n' "$dynamic_out" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p' || true)
+fi
+musl_evidence=""
+# `readelf` prints the interpreter as an **absolute** path (`/lib/ld-musl-x86_64.so.1`,
+# `/lib64/ld-linux-x86-64.so.2`), so the match has to allow the directory: a bare
+# `ld-musl-*` case never fired on a real binary, which is how a musl artifact kept
+# being read as glibc (`MB.3.63` review).
+interp_musl=0
+interp_glibc=0
+case "$elf_interp" in
+    */ld-musl-*|ld-musl-*) interp_musl=1 ;;
+    */ld-linux*|ld-linux*) interp_glibc=1 ;;
+esac
+needs_musl_libc=0
+needs_glibc=0
+if printf '%s\n' "$elf_needed" | grep -q '^libc\.musl-'; then
+    needs_musl_libc=1
+fi
+if printf '%s\n' "$elf_needed" | grep -qx 'libc\.so\.6'; then
+    needs_glibc=1
+fi
+
+# One file cannot load two C libraries, and the evidence for that is in `INTERP`
+# and `NEEDED` alone — never in a version *name*, which is what made the first
+# version of this rule pass impossible files: gated on a `GLIBC_*` node, a glibc
+# loader beside `NEEDED libc.musl-*` printed "links musl" and exited 0, and a musl
+# loader beside `NEEDED libc.so.6` exited 0 when no version node was there to
+# trigger it. Both directions are exit 2 here, before any name is believed.
+contradiction=""
+if [ "$interp_musl" -eq 1 ] && [ "$needs_glibc" -eq 1 ]; then
+    contradiction="a musl interpreter ($elf_interp) beside NEEDED libc.so.6"
+fi
+if [ "$interp_glibc" -eq 1 ] && [ "$needs_musl_libc" -eq 1 ]; then
+    contradiction="a glibc interpreter ($elf_interp) beside NEEDED libc.musl-*"
+fi
+if [ "$needs_glibc" -eq 1 ] && [ "$needs_musl_libc" -eq 1 ]; then
+    contradiction="NEEDED libc.so.6 and NEEDED libc.musl-* in one file"
+fi
+if [ -n "$contradiction" ]; then
+    echo "check-exec-env: FAIL — $(basename "$binary") contradicts itself: $contradiction" >&2
+    echo "  machine ${elf_machine:-unknown}; interpreter ${elf_interp:-none}; NEEDED: $(printf '%s ' $elf_needed)" >&2
+    echo "  one file cannot load two C libraries, so its requirement cannot be read;" >&2
+    echo "  rebuild the artifact (a glibc and a musl input were mixed)" >&2
+    exit 2
+fi
+
+# Now that the readings agree, the libc is whichever they name.
+if [ "$interp_musl" -eq 1 ]; then
+    musl_evidence="interpreter $elf_interp"
+elif [ "$needs_musl_libc" -eq 1 ]; then
+    musl_evidence="NEEDED $(printf '%s\n' "$elf_needed" | grep -m 1 '^libc\.musl-')"
+fi
+
 required=$(
     printf '%s\n' "$version_info" \
         | sed -n 's/.*Name: GLIBC_\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
         | sort -V \
         | tail -n 1
 )
+# A musl binary needs no glibc whatever names its version needs carry: those
+# belong to the version script of `libgcc_s`/`libunwind`, which on aarch64
+# spells one of them `GLIBC_2.0`. The slot stays empty so a musl image is not
+# refused for it, and the ignored names are printed rather than dropped.
+ignored_glibc_names=""
+if [ -n "$required" ] && [ -n "$musl_evidence" ]; then
+    ignored_glibc_names=$(
+        printf '%s\n' "$version_info" \
+            | sed -n 's/.*Name: \(GLIBC_[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
+            | sort -u | tr '\n' ' ' | sed 's/ *$//'
+    )
+    required=""
+fi
+if [ -n "$ignored_glibc_names" ] && [ "$quiet" -eq 0 ]; then
+    echo "check-exec-env: $(basename "$binary") links musl ($musl_evidence), so $ignored_glibc_names in .gnu.version_r is not a glibc requirement"
+    echo "  those names are the version script of a library that is not glibc (libgcc_s/libunwind); machine ${elf_machine:-unknown}"
+fi
 abi_nodes=$(
     printf '%s\n' "$version_info" \
         | sed -n 's/.*Name: \(GLIBC_ABI_[A-Za-z0-9_]*\).*/\1/p' \
@@ -253,6 +359,7 @@ inspect_image() {
     if [ "$provided" = "musl" ]; then
         echo "check-exec-env: FAIL — $(basename "$binary") needs glibc $required, and $image provides musl" >&2
         echo "  a glibc ELF cannot start where there is no glibc: the loader is missing, not older" >&2
+        echo "  the binary's own ELF: machine ${elf_machine:-unknown}, interpreter ${elf_interp:-none}, NEEDED: $(printf '%s ' $elf_needed)" >&2
         echo "  fix: run this binary in a glibc image, or build it inside the musl image" >&2
         return 1
     fi

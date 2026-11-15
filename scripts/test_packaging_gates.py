@@ -3,11 +3,11 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""Self-tests (positive + mutated negatives) for the three packaging gates (MB.3.18).
+"""Self-tests (positive + mutated negatives) for the packaging gates (MB.3.18, MB.3.63).
 
 Runs in `make check` (`make workflow-check` / `make platform-matrix-check`) on
 throwaway temporary copies — never mutating the repository — so none of the
-workflow, matrix, or wheel-tag guards can silently go vacuous.
+workflow, matrix, wheel-tag or exec-env guards can silently go vacuous.
 """
 
 from __future__ import annotations
@@ -24,6 +24,27 @@ REPO = Path(__file__).resolve().parent.parent
 CHECK_WORKFLOWS = REPO / "scripts" / "check_workflows.py"
 PLATFORM_MATRIX = REPO / "scripts" / "platform_matrix.py"
 CHECK_WHEEL_TAG = REPO / "scripts" / "check_wheel_tag.py"
+CHECK_EXEC_ENV = REPO / "scripts" / "check-exec-env.sh"
+
+# Recorded verbatim from the shipped `aarch64-unknown-linux-musl` artifact of
+# `0.2.0` (`readelf --version-info blastit/_blastit.cpython-314-aarch64-linux-musl.so`):
+# the file links musl, and Alpine's aarch64 `libgcc_s` still declares a version
+# node spelled `GLIBC_2.0`, which the check read as "needs glibc 2.0" and
+# refused in `alpine:3.21` — the one image that can run it (`MB.3.63`).
+MUSL_GLIBC_NAMES_TRANSCRIPT = """\
+Version symbols section '.gnu.version' contains 311 entries:
+ Addr: 0x000000000000302e  Offset: 0x0000302e  Link: 27 (.dynsym)
+  000:   0 (*local*)       0 (*local*)       0 (*local*)       1 (*global*)
+  004:   2 (GCC_3.3)       3 (GCC_4.2.0)     4 (GLIBC_2.0)     1 (*global*)
+
+Version needs section '.gnu.version_r' contains 1 entry:
+ Addr: 0x0000000000002140  Offset: 0x00002140  Link: 5 (.dynstr)
+  000000: Version: 1  File: libgcc_s-69c45f16.so.1  Cnt: 4
+  0x0010:   Name: GCC_3.0  Flags: none  Version: 5
+  0x0020:   Name: GLIBC_2.0  Flags: none  Version: 4
+  0x0030:   Name: GCC_4.2.0  Flags: none  Version: 3
+  0x0040:   Name: GCC_3.3  Flags: none  Version: 2
+"""
 
 
 def _copy_workflow_fixture(dst: Path) -> Path:
@@ -31,6 +52,12 @@ def _copy_workflow_fixture(dst: Path) -> Path:
     shutil.copytree(REPO / ".github", root / ".github")
     (root / "scripts").mkdir(parents=True)
     shutil.copy2(PLATFORM_MATRIX, root / "scripts" / "platform_matrix.py")
+    # Rule 16 reads shell text as well as YAML (`MB.3.63`), so the build script
+    # the container cache lives in belongs in the fixture too.
+    shutil.copy2(
+        REPO / "scripts" / "build-standalone-in-image.sh",
+        root / "scripts" / "build-standalone-in-image.sh",
+    )
     return root
 
 
@@ -403,6 +430,35 @@ def test_workflow_auditor_cases() -> int:
         )
         cases_run += 1
 
+        # 15. `MB.3.63`: the read-only `CARGO_HOME` symlink, restored. Cargo
+        #     extracts `registry/src/<crate>` into CARGO_HOME, so a symlink into
+        #     the read-only host cache is a write to a read-only mount that only
+        #     fires on a cold cache.
+        case_dir = Path(tmp) / "readonly-cargo-home"
+        shutil.copytree(base, case_dir)
+        build = case_dir / "scripts" / "build-standalone-in-image.sh"
+        text = build.read_text(encoding="utf-8")
+        _expect(
+            'cp -a /host-cargo/registry/. "$CARGO_HOME/registry/"' in text,
+            "the build fixture no longer seeds CARGO_HOME by copying",
+        )
+        build.write_text(
+            text.replace(
+                "if [ -d /host-cargo/registry ]; then",
+                "ln -s /host-cargo/registry /tmp/build-cargo-home/registry-link\n"
+                "if [ -d /host-cargo/registry ]; then",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "symlinks /host-cargo/registry" in res.stdout,
+            "auditor must reject a symlink under the container CARGO_HOME",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
     return cases_run
 
 
@@ -690,14 +746,276 @@ def test_wheel_tag_guard_cases() -> int:
     return cases_run
 
 
+#: A `readelf`/`docker` pair a fixture can answer with, so the judge is tested
+#: against evidence the way a foreign-arch or CI host would present it — never
+#: against this host's own ELF, which would make the test vacuous wherever the
+#: bug cannot appear.
+FAKE_READELF = """\
+#!/bin/sh
+case "$1" in
+  --version-info) cat "$FAKE_VERSION_INFO" ;;
+  -h) printf '  Machine:                           %s\\n' "$FAKE_MACHINE" ;;
+  -l) [ -n "$FAKE_INTERP" ] && printf '  INTERP        0x0002f4\\n        [Requesting program interpreter: %s]\\n' "$FAKE_INTERP"; true ;;
+  -d) printf '%s\\n' "$FAKE_NEEDED" | while IFS= read -r lib; do [ -n "$lib" ] && printf ' 0x0000000000000001 (NEEDED)             Shared library: [%s]\\n' "$lib"; done; true ;;
+  *) exit 0 ;;
+esac
+"""
+
+FAKE_DOCKER = """\
+#!/bin/sh
+case "$1" in
+  pull) exit 0 ;;
+  run) printf '%s\\n' "$FAKE_IMAGE_LIBC" ;;
+  *) exit 0 ;;
+esac
+"""
+
+
+def _fake_env(
+    directory: Path,
+    *,
+    machine: str = "AArch64",
+    interp: str = "",
+    needed: str = "",
+    version_info: str,
+    image_libc: str = "musl",
+) -> dict[str, str]:
+    """A PATH whose first `readelf` and `docker` answer with this fixture."""
+    bin_dir = directory / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    transcript = directory / "version-info.txt"
+    transcript.write_text(version_info, encoding="utf-8")
+    for name, body in (("readelf", FAKE_READELF), ("docker", FAKE_DOCKER)):
+        path = bin_dir / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "FAKE_MACHINE": machine,
+        "FAKE_INTERP": interp,
+        "FAKE_NEEDED": needed,
+        "FAKE_VERSION_INFO": str(transcript),
+        "FAKE_IMAGE_LIBC": image_libc,
+    }
+    return env
+
+
+def _run_exec_env(env: dict[str, str], binary: Path, image: str = "alpine:3.21"):
+    return subprocess.run(
+        [str(CHECK_EXEC_ENV), "--image", image, "--binary", str(binary)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+
+def test_exec_env_cases() -> int:
+    """`MB.3.63`: the judge reads the binary's own libc, and cannot decide is 2.
+
+    Four cases, each one a verdict the gate used to get wrong in some shape:
+
+    * a file `readelf` cannot parse is exit **2** (cannot decide), never 1 (too
+      old) — the direction `MB.3.61` documented and this test pins;
+    * a musl artifact whose `.gnu.version_r` carries the name `GLIBC_2.0`
+      (recorded from the shipped `aarch64-unknown-linux-musl` wheel) is **not** a
+      glibc requirement: the file links `libc.musl-*`, so it passes in
+      `alpine:3.21` and says which name it ignored and why;
+    * the same `GLIBC_2.0` name on a **glibc** ELF is still compared and still
+      refuses a musl image, because the rule keys on the ELF's libc and not on
+      the spelling of a version node;
+    * a musl interpreter beside `NEEDED libc.so.6` is contradictory evidence and
+      is exit 2, not a silently chosen half.
+    """
+    cases_run = 0
+    if shutil.which("readelf") is None:
+        raise AssertionError(
+            "packaging-gates-test needs a real `readelf` for the unparseable-file case"
+        )
+    with tempfile.TemporaryDirectory(prefix="blastit-exec-env-") as tmp:
+        root = Path(tmp)
+        unreadable = root / "README.md"
+        unreadable.write_text("# not an ELF\n", encoding="utf-8")
+        # A fake `docker` alone: the file must be refused before any image is
+        # inspected, so the fixture never needs a real daemon.
+        bin_dir = root / "docker-bin"
+        bin_dir.mkdir()
+        (bin_dir / "docker").write_text(FAKE_DOCKER, encoding="utf-8")
+        (bin_dir / "docker").chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            "FAKE_IMAGE_LIBC": "musl",
+        }
+        res = _run_exec_env(env, unreadable)
+        _expect(
+            res.returncode == 2,
+            "a file readelf cannot parse must be exit 2 (cannot decide), never "
+            f"exit 1 (too old); got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "cannot read symbol versions" in res.stderr,
+            "the exit-2 refusal must name the parse failure it could not decide on",
+            res.stderr,
+        )
+        cases_run += 1
+
+        binary = root / "blastit"
+        binary.write_text("", encoding="utf-8")
+        musl_env = _fake_env(
+            root / "musl",
+            interp="/lib/ld-musl-aarch64.so.1",
+            needed="libgcc_s.so.1\nlibc.musl-aarch64.so.1",
+            version_info=MUSL_GLIBC_NAMES_TRANSCRIPT,
+        )
+        res = _run_exec_env(musl_env, binary)
+        _expect(
+            res.returncode == 0,
+            "a musl artifact whose version names include GLIBC_2.0 must pass in a "
+            f"musl image, not be refused as glibc (MB.3.63); got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "links musl" in res.stdout + res.stderr
+            and "GLIBC_2.0" in res.stdout + res.stderr,
+            "the pass must name the GLIBC_* node it ignored and the evidence that "
+            "the file links musl",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        glibc_env = _fake_env(
+            root / "glibc",
+            machine="Advanced Micro Devices X86-64",
+            interp="/lib64/ld-linux-x86-64.so.2",
+            needed="libgcc_s.so.1\nlibc.so.6",
+            version_info=MUSL_GLIBC_NAMES_TRANSCRIPT,
+        )
+        res = _run_exec_env(glibc_env, binary)
+        _expect(
+            res.returncode == 1,
+            "the same GLIBC_2.0 name on a glibc ELF must still be compared and must "
+            f"still refuse a musl image; got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "needs glibc 2.0" in res.stderr,
+            "the glibc refusal must still read the version name out of the ELF",
+            res.stderr,
+        )
+        cases_run += 1
+
+        contradiction_env = _fake_env(
+            root / "contradiction",
+            interp="/lib/ld-musl-aarch64.so.1",
+            needed="libc.so.6\nlibc.musl-aarch64.so.1",
+            version_info=MUSL_GLIBC_NAMES_TRANSCRIPT,
+        )
+        res = _run_exec_env(contradiction_env, binary)
+        _expect(
+            res.returncode == 2,
+            "a musl interpreter beside `NEEDED libc.so.6` is contradictory evidence: "
+            f"exit 2 (cannot decide), never a chosen half; got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "contradicts itself" in res.stderr,
+            "the contradiction refusal must say what cannot both be true",
+            res.stderr,
+        )
+        cases_run += 1
+
+        # The three shapes the first version of this judge got wrong (review):
+        # `INTERP` is an **absolute** path, so an `ld-musl-*` match never fired;
+        # and the contradiction was gated on a `GLIBC_*` name, so two impossible
+        # files passed.
+
+        # (a) interp-only musl: a real musl binary, no `libc.*` in NEEDED, whose
+        #     version names still carry the `GLIBC_2.0` node of `libgcc_s`.
+        interp_only_env = _fake_env(
+            root / "interp-only-musl",
+            machine="Advanced Micro Devices X86-64",
+            interp="/lib/ld-musl-x86_64.so.1",
+            needed="libgcc_s.so.1",
+            version_info=MUSL_GLIBC_NAMES_TRANSCRIPT,
+        )
+        res = _run_exec_env(interp_only_env, binary)
+        _expect(
+            res.returncode == 0,
+            "a musl interpreter alone is a musl binary: it must pass in a musl "
+            f"image, not read as glibc; got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "interpreter /lib/ld-musl-x86_64.so.1" in res.stdout + res.stderr,
+            "the pass must name the interpreter it read (an absolute path, as "
+            "readelf prints it) as the evidence that the file links musl",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # (b) the reverse contradiction: a **glibc** loader beside
+        #     `NEEDED libc.musl-*` is as impossible as the forward one, and must
+        #     not become a false pass by way of "links musl".
+        reverse_env = _fake_env(
+            root / "reverse-contradiction",
+            machine="Advanced Micro Devices X86-64",
+            interp="/lib64/ld-linux-x86-64.so.2",
+            needed="libc.musl-aarch64.so.1",
+            version_info=MUSL_GLIBC_NAMES_TRANSCRIPT,
+        )
+        res = _run_exec_env(reverse_env, binary)
+        _expect(
+            res.returncode == 2,
+            "a glibc interpreter beside `NEEDED libc.musl-*` is contradictory "
+            f"evidence: exit 2 (cannot decide), never 0 'links musl'; got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "contradicts itself" in res.stderr,
+            "the reverse contradiction must say what cannot both be true",
+            res.stderr,
+        )
+        cases_run += 1
+
+        # (c) the same forward contradiction with **no** `GLIBC_*` name at all:
+        #     the impossible pair is in `INTERP`/`NEEDED`, so it must be exit 2
+        #     even though no version node is there to trigger the check.
+        nameless_env = _fake_env(
+            root / "contradiction-without-names",
+            interp="/lib/ld-musl-aarch64.so.1",
+            needed="libc.so.6",
+            version_info="No version information found in this file.\n",
+        )
+        res = _run_exec_env(nameless_env, binary)
+        _expect(
+            res.returncode == 2,
+            "a musl interpreter beside `NEEDED libc.so.6` contradicts itself with or "
+            f"without GLIBC_* names; got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "contradicts itself" in res.stderr,
+            "the name-free contradiction must be refused as such, not passed as "
+            "static/no-glibc",
+            res.stderr,
+        )
+        cases_run += 1
+
+    return cases_run
+
+
 def main() -> int:
     wf = test_workflow_auditor_cases()
     pm = test_platform_matrix_cases()
     wt = test_wheel_tag_guard_cases()
-    total = wf + pm + wt
+    ee = test_exec_env_cases()
+    total = wf + pm + wt + ee
     print(
         f"packaging-gates-test: ok — {total} cases passed "
-        f"(workflow={wf}, matrix={pm}, wheel-tag={wt})"
+        f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, exec-env={ee})"
     )
     return 0
 
