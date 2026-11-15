@@ -2,7 +2,7 @@
 id: MB.3.45
 title: "Scheduler-answered requests must not pay the queue wait, and three claims that no longer match the code"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.3.41]
@@ -12,11 +12,11 @@ paths:
   - "crates/blastit-scheduler/tests/critical_charge.rs"
   - "crates/blastit-scheduler/tests/common/mod.rs"
   - "docs/reference/log-events.md"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-15T04:11"
-updated: "2026-11-15T04:36"
+updated: "2026-11-15T06:10"
 ---
 
 # Goal

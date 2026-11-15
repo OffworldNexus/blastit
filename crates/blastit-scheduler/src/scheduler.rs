@@ -274,6 +274,17 @@ struct View {
     last_used: u64,
     /// Frames towards this view, with its own writer task behind them.
     out: Option<Outbound>,
+    /// When init reported the process gone and the ordered `view.chan` has not
+    /// reached [`ViewIn::Closed`] yet (`MB.3.45`).
+    ///
+    /// The scheduler learns a process exited on `ctl.chan`, a different input
+    /// from the frames the process itself wrote, so the two can arrive in
+    /// either order. The frames are the answer: a view that writes
+    /// `RESP_HEAD`/`RESP_END_COST`/`DONE` and then retires **by design** (a
+    /// contained bailout, `php.rs`) must be read before its requests are
+    /// failed. Nothing new is dispatched to an exited view, and
+    /// [`Scheduler::expire_exited_views`] bounds the wait.
+    exited: Option<Instant>,
 }
 
 impl View {
@@ -290,6 +301,7 @@ impl View {
             idle_since: None,
             last_used: 0,
             out: None,
+            exited: None,
         }
     }
 
@@ -597,6 +609,17 @@ struct Request {
     head_at: Option<Instant>,
     /// A `RESP_HEAD` was forwarded to http.
     head_sent: bool,
+    /// The `RESP_HEAD` http was sent came **from the view**, not from the
+    /// scheduler's own `respond` (`MB.3.45`).
+    ///
+    /// `head_sent` answers "is the response under way"; this answers "did the
+    /// view answer this request". They are one and the same for an app's
+    /// response and different for every `5xx` the scheduler wrote itself (the
+    /// `502` of a dead view, a `504` timeout, a `503` refusal), which is what
+    /// [`answered_a_bailout`] and [`completed_outcome`] have to know: a view
+    /// that later bails out of a request the scheduler already answered must
+    /// not turn that answer into the `R19` crash bill.
+    view_answered: bool,
     /// The view's handler bailed out of this request rather than returning
     /// (`DONE`'s `bailed`): a contained `exit()`/`die()`/fatal (`MB.3.41`).
     ///
@@ -924,6 +947,13 @@ impl Scheduler {
                 take(deadline);
             }
         }
+        // A view init reported gone whose `view.chan` has not closed yet is
+        // failed when this elapses (`MB.3.45`).
+        for view in self.views.values() {
+            if let Some(exited) = view.exited {
+                take(exited + self.cfg.request_timeout);
+            }
+        }
         if !self.cfg.idle_timeout.is_zero() {
             for view in self.views.values() {
                 if view.ready
@@ -964,6 +994,7 @@ impl Scheduler {
         self.pump_learn_fallback()?;
         self.dispatch_queued()?;
         self.expire_requests()?;
+        self.expire_exited_views();
         self.retire_finished_views()?;
         self.check_memory()?;
         self.collect_flows(now);
@@ -1069,7 +1100,7 @@ impl Scheduler {
         match message {
             Ctl::Spawned { route, pid } => self.view_spawned(route as usize, pid, fd),
             Ctl::Exited { route, pid, .. } => {
-                self.view_gone(ViewKey {
+                self.view_exited(ViewKey {
                     route: route as usize,
                     pid,
                 });
@@ -1255,6 +1286,7 @@ impl Scheduler {
             finished_at: None,
             head_at: None,
             head_sent: false,
+            view_answered: false,
             bailed: false,
             complete: false,
             emitted: false,
@@ -1965,6 +1997,10 @@ impl Scheduler {
             request.complete = true;
         }
         self.mark_finished(stream_id);
+        // The response ends here, so its span is final: charge before the event
+        // that reports it (`MB.3.45`). `charge` is idempotent, so the `DONE`
+        // that releases the slot later charges nothing more.
+        self.charge(stream_id);
         self.emit_request(stream_id);
         if view.is_none() {
             // Never dispatched: it leaves the queue, and no slot was ever held.
@@ -2030,6 +2066,11 @@ impl Scheduler {
                 view.ready
                     && !view.spawning
                     && !view.stopping
+                    // A process init reported gone cannot take one: its frames
+                    // are still being read, and its close is what frees the
+                    // slot (a new spawn waits for it, so a request is never
+                    // queued against a channel nobody reads).
+                    && view.exited.is_none()
                     && view.inflight < self.cfg.view_worker_cap()
                     && view.out.as_ref().map(Outbound::is_open).unwrap_or(false)
             }
@@ -2673,6 +2714,7 @@ impl Scheduler {
             request.outcome = Outcome::Unmatched;
         }
         self.mark_finished(stream_id);
+        self.charge(stream_id);
         self.emit_request(stream_id);
         self.release(stream_id);
         Ok(())
@@ -2803,6 +2845,10 @@ impl Scheduler {
                 request.outcome = Outcome::Timeout;
             }
             self.mark_finished(stream_id);
+            // The timeout answer is final now, so its charge must precede its
+            // event (`MB.3.45`): `emit_request` reports `charged_ns`, and the
+            // request never pays the queue wait it spent before dispatch.
+            self.charge(stream_id);
             self.emit_request(stream_id);
             if let Some((key, id)) = view {
                 self.view_push(key, id, Frame::Cancel)?;
@@ -3321,6 +3367,67 @@ impl Scheduler {
         }
     }
 
+    /// init reported a view process gone (§4).
+    ///
+    /// The process's own `view.chan` decides what it said before it went away:
+    /// the reader task sends every frame it decoded and only then
+    /// [`ViewIn::Closed`] ([`crate::task::read_frames`]), so failing the
+    /// in-flight requests here would bill a request the view **answered** as a
+    /// dead view with no cost. That is `MB.3.48`'s 1-in-20 `php-sapi` flake: a
+    /// contained bailout writes `RESP_HEAD`, `RESP_END_COST` and `DONE{Bailed}`
+    /// and then retires by design (`crates/blastit-view/src/php.rs`), and
+    /// `Ctl::Exited` can reach the scheduler first on the other channel.
+    ///
+    /// So the failure is left to [`Scheduler::view_gone`], which
+    /// [`ViewIn::Closed`] runs *after* those frames, and
+    /// [`Scheduler::expire_exited_views`] bounds that wait by
+    /// `request_timeout` so a channel that never closes cannot hang a request.
+    /// A process with no channel to wait for — one retired already, or one
+    /// whose `SPAWNED` never arrived — is handled immediately.
+    fn view_exited(&mut self, key: ViewKey) {
+        let live = self
+            .views
+            .get(&key.route)
+            .map(|view| view.key == key)
+            .unwrap_or(false);
+        let channel = live
+            && self
+                .views
+                .get(&key.route)
+                .is_some_and(|view| view.out.is_some());
+        if !channel {
+            self.view_gone(key);
+            return;
+        }
+        if let Some(view) = self.views.get_mut(&key.route)
+            && view.exited.is_none()
+        {
+            view.exited = Some(Instant::now());
+        }
+    }
+
+    /// Fails the requests of a view init reported gone whose `view.chan` never
+    /// closed, `request_timeout` after the report (`MB.3.45`).
+    ///
+    /// The ordered close is what normally decides; this is the bound that keeps
+    /// a lost descriptor from turning a dead view into a request that waits
+    /// forever. It is only ever reached when no `ViewIn::Closed` came.
+    fn expire_exited_views(&mut self) {
+        let now = Instant::now();
+        let overdue: Vec<ViewKey> = self
+            .views
+            .values()
+            .filter(|view| {
+                view.exited
+                    .is_some_and(|exited| now >= exited + self.cfg.request_timeout)
+            })
+            .map(|view| view.key)
+            .collect();
+        for key in overdue {
+            self.view_gone(key);
+        }
+    }
+
     /// A view process is gone: fail its requests, free their slots, and let
     /// the next request for its route spawn a new one (§2.4).
     fn view_gone(&mut self, key: ViewKey) {
@@ -3471,6 +3578,10 @@ impl Scheduler {
             request.complete = true;
         }
         self.mark_finished(stream_id);
+        // Charge before the event that reports the charge (`MB.3.45`): a
+        // scheduler-written answer is complete here, so this span is final and
+        // the event must not say `cost_ns: 0`.
+        self.charge(stream_id);
         self.emit_request(stream_id);
         self.release(stream_id);
         Ok(())
@@ -3496,6 +3607,7 @@ impl Scheduler {
             request.outcome = Outcome::Unmatched;
         }
         self.mark_finished(stream_id);
+        self.charge(stream_id);
         self.emit_request(stream_id);
         if view.is_none() {
             self.release(stream_id);
@@ -3514,6 +3626,8 @@ impl Scheduler {
             request.complete = true;
         }
         self.mark_finished(stream_id);
+        // The span is final here, so the event carries it (`MB.3.45`).
+        self.charge(stream_id);
         self.emit_request(stream_id);
         self.release(stream_id);
         Ok(())
@@ -3551,6 +3665,10 @@ impl Scheduler {
             request.outcome = outcome;
         }
         self.mark_finished(stream_id);
+        // The scheduler wrote this answer; charge the span it held a worker for
+        // before the event reports it (`MB.3.45`). A request that died with its
+        // view still keeps the dispatch→completion rule: no view answered it.
+        self.charge(stream_id);
         self.emit_request(stream_id);
         Ok(())
     }
@@ -3604,7 +3722,7 @@ impl Scheduler {
     /// went away, or the view was built before D5 — the observed time is charged
     /// instead.
     ///
-    /// A request a view **bailed out of** (`head_sent`, `bailed` and
+    /// A request a view **bailed out of** (`view_answered`, `bailed` and
     /// `status >= 500`: a `5xx` a contained `exit()`/`die()`/fatal answered —
     /// `zend_bailout()` swallowed by the SAPI shim, reported by `DONE`) is
     /// charged `R19`'s crash/`504` ceiling instead, and its report is not
@@ -3666,7 +3784,7 @@ impl Scheduler {
             floor,
             observed,
             wall: nanos(finished.saturating_duration_since(request.arrived)),
-            failed: answered_a_bailout(request.head_sent, request.status, request.bailed),
+            failed: answered_a_bailout(request.view_answered, request.status, request.bailed),
         });
         let flow = request.flow;
         if let Some(request) = self.requests.get_mut(&stream_id) {
@@ -3679,6 +3797,11 @@ impl Scheduler {
     }
 
     /// Emits the one `request` event a request gets, once (§8.1).
+    ///
+    /// [`Scheduler::charge`] runs first, always: the event reports
+    /// `charged_ns`, so an event emitted before its charge says `cost_ns: 0`
+    /// for a request that did hold a worker (`MB.3.45`). The debug assertion is
+    /// what keeps that ordering true for every path.
     fn emit_request(&mut self, stream_id: u32) {
         let Some(request) = self.requests.get(&stream_id) else {
             return;
@@ -3686,6 +3809,10 @@ impl Scheduler {
         if request.emitted {
             return;
         }
+        debug_assert!(
+            request.charged,
+            "a request event is emitted only after the request was charged"
+        );
         let now = Instant::now();
         let queued_until = request.dispatched_at.unwrap_or(now);
         let queued_ms = millis(queued_until.duration_since(request.arrived));
@@ -3779,15 +3906,17 @@ impl Scheduler {
             self.dropped += 1;
             return Ok(());
         };
-        let (complete, head_sent, cancelled, status) = match self.requests.get(&stream_id) {
-            Some(request) => (
-                request.complete,
-                request.head_sent,
-                request.cancelled,
-                request.status,
-            ),
-            None => return Ok(()),
-        };
+        let (complete, head_sent, view_answered, cancelled, status) =
+            match self.requests.get(&stream_id) {
+                Some(request) => (
+                    request.complete,
+                    request.head_sent,
+                    request.view_answered,
+                    request.cancelled,
+                    request.status,
+                ),
+                None => return Ok(()),
+            };
         let bailed = outcome == DoneOutcome::Bailed;
         if !complete {
             match outcome {
@@ -3798,7 +3927,8 @@ impl Scheduler {
                         request.complete = true;
                         request.bailed = bailed;
                         if !request.cancelled {
-                            request.outcome = completed_outcome(head_sent, request.status, bailed);
+                            request.outcome =
+                                completed_outcome(view_answered, request.status, bailed);
                         }
                     }
                     self.mark_finished(stream_id);
@@ -3820,9 +3950,13 @@ impl Scheduler {
             // A completed `5xx` was held back for this frame: whether the
             // handler returned (the app's own failure, an answer) or bailed
             // (the `R19` crash) is a fact only `DONE` carries.
-            if !request.cancelled && head_sent && status >= 500 {
+            if a_done_may_relabel_a_completed_5xx(
+                request.view_answered,
+                request.cancelled,
+                request.status,
+            ) {
                 request.bailed = bailed;
-                request.outcome = completed_outcome(head_sent, status, bailed);
+                request.outcome = completed_outcome(request.view_answered, request.status, bailed);
             }
         }
         // `release` is what charges the request and emits its event, so a `5xx`
@@ -3847,6 +3981,10 @@ impl Scheduler {
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.status = head.status;
             request.head_sent = true;
+            // The status a `DONE` may label this response with came from the
+            // view itself, which is a different fact from "a head went out"
+            // (`MB.3.45`): the scheduler's own `5xx` must not become `bailed`.
+            request.view_answered = true;
             // D5: the first frame the view produced is the floor of what its
             // request may be charged — the view cannot shorten that without
             // delaying its own response.
@@ -3895,8 +4033,13 @@ impl Scheduler {
     /// (`MB.3.41`). That one response is finalized at its `DONE`, one frame
     /// later on the same channel, because the status cannot say whether the
     /// handler returned (the app's own failure, an answer) or bailed (`R19`'s
-    /// crash); [`Scheduler::release`] charges and emits it if that `DONE` never
-    /// comes, so a lost frame costs the request its label, never its event.
+    /// crash). [`Scheduler::release`] is what charges and emits it, and the
+    /// paths that reach it are exact (`MB.3.45`): the request's `DONE`, the
+    /// ordered close of the view's channel (a view that went away), or a
+    /// `stuck_threads` retire. A live view that simply loses that one frame
+    /// holds the request — and its event — until one of those happens: neither
+    /// `client_cancel` (which returns early on a completed request) nor
+    /// `expire_requests` (which only marks it overdue) releases it.
     fn view_end(
         &mut self,
         key: ViewKey,
@@ -3978,6 +4121,9 @@ impl Scheduler {
             request.outcome = Outcome::ViewDied;
         }
         self.mark_finished(stream_id);
+        // A `502` the scheduler wrote for a view that aborted: the span is
+        // final, so its event carries the charge (`MB.3.45`).
+        self.charge(stream_id);
         self.emit_request(stream_id);
         Ok(())
     }
@@ -4047,10 +4193,12 @@ fn retry_after_seconds(timeout: Duration) -> u64 {
 /// handler never returned; it is not `view_died` either, because the process is
 /// alive and takes the next request.
 ///
-/// `head_sent` is required because a bailout with no `RESP_HEAD` answered
-/// nothing at all, so there is no completed response to label.
-fn completed_outcome(head_sent: bool, status: u16, bailed: bool) -> Outcome {
-    if head_sent && status >= 500 && bailed {
+// `view_answered` is required because a bailout with no `RESP_HEAD` from the
+/// view answered nothing at all, so there is no completed response to label. It
+/// has to be the view's own head (`MB.3.45`): a `5xx` the scheduler wrote itself
+/// is an answer the view never gave.
+fn completed_outcome(view_answered: bool, status: u16, bailed: bool) -> Outcome {
+    if view_answered && status >= 500 && bailed {
         Outcome::Bailed
     } else {
         Outcome::Ok
@@ -4066,16 +4214,36 @@ fn completed_outcome(head_sent: bool, status: u16, bailed: bool) -> Outcome {
 /// * `bailed` is the `DONE`'s own word — the handler did not return. An app's
 ///   own `500` returned, so its report is believed within the clamp exactly
 ///   like a `200`'s.
-/// * `head_sent` is set only when a `RESP_HEAD` came from the view, so a `5xx`
-///   the scheduler wrote itself — the `502` of a view that never answered, the
-///   `504` of `BLASTIT_REQUEST_TIMEOUT`, a `503` refusal — is not a view
-///   failure and keeps the dispatch→completion charge: it never had the worker
-///   it would have been charged for, and must not pay the queue wait.
+/// * `view_answered` is set only when a `RESP_HEAD` came from the view, so a
+///   `5xx` the scheduler wrote itself — the `502` of a view that never
+///   answered, the `504` of `BLASTIT_REQUEST_TIMEOUT`, a `503` refusal — is not
+///   a view failure and keeps the dispatch→completion charge: it never had the
+///   worker it would have been charged for, and must not pay the queue wait.
+///   `head_sent` cannot say this: `respond` sets that one too, for a head the
+///   scheduler wrote, and a view that bails out *after* the scheduler already
+///   answered that same request must not turn it into the crash bill
+///   (`MB.3.45`).
 /// * `status >= 500` keeps a bailout that still completed its response
 ///   (`echo "…"; exit;` answers `200`) out of the crash rule: the client got
 ///   everything the app produced.
-const fn answered_a_bailout(head_sent: bool, status: u16, bailed: bool) -> bool {
-    head_sent && bailed && status >= 500
+const fn answered_a_bailout(view_answered: bool, status: u16, bailed: bool) -> bool {
+    view_answered && bailed && status >= 500
+}
+
+/// Whether a `DONE` may label a response the scheduler already completed
+/// (`MB.3.45`).
+///
+/// Only a response the **view** answered can carry the handler's own verdict: a
+/// `5xx` the scheduler wrote itself — a `504` timeout, the `502` of a view that
+/// died — is that answer, and a view that finishes afterwards, even with
+/// `DONE { Bailed }`, must not turn it into `bailed` nor into `R19`'s crash
+/// bill. A cancelled request keeps the label it already has for the same reason.
+const fn a_done_may_relabel_a_completed_5xx(
+    view_answered: bool,
+    cancelled: bool,
+    status: u16,
+) -> bool {
+    !cancelled && view_answered && status >= 500
 }
 
 /// The facts one request's charge is decided from (D5, `R19`).
@@ -4324,7 +4492,10 @@ pub async fn run<C: CtlChannel + Send + 'static>(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{Charge, answered_a_bailout, charge_ns, completed_outcome, slot_releasable};
+    use super::{
+        Charge, a_done_may_relabel_a_completed_5xx, answered_a_bailout, charge_ns,
+        completed_outcome, slot_releasable,
+    };
     use blastit_events::Outcome;
 
     /// Design §4.6's table for the one predicate that frees a static slot.
@@ -4500,5 +4671,31 @@ mod tests {
             FLOOR,
             "an under-reporting 200 is still clamped up to the view's first frame"
         );
+    }
+
+    /// `MB.3.45`: a `DONE` may label a completed `5xx` only when the view
+    /// answered it.
+    ///
+    /// The response the scheduler wrote itself — the `504` of a request
+    /// timeout, the `502` of a view that died — is already finished when a live
+    /// view's `DONE { Bailed }` arrives afterwards; relabelling it `bailed`
+    /// would both lie about who answered and let `answered_a_bailout` bill the
+    /// whole arrival→finished wall, queue wait included, instead of the span
+    /// the request held a worker for.
+    #[test]
+    fn a_done_cannot_label_a_5xx_the_scheduler_answered() {
+        // The view answered a `5xx`: its `DONE` decides whether the handler
+        // returned or bailed.
+        assert!(a_done_may_relabel_a_completed_5xx(true, false, 500));
+        assert!(a_done_may_relabel_a_completed_5xx(true, false, 599));
+        // The scheduler wrote the `504`: the view's later `DONE` labels
+        // nothing.
+        assert!(!a_done_may_relabel_a_completed_5xx(false, false, 504));
+        assert!(!a_done_may_relabel_a_completed_5xx(false, false, 502));
+        // The label the client saw is final for a cancelled request, and a
+        // `2xx`/`4xx` is an answer whatever the view's thread did next.
+        assert!(!a_done_may_relabel_a_completed_5xx(true, true, 500));
+        assert!(!a_done_may_relabel_a_completed_5xx(true, false, 200));
+        assert!(!a_done_may_relabel_a_completed_5xx(true, false, 404));
     }
 }

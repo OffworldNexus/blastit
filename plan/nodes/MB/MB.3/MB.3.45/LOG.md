@@ -35,3 +35,23 @@ edited fields
 
 BINDING ITEM 7 (found by MB.3.48, scheduler-only, this node owns it): the required `php-sapi` job can STILL flake until this lands. `supervise.rs:805` pushes `Ctl::Exited` on ctl.chan right after reaping, and `scheduler.rs:1078 -> :3326` fails the in-flight request as `ViewDied` before the view's view.chan frames are read — the very frames (`RESP_HEAD`/`RESP_END_COST`/`DONE{Bailed}`, php.rs:445-465) that a DESIGNED retire writes before exiting. `ViewIn::Closed` is the only ordered trigger today. Reproduced 1 in 20 in the image under 8-spinner load: `outcome: view_died, cost_ns: 0, cpu_ns: null, status: 502, bytes_out: 12, queued_ms: 26.67` — i.e. a request the view ANSWERED is billed as a dead view with no cost. Fix shape (MB.3.48's RESULT f/u 1): make the ordered channel the trigger, or drain view.chan before failing the request as ViewDied. It must be pinned by a scheduler test that a view which writes its frames and then retires is `bailed`/`ok` with its cost, never `view_died` — and that a view which really dies mid-request is still `view_died`.
 Order inside this node is now: item 7 first (it is a random release-blocker), then item 5, then item 4, then item 3, then the three mechanical ones (1, 2, 6).
+
+## 2026-11-15T05:27 [lead]
+
+status ready -> active
+
+## 2026-11-15T05:27 [lead]
+
+attempt 1/3 started
+
+## 2026-11-15T05:27 [lead]
+
+base 88874a4
+
+## 2026-11-15T05:57 [lead]
+
+status active -> review
+
+## 2026-11-15T06:10 [lead]
+
+status review -> done

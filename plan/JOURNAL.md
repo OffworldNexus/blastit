@@ -1610,3 +1610,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T05:20 [MB.3.48] (lead) status active -> review
 - 2026-11-15T05:20 [MB.3.45] (lead) BINDING ITEM 7 (found by MB.3.48, scheduler-only, this node owns it): the required `php-sapi` job can STILL flake until this lands. `supervise.rs:805` pushes `C
 - 2026-11-15T05:26 [MB.3.48] (lead) status review -> done
+- 2026-11-15T05:27 [MB.3.45] (lead) status ready -> active
+- 2026-11-15T05:27 [MB.3.45] (lead) attempt 1/3 started
+- 2026-11-15T05:27 [MB.3.45] (lead) base 88874a4
+- 2026-11-15T05:57 [MB.3.45] (lead) status active -> review
+- 2026-11-15T06:10 [MB.3.45] (lead) status review -> done

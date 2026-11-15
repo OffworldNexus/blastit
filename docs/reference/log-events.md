@@ -37,8 +37,15 @@ and `parts`.
 | `manifest.warning` | the manifest is usable but has a problem | `message` |
 
 `outcome` is one of `ok`, `unmatched`, `queue_full`, `queue_timeout`, `timeout`,
-`view_died`, `client_gone`. `cost_ns` is what the request was charged for fair
-queuing; `cpu_ns` is `null` when the view had no thread clock to report.
+`view_died`, `bailed`, `client_gone`. `bailed` — the handler exited, died or
+fataled out of a `5xx` it had answered; the view process is still alive.
+`cost_ns` is what the request was charged for fair queuing; `cpu_ns` is `null`
+when the view had no thread clock to report. A request the scheduler answered
+itself is charged the time it held a worker — dispatch to completion, never the
+wait it spent in the queue — which is `0` for one that never reached a worker
+at all, like a `503` refusal or a queue timeout. A `5xx` an app answered itself
+is charged like any other answer; only a `5xx` a handler **bailed out of**
+(`bailed`) is charged its whole wall time, arrival to last byte.
 
 ## The three `boot` lines
 

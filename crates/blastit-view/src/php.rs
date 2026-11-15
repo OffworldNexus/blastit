@@ -1899,8 +1899,10 @@ mod tests {
         // `RESP_END_COST`/`DONE`, which is why the half that is asserted is the
         // returned [`ViewError::Protocol`] and the closed peer.
         let ended = handle.join().expect("worker thread");
+        // By type **and** message (`MB.3.45`): a rewording of some other error,
+        // or any other `ViewError` variant, cannot satisfy this.
         assert!(
-            matches!(&ended, Err(err) if err.to_string().contains("RESP_BODY before RESP_HEAD")),
+            matches!(&ended, Err(ViewError::Protocol(msg)) if msg == "RESP_BODY before RESP_HEAD"),
             "a body before the head is the transport's protocol error: {ended:?}"
         );
         let gone = peer.send_to_a_gone_peer(4, Frame::ReqEnd);

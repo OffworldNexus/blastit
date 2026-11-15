@@ -26,6 +26,14 @@
 //! leg carries its accepted twin in the same test: the same frames with a
 //! different `DONE`, or a defined outcome byte, which is what proves the
 //! assertion distinguishes the two cases rather than passing on either.
+//!
+//! `MB.3.45` adds the scheduler's own answers and the order the view's channel
+//! is read in: a `504` the scheduler writes is charged the span the request
+//! held a worker (never the queue wait) and is not relabelled by a `DONE` that
+//! arrives afterwards; and a view that writes its frames and then retires **by
+//! design** is `bailed` with its cost, though init's `Ctl::Exited` may reach the
+//! scheduler first — while a view whose channel closes with nothing written is
+//! still `view_died` (the `MB.3.48` flake).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -35,9 +43,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use blastit_events::{Outcome, RequestInfo};
-use blastit_frame::{DoneOutcome, Frame, RequestCost};
+use blastit_frame::{Ctl, DoneOutcome, ExitStatus, Frame, RequestCost};
 use common::{Options, Script, World, aborted, ended, head, status_of};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 /// What the bailing view says the request cost it: the wall figure `MB.3.38`
 /// quote (a script that dies 18 ms in, claiming 3.2 ms) and the CPU figure next
@@ -52,6 +60,70 @@ const HELD: Duration = Duration::from_millis(18);
 
 /// How long after its response end a view may take to send its `DONE`.
 const LATE_DONE: Duration = Duration::from_millis(10);
+
+/// How long the second route's request waits in the admission queue before the
+/// first route's `DONE` frees the only worker slot.
+const QUEUE_WAIT: Duration = Duration::from_millis(5);
+
+/// The request timeout both worlds run with (`Options::new`).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The two routes the queue-wait legs need: `first`'s view takes the only
+/// worker slot, `second`'s request waits behind it — which is the queue wait a
+/// scheduler-written answer must never bill (`MB.3.45`).
+const TWO_ROUTES: &str = "version = 1\n\
+    [[route]]\nname = \"first\"\npath = [\"/first\"]\n\
+    [route.ingress]\nbody = \"raw\"\nallow_raw = true\n\
+    [[route]]\nname = \"second\"\npath = [\"/second\"]\n\
+    [route.ingress]\nbody = \"raw\"\nallow_raw = true\n";
+
+/// A world whose `first` route answers at once and holds its `DONE` until
+/// [`World::advance`] lets it go, with `second`'s view scripted by `second`.
+///
+/// It returns once `second`'s request has been *dispatched after a queue wait*:
+/// the request that timed out held a worker only from then on.
+async fn queued_second_request(second: Script) -> World {
+    let gate = Arc::new(Notify::new());
+    let mut options = Options::new().manifest(TWO_ROUTES);
+    // One worker slot: `second` cannot run until `first` says `DONE`.
+    options.cfg.max_workers = 1;
+    let mut world = World::start(
+        options
+            .script(
+                0,
+                Script::Gated {
+                    body: b"first".to_vec(),
+                    gate: gate.clone(),
+                },
+            )
+            .script(1, second),
+    );
+
+    world.http.send_request(1, head("GET", "/first"), b"").await;
+    world.until(|world| dispatched(world, 0) == 1).await;
+    eprintln!("DEBUG first dispatched");
+    let first = world.http.response(1).await;
+    assert!(
+        ended(&first),
+        "the slot-holding response is complete, its `DONE` is not: {first:?}"
+    );
+
+    world
+        .http
+        .send_request(2, head("GET", "/second"), b"")
+        .await;
+    world.advance(QUEUE_WAIT).await;
+    assert_eq!(
+        dispatched(&world, 1),
+        0,
+        "the second request is still queued: the only worker slot is held"
+    );
+
+    // The held `DONE` arrives here, at `QUEUE_WAIT`: `second` is dispatched now.
+    gate.notify_one();
+    world.until(|world| dispatched(world, 1) == 1).await;
+    world
+}
 
 /// The report a bailing view sends.
 fn report() -> RequestCost {
@@ -378,5 +450,228 @@ async fn an_out_of_set_done_outcome_takes_the_view_down_where_a_defined_one_comp
         world.log.lock().unwrap().pids.len(),
         1,
         "no process was recycled for an outcome the protocol defines"
+    );
+}
+
+#[tokio::test]
+async fn a_scheduler_written_504_is_charged_before_its_request_event() {
+    tokio::time::pause();
+    // A `504` the scheduler writes is an answer it wrote itself, so its charge
+    // is the span the request held a worker for — dispatch to completion — and
+    // the event that reports the charge has to carry it. Before `MB.3.45` the
+    // emit ran before `release()` charged, so the event said `cost_ns: 0` for
+    // every request the scheduler answered.
+    let world = queued_second_request(Script::Silent).await;
+
+    // Past its own deadline: nothing ever answers it, so the scheduler does.
+    world.advance(REQUEST_TIMEOUT + QUEUE_WAIT).await;
+
+    let timeout = event(&world, "/second").await;
+    assert_eq!(timeout.status(), 504, "the scheduler wrote the timeout");
+    assert_eq!(timeout.outcome(), Outcome::Timeout);
+    assert!(
+        timeout.queued_ms() >= QUEUE_WAIT.as_secs_f64() * 1_000.0,
+        "the request really waited in the queue: {}ms",
+        timeout.queued_ms()
+    );
+    assert!(
+        timeout.cost_ns() > 0,
+        "a scheduler-written 504 held a worker, so its event cannot say 0ns: {}",
+        timeout.cost_ns()
+    );
+    assert!(
+        timeout.cost_ns() >= REQUEST_TIMEOUT.as_nanos() as u64,
+        "the charge is the dispatch→completion span it held: {}ns",
+        timeout.cost_ns()
+    );
+    let wall = event_wall_ns(&timeout);
+    assert!(
+        timeout.cost_ns() <= wall,
+        "{}ns charged for a request the event says lasted {}ns",
+        timeout.cost_ns(),
+        wall
+    );
+    assert!(
+        timeout.cost_ns() < wall,
+        "the {}ms it waited in the queue are not part of the charge: {}ns of {}ns",
+        QUEUE_WAIT.as_millis(),
+        timeout.cost_ns(),
+        wall
+    );
+    assert_eq!(
+        timeout.cpu_ns(),
+        None,
+        "no view reported a CPU time for a request the scheduler answered"
+    );
+}
+
+#[tokio::test]
+async fn a_scheduler_answered_504_stays_out_of_the_bailout_bill() {
+    tokio::time::pause();
+    // The scheduler answered `504`; the request's thread is still alive and
+    // finishes afterwards with `DONE { Bailed }`. A `504` the scheduler wrote is
+    // not a `5xx` a **view** answered: the `bailed` frame must not relabel it,
+    // and must not turn the charge into the `R19` crash bill — the request never
+    // held a worker for its queue wait (`MB.3.45`).
+    let gate = Arc::new(Semaphore::new(0));
+    let mut world = queued_second_request(Script::LateDone {
+        outcome: DoneOutcome::Bailed,
+        gate: gate.clone(),
+    })
+    .await;
+
+    world.advance(REQUEST_TIMEOUT + QUEUE_WAIT).await;
+    let answered = event(&world, "/second").await;
+    assert_eq!(
+        answered.outcome(),
+        Outcome::Timeout,
+        "the answer the scheduler wrote is `timeout`, whatever the view says later"
+    );
+    assert!(
+        answered.cost_ns() > 0,
+        "the scheduler's answer is charged its dispatch→completion span: {}ns",
+        answered.cost_ns()
+    );
+    let wall = event_wall_ns(&answered);
+    assert!(
+        answered.cost_ns() < wall,
+        "the {}ms queue wait is not billed even though the view later bails: {}ns of {}ns",
+        QUEUE_WAIT.as_millis(),
+        answered.cost_ns(),
+        wall
+    );
+
+    // The thread finishes now: the same view says `DONE { Bailed }` for a
+    // request the scheduler already answered, and its slot is freed.
+    gate.add_permits(1);
+    world
+        .until(|world| {
+            world
+                .log
+                .lock()
+                .unwrap()
+                .saw(1, |frame| matches!(frame, Frame::Cancel))
+        })
+        .await;
+    world
+        .http
+        .send_request(3, head("GET", "/second"), b"")
+        .await;
+    world.until(|world| dispatched(world, 1) == 2).await;
+
+    // ... and the event the client's operator reads is unchanged: the `DONE`
+    // labelled nobody, and the charge is still the answer's own.
+    let after = event(&world, "/second").await;
+    assert_eq!(after.outcome(), Outcome::Timeout);
+    assert_eq!(after.cost_ns(), answered.cost_ns());
+}
+
+#[tokio::test]
+async fn a_view_that_answers_then_retires_is_billed_for_its_answer_not_a_death() {
+    tokio::time::pause();
+    // `MB.3.48`'s 1-in-20 `php-sapi` flake: a contained bailout writes
+    // `RESP_HEAD`, `RESP_END_COST` and `DONE { Bailed }`, then retires by
+    // design, and init's `Ctl::Exited` can reach the scheduler on the other
+    // channel before those frames are read. The ordered `view.chan` decides:
+    // the frames win, so the request is `bailed` with its cost — never
+    // `view_died` with no cost.
+    let gate = Arc::new(Notify::new());
+    let mut world = World::start(Options::new().script(
+        0,
+        Script::SilentThenExit {
+            answer: Some((500, report(), DoneOutcome::Bailed)),
+            gate: gate.clone(),
+        },
+    ));
+    world.http.send_request(1, head("GET", "/bail"), b"").await;
+    world.until(|world| dispatched(world, 0) == 1).await;
+    world.advance(HELD).await;
+
+    let pid = world.log.lock().unwrap().pids[0].1;
+    // init reaps the process first. Its channel is still open: the frames the
+    // view wrote are on their way, and failing the request here is the flake.
+    world.ctl_send(Ctl::Exited {
+        route: 0,
+        pid,
+        status: ExitStatus::Signal(9),
+    });
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        world.event_by_path("/bail").is_none(),
+        "a view init only reported gone is not failed before the frames it wrote are read"
+    );
+
+    // Now the view writes its answer and closes, which is the ordered end.
+    gate.notify_one();
+    let frames = world.http.response(1).await;
+    assert_eq!(status_of(&frames), 500, "the head the view wrote");
+    assert!(
+        ended(&frames),
+        "the response the view completed: {frames:?}"
+    );
+    let bailed = event(&world, "/bail").await;
+    assert_eq!(
+        bailed.outcome(),
+        Outcome::Bailed,
+        "a handler that answered a `5xx` and then bailed is `bailed`, not `view_died`"
+    );
+    assert_eq!(bailed.status(), 500);
+    assert_eq!(
+        bailed.cpu_ns(),
+        Some(REPORTED_CPU_NS),
+        "the view's own CPU report travels through: the frame was read"
+    );
+    assert!(
+        bailed.cost_ns() >= HELD.as_nanos() as u64,
+        "the bailout pays the wall it answered at: {}ns",
+        bailed.cost_ns()
+    );
+    assert!(
+        bailed.cost_ns() >= event_wall_ns(&bailed),
+        "{}ns charged for a request the event says lasted {}ns",
+        bailed.cost_ns(),
+        event_wall_ns(&bailed)
+    );
+
+    // The other direction, unchanged: a view that really dies mid-request — its
+    // channel closing with nothing written — is still `view_died`.
+    let gate = Arc::new(Notify::new());
+    let mut world = World::start(Options::new().script(
+        0,
+        Script::SilentThenExit {
+            answer: None,
+            gate: gate.clone(),
+        },
+    ));
+    world.http.send_request(1, head("GET", "/died"), b"").await;
+    world.until(|world| dispatched(world, 0) == 1).await;
+    world.advance(HELD).await;
+    let pid = world.log.lock().unwrap().pids[0].1;
+    world.ctl_send(Ctl::Exited {
+        route: 0,
+        pid,
+        status: ExitStatus::Signal(9),
+    });
+    gate.notify_one();
+
+    let frames = world.http.response(1).await;
+    assert_eq!(
+        status_of(&frames),
+        502,
+        "a view that died before it answered gets the canned `502`: {frames:?}"
+    );
+    let died = event(&world, "/died").await;
+    assert_eq!(
+        died.outcome(),
+        Outcome::ViewDied,
+        "a process that really went away mid-request is still `view_died`"
+    );
+    assert_eq!(died.status(), 502);
+    assert!(
+        died.cost_ns() > 0,
+        "the worker span it held before it died is charged: {}ns",
+        died.cost_ns()
     );
 }

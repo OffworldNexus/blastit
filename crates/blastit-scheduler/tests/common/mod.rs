@@ -124,6 +124,29 @@ pub enum Script {
     /// this is the one way to put a value it does not (`4`) on a `view.chan` —
     /// which only a compromised, or a later, view would send.
     RawDone { status: u16, code: u8 },
+    /// `READY`, then each request is held until `gate` grants it a permit; the
+    /// request is then finished with **only** a `DONE` carrying `outcome`.
+    ///
+    /// This is a request the scheduler answered itself (`expire_requests`
+    /// writes a `504` and cancels the view), whose thread is still alive and
+    /// finishes afterwards — the shape `MB.3.45` has to keep out of the
+    /// bailout bill.
+    LateDone {
+        outcome: DoneOutcome,
+        gate: Arc<Semaphore>,
+    },
+    /// `READY`, then each request is held until `gate` is notified; the channel
+    /// is then closed, after writing the answer if one is given.
+    ///
+    /// With an answer this is `php.rs`'s designed retire: `RESP_HEAD`,
+    /// `RESP_END_COST` and `DONE`, then the process exits — the frames init's
+    /// `Ctl::Exited` may overtake on the other channel (`MB.3.45`). Without
+    /// one it is a view that really died mid-request: the channel closes with
+    /// nothing written.
+    SilentThenExit {
+        answer: Option<(u16, RequestCost, DoneOutcome)>,
+        gate: Arc<Notify>,
+    },
 }
 
 /// What a script wants the view task to do after handling a frame.
@@ -193,6 +216,9 @@ pub struct Log {
     pub retires: Vec<(usize, String)>,
     /// Every process init forked, as `(route, pid)`.
     pub pids: Vec<(usize, u32)>,
+    /// The fake view tasks, with the process init gave them, so a test can stop
+    /// one the way a dead process stops itself (`MB.3.45`).
+    pub handles: Vec<(usize, u32, JoinHandle<()>)>,
 }
 
 impl Log {
@@ -692,7 +718,13 @@ impl World {
                             });
                         init_log.lock().expect("log lock").spawns.push(route);
                         init_log.lock().expect("log lock").pids.push((route, pid));
-                        tokio::spawn(view_task(route, for_view, script, init_log.clone()));
+                        let handle =
+                            tokio::spawn(view_task(route, for_view, script, init_log.clone()));
+                        init_log
+                            .lock()
+                            .expect("log lock")
+                            .handles
+                            .push((route, pid, handle));
                         let std_stream: StdUnixStream =
                             for_scheduler.into_std().expect("std UnixStream");
                         let fd: OwnedFd = std_stream.into();
@@ -760,14 +792,30 @@ impl World {
         let _ = self.ctl.send((message, Some(fd)));
     }
 
-    /// Tells init the view for `route` is gone, the way a crashed process
-    /// would be reaped.
+    /// Tells init the view for `route` is gone, the way a crashed process would
+    /// be reaped: the fake process stops too, so its end of `view.chan` closes
+    /// after whatever it already wrote (`MB.3.45`).
     pub fn ctl_exit(&self, route: usize, pid: u32) {
+        self.stop_view(pid);
         self.ctl_send(Ctl::Exited {
             route: route as u32,
             pid,
             status: ExitStatus::Signal(9),
         });
+    }
+
+    /// Stops the fake view process `pid`, which drops its end of `view.chan` —
+    /// the ordered close a real exit produces.
+    ///
+    /// A test that wants the scheduler to hear about the exit *before* the
+    /// channel closes — the race `Ctl::Exited` can win against `view.chan`, the
+    /// `MB.3.48` flake — sends [`Ctl::Exited`] with [`World::ctl_send`] and
+    /// closes the channel from the script instead.
+    pub fn stop_view(&self, pid: u32) {
+        let log = self.log.lock().expect("log lock");
+        if let Some((_, _, handle)) = log.handles.iter().find(|(_, id, _)| *id == pid) {
+            handle.abort();
+        }
     }
 
     /// Moves the paused clock forward, then lets the scheduler settle.
@@ -1190,6 +1238,29 @@ impl Script {
                     let (status, code) = (*status, *code);
                     send_frame(write, id, &resp_head(status, 0)).await;
                     send_raw_done(write, id, code).await;
+                }
+            }
+            Script::LateDone { outcome, gate } => {
+                if head {
+                    let outcome = *outcome;
+                    // Wait for this request's permit, then report the thread's
+                    // end with no response of its own: the scheduler answered,
+                    // the view only finishes.
+                    if let Ok(permit) = gate.clone().acquire_owned().await {
+                        permit.forget();
+                    }
+                    send_frame(write, id, &Frame::Done { outcome }).await;
+                }
+            }
+            Script::SilentThenExit { answer, gate } => {
+                if head {
+                    gate.notified().await;
+                    if let Some((status, cost, outcome)) = *answer {
+                        send_frame(write, id, &resp_head(status, 0)).await;
+                        send_frame(write, id, &Frame::RespEndCost { cost }).await;
+                        send_frame(write, id, &Frame::Done { outcome }).await;
+                    }
+                    return Step::Close;
                 }
             }
             Script::Deaf { window } => {
