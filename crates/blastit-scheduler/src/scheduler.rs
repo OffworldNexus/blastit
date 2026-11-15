@@ -45,7 +45,10 @@
 //!   [`RetireReason::Other`] (§8.1's reasons are init's: idle, max_requests,
 //!   stuck_threads, memory_pressure, lru_cap).
 //! * A `RESP_ABORT` from a view is reported with the `view_died` outcome, and
-//!   a `DRAIN` rejects new requests with `503`/`queue_full` (the closest of the
+//!   so is a response a view **completed** with a `5xx`: a contained
+//!   `exit()`/`die()`/fatal answers `500` and keeps its worker, but the request
+//!   failed, and §8.1's outcome list is closed and has no "the app failed".
+//! * A `DRAIN` rejects new requests with `503`/`queue_full` (the closest of the
 //!   seven outcomes, which §8.1 closes).
 //! * A scheduler-written body is sent even for a `HEAD` request: deciding not
 //!   to is http's business, not the scheduler's (§2.3).
@@ -97,8 +100,15 @@
 //! it cannot shorten without delaying its own client — **and** the wall time
 //! the scheduler itself observed between dispatch and completion; a request
 //! whose end frame carries no report (an older build, a timeout, a
-//! cancellation, a view that died) charges the observed time instead. The
-//! event keeps both numbers as `cost_ns` (what was charged) and `cpu_ns` (what
+//! cancellation, a view that died) charges the observed time instead. A request
+//! a view **answered** as a **server failure** — a `5xx` whose `RESP_HEAD` came
+//! from the view, which is what a contained `exit()`/`die()`/fatal does — is the
+//! exception: its report is not believed at all and it is charged the request's
+//! own wall time (arrival to last byte), the `R19` ceiling at the one live
+//! thread such a worker has, so a crash-loop can never cost less than the client
+//! waited. A `5xx` the scheduler wrote itself (`502`/`504`/`503`) is not that: no
+//! view answered it, so it keeps the dispatch→completion charge. The event keeps
+//! both numbers as `cost_ns` (what was charged) and `cpu_ns` (what
 //! the worker reported, `null` when it had no thread clock to read), and it is
 //! still emitted when the scheduler learns the request ended — at `RESP_END`
 //! for a response, at release for everything else.
@@ -559,12 +569,14 @@ struct Request {
     flow: Option<FlowRef>,
     /// The view's own measurement of what this request cost it (D5), from the
     /// `RESP_END_COST` frame. Untrusted: [`Scheduler::charge`] clamps it
-    /// between the view's first frame and the time the scheduler observed.
+    /// between the view's first frame and the time the scheduler observed, and
+    /// drops it for a `5xx` — a failing view's report is not evidence.
     report: Option<RequestCost>,
     /// What was charged to the flow for this request, in nanoseconds: the
     /// reported cost clamped between the view's first frame and the observed
-    /// time, or the observed time when there was no report. This is the
-    /// `cost_ns` of the `request` event (§8.1).
+    /// time, the observed time when there was no report, or the request's own
+    /// wall time when the view failed it (`R19`). This is the `cost_ns` of the
+    /// `request` event (§8.1).
     charged_ns: u64,
     /// The flow has been charged for this request. Exactly one of the response
     /// end and the release does it (D5).
@@ -3560,22 +3572,41 @@ impl Scheduler {
         }
     }
 
-    /// What this request cost, and what the flow is charged for it (D5).
+    /// What this request cost, and what the flow is charged for it (D5, `R19`).
     ///
-    /// The cost is the view's own report when there is one, **clamped** into
-    /// `[floor, observed]`, where `observed` is the time the scheduler saw
-    /// between dispatch and completion and `floor` the time up to the view's
-    /// first response frame. Both bounds are the scheduler's own measurements,
-    /// and both are needed because a view process is sandboxed and may be
-    /// compromised: a report that claims more time than the request could
-    /// possibly have taken would let one client buy the whole queue, and a
-    /// report of nothing would let it keep its place at the front for free —
-    /// while the floor is exactly the time the view cannot hide, because
-    /// shortening it means delaying its own client's response.
+    /// For a request a view answered, the cost is the view's own report when
+    /// there is one, **clamped** into `[floor, observed]`, where `observed` is
+    /// the time the scheduler saw between dispatch and completion and `floor`
+    /// the time up to the view's first response frame. Both bounds are the
+    /// scheduler's own measurements, and both are needed because a view process
+    /// is sandboxed and may be compromised: a report that claims more time than
+    /// the request could possibly have taken would let one client buy the whole
+    /// queue, and a report of nothing would let it keep its place at the front
+    /// for free — while the floor is exactly the time the view cannot hide,
+    /// because shortening it means delaying its own client's response.
     ///
     /// With no report — the view crashed, timed out, was cancelled, the client
     /// went away, or the view was built before D5 — the observed time is charged
     /// instead.
+    ///
+    /// A request a view **answered** as a **server failure** (`head_sent` and
+    /// `status >= 500`: a `5xx` a contained bailout answered — `exit()`, `die()`
+    /// or a fatal that `zend_bailout` swallowed) is charged `R19`'s crash/`504`
+    /// ceiling instead, and its report is not believed at all. A failing view is
+    /// exactly the one whose report must not be believed: a script that dies
+    /// 18 ms into a request but says it worked for 3 ms would let a client
+    /// crash-loop for a fifth of its cost. `ceiling = observed_wall_ns *
+    /// max_threads`, and the live thread count of the single-threaded PHP worker
+    /// `ADR-0010` forks is one; no kernel floor can exceed one process's own
+    /// wall time, so `ceiling.max(kernel_floor_ns)` is that wall. The span
+    /// charged is the one the `request` event reports as `duration_ms` —
+    /// arrival to the last byte — so a failed request is always charged at least
+    /// the wall time its client waited. The requirement is a view's own
+    /// `RESP_HEAD` ([`view_answered_a_failure`]): a `5xx` the scheduler wrote
+    /// itself (the `502` of a view that never answered, a `504` timeout, a `503`
+    /// refusal) keeps the old dispatch→completion rule — the view never reported
+    /// anything for it, so there is nothing of its to distrust, and the request
+    /// never had the worker it would have been charged for.
     ///
     /// It is idempotent, and it is called from two places: at the response end
     /// — with the report when the view sent one, with the observed time when it
@@ -3604,10 +3635,18 @@ impl Scheduler {
             // A clock that cannot go backwards still cannot make the floor the
             // ceiling: `clamp` would panic on `floor > observed`.
             .min(observed);
-        let charged = match request.report {
-            Some(report) => report.wall_ns.clamp(floor, observed),
-            None => observed,
-        };
+        // The event's own `duration_ms` span (`arrival` to the last byte), which
+        // is what `R19`'s ceiling is taken from when a view failed the request;
+        // `finished_at` is set before every charge, and `now` is the same
+        // instant the event would fall back to.
+        let finished = request.finished_at.unwrap_or(now);
+        let charged = charge_ns(Charge {
+            reported: request.report.map(|report| report.wall_ns),
+            floor,
+            observed,
+            wall: nanos(finished.saturating_duration_since(request.arrived)),
+            failed: view_answered_a_failure(request.head_sent, request.status),
+        });
         let flow = request.flow;
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.charged_ns = charged;
@@ -3730,7 +3769,9 @@ impl Scheduler {
                     if let Some(request) = self.requests.get_mut(&stream_id) {
                         request.complete = true;
                         if !request.cancelled {
-                            request.outcome = Outcome::Ok;
+                            // Same rule as `view_end`: a `5xx` the view wrote
+                            // was a failed request, never `ok`.
+                            request.outcome = completed_outcome(request.status);
                         }
                     }
                     self.mark_finished(stream_id);
@@ -3810,7 +3851,8 @@ impl Scheduler {
     /// wall time of `serve_request` — the WSGI call, through the iterable's
     /// `close()`, and the frames written back — and the thread's CPU time over
     /// the same span. It is untrusted, so [`Scheduler::charge`] clamps it
-    /// between the view's first frame and the time the scheduler observed.
+    /// between the view's first frame and the time the scheduler observed — and
+    /// ignores it entirely when the response the view completed is a `5xx`.
     ///
     /// A response that streams is charged here, when its stream ends, which is
     /// exactly when the report arrives.
@@ -3835,7 +3877,9 @@ impl Scheduler {
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.complete = true;
             if !request.cancelled {
-                request.outcome = Outcome::Ok;
+                // A contained bailout answers its client a `5xx` and keeps the
+                // worker: the request failed, so it is not `ok`.
+                request.outcome = completed_outcome(request.status);
             }
         }
         self.mark_finished(stream_id);
@@ -3939,6 +3983,71 @@ fn retry_after_seconds(timeout: Duration) -> u64 {
         .as_secs()
         .saturating_add(u64::from(timeout.subsec_nanos() > 0));
     seconds.max(1)
+}
+
+/// The outcome of a response a view completed: `ok`, or — when the status it
+/// wrote is a server failure — `view_died`.
+///
+/// §8.1's outcome list is closed and has no "the app failed", so a response the
+/// view ended with a `5xx` (a contained `exit()`/`die()`/fatal's `500`, and the
+/// `502` a dying view is answered with) is reported as `view_died`, exactly as
+/// [`Scheduler::view_abort`] reports an app that gave up. The label is also the
+/// charge decision (`R19`: a failed request pays its wall time,
+/// [`Scheduler::charge`]), so the two are taken together, never apart.
+fn completed_outcome(status: u16) -> Outcome {
+    if status >= 500 {
+        Outcome::ViewDied
+    } else {
+        Outcome::Ok
+    }
+}
+
+/// Whether a view **answered** this request with a server failure, which is what
+/// `R19` charges the ceiling for.
+///
+/// `head_sent` is the deciding half: it is set only when a `RESP_HEAD` came from
+/// the view, so a `5xx` the scheduler wrote itself — the `502` of a view that
+/// never answered, the `504` of `BLASTIT_REQUEST_TIMEOUT`, a `503` refusal — is
+/// not a view failure and keeps the old dispatch→completion charge. A contained
+/// bailout always qualifies: the shim's `500` travels as a real `RESP_HEAD`
+/// before the worker retires.
+const fn view_answered_a_failure(head_sent: bool, status: u16) -> bool {
+    head_sent && status >= 500
+}
+
+/// The facts one request's charge is decided from (D5, `R19`).
+struct Charge {
+    /// What the view reported (`RESP_END_COST`'s wall time), when it sent one.
+    reported: Option<u64>,
+    /// Dispatch to the view's first response frame.
+    floor: u64,
+    /// Dispatch to completion: the scheduler's own upper bound.
+    observed: u64,
+    /// Arrival to the last byte: the event's `duration_ms`, in nanoseconds.
+    wall: u64,
+    /// A view answered this request with a `5xx`
+    /// ([`view_answered_a_failure`]).
+    failed: bool,
+}
+
+/// What one request is charged, in nanoseconds.
+///
+/// A request a view failed is charged its **wall** time — `R19`'s
+/// `ceiling.max(kernel_floor_ns)`, which is that wall at the one live thread
+/// such a worker has, and which no kernel floor can exceed for one process —
+/// and its report is not believed at all. Everything else keeps the documented
+/// clamp: the report between the view's first frame and the scheduler's own
+/// observation, or the observation when there was no report. The two are decided
+/// by [`view_answered_a_failure`], so a `504` (no view answered) can never be
+/// charged the arrival span.
+fn charge_ns(charge: Charge) -> u64 {
+    if charge.failed {
+        return charge.wall;
+    }
+    match charge.reported {
+        Some(reported) => reported.clamp(charge.floor, charge.observed),
+        None => charge.observed,
+    }
 }
 
 /// The reason phrase and body of a status the scheduler writes itself.
@@ -4148,7 +4257,8 @@ pub async fn run<C: CtlChannel + Send + 'static>(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::slot_releasable;
+    use super::{Charge, charge_ns, completed_outcome, slot_releasable, view_answered_a_failure};
+    use blastit_events::Outcome;
 
     /// Design §4.6's table for the one predicate that frees a static slot.
     ///
@@ -4163,5 +4273,105 @@ mod tests {
         assert!(!slot_releasable(true, true), "(true, true) → false");
         assert!(!slot_releasable(false, false), "(false, false) → false");
         assert!(!slot_releasable(false, true), "(false, true) → false");
+    }
+
+    /// `MB.3.38`: a response a view completed is `ok` only when it is not a
+    /// server failure.
+    ///
+    /// The protected `critical_php_embed.rs` leg can only see this on a host
+    /// with a NTS `libphp`, and `make check` runs on hosts without one, so this
+    /// is the label's only witness in CI. Both directions are asserted: an app
+    /// that answers `2xx` or `4xx` is `ok` (a `404` is a routing answer, not a
+    /// failure), and a `5xx` — the `500` a contained `exit()`/`die()`/fatal
+    /// answers, the `502` a dead view is answered with — is `view_died`, which
+    /// is also what makes `Scheduler::charge` bill it its wall time.
+    #[test]
+    fn a_completed_response_is_ok_unless_the_view_failed_it() {
+        for status in [100, 200, 204, 301, 304, 400, 404, 413] {
+            assert_eq!(
+                completed_outcome(status),
+                Outcome::Ok,
+                "{status} is not a failure"
+            );
+        }
+        for status in [500, 501, 502, 503, 504, 599] {
+            assert_eq!(
+                completed_outcome(status),
+                Outcome::ViewDied,
+                "{status} is a failed request, never `ok`"
+            );
+        }
+    }
+
+    /// `MB.3.38` review, MINOR 1: only a `5xx` **a view answered** is the
+    /// `R19` failure case.
+    ///
+    /// `head_sent` is the flag that says a `RESP_HEAD` came from the view, and
+    /// it is what keeps the scheduler's own `502`/`504`/`503` out of it: a
+    /// timed-out request must not be charged the queue wait it spent before it
+    /// ever reached a worker.
+    #[test]
+    fn only_a_view_answered_5xx_is_a_view_failure() {
+        // A contained bailout: the shim's `500` is a real `RESP_HEAD`.
+        assert!(view_answered_a_failure(true, 500));
+        assert!(view_answered_a_failure(true, 502));
+        // The scheduler's own failures: no view answered them.
+        assert!(!view_answered_a_failure(false, 502), "a dead view's 502");
+        assert!(!view_answered_a_failure(false, 503), "a queue refusal");
+        assert!(!view_answered_a_failure(false, 504), "a request timeout");
+        // A view that answered successfully is not a failure either.
+        assert!(!view_answered_a_failure(true, 200));
+        assert!(!view_answered_a_failure(true, 404));
+    }
+
+    /// `MB.3.38` review, MINOR 1: a `504` and a view-answered `500` are charged
+    /// **differently**, in nanoseconds.
+    ///
+    /// The numbers are one real shape from `critical_php_embed.rs`: `queued_ms`
+    /// ~14.7 of an ~18 ms request, so arrival→last byte (`wall`) is 18 ms while
+    /// dispatch→completion (`observed`) is 3.3 ms.
+    #[test]
+    fn a_view_answered_500_pays_its_wall_and_a_timeout_does_not() {
+        const WALL: u64 = 18_000_000;
+        const OBSERVED: u64 = 3_300_000;
+        const FLOOR: u64 = 3_200_000;
+        // The view answered `500` after reporting 3.2 ms: it pays its wall.
+        assert_eq!(
+            charge_ns(Charge {
+                reported: Some(FLOOR),
+                floor: FLOOR,
+                observed: OBSERVED,
+                wall: WALL,
+                failed: view_answered_a_failure(true, 500),
+            }),
+            WALL,
+            "a contained bailout is charged the 18 ms its client waited, not its 3.2 ms report"
+        );
+        // The same numbers for a `504`: no view answered, so the charge stays
+        // the dispatch→completion span the request actually held a worker for.
+        assert_eq!(
+            charge_ns(Charge {
+                reported: None,
+                floor: FLOOR,
+                observed: OBSERVED,
+                wall: WALL,
+                failed: view_answered_a_failure(false, 504),
+            }),
+            OBSERVED,
+            "a timed-out request keeps the documented clamp, queue wait excluded"
+        );
+        // And the successful path is untouched: a report is clamped, not billed
+        // as the wall.
+        assert_eq!(
+            charge_ns(Charge {
+                reported: Some(1_000_000),
+                floor: FLOOR,
+                observed: OBSERVED,
+                wall: WALL,
+                failed: false,
+            }),
+            FLOOR,
+            "an under-reporting 200 is still clamped up to the view's first frame"
+        );
     }
 }

@@ -1530,3 +1530,17 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T01:34 [MB.3.36] (lead) status active -> review
 - 2026-11-15T01:38 [MB.3.36] (lead) status review -> done
 - 2026-11-15T01:38 [MB.3.13.4] (lead) status active -> done
+- 2026-11-15T01:42 [MB.3.37] (test-curator) created (task) Protected oracle gaps in critical_php_embed: shim inode pin, egress twin, cpu-vs-wall, POST body
+- 2026-11-15T01:42 [MB.3.38] (test-curator) created (task) Charge a contained PHP bailout at least its wall time (epic MB.3.13 acceptance) and assert it
+- 2026-11-15T01:42 [MB.3.39] (test-curator) created (task) CI witness for the real-pair PHP legs: run critical_php_embed + critical_php_backend in php-sapi.yml
+- 2026-11-15T01:42 [MB.3.40] (test-curator) created (task) Production provenance gate for libphp/shim/manifest_dir (R7 + B2-R5) with protected legs
+- 2026-11-15T01:44 [MB.3.38] (lead) status ready -> active
+- 2026-11-15T01:44 [MB.3.38] (lead) attempt 1/3 started
+- 2026-11-15T01:44 [MB.3.38] (lead) base 7d4df458cef3483fa0b3f8d8f4702fda14bca9ab; LEAD DECISION on the open question: the epic's sentence IS the bar — a crashed request must be charged at least i
+- 2026-11-15T01:59 [MB.3.38] (lead) edited fields
+- 2026-11-15T01:59 [MB.3.38] (lead) status active -> review
+- 2026-11-15T02:02 [MB.3.41] (lead) created (task) A completed 5xx must say why it failed: contained bailout vs the app's own 500, and the scheduler's 502/504 must not pay for queue wait
+- 2026-11-15T02:02 [MB.3.39] (lead) status ready -> active
+- 2026-11-15T02:02 [MB.3.39] (lead) attempt 1/3 started
+- 2026-11-15T02:02 [MB.3.39] (lead) base 7d4df458cef3483fa0b3f8d8f4702fda14bca9ab
+- 2026-11-15T02:09 [MB.3.38] (lead) status review -> done

@@ -26,11 +26,16 @@
 //!   `PR_SET_DUMPABLE(0)`, so their maps are `EACCES` to every process —
 //!   including this one — which is asserted rather than assumed;
 //! * **`exit()`/`die()`/a fatal contain themselves in the worker.** One slot,
-//!   two requests: the crash is answered with a `5xx` (never a `200`), carries
-//!   the shim's `cpu_ns` beside the request's wall time, and the next request is
-//!   served by the **only** live worker of that route — a new pid, a direct child
-//!   of init, with the crashed process gone (`workers = 1` caps the slot, and the
-//!   uid is one constant in single-UID `dev`, so it proves nothing).
+//!   two requests: the crash is answered with a `5xx` (never a `200`), is
+//!   charged **at least the wall time its client waited** (`MB.3.13`'s own
+//!   sentence, `R19`'s crash charge at one live thread) and is reported as a
+//!   failed request — `outcome` is never `ok` — and the next request is served
+//!   by the **only** live worker of that route — a new pid, a direct child of
+//!   init, with the crashed process gone (`workers = 1` caps the slot, and the
+//!   uid is one constant in single-UID `dev`, so it proves nothing). A third
+//!   leg spends its 60 ms in `usleep`, so the CPU is a small fraction of the
+//!   wall: a charge taken from `cpu_ns` cannot pass it, which is what makes the
+//!   wall-charge assertion an oracle instead of a tautology.
 //!
 //! **Which outcome is required is decided by [`host_php`], an independent
 //! probe**, exactly as `critical_php_backend.rs` does: raw `std` file access plus
@@ -97,6 +102,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// floor, not a broken measurement (`LESSONS.md`, `MB.3.12`).
 const TICK_FLOOR_NS: u64 = 1_000_000;
 
+/// How much smaller than the wall time a sleeping leg's CPU time must be for a
+/// `cpu_ns`-based charge to be distinguishable from a wall-time one: at least a
+/// twentieth, which a 60 ms `usleep` clears with two orders of magnitude to
+/// spare (`MB.3.38`).
+const CPU_SHARE: u64 = 20;
+
 /// The documented page (`docs/frameworks/php.md`, `ADR-0010` §2): a `[route.php]`
 /// route needs an `entry` and no `BLASTIT_APP`.
 const PHP_MANIFEST: &str = "\
@@ -146,6 +157,24 @@ const FATAL_PHP: &str = "\
 <?php
 for ($i = 0; $i < 500000; $i++) { $x = $i * $i; }
 trigger_error('blastit fatal', E_USER_ERROR);
+";
+
+/// A contained bailout whose wall time is spent **sleeping**, so wall and CPU
+/// cannot be confused: `usleep` parks the process for 60 ms and burns almost no
+/// CPU doing it. A charge taken from `cpu_ns` is therefore a small fraction of
+/// the wall time on this leg (~1/700 measured here), which is what makes
+/// `cost_ns >= wall_ns` an oracle rather than a tautology: the `cpu_ns`-based
+/// rule `MB.3.13.4` compared against fails it by orders of magnitude, not by a
+/// few microseconds.
+///
+/// This is the same clock distinction `LESSONS.md` (`MB.3.12`) records from the
+/// other side: a *fixture* must never use `usleep` when it needs CPU time,
+/// because sleeping spends wall time, not CPU. That is exactly why it is the
+/// right fixture for an assertion about the wall charge.
+const SLEEP_PHP: &str = "\
+<?php
+usleep(60000);
+exit(0);
 ";
 
 // --------------------------------------------------------------- stub ELFs
@@ -1726,11 +1755,11 @@ fn no_libphp_is_mapped_above_the_view_worker() {
 }
 
 /// `exit()` is contained: the worker retires, its slot serves the next request,
-/// and the crashed request is charged CPU time beside its wall time.
+/// and the crashed request is charged **at least its wall time**.
 #[test]
 fn an_exit_is_contained_and_the_next_request_is_served() {
     let _root = StubRootGuard::start();
-    containment(EXIT_PHP, "exit()", "containment-exit");
+    containment(EXIT_PHP, "exit()", "containment-exit", None);
 }
 
 /// The fatal twin: `trigger_error(..., E_USER_ERROR)` reaches `zend_bailout()`,
@@ -1738,13 +1767,30 @@ fn an_exit_is_contained_and_the_next_request_is_served() {
 #[test]
 fn a_fatal_is_contained_and_the_next_request_is_served() {
     let _root = StubRootGuard::start();
-    containment(FATAL_PHP, "fatal", "containment-fatal");
+    containment(FATAL_PHP, "fatal", "containment-fatal", None);
+}
+
+/// The same bailout with almost no CPU in it: 60 ms of `usleep` and an `exit()`.
+///
+/// This is the leg that makes `cost_ns >= wall_ns` an oracle: a charge taken
+/// from `cpu_ns` is a small fraction of the wall time here (this host measures
+/// ~1/700 of it), so it misses the epic's sentence by orders of magnitude rather
+/// than by a rounding error. See [`SLEEP_PHP`].
+#[test]
+fn a_sleeping_bailout_is_charged_its_wall_time_and_not_its_cpu_time() {
+    let _root = StubRootGuard::start();
+    containment(SLEEP_PHP, "usleep()", "containment-sleep", Some(60));
 }
 
 /// One slot, two requests: the crash answers `5xx` with its cost, the next
 /// request is served by a fresh process in the **same** slot — the only live
 /// worker of the route, forked by init, with the crashed one gone.
-fn containment(crash: &str, what: &str, name: &str) {
+///
+/// `sleeps_ms` is set by a leg whose wall time is spent sleeping rather than
+/// computing: it then also asserts that the sleep shows up in the wall time and
+/// that the reported CPU is a small fraction of it, which is what proves the
+/// charge came from the wall and not from the CPU.
+fn containment(crash: &str, what: &str, name: &str, sleeps_ms: Option<u64>) {
     let Some(host) = host_php() else {
         refused_without_a_host(what, name);
         return;
@@ -1787,6 +1833,17 @@ fn containment(crash: &str, what: &str, name: &str) {
         status >= 500,
         "{what}: the crash is reported as a server failure, not success: {event}"
     );
+    // The label and the bill are one decision (`MB.3.38`): a request a view
+    // ended with a `5xx` failed, so §8.1's closed outcome list reports it as
+    // `view_died` — never `ok`, which is what it was before the charge was
+    // fixed.
+    let outcome = event["outcome"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{what}: no outcome: {event}"));
+    assert_ne!(
+        outcome, "ok",
+        "{what}: a {status} bailout is a failed request, not `ok`: {event}"
+    );
     let cpu_ns = event["cpu_ns"]
         .as_u64()
         .unwrap_or_else(|| panic!("{what}: the worker reported no CPU cost: {event}"));
@@ -1807,11 +1864,33 @@ fn containment(crash: &str, what: &str, name: &str) {
         "{what}: a {wall_ns} ns request that reported 0 ns of CPU should have crossed a tick: \
          {event}"
     );
+    // `MB.3.13`'s own sentence: "the crashed request is charged at least its
+    // wall time", where the wall time is the event's `duration_ms` — what the
+    // client waited. `cost_ns >= cpu_ns` was the weaker rule that let an 18 ms
+    // `exit()` be charged 3 ms, so a crash loop cost a fifth of what it spent.
+    // `R19`'s ceiling at the single live thread such a worker has *is* this
+    // wall, and no kernel floor can exceed it.
     assert!(
-        cost_ns > 0 && cost_ns >= cpu_ns,
-        "{what}: the charge must cover the reported CPU time (cost {cost_ns}, cpu {cpu_ns}): \
-         {event}"
+        cost_ns > 0 && cost_ns >= wall_ns,
+        "{what}: a crashed request must be charged at least its wall time (cost {cost_ns}, \
+         wall {wall_ns}, cpu {cpu_ns}): {event}"
     );
+    if let Some(sleep_ms) = sleeps_ms {
+        // The discriminator: the sleep is in the wall time, and the CPU is a
+        // small fraction of it, so a `cpu_ns`-based charge cannot satisfy the
+        // assertion above on this leg.
+        let sleep_ns = sleep_ms.saturating_mul(1_000_000);
+        assert!(
+            wall_ns >= sleep_ns,
+            "{what}: {sleep_ms} ms of sleeping is not in the {wall_ns} ns wall time: {event}"
+        );
+        assert!(
+            cpu_ns.saturating_mul(CPU_SHARE) <= wall_ns,
+            "{what}: the CPU ({cpu_ns} ns) must be at most a {CPU_SHARE}th of the wall \
+             ({wall_ns} ns), or a `cpu_ns`-based charge could not be told from a wall one: \
+             {event}"
+        );
+    }
 
     // The worker retires itself (a clean `0`), which is what lets the supervisor
     // respawn into the same slot instead of treating the crash as a kill.
@@ -1897,8 +1976,9 @@ fn containment(crash: &str, what: &str, name: &str) {
     );
     boot.stop();
     println!(
-        "{what}: status {status}  cpu_ns={cpu_ns}  wall_ns={wall_ns}  cost_ns={cost_ns}  \
-         retired pid {crashed_pid}  respawned pid {second_pid} (ppid {init}) uid {}  live={live:?}",
+        "{what}: status {status}  outcome={outcome}  cpu_ns={cpu_ns}  wall_ns={wall_ns}  \
+         cost_ns={cost_ns}  retired pid {crashed_pid}  respawned pid {second_pid} (ppid {init}) \
+         uid {}  live={live:?}",
         second["uid"]
     );
 }
