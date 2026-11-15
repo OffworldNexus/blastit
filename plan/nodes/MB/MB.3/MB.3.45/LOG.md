@@ -17,3 +17,16 @@ MB.3.46 (the scheduler DONE legs) could only close two of its four legs and foun
 ## 2026-11-15T04:28 [lead]
 
 edited fields
+
+## 2026-11-15T04:36 [lead]
+
+edited fields
+
+## 2026-11-15T04:36 [lead]
+
+Lead scope decision after the body repair: items 4 and 5 are scheduler-accounting legs, and a scheduler harness cannot be built inside `scheduler.rs`'s `#[cfg(test)]` module — the real fixture (a scripted AF_UNIX view, paused clock) is `tests/common/mod.rs`, and the suite that already pins the bailed charge is `tests/critical_charge.rs` (created by MB.3.46, now protected). Both are therefore added to this node's paths: the new legs extend `critical_charge.rs` rather than inventing a second harness, and this node is authorized to edit that protected file for exactly those legs (`critical_guard --node MB.3.45` is the check; do not weaken or delete MB.3.46's three legs, only add).
+Priority inside this node, in order: (1) items 4 and 5, because they are production billing bugs that contradict R19 and ARCHITECTURE.md — fix the seam first (charge before emit or expose the debit; a distinct "a view answered this" bit instead of reusing head_sent) and pin each with a leg; (2) item 3, where narrowing the comment to the paths that do release is acceptable if releasing completed requests in client_cancel is risky, but then say which and file the residue; (3) items 1, 2 and 6, which are mechanical. If items 4 and 5 cannot both land in one attempt, land item 5 (the queue-wait contradiction) first and report the rest, rather than half-fixing the ordering.
+
+## 2026-11-15T04:36 [lead]
+
+edited fields

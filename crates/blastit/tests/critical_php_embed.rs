@@ -45,17 +45,32 @@
 //! refuse with the package sentence. There is no branch on the boot's own exit
 //! status, so a discovery regression cannot pass as "this host has no PHP".
 //!
-//! # CI coverage (`MB.3.13.4` review, follow-up for the CI owner)
+//! # CI coverage (`MB.3.13.4` review, closed by `MB.3.39`)
 //!
-//! `make check` runs on a host without PHP, so every CI run exercises the refusal
-//! branch **only**. The two real-pair legs (`no_libphp_is_mapped_above_the_view_worker`
-//! and the `exit()`/fatal containment legs) need a host with a NTS `libphp` plus
-//! `make php-sapi`; `.github/workflows/php-sapi.yml` is the only job that has
-//! both (its image installs `php8.4-dev` + `libphp8.4-embed` and builds the
-//! shim), but it runs the crate's probe and `make php-sapi-e2e`, never this
-//! suite. Adding `cargo test -p blastit --locked --test critical_php_embed` to
-//! that job (after its shim build) is what would cover them; until then the
-//! containment leg has no CI witness.
+//! `make check` runs on a host without PHP, so the real-pair legs can only take
+//! their refusal branch there. The served half needs a NTS `libphp` plus the
+//! shim, and `.github/workflows/php-sapi.yml`'s `shim` job has both: `make
+//! rs-test-php-image` builds these binaries on the runner (a `--no-run` `cargo
+//! test -p blastit --locked` over `Makefile`'s `PHP_SUITE_ARGS`, i.e. `--test
+//! critical_php_backend --test critical_php_embed`) and runs them in the
+//! `php-sapi-e2e` image against its `libphp8.4.so` and shim. A `guard: the pair
+//! legs must serve, not refuse` step then fails that job if either suite prints
+//! its no-pair line (`refused (no usable libphp + shim on this host` or
+//! `refused: … no usable NTS libphp was found`) or if the served evidence is
+//! missing: `served: HTTP/1.1 200 OK` (the backend suite) and `retired pid …
+//! respawned pid` (the containment leg here). The trigger is `push` or
+//! `pull_request` on `develop` (plus `workflow_dispatch`), so a release-branch
+//! push is not covered; the PR is the gate.
+//!
+//! So this job is the CI witness for `no_libphp_is_mapped_above_the_view_worker`,
+//! the containment legs (`an_exit_is_contained_and_the_next_request_is_served`,
+//! `a_fatal_is_contained_and_the_next_request_is_served`,
+//! `a_sleeping_bailout_is_charged_its_wall_time_and_not_its_cpu_time`),
+//! `a_blocking_script_is_charged_cpu_time_not_wall_time` and
+//! `a_form_body_reaches_the_front_controller` (plus the sibling suite's served
+//! leg), while the stub-refusal and probe legs, the provenance legs and the
+//! `egress` twin run everywhere, and `make rs-test-php` is the same pair legs on
+//! a host that has the pair.
 //!
 //! `cc` is a **hard requirement**: this suite builds its stub ELFs at test time,
 //! so a missing compiler is a failure, never a skip.

@@ -1594,3 +1594,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T04:28 [MB.3.45] (lead) edited fields
 - 2026-11-15T04:28 [MB.3.46] (lead) status ready -> review
 - 2026-11-15T04:33 [MB.3.46] (lead) status review -> done
+- 2026-11-15T04:35 [MB.3.47] (lead) status ready -> active
+- 2026-11-15T04:35 [MB.3.47] (lead) attempt 1/3 started
+- 2026-11-15T04:35 [MB.3.47] (lead) base 36b8aad
+- 2026-11-15T04:36 [MB.3.45] (lead) edited fields
+- 2026-11-15T04:36 [MB.3.45] (lead) Lead scope decision after the body repair: items 4 and 5 are scheduler-accounting legs, and a scheduler harness cannot be built inside `scheduler.rs`'s `#[cfg(t
+- 2026-11-15T04:36 [MB.3.45] (lead) edited fields
+- 2026-11-15T04:37 [MB.3.47] (lead) status active -> review
+- 2026-11-15T04:44 [MB.3.47] (lead) status review -> done
