@@ -288,6 +288,19 @@ egress = true
 entry = \"public/index.php\"
 ";
 
+/// A manifest with **no** `[route.php]` route: the deployment gate has nothing
+/// to authorise, so the boot proceeds exactly as `dev`/`check` do (`MB.3.44`).
+const STATIC_ONLY_MANIFEST: &str = "\
+version = 1
+
+[[route]]
+name = \"docs\"
+path = ['.*']
+
+[route.static]
+root = \"site\"
+";
+
 // --------------------------------------------------------------- stub ELFs
 
 /// The three sources this suite compiles. `BT_CANARY` and `BT_TAG` are `-D`
@@ -3079,6 +3092,16 @@ fn the_deployment_gate_is_invoked_behind_its_sentence() {
         check(&app, &libs)
     );
 
+    // 0. A manifest with no `[route.php]` has nothing to authorise, and a
+    // deployment boots it: the seam says `Ok`, so a caller cannot read a
+    // proceeding manifest as a refusal (`MB.3.44`).
+    assert_eq!(
+        blastit::host::deployment_boot_check(STATIC_ONLY_MANIFEST, &app, &libphp, &libs, 20_000),
+        Ok(()),
+        "a manifest with no [route.php] proceeds through the deployment gate: {:?}",
+        blastit::host::deployment_boot_check(STATIC_ONLY_MANIFEST, &app, &libphp, &libs, 20_000)
+    );
+
     // 1. The tree: the accepted manifest directory, world-writable.
     set_mode(&app, 0o777);
     let err = check(&app, &libs).expect_err("a deployment boot must run the tree authorisation");
@@ -3122,8 +3145,8 @@ fn the_deployment_gate_is_invoked_behind_its_sentence() {
         check(&app, &libs)
     );
     println!(
-        "the deployment gate refused the 0777 tree and the 0777 shim directory, and proceeded \
-         once both were 0755"
+        "the deployment gate proceeded on the manifest with no [route.php], refused the 0777 \
+         tree and the 0777 shim directory, and proceeded once both were 0755"
     );
 }
 

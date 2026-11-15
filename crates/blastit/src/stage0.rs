@@ -936,10 +936,10 @@ fn php_boot_in(
 /// `the_deployment_gate_is_invoked_behind_its_sentence` is the leg that fails,
 /// and without it only this module's unit tests would.
 ///
-/// `Ok(())` is "the gate proceeds"; `Err(message)` is the sentence the boot
-/// refuses with — the same one `php_boot`'s callers print — or, for a manifest
-/// with no `[route.php]` route, a sentence saying so (a deployment treats that
-/// as "absent" and boots).
+/// `Ok(())` is "the gate proceeds" — `Proceed` from the discovery *and* a
+/// manifest with no `[route.php]` route, which a deployment boots like any
+/// other (the gate has nothing to authorise). `Err(message)` is a **refusal**:
+/// the sentence the boot prints, the same one `php_boot`'s callers print.
 ///
 /// Not part of the published API: the only caller is the protected suite, which
 /// reaches it through `blastit::host::deployment_boot_check`.
@@ -962,9 +962,12 @@ pub fn deployment_boot_check(
         manifest_dir: manifest_dir.to_path_buf(),
     };
     match php_boot_in(&manifest, &search, None, Some(&deployment)) {
-        PhpBoot::Proceed(_) => Ok(()),
+        // Nothing to authorise is not a refusal: a manifest with no PHP route
+        // boots (`MB.3.44` — reporting this as an error let a caller read a
+        // *proceeding* manifest as a refused one, the confusion this seam
+        // exists to prevent).
+        PhpBoot::Proceed(_) | PhpBoot::Absent => Ok(()),
         PhpBoot::Refused(message) => Err(message),
-        PhpBoot::Absent => Err("the manifest declares no [route.php] route".to_string()),
     }
 }
 
@@ -1032,9 +1035,13 @@ fn deployment_refusal(
 /// what is wrong with it.
 ///
 /// The test is [`std::fs::metadata`], the same call `host::facts_of` makes, so
-/// "missing" here means exactly the path the provenance check could not inspect
-/// — never a broken symlink, which resolves to the `ENOENT` that sentence is
-/// right about.
+/// "missing" here means exactly the `NotFound` that call reports — which
+/// **includes a dangling symlink** (`metadata` follows the link, and the target
+/// is what the boot would read). That is reported as missing on purpose: it is
+/// the sentence an operator can act on, while "cannot be inspected" would name
+/// the link rather than the file that is absent. Any other errno — `EACCES`, a
+/// symlink loop — is *not* missing and stays with the provenance sentence,
+/// which is the one that can say what is wrong with the path.
 fn missing_claim(claim: &Claim) -> Option<String> {
     let missing = matches!(
         std::fs::metadata(&claim.path),
@@ -4802,6 +4809,20 @@ root = \"site\"
             "a path that is not there is not an unreadable one: {message}"
         );
 
+        // 3. A **dangling symlink** is the same answer, and that is what
+        // `fs::metadata` means by `NotFound`: it follows the link, so the file
+        // the boot would read is the one that is not there.
+        let dangling = protected.dir.join("public/dangling.php");
+        std::os::unix::fs::symlink(protected.dir.join("public/gone.php"), &dangling)
+            .expect("a dangling symlink");
+        let message = refuse(&source("public/dangling.php", "site"));
+        assert!(
+            message.contains("public/dangling.php") && message.contains("is missing"),
+            "a dangling symlink is missing, not unreadable: {message}"
+        );
+        assert!(!message.contains("cannot be inspected"), "{message}");
+        std::fs::remove_file(&dangling).unwrap();
+
         // And the same manifest with both paths created is what a deployment
         // boots, so the two refusals are the missing path and nothing else.
         std::fs::create_dir_all(&site).unwrap();
@@ -4817,6 +4838,74 @@ root = \"site\"
                 PhpBoot::Proceed(_)
             ),
             "the same manifest with both paths there is what a deployment boots"
+        );
+    }
+
+    /// The seam's contract (`MB.3.44`): `Ok(())` is "the gate proceeds" and
+    /// `Err` is a **refusal**.
+    ///
+    /// A deployment whose manifest declares no `[route.php]` route has no pair
+    /// and no entry to authorise — `php_boot_in` answers `Absent` and the boot
+    /// proceeds, exactly as `dev`/`check` do. Mapping that to `Err` let a caller
+    /// read a *proceeding* manifest as a refused one, which is the confusion the
+    /// seam exists to prevent, so both arms are pinned here.
+    #[test]
+    fn the_deployment_seam_proceeds_on_an_absent_gate_and_refuses_a_bad_pair() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let protected = protected_scratch("seam");
+        std::fs::create_dir_all(protected.dir.join("public")).unwrap();
+        let entry = protected.dir.join("public/index.php");
+        std::fs::write(&entry, b"<?php echo 1;\n").unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _pair = stub_pair(&protected);
+        let libphp = protected.dir.join("libphp8.4.so");
+
+        // 1. No `[route.php]`: nothing to authorise, so the boot proceeds.
+        let static_only = "\
+version = 1
+
+[[route]]
+name = \"docs\"
+path = ['.*']
+
+[route.static]
+root = \"site\"
+";
+        assert_eq!(
+            deployment_boot_check(static_only, &protected.dir, &libphp, &protected.dir, 20_000),
+            Ok(()),
+            "a manifest with no [route.php] proceeds through the deployment gate"
+        );
+
+        // 2. A refused pair still produces `ADR-0010` §4.1's sentence, so arm 1
+        // is not passing because the seam never looks.
+        let shared = Scratch::new("seam-shared");
+        std::fs::set_permissions(&shared.dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let writable = shared.file("libphp8.4.so", &shared_object(&["executor_globals"]));
+        shared.file(&shim_name(PhpVersion::new(8, 4)), &shared_object(&[]));
+        let message =
+            deployment_boot_check(PHP_ONLY, &protected.dir, &writable, &shared.dir, 20_000)
+                .expect_err("a pair another uid could replace must refuse the boot");
+        assert!(
+            message.contains("could be replaced by another uid"),
+            "{message}"
+        );
+        assert!(
+            message.contains("install the PHP embed package"),
+            "{message}"
+        );
+        assert!(
+            message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
+            "{message}"
+        );
+
+        // 3. And the accepted pair at 0755 is `Ok`, so the refusal above is the
+        // permission bits and nothing else.
+        assert_eq!(
+            deployment_boot_check(PHP_ONLY, &protected.dir, &libphp, &protected.dir, 20_000),
+            Ok(()),
+            "a 0755 pair owned by init's uid is what a deployment boots"
         );
     }
 

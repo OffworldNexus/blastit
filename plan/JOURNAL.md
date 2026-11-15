@@ -1575,3 +1575,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T03:26 [MB.3.43] (lead) status active -> review
 - 2026-11-15T03:29 [MB.3.43] (lead) edited fields
 - 2026-11-15T03:29 [MB.3.43] (lead) status review -> done
+- 2026-11-15T03:31 [MB.3.44] (lead) created (task) The deployment-gate seam must not report a proceeding manifest as a refusal
+- 2026-11-15T03:31 [MB.3.44] (lead) status ready -> active
+- 2026-11-15T03:31 [MB.3.44] (lead) attempt 1/3 started
+- 2026-11-15T03:31 [MB.3.44] (lead) base 304c5b1
+- 2026-11-15T03:37 [MB.3.44] (lead) status active -> review
+- 2026-11-15T03:41 [MB.3.44] (lead) status review -> done
