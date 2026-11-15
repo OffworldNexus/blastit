@@ -30,3 +30,23 @@ Reviewer PASS on attempt 4 with six MINORs, all folded here rather than fixed tw
 5. `RESULT.md:157-160` — "the gate and the release body cannot drift apart" still implies CHANGELOG prints it, and "only places it is printed" contradicts the H-009 quote in the same sentence → "the gate and `--summary`".
 6. `NODE.md:120-129` Notes still say php.md is "not in `paths`" and "only the first three" — strike both; frontmatter now lists php.md and crates/blastit/tests/**.
 Also: `make docs-unit`'s vocabulary scan is tree-wide (`test_docs_assets.py:802`, `FALLBACK_TERM:197`) and it flags "fallback" in live node bodies — MB.3.59's body used it, so this command must run before any commit that adds a node body.
+
+## 2026-11-15T18:25 [lead]
+
+status ready -> active
+
+## 2026-11-15T18:25 [lead]
+
+attempt 1/3 started
+
+## 2026-11-15T18:25 [lead]
+
+base 0204266
+
+## 2026-11-15T19:22 [lead]
+
+status active -> review
+
+## 2026-11-15T19:34 [lead]
+
+status review -> done

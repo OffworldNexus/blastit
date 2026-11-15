@@ -156,9 +156,9 @@ once the aarch64 gnu legs run; 0 leg(s) dropped
 ```
 
 `--check` and `--summary` print that sentence **verbatim** (one `reaches_sentence()`, so the gate and
-the release body cannot drift apart). Those two commands and this RESULT are the only places it is
-printed: `scripts/release-notes.sh` emits `CHANGELOG.md`, which has no `reaches` line, and
-`plan/HUMAN.md`'s H-009 note quotes it for the owner.
+`--summary` cannot drift apart). The two commands are the only places the gate prints it; this
+RESULT quotes it for the record, and `plan/HUMAN.md`'s H-009 note quotes it for the owner.
+`scripts/release-notes.sh` emits `CHANGELOG.md`, which has no `reaches` line.
 
 * **8.2 (gnu and musl) is refused**, measured in both legs' own images: `libphp8.2` exports no
   `php_version`, and `crates/blastit-php-sapi/src/loader.rs` resolves it before `php_module_startup`,

@@ -506,9 +506,9 @@ def test_platform_matrix_cases() -> int:
         text = pm.read_text(encoding="utf-8")
         reason = (
             '        "suites_because": (\n'
-            '            "the Alpine leg builds the shim and the probe (both musl) but not the "\n'
-            '            "worker-level suites: they need libclang to compile `blastit`, and the "\n'
-            '            "musl half of `MB.3.39` is unchanged scope"\n'
+            '            "PHP 8.2\'s `libphp82` exports no `php_version`, so stage 0 refuses the "\n'
+            '            "pair (`MB.3.59` measured the sentence in this image); the shim and its "\n'
+            '            "real-load probe still build and run"\n'
             "        ),\n"
         )
         _expect(reason in text, "the matrix fixture no longer carries the musl reason")

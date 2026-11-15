@@ -138,16 +138,15 @@ PHP_BUILDS = {
         # `libphpXY.so` at `/usr/lib`, 8.4 installs `/usr/lib/php84/libphp.so`.
         "libphp": "/usr/lib/libphp82.so",
         "suites": False,
-        # Two facts, because one sentence used to blame only the toolchain: the
-        # Alpine image carries no libclang (so it does not build `blastit`), and
-        # PHP 8.2's `libphp82` exports no `php_version`, which `loader.rs`
-        # requires — the boot refuses this pair wherever it runs (measured by
-        # `MB.3.58` in this image).
+        # PHP 8.2's `libphp82` exports no `php_version`, which blastit's stage-0
+        # gate requires before it can choose a shim (measured by `MB.3.58` and
+        # `MB.3.59` in this image) — so the pair is refused wherever it runs and
+        # the worker-level suites would only take their refusal branch. The shim
+        # and its real-load probe still build and run.
         "suites_because": (
-            "the Alpine image builds no `blastit` (no libclang) and PHP 8.2's "
-            "`libphp82` exports no `php_version`, which blastit's stage-1 loader "
-            "requires — `MB.3.58` measured the refusal in this image; the shim "
-            "and its real-load probe still build and run"
+            "PHP 8.2's `libphp82` exports no `php_version`, so stage 0 refuses the "
+            "pair (`MB.3.59` measured the sentence in this image); the shim and its "
+            "real-load probe still build and run"
         ),
     },
     ("8.3", "musl"): {
@@ -156,12 +155,9 @@ PHP_BUILDS = {
         "embed": "php83-embed",
         "curl": "php83-curl",
         "libphp": "/usr/lib/libphp83.so",
-        "suites": False,
-        "suites_because": (
-            "the Alpine leg builds the shim and the probe (both musl) but not the "
-            "worker-level suites: they need libclang to compile `blastit`, and the "
-            "musl half of `MB.3.39` is unchanged scope"
-        ),
+        # `MB.3.59`: the boot resolves 8.3 from Alpine's packed name, so the
+        # worker-level suites run in the image that built the shim.
+        "suites": True,
     },
     ("8.4", "musl"): {
         "base": "alpine:3.21",
@@ -169,12 +165,9 @@ PHP_BUILDS = {
         "embed": "php84-embed",
         "curl": "php84-curl",
         "libphp": "/usr/lib/php84/libphp.so",
-        "suites": False,
-        "suites_because": (
-            "the Alpine leg builds the shim and the probe (both musl) but not the "
-            "worker-level suites: they need libclang to compile `blastit`, and the "
-            "musl half of `MB.3.39` is unchanged scope"
-        ),
+        # `MB.3.59`: the boot resolves 8.4 from the per-minor directory, so the
+        # worker-level suites run in the image that built the shim.
+        "suites": True,
     },
 }
 
@@ -226,9 +219,9 @@ PROVEN: dict[tuple, str] = {
 #            distro's own package path — what the install docs tell a user to do
 #   refused  a boot refused the pair; the sentence and its cause are measured
 #
-# `served` is the support statement: 2 of the 12 declared shims are served today
-# (4 once the aarch64 gnu legs run), so the docs may say "PHP 8.3/8.4 on
-# glibc" and must not say "PHP 8.3/8.4 anywhere".
+# `served` is the support statement: 4 of the 12 declared shims are served today
+# (8 once the aarch64 legs run), so the docs may say "PHP 8.3/8.4 anywhere" and
+# must not say "PHP 8.2 anywhere".
 SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
     ("8.4", "gnu", "x86_64"): (
         "served",
@@ -242,28 +235,29 @@ SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
     ),
     ("8.2", "gnu", "x86_64"): (
         "refused",
-        "measured by MB.3.58: Debian bookworm's `libphp8.2` exports no "
-        "`php_version`, so the worker's `dlopen` of the shim fails with "
-        "`Symbol not found: php_version` and the boot refuses the pair; the "
-        "real-load probe still serves",
+        "measured by MB.3.59: Debian bookworm's `libphp8.2` exports no "
+        "`php_version`, so stage 0 refuses the pair naming the missing symbol "
+        "(a `libphp` fact, not a naming one); the real-load probe still serves",
     ),
     ("8.4", "musl", "x86_64"): (
-        "probed",
-        "measured by MB.3.58: the probe serves 200, and `blastit dev` serves "
-        "`GET / → app 200` when `BLASTIT_LIBPHP` names a *versioned* file — "
-        "Alpine's own `/usr/lib/php84/libphp.so` carries no major.minor, so the "
-        "boot refuses it (`no shim can be chosen`)",
+        "served",
+        "measured by MB.3.59 in the `alpine:3.21` image: with `BLASTIT_LIBPHP` "
+        "unset the boot reaches `/usr/lib/php84/libphp.so` through the per-minor "
+        "directory and serves `GET / → app 200`; `critical_php_backend` and "
+        "`critical_php_embed` pass in the same image",
     ),
     ("8.3", "musl", "x86_64"): (
-        "probed",
-        "as 8.4: probe 200, `blastit dev` 200 with a versioned `BLASTIT_LIBPHP`, "
-        "refused with Alpine's own `/usr/lib/libphp83.so`",
+        "served",
+        "measured by MB.3.59 in the `alpine:3.21` image: with `BLASTIT_LIBPHP` "
+        "unset the boot reaches `/usr/lib/libphp83.so` through the packed name "
+        "and serves `GET / → app 200`; both protected suites pass in the same "
+        "image",
     ),
     ("8.2", "musl", "x86_64"): (
         "refused",
-        "measured by MB.3.58 in `alpine:3.20`: `the loaded images have no "
-        "php_version: Symbol not found`, and `/usr/lib/libphp82.so` names no "
-        "major.minor either",
+        "measured by MB.3.59 in `alpine:3.20`: `/usr/lib/libphp82.so` exports no "
+        "`php_version`, so stage 0 refuses it naming the missing symbol; the shim "
+        "and its real-load probe still build and run",
     ),
 }
 REACHES = ("built", "probed", "served", "refused")
@@ -402,7 +396,7 @@ def reaches_sentence() -> str:
         f"{counts['unbuilt']} unbuilt"
     )
     if prospective > counts["served"]:
-        sentence += f"; {prospective} served once the aarch64 gnu legs run"
+        sentence += f"; {prospective} served once the aarch64 legs run"
     return sentence
 
 

@@ -640,13 +640,13 @@ impl Config {
 
 /// The PHP version a host `libphp` is, `major.minor` (`ADR-0010` §3).
 ///
-/// Stage 0 derives it from the object it opened — its file name, or the name
-/// its descriptor resolves to — because the alternative (calling
-/// `php_version()`) is a `dlopen`, and a `dlopen` in stage 0 is exactly what
-/// `ADR-0010` §3 forbids. It is therefore *what the file says it is*, and the
-/// `(major, minor)` is checked against the shim's own `blastit_php_minor()`
-/// again in stage 1, where a wrong guess becomes a refusal rather than a
-/// crash.
+/// Stage 0 derives it statically from the object it opened — its file name, its
+/// per-minor directory, or the compile-time version string the object carries —
+/// because the alternative (calling `php_version()`) is a `dlopen`, and a
+/// `dlopen` in stage 0 is exactly what `ADR-0010` §3 forbids. It is therefore
+/// *what the file says it is*, and the `(major, minor)` is checked against the
+/// shim's own `blastit_php_minor()` again in stage 1, where a wrong answer
+/// becomes a refusal rather than a crash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PhpVersion {
     major: u8,
@@ -660,21 +660,58 @@ impl PhpVersion {
         Self { major, minor }
     }
 
-    /// The version a `libphp` file name states: `libphp8.4.so`, `libphp-8.4.so`,
-    /// or a soname such as `libphp8.4.so.0`.
+    /// The version a `libphp` file name states, in every spelling a distro
+    /// ships: `libphp8.4.so`, `libphp-8.4.so`, a soname such as
+    /// `libphp8.4.so.0`, and the **packed** name Alpine's 8.3 package installs
+    /// — `libphp83.so` (`MB.3.59`; Alpine's 8.4 states the minor in its
+    /// `/usr/lib/php84` directory instead).
     ///
-    /// `None` for a name that carries no version (`libphp.so`), which is a
-    /// refusal rather than a guess: the shim is chosen by this number.
+    /// The packed form needs exactly two digits before the first dot, so
+    /// `libphp8.so` (major only) and `libphp841.so` are still `None`. `None`
+    /// for a name that carries no version (`libphp.so`): the shim is chosen by
+    /// this number, and stating nothing is a refusal rather than a guess.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         let name = name.rsplit('/').next()?;
         let rest = name.strip_prefix("libphp")?;
         let rest = rest.strip_prefix('-').unwrap_or(rest);
-        let (major, rest) = rest.split_once('.')?;
-        let minor = rest.split(|c: char| !c.is_ascii_digit()).next()?;
-        let major = major.parse::<u8>().ok()?;
-        let minor = minor.parse::<u8>().ok()?;
-        Some(Self { major, minor })
+        let mut parts = rest.split('.');
+        let first = parts.next()?;
+        let second = parts.next();
+        let major_is_digits = !first.is_empty() && first.bytes().all(|b| b.is_ascii_digit());
+        if let (Some(second), true) = (second, major_is_digits)
+            && let Some(minor) = digits_prefix(second)
+        {
+            return Some(Self {
+                major: first.parse().ok()?,
+                minor,
+            });
+        }
+        Self::packed(first)
+    }
+
+    /// The version `php84` (Alpine's per-minor directory) or the digits of a
+    /// packed file name state: exactly two ASCII digits, `major` then `minor`.
+    ///
+    /// `None` for anything else — `php`, `php8`, `php844`, `20240924` — so a
+    /// directory that is not per-minor never becomes a version.
+    #[must_use]
+    pub fn packed(digits: &str) -> Option<Self> {
+        let bytes = digits.as_bytes();
+        if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        Some(Self {
+            major: bytes.first()?.checked_sub(b'0')?,
+            minor: bytes.get(1)?.checked_sub(b'0')?,
+        })
+    }
+
+    /// The version a path component states when it is a per-minor directory:
+    /// `php84` (Alpine's `/usr/lib/php84`), `php83`.
+    #[must_use]
+    pub fn parse_directory(component: &str) -> Option<Self> {
+        Self::packed(component.strip_prefix("php")?)
     }
 
     /// The major version.
@@ -712,6 +749,18 @@ impl PhpVersion {
     }
 }
 
+/// The leading decimal run of `text`, as a byte value (`"4.27"` -> `4`).
+///
+/// One component only: a dotted version's minor is the run before the next
+/// dot, and a run that does not fit a `u8` is not a version this build states.
+fn digits_prefix(text: &str) -> Option<u8> {
+    let run = text.split(|c: char| !c.is_ascii_digit()).next()?;
+    if run.is_empty() {
+        return None;
+    }
+    run.parse().ok()
+}
+
 /// What stage 0 resolved for `[route.php]` before a listener was bound
 /// (`ADR-0010` §3).
 ///
@@ -728,7 +777,8 @@ pub struct PhpRuntime {
     pub dev: u64,
     /// `st_ino` of that inode.
     pub ino: u64,
-    /// The version the file name states (see [`PhpVersion`]).
+    /// The version the resolved library is: from its file name, its per-minor
+    /// directory, or its own compile-time version string (see [`PhpVersion`]).
     pub version: PhpVersion,
     /// The absolute path of the shim for `(version, target arch, target libc)`.
     pub shim: PathBuf,
@@ -4359,6 +4409,10 @@ mod php_settings {
             ("libphp-8.4.so", PhpVersion::new(8, 4)),
             ("libphp8.3.so", PhpVersion::new(8, 3)),
             ("libphp8.4.so.0", PhpVersion::new(8, 4)),
+            // Alpine's packed names and per-minor directories (`MB.3.59`).
+            ("libphp83.so", PhpVersion::new(8, 3)),
+            ("libphp84.so", PhpVersion::new(8, 4)),
+            ("/usr/lib/libphp83.so", PhpVersion::new(8, 3)),
             (
                 "/usr/lib/x86_64-linux-gnu/libphp8.2.so",
                 PhpVersion::new(8, 2),
@@ -4368,6 +4422,21 @@ mod php_settings {
         }
         for name in ["libphp.so", "libphp8.so", "php8.4.so", "libphp.so.8"] {
             assert_eq!(PhpVersion::parse(name), None, "{name}");
+        }
+        // A packed spelling is exactly two digits, never a run of them.
+        assert_eq!(PhpVersion::parse("libphp841.so"), None);
+        for (component, expected) in [
+            ("php84", PhpVersion::new(8, 4)),
+            ("php83", PhpVersion::new(8, 3)),
+        ] {
+            assert_eq!(
+                PhpVersion::parse_directory(component),
+                Some(expected),
+                "{component}"
+            );
+        }
+        for component in ["php", "php8", "php844", "php84x", "20240924"] {
+            assert_eq!(PhpVersion::parse_directory(component), None, "{component}");
         }
         assert_eq!(PhpVersion::new(8, 4).dotted(), "8.4");
         assert_eq!(PhpVersion::new(8, 4).number(), "84");

@@ -38,24 +38,24 @@ $ uv tool install blastit
 ```
 
 Blastit embeds the host's NTS `libphp` — `libphp-embed` on Debian/Ubuntu, `php84-embed`
-on Alpine, `php-embedded` on Fedora/RHEL — or `BLASTIT_LIBPHP` names one. Installing that
-package (`apt install libphp-embed php-pgsql`) is the one privileged step for PHP itself;
-Blastit never writes `/etc`. Without it the boot stops before it binds and names the
-package: it is not a degraded mode.
+(or `php83-embed`) on Alpine, `php-embedded` on Fedora/RHEL — or `BLASTIT_LIBPHP` names
+one. Installing that package (`apt install libphp-embed php-pgsql`) is the one privileged
+step for PHP itself; Blastit never writes `/etc`. Without it the boot stops before it binds
+and names the package: it is not a degraded mode.
 
-The supported versions are PHP **8.3 and 8.4**; 8.2 is built but not served, because its embed
-package (`libphp8.2-embed` on Debian 12, `php82-embed` on Alpine 3.20, which ships `libphp82`)
-exports no `php_version` for Blastit to read.
+The supported versions are PHP **8.3 and 8.4**. 8.2 is not supported yet: its package
+(`libphp8.2-embed` on Debian 12, `php82-embed` on Alpine 3.20) ships no `php_version`
+symbol for Blastit to read — a host-package fact, not a Blastit bug.
 
-Alpine's packaged libraries state no version in their names (`libphp83.so`,
-`/usr/lib/php84/libphp.so`), so the boot refuses them with `no shim can be chosen`. Install each
-under a versioned name that matches **its own** minor —
-`install -m 0644 /usr/lib/libphp83.so /usr/local/lib/libphp8.3.so` for 8.3,
-`install -m 0644 /usr/lib/php84/libphp.so /usr/local/lib/libphp8.4.so` for 8.4 — root-owned,
-`0644`, in a directory no other uid can write (`/usr/local/lib`, never `/tmp`), and set
-`BLASTIT_LIBPHP` to that path. A copy whose name claims a different minor than the library is
-refused: the shim is built for the minor the name states, the library reports its own, and the two
-have to agree.
+The boot reads the minor from the distro's own package, so the install is enough. It
+understands the dotted names (`libphp8.4.so`, `libphp-8.4.so`), Alpine's packed
+`libphp83.so`, and the per-minor directory (`/usr/lib/php84/libphp.so`), and it looks
+where each distro installs. A library whose path states one minor and whose own bytes
+state another is refused before the first request, with both named.
+
+To use a library the distro did not install, put a root-owned `0644` copy in
+`/usr/local/lib` (or `/usr/local/lib/php84`), never `/tmp`: the copy is enough. Set
+`BLASTIT_LIBPHP` only if it lives elsewhere — it must be an absolute path.
 
 ## 2. Static assets
 

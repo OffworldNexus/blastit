@@ -1824,3 +1824,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-15T18:06 [MB.3.59] (lead) Lead: paths re-applied — the planner's body rewrite wrote its own (stale) frontmatter back over my earlier edit, which is the two-writers-on-one-file hazard thi
 - 2026-11-15T18:23 [MB.3.59] (lead) Reviewer PASS on attempt 4 with six MINORs, all folded here rather than fixed twice — this node's discovery fix will rewrite `docs/frameworks/php.md`'s passage 
 - 2026-11-15T18:23 [MB.3.58] (lead) status active -> done
+- 2026-11-15T18:25 [MB.3.59] (lead) status ready -> active
+- 2026-11-15T18:25 [MB.3.59] (lead) attempt 1/3 started
+- 2026-11-15T18:25 [MB.3.59] (lead) base 0204266
+- 2026-11-15T18:33 [MB.3.60] (lead) created (task) The standalone archive must not need the runner's glibc, and check-exec-env must pull before it reads
+- 2026-11-15T18:33 [MB.3.60] (lead) Queued behind MB.3.59 (one gate owner at a time). Owner's report requirement: after the fix, report the floor each archive actually needs (readelf --version-inf
+- 2026-11-15T19:22 [MB.3.59] (lead) status active -> review
+- 2026-11-15T19:34 [MB.3.59] (lead) status review -> done

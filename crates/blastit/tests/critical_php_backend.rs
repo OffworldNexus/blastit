@@ -170,6 +170,13 @@ fn host_php() -> Option<HostPhp> {
     if !contains(&bytes, b"executor_globals") || contains(&bytes, b"tsrm_startup") {
         return None;
     }
+    // PHP 8.2 and earlier export no `php_version` — the symbol the worker
+    // resolves before `php_module_startup` — so a boot refuses them in stage 0
+    // (`MB.3.59`). The exact name needs its NUL: `php_version_compare` exists
+    // in every version and must not count as the symbol.
+    if !contains(&bytes, b"php_version\0") {
+        return None;
+    }
     let (major, minor) = minor_of(&libphp)?;
     let shim = shim_path(major, minor)?;
     Some(HostPhp { libphp, shim })
@@ -183,19 +190,27 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 /// `BLASTIT_LIBPHP` when it is a file, else the distro's fixed names, newest
-/// first, in the multi-arch directories (`ADR-0010` §3) — the resolved path.
+/// first, in the library directories (`ADR-0010` §3) — the resolved path.
+///
+/// The names and directories are the ones `blastit` itself looks in, including
+/// Alpine's packed `libphp83.so` and its per-minor `/usr/lib/php84`
+/// (`MB.3.59`), so this probe and the boot cannot disagree about a host with
+/// the distro's own package.
 fn libphp_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("BLASTIT_LIBPHP") {
         let path = PathBuf::from(path);
         return path.is_file().then(|| path.canonicalize().ok()).flatten();
     }
-    const NAMES: [&str; 7] = [
+    const NAMES: [&str; 10] = [
         "libphp8.4.so",
         "libphp-8.4.so",
+        "libphp84.so",
         "libphp8.3.so",
         "libphp-8.3.so",
+        "libphp83.so",
         "libphp8.2.so",
         "libphp-8.2.so",
+        "libphp82.so",
         "libphp.so",
     ];
     let triplet = format!("{}-linux-gnu", std::env::consts::ARCH);
@@ -203,8 +218,14 @@ fn libphp_path() -> Option<PathBuf> {
         format!("/usr/lib/{triplet}"),
         "/usr/lib64".to_string(),
         "/usr/lib".to_string(),
+        "/usr/lib/php84".to_string(),
+        "/usr/lib/php83".to_string(),
+        "/usr/lib/php82".to_string(),
         format!("/usr/local/lib/{triplet}"),
         "/usr/local/lib".to_string(),
+        "/usr/local/lib/php84".to_string(),
+        "/usr/local/lib/php83".to_string(),
+        "/usr/local/lib/php82".to_string(),
     ];
     NAMES
         .iter()
@@ -213,11 +234,45 @@ fn libphp_path() -> Option<PathBuf> {
         .and_then(|path| path.canonicalize().ok())
 }
 
-/// The `(major, minor)` a `libphp<name>` states: `libphp8.4.so`,
-/// `libphp-8.4.so`, `libphp8.4.so.0`.
+/// The `(major, minor)` the path states: a dotted name (`libphp8.4.so`,
+/// `libphp-8.4.so`), a packed name (`libphp83.so`), or a per-minor directory
+/// (`/usr/lib/php84`, `MB.3.59`).
 fn minor_of(path: &Path) -> Option<(u32, u32)> {
-    let name = path.file_name()?.to_str()?.strip_prefix("libphp")?;
-    let mut rest = name.strip_prefix('-').unwrap_or(name);
+    if let Some(name) = path.file_name().and_then(|name| name.to_str())
+        && let Some(dotted) = dotted_of(name)
+    {
+        return Some(dotted);
+    }
+    let packed = |component: &str| -> Option<(u32, u32)> {
+        let rest = component
+            .strip_prefix("libphp")
+            .or_else(|| component.strip_prefix("php"))?;
+        let stem = rest.split('.').next()?;
+        let bytes = stem.as_bytes();
+        if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        Some((
+            u32::from(bytes.first()? - b'0'),
+            u32::from(bytes.get(1)? - b'0'),
+        ))
+    };
+    if let Some(name) = path.file_name().and_then(|name| name.to_str())
+        && let Some(packed) = packed(name)
+    {
+        return Some(packed);
+    }
+    path.ancestors()
+        .skip(1)
+        .filter_map(Path::file_name)
+        .filter_map(|component| component.to_str())
+        .find_map(packed)
+}
+
+/// The dotted spelling: `libphp8.4.so`, `libphp-8.4.so`, `libphp8.4.so.0`.
+fn dotted_of(name: &str) -> Option<(u32, u32)> {
+    let rest = name.strip_prefix("libphp")?;
+    let mut rest = rest.strip_prefix('-').unwrap_or(rest);
     let major = digits(&mut rest)?;
     rest = rest.strip_prefix('.')?;
     let minor = digits(&mut rest)?;

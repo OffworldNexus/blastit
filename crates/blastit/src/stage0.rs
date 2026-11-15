@@ -448,14 +448,20 @@ pub(crate) fn no_python_support(
 ///
 /// A fixed list rather than a directory scan: the order *is* the preference, so
 /// a `libphp8.5.so` somebody dropped into `/usr/local/lib` never changes which
-/// library an 8.4 host embeds.
-pub(crate) const LIBPHP_CANDIDATES: [&str; 7] = [
+/// library an 8.4 host embeds. Both spellings the distros install are here: the
+/// dotted Debian/Ubuntu name and the **packed** Alpine 8.3 one (`libphp83.so`;
+/// Alpine's 8.4 states its minor in `/usr/lib/php84` instead, `MB.3.59`), so a
+/// host with `BLASTIT_LIBPHP` unset reaches Alpine's package without a copy.
+pub(crate) const LIBPHP_CANDIDATES: [&str; 10] = [
     "libphp8.4.so",
     "libphp-8.4.so",
+    "libphp84.so",
     "libphp8.3.so",
     "libphp-8.3.so",
+    "libphp83.so",
     "libphp8.2.so",
     "libphp-8.2.so",
+    "libphp82.so",
     "libphp.so",
 ];
 
@@ -599,14 +605,26 @@ fn shim_name(version: PhpVersion) -> String {
 
 /// The multi-arch library directories a distro may put `libphp` in, in order
 /// (`ADR-0010` §3).
+///
+/// The per-minor directories come after the plain `/usr/lib` and before the
+/// `/usr/local` half: Alpine installs 8.4 as `/usr/lib/php84/libphp.so`, and
+/// with `BLASTIT_LIBPHP` unset a fixed name alone cannot reach it — the
+/// directory is half of the package's spelling (`MB.3.59`). `/usr/local/lib/php8x`
+/// is the twin of a copy an operator put there.
 fn library_dirs() -> Vec<PathBuf> {
     let triplet = multiarch_triplet();
     [
         format!("/usr/lib/{triplet}"),
         "/usr/lib64".to_string(),
         "/usr/lib".to_string(),
+        "/usr/lib/php84".to_string(),
+        "/usr/lib/php83".to_string(),
+        "/usr/lib/php82".to_string(),
         format!("/usr/local/lib/{triplet}"),
         "/usr/local/lib".to_string(),
+        "/usr/local/lib/php84".to_string(),
+        "/usr/local/lib/php83".to_string(),
+        "/usr/local/lib/php82".to_string(),
     ]
     .into_iter()
     .map(PathBuf::from)
@@ -734,7 +752,27 @@ enum PhpRefusal {
         /// The version its name states, when it states one.
         version: Option<PhpVersion>,
     },
-    /// The file name carries no PHP major.minor, so no shim can be chosen.
+    /// The object exports no `php_version`, so the worker cannot read its
+    /// minor at load time (`MB.3.59`; PHP 8.2 and earlier ship it that way).
+    NoPhpVersion {
+        /// The candidate.
+        path: PathBuf,
+        /// The version the path itself states, when it states one — named in
+        /// the sentence so an operator sees that the file name does not help.
+        named: Option<PhpVersion>,
+    },
+    /// The path states two different minors, or the path and the object's own
+    /// bytes disagree, so no single shim can be chosen.
+    VersionConflict {
+        /// The candidate.
+        path: PathBuf,
+        /// Every minor the path states, with the spelling that stated it.
+        stated: Vec<(PhpVersion, String)>,
+        /// What the object's compile-time version string says, when readable.
+        measured: Option<PhpVersion>,
+    },
+    /// `php_version` is exported but the compile-time version string could not
+    /// be read from the object, and the path states no minor either.
     NoVersion {
         /// The candidate.
         path: PathBuf,
@@ -818,10 +856,51 @@ fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String
             ),
             *version,
         ),
+        PhpRefusal::NoPhpVersion { path, named } => {
+            let name = named.map_or_else(String::new, |version| {
+                format!(
+                    " (its file name states PHP {}, but a file name cannot replace the symbol)",
+                    version.dotted()
+                )
+            });
+            format!(
+                "{prefix}{} is an NTS libphp whose `.dynsym` exports no `php_version` — the \
+                 symbol the embedded worker resolves before `php_module_startup` — so the worker \
+                 cannot determine its minor at load time and no shim can be chosen for it{name}; \
+                 PHP 8.2 and earlier ship it that way; {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+                path.display()
+            )
+        }
+        PhpRefusal::VersionConflict {
+            path,
+            stated,
+            measured,
+        } => {
+            let mut candidates: Vec<String> = stated
+                .iter()
+                .map(|(version, spelling)| format!("{spelling} states PHP {}", version.dotted()))
+                .collect();
+            if let Some(version) = measured {
+                candidates.push(format!(
+                    "the `php_version` string the object carries states PHP {}",
+                    version.dotted()
+                ));
+            }
+            format!(
+                "{prefix}{} states more than one PHP minor — {} — so no single shim can be \
+                 chosen for it; give it one versioned name (libphp8.4.so, libphp-8.4.so, …), \
+                 keep the distro's directory and file name consistent, or {PHP_OVERRIDE}; \
+                 {PHP_PACKAGES}",
+                path.display(),
+                candidates.join(", ")
+            )
+        }
         PhpRefusal::NoVersion { path } => format!(
-            "{prefix}{} is an NTS libphp whose file name names no PHP major.minor, so \
-             no shim can be chosen for it; keep the distro name (libphp8.4.so, libphp-8.4.so, \
-             …) or {PHP_OVERRIDE} with a versioned one; {PHP_PACKAGES}",
+            "{prefix}{} is an NTS libphp that exports `php_version` in its `.dynsym`, but its \
+             compile-time version string could not be read from its sections and neither its \
+             file name nor its directory states a PHP major.minor, so no shim can be chosen \
+             for it; give it a versioned name (libphp8.4.so, libphp-8.4.so, …), or \
+             {PHP_OVERRIDE}; {PHP_PACKAGES}",
             path.display()
         ),
         PhpRefusal::NoShim {
@@ -902,11 +981,12 @@ impl PhpBoot {
 ///
 /// The order is the order an operator can act on: an over-budget `workers` first
 /// (nothing about the host can fix it), then the library (missing, a directory,
-/// not an ELF, ZTS, no version) and the shim for the tuple. Every one of those
-/// is fatal in **both** scopes: `ADR-0010` §1 gives PHP one backend, so a host
-/// that cannot serve a declared `[route.php]` route gets §4.1's package
-/// sentence — in `blastit dev` and `blastit check` as much as in a deployment.
-/// There is no development mode that serves a PHP route another way.
+/// not an ELF, ZTS, no `php_version`, no version this boot can read) and the
+/// shim for the tuple. Every one of those is fatal in **both** scopes:
+/// `ADR-0010` §1 gives PHP one backend, so a host that cannot serve a declared
+/// `[route.php]` route gets §4.1's package sentence — in `blastit dev` and
+/// `blastit check` as much as in a deployment. There is no development mode
+/// that serves a PHP route another way.
 pub(crate) fn php_boot_gate(config: &Config, manifest: &Manifest, scope: PhpShimScope) -> PhpBoot {
     // `R7`/`B2-R5` are `Production` rules (`ADR-0010` §3): a deployed boot
     // authorises every path a route uid must not be able to write, while `dev`
@@ -1238,28 +1318,44 @@ fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
     // The path stage 1 will re-open. A name that cannot be resolved is a §4.1
     // refusal here, never an `ELOOP` after the banner.
     let path = resolve(&path)?;
-    let version = version_of(&path, &file);
-    let abi = zend_abi(&mut file).map_err(|detail| PhpRefusal::NotElf {
+    // Three static statements, in the order `MB.3.59` fixes them: the file
+    // name (the fast path), the path's per-minor directory, then the object's
+    // own bytes. None of them loads anything.
+    let named = version_of(&path, &file);
+    let stated = path_versions(&path);
+    let facts = inspect_object(&mut file).map_err(|detail| PhpRefusal::NotElf {
         path: path.clone(),
         detail,
-        version,
+        version: named.or_else(|| stated.first().map(|stated| stated.version)),
     })?;
-    match abi {
+    let hinted = named
+        .or_else(|| stated.first().map(|stated| stated.version))
+        .or(facts.version);
+    match facts.abi {
         ZendAbi::Nts => {}
         ZendAbi::Zts => {
             return Err(PhpRefusal::ThreadSafe {
                 path: path.clone(),
-                version,
+                version: hinted,
             });
         }
         ZendAbi::NotLibphp => {
             return Err(PhpRefusal::NotLibphp {
                 path: path.clone(),
-                version,
+                version: hinted,
             });
         }
     }
-    let version = version.ok_or_else(|| PhpRefusal::NoVersion { path: path.clone() })?;
+    // The worker resolves `php_version` before it can start anything, so an
+    // object without it is refused here — whatever its file name says
+    // (`MB.3.59`; PHP 8.2 and earlier are the builds that ship it that way).
+    if !facts.exports_php_version {
+        return Err(PhpRefusal::NoPhpVersion {
+            path: path.clone(),
+            named,
+        });
+    }
+    let version = choose_version(&path, &stated, facts.version)?;
     // One spelling, the `ADR-0010` §4.1 one: `make php-sapi` writes the same
     // `libblastit_php<minor>-<arch>-<libc>.so` that `Minor::shim_file()` names,
     // so a developer who has just built a shim is found here with no
@@ -1324,6 +1420,8 @@ fn first_existing(search: &PhpSearch) -> Option<PathBuf> {
 ///
 /// `libphp.so` is usually a symlink to `libphp8.4.so`, and a descriptor's link
 /// target says so even when the path does not — a `readlink`, never a load.
+/// Both spellings `PhpVersion::parse` knows are accepted, so Alpine's packed
+/// `libphp83.so` is a name that states a version (`MB.3.59`).
 fn version_of(path: &Path, file: &std::fs::File) -> Option<PhpVersion> {
     let named = path
         .file_name()
@@ -1335,6 +1433,86 @@ fn version_of(path: &Path, file: &std::fs::File) -> Option<PhpVersion> {
             .and_then(OsStr::to_str)
             .and_then(PhpVersion::parse)
     })
+}
+
+/// One minor the **path** states, and the spelling that stated it — for the
+/// conflict sentence, so an operator sees which half to rename.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatedVersion {
+    /// The minor.
+    version: PhpVersion,
+    /// The file name or directory component, as written.
+    spelling: String,
+}
+
+/// Every PHP minor the path itself states (`MB.3.59`), deduplicated.
+///
+/// Two spellings are the distro's: the file name (`libphp83.so`,
+/// `libphp8.4.so`) and a per-minor parent directory (`/usr/lib/php84`,
+/// `/usr/local/lib/php83`). A path with the same minor twice keeps one entry;
+/// a path with two different minors still lists both, so [`choose_version`]
+/// can refuse rather than pick one.
+fn path_versions(path: &Path) -> Vec<StatedVersion> {
+    let mut stated: Vec<StatedVersion> = Vec::new();
+    let mut push = |version: PhpVersion, spelling: String| {
+        if !stated.iter().any(|known| known.version == version) {
+            stated.push(StatedVersion { version, spelling });
+        }
+    };
+    if let Some(name) = path.file_name().and_then(OsStr::to_str)
+        && let Some(version) = PhpVersion::parse(name)
+    {
+        push(version, format!("`{name}`"));
+    }
+    // The immediate parent only: `…/php84/libphp.so` is Alpine's own shape,
+    // while a `php84` further up a developer's tree is not a statement about
+    // this object.
+    if let Some(component) = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        && let Some(version) = PhpVersion::parse_directory(component)
+    {
+        push(version, format!("the directory `{component}`"));
+    }
+    stated
+}
+
+/// The one minor the path and the object's own bytes agree on, or the refusal
+/// that names every candidate (`MB.3.59`).
+///
+/// Two different statements are never resolved by a preference: the shim is
+/// chosen by this number, and a wrong one is a boot that loads a foreign ABI.
+/// So disagreement is a refusal naming each spelling, the `.dynsym` fact and
+/// `BLASTIT_LIBPHP`; stating nothing at all is the same sentence with no
+/// candidates.
+fn choose_version(
+    path: &Path,
+    stated: &[StatedVersion],
+    measured: Option<PhpVersion>,
+) -> Result<PhpVersion, PhpRefusal> {
+    let mut distinct: Vec<PhpVersion> = stated.iter().map(|stated| stated.version).collect();
+    if let Some(measured) = measured
+        && !distinct.contains(&measured)
+    {
+        distinct.push(measured);
+    }
+    if distinct.len() > 1 {
+        return Err(PhpRefusal::VersionConflict {
+            path: path.to_path_buf(),
+            stated: stated
+                .iter()
+                .map(|stated| (stated.version, stated.spelling.clone()))
+                .collect(),
+            measured,
+        });
+    }
+    distinct
+        .first()
+        .copied()
+        .ok_or_else(|| PhpRefusal::NoVersion {
+            path: path.to_path_buf(),
+        })
 }
 
 /// The largest section this walk will read into memory: a `libphp`'s `.dynsym`
@@ -1354,6 +1532,8 @@ enum ElfClass {
 /// The header fields the `.dynsym` walk needs.
 struct ElfHeader {
     class: ElfClass,
+    /// `e_machine`: which decoder a `php_version` body needs.
+    machine: u16,
     /// Offset of the section header table.
     shoff: u64,
     /// Size of one section header.
@@ -1368,15 +1548,35 @@ struct ElfHeader {
 const SHT_DYNSYM: u32 = 11;
 /// `SHT_STRTAB`: a string table.
 const SHT_STRTAB: u32 = 3;
+/// `EM_X86_64`: the machine whose `lea`-based `php_version` body is read.
+const EM_X86_64: u16 = 62;
+/// `EM_AARCH64`: the machine whose `adrp`/`add` body is read.
+const EM_AARCH64: u16 = 183;
 
-/// Reads the `.dynsym` names of `file` and reports which Zend globals it
-/// exports (`ADR-0010` §3).
+/// What the bounded, load-free walk says about one object (`ADR-0010` §3,
+/// `MB.3.59`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ObjectFacts {
+    /// Which Zend build the `.dynsym` names.
+    abi: ZendAbi,
+    /// Whether `php_version` is exported — the symbol the worker resolves before
+    /// `php_module_startup`. Its absence is PHP 8.2-and-earlier's signature.
+    exports_php_version: bool,
+    /// The compile-time version `php_version()` returns, read from the string
+    /// its body points at; `None` when the body is not the shape this walk
+    /// understands.
+    version: Option<PhpVersion>,
+}
+
+/// Reads the `.dynsym` of `file` and — when the path stated no minor — the
+/// compile-time version the object carries (`ADR-0010` §3, `MB.3.59`).
 ///
 /// No dependency, no `dlopen`, no `mmap`: `seek`/`read` of the section header
-/// table, the dynamic symbol table and its string table, with every offset
+/// table, the dynamic symbol table and its string table, the `php_version`
+/// body (bounded), and the string it returns (bounded), with every offset
 /// bounds-checked. A file that is not a little-endian ELF, has no `.dynsym`, or
 /// is truncated is an `Err` naming what was wrong.
-fn zend_abi(file: &mut std::fs::File) -> Result<ZendAbi, String> {
+fn inspect_object(file: &mut std::fs::File) -> Result<ObjectFacts, String> {
     let header = read_elf_header(file)?;
     let table_len = header
         .shentsize
@@ -1397,12 +1597,19 @@ fn zend_abi(file: &mut std::fs::File) -> Result<ZendAbi, String> {
     let strtab = find_strtab(&header, &table, strtab_index)?;
     let symbols = read_at(file, dynsym.offset, dynsym.len)?;
     let names = read_at(file, strtab.offset, strtab.len)?;
-    let (executor_globals, tsrm_startup) =
-        scan_symbols(&header.class, &symbols, dynsym.entsize, &names)?;
-    Ok(match (executor_globals, tsrm_startup) {
+    let symbols = scan_symbols(&header.class, &symbols, dynsym.entsize, &names)?;
+    let abi = match (symbols.executor_globals, symbols.tsrm_startup) {
         (true, false) => ZendAbi::Nts,
         (false, false) => ZendAbi::NotLibphp,
         (_, true) => ZendAbi::Zts,
+    };
+    let version = symbols
+        .php_version
+        .and_then(|symbol| php_version_string(file, &header, &table, symbol));
+    Ok(ObjectFacts {
+        abi,
+        exports_php_version: symbols.php_version.is_some(),
+        version,
     })
 }
 
@@ -1444,6 +1651,7 @@ fn read_elf_header(file: &mut std::fs::File) -> Result<ElfHeader, String> {
     }
     let head = read_at(file, 0, head_len)?;
     let missing = || "the header is truncated".to_string();
+    let machine = le_u16(&head, 0x12).ok_or_else(missing)?;
     let shoff = match class {
         ElfClass::Elf64 => le_u64(&head, shoff_off),
         ElfClass::Elf32 => le_u32(&head, shoff_off).map(u64::from),
@@ -1461,6 +1669,7 @@ fn read_elf_header(file: &mut std::fs::File) -> Result<ElfHeader, String> {
     }
     Ok(ElfHeader {
         class,
+        machine,
         shoff,
         shentsize,
         shnum,
@@ -1537,6 +1746,29 @@ fn section_fields(class: ElfClass, table: &[u8], at: usize) -> Option<(u64, u64,
     }
 }
 
+/// `sh_addr`: the address a section is mapped at, which turns a symbol's
+/// `st_value` into a file offset (`MB.3.59`).
+fn section_addr(class: ElfClass, table: &[u8], at: usize) -> Option<u64> {
+    match class {
+        ElfClass::Elf64 => le_u64(table, at.saturating_add(0x10)),
+        ElfClass::Elf32 => le_u32(table, at.saturating_add(0x0c)).map(u64::from),
+    }
+}
+
+/// `SHF_ALLOC`: the section is mapped into the process image.
+const SHF_ALLOC: u64 = 0x2;
+/// `SHF_WRITE`: the section is writable — never where a compile-time string
+/// or a `return <constant>;` body is read from.
+const SHF_WRITE: u64 = 0x1;
+
+/// `sh_flags` of the section at `at`.
+fn section_flags(class: ElfClass, table: &[u8], at: usize) -> Option<u64> {
+    match class {
+        ElfClass::Elf64 => le_u64(table, at.saturating_add(0x8)),
+        ElfClass::Elf32 => le_u32(table, at.saturating_add(0x8)).map(u64::from),
+    }
+}
+
 /// A section's length in memory, refused when it is absurd or past the file.
 fn bounded_section(offset: u64, size: u64, file_size: u64) -> Result<usize, String> {
     if size > MAX_SECTION_BYTES {
@@ -1553,13 +1785,24 @@ fn bounded_section(offset: u64, size: u64, file_size: u64) -> Result<usize, Stri
     usize::try_from(size).map_err(|_| "a section is larger than this build can address".to_string())
 }
 
-/// Whether the dynamic symbol table exports the two Zend globals.
+/// The dynamic symbols the walk cares about (`ADR-0010` §3, `MB.3.59`).
+struct DynSymbols {
+    /// `executor_globals` is exported.
+    executor_globals: bool,
+    /// `tsrm_startup` is exported (a ZTS build).
+    tsrm_startup: bool,
+    /// `php_version` is exported **as a function**, with `(st_value, st_size)`:
+    /// the symbol the worker's loader resolves before `php_module_startup`.
+    php_version: Option<(u64, u64)>,
+}
+
+/// Which of the symbols above the dynamic table exports.
 fn scan_symbols(
     class: &ElfClass,
     dynsym: &[u8],
     entsize: usize,
     strtab: &[u8],
-) -> Result<(bool, bool), String> {
+) -> Result<DynSymbols, String> {
     let minimum = match class {
         ElfClass::Elf64 => 24usize,
         ElfClass::Elf32 => 16usize,
@@ -1567,8 +1810,11 @@ fn scan_symbols(
     if entsize < minimum {
         return Err("a .dynsym entry is too small to be a symbol".to_string());
     }
-    let mut executor_globals = false;
-    let mut tsrm_startup = false;
+    let mut symbols = DynSymbols {
+        executor_globals: false,
+        tsrm_startup: false,
+        php_version: None,
+    };
     for index in 0..dynsym.len() / entsize {
         let at = index.saturating_mul(entsize);
         let Some(name) = le_u32(dynsym, at).and_then(|offset| {
@@ -1579,12 +1825,187 @@ fn scan_symbols(
             continue;
         };
         match name {
-            b"executor_globals" => executor_globals = true,
-            b"tsrm_startup" => tsrm_startup = true,
+            b"executor_globals" => symbols.executor_globals = true,
+            b"tsrm_startup" => symbols.tsrm_startup = true,
+            b"php_version" if symbol_is_function(*class, dynsym, at) => {
+                if let (Some(value), Some(size)) = (
+                    symbol_value(*class, dynsym, at),
+                    symbol_size(*class, dynsym, at),
+                ) {
+                    symbols.php_version = Some((value, size));
+                }
+            }
             _ => {}
         }
     }
-    Ok((executor_globals, tsrm_startup))
+    Ok(symbols)
+}
+
+/// `st_info`'s type nibble: `STT_FUNC`, the only kind the worker can call.
+fn symbol_is_function(class: ElfClass, dynsym: &[u8], at: usize) -> bool {
+    let info = match class {
+        ElfClass::Elf64 => dynsym.get(at.saturating_add(4)).copied(),
+        ElfClass::Elf32 => dynsym.get(at.saturating_add(12)).copied(),
+    };
+    info.is_some_and(|info| info & 0x0f == 2)
+}
+
+/// `st_value`: where the symbol's code or data lives.
+fn symbol_value(class: ElfClass, dynsym: &[u8], at: usize) -> Option<u64> {
+    match class {
+        ElfClass::Elf64 => le_u64(dynsym, at.checked_add(8)?),
+        ElfClass::Elf32 => le_u32(dynsym, at.checked_add(4)?).map(u64::from),
+    }
+}
+
+/// `st_size`: how many bytes the symbol's body occupies.
+fn symbol_size(class: ElfClass, dynsym: &[u8], at: usize) -> Option<u64> {
+    match class {
+        ElfClass::Elf64 => le_u64(dynsym, at.checked_add(16)?),
+        ElfClass::Elf32 => le_u32(dynsym, at.checked_add(8)?).map(u64::from),
+    }
+}
+
+/// The compile-time version `php_version()` returns, read statically
+/// (`MB.3.59`).
+///
+/// The function is `return PHP_VERSION;` in every PHP 8.3+ build: one
+/// PC-relative `lea` (`x86_64`) or `adrp`/`add` pair (`aarch64`) whose target
+/// is the string in the object's own read-only data — on Alpine it is the
+/// `8.4.27` inside the `X-Powered-By: PHP/8.4.27` literal, which is why a
+/// search for a bare version string would miss it. Decoding the body is
+/// precise: it reads exactly the constant the loader will receive, and
+/// anything this walk does not understand is `None` (a refusal), never a guess
+/// at a neighbouring library's version.
+fn php_version_string(
+    file: &mut std::fs::File,
+    header: &ElfHeader,
+    table: &[u8],
+    (value, size): (u64, u64),
+) -> Option<PhpVersion> {
+    // 32 bytes is more than the longest body either decoder reads; a bigger
+    // symbol is not a `return <constant>;` and is left to the refusal.
+    let len = usize::try_from(size.min(32)).ok().filter(|len| *len > 0)?;
+    let body_offset = vaddr_to_offset(header, table, value)?;
+    let body = read_at(file, body_offset, len).ok()?;
+    let string_vaddr = match header.machine {
+        EM_X86_64 => decode_x86_64(&body, value)?,
+        EM_AARCH64 => decode_aarch64(&body, value)?,
+        _ => return None,
+    };
+    let string_offset = vaddr_to_offset(header, table, string_vaddr)?;
+    let available = usize::try_from(header.size.checked_sub(string_offset)?).ok()?;
+    let wanted = available.min(32);
+    if wanted == 0 {
+        return None;
+    }
+    let bytes = read_at(file, string_offset, wanted).ok()?;
+    let end = bytes.iter().position(|byte| *byte == 0)?;
+    let text = std::str::from_utf8(bytes.get(..end)?).ok()?;
+    version_prefix(text)
+}
+
+/// The file offset of `vaddr`, from the section that contains it.
+///
+/// A section's `sh_addr` is its load address and `sh_offset` its file offset;
+/// the difference is the mapping, so no program header is needed.
+fn vaddr_to_offset(header: &ElfHeader, table: &[u8], vaddr: u64) -> Option<u64> {
+    for index in 0..header.shnum {
+        let at = index.saturating_mul(header.shentsize);
+        let flags = section_flags(header.class, table, at)?;
+        // A body and the constant it returns live in mapped, read-only
+        // sections; a pointer into `.data` or `.bss` is not the shape this
+        // walk understands.
+        if flags & SHF_ALLOC == 0 || flags & SHF_WRITE != 0 {
+            continue;
+        }
+        let (offset, size, _, _) = section_fields(header.class, table, at)?;
+        let addr = section_addr(header.class, table, at)?;
+        let end = addr.checked_add(size)?;
+        if vaddr >= addr && vaddr < end {
+            return offset.checked_add(vaddr.checked_sub(addr)?);
+        }
+    }
+    None
+}
+
+/// `"8.4.27"` -> PHP 8.4: the first two dot-separated components.
+fn version_prefix(text: &str) -> Option<PhpVersion> {
+    let mut parts = text.split('.');
+    let major = parts.next()?.parse::<u8>().ok()?;
+    let minor = parts.next()?.parse::<u8>().ok()?;
+    Some(PhpVersion::new(major, minor))
+}
+
+/// The target of `php_version`'s body on `x86_64`, when it is the
+/// `lea reg,[rip+disp]` a `return <constant>;` compiles to.
+fn decode_x86_64(body: &[u8], at: u64) -> Option<u64> {
+    // `endbr64` is what `-fcf-protection` prefixes to the function.
+    let cursor = if body.starts_with(&[0xf3, 0x0f, 0x1e, 0xfa]) {
+        4
+    } else {
+        0
+    };
+    let rex = *body.get(cursor)?;
+    if rex & 0xf8 != 0x48 {
+        return None;
+    }
+    if *body.get(cursor.checked_add(1)?)? != 0x8d {
+        return None;
+    }
+    let modrm = *body.get(cursor.checked_add(2)?)?;
+    // mod = 00, rm = 101: `[rip + disp32]`.
+    if modrm & 0xc7 != 0x05 {
+        return None;
+    }
+    let at_disp = cursor.checked_add(3)?;
+    let disp = i32::from_le_bytes(
+        body.get(at_disp..at_disp.checked_add(4)?)?
+            .try_into()
+            .ok()?,
+    );
+    let next = at.checked_add(u64::try_from(at_disp.checked_add(4)?).ok()?)?;
+    Some(next.wrapping_add_signed(i64::from(disp)))
+}
+
+/// The target of `php_version`'s body on `aarch64`: `adrp` + `add` with the
+/// low 12 bits, the PIC sequence a `return <constant>;` compiles to.
+fn decode_aarch64(body: &[u8], at: u64) -> Option<u64> {
+    // `bti c` is what `-mbranch-protection` prefixes to the function.
+    let mut cursor: usize = if u32::from_le_bytes(body.get(..4)?.try_into().ok()?) == 0xd503_245f {
+        4
+    } else {
+        0
+    };
+    let adrp = u32::from_le_bytes(body.get(cursor..cursor.checked_add(4)?)?.try_into().ok()?);
+    // ADRP: op=1, 10000 in bits 28..24, Rd, immhi, immlo.
+    if adrp & 0x9f00_0000 != 0x9000_0000 {
+        return None;
+    }
+    let rd = adrp & 0x1f;
+    let immlo = i64::from((adrp >> 29) & 0x3);
+    let immhi = i64::from((adrp >> 5) & 0x7_ffff);
+    let pages = sign_extend((immhi << 2) | immlo, 21) << 12;
+    let page = at.checked_add(u64::try_from(cursor).ok()?)? & !0xfff;
+    let base = page.wrapping_add_signed(pages);
+    cursor = cursor.checked_add(4)?;
+    let add = u32::from_le_bytes(body.get(cursor..cursor.checked_add(4)?)?.try_into().ok()?);
+    // ADD (immediate), 64-bit: sf=1, op=0, S=0, 100010, sh, imm12, Rn, Rd.
+    if add & 0x7f80_0000 != 0x1100_0000 {
+        return None;
+    }
+    if add & 0x1f != rd || (add >> 5) & 0x1f != rd {
+        return None;
+    }
+    let shift = (add >> 22) & 1;
+    let imm12 = u64::from((add >> 10) & 0xfff);
+    base.checked_add(imm12.checked_shl(12 * shift)?)
+}
+
+/// `value` as a `bits`-wide two's-complement integer.
+fn sign_extend(value: i64, bits: u32) -> i64 {
+    let shift = 64u32.saturating_sub(bits);
+    (value << shift) >> shift
 }
 
 /// The NUL-terminated string at `offset`, or an empty slice.
@@ -3868,39 +4289,111 @@ path = ['.*']
         }
     }
 
-    /// A little-endian ELF64 shared object whose `.dynsym` exports `names`.
+    /// A little-endian ELF shared object whose `.dynsym` exports `names` plus
+    /// the `php_version` symbol the worker needs (`MB.3.59`). The symbol is a
+    /// function with **no body**, so the version comes from the file name — the
+    /// fast path — exactly as a distro soname does.
     ///
     /// Layout: the 64-byte ELF header, the dynamic symbol table (a null symbol
-    /// then one per name), its string table, and three section headers (null,
-    /// `SHT_DYNSYM`, `SHT_STRTAB`). Nothing is loaded: the gate reads these
+    /// then one per name), its string table, then the null, `SHT_DYNSYM`,
+    /// `SHT_STRTAB` section headers. Nothing is loaded: the gate reads these
     /// bytes the way it reads a distro `libphp`.
     fn shared_object(names: &[&str]) -> Vec<u8> {
+        shared_object_with(names, None, true)
+    }
+
+    /// The same object, with a `php_version` body that points at `version` in a
+    /// read-only section — the static fact `MB.3.59` reads when the path states
+    /// no minor.
+    fn shared_object_with_version(names: &[&str], version: &str) -> Vec<u8> {
+        shared_object_with(names, Some(version), true)
+    }
+
+    /// The 8.2-and-earlier signature: an NTS object with **no** `php_version`
+    /// in its `.dynsym` at all.
+    fn shared_object_without_php_version(names: &[&str]) -> Vec<u8> {
+        shared_object_with(names, None, false)
+    }
+
+    fn shared_object_with(
+        names: &[&str],
+        version: Option<&str>,
+        exports_php_version: bool,
+    ) -> Vec<u8> {
+        let machine: u16 = if cfg!(target_arch = "aarch64") {
+            EM_AARCH64
+        } else {
+            EM_X86_64
+        };
+        let mut exports: Vec<&str> = names.to_vec();
+        if exports_php_version && !exports.contains(&"php_version") {
+            exports.push("php_version");
+        }
         let mut strtab = vec![0u8];
-        let mut dynsym = vec![0u8; 24];
-        for name in names {
-            let mut entry = vec![0u8; 24];
-            entry[..4].copy_from_slice(&u32::try_from(strtab.len()).unwrap().to_le_bytes());
-            dynsym.extend_from_slice(&entry);
+        let mut offsets = Vec::new();
+        for name in &exports {
+            offsets.push(u32::try_from(strtab.len()).unwrap());
             strtab.extend_from_slice(name.as_bytes());
             strtab.push(0);
         }
         let dynsym_off = 64usize;
-        let strtab_off = dynsym_off + dynsym.len();
-        let shoff = (strtab_off + strtab.len() + 7) & !7;
-        let mut file = vec![0u8; shoff + 3 * 64];
+        let dynsym_len = 24 * (1 + exports.len());
+        let strtab_off = dynsym_off + dynsym_len;
+        let text_off = (strtab_off + strtab.len() + 7) & !7;
+        let code_len = if version.is_some() {
+            if machine == EM_AARCH64 { 12 } else { 8 }
+        } else {
+            0
+        };
+        let rodata_off = (text_off + code_len + 7) & !7;
+        let string: Vec<u8> = version
+            .map(|version| {
+                let mut bytes = version.as_bytes().to_vec();
+                bytes.push(0);
+                bytes
+            })
+            .unwrap_or_default();
+        let shoff = (rodata_off + string.len() + 7) & !7;
+        let mut file = vec![0u8; shoff + 5 * 64];
         file[..4].copy_from_slice(b"\x7fELF");
         file[4] = 2; // ELFCLASS64
         file[5] = 1; // ELFDATA2LSB
         file[6] = 1; // EV_CURRENT
         file[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
-        file[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        file[18..20].copy_from_slice(&machine.to_le_bytes());
         file[0x28..0x30].copy_from_slice(&u64::try_from(shoff).unwrap().to_le_bytes());
         file[0x34..0x36].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
         file[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
-        file[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes()); // e_shnum
-        file[64..strtab_off].copy_from_slice(&dynsym);
+        file[0x3c..0x3e].copy_from_slice(&5u16.to_le_bytes()); // e_shnum
+
+        let mut dynsym = vec![0u8; 24];
+        for (index, offset) in offsets.iter().enumerate() {
+            let mut entry = vec![0u8; 24];
+            entry[..4].copy_from_slice(&offset.to_le_bytes());
+            entry[4] = if exports[index] == "php_version" {
+                0x12 // STB_GLOBAL | STT_FUNC
+            } else {
+                0x11 // STB_GLOBAL | STT_OBJECT
+            };
+            if exports[index] == "php_version" && version.is_some() {
+                entry[6..8].copy_from_slice(&3u16.to_le_bytes()); // .text
+                entry[8..16].copy_from_slice(&u64::try_from(text_off).unwrap().to_le_bytes());
+                entry[16..24].copy_from_slice(&u64::try_from(code_len).unwrap().to_le_bytes());
+            }
+            dynsym.extend_from_slice(&entry);
+        }
+        file[dynsym_off..dynsym_off + dynsym.len()].copy_from_slice(&dynsym);
         file[strtab_off..strtab_off + strtab.len()].copy_from_slice(&strtab);
-        let dynsym_header = shoff + 64;
+        if version.is_some() {
+            let code = php_version_body(machine, text_off, rodata_off);
+            assert_eq!(code.len(), code_len, "the fixture's body is one size");
+            file[text_off..text_off + code.len()].copy_from_slice(&code);
+            file[rodata_off..rodata_off + string.len()].copy_from_slice(&string);
+        }
+
+        let header = |index: usize| shoff + index * 64;
+        // The null header is already zeroed.
+        let dynsym_header = header(1);
         file[dynsym_header + 4..dynsym_header + 8].copy_from_slice(&SHT_DYNSYM.to_le_bytes());
         file[dynsym_header + 0x18..dynsym_header + 0x20]
             .copy_from_slice(&u64::try_from(dynsym_off).unwrap().to_le_bytes());
@@ -3908,13 +4401,55 @@ path = ['.*']
             .copy_from_slice(&u64::try_from(dynsym.len()).unwrap().to_le_bytes());
         file[dynsym_header + 0x28..dynsym_header + 0x2c].copy_from_slice(&2u32.to_le_bytes());
         file[dynsym_header + 0x38..dynsym_header + 0x40].copy_from_slice(&24u64.to_le_bytes());
-        let strtab_header = shoff + 128;
+        let strtab_header = header(2);
         file[strtab_header + 4..strtab_header + 8].copy_from_slice(&SHT_STRTAB.to_le_bytes());
         file[strtab_header + 0x18..strtab_header + 0x20]
             .copy_from_slice(&u64::try_from(strtab_off).unwrap().to_le_bytes());
         file[strtab_header + 0x20..strtab_header + 0x28]
             .copy_from_slice(&u64::try_from(strtab.len()).unwrap().to_le_bytes());
+        let text_header = header(3);
+        file[text_header + 4..text_header + 8].copy_from_slice(&1u32.to_le_bytes()); // PROGBITS
+        file[text_header + 0x8..text_header + 0x10].copy_from_slice(&6u64.to_le_bytes()); // ALLOC|EXEC
+        file[text_header + 0x10..text_header + 0x18]
+            .copy_from_slice(&u64::try_from(text_off).unwrap().to_le_bytes());
+        file[text_header + 0x18..text_header + 0x20]
+            .copy_from_slice(&u64::try_from(text_off).unwrap().to_le_bytes());
+        file[text_header + 0x20..text_header + 0x28]
+            .copy_from_slice(&u64::try_from(code_len).unwrap().to_le_bytes());
+        let rodata_header = header(4);
+        file[rodata_header + 4..rodata_header + 8].copy_from_slice(&1u32.to_le_bytes());
+        file[rodata_header + 0x8..rodata_header + 0x10].copy_from_slice(&2u64.to_le_bytes()); // ALLOC
+        file[rodata_header + 0x10..rodata_header + 0x18]
+            .copy_from_slice(&u64::try_from(rodata_off).unwrap().to_le_bytes());
+        file[rodata_header + 0x18..rodata_header + 0x20]
+            .copy_from_slice(&u64::try_from(rodata_off).unwrap().to_le_bytes());
+        file[rodata_header + 0x20..rodata_header + 0x28]
+            .copy_from_slice(&u64::try_from(string.len()).unwrap().to_le_bytes());
         file
+    }
+
+    /// `return "PHP_VERSION";` as the host's architecture compiles it.
+    fn php_version_body(machine: u16, text: usize, string: usize) -> Vec<u8> {
+        if machine == EM_AARCH64 {
+            let pages = (string >> 12) as i64 - (text >> 12) as i64;
+            let imm = pages & 0x1f_ffff;
+            let adrp =
+                0x9000_0000u32 | (((imm >> 2) as u32 & 0x7_ffff) << 5) | ((imm as u32 & 0x3) << 29);
+            let add = 0x9100_0000u32 | (((string & 0xfff) as u32) << 10);
+            let mut code = Vec::new();
+            code.extend_from_slice(&adrp.to_le_bytes());
+            code.extend_from_slice(&add.to_le_bytes());
+            code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+            code
+        } else {
+            // `lea rax,[rip+disp]` lands on the byte *after* the instruction.
+            let next = text + 7;
+            let disp = i32::try_from(string as i64 - next as i64).unwrap();
+            let mut code = vec![0x48, 0x8d, 0x05];
+            code.extend_from_slice(&disp.to_le_bytes());
+            code.push(0xc3); // ret
+            code
+        }
     }
 
     /// A search over one explicit NTS object and the shims in `shim_dir`.
@@ -4212,12 +4747,23 @@ path = ['.*']
             Some(16),
         )
         .refusal()
-        .expect("an unversioned name cannot choose a shim")
+        .expect("an unversioned name with no readable version cannot choose a shim")
         .to_string();
-        assert!(message.contains("names no PHP major.minor"), "{message}");
+        assert!(
+            message.contains("exports `php_version`"),
+            "the `.dynsym` fact is named: {message}"
+        );
+        assert!(
+            message.contains("could not be read from its sections"),
+            "the static fact is named: {message}"
+        );
         assert!(
             message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
             "{message}"
+        );
+        assert!(
+            !message.contains("names no PHP major.minor"),
+            "the old file-name-only sentence is gone: {message}"
         );
 
         // The accepted twin, in the distro's hyphenated spelling.
@@ -4229,6 +4775,184 @@ path = ['.*']
             runtime.shim.file_name().unwrap().to_str().unwrap(),
             format!("libblastit_php83-{}.so", target_tuple())
         );
+    }
+
+    /// `MB.3.59`: Alpine's own package path states its minor in the **packed**
+    /// file name (`libphp83.so`) or in the per-minor parent directory
+    /// (`/usr/lib/php84/libphp.so`), and neither is a versioned name.
+    #[test]
+    fn the_packed_name_and_the_alpine_directory_state_the_minor() {
+        let scratch = Scratch::new("alpine-spellings");
+        let shims = Scratch::new("alpine-spellings-shims");
+        for minor in [3u8, 4] {
+            let _ = shims.file(&shim_name(PhpVersion::new(8, minor)), b"never loaded");
+        }
+
+        // `libphp83.so`: the name states 8.3 with no dot.
+        let packed = scratch.file("libphp83.so", &shared_object(&["executor_globals"]));
+        let runtime = discover_php(&search_for(&packed, &shims.dir)).expect("libphp83.so");
+        assert_eq!(runtime.version, PhpVersion::new(8, 3));
+
+        // `/usr/lib/php84/libphp.so`: the name states nothing, the directory
+        // states 8.4.
+        std::fs::create_dir_all(scratch.dir.join("php84")).unwrap();
+        let directory = scratch.file("php84/libphp.so", &shared_object(&["executor_globals"]));
+        let runtime = discover_php(&search_for(&directory, &shims.dir)).expect("php84/libphp.so");
+        assert_eq!(runtime.version, PhpVersion::new(8, 4));
+        assert_eq!(
+            runtime.shim.file_name().unwrap().to_str().unwrap(),
+            format!("libblastit_php84-{}.so", target_tuple())
+        );
+    }
+
+    /// `MB.3.59`: the object's own bytes name the minor when the path states
+    /// none — the `php_version` body's string, read statically.
+    #[test]
+    fn the_object_bytes_name_the_minor_when_the_path_does_not() {
+        let scratch = Scratch::new("object-version");
+        let shims = Scratch::new("object-version-shims");
+        let _ = shims.file(&shim_name(PhpVersion::new(8, 4)), b"never loaded");
+        let unversioned = scratch.file(
+            "libphp.so",
+            &shared_object_with_version(&["executor_globals"], "8.4.27"),
+        );
+        let runtime =
+            discover_php(&search_for(&unversioned, &shims.dir)).expect("the object names 8.4");
+        assert_eq!(runtime.version, PhpVersion::new(8, 4));
+        assert_eq!(
+            runtime.shim.file_name().unwrap().to_str().unwrap(),
+            format!("libblastit_php84-{}.so", target_tuple())
+        );
+    }
+
+    /// `MB.3.59`: two statements that disagree are a refusal naming both, never
+    /// a preference — the shim is chosen by this number.
+    #[test]
+    fn two_disagreeing_minors_are_refused_naming_both() {
+        let scratch = Scratch::new("version-conflict");
+        let shims = Scratch::new("version-conflict-shims");
+        for minor in [3u8, 4] {
+            let _ = shims.file(&shim_name(PhpVersion::new(8, minor)), b"never loaded");
+        }
+        // The file name states 8.3, the directory states 8.4.
+        std::fs::create_dir_all(scratch.dir.join("php84")).unwrap();
+        let conflicted = scratch.file("php84/libphp83.so", &shared_object(&["executor_globals"]));
+        let message = php_boot(
+            &manifest(PHP_ONLY),
+            &search_for(&conflicted, &shims.dir),
+            Some(16),
+        )
+        .refusal()
+        .expect("two minors cannot both choose a shim")
+        .to_string();
+        assert!(message.contains("more than one PHP minor"), "{message}");
+        assert!(message.contains("PHP 8.3"), "{message}");
+        assert!(message.contains("PHP 8.4"), "{message}");
+        assert!(
+            message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
+            "{message}"
+        );
+        assert!(message.contains("apt install libphp-embed"), "{message}");
+    }
+
+    /// `MB.3.59`: PHP 8.2's signature is the missing `php_version` symbol, and
+    /// a file name that **does** carry the minor does not change the sentence.
+    #[test]
+    fn a_libphp_without_php_version_is_refused_naming_the_symbol() {
+        let scratch = Scratch::new("no-php-version");
+        let shims = Scratch::new("no-php-version-shims");
+        let _ = shims.file(&shim_name(PhpVersion::new(8, 2)), b"never loaded");
+        let versioned_name = scratch.file(
+            "libphp8.2.so",
+            &shared_object_without_php_version(&["executor_globals"]),
+        );
+        let message = php_boot(
+            &manifest(PHP_ONLY),
+            &search_for(&versioned_name, &shims.dir),
+            Some(16),
+        )
+        .refusal()
+        .expect("a libphp without php_version cannot be embedded")
+        .to_string();
+        assert!(
+            message.contains("exports no `php_version`"),
+            "the missing symbol is named: {message}"
+        );
+        assert!(
+            message.contains("its file name states PHP 8.2"),
+            "the name is named, but does not rescue it: {message}"
+        );
+        assert!(
+            !message.contains("names no PHP major.minor"),
+            "a versioned name must not change the sentence: {message}"
+        );
+        assert!(
+            message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
+            "{message}"
+        );
+        assert!(message.contains("apt install libphp-embed"), "{message}");
+    }
+
+    /// `MB.3.59`: the discovery directories include Alpine's per-minor embed
+    /// directories, so an unset `BLASTIT_LIBPHP` can reach its own package.
+    #[test]
+    fn the_alpine_embed_directories_are_searched() {
+        let dirs = library_dirs();
+        for wanted in [
+            "/usr/lib/php84",
+            "/usr/lib/php83",
+            "/usr/local/lib/php84",
+            "/usr/local/lib/php83",
+        ] {
+            assert!(
+                dirs.iter().any(|dir| dir == Path::new(wanted)),
+                "{wanted} is missing from {dirs:?}"
+            );
+        }
+        // Order is preference: the plain `/usr/lib` comes before a per-minor
+        // directory, and `/usr/local` after both.
+        let position = |wanted: &str| {
+            dirs.iter()
+                .position(|dir| dir == Path::new(wanted))
+                .unwrap_or(usize::MAX)
+        };
+        assert!(position("/usr/lib") < position("/usr/lib/php84"));
+        assert!(position("/usr/lib/php84") < position("/usr/local/lib"));
+    }
+
+    /// The two `php_version` bodies the resolver decodes, on both architectures
+    /// — the aarch64 half cannot run on an x86_64 host, so it is pinned by
+    /// bytes rather than left to an arm runner.
+    #[test]
+    fn the_version_body_is_decoded_on_both_architectures() {
+        let disp = i32::try_from(0x2000i64 - 0x1007).unwrap();
+        let mut x86 = vec![0x48, 0x8d, 0x05];
+        x86.extend_from_slice(&disp.to_le_bytes());
+        x86.push(0xc3);
+        assert_eq!(decode_x86_64(&x86, 0x1000), Some(0x2000));
+        // `endbr64` is skipped, not mistaken for the body: the displacement of
+        // the body after it is relative to *its* end, not the function's start.
+        let mut protected = vec![0xf3, 0x0f, 0x1e, 0xfa];
+        let disp = i32::try_from(0x2000i64 - 0x100bi64).unwrap();
+        protected.extend_from_slice(&[0x48, 0x8d, 0x05]);
+        protected.extend_from_slice(&disp.to_le_bytes());
+        protected.push(0xc3);
+        assert_eq!(decode_x86_64(&protected, 0x1000), Some(0x2000));
+        // Anything else is not this shape: a refusal, never a guess.
+        assert_eq!(
+            decode_x86_64(&[0xb8, 0x2b, 0x3a, 0x01, 0x00, 0xc3], 0x1000),
+            None
+        );
+
+        // `adrp x0, page; add x0, x0, #0x345; ret` reaches 0x2000 + 0x345.
+        let adrp = 0x9000_0000u32 | (1 << 29);
+        let add = 0x9100_0000u32 | (0x345 << 10);
+        let mut arm = Vec::new();
+        arm.extend_from_slice(&adrp.to_le_bytes());
+        arm.extend_from_slice(&add.to_le_bytes());
+        arm.extend_from_slice(&0xd65f_03c0u32.to_le_bytes());
+        assert_eq!(decode_aarch64(&arm, 0x1000), Some(0x2345));
+        assert_eq!(decode_aarch64(&[0x1f, 0x20, 0x03, 0xd5], 0x1000), None);
     }
 
     /// Nothing matched to the tuple is a refusal that names the shim, the
@@ -4425,10 +5149,24 @@ path = ['.*']
             Ok(runtime) => {
                 assert!(runtime.libphp.is_file(), "{:?}", runtime.libphp);
                 assert!(runtime.dev > 0 && runtime.ino > 0);
-                assert_eq!(
-                    PhpVersion::parse(runtime.libphp.file_name().unwrap().to_str().unwrap()),
-                    Some(runtime.version),
-                    "the version comes from the file name that was opened"
+                // The minor comes from the name, the per-minor directory or
+                // the object's own bytes (`MB.3.59`); the shim is the one that
+                // minor needs.
+                assert_eq!(runtime.version.major(), 8);
+                assert!(
+                    (2..=4).contains(&runtime.version.minor()),
+                    "{} is not a supported minor",
+                    runtime.version.dotted()
+                );
+                assert!(
+                    runtime
+                        .shim
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .is_some_and(|name| name.contains(&runtime.version.number())),
+                    "{} is not the shim for PHP {}",
+                    runtime.shim.display(),
+                    runtime.version.dotted()
                 );
                 assert!(
                     matches!(

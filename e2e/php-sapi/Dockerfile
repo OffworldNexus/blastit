@@ -43,9 +43,9 @@ ARG RUST_TOOLCHAIN=stable
 # Whether this image compiles the two protected suites (`MB.3.39`), driven by the
 # leg's `suites` field in `scripts/platform_matrix.py` (`e2e/php_sapi_probe.py`
 # passes it). 0 keeps a ~7-minute `blastit` build — and a leg that can never
-# pass, because its `libphp` exports no `php_version` or has no libclang — out of
-# the image entirely (`MB.3.58` review). The shim and the probe are built either
-# way: they are what the leg proves.
+# serve, because its `libphp` exports no `php_version` — out of the image
+# entirely (`MB.3.58` review). The shim and the probe are built either way: they
+# are what the leg proves.
 ARG PHP_SAPI_SUITES=1
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -57,11 +57,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # `libc6-dev`); the musl legs are Alpine (`apk`, `musl-dev`, `pkgconf`). Detected
 # rather than declared so a leg cannot name the wrong one and still build.
 #
-# `clang`/`libclang-dev` are on the glibc branch only: the two protected suites
+# `clang`/`libclang-dev` are on the glibc branch, and Alpine's `clang`/
+# `llvm-dev`/`clang19-libclang` on the musl branch: the two protected suites
 # (`MB.3.39`) are compiled in this image too, and `pg_query`'s bindgen needs
-# libclang by name. The Alpine branch does not carry them, because its suites are
-# still out of scope (`MB.3.39`'s gnu-only note) — the musl legs execute only the
-# shim and the probe, and both are built here.
+# libclang by name. The Alpine legs now carry the suites as well (`MB.3.59`):
+# once the boot serves with Alpine's own package names, the worker-level proof
+# has to run where the shim is built, exactly like the glibc legs.
 RUN set -eux; \
     if command -v apt-get >/dev/null; then \
         apt-get update; \
@@ -74,6 +75,9 @@ RUN set -eux; \
         apk add --no-cache \
             "${PHP_DEV}" "${PHP_EMBED}" "${PHP_CURL}" \
             gcc make pkgconf musl-dev binutils ca-certificates curl bash tar xz; \
+        if [ "${PHP_SAPI_SUITES:-1}" = "1" ]; then \
+            apk add --no-cache clang llvm-dev clang19-libclang; \
+        fi; \
     fi
 
 # rustup on both libcs: it ships a musl `rustup-init`, and the workspace's MSRV
@@ -115,11 +119,18 @@ RUN extra=""; \
 #   (required by target/debug/blastit)
 #
 # — and raising the leg's base would prove nothing about the distros the shim is
-# shipped for. The suites are gnu-only (`MB.3.39`), so a musl leg writes an empty
-# list and `rs-test-php-image` refuses it by name rather than passing vacuously.
+# shipped for. The musl legs compile and run the same two suites inside
+# `alpine` (`MB.3.59`): `BLASTIT_LIBPHP` in this image names the distro's own
+# package path, so the served half of both suites is re-proved where the musl
+# shim is built.
+#
 # `PHP_SAPI_SUITES=0` (`matrix.suites == "false"`) skips the build altogether:
-# PHP 8.2's `libphp` exports no `php_version`, so its suites fail 2 of 5 in a
-# leg that can never pass, and the Alpine legs carry no libclang.
+# PHP 8.2's `libphp` exports no `php_version`, so stage 0 refuses its pair and
+# its suites are not run in a leg that can never serve.
+#
+# A musl Rust binary defaults to static-pie, and a static musl binary cannot
+# `dlopen`: the test binaries load `libphp` for real, so they need the same
+# `-C target-feature=-crt-static` the probe above is built with.
 #
 # `bash -euo pipefail` rather than the default `sh`: without `pipefail` a failed
 # `cargo test` would be masked by the `sed` that follows it in the pipe, and this
@@ -130,20 +141,20 @@ RUN bash -euo pipefail -c '\
             : > /src/target/php-suite-executables; \
             exit 0; \
         fi; \
+        extra=""; \
         if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then \
-            echo "musl leg: the protected suites are gnu-only (MB.3.39)"; \
-            : > /src/target/php-suite-executables; \
-        else \
-            cargo test --locked -p blastit --test critical_php_backend --test critical_php_embed --no-run \
-                2>&1 | tee /dev/stderr \
-                | sed -n "s/^[[:space:]]*Executable [^(]*(\(.*\))\$/\\1/p" \
-                > /src/target/php-suite-executables; \
-            count=$(wc -l < /src/target/php-suite-executables); \
-            if [ "$count" -ne 2 ]; then \
-                echo "expected 2 suite executables, recorded $count:" >&2; \
-                cat /src/target/php-suite-executables >&2; \
-                exit 1; \
-            fi; \
+            extra="-C target-feature=-crt-static"; \
+            export LIBCLANG_PATH=/usr/lib/llvm19/lib; \
+        fi; \
+        RUSTFLAGS="$extra" cargo test --locked -p blastit --test critical_php_backend --test critical_php_embed --no-run \
+            2>&1 | tee /dev/stderr \
+            | sed -n "s/^[[:space:]]*Executable [^(]*(\(.*\))\$/\\1/p" \
+            > /src/target/php-suite-executables; \
+        count=$(wc -l < /src/target/php-suite-executables); \
+        if [ "$count" -ne 2 ]; then \
+            echo "expected 2 suite executables, recorded $count:" >&2; \
+            cat /src/target/php-suite-executables >&2; \
+            exit 1; \
         fi' \
  && chmod -R a+rX /src/target/php-suite-executables /src/target/php-sapi
 

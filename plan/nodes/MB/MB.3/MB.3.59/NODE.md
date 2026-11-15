@@ -2,7 +2,7 @@
 id: MB.3.59
 title: "The Alpine libphp cannot be versioned by name: the boot refuses 'no shim can be chosen' unless BLASTIT_LIBPHP is versioned"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.3.58]
@@ -13,11 +13,11 @@ paths:
   - "e2e/php-sapi/**"
   - "scripts/**"
   - docs/frameworks/php.md
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-15T17:56"
-updated: "2026-11-15T18:06"
+updated: "2026-11-15T19:34"
 ---
 
 # Goal
@@ -117,18 +117,16 @@ respect:
 
 - **Ordering**: `depends_on: [MB.3.58]`. The owner's sequence is `.58` attempt 3 → this
   node → re-run the matrix legs → `RELEASE_READY`.
-- **Paths this node needs first** (all four edits are part of one change, and only the first
-  three are in `paths` today):
+- **The files this node changes** (one change, all four listed in `paths`):
   1. `crates/blastit/src/**` — `PhpVersion::parse`/`version_of`, `library_dirs`,
      `zend_abi`, `PhpRefusal::NoVersion`, the inline suite at `stage0.rs:4217`.
   2. `e2e/php-sapi/**`, 3. `scripts/**` — the matrix legs.
-  4. **`docs/frameworks/php.md`** — the §1 support paragraph, **not in `paths`**.
+  4. **`docs/frameworks/php.md`** — the §1 support paragraph.
   5. **`crates/blastit/tests/**`** — the two protected suites
      (`critical_php_backend.rs`, `critical_php_embed.rs`) assert the refusal sentences
      (`critical_php_embed.rs:381-443` builds the stub `php_version`/`blastit_php_minor`) and
-     `host_php()` there assumes the Debian spelling. The guard needs both the widened path and
-     `tools/critical_guard.py --node MB.3.59`, or the sentence change has to keep every
-     existing assertion true.
+     `host_php()` there assumes the Debian spelling. The guard needs `tools/critical_guard.py
+     --node MB.3.59`, or the sentence change has to keep every existing assertion true.
 - **The fix is static, in this order** — no step may load the library:
   1. **Name fast path**, unchanged: `version_of` (`stage0.rs:1327-1338`) parses the file name,
      then the descriptor's `readlink` target.
