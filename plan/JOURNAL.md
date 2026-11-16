@@ -2384,3 +2384,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T22:05 [MB.21.5.1] (lead) attempt 3/3 started
 - 2026-11-16T22:05 [MB.21.5.1] (lead) status review -> review
 - 2026-11-16T22:08 [MB.21.5.1] (lead) status review -> done
+- 2026-11-16T22:11 [MB.21.5.1] (lead) commit 809143d (+3452a7a for the ME brief)
+- 2026-11-16T22:11 [MB.21.5.2] (lead) status ready -> active
+- 2026-11-16T22:11 [MB.21.5.2] (lead) attempt 1/3 started
+- 2026-11-16T22:11 [MB.21.5.2] (lead) base 3452a7a2f2d47652344f33d3b1eb1c2389a44212
+- 2026-11-16T22:27 [MB.21.5.2] (lead) status active -> review
+- 2026-11-16T22:38 [MB.20] (planner) edited fields
+- 2026-11-16T22:40 [MB.21.5.2] (lead) attempt 2/3 started
+- 2026-11-16T22:40 [MB.21.5.2] (lead) status review -> review
+- 2026-11-16T22:46 [MB.21.5.2] (lead) status review -> done

@@ -2,7 +2,7 @@
 id: MB.21.5.2
 title: "Execute Blastfile doc fences live, flip docs_fences strict (retired opening gone) and guard the retired manifest name"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.21.5.1]
@@ -10,11 +10,11 @@ paths:
   - "python/tests/runnable_docs/**"
   - python/tests/test_docs_assets.py
   - "crates/blastit-manifest/tests/docs_fences.rs"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T08:04"
+updated: "2026-11-16T22:46"
 ---
 
 # Goal

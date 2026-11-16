@@ -69,18 +69,17 @@ path = "docs/blastfile.md"
 
 [[page.fence]]
 index = 1
-mode = "static"
-reason = "Blastfile examples run only once the DSL parser lands: MB.21.5.2 flips this fence to live execution against the guide's own Blastfile."
+mode = "dev"
+fixture = "hello"
 
 [[page.fence]]
 index = 2
-mode = "static"
-reason = "`blastit check` needs a parsed Blastfile, so this fence is checked against the installed CLI until MB.21.5.2 flips it to live execution."
+mode = "check"
+fixture = "shop"
 
 [[page.fence]]
 index = 3
-mode = "static"
-reason = "`blastit --preset` needs root or capabilities this unprivileged gate cannot create; MB.21.5.2 flips the fence once the Blastfile parser lands, and the preset name is checked offline."
+mode = "presets"
 
 [[page]]
 path = "docs/local.md"

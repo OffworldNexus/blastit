@@ -23,15 +23,31 @@ describe Blastit's PHP as the retired daemon/CGI transport, teach its manifest
 key, or offer it as a PHP fallback. `docs/decisions/`, `docs/design/`,
 `docs/research/` and `docs/testing/` are the record and keep the old vocabulary,
 and so do `done`/`superseded` plan briefs: only live claims are scanned.
+
+The third guard is the manifest erasure (`MB.21.5.2`, design §15.2): the retired
+v1 file name cannot reappear in a page, a crate, a script, the harness, the
+front door, `AGENTS.md` or a live brief. Its one artefact is
+`test_the_real_tree_carries_no_retired_toml_manifest`; there is no allowlist,
+because a list a lazy edit can widen is the defect the guard exists to prevent.
+The name is composed (`"blastit" + ".toml"`) so this module needs no exemption of
+itself, and the dated record (`docs/decisions|design|research|knowledge|
+testing/`, `docs/changelog.md`, `LOG.md`/`RESULT.md`, finished briefs) is outside
+the scanned set by construction — it is why the name can be recognised at all.
 """
 
 from __future__ import annotations
 
 import re
+import sys
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "runnable_docs"))
+
+# The one published-page list, shared with `docs-test`.
+import fences
 
 ROOT = Path(__file__).resolve().parents[2]
 BRAND = ROOT / "docs" / "brand"
@@ -819,4 +835,388 @@ def test_the_guard_scans_a_real_tree():
     decisions = markdown_files(ROOT / "docs" / "decisions")
     assert any(RETIRED_SPELLING.search(text_of(page)) for page in decisions), (
         "no ADR still names the retired transport: the exemption has no subject"
+    )
+
+
+# --- The retired v1 manifest file name (MB.21.5.2, design §15.2) -------------
+
+#: Composed so this module never carries the name contiguously: the guard scans
+#: `python/**/*.py`, itself included, and there is no allowlist.
+RETIRED_MANIFEST_NAME = "blastit" + ".toml"
+RETIRED_MANIFEST = re.compile(r"blastit[.]toml", re.IGNORECASE)
+#: What a reader must do instead. Every failure ends with this truth.
+RETIRED_MANIFEST_DETAIL = (
+    "the v1 manifest format is retired and has no migration path: read "
+    "`./Blastfile` or name one with `BLASTIT_MANIFEST`"
+)
+#: The front door, the living spec and the vision, beside the published pages.
+FRONT_DOOR = ("README.md", "ARCHITECTURE.md", "AGENTS.md", "docs/VISION.md")
+#: Harness trees are read as text: Python, shell, YAML, Dockerfiles and Markdown.
+HARNESS_SUFFIXES = (".py", ".sh", ".yaml", ".yml", ".md", ".toml", ".json", ".txt")
+#: The dependency a resurrected reader would need (§15.2).
+RETIRED_PACKAGES = ("toml", "toml_edit", "toml_datetime", "toml_parser", "toml_writer")
+RETIRED_REFERENCE = "docs/reference/manifest.md"
+#: A published page that names the retired format without naming its file: the
+#: `v1` token (but not a Kubernetes `apps/v1`, an image tag `:v1.26.1` or
+#: `setup-uv@v10`) and a `gone: <retired key>` row.
+RETIRED_FORMAT_WORD = re.compile(r"(?<![\w/:@.-])v1(?![\w.-])")
+RETIRED_ROW = re.compile(r"\bgone:", re.IGNORECASE)
+RETIRED_FORMAT_DETAIL = (
+    "names the retired manifest format without naming its file: describe the "
+    "`Blastfile` only, and delete the old-format row instead of marking it gone"
+)
+#: Pages a `zensical build` publishes that are **records**, not claims. The
+#: changelog is a published page, but it is the history of what happened (and
+#: the release notes name the retired file by necessity); scanning it would
+#: either force a rewrite of history or need the allowlist this guard refuses.
+#: The module docstring and `NODE.md` both call it a record, so the code does.
+RECORD_PAGES = ("docs/changelog.md",)
+#: A minimal `zensical.toml` for a synthetic tree, with the dated record excluded
+#: exactly as the real site excludes it.
+ZENSICAL_EXCERPT = (
+    "[project]\n"
+    'docs_dir = "docs"\n'
+    'exclude_docs = """\n'
+    "/design/\n"
+    "/decisions/\n"
+    "/research/\n"
+    "/knowledge/\n"
+    "/testing/\n"
+    '"""\n'
+)
+
+
+def published_page_files(root: Path) -> list[Path]:
+    """`README.md` plus every page `zensical build` publishes, by path.
+
+    `RECORD_PAGES` is removed after the published list is built, so the set is
+    still "what the site builds" and a record that happens to be published (the
+    changelog) cannot make the guard demand a rewrite of history.
+    """
+    zensical = root / "zensical.toml"
+    assert zensical.is_file(), (
+        f"{label_of(root, zensical)} is missing: the published-page set cannot be "
+        "derived, so the guard would pass vacuously"
+    )
+    pages = [
+        page
+        for page in fences.public_pages(root, text_of(zensical))
+        if page not in RECORD_PAGES
+    ]
+    return [root / page for page in pages if (root / page).is_file()]
+
+
+def live_plan_briefs(root: Path) -> list[Path]:
+    """Every plan brief still driving work, with **no** brief exemption.
+
+    The PHP guard exempts the brief that defines its list; this guard has no
+    defining brief, because after `MB.21.5.1` every live brief is clean.
+    """
+    return [
+        path
+        for path in sorted((root / "plan" / "nodes").rglob("NODE.md"))
+        if status_of(text_of(path)) not in RETIRED_STATUSES
+    ]
+
+
+def harness_files(root: Path) -> list[Path]:
+    """`scripts/**`, `e2e/**` and the `Makefile`, as text."""
+    files: list[Path] = []
+    for base in ("scripts", "e2e"):
+        directory = root / base
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*")):
+            if path.is_file() and (
+                path.name.startswith("Dockerfile") or path.suffix in HARNESS_SUFFIXES
+            ):
+                files.append(path)
+    makefile = root / "Makefile"
+    if makefile.is_file():
+        files.append(makefile)
+    return files
+
+
+def retired_manifest_paths(root: Path) -> list[Path]:
+    """Every file the erased name may not appear in, once each."""
+    paths = [root / name for name in FRONT_DOOR]
+    paths += published_page_files(root)
+    crates = root / "crates"
+    if crates.is_dir():
+        paths += sorted(crates.rglob("*.rs"))
+        paths += sorted(crates.rglob("Cargo.toml"))
+    python_dir = root / "python"
+    if python_dir.is_dir():
+        paths += sorted(python_dir.rglob("*.py"))
+    inventory = python_dir / "tests" / "runnable_docs"
+    if inventory.is_dir():
+        paths += sorted(inventory.glob("*.toml"))
+    paths += harness_files(root)
+    paths += live_plan_briefs(root)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        if path.is_file() and path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
+def retired_dependency_findings(root: Path) -> list[Finding]:
+    """A `toml`/`toml_edit` dependency, or a lock entry, means a reader came back."""
+    findings: list[Finding] = []
+    for relative in ("Cargo.toml", "crates/blastit-manifest/Cargo.toml"):
+        path = root / relative
+        if not path.is_file():
+            continue
+        for number, line in enumerate(text_of(path).splitlines(), 1):
+            stripped = line.strip()
+            for package in RETIRED_PACKAGES:
+                table = re.fullmatch(
+                    rf"\[(?:workspace\.)?dependencies\.{package}\]", stripped
+                )
+                key = re.fullmatch(rf"['\"]?{package}['\"]?\s*=.*", stripped)
+                if table or key:
+                    findings.append(
+                        Finding(
+                            f"{relative}:{number}",
+                            package,
+                            "the TOML reader is retired with the format; a `Blastfile` "
+                            "is read by `blastit-manifest`'s own parser (§15.2)",
+                        )
+                    )
+    lock = root / "Cargo.lock"
+    if lock.is_file():
+        for number, line in enumerate(text_of(lock).splitlines(), 1):
+            match = re.fullmatch(r'name = "(toml(?:_.*)?)"', line.strip())
+            if match:
+                findings.append(
+                    Finding(
+                        f"Cargo.lock:{number}",
+                        match.group(1),
+                        "a retired TOML crate is still reachable from the workspace (§15.2)",
+                    )
+                )
+    return findings
+
+
+def retired_reference_findings(root: Path) -> list[Finding]:
+    """The retired reference page must not be recreated."""
+    path = root / RETIRED_REFERENCE
+    if not path.is_file():
+        return []
+    return [
+        Finding(
+            RETIRED_REFERENCE,
+            "reference/manifest.md",
+            "the retired reference page must stay deleted; `docs/reference/blastfile.md` "
+            "is the reference",
+        )
+    ]
+
+
+def retired_manifest_findings(root: Path) -> list[Finding]:
+    """Every occurrence of the erased file name, the reader and the dead page."""
+    findings: list[Finding] = []
+    for path in retired_manifest_paths(root):
+        label = label_of(root, path)
+        for number, line in enumerate(text_of(path).splitlines(), 1):
+            for match in RETIRED_MANIFEST.finditer(line):
+                findings.append(
+                    Finding(
+                        f"{label}:{number}", match.group(0), RETIRED_MANIFEST_DETAIL
+                    )
+                )
+    findings += retired_dependency_findings(root)
+    findings += retired_reference_findings(root)
+    return findings
+
+
+def retired_format_word_findings(root: Path) -> list[Finding]:
+    """`v1`/`gone:` on a page a developer reads, without naming the file."""
+    findings: list[Finding] = []
+    for path in published_page_files(root):
+        label = label_of(root, path)
+        for number, line in enumerate(text_of(path).splitlines(), 1):
+            for pattern in (RETIRED_FORMAT_WORD, RETIRED_ROW):
+                match = pattern.search(line)
+                if match:
+                    findings.append(
+                        Finding(
+                            f"{label}:{number}", match.group(0), RETIRED_FORMAT_DETAIL
+                        )
+                    )
+    return findings
+
+
+def write_zensical(root: Path) -> None:
+    """The minimal site descriptor a synthetic tree needs for `public_pages`."""
+    write_page(root, "zensical.toml", ZENSICAL_EXCERPT)
+
+
+def test_the_real_tree_carries_no_retired_toml_manifest():
+    """The name `MB.21.4.5`/`MB.21.5.1` erased cannot come back unnoticed."""
+    findings = retired_manifest_findings(ROOT)
+    assert not findings, "\n".join(str(finding) for finding in findings)
+
+
+def test_no_published_page_names_the_retired_format():
+    """`v1` or `gone: <key>` leaks the format without naming the file."""
+    findings = retired_format_word_findings(ROOT)
+    assert not findings, "\n".join(str(finding) for finding in findings)
+
+
+def test_a_published_page_may_not_name_the_retired_manifest(tmp_path):
+    """A page a developer installs from is a product page, not a record."""
+    write_zensical(tmp_path)
+    write_page(
+        tmp_path, "docs/frameworks/php.md", f"Save it as {RETIRED_MANIFEST_NAME}.\n"
+    )
+    findings = retired_manifest_findings(tmp_path)
+    assert [(finding.where, finding.word) for finding in findings] == [
+        ("docs/frameworks/php.md:1", RETIRED_MANIFEST_NAME)
+    ]
+    assert RETIRED_MANIFEST_DETAIL in str(findings[0])
+
+
+def test_the_record_may_name_the_retired_manifest(tmp_path):
+    """ADRs, design notes and finished briefs are history, not claims."""
+    write_zensical(tmp_path)
+    write_page(
+        tmp_path,
+        "docs/decisions/ADR-0012-blastfile-dsl.md",
+        f"The former {RETIRED_MANIFEST_NAME} became `Blastfile`.\n",
+    )
+    write_page(
+        tmp_path,
+        "plan/nodes/MB/MB.21/MB.21.4/NODE.md",
+        f"---\nstatus: done\n---\nDelete {RETIRED_MANIFEST_NAME}.\n",
+    )
+    assert retired_manifest_findings(tmp_path) == []
+
+
+def test_the_changelog_is_a_published_record(tmp_path):
+    """The site builds the changelog, but it is history and keeps the name."""
+    write_zensical(tmp_path)
+    write_page(tmp_path, "docs/changelog.md", f"- Removed {RETIRED_MANIFEST_NAME}.\n")
+    write_page(tmp_path, "docs/frameworks/php.md", f"Save {RETIRED_MANIFEST_NAME}.\n")
+    findings = retired_manifest_findings(tmp_path)
+    assert [(finding.where, finding.word) for finding in findings] == [
+        ("docs/frameworks/php.md:1", RETIRED_MANIFEST_NAME)
+    ]
+    # The word rule treats the changelog as a record for the same reason.
+    write_page(tmp_path, "docs/changelog.md", "v1 is gone: the key was removed.\n")
+    assert retired_format_word_findings(tmp_path) == []
+
+
+def test_a_live_brief_may_not_name_the_retired_manifest(tmp_path):
+    """No in-flight brief can carry the retired format back in."""
+    write_zensical(tmp_path)
+    write_page(
+        tmp_path,
+        "plan/nodes/MB/MB.21/MB.21.9/NODE.md",
+        f"---\nstatus: ready\n---\nKeep {RETIRED_MANIFEST_NAME} working.\n",
+    )
+    assert [
+        (finding.where, finding.word) for finding in retired_manifest_findings(tmp_path)
+    ] == [("plan/nodes/MB/MB.21/MB.21.9/NODE.md:4", RETIRED_MANIFEST_NAME)]
+
+
+def test_a_crate_or_a_script_may_not_name_the_retired_manifest(tmp_path):
+    """The readers and the harnesses are scanned too, not only the pages."""
+    write_zensical(tmp_path)
+    write_page(
+        tmp_path,
+        "crates/blastit/src/config.rs",
+        f"//! Discovery used to read ./{RETIRED_MANIFEST_NAME}.\n",
+    )
+    write_page(
+        tmp_path,
+        "scripts/boot.sh",
+        f"exec blastit --manifest {RETIRED_MANIFEST_NAME}\n",
+    )
+    write_page(
+        tmp_path, "Makefile", f"serve:\n\tblastit --manifest {RETIRED_MANIFEST_NAME}\n"
+    )
+    write_page(tmp_path, "AGENTS.md", f"Name {RETIRED_MANIFEST_NAME} nowhere.\n")
+    findings = retired_manifest_findings(tmp_path)
+    assert [finding.where for finding in findings] == [
+        "AGENTS.md:1",
+        "crates/blastit/src/config.rs:1",
+        "scripts/boot.sh:1",
+        "Makefile:2",
+    ]
+
+
+def test_the_retired_reader_and_reference_are_refused(tmp_path):
+    """A dependency on a TOML crate, or the deleted page, is the format again."""
+    write_zensical(tmp_path)
+    write_page(tmp_path, "Cargo.toml", '[workspace.dependencies]\ntoml = "0.8"\n')
+    write_page(tmp_path, "Cargo.lock", '[[package]]\nname = "toml_edit"\n')
+    write_page(tmp_path, RETIRED_REFERENCE, "# The old manifest\n")
+    findings = retired_manifest_findings(tmp_path)
+    assert [(finding.where, finding.word) for finding in findings] == [
+        ("Cargo.toml:2", "toml"),
+        ("Cargo.lock:2", "toml_edit"),
+        (RETIRED_REFERENCE, "reference/manifest.md"),
+    ]
+
+
+def test_a_published_page_may_not_say_v1_or_gone(tmp_path):
+    """Both word shapes the `MB.21.1.1` review found are refused."""
+    write_zensical(tmp_path)
+    write_page(
+        tmp_path,
+        "docs/reference/blastfile.md",
+        "| v1's global `groups` key | gone: every attach is written on the view |\n",
+    )
+    findings = retired_format_word_findings(tmp_path)
+    assert [(finding.where, finding.word) for finding in findings] == [
+        ("docs/reference/blastfile.md:1", "v1"),
+        ("docs/reference/blastfile.md:1", "gone:"),
+    ]
+
+
+def test_the_word_rule_does_not_ban_a_real_version_tag(tmp_path):
+    """A Kubernetes `apps/v1`, an image tag and a pinned action are not the format."""
+    write_zensical(tmp_path)
+    write_page(
+        tmp_path,
+        "docs/deploy/anything-else.md",
+        "apiVersion: apps/v1\n"
+        "apiVersion: networking.k8s.io/v1\n"
+        "image: edoburu/pgbouncer:v1.26.1-p0\n"
+        "      - uses: astral-sh/setup-uv@v10.3.2\n",
+    )
+    assert retired_format_word_findings(tmp_path) == []
+
+
+def test_the_retired_manifest_guard_scans_a_real_tree():
+    """Anti-vacuity: every scanned population and the record both have a subject."""
+    assert (ROOT / "README.md").is_file()
+    assert (ROOT / "ARCHITECTURE.md").is_file()
+    assert (ROOT / "AGENTS.md").is_file()
+    pages = [label_of(ROOT, path) for path in published_page_files(ROOT)]
+    assert pages, "no published pages found"
+    assert not any(page.startswith("docs/decisions/") for page in pages)
+    assert "docs/changelog.md" not in pages, (
+        "the changelog is a published record; scanning it would force a rewrite of history"
+    )
+    assert RECORD_PAGES == ("docs/changelog.md",), (
+        "RECORD_PAGES is the guard's only exemption; widening it must be a deliberate, "
+        "reviewed edit that also updates this assertion and the docstring"
+    )
+    assert rust_sources(ROOT), "no Rust sources found"
+    assert any((ROOT / "scripts").iterdir()), "no scripts found"
+    briefs = sorted((ROOT / "plan" / "nodes").rglob("NODE.md"))
+    assert 0 < len(live_plan_briefs(ROOT)) < len(briefs)
+    finished = [page for page in briefs if status_of(text_of(page)) in RETIRED_STATUSES]
+    assert any(RETIRED_MANIFEST.search(text_of(page)) for page in finished), (
+        "no finished brief still names the retired manifest: the exemption is dead"
+    )
+    assert RETIRED_MANIFEST.search(
+        text_of(ROOT / "docs" / "decisions" / "ADR-0012-blastfile-dsl.md")
+    ), "no record still names the retired manifest: the exemption has no subject"
+    assert RETIRED_MANIFEST_NAME not in text_of(Path(__file__)), (
+        "this module must compose the name, not carry it"
     )
