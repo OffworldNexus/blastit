@@ -2198,3 +2198,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T10:31 [MB.21.4.6] (lead) status active -> review
 - 2026-11-16T10:36 [MB.21.4.6] (lead) reviewer PASS. Three MINOR dispositions (recorded here because RESULT.md is the owner's): (1) docs/research/INDEX.md is another node's line and is not staged in
 - 2026-11-16T10:36 [MB.21.4.6] (lead) status review -> done
+- 2026-11-16T10:36 [MB.21.4.6] (lead) commit 1cfdace
+- 2026-11-16T10:38 [MB.21.4.2] (planner) edited fields
+- 2026-11-16T10:39 [MB.21.4.2] (planner) re-scoped to what MB.21.4.1 (a3ac338) actually landed: 4.1 absorbed design 4.3's runtime half, so this leaf's removals work list is gone. Measured on the tree: 

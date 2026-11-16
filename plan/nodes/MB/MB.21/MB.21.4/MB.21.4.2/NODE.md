@@ -1,103 +1,137 @@
 ---
 id: MB.21.4.2
-title: "Prove runtime parity on Blastfile and land design §4.3's removals: static precedence, ingress modes, entrypoint php, traits, grants"
+title: "Prove runtime parity on Blastfile: the capability-map parity suite, the mount/entrypoint sentence re-spellings, and 4.1's five MINORs"
 kind: task
 status: ready
 owner: implementer
 priority: 1
-depends_on: [MB.21.4.1, MB.21.4.6]
+depends_on: [MB.21.4.6]
 paths:
-  - "crates/blastit/src/**"
+  - crates/blastit/src/config.rs
+  - crates/blastit/src/check.rs
+  - crates/blastit/src/stage0.rs
+  - crates/blastit/src/stage1.rs
+  - crates/blastit/src/dev_learn.rs
+  - crates/blastit/src/audit_v1.rs
   - "crates/blastit/tests/**"
+  - "crates/blastit-scheduler/tests/**"
   - "crates/blastit-scheduler/src/**"
-  - "crates/blastit-scheduler/tests/critical_static_entry.rs"
-  - "crates/blastit-scheduler/tests/critical_static_assets.rs"
-  - "crates/blastit-scheduler/tests/critical_static_resolve.rs"
-  - "crates/blastit-scheduler/tests/critical_rewrite.rs"
+  - "crates/blastit-manifest/src/blastfile/**"
   - "crates/blastit-manifest/src/model.rs"
-  - "crates/blastit-manifest/src/validate.rs"
-  - "crates/blastit-manifest/src/routing.rs"
   - "crates/blastit-manifest/src/error.rs"
-  - "crates/blastit-manifest/src/uid.rs"
-  - "crates/blastit-manifest/src/edit.rs"
-  - "crates/blastit-manifest/src/parse.rs"
-  - "crates/blastit-manifest/src/lib.rs"
-  - "crates/blastit-manifest/src/blastfile/lower.rs"
-  - "crates/blastit-manifest/src/blastfile/write.rs"
   - "crates/blastit-manifest/tests/**"
 attempts: 0
-max_attempts: 3
+max_attempts: 5
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T09:11"
+updated: "2026-11-16T10:38"
 ---
 
 # Goal
 
-Prove the running product is identical on `Blastfile`: every capability-map row gets a protected
-end-to-end assertion, and any real gap the new syntax exposes is closed here rather than documented
-away. This leaf is also where design §4.3's **removals** land — the four per-view accessors, the
-`SpaLost` → `fallback_missing` rename, §9.5/§9.6 over mounts, §9.2's precedence and the per-mount
-`immutable` caps — because they could not land while the retired reader was still the only caller
-(`MB.21.3.7`'s attempt 1, H-010).
+Prove the running product is the product the capability map describes: one named **runtime** assertion
+per row, and any real gap closed here rather than documented away. Finish the boot and `check` sentences
+whose subject is now the file's — a mount or the one `entrypoint`, never a route — and close the five
+MINOR findings `MB.21.4.1`'s review handed to this leaf.
 
-The fixtures are already `Blastfile`: `MB.21.4.1` cut the product over and translated every suite that
-boots the binary. This leaf translates **no fixture** — it adds the shapes a new capability needs and
-the parity proofs, nothing else.
+`MB.21.4.1` already landed the runtime half and this leaf re-does none of it: the scheduler serves `static`
+mounts (`MountTable` longest prefix, `MountHead` refusals before views, `Missing` → view → declared
+`fallback` on `GET`/`HEAD` → `404`, `405` after every view, `RouteInfo::{static_policy,static_forward}`
+deleted), `Manifest::static_roots`/`check_static_roots` walk mounts with `Location::Mount`,
+`stage0::mount_root_refusal` is gone, §9.5's `is_all_static`/`can_boot_without_app` have the mount arms,
+`php_view` binds every view from the file-level `Manifest::php()`, `StaticOutcome::SpaLost` is
+`FallbackMissing` with §9.4's `url_path` prefix join, the per-mount `immutable` caps and the
+`index`/`fallback` dotfile refusal are in `validate`, and every fixture `make check` reaches is a
+`Blastfile`. **This leaf translates no fixture and deletes no accessor.**
+
+`Route::{static_policy,with_static,php,with_php}` stay: `crates/blastit-manifest/src/parse.rs` (deleted in
+`MB.21.4.5`) and `validate.rs`'s route arms are their only remaining readers, exactly as
+`MB.21.4.1`'s `RESULT.md` recorded. §4.3's removal row is therefore `MB.21.4.5`'s; the most this leaf
+can prove is that no `Blastfile` path reads them.
 
 # Context
 
-- Design §9.2–§9.5 and §12. The parser produces the same `Manifest`, so this leaf is mostly **proof**
-  plus the few places where a new spelling lands differently:
-  * static precedence: (1) a file on disk under the prefix, (2) the first matching view, (3) the
-    declared deep-URL file, (4) `404`; and the refusals that must survive — `.phar`/`.php` sources
-    under the root, dotfiles, `..`, NUL bytes and symlink escapes;
-  * ingress `body json|form|none|raw` and the production refusal for an unacknowledged `raw`;
-  * `entrypoint php` as the app-wide front controller (the per-view `workers` cap is removed, §12.3);
-  * `prefork`, `egress any` (boot warning parity), a trait's grants (`use`), `postgres … unrestricted`
-    (inline-only, warns), table/column grants and `query '…'`;
-  * `HEAD` implied by `GET` through the scheduler's real matching (not only at parse time).
-- Suites: `crates/blastit/tests/critical_blastfile_parity.rs` is added as the one place the capability
-  map is enumerated, and an existing suite is extended only where a row needs a shape it does not have
-  (`critical_static_cli.rs`, `critical_raw_ingress.rs`, `critical_php_backend.rs` — all already
-  `Blastfile`, all already in `paths`). This leaf performs **no format translation**: `MB.21.4.1` owns
-  the fixture conversion for every suite it boots, `critical_config_and_presets.rs` included, so nothing
-  here renames a fixture file or rewrites a body from another format. No assertion may be weakened, and
-  `RESULT.md` lists each extension and each sentence whose subject changed.
-- Keep the scheduler untouched unless a real gap appears: `crates/blastit-scheduler` is in `paths` so
-  the precedence work may land there if `body/plan_body` or the static pump genuinely needs it.
-- **The §4.3 removals, which are this leaf's work list** (`MB.21.3.7` deferred them; `paths` now covers
-  every file below):
-  * delete `Route::static_policy()`, `Route::with_static`, `Route::php()` and `Route::with_php`
-    (`model.rs`): a `Blastfile` has no per-view static or php declaration, and keeping them would let
-    the model express only what the retired file could. Compile errors are the work list, in this
-    order: `model.rs`'s `is_all_static`/`can_boot_without_app`/`static_roots`/`check_static_roots`,
-    `validate.rs`, `blastfile/{lower,write}.rs`, `edit.rs`, `parse.rs` and the two manifest suites.
-  * the retired reader is still alive until `MB.21.4.5`, so `parse.rs` keeps compiling by lowering
-    into `Manifest::with_mounts`/`with_php` and `Route::with_sandbox` through the parse-time bridge
-    `MB.21.3.7` recorded — it gains no feature, and 4.5 deletes it as it stands;
-  * `StaticOutcome::SpaLost` → `fallback_missing` (`crates/blastit-scheduler/src/static_asset.rs`),
-    doc comment "the declared `fallback` file is missing or refused" (§9.2); the arm in `rewrite.rs`
-    and the three suites that pin it follow: `critical_rewrite.rs`, `critical_static_resolve.rs`,
-    `critical_static_assets.rs`;
-  * §9.5 `is_all_static`/`can_boot_without_app` (no app, no php, no views, ≥ 1 mount) and §9.6
-    `static_roots`/`check_static_roots` iterate **mounts**; a static-only file must boot and `check`
-    must audit it without `BLASTIT_APP`. The sentences change subject (`route "site"` → the mount's
-    prefix, `route "app"` → the entrypoint), so `crates/blastit/tests/{critical_static_cli,
-    critical_php_backend,no_python_build}.rs` change with them — every changed assertion is listed in
-    `RESULT.md` beside its new subject, and none is deleted;
-  * §9.2's four steps: longest prefix wins on a segment boundary, `Missing` falls to step 2 (never
-    `404`), `Hidden`/`Refused` are terminal on the full decoded path, the fallback answers `GET`/`HEAD`
-    only, `405` after every view. `RouteInfo::static_forward` is deleted from
-    `crates/blastit-scheduler/src/route.rs` and its readers (`rewrite.rs`, `static_response.rs`,
-    `config.rs`/`stage1.rs`) read the mount instead;
-  * §9.4 `immutable` keeps the client's full path (the `prefix + relative` join, never `//assets/...`)
-    and its caps move from per route to per mount (≤ 32 patterns, each ≤ 256 bytes), with the sentences
-    naming the mount; §9.1's dotfile definition is applied to `check_static_index`: a dotfile segment
-    is refused in `index`/`fallback` while `root "."` stays legal;
-  * the two retired-spelling sentences in `validate.rs` (the per-route sandbox sentence and the root
-    sentence that names the retired file) are re-spelled; their assertions live in the
-    `crates/blastit/tests/*` suites above, which is why this leaf owns them and 3.7 did not.
+- Design §9.2–§9.6, §12, §13.1 and §18. The parser produces the same `Manifest`, so this leaf is mostly
+  **proof** plus the places where a new spelling lands differently, and it must not weaken an assertion
+  anywhere.
+- **(a) the runtime parity suite — `crates/blastit-scheduler/tests/critical_blastfile_parity.rs`.** Boot it
+  through the scheduler's own harness (`common::{Options::blastfile, World, Script}`, which parses with
+  `Manifest::from_blastfile_str`, builds the real `RoutingTable` and hands the mounts over beside the route
+  table), so a row is asserted on the manifest a user writes and the scheduler the product runs — not on a
+  lowering. One `#[tokio::test]` per row, named after the row, and a header table mapping row → test:
+  * static four-step precedence: a nested `static "/assets/v2"` beats `static "/assets"` on the longest
+    prefix, `Missing` at step 1 reaches a view, `Hidden`/`Refused` never do, the declared `fallback`
+    answers `GET`/`HEAD` only and only from the longest matching mount, `405` after every view;
+  * ingress `body json|form|none|raw`, each **allowed and denied** (`json` + a form body → `400`, `none` +
+    any body → `413`, `raw` unacknowledged refuses the production boot and warns under `dev`,
+    `raw unvalidated` boots with the same warning);
+  * `prefork` reaches the route the scheduler spawns/switches;
+  * `egress any` and its `EgressRoute` boot warning arrive together (§12.4);
+  * a trait's grants are what the view actually receives (`use` order, then inline; `transaction_control`
+    OR-ed; queries deduplicated), `postgres … unrestricted` on the default and a named store, table and
+    column grants (`select products(id, name)` vs `select products`), and `query '…'` after
+    `blastit_sqlpolicy::normalize`;
+  * `entrypoint php` answers **every** view from the one file-level entry;
+  * `HEAD` is implied by `GET` through the real matcher, not only at parse time.
+  Rows the landed suites already prove are named in `RESULT.md` beside the new assertion
+  (`crates/blastit-manifest/tests/critical_blastfile_parity.rs` is the model-equality oracle from
+  `MB.21.3`; `crates/blastit-scheduler/tests/mount_precedence.rs` is `MB.21.4.1`'s narrative precedence),
+  so nothing claims coverage it does not add and no assertion is copied verbatim. The static row asserts
+  the **outcome table** (a request → a status), which is the half `mount_precedence.rs` does not pin.
+- **(b) the sentences whose subject changed, which `MB.21.4.3` does not own.** §13.2's six boot warnings
+  (`crates/blastit-manifest/src/error.rs`) and §10.2's `raw_ingress_refusals` sentence (`validate.rs`), and
+  §11.3's `trait` nouns, are **`MB.21.4.3`'s** — this leaf touches none of those strings and edits neither
+  file for them. What is left is the boot/`check` prose in this leaf's own files:
+  * `stage0::static_app_refusal` still says `BLASTIT_APP: every route is static, so no route can reach an
+    app: unset BLASTIT_APP, or declare a route without [route.static]`. A `Blastfile` has no `[route.static]`
+    block to point at and no route to name: it becomes the mount's sentence, same trigger, same exit code,
+    same order. Its two unit assertions (`stage0.rs`, `starts_with("BLASTIT_APP: every route is static")`)
+    follow;
+  * `stage0`'s libphp-absent sentence («the route declares no [route.static] block … or add a [route.static]
+    block») names the entrypoint and the mount instead;
+  * `check`'s `nothing to learn: every route is static` and `audit_v1::Report::all_static`'s doc comment
+    stop naming routes;
+  * `audit_v1::unrequested_static_roots` and `check.rs`'s `route "{route}": static root "{root}" was never
+    requested`. Today the function filters `route.static_policy()`, so on a `Blastfile` it can never report
+    anything — the R14 hint is dead exactly where the developer now writes mounts. It iterates mounts, the
+    sentence names the mount's prefix, and the rule for "requested" is the mount table plus the observed
+    paths (no `stat` at `check` time — a root's existence is the boot audit's job, §9.6). It stays a
+    stderr warning: never a finding, never `ok`, never the exit code.
+  Every re-spelled string keeps its trigger, its order and its exit code; `RESULT.md` lists each with its
+  old and new subject, and the suites that assert the string assert the new one (never merely "a warning
+  happened").
+- **(c) the five MINOR findings from `MB.21.4.1`'s review, measured on the tree at `1cfdace`.** (The sixth,
+  `docs/local.md:80,92`'s prose, is `MB.21.5.1`'s and is not touched here.)
+  1. **An escaped manifest path.** `config::missing_manifest` (`config.rs`, `path.display()`), `check`'s
+     `read_manifest` and its `path: {error}` arm (`check.rs`), and the two `stage0` boot contexts plus
+     `stage1`'s re-read put the operator's `BLASTIT_MANIFEST` string into a one-line sentence unescaped, so
+     a path holding a newline or a control byte prints two lines. Reuse `error::clipped` (it escapes control
+     bytes and cuts at 120 `char`s) through **one** helper — a third folding copy is the defect, not the fix.
+  2. **`fs::read_to_string` at the manifest sites** (`config.rs`'s `manifest_wiring`, `check.rs`'s
+     `read_manifest`, `stage0.rs`'s two boot paths, `stage1.rs`'s re-read): a FIFO at `./Blastfile` blocks
+     `check` and `dev` forever. `blastfile::read(path)` refuses a non-regular file and caps the read before
+     opening; each site keeps its own rendering (a missing file still produces §15.1's one sentence, every
+     other error keeps its `path: reason` shape) and its exit code.
+  3. **A real `fmt`-regression test.** `print.rs::a_printer_regression_is_refused_rather_than_written`
+     never calls `fmt` — it parses two strings. It must call `blastfile::fmt` and be able to fail for a
+     printer's reason: every committed fixture under `crates/blastit-manifest/tests/fixtures` formats to
+     text that re-parses, and a document `fmt` cannot return a re-parseable, budget-fitting rendering of is
+     `Err` rather than a written string. The test's name must not claim more than it asserts.
+  4. **One `pattern_is_writable`.** `dev_learn.rs` and `audit_v1.rs` hold byte-identical copies. One
+     crate-private definition (in `audit_v1`, which owns the `--json` vocabulary), one doc comment,
+     `dev_learn` calls it.
+  5. **The static-only predicates disagree.** `Manifest::is_all_static`/`can_boot_without_app` and
+     `stage0::is_static_only`/`runs_own_executors` each claim in their doc comments to answer "the same
+     question", and do not: the model accepts a `route.static_policy()` (the retired reader's shape) and
+     `entrypoint php` with no view, the boot requires `routes().is_empty()` and at least one view for the
+     PHP half. §9.5/§12.2 answer it: an `entrypoint php` no view reaches is the `EntrypointNotReached`
+     **warning**, never a missing `BLASTIT_APP`; a static-only file is mounts, no views, no executor. One
+     answer, and the boot calls it. The retired reader's route arms stay as that reader's compatibility
+     path until `MB.21.4.5` and their doc comments must say so instead of claiming equivalence.
+- **Paths and Cargo.** `crates/blastit-scheduler/src/**` is in `paths` only so a gap the parity suite proves
+  is closed in the leaf that found it (the expectation is a small diff, `MB.21.4.1` landed the runtime). No
+  `Cargo.toml`/`Cargo.lock` change is available here: `MB.21.4.5` owns both, and a suite that seems to need
+  a new dependency belongs in the crate that already depends on it.
 
 # Acceptance
 
@@ -105,46 +139,56 @@ the parity proofs, nothing else.
 $ make test-critical
 $ make rs-test
 $ uv run --no-project tools/critical_guard.py --base HEAD~1 --node MB.21.4.2
-$ grep -rnE 'Route::with_static|fn static_policy|fn with_static|SpaLost|static_forward' crates/ --include='*.rs'
-$ grep -rn 'route "site"\|route "app"' crates/blastit/tests/
+$ grep -rnE 'Route::with_static|fn with_static\(|fn static_policy\(|fn with_php\(|SpaLost|static_forward' crates/ --include='*.rs' | grep -vE '^crates/blastit-manifest/src/(model|parse)\.rs:'
+$ grep -rn 'every route is static' crates/blastit/src crates/blastit/tests
+$ grep -rn 'route "site"' crates/blastit/tests/
 $ git diff --stat HEAD~1 -- '*.toml'
 $ make check
 ```
 
-1. `critical_blastfile_parity.rs` enumerates one case per capability-map row and names the row in the
-   test name, so a reviewer can diff the map against the test list.
-2. Precedence is proven in the documented order on a fixture where all four steps are reachable — a
-   nested `static "/assets/v2"` beats `static "/assets"` on the longest prefix, `Missing` at step 1
-   reaches a view, `Hidden`/`Refused` never do — and each refusal (dotfile, `..`, NUL, symlink escape,
-   `.php` under the root) is a deny-side assertion.
-3. Each ingress mode is proven allowed and denied (a JSON route rejects a form body with `400`, a `none`
-   route rejects any body with `413`, a `raw` route without acknowledgement refuses the production boot
-   and warns under `dev`).
-4. A static-only `Blastfile` (mounts, no views) boots and passes `check` with no `BLASTIT_APP`; a
-   missing/unreadable `root` is refused naming the mount's prefix, not a route; the per-mount
-   `immutable` cap and the `index`/`fallback` dotfile refusal each have a deny-side test.
-5. The first `grep` prints nothing in `crates/*/src` or `crates/*/tests` (`Manifest::php()` stays; only
-   the per-view accessors go), and the second prints nothing: the static/PHP sentences name a mount or
-   the entrypoint, and `RESULT.md` lists each one with its old and new subject.
-6. `make test-critical` exit 0 (zero skips) and `make check` exit 0.
-7. This leaf translated no fixture: the third command prints nothing (no `.toml` manifest appears,
-   changes or disappears in this commit), every suite it touches already arrived as `Blastfile` from
-   `MB.21.4.1`, and `RESULT.md` names the fixtures it *extended* rather than converted.
-8. Any behavioural change beyond parsing is named in `RESULT.md` with the test that pins it; there are none
-   silently.
+1. `crates/blastit-scheduler/tests/critical_blastfile_parity.rs` boots through `Options::blastfile` and the
+   real mount/route tables, holds one named case per capability-map row (the eleven rows in Context (a)),
+   and its header maps every row to its test. `RESULT.md` says, for each row, whether the assertion is new
+   or what landed suite already proved the other half.
+2. Every precedence and refusal claim has a **deny side**: `json`+form → `400`, `none`+body → `413`, `raw`
+   unacknowledged → production boot refused and `dev` warned, `raw unvalidated` → boots with the same
+   warning, a dotfile/`..`/`.php` path under a mount never reaches the view, and a `fallback` missing from
+   the longest matching mount is `404` even when an outer mount declares one.
+3. A static-only `Blastfile` (mounts, no views) boots and passes `check` with no `BLASTIT_APP`; a mount root
+   that is missing or unreadable is refused naming the mount's prefix, not a route; a mount no observed
+   request reached is still reported on stderr naming that prefix, and is still only a warning.
+4. Each of the five MINOR findings has a test that fails without its fix: the newline-in-path fixture prints
+   exactly one sentence from `check` and from `dev`; a FIFO at the discovered manifest path makes `check`
+   exit `2` and `dev` exit `1` promptly instead of blocking; the `fmt` test calls `fmt`; `pattern_is_writable`
+   exists once; and one fixture set pins both predicates' arms (PHP entrypoint with no view = warning, no
+   missing app).
+5. The fourth command prints only `crates/blastit-manifest/src/{model,parse}.rs` lines (the accessor
+   definitions and the retired reader's own builder — both removed by `MB.21.4.5` with the reader); the
+   fifth prints nothing; the sixth prints no assertion.
+6. `make test-critical` exit 0 with zero skips — the new suite is picked up by `rs-test-critical`'s
+   `crates/*/tests/critical_*.rs` glob — `make rs-test` exit 0, `make check` exit 0, and
+   `critical_guard.py --node MB.21.4.2` is clean: every protected suite is extended, never weakened, and
+   `RESULT.md` lists each changed assertion with its old and new subject.
+7. This leaf translated no fixture: the seventh command prints nothing (no `*.toml` manifest appears,
+   changes or disappears in this commit), no fixture file is renamed, and `RESULT.md` names the suites it
+   *extended*.
+8. Every behavioural change beyond parsing is named in `RESULT.md` with the test that pins it — the
+   `HEAD`-from-`GET` matcher case and what "a requested mount" means included. There are none unnamed.
 
 # Notes
 
-- `HEAD`-from-`GET` is the one intentional semantic change: it must be visible in the parity suite and
-  in `docs/reference/manifest.md`'s replacement (`MB.21.5.1`).
-- If a case can only be proven in a container, say so and give the `e2e/` scenario name that covers it;
-  `MB.21.4.4` owns that fixture.
-- Protected suites in `paths` are there to be **extended, never weakened**: every removed assertion is
-  named in `RESULT.md` with the contract that replaced it, and `critical_guard.py --node MB.21.4.2` is
-  clean. If a sentence genuinely loses its subject (a mount has no route name), that is a design
-  decision already taken in §9.5/§9.6 — record the new subject, do not keep a dead noun.
-- `Manifest::php()` and `Manifest::with_php` stay (one entrypoint for the file). Only the per-view
-  accessors go; a grep that also matches `Manifest::php` is the wrong grep.
-- A retired-name hit outside this leaf's `paths` goes in `RESULT.md` with the sibling that owns it
-  (`e2e/**`, `scripts/**`, `Makefile` → `MB.21.4.4`; the last Rust paths and the dependency →
-  `MB.21.4.5`); it does not widen itself.
+- No detector, no sniffer, no second file name, no migration text: a body that is not a `Blastfile` is an
+  ordinary `Blastfile:<line>:<col>` syntax error, and this leaf adds no sentence that explains the change to
+  a user.
+- `MB.21.4.3` owns §13.2's six warnings, §10.2's `raw_ingress_refusals` sentence and §11.3's nouns; do not
+  re-spell one here even while touching a neighbouring line.
+- `MB.21.4.5` owns `[route.php]`/`[route.static]` prose that only describes the retired reader (`host.rs`,
+  `php_view.rs`, `validate.rs`'s stale "one route may declare" cap comments) and the dead
+  `stage0::php_worker_budget` sentence. If the sweep meets such a hit outside this leaf's sentences, record
+  it in `RESULT.md` with that sibling and do not widen.
+- Protected suites under `crates/*/tests/` and `crates/blastit-manifest/tests/` are in `paths` to be
+  **extended**: a removed assertion is named in `RESULT.md` with its replacement contract. A mount has no
+  route name, so a sentence that loses its subject records the new subject — never a dead noun, and never a
+  weaker "a warning exists" check where a string is asserted.
+- A case that can only be proven in a container names the `e2e/` scenario that covers it; `MB.21.4.4` owns
+  that fixture.
