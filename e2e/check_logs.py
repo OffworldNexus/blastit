@@ -116,14 +116,14 @@ def main():
           "the very statement the other route was granted is refused here")
     check(not any(route == "sql" and sql == granted_text for route, sql in refusals),
           "the route that was granted the statement was never refused it")
-    # The route whose grant is `queries = []`: an ordinary statement was refused
+    # The view whose grant is an empty `postgres { }`: an ordinary statement was refused
     # by the *proxy*, in its own words — a `sql.denied` event carrying the
     # SQLSTATE it answered. A database permission error would leave no such line
     # at all (only the app would hear of it), so this is what says the refusal
     # was the allowlist's and not the server's.
     check(any(e.get("route") == "deny" and sql.strip() == granted_text
               and e.get("sqlstate") == "42501" for e, sql in zip(denied, sqls)),
-          "the `queries = []` route refused an ordinary statement with SQLSTATE 42501")
+          "the view with an empty `postgres { }` refused an ordinary statement with SQLSTATE 42501")
     check(any(e.get("route") == "deny" and e.get("reason") == "the statement is not granted"
               for e in denied),
           "with the allowlist as the reason: the statement is not granted")

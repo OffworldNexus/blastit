@@ -5,7 +5,6 @@
 # the tests use has no view at all, and no view grants the statements psycopg
 # runs as a connection is established. Every one of those is a line in the report
 # the plugin writes.
-
 postgres $DATABASE_URL
 
 # Complete: the single SELECT this view sends is granted.

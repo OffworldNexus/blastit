@@ -17,8 +17,8 @@ host — so it is the check that blastit renders the socket directory as the
 `host` **query parameter** every client reads, not as a percent-encoded
 authority. It also runs connection statements of its own (`select
 pg_catalog.version()`, `select current_schema()`, two `show`s, a type lookup)
-and a `BEGIN`/`COMMIT` per request, which is what the manifest's `connection`
-group and `transaction_control` are for (§6) — one route is refused a `DELETE`
+and a `BEGIN`/`COMMIT` per request, which is what the file's `connection`
+trait and `transactions` are for (§6) — one view is refused a `DELETE`
 nobody granted, to show the limits are real.
 
 ```console
@@ -32,8 +32,9 @@ blastit's stdout afterwards; `sqlalchemy_check.py` does both for the second app
 stdlib-only.
 
 The static-assets page (`docs/frameworks/static-and-spa.md`) has a leg of its
-own, `static_assets.py`: a `[route.static]` fixture (`static_site/`) served by
-`blastit dev` in the same image, plus a second service whose route omits `spa`.
+own, `static_assets.py`: a `static` mount fixture (`static_site/`) served by
+`blastit dev` in the same image, plus a second service whose mount declares no
+`fallback`.
 The driver runs inside the `static` container, so the page's
 `127.0.0.1:8080` commands are verbatim; it replays every `$ ` command in the
 page's console fences and asserts the documented statuses and headers, the
@@ -61,38 +62,38 @@ and for `boot`/`ready` in the event stream. Docker only:
 $ scripts/build-wheel.sh && e2e/venv-smoke.sh
 ```
 
-## The manifest
+## The Blastfile
 
-`demo/blastit.toml` is generated, then committed. Run the app outside blastit
+`demo/Blastfile` is generated, then committed. Run the app outside blastit
 with `DEMO_HARVEST=/tmp/harvest.jsonl` (the middleware in `notes/harvest.py`
 records each statement as psycopg sends it), run the baseline scenario
 against it, then:
 
 ```console
-$ uv run e2e/grants.py /tmp/harvest.jsonl > e2e/demo/blastit.toml
+$ uv run e2e/grants.py /tmp/harvest.jsonl > e2e/demo/Blastfile
 ```
 
-The routes are listed in `grants.py`. `/notes/peek/`'s own statement is left
+The views are listed in `grants.py`. `/notes/peek/`'s own statement is left
 out on purpose.
 
 `/debug/sql/`, `/notes/sql/` and `/deny/sql/` run `q` as raw SQL and report what
-happened. The first two are the same view mounted in two routes, so the same
+happened. The first two are one view answering two paths, so the same
 text can be sent from two different processes: each one may run only the
-statements its own route was granted. `grants.py` gives the `sql` route exactly
+statements its own view was granted. `grants.py` gives the `sql` view exactly
 one statement (`SELECT count(*) FROM notes_note`) and nothing else, so the
-`notes` route is refused that same text and vice versa. The checks in
-`scenario.py` send the same text from both processes and from a third route that
+`notes` view is refused that same text and vice versa. The checks in
+`scenario.py` send the same text from both processes and from a third view that
 has no grants.
 
-`/deny/sql/` is that third route: its manifest entry is `[route.db] queries = []`
-with no group, so blastit binds it a listener whose allowlist is empty — the
-connection is accepted and the ordinary statement is refused by the proxy with
-SQLSTATE `42501`, which `check_logs.py` reads out of the `sql.denied` event (the
-allowlist as the reason, not a database permission error).
+`/deny/sql/` is that third view: its entry in the file is an empty
+`postgres { }` and no trait, so blastit binds it a listener whose allowlist is
+empty — the connection is accepted and the ordinary statement is refused by the
+proxy with SQLSTATE `42501`, which `check_logs.py` reads out of the `sql.denied`
+event (the allowlist as the reason, not a database permission error).
 
 `/debug/egress/` and `/egress/probe/` run the same probe — create (and close) an
 `AF_INET` socket, and `ptrace(PTRACE_TRACEME)` this process — and report what
-happened. The first is on the `debug` route, the second on `egress` with
-`egress = true` and no grants, so under blastit the §7.3 filters refuse the
-socket on one route and not the other. A route is marked egress with the fifth
+happened. The first is on the `debug` view, the second on `egress` with
+`egress any` and no grants, so under blastit the §7.3 filters refuse the
+socket on one view and not the other. A view is marked egress with the fifth
 column of `grants.py`'s `ROUTES`.

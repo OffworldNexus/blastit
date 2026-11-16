@@ -44,7 +44,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     BLASTIT_APP=demo.wsgi:application \
     BLASTIT_PRELOAD=demo.urls,notes.views \
-    BLASTIT_MANIFEST=/app/blastit.toml \
+    BLASTIT_MANIFEST=/app/Blastfile \
     PORT=8080
 EXPOSE 8080
 # The console script: it runs on the interpreter above, and stage 1 re-executes

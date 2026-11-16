@@ -15,12 +15,12 @@ It exists for the two things the Django demo cannot show:
   standard_conforming_strings`, `show transaction isolation level` and a type
   lookup, and every transaction is `BEGIN`/`COMMIT` (`SAVEPOINT`/`RELEASE` for a
   nested one). None of that is a *request's* statement, which is exactly what
-  the manifest's `connection` group and `transaction_control` are for (§6): the
-  app below works because `sqlalchemy/blastit.toml` grants them, not because
+  the `connection` trait and `transactions` are for (§6): the
+  app below works because `sqlalchemy/Blastfile` grants them, not because
   blastit lets a connection do anything it likes.
 
-Two routes, two grants: the read route may run its `SELECT` and nothing else,
-the write route its `INSERT`. Anything else a route runs is refused by dbproxy
+Two views, two grants: the read view may run its `SELECT` and nothing else,
+the write view its `INSERT`. Anything else a view runs is refused by dbproxy
 with SQLSTATE `42501`, and the `sql.denied` event that goes with it is what
 `sqlalchemy_check.py` looks for in the log.
 """
@@ -65,7 +65,9 @@ def add():
             text("INSERT INTO sqlalchemy_notes (body) VALUES (:body)"),
             {"body": "sqlalchemy"},
         )
-        total = connection.execute(text("SELECT count(*) FROM sqlalchemy_notes")).scalar_one()
+        total = connection.execute(
+            text("SELECT count(*) FROM sqlalchemy_notes")
+        ).scalar_one()
     return jsonify({"added": True, "count": total})
 
 

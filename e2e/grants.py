@@ -1,166 +1,264 @@
-"""Write e2e/demo/blastit.toml from a harvest file (see e2e/README.md). Stdlib only.
+"""Write e2e/demo/Blastfile from a harvest file (see e2e/README.md). Stdlib only.
 
-    grants.py HARVEST.jsonl > e2e/demo/blastit.toml
+    grants.py HARVEST.jsonl > e2e/demo/Blastfile
 
-The routes are fixed here; the statements come from the harvest. A statement
-used by several routes goes to the "session" group, attached to those routes;
-the rest is inline.
-Statements seen only on paths listed in DENY_PATHS are left out on purpose:
-those endpoints exist to prove that ungranted SQL is refused.
+The views are fixed here; the statements come from the harvest. A statement
+used by several views goes to the `session` trait, attached to those views; the
+rest is inline. Statements seen only on paths listed in DENY_PATHS are left out
+on purpose: those endpoints exist to prove that ungranted SQL is refused.
 
 Two things are fixed here rather than harvested, because what they must *lack*
 is the point:
 
-* `deny` is a `[route.db]` with `queries = []` and **no group**. The route names
-  the proxy, so it still gets a listener of its own; the listener's allowlist is
+* `deny` is a `postgres { }` with no directive and **no trait**. The view names
+  the store, so it still gets a listener of its own; the listener's allowlist is
   empty, and blastit's proxy refuses every statement on it with SQLSTATE
   `42501`. `e2e/scenario.py` sends one ordinary statement on it and checks that
   the refusal is the proxy's (a `sql.denied` event), never the database's own
   permissions.
-* every other route attaches the `connection` group **itself** (`groups =
-  ["connection"]`) instead of taking it from the top-level key: that key attaches
-  a group to *every* route, which would hand the `deny` route the connection
-  statements and make its empty grant a listener with two statements in it.
+* every other view attaches the `connection` trait **itself** (`use
+  connection`): no trait is attached file-wide, because that would hand the
+  `deny` view the connection statements and make its empty grant a listener
+  with two statements in it.
 """
 
 import json
 import re
 import sys
+from dataclasses import dataclass, field
 
-ROUTES = [
-    # name, path regexes, methods, transaction_control, egress
-    ("login", [r"/login/"], ["GET", "POST"], True, False),
-    ("logout", [r"/logout/"], ["POST"], True, False),
-    (
+
+@dataclass(frozen=True)
+class View:
+    """One view: what it matches, what the file writes, and what it may run."""
+
+    name: str
+    #: The retired-format path regexes this view answers, matched whole. They are
+    #: how a harvested request finds its view, never what the file spells.
+    matchers: tuple[str, ...]
+    #: The header patterns exactly as the `Blastfile` writes them.
+    patterns: tuple[str, ...]
+    methods: tuple[str, ...] | None = None
+    transactions: bool = False
+    egress: bool = False
+    trait: bool = True
+    body: str | None = None
+    #: Granted by hand, under the harvested statements.
+    extra: tuple[str, ...] = field(default=())
+    #: The comment lines the canonical file keeps above this section.
+    comment: tuple[str, ...] = field(default=())
+
+
+ROUTES = (
+    View(
+        "login",
+        (r"/login/",),
+        ('"/login/"',),
+        methods=("GET", "POST"),
+        transactions=True,
+        body="form",
+    ),
+    View(
+        "logout",
+        (r"/logout/",),
+        ('"/logout/"',),
+        methods=("POST",),
+        transactions=True,
+        body="form",
+    ),
+    View(
         "notes",
-        [r"/notes/", r"/notes/[0-9]+/delete/", r"/notes/peek/", r"/notes/sql/"],
-        None,
-        True,
-        False,
+        (r"/notes/", r"/notes/[0-9]+/delete/", r"/notes/peek/", r"/notes/sql/"),
+        (
+            '"/notes/"',
+            '"/notes/{id:int}/delete/"',
+            '"/notes/peek/"',
+            '"/notes/sql/"',
+        ),
+        transactions=True,
+        body="form",
     ),
-    (
+    View(
         "debug",
-        [r"/debug/env/", r"/debug/request/", r"/debug/caps/", r"/debug/egress/"],
-        ["GET"],
-        False,
-        False,
+        (r"/debug/env/", r"/debug/request/", r"/debug/caps/", r"/debug/egress/"),
+        (
+            '"/debug/env/"',
+            '"/debug/request/"',
+            '"/debug/caps/"',
+            '"/debug/egress/"',
+        ),
+        methods=("GET",),
     ),
-    ("sql", [r"/debug/sql/"], ["GET"], False, False),
-    # The only route that may reach the network (§7.3), and it has no grants:
-    # the probe opens no database connection at all.
-    ("egress", [r"/egress/probe/"], ["GET"], False, True),
-    # The route whose grant is *explicitly* empty — `queries = []` and no group —
-    # so its listener exists and refuses everything (SQLSTATE 42501).
-    ("deny", [r"/deny/sql/"], ["GET"], False, False),
-    ("fallback", [r".*"], None, False, False),
-]
+    View(
+        "sql",
+        (r"/debug/sql/",),
+        ('"/debug/sql/"',),
+        methods=("GET",),
+        extra=("SELECT count(*) FROM notes_note",),
+    ),
+    View(
+        "egress",
+        (r"/egress/probe/",),
+        ('"/egress/probe/"',),
+        methods=("GET",),
+        egress=True,
+        comment=(
+            "# The only view that may reach the network (§7.3), and it has no",
+            "# grants: the probe opens no database connection at all.",
+        ),
+    ),
+    View(
+        "deny",
+        (r"/deny/sql/",),
+        ('"/deny/sql/"',),
+        methods=("GET",),
+        trait=False,
+        comment=(
+            "# The view whose grant is *explicitly* empty — no statement and no",
+            "# trait — so its listener exists and refuses everything (SQLSTATE 42501).",
+        ),
+    ),
+    View("fallback", (r".*",), ("regex '.*'",)),
+)
 DENY_PATHS = {"/notes/peek/", "/notes/sql/", "/debug/sql/", "/deny/sql/"}
-#: The routes that take no group at all, written with `queries = []`: their
-#: empty grant is the assertion, so nothing may fill it in (see the docstring).
-EMPTY_GRANT = {"deny"}
-#: The group every other route attaches by name — the connection-setup
-#: statements, which belong to whichever route opens the connection.
-CONNECTION_GROUP = "connection"
-# The routes that take a request body, and the codec it is validated and
-# re-encoded with: Django's login, logout, note-add and note-delete forms are
-# `application/x-www-form-urlencoded` (docs/frameworks/django.md).
-INGRESS = {"login": "form", "logout": "form", "notes": "form"}
-# Granted by hand: the raw-SQL probe's route may run exactly this statement.
-EXTRA = {"sql": ["SELECT count(*) FROM notes_note"]}
+#: Statements the `connection` trait carries: a harvest records the connection
+#: housekeeping on whichever view opened the connection first, and it belongs to
+#: the trait, never to that view's own grant.
+CONNECTION_STATEMENTS = {
+    "SELECT set_config('TimeZone', $1, false)",
+    "SELECT 1",
+}
+#: The trait every view but `deny` attaches — the connection-setup statements,
+#: which belong to whichever view opens the connection.
+CONNECTION_TRAIT = "connection"
 
 HEADER = """\
-# The blastit manifest of the demo app. Generated by e2e/grants.py from a
-# harvest of the e2e scenario, then committed (ARCHITECTURE.md §6).
+# The Blastfile of the demo app. Generated by e2e/grants.py from a harvest of
+# the e2e scenario, then committed (ARCHITECTURE.md §6).
 #
-# The routes the scenario posts a form to declare `[route.ingress] body =
-# "form"`: a body on a route with no codec is a `413` (ADR-0006), so leaving it
-# out fails the scenario at the login form rather than at the database.
+# The views the scenario posts a form to declare `body form`: a body on a view
+# with no codec is a `413` (ADR-0006), so leaving it out fails the scenario at
+# the login form rather than at the database.
 #
-# Every route attaches the `connection` group itself instead of taking it from a
-# top-level `groups` key: that key attaches a group to *every* route, and the
-# `deny` route below must take none — its `[route.db] queries = []` is the
-# assertion (an empty allowlist refuses every statement with SQLSTATE 42501).
-version = 1
-
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+# Every view attaches the `connection` trait itself: nothing attaches a trait to
+# every view at once, and the `deny` view below must use none — its empty
+# `postgres { }` is the assertion (an empty allowlist refuses every statement
+# with SQLSTATE 42501).
+postgres $DATABASE_URL
 
 # Django's own connection housekeeping: the time zone on a new connection when
 # the server's isn't UTC, and the health check after a request had an error.
-[group.connection.db]
-queries = ["SELECT set_config('TimeZone', $1, false)", "SELECT 1"]
-"""
+trait connection {
+    postgres {
+        query "SELECT set_config('TimeZone', $1, false)"
+        query 'SELECT 1'
+    }
+}"""
 
 
 def route_of(method, path):
-    for name, patterns, methods, _, _ in ROUTES:
-        if methods and method not in methods:
+    for view in ROUTES:
+        if view.methods and method not in view.methods:
             continue
-        if any(re.fullmatch(p, path) for p in patterns):
-            return name
+        if any(re.fullmatch(p, path) for p in view.matchers):
+            return view.name
     return None
 
 
-def toml_list(queries):
-    def lit(q):
-        return "'" + q + "'" if "'" not in q else json.dumps(q)
+def query_line(sql, indent):
+    """One `query` directive, in the string form the statement needs.
 
-    return "[\n" + "".join(f"  {lit(q)},\n" for q in queries) + "]"
+    A `'…'` raw string has no escapes, so a statement holding a `'` — a
+    connection-setup statement such as `set_config('TimeZone', …)` — goes in a
+    `"…"` string with the four escapes the language spells.
+    """
+    pad = " " * indent
+    if "'" not in sql and "\n" not in sql:
+        return f"{pad}query '{sql}'"
+    escaped = (
+        sql.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
+    return f'{pad}query "{escaped}"'
+
+
+def grant_block(name, statements, transactions, indent):
+    """One view's `postgres { … }`, or the empty grant `deny` also needs."""
+    pad = " " * indent
+    inner = " " * (indent + 4)
+    if not statements and not transactions and name != "deny":
+        return []
+    lines = [f"{pad}postgres {{"]
+    if transactions:
+        lines.append(f"{inner}transactions")
+    lines.extend(query_line(statement, indent + 4) for statement in statements)
+    lines.append(f"{pad}}}")
+    return lines
+
+
+def view_block(view, statements, granted, shared):
+    """One canonical `view` section, comment-free: the caller keeps the blank lines."""
+    lines = []
+    header = f"view {view.name}"
+    if view.methods:
+        header += " " + ", ".join(view.methods)
+    header += " " + ", ".join(view.patterns) + " {"
+    lines.append(header)
+    attached = [CONNECTION_TRAIT] if view.trait else []
+    if any(statement in shared for statement in granted):
+        attached.append("session")
+    if attached:
+        lines.append("    use " + ", ".join(attached))
+    if view.body:
+        lines.append(f"    body {view.body}")
+    if view.egress:
+        lines.append("    egress any")
+    lines.extend(grant_block(view.name, statements, view.transactions, 4))
+    lines.append("}")
+    return lines
 
 
 def main():
-    per_route = {name: {} for name, *_ in ROUTES}  # route -> sql -> set of paths
-    for line in open(sys.argv[1]):
-        rec = json.loads(line)
-        route = route_of(rec["method"], rec["path"])
-        if route:
-            per_route[route].setdefault(rec["sql"], set()).add(rec["path"])
+    per_view = {view.name: {} for view in ROUTES}  # view -> sql -> set of paths
+    with open(sys.argv[1], encoding="utf-8") as harvest:
+        for line in harvest:
+            record = json.loads(line)
+            if record["sql"] in CONNECTION_STATEMENTS:
+                continue
+            name = route_of(record["method"], record["path"])
+            if name:
+                per_view[name].setdefault(record["sql"], set()).add(record["path"])
 
     granted = {}
-    for route, stmts in per_route.items():
-        granted[route] = [
-            sql for sql, paths in stmts.items() if not paths <= DENY_PATHS
+    for name, statements in per_view.items():
+        granted[name] = [
+            sql for sql, paths in statements.items() if not paths <= DENY_PATHS
         ]
-    order = [q for r in granted for q in granted[r]]
+    order = [statement for name in granted for statement in granted[name]]
     shared = [
-        q for q in dict.fromkeys(order) if sum(q in granted[r] for r in granted) >= 2
+        statement
+        for statement in dict.fromkeys(order)
+        if sum(statement in granted[name] for name in granted) >= 2
     ]
 
     out = [HEADER]
     if shared:
-        out.append("# Statements several routes share: session and user lookups.")
-        out.append(f"[group.session.db]\nqueries = {toml_list(shared)}\n")
-    for name, patterns, methods, tx, egress in ROUTES:
-        out.append("[[route]]")
-        out.append(f'name = "{name}"')
-        out.append("path = [" + ", ".join(f"'{p}'" for p in patterns) + "]")
-        if methods:
-            out.append("methods = [" + ", ".join(f'"{m}"' for m in methods) + "]")
-        attached = [] if name in EMPTY_GRANT else [CONNECTION_GROUP]
-        if any(q in shared for q in granted[name]):
-            attached.append("session")
-        if attached:
-            out.append("groups = [" + ", ".join(f'"{g}"' for g in attached) + "]")
-        if egress:
-            out.append("egress = true")
-        inline = [q for q in granted[name] if q not in shared] + EXTRA.get(name, [])
-        if inline or tx or name in EMPTY_GRANT:
-            out.append("[route.db]")
-            if tx:
-                out.append("transaction_control = true")
-            if inline:
-                out.append(f"queries = {toml_list(inline)}")
-            elif name in EMPTY_GRANT:
-                # Written out, not left off: the route declares the proxy with a
-                # grant of nothing, so blastit gives it a listener that refuses
-                # every statement instead of no listener at all.
-                out.append("queries = []")
-        if name in INGRESS:
-            out.append("[route.ingress]")
-            out.append(f'body = "{INGRESS[name]}"')
         out.append("")
-    sys.stdout.write("\n".join(out))
+        out.append("# Statements several views share: session and user lookups.")
+        out.append("trait session {")
+        out.append("    postgres {")
+        out.extend(query_line(statement, 8) for statement in shared)
+        out.append("    }")
+        out.append("}")
+    for view in ROUTES:
+        statements = [s for s in granted[view.name] if s not in shared]
+        statements.extend(view.extra)
+        out.append("")
+        out.extend(view.comment)
+        out.extend(view_block(view, statements, granted[view.name], shared))
+    sys.stdout.write("\n".join(out) + "\n")
 
 
 if __name__ == "__main__":

@@ -400,7 +400,7 @@ def check(image: str) -> int:
             "or create a file in the static root "
             f"({(create.stderr or create.stdout).strip()[-120:]})",
         )
-        unlink = _exec("sh", "-c", "rm -f /app/blastit.toml", user="1000")
+        unlink = _exec("sh", "-c", "rm -f /app/Blastfile", user="1000")
         report(
             unlink.returncode != 0,
             "or unlink the manifest "
@@ -441,9 +441,9 @@ def check(image: str) -> int:
         report(_opens() == 0, f"the decoy recorded 0 opens ({_opens()})")
         refusal = server.log()
         report(
-            "[route.php] entry" in refusal
+            "entrypoint php /app/public/index.php" in refusal
             and "restart blastit to run the file as it is now" in refusal,
-            "and the worker names the entry and the fix in its log",
+            "and the worker names the entrypoint, its file and the fix in its log",
         )
         # What is pinned is the inode: putting the application's own file back
         # (`mv`, so the same inode) serves again from the same worker, which is

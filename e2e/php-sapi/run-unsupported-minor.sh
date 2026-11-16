@@ -34,16 +34,12 @@ readelf --dyn-syms "$libphp" | grep -w php_version \
 app=/tmp/unsupported-minor
 rm -rf "$app"
 mkdir -p "$app/public"
-cat >"$app/blastit.toml" <<'TOML'
-version = 1
+cat >"$app/Blastfile" <<'BLASTFILE'
+entrypoint php "public/index.php"
 
-[[route]]
-name = "app"
-path = ['.*']
-
-[route.php]
-entry = "public/index.php"
-TOML
+view app regex '.*' {
+}
+BLASTFILE
 echo '<?php echo "hello from php";' >"$app/public/index.php"
 
 log=/tmp/unsupported-minor.log

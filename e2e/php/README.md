@@ -10,9 +10,8 @@ by `e2e/php2shell.py`); nothing here is a separate command to remember.
 e2e/php/
 ├── Dockerfile        the runtime: the built wheel + Debian's NTS libphp8.4 + the shim
 ├── fixture/          what blastit serves (copied to a scratch dir by the driver)
-│   ├── blastit.toml  two [route.php] routes: the API above the catch-all
+│   ├── Blastfile     one `entrypoint php`, two views: the API above the catch-all
 │   ├── public/       the front controller, the hashed stylesheet
-│   ├── api/          the second route's entry (no [route.static])
 │   ├── src/          the twelve $_SERVER facts, shared
 │   ├── canaries/     prepend.php (PREPEND-RAN), shell.jpg (JPG-RAN)
 │   └── elsewhere/    evil.php (EVIL-RAN), outside the static root
@@ -79,7 +78,7 @@ $ docker run --rm -v "$PWD/e2e/php2shell.py:/opt/e2e/php2shell.py:ro" \
 
 ## What it does not prove
 
-`[route.php] entry` is a path the worker resolves per request; only `libphp` and
+`entrypoint php`'s file is resolved by the worker per request; only `libphp` and
 the shim are pinned by descriptor (`ADR-0010` §1). A decoy swap *inside* the
 application root therefore executes — `e2e/rootless/php_entry_swap.py` prints
 that measurement as **MB.3.56's witness** (that node pins the entry by

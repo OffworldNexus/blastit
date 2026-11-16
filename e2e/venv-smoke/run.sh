@@ -31,7 +31,7 @@ mkdir -p "$work"
 # the sandbox — and /app, /srv/app or a project checkout are all 0755.
 chmod 0755 "$work"
 cd "$work"
-cp /fixture/wsgi.py /fixture/blastit.toml /fixture/check.py .
+cp /fixture/wsgi.py /fixture/Blastfile /fixture/check.py .
 
 uv venv "$work/.venv" --python "$interpreter"
 # The app's dependency, stood in for by a module that is in the venv's
@@ -81,7 +81,7 @@ run_server() {
     sudo env \
         PORT=8080 \
         BLASTIT_APP=wsgi:application \
-        BLASTIT_MANIFEST="$work/blastit.toml" \
+        BLASTIT_MANIFEST="$work/Blastfile" \
         BLASTIT_LOG_FORMAT=json \
         DATABASE_URL="postgresql://demo:not-a-real-password@db.invalid:5432/demo?sslmode=disable" \
         "$work/.venv/bin/blastit" "$@"
@@ -136,7 +136,7 @@ sudo chmod 0750 "$stdlib"
 if sudo env \
     PORT=8081 \
     BLASTIT_APP=wsgi:application \
-    BLASTIT_MANIFEST="$work/blastit.toml" \
+    BLASTIT_MANIFEST="$work/Blastfile" \
     BLASTIT_LOG_FORMAT=json \
     DATABASE_URL="postgresql://demo:not-a-real-password@db.invalid:5432/demo?sslmode=disable" \
     "$work/.venv/bin/blastit" >"$work/private.log" 2>&1; then
@@ -162,7 +162,7 @@ chmod 0700 "$dbproxy"
 if sudo env \
     PORT=8081 \
     BLASTIT_APP=wsgi:application \
-    BLASTIT_MANIFEST="$work/blastit.toml" \
+    BLASTIT_MANIFEST="$work/Blastfile" \
     BLASTIT_LOG_FORMAT=json \
     DATABASE_URL="postgresql://demo:not-a-real-password@db.invalid:5432/demo?sslmode=disable" \
     "$work/.venv/bin/blastit" >"$work/dbproxy-mode.log" 2>&1; then

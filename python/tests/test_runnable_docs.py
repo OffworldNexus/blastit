@@ -111,7 +111,7 @@ class FenceShapeTest(unittest.TestCase):
 
     def test_a_non_console_block_is_not_a_fence(self) -> None:
         text = page(
-            block('name = "shop"', info='toml title="blastit.toml"'),
+            block('name = "shop"', info='toml title="pyproject.toml"'),
             block("body { margin: 0 }", marker="~~~", info="css"),
         )
         self.assertEqual(fences.console_fences("docs/other.md", text), [])
@@ -139,10 +139,11 @@ class FenceShapeTest(unittest.TestCase):
     def test_a_heredoc_command_keeps_its_body(self) -> None:
         text = page(
             block(
-                "$ cat > blastit.toml <<'TOML'\n"
-                "[project]\n"
-                'name = "shop"\n'
-                "TOML\n"
+                "$ cat > Blastfile <<'BLASTFILE'\n"
+                'static "/" {\n'
+                '    root "public"\n'
+                "}\n"
+                "BLASTFILE\n"
                 "$ blastit check\n"
                 "ok"
             )
@@ -151,7 +152,11 @@ class FenceShapeTest(unittest.TestCase):
         self.assertEqual(len(commands), 2)
         self.assertEqual(
             commands[0].text,
-            "cat > blastit.toml <<'TOML'\n[project]\nname = \"shop\"\nTOML",
+            "cat > Blastfile <<'BLASTFILE'\n"
+            'static "/" {\n'
+            '    root "public"\n'
+            "}\n"
+            "BLASTFILE",
         )
         self.assertEqual(commands[0].expected, ())
         self.assertEqual(commands[1].text, "blastit check")

@@ -152,7 +152,7 @@ def test_a_packaged_settings_module_is_served(
     only works if the plugin resolves it where it was invoked.
     """
     outcome = run(
-        packaged_project, "--blastit-manifest", "blastit.toml", tmp_path=tmp_path
+        packaged_project, "--blastit-manifest", "Blastfile", tmp_path=tmp_path
     )
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
     assert "1 passed" in outcome.stdout, outcome.stdout
@@ -177,7 +177,7 @@ def test_a_live_server_is_served_by_blastit(
     outcome = run(
         project,
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
         "-k",
         "not override",
         tmp_path=tmp_path,
@@ -226,7 +226,7 @@ def test_a_projects_own_live_server_wins(
     outcome = run(
         project,
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
         "--blastit-live-server",
         "-k",
         "own_live_server",
@@ -253,7 +253,7 @@ def test_the_live_server_option_serves_a_live_server_suite(
     outcome = run(
         project,
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
         "--blastit-live-server",
         "-k",
         "override",

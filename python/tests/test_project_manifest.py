@@ -54,8 +54,8 @@ def test_the_fixture_is_a_blastfile_the_one_reader_accepts() -> None:
     parsed = model(fixture())
     assert [store["name"] for store in parsed["stores"]] == ["db"]
     assert [view["name"] for view in parsed["views"]] == VIEWS
-    assert not (PROJECT / "blastit.toml").exists(), (
-        "no retired document sits beside the fixture"
+    assert [path.name for path in PROJECT.glob("Blastfile*")] == ["Blastfile"], (
+        "the fixture is one Blastfile, and nothing else sits beside it"
     )
 
 
@@ -122,12 +122,14 @@ def test_a_repaired_model_carries_every_fix_the_report_names() -> None:
     assert again["traits"]["connection"]["db"]["queries"] == [
         "SET TIME ZONE 'UTC'",
     ], "the grantable setup statement is in the trait; the inlined one is not"
-    assert all(
-        "connection" in view["use"]
-        for view in again["views"]
-        if view["name"] != "fallback"
-    ), "every view the repair attached the trait to still uses it"
+    assert all("connection" in view["use"] for view in again["views"]), (
+        "every view uses the trait the repair wrote, the one it created included"
+    )
     assert again["views"][-1]["name"] == "fallback"
+    assert again["views"][-1]["use"] == ["connection"], (
+        "the view the repair creates opens the store, so it uses the trait too: "
+        "without it the next report names the setup statement ungranted there"
+    )
     assert again["views"][-1]["patterns"] == ["/oops/"]
     assert "query \"SET TIME ZONE 'UTC'\"" in written, (
         'a `\'`-bearing statement is written as a `"…"` string'

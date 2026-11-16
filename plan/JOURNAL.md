@@ -2256,3 +2256,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T14:44 [MB.21.4.8] (planner) created (task) Bound the dev test client's response pairing: parse a response against its own request, close after a body, and deadline every wait with a small 
 - 2026-11-16T14:44 [MB.21.4.8] (planner) why this leaf: the protected 413 assertion in dev_boots_five_unprivileged_roles_and_strips_secrets is flaky at gate rate (2 of the last 4 full make check runs h
 - 2026-11-16T14:44 [MB.21.4] (planner) flake now owned by MB.21.4.8: dev_boots_five_unprivileged_roles_and_strips_secrets read 200 where its own dev log says 413 unmatched, measured 2/4 full-gate run
+- 2026-11-16T15:27 [MB.21.4.4] (lead) reported done but left two red tests in python/tests/test_pytest_plugin.py (line 720 expects exit 1 where the plugin now exits 4 'does not parse'; line 627 conn
+- 2026-11-16T15:44 [MB.21.4.4] (lead) status active -> review
+- 2026-11-16T15:53 [MB.21.4.4] (lead) reviewer PASS; six MINORs. Fixing 1-4 before commit (fmt of python/tests/project/Blastfile, the retired queries = [] sentence in e2e/scenario.py:765, the 'the a
+- 2026-11-16T16:07 [MB.21.4.5] (lead) edited fields
+- 2026-11-16T16:07 [MB.21.4.5] (lead) paths widened before dispatch: crates/blastit-sqlpolicy/src/tables.rs::TableGrants::to_toml still renders the retired [route.db.tables] snippet (MB.21.4.7's fol
+- 2026-11-16T16:08 [MB.21.4.4] (lead) HOST CONDITION at commit time: this machine is at 44/48 GiB used by another project (orange-poc procrastinate workers, PIDs 1493095-97/1666738-53), MemAvailable
+- 2026-11-16T16:08 [MB.21.4.4] (lead) status review -> done

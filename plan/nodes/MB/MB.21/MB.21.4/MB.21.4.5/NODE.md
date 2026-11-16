@@ -13,13 +13,14 @@ paths:
   - "crates/blastit-manifest/src/edit.rs"
   - "crates/blastit-manifest/src/routing.rs"
   - "crates/blastit-manifest/src/validate.rs"
-  - "crates/blastit-manifest/tests/parse.rs"
-  - "crates/blastit-manifest/tests/common/mod.rs"
-  - "crates/blastit-manifest/tests/mutation_gaps.rs"
-  - "crates/blastit-manifest/tests/docs_fences.rs"
+  - "crates/blastit-manifest/src/error.rs"
+  - "crates/blastit-manifest/tests/**"
   - crates/blastit/src/stage1.rs
+  - crates/blastit/src/audit_v1.rs
   - "crates/blastit-env/src/**"
-  - "crates/blastit-env/tests/environment.rs"
+  - "crates/blastit-env/tests/**"
+  - "crates/blastit-sqlpolicy/src/**"
+  - "crates/blastit-sqlpolicy/tests/**"
   - "crates/blastit-manifest/Cargo.toml"
   - Cargo.toml
   - Cargo.lock
@@ -27,7 +28,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T02:16"
-updated: "2026-11-16T02:16"
+updated: "2026-11-16T16:07"
 ---
 
 # Goal

@@ -1,0 +1,24 @@
+# The PHP page's fixture (`docs/frameworks/php.md` §1), with a second view so
+# the e2e can prove the first match wins and that a path no file answers is the
+# front controller's.
+#
+# One `entrypoint php` is the whole file's front controller (`ADR-0012` §12.3):
+# every view reaches it, and `/api/.*` is a view of its own above the catch-all
+# so a request under it takes that view's sandbox instead.
+entrypoint php "public/index.php"
+
+# The canonical layout: the static root, then the catch-all. A regular file
+# under `public` is answered by the responder before any view runs; a path
+# ending in `.php` is never served, so the front controller's source cannot be
+# disclosed.
+static "/" {
+    root "public"
+}
+
+view api regex '/api/.*' {
+    body form
+}
+
+view app regex '.*' {
+    body form
+}

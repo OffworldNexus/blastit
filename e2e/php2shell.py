@@ -34,8 +34,8 @@ What it does:
   instead of `blastit` — its canary must be **present**, which is what makes
   "absent" mean "the channel is absent" and not "the canary is broken";
 * the page has three `$ ` commands: `blastit dev --learn` is executed verbatim
-  (it serves, exits `0` on `SIGINT`, and one `EmbeddedView` worker set starts
-  per `[route.php]` route, each with its own pid); `uv tool install blastit` and
+  (it serves, exits `0` on `SIGINT`, and one `EmbeddedView` worker starts per
+  `view`, each with its own pid); `uv tool install blastit` and
   `blastit --preset compose-traefik` are explained — a published-wheel install
   and a production preset owned by `e2e/rootless` — and an unknown `$ ` command
   is a failure;
@@ -380,7 +380,7 @@ PROBES: dict[str, Probe] = {
                 b"/api/__inspect?%ADd+allow_url_include%3d1+%ADd+auto_prepend_file%3dphp://input",
                 asserts=(
                     ("eq", "allow_url_include", "0"),
-                    ("eq", "script_filename", b"{root}/api/index.php"),
+                    ("eq", "script_filename", b"{root}/public/index.php"),
                 ),
             ),
         ),
@@ -551,16 +551,11 @@ PROBES: dict[str, Probe] = {
     ),
     "E23": Probe(
         "P1",
-        (
-            Exchange(
-                b"/api/../../etc/passwd",
-                asserts=(
-                    ("eq", "script_filename", b"{root}/api/index.php"),
-                    ("eq", "path_info", "/api/../../etc/passwd"),
-                ),
-            ),
-        ),
-        "row 23: without `[route.static]` `..` is data and the entry stays pinned",
+        (Exchange(b"/api/../../etc/passwd", expect=(400,)),),
+        "row 23: `..` in a path the static mount claims is refused by the "
+        "mount's own resolver before a view sees it (400) — it is never joined "
+        "onto `root`, and the script a view reaches stays the pinned entry "
+        "(rows 1 and 9)",
     ),
     "E24": Probe(
         "P12",
@@ -808,10 +803,14 @@ def assert_exchange(
 ) -> None:
     """The row's status, then every assertion the row makes about `$_SERVER`."""
     expected = "/".join(str(code) for code in exchange.expect)
-    checks.that(
-        response.status in exchange.expect,
-        f"{label}: the answer is {expected}, not {response.status}",
+    # One sentence per outcome: the expected list and the answer are the same
+    # fact on a pass, and printing both read as "the answer is 200, not 200".
+    message = (
+        f"{label}: the answer is {response.status}"
+        if response.status in exchange.expect
+        else f"{label}: the answer is {expected}, not {response.status}"
     )
+    checks.that(response.status in exchange.expect, message)
     for name in exchange.head_absent:
         present = response.header(name)
         checks.that(
@@ -953,20 +952,20 @@ def check_static(checks: Checks, site: Path) -> None:
     checks.that(
         (document or {}).get("script_filename", "").encode()
         == str(site / "public" / "index.php").encode(),
-        "and `script_filename` is the manifest's `entry`",
+        "and `script_filename` is the file `entrypoint php` names",
     )
 
 
 def check_learn(checks: Checks, site: Path) -> None:
     """The page's `blastit dev --learn`: serves, records on exit, exits `0`.
 
-    The manifest declares no `[route.db]`, so there is no statement to record —
-    the page's own sentence for a manifest whose routes make no query. What is
+    The file declares no store grant, so there is no statement to record — the
+    page's own sentence for a manifest whose views make no query. What is
     asserted is that the command runs, answers, and leaves the file it was
-    pointed at intact, plus the `EmbeddedView` worker set the ADR promises: one
-    per `[route.php]` route, each with its own pid and entry.
+    pointed at intact, plus the `EmbeddedView` workers the ADR promises: one per
+    view, each with its own pid and the one entrypoint.
     """
-    before = (site / "blastit.toml").read_bytes()
+    before = (site / "Blastfile").read_bytes()
     with Server(site, site / "dev-learn.log", learn=True) as server:
         try:
             server.wait_ready()
@@ -1010,16 +1009,16 @@ def check_learn(checks: Checks, site: Path) -> None:
     routes = sorted({event.get("route") for event in spawned if event.get("route")})
     checks.that(
         routes == ["api", "app"],
-        f"one worker set per `[route.php]` route, each its own pid ({routes})",
+        f"one worker per view, each its own pid ({routes})",
     )
     checks.that(
         len({event.get("pid") for event in spawned if event.get("route") in routes})
         >= 2,
-        "and the two routes are two processes, not one",
+        "and the two views are two processes, not one",
     )
     checks.that(
-        (site / "blastit.toml").read_bytes() == before,
-        "`--learn` records nothing: this manifest's routes run no query",
+        (site / "Blastfile").read_bytes() == before,
+        "`--learn` records nothing: this file's views run no query",
     )
     # `--learn`'s own observable, from the process that actually ran: stage 1's
     # argv carries `--dev-obs-fd=` only for a `--learn` boot. (`command_kind` on

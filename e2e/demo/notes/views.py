@@ -353,10 +353,10 @@ def caps_probe(request):
 def egress_probe(request):
     """Report what this process's system calls allow, without doing anything else.
 
-    Mounted in two routes: ``/debug/egress/`` (no egress) and
-    ``/egress/probe/`` (``egress = true``). The socket is created and closed
+    Mounted in two views: ``/debug/egress/`` (no egress) and
+    ``/egress/probe/`` (``egress any``). The socket is created and closed
     again, never connected, and ``ptrace`` traces this very process. Under
-    blastit's filters (ARCHITECTURE.md §7.3) both are refused unless the route
+    blastit's filters (ARCHITECTURE.md §7.3) both are refused unless the view
     was granted egress; outside blastit both are allowed.
     """
     result = {

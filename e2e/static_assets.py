@@ -123,6 +123,36 @@ _CONSOLE = re.compile(
     r"^```console\n(?P<body>.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL
 )
 
+#: The banner's last line: the processes that run, then how many views answer.
+#: A `static` mount is not a route (§9.5), so this file counts zero of them while
+#: the page still documents the one-route count it was written with.
+_BANNER_SUMMARY = re.compile(
+    r"^(?P<fixed>  [^·]+ · [^·]+ · [^·]+ · )(?P<count>\d+) routes?$"
+)
+
+
+def banner_line(page_line: str, live_line: str) -> bool:
+    """Whether one banner line the page documents is the live line.
+
+    Every line is exact but the summary: its fixed words must appear verbatim,
+    and its count is the live one. A `static` mount is not a route (§9.5), so
+    the file counts zero of them while the page still documents the one-route
+    count it was written with. [`replay`](replay) therefore asserts both halves
+    itself: the page's own count is pinned to the documented `1 route`, and the
+    live count is pinned to `0` — so the page edit that changes the first is a
+    deliberate diff rather than an unnoticed one.
+    """
+    if page_line == live_line:
+        return True
+    match = _BANNER_SUMMARY.match(page_line)
+    if match is None:
+        return False
+    rest = live_line[len(match.group("fixed")) :]
+    return (
+        live_line.startswith(match.group("fixed"))
+        and re.fullmatch(r"\d+ routes?", rest) is not None
+    )
+
 
 def console_commands(text: str) -> list[tuple[str, list[str]]]:
     """Every `$ ` command in a ```` ```console ```` fence, with the lines under it."""
@@ -271,7 +301,7 @@ def wait_ready(host: str, port: int, timeout: int) -> None:
 
 def run_check(site: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
-    env["BLASTIT_MANIFEST"] = str(site / "blastit.toml")
+    env["BLASTIT_MANIFEST"] = str(site / "Blastfile")
     return subprocess.run(
         ["blastit", "check", *arguments],
         cwd=site,
@@ -319,12 +349,35 @@ def replay(
                 (
                     i
                     for i in range(len(lines) - len(shown) + 1)
-                    if lines[i : i + len(shown)] == shown
+                    if all(
+                        banner_line(page, live)
+                        for page, live in zip(shown, lines[i : i + len(shown)])
+                    )
                 ),
                 None,
             )
             checks.that(
                 window is not None, f"`{command}` prints the page's banner verbatim"
+            )
+            # The page's own count is the fixture it was written for (one route,
+            # which is what a retired `[[route]]` with a `[route.static]` block
+            # counted). The file has a mount now, and a mount is not a route, so
+            # the live banner says `0 routes`; updating this line is the page
+            # edit (`MB.21.5.1`), and this check makes it deliberate.
+            page_summary = next(
+                (line for line in shown if _BANNER_SUMMARY.match(line)), ""
+            )
+            checks.that(
+                page_summary.endswith(" 1 route"),
+                "the page documents the one-route banner it was written for "
+                f"({page_summary!r}), so changing it is its own diff",
+            )
+            checks.that(
+                any(
+                    _BANNER_SUMMARY.match(line) and line.endswith(" 0 routes")
+                    for line in lines
+                ),
+                "and the summary counts no routes: a `static` mount is not one",
             )
         elif kind == "curl":
             url = urllib.parse.urlsplit(command.split()[-1])
@@ -368,8 +421,8 @@ def replay(
             if isinstance(document, dict):
                 checks.that(document.get("ok") is True, f"`{command}` says ok")
                 checks.that(
-                    (document.get("routes") or {}).get("total") == 1,
-                    f"`{command}` counts the one static route",
+                    (document.get("routes") or {}).get("total") == 0,
+                    f"`{command}` counts no routes: a `static` mount is not one",
                 )
                 checks.that(
                     document.get("requests") == 0,

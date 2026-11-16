@@ -76,7 +76,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     BLASTIT_APP=demo.wsgi:application \
     BLASTIT_PRELOAD=demo.urls,notes.views \
-    BLASTIT_MANIFEST=/app/blastit.toml \
+    BLASTIT_MANIFEST=/app/Blastfile \
     PORT=8080
 EXPOSE 8080
 # No `USER`: the container's user is the `user:` field of the compose service,

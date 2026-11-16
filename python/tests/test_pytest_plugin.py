@@ -717,8 +717,17 @@ def test_strict_without_a_manifest_is_a_usage_error(
     assert "need --blastit-manifest" in output, output
 
 
-def test_an_invalid_manifest_fails_the_session(project: Path, tmp_path: Path) -> None:
-    """The plugin never reports against a Blastfile it could not parse."""
+def test_an_invalid_manifest_is_a_usage_error(project: Path, tmp_path: Path) -> None:
+    """The plugin never reports against a `Blastfile` it could not parse.
+
+    A file that does not parse is a *usage* error, not a failed session: the
+    plugin reads it in `pytest_configure` (the proxy mapping and the live server
+    need the model before any test is collected), and a model it cannot lower is
+    the same refusal `--blastit-manifest` naming no file is — exit `4`, with the
+    reader's own sentence. The alternative, documented in
+    `python/blastit/pytest_plugin.py::_blastfile_model`, is "a report that
+    silently diffs against nothing".
+    """
     copy = copy_project(project, tmp_path)
     (copy / "Blastfile-broken").write_text(
         "postgres $DATABASE_URL\n\nview notes regex '(' {\n}\n",
@@ -727,9 +736,10 @@ def test_an_invalid_manifest_fails_the_session(project: Path, tmp_path: Path) ->
     outcome = run(
         copy, "--blastit-manifest", "Blastfile-broken", "-k", "test_list_notes"
     )
-    assert outcome.returncode == 1
-    assert "blastit: the audit failed" in outcome.stdout
-    assert "invalid" in outcome.stdout, outcome.stdout
+    assert outcome.returncode == 4, "a usage error, before any test runs"
+    assert outcome.stdout == "", "a usage error prints no report to stdout"
+    assert "blastit: the Blastfile does not parse" in outcome.stderr, outcome.stderr
+    assert "does not compile" in outcome.stderr, "the one reader's own reason"
     assert not outcome.report_path.exists(), (
         "no report is written for an invalid Blastfile"
     )
@@ -950,7 +960,14 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
                 "name": "fallback",
                 "methods": None,
                 "patterns": [entry["path_info"]],
-                "use": [],
+                # A view the repair creates is a view like any other: the first
+                # request opens the store, so it `use`s the same trait every
+                # other view was just given — otherwise the next report names
+                # the setup statement ungranted here, and the repair's own view
+                # is what keeps the loop from converging.
+                "use": ["connection"]
+                if "connection" in (model.get("traits") or {})
+                else [],
                 "egress": False,
                 "grants": {},
             }

@@ -61,7 +61,7 @@ services:
     environment:
       <<: *app-env
       BLASTIT_APP: app:application
-      BLASTIT_MANIFEST: /sqlalchemy/blastit.toml
+      BLASTIT_MANIFEST: /sqlalchemy/Blastfile
       BLASTIT_LOG_FORMAT: json
       PYTHONPATH: ""
       # The image preloads the Django demo's URLconf; this app has none.
@@ -70,7 +70,7 @@ services:
     ports: ["127.0.0.1:${E2E_SQLALCHEMY_PORT:-18081}:8080"]
     depends_on: { migrate: { condition: service_completed_successfully } }
 
-  # The static-and-spa page's own manifest (MB.2.7), served by a real
+  # The static-and-spa page's own `Blastfile` (MB.2.7), served by a real
   # `blastit dev` on the loopback default the page documents. The driver runs in
   # this container (`e2e/static_assets.py`) so `127.0.0.1:8080` is verbatim; the
   # fixture is copied to /site by run-dev.sh so the page's decoys (`public/.env`,
@@ -78,7 +78,7 @@ services:
   static:
     image: ${E2E_IMAGE:-blastit-e2e}
     environment:
-      BLASTIT_MANIFEST: /site/blastit.toml
+      BLASTIT_MANIFEST: /site/Blastfile
       PORT: ${E2E_STATIC_PORT:-8080}
     working_dir: /site
     command: ["sh", "/opt/e2e/run-dev.sh", "/fixture", "/site", "decoys"]
@@ -93,13 +93,13 @@ services:
       timeout: 5s
       retries: 60
 
-  # The same route without `spa`: a deep URL that is no file is a 404. The
+  # The same fixture without a `fallback`: a deep URL that is no file is a 404. The
   # driver reaches it by service name, so this one binds 0.0.0.0 and `blastit
   # dev` marks itself EXPOSED (the banner is not checked here).
   static_nospa:
     image: ${E2E_IMAGE:-blastit-e2e}
     environment:
-      BLASTIT_MANIFEST: /site/blastit.toml
+      BLASTIT_MANIFEST: /site/Blastfile
       BLASTIT_DEV_EXPOSE: "1"
     working_dir: /site
     command: ["sh", "/opt/e2e/run-dev.sh", "/fixture", "/site", "plain", "--host", "0.0.0.0"]

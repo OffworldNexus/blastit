@@ -610,15 +610,15 @@ def check_negative_boot(image, uid=APP_UID):
 
 
 #: The sentence production (`stage0::run`) prints in a directory with no
-#: `./blastit.toml` (`docs/troubleshooting.md`): the file, then the reason. The
+#: `./Blastfile` (`docs/troubleshooting.md`): the file, then the reason. The
 #: `dev` entry point is pinned in the protected suite
 #: (`critical_config_and_presets.rs`); this is the same ordering at the identity
 #: that can reach the configuration in production (`MB.1.16`, AUDIT-MB1 `G5`).
-MISSING_MANIFEST = "./blastit.toml: No such file or directory"
-#: A manifest that exists and declares no `app`: then the *setting* is what is
-#: missing, and the file is not named as absent. `version` plus one route is
-#: enough — the `app` check comes before the manifest is parsed.
-MANIFEST_WITHOUT_APP = 'version = 1\n\n[[route]]\nname = "home"\npath = ["/"]\n'
+MISSING_MANIFEST = "./Blastfile: no such file or directory"
+#: A `Blastfile` that exists and names no app: then the *setting* is what is
+#: missing, and the file is not named as absent. One view with no `entrypoint`
+#: is enough — the `app` check runs before the file's views are wired.
+MANIFEST_WITHOUT_APP = 'view home "/" {\n}\n'
 #: The container names this check uses, one per direction: they are fixed so that
 #: a run that was killed leaves a name this check removes rather than guesses at.
 ROOTED_BOOT = "blastit-d6-rooted-boot"
@@ -648,7 +648,7 @@ def rooted_boot(image, workdir, name):
     """The image's entry point as root in `workdir`, with the manifest setting
     cleared; `None` when it does not finish inside the timeout.
 
-    The image sets `BLASTIT_MANIFEST=/app/blastit.toml` and `BLASTIT_APP` (its demo
+    The image sets `BLASTIT_MANIFEST=/app/Blastfile` and `BLASTIT_APP` (its demo
     app) for the compose run, and this boot must see neither: with the manifest
     named, the directory below is never consulted, and with `app` set the setting
     is never what is missing. They are `unset` in the shell rather than passed as
@@ -706,8 +706,8 @@ def check_rooted_startup(image):
         ok &= check(not blamed and "BLASTIT_APP" not in output,
                     f"and `BLASTIT_APP` is not blamed for the missing file ({blamed})")
 
-        # The other order: the file exists and declares no `app`.
-        with open(os.path.join(workdir, "blastit.toml"), "w", encoding="utf-8") as f:
+        # The other order: the file exists and names no app.
+        with open(os.path.join(workdir, "Blastfile"), "w", encoding="utf-8") as f:
             f.write(MANIFEST_WITHOUT_APP)
         print("D6: the rooted production boot with a manifest names BLASTIT_APP, not the file")
         completed = rooted_boot(image, workdir, f"{ROOTED_BOOT}-no-app")

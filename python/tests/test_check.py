@@ -78,17 +78,13 @@ def application(environ, start_response):
 """
 
 MANIFEST = """\
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-
-[[route]]
-name = "home"
-path = ['/']
-[route.db]
-queries = ["SELECT 1"]
+view home "/" {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 """
 
 
@@ -102,25 +98,41 @@ queries = ["SELECT 1"]
 #: Whether that happens is **decided by the server's startup zone spelling**:
 #: `postgres:18` reports `Etc/UTC` and sends the statement,
 #: `postgres:15-alpine` reports `UTC` and never does. Where it runs it is part
-#: of what the route must grant, because in production the same connection is
+#: of what the view must grant, because in production the same connection is
 #: opened inside a request and dbproxy would deny it there; where it never runs
 #: a grant for it is a `dead_grant` error, not extra safety. The documented fix
-#: is a group attached to every route (the statement runs on whichever route
-#: opens the connection first), not one query per route, so the group sits
-#: before `[[route]]` and `[route.db]` stays the manifest's last table.
-DJANGO_MANIFEST = MANIFEST.replace(
-    "\n[[route]]",
-    "\n[group.connection.db]\n"
-    "queries = [\"SELECT set_config('TimeZone', $1, false)\"]\n"
-    "\n[[route]]",
-    1,
-).replace("version = 1\n", 'version = 1\ngroups = ["connection"]\n', 1)
+#: is a trait every view attaches (the statement runs on whichever view opens the
+#: connection first), not one query per view, so the trait comes before the view
+#: and the view `use`s it.
+DJANGO_MANIFEST = """\
+postgres $DATABASE_URL
+
+trait connection {
+    postgres {
+        query "SELECT set_config('TimeZone', $1, false)"
+    }
+}
+
+view home "/" {
+    use connection
+    postgres {
+        query 'SELECT 1'
+    }
+}
+"""
+
+
+def with_transactions(manifest: str) -> str:
+    """`manifest` with `transactions` as its view's first grant directive."""
+    head, marker, tail = manifest.rpartition("postgres {")
+    assert marker, "the view declares a store grant to add to"
+    return head + marker + "\n        transactions" + tail
 
 
 def project(root: Path, manifest: str = MANIFEST, body: str = "") -> Path:
     """A pytest project: the manifest, the app, and one test that drives it."""
     root.mkdir(parents=True, exist_ok=True)
-    (root / "blastit.toml").write_text(manifest, encoding="utf-8")
+    (root / "Blastfile").write_text(manifest, encoding="utf-8")
     (root / "app.py").write_text(APP, encoding="utf-8")
     tests = root / "tests"
     tests.mkdir()
@@ -207,7 +219,7 @@ def test_a_clean_suite_is_one_document_with_no_findings(tmp_path: Path) -> None:
 
 def test_a_denied_statement_is_a_finding_and_exit_one(tmp_path: Path) -> None:
     """A statement no grant allows fails the run with a bootable fix (R33)."""
-    manifest = MANIFEST.replace('queries = ["SELECT 1"]', 'queries = ["SELECT 2"]')
+    manifest = MANIFEST.replace("query 'SELECT 1'", "query 'SELECT 2'")
     root = project(
         tmp_path, manifest, body="def test_home():\n    assert request() == b'ok'\n"
     )
@@ -221,7 +233,7 @@ def test_a_denied_statement_is_a_finding_and_exit_one(tmp_path: Path) -> None:
         if entry["kind"] == "missing_grant" and entry["sql"] == "SELECT 1"
     ]
     assert missing, report["findings"]
-    assert missing[0]["fix"] == {"action": "add_query", "to": "[route.db].queries"}
+    assert missing[0]["fix"] == {"action": "add_query", "to": "view home postgres"}
     # The grant the manifest did declare is dead too: the suite never sent it.
     assert any(entry["kind"] == "dead_grant" for entry in report["findings"])
 
@@ -241,13 +253,13 @@ def test_learn_dry_run_proposes_without_writing(tmp_path: Path) -> None:
     root = project(
         tmp_path, body="def test_extra():\n    assert request(path='/extra') == b'ok'\n"
     )
-    before = (root / "blastit.toml").read_text(encoding="utf-8")
+    before = (root / "Blastfile").read_text(encoding="utf-8")
     completed = run(root, "--learn", "--dry-run", "--json")
     assert completed.returncode == 0, completed.stderr
     proposal = json.loads(completed.stdout)
     assert proposal["wrote"] is False, proposal
     assert proposal["proposed"]["routes"] >= 1, proposal
-    assert (root / "blastit.toml").read_text(encoding="utf-8") == before
+    assert (root / "Blastfile").read_text(encoding="utf-8") == before
 
 
 def test_learn_writes_only_after_a_passing_suite(tmp_path: Path) -> None:
@@ -259,9 +271,9 @@ def test_learn_writes_only_after_a_passing_suite(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
     proposal = json.loads(completed.stdout)
     assert proposal["wrote"] is True, proposal
-    written = (root / "blastit.toml").read_text(encoding="utf-8")
-    assert 'name = "extra"' in written, written
-    assert "SELECT 1" in written.split('name = "extra"')[1], written
+    written = (root / "Blastfile").read_text(encoding="utf-8")
+    assert 'view extra "/extra"' in written, written
+    assert "SELECT 1" in written.split('view extra "/extra"')[1], written
     assert not list(root.glob(".*.tmp")), "the atomic write leaves no temp file"
 
 
@@ -375,10 +387,10 @@ def django_project(
 ) -> Path:
     """Writes a minimal `pytest-django` project into `root`."""
     root.mkdir(parents=True, exist_ok=True)
-    (root / "blastit.toml").write_text(manifest, encoding="utf-8")
+    (root / "Blastfile").write_text(manifest, encoding="utf-8")
     if manage_py:
         (root / "manage.py").write_text("#!/usr/bin/env python\n", encoding="utf-8")
-    ini_lines = ["[tool.pytest.ini_options]", 'blastit_manifest = "blastit.toml"']
+    ini_lines = ["[tool.pytest.ini_options]", 'blastit_manifest = "Blastfile"']
     if ini_ds:
         ini_lines.append('DJANGO_SETTINGS_MODULE = "djapp.settings"')
     (root / "pyproject.toml").write_text("\n".join(ini_lines) + "\n", encoding="utf-8")
@@ -456,7 +468,7 @@ def test_pytest_django_denied_grant_exits_one_and_still_drops_test_db(
     """Denied twin of the `pytest-django` DB flow: `missing_grant` (`exit 1`) + clean DB drop."""
     db_name, _ = _upstream_db_and_password()
     test_db = f"test_{db_name}"
-    manifest = MANIFEST.replace('queries = ["SELECT 1"]', 'queries = ["SELECT 2"]')
+    manifest = MANIFEST.replace("query 'SELECT 1'", "query 'SELECT 2'")
     root = django_project(
         tmp_path,
         manifest=manifest,
@@ -500,7 +512,7 @@ def test_pytest_django_no_db_suite_never_exposes_real_credentials(
         if real_password
         else "assert True"
     )
-    ping_manifest = MANIFEST.replace("path = ['/']", "path = ['/ping/']")
+    ping_manifest = MANIFEST.replace('view home "/"', 'view home "/ping/"')
     root = django_project(
         tmp_path,
         manifest=ping_manifest,
@@ -548,7 +560,9 @@ def test_pytest_django_atomic_view_still_enforces_transaction_control(
     """Flushing `TestCase`'s outer `BEGIN` never masks a view's own `transaction.atomic()`."""
     db_name, _ = _upstream_db_and_password()
     test_db = f"test_{db_name}"
-    atomic_manifest = _django_manifest().replace("path = ['/']", "path = ['/atomic/']")
+    atomic_manifest = _django_manifest().replace(
+        'view home "/"', 'view home "/atomic/"'
+    )
     denied_root = django_project(
         tmp_path / "denied",
         manifest=atomic_manifest,
@@ -577,7 +591,7 @@ def test_pytest_django_atomic_view_still_enforces_transaction_control(
     ), denied_report["findings"]
     assert not _database_exists(test_db)
 
-    granted_manifest = atomic_manifest + "transaction_control = true\n"
+    granted_manifest = with_transactions(atomic_manifest)
     granted_root = django_project(
         tmp_path / "granted",
         manifest=granted_manifest,

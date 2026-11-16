@@ -64,16 +64,11 @@ trap cleanup EXIT
 
 mkdir -p "$work/site"
 printf '<!doctype html><title>standalone</title>hello from the standalone binary\n' > "$work/site/index.html"
-cat > "$work/blastit.toml" <<'TOML'
-version = 1
-
-[[route]]
-name = "site"
-path = [".*"]
-
-[route.static]
-root = "site"
-TOML
+cat > "$work/Blastfile" <<'BLASTFILE'
+static "/" {
+    root "site"
+}
+BLASTFILE
 
 # Never assume a port is free: probe upwards from a high base with bash's own
 # TCP connect, the same way `make docs-serve-check` does.
@@ -89,7 +84,7 @@ if [ -z "$port" ]; then
 fi
 
 echo "standalone-runtime-check: $binary dev --port $port"
-BLASTIT_MANIFEST="$work/blastit.toml" "$binary" dev --port "$port" > "$log" 2>&1 &
+BLASTIT_MANIFEST="$work/Blastfile" "$binary" dev --port "$port" > "$log" 2>&1 &
 pid=$!
 
 waited=0
@@ -162,13 +157,10 @@ echo "ok   2/2 static responses without touching an interpreter"
 # A shipped archive that silently served a WSGI route would mean `python` leaked
 # back into the release build.
 mkdir -p "$work/wsgi"
-cat > "$work/wsgi/blastit.toml" <<'TOML'
-version = 1
-
-[[route]]
-name = "web"
-path = [".*"]
-TOML
+cat > "$work/wsgi/Blastfile" <<'BLASTFILE'
+view web regex '.*' {
+}
+BLASTFILE
 
 wsgi_port=""
 for candidate in $(seq 18460 18500); do
@@ -183,7 +175,7 @@ if [ -z "$wsgi_port" ]; then
 fi
 
 set +e
-BLASTIT_MANIFEST="$work/wsgi/blastit.toml" "$binary" dev --port "$wsgi_port" \
+BLASTIT_MANIFEST="$work/wsgi/Blastfile" "$binary" dev --port "$wsgi_port" \
     > "$work/wsgi.out" 2> "$work/wsgi.err"
 wsgi_rc=$?
 set -e

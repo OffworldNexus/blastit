@@ -143,18 +143,13 @@ trap cleanup EXIT
 
 mkdir -p "$work/site"
 printf 'hello from the %s wheel\n' "$version" > "$work/site/index.html"
-cat > "$work/blastit.toml" <<'TOML'
-version = 1
+cat > "$work/Blastfile" <<'BLASTFILE'
+static "/" {
+    root "site"
+}
+BLASTFILE
 
-[[route]]
-name = "site"
-path = [".*"]
-
-[route.static]
-root = "site"
-TOML
-
-BLASTIT_MANIFEST="$work/blastit.toml" "$blastit_bin" dev --port 18700 \
+BLASTIT_MANIFEST="$work/Blastfile" "$blastit_bin" dev --port 18700 \
     > "$work/dev.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 100); do

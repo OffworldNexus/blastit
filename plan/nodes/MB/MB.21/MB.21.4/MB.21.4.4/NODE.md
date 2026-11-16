@@ -2,7 +2,7 @@
 id: MB.21.4.4
 title: "Rewrite every e2e/ fixture, the remaining python/tests fixtures, the scripts and the Makefile's docs-serve stage to Blastfile, and take make e2e green"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.7]
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T14:43"
+updated: "2026-11-16T16:08"
 ---
 
 # Goal

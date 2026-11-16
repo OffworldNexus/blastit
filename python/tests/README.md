@@ -18,15 +18,15 @@
   `stream`, `ServerCursor`'s `DECLARE`, `TypeInfo.fetch`, and the statement
   deduplication between the two capture layers.
 * `test_pytest_plugin.py` — real `pytest` sessions in a copy of `project/`, a
-  tiny Django app with an unfinished `blastit.toml` next to it. That is the only
+  tiny Django app with an unfinished `Blastfile` next to it. That is the only
   honest way to test a pytest plugin: the options, the hooks, the terminal
   summary, the exit code and the xdist merge are all things only a session has.
 * `project/` — the Django project those sessions run: a dozen views, one model, a
-  `connection_created` receiver that runs a `SET`, and a manifest that is missing
-  grants, needs `transaction_control`, has stale grants, has a route nothing
-  exercises, has no route at all for one path a test asks for, grants none of the
+  `connection_created` receiver that runs a `SET`, and a `Blastfile` that is
+  missing grants, needs `transactions`, has stale grants, has a view nothing
+  exercises, has no view at all for one path a test asks for, grants none of the
   statements psycopg runs as a connection is established, and lets only one of
-  the two routes that open a socket say `egress = true`.
+  the two views that open a socket say `egress any`.
 * `test_live_server.py` + `live_project/` — the live server of D3c: a second
   tiny Django project whose tests are served by the *real* `blastit` binary, so
   what is checked is front-end traffic against the manifest. Those tests skip
