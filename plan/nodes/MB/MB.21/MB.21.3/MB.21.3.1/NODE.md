@@ -5,16 +5,22 @@ kind: task
 status: ready
 owner: implementer
 priority: 1
-depends_on: [MB.21.2]
+depends_on: [MB.21.3.7]
 paths:
   - "crates/blastit-manifest/src/blastfile/**"
+  - "crates/blastit-manifest/src/blastfile/mod.rs"
+  - "crates/blastit-manifest/src/blastfile/tokens.rs"
   - "crates/blastit-manifest/src/lib.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_lexer.rs"
+  - "crates/blastit-manifest/tests/blastfile_errors.rs"
+  - "crates/blastit-manifest/tests/critical_blastfile_errors.rs"
+  - scripts/check_manifest_purity.py
+  - scripts/test_manifest_purity.py
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T00:38"
+updated: "2026-11-16T02:16"
 ---
 
 # Goal
@@ -25,8 +31,8 @@ and the CST can each consume the same stream.
 
 # Context
 
-- Grammar and token rules: `docs/design/blastfile-dsl.md` §1 (`MB.21.2`). Tokens: keywords, bare
-  identifiers, `$IDENT` (`[A-Z_][A-Z0-9_]*`), escaped `"…"`, raw `'…'`, decimal integers, `{`, `}`,
+- Grammar and token rules: `docs/design/blastfile-dsl.md` §5 (tokens, trivia, the budget table) and
+  §4.1 (the module tree). Tokens: keywords, bare identifiers, `$IDENT` (`[A-Z_][A-Z0-9_]*`), escaped `"…"`, raw `'…'`, decimal integers, `{`, `}`,
   `,`, `;`, newline, EOF; `#` to end of line is trivia.
 - Trivia (comments, spaces, blank lines) is **kept**, not dropped: `MB.21.3.4`'s printer must
   reproduce an untouched file byte for byte. Emit trivia as tokens or as spans with the exact text —

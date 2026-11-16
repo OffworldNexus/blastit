@@ -5,16 +5,18 @@ kind: task
 status: ready
 owner: implementer
 priority: 1
-depends_on: [MB.21.3.2]
+depends_on: [MB.21.3.8]
 paths:
   - "crates/blastit-manifest/src/blastfile/**"
+  - "crates/blastit-manifest/src/blastfile/pattern.rs"
   - "crates/blastit-manifest/src/model.rs"
+  - "crates/blastit-manifest/tests/blastfile_patterns.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_patterns.rs"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T00:38"
+updated: "2026-11-16T02:16"
 ---
 
 # Goal
@@ -24,7 +26,7 @@ normalize `HEAD` from `GET` at parse time so request matching itself does not ch
 
 # Context
 
-- Design: `docs/design/blastfile-dsl.md` §3 (pattern → regex table, refusal matrix).
+- Design: `docs/design/blastfile-dsl.md` §8 (the pattern → regex table, the refusal matrix, `HEAD`).
 - Accepted spellings: `"/products/{id:int}"` (`.` is literal), `{name}` → `[^/]+`, `{name:int}` →
   `[0-9]+`, `{name:uuid}` → the canonical UUID form, trailing `*` → the prefix tail
   (`/assets/*` matches `/assets/a/b.css`), and `regex '<pattern>'` kept verbatim and fully anchored.

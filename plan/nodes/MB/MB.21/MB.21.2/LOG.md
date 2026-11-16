@@ -31,3 +31,23 @@ REVIEW FAIL (attempt 1): (1) BLOCKER §22 omits 22 of 47 round-4 BLOCKER/MAJOR r
 ## 2026-11-16T02:14 [lead]
 
 status review -> ready
+
+## 2026-11-16T02:18 [lead]
+
+attempt 2/3 started
+
+## 2026-11-16T02:18 [lead]
+
+status ready -> review
+
+## 2026-11-16T02:25 [lead]
+
+attempt 3/3 started
+
+## 2026-11-16T02:25 [lead]
+
+status review -> review
+
+## 2026-11-16T02:30 [lead]
+
+status review -> done

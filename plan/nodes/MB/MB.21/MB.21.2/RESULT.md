@@ -10,8 +10,8 @@ every BLOCKER/MAJOR finding in the document. By the owner's decision no fifth ro
 was run: the review files are pinned at the round each was written in, and the lead
 accepts on the resolution ledger in `## Review Resolution` and design §22.
 
-* `docs/design/blastfile-dsl.md` — **1959 lines**, 22 numbered sections: the DX
-  target (§1), goals/non-goals (§2), 29 testable requirements (§3), crate home,
+* `docs/design/blastfile-dsl.md` — **2041 lines**, 22 numbered sections: the DX
+  target (§1), goals/non-goals (§2), 32 testable requirements (§3), crate home,
   pipeline, model changes, public surface and budgets (§4), then one section per
   pinned item — tokens/lexer (§5), LL(1) grammar + FIRST sets + the view decision +
   the refusal table (§6), the v1 capability map row by row (§7), the path-pattern
@@ -23,7 +23,7 @@ accepts on the resolution ledger in `## Review Resolution` and design §22.
   (§17), the error contract (§18), alternatives (§19), the R→test table (§20), the
   ordered leaf plan against the real plan ids (§21) and the review resolution
   (§22). Every section names its code site and its test tier.
-* `docs/decisions/ADR-0012-blastfile-dsl.md` — 14 decisions (LL(1) by hand, zero
+* `docs/decisions/ADR-0012-blastfile-dsl.md` — 15 decisions (LL(1) by hand, zero
   dependencies, bounded input, lossless CST, no model rename, the two `raw` forms,
   the `workers` removal, mounts before views, `HEAD` at parse time,
   `$IDENT`-is-a-name, one-line errors, the fence opening, the crate home, and
@@ -96,30 +96,32 @@ Build finished in 0.21s
 
 ```console
 $ wc -l docs/design/blastfile-dsl.md docs/decisions/ADR-0012-blastfile-dsl.md
-  1959 docs/design/blastfile-dsl.md
-   211 docs/decisions/ADR-0012-blastfile-dsl.md
-  2170 total
+  2041 docs/design/blastfile-dsl.md
+   216 docs/decisions/ADR-0012-blastfile-dsl.md
+  2257 total
 ```
 
 ### The erasure is stated as a testable rule
 
 ```console
-$ grep -n 'no format detection\|retired file name appears nowhere\|the_retired_format_is_gone' docs/design/blastfile-dsl.md | head
-110:| R16 | **There is no format detection, no fallback format and no migration path.** …
-122:| R27 | After the cutover, the retired file name appears nowhere in the **strict set** …
-1246:`python/tests/test_docs_assets.py::the_retired_format_is_gone` (run by
+$ grep -n 'no format detection\|retired file name appears nowhere\|test_the_real_tree_carries' docs/design/blastfile-dsl.md | head -5
+112:| R16 | **There is no format detection, no fallback format and no migration path.** A missing `./Blastfile` produces a plain missing-file error naming `./Blastfile` (and `BLASTIT_MANIFEST`); any other content produces the ordinary `Blastfile:line:col` syntax error. | unit + e2e |
+123:| R27 | After the cutover, the retired file name appears nowhere in the set `test_the_real_tree_carries_no_retired_toml_manifest` scans: … |
+1303:`python/tests/test_docs_assets.py::test_the_real_tree_carries_no_retired_toml_manifest` (run by
+1329:### 15.2 There is no format detection, no fallback format and no migration path
+1345:`MB.21.5.2` is written: `test_the_real_tree_carries_no_retired_toml_manifest` in
 ```
 
 ## Files
 
 | Path | What |
 |---|---|
-| `docs/design/blastfile-dsl.md` | the technical design, 1959 lines |
+| `docs/design/blastfile-dsl.md` | the technical design, 2041 lines |
 | `docs/design/blastfile-dsl.review-security.md` | `security` goldfish review |
 | `docs/design/blastfile-dsl.review-implementability.md` | `implementability` goldfish review |
 | `docs/design/blastfile-dsl.review-testability.md` | `testability` goldfish review |
 | `docs/design/blastfile-dsl.review-consistency.md` | `consistency` goldfish review |
-| `docs/decisions/ADR-0012-blastfile-dsl.md` | the decision record, 211 lines |
+| `docs/decisions/ADR-0012-blastfile-dsl.md` | the decision record, 216 lines |
 | `docs/decisions/README.md` | one new row |
 | `plan/nodes/MB/MB.21/MB.21.2/RESULT.md` | this report |
 
@@ -157,6 +159,50 @@ Two critic sessions could not persist their file (one hit its step limit, one hi
 write permission refusal). Their findings are reproduced and resolved above and in
 §22, so no finding is lost; the files on disk are the reviews that did land.
 
+### Reviewer pass (fresh goldfish `reviewer`, attempt 1)
+
+The reviewer audited the document against its own §22 and rejected three BLOCKERs
+and eleven MAJORs. All are fixed in the document; each row was re-checked by
+opening the cited line.
+
+| Finding | Resolution |
+|---|---|
+| BLOCKER 1 — 22 round-4 findings had no §22 row, 8 rows claimed changes the body denies | **fixed** -> §22 gained the "Per-ID ledger for the round-3/4 findings the summary tables omitted" (28 rows, one per finding: consistency `M1`, `M2`, `M4–M13`; implementability `M2–M6`, `M9`; testability `B4`, `M2`, `M4`, `M7`, `M8`) and the eight contradicted rows were rewritten (§22 `S19`, `B1`, `M2`, `TS-16`, `M4`, `M7`, `M8`, and the C-m10 row) |
+| BLOCKER 2 — §13.3 still retired `--manifest` | **fixed** -> §13.3 now says `fold` **keeps its required `--manifest PATH`** (now a Blastfile), citing `ADR-0002` decision 1 and `docs/reference/cli.md`; the retirement clause is deleted |
+| BLOCKER 3 — six stale §22 rows | **fixed** -> the six rows now cite §13.3's node-locator `to`, §4.3's module-level `#![deny]`, and §21's `MB.21.3.0` (not "leaf 1") |
+| MAJOR — `crates/blastit/src/fmt.rs` does not exist | **fixed** -> §14/§15 name `crates/blastit-manifest/src/blastfile/` + `cli.rs`/`lib.rs`, owned by `MB.21.3.4`, and say no leaf creates `fmt.rs` |
+| MAJOR — §9.1 false "today's rule" provenance and `root "."` | **fixed** -> §9.1 states the `index`/`fallback` dotfile rule as **new**, defines "dotfile segment" (`.` allowed, `..` refused, `.env`/`.output` are dotfile segments), keeps `root "."`/`.output` legal, and reconciles the `fallback ".env"` example |
+| MAJOR — §9.4 `url_path` doubles the slash at `/` | **fixed** -> §9.4 uses `if prefix == "/" { relative } else { format!("{prefix}{relative}") }` and names the two-mount `immutable` test |
+| MAJOR — ADR decision 7 requires "this ADR" in the refusal | **fixed** -> dropped; the sentence names the removal only |
+| MAJOR — §4.1 gives `parse.rs` to 4.4, §21 gives it to 4.5 | **fixed** -> §4.1 says `MB.21.4.5`; §21's 4.5 row now lists `edit.rs`, `tests/parse.rs`, `critical_php_manifest.rs`, and the `blastit-env`/`sqlpolicy` comment sites; the Follow-ups list the same |
+| MAJOR — §20 puts P1/P3 in `tests/` though the helpers are `pub(crate)` | **fixed** -> P1 is a `syntax.rs` module test; P3's integration form uses `Manifest::from_blastfile_str(...).equivalent(...)`, and R5/R7 in §20 say so |
+| MAJOR — R10 "exactly as today" contradicts the new pre-routing `400` | **fixed** -> R10 loses the phrase; **R10a** owns the new refusal with `critical_rewrite.rs::a_traversal_path_is_400_before_routing` |
+| MAJOR — §7.1's global-attach row had no drop reason | **fixed** -> the row says "dropped: no keyword; write `use <trait>` in each view", and ADR-0012 decision 15 records it |
+| MAJOR — §16.2 README counts; retired warning texts; unowned `--json`/`LiteralQuery` lines | **fixed** -> §16.2 pins the measured counts (README `0/0/5`) and makes the table exhaustive; §13.2 lists each warning's re-spelling and its owner `MB.21.3.0`; §13.1 gives `LiteralQuery` and §13.3 the `--json` keys sentence to `MB.21.5.1` |
+| MINOR — §21's dependency sentence says 4.4 removes dependencies | **fixed** -> it says `MB.21.4.5` (after 4.4) and `MB.21.5.x` depends on it |
+
+### Reviewer pass 2
+
+| Finding | Resolution |
+|---|---|
+| 1 — §22's implementability `M6` and `C-B3` still said `fold`'s flag is retired | **fixed** -> both rows now say "keeps the required `--manifest PATH` (now a Blastfile)" (§22, matching §13.3:1121) |
+| 2 — §22's round-4 `url_path` row still asserted `prefix + "/" + relative` | **fixed** -> restated as the conditional join `if prefix == "/" { relative } else { format!("{prefix}{relative}") }` (§9.4:800–807) |
+| 3 — reference fence counts | **fixed** -> re-derived with `docs_fences.rs`'s rule: 17 fences = **14 keyword-led statement lists + 3 illustrations** (EBNF, error example, `json`), i.e. `0/14/3`; all four cells now say so |
+| 4 — §22 granted `plan/**` an exemption and `docs_fences.rs` a guard exemption | **fixed** -> both exemptions deleted; §15.2/R27 now say **no allowlist**, live briefs are scanned, and the guard composes the name so it needs no self-exemption |
+| 5 — §21 used letter-suffixed ids and omitted `3.7`/`3.8` rows | **fixed** -> §21 has a one-line `a/b → id` map, `MB.21.3.0` and `MB.21.3.7` (call sites) each carry their own paths, a `MB.21.3.8` (lowering) row exists, and `MB.21.5.1`'s paths add `plan/nodes/**/NODE.md` |
+| 6 — RESULT's evidence grep was stale | **fixed** -> regenerated from a real run (`test_the_real_tree_carries_no_retired_toml_manifest` at `:1303`) |
+| 7 — RESULT claimed 14 ADR decisions and 25 ledger rows | **fixed** -> 15 decisions (ADR decisions 1–15) and **28** per-ID ledger rows (counted with `grep -c '^| \(consistency\|implementability\|testability\) · '`) |
+| 8 — four findings had no named row (implementability `M7`/`M8`, testability `M1`/`M6`) | **fixed** -> four rows added to the per-ID ledger, with `M8`'s formula corrected to the conditional join |
+
+### Reviewer pass 3
+
+| Item | Resolution |
+|---|---|
+| 1 — the reference's fence classification contradicted itself (`0/13/4` in four cells) | **fixed** -> re-derived from `crates/blastit-manifest/tests/docs_fences.rs`'s own rule (a fence is a *statement list* when its first non-blank, non-`#` line is keyword-led): `docs/reference/blastfile.md` = **17 fences = 14 keyword-led statement lists + 3 illustrations** (the EBNF fence, the error example, the `json` document) → **`0/14/3`**; `README.md` = **`0/0/5`**; `docs/blastfile.md` = **`1/0/3`**. §16.2:1418 and the three §22 cells (`C-M7`, the round-4 counts row, `consistency · M3`) now carry the same set, and §16.2 states the derivation in one sentence |
+| 2 — `I-B2'` said Python files are in 4.5 | **fixed** -> the cell says **Python files are in 4.3** (4.5 is Rust-only); the 4.5 sweep wording (§21) and the §21 preamble no longer list `python/` or the Python readers |
+| 3 — the T-B2/I-B3 row still described an "exempt set" | **fixed -> §15.2/:1953** -> "the strict set is every **published** `docs/**` page (`public_pages`); the dated record is outside it by construction and there is no allowlist" |
+| 4 — frontmatter still said `In review` after the reviewer PASS | **accepted -> frontmatter** -> `status: Accepted` |
+
 ## Follow-ups
 
 The epic owner runs these **before** `MB.21.3` starts. Each names the node and the
@@ -167,27 +213,35 @@ exact text or paths to write; all of them are also in design §21.
    Route.sandbox, MountTable, uid by sandbox`. `depends_on: [MB.21.2]`; parents
    `MB.21.3`; owner `implementer`. `paths`:
    `crates/blastit-manifest/src/{model,routing,uid,validate,error,parse,edit}.rs`,
-   `crates/blastit-manifest/tests/{routing,validate,uid,parse,critical_manifest_011,critical_manifest_edit,critical_manifest_edit_executor,edit_branches,grants,critical_static_manifest,critical_php_manifest,docs_fences}.rs`,
-   `crates/blastit-scheduler/src/{route,rewrite,static_asset,static_response}.rs`,
+   `crates/blastit-manifest/tests/{routing,validate,uid,parse,critical_manifest_011,critical_manifest_edit,critical_manifest_edit_executor,edit_branches,grants,critical_static_manifest,critical_php_manifest,docs_fences}.rs`.
+   **Create `MB.21.3.7`** (`depends_on: [MB.21.3.0]`) for the call sites, with
+   `paths`: `crates/blastit-scheduler/src/{route,rewrite,static_asset,static_response}.rs`,
    `crates/blastit-scheduler/tests/{critical_rewrite,critical_static_entry}.rs`,
    `crates/blastit/src/{config,stage0,stage1,check,audit_v1,dev_learn}.rs`,
-   `crates/blastit-php/src/**`. If the diff exceeds one session, split into
-   **`MB.21.3.0a`** (that first src group + the manifest-crate tests) and
-   **`MB.21.3.0b`** (the scheduler, `blastit` and `blastit-php` groups), each
-   keeping `make check` green.
+   `crates/blastit-php/src/**`. (The prose labels `3.0a`/`3.0b` map to
+   `MB.21.3.0`/`MB.21.3.7`; letter-suffixed ids are illegal in `plan.py`.)
 2. **(b) Create `MB.21.4.5`** — title: `Erase the retired manifest format from
    Rust: delete the reader, the TOML synthesis in stage1, the toml dependency and
-   every mention`. `depends_on: [MB.21.4.3]`; owner `implementer`. `paths`:
-   `crates/blastit-manifest/src/parse.rs` (deleted),
-   `crates/blastit-manifest/src/model.rs`, `crates/blastit/src/stage1.rs`,
-   `crates/blastit-manifest/Cargo.toml`, `Cargo.toml`, `Cargo.lock`.
+   every mention`. `depends_on: [MB.21.4.3]`; owner `implementer`; **`MB.21.5.x`
+   depends on it**. `paths`:
+   `crates/blastit-manifest/src/{parse.rs (deleted),model.rs,edit.rs}`,
+   `crates/blastit/src/stage1.rs`, `crates/blastit-manifest/Cargo.toml`,
+   `Cargo.toml`, `Cargo.lock`, **widened:** `crates/blastit-manifest/tests/parse.rs`,
+   `crates/blastit-manifest/tests/critical_php_manifest.rs`,
+   `crates/blastit-env/src/**` and `crates/blastit-sqlpolicy/src/learn.rs`
+   (comment-only mentions).
 3. **(c) Widen each leaf's `paths`** (design §21) with `plan.py edit`:
    * `MB.21.3.1` += `crates/blastit-manifest/src/lib.rs`,
      `crates/blastit-manifest/src/blastfile/{mod,tokens}.rs`,
      `crates/blastit-manifest/tests/{blastfile_errors,critical_blastfile_errors}.rs`,
-     `scripts/{check_manifest_purity,test_manifest_purity}.py`.
-   * `MB.21.3.2` += `crates/blastit-manifest/tests/{blastfile_traits,blastfile_grants,blastfile_body,blastfile_entrypoint,critical_blastfile_parity,critical_blastfile_traits,critical_blastfile_body,critical_blastfile_entrypoint,critical_blastfile_security}.rs`,
-     `crates/blastit-manifest/tests/fixtures/**`.
+     `scripts/{check_manifest_purity,test_manifest_purity}.py`, `Makefile`
+     (the one purity-gate line).
+   * `MB.21.3.2` += `crates/blastit-manifest/tests/{blastfile_parse,critical_blastfile_parser}.rs`.
+     **Create `MB.21.3.8`** (`depends_on: [MB.21.3.2]`) for lowering, with
+     `paths`: `crates/blastit-manifest/src/blastfile/lower.rs`,
+     `crates/blastit-manifest/tests/{blastfile_lower,blastfile_traits,blastfile_grants,blastfile_body,blastfile_entrypoint,critical_blastfile_parity,critical_blastfile_traits,critical_blastfile_body,critical_blastfile_entrypoint,critical_blastfile_security}.rs`,
+     `crates/blastit-manifest/tests/fixtures/**`. (Prose `3.2a`/`3.2b` map to
+     `MB.21.3.2`/`MB.21.3.8`.)
    * `MB.21.3.4` += `crates/blastit-manifest/tests/{blastfile_fmt,critical_blastfile_print}.rs`,
      `crates/blastit/tests/{fmt_command,critical_blastfile_fmt}.rs`.
    * `MB.21.4.1` += `crates/blastit/tests/{blastfile_discovery,critical_config_and_presets}.rs`.
@@ -199,7 +253,9 @@ exact text or paths to write; all of them are also in design §21.
      `python/tests/{test_check,test_fold}.py`.
    * `MB.21.5.1` += `AGENTS.md`, `.opencode/**`,
      `python/tests/runnable_docs/inventory.toml`, `zensical.toml`.
-   * `MB.21.5.2` += `python/tests/test_docs_assets.py`.
+   * `MB.21.5.2` += `python/tests/test_docs_assets.py`,
+     `crates/blastit-manifest/tests/critical_blastfile_print.rs` (the ≥ 20
+     corpus floor).
 4. **(d) Re-title `MB.21.4.1`** from
    `Discover ./Blastfile and refuse blastit.toml/TOML input with one migration
    sentence at every entry point` to
@@ -219,7 +275,11 @@ exact text or paths to write; all of them are also in design §21.
 
 Leaf-level notes already carried by §21, not separate planner actions: `fold`
 keeps its required `--manifest PATH` (now a Blastfile) per `ADR-0002`;
-`MB.21.5.1` fixes the reference's `$IDENT`-echo row and the `--learn`/`body`
-contradiction; `MB.21.4.3` adds the `blastfile_apply_edits` PyO3 binding;
-`MB.21.3.1` routes `check.rs`'s read through `blastfile::read`; `MB.21.5.2`
-removes the `blastfile` fence alias at the strict flip.
+`MB.21.5.1` fixes the reference's `$IDENT`-echo row, the `--learn`/`body`
+contradiction, the `LiteralQuery` sentence, the `--json` "keys are re-spelled"
+sentence and `ARCHITECTURE.md` §2.4; `MB.21.4.3` adds the
+`blastfile_apply_edits` PyO3 binding; `MB.21.3.1` routes `check.rs`'s read
+through `blastfile::read`; `MB.21.5.2` removes the `blastfile` fence alias at the
+strict flip. **Measured fence counts to pin in `MB.21.3.6`** (§16.2): `README.md`
+`0/0/5` (five console/python/toml illustrations, no document yet), `docs/blastfile.md`
+`1/0/3`, `docs/reference/blastfile.md` `0/14/3` (17 fences = 14 statement lists + EBNF/error/`json`).

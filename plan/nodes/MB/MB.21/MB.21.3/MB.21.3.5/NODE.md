@@ -8,15 +8,17 @@ priority: 2
 depends_on: [MB.21.3.4]
 paths:
   - "crates/blastit-manifest/src/blastfile/**"
+  - "crates/blastit-manifest/src/blastfile/write.rs"
   - "crates/blastit-manifest/src/edit.rs"
   - "crates/blastit-manifest/tests/critical_manifest_edit.rs"
   - "crates/blastit-manifest/tests/critical_manifest_edit_executor.rs"
+  - "crates/blastit-manifest/tests/critical_learn_executor_blocks.rs"
   - "crates/blastit-manifest/tests/edit_branches.rs"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T00:38"
+updated: "2026-11-16T02:16"
 ---
 
 # Goal
@@ -27,8 +29,8 @@ of the file — comments, ordering, quoting, blank lines — stays exactly as th
 
 # Context
 
-- Design: `docs/design/blastfile-dsl.md` §9 (edit API) and `MB.21.3.2`'s refusals. Today's behaviour is
-  `crates/blastit-manifest/src/edit.rs` (2049 lines): `--learn` adds `queries`, `groups` and new routes,
+- Design: `docs/design/blastfile-dsl.md` §14.5 (the edit API, P4) and `MB.21.3.8`'s refusals. Today's
+  behaviour is `crates/blastit-manifest/src/edit.rs` (2049 lines): `--learn` adds `queries`, `groups` and new routes,
   and every write is guarded by a postcondition (`verify`) that re-parses and compares the whole
   expected model. That guard is **not optional** — it is what stops a patch from silently dropping an
   executor block (`MB.3.21`).
@@ -45,7 +47,7 @@ of the file — comments, ordering, quoting, blank lines — stays exactly as th
   `crates/blastit-manifest/tests/critical_manifest_edit_executor.rs`,
   `crates/blastit-manifest/tests/edit_branches.rs`. The assertions stay the same or stronger; only the
   document format changes.
-- Keep `Manifest::from_toml_str` and the TOML patcher alive for one more epic: `MB.21.4` deletes them.
+- Keep `Manifest::from_toml_str` and the old patcher alive until the sweep: `MB.21.4.5` deletes them.
   Put the new editor beside it behind the small internal trait the design names.
 
 # Acceptance

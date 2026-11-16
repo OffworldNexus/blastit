@@ -5,7 +5,7 @@ kind: task
 status: ready
 owner: "doc-writer"
 priority: 2
-depends_on: [MB.21.4.4]
+depends_on: [MB.21.4.4, MB.21.4.5]
 paths:
   - README.md
   - "docs/**"
@@ -14,11 +14,13 @@ paths:
   - python/tests/runnable_docs/inventory.toml
   - plan/nodes/NODE.md
   - "plan/nodes/**/NODE.md"
+  - AGENTS.md
+  - ".opencode/**"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T01:49"
+updated: "2026-11-16T02:16"
 ---
 
 # Goal
@@ -30,8 +32,9 @@ manifest Blastit ever had.
 
 # Context
 
-- Preceded by: `MB.21.1.1` (the two language pages and the nav row), `MB.21.4.4` (every crate, script,
-  fixture and the Makefile). This node is the site-wide sweep and the proof that nothing is left.
+- Preceded by: `MB.21.1.1` (the two language pages and the nav row), `MB.21.4.4` (every fixture,
+  script and the Makefile) and `MB.21.4.5` (the reader, the dependency and the last Rust mentions).
+  This node is the site-wide sweep and the proof that nothing is left.
 - Delete `docs/reference/manifest.md` — a page, so three things move in the same commit: the file, its
   `[[page]]` block in `python/tests/runnable_docs/inventory.toml` (lines 309-310),
   and every inbound link. `python/tests/runnable_docs/fences.py:230-251` plus `check_inventory`
@@ -54,11 +57,10 @@ manifest Blastit ever had.
 - `ARCHITECTURE.md` carries architecture examples in fenced blocks tagged with the retired format
   (lines 870, 1055) and prose at 1025, 1224, 1676; retag the fences `blastfile` and rewrite the prose.
   `docs/VISION.md` carries it at lines 13, 23, 24, 42.
-- Live plan briefs: eleven briefs whose `status` is not `done`/`superseded` still name it (measured
-  2026-11-16; find the current set with the loop in `# Acceptance`); they are instructions, so rewrite
-  them. `MB.21.4`'s epic brief is one of them: its title and `# Acceptance` still describe a
-  "migration refusal" — replace that with the missing-file sentence and the ordinary syntax error,
-  and leave its structure alone.
+- Live plan briefs: the briefs whose `status` is not `done`/`superseded` still name it (find the
+  current set with the loop in `# Acceptance`); they are instructions, so rewrite them. `MB.21.4`'s
+  epic brief has already been re-titled to the missing-file sentence and the ordinary syntax error by
+  the planner — verify it against that law and leave its structure alone.
 - Records are never touched: `LOG.md`, `RESULT.md`, briefs whose status is `done` or `superseded`,
   `docs/{decisions,design,research,knowledge,testing,archive}/**` and `docs/changelog.md`.
 - `docs/deploy/**` keeps its pooler guidance: that is a deployment concern (PgBouncer or a managed

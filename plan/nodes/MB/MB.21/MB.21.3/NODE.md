@@ -15,22 +15,23 @@ updated: "2026-11-16T00:38"
 
 # Goal
 
-Build the Blastfile toolchain in `crates/blastit-manifest`: a bounded lexer, an LL(1) parser that
-produces today's `Manifest` unchanged, a path-pattern compiler, a lossless CST with a canonical
-`blastit fmt`, the surgical comment-preserving editor `--learn` depends on, and the `docs_fences`
-validator for ```` ```blastfile ```` blocks.
+Build the Blastfile toolchain in `crates/blastit-manifest`: a bounded lexer, an LL(1) parser and the
+lossless CST it builds, the lowering that produces the `Manifest` the rest of Blastit consumes, a
+path-pattern compiler, the canonical `blastit fmt`, the surgical comment-preserving editor `--learn`
+depends on, and the `docs_fences` validator for ```` ```blastfile ```` blocks.
 
-Everything here is **additive**: `blastit.toml` keeps working until `MB.21.4` cuts over, so each leaf
-lands green on its own and `make check` never depends on a future leaf.
+Everything here is **additive**: the retired reader keeps working until `MB.21.4.5` deletes it, so each
+leaf lands green on its own and `make check` never depends on a future leaf.
 
 # Context
 
-- Design and every decision (grammar, AST, CST, error contract, refusals) are in
+- Design and every decision (grammar, CST, lower, error contract, refusals) are in
   `docs/design/blastfile-dsl.md` + `ADR-0012` (`MB.21.2`). Follow it; if it is silent, stop and open a
   `human` request instead of inventing a rule.
-- The parser's proof obligation is model **equality**: for every row of `MB.21`'s capability map, a
-  Blastfile document and its v1 TOML twin parse to equal `Manifest` values. That single oracle is what
-  guarantees "nothing real is dropped".
+- The parser's proof obligation is model **equality**, but never against a second file format: for every
+  row of `MB.21`'s capability map, the lowered `Manifest` is compared with the **expected `Manifest`
+  built in the test**, and every row the design drops is asserted absent. That single oracle is what
+  guarantees "nothing real is dropped" (`MB.21.3.8`).
 - Protected suites rewritten here (`crates/blastit-manifest/tests/critical_manifest_edit*.rs`,
   `edit_branches.rs`) are listed in `paths` with the reason in each child's `# Goal`; every leaf runs
   `uv run --no-project tools/critical_guard.py --base <sha> --node <id>`.
@@ -43,12 +44,19 @@ lands green on its own and `make check` never depends on a future leaf.
 
 | Node | What | Depends |
 |---|---|---|
-| `MB.21.3.1` | `blastfile/` module + bounded lexer (tokens, `$IDENT`, raw/escaped strings, trivia, `line:col`) | `MB.21.2` |
-| `MB.21.3.2` | LL(1) parser + AST → `Manifest` with v1-model-equality oracle | `MB.21.3.1` |
-| `MB.21.3.3` | Path-pattern compiler, `regex '…'`, and `HEAD` implied by `GET` | `MB.21.3.2` |
-| `MB.21.3.4` | Lossless CST + canonical printer + `blastit fmt [--check] [PATH]` | `MB.21.3.3` |
-| `MB.21.3.5` | Surgical comment-preserving `--learn` editor on the CST (replaces `edit.rs`'s TOML patcher) | `MB.21.3.4` |
+| `MB.21.3.0` | Model parity (a): `Manifest` name/mounts/php/`equivalent`, `StaticMount`, `Route.sandbox`, `MountTable`, uid by sandbox, `StaticPolicy::fallback` — design `MB.21.3.0a` | `MB.21.2` |
+| `MB.21.3.7` | Model parity (b): delete the per-view static/PHP accessors, `StaticOutcome::fallback_missing`, the scheduler and `blastit` call sites, the three suites — design `MB.21.3.0b` | `MB.21.3.0` |
+| `MB.21.3.1` | `blastfile/` module + bounded lexer (tokens, `$IDENT`, raw/escaped strings, trivia, `line:col`) | `MB.21.3.7` |
+| `MB.21.3.2` | LL(1) parser and the lossless CST it builds — design `MB.21.3.2a` | `MB.21.3.1` |
+| `MB.21.3.8` | Lowering to `Manifest`, the parity oracle, the nine suites and `tests/fixtures/` — design `MB.21.3.2b` | `MB.21.3.2` |
+| `MB.21.3.3` | Path-pattern compiler, `regex '…'`, and `HEAD` implied by `GET` | `MB.21.3.8` |
+| `MB.21.3.4` | Lossless CST printer + `blastit fmt [--check] [PATH]` | `MB.21.3.3` |
+| `MB.21.3.5` | Surgical comment-preserving `--learn` editor on the CST (replaces `edit.rs`'s old patcher) | `MB.21.3.4` |
 | `MB.21.3.6` | `docs_fences` validator for ```` ```blastfile ```` complete documents (strict flip in `MB.21.5.2`) | `MB.21.3.5` |
+
+The design's `MB.21.3.0a`/`3.0b` and `3.2a`/`3.2b` are four plan leaves here: the planner cannot mint a
+letter-suffixed id, so the second half of each split is `MB.21.3.7` and `MB.21.3.8`, and the design id
+is carried in each title.
 
 # Acceptance
 
@@ -62,16 +70,18 @@ $ grep -rn 'blastfile' crates/blastit-manifest/src/lib.rs
 
 1. Every child is `done` with command + output evidence in its `RESULT.md`.
 2. `make check` exit 0 for the whole tree — no leaf needed a later leaf to be green.
-3. The v1-model-equality oracle exists and is protected: one Blastfile/TOML fixture pair per
-   capability-map row, asserting equal `Manifest` values.
+3. The model-equality oracle exists and is protected: one fixture per capability-map row, compared with
+   the `Manifest` the test builds (`Manifest::equivalent`), with every row the design drops asserted
+   absent.
 4. Zero new workspace dependencies: `git diff Cargo.lock` is empty unless a child lists `Cargo.toml`
-   and `Cargo.lock` in `paths` and says why (it should not).
-5. `blastit.toml` parsing is untouched and every existing manifest test still passes, so `MB.21.4`
-   starts from green.
+   and `Cargo.lock` in `paths` and says why (it should not; the dependency removal is `MB.21.4.5`'s).
+5. The retired reader is untouched and every existing manifest test still passes (through a bridge named
+   in `MB.21.3.0`/`MB.21.3.7`'s `RESULT.md`), so `MB.21.4` starts from green.
 
 # Notes
 
-- Keep `Manifest` and its accessors as they are; if a spelling needs a new field, that is an
-  `ADR-0012` amendment and a design change, not an implementer's choice.
+- Keep `Manifest`'s names and `Manifest::version()`/`global_groups()`/`PhpPolicy::workers` as they are;
+  the only model changes are the ones `MB.21.3.0`/`MB.21.3.7` carry. If a spelling needs a *new* field,
+  that is an `ADR-0012` amendment and a design change, not an implementer's choice.
 - Mutation survivors here are closed by `MB.21.5.3`; write the deny-side assertion now anyway
   (skill `testing`: a policy test that passes with the check removed is fluff).

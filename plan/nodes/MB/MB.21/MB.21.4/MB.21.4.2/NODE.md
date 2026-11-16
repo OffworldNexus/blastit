@@ -6,12 +6,19 @@ status: ready
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.1]
-paths: ["crates/blastit/src/**", "crates/blastit/tests/**", "crates/blastit-scheduler/src/**"]
+paths:
+  - "crates/blastit/src/**"
+  - "crates/blastit/tests/**"
+  - crates/blastit/tests/critical_raw_ingress.rs
+  - "crates/blastit-scheduler/src/**"
+  - "crates/blastit-scheduler/tests/critical_static_entry.rs"
+  - "crates/blastit-scheduler/tests/critical_static_assets.rs"
+  - "crates/blastit-manifest/tests/critical_static_manifest.rs"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T00:38"
+updated: "2026-11-16T02:16"
 ---
 
 # Goal
@@ -22,13 +29,13 @@ away.
 
 # Context
 
-- Design §4–§8. The parser produces the same `Manifest`, so this leaf is mostly **proof** plus the few
-  places where a new spelling lands differently:
+- Design §9.2–§9.5 and §12. The parser produces the same `Manifest`, so this leaf is mostly **proof**
+  plus the few places where a new spelling lands differently:
   * static precedence: (1) a file on disk under the prefix, (2) the first matching view, (3) the
     declared deep-URL file, (4) `404`; and the refusals that must survive — `.phar`/`.php` sources
     under the root, dotfiles, `..`, NUL bytes and symlink escapes;
   * ingress `body json|form|none|raw` and the production refusal for an unacknowledged `raw`;
-  * `entrypoint php` as the app-wide front controller (with the design's `workers` answer, if any);
+  * `entrypoint php` as the app-wide front controller (the per-view `workers` cap is removed, §12.3);
   * `prefork`, `egress any` (boot warning parity), a trait's grants (`use`), `postgres … unrestricted`
     (inline-only, warns), table/column grants and `query '…'`;
   * `HEAD` implied by `GET` through the scheduler's real matching (not only at parse time).

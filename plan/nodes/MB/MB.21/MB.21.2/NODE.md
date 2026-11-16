@@ -2,7 +2,7 @@
 id: MB.21.2
 title: "Design the Blastfile lexer, parser, CST and cutover (ADR-0012) with security/implementability/testability/consistency critics"
 kind: task
-status: ready
+status: done
 owner: designer
 priority: 1
 depends_on: [MB.21.1]
@@ -14,11 +14,11 @@ paths:
   - "docs/design/blastfile-dsl.review-consistency.md"
   - "docs/decisions/ADR-0012-blastfile-dsl.md"
   - docs/decisions/README.md
-attempts: 1
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T02:14"
+updated: "2026-11-16T02:30"
 ---
 
 # Goal

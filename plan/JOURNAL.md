@@ -1968,3 +1968,25 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T02:12 [MB.21.2] (lead) status active -> review
 - 2026-11-16T02:14 [MB.21.2] (lead) REVIEW FAIL (attempt 1): (1) BLOCKER §22 omits 22 of 47 round-4 BLOCKER/MAJOR rows (consistency M1,M2,M4-M13; implementability M2-M6,M9; testability B4,M2,M4,M7
 - 2026-11-16T02:14 [MB.21.2] (lead) status review -> ready
+- 2026-11-16T02:15 [MB.21.3.0] (planner) created (task) Model parity (a): Manifest name/mounts/php/equivalent, StaticMount, StaticPolicy::fallback, Route.sandbox, MountTable, uid by sandbox
+- 2026-11-16T02:16 [MB.21.3.7] (planner) created (task) Model parity (b): delete the per-view static/PHP accessors, rename StaticOutcome::fallback_missing, move the scheduler and blastit call sites and
+- 2026-11-16T02:16 [MB.21.3.8] (planner) created (task) Lower the Blastfile CST into Manifest against the expected model, with the parity oracle, the nine suites and the fixtures
+- 2026-11-16T02:16 [MB.21.4.5] (planner) created (task) Erase the retired manifest format from Rust: delete the reader, the TOML synthesis in stage1, the toml dependency and every remaining mention
+- 2026-11-16T02:16 [MB.21.3.1] (planner) edited fields
+- 2026-11-16T02:16 [MB.21.3.2] (planner) edited fields
+- 2026-11-16T02:16 [MB.21.3.3] (planner) edited fields
+- 2026-11-16T02:16 [MB.21.3.4] (planner) edited fields
+- 2026-11-16T02:16 [MB.21.3.5] (planner) edited fields
+- 2026-11-16T02:16 [MB.21.4.1] (planner) edited fields
+- 2026-11-16T02:16 [MB.21.4.2] (planner) edited fields
+- 2026-11-16T02:16 [MB.21.4.3] (planner) edited fields
+- 2026-11-16T02:16 [MB.21.4.4] (planner) edited fields
+- 2026-11-16T02:16 [MB.21.4] (planner) edited fields
+- 2026-11-16T02:16 [MB.21.5.1] (planner) edited fields
+- 2026-11-16T02:18 [MB.21.4.4] (planner) edited fields
+- 2026-11-16T02:18 [MB.21.4.3] (planner) edited fields
+- 2026-11-16T02:18 [MB.21.2] (lead) attempt 2/3 started
+- 2026-11-16T02:18 [MB.21.2] (lead) status ready -> review
+- 2026-11-16T02:25 [MB.21.2] (lead) attempt 3/3 started
+- 2026-11-16T02:25 [MB.21.2] (lead) status review -> review
+- 2026-11-16T02:30 [MB.21.2] (lead) status review -> done

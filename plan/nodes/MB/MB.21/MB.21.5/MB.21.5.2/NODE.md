@@ -57,7 +57,7 @@ lazy edit can widen.
   one brief is live and at least one is finished; and at least one record (the changelog or
   `ADR-0012`) still names it, so the allowlist has a subject.
 - Fences: `crates/blastit-manifest/tests/docs_fences.rs` drops the old opening constant (spelled from
-  two fragments by `MB.21.4.4`) and makes any complete-manifest fence whose opening is not the
+  two fragments by `MB.21.4.5`) and makes any complete-manifest fence whose opening is not the
   `blastfile` one a **failure** naming the page and the expected opening; keep the per-file count
   rule and the `docs/frameworks/django.md` static fragment.
 - `python/tests/runnable_docs/inventory.toml`: the two language pages' console fences move from
@@ -65,7 +65,7 @@ lazy edit can widen.
   the `hello` fixture for the Local section, `check` against `shop` for CI, `presets` plus a `static`
   entry (cloud account, same reason style as `docs/deploy/digitalocean-paas.md`) for Deployments.
 - Asymmetry in what this node may touch: the *readers* of the retired name live in `crates/` and
-  `python/` and are already clean (`MB.21.4.4`); this node only adds the mechanism that keeps them
+  `python/` and are already clean (`MB.21.4.4`, `MB.21.4.5`); this node only adds the mechanism that keeps them
   clean.
 
 # Acceptance

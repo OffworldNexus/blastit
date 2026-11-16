@@ -142,8 +142,8 @@ Out of scope by owner decision: `pooler`, any vendor knob, and every Milestone C
   and BEFORE lexer/parser/formatter/runtime implementation."*
 - Owner directive (2026-11-16): the v1 format is buried like the retired PHP transport. Delete the
   migration prose, the key map, the detector and the parser; a foreign body is a syntax error; a
-  permanent `make check` guard refuses the name. `MB.21.1.1`, `MB.21.4.1`, `MB.21.4.4`, `MB.21.5.1`
-  and `MB.21.5.2` carry that directive.
+  permanent `make check` guard refuses the name. `MB.21.1.1`, `MB.21.4.1`, `MB.21.4.4`, `MB.21.4.5`,
+  `MB.21.5.1` and `MB.21.5.2` carry that directive.
 - Read first: `docs/VISION.md` (DX law), `docs/knowledge/LESSONS.md`, `crates/blastit-manifest/src/`
   (`model.rs`, `parse.rs`, `validate.rs`, `routing.rs`, `edit.rs`), `docs/design/blastfile-dsl.md` and
   `docs/decisions/ADR-0012-blastfile-dsl.md` (written by `MB.21.2`), `plan/nodes/MB/MB.20/NODE.md`.
@@ -227,7 +227,8 @@ $ for f in $(grep -rlE 'blastit[.]toml' plan/nodes --include=NODE.md); do \
   owns `Cargo.toml` + `Cargo.lock`.
 - **Zero new dependencies:** hand-written lexer and LL(1) parser (no `logos`/`pest`/`chumsky`/`nom`).
   Every iteration must be bounded by input length, and nesting depth by the grammar (two levels), so
-  a hostile `Blastfile` cannot blow the stack. The v1 parser dependency is removed by `MB.21.4.4`.
+  a hostile `Blastfile` cannot blow the stack. The retired reader and its dependency are removed by
+  `MB.21.4.5`, the only child that owns `Cargo.toml`/`Cargo.lock`.
 - **Protected tests:** the cutover necessarily rewrites fixtures inside
   `crates/*/tests/critical_*.rs` and `python/tests/critical/`. Each such child lists the exact files
   in `paths` and says why in `# Goal`, and runs

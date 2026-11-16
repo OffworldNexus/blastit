@@ -1,6 +1,6 @@
 ---
 id: MB.21.4.1
-title: Discover ./Blastfile at every entry point and fail a foreign body as an ordinary syntax error
+title: "Discover ./Blastfile (BLASTIT_MANIFEST, no upward search) and fail a missing file with the plain missing-file sentence — there is no format detection and no migration"
 kind: task
 status: ready
 owner: implementer
@@ -13,11 +13,12 @@ paths:
   - crates/blastit/src/check.rs
   - crates/blastit/tests/critical_config_and_presets.rs
   - crates/blastit/tests/critical_blastfile_discovery.rs
+  - crates/blastit/tests/blastfile_discovery.rs
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T01:49"
+updated: "2026-11-16T02:16"
 ---
 
 # Goal
@@ -29,7 +30,7 @@ the product.
 
 # Context
 
-- Design §10 is authoritative. Precedence is unchanged (`ADR-0002`): `BLASTIT_MANIFEST` else
+- Design §15 is authoritative. Precedence is unchanged (`ADR-0002`): `BLASTIT_MANIFEST` else
   `./Blastfile` in the working directory; a bare name means the working directory; nothing walks
   upwards.
 - Owner directive (2026-11-16): the v1 format is buried exactly like the retired PHP transport
@@ -71,9 +72,10 @@ $ make check
    directory is read.
 2. In an empty directory `blastit dev` names `./Blastfile` on fd 2 and the production boot puts the
    same sentence inside the `app.output` event on fd 1; neither sentence names a second file name.
-3. A file whose body is `version = 1` followed by a `[[route]]` table fails at boot, `dev`, `check`
-   and `fmt` with a single `line:col` syntax error naming the file and the position, exit code 1, no
-   migration wording and no second paragraph.
+3. A body that is not a Blastfile — a `version = 1` line followed by a `[[route]]` table included —
+   fails at boot, `dev`, `check` and `fmt` with the ordinary `Blastfile:<line>:<col>` syntax error
+   naming the file and the position, exit code 1, and nothing else: no detection, no format name, no
+   second sentence.
 4. The `grep` above prints nothing: no retired file-name default, no detector, no
    `TomlManifest`/`is_toml` symbol, no `.toml` suffix test in `crates/blastit/src`.
 5. `make check` exit 0 and `critical_guard.py` clean.
@@ -81,11 +83,11 @@ $ make check
 # Notes
 
 - The repository-wide emptiness of the retired name across every crate, `python/`, `e2e/`, `scripts/`
-  and `Makefile` is `MB.21.4.4`'s acceptance, and `MB.21.5.2` makes it permanent. This node leaves the
-  discovery and messaging surface clean and lists, in `RESULT.md`, every remaining hit it did not own
-  and which sibling owns it.
-- `MB.21.3.5`/`MB.21.3.6` are ancestors, so the v1 reader still exists in the tree — that is fine; the
-  reader is deleted by `MB.21.4.4`. This leaf only stops the product from ever reaching it.
+  and `Makefile` is `MB.21.4.4`'s and `MB.21.4.5`'s acceptance, and `MB.21.5.2` makes it permanent. This
+  node leaves the discovery and messaging surface clean and lists, in `RESULT.md`, every remaining hit
+  it did not own and which sibling owns it.
+- `MB.21.3.5`/`MB.21.3.6` are ancestors, so the retired reader still exists in the tree — that is fine;
+  it is deleted by `MB.21.4.5`. This leaf only stops the product from ever reaching it.
 - Do not create a root `Blastfile` for the repository: it is not an app, and nothing boots it.
 - Never add a sentence that explains the change to a user. A file that does not parse is a file that
   does not parse.

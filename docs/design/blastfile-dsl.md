@@ -1,5 +1,5 @@
 ---
-status: In review
+status: Accepted
 owner: designer
 node: MB.21.2
 reviewers: [security, implementability, testability, consistency]
@@ -102,7 +102,8 @@ Docker/CI harness, `gate` = a lint/script in `make check`).
 | R7 | `fmt` never changes meaning: `lower(fmt(t)).equivalent(&lower(t))` — `Manifest` equality with the source-position fields excluded. | unit + critical |
 | R8 | Lowering produces a `Manifest` equal to the expected `Manifest` built in the test for each v1 fixture, row by row (§7); the rows the design drops are asserted absent, not compared. | unit + critical |
 | R9 | Path patterns compile to anchored regexes per §8.1; `HEAD` is implied by `GET` at lower time; an invalid pattern names the pattern and the reason. | unit + critical |
-| R10 | A request is answered by mount-file → first matching view → mount `fallback` (GET/HEAD) → `405` when a view's pattern matched but no declared method did → `404`; `.php`/`.phtml`/`.phar`, dotfiles, `..`, NUL, empty segments, absolute/backslash paths and symlinks stay refused exactly as today. | unit + critical + e2e |
+| R10 | A request is answered by mount-file → first matching view → mount `fallback` (GET/HEAD) → `405` when a view's pattern matched but no declared method did → `404`; `.php`/`.phtml`/`.phar`, dotfiles, NUL, absolute/backslash paths and symlinks keep today's refusals. | unit + critical + e2e |
+| R10a | **New pre-routing refusal**: a decoded path containing `..` or an empty segment is a `400` before any mount or view is consulted (today only the static resolver refuses them, so routing can dispatch an un-normalised path). Its own differential test compares the old and new behaviour on `/admin/../public`. | unit + critical |
 | R11 | `body raw` lowers to `(BodyCodec::Raw, allow_raw = false)`; `body raw unvalidated` to `(Raw, true)`; `unvalidated` after any other codec is a syntax error; `--learn` cannot write either form. | unit + critical + e2e |
 | R12 | A trait lowers to a `Group`; `use` resolves after the whole file is parsed; `unrestricted`/`egress any`/an unknown name/a duplicate name are refused with the section named. | unit + critical |
 | R13 | `entrypoint php` lowers to one `Manifest::php()` applied to every view; `workers` is not a token sequence the grammar accepts and its refusal names the removal (no ADR number in the message). | unit + critical |
@@ -115,13 +116,14 @@ Docker/CI harness, `gate` = a lint/script in `make check`).
 | R20 | `$IDENT` is a name: the parser never reads the environment; an unset name is a boot error naming the variable; a string literal where a name is required is a syntax error. | unit + critical + `gate` |
 | R21 | A parse or validation error never yields a usable `Manifest`: no partial tree, no `unwrap_or_default`, no "skip the bad view". | unit + critical |
 | R22 | `check`'s finding kinds, keys (`route`, `proxy`) and exit codes are unchanged; only `fix.to` values are re-spelled to Blastfile nodes (§13.3). | unit + critical |
-| R23 | No `unsafe`, no `unwrap`/`expect`/`panic!`/`todo!` and no unchecked indexing on any path reachable from the file; enforced by `#![forbid(unsafe_code)]` plus `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]` at the top of `blastfile/mod.rs`, and `cargo clippy -D warnings`. The workspace-wide `[lints]` table is **not** changed: existing modules keep their current allowances, and the new module opts in. | `gate` |
+| R23 | No `unsafe`, no `unwrap`/`expect`/`panic!`/`todo!` and no unchecked indexing on any path reachable from the file; enforced by `#![forbid(unsafe_code)]` plus `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::todo, clippy::indexing_slicing)]` at the top of `blastfile/mod.rs`, and `cargo clippy -D warnings`. The workspace-wide `[lints]` table is **not** changed: existing modules keep their current allowances, and the new module opts in. | `gate` |
 | R24 | `blastit-manifest` contains no `std::env` read and no `blastit-env` dependency; parsing is a pure function of the source text. | unit + `gate` |
 | R25 | The formatter's output parses under the same budgets as any other file, and never exceeds `MAX_SOURCE_BYTES`: `fmt` re-checks the size and refuses rather than writing. | unit |
 | R26 | Error text never quotes more than `MAX_QUOTED_CHARS` of a value, never quotes a value where the value could be a secret, and never emits a raw control byte. | unit |
 | R27 | After the cutover, the retired file name appears nowhere in the set `test_the_real_tree_carries_no_retired_toml_manifest` scans: `README.md`, `ARCHITECTURE.md`, `docs/VISION.md`, every published page (`public_pages`), `crates/**/*.rs` + `Cargo.toml`, `python/**/*.py` + `runnable_docs/*.toml`, `scripts/**`, `e2e/**`, `Makefile`, and every live `plan/nodes/**/NODE.md`. No allowlist; the dated design/decision record is outside `public_pages` by construction. | `gate` |
 | R28 | `toml` and `toml_edit` are removed from every `Cargo.toml` and `Cargo.lock` entry the workspace owns; `blastit-manifest`'s `toml` dependency is gone. | `gate` |
 | R29 | One repository guard fails if the retired name or the retired dependency reappears: a pytest in `python/tests/test_docs_assets.py` (already run by `make docs-unit`, so **no new file and no new Makefile target**), with a negative self-test function beside it. | `gate` |
+| R30 | Two new boot decisions are requirements, not footnotes: `entrypoint php` that no view reaches is a **boot warning** (`EntrypointNotReached`), and a request whose path a view's pattern matched but whose method no view declares is a **`405`** with `Allow` listing the declared methods. Each has a named test in §20. | unit + critical |
 
 ## 4. Architecture & Data Flow
 
@@ -140,7 +142,7 @@ crates/blastit-manifest/src/
 │   ├── print.rs      # canonical layout                         (§14.2)
 │   └── write.rs      # surgical CST edits for --learn           (§14.5)
 ├── model.rs          # + Manifest::name/mounts/php/equivalent; Route.sandbox (§4.3)
-├── parse.rs          # DELETED by MB.21.4.4 (no replacement, no compatibility)
+├── parse.rs          # DELETED by MB.21.4.5 (no replacement, no compatibility)
 ├── validate.rs       # unchanged shape checks + Blastfile sentences
 ├── routing.rs        # + MountTable, + lookup() 405 signal      (§9)
 ├── edit.rs           # write_atomic + the public edit types; delegates to blastfile::write
@@ -474,6 +476,7 @@ table.
 | a second `app` | `` a file declares one `app`; the first is on line <l> `` |
 | a directive in a block that does not take it (`fallback` in a view, `body` in a store block, `root` outside a mount) | `` `<word>` is not a directive here; `<block>` takes `<the list>` `` |
 | `view GET "/x" { }` | `` a view name cannot be `GET`; names start with a lower-case letter or a digit `` |
+| `get "/x"` as a method | `` `get` is not a method: methods are upper-case, `GET` `` (the one `Method` predicate is §6.1's; `§8.4` re-states no second definition) |
 | `view products GET` | `` `view "products"` lists methods but no pattern; write the path it answers `` |
 | `view products { }` | `` view "products" has no endpoint: declare at least `GET "/products"` `` |
 | `view p GET "/p" { POST "/x" }` | `` view "p" declares its methods in the header; `POST "/x"` belongs in a view without one `` |
@@ -520,7 +523,7 @@ retired reader — the drops are asserted absent, §20 R8).
 | the preload list | `entrypoint python "…" { preload "mod", "two" }` | `Manifest.preload` | order kept, duplicates dropped |
 | a store declaration (`protocol`, `input`, `output`) | `postgres [name] $ENV` or `postgres [name] { … }` | `Proxy { name, Postgresql, input, output: {} }` | `output` empty = the protocol's default templates; a custom `output` is **dropped** (§7.5) |
 | a shared grant set | `trait <name> { … }` | `Group { name, grants }` | |
-| a global attach of a grant set | *(none)* | `Manifest.global_groups = []` | the field stays (empty) so `effective_grants` and `check` need no change; the file has no spelling |
+| a global attach of a grant set | *(none)* | `Manifest.global_groups = []` | **dropped: no keyword**; an invisible attach has no fail-closed story, so write `use <trait>` in each view that needs it. The field stays (empty) so `effective_grants` and `check` need no change, and `ADR-0012` records the drop |
 | a view (`name`, `path`, `methods`) | `view <name> [METHOD…] "<pattern>"[, …]` or the multi-endpoint form | `Route { name, sandbox, path: [regex…], methods }` | §8, §10.3 |
 | an ingress policy (`body`, `allow_raw`) | `body json\|form\|none\|raw[ unvalidated]` | `IngressPolicy { body, allow_raw }` | §10 |
 | a static block (`root`, `index`, `immutable`, `spa`) | `static "<prefix>" { root; index; immutable; fallback }` | `Manifest.mounts`; `policy.fallback = spa ? Some(index) : None` | §9 |
@@ -704,23 +707,26 @@ static "/" {
 `prefix` is a URL prefix, not a filesystem path: it must start with `/`, must not
 end with `/` unless it is `"/"`, and must not contain `..`, an empty segment,
 a backslash, a NUL, a control byte, `?`, `#` or `%`. A dotfile segment is allowed
-(`/.well-known` is a real prefix); dotfiles stay refused by the *resolver*, on the
-request path (§9.2 step 2), not by the prefix. Two mounts with the same prefix:
+(`/.well-known` is a real prefix; allowing it is **this design's** rule, not a
+page sentence); dotfiles stay refused by the *resolver*, on the request path
+(§9.2 step 2), not by the prefix. Two mounts with the same prefix:
 `DuplicateMount`.
 
 `root` keeps every rule it has today — required, relative, no leading `/`, no `..`
-segment, no `\`, no control byte — **and gains one**: no dotfile segment. That is a
-new rule, not a restatement (`root ".git"` was legal before and is refused now),
-because a mount whose `root` is a dot-directory would serve a tree the resolver's
-request-path dotfile check never sees. It is audited at boot and by `check` exactly
-as today (§9.6).
+segment, no `\`, no control byte — and **gains one, which is new**: no `.`-segment
+in `index` or `fallback` (§9.1's definition below). `root` itself may be `.` or a
+dot-directory such as `.output`, because it names a directory the author chose and
+the request path is still dotfile-checked by the resolver; only the two names that
+are *answered for a request* are restricted. This is a new rule, not a restatement
+(`root ".git"` was legal before and a `fallback ".env"` was not expressible at
+all). It is audited at boot and by `check` exactly as today (§9.6).
 
-`index` (default `index.html`) and `fallback` are **file names below `root`**, and
-they carry the same shape rules as `root`'s relative path: no leading `/`, no
-`..` segment, no `\`, no control byte, **no dotfile segment**, and non-empty. The
-dotfile rule is not decoration: without it, `fallback ".env"` with `root "."`
-would answer every `GET` miss with the environment file, because the request-path
-dotfile check never sees a name the author chose.
+**"Dotfile segment"** means a `/`-separated segment that starts with `.` and is
+not exactly `.` (so `.` is allowed, `..` is already refused, `.env` and `.output`
+are dotfile segments). For `index` and `fallback` — file names below `root` — such
+a segment is refused, because those names are joined to `root` and answered for a
+request the request-path check never sees: `fallback ".env"` with `root "."` would
+otherwise answer every `GET` miss with the environment file.
 
 ### 9.2 Request precedence, and how the scheduler gets it
 
@@ -791,10 +797,20 @@ is `Hidden` (`404`) before any descriptor is opened, so `fallback ".env"` is a
 Today `ImmutableGlob::matches(url_path)` receives `StaticFile::url_path` — the
 path the client asked for — and only an `Exact` answer whose path matches gets the
 year (`static_response::cache_control`). Under a mount, the resolver must
-therefore record `url_path` as `prefix + "/" + relative` (collapsing to the
-prefix itself when `relative` is empty, so the join never yields `//`), not the
-stripped remainder, or `immutable "/assets/*"` under `static "/assets"` would
-never match.
+therefore record `url_path` as the client's path rebuilt from the mount prefix,
+never the stripped remainder, or `immutable "/assets/*"` under `static "/assets"`
+would never match. The join is **not** `prefix + "/" + relative` (that yields
+`//assets/app.js` for the root mount): it is
+
+```rust
+let url_path = if prefix == "/" { relative.to_string() }
+               else { format!("{prefix}{relative}") };   // relative always starts with '/'
+```
+
+so `static "/" { root "public"; immutable "/assets/*" }` records
+`/assets/app.js`, and `static "/assets" { root "public/assets"; immutable
+"/assets/*" }` records the same string. A test covers both mounts with one
+`immutable` pattern.
 `StaticRoot::resolve` gains the mount prefix for exactly that field; the cache
 decision stays in `static_response.rs` unchanged.
 
@@ -1047,18 +1063,24 @@ true`, the existing `EgressRoute` boot warning, and no alternative spelling
 unchanged; `check`'s `dead_grant`/`missing_grant` logic reads the same strings it
 reads today. A `query` is written as a raw string when it holds no `'`, and as a
 `"…"` string when it does (the reference says so); `lower` takes either and stores
-the text without the quotes.
+the text without the quotes. `check`'s `LiteralQuery` refusal (an inlined value in
+a pasted statement) keeps its rule, and `MB.21.5.1` fixes the reference sentence
+that suggests an exact `query` may hold one — the boot refuses it either way.
 
 ### 13.2 Boot-warning parity
 
 | Warning | Blastfile trigger | Emitted by |
 |---|---|---|
-| `UnattachedGroup` | a `trait` no view `use`s | `validate::warnings`, unchanged |
-| `UngrantedProxy` | a `postgres` store no view or trait grants | unchanged |
-| `UnrestrictedRoute` | `postgres [name] unrestricted` in a view | unchanged |
-| `RawIngress` | any `body raw`, acknowledged or not | unchanged |
-| `EgressRoute` | `egress any` | unchanged |
-| `EntrypointNotReached` | `entrypoint php` with no view | new, §12.2 |
+| `UnattachedGroup` | a `trait` no view `use`s | `validate::warnings` — the **sentence is re-spelled** (`group`→`trait`, `route`→`view`), owned by `MB.21.3.0` |
+| `UngrantedProxy` | a `postgres` store no view or trait grants | re-spelled (`proxy`→`store`), `MB.21.3.0` |
+| `UnrestrictedRoute` | `postgres [name] unrestricted` in a view | re-spelled (`route`→`view`, `proxy`→`store`), `MB.21.3.0` |
+| `RawIngress` | any `body raw`, acknowledged or not | re-spelled (`body = "raw"`→`body raw`), `MB.21.3.0` |
+| `EgressRoute` | `egress any` | re-spelled (`egress = true`→`egress any`), `MB.21.3.0` |
+| `EntrypointNotReached` | `entrypoint php` with no view | new, §12.2, `MB.21.3.0` |
+
+The triggers and the emission order are unchanged; only the words are re-spelled,
+and every sentence lives in `crates/blastit-manifest/src/validate.rs` — which is
+`MB.21.3.0`'s file, so no other leaf may edit one of these strings.
 
 ### 13.3 `check`'s findings and `fix.to`
 
@@ -1086,25 +1108,34 @@ acknowledgement (`ADR-0011`). The payload therefore never carries `unvalidated`,
 and a test asserts both: no `unvalidated` in any `fix` object, and no retired path
 prefix in the rendered `--json` (R22).
 
+The `--json` **keys** do not move (`route`, `proxy`, `schema_version: 1`); the
+accepted page's sentence that says the cutover re-spells them is corrected by
+`MB.21.5.1`, because `R22` is the contract and it keeps them.
+
 `fold` (`python/blastit/fold.py`) is a member of this family: the `sql.denied`-log
 sibling of `--learn`, and today a **second** reader and writer of the retired
 format with no Rust counterpart (`blastit-py` exposes `normalize` and `covering`,
 not an editor). `MB.21.4.3` (a) adds one PyO3 function,
 `blastfile_apply_edits(source, edits_json) -> str`, to `crates/blastit-py` — a thin
 binding over `apply_edits`, so the one editor stays the one editor — (b) re-points
-`fold.py` at it and retires its `--manifest` flag in favour of discovery, and (c)
-keeps its statement policy unchanged (never `unrestricted`, never a literal, never
-twice). Until that leaf lands, `fold.py` is the one other writer in the tree, and
-the design names it so no leaf can claim "one serialiser" while it exists.
+`fold.py` at it while **keeping its required `--manifest PATH`** (now a Blastfile;
+`ADR-0002` decision 1 and `docs/reference/cli.md` protect the flag, and an offline
+log tool must not be forced to discover a file), and (c) keeps its statement policy
+unchanged (never `unrestricted`, never a literal, never twice). Until that leaf
+lands, `fold.py` is the one other writer in the tree, and the design names it so no
+leaf can claim "one serialiser" while it exists.
 ## 14. CST, `blastit fmt` and the Surgical `--learn` Editor (item 9)
 
 **Code site:** `blastfile/syntax.rs` (the arena and `print_lossless`),
-`print.rs` (canonical layout), `crates/blastit/src/fmt.rs` (the command),
+`print.rs` (canonical layout), `crates/blastit-manifest/src/blastfile/` (the `fmt`
+entry point), the CLI wiring in `crates/blastit/src/cli.rs` + `lib.rs` (owned by
+`MB.21.3.4`; there is **no** `crates/blastit/src/fmt.rs` and no leaf creates one),
 `blastfile/write.rs` (the edit), `crates/blastit-manifest/src/edit.rs`
 (`write_atomic` and the public edit types).
-**Proved by:** `crates/blastit-manifest/tests/blastfile_fmt.rs` (unit), `crates/blastit-manifest/tests/critical_blastfile_print.rs` (printer), `crates/blastit/tests/critical_blastfile_fmt.rs` (CLI)
-(critical: P1–P4 over the corpus), `tests/critical_manifest_edit*.rs` (rewritten
-to Blastfile).
+**Proved by:** `crates/blastit-manifest/tests/blastfile_fmt.rs` (unit),
+`crates/blastit-manifest/tests/critical_blastfile_print.rs` (printer),
+`crates/blastit/tests/{fmt_command,critical_blastfile_fmt}.rs` (CLI), and
+`tests/critical_manifest_edit*.rs` (rewritten to Blastfile).
 
 ### 14.1 The one tree
 
@@ -1146,7 +1177,8 @@ after formatting is refused (`fmt` re-checks and writes nothing, R25).
 
 ### 14.3 The invariants (phrased as assertions)
 
-1. **P1 lossless**: `print_lossless(&parse(text)?, text) == text`, for every
+1. **P1 lossless** (a module test inside `syntax.rs`, because `print_lossless`
+   is `pub(crate)`): `print_lossless(&parse(text)?, text) == text`, for every
    parseable text. (This is the byte-level round trip; it is what makes every
    other property checkable on the tree.)
 
@@ -1167,19 +1199,21 @@ after formatting is refused (`fmt` re-checks and writes nothing, R25).
 
 4. **P3 semantic round trip** — the NODE's `parse(print(ast)) == ast`, expressed
    on the artefacts that exist (there is no AST printer; the printer prints the
-   CST and `lower` turns a tree into the model):
+   CST and `lower` turns a tree into the model). The **integration** form uses
+   only public API, so it can live in a `tests/` suite:
 
    ```rust
-   let before = lower(&parse(text)?, text)?;
-   let after  = lower(&parse(&fmt(text)?)?, &fmt(text)?)?;
+   let before = Manifest::from_blastfile_str(text)?;
+   let after  = Manifest::from_blastfile_str(&fmt(text)?)?;
    assert!(after.equivalent(&before));   // span-free Manifest equality
    ```
 
-   `Manifest::equivalent` compares every field **except** `route_lines` (`fmt`
-   collapses blank lines, so line numbers legitimately move); warnings compare
-   equal too. A test asserts it for every fixture in `e2e/`,
-   `python/tests/`, every documented fence (§16) and a corpus of hand-written
-   shapes (one per production).
+   A module test inside `lower.rs` additionally asserts the `lower(&parse(..))`
+   identity for a tree it builds directly. `Manifest::equivalent` compares every
+   field **except** `route_lines` (`fmt` collapses blank lines, so line numbers
+   legitimately move); warnings compare equal too. A test asserts it for every
+   fixture in `e2e/`, `python/tests/`, every documented fence (§16) and a corpus
+   of hand-written shapes (one per production).
 
 5. **P4 the edit postcondition** (§14.5).
 
@@ -1261,8 +1295,8 @@ replaced the second half: there is no migration.** This section pins the negativ
 
 **Code site:** `crates/blastit/src/config.rs::manifest_path`/`manifest_dir`,
 `check.rs::read_manifest`, `stage0.rs` (the missing-file sentence), `cli.rs` (the
-`--manifest` refusal), `crates/blastit/src/fmt.rs`,
-`blastfile::read`, and the guard in `python/tests/test_docs_assets.py`.
+`--manifest` refusal and the `fmt` subcommand wiring), `blastfile::read`, and the
+guard in `python/tests/test_docs_assets.py`.
 **Proved by:** `tests/critical_config_and_presets.rs` (the missing-file and
 discovery cases, protected), `tests/blastfile_discovery.rs` (unit),
 `python/tests/test_check.py`, `e2e/` boot cases, and
@@ -1274,7 +1308,7 @@ discovery cases, protected), `tests/blastfile_discovery.rs` (unit),
 | Source | Value |
 |---|---|
 | `BLASTIT_MANIFEST` set and non-empty | that path |
-| `BLASTIT_MANIFEST` set and empty | `BLASTIT_MANIFEST must not be empty: put ./Blastfile in the working directory or name a file` (exit 1; `2` for `check`) |
+| `BLASTIT_MANIFEST` set and empty | `BLASTIT_MANIFEST must not be empty: put ./Blastfile in the working directory or name a file` (exit `1` for boot/`dev`, `2` for `check` **and for `fmt`**, whose contract is `0`/`1`/`2`) |
 | neither | `./Blastfile` in the starting working directory |
 | **no upward search** | a `Blastfile` in an ancestor is never picked up (`ADR-0002` unchanged) |
 
@@ -1378,18 +1412,25 @@ not guess a page's numbers:
 ```rust
 pub struct Counts { documents: usize, statements: usize, illustrations: usize }
 const PAGES: &[(&str, Counts, &str)] = &[
-    // the numbers are measured once from the page as it stands, then pinned;
-    // the design deliberately does not guess them
-    ("README.md",                   Counts { documents: 1, statements: 0, illustrations: 0 }, "MB.21.5.1"),
+    // measured on the pages as they stand (2026-11-16), then pinned
+    ("README.md",                   Counts { documents: 0, statements: 0, illustrations: 5 }, "MB.21.5.1"),
     ("docs/blastfile.md",           Counts { documents: 1, statements: 0, illustrations: 3 }, "MB.21.5.1"),
     ("docs/reference/blastfile.md", Counts { documents: 0, statements: 14, illustrations: 3 }, "MB.21.5.1"),
     // … every page MB.21.5.1 rewrites, with the number it really carries
 ];
 ```
 
+The numbers are produced by the rule §16.1 defines, applied to the pages as they
+stand: `docs/reference/blastfile.md` has **17 fences = 14 keyword-led statement
+lists + 3 illustrations** (the EBNF fence, the error example and the `json`
+document); `README.md` has **5 fences, all illustrations** (`console`/`python`/
+`toml`), so it carries zero documents until `MB.21.5.1` adds one; the guide has
+**1 document + 3 illustrations**. Nothing here is a guess.
+
 | Rule | Assertion |
 |---|---|
-| per-page counts | `count(page) == PAGES[page]` for every listed page, so a new fence cannot appear unlisted |
+| per-page counts | `count(page) == PAGES[page]` for every listed page |
+| the table is exhaustive | the harness also scans every file under `docs/**` and `README.md`; a **document** fence on a page absent from `PAGES` fails (so a fence cannot appear unlisted), and an illustration outside `PAGES` is reported by path |
 | total parity | the sums of the three columns equal `TOTAL` constants; a page that carries none is listed with `0` |
 | every document boots | `Manifest::parse_blastfile(body, UidLayout::DEFAULT_BASE)` succeeds and validates |
 | every statement list parses | `blastfile::parse(body)` succeeds (syntax only, no lower/validate) |
@@ -1629,12 +1670,13 @@ host (TS-25); a test that needs longer is an e2e test, not a critical one.
 | R3a | `lexer.rs` `mod tests::caps` | `critical_blastfile_lexer.rs::the_size_cap_is_checked_without_reading` (a `set_len` regular file of exactly `MAX_SOURCE_BYTES + 1` bytes, refused; and a mode-`000` file of that size returns `TooLarge`, **not** `PermissionDenied` — the observable "the size was known before any read"), `::a_fifo_cannot_exceed_the_cap` | `blastfile_discovery.rs` (the `read` helper) |
 | R3b | `lexer.rs` `mod tests::caps` | `critical_blastfile_lexer.rs::the_token_cap_trips_while_pushing` (a file of exactly `MAX_TOKENS + 1` tokens) | — |
 | R4 | `blastfile_parse.rs` (one test per production, one per §6.7 row) | `critical_blastfile_parser.rs::depth_two_is_the_limit` (a third block refused), `::a_wall_of_braces_is_refused_without_recursion` | `cargo-mutants` on `parser.rs` |
-| R5 | `blastfile_fmt.rs::p1_lossless` | `critical_blastfile_print.rs::p1_over_the_corpus` | every `docs` fence, every `e2e/` fixture |
+| R5 | `syntax.rs` `mod tests::p1_lossless` (a module test: `print_lossless` is `pub(crate)`) | — | every `docs` fence, every `e2e/` fixture (corpus, via the module test) |
 | R6 | `blastfile_fmt.rs::p2_idempotent` | `critical_blastfile_print.rs::p2_fixed_point_over_the_corpus`, `::p2b_comments_survive` (`comment_texts`/`comment_owners` equal) | `fmt --check` in `make check` |
-| R7 | `blastfile_fmt.rs::p3_meaning_preserved` | `critical_blastfile_print.rs::p3_over_the_corpus` (`lower(fmt(t)).equivalent(...)`) | — |
+| R7 | `blastfile_fmt.rs::p3_meaning_preserved` (public API: `from_blastfile_str(fmt(t)).equivalent(...)`) | `critical_blastfile_print.rs::p3_over_the_corpus` | — |
 | R8 | `blastfile_lower.rs` (one per §7.1 row) | `critical_blastfile_parity.rs` (one converted fixture per §7.2 shape, compared to an expected `Manifest` **built in the test**; the dropped rows asserted absent) | — |
 | R9 | `blastfile_patterns.rs` (one per §8.1/§8.3 row) | `critical_blastfile_patterns.rs` (traversal corpus, 257-byte pattern, unbalanced `)`) | `critical_rewrite.rs` |
 | R10 | `routing.rs` `mod tests::mounts`, `rewrite.rs` `mod tests::precedence` | `critical_rewrite.rs` (4-step precedence, mount miss falls through, `Hidden` never falls through, fallback after views, `has_body` → 413), `critical_static_resolve.rs` (unchanged: `.php`/dotfile/symlink/`..`/NUL), `critical_static_entry.rs` | `uid.rs` `mod tests::two_endpoints_share_one_uid` (the sandbox assertion), `e2e/` static matrix |
+| R10a | `scheduler.rs` `mod tests::resolve_rejects_dot_dot` | `critical_rewrite.rs::a_traversal_path_is_400_before_routing` (the `/admin/../public` differential: the view named `admin` is not reached) | — |
 | R11 | `blastfile_lower.rs::body_table` (the 5-row table) | `critical_raw_ingress.rs` (both stages refuse; sentences updated), `critical_blastfile_lexer.rs::body_raw_forms` | `e2e/` boot refusal |
 | R12 | `blastfile_traits.rs`, `grants.rs` | `critical_manifest_011.rs` (rewritten: the same grant set through Blastfile) | — |
 | R13 | `blastfile_entrypoint.rs` | `critical_php_manifest.rs` (rewritten; `workers` sentence; one entrypoint; PHP path rules), `critical_php_backend.rs` | `e2e/php/` runtime unchanged |
@@ -1646,11 +1688,12 @@ host (TS-25); a test that needs longer is an e2e test, not a critical one.
 | R20 | `blastfile_lower.rs::names_are_never_resolved` (parses a text naming an unset variable) | `critical_blastfile_security.rs::parse_never_reads_env` | `scripts/check_manifest_purity.py` (no `std::env` under `crates/blastit-manifest/src/`) |
 | R21 | `blastfile_parse.rs::no_partial_manifest` | `critical_blastfile_security.rs::an_error_never_yields_a_manifest` | — |
 | R22 | `audit_v1.rs` `mod tests` (the §13.3 table, positive `to` values asserted) | `critical_check_engine.rs` (no retired path prefix in any payload; a bare `body` is never a `to`) | `python/tests/test_check.py` |
-| R23 | — | — | the module-level `#![deny(clippy::unwrap_used, expect_used, panic, indexing_slicing)]` at the top of `blastfile/mod.rs` (§4.1) plus `cargo clippy -D warnings`; the workspace `[lints]` table is unchanged |
+| R23 | — | — | the module-level `#![deny(clippy::unwrap_used, expect_used, panic, todo, indexing_slicing)]` at the top of `blastfile/mod.rs` (§4.1) plus `cargo clippy -D warnings`; the workspace `[lints]` table is unchanged |
 | R24 | `blastfile_lower.rs::names_are_never_resolved` | `critical_blastfile_security.rs::parse_never_reads_env` | `scripts/check_manifest_purity.py` |
 | R25 | `blastfile_fmt.rs::output_reparses`, `::over_cap_is_refused` | `critical_blastfile_print.rs::a_query_with_a_quote`, `::fmt_refuses_a_file_it_would_grow_past_the_cap` | — |
 | R26 | `blastfile_errors.rs` (control byte, 121-`char` value, a control byte in the path) | `critical_blastfile_errors.rs` | — |
 | R27–R29 | — | — | `python/tests/test_docs_assets.py::test_the_real_tree_carries_no_retired_toml_manifest` + its negative twin, run by `make docs-unit` |
+| R30 | `validate.rs` `mod tests::entrypoint_not_reached` | `critical_php_manifest.rs::an_unreached_entrypoint_warns`, `critical_rewrite.rs::a_method_mismatch_is_405_with_allow` | — |
 
 Beyond the table:
 
@@ -1673,28 +1716,30 @@ The plan tree already numbers the leaves. This section assigns the design's work
 to **those** ids. Every row is the plan's own `paths` **plus** the additions the
 leaf cannot be green without; each addition is a `plan.py edit` the epic owner
 runs before dispatch, and a row whose list is unchanged from the brief is not
-marked. Two leaves need a **split** because no single ≤ 600-line change can hold
-their work:
+marked. Two working splits use letter suffixes in prose only; **the plan ids are
+numeric** (`plan.py` rejects `3.0a`):
 
-- `MB.21.3.0` (model parity) is created by the epic owner and, if its diff
-  exceeds ~600 lines, split into `3.0a` (`model/routing/uid/validate`) and `3.0b`
-  (the scheduler and `blastit` call sites + the three suites that assert the old
-  accessors: `critical_static_manifest.rs`, `critical_php_manifest.rs`,
-  `docs_fences.rs`). Each commit keeps `make check` green.
-- `MB.21.3.2` is split by the epic owner into `3.2a` (CST + LL(1) parser, ~550
-  lines) and `3.2b` (lowering + the model-equality oracle + the fixtures), because
-  parser + lowering + nine test files + fifteen fixtures is more than one
-  ≤ 600-line / ≤ 8-file leaf.
-- `MB.21.4.4` keeps the *fixture translation* and hands the *erasure sweep* to a
-  new `MB.21.4.5` (`crates/`, `python/`, `e2e/`, `Makefile` mentions, the TOML
-  synthesis in `stage1`, the Python readers and the dependency deletion), so
-  neither leaf carries both.
+| Working label | Plan id | Work |
+|---|---|---|
+| 3.0a | `MB.21.3.0` | `manifest`-crate model parity (`model/routing/uid/validate/error/parse/edit` + its tests) |
+| 3.0b | **`MB.21.3.7`** | the call sites: scheduler (`route/rewrite/static_asset/static_response`), `blastit` (`config/stage0/stage1/check/audit_v1/dev_learn`) and `blastit-php` |
+| 3.2a | `MB.21.3.2` | CST + LL(1) parser |
+| 3.2b | **`MB.21.3.8`** | lowering + the model-equality oracle + the fixtures |
+
+Both leaves of each pair must keep `make check` green on its own commit; the epic
+owner creates `MB.21.3.7` and `MB.21.3.8` with `plan.py add` before dispatch.
+`MB.21.4.4` keeps the *fixture translation* and hands the *Rust-side erasure
+sweep* to a new `MB.21.4.5` (`crates/` and `e2e/`/`Makefile` mentions, the TOML
+synthesis in `stage1`, the dependency deletion), so neither leaf carries both;
+**every Python edit stays with `MB.21.4.3`**.
 
 | Leaf | Work | Paths (plan paths + these additions) | Acceptance |
 |---|---|---|---|
-| **`MB.21.3.0`** (new; the epic owner creates it) | **Model parity, alone.** `Manifest::name/mounts/php/equivalent`, `StaticMount`, `StaticPolicy::fallback`, `Route.sandbox`, remove `Route.static_policy`/`php`, `routing::{MountTable,lookup}`, `UidLayout` by `sandbox`, `StaticOutcome::fallback_missing`. It is a leaf of its own because it touches ~64 call sites in four crates. | `crates/blastit-manifest/src/{model,routing,uid,validate,error,parse,edit}.rs`, `crates/blastit-manifest/tests/{routing,validate,uid,parse,critical_manifest_011,critical_manifest_edit,critical_manifest_edit_executor,edit_branches,grants,critical_static_manifest,critical_php_manifest,docs_fences}.rs`, `crates/blastit-scheduler/src/{route,rewrite,static_asset,static_response}.rs`, `crates/blastit-scheduler/tests/{critical_rewrite,critical_static_entry}.rs`, `crates/blastit/src/{config,stage0,stage1,check,audit_v1,dev_learn}.rs`, `crates/blastit-php/src/**` | the workspace compiles with `-D warnings`; every existing suite keeps its assertions (mechanical accessor updates, no test deleted without a replacement); `uid.rs`'s new sandbox test passes; no TOML code removed yet |
-| `MB.21.3.1` | bounded lexer: tokens, trivia, spans, caps, the `read` helper | **added:** `crates/blastit-manifest/src/lib.rs`, `blastfile/tokens.rs` and the `mod.rs` skeleton, `tests/blastfile_errors.rs`, `tests/critical_blastfile_errors.rs`, `scripts/check_manifest_purity.py` + `scripts/test_manifest_purity.py` | R1, R2, R3a, R3b, R26; the purity gate green |
-| `MB.21.3.2` | LL(1) parser **and** lowering to the existing `Manifest` (§6, §7, §10–§13), with the model-equality oracle; creates `tests/fixtures/` | **added:** `tests/blastfile_{traits,grants,body,entrypoint}.rs`, `tests/critical_blastfile_{parity,traits,body,entrypoint,security}.rs`, `tests/fixtures/**` | R4, R8, R11–R14, R20, R21; `critical_blastfile_parity.rs` green |
+| **`MB.21.3.0`** (new) | **Model parity, the manifest crate alone.** `Manifest::name/mounts/php/equivalent`, `StaticMount`, `StaticPolicy::fallback`, `Route.sandbox`, remove `Route.static_policy`/`php`, `routing::{MountTable,lookup}`, `UidLayout` by `sandbox`, `StaticOutcome::fallback_missing`. | `crates/blastit-manifest/src/{model,routing,uid,validate,error,parse,edit}.rs`, `crates/blastit-manifest/tests/{routing,validate,uid,parse,critical_manifest_011,critical_manifest_edit,critical_manifest_edit_executor,edit_branches,grants,critical_static_manifest,critical_php_manifest,docs_fences}.rs` | `cargo test -p blastit-manifest` with `-D warnings`; every existing suite keeps its assertions; `uid.rs`'s sandbox test passes; no TOML code removed yet |
+| **`MB.21.3.7`** (new) | **The call sites of that parity** — the second half of the split, so neither leaf exceeds one session. | `crates/blastit-scheduler/src/{route,rewrite,static_asset,static_response}.rs`, `crates/blastit-scheduler/tests/{critical_rewrite,critical_static_entry}.rs`, `crates/blastit/src/{config,stage0,stage1,check,audit_v1,dev_learn}.rs`, `crates/blastit-php/src/**` | the workspace compiles with `-D warnings`; the scheduler suites green; one listener/worker per `sandbox` |
+| `MB.21.3.1` | bounded lexer: tokens, trivia, spans, caps, the `read` helper | **added:** `crates/blastit-manifest/src/lib.rs`, `blastfile/tokens.rs` and the `mod.rs` skeleton, `tests/blastfile_errors.rs`, `tests/critical_blastfile_errors.rs`, `scripts/check_manifest_purity.py` + `scripts/test_manifest_purity.py`, `Makefile` (one `make check` line for the purity gate) | R1, R2, R3a, R3b, R26; the purity gate green |
+| `MB.21.3.2` | **CST + LL(1) parser** (§6), no lowering: the second half is `MB.21.3.8` | **added:** `tests/blastfile_parse.rs`, `tests/critical_blastfile_parser.rs` | R4, R5, R21; `critical_blastfile_parser.rs` green |
+| **`MB.21.3.8`** (new) | **Lowering to the existing `Manifest`** (§7, §10–§13) with the model-equality oracle; creates `tests/fixtures/` | `blastfile/lower.rs`, `tests/{blastfile_lower,blastfile_traits,blastfile_grants,blastfile_body,blastfile_entrypoint}.rs`, `tests/critical_blastfile_{parity,traits,body,entrypoint,security}.rs`, `tests/fixtures/**` | R8, R11–R14, R20; `critical_blastfile_parity.rs` green |
 | `MB.21.3.3` | path patterns, `HEAD`, method normalisation | `blastfile/pattern.rs`, `tests/blastfile_patterns.rs`, `tests/critical_blastfile_patterns.rs` | R9; §8.1/§8.3 tables covered |
 | `MB.21.3.4` | CST printing, canonical layout, `blastit fmt` | **added:** `crates/blastit-manifest/tests/{blastfile_fmt,critical_blastfile_print}.rs`, `crates/blastit/tests/{fmt_command,critical_blastfile_fmt}.rs` | R5–R7, R19, R25; P1–P3 over the corpus **created by 3.2**; `fmt --check` clean on those fixtures (the repository-wide check arrives with 4.5) |
 | `MB.21.3.5` | surgical editor over the CST (replaces the retired patcher) | `blastfile/write.rs`, `crates/blastit-manifest/src/edit.rs`, `tests/{critical_manifest_edit,critical_manifest_edit_executor,critical_learn_executor_blocks,edit_branches}.rs` (the plan brief's own list; `dev_learn.rs` is **not** touched here) | R15 + P4; `critical_guard.py` green |
@@ -1703,9 +1748,9 @@ their work:
 | `MB.21.4.2` | runtime parity: mounts before views, fallback after views, `405`, `sandbox` uids, `..`/`//` refused before routing | **added:** `crates/blastit-scheduler/tests/{critical_static_entry,critical_static_assets}.rs`, `crates/blastit-manifest/tests/critical_static_manifest.rs`, `crates/blastit/tests/critical_raw_ingress.rs` (sentence update only) | R10; the §9.2 assertions |
 | `MB.21.4.3` | `check`/`--learn`/`--json` re-spelling; `fold` and the pytest plugin re-pointed through the PyO3 binding (all Python work lives here) | `crates/blastit/src/{audit_v1,check,dev_learn}.rs`, `crates/blastit/tests/critical_check_engine.rs`, **added:** `crates/blastit-py/src/{lib,audit}.rs`, `python/blastit/{fold,pytest_plugin,__init__}.py`, `python/tests/{test_check,test_fold}.py` | R22; §13.3 payloads; no retired prefix, no `unvalidated` in a `fix` |
 | `MB.21.4.4` | every `e2e/` and `python/tests/` fixture → `Blastfile`; the Makefile's `docs-serve` stage; **no** deletion work | `e2e/**`, `python/tests/**`, `Makefile` | MB.21 acceptance 2–3; `find` lists no retired path |
-| **`MB.21.4.5`** (new; the epic owner creates it) | **the Rust-side erasure sweep**: delete `parse.rs`, `Manifest::from_toml_str` (in `model.rs`), the TOML synthesis in `stage1::learn_routing_table`, the `toml`/`toml_edit` dependency, and every remaining mention in Rust code paths. Python files are `MB.21.4.3`'s (they are re-pointed there); this leaf only touches what 4.3 leaves behind. | `crates/blastit-manifest/src/{parse.rs (deleted),model.rs}`, `crates/blastit/src/stage1.rs`, `crates/blastit-manifest/Cargo.toml`, `Cargo.toml`/`Cargo.lock` | R27, R28 in code paths; `cargo tree -p blastit-manifest` shows no `toml`; the guard from `MB.21.5.2` is green on `crates/` |
-| `MB.21.5.1` | docs: rewrite site + `README.md` + `ARCHITECTURE.md` (§5.1/§6 and every mention) + `docs/VISION.md`'s mention; **delete `docs/reference/manifest.md` and its `inventory.toml` row**; fix the `--learn`/`body` contradiction and the `$IDENT`-echo row (§16.3, S2) | `docs/**`, `README.md`, `ARCHITECTURE.md`, **added:** `AGENTS.md`, `.opencode/**`, `python/tests/runnable_docs/inventory.toml`, `zensical.toml` | R27 for docs; `make docs-check` and `make docs-test` green |
-| `MB.21.5.2` | live fences, `docs_fences` strict (one opener), the retired-format guard | `crates/blastit-manifest/tests/docs_fences.rs`, **added:** `python/tests/test_docs_assets.py` | R27–R29; `make docs-unit` green with the guard |
+| **`MB.21.4.5`** (new; the epic owner creates it) | **the Rust-side erasure sweep**: delete `parse.rs`, `Manifest::from_toml_str` (in `model.rs`), the TOML synthesis in `stage1::learn_routing_table`, the `toml`/`toml_edit` dependency, and every remaining mention in Rust code paths. Python files are `MB.21.4.3`'s (they are re-pointed there); this leaf only touches what 4.3 leaves behind. | `crates/blastit-manifest/src/{parse.rs (deleted),model.rs,edit.rs}`, `crates/blastit/src/stage1.rs`, `crates/blastit-manifest/Cargo.toml`, `Cargo.toml`/`Cargo.lock`, **added:** `crates/blastit-manifest/tests/parse.rs`, `crates/blastit-manifest/tests/critical_php_manifest.rs`, comment-only mentions in `crates/blastit-env/src/**` and `crates/blastit-sqlpolicy/src/learn.rs` | R27, R28 in code paths; `cargo tree -p blastit-manifest` shows no `toml`; the guard from `MB.21.5.2` is green on `crates/` |
+| `MB.21.5.1` | docs: rewrite site + `README.md` + `ARCHITECTURE.md` (§2.4, §5.1/§6 and every mention) + `docs/VISION.md`'s mention; **delete `docs/reference/manifest.md` and its `inventory.toml` row**; fix the `--learn`/`body` contradiction, the `$IDENT`-echo row, the `LiteralQuery` sentence (§13.1) and the `--json` "keys are re-spelled" sentence (§13.3) | `docs/**`, `README.md`, `ARCHITECTURE.md`, **added:** `AGENTS.md`, `.opencode/**`, `python/tests/runnable_docs/inventory.toml`, `zensical.toml`, `plan/nodes/**/NODE.md` (the live briefs the guard scans) | R27 for docs; `make docs-check` and `make docs-test` green |
+| `MB.21.5.2` | live fences, `docs_fences` strict (one opener), the retired-format guard | `crates/blastit-manifest/tests/docs_fences.rs`, **added:** `python/tests/test_docs_assets.py`, `crates/blastit-manifest/tests/critical_blastfile_print.rs` (the ≥ 20 corpus floor) | R27–R29; `make docs-unit` green with the guard |
 | `MB.21.5.3` | `test-curator` mutation audit ≥ 75 % | `docs/testing/**` | MB.21 acceptance 6 |
 | `MB.21.5.4` | visual proof of both pages | — | MB.21 acceptance 6 |
 
@@ -1722,7 +1767,8 @@ dispatch — a Follow-up in `RESULT.md`, not a silent mismatch.
 
 Leaves 3.1→3.6 are one serial chain (each needs the previous module's types);
 4.1 depends on 3.2; 4.2–4.4 depend on 3.4 and 3.5; 5.x depends on 4.4. No two
-leaves write `Cargo.toml`/`Cargo.lock` (only `MB.21.4.4` removes dependencies), so
+leaves write `Cargo.toml`/`Cargo.lock` (only `MB.21.4.5` removes dependencies, after
+`MB.21.4.4`; `MB.21.5.x` depends on 4.5), so
 no serialization chain is needed beyond the natural order.
 
 ## 22. Review Resolution
@@ -1754,22 +1800,22 @@ end (a MINOR is not a reason for another round).
 | S16 | `/assets*` matches `/assets-secret` | **accepted** -> §8.2/§8.3: `*` must be a whole tail segment (preceded by `/`); `/assets*` is refused with "write `/assets/*`" |
 | S17 | trivia unbounded in the budget table | **accepted** -> §4.5: one trivia node per whitespace/comment run, `MAX_TRIVIA = MAX_TOKENS` enforced in `push` |
 | S18 | fallback ignores a declared body | **accepted** -> §9.2 step 3: the fallback goes through `rewrite::decide`, so `has_body` is `413` and only GET/HEAD are answered |
-| S19 | ingress `fix.to` is not valid Blastfile | **accepted** -> §13.3: `to: "view products body json"` (the codec is in the node); `raw_ingress` -> `view upload body raw unvalidated` |
+| S19 | ingress `fix.to` is not valid Blastfile | **accepted** -> §13.3: `to` is a **node locator** (`view upload body`, or `view upload POST body`), never a directive to paste; `fix.codecs`/`fix.allow_raw` say what to write, and no `fix` object carries `unvalidated` |
 | S20 | the path prefix is not escaped | **accepted** -> §18: the prefix goes through `escape_control` and the 120-char cut, with a test |
 
 ### implementability (`docs/design/blastfile-dsl.review-implementability.md`)
 
 | id | Finding | Resolution |
 |---|---|---|
-| B1 | leaves are not the plan's leaves; leaf 1 cannot compile | **accepted** -> §21 uses the real ids; `MB.21.3.1` opens with model parity and its `paths` are widened to `parse.rs`, `edit.rs`, six test files and the scheduler's `route.rs`/`rewrite.rs` |
+| B1 | leaves are not the plan's leaves; leaf 1 cannot compile | **accepted** -> §21 uses the real ids; **`MB.21.3.0`** (new) owns model parity with the widened `paths` in §21, and `MB.21.3.1` is the lexer only |
 | B2 | EBNF cannot parse the accepted documents | **accepted** -> §6.1 (grant block; patterns-only header; `Dot`; endpoint grant without `unrestricted`) |
 | B3 | three representations claim to be the CST | **accepted** -> §5.2/§6.4/§14.1: `Lexed` is an input buffer, the arena is the only tree, `lower` reads the arena through typed accessors; no second AST |
 | M1 | model-construction seam missing | **accepted** -> §4.3: `Manifest::with_name/mounts/php`, `Route::with_sandbox`, `equivalent`; `lower` is the only builder and lives in the crate |
-| M2 | `route_lines` renamed; `check_uids` not adapted | **accepted** -> §7.3/§4.3: `route_lines` keeps its name and meaning; `check_uids`/`UidLayout` number by `sandbox`; leaf `MB.21.3.1` |
+| M2 | `route_lines` renamed; `check_uids` not adapted | **accepted** -> §7.3/§4.3: `route_lines` keeps its name and meaning; `check_uids`/`UidLayout` number by `sandbox`; leaf **`MB.21.3.0`** (its `uid.rs` path and `check_uids` are in that row) |
 | M3 | parse entry points named three ways; call sites unowned | **accepted** -> §4.1/§7.3: exactly two public names (`from_blastfile_str`, `parse_blastfile`) and `read`; the call sites are in `MB.21.4.1` |
 | M4 | mounts have no uid/process; static-only file cannot boot | **accepted** -> §9.5: `can_boot_without_app`/`is_all_static` redefined; a zero-route table with a mount is a valid boot; prefix boundary/strip pinned in §9.2 |
 | M5 | leaf paths omit §9.2/§9.3 files | **accepted** -> §21 `MB.21.3.1`/`MB.21.4.2` widened to `static_asset.rs`, `static_response.rs`, `rewrite.rs`, `route.rs`, `stage0.rs` and the two critical suites |
-| M6 | `fold` is a second parser/editor, unmentioned | **accepted** -> §13.3 last paragraph + R22 + leaf `MB.21.4.3`: `fold.py` is re-pointed at `apply_edits` and its `--manifest` flag retired |
+| M6 | `fold` is a second parser/editor, unmentioned | **accepted** -> §13.3 last paragraph + R22 + leaf `MB.21.4.3`: `fold.py` is re-pointed at `apply_edits` and **keeps the required `--manifest PATH`** (now a Blastfile) |
 | M7 | `ManifestEdits` "keeps its names" but renames fields | **accepted** -> §14.5: the rename is stated (`routes` -> `views`, serde key follows), and the `--json` proposal keys stay because they are counts |
 | M8 | lowering is its own leaf, size estimate inconsistent | **accepted** -> §21: `MB.21.3.2` owns parser **and** lowering; §19.1 says ~1,100 lines |
 | M9 | `docs_fences` cannot be green in the stated order; fragments reject the reference's fences | **accepted** -> §16: three fence classes; `MB.21.3.6` lands the harness against the *current* pages and its counts move with `MB.21.5.1` |
@@ -1801,7 +1847,7 @@ end (a MINOR is not a reason for another round).
 | TS-13 | P4's expected value is unspecified and would re-implement `lower` | **accepted** -> §14.5: `ManifestEdits::apply_to` in the library is the one oracle |
 | TS-14 | R19's docs tier empty; a runnable-`fmt` claim | **accepted** -> §16.3/§20: `fmt` examples are illustrations, not runnable console fences; R19's tier is unit |
 | TS-15 | the `$IDENT` oracle is unsound | **accepted** -> §17.2/§20: a behavioural test plus a source `gate` (`scripts/check_manifest_purity.py`) that fails on any `std::env` under the crate |
-| TS-16 | R23's oracle does not detect the property | **accepted** -> §20: R23 is the crate's `[lints]` table + `clippy -D warnings` |
+| TS-16 | R23's oracle does not detect the property | **accepted** -> §20: R23 is the module-level `#![forbid(unsafe_code)]` + `#![deny(…)]` in `blastfile/mod.rs` plus `clippy -D warnings`; the workspace `[lints]` table is untouched |
 | TS-17 | `p3` undefined | **accepted** -> §14.3 names P1, P2, P2b, P3, P4 |
 | TS-18 | total parity is tautological | **accepted** -> §16.2: absolute `TOTAL` constants, per-page counts |
 | TS-19 | R22's critical test only asserts absence | **accepted** -> §20: positive `to` values asserted per action, plus the absence check |
@@ -1819,14 +1865,14 @@ end (a MINOR is not a reason for another round).
 |---|---|---|
 | C-B1 | grants unreachable in the EBNF | **accepted** -> §6.1 (same fix as S8/B2) |
 | C-B2 | precedence inverts the accepted page | **accepted** -> §9.2: fallback after views, `405` after the fallback attempt on GET/HEAD |
-| C-B3 | `fold` is a shipped retired-format reader/writer | **accepted** -> §13.3/R22/§21 `MB.21.4.3`; it is re-pointed at `apply_edits` and its flag retired |
+| C-B3 | `fold` is a shipped retired-format reader/writer | **accepted** -> §13.3/R22/§21 `MB.21.4.3`; it is re-pointed at `apply_edits` and **keeps the required `--manifest PATH`** (now a Blastfile) |
 | C-M1 | `Route.sandbox` missing; `route_lines` renamed | **accepted** -> §4.3/§7.3 |
 | C-M2 | the `app` name has three spellings | **accepted** -> §4.3: one field `name`, one accessor `Manifest::name()` |
 | C-M3 | the editor API rename is denied | **accepted** -> §14.5: the rename is stated, and nothing the `--json` document publishes changes |
 | C-M4 | `fix.to` invented for actions that have none | **accepted** -> §13.3: `to` only on grant actions and `raw_ingress`, with a codec in the ingress node (S19) |
 | C-M5 | no patterns-only header | **accepted** -> §6.1 (`view_header → methods patterns? | patterns`) |
 | C-M6 | generic unknown-directive and second-`app` refusals missing | **accepted** -> §6.7 |
-| C-M7 | the fence inventory is wrong; `docs/ci.md` missing | **accepted** -> §16.1/§16.2: three classes, `docs/ci.md` in `PAGES`, the reference page listed with 16 statement lists and 3 illustrations |
+| C-M7 | the fence inventory is wrong; `docs/ci.md` missing | **accepted** -> §16.1/§16.2: three classes, `docs/ci.md` in `PAGES`, the reference page listed as `0/14/3` (17 fences = 14 keyword-led statement lists + the EBNF, the error example and the `json` document) |
 | C-M8 | `index`'s default unstated | **accepted** -> §9.1: `index` defaults to `index.html`; `root` is required |
 | C-M9 | `ARCHITECTURE.md`/`VISION.md`/the retired page have no owner | **accepted** -> §21 `MB.21.5.1` owns all three (and deletes the retired page) |
 | C-M10 | `--json` keys pinned in two directions; `routes.total` undefined | **accepted** -> §10.3/§13.3: keys stay `route`/`proxy`; `routes.total`/`exercised` count views (sandboxes) |
@@ -1878,7 +1924,7 @@ step limit — so its findings arrived in its report and are resolved here)
 |---|---|---|
 | B1 | eleven named test artefacts have no owning leaf | **accepted** -> §21: every test file and script §20 names is in exactly one leaf's `paths` (lexer/errors/purity in 3.1, body/security/entrypoint in 3.2, `critical_raw_ingress.rs` in 4.2, `critical_static_cli.rs` in 3.4) |
 | B2 | the runnable-docs inventory still lists the deleted page, so `docs-test` dies | **accepted** -> §16.3: `MB.21.5.1` owns the inventory row deletion and its `paths` include it |
-| B3 | the erasure guard cannot pass as specified, and its file set is not repo-wide | **accepted** -> §15.2: two explicit sets — **strict** (`crates/`, `python/`, `scripts/`, `e2e/`, `Makefile`, `README.md`, `ARCHITECTURE.md`, `AGENTS.md`, public `docs/*.md`) and **exempt** (the design/ADR/guard, and the dated records `docs/design|decisions|testing|research|knowledge/**`, `plan/**`, `CHANGELOG.md`); R27 and the guard state the same two sets |
+| B3 | the erasure guard cannot pass as specified, and its file set is not repo-wide | **accepted** -> §15.2: one artefact (`test_the_real_tree_carries_no_retired_toml_manifest`) with **no allowlist**, scanning `README.md`, `ARCHITECTURE.md`, `docs/VISION.md`, every published page (`public_pages`), `crates/**/*.rs` + `Cargo.toml`, `python/**/*.py` + `runnable_docs/*.toml`, `scripts/**`, `e2e/**`, `Makefile` and every **live** `plan/nodes/**/NODE.md`; the name is composed (`"blastit" + ".toml"`) so the guard module never needs a self-exemption |
 | M1 | P1/P3 call undefined symbols in three spellings | **accepted** -> §4.4: one public-surface table with exact signatures |
 | M2 | `comment_texts`/`comment_owners` undefined | **accepted** -> §14.3: defined as test helpers (ordered comment bodies; owner = the next non-trivia token's node kind, EOF attaching to `File`) |
 | M3 | R3 merges two caps and has no "before any read" oracle | **accepted** -> R3a/R3b and §20: the mode-`000` over-cap file returns `TooLarge`, not `PermissionDenied` |
@@ -1904,10 +1950,10 @@ findings are resolved here:
 | id | Finding | Resolution |
 |---|---|---|
 | T-B1 / I-B2 | §21's test names and paths did not match the plan's own leaf text; several files had no owning leaf | **accepted** -> §21 is rewritten against the real leaves: the parser suite is `critical_blastfile_parser.rs`, the printer suite is `critical_blastfile_print.rs` (manifest crate) plus `crates/blastit/tests/critical_blastfile_fmt.rs` (CLI), fixtures live in `crates/blastit-manifest/tests/fixtures/`, `uid.rs` and `lib.rs` are owned, and each row lists its additions explicitly |
-| T-B2 / I-B3 | the erasure guard's script and Makefile target cannot land in 5.2, and the strict set misses `AGENTS.md`, `.opencode/**` and non-public `docs/**` | **accepted** -> §15.2/R27/R29: the guard is a pytest in the existing `python/tests/test_docs_assets.py` (run by `make docs-unit`, no new file or target); the strict set includes `AGENTS.md`, `.opencode/**` and every `docs/**` page; the exempt set is the dated record only |
+| T-B2 / I-B3 | the erasure guard's script and Makefile target cannot land in 5.2, and the strict set misses `AGENTS.md`, `.opencode/**` and non-public `docs/**` | **accepted** -> §15.2/R27/R29: the guard is a pytest in the existing `python/tests/test_docs_assets.py` (run by `make docs-unit`, no new file or target); the strict set is every **published** `docs/**` page (`public_pages`); the dated record is outside it by construction and there is **no allowlist** |
 | T-B3 | 3.4's ≥ 20 corpus floor and 3.6's fence rules are red before the migration | **accepted** -> §20/§21: 3.4 asserts P1–P3 over the fixtures 3.2 created (exact count), 3.6 accepts both openers, and the ≥ 20 floor plus the strict one-opener flip land in 5.2 |
 | I-B1 | 3.2 is over the 600-line budget; 3.0 is admitted over budget; 4.4 bundles 15 translations with the 119-mention sweep | **accepted** -> §21 preamble: 3.0 splits into 3.0a/3.0b if it exceeds the budget, and the erasure sweep is a new `MB.21.4.5` |
-| I-B2' | 3.5 claims `dev_learn.rs`, which its brief forbids; 4.3 claims Python files 4.4 owns | **accepted** -> §21: 3.5 is the plan's own list; `dev_learn.rs` stays in 4.3; Python files are in 4.5 |
+| I-B2' | 3.5 claims `dev_learn.rs`, which its brief forbids; 4.3 claims Python files 4.4 owns | **accepted** -> §21: 3.5 is the plan's own list; `dev_learn.rs` stays in 4.3; **Python files are in 4.3** (4.5 is Rust-only) |
 | C2-B1 | endpoint blocks admit a grant | **accepted** -> §6.1 (already body-only after the round-2 fix); §6.7 names the refusal; depth 2 is the true maximum |
 | C2-B2 | the plan's leaf expects a ```` ```blastfile ```` opener, the design one opener | **accepted** -> §16.1: both openers are documents until 5.2's strict flip, and no `PAGES` page may use the alias |
 | C-M / T-M minors | corpus floor vacuous, P1/P3/P4 arity, `workers` message, R23 `unsafe` oracle, uid test unnamed | **accepted** -> §20 (floor split), §14.3/§14.5 (real signatures), R13 (no ADR id), R23 (`#![forbid(unsafe_code)]`), §20 R10 (`uid.rs::two_endpoints_share_one_uid`) |
@@ -1932,11 +1978,11 @@ carry that round's verdicts.
 | consistency | `fold`'s `--manifest PATH` is protected by `ADR-0002` and `docs/reference/cli.md`; retiring it contradicts both | **accepted** -> §13.3: `fold` keeps its explicit `--manifest PATH` (now a Blastfile) and discovery is not forced on an offline log tool |
 | consistency | `MB.21.4.3`'s brief renames three actions (`add_trait`/`add_view`/`add_body`) while §13.3 keeps the v1 names | **accepted** -> §13.3 keeps the v1 action names (the accepted page's contract); the epic owner re-words 4.3's brief — a `RESULT.md` Follow-up |
 | consistency | `docs/*.md` left nested public pages outside the guard; fence counts were guessed | **accepted** -> R27/§15.2 cover every `docs/**` page; §16.2 pins measured counts (guide `1/0/3`, reference `0/14/3`) |
-| testability | after the 4.4/4.5 split, strict-set files have no leaf (`blastit-env` tests, `blastit-sqlpolicy/src/learn.rs`, `critical_php_manifest.rs`, `tests/parse.rs`); `docs_fences.rs` must itself name the retired opening | **accepted** -> §21: those files are in `MB.21.4.5`/`MB.21.3.0` paths; `docs_fences.rs` is added to the guard's exempt list |
+| testability | after the 4.4/4.5 split, strict-set files have no leaf (`blastit-env` tests, `blastit-sqlpolicy/src/learn.rs`, `critical_php_manifest.rs`, `tests/parse.rs`); `docs_fences.rs` must itself name the retired opening | **accepted** -> §21: those files are in `MB.21.4.5`/`MB.21.3.0` paths; `docs_fences.rs` composes the retired name (`"blastit" + ".toml"`) so the guard needs **no** exemption, and `retired_manifest_findings` scans `crates/` with no allowlist |
 | testability | `make check` wiring for the purity script and `fmt --check` is unowned; R13/§12.3 cite an ADR id | **accepted** -> §21 3.1 owns `scripts/check_manifest_purity.py`; 3.4 owns `fmt`; R13/§12.3 drop the id |
-| implementability | `MB.21.3.0`'s paths miss the suites it breaks; `MB.21.3.2` is over budget; fragments fail on accepted `docs/reference/blastfile.md` fences | **accepted** -> §21 preamble (3.0a/3.0b, 3.2a/3.2b) and §16.1 (a statement list is checked for **syntax only**, never lowered or validated) |
-| implementability | `url_path` join can produce `//` under a mount prefix | **accepted** -> §9.4: the join is `prefix + "/" + relative`, with the empty relative collapsing to the prefix itself |
-| implementability | P1/R7 call `pub(crate)` helpers from integration tests | **accepted** -> §20: the tree-level invariants are module tests inside `blastfile/`, and the integration suites use `fmt`/`from_blastfile_str` only |
+| implementability | `MB.21.3.0`'s paths miss the suites it breaks; `MB.21.3.2` is over budget; fragments fail on accepted `docs/reference/blastfile.md` fences | **accepted** -> §21 splits the leaves into `MB.21.3.0`/`MB.21.3.7` and `MB.21.3.2`/`MB.21.3.8`; §16.1 checks a statement list for **syntax only** |
+| implementability | `url_path` join can produce `//` under a mount prefix | **accepted** -> §9.4: the join is `if prefix == "/" { relative } else { format!("{prefix}{relative}") }` — never `prefix + "/" + relative` — so the root mount records `relative` verbatim |
+| implementability | P1/R7 call `pub(crate)` helpers from integration tests | **accepted** -> §20: P1 is a `syntax.rs` module test; P3's integration form uses `from_blastfile_str(fmt(t)).equivalent(..)` (§14.3) |
 
 ### Late write (security, after the acceptance round closed)
 
@@ -1953,6 +1999,42 @@ the owner. Its seven findings are resolved here without another round:
 | `TRACE` on a method-less view | **accepted** -> §8.4: `lookup` refuses `TRACE`/`CONNECT` for every view, method list or not |
 | the 1 MiB cap bypassed by boot readers | **accepted** -> §4.5: stage 0, stage 1, `dev`, `check`, `fmt` and `fold` all read through `blastfile::read`; `from_blastfile_str` is reachable only from `read` and tests |
 | `InvalidApp`/`PhpEntryInvalid` echo their value | **accepted** -> §18: both refuse without printing the callable/entry, because a pasted DSN or token can land in either slot |
+
+### Per-ID ledger for the round-3/4 findings the summary tables omitted
+
+One row per finding the reviewer could not find a §22 row for. Every `§X` below
+was opened and changed in this pass; nothing here is a claim without a diff.
+
+| Lens · id | Resolution |
+|---|---|
+| consistency · M1 | **accepted** -> §4.1 (`parse.rs` is `MB.21.4.5`'s), §15.2 (every erasure row names 4.5 or 4.3), §21 `MB.21.4.5` paths now include `edit.rs`, `tests/parse.rs`, `critical_php_manifest.rs` and the `blastit-env`/`sqlpolicy` comment sites |
+| consistency · M2 | **accepted** -> ADR-0012 decision 7 drops "and this ADR"; §12.3 and R13 already forbid an ADR id in the sentence |
+| consistency · M3 | **accepted** -> §16.2 pins the **measured** counts (README `0/0/5`, guide `1/0/3`, reference `0/14/3`) and says why README has no document yet |
+| consistency · M4 | **accepted** -> the six stale rows above (S19, B1, M2, TS-16 and this ledger) now cite the current sections and leaf ids |
+| consistency · M5 | **accepted** -> §9.1 marks `/.well-known` and the `root "."` allowance as **this design's** rules, not page sentences |
+| consistency · M6 | **accepted** -> R10 no longer claims `..`/empty segments "stay refused exactly as today"; **R10a** owns the new pre-routing `400` with its differential test |
+| consistency · M7 | **accepted** -> §15.1: an empty `BLASTIT_MANIFEST` exits `1` for boot/`dev` and `2` for `check` **and `fmt`** |
+| consistency · M8 | **accepted** -> §13.1 states `LiteralQuery` still refuses an inlined value and `MB.21.5.1` fixes the reference sentence that suggests otherwise |
+| consistency · M9 | **accepted** -> §9.4 replaces `prefix + "/" + relative` with the root-mount-safe join and names the two-mount `immutable` test |
+| consistency · M10 | **accepted** -> §21 `MB.21.5.1` owns `ARCHITECTURE.md` §2.4 as well as §5.1/§6 |
+| consistency · M11 | **accepted** -> §13.3 pins the `--json` keys (`route`, `proxy`, `schema_version: 1`) and gives `MB.21.5.1` the page sentence that says they move |
+| consistency · M12 | **accepted** -> §13.2 lists each warning's re-spelling and names `MB.21.3.0`/`validate.rs` as its only owner |
+| consistency · M13 | **accepted** -> §6.7 gains the `get` refusal and §8.4 points at §6.1's single `Method` predicate |
+| implementability · M2 | **accepted** -> §21 `MB.21.3.2` owns `tests/{blastfile_parse,blastfile_lower}.rs`; `MB.21.3.4` owns the CLI suites; `MB.21.5.2` owns the corpus floor |
+| implementability · M3 | **accepted** -> the nonexistent `crates/blastit/src/fmt.rs` is gone from §14 and §15; the CLI wiring is `crates/blastit/src/cli.rs`+`lib.rs`, owned by `MB.21.3.4` |
+| implementability · M4 | **accepted** -> §4.1/§15.2/§21 all say `MB.21.4.5`, and the Follow-ups list its widened paths |
+| implementability · M5 | **accepted** -> §13.3/§15.2/§21 give every Python file to `MB.21.4.3`; `MB.21.4.5` is Rust-only |
+| implementability · M6 | **accepted** -> §16.1's strict flip and the guard name are `MB.21.5.2`'s, and §21 lists the files it needs |
+| implementability · M9 | **accepted** -> §6.7 already refuses a methods-only header (`view products GET`); §6.1's `patterns?` is exercised by that refusal, not left to lowering |
+| testability · B4 | **accepted** -> the two unit-oracle files are in `MB.21.3.2`'s paths (§21) |
+| testability · M2 | **accepted** -> §21 `MB.21.5.2` paths include `crates/blastit-manifest/tests/critical_blastfile_print.rs` |
+| testability · M4 | **accepted** -> §16.2's "table is exhaustive" rule: a document fence on a page absent from `PAGES` fails |
+| testability · M7 | **accepted** -> **R30** gives the two new boot decisions a requirement and named tests (`an_unreached_entrypoint_warns`, `a_method_mismatch_is_405_with_allow`) |
+| testability · M8 | **accepted** -> R23's deny list adds `clippy::todo`, so `todo!` has an oracle |
+| implementability · M7 | **accepted** -> §13.3 keeps the accepted page's v1 action names (`add_group`, `add_route`, `declare_ingress`) and §21's closing note tells the epic owner to re-word `MB.21.4.3`'s brief to match |
+| implementability · M8 | **accepted** -> §9.4 defines the join for the root mount: `if prefix == "/" { relative } else { format!("{prefix}{relative}") }` — never `prefix + "/" + relative` — with a two-mount `immutable` test |
+| testability · M1 | **accepted** -> §14.3/§20: P1 is a `syntax.rs` module test (it needs `print_lossless`), P3's integration form uses `Manifest::from_blastfile_str(fmt(t)).equivalent(..)`; no `tests/` file calls a `pub(crate)` item |
+| testability · M6 | **accepted** -> §21 `MB.21.3.0` lists `crates/blastit-manifest/tests/critical_static_manifest.rs` (manifest crate, not the scheduler's), so its "workspace compiles" acceptance can pass |
 
 
 

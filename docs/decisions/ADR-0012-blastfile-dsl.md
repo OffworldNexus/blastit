@@ -80,8 +80,8 @@ per-view `workers` cap.
    concurrency cap duplicated what the scheduler already enforces, was
    downward-only, and gave `check` nothing to verify. A v1 `[route.php] workers`
    route loses it and adds nothing; `workers` is not a keyword, and writing it is
-   a parse refusal whose sentence names the removal and this ADR. No replacement
-   knob exists (design §12.3).
+   a parse refusal whose sentence names the removal (no ADR id in a user-facing
+   message). No replacement knob exists (design §12.3).
 8. **`static` is a top-level mount, and the request precedence moves the
    filesystem before the view.** A mount is not a route: the scheduler resolves
    the longest matching prefix first, serves a regular file if one is there, and
@@ -128,6 +128,11 @@ per-view `workers` cap.
     new Makefile target), fails the build if the name, the dependency or the
     retired reference page reappears (R27–R29), and carries a negative
     self-test so the rule cannot silently stop running.
+15. **The top-level "attach this to every view" key is dropped, not mapped.** A
+    grant set attaches only where a view writes `use <trait>`; an invisible global
+    attach cannot fail closed, and no keyword replaces it (design §7.1). The model
+    keeps `global_groups`, always empty from a Blastfile, so `effective_grants`
+    and `check` are untouched.
 
 ## Consequences
 
