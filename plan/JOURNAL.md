@@ -1937,3 +1937,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T00:40 [MB.21.1] (lead) attempt 1/3 started
 - 2026-11-16T00:40 [MB.21.1] (lead) base f1f933a5edd55bf1e0f9a85f8c3705e45d295702
 - 2026-11-16T00:55 [MB.3.67] (lead) status active -> review
+- 2026-11-16T01:04 [MB.3.67] (lead) status correction: the done transition was skipped when an earlier chained command was rejected by the shell scanner; the reviewed commit 13695e3 stands and thi
+- 2026-11-16T01:04 [MB.3.67] (lead) status review -> done

@@ -2,7 +2,7 @@
 id: MB.3.67
 title: "A check must not claim a verdict it cannot support: unreadable artifacts, unclassifiable ELFs, and the wheel"
 kind: task
-status: review
+status: done
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-15T23:18"
-updated: "2026-11-16T00:55"
+updated: "2026-11-16T01:04"
 ---
 
 # Goal

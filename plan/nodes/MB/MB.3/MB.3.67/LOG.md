@@ -27,3 +27,11 @@ attempt 1/3 started; base f1f933a
 ## 2026-11-16T00:55 [lead]
 
 status active -> review
+
+## 2026-11-16T01:04 [lead]
+
+status correction: the done transition was skipped when an earlier chained command was rejected by the shell scanner; the reviewed commit 13695e3 stands and this commit records the verdict
+
+## 2026-11-16T01:04 [lead]
+
+status review -> done
