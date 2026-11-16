@@ -1,7 +1,7 @@
 //! What `--learn` may propose, and what a session may replay (R25, R31, ADR-0003).
 //!
 //! `--learn` runs every statement a request sends and then writes the ones it
-//! saw into `blastit.toml`. A statement that cannot be written as a grant must
+//! saw into the `Blastfile`. A statement that cannot be written as a grant must
 //! therefore be refused *before* it is proposed, or `--learn` would produce a
 //! manifest that does not boot: a redacted `…`, a literal only this request
 //! carried, a second statement hidden behind the first, or a statement that

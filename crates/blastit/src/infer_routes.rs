@@ -1,8 +1,8 @@
 //! Route inference for `--learn` (`R28`, `ADR-0003`).
 //!
-//! A request no `[[route]]` matched is what `--learn` exists to explain: the
-//! path names the route a human forgot to declare. This module turns those
-//! paths into the routes the manifest should hold, using one rule set for both
+//! A request no `view` matched is what `--learn` exists to explain: the path
+//! names the view a human forgot to declare. This module turns those paths into
+//! the views the `Blastfile` should hold, using one rule set for both
 //! `blastit dev --learn` and `blastit check --learn`:
 //!
 //! * the **name** is the first non-empty path segment, lowercased, with every
@@ -12,12 +12,12 @@
 //! * `/` itself is `root`;
 //! * a purely numeric segment becomes `[0-9]+`, a UUID-shaped one `[^/]+`, and
 //!   every other byte is regex-escaped so `.` and `+` in a path stay literal;
-//! * two paths that infer the same name share **one** route (the fixture
-//!   `/products/` + `/products/42/` is one route with two patterns), while a
+//! * two paths that infer the same name share **one** view (the fixture
+//!   `/products/` + `/products/42/` is one view with two patterns), while a
 //!   name already taken becomes `<name>-2`, `<name>-3`, …;
 //! * the insertion point is the first method-unrestricted catch-all
-//!   ([`Route::is_unrestricted_catch_all`], which reads both `path = ".*"` and
-//!   `path = ['.*']` the same way), or the end of the file.
+//!   ([`Route::is_unrestricted_catch_all`], which matches the lowered `/.*`
+//!   and `.*` fragments alike), or the end of the file.
 //!
 //! [`infer`] is pure: it reads a [`Manifest`] and the paths, and returns a
 //! [`RoutePlan`]. Writing the plan into a document belongs to
@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use blastit_manifest::{Manifest, Route};
 
-/// One `[[route]]` a run of unrouted requests proposes.
+/// One `view` a run of unrouted requests proposes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferredRoute {
     /// The route name, unique in the manifest once the plan is applied.
@@ -204,11 +204,11 @@ mod tests {
     use super::*;
 
     fn manifest(routes: &[(&str, &str)]) -> Manifest {
-        let mut source = String::from("version = 1\n");
-        for (name, path) in routes {
-            source.push_str(&format!("[[route]]\nname = \"{name}\"\npath = {path}\n"));
+        let mut source = String::new();
+        for (name, pattern) in routes {
+            source.push_str(&format!("view {name} {pattern} {{}}\n"));
         }
-        Manifest::from_toml_str(&source).expect("the fixture parses")
+        Manifest::from_blastfile_str(&source).expect("the fixture parses")
     }
 
     #[test]
@@ -233,16 +233,18 @@ mod tests {
 
     #[test]
     fn catch_alls_are_found_in_both_spellings() {
-        for path in [r#"['.*']"#, r#"".*""#] {
-            let plan = infer(["/robots.txt"], &manifest(&[("fallback", path)]));
-            assert_eq!(plan.insert_at, 0, "{path}");
+        // A quoted `"/*"` lowers to `/.*`, and `regex '.*'` stays `.*`: both
+        // are the unrestricted catch-all `--learn` inserts above.
+        for pattern in ["\"/*\"", "regex '.*'"] {
+            let plan = infer(["/robots.txt"], &manifest(&[("fallback", pattern)]));
+            assert_eq!(plan.insert_at, 0, "{pattern}");
         }
         assert_eq!(infer(["/robots.txt"], &manifest(&[])).insert_at, 0);
     }
 
     #[test]
     fn a_taken_name_is_suffixed() {
-        let plan = infer(["/products/42/"], &manifest(&[("products", "['/p/']")]));
+        let plan = infer(["/products/42/"], &manifest(&[("products", "\"/p/\"")]));
         assert_eq!(plan.routes[0].name, "products-2");
     }
 }

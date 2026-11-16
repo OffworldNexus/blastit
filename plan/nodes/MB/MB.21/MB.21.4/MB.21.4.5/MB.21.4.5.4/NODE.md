@@ -2,7 +2,7 @@
 id: MB.21.4.5.4
 title: "Build the --learn routing table from the model and re-point the boot helpers and env/sqlpolicy examples at Blastfile"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
@@ -18,11 +18,11 @@ paths:
   - "crates/blastit-env/tests/environment.rs"
   - "crates/blastit-sqlpolicy/src/learn.rs"
   - "crates/blastit-sqlpolicy/src/tables.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T16:58"
-updated: "2026-11-16T16:58"
+updated: "2026-11-16T18:17"
 ---
 
 # Goal

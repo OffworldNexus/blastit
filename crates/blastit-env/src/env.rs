@@ -379,7 +379,7 @@ mod tests {
     }
 
     fn manifest(source: &str) -> Manifest {
-        Manifest::from_toml_str(source).expect("manifest parses")
+        Manifest::from_blastfile_str(source).expect("manifest parses")
     }
 
     #[test]
@@ -400,9 +400,7 @@ mod tests {
 
     #[test]
     fn a_non_utf8_input_value_is_an_error_and_others_are_dropped() {
-        let manifest = manifest(
-            "version = 1\n[proxy.db]\nprotocol = \"postgresql\"\ninput = { url = \"DATABASE_URL\" }\n",
-        );
+        let manifest = manifest("postgres $DATABASE_URL\n");
         let vars = vec![
             (
                 OsString::from("DATABASE_URL"),
@@ -427,7 +425,7 @@ mod tests {
 
     #[test]
     fn a_non_utf8_variable_name_is_dropped() {
-        let manifest = manifest("version = 1\n");
+        let manifest = manifest("");
         let vars = vec![(invalid_utf8(), OsString::from("value"))];
         let env = platform_env_from_os(&manifest, &vars).expect("converts");
         assert!(env.is_empty());
@@ -435,7 +433,7 @@ mod tests {
 
     #[test]
     fn a_manifest_with_no_proxies_keeps_the_environment() {
-        let manifest = manifest("version = 1\n");
+        let manifest = manifest("");
         let prepared = build(&manifest, &env(&[("PATH", "/usr/bin")]), None).expect("builds");
         assert_eq!(
             prepared.app_env().get("PATH").map(String::as_str),
@@ -451,7 +449,7 @@ mod tests {
 
     #[test]
     fn the_explicit_strip_list_is_added_to_the_environment_one() {
-        let manifest = manifest("version = 1\n");
+        let manifest = manifest("");
         let platform = env(&[
             ("SECRET_KEY", "k"),
             ("PGPASSWORD", "p"),
@@ -475,9 +473,7 @@ mod tests {
 
     #[test]
     fn a_caller_chosen_socket_dir_reaches_the_rendered_url_only() {
-        let manifest = manifest(
-            "version = 1\n[proxy.db]\nprotocol = \"postgresql\"\ninput = { url = \"DATABASE_URL\" }\n",
-        );
+        let manifest = manifest("postgres $DATABASE_URL\n");
         let platform = env(&[
             (
                 "DATABASE_URL",

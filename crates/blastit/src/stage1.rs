@@ -292,9 +292,9 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     // layout is not consulted at all: every `RouteInfo` names the same uid, and
     // the private directories are named by route index instead (`R19`, `R20`).
     // Under `dev --learn`, slot `0` is a dedicated unrouted-request fallback
-    // view (`LEARN_FALLBACK_ROUTE`) whose routing pattern never matches, while
-    // declared routes sit at `1..=N` so no declared route collides with the
-    // scheduler's slot-0 fallback (`R26`, `R27`).
+    // view (`LEARN_FALLBACK_ROUTE`) that holds no pattern and so never matches,
+    // while declared routes sit at `1..=N` so no declared route collides with
+    // the scheduler's slot-0 fallback (`R26`, `R27`).
     let dev_uid = crate::dev_learn::euid();
     // `ADR-0009` §5: stage 0 already refused such a boot, and this is the same
     // refusal one process later — stage 1 is the process that would have to fork
@@ -606,7 +606,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
 ///
 /// Nothing here can start a view: [`crate::stage0::no_python_support`] refused
 /// every route that would need one before a listener was bound, so the
-/// scheduler only holds `[route.static]` policies. A `SPAWN` on `ctl.chan`
+/// scheduler only holds `static` mount policies. A `SPAWN` on `ctl.chan`
 /// would therefore be a protocol violation, and [`Supervisor`] fails the boot on
 /// it rather than ignoring it.
 #[cfg(not(feature = "python"))]
@@ -709,61 +709,13 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
 /// Builds the routing table for `dev --learn`, reserving slot `0` for the
 /// scheduler's unrouted-request fallback (`R26`, `R27`).
 ///
-/// Slot `0` carries `"a^"`, an unsatisfiable pattern (`RoutingTable::route`
-/// never matches it), and declared routes `0..N` shift to `1..=N` in exact
-/// manifest order with their original methods and patterns intact.
+/// Slot `0` carries no pattern — [`RoutingTable::route`] can never select it —
+/// and declared routes `0..N` are their manifest entries, shifted to `1..=N`
+/// in exact manifest order with their original methods and patterns intact.
+/// The table is built from the model [`RoutingTable::for_learn`] already holds:
+/// no document is rendered and re-parsed.
 fn learn_routing_table(manifest: &Manifest) -> Result<RoutingTable, String> {
-    let mut doc = format!(
-        "version = 1\n\n[[route]]\nname = {}\npath = [\"a^\"]\n",
-        toml_basic_string(crate::dev_learn::LEARN_FALLBACK_ROUTE)
-    );
-    for route in manifest.routes() {
-        doc.push_str("\n[[route]]\nname = ");
-        doc.push_str(&toml_basic_string(route.name()));
-        doc.push_str("\npath = [");
-        for (index, pattern) in route.path().iter().enumerate() {
-            if index > 0 {
-                doc.push_str(", ");
-            }
-            doc.push_str(&toml_basic_string(pattern));
-        }
-        doc.push_str("]\n");
-        if let Some(methods) = route.methods() {
-            doc.push_str("methods = [");
-            for (index, method) in methods.iter().enumerate() {
-                if index > 0 {
-                    doc.push_str(", ");
-                }
-                doc.push_str(&toml_basic_string(method));
-            }
-            doc.push_str("]\n");
-        }
-    }
-    let synthetic = Manifest::from_toml_str(&doc).map_err(|err| err.to_string())?;
-    RoutingTable::new(&synthetic).map_err(|err| err.to_string())
-}
-
-/// Escapes `value` as a TOML v1.0 basic string (`"..."`).
-fn toml_basic_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\u{0008}' => out.push_str("\\b"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\u{000C}' => out.push_str("\\f"),
-            '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 || c == '\u{007F}' => {
-                out.push_str(&format!("\\u{:04X}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    RoutingTable::for_learn(manifest).map_err(|errors| errors.to_string())
 }
 
 /// Reads the configuration document stage 0 wrote into the pipe (§4), the
@@ -892,7 +844,7 @@ fn scheduler_config(
         mem_high_watermark_bytes: watermark,
         mem_total_bytes: memory.map(|usage| usage.total()),
         view_mem_estimate: config.view_mem_estimate,
-        // `R2`, `R13`: the scheduler opens every `[route.static]` root beneath
+        // `R2`, `R13`: the scheduler opens every `static` mount's root beneath
         // the manifest's directory, and the one file ceiling this release has
         // comes from `STATIC_MAX_FILE_BYTES` alone. Both come from stage 0's
         // configuration, so stage 1 never re-derives a path from its own
@@ -1596,18 +1548,10 @@ mod tests {
     #[test]
     fn learn_routing_table_reserves_slot_zero_and_preserves_declared_matches() {
         let source = "\
-version = 1
-
-[[route]]
-name = \"a\"
-path = ['/a/[0-9]+', '/café/1']
-methods = ['GET', 'POST']
-
-[[route]]
-name = \"b\"
-path = ['/robots\\.txt']
-";
-        let (manifest, _) = Manifest::parse_and_validate(source, 20_000).unwrap();
+view a GET, POST regex '/a/[0-9]+', regex '/café/1' {}\n\
+\n\
+view b regex '/robots\\.txt' {}\n";
+        let (manifest, _) = Manifest::parse_blastfile(source, 20_000).unwrap();
         let table = learn_routing_table(&manifest).unwrap();
         assert_eq!(
             table.route("GET", "/a/42"),
@@ -1622,8 +1566,11 @@ path = ['/robots\\.txt']
             table.route("GET", "/robots.txt"),
             Some(blastit_manifest::Match { route: 2, rule: 0 })
         );
+        // Slot 0 is the never-matching fallback: no request is routed into it,
+        // and it contributes no method to a `405`.
         assert_eq!(table.route("GET", "/unrouted"), None);
         assert_eq!(table.route("GET", "/"), None);
+        assert_eq!(table.methods_for("/unrouted"), None);
     }
 
     /// `blastit` keeps `blastit-ingress` as a direct dependency (`MA.2.1.1`):

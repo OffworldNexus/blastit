@@ -1198,8 +1198,9 @@ mod tests {
         }
     }
 
-    /// A `[route.php]` manifest, its front controller on disk, a `libphp`-shaped
-    /// file, and a shim for 8.4 — the whole input of [`boot_bindings`].
+    /// A one-view `entrypoint php` manifest, its front controller on disk, a
+    /// `libphp`-shaped file, and a shim for 8.4 — the whole input of
+    /// [`boot_bindings`].
     struct Boot {
         dir: PathBuf,
         config: Config,
@@ -1208,14 +1209,10 @@ mod tests {
     }
 
     const PAGE: &str = "\
-version = 1
+app \"shop\"
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
-
-[route.php]
-entry = \"public/index.php\"
+view app \"/*\" {}
 ";
 
     impl Boot {
@@ -1232,7 +1229,7 @@ entry = \"public/index.php\"
             let shim = dir.join("shims").join("libblastit_php84-x86_64-gnu.so");
             std::fs::write(&shim, b"the shim stage 0 inspected").expect("shim");
             let (manifest, _warnings) =
-                Manifest::parse_and_validate(PAGE, 20_000).expect("the page's manifest");
+                Manifest::parse_blastfile(PAGE, 20_000).expect("the page's manifest");
             let config = Config {
                 manifest_dir: dir.clone(),
                 php: Some(record(&libphp, &shim, 8, 4)),
@@ -1387,11 +1384,8 @@ entry = \"public/index.php\"
         assert_eq!(shim, b"the shim stage 0 inspected");
 
         // A view with no `entrypoint php` is a WSGI slot and gets nothing.
-        let (wsgi, _warnings) = Manifest::parse_and_validate(
-            "version = 1\n\n[[route]]\nname = \"web\"\npath = ['.*']\n",
-            20_000,
-        )
-        .expect("a WSGI manifest");
+        let (wsgi, _warnings) =
+            Manifest::parse_blastfile("view web \"/*\" {}\n", 20_000).expect("a WSGI manifest");
         let routes = vec![RouteInfo::new("web", false, boot.config.uid_base + 1000)];
         let none = boot_bindings(&boot.config, &wsgi, &routes, None).expect("nothing to do");
         assert_eq!(none.len(), 1);

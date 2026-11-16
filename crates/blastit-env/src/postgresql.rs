@@ -1,12 +1,13 @@
 //! The `postgresql` protocol (§5.2).
 //!
-//! One `[proxy.<name>]` declaration with `protocol = "postgresql"` says which
-//! environment variables hold the upstream's real configuration (its *input
-//! slots*), and optionally which variables the app should see instead (its
-//! *outputs*). This module turns the declaration and the platform environment
-//! into an [`Upstream`] — host, port, role, password, database, TLS mode and CA
-//! — that dbproxy (§2.2) uses, and into the template fields and default outputs
-//! the app's environment is built from.
+//! One `postgres` store says which environment variables hold the upstream's
+//! real configuration (its *input slots*): `postgres $DATABASE_URL` is the
+//! one-line form, `postgres { host $DB_HOST … }` the split one. This module
+//! turns the store and the platform environment into an [`Upstream`] — host,
+//! port, role, password, database, TLS mode and CA — that dbproxy (§2.2) uses,
+//! and into the template fields and default outputs the app's environment is
+//! built from. A `Blastfile` has no `output` spelling: every input variable
+//! keeps its name and gets the local value (§7.5).
 //!
 //! Three properties matter:
 //!
@@ -32,20 +33,27 @@
 //! use blastit_env::postgresql;
 //! use blastit_manifest::Manifest;
 //!
-//! let manifest = Manifest::from_toml_str(
-//!     "version = 1\n\
-//!      [proxy.db]\n\
-//!      protocol = \"postgresql\"\n\
-//!      input = { url = \"DATABASE_URL\", ca_cert = \"DATABASE_CA_CERT\" }\n",
+//! let manifest = Manifest::from_blastfile_str(
+//!     "postgres {\n\
+//!          host $DB_HOST\n\
+//!          port $DB_PORT\n\
+//!          user $DB_USER\n\
+//!          password $DB_PASSWORD\n\
+//!          database $DB_DATABASE\n\
+//!          sslmode $DB_SSLMODE\n\
+//!          ca_cert $DB_CA_CERT\n\
+//!      }\n",
 //! )
 //! .unwrap();
 //!
 //! let env = BTreeMap::from([
-//!     (
-//!         "DATABASE_URL".to_string(),
-//!         "postgresql://doadmin:s3cr3t@db.example.com:25060/defaultdb?sslmode=require".to_string(),
-//!     ),
-//!     ("DATABASE_CA_CERT".to_string(), "-----BEGIN CERTIFICATE-----".to_string()),
+//!     ("DB_HOST".to_string(), "db.example.com".to_string()),
+//!     ("DB_PORT".to_string(), "25060".to_string()),
+//!     ("DB_USER".to_string(), "doadmin".to_string()),
+//!     ("DB_PASSWORD".to_string(), "s3cr3t".to_string()),
+//!     ("DB_DATABASE".to_string(), "defaultdb".to_string()),
+//!     ("DB_SSLMODE".to_string(), "require".to_string()),
+//!     ("DB_CA_CERT".to_string(), "-----BEGIN CERTIFICATE-----".to_string()),
 //! ]);
 //!
 //! let proxy = manifest.proxy("db").unwrap();
@@ -536,7 +544,7 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use blastit_manifest::{Manifest, Proxy};
+    use blastit_manifest::{Manifest, Protocol, Proxy, ProxyName};
 
     use super::{
         DEFAULT_PORT, INPUT_SLOTS, LOCAL_USER, PORT_BASE, SOCKET_DIR, default_outputs, local_port,
@@ -547,12 +555,31 @@ mod tests {
     /// A secret that must never appear in an error or a `Debug`.
     const SENTINEL: &str = "S3NT1NEL-d0-not-log-me";
 
-    /// Parses a manifest with one proxy and returns its declaration.
-    fn proxy(input: &str) -> Proxy {
-        let source =
-            format!("version = 1\n[proxy.db]\nprotocol = \"postgresql\"\ninput = {input}\n");
-        let manifest = Manifest::from_toml_str(&source).expect("manifest parses");
+    /// Parses a `Blastfile` with one `postgres` store and returns its
+    /// declaration.
+    fn proxy(store: &str) -> Proxy {
+        let source = format!("postgres {store}\n");
+        let manifest = Manifest::from_blastfile_str(&source).expect("manifest parses");
         manifest.proxy("db").expect("proxy db").clone()
+    }
+
+    /// The `Proxy` the model can hold but no `Blastfile` can write.
+    ///
+    /// `url` is the one-line form only and a store block cannot carry it, an
+    /// unknown slot has no spelling at all, and neither has `url` beside a
+    /// split slot (§7.4). The protocol still has to refuse every one of those
+    /// shapes, so these tests build the model directly instead of through a
+    /// document.
+    fn modeled(input: &[(&str, &str)]) -> Proxy {
+        Proxy::new(
+            ProxyName::new("db"),
+            Protocol::Postgresql,
+            input
+                .iter()
+                .map(|(slot, variable)| ((*slot).to_owned(), (*variable).to_owned()))
+                .collect(),
+            BTreeMap::new(),
+        )
     }
 
     /// An environment from a literal list.
@@ -582,7 +609,9 @@ mod tests {
 
     #[test]
     fn a_url_is_parsed_fully() {
-        let proxy = proxy(r#"{ url = "DATABASE_URL", ca_cert = "CA" }"#);
+        // `url` beside `ca_cert` has no `Blastfile` spelling: `url` is the
+        // one-line form only (§7.4), so the declaration is the model's own.
+        let proxy = modeled(&[("url", "DATABASE_URL"), ("ca_cert", "CA")]);
         let env = env(&[
             (
                 "DATABASE_URL",
@@ -606,7 +635,7 @@ mod tests {
 
     #[test]
     fn the_postgres_scheme_is_accepted_too_and_the_default_port_applies() {
-        let proxy = proxy(r#"{ url = "DATABASE_URL" }"#);
+        let proxy = proxy("$DATABASE_URL");
         let env = env(&[("DATABASE_URL", "postgres://user@host/db")]);
         let upstream = upstream(&proxy, &env).expect("upstream");
         assert_eq!(upstream.port(), 5432);
@@ -616,7 +645,7 @@ mod tests {
 
     #[test]
     fn user_password_and_database_are_percent_decoded() {
-        let proxy = proxy(r#"{ url = "DATABASE_URL" }"#);
+        let proxy = proxy("$DATABASE_URL");
         let env = env(&[(
             "DATABASE_URL",
             "postgresql://user:p%40ss%3Aword@host:5432/my%20db",
@@ -628,7 +657,7 @@ mod tests {
 
     #[test]
     fn a_malformed_url_is_rejected_without_the_url() {
-        let proxy = proxy(r#"{ url = "DATABASE_URL" }"#);
+        let proxy = proxy("$DATABASE_URL");
         for bad in [
             "not a url",
             "http://host/db",
@@ -649,7 +678,7 @@ mod tests {
     #[test]
     fn the_split_form_needs_a_database() {
         // The slot itself is missing.
-        let decl = proxy(r#"{ host = "DB_HOST" }"#);
+        let decl = proxy("{ host $DB_HOST }");
         let vars = env(&[("DB_HOST", "db.example.com")]);
         let errors = upstream(&decl, &vars).expect_err("must be rejected");
         assert_eq!(
@@ -660,7 +689,7 @@ mod tests {
         );
 
         // The slot is there, but the value is empty.
-        let second = proxy(r#"{ host = "DB_HOST", database = "DB_DATABASE" }"#);
+        let second = proxy("{\n    host $DB_HOST\n    database $DB_DATABASE\n}");
         let vars = env(&[("DB_HOST", "db.example.com"), ("DB_DATABASE", "")]);
         let errors = upstream(&second, &vars).expect_err("must be rejected");
         assert_eq!(
@@ -675,7 +704,7 @@ mod tests {
 
     #[test]
     fn the_split_form_defaults_the_optional_slots() {
-        let proxy = proxy(r#"{ host = "DB_HOST", database = "DB_DATABASE" }"#);
+        let proxy = proxy("{\n    host $DB_HOST\n    database $DB_DATABASE\n}");
         let env = env(&[("DB_HOST", "db.example.com"), ("DB_DATABASE", "defaultdb")]);
         let upstream = upstream(&proxy, &env).expect("upstream");
         assert_eq!(upstream.host(), "db.example.com");
@@ -689,7 +718,15 @@ mod tests {
     #[test]
     fn the_split_form_reads_every_slot() {
         let proxy = proxy(
-            r#"{ host = "DB_HOST", port = "DB_PORT", user = "DB_USER", password = "DB_PASSWORD", database = "DB_DATABASE", sslmode = "DB_SSLMODE", ca_cert = "DB_CA_CERT" }"#,
+            "{\n\
+                 host $DB_HOST\n\
+                 port $DB_PORT\n\
+                 user $DB_USER\n\
+                 password $DB_PASSWORD\n\
+                 database $DB_DATABASE\n\
+                 sslmode $DB_SSLMODE\n\
+                 ca_cert $DB_CA_CERT\n\
+             }",
         );
         let env = env(&[
             ("DB_HOST", "db.example.com"),
@@ -712,7 +749,7 @@ mod tests {
 
     #[test]
     fn a_bad_split_port_is_an_error() {
-        let proxy = proxy(r#"{ host = "DB_HOST", port = "DB_PORT", database = "DB_DATABASE" }"#);
+        let proxy = proxy("{\n    host $DB_HOST\n    port $DB_PORT\n    database $DB_DATABASE\n}");
         let env = env(&[
             ("DB_HOST", "h"),
             ("DB_PORT", "not-a-port"),
@@ -732,7 +769,7 @@ mod tests {
 
     #[test]
     fn url_query_parameters_must_be_allowlisted() {
-        let proxy = proxy(r#"{ url = "DATABASE_URL" }"#);
+        let proxy = proxy("$DATABASE_URL");
         for parameter in [
             "password",
             "sslpassword",
@@ -772,7 +809,7 @@ mod tests {
 
     #[test]
     fn allowlisted_query_parameters_are_kept() {
-        let proxy = proxy(r#"{ url = "DATABASE_URL" }"#);
+        let proxy = proxy("$DATABASE_URL");
         let env = env(&[(
             "DATABASE_URL",
             "postgresql://u:p@h:5432/db?application_name=a&connect_timeout=5&target_session_attrs=read-write&channel_binding=require&sslcompression=0&keepalives=1&keepalives_idle=30&sslmode=verify-full",
@@ -795,7 +832,7 @@ mod tests {
 
     #[test]
     fn a_multi_host_input_is_an_error() {
-        let decl = proxy(r#"{ url = "DATABASE_URL" }"#);
+        let decl = proxy("$DATABASE_URL");
         let vars = env(&[("DATABASE_URL", "postgresql://u:p@h1,h2:5432/db")]);
         let errors = upstream(&decl, &vars).expect_err("must be rejected");
         assert!(matches!(
@@ -803,7 +840,7 @@ mod tests {
             EnvError::MultipleHosts { .. }
         ));
 
-        let decl = proxy(r#"{ host = "DB_HOST", database = "DB_DATABASE" }"#);
+        let decl = proxy("{\n    host $DB_HOST\n    database $DB_DATABASE\n}");
         let vars = env(&[("DB_HOST", "h1,h2"), ("DB_DATABASE", "db")]);
         let errors = upstream(&decl, &vars).expect_err("must be rejected");
         assert!(errors.errors().iter().any(|error| matches!(
@@ -814,7 +851,7 @@ mod tests {
 
     #[test]
     fn an_ipv6_literal_loses_its_brackets() {
-        let proxy = proxy(r#"{ url = "DATABASE_URL" }"#);
+        let proxy = proxy("$DATABASE_URL");
         let env = env(&[("DATABASE_URL", "postgresql://u:p@[2001:db8::1]:5432/db")]);
         let upstream = upstream(&proxy, &env).expect("upstream");
         assert_eq!(upstream.host(), "2001:db8::1");
@@ -823,7 +860,7 @@ mod tests {
 
     #[test]
     fn a_url_without_a_database_is_an_error() {
-        let proxy = proxy(r#"{ url = "DATABASE_URL" }"#);
+        let proxy = proxy("$DATABASE_URL");
         for url in [
             "postgresql://u:p@h",
             "postgresql://u:p@h/",
@@ -842,16 +879,13 @@ mod tests {
 
     #[test]
     fn an_unusable_variable_name_is_an_error() {
-        // The manifest already refuses an empty name, so the two names that can
-        // reach the protocol are the ones with `=` and a NUL byte (`\u0000` is
-        // the TOML escape for it).
-        let cases = [("DATABASE=URL", "'='"), (r"DATABASE\u0000URL", "NUL")];
+        // A variable name no `Blastfile` can write: the lexer's `$IDENT` is
+        // `[A-Z_][A-Z0-9_]*`, so a name with `=` or a NUL byte has no spelling.
+        // The protocol is a public entry point and still has to refuse it, so
+        // the declaration is the model's own.
+        let cases = [("DATABASE=URL", "'='"), ("DATABASE\u{0}URL", "NUL")];
         for (name, expected) in cases {
-            let source = format!(
-                "version = 1\n[proxy.db]\nprotocol = \"postgresql\"\ninput = {{ host = \"{name}\", database = \"DB_DATABASE\" }}\n"
-            );
-            let manifest = Manifest::from_toml_str(&source).expect("manifest parses");
-            let proxy = manifest.proxy("db").expect("proxy db").clone();
+            let proxy = modeled(&[("host", name), ("database", "DB_DATABASE")]);
             let env = env(&[("DB_DATABASE", "db")]);
             let errors = upstream(&proxy, &env).expect_err("must be rejected");
             assert!(
@@ -866,12 +900,11 @@ mod tests {
 
     #[test]
     fn url_and_split_slots_conflict() {
+        // `postgres $DATABASE_URL` is the one-line form and a store block cannot
+        // carry `url`, so `url` beside a split slot has no `Blastfile` spelling
+        // (§7.4); the protocol still refuses the model that holds both.
         for extra in ["host", "port", "user", "password", "database", "sslmode"] {
-            let source = format!(
-                "version = 1\n[proxy.db]\nprotocol = \"postgresql\"\ninput = {{ url = \"U\", {extra} = \"V\" }}\n"
-            );
-            let manifest = Manifest::from_toml_str(&source).expect("manifest parses");
-            let proxy = manifest.proxy("db").expect("proxy db").clone();
+            let proxy = modeled(&[("url", "U"), (extra, "V")]);
             let env = env(&[("U", "postgresql://u:p@h/db"), ("V", "x")]);
             let errors = upstream(&proxy, &env).expect_err("must be rejected");
             assert!(
@@ -885,7 +918,7 @@ mod tests {
 
     #[test]
     fn neither_url_nor_host_is_an_error() {
-        let proxy = proxy(r#"{ database = "DB_NAME" }"#);
+        let proxy = proxy("{ database $DB_NAME }");
         let env = env(&[("DB_NAME", "defaultdb")]);
         let errors = upstream(&proxy, &env).expect_err("must be rejected");
         assert_eq!(
@@ -898,7 +931,7 @@ mod tests {
 
     #[test]
     fn a_missing_variable_names_the_variable() {
-        let proxy = proxy(r#"{ url = "DATABASE_URL" }"#);
+        let proxy = proxy("$DATABASE_URL");
         let errors = upstream(&proxy, &BTreeMap::new()).expect_err("must be rejected");
         assert_eq!(
             errors.errors(),
@@ -912,7 +945,9 @@ mod tests {
 
     #[test]
     fn an_unknown_slot_is_an_error() {
-        let proxy = proxy(r#"{ url = "U", dsn = "D" }"#);
+        // `dsn` is not a `postgres` directive, so no `Blastfile` can write it;
+        // the protocol still has to refuse a model that carries it.
+        let proxy = modeled(&[("url", "U"), ("dsn", "D")]);
         let env = env(&[("U", "postgresql://u:p@h/db"), ("D", "x")]);
         let errors = upstream(&proxy, &env).expect_err("must be rejected");
         assert!(errors.errors().iter().any(|error| matches!(
@@ -923,13 +958,19 @@ mod tests {
 
     #[test]
     fn template_fields_never_expose_the_password_host_or_ca() {
-        let proxy = proxy(r#"{ url = "U", ca_cert = "C" }"#);
+        let proxy = proxy(
+            "{\n\
+                 host $DB_HOST\n\
+                 password $DB_PASSWORD\n\
+                 database $DB_DATABASE\n\
+                 ca_cert $DB_CA_CERT\n\
+             }",
+        );
         let env = env(&[
-            (
-                "U",
-                "postgresql://u:s3cr3t@upstream.example.com:25060/my%20db",
-            ),
-            ("C", "PEM"),
+            ("DB_HOST", "upstream.example.com"),
+            ("DB_PASSWORD", "s3cr3t"),
+            ("DB_DATABASE", "my db"),
+            ("DB_CA_CERT", "PEM"),
         ]);
         let upstream = upstream(&proxy, &env).expect("upstream");
         let fields = template_fields(&upstream, 5433);
@@ -968,7 +1009,11 @@ mod tests {
 
     #[test]
     fn default_outputs_follow_the_input_slots() {
-        let proxy = proxy(r#"{ url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }"#);
+        // `url` beside `ca_cert` has no `Blastfile` spelling (§7.4): the
+        // one-line form is `url` alone. This is the pair the protocol renders —
+        // `url` becomes the local URL and `ca_cert` produces no output at all —
+        // so the declaration is the model's own.
+        let proxy = modeled(&[("url", "DATABASE_URL"), ("ca_cert", "DATABASE_CA_CERT")]);
         let outputs = default_outputs(&proxy);
         assert_eq!(
             outputs.get("DATABASE_URL").map(String::as_str),
@@ -980,7 +1025,14 @@ mod tests {
     #[test]
     fn default_outputs_cover_the_split_form() {
         let proxy = proxy(
-            r#"{ host = "DB_HOST", port = "DB_PORT", user = "DB_USER", password = "DB_PASSWORD", database = "DB_DATABASE", sslmode = "DB_SSLMODE" }"#,
+            "{\n\
+                 host $DB_HOST\n\
+                 port $DB_PORT\n\
+                 user $DB_USER\n\
+                 password $DB_PASSWORD\n\
+                 database $DB_DATABASE\n\
+                 sslmode $DB_SSLMODE\n\
+             }",
         );
         let outputs = default_outputs(&proxy);
         assert_eq!(

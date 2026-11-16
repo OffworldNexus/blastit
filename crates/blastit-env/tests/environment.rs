@@ -4,29 +4,54 @@
 use std::collections::BTreeMap;
 
 use blastit_env::{EnvError, Prepared, build};
-use blastit_manifest::Manifest;
+use blastit_manifest::{Manifest, Protocol, Proxy, ProxyName};
 
 /// A secret that must never appear in an error, a `Debug` or the app
 /// environment.
 const SENTINEL: &str = "S3NT1NEL-d0-not-log-me";
 
-/// The two-proxy example from ARCHITECTURE.md §5.1, plus the `version` line a
-/// whole manifest needs.
-const SECTION_5_1: &str = r#"version = 1
-
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }
-
-[proxy.analytics]
-protocol = "postgresql"
-input = { url = "ANALYTICS_URL" }
-[proxy.analytics.output]
-ANALYTICS_DB_HOST = "{{ socket_dir }}"
-ANALYTICS_DB_PORT = "{{ port }}"
-ANALYTICS_DB_NAME = "{{ database }}"
-ANALYTICS_DB_USER = "{{ user }}"
-"#;
+/// The two-proxy example from ARCHITECTURE.md §5.1.
+///
+/// `Blastfile` spells these stores `postgres $DATABASE_URL` and
+/// `postgres analytics $ANALYTICS_URL`; the `db` store's `ca_cert` slot beside
+/// a URL, and `analytics`'s rename map, are the two shapes the language cannot
+/// write (`url` is the one-line form only, §7.4; the `output` map is dropped,
+/// §7.5). The two declarations are therefore built from the model directly.
+fn section_5_1() -> Manifest {
+    let db = Proxy::new(
+        ProxyName::new("db"),
+        Protocol::Postgresql,
+        input(&[("url", "DATABASE_URL"), ("ca_cert", "DATABASE_CA_CERT")]),
+        BTreeMap::new(),
+    );
+    let analytics = Proxy::new(
+        ProxyName::new("analytics"),
+        Protocol::Postgresql,
+        input(&[("url", "ANALYTICS_URL")]),
+        BTreeMap::from([
+            (
+                "ANALYTICS_DB_HOST".to_string(),
+                "{{ socket_dir }}".to_string(),
+            ),
+            ("ANALYTICS_DB_PORT".to_string(), "{{ port }}".to_string()),
+            (
+                "ANALYTICS_DB_NAME".to_string(),
+                "{{ database }}".to_string(),
+            ),
+            ("ANALYTICS_DB_USER".to_string(), "{{ user }}".to_string()),
+        ]),
+    );
+    Manifest::from_parts(
+        1,
+        Vec::new(),
+        BTreeMap::from([
+            (ProxyName::new("db"), db),
+            (ProxyName::new("analytics"), analytics),
+        ]),
+        BTreeMap::new(),
+        Vec::new(),
+    )
+}
 
 /// The platform environment of ARCHITECTURE.md §5.1.
 fn section_5_1_platform() -> BTreeMap<String, String> {
@@ -43,23 +68,70 @@ fn section_5_1_platform() -> BTreeMap<String, String> {
     ])
 }
 
-/// Parses a manifest that must parse.
+/// A slot table from a literal list, for the model-built declarations.
+fn input(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(slot, variable)| ((*slot).to_string(), (*variable).to_string()))
+        .collect()
+}
+
+/// Parses a `Blastfile` that must parse.
 fn parse(source: &str) -> Manifest {
-    Manifest::from_toml_str(source).expect("manifest should parse")
+    Manifest::from_blastfile_str(source).expect("manifest should parse")
 }
 
-/// A one-proxy `postgresql` manifest, with `db` as the only proxy.
-fn one_proxy(input: &str) -> Manifest {
-    parse(&format!(
-        "version = 1\n[proxy.db]\nprotocol = \"postgresql\"\ninput = {input}\n"
-    ))
+/// A one-proxy manifest with `db` as the only proxy, from a `postgres` section
+/// written exactly as the reference spells it: `$DATABASE_URL`, or a `{ … }`
+/// block whose slots are `$IDENT`s.
+fn one_proxy(store: &str) -> Manifest {
+    parse(&format!("postgres {store}\n"))
 }
 
-/// A one-proxy `postgresql` manifest with an explicit output table.
-fn one_proxy_output(input: &str, output: &str) -> Manifest {
-    parse(&format!(
-        "version = 1\n[proxy.db]\nprotocol = \"postgresql\"\ninput = {input}\n[proxy.db.output]\n{output}\n"
-    ))
+/// The model a `Blastfile` can hold but not write.
+///
+/// `url` has no block spelling, a slot the protocol does not know has no
+/// spelling at all, and the `output` rename map is dropped (§7.4, §7.5). The
+/// tests that exercise those shapes build the proxy through [`Proxy::new`];
+/// everything else reads a document.
+fn modeled(slots: &[(&str, &str)], outputs: &[(&str, &str)]) -> Manifest {
+    let name = ProxyName::new("db");
+    let output = outputs
+        .iter()
+        .map(|(variable, template)| ((*variable).to_string(), (*template).to_string()))
+        .collect();
+    Manifest::from_parts(
+        1,
+        Vec::new(),
+        BTreeMap::from([(
+            name.clone(),
+            Proxy::new(name, Protocol::Postgresql, input(slots), output),
+        )]),
+        BTreeMap::new(),
+        Vec::new(),
+    )
+}
+
+/// One `db` store with an explicit output map: its input slots read from a
+/// `Blastfile` store, the map attached through [`Proxy::new`] (§7.5).
+fn one_proxy_output(store: &str, outputs: &[(&str, &str)]) -> Manifest {
+    let parsed = one_proxy(store);
+    let proxy = parsed.proxy("db").expect("the fixture declares db");
+    let name = ProxyName::new("db");
+    let output = outputs
+        .iter()
+        .map(|(variable, template)| ((*variable).to_string(), (*template).to_string()))
+        .collect();
+    Manifest::from_parts(
+        1,
+        Vec::new(),
+        BTreeMap::from([(
+            name.clone(),
+            Proxy::new(name, Protocol::Postgresql, proxy.input().clone(), output),
+        )]),
+        BTreeMap::new(),
+        Vec::new(),
+    )
 }
 
 /// A `BTreeMap` environment from a literal list.
@@ -118,7 +190,7 @@ fn architecture_5_1_example_end_to_end() {
     // first, which would number them the other way round. Everything else —
     // the variable swap, the socket directory, the users, the databases and
     // the split outputs — matches §5.1 verbatim.
-    let manifest = parse(SECTION_5_1);
+    let manifest = section_5_1();
     let prepared = build(&manifest, &section_5_1_platform(), None).expect("builds");
 
     // The app sees the local endpoints, never the platform's.
@@ -186,7 +258,10 @@ fn architecture_5_1_example_end_to_end() {
 
 #[test]
 fn no_output_table_rewrites_the_same_variable_in_place() {
-    let manifest = one_proxy(r#"{ url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }"#);
+    let manifest = modeled(
+        &[("url", "DATABASE_URL"), ("ca_cert", "DATABASE_CA_CERT")],
+        &[],
+    );
     let platform = env(&[
         (
             "DATABASE_URL",
@@ -213,7 +288,14 @@ fn no_output_table_rewrites_the_same_variable_in_place() {
 fn the_split_input_form_gets_the_default_outputs() {
     // DigitalOcean's split bindables: no URL, just the parts.
     let manifest = one_proxy(
-        r#"{ host = "DB_HOST", port = "DB_PORT", user = "DB_USER", password = "DB_PASSWORD", database = "DB_DATABASE", sslmode = "DB_SSLMODE" }"#,
+        "{\n\
+             host $DB_HOST\n\
+             port $DB_PORT\n\
+             user $DB_USER\n\
+             password $DB_PASSWORD\n\
+             database $DB_DATABASE\n\
+             sslmode $DB_SSLMODE\n\
+         }",
     );
     let platform = env(&[
         ("DB_HOST", "db.example.com"),
@@ -248,7 +330,10 @@ fn the_split_input_form_gets_the_default_outputs() {
 
 #[test]
 fn url_together_with_a_split_slot_aborts_the_boot() {
-    let manifest = one_proxy(r#"{ url = "DATABASE_URL", host = "DB_HOST" }"#);
+    // A `Blastfile` cannot write the pair: `postgres $DATABASE_URL` is the
+    // one-line form and a block holds no `url` (§7.4). The model can, and the
+    // protocol refuses it.
+    let manifest = modeled(&[("url", "DATABASE_URL"), ("host", "DB_HOST")], &[]);
     let platform = env(&[
         ("DATABASE_URL", "postgresql://u:p@h/db"),
         ("DB_HOST", "db.example.com"),
@@ -264,7 +349,7 @@ fn url_together_with_a_split_slot_aborts_the_boot() {
 
 #[test]
 fn a_missing_input_variable_aborts_the_boot_and_names_the_variable() {
-    let manifest = one_proxy(r#"{ url = "DATABASE_URL" }"#);
+    let manifest = one_proxy("$DATABASE_URL");
     let errors = build(&manifest, &BTreeMap::new(), None).expect_err("build should fail");
     assert_eq!(errors.len(), 1);
     assert!(matches!(
@@ -276,7 +361,9 @@ fn a_missing_input_variable_aborts_the_boot_and_names_the_variable() {
 
 #[test]
 fn an_unknown_slot_aborts_the_boot() {
-    let manifest = one_proxy(r#"{ dsn = "DATABASE_DSN" }"#);
+    // `dsn` is not a `postgres` directive, so no `Blastfile` can carry it; the
+    // protocol still refuses the model.
+    let manifest = modeled(&[("dsn", "DATABASE_DSN")], &[]);
     let platform = env(&[("DATABASE_DSN", "postgresql://u:p@h/db")]);
     let errors = build(&manifest, &platform, None).expect_err("build should fail");
     assert!(errors.errors().iter().any(|error| matches!(
@@ -287,7 +374,7 @@ fn an_unknown_slot_aborts_the_boot() {
 
 #[test]
 fn a_malformed_url_aborts_the_boot_without_repeating_the_url() {
-    let manifest = one_proxy(r#"{ url = "DATABASE_URL" }"#);
+    let manifest = one_proxy("$DATABASE_URL");
     for bad in [
         "definitely not a URL",
         "mysql://u:p@h/db",
@@ -305,7 +392,7 @@ fn a_malformed_url_aborts_the_boot_without_repeating_the_url() {
 
 #[test]
 fn a_percent_encoded_password_with_at_and_colon_is_decoded() {
-    let manifest = one_proxy(r#"{ url = "DATABASE_URL" }"#);
+    let manifest = one_proxy("$DATABASE_URL");
     let platform = env(&[(
         "DATABASE_URL",
         "postgresql://user:p%40ss%3Aword%2F%23@db.example.com:25060/defaultdb",
@@ -327,7 +414,7 @@ fn a_percent_encoded_password_with_at_and_colon_is_decoded() {
 
 #[test]
 fn database_names_that_need_encoding_are_encoded() {
-    let manifest = one_proxy(r#"{ url = "DATABASE_URL" }"#);
+    let manifest = one_proxy("$DATABASE_URL");
     let platform = env(&[("DATABASE_URL", "postgresql://u:p@h:5432/my%20db%2Fx")]);
     let prepared = build(&manifest, &platform, None).expect("builds");
     assert_eq!(
@@ -344,12 +431,17 @@ fn database_names_that_need_encoding_are_encoded() {
 #[test]
 fn explicit_outputs_can_use_both_filters_and_any_whitespace() {
     let manifest = one_proxy_output(
-        r#"{ url = "DATABASE_URL" }"#,
-        r#"RAW = "{{ socket_dir }}"
-ENCODED = "{{socket_dir|urlencode}}"
-SPACED = "{{   port   }}"
-MIXED = "db://{{ user }}@{{ socket_dir | urlencode }}:{{ port }}/{{ database }}"
-PLAIN = "disable""#,
+        "$DATABASE_URL",
+        &[
+            ("RAW", "{{ socket_dir }}"),
+            ("ENCODED", "{{socket_dir|urlencode}}"),
+            ("SPACED", "{{   port   }}"),
+            (
+                "MIXED",
+                "db://{{ user }}@{{ socket_dir | urlencode }}:{{ port }}/{{ database }}",
+            ),
+            ("PLAIN", "disable"),
+        ],
     );
     let platform = env(&[("DATABASE_URL", "postgresql://u:p@h:5432/defaultdb")]);
     let prepared = build(&manifest, &platform, None).expect("builds");
@@ -377,8 +469,7 @@ fn an_output_template_error_aborts_the_boot() {
         ("{{ }}", "empty field name"),
     ];
     for (template, expected) in cases {
-        let manifest =
-            one_proxy_output(r#"{ url = "DATABASE_URL" }"#, &format!("X = {template:?}"));
+        let manifest = one_proxy_output("$DATABASE_URL", &[("X", template)]);
         let platform = env(&[("DATABASE_URL", "postgresql://u:p@h/db")]);
         let errors = build(&manifest, &platform, None).expect_err("build should fail");
         let text = errors.to_string();
@@ -388,10 +479,7 @@ fn an_output_template_error_aborts_the_boot() {
 
 #[test]
 fn an_output_may_not_overwrite_a_variable_it_does_not_own() {
-    let manifest = one_proxy_output(
-        r#"{ url = "DATABASE_URL" }"#,
-        r#"SECRET_KEY = "{{ user }}""#,
-    );
+    let manifest = one_proxy_output("$DATABASE_URL", &[("SECRET_KEY", "{{ user }}")]);
     let platform = env(&[
         ("DATABASE_URL", "postgresql://u:p@h/db"),
         ("SECRET_KEY", "keep-me"),
@@ -409,8 +497,8 @@ fn an_output_may_redefine_its_own_input() {
     // appends joins with `&`: the rendered value is
     // `postgresql://blastit@/db?host=/proc/self/cwd&port=5432`.
     let manifest = one_proxy_output(
-        r#"{ url = "DATABASE_URL" }"#,
-        r#"DATABASE_URL = "{{ url }}&application_name=shop""#,
+        "$DATABASE_URL",
+        &[("DATABASE_URL", "{{ url }}&application_name=shop")],
     );
     let platform = env(&[("DATABASE_URL", "postgresql://u:p@h/db")]);
     let prepared = build(&manifest, &platform, None).expect("builds");
@@ -422,19 +510,25 @@ fn an_output_may_redefine_its_own_input() {
 
 #[test]
 fn two_proxies_may_not_produce_the_same_variable() {
-    let manifest = parse(
-        r#"version = 1
-[proxy.a]
-protocol = "postgresql"
-input = { url = "A_URL" }
-[proxy.a.output]
-SHARED = "{{ user }}"
-[proxy.b]
-protocol = "postgresql"
-input = { url = "B_URL" }
-[proxy.b.output]
-SHARED = "{{ user }}"
-"#,
+    // Two rename maps, which no `Blastfile` can write (§7.5): the two
+    // declarations are the model's own.
+    let proxy = |name: &str, variable: &str| {
+        Proxy::new(
+            ProxyName::new(name),
+            Protocol::Postgresql,
+            BTreeMap::from([("url".to_string(), variable.to_string())]),
+            BTreeMap::from([("SHARED".to_string(), "{{ user }}".to_string())]),
+        )
+    };
+    let manifest = Manifest::from_parts(
+        1,
+        Vec::new(),
+        BTreeMap::from([
+            (ProxyName::new("a"), proxy("a", "A_URL")),
+            (ProxyName::new("b"), proxy("b", "B_URL")),
+        ]),
+        BTreeMap::new(),
+        Vec::new(),
     );
     let platform = env(&[
         ("A_URL", "postgresql://u:p@h/a"),
@@ -449,10 +543,7 @@ SHARED = "{{ user }}"
 
 #[test]
 fn an_output_may_not_name_a_blastit_variable() {
-    let manifest = one_proxy_output(
-        r#"{ url = "DATABASE_URL" }"#,
-        r#"BLASTIT_SNEAKY = "{{ user }}""#,
-    );
+    let manifest = one_proxy_output("$DATABASE_URL", &[("BLASTIT_SNEAKY", "{{ user }}")]);
     let platform = env(&[("DATABASE_URL", "postgresql://u:p@h/db")]);
     let errors = build(&manifest, &platform, None).expect_err("build should fail");
     assert!(errors.errors().iter().any(|error| matches!(
@@ -463,10 +554,10 @@ fn an_output_may_not_name_a_blastit_variable() {
 
 #[test]
 fn every_blastit_variable_is_removed_from_the_app_environment() {
-    let manifest = one_proxy(r#"{ url = "DATABASE_URL" }"#);
+    let manifest = one_proxy("$DATABASE_URL");
     let platform = env(&[
         ("DATABASE_URL", "postgresql://u:p@h/db"),
-        ("BLASTIT_MANIFEST", "/app/blastit.toml"),
+        ("BLASTIT_MANIFEST", "/app/Blastfile"),
         ("BLASTIT_UID_BASE", "20000"),
         ("BLASTIT_MAX_WORKERS", "4"),
         ("BLASTIT_ENV_STRIP", "PGPASSWORD"),
@@ -491,7 +582,7 @@ fn every_blastit_variable_is_removed_from_the_app_environment() {
 
 #[test]
 fn the_strip_list_comes_from_the_environment_and_from_the_argument() {
-    let manifest = one_proxy(r#"{ url = "DATABASE_URL" }"#);
+    let manifest = one_proxy("$DATABASE_URL");
     let platform = env(&[
         ("DATABASE_URL", "postgresql://u:p@h/db"),
         ("BLASTIT_ENV_STRIP", " PGPASSWORD,PGHOST ,  PGUSER  "),
@@ -551,7 +642,7 @@ fn a_url_may_not_smuggle_configuration() {
         "service=elsewhere",
     ] {
         let url = format!("postgresql://u:p@db.example.com:5432/defaultdb?{query}");
-        let manifest = one_proxy(r#"{ url = "DATABASE_URL" }"#);
+        let manifest = one_proxy("$DATABASE_URL");
         let platform = env(&[("DATABASE_URL", url.as_str())]);
         for text in failure(&manifest, &platform) {
             assert!(!text.contains(SENTINEL), "{query}: {text}");
@@ -563,15 +654,32 @@ fn a_url_may_not_smuggle_configuration() {
 
 #[test]
 fn two_failing_proxies_report_both_errors() {
-    let manifest = parse(
-        r#"version = 1
-[proxy.alpha]
-protocol = "postgresql"
-input = { url = "ALPHA_URL", ca_cert = "MISSING_CA" }
-[proxy.beta]
-protocol = "postgresql"
-input = { host = "BETA_HOST", database = "MISSING_DB" }
-"#,
+    // `alpha` pairs a URL with a CA (§7.4: a `Blastfile` has no such pair), so
+    // both declarations are the model's own; the rewrite must report both
+    // proxies' missing variables.
+    let proxy = |name: &str, slots: &[(&str, &str)]| {
+        Proxy::new(
+            ProxyName::new(name),
+            Protocol::Postgresql,
+            input(slots),
+            BTreeMap::new(),
+        )
+    };
+    let manifest = Manifest::from_parts(
+        1,
+        Vec::new(),
+        BTreeMap::from([
+            (
+                ProxyName::new("alpha"),
+                proxy("alpha", &[("url", "ALPHA_URL"), ("ca_cert", "MISSING_CA")]),
+            ),
+            (
+                ProxyName::new("beta"),
+                proxy("beta", &[("host", "BETA_HOST"), ("database", "MISSING_DB")]),
+            ),
+        ]),
+        BTreeMap::new(),
+        Vec::new(),
     );
     let platform = env(&[
         ("ALPHA_URL", "postgresql://u:p@h/db"),
@@ -598,10 +706,7 @@ input = { host = "BETA_HOST", database = "MISSING_DB" }
 
 #[test]
 fn an_unusable_output_variable_name_aborts_the_boot() {
-    let manifest = one_proxy_output(
-        r#"{ url = "DATABASE_URL" }"#,
-        r#""BAD=NAME" = "{{ user }}""#,
-    );
+    let manifest = one_proxy_output("$DATABASE_URL", &[("BAD=NAME", "{{ user }}")]);
     let platform = env(&[("DATABASE_URL", "postgresql://u:p@h/db")]);
     let errors = build(&manifest, &platform, None).expect_err("build should fail");
     assert!(errors.errors().iter().any(|error| matches!(
@@ -614,7 +719,9 @@ fn an_unusable_output_variable_name_aborts_the_boot() {
 fn a_variable_name_is_checked_before_the_proxy_is_used() {
     // An input variable name with an `=` is refused, and the proxy is skipped
     // rather than parsed with a name that could never be an environment key.
-    let manifest = one_proxy_output(r#"{ url = "DATABASE=URL" }"#, r#"X = "{{ user }}""#);
+    // `$DATABASE=URL` is not a `$IDENT`, so no `Blastfile` can write it: the
+    // model carries the bad name and the output map, and the rewrite refuses it.
+    let manifest = modeled(&[("url", "DATABASE=URL")], &[("X", "{{ user }}")]);
     let platform = env(&[("DATABASE=URL", "postgresql://u:p@h/db")]);
     let errors = build(&manifest, &platform, None).expect_err("build should fail");
     assert!(
@@ -634,7 +741,7 @@ fn a_variable_name_is_checked_before_the_proxy_is_used() {
 
 #[test]
 fn a_url_without_a_database_aborts_the_boot() {
-    let manifest = one_proxy(r#"{ url = "DATABASE_URL" }"#);
+    let manifest = one_proxy("$DATABASE_URL");
     for url in ["postgresql://u:p@h", "postgresql://u:p@h/"] {
         let platform = env(&[("DATABASE_URL", url)]);
         let errors = build(&manifest, &platform, None).expect_err("build should fail");
@@ -649,7 +756,7 @@ fn a_url_without_a_database_aborts_the_boot() {
 
 #[test]
 fn injected_defaults_do_not_override_values_that_are_already_there() {
-    let manifest = parse("version = 1\n");
+    let manifest = parse("");
     let platform = env(&[
         ("LC_ALL", "en_US.UTF-8"),
         ("OMP_NUM_THREADS", "4"),
@@ -670,7 +777,7 @@ fn injected_defaults_do_not_override_values_that_are_already_there() {
 
 #[test]
 fn an_empty_environment_still_gets_the_injected_defaults() {
-    let manifest = parse("version = 1\n");
+    let manifest = parse("");
     let prepared = build(&manifest, &BTreeMap::new(), None).expect("builds");
     for (name, value) in blastit_env::INJECTED_DEFAULTS {
         assert_eq!(app(&prepared, name), Some(*value), "{name}");
@@ -695,23 +802,17 @@ fn every_error_names_variables_and_never_a_value() {
 
     let cases = [
         // `url` together with a split slot
-        one_proxy(r#"{ url = "DATABASE_URL", host = "DB_HOST" }"#),
+        modeled(&[("url", "DATABASE_URL"), ("host", "DB_HOST")], &[]),
         // a variable that is not set (its name is fine to print)
-        one_proxy(r#"{ url = "MISSING_URL" }"#),
+        one_proxy("$MISSING_URL"),
         // an unknown slot
-        one_proxy(r#"{ url = "DATABASE_URL", dsn = "DATABASE_URL" }"#),
+        modeled(&[("url", "DATABASE_URL"), ("dsn", "DATABASE_URL")], &[]),
         // an output that overwrites a foreign variable
-        one_proxy_output(
-            r#"{ url = "DATABASE_URL" }"#,
-            r#"SECRET_KEY = "{{ user }}""#,
-        ),
+        one_proxy_output("$DATABASE_URL", &[("SECRET_KEY", "{{ user }}")]),
         // an output that names a reserved variable
-        one_proxy_output(r#"{ url = "DATABASE_URL" }"#, r#"BLASTIT_X = "{{ user }}""#),
+        one_proxy_output("$DATABASE_URL", &[("BLASTIT_X", "{{ user }}")]),
         // a template error
-        one_proxy_output(
-            r#"{ url = "DATABASE_URL" }"#,
-            r#"X = "{{ database | lower }}""#,
-        ),
+        one_proxy_output("$DATABASE_URL", &[("X", "{{ database | lower }}")]),
     ];
 
     for manifest in cases {
@@ -720,7 +821,7 @@ fn every_error_names_variables_and_never_a_value() {
 
     // A URL that does not parse, with the sentinel inside it.
     let bad = env(&[("DATABASE_URL", "postgresql://u:S3NT1NEL-d0-not-log-me@/db")]);
-    assert_quiet(&failure(&one_proxy(r#"{ url = "DATABASE_URL" }"#), &bad));
+    assert_quiet(&failure(&one_proxy("$DATABASE_URL"), &bad));
 
     // A URL whose query carries the sentinel in a parameter blastit refuses.
     for query in [
@@ -730,7 +831,7 @@ fn every_error_names_variables_and_never_a_value() {
     ] {
         let url = format!("postgresql://u:p@h:5432/db?{query}");
         let bad = env(&[("DATABASE_URL", url.as_str())]);
-        assert_quiet(&failure(&one_proxy(r#"{ url = "DATABASE_URL" }"#), &bad));
+        assert_quiet(&failure(&one_proxy("$DATABASE_URL"), &bad));
     }
 
     // A split port that is not a number.
@@ -740,7 +841,7 @@ fn every_error_names_variables_and_never_a_value() {
         ("DB_DATABASE", "db"),
     ]);
     assert_quiet(&failure(
-        &one_proxy(r#"{ host = "DB_HOST", port = "DB_PORT", database = "DB_DATABASE" }"#),
+        &one_proxy("{\n    host $DB_HOST\n    port $DB_PORT\n    database $DB_DATABASE\n}"),
         &bad_port,
     ));
 
@@ -748,7 +849,10 @@ fn every_error_names_variables_and_never_a_value() {
     // environment or into a `Debug`, even though dbproxy keeps it. (Variables
     // that are not a proxy's input are the app's own, and stay visible — that
     // is §5.3.)
-    let manifest = one_proxy(r#"{ url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }"#);
+    let manifest = modeled(
+        &[("url", "DATABASE_URL"), ("ca_cert", "DATABASE_CA_CERT")],
+        &[],
+    );
     let inputs_only = env(&[
         (
             "DATABASE_URL",

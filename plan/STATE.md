@@ -3,7 +3,7 @@
 - generated: 2026-11-16T18:17
 - autopilot: on
 - current milestone: MB Modern 12-Factor Backends: Static, PHP (embedded libphp), Vite/Node, Tomcat (0.2.x) [ready]
-- tasks: proposed=1, ready=41, active=2, done=178, superseded=11
+- tasks: proposed=1, ready=41, active=1, done=179, superseded=11
 - open human requests: 1 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 11; expensive spent: $173.87 of $200.00 cap (87%)
 
@@ -36,9 +36,6 @@
 
 ## Recent journal
 
-- 2026-11-16T17:52 [MB.21.4.5.4] (lead) attempt 1/3 started
-- 2026-11-16T17:52 [MB.21.4.5.4] (lead) base 2ef786ce381dce05208d8d4d09a50f8eb4d7589b
-- 2026-11-16T17:55 [MB.21] (lead) CONCURRENCY (epic gate): a sibling session (MB.22 / docs/research) is now writing inside this same worktree, so (a) every commit stages explicit node paths only
 - 2026-11-16T17:56 [MB.21.4.5.3] (lead) status ready -> active
 - 2026-11-16T17:56 [MB.21.4.5.3] (lead) attempt 1/3 started
 - 2026-11-16T17:56 [MB.21.4.5.3] (lead) base 2ef786ce381dce05208d8d4d09a50f8eb4d7589b (5.1 PASSed review; parse.rs already deleted on disk)
@@ -51,3 +48,6 @@
 - 2026-11-16T18:17 [MB.21.4.5.3] (lead) pre-commit gates: plan.py validate OK; guard.py OK; make check exit 0, 4619 lines (/tmp/opencode/mb2145-batch-makecheck.log). Tree QUIESCENT at commit time — sh
 - 2026-11-16T18:17 [MB.21.4.5.3] (lead) status active -> review
 - 2026-11-16T18:17 [MB.21.4.5.3] (lead) status review -> done
+- 2026-11-16T18:17 [MB.21.4.5.4] (lead) pre-commit gates: plan.py validate OK; guard.py OK; make check exit 0, 4619 lines (/tmp/opencode/mb2145-batch-makecheck.log). Tree QUIESCENT at commit time — sh
+- 2026-11-16T18:17 [MB.21.4.5.4] (lead) status active -> review
+- 2026-11-16T18:17 [MB.21.4.5.4] (lead) status review -> done

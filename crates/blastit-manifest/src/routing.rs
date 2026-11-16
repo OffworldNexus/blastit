@@ -43,6 +43,11 @@ pub(crate) fn compile_pattern(pattern: &str) -> Result<Regex, regex::Error> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Match {
     /// Index of the route in [`Manifest::routes`].
+    ///
+    /// [`RoutingTable::for_learn`] shifts every index by one, because its slot
+    /// `0` is the reserved fallback: there, this is the manifest index `+ 1`, so
+    /// a caller reading a `for_learn` table must not pair it with
+    /// [`Manifest::route`] directly.
     pub route: usize,
     /// Index of the matching pattern in that route's `path` list.
     pub rule: usize,
@@ -96,6 +101,56 @@ impl RoutingTable {
         }
     }
 
+    /// Compiles the manifest's routing table for `blastit dev --learn`, with
+    /// slot `0` reserved for the unrouted-request fallback (`R26`, `R27`).
+    ///
+    /// Slot `0` is the scheduler's fallback view: the slot a request no view
+    /// matched is served by. It holds **no** patterns, so
+    /// [`RoutingTable::route`] can never select it and
+    /// [`RoutingTable::methods_for`] never takes a method from it — the
+    /// reservation can only be reached through the scheduler's learn path,
+    /// never by a declared request. Every declared route therefore sits at
+    /// `1..=N`, in manifest order, with exactly the methods and compiled
+    /// patterns [`RoutingTable::new`] builds.
+    ///
+    /// # Errors
+    ///
+    /// Every path pattern [`RoutingTable::new`] refuses, with the same
+    /// [`ManifestError::InvalidRegex`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use blastit_manifest::{Manifest, Match, RoutingTable};
+    ///
+    /// let manifest = Manifest::from_blastfile_str(
+    ///     "view about \"/about/\" {}\n\nview products \"/products/\" {}\n",
+    /// )
+    /// .unwrap();
+    /// let table = RoutingTable::for_learn(&manifest).unwrap();
+    ///
+    /// // Slot 0 is the fallback, so the declared views are routes 1 and 2.
+    /// assert_eq!(table.route("GET", "/about/"), Some(Match { route: 1, rule: 0 }));
+    /// assert_eq!(table.route("GET", "/products/"), Some(Match { route: 2, rule: 0 }));
+    /// // Nothing routes into slot 0, and it contributes no `405` methods.
+    /// assert_eq!(table.route("GET", "/unrouted"), None);
+    /// assert_eq!(table.methods_for("/unrouted"), None);
+    /// ```
+    pub fn for_learn(manifest: &Manifest) -> Result<Self, ManifestErrors> {
+        let mut table = Self::new(manifest)?;
+        // One reservation in front of the compiled table: every declared route
+        // shifts by exactly one, which is the index the scheduler's learn path
+        // expects.
+        table.routes.insert(
+            0,
+            CompiledRoute {
+                methods: None,
+                rules: Vec::new(),
+            },
+        );
+        Ok(table)
+    }
+
     /// Matches a request against the table, in manifest order: the first route
     /// whose methods (when it lists them) and whose first matching pattern
     /// accept it wins (§6).
@@ -112,10 +167,8 @@ impl RoutingTable {
     /// ```
     /// use blastit_manifest::{Manifest, Match, RoutingTable};
     ///
-    /// let manifest = Manifest::from_toml_str(
-    ///     "version = 1\n\
-    ///      [[route]]\nname = \"about\"\npath = ['/about/']\n\
-    ///      [[route]]\nname = \"fallback\"\npath = ['.*']\n",
+    /// let manifest = Manifest::from_blastfile_str(
+    ///     "view about \"/about/\" {}\n\nview fallback \"/*\" {}\n",
     /// )
     /// .unwrap();
     /// let table = RoutingTable::new(&manifest).unwrap();
@@ -240,15 +293,13 @@ impl MountTable {
     /// ```
     /// use blastit_manifest::{Manifest, MountTable};
     ///
-    /// let manifest = Manifest::from_toml_str(
-    ///     "version = 1\n\
-    ///      [[route]]\nname = \"site\"\npath = ['.*']\n\
-    ///      [route.static]\nroot = \"public\"\n",
+    /// let manifest = Manifest::from_blastfile_str(
+    ///     "static \"/\" {\n    root \"public\"\n}\n",
     /// )
     /// .unwrap();
     /// let table = MountTable::new(&manifest);
     ///
-    /// // The retired reader's static route is a mount at the URL root.
+    /// // The root mount is a mount at the URL root.
     /// let found = table.lookup("/assets/app.js").unwrap();
     /// assert_eq!((found.mount, found.relative), (0, "/assets/app.js"));
     /// assert!(table.lookup("assets/app.js").is_none());
@@ -300,8 +351,9 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use super::{MountMatch, MountTable, compile_pattern};
-    use crate::model::{Manifest, StaticMount, StaticPolicy};
+    use super::{MountMatch, MountTable, RoutingTable, compile_pattern};
+    use crate::error::ManifestError;
+    use crate::model::{Manifest, Route, StaticMount, StaticPolicy};
 
     /// A manifest with the given mount prefixes, in order, and no routes: a
     /// static-only file (§9.5).
@@ -438,6 +490,41 @@ mod tests {
             assert_eq!(table.lookup("/assets"), None, "{prefix:?}");
             assert_eq!(table.lookup("/assets/app.js"), None, "{prefix:?}");
         }
+    }
+
+    /// A pattern `RoutingTable::new` refuses is refused by `for_learn` too, with
+    /// the same error: the reservation in front of the table never turns a
+    /// broken route into a routable one.
+    ///
+    /// A `Blastfile` compiles its patterns while it parses, so the only place a
+    /// model can carry an uncompilable one is a hand-built route — which is
+    /// exactly the guard `new` exists for.
+    #[test]
+    fn for_learn_refuses_a_pattern_that_new_refuses() {
+        let manifest = Manifest::assemble(
+            1,
+            Vec::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            vec![Route::new(
+                "about".to_string(),
+                vec!["x)|(.*".to_string()],
+                None,
+                Vec::new(),
+                false,
+                false,
+                BTreeMap::new(),
+            )],
+            Vec::new(),
+        );
+        let error = RoutingTable::for_learn(&manifest).expect_err("the pattern cannot compile");
+        assert!(
+            matches!(
+                &error.errors()[0],
+                ManifestError::InvalidRegex { route, rule, .. } if route == "about" && *rule == 0
+            ),
+            "{error}"
+        );
     }
 
     #[test]

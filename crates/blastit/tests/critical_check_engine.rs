@@ -25,13 +25,16 @@ use serde_json::{Value, json};
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/// A manifest with only routes: no proxy, no groups.
+/// A manifest with only views: no proxy, no traits.
+///
+/// Each row is `(<view name>, <pattern clause>)`, where the clause is the
+/// header text a `Blastfile` view carries: a quoted pattern or `regex '…'`.
 fn routes_manifest(routes: &[(&str, &str)]) -> Manifest {
-    let mut source = String::from("version = 1\n");
-    for (name, path) in routes {
-        source.push_str(&format!("[[route]]\nname = \"{name}\"\npath = {path}\n"));
+    let mut source = String::new();
+    for (name, pattern) in routes {
+        source.push_str(&format!("view {name} {pattern} {{}}\n"));
     }
-    Manifest::from_toml_str(&source).expect("the fixture manifest parses")
+    Manifest::from_blastfile_str(&source).expect("the fixture manifest parses")
 }
 
 fn http_line(
@@ -133,7 +136,7 @@ fn infer_routes_reproduces_all_thirteen_rows() {
     let rows = [
         Row {
             paths: &["/"],
-            existing: &[("products", "['/products/']")],
+            existing: &[("products", "\"/products/\"")],
             name: "root",
             patterns: &["/"],
             insert_at: 1,
@@ -203,21 +206,21 @@ fn infer_routes_reproduces_all_thirteen_rows() {
         },
         Row {
             paths: &["/products/42/"],
-            existing: &[("products", "['/products/']")],
+            existing: &[("products", "\"/products/\"")],
             name: "products-2",
             patterns: &["/products/[0-9]+/"],
             insert_at: 1,
         },
         Row {
             paths: &["/robots.txt"],
-            existing: &[("products", "['/products/']"), ("fallback", "['.*']")],
+            existing: &[("products", "\"/products/\""), ("fallback", "\"/*\"")],
             name: "robots-txt",
             patterns: &[r"/robots\.txt"],
             insert_at: 1,
         },
         Row {
             paths: &["/robots.txt"],
-            existing: &[("products", "['/products/']"), ("fallback", r#"".*""#)],
+            existing: &[("products", "\"/products/\""), ("fallback", "regex '.*'")],
             name: "robots-txt",
             patterns: &[r"/robots\.txt"],
             insert_at: 1,
@@ -302,7 +305,7 @@ fn the_r27_golden_proposes_one_orders_route_with_both_exact_queries() {
     assert!(plan.would_write(false));
     assert!(!plan.would_write(true), "a dry run writes nothing");
 
-    // The proposal is a manifest: `[[route]] name = "orders"` with those
+    // The proposal is a manifest: `view orders "/orders/{id1:int}/"` with those
     // exact queries, and every untouched field survives.
     let edited = apply_edits(GOLDEN_MANIFEST, &plan.edits).expect("the edit applies");
     assert!(
@@ -406,7 +409,7 @@ view catalog "/catalog/" {
 "#;
 
 #[test]
-fn every_add_query_reparses_under_parse_and_validate() {
+fn every_add_query_reparses_under_parse_blastfile() {
     let delete = r#"DELETE FROM "p" WHERE "p"."id" = $?"#;
     let insert = r#"INSERT INTO "p" ("id") VALUES ($?)"#;
     let report = run(

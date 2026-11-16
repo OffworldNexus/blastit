@@ -4,7 +4,7 @@
 //! rewrites that environment once, in stage 0, before the `execve` barrier
 //! (§4). This crate is that rewrite, as a pure function:
 //!
-//! * [`postgresql`] turns one `[proxy.<name>]` declaration into an
+//! * [`postgresql`] turns one `postgres` store into an
 //!   [`Upstream`] — host, port, role, password, database, TLS mode and CA —
 //!   for dbproxy to connect with (§2.2, §5.2);
 //! * [`Template`] renders the app-side variables that point at dbproxy's local
@@ -43,11 +43,14 @@
 //! use blastit_env::build;
 //! use blastit_manifest::Manifest;
 //!
-//! let manifest = Manifest::from_toml_str(
-//!     "version = 1\n\
-//!      [proxy.db]\n\
-//!      protocol = \"postgresql\"\n\
-//!      input = { url = \"DATABASE_URL\", ca_cert = \"DATABASE_CA_CERT\" }\n",
+//! let manifest = Manifest::from_blastfile_str(
+//!     "postgres $DATABASE_URL\n\
+//!      \n\
+//!      postgres reports {\n\
+//!          host $REPORTS_HOST\n\
+//!          database $REPORTS_DATABASE\n\
+//!          ca_cert $REPORTS_CA_CERT\n\
+//!      }\n",
 //! )
 //! .unwrap();
 //!
@@ -57,7 +60,9 @@
 //!         "postgresql://doadmin:s3cr3t@db.example.com:25060/defaultdb?sslmode=require"
 //!             .to_string(),
 //!     ),
-//!     ("DATABASE_CA_CERT".to_string(), "-----BEGIN CERTIFICATE-----".to_string()),
+//!     ("REPORTS_HOST".to_string(), "reports.example.com".to_string()),
+//!     ("REPORTS_DATABASE".to_string(), "reports".to_string()),
+//!     ("REPORTS_CA_CERT".to_string(), "-----BEGIN CERTIFICATE-----".to_string()),
 //!     ("PYTHONUNBUFFERED".to_string(), "1".to_string()),
 //! ]);
 //!
@@ -69,7 +74,7 @@
 //!     Some("postgresql://blastit@/defaultdb?host=/proc/self/cwd&port=5432"),
 //! );
 //! // The CA material is gone from the app's environment…
-//! assert_eq!(prepared.app_env().get("DATABASE_CA_CERT"), None);
+//! assert_eq!(prepared.app_env().get("REPORTS_CA_CERT"), None);
 //! // …and the process-safety defaults are in.
 //! assert_eq!(prepared.app_env().get("LC_ALL").map(String::as_str), Some("C.UTF-8"));
 //!

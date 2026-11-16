@@ -9,14 +9,18 @@
 //! may touch, and every statement is checked against it by
 //! [`crate::analysis`], which parses it with PostgreSQL's own parser.
 //!
-//! ```toml
-//! [route.db.tables]
-//! restaurants_restaurant = { select = ["id", "slug", "name"] }
-//! restaurants_cuisinetype = { select = "*" }
-//! orders_order = { select = "*", insert = "*", update = ["status"], delete = true }
-//!
-//! [route.db]
-//! functions = ["st_distance", "unaccent"]
+//! ```text
+//! view catalog GET "/products/{id:int}" {
+//!     postgres {
+//!         functions st_distance, unaccent
+//!         select restaurants_restaurant(id, slug, name)
+//!         select restaurants_cuisinetype
+//!         select orders_order
+//!         insert orders_order
+//!         update orders_order(status)
+//!         delete orders_order
+//!     }
+//! }
 //! ```
 //!
 //! * a table key is the name a grant and the analysis agree on: `public.t` is
