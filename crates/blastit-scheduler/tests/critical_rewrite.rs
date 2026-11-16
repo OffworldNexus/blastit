@@ -9,7 +9,8 @@
 //! appends the flow half (slots, spawns, pump, timeout) to this same file.
 //!
 //! Every refusal table carries its accepted twin in the same file — an exact
-//! file, a directory `index`, the SPA fallback and a `.well-known` token are all
+//! file, a directory `index`, the declared `fallback` and a `.well-known` token
+//! are all
 //! served by the suite whose refusals are asserted here — so neither a `decide`
 //! that always forwards nor one that always serves can pass.
 
@@ -25,7 +26,7 @@ use std::time::Duration;
 
 use blastit_events::Outcome;
 use blastit_frame::{Frame, INITIAL_WINDOW, ReqHead};
-use blastit_manifest::{Manifest, RoutingTable, StaticPolicy, UidLayout};
+use blastit_manifest::{Manifest, MountTable, RoutingTable, UidLayout};
 use blastit_scheduler::rewrite::{Rewrite, STATIC_ALLOW, decide, declares_body};
 use blastit_scheduler::routes_from_manifest;
 use blastit_scheduler::static_asset::{
@@ -87,7 +88,7 @@ fn shape(outcome: &StaticOutcome) -> &'static str {
     match outcome {
         StaticOutcome::File(_) => "file",
         StaticOutcome::Missing => "missing",
-        StaticOutcome::SpaLost => "spa-lost",
+        StaticOutcome::FallbackMissing => "fallback-missing",
         StaticOutcome::Hidden => "hidden",
         StaticOutcome::Refused(_) => "refused",
     }
@@ -418,7 +419,11 @@ fn a_lost_spa_fallback_is_a_404_and_never_the_app() {
     let root = tree.open(Fixture::S, Backend::Openat2);
 
     for target in ["/missing", "/", "/dashboard"] {
-        assert_eq!(shape(&resolve(&root, target)), "spa-lost", "{target}");
+        assert_eq!(
+            shape(&resolve(&root, target)),
+            "fallback-missing",
+            "{target}"
+        );
         for method in ["GET", "POST"] {
             for has_body in [false, true] {
                 rejected(
@@ -554,7 +559,12 @@ fn the_status_mapping_is_total_over_every_outcome_and_every_request() {
                     404,
                 );
                 rejected(
-                    decide(StaticOutcome::SpaLost, method.as_bytes(), has_body, has_app),
+                    decide(
+                        StaticOutcome::FallbackMissing,
+                        method.as_bytes(),
+                        has_body,
+                        has_app,
+                    ),
                     404,
                 );
 
@@ -590,7 +600,7 @@ fn the_status_mapping_is_total_over_every_outcome_and_every_request() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_app_route_matches_before_a_later_static_route() {
+fn a_static_block_adds_no_matching_rule_and_mounts_are_the_files() {
     let front_first = "version = 1\napp = \"app:app\"\n\n\
          [[route]]\nname = \"app\"\npath = ['.*']\n\n\
          [[route]]\nname = \"site\"\npath = ['.*']\n\n\
@@ -600,8 +610,8 @@ fn an_app_route_matches_before_a_later_static_route() {
          [route.static]\nroot = \"public\"\n\n\
          [[route]]\nname = \"app\"\npath = ['.*']\n";
 
-    // First route in manifest order wins, and `[static]` adds no matching rule:
-    // a static route placed after an app catch-all is unreachable (§4.3).
+    // The route table is the views only: a `[route.static]` block adds no
+    // matching rule, and the first route in manifest order still wins (§9.2).
     let manifest = Manifest::from_toml_str(front_first).unwrap();
     let table = RoutingTable::new(&manifest).unwrap();
     let routes = routes_from_manifest(&manifest, &UidLayout::new(20_000));
@@ -609,75 +619,60 @@ fn an_app_route_matches_before_a_later_static_route() {
         table.route("GET", "/assets/app.js").map(|hit| hit.route),
         Some(0)
     );
-    assert_eq!(routes[0].static_policy, None);
+    // No route carries static state: the mount is the file's.
     assert!(
-        !routes[0].static_forward,
-        "a route with no policy never forwards statically"
+        routes
+            .iter()
+            .all(|route| route.name != "site" || route.ingress.is_none())
     );
-    assert_eq!(
-        routes[1].static_policy,
-        Some(StaticPolicy {
-            root: "public".to_string(),
-            index: "index.html".to_string(),
-            fallback: None,
-            immutable: Vec::new(),
-        })
-    );
-    assert!(
-        routes[1].static_forward,
-        "no spa, and the manifest declares an app"
-    );
+    assert_eq!(routes.len(), 2);
+    // The mount is beside the routes, at the URL root the retired reader gives
+    // it, and a lookup strips its prefix (§9.2).
+    let mounts = MountTable::from_mounts(manifest.mounts());
+    let found = mounts
+        .lookup("/assets/app.js")
+        .expect("the mount claims it");
+    assert_eq!((found.mount, found.relative), (0, "/assets/app.js"));
+    assert_eq!(manifest.mounts()[0].policy.root, "public");
 
-    // Swapping the two routes swaps which one wins, so the order — not the
-    // presence of `[static]` — decides. `decide` is reachable only for the
-    // route that matched.
+    // Swapping the two routes swaps which view wins, and the mount is
+    // unchanged: the order — not the presence of `[static]` — decides.
     let manifest = Manifest::from_toml_str(static_first).unwrap();
     let table = RoutingTable::new(&manifest).unwrap();
-    let routes = routes_from_manifest(&manifest, &UidLayout::new(20_000));
     assert_eq!(
         table.route("GET", "/assets/app.js").map(|hit| hit.route),
         Some(0)
     );
-    assert!(routes[0].static_policy.is_some());
-    assert_eq!(routes[1].static_policy, None);
+    assert_eq!(manifest.mounts().len(), 1);
 }
 
 #[test]
-fn a_static_policy_can_forward_only_without_spa_and_with_an_app() {
-    fn policy(spa: bool) -> StaticPolicy {
-        StaticPolicy {
-            root: "public".to_string(),
-            index: "index.html".to_string(),
-            // The reader lowers the retired flag to the file a miss is answered
-            // with (§9.3).
-            fallback: spa.then(|| "index.html".to_string()),
-            immutable: Vec::new(),
-        }
-    }
-
-    // `spa = true` answers every miss itself, so the route never spawns a view.
-    let spa_route = routes_from_manifest(
-        &Manifest::from_toml_str(
-            "version = 1\napp = \"app:app\"\n[[route]]\nname = \"site\"\npath = ['.*']\n\
-             [route.static]\nroot = \"public\"\nspa = true\n",
-        )
-        .unwrap(),
-        &UidLayout::new(20_000),
+fn a_mounts_fallback_is_the_only_thing_that_answers_a_miss_after_the_views() {
+    // §9.3: `spa = true` lowers to a declared `fallback`, which answers a miss
+    // that no view did. The route table never carries the fact.
+    let with_fallback = Manifest::from_toml_str(
+        "version = 1\napp = \"app:app\"\n[[route]]\nname = \"site\"\npath = ['.*']\n\
+         [route.static]\nroot = \"public\"\nspa = true\n",
+    )
+    .unwrap();
+    assert_eq!(
+        with_fallback.mounts()[0].policy.fallback.as_deref(),
+        Some("index.html")
     );
-    assert_eq!(spa_route[0].static_policy, Some(policy(true)));
-    assert!(!spa_route[0].static_forward);
-
-    // No `app` in the manifest: nothing to forward to either.
-    let no_app = routes_from_manifest(
-        &Manifest::from_toml_str(
-            "version = 1\n[[route]]\nname = \"site\"\npath = ['.*']\n\
-             [route.static]\nroot = \"public\"\n",
-        )
-        .unwrap(),
-        &UidLayout::new(20_000),
+    assert!(
+        routes_from_manifest(&with_fallback, &UidLayout::new(20_000))
+            .iter()
+            .all(|route| route.ingress.is_none())
     );
-    assert_eq!(no_app[0].static_policy, Some(policy(false)));
-    assert!(!no_app[0].static_forward, "no app: nothing to forward to");
+
+    // Without the flag there is no fallback: a miss falls through to a view
+    // (which a manifest with no app cannot have), and then to `404`.
+    let without = Manifest::from_toml_str(
+        "version = 1\n[[route]]\nname = \"site\"\npath = ['.*']\n\
+         [route.static]\nroot = \"public\"\n",
+    )
+    .unwrap();
+    assert_eq!(without.mounts()[0].policy.fallback, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,15 +1086,15 @@ async fn a_static_refusal_is_one_scheduler_answer_with_no_store() {
         );
     }
 
-    // Each is one event, `unmatched`, and none of them reached a view.
+    // Each is one event, `unmatched`, and none of them reached a view. The two
+    // rows the mount refuses at step 0 are answered before any view is routed
+    // (§9.2), so their event carries no route; the method and body gates run on
+    // a request the route table did match, and keep it.
     world.until(|world| world.requests().len() == 4).await;
-    for event in world.requests() {
+    for (index, event) in world.requests().iter().enumerate() {
         assert_eq!(event.outcome(), Outcome::Unmatched);
-        assert_eq!(
-            event.rule(),
-            Some(0),
-            "the refusal keeps its route and rule"
-        );
+        let route = if index < 2 { None } else { Some(0) };
+        assert_eq!(event.rule(), route, "refusal {index} attribution");
     }
     assert!(
         world.log.lock().unwrap().spawns.is_empty(),

@@ -9,12 +9,13 @@
 //! match wins:
 //!
 //! 1. a file this route serves — exactly, as a directory's `index`, or as the
-//!    SPA fallback — is answered by this responder, **never** by the app;
+//!    declared `fallback` — is answered by this responder, **never** by the app;
 //! 2. a path with nothing at it forwards to the manifest's `app`, with the
 //!    route's own `methods` and `[route.ingress]`;
 //! 3. without an `app`, that miss is a `404`;
-//! 4. a refusal — a malformed path (`400`), a hidden entry (`404`), a lost SPA
-//!    fallback (`404`) — is final: never the app, never `index`.
+//! 4. a refusal — a malformed path (`400`), a hidden entry (`404`), a missing or
+//!    refused declared `fallback` (`404`) — is final: never the app, never
+//!    `index`.
 //!
 //! The first four steps of §4.3 (the health path, a route with no
 //! `[route.static]`, the one decode, the dotfile rule) run before this module:
@@ -74,8 +75,8 @@ pub enum Rewrite {
 /// The method gate runs before the body gate, so `POST` with a body on a path
 /// with a static target is `405`, and only a `GET`/`HEAD` that declares a body
 /// is `413` (design §4.4). A `File` is never handed to the app, a refusal is
-/// never masked by the SPA fallback, and a miss never answers `index` on a
-/// route whose `spa` is unset.
+/// never masked by the declared `fallback`, and a miss never answers `index`
+/// for a mount that declares no `fallback`.
 pub fn decide(outcome: StaticOutcome, method: &[u8], has_body: bool, has_app: bool) -> Rewrite {
     match outcome {
         // Steps 5–7: a file answers this path. The responder owns it, so the
@@ -107,9 +108,9 @@ pub fn decide(outcome: StaticOutcome, method: &[u8], has_body: bool, has_app: bo
                 }
             }
         }
-        // Step 8: `spa = true` and the fallback file is missing. Final, and
+        // Step 8: the declared `fallback` is missing or refused. Final, and
         // never the app.
-        StaticOutcome::SpaLost => Rewrite::Reject {
+        StaticOutcome::FallbackMissing => Rewrite::Reject {
             status: 404,
             allow: None,
         },

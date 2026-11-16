@@ -37,11 +37,16 @@ const INDENT: &str = "    ";
 /// (`lower(fmt(t))` equals `lower(t)`), which is what makes
 /// `blastit fmt --check` a CI gate rather than a diff generator.
 ///
+/// The canonical text is **read back before it is returned** (R25): `fmt` never
+/// hands a caller — or writes — a file the one reader refuses. The re-parse runs
+/// under the same budgets as any other file, so a printer regression is a
+/// refusal at the byte it broke, not a file that fails to boot later.
+///
 /// # Errors
 ///
-/// Everything the parser refuses, and [`ManifestError::TooLarge`] when the
-/// canonical text would exceed `MAX_SOURCE_BYTES`: a file that formatting would
-/// grow past the reader's own cap is refused rather than written (R25).
+/// Everything the parser refuses, [`ManifestError::TooLarge`] when the canonical
+/// text would exceed `MAX_SOURCE_BYTES`: a file that formatting would grow past
+/// the reader's own cap is refused rather than written (R25).
 pub fn fmt(text: &str) -> Result<String, ManifestErrors> {
     let cst = parse(text)?;
     let formatted = write(&cst);
@@ -51,6 +56,12 @@ pub fn fmt(text: &str) -> Result<String, ManifestErrors> {
         }
         .into());
     }
+    // R25: refuse canonical text the one parser cannot read back. A printer
+    // regression is exactly this: text this module wrote that the reader
+    // refuses. The check is a plain `parse`, so it is the same budget table
+    // (`MAX_TOKENS`, `MAX_TRIVIA`, `MAX_BLOCK_DEPTH`) every other file goes
+    // through.
+    parse(&formatted)?;
     Ok(formatted)
 }
 
@@ -510,11 +521,28 @@ fn push_indent(out: &mut String, indent: usize) {
 mod tests {
     use super::super::syntax::{Cst, Element, NodeId, NodeKind};
     use super::super::tokens::TriviaKind;
-    use super::fmt;
+    use super::{fmt, parse};
 
     /// Formats a document that must parse.
     fn formatted(text: &str) -> String {
         fmt(text).expect("the document parses")
+    }
+
+    /// R25: canonical text the parser cannot read back is a refusal, not a
+    /// file — the whole of a printer regression's fate.
+    ///
+    /// The predicate is what [`fmt`] runs on its own output, so a printer that
+    /// wrote any unreadable byte makes `fmt` fail instead of returning (and
+    /// `blastit fmt` writing) text the one reader refuses.
+    #[test]
+    fn a_printer_regression_is_refused_rather_than_written() {
+        let unreadable = "view v \"/x\" {\n    body xml\n}\n";
+        assert!(
+            parse(unreadable).is_err(),
+            "a document with an unknown codec must not pass the re-parse"
+        );
+        let written = "view v \"/x\" {\n    body json\n}\n";
+        assert!(parse(written).is_ok(), "{written}");
     }
 
     /// P2: the canonical layout is a fixed point, and a canonical file is

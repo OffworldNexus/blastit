@@ -5,7 +5,7 @@ kind: task
 status: ready
 owner: implementer
 priority: 1
-depends_on: [MB.21.4.1]
+depends_on: [MB.21.4.1, MB.21.4.6]
 paths:
   - "crates/blastit/src/**"
   - "crates/blastit/tests/**"
@@ -29,7 +29,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T08:12"
+updated: "2026-11-16T09:11"
 ---
 
 # Goal

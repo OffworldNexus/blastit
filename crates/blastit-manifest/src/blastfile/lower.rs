@@ -892,6 +892,14 @@ fn root_rule(root: &str) -> Option<&'static str> {
     }
 }
 
+/// A `/`-separated segment that starts with `.` and is not exactly `.` (§9.1).
+///
+/// The definition is the design's: `.` is allowed (it names the root), `..` is
+/// refused above, and everything else that starts with `.` is a dotfile.
+fn is_dotfile_segment(segment: &str) -> bool {
+    segment.starts_with('.') && segment != "."
+}
+
 /// The first rule a mount's `index` breaks, or `None` (§9.1).
 fn index_rule(index: &str) -> Option<&'static str> {
     if index.starts_with('/') {
@@ -900,7 +908,7 @@ fn index_rule(index: &str) -> Option<&'static str> {
         Some(ONE_OR_MORE_SEGMENTS)
     } else if index.split('/').any(|segment| segment == "..") {
         Some(NO_PARENT_SEGMENT)
-    } else if index.split('/').any(|segment| segment.starts_with('.')) {
+    } else if index.split('/').any(is_dotfile_segment) {
         Some(NO_DOTFILE_SEGMENT)
     } else if index.contains('\\') {
         Some(NO_BACKSLASH)

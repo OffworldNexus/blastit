@@ -1,0 +1,5 @@
+static "/" {
+    root "public"
+    fallback "index.html"
+    immutable "/assets/*"
+}

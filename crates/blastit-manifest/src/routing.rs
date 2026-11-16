@@ -3,7 +3,7 @@
 use regex::{Regex, RegexBuilder};
 
 use crate::error::{ManifestError, ManifestErrors, regex_message};
-use crate::model::Manifest;
+use crate::model::{Manifest, StaticMount};
 
 /// Largest compiled size of one path regex.
 ///
@@ -138,6 +138,35 @@ impl RoutingTable {
         }
         None
     }
+
+    /// The methods of every route whose **path** matched, for a `405` (§9.2
+    /// step 4).
+    ///
+    /// [`RoutingTable::route`] answers `None` when no route accepts the method,
+    /// which is a `404` for a target no view's pattern matched either. A request
+    /// whose path matched a view that declares methods but not this one is not
+    /// unrouted: the design answers `405` with the union of those views'
+    /// declared methods, in declaration order. `None` means no view's pattern
+    /// matched at all.
+    pub fn methods_for(&self, path_info: &str) -> Option<Vec<String>> {
+        let mut methods: Vec<String> = Vec::new();
+        for compiled in &self.routes {
+            if !compiled.rules.iter().any(|rule| rule.is_match(path_info)) {
+                continue;
+            }
+            let Some(declared) = &compiled.methods else {
+                // A view with no `methods` answers every method, so `route`
+                // would have matched it; it contributes nothing here.
+                continue;
+            };
+            for method in declared {
+                if !methods.iter().any(|known| known == method) {
+                    methods.push(method.clone());
+                }
+            }
+        }
+        (!methods.is_empty()).then_some(methods)
+    }
 }
 
 /// The mount a request path falls under, and the path below it (§9.2).
@@ -181,8 +210,15 @@ impl MountTable {
     /// Infallible: a mount prefix is a string, not a pattern, so there is
     /// nothing to compile and nothing to refuse here.
     pub fn new(manifest: &Manifest) -> Self {
-        let mounts = manifest
-            .mounts()
+        Self::from_mounts(manifest.mounts())
+    }
+
+    /// Builds the mount table from a mount list, in mount order.
+    ///
+    /// The scheduler is handed the mounts separately from the routing table (a
+    /// mount owns no view), so this is the entry point it uses.
+    pub fn from_mounts(mounts: &[StaticMount]) -> Self {
+        let mounts = mounts
             .iter()
             .enumerate()
             .map(|(mount, entry)| CompiledMount {

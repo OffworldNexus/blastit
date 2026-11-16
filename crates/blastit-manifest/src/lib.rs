@@ -110,6 +110,9 @@ pub mod edit;
 
 pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning, Position};
+// §18's one line is the crate's: a caller that prints a path or a message of
+// its own renders it with these rather than keeping a second copy.
+pub use error::{clipped, escape_control};
 pub use model::{
     Executor, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route,
     StaticMount, StaticPolicy,

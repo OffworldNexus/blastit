@@ -600,10 +600,25 @@ pub struct World {
     run: Option<JoinHandle<Result<(), SchedulerError>>>,
 }
 
+/// Which reader [`Options::manifest`] or [`Options::blastfile`] staged the
+/// source for.
+///
+/// The world boots through the same two entry points the product does, so a
+/// test that writes `static "/assets"` proves the scheduler over a `Blastfile`
+/// rather than over a lowering of the reader it replaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The retired reader, for the suites whose fixtures are still TOML.
+    Toml,
+    /// The one parser the product reads: `Manifest::from_blastfile_str`.
+    Blastfile,
+}
+
 /// The knobs a test turns before [`World::start`].
 pub struct Options {
     pub cfg: SchedulerConfig,
     pub manifest: String,
+    pub source: Source,
     pub scripts: Arc<Mutex<HashMap<usize, Script>>>,
     pub exit_on_retire: bool,
     /// A fake memory model whose usage the fake init grows on every fork.
@@ -625,6 +640,7 @@ impl Options {
             manifest: "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
                  [route.ingress]\nbody = \"raw\"\nallow_raw = true\n"
                 .to_string(),
+            source: Source::Toml,
             scripts: Arc::new(Mutex::new(HashMap::new())),
             exit_on_retire: true,
             memory_model: None,
@@ -634,6 +650,14 @@ impl Options {
     /// Replaces the manifest.
     pub fn manifest(mut self, source: &str) -> Self {
         self.manifest = source.to_string();
+        self.source = Source::Toml;
+        self
+    }
+
+    /// Replaces the manifest with a `Blastfile`, read by the product's parser.
+    pub fn blastfile(mut self, source: &str) -> Self {
+        self.manifest = source.to_string();
+        self.source = Source::Blastfile;
         self
     }
 
@@ -665,9 +689,17 @@ impl Default for Options {
 impl World {
     /// Starts the scheduler with a fake init and a fake client.
     pub fn start(options: Options) -> Self {
-        let manifest = Manifest::from_toml_str(&options.manifest).expect("valid manifest");
+        let manifest = match options.source {
+            Source::Toml => Manifest::from_toml_str(&options.manifest),
+            Source::Blastfile => Manifest::from_blastfile_str(&options.manifest),
+        }
+        .expect("valid manifest");
         let table = RoutingTable::new(&manifest).expect("valid routing table");
         let routes = routes_from_manifest(&manifest, &UidLayout::default());
+        // The mounts are the file's, not a route's (§9.2): the real boot hands
+        // them over beside the route table, so the fake one does too.
+        let mut cfg = options.cfg.clone();
+        cfg.mounts = manifest.mounts().to_vec();
         let (scheduler_end, client_end) = UnixStream::pair().expect("http socketpair");
         let (to_init, mut from_scheduler) = mpsc::unbounded_channel::<Ctl>();
         let (to_scheduler, from_init) = mpsc::unbounded_channel::<(Ctl, Option<OwnedFd>)>();
@@ -681,14 +713,7 @@ impl World {
         let view_log = log.clone();
 
         let fake = FakeCtl { to_init, from_init };
-        let run = tokio::spawn(run(
-            options.cfg.clone(),
-            routes,
-            table,
-            scheduler_end,
-            fake,
-            emit,
-        ));
+        let run = tokio::spawn(run(cfg.clone(), routes, table, scheduler_end, fake, emit));
 
         let scripts = options.scripts.clone();
         let exit_on_retire = options.exit_on_retire;
@@ -763,7 +788,7 @@ impl World {
         });
 
         Self {
-            cfg: options.cfg,
+            cfg,
             http: Http::new(client_end),
             events,
             log: view_log,

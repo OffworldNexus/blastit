@@ -8,7 +8,7 @@
 //! the `[route.ingress]` policy its request bodies are decoded with.
 
 use blastit_ingress::{BodyCodec, IngressPolicy};
-use blastit_manifest::{Manifest, StaticPolicy, UidLayout};
+use blastit_manifest::{Manifest, UidLayout};
 
 /// One manifest route, in routing-table order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,14 +25,6 @@ pub struct RouteInfo {
     /// The route's `[route.ingress]` policy (§4.2 A), or `None` when the route
     /// declared none — which is fail-closed exactly like `body = "none"`.
     pub ingress: Option<IngressPolicy>,
-    /// The route's `[route.static]` policy (static design §4.2), or `None` when
-    /// it declared none: a route with no policy is served by its view exactly
-    /// as before.
-    pub static_policy: Option<StaticPolicy>,
-    /// Whether a request the static responder does not answer may reach the
-    /// app (static design §4.6): the policy is present, its `fallback` is unset
-    /// and the manifest declares an `app`.
-    pub static_forward: bool,
 }
 
 impl RouteInfo {
@@ -44,8 +36,6 @@ impl RouteInfo {
             prefork,
             uid,
             ingress: None,
-            static_policy: None,
-            static_forward: false,
         }
     }
 
@@ -53,33 +43,6 @@ impl RouteInfo {
     /// (§4.2 A).
     pub fn with_ingress(mut self, ingress: Option<IngressPolicy>) -> Self {
         self.ingress = ingress;
-        self
-    }
-
-    /// This route with the `[route.static]` policy the manifest declared, and
-    /// whether a miss may still reach the route's view (static design
-    /// §4.2/§4.6).
-    ///
-    /// `static_forward` is `policy.is_some() && policy.fallback.is_none() &&
-    /// forwards`, where `forwards` is **"this route has something to forward
-    /// to"**: the manifest's `BLASTIT_APP`, or the route's own executor. A
-    /// `[route.static]` + `[route.php]` page is the second case —
-    /// `docs/frameworks/php.md` promises "every other path reaches the front
-    /// controller", and `ADR-0010` §2 says a PHP route needs no `app` — so
-    /// [`routes_from_manifest`] passes `has_app || route.php().is_some()`.
-    ///
-    /// It is what stops a *pure* static route from ever spawning a view: with a
-    /// `fallback` declared the fallback answers first (§9.3), and a route with
-    /// no app and no executor of its own has nothing to forward to.
-    ///
-    /// The parameter is named `forwards` rather than `has_app` because the
-    /// second case is exactly what a reader used to mistake for "no app, no
-    /// forward".
-    pub fn with_static(mut self, policy: Option<StaticPolicy>, forwards: bool) -> Self {
-        self.static_forward = policy
-            .as_ref()
-            .is_some_and(|policy| policy.fallback.is_none() && forwards);
-        self.static_policy = policy;
         self
     }
 
@@ -103,30 +66,20 @@ impl RouteInfo {
 /// numbers uids by.
 ///
 /// Each route carries its `[route.ingress]` policy, so the scheduler can plan a
-/// request body from the head alone (`R12`, `R16`), and its `[route.static]`
-/// policy with the `static_forward` rule derived from **what that route has to
-/// forward to**: the manifest's `app`, or its own `[route.php]` executor
-/// (static design §4.6, `docs/frameworks/php.md`).
+/// request body from the head alone (`R12`, `R16`). A route has no static
+/// declaration any more: a `static "<prefix>"` mount is the file's, and a mount
+/// that misses always falls through to the view table (§9.2), so no route
+/// carries a "may forward" flag.
 ///
 /// [`RoutingTable::route`]: blastit_manifest::RoutingTable::route
 pub fn routes_from_manifest(manifest: &Manifest, layout: &UidLayout) -> Vec<RouteInfo> {
-    let has_app = manifest.app().is_some();
     manifest
         .routes()
         .iter()
         .enumerate()
         .map(|(index, route)| {
-            // A miss forwards to whatever the route has to forward to: the
-            // manifest's `app`, or the route's **own** executor — a
-            // `[route.static]` + `[route.php]` page is the shape
-            // `docs/frameworks/php.md` documents ("every other path reaches the
-            // front controller"), and a PHP route needs no `BLASTIT_APP`
-            // (`ADR-0010` §2). Deriving this from `app` alone `404`s every
-            // non-asset path of that page.
-            let forwards = has_app || route.php().is_some();
             RouteInfo::new(route.name(), route.prefork(), layout.view(index))
                 .with_ingress(route.ingress())
-                .with_static(route.static_policy().cloned(), forwards)
         })
         .collect()
 }
@@ -202,106 +155,26 @@ mod tests {
         );
     }
 
-    /// A `[route.static]` policy whose retired flag is set as given, lowered the
-    /// way the reader lowers it: the flag is the file a miss is answered with
-    /// (§9.3).
-    fn static_policy(spa: bool) -> StaticPolicy {
-        StaticPolicy {
-            root: "public".to_string(),
-            index: "index.html".to_string(),
-            fallback: spa.then(|| "index.html".to_string()),
-            immutable: Vec::new(),
-        }
-    }
-
+    /// A `[route.static]` block is a **mount** now (§9.2): the route table is
+    /// the views only, so no `RouteInfo` carries a policy or a "may forward"
+    /// flag, and a mount that misses always falls through to the view table.
+    ///
+    /// The retired reader still lowers the block to a mount at `/`, which is
+    /// the shape the scheduler serves; adding it to the manifest changes no
+    /// route.
     #[test]
-    fn static_forward_is_a_policy_without_spa_and_with_a_target() {
-        // The shape that may forward, and therefore spawn a view.
-        let route = RouteInfo::new("site", false, 7).with_static(Some(static_policy(false)), true);
-        assert_eq!(route.static_policy, Some(static_policy(false)));
-        assert!(route.static_forward);
-
-        // `spa = true` answers every miss itself.
-        let route = RouteInfo::new("site", false, 7).with_static(Some(static_policy(true)), true);
-        assert!(!route.static_forward);
-        // Nothing to forward to at all.
-        let route = RouteInfo::new("site", false, 7).with_static(Some(static_policy(false)), false);
-        assert!(!route.static_forward);
-
-        // A route with no policy is the unchanged view path.
-        let plain = RouteInfo::new("app", false, 7);
-        assert_eq!(plain.static_policy, None);
-        assert!(!plain.static_forward);
-        let route = plain.with_static(None, true);
-        assert_eq!(route.static_policy, None);
-        assert!(!route.static_forward);
-    }
-
-    /// `docs/frameworks/php.md`: a `[route.static]` + `[route.php]` page serves
-    /// files from `root` and sends **every other path** to the front controller,
-    /// with no `BLASTIT_APP` anywhere (`ADR-0010` §2). The rule lives in
-    /// [`routes_from_manifest`], so both the boot's route list and every other
-    /// caller get it — not only the composition root that used to patch it.
-    #[test]
-    fn a_static_and_php_page_forwards_its_misses_to_the_front_controller() {
-        const PAGE: &str = "version = 1\n\
+    fn a_static_block_is_a_mount_and_not_a_route_flag() {
+        let source = "version = 1\n\
              [[route]]\nname = \"app\"\npath = ['.*']\n\
-             [route.static]\nroot = \"public\"\n\
-             [route.php]\nentry = \"public/index.php\"\n";
-
-        // No app, a PHP executor of its own: forward.
-        let manifest = blastit_manifest::Manifest::from_toml_str(PAGE).unwrap();
+             [route.static]\nroot = \"public\"\n";
+        let manifest = blastit_manifest::Manifest::from_toml_str(source).unwrap();
         assert_eq!(manifest.app(), None);
+        assert_eq!(manifest.mounts().len(), 1);
+        assert_eq!(manifest.mounts()[0].prefix, "/");
+
+        // One route, one slot, no per-route static declaration.
         let routes = routes_from_manifest(&manifest, &UidLayout::new(20_000));
-        assert!(
-            routes[0].static_forward,
-            "a documented PHP page must not 404 every non-asset path"
-        );
-
-        // `spa = true` still answers every miss itself.
-        let spa = PAGE.replace("root = \"public\"", "root = \"public\"\nspa = true");
-        let manifest = blastit_manifest::Manifest::from_toml_str(&spa).unwrap();
-        assert!(
-            !routes_from_manifest(&manifest, &UidLayout::new(20_000))[0].static_forward,
-            "the SPA fallback answers first"
-        );
-
-        // A manifest-wide app forwards too, and a pure static route still never
-        // forwards: the two directions the old `has_app` rule covered.
-        let with_app = format!("app = \"app:application\"\n{PAGE}");
-        let manifest = blastit_manifest::Manifest::from_toml_str(&with_app).unwrap();
-        assert!(routes_from_manifest(&manifest, &UidLayout::new(20_000))[0].static_forward);
-        let pure = "version = 1\n\
-             [[route]]\nname = \"docs\"\npath = ['.*']\n\
-             [route.static]\nroot = \"site\"\n";
-        let manifest = blastit_manifest::Manifest::from_toml_str(pure).unwrap();
-        assert!(
-            !routes_from_manifest(&manifest, &UidLayout::new(20_000))[0].static_forward,
-            "a pure static route has nothing to forward to"
-        );
-    }
-
-    #[test]
-    fn routes_from_manifest_carries_the_policy_and_the_app_rule() {
-        let front = blastit_manifest::Manifest::from_toml_str(
-            "version = 1\napp = \"app:app\"\n\
-             [[route]]\nname = \"site\"\npath = ['.*']\n\
-             [route.static]\nroot = \"public\"\n",
-        )
-        .unwrap();
-        let routes = routes_from_manifest(&front, &UidLayout::new(20_000));
-        assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].static_policy, Some(static_policy(false)));
-        assert!(routes[0].static_forward);
-
-        let all_static = blastit_manifest::Manifest::from_toml_str(
-            "version = 1\n\
-             [[route]]\nname = \"site\"\npath = ['.*']\n\
-             [route.static]\nroot = \"public\"\nspa = true\n",
-        )
-        .unwrap();
-        let routes = routes_from_manifest(&all_static, &UidLayout::new(20_000));
-        assert_eq!(routes[0].static_policy, Some(static_policy(true)));
-        assert!(!routes[0].static_forward);
+        assert_eq!(routes.len(), manifest.routes().len());
+        assert_eq!(routes[0], RouteInfo::new("app", false, 21_000));
     }
 }

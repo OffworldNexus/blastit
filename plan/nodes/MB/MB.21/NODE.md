@@ -245,6 +245,13 @@ $ for f in $(grep -rlE 'blastit[.]toml' plan/nodes --include=NODE.md); do \
   `MB.21.3.1`'s for `H-011`, `MB.21.3.2`'s for `H-012`, and `MB.21.3.3`'s for `H-013` (`error.rs`
   widened into 3.3 and 3.8) — so the conductor closes `H-013` with `plan.py human close`; none of them
   is an open design question and no leaf should re-ask one.
+- **Owner directive (2026-11-16): "let's allow something comfortable" — the budgets were too small for
+  a generated file.** `MB.21.4.6` raises six numbers and lands between `MB.21.4.1` and `MB.21.4.2`:
+  `MAX_SOURCE_BYTES` `1_048_576` → `16_777_216` (16 MiB), `MAX_TOKENS` `262_144` → `4_194_304`,
+  `MAX_TRIVIA` `262_144` → `4_194_304`, `MAX_PATTERN_BYTES` `256` → `4_096` (with `REGEX_SIZE_LIMIT`
+  still bounding the compiled program), `MAX_LIST_ITEMS` `256` → `4_096`, and `app "<name>"`
+  `64` → `256` `char`s; it also replaces the "split the file" refusal, which advised splitting a format
+  that has no `include`, with the real remedies (table grants, or a shared `trait`).
 - **Out of scope for this epic:** the `blastit-view` flake in `crates/blastit-view/src/php.rs::wait_for`
   (200 × 5 ms = 1 s budget for three frames, which failed 2 of 10 `make check` runs under load) needs its
   own leaf in the milestone that owns that crate; no child of `MB.21` touches `blastit-view`, and this

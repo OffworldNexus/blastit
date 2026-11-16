@@ -17,19 +17,13 @@ use blastit::audit_v1::{
     self, CheckObsV1, Finding, ObsError, ProxyCounts, Report, SCHEMA_VERSION, Severity,
 };
 use blastit::infer_routes::infer;
-use blastit_manifest::edit::{ManifestEdits, ProposedGrant, ProposedRoute, apply_edits};
+use blastit_manifest::blastfile::{BlastfileEdits, ProposedGrant, ProposedView, apply_edits};
 use blastit_manifest::{Manifest, ProxyName, UidLayout};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
-
-const PROXIES: &str = r#"
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-"#;
 
 /// A manifest with only routes: no proxy, no groups.
 fn routes_manifest(routes: &[(&str, &str)]) -> Manifest {
@@ -252,15 +246,9 @@ fn infer_routes_reproduces_all_thirteen_rows() {
 // ---------------------------------------------------------------------------
 
 const GOLDEN_MANIFEST: &str = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-
-[[route]]
-name = "home"
-path = ['/']
+view home "/" {}
 "#;
 
 const Q1: &str = r#"INSERT INTO "orders" ("id") VALUES ($?)"#;
@@ -297,16 +285,17 @@ fn the_r27_golden_proposes_one_orders_route_with_both_exact_queries() {
     assert_eq!(plan.routes(), 1);
     assert_eq!(plan.queries(), 2);
     assert_eq!(
-        plan.edits.routes,
-        [ProposedRoute {
+        plan.edits.views,
+        [ProposedView {
             name: "orders".to_string(),
-            path: vec!["/orders/[0-9]+/".to_string()],
+            methods: Vec::new(),
+            patterns: vec!["/orders/{id1:int}/".to_string()],
         }]
     );
     assert_eq!(plan.edits.grants.len(), 1);
     let grant = &plan.edits.grants[0];
-    assert_eq!(grant.route, "orders");
-    assert_eq!(grant.proxy, "db");
+    assert_eq!(grant.view, "orders");
+    assert_eq!(grant.store, None);
     let mut expected = vec![Q1.to_string(), Q2.to_string()];
     expected.sort();
     assert_eq!(grant.queries, expected, "exactly the two observed queries");
@@ -316,10 +305,11 @@ fn the_r27_golden_proposes_one_orders_route_with_both_exact_queries() {
     // The proposal is a manifest: `[[route]] name = "orders"` with those
     // exact queries, and every untouched field survives.
     let edited = apply_edits(GOLDEN_MANIFEST, &plan.edits).expect("the edit applies");
-    assert!(edited.contains("[[route]]"));
-    assert!(edited.contains("name = \"orders\""));
-    assert!(edited.contains("path = ['/orders/[0-9]+/']"));
-    let (parsed, _warnings) = Manifest::parse_and_validate(&edited, UidLayout::DEFAULT_BASE)
+    assert!(
+        edited.contains("view orders \"/orders/{id1:int}/\""),
+        "{edited}"
+    );
+    let (parsed, _warnings) = Manifest::parse_blastfile(&edited, UidLayout::DEFAULT_BASE)
         .expect("the edited manifest boots");
     let route = parsed
         .routes()
@@ -338,7 +328,10 @@ fn the_r27_golden_proposes_one_orders_route_with_both_exact_queries() {
         );
     }
     // `--learn` never invents table grants.
-    assert!(!edited.contains("[route.db.tables]"), "{edited}");
+    assert!(
+        !edited.contains("select orders") && !edited.contains("insert orders"),
+        "{edited}"
+    );
 
     // The `--learn --json` document: the proposal and the write decision, and
     // intentionally no `schema_version`.
@@ -361,14 +354,15 @@ fn the_r27_golden_is_a_clean_audit_after_the_edit() {
     // missing, so the proposal really did complete the manifest.
     let edited = apply_edits(
         GOLDEN_MANIFEST,
-        &ManifestEdits {
-            routes: vec![ProposedRoute {
+        &BlastfileEdits {
+            views: vec![ProposedView {
                 name: "orders".to_string(),
-                path: vec!["/orders/[0-9]+/".to_string()],
+                methods: Vec::new(),
+                patterns: vec!["/orders/{id1:int}/".to_string()],
             }],
             grants: vec![ProposedGrant {
-                route: "orders".to_string(),
-                proxy: "db".to_string(),
+                view: "orders".to_string(),
+                store: None,
                 queries: vec![Q1.to_string(), Q2.to_string()],
             }],
         },
@@ -395,23 +389,18 @@ fn the_r27_golden_is_a_clean_audit_after_the_edit() {
 // ---------------------------------------------------------------------------
 
 const RE_PARSE_MANIFEST: &str = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+postgres analytics $ANALYTICS_URL
 
-[proxy.analytics]
-protocol = "postgresql"
-input = { url = "ANALYTICS_URL" }
-
-[[route]]
-name = "catalog"
-path = ['/catalog/']
-[route.db]
-queries = ['SELECT 1']
-[route.analytics]
-queries = ['SELECT 2']
+view catalog "/catalog/" {
+    postgres {
+        query 'SELECT 1'
+    }
+    postgres analytics {
+        query 'SELECT 2'
+    }
+}
 "#;
 
 #[test]
@@ -442,17 +431,17 @@ fn every_add_query_reparses_under_parse_and_validate() {
         assert!(!sql.contains('\u{2026}'), "a redaction is never grantable");
         let edited = apply_edits(
             RE_PARSE_MANIFEST,
-            &ManifestEdits {
-                routes: Vec::new(),
+            &BlastfileEdits {
+                views: Vec::new(),
                 grants: vec![ProposedGrant {
-                    route: "catalog".to_string(),
-                    proxy: proxy.clone(),
+                    view: "catalog".to_string(),
+                    store: (proxy != "db").then(|| proxy.clone()),
                     queries: vec![sql.clone()],
                 }],
             },
         )
         .unwrap_or_else(|error| panic!("{sql} cannot be written: {error}"));
-        let (parsed, _warnings) = Manifest::parse_and_validate(&edited, UidLayout::DEFAULT_BASE)
+        let (parsed, _warnings) = Manifest::parse_blastfile(&edited, UidLayout::DEFAULT_BASE)
             .expect("the edited manifest boots");
         let route = parsed
             .routes()
@@ -699,52 +688,45 @@ fn only_connection_setup_names_a_group_and_never_a_refusal() {
 // ---------------------------------------------------------------------------
 
 const RICH_MANIFEST: &str = r#"
-version = 1
-groups = ["session"]
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+postgres analytics $ANALYTICS_URL
 
-[proxy.analytics]
-protocol = "postgresql"
-input = { url = "ANALYTICS_URL" }
+trait session {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 
-[group.session.db]
-queries = ['SELECT 1']
+view catalog "/catalog/" {
+    use session
+    postgres {
+        query 'SELECT "p"."id" FROM "p"'
+        query 'SELECT count(*) FROM "p"'
+    }
+}
 
-[[route]]
-name = "catalog"
-path = ['/catalog/']
-[route.db]
-queries = [
-  'SELECT "p"."id" FROM "p"',
-  'SELECT count(*) FROM "p"',
-]
+view checkout "/checkout/" {
+    use session
+}
 
-[[route]]
-name = "checkout"
-path = ['/checkout/']
+view about "/about/" {
+    use session
+}
 
-[[route]]
-name = "about"
-path = ['/about/']
+view upload "/upload/" {
+    use session
+}
 
-[[route]]
-name = "upload"
-path = ['/upload/']
+view form "/form/" {
+    use session
+    body json
+}
 
-[[route]]
-name = "form"
-path = ['/form/']
-[route.ingress]
-body = "json"
-
-[[route]]
-name = "raw"
-path = ['/raw/']
-[route.ingress]
-body = "raw"
+view raw "/raw/" {
+    use session
+    body raw
+}
 "#;
 
 const DELETE: &str = r#"DELETE FROM "p" WHERE "p"."id" = $?"#;
@@ -930,15 +912,9 @@ blastit check: 4 problems · `--json` for the machine-readable list
 }
 
 const ONE_PROXY_MANIFEST: &str = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-
-[[route]]
-name = "home"
-path = ['/']
+view home "/" {}
 "#;
 
 #[test]
@@ -981,18 +957,18 @@ fn requests_without_any_statement_are_no_observations() {
 
 #[test]
 fn a_clean_run_is_one_line_and_ok() {
-    let manifest = format!(
-        "version = 1\n{PROXIES}
-[[route]]
-name = \"notes\"
-path = ['/notes/.*']
-[route.db]
-queries = ['SELECT \"notes\".\"id\" FROM \"notes\"']
-"
-    );
+    let manifest = r#"
+postgres $DATABASE_URL
+
+view notes regex '/notes/.*' {
+    postgres {
+        query 'SELECT "notes"."id" FROM "notes"'
+    }
+}
+"#;
     let sql = r#"SELECT "notes"."id" FROM "notes""#;
     let report = run(
-        &manifest,
+        manifest,
         &[http_line("GET", "/notes/", None, 0, None)],
         &[routed_sql("notes", "db", sql, grantable(sql), false)],
     );
@@ -1009,24 +985,17 @@ queries = ['SELECT \"notes\".\"id\" FROM \"notes\"']
 #[test]
 fn ingress_findings_have_positive_twins() {
     let manifest = r#"
-version = 1
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-[[route]]
-name = "raw"
-path = ['/raw/']
-[route.ingress]
-body = "raw"
-allow_raw = true
-[[route]]
-name = "json"
-path = ['/json/']
-[route.ingress]
-body = "json"
-[[route]]
-name = "none"
-path = ['/none/']
+postgres $DATABASE_URL
+
+view raw "/raw/" {
+    body raw unvalidated
+}
+
+view json "/json/" {
+    body json
+}
+
+view none "/none/" {}
 "#;
     let http = vec![
         http_line("POST", "/raw/", Some("application/octet-stream"), 4, None),
@@ -1208,8 +1177,8 @@ fn transaction_control_is_a_hint_never_a_silent_flag() {
         plan.transaction_control[0]
     );
     let edited = apply_edits(GOLDEN_MANIFEST, &plan.edits).expect("the edit applies");
-    assert!(!edited.contains("transaction_control"), "{edited}");
-    assert!(!edited.contains("tables"), "{edited}");
+    assert!(!edited.contains("transactions"), "{edited}");
+    assert!(!edited.contains("select orders"), "{edited}");
 }
 
 #[test]

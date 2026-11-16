@@ -1,0 +1,11 @@
+app "learn"
+
+entrypoint python "app:application"
+
+postgres $DATABASE_URL
+
+view home "/" {
+    postgres {
+        query 'SELECT 1'
+    }
+}

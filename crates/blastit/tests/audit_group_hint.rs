@@ -19,15 +19,9 @@ use blastit::audit_v1::{self, CheckObsV1, Finding, Report};
 use serde_json::{Value, json};
 
 const MANIFEST: &str = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-
-[[route]]
-name = "home"
-path = ['/']
+view home "/" {}
 "#;
 
 /// What Django 6.1 sends at connect when the server's `TimeZone` is not `UTC`

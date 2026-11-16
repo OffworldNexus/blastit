@@ -33,44 +33,28 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// One route, no `[route.static]` block, no app: a WSGI view, which this build
-/// cannot fork.
+/// One view, no `static` mount, no app: a WSGI view, which this build cannot
+/// fork.
 const WSGI_ONLY: &str = "\
-version = 1
-
-[[route]]
-name = \"web\"
-path = ['.*']
+view web regex '.*' {}
 ";
 
-/// One route that still asks for the external `php-fpm` pool Blastit deleted
-/// (`MB.3.17`): the key has no alias, so it is an ordinary unknown route key and
-/// no build — this one included — boots the manifest.
+/// A file that still asks for the external `php-fpm` pool Blastit deleted
+/// (`MB.3.17`): `fastcgi` has no Blastfile spelling, so it is an ordinary
+/// unknown keyword and no build — this one included — boots the file.
 const RETIRED_EXTERNAL_PHP: &str = "\
-version = 1
-
-[[route]]
-name = \"php\"
-path = ['.*']
-
-[route.fastcgi]
-entry = \"public/index.php\"
+fastcgi \"public/index.php\"
 ";
 
-/// One `[route.php]` route and no app: an embedded-PHP route is its own
-/// executor (`ADR-0010` §2), so **this** gate must not fire. The boot is refused
-/// by the separate `[route.php]` discovery gate when the host has no usable NTS
-/// `libphp` (the case below pins one that cannot be a library); `dev` therefore
-/// says that sentence, never the capability gate's.
+/// One `entrypoint php` and no app: a PHP file is its own executor (`ADR-0010`
+/// §2), so **this** gate must not fire. The boot is refused by the separate PHP
+/// discovery gate when the host has no usable NTS `libphp` (the case below pins
+/// one that cannot be a library); `dev` therefore says that sentence, never the
+/// capability gate's.
 const PHP_ONLY: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
-
-[route.php]
-entry = \"public/index.php\"
+view app regex '.*' {}
 ";
 
 /// The sentence the capability gate speaks when it refuses: this build has no
@@ -84,7 +68,7 @@ const INSTALL: &str = "install the Python package: uv add blastit";
 /// front of: on this build "set `BLASTIT_APP`" is not a fix.
 const APP_RULE: &str = "BLASTIT_APP: the WSGI callable (`module:attribute`) is required";
 
-/// A temp directory holding one case's `blastit.toml`, removed on drop.
+/// A temp directory holding one case's `Blastfile`, removed on drop.
 struct Scratch {
     /// The directory `blastit dev` is started in.
     dir: PathBuf,
@@ -95,7 +79,7 @@ impl Scratch {
         let dir = std::env::temp_dir().join(format!("blastit-mb311-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut file = std::fs::File::create(dir.join("blastit.toml")).unwrap();
+        let mut file = std::fs::File::create(dir.join("Blastfile")).unwrap();
         file.write_all(manifest.as_bytes()).unwrap();
         Self { dir }
     }
@@ -183,8 +167,8 @@ fn a_manifest_asking_for_the_retired_external_php_pool_is_refused_by_name() {
         "a startup error writes nothing on stdout (§1.1)"
     );
     assert!(
-        stderr.contains("grant on unknown proxy \"fastcgi\""),
-        "the refusal is the ordinary unknown-route-key one, and it names the key: {stderr}"
+        stderr.contains("`fastcgi` is not a keyword"),
+        "the refusal is the ordinary unknown-keyword one, and it names the key: {stderr}"
     );
     assert!(
         !stderr.contains(INSTALL),
@@ -199,10 +183,10 @@ fn a_manifest_asking_for_the_retired_external_php_pool_is_refused_by_name() {
 /// A PHP-only manifest is **not** a WSGI manifest: the capability gate must not
 /// fire and nothing may suggest installing Python (`MB.3.5.4`, `ADR-0010` §2).
 ///
-/// This build does embed PHP (`--features php`), so the PHP route is not refused
-/// for the missing interpreter — it is refused by the `[route.php]` discovery
-/// gate, because `BLASTIT_LIBPHP` here is a text file and no NTS `libphp` is
-/// bundled (`ADR-0010` §1: one backend, no fallback). What is asserted is
+/// This build does embed PHP (`--features php`), so the PHP file is not refused
+/// for the missing interpreter — it is refused by the PHP discovery gate,
+/// because `BLASTIT_LIBPHP` here is a text file and no NTS `libphp` is bundled
+/// (`ADR-0010` §1: one backend, no fallback). What is asserted is
 /// *which* sentence was printed and which was not: a capability gate that came
 /// back would name the wrong artifact, and `app_rule` would send a PHP developer
 /// to set `BLASTIT_APP`. The WSGI case above stays the denied twin: same
@@ -224,7 +208,7 @@ fn a_php_only_manifest_is_refused_by_the_php_discovery_gate() {
     );
     assert!(stderr.contains("route \"app\""), "{stderr}");
     assert!(
-        stderr.contains("[route.php] entry \"public/index.php\""),
+        stderr.contains("entrypoint php \"public/index.php\""),
         "{stderr}"
     );
     assert!(
@@ -238,7 +222,7 @@ fn a_php_only_manifest_is_refused_by_the_php_discovery_gate() {
     );
     assert!(
         !all.contains(INSTALL),
-        "no Python package can serve a [route.php] route: {all}"
+        "no Python package can serve an entrypoint php: {all}"
     );
     assert!(
         !all.contains(APP_RULE),

@@ -217,11 +217,9 @@ class DocumentedPathTest(HarnessTest):
             0,
         )
 
-    def test_the_reader_writes_blastit_toml_themselves(self) -> None:
+    def test_the_reader_writes_the_blastfile_themselves(self) -> None:
         self.assertEqual(
-            harness._static_command(
-                "blastit-manifest fold --manifest blastit.toml", CLI
-            ),
+            harness._static_command("blastit-manifest fold --manifest Blastfile", CLI),
             0,
         )
 
@@ -234,7 +232,7 @@ class DocumentedPathTest(HarnessTest):
                 "--file",
             ),
             ("doctl apps create --spec deploy/nope.yaml", "--spec"),
-            ("blastit-manifest fold --manifest nope/blastit.toml", "--manifest"),
+            ("blastit-manifest fold --manifest nope/Blastfile", "--manifest"),
         ):
             with (
                 self.subTest(flag=flag),

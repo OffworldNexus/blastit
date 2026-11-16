@@ -42,33 +42,22 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a signalled `blastit dev` gets to leave.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The manifest the page promises for a site with no app at all.
-const ALL_STATIC: &str = r#"version = 1
-
-[[route]]
-name = "site"
-path = ['.*']
-
-[route.static]
-root = "public"
-spa = true
+/// The manifest the page promises for a site with no app at all: one mount and
+/// no views, so `Manifest.routes()` is empty (§9.5).
+const ALL_STATIC: &str = r#"static "/" {
+    root "public"
+    fallback "index.html"
+}
 "#;
 
-/// The same manifest with one route that can only reach an app: no `app` is
+/// The same file with one view that can only reach an app: no `app` is
 /// declared, so this tree is not all-static and `BLASTIT_APP` is still required.
-const MIXED: &str = r#"version = 1
+const MIXED: &str = r#"view api regex '/api/.*' {}
 
-[[route]]
-name = "api"
-path = ['/api/.*']
-
-[[route]]
-name = "site"
-path = ['.*']
-
-[route.static]
-root = "public"
-spa = true
+static "/" {
+    root "public"
+    fallback "index.html"
+}
 "#;
 
 /// A fixture directory plus the environment every child inherits.
@@ -93,7 +82,7 @@ impl Fixture {
     }
 
     fn write_manifest(&self, content: &str) {
-        fs::write(self.dir.join("blastit.toml"), content).expect("write blastit.toml");
+        fs::write(self.dir.join("Blastfile"), content).expect("write Blastfile");
     }
 
     /// The built front end: `public/index.html`, the one file `spa` falls back
@@ -296,13 +285,13 @@ fn an_all_static_site_boots_under_dev_with_no_app() {
         !stderr.contains("BLASTIT_APP"),
         "an all-static manifest needs no app: {stderr}"
     );
-    // The documented banner, unchanged and complete: a static route is a route
-    // and is counted (`docs/design/static-and-spa.md` §1.2,
-    // `docs/frameworks/static-and-spa.md` §Run it).
+    // The documented banner, unchanged and complete: a `static` mount is not a
+    // route (§9.5), so a static-only file counts zero of them and the banner
+    // still names every process that runs.
     let lines = [
         format!("  blastit dev · single-uid simulation · 127.0.0.1:{port}"),
         "  Not a sandbox. Production `blastit` refuses to run like this.".to_string(),
-        "  http · scheduler · dbproxy · 1 route".to_string(),
+        "  http · scheduler · dbproxy · 0 routes".to_string(),
     ];
     for line in &lines {
         assert!(
@@ -360,8 +349,8 @@ fn a_missing_static_root_is_named_with_its_route_before_any_output() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     for expected in [
-        "blastit.toml",
-        "route \"site\"",
+        "Blastfile",
+        "mount \"/\" (index 0)",
         "static root \"public\"",
         "no such file or directory",
     ] {
@@ -419,7 +408,9 @@ fn an_all_static_check_audits_the_root_and_runs_no_pytest() {
     assert_eq!(document["statements"], 0, "{document}");
     assert_eq!(document["proxies"], serde_json::json!({}), "{document}");
     assert_eq!(document["findings"], serde_json::json!([]), "{document}");
-    assert_eq!(document["routes"]["total"], 1, "{document}");
+    // A `static` mount is not a view (§9.5): the file has no route to exercise,
+    // and the document still counts it as zero rather than inventing one.
+    assert_eq!(document["routes"]["total"], 0, "{document}");
     assert_eq!(document["routes"]["exercised"], 0, "{document}");
 
     // The human form prints nothing at all when every root is audited.
@@ -446,9 +437,13 @@ fn an_all_static_check_exits_two_on_a_missing_root() {
             String::from_utf8_lossy(&output.stdout)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // Design §7.2: the path, the route and the root, in that order of
+        // Design §7.2: the path, the mount and the root, in that order of
         // specificity.
-        for expected in ["blastit.toml", "route \"site\"", "static root \"public\""] {
+        for expected in [
+            "Blastfile",
+            "mount \"/\" (index 0)",
+            "static root \"public\"",
+        ] {
             assert!(
                 stderr.contains(expected),
                 "{arguments:?}: {expected} missing from: {stderr}"
@@ -514,7 +509,7 @@ fn a_readable_root_under_an_owned_0700_ancestor_is_accepted() {
     let fixture = Fixture::new("owned-0700");
     let home = fixture.project(&fixture.path().join("home"), 0o700);
     let app = fixture.project(&home.join("app"), 0o755);
-    fs::write(app.join("blastit.toml"), ALL_STATIC).expect("write blastit.toml");
+    fs::write(app.join("Blastfile"), ALL_STATIC).expect("write Blastfile");
     write_site(&app);
 
     let check = run(&app, &[], &["check", "--json"]);
@@ -566,7 +561,7 @@ fn a_root_the_caller_cannot_list_is_refused() {
     assert!(check.stdout.is_empty(), "{check:?}");
     let stderr = String::from_utf8_lossy(&check.stderr);
     for expected in [
-        "route \"site\"",
+        "mount \"/\" (index 0)",
         "static root \"public\"",
         "permission denied",
     ] {
@@ -596,7 +591,7 @@ fn a_root_that_is_a_file_is_refused() {
     assert!(check.stdout.is_empty(), "{check:?}");
     let stderr = String::from_utf8_lossy(&check.stderr);
     for expected in [
-        "route \"site\"",
+        "mount \"/\" (index 0)",
         "static root \"public\"",
         "not a directory",
     ] {

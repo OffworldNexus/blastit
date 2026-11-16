@@ -540,6 +540,14 @@ pub enum ConfigError {
     /// The environment could not be read at all.
     #[error("reading the environment: {0}")]
     Io(#[from] std::io::Error),
+    /// `BLASTIT_MANIFEST` is set but empty (design §15.1).
+    ///
+    /// A mistake, not a fallback: the operator named a file and named nothing.
+    #[error(
+        "BLASTIT_MANIFEST must not be empty: put ./Blastfile in the working directory or name a \
+         file"
+    )]
+    EmptyManifest,
     /// The manifest could not be read or parsed while its `app`/`preload`
     /// fallback was resolved (`R7`, `R9`).
     ///
@@ -772,7 +780,7 @@ fn digits_prefix(text: &str) -> Option<u8> {
     run.parse().ok()
 }
 
-/// What stage 0 resolved for `[route.php]` before a listener was bound
+/// What stage 0 resolved for `entrypoint php` before a listener was bound
 /// (`ADR-0010` §3).
 ///
 /// Both objects — the NTS `libphp` and the shim for its tuple — carry their
@@ -970,7 +978,7 @@ pub struct Config {
     /// path is bytes; `None` when stage 0 could not read the working directory
     /// at all, which is a boot about to fail for other reasons.
     pub cwd: Option<Vec<u8>>,
-    /// `BLASTIT_LIBPHP`: the NTS `libphp` a `[route.php]` route embeds
+    /// `BLASTIT_LIBPHP`: the NTS `libphp` a view embedding `entrypoint php` loads
     /// (`ADR-0010` §3).
     ///
     /// An absolute path, and stage 0's only candidate: set, it *is* the
@@ -985,7 +993,7 @@ pub struct Config {
     /// shims when they are not beside the executable (`MB.3.12`), `dev` and
     /// `check` only (`R8`).
     pub php_shim_dir: Option<PathBuf>,
-    /// What stage 0 resolved for the first `[route.php]` route: the NTS
+    /// What stage 0 resolved for the file's `entrypoint php`: the NTS
     /// `libphp`, its inode, its version and the matching shim.
     ///
     /// Another field that comes from no environment variable: [`Config::from_env`]
@@ -1016,7 +1024,7 @@ impl Default for Config {
             server_port: 8080,
             app: None,
             preload: Vec::new(),
-            manifest: PathBuf::from("./blastit.toml"),
+            manifest: PathBuf::from("./Blastfile"),
             manifest_dir: PathBuf::new(),
             script_name: None,
             log_format: LogFormat::Json,
@@ -2354,36 +2362,65 @@ fn look_up_preset(name: &str, source: &str) -> Result<Option<&'static Preset>, C
     })
 }
 
-/// Where the manifest lives: `BLASTIT_MANIFEST` when set, else `./blastit.toml`
-/// in the starting working directory (`R6`, `ADR-0002`).
+/// The one environment variable that names the manifest (`ADR-0002`, design
+/// §15.1).
 ///
-/// There is **no** upward search: a monorepo ancestor's policy is never picked
-/// up by accident. A set-but-empty `BLASTIT_MANIFEST` is a mistake, not a
-/// fallback (`R9`).
-fn manifest_path() -> Result<PathBuf, ConfigError> {
-    match std::env::var_os("BLASTIT_MANIFEST") {
+/// Every entry point and the CLI's refusals spell it through this constant, so
+/// `cli.rs` cannot grow a second copy of the name and the help text cannot
+/// disagree with the variable a boot reads.
+pub(crate) const MANIFEST_ENV: &str = "BLASTIT_MANIFEST";
+
+/// Where the manifest lives: `BLASTIT_MANIFEST` when set, else `./Blastfile` in
+/// the starting working directory (design §15.1, `ADR-0002`).
+///
+/// This is the **one** discovery function: `blastit` (boot), `blastit dev`,
+/// `blastit check` and `blastit fmt` all call it, so no entry point can read a
+/// different file than another. There is **no** upward search: a monorepo
+/// ancestor's policy is never picked up by accident. A set-but-empty
+/// `BLASTIT_MANIFEST` is a mistake, not a fallback.
+///
+/// Nothing inspects the body to choose a path: a file that is not a `Blastfile`
+/// is an ordinary `Blastfile:<line>:<col>` syntax error once it is parsed.
+///
+/// # Errors
+///
+/// [`ConfigError::EmptyManifest`] for a set-but-empty variable, and
+/// [`ConfigError::NotUnicode`] for one the process cannot read as text.
+pub(crate) fn manifest_path() -> Result<PathBuf, ConfigError> {
+    match std::env::var_os(MANIFEST_ENV) {
         Some(value) => {
             let value = value.into_string().map_err(|_| ConfigError::NotUnicode {
-                variable: "BLASTIT_MANIFEST".to_string(),
+                variable: MANIFEST_ENV.to_string(),
             })?;
             if value.is_empty() {
-                return Err(invalid(
-                    "BLASTIT_MANIFEST",
-                    "must not be empty: put `blastit.toml` in the working directory or \
-                     name a file"
-                        .to_string(),
-                ));
+                return Err(ConfigError::EmptyManifest);
             }
             Ok(PathBuf::from(value))
         }
-        None => Ok(PathBuf::from("./blastit.toml")),
+        None => Ok(PathBuf::from("./Blastfile")),
     }
 }
 
-/// The directory the manifest lives in, absolute: what a `[route.static]`
-/// `root` is relative to (`R2`, `R13`).
+/// The one sentence a missing manifest is reported with, at every entry point
+/// (design §15.1).
 ///
-/// A bare `blastit.toml` has an empty parent, which means the working
+/// It names `./Blastfile` — the default discovery — and `BLASTIT_MANIFEST`, the
+/// variable that names another path, and nothing else: no second file name, no
+/// "did you mean", no detection of a sibling file. A `BLASTIT_MANIFEST` that
+/// names a missing path is named by the path it tried, which is the operator's
+/// own string, never a second default.
+pub(crate) fn missing_manifest(path: &Path) -> String {
+    format!(
+        "{}: no such file or directory (put a Blastfile in the working directory, or set \
+         BLASTIT_MANIFEST)",
+        path.display()
+    )
+}
+
+/// The directory the manifest lives in, absolute: what a `static` mount's `root`
+/// is relative to (`R2`, `R13`).
+///
+/// A bare `Blastfile` has an empty parent, which means the working
 /// directory. The path is made absolute once, here, because stage 1 runs from a
 /// different working directory and the responder opens `root` beneath it.
 fn manifest_dir(path: &Path) -> PathBuf {
@@ -2414,10 +2451,11 @@ fn manifest_wiring(path: &Path) -> Result<(Option<String>, Vec<String>), ConfigE
             });
         }
     };
-    let manifest = Manifest::from_toml_str(&source).map_err(|errors| ConfigError::Manifest {
-        path: path.to_path_buf(),
-        reason: errors.to_string(),
-    })?;
+    let manifest =
+        Manifest::from_blastfile_str(&source).map_err(|errors| ConfigError::Manifest {
+            path: path.to_path_buf(),
+            reason: errors.to_string(),
+        })?;
     Ok((
         manifest.app().map(str::to_string),
         manifest.preload().to_vec(),
@@ -3032,14 +3070,14 @@ mod tests {
 
     /// A `BLASTIT_MANIFEST` that names no file in this tree.
     ///
-    /// [`Config::from_env`] falls back to `./blastit.toml` when the variable is
-    /// unset (`R6`), which would make every unit test below depend on the
+    /// [`Config::from_env`] falls back to `./Blastfile` when the variable is
+    /// unset (design §15.1), which would make every unit test below depend on the
     /// directory `cargo test` happened to start in: a stray manifest there would
     /// silently change `app` and `preload`. Pointing the variable at a path that
     /// is never written makes discovery deterministic (`ADR-0002`).
     const ABSENT_MANIFEST: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/absent-blastit.toml"
+        "/tests/fixtures/absent-blastfile"
     );
 
     /// The lock described on [`ENV`], plus a deterministic `BLASTIT_MANIFEST`.

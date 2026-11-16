@@ -89,7 +89,8 @@ pub struct CheckOptions {
 pub struct FmtOptions {
     /// `--check`: change nothing, and report a file that is not canonical.
     pub check: bool,
-    /// The file to format; `None` means `./Blastfile`, or `BLASTIT_MANIFEST`.
+    /// The file to format; `None` means the discovered default (`./Blastfile`
+    /// unless the manifest variable names another).
     pub path: Option<std::path::PathBuf>,
 }
 
@@ -186,12 +187,15 @@ Exit codes: 0 clean, 1 completeness findings, 2 CLI/config error, 3 pytest
 failed (including exit 5, no tests collected).";
 
 /// `blastit fmt --help` (§14.4).
+///
+/// `{env}` is [`crate::config::MANIFEST_ENV`], filled in by [`fmt_usage`] so the help
+/// text and the variable a boot reads can never spell it differently.
 const FMT_USAGE: &str = "\
 usage: blastit fmt [--check] [PATH]
 
   --check       change nothing; name every file that is not in canonical
                 layout and exit 1
-  PATH          the file to format (default ./Blastfile, or BLASTIT_MANIFEST)
+  PATH          the file to format (default ./Blastfile, or {env})
   -h, --help    print this help
 
 `blastit fmt` rewrites the file in the canonical layout: one directive per line,
@@ -200,6 +204,11 @@ without --check the rewrite is atomic and keeps the file's mode.
 
 Exit codes: 0 clean or rewritten, 1 --check found a file that is not canonical,
 2 the file could not be read, parsed or written.";
+
+/// [`FMT_USAGE`] with the manifest variable named from its one spelling.
+fn fmt_usage() -> String {
+    FMT_USAGE.replace("{env}", crate::config::MANIFEST_ENV)
+}
 
 /// Runs the role the command line names, in the installation `host` describes.
 ///
@@ -241,7 +250,7 @@ pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
         },
         Command::Fmt => match parse_fmt(&argv[1..]) {
             Ok(Subcommand::Help) => {
-                println!("{FMT_USAGE}");
+                println!("{}", fmt_usage());
                 SUCCESS
             }
             Ok(Subcommand::Run(options)) => run_fmt(&options),
@@ -306,11 +315,11 @@ fn parse_dev(arguments: &[String]) -> Result<Subcommand<DevOptions>, String> {
             "-h" | "--help" => return Ok(Subcommand::Help),
             "--learn" => learn = true,
             "--manifest" => {
-                return Err(
-                    "`--manifest` is not accepted: put `blastit.toml` in the working \
-                     directory, or set BLASTIT_MANIFEST"
-                        .to_string(),
-                );
+                return Err(format!(
+                    "`--manifest` is not accepted: put `Blastfile` in the working \
+                     directory, or set {}",
+                    crate::config::MANIFEST_ENV
+                ));
             }
             "--preset" => {
                 return Err(
@@ -372,11 +381,11 @@ fn parse_check(arguments: &[String]) -> Result<Subcommand<CheckOptions>, String>
     };
     for argument in forwarded {
         if argument == "--blastit-manifest" || argument.starts_with("--blastit-manifest=") {
-            return Err(
+            return Err(format!(
                 "pytest arguments must not include `--blastit-manifest`: set \
-                 BLASTIT_MANIFEST or put `blastit.toml` in the working directory"
-                    .to_string(),
-            );
+                 {} or put `Blastfile` in the working directory",
+                crate::config::MANIFEST_ENV
+            ));
         }
         if argument == "--blastit-live-server" || argument.starts_with("--blastit-live-server=") {
             return Err(
@@ -399,11 +408,11 @@ fn parse_check(arguments: &[String]) -> Result<Subcommand<CheckOptions>, String>
             "--learn" => options.learn = true,
             "--dry-run" => options.dry_run = true,
             "--manifest" => {
-                return Err(
-                    "`--manifest` is not accepted: put `blastit.toml` in the working \
-                     directory, or set BLASTIT_MANIFEST"
-                        .to_string(),
-                );
+                return Err(format!(
+                    "`--manifest` is not accepted: put `Blastfile` in the working \
+                     directory, or set {}",
+                    crate::config::MANIFEST_ENV
+                ));
             }
             "--preset" => {
                 return Err(
@@ -439,11 +448,11 @@ fn parse_fmt(arguments: &[String]) -> Result<Subcommand<FmtOptions>, String> {
             "-h" | "--help" => return Ok(Subcommand::Help),
             "--check" => check = true,
             "--manifest" => {
-                return Err(
+                return Err(format!(
                     "`--manifest` is not accepted: put `Blastfile` in the working \
-                     directory, or set BLASTIT_MANIFEST"
-                        .to_string(),
-                );
+                     directory, or set {}",
+                    crate::config::MANIFEST_ENV
+                ));
             }
             "--preset" => {
                 return Err(
@@ -468,40 +477,12 @@ fn parse_fmt(arguments: &[String]) -> Result<Subcommand<FmtOptions>, String> {
     Ok(Subcommand::Run(FmtOptions { check, path }))
 }
 
-/// The file `blastit fmt` formats: `PATH`, else `BLASTIT_MANIFEST`, else
-/// `./Blastfile` (§15.1).
-///
-/// There is no upward search and no format detection: a path that holds
-/// anything but a `Blastfile` is an ordinary syntax error at its first
-/// offending byte.
-///
-/// # Errors
-///
-/// A set-but-empty `BLASTIT_MANIFEST`, which is a mistake rather than a
-/// fallback, and a value that is not UTF-8.
-fn fmt_path(requested: Option<&std::path::Path>) -> Result<std::path::PathBuf, String> {
-    if let Some(path) = requested {
-        return Ok(path.to_path_buf());
-    }
-    match std::env::var_os("BLASTIT_MANIFEST") {
-        Some(value) => {
-            let value = value
-                .into_string()
-                .map_err(|_| "BLASTIT_MANIFEST: the value is not valid UTF-8".to_string())?;
-            if value.is_empty() {
-                return Err(
-                    "BLASTIT_MANIFEST must not be empty: put ./Blastfile in the working \
-                     directory or name a file"
-                        .to_string(),
-                );
-            }
-            Ok(std::path::PathBuf::from(value))
-        }
-        None => Ok(std::path::PathBuf::from("./Blastfile")),
-    }
-}
-
 /// The `blastit fmt` command (§14.4).
+///
+/// Discovery is [`crate::config::manifest_path`]'s when no `PATH` names a file:
+/// the same function the boot, `dev` and `check` call, so `fmt` can never format
+/// a different file than the one those three read (design §15.1). A `PATH`
+/// argument wins over both, because it is the caller naming the file to format.
 ///
 /// `--check` reads, formats in memory and writes nothing at all — not even a
 /// temporary file — and prints `<path>: not in canonical layout` on stdout when
@@ -509,16 +490,31 @@ fn fmt_path(requested: Option<&std::path::Path>) -> Result<std::path::PathBuf, S
 /// [`blastit_manifest::edit::write_atomic`], so the file keeps its mode and a
 /// failed write leaves the original in place.
 fn run_fmt(options: &FmtOptions) -> u8 {
-    let path = match fmt_path(options.path.as_deref()) {
+    let path = match options.path.clone().map_or_else(
+        || crate::config::manifest_path().map_err(|error| error.to_string()),
+        Ok,
+    ) {
         Ok(path) => path,
         Err(message) => {
-            eprintln!("blastit fmt: {message}");
+            eprintln!("{message}");
             return FMT_FAILURE;
         }
     };
     let text = match blastit_manifest::blastfile::read(&path) {
         Ok(text) => text,
-        Err(errors) => return report_manifest_errors(&path, &errors),
+        Err(errors) => {
+            // §15.1: a file that is not there is the one missing-file sentence,
+            // produced exactly once in `config::missing_manifest` — the same
+            // words `blastit`, `dev` and `check` use. `read`'s own wording for
+            // an unreadable file stays for every other refusal.
+            if std::fs::metadata(&path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                eprintln!("{}", crate::config::missing_manifest(&path));
+                return FMT_FAILURE;
+            }
+            return report_manifest_errors(&path, &errors);
+        }
     };
     let formatted = match blastit_manifest::blastfile::fmt(&text) {
         Ok(formatted) => formatted,
@@ -537,7 +533,7 @@ fn run_fmt(options: &FmtOptions) -> u8 {
             eprintln!(
                 "{}: the file could not be written: {}",
                 one_line(&path),
-                one_line_text(&error.to_string())
+                blastit_manifest::clipped(&error.to_string())
             );
             FMT_FAILURE
         }
@@ -583,38 +579,11 @@ fn positioned(rendered: &str) -> bool {
 /// Renders a path for a one-line message: control bytes escaped and the value
 /// cut at 120 characters (§18).
 ///
-/// `blastit-manifest`'s own `clipped` does the same for a value, but it is
-/// crate-private; this is the CLI's copy for the one thing the crate never
-/// renders, the path a caller passed in.
+/// §18's one line is `blastit-manifest`'s `clipped`, which this crate
+/// re-exports, so the CLI keeps no copy of the rule; `fmt` is the one command
+/// that renders a path a caller passed in.
 fn one_line(path: &std::path::Path) -> String {
-    one_line_text(&path.to_string_lossy())
-}
-
-/// The same for a string: control bytes escaped, cut at 120 characters.
-fn one_line_text(value: &str) -> String {
-    /// Longest path or message quoted before it is cut short (§18).
-    const MAX_CHARS: usize = 120;
-    let cut = value.char_indices().nth(MAX_CHARS).map(|(at, _)| at);
-    let mut out = String::with_capacity(value.len().saturating_add(1));
-    let (head, cut_short) = match cut {
-        Some(at) => (value.get(..at).unwrap_or(""), true),
-        None => (value, false),
-    };
-    for character in head.chars() {
-        match character {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            character if character.is_control() => {
-                out.push_str(&format!("\\u{{{:x}}}", character as u32));
-            }
-            character => out.push(character),
-        }
-    }
-    if cut_short {
-        out.push('…');
-    }
-    out
+    blastit_manifest::clipped(&path.to_string_lossy())
 }
 
 /// A `--port` / `PORT` value: `1..=65535` (`R2`).

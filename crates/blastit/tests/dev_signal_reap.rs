@@ -53,16 +53,12 @@ const POLL: Duration = Duration::from_millis(20);
 /// between the probe and the launch; that is a harness race, not this contract.
 const PORT_ATTEMPTS: u32 = 3;
 
-/// The all-static manifest `MB.14` dogfooded: one catch-all route, no `app`.
+/// The all-static manifest `MB.14` dogfooded: one mount at the URL root, no
+/// `app`.
 const MANIFEST: &str = "\
-version = 1
-
-[[route]]
-name = \"site\"
-path = ['.*']
-
-[route.static]
-root = \"site\"
+static \"/\" {
+    root \"site\"
+}
 ";
 
 #[test]
@@ -84,7 +80,7 @@ fn sigterm_to_the_dev_init_pid_reaps_the_tree_and_closes_the_port() {
         "the run's --dev-root exists while it serves: {root:?}"
     );
 
-    // It serves, from the real `[route.static]` path.
+    // It serves, from the real `static` mount.
     for target in ["/", "/sub/page.html"] {
         assert_eq!(dev.get(target).0, 200, "GET {target}\n{}", dev.log_text());
     }
@@ -178,7 +174,7 @@ impl Fixture {
         fs::create_dir_all(path.join("site/sub")).expect("the serve root");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
             .expect("a readable fixture directory");
-        fs::write(path.join("blastit.toml"), MANIFEST).expect("write blastit.toml");
+        fs::write(path.join("Blastfile"), MANIFEST).expect("write Blastfile");
         fs::write(
             path.join("site/index.html"),
             "<!doctype html><title>mb15</title><h1>index</h1>\n",
@@ -193,7 +189,7 @@ impl Fixture {
     }
 
     fn manifest(&self) -> PathBuf {
-        self.path.join("blastit.toml")
+        self.path.join("Blastfile")
     }
 
     fn log(&self) -> PathBuf {

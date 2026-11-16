@@ -260,7 +260,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             &format!("{}: {err}", config.manifest.display()),
         ),
     };
-    let (manifest, _warnings) = match Manifest::parse_and_validate(&source, config.uid_base) {
+    let (manifest, _warnings) = match Manifest::parse_blastfile(&source, config.uid_base) {
         Ok(parsed) => parsed,
         Err(errors) => fail(&emitter, dev.as_ref(), &errors.to_string()),
     };
@@ -300,10 +300,6 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     // declared routes sit at `1..=N` so no declared route collides with the
     // scheduler's slot-0 fallback (`R26`, `R27`).
     let dev_uid = crate::dev_learn::euid();
-    // `R13`: whether the manifest declares an app decides whether a static
-    // route with `spa` unset may forward a miss to it (design §4.6). Computed
-    // once, exactly as `routes_from_manifest` does.
-    let has_app = manifest.app().is_some();
     // `ADR-0009` §5: stage 0 already refused such a boot, and this is the same
     // refusal one process later — stage 1 is the process that would have to fork
     // a view, so it repeats the gate rather than trusting a `--config-fd` it
@@ -321,14 +317,6 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         .chain(manifest.routes().iter().map(|route| {
             blastit_scheduler::RouteInfo::new(route.name(), route.prefork(), dev_uid)
                 .with_ingress(route.ingress())
-                .with_static(
-                    route.static_policy().cloned(),
-                    // `docs/frameworks/php.md`: a `[route.static]` + `[route.php]`
-                    // page sends every non-file path to the front controller, and a
-                    // PHP route needs no `BLASTIT_APP` (`ADR-0010` §2) — the same
-                    // rule `routes_from_manifest` applies for production.
-                    has_app || route.php().is_some(),
-                )
         }))
         .collect(),
         (Some(_), false) => manifest
@@ -337,14 +325,6 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             .map(|route| {
                 blastit_scheduler::RouteInfo::new(route.name(), route.prefork(), dev_uid)
                     .with_ingress(route.ingress())
-                    .with_static(
-                        route.static_policy().cloned(),
-                        // `docs/frameworks/php.md`: a `[route.static]` + `[route.php]`
-                        // page sends every non-file path to the front controller, and a
-                        // PHP route needs no `BLASTIT_APP` (`ADR-0010` §2) — the same
-                        // rule `routes_from_manifest` applies for production.
-                        has_app || route.php().is_some(),
-                    )
             })
             .collect(),
         (None, _) => routes_from_manifest(&manifest, &layout),
@@ -381,7 +361,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         Ok(bindings) => bindings,
         Err(message) => fail(&emitter, dev.as_ref(), &message),
     };
-    // `ADR-0010` §3: a contained probe child per `[route.php]` route loads the
+    // `ADR-0010` §3: a contained probe child per `entrypoint php` file loads the
     // pair stage 0 inspected and starts the module **before** anything listens.
     // A shim that will not load, an ABI this build does not speak, a minor that
     // disagrees with the library, or a `worker_init` that hangs is this boot's
@@ -441,7 +421,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     let mask = signals.previous_mask();
 
     let http_cfg = http_config(&config, limits);
-    let sched_cfg = scheduler_config(&config, limits, memory, learn);
+    let sched_cfg = scheduler_config(&config, &manifest, limits, memory, learn);
 
     // Production drops each component to its layout uid before it serves;
     // `dev` runs every role as the caller, so there is nobody to drop to and
@@ -668,7 +648,7 @@ struct Serving {
     /// for a WSGI view (`ADR-0010` §1). Built and verified at boot.
     #[cfg(feature = "php")]
     php: Vec<Option<crate::php_view::PhpBinding>>,
-    /// Number of routes declared in `blastit.toml` (reported on `ready`).
+    /// Number of views declared in the `Blastfile` (reported on `ready`).
     declared_routes: usize,
     /// Whether each route may keep `AF_INET`/`AF_INET6`, by route index (§7.3).
     /// Only a build that forks a view reads it (`MB.3.11`).
@@ -791,7 +771,7 @@ fn toml_basic_string(value: &str) -> String {
 }
 
 /// Reads the configuration document stage 0 wrote into the pipe (§4), the
-/// `[route.php]` probe timeout that travelled with it (`ADR-0010` §3), and —
+/// `entrypoint php` probe timeout that travelled with it (`ADR-0010` §3), and —
 /// in a debug build — the test-only swap point (`MB.3.64`).
 ///
 /// The timeout is a **stage-0 decision**: `BLASTIT_PROBE_TIMEOUT_MS` is read
@@ -886,6 +866,7 @@ fn http_config(config: &Config, limits: Limits) -> HttpConfig {
 /// reliable under gVisor).
 fn scheduler_config(
     config: &Config,
+    manifest: &blastit_manifest::Manifest,
     limits: Limits,
     memory: Option<mem_usage::Usage>,
     learn: bool,
@@ -922,6 +903,9 @@ fn scheduler_config(
         // working directory.
         manifest_dir: config.manifest_dir.clone(),
         static_max_bytes: blastit_scheduler::static_asset::STATIC_MAX_FILE_BYTES,
+        // §9.2: the file's mounts travel beside the route table, because a
+        // mount owns no uid and starts no process.
+        mounts: manifest.mounts().to_vec(),
         // `SPAWN_BACKOFF` and `MEMORY_CHECK_INTERVAL` are the struct defaults,
         // so a field a later release adds needs no edit here.
         ..SchedulerConfig::default()

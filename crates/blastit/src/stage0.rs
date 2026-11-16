@@ -293,30 +293,59 @@ fn copy_recipe(install: Install) -> String {
 /// [`app_rule`] — because `blastit check` never demanded an `app`: the suite's
 /// own configuration supplies the WSGI callable.
 pub(crate) fn static_app_refusal(config: &Config, manifest: &Manifest) -> Option<String> {
-    (manifest.is_all_static() && config.app.is_some()).then(|| {
+    (is_static_only(manifest) && config.app.is_some()).then(|| {
         "BLASTIT_APP: every route is static, so no route can reach an app: \
          unset BLASTIT_APP, or declare a route without [route.static]"
             .to_string()
     })
 }
 
+/// True when the file declares nothing but static mounts: no callable, no front
+/// controller and no view (`static "/" { root "public" }` is the whole file).
+///
+/// The model's [`Manifest::is_all_static`] is the per-route spelling of the same
+/// question, which a `Blastfile` cannot answer — its mounts are the file's, not
+/// a view's. §9.5/§9.6 move the predicate into the model over mounts; until
+/// then this is the one place the boot asks it.
+pub(crate) fn is_static_only(manifest: &Manifest) -> bool {
+    manifest.app().is_none()
+        && manifest.php().is_none()
+        && manifest.routes().is_empty()
+        && !manifest.mounts().is_empty()
+}
+
+/// True when every request is answered by one of the file's own executors: the
+/// one `entrypoint php` front controller, or a static mount.
+///
+/// The model's [`Manifest::can_boot_without_app`] is the per-route spelling,
+/// which a `Blastfile` cannot answer (it has one file-level entrypoint and
+/// file-level mounts). §9.5/§9.6 move the predicate into the model over mounts;
+/// until then this is the one place the boot asks it. A view needs a callable
+/// unless a front controller answers it, which is why the PHP half needs at
+/// least one view: an entrypoint no view reaches serves nothing.
+pub(crate) fn runs_own_executors(manifest: &Manifest) -> bool {
+    (manifest.php().is_some() && !manifest.routes().is_empty())
+        || (manifest.routes().is_empty() && !manifest.mounts().is_empty())
+}
+
 /// `R13`: the app rule a **boot** refuses with (`blastit`, `blastit dev`).
 ///
 /// Both halves: a `BLASTIT_APP` no route could reach is refused
-/// ([`static_app_refusal`]), and a manifest whose routes do **not** all run
-/// their own executor needs a callable to forward to. The second half asks
-/// [`Manifest::can_boot_without_app`] — "every route is its own executor" —
-/// rather than "every route is static": a `[route.php]` route is its own
-/// executor, so the *rule* demands no `app` for a PHP-only manifest
-/// (`ADR-0010` §2); what such a boot needs instead is a usable NTS `libphp`,
-/// and [`php_boot_gate`] is what refuses a host that has none.
+/// ([`static_app_refusal`]), and a manifest whose views do **not** all run on an
+/// executor of the file's own needs a callable to forward to. The second half
+/// asks [`runs_own_executors`] — "every request is answered by the front
+/// controller or a mount" — rather than "every route is static": an
+/// `entrypoint php` file is its own executor, so the *rule* demands no `app` for
+/// a PHP-only manifest (`ADR-0010` §2); what such a boot needs instead is a
+/// usable NTS `libphp`, and [`php_boot_gate`] is what refuses a host that has
+/// none.
 /// `blastit check` must not take the second half — a suite brings its own
 /// `app` — so it calls [`static_app_refusal`] directly.
 pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), String> {
     if let Some(message) = static_app_refusal(config, manifest) {
         return Err(message);
     }
-    if !manifest.can_boot_without_app() && config.app.is_none() {
+    if !runs_own_executors(manifest) && config.app.is_none() {
         return Err("BLASTIT_APP: the WSGI callable (`module:attribute`) is required".to_string());
     }
     Ok(())
@@ -335,7 +364,7 @@ pub(crate) fn app_rule(config: &Config, manifest: &Manifest) -> Result<(), Strin
 /// the rest of the boot's warnings), and `blastit check` keeps the `raw_ingress`
 /// finding so CI reports the same rule before anyone deploys.
 ///
-/// Stage 1 calls this too, immediately after its own `parse_and_validate` of the
+/// Stage 1 calls this too, immediately after its own `parse_blastfile` of the
 /// file: the configuration document carries the manifest's *path*, not a digest
 /// of what stage 0 approved, so the re-read is a real checkpoint and not
 /// belt-and-braces.
@@ -395,7 +424,7 @@ impl ServeGates {
 ///
 /// An all-static manifest needs no interpreter at all and is left to
 /// [`static_app_refusal`], which keeps its `BLASTIT_APP`-on-a-static-tree
-/// sentence in both builds. So does a `[route.php]` route: it runs in a `view`
+/// sentence in both builds. So does an `entrypoint php` file: it runs in a `view`
 /// worker with no interpreter anywhere near it, so this gate returns `None`
 /// for a PHP-only manifest (`MB.3.5.4`) — [`php_boot_gate`] is the separate
 /// gate that refuses such a boot when the host has no usable NTS `libphp`, and
@@ -419,7 +448,7 @@ pub(crate) fn no_python_support(
              run a build with --features python"
         ));
     }
-    if manifest.can_boot_without_app() {
+    if runs_own_executors(manifest) {
         return None;
     }
     if let Some(app) = config.app.as_deref() {
@@ -428,13 +457,13 @@ pub(crate) fn no_python_support(
              \"python\"), so it cannot import a WSGI application; {INSTALL}"
         ));
     }
-    // The first route that is not its own executor: a `[route.static]` root and
-    // a `[route.php]` front controller both answer without an interpreter, so
-    // only a route that declares neither is a WSGI view this build cannot fork.
+    // The first view no mount or front controller answers: a static mount and an
+    // `entrypoint php` both answer without an interpreter, so only a view that
+    // nothing else reaches is a WSGI view this build cannot fork.
     let route = manifest
         .routes()
-        .iter()
-        .find(|route| route.static_policy().is_none() && route.php().is_none())?;
+        .first()
+        .filter(|_| manifest.php().is_none() && manifest.mounts().is_empty())?;
     Some(format!(
         "route {:?}: this build has no Python support (built without feature \"python\"), \
          and the route declares no [route.static] block, so it needs a runtime this build \
@@ -567,7 +596,7 @@ const SUPPORTED_PHP: &str = "PHP 8.3, 8.4 and 8.5";
 /// The one override `ADR-0010` §3 allows.
 const PHP_OVERRIDE: &str = "set BLASTIT_LIBPHP=/path/to/libphp.so";
 
-/// The variable that tunes how long a stage-1 `[route.php]` probe may take
+/// The variable that tunes how long a stage-1 `entrypoint php` probe may take
 /// (`ADR-0010` §3).
 pub(crate) const PROBE_TIMEOUT_VAR: &str = "BLASTIT_PROBE_TIMEOUT_MS";
 
@@ -601,7 +630,7 @@ fn probe_timeout() -> Result<Option<Duration>, String> {
     })?;
     if millis == 0 {
         return Err(format!(
-            "{PROBE_TIMEOUT_VAR}=0 would kill every [route.php] probe before it starts; set it \
+            "{PROBE_TIMEOUT_VAR}=0 would kill every entrypoint php probe before it starts; set it \
              to e.g. 5000, or unset it for the default"
         ));
     }
@@ -682,7 +711,7 @@ pub(crate) fn php_probe_refusal(
     version: Option<PhpVersion>,
 ) -> String {
     present_refusal(
-        &format!("route {route:?}: [route.php] entry {entry:?}: "),
+        &format!("route {route:?}: entrypoint php {entry:?}: "),
         problem,
         version,
     )
@@ -783,7 +812,7 @@ pub(crate) enum PhpShimScope {
     Development,
 }
 
-/// Everything the `[route.php]` discovery looks at, injectable so a test never
+/// Everything the `entrypoint php` discovery looks at, injectable so a test never
 /// depends on the host's `/usr/lib`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PhpSearch {
@@ -845,7 +874,7 @@ enum ZendAbi {
     NotLibphp,
 }
 
-/// Why the `[route.php]` gate refused, before the sentence names the route.
+/// Why the `entrypoint php` gate refused, before the sentence names the route.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PhpRefusal {
     /// No `BLASTIT_LIBPHP` and no candidate file: nothing to embed.
@@ -948,7 +977,7 @@ fn abi_tuple(version: Option<PhpVersion>) -> Option<(String, String)> {
     Some((version.dotted(), shim_name(version)))
 }
 
-/// The sentence a `[route.php]` boot fails with (`ADR-0010` §4.1).
+/// The sentence an `entrypoint php` boot fails with (`ADR-0010` §4.1).
 ///
 /// Both shapes name the route and its `entry`, the distro package that provides
 /// the library, and `BLASTIT_LIBPHP`. The version-specific shape also names the
@@ -959,7 +988,7 @@ fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> String
     // Every shape names the route **and** its `entry`: a manifest with two PHP
     // routes must let the operator tell which front controller the host cannot
     // serve, and the entry is the only thing that distinguishes them.
-    let prefix = format!("route {route:?}: [route.php] entry {entry:?}: ");
+    let prefix = format!("route {route:?}: entrypoint php {entry:?}: ");
     match refusal {
         PhpRefusal::Missing { searched } => format!(
             "{prefix}no usable NTS libphp was found (searched BLASTIT_LIBPHP, then {} in {}); \
@@ -1100,10 +1129,10 @@ fn display_paths(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
-/// What a boot's `[route.php]` gate says before a listener may bind.
+/// What a boot's `entrypoint php` gate says before a listener may bind.
 #[derive(Debug)]
 pub(crate) enum PhpBoot {
-    /// No route declares `[route.php]`: nothing to discover.
+    /// No file declares `entrypoint php`: nothing to discover.
     Absent,
     /// The host can embed PHP: this is the NTS `libphp` and the shim every PHP
     /// route's worker will load, recorded as `(path, st_dev, st_ino)` in
@@ -1126,7 +1155,7 @@ impl PhpBoot {
     }
 }
 
-/// `ADR-0010` §3/§4.1: the discovery gate a `[route.php]` manifest is resolved
+/// `ADR-0010` §3/§4.1: the discovery gate a `entrypoint php` file is resolved
 /// by, before any listener binds.
 ///
 /// Runs in the stage-0 image and never loads anything: the `libphp` is opened,
@@ -1138,7 +1167,7 @@ impl PhpBoot {
 /// not an ELF, ZTS, no `php_version`, no version this boot can read) and the
 /// shim for the tuple. Every one of those is fatal in **both** scopes:
 /// `ADR-0010` §1 gives PHP one backend, so a host that cannot serve a declared
-/// `[route.php]` route gets §4.1's package sentence — in `blastit dev` and
+/// `entrypoint php` file gets §4.1's package sentence — in `blastit dev` and
 /// `blastit check` as much as in a deployment. There is no development mode
 /// that serves a PHP route another way.
 pub(crate) fn php_boot_gate(config: &Config, manifest: &Manifest, scope: PhpShimScope) -> PhpBoot {
@@ -1151,7 +1180,7 @@ pub(crate) fn php_boot_gate(config: &Config, manifest: &Manifest, scope: PhpShim
     // could replace the shim is the uid that already runs the boot. A
     // deployment has no such coincidence — its route uids (`UID_BASE + 1000 +
     // i`) are not the uid that owns `$BLASTIT_EXEC`, the shims or
-    // `blastit.toml`'s tree.
+    // the `Blastfile`'s tree.
     let deployment = (scope == PhpShimScope::Deployment).then(|| Deployment {
         init_uid: current_uid(),
         manifest_dir: config.manifest_dir.clone(),
@@ -1170,7 +1199,7 @@ pub(crate) fn php_boot_gate(config: &Config, manifest: &Manifest, scope: PhpShim
 struct Deployment {
     /// The uid init runs as: root, or init's own in `rootless` mode.
     init_uid: u32,
-    /// The directory `blastit.toml` came from — every PHP worker's `cwd` and
+    /// The directory the `Blastfile` came from — every PHP worker's `cwd` and
     /// `include_path` (`ADR-0010` §2).
     manifest_dir: PathBuf,
 }
@@ -1218,7 +1247,7 @@ fn php_boot_in(
     }
 }
 
-/// `R7`/`B2-R5`: the **deployment** half of the `[route.php]` gate, run over one
+/// `R7`/`B2-R5`: the **deployment** half of the `entrypoint php` gate, run over one
 /// manifest directory and one pair — the seam the protected suite needs.
 ///
 /// It runs the same function a deployment boot runs, `php_boot_in` with a
@@ -1231,7 +1260,7 @@ fn php_boot_in(
 /// and without it only this module's unit tests would.
 ///
 /// `Ok(())` is "the gate proceeds" — `Proceed` from the discovery *and* a
-/// manifest with no `[route.php]` route, which a deployment boots like any
+/// a file with no `entrypoint php`, which a deployment boots like any
 /// other (the gate has nothing to authorise). `Err(message)` is a **refusal**:
 /// the sentence the boot prints, the same one `php_boot`'s callers print.
 ///
@@ -1244,7 +1273,7 @@ pub fn deployment_boot_check(
     shim_dir: &Path,
     uid_base: u32,
 ) -> Result<(), String> {
-    let (manifest, _warnings) = Manifest::parse_and_validate(manifest_source, uid_base)
+    let (manifest, _warnings) = Manifest::parse_blastfile(manifest_source, uid_base)
         .map_err(|errors| errors.to_string())?;
     let search = PhpSearch {
         libphp: Some(libphp.to_path_buf()),
@@ -1272,8 +1301,8 @@ pub fn deployment_boot_check(
 /// tuple, the distro package and `BLASTIT_LIBPHP` — because every way an
 /// operator can fix a library is one of those names. The **tree** is a
 /// different sentence: nothing about it is fixed by installing a package, so it
-/// names what the path is (the directory holding `blastit.toml`, a
-/// `[route.php] entry`, a `[route.static] root`), the directory itself, and the
+/// names what the path is (the directory holding the `Blastfile`, a
+/// `entrypoint php`, a `static` root), the directory itself, and the
 /// `chown`/`chmod` that fixes it.
 fn deployment_refusal(
     manifest: &Manifest,
@@ -1291,7 +1320,7 @@ fn deployment_refusal(
         trees: Vec::new(),
     };
     if let Err(detail) = objects.check_objects() {
-        let prefix = format!("route {route:?}: [route.php] entry {entry:?}: ");
+        let prefix = format!("route {route:?}: entrypoint php {entry:?}: ");
         return Some(present_refusal(
             &prefix,
             detail.as_str(),
@@ -1353,7 +1382,7 @@ fn missing_claim(claim: &Claim) -> Option<String> {
 }
 
 /// The tree claims a deployment boot authorises: the directory the workers'
-/// `cwd`/`include_path` is, every `[route.php] entry`, and every
+/// `cwd`/`include_path` is, every `entrypoint php`, and every
 /// `[route.static] root` (`ADR-0010` §3, design `B2-R5`).
 ///
 /// A worker can `include` any file those paths reach, so a route uid that can
@@ -1362,30 +1391,24 @@ fn missing_claim(claim: &Claim) -> Option<String> {
 /// child executes, minus the file-capability half (a tree is read, not loaded).
 fn php_trees(manifest: &Manifest, deployment: &Deployment) -> Vec<Claim> {
     let mut claims = vec![Claim::new(
-        "the directory holding blastit.toml (the PHP worker's cwd and include_path)",
+        "the directory holding the Blastfile (the PHP worker's cwd and include_path)",
         deployment.manifest_dir.clone(),
     )];
-    for route in manifest.routes() {
-        if let Some(php) = route.php() {
-            claims.push(Claim::new(
-                format!(
-                    "route {:?}: [route.php] entry {:?}",
-                    route.name(),
-                    php.entry
-                ),
-                deployment.manifest_dir.join(&php.entry),
-            ));
-        }
-        if let Some(policy) = route.static_policy() {
-            claims.push(Claim::new(
-                format!(
-                    "route {:?}: [route.static] root {:?}",
-                    route.name(),
-                    policy.root
-                ),
-                deployment.manifest_dir.join(&policy.root),
-            ));
-        }
+    // The file's one front controller, under the first view's name: every view
+    // reaches it (§12.2), so the claim is one file, not one per view.
+    if let (Some(php), Some(route)) = (manifest.php(), manifest.routes().first()) {
+        claims.push(Claim::new(
+            format!("route {:?}: entrypoint php {:?}", route.name(), php.entry),
+            deployment.manifest_dir.join(&php.entry),
+        ));
+    }
+    // A mount is the file's, not a route's (§9.1), so the claim names the
+    // prefix it answers under.
+    for mount in manifest.mounts() {
+        claims.push(Claim::new(
+            format!("static {:?}: root {:?}", mount.prefix, mount.policy.root),
+            deployment.manifest_dir.join(&mount.policy.root),
+        ));
     }
     claims
 }
@@ -1413,16 +1436,18 @@ fn php_worker_budget(manifest: &Manifest, cap: u32) -> Option<String> {
     })
 }
 
-/// The first `[route.php]` route: its name, its `entry` and its `workers` cap.
+/// The file's one front controller: the first view's name, its `entry` and its
+/// (always absent) `workers` cap.
 ///
-/// One route names the refusal, and it is the first one, so the sentence is
-/// stable across a boot with several PHP routes.
+/// A `Blastfile` declares `entrypoint php` once for the whole file (§12.2), so
+/// every view reaches it; the gate names the first view and the entry, which is
+/// the shape `ADR-0010` §4.1's sentence has. A file with no view has nothing to
+/// route to, so the gate is absent. `workers` is `None` by construction: the
+/// language has no `workers` keyword (`ADR-0012` §12.3).
 fn first_php_route(manifest: &Manifest) -> Option<(&str, &str, Option<u32>)> {
-    manifest.routes().iter().find_map(|route| {
-        route
-            .php()
-            .map(|php| (route.name(), php.entry.as_str(), php.workers))
-    })
+    let php = manifest.php()?;
+    let route = manifest.routes().first()?;
+    Some((route.name(), php.entry.as_str(), php.workers))
 }
 
 /// Resolves the NTS `libphp` and its shim, or names why not (`ADR-0010` §3).
@@ -2297,7 +2322,7 @@ fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(slice))
 }
 
-/// The one line a boot emits when `[route.php]` discovery resolved a runtime
+/// The one line a boot emits when `entrypoint php` discovery resolved a runtime
 /// (`MB.3.35`): the *resolved* `libphp`, the shim and this build's
 /// `<arch>-<libc>` tuple.
 ///
@@ -2309,7 +2334,7 @@ fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 /// whole boot output.
 fn php_runtime_line(runtime: &PhpRuntime) -> String {
     format!(
-        "the [route.php] runtime is libphp {} and shim {} (PHP {}, {})",
+        "the entrypoint php runtime is libphp {} and shim {} (PHP {}, {})",
         runtime.libphp.display(),
         runtime.shim.display(),
         runtime.version.dotted(),
@@ -2377,11 +2402,13 @@ fn listable(path: &Path) -> bool {
 }
 
 /// The declared root, as written, in the sentence a boot refuses with.
+///
+/// `index` is a **mount** index (§9.6), which is what `static_roots` returns.
 fn static_root_refusal(manifest: &Manifest, index: usize) -> String {
     let root = manifest
-        .route(index)
-        .and_then(|route| route.static_policy())
-        .map_or_else(String::new, |policy| policy.root.clone());
+        .mounts()
+        .get(index)
+        .map_or_else(String::new, |mount| mount.policy.root.clone());
     format!("static root {root:?}: permission denied")
 }
 
@@ -2546,20 +2573,24 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     }
 
     // The file is named before the setting: in a directory with no
-    // `./blastit.toml` that file is what is missing, and `BLASTIT_APP` would
+    // `./Blastfile` that file is what is missing, and `BLASTIT_APP` would
     // send the operator looking for an environment variable instead of a
-    // project (`docs/troubleshooting.md`).
+    // project (`docs/troubleshooting.md`). The sentence is §15.1's and is the
+    // same one `dev`, `check` and `fmt` print.
     let source = match std::fs::read_to_string(&config.manifest) {
         Ok(source) => source,
-        Err(err) => fail(&emitter, &format!("{}: {err}", config.manifest.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fail(&emitter, &crate::config::missing_manifest(&config.manifest));
+        }
+        Err(error) => fail(&emitter, &format!("{}: {error}", config.manifest.display())),
     };
-    let (manifest, warnings) = match Manifest::parse_and_validate(&source, config.uid_base) {
+    let (manifest, warnings) = match Manifest::parse_blastfile(&source, config.uid_base) {
         Ok(parsed) => parsed,
         Err(errors) => fail(&emitter, &errors.to_string()),
     };
     // `R13`: `BLASTIT_APP` is required unless every route is static. The
     // manifest is parsed first, because "is every route static" is a property of
-    // the file, not of the environment — and a missing `./blastit.toml` is still
+    // the file, not of the environment — and a missing `./Blastfile` is still
     // named before the setting (`MB.1.6`).
     // `ADR-0009` §5: a build with no Python support (`ADR-0010` §4's standalone
     // archive) refuses a manifest that needs an interpreter here, before any
@@ -2840,12 +2871,16 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
     }
 
     // The same order as `run`: the missing file first, the missing `app`
-    // second (`docs/troubleshooting.md`).
+    // second (`docs/troubleshooting.md`), with §15.1's one sentence on
+    // descriptor 2 — `dev` writes no startup error to stdout.
     let source = match std::fs::read_to_string(&config.manifest) {
         Ok(source) => source,
-        Err(err) => dev_fail(&format!("{}: {err}", config.manifest.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            dev_fail(&crate::config::missing_manifest(&config.manifest));
+        }
+        Err(error) => dev_fail(&format!("{}: {error}", config.manifest.display())),
     };
-    let (manifest, warnings) = match Manifest::parse_and_validate(&source, config.uid_base) {
+    let (manifest, warnings) = match Manifest::parse_blastfile(&source, config.uid_base) {
         Ok(parsed) => parsed,
         Err(errors) => dev_fail(&format!("{errors}")),
     };
@@ -3904,13 +3939,11 @@ mod tests {
 
     /// A manifest with `routes` routes, in the order they matter here.
     fn manifest_with(routes: usize) -> Manifest {
-        let mut source = String::from("version = 1\n");
+        let mut source = String::new();
         for index in 0..routes {
-            source.push_str(&format!(
-                "\n[[route]]\nname = \"r{index}\"\npath = ['/r{index}/']\n"
-            ));
+            source.push_str(&format!("view r{index} \"/r{index}/\" {{}}\n"));
         }
-        Manifest::parse_and_validate(&source, 20_000).unwrap().0
+        Manifest::parse_blastfile(&source, 20_000).unwrap().0
     }
 
     #[test]
@@ -4159,31 +4192,23 @@ mod tests {
     #[test]
     fn an_explicit_empty_grant_still_names_the_proxy_for_its_route() {
         let source = "\
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = \"postgresql\"
-input = { url = \"DATABASE_URL\" }
+trait denied {
+    postgres {}
+}
 
-[group.denied.db]
-queries = []
+view locked regex '/locked/.*' {
+    postgres {}
+}
 
-[[route]]
-name = \"locked\"
-path = ['/locked/.*']
-[route.db]
-queries = []
+view grouped regex '/grouped/.*' {
+    use denied
+}
 
-[[route]]
-name = \"grouped\"
-path = ['/grouped/.*']
-groups = [\"denied\"]
-
-[[route]]
-name = \"ungranted\"
-path = ['/ungranted/.*']
+view ungranted regex '/ungranted/.*' {}
 ";
-        let (manifest, _) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let (manifest, _) = Manifest::parse_blastfile(source, 20_000).unwrap();
         let db = ProxyName::new("db");
         assert!(
             route_declares_proxy(&manifest, 0, &db),
@@ -4216,58 +4241,40 @@ path = ['/ungranted/.*']
 mod no_python_capability {
     use super::*;
 
-    /// A static-only manifest: one `[route.static]` root, no app.
+    /// A static-only manifest: one `static` mount, no app.
     const STATIC_ONLY: &str = "\
-version = 1
-
-[[route]]
-name = \"docs\"
-path = ['.*']
-
-[route.static]
-root = \"site\"
+static \"/\" {
+    root \"site\"
+}
 ";
 
     /// One route that declares no executor of its own: a WSGI view.
     const WITH_A_VIEW: &str = "\
-version = 1
-
-[[route]]
-name = \"web\"
-path = ['.*']
+view web regex '.*' {}
 ";
 
     /// One PHP route and no app: its own executor (`ADR-0010` §2), so this
     /// build can serve it without an interpreter anywhere in the image.
     const PHP_ONLY: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
-
-[route.php]
-entry = \"public/index.php\"
+view app regex '.*' {}
 ";
 
     /// The page's shape: files from disk, everything else to the front
     /// controller. Still no interpreter.
     const STATIC_AND_PHP: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
+static \"/\" {
+    root \"public\"
+}
 
-[route.static]
-root = \"public\"
-
-[route.php]
-entry = \"public/index.php\"
+view app regex '.*' {}
 ";
 
     fn manifest(source: &str) -> Manifest {
-        let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let (manifest, _warnings) = Manifest::parse_blastfile(source, 20_000).unwrap();
         manifest
     }
 
@@ -4341,7 +4348,7 @@ entry = \"public/index.php\"
     /// [`php_boot_gate`]'s — a different gate, with a different sentence.
     ///
     /// The denied twin in the same test is the manifest that *is* WSGI-shaped:
-    /// a route with no `[route.static]` and no `[route.php]` keeps the gate's
+    /// a route with no `[route.static]` and no `entrypoint php` keeps the gate's
     /// sentence, so the early return cannot have swallowed the whole rule.
     #[test]
     fn a_php_only_manifest_is_not_refused_by_the_capability_gate() {
@@ -4363,14 +4370,15 @@ entry = \"public/index.php\"
     }
 }
 
-/// `ADR-0010` §3/§4.1: the `[route.php]` discovery gate and its two exact
+/// `ADR-0010` §3/§4.1: the `entrypoint php` discovery gate and its two exact
 /// sentences.
 ///
 /// Every rule here has a denied case and an accepted twin: a host with no
 /// `libphp` at all, one whose object is ZTS or not an ELF at all, one whose
-/// version no shim matches, and a `workers` cap above the view budget — beside
-/// the manifest that declares no PHP route and must be left alone, and the
-/// versioned NTS object with its shim that resolves.
+/// version no shim matches — beside the manifest that declares no PHP route and
+/// must be left alone, and the versioned NTS object with its shim that resolves.
+/// (`workers` is not among them: `ADR-0012` §12.3 removed the keyword, so a
+/// `Blastfile` can never carry a cap above a budget.)
 ///
 /// The library fixtures are written out byte by byte (an ELF64 header plus a
 /// `.dynsym` and its `.dynstr`), so the inline suite needs no C toolchain and
@@ -4384,37 +4392,23 @@ mod php_boot_gate {
 
     /// The page's shape: files from disk, the rest to the front controller.
     const STATIC_AND_PHP: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
+static \"/\" {
+    root \"public\"
+}
 
-[route.static]
-root = \"public\"
-
-[route.php]
-entry = \"public/index.php\"
+view app regex '.*' {}
 ";
 
     /// Two PHP routes: the gate names the **first** one, so the sentence is
     /// actionable and stable.
     const TWO_PHP_ROUTES: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
+view app regex '.*' {}
 
-[route.php]
-entry = \"public/index.php\"
-
-[[route]]
-name = \"api\"
-path = ['/api/.*']
-
-[route.php]
-entry = \"api/index.php\"
+view api regex '/api/.*' {}
 ";
 
     /// The ADR-0010 §4.1 name, pinned to literals rather than to this module's
@@ -4455,57 +4449,29 @@ entry = \"api/index.php\"
         }
     }
 
-    /// A PHP route with a cap the tests compare against the budget.
-    fn php_with_workers(workers: u32) -> String {
-        format!(
-            "version = 1\n\n[[route]]\nname = \"app\"\npath = ['.*']\n\n[route.php]\n\
-             entry = \"public/index.php\"\nworkers = {workers}\n"
-        )
-    }
-
-    /// Two PHP routes where **the second** carries the cap: the budget rule is a
-    /// manifest rule, so it must not stop at the first route.
-    fn two_php_routes_with_second_workers(workers: u32) -> String {
-        format!(
-            "version = 1\n\n[[route]]\nname = \"app\"\npath = ['.*']\n\n[route.php]\n\
-             entry = \"public/index.php\"\n\n[[route]]\nname = \"api\"\npath = ['/api/.*']\n\n\
-             [route.php]\nentry = \"api/index.php\"\nworkers = {workers}\n"
-        )
-    }
-
     /// A PHP route with no cap at all: the deployment's budget is the budget.
+    ///
+    /// `Blastfile` has no `workers` keyword at all (`ADR-0012` §12.3: the
+    /// scheduler owns parallelism), so this is the only PHP shape a file can
+    /// declare, and the budget rule has no over-cap input to refuse.
     const PHP_ONLY: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
-
-[route.php]
-entry = \"public/index.php\"
+view app regex '.*' {}
 ";
 
     const STATIC_ONLY: &str = "\
-version = 1
-
-[[route]]
-name = \"docs\"
-path = ['.*']
-
-[route.static]
-root = \"site\"
+static \"/\" {
+    root \"site\"
+}
 ";
 
     const WITH_A_VIEW: &str = "\
-version = 1
-
-[[route]]
-name = \"web\"
-path = ['.*']
+view web regex '.*' {}
 ";
 
     fn manifest(source: &str) -> Manifest {
-        let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let (manifest, _warnings) = Manifest::parse_blastfile(source, 20_000).unwrap();
         manifest
     }
 
@@ -4827,7 +4793,7 @@ path = ['.*']
         .to_string();
         assert!(message.contains("route \"app\""), "{message}");
         assert!(
-            message.contains("[route.php] entry \"public/index.php\""),
+            message.contains("entrypoint php \"public/index.php\""),
             "{message}"
         );
         assert!(message.contains(&link.display().to_string()), "{message}");
@@ -4875,7 +4841,7 @@ path = ['.*']
             .to_string();
         assert!(message.contains("route \"app\""), "{message}");
         assert!(
-            message.contains("[route.php] entry \"public/index.php\""),
+            message.contains("entrypoint php \"public/index.php\""),
             "{message}"
         );
         assert!(message.contains("no usable NTS libphp"), "{message}");
@@ -5503,70 +5469,21 @@ path = ['.*']
         );
     }
 
-    /// `ADR-0010` §2: `workers` is downward only. The error names both
-    /// numbers, and comes before the discovery so the operator fixes the
-    /// manifest first; `workers == cap` (and no `workers` at all) passes it.
+    /// `ADR-0010` §2's `workers` cap is downward only — and `ADR-0012` §12.3
+    /// removed the keyword from the language, so the only budget a `Blastfile`
+    /// can carry is the deployment's. `php_worker_budget` therefore has no
+    /// over-cap input to refuse: the accepted case is the whole rule, and the
+    /// refusal itself is deleted with the keyword by `MB.21.4.2`.
     #[test]
-    fn a_workers_cap_above_the_view_budget_names_both_numbers() {
+    fn a_php_boot_with_no_workers_cap_passes_any_budget() {
         let scratch = Scratch::new("workers");
         let (_, resolved) = resolved_84(&scratch);
-
-        let config = Config {
-            max_workers: 8,
-            view_max_workers: None,
-            ..Config::default()
-        };
-        let gate = php_boot_gate(
-            &config,
-            &manifest(&php_with_workers(9)),
-            PhpShimScope::Deployment,
-        );
-        let message = gate
-            .refusal()
-            .expect("9 is above the budget of 8")
-            .to_string();
-        assert!(message.contains("workers = 9"), "{message}");
-        assert!(message.contains("budget of 8"), "{message}");
-        assert!(message.contains("BLASTIT_VIEW_MAX_WORKERS"), "{message}");
-        assert!(
-            !message.contains("apt install"),
-            "the budget is named before any discovery: {message}"
-        );
-
-        // The accepted twins: exactly the budget, and no cap at all.
-        for source in [php_with_workers(8), PHP_ONLY.to_string()] {
-            assert!(
-                matches!(
-                    php_boot(&manifest(&source), &resolved, Some(8)),
-                    PhpBoot::Proceed(_)
-                ),
-                "{source}: the cap passed"
-            );
-        }
-        // And the second route's over-budget cap is still refused below.
-        let second = php_boot(
-            &manifest(&two_php_routes_with_second_workers(20)),
-            &resolved,
-            Some(16),
-        );
-        let message = second
-            .refusal()
-            .expect("the second route's 20 is above the budget of 16")
-            .to_string();
-        assert!(message.contains("route \"api\""), "{message}");
-        assert!(!message.contains("route \"app\""), "{message}");
-        assert!(message.contains("workers = 20"), "{message}");
-        assert!(message.contains("budget of 16"), "{message}");
         assert!(
             matches!(
-                php_boot(
-                    &manifest(&two_php_routes_with_second_workers(16)),
-                    &resolved,
-                    Some(16)
-                ),
+                php_boot(&manifest(PHP_ONLY), &resolved, Some(8)),
                 PhpBoot::Proceed(_)
             ),
-            "the second route at exactly the budget passes"
+            "a view declares no cap, so the deployment's budget is the budget"
         );
     }
 
@@ -5832,7 +5749,7 @@ path = ['.*']
         // tuple and the shim, the package, and the override.
         assert!(message.contains("route \"app\""), "{message}");
         assert!(
-            message.contains("[route.php] entry \"public/index.php\""),
+            message.contains("entrypoint php \"public/index.php\""),
             "{message}"
         );
         assert!(message.contains("the NTS libphp"), "{message}");
@@ -5892,8 +5809,8 @@ path = ['.*']
         );
     }
 
-    /// `B2-R5`: the tree the worker's `cwd`/`include_path` is — `blastit.toml`'s
-    /// directory, each `[route.php] entry` and each `[route.static] root` — is
+    /// `B2-R5`: the tree the worker's `cwd`/`include_path` is — the `Blastfile`'s
+    /// directory, each `entrypoint php` and each `static` root — is
     /// refused when a route uid could write it, in its own sentence (this one is
     /// fixed by `chown`/`chmod`, not by installing a package).
     #[test]
@@ -5906,21 +5823,15 @@ path = ['.*']
         // declares both blocks on *one* route must keep the entry under the
         // root, which would make the two legs interfere.
         let manifest_source = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
+view app regex '.*' {}
 
-[route.php]
-entry = \"public/index.php\"
+view docs regex '/assets/.*' {}
 
-[[route]]
-name = \"docs\"
-path = ['/assets/.*']
-
-[route.static]
-root = \"site\"
+static \"/assets\" {
+    root \"site\"
+}
 ";
         // The accepted shape this test starts from: the entry at `0644`, the
         // static root at `0755`, both owned by init's uid.
@@ -5970,7 +5881,7 @@ root = \"site\"
         .expect("a writable manifest directory cannot be a deployment")
         .to_string();
         assert!(
-            message.contains("the directory holding blastit.toml"),
+            message.contains("the directory holding the Blastfile"),
             "the tree is named for what it is: {message}"
         );
         assert!(
@@ -5999,7 +5910,7 @@ root = \"site\"
         .expect("a writable front controller cannot be a deployment")
         .to_string();
         assert!(
-            message.contains("route \"app\": [route.php] entry \"public/index.php\""),
+            message.contains("route \"app\": entrypoint php \"public/index.php\""),
             "the entry is named with its route: {message}"
         );
         assert!(message.contains(&entry.display().to_string()), "{message}");
@@ -6018,7 +5929,7 @@ root = \"site\"
         .expect("a writable static root cannot be a deployment")
         .to_string();
         assert!(
-            message.contains("route \"docs\": [route.static] root \"site\""),
+            message.contains("static \"/assets\": root \"site\""),
             "the static root is named with its route: {message}"
         );
         assert!(message.contains(&root.display().to_string()), "{message}");
@@ -6059,13 +5970,12 @@ root = \"site\"
             manifest_dir: protected.dir.clone(),
         };
         // A PHP route and a static route, as in the tree test above: the gate
-        // only runs for a manifest with a `[route.php]`, so the static half must
+        // only runs for a manifest with an `entrypoint php`, so the static half must
         // ride beside one.
         let source = |entry: &str, root: &str| {
             format!(
-                "version = 1\n\n[[route]]\nname = \"app\"\npath = ['.*']\n\n[route.php]\nentry = \
-                 \"{entry}\"\n\n[[route]]\nname = \"docs\"\npath = ['/assets/.*']\n\n\
-                 [route.static]\nroot = \"{root}\"\n"
+                "entrypoint php \"{entry}\"\n\nview app regex '.*' {{}}\n\nview docs regex \
+                 '/assets/.*' {{}}\n\nstatic \"/assets\" {{\n    root \"{root}\"\n}}\n"
             )
         };
         let refuse = |source: &str| {
@@ -6104,7 +6014,7 @@ root = \"site\"
         let site = protected.dir.join("site");
         let message = refuse(&source("public/index.php", "site"));
         assert!(
-            message.contains("route \"docs\": [route.static] root \"site\""),
+            message.contains("static \"/assets\": root \"site\""),
             "the static root is named with its route: {message}"
         );
         assert!(
@@ -6155,7 +6065,7 @@ root = \"site\"
     /// The seam's contract (`MB.3.44`): `Ok(())` is "the gate proceeds" and
     /// `Err` is a **refusal**.
     ///
-    /// A deployment whose manifest declares no `[route.php]` route has no pair
+    /// A deployment whose manifest declares no `entrypoint php` has no pair
     /// and no entry to authorise — `php_boot_in` answers `Absent` and the boot
     /// proceeds, exactly as `dev`/`check` do. Mapping that to `Err` let a caller
     /// read a *proceeding* manifest as a refused one, which is the confusion the
@@ -6172,21 +6082,16 @@ root = \"site\"
         let _pair = stub_pair(&protected);
         let libphp = protected.dir.join("libphp8.4.so");
 
-        // 1. No `[route.php]`: nothing to authorise, so the boot proceeds.
+        // 1. No `entrypoint php`: nothing to authorise, so the boot proceeds.
         let static_only = "\
-version = 1
-
-[[route]]
-name = \"docs\"
-path = ['.*']
-
-[route.static]
-root = \"site\"
+static \"/\" {
+    root \"site\"
+}
 ";
         assert_eq!(
             deployment_boot_check(static_only, &protected.dir, &libphp, &protected.dir, 20_000),
             Ok(()),
-            "a manifest with no [route.php] proceeds through the deployment gate"
+            "a manifest with no entrypoint php proceeds through the deployment gate"
         );
 
         // 2. A refused pair still produces `ADR-0010` §4.1's sentence, so arm 1
@@ -6258,7 +6163,7 @@ root = \"site\"
     }
 }
 
-/// `R13` after `ADR-0010` §2: a `[route.php]` route is its own executor, so the
+/// `R13` after `ADR-0010` §2: an `entrypoint php` file is its own executor, so the
 /// app rule must never demand the WSGI callable for it (`MB.3.5.4`).
 ///
 /// The old predicate was "every route is static", which read "not all-static"
@@ -6272,65 +6177,35 @@ mod app_rule_executors {
     use super::*;
 
     /// A PHP route with no app: the app rule must not demand the callable.
-    /// (What a `[route.php]` boot does need is a usable NTS `libphp`, and
+    /// (What an `entrypoint php` boot needs is a usable NTS `libphp`, and
     /// [`php_boot_gate`] is the gate that asks; that is a different sentence.)
     const PHP_ONLY: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
-
-[route.php]
-entry = \"public/index.php\"
+view app regex '.*' {}
 ";
 
     /// Files from disk, everything else to the front controller: also no app.
     const STATIC_AND_PHP: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
+static \"/\" {
+    root \"public\"
+}
 
-[route.static]
-root = \"public\"
-
-[route.php]
-entry = \"public/index.php\"
+view app regex '.*' {}
 ";
 
     /// One route that declares no executor: a WSGI view, which needs the app.
     const WITH_A_VIEW: &str = "\
-version = 1
-
-[[route]]
-name = \"web\"
-path = ['.*']
-";
-
-    /// A PHP route beside a WSGI view: the view still needs the callable, so one
-    /// own-executor route cannot excuse the manifest.
-    const PHP_AND_A_VIEW: &str = "\
-version = 1
-
-[[route]]
-name = \"app\"
-path = ['.*']
-
-[route.php]
-entry = \"public/index.php\"
-
-[[route]]
-name = \"web\"
-path = ['/api/.*']
+view web regex '.*' {}
 ";
 
     /// The sentence the rule refuses with, exactly.
     const REQUIRE_APP: &str = "BLASTIT_APP: the WSGI callable (`module:attribute`) is required";
 
     fn manifest(source: &str) -> Manifest {
-        let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let (manifest, _warnings) = Manifest::parse_blastfile(source, 20_000).unwrap();
         manifest
     }
 
@@ -6353,13 +6228,10 @@ path = ['/api/.*']
     /// would send a PHP developer to install a package the route cannot use.
     #[test]
     fn a_manifest_with_no_executor_still_requires_the_callable() {
-        for source in [
-            WITH_A_VIEW,
-            PHP_AND_A_VIEW,
-            "version = 1\n",
-            "version = 1\n\n[[route]]\nname = \"web\"\npath = ['.*']\n\
-             [route.ingress]\nbody = \"json\"\n",
-        ] {
+        // A `Blastfile` declares one entrypoint for the whole file (§12.2), so
+        // "a PHP view beside a WSGI view" is not a shape the language offers;
+        // the refusal is measured on the shapes that need a callable.
+        for source in [WITH_A_VIEW, "", "view web regex '.*' {\n    body json\n}\n"] {
             let message = app_rule(&Config::default(), &manifest(source)).unwrap_err();
             assert_eq!(message, REQUIRE_APP, "{source}");
             assert!(
@@ -6379,8 +6251,7 @@ path = ['/api/.*']
         };
         assert_eq!(app_rule(&with_app, &manifest(WITH_A_VIEW)), Ok(()));
 
-        let static_only = "version = 1\n\n[[route]]\nname = \"docs\"\npath = ['.*']\n\
-                           [route.static]\nroot = \"site\"\n";
+        let static_only = "static \"/\" {\n    root \"site\"\n}\n";
         assert_eq!(app_rule(&Config::default(), &manifest(static_only)), Ok(()));
         let message = app_rule(&with_app, &manifest(static_only)).unwrap_err();
         assert!(
@@ -6406,35 +6277,24 @@ mod raw_ingress_gate_tests {
     use super::{Manifest, ServeGates, raw_ingress_gate};
 
     fn manifest(source: &str) -> Manifest {
-        let (manifest, _warnings) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let (manifest, _warnings) = Manifest::parse_blastfile(source, 20_000).unwrap();
         manifest
     }
 
     const REFUSED: &str = "\
-version = 1
-app = \"app:app\"
+app \"app:app\"
 
-[[route]]
-name = \"upload\"
-path = ['/upload']
-methods = [\"POST\"]
-
-[route.ingress]
-body = \"raw\"
+view upload POST \"/upload\" {
+    body raw
+}
 ";
 
     const ACCEPTED: &str = "\
-version = 1
-app = \"app:app\"
+app \"app:app\"
 
-[[route]]
-name = \"upload\"
-path = ['/upload']
-methods = [\"POST\"]
-
-[route.ingress]
-body = \"raw\"
-allow_raw = true
+view upload POST \"/upload\" {
+    body raw unvalidated
+}
 ";
 
     /// The gate has exactly one refusal and it names the route and the key; the
@@ -6455,17 +6315,15 @@ allow_raw = true
     fn every_other_codec_and_no_ingress_at_all_pass_the_gate() {
         for body in ["json", "form", "none"] {
             let source = format!(
-                "version = 1\napp = \"app:app\"\n\n[[route]]\nname = \"upload\"\n\
-                 path = ['/upload']\nmethods = [\"POST\"]\n\n[route.ingress]\nbody = \"{body}\"\n"
+                "app \"app:app\"\n\nview upload POST \"/upload\" {{\n    body {body}\n}}\n"
             );
             assert_eq!(
                 raw_ingress_gate(&manifest(&source)),
                 Ok(()),
-                "body = {body} needs no acknowledgement"
+                "body {body} needs no acknowledgement"
             );
         }
-        let no_ingress = "version = 1\napp = \"app:app\"\n\n[[route]]\nname = \"home\"\n\
-                          path = ['.*']\n";
+        let no_ingress = "app \"app:app\"\n\nview home regex '.*' {}\n";
         assert_eq!(raw_ingress_gate(&manifest(no_ingress)), Ok(()));
     }
 
@@ -6473,9 +6331,8 @@ allow_raw = true
     /// places is fixed in one boot rather than one denial at a time.
     #[test]
     fn every_unacknowledged_route_is_named_in_route_order() {
-        let source = REFUSED.replace("name = \"upload\"", "name = \"first\"")
-            + "\n[[route]]\nname = \"second\"\npath = ['/second']\nmethods = [\"POST\"]\n\
-               \n[route.ingress]\nbody = \"raw\"\n";
+        let source = REFUSED.replace("view upload", "view first")
+            + "\nview second POST \"/second\" {\n    body raw\n}\n";
         let message = raw_ingress_gate(&manifest(&source)).unwrap_err();
         assert_eq!(message.lines().count(), 2, "{message}");
         assert!(

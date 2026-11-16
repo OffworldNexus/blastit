@@ -92,7 +92,7 @@ impl Sandbox {
     }
 
     fn write_manifest(&self, content: &str) {
-        fs::write(self.dir.join("blastit.toml"), content).expect("write blastit.toml");
+        fs::write(self.dir.join("Blastfile"), content).expect("write Blastfile");
     }
 
     fn run_cli(&self, arguments: &[&str]) -> Output {
@@ -134,13 +134,13 @@ impl Drop for Sandbox {
 }
 
 const MANIFEST: &str = "\
-version = 1
-app = \"demo:application\"
-preload = [\"one\", \"two\"]
+app \"demo\"
 
-[[route]]
-name = \"home\"
-path = [\"/\"]
+entrypoint python \"demo:application\" {
+    preload \"one\", \"two\"
+}
+
+view home GET \"/\" {}
 ";
 
 #[test]
@@ -149,19 +149,19 @@ fn cwd_manifest_is_discovered_with_no_upward_search() {
     sandbox.write_manifest(MANIFEST);
 
     let config = Config::from_env(None).expect("the CWD manifest is enough");
-    assert_eq!(config.manifest, PathBuf::from("./blastit.toml"));
+    assert_eq!(config.manifest, PathBuf::from("./Blastfile"));
     assert_eq!(config.app.as_deref(), Some("demo:application"));
     assert_eq!(config.preload, ["one", "two"]);
 
     // A parent manifest is never consulted: the same file one directory up does
-    // not make `./blastit.toml` exist in a child.
-    let parent = sandbox.path().join("parent.toml");
+    // not make `./Blastfile` exist in a child.
+    let parent = sandbox.path().join("parent-Blastfile");
     fs::write(&parent, MANIFEST).expect("write the parent manifest");
     let child = sandbox.path().join("child");
     fs::create_dir(&child).expect("create the child directory");
     sandbox.enter(&child);
-    let config = Config::from_env(None).expect("a missing ./blastit.toml is not a parse error");
-    assert_eq!(config.manifest, PathBuf::from("./blastit.toml"));
+    let config = Config::from_env(None).expect("a missing ./Blastfile is not a parse error");
+    assert_eq!(config.manifest, PathBuf::from("./Blastfile"));
     assert_eq!(config.app, None, "no upward search reached the parent");
     assert!(config.preload.is_empty());
 }
@@ -592,7 +592,7 @@ fn an_empty_directory_names_the_missing_manifest_before_the_app() {
 
     // `blastit dev` reaches its configuration without capabilities, so it is
     // the entry point an unprivileged suite can observe: in a directory with no
-    // `./blastit.toml` the file is what is missing, and `BLASTIT_APP` must not
+    // `./Blastfile` the file is what is missing, and `BLASTIT_APP` must not
     // be blamed for its absence (MA gate, `MB.1.6`).
     let output = sandbox.run_cli_env(&[("BLASTIT_MEM_HIGH_WATERMARK", "100")], &["dev"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -602,7 +602,7 @@ fn an_empty_directory_names_the_missing_manifest_before_the_app() {
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("blastit.toml"), "{stderr}");
+    assert!(stderr.contains("./Blastfile"), "{stderr}");
     assert!(
         !stderr.contains("BLASTIT_APP"),
         "the file is missing, not the app: {stderr}"
@@ -610,7 +610,7 @@ fn an_empty_directory_names_the_missing_manifest_before_the_app() {
 
     // The other order still holds: a manifest that exists and declares no `app`
     // is the setting's problem, and the file is not named as missing.
-    sandbox.write_manifest("version = 1\n\n[[route]]\nname = \"home\"\npath = [\"/\"]\n");
+    sandbox.write_manifest("view home GET \"/\" {}\n");
     let output = sandbox.run_cli_env(&[("BLASTIT_MEM_HIGH_WATERMARK", "100")], &["dev"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(

@@ -107,7 +107,9 @@ pub enum StaticOutcome {
     /// Nothing at that path: the caller may forward (design §4.3 steps 9–10).
     Missing,
     /// `spa = true` and `root/index` is missing: `404`, final.
-    SpaLost,
+    ///
+    /// The declared `fallback` file is missing or refused (§9.2 step 3, §9.3).
+    FallbackMissing,
     /// The entry exists but is not servable (a dotfile, a PHP source, a
     /// symlink, a special or oversize file): `404`, final.
     Hidden,
@@ -122,7 +124,8 @@ pub enum AnswerKind {
     Exact,
     /// The request path named a directory whose `index` answered.
     DirectoryIndex,
-    /// The request path named nothing; the root `index` answered.
+    /// The request path named nothing; the declared `fallback` answered
+    /// (§9.2 step 3).
     SpaFallback,
 }
 
@@ -250,14 +253,19 @@ pub struct StaticRoot {
     /// The `index` file, relative to `root` (validation guarantees no
     /// leading `/`, no `.`/`..` segment and no dotfile segment).
     pub(crate) index: String,
-    /// Whether a miss answers `index` instead of the app, derived from
-    /// [`StaticPolicy::fallback`] (§9.3).
+    /// The declared `fallback` file, relative to `root`, or `None` when a miss
+    /// is the caller's (§9.3).
     ///
-    /// The retired reader lowers its flag to `fallback = Some(index)`, so the
-    /// two spellings agree on every document this build can parse. `MB.21.4.2`
-    /// reshapes the path to answer the declared `fallback` file itself, which
-    /// is why this stays a flag until then.
-    pub(crate) spa: bool,
+    /// The file is resolved **under `root` at request time**, never at boot, so
+    /// a build output that appears after the boot still answers.
+    pub(crate) fallback: Option<String>,
+    /// The mount prefix this root answers under (`"/"` for the retired reader's
+    /// mount at the URL root).
+    ///
+    /// Only [`StaticFile::url_path`] reads it: a file's cache key and its
+    /// `immutable` glob are matched against the path the **client** asked for
+    /// (§9.4), so the prefix has to be put back after the strip.
+    pub(crate) prefix: String,
     /// The `/`-anchored patterns that earn the year-long cache.
     // Read by `static_response.rs`'s cache rule (`MB.2.4.2`).
     #[allow(dead_code)]
@@ -323,7 +331,8 @@ impl StaticRoot {
             root: policy.root.clone(),
             dirfd,
             index: policy.index.clone(),
-            spa: policy.fallback.is_some(),
+            fallback: policy.fallback.clone(),
+            prefix: "/".to_string(),
             immutable: policy
                 .immutable
                 .iter()
@@ -334,13 +343,39 @@ impl StaticRoot {
         })
     }
 
-    /// Resolves `segments` (already decoded, already split by [`segments`]).
+    /// This root with the mount prefix it answers under (§9.4).
+    ///
+    /// `StaticRoot::open` defaults to the URL root, which is the retired
+    /// reader's only mount and every unit fixture's shape.
+    pub fn with_prefix(mut self, prefix: &str) -> Self {
+        self.prefix = prefix.to_string();
+        self
+    }
+
+    /// Resolves `segments` (already decoded, already split by [`segments`]),
+    /// **including** the declared `fallback` a miss answers with (§9.3).
     ///
     /// A final PHP-source segment (`.php`/`.phtml`/`.phar`) is
     /// [`StaticOutcome::Hidden`] before any descriptor is opened, and so is any
-    /// candidate answer (`index`, SPA fallback) that ends that way.
+    /// candidate answer (`index`, the declared `fallback`) that ends that way.
+    ///
+    /// The scheduler's §9.2 pipeline does **not** use this form for step 1: a
+    /// mount that answers the `fallback` here would shadow every view, which is
+    /// exactly what §9.2 forbids. It resolves with [`StaticRoot::resolve_file`]
+    /// and asks [`StaticRoot::resolve_fallback`] only at step 3. This form is
+    /// the one-policy answer the responder and rewrite suites assert.
     pub fn resolve(&self, segments: &[&str]) -> StaticOutcome {
         self.resolve_with(segments, None)
+    }
+
+    /// §9.2 step 1: the **file** this request path answers, or `Missing`.
+    ///
+    /// A miss is `Missing` — never the declared `fallback`, which is step 3's
+    /// ([`StaticRoot::resolve_fallback`], consulted after every view). A
+    /// `FallbackMissing` is therefore impossible here: the fallback is not
+    /// looked at, so a broken one cannot decide a path a view claims.
+    pub fn resolve_file(&self, segments: &[&str]) -> StaticOutcome {
+        self.lookup(segments, None, false)
     }
 
     /// [`StaticRoot::resolve`], with a hook between the `O_PATH` probe and the
@@ -351,6 +386,17 @@ impl StaticRoot {
     /// exercise the TOCTOU arm without a real race.
     #[doc(hidden)]
     pub fn resolve_with(&self, segments: &[&str], after_probe: Option<&dyn Fn()>) -> StaticOutcome {
+        self.lookup(segments, after_probe, true)
+    }
+
+    /// The shared body of [`StaticRoot::resolve`] and
+    /// [`StaticRoot::resolve_file`]: `with_fallback` is the only difference.
+    fn lookup(
+        &self,
+        segments: &[&str],
+        after_probe: Option<&dyn Fn()>,
+        with_fallback: bool,
+    ) -> StaticOutcome {
         // `resolve` is `pub`, so the "the walk cannot leave the root" guarantee
         // is enforced here and not only by [`segments`]'s caller: a `..`, an
         // empty segment or an embedded `/` would let the per-segment walk open
@@ -382,32 +428,57 @@ impl StaticRoot {
                     ),
                     Landing::Hidden => StaticOutcome::Hidden,
                     // A directory with no servable `index` "falls through like
-                    // any missing path" (design §4.3 step 7).
-                    Landing::Directory | Landing::Missing => self.missed(after_probe),
+                    // any missing path" (design §4.3 step 7). §9.2 step 1 is
+                    // `Missing`, so the view table is consulted first.
+                    Landing::Directory | Landing::Missing => {
+                        if with_fallback {
+                            self.missed(after_probe)
+                        } else {
+                            StaticOutcome::Missing
+                        }
+                    }
                 }
             }
-            Landing::Missing => self.missed(after_probe),
+            Landing::Missing => {
+                if with_fallback {
+                    self.missed(after_probe)
+                } else {
+                    StaticOutcome::Missing
+                }
+            }
             Landing::Hidden => StaticOutcome::Hidden,
         }
     }
 
-    /// A miss: the SPA fallback, or `Missing` for the caller to forward.
+    /// A miss: the declared `fallback`, or `Missing` for the caller (§9.2 step
+    /// 3, §9.3).
+    ///
+    /// The fallback is a **file** now, not a flag answering `index`: resolving
+    /// it here keeps the file's own name for the cache key and the `Hidden`
+    /// rules. A fallback that is missing, a dotfile, a symlink or a
+    /// `.php`/`.phtml`/`.phar` source is [`StaticOutcome::FallbackMissing`].
     fn missed(&self, after_probe: Option<&dyn Fn()>) -> StaticOutcome {
-        if !self.spa {
+        let Some(fallback) = self.fallback.as_deref() else {
             return StaticOutcome::Missing;
+        };
+        match self.probe(fallback) {
+            Landing::File(file, stat) => {
+                self.finish(file, stat, fallback, AnswerKind::SpaFallback, after_probe)
+            }
+            // A refused fallback is a `404` either way, and the fallback has no
+            // third answer.
+            Landing::Directory | Landing::Missing | Landing::Hidden => {
+                StaticOutcome::FallbackMissing
+            }
         }
-        match self.probe(&self.index) {
-            Landing::File(file, stat) => self.finish(
-                file,
-                stat,
-                &self.index,
-                AnswerKind::SpaFallback,
-                after_probe,
-            ),
-            // A refused index is a `404` either way, and the SPA fallback has
-            // no third answer: it is `SpaLost`.
-            Landing::Directory | Landing::Missing | Landing::Hidden => StaticOutcome::SpaLost,
-        }
+    }
+
+    /// Resolves the declared `fallback` file alone, for step 3 of §9.2.
+    ///
+    /// Used when a request matched a mount but neither a file nor a view
+    /// answered: only the mount's own `fallback` may, and only for `GET`/`HEAD`.
+    pub fn resolve_fallback(&self) -> StaticOutcome {
+        self.missed(None)
     }
 
     /// The probe→read-open half: run the hook, re-open, and prove identity.
@@ -449,7 +520,7 @@ impl StaticRoot {
             return StaticOutcome::Hidden;
         }
         StaticOutcome::File(StaticFile {
-            url_path: format!("/{rel}"),
+            url_path: self.url_path(rel),
             kind,
             file,
             len,
@@ -459,6 +530,25 @@ impl StaticRoot {
                 mtime_nsec: u32::try_from(stat.st_mtime_nsec).unwrap_or(0),
             },
         })
+    }
+
+    /// The client's path, rebuilt from the mount prefix and the stripped
+    /// remainder (§9.4).
+    ///
+    /// `rel` is the resolved path **below** `root` and carries no leading `/`,
+    /// so the join is not `prefix + "/" + rel` (that yields `//assets/app.js`
+    /// for the root mount): it is the prefix alone for the mount's own
+    /// directory, `/{rel}` under the URL root, and `prefix/rel` otherwise.
+    /// `immutable "/assets/*"` therefore matches the same file whichever mount
+    /// serves it.
+    fn url_path(&self, rel: &str) -> String {
+        if rel.is_empty() {
+            return self.prefix.clone();
+        }
+        if self.prefix == "/" {
+            return format!("/{rel}");
+        }
+        format!("{}/{rel}", self.prefix)
     }
 
     /// Classifies one `O_PATH` probe.

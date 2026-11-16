@@ -72,7 +72,7 @@ const PAGES: [(&str, Counts); 10] = [
     ("README.md", [0, 0, 1]),
     ("docs/index.md", [0, 0, 1]),
     ("docs/getting-started.md", [0, 0, 1]),
-    ("docs/local.md", [0, 0, 1]),
+    ("docs/local.md", [1, 0, 0]),
     ("docs/frameworks/index.md", [0, 0, 1]),
     ("docs/frameworks/django.md", [0, 0, 1]),
     ("docs/frameworks/flask.md", [0, 0, 1]),
@@ -81,9 +81,10 @@ const PAGES: [(&str, Counts); 10] = [
     ("docs/blastfile.md", [1, 0, 0]),
 ];
 
-/// The whole documented set: one `text title="Blastfile"` document today, and
-/// the nine `toml title="blastit.toml"` manifests the migration replaces.
-const TOTAL: Counts = [1, 0, 9];
+/// The whole documented set: two `text title="Blastfile"` documents today
+/// (`docs/blastfile.md`'s and `docs/local.md`'s), and the eight
+/// `toml title="blastit.toml"` manifests the migration replaces.
+const TOTAL: Counts = [2, 0, 8];
 
 /// One fenced block: the opening it uses, the 1-based page line that opening
 /// sits on, and its body without the markers.

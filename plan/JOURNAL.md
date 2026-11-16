@@ -2154,3 +2154,35 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T08:13 [MB.21.4.2] (planner) narrowed: runtime parity plus design 4.3's removals only. The fixture-translation framing (rewrite/replace fixtures in the crates/blastit/tests suites) is delet
 - 2026-11-16T08:13 [MB.21.4.4] (planner) narrowed to e2e/**, the python/tests fixtures MB.21.4.1 did not migrate, scripts/** and the Makefile, with make e2e exit 0 as the leaf gate. Context now records
 - 2026-11-16T08:13 [MB.21.4] (planner) rescoped children after MB.21.4.1's needs_split (no code landed, 9+6 fixtures made the flip and the translation inseparable): Children rows and the ordering sen
+- 2026-11-16T08:13 [MB.21.4.1] (lead) status ready -> active
+- 2026-11-16T08:13 [MB.21.4.1] (lead) attempt 1/3 started
+- 2026-11-16T08:13 [MB.21.4.1] (lead) base f2773d4
+- 2026-11-16T08:24 [MB.21.4.1] (lead) edited fields
+- 2026-11-16T08:24 [MB.21.4.1] (lead) edited fields
+- 2026-11-16T08:24 [MB.21.4.1] (lead) attempt 1 hit the step limit mid-leaf; the flip is on disk uncommitted (18 files, lib+tests compiling). Widened paths to the two files the flip forces: crates/b
+- 2026-11-16T08:24 [MB.21.4.1] (lead) attempt 2/3 started
+- 2026-11-16T09:05 [MB.21] (lead) INCIDENT (MB.21.4.1): implementer wedged 1002s on an unwrapped 'background: true' cargo test --test critical_static_cli; harness killed pid 3158340, EXIT=101. R
+- 2026-11-16T09:09 [MB.21] (conductor) Owner directive — make Blastfile budgets comfortable across code + reference + design: raise MAX_SOURCE_BYTES from 1 MiB to 16 MiB (16_777_216), MAX_TOKENS and 
+- 2026-11-16T09:10 [MB.21.4.1] (lead) edited fields
+- 2026-11-16T09:10 [MB.21.4.1] (lead) measured by lead: critical_static_cli 10/12 (282s, no hang) — an_all_static_site_boots_under_dev_with_no_app and a_readable_root_under_an_owned_0700_ancestor_is
+- 2026-11-16T09:10 [MB.21.4.1] (lead) attempt 3/6 started
+- 2026-11-16T09:11 [MB.21.4.6] (planner) created (task) Raise the six Blastfile budgets (16 MiB source, 4M tokens/trivia, 4 KiB patterns, 4K list items, 256-char app name) and fix the token-cap sentenc
+- 2026-11-16T09:11 [MB.21.4.2] (planner) edited fields
+- 2026-11-16T09:16 [MB.22] (planner) created (epic) Ship blastit lsp and a ready-to-install Zed extension for Blastfile (highlighting, diagnostics, formatting)
+- 2026-11-16T09:16 [MB.22.1] (planner) created (task) Write the editor setup and blastit lsp DX docs (Zed extension, diagnostics, format-on-save) with dx + ai-ergonomics critics
+- 2026-11-16T09:16 [MB.22.2] (planner) created (task) Design blastit lsp and the Zed extension (ADR-0013) with security/implementability/testability/consistency critics
+- 2026-11-16T09:16 [MB.22.3] (planner) created (task) Add structured manifest spans and implement blastit lsp (stdio JSON-RPC) with protected framing/UTF-16/diagnostics/formatting tests
+- 2026-11-16T09:16 [MB.22.4] (planner) created (task) Ship editors/zed and the in-repo tree-sitter-blastfile grammar with corpus/query proofs
+- 2026-11-16T09:16 [MB.22.5] (planner) created (task) Pin the grammar rev, guard editors/**, and prove blastit lsp live in the standalone and console-script paths
+- 2026-11-16T09:16 [MB.22.6] (planner) created (task) Audit and mutation-test blastit lsp, the manifest spans, the grammar queries and the editors guard (test-curator)
+- 2026-11-16T09:16 [MB.22.6] (planner) edited fields
+- 2026-11-16T09:16 [MB.22.1] (planner) edited fields
+- 2026-11-16T09:16 [MB.22.6] (planner) edited fields
+- 2026-11-16T09:22 [MB.21.4.1] (lead) attempt 3 green in Rust: scheduler serves mounts (MountTable longest-prefix, MountHead refusals, Missing->view->fallback->404), model static_roots/check_static_
+- 2026-11-16T09:22 [MB.21.4.1] (lead) attempt 4/6 started
+- 2026-11-16T09:37 [MB.21.4.1] (lead) edited fields
+- 2026-11-16T09:37 [MB.21.4.1] (lead) attempt 4 left two gate blockers, both outside the old paths: (a) python/tests/critical/test_check_contract.py stages a v1 fixture and the PyO3 binding still pa
+- 2026-11-16T09:37 [MB.21.4.1] (lead) attempt 5/6 started
+- 2026-11-16T09:52 [MB.21.4.1] (implementer) edited fields
+- 2026-11-16T09:56 [MB.21.4.1] (lead) status active -> review
+- 2026-11-16T10:10 [MB.21.4.1] (lead) status review -> done

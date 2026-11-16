@@ -47,7 +47,6 @@ import sys
 import tempfile
 import threading
 import time
-import tomllib
 import types
 import unittest
 from pathlib import Path
@@ -604,23 +603,17 @@ sys.exit(0)
 '''
 
 PROJECT_MANIFEST = """\
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-
-[[route]]
-name = "home"
-path = ['/']
-[route.db]
-queries = ["SELECT 1"]
+view home "/" {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 """
 
 #: The manifest that grants the statement the app never sends (`exit 1`).
-DEGRADED_MANIFEST = PROJECT_MANIFEST.replace(
-    'queries = ["SELECT 1"]', 'queries = ["SELECT 2"]'
-)
+DEGRADED_MANIFEST = PROJECT_MANIFEST.replace("query 'SELECT 1'", "query 'SELECT 2'")
 
 #: Django DB runner: never calls `finish_django_handshake()` itself — the real
 #: `pytest_fixture_setup` hookwrapper must trigger on `django_db_setup`, scrub
@@ -677,20 +670,14 @@ DJANGO_NO_DB_RUNNER = (
 )
 
 UPLOAD_MANIFEST = """\
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-
-[[route]]
-name = "upload"
-path = ['/upload']
-[route.ingress]
-body = "raw"
-allow_raw = true
-[route.db]
-queries = ["SELECT 1"]
+view upload POST "/upload" {
+    body raw unvalidated
+    postgres {
+        query 'SELECT 1'
+    }
+}
 """
 
 
@@ -700,13 +687,13 @@ class Project:
     def __init__(self, manifest: str, runner: str = MINI_RUNNER) -> None:
         self._directory = tempfile.TemporaryDirectory()
         self.root = Path(self._directory.name)
-        (self.root / "blastit.toml").write_text(manifest, encoding="utf-8")
+        (self.root / "Blastfile").write_text(manifest, encoding="utf-8")
         (self.root / "app.py").write_text(MINI_APP, encoding="utf-8")
         tests = self.root / "tests"
         tests.mkdir()
         (tests / "test_contract.py").write_text(runner, encoding="utf-8")
         (tests / "pyproject.toml").write_text(
-            '[tool.pytest.ini_options]\nblastit_manifest = "blastit.toml"\n',
+            '[tool.pytest.ini_options]\nblastit_manifest = "Blastfile"\n',
             encoding="utf-8",
         )
         stub = self.root / "stub" / "pytest"
@@ -997,7 +984,7 @@ class TestTheContract(unittest.TestCase):
         """`R29`: a failing suite is exit `3`, no document, and a byte-identical manifest."""
         server = self.server()
         project = self.project()
-        before = (project.root / "blastit.toml").read_bytes()
+        before = (project.root / "Blastfile").read_text(encoding="utf-8")
         run = self.run_check(
             project, "--learn", "--json", server=server, env={"CONTRACT_EXIT": "1"}
         )
@@ -1006,7 +993,9 @@ class TestTheContract(unittest.TestCase):
             run.stdout, b"", "exit 3 emits no document, not even a proposal"
         )
         self.assertEqual(
-            (project.root / "blastit.toml").read_bytes(), before, "nothing was written"
+            (project.root / "Blastfile").read_text(encoding="utf-8"),
+            before,
+            "nothing was written",
         )
 
     def test_learn_refuses_an_inline_literal_with_exit_one_and_writes_nothing(
@@ -1030,7 +1019,7 @@ class TestTheContract(unittest.TestCase):
         (refused_project.root / "app.py").write_text(
             _learn_app(literal), encoding="utf-8"
         )
-        before = (refused_project.root / "blastit.toml").read_bytes()
+        before = (refused_project.root / "Blastfile").read_text(encoding="utf-8")
         refused = self.run_check(refused_project, "--learn", "--json", server=server)
         self.assertEqual(refused.returncode, 1, refused.stderr.decode())
         # The statement reaches this test's own server asynchronously: the view
@@ -1054,10 +1043,10 @@ class TestTheContract(unittest.TestCase):
             {"routes": 1, "queries": 0},
             "a route was worth writing; only the refused query was withheld",
         )
-        after = (refused_project.root / "blastit.toml").read_bytes()
+        after = (refused_project.root / "Blastfile").read_text(encoding="utf-8")
         self.assertEqual(after, before, "a refusal writes nothing")
-        self.assertNotIn(b'name = "notes"', after, "no [[route]] line was added")
-        self.assertNotIn(b"SELECT 1 WHERE", after, "no queries line was added")
+        self.assertNotIn('view notes "/notes"', after, "no view line was added")
+        self.assertNotIn("SELECT 1 WHERE", after, "no query line was added")
         self.assertIn(b"learn: refused", refused.stderr)
         self.assertIn(
             b"bind the value with a placeholder instead",
@@ -1084,21 +1073,19 @@ class TestTheContract(unittest.TestCase):
         (written_project.root / "app.py").write_text(
             _learn_app(parameterised), encoding="utf-8"
         )
-        before = (written_project.root / "blastit.toml").read_bytes()
+        before = (written_project.root / "Blastfile").read_text(encoding="utf-8")
         written = self.run_check(written_project, "--learn", "--json", server=server)
         self.assertEqual(written.returncode, 0, written.stderr.decode())
         document = written.document()
         self.assertTrue(document["wrote"], document)
         self.assertEqual(document["proposed"], {"routes": 1, "queries": 1}, document)
-        text = (written_project.root / "blastit.toml").read_bytes()
+        text = (written_project.root / "Blastfile").read_text(encoding="utf-8")
         self.assertNotEqual(text, before, "the parameterised grant was written")
-        manifest = tomllib.loads(text.decode("utf-8"))
-        notes = [route for route in manifest["route"] if route.get("name") == "notes"]
-        self.assertEqual(len(notes), 1, text.decode("utf-8"))
-        self.assertEqual(notes[0]["path"], ["/notes"], notes)
-        self.assertEqual(
-            notes[0]["db"]["queries"],
-            ["SELECT 1 WHERE $? = $?"],
+        self.assertEqual(text.count('view notes "/notes"'), 1, text)
+        notes_block = text[text.index('view notes "/notes"') :].split("\nview ", 1)[0]
+        self.assertIn(
+            "query 'SELECT 1 WHERE $? = $?'",
+            notes_block,
             "the grant holds the normalised text, placeholders as `$?`",
         )
 
@@ -1256,9 +1243,7 @@ class TestTheContract(unittest.TestCase):
         would land in the developer's own database.
         """
         server = self.server()
-        project = self.project(
-            "version = 1\n\n[[route]]\nname = \"home\"\npath = ['/']\n"
-        )
+        project = self.project('app "home"\n\nview home "/" {}\n')
         project.install_django_stub()
         run = self.run_check(
             project,

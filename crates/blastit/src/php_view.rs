@@ -75,7 +75,7 @@ const VIEW_PROCESS_MARGIN: u32 = 16;
 /// granted proxy sockets, `libphp` and its extensions).
 const VIEW_NOFILE: u64 = 1024;
 
-/// Everything the child needs to load and run `[route.php]`.
+/// Everything the child needs to load and run `entrypoint php`.
 ///
 /// Both shared objects are **descriptors**, never paths: the child keeps them
 /// across `ChildIo::prepare` and `dlopen`s `/proc/self/fd/<n>`, so the file
@@ -97,7 +97,7 @@ pub struct PhpBinding {
     pub libphp: OwnedFd,
     /// The matching `libblastit_php8X.so` shim (`MB.3.12`).
     pub shim: OwnedFd,
-    /// Absolute `SCRIPT_FILENAME` (`[route.php] entry`), pinned at boot: the
+    /// Absolute `SCRIPT_FILENAME` (the `entrypoint php`), pinned at boot: the
     /// record is [`PhpBinding::entry_pin`] beside it, and every request
     /// re-checks the file at this path against that record.
     pub entry: PathBuf,
@@ -143,7 +143,7 @@ impl PhpBinding {
     }
 }
 
-/// The `[route.php] entry` as the boot recorded it (`MB.3.56`, `ADR-0010` §3).
+/// The `entrypoint php` as the boot recorded it (`MB.3.56`, `ADR-0010` §3).
 ///
 /// `(st_dev, st_ino)` says *which* file, and the pair alone is not enough: a
 /// rewrite **in place** — what `cp`, `tar -x` and a deploy script do — keeps the
@@ -290,16 +290,18 @@ pub fn boot_bindings(
     dev: Option<&crate::dev_learn::Dev>,
 ) -> Result<Vec<Option<PhpBinding>>, String> {
     let mut bindings: Vec<Option<PhpBinding>> = routes.iter().map(|_| None).collect();
+    // §12.2: one `entrypoint php` for the whole file, so **every** view runs it.
+    // A file with no front controller binds nothing.
+    let Some(php) = manifest.php() else {
+        return Ok(bindings);
+    };
     // The manifest's route `i` is slot `i + offset`.
     let offset = routes.len().saturating_sub(manifest.routes().len());
     for (index, route) in manifest.routes().iter().enumerate() {
-        let Some(php) = route.php() else {
-            continue;
-        };
         let slot = index + offset;
         let Some(info) = routes.get(slot) else {
             return Err(format!(
-                "route {:?}: no view slot for [route.php] entry {:?}; the manifest and the \
+                "route {:?}: no view slot for entrypoint php {:?}; the manifest and the \
                  scheduler's routing table disagree",
                 route.name(),
                 php.entry
@@ -307,7 +309,7 @@ pub fn boot_bindings(
         };
         let Some(record) = config.php.as_ref() else {
             return Err(format!(
-                "route {:?}: stage 0 recorded no NTS libphp for [route.php] entry {:?}, so there \
+                "route {:?}: stage 0 recorded no NTS libphp for entrypoint php {:?}, so there \
                  is nothing to load; restart blastit so the discovery gate runs again",
                 route.name(),
                 php.entry
@@ -317,7 +319,7 @@ pub fn boot_bindings(
         let entry = document_root.join(&php.entry);
         if !entry.starts_with(&document_root) {
             return Err(format!(
-                "route {:?}: [route.php] entry {:?} leaves the application root {}; a script \
+                "route {:?}: entrypoint php {:?} leaves the application root {}; a script \
                  outside it would also be outside open_basedir",
                 route.name(),
                 php.entry,
@@ -401,7 +403,7 @@ fn open_pinned(
     Ok(fd)
 }
 
-/// `ADR-0010` §3: records the resolved `[route.php] entry` — the same record the
+/// `ADR-0010` §3: records the resolved `entrypoint php` — the same record the
 /// pair carries, plus `st_size`/`st_ctime` and an `O_PATH` descriptor — or the
 /// sentence the boot refuses with.
 ///
@@ -421,7 +423,7 @@ fn open_pinned(
 fn pin_entry(entry: &Path, route: &str, declared: &str) -> Result<(EntryPin, OwnedFd), String> {
     let not_a_file = |detail: String| {
         format!(
-            "route {route:?}: [route.php] entry {declared:?} is not a file ({}: {detail}); \
+            "route {route:?}: entrypoint php {declared:?} is not a file ({}: {detail}); \
              SCRIPT_FILENAME is pinned to it and never taken from the request",
             entry.display()
         )
@@ -464,7 +466,7 @@ fn pin_entry(entry: &Path, route: &str, declared: &str) -> Result<(EntryPin, Own
 fn verify_entry(route: &str, entry: &Path, pin: EntryPin) -> Result<(), String> {
     let changed = |why: String| {
         format!(
-            "route {route:?}: [route.php] entry {} changed since this boot recorded it ({why}), \
+            "route {route:?}: entrypoint php {} changed since this boot recorded it ({why}), \
              so this worker will not run it; restart blastit to run the file as it is now, and \
              restore it first if you did not change it",
             entry.display()
@@ -557,7 +559,7 @@ impl blastit_view::WorkerRuntime for PinnedEntryRuntime {
     }
 }
 
-/// Everything a boot's `[route.php]` probe needs (`ADR-0010` §3).
+/// Everything a boot's `entrypoint php` probe needs (`ADR-0010` §3).
 ///
 /// `bindings` is what [`boot_bindings`] built — the **pinned** descriptors stage
 /// 0 inspected — so the probe loads exactly the files the workers will, one step
@@ -584,7 +586,7 @@ pub struct PhpProbeBoot<'a> {
 /// can be long, and this becomes one log line (≤ 2048 bytes, §1.1).
 const PROBE_MESSAGE_MAX: usize = 512;
 
-/// `ADR-0010` §3: one contained probe child per `[route.php]` route, forked
+/// `ADR-0010` §3: one contained probe child per `entrypoint php`, forked
 /// **before** `bind_tcp`, that loads the pair stage 0 inspected and runs
 /// `blastit_php_worker_init` + `blastit_php_worker_shutdown` in it.
 ///
@@ -626,7 +628,7 @@ fn probe_route(
 ) -> Result<(), String> {
     let (message, message_write) = pipe().map_err(|err| {
         format!(
-            "route {:?}: the [route.php] probe child's diagnostic pipe: {err}",
+            "route {:?}: the entrypoint php probe child's diagnostic pipe: {err}",
             info.name
         )
     })?;
@@ -651,7 +653,7 @@ fn probe_route(
     };
     let fork = crate::forking::fork(probe.interpreter_live).map_err(|err| {
         format!(
-            "route {:?}: the [route.php] probe child could not be forked: {err}",
+            "route {:?}: the entrypoint php probe child could not be forked: {err}",
             info.name
         )
     })?;
@@ -1384,7 +1386,7 @@ entry = \"public/index.php\"
         let shim = std::fs::read(format!("/proc/self/fd/{}", fds[1])).expect("the shim fd");
         assert_eq!(shim, b"the shim stage 0 inspected");
 
-        // A route with no `[route.php]` policy is a WSGI slot and gets nothing.
+        // A view with no `entrypoint php` is a WSGI slot and gets nothing.
         let (wsgi, _warnings) = Manifest::parse_and_validate(
             "version = 1\n\n[[route]]\nname = \"web\"\npath = ['.*']\n",
             20_000,

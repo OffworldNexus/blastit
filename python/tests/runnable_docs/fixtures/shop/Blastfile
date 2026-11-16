@@ -1,0 +1,11 @@
+app "shop"
+
+entrypoint python "app:application"
+
+postgres $DATABASE_URL
+
+view home regex '.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}

@@ -92,36 +92,32 @@ def app(environ, start_response):
     return [body]
 "#;
 
-/// A manifest whose only route takes a `raw` body, with the acknowledgement as
-/// the caller wrote it (`allow_raw = true` or nothing at all).
-fn raw_manifest(route: &str, acknowledgement: &str) -> String {
+/// A manifest whose only view takes a `raw` body, with the acknowledgement as
+/// the caller wrote it (`unvalidated` or nothing at all).
+fn raw_manifest(view: &str, acknowledgement: &str) -> String {
     format!(
-        r#"version = 1
-app = "app:app"
+        r#"app "app"
+entrypoint python "app:app"
 
-[[route]]
-name = "{route}"
-path = ['/upload']
-methods = ["POST"]
-
-[route.ingress]
-body = "raw"
-{acknowledgement}"#
+view {view} POST "/upload" {{
+    body raw{acknowledgement}
+}}
+"#
     )
 }
 
-/// A manifest whose raw route is acknowledged — the shape a `body = "raw"`
+/// A manifest whose raw view is acknowledged — the shape a `body raw`
 /// deployment must now have.
 fn accepted_manifest() -> String {
-    raw_manifest("upload", "allow_raw = true\n")
+    raw_manifest("upload", " unvalidated\n")
 }
 
-/// A manifest with the same route and no acknowledgement: the boot refusal.
+/// A manifest with the same view and no acknowledgement: the boot refusal.
 fn refused_manifest() -> String {
-    raw_manifest("upload", "")
+    raw_manifest("upload", "\n")
 }
 
-/// A fresh fixture directory holding `blastit.toml` (and `app.py` when the
+/// A fresh fixture directory holding `Blastfile` (and `app.py` when the
 /// serving twin needs it).
 fn fixture(tag: &str, manifest: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -132,7 +128,7 @@ fn fixture(tag: &str, manifest: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("a fixture directory");
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("a readable fixture");
-    fs::write(dir.join("blastit.toml"), manifest).expect("write blastit.toml");
+    fs::write(dir.join("Blastfile"), manifest).expect("write Blastfile");
     #[cfg(feature = "python")]
     {
         fs::write(dir.join("app.py"), APP).expect("write app.py");
@@ -172,7 +168,7 @@ fn free_port() -> u16 {
 /// log format's decision, so both spellings are asserted rather than assumed.
 fn config_document(dir: &Path, port: u16, format: LogFormat) -> Vec<u8> {
     let config = blastit::config::Config {
-        manifest: dir.join("blastit.toml"),
+        manifest: dir.join("Blastfile"),
         manifest_dir: dir.to_path_buf(),
         port,
         server_port: port,
@@ -423,15 +419,15 @@ fn production_stage_one_refuses_a_manifest_edited_after_stage_zero_approved_it()
     let document = config_document(&dir, port, LogFormat::Json);
     let document_text = String::from_utf8_lossy(&document).into_owned();
     assert!(
-        document_text.contains(&*dir.join("blastit.toml").to_string_lossy()),
+        document_text.contains(&*dir.join("Blastfile").to_string_lossy()),
         "the document carries the manifest's path: {document_text}"
     );
     assert!(
-        !document_text.contains("allow_raw"),
+        !document_text.contains("unvalidated") && !document_text.contains("body raw"),
         "the document carries no record of what stage 0 approved: {document_text}"
     );
     // The edit, between the stages: the acknowledgement is gone.
-    fs::write(dir.join("blastit.toml"), refused_manifest()).expect("rewrite blastit.toml");
+    fs::write(dir.join("Blastfile"), refused_manifest()).expect("rewrite Blastfile");
 
     let (code, stdout, stderr) = stage_one(&dir, &document);
     let _ = fs::remove_dir_all(&dir);
@@ -620,7 +616,7 @@ fn response_body(raw: &[u8]) -> Vec<u8> {
     decoded
 }
 
-/// **The accepted twin.** The same route with `allow_raw = true` boots and
+/// **The accepted twin.** The same view with `body raw unvalidated` boots and
 /// serves the body exactly as it arrived — so the gate is a gate, not a blanket
 /// refusal — and `dev` still says the body goes through unvalidated (the
 /// warning half of the rule is not deleted to make the refusal pass).

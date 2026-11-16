@@ -1,9 +1,9 @@
-//! `blastit check`: audit a pytest suite against `blastit.toml` (R3..R5, R30).
+//! `blastit check`: audit a pytest suite against a `Blastfile` (R3..R5, R30).
 //!
 //! The command is a transaction with one place where it can fail and one place
 //! where it writes:
 //!
-//! 1. **Before anything runs**, the CLI, the configuration, `./blastit.toml`
+//! 1. **Before anything runs**, the CLI, the configuration, `./Blastfile`
 //!    and every `[proxy.*]` input are validated. Any problem exits **`2`** with
 //!    **nothing on stdout** — under `--json` stdout is reserved for exactly one
 //!    document.
@@ -64,7 +64,8 @@ use crate::cli::CheckOptions;
 use crate::config::Config;
 use crate::host::{Host, Install};
 use crate::stage0::{
-    PhpBoot, PhpShimScope, php_boot_gate, static_app_refusal, static_root_permission,
+    PhpBoot, PhpShimScope, is_static_only, php_boot_gate, static_app_refusal,
+    static_root_permission,
 };
 
 /// The process exited cleanly: pytest passed and no finding fails the run.
@@ -132,7 +133,7 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     config.validate().map_err(|error| error.to_string())?;
 
     let source = read_manifest(&config.manifest)?;
-    let (manifest, _warnings) = Manifest::parse_and_validate(&source, config.uid_base)
+    let (manifest, _warnings) = Manifest::parse_blastfile(&source, config.uid_base)
         .map_err(|errors| format!("{}: {errors}", config.manifest.display()))?;
     // The routing table is built here, not only inside the engine: the same
     // table resolves each observed request to its route (`resolve_targets`), so
@@ -146,7 +147,7 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     if let Some(message) = static_app_refusal(&config, &manifest) {
         return Err(message);
     }
-    // `ADR-0010` §3, §4.1: the same `[route.php]` discovery gate the boot runs,
+    // `ADR-0010` §3, §4.1: the same `entrypoint php` discovery gate the boot runs,
     // so `blastit check` reaches the package sentence rather than handing pytest
     // a manifest no worker of this host could serve. `check` looks where `dev`
     // does (`BLASTIT_PHP_SHIM_DIR`, the `target/php-sapi` `make php-sapi`
@@ -170,7 +171,7 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     // `R14`: an all-static site has nothing to exercise — no pytest, no
     // dbproxy, no observation file. Every root is audited above; the report is
     // the same document a run with an app prints, with the counts at zero.
-    if manifest.is_all_static() {
+    if is_static_only(&manifest) {
         if options.learn {
             return Err("nothing to learn: every route is static".to_string());
         }
@@ -291,14 +292,19 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     Ok(if report.ok { CLEAN } else { FINDINGS })
 }
 
-/// Reads `./blastit.toml` (or `BLASTIT_MANIFEST`), naming the fix when absent.
+/// Reads the discovered manifest (design §15.1), naming the fix when absent.
+///
+/// Discovery is [`crate::config::manifest_path`]'s — the same function `dev`,
+/// the boot and `fmt` call — so `check` can never read a different file. The
+/// missing-file sentence is §15.1's one sentence, produced exactly once in
+/// [`crate::config::missing_manifest`].
 fn read_manifest(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|error| {
-        format!(
-            "{}: {error} (run `blastit check` from the directory that holds \
-             blastit.toml, or set BLASTIT_MANIFEST)",
-            path.display()
-        )
+        if error.kind() == std::io::ErrorKind::NotFound {
+            crate::config::missing_manifest(path)
+        } else {
+            format!("{}: {error}", path.display())
+        }
     })
 }
 
@@ -438,7 +444,7 @@ fn django_document(
 ) -> Result<serde_json::Value, String> {
     let Some((name, upstream)) = prepared.upstreams().first() else {
         return Err(
-            "pytest-django is installed but blastit.toml declares no postgresql proxy, \
+            "pytest-django is installed but the Blastfile declares no postgresql proxy, \
              so its test database has nowhere to go; declare [proxy.<name>] with \
              protocol = \"postgresql\" (see docs/frameworks/django.md), or remove \
              pytest-django from the environment blastit audits"
@@ -976,7 +982,7 @@ fn learn(
     let mut wrote = false;
     let mut failure = None;
     if plan.would_write(options.dry_run) {
-        match blastit_manifest::edit::apply_edits(source, &plan.edits) {
+        match blastit_manifest::blastfile::apply_edits(source, &plan.edits) {
             Ok(edited) if edited != source => {
                 match blastit_manifest::edit::write_atomic(&config.manifest, &edited) {
                     Ok(()) => wrote = true,
@@ -1164,21 +1170,15 @@ mod tests {
     use crate::audit_v1::{HttpObsLine, SCHEMA_VERSION};
 
     const MANIFEST: &str = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+view catalog regex '/catalog/.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 
-[[route]]
-name = "catalog"
-path = ['/catalog/.*']
-[route.db]
-queries = ["SELECT 1"]
-
-[[route]]
-name = "fallback"
-path = ['.*']
+view fallback regex '.*' {}
 "#;
 
     fn statement(target: ObsTarget, sql: &str) -> WireSqlObs {
@@ -1251,9 +1251,7 @@ path = ['.*']
         // Denied twin: no route at all stays unrouted, so `--learn` can
         // propose one and the audit can report it.
         let manifest = audit_v1::parse_manifest(
-            "version = 1\n\n[proxy.db]\nprotocol = \"postgresql\"\n\
-             input = { url = \"DATABASE_URL\" }\n\n[[route]]\nname = \"catalog\"\n\
-             path = ['/catalog/.*']\n",
+            "postgres $DATABASE_URL\n\nview catalog regex '/catalog/.*' {}\n",
         )
         .expect("manifest");
         let table = RoutingTable::new(&manifest).expect("table");
@@ -1294,9 +1292,7 @@ path = ['.*']
         // The whole point of resolving: the same statement is a `missing_grant`
         // under `Unrouted` in the raw stream and not one once resolved.
         let manifest = audit_v1::parse_manifest(
-            "version = 1\n\n[proxy.db]\nprotocol = \"postgresql\"\n\
-             input = { url = \"DATABASE_URL\" }\n\n[[route]]\nname = \"catalog\"\n\
-             path = ['/catalog/.*']\n[route.db]\nqueries = [\"SELECT 1\"]\n",
+            "postgres $DATABASE_URL\n\nview catalog regex '/catalog/.*' {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n",
         )
         .expect("manifest");
         let table = RoutingTable::new(&manifest).expect("table");
@@ -1349,34 +1345,35 @@ path = ['.*']
     fn the_learn_line_names_dry_runs_and_absolute_paths() {
         let mut plan = audit_v1::LearnPlan::default();
         plan.edits
-            .routes
-            .push(blastit_manifest::edit::ProposedRoute {
+            .views
+            .push(blastit_manifest::blastfile::ProposedView {
                 name: "orders".to_string(),
-                path: vec!["/orders/[0-9]+".to_string()],
+                methods: Vec::new(),
+                patterns: vec!["/orders/{id:int}".to_string()],
             });
         plan.edits
             .grants
-            .push(blastit_manifest::edit::ProposedGrant {
-                route: "orders".to_string(),
-                proxy: "db".to_string(),
+            .push(blastit_manifest::blastfile::ProposedGrant {
+                view: "orders".to_string(),
+                store: None,
                 queries: vec!["SELECT 1".to_string()],
             });
-        let line = learn_line(&plan, Path::new("./blastit.toml"), false);
+        let line = learn_line(&plan, Path::new("./Blastfile"), false);
         assert!(
             line.starts_with("learn: 1 routes, 1 queries added → /"),
             "{line}"
         );
         assert!(!line.contains("dry-run"), "{line}");
-        let dry = learn_line(&plan, Path::new("./blastit.toml"), true);
+        let dry = learn_line(&plan, Path::new("./Blastfile"), true);
         assert!(dry.contains("proposed (dry-run)"), "{dry}");
         assert!(!dry.contains("added"), "a dry run adds nothing: {dry}");
     }
 
     #[test]
     fn a_missing_manifest_names_the_fix() {
-        let error = read_manifest(Path::new("/nonexistent/blastit.toml")).unwrap_err();
+        let error = read_manifest(Path::new("/nonexistent/Blastfile")).unwrap_err();
         assert!(error.contains("BLASTIT_MANIFEST"), "{error}");
-        assert!(error.contains("blastit.toml"), "{error}");
+        assert!(error.contains("Blastfile"), "{error}");
     }
 
     #[test]
@@ -1460,10 +1457,7 @@ path = ['.*']
         // Split-form proxy inputs work too: `DB_PASSWORD` has no output slot in
         // `swapped` and the local socket endpoint is still explicit.
         let split_manifest = audit_v1::parse_manifest(
-            "version = 1\n\n[proxy.db]\nprotocol = \"postgresql\"\n\
-             input = { host = \"DB_HOST\", port = \"DB_PORT\", user = \"DB_USER\", \
-             password = \"DB_PASSWORD\", database = \"DB_DATABASE\" }\n\n\
-             [[route]]\nname = \"home\"\npath = ['/']\n",
+            "postgres {\n    host $DB_HOST\n    port $DB_PORT\n    user $DB_USER\n    password $DB_PASSWORD\n    database $DB_DATABASE\n}\n\nview home \"/\" {}\n",
         )
         .expect("split manifest");
         let split_platform = BTreeMap::from([
@@ -1525,9 +1519,7 @@ path = ['.*']
 
     #[test]
     fn a_pytest_django_project_without_a_postgresql_proxy_is_a_start_failure() {
-        let manifest =
-            audit_v1::parse_manifest("version = 1\n\n[[route]]\nname = \"home\"\npath = ['/']\n")
-                .expect("manifest");
+        let manifest = audit_v1::parse_manifest("view home \"/\" {}\n").expect("manifest");
         let platform = BTreeMap::new();
         let prepared = blastit_env::build_with_socket_dir(&manifest, &platform, None, "/run/x")
             .expect("the environment");

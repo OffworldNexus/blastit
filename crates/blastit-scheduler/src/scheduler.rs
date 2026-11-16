@@ -141,7 +141,7 @@ use blastit_frame::{
     RequestCost, RespHead, TypeCode,
 };
 use blastit_ingress::{BodyPlan, apply_transcoded_headers, plan_body, transcode_buffered};
-use blastit_manifest::RoutingTable;
+use blastit_manifest::{MountTable, RoutingTable};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -156,7 +156,7 @@ use crate::path::{
 use crate::rewrite::{Rewrite, decide, declares_body};
 use crate::route::RouteInfo;
 use crate::static_asset::{
-    STATIC_CHUNK_BYTES, StaticFile, StaticOutcome, StaticRefusal, StaticRoot, head_segments,
+    STATIC_CHUNK_BYTES, StaticFile, StaticOutcome, StaticRoot, is_dotfile, is_php_source, segments,
 };
 use crate::static_response::{StaticBody, StaticResponse};
 use crate::task::{
@@ -557,13 +557,15 @@ struct Request {
     /// The body is buffered and, for `json`/`form`, transcoded: the request may
     /// be dispatched. A `Buffer` request waits here until its `REQ_END`.
     body_ready: bool,
-    /// The matched route declares `[route.static]` and the head passed design
-    /// §4.3 steps 3–4: `dispatch_static` is what admits it, and no view is
-    /// involved until a `Forward` (design §4.6).
+    /// The matched mount claims this path and the head passed §9.2 step 0:
+    /// `dispatch_static` is what admits it, and no view is involved until the
+    /// mount misses and a view matched (§9.2 steps 1–2).
     static_pending: bool,
-    /// The `head_segments` result, kept until `dispatch_static` borrows it for
-    /// `StaticRoot::resolve`; a queued static request therefore opens no
-    /// descriptor (design §4.6).
+    /// The mount whose root is resolved, kept beside the segments.
+    static_mount: Option<usize>,
+    /// The path below the mount's prefix, split into segments and kept until
+    /// `dispatch_static` borrows it for `StaticRoot::resolve`; a queued static
+    /// request therefore opens no descriptor (§9.2 step 1).
     static_parts: Option<Vec<String>>,
     /// `rewrite::declares_body` for this head: `Request` keeps no header list,
     /// so the one bit the answer needs is taken from the borrowed head.
@@ -653,15 +655,31 @@ struct Request {
 
 /// What routing a request target produced.
 enum Resolution {
-    /// The target cannot be routed: a `400` (§2.4).
+    /// The target cannot be routed: a `400` (§2.4). The decode or a C0 byte
+    /// failed before any mount was consulted.
     Bad,
+    /// A mount claimed the path and the resolver refuses it (`..`, a backslash,
+    /// a leading `//`, a path over the ceiling): `400` final (§9.2 step 0).
+    MountRefused,
+    /// A mount matched and the resolved path is a dotfile or a PHP source:
+    /// `404` final, before any view (§9.2 step 2's `Hidden`).
+    Hidden,
+    /// A view's path pattern matched but no view declared this method: `405`
+    /// with the union of their declared methods (§9.2 step 4).
+    MethodNotAllowed {
+        /// The `Allow` header value, in declaration order.
+        allow: String,
+    },
     /// The health path, answered by the scheduler itself.
     Health,
-    /// Nothing matched: a `404` (§2.4), or the `--learn` fallback.
+    /// Nothing matched: a `404` (§2.4), the `--learn` fallback, or a mount that
+    /// answered nothing and whose `fallback` did not either.
     Unrouted {
         /// The decoded target path, used only by the `--learn` fallback to
         /// attribute the request (`R26`).
         path: String,
+        /// The mount that claims this path, when one does (§9.2 step 1).
+        mount: Option<MountHead>,
     },
     /// A route, one of its rules, and the `PATH_INFO` that matched.
     Routed {
@@ -671,7 +689,34 @@ enum Resolution {
         rule: u32,
         /// The decoded, stripped path.
         path_info: String,
+        /// The mount that claims this path, when one does: its file answers
+        /// before the view, and its `fallback` answers after it (§9.2).
+        mount: Option<MountHead>,
     },
+}
+
+/// One matched mount and the request path below its prefix (§9.2).
+struct MountHead {
+    /// Index of the mount in `SchedulerConfig::mounts`.
+    mount: usize,
+    /// The decoded request path with the mount's prefix removed, split into
+    /// segments: `StaticRoot::resolve`'s input. The dotfile and PHP-source
+    /// rules were applied to the **full** path before the strip.
+    segments: Vec<String>,
+}
+
+impl Resolution {
+    /// The mount that claims this request, if any.
+    fn mount(&self) -> Option<&MountHead> {
+        match self {
+            Self::Unrouted { mount, .. } | Self::Routed { mount, .. } => mount.as_ref(),
+            Self::Bad
+            | Self::MountRefused
+            | Self::Hidden
+            | Self::Health
+            | Self::MethodNotAllowed { .. } => None,
+        }
+    }
 }
 
 /// The head half of a request to a route with `[route.static]` (design §4.3
@@ -684,22 +729,14 @@ enum StaticHead {
     /// Steps 3–4 passed: `dispatch_static` resolves these segments once the
     /// request holds a slot, so a queued request opens no descriptor.
     Resolve {
-        /// The `head_segments` result, borrowed once as `&[&str]` for
-        /// `StaticRoot::resolve`.
+        /// The mount whose root answers this path (§9.2 step 1).
+        mount: usize,
+        /// The path below the mount's prefix, split into segments.
         segments: Vec<String>,
         /// `rewrite::declares_body` for this head.
         has_body: bool,
         /// The `If-None-Match` the responder honours for a `304` (§4.5).
         if_none_match: Option<Vec<u8>>,
-    },
-    /// Steps 3–4 refused the path: the refusal `decide` chose, answered here
-    /// before `admit_ready` — no slot, no queue entry, no descriptor.
-    Answer {
-        /// The status (`400` for a malformed path, `404` for a dotfile).
-        status: u16,
-        /// The `Allow` value, which a head refusal never carries (`400`/`404`
-        /// only, §4.4).
-        allow: Option<&'static [u8]>,
     },
 }
 
@@ -717,10 +754,11 @@ struct Scheduler {
     ctl_out: Outbound,
     /// The normalised `BLASTIT_SCRIPT_NAME` mount prefix (§6), if any.
     script_name: Option<String>,
-    /// One static root per route, opened by [`run`] before the listeners are
-    /// served: `None` for a route that declares no `[route.static]` (design
-    /// §4.6). A declared root that cannot be opened exits the role.
-    static_roots: Vec<Option<Arc<StaticRoot>>>,
+    /// The file's static mounts, compiled for the longest-prefix match (§9.2).
+    mounts: MountTable,
+    /// One root per mount, opened by [`run`] before the first request: a mount
+    /// whose root cannot be opened exits the role.
+    mount_roots: Vec<Arc<StaticRoot>>,
     /// The sending half of the static read results, cloned into one blocking
     /// task per read.
     static_in: mpsc::Sender<StaticRead>,
@@ -795,7 +833,8 @@ impl Scheduler {
         http_out: Outbound,
         view_in: mpsc::Sender<ViewIn>,
         ctl_out: Outbound,
-        static_roots: Vec<Option<Arc<StaticRoot>>>,
+        mounts: MountTable,
+        mount_roots: Vec<Arc<StaticRoot>>,
         static_in: mpsc::Sender<StaticRead>,
     ) -> Self {
         let script_name = cfg.script_name.as_deref().and_then(normalize_script_name);
@@ -814,7 +853,8 @@ impl Scheduler {
             http_out,
             view_in,
             ctl_out,
-            static_roots,
+            mounts,
+            mount_roots,
             static_in,
             script_name,
             started: Instant::now(),
@@ -868,10 +908,8 @@ impl Scheduler {
         self.derive_view_cap(false);
         let wanted: Vec<usize> = (0..self.routes.len())
             .filter(|route| self.cfg.eager_spawn || self.routes[*route].prefork)
-            // A route the responder answers on its own has no view to fork:
-            // `Forward` is the only static verdict that reaches the app, so a
-            // pure static route is never spawned, here or by either queue walk
-            // (design §4.6).
+            // Every route is a view now; a mount owns no uid and starts no
+            // process (§9.2).
             .filter(|route| self.spawnable(*route))
             .collect();
         for route in wanted {
@@ -882,14 +920,11 @@ impl Scheduler {
 
     /// Whether a view for `route` can ever serve a request.
     ///
-    /// A route with `[route.static]` and no way to forward — `spa = true`, or a
-    /// manifest that declares no `app` — is answered by the responder alone, so
-    /// it never gets a view. Every other route can.
+    /// Every route is a view now: a `static "<prefix>"` mount is the file's and
+    /// owns no uid, and a mount miss always falls through to the view table
+    /// (§9.2), so a route is spawnable exactly when it exists.
     fn spawnable(&self, route: usize) -> bool {
-        match self.routes.get(route) {
-            Some(route) => route.static_policy.is_none() || route.static_forward,
-            None => false,
-        }
+        self.routes.get(route).is_some()
     }
 
     /// Whether the run is over.
@@ -1278,6 +1313,7 @@ impl Scheduler {
             body_plan_error: None,
             body_ready: true,
             static_pending: false,
+            static_mount: None,
             static_parts: None,
             static_has_body: false,
             static_if_none_match: None,
@@ -1315,13 +1351,53 @@ impl Scheduler {
                     None,
                 )
             }
+            Resolution::MountRefused => {
+                // §9.2 step 0: a shape the resolver refuses is a `400` before
+                // any mount or view is consulted.
+                self.requests.insert(stream_id, request);
+                self.refuse_static(stream_id, 400, None)
+            }
+            Resolution::Hidden => {
+                // §9.2 step 0: the full path is a dotfile or a PHP source
+                // before any mount or view is consulted, and no view may answer
+                // it.
+                self.requests.insert(stream_id, request);
+                self.refuse_static(stream_id, 404, None)
+            }
+            Resolution::MethodNotAllowed { allow } => {
+                // §9.2 step 4: a view's pattern matched and no view declared
+                // this method.
+                self.requests.insert(stream_id, request);
+                self.refuse_static(stream_id, 405, Some(allow.as_bytes()))
+            }
             Resolution::Health => {
                 self.requests.insert(stream_id, request);
                 self.respond(stream_id, 200, "OK", "ok", None)?;
                 self.finish_immediately(stream_id, Outcome::Ok)
             }
-            Resolution::Unrouted { path } => {
+            Resolution::Unrouted { path, .. } => {
                 request.path_info = Some(path);
+                // §9.2 step 1/3: a mount that claims the path answers its file
+                // or its `fallback` even when no view matched. It takes a slot
+                // exactly like a routed static request, and a miss that reaches
+                // step 4 is a `404` (or the `--learn` fallback).
+                if let Some(StaticHead::Resolve {
+                    mount,
+                    segments,
+                    has_body,
+                    if_none_match,
+                }) = static_head
+                {
+                    request.static_pending = true;
+                    request.static_mount = Some(mount);
+                    request.static_parts = Some(segments);
+                    request.static_has_body = has_body;
+                    request.static_if_none_match = if_none_match;
+                    request.body_plan = BodyPlan::AllowEmptyOnly;
+                    request.body_ready = true;
+                    self.requests.insert(stream_id, request);
+                    return self.admit_ready(stream_id);
+                }
                 self.requests.insert(stream_id, request);
                 if self.cfg.learn_mode {
                     // `--learn` never short-circuits an unrouted request: it is
@@ -1358,6 +1434,7 @@ impl Scheduler {
                 route,
                 rule,
                 path_info,
+                ..
             } => {
                 request.route = Some(route);
                 request.rule = Some(rule);
@@ -1367,39 +1444,34 @@ impl Scheduler {
                 // and it is the *same* resolution the front end used for
                 // `REMOTE_ADDR`, stamped by the queue with this event's clock.
                 request.flow = flow;
-                // Design §4.4: a route with a policy is admitted at the head,
-                // without waiting for its body. The plan is still computed (a
-                // `Forward` needs it) but its error is *stored*, not answered:
-                // the responder's method/body gate outranks a codec error on a
-                // path it answers.
-                if let Some(static_head) = static_head {
-                    return match static_head {
-                        StaticHead::Answer { status, allow } => {
-                            self.requests.insert(stream_id, request);
-                            self.refuse_static(stream_id, status, allow)
-                        }
-                        StaticHead::Resolve {
-                            segments,
-                            has_body,
-                            if_none_match,
-                        } => {
-                            request.static_pending = true;
-                            request.static_parts = Some(segments);
-                            request.static_has_body = has_body;
-                            request.static_if_none_match = if_none_match;
-                            request.body_plan = match plan {
-                                Ok(plan) => plan,
-                                // Nothing is buffered or transcoded for a
-                                // static answer; the plan's error is what a
-                                // `Forward` answers (§4.4).
-                                Err(_) => BodyPlan::AllowEmptyOnly,
-                            };
-                            request.body_plan_error = plan.err();
-                            request.body_ready = true;
-                            self.requests.insert(stream_id, request);
-                            self.admit_ready(stream_id)
-                        }
+                // §9.2 steps 1–2: a mount's file answers first and a miss falls
+                // through to this view. The request is admitted at the head; the
+                // plan is still computed (a miss that forwards needs it) but its
+                // error is *stored*, not answered: the mount's method/body gate
+                // outranks a codec error on a path a file answers.
+                if let Some(StaticHead::Resolve {
+                    mount,
+                    segments,
+                    has_body,
+                    if_none_match,
+                }) = static_head
+                {
+                    request.static_pending = true;
+                    request.static_mount = Some(mount);
+                    request.static_parts = Some(segments);
+                    request.static_has_body = has_body;
+                    request.static_if_none_match = if_none_match;
+                    request.body_plan = match plan {
+                        Ok(plan) => plan,
+                        // Nothing is buffered or transcoded for a static
+                        // answer; the plan's error is what the view answers
+                        // when the mount misses.
+                        Err(_) => BodyPlan::AllowEmptyOnly,
                     };
+                    request.body_plan_error = plan.err();
+                    request.body_ready = true;
+                    self.requests.insert(stream_id, request);
+                    return self.admit_ready(stream_id);
                 }
                 // `R12`/`R16`: `plan` was decided from the same head, and `Err`
                 // carries the status a body this route will not take is
@@ -1437,24 +1509,21 @@ impl Scheduler {
         }
     }
 
-    /// The static head half of design §4.3 (steps 3–4) and §4.4's `has_body`.
+    /// The static head half of §9.2 and §4.4's `has_body`.
     ///
     /// Runs while the head is still the borrowed payload, so nothing it returns
     /// borrows the request: [`Request`] keeps no header list, and this is where
     /// the one `declares_body` bit and the `If-None-Match` the responder honours
-    /// come from. `None` for a route that declares no `[route.static]`, which
-    /// takes the unchanged path.
+    /// come from. `None` for a request no mount claims, which takes the view
+    /// path unchanged.
     ///
-    /// A path the decode refuses (`400`) or hides (`404`) is answered here,
-    /// before `admit_ready`: no slot is taken, nothing queues, and no `..` probe
-    /// can turn into a `503` (design §4.3).
+    /// The segments are already decoded and split, and the dotfile and
+    /// PHP-source rules were applied to the full path in [`Scheduler::resolve`],
+    /// so a refused (`400`) or hidden (`404`) path is answered there, before
+    /// `admit_ready`: no slot is taken, nothing queues, and no `..` probe can
+    /// turn into a `503` (§9.2).
     fn static_head(&self, head: &ReqHeadView<'_>, resolution: &Resolution) -> Option<StaticHead> {
-        let Resolution::Routed { route, .. } = resolution else {
-            return None;
-        };
-        // A route with no policy never reaches the responder, so it pays for
-        // none of this.
-        self.routes.get(*route)?.static_policy.as_ref()?;
+        let mount = resolution.mount()?;
         let headers: Vec<(Vec<u8>, Vec<u8>)> = head
             .headers()
             .map(|(name, value)| (name.to_vec(), value.to_vec()))
@@ -1464,39 +1533,11 @@ impl Scheduler {
             .headers()
             .find(|(name, _)| name.eq_ignore_ascii_case(b"if-none-match"))
             .map(|(_, value)| value.to_vec());
-        // The request target is bytes, so an invalid one is `Refused(Encoding)`
-        // — a `400` — and never `from_utf8_lossy`, which would turn an invalid
-        // byte into U+FFFD and a forward (design §4.3).
-        let segments = match std::str::from_utf8(head.target()) {
-            Ok(target) => head_segments(target),
-            Err(_) => Err(StaticOutcome::Refused(StaticRefusal::Encoding)),
-        };
-        Some(match segments {
-            Ok(segments) => StaticHead::Resolve {
-                segments,
-                has_body,
-                if_none_match,
-            },
-            Err(outcome) => {
-                let has_app = self
-                    .routes
-                    .get(*route)
-                    .is_some_and(|route| route.static_forward);
-                match decide(outcome, head.method(), has_body, has_app) {
-                    Rewrite::Reject { status, allow } => StaticHead::Answer { status, allow },
-                    // `head_segments` answers only `Refused` or `Hidden`, and
-                    // `decide` rejects both (§4.4): serving or forwarding here
-                    // would be a bug in this build, so the closed answer is a
-                    // refusal — never a file without a slot.
-                    Rewrite::Serve(_) | Rewrite::Forward => {
-                        debug_assert!(false, "a refused static path was not rejected by `decide`");
-                        StaticHead::Answer {
-                            status: 404,
-                            allow: None,
-                        }
-                    }
-                }
-            }
+        Some(StaticHead::Resolve {
+            mount: mount.mount,
+            segments: mount.segments.clone(),
+            has_body,
+            if_none_match,
         })
     }
 
@@ -1557,6 +1598,9 @@ impl Scheduler {
     /// (design §4.6): its static branch comes before `can_dispatch`, because no
     /// view exists to be asked.
     fn admit_ready(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        if self.static_pending(stream_id) {
+            return self.admit_static(stream_id);
+        }
         let Some(route) = self
             .requests
             .get(&stream_id)
@@ -1564,9 +1608,6 @@ impl Scheduler {
         else {
             return Ok(());
         };
-        if self.static_pending(stream_id) {
-            return self.admit_static(stream_id);
-        }
         let retry_after = retry_after_seconds(self.cfg.queue_timeout);
         if self.draining {
             self.reject(
@@ -1594,9 +1635,9 @@ impl Scheduler {
         }
     }
 
-    /// Admits a request a route with `[route.static]` may answer itself
-    /// (design §4.6): the same bounded queue, `queue_timeout` and `503` +
-    /// `Retry-After` as the view path, with the slot as the only eligibility.
+    /// Admits a request a mount may answer itself (§9.2): the same bounded
+    /// queue, `queue_timeout` and `503` + `Retry-After` as the view path, with
+    /// the slot as the only eligibility.
     fn admit_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         let retry_after = retry_after_seconds(self.cfg.queue_timeout);
         if self.draining {
@@ -1635,7 +1676,7 @@ impl Scheduler {
         self.slots < self.cfg.max_workers
     }
 
-    /// Whether `stream_id` has matched a static route and not resolved yet.
+    /// Whether `stream_id` has matched a mount and not resolved yet.
     fn static_pending(&self, stream_id: u32) -> bool {
         self.requests
             .get(&stream_id)
@@ -1653,34 +1694,16 @@ impl Scheduler {
             .is_some_and(|request| request.pumping)
     }
 
-    /// Asks for the view a queued static request may still need, when its route
-    /// can forward.
-    ///
-    /// A pure static route never gets one (design §4.6); a front controller
-    /// route does, so its `Forward` handback can be dispatched as soon as the
-    /// view is `READY`.
-    fn spawn_for_static(&mut self, route: usize) -> Result<(), SchedulerError> {
-        if self
-            .routes
-            .get(route)
-            .is_some_and(|route| route.static_forward)
-            && !self.views.contains_key(&route)
-            && !self.draining
-        {
-            self.try_spawn(route)?;
-        }
-        Ok(())
-    }
-
-    /// The first queued request that still has to resolve against a static root.
+    /// The first queued request that still has to resolve against a mount's
+    /// root.
     ///
     /// Only used by the fair walk, whose ordering is a view-budget decision and
     /// has nothing to say about a request that never touches a view.
     fn first_static_queued(&self) -> Option<u32> {
         self.queue.ids().into_iter().find(|stream_id| {
-            self.requests.get(stream_id).is_some_and(|request| {
-                request.static_pending && request.static_parts.is_some() && request.route.is_some()
-            })
+            self.requests
+                .get(stream_id)
+                .is_some_and(|request| request.static_pending && request.static_parts.is_some())
         })
     }
 
@@ -1780,18 +1803,61 @@ impl Scheduler {
             Some(prefix) => match strip_script_name(path, prefix) {
                 Some(rest) => rest,
                 None => {
-                    return Resolution::Unrouted { path: request_path };
+                    return Resolution::Unrouted {
+                        path: request_path,
+                        mount: None,
+                    };
                 }
             },
             None => path,
+        };
+        // §9.2 step 0: the decode and the path-shape refusal, plus the dotfile
+        // and PHP-source rules, all run on the **full** path before the prefix
+        // is stripped, so a mount can neither hide a refusal nor manufacture
+        // one. They only apply when a mount claims the path: an app is free to
+        // serve a dotfile of its own.
+        let mount = match self.mounts.lookup(path) {
+            None => None,
+            Some(found) => {
+                let Ok(parts) = segments(path) else {
+                    return Resolution::MountRefused;
+                };
+                if is_dotfile(&parts) {
+                    return Resolution::Hidden;
+                }
+                if parts.last().is_some_and(|segment| is_php_source(segment)) {
+                    return Resolution::Hidden;
+                }
+                let below = segments(&self.cfg.mounts[found.mount].prefix)
+                    .map(|prefix| prefix.len())
+                    .unwrap_or(0);
+                let relative = parts.get(below..).unwrap_or_default();
+                Some(MountHead {
+                    mount: found.mount,
+                    segments: relative.iter().map(|part| (*part).to_string()).collect(),
+                })
+            }
         };
         match self.table.route(method, path) {
             Some(matched) => Resolution::Routed {
                 route: matched.route,
                 rule: u32::try_from(matched.rule).unwrap_or(u32::MAX),
                 path_info: path.to_string(),
+                mount,
             },
-            None => Resolution::Unrouted { path: request_path },
+            None => {
+                // §9.2 step 4: a path a view's pattern matched but whose method
+                // no view declared is a `405`, not an unrouted `404`.
+                if let Some(allow) = self.table.methods_for(path) {
+                    return Resolution::MethodNotAllowed {
+                        allow: allow.join(", "),
+                    };
+                }
+                Resolution::Unrouted {
+                    path: request_path,
+                    mount,
+                }
+            }
         }
     }
 
@@ -2096,11 +2162,10 @@ impl Scheduler {
     /// — its route's view is not ready — is skipped rather than allowed to hold
     /// up the ones behind it.
     ///
-    /// A queued request a static route matched is taken through
+    /// A queued request a mount matched is taken through
     /// [`Scheduler::dispatch_static`] once a slot is free, never through the
     /// view walk: that is what makes "more than `max_workers` static streams
-    /// complete in waves" true, and it is why a pure static route never reaches
-    /// [`Scheduler::try_spawn`] (design §4.6).
+    /// complete in waves" true (§9.2).
     fn dispatch_queued(&mut self) -> Result<(), SchedulerError> {
         if self.queue.is_fair() {
             return self.dispatch_queued_fair();
@@ -2110,6 +2175,22 @@ impl Scheduler {
             if !self.queue.contains(stream_id) {
                 continue;
             }
+            if self.slots >= self.cfg.max_workers {
+                return Ok(());
+            }
+            if self.static_pending(stream_id) {
+                if !self.can_dispatch_static() {
+                    continue;
+                }
+                self.dispatch_static(stream_id)?;
+                // A miss that a view will answer hands the slot back and puts
+                // the request in the queue again as an ordinary one: it leaves
+                // for its view in this same walk, or nothing would fork one for
+                // it.
+                if !self.queue.contains(stream_id) {
+                    continue;
+                }
+            }
             let Some(route) = self
                 .requests
                 .get(&stream_id)
@@ -2117,22 +2198,6 @@ impl Scheduler {
             else {
                 continue;
             };
-            if self.slots >= self.cfg.max_workers {
-                return Ok(());
-            }
-            if self.static_pending(stream_id) {
-                if !self.can_dispatch_static() {
-                    self.spawn_for_static(route)?;
-                    continue;
-                }
-                self.dispatch_static(stream_id)?;
-                // A `Forward` hands the slot back and puts the request in the
-                // queue again as an ordinary one: it leaves for its view in
-                // this same walk, or nothing would fork one for it.
-                if !self.queue.contains(stream_id) {
-                    continue;
-                }
-            }
             if self.can_dispatch(route) {
                 self.dispatch(stream_id)?;
                 continue;
@@ -2326,18 +2391,25 @@ impl Scheduler {
 
     // ---------------------------------------------------------------- static
 
-    /// Admits one request to a route with `[route.static]` (design §4.6).
+    /// Admits one request to a mount (§9.2 steps 1–4).
     ///
     /// This is the one function that takes a static admission slot: it sets
     /// `slots`, `view = None`, `dispatched_at` and `deadline` exactly as
     /// [`Scheduler::dispatch`] does — or `next_deadline` and `expire_requests`
-    /// would never fire for it — and then runs the filesystem half of design
-    /// §4.3 (steps 5–11) to produce the one verdict `decide` settles.
+    /// would never fire for it — and then resolves the mount's root to produce
+    /// the one verdict §9.2 settles:
+    ///
+    /// 1. a file answers, through the method/body gate (`405`/`413`);
+    /// 2. `Missing` falls through to the view a route matched, if any;
+    /// 3. with no view left to try, the mount's declared `fallback` answers a
+    ///    `GET`/`HEAD` that declares no body;
+    /// 4. `Hidden`/`Refused`/a missing `fallback` is final, and a miss with no
+    ///    view and no fallback is a `404` (or the `--learn` fallback).
     fn dispatch_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         let Some(request) = self.requests.get_mut(&stream_id) else {
             return Ok(());
         };
-        let Some(route) = request.route else {
+        let Some(mount) = request.static_mount else {
             return Ok(());
         };
         let Some(parts) = request.static_parts.take() else {
@@ -2360,34 +2432,110 @@ impl Scheduler {
         self.queue.remove(stream_id);
         self.slots += 1;
 
-        let Some(root) = self
-            .static_roots
-            .get(route)
-            .and_then(Option::as_ref)
-            .cloned()
-        else {
-            // A route with a policy and no root is a boot-order bug; fail
-            // closed rather than answer a file this role never proved it can
-            // read.
+        let Some(root) = self.mount_roots.get(mount).cloned() else {
+            // A mount with no opened root is a boot-order bug; fail closed
+            // rather than answer a file this role never proved it can read.
             return self.refuse_static(stream_id, 404, None);
         };
         let borrowed: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let outcome = root.resolve(&borrowed);
-        let static_forward = self
-            .routes
-            .get(route)
-            .is_some_and(|route| route.static_forward);
-        match decide(outcome, &method, has_body, static_forward) {
-            Rewrite::Serve(file) => self.serve_static(
-                stream_id,
-                root.as_ref(),
-                file,
-                &method,
-                if_none_match.as_deref(),
-            ),
-            Rewrite::Reject { status, allow } => self.refuse_static(stream_id, status, allow),
-            Rewrite::Forward => self.forward_static(stream_id),
+        // §9.2 step 1 only: `resolve_file` never answers the declared
+        // `fallback`, because that is step 3's and would shadow every view.
+        let outcome = root.resolve_file(&borrowed);
+        match outcome {
+            // Step 2: nothing at the path, so the view table is consulted
+            // first. A routed request forwards; one no view matched has to
+            // answer from the mount itself.
+            StaticOutcome::Missing => self.mount_missed(stream_id, mount, &method, has_body),
+            // Step 1 and the final refusals: the file/refusal gate.
+            other => match decide(other, &method, has_body, false) {
+                Rewrite::Serve(file) => self.serve_static(
+                    stream_id,
+                    root.as_ref(),
+                    file,
+                    &method,
+                    if_none_match.as_deref(),
+                ),
+                Rewrite::Reject { status, allow } => self.refuse_static(stream_id, status, allow),
+                // `Missing` is handled above, so a `Forward` here would mean
+                // `decide` served a shape it was not given.
+                Rewrite::Forward => {
+                    debug_assert!(false, "a non-miss static outcome must not forward");
+                    self.refuse_static(stream_id, 404, None)
+                }
+            },
         }
+    }
+
+    /// §9.2 steps 2–4 for a mount that answered no file.
+    ///
+    /// A request whose path a view also matched forwards to it — the view queue
+    /// owns the answer from here, exactly as before. A request no view matched
+    /// asks the mount's declared `fallback`, on `GET`/`HEAD` only, and is a
+    /// `404` otherwise (or the `--learn` fallback, which is the app).
+    fn mount_missed(
+        &mut self,
+        stream_id: u32,
+        mount: usize,
+        method: &[u8],
+        has_body: bool,
+    ) -> Result<(), SchedulerError> {
+        if self
+            .requests
+            .get(&stream_id)
+            .is_some_and(|request| request.route.is_some())
+        {
+            return self.forward_static(stream_id);
+        }
+        // Step 4's `405` is a view rule (§9.2); a method other than `GET`/`HEAD`
+        // never reaches the fallback and is a `404` here.
+        if method != b"GET" && method != b"HEAD" {
+            return self.mount_learn_or_404(stream_id);
+        }
+        // A `GET`/`HEAD` that declares a body is a `413`, the same rule a file
+        // answer uses.
+        if has_body {
+            return self.refuse_static(stream_id, 413, None);
+        }
+        let has_fallback = self
+            .cfg
+            .mounts
+            .get(mount)
+            .is_some_and(|mount| mount.policy.fallback.is_some());
+        let Some(root) = self.mount_roots.get(mount).cloned() else {
+            return self.refuse_static(stream_id, 404, None);
+        };
+        if !has_fallback {
+            return self.mount_learn_or_404(stream_id);
+        }
+        match root.resolve_fallback() {
+            StaticOutcome::File(file) => {
+                self.serve_static(stream_id, root.as_ref(), file, method, None)
+            }
+            // A fallback that is missing, a dotfile, a symlink or a PHP source
+            // is `404` final.
+            _ => self.refuse_static(stream_id, 404, None),
+        }
+    }
+
+    /// §9.2 step 4's final miss: the `--learn` fallback in learn mode, else a
+    /// `404`.
+    ///
+    /// The static slot is released first: a learn request is served by the
+    /// app's ordinary view path, which takes its own slot.
+    fn mount_learn_or_404(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
+        if !self.cfg.learn_mode {
+            return self.refuse_static(stream_id, 404, None);
+        }
+        self.release_static_slot(stream_id);
+        self.queue.remove(stream_id);
+        if let Some(request) = self.requests.get_mut(&stream_id) {
+            request.static_pending = false;
+            request.dispatched_at = None;
+            request.deadline = None;
+            request.queued_since = Some(Instant::now());
+        }
+        self.learn_fallback_queue.push_back(stream_id);
+        self.pump_learn_fallback()
     }
 
     /// Pushes a static head and starts its body pump (design §4.6).
@@ -2708,7 +2856,7 @@ impl Scheduler {
         &mut self,
         stream_id: u32,
         status: u16,
-        allow: Option<&'static [u8]>,
+        allow: Option<&[u8]>,
     ) -> Result<(), SchedulerError> {
         // The slot goes back before the status is written, so the answer never
         // holds admission capacity while it is being framed.
@@ -4486,23 +4634,19 @@ pub async fn run<C: CtlChannel + Send + 'static>(
     // Held for the whole run, so `http_in_rx` only ever ends with an explicit
     // `HttpIn::Closed`.
     let _keepalive = http_in_tx;
-    // One static root per route, opened here as the scheduler's uid and before
+    // One static root per mount, opened here as the scheduler's uid and before
     // a single request is served: a root that cannot be opened is a broken
-    // declaration, not a degraded answer, so it exits the role (design §4.6,
-    // §4.7).
-    let mut static_roots: Vec<Option<Arc<StaticRoot>>> = Vec::with_capacity(routes.len());
-    for route in &routes {
-        match route.static_policy.as_ref() {
-            Some(policy) => {
-                let mut root = StaticRoot::open(&cfg.manifest_dir, policy)
-                    .map_err(|error| SchedulerError::protocol(error.to_string()))?;
-                // The one source of the per-file ceiling: no environment
-                // variable and no manifest key (design §4.6).
-                root.max_bytes = cfg.static_max_bytes;
-                static_roots.push(Some(Arc::new(root)));
-            }
-            None => static_roots.push(None),
-        }
+    // declaration, not a degraded answer, so it exits the role (§9.2).
+    let mounts = MountTable::from_mounts(&cfg.mounts);
+    let mut mount_roots: Vec<Arc<StaticRoot>> = Vec::with_capacity(cfg.mounts.len());
+    for mount in &cfg.mounts {
+        let mut root = StaticRoot::open(&cfg.manifest_dir, &mount.policy)
+            .map_err(|error| SchedulerError::protocol(error.to_string()))?
+            .with_prefix(&mount.prefix);
+        // The one source of the per-file ceiling: no environment variable and
+        // no manifest key (design §4.6).
+        root.max_bytes = cfg.static_max_bytes;
+        mount_roots.push(Arc::new(root));
     }
     let (static_in, mut static_in_rx) = mpsc::channel(STATIC_IN_CAPACITY);
     let mut scheduler = Scheduler::new(
@@ -4513,7 +4657,8 @@ pub async fn run<C: CtlChannel + Send + 'static>(
         http_out,
         view_in_tx,
         ctl_out,
-        static_roots,
+        mounts,
+        mount_roots,
         static_in,
     );
     scheduler.start()?;

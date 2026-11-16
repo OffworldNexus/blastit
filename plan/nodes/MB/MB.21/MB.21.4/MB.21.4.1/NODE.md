@@ -2,29 +2,33 @@
 id: MB.21.4.1
 title: "Cut every entry point over to ./Blastfile in one atomic commit: one discovery function, Blastfile parsing, the §15.1 sentences and exit codes, fmt re-parse, and every fixture make check reaches"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.3.6]
 paths:
   - crates/blastit/src/config.rs
   - crates/blastit/src/stage0.rs
+  - crates/blastit/src/stage1.rs
   - crates/blastit/src/cli.rs
   - crates/blastit/src/check.rs
+  - crates/blastit/src/dev_learn.rs
+  - crates/blastit/src/audit_v1.rs
+  - crates/blastit/src/php_view.rs
   - "crates/blastit/tests/**"
-  - "crates/blastit-manifest/src/lib.rs"
-  - "crates/blastit-manifest/src/error.rs"
-  - "crates/blastit-manifest/src/blastfile/print.rs"
-  - "crates/blastit-manifest/tests/blastfile_fmt.rs"
-  - "crates/blastit-manifest/tests/critical_blastfile_print.rs"
-  - "crates/blastit-manifest/tests/docs_fences.rs"
+  - "crates/blastit-py/**"
+  - "crates/blastit-manifest/src/**"
+  - "crates/blastit-manifest/tests/**"
+  - "crates/blastit-scheduler/src/**"
+  - "crates/blastit-scheduler/tests/**"
   - "python/tests/runnable_docs/**"
+  - python/tests/critical/test_check_contract.py
   - docs/local.md
-attempts: 0
-max_attempts: 3
+attempts: 5
+max_attempts: 6
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T08:12"
+updated: "2026-11-16T10:10"
 ---
 
 # Goal

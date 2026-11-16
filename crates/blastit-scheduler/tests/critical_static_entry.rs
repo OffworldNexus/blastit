@@ -357,8 +357,11 @@ fn a_source_index_never_answers_the_directory_or_the_spa_fallback() {
     for backend in [Backend::Openat2, Backend::Walk] {
         let mut policy = Fixture::S.policy();
         // The manifest permits any non-dotfile `index`; `.php` is the one that
-        // would publish source at `/`, `/docs` and every SPA miss.
+        // would publish source at `/` and `/docs`. `fallback` is its own file
+        // now (§9.3), so both names have to name the source to prove every
+        // answer the root controls is guarded.
         policy.index = "index.php".to_string();
+        policy.fallback = Some("index.php".to_string());
         let root =
             StaticRoot::open_with(&tree.base, &policy, backend).expect("the fixture root opens");
         for target in ["/", "/docs", "/dashboard"] {

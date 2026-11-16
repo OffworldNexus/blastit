@@ -709,9 +709,9 @@ class Harness:
                 raise Failure(f"inventory names the missing fixture {fixture!r}")
             shutil.copytree(source, root, dirs_exist_ok=True)
         if manifest is not None:
-            # The page's own TOML is the manifest under test; the fixture only
+            # The page's own block is the manifest under test; the fixture only
             # supplies the app code it names.
-            (root / "blastit.toml").write_text(manifest, encoding="utf-8")
+            (root / "Blastfile").write_text(manifest, encoding="utf-8")
         shutil.copyfile(self.base / "pyproject.toml", root / "pyproject.toml")
         shutil.copyfile(self.base / "uv.lock", root / "uv.lock")
         if git:
@@ -815,7 +815,7 @@ class Harness:
     def _init_git(self, root: Path, env: dict[str, str]) -> None:
         for command in (
             ["git", "init", "-q"],
-            ["git", "add", "blastit.toml"],
+            ["git", "add", "Blastfile"],
             ["git", "commit", "-q", "-m", "fixture"],
         ):
             self._tool(root, env, command, quiet=True)
@@ -1108,7 +1108,7 @@ class Harness:
                 if command.text.startswith("git diff"):
                     if code != 0 or not lines:
                         raise Failure(
-                            "`git diff blastit.toml` showed nothing after `--learn`; "
+                            "`git diff` showed nothing after `--learn`; "
                             f"exit {code}, output:\n" + "\n".join(lines[-20:])
                         )
                     continue
@@ -1153,16 +1153,16 @@ class Harness:
             unserved = self.unserved(command.text, dev.stdout)
             if unserved is not None:
                 raise unserved
-        manifest = tomllib.loads((root / "blastit.toml").read_text(encoding="utf-8"))
-        routes = {route["name"] for route in manifest.get("route", [])}
+        learned_path = root / "Blastfile"
+        learned_text = learned_path.read_text(encoding="utf-8")
         if code != 0:
             raise Failure(
                 f"`{command.text}` exited {code} after SIGINT (expected 0); stdout:\n"
                 + "\n".join(dev.stdout[-40:])
             )
-        # The page promises one pass adds the routes it saw *and their exact
+        # The page promises one pass adds the views it saw *and their exact
         # queries*, printing the resolved path. Assert all three, so a product
-        # that adds a route without its grants (or writes nothing) goes red here.
+        # that adds a view without its grants (or writes nothing) goes red here.
         summary = next(
             (line.strip() for line in dev.stdout if line.lstrip().startswith("learn:")),
             None,
@@ -1187,32 +1187,29 @@ class Harness:
         )
         if added_routes < 1 or added_queries < 1:
             raise Failure(
-                "one `dev --learn` pass must add the route and its queries; the "
+                "one `dev --learn` pass must add the view and its queries; the "
                 f"summary says {added_routes} routes, {added_queries} queries:\n"
                 + summary
             )
-        if printed_path.resolve() != (root / "blastit.toml").resolve():
+        if printed_path.resolve() != learned_path.resolve():
             raise Failure(
                 "the `learn:` summary must print the manifest it wrote; it names "
-                f"{printed_path}, expected {(root / 'blastit.toml').resolve()}"
+                f"{printed_path}, expected {learned_path.resolve()}"
             )
-        if "extra" not in routes:
+        if not re.search(r"(?m)^view extra\b", learned_text):
             raise Failure(
-                "`--learn` did not add the unrouted route; manifest:\n"
-                + (root / "blastit.toml").read_text(encoding="utf-8")
+                "`--learn` did not add the unrouted view; manifest:\n" + learned_text
             )
-        learned = next(route for route in manifest["route"] if route["name"] == "extra")
-        queries = (learned.get("db") or {}).get("queries") or []
-        if not queries:
+        learned = _view_block(learned_text, "extra")
+        if not learned:
             raise Failure(
-                "`--learn` added the route but wrote no `queries`; the page says "
-                "one pass adds the exact queries it saw. Manifest:\n"
-                + (root / "blastit.toml").read_text(encoding="utf-8")
+                "`--learn` wrote a `view extra` the harness cannot read; manifest:\n"
+                + learned_text
             )
-        if "SELECT 1" not in queries:
+        if "query 'SELECT 1'" not in learned:
             raise Failure(
-                "the learned query is not the statement the app issued "
-                f"(`SELECT 1`): {queries!r}"
+                "`--learn` added the view but wrote no exact query; the page says "
+                "one pass adds the exact queries it saw. Manifest:\n" + learned_text
             )
         return (
             f"one pass added {added_routes} route(s) and {added_queries} "
@@ -1220,24 +1217,24 @@ class Harness:
         ), True
 
     def mode_page_manifest(self, fence: Fence, spec: FenceSpec) -> tuple[str, bool]:
-        """Run the fence against the page's own TOML block, then its prose.
+        """Run the fence against the page's own Blastfile block, then its prose.
 
-        `docs/local.md` shows a `blastit.toml` with `queries = []` and then the
-        command that starts the app with it. Running a fixture manifest instead
-        would prove nothing about that block, so this mode writes the page's own
-        TOML into the project and asserts the two promises that follow it: the
-        app keeps reading `DATABASE_URL` (the request is answered at all), and an
-        ungranted statement is denied by PostgreSQL's `42501` through a listener
-        — visible as a `sql.denied` line and, uncaught, a `500`.
+        `docs/local.md` shows a `Blastfile` with a `postgres {}` that grants
+        nothing and then the command that starts the app with it. Running a
+        fixture manifest instead would prove nothing about that block, so this
+        mode writes the page's own block into the project and asserts the two
+        promises that follow it: the app keeps reading `DATABASE_URL` (the
+        request is answered at all), and an ungranted statement is denied by
+        PostgreSQL's `42501` through a listener — visible as a `sql.denied` line
+        and, uncaught, a `500`.
         """
         manifest_text = _page_manifest(fence)
         root, env = self.prepare(fence, spec, manifest=manifest_text)
-        document = tomllib.loads(manifest_text)
-        target = str(document.get("app", ""))
+        target = _entrypoint_callable(manifest_text)
         module = target.split(":", 1)[0].replace(".", "/")
         if not module or not (root / f"{module}.py").is_file():
             raise Failure(
-                f"{fence.page}: the manifest block names `app = {target!r}`, which "
+                f"{fence.page}: the entrypoint names `{target!r}`, which "
                 f"the `{spec.fixture or 'empty'}` fixture does not provide"
             )
         commands = list(fence.commands())
@@ -1283,14 +1280,15 @@ class Harness:
                 "the page says an uncaught denial is a `500`; the request "
                 f"answered {status}. stdout:\n" + "\n".join(dev.stdout[-40:])
             )
-        # The paragraph promises this exact listener: `queries = []` denies every
-        # statement with PostgreSQL's 42501 and says so on one `sql.denied` line.
+        # The paragraph promises this exact listener: an empty `postgres {}`
+        # denies every statement with PostgreSQL's 42501 and says so on one
+        # `sql.denied` line.
         denied = [
             line for line in dev.stdout if re.search(r"\bWARN\s+sql\.denied\b", line)
         ]
         if not denied:
             raise Failure(
-                "the page's `queries = []` route has no denying listener: the "
+                "the page's `postgres {}` view has no denying listener: the "
                 "request failed without a `sql.denied` line. stdout:\n"
                 + "\n".join(dev.stdout[-40:])
             )
@@ -1307,7 +1305,7 @@ class Harness:
                 + "\n".join(dev.stdout[-40:])
             )
         return (
-            "the page's `queries = []` route answered 500 with a `sql.denied` "
+            "the page's `postgres {}` view answered 500 with a `sql.denied` "
             "line and SQLSTATE 42501"
         ), True
 
@@ -2762,10 +2760,10 @@ def assert_flag_tables(gate_only: bool = False) -> str:
 
 
 # Files a page tells the reader to create in their own project, so the gate can
-# neither have them nor expect the page to show them. `blastit.toml` is the one
-# file the product is about (`./blastit.toml` is the documented default); every
+# neither have them nor expect the page to show them. `Blastfile` is the one
+# file the product is about (`./Blastfile` is the documented default); every
 # other file a flag names is either in this tree or shown on the page.
-READER_FILES = frozenset({"blastit.toml"})
+READER_FILES = frozenset({"Blastfile"})
 
 
 def _documented_path(value: str, titles: frozenset[str], line: str, flag: str) -> int:
@@ -3243,44 +3241,65 @@ def _logical_lines(command: str) -> list[str]:
 
 
 def _page_manifest(fence: Fence) -> str:
-    """The `blastit.toml` block the page itself shows before this fence.
+    """The `Blastfile` block the page itself shows before this fence.
 
-    The page's own manifest is what a developer copies; a fixture manifest would
+    The page's own file is what a developer copies; a fixture manifest would
     prove nothing about it. The block must still be the one this mode knows how
-    to judge: a route whose `[route.db]` grants nothing, which the page says gets
-    a listener that denies every statement.
+    to judge: a view whose `postgres {}` grants nothing, which the page says gets
+    a listener that denies every statement. It is read as text — the page shows
+    a `Blastfile`, and the product's own parser is the only thing that judges a
+    `Blastfile`; the harness only checks the one shape the paragraph promises.
     """
     text = (REPO / fence.page).read_text(encoding="utf-8")
     blocks = [
         (text.count("\n", 0, block.start()) + 1, block)
         for block in re.finditer(
-            r"^```toml[^\n]*\n(.*?)^```$", text, re.DOTALL | re.MULTILINE
+            r"^```text[^\n]*title=\"Blastfile\"[^\n]*\n(.*?)^```$",
+            text,
+            re.DOTALL | re.MULTILINE,
         )
     ]
     before = [(line, block) for line, block in blocks if line < fence.line]
     if not before:
         raise Failure(
-            f"{fence.page} fence {fence.index}: no `toml` block precedes the fence; "
-            "the page must show the manifest this command reads"
+            f'{fence.page} fence {fence.index}: no `text title="Blastfile"` '
+            "block precedes the fence; the page must show the file this command "
+            "reads"
         )
     body = before[-1][1].group(1)
-    try:
-        document = tomllib.loads(body)
-    except tomllib.TOMLDecodeError as error:
+    if not re.search(r"(?m)^\s*postgres\s*\{\s*\}\s*$", body) and not re.search(
+        r"(?m)^\s*postgres\s*\{\s*$", body
+    ):
         raise Failure(
-            f"{fence.page}: the manifest block does not parse: {error}"
-        ) from error
-    empty = [
-        route.get("name", "?")
-        for route in document.get("route", [])
-        if not route.get("db", {}).get("queries")
-    ]
-    if not empty:
+            f"{fence.page}: the Blastfile block no longer shows a view with an "
+            "empty `postgres {}` grant, which is what this fence's next paragraph "
+            "promises"
+        )
+    if not _view_block(body, "products"):
         raise Failure(
-            f"{fence.page}: the manifest block no longer shows a route with "
-            "`queries = []`, which is what this fence's next paragraph promises"
+            f"{fence.page}: the Blastfile block no longer declares the `products` "
+            "view this fence's request reaches"
         )
     return body
+
+
+def _view_block(text: str, name: str) -> str:
+    """One `view <name> … { … }` block of a `Blastfile`, header tail and body.
+
+    A textual reader, not a parser: the harness has to recognise the shape a
+    page shows (a `learn`ed `view extra`, the page's `products`), and the
+    product is the only thing that judges the syntax.
+    """
+    found = re.search(
+        rf"(?m)^view {re.escape(name)}\b(.*?)^\}}[ \t]*$", text, re.DOTALL
+    )
+    return found.group(1) if found else ""
+
+
+def _entrypoint_callable(text: str) -> str:
+    """The `module:attribute` an `entrypoint python "…"` names, or `""`."""
+    found = re.search(r'(?m)^\s*entrypoint\s+python\s+"([^"]+)"', text)
+    return found.group(1) if found else ""
 
 
 @dataclass(frozen=True, slots=True)

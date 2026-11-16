@@ -1,13 +1,13 @@
-//! `MB.3.13.3`: a `[route.php]` route is served by an embedded worker —
+//! `MB.3.13.3`: an `entrypoint php` file is served by an embedded worker —
 //! `200` through `view.chan`, with the worker's own CPU nanoseconds on the
 //! request event — or the boot refuses with `ADR-0010` §4.1's package sentence.
 //!
 //! `ADR-0010` §1 gives PHP exactly one backend, so there are exactly two
-//! outcomes for a `[route.php]` manifest and this suite asserts **one of them**,
+//! outcomes for an `entrypoint php` file and this suite asserts **one of them**,
 //! never a silent skip:
 //!
 //! * a host with a usable NTS `libphp` and the matching shim boots, forks the
-//!   PHP view, serves a file from `[route.static]`'s root from disk, forwards
+//!   PHP view, serves a file from the `static` mount from disk, forwards
 //!   every other path to the front controller, and the `request` event carries
 //!   the worker's `cpu_ns` beside the request's wall time with
 //!   `cpu_ns <= wall_ns`. A tick-granular clock may report `0` for a cheap
@@ -71,32 +71,24 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const TICK_FLOOR_NS: u64 = 1_000_000;
 
 /// The documented page shape (`docs/frameworks/php.md`): a file under `public/`
-/// is answered by the static responder, every other path reaches the front
-/// controller, and a PHP route needs no `BLASTIT_APP` (`ADR-0010` §2).
+/// is answered by the static mount, every other path reaches the front
+/// controller, and a PHP file needs no `BLASTIT_APP` (`ADR-0010` §2).
 const PHP_MANIFEST: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
+static \"/\" {
+    root \"public\"
+}
 
-[route.static]
-root = \"public\"
-
-[route.php]
-entry = \"public/index.php\"
+view app regex '.*' {}
 ";
 
-/// The allowed twin: no PHP route, so the discovery gate has nothing to say.
+/// The allowed twin: no `entrypoint php`, so the discovery gate has nothing to
+/// say.
 const STATIC_ONLY: &str = "\
-version = 1
-
-[[route]]
-name = \"docs\"
-path = ['.*']
-
-[route.static]
-root = \"site\"
+static \"/\" {
+    root \"site\"
+}
 ";
 
 /// The fixture's script. The busy loop is deliberate: `CLOCK_PROCESS_CPUTIME_ID`
@@ -109,7 +101,7 @@ header('Content-Type: text/plain');
 echo \"blastit-php-ok\\n\";
 ";
 
-/// A temp directory holding one case's `blastit.toml` and its front controller,
+/// A temp directory holding one case's `Blastfile` and its front controller,
 /// removed on drop.
 struct Scratch {
     /// The directory `blastit dev` is started in.
@@ -122,7 +114,7 @@ impl Scratch {
             std::env::temp_dir().join(format!("blastit-php-backend-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("public")).unwrap();
-        let mut file = std::fs::File::create(dir.join("blastit.toml")).unwrap();
+        let mut file = std::fs::File::create(dir.join("Blastfile")).unwrap();
         file.write_all(manifest.as_bytes()).unwrap();
         Self { dir }
     }
@@ -714,7 +706,7 @@ fn assert_package_sentence(stderr: &str, what: &str) {
         "{what}: the route is named: {stderr}"
     );
     assert!(
-        stderr.contains("[route.php] entry \"public/index.php\""),
+        stderr.contains("entrypoint php \"public/index.php\""),
         "{what}: the entry is named: {stderr}"
     );
     assert!(
@@ -1095,9 +1087,11 @@ fn a_static_only_manifest_is_not_refused_by_this_gate() {
         Some(1),
         "the held port is what refuses this boot: stdout={stdout:?} stderr={stderr:?}"
     );
+    // A `static "/"` is a mount, not a view (§9.5), so the banner counts zero
+    // routes — and reaching the bind at all still proves the gate was silent.
     assert!(
-        stdout.contains("1 route"),
-        "the boot reached its banner with the static route counted: {stdout}"
+        stdout.contains("0 routes"),
+        "the boot reached its banner with the mount counted as no route: {stdout}"
     );
     let all = format!("{stdout}{stderr}");
     assert!(

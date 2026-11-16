@@ -1025,9 +1025,11 @@ fn statuses_come_from_decide_not_a_second_mapping() {
         Rewrite::Serve(_)
     ));
 
-    // `spa = true` with a missing `index` is `SpaLost`: a final 404.
+    // A declared `fallback` that is missing is `FallbackMissing`: a final 404.
+    // The fallback is its own file (§9.3), so moving the `index` no longer
+    // moves it — the test has to move the fallback itself.
     let mut lost = Fixture::S.policy();
-    lost.index = "missing-index.html".to_string();
+    lost.fallback = Some("missing-index.html".to_string());
     let lost_root = StaticRoot::open_with(&tree.base, &lost, Backend::Openat2).expect("root opens");
     assert!(matches!(
         decide(lost_root.resolve(&["missing"]), b"GET", false, true),

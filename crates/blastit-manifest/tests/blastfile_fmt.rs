@@ -56,13 +56,18 @@ fn p3_meaning_preserved_over_the_corpus() {
 }
 
 /// The formatter's output parses: `fmt` never writes a file its own reader
-/// refuses (`R25`).
+/// refuses (`R25`), and the re-parsed document is the one it just wrote.
 #[test]
 fn output_reparses() {
     for (name, source) in common::corpus() {
         let formatted = blastfile::fmt(&source).unwrap_or_else(|error| panic!("{name}: {error}"));
         Manifest::from_blastfile_str(&formatted)
             .unwrap_or_else(|error| panic!("{name} formatted does not parse: {error}"));
+        assert_eq!(
+            blastfile::fmt(&formatted).unwrap_or_else(|error| panic!("{name} again: {error}")),
+            formatted,
+            "{name} is not the document the reader saw"
+        );
     }
 }
 

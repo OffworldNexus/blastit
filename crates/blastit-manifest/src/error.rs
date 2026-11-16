@@ -10,7 +10,10 @@ use crate::model::ProxyName;
 pub(crate) const MAX_QUOTED_CHARS: usize = 120;
 
 /// Escapes control characters, so a name or a path never breaks a line.
-pub(crate) fn escape_control(value: &str) -> String {
+///
+/// This is the CLI's renderer for the one thing the crate never quotes — the
+/// path a caller passed in — so it is public rather than crate-private (§18).
+pub fn escape_control(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -27,9 +30,12 @@ pub(crate) fn escape_control(value: &str) -> String {
 }
 
 /// Renders a name, path or pattern for an error message: control characters
-/// escaped and long values cut to [`MAX_QUOTED_CHARS`] characters, without the
-/// surrounding quotes [`quoted`] adds.
-pub(crate) fn clipped(value: &str) -> String {
+/// escaped and long values cut to 120 characters, without the surrounding
+/// quotes the caller adds.
+///
+/// §18's one line is this function, so a caller that renders a path or a
+/// message of its own calls it rather than keeping a second copy.
+pub fn clipped(value: &str) -> String {
     let cut = value.char_indices().nth(MAX_QUOTED_CHARS).map(|(at, _)| at);
     let mut out = String::with_capacity(value.len() + 1);
     match cut {

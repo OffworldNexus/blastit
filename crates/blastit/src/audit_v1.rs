@@ -21,7 +21,7 @@
 //!   proved grantable (`ObsVerdict::Query`, never a redacted `…`). A redacted
 //!   literal, and every transaction-control denial, names `observe` instead, so
 //!   every `add_query` this engine emits passes
-//!   [`Manifest::parse_and_validate`] once written (`R33`);
+//!   [`Manifest::parse_blastfile`] once written (`R33`);
 //! * a grantable statement that is the driver's own session setup — `SELECT
 //!   set_config('TimeZone', $?, false)`, `SET …`, `SHOW …` — names `add_group`
 //!   and a `[group.connection.<proxy>]` table instead of one route's `queries`:
@@ -32,9 +32,9 @@
 //!   and never produces a route-less `missing_grant` (`R32`).
 //!
 //! [`plan_learn`] is the `--learn` side: it maps unrouted SQL through
-//! [`crate::infer_routes`] into the proposed route's `[route.<proxy>].queries`,
-//! writes only routes and exact queries, and refuses to invent table grants or
-//! a `transaction_control` flag (`R27`).
+//! [`crate::infer_routes`] into the proposed view's `postgres { query … }`
+//! block, writes only views and exact queries, and refuses to invent table
+//! grants or a `transactions` flag (`R27`).
 //!
 //! # The observations schema (v1)
 //!
@@ -56,13 +56,13 @@ use blastit_dbproxy::{ObsTarget, ObsVerdict, WireSqlObs};
 use blastit_ingress::{
     BodyCodec, BodySample, IngressPolicy, parse_mime, probe_sample, suggest_fix,
 };
-use blastit_manifest::edit::{ManifestEdits, ProposedGrant, ProposedRoute};
+use blastit_manifest::blastfile::{BlastfileEdits, ProposedGrant, ProposedView};
 use blastit_manifest::{Grant, Manifest, PgGrant, ProxyName, RoutingTable};
 use blastit_sqlpolicy::{Allowlist, KNOWN_STATIC_SETUP_SQL, is_introspection_setup_sql, normalize};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::infer_routes::infer;
+use crate::infer_routes::{RoutePlan, infer};
 
 /// The only observations schema this build reads.
 pub const SCHEMA_VERSION: u64 = 1;
@@ -529,7 +529,7 @@ impl Report {
 /// [`ObsError::Manifest`] with the manifest's own one-line diagnostics.
 pub fn parse_manifest(source: &str) -> Result<Manifest, ObsError> {
     let (manifest, _warnings) =
-        Manifest::parse_and_validate(source, blastit_manifest::UidLayout::DEFAULT_BASE)
+        Manifest::parse_blastfile(source, blastit_manifest::UidLayout::DEFAULT_BASE)
             .map_err(|errors| ObsError::Manifest(errors.to_string()))?;
     Ok(manifest)
 }
@@ -542,11 +542,11 @@ pub fn parse_manifest(source: &str) -> Result<Manifest, ObsError> {
 /// [`ObsError`] when the manifest is invalid, the schema version is not
 /// [`SCHEMA_VERSION`], or a JSONL line does not parse.
 pub fn check_audit(
-    manifest_toml: &str,
+    manifest_text: &str,
     http_jsonl: &str,
     sql_jsonl: &str,
 ) -> Result<String, ObsError> {
-    let manifest = parse_manifest(manifest_toml)?;
+    let manifest = parse_manifest(manifest_text)?;
     let observations = CheckObsV1::from_jsonl(http_jsonl, sql_jsonl)?;
     evaluate(&manifest, &observations)?.to_json()
 }
@@ -1252,7 +1252,7 @@ pub fn probe_ingress_json(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LearnPlan {
     /// Routes and exact `queries` only.
-    pub edits: ManifestEdits,
+    pub edits: BlastfileEdits,
     /// HTTP requests the run observed.
     pub requests: u64,
     /// Statements the learn policy refused, rendered for stderr.
@@ -1264,7 +1264,7 @@ pub struct LearnPlan {
 impl LearnPlan {
     /// How many routes the plan adds.
     pub fn routes(&self) -> usize {
-        self.edits.routes.len()
+        self.edits.views.len()
     }
 
     /// How many exact queries the plan adds.
@@ -1309,14 +1309,97 @@ impl LearnPlan {
     }
 }
 
+fn learn_route_plan(plan: &RoutePlan) -> BlastfileEdits {
+    let mut patterns: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (path, name) in &plan.by_path {
+        let Some(pattern) = writable_pattern(path) else {
+            continue;
+        };
+        let proposed = patterns.entry(name.clone()).or_default();
+        if !proposed.contains(&pattern) {
+            proposed.push(pattern);
+        }
+    }
+    BlastfileEdits {
+        views: patterns
+            .into_iter()
+            .map(|(name, patterns)| ProposedView {
+                name,
+                methods: Vec::new(),
+                patterns,
+            })
+            .collect(),
+        grants: Vec::new(),
+    }
+}
+
+/// Whether a requested path can be written as a quoted `Blastfile` pattern at
+/// all (§8.3).
+///
+/// A `{` or `}` would be read as a parameter, a `"` or `\` would end the
+/// string, and a control byte has no place in a quoted pattern. Such a path is
+/// not proposed: one unroutable request must not make the writer refuse the
+/// whole document.
+fn pattern_is_writable(path: &str) -> bool {
+    !path
+        .chars()
+        .any(|character| matches!(character, '{' | '}' | '"' | '\\') || character.is_control())
+}
+
+/// One observed path as the `Blastfile` pattern that matches it (§8.1).
+///
+/// Numeric and UUID-shaped segments become unique `{idN:int}`/`{idN:uuid}`
+/// parameters; every other segment is copied verbatim, because a quoted pattern
+/// matches its own bytes. `None` when the path cannot be written as one
+/// ([`pattern_is_writable`]).
+fn writable_pattern(path: &str) -> Option<String> {
+    if !pattern_is_writable(path) {
+        return None;
+    }
+    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    if segments.is_empty() {
+        return Some("/".to_string());
+    }
+    let mut pattern = String::from("/");
+    let mut parameters = 0u32;
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            pattern.push('/');
+        }
+        if segment.chars().all(|character| character.is_ascii_digit()) {
+            parameters = parameters.saturating_add(1);
+            pattern.push_str(&format!("{{id{parameters}:int}}"));
+        } else if is_uuid(segment) {
+            parameters = parameters.saturating_add(1);
+            pattern.push_str(&format!("{{id{parameters}:uuid}}"));
+        } else {
+            pattern.push_str(segment);
+        }
+    }
+    if path.ends_with('/') {
+        pattern.push('/');
+    }
+    Some(pattern)
+}
+
+/// Whether `segment` is shaped like a UUID (`8-4-4-4-12` hex digits).
+fn is_uuid(segment: &str) -> bool {
+    segment.len() == 36
+        && segment.char_indices().all(|(at, character)| match at {
+            8 | 13 | 18 | 23 => character == '-',
+            _ => character.is_ascii_hexdigit(),
+        })
+}
+
 /// Plans the routes and exact queries an unrouted observation run adds (`R27`).
 ///
 /// Only `ObsTarget::Unrouted` statements are mapped: they belong to a route
 /// that does not exist yet, so they cannot be granted anywhere today. The
-/// route's name and path come from [`infer`]; the statement is the learn
-/// policy's normalised text. Redacted literals are refused (they make the plan
-/// unwritable), transaction control is a hint, and a table grant is never
-/// invented.
+/// view's name comes from [`infer`]; its patterns come from the paths the run
+/// saw, with numeric and UUID-shaped segments becoming parameters; the
+/// statement is the learn policy's normalised text. Redacted literals are
+/// refused (they make the plan unwritable), transaction control is a hint, and
+/// a table grant is never invented.
 ///
 /// # Errors
 ///
@@ -1384,18 +1467,20 @@ pub fn plan_learn(manifest: &Manifest, observations: &CheckObsV1) -> Result<Lear
         }
     }
 
-    let mut edits = ManifestEdits {
-        routes: plan
-            .routes
-            .iter()
-            .map(|route| ProposedRoute {
-                name: route.name.clone(),
-                path: route.paths.clone(),
-            })
-            .collect(),
-        grants: Vec::new(),
-    };
+    let mut edits = learn_route_plan(&plan);
+    let proposed: BTreeSet<String> = edits.views.iter().map(|view| view.name.clone()).collect();
+    let declared: BTreeSet<String> = manifest
+        .routes()
+        .iter()
+        .map(|route| route.name().to_string())
+        .collect();
     for ((route, proxy), queries) in grouped {
+        if !proposed.contains(&route) && !declared.contains(&route) {
+            // No view could be written for this route: every path it saw is not
+            // expressible as a quoted pattern, so a grant would name a view the
+            // edit does not create.
+            continue;
+        }
         let already = manifest
             .routes()
             .iter()
@@ -1409,8 +1494,10 @@ pub fn plan_learn(manifest: &Manifest, observations: &CheckObsV1) -> Result<Lear
             .collect();
         if !queries.is_empty() {
             edits.grants.push(ProposedGrant {
-                route,
-                proxy,
+                view: route,
+                // The unnamed `postgres { … }` block is the store `db` (§7.4);
+                // a named store is written `postgres <name> { … }`.
+                store: (proxy != "db").then_some(proxy),
                 queries,
             });
         }
@@ -1444,12 +1531,12 @@ fn granted_already(manifest: &Manifest, route: usize, proxy: &str, sql: &str) ->
 ///
 /// Every [`ObsError`] of [`check_audit`].
 pub fn plan_learn_json(
-    manifest_toml: &str,
+    manifest_text: &str,
     http_jsonl: &str,
     sql_jsonl: &str,
     dry_run: bool,
 ) -> Result<String, ObsError> {
-    let manifest = parse_manifest(manifest_toml)?;
+    let manifest = parse_manifest(manifest_text)?;
     let observations = CheckObsV1::from_jsonl(http_jsonl, sql_jsonl)?;
     let plan = plan_learn(&manifest, &observations)?;
     plan.emit_hints();
@@ -1462,15 +1549,13 @@ mod tests {
     use super::*;
 
     const MANIFEST: &str = r#"
-        version = 1
-        [proxy.db]
-        protocol = "postgresql"
-        input = { url = "DATABASE_URL" }
-        [[route]]
-        name = "notes"
-        path = ['/notes/.*']
-        [route.db]
-        queries = ['SELECT "notes"."id" FROM "notes" WHERE "notes"."id" = $1']
+        postgres $DATABASE_URL
+
+        view notes regex '/notes/.*' {
+            postgres {
+                query 'SELECT "notes"."id" FROM "notes" WHERE "notes"."id" = $1'
+            }
+        }
     "#;
 
     fn routed(query: Option<&str>, sql: &str, is_tx: bool) -> String {

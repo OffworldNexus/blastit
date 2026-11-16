@@ -22,11 +22,11 @@
 /// unsupported schema version fails with; the caller raises it as
 /// `ValueError`, and `check::run` names the file and exits `2`.
 pub(crate) fn check_audit(
-    manifest_toml: &str,
+    manifest_text: &str,
     http_obs_jsonl: &str,
     sql_obs_jsonl: &str,
 ) -> Result<String, String> {
-    blastit::audit_v1::check_audit(manifest_toml, http_obs_jsonl, sql_obs_jsonl)
+    blastit::audit_v1::check_audit(manifest_text, http_obs_jsonl, sql_obs_jsonl)
         .map_err(|error| error.to_string())
 }
 
@@ -36,12 +36,12 @@ pub(crate) fn check_audit(
 ///
 /// The same failures as [`check_audit`].
 pub(crate) fn plan_learn(
-    manifest_toml: &str,
+    manifest_text: &str,
     http_obs_jsonl: &str,
     sql_obs_jsonl: &str,
     dry_run: bool,
 ) -> Result<String, String> {
-    blastit::audit_v1::plan_learn_json(manifest_toml, http_obs_jsonl, sql_obs_jsonl, dry_run)
+    blastit::audit_v1::plan_learn_json(manifest_text, http_obs_jsonl, sql_obs_jsonl, dry_run)
         .map_err(|error| error.to_string())
 }
 
@@ -70,15 +70,13 @@ mod tests {
     use super::*;
 
     const MANIFEST: &str = r#"
-        version = 1
-        [proxy.db]
-        protocol = "postgresql"
-        input = { url = "DATABASE_URL" }
-        [[route]]
-        name = "notes"
-        path = ['/notes/.*']
-        [route.db]
-        queries = ['SELECT "notes"."id" FROM "notes" WHERE "notes"."id" = $1']
+        postgres $DATABASE_URL
+
+        view notes regex '/notes/.*' {
+            postgres {
+                query 'SELECT "notes"."id" FROM "notes" WHERE "notes"."id" = $1'
+            }
+        }
     "#;
 
     #[test]

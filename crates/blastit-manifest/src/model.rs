@@ -836,42 +836,54 @@ impl Manifest {
         self.php.as_ref()
     }
 
-    /// True when the manifest declares no `app` and every route is static: the
-    /// one shape that needs no WSGI callable (`R13`).
+    /// True when the manifest declares no `app` and answers every request from
+    /// the filesystem: no callable, no front controller, at least one mount
+    /// (§9.5).
     ///
-    /// `BLASTIT_APP` may still supply an app, so this is the manifest-level
-    /// answer and the boot decides what to do with it. A manifest that mixes a
-    /// static route with a route that forwards declares no app either, but it
-    /// is not all-static: the forwarding route still needs a callable.
-    ///
-    /// A `[route.php]` route needs no app either, but its requests reach PHP
-    /// rather than the filesystem, so this stays `false` for it — and for a
-    /// route that declares **both** blocks, which serves its files from disk but
-    /// still reaches the front controller. [`Manifest::can_boot_without_app`] is
-    /// the predicate that covers both own executors.
+    /// A `Blastfile`'s mounts are the file's, so a static-only file has mounts
+    /// and no views; the retired reader's static route is both a route and a
+    /// mount, which is why the route arm below is kept. `BLASTIT_APP` may still
+    /// supply an app, so this is the manifest-level answer and the boot decides
+    /// what to do with it.
     pub fn is_all_static(&self) -> bool {
-        self.app.is_none()
-            && !self.routes.is_empty()
-            && self
-                .routes
-                .iter()
-                .all(|route| route.static_policy().is_some() && route.php().is_none())
+        if self.app.is_some() || self.php.is_some() {
+            return false;
+        }
+        if self.routes.is_empty() {
+            return !self.mounts.is_empty();
+        }
+        self.routes
+            .iter()
+            .all(|route| route.static_policy().is_some())
     }
 
-    /// True when every route runs on its own executor: a `[route.static]` root
-    /// or a `[route.php]` front controller (design §4.2, `ADR-0010` §2).
+    /// True when the manifest needs no `BLASTIT_APP`: the file's one front
+    /// controller answers every view (`entrypoint php`, §12.2), or the file is
+    /// static mounts and no views (§9.5).
     ///
     /// Such a manifest needs no `app` at all, so a boot may skip the WSGI
     /// interpreter (and `check` may run an external suite instead of pytest).
-    /// A PHP route is its own executor even though it is not static, which is
-    /// why this predicate is not [`Manifest::is_all_static`]. An empty manifest
-    /// is not bootable without an app.
+    /// The retired reader's per-route spelling is kept because one of its views
+    /// may still be a WSGI route while another declares `[route.php]`: the
+    /// manifest-level `php` field then means "the first such route's entry",
+    /// not "every view runs it". A file-level entrypoint is the case where no
+    /// route declares one at all. An empty manifest is not bootable without an
+    /// app.
     pub fn can_boot_without_app(&self) -> bool {
-        !self.routes.is_empty()
-            && self
-                .routes
-                .iter()
-                .all(|route| route.static_policy().is_some() || route.php().is_some())
+        let any_route_declares = self
+            .routes
+            .iter()
+            .any(|route| route.php().is_some() || route.static_policy().is_some());
+        if self.php.is_some() && !any_route_declares {
+            // §12.2: one entrypoint, every view.
+            return true;
+        }
+        if self.routes.is_empty() {
+            return self.php.is_some() || !self.mounts.is_empty();
+        }
+        self.routes
+            .iter()
+            .all(|route| route.static_policy().is_some() || route.php().is_some())
     }
 
     /// The one-based line of every `[[route]]` header, in routing order.
@@ -883,23 +895,23 @@ impl Manifest {
         self.route_lines.clone()
     }
 
-    /// The declared roots, route index and absolute path, in manifest order:
-    /// the input of [`Manifest::check_static_roots`] and of the responder-uid
-    /// visibility probe (`R13`).
+    /// The declared roots, mount index and absolute path, in mount order: the
+    /// input of [`Manifest::check_static_roots`] and of the responder-uid
+    /// visibility probe (`R13`, §9.6).
+    ///
+    /// A root belongs to a top-level `static "<prefix>"` mount, not to a view: a
+    /// static-only file has mounts and no routes, and its roots still have to be
+    /// audited (§9.5).
     pub fn static_roots(&self, manifest_dir: &Path) -> Vec<(usize, PathBuf)> {
-        self.routes
+        self.mounts
             .iter()
             .enumerate()
-            .filter_map(|(index, route)| {
-                route
-                    .static_policy()
-                    .map(|policy| (index, manifest_dir.join(&policy.root)))
-            })
+            .map(|(index, mount)| (index, manifest_dir.join(&mount.policy.root)))
             .collect()
     }
 
     /// Checks that every declared static root exists, is a directory and can be
-    /// listed, relative to `manifest_dir` (`R2`, `R13`).
+    /// listed, relative to `manifest_dir` (`R2`, `R13`, §9.6).
     ///
     /// Deliberately separate from [`Manifest::validate`]: a manifest has to
     /// validate before its build output exists (the documentation fences are
@@ -908,10 +920,8 @@ impl Manifest {
     /// followed, so a `current/public` deployment works.
     pub fn check_static_roots(&self, manifest_dir: &Path) -> Result<(), ManifestErrors> {
         let mut errors = Vec::new();
-        for (index, route) in self.routes.iter().enumerate() {
-            let Some(policy) = route.static_policy() else {
-                continue;
-            };
+        for (index, mount) in self.mounts.iter().enumerate() {
+            let policy = &mount.policy;
             let root = manifest_dir.join(&policy.root);
             let reason = match std::fs::metadata(&root) {
                 Err(error) => Some(root_reason(&error)),
@@ -929,9 +939,9 @@ impl Manifest {
             };
             if let Some(reason) = reason {
                 errors.push(ManifestError::StaticRootUnusable {
-                    location: Location::Route {
+                    location: Location::Mount {
                         index,
-                        name: route.name().to_string(),
+                        prefix: mount.prefix.clone(),
                     },
                     root: policy.root.clone(),
                     reason,

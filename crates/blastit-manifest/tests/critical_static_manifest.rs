@@ -41,6 +41,14 @@ fn location() -> Location {
     }
 }
 
+/// The one mount the retired reader lowers that route to: a `static "/"`.
+fn mount_location() -> Location {
+    Location::Mount {
+        index: 0,
+        prefix: "/".to_string(),
+    }
+}
+
 /// A manifest with one route named `site` and the given route-level keys.
 fn route_manifest(route_keys: &str, static_block: &str) -> String {
     format!(
@@ -593,14 +601,14 @@ fn validation_never_touches_the_filesystem() {
     assert_eq!(
         errors.errors(),
         [ManifestError::StaticRootUnusable {
-            location: location(),
+            location: mount_location(),
             root: "public".to_string(),
             reason: "no such file or directory",
         }]
     );
     assert_eq!(
         errors.errors()[0].to_string(),
-        r#"route "site" (index 0): static root "public": no such file or directory"#
+        r#"mount "/" (index 0): static root "public": no such file or directory"#
     );
 }
 
@@ -631,12 +639,12 @@ fn every_unusable_root_is_named_and_none_stops_the_list() {
     let dir = Scratch::new("many");
     std::fs::create_dir(dir.join("ok")).expect("mkdir");
     std::fs::write(dir.join("afile"), b"not a directory").expect("write");
-    let source = "version = 1\n\n\
-                  [[route]]\nname = \"first\"\npath = ['.*']\n\n[route.static]\nroot = 'ok'\n\n\
-                  [[route]]\nname = \"second\"\npath = ['/b/.*']\n\n[route.static]\nroot = 'afile'\n\n\
-                  [[route]]\nname = \"third\"\npath = ['/c/.*']\n\n[route.static]\nroot = 'gone'\n";
-    let (manifest, _) = Manifest::parse_and_validate(source, UidLayout::DEFAULT_BASE)
-        .expect("the manifest validates");
+    // Three mounts: a root belongs to a mount now (§9.6), so three declarations
+    // are three roots to audit, in file order.
+    let source = "static \"/a\" {\n    root \"ok\"\n}\n\n\
+                  static \"/b\" {\n    root \"afile\"\n}\n\n\
+                  static \"/c\" {\n    root \"gone\"\n}\n";
+    let manifest = Manifest::from_blastfile_str(source).expect("the Blastfile parses");
     assert_eq!(
         manifest.static_roots(&dir.path),
         vec![
@@ -646,11 +654,11 @@ fn every_unusable_root_is_named_and_none_stops_the_list() {
         ]
     );
 
-    let unusable = |index: usize, name: &str, root: &str, reason: &'static str| {
+    let unusable = |index: usize, prefix: &str, root: &str, reason: &'static str| {
         ManifestError::StaticRootUnusable {
-            location: Location::Route {
+            location: Location::Mount {
                 index,
-                name: name.to_string(),
+                prefix: prefix.to_string(),
             },
             root: root.to_string(),
             reason,
@@ -662,8 +670,8 @@ fn every_unusable_root_is_named_and_none_stops_the_list() {
             .expect_err("a file and a missing directory")
             .errors(),
         [
-            unusable(1, "second", "afile", "not a directory"),
-            unusable(2, "third", "gone", "no such file or directory"),
+            unusable(1, "/b", "afile", "not a directory"),
+            unusable(2, "/c", "gone", "no such file or directory"),
         ],
         "every unusable root, in manifest order, and only those"
     );
@@ -691,7 +699,7 @@ fn an_unlistable_root_is_permission_denied() {
     assert_eq!(
         errors.errors(),
         [ManifestError::StaticRootUnusable {
-            location: location(),
+            location: mount_location(),
             root: "locked".to_string(),
             reason: "permission denied",
         }]

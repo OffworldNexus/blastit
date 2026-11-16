@@ -64,7 +64,7 @@ fn describe(outcome: &StaticOutcome) -> String {
             format!("file:{:?}:{}:{}", file.kind, file.url_path, file.len)
         }
         StaticOutcome::Missing => "missing".to_string(),
-        StaticOutcome::SpaLost => "spa-lost".to_string(),
+        StaticOutcome::FallbackMissing => "fallback-missing".to_string(),
         StaticOutcome::Hidden => "hidden".to_string(),
         StaticOutcome::Refused(refusal) => format!("refused:{refusal:?}"),
     }
@@ -802,17 +802,27 @@ fn the_dotfile_rule_exempts_exactly_dot_well_known() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_spa_route_whose_index_is_missing_is_spa_lost() {
+fn a_declared_fallback_that_is_missing_is_fallback_missing() {
     let tree = StaticTree::build(Fixture::S);
     let mut policy = Fixture::S.policy();
+    // `fallback` is the file a miss answers with (§9.3), so it is the name that
+    // has to move; `index` moves with it because `/` and `/docs` are a miss
+    // only when the directory index is gone.
     policy.index = "missing-index.html".to_string();
+    policy.fallback = Some("missing-index.html".to_string());
     for backend in [Backend::Openat2, Backend::Walk] {
         let root =
             StaticRoot::open_with(&tree.base, &policy, backend).expect("the fixture root opens");
-        assert!(matches!(root.resolve(&[]), StaticOutcome::SpaLost));
-        assert!(matches!(root.resolve(&["missing"]), StaticOutcome::SpaLost));
-        assert!(matches!(root.resolve(&["docs"]), StaticOutcome::SpaLost));
-        // The exact file is still served: `SpaLost` is only the fallback.
+        assert!(matches!(root.resolve(&[]), StaticOutcome::FallbackMissing));
+        assert!(matches!(
+            root.resolve(&["missing"]),
+            StaticOutcome::FallbackMissing
+        ));
+        assert!(matches!(
+            root.resolve(&["docs"]),
+            StaticOutcome::FallbackMissing
+        ));
+        // The exact file is still served: `FallbackMissing` is only the fallback.
         let parts: Vec<&str> = APP_JS.split('/').collect();
         assert!(
             matches!(root.resolve(&parts), StaticOutcome::File(_)),

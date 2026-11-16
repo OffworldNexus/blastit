@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use blastit_frame::{ClientIpConfig, Limits};
+use blastit_manifest::StaticMount;
 
 /// How long the scheduler waits before asking init for a view it just lost
 /// (§2.4: "don't spin: back off before respawning the same route").
@@ -286,6 +287,13 @@ pub struct SchedulerConfig {
     /// The largest static file served, in bytes: `STATIC_MAX_FILE_BYTES`, with
     /// no environment variable and no manifest key (design §4.6).
     pub static_max_bytes: u64,
+    /// The file's top-level `static "<prefix>"` mounts, in file order (§9.1).
+    ///
+    /// A mount is not a route: it owns no uid and starts no process, so the
+    /// scheduler receives it beside the route table. Every root is opened from
+    /// [`SchedulerConfig::manifest_dir`] before the first request, and a request
+    /// path is matched against the mounts before any view (§9.2).
+    pub mounts: Vec<StaticMount>,
 }
 
 impl Default for SchedulerConfig {
@@ -316,6 +324,7 @@ impl Default for SchedulerConfig {
             view_mem_estimate: 32 * 1024 * 1024,
             manifest_dir: PathBuf::new(),
             static_max_bytes: crate::static_asset::STATIC_MAX_FILE_BYTES,
+            mounts: Vec::new(),
         }
     }
 }

@@ -147,14 +147,19 @@ fn a_broken_file_exits_two_with_a_position() {
     assert_eq!(dir.read("Blastfile"), broken);
 }
 
-/// A missing file exits `2` and names the path.
+/// A missing file exits `2` and names the path with §15.1's one sentence.
 #[test]
 fn a_missing_file_exits_two() {
     let dir = Dir::new("missing");
     let output = dir.run(&[], &["fmt"]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.starts_with("./Blastfile: "), "{stderr}");
+    assert_eq!(
+        stderr.trim_end(),
+        "./Blastfile: no such file or directory (put a Blastfile in the working directory, or \
+         set BLASTIT_MANIFEST)",
+        "{stderr}"
+    );
 }
 
 /// `PATH` names the file, and wins over `BLASTIT_MANIFEST`.

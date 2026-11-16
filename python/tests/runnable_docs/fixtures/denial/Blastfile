@@ -1,0 +1,11 @@
+app "denial"
+
+entrypoint python "app:application"
+
+postgres $DATABASE_URL
+
+view products regex '.*' {
+    postgres {
+        query 'SELECT 2'
+    }
+}

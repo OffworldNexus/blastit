@@ -15,21 +15,15 @@ use blastit_manifest::{Manifest, ProxyName, UidLayout};
 use serde_json::{Value, json};
 
 const MANIFEST: &str = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+postgres analytics $ANALYTICS_URL
 
-[proxy.analytics]
-protocol = "postgresql"
-input = { url = "ANALYTICS_URL" }
-
-[[route]]
-name = "notes"
-path = ['/notes/.*']
-[route.db]
-queries = ['SELECT "notes"."id" FROM "notes" WHERE "notes"."id" = $1']
+view notes regex '/notes/.*' {
+    postgres {
+        query 'SELECT "notes"."id" FROM "notes" WHERE "notes"."id" = $1'
+    }
+}
 "#;
 
 /// One `http_obs.jsonl` line exactly as `_check_pytest.py` writes it.
@@ -290,8 +284,8 @@ fn the_bridge_plan_learn_matches_the_engine_proposal() {
         CheckObsV1::from_jsonl(&http.join("\n"), &sql).expect("the observations parse");
     let plan = audit_v1::plan_learn(&manifest, &observations).expect("the plan is built");
     let edited =
-        blastit_manifest::edit::apply_edits(MANIFEST, &plan.edits).expect("the plan applies");
-    let (parsed, _warnings) = Manifest::parse_and_validate(&edited, UidLayout::DEFAULT_BASE)
+        blastit_manifest::blastfile::apply_edits(MANIFEST, &plan.edits).expect("the plan applies");
+    let (parsed, _warnings) = Manifest::parse_blastfile(&edited, UidLayout::DEFAULT_BASE)
         .expect("the edited manifest boots");
     let route = parsed
         .routes()

@@ -452,7 +452,7 @@ fn check_static_index(location: &Location, policy: &StaticPolicy, errors: &mut V
         Some(ONE_OR_MORE_SEGMENTS)
     } else if has_parent_segment(index) {
         Some(NO_PARENT_SEGMENT)
-    } else if index.split('/').any(|segment| segment.starts_with('.')) {
+    } else if index.split('/').any(is_dotfile_segment) {
         Some(NO_DOTFILE_SEGMENT)
     } else if index.contains('\\') {
         Some(NO_BACKSLASH)
@@ -567,21 +567,39 @@ fn check_static_declarations(
     }
 }
 
-/// The top-level `static "<prefix>"` mounts (§9.1): the prefix's shape, the
-/// `fallback`'s name, and the prefix's uniqueness.
+/// The top-level `static "<prefix>"` mounts (§9.1): the four keys' rules, the
+/// prefix's shape and its uniqueness (§9.1, §9.4).
 ///
-/// `root` and `index` are checked where they are written — on a route's own
-/// block — because the retired reader fills both from that same document and
-/// one mistake must not be reported twice. `fallback` has no key in that
-/// format, so it is checked here. Nothing touches the filesystem: a mount has
+/// `root`, `index` and `immutable` are checked **per mount**, because that is
+/// the declaration they belong to; the sentence names the mount. A mount the
+/// retired reader lowered from a `[route.static]` block carries the identical
+/// policy that block's route already had checked, so it is skipped here and one
+/// mistake is still reported once. Nothing touches the filesystem: a mount has
 /// to validate on a machine that has not run the build yet.
 fn check_mounts(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    // The retired reader lowers each `[route.static]` block to a route *and* a
+    // mount at the URL root, so the two carry one identical policy. The route
+    // walk above already checked that one; checking it again here would report
+    // one mistake twice under two subjects. A `Blastfile` has no route-level
+    // policy at all, so every mount it declares is this function's (§9.1,
+    // §9.4).
+    let bridged = |policy: &StaticPolicy| {
+        manifest
+            .routes()
+            .iter()
+            .any(|route| route.static_policy() == Some(policy))
+    };
     for (index, mount) in manifest.mounts().iter().enumerate() {
         let location = Location::Mount {
             index,
             prefix: mount.prefix.clone(),
         };
+        if !bridged(&mount.policy) {
+            check_static_root(&location, &mount.policy, errors);
+            check_static_index(&location, &mount.policy, errors);
+            check_static_immutable(&location, &mount.policy, errors);
+        }
         if let Some(rule) = mount_prefix_rule(&mount.prefix) {
             errors.push(ManifestError::StaticMountPrefixInvalid {
                 location: location.clone(),

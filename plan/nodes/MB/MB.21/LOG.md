@@ -31,3 +31,11 @@ Replan under the 2026-11-16 burial directive: MB.21.1.1 created (purge the two l
 ## 2026-11-16T06:05 [lead]
 
 FOLLOW-UP for conductor/strategist (out of this epic's paths): crates/blastit-view's 1s frame-budget test flakes under load — observed in 2 of 4 make check runs during MB.21.3 (a flake outside every MB.21.3 leaf's paths; the sub-lead re-ran rather than touching it). Needs its own node before the MB.21 epic gate can be trusted repeatedly. Also: design §13.2 assigns six boot-warning re-spellings to MB.21.3.0 but they change sentences pinned by crates/blastit/tests/*, so they belong to MB.21.4.3's re-spelling sweep
+
+## 2026-11-16T09:05 [lead]
+
+INCIDENT (MB.21.4.1): implementer wedged 1002s on an unwrapped 'background: true' cargo test --test critical_static_cli; harness killed pid 3158340, EXIT=101. Root cause is a product defect, not only tooling: critical_static_cli::a_root_the_caller_cannot_list_is_refused spawns 'blastit dev' via .output() and expects a boot refusal; in the WIP cutover check_static_roots was not refusing on mounts in the dev boot path so dev booted and .output() hung. Rule enforced for every sub-lead/implementer: never background:true a cargo test without 'timeout 180', and use make (PYO3_PYTHON/LD_LIBRARY_PATH/PYTHONHOME) for python-feature targets
+
+## 2026-11-16T09:09 [conductor]
+
+Owner directive — make Blastfile budgets comfortable across code + reference + design: raise MAX_SOURCE_BYTES from 1 MiB to 16 MiB (16_777_216), MAX_TOKENS and MAX_TRIVIA to 4_194_304, MAX_PATTERN_BYTES from 256 to 4_096, MAX_LIST_ITEMS from 256 to 4_096, and app name length cap from 64 to 256 chars; also remove the false 'split the file' suggestion from token/trivia refusal messages since Blastfile has no multi-file include.

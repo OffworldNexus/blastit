@@ -173,7 +173,7 @@ impl Server {
         as_uid: Option<u32>,
     ) -> Self {
         let fixture = Fixture::new(tag);
-        let manifest_path = fixture.write("blastit.toml", manifest);
+        let manifest_path = fixture.write("Blastfile", manifest);
         for (name, contents) in python {
             fixture.write(name, contents);
         }
@@ -918,82 +918,50 @@ def application(environ, start_response):
     return [body]
 "#;
 
-/// The manifest for the routing tests: two routes with different uids.
+/// The manifest for the routing tests: two views with different uids.
 const TWO_ROUTES: &str = r#"
-version = 1
+view one "/", "/one" {}
 
-[[route]]
-name = "one"
-path = ['/', '/one']
-
-[[route]]
-name = "two"
-path = ['/two/.*']
+view two regex '/two/.*' {}
 "#;
 
-/// The manifest for the concurrency test: `/parallel` has to reach a route.
+/// The manifest for the concurrency test: `/parallel` has to reach a view.
 const PARALLEL_ROUTE: &str = r#"
-version = 1
-
-[[route]]
-name = "one"
-path = ['/', '/one', '/parallel']
+view one "/", "/one", "/parallel" {}
 "#;
 
-/// The manifest for the crash test: `/crash` has to reach a route.
+/// The manifest for the crash test: `/crash` has to reach a view.
 const CRASH_ROUTE: &str = r#"
-version = 1
-
-[[route]]
-name = "one"
-path = ['/', '/one', '/crash']
+view one "/", "/one", "/crash" {}
 "#;
 
-/// The manifest for the environment test: `/env` has to reach a route.
+/// The manifest for the environment test: `/env` has to reach a view.
 const ENV_ROUTE: &str = r#"
-version = 1
-
-[[route]]
-name = "one"
-path = ['/', '/one', '/env']
+view one "/", "/one", "/env" {}
 "#;
 
-/// One route that matches everything, for tests that need a single view.
+/// One view that matches everything, for tests that need a single view.
 const ONE_ROUTE: &str = r#"
-version = 1
-
-[[route]]
-name = "one"
-path = ['.*']
+view one regex '.*' {}
 "#;
 
-/// A declared proxy with a grant: dbproxy exists and the view has a socket.
+/// A declared store with a grant: dbproxy exists and the view has a socket.
 const PROXY_AND_ROUTE: &str = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-
-[[route]]
-name = "one"
-path = ['.*']
-[route.db]
-queries = ["SELECT 1"]
+view one regex '.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 "#;
 
-/// A declared proxy that no route grants: its variables are rewritten, but it
+/// A declared store that no view grants: its variables are rewritten, but it
 /// gets no listener and so no dbproxy.
 const PROXY_WITHOUT_GRANTS: &str = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-
-[[route]]
-name = "one"
-path = ['.*']
+view one regex '.*' {}
 "#;
 
 #[test]
@@ -1118,17 +1086,13 @@ fn a_declared_proxy_boots_dbproxy_and_replaces_the_credential_with_a_local_endpo
     let url =
         format!("postgresql://doadmin:{password}@db.internal:25060/defaultdb?sslmode=require");
     let manifest = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }
-
-[[route]]
-name = "one"
-path = ['/.*']
-[route.db]
-queries = ["SELECT 1"]
+view one regex '/.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 "#;
     let server = Server::start(
         "proxy",
@@ -1301,7 +1265,7 @@ fn a_non_root_init_without_its_capabilities_names_them() {
     // fail at boot with the list of capabilities it is missing, not later with
     // an EPERM nobody can place.
     let fixture = Fixture::new("rootless");
-    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    let manifest = fixture.write("Blastfile", ONE_ROUTE);
     fixture.write("app.py", APP);
     let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
     command
@@ -1458,7 +1422,7 @@ fn a_rootless_standalone_install_runs_dbproxy_from_the_capability_free_copy() {
         "chown {uid} /run/blastit /run/blastit/views"
     );
 
-    let manifest = dir.readable("blastit.toml", PROXY_AND_ROUTE);
+    let manifest = dir.readable("Blastfile", PROXY_AND_ROUTE);
     dir.readable("app.py", PG_APP);
     let python_path = dir.python_path();
     let url = "postgresql://nowhere:nowhere@127.0.0.1:1/nowhere";
@@ -1597,23 +1561,17 @@ fn sigterm_drains_and_exits_zero_within_the_graceful_timeout() {
 }
 
 /// The manifest the two database tests serve: one granted query, one other
-/// route.
+/// view.
 const GRANTED_AND_DENIED: &str = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+view data regex '/query' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 
-[[route]]
-name = "data"
-path = ['/query']
-[route.db]
-queries = ["SELECT 1"]
-
-[[route]]
-name = "other"
-path = ['/other']
+view other regex '/other' {}
 "#;
 
 #[test]
@@ -1718,21 +1676,15 @@ fn a_granted_query_is_forwarded_and_an_ungranted_one_is_denied() {
     };
     let base = 47_000;
     let manifest = r#"
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+view data regex '/query' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 
-[[route]]
-name = "data"
-path = ['/query']
-[route.db]
-queries = ["SELECT 1"]
-
-[[route]]
-name = "other"
-path = ['/other']
+view other regex '/other' {}
 "#;
     let server = Server::start(
         "postgres",
@@ -2249,7 +2201,7 @@ fn a_failing_boot_still_says_the_preset_assumption_it_contradicts() {
         &[
             ("PORT", "8096"),
             ("BLASTIT_APP", "app:application"),
-            ("BLASTIT_MANIFEST", "/nonexistent/blastit.toml"),
+            ("BLASTIT_MANIFEST", "/nonexistent/Blastfile"),
             ("PYTHONPATH", &fixture.python_path()),
             ("BLASTIT_UID_BASE", "48200"),
             ("BLASTIT_LOG_FORMAT", "json"),
@@ -2276,7 +2228,7 @@ fn an_unknown_preset_is_refused_with_the_list_of_presets() {
     // E1: a startup error, before anything is forked, naming the flag the
     // operator used and every preset this build knows.
     let fixture = Fixture::new("preset-refusal");
-    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    let manifest = fixture.write("Blastfile", ONE_ROUTE);
     fixture.write("app.py", APP);
     let text = run_to_exit(
         &[
@@ -2332,7 +2284,7 @@ fn a_writable_working_directory_is_refused() {
         return;
     }
     let fixture = Fixture::new("writable-cwd");
-    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    let manifest = fixture.write("Blastfile", ONE_ROUTE);
     fixture.write("app.py", APP);
     for mode in [0o777, 0o1777] {
         std::fs::set_permissions(&fixture.path, Permissions::from_mode(mode)).unwrap();
@@ -2389,7 +2341,7 @@ fn a_writable_directory_only_on_pythonpath_is_refused() {
         return;
     }
     let fixture = Fixture::new("writable-pythonpath");
-    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    let manifest = fixture.write("Blastfile", ONE_ROUTE);
     fixture.write("app.py", APP);
     let shared = fixture.path.join("shared");
     std::fs::create_dir(&shared).unwrap();
@@ -2461,7 +2413,7 @@ fn a_writable_directory_above_the_working_directory_is_refused() {
         return;
     }
     let fixture = Fixture::new("writable-parent");
-    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    let manifest = fixture.write("Blastfile", ONE_ROUTE);
     fixture.write("app.py", APP);
     let parent = fixture.path.join("parent");
     let started_in = parent.join("sub");
@@ -2509,7 +2461,7 @@ fn a_directory_a_view_can_read_through_its_own_group_is_not_a_blocker() {
         return;
     }
     let fixture = Fixture::new("group-class");
-    let manifest = fixture.write("blastit.toml", ONE_ROUTE);
+    let manifest = fixture.write("Blastfile", ONE_ROUTE);
     fixture.write("app.py", APP);
     let base = 48_400;
     let view = base + 1000;
@@ -2577,7 +2529,7 @@ fn a_boot_s_first_lines_are_in_the_format_its_settings_name() {
         &[
             ("PORT", "8095"),
             ("BLASTIT_APP", "app:application"),
-            ("BLASTIT_MANIFEST", "/nonexistent/blastit.toml"),
+            ("BLASTIT_MANIFEST", "/nonexistent/Blastfile"),
             ("BLASTIT_UID_BASE", "48500"),
             ("BLASTIT_LOG_FORMAT", "pretty"),
         ],
@@ -2614,7 +2566,7 @@ fn a_boot_with_no_readable_configuration_writes_its_first_lines_as_json() {
         &[
             ("PORT", "8095"),
             ("BLASTIT_APP", "app:application"),
-            ("BLASTIT_MANIFEST", "/nonexistent/blastit.toml"),
+            ("BLASTIT_MANIFEST", "/nonexistent/Blastfile"),
             ("BLASTIT_UID_BASE", "48500"),
             ("BLASTIT_LOG_FORMAT", "nope"),
         ],

@@ -153,7 +153,9 @@ fn normalize(sql: &str) -> String {
 
 /// Diffs what a test suite observed against what a manifest grants (D3b, §6).
 ///
-/// `manifest_toml` is the whole `blastit.toml`; `observations_json` is the
+/// `manifest_toml` is the whole manifest the pytest plugin and `fold` read
+/// (the retired reader until `MB.21.4.3` moves them to `Blastfile`);
+/// `observations_json` is the
 /// document the pytest plugin writes (the [`audit`] module documents its shape
 /// and the shape of the report). The observations carry the `PATH_INFO` the app
 /// saw, which is what the scheduler routed on, so no mount prefix is involved.
@@ -299,11 +301,11 @@ fn classify_statement(sql: &str) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(name = "check_audit")]
 fn check_audit_report(
-    manifest_toml: &str,
+    manifest_text: &str,
     http_obs_jsonl: &str,
     sql_obs_jsonl: &str,
 ) -> PyResult<String> {
-    check::check_audit(manifest_toml, http_obs_jsonl, sql_obs_jsonl).map_err(PyValueError::new_err)
+    check::check_audit(manifest_text, http_obs_jsonl, sql_obs_jsonl).map_err(PyValueError::new_err)
 }
 
 /// Plans the routes and exact queries `--learn` adds and renders its document
@@ -323,14 +325,14 @@ fn check_audit_report(
 /// `{"proposed": {"routes": R, "queries": Q}, "wrote": true|false}`, exactly
 /// the `--learn --json` document (intentionally without `schema_version`).
 #[pyfunction]
-#[pyo3(name = "plan_learn", signature = (manifest_toml, http_obs_jsonl, sql_obs_jsonl, dry_run=false))]
+#[pyo3(name = "plan_learn", signature = (manifest_text, http_obs_jsonl, sql_obs_jsonl, dry_run=false))]
 fn plan_learn_report(
-    manifest_toml: &str,
+    manifest_text: &str,
     http_obs_jsonl: &str,
     sql_obs_jsonl: &str,
     dry_run: bool,
 ) -> PyResult<String> {
-    check::plan_learn(manifest_toml, http_obs_jsonl, sql_obs_jsonl, dry_run)
+    check::plan_learn(manifest_text, http_obs_jsonl, sql_obs_jsonl, dry_run)
         .map_err(PyValueError::new_err)
 }
 

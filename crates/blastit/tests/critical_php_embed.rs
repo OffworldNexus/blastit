@@ -31,9 +31,10 @@
 //!   sentence, `R19`'s crash charge at one live thread) and is reported as a
 //!   bailed request — `outcome` is `bailed` (`MB.3.41`), never `ok` and never
 //!   `view_died` — and the next request is served
-//!   by the **only** live worker of that route — a new pid, a direct child of
-//!   init, with the crashed process gone (`workers = 1` caps the slot, and the
-//!   uid is one constant in single-UID `dev`, so it proves nothing). A third
+//!   by a fresh worker of that route — a new pid, a direct child of
+//!   init, with the crashed process gone (views are forked on demand and one
+//!   request is in flight at a time, and the uid is one constant in single-UID
+//!   `dev`, so it proves nothing about the slot). A third
 //!   leg spends its 60 ms in `usleep`, so the CPU is a small fraction of the
 //!   wall: a charge taken from `cpu_ns` cannot pass it, which is what makes the
 //!   wall-charge assertion an oracle instead of a tautology.
@@ -156,30 +157,12 @@ const TICK_FLOOR_NS: u64 = 1_000_000;
 /// spare (`MB.3.38`).
 const CPU_SHARE: u64 = 20;
 
-/// The documented page (`docs/frameworks/php.md`, `ADR-0010` §2): a `[route.php]`
-/// route needs an `entry` and no `BLASTIT_APP`.
+/// The documented page (`docs/frameworks/php.md`, `ADR-0010` §2): a PHP file
+/// needs an `entrypoint` and no `BLASTIT_APP`.
 const PHP_MANIFEST: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
-
-[route.php]
-entry = \"public/index.php\"
-";
-
-/// One worker slot: the containment leg is about *that* slot surviving a crash.
-const ONE_WORKER_MANIFEST: &str = "\
-version = 1
-
-[[route]]
-name = \"app\"
-path = ['.*']
-
-[route.php]
-entry = \"public/index.php\"
-workers = 1
+view app regex '.*' {}
 ";
 
 /// What the front controller echoes; the body the suite looks for.
@@ -303,17 +286,11 @@ echo 'x=' . (isset($_POST['x']) ? $_POST['x'] : 'absent') . \"\\n\";
 /// `MB.3.13`'s gap G4): a `form` route refuses a body of another type with
 /// `400`, so the `Content-Type` the leg posts is part of the fixture.
 const FORM_MANIFEST: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
-
-[route.php]
-entry = \"public/index.php\"
-
-[route.ingress]
-body = \"form\"
+view app regex '.*' {
+    body form
+}
 ";
 
 /// The worker's whole-body budget for the form leg (`BLASTIT_MAX_BODY_BYTES`).
@@ -323,32 +300,23 @@ body = \"form\"
 /// 8 KiB post is past the cap both of them apply.
 const FORM_BODY_MAX: usize = 4096;
 
-/// `PHP_MANIFEST` with `egress = true` (`ADR-0010` §3, design §7.3): the route
+/// `PHP_MANIFEST` with `egress any` (`ADR-0010` §3, design §7.3): the view
 /// keeps `AF_INET`/`AF_INET6` in its filter, and the INI renders
-/// `allow_url_fopen=1` for the same route. The two must never disagree.
+/// `allow_url_fopen=1` for the same view. The two must never disagree.
 const EGRESS_MANIFEST: &str = "\
-version = 1
+entrypoint php \"public/index.php\"
 
-[[route]]
-name = \"app\"
-path = ['.*']
-egress = true
-
-[route.php]
-entry = \"public/index.php\"
+view app regex '.*' {
+    egress any
+}
 ";
 
-/// A manifest with **no** `[route.php]` route: the deployment gate has nothing
-/// to authorise, so the boot proceeds exactly as `dev`/`check` do (`MB.3.44`).
+/// A file with **no** `entrypoint php`: the deployment gate has nothing to
+/// authorise, so the boot proceeds exactly as `dev`/`check` do (`MB.3.44`).
 const STATIC_ONLY_MANIFEST: &str = "\
-version = 1
-
-[[route]]
-name = \"docs\"
-path = ['.*']
-
-[route.static]
-root = \"site\"
+static \"/\" {
+    root \"site\"
+}
 ";
 
 // --------------------------------------------------------------- stub ELFs
@@ -1028,7 +996,7 @@ fn shim_path(major: u32, minor: u32) -> Option<PathBuf> {
 
 // ---------------------------------------------------------------- fixture
 
-/// A temp directory holding one case's `blastit.toml`, its front controller and
+/// A temp directory holding one case's `Blastfile`, its front controller and
 /// (for the stub legs) the stub pair, removed on drop.
 struct Scratch {
     /// The directory `blastit dev` is started in.
@@ -1036,13 +1004,13 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// Creates `dir` with `blastit.toml` written.
+    /// Creates `dir` with `Blastfile` written.
     fn new(name: &str, manifest: &str) -> Self {
         let dir =
             std::env::temp_dir().join(format!("blastit-php-embed-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("public")).expect("a fixture directory");
-        std::fs::write(dir.join("blastit.toml"), manifest).expect("the manifest");
+        std::fs::write(dir.join("Blastfile"), manifest).expect("the manifest");
         Self { dir }
     }
 
@@ -1445,7 +1413,7 @@ fn assert_package_sentence(text: &str, what: &str) {
         "{what}: the route is named: {text}"
     );
     assert!(
-        text.contains(&format!("[route.php] entry {ENTRY:?}")),
+        text.contains(&format!("entrypoint php {ENTRY:?}")),
         "{what}: the entry is named: {text}"
     );
     assert!(
@@ -2444,8 +2412,8 @@ fn a_sleeping_bailout_is_charged_its_wall_time_and_not_its_cpu_time() {
 }
 
 /// One slot, two requests: the crash answers `5xx` with its cost, the next
-/// request is served by a fresh process in the **same** slot — the only live
-/// worker of the route, forked by init, with the crashed one gone.
+/// request is served by a fresh process — forked on demand, a direct child of
+/// init, with the crashed one gone.
 ///
 /// `sleeps_ms` is set by a leg whose wall time is spent sleeping rather than
 /// computing: it then also asserts that the sleep shows up in the wall time and
@@ -2456,7 +2424,7 @@ fn containment(crash: &str, what: &str, name: &str, sleeps_ms: Option<u64>) {
         refused_without_a_host(what, name);
         return;
     };
-    let scratch = Scratch::new(name, ONE_WORKER_MANIFEST);
+    let scratch = Scratch::new(name, PHP_MANIFEST);
     scratch.write(ENTRY, &crash_page(crash));
 
     let mut boot = Boot::start(
@@ -2604,11 +2572,13 @@ fn containment(crash: &str, what: &str, name: &str, sleeps_ms: Option<u64>) {
         "{what}: the crash retired the worker, so the next request needs a new process: {second}"
     );
 
-    // "Same slot" cannot be uid equality: `blastit dev` runs every route as the
-    // caller, so the uid is one constant for the whole boot. The slot is the
-    // route's **single** live view, and the proof is that the process serving
-    // the second request is a direct child of init, that the process that
-    // crashed is gone, and that exactly one worker of this route is alive.
+    // "Same slot" cannot be uid equality: `blastit dev` runs every view as the
+    // caller, so the uid is one constant for the whole boot. Views are forked on
+    // demand (`Blastfile` has no eager spawn and this view declares no
+    // `prefork`), so one request in flight means one worker: the proof is that
+    // the process serving the second request is a direct child of init, that the
+    // process that crashed is gone, and that exactly one worker of this view is
+    // alive.
     let init = boot.pid();
     let second_pid = second["pid"]
         .as_u64()
@@ -3165,7 +3135,7 @@ fn refused_without_a_host(what: &str, name: &str) {
     let mut boot = Boot::start(&scratch.dir, &[]);
     let code = boot
         .await_boot()
-        .expect("a host with no usable libphp cannot serve a [route.php] route");
+        .expect("a host with no usable libphp cannot serve an entrypoint php file");
     boot.stop();
     let stdout = boot.stdout_text();
     let stderr = boot.stderr_text();
@@ -3347,19 +3317,19 @@ fn first_answer(boot: &Boot) -> String {
     }
 }
 
-/// A fixture `blastit.toml` directory, at `mode`, with a `0644` front controller
+/// A fixture `Blastfile` directory, at `mode`, with a `0644` front controller
 /// and the manifest the documented page uses.
 fn manifest_tree(root: &Path, mode: u32) -> PathBuf {
     let app = root.join("app");
     std::fs::create_dir_all(app.join("public")).expect("a fixture directory");
-    std::fs::write(app.join("blastit.toml"), PHP_MANIFEST).expect("the manifest");
+    std::fs::write(app.join("Blastfile"), PHP_MANIFEST).expect("the manifest");
     std::fs::write(app.join(ENTRY), NORMAL_PHP).expect("the front controller");
     set_mode(&app.join(ENTRY), 0o644);
     set_mode(&app, mode);
     app
 }
 
-/// **`R7`/`B2-R5`, the tree half.** A deployment refuses a `blastit.toml`
+/// **`R7`/`B2-R5`, the tree half.** A deployment refuses a `Blastfile`
 /// directory a route uid could write, because that directory is every PHP
 /// worker's `cwd` and `include_path` (`ADR-0010` §2): a route uid that can write
 /// a file there chooses what the worker `include`s.
@@ -3378,7 +3348,7 @@ fn manifest_tree(root: &Path, mode: u32) -> PathBuf {
 fn a_world_writable_manifest_root_refuses_a_production_boot() {
     let root = protected_root("manifest");
     let app = manifest_tree(&root, 0o755);
-    let what = "the directory holding blastit.toml";
+    let what = "the directory holding the Blastfile";
 
     // The permission bits, not the path, are the decision: the same tree the
     // same fixture just created is the accepted shape at 0755.
@@ -3387,7 +3357,7 @@ fn a_world_writable_manifest_root_refuses_a_production_boot() {
         "a 0755 tree owned by init's uid is what a deployment boots"
     );
     assert!(
-        trees_refusal(vec![Claim::new("[route.php] entry", app.join(ENTRY))]).is_ok(),
+        trees_refusal(vec![Claim::new("entrypoint php", app.join(ENTRY))]).is_ok(),
         "and its 0644 front controller is part of the accepted tree"
     );
 
@@ -3416,7 +3386,7 @@ fn a_world_writable_manifest_root_refuses_a_production_boot() {
     set_mode(&app, 0o755);
     set_mode(&app.join(ENTRY), 0o666);
     let err = trees_refusal(vec![Claim::new(
-        "route \"app\": [route.php] entry \"public/index.php\"",
+        "route \"app\": entrypoint php \"public/index.php\"",
         app.join(ENTRY),
     )])
     .expect_err("a world-writable front controller must refuse a deployment boot");
@@ -3424,7 +3394,7 @@ fn a_world_writable_manifest_root_refuses_a_production_boot() {
         err.contains(&app.join(ENTRY).display().to_string()),
         "{err}"
     );
-    assert!(err.contains("[route.php] entry"), "{err}");
+    assert!(err.contains("entrypoint php"), "{err}");
 
     // `root` is a `ProtectedRoot`: it removes the fixture, panic path included.
     println!("refused (production provenance, tree half): {err}");
@@ -3626,13 +3596,13 @@ fn the_deployment_gate_is_invoked_behind_its_sentence() {
         check(&app, &libs)
     );
 
-    // 0. A manifest with no `[route.php]` has nothing to authorise, and a
+    // 0. A file with no `entrypoint php` has nothing to authorise, and a
     // deployment boots it: the seam says `Ok`, so a caller cannot read a
     // proceeding manifest as a refusal (`MB.3.44`).
     assert_eq!(
         blastit::host::deployment_boot_check(STATIC_ONLY_MANIFEST, &app, &libphp, &libs, 20_000),
         Ok(()),
-        "a manifest with no [route.php] proceeds through the deployment gate: {:?}",
+        "a manifest with no entrypoint php proceeds through the deployment gate: {:?}",
         blastit::host::deployment_boot_check(STATIC_ONLY_MANIFEST, &app, &libphp, &libs, 20_000)
     );
 
@@ -3679,13 +3649,13 @@ fn the_deployment_gate_is_invoked_behind_its_sentence() {
         check(&app, &libs)
     );
     println!(
-        "the deployment gate proceeded on the manifest with no [route.php], refused the 0777 \
+        "the deployment gate proceeded on the manifest with no entrypoint php, refused the 0777 \
          tree and the 0777 shim directory, and proceeded once both were 0755"
     );
 }
 
 /// **The accepted twin** (`R7`, `B2-R5`): a whole deployment — the pair, the
-/// manifest directory, the front controller and a `[route.static]` root — at the
+/// manifest directory, the front controller and a `static` root — at the
 /// modes an install has, owned by init's uid, is accepted. Then one directory is
 /// made world-writable and the same check refuses, so the acceptance is the
 /// permission bits and cannot be vacuous.
@@ -3717,12 +3687,12 @@ fn the_same_tree_owned_by_init_is_accepted() {
     };
     let trees = || {
         vec![
-            Claim::new("the directory holding blastit.toml", &app),
+            Claim::new("the directory holding the Blastfile", &app),
             Claim::new(
-                "route \"app\": [route.php] entry \"public/index.php\"",
+                "route \"app\": entrypoint php \"public/index.php\"",
                 app.join(ENTRY),
             ),
-            Claim::new("route \"app\": [route.static] root \"site\"", &site),
+            Claim::new("static \"/\": root \"site\"", &site),
         ]
     };
     assert!(
@@ -3751,7 +3721,7 @@ fn the_same_tree_owned_by_init_is_accepted() {
 }
 
 /// **The `Production`-scoped twin, end to end.** The same `0777` fixture the
-/// legs above refuse — a `blastit.toml` directory a route uid can write, with
+/// legs above refuse — a `Blastfile` directory a route uid can write, with
 /// the stub pair inside it — still boots and serves under `blastit dev`, because
 /// `ADR-0010` §3's provenance rule is a deployment rule (`R7`). A developer's
 /// shim lives in a checkout their own uid owns and writes, so asking "could
@@ -3806,7 +3776,7 @@ fn a_dev_boot_of_a_world_writable_tree_still_serves() {
     );
     assert!(
         trees_refusal(vec![Claim::new(
-            "the directory holding blastit.toml",
+            "the directory holding the Blastfile",
             &scratch.dir
         )])
         .is_err(),

@@ -16,9 +16,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use blastit_dbproxy::{ObsTarget, WireSqlObs};
-use blastit_manifest::edit::{
-    ManifestEdits, ProposedGrant, ProposedRoute, apply_edits, write_atomic,
-};
+use blastit_manifest::blastfile::{BlastfileEdits, ProposedGrant, ProposedView, apply_edits};
+use blastit_manifest::edit::write_atomic;
 use blastit_manifest::{Grant, Manifest, ProxyName};
 
 /// The `privilege` value every `blastit dev` boot reports (`R22`).
@@ -337,7 +336,7 @@ fn hex(bytes: &[u8]) -> String {
 /// The supervisor owns it: observations arrive on `obs_fd` as one JSON
 /// [`WireSqlObs`] per line, and the scheduler's own `request` events name the
 /// requests it could not route. [`LearnRun::finish`] turns both into
-/// [`ManifestEdits`] and one atomic write.
+/// [`BlastfileEdits`] and one atomic write.
 #[derive(Debug, Default)]
 pub struct LearnRun {
     /// Every statement dbproxy observed, in order.
@@ -446,7 +445,7 @@ impl LearnRun {
                 return 1;
             }
         };
-        let parsed = match Manifest::parse_and_validate(&source, uid_base) {
+        let parsed = match Manifest::parse_blastfile(&source, uid_base) {
             Ok((manifest, _warnings)) => manifest,
             Err(errors) => {
                 eprintln!("learn: {errors}");
@@ -454,7 +453,7 @@ impl LearnRun {
             }
         };
         let edits = self.edits(&parsed);
-        let routes_added = edits.routes.len();
+        let routes_added = edits.views.len();
         let queries_added: usize = edits.grants.iter().map(|grant| grant.queries.len()).sum();
         let edited = match apply_edits(&source, &edits) {
             Ok(edited) => edited,
@@ -475,20 +474,26 @@ impl LearnRun {
     }
 
     /// The edits this run proposes, filtered against the grants already there
-    /// (`R27`: `--learn` writes only routes and exact `queries`).
-    fn edits(&self, manifest: &Manifest) -> ManifestEdits {
-        let mut edits = ManifestEdits::default();
+    /// (`R27`: `--learn` writes only views and exact `queries`).
+    fn edits(&self, manifest: &Manifest) -> BlastfileEdits {
+        let mut edits = BlastfileEdits::default();
         let names: BTreeSet<String> = manifest
             .routes()
             .iter()
             .map(|route| route.name().to_string())
             .collect();
 
-        // Routes: one per name, paths collected from every unrouted request.
-        let mut proposed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // Views: one per name, the methods and patterns collected from every
+        // unrouted request. A path a literal pattern cannot carry (a brace the
+        // grammar reads as a placeholder, a quote, a control byte) is not
+        // proposed: the writer would refuse the whole file for it.
+        let mut proposed: BTreeMap<String, (BTreeSet<String>, Vec<String>)> = BTreeMap::new();
         let mut used = names.clone();
-        for (_, path) in &self.unrouted {
+        for (method, path) in &self.unrouted {
             let (name, pattern) = name_and_pattern(path);
+            if !pattern_is_writable(path) {
+                continue;
+            }
             let mut candidate = name.clone();
             let mut suffix = 2;
             while used.contains(&candidate) {
@@ -496,24 +501,28 @@ impl LearnRun {
                 suffix += 1;
             }
             let entry = proposed.entry(candidate).or_default();
-            entry.insert(pattern);
+            entry.0.insert(method.to_ascii_uppercase());
+            if !entry.1.contains(&pattern) {
+                entry.1.push(pattern);
+            }
         }
-        for (name, paths) in proposed {
+        for (name, (methods, patterns)) in proposed {
             used.insert(name.clone());
-            edits.routes.push(ProposedRoute {
+            edits.views.push(ProposedView {
                 name,
-                path: paths.into_iter().collect(),
+                methods: methods.into_iter().collect(),
+                patterns,
             });
         }
 
         // Statements that ran on the reserved fallback view belong to an
         // unrouted request, and a per-route socket cannot say which one. When
-        // this run proposes exactly one route, every unrouted request maps to
-        // it, so the attribution is exact; with more than one the statement
-        // cannot be placed, and guessing would hand one new route another's
-        // grants. This is what makes one `dev --learn` pass write the queries of
-        // the route it discovered (R26, R27, `docs/local.md`).
-        let fallback_owner = match edits.routes.as_slice() {
+        // this run proposes exactly one view, every unrouted request maps to it,
+        // so the attribution is exact; with more than one the statement cannot be
+        // placed, and guessing would hand one new view another's grants. This is
+        // what makes one `dev --learn` pass write the queries of the view it
+        // discovered (R26, R27, `docs/local.md`).
+        let fallback_owner = match edits.views.as_slice() {
             [only] => Some(only.name.clone()),
             _ => None,
         };
@@ -563,10 +572,12 @@ impl LearnRun {
                 .or_default()
                 .push(normalized.to_string());
         }
-        for ((route, proxy), queries) in grants {
+        for ((view, proxy), queries) in grants {
             edits.grants.push(ProposedGrant {
-                route,
-                proxy,
+                view,
+                // The unnamed `postgres { … }` block is the store `db` (§7.4);
+                // a named store is written `postgres <name> { … }`.
+                store: (proxy != "db").then_some(proxy),
                 queries,
             });
         }
@@ -591,13 +602,14 @@ fn print_summary(manifest: &Path, pretty: bool, routes: usize, queries: usize) {
     }
 }
 
-/// A `(name, path regex)` for one unrouted request (`R28`).
+/// A `(name, path pattern)` for one unrouted request (`R28`).
 ///
 /// The name is the first non-empty segment, lowercased, with runs outside
 /// `[a-z0-9_-]` collapsed to `-` and every leading or trailing character
 /// outside `[a-z0-9]` trimmed; `/` is `root`. Numeric and UUID segments become
-/// `[0-9]+` and `[^/]+`, and everything else is regex-escaped so `.` and `+` in a
-/// path stay literal.
+/// the pattern placeholders `{id:int}` and `{id:uuid}`; everything else is
+/// literal, because a quoted pattern in a `Blastfile` matches its bytes and
+/// escapes nothing (`.` is a dot, not a wildcard).
 fn name_and_pattern(path: &str) -> (String, String) {
     let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     if segments.is_empty() {
@@ -614,37 +626,39 @@ fn name_and_pattern(path: &str) -> (String, String) {
     }
     let name = name.trim_matches(|character: char| !character.is_ascii_alphanumeric());
     let name = if name.is_empty() { "route" } else { name };
-    let pattern = if segments.is_empty() {
-        "/".to_string()
-    } else {
-        let mut out = String::from("/");
-        for (index, segment) in segments.iter().enumerate() {
-            if index > 0 {
-                out.push('/');
-            }
-            out.push_str(&segment_pattern(segment));
+    let mut pattern = String::from("/");
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            pattern.push('/');
         }
-        out
-    };
+        pattern.push_str(&segment_pattern(segment));
+    }
     (name.to_string(), pattern)
 }
 
-/// One path segment as a regex.
+/// One path segment as a `Blastfile` pattern piece.
 fn segment_pattern(segment: &str) -> String {
     if segment.chars().all(|character| character.is_ascii_digit()) {
-        return "[0-9]+".to_string();
+        return "{id:int}".to_string();
     }
     if is_uuid(segment) {
-        return "[^/]+".to_string();
+        return "{id:uuid}".to_string();
     }
-    let mut out = String::with_capacity(segment.len());
-    for character in segment.chars() {
-        if "\\^$.|?*+()[]{}".contains(character) {
-            out.push('\\');
-        }
-        out.push(character);
-    }
-    out
+    segment.to_string()
+}
+
+/// Whether a requested path can be written as a quoted `Blastfile` pattern at
+/// all.
+///
+/// The pattern writer substitutes `{id:int}`/`{id:uuid}` for a numeric or UUID
+/// segment and copies the rest verbatim, so a path that itself carries `{` or
+/// `}`, a `"` or a `\` — or a control byte — would produce a pattern the grammar
+/// reads as a placeholder or that ends the string. Such a path is not proposed:
+/// one unroutable request must not make the writer refuse the whole document.
+fn pattern_is_writable(path: &str) -> bool {
+    !path
+        .chars()
+        .any(|character| matches!(character, '{' | '}' | '"' | '\\') || character.is_control())
 }
 
 /// Whether `segment` is shaped like a UUID.
@@ -774,23 +788,25 @@ mod tests {
     }
 
     #[test]
-    fn route_names_and_patterns_follow_the_documented_rules() {
+    fn view_names_and_patterns_follow_the_documented_rules() {
         assert_eq!(name_and_pattern("/"), ("root".to_string(), "/".to_string()));
         assert_eq!(
             name_and_pattern("/products/42/"),
-            ("products".to_string(), "/products/[0-9]+".to_string())
+            ("products".to_string(), "/products/{id:int}".to_string())
         );
         assert_eq!(
             name_and_pattern("/orders/550e8400-e29b-41d4-a716-446655440000"),
-            ("orders".to_string(), "/orders/[^/]+".to_string())
+            ("orders".to_string(), "/orders/{id:uuid}".to_string())
         );
+        // A quoted pattern is literal: `.` and `+` need no escaping, which is
+        // what makes `--learn`'s output readable and its match exact.
         assert_eq!(
             name_and_pattern("/robots.txt"),
-            ("robots-txt".to_string(), "/robots\\.txt".to_string())
+            ("robots-txt".to_string(), "/robots.txt".to_string())
         );
         assert_eq!(
             name_and_pattern("/api.v2/items+list/"),
-            ("api-v2".to_string(), "/api\\.v2/items\\+list".to_string())
+            ("api-v2".to_string(), "/api.v2/items+list".to_string())
         );
     }
 
@@ -827,24 +843,15 @@ mod tests {
     }
 
     #[test]
-    fn first_declared_route_and_matching_proxy_name_keep_grants_when_unrouted_exists() {
+    fn first_declared_view_and_matching_proxy_name_keep_grants_when_unrouted_exists() {
         let source = "\
-version = 1
-app = \"app:application\"
+postgres home $DATABASE_URL
 
-[proxy.home]
-protocol = \"postgresql\"
-input = { url = \"DATABASE_URL\" }
+view home GET \"/\" {}
 
-[[route]]
-name = \"home\"
-path = ['/']
-
-[[route]]
-name = \"items\"
-path = ['/items']
+view items GET \"/items\" {}
 ";
-        let (manifest, _) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let (manifest, _) = Manifest::parse_blastfile(source, 20_000).unwrap();
         let mut run = LearnRun::new();
         run.note_event(r#"{"event":"request","method":"GET","path":"/extra/1"}"#);
         let home_obs = serde_json::json!({
@@ -878,24 +885,24 @@ path = ['/items']
         run.push_bytes(lines.as_bytes());
 
         let edits = run.edits(&manifest);
-        assert_eq!(edits.routes.len(), 1);
-        assert_eq!(edits.routes[0].name, "extra");
+        assert_eq!(edits.views.len(), 1);
+        assert_eq!(edits.views[0].name, "extra");
         assert_eq!(
             edits.grants,
             vec![
                 ProposedGrant {
-                    route: "extra".to_string(),
-                    proxy: "home".to_string(),
+                    view: "extra".to_string(),
+                    store: Some("home".to_string()),
                     queries: vec!["SELECT 2".to_string()],
                 },
                 ProposedGrant {
-                    route: "home".to_string(),
-                    proxy: "home".to_string(),
+                    view: "home".to_string(),
+                    store: Some("home".to_string()),
                     queries: vec!["SELECT 111".to_string()],
                 },
                 ProposedGrant {
-                    route: "items".to_string(),
-                    proxy: "home".to_string(),
+                    view: "items".to_string(),
+                    store: Some("home".to_string()),
                     queries: vec!["SELECT 1".to_string()],
                 },
             ],
@@ -905,26 +912,21 @@ path = ['/items']
     }
 
     #[test]
-    fn two_proposed_routes_do_not_borrow_each_others_fallback_statements() {
+    fn two_proposed_views_do_not_borrow_each_others_fallback_statements() {
         let source = "\
-version = 1
-app = \"app:application\"
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = \"postgresql\"
-input = { url = \"DATABASE_URL\" }
-
-[[route]]
-name = \"home\"
-path = ['/']
-[route.db]
-queries = [\"SELECT 1\"]
+view home GET \"/\" {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 ";
-        let (manifest, _) = Manifest::parse_and_validate(source, 20_000).unwrap();
+        let (manifest, _) = Manifest::parse_blastfile(source, 20_000).unwrap();
         let mut run = LearnRun::new();
-        // Two unrouted requests propose two different routes, so a statement
+        // Two unrouted requests propose two different views, so a statement
         // that ran on the single fallback view cannot be placed: granting it to
-        // either would hand one new route the other's access.
+        // either would hand one new view the other's access.
         run.note_event(r#"{"event":"request","method":"GET","path":"/extra/1"}"#);
         run.note_event(r#"{"event":"request","method":"GET","path":"/orders/2"}"#);
         let fallback_obs = serde_json::json!({
@@ -939,11 +941,7 @@ queries = [\"SELECT 1\"]
         run.push_bytes(format!("{fallback_obs}\n").as_bytes());
 
         let edits = run.edits(&manifest);
-        let names: Vec<&str> = edits
-            .routes
-            .iter()
-            .map(|route| route.name.as_str())
-            .collect();
+        let names: Vec<&str> = edits.views.iter().map(|view| view.name.as_str()).collect();
         assert_eq!(names, vec!["extra", "orders"]);
         assert!(
             edits.grants.is_empty(),
@@ -953,41 +951,35 @@ queries = [\"SELECT 1\"]
     }
 
     /// The `dev --learn` write path (`docs/frameworks/php.md`: "records the
-    /// routes and exact queries you click through") against the documented
-    /// PHP-shaped manifest: the learned query must land, and the route's
-    /// `[route.static]` and `[route.php]` blocks must be the bytes they were.
+    /// views and exact queries you click through") against the documented
+    /// PHP-shaped file: the learned query must land, and the mount and the
+    /// front controller must be the bytes they were.
     ///
     /// This is [`LearnRun::finish`], the one function the supervisor calls on
-    /// `SIGTERM`; no PHP binary takes part in writing a manifest.
+    /// `SIGTERM`; no PHP binary takes part in writing a file.
     #[test]
-    fn a_learned_query_keeps_the_route_s_executor_blocks_on_disk() {
+    fn a_learned_query_keeps_the_files_executor_blocks_on_disk() {
         const PHP_STATIC: &str = "\
 # The shop: Symfony serves it from one front controller.
-version = 1
+app \"shop\"
 
 # One database, one credential.
-[proxy.db]
-protocol = \"postgresql\"
-input = { url = \"DATABASE_URL\" }
+postgres $DATABASE_URL
 
-[[route]]
-name = \"app\"
-path = ['.*']
+entrypoint php \"public/index.php\"
 
 # Only fingerprinted output is cached for a year.
-[route.static]
-root = \"public\"
-index = \"index.html\"
-spa = false
-immutable = [\"/assets/*\", \"/build/*\"]
+static \"/\" {
+    root \"public\"
+    index \"index.html\"
+    immutable \"/assets/*\", \"/build/*\"
+}
 
-# The front controller; 4 is a cap, the budget is derived.
-[route.php]
-entry = \"public/index.php\"
-workers = 4
-
-[route.db]
-queries = ['SELECT \"shop_product\".\"id\" FROM \"shop_product\"']
+view app regex '.*' {
+    postgres {
+        query 'SELECT \"shop_product\".\"id\" FROM \"shop_product\"'
+    }
+}
 ";
         const LEARNED: &str =
             r#"SELECT "shop_product"."sku" FROM "shop_product" WHERE "shop_product"."id" = $?"#;
@@ -998,7 +990,7 @@ queries = ['SELECT \"shop_product\".\"id\" FROM \"shop_product\"']
             LEARNED.len()
         ));
         std::fs::create_dir_all(&dir).expect("a fresh fixture directory");
-        let manifest = dir.join("blastit.toml");
+        let manifest = dir.join("Blastfile");
         std::fs::write(&manifest, PHP_STATIC).expect("write the fixture");
 
         let mut run = LearnRun::new();
@@ -1018,7 +1010,7 @@ queries = ['SELECT \"shop_product\".\"id\" FROM \"shop_product\"']
         let without_queries = |document: &str| -> String {
             document
                 .lines()
-                .filter(|line| !line.trim_start().starts_with("queries"))
+                .filter(|line| !line.trim_start().starts_with("query"))
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -1028,32 +1020,29 @@ queries = ['SELECT \"shop_product\".\"id\" FROM \"shop_product\"']
         assert_eq!(
             without_queries(&written),
             without_queries(PHP_STATIC),
-            "an executor block or another author line changed:\n{written}"
+            "a mount, the entrypoint or another author line changed:\n{written}"
         );
-        assert_eq!(written.matches("[route.static]").count(), 1, "{written}");
-        assert_eq!(written.matches("[route.php]").count(), 1, "{written}");
+        assert_eq!(written.matches("static \"/\"").count(), 1, "{written}");
+        assert_eq!(written.matches("entrypoint php").count(), 1, "{written}");
         let (parsed, _warnings) =
-            Manifest::parse_and_validate(&written, 20_000).expect("the written manifest boots");
-        let app = parsed
-            .routes()
-            .iter()
-            .find(|route| route.name() == "app")
-            .expect("the route is still declared");
+            Manifest::parse_blastfile(&written, 20_000).expect("the written file boots");
         assert_eq!(
-            app.static_policy().map(|policy| policy.root.as_str()),
-            Some("public")
+            parsed.php().map(|policy| policy.entry.as_str()),
+            Some("public/index.php")
         );
         assert_eq!(
-            app.php()
-                .map(|policy| (policy.entry.as_str(), policy.workers)),
-            Some(("public/index.php", Some(4)))
+            parsed
+                .mounts()
+                .first()
+                .map(|mount| mount.policy.root.as_str()),
+            Some("public")
         );
 
         // The denied twin: a statement the policy refused is never written, and
-        // the file (both blocks included) stays exactly as it was.
+        // the file (mount and entrypoint included) stays exactly as it was.
         let refused_dir = dir.join("refused");
         std::fs::create_dir_all(&refused_dir).expect("a second fixture directory");
-        let refused_manifest = refused_dir.join("blastit.toml");
+        let refused_manifest = refused_dir.join("Blastfile");
         std::fs::write(&refused_manifest, PHP_STATIC).expect("write the second fixture");
         let mut refused_run = LearnRun::new();
         let refused = serde_json::json!({
@@ -1085,15 +1074,15 @@ queries = ['SELECT \"shop_product\".\"id\" FROM \"shop_product\"']
         // returns `1` with no writer reachable and the file untouched.
         let broken_dir = dir.join("broken");
         std::fs::create_dir_all(&broken_dir).expect("a third fixture directory");
-        let broken_manifest = broken_dir.join("blastit.toml");
-        let broken = PHP_STATIC.replace("entry = \"public/index.php\"", "entry = 4");
+        let broken_manifest = broken_dir.join("Blastfile");
+        let broken = PHP_STATIC.replace("entrypoint php \"public/index.php\"", "entrypoint php 4");
         std::fs::write(&broken_manifest, &broken).expect("write the third fixture");
         let mut broken_run = LearnRun::new();
         broken_run.push_bytes(format!("{obs}\n").as_bytes());
         assert_eq!(
             broken_run.finish(&broken_manifest, 20_000, false),
             1,
-            "a manifest that does not parse is an exit-1 learn"
+            "a file that does not parse is an exit-1 learn"
         );
         assert_eq!(
             std::fs::read_to_string(&broken_manifest).expect("read the third fixture back"),

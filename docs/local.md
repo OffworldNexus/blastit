@@ -43,20 +43,16 @@ $ docker run --rm -d -p 127.0.0.1:5432:5432 \
     -e POSTGRES_USER=shop -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=shop postgres:18
 ```
 
-```toml title="blastit.toml"
-version = 1
-app = "app:app"
+```text title="Blastfile"
+app "shop"
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+entrypoint python "app:app"
 
-[[route]]
-name = "products"
-path = ['/products/.*']
+postgres $DATABASE_URL
 
-[route.db]
-queries = []
+view products regex '/products/.*' {
+    postgres {}
+}
 ```
 
 ```console
@@ -82,7 +78,7 @@ With a test suite, one command records the whole app:
 ```console
 $ uv run blastit check --learn
 learn: 2 routes, 38 queries added → /home/you/shop/blastit.toml
-$ git diff blastit.toml
+$ git diff Blastfile
 $ uv run blastit check
 blastit check: 412 requests, 977 statements, 3/3 routes, clean
 ```

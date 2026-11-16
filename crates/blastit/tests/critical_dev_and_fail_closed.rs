@@ -581,7 +581,7 @@ impl Response {
     }
 }
 
-/// A fresh `0755` fixture directory holding `blastit.toml` and `app.py`.
+/// A fresh `0755` fixture directory holding `Blastfile` and `app.py`.
 fn fixture(tag: &str, manifest: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "blastit-dev-{}-{tag}-{}",
@@ -591,7 +591,7 @@ fn fixture(tag: &str, manifest: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("a fixture directory");
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("a readable fixture");
-    fs::write(dir.join("blastit.toml"), manifest).expect("write blastit.toml");
+    fs::write(dir.join("Blastfile"), manifest).expect("write Blastfile");
     fs::write(dir.join("app.py"), APP).expect("write app.py");
     fs::set_permissions(dir.join("app.py"), fs::Permissions::from_mode(0o644))
         .expect("a readable app.py");
@@ -734,13 +734,26 @@ fn euid_of(pid: i32) -> Option<u32> {
     line.split_whitespace().nth(2)?.parse().ok()
 }
 
-/// A manifest with one granted proxy and the routes a case needs.
-fn manifest(routes: &str) -> String {
+/// A manifest with one granted store and the views a case needs.
+fn manifest(views: &str) -> String {
     format!(
-        "version = 1\napp = \"app:application\"\n\n\
-         [proxy.db]\nprotocol = \"postgresql\"\ninput = {{ url = \"DATABASE_URL\" }}\n\n\
-         {routes}"
+        "app \"app\"\n\nentrypoint python \"app:application\"\n\npostgres $DATABASE_URL\n\n{views}"
     )
+}
+
+/// One `view <name> … { … }` block of a learned `Blastfile`, from just after
+/// the name to the next `view`: its header's tail and its whole body.
+///
+/// A learned file is a `Blastfile`, so a grant belongs to the `view` it was
+/// written under — the same document a developer reads and edits.
+fn view_block<'a>(learned: &'a str, name: &str) -> &'a str {
+    learned
+        .split(&format!("\nview {name} "))
+        .nth(1)
+        .unwrap_or_default()
+        .split("\nview ")
+        .next()
+        .unwrap_or_default()
 }
 
 /// The `DATABASE_URL` a case hands the child: a real-looking credential for a
@@ -756,22 +769,20 @@ fn database_url(server: &MockPgServer) -> String {
 fn dev_boots_five_unprivileged_roles_and_strips_secrets() {
     let server = MockPgServer::start();
     let url = database_url(&server);
-    let routes = "\
-[[route]]
-name = \"json\"
-path = ['/json']
-[route.ingress]
-body = \"json\"
+    let views = "\
+view json POST \"/json\" {
+    body json
+}
 
-[[route]]
-name = \"home\"
-path = ['/.*']
-[route.db]
-queries = [\"SELECT 1\"]
+view home regex '/.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 ";
     let mut dev = Dev::start(
         "five-roles",
-        &manifest(routes),
+        &manifest(views),
         &[
             ("DATABASE_URL", &url),
             ("BLASTIT_SECRET_MARKER", "must-not-reach-a-view"),
@@ -892,9 +903,7 @@ fn one_route_banner_singularises() {
     let server = MockPgServer::start();
     let url = database_url(&server);
     let routes = "\
-[[route]]
-name = \"home\"
-path = ['/.*']
+view home regex '/.*' {}
 ";
     let mut dev = Dev::start(
         "one-route",
@@ -916,7 +925,7 @@ path = ['/.*']
 fn a_non_loopback_host_needs_the_acknowledgement() {
     let server = MockPgServer::start();
     let url = database_url(&server);
-    let routes = "[[route]]\nname = \"home\"\npath = ['/.*']\n";
+    let routes = "view home regex '/.*' {}\n";
     let manifest = manifest(routes);
 
     // Without `BLASTIT_DEV_EXPOSE=1`: exit `1`, nothing on stdout, and the fix
@@ -981,8 +990,7 @@ fn a_non_loopback_host_needs_the_acknowledgement() {
 fn a_memory_watermark_above_the_reading_serves_and_above_the_host_refuses_by_name() {
     let server = MockPgServer::start();
     let url = database_url(&server);
-    let routes =
-        "[[route]]\nname = \"home\"\npath = ['/.*']\n[route.db]\nqueries = [\"SELECT 1\"]\n";
+    let routes = "view home regex '/.*' {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n";
 
     // Allowed arm: a 100% watermark is above or equal to every reading, so the
     // boot serves. This is the only way to place the host *below* the
@@ -1176,8 +1184,7 @@ fn memory_tree(tag: &str, total_gib: u64, current_gib: u64, stat: Option<&str>) 
 fn a_host_whose_page_cache_is_above_the_default_still_boots_and_serves() {
     let server = MockPgServer::start();
     let url = database_url(&server);
-    let routes =
-        "[[route]]\nname = \"home\"\npath = ['/.*']\n[route.db]\nqueries = [\"SELECT 1\"]\n";
+    let routes = "view home regex '/.*' {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n";
 
     // The documented default, named explicitly so the leg does not follow the
     // shipped constant: on this host `memory.current` is far above 85 % while
@@ -1212,8 +1219,7 @@ fn a_host_whose_page_cache_is_above_the_default_still_boots_and_serves() {
 fn the_dev_memory_advisory_is_one_line_and_only_above_the_default() {
     let server = MockPgServer::start();
     let url = database_url(&server);
-    let routes =
-        "[[route]]\nname = \"home\"\npath = ['/.*']\n[route.db]\nqueries = [\"SELECT 1\"]\n";
+    let routes = "view home regex '/.*' {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n";
 
     // A 100% watermark always boots, so the transcript shows exactly what the
     // boot says about the reading the watermark *default* is compared with.
@@ -1259,7 +1265,7 @@ fn the_dev_memory_advisory_is_one_line_and_only_above_the_default() {
 fn unprivileged_production_has_no_single_uid_fallback() {
     let server = MockPgServer::start();
     let url = database_url(&server);
-    let routes = "[[route]]\nname = \"home\"\npath = ['/.*']\n";
+    let routes = "view home regex '/.*' {}\n";
     let dir = fixture("production", &manifest(routes));
     let output = Command::new(env!("CARGO_BIN_EXE_blastit"))
         .env_clear()
@@ -1301,15 +1307,13 @@ fn only_a_granted_route_gets_a_pg_socket() {
     let server = MockPgServer::start();
     let url = database_url(&server);
     let routes = "\
-[[route]]
-name = \"granted\"
-path = ['/granted/.*']
-[route.db]
-queries = [\"SELECT 1\"]
+view granted regex '/granted/.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 
-[[route]]
-name = \"ungranted\"
-path = ['/ungranted/.*']
+view ungranted regex '/ungranted/.*' {}
 ";
     let mut dev = Dev::start("sockets", &manifest(routes), &[("DATABASE_URL", &url)], &[]);
     dev.wait_for_ready();
@@ -1355,17 +1359,15 @@ fn an_empty_grant_gets_a_denying_listener() {
     let server = MockPgServer::start();
     let url = database_url(&server);
     let routes = "\
-[[route]]
-name = \"locked\"
-path = ['/locked/.*']
-[route.db]
-queries = []
+view locked regex '/locked/.*' {
+    postgres {}
+}
 
-[[route]]
-name = \"open\"
-path = ['/open/.*']
-[route.db]
-queries = [\"SELECT 1\"]
+view open regex '/open/.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 ";
     let mut dev = Dev::start(
         "denying-listener",
@@ -1411,14 +1413,11 @@ fn an_egress_false_view_cannot_open_inet() {
     let server = MockPgServer::start();
     let url = database_url(&server);
     let routes = "\
-[[route]]
-name = \"closed\"
-path = ['/closed/.*']
+view closed regex '/closed/.*' {}
 
-[[route]]
-name = \"open\"
-path = ['/open/.*']
-egress = true
+view open regex '/open/.*' {
+    egress any
+}
 ";
     let mut dev = Dev::start("egress", &manifest(routes), &[("DATABASE_URL", &url)], &[]);
     dev.wait_for_ready();
@@ -1485,11 +1484,11 @@ fn fatal_startup_removes_the_ephemeral_dev_root() {
     let server = MockPgServer::start();
     let url = database_url(&server);
     let routes = "\
-[[route]]
-name = \"home\"
-path = ['/.*']
-[route.db]
-queries = [\"SELECT 1\"]
+view home regex '/.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 ";
     let manifest_text = manifest(routes);
 
@@ -1582,11 +1581,11 @@ fn json_mode_emits_privilege_and_never_a_port_key() {
     let server = MockPgServer::start();
     let url = database_url(&server);
     let routes = "\
-[[route]]
-name = \"home\"
-path = ['/.*']
-[route.db]
-queries = [\"SELECT 1\"]
+view home regex '/.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 ";
     let mut dev = Dev::start(
         "json-no-port",
@@ -1652,21 +1651,17 @@ fn learn_writes_routes_and_queries_on_sigterm() {
     let server = MockPgServer::start();
     let url = database_url(&server);
     let routes = "\
-[[route]]
-name = \"home\"
-path = ['/']
-[route.db]
-queries = [\"SELECT 42\"]
+view home \"/\" {
+    postgres {
+        query 'SELECT 42'
+    }
+}
 
-[[route]]
-name = \"json\"
-path = ['/json']
-[route.ingress]
-body = \"json\"
+view json \"/json\" {
+    body json
+}
 
-[[route]]
-name = \"sql\"
-path = ['/sql']
+view sql \"/sql\" {}
 ";
     let mut dev = Dev::start(
         "learn",
@@ -1709,7 +1704,7 @@ path = ['/sql']
     dev.wait_for_line("/extra/7");
     dev.wait_for_line("/sql");
 
-    let manifest_path = dev.dir.join("blastit.toml");
+    let manifest_path = dev.dir.join("Blastfile");
     let status = dev.terminate();
     assert_eq!(
         status.code(),
@@ -1720,48 +1715,40 @@ path = ['/sql']
     );
     let learned = fs::read_to_string(&manifest_path).expect("the manifest is readable");
     assert!(
-        learned.contains("name = \"extra\""),
-        "the unrouted route was proposed:\n{learned}"
+        learned.contains("view extra "),
+        "the unrouted view was proposed:\n{learned}"
     );
     assert!(
-        learned.contains("\"/extra/[0-9]+\"") || learned.contains("'/extra/[0-9]+'"),
-        "the numeric segment became a pattern:\n{learned}"
+        learned.contains("\"/extra/{id:int}\""),
+        "the numeric segment became a pattern placeholder:\n{learned}"
     );
     assert!(
         learned.contains("SELECT 1"),
         "the routed statement was written:\n{learned}"
     );
-    let sql_section = learned
-        .split("name = \"sql\"")
-        .nth(1)
-        .unwrap_or_default()
-        .split("[[route]]")
-        .next()
-        .unwrap_or_default();
+    let sql_view = view_block(&learned, "sql");
     assert!(
-        sql_section.contains("SELECT 1"),
-        "the statement belongs to the route that ran it:\n{learned}"
+        sql_view.contains("SELECT 1"),
+        "the statement belongs to the view that ran it:\n{learned}"
     );
     assert!(
-        !sql_section.contains("ingress"),
-        "`--learn` never synthesises `[route.ingress]` from a rejected 413:\n{learned}"
+        !sql_view.contains("body"),
+        "`--learn` never synthesises a `body` codec from a rejected 413:\n{learned}"
     );
-    // The learn fallback's own view is route `home`; its observations belong to
-    // an unrouted request, so they are not written as a grant for `home`.
-    let home = learned.split("name = \"home\"").nth(1).unwrap_or_default();
-    let home = home.split("[[route]]").next().unwrap_or_default();
+    // The learn fallback's own view is `home`; its observations belong to an
+    // unrouted request, so they are not written as a grant for `home`.
+    let home = view_block(&learned, "home");
     assert!(
         !home.contains("SELECT 1"),
-        "an unrouted request's statement must not become a route grant:\n{learned}"
+        "an unrouted request's statement must not become a view grant:\n{learned}"
     );
-    // One pass writes the newly discovered route *and* its statement (the
-    // route's own socket is `_learn_fallback`, and with one proposed route the
+    // One pass writes the newly discovered view *and* its statement (the
+    // route's own socket is `_learn_fallback`, and with one proposed view the
     // attribution is exact), so no second `dev --learn` is needed.
-    let extra = learned.split("name = \"extra\"").nth(1).unwrap_or_default();
-    let extra = extra.split("[[route]]").next().unwrap_or_default();
+    let extra = view_block(&learned, "extra");
     assert!(
         extra.contains("SELECT 1"),
-        "the route this pass discovered keeps the statement it ran:\n{learned}"
+        "the view this pass discovered keeps the statement it ran:\n{learned}"
     );
     dev.wait_for_line("learn: ");
     assert!(
@@ -1777,15 +1764,13 @@ fn learn_refuses_a_literal_on_a_live_request() {
     let server = MockPgServer::start();
     let url = database_url(&server);
     let routes = "\
-[[route]]
-name = \"home\"
-path = ['/']
-[route.db]
-queries = [\"SELECT 1\"]
+view home \"/\" {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 
-[[route]]
-name = \"literal\"
-path = ['/literal']
+view literal \"/literal\" {}
 ";
     let mut dev = Dev::start(
         "learn-literal",
@@ -1822,7 +1807,7 @@ path = ['/literal']
     );
     dev.wait_for_line("/literal");
 
-    let manifest_path = dev.dir.join("blastit.toml");
+    let manifest_path = dev.dir.join("Blastfile");
     let status = dev.terminate();
     assert_eq!(
         status.code(),
@@ -1858,13 +1843,9 @@ fn learn_attributes_queries_per_route_across_concurrent_live_views() {
     let server = MockPgServer::start();
     let url = database_url(&server);
     let routes = "\
-[[route]]
-name = \"a\"
-path = ['/a/.*']
+view a regex '/a/.*' {}
 
-[[route]]
-name = \"b\"
-path = ['/b']
+view b \"/b\" {}
 ";
     let mut dev = Dev::start(
         "learn-multi-view",
@@ -1903,7 +1884,7 @@ path = ['/b']
     );
 
     dev.wait_for_line("/a/2");
-    let manifest_path = dev.dir.join("blastit.toml");
+    let manifest_path = dev.dir.join("Blastfile");
     let status = dev.terminate();
     assert_eq!(
         status.code(),
@@ -1915,7 +1896,7 @@ path = ['/b']
 
     let learned = fs::read_to_string(&manifest_path).expect("the manifest is readable");
     let (parsed, _) =
-        Manifest::parse_and_validate(&learned, 20_000).expect("the learned manifest parses");
+        Manifest::parse_blastfile(&learned, 20_000).expect("the learned manifest parses");
     let proxy = ProxyName::new("db");
     let queries_a: Vec<String> = parsed
         .effective_grants(0)
@@ -1958,13 +1939,9 @@ fn first_declared_route_keeps_all_queries_when_unrouted_requests_exist() {
     let server = MockPgServer::start();
     let url = database_url(&server);
     let routes = "\
-[[route]]
-name = \"a\"
-path = ['/a/.*']
+view a regex '/a/.*' {}
 
-[[route]]
-name = \"b\"
-path = ['/b']
+view b \"/b\" {}
 ";
     let mut dev = Dev::start(
         "learn-first-route-with-unrouted",
@@ -1996,7 +1973,7 @@ path = ['/b']
     dev.wait_for_line("/extra/7");
     dev.wait_for_line("/a/2");
 
-    let manifest_path = dev.dir.join("blastit.toml");
+    let manifest_path = dev.dir.join("Blastfile");
     let status = dev.terminate();
     assert_eq!(
         status.code(),
@@ -2008,7 +1985,7 @@ path = ['/b']
 
     let learned = fs::read_to_string(&manifest_path).expect("the manifest is readable");
     let (parsed, _) =
-        Manifest::parse_and_validate(&learned, 20_000).expect("the learned manifest parses");
+        Manifest::parse_blastfile(&learned, 20_000).expect("the learned manifest parses");
     let route_names: Vec<&str> = parsed.routes().iter().map(|r| r.name()).collect();
     assert_eq!(
         route_names,
@@ -2109,7 +2086,7 @@ fn only_a_lost_bind_is_classified_as_a_lost_port() {
 fn a_launch_that_loses_its_port_retries_with_a_fresh_one() {
     let server = MockPgServer::start();
     let url = database_url(&server);
-    let routes = "[[route]]\nname = \"home\"\npath = ['/.*']\n";
+    let routes = "view home regex '/.*' {}\n";
 
     // This listener stands in for the unrelated process that wins the race
     // between `free_port()` and the child's `bind`.
