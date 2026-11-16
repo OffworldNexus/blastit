@@ -2109,3 +2109,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T06:40 [MB.21.3.4] (lead) attempt 2 reported done: both MAJORs fixed (split_lines honours §6.6; fixtures 06/07/15 reformatted + a corpus-canonicity test), deviation (b) corrected. Fresh 
 - 2026-11-16T06:45 [MB.21.3.4] (lead) reviewer verdict PASS (attempt 2), both MAJORs verified closed with non-tautological tests. 6 MINOR recorded: (1) fmt does not re-parse its output at runtime wh
 - 2026-11-16T06:45 [MB.21.3.4] (lead) status review -> done
+- 2026-11-16T06:46 [MB.21.3.4] (lead) commit 8299a72
+- 2026-11-16T06:46 [MB.21.3.5] (lead) status ready -> active
+- 2026-11-16T06:46 [MB.21.3.5] (lead) attempt 1/3 started
+- 2026-11-16T06:46 [MB.21.3.5] (lead) base 8299a7287dec76deb1835db3caf55e8ca854dee2
+- 2026-11-16T07:08 [MB.21.3.5] (lead) edited fields
+- 2026-11-16T07:08 [MB.21.3.5] (lead) Owner hit the step cap after the code and four suites were green, mid-way through a clippy cleanup and before RESULT.md. Lead rulings on its three disclosures: 
+- 2026-11-16T07:19 [MB.21.3.5] (lead) status active -> review
+- 2026-11-16T07:19 [MB.21.3.5] (lead) finishing session done: clippy cleanup, catch-all predicate per §4.3 with a test, RESULT.md with four disclosures. Fresh review on base 8299a72.
+- 2026-11-16T07:24 [MB.21.3.5] (lead) REVIEW FAIL (attempt 1): 2 MAJOR. MAJOR1: write.rs:897 block_is_empty treats Element::Node as "no content" for both a GrantBlock and a View, so a legal one-line
+- 2026-11-16T07:24 [MB.21.3.5] (lead) status review -> ready
+- 2026-11-16T07:24 [MB.21.3.5] (lead) status ready -> active
+- 2026-11-16T07:24 [MB.21.3.5] (lead) attempt 2/3 started
+- 2026-11-16T07:24 [MB.21.3.5] (lead) base 8299a7287dec76deb1835db3caf55e8ca854dee2 (attempt 2)
+- 2026-11-16T07:32 [MB.21.3.5] (lead) status active -> review
+- 2026-11-16T07:32 [MB.21.3.5] (lead) attempt 2 done: both MAJORs fixed (per-shape emptiness + one-line separator; P4 no-write test via an undeclared store), four MINORs closed. Fresh review on base
+- 2026-11-16T07:36 [MB.21.3.5] (lead) reviewer verdict PASS (attempt 2), both MAJORs verified closed with non-tautological tests. 5 MINOR recorded: (1) first_difference has no unresolved_grants arm 
+- 2026-11-16T07:36 [MB.21.3.5] (lead) status review -> done

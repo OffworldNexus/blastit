@@ -1,31 +1,44 @@
 //! Surgical, comment-preserving manifest edits and atomic writes (`R28`,
 //! `R29`).
 //!
-//! `--learn` has to add routes and exact `queries` to a file a person wrote by
-//! hand. Comments, ordering and quoting are the author's, so the editor never
-//! re-serialises the document: [`apply_edits`] parses the manifest, locates the
-//! insertion points line by line, splices whole `[[route]]` blocks or a single
-//! `queries = [...]` assignment, and then re-parses the result to prove that
-//! every field it did not mean to touch is unchanged.
+//! Two editors live here while the `Blastfile` cutover is in flight, and they
+//! share [`write_atomic`] and the [`EditError`] vocabulary:
 //!
-//! Two rules from `ADR-0003` shape the output:
+//! * [`crate::blastfile::apply_edits`] is the `Blastfile` editor (§14.5): it
+//!   splices into the CST of §14.1 and proves the result with
+//!   [`Manifest::equivalent`]. It is the editor `--learn` will call once
+//!   `MB.21.4.3` moves `dev_learn.rs`, `check.rs` and `audit_v1.rs` off the
+//!   retired document;
+//! * [`apply_edits`] is the retired TOML patcher, kept alive because those call
+//!   sites and their protected suites (`critical_check_engine.rs`,
+//!   `critical_check_schema.rs`) still read the retired document. `MB.21.4.3`
+//!   flips the call sites and `MB.21.4.5` deletes this function with the
+//!   reader.
 //!
-//! * a proposed route goes immediately above the first method-unrestricted
-//!   catch-all ([`Route::is_unrestricted_catch_all`]), or at the end of the
-//!   file. The position comes from the parsed model, so `path = ".*"` and
-//!   `path = ['.*']` are the same catch-all;
+//! `--learn` has to add views and exact `queries` to a file a person wrote by
+//! hand. Comments, ordering and quoting are the author's, so neither editor
+//! re-serialises the document: each parses the source, locates the insertion
+//! points the parse names, splices whole lines, and then re-parses the result
+//! to prove that every field it did not mean to touch is unchanged.
+//!
+//! Three rules shape the output of both:
+//!
+//! * a proposed view goes immediately above the first method-unrestricted
+//!   catch-all, or at the end of the file. The position comes from the parsed
+//!   model, so `view fallback "/*"` and the retired `path = ".*"` are the same
+//!   catch-all;
 //! * only exact, normalised `queries` are written. A statement that inlines a
 //!   literal or still holds a redacted `…` is refused
 //!   ([`EditError::LiteralQuery`], [`EditError::RedactedQuery`]): the message
-//!   names the position and the fix, never the statement (`R24`).
+//!   names the position and the fix, never the statement (`R24`);
+//! * `body` is never written. [`crate::blastfile::ProposedView`] and
+//!   [`crate::blastfile::ProposedGrant`] have no field for it, so "`--learn`
+//!   never writes `body raw unvalidated`" is a property of the types rather
+//!   than a policy (§10.1, R11).
 //!
-//! [`apply_edits`] is idempotent — applying the same [`ManifestEdits`] to its
-//! own output returns that output byte for byte, and an edit with nothing to
-//! add returns the source untouched. A `queries` list on one line is extended
-//! in place (the author's quoting is kept entry by entry); a list spread over
-//! several lines is written on one line, because only the list itself is
-//! touched. A grant an author wrote as an inline table is refused rather than
-//! duplicated ([`EditError::InlineGrant`]).
+//! Both are idempotent — applying the same [`ManifestEdits`] to its own output
+//! returns that output byte for byte, and an edit with nothing to add returns
+//! the source untouched.
 //!
 //! [`write_atomic`] replaces a file the way the documentation promises: a
 //! sibling `.<name>.<pid>.tmp`, an `fsync` of the file, a `rename`, an `fsync`
@@ -34,21 +47,21 @@
 //! symlink at that name is never written through.
 //!
 //! ```
-//! use blastit_manifest::edit::{ManifestEdits, ProposedRoute, apply_edits};
+//! use blastit_manifest::blastfile::{BlastfileEdits, ProposedView, apply_edits};
 //!
-//! let source = "version = 1\n\
-//!               [[route]]\nname = \"fallback\"\npath = \".*\"\n";
-//! let edits = ManifestEdits {
-//!     routes: vec![ProposedRoute {
+//! let source = "view fallback \"/*\" {\n}\n";
+//! let edits = BlastfileEdits {
+//!     views: vec![ProposedView {
 //!         name: "orders".to_string(),
-//!         path: vec!["/orders/".to_string()],
+//!         methods: vec!["GET".to_string()],
+//!         patterns: vec!["/orders/".to_string()],
 //!     }],
 //!     grants: vec![],
 //! };
 //!
 //! let edited = apply_edits(source, &edits).expect("the edit applies");
-//! assert!(edited.contains("name = \"orders\""));
-//! // The new route is above the catch-all, and the source is otherwise intact.
+//! assert!(edited.contains("view orders GET \"/orders/\""));
+//! // The new view is above the catch-all, and the source is otherwise intact.
 //! assert!(edited.find("orders").expect("inserted") < edited.find("fallback").expect("kept"));
 //! assert_eq!(apply_edits(&edited, &edits).expect("idempotent"), edited);
 //! ```
@@ -97,11 +110,16 @@ pub struct ProposedGrant {
     pub queries: Vec<String>,
 }
 
-/// Everything one `--learn` run wants to add to a manifest (`R28`, `R29`).
+/// Everything the retired TOML patcher wants to add to a manifest (`R28`,
+/// `R29`).
 ///
-/// Routes are inserted above the method-unrestricted catch-all (or appended),
-/// grants are merged into the route's existing `queries` list, and the whole
-/// edit is a no-op when there is nothing to add.
+/// The `Blastfile` editor's own edits type is
+/// [`crate::blastfile::BlastfileEdits`]: the two documents need different
+/// proposal shapes (a `[[route]]` carries regexes, a `view` carries methods and
+/// patterns), and `MB.21.4.3` merges them when it moves the call sites off the
+/// retired document. The two share [`write_atomic`] and nothing else: each has
+/// its own `ProposedGrant`, because a `[[route]]` grant names a proxy and a
+/// `view` grant names a store.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestEdits {
     /// New `[[route]]` blocks.
@@ -110,6 +128,39 @@ pub struct ManifestEdits {
     /// Exact statements to add to existing or newly proposed routes.
     #[serde(default)]
     pub grants: Vec<ProposedGrant>,
+}
+
+/// The seam between the edit types and the `Blastfile` writer (§14.5).
+///
+/// [`crate::blastfile::apply_edits`] is its one caller and the `Blastfile`
+/// editor its one implementation, so the splicing stays in
+/// [`crate::blastfile::write`] and every caller (`dev_learn`, `check`, `fold`)
+/// reaches it through one function.
+pub(crate) trait Editor {
+    /// Applies `edits` to `source`, returning the edited document.
+    ///
+    /// # Errors
+    ///
+    /// The refusal of the rule the edit broke, or [`EditError::Verification`]
+    /// when the splice cannot reproduce the model the edit intended.
+    fn apply(
+        &self,
+        source: &str,
+        edits: &crate::blastfile::BlastfileEdits,
+    ) -> Result<String, EditError>;
+}
+
+/// The `Blastfile` editor: parse, splice, prove (P4).
+pub(crate) struct BlastfileEditor;
+
+impl Editor for BlastfileEditor {
+    fn apply(
+        &self,
+        source: &str,
+        edits: &crate::blastfile::BlastfileEdits,
+    ) -> Result<String, EditError> {
+        crate::blastfile::write::apply(source, edits)
+    }
 }
 
 /// Why a manifest could not be edited.
@@ -144,6 +195,13 @@ pub enum EditError {
         name: String,
         /// The index in the proposed `path` list.
         rule: usize,
+    },
+    /// One of a view's methods is not a method the grammar accepts.
+    InvalidMethod {
+        /// The view's name.
+        name: String,
+        /// The rejected method.
+        method: String,
     },
     /// Two proposed routes carry the same name.
     DuplicateProposedRoute {
@@ -225,59 +283,64 @@ impl std::fmt::Display for EditError {
         match self {
             Self::Source(error) => write!(
                 f,
-                "the manifest does not parse, so it cannot be edited: {error}"
+                "the document does not parse, so it cannot be edited: {error}"
             ),
             Self::InvalidRouteName { name } => write!(
                 f,
-                "route name {} is not `[a-z0-9][a-z0-9_-]*`; derive it from the first path \
-                 segment in lowercase",
+                "name {} is not `[a-z0-9][a-z0-9_-]*`; derive it from the first path segment in \
+                 lowercase",
                 quoted(name)
             ),
             Self::EmptyPath { name } => write!(
                 f,
-                "route {} has no `path`; a route needs at least one regex",
+                "{} has no pattern; a view answers at least one path",
                 quoted(name)
             ),
             Self::EmptyPattern { name, rule } => write!(
                 f,
-                "route {}'s path[{rule}] is empty; every pattern has to match something",
+                "{}'s patterns[{rule}] is empty; every pattern has to match something",
                 quoted(name)
             ),
             Self::InvalidPattern { name, rule } => write!(
                 f,
-                "route {}'s path[{rule}] is not a valid Rust regex; fix the inferred pattern",
+                "{}'s patterns[{rule}] is not a valid path pattern; fix the inferred pattern",
                 quoted(name)
+            ),
+            Self::InvalidMethod { name, method } => write!(
+                f,
+                "view {}'s method {} is not a method; methods are upper-case (`GET`, `POST`, …)",
+                quoted(name),
+                quoted(method)
             ),
             Self::DuplicateProposedRoute { name } => write!(
                 f,
-                "two proposed routes are named {}; disambiguate them with `-2`, `-3`, …",
+                "two proposed views are named {}; disambiguate them with `-2`, `-3`, …",
                 quoted(name)
             ),
             Self::RouteConflict { name } => write!(
                 f,
-                "route {} is already declared with another path; --learn has to disambiguate the \
-                 inferred name",
+                "{} is already declared with another method or pattern; --learn has to \
+                 disambiguate the inferred name",
                 quoted(name)
             ),
             Self::UnknownProxy { route, proxy } => write!(
                 f,
-                "route {} grants proxy {} but no `[proxy.{}]` declares it; write the declaration \
-                 first",
+                "view {} grants store {} but no `postgres {}` declares it; write the store first",
                 quoted(route),
                 quoted(proxy),
                 escape_control(proxy)
             ),
             Self::MissingRoute { route, proxy } => write!(
                 f,
-                "a {} grant names route {}, which is neither declared nor proposed; add the route \
+                "a {} grant names view {}, which is neither declared nor proposed; add the view \
                  first",
                 quoted(proxy),
                 quoted(route)
             ),
             Self::UnrestrictedGrant { route, proxy } => write!(
                 f,
-                "route {}'s grant on {} is `unrestricted = true`; an exact query next to it is a \
-                 boot error, so remove `unrestricted` first",
+                "view {}'s grant on {} is `unrestricted`; an exact query next to it is a boot \
+                 error, so remove `unrestricted` first",
                 quoted(route),
                 quoted(proxy)
             ),
@@ -295,7 +358,7 @@ impl std::fmt::Display for EditError {
                 index,
             } => write!(
                 f,
-                "route {}'s {} grant would write queries[{index}] with a redacted `…`; the value \
+                "view {}'s {} grant would write queries[{index}] with a redacted `…`; the value \
                  is gone, so bind it and learn again",
                 quoted(route),
                 quoted(proxy)
@@ -306,7 +369,7 @@ impl std::fmt::Display for EditError {
                 index,
             } => write!(
                 f,
-                "route {}'s {} grant would write queries[{index}] with an inline literal; bind the \
+                "view {}'s {} grant would write queries[{index}] with an inline literal; bind the \
                  value and learn again",
                 quoted(route),
                 quoted(proxy)
@@ -317,7 +380,7 @@ impl std::fmt::Display for EditError {
                 index,
             } => write!(
                 f,
-                "route {}'s {} grant has an empty queries[{index}]; write a statement or drop it",
+                "view {}'s {} grant has an empty queries[{index}]; write a statement or drop it",
                 quoted(route),
                 quoted(proxy)
             ),
@@ -345,7 +408,15 @@ impl From<ManifestErrors> for EditError {
     }
 }
 
-/// Applies `--learn`'s proposals to a manifest document (`R28`, `R29`).
+/// Applies `--learn`'s proposals to the **retired TOML** manifest (`R28`,
+/// `R29`).
+///
+/// Retired: [`crate::blastfile::apply_edits`] is the editor `--learn` will
+/// call once `MB.21.4.3` moves `dev_learn.rs`, `check.rs` and `audit_v1.rs` off
+/// the retired document, and `MB.21.4.5` deletes this function with the reader.
+/// Until then it keeps those call sites and their protected suites
+/// (`critical_check_engine.rs`, `critical_check_schema.rs`) working, which is
+/// why the two editors share [`ManifestEdits`] and [`write_atomic`].
 ///
 /// The source is parsed first, then edited line by line: comments, ordering and
 /// quoting outside the edited fields are reproduced byte for byte. New routes
@@ -360,6 +431,12 @@ impl From<ManifestErrors> for EditError {
 ///
 /// An edits set with nothing to add returns the source unchanged, which makes
 /// repeated learning runs byte-identical.
+///
+/// # Errors
+///
+/// [`EditError::Source`] when the document does not parse, every refusal of the
+/// retired editor's table, and [`EditError::Verification`] when the
+/// postcondition fails.
 pub fn apply_edits(source: &str, edits: &ManifestEdits) -> Result<String, EditError> {
     let manifest = Manifest::from_toml_str(source)?;
     let plan = Plan::build(&manifest, edits)?;

@@ -49,14 +49,127 @@ mod pattern;
 mod print;
 mod syntax;
 mod tokens;
+pub(crate) mod write;
 
 pub use print::fmt;
 
 use std::io::Read as _;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
+use crate::edit::{BlastfileEditor, EditError, Editor as _};
 use crate::error::{ManifestError, ManifestErrors, ManifestWarning, escape_control};
 use crate::model::Manifest;
+
+/// One `view` `--learn` proposes (§14.5).
+///
+/// The editor writes exactly these three facts: inferring a name from a path
+/// and deciding which paths to propose happens before the edit ([`apply_edits`]
+/// only writes them). There is deliberately no `body` field — a learning run
+/// cannot declare an ingress policy (§10.1, R11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedView {
+    /// The view's name; `[a-z0-9][a-z0-9_-]*`, unique in the document.
+    pub name: String,
+    /// The methods the run saw, in the order it saw them.
+    ///
+    /// `GET` is written and `HEAD` is implied by the model (§8.4), so a run
+    /// that saw only `GET` writes `GET`.
+    #[serde(default)]
+    pub methods: Vec<String>,
+    /// The path patterns, matched against the whole of `PATH_INFO`, in order.
+    #[serde(default)]
+    pub patterns: Vec<String>,
+}
+
+/// Exact `queries` `--learn` proposes for one view on one store (§14.5).
+///
+/// The statements arrive as the wire spelled them (`$1`, `$2`, …) and are
+/// normalised before they are written; a statement that inlines a literal or
+/// holds a redacted `…` is refused instead. There is deliberately no `body`
+/// field (§10.1, R11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedGrant {
+    /// The view the grant belongs to.
+    pub view: String,
+    /// The `postgres` store the statements run on, or `None` for the unnamed
+    /// `postgres { … }` block, which is the store `db` (§7.4).
+    ///
+    /// A named store is written as `postgres <store> { … }`; it has to be
+    /// declared.
+    #[serde(default)]
+    pub store: Option<String>,
+    /// The statements to add, as the wire spelled them.
+    #[serde(default)]
+    pub queries: Vec<String>,
+}
+
+/// Everything one `--learn` run wants to add to a `Blastfile` (§14.5).
+///
+/// Views are inserted above the method-unrestricted catch-all (or appended),
+/// grants are merged into the view's `postgres` block for that store, and the
+/// whole edit is a no-op when there is nothing to add.
+///
+/// This is the `Blastfile` edits type. The retired TOML patcher's is
+/// [`crate::edit::ManifestEdits`]: the two documents need different proposal
+/// shapes (a `[[route]]` carries regexes, a `view` carries methods and
+/// patterns), so they are separate types until `MB.21.4.3` merges them when it
+/// moves the call sites off the retired document.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlastfileEdits {
+    /// New `view` blocks.
+    #[serde(default)]
+    pub views: Vec<ProposedView>,
+    /// Exact statements to add to existing or newly proposed views.
+    #[serde(default)]
+    pub grants: Vec<ProposedGrant>,
+}
+
+impl BlastfileEdits {
+    /// The manifest these edits intend, so the writer and its test share one
+    /// oracle (P4) instead of re-implementing lowering in a test (§14.5).
+    ///
+    /// The routes are grouped by the view that produced them, the grants are
+    /// merged per store, the new views are inserted at the catch-all's index,
+    /// and the sandboxes are renumbered by view index — exactly what `lower`
+    /// does to the edited text. Every top-level field the edits do not touch
+    /// (the `app`, the `preload`, the mounts, the `entrypoint`) is carried
+    /// across, so a mismatch means the writer changed something it does not
+    /// own.
+    pub fn apply_to(&self, manifest: &Manifest) -> Manifest {
+        write::expected(self, manifest)
+    }
+}
+
+/// Applies `--learn`'s proposals to a `Blastfile` document (§14.5, `R28`,
+/// `R29`).
+///
+/// The source is parsed into the one tree of §14.1, then edited at the offsets
+/// the tree names: comments, ordering and quoting outside the edited block are
+/// reproduced byte for byte. New views are inserted immediately above the
+/// first method-unrestricted catch-all view, or at the end of the file when
+/// there is none; a statement already granted for that view and store is not
+/// added twice. The result is re-parsed, re-lowered and compared with
+/// [`BlastfileEdits::apply_to`]'s model, so an edit that would change anything
+/// else fails with [`EditError::Verification`] and no output — a view's
+/// `static` mount and the `entrypoint` included (`MB.3.21`).
+///
+/// An edits set with nothing to add returns the source unchanged, which makes
+/// repeated learning runs byte-identical.
+///
+/// This is the `Blastfile` half of [`crate::edit`]'s two editors: the retired
+/// TOML patcher is [`crate::edit::apply_edits`], and `MB.21.4.3` moves this
+/// function to that name when it moves the call sites off the retired document.
+///
+/// # Errors
+///
+/// [`EditError::Source`] when the document does not parse or lower, every
+/// refusal of §14.5's table, and [`EditError::Verification`] when the
+/// postcondition fails.
+pub fn apply_edits(source: &str, edits: &BlastfileEdits) -> Result<String, EditError> {
+    BlastfileEditor.apply(source, edits)
+}
 
 /// Largest `Blastfile` [`read`] accepts, in bytes (§4.5).
 pub(crate) const MAX_SOURCE_BYTES: usize = 1_048_576;

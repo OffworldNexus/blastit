@@ -2,7 +2,7 @@
 id: MB.21.3.5
 title: "Surgical comment-preserving Blastfile editor for --learn (replaces the TOML patcher)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.21.3.4]
@@ -10,15 +10,16 @@ paths:
   - "crates/blastit-manifest/src/blastfile/**"
   - "crates/blastit-manifest/src/blastfile/write.rs"
   - "crates/blastit-manifest/src/edit.rs"
+  - "crates/blastit-manifest/src/model.rs"
   - "crates/blastit-manifest/tests/critical_manifest_edit.rs"
   - "crates/blastit-manifest/tests/critical_manifest_edit_executor.rs"
-  - crates/blastit/tests/critical_learn_executor_blocks.rs
   - "crates/blastit-manifest/tests/edit_branches.rs"
-attempts: 0
+  - crates/blastit/tests/critical_learn_executor_blocks.rs
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T02:40"
+updated: "2026-11-16T07:36"
 ---
 
 # Goal

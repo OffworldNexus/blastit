@@ -38,7 +38,7 @@ use crate::model::{
 };
 
 /// The name the unnamed `postgres $DATABASE_URL` takes (§7.3).
-const DEFAULT_STORE: &str = "db";
+pub(crate) const DEFAULT_STORE: &str = "db";
 
 /// The file a mount answers a directory with unless it says otherwise (§9.1).
 const DEFAULT_INDEX: &str = "index.html";

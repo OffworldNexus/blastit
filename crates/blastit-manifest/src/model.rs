@@ -590,17 +590,19 @@ impl Route {
     /// Whether this is the method-unrestricted catch-all `--learn` inserts new
     /// routes above (`R28`, `ADR-0003`).
     ///
-    /// Both spellings the documentation uses count: the bare string
-    /// `path = ".*"` parses to `[".*"]`, and `path = ['.*']` is the same list.
-    /// An anchored `^.*$` matches the same requests, so it counts too. A
-    /// catch-all restricted to some methods is not unrestricted: a request
-    /// with another method still falls through to the route below it.
+    /// Every spelling that matches every request counts. The bare string
+    /// `path = ".*"` parses to `[".*"]`, and `path = ['.*']` is the same list;
+    /// an anchored `^.*$` matches the same requests. The lowered form of a
+    /// `Blastfile` `view app "/*"` is `/.*` (`MB.21.3.5`, §4.3), so it counts
+    /// too: `--learn` inserts new views above the catch-all it finds in either
+    /// document. A catch-all restricted to some methods is not unrestricted: a
+    /// request with another method still falls through to the route below it.
     pub fn is_unrestricted_catch_all(&self) -> bool {
         self.methods.is_none()
             && self
                 .path
                 .iter()
-                .any(|pattern| pattern == ".*" || pattern == "^.*$")
+                .any(|pattern| matches!(pattern.as_str(), ".*" | "^.*$" | "/.*"))
     }
 }
 
@@ -1600,5 +1602,45 @@ entry = \"public/index.php\"
             "SELECT 1 WHERE x = 'a"
         );
         assert_eq!(parameterised(""), "");
+    }
+
+    /// `--learn` inserts a new view above the catch-all. A `Blastfile`
+    /// `view app "/*"` lowers to `/.*` (§4.3), so the predicate accepts that
+    /// spelling as well as the `.*` a `blastit.toml` writes, and still refuses
+    /// a prefix pattern or a method-restricted catch-all.
+    #[test]
+    fn the_lowered_catch_all_is_unrestricted_too() {
+        fn route(path: &[&str], methods: Option<&[&str]>) -> Route {
+            Route::new(
+                "app".to_string(),
+                path.iter().map(|pattern| (*pattern).to_string()).collect(),
+                methods.map(|list| list.iter().map(|method| (*method).to_string()).collect()),
+                Vec::new(),
+                false,
+                false,
+                BTreeMap::new(),
+            )
+        }
+
+        let unrestricted: [&[&str]; 3] = [&[".*"], &["/.*"], &["^.*$"]];
+        for path in unrestricted {
+            assert!(
+                route(path, None).is_unrestricted_catch_all(),
+                "for path {path:?}"
+            );
+        }
+
+        let restricted: [&[&str]; 3] = [&["/products/.*"], &["/"], &[]];
+        for path in restricted {
+            assert!(
+                !route(path, None).is_unrestricted_catch_all(),
+                "for path {path:?}"
+            );
+        }
+
+        // A catch-all restricted to some methods still falls through for
+        // another method, whatever spelling it uses.
+        assert!(!route(&["/.*"], Some(&["GET", "HEAD"])).is_unrestricted_catch_all());
+        assert!(!route(&[".*"], Some(&["GET"])).is_unrestricted_catch_all());
     }
 }
