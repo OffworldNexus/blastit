@@ -31,3 +31,15 @@ edited fields
 ## 2026-11-16T12:54 [planner]
 
 re-pointed depends_on MB.21.4.3 -> MB.21.4.7 (new Python-cutover leaf) and Context now says the package surface is 4.7's: the plugin default/help and the four Python suites' fixtures belong to 4.7, so 4.4 translates only what 4.7 leaves (e2e/, the three project fixture directories, scripts, Makefile). Reason: the Python cutover was split out of 4.3 as one session's worth of work; 4.4 must run after the Python tree reads Blastfile, or it would translate the same fixtures twice.
+
+## 2026-11-16T14:43 [lead]
+
+status ready -> active
+
+## 2026-11-16T14:43 [lead]
+
+attempt 1/3 started
+
+## 2026-11-16T14:43 [lead]
+
+base 621626c

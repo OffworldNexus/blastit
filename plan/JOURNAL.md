@@ -2249,3 +2249,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T14:32 [MB.21.4.7] (lead) status ready -> review
 - 2026-11-16T14:43 [MB.21.4.7] (lead) reviewer PASS (round 3). Gate flake: dev_boots_five_unprivileged_roles_and_strips_secrets failed again in my first make check (POST /env 200 where the test read
 - 2026-11-16T14:43 [MB.21.4.7] (lead) status review -> done
+- 2026-11-16T14:43 [MB.21.4.7] (lead) commit 621626c
+- 2026-11-16T14:43 [MB.21.4.4] (lead) status ready -> active
+- 2026-11-16T14:43 [MB.21.4.4] (lead) attempt 1/3 started
+- 2026-11-16T14:43 [MB.21.4.4] (lead) base 621626c
+- 2026-11-16T14:44 [MB.21.4.8] (planner) created (task) Bound the dev test client's response pairing: parse a response against its own request, close after a body, and deadline every wait with a small 
+- 2026-11-16T14:44 [MB.21.4.8] (planner) why this leaf: the protected 413 assertion in dev_boots_five_unprivileged_roles_and_strips_secrets is flaky at gate rate (2 of the last 4 full make check runs h
+- 2026-11-16T14:44 [MB.21.4] (planner) flake now owned by MB.21.4.8: dev_boots_five_unprivileged_roles_and_strips_secrets read 200 where its own dev log says 413 unmatched, measured 2/4 full-gate run

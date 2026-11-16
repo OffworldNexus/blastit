@@ -15,3 +15,7 @@ rescoped children after MB.21.4.1's needs_split (no code landed, 9+6 fixtures ma
 ## 2026-11-16T10:10 [lead]
 
 MB.21.4.1 closed at a3ac338 after 5 attempts and 5 sessions (this leaf grew into the whole atomic cutover: 74 files). Key outcome: the scheduler now serves static mounts and binds the file-level entrypoint php, the model audits mount roots, and every fixture make check reaches is a Blastfile. Moved to MB.21.4.2: the six reviewer MINORs (escaped path, blastfile::read, a real fmt test, RESULT.md note, doc prose, shared predicates) plus the parity suite. Moved to MB.21.4.3: the --json action vocabulary, fold/pytest plugin and _blastit.audit cutover, the e2e learn case, and the §13.2/§10.2/§11.3 re-spellings. Route::{static_policy,with_static,php,with_php} go with MB.21.4.5.
+
+## 2026-11-16T14:44 [planner]
+
+flake now owned by MB.21.4.8: dev_boots_five_unprivileged_roles_and_strips_secrets read 200 where its own dev log says 413 unmatched, measured 2/4 full-gate runs on this host (plus one reviewer run); the protected 413 assertion stays untouched and the test client's response pairing is bounded after MB.21.4.4.
