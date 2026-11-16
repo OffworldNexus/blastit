@@ -35,3 +35,7 @@ MB.21.4.10 amended twice before dispatch: (1) it renames the report key table_gr
 ## 2026-11-16T21:45 [lead]
 
 status ready -> done
+
+## 2026-11-16T21:45 [lead]
+
+gate closed; RESULT.md written by doc-writer from the measured tree (make check 166 ok, make e2e 411 ok/0 FAIL, greps 0, cargo tree 0, Cargo.lock -55); hand-offs to MB.21.5.1/5.2/5.3 recorded in RESULT.md.
