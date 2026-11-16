@@ -39,3 +39,7 @@ status active -> review
 ## 2026-11-16T00:19 [lead]
 
 status review -> done
+
+## 2026-11-16T00:19 [lead]
+
+commit fa91776; reviewer MINORs filed as MB.3.68 (installed_unsupported names a stray 8.2 object when a supported lib sits at an unprobed spelling) and MB.3.69 (two-package witness rewritten but unexecuted; RESULT A7 omits LESSONS/php2shell 8.2 hits)

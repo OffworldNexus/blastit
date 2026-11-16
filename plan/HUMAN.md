@@ -38,7 +38,7 @@ Done already, no action needed from you: the hot-path performance work from PR #
 
 **Answer:**
 
-## H-005 [open] (node MB)
+## H-005 [closed] (node MB)
 
 - asked: 2026-11-14T00:55 by conductor
 
@@ -64,7 +64,7 @@ MB.3.7 filed H-006: [route.php] entry is re-resolved per request, not pinned by 
 
 **Answer:**
 
-## H-008 [open] (node MB)
+## H-008 [closed] (node MB)
 
 - asked: 2026-11-15T16:28 by conductor
 
@@ -72,7 +72,7 @@ Release v0.2.0 is ready on branch release/0.2.0 (tip 73960fc). Review and squash
 
 **Answer:**
 
-## H-009 [open]
+## H-009 [closed]
 
 - asked: 2026-11-15T17:36 by implementer
 

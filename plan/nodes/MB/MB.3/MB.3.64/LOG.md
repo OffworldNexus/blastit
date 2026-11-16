@@ -31,3 +31,7 @@ status active -> review
 ## 2026-11-15T23:18 [lead]
 
 status review -> done
+
+## 2026-11-15T23:18 [lead]
+
+commit 2419971; reviewer MINORs filed as MB.3.67 (unreadable artifact reads as 'absent' rc 0; wheel not measured)

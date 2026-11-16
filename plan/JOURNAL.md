@@ -1939,3 +1939,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T00:55 [MB.3.67] (lead) status active -> review
 - 2026-11-16T01:04 [MB.3.67] (lead) status correction: the done transition was skipped when an earlier chained command was rejected by the shell scanner; the reviewed commit 13695e3 stands and thi
 - 2026-11-16T01:04 [MB.3.67] (lead) status review -> done
+- 2026-11-16T01:10 [MB.21.1] (lead) final ai-ergonomics review: 0 BLOCKER / 5 MAJOR (--json contract naming, fix.to vocabulary, PHP gate not runnable unprivileged, guide links to 0.1.1 pages, raw 
+- 2026-11-16T01:12 [MB.21.1] (lead) owner correction: acknowledged raw IS deployable (validate.rs:835-878 refuses only Raw && !allow_raw; ADR-0011). Blastfile spelling settled: 'body raw' = unackn
+- 2026-11-16T01:23 [MB.21.1] (lead) closing pass complete after 2 acceptance-round reviews; owner decisions enforced in text: workers REMOVED (not deferred), raw acknowledgement = 'body raw unvali
+- 2026-11-16T01:23 [MB.21.1] (lead) status active -> review
+- 2026-11-16T01:31 [MB.21.1] (lead) status review -> done

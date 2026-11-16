@@ -1,0 +1,194 @@
+---
+id: MB.21
+title: "Replace blastit.toml with the purpose-built Blastfile DSL (docs first, then parser, fmt and cutover)"
+kind: epic
+status: ready
+priority: 1
+depends_on: []
+paths: []
+attempts: 0
+max_attempts: 3
+escalation: none
+created: "2026-11-16T00:38"
+updated: "2026-11-16T00:38"
+---
+
+# Goal
+
+Replace `blastit.toml` **completely** with `Blastfile`, a purpose-built DSL that is Blastit's whole
+routing table and permission model. `./Blastfile` is discovered automatically, `BLASTIT_MANIFEST`
+still names another path, and a `blastit.toml` — or any TOML — handed to a `Blastfile` reader fails
+with a targeted migration error naming the new file instead of a parse trace.
+
+Blastfile removes TOML friction exactly where a developer pays for it: no `version` header, no `=`
+anywhere, no four-level `[route.db.tables]` nesting, the protocol is the keyword
+(`postgres $DATABASE_URL`), raw `'...'` strings for SQL and regex, and a dedicated `$IDENT` token so
+an environment-variable name can never be pasted as a literal by accident.
+
+This epic is **DX-First, in the mandatory order**: the lean user documentation (a basic guide plus a
+complete language reference) is written and critiqued by fresh-context `dx` + `ai-ergonomics`
+goldfish critics **before** any design; the technical design and ADR pass `security`,
+`implementability`, `testability` and `consistency` critics **before** one line of lexer.
+
+## Settled language spec (owner, 2026-11-16 — do not re-litigate)
+
+```text
+1. Universal block grammar: `keyword [args...] [{ directives... }]`, newline or `;` statement
+   terminators, `#` comments, comma-separated items, **zero `=` anywhere**, **no `version` header**.
+2. Tokens: `"..."` escaped strings, `'...'` raw strings (zero backslash escaping for SQL/regex),
+   `$IDENT` dedicated env-var token (`[A-Z_][A-Z0-9_]*` — passing a string literal where `$VAR` is
+   required is a syntax error at `line:col`).
+3. Zero cloud/infra specifics in `Blastfile`: **no `pooler` / `digitalocean` / vendor knobs in
+   `Blastfile`** (relocate any pooler transaction-mode knob that existed in the v1 manifest to a host
+   deployment env var, never in `Blastfile`). Outgoing HTTP templates (`http ...`) and
+   `mysql`/`redis`/`mongodb` are Milestone D — do NOT document or parse placeholder blocks for
+   unbuilt proxies in `0.2.0`; only `postgres` is the store keyword in `0.2.0`, and `egress any` is
+   the explicit raw-network escape hatch.
+4. Four sections:
+   - `app "<name>"`
+   - `entrypoint python "<module:attr>"` (optional `{ preload "<mod>", ... }`) OR
+     `entrypoint php "<relative/path.php>"` (declared ONCE at top level, replacing per-route
+     `[route.php] entry`; omitted for static-only apps).
+   - Store connections (protocol IS the keyword): `postgres $DATABASE_URL`, named second DB
+     `postgres <name> $ENV_VAR`, or block form `postgres [name] { host $DB_HOST; port $DB_PORT;
+     user $DB_USERNAME; password $DB_PASSWORD; database $DB_DATABASE; ... }` (check existing
+     `blastit-manifest` proxy input/output templates so all real `0.2.0` Postgres capabilities map
+     cleanly).
+   - Optional reusable grants: `trait <name> { postgres [name] { ... } }`, attached explicitly inside
+     a view via `use <name>[, ...]` (`unrestricted` and `egress any` forbidden inside `trait`).
+   - Views:
+     * Single-signature header: `view <name> [METHOD[, ...]] <pattern[, ...]> { ... }`
+       (`HEAD` automatically implied by `GET`; omitted method = any method).
+     * Multi-endpoint resource form: `view <name> { GET "/cart"; POST "/cart/items" { body json };
+       DELETE "/cart/items/{id:int}"; ... }` so body rules attach per method in one view sandbox.
+     * Route matching: quoted string `"/products/{id:int}"` = literal path pattern (`.` is literal;
+       `{name}` = `[^/]+`, `{name:int}` = `[0-9]+`, `{name:uuid}` = UUID, trailing `*` = prefix tail)
+       OR `regex '<pattern>'` (full anchored regex).
+     * View directives: `body <mode>` (match real `0.2.0` modes in `blastit-manifest`; `raw` explicit
+       and never written by `--learn`), `use <trait>`, `egress any` (warns at boot), `prefork`,
+       `postgres [name] unrestricted`, and `postgres [name] { transactions; functions fn1, fn2;
+       select|insert|update table[(col1, col2)], ...; delete table, ...;
+       query 'SELECT ... WHERE x = $?'; }`.
+   - Static mounts:
+     `static "<prefix>" { root "<dir>"; immutable ["<glob>"]; fallback "<file>"; index "<file>" }`
+     (NOTE: `python/tests/test_docs_assets.py` bans sentences mentioning both `PHP` and
+     `fallback`/`fall back` together — never pair `PHP` and `fallback` in the same prose sentence in
+     `NODE.md` or `docs/`!)
+   - Request precedence (one rule): (1) `static` prefix match where a regular non-`.php`/`.phar` file
+     exists on disk → (2) first matching `view` → (3) `static` `fallback` → (4) `404`.
+   - Tooling: `blastit fmt [--check] [PATH]` canonical formatter + lossless comment-preserving CST
+     surgical editor for `--learn`.
+```
+
+## Capability map: v1 `blastit.toml` → `Blastfile` (nothing may be dropped silently)
+
+| v1 spelling | Blastfile | Landed by |
+|---|---|---|
+| `version = 1` | gone — no header | MB.21.2 |
+| `app = "mod:attr"` | `entrypoint python "mod:attr"` | MB.21.2 |
+| `preload = ["mod"]` | `entrypoint python "mod:attr" { preload "mod" }` | MB.21.2 |
+| `[proxy.<name>]` `protocol`/`input`/`output` | `postgres $DATABASE_URL` (in-place outputs) or `postgres <name> { host $DB_HOST; … }` | MB.21.2 |
+| `[group.<name>]` | `trait <name> { … }`, attached by `use <name>` inside a view | MB.21.2 |
+| top-level `groups` (attached to every route) | gone — explicit `use` per view only; an invisible global attach has no fail-closed story | MB.21.2 |
+| `[[route]]` `name`/`path`/`methods` | `view <name> [METHOD] "<pattern>"` or the multi-endpoint form | MB.21.2 |
+| `[route.ingress]` `body` + `allow_raw` | `body json\|form\|none\|raw` plus the acknowledgement rule the design must pin | MB.21.2 |
+| the static block `root`/`index`/`immutable`/`spa` | `static "<prefix>" { root; index; immutable; fallback }` | MB.21.2 |
+| `[route.php] entry` | `entrypoint php "<relative/path.php>"` | MB.21.2 |
+| `[route.php] workers` (optional cap, 1..64) | **open**: MB.21.2 must either add a `workers <n>` view directive or drop it with an ADR reason and a migration note | MB.21.2 |
+| `prefork = true` | `prefork` | MB.21.2 |
+| `egress = true` | `egress any` (warns at boot) | MB.21.2 |
+| `[route.<proxy>]` `queries`/`functions`/`transaction_control`/`tables`/`unrestricted` | `postgres [name] { transactions; functions …; select\|insert\|update …; delete …; query '…' }` and `postgres [name] unrestricted` | MB.21.2 |
+
+Out of scope by owner decision: `pooler`, any vendor knob, and every Milestone C/D proxy keyword
+(`http`, `mysql`, `redis`, `mongodb`) — the reference documents only what `0.2.0` runs.
+
+## Children
+
+| Node | Owner | What |
+|---|---|---|
+| `MB.21.1` | doc-writer | Basic guide + complete language reference, registered in the site and the fence inventory, through `dx` + `ai-ergonomics` critics |
+| `MB.21.2` | designer | Technical design + `ADR-0012` + `security`/`implementability`/`testability`/`consistency` critics |
+| `MB.21.3` | epic | Toolchain: bounded lexer, LL(1) parser, path compiler, `fmt` + lossless CST, surgical `--learn` editor, `docs_fences` validator |
+| `MB.21.4` | epic | Cutover: discovery and migration errors, runtime parity, `check`/`--learn`/`--json`, Python package, Makefile, `e2e/` |
+| `MB.21.5` | epic | Docs and proof: site-wide migration, live fences + retired-TOML guard, `test-curator` audit, visual check |
+
+# Context
+
+- Owner mandate (2026-11-16): *"Replace `blastit.toml` completely with the purpose-built `Blastfile`
+  DSL. Start strictly DX-First by writing the language documentation — a basic guide plus a complete
+  language reference — critiqued by `dx` and `ai-ergonomics` goldfish critics, BEFORE technical design
+  and BEFORE lexer/parser/formatter/runtime implementation."*
+- Read first: `docs/VISION.md` (DX law), `docs/knowledge/LESSONS.md`, `crates/blastit-manifest/src/`
+  (`model.rs`, `parse.rs`, `validate.rs`, `routing.rs`, `edit.rs`), `docs/reference/manifest.md`,
+  `plan/nodes/MB/MB.20/NODE.md`.
+- Measured surface the design must preserve: `Manifest` carries `app`, `preload`, global `groups`,
+  `proxies` (protocol + raw `input`/`output` maps), `groups`, `routes` (name, path regexes, methods,
+  groups, `egress`, `prefork`, grants) and per-route `ingress` (`BodyCodec` `Json|Form|None|Raw` +
+  `allow_raw`), `static` (`root`/`index`/`spa`/`immutable`) and `php` (`entry`/`workers`).
+  `Protocol::ALL` is `[Postgresql]` only; `PgGrant` is queries + `transaction_control` +
+  `unrestricted` + `TableGrants` (`select`/`insert`/`update` columns, `delete`).
+- Today's discovery: `BLASTIT_MANIFEST` else `./blastit.toml`, no upward search (`ADR-0002`), and
+  `crates/blastit/src/cli.rs` currently refuses `--manifest` with "put `blastit.toml` in the working
+  directory". Those sentences, `Config::from_env`'s messages, `check.rs`'s `read_manifest` and
+  `stage0.rs`'s missing-file sentence all move to `Blastfile`.
+- `crates/blastit-manifest/tests/docs_fences.rs` counts complete manifest fences per documented file
+  and lives in the crate the parser will grow in; every page the release rewrites must keep it green.
+- Coordinate with `MB.20` (frameworks regroup, held until v0.2.0 is merged): `MB.21.5.1` rewrites the
+  manifest fences inside `docs/frameworks/**`, and `MB.20` restructures those pages afterwards. Its
+  `depends_on` is extended with `MB.21.5.1` so no file is rewritten twice.
+
+# Acceptance
+
+```console
+$ uv run --no-project tools/plan.py tree --under MB.21
+$ uv run --no-project tools/plan.py validate
+$ make check
+$ make e2e
+$ uvx --offline zensical build --strict
+$ ls docs/blastfile.md docs/reference/blastfile.md docs/design/blastfile-dsl.md docs/decisions/ADR-0012-blastfile-dsl.md
+$ find e2e python/tests -name 'Blastfile' -o -name 'blastit.toml' | sort
+$ grep -rn 'blastit\.toml' README.md docs --include='*.md' \
+    | grep -vE 'blastfile\.md|changelog\.md|/decisions/|/design/|/knowledge/|/testing/|/research/|/archive/'
+```
+
+1. Every child of `MB.21.{3,4,5}` is `done` with a `RESULT.md` carrying command + output evidence;
+   `plan.py tree --under MB.21` shows no `ready`/`active` child and no `blocked`/`failed` one.
+2. The repository runs on `Blastfile`: the fifteen fixture manifests under `e2e/` and `python/tests/`
+   are `Blastfile`, the Makefile's `docs-serve` stage writes one, and every Docker/rootless scenario
+   loads one; the last `find` above lists `Blastfile` paths only and no `blastit.toml`, and no code
+   path reads `blastit.toml`.
+3. `make check` exit 0 (including `docs-unit`, `docs-check`, `docs-test` with the new pages executed
+   live, `test-critical`, `rs-no-python`, `plan-validate`) and `make e2e` exit 0.
+4. A `blastit.toml` or a TOML body handed to any Blastit command exits non-zero with one sentence
+   naming `Blastfile`, `./Blastfile` and the migration page — no lexer trace, no "unknown keyword
+   toml". Proven by a test per entry point (boot, `dev`, `check`, `fmt`).
+5. Both pages are public, lean and true: `docs/blastfile.md` ≤ 150 lines, the reference complete
+   enough to write any `0.2.0` manifest; zero Milestone C/D or vendor claims; `dx` and
+   `ai-ergonomics` critics accepted on the docs, `security`/`implementability`/`testability`/
+   `consistency` accepted on the design.
+6. `test-curator` audit of `blastit-manifest` (lexer, parser, CST, editor) with a `cargo-mutants`
+   ratio ≥ 75 % on the parsing/policy modules, and `visual-checker` proof that the two new pages
+   render (nav, tables, code blocks) in both colour schemes.
+
+# Notes
+
+- **ADR number:** `ADR-0011` is already accepted (`raw-ingress boot refusal`, MB.3.53), so the
+  Blastfile ADR is **`ADR-0012-blastfile-dsl.md`**. Any brief that says `ADR-0011` for this work is
+  stale; fix the reference rather than the number.
+- **Crate home:** unless `ADR-0012` decides otherwise, the lexer/parser/CST live inside
+  `crates/blastit-manifest/` (a `blastfile/` module tree) so `docs_fences.rs`, `edit.rs` and the
+  protected manifest suites keep their home. If the design introduces a new workspace crate, `lead`
+  widens the child `paths` with `plan.py edit` **before** dispatch, and one strictly serialized child
+  owns `Cargo.toml` + `Cargo.lock`.
+- **Zero new dependencies:** hand-written lexer and LL(1) parser (no `logos`/`pest`/`chumsky`/`nom`).
+  Every iteration must be bounded by input length, and nesting depth by the grammar (two levels), so
+  a hostile `Blastfile` cannot blow the stack.
+- **Protected tests:** the cutover necessarily rewrites fixtures inside
+  `crates/*/tests/critical_*.rs` and `python/tests/critical/`. Each such child lists the exact files
+  in `paths` and says why in `# Goal`, and runs
+  `uv run --no-project tools/critical_guard.py --base <sha> --node <id>` before reporting.
+- **Prose rule:** `python/tests/test_docs_assets.py` refuses a sentence that pairs the runtime name with
+  the word for the deep-URL file, and it treats `route` as that runtime word. Read its docstring; keep
+  language examples in fences.
+- Priority 1: this is release-blocking for v0.2.0; `MB.21.1` starts immediately with zero code
+  dependencies.

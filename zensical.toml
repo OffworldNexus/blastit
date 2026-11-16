@@ -21,6 +21,7 @@ site_dir = "site"
 nav = [
   { "Home" = "index.md" },
   { "Getting started" = "getting-started.md" },
+  { "The Blastfile" = "blastfile.md" },
   { "Local development" = "local.md" },
   { "CI/CD" = "ci.md" },
   { "Deployments" = [
@@ -39,7 +40,8 @@ nav = [
   ] },
   { "Reference" = [
     "reference/cli.md",
-    { "The manifest" = "reference/manifest.md" },
+    { "Blastfile reference" = "reference/blastfile.md" },
+    { "The manifest (0.1.1, retired)" = "reference/manifest.md" },
     { "Settings" = "reference/settings.md" },
     { "Log events" = "reference/log-events.md" },
   ] },
