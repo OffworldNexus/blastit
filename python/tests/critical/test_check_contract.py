@@ -873,7 +873,7 @@ class TestTheContract(unittest.TestCase):
     def test_a_bad_manifest_exits_two_with_an_empty_stdout(self) -> None:
         """`exit 2`: Blastit could not start, so there is no report at all."""
         server = self.server()
-        project = self.project('version = 1\n[[route]\nname = "oops"\n')
+        project = self.project('view a "/" {\n')
         run = self.run_check(project, "--json", server=server)
         self.assertEqual(run.returncode, 2, run.stderr.decode())
         self.assertEqual(run.stdout, b"", "exit 2 emits no document")

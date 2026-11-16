@@ -94,44 +94,32 @@ class TestProxyOptions:
 
 
 class TestManifestProxies:
-    """The manifest is read with `tomllib`: the plugin needs to know its proxies."""
+    """The Blastfile is read by the extension: the plugin needs to know its stores."""
 
-    def test_the_postgresql_proxies_are_found(self) -> None:
-        manifest = (
-            "version = 1\n"
-            "[proxy.db]\n"
-            'protocol = "postgresql"\n'
-            "[proxy.warehouse]\n"
-            'protocol = "postgresql"\n'
-        )
+    def test_the_postgres_stores_are_found(self) -> None:
+        manifest = "postgres $DATABASE_URL\n\npostgres warehouse $WAREHOUSE_URL\n"
         assert plugin._postgresql_proxies(manifest) == ["db", "warehouse"]
 
     def test_a_manifest_without_proxies_has_none(self) -> None:
-        assert plugin._postgresql_proxies("version = 1\n") == []
+        assert plugin._postgresql_proxies('app "shop"\n') == []
 
-    def test_broken_toml_is_a_usage_error(self) -> None:
+    def test_a_document_that_is_not_a_blastfile_is_a_usage_error(self) -> None:
         with pytest.raises(pytest.UsageError):
             plugin._postgresql_proxies("version = ")
 
 
 class TestLiveServerManifest:
-    """What the live server needs from the manifest, read without Django (D3c)."""
+    """What the live server needs from the Blastfile, read without Django (D3c)."""
 
     def manifest(self, tmp_path: Path, text: str) -> Path:
-        path = tmp_path / "blastit.toml"
+        path = tmp_path / "Blastfile"
         path.write_text(text, encoding="utf-8")
         return path
 
     def test_a_url_input_is_the_variable_to_point_at_the_test_database(
         self, tmp_path: Path
     ) -> None:
-        path = self.manifest(
-            tmp_path,
-            "version = 1\n"
-            "[proxy.db]\n"
-            'protocol = "postgresql"\n'
-            'input = { url = "DATABASE_URL" }\n',
-        )
+        path = self.manifest(tmp_path, "postgres $DATABASE_URL\n")
         assert plugin._postgresql_url_variable(path) == "DATABASE_URL"
 
     def test_a_proxy_taking_its_upstream_in_pieces_has_no_url_variable(
@@ -139,17 +127,14 @@ class TestLiveServerManifest:
     ) -> None:
         path = self.manifest(
             tmp_path,
-            "version = 1\n"
-            "[proxy.db]\n"
-            'protocol = "postgresql"\n'
-            'input = { host = "DB_HOST", database = "DB_NAME" }\n',
+            "postgres {\n    host $DB_HOST\n    database $DB_NAME\n}\n",
         )
         assert plugin._postgresql_url_variable(path) is None
 
     def test_a_manifest_without_a_postgresql_proxy_has_no_url_variable(
         self, tmp_path: Path
     ) -> None:
-        path = self.manifest(tmp_path, "version = 1\n")
+        path = self.manifest(tmp_path, 'app "shop"\n')
         assert plugin._postgresql_url_variable(path) is None
 
 

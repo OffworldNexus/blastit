@@ -1,0 +1,95 @@
+# The Blastfile the plugin's tests diff against (D3b).
+#
+# It is deliberately *not* finished: views are missing grants, one needs
+# transaction control, some have a stale grant, one is never exercised, one path
+# the tests use has no view at all, and no view grants the statements psycopg
+# runs as a connection is established. Every one of those is a line in the report
+# the plugin writes.
+
+postgres $DATABASE_URL
+
+# Complete: the single SELECT this view sends is granted.
+view notes GET "/notes/" {
+    postgres {
+        query 'SELECT "notes_note"."id" AS "id" FROM "notes_note" WHERE "notes_note"."owner_id" = $?'
+    }
+}
+
+# Its own grant, plus one that no code path runs any more: an `unused` line.
+view note-create POST "/notes/create/" {
+    postgres {
+        query 'INSERT INTO "notes_note" ("owner_id", "body") VALUES ($?, $?) RETURNING "notes_note"."id"'
+        query 'SELECT "notes_note"."body" FROM "notes_note" WHERE "notes_note"."id" = $?'
+    }
+}
+
+# The view sends a DELETE; the Blastfile grants something else entirely.
+view note-delete POST "/notes/{id:int}/delete/" {
+    postgres {
+        query 'SELECT "notes_note"."id" FROM "notes_note" ORDER BY "notes_note"."id" DESC LIMIT 1'
+    }
+}
+
+# A nested `atomic` is a SAVEPOINT: the view needs `transactions`, and the
+# UPDATE it sends is granted.
+view note-atomic POST "/notes/atomic/" {
+    postgres {
+        query 'UPDATE "notes_note" SET "body" = $? WHERE "notes_note"."owner_id" = $?'
+    }
+}
+
+# One grant for an `IN` list of any length (D3a): the report would give this
+# text back for a list of one id, of ten ids, or of a hundred.
+view note-in GET "/notes/in/" {
+    postgres {
+        query 'SELECT "notes_note"."id" AS "id" FROM "notes_note" WHERE "notes_note"."id" IN ($?)'
+    }
+}
+
+# One grant for a run of identical VALUES rows, whatever the count — the `, ...`
+# is what D3a's normaliser writes, and reading it back is idempotent.
+view note-multi GET "/notes/multi/" {
+    postgres {
+        query 'INSERT INTO "notes_note" ("owner_id", "body") VALUES ($?, $?), ... RETURNING "notes_note"."id"'
+    }
+}
+
+# No grant: Django's `bulk_create` sends one `VALUES` row for a single object and
+# an `UNNEST` array for several, so this view has two statements to grant, and
+# neither covers the other.
+view note-bulk GET "/notes/bulk/" {
+}
+
+# No grant at all: the type lookup this view makes goes straight through psycopg,
+# so the report is where it shows up.
+view note-types GET "/notes/types/" {
+}
+
+# No grant either, because what this view sends is not the SELECT in the view:
+# a named cursor is a `DECLARE … CURSOR FOR …`, plus the `FETCH` that reads it.
+view note-stream GET "/notes/stream/" {
+}
+
+# psycopg sends the BEGIN and the COMMIT of this view's `atomic()` itself, and
+# neither is granted here: the view needs `transactions`.
+view note-atomic-live POST "/notes/atomic-live/" {
+    postgres {
+        query 'UPDATE "notes_note" SET "body" = $? WHERE "notes_note"."owner_id" = $?'
+    }
+}
+
+# This one may open outbound connections.
+view note-cache GET "/notes/cache/" {
+    egress any
+}
+
+# This one does too, and says nothing about it: the report is where that shows.
+view note-queue GET "/notes/queue/" {
+}
+
+# No test reaches this one: it is reported as never exercised, not as missing.
+view orders GET "/orders/" {
+    postgres {
+        query 'SELECT "orders_order"."id" FROM "orders_order" LIMIT 1'
+    }
+}

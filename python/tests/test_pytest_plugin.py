@@ -12,7 +12,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tomllib
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -40,6 +39,13 @@ APP_SETUP_SQL = "SET application_name = 'blastit-test'"
 #: another zone sends this. Whatever runs is what the report must name, and it is
 #: pinned by its exact text either way.
 TIMEZONE_SETUP_SQL = "SELECT set_config('TimeZone', $?, false)"
+
+#: The stale grant `note-delete` carries: the retired document had it (the view
+#: sends a DELETE instead). The `LIMIT 1` is part of the text a grant holds, and
+#: `python/tests/test_project_manifest.py` pins that the fixture still says it.
+STALE_GRANT = (
+    'SELECT "notes_note"."id" FROM "notes_note" ORDER BY "notes_note"."id" DESC LIMIT 1'
+)
 
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
@@ -160,7 +166,7 @@ def baseline(project: Path, tmp_path_factory: pytest.TempPathFactory) -> Outcome
     return run(
         copy_project(project, tmp_path_factory.mktemp("baseline")),
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
     )
 
 
@@ -170,7 +176,7 @@ def strict(project: Path, tmp_path_factory: pytest.TempPathFactory) -> Outcome:
     return run(
         copy_project(project, tmp_path_factory.mktemp("strict")),
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
         "--blastit-strict",
     )
 
@@ -210,8 +216,7 @@ def test_a_missing_grant_names_the_statement_the_test_and_the_path(
 
 def test_a_grant_nothing_matched_is_unused(baseline: Outcome) -> None:
     """A stale grant is reported, and does not fail a run on its own."""
-    stale = 'SELECT "notes_note"."id" FROM "notes_note" ORDER BY "notes_note"."id" DESC LIMIT 1'
-    assert baseline.proxy("note-delete")["unused"] == [stale]
+    assert baseline.proxy("note-delete")["unused"] == [STALE_GRANT]
     assert baseline.proxy("note-create")["unused"] == [
         'SELECT "notes_note"."body" FROM "notes_note" WHERE "notes_note"."id" = $?'
     ]
@@ -334,7 +339,7 @@ def test_psycopg_own_transaction_commands_are_reported(baseline: Outcome) -> Non
 def test_a_route_that_opens_connections_needs_egress(baseline: Outcome) -> None:
     """`socket.connect` is where every TCP client ends up, so it is all seen."""
     queue = baseline.route("note-queue")["egress"]
-    assert queue["needed"] is True, "no egress = true on this route"
+    assert queue["needed"] is True, "no egress any on this view"
     assert queue["observed"] == [
         {
             "target": "127.0.0.1:9",
@@ -347,7 +352,7 @@ def test_a_route_that_opens_connections_needs_egress(baseline: Outcome) -> None:
     ]
     cache = baseline.route("note-cache")["egress"]
     assert cache["observed"] == queue["observed"], "the same view, the same attempt"
-    assert cache["needed"] is False, "this route has egress = true"
+    assert cache["needed"] is False, "this view has egress any"
     assert baseline.report["totals"]["egress"] == 1
     for name in ("notes", "note-delete", "orders"):
         assert baseline.route(name)["egress"] == {"observed": [], "needed": False}, name
@@ -474,18 +479,19 @@ def test_the_terminal_summary_is_short_and_actionable(baseline: Outcome) -> None
     assert "blastit: route note-bulk: 2 statement(s) missing" in baseline.stdout
     assert "blastit: route note-atomic-live: 2 statement(s) missing" in baseline.stdout
     assert (
-        "blastit: route note-atomic: needs transaction_control = true"
-        in baseline.stdout
+        "blastit: route note-atomic: needs transactions "
+        "(add `transactions` to its postgres block)" in baseline.stdout
     )
     assert (
         "blastit: route note-queue opens outbound connections (127.0.0.1:9) "
-        "but has no egress = true" in baseline.stdout
+        "but has no egress any" in baseline.stdout
     )
     assert "blastit: 1 unrouted request(s): GET /oops/" in baseline.stdout
     assert (
         f"blastit: {len(baseline.setup_statements())} connection-setup statement(s) "
-        "some routes do not grant: put them in a group attached to every route"
-        in baseline.stdout
+        "some routes do not grant: put them in a trait attached to every view "
+        "(`trait connection { postgres { … } }`, then `use connection`), "
+        "see blastit-report.json" in baseline.stdout
     ), baseline.stdout
     assert "blastit-report.json" in baseline.stdout
 
@@ -497,7 +503,7 @@ def test_strict_fails_the_session(baseline: Outcome, strict: Outcome) -> None:
         "blastit: --blastit-strict: 12 statement execution(s) missing, 1 unrouted "
         f"request(s), {len(baseline.setup_statements())} connection-setup statement(s) "
         "not granted in every route, 1 route(s) opening connections without "
-        "egress = true, 0 unreadable statement(s) and 0 warning(s)" in strict.stdout
+        "egress any, 0 unreadable statement(s) and 0 warning(s)" in strict.stdout
     ), strict.stdout
     assert strict.report["totals"]["clean"] is False
 
@@ -521,27 +527,27 @@ def test_the_plugin_is_inert_without_a_manifest(project: Path, tmp_path: Path) -
 def test_the_report_is_enough_to_fill_the_manifest_in(
     baseline: Outcome, project: Path, tmp_path: Path
 ) -> None:
-    """The whole point: what the report says, applied to the manifest, is clean.
+    """The whole point: what the report says, applied to the Blastfile, is clean.
 
     Applying the report happens twice, which is the honest shape of the loop: the
-    first pass adds the statements of the routes that ran — including the two
+    first pass adds the statements of the views that ran — including the two
     `bulk_create` shapes, the type lookup psycopg sends and the named cursor's
-    three statements — sets `egress = true` where a route opened connections,
-    puts the connection-setup statements in a group attached to every route, and
-    gives the unrouted path a route of its own. Only then do that route's own
-    statements show up as missing, because until it existed nothing could
-    attribute them to it.
+    three statements — sets `egress any` where a view opened connections, puts
+    the connection-setup statements in a `trait connection { … }` every view
+    `use`s, and gives the unrouted path a view of its own. Only then do that
+    view's own statements show up as missing, because until it existed nothing
+    could attribute them to it.
 
-    One statement the report names is not the manifest's to fix: the fixture app
+    One statement the report names is not the Blastfile's to fix: the fixture app
     sends `SET application_name = 'blastit-test'` with the value inlined, and no
     grant may hold an inlined value (`ADR-0003`, `R24` — the validator's "bind
     the value with `$?`"). Everything a grant *can* hold converges; that one
-    stays reported, and it is the app, not the manifest, that has to change. The
+    stays reported, and it is the app, not the Blastfile, that has to change. The
     last run proves the rest is clean: every total but that one is zero.
     """
     assert baseline.report["totals"]["clean"] is False
     copy = copy_project(project, tmp_path)
-    source = (copy / "blastit.toml").read_text(encoding="utf-8")
+    source = (copy / "Blastfile").read_text(encoding="utf-8")
 
     repaired = repaired_manifest(source, baseline)
     setup = [entry for entry in baseline.setup_statements() if entry["ungranted_in"]]
@@ -554,27 +560,27 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     assert [entry["sql"] for entry in setup if not may_be_granted(entry["sql"])] == [
         APP_SETUP_SQL
     ], "the only one a grant may not hold is the app's inlined value"
-    assert "egress = true" in repaired, "and so is the route that opens connections"
-    (copy / "blastit-repaired.toml").write_text(repaired, encoding="utf-8")
+    assert "egress any" in repaired, "and so is the view that opens connections"
+    (copy / "Blastfile-repaired").write_text(repaired, encoding="utf-8")
     second = run(
         copy,
         "--blastit-manifest",
-        "blastit-repaired.toml",
+        "Blastfile-repaired",
         report="second-report.json",
     )
     assert second.returncode == 0, second.stdout + second.stderr
     assert second.report["totals"]["unrouted"] == 0, "the path has a route now"
     assert second.report["totals"]["needs_transaction_control"] == []
-    assert second.report["totals"]["egress"] == 0, "egress = true is in the manifest"
+    assert second.report["totals"]["egress"] == 0, "egress any is in the Blastfile"
     ungranted_setup = [
         entry["sql"] for entry in second.setup_statements() if entry["ungranted_in"]
     ]
     assert ungranted_setup == [APP_SETUP_SQL], (
-        "the group attached to every route covers every connection-setup statement a "
+        "the trait every view uses covers every connection-setup statement a "
         "grant may hold; the app's inlined value is the one `R24` refuses, and the "
         "report keeps naming it"
     )
-    assert second.missing_sql("fallback") == ["SELECT 1"], "the new route's own SQL"
+    assert second.missing_sql("fallback") == ["SELECT 1"], "the new view's own SQL"
     named_cursor = second.missing_sql("note-stream")
     assert second.report["totals"]["missing"] == 1 + len(named_cursor), (
         "everything the first report listed is granted, except the named cursor"
@@ -590,13 +596,13 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     # Everything a grant can hold converges, which is what this third run checks —
     # and the one statement it cannot hold is exactly what `--blastit-strict`
     # still counts.
-    (copy / "blastit-repaired.toml").write_text(
+    (copy / "Blastfile-repaired").write_text(
         repaired_manifest(repaired, second), encoding="utf-8"
     )
     third = run(
         copy,
         "--blastit-manifest",
-        "blastit-repaired.toml",
+        "Blastfile-repaired",
         "--blastit-strict",
         "-k",
         "not named_cursor",
@@ -628,7 +634,7 @@ def test_the_report_is_enough_to_fill_the_manifest_in(
     assert (
         "blastit: --blastit-strict: 0 statement execution(s) missing, 0 unrouted "
         "request(s), 1 connection-setup statement(s) not granted in every route, "
-        "0 route(s) opening connections without egress = true, 0 unreadable "
+        "0 route(s) opening connections without egress any, 0 unreadable "
         "statement(s) and 0 warning(s)" in third.stdout
     ), third.stdout
     assert "blastit: 1 connection-setup statement(s) some routes do not grant" in (
@@ -646,7 +652,7 @@ def test_atomic_requests_on_the_alias_needs_transaction_control(
     outcome = run(
         copy_project(project, tmp_path),
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
         "-k",
         "test_list_notes",
         env={"BLASTIT_TEST_ATOMIC": "1"},
@@ -659,11 +665,9 @@ def test_atomic_requests_on_the_alias_needs_transaction_control(
 def test_more_than_one_proxy_needs_a_mapping(project: Path, tmp_path: Path) -> None:
     """With two proxies, the plugin asks which one an alias talks to."""
     copy = copy_project(project, tmp_path)
-    (copy / "blastit-two-proxies.toml").write_text(
-        two_proxy_manifest(), encoding="utf-8"
-    )
+    (copy / "Blastfile-two-stores").write_text(two_proxy_manifest(), encoding="utf-8")
     without = run(
-        copy, "--blastit-manifest", "blastit-two-proxies.toml", "-k", "test_list_notes"
+        copy, "--blastit-manifest", "Blastfile-two-stores", "-k", "test_list_notes"
     )
     assert without.returncode == 4, "a usage error, before any test runs"
     assert "--blastit-proxy alias=proxy" in (without.stdout + without.stderr).replace(
@@ -672,7 +676,7 @@ def test_more_than_one_proxy_needs_a_mapping(project: Path, tmp_path: Path) -> N
     with_mapping = run(
         copy,
         "--blastit-manifest",
-        "blastit-two-proxies.toml",
+        "Blastfile-two-stores",
         "--blastit-proxy",
         "default=warehouse",
         "-k",
@@ -695,7 +699,7 @@ def test_a_typo_in_the_mapping_is_a_usage_error(project: Path, tmp_path: Path) -
     outcome = run(
         copy_project(project, tmp_path),
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
         "--blastit-proxy",
         "default=not-a-proxy",
     )
@@ -714,24 +718,20 @@ def test_strict_without_a_manifest_is_a_usage_error(
 
 
 def test_an_invalid_manifest_fails_the_session(project: Path, tmp_path: Path) -> None:
-    """The plugin never reports against a manifest it could not parse."""
+    """The plugin never reports against a Blastfile it could not parse."""
     copy = copy_project(project, tmp_path)
-    (copy / "broken.toml").write_text(
-        "version = 1\n"
-        "[proxy.db]\n"
-        'protocol = "postgresql"\n'
-        'input = { url = "DATABASE_URL" }\n'
-        "[[route]]\n"
-        'name = "notes"\n'
-        'path = ["("]\n',
+    (copy / "Blastfile-broken").write_text(
+        "postgres $DATABASE_URL\n\nview notes regex '(' {\n}\n",
         encoding="utf-8",
     )
-    outcome = run(copy, "--blastit-manifest", "broken.toml", "-k", "test_list_notes")
+    outcome = run(
+        copy, "--blastit-manifest", "Blastfile-broken", "-k", "test_list_notes"
+    )
     assert outcome.returncode == 1
     assert "blastit: the audit failed" in outcome.stdout
     assert "invalid" in outcome.stdout, outcome.stdout
     assert not outcome.report_path.exists(), (
-        "no report is written for an invalid manifest"
+        "no report is written for an invalid Blastfile"
     )
 
 
@@ -743,7 +743,7 @@ def test_xdist_workers_are_merged(
     outcome = run(
         copy,
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
         "-n",
         "2",
         report="xdist-report.json",
@@ -777,7 +777,7 @@ def test_an_alias_without_server_side_binding_is_reported(
     outcome = run(
         copy,
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
         "-k",
         "test_list_notes",
         env={"BLASTIT_TEST_CLIENT_BINDING": "1"},
@@ -794,7 +794,7 @@ def test_an_alias_without_server_side_binding_is_reported(
     strict = run(
         copy,
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
         "--blastit-strict",
         "-k",
         "test_list_notes",
@@ -816,7 +816,7 @@ def test_a_stray_file_next_to_the_report_is_not_merged(
         encoding="utf-8",
     )
     outcome = run(
-        copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="stray.json"
+        copy, "--blastit-manifest", "Blastfile", "-n", "2", report="stray.json"
     )
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
     assert "stray.json.old is not a blastit worker report" in outcome.stdout
@@ -835,11 +835,9 @@ def test_xdist_reports_are_not_merged_twice(
 ) -> None:
     """A second run in the same directory does not see the first run's requests."""
     copy = copy_project(project, tmp_path)
-    first = run(
-        copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json"
-    )
+    first = run(copy, "--blastit-manifest", "Blastfile", "-n", "2", report="twice.json")
     second = run(
-        copy, "--blastit-manifest", "blastit.toml", "-n", "2", report="twice.json"
+        copy, "--blastit-manifest", "Blastfile", "-n", "2", report="twice.json"
     )
     assert first.returncode == second.returncode == 0
     assert (
@@ -859,16 +857,16 @@ STATIC_SETUP_GRANTS = ("SET TIME ZONE 'UTC'", TIMEZONE_SETUP_SQL)
 
 
 def may_be_granted(sql: str) -> bool:
-    """Whether a `blastit.toml` grant may hold `sql` at all (`ADR-0003`, `R24`)."""
+    """Whether a `Blastfile` grant may hold `sql` at all (`ADR-0003`, `R24`)."""
     return "'" not in sql or sql in STATIC_SETUP_GRANTS
 
 
 def is_transaction_control(sql: str) -> bool:
     """Whether a reported statement is transaction control.
 
-    Only this test module needs to know: the report says which routes need
-    `transaction_control`, and the statements it lists as missing on those routes
-    are the savepoints, whose names change on every run — a grant for their text
+    Only this test module needs to know: the report says which views need
+    `transactions`, and the statements it lists as missing on those views are
+    the savepoints, whose names change on every run — a grant for their text
     would be meaningless.
     """
     return sql.startswith(
@@ -885,34 +883,42 @@ def is_transaction_control(sql: str) -> bool:
 
 
 def repaired_manifest(source: str, outcome: Outcome) -> str:
-    """Applies a report to a manifest, the way a human or an agent would.
+    """Applies a report to a `Blastfile`, the way a human or an agent would.
 
     * every `missing` statement that is not transaction control is appended to
-      its route's grant, on the proxy the report names — the report hands the
+      its view's grant, on the store the report names — the report hands the
       normalised text over, which is exactly what a grant holds;
-    * a route that `needs_transaction_control` gets the flag, instead of a grant
-      for a savepoint whose name changes on every run;
-    * the connection-setup statements go into a group attached to every route
-      (`groups = ["connection"]`), which is what the report's
-      `ungranted_in` is telling you to do: they run on every route in
-      production, so they cannot belong to one. A statement that inlines a value
-      is left out, because no grant may hold one (`ADR-0003`, `R24`): the app has
-      to bind it, and the next run keeps reporting it until it does;
-    * a route whose `egress.needed` is true gets `egress = true`, because it
-      opened connections and the manifest does not let it;
-    * a path the report calls `unrouted` gets a route of its own: blastit would
-      have answered 404 before Django saw it. That route's statements were not
+    * a view that `needs_transaction_control` gets `transactions`, instead of a
+      grant for a savepoint whose name changes on every run;
+    * the connection-setup statements go into a `trait connection { … }` and
+      every view gets `use connection`, which is what the report's
+      `ungranted_in` is telling you to do: they run on every view in production,
+      so they cannot belong to one. A statement that inlines a value is left
+      out, because no grant may hold one (`ADR-0003`, `R24`): the app has to bind
+      it, and the next run keeps reporting it until it does;
+    * a view whose `egress.needed` is true gets `egress any`, because it opened
+      connections and the `Blastfile` does not let it;
+    * a path the report calls `unrouted` gets a view of its own: blastit would
+      have answered 404 before Django saw it. That view's statements were not
       attributed to anything (they could not be), so the next run is the one that
       reports them.
+
+    The source is read by the extension (`blastit._blastit.blastfile_model`), so
+    the repair starts from what the one reader lowers, and the result is a fresh
+    `Blastfile` written by [`dumps_blastfile`] — never a second parser.
     """
-    document = tomllib.loads(source)
-    routes = {route["name"]: route for route in document.get("route", [])}
+    from blastit import _blastit
+
+    model = json.loads(_blastit.blastfile_model(source))
+    views = {view["name"]: view for view in model["views"]}
     for reported in outcome.report["routes"]:
-        route = routes.get(reported["name"])
-        if route is None:
+        view = views.get(reported["name"])
+        if view is None:
             continue
+        grants = view.setdefault("grants", {})
         for block in reported["proxies"]:
-            queries = route.setdefault(block["name"], {}).setdefault("queries", [])
+            grant = grants.setdefault(block["name"], {"queries": []})
+            queries = grant.setdefault("queries", [])
             for entry in block["missing"]:
                 if (
                     not is_transaction_control(entry["sql"])
@@ -920,9 +926,9 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
                 ):
                     queries.append(entry["sql"])
             if block["transaction_control"]["needed"]:
-                route[block["name"]]["transaction_control"] = True
+                grant["transactions"] = True
         if reported["egress"]["needed"]:
-            route["egress"] = True
+            view["egress"] = True
 
     setup = [
         entry["sql"]
@@ -930,107 +936,144 @@ def repaired_manifest(source: str, outcome: Outcome) -> str:
         if entry["ungranted_in"] and may_be_granted(entry["sql"])
     ]
     if setup:
-        groups = document.setdefault("groups", [])
-        if "connection" not in groups:
-            groups.append("connection")
-        grant = (
-            document.setdefault("group", {})
-            .setdefault("connection", {})
-            .setdefault("db", {})
-        )
-        queries = grant.setdefault("queries", [])
+        connection = model.setdefault("traits", {}).setdefault("connection", {})
+        queries = connection.setdefault("db", {"queries": []}).setdefault("queries", [])
         queries.extend(sql for sql in setup if sql not in queries)
+        for view in model["views"]:
+            uses = view.setdefault("use", [])
+            if "connection" not in uses:
+                uses.append("connection")
 
     for entry in outcome.report["unrouted"]:
-        document.setdefault("route", []).append(
-            {"name": "fallback", "path": [entry["path_info"]], "db": {"queries": []}}
+        model["views"].append(
+            {
+                "name": "fallback",
+                "methods": None,
+                "patterns": [entry["path_info"]],
+                "use": [],
+                "egress": False,
+                "grants": {},
+            }
         )
-    return dumps_manifest(document)
+    return dumps_blastfile(model)
 
 
-def dumps_manifest(document: dict[str, Any]) -> str:
-    """Writes the small subset of `blastit.toml` the tiny project uses.
+def dumps_blastfile(model: dict[str, Any]) -> str:
+    """Writes a `Blastfile` from the model the one reader lowers.
 
-    `version`, top-level `groups`, `[proxy.*]` with an inline `input`,
-    `[group.*.<proxy>]`, and `[[route]]` with an inline `[route.<proxy>]` grant —
-    so a test can apply a report to a manifest the way a human would, without a
-    TOML writer in the plugin's own dependencies.
+    Stores, traits and views — the tiny project's whole document. Patterns are
+    written `regex '…'` because the model carries the lowered fragment, and a
+    view's `HEAD` is dropped because `GET` implies it. This is a test helper that
+    applies a report the way a human would; the plugin itself never writes a
+    `Blastfile`.
     """
-    lines = [f"version = {document['version']}"]
-    if document.get("groups"):
-        lines.append(f"groups = {_toml(document['groups'])}")
-    for name, proxy in document.get("proxy", {}).items():
-        inputs = ", ".join(
-            f"{key} = {_toml(value)}" for key, value in proxy.get("input", {}).items()
-        )
-        lines += [
-            "",
-            f"[proxy.{name}]",
-            f"protocol = {_toml(proxy['protocol'])}",
-            f"input = {{ {inputs} }}",
-        ]
-    for name, group in document.get("group", {}).items():
-        for proxy_name, grant in group.items():
-            lines += ["", f"[group.{name}.{proxy_name}]"]
-            if grant.get("transaction_control"):
-                lines.append("transaction_control = true")
-            lines.append(f"queries = {_toml(grant.get('queries', []))}")
-    for route in document.get("route", []):
-        lines += [
-            "",
-            "[[route]]",
-            f"name = {_toml(route['name'])}",
-            f"path = {_toml(route['path'])}",
-        ]
-        for field in ("methods", "groups"):
-            if field in route:
-                lines.append(f"{field} = {_toml(route[field])}")
-        for field in ("egress", "prefork"):
-            if route.get(field):
-                lines.append(f"{field} = true")
-        for name, grant in route.items():
-            if not isinstance(grant, dict):
-                continue
-            lines.append("")
-            lines.append(f"[route.{name}]")
-            if grant.get("transaction_control"):
-                lines.append("transaction_control = true")
-            lines.append(f"queries = {_toml(grant.get('queries', []))}")
+    lines: list[str] = []
+    for store in model.get("stores") or []:
+        lines.extend(_store_lines(store))
+    for name, grants in (model.get("traits") or {}).items():
+        lines += ["", f"trait {name} {{"]
+        for store, grant in grants.items():
+            lines.extend(_grant_lines(store, grant, "    "))
+        lines.append("}")
+    for view in model.get("views") or []:
+        lines += ["", _view_header(view)]
+        if view.get("egress"):
+            lines.append("    egress any")
+        if view.get("use"):
+            lines.append("    use " + ", ".join(str(name) for name in view["use"]))
+        for store, grant in (view.get("grants") or {}).items():
+            lines.extend(_grant_lines(store, grant, "    "))
+        lines.append("}")
     return "\n".join(lines) + "\n"
 
 
-def _toml(value: Any) -> str:
-    """One TOML value: what the manifest writer above needs, and nothing more."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, str):
-        return json.dumps(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_toml(item) for item in value) + "]"
-    raise TypeError(f"the manifest writer cannot write {value!r}")
+def _store_lines(store: dict[str, Any]) -> list[str]:
+    """One `postgres` declaration: the one-variable form, or its split slots."""
+    name = str(store["name"])
+    prefix = "postgres" if name == "db" else f"postgres {name}"
+    inputs = store.get("inputs") or {}
+    if list(inputs) == ["url"]:
+        return [f"{prefix} ${inputs['url']}"]
+    lines = [f"{prefix} {{"]
+    for slot in sorted(inputs):
+        lines.append(f"    {slot} ${inputs[slot]}")
+    lines.append("}")
+    return lines
+
+
+def _view_header(view: dict[str, Any]) -> str:
+    """One `view <name> [METHODS] <pattern>[, …] {` line."""
+    header = f"view {view['name']}"
+    methods = [str(method) for method in view.get("methods") or [] if method != "HEAD"]
+    if methods:
+        header += " " + ", ".join(methods)
+    patterns = ", ".join(f"regex '{pattern}'" for pattern in view.get("patterns") or [])
+    return f"{header} {patterns} {{"
+
+
+def _grant_lines(store: str, grant: dict[str, Any], indent: str) -> list[str]:
+    """One `postgres [store] { … }` block, with its directives."""
+    head = "postgres" if store == "db" else f"postgres {store}"
+    lines = [f"{indent}{head} {{"]
+    inner = indent + "    "
+    if grant.get("transactions"):
+        lines.append(f"{inner}transactions")
+    functions = grant.get("functions") or []
+    if functions:
+        lines.append(f"{inner}functions {', '.join(str(name) for name in functions)}")
+    for directive in _table_directives(grant.get("tables") or {}):
+        lines.append(f"{inner}{directive}")
+    for query in grant.get("queries") or []:
+        lines.append(f"{inner}query {_blastfile_string(str(query))}")
+    lines.append(f"{indent}}}")
+    return lines
+
+
+def _table_directives(tables: dict[str, Any]) -> list[str]:
+    """`select`/`insert`/`update`/`delete` lines for a table scope (§13.1)."""
+    directives: list[str] = []
+    for table in sorted(tables):
+        grant = tables[table]
+        if not isinstance(grant, dict):
+            continue
+        for operation in ("select", "insert", "update"):
+            value = grant.get(operation)
+            if value is None:
+                continue
+            if value == "*":
+                directives.append(f"{operation} {table}")
+            else:
+                columns = ", ".join(str(column) for column in value)
+                directives.append(f"{operation} {table}({columns})")
+        if grant.get("delete"):
+            directives.append(f"delete {table}")
+    return directives
+
+
+def _blastfile_string(value: str) -> str:
+    """A `Blastfile` string: raw when it holds no `'`, escaped otherwise."""
+    if "'" not in value:
+        return f"'{value}'"
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
 
 
 def two_proxy_manifest() -> str:
-    """A manifest with two `postgresql` proxies: only the tests can say which is which."""
+    """A `Blastfile` with two `postgres` stores: only the tests can say which is which."""
     return (
-        "version = 1\n"
+        "postgres $DATABASE_URL\n"
+        "postgres warehouse $WAREHOUSE_URL\n"
         "\n"
-        "[proxy.db]\n"
-        'protocol = "postgresql"\n'
-        'input = { url = "DATABASE_URL" }\n'
-        "\n"
-        "[proxy.warehouse]\n"
-        'protocol = "postgresql"\n'
-        'input = { url = "WAREHOUSE_URL" }\n'
-        "\n"
-        "[[route]]\n"
-        'name = "notes"\n'
-        "path = ['/notes/']\n"
-        'methods = ["GET"]\n'
-        "[route.warehouse]\n"
-        "queries = ['SELECT 1']\n"
+        'view notes GET "/notes/" {\n'
+        "    postgres warehouse {\n"
+        "        query 'SELECT 1'\n"
+        "    }\n"
+        "}\n"
     )
 
 
@@ -1110,14 +1153,15 @@ def test_prefer_tables_prints_the_snippet(project: Path, tmp_path: Path) -> None
     outcome = run(
         copy_project(project, tmp_path),
         "--blastit-manifest",
-        "blastit.toml",
+        "Blastfile",
         "--blastit-prefer-tables",
         "-q",
     )
-    assert "[route.db.tables]" in outcome.stdout, outcome.stdout
-    assert 'notes_note = { select = ["id"], delete = true }' in outcome.stdout, (
+    assert "a table scope covering every statement it ran:" in outcome.stdout, (
         outcome.stdout
     )
+    assert "select notes_note(id)\ndelete notes_note" in outcome.stdout, outcome.stdout
+    assert "[route." not in outcome.stdout, "no retired TOML snippet is printed"
     # The statements are still named: the snippet is the other way to fix them.
     assert "statement(s) missing" in outcome.stdout
 
@@ -1134,27 +1178,22 @@ def test_the_option_without_a_manifest_is_a_usage_error(
 def test_a_table_grant_in_the_manifest_covers_the_route(
     project: Path, tmp_path: Path
 ) -> None:
-    """A manifest written as table grants passes the same audit (D7)."""
+    """A Blastfile written as a table scope passes the same audit (D7)."""
     copy = copy_project(project, tmp_path)
-    (copy / "tables.toml").write_text(
-        "version = 1\n"
+    (copy / "Blastfile-tables").write_text(
+        "postgres $DATABASE_URL\n"
         "\n"
-        "[proxy.db]\n"
-        'protocol = "postgresql"\n'
-        'input = { url = "DATABASE_URL" }\n'
-        "\n"
-        "[[route]]\n"
-        'name = "notes"\n'
-        "path = ['/notes/']\n"
-        'methods = ["GET"]\n'
-        "[route.db.tables]\n"
-        'notes_note = { select = ["id", "owner_id"] }\n',
+        'view notes GET "/notes/" {\n'
+        "    postgres {\n"
+        "        select notes_note(id, owner_id)\n"
+        "    }\n"
+        "}\n",
         encoding="utf-8",
     )
     outcome = run(
         copy,
         "--blastit-manifest",
-        "tables.toml",
+        "Blastfile-tables",
         "-k",
         "test_list_notes",
     )

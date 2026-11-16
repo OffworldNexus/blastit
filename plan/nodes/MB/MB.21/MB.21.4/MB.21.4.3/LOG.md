@@ -79,3 +79,7 @@ reviewer PASS (round 2); lead gate: validate OK, guard OK, make check exit 0 wit
 ## 2026-11-16T13:23 [lead]
 
 status review -> done
+
+## 2026-11-16T13:23 [lead]
+
+commit fa6dc39

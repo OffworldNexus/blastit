@@ -133,7 +133,7 @@ def note_egress(request):
     """`GET /notes/cache/`: opens a TCP connection, as a cache client does.
 
     Nothing listens on the discard port, so the attempt fails — which is still
-    an attempt, and `egress = true` is exactly about being allowed to make one.
+    an attempt, and `egress any` is exactly about being allowed to make one.
     """
     try:
         with socket.create_connection(("127.0.0.1", 9), timeout=0.05):

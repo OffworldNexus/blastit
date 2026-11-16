@@ -52,7 +52,7 @@ Django cursor of that request sees); and, most importantly, with
 ``autocommit = False`` **psycopg sends the ``BEGIN`` and the ``COMMIT``** through
 ``Connection._exec_command``, so a request that runs an ``atomic()`` — Django's
 ``ATOMIC_REQUESTS``, or a handler that wraps its work in one — would otherwise
-look like it never needed ``transaction_control``.
+look like it never needed ``transactions``.
 
 So the plugin also wraps ``psycopg.Cursor.execute``/``executemany``/``stream``/
 ``copy``, ``Connection.execute``/``copy``, ``ServerCursor.execute`` (whose
@@ -68,23 +68,24 @@ Under blastit every request opens its own connection (``CONN_MAX_AGE = 0``,
 a test suite the connection is reused and they run once, usually outside any
 request at all. The plugin records what runs while
 ``DatabaseWrapper.connect()`` is in progress as a separate ``connection_setup``
-set, and the report does not diff it against one route: it lists the routes that
-do **not** grant it, and the fix is a group attached to every route
-(``groups = ["connection"]`` at the top level, §6).
+set, and the report does not diff it against one view: it lists the views that
+do **not** grant it, and the fix is a trait attached to every view (``trait
+connection { postgres { query "…" } }``, then ``use connection`` in every view,
+§6).
 
 Egress
 ------
 
-A route that opens outbound connections needs ``egress = true`` (§7.3); without
-it the seccomp filter refuses them. The plugin wraps ``socket.socket.connect``
+A view that opens outbound connections needs ``egress any`` (§7.3); without it
+the seccomp filter refuses them. The plugin wraps ``socket.socket.connect``
 (and ``connect_ex``, which ``socket.create_connection`` goes through), so every
-outbound connection a request tries is reported per route, with the destination,
+outbound connection a request tries is reported per view, with the destination,
 how often, and an example test. A unix socket is not egress: under blastit the
 database itself is one.
 
 Mocked HTTP clients — pytest-httpx, responses, a stub transport — never open a
-socket, so the list is a **lower bound**: a route the report says nothing about
-may still need ``egress = true`` in production.
+socket, so the list is a **lower bound**: a view the report says nothing about
+may still need ``egress any`` in production.
 
 A live server, served by blastit itself
 --------------------------------------
@@ -157,10 +158,15 @@ A log also says nothing about the statements that *ran*: it records the requests
 that were served and the statements that were denied, never an allowed one. So a
 route whose only evidence is the log — the common case for a suite whose traffic
 all goes through the live server — reports its `missing` grants and no `unused`
-ones, and `unused_global` stays empty for the proxies such a route has a grant
-on: the report never calls a grant dead when nothing observed whether it was
+ones: the report never calls a grant dead when nothing observed whether it was
 used. The suite's own requests, the ones this process served, are evidence like
 any other.
+
+``unused_global`` is always ``{"statements": [], "tables": [], "count": 0}`` in
+0.2.0: a `Blastfile` has no global groups (§7.1), so a grant every view gets is
+that view's own `use` and is reported in its `unused` list. The key stays in the
+document for `--json` consumers; removing it from the report is `MB.21.4.5`'s
+Rust sweep (and `MB.21.5.1`'s page), not this plugin's.
 
 Options
 -------
@@ -177,16 +183,16 @@ Options
     the working directory (like pytest's own ``--junitxml``).
 
 ``--blastit-proxy ALIAS=PROXY``
-    Maps a Django database alias to a manifest proxy. Needed when the manifest
-    declares more than one ``postgresql`` proxy; with exactly one, every alias
-    is that one and the option is not needed.
+    Maps a Django database alias to a ``Blastfile`` store. Needed when the file
+    declares more than one ``postgres`` store; with exactly one, every alias is
+    that one and the option is not needed.
 
 ``--blastit-strict``
     Fails the session (non-zero exit code) when anything is missing, unrouted, a
-    route needs ``transaction_control`` it was not granted, a route opens
-    connections without ``egress = true``, a connection-setup statement is not
-    granted in every route, a statement could not be read, or the plugin itself
-    had to warn about something.
+    view needs ``transactions`` it was not granted, a view opens connections
+    without ``egress any``, a connection-setup statement is not granted in every
+    view, a statement could not be read, or the plugin itself had to warn about
+    something.
 
 ``--blastit-prefer-tables``
     Print the ``table_grants`` snippet of a route with missing statements, so the
@@ -251,17 +257,12 @@ are::
                                   "tables": {"orders_order": {"select": ["id"],
                                                               "delete": true}},
                                   "functions": ["unaccent"],
-                                  "toml": "[route.db.tables]\\n…",
                                   "unanalysable": [{"sql": ...,
                                                     "reason": ...}]}}]}],
      "unrouted": [{"method": ..., "path_info": ..., "count": N,
                    "statements": N, "tests": [...]}],
      "unexercised_routes": [...],
-     "unused_global": {"statements": [{"proxy": ..., "sql": ...,
-                                       "groups": [...]}],
-                       "tables": [{"proxy": ..., "group": ...,
-                                   "tables": {...}, "functions": [...]}],
-                       "count": N},
+     "unused_global": {"statements": [], "tables": [], "count": 0},
      "connection_setup": {"statements": [{"sql": ..., "proxy": ..., "count": N,
                                           "wire_sql": ...,
                                           "ungranted_in": [...],
@@ -278,15 +279,18 @@ are::
                 "plugin_warnings": N, "clean": bool}}
 
 ``missing[].sql`` is the *normalised* text: it is what a grant has to contain,
-so it can be pasted into the manifest as it is. ``wire_sql`` is one raw
+so it can be pasted into the ``Blastfile`` as it is. ``wire_sql`` is one raw
 occurrence, for a human who wants to see the placeholders as they were sent.
 
-``table_grants`` is the other way to fix a route (D7): the smallest
-``[route.<proxy>.tables]`` grant that covers every statement the route ran,
-with the TOML to paste in. It is reported per ``(route, proxy)`` pair, because
-that is what a grant is, and it is computed from **every** statement the pair
-ran — the ones that matched a grant included — so a route can be rewritten from
-exact queries to table grants in one step. A statement a table grant cannot
+``table_grants`` is the other way to fix a view (D7): the smallest
+``select``/``insert``/``update``/``delete`` scope that covers every statement the
+view ran, as ``tables`` — the directives ``--blastit-prefer-tables`` prints. It
+is reported per ``(view, store)`` pair, because that is what a grant is, and it
+is computed from **every** statement the pair ran — the ones that matched a
+grant included — so a view can be rewritten from exact queries to a table scope
+in one step. The ``toml`` key beside ``tables`` is the retired snippet, kept
+until `MB.21.4.5` re-points `TableGrants::to_toml`; nothing here reads it. A
+statement a table grant cannot
 describe at all (a ``SET``, a ``COPY``, a statement this build does not
 understand) is listed in ``unanalysable``, with the same reason a ``sql.denied``
 event carries: the covering grant is then not a complete replacement for the
@@ -327,7 +331,7 @@ _OBSERVATIONS_VERSION = 1
 
 #: Django's alias for the connection it opens *without* a database, to create the
 #: test database (`django.db.backends.base.base.NO_DB_ALIAS`). What it runs is
-#: test machinery, never request traffic, and it names no manifest proxy.
+#: test machinery, never request traffic, and it names no Blastfile store.
 NO_DB_ALIAS = "__no_db__"
 
 #: Where the JSON report goes when `--blastit-report` is not given.
@@ -518,11 +522,11 @@ class _Session:
         self.reported_bindings: set[str] = set()
 
     def proxy_for(self, alias: str) -> str | None:
-        """The manifest proxy a Django database alias talks to.
+        """The Blastfile store a Django database alias talks to.
 
-        `--blastit-proxy` wins; with exactly one `postgresql` proxy in the
-        manifest, every alias is that one. Anything else is a request to say
-        which proxy an alias uses, and is reported at the end of the session.
+        `--blastit-proxy` wins; with exactly one `postgres` store in the file,
+        every alias is that one. Anything else is a request to say which store
+        an alias uses, and is reported at the end of the session.
         """
         if alias in self.proxies:
             return self.proxies[alias]
@@ -715,49 +719,59 @@ def _proxy_options(values: list[str]) -> dict[str, str]:
     return mapping
 
 
-def _postgresql_proxies(manifest: str) -> list[str]:
-    """The names of the `postgresql` proxies a manifest declares."""
-    import tomllib
+def _blastfile_model(source: str) -> dict[str, Any]:
+    """The `Blastfile`'s stores, traits and views, from the compiled extension.
+
+    §15.2 gives the tree one reader, and it is Rust's: the plugin never parses a
+    `Blastfile` itself. `blastit._blastit.blastfile_model` hands over the lowered
+    document, which is what the proxy mapping and the live server need.
+    """
+    from blastit import _blastit
 
     try:
-        document = tomllib.loads(manifest)
-    except tomllib.TOMLDecodeError as error:
+        return json.loads(_blastit.blastfile_model(source))
+    except ValueError as error:
         raise pytest.UsageError(
-            f"blastit: the manifest is not valid TOML: {error}"
+            f"blastit: the Blastfile does not parse: {error}"
         ) from error
-    proxies = document.get("proxy")
-    if not isinstance(proxies, dict):
-        return []
+
+
+def _postgresql_proxies(manifest: str) -> list[str]:
+    """The names of the `postgres` stores a Blastfile declares.
+
+    The unnamed store is `db` (§7.4), which is the name a grant and a log use.
+    """
+    model = _blastfile_model(manifest)
     return [
-        str(name)
-        for name, declaration in proxies.items()
-        if isinstance(declaration, dict) and declaration.get("protocol") == "postgresql"
+        str(store["name"])
+        for store in model.get("stores") or []
+        if isinstance(store, dict) and store.get("protocol") == "postgresql"
     ]
 
 
 def _check_proxy_mapping(session: _Session) -> None:
     """Refuses a mapping that cannot be resolved, before any test runs.
 
-    Raises `pytest.UsageError` when the manifest declares several `postgresql`
-    proxies and `--blastit-proxy` was not used at all, or when one of the names
+    Raises `pytest.UsageError` when the `Blastfile` declares several `postgres`
+    stores and `--blastit-proxy` was not used at all, or when one of the names
     it maps to does not exist.
     """
     if not session.declared:
         raise pytest.UsageError(
-            "blastit: the manifest declares no postgresql proxy, so no observed "
+            "blastit: the Blastfile declares no postgres store, so no observed "
             "statement could be checked against a grant"
         )
     for alias, proxy in session.proxies.items():
         if proxy not in session.declared:
             raise pytest.UsageError(
                 f"blastit: --blastit-proxy maps {alias!r} to {proxy!r}, which is not "
-                f"a postgresql proxy of the manifest (it declares: "
+                f"a postgres store of the Blastfile (it declares: "
                 f"{', '.join(session.declared)})"
             )
     if len(session.declared) > 1 and not session.proxies:
         raise pytest.UsageError(
-            "blastit: the manifest declares "
-            f"{len(session.declared)} postgresql proxies "
+            "blastit: the Blastfile declares "
+            f"{len(session.declared)} postgres stores "
             f"({', '.join(session.declared)}); pass --blastit-proxy alias=proxy for "
             "each database alias the tests use"
         )
@@ -1281,7 +1295,7 @@ def _capture_command(alias: str | None, sql: Any, params: Any, connection: Any) 
 
 
 #: A transaction-control command, as §5.2 spells them out — the same list the
-#: policy accepts with `transaction_control = true`.
+#: policy accepts when `transactions` is on.
 _TRANSACTION_COMMAND = re.compile(
     r"^\s*(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b",
     re.IGNORECASE,
@@ -1326,7 +1340,7 @@ def _patch_transactions() -> None:
 
 
 def _patch_sockets() -> None:
-    """Records outbound connection attempts, which `egress = true` is about (§7.3).
+    """Records outbound connection attempts, which `egress any` is about (§7.3).
 
     `socket.socket.connect` is the one place every TCP client ends up —
     `socket.create_connection`, and therefore requests, httpx, redis and friends,
@@ -1772,28 +1786,23 @@ def _open_up(root: Path) -> None:
 
 
 def _postgresql_url_variable(manifest: Path) -> str | None:
-    """The variable a `postgresql` proxy reads its URL from, or `None`.
+    """The variable a `postgres` store reads its URL from, or `None`.
 
-    `input = { url = "DATABASE_URL" }` is the usual declaration (§5.1). A proxy
-    that takes its upstream in pieces (`host`, `port`, `user`, `password`,
-    `database`) is not something this fixture can fill in from one URL, and the
-    caller says so.
+    `postgres $DATABASE_URL` is the usual declaration (§5.1). A store that takes
+    its upstream in pieces (`host`, `port`, `user`, `password`, `database`) is
+    not something this fixture can fill in from one URL, and the caller says so.
+    Only `postgres` exists in 0.2.0, so the first store's `url` slot is the one.
     """
-    import tomllib
-
-    document = tomllib.loads(manifest.read_text(encoding="utf-8"))
-    proxies = document.get("proxy")
-    if not isinstance(proxies, dict):
-        return None
-    for declaration in proxies.values():
-        if not isinstance(declaration, dict):
+    try:
+        source = manifest.read_text(encoding="utf-8")
+    except OSError as error:
+        raise pytest.UsageError(f"blastit: {manifest}: {error}") from error
+    model = _blastfile_model(source)
+    for store in model.get("stores") or []:
+        if not isinstance(store, dict) or store.get("protocol") != "postgresql":
             continue
-        if declaration.get("protocol") != "postgresql":
-            continue
-        inputs = declaration.get("input")
-        if isinstance(inputs, dict) and isinstance(inputs.get("url"), str):
-            return str(inputs["url"])
-        return None
+        url = store.get("url")
+        return str(url) if isinstance(url, str) else None
     return None
 
 
@@ -1822,8 +1831,8 @@ def _start_live_server(
     variable = _postgresql_url_variable(manifest)
     if variable is None and _postgresql_proxies(manifest.read_text(encoding="utf-8")):
         pytest.skip(
-            "blastit: a live server needs the manifest's postgresql proxy to take its "
-            'URL from one variable (`input = { url = "DATABASE_URL" }`, §5.1) to be '
+            "blastit: a live server needs the Blastfile's postgres store to take its "
+            "URL from one variable (`postgres $DATABASE_URL`, §5.1) to be "
             "pointed at the test database"
         )
     environment_path = log_path.parent / "blastit-live.env"
@@ -2104,8 +2113,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="ALIAS=PROXY",
         action="append",
         default=[],
-        help="map a Django database alias to a manifest proxy (repeatable; only "
-        "needed when the manifest declares several postgresql proxies)",
+        help="map a Django database alias to a Blastfile store (repeatable; only "
+        "needed when the Blastfile declares several postgres stores)",
     )
     group.addoption(
         "--blastit-strict",
@@ -2117,7 +2126,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--blastit-prefer-tables",
         action="store_true",
         default=False,
-        help="print the table-grant snippet of a route with missing statements, "
+        help="print the table-grant snippet of a view with missing statements, "
         "instead of only naming the statements (D7)",
     )
     group.addoption(
@@ -2125,7 +2134,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         default=False,
         help="serve pytest-django's live_server through blastit itself, so real "
-        "front-end traffic is checked against the manifest (D3c; needs root or "
+        "front-end traffic is checked against the Blastfile (D3c; needs root or "
         "passwordless sudo)",
     )
     group.addoption(
@@ -2357,7 +2366,7 @@ def _finish(session: pytest.Session, state: _Session) -> None:
                     f"{totals['unrouted']} unrouted request(s), "
                     f"{totals['connection_setup_ungranted']} connection-setup "
                     f"statement(s) not granted in every route, "
-                    f"{totals['egress']} route(s) opening connections without egress = true, "
+                    f"{totals['egress']} route(s) opening connections without egress any, "
                     f"{totals['unrecognised']} unreadable statement(s) and "
                     f"{totals['plugin_warnings']} warning(s)"
                 ),
@@ -2368,6 +2377,39 @@ def _finish(session: pytest.Session, state: _Session) -> None:
     _print_lines(session.config, lines)
     if report is None or state.problems or strict_failure:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def _table_snippet(table_grants: dict[str, Any]) -> str:
+    """The directives a report's table scope needs, one per line (§13.1).
+
+    The report carries the scope as JSON — `TableGrant`'s spelling, `"*"` or a
+    list of columns plus a `delete` flag — and this renders the `select
+    <table>(…)` / `insert` / `update` / `delete` lines, and `functions …` when
+    the route calls one beyond the safe set, so a developer pastes them inside
+    the view's `postgres [store] { }` block. Nothing here is written: the
+    snippet is a hint, never a second editor.
+    """
+    directives: list[str] = []
+    functions = table_grants.get("functions") or []
+    if functions:
+        directives.append(f"functions {', '.join(str(name) for name in functions)}")
+    tables = table_grants.get("tables") or {}
+    for table in sorted(tables):
+        grant = tables[table]
+        if not isinstance(grant, dict):
+            continue
+        for operation in ("select", "insert", "update"):
+            value = grant.get(operation)
+            if value is None:
+                continue
+            if value == "*":
+                directives.append(f"{operation} {table}")
+            else:
+                columns = ", ".join(str(column) for column in value)
+                directives.append(f"{operation} {table}({columns})")
+        if grant.get("delete"):
+            directives.append(f"delete {table}")
+    return "\n".join(directives)
 
 
 def _summary(
@@ -2411,13 +2453,13 @@ def _summary(
             )
             if prefer_tables:
                 for proxy in route["proxies"]:
-                    snippet = proxy.get("table_grants", {}).get("toml", "")
+                    snippet = _table_snippet(proxy.get("table_grants") or {})
                     if proxy["missing"] and snippet:
                         lines.append(
                             (
                                 (
-                                    f"blastit: route {route['name']} (proxy "
-                                    f"{proxy['name']}): a table grant covering every "
+                                    f"blastit: route {route['name']} (store "
+                                    f"{proxy['name']}): a table scope covering every "
                                     f"statement it ran:\n{snippet}"
                                 ),
                                 True,
@@ -2426,7 +2468,10 @@ def _summary(
         if route["needs_transaction_control"]:
             lines.append(
                 (
-                    f"blastit: route {route['name']}: needs transaction_control = true",
+                    (
+                        f"blastit: route {route['name']}: needs transactions "
+                        "(add `transactions` to its postgres block)"
+                    ),
                     True,
                 )
             )
@@ -2434,16 +2479,6 @@ def _summary(
             lines.append(
                 (f"blastit: route {route['name']}: {unused} grant(s) unused", False)
             )
-    if totals.get("unused_global"):
-        lines.append(
-            (
-                (
-                    f"blastit: {totals['unused_global']} grant(s) of a global group nothing "
-                    f"matched (see {path})"
-                ),
-                False,
-            )
-        )
     if totals["unrouted"]:
         examples = ", ".join(
             f"{entry['method']} {entry['path_info']}"
@@ -2474,8 +2509,9 @@ def _summary(
             (
                 (
                     f"blastit: {setup['ungranted']} connection-setup statement(s) some "
-                    "routes do not grant: put them in a group attached to every route "
-                    f"(see {path})"
+                    "routes do not grant: put them in a trait attached to every view "
+                    "(`trait connection { postgres { … } }`, then `use connection`), "
+                    f"see {path}"
                 ),
                 True,
             )
@@ -2488,7 +2524,7 @@ def _summary(
                 (
                     (
                         f"blastit: route {route['name']} opens outbound connections "
-                        f"({targets}) but has no egress = true"
+                        f"({targets}) but has no egress any"
                     ),
                     True,
                 )

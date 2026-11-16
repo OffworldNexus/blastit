@@ -1,7 +1,7 @@
 """Protected critical tier: `fold` refuses inlined values and writes atomically.
 
-`blastit-manifest fold` turns `sql.denied` lines into manifest grants (D3c). Two
-properties of that are security boundaries and are pinned here (R25, R29):
+`blastit-manifest fold` turns `sql.denied` lines into `Blastfile` grants (D3c).
+Two properties of that are security boundaries and are pinned here (R25, R29):
 
 * a statement that still holds a value — an inline quoted literal, or the `…`
   dbproxy redacts an inlined value to — is **refused**. A grant is committed,
@@ -10,13 +10,13 @@ properties of that are security boundaries and are pinned here (R25, R29):
   refusal is not reachable with `--allow-dangerous`: that flag grants
   dangerous *kinds*, never a leaked value.
 * `--write` goes through `.{name}.{pid}.tmp` + `fsync` + `os.replace`, and an
-  error leaves neither a half-written manifest nor a stray `.tmp` next to it.
+  error leaves neither a half-written `Blastfile` nor a stray `.tmp` next to it.
 
 The allowed path is tested too: a parameterised statement is written, the
-result parses, and the command exits `0` even when other statements in the same
-log were refused (an unreadable input is the only `1`). The standard suite
-(`python/tests/test_fold.py`) covers the planning in depth; this file is the
-wall.
+result parses through the one reader, and the command exits `0` even when other
+statements in the same log were refused (an unreadable input is the only `1`).
+The standard suite (`python/tests/test_fold.py`) covers the planning in depth;
+this file is the wall.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ import json
 import os
 import stat
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 from typing import Any
@@ -36,17 +35,13 @@ from unittest import mock
 from blastit import fold
 
 MANIFEST = """\
-version = 1
+postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
-
-[[route]]
-name = "notes"
-path = ['/notes/']
-[route.db]
-queries = ["SELECT 1"]
+view notes "/notes/" {
+    postgres {
+        query 'SELECT 1'
+    }
+}
 """
 
 
@@ -63,14 +58,14 @@ def describe_nothing(_sql: str) -> str:
 
 
 def denial(sql: str) -> fold._Denial:
-    """One `sql.denied` line's worth of a denial on the manifest's route."""
+    """One `sql.denied` line's worth of a denial on the file's view."""
     return fold._Denial(route="notes", proxy="db", sql=sql, reason="not granted")
 
 
 def planned(sql: str, *, allow_dangerous: bool = False) -> fold._Addition:
     """Plan one denial against [`MANIFEST`], with the parser and walk stubbed."""
     return fold.plan(
-        tomllib.loads(MANIFEST),
+        fold.model(MANIFEST),
         [denial(sql)],
         prefer_tables=False,
         allow_dangerous=allow_dangerous,
@@ -79,8 +74,14 @@ def planned(sql: str, *, allow_dangerous: bool = False) -> fold._Addition:
     )[0]
 
 
+def queries_of(source: str) -> list[str]:
+    """The `db` grant's queries in a `Blastfile`, through the one reader."""
+    model = fold.model(source)
+    return list(model["views"][0]["grants"]["db"]["queries"])
+
+
 class TestLiteralRefusal(unittest.TestCase):
-    """A value in the statement is never written to the manifest (R25)."""
+    """A value in the statement is never written to the file (R25)."""
 
     def test_a_quoted_literal_is_refused(self) -> None:
         addition = planned("SELECT id FROM notes WHERE body = 'secret'")
@@ -200,7 +201,7 @@ class TestLiteralRefusal(unittest.TestCase):
 
         for dangerous in (False, True):
             addition = fold.plan(
-                tomllib.loads(MANIFEST),
+                fold.model(MANIFEST),
                 [denial("SELECT 'hunter2")],
                 prefer_tables=False,
                 allow_dangerous=dangerous,
@@ -213,7 +214,7 @@ class TestLiteralRefusal(unittest.TestCase):
 
     def test_a_multi_statement_text_is_refused(self) -> None:
         addition = fold.plan(
-            tomllib.loads(MANIFEST),
+            fold.model(MANIFEST),
             [denial("SELECT 1; DELETE FROM notes")],
             prefer_tables=False,
             classify=lambda _sql: json.dumps(
@@ -235,7 +236,7 @@ class TestLiteralRefusal(unittest.TestCase):
     def test_an_unsafe_function_is_refused_without_the_flag(self) -> None:
         sql = "SELECT unaccent($1), st_distance($1, $2)"
         addition = fold.plan(
-            tomllib.loads(MANIFEST),
+            fold.model(MANIFEST),
             [denial(sql)],
             prefer_tables=False,
             classify=classify_plain,
@@ -256,7 +257,7 @@ class TestFoldCli(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.manifest = self.root / "blastit.toml"
+        self.manifest = self.root / "Blastfile"
         self.manifest.write_text(MANIFEST, encoding="utf-8")
         self.log = self.root / "app.log"
 
@@ -290,11 +291,11 @@ class TestFoldCli(unittest.TestCase):
         code, _, err = self.run_fold(str(self.log), "--write")
         self.assertEqual(code, 0, err)
         written = self.manifest.read_text(encoding="utf-8")
-        self.assertIn('"SELECT id FROM notes WHERE id = $?"', written)
-        parsed = tomllib.loads(written)
+        self.assertIn("query 'SELECT id FROM notes WHERE id = $?'", written)
         self.assertEqual(
-            parsed["route"][0]["db"]["queries"],
+            queries_of(written),
             ["SELECT 1", "SELECT id FROM notes WHERE id = $?"],
+            "the edited file parses through the one reader",
         )
         self.assertEqual(list(self.root.glob("*.tmp")), [], "no temp file survives")
         self.assertEqual(
@@ -328,9 +329,7 @@ class TestFoldCli(unittest.TestCase):
         )
         code, out, err = self.run_fold(str(self.log))
         self.assertEqual(code, 0, err)
-        self.assertEqual(
-            out, "", "no TOML diff is emitted when every denial is refused"
-        )
+        self.assertEqual(out, "", "no grant is emitted when every denial is refused")
         self.assertNotIn("hunter2", err, "a value from a log never reaches stderr")
         self.assertNotIn("0041", err, "unicode escape payload never reaches stderr")
         self.assertNotIn("unreadable", err, "every statement parsed as SQL")
@@ -365,11 +364,10 @@ class TestFoldCli(unittest.TestCase):
         self.assertEqual(
             stat.S_IMODE(self.manifest.stat().st_mode),
             0o600,
-            "--write must never widen a restricted manifest's permissions",
+            "--write must never widen a restricted file's permissions",
         )
-        parsed = tomllib.loads(self.manifest.read_text(encoding="utf-8"))
         self.assertEqual(
-            parsed["route"][0]["db"]["queries"],
+            queries_of(self.manifest.read_text(encoding="utf-8")),
             ["SELECT 1", "SELECT id FROM notes WHERE id = $?"],
         )
 
@@ -386,7 +384,7 @@ class TestFoldCli(unittest.TestCase):
         self.manifest.unlink()
         code, _, err = self.run_fold(str(self.log), "--write")
         self.assertEqual(code, 1)
-        self.assertIn("blastit.toml", err)
+        self.assertIn("Blastfile", err)
 
     def test_a_failed_replace_leaves_the_manifest_and_no_temp_file(self) -> None:
         self.write_log("SELECT id FROM notes WHERE id = $?")
@@ -413,8 +411,8 @@ class TestTempFileName(unittest.TestCase):
 
     def test_the_write_goes_through_the_documented_sibling(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "blastit.toml"
-            path.write_text("version = 1\n", encoding="utf-8")
+            path = Path(directory) / "Blastfile"
+            path.write_text("postgres $DB\n", encoding="utf-8")
             seen: list[Any] = []
             real_replace = os.replace
 
@@ -423,46 +421,50 @@ class TestTempFileName(unittest.TestCase):
                 real_replace(source, target)
 
             with mock.patch.object(fold.os, "replace", side_effect=recording_replace):
-                fold._write_atomic(path, "version = 2\n")
+                fold._write_atomic(path, "postgres $DB\npostgres b $B\n")
             self.assertEqual(len(seen), 1)
             source, target = seen[0]
             self.assertEqual(target, path)
-            self.assertEqual(source.name, f".blastit.toml.{os.getpid()}.tmp")
+            self.assertEqual(source.name, f".Blastfile.{os.getpid()}.tmp")
             self.assertEqual(source.parent, path.parent)
             self.assertFalse(source.exists())
-            self.assertEqual(path.read_text(encoding="utf-8"), "version = 2\n")
+            self.assertEqual(
+                path.read_text(encoding="utf-8"), "postgres $DB\npostgres b $B\n"
+            )
 
     def test_a_planted_temp_symlink_is_never_written_through(self) -> None:
         """Anyone who can write the directory can predict the temp name (R29)."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            path = root / "blastit.toml"
-            path.write_text("version = 1\n", encoding="utf-8")
+            path = root / "Blastfile"
+            path.write_text("postgres $DB\n", encoding="utf-8")
             victim = root / "victim.txt"
             victim.write_text("the author's own file\n", encoding="utf-8")
-            planted = root / f".blastit.toml.{os.getpid()}.tmp"
+            planted = root / f".Blastfile.{os.getpid()}.tmp"
             planted.symlink_to(victim)
 
-            fold._write_atomic(path, "version = 2\n")
+            fold._write_atomic(path, "postgres $DB\npostgres b $B\n")
 
             self.assertEqual(
                 victim.read_text(encoding="utf-8"),
                 "the author's own file\n",
                 "a planted symlink is never written through",
             )
-            self.assertEqual(path.read_text(encoding="utf-8"), "version = 2\n")
+            self.assertEqual(
+                path.read_text(encoding="utf-8"), "postgres $DB\npostgres b $B\n"
+            )
             self.assertFalse(planted.exists(), "the temp file is gone, not a symlink")
             self.assertFalse(planted.is_symlink(), "the planted link was not followed")
             self.assertEqual(
                 sorted(entry.name for entry in root.iterdir()),
-                ["blastit.toml", "victim.txt"],
-                "no .tmp is left beside the manifest",
+                ["Blastfile", "victim.txt"],
+                "no .tmp is left beside the file",
             )
 
     def test_a_0600_manifest_keeps_its_mode_before_and_after_replace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "blastit.toml"
-            path.write_text("version = 1\n", encoding="utf-8")
+            path = Path(directory) / "Blastfile"
+            path.write_text("postgres $DB\n", encoding="utf-8")
             os.chmod(path, 0o600)
             temp_modes: list[int] = []
             real_replace = os.replace
@@ -472,14 +474,16 @@ class TestTempFileName(unittest.TestCase):
                 real_replace(source, target)
 
             with mock.patch.object(fold.os, "replace", side_effect=recording_replace):
-                fold._write_atomic(path, "version = 2\n")
+                fold._write_atomic(path, "postgres $DB\npostgres b $B\n")
             self.assertEqual(temp_modes, [0o600], "temp file is 0600 before replace")
             self.assertEqual(
                 stat.S_IMODE(path.stat().st_mode),
                 0o600,
-                "replaced manifest stays 0600",
+                "replaced file stays 0600",
             )
-            self.assertEqual(path.read_text(encoding="utf-8"), "version = 2\n")
+            self.assertEqual(
+                path.read_text(encoding="utf-8"), "postgres $DB\npostgres b $B\n"
+            )
 
 
 if __name__ == "__main__":

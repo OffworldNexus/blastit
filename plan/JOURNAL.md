@@ -2234,3 +2234,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T13:14 [MB.21.4.3] (lead) status ready -> review
 - 2026-11-16T13:23 [MB.21.4.3] (lead) reviewer PASS (round 2); lead gate: validate OK, guard OK, make check exit 0 with 166 suites. Five MINORs of round 2 handed to MB.21.4.5/5.1: edit.rs's stale do
 - 2026-11-16T13:23 [MB.21.4.3] (lead) status review -> done
+- 2026-11-16T13:23 [MB.21.4.3] (lead) commit fa6dc39
+- 2026-11-16T13:23 [MB.21.4.7] (lead) status ready -> active
+- 2026-11-16T13:23 [MB.21.4.7] (lead) attempt 1/5 started
+- 2026-11-16T13:23 [MB.21.4.7] (lead) base fa6dc39
+- 2026-11-16T13:50 [MB.21.4.7] (lead) status active -> review
+- 2026-11-16T13:58 [MB.21.4.7] (lead) REVIEW FAIL: [MAJOR] pytest_plugin.py's terminal hints still tell the developer to write retired TOML (groups, egress = true, transaction_control = true) — all 
+- 2026-11-16T13:58 [MB.21.4.7] (lead) status review -> ready
+- 2026-11-16T13:58 [MB.21.4.7] (lead) attempt 2/5 started
+- 2026-11-16T14:17 [MB.21.4.7] (lead) status ready -> review
+- 2026-11-16T14:22 [MB.21.4.7] (lead) REVIEW FAIL (round 2): [MAJOR] test_pytest_plugin.py:631 still asserts 'without egress = true' while _finish emits 'egress any' (DATABASE_URL-only module, so lo
+- 2026-11-16T14:22 [MB.21.4.7] (lead) status review -> ready
+- 2026-11-16T14:22 [MB.21.4.7] (lead) attempt 3/5 started
+- 2026-11-16T14:32 [MB.21.4.7] (lead) status ready -> review
+- 2026-11-16T14:43 [MB.21.4.7] (lead) reviewer PASS (round 3). Gate flake: dev_boots_five_unprivileged_roles_and_strips_secrets failed again in my first make check (POST /env 200 where the test read
+- 2026-11-16T14:43 [MB.21.4.7] (lead) status review -> done

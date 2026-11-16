@@ -2,16 +2,16 @@
 id: MB.21.4.7
 title: "Cut python/blastit over to Blastfile: fold and the pytest plugin through blastfile_apply_edits, _blastit.audit off the retired reader, and the four Python suites translated"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.3]
 paths: ["python/blastit/**", "python/tests/**", "crates/blastit-py/src/**", "crates/blastit-py/tests/**"]
-attempts: 0
+attempts: 3
 max_attempts: 5
 escalation: none
 created: "2026-11-16T12:54"
-updated: "2026-11-16T12:54"
+updated: "2026-11-16T14:43"
 ---
 
 # Goal

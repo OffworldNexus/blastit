@@ -819,8 +819,8 @@ def _materialise_test_transactions() -> None:
     Without flushing that outer `BEGIN` before `push_unrouted`, a read-only
     view's first `SELECT` would inherit the test harness's `BEGIN` as a routed
     transaction statement. Views that open their own `transaction.atomic()`
-    still emit `SAVEPOINT` inside the request and still require
-    `transaction_control = true`.
+    still emit `SAVEPOINT` inside the request and still require the view to
+    grant `transactions`.
     """
     try:
         from django.db import connections

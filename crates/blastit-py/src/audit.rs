@@ -82,7 +82,7 @@
 //!   "routes": [
 //!     {
 //!       "name": "notes",
-//!       "path": ["/notes/.*"],
+//!       "path": ["/notes/*"],
 //!       "requests": 2,
 //!       "needs_transaction_control": false,
 //!       "egress": {
@@ -392,13 +392,131 @@ pub(crate) fn classify(sql: &str) -> Result<String, String> {
     serde_json::to_string_pretty(&document).map_err(|error| error.to_string())
 }
 
+/// The `Blastfile`'s model, as JSON: its stores, traits and views.
+///
+/// `fold` and the pytest plugin both have to know what a `Blastfile` declares
+/// before they can plan a grant or map a database alias. They must not parse one
+/// themselves — there is one reader (§15.2) — so this binding hands over the
+/// lowered model instead: the store names and their input slots, every trait's
+/// grants by store, and every view's name, patterns, methods, attached traits
+/// and grants.
+///
+/// It is [`Manifest::from_blastfile_str`]: parse and lower, **without**
+/// `validate`, exactly as the Python reader it replaces did. A caller that wants
+/// validation runs [`audit`], which parses with the same reader and validates.
+///
+/// ```json
+/// {
+///   "stores": [{"name": "db", "protocol": "postgresql",
+///               "url": "DATABASE_URL", "inputs": {"url": "DATABASE_URL"}}],
+///   "traits": {"session": {"db": {"queries": ["SELECT 40"], "unrestricted": false,
+///                                 "transactions": true, "tables": {}, "functions": []}}},
+///   "views": [{"name": "notes", "methods": ["GET", "HEAD"], "patterns": ["/notes/.*"],
+///              "use": ["session"], "egress": false,
+///              "grants": {"db": {"queries": ["SELECT 10"], …}}}]
+/// }
+/// ```
+///
+/// # Errors
+///
+/// [`AuditError`] with the parser's or lowerer's one-line reason when the text is
+/// not a `Blastfile`; no partial model is ever returned.
+pub(crate) fn model(source: &str) -> Result<String, AuditError> {
+    let manifest =
+        Manifest::from_blastfile_str(source).map_err(|errors| AuditError::manifest(&errors))?;
+    let stores: Vec<Value> = manifest
+        .proxies()
+        .iter()
+        .map(|(name, proxy)| {
+            json!({
+                "name": name.as_str(),
+                "protocol": proxy.protocol().as_str(),
+                "url": proxy.input().get("url"),
+                "inputs": proxy.input(),
+            })
+        })
+        .collect();
+    let traits: Map<String, Value> = manifest
+        .groups()
+        .iter()
+        .map(|(name, group)| (name.clone(), grants_json(group.grants())))
+        .collect();
+    let views: Vec<Value> = manifest
+        .routes()
+        .iter()
+        .map(|route| {
+            json!({
+                "name": route.name(),
+                "methods": route.methods(),
+                "patterns": route.path(),
+                "use": route.groups(),
+                "egress": route.egress(),
+                "grants": grants_json(route.grants()),
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&json!({
+        "stores": stores,
+        "traits": traits,
+        "views": views,
+    }))
+    .map_err(|error| AuditError::Report(error.to_string()))
+}
+
+/// One map of grants, by store, as the model document spells it.
+fn grants_json(grants: &BTreeMap<ProxyName, Grant>) -> Value {
+    let by_store: Map<String, Value> = grants
+        .iter()
+        .map(|(proxy, grant)| {
+            let value = match grant {
+                Grant::Postgresql(grant) => json!({
+                    "queries": grant.queries(),
+                    "unrestricted": grant.is_unrestricted(),
+                    "transactions": grant.transaction_control(),
+                    "tables": tables_json(grant.tables()),
+                    "functions": grant.tables().functions,
+                }),
+            };
+            (proxy.as_str().to_owned(), value)
+        })
+        .collect();
+    Value::Object(by_store)
+}
+
+/// A table scope as a `Blastfile` holds it: only the operations it grants.
+///
+/// `TableGrant`'s own serde shape carries every field (`insert: null`,
+/// `delete: false` included) because the report does; a model of a file should
+/// read like the file.
+fn tables_json(tables: &blastit_sqlpolicy::TableGrants) -> Value {
+    let by_table: Map<String, Value> = tables
+        .tables
+        .iter()
+        .map(|(table, grant)| {
+            let mut value = Map::new();
+            for (operation, columns) in [
+                ("select", &grant.select),
+                ("insert", &grant.insert),
+                ("update", &grant.update),
+            ] {
+                if let Some(columns) = columns {
+                    value.insert(operation.to_owned(), json!(columns));
+                }
+            }
+            if grant.delete {
+                value.insert("delete".to_owned(), Value::Bool(true));
+            }
+            (table.clone(), Value::Object(value))
+        })
+        .collect();
+    Value::Object(by_table)
+}
+
 /// Diffs the observations of a test suite against a manifest (§6).
 ///
-/// `manifest_text` is the file `fold` and the pytest plugin hand over. It is
-/// still read by the retired reader: `MB.21.4.7` moves this call to
-/// `Manifest::parse_blastfile` *and* the suites that pin `fold` to it — one
-/// change, not two, so the binding and its tests never disagree about which
-/// document they read.
+/// `manifest_text` is the `Blastfile` `fold` and the pytest plugin hand over, read
+/// by [`Manifest::from_blastfile_str`] like every other reader (§15.2), then
+/// validated so a document that would not boot is reported rather than diffed.
 ///
 /// The observations carry the `PATH_INFO` the app saw, which is the string the
 /// scheduler routed on — the view strips `BLASTIT_SCRIPT_NAME` before WSGI
@@ -416,8 +534,8 @@ pub(crate) fn classify(sql: &str) -> Result<String, String> {
 /// [`AuditError`] when the manifest is invalid, the observations do not have the
 /// documented shape, or a statement cannot be attributed to a proxy.
 pub(crate) fn audit(manifest_text: &str, observations_json: &str) -> Result<String, AuditError> {
-    let manifest =
-        Manifest::from_toml_str(manifest_text).map_err(|errors| AuditError::manifest(&errors))?;
+    let manifest = Manifest::from_blastfile_str(manifest_text)
+        .map_err(|errors| AuditError::manifest(&errors))?;
     let warnings = manifest
         .validate_default()
         .map_err(|errors| AuditError::manifest(&errors))?;
@@ -645,6 +763,11 @@ fn assemble(
     let mut missing = 0usize;
     let mut missing_distinct = 0usize;
     let mut unused = 0usize;
+    // The statements psycopg runs as a connection opens (§6): they belong to no
+    // request, so they are not a route's to call dead — a trait attached to
+    // every view grants them, and `connection_setup` is where the report shows
+    // they are used. Built before the route loop because `unused_here` reads it.
+    let setup = setup_section(manifest, &observations.connection_setup)?;
     // The `(proxy, statement)` pairs some route matched: a global group's
     // statement is used as soon as *one* route ran it.
     let mut global_matched: BTreeSet<(ProxyName, String)> = BTreeSet::new();
@@ -753,6 +876,9 @@ fn assemble(
                     .iter()
                     .filter(|query| {
                         !matched.contains(query.as_str())
+                            && !setup
+                                .accounted
+                                .contains(&(proxy.clone(), (*query).clone()))
                             && own.contains(query.as_str())
                             // A route's own `queries` entry a table grant
                             // already covers is not dead (`R34`): the shared
@@ -856,7 +982,6 @@ fn assemble(
         .iter()
         .map(|warning| json!(warning.to_string()))
         .collect();
-    let setup = setup_section(manifest, &observations.connection_setup)?;
     let unrecognised_total: u64 = observations
         .unrecognised
         .iter()
@@ -1823,52 +1948,42 @@ mod tests {
 
     use super::*;
 
-    /// A manifest with a session group, a notes route that takes it, an
-    /// unexercised route and a second proxy.
+    /// A `Blastfile` with a session trait, a notes view that uses it, an
+    /// unexercised view and a second store's grant.
     const MANIFEST: &str = r#"
-        version = 1
-        groups = ["session"]
+postgres $DATABASE_URL
 
-        [proxy.db]
-        protocol = "postgresql"
-        input = { url = "DATABASE_URL" }
+trait session {
+    postgres {
+        transactions
+        query 'SELECT "django_session"."session_key" FROM "django_session" WHERE "django_session"."session_key" = $?'
+    }
+}
 
-        [group.session.db]
-        transaction_control = true
-        queries = [
-          'SELECT "django_session"."session_key" FROM "django_session" WHERE "django_session"."session_key" = $1',
-        ]
+view notes GET, POST "/notes/*" {
+    use session
+    postgres {
+        query 'SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $? LIMIT 21'
+    }
+}
 
-        [[route]]
-        name = "notes"
-        path = ['/notes/.*']
-        methods = ["GET", "POST"]
-        [route.db]
-        queries = [
-          'SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $1 LIMIT 21',
-        ]
+view checkout "/checkout/" {
+    postgres {
+        query 'INSERT INTO "orders" ("id") VALUES ($?)'
+    }
+}
+"#;
 
-        [[route]]
-        name = "checkout"
-        path = ['/checkout/']
-        [route.db]
-        queries = ['INSERT INTO "orders" ("id") VALUES ($1)']
-    "#;
-
-    /// A manifest whose only proxy is `db`, without the session group.
+    /// A `Blastfile` whose only store is `db`, without the session trait.
     const SIMPLE: &str = r#"
-        version = 1
+postgres $DATABASE_URL
 
-        [proxy.db]
-        protocol = "postgresql"
-        input = { url = "DATABASE_URL" }
-
-        [[route]]
-        name = "notes"
-        path = ['/notes/.*']
-        [route.db]
-        queries = ['SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $1 LIMIT 21']
-    "#;
+view notes "/notes/*" {
+    postgres {
+        query 'SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $? LIMIT 21'
+    }
+}
+"#;
 
     /// Runs the audit on a report and returns the parsed JSON.
     fn run(manifest: &str, observations: &str) -> Value {
@@ -1932,16 +2047,14 @@ mod tests {
     #[test]
     fn a_locking_statement_gets_a_column_named_never_a_star() {
         let manifest = r#"
-            version = 1
-            [proxy.db]
-            protocol = "postgresql"
-            input = { url = "DATABASE_URL" }
-            [[route]]
-            name = "notes"
-            path = ['/notes/.*']
-            [route.db]
-            queries = ['SELECT 1']
-        "#;
+postgres $DATABASE_URL
+
+view notes "/notes/*" {
+    postgres {
+        query 'SELECT 1'
+    }
+}
+"#;
         let locked = run(
             manifest,
             &document(&request(
@@ -2017,16 +2130,14 @@ mod tests {
         // named from what the other reads, because PostgreSQL asks for the UPDATE
         // privilege on any single column of a locked table (D3c).
         let manifest = r#"
-            version = 1
-            [proxy.db]
-            protocol = "postgresql"
-            input = { url = "DATABASE_URL" }
-            [[route]]
-            name = "notes"
-            path = ['/notes/.*']
-            [route.db]
-            queries = ['SELECT 1']
-        "#;
+postgres $DATABASE_URL
+
+view notes "/notes/*" {
+    postgres {
+        query 'SELECT 1'
+    }
+}
+"#;
         let report = run(
             manifest,
             &document(&request(
@@ -2147,7 +2258,7 @@ mod tests {
         );
         let normalised = missing_sql(&report, "notes")[0].clone();
         let repaired = SIMPLE.replace(
-            "'SELECT \"notes\".\"id\" FROM \"notes\" WHERE \"notes\".\"owner_id\" = $1 LIMIT 21'",
+            "'SELECT \"notes\".\"id\" FROM \"notes\" WHERE \"notes\".\"owner_id\" = $? LIMIT 21'",
             &format!("'{normalised}'"),
         );
         let after = run(
@@ -2202,20 +2313,16 @@ mod tests {
     #[test]
     fn grants_that_nothing_matched_are_unused() {
         let manifest = r#"
-            version = 1
-            [proxy.db]
-            protocol = "postgresql"
-            input = { url = "DATABASE_URL" }
-            [[route]]
-            name = "notes"
-            path = ['/notes/.*']
-            [route.db]
-            queries = [
-              'SELECT 1',
-              'SELECT 2 ;',
-              'SELECT 2',
-            ]
-        "#;
+postgres $DATABASE_URL
+
+view notes "/notes/*" {
+    postgres {
+        query 'SELECT 1'
+        query 'SELECT 2 ;'
+        query 'SELECT 2'
+    }
+}
+"#;
         let report = run(
             manifest,
             &document(&request("GET", "/notes/", &statement("SELECT 1;"))),
@@ -2243,19 +2350,17 @@ mod tests {
     #[test]
     fn a_route_with_no_grant_denies_everything() {
         let manifest = r#"
-            version = 1
-            [proxy.db]
-            protocol = "postgresql"
-            input = { url = "DATABASE_URL" }
-            [[route]]
-            name = "notes"
-            path = ['/notes/.*']
-            [route.db]
-            queries = ["SELECT 1"]
-            [[route]]
-            name = "about"
-            path = ['/about/.*']
-        "#;
+postgres $DATABASE_URL
+
+view notes "/notes/*" {
+    postgres {
+        query 'SELECT 1'
+    }
+}
+
+view about "/about/*" {
+}
+"#;
         let report = run(
             manifest,
             &document(&request("GET", "/about/x", &statement("SELECT 1"))),
@@ -2352,11 +2457,10 @@ mod tests {
         assert_eq!(report["totals"]["routes"], 2);
         assert_eq!(report["totals"]["routes_exercised"], 1);
         // `notes` ran without touching the database, so its own grant and the
-        // group it names are unused; the global group's statement is not a
-        // route's unused line (D3c), and `checkout` did not run at all, so it
-        // claims nothing.
-        assert_eq!(report["totals"]["unused"], 1);
-        assert_eq!(report["totals"]["unused_global"], 1);
+        // trait it uses are unused; a `Blastfile` has no global groups (D3c),
+        // and `checkout` did not run at all, so it claims nothing.
+        assert_eq!(report["totals"]["unused"], 2);
+        assert_eq!(report["totals"]["unused_global"], 0);
     }
 
     #[test]
@@ -2372,19 +2476,16 @@ mod tests {
 
     #[test]
     fn catches_all_routing_is_the_manifests_own() {
-        // First match wins, in manifest order.
+        // First match wins, in Blastfile order.
         let manifest = r#"
-            version = 1
-            [proxy.db]
-            protocol = "postgresql"
-            input = { url = "DATABASE_URL" }
-            [[route]]
-            name = "fallback"
-            path = ['.*']
-            [[route]]
-            name = "notes"
-            path = ['/notes/.*']
-        "#;
+postgres $DATABASE_URL
+
+view fallback "/*" {
+}
+
+view notes "/notes/*" {
+}
+"#;
         let report = run(
             manifest,
             &document(&request("GET", "/notes/", &statement("SELECT 1"))),
@@ -2425,19 +2526,15 @@ mod tests {
     #[test]
     fn several_proxies_without_a_statement_proxy_is_an_error() {
         let manifest = r#"
-            version = 1
-            [proxy.db]
-            protocol = "postgresql"
-            input = { url = "DATABASE_URL" }
-            [proxy.warehouse]
-            protocol = "postgresql"
-            input = { url = "WAREHOUSE_URL" }
-            [[route]]
-            name = "notes"
-            path = ['/notes/.*']
-            [route.db]
-            queries = ["SELECT 1"]
-        "#;
+postgres $DATABASE_URL
+postgres warehouse $WAREHOUSE_URL
+
+view notes "/notes/*" {
+    postgres {
+        query 'SELECT 1'
+    }
+}
+"#;
         let observations = document(&request(
             "GET",
             "/notes/",
@@ -2470,45 +2567,37 @@ mod tests {
     #[test]
     fn a_manifest_without_a_postgresql_proxy_is_an_error() {
         let manifest = r#"
-            version = 1
-            [proxy.db]
-            protocol = "postgresql"
-            input = { url = "DATABASE_URL" }
-            [[route]]
-            name = "notes"
-            path = ['/notes/.*']
-        "#;
+postgres $DATABASE_URL
+
+view notes "/notes/*" {
+}
+"#;
         let observation = document(&request(
             "GET",
             "/notes/",
             r#"{"alias": "default", "sql": "SELECT 1"}"#,
         ));
-        // ... a route with no grant still knows the proxy: the manifest has one.
+        // ... a view with no grant still knows the store: the Blastfile has one.
         assert_eq!(run(manifest, &observation)["totals"]["missing"], 1);
 
         let no_proxy = r#"
-            version = 1
-            [[route]]
-            name = "notes"
-            path = ['/notes/.*']
-        "#;
+view notes "/notes/*" {
+}
+"#;
         let error = audit(no_proxy, &observation).expect_err("no proxy");
         assert!(matches!(error, AuditError::NoProxy));
     }
 
     #[test]
     fn a_non_postgresql_proxy_cannot_be_used() {
-        // Nothing but `postgresql` exists today, so the manifest itself rejects
-        // the declaration; the audit reports it as a manifest error.
+        // Nothing but `postgres` exists in a `Blastfile`, so the parser rejects
+        // any other store keyword; the audit reports it as a manifest error.
         let manifest = r#"
-            version = 1
-            [proxy.mq]
-            protocol = "amqp"
-            input = { url = "AMQP_URL" }
-            [[route]]
-            name = "notes"
-            path = ['/notes/.*']
-        "#;
+amqp $AMQP_URL
+
+view notes "/notes/*" {
+}
+"#;
         let error = audit(manifest, &document("")).expect_err("unknown protocol");
         assert!(matches!(error, AuditError::Manifest(_)), "{error}");
     }
@@ -2516,9 +2605,9 @@ mod tests {
     #[test]
     fn a_broken_manifest_is_an_error() {
         for manifest in [
-            "version = 2\n[[route]]\nname = \"a\"\npath = ['/']\n",
-            "version = 1\n[[route]]\nname = \"a\"\npath = ['(']\n",
-            "version = 1\n[[route]]\nname = \"a\"\npath = ['/']\n[route.db]\nqueries = ['SELECT 1']\n",
+            "view a \"/\" {\n",
+            "postgres $DB\nview a regex '(' {\n}\n",
+            "view a \"/\" {\n    postgres { query 'SELECT 1' }\n}\n",
         ] {
             let error = audit(manifest, &document("")).expect_err("invalid manifest");
             assert!(matches!(error, AuditError::Manifest(_)), "{error}");
@@ -2678,13 +2767,15 @@ mod tests {
 
     #[test]
     fn the_report_names_the_manifests_proxies_and_warnings() {
-        let manifest = format!("{MANIFEST}\n[group.orphan.db]\nqueries = ['SELECT 1']\n");
+        let manifest = format!(
+            "{MANIFEST}\ntrait orphan {{\n    postgres {{\n        query 'SELECT 1'\n    }}\n}}\n"
+        );
         let report = run(&manifest, &document(""));
         assert_eq!(report["manifest"]["proxies"], json!({"db": "postgresql"}));
         assert_eq!(report["manifest"]["routes"], 2);
         assert_eq!(report["version"], 1);
         let warnings = report["manifest"]["warnings"].as_array().unwrap();
-        assert_eq!(warnings.len(), 1, "one unattached group: {warnings:?}");
+        assert_eq!(warnings.len(), 1, "one unattached trait: {warnings:?}");
         assert!(
             warnings[0].as_str().unwrap().contains("orphan"),
             "{warnings:?}"
@@ -2809,24 +2900,25 @@ mod tests {
     /// strings (the escaping is JSON's).
     fn manifest_with_queries(queries: &[String]) -> String {
         let mut out = String::from(
-            "version = 1\n\
-             [proxy.db]\n\
-             protocol = \"postgresql\"\n\
-             input = { url = \"DATABASE_URL\" }\n\
-             [[route]]\n\
-             name = \"notes\"\n\
-             path = ['/notes/.*']\n\
-             methods = [\"GET\", \"POST\"]\n\
-             [route.db]\n\
-             queries = [\n",
+            "postgres $DATABASE_URL\n\nview notes GET, POST \"/notes/*\" {\n    postgres {\n",
         );
         for query in queries {
-            out.push_str("  ");
-            out.push_str(&serde_json::to_string(query).expect("a string"));
-            out.push_str(",\n");
+            out.push_str("        query ");
+            out.push_str(&blastfile_string(query));
+            out.push('\n');
         }
-        out.push_str("]\n");
+        out.push_str("    }\n}\n");
         out
+    }
+
+    /// A `Blastfile` string for `sql`: a raw `'…'` when it holds no `'`, else a
+    /// `"…"` with JSON's escapes (which are the grammar's for these texts).
+    fn blastfile_string(sql: &str) -> String {
+        if sql.contains('\'') {
+            serde_json::to_string(sql).expect("a string")
+        } else {
+            format!("'{sql}'")
+        }
     }
 
     /// One observed statement whose SQL is escaped for the JSON document, for a
@@ -2912,39 +3004,35 @@ mod tests {
         assert_eq!(both["totals"]["unused"], 0, "each grant matched its shape");
     }
 
-    /// A manifest with a group attached to one route, one route that grants
-    /// everything, one that grants something else, and one with no listener.
+    /// A `Blastfile` with a connection trait used by one view, a view that
+    /// grants everything, one that grants something else, and one with no
+    /// listener.
     const SETUP: &str = r#"
-        version = 1
+postgres $DATABASE_URL
 
-        [proxy.db]
-        protocol = "postgresql"
-        input = { url = "DATABASE_URL" }
+trait connection {
+    postgres {
+        query "SET TIME ZONE 'UTC'"
+    }
+}
 
-        [group.connection.db]
-        queries = ["SET TIME ZONE 'UTC'"]
+view notes "/notes/*" {
+    use connection
+}
 
-        [[route]]
-        name = "notes"
-        path = ['/notes/.*']
-        groups = ["connection"]
+view checkout "/checkout/" {
+    postgres unrestricted
+}
 
-        [[route]]
-        name = "checkout"
-        path = ['/checkout/']
-        [route.db]
-        unrestricted = true
+view about "/about/" {
+    postgres {
+        query 'SELECT "cms_page"."body" FROM "cms_page" LIMIT 21'
+    }
+}
 
-        [[route]]
-        name = "about"
-        path = ['/about/']
-        [route.db]
-        queries = ['SELECT "cms_page"."body" FROM "cms_page" LIMIT 21']
-
-        [[route]]
-        name = "static"
-        path = ['/static/.*']
-    "#;
+view assets "/static/*" {
+}
+"#;
 
     /// One `connection_setup` entry.
     fn setup(sql: &str, count: u64) -> String {
@@ -3006,7 +3094,7 @@ mod tests {
 
     #[test]
     fn a_route_with_no_listener_is_not_counted_in_connection_setup() {
-        // `static` has no `[route.db]` grant, so it gets no listener at all: it
+        // `assets` has no `postgres` grant, so it gets no listener at all: it
         // can never run one of these, and naming it would be noise.
         let report = run(SETUP, &setup_document(&setup("SELECT 1", 1)));
         let entry = &report["connection_setup"]["statements"][0];
@@ -3043,39 +3131,38 @@ mod tests {
         assert_eq!(app["wire_sql"], "SET TIME ZONE 'UTC'");
     }
 
-    /// A manifest whose *global* group is Django's connection housekeeping (§6).
+    /// A `Blastfile` whose connection trait grants Django's connection
+    /// housekeeping to the view that uses it (§6).
     ///
-    /// `SELECT set_config('TimeZone', $1, false)` only runs while a connection
-    /// opens, so it is granted to every route and no request ever runs it; the
-    /// second statement is the control — a grant nothing used at all.
+    /// `SELECT set_config('TimeZone', $?, false)` only runs while a connection
+    /// opens, so no request ever runs it; the second statement is the control —
+    /// a grant nothing used at all.
     const CONNECTION: &str = r#"
-        version = 1
-        groups = ["connection"]
+postgres $DATABASE_URL
 
-        [proxy.db]
-        protocol = "postgresql"
-        input = { url = "DATABASE_URL" }
+trait connection {
+    postgres {
+        query "SELECT set_config('TimeZone', $?, false)"
+        query 'SELECT "never_runs"."id" FROM "never_runs" WHERE "never_runs"."id" = $?'
+    }
+}
 
-        [group.connection.db]
-        queries = [
-          "SELECT set_config('TimeZone', $1, false)",
-          'SELECT "never_runs"."id" FROM "never_runs" WHERE "never_runs"."id" = $?',
-        ]
-
-        [[route]]
-        name = "notes"
-        path = ['/notes/.*']
-        [route.db]
-        queries = ["SELECT 1"]
-    "#;
+view notes "/notes/*" {
+    use connection
+    postgres {
+        query 'SELECT 1'
+    }
+}
+"#;
 
     #[test]
     fn a_statement_connection_setup_accounts_for_is_used_rather_than_unused() {
         // The report used to say both things at once: `connection_setup` showed
-        // the group's `set_config` granted in every route, and `unused_global`
+        // the trait's `set_config` granted in the view, and the view's `unused`
         // called the same grant one that "nothing matched" — because it only
         // runs while a connection opens, which is not a request. A statement
-        // the connection-setup section accounts for is *used*.
+        // the connection-setup section accounts for is *used*, whether a trait
+        // or a global group grants it.
         let observations = format!(
             r#"{{"version": 1, "requests": [{}], "connection_setup": [{}]}}"#,
             request("GET", "/notes/", &statement("SELECT 1")),
@@ -3085,27 +3172,27 @@ mod tests {
 
         let entry = &report["connection_setup"]["statements"][0];
         assert_eq!(entry["sql"], "SELECT set_config('TimeZone', $?, false)");
-        assert_eq!(entry["granted_in"], 1, "the group grants it everywhere");
+        assert_eq!(entry["granted_in"], 1, "the trait grants it to the view");
         assert_eq!(entry["ungranted_in"], json!([]));
         assert_eq!(report["totals"]["clean"], true);
 
-        // The grant it accounts for is not in `unused_global`, and the summary
-        // cannot say "nothing matched" about it. The control statement, which
-        // nothing ran at all, still is — the fix is about the statements that
-        // run while a connection opens, not about every statement.
-        assert_eq!(report["unused_global"]["count"], 1, "{report}");
+        // The grant it accounts for is not in the view's `unused` line, and the
+        // summary cannot say "nothing matched" about it. The control statement,
+        // which nothing ran at all, still is — the fix is about the statements
+        // that run while a connection opens, not about every statement. A
+        // `Blastfile` has no global groups (§7.1), so `unused_global` is empty
+        // by construction.
+        assert_eq!(report["unused_global"]["count"], 0, "{report}");
+        assert_eq!(report["unused_global"]["statements"], json!([]));
+        assert_eq!(report["totals"]["unused_global"], 0);
         assert_eq!(
-            report["unused_global"]["statements"],
-            json!([{
-                "proxy": "db",
-                "sql": r#"SELECT "never_runs"."id" FROM "never_runs" WHERE "never_runs"."id" = $?"#,
-                "groups": ["connection"],
-            }])
+            proxy(&report, "notes")["unused"],
+            json!([r#"SELECT "never_runs"."id" FROM "never_runs" WHERE "never_runs"."id" = $?"#]),
+            "the control statement, and only it"
         );
-        assert_eq!(report["totals"]["unused_global"], 1);
         assert_eq!(
-            report["totals"]["unused"], 0,
-            "the route's own grant matched"
+            report["totals"]["unused"], 1,
+            "the view's own grant matched, the trait's setup statement is used"
         );
     }
 
@@ -3192,17 +3279,17 @@ mod tests {
 
     #[test]
     fn a_route_that_may_reach_the_network_is_not_asking_for_anything() {
-        let manifest = format!("{SETUP}\n# the route that runs it may open connections\n");
+        let manifest = format!("{SETUP}\n# the view that runs it may open connections\n");
         let report = run(
             &manifest.replace(
-                "name = \"notes\"\n        path = ['/notes/.*']",
-                "name = \"notes\"\n        path = ['/notes/.*']\n        egress = true",
+                "view notes \"/notes/*\" {\n",
+                "view notes \"/notes/*\" {\n    egress any\n",
             ),
             &document_with_egress("/notes/", &attempt("redis", 6379)),
         );
         let egress = &route(&report, "notes")["egress"];
         assert_eq!(egress["observed"].as_array().unwrap().len(), 1);
-        assert_eq!(egress["needed"], false, "the route grants egress already");
+        assert_eq!(egress["needed"], false, "the view grants egress already");
         assert_eq!(report["totals"]["egress"], 0);
     }
 
@@ -3213,7 +3300,7 @@ mod tests {
             route(&report, "notes")["egress"],
             json!({"observed": [], "needed": false})
         );
-        assert_eq!(route(&report, "static")["egress"]["observed"], json!([]));
+        assert_eq!(route(&report, "assets")["egress"]["observed"], json!([]));
         assert_eq!(report["totals"]["egress"], 0);
     }
 
@@ -3272,55 +3359,58 @@ mod tests {
     }
 
     //
-    // Global groups are nobody's route (D3c).
+    // A trait is the view's own grant, and global groups do not exist (§7.1).
     //
 
-    /// Two routes, one group of each kind: a global one applied to every route
-    /// and one the route names itself.
+    /// Two traits: one every view `use`s, and one only `notes` names.
     const GLOBAL: &str = r#"
-        version = 1
-        groups = ["session"]
+postgres $DATABASE_URL
 
-        [proxy.db]
-        protocol = "postgresql"
-        input = { url = "DATABASE_URL" }
+trait session {
+    postgres {
+        query 'SELECT 0'
+    }
+}
 
-        [group.session.db]
-        queries = ['SELECT 0']
+trait own {
+    postgres {
+        query 'SELECT 9'
+    }
+}
 
-        [group.own.db]
-        queries = ['SELECT 9']
+view notes "/notes/*" {
+    use session, own
+    postgres {
+        query 'SELECT 1'
+    }
+}
 
-        [[route]]
-        name = "notes"
-        path = ['/notes/.*']
-        groups = ["own"]
-        [route.db]
-        queries = ['SELECT 1']
-
-        [[route]]
-        name = "orders"
-        path = ['/orders/']
-        [route.db]
-        queries = ['SELECT 2']
-    "#;
+view orders "/orders/" {
+    use session
+    postgres {
+        query 'SELECT 2'
+    }
+}
+"#;
 
     #[test]
-    fn a_global_group_statement_is_not_unused_once_per_route() {
+    fn a_trait_every_view_uses_is_reported_per_view_not_once_globally() {
         let report = run(
             GLOBAL,
             &document(&request("GET", "/notes/", &statement("SELECT 1"))),
         );
-        // The route's own group's statement is the route's to call dead; the
-        // global group's is not, once per route.
-        assert_eq!(proxy(&report, "notes")["unused"], json!(["SELECT 9"]));
+        // A `Blastfile` has no global groups (§7.1): a trait the views `use` is
+        // each view's own grant, so its unmatched statement is that view's
+        // `unused` line — and `unused_global` is empty by construction.
         assert_eq!(
-            report["unused_global"]["statements"],
-            json!([{"proxy": "db", "sql": "SELECT 0", "groups": ["session"]}])
+            proxy(&report, "notes")["unused"],
+            json!(["SELECT 0", "SELECT 9"]),
+            "the trait every view uses, and the one only this view names"
         );
-        assert_eq!(report["unused_global"]["count"], 1);
-        assert_eq!(report["totals"]["unused"], 1, "the route's own group only");
-        assert_eq!(report["totals"]["unused_global"], 1);
+        assert_eq!(report["unused_global"]["statements"], json!([]));
+        assert_eq!(report["unused_global"]["count"], 0);
+        assert_eq!(report["totals"]["unused"], 2);
+        assert_eq!(report["totals"]["unused_global"], 0);
         assert_eq!(
             report["totals"]["clean"], true,
             "unused grants do not fail strict"
@@ -3328,7 +3418,7 @@ mod tests {
     }
 
     #[test]
-    fn a_global_group_statement_one_route_used_is_unused_nowhere() {
+    fn a_trait_statement_one_view_used_is_unused_only_where_unused() {
         let report = run(
             GLOBAL,
             &document(&request("GET", "/notes/", &statement("SELECT 0"))),
@@ -3339,54 +3429,30 @@ mod tests {
         assert_eq!(
             proxy(&report, "notes")["unused"],
             json!(["SELECT 9", "SELECT 1"]),
-            "one route ran the global group's statement, so all of them are live"
+            "the view ran the trait's statement, so it is not dead here"
         );
     }
 
-    /// A global group whose only grant is a table grant (D7).
+    /// A trait whose only grant is a table grant (D7).
     const GLOBAL_TABLES: &str = r#"
-        version = 1
-        groups = ["catalog"]
+postgres $DATABASE_URL
 
-        [proxy.db]
-        protocol = "postgresql"
-        input = { url = "DATABASE_URL" }
-
-        [group.catalog.db.tables]
-        shop_product = { select = ["id"] }
-
-        [[route]]
-        name = "notes"
-        path = ['/notes/.*']
-        [route.db]
-        queries = ['SELECT 1']
-    "#;
-
-    #[test]
-    fn a_global_group_table_grant_nothing_needed_is_reported_once() {
-        let report = run(
-            GLOBAL_TABLES,
-            &document(&request("GET", "/notes/", &statement("SELECT 1"))),
-        );
-        assert_eq!(report["unused_global"]["statements"], json!([]));
-        let tables = report["unused_global"]["tables"]
-            .as_array()
-            .expect("a list");
-        assert_eq!(tables.len(), 1, "{tables:?}");
-        assert_eq!(tables[0]["proxy"], "db");
-        assert_eq!(tables[0]["group"], "catalog");
-        assert_eq!(tables[0]["tables"]["shop_product"]["select"], json!(["id"]));
-        assert_eq!(tables[0]["functions"], json!([]));
-        assert_eq!(report["totals"]["unused_global"], 1);
-        assert_eq!(
-            proxy(&report, "notes")["unused"],
-            json!([]),
-            "a table grant is never a route's unused line"
-        );
+trait catalog {
+    postgres {
+        select shop_product(id)
     }
+}
+
+view notes "/notes/*" {
+    use catalog
+    postgres {
+        query 'SELECT 1'
+    }
+}
+"#;
 
     #[test]
-    fn a_global_group_table_grant_a_statement_needed_is_used() {
+    fn a_trait_table_grant_a_statement_needed_is_used() {
         let report = run(
             GLOBAL_TABLES,
             &document(&request(
@@ -3398,7 +3464,7 @@ mod tests {
         assert_eq!(
             proxy(&report, "notes")["missing"],
             json!([]),
-            "the global group's table grant allowed it"
+            "the trait's table grant allowed it"
         );
         assert_eq!(report["unused_global"]["tables"], json!([]));
         assert_eq!(report["unused_global"]["count"], 0);
@@ -3472,18 +3538,18 @@ mod tests {
         let report = run(GLOBAL, &observations);
         assert_eq!(
             proxy(&report, "notes")["unused"],
-            json!(["SELECT 9", "SELECT 1"]),
-            "the suite's own request is evidence about the route it reached"
+            json!(["SELECT 0", "SELECT 9", "SELECT 1"]),
+            "the suite's own request is evidence about the view it reached"
         );
         assert_eq!(
             proxy(&report, "orders")["unused"],
             json!([]),
-            "and a route only a log saw still claims nothing"
+            "and a view only a log saw still claims nothing"
         );
         assert_eq!(
             report["unused_global"]["statements"],
             json!([]),
-            "a global grant on a proxy a live route used cannot be called dead"
+            "a `Blastfile` has no global groups, so the section is always empty"
         );
     }
 
@@ -3506,5 +3572,71 @@ mod tests {
             "{:?}",
             unanalysable[0]["reason"]
         );
+    }
+
+    #[test]
+    fn the_model_names_the_stores_traits_and_views() {
+        let source = r#"
+postgres $DATABASE_URL
+postgres warehouse $WAREHOUSE_URL
+
+trait session {
+    postgres {
+        transactions
+        query 'SELECT 40'
+    }
+}
+
+view notes GET, POST "/notes/*" {
+    use session
+    postgres {
+        select products(id, name)
+        query 'SELECT 10'
+    }
+}
+"#;
+        let model: Value = serde_json::from_str(&model(source).expect("the model renders"))
+            .expect("the model is JSON");
+        assert_eq!(
+            model["stores"],
+            json!([
+                {"name": "db", "protocol": "postgresql", "url": "DATABASE_URL",
+                 "inputs": {"url": "DATABASE_URL"}},
+                {"name": "warehouse", "protocol": "postgresql",
+                 "url": "WAREHOUSE_URL", "inputs": {"url": "WAREHOUSE_URL"}},
+            ])
+        );
+        assert_eq!(
+            model["traits"]["session"]["db"]["queries"],
+            json!(["SELECT 40"])
+        );
+        assert_eq!(model["traits"]["session"]["db"]["transactions"], true);
+        let notes = &model["views"][0];
+        assert_eq!(notes["name"], "notes");
+        assert_eq!(notes["methods"], json!(["GET", "HEAD", "POST"]));
+        assert_eq!(notes["patterns"], json!(["/notes/.*"]));
+        assert_eq!(notes["use"], json!(["session"]));
+        assert_eq!(notes["egress"], false);
+        assert_eq!(notes["grants"]["db"]["queries"], json!(["SELECT 10"]));
+        assert_eq!(
+            notes["grants"]["db"]["tables"]["products"]["select"],
+            json!(["id", "name"])
+        );
+        assert_eq!(notes["grants"]["db"]["unrestricted"], false);
+    }
+
+    #[test]
+    fn the_model_refuses_a_document_that_is_not_a_blastfile() {
+        let error = model("version = 1\n[proxy.db]\n").expect_err("not a Blastfile");
+        assert!(matches!(error, AuditError::Manifest(_)), "{error}");
+    }
+
+    #[test]
+    fn the_audit_reads_the_blastfile_reader_and_not_the_retired_one() {
+        // A document in the retired shape parses to a `Blastfile` with a syntax
+        // error, which is the proof that no default path reaches the old reader.
+        let retired = "version = 1\n[proxy.db]\nprotocol = \"postgresql\"\ninput = { url = \"DATABASE_URL\" }\n";
+        let error = audit(retired, &document("")).expect_err("the retired document is refused");
+        assert!(matches!(error, AuditError::Manifest(_)), "{error}");
     }
 }

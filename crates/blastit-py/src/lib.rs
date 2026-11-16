@@ -424,6 +424,30 @@ fn blastfile_apply_edits(source: &str, edits_json: &str) -> PyResult<String> {
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Reads a `Blastfile` and returns its lowered model as JSON (§15.2's one reader).
+///
+/// `fold` and the pytest plugin need the store names, the traits and the views
+/// of the file they are handed. They must not parse it themselves — §15.2 gives
+/// the tree exactly one reader — so this returns the lowered model:
+/// `{"stores": […], "traits": {…}, "views": […]}`. `audit` documents the shape.
+///
+/// It parses and lowers; it does not validate. A caller that needs the boot
+/// rules runs [`audit_report`], which parses with the same reader and validates.
+///
+/// # Errors
+///
+/// [`PyValueError`] with the parser's or lowerer's one-line reason when the text
+/// is not a `Blastfile`.
+///
+/// # Returns
+///
+/// The model, pretty-printed JSON.
+#[pyfunction]
+#[pyo3(name = "blastfile_model")]
+fn blastfile_model(source: &str) -> PyResult<String> {
+    audit::model(source).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// The `blastit._blastit` module: the console script's `main`, and the
 /// functions the pytest plugin and the manifest tools call (D3b, D3c).
 ///
@@ -443,5 +467,6 @@ fn _blastit(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(plan_learn_report, module)?)?;
     module.add_function(wrap_pyfunction!(probe_ingress_sample, module)?)?;
     module.add_function(wrap_pyfunction!(blastfile_apply_edits, module)?)?;
+    module.add_function(wrap_pyfunction!(blastfile_model, module)?)?;
     Ok(())
 }
