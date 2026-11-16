@@ -2,7 +2,7 @@
 id: MB.21.3
 title: "Blastfile toolchain: bounded lexer, LL(1) parser, path compiler, fmt, surgical editor, docs_fences"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.21.2]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T00:38"
+updated: "2026-11-16T08:01"
 ---
 
 # Goal

@@ -15,3 +15,11 @@ Also recorded: StaticPolicy's fallback field + spa removal moved from 3.0 to 3.7
 ## 2026-11-16T03:09 [lead]
 
 Design gap resolved without a human: §4.3's Consumers column assigns the per-view accessor removal, the StaticOutcome rename and §9.5/§9.6 to MB.21.4.2, and 3.7 cannot land them while blastit.toml still drives the product (four protected contracts read the route->mount link). 3.7 re-scoped; MB.21.4.2's paths need widening (model.rs, parse.rs, edit.rs, scheduler route/rewrite/static_asset/static_response + their suites, blastit src, tests/parse.rs). H-010 open for the conductor to close.
+
+## 2026-11-16T08:01 [lead]
+
+Gate: all 9 leaves done; epic acceptance 1-5 verified (tree, make check exit 0 with 161 ok/0 FAILED, cargo test -p blastit-manifest 32 suites/527 tests, blastfile/ + 10 critical_blastfile suites present, lib.rs registers pub mod blastfile, empty Cargo/Lock diff, every changed pre-existing suite accounted for by an authorizing leaf). A test-curator audit is the parent's call per the brief; gaps measured here are listed in RESULT.md # Follow-ups (module coverage is complete, but the purity gate's substring needle and the P4 arms are worth a mutation pass).
+
+## 2026-11-16T08:01 [lead]
+
+status ready -> done

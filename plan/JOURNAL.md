@@ -2134,3 +2134,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T07:52 [MB.21.3.6] (lead) attempt 1 done: both openers read, pinned PAGES table with per-opening counts, one flip constant for 5.2, three deviations disclosed. Review on base d652117.
 - 2026-11-16T07:57 [MB.21.3.6] (lead) reviewer verdict PASS. 3 MINOR for MB.21.5.2: (1) no self-test parses a VALID blastfile fence through parse_fence (the shared branch implies it); (2) the "missi
 - 2026-11-16T07:57 [MB.21.3.6] (lead) status review -> done
+- 2026-11-16T08:01 [MB.21.3] (lead) Gate: all 9 leaves done; epic acceptance 1-5 verified (tree, make check exit 0 with 161 ok/0 FAILED, cargo test -p blastit-manifest 32 suites/527 tests, blastfi
+- 2026-11-16T08:01 [MB.21.3] (lead) status ready -> done
