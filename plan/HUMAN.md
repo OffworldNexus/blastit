@@ -121,3 +121,11 @@ MB.21.3.1: design §4.5 mandates that blastfile::read refuse a non-regular file 
 
 **Answer:**
 
+## H-012 [closed] (node MB.21.3.2)
+
+- asked: 2026-11-16T04:19 by implementer
+
+MB.21.3.2 (design gap, implemented and reported): §6.7 pins a sentence for every WORD written in the wrong place, but a total parser must also refuse a token that is not a word at all — a "…" where a section keyword belongs, a { where a value belongs, postgres with no $IDENT/name/block, a newline where { is required. §18 says the new variants are exactly the rows of §5.3/§6.7/§8.3/§11.3/§12/§9.1, so no sentence covers that residue, and §6.7's slots must hold a name or a number (§18 S2), which a string literal is not. Implemented as ONE variant: '<l>:<c>: expected <what the grammar allows>, found <token class | `word` | `$NAME` | punctuation>' — a string is named by its class, so no value that could be a credential is ever echoed. Please confirm or re-word it and add the row to §6.7 before MB.21.3.8's error suite (R2/R26) pins it.
+
+**Answer:**
+

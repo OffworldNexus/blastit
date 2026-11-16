@@ -808,6 +808,421 @@ pub enum ManifestError {
         /// The count that was refused: one past the cap.
         runs: usize,
     },
+    /// A word at the top level that is not a section keyword (§6.7).
+    ///
+    /// The word is a `Word` — `[A-Za-z0-9_-]` — so it is a name, never a
+    /// value, and it is safe to quote (§18).
+    #[error(
+        "{}`{}` is not a keyword; the sections are `app`, `entrypoint`, `postgres`, `trait`, `view`, `static`",
+        prefix(*at),
+        clipped(word)
+    )]
+    UnknownKeyword {
+        /// Where the word is.
+        at: Position,
+        /// The word as written.
+        word: String,
+    },
+    /// A second `app` (§6.7).
+    #[error("{}a file declares one `app`; the first is on line {first}", prefix(*at))]
+    DuplicateApp {
+        /// Where the second `app` is.
+        at: Position,
+        /// The line of the first `app`.
+        first: u32,
+    },
+    /// A directive inside a block that does not take it (§6.7).
+    ///
+    /// `block` names the block (`a view`, `a store block`, …) and `takes` lists
+    /// what it does take, so the sentence names the fix as well as the mistake.
+    #[error(
+        "{}`{}` is not a directive here; {block} takes {takes}",
+        prefix(*at),
+        clipped(word)
+    )]
+    NotADirectiveHere {
+        /// Where the word is.
+        at: Position,
+        /// The word as written.
+        word: String,
+        /// The block the word was written in.
+        block: &'static str,
+        /// What that block takes instead.
+        takes: &'static str,
+    },
+    /// A `Method` word where a view name belongs (§6.7).
+    #[error(
+        "{}a view name cannot be `{}`; names start with a lower-case letter or a digit",
+        prefix(*at),
+        clipped(name)
+    )]
+    MethodAsName {
+        /// Where the name is.
+        at: Position,
+        /// The upper-case word as written.
+        name: String,
+    },
+    /// A lower-case word where a method belongs (§6.7, §6.3).
+    ///
+    /// `upper` is the same word upper-cased, which is the fix.
+    #[error(
+        "{}`{}` is not a method: methods are upper-case, `{}`",
+        prefix(*at),
+        clipped(word),
+        clipped(upper)
+    )]
+    NotAMethod {
+        /// Where the word is.
+        at: Position,
+        /// The word as written.
+        word: String,
+        /// The word upper-cased.
+        upper: String,
+    },
+    /// A `view` header that lists methods but no pattern (§6.7).
+    #[error(
+        "{}`view \"{}\"` lists methods but no pattern; write the path it answers",
+        prefix(*at),
+        clipped(name)
+    )]
+    MethodsWithoutPattern {
+        /// Where the missing pattern would start.
+        at: Position,
+        /// The view's name.
+        name: String,
+    },
+    /// A `view` block that declares no endpoint (§6.7).
+    #[error(
+        "{}view \"{}\" has no endpoint: declare at least `GET \"/products\"`",
+        prefix(*at),
+        clipped(name)
+    )]
+    ViewWithoutEndpoint {
+        /// Where the block opens.
+        at: Position,
+        /// The view's name.
+        name: String,
+    },
+    /// An endpoint inside a view that declares its methods in the header
+    /// (§6.7).
+    ///
+    /// `method` and `pattern` are what the endpoint wrote; a pattern is a URL
+    /// path or a regex, never a value that could be a credential.
+    #[error(
+        "{}view \"{}\" declares its methods in the header; `{} {}` belongs in a view without one",
+        prefix(*at),
+        clipped(name),
+        clipped(method),
+        clipped(pattern)
+    )]
+    EndpointInHeaderView {
+        /// Where the endpoint's first method is.
+        at: Position,
+        /// The view's name.
+        name: String,
+        /// The endpoint's method.
+        method: String,
+        /// The endpoint's pattern, as written.
+        pattern: String,
+    },
+    /// A store written as both a URL and a block (§6.7).
+    #[error(
+        "{}`postgres $DATABASE_URL` and a store block are two different forms; write one",
+        prefix(*at)
+    )]
+    StoreTwoForms {
+        /// Where the second form starts.
+        at: Position,
+    },
+    /// A store block with no slot (§6.7).
+    #[error(
+        "{}a store block declares at least one slot: `postgres {{ host $DB_HOST; database $DB_DATABASE }}`",
+        prefix(*at)
+    )]
+    EmptyStoreBlock {
+        /// Where the block opens.
+        at: Position,
+    },
+    /// `url` inside a store block (§6.7).
+    #[error(
+        "{}`url` is the one-line form; write `postgres $DATABASE_URL` (or a named `postgres db $DATABASE_URL`)",
+        prefix(*at)
+    )]
+    UrlSlot {
+        /// Where the `url` word is.
+        at: Position,
+    },
+    /// A slot written twice in one store block (§6.7).
+    #[error(
+        "{}`{slot}` is written twice; a store block names each slot once",
+        prefix(*at)
+    )]
+    DuplicateSlot {
+        /// Where the second slot is.
+        at: Position,
+        /// The slot's keyword.
+        slot: &'static str,
+    },
+    /// A directive inside a `trait` that is not a `postgres` grant (§6.7,
+    /// §11.3).
+    #[error(
+        "{}a trait holds `postgres` blocks only; {what} belongs {place}",
+        prefix(*at)
+    )]
+    TraitHoldsGrantsOnly {
+        /// Where the directive is.
+        at: Position,
+        /// The directive, in backticks.
+        what: String,
+        /// Where it belongs instead.
+        place: &'static str,
+    },
+    /// A `postgres` grant inside an endpoint block (§6.7).
+    #[error(
+        "{}a grant is per view; write the `postgres` block in the view body, where it applies to every endpoint",
+        prefix(*at)
+    )]
+    GrantIsPerView {
+        /// Where the `postgres` word is.
+        at: Position,
+    },
+    /// `unvalidated` on a codec that already validates (§6.7).
+    #[error(
+        "{}`unvalidated` acknowledges `raw` only; `body {}` already validates the body",
+        prefix(*at),
+        clipped(codec)
+    )]
+    UnvalidatedNeedsRaw {
+        /// Where the `unvalidated` word is.
+        at: Position,
+        /// The codec the `body` directive declared.
+        codec: String,
+    },
+    /// `body` with no codec (§6.7).
+    #[error("{}`body` needs a codec: `json`, `form`, `none` or `raw`", prefix(*at))]
+    BodyNeedsCodec {
+        /// Where the missing codec would start.
+        at: Position,
+    },
+    /// A word after `body` that is not a codec (§6.7).
+    #[error(
+        "{}`{}` is not a codec; the codecs are `json`, `form`, `none`, `raw`",
+        prefix(*at),
+        clipped(codec)
+    )]
+    UnknownCodec {
+        /// Where the word is.
+        at: Position,
+        /// The word as written.
+        codec: String,
+    },
+    /// `workers`, removed in 0.2.0 (§6.7, §12.3).
+    #[error(
+        "{}`workers` was removed in 0.2.0: the scheduler owns parallelism, so delete the line and add nothing",
+        prefix(*at)
+    )]
+    WorkersRemoved {
+        /// Where the `workers` word is.
+        at: Position,
+    },
+    /// A directive other than `preload` inside `entrypoint python`'s block
+    /// (§6.7).
+    #[error(
+        "{}the `entrypoint python` block holds `preload` only",
+        prefix(*at)
+    )]
+    EntrypointBlockHoldsPreload {
+        /// Where the directive is.
+        at: Position,
+    },
+    /// A second `entrypoint` (§6.7).
+    #[error(
+        "{}a file declares one `entrypoint`; the first is on line {first}",
+        prefix(*at)
+    )]
+    DuplicateEntrypoint {
+        /// Where the second `entrypoint` is.
+        at: Position,
+        /// The line of the first `entrypoint`.
+        first: u32,
+    },
+    /// A `}` with no open block (§6.7).
+    #[error(
+        "{}`}}` closes nothing; the last open block is line {opened}",
+        prefix(*at)
+    )]
+    StrayCloseBrace {
+        /// Where the `}` is.
+        at: Position,
+        /// The line of the most recently opened block.
+        opened: u32,
+    },
+    /// A block that is not closed before the end of the file (§6.7).
+    #[error(
+        "{}the block opened on line {opened} is not closed before the end of the file",
+        prefix(*at)
+    )]
+    UnclosedBlock {
+        /// Where the file ends.
+        at: Position,
+        /// The line of the `{` that opened the block.
+        opened: u32,
+    },
+    /// A list whose first item is a `,` (§6.7).
+    #[error("{}a list cannot start with `,`", prefix(*at))]
+    ListStartsWithComma {
+        /// Where the `,` is.
+        at: Position,
+    },
+    /// A list with a trailing `,` (§6.7).
+    #[error("{}a list has no trailing comma; delete the `,`", prefix(*at))]
+    TrailingComma {
+        /// Where the `,` is.
+        at: Position,
+    },
+    /// A third nested block (§4.5, §6.7).
+    #[error(
+        "{}blocks nest two deep at most: a view's `postgres` block is the deepest",
+        prefix(*at)
+    )]
+    BlockTooDeep {
+        /// Where the third `{` is.
+        at: Position,
+    },
+    /// A name that is not `[a-z0-9][a-z0-9_-]*` (§6.7).
+    #[error(
+        "{}`{}` is not a name; a view, trait or store name is `[a-z0-9][a-z0-9_-]*`",
+        prefix(*at),
+        clipped(name)
+    )]
+    InvalidName {
+        /// Where the name is.
+        at: Position,
+        /// The word as written.
+        name: String,
+    },
+    /// A view, trait or store declared twice (§6.7).
+    ///
+    /// `kind` is `view`, `trait` or `store`; `name` is the duplicated name.
+    #[error(
+        "{}`{kind} \"{}\"` is declared twice; the first is on line {first}",
+        prefix(*at),
+        clipped(name)
+    )]
+    DuplicateName {
+        /// Where the second declaration is.
+        at: Position,
+        /// Which kind of name was duplicated.
+        kind: &'static str,
+        /// The duplicated name.
+        name: String,
+        /// The line of the first declaration.
+        first: u32,
+    },
+    /// `body` twice in one view (§6.7).
+    #[error(
+        "{}`body` is declared once per view; the one for a single method goes inside that endpoint",
+        prefix(*at)
+    )]
+    DuplicateBody {
+        /// Where the second `body` is.
+        at: Position,
+    },
+    /// Two `postgres` blocks for one store in one view (§6.7).
+    #[error(
+        "{}`postgres` is declared once per store in a view; put both grants in one block",
+        prefix(*at)
+    )]
+    DuplicateGrant {
+        /// Where the second grant is.
+        at: Position,
+    },
+    /// `body` twice in one endpoint (§6.7).
+    #[error("{}`body` is declared once per endpoint", prefix(*at))]
+    DuplicateEndpointBody {
+        /// Where the second `body` is.
+        at: Position,
+    },
+    /// A `.` outside a `functions` name (§6.7).
+    #[error(
+        "{}`.` is only part of a qualified function name: `functions pg_catalog.st_distance`",
+        prefix(*at)
+    )]
+    DotOutsideFunction {
+        /// Where the `.` is.
+        at: Position,
+    },
+    /// A byte the lexer carried as `Unknown` (§5.1, §5.3).
+    ///
+    /// §5.1 gives any other byte to `Unknown` "so the parser can name it in
+    /// hex"; this is that sentence, at the byte's own position.
+    #[error("{}byte 0x{byte:x} is not Blastfile syntax", prefix(*at))]
+    UnknownByte {
+        /// Where the byte is.
+        at: Position,
+        /// The byte as written.
+        byte: u8,
+    },
+    /// A list over §4.5's item cap.
+    #[error(
+        "{}a list holds at most {} items",
+        prefix(*at),
+        crate::blastfile::MAX_LIST_ITEMS
+    )]
+    TooManyListItems {
+        /// Where the first item past the cap is.
+        at: Position,
+    },
+    /// `unrestricted` where a store name belongs (§6.3).
+    #[error(
+        "{}`unrestricted` is a grant keyword, not a store name; write `postgres unrestricted` for the default store",
+        prefix(*at)
+    )]
+    StoreNameReserved {
+        /// Where the `unrestricted` word is.
+        at: Position,
+    },
+    /// `regex` in a pattern list with no raw string after it (§6.3).
+    ///
+    /// The reserved-word row: `regex` carries a directive meaning wherever a
+    /// pattern could appear, so it must be followed by a raw string. §8.3's
+    /// [`ManifestError::RegexNeedsRawString`] is the narrower row for the
+    /// escaped-string spelling.
+    #[error(
+        "{}`regex` must be followed by a raw string: `regex '/v[0-9]+/items'`",
+        prefix(*at)
+    )]
+    RegexWithoutRawString {
+        /// Where the token after `regex` is.
+        at: Position,
+    },
+    /// `regex` followed by an escaped string (§6.1, §8.3).
+    #[error(
+        "{}`regex` takes a raw string: write `regex '/v[0-9]+/items'`",
+        prefix(*at)
+    )]
+    RegexNeedsRawString {
+        /// Where the `"…"` string is.
+        at: Position,
+    },
+    /// A token the grammar cannot use where it stands.
+    ///
+    /// §6.7 pins a sentence for every *word* a developer is likely to write in
+    /// the wrong place, and §5.3/§5.1 pin the `=`, the `.` and an unknown byte;
+    /// this is the one refusal left for a token that is not a word at all — a
+    /// string where a keyword belongs, a `{` where a value belongs. Both slots
+    /// are fixed descriptions (a token class, a punctuation spelling, or a
+    /// `Word`/`$IDENT` as written), so no value that could be a credential is
+    /// ever echoed (§18).
+    #[error("{}expected {expected}, found {found}", prefix(*at))]
+    Unexpected {
+        /// Where the token is.
+        at: Position,
+        /// What the grammar allows there.
+        expected: &'static str,
+        /// What is there instead.
+        found: String,
+    },
 }
 
 /// Something suspicious that does not stop the server from starting (§6).

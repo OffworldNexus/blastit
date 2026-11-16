@@ -12,13 +12,19 @@
 //! printer consume the same stream: `Token::leading` names the trivia before a
 //! token, which is what makes an untouched file printable byte for byte.
 //!
+//! `parser::parse` is the one parse: LL(1), one token of lookahead, and
+//! `syntax::Cst` is its only product — the lossless arena of §14.1 that `lower`
+//! and `print` both walk. Every refusal is one line at the offending token's
+//! `line:col`, and the two budgets that bound the tree (`MAX_BLOCK_DEPTH`,
+//! `MAX_LIST_ITEMS`) are checked where §4.5 puts them.
+//!
 //! Nothing here reads the environment, and nothing resolves a `$IDENT`: a name
 //! is a name, and its value is the builder's business (§17.2, R20/R24).
 
-// The lexer, its types and the parser that follows are consumed by the public
-// entry points `MB.21.3.8` adds; until then only this module's tests call them,
-// so staged code is allowed to be unreachable in a non-test build. Delete this
-// line when `Manifest::from_blastfile_str` lands.
+// The lexer, its types, the CST and the parser are consumed by the public
+// entry points `MB.21.3.8` adds; until then only this module's tests call
+// them, so staged code is allowed to be unreachable in a non-test build.
+// Delete this line when `Manifest::from_blastfile_str` lands.
 #![cfg_attr(not(test), allow(dead_code))]
 #![forbid(unsafe_code)]
 #![deny(
@@ -30,6 +36,8 @@
 )]
 
 mod lexer;
+mod parser;
+mod syntax;
 mod tokens;
 
 use std::io::Read as _;
@@ -45,6 +53,14 @@ pub(crate) const MAX_TOKENS: usize = 262_144;
 
 /// Most trivia runs one `Blastfile` may hold (§4.5).
 pub(crate) const MAX_TRIVIA: usize = 262_144;
+
+/// Deepest block nesting the grammar allows (§4.5): `view { postgres { … } }`
+/// and `view { GET "…" { body … } }` are two, and a third is refused.
+pub(crate) const MAX_BLOCK_DEPTH: u32 = 2;
+
+/// Most items one list may hold (§4.5): methods, patterns, columns, preload
+/// modules, `immutable` patterns and table grants.
+pub(crate) const MAX_LIST_ITEMS: usize = 256;
 
 /// Reads a `Blastfile`: a regular file of at most 1 MiB.
 ///

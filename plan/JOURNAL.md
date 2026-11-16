@@ -2042,3 +2042,24 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T03:56 [MB.21.3.1] (lead) reviewer verdict PASS (attempt 1). 3 MINOR: (1) check_manifest_purity.py's needle misses / spellings -> epic follow-up for the guard's owner (5.2/5.3), gate is 
 - 2026-11-16T03:56 [MB.21.3.1] (lead) status review -> done
 - 2026-11-16T03:56 [MB.21.3.1] (lead) reviewer verdict PASS (attempt 1). 3 MINOR, none blocking: (1) the purity script needle is a literal substring, so a "use std::{env}" + "env::var" spelling evad
+- 2026-11-16T03:56 [MB.21.3.1] (lead) commit 58c8ed9
+- 2026-11-16T03:56 [MB.21.3.2] (lead) status ready -> active
+- 2026-11-16T03:56 [MB.21.3.2] (lead) attempt 1/3 started
+- 2026-11-16T03:56 [MB.21.3.2] (lead) base 58c8ed9760ab3bd4510cc8edc96e6ab333dea405
+- 2026-11-16T04:19 HUMAN H-012 opened by implementer (node MB.21.3.2)
+- 2026-11-16T04:25 [MB.21.3.2] (lead) Attempt 1 done. Deviations reviewed by the lead and accepted: D1 one catch-all "expected …, found <class>" sentence for the non-word residue (H-012 for the owne
+- 2026-11-16T04:25 [MB.21.3.2] (lead) status active -> review
+- 2026-11-16T04:26 [MB.21.3.8] (conductor) Confirmed H-012 catch-all syntax-error sentence from MB.21.3.2: '<l>:<c>: expected <what the grammar allows>, found <token class |  |  | punctuation>' (string l
+- 2026-11-16T04:26 HUMAN H-012 closed by conductor
+- 2026-11-16T04:26 [MB.21.3.8] (conductor) Confirmed H-012 catch-all syntax-error sentence from MB.21.3.2: "<l>:<c>: expected <what the grammar allows>, found <token class | word | $NAME | punctuation>" 
+- 2026-11-16T04:27 [MB.21.3.8] (conductor) Note (exact wording for H-012): "<l>:<c>: expected <what the grammar allows>, found <token class | `word` | `$NAME` | punctuation>" — string literals named by c
+- 2026-11-16T04:31 [MB.21.3.2] (lead) REVIEW FAIL (attempt 1): 2 MAJOR, both test/pinned-sentence gaps, plus 5 MINOR. MAJORa: a lower-case method inside a view block yields the generic "not a direct
+- 2026-11-16T04:31 [MB.21.3.2] (lead) status review -> ready
+- 2026-11-16T04:31 [MB.21.3.2] (lead) status ready -> active
+- 2026-11-16T04:31 [MB.21.3.2] (lead) attempt 2/3 started
+- 2026-11-16T04:31 [MB.21.3.2] (lead) base 58c8ed9760ab3bd4510cc8edc96e6ab333dea405 (attempt 2; no commits since)
+- 2026-11-16T04:38 [MB.21.3.2] (lead) status active -> review
+- 2026-11-16T04:38 [MB.21.3.2] (lead) attempt 2 reported done; re-review (fresh reviewer, base 58c8ed9) on both MAJORs and a regression sweep.
+- 2026-11-16T04:45 [MB.21.3.2] (lead) edited fields
+- 2026-11-16T04:45 [MB.21.3.2] (lead) reviewer verdict PASS (attempt 2): both MAJORs verified closed, the keyword split pinned both ways. 3 MINOR: (1) top-level `root`/`body`/... answer "is not a ke
+- 2026-11-16T04:45 [MB.21.3.2] (lead) status review -> done

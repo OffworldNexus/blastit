@@ -47,3 +47,7 @@ status review -> done
 ## 2026-11-16T03:56 [lead]
 
 reviewer verdict PASS (attempt 1). 3 MINOR, none blocking: (1) the purity script needle is a literal substring, so a "use std::{env}" + "env::var" spelling evades R24 -- recorded as an epic follow-up for the guard owner; (2) error.rs Equals/QuotedStore variants are constructed by the parser (3.8), so their line:col rendering lands there; (3) Position::is_none tests line == 0 only -- 3.8 note.
+
+## 2026-11-16T03:56 [lead]
+
+commit 58c8ed9
