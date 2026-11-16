@@ -600,25 +600,11 @@ pub struct World {
     run: Option<JoinHandle<Result<(), SchedulerError>>>,
 }
 
-/// Which reader [`Options::manifest`] or [`Options::blastfile`] staged the
-/// source for.
-///
-/// The world boots through the same two entry points the product does, so a
-/// test that writes `static "/assets"` proves the scheduler over a `Blastfile`
-/// rather than over a lowering of the reader it replaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Source {
-    /// The retired reader, for the suites whose fixtures are still TOML.
-    Toml,
-    /// The one parser the product reads: `Manifest::from_blastfile_str`.
-    Blastfile,
-}
-
 /// The knobs a test turns before [`World::start`].
 pub struct Options {
     pub cfg: SchedulerConfig,
+    /// The `Blastfile` the world boots, as a user would write it.
     pub manifest: String,
-    pub source: Source,
     pub scripts: Arc<Mutex<HashMap<usize, Script>>>,
     pub exit_on_retire: bool,
     /// A fake memory model whose usage the fake init grows on every fork.
@@ -626,8 +612,8 @@ pub struct Options {
 }
 
 impl Options {
-    /// The default configuration and a one-route manifest that matches
-    /// everything.
+    /// The default configuration and a one-view `Blastfile` that matches
+    /// everything, with the unacknowledged `raw` body a streaming test needs.
     pub fn new() -> Self {
         Self {
             cfg: SchedulerConfig {
@@ -637,27 +623,17 @@ impl Options {
                 request_timeout: Duration::from_secs(30),
                 ..SchedulerConfig::default()
             },
-            manifest: "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
-                 [route.ingress]\nbody = \"raw\"\nallow_raw = true\n"
-                .to_string(),
-            source: Source::Toml,
+            manifest: "view app \"/*\" {\n  body raw unvalidated\n}\n".to_string(),
             scripts: Arc::new(Mutex::new(HashMap::new())),
             exit_on_retire: true,
             memory_model: None,
         }
     }
 
-    /// Replaces the manifest.
-    pub fn manifest(mut self, source: &str) -> Self {
-        self.manifest = source.to_string();
-        self.source = Source::Toml;
-        self
-    }
-
-    /// Replaces the manifest with a `Blastfile`, read by the product's parser.
+    /// Replaces the manifest with a `Blastfile`, read by the product's one
+    /// parser ([`Manifest::from_blastfile_str`]).
     pub fn blastfile(mut self, source: &str) -> Self {
         self.manifest = source.to_string();
-        self.source = Source::Blastfile;
         self
     }
 
@@ -689,11 +665,7 @@ impl Default for Options {
 impl World {
     /// Starts the scheduler with a fake init and a fake client.
     pub fn start(options: Options) -> Self {
-        let manifest = match options.source {
-            Source::Toml => Manifest::from_toml_str(&options.manifest),
-            Source::Blastfile => Manifest::from_blastfile_str(&options.manifest),
-        }
-        .expect("valid manifest");
+        let manifest = Manifest::from_blastfile_str(&options.manifest).expect("valid manifest");
         let table = RoutingTable::new(&manifest).expect("valid routing table");
         let routes = routes_from_manifest(&manifest, &UidLayout::default());
         // The mounts are the file's, not a route's (§9.2): the real boot hands
@@ -1479,9 +1451,12 @@ pub fn aborted(frames: &[Frame]) -> bool {
     matches!(frames.last(), Some(Frame::RespAbort { .. }))
 }
 
-/// A manifest route source line.
+/// A one-view `Blastfile` source line: `view <name> regex '<path>'`.
+///
+/// The pattern is the v1 regex verbatim, so a suite states the path rule it
+/// always did and the one parser compiles it (§8.1).
 pub fn route(name: &str, path: &str) -> String {
-    format!("[[route]]\nname = \"{name}\"\npath = ['{path}']\n")
+    format!("view {name} regex '{path}' {{}}\n")
 }
 
 /// Waits until a view holds a request, and gives back that request's id.

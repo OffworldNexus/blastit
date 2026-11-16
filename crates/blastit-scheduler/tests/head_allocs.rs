@@ -7,11 +7,11 @@
 //! scheduler would take it, and the two totals are compared with a counting
 //! allocator.
 //!
-//! The same allocator answers the other half of `begin_raw`: a route with no
-//! `[route.ingress]` may only hold an empty body, which the scheduler decides
-//! from the policy alone — so it never copies the method or a header out of the
-//! head. One route with `body = "none"` (the same plan, read from the head) and
-//! the same route without a policy differ by exactly those three copies.
+//! The same allocator answers the other half of `begin_raw`: a view with no
+//! `body` may only hold an empty body, which the scheduler decides from the
+//! policy alone — so it never copies the method or a header out of the head.
+//! One view with `body none` (the same plan, read from the head) and the same
+//! view without a policy differ by exactly those three copies.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -175,26 +175,14 @@ fn a_raw_head_is_forwarded_for_far_fewer_allocations_than_a_decoded_one() {
 // `R12`: a route with no ingress policy never reads the head
 // ---------------------------------------------------------------------------
 
-/// One route, declaring no `[route.ingress]`: `plan_body` says
-/// `AllowEmptyOnly` from the policy alone, so nothing in the head is read.
-const PLAIN_ROUTE: &str = "\
-version = 1
-[[route]]
-name = \"app\"
-path = ['/app/']
-";
+/// One view, declaring no `body`: `plan_body` says `AllowEmptyOnly` from the
+/// policy alone, so nothing in the head is read.
+const PLAIN_ROUTE: &str = "view app \"/app/\" {}\n";
 
-/// The same route declaring `body = "none"`. Its plan is `AllowEmptyOnly` too,
-/// so the only difference the two manifests can make is whether the scheduler
-/// has a policy to consult — and therefore whether it reads the head.
-const NONE_ROUTE: &str = "\
-version = 1
-[[route]]
-name = \"app\"
-path = ['/app/']
-[route.ingress]
-body = \"none\"
-";
+/// The same view declaring `body none`. Its plan is `AllowEmptyOnly` too, so
+/// the only difference the two manifests can make is whether the scheduler has
+/// a policy to consult — and therefore whether it reads the head.
+const NONE_ROUTE: &str = "view app \"/app/\" {\n  body none\n}\n";
 
 /// The head both worlds receive: a `POST` with a content type, a content
 /// encoding and a zero length, so the policy path copies three `String`s out
@@ -281,7 +269,7 @@ async fn per_head(world: &mut World, target: &str, iterations: usize) -> usize {
 /// pass is comparable across worlds.
 async fn steady_state(manifest: &str) -> (usize, usize) {
     const ITERATIONS: usize = 100;
-    let mut world = World::start(Options::new().manifest(manifest));
+    let mut world = World::start(Options::new().blastfile(manifest));
     warm_up(&mut world, "/app/").await;
     let _settle = per_head(&mut world, "/app/", ITERATIONS).await;
     (per_head(&mut world, "/app/", ITERATIONS).await, ITERATIONS)

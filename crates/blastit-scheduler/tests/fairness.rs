@@ -22,10 +22,9 @@ use blastit_frame::{ClientIpConfig, Frame, RequestCost};
 use common::{Options, Script, World, body_of, head, head_from, status_of};
 use tokio::sync::Semaphore;
 
-/// The manifest with two routes for the blocked-head tests: `/a/…` and `/b/…`.
-const TWO_ROUTES: &str = "version = 1\n\
-     [[route]]\nname = \"a\"\npath = ['/a/.*']\n\
-     [[route]]\nname = \"b\"\npath = ['/b/.*']\n";
+/// The manifest with two views for the blocked-head tests: `/a/*` and `/b/*`.
+const TWO_ROUTES: &str = "view a \"/a/*\" {}\n\
+     view b \"/b/*\" {}\n";
 
 /// A view that answers with `body` and reports `cost` for every request.
 fn reporting(body: &[u8], cost: RequestCost, gate: Arc<Semaphore>) -> Script {
@@ -113,7 +112,7 @@ async fn with_fair_queuing_off_a_blocked_head_does_not_hold_up_another_route() {
     // request must still go out: §2.4's FIFO skips what it cannot serve rather
     // than letting the head hold the queue (D5 keeps that walk untouched).
     let mut options = Options::new()
-        .manifest(TWO_ROUTES)
+        .blastfile(TWO_ROUTES)
         .script(
             0,
             Script::NeverReady {
@@ -144,7 +143,7 @@ async fn with_fair_queuing_on_a_blocked_head_does_not_hold_up_another_route() {
     // The same walk, with the fair order: a route that cannot take a request is
     // not one of the candidates, so it cannot hold up the routes that can.
     let mut options = Options::new()
-        .manifest(TWO_ROUTES)
+        .blastfile(TWO_ROUTES)
         .script(
             0,
             Script::NeverReady {

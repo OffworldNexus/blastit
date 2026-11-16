@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 
 fn two_routes() -> String {
-    format!("version = 1\n{}{}", route("a", "/a/"), route("b", "/b/"))
+    format!("{}{}", route("a", "/a/"), route("b", "/b/"))
 }
 
 #[tokio::test]
@@ -21,7 +21,7 @@ async fn frames_for_unknown_request_ids_are_dropped() {
     tokio::time::pause();
     let mut world = World::start(
         Options::new()
-            .manifest(&two_routes())
+            .blastfile(&two_routes())
             .script(
                 0,
                 Script::ForeignId {
@@ -61,7 +61,7 @@ async fn frames_for_unknown_request_ids_are_dropped() {
 #[tokio::test]
 async fn one_route_never_gets_a_second_process_while_the_first_lives() {
     tokio::time::pause();
-    let mut world = World::start(Options::new().manifest(&two_routes()).script(
+    let mut world = World::start(Options::new().blastfile(&two_routes()).script(
         0,
         Script::Answer {
             body: b"a".to_vec(),

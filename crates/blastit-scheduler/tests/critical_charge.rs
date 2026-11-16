@@ -83,11 +83,8 @@ const SETTLE: usize = 256;
 /// The two routes the queue-wait legs need: `first`'s view takes the only
 /// worker slot, `second`'s request waits behind it — which is the queue wait a
 /// scheduler-written answer must never bill (`MB.3.45`).
-const TWO_ROUTES: &str = "version = 1\n\
-    [[route]]\nname = \"first\"\npath = [\"/first\"]\n\
-    [route.ingress]\nbody = \"raw\"\nallow_raw = true\n\
-    [[route]]\nname = \"second\"\npath = [\"/second\"]\n\
-    [route.ingress]\nbody = \"raw\"\nallow_raw = true\n";
+const TWO_ROUTES: &str = "view first \"/first\" {\n  body raw unvalidated\n}\n\
+    view second \"/second\" {\n  body raw unvalidated\n}\n";
 
 /// A world whose `first` route answers at once and holds its `DONE` until
 /// [`World::advance`] lets it go, with `second`'s view scripted by `second`.
@@ -96,7 +93,7 @@ const TWO_ROUTES: &str = "version = 1\n\
 /// the request that timed out held a worker only from then on.
 async fn queued_second_request(second: Script) -> World {
     let gate = Arc::new(Notify::new());
-    let mut options = Options::new().manifest(TWO_ROUTES);
+    let mut options = Options::new().blastfile(TWO_ROUTES);
     // One worker slot: `second` cannot run until `first` says `DONE`.
     options.cfg.max_workers = 1;
     let mut world = World::start(

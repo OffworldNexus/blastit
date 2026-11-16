@@ -21,11 +21,10 @@ use tokio::sync::Semaphore;
 /// One mebibyte, for arithmetic that reads the way §8 writes it.
 const MIB: u64 = 1024 * 1024;
 
-/// A two-route manifest: `/a/` and `/b/`, both answering.
+/// A two-view `Blastfile`: `/a/` (taking a raw body) and `/b/`, both answering.
 fn two_routes() -> String {
     format!(
-        "version = 1\n{}[route.ingress]\nbody = \"raw\"\nallow_raw = true\n{}",
-        route("a", "/a/"),
+        "view a \"/a/\" {{ body raw unvalidated }}\n{}",
         route("b", "/b/")
     )
 }
@@ -33,7 +32,7 @@ fn two_routes() -> String {
 /// A configurable world where both routes answer immediately.
 fn answering() -> Options {
     Options::new()
-        .manifest(&two_routes())
+        .blastfile(&two_routes())
         .script(
             0,
             Script::Answer {
@@ -252,13 +251,12 @@ async fn the_derived_cap_replaces_an_unset_max_view_processes() {
 async fn the_derived_cap_bounds_the_initial_prefork_burst() {
     tokio::time::pause();
     // Three preforked routes, and room for exactly one view process.
-    let manifest = "version = 1\n\
-        [[route]]\nname = \"a\"\npath = ['/a/']\nprefork = true\n\
-        [[route]]\nname = \"b\"\npath = ['/b/']\nprefork = true\n\
-        [[route]]\nname = \"c\"\npath = ['/c/']\nprefork = true\n";
+    let manifest = "view a \"/a/\" {\n  prefork\n}\n\
+        view b \"/b/\" {\n  prefork\n}\n\
+        view c \"/c/\" {\n  prefork\n}\n";
     let usage = Arc::new(AtomicU64::new(900 * MIB));
     let probe = usage.clone();
-    let mut options = Options::new().manifest(manifest);
+    let mut options = Options::new().blastfile(manifest);
     options.cfg.memory_usage = Some(MemoryProbe::new(move || {
         Some(probe.load(Ordering::Relaxed))
     }));
@@ -329,10 +327,10 @@ async fn without_a_memory_total_the_cap_stays_unset() {
     assert!(world.log.lock().unwrap().retires.is_empty());
 }
 
-/// A three-route manifest: `/a/`, `/b/` and `/c/`, all answering.
+/// A three-view `Blastfile`: `/a/`, `/b/` and `/c/`, all answering.
 fn three_routes() -> String {
     format!(
-        "version = 1\n{}{}{}",
+        "{}{}{}",
         route("a", "/a/"),
         route("b", "/b/"),
         route("c", "/c/")
@@ -342,7 +340,7 @@ fn three_routes() -> String {
 /// A world where every one of the three routes answers at once.
 fn three_answering() -> Options {
     Options::new()
-        .manifest(&three_routes())
+        .blastfile(&three_routes())
         .script(
             0,
             Script::Answer {

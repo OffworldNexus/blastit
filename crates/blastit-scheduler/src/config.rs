@@ -277,12 +277,12 @@ pub struct SchedulerConfig {
     /// `BLASTIT_VIEW_MEM_ESTIMATE`, in bytes: what one more view process is
     /// expected to cost.
     pub view_mem_estimate: u64,
-    /// The directory holding `blastit.toml`, absolute: static roots are
-    /// declared relative to it (design §4.7).
+    /// The manifest's directory, absolute: static roots are declared relative
+    /// to it (design §4.7).
     ///
     /// Stage 1 sets it once, from the manifest path it discovered; the
     /// scheduler never re-derives it. Empty means "not set", which only
-    /// matters to a route that declares `[route.static]`.
+    /// matters to a manifest that declares a `static` mount.
     pub manifest_dir: PathBuf,
     /// The largest static file served, in bytes: `STATIC_MAX_FILE_BYTES`, with
     /// no environment variable and no manifest key (design §4.6).

@@ -22,23 +22,21 @@ use blastit_manifest::Manifest;
 use common::{Options, Script, World, body_of, ended, head, route, status_of};
 use tokio::sync::Semaphore;
 
-/// A one-route manifest with the given `[route.ingress]` body codec.
+/// A one-view `Blastfile` with the given `body` codec, and `unvalidated` only
+/// when `allow_raw` says so.
 fn ingress_manifest(path: &str, body: &str, allow_raw: bool) -> String {
-    let allow = if allow_raw { "allow_raw = true\n" } else { "" };
-    format!(
-        "version = 1\n[[route]]\nname = \"upload\"\npath = ['{path}']\n\
-         [route.ingress]\nbody = \"{body}\"\n{allow}"
-    )
+    let allow = if allow_raw { " unvalidated" } else { "" };
+    format!("view upload \"{path}\" {{\n  body {body}{allow}\n}}\n")
 }
 
-/// A one-route manifest with **no** `[route.ingress]`, so the route takes no
+/// A one-view `Blastfile` with **no** `body` directive, so the route takes no
 /// body at all (`R12`).
 ///
 /// The pattern covers the sub-paths the tests use to tell one request from
 /// another in the view's log: a view numbers its own requests from one, so the
 /// path is the only stable name for "this head, not that one".
 fn ingress_less_manifest() -> String {
-    format!("version = 1\n{}", route("app", "/app/.*"))
+    "view app \"/app/*\" {}\n".to_string()
 }
 
 /// A `Blastfile` whose mount claims **every** path (`static "/"`) and whose view
@@ -126,7 +124,7 @@ async fn raw_streams_chunk_one_to_the_view_before_chunk_two() {
     // client still holds the second.
     let mut world = World::start(
         Options::new()
-            .manifest(&ingress_manifest("/upload/", "raw", true))
+            .blastfile(&ingress_manifest("/upload/", "raw", true))
             .script(
                 0,
                 Script::Consume {
@@ -197,7 +195,7 @@ async fn a_chunked_json_body_at_the_cap_is_accepted() {
     // body exactly at the cap is accepted.
     let json = b"[1,2,3]";
     let mut options = Options::new()
-        .manifest(&ingress_manifest("/json/", "json", false))
+        .blastfile(&ingress_manifest("/json/", "json", false))
         .script(
             0,
             Script::Answer {
@@ -231,7 +229,7 @@ async fn a_valid_chunked_json_body_reaches_the_view_canonically() {
     let canonical = "{\"a\":\"\u{e9}\",\"b\":1.0}";
     let mut world = World::start(
         Options::new()
-            .manifest(&ingress_manifest("/json/", "json", false))
+            .blastfile(&ingress_manifest("/json/", "json", false))
             .script(
                 0,
                 Script::Answer {
@@ -326,7 +324,7 @@ async fn a_buffered_body_over_the_cap_is_refused_before_req_end() {
     let json = b"{\"a\":1234}";
     assert_eq!(json.len(), 10);
     let mut options = Options::new()
-        .manifest(&ingress_manifest("/json/", "json", false))
+        .blastfile(&ingress_manifest("/json/", "json", false))
         .script(
             0,
             Script::Answer {
@@ -366,10 +364,9 @@ async fn a_buffered_body_over_the_cap_is_refused_before_req_end() {
 
 #[tokio::test]
 async fn a_non_empty_body_on_an_ingress_less_route_is_413() {
-    // `R12`: a route that declared no `[route.ingress]` takes no body at all,
+    // `R12`: a view that declared no `body` takes no body at all,
     // and the scheduler answers `413` before a view runs.
-    let mut world =
-        World::start(Options::new().manifest(&format!("version = 1\n{}", route("app", "/app/"))));
+    let mut world = World::start(Options::new().blastfile(&route("app", "/app/")));
 
     let mut request = head("POST", "/app/");
     request
@@ -390,7 +387,7 @@ async fn a_non_empty_body_on_an_ingress_less_route_is_413() {
 
 #[tokio::test]
 async fn a_non_empty_body_on_a_none_route_is_413() {
-    // The same rule for an explicit `body = "none"`, on the chunked path where
+    // The same rule for an explicit `body none`, on the chunked path where
     // the head alone cannot prove the body empty: the first byte is a `413`.
     //
     // No wait for the view here: the head is *not* dispatchable, so there is
@@ -398,7 +395,7 @@ async fn a_non_empty_body_on_a_none_route_is_413() {
     // never have seen the head — that is the whole point of the gate.
     let mut world = World::start(
         Options::new()
-            .manifest(&ingress_manifest("/none/", "none", false))
+            .blastfile(&ingress_manifest("/none/", "none", false))
             .script(0, Script::Silent),
     );
 
@@ -425,12 +422,12 @@ async fn a_non_empty_body_on_a_none_route_is_413() {
 #[tokio::test]
 async fn a_declared_body_on_an_ingress_less_route_is_413_from_the_head() {
     // `R12`, and the race `MB.21.4.8` measured: a route that declared no
-    // `[route.ingress]` must refuse a body **from the head**, before any byte
+    // the view's absent `body` must refuse a body **from the head**, before any byte
     // and before `REQ_END`. A view is already warm and answers on `REQ_HEAD`
     // (the WSGI app really does), so a head that were dispatched would race the
     // app's `200` against the required `413` — a 1 ms gap between head and body
     // made the `200` win 5/5 against a real `blastit dev`.
-    let mut world = World::start(Options::new().manifest(&ingress_less_manifest()).script(
+    let mut world = World::start(Options::new().blastfile(&ingress_less_manifest()).script(
         0,
         Script::Answer {
             body: b"ok".to_vec(),
@@ -505,7 +502,7 @@ async fn an_ingress_less_request_is_served_only_after_req_end() {
     // third request completes on the same `http.chan` (so the scheduler
     // necessarily handled every earlier frame), and both heads are still
     // unserved.
-    let mut world = World::start(Options::new().manifest(&ingress_less_manifest()).script(
+    let mut world = World::start(Options::new().blastfile(&ingress_less_manifest()).script(
         0,
         Script::Answer {
             body: b"ok".to_vec(),
@@ -555,7 +552,7 @@ async fn a_chunked_ingress_less_head_cannot_reach_the_view_before_req_end() {
     // cannot refuse it and cannot dispatch it either: the first byte is the
     // `413`, and the view must never see the head — no `REQ_HEAD`, so no app
     // response can win.
-    let mut world = World::start(Options::new().manifest(&ingress_less_manifest()).script(
+    let mut world = World::start(Options::new().blastfile(&ingress_less_manifest()).script(
         0,
         Script::Answer {
             body: b"ok".to_vec(),
@@ -653,7 +650,7 @@ async fn an_ingress_less_head_that_never_ends_is_a_bounded_503() {
     // A head with no `REQ_END` at all must not park a request: the wait is the
     // same `queue_timeout` bound a half-collected body has, so the client is
     // told to come back instead of holding a stream forever.
-    let mut options = Options::new().manifest(&ingress_less_manifest()).script(
+    let mut options = Options::new().blastfile(&ingress_less_manifest()).script(
         0,
         Script::Answer {
             body: b"ok".to_vec(),
@@ -687,7 +684,7 @@ async fn an_ingress_less_head_that_waits_holds_one_queue_slot_and_no_more() {
     // park an unbounded number of them, each holding its raw head. The barrier
     // is the second head's own answer, not a sleep — `queue_size = 2` is
     // already reached by the second waiting head, so it is the `503`.
-    let mut options = Options::new().manifest(&ingress_less_manifest()).script(
+    let mut options = Options::new().blastfile(&ingress_less_manifest()).script(
         0,
         Script::Answer {
             body: b"ok".to_vec(),
@@ -731,15 +728,13 @@ async fn concurrent_unrouted_learn_requests_queue_behind_one_slot() {
     // `R26`: `--learn` never short-circuits an unrouted request, but it serves
     // exactly one at a time so `ObsTarget::Unrouted` attribution stays exact.
     let gate = Arc::new(Semaphore::new(0));
-    let mut options = Options::new()
-        .manifest(&format!("version = 1\n{}", route("known", "/known/")))
-        .script(
-            0,
-            Script::Hold {
-                body: b"held".to_vec(),
-                gate: gate.clone(),
-            },
-        );
+    let mut options = Options::new().blastfile(&route("known", "/known/")).script(
+        0,
+        Script::Hold {
+            body: b"held".to_vec(),
+            gate: gate.clone(),
+        },
+    );
     options.cfg.learn_mode = true;
     options.cfg.queue_timeout = Duration::from_secs(3600);
     let mut world = World::start(options);
@@ -791,15 +786,13 @@ async fn a_full_learn_fallback_queue_answers_503_instead_of_growing() {
     // `503` and a `Retry-After` instead of being buffered — an unauthenticated
     // scanner must not be able to grow that queue.
     let gate = Arc::new(Semaphore::new(0));
-    let mut options = Options::new()
-        .manifest(&format!("version = 1\n{}", route("known", "/known/")))
-        .script(
-            0,
-            Script::Hold {
-                body: b"held".to_vec(),
-                gate: gate.clone(),
-            },
-        );
+    let mut options = Options::new().blastfile(&route("known", "/known/")).script(
+        0,
+        Script::Hold {
+            body: b"held".to_vec(),
+            gate: gate.clone(),
+        },
+    );
     options.cfg.learn_mode = true;
     options.cfg.queue_size = 1;
     options.cfg.queue_timeout = Duration::from_secs(3600);
@@ -883,8 +876,9 @@ fn view_paths(world: &World, route: usize) -> Vec<String> {
 #[test]
 fn routes_from_manifest_carries_the_declared_ingress() {
     // The scheduler can only enforce a policy it actually received: prove the
-    // manifest's `[route.ingress]` reaches `RouteInfo`.
-    let manifest = Manifest::from_toml_str(&ingress_manifest("/upload/", "raw", true)).unwrap();
+    // view's `body` reaches `RouteInfo`.
+    let manifest =
+        Manifest::from_blastfile_str(&ingress_manifest("/upload/", "raw", true)).unwrap();
     let routes =
         blastit_scheduler::routes_from_manifest(&manifest, &blastit_manifest::UidLayout::default());
     assert_eq!(

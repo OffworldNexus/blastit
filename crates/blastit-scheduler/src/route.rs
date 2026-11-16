@@ -5,7 +5,7 @@
 //! keeps one [`RouteInfo`] per index, with the little that is not in the
 //! routing table but is needed to serve the request: the route's name (for
 //! events), whether its view is preforked, the uid its process runs under, and
-//! the `[route.ingress]` policy its request bodies are decoded with.
+//! the `body` policy its request bodies are decoded with.
 
 use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_manifest::{Manifest, UidLayout};
@@ -17,13 +17,13 @@ pub struct RouteInfo {
     /// event that belongs to it (§8.1).
     pub name: String,
     /// Whether the manifest asks for this view to exist at boot
-    /// (`prefork = true`, §6). It also overrides `BLASTIT_VIEW_SPAWN`.
+    /// (`prefork`, §6). It also overrides `BLASTIT_VIEW_SPAWN`.
     pub prefork: bool,
     /// The uid the view process runs under, `UID_BASE + 1000 + index` (§6).
     /// The scheduler never *uses* it — only init does — but events carry it.
     pub uid: u32,
-    /// The route's `[route.ingress]` policy (§4.2 A), or `None` when the route
-    /// declared none — which is fail-closed exactly like `body = "none"`.
+    /// The route's `body` policy (§4.2 A), or `None` when the view declared
+    /// none — which is fail-closed exactly like `body none`.
     pub ingress: Option<IngressPolicy>,
 }
 
@@ -38,8 +38,7 @@ impl RouteInfo {
         }
     }
 
-    /// This route with the `[route.ingress]` policy the manifest declared
-    /// (§4.2 A).
+    /// This route with the `body` policy the manifest declared (§4.2 A).
     pub fn with_ingress(mut self, ingress: Option<IngressPolicy>) -> Self {
         self.ingress = ingress;
         self
@@ -47,8 +46,8 @@ impl RouteInfo {
 
     /// The policy the scheduler enforces for this route's request bodies.
     ///
-    /// A route that declared no `[route.ingress]` takes no body at all, exactly
-    /// like `body = "none"` (§4.2 A: `None` at the use site is fail-closed).
+    /// A view that declared no `body` takes no body at all, exactly like
+    /// `body none` (§4.2 A: `None` at the use site is fail-closed).
     pub fn ingress_policy(&self) -> IngressPolicy {
         self.ingress.unwrap_or(IngressPolicy {
             body: BodyCodec::None,
@@ -64,8 +63,8 @@ impl RouteInfo {
 /// [`RoutingTable::route`] returns indices in, and which [`UidLayout::view`]
 /// numbers uids by.
 ///
-/// Each route carries its `[route.ingress]` policy, so the scheduler can plan a
-/// request body from the head alone (`R12`, `R16`). A route has no static
+/// Each route carries its `body` policy, so the scheduler can plan a request
+/// body from the head alone (`R12`, `R16`). A route has no static
 /// declaration any more: a `static "<prefix>"` mount is the file's, and a mount
 /// that misses always falls through to the view table (§9.2), so no route
 /// carries a "may forward" flag.
@@ -90,10 +89,9 @@ mod tests {
 
     #[test]
     fn routes_follow_manifest_order_and_the_uid_layout() {
-        let manifest = blastit_manifest::Manifest::from_toml_str(
-            "version = 1\n\
-             [[route]]\nname = \"first\"\npath = ['/a']\n\
-             [[route]]\nname = \"hot\"\npath = ['/b']\nprefork = true\n",
+        let manifest = blastit_manifest::Manifest::from_blastfile_str(
+            "view first \"/a\" {}\n\
+             view hot \"/b\" {\n  prefork\n}\n",
         )
         .unwrap();
         let layout = UidLayout::new(20_000);
@@ -118,7 +116,7 @@ mod tests {
             allow_raw: false,
         };
 
-        // Fail-closed: no `[route.ingress]` is `body = "none"`.
+        // Fail-closed: no `body` is `body none`.
         let plain = RouteInfo::new("plain", false, 7);
         assert_eq!(plain.ingress, None);
         assert_eq!(
@@ -144,29 +142,26 @@ mod tests {
             raw
         );
 
-        let manifest = blastit_manifest::Manifest::from_toml_str(
-            "version = 1\n[[route]]\nname = \"api\"\npath = ['/api']\n",
-        )
-        .unwrap();
+        let manifest =
+            blastit_manifest::Manifest::from_blastfile_str("view api \"/api\" {}\n").unwrap();
         assert_eq!(
             routes_from_manifest(&manifest, &UidLayout::new(20_000))[0].ingress,
             None
         );
     }
 
-    /// A `[route.static]` block is a **mount** now (§9.2): the route table is
-    /// the views only, so no `RouteInfo` carries a policy or a "may forward"
-    /// flag, and a mount that misses always falls through to the view table.
+    /// A `static` mount is a **mount**, not a route flag (§9.2): the route
+    /// table is the views only, so no `RouteInfo` carries a policy or a "may
+    /// forward" flag, and a mount that misses always falls through to the view
+    /// table.
     ///
-    /// The retired reader still lowers the block to a mount at `/`, which is
-    /// the shape the scheduler serves; adding it to the manifest changes no
-    /// route.
+    /// The mount declares the URL root itself, which is the shape the
+    /// scheduler serves; adding it to the manifest changes no route.
     #[test]
     fn a_static_block_is_a_mount_and_not_a_route_flag() {
-        let source = "version = 1\n\
-             [[route]]\nname = \"app\"\npath = ['.*']\n\
-             [route.static]\nroot = \"public\"\n";
-        let manifest = blastit_manifest::Manifest::from_toml_str(source).unwrap();
+        let source = "view app \"/*\" {}\n\
+             static \"/\" {\n  root \"public\"\n}\n";
+        let manifest = blastit_manifest::Manifest::from_blastfile_str(source).unwrap();
         assert_eq!(manifest.app(), None);
         assert_eq!(manifest.mounts().len(), 1);
         assert_eq!(manifest.mounts()[0].prefix, "/");

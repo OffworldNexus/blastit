@@ -238,8 +238,8 @@ fn a_miss_on_a_spa_route_answers_index_and_never_the_near_miss_file() {
     let tree = StaticTree::build(Fixture::S);
     let root = tree.open(Fixture::S, Backend::Openat2);
 
-    // Rows 14, 19, 31 and 38 are misses; with `spa = true` and an `app`
-    // declared the fallback still answers first (SPA outranks the front
+    // Rows 14, 19, 31 and 38 are misses; with a declared `fallback` and an
+    // `entrypoint` the fallback still answers first (SPA outranks the front
     // controller).
     for target in [
         "/dashboard/settings",
@@ -268,7 +268,7 @@ fn a_miss_forwards_only_with_an_app_and_keeps_every_method_and_body() {
     let root = tree.open(Fixture::F, Backend::Openat2);
 
     // `spa` is unset, so a miss is the app's: every method, and a declared body
-    // too, because the route's own `[route.ingress]` decides there (§4.4).
+    // too, because the view's own `body` decides there (§4.4).
     for method in METHODS {
         forwarded(decide(
             resolve(&root, "/missing"),
@@ -335,8 +335,8 @@ fn a_route_without_spa_answers_404_instead_of_falling_back() {
 
 #[test]
 fn a_refusal_is_final_even_with_a_spa_fallback_and_an_app_armed() {
-    // Fixture S has `spa = true`, so both traps — the fallback and the app —
-    // are armed for every row below.
+    // Fixture S declares a `fallback`, so both traps — the fallback and the app
+    // — are armed for every row below.
     let tree = StaticTree::build(Fixture::S);
     let root = tree.open(Fixture::S, Backend::Openat2);
     let long_path = format!("/{}.js", "a".repeat(4096));
@@ -413,8 +413,8 @@ fn a_refusal_is_final_even_with_a_spa_fallback_and_an_app_armed() {
 #[test]
 fn a_lost_spa_fallback_is_a_404_and_never_the_app() {
     let tree = StaticTree::build(Fixture::S);
-    // `spa = true` and `root/index` missing: step 8, final ("a fallback whose
-    // file is missing is a `404`").
+    // A declared `fallback` whose `root/index` is missing: step 8, final ("a
+    // fallback whose file is missing is a `404`").
     std::fs::remove_file(tree.path("index.html")).expect("remove the fallback");
     let root = tree.open(Fixture::S, Backend::Openat2);
 
@@ -447,7 +447,7 @@ fn the_method_gate_is_405_with_exactly_allow_get_head() {
 
     // A file, a directory index, the root index, the SPA fallback and the
     // `.well-known` token are all paths this responder answers — including
-    // `POST /dashboard` on a `spa = true` route.
+    // `POST /dashboard` on a route with a declared `fallback`.
     for target in [
         "/assets/app.4f1c2a9b7d3e.js",
         "/docs",
@@ -499,8 +499,8 @@ fn a_get_or_head_that_declares_a_body_is_413_and_the_method_gate_runs_first() {
         rejected(decide(resolve(&root, target), b"POST", true, true), 405);
     }
 
-    // A `Forward` keeps the app's own plan: the body is `[route.ingress]`'s
-    // business, and a miss without an app is still the 404.
+    // A `Forward` keeps the app's own plan: the body is the view's `body`
+    // directive's business, and a miss without an app is still the 404.
     forwarded(decide(StaticOutcome::Missing, b"GET", true, true));
     rejected(decide(StaticOutcome::Missing, b"GET", true, false), 404);
 }
@@ -601,18 +601,18 @@ fn the_status_mapping_is_total_over_every_outcome_and_every_request() {
 
 #[test]
 fn a_static_block_adds_no_matching_rule_and_mounts_are_the_files() {
-    let front_first = "version = 1\napp = \"app:app\"\n\n\
-         [[route]]\nname = \"app\"\npath = ['.*']\n\n\
-         [[route]]\nname = \"site\"\npath = ['.*']\n\n\
-         [route.static]\nroot = \"public\"\n";
-    let static_first = "version = 1\napp = \"app:app\"\n\n\
-         [[route]]\nname = \"site\"\npath = ['.*']\n\n\
-         [route.static]\nroot = \"public\"\n\n\
-         [[route]]\nname = \"app\"\npath = ['.*']\n";
+    let front_first = "entrypoint python \"app:app\"\n\n\
+         view app \"/*\" {}\n\n\
+         view site \"/*\" {}\n\n\
+         static \"/\" {\n  root \"public\"\n}\n";
+    let static_first = "entrypoint python \"app:app\"\n\n\
+         view site \"/*\" {}\n\n\
+         static \"/\" {\n  root \"public\"\n}\n\n\
+         view app \"/*\" {}\n";
 
-    // The route table is the views only: a `[route.static]` block adds no
-    // matching rule, and the first route in manifest order still wins (§9.2).
-    let manifest = Manifest::from_toml_str(front_first).unwrap();
+    // The route table is the views only: a `static` mount adds no matching
+    // rule, and the first view in file order still wins (§9.2).
+    let manifest = Manifest::from_blastfile_str(front_first).unwrap();
     let table = RoutingTable::new(&manifest).unwrap();
     let routes = routes_from_manifest(&manifest, &UidLayout::new(20_000));
     assert_eq!(
@@ -626,8 +626,8 @@ fn a_static_block_adds_no_matching_rule_and_mounts_are_the_files() {
             .all(|route| route.name != "site" || route.ingress.is_none())
     );
     assert_eq!(routes.len(), 2);
-    // The mount is beside the routes, at the URL root the retired reader gives
-    // it, and a lookup strips its prefix (§9.2).
+    // The mount is beside the routes, at the URL root it declares, and a
+    // lookup strips its prefix (§9.2).
     let mounts = MountTable::from_mounts(manifest.mounts());
     let found = mounts
         .lookup("/assets/app.js")
@@ -635,9 +635,9 @@ fn a_static_block_adds_no_matching_rule_and_mounts_are_the_files() {
     assert_eq!((found.mount, found.relative), (0, "/assets/app.js"));
     assert_eq!(manifest.mounts()[0].policy.root, "public");
 
-    // Swapping the two routes swaps which view wins, and the mount is
-    // unchanged: the order — not the presence of `[static]` — decides.
-    let manifest = Manifest::from_toml_str(static_first).unwrap();
+    // Swapping the two views swaps which one wins, and the mount is unchanged:
+    // the order — not the presence of a mount — decides.
+    let manifest = Manifest::from_blastfile_str(static_first).unwrap();
     let table = RoutingTable::new(&manifest).unwrap();
     assert_eq!(
         table.route("GET", "/assets/app.js").map(|hit| hit.route),
@@ -648,11 +648,12 @@ fn a_static_block_adds_no_matching_rule_and_mounts_are_the_files() {
 
 #[test]
 fn a_mounts_fallback_is_the_only_thing_that_answers_a_miss_after_the_views() {
-    // §9.3: `spa = true` lowers to a declared `fallback`, which answers a miss
-    // that no view did. The route table never carries the fact.
-    let with_fallback = Manifest::from_toml_str(
-        "version = 1\napp = \"app:app\"\n[[route]]\nname = \"site\"\npath = ['.*']\n\
-         [route.static]\nroot = \"public\"\nspa = true\n",
+    // §9.3: a declared `fallback` answers a miss that no view did. The route
+    // table never carries the fact.
+    let with_fallback = Manifest::from_blastfile_str(
+        "entrypoint python \"app:app\"\n\
+         view site \"/*\" {}\n\
+         static \"/\" {\n  root \"public\"\n  fallback \"index.html\"\n}\n",
     )
     .unwrap();
     assert_eq!(
@@ -665,11 +666,11 @@ fn a_mounts_fallback_is_the_only_thing_that_answers_a_miss_after_the_views() {
             .all(|route| route.ingress.is_none())
     );
 
-    // Without the flag there is no fallback: a miss falls through to a view
-    // (which a manifest with no app cannot have), and then to `404`.
-    let without = Manifest::from_toml_str(
-        "version = 1\n[[route]]\nname = \"site\"\npath = ['.*']\n\
-         [route.static]\nroot = \"public\"\n",
+    // Without the flag there is no fallback: a miss falls through to a view the
+    // file declares, and then to `404`.
+    let without = Manifest::from_blastfile_str(
+        "view site \"/*\" {}\n\
+         static \"/\" {\n  root \"public\"\n}\n",
     )
     .unwrap();
     assert_eq!(without.mounts()[0].policy.fallback, None);
@@ -684,33 +685,58 @@ fn a_mounts_fallback_is_the_only_thing_that_answers_a_miss_after_the_views() {
 // slot, keeps it until its read result, and gives it back exactly once.
 // ---------------------------------------------------------------------------
 
-/// The page's route over the §5.2 fixture tree, with an `app` declared so the
-/// fallback and the front controller are both armed: nothing a refusal does may
-/// be masked by either (design §4.4).
-const SITE_MANIFEST: &str = "version = 1\napp = \"app:app\"\n\n\
-     [[route]]\nname = \"site\"\npath = ['.*']\n\n\
-     [route.static]\nroot = \"root\"\nspa = true\nimmutable = [\"/assets/*\"]\n";
+/// The page's route over the §5.2 fixture tree, with an `entrypoint` declared
+/// so the fallback and the front controller are both armed: nothing a refusal
+/// does may be masked by either (design §4.4).
+const SITE_MANIFEST: &str = concat!(
+    "entrypoint python \"app:app\"\n",
+    "\n",
+    "static \"/\" {\n",
+    "  root \"root\"\n",
+    "  fallback \"index.html\"\n",
+    "  immutable \"/assets/*\"\n",
+    "}\n",
+    "\n",
+    "view site \"/*\" {}\n",
+);
 
-/// The same tree with `spa` unset and no `app`: an all-static route that must
-/// never fork a view (design §4.6).
-const PUMP_MANIFEST: &str = "version = 1\n\n\
-     [[route]]\nname = \"site\"\npath = ['.*']\n\n\
-     [route.static]\nroot = \"root\"\n";
+/// The same tree with no `fallback` and no `entrypoint`: an all-static view
+/// that must never fork a view process (design §4.6).
+const PUMP_MANIFEST: &str = concat!(
+    "static \"/\" {\n",
+    "  root \"root\"\n",
+    "}\n",
+    "\n",
+    "view site \"/*\" {}\n",
+);
 
-/// The front controller of design §4.4: a miss forwards with the route's own
-/// `[route.ingress]`, so the static slot has to be handed back for the view to
-/// be spawned.
-const FRONT_MANIFEST: &str = "version = 1\napp = \"app:app\"\n\n\
-     [[route]]\nname = \"site\"\npath = ['.*']\n\n\
-     [route.static]\nroot = \"root\"\n\n\
-     [route.ingress]\nbody = \"raw\"\nallow_raw = true\n";
+/// The front controller of design §4.4: a miss forwards with the view's own
+/// `body`, so the static slot has to be handed back for the view to be spawned.
+const FRONT_MANIFEST: &str = concat!(
+    "entrypoint python \"app:app\"\n",
+    "\n",
+    "static \"/\" {\n",
+    "  root \"root\"\n",
+    "}\n",
+    "\n",
+    "view site \"/*\" {\n",
+    "  body raw unvalidated\n",
+    "}\n",
+);
 
 /// The same front controller with a structured body: its `plan_body` error must
 /// be stored, not answered, while a `Serve` still answers the page's own rule.
-const JSON_FRONT_MANIFEST: &str = "version = 1\napp = \"app:app\"\n\n\
-     [[route]]\nname = \"site\"\npath = ['.*']\n\n\
-     [route.static]\nroot = \"root\"\n\n\
-     [route.ingress]\nbody = \"json\"\n";
+const JSON_FRONT_MANIFEST: &str = concat!(
+    "entrypoint python \"app:app\"\n",
+    "\n",
+    "static \"/\" {\n",
+    "  root \"root\"\n",
+    "}\n",
+    "\n",
+    "view site \"/*\" {\n",
+    "  body json\n",
+    "}\n",
+);
 
 /// A request head carrying `headers` on top of the shared one.
 fn head_with(method: &str, target: &str, headers: &[(&str, &str)]) -> ReqHead {
@@ -890,7 +916,7 @@ impl Drop for PumpTree {
 
 /// A world serving `PUMP_MANIFEST` over `tree`, with `max_workers` slots.
 fn pump_world(tree: &PumpTree, max_workers: u32) -> World {
-    let mut options = Options::new().manifest(PUMP_MANIFEST);
+    let mut options = Options::new().blastfile(PUMP_MANIFEST);
     options.cfg.manifest_dir = tree.base.clone();
     options.cfg.max_workers = max_workers;
     options.cfg.queue_size = 8;
@@ -914,7 +940,7 @@ fn zeros(frames: &[Frame], expected: u64) -> Vec<u8> {
 async fn a_serve_reaches_the_wire_with_the_responders_own_bytes_and_headers() {
     tokio::time::pause();
     let tree = StaticTree::build(Fixture::S);
-    let mut options = Options::new().manifest(SITE_MANIFEST);
+    let mut options = Options::new().blastfile(SITE_MANIFEST);
     options.cfg.manifest_dir = tree.base.clone();
     let mut world = World::start(options);
 
@@ -991,7 +1017,7 @@ async fn a_serve_reaches_the_wire_with_the_responders_own_bytes_and_headers() {
 async fn a_head_answers_the_get_head_and_never_a_body_frame() {
     tokio::time::pause();
     let tree = StaticTree::build(Fixture::S);
-    let mut options = Options::new().manifest(SITE_MANIFEST);
+    let mut options = Options::new().blastfile(SITE_MANIFEST);
     options.cfg.manifest_dir = tree.base.clone();
     let mut world = World::start(options);
 
@@ -1028,14 +1054,14 @@ async fn a_head_answers_the_get_head_and_never_a_body_frame() {
 async fn a_static_refusal_is_one_scheduler_answer_with_no_store() {
     tokio::time::pause();
     let tree = StaticTree::build(Fixture::S);
-    let mut options = Options::new().manifest(SITE_MANIFEST);
+    let mut options = Options::new().blastfile(SITE_MANIFEST);
     options.cfg.manifest_dir = tree.base.clone();
     let mut world = World::start(options);
 
     // `(request, status, body)`: a malformed path, a dotfile, a servable path
     // with the wrong method and one that declares a body (§4.4). The route has
-    // `spa = true` and an `app`, so a refusal that leaked into either the
-    // fallback or the app would answer 200 instead.
+    // a declared `fallback` and an `entrypoint`, so a refusal that leaked into
+    // either the fallback or the app would answer 200 instead.
     let rows: [(ReqHead, u16, &[u8]); 4] = [
         (head("GET", "/../etc/passwd"), 400, b"bad request\n"),
         (head("GET", "/.env"), 404, b"not found\n"),
@@ -1275,7 +1301,7 @@ async fn a_client_that_stops_granting_credit_is_aborted_at_request_timeout() {
     tokio::time::pause();
     let window = u64::from(INITIAL_WINDOW);
     let tree = PumpTree::build(&[("a.bin", window + 64 * 1024), ("small.js", 24)]);
-    let mut options = Options::new().manifest(PUMP_MANIFEST);
+    let mut options = Options::new().blastfile(PUMP_MANIFEST);
     options.cfg.manifest_dir = tree.base.clone();
     options.cfg.max_workers = 1;
     options.cfg.queue_timeout = Duration::from_secs(5);
@@ -1335,7 +1361,7 @@ async fn a_forward_hands_the_slot_back_and_re_enters_the_view_path() {
     // leaves the second forward queued until `queue_timeout` and answers `503`.
     tokio::time::pause();
     let tree = StaticTree::build(Fixture::F);
-    let mut options = Options::new().manifest(FRONT_MANIFEST).script(
+    let mut options = Options::new().blastfile(FRONT_MANIFEST).script(
         0,
         Script::Answer {
             body: b"hello".to_vec(),
@@ -1406,7 +1432,7 @@ async fn a_serve_outranks_the_codec_error_a_forward_stores() {
     // the third row's twin (`POST` on a servable path), where §4.4 says `405`.
     tokio::time::pause();
     let tree = StaticTree::build(Fixture::F);
-    let mut options = Options::new().manifest(JSON_FRONT_MANIFEST);
+    let mut options = Options::new().blastfile(JSON_FRONT_MANIFEST);
     options.cfg.manifest_dir = tree.base.clone();
     options.cfg.max_workers = 1;
     options.cfg.queue_timeout = Duration::from_secs(5);
@@ -1482,7 +1508,7 @@ async fn an_if_none_match_from_the_head_answers_304_without_a_body() {
     // `200` here, with the same bytes, which is the whole point of the header.
     tokio::time::pause();
     let tree = StaticTree::build(Fixture::S);
-    let mut options = Options::new().manifest(SITE_MANIFEST);
+    let mut options = Options::new().blastfile(SITE_MANIFEST);
     options.cfg.manifest_dir = tree.base.clone();
     let mut world = World::start(options);
 
@@ -1576,7 +1602,7 @@ async fn a_buffered_forward_that_ends_while_queued_is_still_answered() {
     tokio::time::pause();
     let window = u64::from(INITIAL_WINDOW);
     let tree = PumpTree::build(&[("big.bin", window + 64 * 1024)]);
-    let mut options = Options::new().manifest(JSON_FRONT_MANIFEST).script(
+    let mut options = Options::new().blastfile(JSON_FRONT_MANIFEST).script(
         0,
         Script::Answer {
             body: b"hello".to_vec(),
@@ -1675,7 +1701,7 @@ async fn a_full_static_queue_answers_503_with_retry_after() {
         ("b.bin", window + 64 * 1024),
         ("c.bin", window + 64 * 1024),
     ]);
-    let mut options = Options::new().manifest(PUMP_MANIFEST);
+    let mut options = Options::new().blastfile(PUMP_MANIFEST);
     options.cfg.manifest_dir = tree.base.clone();
     options.cfg.max_workers = 1;
     options.cfg.queue_size = 1;
@@ -1742,11 +1768,15 @@ async fn buffered_forward(world: &mut World, stream: u32, body: &[u8]) {
     world.http.send(stream, &Frame::ReqEnd).await;
 }
 
-/// The same `json` ingress with no `[route.static]`: the app path's own
+/// The same `json` body with no `static` mount at all: the app path's own
 /// half-body bound, which the static path has to meet (design §4.6).
-const JSON_APP_MANIFEST: &str = "version = 1\napp = \"app:app\"\n\n\
-     [[route]]\nname = \"app\"\npath = ['.*']\n\n\
-     [route.ingress]\nbody = \"json\"\n";
+const JSON_APP_MANIFEST: &str = concat!(
+    "entrypoint python \"app:app\"\n",
+    "\n",
+    "view app \"/*\" {\n",
+    "  body json\n",
+    "}\n",
+);
 
 /// The response of one buffered `json` `POST` and its one `request` event,
 /// through `manifest` with `queue_size` half-body slots.
@@ -1755,7 +1785,7 @@ async fn buffered_forward_answer(
     manifest_dir: PathBuf,
     queue_size: usize,
 ) -> (Vec<Frame>, Outcome) {
-    let mut options = Options::new().manifest(manifest).script(
+    let mut options = Options::new().blastfile(manifest).script(
         0,
         Script::Answer {
             body: b"hello".to_vec(),
@@ -1999,7 +2029,7 @@ async fn a_buffered_forward_that_ends_while_queued_keeps_one_queue_entry() {
     tokio::time::pause();
     let window = u64::from(INITIAL_WINDOW);
     let tree = PumpTree::build(&[("big.bin", window + 64 * 1024), ("small.js", 24)]);
-    let mut options = Options::new().manifest(JSON_FRONT_MANIFEST).script(
+    let mut options = Options::new().blastfile(JSON_FRONT_MANIFEST).script(
         0,
         Script::Answer {
             body: b"hello".to_vec(),
@@ -2067,7 +2097,7 @@ async fn a_buffered_forward_that_ends_while_queued_still_expires_on_queue_timeou
     tokio::time::pause();
     let window = u64::from(INITIAL_WINDOW);
     let tree = PumpTree::build(&[("big.bin", window + 64 * 1024)]);
-    let mut options = Options::new().manifest(JSON_FRONT_MANIFEST).script(
+    let mut options = Options::new().blastfile(JSON_FRONT_MANIFEST).script(
         0,
         Script::Answer {
             body: b"hello".to_vec(),

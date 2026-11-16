@@ -68,9 +68,7 @@ async fn health_path_respects_a_custom_path() {
 #[tokio::test]
 async fn unmatched_request_gets_the_schedulers_404() {
     tokio::time::pause();
-    let mut world = World::start(
-        Options::new().manifest(&format!("version = 1\n{}", route("about", "/about/"))),
-    );
+    let mut world = World::start(Options::new().blastfile(&route("about", "/about/")));
     world
         .http
         .send_request(7, head("GET", "/elsewhere"), b"")
@@ -98,15 +96,15 @@ async fn unmatched_request_gets_the_schedulers_404() {
 #[tokio::test]
 async fn requests_are_routed_by_path_and_method_and_rule() {
     tokio::time::pause();
+    // One view, two patterns: the path list stays one view (§8.1), so rule 0
+    // and rule 1 are the two patterns of the same route.
     let manifest = format!(
-        "version = 1\n{}{}{}",
-        "[[route]]\nname = \"product\"\npath = ['/products/[0-9]+/', '/products/[0-9]+/x']\nmethods = [\"GET\"]\n",
+        "view product GET regex '/products/[0-9]+/', regex '/products/[0-9]+/x' {{}}\n{}",
         route("fallback", ".*"),
-        "",
     );
     let mut world = World::start(
         Options::new()
-            .manifest(&manifest)
+            .blastfile(&manifest)
             .script(
                 0,
                 Script::Answer {
@@ -167,14 +165,12 @@ async fn requests_are_routed_by_path_and_method_and_rule() {
 #[tokio::test]
 async fn script_name_is_stripped_before_routing() {
     tokio::time::pause();
-    let mut options = Options::new()
-        .manifest(&format!("version = 1\n{}", route("about", "/about/")))
-        .script(
-            0,
-            Script::Answer {
-                body: b"about".to_vec(),
-            },
-        );
+    let mut options = Options::new().blastfile(&route("about", "/about/")).script(
+        0,
+        Script::Answer {
+            body: b"about".to_vec(),
+        },
+    );
     options.cfg.script_name = Some("/app".to_string());
     let mut world = World::start(options);
 
@@ -212,16 +208,12 @@ async fn script_name_is_stripped_before_routing() {
 #[tokio::test]
 async fn the_event_path_is_the_decoded_path_info() {
     tokio::time::pause();
-    let mut world = World::start(
-        Options::new()
-            .manifest(&format!("version = 1\n{}", route("slashed", "/a/b")))
-            .script(
-                0,
-                Script::Answer {
-                    body: b"ok".to_vec(),
-                },
-            ),
-    );
+    let mut world = World::start(Options::new().blastfile(&route("slashed", "/a/b")).script(
+        0,
+        Script::Answer {
+            body: b"ok".to_vec(),
+        },
+    ));
     // The target is `%`-escaped and carries a query string; the event reports
     // neither the escapes nor the query.
     world
@@ -238,14 +230,12 @@ async fn the_event_path_is_the_decoded_path_info() {
 async fn a_script_name_is_normalised_before_routing() {
     tokio::time::pause();
     for configured in ["app", "/app", "/app/", "app///"] {
-        let mut options = Options::new()
-            .manifest(&format!("version = 1\n{}", route("about", "/about/")))
-            .script(
-                0,
-                Script::Answer {
-                    body: b"about".to_vec(),
-                },
-            );
+        let mut options = Options::new().blastfile(&route("about", "/about/")).script(
+            0,
+            Script::Answer {
+                body: b"about".to_vec(),
+            },
+        );
         options.cfg.script_name = Some(configured.to_string());
         let mut world = World::start(options);
         world
@@ -259,14 +249,12 @@ async fn a_script_name_is_normalised_before_routing() {
         );
     }
     // A prefix that is only slashes means "no mount": nothing is stripped.
-    let mut options = Options::new()
-        .manifest(&format!("version = 1\n{}", route("about", "/about/")))
-        .script(
-            0,
-            Script::Answer {
-                body: b"about".to_vec(),
-            },
-        );
+    let mut options = Options::new().blastfile(&route("about", "/about/")).script(
+        0,
+        Script::Answer {
+            body: b"about".to_vec(),
+        },
+    );
     options.cfg.script_name = Some("/".to_string());
     let mut world = World::start(options);
     world
@@ -279,16 +267,12 @@ async fn a_script_name_is_normalised_before_routing() {
 #[tokio::test]
 async fn only_get_and_head_reach_the_health_path() {
     tokio::time::pause();
-    let mut world = World::start(
-        Options::new()
-            .manifest(&format!("version = 1\n{}", route("app", ".*")))
-            .script(
-                0,
-                Script::Answer {
-                    body: b"app".to_vec(),
-                },
-            ),
-    );
+    let mut world = World::start(Options::new().blastfile(&route("app", ".*")).script(
+        0,
+        Script::Answer {
+            body: b"app".to_vec(),
+        },
+    ));
     for (stream, method) in [(1u32, "GET"), (2, "HEAD")] {
         world
             .http
@@ -314,7 +298,7 @@ async fn control_bytes_and_dot_segments() {
     tokio::time::pause();
     let mut world = World::start(
         Options::new()
-            .manifest(&format!("version = 1\n{}", route("dotted", r"/a/\.\./b")))
+            .blastfile(&route("dotted", r"/a/\.\./b"))
             .script(
                 0,
                 Script::Answer {
@@ -360,16 +344,12 @@ async fn control_bytes_and_dot_segments() {
 #[tokio::test]
 async fn percent_decoding_keeps_the_view_and_its_target_intact() {
     tokio::time::pause();
-    let mut world = World::start(
-        Options::new()
-            .manifest(&format!("version = 1\n{}", route("slashed", "/a/b")))
-            .script(
-                0,
-                Script::Answer {
-                    body: b"ok".to_vec(),
-                },
-            ),
-    );
+    let mut world = World::start(Options::new().blastfile(&route("slashed", "/a/b")).script(
+        0,
+        Script::Answer {
+            body: b"ok".to_vec(),
+        },
+    ));
 
     // `%2F` decodes to a slash, so it matches `/a/b`.
     world
@@ -397,16 +377,12 @@ async fn percent_decoding_keeps_the_view_and_its_target_intact() {
 #[tokio::test]
 async fn bad_targets_and_methods_are_400s() {
     tokio::time::pause();
-    let mut world = World::start(
-        Options::new()
-            .manifest(&format!("version = 1\n{}", route("app", ".*")))
-            .script(
-                0,
-                Script::Answer {
-                    body: b"ok".to_vec(),
-                },
-            ),
-    );
+    let mut world = World::start(Options::new().blastfile(&route("app", ".*")).script(
+        0,
+        Script::Answer {
+            body: b"ok".to_vec(),
+        },
+    ));
 
     let cases: Vec<(u32, ReqHead)> = vec![
         // A `%` that is not a byte escape.
@@ -454,10 +430,7 @@ async fn request_events_carry_every_field() {
     tokio::time::pause();
     let mut world = World::start(
         Options::new()
-            .manifest(&format!(
-                "version = 1\n{}[route.ingress]\nbody = \"raw\"\nallow_raw = true\n",
-                "[[route]]\nname = \"upload\"\npath = ['/upload/']\n"
-            ))
+            .blastfile("view upload \"/upload/\" {\n  body raw unvalidated\n}\n")
             .script(
                 0,
                 Script::Answer {

@@ -13,11 +13,10 @@ use blastit_frame::{Ctl, Frame};
 use common::{Options, Script, World, body_of, head, route, status_of};
 use tokio::sync::Semaphore;
 
-/// A two-route manifest: `/a/` and everything else.
+/// A two-view `Blastfile`: `/a/` (taking a raw body) and everything else.
 fn two_routes() -> String {
     format!(
-        "version = 1\n{}[route.ingress]\nbody = \"raw\"\nallow_raw = true\n{}",
-        route("a", "/a/"),
+        "view a \"/a/\" {{ body raw unvalidated }}\n{}",
         route("b", ".*")
     )
 }
@@ -49,11 +48,8 @@ async fn lazy_spawn_then_dispatch_after_ready() {
 #[tokio::test]
 async fn a_preforked_route_is_spawned_at_startup() {
     tokio::time::pause();
-    let manifest = format!(
-        "version = 1\n{}[[route]]\nname = \"b\"\npath = ['.*']\n",
-        "[[route]]\nname = \"hot\"\npath = ['/hot/']\nprefork = true\n"
-    );
-    let world = World::start(Options::new().manifest(&manifest).script(
+    let manifest = format!("view hot \"/hot/\" {{ prefork }}\n{}", route("b", ".*"));
+    let world = World::start(Options::new().blastfile(&manifest).script(
         0,
         Script::Answer {
             body: b"hot".to_vec(),
@@ -72,8 +68,8 @@ async fn a_preforked_route_is_spawned_at_startup() {
 #[tokio::test]
 async fn eager_mode_spawns_every_route_at_startup() {
     tokio::time::pause();
-    let mut options = Options::new().manifest(&format!(
-        "version = 1\n{}{}{}",
+    let mut options = Options::new().blastfile(&format!(
+        "{}{}{}",
         route("a", "/a/"),
         route("b", "/b/"),
         route("c", ".*")
@@ -160,7 +156,7 @@ async fn a_view_is_retired_after_its_request_cap() {
 async fn the_view_cap_retires_the_least_recently_used_idle_view() {
     tokio::time::pause();
     let mut options = Options::new()
-        .manifest(&two_routes())
+        .blastfile(&two_routes())
         .script(
             0,
             Script::Answer {
@@ -207,7 +203,7 @@ async fn the_view_cap_waits_when_nothing_is_idle() {
     tokio::time::pause();
     let gate = Arc::new(Semaphore::new(0));
     let mut options = Options::new()
-        .manifest(&two_routes())
+        .blastfile(&two_routes())
         .script(
             0,
             Script::Hold {
@@ -245,8 +241,8 @@ async fn the_view_cap_waits_when_nothing_is_idle() {
 #[tokio::test]
 async fn an_unused_preforked_view_is_retired_after_the_idle_timeout() {
     tokio::time::pause();
-    let manifest = "version = 1\n[[route]]\nname = \"hot\"\npath = ['/hot/']\nprefork = true\n";
-    let mut options = Options::new().manifest(manifest);
+    let manifest = "view hot \"/hot/\" {\n  prefork\n}\n";
+    let mut options = Options::new().blastfile(manifest);
     options.cfg.idle_timeout = Duration::from_secs(60);
     let world = World::start(options);
     world
@@ -485,13 +481,13 @@ async fn a_cap_of_two_serves_three_routes_without_lru_churn() {
     // Three routes, two processes: the third route's request can only be
     // served by retiring one of the first two, and all three must be answered.
     let manifest = format!(
-        "version = 1\n{}{}{}",
+        "{}{}{}",
         route("a", "/a/"),
         route("b", "/b/"),
         route("c", "/c/")
     );
     let mut options = Options::new()
-        .manifest(&manifest)
+        .blastfile(&manifest)
         .script(
             0,
             Script::Answer {
@@ -566,7 +562,7 @@ async fn a_view_that_is_not_ready_yet_is_never_a_victim() {
     // full, but a process that has not served anything is not a candidate: the
     // request for route 1 waits for the queue timeout instead of killing it.
     let mut options = Options::new()
-        .manifest(&two_routes())
+        .blastfile(&two_routes())
         .script(
             0,
             Script::NeverReady {
@@ -608,7 +604,7 @@ async fn a_view_whose_route_is_waiting_is_never_a_victim() {
     // cap of one full, route 1's request must not retire that process: it is
     // the only thing that can still answer route 0.
     let mut options = Options::new()
-        .manifest(&two_routes())
+        .blastfile(&two_routes())
         .script(
             0,
             Script::Hold {

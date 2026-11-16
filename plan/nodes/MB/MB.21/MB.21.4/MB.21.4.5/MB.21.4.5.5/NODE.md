@@ -2,7 +2,7 @@
 id: MB.21.4.5.5
 title: "Translate the scheduler's manifest fixtures and delete its second reader"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.9]
@@ -11,11 +11,11 @@ paths:
   - "crates/blastit-scheduler/src/route.rs"
   - "crates/blastit-scheduler/src/config.rs"
   - "crates/blastit-scheduler/tests/**"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T16:58"
-updated: "2026-11-16T16:58"
+updated: "2026-11-16T18:18"
 ---
 
 # Goal

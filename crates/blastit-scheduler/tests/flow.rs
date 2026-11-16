@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use blastit_events::Outcome;
 use blastit_frame::{Frame, INITIAL_WINDOW};
-use common::{Options, Script, World, body_of, head, route, status_of};
+use common::{Options, Script, World, body_of, head, status_of};
 use tokio::sync::Semaphore;
 
 /// A body several windows long: three MiB, which is three `INITIAL_WINDOW`s.
@@ -66,10 +66,9 @@ async fn a_queued_upload_does_not_delay_another_request() {
     tokio::time::pause();
     let gate = Arc::new(Semaphore::new(0));
     let mut options = Options::new()
-        .manifest(&format!(
-            "version = 1\n{}{}[route.ingress]\nbody = \"raw\"\nallow_raw = true\n",
-            route("slow", "/slow/"),
-            route("app", ".*")
+        .blastfile(concat!(
+            "view slow \"/slow/\" {}\n",
+            "view app \"/*\" {\n  body raw unvalidated\n}\n"
         ))
         .script(
             0,

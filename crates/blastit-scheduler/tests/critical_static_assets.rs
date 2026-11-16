@@ -1001,7 +1001,8 @@ fn statuses_come_from_decide_not_a_second_mapping() {
         );
     }
 
-    // A miss: forward with an app, 404 without, `index` under `spa = true`.
+    // A miss: forward with an `entrypoint`, 404 without, `index` under a
+    // declared `fallback`.
     assert!(matches!(
         decide(outcome(&f, "/missing"), b"GET", false, true),
         Rewrite::Forward

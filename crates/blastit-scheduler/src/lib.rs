@@ -37,9 +37,7 @@
 //! use tokio::net::UnixStream;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let manifest = Manifest::from_toml_str(
-//!     "version = 1\n[[route]]\nname = \"about\"\npath = ['/about/']\n",
-//! )?;
+//! let manifest = Manifest::from_blastfile_str("view about \"/about/\" {}\n")?;
 //! let table = RoutingTable::new(&manifest)?;
 //! let routes = routes_from_manifest(&manifest, &UidLayout::default());
 //! let emit = Arc::new(|event: Event| println!("{event:?}"));

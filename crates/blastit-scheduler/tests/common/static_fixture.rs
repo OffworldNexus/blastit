@@ -2,11 +2,12 @@
 //! real directory, built in `std::env::temp_dir()` (no `tempfile` dependency)
 //! and removed on drop.
 //!
-//! S = the page's route (`spa = true`, `immutable = ["/assets/*"]`); F = the
-//! same tree with `spa` unset (the front-controller shape; the manifest-level
-//! `app` is the caller's business); N = the same tree with `spa = false` and no
-//! `app`; D = `immutable = ["/index.html"]` for the cache-kind rows. Every
-//! fixture is the same tree, so every file row is comparable across policies.
+//! S = the page's route (a declared `fallback "index.html"` and `immutable
+//! "/assets/*"`); F = the same tree with no `fallback` (the front-controller
+//! shape; the file-level `entrypoint` is the caller's business); N = the same
+//! tree with neither a `fallback` nor an `entrypoint`; D = `immutable
+//! "/index.html"` for the cache-kind rows. Every fixture is the same tree, so
+//! every file row is comparable across policies.
 //!
 //! The preconditions are hard failures, never skips: the runner is non-root, the
 //! filesystem is case-sensitive and it does not normalize `café.js` — rows
@@ -72,13 +73,13 @@ pub const SWAPPED_BYTES: &[u8] = b"swap-substituted-inode\n";
 /// The four policies of design §5.2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fixture {
-    /// `spa = true`, `immutable = ["/assets/*"]`.
+    /// A declared `fallback "index.html"` and `immutable "/assets/*"`.
     S,
-    /// `spa = false`: a miss forwards to the manifest's app.
+    /// No `fallback`: a miss forwards to the manifest's `entrypoint`.
     F,
-    /// An all-static root with no app.
+    /// An all-static root with no `entrypoint`.
     N,
-    /// `spa = true`, `immutable = ["/index.html"]`.
+    /// A declared `fallback "index.html"` and `immutable "/index.html"`.
     D,
 }
 

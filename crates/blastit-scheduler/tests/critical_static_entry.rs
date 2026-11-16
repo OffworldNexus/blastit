@@ -2,9 +2,9 @@
 //! `.php`/`.phtml`/`.phar` source, whatever the case, the method or the
 //! declared body, and never opens the file for reading.
 //!
-//! The canonical manifest puts `[route.php] entry = "public/index.php"` beside
-//! `[route.static] root = "public"`, so the front controller legitimately lives
-//! under the served root. The owner's decision (2026-11-14) is a per-request
+//! The canonical manifest declares `entrypoint php "public/index.php"` beside a
+//! `static "/" { root "public" }` mount, so the front controller legitimately
+//! lives under the served root. The owner's decision (2026-11-14) is a per-request
 //! `404` rather than a boot refusal: `root` may contain `entry`, and nothing
 //! `.php`/`.phar` is ever served. Every row runs over both backends, and the
 //! suite asserts the file was not read-opened through the `resolve_with` hook
