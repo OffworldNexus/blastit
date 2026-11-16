@@ -1963,3 +1963,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T01:51 [MB.21.1.1] (lead) status active -> review
 - 2026-11-16T01:55 [MB.21.1.1] (lead) status review -> done
 - 2026-11-16T01:55 [MB.21.1.1] (lead) committing
+- 2026-11-16T01:55 [MB.21.1.1] (lead) commit c7b1169
+- 2026-11-16T01:55 [MB.21.1] (lead) commit c2d89e4
+- 2026-11-16T02:12 [MB.21.2] (lead) status active -> review
+- 2026-11-16T02:14 [MB.21.2] (lead) REVIEW FAIL (attempt 1): (1) BLOCKER §22 omits 22 of 47 round-4 BLOCKER/MAJOR rows (consistency M1,M2,M4-M13; implementability M2-M6,M9; testability B4,M2,M4,M7
+- 2026-11-16T02:14 [MB.21.2] (lead) status review -> ready
