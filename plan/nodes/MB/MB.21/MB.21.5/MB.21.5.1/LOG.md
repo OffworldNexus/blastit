@@ -11,3 +11,7 @@ edited fields
 ## 2026-11-16T02:16 [planner]
 
 edited fields
+
+## 2026-11-16T03:50 [conductor]
+
+Confirmed H-011 diagnostic wording from MB.21.3.1: 'the file is not a regular file; Blastfile must be a plain file' and 'the file could not be read: <os sentence>'.

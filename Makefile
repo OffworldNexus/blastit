@@ -114,7 +114,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
         rs-test-php rs-test-php-image platform-matrix-check standalone standalone-glibc workflow-check \
-        packaging-gates-test doc-tone mutants-clean mutants-scope-probe print-mutants-tmp
+        packaging-gates-test doc-tone manifest-purity mutants-clean mutants-scope-probe print-mutants-tmp
 
 help: ## Show available Make targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -155,6 +155,14 @@ packaging-gates-test: ## Run positive + negative self-tests for workflow, matrix
 # self-tests run with the rest of `docs-unit`'s pytest files.
 doc-tone: ## Refuse apology language in the user-facing docs
 	$(UV) run --no-project scripts/check_doc_tone.py
+
+# The manifest crate never reads the environment (`MB.21.3.1`, R20/R24): a
+# `Blastfile` names variables and the value is resolved by `blastit-env` at
+# boot. The guard is literal and its negative self-tests run with it, so a moved
+# directory or an emptied needle fails here instead of passing silently.
+manifest-purity: ## Refuse std::env under crates/blastit-manifest/src (R20/R24)
+	$(UV) run --no-project scripts/check_manifest_purity.py
+	$(UV) run --no-project scripts/test_manifest_purity.py
 
 rs-format: ## Format Rust workspace
 	$(CARGO) fmt --all
@@ -763,4 +771,4 @@ mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign 
 print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 	@echo "$(MUTANTS_TMP)"
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python seam-check platform-matrix-check workflow-check packaging-gates-test doc-tone plan-validate ## Full fast unprivileged check
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python seam-check platform-matrix-check workflow-check packaging-gates-test doc-tone manifest-purity plan-validate ## Full fast unprivileged check

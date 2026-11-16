@@ -91,6 +91,10 @@
 //! `[route.fastcgi]` is retired: a manifest that writes it is refused like any
 //! other unknown route key (`ADR-0010` §1: embedded PHP only, no fallback), and
 //! `php` is the embedded worker ([`PhpPolicy`]), not the retired pool.
+//!
+//! [`blastfile::read`] is the one reader of a `Blastfile`: a regular file of at
+//! most 1 MiB, refused by size from its metadata before a byte is read, and
+//! never a FIFO or a device.
 
 #![deny(missing_docs)]
 
@@ -101,10 +105,11 @@ mod routing;
 mod uid;
 mod validate;
 
+pub mod blastfile;
 pub mod edit;
 
 pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
-pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning};
+pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning, Position};
 pub use model::{
     Executor, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route,
     StaticMount, StaticPolicy,

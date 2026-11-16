@@ -2025,3 +2025,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T03:26 [MB.21.3.7] (lead) status active -> review
 - 2026-11-16T03:35 [MB.21.3.7] (lead) reviewer verdict PASS (attempt 2). 4 MINOR: (1) unrelated doc-comment rewordings in model.rs made only to satisfy the acceptance grep -> node grep tightened to 
 - 2026-11-16T03:35 [MB.21.3.7] (lead) status review -> done
+- 2026-11-16T03:35 [MB.21.3.7] (lead) commit 3600326
+- 2026-11-16T03:35 [MB.21.3.1] (lead) edited fields
+- 2026-11-16T03:35 [MB.21.3.8] (lead) edited fields
+- 2026-11-16T03:35 [MB.21.3.8] (lead) edited fields
+- 2026-11-16T03:35 [MB.21.3.1] (lead) status ready -> active
+- 2026-11-16T03:35 [MB.21.3.1] (lead) attempt 1/3 started
+- 2026-11-16T03:35 [MB.21.3.1] (lead) base 3600326ee11fd58c146befcadb334164d3ed4753
+- 2026-11-16T03:36 [MB.21.3.3] (lead) edited fields
+- 2026-11-16T03:47 HUMAN H-011 opened by implementer (node MB.21.3.1)
+- 2026-11-16T03:49 [MB.21.3.2] (lead) edited fields
+- 2026-11-16T03:49 [MB.21.3.1] (lead) Attempt 1 done, 5 deviations reviewed by the lead: D1 accepted (design §5.1 + docs/reference/blastfile.md:276 say '...' has no escapes, so 'don''t' is two token
+- 2026-11-16T03:49 [MB.21.3.1] (lead) status active -> review
+- 2026-11-16T03:50 [MB.21.5.1] (conductor) Confirmed H-011 diagnostic wording from MB.21.3.1: 'the file is not a regular file; Blastfile must be a plain file' and 'the file could not be read: <os sentenc
+- 2026-11-16T03:50 HUMAN H-011 closed by conductor
+- 2026-11-16T03:56 [MB.21.3.1] (lead) reviewer verdict PASS (attempt 1). 3 MINOR: (1) check_manifest_purity.py's needle misses / spellings -> epic follow-up for the guard's owner (5.2/5.3), gate is 
+- 2026-11-16T03:56 [MB.21.3.1] (lead) status review -> done
+- 2026-11-16T03:56 [MB.21.3.1] (lead) reviewer verdict PASS (attempt 1). 3 MINOR, none blocking: (1) the purity script needle is a literal substring, so a "use std::{env}" + "env::var" spelling evad

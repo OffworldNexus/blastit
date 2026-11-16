@@ -14,6 +14,7 @@ paths:
   - "crates/blastit-manifest/tests/blastfile_body.rs"
   - "crates/blastit-manifest/tests/blastfile_entrypoint.rs"
   - "crates/blastit-manifest/tests/blastfile_patterns.rs"
+  - "crates/blastit-manifest/tests/blastfile_errors.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_parity.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_traits.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_body.rs"
@@ -21,13 +22,15 @@ paths:
   - "crates/blastit-manifest/tests/critical_blastfile_security.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_parser.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_patterns.rs"
+  - "crates/blastit-manifest/tests/critical_blastfile_lexer.rs"
+  - "crates/blastit-manifest/tests/critical_blastfile_errors.rs"
   - "crates/blastit-manifest/tests/common/mod.rs"
   - "crates/blastit-manifest/tests/fixtures/**"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T02:16"
-updated: "2026-11-16T02:39"
+updated: "2026-11-16T03:35"
 ---
 
 # Goal

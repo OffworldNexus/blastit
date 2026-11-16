@@ -6,12 +6,15 @@ status: ready
 owner: implementer
 priority: 1
 depends_on: [MB.21.3.1]
-paths: ["crates/blastit-manifest/src/blastfile/**", "crates/blastit-manifest/src/lib.rs"]
+paths:
+  - "crates/blastit-manifest/src/blastfile/**"
+  - "crates/blastit-manifest/src/lib.rs"
+  - "crates/blastit-manifest/src/error.rs"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T02:16"
+updated: "2026-11-16T03:49"
 ---
 
 # Goal

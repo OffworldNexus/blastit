@@ -26,22 +26,80 @@ pub(crate) fn escape_control(value: &str) -> String {
     out
 }
 
+/// Renders a name, path or pattern for an error message: control characters
+/// escaped and long values cut to [`MAX_QUOTED_CHARS`] characters, without the
+/// surrounding quotes [`quoted`] adds.
+pub(crate) fn clipped(value: &str) -> String {
+    let cut = value.char_indices().nth(MAX_QUOTED_CHARS).map(|(at, _)| at);
+    let mut out = String::with_capacity(value.len() + 1);
+    match cut {
+        Some(at) => {
+            out.push_str(&escape_control(value.get(..at).unwrap_or("")));
+            out.push('…');
+        }
+        None => out.push_str(&escape_control(value)),
+    }
+    out
+}
+
 /// Renders a name, path or pattern for an error message: quoted, with control
 /// characters escaped and long values cut to [`MAX_QUOTED_CHARS`] characters.
 pub(crate) fn quoted(value: impl fmt::Display) -> String {
-    let text = value.to_string();
-    let cut = text.char_indices().nth(MAX_QUOTED_CHARS).map(|(at, _)| at);
-    let mut out = String::with_capacity(text.len() + 3);
-    out.push('"');
-    match cut {
-        Some(at) => {
-            out.push_str(&escape_control(&text[..at]));
-            out.push('…');
-        }
-        None => out.push_str(&escape_control(&text)),
+    format!("\"{}\"", clipped(&value.to_string()))
+}
+
+/// Where in a `Blastfile` a refusal points (§18): a 1-based `line` and a
+/// 1-based `col` counted in `char`s, or [`Position::NONE`] for a whole-file
+/// refusal, which renders without a position at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Position {
+    line: u32,
+    col: u32,
+}
+
+impl Position {
+    /// No position: a whole-file refusal such as the size cap.
+    pub const NONE: Self = Self { line: 0, col: 0 };
+
+    /// A 1-based position; `col` counts `char`s, as an editor does.
+    pub const fn at(line: u32, col: u32) -> Self {
+        Self { line, col }
     }
-    out.push('"');
-    out
+
+    /// The 1-based line, or `0` when there is no position.
+    pub const fn line(self) -> u32 {
+        self.line
+    }
+
+    /// The 1-based column, or `0` when there is no position.
+    pub const fn col(self) -> u32 {
+        self.col
+    }
+
+    /// True for [`Position::NONE`].
+    pub const fn is_none(self) -> bool {
+        self.line == 0
+    }
+}
+
+impl fmt::Display for Position {
+    /// Renders `line:col`, or nothing at all for [`Position::NONE`].
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_none() {
+            return Ok(());
+        }
+        write!(f, "{}:{}", self.line, self.col)
+    }
+}
+
+/// The `line:col: ` a positioned refusal starts with, or nothing at all for
+/// [`Position::NONE`] (§18).
+pub(crate) fn prefix(at: Position) -> String {
+    if at.is_none() {
+        String::new()
+    } else {
+        format!("{}:{}: ", at.line, at.col)
+    }
 }
 
 /// A regex compile failure as a single line: the `regex` crate reports syntax
@@ -594,6 +652,161 @@ pub enum ManifestError {
         key: String,
         /// Why it can never reach the front controller.
         why: &'static str,
+    },
+    /// `=` is not Blastfile syntax (§5.3).
+    ///
+    /// The lexer emits [`crate::blastfile`]'s `Equals` token only so the parser
+    /// can refuse it here: `body = "json"` must name the fix, which is to write
+    /// the value after the keyword.
+    #[error("{}`=` is not Blastfile syntax; write the value after the keyword: `body json`", prefix(*at))]
+    Equals {
+        /// Where the `=` is.
+        at: Position,
+    },
+    /// A quoted string where a store reads `$IDENT` (§5.3).
+    ///
+    /// The literal is **never** echoed: a pasted DSN or token can sit in that
+    /// slot, and an error is written to logs and CI output (§17.1, R26).
+    #[error(
+        "{}a quoted string is not a variable name; a store reads `$IDENT`: `postgres $DATABASE_URL`",
+        prefix(*at)
+    )]
+    QuotedStore {
+        /// Where the string is.
+        at: Position,
+    },
+    /// An environment-variable name that does not start `[A-Z_]` (§5.3).
+    ///
+    /// The name is a name, not a value, so it is safe to quote; it is escaped
+    /// and cut like every other value (§18).
+    #[error(
+        "{}`${}` is not an environment variable name: names are upper-case, `[A-Z_][A-Z0-9_]*`, like `$DATABASE_URL`",
+        prefix(*at),
+        clipped(name)
+    )]
+    EnvName {
+        /// Where the `$` is.
+        at: Position,
+        /// The name as written, without the `$`.
+        name: String,
+    },
+    /// A `$` that starts neither a name nor a bind placeholder (§5.3).
+    #[error(
+        "{}`$` must start an environment variable name, `[A-Z_][A-Z0-9_]*`; `$?` is a bind placeholder and belongs inside a `query '…'` string",
+        prefix(*at)
+    )]
+    EnvMarker {
+        /// Where the `$` is.
+        at: Position,
+    },
+    /// A `"…"` string with no closing quote (§5.3).
+    #[error("{}unterminated string: the opening `\"` is on line {opened}", prefix(*at))]
+    UnterminatedString {
+        /// Where the opening quote is.
+        at: Position,
+        /// The line the opening quote is on.
+        opened: u32,
+    },
+    /// A `'…'` string with no closing quote (§5.3).
+    #[error("{}unterminated raw string: the opening `'` is on line {opened}", prefix(*at))]
+    UnterminatedRawString {
+        /// Where the opening quote is.
+        at: Position,
+        /// The line the opening quote is on.
+        opened: u32,
+    },
+    /// A backslash that starts no escape the grammar allows (§5.3).
+    ///
+    /// The escape is one `char`, escaped so it cannot break the one line (§18).
+    #[error(
+        "{}`\\{}` is not an escape; the escapes are `\\\"`, `\\\\`, `\\n`, `\\t`",
+        prefix(*at),
+        clipped(&escape.to_string())
+    )]
+    InvalidEscape {
+        /// Where the backslash is.
+        at: Position,
+        /// The character after the backslash.
+        escape: char,
+    },
+    /// A `\r` that no `\n` follows (§5.3).
+    #[error("{}carriage return without a newline is not Blastfile syntax", prefix(*at))]
+    CarriageReturn {
+        /// Where the `\r` is.
+        at: Position,
+    },
+    /// A byte outside the token set that is not ASCII (§5.3).
+    #[error(
+        "{}byte 0x{byte:x} is not Blastfile syntax; quote the text, or start a name with a letter or a digit",
+        prefix(*at)
+    )]
+    NonAsciiByte {
+        /// Where the byte is.
+        at: Position,
+        /// The byte's first UTF-8 byte, as written in the file.
+        byte: u8,
+    },
+    /// A `-` that follows no letter or digit (§5.3).
+    #[error(
+        "{}`-` is part of a name or a keyword only after a letter or a digit",
+        prefix(*at)
+    )]
+    BareHyphen {
+        /// Where the `-` is.
+        at: Position,
+    },
+    /// A `Blastfile` over the 1 MiB cap (§4.5).
+    ///
+    /// Position-less: the caller prefixes the path exactly once, giving
+    /// `<path>: the file is <n> bytes; …` (§18).
+    #[error(
+        "the file is {bytes} bytes; Blastfile is limited to {} bytes — split the grants into a `trait`, or delete a generated block",
+        crate::blastfile::MAX_SOURCE_BYTES
+    )]
+    TooLarge {
+        /// The size that was refused: the metadata length, or the bytes read.
+        bytes: u64,
+    },
+    /// A path that is not a regular file: a FIFO, a device or a directory
+    /// (§4.5).
+    ///
+    /// Position-less, like [`ManifestError::TooLarge`]. `read` refuses it from
+    /// its metadata, before it opens anything, so a FIFO with no writer can
+    /// never block the boot.
+    #[error("the file is not a regular file; Blastfile must be a plain file")]
+    NotRegularFile,
+    /// A `Blastfile` that could not be read or is not UTF-8 (§4.5).
+    ///
+    /// Position-less, like [`ManifestError::TooLarge`]; `message` is the
+    /// operating system's own sentence, escaped so it stays on one line.
+    #[error("the file could not be read: {message}")]
+    Unreadable {
+        /// The error as the operating system reported it, escaped.
+        message: String,
+    },
+    /// A token stream over the 262144-token cap (§4.5).
+    ///
+    /// Position-less: the caller prefixes the path exactly once (§18).
+    #[error(
+        "{} tokens; Blastfile is limited to {} — split the file",
+        tokens,
+        crate::blastfile::MAX_TOKENS
+    )]
+    TooManyTokens {
+        /// The count that was refused: one past the cap.
+        tokens: usize,
+    },
+    /// A trivia stream over the 262144-run cap (§4.5).
+    ///
+    /// Position-less: the caller prefixes the path exactly once (§18).
+    #[error(
+        "{} trivia runs; Blastfile is limited to {} — split the file",
+        runs,
+        crate::blastfile::MAX_TRIVIA
+    )]
+    TooManyTrivia {
+        /// The count that was refused: one past the cap.
+        runs: usize,
     },
 }
 

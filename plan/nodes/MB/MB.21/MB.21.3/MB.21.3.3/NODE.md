@@ -1,6 +1,6 @@
 ---
 id: MB.21.3.3
-title: Compile Blastfile path patterns and imply HEAD from GET at parse time
+title: Compile Blastfile path patterns and normalise HEAD from GET for lowering
 kind: task
 status: ready
 owner: implementer
@@ -10,17 +10,19 @@ paths:
   - "crates/blastit-manifest/src/blastfile/**"
   - "crates/blastit-manifest/src/blastfile/pattern.rs"
   - "crates/blastit-manifest/src/model.rs"
+  - "crates/blastit-manifest/src/routing.rs"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T02:39"
+updated: "2026-11-16T03:36"
 ---
 
 # Goal
 
-Compile Blastfile's path patterns into the anchored regexes the scheduler already matches, and
-normalize `HEAD` from `GET` at parse time so request matching itself does not change.
+Compile Blastfile's path patterns into the anchored regexes the scheduler already matches, and provide
+the method normalisation lowering applies **before** the `Route` exists (§8.4: `HEAD` is implied by
+`GET` at lower time), so request matching itself does not change.
 
 The **public-entry-point** proof of this leaf cannot be written yet: `tests/` may only call
 `Manifest::from_blastfile_str`/`parse_blastfile`, and those arrive with lowering in `MB.21.3.8`. This
@@ -40,9 +42,11 @@ come **before** `MB.21.3.8`, because lowering's step 4 compiles each `view` head
   spelling the design allows), an unknown parameter kind (`{id:float}`), a duplicate parameter name in
   one pattern, `*` anywhere but last, an unescaped `{`/`}` inside a quoted pattern, and a `regex` that
   Rust's `regex` refuses (report the compile error, never a panic).
-- **`HEAD` implied by `GET`**: a view declaring `GET` answers `HEAD` too, at parse time, by
-  normalizing `methods` into the existing `Option<Vec<String>>` — so retry/matching code is untouched.
-  Update `Route::methods`' doc comment (it currently promises the opposite) and note that
+- **`HEAD` implied by `GET`**: a view declaring `GET` answers `HEAD` too. `lower` normalises the method
+  list into the existing `Option<Vec<String>>` (§8.4's table, including `GET, POST` →
+  `["GET", "HEAD", "POST"]` and the deduplicated duplicate), so retry/matching code is untouched and
+  `HEAD` lands before `RoutingTable` sees anything. Rewrite BOTH stale doc comments: `Route::methods`
+  (it promises the opposite) and `src/routing.rs`'s "`HEAD` is never implied by `GET`"; note that
   `docs/reference/manifest.md` is repointed by `MB.21.5.1`.
 - Tests: `#[cfg(test)] mod tests` inside `pattern.rs` (a table of pattern → matching paths, both
   directions) and inside `parser.rs` (the header hook), covering the refusal matrix in the same module.

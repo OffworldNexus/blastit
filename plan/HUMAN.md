@@ -113,3 +113,11 @@ MB.21.3.7 is blocked on a design gap, not on size: deleting Route::static_policy
 
 **Answer:**
 
+## H-011 [closed] (node MB.21.3.1)
+
+- asked: 2026-11-16T03:47 by implementer
+
+MB.21.3.1: design §4.5 mandates that blastfile::read refuse a non-regular file and an unreadable file, but pins no sentence for either (the size row's sentence is the only one). Implemented as 'the file is not a regular file; Blastfile must be a plain file' and 'the file could not be read: <os sentence>' — confirm or re-word in the design before MB.21.5.1 documents the reader.
+
+**Answer:**
+
