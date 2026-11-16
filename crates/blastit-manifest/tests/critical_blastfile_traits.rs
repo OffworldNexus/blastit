@@ -58,10 +58,10 @@ fn unrestricted_inside_a_trait_is_refused() {
     ] {
         let rendered = refusal(source);
         assert!(
-            rendered.contains("unrestricted is only allowed inline on a route"),
+            rendered.contains("unrestricted is only allowed inline on a view"),
             "{rendered}"
         );
-        assert!(rendered.contains("group \"t\""), "{rendered}");
+        assert!(rendered.contains("trait \"t\""), "{rendered}");
     }
 }
 

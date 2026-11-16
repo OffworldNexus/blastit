@@ -27,8 +27,8 @@ use std::collections::BTreeMap;
 
 use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_manifest::{
-    Columns, Grant, Group, Manifest, ManifestWarning, PgGrant, PhpPolicy, Protocol, Proxy,
-    ProxyName, Route, StaticMount, StaticPolicy, TableGrant, TableGrants, UidLayout,
+    BodyOwner, Columns, Grant, Group, Manifest, ManifestWarning, PgGrant, PhpPolicy, Protocol,
+    Proxy, ProxyName, Route, StaticMount, StaticPolicy, TableGrant, TableGrants, UidLayout,
 };
 
 // ---- builders ----------------------------------------------------------
@@ -119,6 +119,8 @@ struct Spec<'a> {
     grants: Vec<(ProxyName, Grant)>,
     /// The `body` policy, when the view or the endpoint declares one.
     ingress: Option<IngressPolicy>,
+    /// Who declared it (§10.3): the view, or one of its endpoints.
+    body_owner: BodyOwner,
 }
 
 impl<'a> Spec<'a> {
@@ -168,6 +170,14 @@ impl<'a> Spec<'a> {
         self
     }
 
+    /// The route with an **endpoint's** `body` (§10.3): the locator names the
+    /// endpoint (`view app POST body`), not the view.
+    fn endpoint_body(mut self, ingress: IngressPolicy) -> Self {
+        self.ingress = Some(ingress);
+        self.body_owner = BodyOwner::Endpoint;
+        self
+    }
+
     /// The route itself.
     fn build(self) -> Route {
         Route::new(
@@ -181,6 +191,7 @@ impl<'a> Spec<'a> {
             self.grants.into_iter().collect(),
         )
         .with_ingress(self.ingress)
+        .with_body_owner(self.body_owner)
         .with_sandbox(self.sandbox)
     }
 }
@@ -764,23 +775,23 @@ fn row_the_ingress_policies() {
         vec![
             Spec::new("app", &["/a"])
                 .methods(&["GET", "HEAD"])
-                .body(ingress(BodyCodec::Json))
+                .endpoint_body(ingress(BodyCodec::Json))
                 .build(),
             Spec::new("app", &["/b"])
                 .methods(&["POST"])
-                .body(ingress(BodyCodec::Form))
+                .endpoint_body(ingress(BodyCodec::Form))
                 .build(),
             Spec::new("app", &["/c"])
                 .methods(&["PUT"])
-                .body(ingress(BodyCodec::None))
+                .endpoint_body(ingress(BodyCodec::None))
                 .build(),
             Spec::new("app", &["/d"])
                 .methods(&["DELETE"])
-                .body(ingress(BodyCodec::Raw))
+                .endpoint_body(ingress(BodyCodec::Raw))
                 .build(),
             Spec::new("app", &["/e"])
                 .methods(&["PATCH"])
-                .body(IngressPolicy {
+                .endpoint_body(IngressPolicy {
                     body: BodyCodec::Raw,
                     allow_raw: true,
                 })
@@ -1006,7 +1017,7 @@ fn row_a_multi_endpoint_view() {
                 .methods(&["POST"])
                 .groups(&["session"])
                 .grants(vec![(ProxyName::from("db"), cart_items())])
-                .body(ingress(BodyCodec::Json))
+                .endpoint_body(ingress(BodyCodec::Json))
                 .build(),
         ],
     );
@@ -1117,26 +1128,29 @@ fn a_view_cannot_carry_a_static_or_php_declaration() {
 }
 
 /// `parse_blastfile` surfaces `validate`'s warnings unchanged, in one document
-/// (§13.2, acceptance item 4).
+/// (§13.2, acceptance item 4) — one sentence per kind, verbatim, in the order
+/// the five fire, and the sixth (`EntrypointNotReached`) from its own file.
 #[test]
 fn the_validate_warnings_are_surfaced_unchanged() {
     use blastit_manifest::ManifestWarning;
+
+    fn kind(warning: &ManifestWarning) -> &'static str {
+        match warning {
+            ManifestWarning::UnattachedGroup { .. } => "UnattachedGroup",
+            ManifestWarning::UngrantedProxy { .. } => "UngrantedProxy",
+            ManifestWarning::UnrestrictedRoute { .. } => "UnrestrictedRoute",
+            ManifestWarning::RawIngress { .. } => "RawIngress",
+            ManifestWarning::EgressRoute { .. } => "EgressRoute",
+            ManifestWarning::EntrypointNotReached { .. } => "EntrypointNotReached",
+        }
+    }
 
     let source = "postgres $DATABASE_URL\n\
                   postgres analytics $ANALYTICS_URL\n\
                   trait unused {\n  postgres { select events }\n}\n\
                   view admin \"/admin\" {\n  postgres unrestricted\n  body raw\n  egress any\n}\n";
     let (_, warnings) = Manifest::parse_blastfile(source, 20_000).expect("validates");
-    let kinds: Vec<&str> = warnings
-        .iter()
-        .map(|warning| match warning {
-            ManifestWarning::UnattachedGroup { .. } => "UnattachedGroup",
-            ManifestWarning::UngrantedProxy { .. } => "UngrantedProxy",
-            ManifestWarning::UnrestrictedRoute { .. } => "UnrestrictedRoute",
-            ManifestWarning::RawIngress { .. } => "RawIngress",
-            ManifestWarning::EgressRoute { .. } => "EgressRoute",
-        })
-        .collect();
+    let kinds: Vec<&str> = warnings.iter().map(kind).collect();
     assert_eq!(
         kinds,
         [
@@ -1148,13 +1162,31 @@ fn the_validate_warnings_are_surfaced_unchanged() {
         ],
         "{warnings:?}"
     );
-    // Every sentence is `validate`'s own; this leaf re-spells none of them.
-    let rendered = warnings
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(rendered.contains("\"unused\""), "{rendered}");
-    assert!(rendered.contains("\"analytics\""), "{rendered}");
-    assert!(rendered.contains("\"admin\""), "{rendered}");
+    // §13.2: each sentence names the Blastfile node a developer edits.
+    assert_eq!(
+        warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        [
+            "trait \"unused\" is attached to no view and no global traits: it grants nothing",
+            "store \"analytics\" has no grant in any view or trait: it is unusable",
+            "view \"admin\" may run any statement on store \"db\" (unrestricted)",
+            "view \"admin\": body raw passes the request body through unvalidated",
+            "view \"admin\": egress any opens any outbound address and port",
+        ],
+        "{warnings:?}"
+    );
+
+    // §12.2: a front controller no view forwards to is the sixth, and its
+    // sentence names the entry and the fix.
+    let (_, warnings) = Manifest::parse_blastfile("entrypoint php \"public/index.php\"\n", 20_000)
+        .expect("a php entry with no view boots");
+    assert_eq!(
+        warnings.iter().map(kind).collect::<Vec<_>>(),
+        ["EntrypointNotReached"],
+        "{warnings:?}"
+    );
+    assert_eq!(
+        warnings[0].to_string(),
+        "entrypoint php \"public/index.php\" is reached by no view: declare a `view` that forwards to it",
+        "{warnings:?}"
+    );
 }

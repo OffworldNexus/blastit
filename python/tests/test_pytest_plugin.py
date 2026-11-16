@@ -458,9 +458,9 @@ def test_the_report_counts_what_the_manifest_does_not_cover(baseline: Outcome) -
         "routes": 13,
         "proxies": {"db": "postgresql"},
         "warnings": [
-            'route "note-cache": egress = true opens any outbound address and port'
+            'view "note-cache": egress any opens any outbound address and port'
         ],
-    }, "R11: the route that may reach any address says so, in the report"
+    }, "R11: the view that may reach any address says so, in the report"
     assert baseline.report["unrecognised"] == {"statements": [], "count": 0}
     assert baseline.report["plugin_warnings"] == []
 

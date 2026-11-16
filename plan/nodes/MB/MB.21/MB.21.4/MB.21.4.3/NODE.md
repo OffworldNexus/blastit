@@ -2,7 +2,7 @@
 id: MB.21.4.3
 title: "Map check, dev --learn and the --json fix actions onto Blastfile nodes, re-spell §13.2/§10.2/§11.3, close §18 and grow the editor's grant scope"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.2]
@@ -29,11 +29,11 @@ paths:
   - "python/tests/**"
   - e2e/php2shell.py
   - "docs/design/blastfile-dsl.md"
-attempts: 2
-max_attempts: 3
+attempts: 3
+max_attempts: 5
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T12:53"
+updated: "2026-11-16T13:23"
 ---
 
 # Goal

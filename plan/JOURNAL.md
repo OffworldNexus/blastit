@@ -2226,3 +2226,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T12:54 [MB.21.4.4] (planner) edited fields
 - 2026-11-16T12:54 [MB.21.4.4] (planner) re-pointed depends_on MB.21.4.3 -> MB.21.4.7 (new Python-cutover leaf) and Context now says the package surface is 4.7's: the plugin default/help and the four P
 - 2026-11-16T12:54 [MB.21.4.7] (planner) created (task) after MB.21.4.3 attempt 2 returned needs_split: its Rust contract landed green, the Python cutover did not fit the session. Scope is caller re-po
+- 2026-11-16T12:54 [MB.21.4.3] (lead) status active -> review
+- 2026-11-16T13:01 [MB.21.4.3] (lead) REVIEW FAIL: [MAJOR] python/tests/test_pytest_plugin.py:461 pins the retired egress sentence and is unsatisfiable now (CI sets DATABASE_URL so it will not skip 
+- 2026-11-16T13:01 [MB.21.4.3] (lead) status review -> ready
+- 2026-11-16T13:01 [MB.21.4.3] (lead) edited fields
+- 2026-11-16T13:01 [MB.21.4.3] (lead) attempt 3/5 started
+- 2026-11-16T13:14 [MB.21.4.3] (lead) status ready -> review
+- 2026-11-16T13:23 [MB.21.4.3] (lead) reviewer PASS (round 2); lead gate: validate OK, guard OK, make check exit 0 with 166 suites. Five MINORs of round 2 handed to MB.21.4.5/5.1: edit.rs's stale do
+- 2026-11-16T13:23 [MB.21.4.3] (lead) status review -> done

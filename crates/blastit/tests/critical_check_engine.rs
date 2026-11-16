@@ -364,6 +364,8 @@ fn the_r27_golden_is_a_clean_audit_after_the_edit() {
                 view: "orders".to_string(),
                 store: None,
                 queries: vec![Q1.to_string(), Q2.to_string()],
+                tables: Default::default(),
+                functions: Default::default(),
             }],
         },
     )
@@ -424,10 +426,14 @@ fn every_add_query_reparses_under_parse_and_validate() {
             continue;
         };
         assert_eq!(fix.action, "add_query", "{sql}");
-        assert_eq!(
-            fix.to.as_deref(),
-            Some(format!("[route.{proxy}].queries").as_str())
-        );
+        // §13.3: `to` is the Blastfile node, never a retired table path, and a
+        // named store appends its name.
+        let expected = if proxy == "db" {
+            "view catalog postgres".to_string()
+        } else {
+            format!("view catalog postgres {proxy}")
+        };
+        assert_eq!(fix.to.as_deref(), Some(expected.as_str()), "{sql}");
         assert!(!sql.contains('\u{2026}'), "a redaction is never grantable");
         let edited = apply_edits(
             RE_PARSE_MANIFEST,
@@ -437,6 +443,8 @@ fn every_add_query_reparses_under_parse_and_validate() {
                     view: "catalog".to_string(),
                     store: (proxy != "db").then(|| proxy.clone()),
                     queries: vec![sql.clone()],
+                    tables: Default::default(),
+                    functions: Default::default(),
                 }],
             },
         )
@@ -552,7 +560,7 @@ fn a_lying_query_verdict_carrying_a_redaction_is_observe_never_add_query() {
     );
     assert_eq!(
         fixes.get(grantable_sql),
-        Some(&("add_query", Some("[route.db].queries".to_string()))),
+        Some(&("add_query", Some("view catalog postgres".to_string()))),
         "the parameterised twin is still grantable"
     );
 }
@@ -583,12 +591,12 @@ fn fix_of(report: &Report, sql: &str) -> Value {
 }
 
 #[test]
-fn connection_setup_sql_names_the_connection_group_grant() {
+fn connection_setup_sql_names_the_connection_trait_grant() {
     // Django re-states `TimeZone` when it opens a connection (LESSONS.md), and
-    // `SET`/`SHOW` are the driver's session setup. Each runs on whichever route
-    // opens the connection first, so a per-route `[route.db].queries` grant
-    // leaves every other route denying it: the fix is the `connection` group
-    // every route attaches (`MA.8`).
+    // `SET`/`SHOW` are the driver's session setup. Each runs on whichever view
+    // opens the connection first, so a per-view `postgres { query … }` grant
+    // leaves every other view denying it: the fix is the `connection` trait
+    // every view `use`s (`MA.8`, §13.3).
     for sql in [
         "SELECT set_config('TimeZone', $?, false)",
         "SET search_path = public",
@@ -602,17 +610,17 @@ fn connection_setup_sql_names_the_connection_group_grant() {
         assert!(!report.ok, "{sql} is an ungranted statement, not advice");
         assert_eq!(
             fix_of(&report, sql),
-            json!({"action": "add_group", "to": "[group.connection.db].queries"}),
-            "{sql} runs on whichever route opens the connection"
+            json!({"action": "add_group", "to": "trait connection"}),
+            "{sql} runs on whichever view opens the connection"
         );
     }
 }
 
 #[test]
-fn ordinary_statements_keep_the_per_route_add_query() {
-    // The twin of the group hint: `SELECT 1` is replayable in a transaction
-    // but it belongs to the route that issued it, and `DELETE` is an ordinary
-    // statement, so neither may name a group every route attaches.
+fn ordinary_statements_keep_the_per_view_add_query() {
+    // The twin of the trait hint: `SELECT 1` is replayable in a transaction
+    // but it belongs to the view that issued it, and `DELETE` is an ordinary
+    // statement, so neither may name the trait every view attaches.
     for sql in ["SELECT 1", DELETE] {
         let report = run(
             GOLDEN_MANIFEST,
@@ -621,14 +629,14 @@ fn ordinary_statements_keep_the_per_route_add_query() {
         );
         assert_eq!(
             fix_of(&report, sql),
-            json!({"action": "add_query", "to": "[route.db].queries"}),
-            "{sql} is one route's statement, at one route's path"
+            json!({"action": "add_query", "to": "view home postgres"}),
+            "{sql} is one view's statement, at one view's path"
         );
     }
 }
 
 #[test]
-fn only_connection_setup_names_a_group_and_never_a_refusal() {
+fn only_connection_setup_names_a_trait_and_never_a_refusal() {
     // One mixed run: exactly the setup statement carries `add_group`, while the
     // per-route statements and the two `observe` cases keep their fixes — so a
     // regression that emits `add_group` everywhere (or `add_query` for setup)
@@ -664,15 +672,15 @@ fn only_connection_setup_names_a_group_and_never_a_refusal() {
     assert_eq!(
         grouped,
         [setup.to_string()],
-        "only connection setup names a group: {report:?}"
+        "only connection setup names a trait: {report:?}"
     );
     assert_eq!(
         fix_of(&report, "SELECT 1"),
-        json!({"action": "add_query", "to": "[route.db].queries"})
+        json!({"action": "add_query", "to": "view home postgres"})
     );
     assert_eq!(
         fix_of(&report, DELETE),
-        json!({"action": "add_query", "to": "[route.db].queries"})
+        json!({"action": "add_query", "to": "view home postgres"})
     );
     for sql in [REDACTED, "SAVEPOINT"] {
         assert_eq!(
@@ -856,12 +864,12 @@ fn every_finding_kind_and_its_interaction_counts() {
         })
         .collect();
     assert!(dead_routes.iter().all(|route| *route != "about"));
-    // The group's dead grant is reported once, with its group table.
+    // The trait's dead grant is reported once, with its trait node.
     assert!(report.findings.iter().any(|finding| matches!(
         finding,
         Finding::DeadGrant { group: Some(group), fix, .. }
             if group == "session"
-                && fix.to.as_deref() == Some("[group.session.db].queries")
+                && fix.to.as_deref() == Some("trait session")
                 && fix.unsafe_ == Some(true)
     )));
 
@@ -980,6 +988,92 @@ view notes regex '/notes/.*' {
     );
     // One proxy never gets the `, <P> proxies` suffix.
     assert_eq!(report.proxies.len(), 1);
+}
+
+#[test]
+fn the_body_finding_names_the_view_body_node_and_never_unvalidated() {
+    // §13.3: `fix.to` is a node locator, never a directive to paste. A view
+    // whose `body` belongs to the whole view names `view <name> body`; one
+    // endpoint's `body` names that endpoint — and `HEAD` is implied by `GET`
+    // (§8.4), so it is never written.
+    let manifest = r#"
+postgres $DATABASE_URL
+
+view raw "/raw/" {
+    body raw
+}
+
+view upload {
+    POST "/upload" {
+        body raw
+    }
+}
+
+view note {
+    body raw
+    POST "/note/" {}
+}
+"#;
+    let report = run(
+        manifest,
+        &[
+            http_line("GET", "/raw/", None, 0, None),
+            http_line("POST", "/upload/", Some("text/plain"), 4, None),
+            http_line("POST", "/note/", Some("text/plain"), 4, None),
+        ],
+        &[],
+    );
+    let fixes: Vec<(String, Value)> = report
+        .findings
+        .iter()
+        .filter_map(|finding| match finding {
+            Finding::RawIngress { route, fix, .. } => Some((
+                route.clone(),
+                serde_json::to_value(fix).expect("a fix renders"),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fixes,
+        [
+            (
+                "raw".to_string(),
+                json!({"action": "fix_ingress", "to": "view raw body", "allow_raw": true}),
+            ),
+            (
+                "upload".to_string(),
+                json!({"action": "fix_ingress", "to": "view upload POST body", "allow_raw": true}),
+            ),
+            // A view-level `body` on a view with one `POST` endpoint is still the
+            // view's node: `route.methods()` cannot tell the two apart, so the
+            // owner comes out of lowering (§13.3).
+            (
+                "note".to_string(),
+                json!({"action": "fix_ingress", "to": "view note body", "allow_raw": true}),
+            ),
+        ],
+        "the acknowledgement is the author's to type, so the payload never carries it"
+    );
+    // The whole document: no `unvalidated` anywhere a fix could carry it, and
+    // no retired table path in any `to`.
+    let document = serde_json::to_string(&report).expect("the report renders");
+    let fixes_only: String = report
+        .findings
+        .iter()
+        .map(|finding| serde_json::to_string(&finding).expect("a finding renders"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !fixes_only.contains("unvalidated"),
+        "no fix may carry the acknowledgement: {fixes_only}"
+    );
+    for retired in ["[route.", "[group.", "[route.ingress]"] {
+        assert!(
+            !document.contains(retired),
+            "`{retired}` is a retired table path, not a node: {document}"
+        );
+    }
 }
 
 #[test]

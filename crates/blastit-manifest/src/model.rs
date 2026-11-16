@@ -406,6 +406,24 @@ impl Executor {
     }
 }
 
+/// Who declared a route's `body` (§10.3, §13.3).
+///
+/// A view-level `body` applies to every endpoint and has no endpoint to name in
+/// a locator; an endpoint's `body` belongs to that method. Two documents can
+/// lower to the same [`IngressPolicy`] and differ here, which is why this is
+/// carried rather than derived from [`Route::methods`] — a view-level `body` on
+/// a view with one `POST` endpoint is indistinguishable from that endpoint's own
+/// `body` by the methods alone, and `check`'s `fix.to` names the node a
+/// developer edits (§13.3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BodyOwner {
+    /// The view's own `body`: `view upload { body raw }`.
+    #[default]
+    View,
+    /// The endpoint's `body`: `view upload { POST "/upload" { body raw } }`.
+    Endpoint,
+}
+
 /// A `[[route]]` entry: one sandbox, one process, one uid (§6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
@@ -418,6 +436,7 @@ pub struct Route {
     prefork: bool,
     grants: BTreeMap<ProxyName, Grant>,
     ingress: Option<IngressPolicy>,
+    body_owner: BodyOwner,
     static_policy: Option<StaticPolicy>,
     php: Option<PhpPolicy>,
 }
@@ -453,9 +472,29 @@ impl Route {
             prefork,
             grants,
             ingress: None,
+            body_owner: BodyOwner::View,
             static_policy: None,
             php: None,
         }
+    }
+
+    /// The same route with the owner of its `body` (§10.3, §13.3).
+    ///
+    /// `#[doc(hidden)]`: `lower` sets it, and the crate's integration tests chain
+    /// it when their expected model carries an endpoint's `body`.
+    #[doc(hidden)]
+    pub fn with_body_owner(mut self, owner: BodyOwner) -> Self {
+        self.body_owner = owner;
+        self
+    }
+
+    /// Who declared this route's `body`: the view, or the endpoint (§10.3).
+    ///
+    /// It is what `check`'s `raw_ingress` finding needs to name a node the file
+    /// actually has — `view upload body` for a view-level `body`, `view upload
+    /// POST body` for that endpoint's (§13.3).
+    pub fn body_owner(&self) -> BodyOwner {
+        self.body_owner
     }
 
     /// The same route in the given sandbox (§7.3, §10.3).

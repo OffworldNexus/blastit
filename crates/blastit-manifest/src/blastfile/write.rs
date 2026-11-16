@@ -39,14 +39,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use blastit_sqlpolicy::{KNOWN_STATIC_SETUP_SQL, has_quoted_literal, normalize};
+use blastit_sqlpolicy::{
+    Columns, KNOWN_STATIC_SETUP_SQL, TableGrants, has_quoted_literal, normalize,
+};
 
-use super::BlastfileEdits;
 use super::lower::{self, DEFAULT_STORE};
 use super::parser;
 use super::pattern::{self, normalise_methods};
 use super::syntax::{Cst, Element, NodeId, NodeKind};
 use super::tokens::TokenKind;
+use super::{BlastfileEdits, ProposedGrant};
 use crate::edit::EditError;
 use crate::error::Position;
 use crate::model::{Grant, Manifest, PgGrant, ProxyName, Route};
@@ -108,7 +110,8 @@ pub(crate) fn expected(edits: &BlastfileEdits, manifest: &Manifest) -> Manifest 
         let Ok(proposed) = normalise_queries(&grant.view, store_name, &grant.queries) else {
             continue;
         };
-        if proposed.is_empty() {
+        let scope = TableGrants::new(grant.tables.clone(), grant.functions.iter().cloned());
+        if proposed.is_empty() && scope.is_empty() {
             continue;
         }
         let store = ProxyName::from(store_name);
@@ -126,15 +129,16 @@ pub(crate) fn expected(edits: &BlastfileEdits, manifest: &Manifest) -> Manifest 
                     .map(|grant| grant.queries().to_vec())
                     .unwrap_or_default();
                 let fresh = fresh_queries(&written, &proposed);
-                if fresh.is_empty() {
-                    continue;
-                }
                 let mut merged = route
                     .grant(&store)
                     .and_then(Grant::as_postgresql)
                     .cloned()
                     .unwrap_or_else(|| PgGrant::new(Vec::new(), false));
-                merged.merge_from(&PgGrant::new(fresh, false));
+                let before = merged.tables().clone();
+                merged.merge_from(&PgGrant::new(fresh.clone(), false).with_tables(scope.clone()));
+                if fresh.is_empty() && merged.tables() == &before {
+                    continue;
+                }
                 *route = with_grant(route, store.clone(), Grant::Postgresql(merged));
             }
         }
@@ -154,7 +158,8 @@ pub(crate) fn expected(edits: &BlastfileEdits, manifest: &Manifest) -> Manifest 
             let Ok(proposed) = normalise_queries(&grant.view, store_name, &grant.queries) else {
                 continue;
             };
-            if proposed.is_empty() {
+            let scope = TableGrants::new(grant.tables.clone(), grant.functions.iter().cloned());
+            if proposed.is_empty() && scope.is_empty() {
                 continue;
             }
             let store = ProxyName::from(store_name);
@@ -163,7 +168,7 @@ pub(crate) fn expected(edits: &BlastfileEdits, manifest: &Manifest) -> Manifest 
                 .and_then(Grant::as_postgresql)
                 .cloned()
                 .unwrap_or_else(|| PgGrant::new(Vec::new(), false));
-            merged.merge_from(&PgGrant::new(proposed, false));
+            merged.merge_from(&PgGrant::new(proposed, false).with_tables(scope));
             grants.insert(store, Grant::Postgresql(merged));
         }
         let path: Vec<String> = view
@@ -403,6 +408,8 @@ struct GrantTarget {
     /// The store's name, or `None` for the unnamed `postgres { … }` block.
     store: Option<String>,
     queries: Vec<String>,
+    /// The table/column and function scope the block declares (§13.1).
+    tables: TableGrants,
 }
 
 /// A `view` block to insert.
@@ -419,6 +426,39 @@ struct Patch {
     /// The store's name, or `None` for the unnamed `postgres { … }` block.
     store: Option<String>,
     queries: Vec<String>,
+    /// The **merged** table/function scope: what the block declares after this
+    /// edit, so the splice can rewrite the directives rather than add a second
+    /// one (§14.5's P4).
+    tables: TableGrants,
+}
+
+/// One splice: replace `[start, end)` with `text`, or insert at `start` when
+/// `end == start`.
+#[derive(Clone, Debug)]
+struct Splice {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+impl Splice {
+    /// Text inserted at `at`, replacing nothing.
+    fn insert(at: usize, text: String) -> Self {
+        Self {
+            start: at,
+            end: at,
+            text,
+        }
+    }
+
+    /// `[start, end)` replaced by `text` (an empty `text` deletes it).
+    fn replace(start: usize, end: usize, text: &str) -> Self {
+        Self {
+            start,
+            end,
+            text: text.to_owned(),
+        }
+    }
 }
 
 /// Everything an edits set resolves to against one document.
@@ -514,11 +554,17 @@ impl Plan {
                 });
             }
             let fresh = normalise_queries(&proposed.view, store_name, &proposed.queries)?;
-            if fresh.is_empty() {
+            let proposed_tables = table_scope(proposed, &proposed.view, store_name)?;
+            if fresh.is_empty() && proposed_tables.is_empty() {
                 continue;
             }
             if let Some(view) = new_views.iter_mut().find(|view| view.name == proposed.view) {
-                merge_target(&mut view.grants, proposed.store.clone(), fresh);
+                merge_target(
+                    &mut view.grants,
+                    proposed.store.clone(),
+                    fresh,
+                    proposed_tables,
+                );
                 continue;
             }
             let Some(routes) = view_routes(manifest, &proposed.view) else {
@@ -540,10 +586,21 @@ impl Plan {
             }
             let written: &[String] = existing.map(PgGrant::queries).unwrap_or(&[]);
             let fresh = fresh_queries(written, &fresh);
-            if fresh.is_empty() {
+            // The merged scope is what the block must declare afterwards; an
+            // identical proposal therefore changes nothing.
+            let mut merged = existing.map(PgGrant::tables).cloned().unwrap_or_default();
+            merged.merge_from(&proposed_tables);
+            let tables_changed = existing.map(PgGrant::tables) != Some(&merged);
+            if fresh.is_empty() && !tables_changed {
                 continue;
             }
-            merge_patch(&mut patches, &proposed.view, proposed.store.clone(), fresh);
+            merge_patch(
+                &mut patches,
+                &proposed.view,
+                proposed.store.clone(),
+                fresh,
+                tables_changed.then_some(merged),
+            );
         }
 
         let insert = match catch_all_view(manifest) {
@@ -560,24 +617,30 @@ impl Plan {
     /// Produces the edited document, splicing only whole lines.
     fn render(&self, cst: &Cst, source: &str) -> Result<String, EditError> {
         let eol = line_ending(source);
-        let mut splices: Vec<(usize, String)> = Vec::new();
+        let mut splices: Vec<Splice> = Vec::new();
         for patch in &self.patches {
             splices.push(patch_splice(cst, source, patch, eol)?);
+            if let Some(more) = table_splice(cst, source, patch, eol)? {
+                splices.extend(more);
+            }
         }
         if !self.new_views.is_empty() {
-            splices.push(self.views_splice(cst, source, eol)?);
+            let (offset, text) = self.views_splice(cst, source, eol)?;
+            splices.push(Splice::insert(offset, text));
         }
-        splices.sort_by_key(|splice| splice.0);
+        splices.sort_by_key(|splice| splice.start);
 
         let mut out = String::with_capacity(source.len().saturating_add(256));
         let mut cursor = 0;
-        for (offset, text) in splices {
-            let head = source.get(cursor..offset).ok_or(EditError::Verification {
-                section: "the insertion points",
-            })?;
+        for splice in splices {
+            let head = source
+                .get(cursor..splice.start)
+                .ok_or(EditError::Verification {
+                    section: "the insertion points",
+                })?;
             out.push_str(head);
-            out.push_str(&text);
-            cursor = offset;
+            out.push_str(&splice.text);
+            cursor = splice.end;
         }
         out.push_str(source.get(cursor..).ok_or(EditError::Verification {
             section: "the insertion points",
@@ -639,7 +702,12 @@ impl Plan {
 }
 
 /// Adds a grant to a view the edit creates, merging a repeated proposal.
-fn merge_target(grants: &mut Vec<GrantTarget>, store: Option<String>, fresh: Vec<String>) {
+fn merge_target(
+    grants: &mut Vec<GrantTarget>,
+    store: Option<String>,
+    fresh: Vec<String>,
+    tables: TableGrants,
+) {
     match grants.iter_mut().find(|target| target.store == store) {
         Some(target) => {
             for query in fresh {
@@ -647,16 +715,24 @@ fn merge_target(grants: &mut Vec<GrantTarget>, store: Option<String>, fresh: Vec
                     target.queries.push(query);
                 }
             }
+            target.tables.merge_from(&tables);
         }
         None => grants.push(GrantTarget {
             store,
             queries: fresh,
+            tables,
         }),
     }
 }
 
 /// Merges a repeated proposal for one view and store into one patch.
-fn merge_patch(patches: &mut Vec<Patch>, view: &str, store: Option<String>, fresh: Vec<String>) {
+fn merge_patch(
+    patches: &mut Vec<Patch>,
+    view: &str,
+    store: Option<String>,
+    fresh: Vec<String>,
+    tables: Option<TableGrants>,
+) {
     match patches
         .iter_mut()
         .find(|patch| patch.view == view && patch.store == store)
@@ -667,22 +743,112 @@ fn merge_patch(patches: &mut Vec<Patch>, view: &str, store: Option<String>, fres
                     patch.queries.push(query);
                 }
             }
+            if let Some(tables) = tables {
+                patch.tables.merge_from(&tables);
+            }
         }
         None => patches.push(Patch {
             view: view.to_owned(),
             store,
             queries: fresh,
+            tables: tables.unwrap_or_default(),
         }),
     }
 }
 
+/// The table/column and function scope a proposal names, as the model holds it
+/// (§13.1's spellings), refusing a name the file cannot write.
+///
+/// A `Word` is `[A-Za-z0-9_-]` (§5.1), so a quoted identifier, a
+/// schema-qualified table or a name with a space has no spelling in a grant
+/// block; an empty column list grants nothing and would be a misleading line.
+/// Both are refused before anything is spliced, naming the view and the store.
+fn table_scope(
+    proposed: &ProposedGrant,
+    view: &str,
+    store: &str,
+) -> Result<TableGrants, EditError> {
+    for table in proposed.tables.keys() {
+        if !writable_table(table) {
+            return Err(EditError::UnwritableGrantName {
+                view: view.to_owned(),
+                store: store.to_owned(),
+                what: "table",
+                name: table.clone(),
+            });
+        }
+    }
+    for (table, grant) in &proposed.tables {
+        for (operation, columns) in [
+            ("select", &grant.select),
+            ("insert", &grant.insert),
+            ("update", &grant.update),
+        ] {
+            let Some(Columns::List(names)) = columns else {
+                continue;
+            };
+            if names.is_empty() {
+                return Err(EditError::EmptyColumnList {
+                    view: view.to_owned(),
+                    store: store.to_owned(),
+                    table: table.clone(),
+                    operation,
+                });
+            }
+            for column in names {
+                if !writable_word(column) {
+                    return Err(EditError::UnwritableGrantName {
+                        view: view.to_owned(),
+                        store: store.to_owned(),
+                        what: "column",
+                        name: column.clone(),
+                    });
+                }
+            }
+        }
+    }
+    for function in &proposed.functions {
+        if !writable_function(function) {
+            return Err(EditError::UnwritableGrantName {
+                view: view.to_owned(),
+                store: store.to_owned(),
+                what: "function",
+                name: function.clone(),
+            });
+        }
+    }
+    Ok(TableGrants::new(
+        proposed.tables.clone(),
+        proposed.functions.iter().cloned(),
+    ))
+}
+
+/// Whether a table name is one `Word` (§13.1 writes `select products`).
+///
+/// A schema-qualified name is not: the grant grammar reads one word, and
+/// `TableGrants` already drops a leading `public.`, so a table in another
+/// schema has no spelling here.
+fn writable_table(name: &str) -> bool {
+    writable_word(name)
+}
+
+/// Whether one column name is a `Word`.
+fn writable_word(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    match bytes.next() {
+        Some(first) if first.is_ascii_alphanumeric() || first == b'_' => {}
+        _ => return false,
+    }
+    bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// Whether a function name is `Word ('.' Word)*`, the grammar's spelling.
+fn writable_function(name: &str) -> bool {
+    !name.is_empty() && name.split('.').all(writable_word)
+}
+
 /// The splice that adds `patch`'s statements to one view's grant block.
-fn patch_splice(
-    cst: &Cst,
-    source: &str,
-    patch: &Patch,
-    eol: &str,
-) -> Result<(usize, String), EditError> {
+fn patch_splice(cst: &Cst, source: &str, patch: &Patch, eol: &str) -> Result<Splice, EditError> {
     let view = view_node(cst, &patch.view).ok_or(EditError::Verification {
         section: "the views",
     })?;
@@ -707,7 +873,8 @@ fn patch_splice(
                         .unwrap_or_else(|| DEFAULT_STORE.to_owned()),
                 })?;
             let close = block_close(cst, block)?;
-            Ok(insertion_at(cst, source, block, close, &statements, eol))
+            let (at, text) = insertion_at(cst, source, block, close, &statements, eol);
+            Ok(Splice::insert(at, text))
         }
         None => {
             let close = block_close(cst, view)?;
@@ -731,7 +898,7 @@ fn patch_splice(
                 text.push_str(&item);
                 text.push('}');
                 text.push_str(eol);
-                Ok((line, text))
+                Ok(Splice::insert(line, text))
             } else {
                 // A one-line view: its body is a `;`-separated list.
                 let mut text = String::new();
@@ -747,7 +914,7 @@ fn patch_splice(
                 }
                 text.push_str(&block);
                 let at = trim_spaces_before(source, close);
-                Ok((at, text))
+                Ok(Splice::insert(at, text))
             }
         }
     }
@@ -817,6 +984,11 @@ fn render_view(view: &NewView, eol: &str) -> String {
         out.push_str(&store_head(target.store.as_deref()));
         out.push_str(" {");
         out.push_str(eol);
+        for statement in table_statements(&target.tables) {
+            out.push_str("        ");
+            out.push_str(&statement);
+            out.push_str(eol);
+        }
         for query in &target.queries {
             out.push_str("        ");
             out.push_str(&query_statement(query));
@@ -828,6 +1000,248 @@ fn render_view(view: &NewView, eol: &str) -> String {
     out.push('}');
     out.push_str(eol);
     out
+}
+
+/// The table and function directives of one merged scope, in file order
+/// (§13.1): `functions a, b`, then `select`, `insert`, `update`, `delete`.
+///
+/// One line per operation, tables in name order, columns in name order, so a
+/// second run over the same model writes the same bytes.
+fn table_statements(tables: &TableGrants) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if !tables.functions().next().is_none() {
+        let names: Vec<String> = tables.functions().map(str::to_owned).collect();
+        out.push(format!("functions {}", names.join(", ")));
+    }
+    let mut selects: Vec<String> = Vec::new();
+    let mut inserts: Vec<String> = Vec::new();
+    let mut updates: Vec<String> = Vec::new();
+    let mut deletes: Vec<String> = Vec::new();
+    for (table, grant) in tables.tables() {
+        for (slot, target) in [
+            (&grant.select, &mut selects),
+            (&grant.insert, &mut inserts),
+            (&grant.update, &mut updates),
+        ] {
+            if let Some(columns) = slot {
+                target.push(columns_spelling(table, columns));
+            }
+        }
+        if grant.delete {
+            deletes.push(table.clone());
+        }
+    }
+    for (keyword, entries) in [
+        ("select", selects),
+        ("insert", inserts),
+        ("update", updates),
+        ("delete", deletes),
+    ] {
+        if !entries.is_empty() {
+            out.push(format!("{keyword} {}", entries.join(", ")));
+        }
+    }
+    out
+}
+
+/// One table's spelling inside a `select`/`insert`/`update` line: a bare name
+/// for every column, else `name(a, b)`.
+fn columns_spelling(table: &str, columns: &Columns) -> String {
+    match columns {
+        Columns::All => table.to_owned(),
+        Columns::List(names) => {
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            format!("{table}({})", names.join(", "))
+        }
+    }
+}
+
+/// The splice that rewrites one store block's table and function directives
+/// (§14.5's `ProposedGrant` scope row, §13.1's spellings).
+///
+/// The block's `select`/`insert`/`update`/`delete`/`functions` statements are
+/// replaced by the merged scope; `query` lines, `transactions` and every
+/// comment stay where the author put them. Rewriting rather than appending is
+/// what keeps P4 honest — a second `select products` line in one block is a
+/// duplicate directive, not a union — and an operation with nothing merged is
+/// written where an earlier statement of that operation stood, so the block
+/// never gains an empty line it did not have.
+fn table_splice(
+    cst: &Cst,
+    source: &str,
+    patch: &Patch,
+    eol: &str,
+) -> Result<Option<Vec<Splice>>, EditError> {
+    if patch.tables.is_empty() {
+        return Ok(None);
+    }
+    let view = view_node(cst, &patch.view).ok_or(EditError::Verification {
+        section: "the views",
+    })?;
+    let Some(grant) = cst
+        .grants(view)
+        .find(|grant| same_store(grant_store(cst, *grant), patch.store.as_deref()))
+    else {
+        return Err(EditError::Verification {
+            section: "the grant blocks",
+        });
+    };
+    let block = cst
+        .first_of_kind(grant, NodeKind::GrantBlock)
+        .ok_or_else(|| EditError::UnrestrictedGrant {
+            route: patch.view.clone(),
+            proxy: patch
+                .store
+                .clone()
+                .unwrap_or_else(|| DEFAULT_STORE.to_owned()),
+        })?;
+    let statements = table_statements(&patch.tables);
+    let spans = directive_spans(cst, block)?;
+    if spans.is_empty() {
+        // A block with no table or function directive: the merged ones go where
+        // a `query` bonus block would, i.e. just above the closing `}`.
+        let close = block_close(cst, block)?;
+        if source
+            .get(line_start(source, close)..close)
+            .is_some_and(|prefix| prefix.trim().is_empty())
+        {
+            let indent = format!("{}    ", indent_of(source, line_start(source, close)));
+            let mut text = String::new();
+            for statement in &statements {
+                text.push_str(&indent);
+                text.push_str(statement);
+                text.push_str(eol);
+            }
+            return Ok(Some(vec![Splice::insert(line_start(source, close), text)]));
+        }
+        // A one-line block: extend it in place, `;` between statements.
+        let mut text = String::new();
+        for (index, statement) in statements.iter().enumerate() {
+            if index == 0 && block_is_empty(cst, block) {
+                text.push(' ');
+            } else {
+                text.push_str("; ");
+            }
+            text.push_str(statement);
+        }
+        return Ok(Some(vec![Splice::insert(
+            trim_spaces_before(source, close),
+            text,
+        )]));
+    }
+
+    // Every existing directive is replaced by the merged set at the first one's
+    // position; the rest are removed with their line when that line holds
+    // nothing else, so the author's blank lines stay where they are.
+    let first = spans.first().copied().ok_or(EditError::Verification {
+        section: "the grant blocks",
+    })?;
+    let indent = indent_of(source, line_start(source, first.0));
+    let mut text = String::new();
+    for statement in &statements {
+        text.push_str(indent);
+        text.push_str(statement);
+        text.push_str(eol);
+    }
+    let mut splices: Vec<Splice> = vec![statement_splice(source, first, &text)];
+    for (start, end) in spans.iter().skip(1) {
+        splices.push(statement_splice(source, (*start, *end), ""));
+    }
+    Ok(Some(splices))
+}
+
+/// One `select`/`insert`/`update`/`delete`/`functions` statement's byte span:
+/// from its keyword to the next statement's keyword (or the closing `}`).
+///
+/// A grant block's statements are keyword-led, so the next keyword is the end of
+/// this one however the author wrapped a column list.
+fn directive_spans(cst: &Cst, block: NodeId) -> Result<Vec<(usize, usize)>, EditError> {
+    let mut keywords: Vec<(usize, bool)> = Vec::new();
+    let close = block_close(cst, block)?;
+    for (id, element) in cst.child_elements(block) {
+        match element {
+            Element::Node {
+                kind: NodeKind::Query,
+                ..
+            } => {
+                // `query` is a node of its own (the keyword is inside it), so it
+                // bounds a directive without being one this splice rewrites.
+                let Some(token) = cst.first_token(id) else {
+                    continue;
+                };
+                let Some(span) = cst.token_span(token) else {
+                    return Err(EditError::Verification {
+                        section: "the grant blocks",
+                    });
+                };
+                keywords.push((span.start as usize, false));
+            }
+            Element::Token(token) => {
+                if !matches!(cst.token_kind(token), Some(TokenKind::Word)) {
+                    continue;
+                }
+                let word = cst.token_text(token);
+                // Every statement ends at the next one, so `transactions` bounds
+                // a directive even though it is not rewritten here.
+                let replace = matches!(
+                    word,
+                    "select" | "insert" | "update" | "delete" | "functions"
+                );
+                if !replace && word != "transactions" {
+                    continue;
+                }
+                let Some(span) = cst.token_span(token) else {
+                    return Err(EditError::Verification {
+                        section: "the grant blocks",
+                    });
+                };
+                keywords.push((span.start as usize, replace));
+            }
+            Element::Node { .. } => {}
+            Element::Trivia(_) => {}
+        }
+    }
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (index, (start, replace)) in keywords.iter().copied().enumerate() {
+        if !replace {
+            continue;
+        }
+        let end = keywords
+            .get(index + 1)
+            .map(|(at, _)| *at)
+            .unwrap_or(close)
+            .min(close);
+        if end > start {
+            spans.push((start, end));
+        }
+    }
+    Ok(spans)
+}
+
+/// The replacement for one statement: its whole line when it is alone on it,
+/// else exactly the statement's span.
+fn statement_splice(source: &str, span: (usize, usize), text: &str) -> Splice {
+    let (start, end) = span;
+    // The span runs to the next statement, so its tail is whitespace: trim it
+    // before asking which line the statement ends on.
+    let trimmed_end = source
+        .get(..end)
+        .map(|head| head.trim_end().len())
+        .unwrap_or(end)
+        .max(start);
+    let line = line_start(source, start);
+    let line_end = line_end_after(source, trimmed_end);
+    let alone = source
+        .get(line..start)
+        .is_some_and(|prefix| prefix.trim().is_empty())
+        && source
+            .get(trimmed_end..line_end)
+            .is_some_and(|suffix| suffix.trim().is_empty());
+    if alone {
+        Splice::replace(line, line_end, text)
+    } else {
+        Splice::replace(start, end, text)
+    }
 }
 
 /// The header of a grant: `postgres` for the unnamed block, else its store.
@@ -947,6 +1361,16 @@ fn line_start(source: &str, offset: usize) -> usize {
         .get(..offset)
         .and_then(|head| head.rfind('\n'))
         .map_or(0, |at| at.saturating_add(1))
+}
+
+/// The byte offset just after the line holding `offset`, newline included.
+fn line_end_after(source: &str, offset: usize) -> usize {
+    source
+        .get(offset..)
+        .and_then(|rest| rest.find('\n'))
+        .map_or(source.len(), |at| {
+            offset.saturating_add(at).saturating_add(1)
+        })
 }
 
 /// The leading spaces and tabs of the line holding `offset`.

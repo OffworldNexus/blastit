@@ -34,12 +34,16 @@ use super::syntax::{Cst, Element, NodeId, NodeKind};
 use super::tokens::{TokenKind, raw_value, str_value};
 use crate::error::{Location, ManifestError, Position};
 use crate::model::{
-    Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route, StaticMount,
-    StaticPolicy, UnresolvedGrant,
+    BodyOwner, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route,
+    StaticMount, StaticPolicy, UnresolvedGrant,
 };
 
-/// The name the unnamed `postgres $DATABASE_URL` takes (§7.3).
-pub(crate) const DEFAULT_STORE: &str = "db";
+/// The name the unnamed `postgres $DATABASE_URL` takes (§7.3, §7.4).
+///
+/// It is public because `blastit check`'s `--json` payload names the store
+/// block by its Blastfile spelling (§13.3): the unnamed block is this store and
+/// is written without a name.
+pub const DEFAULT_STORE: &str = "db";
 
 /// The file a mount answers a directory with unless it says otherwise (§9.1).
 const DEFAULT_INDEX: &str = "index.html";
@@ -690,7 +694,7 @@ impl<'a> Lowering<'a> {
                 Some(header) => {
                     let methods = self.methods(header)?;
                     let path = self.patterns(header)?;
-                    self.push_route(&parts, path, methods, view_body);
+                    self.push_route(&parts, path, methods, view_body, BodyOwner::View);
                 }
                 None => {
                     let endpoints: Vec<NodeId> = self.cst.endpoints(view).collect();
@@ -700,11 +704,14 @@ impl<'a> Lowering<'a> {
                     for endpoint in endpoints {
                         let methods = self.methods(endpoint)?;
                         let path = self.patterns(endpoint)?;
-                        let ingress = match self.endpoint_body(endpoint) {
-                            Some(node) => Some(self.ingress(node)?),
-                            None => view_body,
+                        // §10.3: an endpoint's own `body` is that method's; a
+                        // view-level one applies to all of them and stays the
+                        // view's node, which is what `fix.to` names (§13.3).
+                        let (ingress, owner) = match self.endpoint_body(endpoint) {
+                            Some(node) => (Some(self.ingress(node)?), BodyOwner::Endpoint),
+                            None => (view_body, BodyOwner::View),
                         };
-                        self.push_route(&parts, path, methods, ingress);
+                        self.push_route(&parts, path, methods, ingress, owner);
                     }
                 }
             }
@@ -758,6 +765,7 @@ impl<'a> Lowering<'a> {
         path: Vec<String>,
         methods: Option<Vec<String>>,
         ingress: Option<IngressPolicy>,
+        owner: BodyOwner,
     ) {
         self.routes.push(
             Route::new(
@@ -770,6 +778,7 @@ impl<'a> Lowering<'a> {
                 parts.grants.clone(),
             )
             .with_ingress(ingress)
+            .with_body_owner(owner)
             .with_sandbox(parts.sandbox),
         );
         // Two routes of one view carry the same line: the `view` header's.

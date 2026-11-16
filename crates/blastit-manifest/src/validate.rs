@@ -925,8 +925,9 @@ fn token_char(byte: u8) -> bool {
         )
 }
 
-/// The non-fatal findings: a group attached nowhere, a proxy nobody grants, and
-/// an unrestricted route.
+/// The non-fatal findings: a trait attached nowhere, a store nobody grants, an
+/// unrestricted view, a `raw` body, `egress any`, and a front controller no view
+/// forwards to.
 fn warnings(manifest: &Manifest) -> Vec<ManifestWarning> {
     let mut warnings = Vec::new();
 
@@ -997,25 +998,36 @@ fn warnings(manifest: &Manifest) -> Vec<ManifestWarning> {
         }
     }
 
+    // §12.2/§9.5: a front controller no view forwards to serves nothing. A
+    // warning, not an error, so a static mount and a `libphp` entry can ship
+    // together before the catch-all view is written; the reminder is the point.
+    if let Some(php) = manifest.php()
+        && manifest.routes().is_empty()
+    {
+        warnings.push(ManifestWarning::EntrypointNotReached {
+            entry: php.entry.clone(),
+        });
+    }
+
     warnings
 }
 
 impl Manifest {
-    /// The production path's refusal sentences (`ADR-0011`), one per route that
-    /// declares `body = "raw"` without `allow_raw = true`, in route order.
+    /// The production path's refusal sentences (`ADR-0011`), one per view that
+    /// declares `body raw` without `unvalidated`, in route order.
     ///
     /// `raw` is the one ingress declaration the runtime does not gate: the bytes
     /// reach the application's own parser unchanged (`blastit_ingress::
-    /// plan_body`'s `StreamPassthrough`). The acknowledgement in the manifest is
+    /// plan_body`'s `StreamPassthrough`). The acknowledgement in the view is
     /// therefore the whole of the decision, and on the production path an
     /// unacknowledged one is a **boot refusal** rather than the warning it used
-    /// to be — the boot names the route and the key before a listener exists.
-    /// `blastit dev` keeps the warning (`ManifestWarning::RawIngress`, emitted
-    /// from `warnings`) because it is the local simulation, and
-    /// `blastit check` keeps the `raw_ingress` finding so CI reports the same
-    /// rule before anyone deploys.
+    /// to be — the boot names the view and the node before a listener exists
+    /// (§10.2). `blastit dev` keeps the warning
+    /// (`ManifestWarning::RawIngress`, emitted from `warnings`) because it is
+    /// the local simulation, and `blastit check` keeps the `raw_ingress` finding
+    /// so CI reports the same rule before anyone deploys.
     ///
-    /// Acknowledged routes contribute nothing, so an empty result is the gate
+    /// Acknowledged views contribute nothing, so an empty result is the gate
     /// being open — the caller refuses on `!is_empty()`, never on the text.
     pub fn raw_ingress_refusals(&self) -> Vec<String> {
         self.routes()
@@ -1024,10 +1036,10 @@ impl Manifest {
                 let policy = route.ingress()?;
                 (policy.body == BodyCodec::Raw && !policy.allow_raw).then(|| {
                     format!(
-                        "route \"{}\": body = \"raw\" hands the request body to the application \
+                        "view \"{}\": body raw hands the request body to the application \
                          unvalidated, and the production path refuses it without the \
-                         acknowledgement; add `allow_raw = true` to that [route.ingress] table, or \
-                         declare the codec the route takes (json, form, none) (ADR-0011)",
+                         acknowledgement; write `body raw unvalidated` in that view, or declare \
+                         the codec it takes (json, form, none)",
                         route.name()
                     )
                 })
@@ -1136,7 +1148,7 @@ mod tests {
                 .validate(20_000)
                 .unwrap_err()
                 .to_string(),
-            "manifest has 1 error(s)\n  - mount \"/assets/\" (index 0): must not end with /"
+            "mount \"/assets/\" (index 0): must not end with /"
         );
     }
 
@@ -1158,7 +1170,7 @@ mod tests {
         );
         assert_eq!(
             manifest.validate(20_000).unwrap_err().to_string(),
-            "manifest has 1 error(s)\n  - duplicate static mount \"/assets\" (mounts 0 and 2)"
+            "duplicate static mount \"/assets\" (mounts 0 and 2)"
         );
     }
 
@@ -1276,98 +1288,83 @@ mod tests {
         );
     }
 
-    /// A manifest with one route per `[route.ingress]` spelling this gate cares
-    /// about (`MB.3.53`, `ADR-0011`).
+    /// A manifest with one view per `body` spelling this gate cares about
+    /// (`MB.3.53`, `ADR-0011`, §10.1).
     const INGRESS_MATRIX: &str = r#"
-version = 1
+view upload POST "/upload" {
+    body raw
+}
 
-[[route]]
-name = "upload"
-path = ['/upload']
-[route.ingress]
-body = "raw"
+view assets POST "/assets" {
+    body raw unvalidated
+}
 
-[[route]]
-name = "assets"
-path = ['/assets']
-[route.ingress]
-body = "raw"
-allow_raw = true
+view checkout POST "/checkout" {
+    body json
+}
 
-[[route]]
-name = "checkout"
-path = ['/checkout']
-[route.ingress]
-body = "json"
-
-[[route]]
-name = "plain"
-path = ['/plain']
+view plain POST "/plain" {}
 "#;
 
     fn manifest(source: &str) -> Manifest {
-        Manifest::from_toml_str(source).unwrap()
+        Manifest::from_blastfile_str(source).unwrap()
     }
 
     /// The gate has two answers and both are measured: an unacknowledged `raw`
-    /// route is refused naming the route **and** the key, and every other shape
-    /// — acknowledged `raw`, a structured codec, no `[route.ingress]` at all —
-    /// is silent (`ADR-0011`).
+    /// view is refused with §10.2's sentence — naming the view and the node to
+    /// write — and every other shape — acknowledged `raw`, a structured codec,
+    /// no `body` at all — is silent (`ADR-0011`).
     #[test]
-    fn raw_ingress_without_allow_raw_is_the_only_refused_shape() {
+    fn raw_ingress_without_unvalidated_is_the_only_refused_shape() {
         let refusals = manifest(INGRESS_MATRIX).raw_ingress_refusals();
-        assert_eq!(refusals.len(), 1, "{refusals:?}");
-        let sentence = &refusals[0];
-        assert!(sentence.contains("route \"upload\""), "{sentence}");
-        assert!(sentence.contains("allow_raw = true"), "{sentence}");
-        assert!(sentence.contains("body = \"raw\""), "{sentence}");
-        assert!(
-            !sentence.contains("route \"assets\""),
-            "an acknowledged raw route is not refused: {sentence}"
+        assert_eq!(
+            refusals,
+            [
+                "view \"upload\": body raw hands the request body to the application unvalidated, \
+                 and the production path refuses it without the acknowledgement; write `body raw \
+                 unvalidated` in that view, or declare the codec it takes (json, form, none)",
+            ],
+            "§10.2, verbatim"
         );
     }
 
-    /// `allow_raw = false` is not an acknowledgement: the key is present and
-    /// says no, which is the same boot as omitting it.
+    /// The acknowledgement is the whole decision, and it is the one thing that
+    /// opens the gate: the same view with `unvalidated` is silent.
     #[test]
-    fn allow_raw_false_is_refused() {
-        let source = r#"
-version = 1
-[[route]]
-name = "upload"
-path = ['/upload']
-[route.ingress]
-body = "raw"
-allow_raw = false
-"#;
-        let refusals = manifest(source).raw_ingress_refusals();
-        assert_eq!(refusals.len(), 1, "{refusals:?}");
-        assert!(refusals[0].contains("route \"upload\""), "{refusals:?}");
+    fn the_acknowledgement_is_what_opens_the_gate() {
+        let acknowledged =
+            manifest("view upload POST \"/upload\" {\n    body raw unvalidated\n}\n");
+        assert_eq!(acknowledged.raw_ingress_refusals(), Vec::<String>::new());
+        let unacknowledged = manifest("view upload POST \"/upload\" {\n    body raw\n}\n");
+        assert_eq!(unacknowledged.raw_ingress_refusals().len(), 1);
+        assert!(
+            unacknowledged.raw_ingress_refusals()[0].contains("body raw unvalidated"),
+            "the sentence names the node to write"
+        );
     }
 
     /// Every offender is named, in route order: a manifest edited by hand or by
     /// an agent often has more than one, and a boot that named only the first
     /// would send the reader round the loop this task exists to close.
     #[test]
-    fn every_unacknowledged_route_is_named_in_route_order() {
+    fn every_unacknowledged_view_is_named_in_route_order() {
         let source = r#"
-version = 1
-[[route]]
-name = "first"
-path = ['/first']
-[route.ingress]
-body = "raw"
+view first POST "/first" {
+    body raw
+}
 
-[[route]]
-name = "second"
-path = ['/second']
-[route.ingress]
-body = "raw"
+view second POST "/second" {
+    body raw
+}
 "#;
         let refusals = manifest(source).raw_ingress_refusals();
         assert_eq!(refusals.len(), 2, "{refusals:?}");
-        assert!(refusals[0].contains("route \"first\""), "{refusals:?}");
-        assert!(refusals[1].contains("route \"second\""), "{refusals:?}");
+        assert!(refusals[0].starts_with("view \"first\": "), "{refusals:?}");
+        assert!(refusals[1].starts_with("view \"second\": "), "{refusals:?}");
+        assert!(
+            !refusals[0].contains("\"second\"") && !refusals[1].contains("\"first\""),
+            "each sentence names one view: {refusals:?}"
+        );
     }
 
     /// The warning is not the gate and the gate is not the warning: `dev` keeps

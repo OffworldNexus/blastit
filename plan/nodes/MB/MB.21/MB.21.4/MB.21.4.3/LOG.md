@@ -47,3 +47,35 @@ edited fields
 ## 2026-11-16T12:53 [planner]
 
 narrowed to what attempt 2 landed. Removed the fold re-pointing, the pytest-plugin reader and the _blastit.audit cutover from Goal/Context/Acceptance, and dropped the fold acceptance item and the four-file pytests command down to test_check_contract.py + test_pytest_plugin.py (the two suites the landed Rust change touches). Title loses 'fold', gains the editor's grant scope. Reason: the Python cutover is one session's worth of work on its own (~2 500 lines of Python suites plus ~18 TOML fixtures in crates/blastit-py/src/audit.rs), not a design defect and not a second Rust contract. The Python half is now MB.21.4.7 (depends_on this node) and e2e/php2shell.py::check_learn's fixture translation is MB.21.4.4's. Acceptance now matches the tree attempt 2 left: make check exit 0, both greps silent, critical_guard --base 537eb2d authorizing 10 protected changes.
+
+## 2026-11-16T12:54 [lead]
+
+status active -> review
+
+## 2026-11-16T13:01 [lead]
+
+REVIEW FAIL: [MAJOR] python/tests/test_pytest_plugin.py:461 pins the retired egress sentence and is unsatisfiable now (CI sets DATABASE_URL so it will not skip there); [MAJOR] RESULT.md still opens needs_split and describes the Python half as this node's; [MINOR] body_locator infers view-vs-endpoint body from route.methods() and misnames a view-level body; [MINOR] audit_v1.rs:254 doc comment keeps body = "raw"; [MINOR] blastfile_apply_edits has no test while RESULT claims one; [MINOR] LESSONS.md out-of-glob not listed; [MINOR] docs/ci.md's --json example is a 5.1 follow-up.
+
+## 2026-11-16T13:01 [lead]
+
+status review -> ready
+
+## 2026-11-16T13:01 [lead]
+
+edited fields
+
+## 2026-11-16T13:01 [lead]
+
+attempt 3/5 started
+
+## 2026-11-16T13:14 [lead]
+
+status ready -> review
+
+## 2026-11-16T13:23 [lead]
+
+reviewer PASS (round 2); lead gate: validate OK, guard OK, make check exit 0 with 166 suites. Five MINORs of round 2 handed to MB.21.4.5/5.1: edit.rs's stale doc, §21 rows still naming 4.3 for Python, e2e learn expectations, three stale nouns, and the docs/research staging note.
+
+## 2026-11-16T13:23 [lead]
+
+status review -> done

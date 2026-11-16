@@ -24,10 +24,10 @@
 //!   [`Manifest::parse_blastfile`] once written (`R33`);
 //! * a grantable statement that is the driver's own session setup — `SELECT
 //!   set_config('TimeZone', $?, false)`, `SET …`, `SHOW …` — names `add_group`
-//!   and a `[group.connection.<proxy>]` table instead of one route's `queries`:
-//!   it runs on whichever route opens the connection first, so a per-route
-//!   grant would leave every other route denying it, so the hint is the group
-//!   one every route attaches (`MA.8`);
+//!   and the `trait connection` node instead of one view's grants: it runs on
+//!   whichever view opens the connection first, so a per-view grant would leave
+//!   every other one denying it, so the hint is the trait every view `use`s
+//!   (`MA.8`, §13.3);
 //! * SQL under [`ObsTarget::Unrouted`] counts towards `statements`/`denied`
 //!   and never produces a route-less `missing_grant` (`R32`).
 //!
@@ -57,7 +57,9 @@ use blastit_ingress::{
     BodyCodec, BodySample, IngressPolicy, parse_mime, probe_sample, suggest_fix,
 };
 use blastit_manifest::blastfile::{BlastfileEdits, ProposedGrant, ProposedView};
-use blastit_manifest::{Grant, Manifest, MountTable, PgGrant, ProxyName, RoutingTable};
+use blastit_manifest::{
+    BodyOwner, Grant, Manifest, MountTable, PgGrant, ProxyName, Route, RoutingTable,
+};
 use blastit_sqlpolicy::{Allowlist, KNOWN_STATIC_SETUP_SQL, is_introspection_setup_sql, normalize};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -233,22 +235,25 @@ pub enum Severity {
 
 /// The machine-readable `fix` object of a finding.
 ///
-/// `action` is one of the closed set of `R38` — `add_query`, its group-scoped
+/// `action` is one of the closed set of `R38` — `add_query`, its trait-scoped
 /// twin `add_group`, `remove_query`, `add_route`, `remove_route`, `add_test`,
-/// `declare_ingress`, `fix_ingress` and `observe`; `to` names the manifest
-/// table to edit, `codecs`/`allow_raw` an ingress declaration, and `unsafe`
-/// marks the destructive `remove_query`/`remove_route` actions.
+/// `declare_ingress`, `fix_ingress` and `observe`; `to` names the **Blastfile
+/// node** the action edits — `view <view> postgres [<store>]` for a statement
+/// grant, `trait <name>` for a trait's, and `view <view> [<METHOD>] body` for
+/// `raw_ingress` — never a directive to paste (§13.3). `codecs`/`allow_raw`
+/// describe an ingress declaration, and `unsafe` marks the destructive
+/// `remove_query`/`remove_route` actions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Fix {
     /// The closed action name.
     pub action: &'static str,
-    /// The manifest table the action edits, when it edits one.
+    /// The Blastfile node the action edits, when it edits one (§13.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
     /// The codecs a `declare_ingress`/`fix_ingress` action proposes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codecs: Option<Vec<BodyCodec>>,
-    /// Whether `body = "raw"` also needs `allow_raw = true`.
+    /// Whether `body raw` also needs `unvalidated` (§10.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_raw: Option<bool>,
     /// Whether the action is destructive in production too.
@@ -328,6 +333,60 @@ impl Fix {
     }
 }
 
+/// The trait every view attaches so a connection-setup statement is granted once
+/// (`MA.8`, §13.3): `trait connection { … }` plus `use connection`.
+const CONNECTION_TRAIT: &str = "connection";
+
+/// The node a statement grant lives on: `view <view> postgres [<store>]`.
+///
+/// It is a **locator**, never a directive to paste (§13.3): the author adds
+/// `query '<sql>'` to the block the locator names. The unnamed `postgres { … }`
+/// block is the store `db` (§7.4) and is written without a name, so its locator
+/// stops at `postgres`.
+fn grant_locator(view: &str, store: &str) -> String {
+    if store == blastit_manifest::blastfile::DEFAULT_STORE {
+        format!("view {view} postgres")
+    } else {
+        format!("view {view} postgres {store}")
+    }
+}
+
+/// The node a trait's grant lives on: `trait <name>` (§13.3).
+fn trait_locator(trait_name: &str) -> String {
+    format!("trait {trait_name}")
+}
+
+/// The `body` node of a view: `view <view> body`, or `view <view> <METHOD[s]>
+/// body` when an endpoint declares it (§13.3, §10.3).
+///
+/// The owner comes out of lowering ([`Route::body_owner`]), never out of
+/// [`Route::methods`]: a view-level `body` on a view with one `POST` endpoint has
+/// the same method list as that endpoint's own `body`, and the locator has to
+/// name the node the file actually has.
+fn body_locator(route: &Route) -> String {
+    if route.body_owner() == BodyOwner::Endpoint
+        && let Some(methods) = endpoint_methods(route)
+    {
+        return format!("view {} {methods} body", route.name());
+    }
+    format!("view {} body", route.name())
+}
+
+/// The methods an endpoint names, as the locator writes them.
+///
+/// `HEAD` is implied by `GET` (§8.4) and is never written, so a `GET` endpoint
+/// answers `GET`; a route with no methods answers every method and has no
+/// endpoint to name.
+fn endpoint_methods(route: &Route) -> Option<String> {
+    let methods: Vec<&str> = route
+        .methods()?
+        .iter()
+        .map(String::as_str)
+        .filter(|method| *method != "HEAD")
+        .collect();
+    (!methods.is_empty()).then(|| methods.join(", "))
+}
+
 /// One completeness finding, over the closed nine-kind enum (`§4.2 E.3`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -394,13 +453,13 @@ pub enum Finding {
         /// `fix_ingress`.
         fix: Fix,
     },
-    /// A route declares `body = "raw"` without `allow_raw = true` (`R36`).
+    /// A view declares `body raw` without `unvalidated` (`R36`).
     RawIngress {
         /// Always `error` in `0.1.1`.
         severity: Severity,
         /// The route name.
         route: String,
-        /// `fix_ingress` naming `[route.ingress]`.
+        /// `fix_ingress` naming the view's `body` node (§13.3).
         fix: Fix,
     },
     /// A request no route matched (`R32`).
@@ -686,11 +745,11 @@ pub fn evaluate(manifest: &Manifest, observations: &CheckObsV1) -> Result<Report
             // A connection-setup statement is not a route's statement: it runs
             // on whichever route opens the connection first, so a per-route
             // grant would leave the others denying it (`MA.8`). The documented
-            // fix is one `connection` group attached to every route.
+            // fix is one `connection` trait attached to every view.
             let fix = if is_connection_setup(normalized) {
-                Fix::add_group(format!("[group.connection.{proxy}].queries"))
+                Fix::add_group(trait_locator(CONNECTION_TRAIT))
             } else {
-                Fix::add_query(format!("[route.{proxy}].queries"))
+                Fix::add_query(grant_locator(route.name(), proxy))
             };
             (normalized.clone(), fix)
         } else {
@@ -860,7 +919,7 @@ fn dead_route_grants(
                     group: None,
                     proxy: proxy.as_str().to_string(),
                     sql: normalized,
-                    fix: Fix::remove_query(format!("[route.{}].queries", proxy.as_str())),
+                    fix: Fix::remove_query(grant_locator(route.name(), proxy.as_str())),
                 });
             }
         }
@@ -933,7 +992,7 @@ fn dead_group_grants(
                     group: Some(name.clone()),
                     proxy: proxy.as_str().to_string(),
                     sql: normalized,
-                    fix: Fix::remove_query(format!("[group.{name}.{}].queries", proxy.as_str())),
+                    fix: Fix::remove_query(trait_locator(&name)),
                 });
             }
         }
@@ -1086,7 +1145,7 @@ fn raw_ingress_findings(manifest: &Manifest, findings: &mut Vec<Finding>) {
             findings.push(Finding::RawIngress {
                 severity: Severity::Error,
                 route: route.name().to_string(),
-                fix: Fix::fix_raw_ingress("[route.ingress]".to_string()),
+                fix: Fix::fix_raw_ingress(body_locator(route)),
             });
         }
     }
@@ -1515,8 +1574,10 @@ pub fn plan_learn(manifest: &Manifest, observations: &CheckObsV1) -> Result<Lear
                 view: route,
                 // The unnamed `postgres { … }` block is the store `db` (§7.4);
                 // a named store is written `postgres <name> { … }`.
-                store: (proxy != "db").then_some(proxy),
+                store: (proxy != blastit_manifest::blastfile::DEFAULT_STORE).then_some(proxy),
                 queries,
+                tables: std::collections::BTreeMap::new(),
+                functions: std::collections::BTreeSet::new(),
             });
         }
     }

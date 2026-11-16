@@ -1366,6 +1366,8 @@ view fallback regex '.*' {}
                 view: "orders".to_string(),
                 store: None,
                 queries: vec!["SELECT 1".to_string()],
+                tables: Default::default(),
+                functions: Default::default(),
             });
         let line = learn_line(&plan, Path::new("./Blastfile"), false);
         assert!(

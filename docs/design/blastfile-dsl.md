@@ -1090,8 +1090,12 @@ that suggests an exact `query` may hold one — the boot refuses it either way.
 | `EntrypointNotReached` | `entrypoint php` with no view | new, §12.2, `MB.21.3.0` |
 
 The triggers and the emission order are unchanged; only the words are re-spelled,
-and every sentence lives in `crates/blastit-manifest/src/validate.rs` — which is
-`MB.21.3.0`'s file, so no other leaf may edit one of these strings.
+and every sentence is **`error.rs`'s** `thiserror` attribute on
+`ManifestWarning` — `validate::warnings` decides *when* a warning fires, and
+`error.rs` decides *what it says*. The sweep therefore rewrites
+`crates/blastit-manifest/src/error.rs` (with `validate.rs` for the emission of the
+new `EntrypointNotReached`), which is why `MB.21.4.3` owns both files and no
+other leaf may edit one of these strings.
 
 ### 13.3 `check`'s findings and `fix.to`
 
@@ -1250,7 +1254,15 @@ change at their call sites only.
 
 ```rust
 pub struct ProposedView { pub name: String, pub methods: Vec<String>, pub patterns: Vec<String> }
-pub struct ProposedGrant { pub view: String, pub store: Option<String>, pub queries: Vec<String> }
+pub struct ProposedGrant {
+    pub view: String,
+    pub store: Option<String>,
+    pub queries: Vec<String>,
+    /// The table/column scope `fold --prefer-tables` proves (§13.1's spellings).
+    pub tables: BTreeMap<String, TableGrant>,
+    /// The functions beyond the safe set the view may call (`functions …`).
+    pub functions: BTreeSet<String>,
+}
 pub struct ManifestEdits { pub views: Vec<ProposedView>, pub grants: Vec<ProposedGrant> }
 
 impl ManifestEdits {
@@ -1262,6 +1274,18 @@ impl ManifestEdits {
 pub fn apply_edits(source: &str, edits: &ManifestEdits) -> Result<String, EditError>;
 pub fn write_atomic(path: &Path, content: &str) -> io::Result<()>;   // unchanged
 ```
+
+`tables`/`functions` exist because `blastit-manifest fold` (the `sql.denied`-log
+sibling of `--learn`) writes table and function scope, not only exact statements:
+dropping them would delete a documented flag (`--prefer-tables`,
+`docs/reference/cli.md:95`). They are merged into the view's `postgres [store] {
+}` block for that store, so a repeated proposal adds nothing, and the refusals are
+the grant grammar's: a table, column or function name a `Word` cannot spell (a
+quoted identifier, a schema-qualified table, a name with a space) is
+`EditError::UnwritableGrantName`, an operation naming no column
+(`select products()`) is `EditError::EmptyColumnList`, and a store the file does
+not declare is the existing `UnknownProxy`/`MissingRoute` — each naming the view
+and the store before anything is spliced.
 
 The struct field `routes` is renamed `views` and the serde key follows; this is an
 internal channel between the audit engine and the writer, not the `--json`
@@ -1283,6 +1307,7 @@ rule).
 | a grant on a new view | the new view's block | one block per store |
 | a `query` with no `'` | `query '<sql>'` | raw string, SQL verbatim |
 | a `query` with a `'` | `query "<sql>"` | escaped string (`\"`, `\\`, newline as `\n`), so the writer never emits a file its own reader refuses (R25) |
+| a table/column scope | the same store block, as `functions a, b`, then `select`/`insert`/`update`/`delete` lines (§13.1's spellings) | the block's existing directives are rewritten to the merged scope — a second `select <table>` line would be a duplicate directive, not a union — and a comment above the directive stays above it |
 | a comment above the insertion point | the comment stays above the inserted line | comments are elements, not text |
 
 **P4 (the postcondition):**

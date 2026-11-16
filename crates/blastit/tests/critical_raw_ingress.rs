@@ -1,17 +1,18 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! Protected critical suite for `MB.3.53` (`ADR-0011`): `[route.ingress]
-//! body = "raw"` without `allow_raw = true` is a **boot refusal on the
-//! production path**, not the warning it was.
+//! Protected critical suite for `MB.3.53` (`ADR-0011`): a view that declares
+//! `body raw` without `unvalidated` is a **boot refusal on the production
+//! path**, not the warning it was.
 //!
 //! Before this gate the acknowledgement gated nothing: `plan_body` streams a
-//! `raw` body to the application's own parser whether or not `allow_raw` is
+//! `raw` body to the application's own parser whether or not `unvalidated` is
 //! written (`blastit_ingress::plan_body`'s `StreamPassthrough`), and nothing at
-//! boot read the key — so a production manifest with `body = "raw"` served
-//! unvalidated bytes with only a lint (`blastit check`, which no preset runs)
-//! objecting. The three environments now differ on purpose:
+//! boot read the node — so a production file with `body raw` served unvalidated
+//! bytes with only a lint (`blastit check`, which no preset runs) objecting. The
+//! three environments now differ on purpose:
 //!
 //! * **production** (`blastit`, and stage 1's re-read of the same file)
-//!   refuses, naming the route and the key, before a listener is bound;
+//!   refuses, with §10.2's sentence naming the view and the node to write,
+//!   before a listener is bound;
 //! * **`blastit dev`** keeps the loud `ManifestWarning::RawIngress` and serves —
 //!   the local single-uid simulation;
 //! * **`blastit check`** keeps the `raw_ingress` finding (`critical_check_engine`
@@ -67,6 +68,18 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "python")]
 use std::thread::JoinHandle;
+
+/// §10.2's production sentence, verbatim: the view, what was declared, and the
+/// node that acknowledges it.
+const REFUSAL: &str = "view \"upload\": body raw hands the request body to the application \
+                       unvalidated, and the production path refuses it without the \
+                       acknowledgement; write `body raw unvalidated` in that view, or declare \
+                       the codec it takes (json, form, none)";
+
+/// §13.2's `RawIngress` warning, verbatim: `dev` says the same thing about the
+/// view it serves.
+#[cfg(feature = "python")]
+const WARNING: &str = "view \"upload\": body raw passes the request body through unvalidated";
 
 /// How long a launched process may take before the case calls it wedged.
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -306,7 +319,7 @@ fn announced_ready(stdout: &str) -> bool {
 /// The pretty-format twin below asserts the *other* stream, so neither case can
 /// pass by grepping the descriptor its format never writes to.
 #[test]
-fn production_stage_one_refuses_raw_ingress_without_allow_raw() {
+fn production_stage_one_refuses_raw_ingress_without_unvalidated() {
     let dir = fixture("production-refusal", &refused_manifest());
     let port = free_port();
     let (code, stdout, stderr) = stage_one(&dir, &config_document(&dir, port, LogFormat::Json));
@@ -319,20 +332,20 @@ fn production_stage_one_refuses_raw_ingress_without_allow_raw() {
     );
     let refusal = app_output(&stdout);
     assert!(
-        refusal.contains("route \"upload\""),
-        "the refusal names the route: {refusal}\nstdout:\n{stdout}"
+        refusal.contains(REFUSAL),
+        "the refusal is §10.2's sentence: {refusal}\nstdout:\n{stdout}"
     );
     assert!(
-        refusal.contains("allow_raw = true"),
-        "the refusal names the key that fixes it: {refusal}\nstdout:\n{stdout}"
+        refusal.contains("view \"upload\""),
+        "the refusal names the view: {refusal}\nstdout:\n{stdout}"
     );
     assert!(
-        refusal.contains("body = \"raw\""),
-        "the refusal names what was declared: {refusal}"
+        refusal.contains("body raw unvalidated"),
+        "the refusal names the node that fixes it: {refusal}\nstdout:\n{stdout}"
     );
     assert!(
-        refusal.contains("[route.ingress]"),
-        "the refusal names the table to edit: {refusal}"
+        !refusal.contains("allow_raw"),
+        "no retired key reaches the sentence: {refusal}"
     );
     // `MB.3.54` (item 2): the *event's* `stream` field, parsed — the descriptor
     // is stdout in both formats, so `stderr.is_empty()` below could hold with
@@ -344,9 +357,11 @@ fn production_stage_one_refuses_raw_ingress_without_allow_raw() {
             event
                 .get("line")
                 .and_then(|line| line.as_str())
-                .is_some_and(|line| line.contains("allow_raw = true"))
+                .is_some_and(|line| line.contains("body raw unvalidated"))
         })
-        .unwrap_or_else(|| panic!("the refusal is an `app.output` event naming the key: {stdout}"));
+        .unwrap_or_else(|| {
+            panic!("the refusal is an `app.output` event naming the node: {stdout}")
+        });
     assert_eq!(
         event["level"], "error",
         "a refusal is an error-level event: {event}"
@@ -385,8 +400,8 @@ fn the_pretty_refusal_is_plain_text_naming_the_same_route() {
         "a refused boot exits 1\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("route \"upload\"") && stdout.contains("allow_raw = true"),
-        "pretty writes the sentence as text on the emitter's descriptor: {stdout}"
+        stdout.contains(REFUSAL),
+        "pretty writes §10.2's sentence as text on the emitter's descriptor: {stdout}"
     );
     assert!(
         !stdout.contains("\"event\""),
@@ -439,8 +454,8 @@ fn production_stage_one_refuses_a_manifest_edited_after_stage_zero_approved_it()
     );
     let refusal = app_output(&stdout);
     assert!(
-        refusal.contains("route \"upload\"") && refusal.contains("allow_raw = true"),
-        "the re-read names the route and the key: {refusal}\nstdout:\n{stdout}"
+        refusal.contains(REFUSAL),
+        "the re-read refuses with the same sentence: {refusal}\nstdout:\n{stdout}"
     );
     assert!(
         !announced_ready(&stdout),
@@ -629,7 +644,7 @@ fn response_body(raw: &[u8]) -> Vec<u8> {
 /// scheduler's body frames — is the same one production uses.
 #[cfg(feature = "python")]
 #[test]
-fn allow_raw_true_serves_the_body_byte_for_byte_and_dev_still_warns() {
+fn unvalidated_serves_the_body_byte_for_byte_and_dev_still_warns() {
     const PAYLOAD: &[u8] = b"{\"a\":1,\"a\":2}\r\n\0\xff\xfe trailing bytes \x01 not json";
     let dev = Dev::start("accepted", &accepted_manifest());
     let served = dev.post("/upload", PAYLOAD);
@@ -644,11 +659,11 @@ fn allow_raw_true_serves_the_body_byte_for_byte_and_dev_still_warns() {
         stdout
     );
     assert!(
-        stdout.contains("passes the request body through unvalidated"),
+        stdout.contains(WARNING),
         "dev keeps the loud warning even with the acknowledgement: {stdout}"
     );
     assert!(
-        !stdout.contains("allow_raw = true"),
+        !stdout.contains("production path refuses"),
         "the boot refusal never fires in dev: {stdout}"
     );
 }
@@ -671,7 +686,7 @@ fn dev_serves_the_unacknowledged_manifest_that_production_refuses() {
         "dev serves the unacknowledged raw route\nstdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("passes the request body through unvalidated"),
-        "dev warns about the route it serves: {stdout}"
+        stdout.contains(WARNING),
+        "dev warns about the view it serves: {stdout}"
     );
 }

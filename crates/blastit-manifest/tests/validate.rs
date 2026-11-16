@@ -426,7 +426,8 @@ fn locations_read_well_in_errors() {
     assert_eq!(Location::Global.to_string(), "global groups");
     assert_eq!(
         Location::Group("session".to_string()).to_string(),
-        "group \"session\""
+        "trait \"session\"",
+        "a `[group.x]` and a `trait x` are one node, and it is spelled `trait` (§11.3)"
     );
     assert_eq!(
         Location::Route {
@@ -436,6 +437,31 @@ fn locations_read_well_in_errors() {
         .to_string(),
         "route \"checkout\" (index 2)"
     );
+    // §18: a view is named, not numbered — `(index 0)` would send a reader
+    // looking for a numbering the file does not have.
+    assert_eq!(
+        Location::View {
+            index: 0,
+            name: "catalog".to_string(),
+        }
+        .to_string(),
+        "view \"catalog\""
+    );
+}
+
+#[test]
+fn a_view_refusal_names_the_view_and_no_index() {
+    // The rendering a `Blastfile` grant error reaches a developer with, end to
+    // end: the store is unknown, so lowering reports it against the view (§13.1).
+    let source = "postgres $DATABASE_URL\n\n\
+                  view catalog \"/catalog/\" {\n    postgres analytics {\n        select products\n    }\n}\n";
+    let errors = Manifest::parse_blastfile(source, 20_000).expect_err("unknown store");
+    assert_eq!(
+        errors.errors()[0].to_string(),
+        "view \"catalog\": grant on unknown proxy \"analytics\"",
+        "{errors}"
+    );
+    assert!(!errors.to_string().contains("(index"), "{errors}");
 }
 
 /// A manifest with one unrestricted inline grant, and a place to put more.
@@ -482,10 +508,10 @@ fn an_unrestricted_grant_in_a_group_is_refused_at_boot() {
     );
     let rendered = errors.to_string();
     assert!(
-        rendered.contains("unrestricted is only allowed inline on a route"),
+        rendered.contains("unrestricted is only allowed inline on a view"),
         "{rendered}"
     );
-    assert!(rendered.contains("group \"backoffice\""), "{rendered}");
+    assert!(rendered.contains("trait \"backoffice\""), "{rendered}");
 
     // A group attached nowhere is refused too: it could be attached to every
     // route at the next deploy, which is what the rule exists for.

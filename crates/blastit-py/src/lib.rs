@@ -153,12 +153,17 @@ fn normalize(sql: &str) -> String {
 
 /// Diffs what a test suite observed against what a manifest grants (D3b, §6).
 ///
-/// `manifest_toml` is the whole manifest the pytest plugin and `fold` read
-/// (the retired reader until `MB.21.4.3` moves them to `Blastfile`);
-/// `observations_json` is the
-/// document the pytest plugin writes (the [`audit`] module documents its shape
-/// and the shape of the report). The observations carry the `PATH_INFO` the app
-/// saw, which is what the scheduler routed on, so no mount prefix is involved.
+/// `manifest_text` is the whole manifest the pytest plugin and `fold` read;
+/// `observations_json` is the document the pytest plugin writes (the [`audit`]
+/// module documents its shape and the shape of the report). The observations
+/// carry the `PATH_INFO` the app saw, which is what the scheduler routed on, so
+/// no mount prefix is involved.
+///
+/// The text is parsed by the retired reader until `MB.21.4.7` moves it: `fold`
+/// and the plugin still hand this binding a file in the retired shape, and the
+/// suites that pin them move with the same change. Nothing else about the call
+/// changes when it does — the parameter is a `&str` and the signature is
+/// positional.
 ///
 /// Routing is blastit's own: [`blastit_manifest::RoutingTable`] on the
 /// method and path, [`blastit_manifest::Manifest::effective_grants`] per
@@ -178,8 +183,8 @@ fn normalize(sql: &str) -> String {
 /// The report, pretty-printed JSON.
 #[pyfunction]
 #[pyo3(name = "audit")]
-fn audit_report(manifest_toml: &str, observations_json: &str) -> PyResult<String> {
-    audit::audit(manifest_toml, observations_json)
+fn audit_report(manifest_text: &str, observations_json: &str) -> PyResult<String> {
+    audit::audit(manifest_text, observations_json)
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
@@ -382,6 +387,43 @@ fn interpreter_path(py: Python<'_>) -> PyResult<Vec<Vec<u8>>> {
     Ok(entries)
 }
 
+/// Applies an edits document to a `Blastfile` (§14.5's editor, the one writer).
+///
+/// `edits_json` is a `BlastfileEdits` document — the shape `--learn` plans and
+/// `fold` builds — and `source` is the file it is applied to. The editor parses
+/// the document into the one tree, splices the proposals, and re-parses,
+/// re-lowers and compares the result with the model the edits intended, so a
+/// returned string is already proved; an edit that cannot reproduce the document
+/// is an error and nothing is written.
+///
+/// `fold` calls this instead of carrying its own writer, which is what makes
+/// `blastit-manifest fold`, `blastit check --learn` and `blastit dev --learn` one
+/// editor rather than three.
+///
+/// # Errors
+///
+/// [`PyValueError`] when `edits_json` is not a `BlastfileEdits` document, when
+/// the source does not parse, and for every refusal of §14.5's table (a literal
+/// or redacted statement, an unwritable table/column/function name, a store the
+/// file does not declare, a failed postcondition). The messages name the view
+/// and the store, never a statement.
+///
+/// # Returns
+///
+/// The edited source, byte-identical outside the spliced lines.
+#[pyfunction]
+#[pyo3(name = "blastfile_apply_edits", signature = (source, edits_json))]
+fn blastfile_apply_edits(source: &str, edits_json: &str) -> PyResult<String> {
+    let edits: blastit_manifest::blastfile::BlastfileEdits = serde_json::from_str(edits_json)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "the edits are not a BlastfileEdits document: {error}"
+            ))
+        })?;
+    blastit_manifest::blastfile::apply_edits(source, &edits)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// The `blastit._blastit` module: the console script's `main`, and the
 /// functions the pytest plugin and the manifest tools call (D3b, D3c).
 ///
@@ -400,5 +442,6 @@ fn _blastit(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(check_audit_report, module)?)?;
     module.add_function(wrap_pyfunction!(plan_learn_report, module)?)?;
     module.add_function(wrap_pyfunction!(probe_ingress_sample, module)?)?;
+    module.add_function(wrap_pyfunction!(blastfile_apply_edits, module)?)?;
     Ok(())
 }

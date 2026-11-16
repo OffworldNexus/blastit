@@ -23,13 +23,14 @@
 //!   The per-route pair is deleted with that reader;
 //! * [`Manifest::is_all_static`], [`Manifest::static_roots`] and
 //!   [`Manifest::check_static_roots`] answer the app-less static site: no `app`
-//!   is needed once every route is static, and the roots are audited by an
-//!   explicit call rather than by validation;
+//!   is needed when a `static` mount answers every request and no view or
+//!   `entrypoint php` runs, and the roots are audited by an explicit call rather
+//!   than by validation;
 //! * [`Manifest::effective_grants`] unions the grants a route ends up with;
 //! * [`Manifest::equivalent`] compares two manifests without their source
 //!   positions, which is what a formatter or an editor's postcondition needs;
-//! * [`edit::apply_edits`] and [`edit::write_atomic`] are how `--learn` writes
-//!   the manifest back without reformatting it;
+//! * [`blastfile::apply_edits`] and [`edit::write_atomic`] are how `--learn`
+//!   writes the manifest back without reformatting it;
 //! * [`UidLayout`] maps a route's sandbox to the uid its process runs under;
 //! * [`RoutingTable`] matches `(method, path_info)` to a route, and
 //!   [`MountTable`] matches a path to a static mount.
@@ -114,8 +115,8 @@ pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning, Positi
 // its own renders it with these rather than keeping a second copy.
 pub use error::{clipped, escape_control};
 pub use model::{
-    Executor, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route,
-    StaticMount, StaticPolicy,
+    BodyOwner, Executor, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName,
+    Route, StaticMount, StaticPolicy,
 };
 pub use routing::{
     Match, MountMatch, MountTable, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable,

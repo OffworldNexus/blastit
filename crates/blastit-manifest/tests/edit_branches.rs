@@ -29,6 +29,8 @@ fn grant(view: &str, queries: &[&str]) -> ProposedGrant {
         view: view.to_string(),
         store: Some("db".to_string()),
         queries: queries.iter().map(|query| query.to_string()).collect(),
+        tables: Default::default(),
+        functions: Default::default(),
     }
 }
 
@@ -37,6 +39,8 @@ fn grant_on(view: &str, store: &str, queries: &[&str]) -> ProposedGrant {
         view: view.to_string(),
         store: Some(store.to_string()),
         queries: queries.iter().map(|query| query.to_string()).collect(),
+        tables: Default::default(),
+        functions: Default::default(),
     }
 }
 
@@ -857,5 +861,263 @@ fn a_write_into_an_unwritable_directory_reports_permission_denied() {
         entries(dir.path()).is_empty(),
         "a temporary file was left behind: {:?}",
         entries(dir.path())
+    );
+}
+
+//
+// The table and function scope (§14.5's `ProposedGrant` row, §13.1's spellings).
+//
+
+/// A `ProposedGrant` with a table/function scope and no exact statement —
+/// what `fold --prefer-tables` proposes.
+fn scope(
+    view: &str,
+    table: &str,
+    grant: blastit_manifest::blastfile::TableGrant,
+    functions: &[&str],
+) -> ProposedGrant {
+    let mut tables = std::collections::BTreeMap::new();
+    tables.insert(table.to_string(), grant);
+    ProposedGrant {
+        view: view.to_string(),
+        store: Some("db".to_string()),
+        queries: Vec::new(),
+        tables,
+        functions: functions.iter().map(|name| name.to_string()).collect(),
+    }
+}
+
+/// One `select` on two columns, as the analysis spells it.
+fn select_two() -> blastit_manifest::blastfile::TableGrant {
+    blastit_manifest::blastfile::TableGrant {
+        select: Some(blastit_manifest::Columns::list(["id", "name"])),
+        ..Default::default()
+    }
+}
+
+fn table_grant_of(manifest: &Manifest, name: &str, store: &str, table: &str) -> String {
+    manifest
+        .routes()
+        .iter()
+        .find(|route| route.name() == name)
+        .and_then(|route| route.grant(&ProxyName::from(store)))
+        .and_then(Grant::as_postgresql)
+        .and_then(|grant| grant.tables().table(table))
+        .map(|grant| format!("{grant:?}"))
+        .unwrap_or_default()
+}
+
+/// A scope lands inside the view's existing `postgres { }` block, as §13.1
+/// spells it, and P4's postcondition accepts the result.
+#[test]
+fn a_table_and_function_scope_is_written_inside_the_store_block() {
+    let source = format!(
+        "{HEAD}\nview products GET \"/products/\" {{\n    postgres {{\n        query '{KEPT}'\n    }}\n}}\n"
+    );
+    let edits = BlastfileEdits {
+        views: Vec::new(),
+        grants: vec![scope(
+            "products",
+            "shop_product",
+            select_two(),
+            &["st_distance"],
+        )],
+    };
+    let (edited, manifest) = edited_and_parsed(&source, &edits);
+
+    assert!(
+        edited.contains("        select shop_product(id, name)\n"),
+        "{edited}"
+    );
+    assert!(
+        edited.contains("        functions st_distance\n"),
+        "{edited}"
+    );
+    assert!(
+        edited.contains(&format!("        query '{KEPT}'\n")),
+        "{edited}"
+    );
+    assert!(
+        table_grant_of(&manifest, "products", "db", "shop_product").contains("id")
+            && table_grant_of(&manifest, "products", "db", "shop_product").contains("name"),
+        "the grant reads both columns"
+    );
+    assert!(
+        manifest
+            .routes()
+            .iter()
+            .find(|route| route.name() == "products")
+            .and_then(|route| route.grant(&ProxyName::from("db")))
+            .and_then(Grant::as_postgresql)
+            .is_some_and(|grant| grant.tables().functions().eq(["st_distance"]))
+    );
+
+    // Idempotent: the same proposal over the edited file adds nothing.
+    assert_eq!(
+        apply_edits(&edited, &edits).expect("the second edit applies"),
+        edited
+    );
+}
+
+/// A table the block already grants is **rewritten**, not duplicated: two
+/// `select` lines for one table would be a duplicate directive.
+#[test]
+fn a_wider_column_list_rewrites_the_existing_directive() {
+    let source = format!(
+        "{HEAD}\nview products GET \"/products/\" {{\n    postgres {{\n        select shop_product(id)\n        query '{KEPT}'\n    }}\n}}\n"
+    );
+    let edits = BlastfileEdits {
+        views: Vec::new(),
+        grants: vec![scope("products", "shop_product", select_two(), &[])],
+    };
+    let (edited, manifest) = edited_and_parsed(&source, &edits);
+
+    assert_eq!(
+        edited.matches("select shop_product").count(),
+        1,
+        "one directive per table: {edited}"
+    );
+    assert!(edited.contains("select shop_product(id, name)"), "{edited}");
+    assert!(
+        edited.contains(&format!("        query '{KEPT}'")),
+        "the statement the view already had is untouched: {edited}"
+    );
+    assert!(
+        table_grant_of(&manifest, "products", "db", "shop_product").contains("name"),
+        "{edited}"
+    );
+}
+
+/// A new view gets the scope in its own block, and a `delete` grant needs no
+/// column list.
+#[test]
+fn a_new_view_carries_its_table_scope() {
+    let edits = BlastfileEdits {
+        views: vec![new_view("notes", "/notes/")],
+        grants: vec![scope(
+            "notes",
+            "notes",
+            blastit_manifest::blastfile::TableGrant {
+                select: Some(blastit_manifest::Columns::list(["id"])),
+                delete: true,
+                ..Default::default()
+            },
+            &[],
+        )],
+    };
+    let (edited, manifest) = edited_and_parsed(HEAD, &edits);
+
+    assert!(edited.contains("view notes \"/notes/\" {"), "{edited}");
+    assert!(edited.contains("        select notes(id)"), "{edited}");
+    assert!(edited.contains("        delete notes"), "{edited}");
+    assert!(
+        table_grant_of(&manifest, "notes", "db", "notes").contains("delete: true"),
+        "{edited}"
+    );
+}
+
+/// The refusals happen before anything is spliced, and they name the view and
+/// the store — never a value.
+#[test]
+fn a_name_the_grant_block_cannot_spell_is_refused() {
+    let source = format!("{HEAD}\nview products GET \"/products/\" {{}}\n");
+    for (table, what) in [
+        ("My Schema.\"products\"", "table"),
+        ("public.products.x", "table"),
+    ] {
+        let edits = BlastfileEdits {
+            views: Vec::new(),
+            grants: vec![scope("products", table, select_two(), &[])],
+        };
+        let error = apply_edits(&source, &edits).expect_err("the name has no spelling");
+        assert!(
+            matches!(error, EditError::UnwritableGrantName { .. }),
+            "{what}: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("view \"products\""), "{message}");
+        assert!(message.contains("by hand"), "{message}");
+    }
+
+    // A column the grammar cannot write, and a function that is not a name.
+    let bad_column = blastit_manifest::blastfile::TableGrant {
+        select: Some(blastit_manifest::Columns::list(["my column"])),
+        ..Default::default()
+    };
+    let edits = BlastfileEdits {
+        views: Vec::new(),
+        grants: vec![scope("products", "shop_product", bad_column, &[])],
+    };
+    let error = apply_edits(&source, &edits).expect_err("the column has no spelling");
+    assert!(
+        matches!(error, EditError::UnwritableGrantName { what: "column", .. }),
+        "{error:?}"
+    );
+
+    let edits = BlastfileEdits {
+        views: Vec::new(),
+        grants: vec![scope(
+            "products",
+            "shop_product",
+            select_two(),
+            &["no such fn"],
+        )],
+    };
+    let error = apply_edits(&source, &edits).expect_err("the function has no spelling");
+    assert!(
+        matches!(
+            error,
+            EditError::UnwritableGrantName {
+                what: "function",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+/// An empty column list grants nothing, so it is refused rather than written as
+/// a line that looks like a grant.
+#[test]
+fn an_empty_column_list_is_refused() {
+    let source = format!("{HEAD}\nview products GET \"/products/\" {{}}\n");
+    let empty = blastit_manifest::blastfile::TableGrant {
+        select: Some(blastit_manifest::Columns::list(Vec::<String>::new())),
+        ..Default::default()
+    };
+    let edits = BlastfileEdits {
+        views: Vec::new(),
+        grants: vec![scope("products", "shop_product", empty, &[])],
+    };
+    let error = apply_edits(&source, &edits).expect_err("nothing is granted");
+    assert!(
+        matches!(error, EditError::EmptyColumnList { .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("view \"products\""), "{error}");
+}
+
+/// A comment directly above the directive stays above it, because the splice
+/// replaces the statement's own line and not the one before it.
+#[test]
+fn a_comment_above_the_directive_stays_there() {
+    let source = format!(
+        "{HEAD}\nview products GET \"/products/\" {{\n    postgres {{\n        # the catalogue\n        select shop_product(id)\n    }}\n}}\n"
+    );
+    let edits = BlastfileEdits {
+        views: Vec::new(),
+        grants: vec![scope("products", "shop_product", select_two(), &[])],
+    };
+    let (edited, _manifest) = edited_and_parsed(&source, &edits);
+    assert_eq!(edited.matches("# the catalogue").count(), 1, "{edited}");
+    let comment = edited
+        .find("# the catalogue")
+        .expect("the comment survives");
+    let directive = edited
+        .find("select shop_product(id, name)")
+        .expect("the directive was rewritten");
+    assert!(
+        comment < directive,
+        "the comment still leads the directive: {edited}"
     );
 }

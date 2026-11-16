@@ -6330,15 +6330,20 @@ view upload POST \"/upload\" {
 }
 ";
 
-    /// The gate has exactly one refusal and it names the route and the key; the
-    /// acknowledgement opens it, which is what makes this a gate rather than a
-    /// blanket refusal of the codec.
+    /// The gate has exactly one refusal, and it is §10.2's sentence: it names
+    /// the view, what was declared (`body raw`) and the node to write
+    /// (`body raw unvalidated`); the acknowledgement opens it, which is what
+    /// makes this a gate rather than a blanket refusal of the codec.
     #[test]
-    fn an_unacknowledged_raw_route_is_refused_and_an_acknowledged_one_is_not() {
+    fn an_unacknowledged_raw_view_is_refused_and_an_acknowledged_one_is_not() {
         let message = raw_ingress_gate(&manifest(REFUSED)).unwrap_err();
-        assert!(message.contains("route \"upload\""), "{message}");
-        assert!(message.contains("allow_raw = true"), "{message}");
-        assert!(message.contains("[route.ingress]"), "{message}");
+        assert_eq!(
+            message,
+            "view \"upload\": body raw hands the request body to the application unvalidated, and \
+             the production path refuses it without the acknowledgement; write `body raw \
+             unvalidated` in that view, or declare the codec it takes (json, form, none)",
+            "§10.2, verbatim"
+        );
         assert_eq!(raw_ingress_gate(&manifest(ACCEPTED)), Ok(()));
     }
 

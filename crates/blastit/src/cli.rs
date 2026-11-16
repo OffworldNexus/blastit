@@ -524,7 +524,10 @@ fn run_fmt(options: &FmtOptions) -> u8 {
         return SUCCESS;
     }
     if options.check {
-        println!("{}: not in canonical layout", one_line(&path));
+        println!(
+            "{}: not in canonical layout",
+            crate::config::display_path(&path)
+        );
         return FMT_NOT_CANONICAL;
     }
     match blastit_manifest::edit::write_atomic(&path, &formatted) {
@@ -532,7 +535,7 @@ fn run_fmt(options: &FmtOptions) -> u8 {
         Err(error) => {
             eprintln!(
                 "{}: the file could not be written: {}",
-                one_line(&path),
+                crate::config::display_path(&path),
                 blastit_manifest::clipped(&error.to_string())
             );
             FMT_FAILURE
@@ -543,47 +546,21 @@ fn run_fmt(options: &FmtOptions) -> u8 {
 /// Prints one line per refusal, each prefixed with the manifest path exactly
 /// once (§18), and returns `fmt`'s failure status.
 ///
-/// A positioned refusal renders `<line>:<col>: <message>`, so the path goes
-/// straight before it — `./Blastfile:2:10: …`; a position-less one renders only
-/// its message, and takes the `<path>: <message>` spelling.
+/// The position comes from [`blastit_manifest::ManifestError::position`], not
+/// from the rendered line: a positioned refusal renders `<line>:<col>: <message>`,
+/// so the path goes straight before it — `./Blastfile:2:10: …`; a position-less
+/// one takes the `<path>: <message>` spelling.
 fn report_manifest_errors(path: &std::path::Path, errors: &blastit_manifest::ManifestErrors) -> u8 {
-    let path = one_line(path);
+    let path = crate::config::display_path(path);
     for error in errors.errors() {
         let rendered = error.to_string();
-        if positioned(&rendered) {
-            eprintln!("{path}:{rendered}");
-        } else {
+        if error.position().is_none() {
             eprintln!("{path}: {rendered}");
+        } else {
+            eprintln!("{path}:{rendered}");
         }
     }
     FMT_FAILURE
-}
-
-/// True when a rendered refusal starts with §18's `<line>:<col>: ` prefix.
-///
-/// `ManifestError`'s `Display` is the documented rendering — a position, or
-/// nothing at all for a whole-file refusal — and the crate does not expose the
-/// position itself, so the caller reads the one spelling it has to prefix.
-fn positioned(rendered: &str) -> bool {
-    let mut parts = rendered.splitn(3, ':');
-    let (Some(line), Some(col), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
-        return false;
-    };
-    !line.is_empty()
-        && !col.is_empty()
-        && line.bytes().all(|byte| byte.is_ascii_digit())
-        && col.bytes().all(|byte| byte.is_ascii_digit())
-        && rest.starts_with(' ')
-}
-
-/// Renders a path for a one-line message: control bytes escaped and the value
-/// cut at 120 characters (§18).
-///
-/// §18's one line is `blastit-manifest`'s `clipped`, which this crate
-/// re-exports, so the CLI keeps no copy of the rule; `fmt` is the one command
-/// that renders a path a caller passed in.
-fn one_line(path: &std::path::Path) -> String {
-    blastit_manifest::clipped(&path.to_string_lossy())
 }
 
 /// A `--port` / `PORT` value: `1..=65535` (`R2`).

@@ -394,6 +394,12 @@ pub(crate) fn classify(sql: &str) -> Result<String, String> {
 
 /// Diffs the observations of a test suite against a manifest (§6).
 ///
+/// `manifest_text` is the file `fold` and the pytest plugin hand over. It is
+/// still read by the retired reader: `MB.21.4.7` moves this call to
+/// `Manifest::parse_blastfile` *and* the suites that pin `fold` to it — one
+/// change, not two, so the binding and its tests never disagree about which
+/// document they read.
+///
 /// The observations carry the `PATH_INFO` the app saw, which is the string the
 /// scheduler routed on — the view strips `BLASTIT_SCRIPT_NAME` before WSGI
 /// (§2.5) — so no mount prefix is involved here. A caller that recorded mounted
@@ -409,9 +415,9 @@ pub(crate) fn classify(sql: &str) -> Result<String, String> {
 ///
 /// [`AuditError`] when the manifest is invalid, the observations do not have the
 /// documented shape, or a statement cannot be attributed to a proxy.
-pub(crate) fn audit(manifest_toml: &str, observations_json: &str) -> Result<String, AuditError> {
+pub(crate) fn audit(manifest_text: &str, observations_json: &str) -> Result<String, AuditError> {
     let manifest =
-        Manifest::from_toml_str(manifest_toml).map_err(|errors| AuditError::manifest(&errors))?;
+        Manifest::from_toml_str(manifest_text).map_err(|errors| AuditError::manifest(&errors))?;
     let warnings = manifest
         .validate_default()
         .map_err(|errors| AuditError::manifest(&errors))?;

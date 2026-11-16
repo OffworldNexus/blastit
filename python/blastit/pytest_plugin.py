@@ -1,6 +1,6 @@
 """blastit's pytest plugin (D3b): what the tests do, against what the manifest allows.
 
-Writing ``blastit.toml`` by hand from production denial logs is a loop:
+Writing ``Blastfile`` by hand from production denial logs is a loop:
 deploy, hit an endpoint, read ``sql.denied``, add a grant, repeat — and each
 pass only reveals the first denial of each request (ARCHITECTURE.md §6,
 "Writing the manifest"). This plugin closes the loop before the deploy: it
@@ -12,11 +12,11 @@ of grants nothing used.
 
 It is inert unless it is asked for::
 
-    pytest --blastit-manifest blastit.toml
+    pytest --blastit-manifest Blastfile
 
 or, in ``pytest.ini``/``pyproject.toml``::
 
-    blastit_manifest = blastit.toml
+    blastit_manifest = Blastfile
 
 With the manifest in place, in a project already using pytest-django:
 
@@ -112,7 +112,7 @@ def test_notes_page(blastit_live_server):
 or, when the suite already uses ``live_server`` everywhere:
 
 ```console
-$ pytest --blastit-live-server --blastit-manifest blastit.toml
+$ pytest --blastit-live-server --blastit-manifest Blastfile
 ```
 
 ``--blastit-live-server`` makes ``live_server`` *be* blastit's, so a suite that
@@ -166,7 +166,7 @@ Options
 -------
 
 ``--blastit-manifest PATH``
-    The ``blastit.toml`` to diff against. Without it (and without the
+    The ``Blastfile`` to diff against. Without it (and without the
     ``blastit_manifest`` ini option) the plugin does nothing at all: nothing is
     patched, nothing is written, no test sees a difference. A relative path is
     read from the directory pytest was invoked in, not from the one a live
@@ -208,7 +208,7 @@ Options
 
 `pytest-xdist <https://pytest-xdist.readthedocs.io/>`_ works: each worker writes
 the requests it saw next to the report path, and the controller merges them and
-reports once, so ``pytest -n auto --blastit-manifest blastit.toml`` gives one
+reports once, so ``pytest -n auto --blastit-manifest Blastfile`` gives one
 report for the whole run. Only files that say which worker wrote them *and*
 carry the version this build knows are merged; anything else is left alone and
 reported.
@@ -678,7 +678,7 @@ def _manifest_path(config: pytest.Config) -> Path:
 
     A relative path is resolved against the directory pytest was **invoked** in,
     which is the directory the person who typed the command meant it in — not
-    the one a live server runs in, which is the project's (a `blastit.toml` in
+    the one a live server runs in, which is the project's (a `Blastfile` in
     the project would be a different file, or none at all).
 
     Raises `pytest.UsageError` when the configured file is not there, because
@@ -2090,7 +2090,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--blastit-manifest",
         metavar="PATH",
         default=None,
-        help="blastit.toml to diff the requests of this test suite against; "
+        help="Blastfile to diff the requests of this test suite against; "
         "without it the plugin does nothing",
     )
     group.addoption(
@@ -2137,7 +2137,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addini(
         "blastit_manifest",
-        "path of the blastit.toml to diff the test suite against",
+        "path of the Blastfile to diff the test suite against",
         default="",
     )
 

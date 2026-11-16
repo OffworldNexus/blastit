@@ -84,6 +84,8 @@ fn grant_edit(view: &str, query: &str) -> BlastfileEdits {
             view: view.to_string(),
             store: Some("db".to_string()),
             queries: vec![query.to_string()],
+            tables: Default::default(),
+            functions: Default::default(),
         }],
     }
 }

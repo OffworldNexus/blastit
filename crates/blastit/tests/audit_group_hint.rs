@@ -1,12 +1,12 @@
-//! `blastit check` names a group grant for connection-setup SQL (`MA.8`).
+//! `blastit check` names a trait grant for connection-setup SQL (`MA.8`).
 //!
 //! Django re-states `TimeZone` when it opens a connection
 //! (`SELECT set_config('TimeZone', $1, false)`), and the statement runs on
-//! whichever route opens the connection first — so a per-route
-//! `[route.db].queries` grant leaves every other route denying it. The `fix`
-//! for that statement names `[group.connection.db].queries` with
-//! `action = "add_group"`, while every other grantable statement keeps its
-//! per-route `add_query` twin; a redacted literal and transaction control stay
+//! whichever view opens the connection first — so a per-view
+//! `postgres { query … }` grant leaves every other view denying it. The `fix`
+//! for that statement names `trait connection` with `action = "add_group"`,
+//! while every other grantable statement keeps its per-view `add_query` twin
+//! (`view home postgres`); a redacted literal and transaction control stay
 //! `observe`, exactly as before.
 //!
 //! Standard-tier twin: the protected `crates/blastit/tests/critical_check_engine.rs`
@@ -98,7 +98,7 @@ fn fix_of(report: &Report, sql: &str) -> Value {
 }
 
 #[test]
-fn connection_setup_sql_names_a_group_grant() {
+fn connection_setup_sql_names_a_trait_grant() {
     let report = report(&[routed_sql(TIMEZONE_SETUP, grantable(TIMEZONE_SETUP), false)]);
     assert!(
         !report.ok,
@@ -106,8 +106,8 @@ fn connection_setup_sql_names_a_group_grant() {
     );
     assert_eq!(
         fix_of(&report, TIMEZONE_SETUP),
-        json!({"action": "add_group", "to": "[group.connection.db].queries"}),
-        "the statement runs on whichever route opens the connection"
+        json!({"action": "add_group", "to": "trait connection"}),
+        "the statement runs on whichever view opens the connection"
     );
 }
 
@@ -120,29 +120,30 @@ fn a_set_and_a_show_are_session_setup_too() {
         let report = report(&[routed_sql(sql, grantable(sql), false)]);
         assert_eq!(
             fix_of(&report, sql),
-            json!({"action": "add_group", "to": "[group.connection.db].queries"}),
+            json!({"action": "add_group", "to": "trait connection"}),
             "{sql} is session setup: {sql}"
         );
     }
 }
 
 #[test]
-fn a_plain_statement_keeps_the_per_route_grant() {
+fn a_plain_statement_keeps_the_per_view_grant() {
     // The twin: `SELECT 1` is replayable as setup, and `DELETE` is an ordinary
-    // statement — neither belongs to a group every route attaches, so both keep
-    // the per-route `add_query` this engine has always emitted.
+    // statement — neither belongs to a trait every view attaches, so both keep
+    // the per-view `add_query` this engine has always emitted, naming the
+    // view's `postgres` block.
     for sql in ["SELECT 1", "DELETE FROM \"t\" WHERE \"t\".\"id\" = $?"] {
         let report = report(&[routed_sql(sql, grantable(sql), false)]);
         assert_eq!(
             fix_of(&report, sql),
-            json!({"action": "add_query", "to": "[route.db].queries"}),
-            "{sql} is a route's statement"
+            json!({"action": "add_query", "to": "view home postgres"}),
+            "{sql} is a view's statement"
         );
     }
 }
 
 #[test]
-fn transaction_control_and_a_redacted_literal_never_name_a_group() {
+fn transaction_control_and_a_redacted_literal_never_name_a_trait() {
     let report = report(&[
         routed_sql("SAVEPOINT s1", grantable("SAVEPOINT s1"), true),
         routed_sql(REDACTED, refused(REDACTED), false),
@@ -151,7 +152,7 @@ fn transaction_control_and_a_redacted_literal_never_name_a_group() {
         assert_eq!(
             fix_of(&report, sql),
             json!({"action": "observe"}),
-            "{sql} is never grantable, so it is never a group's either"
+            "{sql} is never grantable, so it is never a trait's either"
         );
     }
     assert!(
@@ -159,7 +160,7 @@ fn transaction_control_and_a_redacted_literal_never_name_a_group() {
             finding,
             Finding::MissingGrant { fix, .. } if fix.action == "add_group"
         )),
-        "no group hint for a refusal: {:?}",
+        "no trait hint for a refusal: {:?}",
         report.findings
     );
 }

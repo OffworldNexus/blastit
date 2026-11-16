@@ -125,7 +125,11 @@ pub(crate) fn regex_message(error: &regex::Error) -> String {
 pub enum Location {
     /// The top-level `groups` list, which attaches a group to every route.
     Global,
-    /// A `[group.<name>]` section.
+    /// A `[group.<name>]` section, which a `Blastfile` spells `trait
+    /// <name> { … }` (§11).
+    ///
+    /// The retired reader still produces it; both documents name the same node,
+    /// so it renders `trait "<name>"` — the noun a developer edits (§11.3).
     Group(String),
     /// A `[[route]]` entry, by index and by name.
     Route {
@@ -149,7 +153,10 @@ pub enum Location {
     /// A `view`, by sandbox index and by name (§7.3, §10.3).
     ///
     /// One `view` may lower to several routes, so the location names the view
-    /// and the sandbox it owns rather than a route index.
+    /// rather than a route index. The sandbox index is kept in the variant for
+    /// the callers that key on it; it is not printed, because a view is named,
+    /// not numbered, and `(index 0)` in a refusal would send a reader looking
+    /// for a numbering the file does not have (§18).
     View {
         /// The view's sandbox, which is its index in file order.
         index: usize,
@@ -162,7 +169,7 @@ impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Global => f.write_str("global groups"),
-            Self::Group(group) => write!(f, "group {}", quoted(group)),
+            Self::Group(group) => write!(f, "trait {}", quoted(group)),
             Self::Route { index, name } => {
                 write!(f, "route {} (index {index})", quoted(name))
             }
@@ -170,9 +177,7 @@ impl fmt::Display for Location {
                 write!(f, "mount {} (index {index})", quoted(prefix))
             }
             Self::Trait(name) => write!(f, "trait {}", quoted(name)),
-            Self::View { index, name } => {
-                write!(f, "view {} (index {index})", quoted(name))
-            }
+            Self::View { name, .. } => write!(f, "view {}", quoted(name)),
         }
     }
 }
@@ -223,9 +228,14 @@ pub enum ManifestError {
         key: String,
     },
     /// Top-level `app` is not a `module:attribute` WSGI callable (`R7`).
-    #[error("app {}: must be `module:attribute`", quoted(.app))]
+    ///
+    /// The value is **never** printed (§18): a pasted `$TOKEN` or DSN can sit
+    /// in that slot, so the sentence names the shape the value must have
+    /// instead. `app` is kept in the variant because the model compares it, not
+    /// because a message quotes it.
+    #[error("app: must be `module:attribute`")]
     InvalidApp {
-        /// The value as written.
+        /// The value as written; compared, never rendered.
         app: String,
     },
     /// A `[route.ingress]` `body` names a codec this build does not have
@@ -422,16 +432,16 @@ pub enum ManifestError {
         /// Exclusive upper bound of the uid range.
         max: u32,
     },
-    /// A group carries `unrestricted = true` (§6). It is only accepted inline on
-    /// a route, so that it can never be attached to routes by accident.
+    /// A trait carries `unrestricted` (§6, §11.3). It is only accepted inline on
+    /// a view, so that it can never be attached to views by accident.
     #[error(
-        "{location}: unrestricted is only allowed inline on a route (grant on proxy {})",
+        "{location}: unrestricted is only allowed inline on a view (grant on store {})",
         quoted(.proxy)
     )]
     UnrestrictedGroup {
         /// Where the grant is written.
         location: Location,
-        /// The proxy the group's grant names.
+        /// The store the trait's grant names.
         proxy: ProxyName,
     },
     /// A grant carries both `unrestricted = true` and a list of queries (§6).
@@ -639,11 +649,15 @@ pub enum ManifestError {
     /// `String` because that last phrase interpolates a value, and because the
     /// entry probe adds `must exist`, `must be a regular file`, `must be
     /// readable by uid <uid>` and `must be stat-able` to the same variant.
-    #[error("{location}: php entry {}: {rule}", quoted(.entry))]
+    ///
+    /// The entry itself is **never** printed (§18): a pasted DSN or token can
+    /// sit in that slot, so the sentence names the position (`view "app"`) and
+    /// the rule; `entry` is kept for the model's equality, not for a message.
+    #[error("{location}: php entry {rule}")]
     PhpEntryInvalid {
         /// Where the `[route.php]` block is written.
         location: Location,
-        /// The entry as written.
+        /// The entry as written; compared, never rendered.
         entry: String,
         /// The fixed rule the entry breaks.
         rule: String,
@@ -1469,68 +1483,162 @@ pub enum ManifestError {
     },
 }
 
+impl ManifestError {
+    /// Where in the file this refusal points ([`Position::NONE`] for a
+    /// whole-file one), so a caller that prefixes the manifest path reads the
+    /// position instead of parsing the rendered line (§18).
+    ///
+    /// Every variant that renders a position carries it as `at`; the rest are
+    /// whole-file refusals, whose sentence has no position to prefix.
+    pub fn position(&self) -> Position {
+        match self {
+            Self::AppNameInvalid { at, .. }
+            | Self::BareHyphen { at, .. }
+            | Self::BlockTooDeep { at, .. }
+            | Self::BodyNeedsCodec { at, .. }
+            | Self::CarriageReturn { at, .. }
+            | Self::DotOutsideFunction { at, .. }
+            | Self::DuplicateApp { at, .. }
+            | Self::DuplicateBody { at, .. }
+            | Self::DuplicateEndpointBody { at, .. }
+            | Self::DuplicateEntrypoint { at, .. }
+            | Self::DuplicateGrant { at, .. }
+            | Self::DuplicateName { at, .. }
+            | Self::DuplicateProxyName { at, .. }
+            | Self::DuplicateSlot { at, .. }
+            | Self::DuplicateStaticDirective { at, .. }
+            | Self::EmptyStoreBlock { at, .. }
+            | Self::EndpointInHeaderView { at, .. }
+            | Self::EntrypointBlockHoldsPreload { at, .. }
+            | Self::EnvMarker { at, .. }
+            | Self::EnvName { at, .. }
+            | Self::Equals { at, .. }
+            | Self::GrantIsPerView { at, .. }
+            | Self::InvalidEscape { at, .. }
+            | Self::InvalidName { at, .. }
+            | Self::ListStartsWithComma { at, .. }
+            | Self::MethodAsName { at, .. }
+            | Self::MethodCannotReachView { at, .. }
+            | Self::MethodsWithoutPattern { at, .. }
+            | Self::NonAsciiByte { at, .. }
+            | Self::NotADirectiveHere { at, .. }
+            | Self::NotAMethod { at, .. }
+            | Self::PatternNotAnchored { at, .. }
+            | Self::PatternParameterDuplicate { at, .. }
+            | Self::PatternParameterName { at, .. }
+            | Self::PatternParameterType { at, .. }
+            | Self::PatternParameterUnclosed { at, .. }
+            | Self::PatternParameterUnnamed { at, .. }
+            | Self::PatternRegex { at, .. }
+            | Self::PatternStarPosition { at, .. }
+            | Self::PatternTooLong { at, .. }
+            | Self::PhpEntrypointInvalid { at, .. }
+            | Self::QuotedStore { at, .. }
+            | Self::RegexNeedsRawString { at, .. }
+            | Self::RegexWithoutRawString { at, .. }
+            | Self::StaticRootMissing { at, .. }
+            | Self::StoreNameReserved { at, .. }
+            | Self::StoreTwoForms { at, .. }
+            | Self::StrayCloseBrace { at, .. }
+            | Self::TooManyListItems { at, .. }
+            | Self::TrailingComma { at, .. }
+            | Self::TraitHoldsGrantsOnly { at, .. }
+            | Self::UnclosedBlock { at, .. }
+            | Self::Unexpected { at, .. }
+            | Self::UnknownByte { at, .. }
+            | Self::UnknownCodec { at, .. }
+            | Self::UnknownKeyword { at, .. }
+            | Self::UnknownTrait { at, .. }
+            | Self::UnterminatedRawString { at, .. }
+            | Self::UnterminatedString { at, .. }
+            | Self::UnvalidatedNeedsRaw { at, .. }
+            | Self::UrlSlot { at, .. }
+            | Self::ViewWithoutEndpoint { at, .. }
+            | Self::WorkersRemoved { at, .. } => *at,
+            _ => Position::NONE,
+        }
+    }
+}
+
 /// Something suspicious that does not stop the server from starting (§6).
+///
+/// Every sentence names the `Blastfile` node a developer edits — a `trait`, a
+/// `view` or a `store` (§13.2) — never the retired file's `group`/`route`/
+/// `proxy`, and `error.rs` (not `validate.rs`) is where they live because each
+/// one is this enum's `thiserror` attribute. The triggers and the emission order
+/// are `validate::warnings`' and did not change.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ManifestWarning {
-    /// A `[group.<name>]` that no route and no global `groups` entry
-    /// references: it grants nothing.
+    /// A `trait` that no view `use`s and no global `groups` entry references:
+    /// it grants nothing (§11.3).
     #[error(
-        "group {} is attached to no route and no global groups: it grants nothing",
+        "trait {} is attached to no view and no global traits: it grants nothing",
         quoted(.group)
     )]
     UnattachedGroup {
-        /// The group's name.
+        /// The trait's name (the model still calls the section a group).
         group: String,
     },
-    /// A proxy that no route and no group grants: it is declared, but nothing
-    /// may use it, so its variables never reach the app.
-    #[error("proxy {} has no grant in any route or group: it is unusable", quoted(.proxy))]
+    /// A store that no view and no trait grants: it is declared, but nothing
+    /// may use it, so its variables never reach the app (§13.2).
+    #[error(
+        "store {} has no grant in any view or trait: it is unusable",
+        quoted(.proxy)
+    )]
     UngrantedProxy {
-        /// The proxy's name.
+        /// The store's name (the model still calls it a proxy).
         proxy: ProxyName,
     },
-    /// A route that may run any statement on one proxy (§6,
-    /// `unrestricted = true`). Reported once per (route, proxy), at boot, so the
-    /// grant is never invisible in the logs.
+    /// A view that may run any statement on one store (§13.1,
+    /// `postgres [name] unrestricted`). Reported once per (view, store), at
+    /// boot, so the grant is never invisible in the logs.
     #[error(
-        "route {} may run any statement on proxy {} (unrestricted = true)",
+        "view {} may run any statement on store {} (unrestricted)",
         quoted(.route),
         quoted(.proxy)
     )]
     UnrestrictedRoute {
-        /// The route's name.
+        /// The view's name (the model still calls it a route).
         route: String,
-        /// The proxy the route is unrestricted on.
+        /// The store the view is unrestricted on.
         proxy: ProxyName,
     },
-    /// A route that declares `body = "raw"`: the request body reaches the app
-    /// exactly as the client sent it (`R11`).
+    /// A view that declares `body raw`: the request body reaches the app
+    /// exactly as the client sent it (`R11`, §10.1).
     ///
-    /// `raw` is the loud opt-out, so a boot says so once per route: every other
+    /// `raw` is the loud opt-out, so a boot says so once per view: every other
     /// codec decodes, validates and re-encodes the body before the app sees it.
-    #[error(
-        "route {}: body = \"raw\" passes the request body through unvalidated",
-        quoted(.route)
-    )]
+    #[error("view {}: body raw passes the request body through unvalidated", quoted(.route))]
     RawIngress {
-        /// The route's name.
+        /// The view's name.
         route: String,
     },
-    /// A route that declares `egress = true`: it may open any outbound address
-    /// and port, cloud metadata included (`R11`).
-    #[error(
-        "route {}: egress = true opens any outbound address and port",
-        quoted(.route)
-    )]
+    /// A view that declares `egress any`: it may open any outbound address and
+    /// port, cloud metadata included (`R11`, §12.4).
+    #[error("view {}: egress any opens any outbound address and port", quoted(.route))]
     EgressRoute {
-        /// The route's name.
+        /// The view's name.
         route: String,
+    },
+    /// An `entrypoint php` that no view forwards to (§12.2, `R30`).
+    ///
+    /// A warning, never an error: a static mount and a front controller can
+    /// ship together before the catch-all view is written, and this is the
+    /// reminder. The entry is a relative `.php` path the boot already accepted.
+    #[error(
+        "entrypoint php {} is reached by no view: declare a `view` that forwards to it",
+        quoted(.entry)
+    )]
+    EntrypointNotReached {
+        /// The front controller the file names.
+        entry: String,
     },
 }
 
 /// Every problem found in one manifest, so a boot can report them all at once.
 ///
-/// [`Display`](fmt::Display) lists them, one per line.
+/// [`Display`](fmt::Display) lists them, one per line, with no header and no
+/// per-line prefix (§18).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManifestErrors(Vec<ManifestError>);
 
@@ -1563,11 +1671,17 @@ impl ManifestErrors {
 }
 
 impl fmt::Display for ManifestErrors {
-    /// Lists the problems, one per line.
+    /// One line per problem and nothing else (§18): no `manifest has N error(s)`
+    /// header, no `  - ` prefix and no trailing newline. A caller that prints
+    /// them prefixes the manifest path exactly once, and the list is exactly
+    /// `len()` lines — the boot's report and the `fmt` refusal are the same N
+    /// lines, one per problem.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "manifest has {} error(s)", self.0.len())?;
-        for error in &self.0 {
-            write!(f, "\n  - {error}")?;
+        for (index, error) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str("\n")?;
+            }
+            write!(f, "{error}")?;
         }
         Ok(())
     }

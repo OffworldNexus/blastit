@@ -98,11 +98,15 @@ fn learned() -> BlastfileEdits {
                 view: "app".to_string(),
                 store: Some("db".to_string()),
                 queries: vec![WIRE_QUERY.to_string()],
+                tables: Default::default(),
+                functions: Default::default(),
             },
             ProposedGrant {
                 view: "orders".to_string(),
                 store: Some("db".to_string()),
                 queries: vec![WIRE_QUERY.to_string()],
+                tables: Default::default(),
+                functions: Default::default(),
             },
         ],
     }

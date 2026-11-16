@@ -108,11 +108,11 @@ fn unrestricted_inside_a_trait_is_refused() {
                   trait session {\n  postgres unrestricted\n}\n\
                   view v \"/v\" {\n  use session\n}\n";
     let rendered = refusal(source);
-    // `validate` names the section by the group it lowers to; re-spelling that
-    // sentence is `MB.21.3.0`'s (§13.2), not this leaf's.
-    assert!(rendered.contains("group \"session\""), "{rendered}");
+    // `validate` names the trait the grant is written in, and the `view` noun is
+    // the decision it makes (§11.3).
+    assert!(rendered.contains("trait \"session\""), "{rendered}");
     assert!(
-        rendered.contains("unrestricted is only allowed inline on a route"),
+        rendered.contains("unrestricted is only allowed inline on a view"),
         "{rendered}"
     );
 }

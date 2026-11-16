@@ -360,7 +360,7 @@ fn a_grant_on_an_unknown_proxy_names_where_it_was_written() {
     let errors = validate_errors(group, UidLayout::DEFAULT_BASE);
     assert_eq!(
         errors.errors()[0].to_string(),
-        "group \"catalog\": grant on unknown proxy \"warehouse\""
+        "trait \"catalog\": grant on unknown proxy \"warehouse\""
     );
 
     // The global list has its own spelling: it is not a group and not a route.
@@ -376,41 +376,84 @@ fn a_grant_on_an_unknown_proxy_names_where_it_was_written() {
 
 #[test]
 fn a_message_escapes_control_characters_and_cuts_long_values() {
-    let bell = ManifestError::InvalidApp {
-        app: "shop\u{7}wsgi".to_string(),
+    // A value the sentence is allowed to quote: the codec a manifest named.
+    // (`InvalidApp` no longer quotes its value — §18, `a_refusal_never_carries`
+    // below — so the escaping and cutting rule is pinned on a variant that does.)
+    let bell = ManifestError::UnknownBodyCodec {
+        path: "view upload: body".to_string(),
+        found: "shop\u{7}wsgi".to_string(),
     };
     assert_eq!(
         bell.to_string(),
-        "app \"shop\\u{7}wsgi\": must be `module:attribute`",
+        "view upload: body: expected \"json\", \"form\", \"none\" or \"raw\", found \"shop\\u{7}wsgi\"",
         "a control character never reaches the event stream raw"
     );
     assert!(!bell.to_string().chars().any(char::is_control));
 
     // Up to 120 characters are quoted whole...
-    let short = ManifestError::InvalidApp {
-        app: "a".repeat(120),
+    let short = ManifestError::UnknownBodyCodec {
+        path: "view upload: body".to_string(),
+        found: "a".repeat(120),
     };
     let rendered = short.to_string();
-    assert!(rendered.starts_with(&format!("app \"{}\": ", "a".repeat(120))));
+    assert!(rendered.ends_with(&format!("found \"{}\"", "a".repeat(120))));
     assert!(!rendered.contains('…'));
 
     // ...and the 121st is replaced by an ellipsis, so the line stays readable.
-    let long = ManifestError::InvalidApp {
-        app: "a".repeat(121),
+    let long = ManifestError::UnknownBodyCodec {
+        path: "view upload: body".to_string(),
+        found: "a".repeat(121),
     };
     let rendered = long.to_string();
-    assert!(rendered.starts_with(&format!("app \"{}\u{2026}\": ", "a".repeat(120))));
-    assert!(rendered.ends_with(": must be `module:attribute`"));
+    assert!(rendered.contains(&format!("\"{}\u{2026}\"", "a".repeat(120))));
 
     // The cut counts characters, not bytes: a name of two-byte characters is
     // never split mid-character.
-    let accented = ManifestError::InvalidApp {
-        app: "é".repeat(130),
+    let accented = ManifestError::UnknownBodyCodec {
+        path: "view upload: body".to_string(),
+        found: "é".repeat(130),
     };
     assert!(
         accented
             .to_string()
             .contains(&format!("\"{}\u{2026}\"", "é".repeat(120)))
+    );
+}
+
+#[test]
+fn a_refusal_never_carries_the_app_it_refused() {
+    // §18: a pasted token can land in the `app` slot, and the sentence names the
+    // shape instead of quoting what is there — so nothing a log or CI run prints
+    // can carry it. (`PhpEntryInvalid`, the other echoing variant §18 names,
+    // belongs to `critical_php_manifest.rs`, outside this leaf's paths.)
+    for value in ["$BLASTIT_TOKEN", "ghp_s3cr3tToken"] {
+        let source = format!("entrypoint python \"{value}\"\n\nview home \"/\" {{}}\n");
+        let errors = Manifest::parse_blastfile(&source, 20_000).expect_err("refused");
+        assert_eq!(
+            errors.errors(),
+            [ManifestError::InvalidApp {
+                app: value.to_string(),
+            }],
+            "{errors}"
+        );
+        let rendered = errors.errors()[0].to_string();
+        assert_eq!(rendered, "app: must be `module:attribute`", "{rendered}");
+        let joined = errors.to_string();
+        assert!(!joined.contains(value), "the value is echoed: {joined}");
+        for fragment in ["$BLASTIT", "ghp_"] {
+            assert!(
+                !joined.contains(fragment),
+                "`{fragment}` reached the message: {joined}"
+            );
+        }
+    }
+    // The allowed twin: one colon is the whole rule.
+    assert!(
+        Manifest::parse_blastfile(
+            "entrypoint python \"shop.wsgi:application\"\n\nview home \"/\" {}\n",
+            20_000
+        )
+        .is_ok()
     );
 }
 
@@ -470,8 +513,7 @@ fn a_declared_proxy_name_is_a_grant_only_when_it_holds_a_table() {
     );
     assert_eq!(
         errors.to_string(),
-        "manifest has 1 error(s)\n  \
-         - app after a [table] is not top-level; move it above the first table"
+        "app after a [table] is not top-level; move it above the first table"
     );
 }
 
@@ -494,8 +536,7 @@ fn a_reserved_key_inside_a_table_grant_row_is_a_misplaced_top_level_key() {
     );
     assert_eq!(
         errors.to_string(),
-        "manifest has 1 error(s)\n  \
-         - groups after a [table] is not top-level; move it above the first table"
+        "groups after a [table] is not top-level; move it above the first table"
     );
 
     // A table *named* `groups` is the author's, so the walk stops at the row:
@@ -533,10 +574,7 @@ fn an_unknown_grant_key_holding_a_table_is_reported_as_the_key_it_is() {
         }],
         "the inner table was walked as if it were a grant row: {errors}"
     );
-    assert_eq!(
-        errors.to_string(),
-        "manifest has 1 error(s)\n  - route[0].db.options: unknown key"
-    );
+    assert_eq!(errors.to_string(), "route[0].db.options: unknown key");
 }
 
 //
@@ -551,7 +589,8 @@ fn the_error_list_counts_iterates_and_renders() {
     assert_eq!(one.errors().len(), 1);
     assert_eq!(
         one.to_string(),
-        "manifest has 1 error(s)\n  - version: missing `version = 1`"
+        "version: missing `version = 1`",
+        "§18: one line per problem, no header and no `  - ` prefix"
     );
 
     let two = ManifestErrors::from(vec![
@@ -569,13 +608,15 @@ fn the_error_list_counts_iterates_and_renders() {
     assert_eq!(two.errors().len(), 2);
     let rendered = two.to_string();
     assert!(
-        rendered.starts_with("manifest has 2 error(s)"),
+        !rendered.contains("manifest has "),
+        "no header (§18): {rendered}"
+    );
+    assert_eq!(rendered.lines().count(), 2, "{rendered}");
+    assert_eq!(
+        rendered, "version: missing `version = 1`\nroute[0].name: missing required key",
         "{rendered}"
     );
-    assert!(
-        rendered.contains("\n  - route[0].name: missing required key"),
-        "{rendered}"
-    );
+    assert!(!rendered.ends_with('\n'), "{rendered:?}");
 
     // Iterating by reference, then by value.
     let mut seen = 0;
@@ -595,7 +636,7 @@ fn the_error_list_counts_iterates_and_renders() {
     let none = ManifestErrors::new(Vec::new());
     assert!(none.is_empty());
     assert_eq!(none.len(), 0);
-    assert_eq!(none.to_string(), "manifest has 0 error(s)");
+    assert_eq!(none.to_string(), "", "no problems, no lines (§18)");
     assert!(none.into_errors().is_empty());
 }
 

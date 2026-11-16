@@ -458,12 +458,17 @@ fn syntax_errors_after_non_ascii_text_stay_on_one_line() {
         let errors = parse_errors(source);
         let rendered = errors.to_string();
         assert!(
-            rendered.starts_with("manifest has 1 error(s)"),
+            !rendered.starts_with("manifest has "),
+            "{source:?} -> {rendered}"
+        );
+        assert_eq!(
+            rendered.lines().count(),
+            errors.len(),
             "{source:?} -> {rendered}"
         );
         for line in rendered.lines() {
             assert!(
-                line.starts_with("manifest has 1 error(s)") || line.starts_with("  - "),
+                !line.starts_with("  - ") && !line.contains('\n'),
                 "{source:?} -> {rendered}"
             );
         }
@@ -544,11 +549,13 @@ fn every_problem_is_collected_and_listed() {
 
     let rendered = errors.to_string();
     assert!(
-        rendered.starts_with("manifest has 3 error(s)"),
-        "{rendered}"
+        !rendered.starts_with("manifest has "),
+        "§18: one line per problem, no header: {rendered}"
     );
-    assert!(rendered.contains("\n  - first: unknown key"), "{rendered}");
-    assert!(rendered.contains("\n  - second: unknown key"), "{rendered}");
+    assert_eq!(rendered.lines().count(), errors.len(), "{rendered}");
+    assert!(rendered.contains("first: unknown key"), "{rendered}");
+    assert!(rendered.contains("second: unknown key"), "{rendered}");
+    assert!(!rendered.contains("  - "), "{rendered}");
 
     let collected: Vec<ManifestError> = errors.into_iter().collect();
     assert_eq!(collected.len(), 3);

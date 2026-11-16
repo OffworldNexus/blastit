@@ -131,6 +131,8 @@ fn grant(view: &str, queries: &[&str]) -> ProposedGrant {
         view: view.to_string(),
         store: Some("db".to_string()),
         queries: queries.iter().map(|query| query.to_string()).collect(),
+        tables: Default::default(),
+        functions: Default::default(),
     }
 }
 
@@ -524,6 +526,8 @@ fn a_grant_on_an_undeclared_store_names_the_missing_declaration() {
             view: "products".to_string(),
             store: Some("ghost".to_string()),
             queries: vec![PRODUCT_QUERY.to_string()],
+            tables: Default::default(),
+            functions: Default::default(),
         }],
     };
     let error = apply_edits(SOURCE, &edits).expect_err("the store is not declared");
@@ -634,6 +638,8 @@ fn a_store_named_like_a_directive_still_boots() {
             view: "catalogue".to_string(),
             store: Some("body".to_string()),
             queries: vec![PRODUCT_QUERY.to_string()],
+            tables: Default::default(),
+            functions: Default::default(),
         }],
     };
     let edited = apply_edits(source, &edits).expect("the store name is legal");

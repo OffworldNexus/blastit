@@ -343,11 +343,14 @@ fn connect_and_trace_cannot_reach_a_php_worker() {
 }
 
 /// The three messages render exactly as the design's table spells them.
+///
+/// §18: the entry is **not** quoted — a pasted DSN or token can sit in that slot
+/// — so the sentence names the position (the view or route) and the rule.
 #[test]
 fn the_php_messages_match_the_design_table() {
     assert_eq!(
         entry_invalid("index.php", "must be under static root \"public\"").to_string(),
-        "route \"app\" (index 0): php entry \"index.php\": must be under static root \"public\""
+        "route \"app\" (index 0): php entry must be under static root \"public\""
     );
     assert_eq!(
         workers_invalid(0, "must be at least 1").to_string(),
@@ -362,6 +365,28 @@ fn the_php_messages_match_the_design_table() {
         .to_string(),
         "route \"app\" (index 0): spa = true never reaches the front controller"
     );
+}
+
+/// §18: neither echoing variant carries the value it refused, because a pasted
+/// token or DSN lands in the slot.
+#[test]
+fn a_refusal_never_carries_the_php_entry_it_refused() {
+    const DSN: &str = "postgres://user:hunter2@db/public/index.php";
+    let sentence = entry_invalid(DSN, "must be a relative path").to_string();
+    assert_eq!(
+        sentence,
+        "route \"app\" (index 0): php entry must be a relative path"
+    );
+    assert!(!sentence.contains("hunter2"), "{sentence}");
+    assert!(!sentence.contains("postgres://"), "{sentence}");
+
+    // The same rule holds for the token-shaped slot `InvalidApp` owns.
+    let token = ManifestError::InvalidApp {
+        app: "$BLASTIT_TOKEN".to_string(),
+    }
+    .to_string();
+    assert_eq!(token, "app: must be `module:attribute`");
+    assert!(!token.contains("$BLASTIT"), "{token}");
 }
 
 /// A PHP route is its own executor: a php-only manifest needs no `app`, while a

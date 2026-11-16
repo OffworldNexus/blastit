@@ -583,8 +583,10 @@ impl LearnRun {
                 view,
                 // The unnamed `postgres { … }` block is the store `db` (§7.4);
                 // a named store is written `postgres <name> { … }`.
-                store: (proxy != "db").then_some(proxy),
+                store: (proxy != blastit_manifest::blastfile::DEFAULT_STORE).then_some(proxy),
                 queries,
+                tables: std::collections::BTreeMap::new(),
+                functions: std::collections::BTreeSet::new(),
             });
         }
         edits
@@ -885,16 +887,22 @@ view items GET \"/items\" {}
                     view: "extra".to_string(),
                     store: Some("home".to_string()),
                     queries: vec!["SELECT 2".to_string()],
+                    tables: Default::default(),
+                    functions: Default::default(),
                 },
                 ProposedGrant {
                     view: "home".to_string(),
                     store: Some("home".to_string()),
                     queries: vec!["SELECT 111".to_string()],
+                    tables: Default::default(),
+                    functions: Default::default(),
                 },
                 ProposedGrant {
                     view: "items".to_string(),
                     store: Some("home".to_string()),
                     queries: vec!["SELECT 1".to_string()],
+                    tables: Default::default(),
+                    functions: Default::default(),
                 },
             ],
             "the one proposed route receives the statement its unrouted request ran, while \

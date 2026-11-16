@@ -99,23 +99,37 @@ fn the_two_entry_points_differ_by_validation() {
     assert_eq!(errors.len(), 2, "one error per undeclared store");
 }
 
-/// `ManifestErrors` lists one line per problem, so a boot's list is N lines.
+/// `ManifestErrors` lists one line per problem and nothing else (§18): no
+/// header, no `  - ` prefix, no trailing newline.
 #[test]
 fn the_error_list_is_one_line_per_problem() {
     let source = "view a \"/a\" {\n  postgres x { select t }\n}\nview b \"/b\" {\n  postgres y { select t }\n}\n";
     let errors = Manifest::parse_blastfile(source, 20_000).expect_err("validation refuses it");
     let rendered = errors.to_string();
     let lines: Vec<&str> = rendered.lines().collect();
-    assert_eq!(lines.len(), errors.len() + 1, "{rendered}");
-    assert!(
-        lines
-            .first()
-            .is_some_and(|line| line.starts_with("manifest has 2 error(s)")),
-        "{rendered}"
-    );
-    for line in lines.iter().skip(1) {
-        assert!(line.starts_with("  - "), "{rendered}");
+    assert_eq!(lines.len(), errors.len(), "{rendered}");
+    for error in errors.errors() {
+        let line = error.to_string();
+        assert!(!line.contains('\n'), "one problem is one line: {line}");
+        assert!(!line.starts_with("  - "), "no per-line prefix: {line}");
+        assert!(
+            !line.starts_with("manifest has "),
+            "no header is folded into a problem: {line}"
+        );
+        assert!(lines.contains(&line.as_str()), "{line}\n{rendered}");
     }
+    assert!(!rendered.contains("manifest has "), "{rendered}");
+    assert!(!rendered.ends_with('\n'), "{rendered:?}");
+    assert_eq!(
+        rendered,
+        errors
+            .errors()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        "the join is exactly the problems"
+    );
 }
 
 /// A predicate over one refusal, so the table below stays readable.

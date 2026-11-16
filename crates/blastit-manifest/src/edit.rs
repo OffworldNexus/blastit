@@ -83,7 +83,7 @@ use crate::model::{Grant, Manifest, PgGrant, ProxyName, Route};
 ///
 /// The editor writes exactly these two keys: inferring a name from a path and
 /// deciding which paths to propose happens before the edit
-/// ([`crate::edit::apply_edits`] only writes them).
+/// ([`apply_edits`] only writes them).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposedRoute {
     /// The route's name; `[a-z0-9][a-z0-9_-]*`, unique in the document.
@@ -268,6 +268,32 @@ pub enum EditError {
         /// The index in the proposed `queries` list.
         index: usize,
     },
+    /// A table, column or function name has no spelling in a grant block.
+    ///
+    /// A grant block reads `Word` names (§13.1), so a quoted identifier, a
+    /// schema-qualified table or a name with a space cannot be written; the
+    /// edit is refused rather than written in a form the reader would refuse.
+    UnwritableGrantName {
+        /// The view the grant belongs to.
+        view: String,
+        /// The store the grant names.
+        store: String,
+        /// `table`, `column` or `function`.
+        what: &'static str,
+        /// The name as the analysis spelled it.
+        name: String,
+    },
+    /// A table grant names no column at all: `select products()` grants nothing.
+    EmptyColumnList {
+        /// The view the grant belongs to.
+        view: String,
+        /// The store the grant names.
+        store: String,
+        /// The table whose column list is empty.
+        table: String,
+        /// `select`, `insert` or `update`.
+        operation: &'static str,
+    },
     /// The edit would have changed a part of the document it does not own.
     ///
     /// This is the editor's own postcondition, not the author's mistake: the
@@ -383,6 +409,31 @@ impl std::fmt::Display for EditError {
                 "view {}'s {} grant has an empty queries[{index}]; write a statement or drop it",
                 quoted(route),
                 quoted(proxy)
+            ),
+            Self::UnwritableGrantName {
+                view,
+                store,
+                what,
+                name,
+            } => write!(
+                f,
+                "view {}'s {store} grant names the {what} {}, which a grant block cannot spell; \
+                 a {what} is `[A-Za-z0-9_-]` (a quoted identifier or a schema-qualified table has \
+                 no spelling here) — write that grant by hand",
+                quoted(view),
+                quoted(name)
+            ),
+            Self::EmptyColumnList {
+                view,
+                store,
+                table,
+                operation,
+            } => write!(
+                f,
+                "view {}'s {store} grant would write `{operation} {}(…)` with no column, which \
+                 grants nothing; analyze the statement again or grant the table by hand",
+                quoted(view),
+                escape_control(table)
             ),
             Self::Verification { section } => write!(
                 f,

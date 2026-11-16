@@ -52,7 +52,12 @@ mod tokens;
 pub(crate) mod write;
 
 pub use print::fmt;
+// §7.4's store slots: the unnamed `postgres { … }` block is the store `db`, and
+// a caller that renders a store the way a `Blastfile` writes it (§13.3) needs the
+// name to know it is the unnamed one.
+pub use lower::DEFAULT_STORE;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 use std::path::Path;
 
@@ -61,6 +66,11 @@ use serde::{Deserialize, Serialize};
 use crate::edit::{BlastfileEditor, EditError, Editor as _};
 use crate::error::{ManifestError, ManifestErrors, ManifestWarning, escape_control};
 use crate::model::Manifest;
+
+/// `TableGrant` is `blastit-sqlpolicy`'s (the crate the analysis and dbproxy
+/// share), re-exported through the model so a proposal and a report spell a
+/// table grant one way.
+pub use blastit_sqlpolicy::TableGrant;
 
 /// One `view` `--learn` proposes (§14.5).
 ///
@@ -89,6 +99,16 @@ pub struct ProposedView {
 /// normalised before they are written; a statement that inlines a literal or
 /// holds a redacted `…` is refused instead. There is deliberately no `body`
 /// field (§10.1, R11).
+///
+/// `tables` and `functions` are the **scope** a `sql.denied` log can prove
+/// without an exact statement (`fold --prefer-tables`): a table the suite
+/// touched, with the columns each operation used, and the functions beyond the
+/// safe set. They are merged into the view's `postgres [store] { }` block the
+/// same way `queries` are, so a repeated proposal adds nothing; a name the
+/// grammar cannot write as a `Word` (a quoted identifier, a schema-qualified
+/// table) and a column list that names no column are refused before anything is
+/// spliced (§13.1's spellings). `unrestricted`, `use`, `transactions` and `body`
+/// stay unproposable: there is no field for them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposedGrant {
     /// The view the grant belongs to.
@@ -103,6 +123,14 @@ pub struct ProposedGrant {
     /// The statements to add, as the wire spelled them.
     #[serde(default)]
     pub queries: Vec<String>,
+    /// `select`/`insert`/`update`/`delete` scope per table, `select
+    /// products(id, name)` in the file (§13.1).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tables: BTreeMap<String, TableGrant>,
+    /// The functions beyond the safe set the view may call, `functions
+    /// st_distance` in the file (§13.1).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub functions: BTreeSet<String>,
 }
 
 /// Everything one `--learn` run wants to add to a `Blastfile` (§14.5).
@@ -114,8 +142,8 @@ pub struct ProposedGrant {
 /// This is the `Blastfile` edits type. The retired TOML patcher's is
 /// [`crate::edit::ManifestEdits`]: the two documents need different proposal
 /// shapes (a `[[route]]` carries regexes, a `view` carries methods and
-/// patterns), so they are separate types until `MB.21.4.3` merges them when it
-/// moves the call sites off the retired document.
+/// patterns), so they are separate types until `MB.21.4.5` deletes the retired
+/// reader — the Python side that still plans against it moves in `MB.21.4.7`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlastfileEdits {
     /// New `view` blocks.
@@ -158,9 +186,11 @@ impl BlastfileEdits {
 /// An edits set with nothing to add returns the source unchanged, which makes
 /// repeated learning runs byte-identical.
 ///
-/// This is the `Blastfile` half of [`crate::edit`]'s two editors: the retired
-/// TOML patcher is [`crate::edit::apply_edits`], and `MB.21.4.3` moves this
-/// function to that name when it moves the call sites off the retired document.
+/// This is **the** editor: `blastit check --learn`, `blastit dev --learn` and
+/// the Python `fold` binding all apply their proposals through it, so a
+/// `Blastfile` has exactly one writer. The retired TOML patcher beside it
+/// ([`crate::edit`]'s `apply_edits`) keeps only its own document until
+/// `MB.21.4.5` deletes that reader; no call site in `blastit` reaches it.
 ///
 /// # Errors
 ///

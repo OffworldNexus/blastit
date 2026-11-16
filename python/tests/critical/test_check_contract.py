@@ -974,7 +974,7 @@ class TestTheContract(unittest.TestCase):
             if finding["kind"] == "missing_grant"
         )
         self.assertEqual(
-            missing["fix"], {"action": "add_query", "to": "[route.db].queries"}
+            missing["fix"], {"action": "add_query", "to": "view home postgres"}
         )
         self.assertTrue(
             run.stdout.rstrip().endswith(b"}"), "one document, nothing else"

@@ -135,7 +135,8 @@ fn a_positionless_refusal_renders_bare() {
     assert!(!rendered.contains('\n'), "{rendered}");
 }
 
-/// The list is one line per problem, so a boot's output is N lines (§18).
+/// The list is one line per problem and nothing else — no header, no `  - `
+/// prefix, no trailing newline (§18).
 #[test]
 fn the_list_is_one_line_per_problem() {
     let source = "view a \"/a\" {\n  postgres x { select t }\n}\n\
@@ -144,7 +145,19 @@ fn the_list_is_one_line_per_problem() {
     let errors = Manifest::parse_blastfile(source, 20_000).expect_err("refused");
     assert_eq!(errors.len(), 3);
     let rendered = errors.to_string();
-    assert_eq!(rendered.lines().count(), errors.len() + 1, "{rendered}");
+    assert_eq!(rendered.lines().count(), errors.len(), "{rendered}");
+    assert!(!rendered.contains("manifest has "), "{rendered}");
+    assert!(!rendered.contains("  - "), "{rendered}");
+    assert!(!rendered.ends_with('\n'), "{rendered:?}");
+    assert_eq!(
+        rendered,
+        errors
+            .errors()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     for error in errors.errors() {
         assert!(!error.to_string().contains('\n'), "{error}");
     }
@@ -152,9 +165,8 @@ fn the_list_is_one_line_per_problem() {
 
 /// A refusal never carries a value that could be a credential (§18, §17.1).
 ///
-/// `InvalidApp` still quotes its value: `mutation_gaps.rs` pins that rendering
-/// and it is outside this leaf's paths, so the re-spelling §18 asks for is a
-/// follow-up (`MB.21.3.0`/`MB.21.4.3`).
+/// `InvalidApp` and `PhpEntryInvalid` name the position and the shape instead of
+/// quoting the slot, because a pasted DSN or token lands in either.
 #[test]
 fn a_refusal_never_carries_a_secret() {
     let secrets = ["hunter2", "s3cr3t", "postgres://"];
