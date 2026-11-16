@@ -2063,3 +2063,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T04:45 [MB.21.3.2] (lead) edited fields
 - 2026-11-16T04:45 [MB.21.3.2] (lead) reviewer verdict PASS (attempt 2): both MAJORs verified closed, the keyword split pinned both ways. 3 MINOR: (1) top-level `root`/`body`/... answer "is not a ke
 - 2026-11-16T04:45 [MB.21.3.2] (lead) status review -> done
+- 2026-11-16T04:47 [MB.21.3.2] (lead) commit d230370
+- 2026-11-16T04:47 [MB.21.3.3] (lead) status ready -> active
+- 2026-11-16T04:47 [MB.21.3.3] (lead) attempt 1/3 started
+- 2026-11-16T04:47 [MB.21.3.3] (lead) base d23037053e6971e39ad6b76bef65fc7c40082805
+- 2026-11-16T04:51 HUMAN H-013 opened by implementer (node MB.21.3.3)
+- 2026-11-16T05:02 [MB.21.3.3] (lead) edited fields
+- 2026-11-16T05:02 [MB.21.3.8] (lead) edited fields
+- 2026-11-16T05:02 [MB.21.3.3] (lead) Blocked report accepted as a lead plan defect, not a design gap: error.rs was missing from this node and from 3.8 (every sibling leaf lists it). Both widened no
+- 2026-11-16T05:03 [MB.21.3.3] (lead) status active -> ready
+- 2026-11-16T05:03 [MB.21.3.3] (lead) status ready -> active
+- 2026-11-16T05:03 [MB.21.3.3] (lead) attempt 2/3 started
+- 2026-11-16T05:03 [MB.21.3.3] (lead) base d23037053e6971e39ad6b76bef65fc7c40082805 (attempt 2)
+- 2026-11-16T05:15 [MB.21.3.3] (lead) status active -> review
+- 2026-11-16T05:15 [MB.21.3.3] (lead) attempt 2 reported done; goldfish review on base d230370, with the refusals-now-eager and str_value/raw_value seam in scope.
+- 2026-11-16T05:19 [MB.21.3.3] (lead) reviewer verdict PASS (attempt 2). 3 MINOR: (1) the quoted form is not pre-compiled at parse (the raw form is), so an emission-table regression surfaces at tabl
+- 2026-11-16T05:19 [MB.21.3.3] (lead) status review -> done
+- 2026-11-16T05:23 [MB.21.3.3] (lead) Gate note: the first make check on this tree failed in blastit-view (php::tests::a_runtime_that_retires_ends_the_loop_after_its_done: "the worker never wrote 3 

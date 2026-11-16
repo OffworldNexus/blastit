@@ -1205,6 +1205,123 @@ pub enum ManifestError {
         /// Where the `"…"` string is.
         at: Position,
     },
+    /// A parameter a pattern never closes (§8.3).
+    ///
+    /// `parameter` is the text from the `{` to the end of the pattern, escaped
+    /// and cut like every other value (§18); a pattern is a URL path, never a
+    /// value that could be a credential (§17.1).
+    #[error(
+        "{}the parameter `{}` is not closed; write `{{id:int}}`",
+        prefix(*at),
+        clipped(parameter)
+    )]
+    PatternParameterUnclosed {
+        /// Where the pattern is.
+        at: Position,
+        /// The text from the `{` to the end of the pattern.
+        parameter: String,
+    },
+    /// `{}` in a pattern, which names nothing (§8.3).
+    #[error(
+        "{}`{{}}` has no name; write `{{id}}`, `{{id:int}}` or `{{id:uuid}}`",
+        prefix(*at)
+    )]
+    PatternParameterUnnamed {
+        /// Where the pattern is.
+        at: Position,
+    },
+    /// A parameter name outside `[a-z][a-z0-9_]*` (§8.3).
+    ///
+    /// `parameter` is the whole `{…}` as written, so the fix is visible.
+    #[error(
+        "{}`{{{}}}` is not a parameter name; names start with a lower-case letter and are `[a-z][a-z0-9_]*`",
+        prefix(*at),
+        clipped(parameter)
+    )]
+    PatternParameterName {
+        /// Where the pattern is.
+        at: Position,
+        /// The parameter as written, without its braces.
+        parameter: String,
+    },
+    /// A parameter type that is not `int` or `uuid` (§8.3).
+    #[error(
+        "{}`{{{}}}` is not a pattern type; the types are `int` and `uuid`",
+        prefix(*at),
+        clipped(parameter)
+    )]
+    PatternParameterType {
+        /// Where the pattern is.
+        at: Position,
+        /// The parameter as written, without its braces.
+        parameter: String,
+    },
+    /// A `*` that is not the last byte of a pattern after a `/` (§8.2, §8.3).
+    #[error(
+        "{}`*` is only valid at the end of a pattern; write `/x/*`",
+        prefix(*at)
+    )]
+    PatternStarPosition {
+        /// Where the pattern is.
+        at: Position,
+    },
+    /// One parameter name used twice in one pattern (§8.3).
+    #[error(
+        "{}the parameter `{{{}}}` appears twice; a pattern names each parameter once",
+        prefix(*at),
+        clipped(name)
+    )]
+    PatternParameterDuplicate {
+        /// Where the pattern is.
+        at: Position,
+        /// The parameter's name, without its braces.
+        name: String,
+    },
+    /// A pattern that does not start with `/` (§8.3).
+    #[error("{}a pattern starts with `/`: write `/x`", prefix(*at))]
+    PatternNotAnchored {
+        /// Where the pattern is.
+        at: Position,
+    },
+    /// A pattern over §4.5's 256-byte cap, in either spelling.
+    #[error("{}a pattern holds at most 256 bytes", prefix(*at))]
+    PatternTooLong {
+        /// Where the pattern is.
+        at: Position,
+    },
+    /// A `regex '…'` pattern the `regex` crate refuses (§8.3, §17.4).
+    ///
+    /// `message` is the crate's own sentence, escaped and on one line, so the
+    /// developer reads the compiler's answer rather than a paraphrase.
+    #[error(
+        "{}regex `{}` does not compile: {}",
+        prefix(*at),
+        clipped(pattern),
+        message
+    )]
+    PatternRegex {
+        /// Where the pattern is.
+        at: Position,
+        /// The pattern as written.
+        pattern: String,
+        /// The `regex` crate's message, on one line.
+        message: String,
+    },
+    /// A method a view can never answer (§8.4).
+    ///
+    /// `CONNECT` and `TRACE` cannot reach a view: blastit answers `GET`/`HEAD`
+    /// static files and forwards only the methods a view declares.
+    #[error(
+        "{}`{}` cannot reach a view; Blastit answers `GET`/`HEAD` static files and forwards the methods you declare",
+        prefix(*at),
+        clipped(method)
+    )]
+    MethodCannotReachView {
+        /// Where the method is.
+        at: Position,
+        /// The method as written.
+        method: String,
+    },
     /// A token the grammar cannot use where it stands.
     ///
     /// §6.7 pins a sentence for every *word* a developer is likely to write in

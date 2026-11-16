@@ -9,6 +9,7 @@ depends_on: [MB.21.3.3]
 paths:
   - "crates/blastit-manifest/src/blastfile/**"
   - "crates/blastit-manifest/src/model.rs"
+  - "crates/blastit-manifest/src/error.rs"
   - "crates/blastit-manifest/tests/blastfile_grants.rs"
   - "crates/blastit-manifest/tests/blastfile_traits.rs"
   - "crates/blastit-manifest/tests/blastfile_body.rs"
@@ -30,7 +31,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T02:16"
-updated: "2026-11-16T03:35"
+updated: "2026-11-16T05:02"
 ---
 
 # Goal

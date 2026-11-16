@@ -129,3 +129,11 @@ MB.21.3.2 (design gap, implemented and reported): §6.7 pins a sentence for ever
 
 **Answer:**
 
+## H-013 [open] (node MB.21.3.3)
+
+- asked: 2026-11-16T04:51 by implementer
+
+MB.21.3.3 needs one path added: crates/blastit-manifest/src/error.rs. The node's paths are blastfile/**, model.rs and routing.rs, but §8.3's nine pattern rows and §8.4's CONNECT/TRACE row are ManifestError variants and §18 puts them in error.rs — every sibling leaf (3.0, 3.1, 3.2, 3.7) lists it. Without it pattern.rs cannot raise a refusal and the parser hook cannot be wired, so acceptance items 1/3/5 cannot be met. pattern.rs is landed and green with a pub(crate) Refusal seam that renders exactly §18's '<line>:<col>: <message>'; the ten variants (PatternParameterUnclosed, PatternParameterUnnamed, PatternParameterName, PatternParameterType, PatternStarPosition, PatternParameterDuplicate, PatternNotAnchored, PatternTooLong, PatternRegex, MethodCannotReachView) are listed with their exact #[error] strings in plan/nodes/MB/MB.21/MB.21.3/MB.21.3.3/RESULT.md, ready to paste. Please widen the paths and re-dispatch (or tell the lead to).
+
+**Answer:**
+

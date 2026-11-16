@@ -18,6 +18,11 @@
 //! `line:col`, and the two budgets that bound the tree (`MAX_BLOCK_DEPTH`,
 //! `MAX_LIST_ITEMS`) are checked where §4.5 puts them.
 //!
+//! `pattern` is the one compiler from a path pattern to the regex the
+//! scheduler matches (§8.1) and the one method normalisation lowering applies
+//! before a `Route` exists (§8.4), so `HEAD` is implied by `GET` once, at
+//! lower time, and request matching itself does not change.
+//!
 //! Nothing here reads the environment, and nothing resolves a `$IDENT`: a name
 //! is a name, and its value is the builder's business (§17.2, R20/R24).
 
@@ -37,6 +42,7 @@
 
 mod lexer;
 mod parser;
+mod pattern;
 mod syntax;
 mod tokens;
 

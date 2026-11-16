@@ -27,3 +27,7 @@ Confirmed H-012 catch-all syntax-error sentence from MB.21.3.2: "<l>:<c>: expect
 ## 2026-11-16T04:27 [conductor]
 
 Note (exact wording for H-012): "<l>:<c>: expected <what the grammar allows>, found <token class | `word` | `$NAME` | punctuation>" — string literals named by class so credentials are never echoed.
+
+## 2026-11-16T05:02 [lead]
+
+edited fields

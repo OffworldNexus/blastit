@@ -13,8 +13,10 @@
 //! kinds are exactly §6.4's list. The accessors return node ids, never a
 //! parallel struct, so the tree `lower` reads is the tree `print` writes.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
+use super::pattern::Compiled;
 use super::tokens::{Token, TokenKind, Trivia};
 
 /// An index into [`Cst`]'s element arena.
@@ -113,6 +115,11 @@ pub(crate) struct Cst {
     trivia: Vec<Trivia>,
     /// The `File` node.
     root: NodeId,
+    /// The compiled form of every `pattern`, by its token (§8.1).
+    ///
+    /// A pattern is compiled while it is parsed, so a bad one is refused at its
+    /// own `line:col` and `lower` reads the fragment instead of recompiling it.
+    patterns: BTreeMap<TokenId, Compiled>,
     /// The source the spans index.
     text: String,
 }
@@ -277,6 +284,21 @@ impl Cst {
         self.tokens.get(token as usize).map(|token| token.kind)
     }
 
+    /// The compiled form of the `pattern` node `node` (§8.1).
+    ///
+    /// `None` when `node` is not a pattern node. The fragment is what a
+    /// `Route.path` entry holds; the text is the value it was compiled from,
+    /// decoded for `"…"` (§5.1), so a reader never re-decodes or recompiles.
+    pub(crate) fn pattern(&self, node: NodeId) -> Option<&Compiled> {
+        let token = self.child_tokens(node).find(|token| {
+            matches!(
+                self.token_kind(*token),
+                Some(TokenKind::Str | TokenKind::RawStr)
+            )
+        })?;
+        self.patterns.get(&token)
+    }
+
     /// The source text a token spans.
     pub(crate) fn token_text(&self, token: TokenId) -> &str {
         self.tokens
@@ -432,7 +454,13 @@ impl Builder {
     }
 
     /// Seals the tree: one contiguous child run per node, then the tables.
-    pub(crate) fn build(self, tokens: Vec<Token>, trivia: Vec<Trivia>, text: &str) -> Cst {
+    pub(crate) fn build(
+        self,
+        tokens: Vec<Token>,
+        trivia: Vec<Trivia>,
+        patterns: BTreeMap<TokenId, Compiled>,
+        text: &str,
+    ) -> Cst {
         // Where each node's child run starts. Element 0 is the root itself, so
         // the first run starts at 1.
         let mut runs = Vec::with_capacity(self.nodes.len());
@@ -475,6 +503,7 @@ impl Builder {
             tokens,
             trivia,
             root: 0,
+            patterns,
             text: text.to_owned(),
         }
     }

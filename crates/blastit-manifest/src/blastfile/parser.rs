@@ -13,15 +13,18 @@
 //! (`MAX_LIST_ITEMS`). The cursor is a slice iterator, not a hand-written
 //! index, so no scan can be frozen by a mutant (`LESSONS.md`, `MB.1.4`).
 //!
-//! Nothing here lowers into a `Manifest`: that is `MB.21.3.8`'s, and a parser
-//! that validated would let the two leaves disagree about which document is
-//! legal.
+//! Nothing here lowers into a `Manifest`: that is `MB.21.3.8`'s. The one value
+//! the parser does decide is a pattern's text, because §8.3's rows are refusals
+//! at the pattern's own `line:col` (§8.1) and only the parser sees which
+//! spelling was written. The compiled fragment is stored on the pattern's
+//! token, so `lower` reads it instead of compiling the text a second time.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::lexer::lex;
+use super::pattern::{self, Compiled};
 use super::syntax::{Builder, Cst, NodeKind, TokenId};
-use super::tokens::{Lexed, Token, TokenKind};
+use super::tokens::{Lexed, Token, TokenKind, raw_value, str_value};
 use super::{MAX_BLOCK_DEPTH, MAX_LIST_ITEMS, MAX_SOURCE_BYTES};
 use crate::error::{ManifestError, ManifestErrors, Position, clipped};
 
@@ -46,6 +49,23 @@ pub(crate) fn parse(text: &str) -> Result<Cst, ManifestErrors> {
     let mut parser = Parser::new(text, &lexed);
     parser.file().map_err(ManifestErrors::from)?;
     Ok(parser.into_cst(&lexed))
+}
+
+/// The byte offset of the start of every line, `0` first (§18's `line:col`).
+///
+/// One pass over the source, so a position is a binary search: the pattern hook
+/// asks for one per pattern, and a per-item scan from byte 0 is `O(n²)` on a
+/// generated file (`LESSONS.md`, `MB.21.3.2`).
+fn line_starts(text: &str) -> Vec<u32> {
+    let mut starts = Vec::new();
+    starts.push(0);
+    starts.extend(
+        text.bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b'\n')
+            .map(|(offset, _)| offset as u32 + 1),
+    );
+    starts
 }
 
 /// True for a `Word` the grammar reads as a `Method`: its first byte is `A`–`Z`
@@ -149,12 +169,17 @@ struct ViewState {
 struct Parser<'a> {
     /// The source, for token text and `line:col`.
     text: &'a str,
+    /// The byte offset of the start of every line, so a position is a binary
+    /// search instead of a scan from byte 0 (`LESSONS.md`, `MB.21.3.2`).
+    line_starts: Vec<u32>,
     /// Every token, so a token's index is its `TokenId`.
     tokens: &'a [Token],
     /// The tokens not yet consumed; `Eof` is the last one.
     rest: std::slice::Iter<'a, Token>,
     /// The arena being built.
     builder: Builder,
+    /// The compiled form of every `pattern`, by its token (§8.1).
+    patterns: BTreeMap<TokenId, Compiled>,
     /// How many blocks are open, for §4.5's `MAX_BLOCK_DEPTH`.
     depth: u32,
     /// Offset of the most recently opened block, for the stray-`}` sentence.
@@ -176,9 +201,11 @@ impl<'a> Parser<'a> {
     fn new(text: &'a str, lexed: &'a Lexed) -> Self {
         Self {
             text,
+            line_starts: line_starts(text),
             tokens: &lexed.tokens,
             rest: lexed.tokens.iter(),
             builder: Builder::new(),
+            patterns: BTreeMap::new(),
             depth: 0,
             last_block: None,
             app: None,
@@ -191,8 +218,12 @@ impl<'a> Parser<'a> {
 
     /// Seals the tree, copying the token and trivia tables into it (§5.2).
     fn into_cst(self, lexed: &Lexed) -> Cst {
-        self.builder
-            .build(lexed.tokens.clone(), lexed.trivia.clone(), self.text)
+        self.builder.build(
+            lexed.tokens.clone(),
+            lexed.trivia.clone(),
+            self.patterns,
+            self.text,
+        )
     }
 
     // ---- the cursor -----------------------------------------------------
@@ -236,15 +267,28 @@ impl<'a> Parser<'a> {
     }
 
     /// The position of a byte offset, 1-based, `col` in `char`s.
+    ///
+    /// The line is a binary search over [`line_starts`], so this is `O(log n)`
+    /// rather than a scan from byte 0: the pattern hook calls it once per
+    /// pattern, and a scan per item is `O(n²)` on a generated file
+    /// (`LESSONS.md`, `MB.21.3.2`).
     fn position_of(&self, offset: u32) -> Position {
         let end = (offset as usize).min(self.text.len());
-        let before = self.text.get(..end).unwrap_or("");
-        let line = before.bytes().filter(|byte| *byte == b'\n').count() as u32 + 1;
-        let col = before
-            .rsplit('\n')
-            .next()
+        // The number of line starts at or before `end` is the 1-based line.
+        let line = self
+            .line_starts
+            .partition_point(|start| *start as usize <= end)
+            .max(1);
+        let start = self
+            .line_starts
+            .get(line.saturating_sub(1))
+            .copied()
+            .unwrap_or(0);
+        let col = self
+            .text
+            .get(start as usize..end)
             .map_or(1, |tail| tail.chars().count() as u32 + 1);
-        Position::at(line, col)
+        Position::at(line as u32, col)
     }
 
     /// The line of a byte offset.
@@ -575,14 +619,30 @@ impl<'a> Parser<'a> {
     }
 
     /// One `pattern`: a `"…"` string, or `regex` and a `'…'` string.
+    ///
+    /// The pattern is compiled here, at its own position, so §8.3's rows and
+    /// the `regex` crate's own message are parse refusals with a `line:col`
+    /// (§8.1: both spellings are capped at `MAX_PATTERN_BYTES` "in the parser").
+    /// The fragment it emits is stored in the tree, keyed by the pattern's
+    /// token, so `lower` reads it instead of compiling the text a second time.
     fn pattern(&mut self) -> Result<TokenId, ManifestError> {
         self.builder.start(NodeKind::Pattern);
-        let token = match self.peek() {
-            TokenKind::Str => self.bump()?,
+        let (token, compiled) = match self.peek() {
+            TokenKind::Str => {
+                let at = self.at();
+                let token = self.bump()?;
+                let text = str_value(self.token_text(token));
+                (token, pattern::compile(&text, at)?)
+            }
             TokenKind::Word if self.peek_word() == Some("regex") => {
                 self.bump()?;
                 match self.peek() {
-                    TokenKind::RawStr => self.bump()?,
+                    TokenKind::RawStr => {
+                        let at = self.at();
+                        let token = self.bump()?;
+                        let text = raw_value(self.token_text(token));
+                        (token, pattern::compile_regex(text, at)?)
+                    }
                     TokenKind::Str => {
                         return Err(ManifestError::RegexNeedsRawString { at: self.at() });
                     }
@@ -591,6 +651,7 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(self.unexpected("a pattern")),
         };
+        self.patterns.insert(token, compiled);
         self.builder.finish();
         Ok(token)
     }
@@ -1602,6 +1663,112 @@ mod tests {
         assert_eq!(patterns.len(), 2);
         assert_eq!(cst.node_text(patterns[0]), "\"/a\"");
         assert_eq!(cst.node_text(patterns[1]), "regex '/v[0-9]+/items'");
+    }
+
+    /// The hook compiles each pattern as it is parsed and stores the result on
+    /// the pattern's own token, so `lower` reads the fragment instead of
+    /// compiling the text again (§8.1).
+    #[test]
+    fn a_pattern_is_compiled_while_it_is_parsed() {
+        let cst =
+            parsed("view v \"/products/{id:int}\", regex '/v[0-9]+/items' {\n    body none\n}\n");
+        let view = cst.views().next().expect("a view");
+        let header = cst
+            .first_of_kind(view, NodeKind::ViewHeader)
+            .expect("a header");
+        let compiled: Vec<_> = cst
+            .patterns(header)
+            .map(|pattern| cst.pattern(pattern).expect("the pattern is compiled"))
+            .collect();
+        assert_eq!(compiled.len(), 2);
+        // The quoted form: the value is decoded, the fragment is §8.1's row.
+        assert_eq!(compiled[0].text(), "/products/{id:int}");
+        assert_eq!(compiled[0].fragment(), "/products/[0-9]+");
+        // The raw form: the text is verbatim, so the fragment is the same.
+        assert_eq!(compiled[1].text(), "/v[0-9]+/items");
+        assert_eq!(compiled[1].fragment(), "/v[0-9]+/items");
+        // A node that is not a pattern has no compiled form.
+        assert!(cst.pattern(view).is_none());
+    }
+
+    /// §5.1's escapes are decoded before a pattern is compiled, so a pattern
+    /// written with `\"` is the path with a quote in it.
+    #[test]
+    fn a_pattern_is_decoded_before_it_is_compiled() {
+        let cst = parsed("view v \"/a\\\"b\" {\n    body none\n}\n");
+        let view = cst.views().next().expect("a view");
+        let header = cst
+            .first_of_kind(view, NodeKind::ViewHeader)
+            .expect("a header");
+        let pattern = cst.patterns(header).next().expect("a pattern");
+        let compiled = cst.pattern(pattern).expect("the pattern is compiled");
+        assert_eq!(compiled.text(), "/a\"b");
+        assert_eq!(compiled.fragment(), "/a\"b");
+    }
+
+    /// §8.3's rows are parse refusals, at the pattern's own `line:col` — the
+    /// hook is what makes "a pattern holds at most 256 bytes" a parse error
+    /// rather than a lowering error (§8.1).
+    #[test]
+    fn a_bad_pattern_is_refused_where_it_is_written() {
+        for (text, message) in [
+            (
+                "view v \"/x/{id:int\" {\n    body none\n}\n",
+                "1:8: the parameter `{id:int` is not closed; write `{id:int}`",
+            ),
+            (
+                "view v \"/x/{}\" {\n    body none\n}\n",
+                "1:8: `{}` has no name; write `{id}`, `{id:int}` or `{id:uuid}`",
+            ),
+            (
+                "view v \"/x/{Id}\" {\n    body none\n}\n",
+                "1:8: `{Id}` is not a parameter name; names start with a lower-case letter and are `[a-z][a-z0-9_]*`",
+            ),
+            (
+                "view v \"/x/{id:str}\" {\n    body none\n}\n",
+                "1:8: `{id:str}` is not a pattern type; the types are `int` and `uuid`",
+            ),
+            (
+                "view v \"/x/*/y\" {\n    body none\n}\n",
+                "1:8: `*` is only valid at the end of a pattern; write `/x/*`",
+            ),
+            (
+                "view v \"/x/{a}/{a:int}\" {\n    body none\n}\n",
+                "1:8: the parameter `{a}` appears twice; a pattern names each parameter once",
+            ),
+            (
+                "view v \"x\" {\n    body none\n}\n",
+                "1:8: a pattern starts with `/`: write `/x`",
+            ),
+            (
+                "view v regex '/a(?=b)' {\n    body none\n}\n",
+                "1:14: regex `/a(?=b)` does not compile: ",
+            ),
+        ] {
+            let rendered = refusal(text);
+            assert!(
+                rendered.starts_with(message),
+                "{text:?} -> {rendered:?} (expected {message:?})"
+            );
+        }
+    }
+
+    /// The second pattern of a header is refused at its own position, not at
+    /// the header's, and the cap is the parser's (§4.5, §8.1).
+    #[test]
+    fn a_bad_second_pattern_names_its_own_position() {
+        assert_eq!(
+            refusal("view v \"/a\", \"x\" {\n    body none\n}\n"),
+            "1:14: a pattern starts with `/`: write `/x`"
+        );
+        let over = format!("view v \"/{}\" {{\n    body none\n}}\n", "a".repeat(256));
+        assert_eq!(refusal(&over), "1:8: a pattern holds at most 256 bytes");
+        // The raw form is capped at the same 256 bytes.
+        let raw = format!(
+            "view v regex '/{}' {{\n    body none\n}}\n",
+            "a".repeat(256)
+        );
+        assert_eq!(refusal(&raw), "1:14: a pattern holds at most 256 bytes");
     }
 
     #[test]

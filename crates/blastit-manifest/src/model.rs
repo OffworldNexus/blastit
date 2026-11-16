@@ -508,7 +508,12 @@ impl Route {
 
     /// The methods this route answers, if it restricts them.
     ///
-    /// `None` means any method. `HEAD` is never implied by `GET`.
+    /// `None` means any method the front end lets through — not any byte
+    /// string (§8.4).
+    ///
+    /// A `Blastfile` view that declares `GET` answers `HEAD` too. Lowering
+    /// normalises the list before the route exists, so `HEAD` is already in
+    /// this list and request matching itself compares exact strings (§8.4).
     pub fn methods(&self) -> Option<&[String]> {
         self.methods.as_deref()
     }

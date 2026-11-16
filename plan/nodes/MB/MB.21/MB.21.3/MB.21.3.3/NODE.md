@@ -2,7 +2,7 @@
 id: MB.21.3.3
 title: Compile Blastfile path patterns and normalise HEAD from GET for lowering
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.3.2]
@@ -11,11 +11,12 @@ paths:
   - "crates/blastit-manifest/src/blastfile/pattern.rs"
   - "crates/blastit-manifest/src/model.rs"
   - "crates/blastit-manifest/src/routing.rs"
-attempts: 0
+  - "crates/blastit-manifest/src/error.rs"
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T03:36"
+updated: "2026-11-16T05:19"
 ---
 
 # Goal
@@ -71,8 +72,11 @@ $ make check
    error, never a panic.
 4. `make check` exit 0.
 5. Files: `src/blastfile/pattern.rs`, the parser hook that stores patterns and normalised methods,
-   `src/model.rs` doc-comment update, and in-module tests only (≤ 4 files, ≤ 450 changed lines). No
-   `lower.rs`, no new public item beyond what `MB.21.3.8` will consume.
+   `src/blastfile/tokens.rs` (`str_value`/`raw_value`), `src/error.rs`'s variants, the two doc-comment
+   updates (`model.rs`, `routing.rs`), and in-module tests only — 8 files, ~1 300 lines, of which ~530
+   are the §8.1/§8.3/§8.4 tables the acceptance demands (lead-authorised after attempt 1's blocked
+   report added `error.rs` and moved the decoder here). No `lower.rs`, no new public item beyond what
+   `MB.21.3.8` will consume.
 
 # Notes
 

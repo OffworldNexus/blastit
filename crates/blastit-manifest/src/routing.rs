@@ -100,8 +100,12 @@ impl RoutingTable {
     /// whose methods (when it lists them) and whose first matching pattern
     /// accept it wins (§6).
     ///
-    /// A route that lists methods answers exactly those; `HEAD` is not implied
-    /// by `GET`.
+    /// A route that lists methods answers exactly those, compared as exact
+    /// strings; `HEAD` is not implied by `GET` **here**. The implication
+    /// happened at lower time (§8.4): a `Blastfile` view that declares `GET`
+    /// arrives with `["GET", "HEAD"]` already in its list, so this table
+    /// answers both without a second rule and the matching order does not
+    /// change.
     ///
     /// # Examples
     ///
