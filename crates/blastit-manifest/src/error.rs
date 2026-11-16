@@ -125,13 +125,12 @@ pub(crate) fn regex_message(error: &regex::Error) -> String {
 pub enum Location {
     /// The top-level `groups` list, which attaches a group to every route.
     Global,
-    /// A `[group.<name>]` section, which a `Blastfile` spells `trait
-    /// <name> { … }` (§11).
+    /// A group, which a `Blastfile` spells `trait <name> { … }` (§11).
     ///
-    /// The retired reader still produces it; both documents name the same node,
-    /// so it renders `trait "<name>"` — the noun a developer edits (§11.3).
+    /// The model keeps the section's old name; it renders `trait "<name>"` —
+    /// the noun a developer edits (§11.3).
     Group(String),
-    /// A `[[route]]` entry, by index and by name.
+    /// A route, by index and by name.
     Route {
         /// Index of the route in the manifest.
         index: usize,
@@ -145,10 +144,9 @@ pub enum Location {
         /// The prefix as written.
         prefix: String,
     },
-    /// A `trait` section, by name (§11.3).
+    /// A `Blastfile` trait, by name (§11.3).
     ///
-    /// A `Blastfile` trait is the retired format's `[group.<name>]`, and a
-    /// grant it names that nothing declares is reported against the trait.
+    /// It renders `trait "<name>"` — the noun a developer edits (§11.3).
     Trait(String),
     /// A `view`, by sandbox index and by name (§7.3, §10.3).
     ///
@@ -184,49 +182,16 @@ impl fmt::Display for Location {
 
 /// One problem with a manifest.
 ///
-/// Parsing reports the structural ones ([`ManifestError::Syntax`],
-/// [`ManifestError::UnknownKey`], [`ManifestError::WrongType`]…); validation
-/// reports the ones that need the whole document
-/// ([`ManifestError::UnknownGroup`], [`ManifestError::InvalidRegex`]…).
+/// Reading a `Blastfile` reports the structural ones
+/// ([`ManifestError::Equals`], [`ManifestError::UnknownKeyword`],
+/// [`ManifestError::Unexpected`]…); validation reports the ones that need the
+/// whole document ([`ManifestError::UnknownGroup`],
+/// [`ManifestError::InvalidRegex`]…).
 ///
 /// [`Display`](fmt::Display) always renders one line, whatever the manifest
 /// contains.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ManifestError {
-    /// The source is not valid TOML.
-    #[error("invalid TOML: {message}")]
-    Syntax {
-        /// The parser's message, with the line and column when known.
-        message: String,
-    },
-    /// `version` is absent; a manifest must declare `version = 1` (§6).
-    #[error("version: missing `version = 1`")]
-    MissingVersion,
-    /// `version` is present but is not `1`.
-    #[error("version: expected 1, found {found}")]
-    UnsupportedVersion {
-        /// The offending value, rendered as TOML.
-        found: String,
-    },
-    /// A key that is not part of the schema. The manifest is strict, so this is
-    /// an error rather than a comment.
-    #[error("{path}: unknown key")]
-    UnknownKey {
-        /// Dotted path of the offending key.
-        path: String,
-    },
-    /// A top-level key written after the first `[table]`, where TOML would
-    /// silently attach it to that table instead (`R8`, `ADR-0002`).
-    ///
-    /// `version`, `app` and `preload` are top-level only, and so is `groups`
-    /// outside a `[[route]]` element. The message names the key and the fix,
-    /// because the TOML error a reader would otherwise see points at a line
-    /// that looks perfectly fine.
-    #[error("{key} after a [table] is not top-level; move it above the first table")]
-    NotTopLevel {
-        /// The misplaced key, escaped.
-        key: String,
-    },
     /// Top-level `app` is not a `module:attribute` WSGI callable (`R7`).
     ///
     /// The value is **never** printed (§18): a pasted `$TOKEN` or DSN can sit
@@ -238,62 +203,6 @@ pub enum ManifestError {
         /// The value as written; compared, never rendered.
         app: String,
     },
-    /// A `[route.ingress]` `body` names a codec this build does not have
-    /// (`R11`).
-    #[error(
-        "{path}: expected \"json\", \"form\", \"none\" or \"raw\", found {}",
-        quoted(.found)
-    )]
-    UnknownBodyCodec {
-        /// Dotted path of the offending value.
-        path: String,
-        /// The codec name as written.
-        found: String,
-    },
-    /// A key of a `[route.db.tables.<table>]` entry that is not one of the four
-    /// operations (§6, D7).
-    #[error("{path}: unknown operation; expected select, insert, update or delete")]
-    UnknownTableOperation {
-        /// Dotted path of the offending key.
-        path: String,
-    },
-    /// A `"*"` inside a column list: the whole table is the string form
-    /// (`select = "*"`), so a list holding one is ambiguous (§6, D7).
-    #[error("{path}: \"*\" is not a column name; write select = \"*\" for every column")]
-    StarredColumn {
-        /// Dotted path of the offending list.
-        path: String,
-    },
-    /// A required key is absent.
-    #[error("{path}: missing required key")]
-    MissingKey {
-        /// Dotted path of the missing key.
-        path: String,
-    },
-    /// A value has the wrong TOML type.
-    #[error("{path}: expected {expected}, found {found}")]
-    WrongType {
-        /// Dotted path of the offending value.
-        path: String,
-        /// What the schema expects there.
-        expected: &'static str,
-        /// The TOML type that is actually there.
-        found: &'static str,
-    },
-    /// A name that must not be empty is empty.
-    #[error("{path}: must not be empty")]
-    Empty {
-        /// Dotted path of the offending value, or a description of the name.
-        path: String,
-    },
-    /// `protocol` names something this build does not have (§5.1).
-    #[error("proxy {}: unknown protocol {} (known: \"postgresql\")", quoted(.proxy), quoted(.protocol))]
-    UnknownProtocol {
-        /// The proxy being declared.
-        proxy: String,
-        /// The protocol the manifest asked for.
-        protocol: String,
-    },
     /// A group is referenced where it was never declared (§6).
     #[error("{location}: unknown group {}", quoted(.group))]
     UnknownGroup {
@@ -302,7 +211,7 @@ pub enum ManifestError {
         /// The undeclared group name.
         group: String,
     },
-    /// A grant names a proxy that has no `[proxy.<name>]` section (§5.1, §6).
+    /// A grant names a store that no `postgres <name>` declares (§5.1, §6).
     #[error("{location}: grant on unknown proxy {}", quoted(.proxy))]
     GrantOnUnknownProxy {
         /// Where the grant is written.

@@ -2,7 +2,7 @@
 id: MB.21.4.5.6
 title: "Delete the reader, the retired patcher and the model surface they filled, and drop the toml dependency - alone"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.5.1, MB.21.4.5.2, MB.21.4.5.3, MB.21.4.5.4, MB.21.4.5.5]
@@ -14,14 +14,15 @@ paths:
   - "crates/blastit-manifest/src/error.rs"
   - "crates/blastit-manifest/src/validate.rs"
   - "crates/blastit-manifest/src/blastfile/mod.rs"
+  - "crates/blastit-manifest/tests/mutation_gaps.rs"
   - "crates/blastit-manifest/Cargo.toml"
   - Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-16T16:58"
-updated: "2026-11-16T16:58"
+updated: "2026-11-16T19:00"
 ---
 
 # Goal

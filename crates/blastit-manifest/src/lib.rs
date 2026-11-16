@@ -3,10 +3,10 @@
 //!
 //! The manifest is blastit's own routing table and capability list: which
 //! requests go to which view process, and what each view may do. This crate
-//! turns one TOML document into a typed [`Manifest`]:
+//! turns one `Blastfile` document into a typed [`Manifest`]:
 //!
-//! * [`Manifest::from_toml_str`] parses it strictly — an unknown key is an
-//!   error, not a comment;
+//! * [`Manifest::from_blastfile_str`] is the one reader: it parses and lowers
+//!   the file, and an unknown keyword is an error, not a comment;
 //! * [`Manifest::validate`] checks what needs the whole document (unknown
 //!   groups, grants on unknown proxies, duplicate route names, path regexes,
 //!   method tokens, the uid range, a `module:attribute` `app`, and a
@@ -17,10 +17,11 @@
 //!   the request-body codec a route declared, [`Manifest::mounts`] the static
 //!   mounts a file serves, and [`Manifest::php`] the one front controller an
 //!   embedded `libphp` worker runs;
-//! * [`Route::static_policy`] and [`Route::php`] are the retired reader's
-//!   per-route blocks: it fills them *and* [`Manifest::mounts`]/[`Manifest::php`]
-//!   from the same document, so today's runtime reads one answer either way.
-//!   The per-route pair is deleted with that reader;
+//! * [`Route::static_policy`] and [`Route::php`] are the retired per-route
+//!   blocks: no `Blastfile` can set either (a static site is a top-level
+//!   `static` mount and PHP is one `entrypoint php`), and they stay in the
+//!   model until the two pages that still describe them are rewritten
+//!   (`MB.21.5.1`);
 //! * [`Manifest::is_all_static`], [`Manifest::static_roots`] and
 //!   [`Manifest::check_static_roots`] answer the app-less static site: no `app`
 //!   is needed when a `static` mount answers every request and no view or
@@ -46,19 +47,16 @@
 //! ```
 //! use blastit_manifest::{Manifest, Match, RoutingTable};
 //!
-//! let manifest = Manifest::from_toml_str(
+//! let manifest = Manifest::from_blastfile_str(
 //!     r#"
-//!     version = 1
+//!     postgres $DATABASE_URL
 //!
-//!     [proxy.db]
-//!     protocol = "postgresql"
-//!     input = { url = "DATABASE_URL" }
-//!
-//!     [[route]]
-//!     name = "about"
-//!     path = ['/about/']
-//!     [route.db]
-//!     queries = ['SELECT "cms_page"."body" FROM "cms_page" WHERE "cms_page"."slug" = $1']
+//!     view about {
+//!         GET "/about/"
+//!         postgres {
+//!             query 'SELECT "cms_page"."body" FROM "cms_page" WHERE "cms_page"."slug" = $1'
+//!         }
+//!     }
 //!     "#,
 //! )
 //! # .unwrap()
@@ -69,9 +67,8 @@
 //! assert_eq!(table.route("GET", "/about/"), Some(Match { route: 0, rule: 0 }));
 //! assert_eq!(table.route("GET", "/elsewhere"), None);
 //!
-//! // The model carries the Blastfile fields beside the per-route blocks the
-//! // retired reader still fills: this document declares neither a mount nor a
-//! // front controller, and it has no application name.
+//! // This document declares no mount and no front controller, and it has no
+//! // application name.
 //! assert!(manifest.mounts().is_empty());
 //! assert!(manifest.php().is_none());
 //! assert_eq!(manifest.name(), None);
@@ -89,8 +86,8 @@
 //! assert_eq!(Executor::ALL_KINDS, ["wsgi", "php"].as_slice());
 //! ```
 //!
-//! `[route.fastcgi]` is retired: a manifest that writes it is refused like any
-//! other unknown route key (`ADR-0010` §1: embedded PHP only, no fallback), and
+//! `fastcgi` is not a keyword: a `Blastfile` that writes it is refused like any
+//! other unknown keyword (`ADR-0010` §1: embedded PHP only, no fallback), and
 //! `php` is the embedded worker ([`PhpPolicy`]), not the retired pool.
 //!
 //! [`blastfile::read`] is the one reader of a `Blastfile`: a regular file of at
@@ -101,7 +98,6 @@
 
 mod error;
 mod model;
-mod parse;
 mod routing;
 mod uid;
 mod validate;

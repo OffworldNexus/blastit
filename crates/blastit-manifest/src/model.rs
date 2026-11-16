@@ -11,7 +11,6 @@ use blastit_ingress::IngressPolicy;
 use blastit_sqlpolicy::{Allowlist, TableGrants};
 
 use crate::error::{Location, ManifestError, ManifestErrors, ManifestWarning};
-use crate::parse;
 use crate::validate;
 
 /// Name of a proxy declared as `[proxy.<name>]`.
@@ -113,9 +112,9 @@ pub struct Proxy {
 impl Proxy {
     /// Builds a proxy declaration.
     ///
-    /// `#[doc(hidden)]`: `lower` and the retired reader are the only production
-    /// builders, and the crate's integration tests need it to build the
-    /// expected model of the §20 R8 parity oracle field by field.
+    /// `#[doc(hidden)]`: `lower` is the only production builder, and the
+    /// crate's integration tests need it to build the expected model of the
+    /// §20 R8 parity oracle field by field.
     #[doc(hidden)]
     pub fn new(
         name: ProxyName,
@@ -315,7 +314,7 @@ impl Grant {
 /// has to parse on a machine that has not run the build yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaticPolicy {
-    /// The directory served, relative to the directory holding `blastit.toml`.
+    /// The directory served, relative to the directory holding the `Blastfile`.
     pub root: String,
     /// The file a directory answers with, relative to `root`. `index.html`
     /// unless the manifest says otherwise.
@@ -361,8 +360,8 @@ pub struct StaticMount {
 /// the optional `workers` cap).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhpPolicy {
-    /// The front controller, relative to the directory holding `blastit.toml`
-    /// (beneath `[route.static] root` when both blocks are declared).
+    /// The front controller, relative to the manifest's own directory (beneath
+    /// a `static` mount's `root` when both are declared).
     pub entry: String,
     /// An optional **cap** on the route's derived concurrency, or `None` to let
     /// blastit use the route's per-view budget unchanged.
@@ -424,7 +423,7 @@ pub enum BodyOwner {
     Endpoint,
 }
 
-/// A `[[route]]` entry: one sandbox, one process, one uid (§6).
+/// One route of a `view`: one sandbox, one process, one uid (§6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
     name: String,
@@ -449,9 +448,9 @@ impl Route {
     /// route must chain it, or the rebuilt route claims a different sandbox
     /// than the one it was copied from.
     ///
-    /// `#[doc(hidden)]`: `lower` and the retired reader are the only production
-    /// builders, and the crate's integration tests need it to build the
-    /// expected model of the §20 R8 parity oracle field by field.
+    /// `#[doc(hidden)]`: `lower` is the only production builder, and the
+    /// crate's integration tests need it to build the expected model of the
+    /// §20 R8 parity oracle field by field.
     #[doc(hidden)]
     pub fn new(
         name: String,
@@ -512,20 +511,22 @@ impl Route {
         self
     }
 
-    /// The same route with its `[route.static]` block, if it declared one
-    /// (`R1`). Parsing sets it, and so must any rebuild of an existing route:
-    /// `edit.rs`'s `expected_routes` chains it for every route it patches, so
-    /// a block the writer cannot reproduce fails the postcondition instead of
-    /// vanishing (`MB.3.21`).
+    /// The same route with its retired `[route.static]`-shaped block (`R1`).
+    ///
+    /// No `Blastfile` can set it: a static site is a top-level `static` mount.
+    /// It stays in the model, and in `check_static`'s coverage, until the
+    /// per-route pair is removed with `MB.21.5.1`.
     pub(crate) fn with_static(mut self, static_policy: Option<StaticPolicy>) -> Self {
         self.static_policy = static_policy;
         self
     }
 
-    /// The same route with its `[route.php]` block, if it declared one
-    /// (`ADR-0010` §2). Parsing sets it, and so must any rebuild of an
-    /// existing route: `edit.rs`'s `expected_routes` chains it for every route
-    /// it patches (`MB.3.21`).
+    /// The same route with its retired `[route.php]`-shaped block (`ADR-0010`
+    /// §2).
+    ///
+    /// No `Blastfile` can set it: PHP is one `entrypoint php` for every view.
+    /// It stays in the model until the per-route pair is removed with
+    /// `MB.21.5.1`.
     pub(crate) fn with_php(mut self, php: Option<PhpPolicy>) -> Self {
         self.php = php;
         self
@@ -657,9 +658,9 @@ pub struct Group {
 impl Group {
     /// Builds a group. Parsing is the only intended constructor.
     ///
-    /// `#[doc(hidden)]`: `lower` and the retired reader are the only production
-    /// builders, and the crate's integration tests need it to build the
-    /// expected model of the §20 R8 parity oracle field by field.
+    /// `#[doc(hidden)]`: `lower` is the only production builder, and the
+    /// crate's integration tests need it to build the expected model of the
+    /// §20 R8 parity oracle field by field.
     #[doc(hidden)]
     pub fn new(name: String, grants: BTreeMap<ProxyName, Grant>) -> Self {
         Self { name, grants }
@@ -726,30 +727,6 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Parses a manifest document strictly: an unknown key is an error, not a
-    /// comment (§6).
-    ///
-    /// Only structural problems are reported here. The checks that need the
-    /// whole document — unknown groups, grants on unknown proxies, duplicate
-    /// route names, path regexes, method tokens and the uid range — live in
-    /// [`Manifest::validate`], and [`Manifest::parse_and_validate`] runs both.
-    pub fn from_toml_str(source: &str) -> Result<Self, ManifestErrors> {
-        parse::parse(source)
-    }
-
-    /// Parses and validates in one step, on the given uid base (§2).
-    ///
-    /// Returns the manifest together with its warnings. Only the parse errors
-    /// can be reported when parsing fails, because validation needs a manifest.
-    pub fn parse_and_validate(
-        source: &str,
-        base: u32,
-    ) -> Result<(Self, Vec<ManifestWarning>), ManifestErrors> {
-        let manifest = Self::from_toml_str(source)?;
-        let warnings = manifest.validate(base)?;
-        Ok((manifest, warnings))
-    }
-
     /// Checks everything that needs the whole document, on the given uid base
     /// (§6), and returns the non-fatal warnings.
     pub fn validate(&self, base: u32) -> Result<Vec<ManifestWarning>, ManifestErrors> {
@@ -841,8 +818,8 @@ impl Manifest {
         self.groups.get(name)
     }
 
-    /// The `[[route]]` entries, in manifest order — which is matching order
-    /// (§6).
+    /// The routes the `view` entries lowered to, in manifest order — which is
+    /// matching order (§6).
     pub fn routes(&self) -> &[Route] {
         &self.routes
     }
@@ -881,10 +858,9 @@ impl Manifest {
     ///
     /// A `Blastfile`'s mounts are the file's, so a static-only file is mounts and
     /// **no views**, and the `routes.is_empty()` arm below is the whole answer
-    /// for it. The `route.static_policy()` arm is the retired reader's
-    /// compatibility path — that reader lowers a static route to both a route
-    /// and a mount, so its shape has routes where a `Blastfile` has none — and it
-    /// goes with that reader in `MB.21.4.5`. It is **not** a second definition:
+    /// for it. The `route.static_policy()` arm is the retired per-route block's
+    /// compatibility path — no `Blastfile` can reach it, and it goes with the
+    /// per-route pair in `MB.21.5.1`. It is **not** a second definition:
     /// a `Blastfile` never reaches it. `BLASTIT_APP` may still supply an app, so
     /// this is the manifest-level answer and the boot decides what to do with it.
     pub fn is_all_static(&self) -> bool {
@@ -910,10 +886,9 @@ impl Manifest {
     /// missing app, so a static mount and a front controller can ship together
     /// before the catch-all view exists.
     ///
-    /// The per-route arms are the retired reader's compatibility path (it lowers
-    /// `[route.php]`/`[route.static]` onto the routes themselves, so its
-    /// manifest-level `php` may mean "the first such route's entry"), and they go
-    /// with that reader in `MB.21.4.5`. A `Blastfile` never sets `route.php()` or
+    /// The per-route arms are the retired per-route blocks' compatibility path
+    /// (they are unreachable from a `Blastfile` and go with the pair in
+    /// `MB.21.5.1`). A `Blastfile` never sets `route.php()` or
     /// `route.static_policy()`, so for it this reduces to §9.5's two shapes. An
     /// empty manifest is not bootable without an app.
     pub fn can_boot_without_app(&self) -> bool {
@@ -933,11 +908,11 @@ impl Manifest {
             .all(|route| route.static_policy().is_some() || route.php().is_some())
     }
 
-    /// The one-based line of every `[[route]]` header, in routing order.
+    /// The one-based line of every `view` header, in routing order.
     ///
-    /// A boot error names the manifest line it came from, and the parsed
-    /// document no longer remembers where a route was written, so parsing keeps
-    /// the header lines beside the routes.
+    /// A boot error names the Blastfile line it came from, and the model no
+    /// longer remembers where a `view` was written, so the reader keeps the
+    /// header lines beside the routes.
     pub fn route_lines(&self) -> Vec<u32> {
         self.route_lines.clone()
     }
@@ -1098,8 +1073,8 @@ impl Manifest {
         self
     }
 
-    /// The same manifest with the lines its `[[route]]` headers were written
-    /// on; parsing is the only caller.
+    /// The same manifest with the lines its `view` headers were written on;
+    /// the reader is the only caller.
     pub(crate) fn with_route_lines(mut self, route_lines: Vec<u32>) -> Self {
         self.route_lines = route_lines;
         self
@@ -1340,82 +1315,105 @@ mod tests {
 
     /// `can_boot_without_app` accepts only a manifest whose every route has its
     /// own executor, and `is_all_static` the subset that declares no `app`.
+    ///
+    /// The per-route executors are built with the crate-private builders: no
+    /// `Blastfile` can set either one, and both leave the model with the
+    /// per-route pair in `MB.21.5.1` — but these predicates still read them.
     #[test]
     fn the_boot_predicates_read_every_routes_executor() {
-        fn parsed(source: &str) -> Manifest {
-            Manifest::from_toml_str(source).expect("the manifest parses")
+        fn manifest(routes: Vec<Route>) -> Manifest {
+            Manifest::assemble(
+                1,
+                Vec::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                routes,
+                Vec::new(),
+            )
         }
+        fn route(name: &str) -> Route {
+            Route::new(
+                name.to_string(),
+                vec![".*".to_string()],
+                None,
+                Vec::new(),
+                false,
+                false,
+                BTreeMap::new(),
+            )
+        }
+        let static_policy = StaticPolicy {
+            root: "public".to_string(),
+            index: "index.html".to_string(),
+            fallback: None,
+            immutable: Vec::new(),
+        };
 
-        let static_site = parsed(
-            "version = 1\n[[route]]\nname = \"site\"\npath = ['.*']\n\
-             [route.static]\nroot = \"public\"\n",
-        );
+        let static_site = manifest(vec![route("site").with_static(Some(static_policy.clone()))]);
         assert!(static_site.can_boot_without_app());
         assert!(static_site.is_all_static());
 
         // A plain forwarding route still needs the app, and an empty manifest
         // needs everything.
-        let mixed = parsed(
-            "version = 1\n\n[[route]]\nname = \"site\"\npath = ['/assets/.*']\n\
-             [route.static]\nroot = 'public'\n\n[[route]]\nname = \"app\"\npath = ['.*']\n",
-        );
+        let mixed = manifest(vec![
+            route("site").with_static(Some(static_policy)),
+            route("app"),
+        ]);
         assert!(!mixed.can_boot_without_app());
         assert!(!mixed.is_all_static());
 
         // A PHP route is its own executor, so it needs no app — and it is still
         // not a static site (`MB.3.5.4`).
-        let php_site = parsed(
-            "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
-             [route.php]\nentry = \"public/index.php\"\n",
-        );
+        let php = PhpPolicy {
+            entry: "public/index.php".to_string(),
+            workers: None,
+        };
+        let php_site = manifest(vec![route("app").with_php(Some(php))]);
         assert!(php_site.can_boot_without_app());
         assert!(!php_site.is_all_static());
 
-        let empty = parsed("version = 1\n");
+        let empty = manifest(Vec::new());
         assert!(!empty.can_boot_without_app());
         assert!(!empty.is_all_static());
     }
 
-    /// `route_lines` returns the `[[route]]` header lines in routing order, and
-    /// nothing for a manifest that declares no route.
+    /// `route_lines` returns each `view` header's line in routing order, and
+    /// nothing for a document that declares no view.
     #[test]
     fn route_lines_are_the_header_lines_in_routing_order() {
-        let manifest = Manifest::from_toml_str(
-            "version = 1\n\n[[route]]\nname = \"a\"\npath = ['.*']\n\n\
-             [[route]]\nname = \"b\"\npath = ['/b']\n",
-        )
-        .expect("the manifest parses");
-        assert_eq!(manifest.route_lines(), vec![3, 7]);
+        let manifest = Manifest::from_blastfile_str("view a \"/*\" {}\n\nview b \"/b\" {}\n")
+            .expect("the manifest parses");
+        assert_eq!(manifest.route_lines(), vec![1, 3]);
 
-        let without = Manifest::from_toml_str("version = 1\n").expect("the manifest parses");
+        let without = Manifest::from_blastfile_str("").expect("the manifest parses");
         assert_eq!(without.route_lines(), Vec::<u32>::new());
     }
 
-    /// The document `equivalent` is tested against: every field it compares is
-    /// non-default, so a comparison that skipped one would still pass.
-    const EQUIVALENT: &str = "\
-version = 1
-app = \"shop.wsgi:application\"
-preload = [\"shop.boot\"]
-groups = [\"shared\"]
+    /// The document `equivalent` is tested against: every field a `Blastfile`
+    /// can set is non-default, so a comparison that skipped one would still
+    /// pass. The per-route `static`/`php` pair and `global_groups` have no file
+    /// spelling; `equivalent_honours_every_other_field` pins them through the
+    /// model builders.
+    const EQUIVALENT: &str = r#"app "shop"
 
-[proxy.db]
-protocol = \"postgresql\"
+entrypoint python "shop.wsgi:application" {
+    preload "shop.boot"
+}
 
-[group.shared.db]
-queries = []
+postgres $DATABASE_URL
 
-[[route]]
-name = \"app\"
-path = ['.*']
-[route.static]
-root = \"public\"
-[route.php]
-entry = \"public/index.php\"
-";
+trait shared {
+    postgres { select cms_page(id) }
+}
+
+view app "/*" {
+    use shared
+    postgres { query 'SELECT "cms_page"."body" FROM "cms_page"' }
+}
+"#;
 
     fn equivalent_fixture() -> Manifest {
-        Manifest::from_toml_str(EQUIVALENT).expect("the fixture parses")
+        Manifest::from_blastfile_str(EQUIVALENT).expect("the fixture lowers")
     }
 
     /// [`Manifest::equivalent`] leaves out the source positions and nothing
@@ -1424,7 +1422,7 @@ entry = \"public/index.php\"
     #[test]
     fn equivalent_ignores_only_the_route_lines() {
         let base = equivalent_fixture();
-        let moved = Manifest::from_toml_str(&format!("\n{EQUIVALENT}")).expect("parses");
+        let moved = Manifest::from_blastfile_str(&format!("\n{EQUIVALENT}")).expect("lowers");
         assert_ne!(
             base.route_lines(),
             moved.route_lines(),
@@ -1663,8 +1661,8 @@ entry = \"public/index.php\"
 
     /// `--learn` inserts a new view above the catch-all. A `Blastfile`
     /// `view app "/*"` lowers to `/.*` (§4.3), so the predicate accepts that
-    /// spelling as well as the `.*` a `blastit.toml` writes, and still refuses
-    /// a prefix pattern or a method-restricted catch-all.
+    /// spelling as well as the bare `.*`, and still refuses a prefix pattern or
+    /// a method-restricted catch-all.
     #[test]
     fn the_lowered_catch_all_is_unrestricted_too() {
         fn route(path: &[&str], methods: Option<&[&str]>) -> Route {

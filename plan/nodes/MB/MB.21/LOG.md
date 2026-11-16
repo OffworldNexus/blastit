@@ -47,3 +47,7 @@ FLAKE #2 for conductor: crates/blastit/tests/critical_dev_and_fail_closed failed
 ## 2026-11-16T16:09 [lead]
 
 HOST CONDITION for the epic gate: the machine is at ~91% MemTotal used by another project, above BLASTIT_MEM_HIGH_WATERMARK=85, so every blastit-dev-booting case refuses at boot by design (LESSONS: above-watermark refuses with 'memory: X of Y used' rather than serving 503s). MB.21.4.4's two failing cases are exactly those. The epic gate's make check must be run when the host drops below the watermark, or the two exclusions documented with the /proc/meminfo reading and the sub-lead's evidence
+
+## 2026-11-16T17:55 [lead]
+
+CONCURRENCY (epic gate): a sibling session (MB.22 / docs/research) is now writing inside this same worktree, so (a) every commit stages explicit node paths only and records the shared make check's suite count in the node LOG, (b) the MB.21 epic gate's make check is measured on a tree that may hold another epic's uncommitted files — the gate must record git status and note which non-MB.21 paths were present, and (c) no session may blindly stage or clean another's files

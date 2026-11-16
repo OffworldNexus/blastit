@@ -430,47 +430,47 @@ fn a_grant_on_an_unknown_proxy_names_where_it_was_written() {
 
 #[test]
 fn a_message_escapes_control_characters_and_cuts_long_values() {
-    // A value the sentence is allowed to quote: the codec a view named.
+    // A value the sentence is allowed to quote: the name a `view` was given.
     // (`InvalidApp` no longer quotes its value — §18, `a_refusal_never_carries`
     // below — so the escaping and cutting rule is pinned on a variant that does.)
-    let bell = ManifestError::UnknownBodyCodec {
-        path: "view upload: body".to_string(),
-        found: "shop\u{7}wsgi".to_string(),
+    let bell = ManifestError::InvalidName {
+        at: Position::at(1, 6),
+        name: "shop\u{7}wsgi".to_string(),
     };
     assert_eq!(
         bell.to_string(),
-        "view upload: body: expected \"json\", \"form\", \"none\" or \"raw\", found \"shop\\u{7}wsgi\"",
+        "1:6: `shop\\u{7}wsgi` is not a name; a view, trait or store name is `[a-z0-9][a-z0-9_-]*`",
         "a control character never reaches the event stream raw"
     );
     assert!(!bell.to_string().chars().any(char::is_control));
 
     // Up to 120 characters are quoted whole...
-    let short = ManifestError::UnknownBodyCodec {
-        path: "view upload: body".to_string(),
-        found: "a".repeat(120),
+    let short = ManifestError::InvalidName {
+        at: Position::at(1, 1),
+        name: "a".repeat(120),
     };
     let rendered = short.to_string();
-    assert!(rendered.ends_with(&format!("found \"{}\"", "a".repeat(120))));
+    assert!(rendered.contains(&format!("`{}`", "a".repeat(120))));
     assert!(!rendered.contains('…'));
 
     // ...and the 121st is replaced by an ellipsis, so the line stays readable.
-    let long = ManifestError::UnknownBodyCodec {
-        path: "view upload: body".to_string(),
-        found: "a".repeat(121),
+    let long = ManifestError::InvalidName {
+        at: Position::at(1, 1),
+        name: "a".repeat(121),
     };
     let rendered = long.to_string();
-    assert!(rendered.contains(&format!("\"{}\u{2026}\"", "a".repeat(120))));
+    assert!(rendered.contains(&format!("`{}\u{2026}`", "a".repeat(120))));
 
     // The cut counts characters, not bytes: a name of two-byte characters is
     // never split mid-character.
-    let accented = ManifestError::UnknownBodyCodec {
-        path: "view upload: body".to_string(),
-        found: "é".repeat(130),
+    let accented = ManifestError::InvalidName {
+        at: Position::at(1, 1),
+        name: "é".repeat(130),
     };
     assert!(
         accented
             .to_string()
-            .contains(&format!("\"{}\u{2026}\"", "é".repeat(120)))
+            .contains(&format!("`{}\u{2026}`", "é".repeat(120)))
     );
 }
 

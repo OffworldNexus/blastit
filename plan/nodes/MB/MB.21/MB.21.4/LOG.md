@@ -23,3 +23,7 @@ flake now owned by MB.21.4.8: dev_boots_five_unprivileged_roles_and_strips_secre
 ## 2026-11-16T16:30 [planner]
 
 the residual dev-suite flake is a product race owned by MB.21.4.9: an AllowEmptyOnly request is dispatched from its head (scheduler.rs:1487/:1507) and blastit-view starts the app on REQ_HEAD (lib.rs:474/:501), so a body byte races 413 against the app's 200 (1 ms gap: 5/5 wrong); 4.8's client fix landed and its 413 assertion is untouched.
+
+## 2026-11-16T18:58 [planner]
+
+MB.21.4.10 created (⇠MB.21.4.5.6, a4): the last user-facing retired spellings (validate.rs StaticDeadDeclaration/spa/prefork, the --learn transactions hint, check.rs's [proxy.<name>] hints, stage0's dead workers sentence, host.rs's claim label, blastit-view php.rs) plus the report's table scope: table_grants.toml -> table_grants.blastfile, value rendered as select/insert/update/delete directives per owner decision (zero .toml field names in output; ADR-0012 records it, superseding that one field name in ADR-0003).

@@ -319,8 +319,7 @@ fn check_queries(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
 /// several endpoints lowers to several routes that share one name and one
 /// sandbox, and those are not duplicates. A name that reappears in a different
 /// sandbox is, and the message names the two routes so an operator can find
-/// them. A `blastit.toml` route is always its own sandbox, so the retired
-/// format keeps today's answer for every document it can express.
+/// them.
 fn check_routes(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
     let mut seen: BTreeMap<&str, (u32, usize)> = BTreeMap::new();
     for (index, route) in manifest.routes().iter().enumerate() {
@@ -414,8 +413,8 @@ fn check_static(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
 /// `root` is a relative path that stays in the manifest's directory (`R2`).
 ///
 /// An empty string is not a relative path either, so it shares the rule: the
-/// two are the same mistake — a root that names no directory beneath
-/// `blastit.toml`.
+/// two are the same mistake — a root that names no directory beneath the
+/// manifest file.
 fn check_static_root(location: &Location, policy: &StaticPolicy, errors: &mut Vec<ManifestError>) {
     let root = policy.root.as_str();
     let rule = if root.is_empty() || root.starts_with('/') {
@@ -1089,13 +1088,33 @@ mod tests {
         .with_mounts(mounts)
     }
 
-    /// A retired-format manifest whose only route is static, with the given
-    /// `[route.static]` body.
-    fn retired_static(block: &str) -> Manifest {
-        Manifest::from_toml_str(&format!(
-            "version = 1\n[[route]]\nname = \"site\"\npath = ['.*']\n[route.static]\n{block}"
-        ))
-        .unwrap()
+    /// A manifest whose only route carries the retired per-route static block,
+    /// built through the model: no `Blastfile` can set it, and it leaves with
+    /// the per-route pair (`MB.21.5.1`), but `check_static` still reads it.
+    fn retired_static(root: &str, index: &str) -> Manifest {
+        let route = Route::new(
+            "site".to_string(),
+            vec![".*".to_string()],
+            None,
+            Vec::new(),
+            false,
+            false,
+            BTreeMap::new(),
+        )
+        .with_static(Some(StaticPolicy {
+            root: root.to_string(),
+            index: index.to_string(),
+            fallback: None,
+            immutable: Vec::new(),
+        }));
+        Manifest::assemble(
+            1,
+            Vec::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            vec![route],
+            Vec::new(),
+        )
     }
 
     /// §9.1: a prefix is a URL prefix, not a filesystem path. Every rule has
@@ -1208,30 +1227,12 @@ mod tests {
         }
 
         assert_eq!(
-            retired_static("root = '.output'\n").validate(20_000),
+            retired_static(".output", "index.html").validate(20_000),
             Ok(Vec::new()),
             "a dot-directory root is the author's own choice"
         );
         assert_eq!(
-            retired_static("root = '.'\nindex = '.env'\n").validate(20_000),
-            Err(ManifestErrors::from(ManifestError::StaticIndexInvalid {
-                location: Location::Route {
-                    index: 0,
-                    name: "site".to_string(),
-                },
-                index: ".env".to_string(),
-                rule: NO_DOTFILE_SEGMENT,
-            }))
-        );
-    }
-
-    /// One mistake, one line: the retired reader lowers its flag to the index,
-    /// and a bad index is already refused on the route's own block, so the
-    /// mount check does not report the same name twice.
-    #[test]
-    fn a_bad_index_beside_the_retired_flag_is_reported_once() {
-        assert_eq!(
-            retired_static("root = '.'\nindex = '.env'\nspa = true\n").validate(20_000),
+            retired_static(".", ".env").validate(20_000),
             Err(ManifestErrors::from(ManifestError::StaticIndexInvalid {
                 location: Location::Route {
                     index: 0,

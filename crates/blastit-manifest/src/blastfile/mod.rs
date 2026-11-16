@@ -139,11 +139,10 @@ pub struct ProposedGrant {
 /// grants are merged into the view's `postgres` block for that store, and the
 /// whole edit is a no-op when there is nothing to add.
 ///
-/// This is the `Blastfile` edits type. The retired TOML patcher's is
-/// [`crate::edit::ManifestEdits`]: the two documents need different proposal
-/// shapes (a `[[route]]` carries regexes, a `view` carries methods and
-/// patterns), so they are separate types until `MB.21.4.5` deletes the retired
-/// reader — the Python side that still plans against it moves in `MB.21.4.7`.
+/// This is the `Blastfile` edits type. The file has one reader
+/// ([`read`]) and one writer, and the proposal shape follows the file: a `view`
+/// carries methods and patterns, so a proposed view is not a route regex list.
+/// The Python side that plans against it moves in `MB.21.4.7`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlastfileEdits {
     /// New `view` blocks.
@@ -188,9 +187,7 @@ impl BlastfileEdits {
 ///
 /// This is **the** editor: `blastit check --learn`, `blastit dev --learn` and
 /// the Python `fold` binding all apply their proposals through it, so a
-/// `Blastfile` has exactly one writer. The retired TOML patcher beside it
-/// ([`crate::edit`]'s `apply_edits`) keeps only its own document until
-/// `MB.21.4.5` deletes that reader; no call site in `blastit` reaches it.
+/// `Blastfile` has exactly one writer.
 ///
 /// # Errors
 ///

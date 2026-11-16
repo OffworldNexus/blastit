@@ -2332,3 +2332,19 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T18:18 [MB.21.4.5.5] (lead) pre-commit gates: plan.py validate OK; guard.py OK; make check exit 0, 4619 lines (/tmp/opencode/mb2145-batch-makecheck.log). Tree QUIESCENT at commit time — sh
 - 2026-11-16T18:18 [MB.21.4.5.5] (lead) status active -> review
 - 2026-11-16T18:18 [MB.21.4.5.5] (lead) status review -> done
+- 2026-11-16T18:18 [MB.21.4.5.6] (lead) status ready -> active
+- 2026-11-16T18:18 [MB.21.4.5.6] (lead) attempt 1/3 started
+- 2026-11-16T18:18 [MB.21.4.5.6] (lead) base 7ba6d23 (5.1-5.5 all committed; this leaf runs strictly alone)
+- 2026-11-16T18:38 [MB.21.4.5.6] (unknown) edited fields
+- 2026-11-16T18:38 [MB.21.4.5.6] (lead) REVIEW FAIL: (1 MAJOR) the retired reader's whole error surface survives in src/error.rs:196-287 with no constructor - Syntax, UnknownKey, NotTopLevel, MissingK
+- 2026-11-16T18:38 [MB.21.4.5.6] (lead) status active -> ready
+- 2026-11-16T18:38 [MB.21.4.5.6] (lead) status ready -> active
+- 2026-11-16T18:38 [MB.21.4.5.6] (lead) attempt 2/3 started
+- 2026-11-16T18:58 [MB.21.4.10] (planner) created (task) Delete the last retired spellings from user-facing sentences and give the report's table scope a `blastfile` key
+- 2026-11-16T18:58 [MB.21.4.10] (planner) edited fields
+- 2026-11-16T18:58 [MB.21.4.10] (planner) created: the last user-facing retired spellings (validate.rs StaticDeadDeclaration + spa/prefork strings, the audit_v1 --learn hint, check.rs's two pytest-djang
+- 2026-11-16T18:58 [MB.21.4.10] (planner) amended per owner (2026-11-16): the report key is renamed table_grants.toml -> table_grants.blastfile, not kept - owner rule: zero .toml field names in CLI/JSON
+- 2026-11-16T18:58 [MB.21.4] (planner) MB.21.4.10 created (⇠MB.21.4.5.6, a4): the last user-facing retired spellings (validate.rs StaticDeadDeclaration/spa/prefork, the --learn transactions hint, che
+- 2026-11-16T19:00 [MB.21.4.5.6] (lead) review PASS (attempt 2). pre-commit: plan.py validate OK; guard.py OK; make check exit 0 (165 'test result: ok', run by the reviewer on this tree); critical_gua
+- 2026-11-16T19:00 [MB.21.4.5.6] (lead) status active -> review
+- 2026-11-16T19:00 [MB.21.4.5.6] (lead) status review -> done
