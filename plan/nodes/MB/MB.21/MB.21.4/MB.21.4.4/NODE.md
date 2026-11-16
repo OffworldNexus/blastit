@@ -5,13 +5,13 @@ kind: task
 status: ready
 owner: implementer
 priority: 1
-depends_on: [MB.21.4.3]
+depends_on: [MB.21.4.7]
 paths: ["e2e/**", "python/tests/**", "scripts/**", Makefile]
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T08:13"
+updated: "2026-11-16T12:54"
 ---
 
 # Goal
@@ -43,10 +43,13 @@ only leaf that owns `Cargo.toml`/`Cargo.lock`.
   directories (`hello`, `shop`, `learn`, `denial`, `findings`, `static-site`), the runnable-docs harness
   (staged file name, `READER_FILES`, the page-manifest mode) and every `crates/blastit/tests/` suite.
   They are listed here only so the `find` counts below make sense: a hit there is 4.1's, not yours.
-- Package surface: **not this leaf's** — `python/blastit/{fold,pytest_plugin}.py`, the `--blastit-manifest`
-  default and its help text, and the `manifest_toml` → `manifest_text` docstrings next to the PyO3
-  binding are `MB.21.4.3`'s. This leaf only proves the rewritten `python/tests/` fixtures run through
-  that plugin.
+- Package surface: **not this leaf's, and the last word is `MB.21.4.7`'s** — `python/blastit/
+  {fold,pytest_plugin}.py`'s readers, the PyO3 `blastfile_apply_edits` call, `_blastit.audit`'s parse, the
+  `--blastit-manifest` default and its help text, and the four Python suites' own fixtures belong to 4.7,
+  which runs before this leaf. `MB.21.4.3` landed the Rust contract and the binding; `manifest_toml` →
+  `manifest_text` and the plugin's help text moved there. **This leaf translates only what 4.7 leaves** —
+  the three project fixture directories below — and proves the rewritten `python/tests/` fixtures run
+  through the plugin 4.7 cut over. Do not re-translate a suite 4.7 already owns.
 - Makefile: the `DOCS_SERVE_MANIFEST` variable and the stage that writes it (line 85 and its recipe);
   keep `docs-serve` and `docs-serve-check` working with `Blastfile`, and drop the retired file name from
   the variable's value (rename the variable if it reads as the retired path).
@@ -90,7 +93,7 @@ $ uv run --no-project tools/critical_guard.py --base HEAD~1 --node MB.21.4.4
    `MB.21.4.1` migrated), and nothing under `e2e/` or `python/tests/` is a `.toml` file apart from the
    runnable-docs inventory and the seccomp fixture's own `Cargo.toml`.
 4. `blastit fmt --check ./Blastfile` passes in every rewritten fixture; the rewritten `python/tests/`
-   fixtures run through `pytest --blastit-manifest` (whose default `MB.21.4.3` moved) and
+   fixtures run through `pytest --blastit-manifest` (whose default `MB.21.4.7` moved) and
    `make docs-serve-check` passes writing its own `Blastfile`.
 5. This leaf changes no dependency: the `git diff --stat` above is empty, and `critical_guard.py` is
    clean for every protected test this leaf rewrote.

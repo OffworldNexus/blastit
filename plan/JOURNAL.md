@@ -2218,3 +2218,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T11:43 [MB.21] (lead) FLAKE #2 for conductor: crates/blastit/tests/critical_dev_and_fail_closed failed once under load during MB.21.4.2's gate and passed 3/3 in isolation. Same class
 - 2026-11-16T12:16 [MB.21.4.3] (planner) edited fields
 - 2026-11-16T12:17 [MB.21.4.3] (planner) re-scoped after attempt 1 returned needs_split (paths + design defect, not size). paths widened to crates/blastit/src/stage0.rs, crates/blastit-manifest/tests/*
+- 2026-11-16T12:18 [MB.21.4.3] (lead) attempt 2/3 started
+- 2026-11-16T12:53 [MB.21.4.3] (planner) edited fields
+- 2026-11-16T12:53 [MB.21.4.3] (planner) narrowed to what attempt 2 landed. Removed the fold re-pointing, the pytest-plugin reader and the _blastit.audit cutover from Goal/Context/Acceptance, and dropp
+- 2026-11-16T12:54 [MB.21.4.7] (planner) created (task) Cut python/blastit over to Blastfile: fold and the pytest plugin through blastfile_apply_edits, _blastit.audit off the retired reader, and the fo
+- 2026-11-16T12:54 [MB.21.4.7] (planner) edited fields
+- 2026-11-16T12:54 [MB.21.4.4] (planner) edited fields
+- 2026-11-16T12:54 [MB.21.4.4] (planner) re-pointed depends_on MB.21.4.3 -> MB.21.4.7 (new Python-cutover leaf) and Context now says the package surface is 4.7's: the plugin default/help and the four P
+- 2026-11-16T12:54 [MB.21.4.7] (planner) created (task) after MB.21.4.3 attempt 2 returned needs_split: its Rust contract landed green, the Python cutover did not fit the session. Scope is caller re-po

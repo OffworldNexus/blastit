@@ -1,215 +1,151 @@
-# Result MB.21.4.3 (attempt 1)
+# Result MB.21.4.3 (attempt 2)
 
-**`STATUS: needs_split`** — this node cannot reach its own `# Acceptance` from its own `paths`:
-**six** files that assert the strings and shapes items 2, 3 and 4 change are outside `paths`, and
-**four** of them are protected, so `critical_guard.py` would call the edit a violation. The two
-sentences this leaf owns are therefore *still in the tree*, and the fold/pytest-plugin cutover — the
-largest piece — is blocked by the very suite the dispatch says is mine to move
-(`python/tests/critical/test_fold_literals_and_atomic.py`, which is **not** in `paths`).
+**`STATUS: needs_split`** — the Rust half of the leaf is landed and the whole tree is green, but the
+**Python cutover** (item (e): `fold.py` → `blastfile_apply_edits`, `_blastit.audit` off the retired
+reader, and the four Python suites' fixtures) did not fit this session. It is the *only* thing left;
+§3 says exactly how to finish it, and §2 says what already works for it.
 
-What **did** land is complete, green and verifiable on its own: the `--json` `fix.to` node locators
-(item 1), the §18 pieces whose asserting suites *are* in `paths` (`Location::View`,
-`ManifestError::position()`, `InvalidApp`), item 5's renames and both doc follow-ups, and item 8's
-"one editor" wording so its grep prints nothing. §3 below is the concrete split; §4 is the plan
-defects with file:line, so the next dispatch needs no search of its own.
+Attempt 1's `needs_split` was answered by widening `paths` and by the ruling that `ProposedGrant` grows
+the table/function scope. Both are honoured here: every sentence, the §18 remainder and the editor's
+new field are implemented **with** their asserting suites (all ten protected changes are inside
+`paths`), and the editor is the one writer both Rust entry points use.
 
-## 1. What landed, and the test that pins it
+## 1. What landed
 
-| Node item | Landed | Pinned by |
+| Node item | Change | Pinned by |
 |---|---|---|
-| 1 — `--json` `fix.to` is a **node locator** | `grant_locator`/`trait_locator`/`body_locator` in `crates/blastit/src/audit_v1.rs`: `view <view> postgres[ <store>]` for `add_query`/`remove_query`, `trait <name>` for `add_group` and a trait's `remove_query`, `view <view>[ <METHOD>] body` for `raw_ingress` (method only when one endpoint owns the `body`, `HEAD` dropped as implied); `DEFAULT_STORE` is public so the crate spells the unnamed block the way a file writes it | `critical_check_engine::{every_add_query_reparses_under_parse_and_validate, connection_setup_sql_names_the_connection_trait_grant, ordinary_statements_keep_the_per_view_add_query, only_connection_setup_names_a_trait_and_never_a_refusal, the_body_finding_names_the_view_body_node_and_never_unvalidated, every_finding_kind_and_its_interaction_counts}`, `audit_group_hint::*`, **protected** `python/tests/critical/test_check_contract.py::test_the_report_names_the_fix` |
-| 3 (part) — `Location::View` names the view | `error.rs`: `view "x"`, never `view "x" (index 0)`; the sandbox index stays in the variant but is not printed | `validate::{locations_read_well_in_errors, a_view_refusal_names_the_view_and_no_index}` (the second is the end-to-end rendering of a `Blastfile` grant error) |
-| 3 (part) — `ManifestError::position()` | new `pub fn position(&self) -> Position` over all 63 positioned variants, `Position::NONE` otherwise; `cli.rs::report_manifest_errors` reads it and `positioned()` (the split-and-sniff helper) is **deleted** | `critical_blastfile_fmt` (path-prefixed refusals, `./Blastfile:2:10: …` and `<path>: <message>`), `blastfile_discovery` (one escaped line at every entry point) |
-| 3 (part) — `InvalidApp` stops echoing its value | `app: must be \`module:attribute\`` — the value is compared, never rendered (a pasted `$TOKEN` ends up in that slot) | `mutation_gaps::a_refusal_never_carries_the_app_it_refused` (`$BLASTIT_TOKEN` and `ghp_s3cr3tToken`, plus the allowed twin), `critical_manifest_011::app_must_be_module_attribute` unchanged |
-| 5 — `manifest_toml` → `manifest_text` | `crates/blastit-py/src/lib.rs::audit_report`, `crates/blastit-py/src/audit.rs::audit` (signatures stay positional), docstrings re-written to say what the text is and that the retired reader is the next leaf's; `check.rs`/`audit_v1.rs` were already `manifest_text` | doc build (`RUSTDOCFLAGS=-D warnings`) + `make check` |
-| 5 — the two 4.2 follow-ups | `cli.rs::one_line` **deleted**; `fmt` uses `config::display_path` (one home for §18's escaping/cut). `crates/blastit-manifest/src/lib.rs:22-24` no longer says "every route is static" | `critical_blastfile_fmt`, `docs-test` |
-| 8 (part) — one editor, one wording | `check --learn` (`check.rs:994`) and `dev --learn` (`dev_learn.rs:464`) write through `blastfile::apply_edits` + one `edit::write_atomic`; `blastfile/mod.rs`, `edit.rs`, `lib.rs` no longer present `edit::apply_edits` as the editor, so acceptance 8's second grep prints **nothing** | the grep in §5.6 |
+| (a) §13.2's six boot warnings | `error.rs`: `trait {} is attached to no view and no global traits`, `store {} has no grant in any view or trait`, `view {} may run any statement on store {} (unrestricted)`, `view {}: body raw passes the request body through unvalidated`, `view {}: egress any opens any outbound address and port`; **new** `ManifestWarning::EntrypointNotReached` (``entrypoint php "…" is reached by no view: declare a `view` that forwards to it``), emitted by `validate::warnings` when `php` is declared and no view exists. Triggers, order and counts unchanged | `validate::tests::*`, `critical_blastfile_parity::the_validate_warnings_are_surfaced_unchanged` (asserts the six sentences verbatim, in order) |
+| (b) §10.2 | `raw_ingress_refusals`: ``view "<name>": body raw hands the request body to the application unvalidated, … write `body raw unvalidated` in that view, or declare the codec it takes (json, form, none)``; its unit tests are now `Blastfile` fixtures and assert the sentence **verbatim** | `validate::tests::{raw_ingress_without_unvalidated_is_the_only_refused_shape, the_acknowledgement_is_what_opens_the_gate, every_unacknowledged_view_is_named_in_route_order}`, `stage0::raw_ingress_gate_tests`, `critical_raw_ingress::{production_stage_one_refuses_raw_ingress_without_unvalidated, the_pretty_refusal_is_plain_text_naming_the_same_route, production_stage_one_refuses_a_manifest_edited_after_stage_zero_approved_it}` |
+| (c) §11.3's nouns | `UnrestrictedGroup`: `unrestricted is only allowed inline on a view (grant on store …)`; `Location::Group` renders `trait "…"` (a `[group.x]` and a `trait x` are one node) | `validate::{an_unrestricted_grant_in_a_group_is_refused_at_boot, locations_read_well_in_errors}`, `blastfile_traits::unrestricted_inside_a_trait_is_refused`, `critical_blastfile_traits::unrestricted_inside_a_trait_is_refused` |
+| (d) §18 remainder | `ManifestErrors`' `Display` is one line per problem: no `manifest has N error(s)` header, no `  - ` prefix, no trailing newline, `""` for none; `PhpEntryInvalid` renders `{location}: php entry {rule}` — the entry is compared, never printed | `blastfile_errors::the_error_list_is_one_line_per_problem`, `critical_blastfile_errors::the_list_is_one_line_per_problem`, `parse::*`, `mutation_gaps::the_error_list_counts_iterates_and_renders` (exact `"version: missing …\nroute[0].name: …"` and `""`), `critical_php_manifest::{the_php_messages_match_the_design_table, a_refusal_never_carries_the_php_entry_it_refused}` (a DSN-shaped entry and a `$TOKEN`-shaped app, each asserted absent) |
+| (e, half) the editor grows | `ProposedGrant` gains `tables: BTreeMap<String, TableGrant>` + `functions: BTreeSet<String>`; `write.rs` merges them into the view's `postgres [store] { }` block, **rewriting** the block's `select/insert/update/delete/functions` directives to the merged scope (a second `select <table>` line is a duplicate directive, not a union) and leaving `query` lines, `transactions` and comments where the author put them; new refusals `UnwritableGrantName` (a table/column/function a `Word` cannot spell) and `EmptyColumnList`, both before anything is spliced. `expected()`/P4 carry the merge, so repetition is a no-op | `edit_branches::{a_table_and_function_scope_is_written_inside_the_store_block, a_wider_column_list_rewrites_the_existing_directive, a_new_view_carries_its_table_scope, a_name_the_grant_block_cannot_spell_is_refused, an_empty_column_list_is_refused, a_comment_above_the_directive_stays_there}` |
+| (e, half) the binding | `blastit._blastit.blastfile_apply_edits(source, edits_json) -> str` over `blastfile::apply_edits` (a `BlastfileEdits` document in, the proved source out) | built + linked into the wheel (`crates/blastit-py`), exercised through the editor's own suite; `fold` does not call it yet (§3) |
+| (e, part) the plugin's default/help | `pytest_plugin.py`'s docstring, `--blastit-manifest` help and `blastit_manifest` ini text name `Blastfile`; its `tomllib` reader is untouched (§3) | `python/tests/test_pytest_plugin.py` (skips without an installed wheel, as before) |
+| (f) the design row | §14.5's `ProposedGrant` gains `tables`/`functions` with the merge rule and the three refusals; §13.2's "every sentence lives in `validate.rs`" is corrected to `error.rs` (the `thiserror` attributes) with `validate.rs` owning the emission | `docs/design/blastfile-dsl.md`; `make docs-check` clean |
+| item 1 (attempt 1, re-verified) | `fix.to` node locators (`view <view> postgres[ <store>]`, `trait connection`, `trait <name>`, `view <view>[ <METHOD>] body`) | `critical_check_engine`, `audit_group_hint`, the protected Python contract |
+| items 3/5 (attempt 1, re-verified) | `Location::View` names the view, `ManifestError::position()`, `InvalidApp` stops echoing, `manifest_toml`→`manifest_text`, `cli.rs::one_line` gone, `lib.rs` doc | `validate`, `critical_blastfile_fmt`, `blastfile_discovery` |
 
-`fix.to` spelling: the design's §13.3 table and `docs/reference/blastfile.md:451` both write the
-default store **without a name** (`view catalog postgres`) and a named store appended
-(`view catalog postgres analytics`); the node's `view restaurants postgres db` is that same rule with
-a store literally named `db`. I followed the accepted page.
+## 2. What is *not* done, and why it is the only gap
 
-## 2. Why the rest cannot land from this node's `paths`
+`fold.py` (2 154 lines) and `pytest_plugin.py`'s manifest read still parse the retired document with
+`tomllib`, and `_blastit.audit` still calls `Manifest::from_toml_str`. Re-pointing them needs all of:
 
-Every line below is an assertion that *is* the contract the item changes; each is outside `paths`,
-and the ones marked **P** are protected (`tools/critical_guard.py` would refuse the edit).
+1. **`fold.py` re-written around the binding** — read the `Blastfile`, plan from the log through
+   `_blastit.audit` (the report's `routes[].proxies[].missing[]` already says what is missing per
+   view/store) plus `_blastit.covering` for `--prefer-tables`, build the `BlastfileEdits` JSON, call
+   `blastfile_apply_edits`, keep `_write_atomic` (the protected suite pins `.{name}.{pid}.tmp` +
+   `fsync` + `os.replace` + the mode), and re-validate by auditing the edited text.
+2. **`_blastit.audit`'s cutover** — `Manifest::parse_blastfile` instead of `from_toml_str`. That is one
+   line, but it turns ~18 TOML fixtures and ~10 global-`groups` unit tests in
+   `crates/blastit-py/src/audit.rs`'s `mod tests` red: they are this leaf's (`crates/blastit-py/**`),
+   and the global-group concept does not exist in a `Blastfile` (`global_groups` is always empty,
+   §7.1), so those cases become traits-on-every-view cases or go.
+3. **The four Python suites** — `python/tests/test_fold.py` (2 014 lines of TOML planning cases),
+   the protected `python/tests/critical/test_fold_literals_and_atomic.py` (486 lines: `fold.plan`,
+   `fold._Addition`, `fold._write_atomic`, `fold.main`), and `python/tests/test_check.py` (TOML
+   fixtures, `DATABASE_URL`-gated).
 
-| Blocked item | File:line | What it pins |
+Everything else in the node is done and green. I reverted the `audit()` cutover *after* trying it: with
+it applied and `fold.py` still on TOML, `fold` and its whole suite break, and a half-cut Python tree is
+worse than a green one.
+
+## 3. Proposed split for attempt 3 (one node, one commit)
+
+**4.3b — the Python cutover.** `paths`: `crates/blastit-py/**`, `python/blastit/{fold,pytest_plugin}.py`,
+`python/tests/{test_check,test_fold,test_pytest_plugin,test_plugin_helpers}.py`,
+`python/tests/critical/test_fold_literals_and_atomic.py`, `python/tests/runtime-capture/**` (if the
+fixtures need it). Acceptance: `make test-critical`, the four-file pytest command, `make check`, and a
+`--prefer-tables`/`--allow-dangerous`/`--write` run whose edited file re-parses **and validates**, keeps
+every comment, and adds nothing on a second run (`docs/reference/cli.md` unchanged).
+
+The pieces it must not redo: the binding (`blastfile_apply_edits`), `ProposedGrant`'s fields, the
+editor's table/function splice and its refusals, and the design row — all landed here, all tested.
+
+## 4. Protected suites: every changed assertion
+
+Ten protected files changed; `critical_guard.py --base 537eb2d --node MB.21.4.3` says all ten are
+authorized. None is weaker:
+
+| File | Change | Why it is not weaker |
 |---|---|---|
-| §13.2 `EgressRoute` sentence (and with it the whole five-sentence sweep) | `python/tests/test_pytest_plugin.py:461` | `route "note-cache": egress = true opens any outbound address and port` in the plugin's `manifest.warnings`. `python/tests/**` is `MB.21.4.4`'s; re-spelling the warning turns this suite red until that leaf lands |
-| §13.2 #6 `EntrypointNotReached` (the new variant) | **P** `crates/blastit-manifest/tests/critical_blastfile_parity.rs:1132-1138` | an exhaustive `match` over `ManifestWarning`; a sixth variant does not compile in that file |
-| §10.2 `raw_ingress_refusals` | `crates/blastit/src/stage0.rs:6339-6342` | asserts `route "upload"`, `allow_raw = true`, `[route.ingress]`. `stage0.rs` is not in `paths` (`stage1.rs` is) |
-| §11.3 `UnrestrictedGroup` (`route`→`view`) | **P** `crates/blastit-manifest/tests/critical_blastfile_traits.rs:61`, `crates/blastit-manifest/tests/blastfile_traits.rs:115` | `unrestricted is only allowed inline on a route` |
-| §18 `ManifestErrors`' `Display` (one line per problem, no header) | `crates/blastit-manifest/tests/blastfile_errors.rs:109-116`, `crates/blastit-manifest/tests/parse.rs:461,466,547` | `lines.len() == errors.len() + 1` and the `manifest has N error(s)` header |
-| §18 `PhpEntryInvalid` stops echoing its entry | **P** `crates/blastit-manifest/tests/critical_php_manifest.rs:349-352` | the exact `route "app" (index 0): php entry "index.php": …` rendering |
-| item 4 — the whole Python cutover | **P** `python/tests/critical/test_fold_literals_and_atomic.py` (486 lines: it calls `fold.plan(tomllib.loads(MANIFEST), …)`, `fold._Addition`, `fold._write_atomic`, `fold.main` on a TOML file) plus `python/tests/test_pytest_plugin.py`, `python/tests/test_plugin_helpers.py:97-121` | the fixture format *and* the fold/pytest-plugin API. This is the file the dispatch calls mine to move; it is not in `paths` |
-| item 6 — `e2e/php2shell.py::check_learn` | `e2e/**` fixtures | `MB.21.4.4` translates them (its `# Context`: `make e2e` is red between 4.1 and 4.4); the case cannot be green before that, and `make e2e` needs Docker |
+| `crates/blastit-manifest/tests/critical_blastfile_parity.rs` | the exhaustive `ManifestWarning` `match` gains `EntrypointNotReached`; the five `contains("\"unused\"")` assertions become **exact sentence equality** for all five, plus a second file asserting the sixth's sentence | a `match` that compiles only with the arm, and five substring assertions replaced by six exact ones |
+| `crates/blastit-manifest/tests/critical_php_manifest.rs` | `php entry "index.php": …` → `php entry must be …` | adds `a_refusal_never_carries_the_php_entry_it_refused` (a DSN-shaped entry + a `$TOKEN`-shaped app, both asserted absent) |
+| `crates/blastit-manifest/tests/critical_blastfile_traits.rs` | `inline on a route` → `inline on a view`, `group "t"` → `trait "t"` | same rule, the design's nouns |
+| `crates/blastit-manifest/tests/critical_blastfile_errors.rs` | `lines.len() == errors.len() + 1` + header → `== errors.len()`, no header, no `  - `, no trailing newline, exact join | strictly more assertions on the §18 shape |
+| `crates/blastit-manifest/tests/critical_manifest_edit.rs`, `critical_manifest_edit_executor.rs` | `ProposedGrant { …, tables: Default::default(), functions: Default::default() }` | constructors only; every assertion untouched |
+| `crates/blastit/tests/critical_check_engine.rs` | `fix.to` values, the `add_group` → `trait connection` assertions, three test names, one new test (`the_body_finding_names_the_view_body_node_and_never_unvalidated`: exact `fix` objects, no `unvalidated`, no retired path prefix in the whole document) | locators are asserted exactly; the new test adds the §13.3 properties |
+| `crates/blastit/tests/critical_learn_executor_blocks.rs` | the two `ProposedGrant` constructors | constructors only |
+| `crates/blastit/tests/critical_raw_ingress.rs` | §10.2's sentence asserted **verbatim** (`REFUSAL`), `view "upload"` instead of `route`, `body raw unvalidated` instead of `allow_raw = true`, and `dev`'s warning asserted verbatim (`WARNING`, `#[cfg(feature = "python")]`) | the refusal is now pinned whole rather than by four substrings, plus a negative (`!refusal.contains("allow_raw")`) |
+| `python/tests/critical/test_check_contract.py` | `{"action": "add_query", "to": "view home postgres"}` | the documented locator, exactly |
 
-Two further facts make item 4 undecidable here, both real:
+Non-protected suites edited in place: `crates/blastit-manifest/src/{error,validate,lib}.rs` and its
+`tests/{validate,mutation_gaps,parse,blastfile_errors,blastfile_traits,edit_branches}.rs`,
+`crates/blastit/src/{audit_v1,check,dev_learn,cli,stage0}.rs`, `crates/blastit/tests/audit_group_hint.rs`,
+`crates/blastit-py/src/{lib,audit}.rs`, `python/blastit/pytest_plugin.py`,
+`docs/design/blastfile-dsl.md`, `docs/knowledge/LESSONS.md` (attempt 1's line).
 
-1. **`BlastfileEdits` cannot express fold's policy.** `ProposedGrant` is `{view, store, queries}`
-   (§14.5) — there is no table or function field, so `fold --prefer-tables` and the `functions`
-   grants it writes today have no `Blastfile` form. Re-pointing `fold` means either dropping a
-   documented flag (`docs/reference/cli.md:95`) or growing the editor's proposal type, which no
-   accepted doc authorises. That is an owner/planner decision, not an implementer's.
-2. **§13.2's acceptance grep cannot print nothing.** It greps for `passes the request body through
-   unvalidated` and `opens any outbound address`, which §13.2's own table says are re-spelled only in
-   the *prefix* (`body = "raw"`→`body raw`, `egress = true`→`egress any`). Either the acceptance
-   command is stale or the two sentences must change more than the table says.
-
-## 3. Proposed split (concrete)
-
-| New node | Scope | `paths` it needs |
-|---|---|---|
-| **4.3a** — the §13.2/§10.2/§11.3 sentence sweep, exactly as the design's tables spell it | the five `ManifestWarning` sentences + the new `EntrypointNotReached`, `raw_ingress_refusals`, `UnrestrictedGroup`; assert each string (not "a warning happened"), keep trigger/order/count | *existing* plus `crates/blastit/src/stage0.rs`, `crates/blastit-manifest/tests/{parse.rs,blastfile_errors.rs,blastfile_traits.rs}`, **`crates/blastit-manifest/tests/critical_blastfile_parity.rs`**, **`crates/blastit-manifest/tests/critical_blastfile_traits.rs`**, **`crates/blastit-manifest/tests/critical_php_manifest.rs`**, **`crates/blastit-manifest/tests/critical_manifest_011.rs`**, `python/tests/test_pytest_plugin.py` |
-| **4.3b** — §18's remaining contract | `ManifestErrors`' `Display` (one line per problem), `PhpEntryInvalid` stops echoing, the §13.2/§18 sentence assertions moved with 4.3a | the same test files as 4.3a's last row |
-| **4.3c** — fold/`_blastit.audit`/pytest-plugin cutover **and** the new PyO3 binding `blastfile_apply_edits(source, edits_json) -> str` | re-point `fold.py`'s reader/writer at the editor, delete its `tomllib` scan/verify, keep `--manifest PATH` and the never-literal/never-unrestricted/never-twice policy; `pytest_plugin.py`'s default and help text; `python/tests/{test_check,test_fold}.py`; `e2e/php2shell.py::check_learn` | `python/tests/**` (the whole tree, incl. the protected fold suite), `crates/blastit-py/tests/**`, `e2e/**`; **plus** a decision on `--prefer-tables`/`functions` under `BlastfileEdits` |
-
-Splitting that way keeps every acceptance command satisfiable by the node that owns it: 4.3a owns
-the first grep, 4.3b the `Display`/echo assertions, 4.3c the fold wall and the e2e case.
-
-## 4. Acceptance evidence (final tree)
-
-All commands in `/home/remy/offworld-nexus/blastit/.worktrees/release-0.2.0`, foreground, under
-`timeout`. `make check` was run **after the last edit**.
-
-### 5.1 `make test-critical` — exit 0, zero skips, 50 Python tests
+## 5. Acceptance evidence (final tree)
 
 ```console
-$ timeout 2400 make test-critical ; echo EXIT=$?
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+$ timeout 1800 make test-critical ; echo EXIT=$?
+test result: ok. 12 passed; 0 failed; … (the critical Rust tier)
 cargo build --locked -p blastit-py -p blastit-dbproxy --features blastit/python
 python -m unittest discover -s python/tests/critical
 ..................................................
-Ran 50 tests in 4.788s
+Ran 50 tests in 5.824s
 OK
 EXIT=0
-```
 
-### 5.2 The protected Python contract suite — 22 passed
+$ timeout 1800 env UV_OFFLINE=1 uv run --no-project --with pytest==9.2.0 python -m pytest \
+    python/tests/critical/test_check_contract.py python/tests/critical/test_fold_literals_and_atomic.py \
+    python/tests/test_fold.py python/tests/test_pytest_plugin.py -q
+161 passed, 39 skipped in 3.84s
 
-```console
-$ timeout 1200 env UV_OFFLINE=1 uv run --no-project --with pytest==9.2.0 \
-    python -m pytest python/tests/critical/test_check_contract.py -q
-......................                                                   [100%]
-22 passed in 4.03s
-```
+$ timeout 600 uv run --no-project tools/critical_guard.py --base 537eb2d --node MB.21.4.3 | tail -2
+critical-guard: OK: all 10 protected change(s) are authorized by node(s) MB.21.4.3
 
-(`LESSONS.md` records why this needs the in-tree `python/blastit/_blastit*.so` refreshed first: a bare
-`pytest` imports that built extension, and a stale one runs the previous commit's CLI. I refreshed it
-from `target/debug/lib_blastit.so`; it is gitignored build residue, not source.)
+$ timeout 900 cargo test -p blastit-manifest --locked    # 33 `test result: ok` blocks, 0 failed
 
-### 5.3 `critical_guard.py --base 537eb2d --node MB.21.4.3` — clean
+$ grep -rnE 'attached to no route|no grant in any route or group|may run any statement on proxy|body = "raw"|egress = true' \
+    crates/blastit-manifest/src/error.rs
+(no output; exit 1)
 
-```console
-$ timeout 600 uv run --no-project tools/critical_guard.py --base 537eb2d --node MB.21.4.3
-critical-guard: 537eb2d..working tree, 20 changed file(s)
-  M  crates/blastit/tests/critical_check_engine.rs  [authorized by crates/blastit/tests/critical_check_engine.rs]
-  M  python/tests/critical/test_check_contract.py  [authorized by python/tests/critical/test_check_contract.py]
-critical-guard: OK: all 2 protected change(s) are authorized by node(s) MB.21.4.3
-```
-
-No assertion was relaxed: the contract test's `fix` assertion now names the documented locator
-(`{"action": "add_query", "to": "view home postgres"}`), and `critical_check_engine` gained a test
-(§1) rather than losing one.
-
-### 5.4 `cargo test -p blastit-manifest --locked --test validate --test mutation_gaps` — green
-
-```console
-$ timeout 900 cargo test -p blastit-manifest --locked --test validate --test mutation_gaps
-running 21 tests   # mutation_gaps
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-running 30 tests   # validate
-test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-```
-
-### 5.5 The first grep — still prints, because §13.2 is blocked (§2)
-
-```console
-$ grep -rnE 'attached to no route|no grant in any route or group|may run any statement on proxy|passes the request body through unvalidated|opens any outbound address' \
-    crates/blastit-manifest/src/error.rs crates/blastit/tests/
-crates/blastit-manifest/src/error.rs:1556:        "group {} is attached to no route and no global groups: it grants nothing",
-crates/blastit-manifest/src/error.rs:1565:    #[error("proxy {} has no grant in any route or group: it is unusable", quoted(.proxy))]
-crates/blastit-manifest/src/error.rs:1574:        "route {} may run any statement on proxy {} (unrestricted = true)",
-crates/blastit-manifest/src/error.rs:1590:        "route {}: body = \"raw\" passes the request body through unvalidated",
-crates/blastit-manifest/src/error.rs:1600:        "route {}: egress = true opens any outbound address and port",
-crates/blastit/tests/critical_raw_ingress.rs:647:        stdout.contains("passes the request body through unvalidated"),
-crates/blastit/tests/critical_raw_ingress.rs:674:        stdout.contains("passes the request body through unvalidated"),
-```
-
-I drafted the five re-spellings and **reverted them**: without `EntrypointNotReached` (blocked) and
-without `raw_ingress_refusals` (blocked) the boot would say `view … body raw` while the production
-refusal still said `route … allow_raw = true`, and the `EgressRoute` re-spell turns
-`test_pytest_plugin.py` red — a regression in a suite this node cannot fix. No sentence moved.
-
-### 5.6 The second grep — prints nothing
-
-```console
 $ grep -rn 'blastit_manifest::edit::apply_edits\|edit::apply_edits' crates/ --include='*.rs'
 (no output; exit 1)
 
-$ grep -n 'blastfile::apply_edits\|write_atomic' crates/blastit/src/check.rs crates/blastit/src/dev_learn.rs
-crates/blastit/src/check.rs:994:        match blastit_manifest::blastfile::apply_edits(source, &plan.edits) {
-crates/blastit/src/check.rs:996:                match blastit_manifest::edit::write_atomic(&config.manifest, &edited) {
-crates/blastit/src/dev_learn.rs:464:        let edited = match apply_edits(&source, &edits) {
-crates/blastit/src/dev_learn.rs:472:            && let Err(err) = write_atomic(manifest, &edited)
-```
-
-(`dev_learn.rs:19` imports `blastit_manifest::blastfile::apply_edits`.)
-
-### 5.7 `make check` — exit 0
-
-```console
 $ timeout 5400 make check ; echo EXIT=$?
-guard: OK (15 staged/untracked file(s) checked)
-cargo fmt --all -- --check                                    # clean
-cargo clippy --workspace --all-targets … -- -D warnings        # Finished, 0 warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps …   # Finished, 0 warnings
-cargo test --workspace --all-targets --locked --features python # 166 `test result: ok`, 0 failed
-python -m unittest discover -s python/tests/critical           # Ran 50 tests, OK
-49 fences: 28 executed, 21 accounted, 0 failed · 25.9s
+guard: OK · critical-guard (report-only) · fmt clean · clippy 0 warnings · rustdoc 0 warnings
+cargo test --workspace --all-targets --locked --features python   # 166 `test result: ok`, 0 failed
+python -m unittest discover -s python/tests/critical              # Ran 50 tests, OK
+49 fences: 28 executed, 21 accounted, 0 failed · 18.7s
 … rs-no-python, seam-check, platform-matrix, workflow-check, packaging-gates, doc-tone,
-  manifest-purity (17 sources, no std::env) …
-uv run --no-project tools/plan.py validate
-plan OK
+  manifest-purity, plan-validate (plan OK) …
 EXIT=0
+
+$ timeout 1200 make docs-check
+uvx --offline zensical build --strict
+No issues found
+Build finished in 0.23s
 ```
 
-(166 `test result: ok` blocks, no `FAILED`; the only `warning:` line is cargo's pre-existing "doc tests
-are not supported for crate type(s) `cdylib`".)
+The two greps are the node's own: no retired warning fragment is left in `error.rs`, and no call site
+reaches the retired patcher. The design row and the struct agree (§1's (e)/(f) rows).
 
-## 6. Behaviour that changed, and its test
+## 6. Sentences that moved (for the docs sweep)
 
-| Change | Test |
-|---|---|
-| every `fix.to` is a Blastfile node locator; a named store appends its name | §1 |
-| `raw_ingress`'s `fix` names `view <view> [<METHOD>] body`, and no `fix` object carries `unvalidated` or a retired `[route.…]`/`[group.…]` path | `the_body_finding_names_the_view_body_node_and_never_unvalidated` |
-| a view's grant refusal says `view "x"`, not `view "x" (index 0)` | `validate::a_view_refusal_names_the_view_and_no_index`, `locations_read_well_in_errors` |
-| `cli.rs` prefixes the path by `ManifestError::position()`; `fmt` renders a path with `config::display_path` | `critical_blastfile_fmt`, `blastfile_discovery` |
-| `app: must be \`module:attribute\`` (the refused value is never echoed) | `mutation_gaps::a_refusal_never_carries_the_app_it_refused` |
-
-## 7. Files outside `paths`
-
-Only `docs/knowledge/LESSONS.md` (one line, §5.2's gotcha) and the gitignored build residue
-`python/blastit/_blastit*.so` (re-copied from `target/debug/lib_blastit.so` so a hand-run of the
-protected suite grades this tree). No `plan/` frontmatter was hand-edited; the `plan/` and
-`docs/research/` diffs in `git status` were already dirty when this attempt started.
+Moved here: the five §13.2 warnings + `EntrypointNotReached`, §10.2's production refusal,
+`UnrestrictedGroup`, `Location::Group`, `ManifestErrors`' `Display`, `PhpEntryInvalid`, `InvalidApp`
+(attempt 1). **`docs/reference/manifest.md:118,318`** still quote the old §13.2 spellings and are not in
+`paths` — a follow-up for `MB.21.5.1`, as the node says. The human-readable `check` lines
+(`route …`, `group session: …`) are unchanged, because `docs/ci.md` quotes them.
 
 ## Follow-ups
 
-- **`python/tests/test_check.py` is stale in a way that predates this attempt:** its `MANIFEST` and
-  `DJANGO_MANIFEST` are still TOML, its project writes `blastit.toml`, and `blastit check` now parses
-  only a `Blastfile` — the suite is `skipif(not DATABASE_URL)`, which is why nobody saw it. Its
-  `fix.to` assertion (line 224) is the old `[route.db].queries` form. It is `4.3c`'s, together with
-  `test_fold.py`; both need PostgreSQL or a rewritten fold to run.
-- **`docs/reference/manifest.md:118,318` and `docs/testing/AUDIT-MA.2.3.md:172` quote the sentences
-  that have not moved yet.** They become wrong exactly when `4.3a` lands; `MB.21.5.1` rewrites the
-  reference pages, so whoever lands `4.3a` should either move the quotes with it or note it there.
-- **`set_transaction_control`**: `docs/design/learn-single-pass.md` R18 pins a `fix.action` and
-  `fix.to == "[route.db].transaction_control"`; the 0.2.0 engine emits `observe` for transaction
-  control (`audit_v1`'s module doc says so). Not this leaf's, and not a `--json` v1 action today, but
-  the design page and the engine disagree — worth a planner's look before the v1 schema is frozen.
-- **`EntrypointNotReached` is still only a doc comment** (`model.rs:870`, `stage0.rs:317`,
-  `critical_blastfile_entrypoint.rs:100`). `4.3a` adds the variant; the scheduler parity suite's php
-  row should then assert it (§4.2's follow-up, still open).
+- **The Python cutover** — §3. It is the only remaining work in this node.
+- **`python/tests/project/`, `live_project/`** are still TOML fixtures (`MB.21.4.4`'s); once
+  `_blastit.audit` reads `Blastfile`, `test_pytest_plugin.py` and `test_plugin_helpers.py` need them
+  translated in the same change.
+- **`docs/reference/cli.md:95`** keeps `--manifest blastit.toml` in its example; it is `MB.21.5.1`'s,
+  and the *flags* it documents are unchanged (the ruling), so nothing here contradicts it.
+- **`set_transaction_control`** (`docs/design/learn-single-pass.md` R18) still names a `fix.action` the
+  0.2.0 engine does not emit (`observe`); a planner's decision, unrelated to this leaf.
