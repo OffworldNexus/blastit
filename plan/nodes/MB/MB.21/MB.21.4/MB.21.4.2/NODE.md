@@ -9,10 +9,6 @@ depends_on: [MB.21.4.1]
 paths:
   - "crates/blastit/src/**"
   - "crates/blastit/tests/**"
-  - crates/blastit/tests/critical_static_cli.rs
-  - crates/blastit/tests/critical_php_backend.rs
-  - crates/blastit/tests/no_python_build.rs
-  - crates/blastit/tests/critical_raw_ingress.rs
   - "crates/blastit-scheduler/src/**"
   - "crates/blastit-scheduler/tests/critical_static_entry.rs"
   - "crates/blastit-scheduler/tests/critical_static_assets.rs"
@@ -33,7 +29,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T08:04"
+updated: "2026-11-16T08:12"
 ---
 
 # Goal
@@ -44,6 +40,10 @@ away. This leaf is also where design §4.3's **removals** land — the four per-
 `SpaLost` → `fallback_missing` rename, §9.5/§9.6 over mounts, §9.2's precedence and the per-mount
 `immutable` caps — because they could not land while the retired reader was still the only caller
 (`MB.21.3.7`'s attempt 1, H-010).
+
+The fixtures are already `Blastfile`: `MB.21.4.1` cut the product over and translated every suite that
+boots the binary. This leaf translates **no fixture** — it adds the shapes a new capability needs and
+the parity proofs, nothing else.
 
 # Context
 
@@ -57,11 +57,13 @@ away. This leaf is also where design §4.3's **removals** land — the four per-
   * `prefork`, `egress any` (boot warning parity), a trait's grants (`use`), `postgres … unrestricted`
     (inline-only, warns), table/column grants and `query '…'`;
   * `HEAD` implied by `GET` through the scheduler's real matching (not only at parse time).
-- Suites: extend/replace fixtures in
-  `crates/blastit/tests/{critical_static_cli,critical_raw_ingress,critical_php_backend,critical_dev_and_fail_closed}.rs`
-  and add `crates/blastit/tests/critical_blastfile_parity.rs` as the one place the capability map is
-  enumerated. All are listed in `paths` deliberately; no assertion may be weakened, and `RESULT.md`
-  lists each fixture rewrite.
+- Suites: `crates/blastit/tests/critical_blastfile_parity.rs` is added as the one place the capability
+  map is enumerated, and an existing suite is extended only where a row needs a shape it does not have
+  (`critical_static_cli.rs`, `critical_raw_ingress.rs`, `critical_php_backend.rs` — all already
+  `Blastfile`, all already in `paths`). This leaf performs **no format translation**: `MB.21.4.1` owns
+  the fixture conversion for every suite it boots, `critical_config_and_presets.rs` included, so nothing
+  here renames a fixture file or rewrites a body from another format. No assertion may be weakened, and
+  `RESULT.md` lists each extension and each sentence whose subject changed.
 - Keep the scheduler untouched unless a real gap appears: `crates/blastit-scheduler` is in `paths` so
   the precedence work may land there if `body/plan_body` or the static pump genuinely needs it.
 - **The §4.3 removals, which are this leaf's work list** (`MB.21.3.7` deferred them; `paths` now covers
@@ -93,9 +95,9 @@ away. This leaf is also where design §4.3's **removals** land — the four per-
     and its caps move from per route to per mount (≤ 32 patterns, each ≤ 256 bytes), with the sentences
     naming the mount; §9.1's dotfile definition is applied to `check_static_index`: a dotfile segment
     is refused in `index`/`fallback` while `root "."` stays legal;
-  * the two retired-spelling sentences in `validate.rs` (`route … own sandbox`, "a root that names no
-    directory beneath `blastit.toml`") are re-spelled; their assertions live in the `crates/blastit/tests/*`
-    suites above, which is why this leaf owns them and 3.7 did not.
+  * the two retired-spelling sentences in `validate.rs` (the per-route sandbox sentence and the root
+    sentence that names the retired file) are re-spelled; their assertions live in the
+    `crates/blastit/tests/*` suites above, which is why this leaf owns them and 3.7 did not.
 
 # Acceptance
 
@@ -105,6 +107,7 @@ $ make rs-test
 $ uv run --no-project tools/critical_guard.py --base HEAD~1 --node MB.21.4.2
 $ grep -rnE 'Route::with_static|fn static_policy|fn with_static|SpaLost|static_forward' crates/ --include='*.rs'
 $ grep -rn 'route "site"\|route "app"' crates/blastit/tests/
+$ git diff --stat HEAD~1 -- '*.toml'
 $ make check
 ```
 
@@ -124,7 +127,10 @@ $ make check
    the per-view accessors go), and the second prints nothing: the static/PHP sentences name a mount or
    the entrypoint, and `RESULT.md` lists each one with its old and new subject.
 6. `make test-critical` exit 0 (zero skips) and `make check` exit 0.
-7. Any behavioural change beyond parsing is named in `RESULT.md` with the test that pins it; there are none
+7. This leaf translated no fixture: the third command prints nothing (no `.toml` manifest appears,
+   changes or disappears in this commit), every suite it touches already arrived as `Blastfile` from
+   `MB.21.4.1`, and `RESULT.md` names the fixtures it *extended* rather than converted.
+8. Any behavioural change beyond parsing is named in `RESULT.md` with the test that pins it; there are none
    silently.
 
 # Notes
@@ -133,9 +139,12 @@ $ make check
   in `docs/reference/manifest.md`'s replacement (`MB.21.5.1`).
 - If a case can only be proven in a container, say so and give the `e2e/` scenario name that covers it;
   `MB.21.4.4` owns that fixture.
-- Protected suites in `paths` are there to be **rewritten, never weakened**: every removed assertion is
+- Protected suites in `paths` are there to be **extended, never weakened**: every removed assertion is
   named in `RESULT.md` with the contract that replaced it, and `critical_guard.py --node MB.21.4.2` is
   clean. If a sentence genuinely loses its subject (a mount has no route name), that is a design
   decision already taken in §9.5/§9.6 — record the new subject, do not keep a dead noun.
 - `Manifest::php()` and `Manifest::with_php` stay (one entrypoint for the file). Only the per-view
   accessors go; a grep that also matches `Manifest::php` is the wrong grep.
+- A retired-name hit outside this leaf's `paths` goes in `RESULT.md` with the sibling that owns it
+  (`e2e/**`, `scripts/**`, `Makefile` → `MB.21.4.4`; the last Rust paths and the dependency →
+  `MB.21.4.5`); it does not widen itself.

@@ -33,8 +33,11 @@ After this epic no code path in the repository reads the retired format.
   `missing ./Blastfile` (or names `BLASTIT_MANIFEST`). Nothing in this epic classifies an input by
   format, no sentence explains a change to a user, and no entry point has a second file name to fall
   back on (boot, `dev`, `check`, `fmt`, `blastit-manifest fold`).
-- Ordering: `MB.21.4.1` discovery → `MB.21.4.2` runtime parity → `MB.21.4.3` `check`/`--learn`/`--json`
-  and the Python package → `MB.21.4.4` fixtures and Makefile → `MB.21.4.5` the Rust erasure sweep.
+- Ordering: `MB.21.4.1` the atomic cutover (one discovery function, `Blastfile` parsing at every entry
+  point, and every fixture `make check` reaches — translation and flip cannot be green apart) →
+  `MB.21.4.2` runtime parity and §4.3's removals → `MB.21.4.3` `check`/`--learn`/`--json` and the Python
+  package → `MB.21.4.4` the `e2e/`, script and Makefile fixtures, which takes `make e2e` green again →
+  `MB.21.4.5` the Rust erasure sweep.
   Only `MB.21.4.5` touches `Cargo.toml`/`Cargo.lock`, so the dependency removal cannot collide with a
   fixture rewrite.
 - Protected suites that encode the boot/learn contracts are rewritten to Blastfile fixtures with every
@@ -50,10 +53,10 @@ After this epic no code path in the repository reads the retired format.
 
 | Node | What | Depends |
 |---|---|---|
-| `MB.21.4.1` | `./Blastfile` discovery, `BLASTIT_MANIFEST`, the plain missing-file sentence at every entry point, no detection | `MB.21.3.6` |
-| `MB.21.4.2` | Runtime parity: precedence, ingress modes, executor, grants — protected end-to-end suites | `MB.21.4.1` |
+| `MB.21.4.1` | The atomic cutover: one discovery function, `Blastfile` parsing at every entry point, §15.1's sentences and exit codes, `fmt`'s re-parse, and every fixture `make check` reaches | `MB.21.3.6` |
+| `MB.21.4.2` | Runtime parity and design §4.3's removals: precedence, ingress modes, executor, grants — protected end-to-end suites, no fixture translation | `MB.21.4.1` |
 | `MB.21.4.3` | `check` / `dev --learn` / `--json` fix actions against Blastfile, plus the Python package (`fold`, the pytest plugin, the PyO3 editor binding) | `MB.21.4.2` |
-| `MB.21.4.4` | Every `e2e/` and `python/tests/` fixture and the Makefile's `docs-serve` stage on Blastfile — no deletion work | `MB.21.4.3` |
+| `MB.21.4.4` | The remaining `e2e/` and `python/tests/` fixtures, the scripts and the Makefile's `docs-serve` stage on Blastfile — `make e2e` green again, no deletion work | `MB.21.4.3` |
 | `MB.21.4.5` | The Rust erasure sweep: the reader, `Manifest::from_toml_str`, the TOML synthesis in `stage1`, the dependency, every mention | `MB.21.4.4` |
 
 # Acceptance
@@ -67,7 +70,8 @@ $ find e2e python/tests \( -name 'Blastfile' -o -name '*.toml' \) | sort
 ```
 
 1. Every child is `done` with evidence; `plan.py tree` shows no open child.
-2. `make check` exit 0 and `make e2e` exit 0.
+2. `make check` exit 0 and `make e2e` exit 0 — both are the epic gate's, and `make e2e` is red from
+   `MB.21.4.1`'s commit until `MB.21.4.4`, which is expected; no leaf weakens a gate to cover that gap.
 3. The `grep` above prints nothing: no retired file name as a path, a default, a fixture, a script line
    or a Makefile stage, and no test that names it next to a refusal either.
 4. The reader, the patcher and the dependency are gone — `Manifest::from_toml_str` no longer exists, no
@@ -81,7 +85,8 @@ $ find e2e python/tests \( -name 'Blastfile' -o -name '*.toml' \) | sort
 - Serialize on `Cargo.toml`/`Cargo.lock`: exactly one child (`MB.21.4.5`) owns both files, so no other
   leaf may add, remove or bump a dependency.
 - Keep the release honest: `docs/` still shows the retired openings until `MB.21.5.1`, and `make
-  docs-test` builds a wheel — if a docs fence breaks because the binary now wants `Blastfile`,
-  `MB.21.4.4` fixes the staged fixture, never the page.
+  docs-test` builds a wheel. `MB.21.4.1` moves the one page block the harness *executes*
+  (`docs/local.md`'s manifest) together with the staged file name; every other page stays `MB.21.5.1`'s,
+  and no leaf edits docs prose to make a fence pass.
 - A leaf that finds the retired name in a file its `paths` do not list records the hit in `RESULT.md`
   and names the sibling that owns it; it does not widen itself silently.

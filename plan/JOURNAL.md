@@ -2142,3 +2142,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T08:04 [MB.21.4.3] (planner) edited fields
 - 2026-11-16T08:04 [MB.21.5.2] (planner) edited fields
 - 2026-11-16T08:04 [MB.21.5.3] (planner) edited fields
+- 2026-11-16T08:05 [MB.21.4.1] (lead) status ready -> active
+- 2026-11-16T08:05 [MB.21.4.1] (lead) attempt 1/3 started
+- 2026-11-16T08:05 [MB.21.4.1] (lead) base b4c8344
+- 2026-11-16T08:11 [MB.21.4.1] (lead) needs_split at attempt 1: no code landed (only RESULT.md). Measured: (a) the flip breaks every crates/blastit/tests boot fixture (9 files) and every python/test
+- 2026-11-16T08:11 [MB.21.4.1] (lead) status active -> ready
+- 2026-11-16T08:12 [MB.21.4.1] (planner) edited fields
+- 2026-11-16T08:12 [MB.21.4.2] (planner) edited fields
+- 2026-11-16T08:13 [MB.21.4.4] (planner) edited fields
+- 2026-11-16T08:13 [MB.21.4.1] (planner) rescoped after attempt 1's needs_split: this leaf is now the atomic cutover. One discovery function (config::manifest_path pub(crate), cli::fmt_path deleted) ca
+- 2026-11-16T08:13 [MB.21.4.2] (planner) narrowed: runtime parity plus design 4.3's removals only. The fixture-translation framing (rewrite/replace fixtures in the crates/blastit/tests suites) is delet
+- 2026-11-16T08:13 [MB.21.4.4] (planner) narrowed to e2e/**, the python/tests fixtures MB.21.4.1 did not migrate, scripts/** and the Makefile, with make e2e exit 0 as the leaf gate. Context now records
+- 2026-11-16T08:13 [MB.21.4] (planner) rescoped children after MB.21.4.1's needs_split (no code landed, 9+6 fixtures made the flip and the translation inseparable): Children rows and the ordering sen
