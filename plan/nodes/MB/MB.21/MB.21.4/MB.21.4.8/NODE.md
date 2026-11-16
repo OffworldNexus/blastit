@@ -2,16 +2,16 @@
 id: MB.21.4.8
 title: "Bound the dev test client's response pairing: parse a response against its own request, close after a body, and deadline every wait with a small diagnostic"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.4]
 paths: [crates/blastit/tests/critical_dev_and_fail_closed.rs, docs/knowledge/LESSONS.md]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T14:44"
-updated: "2026-11-16T14:44"
+updated: "2026-11-16T16:28"
 ---
 
 # Goal

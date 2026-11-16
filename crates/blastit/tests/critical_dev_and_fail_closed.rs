@@ -19,8 +19,8 @@
 mod common;
 
 use std::fs;
-use std::io::{BufRead, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, ErrorKind, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
@@ -39,6 +39,19 @@ const GIB: u64 = 1024 * 1024 * 1024;
 const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a case waits for the process to exit.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one whole request/response exchange may take.
+///
+/// The budget covers the head, the declared body and the close that proves the
+/// pairing, so a stuck or desynchronised exchange fails inside it instead of
+/// handing a stale status to an assertion (`MB.21.4.8`).
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The most of a response head this client will read before calling it broken.
+const MAX_RESPONSE_HEAD: usize = 64 * 1024;
+/// The most of a response body this client will hold.
+const MAX_RESPONSE_BODY: usize = 16 * 1024 * 1024;
+/// How many stdout lines an exchange failure quotes back.
+const DIAGNOSTIC_TRAIL: usize = 12;
+
 /// How many times a launch is retried when another process takes the port
 /// `free_port()` handed out before the child can `bind` it (`EADDRINUSE`).
 ///
@@ -438,33 +451,30 @@ impl Dev {
         lines.into_iter().skip(start).take(3).collect()
     }
 
-    /// One HTTP/1.1 request answered in full.
+    /// One HTTP/1.1 request, answered by the response that belongs to it.
+    ///
+    /// Every exchange gets its own connection — one request, `Connection:
+    /// close`, and the socket is dropped when the exchange ends — and the reader
+    /// proves the pairing instead of trusting it: it parses the head on its own,
+    /// reads exactly the body the head declares, and refuses a buffer it cannot
+    /// prove complete (a short body, a deadline, a second response behind the
+    /// first). A failure names this request, the bounded bytes read and the
+    /// server's last lines, so a stale status can never reach an assertion
+    /// (`MB.21.4.8`).
     fn request(&self, method: &str, target: &str, body: Option<(&str, &str)>) -> Response {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap_or_else(|err| {
+        let stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap_or_else(|err| {
             panic!(
-                "connecting for {target}: {err}\nstdout:\n{}",
+                "connecting for {method} {target}: {err}\nstdout:\n{}",
                 self.stdout_text()
             )
         });
-        stream
-            .set_read_timeout(Some(Duration::from_secs(20)))
-            .unwrap();
-        let (content_type, payload) = match body {
-            Some((content_type, payload)) => (Some(content_type), payload),
-            None => (None, ""),
-        };
-        let mut request =
-            format!("{method} {target} HTTP/1.1\r\nHost: blastit.test\r\nConnection: close\r\n");
-        if let Some(content_type) = content_type {
-            request.push_str(&format!("Content-Type: {content_type}\r\n"));
-            request.push_str(&format!("Content-Length: {}\r\n", payload.len()));
+        match exchange(stream, method, target, body, EXCHANGE_TIMEOUT) {
+            Ok(response) => response,
+            Err(diagnostic) => panic!(
+                "{diagnostic}\nblastit dev stdout (last {DIAGNOSTIC_TRAIL} lines):\n{}",
+                tail(&self.stdout_text(), DIAGNOSTIC_TRAIL)
+            ),
         }
-        request.push_str("\r\n");
-        request.push_str(payload);
-        stream.write_all(request.as_bytes()).unwrap();
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).unwrap_or_default();
-        Response::parse(&raw)
     }
 
     fn get_json(&self, target: &str) -> serde_json::Value {
@@ -559,26 +569,317 @@ impl Drop for Dev {
 }
 
 /// A parsed HTTP response.
+#[derive(Debug)]
 struct Response {
     status: u16,
     body: String,
 }
 
-impl Response {
-    fn parse(raw: &[u8]) -> Self {
-        let text = String::from_utf8_lossy(raw);
-        let status = text
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|code| code.parse().ok())
-            .unwrap_or(0);
-        let body = text
-            .split_once("\r\n\r\n")
-            .map(|(_, body)| body.to_string())
-            .unwrap_or_default();
-        Self { status, body }
+/// How the head says the body is delimited.
+enum Framing {
+    /// `Content-Length: n`: exactly `n` bytes follow the head.
+    Length(usize),
+    /// No length at all: the body ends where the connection does.
+    ///
+    /// A chunked body takes this path too — the terminator is only provable
+    /// against the close that follows it here, and this suite's own app always
+    /// declares a length.
+    UntilClose,
+}
+
+/// Why a read stopped before the exchange could be proven complete.
+enum Fault {
+    /// The peer closed the connection.
+    Closed,
+    /// The deadline passed with the exchange unfinished.
+    Timeout,
+    /// The socket failed.
+    Io(String),
+}
+
+impl Fault {
+    fn describe(&self) -> String {
+        match self {
+            Self::Closed => "the peer closed the connection".to_string(),
+            Self::Timeout => "nothing arrived before the deadline".to_string(),
+            Self::Io(err) => format!("reading the response failed: {err}"),
+        }
     }
+}
+
+/// One request in flight: its own socket, one deadline, and the bytes read.
+struct Exchange<'a> {
+    stream: TcpStream,
+    deadline: Instant,
+    method: &'a str,
+    target: &'a str,
+    raw: Vec<u8>,
+}
+
+impl Exchange<'_> {
+    /// The diagnostic one failed exchange panics with.
+    ///
+    /// It names the request, what was still missing, the bytes actually read
+    /// (bounded and escaped) and the peer it read them from — never a whole
+    /// frame dump.
+    fn fail(&self, what: impl std::fmt::Display) -> String {
+        let peer = self
+            .stream
+            .peer_addr()
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|_| "an unknown peer".to_string());
+        format!(
+            "{} {}: {what}; {} response bytes read from {peer}: {}",
+            self.method,
+            self.target,
+            self.raw.len(),
+            preview(&self.raw)
+        )
+    }
+
+    /// Appends whatever arrives next, or says why the exchange cannot continue.
+    fn read_more(&mut self) -> Result<usize, Fault> {
+        loop {
+            let now = Instant::now();
+            if now >= self.deadline {
+                return Err(Fault::Timeout);
+            }
+            let remaining = (self.deadline - now).max(Duration::from_millis(1));
+            self.stream
+                .set_read_timeout(Some(remaining))
+                .map_err(|err| Fault::Io(err.to_string()))?;
+            let mut chunk = [0u8; 8192];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err(Fault::Closed),
+                Ok(read) => {
+                    self.raw.extend_from_slice(&chunk[..read]);
+                    return Ok(read);
+                }
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return Err(Fault::Timeout);
+                }
+                Err(err) => return Err(Fault::Io(err.to_string())),
+            }
+        }
+    }
+}
+
+/// One request and the response that belongs to it (`MB.21.4.8`).
+///
+/// `stream` is this request's own connection: one request goes out, and it is
+/// closed when the exchange ends, so nothing can be pipelined behind the
+/// response and no body-carrying request can ever leave a connection to be
+/// reused. The reader proves the pairing rather than trusting it — the head is
+/// parsed on its own, the declared body is read exactly, and everything after
+/// it must be the close — so a short, stale or desynchronised buffer is an
+/// `Err` naming this request, never a status an assertion reads as the
+/// server's answer.
+fn exchange(
+    mut stream: TcpStream,
+    method: &str,
+    target: &str,
+    body: Option<(&str, &str)>,
+    budget: Duration,
+) -> Result<Response, String> {
+    let (content_type, payload) = match body {
+        Some((content_type, payload)) => (Some(content_type), payload),
+        None => (None, ""),
+    };
+    let mut request =
+        format!("{method} {target} HTTP/1.1\r\nHost: blastit.test\r\nConnection: close\r\n");
+    if let Some(content_type) = content_type {
+        request.push_str(&format!("Content-Type: {content_type}\r\n"));
+        request.push_str(&format!("Content-Length: {}\r\n", payload.len()));
+    }
+    request.push_str("\r\n");
+    request.push_str(payload);
+    let written = stream
+        .set_write_timeout(Some(budget))
+        .and_then(|()| stream.write_all(request.as_bytes()));
+    if let Err(err) = written {
+        return Err(format!(
+            "{method} {target}: sending {} request bytes failed: {err}",
+            request.len()
+        ));
+    }
+    let mut exchange = Exchange {
+        stream,
+        deadline: Instant::now() + budget,
+        method,
+        target,
+        raw: Vec::new(),
+    };
+
+    // 1. The head, on its own: a status line is not a response.
+    let head_end = loop {
+        if let Some(at) = head_end_of(&exchange.raw) {
+            break at;
+        }
+        if exchange.raw.len() > MAX_RESPONSE_HEAD {
+            return Err(exchange.fail(format!("no complete head inside {MAX_RESPONSE_HEAD} bytes")));
+        }
+        exchange.read_more().map_err(|fault| {
+            exchange.fail(format!("the head is incomplete: {}", fault.describe()))
+        })?;
+    };
+    let (status, framing) = parse_head(&exchange.raw[..head_end])
+        .map_err(|err| exchange.fail(format!("the head is unusable: {err}")))?;
+
+    // 2. Exactly the body the head declared, or the close that declares it over.
+    let body = match framing {
+        Framing::Length(len) => {
+            if len > MAX_RESPONSE_BODY {
+                return Err(exchange.fail(format!(
+                    "the head declares {len} body bytes, over {MAX_RESPONSE_BODY}"
+                )));
+            }
+            while exchange.raw.len() - head_end < len {
+                let read = exchange.raw.len() - head_end;
+                exchange.read_more().map_err(|fault| {
+                    exchange.fail(format!(
+                        "{read} of {len} declared body bytes arrived, then {}",
+                        fault.describe()
+                    ))
+                })?;
+            }
+            exchange.raw[head_end..head_end + len].to_vec()
+        }
+        Framing::UntilClose => {
+            loop {
+                let read = exchange.raw.len() - head_end;
+                if read > MAX_RESPONSE_BODY {
+                    return Err(
+                        exchange.fail(format!("the body is over {MAX_RESPONSE_BODY} bytes"))
+                    );
+                }
+                match exchange.read_more() {
+                    Ok(_) => {}
+                    // The close is what declares this body complete.
+                    Err(Fault::Closed) => break,
+                    Err(fault) => {
+                        return Err(exchange.fail(format!(
+                            "the body is unproven after {read} bytes: {}",
+                            fault.describe()
+                        )));
+                    }
+                }
+            }
+            exchange.raw[head_end..].to_vec()
+        }
+    };
+
+    // 3. Nothing may follow the response this request was answered with.
+    if let Framing::Length(len) = framing {
+        let end = head_end + len;
+        if exchange.raw.len() > end {
+            let extra = exchange.raw.len() - end;
+            return Err(exchange.fail(format!(
+                "{extra} more bytes followed the declared body: the pairing is desynchronised"
+            )));
+        }
+        match exchange.read_more() {
+            Ok(read) => {
+                return Err(exchange.fail(format!(
+                    "{read} more bytes followed the declared body: the pairing is \
+                     desynchronised"
+                )));
+            }
+            Err(Fault::Closed) => {}
+            Err(fault) => {
+                return Err(exchange.fail(format!(
+                    "the connection did not end after the declared body: {}",
+                    fault.describe()
+                )));
+            }
+        }
+    }
+    // The exchange is over: nothing of it is left to reuse.
+    let _ = exchange.stream.shutdown(Shutdown::Both);
+    Ok(Response {
+        status,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    })
+}
+
+/// Where the head ends, if its blank line has arrived.
+fn head_end_of(raw: &[u8]) -> Option<usize> {
+    raw.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|at| at + 4)
+}
+
+/// The status and the body framing of one complete head.
+fn parse_head(head: &[u8]) -> Result<(u16, Framing), String> {
+    let text = String::from_utf8_lossy(head);
+    let mut lines = text.split("\r\n");
+    let status_line = lines.next().unwrap_or_default();
+    let mut parts = status_line.split_whitespace();
+    let version = parts.next().unwrap_or_default();
+    let code = parts.next().unwrap_or_default();
+    if !version.starts_with("HTTP/1.") {
+        return Err(format!("`{status_line}` is not an HTTP/1.x status line"));
+    }
+    if code.len() != 3 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("`{status_line}` has no three-digit status"));
+    }
+    let status: u16 = code
+        .parse()
+        .map_err(|err| format!("`{code}` is not a status: {err}"))?;
+
+    let mut declared: Option<usize> = None;
+    let mut chunked = false;
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(format!("`{line}` is not a header"));
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            if declared.is_some() {
+                return Err("the head declares a length twice".to_string());
+            }
+            declared = Some(
+                value
+                    .parse()
+                    .map_err(|err| format!("`Content-Length: {value}` is not a length: {err}"))?,
+            );
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") && value.eq_ignore_ascii_case("chunked") {
+            chunked = true;
+        }
+    }
+    match (declared, chunked) {
+        (Some(_), true) => Err("the head carries two body framings".to_string()),
+        (Some(len), false) => Ok((status, Framing::Length(len))),
+        (None, _) => Ok((status, Framing::UntilClose)),
+    }
+}
+
+/// A bounded, printable view of the bytes read so far.
+fn preview(raw: &[u8]) -> String {
+    let mut text = String::new();
+    for byte in raw.iter().take(200) {
+        match byte {
+            b'\r' => text.push_str("\\r"),
+            b'\n' => text.push_str("\\n"),
+            b'\\' => text.push_str("\\\\"),
+            0x20..=0x7e => text.push(char::from(*byte)),
+            _ => text.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    if raw.len() > 200 {
+        text.push_str("...");
+    }
+    text
+}
+
+/// The last `count` lines of `text`, for a panic that stays readable.
+fn tail(text: &str, count: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(count)..].join("\n")
 }
 
 /// A fresh `0755` fixture directory holding `Blastfile` and `app.py`.
@@ -763,6 +1064,131 @@ fn database_url(server: &MockPgServer) -> String {
         "postgresql://real-user:real-secret@127.0.0.1:{}/shop?sslmode=disable",
         server.port()
     )
+}
+
+/// A one-shot listener that answers one exchange with `script`, and its port.
+///
+/// Bound rather than probed, so the port is the one this exchange reaches: the
+/// pairing under test must not be able to become a lost-port race.
+fn answering_once(script: impl FnOnce(&mut TcpStream) + Send + 'static) -> (u16, JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a listener on an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("the listener's address")
+        .port();
+    let handler = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("one connection");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .expect("a write timeout");
+        script(&mut stream);
+    });
+    (port, handler)
+}
+
+/// Drives [`exchange`] against `script` and returns its answer.
+fn ask_once(
+    script: impl FnOnce(&mut TcpStream) + Send + 'static,
+    budget: Duration,
+) -> Result<Response, String> {
+    let (port, handler) = answering_once(script);
+    let answer = exchange(
+        TcpStream::connect(("127.0.0.1", port)).expect("a connection to the listener"),
+        "POST",
+        "/env",
+        Some(("text/plain", "hello")),
+        budget,
+    );
+    handler.join().expect("the one-shot listener's thread");
+    answer
+}
+
+/// The dev client answers only with the response it can prove belongs to it.
+///
+/// `MB.21.4.8`: the helper used to `read_to_end` and parse the first status line
+/// of whatever arrived — `unwrap_or_default` swallowed the timeout or reset and
+/// kept the bytes — so a response cut short, a second response behind the first
+/// or a peer that never answered all handed a status to the assertion that the
+/// server never sent. Every leg below is one of those shapes: the first is the
+/// allowed one (a complete response split across writes is read in full), the
+/// rest must fail with a diagnostic naming the request instead of answering.
+#[test]
+fn the_dev_client_only_answers_with_the_response_it_can_prove() {
+    // Allowed: a complete head and its declared body, split across two writes.
+    let complete = ask_once(
+        |stream| {
+            stream
+                .write_all(
+                    b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 18\r\n\
+                      Connection: close\r\n\r\ncontent ",
+                )
+                .expect("the head and part of the body");
+            std::thread::sleep(Duration::from_millis(20));
+            stream
+                .write_all(b"too large\n")
+                .expect("the rest of the body");
+            let _ = stream.shutdown(Shutdown::Write);
+        },
+        Duration::from_secs(10),
+    )
+    .expect("a complete response is read in full");
+    assert_eq!(complete.status, 413);
+    assert_eq!(complete.body, "content too large\n");
+
+    // Denied: the peer closes one byte short of its declared body.
+    let short = ask_once(
+        |stream| {
+            stream
+                .write_all(b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 18\r\n\r\ncontent too large")
+                .expect("a short body");
+            let _ = stream.shutdown(Shutdown::Write);
+        },
+        Duration::from_secs(10),
+    )
+    .expect_err("a body the head declared and the peer did not send is not a response");
+    assert!(short.contains("/env"), "the diagnostic names it: {short}");
+    assert!(
+        short.contains("17 of 18"),
+        "the diagnostic counts the body it did not get: {short}"
+    );
+
+    // Denied: a second response follows the declared body, which is exactly what
+    // a reused keep-alive connection looks like when a refusal is left unread.
+    let desynchronised = ask_once(
+        |stream| {
+            stream
+                .write_all(
+                    b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 18\r\n\r\ncontent too large\n\
+                      HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\":true}",
+                )
+                .expect("two responses on one connection");
+            let _ = stream.shutdown(Shutdown::Write);
+        },
+        Duration::from_secs(10),
+    )
+    .expect_err("a response with another one behind it cannot be paired");
+    assert!(
+        desynchronised.contains("more bytes followed"),
+        "the diagnostic names the desynchronisation: {desynchronised}"
+    );
+
+    // Denied: the peer says nothing at all, so the deadline must fire — and fire
+    // inside the budget, with the request named, instead of reading status 0.
+    let started = Instant::now();
+    let silent = ask_once(
+        |_stream| std::thread::sleep(Duration::from_secs(1)),
+        Duration::from_millis(300),
+    )
+    .expect_err("an exchange nobody answered is not an answer");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the deadline is a bound, not a hint: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        silent.contains("before the deadline") && silent.contains("/env"),
+        "the diagnostic names the deadline and the request: {silent}"
+    );
 }
 
 #[test]

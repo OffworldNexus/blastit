@@ -43,3 +43,7 @@ Owner directive — make Blastfile budgets comfortable across code + reference +
 ## 2026-11-16T11:43 [lead]
 
 FLAKE #2 for conductor: crates/blastit/tests/critical_dev_and_fail_closed failed once under load during MB.21.4.2's gate and passed 3/3 in isolation. Same class as the blastit-view 1s frame-budget flake. Both are outside this epic's paths; neither is being papered over — each gate re-runs once and logs it. The MB.21 gate needs these two stabilised or explicitly waived by the conductor before a repeated full-tree make check can be trusted
+
+## 2026-11-16T16:09 [lead]
+
+HOST CONDITION for the epic gate: the machine is at ~91% MemTotal used by another project, above BLASTIT_MEM_HIGH_WATERMARK=85, so every blastit-dev-booting case refuses at boot by design (LESSONS: above-watermark refuses with 'memory: X of Y used' rather than serving 503s). MB.21.4.4's two failing cases are exactly those. The epic gate's make check must be run when the host drops below the watermark, or the two exclusions documented with the /proc/meminfo reading and the sub-lead's evidence

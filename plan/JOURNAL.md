@@ -2263,3 +2263,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T16:07 [MB.21.4.5] (lead) paths widened before dispatch: crates/blastit-sqlpolicy/src/tables.rs::TableGrants::to_toml still renders the retired [route.db.tables] snippet (MB.21.4.7's fol
 - 2026-11-16T16:08 [MB.21.4.4] (lead) HOST CONDITION at commit time: this machine is at 44/48 GiB used by another project (orange-poc procrastinate workers, PIDs 1493095-97/1666738-53), MemAvailable
 - 2026-11-16T16:08 [MB.21.4.4] (lead) status review -> done
+- 2026-11-16T16:08 [MB.21.4.4] (lead) commit c228390
+- 2026-11-16T16:09 [MB.21.4.8] (lead) status ready -> active
+- 2026-11-16T16:09 [MB.21.4.8] (lead) attempt 1/3 started
+- 2026-11-16T16:09 [MB.21.4.8] (lead) base c228390; host note: this machine is at 92% memory used by another project, so two host-memory cases in the same file fail for reasons unrelated to this lea
+- 2026-11-16T16:09 [MB.21] (lead) HOST CONDITION for the epic gate: the machine is at ~91% MemTotal used by another project, above BLASTIT_MEM_HIGH_WATERMARK=85, so every blastit-dev-booting cas
+- 2026-11-16T16:28 [MB.21.4.8] (lead) evidence: the client defect is real and fixed (regression test fails on the old reader), 20/20 under load; the residual 200-vs-413 is a PRODUCT race, hypothesis
+- 2026-11-16T16:28 [MB.21.4.8] (lead) status active -> done
