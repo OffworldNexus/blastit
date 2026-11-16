@@ -2,7 +2,7 @@
 id: MB.21.4.5
 title: "Erase the retired manifest format from Rust: delete the reader, the TOML synthesis in stage1, the toml dependency and every remaining mention"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.21.4.4]
 paths:
@@ -44,7 +44,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T02:16"
-updated: "2026-11-16T16:58"
+updated: "2026-11-16T20:35"
 ---
 
 # Goal

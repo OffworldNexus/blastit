@@ -2352,3 +2352,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T19:00 [MB.21.4.10] (planner) amendment 2 (measured surface folded in): the renderer is substantive, not a verification - tables.rs:504 to_toml(&self, prefix) renders [route.db.tables] + x =
 - 2026-11-16T19:01 [MB.21.4.10] (planner) amendment 2, corrections with measurement: (a) crates/blastit-sqlpolicy/tests/critical_policy_surface.rs:740,761 is a PROTECTED caller of to_toml and must be re
 - 2026-11-16T19:01 [MB.21.4] (planner) MB.21.4.10 amended twice before dispatch: (1) it renames the report key table_grants.toml to table_grants.blastfile per the owner rule, (2) measured surface fol
+- 2026-11-16T20:35 [MB.21.4.5] (lead) gate (lead): greps empty, cargo tree toml=0, ^mod parse; empty, parse.rs gone, Cargo.lock -55 only; sub-lead ran make check (165 ok) and make e2e (exit 0, 1115 
+- 2026-11-16T20:35 [MB.21.4.5] (lead) status ready -> done

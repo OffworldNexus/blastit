@@ -23,3 +23,11 @@ split: the leaf's planned remainder (src/{model,lib,edit,routing,validate} + tes
 ## 2026-11-16T16:58 [planner]
 
 edited fields
+
+## 2026-11-16T20:35 [lead]
+
+gate (lead): greps empty, cargo tree toml=0, ^mod parse; empty, parse.rs gone, Cargo.lock -55 only; sub-lead ran make check (165 ok) and make e2e (exit 0, 1115 lines) at f390bd2; test-curator mutants: validate+error 77.2%, routing 77.3%, lower 93.0% (docs/testing/AUDIT-MB-21-4-5.md); 9/9 protected changes authorized. Acceptance item 2's 'git grep mod parse' over-matches 'mod parser;' — anchored form is empty, recorded.
+
+## 2026-11-16T20:35 [lead]
+
+status ready -> done
