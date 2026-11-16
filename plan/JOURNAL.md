@@ -2211,3 +2211,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T11:31 [MB.21.4.2] (lead) status ready -> review
 - 2026-11-16T11:43 [MB.21.4.2] (lead) reviewer PASS (round 2). Gate flake noted: dev_boots_five_unprivileged_roles_and_strips_secrets failed once inside the full make check (POST /env answered 200 w
 - 2026-11-16T11:43 [MB.21.4.2] (lead) status review -> done
+- 2026-11-16T11:43 [MB.21.4.2] (lead) commit 537eb2d
+- 2026-11-16T11:43 [MB.21.4.3] (lead) status ready -> active
+- 2026-11-16T11:43 [MB.21.4.3] (lead) attempt 1/3 started
+- 2026-11-16T11:43 [MB.21.4.3] (lead) base 537eb2d; note: MB.21.4.1 already re-pointed check --learn and dev --learn at blastfile::apply_edits and renamed the PyO3 check binding's parse, so this lea
+- 2026-11-16T11:43 [MB.21] (lead) FLAKE #2 for conductor: crates/blastit/tests/critical_dev_and_fail_closed failed once under load during MB.21.4.2's gate and passed 3/3 in isolation. Same class
+- 2026-11-16T12:16 [MB.21.4.3] (planner) edited fields
+- 2026-11-16T12:17 [MB.21.4.3] (planner) re-scoped after attempt 1 returned needs_split (paths + design defect, not size). paths widened to crates/blastit/src/stage0.rs, crates/blastit-manifest/tests/*

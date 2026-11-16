@@ -39,3 +39,7 @@ INCIDENT (MB.21.4.1): implementer wedged 1002s on an unwrapped 'background: true
 ## 2026-11-16T09:09 [conductor]
 
 Owner directive — make Blastfile budgets comfortable across code + reference + design: raise MAX_SOURCE_BYTES from 1 MiB to 16 MiB (16_777_216), MAX_TOKENS and MAX_TRIVIA to 4_194_304, MAX_PATTERN_BYTES from 256 to 4_096, MAX_LIST_ITEMS from 256 to 4_096, and app name length cap from 64 to 256 chars; also remove the false 'split the file' suggestion from token/trivia refusal messages since Blastfile has no multi-file include.
+
+## 2026-11-16T11:43 [lead]
+
+FLAKE #2 for conductor: crates/blastit/tests/critical_dev_and_fail_closed failed once under load during MB.21.4.2's gate and passed 3/3 in isolation. Same class as the blastit-view 1s frame-budget flake. Both are outside this epic's paths; neither is being papered over — each gate re-runs once and logs it. The MB.21 gate needs these two stabilised or explicitly waived by the conductor before a repeated full-tree make check can be trusted
