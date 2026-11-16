@@ -2348,3 +2348,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T19:00 [MB.21.4.5.6] (lead) review PASS (attempt 2). pre-commit: plan.py validate OK; guard.py OK; make check exit 0 (165 'test result: ok', run by the reviewer on this tree); critical_gua
 - 2026-11-16T19:00 [MB.21.4.5.6] (lead) status active -> review
 - 2026-11-16T19:00 [MB.21.4.5.6] (lead) status review -> done
+- 2026-11-16T19:00 [MB.21.4.10] (planner) edited fields
+- 2026-11-16T19:00 [MB.21.4.10] (planner) amendment 2 (measured surface folded in): the renderer is substantive, not a verification - tables.rs:504 to_toml(&self, prefix) renders [route.db.tables] + x =
+- 2026-11-16T19:01 [MB.21.4.10] (planner) amendment 2, corrections with measurement: (a) crates/blastit-sqlpolicy/tests/critical_policy_surface.rs:740,761 is a PROTECTED caller of to_toml and must be re
+- 2026-11-16T19:01 [MB.21.4] (planner) MB.21.4.10 amended twice before dispatch: (1) it renames the report key table_grants.toml to table_grants.blastfile per the owner rule, (2) measured surface fol
