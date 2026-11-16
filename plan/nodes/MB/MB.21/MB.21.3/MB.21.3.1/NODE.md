@@ -16,11 +16,12 @@ paths:
   - "crates/blastit-manifest/tests/critical_blastfile_errors.rs"
   - scripts/check_manifest_purity.py
   - scripts/test_manifest_purity.py
+  - Makefile
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T02:16"
+updated: "2026-11-16T02:41"
 ---
 
 # Goal
@@ -48,6 +49,9 @@ and the CST can each consume the same stream.
   kind, CRLF and comment-at-EOF, `#` inside a raw string stays literal, `'don''t'` style SQL stays one
   token, `$DATABASE_URL` one token, `$1` and `$?` are not `$IDENT`, plus the whole deny list above
   asserting the position, not just the message.
+- `scripts/check_manifest_purity.py` (with its `scripts/test_manifest_purity.py` self-test) refuses
+  `std::env` under `crates/blastit-manifest/src/` (§20 R20/R24); wire it into `make check` with one
+  line, which is why `Makefile` is in this leaf's `paths`. It must be green when you report.
 
 # Acceptance
 
@@ -63,8 +67,9 @@ $ make check
    exact `line:col`; the suite includes at least one > 100 KiB input that lexes in one pass.
 2. Comments and blank lines survive the token stream (a test prints them back unchanged).
 3. `make check` exit 0; no existing manifest test changed behaviour.
-4. Files: `crates/blastit-manifest/src/blastfile/{mod,lexer}.rs`, the `lib.rs` module registration,
-   and the one new protected suite (≤ 5 files, ≤ 600 changed lines).
+4. Files: `crates/blastit-manifest/src/blastfile/{mod,lexer,tokens}.rs`, the `lib.rs` module
+   registration, the one new protected suite, `scripts/check_manifest_purity.py` with its self-test, and
+   the single `Makefile` line that runs it (≤ 8 files, ≤ 600 changed lines).
 
 # Notes
 

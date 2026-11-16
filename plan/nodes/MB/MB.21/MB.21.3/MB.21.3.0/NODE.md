@@ -2,7 +2,7 @@
 id: MB.21.3.0
 title: "Model parity (a): Manifest name/mounts/php/equivalent, StaticMount, Route.sandbox, MountTable, uid by sandbox, StaticPolicy::fallback"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.2]
@@ -25,11 +25,11 @@ paths:
   - "crates/blastit-manifest/tests/edit_branches.rs"
   - "crates/blastit-manifest/tests/grants.rs"
   - "crates/blastit-manifest/tests/common/mod.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T02:15"
-updated: "2026-11-16T02:15"
+updated: "2026-11-16T03:05"
 ---
 
 # Goal
@@ -44,7 +44,11 @@ running product:
 - `Manifest::equivalent(&self, other) -> bool` compares every field **except** `route_lines` (§4.3,
   used by `fmt`'s postcondition, `--learn`'s `verify`, and the parity oracle).
 - `StaticMount { prefix, policy }`, exported from the crate root.
-- `StaticPolicy` gains `fallback: Option<String>` and loses `spa: bool` (§9.3).
+- `StaticPolicy` is **not** touched in this leaf: `spa` stays exactly as it is and the new
+  `fallback: Option<String>` field, with the removal of `spa: bool`, is `MB.21.3.7`'s (§9.3). Every
+  `StaticPolicy { … }` literal in the workspace lives in a file of that leaf's list (the scheduler's
+  `route.rs` and its `static_fixture.rs`, `critical_rewrite.rs`, the two manifest suites), so adding the
+  field here would leave the workspace red outside this leaf's paths.
 - `Route` gains `sandbox: u32` plus `Route::with_sandbox`; `UidLayout` and `check_uids` number by
   **sandbox**, so several endpoints of one `view` share one uid (§2.3, §7.3).
 - `routing::MountTable` and `MountTable::lookup`: segment-boundary prefix matching, longest prefix wins
@@ -65,6 +69,10 @@ suites that assert the old accessors). The plan tool has no letter-suffixed ids,
   `MB.21.3.7`'s job. Here you land the new surface and rewrite this crate's own tests. Where a removal
   would break a crate outside this leaf, keep one **temporary inherent method** that reads the new
   field, name every such bridge in `RESULT.md`, and `MB.21.3.7` deletes it.
+- **The bridge this leaf keeps.** The per-view `static`/`php` fields and their four accessors stay as
+  they are, and `src/parse.rs` fills them *and* the new `Manifest.mounts`/`Manifest.php` from the same
+  TOML source, so today's runtime reads one answer either way. `RESULT.md` names each bridge with its
+  deletion owner (`MB.21.3.7`), and no new code outside this crate may start reading the old accessors.
 - **The retired reader keeps working.** `src/parse.rs` is deleted by `MB.21.4.5`, so in this leaf it
   must produce the new model: a `[route.static]` block becomes a `StaticMount` whose `prefix` is that
   mount's own literal path; `spa = true` lowers to `fallback = Some(index)`. The assertions in
@@ -94,8 +102,9 @@ $ make check
    equality.
 4. `MountTable` matches only on a segment boundary and prefers the longest prefix (`/assets`,
    `/assets/v2`, `/assets-secret` table test, both directions).
-5. `StaticPolicy` has `fallback: Option<String>` and no `spa`; the retired reader lowers `spa = true`
-   to `fallback = Some(index)`.
+5. `StaticPolicy` and every existing literal of it compile unchanged: this leaf adds no field to it and
+   the retired reader keeps its `spa` handling byte for byte. The new `fallback: Option<String>` field and
+   the removal of `spa: bool` are `MB.21.3.7`'s (§9.3), whose `# Acceptance` restates this item.
 6. `make check` exit 0, and no TOML code path was removed: `grep -n '^toml' crates/blastit-manifest/Cargo.toml`
    still prints the dependency.
 

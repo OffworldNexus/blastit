@@ -685,6 +685,10 @@ fn has_parent_segment(value: &str) -> bool {
 }
 
 /// The uid table must stay below [`UidLayout::MAX_UID_EXCLUSIVE`] (§2).
+///
+/// Routes are numbered by **sandbox**, not by position: several routes of one
+/// `view` share one uid, so the table's reach is the highest sandbox id and the
+/// error names the route that carries it (§7.3).
 fn check_uids(manifest: &Manifest, base: u32, errors: &mut Vec<ManifestError>) {
     let layout = UidLayout::new(base);
     if layout.dbproxy() >= UidLayout::MAX_UID_EXCLUSIVE {
@@ -694,11 +698,16 @@ fn check_uids(manifest: &Manifest, base: u32, errors: &mut Vec<ManifestError>) {
             max: UidLayout::MAX_UID_EXCLUSIVE,
         });
     }
-    if let Some(last) = manifest.route_count().checked_sub(1) {
-        let uid = layout.view(last);
+    let highest = manifest
+        .routes()
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, route)| route.sandbox());
+    if let Some((index, route)) = highest {
+        let uid = layout.sandbox(route.sandbox());
         if uid >= UidLayout::MAX_UID_EXCLUSIVE {
             errors.push(ManifestError::TooManyRoutes {
-                index: last,
+                index,
                 uid,
                 base,
                 max: UidLayout::MAX_UID_EXCLUSIVE,

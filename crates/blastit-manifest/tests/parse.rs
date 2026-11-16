@@ -966,3 +966,77 @@ fn fastcgi_is_an_ordinary_unknown_route_key_and_the_php_twin_parses() {
         "public/index.php"
     );
 }
+
+//
+// The retired reader's bridge into the Blastfile model (§4.3, §9.1, §12.2).
+// It fills the per-route blocks it has always filled *and* `Manifest.mounts` /
+// `Manifest.php`, so a caller that reads either one sees the same document
+// until the per-route pair is deleted with the reader.
+//
+
+/// A `[route.static]` block becomes a mount at the URL root, carrying the same
+/// policy the route carries.
+#[test]
+fn a_static_block_fills_the_mount_list_beside_the_route() {
+    let manifest = Manifest::from_toml_str(
+        "version = 1\n\
+         [[route]]\nname = \"site\"\npath = ['.*']\n\
+         [route.static]\nroot = \"public\"\nindex = \"app.html\"\nspa = true\n\
+         immutable = [\"/assets/*\"]\n",
+    )
+    .expect("the manifest parses");
+
+    let policy = manifest
+        .route(0)
+        .expect("route 0")
+        .static_policy()
+        .expect("the per-route block");
+    assert_eq!(manifest.mounts().len(), 1);
+    let mount = &manifest.mounts()[0];
+    assert_eq!(mount.prefix, "/", "the retired format has no prefix");
+    assert_eq!(&mount.policy, policy, "the two answers disagree");
+    assert!(mount.policy.spa, "spa is carried byte for byte");
+    assert_eq!(mount.policy.root, "public");
+    assert_eq!(mount.policy.index, "app.html");
+}
+
+/// A `[route.php]` block fills the one manifest-level front controller, and the
+/// route keeps its own block.
+#[test]
+fn a_php_block_fills_the_manifest_front_controller() {
+    let manifest = Manifest::from_toml_str(
+        "version = 1\n\
+         [[route]]\nname = \"app\"\npath = ['.*']\n\
+         [route.php]\nentry = \"public/index.php\"\nworkers = 4\n",
+    )
+    .expect("the manifest parses");
+
+    let route_php = manifest.route(0).expect("route 0").php();
+    assert_eq!(manifest.php(), route_php, "the two answers disagree");
+    let php = manifest.php().expect("the front controller");
+    assert_eq!(php.entry, "public/index.php");
+    assert_eq!(php.workers, Some(4));
+}
+
+/// A document with neither block fills neither field, and the retired format
+/// has no application name to carry.
+#[test]
+fn a_plain_document_fills_no_mount_no_front_controller_and_no_name() {
+    let manifest = section_6();
+    assert!(manifest.mounts().is_empty());
+    assert!(manifest.php().is_none());
+    assert_eq!(manifest.name(), None);
+}
+
+/// The retired reader numbers one sandbox per route, which is what today's
+/// per-route uid table does (§7.3).
+#[test]
+fn every_retired_route_is_its_own_sandbox() {
+    let manifest = section_6();
+    let sandboxes: Vec<u32> = manifest
+        .routes()
+        .iter()
+        .map(blastit_manifest::Route::sandbox)
+        .collect();
+    assert_eq!(sandboxes, vec![0, 1, 2, 3]);
+}

@@ -10,8 +10,8 @@ use toml::Value;
 
 use crate::error::{Location, ManifestError, ManifestErrors, escape_control};
 use crate::model::{
-    Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route, StaticPolicy,
-    UnresolvedGrant,
+    Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route, StaticMount,
+    StaticPolicy, UnresolvedGrant,
 };
 use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
@@ -32,6 +32,13 @@ const ROUTE_KEYS: &[&str] = &[
 
 /// The index file a `[route.static]` block answers with when it names none.
 const DEFAULT_INDEX: &str = "index.html";
+
+/// The URL prefix a retired `[route.static]` block is mounted at (§9.1).
+///
+/// The retired format has no prefix of its own: its responder answers any path
+/// under `root`, and the route's regexes decide which requests arrive. The URL
+/// root is the prefix that serves the same files at the same paths.
+const ROOT_PREFIX: &str = "/";
 
 /// Keys that are only ever top-level, so finding one inside a table means the
 /// author wrote it after the first `[table]` and TOML attached it there (`R8`).
@@ -88,6 +95,11 @@ pub(crate) fn parse(source: &str) -> Result<Manifest, ManifestErrors> {
         return Err(ManifestErrors::from(parser.errors));
     }
 
+    // The retired reader fills the Blastfile model beside the per-route blocks
+    // it has always filled, so today's runtime reads one answer either way.
+    let mounts = mounts_of(&routes);
+    let php = php_of(&routes);
+
     Ok(Manifest::assemble(
         version,
         global_groups,
@@ -98,7 +110,44 @@ pub(crate) fn parse(source: &str) -> Result<Manifest, ManifestErrors> {
     )
     .with_app(app)
     .with_preload(preload)
-    .with_route_lines(route_lines(source)))
+    // The retired format has no `app "<name>"` spelling, so the reader carries
+    // no name; the field exists for the Blastfile lowering (§4.3).
+    .with_name(None)
+    .with_route_lines(route_lines(source))
+    .with_mounts(mounts)
+    .with_php(php))
+}
+
+/// The mounts the retired reader's static routes become (§4.3, §9.1).
+///
+/// A `[route.static]` block is a mount at the URL root: the retired format has
+/// no prefix of its own, and its responder answers any path under `root`. The
+/// per-route field stays filled as well, so today's runtime reads one answer
+/// either way; `spa = true` keeps its `spa` flag here, and the `fallback` it
+/// becomes is the field `MB.21.3.7` adds. `MB.21.3.7` deletes the per-route
+/// accessor and `MB.21.4.5` deletes this reader.
+fn mounts_of(routes: &[Route]) -> Vec<StaticMount> {
+    routes
+        .iter()
+        .filter_map(|route| {
+            route.static_policy().map(|policy| StaticMount {
+                prefix: ROOT_PREFIX.to_string(),
+                policy: policy.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The one front controller the retired reader's PHP routes become (§4.3,
+/// §12.2).
+///
+/// A Blastfile has one `entrypoint php` for the whole file; the retired format
+/// could declare `[route.php]` on several routes. The first route that declares
+/// one fills the manifest-level field, and every route keeps its own block, so
+/// today's runtime reads one answer either way. `MB.21.3.7` deletes the
+/// per-route accessor and `MB.21.4.5` deletes this reader.
+fn php_of(routes: &[Route]) -> Option<PhpPolicy> {
+    routes.iter().find_map(|route| route.php().cloned())
 }
 
 /// The one-based line of every `[[route]]` header in `source`, in document
@@ -609,6 +658,10 @@ impl Parser {
                 }
             }
 
+            // The retired reader numbers one sandbox per route, which is what
+            // today's per-route uid table does; a Blastfile numbers by `view`
+            // (§7.3).
+            let sandbox = u32::try_from(routes.len()).unwrap_or(u32::MAX);
             routes.push(
                 Route::new(
                     name,
@@ -621,7 +674,8 @@ impl Parser {
                 )
                 .with_ingress(ingress)
                 .with_static(static_policy)
-                .with_php(php),
+                .with_php(php)
+                .with_sandbox(sandbox),
             );
         }
 

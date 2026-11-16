@@ -318,6 +318,25 @@ pub struct StaticPolicy {
     pub immutable: Vec<String>,
 }
 
+/// A top-level `static "<prefix>"` mount: one URL prefix answered from one
+/// directory (§9.1).
+///
+/// A mount is not a route: it owns no uid, spawns no process and declares no
+/// methods. The scheduler answers a matching request from
+/// [`StaticMount::policy`] and only then consults the view table (§9.2), so a
+/// mount can never shadow a view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaticMount {
+    /// The URL prefix, exactly as written: `"/"`, or a `/`-anchored path with
+    /// no trailing `/` (§9.1).
+    ///
+    /// It is a URL prefix, not a filesystem path: the directory served is
+    /// [`StaticPolicy::root`], relative to the manifest's own directory.
+    pub prefix: String,
+    /// What the mount serves: the directory, its index and its cache globs.
+    pub policy: StaticPolicy,
+}
+
 /// A `[route.php]` block: the front controller a route's embedded PHP workers
 /// run (`ADR-0010` §2).
 ///
@@ -376,6 +395,7 @@ impl Executor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
     name: String,
+    sandbox: u32,
     path: Vec<String>,
     methods: Option<Vec<String>>,
     groups: Vec<String>,
@@ -389,6 +409,11 @@ pub struct Route {
 
 impl Route {
     /// Builds a route. Parsing is the only intended constructor.
+    ///
+    /// The route starts in sandbox `0`; a caller that knows which view it
+    /// belongs to chains [`Route::with_sandbox`]. A rebuild of an existing
+    /// route must chain it, or the rebuilt route claims a different sandbox
+    /// than the one it was copied from.
     pub(crate) fn new(
         name: String,
         path: Vec<String>,
@@ -400,6 +425,7 @@ impl Route {
     ) -> Self {
         Self {
             name,
+            sandbox: 0,
             path,
             methods,
             groups,
@@ -410,6 +436,17 @@ impl Route {
             static_policy: None,
             php: None,
         }
+    }
+
+    /// The same route in the given sandbox (§7.3, §10.3).
+    ///
+    /// One `view` with several endpoints lowers to several routes that all
+    /// carry that view's sandbox, so they share one uid, one socket directory
+    /// and one worker. The retired TOML reader numbers one sandbox per route,
+    /// which is what today's per-route uid table does.
+    pub(crate) fn with_sandbox(mut self, sandbox: u32) -> Self {
+        self.sandbox = sandbox;
+        self
     }
 
     /// The same route with its `[route.static]` block, if it declared one
@@ -445,6 +482,17 @@ impl Route {
     /// event stream (§8.1).
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The view this route belongs to (§7.3, §10.3).
+    ///
+    /// Several routes of one `view` — its several endpoints — carry the same
+    /// sandbox and therefore the same uid, one private socket directory and one
+    /// worker; the next view takes the next sandbox. The retired TOML reader
+    /// numbers one sandbox per route, so its routes number exactly as they did
+    /// before [`Route::sandbox`] existed.
+    pub fn sandbox(&self) -> u32 {
+        self.sandbox
     }
 
     /// The path regexes, in matching order, exactly as written (§6).
@@ -590,11 +638,14 @@ impl UnresolvedGrant {
 pub struct Manifest {
     version: u32,
     app: Option<String>,
+    name: Option<String>,
     preload: Vec<String>,
     global_groups: Vec<String>,
     proxies: BTreeMap<ProxyName, Proxy>,
     groups: BTreeMap<String, Group>,
     routes: Vec<Route>,
+    mounts: Vec<StaticMount>,
+    php: Option<PhpPolicy>,
     route_lines: Vec<u32>,
     unresolved_grants: Vec<UnresolvedGrant>,
 }
@@ -638,6 +689,36 @@ impl Manifest {
     /// The manifest version; always `1` for a manifest that parsed.
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Whether two manifests describe the same document, ignoring where each
+    /// route was written (§4.4).
+    ///
+    /// [`Manifest::route_lines`] is the only field left out: it holds source
+    /// positions, and a formatter or an editor may move a route to another line
+    /// without changing what the manifest means (`R7`, `P4`). Every other
+    /// field, `unresolved_grants` included, has to match.
+    pub fn equivalent(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.app == other.app
+            && self.name == other.name
+            && self.preload == other.preload
+            && self.global_groups == other.global_groups
+            && self.proxies == other.proxies
+            && self.groups == other.groups
+            && self.routes == other.routes
+            && self.mounts == other.mounts
+            && self.php == other.php
+            && self.unresolved_grants == other.unresolved_grants
+    }
+
+    /// The application's name, from the Blastfile's `app "<name>"` (§4.3).
+    ///
+    /// Carried, not interpreted: nothing in 0.2.0 reads it. The retired TOML
+    /// format has no spelling for it, so a manifest read by that reader always
+    /// answers `None`.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// The top-level `app`: the WSGI callable, `module:attribute`, exactly as
@@ -699,6 +780,24 @@ impl Manifest {
     /// One route by index.
     pub fn route(&self, index: usize) -> Option<&Route> {
         self.routes.get(index)
+    }
+
+    /// The top-level static mounts, in file order (§9.1).
+    ///
+    /// Mounts are tried before views, longest prefix first, so a static mount
+    /// never shadows a view (§9.2). A mount owns no uid and spawns no process.
+    pub fn mounts(&self) -> &[StaticMount] {
+        &self.mounts
+    }
+
+    /// The one `entrypoint php` front controller for the whole file (§12.2).
+    ///
+    /// `Some` makes the manifest its own executor: it needs no `app`, and every
+    /// request no mount answers reaches `entry` inside an embedded `libphp`
+    /// worker. The retired TOML reader fills this from the first route that
+    /// declares `[route.php]`, and keeps each route's own block as well.
+    pub fn php(&self) -> Option<&PhpPolicy> {
+        self.php.as_ref()
     }
 
     /// True when the manifest declares no `app` and every route is static: the
@@ -858,6 +957,27 @@ impl Manifest {
         self
     }
 
+    /// The same manifest with its application name; parsing is the only caller
+    /// (§4.3).
+    pub(crate) fn with_name(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// The same manifest with its static mounts; parsing is the only caller
+    /// (§9.1).
+    pub(crate) fn with_mounts(mut self, mounts: Vec<StaticMount>) -> Self {
+        self.mounts = mounts;
+        self
+    }
+
+    /// The same manifest with its one front controller; parsing is the only
+    /// caller (§12.2).
+    pub(crate) fn with_php(mut self, php: Option<PhpPolicy>) -> Self {
+        self.php = php;
+        self
+    }
+
     /// The same manifest with its top-level `preload`; parsing is the only
     /// caller.
     pub(crate) fn with_preload(mut self, preload: Vec<String>) -> Self {
@@ -947,11 +1067,14 @@ impl Manifest {
         Self {
             version,
             app: None,
+            name: None,
             preload: Vec::new(),
             global_groups,
             proxies,
             groups,
             routes,
+            mounts: Vec::new(),
+            php: None,
             route_lines: Vec::new(),
             unresolved_grants,
         }
@@ -1132,6 +1255,236 @@ mod tests {
 
         let without = Manifest::from_toml_str("version = 1\n").expect("the manifest parses");
         assert_eq!(without.route_lines(), Vec::<u32>::new());
+    }
+
+    /// The document `equivalent` is tested against: every field it compares is
+    /// non-default, so a comparison that skipped one would still pass.
+    const EQUIVALENT: &str = "\
+version = 1
+app = \"shop.wsgi:application\"
+preload = [\"shop.boot\"]
+groups = [\"shared\"]
+
+[proxy.db]
+protocol = \"postgresql\"
+
+[group.shared.db]
+queries = []
+
+[[route]]
+name = \"app\"
+path = ['.*']
+[route.static]
+root = \"public\"
+[route.php]
+entry = \"public/index.php\"
+";
+
+    fn equivalent_fixture() -> Manifest {
+        Manifest::from_toml_str(EQUIVALENT).expect("the fixture parses")
+    }
+
+    /// [`Manifest::equivalent`] leaves out the source positions and nothing
+    /// else: a document moved down one line is the same manifest, and every
+    /// other field is compared.
+    #[test]
+    fn equivalent_ignores_only_the_route_lines() {
+        let base = equivalent_fixture();
+        let moved = Manifest::from_toml_str(&format!("\n{EQUIVALENT}")).expect("parses");
+        assert_ne!(
+            base.route_lines(),
+            moved.route_lines(),
+            "the fixture is not testing what it claims"
+        );
+        assert!(base.equivalent(&moved));
+        assert!(moved.equivalent(&base));
+
+        // A manifest is equivalent to its own clone, and to itself.
+        assert!(base.equivalent(&base.clone()));
+        assert!(base.equivalent(&base));
+    }
+
+    /// Every field but `route_lines` is honoured: one field changed at a time
+    /// makes the two manifests unequal, in both directions.
+    #[test]
+    fn equivalent_honours_every_other_field() {
+        let base = equivalent_fixture();
+
+        /// The parts `assemble` takes, so a pair can differ in exactly one.
+        fn parts(
+            version: u32,
+            global_groups: Vec<String>,
+            proxies: BTreeMap<ProxyName, Proxy>,
+            groups: BTreeMap<String, Group>,
+            routes: Vec<Route>,
+            unresolved_grants: Vec<UnresolvedGrant>,
+        ) -> Manifest {
+            Manifest::assemble(
+                version,
+                global_groups,
+                proxies,
+                groups,
+                routes,
+                unresolved_grants,
+            )
+        }
+
+        let same = || {
+            parts(
+                1,
+                base.global_groups().to_vec(),
+                base.proxies().clone(),
+                base.groups().clone(),
+                base.routes().to_vec(),
+                base.unresolved_grants().to_vec(),
+            )
+        };
+        let with_version = |version| {
+            parts(
+                version,
+                base.global_groups().to_vec(),
+                base.proxies().clone(),
+                base.groups().clone(),
+                base.routes().to_vec(),
+                base.unresolved_grants().to_vec(),
+            )
+        };
+        let with_groups = |global_groups: Vec<String>| {
+            parts(
+                1,
+                global_groups,
+                base.proxies().clone(),
+                base.groups().clone(),
+                base.routes().to_vec(),
+                base.unresolved_grants().to_vec(),
+            )
+        };
+        let with_proxies = |proxies: BTreeMap<ProxyName, Proxy>| {
+            parts(
+                1,
+                base.global_groups().to_vec(),
+                proxies,
+                base.groups().clone(),
+                base.routes().to_vec(),
+                base.unresolved_grants().to_vec(),
+            )
+        };
+        let with_grant_groups = |groups: BTreeMap<String, Group>| {
+            parts(
+                1,
+                base.global_groups().to_vec(),
+                base.proxies().clone(),
+                groups,
+                base.routes().to_vec(),
+                base.unresolved_grants().to_vec(),
+            )
+        };
+        let with_routes = |routes: Vec<Route>| {
+            parts(
+                1,
+                base.global_groups().to_vec(),
+                base.proxies().clone(),
+                base.groups().clone(),
+                routes,
+                base.unresolved_grants().to_vec(),
+            )
+        };
+        let with_unresolved = |unresolved_grants: Vec<UnresolvedGrant>| {
+            parts(
+                1,
+                base.global_groups().to_vec(),
+                base.proxies().clone(),
+                base.groups().clone(),
+                base.routes().to_vec(),
+                unresolved_grants,
+            )
+        };
+
+        let php = PhpPolicy {
+            entry: "public/index.php".to_string(),
+            workers: Some(2),
+        };
+        let mount = StaticMount {
+            prefix: "/assets".to_string(),
+            policy: StaticPolicy {
+                root: "public/assets".to_string(),
+                index: "index.html".to_string(),
+                spa: false,
+                immutable: vec!["/assets/*".to_string()],
+            },
+        };
+        let unresolved = UnresolvedGrant::new(
+            ProxyName::from("db"),
+            Location::Route {
+                index: 0,
+                name: "app".to_string(),
+            },
+        );
+
+        let pairs: [(&str, Manifest, Manifest); 11] = [
+            ("version", with_version(1), with_version(2)),
+            (
+                "app",
+                base.clone()
+                    .with_app(Some("shop.wsgi:application".to_string())),
+                base.clone()
+                    .with_app(Some("other.wsgi:application".to_string())),
+            ),
+            (
+                "name",
+                base.clone().with_name(Some("shop".to_string())),
+                base.clone().with_name(None),
+            ),
+            (
+                "preload",
+                base.clone().with_preload(vec!["shop.boot".to_string()]),
+                base.clone().with_preload(Vec::new()),
+            ),
+            (
+                "global_groups",
+                with_groups(vec!["shared".to_string()]),
+                with_groups(Vec::new()),
+            ),
+            (
+                "proxies",
+                with_proxies(base.proxies().clone()),
+                with_proxies(BTreeMap::new()),
+            ),
+            (
+                "groups",
+                with_grant_groups(base.groups().clone()),
+                with_grant_groups(BTreeMap::new()),
+            ),
+            (
+                "routes",
+                with_routes(base.routes().to_vec()),
+                with_routes(Vec::new()),
+            ),
+            (
+                "mounts",
+                base.clone().with_mounts(vec![mount]),
+                base.clone().with_mounts(Vec::new()),
+            ),
+            (
+                "php",
+                base.clone().with_php(Some(php)),
+                base.clone().with_php(None),
+            ),
+            (
+                "unresolved_grants",
+                with_unresolved(vec![unresolved]),
+                with_unresolved(Vec::new()),
+            ),
+        ];
+
+        assert!(same().equivalent(&same()), "the parts are stable");
+        for (field, left, right) in pairs {
+            assert!(!left.equivalent(&right), "{field} is not compared");
+            assert!(
+                !right.equivalent(&left),
+                "{field} is not compared, reversed"
+            );
+        }
     }
 
     /// `normalize` writes every bind placeholder as `$?`, which no SQL parser

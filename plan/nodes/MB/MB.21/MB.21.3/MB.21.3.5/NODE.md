@@ -12,13 +12,13 @@ paths:
   - "crates/blastit-manifest/src/edit.rs"
   - "crates/blastit-manifest/tests/critical_manifest_edit.rs"
   - "crates/blastit-manifest/tests/critical_manifest_edit_executor.rs"
-  - "crates/blastit-manifest/tests/critical_learn_executor_blocks.rs"
+  - crates/blastit/tests/critical_learn_executor_blocks.rs
   - "crates/blastit-manifest/tests/edit_branches.rs"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T02:16"
+updated: "2026-11-16T02:40"
 ---
 
 # Goal

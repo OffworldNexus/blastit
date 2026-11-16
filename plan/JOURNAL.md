@@ -1990,3 +1990,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T02:25 [MB.21.2] (lead) attempt 3/3 started
 - 2026-11-16T02:25 [MB.21.2] (lead) status review -> review
 - 2026-11-16T02:30 [MB.21.2] (lead) status review -> done
+- 2026-11-16T02:39 [MB.21.3.3] (lead) edited fields
+- 2026-11-16T02:39 [MB.21.3.8] (lead) edited fields
+- 2026-11-16T02:40 [MB.21.3.7] (lead) edited fields
+- 2026-11-16T02:40 [MB.21.3.5] (lead) edited fields
+- 2026-11-16T02:41 [MB.21.3.1] (lead) edited fields
+- 2026-11-16T02:41 [MB.21.3] (lead) Re-ordered the chain from design-order to build-order: 3.3 (pattern.rs + HEAD normalisation) now runs before 3.8, because lowering's step 4 compiles each view h
+- 2026-11-16T02:41 [MB.21.3] (lead) Also recorded: StaticPolicy's fallback field + spa removal moved from 3.0 to 3.7, because every StaticPolicy literal in the workspace lives in 3.7's file list (
+- 2026-11-16T02:41 [MB.21.3.0] (lead) status ready -> active
+- 2026-11-16T02:41 [MB.21.3.0] (lead) attempt 1/3 started
+- 2026-11-16T02:41 [MB.21.3.0] (lead) base 3cf4eabc82cc999d2a58239a20c8de4cb04cd9ef
+- 2026-11-16T02:58 [MB.21.3.0] (lead) status active -> review
+- 2026-11-16T03:04 [MB.21.3.7] (lead) edited fields
+- 2026-11-16T03:04 [MB.21.3.7] (lead) edited fields
+- 2026-11-16T03:05 [MB.21.3.0] (lead) reviewer verdict PASS (attempt 1). 6 MINOR findings, no blocker: (1) lib.rs crate-doc links -> MB.21.3.7 now owns lib.rs; (2) parse.rs bridge is lossy for two s
+- 2026-11-16T03:05 [MB.21.3.0] (lead) status review -> done

@@ -136,11 +136,269 @@ impl RoutingTable {
     }
 }
 
+/// The mount a request path falls under, and the path below it (§9.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MountMatch<'a> {
+    /// Index of the mount in [`Manifest::mounts`].
+    pub mount: usize,
+    /// The request path with the mount's prefix removed.
+    ///
+    /// Empty when the request is exactly the prefix, `/`-anchored otherwise, so
+    /// `root` + `relative` names the candidate path (§9.2). For the root mount
+    /// it is the whole request path, which is what §9.4's `url_path` rebuild
+    /// expects.
+    pub relative: &'a str,
+}
+
+/// One mount's prefix, with the index of the mount it came from.
+#[derive(Debug)]
+struct CompiledMount {
+    prefix: String,
+    mount: usize,
+}
+
+/// The manifest's static mounts, ready to be matched against a request path
+/// (§9.2).
+///
+/// Mounts are matched on a **segment boundary** — `"/assets"` matches
+/// `/assets` and `/assets/x`, never `/assets-secret` — and the longest matching
+/// prefix wins, so a nested `static "/assets/v2"` beats `static "/assets"`.
+/// A prefix that is not a `/`-anchored path matches nothing, so a malformed
+/// prefix can only leave a request to the views; the prefix's shape rules are
+/// part of validation (§9.1).
+#[derive(Debug)]
+pub struct MountTable {
+    mounts: Vec<CompiledMount>,
+}
+
+impl MountTable {
+    /// Builds the mount table from a manifest, in mount order.
+    ///
+    /// Infallible: a mount prefix is a string, not a pattern, so there is
+    /// nothing to compile and nothing to refuse here.
+    pub fn new(manifest: &Manifest) -> Self {
+        let mounts = manifest
+            .mounts()
+            .iter()
+            .enumerate()
+            .map(|(mount, entry)| CompiledMount {
+                prefix: entry.prefix.clone(),
+                mount,
+            })
+            .collect();
+        Self { mounts }
+    }
+
+    /// The mount that answers a request path, longest prefix first (§9.2).
+    ///
+    /// `None` means no mount claims the path, and the view table is consulted.
+    /// Two mounts with the same prefix are a validation error
+    /// (`DuplicateMount`); the first in mount order answers here.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use blastit_manifest::{Manifest, MountTable};
+    ///
+    /// let manifest = Manifest::from_toml_str(
+    ///     "version = 1\n\
+    ///      [[route]]\nname = \"site\"\npath = ['.*']\n\
+    ///      [route.static]\nroot = \"public\"\n",
+    /// )
+    /// .unwrap();
+    /// let table = MountTable::new(&manifest);
+    ///
+    /// // The retired reader's static route is a mount at the URL root.
+    /// let found = table.lookup("/assets/app.js").unwrap();
+    /// assert_eq!((found.mount, found.relative), (0, "/assets/app.js"));
+    /// assert!(table.lookup("assets/app.js").is_none());
+    /// ```
+    pub fn lookup<'a>(&self, path: &'a str) -> Option<MountMatch<'a>> {
+        let mut best: Option<(usize, MountMatch<'a>)> = None;
+        for mount in &self.mounts {
+            let Some(relative) = strip_prefix(&mount.prefix, path) else {
+                continue;
+            };
+            if best.is_none_or(|(longest, _)| mount.prefix.len() > longest) {
+                best = Some((
+                    mount.prefix.len(),
+                    MountMatch {
+                        mount: mount.mount,
+                        relative,
+                    },
+                ));
+            }
+        }
+        best.map(|(_, found)| found)
+    }
+}
+
+/// The request path below `prefix`, or `None` when the path is not under it.
+///
+/// The match is on a segment boundary: after the prefix the path has to end or
+/// continue with `/`, so `"/assets"` never matches `/assets-secret`. A request
+/// that is exactly the prefix has an empty remainder. The root mount keeps the
+/// whole path, so `relative` is always `/`-anchored for it (§9.4). A prefix that
+/// is not a `/`-anchored path matches nothing.
+fn strip_prefix<'a>(prefix: &str, path: &'a str) -> Option<&'a str> {
+    if !prefix.starts_with('/') {
+        return None;
+    }
+    if prefix == "/" {
+        return path.starts_with('/').then_some(path);
+    }
+    if path == prefix {
+        return Some("");
+    }
+    path.strip_prefix(prefix)
+        .filter(|rest| rest.starts_with('/'))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::compile_pattern;
+    use std::collections::BTreeMap;
+
+    use super::{MountMatch, MountTable, compile_pattern};
+    use crate::model::{Manifest, StaticMount, StaticPolicy};
+
+    /// A manifest with the given mount prefixes, in order, and no routes: a
+    /// static-only file (§9.5).
+    fn mounted(prefixes: &[&str]) -> Manifest {
+        let mounts = prefixes
+            .iter()
+            .enumerate()
+            .map(|(index, prefix)| StaticMount {
+                prefix: (*prefix).to_string(),
+                policy: StaticPolicy {
+                    root: format!("public{index}"),
+                    index: "index.html".to_string(),
+                    spa: false,
+                    immutable: Vec::new(),
+                },
+            })
+            .collect();
+        Manifest::assemble(
+            1,
+            Vec::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_mounts(mounts)
+    }
+
+    /// A mount answers its prefix and the paths below it, and nothing that only
+    /// shares the prefix's characters: `/assets` is not a prefix of
+    /// `/assets-secret` (§9.2).
+    #[test]
+    fn a_mount_matches_on_a_segment_boundary_only() {
+        let table = MountTable::new(&mounted(&["/assets"]));
+        assert_eq!(
+            table.lookup("/assets"),
+            Some(MountMatch {
+                mount: 0,
+                relative: ""
+            })
+        );
+        assert_eq!(
+            table.lookup("/assets/app.js"),
+            Some(MountMatch {
+                mount: 0,
+                relative: "/app.js"
+            })
+        );
+        for path in [
+            "/assets-secret",
+            "/assets-secret/key.pem",
+            "/other",
+            "assets",
+        ] {
+            assert_eq!(table.lookup(path), None, "{path} must not match /assets");
+        }
+
+        // The other direction: the longer word's mount does not answer the
+        // shorter path either.
+        let table = MountTable::new(&mounted(&["/assets-secret"]));
+        assert_eq!(table.lookup("/assets"), None);
+        assert_eq!(table.lookup("/assets/secret"), None);
+        assert_eq!(
+            table.lookup("/assets-secret"),
+            Some(MountMatch {
+                mount: 0,
+                relative: ""
+            })
+        );
+    }
+
+    /// A nested mount beats its parent, and the manifest's order does not
+    /// decide: the longest prefix does (§9.2).
+    #[test]
+    fn the_longest_prefix_wins() {
+        let table = MountTable::new(&mounted(&["/assets", "/assets/v2", "/assets-secret"]));
+        assert_eq!(
+            table.lookup("/assets/v2/app.js").map(|found| found.mount),
+            Some(1)
+        );
+        assert_eq!(
+            table
+                .lookup("/assets/v2")
+                .map(|found| (found.mount, found.relative)),
+            Some((1, ""))
+        );
+        assert_eq!(
+            table.lookup("/assets/v3/app.js").map(|found| found.mount),
+            Some(0)
+        );
+        assert_eq!(
+            table.lookup("/assets-secret/key").map(|found| found.mount),
+            Some(2)
+        );
+        assert_eq!(table.lookup("/assets").map(|found| found.mount), Some(0));
+
+        // The same table written the other way round answers the same mounts.
+        let reversed = MountTable::new(&mounted(&["/assets/v2", "/assets"]));
+        assert_eq!(
+            reversed
+                .lookup("/assets/v2/app.js")
+                .map(|found| found.mount),
+            Some(0)
+        );
+        assert_eq!(
+            reversed.lookup("/assets/app.js").map(|found| found.mount),
+            Some(1)
+        );
+    }
+
+    /// The root mount keeps the whole path, so §9.4's `url_path` rebuild is the
+    /// identity for it; a nested mount still beats it (§9.4, §9.2).
+    #[test]
+    fn the_root_mount_keeps_the_whole_path() {
+        let table = MountTable::new(&mounted(&["/"]));
+        assert_eq!(table.lookup("/").map(|found| found.relative), Some("/"));
+        assert_eq!(
+            table.lookup("/a/b").map(|found| found.relative),
+            Some("/a/b")
+        );
+        assert_eq!(table.lookup(""), None);
+
+        let nested = MountTable::new(&mounted(&["/", "/assets"]));
+        assert_eq!(nested.lookup("/assets/x").map(|found| found.mount), Some(1));
+        assert_eq!(nested.lookup("/about").map(|found| found.mount), Some(0));
+    }
+
+    /// A prefix that is not a `/`-anchored path matches nothing, so a mount the
+    /// validator would refuse can only leave the request to the views.
+    #[test]
+    fn a_malformed_prefix_matches_nothing() {
+        for prefix in ["assets", "", "/assets/"] {
+            let table = MountTable::new(&mounted(&[prefix]));
+            assert_eq!(table.lookup("/assets"), None, "{prefix:?}");
+            assert_eq!(table.lookup("/assets/app.js"), None, "{prefix:?}");
+        }
+    }
 
     #[test]
     fn patterns_match_whole_paths() {

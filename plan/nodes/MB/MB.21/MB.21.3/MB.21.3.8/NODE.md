@@ -5,7 +5,7 @@ kind: task
 status: ready
 owner: implementer
 priority: 1
-depends_on: [MB.21.3.2]
+depends_on: [MB.21.3.3]
 paths:
   - "crates/blastit-manifest/src/blastfile/**"
   - "crates/blastit-manifest/src/model.rs"
@@ -13,19 +13,21 @@ paths:
   - "crates/blastit-manifest/tests/blastfile_traits.rs"
   - "crates/blastit-manifest/tests/blastfile_body.rs"
   - "crates/blastit-manifest/tests/blastfile_entrypoint.rs"
+  - "crates/blastit-manifest/tests/blastfile_patterns.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_parity.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_traits.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_body.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_entrypoint.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_security.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_parser.rs"
+  - "crates/blastit-manifest/tests/critical_blastfile_patterns.rs"
   - "crates/blastit-manifest/tests/common/mod.rs"
   - "crates/blastit-manifest/tests/fixtures/**"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T02:16"
-updated: "2026-11-16T02:16"
+updated: "2026-11-16T02:39"
 ---
 
 # Goal
@@ -41,6 +43,10 @@ Lower the CST into `Manifest` and prove it with the model-equality oracle.
   (§12).
 - The **oracle**: for each fixture, `Manifest::equivalent` against the expected `Manifest` built in the
   test, with every row the design drops asserted **absent**.
+- The two pattern suites `MB.21.3.3` could not write, because they need this leaf's public entry point:
+  `tests/blastfile_patterns.rs` (the §8.1 table and every §8.3 refusal through `from_blastfile_str`) and
+  the protected `tests/critical_blastfile_patterns.rs` (the traversal corpus, a 257-byte pattern, an
+  unbalanced `)`, and `HEAD` present in `methods` for a `GET` view).
 
 This leaf is **design `MB.21.3.2b`** (§21). The plan tool has no letter-suffixed ids, so the parser half
 is `MB.21.3.2` and this half is `MB.21.3.8`.
@@ -87,6 +93,11 @@ $ make check
 5. A hostile document (2 block levels is the grammar's maximum; `{{{{…` and a 256 KiB file of views)
    fails or finishes cleanly — never a stack overflow, never an unbounded loop.
 6. `make check` exit 0; the retired reader is untouched and its suites are still green.
+7. The two pattern suites pass: `blastfile_patterns.rs` proves the §8.1 table through
+   `from_blastfile_str` (`/a.b` ≠ `/axb`, `{id:int}` rejects `12a`, `{id:uuid}` rejects a near-miss,
+   `/assets/*` matches a nested file, a bare `/x` does not match `/xy`) and `critical_blastfile_patterns.rs`
+   proves the refusal matrix with message and `line:col`, a `GET` view's `methods` carrying `HEAD`, and
+   the protected caps (§4.5 `MAX_PATTERN_BYTES`, the traversal corpus, an unbalanced `)`).
 
 # Notes
 

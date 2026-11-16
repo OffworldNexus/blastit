@@ -939,10 +939,13 @@ fn expected_routes(manifest: &Manifest, plan: &Plan) -> Vec<Route> {
         // Every executor key the route carries travels with it. The edit only
         // ever splices a `queries` entry, so an `[route.static]` or
         // `[route.php]` block it cannot reproduce must make verification fail
-        // rather than vanish from the postcondition (`R28`, `R29`).
+        // rather than vanish from the postcondition (`R28`, `R29`). The sandbox
+        // travels too: a rebuilt route that claimed sandbox `0` would compare
+        // unequal to the parsed one and refuse every edit (`MB.3.21`).
         .with_static(route.static_policy().cloned())
         .with_php(route.php().cloned())
-        .with_ingress(route.ingress());
+        .with_ingress(route.ingress())
+        .with_sandbox(route.sandbox());
         if let Some(slot) = routes.get_mut(patch.route_index) {
             *slot = rebuilt;
         }
@@ -969,7 +972,14 @@ fn expected_routes(manifest: &Manifest, plan: &Plan) -> Vec<Route> {
         ));
     }
     built.extend(routes);
+    // The retired reader numbers one sandbox per route, so an insertion
+    // renumbers every route below it; the postcondition carries the numbers the
+    // re-parsed document will have (§7.3).
     built
+        .into_iter()
+        .enumerate()
+        .map(|(index, route)| route.with_sandbox(u32::try_from(index).unwrap_or(u32::MAX)))
+        .collect()
 }
 
 /// Re-parses the edit and proves nothing outside the edit moved.
@@ -980,8 +990,10 @@ fn verify(manifest: &Manifest, expected: &[Route], text: &str) -> Result<(), Edi
 
     if reparsed.version() != manifest.version()
         || reparsed.app() != manifest.app()
+        || reparsed.name() != manifest.name()
         || reparsed.preload() != manifest.preload()
         || reparsed.global_groups() != manifest.global_groups()
+        || reparsed.php() != manifest.php()
     {
         return Err(EditError::Verification {
             section: "the top-level keys",
@@ -998,6 +1010,15 @@ fn verify(manifest: &Manifest, expected: &[Route], text: &str) -> Result<(), Edi
         });
     }
     if reparsed.routes() != expected {
+        return Err(EditError::Verification {
+            section: "the routes",
+        });
+    }
+    // The mounts and the front controller are what the routes lower to, so a
+    // postcondition that kept the routes but lost a mount would still be a
+    // rewrite. `MB.21.3.5` replaces this whole function with one
+    // `Manifest::equivalent` call.
+    if reparsed.mounts() != manifest.mounts() {
         return Err(EditError::Verification {
             section: "the routes",
         });

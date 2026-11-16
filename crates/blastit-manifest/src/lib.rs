@@ -13,19 +13,26 @@
 //!   `queries` entry that inlines a value or a redacted `…`) and returns the
 //!   non-fatal warnings;
 //! * [`Manifest::app`] and [`Manifest::preload`] carry the two non-secret
-//!   wiring keys, [`Route::ingress`] the request-body codec a route declared,
-//!   [`Route::static_policy`] the `[route.static]` block it serves files with
-//!   and [`Route::php`] the `[route.php]` front controller an embedded `libphp`
-//!   worker runs;
+//!   wiring keys, [`Manifest::name`] the application's name, [`Route::ingress`]
+//!   the request-body codec a route declared, [`Manifest::mounts`] the static
+//!   mounts a file serves, and [`Manifest::php`] the one front controller an
+//!   embedded `libphp` worker runs;
+//! * [`Route::static_policy`] and [`Route::php`] are the retired reader's
+//!   per-route blocks: it fills them *and* [`Manifest::mounts`]/[`Manifest::php`]
+//!   from the same document, so today's runtime reads one answer either way.
+//!   The per-route pair is deleted with that reader;
 //! * [`Manifest::is_all_static`], [`Manifest::static_roots`] and
 //!   [`Manifest::check_static_roots`] answer the app-less static site: no `app`
 //!   is needed once every route is static, and the roots are audited by an
 //!   explicit call rather than by validation;
 //! * [`Manifest::effective_grants`] unions the grants a route ends up with;
+//! * [`Manifest::equivalent`] compares two manifests without their source
+//!   positions, which is what a formatter or an editor's postcondition needs;
 //! * [`edit::apply_edits`] and [`edit::write_atomic`] are how `--learn` writes
 //!   the manifest back without reformatting it;
-//! * [`UidLayout`] maps a route index to the uid its process runs under;
-//! * [`RoutingTable`] matches `(method, path_info)` to a route.
+//! * [`UidLayout`] maps a route's sandbox to the uid its process runs under;
+//! * [`RoutingTable`] matches `(method, path_info)` to a route, and
+//!   [`MountTable`] matches a path to a static mount.
 //!
 //! Templates, input slots and the meaning of a statement belong to other
 //! crates: this one keeps `input`, `output` and `queries` as raw strings
@@ -60,6 +67,15 @@
 //! let table = RoutingTable::new(&manifest).expect("valid");
 //! assert_eq!(table.route("GET", "/about/"), Some(Match { route: 0, rule: 0 }));
 //! assert_eq!(table.route("GET", "/elsewhere"), None);
+//!
+//! // The model carries the Blastfile fields beside the per-route blocks the
+//! // retired reader still fills: this document declares neither a mount nor a
+//! // front controller, and it has no application name.
+//! assert!(manifest.mounts().is_empty());
+//! assert!(manifest.php().is_none());
+//! assert_eq!(manifest.name(), None);
+//! assert_eq!(manifest.route(0).map(|route| route.sandbox()), Some(0));
+//! assert!(manifest.equivalent(&manifest.clone()));
 //! ```
 //!
 //! The executor kind table a backend registry checks at boot is the crate
@@ -91,9 +107,11 @@ pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning};
 pub use model::{
     Executor, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route,
-    StaticPolicy,
+    StaticMount, StaticPolicy,
 };
-pub use routing::{Match, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable};
+pub use routing::{
+    Match, MountMatch, MountTable, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable,
+};
 pub use uid::UidLayout;
 
 // A route's `[route.ingress]` is part of the manifest, so the policy type it
