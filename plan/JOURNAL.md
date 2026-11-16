@@ -2393,3 +2393,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T22:40 [MB.21.5.2] (lead) attempt 2/3 started
 - 2026-11-16T22:40 [MB.21.5.2] (lead) status review -> review
 - 2026-11-16T22:46 [MB.21.5.2] (lead) status review -> done
+- 2026-11-16T22:49 [MB.21.5.2] (lead) commit 6bfd1cc
+- 2026-11-16T22:49 [MB.21.5.3] (lead) status ready -> active
+- 2026-11-16T22:49 [MB.21.5.3] (lead) attempt 1/3 started
+- 2026-11-16T22:49 [MB.21.5.3] (lead) base 6bfd1cc4eb36b85f4bb4cb2c9f45b2fa0db1273c
+- 2026-11-16T22:49 [MB.21.5.4] (lead) status ready -> active
+- 2026-11-16T22:49 [MB.21.5.4] (lead) attempt 1/3 started
+- 2026-11-16T22:49 [MB.21.5.4] (lead) base 6bfd1cc4eb36b85f4bb4cb2c9f45b2fa0db1273c
+- 2026-11-16T23:03 [MB.21.5.5] (test-curator) created (task) Close the purity gate's nested-use evasion (R24) and prove it in both directions
+- 2026-11-16T23:03 [MB.21.5.6] (test-curator) created (task) Pin blastfile::read's accepted path so the read bound's mutants die in-crate
+- 2026-11-16T23:03 [MB.21.5.7] (test-curator) created (task) Land the design's >= 20-document round-trip corpus floor and the hoisted-comment owner case
+- 2026-11-16T23:04 [MB.21.5.8] (test-curator) created (task) Give P4's postcondition oracle a direct test and a truthful section for unresolved grants
+- 2026-11-16T23:04 [MB.21.5.9] (test-curator) created (task) Pin EditError::source so the editor's error chain is walked by a test
+- 2026-11-16T23:04 [MB.21.5.10] (test-curator) created (task) Remove the uid-0 silent skip from critical_blastfile_fmt's write-failure case
+- 2026-11-16T23:07 [MB.21.5.8] (test-curator) body wording fixed so test_the_real_tree_carries_no_retired_php_vocabulary passes (the word the guard flags was used descriptively)
+- 2026-11-16T23:09 [MB.21.5.4] (lead) status active -> done

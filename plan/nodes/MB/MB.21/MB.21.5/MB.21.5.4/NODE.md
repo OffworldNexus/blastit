@@ -2,16 +2,16 @@
 id: MB.21.5.4
 title: "Browser proof of the Blastfile pages, nav and both colour schemes (visual-checker)"
 kind: task
-status: ready
+status: done
 owner: "visual-checker"
 priority: 3
 depends_on: [MB.21.5.2]
 paths: ["docs/testing/VISUAL-MB.21.md"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T00:38"
+updated: "2026-11-16T23:09"
 ---
 
 # Goal
