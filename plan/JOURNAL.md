@@ -2080,3 +2080,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T05:19 [MB.21.3.3] (lead) reviewer verdict PASS (attempt 2). 3 MINOR: (1) the quoted form is not pre-compiled at parse (the raw form is), so an emission-table regression surfaces at tabl
 - 2026-11-16T05:19 [MB.21.3.3] (lead) status review -> done
 - 2026-11-16T05:23 [MB.21.3.3] (lead) Gate note: the first make check on this tree failed in blastit-view (php::tests::a_runtime_that_retires_ends_the_loop_after_its_done: "the worker never wrote 3 
+- 2026-11-16T05:23 [MB.21.3.3] (lead) commit 46e1b80
+- 2026-11-16T05:23 [MB.21.3.4] (lead) edited fields
+- 2026-11-16T05:23 [MB.21.3.4] (lead) depends_on re-pointed to MB.21.3.8: the design created the fixtures in 3.2, this plan creates them in 3.8 (lowering), and fmt's P1-P3 loop runs over that corpus
+- 2026-11-16T05:23 [MB.21.3.8] (lead) status ready -> active
+- 2026-11-16T05:23 [MB.21.3.8] (lead) attempt 1/3 started
+- 2026-11-16T05:23 [MB.21.3.8] (lead) base 46e1b80f7ab29ba273024f2149e1991774239986
+- 2026-11-16T05:47 [MB.21.3.8] (lead) edited fields
+- 2026-11-16T05:47 [MB.21.3.8] (lead) attempt 1 hit the agent step cap after the code+tests were green and before RESULT.md; a narrow implementer is dispatched to write RESULT.md only (no code chang
+- 2026-11-16T05:53 [MB.21.3.8] (lead) status active -> review
+- 2026-11-16T05:53 [MB.21.3.8] (lead) attempt 1 (code) + evidence session: all five acceptance commands green, RESULT.md written by a narrow follow-up session without touching code. Sending to goldf
+- 2026-11-16T06:01 [MB.21.3.8] (lead) reviewer verdict PASS (attempt 1). 7 MINOR, all recorded as epic follow-ups with owners: (1) validate.rs's `body raw` sentence still spells `[route.ingress]`/`a
+- 2026-11-16T06:01 [MB.21.3.8] (lead) status review -> done

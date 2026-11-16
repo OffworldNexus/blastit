@@ -112,7 +112,12 @@ pub struct Proxy {
 
 impl Proxy {
     /// Builds a proxy declaration.
-    pub(crate) fn new(
+    ///
+    /// `#[doc(hidden)]`: `lower` and the retired reader are the only production
+    /// builders, and the crate's integration tests need it to build the
+    /// expected model of the §20 R8 parity oracle field by field.
+    #[doc(hidden)]
+    pub fn new(
         name: ProxyName,
         protocol: Protocol,
         input: BTreeMap<String, String>,
@@ -201,7 +206,11 @@ impl PgGrant {
     ///
     /// Only the parser builds grants from a document; this is how it carries
     /// the flag into a value [`PgGrant::new`] cannot produce.
-    pub(crate) fn with_unrestricted(mut self, unrestricted: bool) -> Self {
+    ///
+    /// `#[doc(hidden)]`: the crate's integration tests build the expected model
+    /// of the §20 R8 parity oracle with it.
+    #[doc(hidden)]
+    pub fn with_unrestricted(mut self, unrestricted: bool) -> Self {
         self.unrestricted = unrestricted;
         self
     }
@@ -420,7 +429,12 @@ impl Route {
     /// belongs to chains [`Route::with_sandbox`]. A rebuild of an existing
     /// route must chain it, or the rebuilt route claims a different sandbox
     /// than the one it was copied from.
-    pub(crate) fn new(
+    ///
+    /// `#[doc(hidden)]`: `lower` and the retired reader are the only production
+    /// builders, and the crate's integration tests need it to build the
+    /// expected model of the §20 R8 parity oracle field by field.
+    #[doc(hidden)]
+    pub fn new(
         name: String,
         path: Vec<String>,
         methods: Option<Vec<String>>,
@@ -450,7 +464,11 @@ impl Route {
     /// carry that view's sandbox, so they share one uid, one socket directory
     /// and one worker. The retired TOML reader numbers one sandbox per route,
     /// which is what today's per-route uid table does.
-    pub(crate) fn with_sandbox(mut self, sandbox: u32) -> Self {
+    ///
+    /// `#[doc(hidden)]`: the crate's integration tests build the expected model
+    /// of the §20 R8 parity oracle with it.
+    #[doc(hidden)]
+    pub fn with_sandbox(mut self, sandbox: u32) -> Self {
         self.sandbox = sandbox;
         self
     }
@@ -597,7 +615,12 @@ pub struct Group {
 
 impl Group {
     /// Builds a group. Parsing is the only intended constructor.
-    pub(crate) fn new(name: String, grants: BTreeMap<ProxyName, Grant>) -> Self {
+    ///
+    /// `#[doc(hidden)]`: `lower` and the retired reader are the only production
+    /// builders, and the crate's integration tests need it to build the
+    /// expected model of the §20 R8 parity oracle field by field.
+    #[doc(hidden)]
+    pub fn new(name: String, grants: BTreeMap<ProxyName, Grant>) -> Self {
         Self { name, grants }
     }
 
@@ -963,35 +986,55 @@ impl Manifest {
     }
 
     /// The same manifest with its top-level `app`; parsing is the only caller.
-    pub(crate) fn with_app(mut self, app: Option<String>) -> Self {
+    ///
+    /// `#[doc(hidden)]`: the crate's integration tests build the expected model
+    /// of the §20 R8 parity oracle with it.
+    #[doc(hidden)]
+    pub fn with_app(mut self, app: Option<String>) -> Self {
         self.app = app;
         self
     }
 
     /// The same manifest with its application name; parsing is the only caller
     /// (§4.3).
-    pub(crate) fn with_name(mut self, name: Option<String>) -> Self {
+    ///
+    /// `#[doc(hidden)]`: the crate's integration tests build the expected model
+    /// of the §20 R8 parity oracle with it.
+    #[doc(hidden)]
+    pub fn with_name(mut self, name: Option<String>) -> Self {
         self.name = name;
         self
     }
 
     /// The same manifest with its static mounts; parsing is the only caller
     /// (§9.1).
-    pub(crate) fn with_mounts(mut self, mounts: Vec<StaticMount>) -> Self {
+    ///
+    /// `#[doc(hidden)]`: the crate's integration tests build the expected model
+    /// of the §20 R8 parity oracle with it.
+    #[doc(hidden)]
+    pub fn with_mounts(mut self, mounts: Vec<StaticMount>) -> Self {
         self.mounts = mounts;
         self
     }
 
     /// The same manifest with its one front controller; parsing is the only
     /// caller (§12.2).
-    pub(crate) fn with_php(mut self, php: Option<PhpPolicy>) -> Self {
+    ///
+    /// `#[doc(hidden)]`: the crate's integration tests build the expected model
+    /// of the §20 R8 parity oracle with it.
+    #[doc(hidden)]
+    pub fn with_php(mut self, php: Option<PhpPolicy>) -> Self {
         self.php = php;
         self
     }
 
     /// The same manifest with its top-level `preload`; parsing is the only
     /// caller.
-    pub(crate) fn with_preload(mut self, preload: Vec<String>) -> Self {
+    ///
+    /// `#[doc(hidden)]`: the crate's integration tests build the expected model
+    /// of the §20 R8 parity oracle with it.
+    #[doc(hidden)]
+    pub fn with_preload(mut self, preload: Vec<String>) -> Self {
         self.preload = preload;
         self
     }
@@ -1089,6 +1132,27 @@ impl Manifest {
             route_lines: Vec::new(),
             unresolved_grants,
         }
+    }
+
+    /// Builds a manifest from the parts the §20 R8 parity oracle compares.
+    ///
+    /// `#[doc(hidden)]`: `lower` is the only production builder (§4.3), and an
+    /// integration test is a separate crate that cannot reach `assemble`. The
+    /// oracle builds the **expected** model field by field with this, then
+    /// compares it with [`Manifest::equivalent`], so both sides of every row are
+    /// readable in one file and neither comes from a document.
+    ///
+    /// It takes no unresolved grants: a grant on an undeclared store is a
+    /// refusal, so no fixture that lowers cleanly has one.
+    #[doc(hidden)]
+    pub fn from_parts(
+        version: u32,
+        global_groups: Vec<String>,
+        proxies: BTreeMap<ProxyName, Proxy>,
+        groups: BTreeMap<String, Group>,
+        routes: Vec<Route>,
+    ) -> Self {
+        Self::assemble(version, global_groups, proxies, groups, routes, Vec::new())
     }
 }
 

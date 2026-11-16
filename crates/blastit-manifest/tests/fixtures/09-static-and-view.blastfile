@@ -1,0 +1,10 @@
+# A static mount above a forwarding view: mounts are tried first, so the view
+# is never shadowed (§7.2 row 2, §9.2).
+static "/assets" {
+    root "public/assets"
+    immutable "/assets/*"
+}
+
+view about "/about" {
+    body none
+}

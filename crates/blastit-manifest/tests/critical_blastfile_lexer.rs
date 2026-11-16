@@ -169,3 +169,52 @@ fn a_missing_file_and_a_directory_are_refused() {
         "a directory must be refused as not a regular file, got {error}"
     );
 }
+
+/// The token cap is reachable through the public entry point, and it trips
+/// while the lexer pushes rather than after the tree is built (`R3b`).
+#[test]
+fn the_token_cap_is_reachable_through_the_public_entry_point() {
+    // 262 145 words is one token past the cap, and well under the size cap, so
+    // the refusal is the token budget and not the file budget.
+    let source = "a ".repeat(262_145);
+    assert!(source.len() < 1_048_576, "the size cap is not what trips");
+    let errors = blastit_manifest::Manifest::from_blastfile_str(&source)
+        .expect_err("the token cap is a refusal");
+    let rendered = errors
+        .errors()
+        .first()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    assert_eq!(
+        rendered,
+        "262145 tokens; Blastfile is limited to 262144 — split the file"
+    );
+}
+
+/// A hostile document is refused cleanly: never a panic, never an unbounded
+/// loop, and always one line (`R4`).
+#[test]
+fn a_hostile_document_is_refused_cleanly() {
+    let hostile: &[(&str, String)] = &[
+        ("a wall of braces", "{".repeat(1_048_576)),
+        ("a wall of comments", "#x\n".repeat(262_145)),
+        (
+            "an unterminated string",
+            format!("\"{}", "a".repeat(1_048_576 - 1)),
+        ),
+        ("a wall of views", "view v { ".repeat(100_000)),
+        ("a file over the cap", "a".repeat(1_048_577)),
+    ];
+    for (label, source) in hostile {
+        let errors = blastit_manifest::Manifest::from_blastfile_str(source)
+            .expect_err("a hostile document is refused");
+        assert!(!errors.is_empty(), "{label} must be refused");
+        let rendered = errors
+            .errors()
+            .first()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(!rendered.contains('\n'), "{label}: {rendered:?}");
+        assert!(!rendered.is_empty(), "{label}");
+    }
+}

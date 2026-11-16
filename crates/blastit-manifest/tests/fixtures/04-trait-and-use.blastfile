@@ -1,0 +1,15 @@
+# A trait is the retired format's shared grant set, and `use` is the only way
+# to attach it: there is no global attach (§7.1, §11.1).
+postgres $DATABASE_URL
+
+trait session {
+    postgres {
+        transactions
+        query "SET TIME ZONE 'UTC'"
+    }
+}
+
+view account "/account" {
+    use session
+    body json
+}

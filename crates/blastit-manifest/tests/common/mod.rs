@@ -114,3 +114,59 @@ pub fn validate_warnings(source: &str) -> Vec<ManifestWarning> {
         .validate(UidLayout::DEFAULT_BASE)
         .expect("manifest should validate")
 }
+
+// ---- the Blastfile fixture corpus (§20 R8) ------------------------------
+
+/// The fixture directory: one flat directory of `*.blastfile` documents, one
+/// per row of §7.1/§7.2.
+///
+/// It is flat on purpose. §20 makes it the round-trip corpus `MB.21.3.4`
+/// (P1–P3), `MB.21.3.6` (fence counts) and `MB.21.5.1` (docs) read, and each of
+/// those globs `fixtures/*` and asserts a count — a directory per row would make
+/// every one of them recurse and would lose the "15 fixtures" number §20 pins.
+///
+/// The expected model for a fixture is **not** a file: each test builds it field
+/// by field, so both sides of the parity oracle are readable in one place and
+/// neither comes from a document.
+pub fn fixture_directory() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// Every fixture, as `(file name, source)`, in file-name order.
+pub fn corpus() -> Vec<(String, String)> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(fixture_directory())
+        .expect("the fixture directory is readable")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "blastfile")
+        })
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{} is readable: {error}", path.display()));
+            (name, source)
+        })
+        .collect()
+}
+
+/// One fixture's source, by file name.
+pub fn fixture(name: &str) -> String {
+    let path = fixture_directory().join(name);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} is readable: {error}", path.display()))
+}
+
+/// How many fixtures the corpus holds.
+///
+/// §20 pins the number: the corpus is the 15 rows of §7.1/§7.2, and a later
+/// leaf that adds a file has to say so here as well.
+pub const CORPUS_SIZE: usize = 15;

@@ -2,7 +2,7 @@
 id: MB.21.3.8
 title: "Lower the Blastfile CST into Manifest against the expected model, with the parity oracle, the nine suites and the fixtures"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.3.3]
@@ -10,6 +10,7 @@ paths:
   - "crates/blastit-manifest/src/blastfile/**"
   - "crates/blastit-manifest/src/model.rs"
   - "crates/blastit-manifest/src/error.rs"
+  - docs/knowledge/LESSONS.md
   - "crates/blastit-manifest/tests/blastfile_grants.rs"
   - "crates/blastit-manifest/tests/blastfile_traits.rs"
   - "crates/blastit-manifest/tests/blastfile_body.rs"
@@ -27,11 +28,11 @@ paths:
   - "crates/blastit-manifest/tests/critical_blastfile_errors.rs"
   - "crates/blastit-manifest/tests/common/mod.rs"
   - "crates/blastit-manifest/tests/fixtures/**"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T02:16"
-updated: "2026-11-16T05:02"
+updated: "2026-11-16T06:01"
 ---
 
 # Goal

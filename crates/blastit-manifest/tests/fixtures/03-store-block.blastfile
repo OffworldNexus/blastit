@@ -1,0 +1,19 @@
+# The block form names every slot's variable (§7.4), and a named store is a
+# second proxy with its own grants.
+postgres {
+    host $DB_HOST
+    port $DB_PORT
+    user $DB_USERNAME
+    password $DB_PASSWORD
+    database $DB_DATABASE
+    sslmode $DB_SSLMODE
+    ca_cert $DB_CA_CERT
+}
+
+postgres analytics $ANALYTICS_URL
+
+view reports "/reports" {
+    postgres analytics {
+        select events
+    }
+}

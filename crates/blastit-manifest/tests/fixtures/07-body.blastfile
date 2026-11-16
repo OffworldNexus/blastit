@@ -1,0 +1,10 @@
+# The five `body` rows of §10.1, one per endpoint, plus an endpoint that
+# declares none: six routes in one sandbox (§10.3).
+view app {
+    GET "/a" { body json }
+    POST "/b" { body form }
+    PUT "/c" { body none }
+    DELETE "/d" { body raw }
+    PATCH "/e" { body raw unvalidated }
+    OPTIONS "/f"
+}

@@ -23,14 +23,16 @@
 //! before a `Route` exists (§8.4), so `HEAD` is implied by `GET` once, at
 //! lower time, and request matching itself does not change.
 //!
+//! `lower` is the one lowering: it walks the tree in §7.3's order and builds
+//! the `Manifest` the rest of blastit reads, applying §7.4's store slots,
+//! §10's ingress policies, §11's traits and `use`, §12's entrypoints and §13's
+//! grants. [`Manifest::from_blastfile_str`] is parse + lower and
+//! [`Manifest::parse_blastfile`] is parse + lower + `validate`, so the two
+//! entry points of §4.4 differ by exactly the whole-file checks.
+//!
 //! Nothing here reads the environment, and nothing resolves a `$IDENT`: a name
 //! is a name, and its value is the builder's business (§17.2, R20/R24).
 
-// The lexer, its types, the CST and the parser are consumed by the public
-// entry points `MB.21.3.8` adds; until then only this module's tests call
-// them, so staged code is allowed to be unreachable in a non-test build.
-// Delete this line when `Manifest::from_blastfile_str` lands.
-#![cfg_attr(not(test), allow(dead_code))]
 #![forbid(unsafe_code)]
 #![deny(
     clippy::unwrap_used,
@@ -41,6 +43,7 @@
 )]
 
 mod lexer;
+mod lower;
 mod parser;
 mod pattern;
 mod syntax;
@@ -49,7 +52,8 @@ mod tokens;
 use std::io::Read as _;
 use std::path::Path;
 
-use crate::error::{ManifestError, ManifestErrors, escape_control};
+use crate::error::{ManifestError, ManifestErrors, ManifestWarning, escape_control};
+use crate::model::Manifest;
 
 /// Largest `Blastfile` [`read`] accepts, in bytes (§4.5).
 pub(crate) const MAX_SOURCE_BYTES: usize = 1_048_576;
@@ -118,4 +122,43 @@ fn unreadable(error: std::io::Error) -> ManifestErrors {
         message: escape_control(&error.to_string()),
     }
     .into()
+}
+
+impl Manifest {
+    /// Parses a `Blastfile` and lowers it, **without** validating (§4.4).
+    ///
+    /// The two steps are the parser's (`parse`) and `lower`'s; the whole-file
+    /// checks of [`Manifest::validate`] are deliberately not run, so a caller
+    /// that wants them calls [`Manifest::parse_blastfile`] instead. A parse or
+    /// lower refusal never yields a manifest (R21).
+    ///
+    /// # Errors
+    ///
+    /// §5.3's lexer refusals, §6.7's parse refusals, §8.3's pattern refusals
+    /// and §7.3/§9.1/§10/§11/§12/§13's lowering refusals — each one line, at
+    /// the offending token's `line:col` (§18).
+    pub fn from_blastfile_str(source: &str) -> Result<Self, ManifestErrors> {
+        let cst = parser::parse(source)?;
+        lower::lower(&cst, source)
+    }
+
+    /// Parses, lowers and validates a `Blastfile`, returning its warnings
+    /// (§4.4).
+    ///
+    /// This is the boot and `check` entry point: [`Manifest::from_blastfile_str`]
+    /// plus [`Manifest::validate`], so every whole-file rule the parser cannot
+    /// see runs on the lowered model, unchanged (§7.3 step 7).
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Manifest::from_blastfile_str`] refuses, and everything
+    /// [`Manifest::validate`] refuses.
+    pub fn parse_blastfile(
+        source: &str,
+        base: u32,
+    ) -> Result<(Self, Vec<ManifestWarning>), ManifestErrors> {
+        let manifest = Self::from_blastfile_str(source)?;
+        let warnings = manifest.validate(base)?;
+        Ok((manifest, warnings))
+    }
 }

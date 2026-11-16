@@ -135,6 +135,21 @@ pub enum Location {
         /// The prefix as written.
         prefix: String,
     },
+    /// A `trait` section, by name (§11.3).
+    ///
+    /// A `Blastfile` trait is the retired format's `[group.<name>]`, and a
+    /// grant it names that nothing declares is reported against the trait.
+    Trait(String),
+    /// A `view`, by sandbox index and by name (§7.3, §10.3).
+    ///
+    /// One `view` may lower to several routes, so the location names the view
+    /// and the sandbox it owns rather than a route index.
+    View {
+        /// The view's sandbox, which is its index in file order.
+        index: usize,
+        /// The view's name.
+        name: String,
+    },
 }
 
 impl fmt::Display for Location {
@@ -147,6 +162,10 @@ impl fmt::Display for Location {
             }
             Self::Mount { index, prefix } => {
                 write!(f, "mount {} (index {index})", quoted(prefix))
+            }
+            Self::Trait(name) => write!(f, "trait {}", quoted(name)),
+            Self::View { index, name } => {
+                write!(f, "view {} (index {index})", quoted(name))
             }
         }
     }
@@ -1292,12 +1311,15 @@ pub enum ManifestError {
     /// A `regex '…'` pattern the `regex` crate refuses (§8.3, §17.4).
     ///
     /// `message` is the crate's own sentence, escaped and on one line, so the
-    /// developer reads the compiler's answer rather than a paraphrase.
+    /// developer reads the compiler's answer rather than a paraphrase. §8.3
+    /// pins "escaped and cut", so it goes through the same `clipped` rule as
+    /// every other value: a crate message that quotes a long excerpt cannot
+    /// break the one-line, 120-`char` rule (§18).
     #[error(
         "{}regex `{}` does not compile: {}",
         prefix(*at),
         clipped(pattern),
-        message
+        clipped(message)
     )]
     PatternRegex {
         /// Where the pattern is.
@@ -1339,6 +1361,76 @@ pub enum ManifestError {
         expected: &'static str,
         /// What is there instead.
         found: String,
+    },
+    /// Two `postgres` sections that lower to one store (§7.3).
+    ///
+    /// The unnamed form takes the name `db`, so `postgres $DATABASE_URL` and
+    /// `postgres db $OTHER_URL` are one store written twice.
+    #[error(
+        "{}store {} is declared twice; the unnamed `postgres $DATABASE_URL` takes the name `db`, so name one of the two",
+        prefix(*at),
+        quoted(name)
+    )]
+    DuplicateProxyName {
+        /// Where the second declaration is.
+        at: Position,
+        /// The store's name.
+        name: String,
+    },
+    /// A `use` that names no trait (§11.2).
+    ///
+    /// A trait may be written after the view that uses it, so this is resolved
+    /// once the whole file has been read — never by the parser (§11.2, §7.3).
+    #[error(
+        "{}view {}: `use {name}` names no trait; a trait is declared at the top level: `trait {name} {{ … }}`",
+        prefix(*at),
+        quoted(view)
+    )]
+    UnknownTrait {
+        /// Where the `use` name is.
+        at: Position,
+        /// The view that uses it.
+        view: String,
+        /// The trait name that resolves to nothing.
+        name: String,
+    },
+    /// An `entrypoint php` whose path breaks one of `check_php_entry`'s rules
+    /// (§12.2).
+    ///
+    /// The path is never printed: a pasted token can end up in that slot
+    /// (§18), so the sentence names the position and the rule instead.
+    #[error("{}entrypoint php: {rule}", prefix(*at))]
+    PhpEntrypointInvalid {
+        /// Where the `entrypoint` is.
+        at: Position,
+        /// The rule the path breaks, in `check_php_entry`'s words.
+        rule: &'static str,
+    },
+    /// A `static` block with no `root` (§9.1).
+    ///
+    /// `root` is required: a mount with no directory answers nothing, and
+    /// defaulting it would make the omission invisible.
+    #[error("{}a `static` block needs `root`: write `root \"public\"`", prefix(*at))]
+    StaticRootMissing {
+        /// Where the `static` keyword is.
+        at: Position,
+    },
+    /// One `root`, `index`, `fallback` or `immutable` written twice in one
+    /// `static` block (§9.1).
+    ///
+    /// The retired format refused a duplicate key; a second directive would
+    /// otherwise silently replace the first.
+    #[error(
+        "{}`{directive}` is written twice in one `static` block; the first is on line {first}",
+        prefix(*at)
+    )]
+    DuplicateStaticDirective {
+        /// Where the second directive is.
+        at: Position,
+        /// The directive's keyword.
+        directive: String,
+        /// The line of the first one.
+        first: u32,
     },
 }
 

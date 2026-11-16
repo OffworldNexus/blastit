@@ -1,0 +1,11 @@
+# A mount beside a front controller: one `entrypoint php` for the whole file,
+# and the catch-all view that forwards to it (§7.2 row 3, §12.2).
+entrypoint php "public/index.php"
+
+static "/assets" {
+    root "public/assets"
+}
+
+view app "/*" {
+    body none
+}

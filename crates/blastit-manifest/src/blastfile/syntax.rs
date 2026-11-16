@@ -126,11 +126,13 @@ pub(crate) struct Cst {
 
 impl Cst {
     /// The source the tree was built from, byte for byte.
+    #[allow(dead_code)] // the printer reads it (`MB.21.3.4`)
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
     /// The `File` node.
+    #[allow(dead_code)] // the printer and the editor walk from it (`MB.21.3.4`, `MB.21.3.5`)
     pub(crate) fn root(&self) -> NodeId {
         self.root
     }
@@ -153,6 +155,7 @@ impl Cst {
     }
 
     /// The child nodes of `node`, in source order.
+    #[allow(dead_code)] // the printer and the editor walk it (`MB.21.3.4`, `MB.21.3.5`)
     pub(crate) fn child_nodes(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         let range = self.child_range(node);
         let start = range.start;
@@ -189,6 +192,25 @@ impl Cst {
     /// The first child node of `node` that is `kind`.
     pub(crate) fn first_of_kind(&self, node: NodeId, kind: NodeKind) -> Option<NodeId> {
         self.of_kind(node, kind).next()
+    }
+
+    /// The elements of `node` with their arena index, in source order.
+    ///
+    /// The index of an [`Element::Node`] is that node's id, so a walk that has
+    /// to keep tokens and child nodes in one order — `lower`'s grant block, whose
+    /// clause keyword and its items are siblings — can use it.
+    pub(crate) fn child_elements(
+        &self,
+        node: NodeId,
+    ) -> impl Iterator<Item = (NodeId, Element)> + '_ {
+        let range = self.child_range(node);
+        let start = range.start as u32;
+        self.elements
+            .get(range)
+            .unwrap_or(&[])
+            .iter()
+            .enumerate()
+            .map(move |(offset, element)| (start + offset as u32, *element))
     }
 
     /// The `app` section, when the file declares one.
@@ -334,6 +356,7 @@ impl Cst {
     }
 
     /// The last token of `node`'s subtree.
+    #[allow(dead_code)] // the printer and the editor read a node's span (`MB.21.3.4`, `MB.21.3.5`)
     pub(crate) fn last_token(&self, node: NodeId) -> Option<TokenId> {
         let mut current = node as usize;
         loop {
@@ -353,6 +376,7 @@ impl Cst {
     }
 
     /// The source text `node`'s subtree spans.
+    #[allow(dead_code)] // the editor rewrites a node in place (`MB.21.3.5`)
     pub(crate) fn node_text(&self, node: NodeId) -> &str {
         let start = self.first_token(node).and_then(|id| self.token_span(id));
         let end = self.last_token(node).and_then(|id| self.token_span(id));
@@ -515,6 +539,7 @@ impl Builder {
 /// This is a byte-for-byte concatenation with no layout logic, so it proves the
 /// tree lost nothing: `print_lossless(&parse(text)?) == text` for every
 /// parseable text.
+#[allow(dead_code)] // `blastit fmt` and the editor's postcondition read it (`MB.21.3.4`)
 pub(crate) fn print_lossless(cst: &Cst) -> String {
     let mut out = String::with_capacity(cst.text.len());
     let mut stack: Vec<Element> = cst.children(cst.root).collect();

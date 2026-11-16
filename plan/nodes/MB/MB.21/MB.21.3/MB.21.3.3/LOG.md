@@ -71,3 +71,7 @@ status review -> done
 ## 2026-11-16T05:23 [lead]
 
 Gate note: the first make check on this tree failed in blastit-view (php::tests::a_runtime_that_retires_ends_the_loop_after_its_done: "the worker never wrote 3 frames" -- wait_for gives 200x5ms = 1s), a crate and file no leaf of MB.21.3 touches; the immediate re-run was green (exit 0) and the leaf-specific suites were green on both runs. Recorded as an epic follow-up: a 1 s frame budget that flakes under a loaded make check.
+
+## 2026-11-16T05:23 [lead]
+
+commit 46e1b80

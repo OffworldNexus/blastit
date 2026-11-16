@@ -55,8 +55,9 @@ pub(crate) fn parse(text: &str) -> Result<Cst, ManifestErrors> {
 ///
 /// One pass over the source, so a position is a binary search: the pattern hook
 /// asks for one per pattern, and a per-item scan from byte 0 is `O(n²)` on a
-/// generated file (`LESSONS.md`, `MB.21.3.2`).
-fn line_starts(text: &str) -> Vec<u32> {
+/// generated file (`LESSONS.md`, `MB.21.3.2`). `lower` builds the same index
+/// once, so a lowering refusal is a `line:col` too.
+pub(crate) fn line_starts(text: &str) -> Vec<u32> {
     let mut starts = Vec::new();
     starts.push(0);
     starts.extend(
@@ -94,6 +95,9 @@ fn is_name(word: &str) -> bool {
 /// A word outside this set cannot start a directive in any block, so inside a
 /// view block it can only be a method attempt — and §6.3 refuses a lower-case
 /// method with its own sentence rather than §6.7's "not a directive here".
+/// Every keyword of the language is listed, the `body` codecs and the two
+/// `store_grant`/`egress` sub-tokens included: `view v { json }` is a directive
+/// in the wrong place (§6.7 row 3), not a lower-case method.
 fn is_keyword(word: &str) -> bool {
     matches!(
         word,
@@ -131,6 +135,26 @@ fn is_keyword(word: &str) -> bool {
             | "query"
             | "regex"
             | "workers"
+            | "unrestricted"
+            | "any"
+            | "json"
+            | "form"
+            | "none"
+            | "raw"
+            | "unvalidated"
+    )
+}
+
+/// True for a word that is a directive of a *block* — a view, a `static` block
+/// or an endpoint — rather than a top-level section (§6.7 row 3).
+///
+/// At the top level such a word is "not a directive here", not "not a keyword":
+/// `root "public"` outside a mount is a misplaced directive, and the sentence
+/// says which sections the file does take.
+fn is_block_directive(word: &str) -> bool {
+    matches!(
+        word,
+        "body" | "use" | "egress" | "prefork" | "root" | "index" | "fallback" | "immutable"
     )
 }
 
@@ -753,6 +777,14 @@ impl<'a> Parser<'a> {
             "view" => self.view(),
             "static" => self.static_(),
             "workers" => Err(ManifestError::WorkersRemoved { at: self.at() }),
+            // §6.7 row 3: a directive of a block written at the top level is
+            // "not a directive here", naming the sections the file does take.
+            other if is_block_directive(other) => Err(ManifestError::NotADirectiveHere {
+                at: self.at(),
+                word: other.to_owned(),
+                block: "the top level",
+                takes: "`app`, `entrypoint`, `postgres`, `trait`, `view` and `static`",
+            }),
             other => Err(ManifestError::UnknownKeyword {
                 at: self.at(),
                 word: other.to_owned(),
@@ -1909,6 +1941,51 @@ mod tests {
             (
                 "view v {\n  fallback \"x\"\n}\n",
                 "2:3: `fallback` is not a directive here; a view takes `body`, `use`, `egress`, `prefork`, `postgres` and `METHOD \"pattern\"`",
+            ),
+            // §6.7 row 3 at the top level: a block's directive, not an unknown
+            // keyword. `root`, `body`, `index`, `fallback`, `immutable`, `use`,
+            // `egress` and `prefork` are all directives of a block.
+            (
+                "root \"public\"\n",
+                "1:1: `root` is not a directive here; the top level takes `app`, `entrypoint`, `postgres`, `trait`, `view` and `static`",
+            ),
+            (
+                "body json\n",
+                "1:1: `body` is not a directive here; the top level takes `app`, `entrypoint`, `postgres`, `trait`, `view` and `static`",
+            ),
+            (
+                "index \"index.html\"\n",
+                "1:1: `index` is not a directive here; the top level takes `app`, `entrypoint`, `postgres`, `trait`, `view` and `static`",
+            ),
+            (
+                "fallback \"index.html\"\n",
+                "1:1: `fallback` is not a directive here; the top level takes `app`, `entrypoint`, `postgres`, `trait`, `view` and `static`",
+            ),
+            (
+                "immutable \"/assets/*\"\n",
+                "1:1: `immutable` is not a directive here; the top level takes `app`, `entrypoint`, `postgres`, `trait`, `view` and `static`",
+            ),
+            (
+                "use session\n",
+                "1:1: `use` is not a directive here; the top level takes `app`, `entrypoint`, `postgres`, `trait`, `view` and `static`",
+            ),
+            (
+                "egress any\n",
+                "1:1: `egress` is not a directive here; the top level takes `app`, `entrypoint`, `postgres`, `trait`, `view` and `static`",
+            ),
+            (
+                "prefork\n",
+                "1:1: `prefork` is not a directive here; the top level takes `app`, `entrypoint`, `postgres`, `trait`, `view` and `static`",
+            ),
+            // §6.3's one bit: a word that is a keyword of the language gets the
+            // directive sentence, not the method one.
+            (
+                "view v {\n  json\n}\n",
+                "2:3: `json` is not a directive here; a view takes `body`, `use`, `egress`, `prefork`, `postgres` and `METHOD \"pattern\"`",
+            ),
+            (
+                "view v {\n  unvalidated\n}\n",
+                "2:3: `unvalidated` is not a directive here; a view takes `body`, `use`, `egress`, `prefork`, `postgres` and `METHOD \"pattern\"`",
             ),
             (
                 "view v {\n  get \"/x\"\n}\n",

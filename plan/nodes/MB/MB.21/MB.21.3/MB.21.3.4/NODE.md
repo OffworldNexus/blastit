@@ -5,7 +5,7 @@ kind: task
 status: ready
 owner: implementer
 priority: 2
-depends_on: [MB.21.3.3]
+depends_on: [MB.21.3.8]
 paths:
   - "crates/blastit-manifest/src/blastfile/**"
   - "crates/blastit-manifest/tests/critical_blastfile_print.rs"
@@ -18,7 +18,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T02:16"
+updated: "2026-11-16T05:23"
 ---
 
 # Goal
