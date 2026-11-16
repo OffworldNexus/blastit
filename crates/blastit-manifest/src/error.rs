@@ -533,19 +533,19 @@ pub enum ManifestError {
     /// A static route that can never reach the app still declares something
     /// only the app could use (`R4`).
     ///
-    /// `why` is `spa = true never reaches the app` or `the manifest declares no
-    /// app`; `key` is the declaration, as the operator wrote it:
-    /// `[route.ingress]`, `prefork = true`, `groups`, or the grant's
-    /// `[route.<proxy>]`. Each is dead weight that reads like a capability, so
-    /// the boot refuses it rather than let it look like it runs.
+    /// `why` is `fallback "index.html" never reaches the app` or `the manifest
+    /// declares no app`; `key` is the declaration, as a `Blastfile` writes it:
+    /// `body json`, `prefork`, `use`, or the grant's `postgres [<name>] { … }`
+    /// block. Each is dead weight that reads like a capability, so the boot
+    /// refuses it rather than let it look like it runs.
     #[error("{location}: {why}; {} can never run", escape_control(.key))]
     StaticDeadDeclaration {
-        /// Where the `[route.static]` block is written.
+        /// Where the static route is declared.
         location: Location,
         /// The dead declaration, as written.
         key: String,
         /// Why the route can never reach the app.
-        why: &'static str,
+        why: String,
     },
     /// A `[route.php]` `entry` is not a relative `.php` path beneath the
     /// manifest's directory (`ADR-0010` §2; design §4.1, unchanged from the
@@ -589,9 +589,10 @@ pub enum ManifestError {
     /// A `[route.php]` route carries a declaration that never reaches the front
     /// controller (`ADR-0010` §2).
     ///
-    /// `key` names the declaration (`spa = true`, `CONNECT`, `TRACE`) and `why`
-    /// is the fixed sentence the design pins; the message is
-    /// `route "app" (index 0): <why>`, exactly as the design's table renders it.
+    /// `key` names the declaration as a `Blastfile` writes it (`fallback
+    /// "<file>"`, `CONNECT`, `TRACE`) and `why` is the sentence the design pins;
+    /// the message is `route "app" (index 0): <why>`, exactly as the design's
+    /// table renders it.
     #[error("{location}: {why}")]
     PhpDeadDeclaration {
         /// Where the `[route.php]` block is written.
@@ -599,7 +600,7 @@ pub enum ManifestError {
         /// The declaration that can never run.
         key: String,
         /// Why it can never reach the front controller.
-        why: &'static str,
+        why: String,
     },
     /// `=` is not Blastfile syntax (§5.3).
     ///

@@ -2061,7 +2061,10 @@ mod tests {
             Provenance {
                 init_uid: init_uid(),
                 objects: Vec::new(),
-                trees: vec![Claim::new("route \"app\": [route.php] entry", path)],
+                trees: vec![Claim::new(
+                    "route \"app\": entrypoint php \"public/index.php\"",
+                    path,
+                )],
             }
             .check_trees()
         };
@@ -2069,6 +2072,13 @@ mod tests {
         std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(0o777)).unwrap();
         let err = checked(&tree).unwrap_err();
         assert!(err.contains(&tree.display().to_string()), "{err}");
+        // The refusal names the claim the way a `Blastfile` writes it: the
+        // `entrypoint php` the tree belongs to, not the retired per-route table.
+        assert!(
+            err.contains("route \"app\": entrypoint php \"public/index.php\""),
+            "{err}"
+        );
+        assert!(!err.contains("[route."), "{err}");
         assert!(err.contains("could be replaced by another uid"), "{err}");
         assert!(err.contains("chown"), "the fix is a chown/chmod: {err}");
     }

@@ -27,3 +27,51 @@ amendment 2 (measured surface folded in): the renderer is substantive, not a ver
 ## 2026-11-16T19:01 [planner]
 
 amendment 2, corrections with measurement: (a) crates/blastit-sqlpolicy/tests/critical_policy_surface.rs:740,761 is a PROTECTED caller of to_toml and must be re-spelled (update = ["id"] to update t(id)); it is authorized by its own explicit paths entry and RESULT.md quotes the diff with every structural claim kept. (b) python/tests/runnable_docs/harness.py:3555 is not a field - it is the BLOCK_CHECKS fence-language validator map (yaml/toml/sql), which docs/{ci,getting-started,index,local}.md still need, and blastfile can never be a fence language (ADR-0012 12); renaming it would silently stop every TOML fence being parsed, so harness.py stays out of paths and out of the new grep, recorded in the body. (c) docs/reference/blastfile.md never names table_grants - it documents --json findings only - so there is no documented example to keep in step; the undocumented report field is a follow-up for MB.21.5.1. Build artefacts (_blastit*.so, __pycache__) match a bare grep: acceptance uses grep -I and forbids touching them.
+
+## 2026-11-16T20:35 [lead]
+
+status ready -> active
+
+## 2026-11-16T20:35 [lead]
+
+attempt 1/4 started
+
+## 2026-11-16T20:35 [lead]
+
+base fa7f2ef
+
+## 2026-11-16T20:48 [lead]
+
+attempt 1 landed the whole edit set on disk (13 Rust/Python/doc files, greps clean, blastit-sqlpolicy+blastit-py build) but the session ended with an empty report and no RESULT.md; attempt 2 finishes the evidence and the gate.
+
+## 2026-11-16T20:48 [lead]
+
+attempt 2/4 started
+
+## 2026-11-16T21:10 [lead]
+
+status active -> review
+
+## 2026-11-16T21:15 [lead]
+
+REVIEW FAIL: [MAJOR] to_blastfile interpolates table/column names raw, so a non-Word name renders a fragment the reader refuses (select audit.users(id) -> fmt rc=2) or extra directives (a newline name adds 'select secret(id)'), contradicting its own rustdoc and the test that pins the dotted form; need the escaping/advice rule the deleted string_toml gave, mirrored in _table_snippet, with both shapes in grant_fragment.rs. [MAJOR] audit_v1.rs:1258/1264 still tell the developer to write body = "json"/body = "raw" + allow_raw, pinned by critical_check_engine.rs:890-891. [MINOR] RESULT names the wrong twin file; stage0::php_boot keeps a dead _cap; the only _table_snippet empty-list test sits behind the PostgreSQL skipif.
+
+## 2026-11-16T21:15 [lead]
+
+status review -> ready
+
+## 2026-11-16T21:15 [lead]
+
+attempt 3/4 started
+
+## 2026-11-16T21:30 [lead]
+
+status ready -> review
+
+## 2026-11-16T21:41 [lead]
+
+reviewer PASS (round 2). Two MINORs recorded: (1) the DB-free _table_snippet tests run in CI's pytest job (.github/workflows/ci.yml:589), not in a make target — a Makefile change would need its own leaf; (2) grant_locator's named-store header is executed but never asserted (a mutant dropping {store} would survive) — handed to the MB.21.5.3 mutation audit. My gate: validate OK, guard OK, make check exit 0, 166 suites.
+
+## 2026-11-16T21:41 [lead]
+
+status review -> done

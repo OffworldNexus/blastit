@@ -163,7 +163,7 @@ def document(text: str = MANIFEST) -> dict[str, Any]:
 def covering_for(table: str = "orders") -> Any:
     """A stand-in for `blastit._blastit.covering`, with one table grant."""
 
-    def covering(statements: list[str], prefix: str) -> str:
+    def covering(statements: list[str], locator: str) -> str:
         return json.dumps(
             {
                 "tables": {
@@ -175,7 +175,7 @@ def covering_for(table: str = "orders") -> Any:
                     }
                 },
                 "functions": ["unaccent"],
-                "toml": f"[{prefix}.tables]\n",
+                "blastfile": f"# {locator}\n",
                 "unanalysable": [],
             }
         )
@@ -260,12 +260,12 @@ class TestPlanning:
         assert additions[0].functions == ["unaccent"]
 
     def test_prefer_tables_keeps_what_a_table_grant_cannot_describe(self) -> None:
-        def covering(statements: list[str], prefix: str) -> str:
+        def covering(statements: list[str], locator: str) -> str:
             return json.dumps(
                 {
                     "tables": {},
                     "functions": [],
-                    "toml": "",
+                    "blastfile": "",
                     "unanalysable": [
                         {
                             "sql": statement,
@@ -296,11 +296,11 @@ class TestPlanning:
                 )
             ],
             prefer_tables=True,
-            covering=lambda statements, prefix: json.dumps(
+            covering=lambda statements, locator: json.dumps(
                 {
                     "tables": {"products": {"insert": ["id", "name"]}},
                     "functions": [],
-                    "toml": "",
+                    "blastfile": "",
                     "unanalysable": [],
                 }
             ),
@@ -316,11 +316,11 @@ class TestPlanning:
             document(),
             [denial('SELECT "products"."id" FROM "products"', route="catalog")],
             prefer_tables=True,
-            covering=lambda statements, prefix: json.dumps(
+            covering=lambda statements, locator: json.dumps(
                 {
                     "tables": {"products": {"select": ["id"]}},
                     "functions": [],
-                    "toml": "",
+                    "blastfile": "",
                     "unanalysable": [],
                 }
             ),
@@ -332,10 +332,10 @@ class TestPlanning:
     def test_the_covering_grant_is_taken_over_all_the_statements_at_once(self) -> None:
         seen: list[list[str]] = []
 
-        def covering(statements: list[str], prefix: str) -> str:
+        def covering(statements: list[str], locator: str) -> str:
             seen.append(statements)
             return json.dumps(
-                {"tables": {}, "functions": [], "toml": "", "unanalysable": []}
+                {"tables": {}, "functions": [], "blastfile": "", "unanalysable": []}
             )
 
         fold.plan(
@@ -463,11 +463,11 @@ class TestEdit:
                 )
             ],
             prefer_tables=True,
-            covering=lambda statements, prefix: json.dumps(
+            covering=lambda statements, locator: json.dumps(
                 {
                     "tables": {"products": {"insert": ["name"]}},
                     "functions": [],
-                    "toml": "",
+                    "blastfile": "",
                     "unanalysable": [],
                 }
             ),
@@ -683,10 +683,12 @@ class TestCli:
         log = tmp_path / "app.log"
         log.write_text(self.LOG + "\n", encoding="utf-8")
         assert (
-            fold.main(["fold", str(log), "--manifest", str(tmp_path / "nope.toml")])
+            fold.main(
+                ["fold", str(log), "--manifest", str(tmp_path / "nope.blastfile")]
+            )
             == 1
         )
-        assert "nope.toml" in capsys.readouterr().err
+        assert "nope.blastfile" in capsys.readouterr().err
 
 
 class TestWithTheExtension:
@@ -1566,6 +1568,66 @@ view notes "/notes/" {
         notes = fold.model(edited)["views"][0]
         assert notes["grants"]["db"]["queries"][-1] == fold._normalise(sql)
         assert "\\u007F" not in edited, "a `Blastfile` has no `\\u` escape"
+
+
+class TestTheTableScopeHint:
+    """`pytest_plugin._table_snippet`: the terminal hint the report backs.
+
+    It lives here, not in ``test_pytest_plugin.py``, because that module is
+    gated on a real PostgreSQL and this branch — which lines a table scope may
+    print — has to be provable without one. Every line must be syntax the
+    `Blastfile` reader accepts: the hint is pasted, not read.
+    """
+
+    def test_a_table_scope_never_prints_a_directive_the_reader_refuses(self) -> None:
+        from blastit import pytest_plugin as plugin
+
+        snippet = plugin._table_snippet(
+            {
+                "tables": {
+                    "notes_note": {"select": ["id", "owner_id"], "delete": True},
+                    "counter": {"select": []},
+                    "wide": {"select": "*"},
+                },
+                "functions": ["unaccent"],
+            }
+        )
+        assert snippet.splitlines()[0] == "functions unaccent"
+        assert "select notes_note(id, owner_id)" in snippet
+        assert "delete notes_note" in snippet
+        assert "select wide" in snippet
+        # Never the syntax the grammar lacks, and never a widening to every column.
+        assert "counter()" not in snippet
+        assert "select counter" not in snippet
+        assert "name one here" in snippet
+
+    def test_a_name_the_reader_cannot_write_is_a_comment(self) -> None:
+        from blastit import pytest_plugin as plugin
+
+        snippet = plugin._table_snippet(
+            {
+                "tables": {
+                    "audit.users": {"select": ["id"]},
+                    "notes_note\nselect secret": {"select": ["id"]},
+                    "columns": {"select": ["audit.id"]},
+                },
+                "functions": ["unaccent", "my schema.f"],
+            }
+        )
+        assert "functions unaccent" in snippet
+        assert "select audit.users" not in snippet
+        assert "select notes_note" not in snippet
+        assert "select columns" not in snippet
+        # Five lines: the one writable function, and one comment per refused
+        # table (two name clashes and one column). A newline in a name is
+        # escaped inside its comment, so it never becomes a directive of its own.
+        lines = snippet.splitlines()
+        assert len(lines) == 5, lines
+        assert all(line.startswith(("functions ", "# ")) for line in lines), lines
+        assert "\nselect secret" not in snippet, "a newline stayed a newline"
+        assert '"audit.users"' in snippet
+        assert '"audit.id"' in snippet
+        assert '"my schema.f"' in snippet
 
 
 class TestTheAuditProofIsNotSkipped:

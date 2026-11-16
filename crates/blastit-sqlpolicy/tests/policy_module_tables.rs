@@ -400,6 +400,28 @@ fn a_lock_needs_update_on_one_column() {
 }
 
 #[test]
+fn a_covering_grant_is_rendered_as_the_directives_a_view_holds() {
+    // What the report publishes and the plugin prints: the directives a
+    // `postgres` block takes, under a header naming where they go. The Django
+    // shape, because that is the app this rewrite serves.
+    let covering = covering(&[
+        r#"SELECT "notes_note"."id", "notes_note"."owner_id" FROM "notes_note" WHERE "notes_note"."owner_id" = $1"#,
+        r#"INSERT INTO "notes_note" ("id", "owner_id") VALUES ($1, $2)"#,
+    ]);
+    assert_eq!(
+        covering.to_blastfile("view notes postgres"),
+        "# view notes postgres\n\
+         select notes_note(id, owner_id)\n\
+         insert notes_note(id, owner_id)\n"
+    );
+    // No directives at all is the empty string, never a header on its own.
+    assert_eq!(
+        TableGrants::default().to_blastfile("view notes postgres"),
+        ""
+    );
+}
+
+#[test]
 // Protected twin (MB.1.12, AUDIT-MB.1 F1/F2): tests/critical_policy_surface.rs.
 fn a_covering_grant_writes_the_lock_it_can_name() {
     let sql = "SELECT t.id, t.status FROM t WHERE t.id = $1 FOR UPDATE";
@@ -409,12 +431,12 @@ fn a_covering_grant_writes_the_lock_it_can_name() {
         Vec::<&str>::new(),
         "the lock names a column the route already reads"
     );
-    let toml = covering.to_toml("route.db");
-    assert!(toml.contains("update = [\"id\"]"), "{toml}");
-    assert!(toml.contains("only locks its rows"), "{toml}");
+    let blastfile = covering.to_blastfile("view notes postgres");
+    assert!(blastfile.contains("update t(id)"), "{blastfile}");
+    assert!(blastfile.contains("only locks its rows"), "{blastfile}");
     assert!(
-        !toml.contains("update = \"*\""),
-        "a lock is never `\"*\"`: {toml}"
+        !blastfile.contains("update t\n"),
+        "a lock never widens to every column: {blastfile}"
     );
     assert!(allowed(&covering, sql));
 
@@ -431,12 +453,15 @@ fn a_lock_without_a_column_is_reported_not_widened() {
     let sql = "SELECT 1 FROM (SELECT 1 FROM t) s FOR UPDATE";
     let covering = covering(&[sql]);
     assert_eq!(covering.locks_without_a_column().collect::<Vec<_>>(), ["t"]);
-    let toml = covering.to_toml("route.db");
+    let blastfile = covering.to_blastfile("view notes postgres");
     assert!(
-        !toml.contains("update ="),
-        "no update entry is invented: {toml}"
+        !blastfile.contains("update"),
+        "no update entry is invented: {blastfile}"
     );
-    assert!(toml.contains("name one here"), "the author is told: {toml}");
+    assert!(
+        blastfile.contains("name one here"),
+        "the author is told: {blastfile}"
+    );
     assert!(
         !allowed(&covering, sql),
         "a grant that cannot name a column cannot allow the lock"
@@ -456,10 +481,15 @@ fn a_written_empty_update_is_left_alone() {
         )],
         [],
     );
-    // Rendered exactly as written, with no claim that the entry only locks.
+    // Rendered as the one thing a `Blastfile` can say about it: the entry is
+    // omitted (the grammar takes at least one column) and the author is told.
     assert_eq!(
-        grants.to_toml("route.db"),
-        "[route.db.tables]\nt = { select = [\"id\"], update = [] }\n"
+        grants.to_blastfile("view notes postgres"),
+        "# view notes postgres\n\
+         # t: the statements only name it, so there is no column to write for `update` — a \
+         table grant takes at least one, so name one here (its primary key, say): without the \
+         entry the statement is refused.\n\
+         select t(id)\n"
     );
     // It is not a lock hint, so nothing reports it as one...
     assert_eq!(
@@ -469,8 +499,12 @@ fn a_written_empty_update_is_left_alone() {
     // ... and nothing fills the list in behind the author's back.
     grants.pick_locking_columns();
     assert_eq!(
-        grants.to_toml("route.db"),
-        "[route.db.tables]\nt = { select = [\"id\"], update = [] }\n"
+        grants.to_blastfile("view notes postgres"),
+        "# view notes postgres\n\
+         # t: the statements only name it, so there is no column to write for `update` — a \
+         table grant takes at least one, so name one here (its primary key, say): without the \
+         entry the statement is refused.\n\
+         select t(id)\n"
     );
     // It still does not grant a lock, because it names no column.
     assert_eq!(

@@ -1112,8 +1112,8 @@ def test_a_route_reports_the_table_grant_that_covers_it(baseline: Outcome) -> No
     }
     assert grants["functions"] == []
     assert grants["unanalysable"] == []
-    assert grants["toml"] == (
-        '[route.db.tables]\nnotes_note = { select = ["id", "owner_id"] }\n'
+    assert grants["blastfile"] == (
+        "# view notes postgres\nselect notes_note(id, owner_id)\n"
     )
 
 

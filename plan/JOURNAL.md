@@ -2354,3 +2354,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T19:01 [MB.21.4] (planner) MB.21.4.10 amended twice before dispatch: (1) it renames the report key table_grants.toml to table_grants.blastfile per the owner rule, (2) measured surface fol
 - 2026-11-16T20:35 [MB.21.4.5] (lead) gate (lead): greps empty, cargo tree toml=0, ^mod parse; empty, parse.rs gone, Cargo.lock -55 only; sub-lead ran make check (165 ok) and make e2e (exit 0, 1115 
 - 2026-11-16T20:35 [MB.21.4.5] (lead) status ready -> done
+- 2026-11-16T20:35 [MB.21.4.10] (lead) status ready -> active
+- 2026-11-16T20:35 [MB.21.4.10] (lead) attempt 1/4 started
+- 2026-11-16T20:35 [MB.21.4.10] (lead) base fa7f2ef
+- 2026-11-16T20:48 [MB.21.4.10] (lead) attempt 1 landed the whole edit set on disk (13 Rust/Python/doc files, greps clean, blastit-sqlpolicy+blastit-py build) but the session ended with an empty repo
+- 2026-11-16T20:48 [MB.21.4.10] (lead) attempt 2/4 started
+- 2026-11-16T21:10 [MB.21.4.10] (lead) status active -> review
+- 2026-11-16T21:15 [MB.21.4.10] (lead) REVIEW FAIL: [MAJOR] to_blastfile interpolates table/column names raw, so a non-Word name renders a fragment the reader refuses (select audit.users(id) -> fmt r
+- 2026-11-16T21:15 [MB.21.4.10] (lead) status review -> ready
+- 2026-11-16T21:15 [MB.21.4.10] (lead) attempt 3/4 started
+- 2026-11-16T21:30 [MB.21.4.10] (lead) status ready -> review
+- 2026-11-16T21:41 [MB.21.4.10] (lead) reviewer PASS (round 2). Two MINORs recorded: (1) the DB-free _table_snippet tests run in CI's pytest job (.github/workflows/ci.yml:589), not in a make target —
+- 2026-11-16T21:41 [MB.21.4.10] (lead) status review -> done

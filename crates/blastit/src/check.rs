@@ -454,8 +454,8 @@ fn django_document(
     let Some((name, upstream)) = prepared.upstreams().first() else {
         return Err(
             "pytest-django is installed but the Blastfile declares no postgresql proxy, \
-             so its test database has nowhere to go; declare [proxy.<name>] with \
-             protocol = \"postgresql\" (see docs/frameworks/django.md), or remove \
+             so its test database has nowhere to go; declare a `postgres` store: \
+             `postgres $DATABASE_URL` (see docs/frameworks/django.md), or remove \
              pytest-django from the environment blastit audits"
                 .to_string(),
         );
@@ -487,13 +487,7 @@ fn django_document(
         }
     }
     if real.is_empty() || swapped.is_empty() {
-        return Err(format!(
-            "pytest-django is installed but proxy `{}` has no input variables to hand \
-             over, so its test database cannot be created; name them in [proxy.{}] and \
-             export them before running blastit check",
-            name.as_str(),
-            name.as_str()
-        ));
+        return Err(no_input_variables(name.as_str()));
     }
     Ok(json!({
         "proxy": name.as_str(),
@@ -504,6 +498,23 @@ fn django_document(
         "real": real,
         "swapped": swapped,
     }))
+}
+
+/// The refusal a store that hands the Django handshake no variable is printed
+/// with: the block to write, as a `Blastfile` writes it, and never the retired
+/// per-route table.
+///
+/// `real` and `swapped` are both filled for every store a `postgres` block can
+/// declare, so this is the guard against a model that changes that — one
+/// sentence, asserted on its own rather than through a manifest that cannot
+/// reach it.
+fn no_input_variables(store: &str) -> String {
+    format!(
+        "pytest-django is installed but proxy `{store}` has no input variables to hand \
+         over, so its test database cannot be created; name them in that store's block: \
+         `postgres {{ user $DB_USER; password $DB_PASSWORD }}` and export them before \
+         running blastit check"
+    )
 }
 
 /// Creates `path` `0600` and writes `bytes` into it, owned by this uid.
@@ -1537,6 +1548,24 @@ view fallback regex '.*' {}
         let error =
             django_document(&manifest, &prepared, &platform, "/run/x").expect_err("refused");
         assert!(error.contains("no postgresql proxy"), "{error}");
-        assert!(error.contains("protocol = \"postgresql\""), "{error}");
+        // The fix names the store a `Blastfile` writes, not the retired table.
+        assert!(error.contains("postgres $DATABASE_URL"), "{error}");
+        assert!(!error.contains("[proxy."), "{error}");
+    }
+
+    #[test]
+    fn a_store_with_no_input_variables_is_a_start_failure_that_names_the_block() {
+        // The guard fires for a model that hands the handshake nothing — no
+        // `postgres` block any build accepts reaches it — so the sentence is
+        // asserted here: it names the store's block, as a `Blastfile` writes it,
+        // and never the retired per-route table.
+        let error = no_input_variables("db");
+        assert!(error.contains("no input variables"), "{error}");
+        assert!(
+            error.contains("postgres { user $DB_USER; password $DB_PASSWORD }"),
+            "{error}"
+        );
+        assert!(!error.contains("[proxy."), "{error}");
+        assert!(!error.contains("protocol ="), "{error}");
     }
 }

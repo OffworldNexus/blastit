@@ -2,7 +2,7 @@
 id: MB.21.4.10
 title: "Delete the last retired spellings from user-facing sentences and give the report's table scope a `blastfile` key"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.5.6]
@@ -27,11 +27,11 @@ paths:
   - python/tests/test_pytest_plugin.py
   - docs/reference/blastfile.md
   - "docs/decisions/ADR-0012-blastfile-dsl.md"
-attempts: 0
+attempts: 3
 max_attempts: 4
 escalation: none
 created: "2026-11-16T18:58"
-updated: "2026-11-16T19:00"
+updated: "2026-11-16T21:41"
 ---
 
 # Goal

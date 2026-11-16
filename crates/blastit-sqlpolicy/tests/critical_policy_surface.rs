@@ -737,12 +737,12 @@ fn a_covering_grant_writes_the_lock_it_can_name() {
         Vec::<&str>::new(),
         "the lock names a column the route already reads"
     );
-    let toml = covering.to_toml("route.db");
-    assert!(toml.contains("update = [\"id\"]"), "{toml}");
-    assert!(toml.contains("only locks its rows"), "{toml}");
+    let blastfile = covering.to_blastfile("view notes postgres");
+    assert!(blastfile.contains("update t(id)"), "{blastfile}");
+    assert!(blastfile.contains("only locks its rows"), "{blastfile}");
     assert!(
-        !toml.contains("update = \"*\""),
-        "a lock is never `\"*\"`: {toml}"
+        !blastfile.contains("update t\n"),
+        "a lock never widens to every column: {blastfile}"
     );
     assert!(allowed(&covering, sql));
 
@@ -758,12 +758,15 @@ fn a_lock_without_a_column_is_reported_not_widened() {
     let sql = "SELECT 1 FROM (SELECT 1 FROM t) s FOR UPDATE";
     let covering = covering(&[sql]);
     assert_eq!(covering.locks_without_a_column().collect::<Vec<_>>(), ["t"]);
-    let toml = covering.to_toml("route.db");
+    let blastfile = covering.to_blastfile("view notes postgres");
     assert!(
-        !toml.contains("update ="),
-        "no update entry is invented: {toml}"
+        !blastfile.contains("update"),
+        "no update entry is invented: {blastfile}"
     );
-    assert!(toml.contains("name one here"), "the author is told: {toml}");
+    assert!(
+        blastfile.contains("name one here"),
+        "the author is told: {blastfile}"
+    );
     assert!(
         !allowed(&covering, sql),
         "a grant that cannot name a column cannot allow the lock"

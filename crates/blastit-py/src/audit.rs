@@ -107,7 +107,7 @@
 //!           "unused": ["SELECT ..."],
 //!           "transaction_control": {"observed": false, "granted": false, "needed": false},
 //!           "table_grants": {"tables": {"notes": {"select": ["id"]}},
-//!                            "functions": [], "toml": "[route.db.tables]\n…",
+//!                            "functions": [], "blastfile": "# view notes postgres\n…",
 //!                            "unanalysable": []}
 //!         }
 //!       ]
@@ -323,11 +323,15 @@ pub(crate) const LOCK_NEEDS_A_COLUMN: &str = "its rows are locked (`FOR UPDATE`)
 /// {
 ///   "tables": {"shop_product": {"select": ["id", "name"]}},
 ///   "functions": ["unaccent"],
-///   "toml": "[route.db.tables]\nshop_product = { select = [\"id\", \"name\"] }\n",
+///   "blastfile": "# view shop postgres\nfunctions unaccent\nselect shop_product(id, name)\n",
 ///   "unanalysable": [{"sql": "SET TIME ZONE 'UTC'",
 ///                     "reason": "only SELECT, INSERT, UPDATE and DELETE…"}]
 /// }
 /// ```
+///
+/// `locator` is the `Blastfile` node the fragment belongs in — `view <name>
+/// postgres`, `view <name> postgres <store>`, or `trait <name>` — and becomes
+/// the value's one leading `#` comment.
 ///
 /// `unanalysable` lists the statements a table grant cannot describe at all —
 /// they have to stay exact `queries`, and the reason is the same one a
@@ -337,7 +341,7 @@ pub(crate) const LOCK_NEEDS_A_COLUMN: &str = "its rows are locked (`FOR UPDATE`)
 ///
 /// Only a JSON rendering failure, which cannot happen in practice: a statement
 /// this build cannot analyse is data, not an error.
-pub(crate) fn covering(statements: &[String], prefix: &str) -> Result<String, String> {
+pub(crate) fn covering(statements: &[String], locator: &str) -> Result<String, String> {
     let mut analyses = Vec::with_capacity(statements.len());
     let mut unanalysable = Vec::new();
     for sql in statements {
@@ -363,7 +367,7 @@ pub(crate) fn covering(statements: &[String], prefix: &str) -> Result<String, St
     let mut document = serde_json::to_value(&tables).map_err(|error| error.to_string())?;
     if let Some(map) = document.as_object_mut() {
         map.insert("unanalysable".to_string(), json!(unanalysable));
-        map.insert("toml".to_string(), json!(tables.to_toml(prefix)));
+        map.insert("blastfile".to_string(), json!(tables.to_blastfile(locator)));
     }
     serde_json::to_string_pretty(&document).map_err(|error| error.to_string())
 }
@@ -934,7 +938,12 @@ fn assemble(
                     "granted": granted_control,
                     "needed": needed,
                 },
-                "table_grants": table_grants_json(&table_grants, proxy.as_str(), unanalysable),
+                "table_grants": table_grants_json(
+                    &table_grants,
+                    route.name(),
+                    proxy.as_str(),
+                    unanalysable,
+                ),
             }));
         }
         if route_needs_transaction_control {
@@ -1535,26 +1544,43 @@ static EMPTY_MATCHED: BTreeSet<String> = BTreeSet::new();
 /// The `table_grants` section of one `(route, proxy)` pair (§6, D7).
 ///
 /// It is the smallest table grant that covers every statement the pair was
-/// observed to run, plus the TOML a manifest author pastes into
-/// `[route.<proxy>.tables]` — the rewrite of a route's exact queries into table
-/// grants. It is per pair, not per route, because a grant is: a route with two
-/// `postgresql` proxies has two grants, and the plugin reports each where it
-/// belongs.
+/// observed to run, plus the directives a `Blastfile` view's `postgres` block
+/// takes — the rewrite of a route's exact queries into table grants. It is per
+/// pair, not per route, because a grant is: a route with two `postgresql` stores
+/// has two grants, and the plugin reports each where it belongs.
 ///
 /// `unanalysable` lists the statements a table grant cannot describe at all
 /// (a `SET`, a `COPY`, a statement this build does not understand). They are
 /// reported, never dropped: the covering grant is then not a complete
 /// replacement for the route's exact queries.
-fn table_grants_json(tables: &TableGrants, proxy: &str, unanalysable: Vec<Value>) -> Value {
+fn table_grants_json(
+    tables: &TableGrants,
+    view: &str,
+    store: &str,
+    unanalysable: Vec<Value>,
+) -> Value {
     let mut section = serde_json::to_value(tables).unwrap_or_else(|_| json!({}));
     if let Some(map) = section.as_object_mut() {
         map.insert(
-            "toml".to_string(),
-            json!(tables.to_toml(&format!("route.{proxy}"))),
+            "blastfile".to_string(),
+            json!(tables.to_blastfile(&grant_locator(view, store))),
         );
         map.insert("unanalysable".to_string(), json!(unanalysable));
     }
     section
+}
+
+/// The `Blastfile` node a pair's table grant belongs in: `view <name> postgres`
+/// for the unnamed store, `view <name> postgres <store>` otherwise.
+///
+/// The header is what makes the rendered value a fragment a developer can paste
+/// as it stands, instead of a list of directives with no place to go.
+fn grant_locator(view: &str, store: &str) -> String {
+    if store == blastit_manifest::blastfile::DEFAULT_STORE {
+        format!("view {view} postgres")
+    } else {
+        format!("view {view} postgres {store}")
+    }
 }
 
 /// One statement executed but not granted.
@@ -2068,12 +2094,23 @@ view notes "/notes/*" {
         let grants = &proxy(&locked, "notes")["table_grants"];
         assert_eq!(grants["tables"]["notes"]["update"], json!(["id"]));
         assert!(
-            !grants["toml"]
+            !grants["blastfile"]
                 .as_str()
                 .expect("a string")
-                .contains("update = \"*\""),
-            "a lock never renders a star: {}",
-            grants["toml"]
+                .contains("update notes\n"),
+            "a lock never widens to every column: {}",
+            grants["blastfile"]
+        );
+        assert_eq!(
+            grants["blastfile"],
+            json!(
+                "# view notes postgres\n\
+                 # notes: `update notes(id)` only locks its rows (`FOR UPDATE`) — any one \
+                 column is enough, as PostgreSQL requires.\n\
+                 select notes(id)\n\
+                 update notes(id)\n"
+            ),
+            "the report publishes the directives a pasteable fragment holds"
         );
         assert_eq!(grants["unanalysable"], json!([]));
 
@@ -2094,12 +2131,12 @@ view notes "/notes/*" {
             "the lock is named by nothing: the entry grants no column"
         );
         assert!(
-            !grants["toml"]
+            !grants["blastfile"]
                 .as_str()
                 .expect("a string")
                 .contains("update"),
             "and the rendered grant leaves it out: {}",
-            grants["toml"]
+            grants["blastfile"]
         );
         assert_eq!(grants["unanalysable"].as_array().expect("a list").len(), 1);
         assert_eq!(
@@ -2115,12 +2152,12 @@ view notes "/notes/*" {
             grants["unanalysable"][0]["reason"]
         );
         assert!(
-            !grants["toml"]
+            !grants["blastfile"]
                 .as_str()
                 .expect("a string")
-                .contains("update = \"*\""),
+                .contains("update notes\n"),
             "{}",
-            grants["toml"]
+            grants["blastfile"]
         );
     }
 
@@ -3477,25 +3514,29 @@ view notes "/notes/*" {
         // once — which is why the fold tool calls this function and not the
         // per-statement analysis.
         let statements = vec![
-            r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."id" = $1 FOR UPDATE"#.to_string(),
-            r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $1"#.to_string(),
+            r#"SELECT "notes_note"."id" FROM "notes_note" WHERE "notes_note"."id" = $1 FOR UPDATE"#
+                .to_string(),
+            r#"SELECT "notes_note"."id", "notes_note"."owner_id" FROM "notes_note"
+                WHERE "notes_note"."owner_id" = $1"#
+                .to_string(),
         ];
         let document: Value =
-            serde_json::from_str(&covering(&statements, "route.db").expect("renders"))
+            serde_json::from_str(&covering(&statements, "view notes postgres").expect("renders"))
                 .expect("JSON");
         assert_eq!(
-            document["tables"]["notes"]["select"],
+            document["tables"]["notes_note"]["select"],
             json!(["id", "owner_id"])
         );
-        assert_eq!(document["tables"]["notes"]["update"], json!(["id"]));
+        assert_eq!(document["tables"]["notes_note"]["update"], json!(["id"]));
         assert_eq!(document["functions"], json!([]));
         assert_eq!(document["unanalysable"], json!([]));
         assert_eq!(
-            document["toml"].as_str().expect("a string"),
-            "[route.db.tables]\n\
-             # notes: `update = [\"id\"]` only locks its rows (`FOR UPDATE`) — any one \
+            document["blastfile"].as_str().expect("a string"),
+            "# view notes postgres\n\
+             # notes_note: `update notes_note(id)` only locks its rows (`FOR UPDATE`) — any one \
              column is enough, as PostgreSQL requires.\n\
-             notes = { select = [\"id\", \"owner_id\"], update = [\"id\"] }\n"
+             select notes_note(id, owner_id)\n\
+             update notes_note(id)\n"
         );
     }
 
@@ -3557,7 +3598,7 @@ view notes "/notes/*" {
     fn a_statement_no_table_grant_can_describe_comes_back_separately() {
         let statements = vec!["SET TIME ZONE 'UTC'".to_string()];
         let document: Value =
-            serde_json::from_str(&covering(&statements, "route.db").expect("renders"))
+            serde_json::from_str(&covering(&statements, "view notes postgres").expect("renders"))
                 .expect("JSON");
         assert_eq!(document["tables"], json!({}));
         assert_eq!(document["functions"], json!([]));

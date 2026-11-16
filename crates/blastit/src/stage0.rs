@@ -1156,10 +1156,11 @@ impl PhpBoot {
 /// `fstat`ed and read as an ELF `.dynsym` table — `dlopen` happens inside a
 /// view worker, never here.
 ///
-/// The order is the order an operator can act on: an over-budget `workers` first
-/// (nothing about the host can fix it), then the library (missing, a directory,
-/// not an ELF, ZTS, no `php_version`, no version this boot can read) and the
-/// shim for the tuple. Every one of those is fatal in **both** scopes:
+/// The order is the order an operator can act on: the library (missing, a
+/// directory, not an ELF, ZTS, no `php_version`, no version this boot can read)
+/// and then the shim for the tuple. There is no `workers` arm: `ADR-0012` §12.3
+/// removed the keyword, and the deployment's budget comes from configuration.
+/// Every one of those refusals is fatal in **both** scopes:
 /// `ADR-0010` §1 gives PHP one backend, so a host that cannot serve a declared
 /// `entrypoint php` file gets §4.1's package sentence — in `blastit dev` and
 /// `blastit check` as much as in a deployment. There is no development mode
@@ -1182,7 +1183,6 @@ pub(crate) fn php_boot_gate(config: &Config, manifest: &Manifest, scope: PhpShim
     php_boot_in(
         manifest,
         &PhpSearch::from_config(config, scope),
-        Some(config.view_worker_cap()),
         deployment.as_ref(),
     )
 }
@@ -1201,28 +1201,28 @@ struct Deployment {
 /// The same gate for a `dev`/`check` caller: no production provenance.
 ///
 /// The unit tests use it as the seam they have always used; a boot reaches the
-/// gate through [`php_boot_gate`], which decides the scope.
+/// gate through [`php_boot_gate`], which decides the scope. It took the
+/// per-view budget until `MB.21.4.10`: `ADR-0012` §12.3 removed `workers`, so a
+/// manifest carries no cap and the deployment's is the scheduler's, which is why
+/// the parameter is gone rather than ignored.
 #[cfg(test)]
-fn php_boot(manifest: &Manifest, search: &PhpSearch, cap: Option<u32>) -> PhpBoot {
-    php_boot_in(manifest, search, cap, None)
+fn php_boot(manifest: &Manifest, search: &PhpSearch) -> PhpBoot {
+    php_boot_in(manifest, search, None)
 }
 
-/// The same gate for a caller with the search, the budget, and — for a
-/// deployment — the provenance to authorise spelled out.
+/// The same gate for a caller with the search and — for a deployment — the
+/// provenance to authorise spelled out.
+///
+/// There is no per-view budget here: `ADR-0012` §12.3 removed `workers`, so the
+/// only cap is the deployment's, and it reaches the scheduler, not this gate.
 fn php_boot_in(
     manifest: &Manifest,
     search: &PhpSearch,
-    cap: Option<u32>,
     deployment: Option<&Deployment>,
 ) -> PhpBoot {
     let Some((route, entry, _workers)) = first_php_route(manifest) else {
         return PhpBoot::Absent;
     };
-    if let Some(cap) = cap
-        && let Some(message) = php_worker_budget(manifest, cap)
-    {
-        return PhpBoot::Refused(message);
-    }
     match discover_php(search) {
         Ok(runtime) => {
             // The authorisation comes after discovery — it needs the *resolved*
@@ -1278,7 +1278,7 @@ pub fn deployment_boot_check(
         init_uid: current_uid(),
         manifest_dir: manifest_dir.to_path_buf(),
     };
-    match php_boot_in(&manifest, &search, None, Some(&deployment)) {
+    match php_boot_in(&manifest, &search, Some(&deployment)) {
         // Nothing to authorise is not a refusal: a manifest with no PHP route
         // boots (`MB.3.44` — reporting this as an error let a caller read a
         // *proceeding* manifest as a refused one, the confusion this seam
@@ -1407,29 +1407,6 @@ fn php_trees(manifest: &Manifest, deployment: &Deployment) -> Vec<Claim> {
     claims
 }
 
-/// `ADR-0010` §2: `workers` is a cap on **that route's** concurrency and it is
-/// downward only, so every `[route.php]` route is checked, in manifest order,
-/// and the first one above the deployment's per-view budget is refused naming
-/// its own name and both numbers.
-///
-/// Checking only the route the discovery sentence would name leaves a manifest
-/// whose *second* PHP route asks for more than the deployment allows booting
-/// with an accepted budget; the cap is a manifest rule, so it is applied to the
-/// whole manifest before any host question is asked.
-fn php_worker_budget(manifest: &Manifest, cap: u32) -> Option<String> {
-    manifest.routes().iter().find_map(|route| {
-        let workers = route.php()?.workers?;
-        (workers > cap).then(|| {
-            format!(
-                "route {:?}: [route.php] workers = {workers} is above this deployment's \
-                     per-view budget of {cap} (BLASTIT_VIEW_MAX_WORKERS, from \
-                     BLASTIT_MAX_WORKERS); lower workers to {cap} or raise the budget",
-                route.name()
-            )
-        })
-    })
-}
-
 /// The file's one front controller: the first view's name, its `entry` and its
 /// (always absent) `workers` cap.
 ///
@@ -1437,7 +1414,8 @@ fn php_worker_budget(manifest: &Manifest, cap: u32) -> Option<String> {
 /// every view reaches it; the gate names the first view and the entry, which is
 /// the shape `ADR-0010` §4.1's sentence has. A file with no view has nothing to
 /// route to, so the gate is absent. `workers` is `None` by construction: the
-/// language has no `workers` keyword (`ADR-0012` §12.3).
+/// language has no `workers` keyword (`ADR-0012` §12.3), so the per-view budget
+/// is the deployment's alone and no boot can be refused for one the file names.
 fn first_php_route(manifest: &Manifest) -> Option<(&str, &str, Option<u32>)> {
     let php = manifest.php()?;
     let route = manifest.routes().first()?;
@@ -4754,10 +4732,7 @@ view web regex '.*' {}
             );
         }
         assert!(
-            matches!(
-                php_boot(&manifest(PHP_ONLY), &search, Some(16)),
-                PhpBoot::Proceed(_)
-            ),
+            matches!(php_boot(&manifest(PHP_ONLY), &search), PhpBoot::Proceed(_)),
             "a legitimately symlinked distro library keeps booting"
         );
     }
@@ -4772,14 +4747,10 @@ view web regex '.*' {}
         std::os::unix::fs::symlink(scratch.dir.join("not-installed.so"), &link).unwrap();
         let shims = Scratch::new("dangling-shims");
 
-        let message = php_boot(
-            &manifest(PHP_ONLY),
-            &search_for(&link, &shims.dir),
-            Some(16),
-        )
-        .refusal()
-        .expect("a dangling link cannot be embedded")
-        .to_string();
+        let message = php_boot(&manifest(PHP_ONLY), &search_for(&link, &shims.dir))
+            .refusal()
+            .expect("a dangling link cannot be embedded")
+            .to_string();
         assert!(message.contains("route \"app\""), "{message}");
         assert!(
             message.contains("entrypoint php \"public/index.php\""),
@@ -4817,14 +4788,11 @@ view web regex '.*' {}
         };
         for source in [STATIC_ONLY, WITH_A_VIEW] {
             assert!(
-                matches!(
-                    php_boot(&manifest(source), &search, Some(16)),
-                    PhpBoot::Absent
-                ),
+                matches!(php_boot(&manifest(source), &search), PhpBoot::Absent),
                 "{source}"
             );
         }
-        let message = php_boot(&manifest(STATIC_AND_PHP), &search, Some(16))
+        let message = php_boot(&manifest(STATIC_AND_PHP), &search)
             .refusal()
             .expect("a PHP route")
             .to_string();
@@ -4858,7 +4826,7 @@ view web regex '.*' {}
         );
 
         // The first PHP route is the one named, never the second.
-        let two = php_boot(&manifest(TWO_PHP_ROUTES), &search, Some(16))
+        let two = php_boot(&manifest(TWO_PHP_ROUTES), &search)
             .refusal()
             .expect("a PHP route")
             .to_string();
@@ -4868,7 +4836,7 @@ view web regex '.*' {}
         // The `dev` twin is the same refusal: `ADR-0010` §1 gives PHP one
         // backend, so a developer host with nothing installed gets the package
         // sentence too, not a boot that serves the route another way.
-        let dev = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+        let dev = php_boot(&manifest(PHP_ONLY), &search)
             .refusal()
             .expect("a PHP-free dev host is refused")
             .to_string();
@@ -4894,7 +4862,7 @@ view web regex '.*' {}
             b"never loaded in stage 0",
         );
         let search = search_for(&zts, &shims.dir);
-        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+        let message = php_boot(&manifest(PHP_ONLY), &search)
             .refusal()
             .expect("a ZTS host is refused")
             .to_string();
@@ -4923,10 +4891,7 @@ view web regex '.*' {}
         assert_eq!(runtime.shim, shim);
         assert!(runtime.ino > 0, "the inode is recorded for stage 1");
         assert!(
-            matches!(
-                php_boot(&manifest(PHP_ONLY), &search, Some(16)),
-                PhpBoot::Proceed(_)
-            ),
+            matches!(php_boot(&manifest(PHP_ONLY), &search), PhpBoot::Proceed(_)),
             "the host resolves, so the boot proceeds to stage 1's binding"
         );
     }
@@ -4946,14 +4911,10 @@ view web regex '.*' {}
             (scratch.dir.join("libphp-8.4.so"), "cannot be opened"),
         ];
         for (path, expected) in cases {
-            let message = php_boot(
-                &manifest(PHP_ONLY),
-                &search_for(&path, &shims.dir),
-                Some(16),
-            )
-            .refusal()
-            .expect("an unusable path is refused")
-            .to_string();
+            let message = php_boot(&manifest(PHP_ONLY), &search_for(&path, &shims.dir))
+                .refusal()
+                .expect("an unusable path is refused")
+                .to_string();
             assert!(message.contains(expected), "{path:?}: {message}");
             assert!(
                 message.contains("BLASTIT_LIBPHP=/path/to/libphp.so"),
@@ -4963,14 +4924,10 @@ view web regex '.*' {}
         // A directory named like the library.
         let directory = scratch.dir.join("libphp8.3.so");
         std::fs::create_dir_all(&directory).unwrap();
-        let message = php_boot(
-            &manifest(PHP_ONLY),
-            &search_for(&directory, &shims.dir),
-            Some(16),
-        )
-        .refusal()
-        .expect("a directory is not a library")
-        .to_string();
+        let message = php_boot(&manifest(PHP_ONLY), &search_for(&directory, &shims.dir))
+            .refusal()
+            .expect("a directory is not a library")
+            .to_string();
         assert!(message.contains("not a regular file"), "{message}");
     }
 
@@ -4983,14 +4940,10 @@ view web regex '.*' {}
         let _ = shims.file(&shim_name(PhpVersion::new(8, 3)), b"never loaded");
 
         let unversioned = scratch.file("libphp.so", &shared_object(&["executor_globals"]));
-        let message = php_boot(
-            &manifest(PHP_ONLY),
-            &search_for(&unversioned, &shims.dir),
-            Some(16),
-        )
-        .refusal()
-        .expect("an unversioned name with no readable version cannot choose a shim")
-        .to_string();
+        let message = php_boot(&manifest(PHP_ONLY), &search_for(&unversioned, &shims.dir))
+            .refusal()
+            .expect("an unversioned name with no readable version cannot choose a shim")
+            .to_string();
         assert!(
             message.contains("exports `php_version`"),
             "the `.dynsym` fact is named: {message}"
@@ -5079,14 +5032,10 @@ view web regex '.*' {}
         // The file name states 8.3, the directory states 8.4.
         std::fs::create_dir_all(scratch.dir.join("php84")).unwrap();
         let conflicted = scratch.file("php84/libphp83.so", &shared_object(&["executor_globals"]));
-        let message = php_boot(
-            &manifest(PHP_ONLY),
-            &search_for(&conflicted, &shims.dir),
-            Some(16),
-        )
-        .refusal()
-        .expect("two minors cannot both choose a shim")
-        .to_string();
+        let message = php_boot(&manifest(PHP_ONLY), &search_for(&conflicted, &shims.dir))
+            .refusal()
+            .expect("two minors cannot both choose a shim")
+            .to_string();
         assert!(message.contains("more than one PHP minor"), "{message}");
         assert!(message.contains("PHP 8.3"), "{message}");
         assert!(message.contains("PHP 8.4"), "{message}");
@@ -5112,7 +5061,6 @@ view web regex '.*' {}
         let message = php_boot(
             &manifest(PHP_ONLY),
             &search_for(&versioned_name, &shims.dir),
-            Some(16),
         )
         .refusal()
         .expect("a libphp without php_version cannot be embedded")
@@ -5151,7 +5099,7 @@ view web regex '.*' {}
 
         // `BLASTIT_LIBPHP` names it: the object is opened, and the version its
         // own name states is refused before the symbol walk.
-        let message = php_boot(&manifest(PHP_ONLY), &search_for(&old, &shims.dir), Some(16))
+        let message = php_boot(&manifest(PHP_ONLY), &search_for(&old, &shims.dir))
             .refusal()
             .expect("an unsupported minor cannot be embedded")
             .to_string();
@@ -5171,7 +5119,7 @@ view web regex '.*' {}
         let mut search = PhpSearch::new(None, None, PhpShimScope::Development);
         search.lib_dirs = vec![only_old.dir.clone()];
         search.shim_dirs = vec![shims.dir.clone()];
-        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+        let message = php_boot(&manifest(PHP_ONLY), &search)
             .refusal()
             .expect("an 8.2-only host is refused")
             .to_string();
@@ -5188,7 +5136,7 @@ view web regex '.*' {}
         let mut search = PhpSearch::new(None, None, PhpShimScope::Development);
         search.lib_dirs = vec![per_minor.dir.join("php82")];
         search.shim_dirs = vec![shims.dir.clone()];
-        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+        let message = php_boot(&manifest(PHP_ONLY), &search)
             .refusal()
             .expect("the per-minor directory states the minor")
             .to_string();
@@ -5259,7 +5207,7 @@ view web regex '.*' {}
         search.lib_dirs = vec![scratch.dir.clone(), scratch.dir.join("php85")];
         search.shim_dirs = vec![shims.dir.clone()];
 
-        let boot = php_boot(&manifest(PHP_ONLY), &search, Some(16));
+        let boot = php_boot(&manifest(PHP_ONLY), &search);
         let PhpBoot::Proceed(runtime) = boot else {
             panic!("two packages, and the 8.5 library serves: {boot:?}");
         };
@@ -5323,14 +5271,10 @@ view web regex '.*' {}
                 "libphp.so",
                 &shared_object_in(&["executor_globals"], None, true, shape),
             );
-            let message = php_boot(
-                &manifest(PHP_ONLY),
-                &search_for(&unversioned, &shims.dir),
-                Some(16),
-            )
-            .refusal()
-            .unwrap_or_else(|| panic!("{label}: no version anywhere cannot choose a shim"))
-            .to_string();
+            let message = php_boot(&manifest(PHP_ONLY), &search_for(&unversioned, &shims.dir))
+                .refusal()
+                .unwrap_or_else(|| panic!("{label}: no version anywhere cannot choose a shim"))
+                .to_string();
             assert!(
                 !message.contains("exports no `php_version`"),
                 "{label}: the object does export it, so that sentence is false: {message}"
@@ -5350,14 +5294,10 @@ view web regex '.*' {}
                 "libphp8.4.so",
                 &shared_object_without_php_version(&["executor_globals"]),
             );
-            let message = php_boot(
-                &manifest(PHP_ONLY),
-                &search_for(&absent, &shims.dir),
-                Some(16),
-            )
-            .refusal()
-            .expect("no php_version name at all is refused")
-            .to_string();
+            let message = php_boot(&manifest(PHP_ONLY), &search_for(&absent, &shims.dir))
+                .refusal()
+                .expect("no php_version name at all is refused")
+                .to_string();
             assert!(
                 message.contains("exports no `php_version`"),
                 "{label}: the absence sentence still belongs to the absent symbol: {message}"
@@ -5414,7 +5354,7 @@ view web regex '.*' {}
             shim_dirs: vec![first.dir.clone(), second.dir.clone()],
             lib_dirs: Vec::new(),
         };
-        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+        let message = php_boot(&manifest(PHP_ONLY), &search)
             .refusal()
             .expect("no shim for the tuple")
             .to_string();
@@ -5448,7 +5388,7 @@ view web regex '.*' {}
             shim_dirs: vec![empty.dir.clone()],
             lib_dirs: Vec::new(),
         };
-        let dev = php_boot(&manifest(PHP_ONLY), &dev_search, Some(16))
+        let dev = php_boot(&manifest(PHP_ONLY), &dev_search)
             .refusal()
             .expect("dev refuses a missing shim too")
             .to_string();
@@ -5458,18 +5398,19 @@ view web regex '.*' {}
         );
     }
 
-    /// `ADR-0010` §2's `workers` cap is downward only — and `ADR-0012` §12.3
-    /// removed the keyword from the language, so the only budget a `Blastfile`
-    /// can carry is the deployment's. `php_worker_budget` therefore has no
-    /// over-cap input to refuse: the accepted case is the whole rule, and the
-    /// refusal itself is deleted with the keyword by `MB.21.4.2`.
+    /// `ADR-0010` §2's `workers` cap was downward only, and `ADR-0012` §12.3
+    /// removed the keyword from the language: a `Blastfile` carries no per-view
+    /// cap, so the deployment's budget is the only one there is and this gate
+    /// has nothing to compare it against. The accepted case is the whole rule —
+    /// the sibling that refused an over-cap `workers`, and the parameter that
+    /// carried the budget, are deleted with the keyword.
     #[test]
     fn a_php_boot_with_no_workers_cap_passes_any_budget() {
         let scratch = Scratch::new("workers");
         let (_, resolved) = resolved_84(&scratch);
         assert!(
             matches!(
-                php_boot(&manifest(PHP_ONLY), &resolved, Some(8)),
+                php_boot(&manifest(PHP_ONLY), &resolved),
                 PhpBoot::Proceed(_)
             ),
             "a view declares no cap, so the deployment's budget is the budget"
@@ -5485,14 +5426,10 @@ view web regex '.*' {}
         let shims = Scratch::new("no-version-shims");
         let _ = shims.file(&shim_name(PhpVersion::new(8, 4)), b"never loaded");
         let unversioned = scratch.file("libphp.so", b"this is not an ELF shared object");
-        let message = php_boot(
-            &manifest(PHP_ONLY),
-            &search_for(&unversioned, &shims.dir),
-            Some(16),
-        )
-        .refusal()
-        .expect("not an ELF, and its name states no version")
-        .to_string();
+        let message = php_boot(&manifest(PHP_ONLY), &search_for(&unversioned, &shims.dir))
+            .refusal()
+            .expect("not an ELF, and its name states no version")
+            .to_string();
         assert!(
             message.contains(&format!("(PHP ?, {})", target_tuple())),
             "the tuple shape survives an unknown version: {message}"
@@ -5515,7 +5452,7 @@ view web regex '.*' {}
             shim_dirs: Vec::new(),
             lib_dirs: Vec::new(),
         };
-        let message = php_boot(&manifest(PHP_ONLY), &search, Some(16))
+        let message = php_boot(&manifest(PHP_ONLY), &search)
             .refusal()
             .expect("a relative override cannot be the library the boot inspected")
             .to_string();
@@ -5565,10 +5502,7 @@ view web regex '.*' {}
                     runtime.version.dotted()
                 );
                 assert!(
-                    matches!(
-                        php_boot(&manifest(PHP_ONLY), &search, None),
-                        PhpBoot::Proceed(_)
-                    ),
+                    matches!(php_boot(&manifest(PHP_ONLY), &search), PhpBoot::Proceed(_)),
                     "this host resolves the pair"
                 );
             }
@@ -5730,7 +5664,7 @@ view web regex '.*' {}
             init_uid: current_uid(),
             manifest_dir: protected.dir.clone(),
         };
-        let message = php_boot_in(&manifest(PHP_ONLY), &search, Some(16), Some(&deployment))
+        let message = php_boot_in(&manifest(PHP_ONLY), &search, Some(&deployment))
             .refusal()
             .expect("a writable libphp directory cannot be a deployment")
             .to_string();
@@ -5773,7 +5707,7 @@ view web regex '.*' {}
         let shim = shims.join(shim_name(PhpVersion::new(8, 4)));
         std::fs::write(&shim, shared_object(&[])).unwrap();
         let search = search_for(&protected.dir.join("libphp8.4.so"), &shims);
-        let message = php_boot_in(&manifest(PHP_ONLY), &search, Some(16), Some(&deployment))
+        let message = php_boot_in(&manifest(PHP_ONLY), &search, Some(&deployment))
             .refusal()
             .expect("a writable shim directory cannot be a deployment")
             .to_string();
@@ -5791,7 +5725,7 @@ view web regex '.*' {}
         // what a deployment boots: nothing in `dev`'s answer changed.
         assert!(
             matches!(
-                php_boot_in(&manifest(PHP_ONLY), &good, Some(16), Some(&deployment)),
+                php_boot_in(&manifest(PHP_ONLY), &good, Some(&deployment)),
                 PhpBoot::Proceed(_)
             ),
             "a 0755 pair plus a protected tree must not be refused"
@@ -5837,21 +5771,11 @@ static \"/assets\" {
         };
         assert!(
             matches!(
-                php_boot_in(
-                    &manifest(manifest_source),
-                    &search,
-                    Some(16),
-                    Some(&accepted)
-                ),
+                php_boot_in(&manifest(manifest_source), &search, Some(&accepted)),
                 PhpBoot::Proceed(_)
             ),
             "a 0755 tree owned by init's uid is the accepted shape: {:?}",
-            php_boot_in(
-                &manifest(manifest_source),
-                &search,
-                Some(16),
-                Some(&accepted)
-            )
+            php_boot_in(&manifest(manifest_source), &search, Some(&accepted))
         );
 
         // 1. The directory the manifest was read from.
@@ -5860,7 +5784,6 @@ static \"/assets\" {
         let message = php_boot_in(
             &manifest(manifest_source),
             &search,
-            Some(16),
             Some(&Deployment {
                 init_uid: current_uid(),
                 manifest_dir: shared.dir.clone(),
@@ -5889,15 +5812,10 @@ static \"/assets\" {
 
         // 2. The front controller itself, world-writable inside a protected tree.
         std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o666)).unwrap();
-        let message = php_boot_in(
-            &manifest(manifest_source),
-            &search,
-            Some(16),
-            Some(&accepted),
-        )
-        .refusal()
-        .expect("a writable front controller cannot be a deployment")
-        .to_string();
+        let message = php_boot_in(&manifest(manifest_source), &search, Some(&accepted))
+            .refusal()
+            .expect("a writable front controller cannot be a deployment")
+            .to_string();
         assert!(
             message.contains("route \"app\": entrypoint php \"public/index.php\""),
             "the entry is named with its route: {message}"
@@ -5908,15 +5826,10 @@ static \"/assets\" {
         // 3. A static root: the responder reads it, and the manifest declares
         // one next to the PHP route.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
-        let message = php_boot_in(
-            &manifest(manifest_source),
-            &search,
-            Some(16),
-            Some(&accepted),
-        )
-        .refusal()
-        .expect("a writable static root cannot be a deployment")
-        .to_string();
+        let message = php_boot_in(&manifest(manifest_source), &search, Some(&accepted))
+            .refusal()
+            .expect("a writable static root cannot be a deployment")
+            .to_string();
         assert!(
             message.contains("static \"/assets\": root \"site\""),
             "the static root is named with its route: {message}"
@@ -5927,12 +5840,7 @@ static \"/assets\" {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             matches!(
-                php_boot_in(
-                    &manifest(manifest_source),
-                    &search,
-                    Some(16),
-                    Some(&accepted)
-                ),
+                php_boot_in(&manifest(manifest_source), &search, Some(&accepted)),
                 PhpBoot::Proceed(_)
             ),
             "the same tree at 0755 is what a deployment boots"
@@ -5968,7 +5876,7 @@ static \"/assets\" {
             )
         };
         let refuse = |source: &str| {
-            php_boot_in(&manifest(source), &search, Some(16), Some(&deployment))
+            php_boot_in(&manifest(source), &search, Some(&deployment))
                 .refusal()
                 .expect("a manifest naming a path that is not there cannot be a deployment")
                 .to_string()
@@ -6042,7 +5950,6 @@ static \"/assets\" {
                 php_boot_in(
                     &manifest(&source("public/index.php", "site")),
                     &search,
-                    Some(16),
                     Some(&deployment)
                 ),
                 PhpBoot::Proceed(_)
@@ -6125,10 +6032,7 @@ static \"/\" {
         std::fs::set_permissions(&shared.dir, std::fs::Permissions::from_mode(0o777)).unwrap();
         let search = stub_pair(&shared);
         assert!(
-            matches!(
-                php_boot(&manifest(PHP_ONLY), &search, Some(16)),
-                PhpBoot::Proceed(_)
-            ),
+            matches!(php_boot(&manifest(PHP_ONLY), &search), PhpBoot::Proceed(_)),
             "`dev`/`check` must keep booting out of a world-writable checkout"
         );
         // And the production question about those same bytes is a refusal, so
@@ -6136,7 +6040,6 @@ static \"/\" {
         let message = php_boot_in(
             &manifest(PHP_ONLY),
             &search,
-            Some(16),
             Some(&Deployment {
                 init_uid: current_uid(),
                 manifest_dir: shared.dir.clone(),

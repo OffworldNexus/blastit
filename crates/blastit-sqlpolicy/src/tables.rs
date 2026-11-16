@@ -167,7 +167,7 @@ pub struct TableGrant {
     pub update: Option<Columns>,
     /// Whether `update` is only there to lock rows (`FOR UPDATE`), not to write
     /// them — a hint [`TableGrants::covering`] leaves for
-    /// [`TableGrants::to_toml`], which says so in a comment.
+    /// [`TableGrants::to_blastfile`], which says so in a comment.
     ///
     /// A lock needs the UPDATE privilege on **any one** column of the table
     /// (PostgreSQL's rule), so the covering grant names the smallest column the
@@ -488,81 +488,170 @@ impl TableGrants {
         }
     }
 
-    /// Renders the grants as the TOML a manifest holds, under the section
-    /// `prefix` (for example `route.db`).
+    /// Renders the grants as the directives a view's `postgres` block holds,
+    /// under `locator` (for example `view catalog postgres`, `view catalog
+    /// postgres warehouse`, or `trait connection`).
     ///
-    /// The output is the text of one `[<prefix>.tables]` section plus, when
-    /// there are any, a `functions` line under `[<prefix>]` — what a manifest
-    /// author pastes in to replace a list of exact queries. Tables and columns
-    /// are sorted, so the same grants render the same text and a diff is
-    /// readable.
+    /// The output is what a manifest author pastes in to replace a list of exact
+    /// queries: one `# <locator>` comment saying where it goes, a `functions …`
+    /// line when the grant calls one beyond the safe set, then
+    /// `select`/`insert`/`update`/`delete` for every table. Tables, columns and
+    /// functions are sorted, so the same grants render the same text and a diff
+    /// is readable. A grant with no directive at all renders as the empty
+    /// string: a bare header would say nothing.
     ///
     /// A lock whose column this grant cannot name is written as a comment
     /// saying so, and the table is left without an `update` entry: it is the one
     /// thing a manifest author has to finish by hand, because a lock needs a
     /// column and a table grant has no `"*"` (§6, D3c).
-    pub fn to_toml(&self, prefix: &str) -> String {
+    ///
+    /// A column list that is empty — a table the statements merely *named*
+    /// (`SELECT count(*) FROM t`) — has no spelling either: the grammar's
+    /// `table_grant` needs at least one word, and `select t` would grant every
+    /// column. So the entry is left out and the author is told to name a column,
+    /// exactly as for a lock. Every line this function emits parses, and
+    /// `crates/blastit-manifest/tests/grant_fragment.rs` proves it by pasting the
+    /// value into a `view` and reading it back.
+    ///
+    /// A name the reader cannot write — a relation outside the default schema
+    /// keeps its `schema.` prefix, and `audit.users` is not a table name the
+    /// grammar takes — is never interpolated: written raw it is a refusal
+    /// (`` `.` is only part of a qualified function name ``), and a name
+    /// carrying a newline would end the line and become a directive of its own.
+    /// The table is left out with one `#` comment naming it, like the two shapes
+    /// above, so everything this function emits parses. `is_word` here is the
+    /// reader's own rule.
+    pub fn to_blastfile(&self, locator: &str) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
         let mut out = String::new();
-        out.push('[');
-        out.push_str(prefix);
-        out.push_str(".tables]\n");
+        out.push_str(&format!("# {locator}\n"));
+        // A function name is `Word ("." Word)*`, so a qualified name is fine and
+        // anything else (a space, a quote, a control byte) is not: the writable
+        // ones are one line, the rest one comment.
+        let (functions, unwritable): (Vec<&String>, Vec<&String>) = self
+            .functions
+            .iter()
+            .partition(|function| is_function_name(function));
+        if !functions.is_empty() {
+            out.push_str("functions ");
+            out.push_str(
+                &functions
+                    .iter()
+                    .map(|function| function.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            out.push('\n');
+        }
+        for function in unwritable {
+            out.push_str(&format!(
+                "# functions: {function:?} is not a name a Blastfile writes (a name, or names \
+                 joined by `.`), so it is left out — grant it in the block by hand.\n"
+            ));
+        }
         for (table, grant) in &self.tables {
+            // The names come from the analysis, so a qualified relation reaches
+            // here exactly as the analysis spells it. Rendering it raw is the
+            // refusal above; a name carrying a newline would even become a
+            // directive of its own. Comment instead, and never interpolate a name
+            // that is not a word (the comment quotes it, so it stays escaped).
+            let bad_column = [&grant.select, &grant.insert, &grant.update]
+                .into_iter()
+                .flatten()
+                .filter_map(|columns| match columns {
+                    Columns::All => None,
+                    Columns::List(columns) => columns.iter().find(|column| !is_word(column)),
+                })
+                .next();
+            if !is_word(table) || bad_column.is_some() {
+                match bad_column {
+                    Some(column) => out.push_str(&format!(
+                        "# {table:?}: the column {column:?} is not a name a Blastfile writes \
+                         (one word: letters, digits, `_` and an inner `-`), so no directive \
+                         names it — write that grant by hand, or keep the statement an exact \
+                         `query`.\n"
+                    )),
+                    None => out.push_str(&format!(
+                        "# {table:?}: a table name is one word (letters, digits, `_` and an \
+                         inner `-`), so no directive can name it — write that grant by hand, \
+                         or keep the statement an exact `query`.\n"
+                    )),
+                }
+                continue;
+            }
             let unnamable = grant.lock_only
                 && matches!(&grant.update, Some(Columns::List(columns)) if columns.is_empty());
             if grant.lock_only && !unnamable {
-                let columns = match &grant.update {
-                    Some(columns) => columns_toml(columns),
-                    None => "[]".to_string(),
+                let directive = match &grant.update {
+                    Some(columns) => table_directive("update", table, columns),
+                    None => format!("update {table}"),
                 };
                 out.push_str(&format!(
-                    "# {}: `update = {columns}` only locks its rows (`FOR UPDATE`) — any one \
-                     column is enough, as PostgreSQL requires.\n",
-                    key_toml(table),
+                    "# {table}: `{directive}` only locks its rows (`FOR UPDATE`) — any one \
+                     column is enough, as PostgreSQL requires.\n"
                 ));
             }
             if unnamable {
                 out.push_str(&format!(
-                    "# {}: its rows are locked (`FOR UPDATE`) without reading a column of it, so \
-                     name one here — its primary key, say: a table grant never takes `\"*\"` for \
-                     a lock, and without the entry the statement is refused.\n",
-                    key_toml(table),
+                    "# {table}: its rows are locked (`FOR UPDATE`) without reading a column of \
+                     it, so name one here — its primary key, say: a table grant never takes \
+                     `\"*\"` for a lock, and without the entry the statement is refused.\n"
                 ));
             }
-            let mut operations = Vec::new();
-            for (name, columns) in [
+            // An operation whose column list is empty names the table and reads
+            // no column. `unnamable` already explains why there is none, so its
+            // own sentence is the advice and no second one repeats it.
+            let nameless: Vec<&str> = if unnamable {
+                Vec::new()
+            } else {
+                [
+                    ("select", &grant.select),
+                    ("insert", &grant.insert),
+                    ("update", &grant.update),
+                ]
+                .into_iter()
+                .filter(|(_, columns)| {
+                    matches!(columns, Some(Columns::List(columns)) if columns.is_empty())
+                })
+                .map(|(operation, _)| operation)
+                .collect()
+            };
+            if !nameless.is_empty() {
+                out.push_str(&format!(
+                    "# {table}: the statements only name it, so there is no column to write for \
+                     {} — a table grant takes at least one, so name one here (its primary key, \
+                     say): without the entry the statement is refused.\n",
+                    nameless
+                        .iter()
+                        .map(|operation| format!("`{operation}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ));
+            }
+            for (operation, columns) in [
                 ("select", &grant.select),
                 ("insert", &grant.insert),
                 ("update", &grant.update),
             ] {
-                if let Some(columns) = columns {
-                    if name == "update" && unnamable {
-                        continue;
-                    }
-                    operations.push(format!("{name} = {}", columns_toml(columns)));
+                let Some(columns) = columns else {
+                    continue;
+                };
+                if operation == "update" && unnamable {
+                    continue;
                 }
+                // No grammar spelling for "names it, reads no column": the
+                // advice above is the entry's whole rendering.
+                if matches!(columns, Columns::List(columns) if columns.is_empty()) {
+                    continue;
+                }
+                out.push_str(&table_directive(operation, table, columns));
+                out.push('\n');
             }
             if grant.delete {
-                operations.push("delete = true".to_string());
+                out.push_str(&format!("delete {table}\n"));
             }
-            out.push_str(&format!(
-                "{} = {{ {} }}\n",
-                key_toml(table),
-                operations.join(", ")
-            ));
-        }
-        if !self.functions.is_empty() {
-            out.push('[');
-            out.push_str(prefix);
-            out.push_str("]\nfunctions = [");
-            out.push_str(
-                &self
-                    .functions
-                    .iter()
-                    .map(|function| string_toml(function))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
-            out.push_str("]\n");
         }
         out
     }
@@ -622,19 +711,50 @@ pub(crate) fn canonical_function(function: &str) -> String {
     }
 }
 
-/// One column set, as TOML.
-fn columns_toml(columns: &Columns) -> String {
+/// One `select`/`insert`/`update` directive: `select t(id, name)`, or `select t`
+/// when the grant is every column.
+fn table_directive(operation: &str, table: &str, columns: &Columns) -> String {
     match columns {
-        Columns::All => "\"*\"".to_string(),
-        Columns::List(columns) => format!(
-            "[{}]",
-            columns
-                .iter()
-                .map(|column| string_toml(column))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        Columns::All => format!("{operation} {table}"),
+        Columns::List(columns) => format!("{operation} {table}({})", column_names(columns)),
     }
+}
+
+/// Whether `name` is one `Blastfile` word: the reader's own rule (§5.1).
+///
+/// A word is a non-empty run of ASCII letters, digits and `_`, where a `-` is
+/// accepted only after one of those — which is exactly what
+/// `crates/blastit-manifest/src/blastfile/lexer.rs`'s `word_run` consumes. A
+/// name that fails it (a `.`, a space, a quote, a control byte) has no directive
+/// spelling: `table_grant` takes one word and nothing else.
+fn is_word(name: &str) -> bool {
+    let mut previous: Option<char> = None;
+    for character in name.chars() {
+        let accepted = match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => true,
+            '-' => matches!(previous, Some(previous) if previous.is_ascii_alphanumeric()),
+            _ => false,
+        };
+        if !accepted {
+            return false;
+        }
+        previous = Some(character);
+    }
+    previous.is_some()
+}
+
+/// Whether `name` is a `Blastfile` function name: `Word ('.' Word)*`.
+fn is_function_name(name: &str) -> bool {
+    name.split('.').all(is_word)
+}
+
+/// A grant's column names, as a directive's `(…)` list holds them.
+///
+/// `Columns::List` is empty only for a table the statements merely *named*
+/// (`SELECT count(*) FROM t`), and [`TableGrants::to_blastfile`] never calls this
+/// for one: the grammar takes at least one column, so that entry is a comment.
+fn column_names(columns: &BTreeSet<String>) -> String {
+    columns.iter().cloned().collect::<Vec<_>>().join(", ")
 }
 
 /// The `update` entry a row lock alone needs: one column the route already
@@ -661,40 +781,6 @@ fn lock_update(select: Option<&Columns>) -> Option<Columns> {
         .find(|column| column.as_str() == "id")
         .or_else(|| columns.iter().next());
     column.map(|column| Columns::list([column.clone()]))
-}
-
-/// A TOML key: bare when it can be, quoted when it cannot.
-fn key_toml(key: &str) -> String {
-    let bare = !key.is_empty()
-        && key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    if bare {
-        key.to_string()
-    } else {
-        string_toml(key)
-    }
-}
-
-/// A TOML basic string.
-fn string_toml(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            character if character.is_control() => {
-                out.push_str(&format!("\\u{:04X}", character as u32));
-            }
-            character => out.push(character),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]
@@ -965,11 +1051,12 @@ mod tests {
         ];
         let covering = TableGrants::covering(analyses.iter());
         assert_eq!(
-            covering.to_toml("route.db"),
-            "[route.db.tables]\n\
-             t = { select = [\"id\", \"name\"], insert = [\"id\"], delete = true }\n\
-             [route.db]\n\
-             functions = [\"unaccent\"]\n"
+            covering.to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
+             functions unaccent\n\
+             select t(id, name)\n\
+             insert t(id)\n\
+             delete t\n"
         );
         // The covering grant allows every statement it was built from.
         for analysis in &analyses {
@@ -984,9 +1071,9 @@ mod tests {
     fn a_covering_grant_of_a_whole_row_read_asks_for_every_column() {
         let analyses = [analyze("SELECT * FROM t").unwrap()];
         assert_eq!(
-            TableGrants::covering(analyses.iter()).to_toml("route.db"),
-            "[route.db.tables]\n\
-             t = { select = \"*\" }\n"
+            TableGrants::covering(analyses.iter()).to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
+             select t\n"
         );
     }
 
@@ -994,29 +1081,136 @@ mod tests {
     fn covering_an_empty_set_is_empty() {
         let covering = TableGrants::covering(std::iter::empty());
         assert!(covering.is_empty());
-        assert_eq!(covering.to_toml("route.db"), "[route.db.tables]\n");
+        // No directives, no header: the empty string, never a comment alone.
+        assert_eq!(covering.to_blastfile("view notes postgres"), "");
     }
 
     #[test]
-    fn toml_quotes_what_it_has_to() {
-        let grants = TableGrants::new(
+    fn a_covering_grant_renders_the_directives_a_view_holds() {
+        // The Django shape: one table, the columns its statements read, and the
+        // locator naming where the fragment goes.
+        let analyses = [
+            analyze("SELECT id, owner_id FROM notes_note WHERE id = $1").unwrap(),
+            analyze("INSERT INTO notes_note (id, owner_id) VALUES ($1, $2)").unwrap(),
+        ];
+        let covering = TableGrants::covering(analyses.iter());
+        assert_eq!(
+            covering.to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
+             select notes_note(id, owner_id)\n\
+             insert notes_note(id, owner_id)\n"
+        );
+        // A named store is part of the locator, exactly as the block is written.
+        assert_eq!(
+            covering.to_blastfile("view notes postgres warehouse"),
+            "# view notes postgres warehouse\n\
+             select notes_note(id, owner_id)\n\
+             insert notes_note(id, owner_id)\n"
+        );
+        // A trait's block takes the same directives under its own header.
+        let mut functions = TableGrants::default();
+        functions.functions.insert("unaccent".to_string());
+        assert_eq!(
+            functions.to_blastfile("trait connection"),
+            "# trait connection\nfunctions unaccent\n"
+        );
+    }
+
+    #[test]
+    fn a_name_the_reader_cannot_write_is_a_comment_never_a_directive() {
+        // `canonical_table` keeps a schema prefix other than `public.`, so a
+        // qualified relation reaches the renderer. `audit.users` is not a table
+        // name the grammar takes (`` `.` is only part of a qualified function
+        // name ``), so it is not interpolated: the table is one comment.
+        let dotted = TableGrants::new(
             [(
                 "audit.users".to_string(),
                 TableGrant {
-                    select: Some(Columns::list([r#"we"ird"#])),
+                    select: Some(Columns::list(["id"])),
                     ..TableGrant::default()
                 },
             )],
-            ["my schema.f".to_string()],
+            [],
         );
+        let rendered = dotted.to_blastfile("view notes postgres");
         assert_eq!(
-            grants.to_toml("route.db"),
-            "[route.db.tables]\n\
-             \"audit.users\" = { select = [\"we\\\"ird\"] }\n\
-             [route.db]\n\
-             functions = [\"my schema.f\"]\n"
+            rendered,
+            "# view notes postgres\n\
+             # \"audit.users\": a table name is one word (letters, digits, `_` and an inner \
+             `-`), so no directive can name it — write that grant by hand, or keep the \
+             statement an exact `query`.\n"
         );
-        let _ = grants;
+
+        // A column name fails the same rule, and the comment names it.
+        let column = TableGrants::new(
+            [(
+                "notes_note".to_string(),
+                TableGrant {
+                    select: Some(Columns::list(["audit.id"])),
+                    ..TableGrant::default()
+                },
+            )],
+            [],
+        );
+        let rendered = column.to_blastfile("view notes postgres");
+        assert!(rendered.contains("the column \"audit.id\""), "{rendered}");
+        assert!(!rendered.contains("select notes_note"), "{rendered}");
+
+        // A newline in a name never ends the line: the comment quotes it, so it
+        // cannot become a directive of its own.
+        let newline = TableGrants::new(
+            [(
+                "notes_note\nselect secret".to_string(),
+                TableGrant {
+                    select: Some(Columns::list(["id"])),
+                    ..TableGrant::default()
+                },
+            )],
+            [],
+        );
+        let rendered = newline.to_blastfile("view notes postgres");
+        assert_eq!(rendered.lines().count(), 2, "{rendered:?}");
+        assert!(!rendered.contains("\nselect secret\n"), "{rendered:?}");
+
+        // A function name is `Word ("." Word)*`: a qualified one renders, a
+        // space does not.
+        let functions = TableGrants::new(
+            [],
+            ["pg_catalog.unaccent".to_string(), "my schema.f".to_string()],
+        );
+        let rendered = functions.to_blastfile("view notes postgres");
+        // `TableGrants::new` canonicalises the name (`pg_catalog.` is dropped),
+        // so the writable half is the bare function.
+        assert!(rendered.contains("functions unaccent\n"), "{rendered}");
+        assert!(rendered.contains("\"my schema.f\""), "{rendered}");
+        assert!(!rendered.contains("my schema.f\n"), "{rendered}");
+    }
+
+    #[test]
+    fn a_word_is_the_readers_own_run() {
+        // The lexer's `word_run`: an ASCII run of letters, digits and `_`, where
+        // `-` is taken only right after one of those.
+        for word in ["t", "notes_note", "A1", "orders-order9", "a-"] {
+            assert!(is_word(word), "{word:?} is one word");
+        }
+        for not in [
+            "",
+            "audit.users",
+            "a b",
+            "a\"b",
+            "-a",
+            "a--b",
+            "a_-b",
+            "a\nb",
+            "héllo",
+        ] {
+            assert!(!is_word(not), "{not:?} is not one word");
+        }
+        assert!(is_function_name("lower"));
+        assert!(is_function_name("pg_catalog.unaccent"));
+        for not in ["my schema.f", "a..b", ".a", "a.", ""] {
+            assert!(!is_function_name(not), "{not:?} is not a function name");
+        }
     }
 
     #[test]
@@ -1099,9 +1293,9 @@ mod tests {
         ];
         // The column read absorbs the naming: `select = ["id"]` covers both.
         assert_eq!(
-            TableGrants::covering(analyses.iter()).to_toml("route.db"),
-            "[route.db.tables]\n\
-             t = { select = [\"id\"] }\n"
+            TableGrants::covering(analyses.iter()).to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
+             select t(id)\n"
         );
         let covering = TableGrants::covering(analyses.iter());
         for analysis in &analyses {
@@ -1111,10 +1305,15 @@ mod tests {
         // A table only ever counted gets the naming grant, and still a listener.
         let counted = [analyze("SELECT count(*) FROM t").unwrap()];
         let covering = TableGrants::covering(counted.iter());
+        // An empty column list has no directive: `select t` would grant every
+        // column and `select t()` is not syntax, so the entry is a comment that
+        // names the one thing the author has to finish by hand.
         assert_eq!(
-            covering.to_toml("route.db"),
-            "[route.db.tables]\n\
-             t = { select = [] }\n"
+            covering.to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
+             # t: the statements only name it, so there is no column to write for `select` — a \
+             table grant takes at least one, so name one here (its primary key, say): without \
+             the entry the statement is refused.\n"
         );
         assert!(!covering.is_empty());
         assert!(covering.check(&counted[0]).is_ok());
@@ -1197,7 +1396,7 @@ mod tests {
     fn covering_a_locked_table_asks_for_one_column_not_every_column() {
         // The Django shape (D7b): a join locked with `select_for_update()` reads
         // its columns and writes none, so the covering grant needs no more than
-        // `update = ["id"]` per locked table.
+        // `update t(id)` per locked table.
         let analyses =
             [
                 analyze("SELECT t.id, t.status, u.id FROM t JOIN u ON u.t_id = t.id FOR UPDATE")
@@ -1205,14 +1404,16 @@ mod tests {
             ];
         let covering = TableGrants::covering(analyses.iter());
         assert_eq!(
-            covering.to_toml("route.db"),
-            "[route.db.tables]\n\
-             # t: `update = [\"id\"]` only locks its rows (`FOR UPDATE`) — any one column is \
+            covering.to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
+             # t: `update t(id)` only locks its rows (`FOR UPDATE`) — any one column is \
              enough, as PostgreSQL requires.\n\
-             t = { select = [\"id\", \"status\"], update = [\"id\"] }\n\
-             # u: `update = [\"id\"]` only locks its rows (`FOR UPDATE`) — any one column is \
+             select t(id, status)\n\
+             update t(id)\n\
+             # u: `update u(id)` only locks its rows (`FOR UPDATE`) — any one column is \
              enough, as PostgreSQL requires.\n\
-             u = { select = [\"id\", \"t_id\"], update = [\"id\"] }\n"
+             select u(id, t_id)\n\
+             update u(id)\n"
         );
         assert!(covering.check(&analyses[0]).is_ok());
         // ... and it is still the smallest one that fits: another column of `t`
@@ -1225,20 +1426,22 @@ mod tests {
         // `id` when the route reads one (the key a lock's `WHERE` goes through)…
         let key = [analyze("SELECT t.status, t.id FROM t FOR UPDATE").unwrap()];
         assert_eq!(
-            TableGrants::covering(key.iter()).to_toml("route.db"),
-            "[route.db.tables]\n\
-             # t: `update = [\"id\"]` only locks its rows (`FOR UPDATE`) — any one column is \
+            TableGrants::covering(key.iter()).to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
+             # t: `update t(id)` only locks its rows (`FOR UPDATE`) — any one column is \
              enough, as PostgreSQL requires.\n\
-             t = { select = [\"id\", \"status\"], update = [\"id\"] }\n"
+             select t(id, status)\n\
+             update t(id)\n"
         );
         // … otherwise the first column it reads.
         let first = [analyze("SELECT t.status, t.name FROM t FOR UPDATE").unwrap()];
         assert_eq!(
-            TableGrants::covering(first.iter()).to_toml("route.db"),
-            "[route.db.tables]\n\
-             # t: `update = [\"name\"]` only locks its rows (`FOR UPDATE`) — any one column is \
+            TableGrants::covering(first.iter()).to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
+             # t: `update t(name)` only locks its rows (`FOR UPDATE`) — any one column is \
              enough, as PostgreSQL requires.\n\
-             t = { select = [\"name\", \"status\"], update = [\"name\"] }\n"
+             select t(name, status)\n\
+             update t(name)\n"
         );
         // A lock through a subquery reads no column of the table it locks, so
         // there is no name to pick — and a table grant has no `"*"` for a lock:
@@ -1248,17 +1451,18 @@ mod tests {
         let covering = TableGrants::covering(none.iter());
         assert_eq!(covering.locks_without_a_column().collect::<Vec<_>>(), ["t"]);
         assert!(
-            !covering.to_toml("route.db").contains("update = \"*\""),
-            "a lock never renders `update = \"*\"`: {}",
-            covering.to_toml("route.db")
+            !covering
+                .to_blastfile("view notes postgres")
+                .contains("update t\n"),
+            "a lock never widens to every column: {}",
+            covering.to_blastfile("view notes postgres")
         );
         assert_eq!(
-            covering.to_toml("route.db"),
-            "[route.db.tables]\n\
+            covering.to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
              # t: its rows are locked (`FOR UPDATE`) without reading a column of it, so name \
              one here — its primary key, say: a table grant never takes `\"*\"` for a lock, and \
-             without the entry the statement is refused.\n\
-             t = { select = [] }\n"
+             without the entry the statement is refused.\n"
         );
         assert!(
             covering.check(&none[0]).is_err(),
@@ -1269,9 +1473,11 @@ mod tests {
         let covering = TableGrants::covering(every.iter());
         assert_eq!(covering.locks_without_a_column().collect::<Vec<_>>(), ["t"]);
         assert!(
-            !covering.to_toml("route.db").contains("update"),
+            !covering
+                .to_blastfile("view notes postgres")
+                .contains("update"),
             "{}",
-            covering.to_toml("route.db")
+            covering.to_blastfile("view notes postgres")
         );
         // …but a column another statement of the same route reads is enough for
         // a lock: PostgreSQL asks for the UPDATE privilege on any single column
@@ -1299,11 +1505,12 @@ mod tests {
             Vec::<&str>::new()
         );
         assert_eq!(
-            merged.to_toml("route.db"),
-            "[route.db.tables]\n\
-             # t: `update = [\"id\"]` only locks its rows (`FOR UPDATE`) — any one column is \
+            merged.to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
+             # t: `update t(id)` only locks its rows (`FOR UPDATE`) — any one column is \
              enough, as PostgreSQL requires.\n\
-             t = { select = [\"id\"], update = [\"id\"] }\n"
+             select t(id)\n\
+             update t(id)\n"
         );
         assert!(merged.check(&mixed[0]).is_ok(), "the lock is granted now");
         // A table whose own `UPDATE` already names columns keeps them: they lock
@@ -1313,9 +1520,10 @@ mod tests {
             analyze("UPDATE t SET status = $1 WHERE id = $2").unwrap(),
         ];
         assert_eq!(
-            TableGrants::covering(written.iter()).to_toml("route.db"),
-            "[route.db.tables]\n\
-             t = { select = [\"id\"], update = [\"status\"] }\n"
+            TableGrants::covering(written.iter()).to_blastfile("view notes postgres"),
+            "# view notes postgres\n\
+             select t(id)\n\
+             update t(status)\n"
         );
     }
 
@@ -1335,35 +1543,6 @@ mod tests {
         with_type.functions.insert("regclass".to_string());
         assert!(checked(&with_type, "SELECT a::regclass FROM t").is_ok());
         assert!(checked(&with_type, "SELECT a::regclass[] FROM t").is_ok());
-    }
-
-    #[test]
-    fn a_control_character_is_escaped_in_toml() {
-        // TOML forbids a raw control character in a basic string, U+007F (DEL)
-        // included: a statement out of a log could hold one, and a manifest that
-        // does not parse is worse than one that does (D3c).
-        assert_eq!(string_toml("a\u{7f}b"), "\"a\\u007Fb\"");
-        assert_eq!(string_toml("a\u{1}b"), "\"a\\u0001b\"");
-        assert_eq!(string_toml("a\nb\tc\rd"), "\"a\\nb\\tc\\rd\"");
-        assert_eq!(string_toml("a\"b\\c"), "\"a\\\"b\\\\c\"");
-        assert_eq!(key_toml("a\u{7f}b"), "\"a\\u007Fb\"");
-        assert_eq!(key_toml("plain"), "plain");
-        // U+0085 (NEL) is a control character too, and printable text is not.
-        assert_eq!(string_toml("a\u{85}b"), "\"a\\u0085b\"");
-        assert_eq!(string_toml("héllo — ok"), "\"héllo — ok\"");
-    }
-
-    #[test]
-    fn a_toml_key_is_bare_only_when_it_can_be() {
-        // Bare exactly for `[A-Za-z0-9_-]`, and never for the empty key: a
-        // manifest key is what a grant is looked up by, so quoting has to round
-        // trip the same name.
-        for key in ["plain", "a_b", "orders-order9", "A1"] {
-            assert_eq!(key_toml(key), key, "{key:?} is a bare key");
-        }
-        for key in ["audit.users", "a b", "", "a\u{7f}b", "a\"b"] {
-            assert_eq!(key_toml(key), string_toml(key), "{key:?} is quoted");
-        }
     }
 
     #[test]

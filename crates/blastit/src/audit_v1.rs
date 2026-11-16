@@ -1255,13 +1255,18 @@ pub fn human(report: &Report) -> String {
                     BodyCodec::Raw => "raw",
                 };
                 out.push_str(&format!(
-                    "  route {route}: declared body = \"{declared}\" does not match observed {first}\n"
+                    "  route {route}: declared body {declared} does not match observed {first}\n"
                 ));
                 at += 1;
             }
             Finding::RawIngress { route, .. } => {
+                // The design's two spellings: the codec after the keyword, and the
+                // acknowledgement by name. An assignment is not Blastfile syntax,
+                // so a fix that quoted one could not be typed into the file the
+                // sentence is about (§10.1, §10.2).
                 out.push_str(&format!(
-                    "  route {route}: declares body = \"raw\" without allow_raw = true\n"
+                    "  route {route}: declares body raw without `unvalidated` — write \
+                     `body raw unvalidated`, or the codec it takes\n"
                 ));
                 at += 1;
             }
@@ -1525,8 +1530,8 @@ pub fn plan_learn(manifest: &Manifest, observations: &CheckObsV1) -> Result<Lear
         };
         if statement.is_tx {
             hints.insert(format!(
-                "transaction control is not granted automatically: set transaction_control = true on [route.{}]",
-                statement.proxy
+                "transaction control is not granted automatically: add `transactions` to \
+                 `view {route}`'s `postgres` block (or to a trait it `use`s)"
             ));
             continue;
         }
@@ -1722,6 +1727,38 @@ mod tests {
         assert_eq!(report.proxies["db"].statements, 1);
         assert_eq!(report.proxies["db"].denied, 1);
         assert_eq!(report.statements, 1);
+    }
+
+    #[test]
+    fn a_transaction_hint_names_the_directive_and_the_view() {
+        // The hint `--learn` prints on stderr has to name the `transactions`
+        // keyword and the view that needs it: `--learn` never invents a grant,
+        // so the sentence is the whole fix.
+        let sql = json!({
+            "target": {"scope": "unrouted", "method": "POST", "path": "/cart/"},
+            "proxy": "db",
+            "kind": "tx",
+            "sql": "BEGIN",
+            "is_tx": true,
+            "allowed": true,
+            "verdict": {"kind": "query", "normalized": "BEGIN"},
+        })
+        .to_string();
+        let manifest = parse_manifest(MANIFEST).expect("the fixture manifest validates");
+        let observations =
+            CheckObsV1::from_jsonl(&http("POST", "/cart/"), &sql).expect("the observations parse");
+        let plan = plan_learn(&manifest, &observations).expect("the plan is built");
+        assert_eq!(
+            plan.transaction_control,
+            vec![
+                "transaction control is not granted automatically: add `transactions` to \
+                 `view cart`'s `postgres` block (or to a trait it `use`s)"
+                    .to_string()
+            ]
+        );
+        let hint = &plan.transaction_control[0];
+        assert!(!hint.contains("[route."), "no retired key: {hint}");
+        assert!(!hint.contains("transaction_control"), "{hint}");
     }
 
     #[test]

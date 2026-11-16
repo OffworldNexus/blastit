@@ -133,6 +133,14 @@ per-view `workers` cap.
     attach cannot fail closed, and no keyword replaces it (design §7.1). The model
     keeps `global_groups`, always empty from a Blastfile, so `effective_grants`
     and `check` are untouched.
+16. **The v2 manifest is a `Blastfile`, so no schema key, field, function or
+    sentence carries the retired extension** (owner decision, 2026-11-16: "zero
+    `.toml` field names in CLI or JSON output"). The report's table-scope field
+    is `table_grants.blastfile`, and the renderer that fills it is
+    `TableGrants::to_blastfile`, which emits the directives a view's `postgres`
+    block accepts. That supersedes the report's earlier field name only — the
+    field's meaning, the directive syntax inside it, and `ADR-0003`'s
+    atomic-write and redaction rules are unchanged.
 
 ## Consequences
 

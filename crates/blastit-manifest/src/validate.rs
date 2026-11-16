@@ -10,7 +10,7 @@ use crate::model::{Manifest, PgGrant, PhpPolicy, ProxyName, Route, StaticPolicy}
 use crate::routing::compile_pattern;
 use crate::uid::UidLayout;
 
-use blastit_ingress::BodyCodec;
+use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_sqlpolicy::{KNOWN_STATIC_SETUP_SQL, has_quoted_literal, is_system_table, normalize};
 
 /// The fixed rules a `[route.static]` value can break (`R2`, `R3`, `R5`).
@@ -48,9 +48,8 @@ const AT_MOST_WORKERS: &str = "at most 64";
 
 /// Why a `[route.php]` declaration can never run (`ADR-0010` §2).
 ///
-/// `spa = true` answers every miss itself, and `CONNECT`/`TRACE` are the two
-/// methods a front controller cannot serve.
-const SPA_NEVER_REACHES_FRONT_CONTROLLER: &str = "spa = true never reaches the front controller";
+/// A `fallback "<file>"` answers every miss itself, and `CONNECT`/`TRACE` are
+/// the two methods a front controller cannot serve.
 const CONNECT_CANNOT_REACH_WORKER: &str = "CONNECT cannot reach a PHP worker";
 const TRACE_CANNOT_REACH_WORKER: &str = "TRACE cannot reach a PHP worker";
 
@@ -518,12 +517,12 @@ fn check_static_immutable(
 /// A static route that can never reach the app may not declare anything only
 /// the app could run (`R4`).
 ///
-/// `spa = true` answers every miss itself, and a manifest without an `app` has
-/// nothing to forward to. An ingress codec, a prefork, an inline grant or an
-/// inline `groups` list on such a route is dead weight that reads like a
-/// capability, so it is refused with the reason and the fix. Groups inherited
-/// from the manifest-wide `groups` list are not re-checked: they are attached
-/// to the route, not declared by it.
+/// A `fallback "<file>"` answers every miss itself, and a manifest without an
+/// `app` has nothing to forward to. A `body` codec, a `prefork`, an inline grant
+/// or an inline `use` on such a route is dead weight that reads like a
+/// capability, so it is refused with the reason and the fix — naming the
+/// directive as a `Blastfile` writes it. Groups inherited from a trait are not
+/// re-checked: they are attached to the route, not declared by it.
 fn check_static_declarations(
     manifest: &Manifest,
     route: &Route,
@@ -532,15 +531,15 @@ fn check_static_declarations(
     errors: &mut Vec<ManifestError>,
 ) {
     // A route with a front controller does reach an executor, so nothing on it
-    // is dead; `spa = true` beside `[route.php]` is refused by `check_php`
+    // is dead; a `fallback` beside `entrypoint php` is refused by `check_php`
     // instead (the retired key kept both arms the same way).
     if route.php().is_some() {
         return;
     }
-    let why = if policy.fallback.is_some() {
-        "spa = true never reaches the app"
+    let why = if let Some(fallback) = &policy.fallback {
+        format!("fallback {fallback:?} never reaches the app")
     } else if manifest.app().is_none() {
-        "the manifest declares no app"
+        "the manifest declares no app".to_string()
     } else {
         return;
     };
@@ -549,20 +548,46 @@ fn check_static_declarations(
         errors.push(ManifestError::StaticDeadDeclaration {
             location: location.clone(),
             key,
-            why,
+            why: why.clone(),
         });
     };
-    if route.ingress().is_some() {
-        dead("[route.ingress]".to_string());
+    if let Some(ingress) = route.ingress() {
+        dead(body_directive(&ingress));
     }
     if route.prefork() {
-        dead("prefork = true".to_string());
+        dead("prefork".to_string());
     }
-    for proxy in route.grants().keys() {
-        dead(format!("[route.{proxy}]"));
+    for store in route.grants().keys() {
+        dead(store_block(store.as_str()));
     }
     if !route.groups().is_empty() {
-        dead("groups".to_string());
+        dead("use".to_string());
+    }
+}
+
+/// The `body` directive an ingress policy is written as (§10.1), for a refusal
+/// that names the declaration the operator has to delete.
+fn body_directive(policy: &IngressPolicy) -> String {
+    let codec = match policy.body {
+        BodyCodec::Json => "json",
+        BodyCodec::Form => "form",
+        BodyCodec::None => "none",
+        BodyCodec::Raw => "raw",
+    };
+    if policy.body == BodyCodec::Raw && policy.allow_raw {
+        format!("body {codec} unvalidated")
+    } else {
+        format!("body {codec}")
+    }
+}
+
+/// The `postgres` block a grant on `store` is written in (§13.1): `postgres {
+/// … }` for the unnamed store, `postgres <name> { … }` otherwise.
+fn store_block(store: &str) -> String {
+    if store == crate::blastfile::DEFAULT_STORE {
+        "postgres { … }".to_string()
+    } else {
+        format!("postgres {store} {{ … }}")
     }
 }
 
@@ -809,28 +834,37 @@ fn check_php_workers(location: &Location, policy: &PhpPolicy, errors: &mut Vec<M
 }
 
 /// A PHP route may not declare a form that never reaches a worker
-/// (`ADR-0010` §2): `spa = true` answers every miss itself, and
+/// (`ADR-0010` §2): a `fallback "<file>"` answers every miss itself, and
 /// `CONNECT`/`TRACE` are the two methods a front controller cannot serve.
+///
+/// The sentence names the declaration as a `Blastfile` writes it — `fallback
+/// "<file>"`, never the retired `spa` key that directive replaced (§9.3).
 fn check_php_declarations(route: &Route, location: &Location, errors: &mut Vec<ManifestError>) {
-    let mut dead = |key: &str, why: &'static str| {
+    let mut dead = |key: String, why: String| {
         errors.push(ManifestError::PhpDeadDeclaration {
             location: location.clone(),
-            key: key.to_string(),
+            key,
             why,
         });
     };
-    if route
+    if let Some(fallback) = route
         .static_policy()
-        .is_some_and(|policy| policy.fallback.is_some())
+        .and_then(|policy| policy.fallback.as_deref())
     {
-        dead("spa = true", SPA_NEVER_REACHES_FRONT_CONTROLLER);
+        dead(
+            format!("fallback {fallback:?}"),
+            format!("fallback {fallback:?} never reaches the front controller"),
+        );
     }
     if let Some(methods) = route.methods() {
         if methods.iter().any(|method| method == "CONNECT") {
-            dead("CONNECT", CONNECT_CANNOT_REACH_WORKER);
+            dead(
+                "CONNECT".to_string(),
+                CONNECT_CANNOT_REACH_WORKER.to_string(),
+            );
         }
         if methods.iter().any(|method| method == "TRACE") {
-            dead("TRACE", TRACE_CANNOT_REACH_WORKER);
+            dead("TRACE".to_string(), TRACE_CANNOT_REACH_WORKER.to_string());
         }
     }
 }
@@ -1059,7 +1093,10 @@ mod tests {
         NO_PARENT_SEGMENT, fallback_rule, mount_prefix_rule, valid_method, valid_route_name,
     };
     use crate::error::{Location, ManifestError, ManifestErrors};
-    use crate::model::{Manifest, Route, StaticMount, StaticPolicy};
+    use crate::model::{
+        Grant, Group, Manifest, PgGrant, PhpPolicy, ProxyName, Route, StaticMount, StaticPolicy,
+    };
+    use blastit_ingress::{BodyCodec, IngressPolicy};
 
     /// A manifest with the given `(prefix, fallback)` mounts and no routes: the
     /// static-only shape of §9.5, which is the only one a mount can be checked
@@ -1242,6 +1279,151 @@ mod tests {
                 rule: NO_DOTFILE_SEGMENT,
             }))
         );
+    }
+
+    /// `R4`'s refusals name the declaration the way a `Blastfile` writes it:
+    /// the `body` codec, `prefork`, the store's `postgres [<name>] { … }` block
+    /// and `use` — never the retired per-route key. A developer reads the
+    /// sentence and deletes the directive it names.
+    ///
+    /// No `Blastfile` can reach this: the per-route static block is the retired
+    /// model's, so the route is built through the model, as the retired reader
+    /// built it (§12, `MB.21.5.1` removes the pair).
+    #[test]
+    fn a_dead_declaration_is_named_the_way_a_blastfile_writes_it() {
+        let mut grants = BTreeMap::new();
+        for store in ["db", "warehouse"] {
+            grants.insert(
+                ProxyName::from(store),
+                Grant::Postgresql(PgGrant::new(Vec::new(), false)),
+            );
+        }
+        let route = Route::new(
+            "site".to_string(),
+            vec![".*".to_string()],
+            None,
+            vec!["session".to_string()],
+            false,
+            true,
+            grants,
+        )
+        .with_ingress(Some(IngressPolicy {
+            body: BodyCodec::Raw,
+            allow_raw: true,
+        }))
+        .with_static(Some(StaticPolicy {
+            root: "public".to_string(),
+            index: "index.html".to_string(),
+            fallback: Some("index.html".to_string()),
+            immutable: Vec::new(),
+        }));
+        let mut groups = BTreeMap::new();
+        groups.insert(
+            "session".to_string(),
+            Group::new(
+                "session".to_string(),
+                ["db", "warehouse"]
+                    .into_iter()
+                    .map(|store| {
+                        (
+                            ProxyName::from(store),
+                            Grant::Postgresql(PgGrant::new(Vec::new(), false)),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+        let manifest = Manifest::assemble(
+            1,
+            Vec::new(),
+            BTreeMap::new(),
+            groups,
+            vec![route],
+            Vec::new(),
+        );
+        let refusals: Vec<String> = manifest
+            .validate(20_000)
+            .expect_err("the route can never reach the app")
+            .into_errors()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            refusals,
+            vec![
+                "route \"site\" (index 0): fallback \"index.html\" never reaches the app; \
+                 body raw unvalidated can never run",
+                "route \"site\" (index 0): fallback \"index.html\" never reaches the app; \
+                 prefork can never run",
+                "route \"site\" (index 0): fallback \"index.html\" never reaches the app; \
+                 postgres { … } can never run",
+                "route \"site\" (index 0): fallback \"index.html\" never reaches the app; \
+                 postgres warehouse { … } can never run",
+                "route \"site\" (index 0): fallback \"index.html\" never reaches the app; \
+                 use can never run",
+            ]
+        );
+        // The store block a grant on the unnamed store is written in is the one
+        // the message names, and the retired per-route key appears nowhere.
+        for refusal in &refusals {
+            assert!(!refusal.contains("[route."), "{refusal}");
+            assert!(!refusal.contains("spa"), "{refusal}");
+        }
+    }
+
+    /// `ADR-0010` §2's PHP dead declarations name what a `Blastfile` writes: a
+    /// `fallback "<file>"` answers every miss so a front controller is never
+    /// reached, and `CONNECT`/`TRACE` cannot reach a worker. The `spa` key the
+    /// directive replaced never appears — a developer deletes the line the
+    /// sentence names.
+    #[test]
+    fn a_php_dead_declaration_names_the_fallback_directive() {
+        let route = Route::new(
+            "app".to_string(),
+            vec!["/".to_string()],
+            Some(vec!["CONNECT".to_string(), "TRACE".to_string()]),
+            Vec::new(),
+            false,
+            false,
+            BTreeMap::new(),
+        )
+        .with_php(Some(PhpPolicy {
+            entry: "public/index.php".to_string(),
+            workers: None,
+        }))
+        .with_static(Some(StaticPolicy {
+            root: "public".to_string(),
+            index: "index.html".to_string(),
+            fallback: Some("index.html".to_string()),
+            immutable: Vec::new(),
+        }));
+        let manifest = Manifest::assemble(
+            1,
+            Vec::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            vec![route],
+            Vec::new(),
+        );
+        let refusals: Vec<String> = manifest
+            .validate(20_000)
+            .expect_err("a fallback answers every miss, so nothing reaches PHP")
+            .into_errors()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            refusals,
+            vec![
+                "route \"app\" (index 0): fallback \"index.html\" never reaches the front \
+                 controller",
+                "route \"app\" (index 0): CONNECT cannot reach a PHP worker",
+                "route \"app\" (index 0): TRACE cannot reach a PHP worker",
+            ]
+        );
+        for refusal in &refusals {
+            assert!(!refusal.contains("spa"), "{refusal}");
+        }
     }
 
     /// §10.3: two routes of one sandbox are two endpoints of one view, so one

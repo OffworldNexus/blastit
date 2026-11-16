@@ -561,7 +561,11 @@ def _plan_route(
         return addition
 
     cover = covering or _covering
-    prefix = f"postgres {proxy}" if proxy != DEFAULT_STORE else "postgres"
+    locator = (
+        f"view {route_name} postgres"
+        if proxy == DEFAULT_STORE
+        else f"view {route_name} postgres {proxy}"
+    )
     existing_tables = (
         grant.get("tables") if grant and isinstance(grant.get("tables"), dict) else {}
     )
@@ -569,7 +573,7 @@ def _plan_route(
     kept: list[_Denial] = []
     for denial in new:
         if existing_tables or existing_functions:
-            single = json.loads(cover([denial.parseable], prefix))
+            single = json.loads(cover([denial.parseable], locator))
             if not single["unanalysable"] and _covered_by(
                 existing_tables, single, existing_functions
             ):
@@ -587,7 +591,7 @@ def _plan_route(
         addition.queries = [(denial.sql, denial.reason) for denial in kept]
         return addition
 
-    merged = json.loads(cover([denial.parseable for denial in kept], prefix))
+    merged = json.loads(cover([denial.parseable for denial in kept], locator))
     rejected = {entry["sql"] for entry in merged["unanalysable"]}
     reasons = {
         denial.parseable: entry["reason"]
@@ -822,11 +826,11 @@ def _normalise(sql: str) -> str:
     return _blastit.normalize(sql)
 
 
-def _covering(statements: list[str], prefix: str) -> str:
+def _covering(statements: list[str], locator: str) -> str:
     """`blastit._blastit.covering`: the grant that covers a set of statements."""
     from blastit import _blastit
 
-    return _blastit.covering(statements, prefix)
+    return _blastit.covering(statements, locator)
 
 
 def _analyze(sql: str) -> str:

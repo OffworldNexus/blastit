@@ -231,15 +231,16 @@ fn analyze_statement(sql: &str) -> PyResult<String> {
 /// `update` on a column the route already reads rather than on `"*"`, and the
 /// statements no table grant can describe come back separately.
 ///
-/// `prefix` is the manifest section the rendered `toml` names, for example
-/// `route.db` — the same string the pytest plugin's report uses.
+/// `locator` is the `Blastfile` node the rendered `blastfile` value belongs in,
+/// for example `view notes postgres` or `trait connection` — the same string the
+/// pytest plugin's report writes above the directives.
 ///
 /// # Returns
 ///
-/// Pretty-printed JSON with `tables`, `functions`, `toml` and `unanalysable`
-/// (each entry with its `sql` and the `reason` a `sql.denied` event would
-/// carry). Statements this build cannot analyse are reported, never dropped:
-/// they have to stay exact `queries`.
+/// Pretty-printed JSON with `tables`, `functions`, `blastfile` and
+/// `unanalysable` (each entry with its `sql` and the `reason` a `sql.denied`
+/// event would carry). Statements this build cannot analyse are reported, never
+/// dropped: they have to stay exact `queries`.
 ///
 /// # Errors
 ///
@@ -247,8 +248,8 @@ fn analyze_statement(sql: &str) -> PyResult<String> {
 /// cannot happen in practice.
 #[pyfunction]
 #[pyo3(name = "covering")]
-fn covering_statements(statements: Vec<String>, prefix: String) -> PyResult<String> {
-    audit::covering(&statements, &prefix).map_err(PyValueError::new_err)
+fn covering_statements(statements: Vec<String>, locator: String) -> PyResult<String> {
+    audit::covering(&statements, &locator).map_err(PyValueError::new_err)
 }
 
 /// Classifies one statement with PostgreSQL's own parser, without analysing it

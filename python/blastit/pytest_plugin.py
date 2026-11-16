@@ -288,13 +288,13 @@ view ran, as ``tables`` — the directives ``--blastit-prefer-tables`` prints. I
 is reported per ``(view, store)`` pair, because that is what a grant is, and it
 is computed from **every** statement the pair ran — the ones that matched a
 grant included — so a view can be rewritten from exact queries to a table scope
-in one step. The ``toml`` key beside ``tables`` is the retired snippet, kept
-until `MB.21.4.5` re-points `TableGrants::to_toml`; nothing here reads it. A
-statement a table grant cannot
-describe at all (a ``SET``, a ``COPY``, a statement this build does not
-understand) is listed in ``unanalysable``, with the same reason a ``sql.denied``
-event carries: the covering grant is then not a complete replacement for the
-route's exact queries.
+in one step. The ``blastfile`` key beside ``tables`` is the same directives
+under a ``# view <name> postgres`` header, so the value says where it goes;
+nothing here reads it. A statement a table grant cannot describe at all (a
+``SET``, a ``COPY``, a statement this build does not understand) is listed in
+``unanalysable``, with the same reason a ``sql.denied`` event carries: the
+covering grant is then not a complete replacement for the route's exact
+queries.
 """
 
 from __future__ import annotations
@@ -2379,6 +2379,39 @@ def _finish(session: pytest.Session, state: _Session) -> None:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
+#: The bytes one `Blastfile` word may hold: ASCII letters, digits and `_`.
+_WORD_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+)
+
+
+def _is_word(name: str) -> bool:
+    """Whether `name` is one `Blastfile` word: the reader's own rule (§5.1).
+
+    A non-empty run of ASCII letters, digits and `_`, where `-` is taken only
+    right after one of those — exactly what the lexer's `word_run` consumes. A
+    name that fails it (a `.`, a space, a quote, a control byte) has no directive
+    spelling: `table_grant` takes one word and nothing else.
+    """
+    if not name:
+        return False
+    previous = ""
+    for character in name:
+        if character in _WORD_CHARS:
+            previous = character
+            continue
+        if character == "-" and previous.isascii() and previous.isalnum():
+            previous = character
+            continue
+        return False
+    return True
+
+
+def _is_function_name(name: str) -> bool:
+    """Whether `name` is a `Blastfile` function name: `Word ('.' Word)*`."""
+    return all(_is_word(part) for part in name.split("."))
+
+
 def _table_snippet(table_grants: dict[str, Any]) -> str:
     """The directives a report's table scope needs, one per line (§13.1).
 
@@ -2388,23 +2421,83 @@ def _table_snippet(table_grants: dict[str, Any]) -> str:
     the route calls one beyond the safe set, so a developer pastes them inside
     the view's `postgres [store] { }` block. Nothing here is written: the
     snippet is a hint, never a second editor.
+
+    An *empty* column list — a table the statements only named (`SELECT
+    count(*) FROM t`) — has no directive, because the grammar takes at least one
+    column and a bare `select <table>` would grant every one. It renders the
+    advice `TableGrants::to_blastfile` writes for it instead, so the hint names
+    the line the author has to finish by hand and never prints syntax the reader
+    refuses.
     """
     directives: list[str] = []
-    functions = table_grants.get("functions") or []
-    if functions:
-        directives.append(f"functions {', '.join(str(name) for name in functions)}")
+    functions = [str(name) for name in table_grants.get("functions") or []]
+    writable = [name for name in functions if _is_function_name(name)]
+    if writable:
+        directives.append(f"functions {', '.join(writable)}")
+    # A function name is `Word ("." Word)*`, so a qualified name is fine and a
+    # space is not: the unwritable ones are named in a comment, never printed.
+    for name in functions:
+        if not _is_function_name(name):
+            directives.append(
+                f"# functions: {json.dumps(name)} is not a name a Blastfile writes (a "
+                "name, or names joined by `.`), so it is left out — grant it in the block "
+                "by hand."
+            )
     tables = table_grants.get("tables") or {}
     for table in sorted(tables):
         grant = tables[table]
         if not isinstance(grant, dict):
             continue
+        # A name the reader cannot write is never interpolated: `audit.users` is
+        # refused as a table name and a name carrying a newline would become a
+        # directive of its own. The table is one comment, like the empty list.
+        bad_column = next(
+            (
+                str(column)
+                for operation in ("select", "insert", "update")
+                for column in (
+                    grant.get(operation)
+                    if isinstance(grant.get(operation), list)
+                    else []
+                )
+                if not _is_word(str(column))
+            ),
+            None,
+        )
+        if not _is_word(str(table)) or bad_column is not None:
+            if bad_column is not None:
+                directives.append(
+                    f"# {json.dumps(str(table))}: the column "
+                    f"{json.dumps(bad_column)} is not a name a Blastfile writes (one word: "
+                    "letters, digits, `_` and an inner `-`), so no directive names it — write "
+                    "that grant by hand, or keep the statement an exact `query`."
+                )
+            else:
+                directives.append(
+                    f"# {json.dumps(str(table))}: a table name is one word (letters, digits, "
+                    "`_` and an inner `-`), so no directive can name it — write that grant by "
+                    "hand, or keep the statement an exact `query`."
+                )
+            continue
+        nameless = [
+            operation
+            for operation in ("select", "insert", "update")
+            if isinstance(grant.get(operation), list) and not grant[operation]
+        ]
+        if nameless:
+            named = ", ".join(f"`{operation}`" for operation in nameless)
+            directives.append(
+                f"# {table}: the statements only name it, so there is no column to write "
+                f"for {named} — a table grant takes at least one, so name one here (its "
+                "primary key, say): without the entry the statement is refused."
+            )
         for operation in ("select", "insert", "update"):
             value = grant.get(operation)
             if value is None:
                 continue
             if value == "*":
                 directives.append(f"{operation} {table}")
-            else:
+            elif value:
                 columns = ", ".join(str(column) for column in value)
                 directives.append(f"{operation} {table}({columns})")
         if grant.get("delete"):

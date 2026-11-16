@@ -62,8 +62,8 @@ const BODY_READ: usize = 64 * 1024;
 /// What a PHP view process is told about itself; fixed for its lifetime.
 #[derive(Debug, Clone)]
 pub struct PhpRuntimeConfig {
-    /// Absolute path of the script `SCRIPT_FILENAME` is pinned to (`[route.php]
-    /// entry`). Never request-derived (ADR-0010 §2).
+    /// Absolute path of the script `SCRIPT_FILENAME` is pinned to — the path
+    /// `entrypoint php` resolved to. Never request-derived (ADR-0010 §2).
     pub entry: PathBuf,
     /// The application root PHP sees as `DOCUMENT_ROOT` and `open_basedir`.
     pub document_root: PathBuf,
@@ -97,7 +97,7 @@ impl PhpRuntimeConfig {
     pub fn validate(&self) -> Result<(), String> {
         if !self.entry.is_absolute() {
             return Err(format!(
-                "entry {} must be an absolute path ([route.php] entry)",
+                "entry {} must be an absolute path (the path `entrypoint php` resolved to)",
                 self.entry.display()
             ));
         }
@@ -1575,7 +1575,17 @@ mod tests {
             entry: PathBuf::from("public/index.php"),
             ..good.clone()
         };
-        assert!(relative.validate().is_err(), "a relative entry is refused");
+        // The refusal names the directive the path came from, as a `Blastfile`
+        // writes it, and never the retired per-route table.
+        let refusal = relative
+            .validate()
+            .expect_err("a relative entry is refused");
+        assert_eq!(
+            refusal,
+            "entry public/index.php must be an absolute path (the path `entrypoint php` \
+             resolved to)"
+        );
+        assert!(!refusal.contains("[route."), "{refusal}");
         let no_ini = PhpRuntimeConfig {
             ini: String::new(),
             ..good.clone()

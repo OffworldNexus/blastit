@@ -887,13 +887,18 @@ blastit check: 6 requests, 5 statements, 5/6 routes, 2 proxies
   group session: 1 grant never used
   route about: never exercised
   route upload: takes a body and declares no ingress validation
-  route form: declared body = \"json\" does not match observed application/x-www-form-urlencoded
-  route raw: declares body = \"raw\" without allow_raw = true
+  route form: declared body json does not match observed application/x-www-form-urlencoded
+  route raw: declares body raw without `unvalidated` — write `body raw unvalidated`, or the codec it takes
   request GET /robots.txt: no route
   proxy analytics: declared, 0 statements observed
 blastit check: 11 problems · `--json` for the machine-readable list
 ";
-    assert_eq!(audit_v1::human(&report), expected);
+    let human = audit_v1::human(&report);
+    assert_eq!(human, expected);
+    // Every sentence a developer reads names syntax the reader accepts: the
+    // retired assignment spellings would not parse if typed into the view.
+    assert!(!human.contains("body = \""), "{human}");
+    assert!(!human.contains("allow_raw"), "{human}");
 }
 
 #[test]
@@ -913,7 +918,7 @@ fn an_empty_suite_is_no_observations_and_suppresses_unexercised_routes() {
     assert_eq!(report.routes.exercised, 0);
     let expected = "\
 blastit check: 0 requests, 0 statements, 0/6 routes, 2 proxies
-  route raw: declares body = \"raw\" without allow_raw = true
+  route raw: declares body raw without `unvalidated` — write `body raw unvalidated`, or the codec it takes
   suite exercised 0 routes or 0 proxy statements
   proxy analytics: declared, 0 statements observed
   proxy db: declared, 0 statements observed
@@ -1268,8 +1273,20 @@ fn transaction_control_is_a_hint_never_a_silent_flag() {
     .expect("the plan is built");
     assert_eq!(plan.queries(), 0, "no silent transaction control");
     assert_eq!(plan.transaction_control.len(), 1);
+    // The hint names the keyword a `Blastfile` writes, and the view it goes in;
+    // the retired per-route field it used to name is gone (ADR-0012 §16).
     assert!(
-        plan.transaction_control[0].contains("transaction_control = true"),
+        plan.transaction_control[0].contains("`transactions`"),
+        "{}",
+        plan.transaction_control[0]
+    );
+    assert!(
+        plan.transaction_control[0].contains("view notes"),
+        "{}",
+        plan.transaction_control[0]
+    );
+    assert!(
+        !plan.transaction_control[0].contains("transaction_control"),
         "{}",
         plan.transaction_control[0]
     );
