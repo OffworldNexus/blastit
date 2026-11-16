@@ -2,25 +2,26 @@
 id: MB.21.5.1
 title: "Purge the retired manifest from the site, README, ARCHITECTURE and live briefs, and retire the v1 reference page"
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 2
 depends_on: [MB.21.4.4, MB.21.4.5]
 paths:
-  - README.md
   - "docs/**"
+  - README.md
   - ARCHITECTURE.md
-  - zensical.toml
-  - python/tests/runnable_docs/inventory.toml
-  - plan/nodes/NODE.md
-  - "plan/nodes/**/NODE.md"
   - AGENTS.md
   - ".opencode/**"
-attempts: 0
+  - zensical.toml
+  - python/tests/runnable_docs/inventory.toml
+  - python/tests/runnable_docs/harness.py
+  - "crates/blastit-manifest/tests/docs_fences.rs"
+  - "plan/nodes/**/NODE.md"
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T02:16"
+updated: "2026-11-16T22:08"
 ---
 
 # Goal

@@ -1,16 +1,16 @@
 # Settings
 
-Everything is environment variables, plus the manifest. A set `BLASTIT_*`
-variable wins over the manifest and over a preset, even when empty, and `PORT`
+Everything is environment variables, plus the `Blastfile`. A set `BLASTIT_*`
+variable wins over the `Blastfile` and over a preset, even when empty, and `PORT`
 counts the same. `--preset` is a flag; `--port` belongs to `blastit dev`.
 
-## The app and the manifest
+## The app and the file
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_APP` | the manifest's `app` | the WSGI callable, `module:attribute`; one of the two is required |
-| `BLASTIT_PRELOAD` | the manifest's `preload` | modules imported before the fork, comma-separated |
-| `BLASTIT_MANIFEST` | `./blastit.toml` | the manifest path |
+| `BLASTIT_APP` | the `Blastfile`'s `entrypoint` | the WSGI callable, `module:attribute`; one of the two is required |
+| `BLASTIT_PRELOAD` | the `Blastfile`'s `preload` | modules imported before the fork, comma-separated |
+| `BLASTIT_MANIFEST` | `./Blastfile` | the file Blastit reads |
 | `BLASTIT_SCRIPT_NAME` | — | mount prefix stripped before routing; the app sees `SCRIPT_NAME` |
 | `BLASTIT_WARMUP` | — | an optional `module:callable` run before the fork, for an expensive first use |
 | `BLASTIT_ENV_STRIP` | — | extra variables hidden from the app, comma-separated |
@@ -23,7 +23,7 @@ the process environment only; `uv run --env-file .env blastit dev` loads a file.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_LIBPHP` | the distro package's library | names the NTS `libphp` to embed for `[route.php]` |
+| `BLASTIT_LIBPHP` | the distro package's library | names the NTS `libphp` to embed for `entrypoint php` |
 
 ## Port and health
 
@@ -150,8 +150,8 @@ client invented. That is why both presets use `*` and publish no port.
 |---|---|---|
 | `BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` | `= MAX_WORKERS` | upstream connection cap of proxy `<NAME>`, upper-cased: `BLASTIT_PROXY_DB_MAX_CONNECTIONS` |
 
-A proxy's protocol, inputs and outputs live in the
-[manifest](manifest.md#proxies).
+A store's URL, or its split slots, live in the
+[`Blastfile`](blastfile.md#stores).
 
 ## Behind a connection pooler
 

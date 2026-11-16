@@ -32,8 +32,8 @@ Also to pin down, because it is the usual production bug:
 # Acceptance
 
 1. `docs/frameworks/static-and-spa.md` gains a short section **"Static files next to your app"** with three lean, runnable blocks:
-   - **Django / Flask:** `collectstatic` output (`STATIC_ROOT`) served by `[static]`, dynamic routes still reaching the WSGI app; show the `blastit.toml` lines and the one command;
-   - **PHP (Symfony/Laravel):** `public/` served by `[static]` with the front controller as the app route;
+   - **Django / Flask:** `collectstatic` output (`STATIC_ROOT`) served by a `static` mount, dynamic views still reaching the WSGI app; show the `Blastfile` lines and the one command;
+   - **PHP (Symfony/Laravel):** `public/` served by a `static` mount with `entrypoint php` as the app;
    - **Node/SPA:** the existing case, kept but no longer presented as the only one.
    Each block states where the files come from, the `root`, and the glob for hashed output.
 2. A **"Caching"** subsection stating the contract exactly as implemented: `immutable` globs → the year-long header; everything else, `index` included, `no-cache`; ETag/304 on both; the matching is on the answering file's path. Include the hashed-name licence rule and the `STATIC_ROOT`/unhashed-original warning above, with the wrong and right glob side by side.

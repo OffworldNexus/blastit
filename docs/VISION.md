@@ -10,7 +10,7 @@ Blastit fixes this **outside the application code**, without asking developers t
 
 1. **Every inbound byte is decoded, validated, and re-encoded by guaranteed-safe budgeted WASM/Rust code** before the backend ever sees it.
 2. **Every route runs in its own sandbox** with zero real credentials in memory.
-3. **Every outgoing connection goes through a local capability proxy** that authenticates the route by socket identity, enforces per-route allowlists (`blastit.toml`), and injects real credentials only upstream.
+3. **Every outgoing connection goes through a local capability proxy** that authenticates the route by socket identity, enforces per-route allowlists (the `Blastfile`), and injects real credentials only upstream.
 
 ## The Guiding Principle: Everything Stems From Developer Experience
 
@@ -20,17 +20,17 @@ Security tools that require 40 environment variables, `sudo` on a laptop, manual
    - **On a developer's laptop:** Zero `sudo`, zero `setcap` rituals, zero `chmod` on `$HOME`. `blastit dev` runs an unprivileged single-UID simulation that still executes the full multi-process topology (`http`, ingress gate, `scheduler`, route workers, local proxies, `execve` secret stripping, per-route socket dirs). To an honest program, every misconfiguration shows up locally right away. (Testing real multi-UID capabilities locally is also a one-liner when wanted.)
    - **In CI/CD:** One fast, unprivileged command runs the test suite through Blastit and proves **nothing was forgotten**: zero unrouted paths, zero missing SQL/NoSQL/Redis/HTTP grants, zero dead grants, zero untested routes, and valid input schemas.
    - **In production deployments:** Foolproof presets (`digitalocean-paas`, `compose-traefik`, plus clean container/systemd setups) that **fail closed** if real OS isolation (root or capabilities + seccomp) is absent.
-2. **Lean Documentation & Minimal Configuration.** `./blastit.toml` is found automatically. Common framework setups take a handful of readable lines. User docs lead with 10-line working examples, never kernel trivia.
-3. **Built for Both Humans and AI Agents.** Developers and AI coding agents fill and maintain `blastit.toml` effortlessly:
+2. **Lean Documentation & Minimal Configuration.** `./Blastfile` is found automatically. Common framework setups take a handful of readable lines. User docs lead with 10-line working examples, never kernel trivia.
+3. **Built for Both Humans and AI Agents.** Developers and AI coding agents fill and maintain a `Blastfile` effortlessly:
    - **Single-pass wire learning (`--learn`):** Because Blastit sits on the HTTP ingress and every outgoing wire protocol, it records every route hit and outgoing query/call across an entire test run in one pass — language-agnostically (Python, PHP, Node, Java) — instead of failing on the first query per request; `dev --learn` writes those grants, while `check --learn` proposes new routes only, and a grant for a statement on an existing route is still the `0.2.x` gap.
-   - **Machine-readable verification (`--json`):** Structured audit output lets an AI agent or CI job verify completeness and fix drift deterministically without resorting to `unrestricted = true`.
+   - **Machine-readable verification (`--json`):** Structured audit output lets an AI agent or CI job verify completeness and fix drift deterministically without resorting to an `unrestricted` grant.
 
 ## Target Applications (Modern 12-Factor Frameworks Only)
 
 Blastit deliberately targets **modern, testable, 12-factor applications** — not legacy un-12-factorizable monoliths such as WordPress. We embrace modern framework idioms natively:
 
 - **Python (WSGI):** Django, Flask, SQLAlchemy, psycopg 3.
-- **PHP (embedded `libphp`):** Symfony, Laravel, Slim, PSR-7 / PSR-15 front controllers (`[route.php] entry = "public/index.php"`) running in unprivileged per-route view workers — no PHP daemon beside them and no CGI parameter surface — with clean URL rewriting and static asset serving without nginx boilerplate.
+- **PHP (embedded `libphp`):** Symfony, Laravel, Slim, PSR-7 / PSR-15 front controllers (`entrypoint php "public/index.php"`) running in unprivileged per-route view workers — no PHP daemon beside them and no CGI parameter surface — with clean URL rewriting and static asset serving without nginx boilerplate.
 - **Node & Frontend (Vite + HTTP SSR/API):** Vite assets & dev/preview integration, SvelteKit, Remix / React Router, Nuxt, Hono, Next standalone.
 - **JVM (Tomcat / Spring Boot):** Modern 12-factor Servlet / Spring Boot services.
 
@@ -39,12 +39,12 @@ Blastit deliberately targets **modern, testable, 12-factor applications** — no
 ### Milestone A (`0.1.1` — Radical DX & Lean Docs for Current Scope)
 Reimagine and ship the sharpest possible developer experience for Python WSGI + PostgreSQL (`v0.1.0` is already tagged, so Milestone A ships as `0.1.1`):
 - Rewrite the documentation and README from the ground up to be **radically leaner**, clear, and show-the-world ready across Local, CI/CD, and Deployments.
-- Ship zero-`sudo` local/CI execution (`blastit dev`), auto-discovery of `./blastit.toml` (with optional non-secret app wiring in `blastit.toml`), single-pass wire-level `--learn` (`dev --learn` writes those grants, while `check --learn` proposes new routes only and existing-route statement grants remain a `0.2.x` gap) & framework-agnostic `blastit test` / `blastit check` (solving Flask/SQLAlchemy alongside Django!), and crisp human + `--json` diagnostics.
+- Ship zero-`sudo` local/CI execution (`blastit dev`), auto-discovery of `./Blastfile` (with the entrypoint and the non-secret wiring in it), single-pass wire-level `--learn` (`dev --learn` writes those grants, while `check --learn` proposes new routes only and existing-route statement grants remain a `0.2.x` gap) & framework-agnostic `blastit test` / `blastit check` (solving Flask/SQLAlchemy alongside Django!), and crisp human + `--json` diagnostics.
 
 ### Milestone B (`0.2.0` & `0.2.x` — Modern Backends: Embedded PHP, Vite/Node, Tomcat & Static Assets)
 Expand Blastit across focused `0.2.x` releases (`0.2.0` shipping static/SPA and embedded PHP as one release, followed by Node/Vite and JVM) from a Python-only WSGI server into a multi-backend zero-trust harness:
 - First-class static asset serving & clean SPA/front-controller URL rewriting.
-- **Embedded PHP** (host NTS `libphp` inside unprivileged per-route view workers via `[route.php] entry`, PSR/Symfony/Laravel zero-footgun defaults, no daemon beside it and no CGI parameter surface).
+- **Embedded PHP** (host NTS `libphp` inside unprivileged per-route view workers via `entrypoint php`, PSR/Symfony/Laravel zero-footgun defaults, no daemon beside it and no CGI parameter surface).
 - **Vite & Node** (HTTP upstream per route/worker, SSR + static split, clean dev & prod workflows).
 - **Tomcat / JVM** (12-factor Servlet / Spring Boot integration) and other high-value modern HTTP backends where appropriate.
 - Language-agnostic wire learning (`--learn`) and CI completeness checks across every backend.
@@ -67,8 +67,8 @@ Extend Blastit's stage-0 credential barrier, per-route local sockets, allowlist 
 ### Milestone E (`0.5.x` — Coding Agent Integrations, Portable Skills & `llms.txt`)
 Turn Blastit's single-pass `dev --learn`, versioned `check --json` contract, nine-slot framework model, and surgical comment-preserving manifest editor into first-class coding-agent integrations — with agent-facing documentation written and critiqued before any plugin or tool-server code:
 - **Agent-consumable documentation:** Blastit is published in an agent-consumable form — a generated `llms.txt` index at exact `sitemap.xml` parity, `llms-full.txt` full text, per-page raw `.md` sources, and `robots.txt` — not only as HTML, while keeping `sitemap.xml` for search crawlers.
-- **Portable manifest-writing skill:** Encodes the nine capability slots, the canonical adapt → `dev --learn` → `check` → deploy workflow, and deterministic finding-to-fix mappings (`missing_grant`, `dead_grant`, `unrouted`, missing `[route.ingress]`) that never teach `unrestricted = true` or `unsafe` workarounds.
-- **Coding-agent plugins & MCP surface:** Zero-`sudo`, ≤ 3-step integrations for at least **Claude Code**, **OpenCode**, **Codex**, and **Junie**, backed by schema-validated `--json` output and the CLI's own comment-preserving TOML editor, proven by golden end-to-end adaptation transcripts.
+- **Portable manifest-writing skill:** Encodes the nine capability slots, the canonical adapt → `dev --learn` → `check` → deploy workflow, and deterministic finding-to-fix mappings (`missing_grant`, `dead_grant`, `unrouted`, a view with no `body`) that never teach an `unrestricted` grant or an `unsafe` workaround.
+- **Coding-agent plugins & MCP surface:** Zero-`sudo`, ≤ 3-step integrations for at least **Claude Code**, **OpenCode**, **Codex**, and **Junie**, backed by schema-validated `--json` output and the CLI's own comment-preserving `Blastfile` editor, proven by golden end-to-end adaptation transcripts.
 
 ## Standing Security Benchmark: Removing Real CVE Attack Surfaces
 

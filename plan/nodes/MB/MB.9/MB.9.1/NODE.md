@@ -62,7 +62,7 @@ $ grep -q 'pub fn cases' crates/blastit-backend/src/conformance.rs && grep -q 'I
 $ make check
 ```
 - [ ] `Arc<dyn Upstream>` compiles, `BootError` implements `std::error::Error`, and a
-  missing builder fails closed at boot naming `./blastit.toml:<line>`.
+  missing builder fails closed at boot naming `./Blastfile:<line>`.
 
 # Notes
 

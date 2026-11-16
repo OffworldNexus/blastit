@@ -246,7 +246,7 @@ reason = "A PHP project has no pyproject.toml, so `uv tool install blastit` reac
 [[page.fence]]
 index = 2
 mode = "static"
-reason = "The gate builds no PHP project fixture: a `[route.php]` route needs a `public/index.php` app and a host NTS `libphp`, and this offline gate installs neither. It checks the documented `blastit dev --learn` command and its flags against the installed CLI, and parses the page's manifest block."
+reason = "The gate builds no PHP project fixture: an `entrypoint php` file needs a `public/index.php` app and a host NTS `libphp`, and this offline gate installs neither. It checks the documented `blastit dev --learn` command and its flags against the installed CLI, and parses the page's Blastfile block."
 
 [[page.fence]]
 index = 3
@@ -305,9 +305,6 @@ mode = "serve-flags"
 [[page.fence]]
 index = 4
 mode = "usage"
-
-[[page]]
-path = "docs/reference/manifest.md"
 
 [[page]]
 path = "docs/reference/blastfile.md"

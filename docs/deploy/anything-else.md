@@ -83,7 +83,8 @@ edge **sets**, and `BLASTIT_TRUSTED_PROXIES` the address it connects from.
 
 ## The pooler { #pooler }
 
-A pool is a connection multiplier, not a tuning knob:
+A pool is a connection multiplier, not a tuning knob, and it is a deployment
+concern: no `Blastfile` directive declares one.
 `BLASTIT_MAX_WORKERS` × instances is the client count it must accept, and
 `DEFAULT_POOL_SIZE` (PgBouncer) is the server connections it keeps. A managed
 pool's `size` is its **minimum**, and its maximum follows the cluster's RAM —
@@ -107,7 +108,7 @@ connect-time `SET` is not yours to rely on:
   session inherits it.
 - **A URL cannot do it.** `options=-c timezone=UTC` is refused: the proxy
   allowlists the startup parameters, so a URL cannot set session state or smuggle
-  a credential ([postgresql inputs](../reference/manifest.md#protocol-postgresql)).
+  a credential ([postgresql stores](../reference/blastfile.md#stores)).
 - **Read it back as the app's own role on the direct port, never the pool.** It
   must print exactly `UTC`; if it does not, set it on the role as the owner and
   read again.
@@ -213,7 +214,7 @@ PORT=8080
 BLASTIT_TRUSTED_PROXIES=127.0.0.1,::1
 ```
 
-`WorkingDirectory` is where Blastit finds `./blastit.toml`. `User=shop` must not
+`WorkingDirectory` is where Blastit finds `./Blastfile`. `User=shop` must not
 be a uid the layout hands out. The environment file holds secrets: mode `0600`,
 owned by the service user.
 

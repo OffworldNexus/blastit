@@ -19,11 +19,11 @@ Spawn **≥ 2** (and **≥ 3** for core designs: always include `dx`, `ai-ergono
 | Lens | What the goldfish asks |
 |---|---|
 | `dx` | **Human Developer Experience.** Count the steps on (a) local laptop, (b) CI/CD, (c) deployment! Does local dev work with **zero `sudo`** and zero `chmod`/`setcap` pain? Is the prose ultra-lean (no kernel lectures in user guides, ≤ 3 steps to hello world, clear tables)? Does it fit modern 12-factor idioms (Django/Flask, Symfony/Laravel PSR, Vite/Node, Tomcat) natively? Do errors tell the user the exact fix? |
-| `ai-ergonomics` | **AI Agent Experience.** Imagine an LLM coding agent asked to integrate Blastit or add a feature to an app. How does it populate `blastit.toml`? How does it verify in one pass (`--learn` / `blastit check --json`) that **zero** SQL queries, outgoing calls, routes, or input schemas were forgotten? Could any syntax or error message confuse an agent into reaching for `unrestricted = true`? |
+| `ai-ergonomics` | **AI Agent Experience.** Imagine an LLM coding agent asked to integrate Blastit or add a feature to an app. How does it populate `Blastfile`? How does it verify in one pass (`--learn` / `blastit check --json`) that **zero** SQL queries, outgoing calls, routes, or input schemas were forgotten? Could any syntax or error message confuse an agent into reaching for an `unrestricted` grant? |
 | `security` | **Zero-Trust & CVE Resistance.** Does every byte reaching the backend get decoded and re-encoded in memory-safe / budgeted WASM code (where applicable)? Are WASM memory and fuel strictly bounded (O(1 page/chunk), never O(N pages))? Are parser differentials impossible? Do real credentials stay strictly behind the stage-0 `execve` barrier? Would `php2shell`, `node2shell`, polyglot uploads, HTTP/FastCGI header smuggling, or SSRF be stopped cold even on an unpatched runtime? Does production `blastit` fail closed if mistakenly run without privileges? |
 | `implementability` | **Cheap-Model Buildability.** Are crate boundaries, Rust traits, wire frames, and CLI flags specified unambiguously so a cheap `implementer` can build each task in ≤ 600 lines without guessing? Are new dependencies justified and permissively licensed (Apache-2.0 / MIT / BSD)? |
 | `testability` | **Verification & Oracles.** Does every requirement `R1..Rn` map to a fast unprivileged test, a protected critical test, and (for security/CVE claims) an exploit-reproduction integration test? Can every code block in `docs/` be executed automatically? |
-| `consistency` | **Coherence.** Does the doc agree with `docs/VISION.md`, `ARCHITECTURE.md`, accepted ADRs, and `blastit.toml` conventions? Are there naming mismatches between CLI flags, env vars, presets, and TOML keys? |
+| `consistency` | **Coherence.** Does the doc agree with `docs/VISION.md`, `ARCHITECTURE.md`, accepted ADRs, and `Blastfile` conventions? Are there naming mismatches between CLI flags, env vars, presets, and `Blastfile` keywords? |
 
 Each critic writes `docs/design/<slug>.review-<lens>.md` with findings graded:
 - `BLOCKER`: breaks DX simplicity, leaks secrets/sandbox, allows CVE bypass, or contradicts `VISION.md`.
@@ -42,7 +42,7 @@ reviewers: []
 # <Title>
 
 ## 1. Developer Experience Target (Local, CI/CD, Deploy)
-(Link to or summarize the exact user-facing commands, `blastit.toml` syntax, and error messages this design serves.)
+(Link to or summarize the exact user-facing commands, `Blastfile` syntax, and error messages this design serves.)
 
 ## 2. Goals & Non-Goals
 ## 3. Requirements (R1..Rn, numbered and testable)

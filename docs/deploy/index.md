@@ -23,7 +23,9 @@ database.
 
 A pool keeps a small set of server connections and shares them: sixteen workers
 per instance take most of a 1 GB cluster's ~22 backends, and a second instance
-would exhaust them. So there are two URLs, and swapping them is the failure this
+would exhaust them. A pool is a deployment concern, never a `Blastfile` directive:
+the file names the store's URL and nothing about how many connections the platform
+puts in front of it. So there are two URLs, and swapping them is the failure this
 page is about — only the app's `DATABASE_URL` names the pool, while migrations and
 grants name the database on its direct port, as a role of their own, because DDL
 and session state do not survive transaction pooling. Sizing and the session zone:

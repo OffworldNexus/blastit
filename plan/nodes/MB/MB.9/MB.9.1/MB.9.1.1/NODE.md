@@ -65,7 +65,7 @@ knowledge.
     builds the executor first and wraps it with `"static"` when `spec.static_policy.is_some()`,
     returning `[static?, executor?]`. No fallback backend: the only boot error is a kind
     with no registered builder, naming the manifest line from `Manifest::route_lines()`
-    (`./blastit.toml:<line>: no builder registered for backend "…"`).
+    (`./Blastfile:<line>: no builder registered for backend "…"`).
   - `BootError { manifest, line, route, kind, detail }` implements `std::error::Error`
     (required by `SchedulerError::Boot`'s `#[error("{0}")]`), hand-written `Display`.
 - Crate rules: `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]`, **no** `async_trait`,

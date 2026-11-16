@@ -27,7 +27,7 @@ is what the attacker is holding when that happens.
 
 | If this is compromised… | …the attacker gets | …and cannot |
 |---|---|---|
-| **a view** (request-time RCE) | that route's allowlisted statements; its scratch directory; **every file its uid can open** — the code tree, the virtualenv, `/tmp`; all the CPU and memory the container has; egress only with `egress = true` | run any other statement; read the real database credentials; `ptrace` another process; connect to another route's socket or channel; hold more threads than its `RLIMIT_NPROC`; take another route's worker slot |
+| **a view** (request-time RCE) | that route's allowlisted statements; its scratch directory; **every file its uid can open** — the code tree, the virtualenv, `/tmp`; all the CPU and memory the container has; egress only with `egress any` | run any other statement; read the real database credentials; `ptrace` another process; connect to another route's socket or channel; hold more threads than its `RLIMIT_NPROC`; take another route's worker slot |
 | **http** | the raw bytes of in-flight HTTP traffic | reach the database; run Python; spawn processes |
 | **the scheduler** | it can send any request to any view; every file beneath each declared static `root` — dotfiles and symlinks included, but never a `.php`/`.phtml`/`.phar` source, which is `404` | read the real database credentials; reach another route's socket or a view's memory; go beyond what its uid and a socket-less seccomp role allow |
 | **dbproxy** | the real database credentials | — it runs no app code, is not dumpable, and is kept small |
@@ -76,11 +76,11 @@ uids cannot signal, `ptrace` or read each other's
   module-loading calls, `mount` and the new mount API, `setns` and `unshare` —
   the calls that read or steer another process, load kernel code or move between
   namespaces. Views may use `AF_UNIX` only, plus `AF_INET`/`AF_INET6` with
-  `egress = true`; http and the scheduler may not call `socket()` at all.
+  `egress any`; http and the scheduler may not call `socket()` at all.
   `clone3` is the one non-`EPERM` refusal (`ENOSYS`, so glibc falls back to
   `clone`), a `clone` requesting any `CLONE_NEW*` flag and `setsid`/`setpgid`
   are `EPERM`, and a PHP view additionally refuses `execve`, `fork` and the
-  other process-creating calls. `egress = true` is any IPv4/IPv6 address and
+  other process-creating calls. `egress any` is any IPv4/IPv6 address and
   port, cloud metadata included: there is no allowlist until the HTTP proxy
   milestone.
 * **Filesystem and limits.** The code tree is read-only to views; each view gets a
@@ -88,13 +88,13 @@ uids cannot signal, `ptrace` or read each other's
   `TMPDIR`; `RLIMIT_NPROC` (counting threads) is a hard backstop *under* the
   scheduler's budget, with `RLIMIT_NOFILE` and `RLIMIT_CORE=0`;
   `PR_SET_PDEATHSIG(SIGKILL)` means no process outlives init.
-* **Ingress bodies.** A route declares how a body is handled: `json` and `form`
+* **Ingress bodies.** A view declares how a body is handled: `json` and `form`
   decode and re-encode it before the app sees it, `none` rejects a body, and
-  `raw` passes the bytes unchanged. A body to a route with no `[route.ingress]`
-  is a `413` at runtime; `blastit check` reports a body route that declares
-  nothing, and a `raw` route the manifest does not acknowledge. `raw` is the one
+  `raw` passes the bytes unchanged. A body to a view with no `body` is a `413` at
+  runtime; `blastit check` reports a view that took one and declares nothing, and
+  a `raw` view the file does not acknowledge. `raw` is the one
   codec nothing validates at run time, so it is the one that needs an
-  acknowledgement **and** a gate: `body = "raw"` without `allow_raw = true` is
+  acknowledgement **and** a gate: `body raw` without `unvalidated` is
   **refused at a production boot** (stage 0, and again by stage 1's re-read of
   the same file, before a listener exists), while `blastit dev` warns and serves
   and `blastit check` reports `raw_ingress`. 0.2.0
@@ -103,13 +103,13 @@ uids cannot signal, `ptrace` or read each other's
 
 ## Static files
 
-A `[route.static]` route serves files from one declared `root`, answered by the
+A `static` mount serves files from one declared `root`, answered by the
 scheduler as its own uid (`UID_BASE+2`) — no new process, socket or uid.
 
 | What arrives | Answer |
 |---|---|
 | `..` (plain or percent-encoded), NUL and other control bytes, an absolute or backslash path, invalid UTF-8, a malformed percent escape, a segment over 255 bytes, a path over 4096 bytes | `400` |
-| a dotfile such as `.env` or `.git`, a symlink, a FIFO, socket or device, an unreadable or oversize file — and, on a route with no `spa` and no `app`, any path that is no file | `404` |
+| a dotfile such as `.env` or `.git`, a symlink, a FIFO, socket or device, an unreadable or oversize file — and, on a mount with no `fallback` and no app, any path that is no file | `404` |
 
 `/.well-known/` is the one dotfile exception. A refusal is final: never the app,
 never `index.html`, whatever the method, so a traversal probe cannot be answered
@@ -130,7 +130,7 @@ holds the decision and its trade-offs.
 
 ## PHP front controllers
 
-A `[route.php]` route runs `public/index.php` in the route's own unprivileged view
+A PHP front controller runs `public/index.php` in its own unprivileged view
 worker, with the host's NTS `libphp` embedded in it. The three things a CGI or
 FastCGI deployment has to defend are not defended here because they do not exist:
 
@@ -166,7 +166,7 @@ NTS library the boot refuses, naming the distro package (`libphp-embed`,
 `.php`/`.phtml`/`.phar` under a static root is `404` whatever its case, so a front
 controller's source is never served as a file. Until Milestone C's CDR, an upload is
 `raw`: PHP's own parser sees the original bytes, a polyglot included, which is why
-`phar.readonly`/`phar.require_hash` are pinned and the route declares its ingress
+`phar.readonly`/`phar.require_hash` are pinned and the view declares its `body`
 codec. [`ARCHITECTURE.md` §2.6](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md#26-php-embedded)
 has the mechanism; [`ADR-0010`](https://github.com/OffworldNexus/blastit/blob/develop/docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md)
 §1–§2 the decision.

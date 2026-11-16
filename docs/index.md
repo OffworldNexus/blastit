@@ -17,21 +17,18 @@ allowlist, so a bug in the least important page is worth that page, not the app.
 
 ## One file, no code changes
 
-```toml title="blastit.toml"
-version = 1
-app = "myshop.wsgi:application"
+```text title="Blastfile"
+app "myshop"
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+entrypoint python "myshop.wsgi:application"
 
-[[route]]
-name = "catalog"
-path = ['/products/.*']
-methods = ["GET", "HEAD"]
+postgres $DATABASE_URL
 
-[route.db.tables]
-products = { select = ["id", "name", "price"] }
+view catalog GET "/products/*" {
+    postgres {
+        select products(id, name, price)
+    }
+}
 ```
 
 ```console
@@ -57,7 +54,7 @@ started](getting-started.md) builds a smaller app in three steps.
 
 * one process per live route, forked from a preloaded parent;
 * root or a small capability set at boot — `blastit dev` needs neither;
-* one manifest, `blastit.toml`.
+* one manifest, `Blastfile`.
 
 ## Is it for you?
 

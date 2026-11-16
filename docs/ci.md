@@ -8,34 +8,34 @@ $ uv run blastit check
 
 With an `app`, it runs `pytest -q` with Blastit in front of PostgreSQL: every
 request the suite makes and every statement it sends is checked against
-`./blastit.toml`. A clean run means every route and every declared proxy was
+`./Blastfile`. A clean run means every view and every declared store was
 observed, and nothing **your suite exercised** was forgotten.
 
-An all-static manifest has no app: `check` audits every `root` (exists, a
+An all-static file has no app: `check` audits every `root` (exists, a
 directory, readable), runs no `pytest`, prints nothing and exits `0` — or exits
-`2` naming the root, and the route whenever the filesystem refuses the root. With
+`2` naming the root, and the view whenever the filesystem refuses the root. With
 `--json` it is the same document, counts at zero except `routes.total`.
-Everything below is a manifest with an `app`.
+Everything below is a file with an `app`.
 
 ## What it fails on
 
 | Finding | Meaning | Fix |
 |---|---|---|
-| `unrouted_request` | a path no route matches | add a route, or widen a `path` |
-| `missing_grant` | a statement no grant allows | add it to `queries`; session setup (`SET`, `SHOW`, `set_config(…)`) to the `connection` group |
+| `unrouted_request` | a path no view matches | add a view, or widen a pattern |
+| `missing_grant` | a statement no grant allows | add `query '<sql>'` to that view's `postgres` block; session setup (`SET`, `SHOW`, `set_config(…)`) goes in a `connection` trait every view `use`s |
 | `dead_grant` | a grant the suite never used | cover that code path, or remove the grant |
-| `unexercised_route` | a route the suite never hit | add a test |
-| `missing_ingress` | a route took a body and declares no `[route.ingress]` | declare the codec; `raw` also needs `allow_raw = true` |
-| `ingress_mismatch` | the declared codec is not what the suite sent | fix the `body` value |
-| `raw_ingress` | a route declares `body = "raw"` without acknowledging it | add `allow_raw = true`, or use a codec — the production boot refuses the manifest until you do |
-| `no_observations` | the suite reached no route or no proxy | check the test database and `DATABASE_URL` |
-| `proxy_unused` | a declared proxy saw zero statements | fix the suite's URL, or remove the proxy by hand |
+| `unexercised_route` | a view the suite never hit | add a test |
+| `missing_ingress` | a view took a body and declares no `body` | declare the codec; `raw` also needs `unvalidated` |
+| `ingress_mismatch` | the declared codec is not what the suite sent | fix the `body` directive |
+| `raw_ingress` | a view declares `body raw` without `unvalidated` | add `unvalidated`, or use a codec — the production boot refuses the file until you do |
+| `no_observations` | the suite reached no view or no store | check the test database and `DATABASE_URL` |
+| `proxy_unused` | a declared store saw zero statements | fix the suite's URL, or remove the store |
 
-Production enforces the same declaration: a body to a route without
-`[route.ingress]` is a `413` there, not a warning, and an unacknowledged `raw`
-route refuses the boot before it binds a listener — so a deployment that never ran
-`check` still fails closed. Deleting a route or a grant is never safe
-automatically: the path becomes `404`, the statement is denied.
+Production enforces the same declaration: a body to a view with no `body` is a
+`413` there, not a warning, and an unacknowledged `raw` view refuses the boot
+before it binds a listener — so a deployment that never ran `check` still fails
+closed. Deleting a view or a grant is never safe automatically: the path becomes
+`404`, the statement is denied.
 
 ## What you see
 
@@ -66,8 +66,8 @@ $ uv run blastit check --json
   "requests": 412, "statements": 977,
   "routes": {"total": 8, "exercised": 7}, "proxies": {"db": {"statements": 977, "denied": 1}, "analytics": {"statements": 0, "denied": 0}},
   "findings": [
-    {"kind": "missing_grant", "severity": "error", "route": "catalog", "proxy": "db", "sql": "SELECT \"shop_product\".\"price\" FROM \"shop_product\"", "fix": {"action": "add_query", "to": "[route.db].queries"}},
-    {"kind": "dead_grant", "severity": "error", "route": "search", "proxy": "db", "sql": "SELECT count(*) FROM \"shop_product\"", "fix": {"action": "remove_query", "to": "[route.db].queries", "unsafe": true}},
+    {"kind": "missing_grant", "severity": "error", "route": "catalog", "proxy": "db", "sql": "SELECT \"shop_product\".\"price\" FROM \"shop_product\"", "fix": {"action": "add_query", "to": "view catalog postgres"}},
+    {"kind": "dead_grant", "severity": "error", "route": "search", "proxy": "db", "sql": "SELECT count(*) FROM \"shop_product\"", "fix": {"action": "remove_query", "to": "view search postgres", "unsafe": true}},
     {"kind": "unexercised_route", "severity": "error", "route": "checkout", "fix": {"action": "add_test"}},
     {"kind": "missing_ingress", "severity": "error", "route": "upload", "observed": ["multipart/form-data"], "fix": {"action": "declare_ingress", "codecs": ["raw"], "allow_raw": true}},
     {"kind": "unrouted_request", "severity": "error", "method": "GET", "path": "/robots.txt", "fix": {"action": "add_route"}},
@@ -76,19 +76,23 @@ $ uv run blastit check --json
 }
 ```
 
-`severity` is `error` on every kind in 0.1.1, so any finding fails the run and
+`severity` is `error` on every kind in 0.2.0, so any finding fails the run and
 `ok` is `false`; a `warning` leaves the exit code alone. `sql` is the normalised
-statement, never a literal value, and a grant finding's `fix.to` is its table in
-the manifest: `"[route.db].queries"`. `fix.action` is `add_query`, `add_group`,
-`remove_query`, `add_route`, `remove_route`, `add_test`, `declare_ingress`,
-`fix_ingress` or `observe`; a destructive one carries `"unsafe": true`. `add_group`
-fits only `SET`, `SHOW` or `set_config('TimeZone', …)`; another `set_config(…)` is
-`observe`. Setup runs on whichever route connects first, so `fix.to` names a group:
+statement, never a literal value, and a grant finding's `fix.to` is the
+`Blastfile` node it edits: `"view catalog postgres"`, or `"trait connection"` for
+a trait's grant. `fix.action` is `add_query`, `add_group`, `remove_query`,
+`add_route`, `remove_route`, `add_test`, `declare_ingress`, `fix_ingress` or
+`observe`; a destructive one carries `"unsafe": true`. `add_group` fits only
+`SET`, `SHOW` or `set_config('TimeZone', …)`; another `set_config(…)` is
+`observe`. Setup runs on whichever view connects first, so `fix.to` names a
+trait: write it once and attach it everywhere.
 
-```toml
-groups = ["connection"]                 # to every route
-[group.connection.db]
-queries = ["SELECT set_config('TimeZone', $?, false)"]
+```text
+trait connection {
+    postgres {
+        query "SELECT set_config('TimeZone', $?, false)"
+    }
+}
 ```
 
 `--json` writes one document to stdout and nothing else: pytest output, logs and
@@ -114,9 +118,10 @@ $ uv run blastit check -- -k products
 
 ## Bootstrap an existing project
 
-It needs a manifest that boots: `version`, `app`, `[proxy.db]` and one route.
-[Getting started](getting-started.md) is the smallest. `--learn` discovers routes
-and statements; `app`, `preload` and the proxy's input names are yours to write.
+It needs a file that boots: an `entrypoint`, a `postgres` store and one view.
+[Getting started](getting-started.md) is the smallest. `--learn` discovers views
+and statements; `entrypoint`, `preload` and the store's variable names are yours
+to write.
 
 ```console
 $ uv run blastit check --learn              # record, write what was missing
@@ -131,9 +136,9 @@ For an agent, `--learn --json` prints exactly one document on stdout:
 ```
 
 Add `--dry-run` and the document says `"wrote": false`, with nothing written. A
-real `--learn` replaces the manifest atomically and only after the suite passed,
-writes exact `queries` (never table grants) and refuses a statement that inlines a
-value: parameterise it first. Review `git diff` before committing.
+real `--learn` replaces the file atomically and only after the suite passed,
+writes exact `query` lines (never table grants) and refuses a statement that
+inlines a value: parameterise it first. Review `git diff` before committing.
 
 ## GitHub Actions
 

@@ -21,7 +21,7 @@ updated: "2026-11-14T22:18"
 # Goal
 
 Make `blastit dev` own the PHP worker set end to end, so a PHP developer runs **two
-commands**: write `blastit.toml`, run `blastit dev`. `blastit dev` discovers the host NTS
+commands**: write a `Blastfile`, run `blastit dev`. `blastit dev` discovers the host NTS
 `libphp`, forks, recycles, supervises, reaps, group-kills and cleans up the per-route
 `EmbeddedView` workers — exactly as it already does for Python view workers, with no
 external PHP process. Nothing is hand-written, nothing needs `sudo`, nothing lands in

@@ -1,37 +1,33 @@
 # PHP (Symfony, Laravel)
 
 Blastit runs `public/index.php` in its own worker: no PHP server beside it, no rewrite
-rules, and the manifest block that says so is short.
+rules, and the block that says so is short.
 
 ## 1. Executor
 
-```toml title="blastit.toml"
-version = 1
+```text title="Blastfile"
+app "shop"
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+entrypoint php "public/index.php"
 
-[[route]]
-name = "app"
-path = ['.*']
+postgres $DATABASE_URL
 
-[route.php]
-entry = "public/index.php"
+static "/" {
+    root "public"
+}
 
-[route.static]
-root = "public"
+view app {
+    GET, DELETE, OPTIONS "/*"
+    POST "/*" { body form }
 
-[route.db]
-queries = []
-
-[route.ingress]
-body = "form"
+    postgres {}
+}
 ```
 
-`entry` is the only file Blastit executes: a `[route.php]` route needs no `app`, and
-`.php`/`.phar`/`.phtml` files under the static root are refused with `404`, so keep
-other sources out of `public/`.
+`entrypoint php` names the only file Blastit executes: a PHP app needs no Python
+callable, and `.php`/`.phar`/`.phtml` files under the static root are refused with `404`,
+so keep other sources out of `public/`. A regular file under `public` is served first;
+every other path reaches the front controller.
 
 ```console
 $ uv tool install blastit
@@ -66,16 +62,15 @@ Encore, `/build/assets/*` for Laravel's Vite.
 
 `getenv('DATABASE_URL')` is the local socket URL, and `$pdo->prepare()` with
 `PDO::ATTR_EMULATE_PREPARES => false` keeps `$1` in the statement text, so one template
-is one grant; Laravel's `env('DATABASE_URL')` reads the same variable. A route with no
-`[route.db]` gets no listener at all, and nothing in `blastit.toml` holds a password: the
+is one grant; Laravel's `env('DATABASE_URL')` reads the same variable. A view with no
+`postgres` block gets no listener at all, and a `Blastfile` holds no password: the
 real URL lives in the proxy and connects upstream from Blastit's own process.
 
 ## 4. Ingress
 
-The block declares `form` for the front controller. A JSON API is a separate route
-**above** the catch-all, with its own `name`, `path = ['/api/.*']`, `[route.php]`, the
-`[route.db]` grants it needs and `body = "json"`; an upload is `raw` with
-`allow_raw = true` on its own route, never on the catch-all.
+The catch-all declares `form`. A JSON API is a separate view **above** it, with its own
+name, a `"/api/*"` pattern, the `postgres` grant it needs and `body json`; an upload is
+`body raw unvalidated` on its own view, never on the catch-all.
 
 ## 5. Environment and secrets
 
@@ -99,9 +94,9 @@ before the new image boots.
 $ blastit dev --learn
 ```
 
-Click through the app: `--learn` records the routes and exact queries and writes them in
-`blastit.toml` on exit. `blastit check` runs `pytest -q` ([CI/CD](../ci.md)), so a PHP
-manifest has no request audit in 0.2.0: it validates the manifest, the static roots and
+Click through the app: `--learn` records the views and exact query lines and writes them
+in the `Blastfile` on exit. `blastit check` runs `pytest -q` ([CI/CD](../ci.md)), so a PHP
+file has no request audit in 0.2.0: it validates the file, the static roots and
 the libphp gate, exits `2` without pytest, and has nothing to observe if pytest is there.
 
 ## 9. Deployment notes
@@ -110,7 +105,6 @@ the libphp gate, exits `2` without pytest, and has nothing to observe if pytest 
 $ blastit --preset compose-traefik
 ```
 
-The image must carry the same NTS `libphp`, and the first route's uid `21000` needs write
-access to Symfony's `var/` or Laravel's `storage/` and `bootstrap/cache/`. `workers`
-(1–64) may only lower the concurrency Blastit derives for the route
-([Deployments](../deploy/index.md)).
+The image must carry the same NTS `libphp`, and the first view's uid `21000` needs write
+access to Symfony's `var/` or Laravel's `storage/` and `bootstrap/cache/`.
+`BLASTIT_MAX_WORKERS` caps concurrency for the app ([Deployments](../deploy/index.md)).

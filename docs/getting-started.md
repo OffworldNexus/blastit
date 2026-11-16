@@ -26,18 +26,17 @@ def application(environ, start_response):
     return [b"hello from blastit\n"]
 ```
 
-```toml title="blastit.toml"
-version = 1
-app = "hello:application"
+```text title="Blastfile"
+app "hello"
 
-[[route]]
-name = "hello"
-path = ['.*']
+entrypoint python "hello:application"
+
+view hello GET "/*" {}
 ```
 
-`app` is `module:attribute`. `path` is a list of regexes matched against the
-whole `PATH_INFO`, in the order written; the first match wins, so a catch-all
-goes last.
+`entrypoint python` names the WSGI callable, `module:attribute`. `view hello GET
+"/*"` matches every path and answers `GET`; views are tried in the order written,
+so a specific view goes above a catch-all.
 
 ## 3. Run it
 
@@ -53,14 +52,14 @@ $ curl localhost:8080/whatever
 hello from blastit
 ```
 
-`blastit dev` reads `./blastit.toml` and runs as you: no `sudo`, no setup, no
+`blastit dev` reads `./Blastfile` and runs as you: no `sudo`, no setup, no
 environment variables. It forks the same processes production does, on one uid,
-so a real request takes a real route. A path no route matches gets Blastit's own
+so a real request takes a real route. A path no view matches gets Blastit's own
 `404`, with no Python at all. `blastit dev --port N` moves it off `8080`.
 
 ## Where next
 
-* [Local development](local.md) — PostgreSQL, filling the manifest in one pass,
+* [Local development](local.md) — PostgreSQL, filling the grants in one pass,
   reading a denial.
 * [CI/CD](ci.md) — one command that proves nothing was forgotten.
 * [Deployments](deploy/index.md) — presets, and what production refuses.

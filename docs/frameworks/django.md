@@ -1,59 +1,51 @@
 # Django
 
-A Django project is a WSGI callable: blastit needs one manifest and a few settings,
+A Django project is a WSGI callable: blastit needs one `Blastfile` and a few settings,
 and no plugin. Not Django? [Flask and any WSGI app](flask.md).
 
 ## 1. Executor { #manifest }
 
-```toml title="blastit.toml"
-version = 1
-app = "myshop.wsgi:application"
-preload = ["myshop.urls"]
+```text title="Blastfile"
+app "myshop"
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+entrypoint python "myshop.wsgi:application" {
+    preload "myshop.urls"
+}
 
-[[route]]
-name = "catalog"
-path = ['/products/.*']
-[route.db]
-queries = []
+postgres $DATABASE_URL
 
-[[route]]
-name = "checkout"
-path = ['/checkout/']
-[route.db]
-transaction_control = true      # the BEGIN and savepoints a write route sends
-[route.ingress]
-body = "json"
+view catalog GET "/products/*" {
+    postgres {}
+}
 
-[[route]]
-name = "fallback"
-path = ['.*']
+view checkout POST "/checkout" {
+    body json
+    postgres {
+        transactions      # the BEGIN and savepoints a write view sends
+    }
+}
+
+view fallback "/*" {}
 ```
 
-`app` is `module:attribute` and `preload` imports the URLconf once before the fork;
-Django still routes — blastit picks the sandbox by `PATH_INFO` and passes the request
-through. The last route takes what nothing else claimed, so Django renders its 404s.
-`uv add blastit 'psycopg[binary]' dj-database-url` supplies the rest, then
+`entrypoint python` names `module:attribute`; `preload` imports the URLconf once before
+the fork. Django still routes — blastit picks the sandbox by path and passes the request
+through. The last view takes every method nothing else claimed, so Django renders its own
+404s. `uv add blastit 'psycopg[binary]' dj-database-url` supplies the rest, then
 `uv run blastit dev` serves the app; a savepoint's name is generated per request, so only
-`transaction_control` can allow it.
+`transactions` can allow it.
 
 ## 2. Static assets
 
-```toml
-[[route]]
-name = "static"
-path = ['/static/.*']
-
-[route.static]
-root = "staticfiles"
-immutable = ["/static/*", "/static/*/*", "/static/*/*/*",
-             "/static/*/*/*/*", "/static/*/*/*/*/*", "/static/*/*/*/*/*/*"]
+```text
+static "/static" {
+    root "staticfiles"
+    immutable "/static/*", "/static/*/*", "/static/*/*/*",
+              "/static/*/*/*/*", "/static/*/*/*/*/*", "/static/*/*/*/*/*/*"
+}
 ```
 
-Add it above the catch-all, and set `STATIC_ROOT = BASE_DIR / "staticfiles"` beside
+A mount sits beside the views. Set `STATIC_ROOT = BASE_DIR / "staticfiles"` beside
 `STATIC_URL = "/static/"` so `collectstatic` writes there — the root must exist before
 `blastit dev` starts. List `immutable` only for fingerprinted output, one pattern per
 depth, and as deep as the deepest fingerprinted file: Django's admin ships
@@ -72,17 +64,17 @@ DATABASES["default"].setdefault("OPTIONS", {})["server_side_binding"] = True
 `conn_max_age=0` closes the connection with the request and `server_side_binding` sends
 parameters apart from the statement text. The app's `DATABASE_URL` may name a pool;
 `manage.py migrate` needs the direct URL. Sessions are read on every authenticated
-request: define `[group.session.db]` once with those statements, then attach it with
-`groups = ["session"]` where you authenticate ([groups](../reference/manifest.md#groups)).
+request: define one `trait session { postgres { … } }` with those statements, then write
+`use session` in the views that authenticate ([traits](../reference/blastfile.md#traits)).
 
-Django's own admin cannot be enumerated as `queries`: give it a route of its own with
-`[route.db.tables]` for its tables, and `unrestricted = true` only if you cannot list
-them — that route may then run every statement, and every boot warns about it.
+Django's own admin cannot be enumerated as `query` lines: give it a view of its own with
+a table grant for its tables, and `postgres unrestricted` only if you cannot list them —
+that view may then run every statement, and every boot warns about it.
 
 ## 4. Ingress
 
-`json` for an API route, `form` for a POST, `raw` with `allow_raw = true` for an upload
-— [the manifest](../reference/manifest.md#ingress). Behind TLS set
+`body json` for an API view, `body form` for a POST, `body raw unvalidated` for an upload
+— [view directives](../reference/blastfile.md#view-directives). Behind TLS set
 `SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")`, list the origin in
 `CSRF_TRUSTED_ORIGINS`, and name the host in `ALLOWED_HOSTS`.
 
@@ -110,7 +102,7 @@ $ uv run blastit check
 `pytest-django` plus a `manage.py` (or `DJANGO_SETTINGS_MODULE`) is how `check` finds your
 suite, and why it can create `test_<database>` instead of touching your development
 database ([CI/CD](../ci.md#your-suite)). A statement `check` reports as not granted is
-closed by pasting it into that route's `queries` — bind any value it inlined first.
+closed by pasting it into that view's `postgres` block — bind any value it inlined first.
 
 ## 9. Deployment notes
 

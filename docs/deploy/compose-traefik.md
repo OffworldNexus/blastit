@@ -166,12 +166,13 @@ a deployment where a *shared* interpreter carries them
 
 ### 5. Compose
 
-Start from the [Django guide](../frameworks/django.md#manifest)'s manifest and
-change two things: `[proxy.db] input = { url = "DATABASE_URL" }` (`ca_cert` only
-for a network database, with `sslmode=verify-full`), and `queries` filled in —
-the guide's `queries = []` denies every statement. Deploy only a manifest
-`blastit check` passes ([CI/CD](../ci.md#what-it-fails-on)). `settings.py` must
-read the host: `ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]`.
+Start from the [Django guide](../frameworks/django.md#manifest)'s `Blastfile` and
+change two things: the split `postgres` block with `$DATABASE_CA_CERT` beside
+`$DATABASE_URL` (`ca_cert` only for a network database, with `sslmode`
+`verify-full`), and the grants filled in — the guide's `postgres {}` denies every
+statement. Deploy only a file `blastit check` passes
+([CI/CD](../ci.md#what-it-fails-on)). `settings.py` must read the host:
+`ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]`.
 
 ```yaml title="compose.yaml"
 name: shop

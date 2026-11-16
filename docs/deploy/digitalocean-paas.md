@@ -61,10 +61,11 @@ Everything inside the box is the [model](index.md#the-topology) unchanged.
 
 ### 1. Image and manifest
 
-Start from the [Django guide](../frameworks/django.md#manifest)'s manifest and
-change two things: `input = { url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }`,
-and `queries` filled in — the guide's `queries = []` denies every statement. Deploy
-only a manifest `blastit check` passes ([CI/CD](../ci.md#what-it-fails-on)).
+Start from the [Django guide](../frameworks/django.md#manifest)'s `Blastfile` and
+change two things: the split `postgres` block with `$DATABASE_CA_CERT` beside
+`$DATABASE_URL` (only for a network database, with `sslmode` `verify-full`), and the
+grants filled in — the guide's `postgres {}` denies every statement. Deploy
+only a file `blastit check` passes ([CI/CD](../ci.md#what-it-fails-on)).
 `settings.py` must read the host the spec passes down:
 `ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]` — Django does not read
 `ALLOWED_HOST` on its own.

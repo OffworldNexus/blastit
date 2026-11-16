@@ -13,7 +13,7 @@ Tests exist to prove two things: **(1) the developer experience works exactly as
 |---|---|---|---|
 | **critical** (protected) | Rust: `crates/<crate>/tests/critical_*.rs`<br/>Python: `python/tests/critical/test_*.py` | Every `make check` (< 60 s total, unprivileged!) | Security boundaries, secret stripping, SQL/NoSQL/HTTP allowlist & parser-differential resistance, WASM fuel/memory budgets, CDR metadata/script stripping, `blastit dev` vs prod fail-closed behaviour, `--learn` / `check` completeness, CVE payload rejection |
 | **standard** | `crates/<crate>/src/**` unit tests, `crates/<crate>/tests/*.rs`, `python/tests/test_*.py` | Every `make check` (unprivileged) | Component behaviour, edge cases, CLI formatting, wire codecs |
-| **docs** | `make docs-check` (`zensical build --strict`) + runnable doc snippet tests | Every `make check` | Zero broken links/anchors, valid `blastit.toml` / CLI examples in `docs/` & `README.md` |
+| **docs** | `make docs-check` (`zensical build --strict`) + runnable doc snippet tests | Every `make check` | Zero broken links/anchors, valid `Blastfile` / CLI examples in `docs/` & `README.md` |
 | **e2e & CVE** | `e2e/` (Docker, rootless capabilities, backend stacks, CVE exploit harnesses) | Epic & milestone gates (`make e2e`) and tasks touching `crates/blastit`, Dockerfiles, or new backends/proxies | Real multi-UID / rootless isolation, real PostgreSQL/MySQL/Mongo/Redis/HTTP brokers, real `php2shell` / `node2shell` / polyglot exploit neutralisation |
 
 ## 2. Protected critical tests (`tools/critical_guard.py`)

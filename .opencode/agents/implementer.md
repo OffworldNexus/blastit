@@ -37,7 +37,7 @@ You are a Blastit **implementer**. You deliver one well-scoped task cleanly, saf
 ## Coding
 
 1. **Traits/interfaces and protected critical tests first** (`crates/<crate>/tests/critical_*.rs` or `python/tests/critical/`). Prove the test fails before implementing the feature/fix, and always test **both** the allowed path and the denied/malicious path.
-2. **Deliver the exact DX promised by `docs/`.** CLI flags, auto-discovered `./blastit.toml` behaviour, pretty/JSON outputs, and actionable error messages (naming the fix without leaking secrets!) must match the accepted docs word for word.
+2. **Deliver the exact DX promised by `docs/`.** CLI flags, auto-discovered `./Blastfile` behaviour, pretty/JSON outputs, and actionable error messages (naming the fix without leaking secrets!) must match the accepted docs word for word.
 3. **Stay strictly within `paths` from `NODE.md`.** Never edit existing files under `tests/critical/` or `critical_*.rs` unless `paths` explicitly authorize them.
 4. **Never weaken lints, clippy rules, rustdoc warnings, or tests** to get green. Zero `unwrap()`/`expect()` on untrusted input paths.
 5. Iterate rapidly with `cargo test -p <crate>` / `uv run ...`, then run every `# Acceptance` command and `make check` before finishing.

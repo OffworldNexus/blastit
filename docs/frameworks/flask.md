@@ -1,29 +1,23 @@
 # Flask, SQLAlchemy and raw WSGI
 
-One callable, one manifest. The code below is Flask's; a bare WSGI app is the same file
+One callable, one `Blastfile`. The code below is Flask's; a bare WSGI app is the same file
 without the decorator, and SQLAlchemy changes two lines.
 
 ## 1. Executor
 
-```toml title="blastit.toml"
-version = 1
-app = "app:app"
+```text title="Blastfile"
+app "shop"
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+entrypoint python "app:app"
 
-[[route]]
-name = "products"
-path = ['/products/']
-[route.db]
-queries = []
-[route.ingress]                 # 4. ingress: json, form, none, raw
-body = "form"                   # the search form posts URL-encoded
+postgres $DATABASE_URL
 
-[[route]]
-name = "fallback"       # everything else: no database at all
-path = ['.*']
+view products POST "/products/" {
+    body form                   # the search form posts URL-encoded
+    postgres {}
+}
+
+view fallback "/*" {}           # everything else: no database at all
 ```
 
 ```console
@@ -36,8 +30,8 @@ interpreter; add `uv add sqlalchemy` if you use it, and `uv run blastit dev` ser
 
 ## 2. Static assets
 
-A WSGI app has no static story of its own: `[route.static]` serves the files itself and
-forwards everything else to the app — a route above the catch-all, or a page of its own
+A WSGI app has no static story of its own: a `static` mount serves the files itself and
+forwards everything else to the app — beside the views above, or a page of its own
 ([static assets and SPAs](static-and-spa.md)).
 
 ## 3. Database
@@ -67,7 +61,7 @@ One connection per request, closed in the teardown: a connection that outlives t
 request is orphaned when its thread ends. psycopg 3 binds parameters server-side
 (`%s` becomes `$1`), so a statement's text is the same every time.
 
-With SQLAlchemy, two lines and one key:
+With SQLAlchemy, two lines and one directive:
 
 ```python
 url = os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://", 1)
@@ -75,18 +69,19 @@ engine = create_engine(url, poolclass=NullPool)
 ```
 
 The `postgresql+psycopg://` driver keeps parameters out of the text, `NullPool` gives
-each request its own connection, and SQLAlchemy's own `BEGIN` needs
-`transaction_control = true`. Its first connection runs `select pg_catalog.version()`
-before any request statement: put it in `[group.connection.db]` and attach
-`groups = ["connection"]` wherever the app connects ([groups](../reference/manifest.md#groups)).
-Flask-SQLAlchemy takes `SQLALCHEMY_ENGINE_OPTIONS = {"poolclass": NullPool}` and the same
-URL replacement for `SQLALCHEMY_DATABASE_URI`.
+each request its own connection, and SQLAlchemy's own `BEGIN` needs `transactions` in
+the view's grant. Its first connection runs `select pg_catalog.version()` before any
+request statement: write it once in a `trait connection { postgres { query 'SELECT
+pg_catalog.version()' } }` and `use connection` wherever the app connects
+([traits](../reference/blastfile.md#traits)). Flask-SQLAlchemy takes
+`SQLALCHEMY_ENGINE_OPTIONS = {"poolclass": NullPool}` and the same URL replacement for
+`SQLALCHEMY_DATABASE_URI`.
 
 ## 4. Ingress
 
-The `products` route declares `body = "form"`, so a URL-encoded POST reaches the view;
-declare the codec each route that takes a body receives, and a body of the wrong shape is
-a `400` before Flask sees it.
+The `products` view declares `body form`, so a URL-encoded POST reaches it; declare the
+codec each view that takes a body receives, and a body of the wrong shape is a `400`
+before Flask sees it.
 
 ## 5. Environment and secrets
 
@@ -96,7 +91,7 @@ response, a log line or a subprocess.
 
 ## 6. Health
 
-Do not add a view for `/_blastit/health`: the scheduler answers it before your routes are
+Do not add a view for `/_blastit/health`: the scheduler answers it before your views are
 consulted, so it never runs.
 
 ## 7. Migrations
@@ -106,10 +101,10 @@ Run Flask-Migrate's `uv run flask db upgrade` outside blastit, before the new co
 ## 8. Learn and check
 
 `check` runs your pytest suite, so keep `app.py` importable from the project root: the
-suite imports the same callable the manifest names
+suite imports the same callable the file names
 ([CI/CD](../ci.md#what-it-fails-on)).
 
 ## 9. Deployment notes
 
-A catch-all route is one process for the whole app; give a hot or risky path its own
-`[[route]]` above it to get its own process, uid and grants.
+A catch-all view is one process for the whole app; give a hot or risky path its own
+`view` above it to get its own process, uid and grants.

@@ -2369,3 +2369,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T21:41 [MB.21.4.10] (lead) commit 335f564
 - 2026-11-16T21:45 [MB.21.4] (lead) status ready -> done
 - 2026-11-16T21:45 [MB.21.4] (lead) gate closed; RESULT.md written by doc-writer from the measured tree (make check 166 ok, make e2e 411 ok/0 FAIL, greps 0, cargo tree 0, Cargo.lock -55); hand-off
+- 2026-11-16T21:45 [MB.21.5.1] (lead) status ready -> active
+- 2026-11-16T21:45 [MB.21.5.1] (lead) attempt 1/3 started
+- 2026-11-16T21:45 [MB.21.5.1] (lead) base 1f3ffc83f26510c24255b21c98b91ce0c34d750a
+- 2026-11-16T21:55 [MB.21.5.1] (lead) edited fields
+- 2026-11-16T21:57 [MB.21.5.1] (doc-writer) site-wide sweep: reference/manifest.md deleted, 8 pages teach Blastfile, links repointed, 7 live briefs re-spelled, docs_fences rows moved, all docs gates green
+- 2026-11-16T21:57 [MB.21.5.1] (lead) status active -> review
+- 2026-11-16T22:00 [MB.21.5.1] (lead) REVIEW FAIL (attempt 1): ARCHITECTURE.md:223 still teaches 'inline grants, its groups and the global groups'; :708 Mermaid repeats it. MINOR plan/nodes/MB/NODE.
+- 2026-11-16T22:01 [MB.21.5.1] (doc-writer) review fix: ARCHITECTURE group-model claims re-spelled as traits (223, 708); MB brief lines 20/73/78 de-retired
+- 2026-11-16T22:01 [MB.21.5.1] (lead) attempt 2/3 started
+- 2026-11-16T22:01 [MB.21.5.1] (lead) status review -> review
+- 2026-11-16T22:04 [MB.21.5.1] (doc-writer) review pass 2: whole-file ARCHITECTURE audit — 16 retired-model rows fixed (routing path=, php workers/max_requests, manifest-order, proxy/group prose); 9 justi
+- 2026-11-16T22:04 [MB.21.5.1] (doc-writer) audit count: 8 passages / 15 retired-model token hits fixed; 9 hits justified as product vocabulary (worker processes, process.retired max_requests, report fix.
+- 2026-11-16T22:05 [MB.21.5.1] (lead) attempt 3/3 started
+- 2026-11-16T22:05 [MB.21.5.1] (lead) status review -> review
+- 2026-11-16T22:08 [MB.21.5.1] (lead) status review -> done

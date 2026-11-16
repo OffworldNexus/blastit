@@ -10,7 +10,7 @@
 
 **A WSGI server that keeps the blast radius of a security bug small.** Each route
 runs in its own process under its own Unix user, talks to a local proxy instead of
-the real database, and may run only the SQL its manifest grants it — so one
+the real database, and may run only the SQL its `Blastfile` grants it — so one
 exploitable bug in the least important page is worth that page, not the app.
 Linux, CPython 3.13+, PostgreSQL.
 
@@ -26,13 +26,12 @@ def application(environ, start_response):
     return [b"hello from blastit\n"]
 ```
 
-```toml title="blastit.toml"
-version = 1
-app = "hello:application"
+```text title="Blastfile"
+app "hello"
 
-[[route]]
-name = "hello"
-path = ['.*']
+entrypoint python "hello:application"
+
+view hello GET "/*" {}
 ```
 
 ```console
@@ -50,7 +49,7 @@ hello from blastit
 The server keeps the terminal; `curl` goes in another one.
 
 For this hello world: no `sudo`, no `chmod`, no environment variables. `blastit
-dev` finds `./blastit.toml`, runs the app as you, and says so in the banner.
+dev` finds `./Blastfile`, runs the app as you, and says so in the banner.
 
 Our own documentation site is served the same way: `make docs-serve` builds it
 with Zensical and hands it to a freshly built `blastit dev` (`PORT=8080`), and

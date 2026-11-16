@@ -269,7 +269,10 @@ view catalog GET "/products/{id:int}" {
   An exact `query` you write yourself may hold one — read it before pasting.
 * Table grants allow a statement no exact `query` lists when every table, column
   and function it touches is granted. Reading a column anywhere — a `WHERE`, an
-  `ORDER BY`, a join — is reading it. `count(*)` reads no column.
+  `ORDER BY`, a join — is reading it. `count(*)` reads no column, and a table
+  grant takes at least one: a statement that only names a table gets advice to
+  name a column (its primary key, say), never a `select <table>` that would
+  widen the grant.
 * `pg_catalog` and `information_schema` are never covered by table grants; write
   those statements as `query`.
 * `RETURNING` reads the columns it names, so grant them with `select` as well.
@@ -470,6 +473,14 @@ or `fmt` where that is the writer.
 body, `form` for a form body, and `raw` only when a sample validated as neither.
 `remove_query` and `remove_route` carry `"unsafe": true`. `--learn` writes `json`,
 `form` or `none`, and never `raw unvalidated`.
+
+The audit report also carries one `table_grants` object per view and store:
+`tables` (the operations and columns its statements touched), `functions`,
+`unanalysable`, and `blastfile` — those same directives under a
+`# view <name> postgres` header, ready to paste into that view's `postgres { }`
+block. `--prefer-tables` prints the identical lines. A table its statements only
+named has no directive: `blastfile` carries advice to name a column instead,
+because a table grant takes at least one.
 
 `--json` prints that document on stdout and nothing else: the suite's own output
 goes to stderr. `--learn --json` prints the proposal instead:

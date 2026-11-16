@@ -83,22 +83,21 @@ fn label(counts: Counts) -> String {
 /// eight retired rows to `Blastfile` documents, `MB.21.5.2` deletes the retired
 /// column.
 const PAGES: [(&str, Counts); 10] = [
-    ("README.md", [0, 0, 1]),
-    ("docs/index.md", [0, 0, 1]),
-    ("docs/getting-started.md", [0, 0, 1]),
+    ("README.md", [1, 0, 0]),
+    ("docs/index.md", [1, 0, 0]),
+    ("docs/getting-started.md", [1, 0, 0]),
     ("docs/local.md", [1, 0, 0]),
-    ("docs/frameworks/index.md", [0, 0, 1]),
-    ("docs/frameworks/django.md", [0, 0, 1]),
-    ("docs/frameworks/flask.md", [0, 0, 1]),
-    ("docs/frameworks/php.md", [0, 0, 1]),
-    ("docs/frameworks/static-and-spa.md", [0, 0, 1]),
+    ("docs/frameworks/index.md", [1, 0, 0]),
+    ("docs/frameworks/django.md", [1, 0, 0]),
+    ("docs/frameworks/flask.md", [1, 0, 0]),
+    ("docs/frameworks/php.md", [1, 0, 0]),
+    ("docs/frameworks/static-and-spa.md", [1, 0, 0]),
     ("docs/blastfile.md", [1, 0, 0]),
 ];
 
-/// The whole documented set: two `text title="Blastfile"` documents today
-/// (`docs/blastfile.md`'s and `docs/local.md`'s), and the eight retired
-/// manifests the migration replaces.
-const TOTAL: Counts = [2, 0, 8];
+/// The whole documented set: every page's one `text title="Blastfile"`
+/// document, and no retired manifest (`MB.21.5.2` deletes the column).
+const TOTAL: Counts = [10, 0, 0];
 
 /// One fenced block: the opening it uses, the 1-based page line that opening
 /// sits on, and its body without the markers.
@@ -282,6 +281,8 @@ enum Shape {
     Application,
     /// At least one mount, no view, no app: an app-less static site (§9.5).
     StaticSite,
+    /// Views and a mount: a PHP app whose `public/` is served as files too.
+    ViewsAndMount,
     /// Neither a view nor a mount: the document reaches nothing.
     Empty,
 }
@@ -295,6 +296,8 @@ fn shape_of(manifest: &Manifest) -> Shape {
         && manifest.is_all_static()
     {
         Shape::StaticSite
+    } else if manifest.route_count() > 0 && !manifest.mounts().is_empty() {
+        Shape::ViewsAndMount
     } else {
         Shape::Empty
     }
@@ -316,15 +319,23 @@ fn every_documented_document_parses_and_validates() {
         for fence in complete {
             let (manifest, _warnings) = parse_document(&fence.body)
                 .unwrap_or_else(|errors| panic!("{}", describe_failure(file, &fence, &errors)));
-            // The shape is pinned per page, not absorbed by an "or": both pages
-            // that carry a document today show an application — one or more
-            // views and no mount — so a fence that degraded from views to a
-            // static mount fails here. A page that documents an all-static site
-            // adds its own arm with `Shape::StaticSite`; nothing else can
-            // execute a document, so an unpinned page panics rather than
-            // passing.
+            // The shape is pinned per page, not absorbed by an "or": a fence
+            // that degraded from views to a static mount fails here. A page
+            // that documents an all-static site pins `Shape::StaticSite`, and a
+            // PHP page whose `public/` is served as files too pins
+            // `Shape::ViewsAndMount`; nothing else can execute a document, so an
+            // unpinned page panics rather than passing.
             let expected = match file {
-                "docs/local.md" | "docs/blastfile.md" => Shape::Application,
+                "docs/frameworks/static-and-spa.md" => Shape::StaticSite,
+                "docs/frameworks/php.md" => Shape::ViewsAndMount,
+                "README.md"
+                | "docs/index.md"
+                | "docs/getting-started.md"
+                | "docs/local.md"
+                | "docs/blastfile.md"
+                | "docs/frameworks/index.md"
+                | "docs/frameworks/django.md"
+                | "docs/frameworks/flask.md" => Shape::Application,
                 other => panic!("{other}: a page with an executed document needs its shape pinned"),
             };
             assert_eq!(

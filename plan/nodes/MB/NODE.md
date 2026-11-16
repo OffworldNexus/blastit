@@ -17,7 +17,7 @@ updated: "2026-11-14T22:18"
 
 Expand Blastit across focused `0.2.x` sub-releases into a **multi-backend zero-trust application harness** supporting modern 12-factor ecosystems beyond Python WSGI:
 1. Safe built-in **static asset serving** and clean front-controller / SPA **URL rewriting** (no nginx regex soup).
-2. **PHP** (host NTS `libphp` embedded in per-route view workers — `[route.php]` with `entry` and an optional `workers` cap, ADR-0010; PSR-7/15 front controllers, Symfony & Laravel idioms, `SCRIPT_FILENAME`/`DOCUMENT_ROOT` pinned in C memory, no parameter stream to inject into).
+2. **PHP** (host NTS `libphp` embedded in per-route view workers — `entrypoint php "public/index.php"`, ADR-0010; PSR-7/15 front controllers, Symfony & Laravel idioms, `SCRIPT_FILENAME`/`DOCUMENT_ROOT` pinned in C memory, no parameter stream to inject into).
 3. **Vite & Node** (HTTP upstream per route/worker, seamless Vite asset + SSR split for SvelteKit, Remix/React Router, Nuxt, Hono, Next standalone).
 4. **Tomcat / JVM** (modern 12-factor Servlet / Spring Boot integration) and other evaluated popular 12-factor HTTP backends.
 5. Unified language-agnostic `blastit dev --learn` and `blastit check` workflows across Python, PHP, Node, and JVM, plus baseline `php2shell` and `node2shell` exploit neutralization tests.
@@ -32,7 +32,7 @@ Expand Blastit across focused `0.2.x` sub-releases into a **multi-backend zero-t
 
 - [ ] Each `0.2.x` sub-epic begins with accepted lean user documentation (`docs/frameworks/...`) covering Local, CI/CD, and Deployments, verified by `dx` and `ai-ergonomics` critics before Rust code is written.
 - [ ] Static asset serving + URL rewriting handle SPA fallbacks, hashed immutable assets, and PHP `public/index.php` front-controller routing safely (immune to path traversal, null bytes, symlink escapes, and dotfile leaks).
-- [ ] The embedded PHP backend serves real PSR / Symfony- or Laravel-style routes isolated per route (one `[route.php]` front controller, its own forked `EmbeddedView` workers), strips real DB secrets via stage-0 `execve`, enforces `blastit.toml` PostgreSQL grants, and blocks `php2shell` / CVE-2024-4577 CGI argument & `PHP_VALUE` injection attacks in automated `e2e/` tests.
+- [ ] The embedded PHP backend serves real PSR / Symfony- or Laravel-style routes isolated per route (one `entrypoint php` front controller, its own forked `EmbeddedView` workers), strips real DB secrets via stage-0 `execve`, enforces the `Blastfile` PostgreSQL grants, and blocks `php2shell` / CVE-2024-4577 CGI argument & `PHP_VALUE` injection attacks in automated `e2e/` tests.
 - [ ] Vite + Node SSR/API backend serves static + dynamic routes cleanly in `blastit dev` and production containers, enforces per-route DB grants & egress lockdown, and blocks `node2shell` reverse-shell / env / `/@fs/` traversal vectors in `e2e/`.
 - [ ] Tomcat / JVM 12-factor backend runs cleanly under Blastit with per-route sandboxing/routing, env secret swapping, and wire-level `--learn` + `blastit check`.
 - [ ] `make check`, `make docs-check`, `visual-checker`, `make e2e`, and `test-curator` milestone audit all pass.
@@ -54,7 +54,7 @@ A static, PHP (embedded `libphp` in a view worker, ADR-0010), Vite/Node (HTTP up
 
 **Mandatory DX-First sequence per sub-release (non-negotiable).**
 1. One lean user page per backend under `docs/frameworks/` covering Local (zero `sudo`), CI/CD (`blastit check`), and Deployments → `dx` + `ai-ergonomics` goldfish critics.
-2. Register every new public doc page in `python/tests/runnable_docs/inventory.toml` **in the same commit** (and bump `crates/blastit-manifest/tests/docs_fences.rs`'s `count == 6` whenever a complete `blastit.toml` fence is added).
+2. Register every new public doc page in `python/tests/runnable_docs/inventory.toml` **in the same commit** (and bump `crates/blastit-manifest/tests/docs_fences.rs`'s `PAGES` row whenever a complete `Blastfile` document is added).
 3. Technical design (`docs/design/*.md`) + ADR → `security` + `implementability` + `testability` critics.
 4. Small leaf tasks (≤ 5–8 files, ≤ 600 lines) bundling their own `crates/*/tests/critical_*.rs` tests. **MA escalation lesson (`MA.2.3.3`):** never bundle process-lifecycle/cleanup logic and `--learn` wire attribution into the same leaf task — split them so cheap passes succeed on attempt 1.
 5. `e2e/` + baseline CVE exploit regression (`php2shell` CVE-2024-4577 / `PHP_VALUE` / `SCRIPT_FILENAME`; `node2shell` egress/env/`/@fs/`).
@@ -67,12 +67,12 @@ A static, PHP (embedded `libphp` in a view worker, ADR-0010), Vite/Node (HTTP up
 
 **Queued hygiene, diagnostics, perf & mutation gaps — execute first in `MB.1` before `0.2.0` feature code:**
 1. **Mutation & timeout gap (`MB.1`):** lift whole-crate `blastit-manifest` from 69.4 % (437/630 viable; policy modules already 95.0 %) past 75 % by testing `edit.rs` `verify()` (`:961`) and comment/bracket patcher branches; run the unreached 511/1019 `blastit-sqlpolicy` mutants (`lexer.rs` tail, `literals.rs`, `lru.rs`, `normalize.rs`, `statements.rs`, `tables.rs`) via file-scoped targets; and eliminate or bound the cursor-progress infinite-loop mutants behind the 20 timeouts (11 in `blastit-manifest`, 9 in `blastit-sqlpolicy`).
-2. **Missing `./blastit.toml` startup message (`crates/blastit/src/stage0.rs:444,666`):** deferred from `MA` (`docs/troubleshooting.md:13` covers `0.1.1`) — check manifest existence/readability before `config.app.is_none()` so running `blastit dev` in an empty directory names the missing `./blastit.toml` rather than `BLASTIT_APP`, and pin in `critical_config_and_presets.rs`.
+2. **Missing `./Blastfile` startup message (`crates/blastit/src/stage0.rs:444,666`):** deferred from `MA` (`docs/troubleshooting.md:13` covers `0.1.1`) — check manifest existence/readability before `config.app.is_none()` so running `blastit dev` in an empty directory names the missing `./Blastfile` rather than `BLASTIT_APP`, and pin in `critical_config_and_presets.rs`.
 3. **`scripts/build-wheel.sh` README links:** run `scripts/readme-absolute-links.py` (restoring `README.md` via trap) during local wheel builds so `dist/*.whl` long description matches PyPI's build.
 4. **`CARGO_NET_OFFLINE=true` spelling:** replace `CARGO_NET_OFFLINE=1` in `Makefile` / scripts / task acceptances that can reach `maturin >= 1.16` (maturin parses it as strict `"true"`/`"false"`).
-5. **Permanent `e2e/` negative & empty-grant jobs:** add an `e2e/` route fixture exercising `queries = []` (`42501` denying listener) and a permanent negative-boot check (`docker run -u 10000 --cap-drop ALL` exits `1` naming missing capabilities).
+5. **Permanent `e2e/` negative & empty-grant jobs:** add an `e2e/` fixture whose view has an empty `postgres {}` grant (the `42501` denying listener) and a permanent negative-boot check (`docker run -u 10000 --cap-drop ALL` exits `1` naming missing capabilities).
 6. **Learn-refusal contract sync:** eliminate the rare timing race in `python/tests/critical/test_check_contract.py`'s learn-refusal test (`server.statements` drain before exit).
 7. **Hot-path `Scheduler::plan_request_body` (`crates/blastit-scheduler/src/scheduler.rs`):** return `Ok(BodyPlan::AllowEmptyOnly)` as soon as `policy.is_none()` instead of allocating method + 2 header `String`s first (measure when bringing in the `benchmark/` harness).
 8. **`crates/blastit-events/Cargo.toml` unused `serde` dependency:** drop the unused `serde` dep in a dedicated sequential `Cargo.toml`/`Cargo.lock` task.
 9. **Light-scheme header logo contrast (`docs/brand/logo.svg`):** address `VISUAL-MA.3.md` minor contrast note (`fill="#fbfaf6"` on light `#f4efe3` header).
-10. **Connection-setup group hint in `audit_v1` (`crates/blastit/src/audit_v1.rs`):** surfaced by `MA.8` — when `blastit check` flags a `missing_grant` on session/connection-setup SQL (e.g. `SELECT set_config('TimeZone', $?, false)`), emit group-scoped `fix` guidance (`add_group` / `[group.<name>.db]`) rather than per-route `add_query`, since connection setup fires on whichever route opens a connection first.
+10. **Connection-setup trait hint in `audit_v1` (`crates/blastit/src/audit_v1.rs`):** surfaced by `MA.8` — when `blastit check` flags a `missing_grant` on session/connection-setup SQL (e.g. `SELECT set_config('TimeZone', $?, false)`), emit the trait-scoped `fix` guidance (`add_group`, whose `to` names `trait connection`) rather than a per-view `add_query`, since connection setup fires on whichever view opens a connection first.

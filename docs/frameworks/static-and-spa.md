@@ -1,25 +1,22 @@
 # Static assets and SPAs
 
-A built front end is one route and no app: this is the "no executor" page — every other
+A built front end is one mount and no app: this is the "no executor" page — every other
 page fills the same nine slots with a callable or a front controller.
 
 ## 1. Executor
 
-```toml title="blastit.toml"
-version = 1
-
-[[route]]
-name = "site"
-path = ['.*']
-
-[route.static]
-root = "public"
-spa = true
-immutable = ["/assets/*"]
+```text title="Blastfile"
+static "/" {
+    root "public"
+    fallback "index.html"
+    immutable "/assets/*"
+}
 ```
 
-`root` is the directory served, relative to `blastit.toml`. An all-static site needs no
-`app`; with `spa = true` no route here reaches one, because `index` answers first.
+`root` is the directory served, relative to the `Blastfile`. A static-only file needs no
+`entrypoint`; with `fallback` a deep path that is no file answers `index.html`, so no
+request here reaches an app.
+
 ```console
 $ uvx blastit dev
   blastit dev · single-uid simulation · 127.0.0.1:8080
@@ -40,11 +37,11 @@ Vite writes `dist/`; one flag puts it where `root` looks. Vite's own `public/` i
 `publicDir` and the build empties it: move what you keep there to `static/`, and set
 `publicDir: "static"` in `vite.config.ts`.
 
-| Key | Default | What it does |
+| Directive | Default | What it does |
 |---|---|---|
-| `root` | required | the directory served, relative to `blastit.toml` |
-| `index` | `index.html` | the file a directory or the fallback answers with |
-| `spa` | `false` | a path that is no file answers `index` instead of the app |
+| `root` | required | the directory served, relative to the `Blastfile` |
+| `index` | `index.html` | the file a directory answers with |
+| `fallback` | none | the file a path that is no file answers with, instead of a `404` |
 | `immutable` | none | globs matched whole against the answering path; `*` stops at `/` |
 
 Only a match gets the year-long cache, because its name changes when its bytes do
@@ -57,7 +54,7 @@ Content-Type: text/javascript
 Cache-Control: public, max-age=31536000, immutable
 ```
 
-A deep URL is no file, so `spa = true` answers with `public/index.html`:
+A deep URL is no file, so `fallback` answers with `public/index.html`:
 
 ```console
 $ curl -i http://127.0.0.1:8080/dashboard/settings
@@ -73,14 +70,13 @@ percent-encoded), NUL, absolute and backslash paths are `400`; any symlink under
 
 ## 3. Database
 
-None: a static route declares no `[route.db]`, so it has no listener and cannot reach a
-database. A site that needs data puts its API on another route, with an executor.
+None: a static file declares no `postgres` store, so no listener exists and nothing can
+reach a database. A site that needs data puts its API on another file, with an executor.
 
 ## 4. Ingress
 
-None to declare: a route that can never reach the app may carry no `[route.ingress]`,
-`prefork`, grant or `groups`, and each is a boot error. The responder answers `GET` and
-`HEAD`; another method is a `405` with `Allow: GET, HEAD`.
+None to declare: a mount answers `GET` and `HEAD`, another method is a `405` with `Allow:
+GET, HEAD`, and a `body`, `prefork`, `use` or grant belongs to a view, not to a mount.
 
 ## 5. Environment and secrets
 
@@ -98,7 +94,7 @@ None: this page owns no schema. If the API beside it has one, its own page cover
 
 ## 8. Learn and check
 
-An all-static manifest has no app to learn from: `check` audits every `root` — exists, a
+An all-static file has no app to learn from: `check` audits every `root` — exists, a
 directory, readable — and exits `0` without a suite, so build first:
 
 ```console

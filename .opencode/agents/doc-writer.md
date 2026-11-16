@@ -53,7 +53,7 @@ When your node requires critic review:
 ### Mode B: Post-Implementation Polish & Runnable Verification
 Once code lands, verify against the real codebase (`explore` / grep `crates/` and `python/`):
 - Never invent a flag, TOML key, or env var that does not exist in code (in Mode B).
-- Execute documented CLI commands and validate every `blastit.toml` snippet so zero examples are broken.
+- Execute documented CLI commands and validate every `Blastfile` snippet so zero examples are broken.
 
 ## Writing rules (non-negotiable)
 
