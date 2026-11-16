@@ -80,8 +80,9 @@ impl Dir {
         Self { path }
     }
 
-    /// Runs `blastit` here with exactly `vars` in the child's environment.
-    fn run(&self, vars: &[(&str, &str)], arguments: &[&str]) -> Output {
+    /// The `blastit` command for a run here, with exactly `vars` in the child's
+    /// environment and both streams captured.
+    fn command(&self, vars: &[(&str, &str)], arguments: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
         command.args(arguments).env_clear();
         for (name, value) in vars {
@@ -98,7 +99,52 @@ impl Dir {
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
         command.stdin(std::process::Stdio::null());
-        command.output().expect("run the blastit binary")
+        command
+    }
+
+    /// Runs `blastit` here with exactly `vars` in the child's environment.
+    fn run(&self, vars: &[(&str, &str)], arguments: &[&str]) -> Output {
+        self.command(vars, arguments)
+            .output()
+            .expect("run the blastit binary")
+    }
+
+    /// Runs `blastit`, failing if it has not exited within `limit`.
+    ///
+    /// A regression on a manifest that is not a regular file is an open that
+    /// never returns, so the test must bound the wait instead of hanging the
+    /// suite: on the deadline the child is killed and the failure names what it
+    /// had written.
+    fn run_bounded(
+        &self,
+        vars: &[(&str, &str)],
+        arguments: &[&str],
+        limit: std::time::Duration,
+    ) -> Output {
+        let mut child = self
+            .command(vars, arguments)
+            .spawn()
+            .expect("spawn the blastit binary");
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            match child.try_wait().expect("poll the blastit binary") {
+                Some(_) => break,
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().expect("reap the blastit binary");
+                    panic!(
+                        "`blastit {}` did not exit within {limit:?}: it blocked on the manifest; \
+                         stderr so far: {}",
+                        arguments.join(" "),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        child
+            .wait_with_output()
+            .expect("collect the blastit output")
     }
 }
 
@@ -288,6 +334,104 @@ fn a_body_that_is_not_a_blastfile_is_an_ordinary_syntax_error() {
         FOREIGN,
         "a file that does not parse is never rewritten"
     );
+}
+
+/// How long an entry point that must not block gets before the test fails it.
+const BOUNDED: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// An operator's `BLASTIT_MANIFEST` holding a newline prints **one** line.
+///
+/// The path is the operator's own string, so a control byte in it must be
+/// escaped rather than written out: every manifest-path message goes through
+/// `error::clipped` (§18, §15.1). A path that printed its newline would turn one
+/// sentence into two, and the second would read as a second, unrelated error.
+#[test]
+fn a_manifest_path_holding_a_newline_prints_one_escaped_line() {
+    let dir = Dir::new("escaped-path");
+    let named = "./a\nb";
+
+    // `check`: exit `2`, nothing on stdout, one line on stderr, the newline
+    // written as `\n`, and the path still named.
+    for arguments in [&["check"][..], &["check", "--json"][..]] {
+        let output = dir.run(&[("BLASTIT_MANIFEST", named)], arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}: {output:?}");
+        let stderr = stderr_of(&output);
+        assert_eq!(stderr.lines().count(), 1, "{arguments:?}: {stderr:?}");
+        assert!(
+            stderr.contains("./a\\nb: no such file or directory"),
+            "the path is escaped, not printed: {stderr:?}"
+        );
+    }
+
+    // `dev`: the same sentence on fd 2, exit `1`, one line.
+    let dev = dir.run(
+        &[
+            ("BLASTIT_MANIFEST", named),
+            ("BLASTIT_MEM_HIGH_WATERMARK", "100"),
+        ],
+        &["dev"],
+    );
+    assert_eq!(dev.status.code(), Some(1), "{dev:?}");
+    assert!(dev.stdout.is_empty(), "{dev:?}");
+    let stderr = stderr_of(&dev);
+    assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
+    assert!(
+        stderr.contains("./a\\nb: no such file or directory"),
+        "{stderr:?}"
+    );
+
+    // `fmt`: the same one sentence, exit `2`.
+    let fmt = dir.run(&[("BLASTIT_MANIFEST", named)], &["fmt"]);
+    assert_eq!(fmt.status.code(), Some(2), "{fmt:?}");
+    let stderr = stderr_of(&fmt);
+    assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
+    assert!(
+        stderr.contains("./a\\nb: no such file or directory"),
+        "{stderr:?}"
+    );
+}
+
+/// A FIFO at `./Blastfile` is refused from its metadata, never opened.
+///
+/// `fs::read_to_string` on a FIFO with no writer blocks for ever, so a
+/// regression here is a command that never returns — the whole reason the one
+/// reader is `blastfile::read`, which `stat`s first. Both entry points must
+/// answer promptly with their own exit code, and one line naming the file.
+#[test]
+fn a_fifo_at_the_manifest_path_cannot_block_dev_or_check() {
+    let dir = Dir::new("fifo-manifest");
+    let fifo = dir.path.join("Blastfile");
+    let status = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo runs");
+    assert!(status.success(), "mkfifo failed: {status}");
+
+    let check = dir.run_bounded(&[], &["check"], BOUNDED);
+    assert_eq!(check.status.code(), Some(2), "{check:?}");
+    assert!(check.stdout.is_empty(), "{check:?}");
+    let stderr = stderr_of(&check);
+    assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
+    assert!(
+        stderr.contains("Blastfile: ") && stderr.contains("not a regular file"),
+        "the refusal names the file and the reason: {stderr:?}"
+    );
+
+    let dev = dir.run_bounded(&[("BLASTIT_MEM_HIGH_WATERMARK", "100")], &["dev"], BOUNDED);
+    assert_eq!(dev.status.code(), Some(1), "{dev:?}");
+    assert!(dev.stdout.is_empty(), "{dev:?}");
+    let stderr = stderr_of(&dev);
+    assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
+    assert!(
+        stderr.contains("Blastfile: ") && stderr.contains("not a regular file"),
+        "the refusal names the file and the reason: {stderr:?}"
+    );
+
+    // `fmt` reads through the same reader and answers the same way.
+    let fmt = dir.run_bounded(&[], &["fmt"], BOUNDED);
+    assert_eq!(fmt.status.code(), Some(2), "{fmt:?}");
+    assert!(stderr_of(&fmt).contains("not a regular file"), "{fmt:?}");
 }
 
 /// The ordinary syntax error, and nothing beside it: the first token, its

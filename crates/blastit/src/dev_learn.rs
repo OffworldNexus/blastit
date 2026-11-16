@@ -438,10 +438,16 @@ impl LearnRun {
             return 0;
         }
 
-        let source = match std::fs::read_to_string(manifest) {
+        // The boot read the file, but `--learn` runs for as long as the suite
+        // does and the path can have been swapped since: `config::read_manifest`
+        // is `blastfile::read`, which refuses a FIFO or a device from its
+        // metadata before opening it, so an observation can never block the
+        // write path. Its sentence escapes the path, so a newline-bearing
+        // `BLASTIT_MANIFEST` still prints one line.
+        let source = match crate::config::read_manifest(manifest) {
             Ok(source) => source,
             Err(err) => {
-                eprintln!("learn: {}: {err}", manifest.display());
+                eprintln!("learn: {}", err.sentence(manifest));
                 return 1;
             }
         };
@@ -465,7 +471,7 @@ impl LearnRun {
         if edited != source
             && let Err(err) = write_atomic(manifest, &edited)
         {
-            eprintln!("learn: {}: {err}", manifest.display());
+            eprintln!("learn: {}: {err}", crate::config::display_path(manifest));
             return 1;
         }
 
@@ -491,7 +497,7 @@ impl LearnRun {
         let mut used = names.clone();
         for (method, path) in &self.unrouted {
             let (name, pattern) = name_and_pattern(path);
-            if !pattern_is_writable(path) {
+            if !crate::audit_v1::pattern_is_writable(path) {
                 continue;
             }
             let mut candidate = name.clone();
@@ -590,10 +596,9 @@ impl LearnRun {
 /// It goes to stdout in `pretty` and to stderr under `BLASTIT_LOG_FORMAT=json`,
 /// where stdout is the event stream alone (`§1.1`).
 fn print_summary(manifest: &Path, pretty: bool, routes: usize, queries: usize) {
-    let path = std::path::absolute(manifest)
-        .unwrap_or_else(|_| manifest.to_path_buf())
-        .display()
-        .to_string();
+    let path = crate::config::display_path(
+        &std::path::absolute(manifest).unwrap_or_else(|_| manifest.to_path_buf()),
+    );
     let summary = format!("learn: {routes} routes, {queries} queries added → {path}");
     if pretty {
         println!("{summary}");
@@ -645,20 +650,6 @@ fn segment_pattern(segment: &str) -> String {
         return "{id:uuid}".to_string();
     }
     segment.to_string()
-}
-
-/// Whether a requested path can be written as a quoted `Blastfile` pattern at
-/// all.
-///
-/// The pattern writer substitutes `{id:int}`/`{id:uuid}` for a numeric or UUID
-/// segment and copies the rest verbatim, so a path that itself carries `{` or
-/// `}`, a `"` or a `\` — or a control byte — would produce a pattern the grammar
-/// reads as a placeholder or that ends the string. Such a path is not proposed:
-/// one unroutable request must not make the writer refuse the whole document.
-fn pattern_is_writable(path: &str) -> bool {
-    !path
-        .chars()
-        .any(|character| matches!(character, '{' | '}' | '"' | '\\') || character.is_control())
 }
 
 /// Whether `segment` is shaped like a UUID.
@@ -1090,6 +1081,62 @@ view app regex '.*' {
             "a parse refusal writes nothing"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `dev --learn` reads the manifest again when it writes, and the path can
+    /// have been swapped for a FIFO since the boot read it: the one reader
+    /// refuses a non-regular file from its metadata, so the write path exits `1`
+    /// promptly instead of blocking for ever on `open`.
+    ///
+    /// The bound is the assertion: `fs::read_to_string` on a FIFO with no writer
+    /// never returns, so this test would hang instead of failing without the fix.
+    #[test]
+    fn a_manifest_swapped_for_a_fifo_cannot_block_the_learn_write() {
+        let dir =
+            std::env::temp_dir().join(format!("blastit-mb2142-learn-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a fresh fixture directory");
+        let manifest = dir.join("Blastfile");
+        std::fs::write(
+            &manifest,
+            "postgres $DATABASE_URL\n\nview home GET \"/\" {}\n",
+        )
+        .expect("write the fixture");
+
+        let mut run = LearnRun::new();
+        let obs = serde_json::json!({
+            "target": {"scope": "routed", "route": "home"},
+            "proxy": "db",
+            "kind": "query",
+            "sql": "SELECT 1",
+            "is_tx": false,
+            "allowed": false,
+            "verdict": {"kind": "query", "normalized": "SELECT 1"}
+        });
+        run.push_bytes(format!("{obs}\n").as_bytes());
+
+        // The swap: a FIFO where the file was, so any reader that opens it
+        // without a writer blocks.
+        std::fs::remove_file(&manifest).expect("remove the fixture");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&manifest)
+            .status()
+            .expect("mkfifo runs");
+        assert!(status.success(), "mkfifo failed: {status}");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = manifest.clone();
+        std::thread::spawn(move || {
+            let code = run.finish(&path, 20_000, false);
+            let _ = sender.send(code);
+        });
+        let code = receiver
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("`learn` refused the FIFO instead of blocking on it");
+        assert_eq!(code, 1, "an unreadable manifest is an exit-1 learn");
+
+        let _ = std::fs::remove_file(&manifest);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

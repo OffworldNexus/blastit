@@ -553,7 +553,7 @@ pub enum ConfigError {
     ///
     /// The path is the discovered one and the reason comes from the parser; no
     /// value from the environment is ever carried.
-    #[error("manifest {}: {reason}", path.display())]
+    #[error("manifest {}: {reason}", display_path(path))]
     Manifest {
         /// The manifest path that was read.
         path: PathBuf,
@@ -2413,8 +2413,75 @@ pub(crate) fn missing_manifest(path: &Path) -> String {
     format!(
         "{}: no such file or directory (put a Blastfile in the working directory, or set \
          BLASTIT_MANIFEST)",
-        path.display()
+        display_path(path)
     )
+}
+
+/// The manifest path as one message can carry it (§18, §15.1).
+///
+/// `BLASTIT_MANIFEST` is the operator's own string, and a path holding a newline
+/// or a control byte would otherwise print two lines out of a one-line sentence.
+/// [`blastit_manifest::clipped`] escapes the control bytes and cuts the value at
+/// 120 `char`s; every manifest-path message goes through this one helper, so the
+/// rule has one home rather than a folded copy per entry point.
+pub(crate) fn display_path(path: &Path) -> String {
+    blastit_manifest::clipped(&path.display().to_string())
+}
+
+/// Why a discovered `Blastfile` could not be read (§15.1).
+///
+/// The two answers are kept apart because every entry point renders them
+/// differently: absence is §15.1's one sentence, and any other refusal keeps
+/// `blastfile::read`'s own message behind the path. `blastfile::read` is the one
+/// reader, so a FIFO, a device or a file over the 16 MiB cap is refused from its
+/// metadata before anything is opened — no entry point can block on it.
+pub(crate) enum ManifestReadError {
+    /// The path is not there.
+    Missing,
+    /// [`blastit_manifest::blastfile::read`] refused it.
+    Refused(blastit_manifest::ManifestErrors),
+}
+
+impl ManifestReadError {
+    /// The one sentence this failure prints, with the path escaped.
+    pub(crate) fn sentence(&self, path: &Path) -> String {
+        match self {
+            Self::Missing => missing_manifest(path),
+            Self::Refused(errors) => format!("{}: {}", display_path(path), errors_line(errors)),
+        }
+    }
+}
+
+/// The reader's refusals on one line, `; ` between them.
+///
+/// [`blastit_manifest::ManifestErrors`]' own `Display` is a header and one
+/// indented line per problem — right for a boot that reports a whole file, wrong
+/// for the one sentence a missing or unreadable *path* produces (§15.1). A read
+/// refusal has no position to line up, so joining is lossless.
+fn errors_line(errors: &blastit_manifest::ManifestErrors) -> String {
+    errors
+        .errors()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Reads the discovered manifest through the one reader (`blastfile::read`).
+///
+/// A missing file is [`ManifestReadError::Missing`]; every other failure is the
+/// reader's refusal, rendered as `<path>: <reason>` by
+/// [`ManifestReadError::sentence`]. The `stat` is only consulted on the error
+/// path, to tell the two apart without parsing the operating system's sentence.
+pub(crate) fn read_manifest(path: &Path) -> Result<String, ManifestReadError> {
+    blastit_manifest::blastfile::read(path).map_err(|errors| {
+        if std::fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            ManifestReadError::Missing
+        } else {
+            ManifestReadError::Refused(errors)
+        }
+    })
 }
 
 /// The directory the manifest lives in, absolute: what a `static` mount's `root`
@@ -2439,15 +2506,15 @@ fn manifest_dir(path: &Path) -> PathBuf {
 /// an error, because silently booting with a different callable is worse than
 /// naming the parse failure.
 fn manifest_wiring(path: &Path) -> Result<(Option<String>, Vec<String>), ConfigError> {
-    let source = match std::fs::read_to_string(path) {
+    let source = match read_manifest(path) {
         Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(ManifestReadError::Missing) => {
             return Ok((None, Vec::new()));
         }
-        Err(error) => {
+        Err(ManifestReadError::Refused(errors)) => {
             return Err(ConfigError::Manifest {
                 path: path.to_path_buf(),
-                reason: error.to_string(),
+                reason: errors_line(&errors),
             });
         }
     };

@@ -252,13 +252,9 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         );
     }
 
-    let source = match std::fs::read_to_string(&config.manifest) {
+    let source = match crate::config::read_manifest(&config.manifest) {
         Ok(source) => source,
-        Err(err) => fail(
-            &emitter,
-            dev.as_ref(),
-            &format!("{}: {err}", config.manifest.display()),
-        ),
+        Err(error) => fail(&emitter, dev.as_ref(), &error.sentence(&config.manifest)),
     };
     let (manifest, _warnings) = match Manifest::parse_blastfile(&source, config.uid_base) {
         Ok(parsed) => parsed,

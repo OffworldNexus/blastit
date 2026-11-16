@@ -133,8 +133,13 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     config.validate().map_err(|error| error.to_string())?;
 
     let source = read_manifest(&config.manifest)?;
-    let (manifest, _warnings) = Manifest::parse_blastfile(&source, config.uid_base)
-        .map_err(|errors| format!("{}: {errors}", config.manifest.display()))?;
+    let (manifest, _warnings) =
+        Manifest::parse_blastfile(&source, config.uid_base).map_err(|errors| {
+            format!(
+                "{}: {errors}",
+                crate::config::display_path(&config.manifest)
+            )
+        })?;
     // The routing table is built here, not only inside the engine: the same
     // table resolves each observed request to its route (`resolve_targets`), so
     // a pattern that cannot compile fails before pytest starts.
@@ -159,7 +164,12 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     }
     manifest
         .check_static_roots(&config.manifest_dir)
-        .map_err(|errors| format!("{}: {errors}", config.manifest.display()))?;
+        .map_err(|errors| {
+            format!(
+                "{}: {errors}",
+                crate::config::display_path(&config.manifest)
+            )
+        })?;
     if let Some(message) = static_root_permission(
         &manifest,
         &config.manifest_dir,
@@ -173,7 +183,9 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     // the same document a run with an app prints, with the counts at zero.
     if is_static_only(&manifest) {
         if options.learn {
-            return Err("nothing to learn: every route is static".to_string());
+            return Err(
+                "nothing to learn: the file answers every request from static mounts".to_string(),
+            );
         }
         // `--json` prints exactly one document; the human form prints nothing
         // at all, because every root was audited and nothing ran.
@@ -285,8 +297,9 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     // `R14`: a declared static root the suite never requested is a line on
     // stderr — never a finding, never `ok`, never the exit code. It is the
     // scheduler that answers those files, so the observations cannot see them.
-    for (route, root) in audit_v1::unrequested_static_roots(&manifest, &table, &observations) {
-        eprintln!("  route \"{route}\": static root \"{root}\" was never requested");
+    let mounts = blastit_manifest::MountTable::new(&manifest);
+    for (prefix, root) in audit_v1::unrequested_static_roots(&manifest, &mounts, &observations) {
+        eprintln!("{}", audit_v1::unrequested_static_root_line(&prefix, &root));
     }
     emit_report(&report, options.json)?;
     Ok(if report.ok { CLEAN } else { FINDINGS })
@@ -295,17 +308,13 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
 /// Reads the discovered manifest (design §15.1), naming the fix when absent.
 ///
 /// Discovery is [`crate::config::manifest_path`]'s — the same function `dev`,
-/// the boot and `fmt` call — so `check` can never read a different file. The
-/// missing-file sentence is §15.1's one sentence, produced exactly once in
-/// [`crate::config::missing_manifest`].
+/// the boot and `fmt` call — so `check` can never read a different file, and
+/// the read is [`blastit_manifest::blastfile::read`]'s, so a FIFO cannot block
+/// it. The missing-file sentence is §15.1's one sentence, produced exactly once
+/// in [`crate::config::missing_manifest`]; every other refusal keeps the
+/// reader's `path: reason` shape with the path escaped.
 fn read_manifest(path: &Path) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            crate::config::missing_manifest(path)
-        } else {
-            format!("{}: {error}", path.display())
-        }
-    })
+    crate::config::read_manifest(path).map_err(|error| error.sentence(path))
 }
 
 /// The platform environment the manifest's inputs come from.

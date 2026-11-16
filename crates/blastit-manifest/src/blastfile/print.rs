@@ -48,8 +48,18 @@ const INDENT: &str = "    ";
 /// text would exceed `MAX_SOURCE_BYTES`: a file that formatting would grow past
 /// the reader's own cap is refused rather than written (R25).
 pub fn fmt(text: &str) -> Result<String, ManifestErrors> {
+    format_with(text, write)
+}
+
+/// [`fmt`], with the layout step injected so a test can hand the postcondition a
+/// printer that wrote the wrong bytes.
+///
+/// The production caller is [`fmt`] with [`write`]; the only other caller is the
+/// module's own regression test, which proves that deleting the re-parse lets a
+/// printer regression through. Nothing outside this module can reach it.
+fn format_with(text: &str, layout: impl Fn(&Cst) -> String) -> Result<String, ManifestErrors> {
     let cst = parse(text)?;
-    let formatted = write(&cst);
+    let formatted = layout(&cst);
     if formatted.len() > MAX_SOURCE_BYTES {
         return Err(ManifestError::TooLarge {
             bytes: formatted.len() as u64,
@@ -522,28 +532,45 @@ mod tests {
     use super::super::MAX_SOURCE_BYTES;
     use super::super::syntax::{Cst, Element, NodeId, NodeKind};
     use super::super::tokens::TriviaKind;
-    use super::{fmt, parse};
+    use super::{fmt, format_with, parse};
 
     /// Formats a document that must parse.
     fn formatted(text: &str) -> String {
         fmt(text).expect("the document parses")
     }
 
-    /// R25: canonical text the parser cannot read back is a refusal, not a
-    /// file — the whole of a printer regression's fate.
+    /// R25: a document `fmt` cannot return a re-parseable rendering of is `Err`
+    /// rather than a string — the whole of a printer regression's fate.
     ///
-    /// The predicate is what [`fmt`] runs on its own output, so a printer that
-    /// wrote any unreadable byte makes `fmt` fail instead of returning (and
-    /// `blastit fmt` writing) text the one reader refuses.
+    /// Both halves go through [`fmt`] itself. The first half formats **every**
+    /// committed fixture: each must come back, and (`fmt` re-parses its own
+    /// output) each result must be text the one reader accepts and a fixed
+    /// point. The second half injects a layout that writes an unknown codec —
+    /// `body xml` — so it can only pass if `fmt` really re-parses what it is
+    /// about to hand back: delete that `parse(&formatted)` and the regression is
+    /// written, not refused.
     #[test]
     fn a_printer_regression_is_refused_rather_than_written() {
-        let unreadable = "view v \"/x\" {\n    body xml\n}\n";
+        for source in fixtures() {
+            let formatted = fmt(&source).expect("a committed fixture formats");
+            parse(&formatted).expect("fmt only returns text the one parser reads");
+            assert_eq!(
+                formatted,
+                fmt(&formatted).expect("the canonical form is a fixed point"),
+                "{source:?}"
+            );
+        }
+
+        // A printer that wrote a codec the grammar does not have: `fmt` would
+        // return it if it did not read its own output back.
+        let broken = format_with("view v \"/x\" {\n    body json\n}\n", |_| {
+            "view v \"/x\" {\n    body xml\n}\n".to_string()
+        });
+        let error = broken.expect_err("a printer regression is refused, not written");
         assert!(
-            parse(unreadable).is_err(),
-            "a document with an unknown codec must not pass the re-parse"
+            error.to_string().contains("body xml") || error.to_string().contains("codec"),
+            "the refusal names the byte the printer broke: {error}"
         );
-        let written = "view v \"/x\" {\n    body json\n}\n";
-        assert!(parse(written).is_ok(), "{written}");
     }
 
     /// P2: the canonical layout is a fixed point, and a canonical file is

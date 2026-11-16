@@ -2,7 +2,7 @@
 id: MB.21.4.2
 title: "Prove runtime parity on Blastfile: the capability-map parity suite, the mount/entrypoint sentence re-spellings, and 4.1's five MINORs"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.6]
@@ -20,11 +20,11 @@ paths:
   - "crates/blastit-manifest/src/model.rs"
   - "crates/blastit-manifest/src/error.rs"
   - "crates/blastit-manifest/tests/**"
-attempts: 0
+attempts: 2
 max_attempts: 5
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T10:38"
+updated: "2026-11-16T11:43"
 ---
 
 # Goal
@@ -35,14 +35,15 @@ whose subject is now the file's — a mount or the one `entrypoint`, never a rou
 MINOR findings `MB.21.4.1`'s review handed to this leaf.
 
 `MB.21.4.1` already landed the runtime half and this leaf re-does none of it: the scheduler serves `static`
-mounts (`MountTable` longest prefix, `MountHead` refusals before views, `Missing` → view → declared
-`fallback` on `GET`/`HEAD` → `404`, `405` after every view, `RouteInfo::{static_policy,static_forward}`
-deleted), `Manifest::static_roots`/`check_static_roots` walk mounts with `Location::Mount`,
-`stage0::mount_root_refusal` is gone, §9.5's `is_all_static`/`can_boot_without_app` have the mount arms,
-`php_view` binds every view from the file-level `Manifest::php()`, `StaticOutcome::SpaLost` is
-`FallbackMissing` with §9.4's `url_path` prefix join, the per-mount `immutable` caps and the
-`index`/`fallback` dotfile refusal are in `validate`, and every fixture `make check` reaches is a
-`Blastfile`. **This leaf translates no fixture and deletes no accessor.**
+mounts (`MountTable` longest prefix, `MountHead` refusals before views, `Missing` → view → the declared
+`static` mount's last-resort file on `GET`/`HEAD` → `404`, `405` after every view); `RouteInfo` no longer
+carries `static_policy` or `static_forward`; `Manifest::static_roots`/`check_static_roots` walk mounts
+with `Location::Mount`; `stage0::mount_root_refusal` is gone; §9.5's
+`is_all_static`/`can_boot_without_app` have the mount arms; `php_view` binds every view from the
+file-level `Manifest::php()`; `StaticOutcome::SpaLost` is `FallbackMissing` with §9.4's `url_path`
+prefix join; the per-mount `immutable` caps and the `index`/`fallback` dotfile refusal are in
+`validate`; and every fixture `make check` reaches is a `Blastfile`. **This leaf translates no
+fixture and deletes no accessor.**
 
 `Route::{static_policy,with_static,php,with_php}` stay: `crates/blastit-manifest/src/parse.rs` (deleted in
 `MB.21.4.5`) and `validate.rs`'s route arms are their only remaining readers, exactly as

@@ -294,8 +294,8 @@ fn copy_recipe(install: Install) -> String {
 /// own configuration supplies the WSGI callable.
 pub(crate) fn static_app_refusal(config: &Config, manifest: &Manifest) -> Option<String> {
     (is_static_only(manifest) && config.app.is_some()).then(|| {
-        "BLASTIT_APP: every route is static, so no route can reach an app: \
-         unset BLASTIT_APP, or declare a route without [route.static]"
+        "BLASTIT_APP: the file serves static mounts and no views, so no app can run: \
+         unset BLASTIT_APP, or declare a view"
             .to_string()
     })
 }
@@ -303,29 +303,22 @@ pub(crate) fn static_app_refusal(config: &Config, manifest: &Manifest) -> Option
 /// True when the file declares nothing but static mounts: no callable, no front
 /// controller and no view (`static "/" { root "public" }` is the whole file).
 ///
-/// The model's [`Manifest::is_all_static`] is the per-route spelling of the same
-/// question, which a `Blastfile` cannot answer — its mounts are the file's, not
-/// a view's. §9.5/§9.6 move the predicate into the model over mounts; until
-/// then this is the one place the boot asks it.
+/// This is [`Manifest::is_all_static`] and nothing else: §9.5 answers the
+/// question once, over mounts and views, and the boot asks the model's answer
+/// rather than keeping a second reading that could drift from it.
 pub(crate) fn is_static_only(manifest: &Manifest) -> bool {
-    manifest.app().is_none()
-        && manifest.php().is_none()
-        && manifest.routes().is_empty()
-        && !manifest.mounts().is_empty()
+    manifest.is_all_static()
 }
 
 /// True when every request is answered by one of the file's own executors: the
 /// one `entrypoint php` front controller, or a static mount.
 ///
-/// The model's [`Manifest::can_boot_without_app`] is the per-route spelling,
-/// which a `Blastfile` cannot answer (it has one file-level entrypoint and
-/// file-level mounts). §9.5/§9.6 move the predicate into the model over mounts;
-/// until then this is the one place the boot asks it. A view needs a callable
-/// unless a front controller answers it, which is why the PHP half needs at
-/// least one view: an entrypoint no view reaches serves nothing.
+/// This is [`Manifest::can_boot_without_app`] and nothing else (§9.5, §12.2):
+/// an `entrypoint php` no view reaches is the `EntrypointNotReached` warning,
+/// never a missing `BLASTIT_APP`. A WSGI view with no mount and no front
+/// controller is the case that still needs the callable.
 pub(crate) fn runs_own_executors(manifest: &Manifest) -> bool {
-    (manifest.php().is_some() && !manifest.routes().is_empty())
-        || (manifest.routes().is_empty() && !manifest.mounts().is_empty())
+    manifest.can_boot_without_app()
 }
 
 /// `R13`: the app rule a **boot** refuses with (`blastit`, `blastit dev`).
@@ -334,7 +327,7 @@ pub(crate) fn runs_own_executors(manifest: &Manifest) -> bool {
 /// ([`static_app_refusal`]), and a manifest whose views do **not** all run on an
 /// executor of the file's own needs a callable to forward to. The second half
 /// asks [`runs_own_executors`] — "every request is answered by the front
-/// controller or a mount" — rather than "every route is static": an
+/// controller or a mount" — rather than "every view needs an app": an
 /// `entrypoint php` file is its own executor, so the *rule* demands no `app` for
 /// a PHP-only manifest (`ADR-0010` §2); what such a boot needs instead is a
 /// usable NTS `libphp`, and [`php_boot_gate`] is what refuses a host that has
@@ -465,9 +458,10 @@ pub(crate) fn no_python_support(
         .first()
         .filter(|_| manifest.php().is_none() && manifest.mounts().is_empty())?;
     Some(format!(
-        "route {:?}: this build has no Python support (built without feature \"python\"), \
-         and the route declares no [route.static] block, so it needs a runtime this build \
-         does not carry; {INSTALL}, or add a [route.static] block",
+        "view {:?}: this build has no Python support (built without feature \"python\"), \
+         and the view is reached by no `static` mount and no `entrypoint php`, so it needs a \
+         runtime this build does not carry; {INSTALL}, or declare a `static` mount or an \
+         `entrypoint php`",
         route.name()
     ))
 }
@@ -2577,19 +2571,16 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // send the operator looking for an environment variable instead of a
     // project (`docs/troubleshooting.md`). The sentence is §15.1's and is the
     // same one `dev`, `check` and `fmt` print.
-    let source = match std::fs::read_to_string(&config.manifest) {
+    let source = match crate::config::read_manifest(&config.manifest) {
         Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fail(&emitter, &crate::config::missing_manifest(&config.manifest));
-        }
-        Err(error) => fail(&emitter, &format!("{}: {error}", config.manifest.display())),
+        Err(error) => fail(&emitter, &error.sentence(&config.manifest)),
     };
     let (manifest, warnings) = match Manifest::parse_blastfile(&source, config.uid_base) {
         Ok(parsed) => parsed,
         Err(errors) => fail(&emitter, &errors.to_string()),
     };
-    // `R13`: `BLASTIT_APP` is required unless every route is static. The
-    // manifest is parsed first, because "is every route static" is a property of
+    // `R13`: `BLASTIT_APP` is required unless the file answers every request
+    // itself (§9.5). The manifest is parsed first, because that is a property of
     // the file, not of the environment — and a missing `./Blastfile` is still
     // named before the setting (`MB.1.6`).
     // `ADR-0009` §5: a build with no Python support (`ADR-0010` §4's standalone
@@ -2873,20 +2864,17 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
     // The same order as `run`: the missing file first, the missing `app`
     // second (`docs/troubleshooting.md`), with §15.1's one sentence on
     // descriptor 2 — `dev` writes no startup error to stdout.
-    let source = match std::fs::read_to_string(&config.manifest) {
+    let source = match crate::config::read_manifest(&config.manifest) {
         Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            dev_fail(&crate::config::missing_manifest(&config.manifest));
-        }
-        Err(error) => dev_fail(&format!("{}: {error}", config.manifest.display())),
+        Err(error) => dev_fail(&error.sentence(&config.manifest)),
     };
     let (manifest, warnings) = match Manifest::parse_blastfile(&source, config.uid_base) {
         Ok(parsed) => parsed,
         Err(errors) => dev_fail(&format!("{errors}")),
     };
-    // `R13`: a site whose every route is static needs no `app`; anything else
-    // still names the setting as before (`MB.1.6`), and a `BLASTIT_APP` that
-    // could never run is refused rather than ignored.
+    // `R13`: a site whose mounts answer every request needs no `app`; anything
+    // else still names the setting as before (`MB.1.6`), and a `BLASTIT_APP`
+    // that could never run is refused rather than ignored.
     //
     // Before it: `ADR-0009` §5's capability gate, so a python-less build says
     // "install the Python package: uv add blastit" (or "add a [route.static]
@@ -4301,14 +4289,15 @@ view app regex '.*' {}
     }
 
     #[test]
-    fn a_route_with_no_static_block_is_refused_by_name() {
+    fn a_view_no_mount_or_entrypoint_reaches_is_refused_by_name() {
         let message = no_python_support(&Config::default(), &manifest(WITH_A_VIEW), false).unwrap();
-        assert!(message.contains("route \"web\""), "{message}");
+        assert!(message.contains("view \"web\""), "{message}");
         assert!(
             message.contains("install the Python package: uv add blastit"),
             "{message}"
         );
-        assert!(message.contains("[route.static]"), "{message}");
+        assert!(message.contains("`static` mount"), "{message}");
+        assert!(message.contains("`entrypoint php`"), "{message}");
     }
 
     #[test]
@@ -4338,7 +4327,7 @@ view app regex '.*' {}
         assert!(
             static_app_refusal(&config, &manifest(STATIC_ONLY))
                 .unwrap()
-                .starts_with("BLASTIT_APP: every route is static"),
+                .starts_with("BLASTIT_APP: the file serves static mounts and no views"),
         );
     }
 
@@ -4362,7 +4351,7 @@ view app regex '.*' {}
         );
 
         let message = no_python_support(&Config::default(), &manifest(WITH_A_VIEW), false).unwrap();
-        assert!(message.contains("route \"web\""), "{message}");
+        assert!(message.contains("view \"web\""), "{message}");
         assert!(
             message.contains("install the Python package: uv add blastit"),
             "a WSGI view keeps the sentence that names the artifact: {message}"
@@ -6166,11 +6155,11 @@ static \"/\" {
 /// `R13` after `ADR-0010` §2: an `entrypoint php` file is its own executor, so the
 /// app rule must never demand the WSGI callable for it (`MB.3.5.4`).
 ///
-/// The old predicate was "every route is static", which read "not all-static"
-/// as "needs an app" and refused a PHP-only manifest with
-/// `BLASTIT_APP: the WSGI callable (…) is required` — advice that cannot make a
-/// PHP route serve. What the rule actually asks is whether every route runs its
-/// own executor.
+/// The old predicate read "not all-static" as "needs an app" and refused a
+/// PHP-only manifest with `BLASTIT_APP: the WSGI callable (…) is required` —
+/// advice that cannot make a view serve. What the rule actually asks is
+/// [`Manifest::can_boot_without_app`]: does every request reach an executor the
+/// file owns?
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod app_rule_executors {
@@ -6255,8 +6244,52 @@ view web regex '.*' {}
         assert_eq!(app_rule(&Config::default(), &manifest(static_only)), Ok(()));
         let message = app_rule(&with_app, &manifest(static_only)).unwrap_err();
         assert!(
-            message.starts_with("BLASTIT_APP: every route is static"),
+            message.starts_with("BLASTIT_APP: the file serves static mounts and no views"),
             "{message}"
+        );
+    }
+
+    /// §9.5/§12.2: an `entrypoint php` no view reaches needs **no**
+    /// `BLASTIT_APP`. This is the arm the boot's own predicate used to disagree
+    /// on: it demanded at least one view for the PHP half, so a file that is a
+    /// mount and a front controller was refused with "the WSGI callable is
+    /// required" — advice that cannot make it serve. The boot now asks the
+    /// model's one answer.
+    ///
+    /// `EntrypointNotReached` (the reminder for such a file) is `MB.21.3.0`'s
+    /// warning and lives in `validate.rs`; it is not in the model yet
+    /// (`critical_blastfile_entrypoint.rs` records the same gap), so what this
+    /// fixture set pins is the half this leaf owns: no missing app, and not a
+    /// static file.
+    #[test]
+    fn a_php_entrypoint_no_view_reaches_needs_no_app() {
+        // The bare shape is the discriminating one: no view and no mount, so the
+        // boot's old "PHP needs a view" reading demanded the callable while the
+        // model already said this file is its own executor.
+        let source = "entrypoint php \"public/index.php\"\n";
+        let (front_controller, _warnings) = Manifest::parse_blastfile(source, 20_000).unwrap();
+        assert!(
+            front_controller.can_boot_without_app(),
+            "§12.2 answers true"
+        );
+        assert!(
+            !front_controller.is_all_static(),
+            "a front controller is not static"
+        );
+        assert_eq!(app_rule(&Config::default(), &front_controller), Ok(()));
+
+        // The page's shape — a mount beside the front controller — is bootable
+        // without an app too.
+        let with_mount = "entrypoint php \"public/index.php\"\n\
+                          static \"/assets\" {\n    root \"public/assets\"\n}\n";
+        assert_eq!(app_rule(&Config::default(), &manifest(with_mount)), Ok(()));
+
+        // The deny side is the same view with no entrypoint and no mount: nothing
+        // answers it, so the callable is required again.
+        let without_entrypoint = "view web regex '.*' {}\n";
+        assert_eq!(
+            app_rule(&Config::default(), &manifest(without_entrypoint)),
+            Err(REQUIRE_APP.to_string())
         );
     }
 }

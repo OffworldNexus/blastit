@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use blastit::audit_v1::{self, CheckObsV1, HttpObsLine};
-use blastit_manifest::{Manifest, RoutingTable};
+use blastit_manifest::{Manifest, MountTable};
 
 /// The one-line marker the fixture's `index.html` carries.
 const MARKER: &str = "blastit-static-fixture";
@@ -332,7 +332,7 @@ fn a_mixed_tree_without_an_app_still_names_blastit_app() {
 }
 
 #[test]
-fn a_missing_static_root_is_named_with_its_route_before_any_output() {
+fn a_missing_mount_root_is_named_with_its_prefix_before_any_output() {
     let fixture = Fixture::new("dev-missing-root");
     fixture.write_manifest(ALL_STATIC);
 
@@ -488,7 +488,7 @@ fn an_all_static_check_refuses_learn() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("nothing to learn: every route is static"),
+        stderr.contains("nothing to learn: the file answers every request from static mounts"),
         "{stderr}"
     );
 }
@@ -631,7 +631,7 @@ fn a_blastit_app_on_an_all_static_manifest_is_refused() {
     assert_eq!(dev.status.code(), Some(1), "{dev:?}");
     assert!(dev.stdout.is_empty(), "{dev:?}");
     let stderr = String::from_utf8_lossy(&dev.stderr);
-    for expected in ["BLASTIT_APP", "every route is static"] {
+    for expected in ["BLASTIT_APP", "the file serves static mounts and no views"] {
         assert!(
             stderr.contains(expected),
             "{expected} missing from: {stderr}"
@@ -651,7 +651,7 @@ fn a_blastit_app_on_an_all_static_manifest_is_refused() {
     assert!(check.stdout.is_empty(), "{check:?}");
     let stderr = String::from_utf8_lossy(&check.stderr);
     assert!(
-        stderr.contains("BLASTIT_APP: every route is static"),
+        stderr.contains("BLASTIT_APP: the file serves static mounts and no views"),
         "{stderr}"
     );
     assert!(!stderr.contains(app), "{stderr}");
@@ -661,19 +661,28 @@ fn a_blastit_app_on_an_all_static_manifest_is_refused() {
 // The completeness warning is a warning (§4.7 last paragraph)
 // ---------------------------------------------------------------------------
 
-/// A manifest with an app, one app route and one static route.
-fn mixed_with_app(static_route: bool) -> Manifest {
-    let static_block = if static_route {
-        "\n[route.static]\nroot = \"public\"\nspa = true\n"
+/// A manifest with an app, one app view, and either a `static` mount or a
+/// second view at `/site/*`.
+///
+/// The two shapes are what makes "a mount is not a route" observable: the first
+/// has a mount the suite never reaches (a stderr hint), the second has a view it
+/// never reaches (an `unexercised_route` finding).
+fn mixed_with_app(static_mount: bool) -> Manifest {
+    let site = if static_mount {
+        "static \"/site\" {\n    root \"public\"\n}\n"
     } else {
         ""
     };
+    let site_view = if static_mount {
+        ""
+    } else {
+        "view site GET \"/site/*\" {}\n"
+    };
     let source = format!(
-        "version = 1\napp = \"demo:application\"\n\n\
-         [[route]]\nname = \"api\"\npath = ['/api/.*']\n\n\
-         [[route]]\nname = \"site\"\npath = ['.*']\n{static_block}"
+        "entrypoint python \"demo:application\"\n\n\
+         view api GET \"/api/*\" {{}}\n\n{site}{site_view}"
     );
-    Manifest::from_toml_str(&source).expect("the fixture manifest parses")
+    Manifest::from_blastfile_str(&source).expect("the fixture manifest parses")
 }
 
 /// One `GET /api/notes`, which only the app route can match.
@@ -693,37 +702,65 @@ fn api_request() -> CheckObsV1 {
 }
 
 #[test]
-fn a_static_root_the_suite_never_requested_is_a_warning_not_a_finding() {
+fn a_static_mount_the_suite_never_requested_is_a_warning_not_a_finding() {
     let manifest = mixed_with_app(true);
     let observations = api_request();
-    let table = RoutingTable::new(&manifest).expect("the table builds");
+    let mounts = MountTable::new(&manifest);
 
     let report = audit_v1::evaluate(&manifest, &observations).expect("the audit runs");
     assert!(
         report.ok,
-        "a static route the suite cannot exercise is not a finding: {report:?}"
+        "a mount the suite cannot exercise is not a finding: {report:?}"
     );
-    assert!(
-        !report.findings.iter().any(|finding| matches!(
-            finding,
-            audit_v1::Finding::UnexercisedRoute { route, .. } if route == "site"
-        )),
-        "{:?}",
-        report.findings
-    );
-    assert_eq!(report.routes.total, 2, "{report:?}");
+    assert_eq!(report.routes.total, 1, "a mount is not a route: {report:?}");
     assert_eq!(report.routes.exercised, 1, "{report:?}");
 
+    // The hint names the mount by its prefix — the thing the developer edits —
+    // and its root, which is what `check` prints on stderr.
     assert_eq!(
-        audit_v1::unrequested_static_roots(&manifest, &table, &observations),
-        [("site".to_string(), "public".to_string())]
+        audit_v1::unrequested_static_roots(&manifest, &mounts, &observations),
+        [("/site".to_string(), "public".to_string())]
+    );
+    // The line `check` prints for it names the mount's prefix, not a route.
+    assert_eq!(
+        audit_v1::unrequested_static_root_line("/site", "public"),
+        "  static \"/site\": root \"public\" was never requested"
     );
 
-    // The negative twin: the same route without `[route.static]` is an
-    // `unexercised_route` finding again, so the skip is about the static
-    // surface and not a blanket exemption.
+    // The other side of the same rule: `GET /api/notes` is below no mount, so
+    // the mount is unrequested; the table answers the prefix on a segment
+    // boundary, so a request below `/site` would mark it requested.
+    let requested = CheckObsV1::new(
+        1,
+        vec![
+            HttpObsLine {
+                method: "GET".to_string(),
+                path: "/api/notes".to_string(),
+                content_type: None,
+                body_len: 0,
+                sample: None,
+            },
+            HttpObsLine {
+                method: "GET".to_string(),
+                path: "/site/app.js".to_string(),
+                content_type: None,
+                body_len: 0,
+                sample: None,
+            },
+        ],
+        Vec::new(),
+    )
+    .expect("v1 observations");
+    assert!(
+        audit_v1::unrequested_static_roots(&manifest, &mounts, &requested).is_empty(),
+        "a request below the prefix is a request the mount answered"
+    );
+
+    // The negative twin: a **view** no request reached is an
+    // `unexercised_route` finding, so the exemption is about mounts and not a
+    // blanket skip.
     let plain = mixed_with_app(false);
-    let plain_table = RoutingTable::new(&plain).expect("the table builds");
+    let plain_mounts = MountTable::new(&plain);
     let plain_report = audit_v1::evaluate(&plain, &observations).expect("the audit runs");
     assert!(
         plain_report.findings.iter().any(|finding| matches!(
@@ -733,5 +770,8 @@ fn a_static_root_the_suite_never_requested_is_a_warning_not_a_finding() {
         "{:?}",
         plain_report.findings
     );
-    assert!(audit_v1::unrequested_static_roots(&plain, &plain_table, &observations).is_empty());
+    assert!(
+        audit_v1::unrequested_static_roots(&plain, &plain_mounts, &observations).is_empty(),
+        "a file with no mount has no mount to report"
+    );
 }

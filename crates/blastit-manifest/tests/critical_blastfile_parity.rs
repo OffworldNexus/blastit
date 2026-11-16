@@ -7,6 +7,18 @@
 //! the design **drops** — the `version` header, `workers`, a per-view `static`
 //! or `php` block, the global `groups` attach — is asserted **absent**, not
 //! merely uncompared.
+//!
+//! It also carries the capability map's four grant rows (§11.1, §13.1), because
+//! `Manifest::effective_grants` is this crate's and the scheduler carries no
+//! grant at all. What a test pins of the runtime half is the per-route
+//! *selection*: `crates/blastit/src/check.rs::tests::the_route_policies_are_the_effective_grants`
+//! (the `RoutePolicySpec` list `blastit check` hands dbproxy from a `Blastfile`)
+//! and `stage0::tests::an_explicit_empty_grant_still_names_the_proxy_for_its_route`
+//! (the per-route socket rule); dbproxy's `critical_learn_and_redaction.rs`
+//! pins that a `RoutePolicySpec` is the allowlist the listener enforces. The
+//! production handoff itself, `crates/blastit/src/stage0.rs::bind_view_sockets`,
+//! is private, needs stage 0's privileges, and has no test — this leaf records
+//! that as a follow-up instead of claiming it.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -15,8 +27,8 @@ use std::collections::BTreeMap;
 
 use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_manifest::{
-    Columns, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route,
-    StaticMount, StaticPolicy, TableGrant, TableGrants,
+    Columns, Grant, Group, Manifest, ManifestWarning, PgGrant, PhpPolicy, Protocol, Proxy,
+    ProxyName, Route, StaticMount, StaticPolicy, TableGrant, TableGrants, UidLayout,
 };
 
 // ---- builders ----------------------------------------------------------
@@ -204,6 +216,26 @@ fn ingress(body: BodyCodec) -> IngressPolicy {
 fn lowered(name: &str) -> Manifest {
     Manifest::from_blastfile_str(&common::fixture(name))
         .unwrap_or_else(|error| panic!("{name} lowers: {error}"))
+}
+
+/// The manifest a source string lowers to, for the grant rows whose subject is
+/// a document rather than a corpus fixture.
+fn lower_source(source: &str) -> Manifest {
+    Manifest::parse_blastfile(source, UidLayout::DEFAULT_BASE)
+        .expect("the Blastfile parses and validates")
+        .0
+}
+
+/// The warnings the same parse produced, in `validate`'s order.
+fn warnings_of(source: &str) -> Vec<ManifestWarning> {
+    Manifest::parse_blastfile(source, UidLayout::DEFAULT_BASE)
+        .expect("the Blastfile parses and validates")
+        .1
+}
+
+/// True when one warning matches `pick`.
+fn has_warning(warnings: &[ManifestWarning], pick: impl Fn(&ManifestWarning) -> bool) -> bool {
+    warnings.iter().any(pick)
 }
 
 /// Asserts the oracle's one comparison, printing both sides on a mismatch.
@@ -477,6 +509,247 @@ fn row_an_unrestricted_grant() {
     );
     assert_equivalent(&actual, &expected);
     assert_dropped_rows(&actual);
+}
+
+// ---- the capability map's grant rows, which are this crate's ------------
+
+/// §11.1: a trait's grants are exactly what `effective_grants` hands the view:
+/// `use` order first, then the inline block, `transactions` OR-ed, queries
+/// deduplicated.
+///
+/// The scheduler cannot assert this row: it carries no grant at all
+/// (`RouteInfo` is the name, the prefork flag, the uid and the ingress policy).
+/// The seam that turns this map into a socket is
+/// `crates/blastit/src/stage0.rs::bind_view_sockets`, and
+/// `crates/blastit-dbproxy/tests/critical_learn_and_redaction.rs` pins what the
+/// listener then refuses.
+#[test]
+fn row_a_trait_grants_what_the_view_receives() {
+    let source = concat!(
+        "postgres $DATABASE_URL\n",
+        "\n",
+        "trait first {\n",
+        "    postgres {\n",
+        "        transactions\n",
+        "        query 'SELECT 1'\n",
+        "    }\n",
+        "}\n",
+        "\n",
+        "trait second {\n",
+        "    postgres {\n",
+        "        query 'SELECT 2'\n",
+        "    }\n",
+        "}\n",
+        "\n",
+        "view catalog GET \"/c\" {\n",
+        "    use second, first\n",
+        "    postgres {\n",
+        "        query 'SELECT 3'\n",
+        "        query 'SELECT 1'\n",
+        "    }\n",
+        "}\n",
+    );
+    let manifest = lower_source(source);
+    let route = manifest.route(0).expect("one view");
+    assert_eq!(route.groups(), ["second", "first"], "written order");
+
+    let grants = manifest.effective_grants(0);
+    let db = grants
+        .values()
+        .next()
+        .and_then(|grant| grant.as_postgresql())
+        .expect("the `db` grant");
+    assert_eq!(
+        db.queries(),
+        ["SELECT 2", "SELECT 1", "SELECT 3"],
+        "`use` order, then inline; the inline duplicate of `SELECT 1` is dropped"
+    );
+    assert!(
+        db.transaction_control(),
+        "the trait's `transactions` is OR-ed"
+    );
+
+    // There is no invisible global attach: a trait nobody `use`s warns instead.
+    let unused = "postgres $DATABASE_URL\ntrait idle {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n\nview v \"/v\" {}\n";
+    assert!(
+        has_warning(&warnings_of(unused), |warning| matches!(
+            warning,
+            ManifestWarning::UnattachedGroup { .. }
+        )),
+        "a trait no view uses is a warning, not a silent global grant"
+    );
+    assert!(
+        lower_source(unused).effective_grants(0).is_empty(),
+        "the unused trait granted the view nothing"
+    );
+}
+
+/// §13.1: `postgres … unrestricted` on the default and a named store: inline
+/// only, each one warns, and a trait cannot carry it.
+#[test]
+fn row_unrestricted_on_the_default_and_a_named_store() {
+    let source = concat!(
+        "postgres $DATABASE_URL\n",
+        "postgres analytics $ANALYTICS_URL\n",
+        "\n",
+        "view a GET \"/a\" {\n",
+        "    postgres unrestricted\n",
+        "}\n",
+        "\n",
+        "view b GET \"/b\" {\n",
+        "    postgres analytics unrestricted\n",
+        "}\n",
+    );
+    let manifest = lower_source(source);
+
+    let a = manifest.effective_grants(0);
+    assert!(
+        a.values()
+            .next()
+            .and_then(|grant| grant.as_postgresql())
+            .is_some_and(PgGrant::is_unrestricted),
+        "the default store is unrestricted"
+    );
+    let b = manifest.effective_grants(1);
+    let analytics = b
+        .iter()
+        .find(|(name, _)| name.as_str() == "analytics")
+        .and_then(|(_, grant)| grant.as_postgresql())
+        .expect("the named store's grant");
+    assert!(analytics.is_unrestricted());
+
+    let warned = warnings_of(source);
+    assert!(
+        has_warning(&warned, |warning| matches!(
+            warning,
+            ManifestWarning::UnrestrictedRoute { route, .. } if route == "a"
+        )),
+        "{warned:?}"
+    );
+    assert!(
+        has_warning(&warned, |warning| matches!(
+            warning,
+            ManifestWarning::UnrestrictedRoute { route, proxy } if route == "b" && proxy.as_str() == "analytics"
+        )),
+        "{warned:?}"
+    );
+
+    // The deny side: `unrestricted` in a trait is refused, because a trait
+    // could attach it to every view by accident.
+    let in_a_trait = "postgres $DATABASE_URL\ntrait t {\n    postgres unrestricted\n}\nview v \"/v\" {\n    use t\n}\n";
+    let error = Manifest::parse_blastfile(in_a_trait, UidLayout::DEFAULT_BASE)
+        .expect_err("a trait cannot carry unrestricted");
+    assert!(
+        error
+            .to_string()
+            .contains("unrestricted is only allowed inline"),
+        "{error}"
+    );
+}
+
+/// §13.1: `select products(id, name)` vs `select products` — the column list
+/// and the whole table, through the same accessor the policy reads.
+#[test]
+fn row_table_and_column_grants() {
+    let source = concat!(
+        "postgres $DATABASE_URL\n",
+        "\n",
+        "view narrow \"/n\" {\n",
+        "    postgres {\n",
+        "        select products(id, name)\n",
+        "        insert orders\n",
+        "        delete archived\n",
+        "    }\n",
+        "}\n",
+        "\n",
+        "view whole \"/w\" {\n",
+        "    postgres {\n",
+        "        select products\n",
+        "    }\n",
+        "}\n",
+    );
+    let manifest = lower_source(source);
+
+    let narrow = manifest.effective_grants(0);
+    let narrow = narrow
+        .values()
+        .next()
+        .and_then(|grant| grant.as_postgresql())
+        .expect("the narrow grant");
+    let products = narrow.tables().table("products").expect("products");
+    let select = products.select.as_ref().expect("a select grant");
+    assert_eq!(
+        select,
+        &columns(&["id", "name"]),
+        "`select products(id, name)` names two columns"
+    );
+    assert!(select.contains("id") && select.contains("name"));
+    assert!(
+        !select.contains("password"),
+        "a column grant does not cover the columns it does not name"
+    );
+    assert!(products.insert.is_none());
+    assert!(
+        narrow
+            .tables()
+            .table("orders")
+            .is_some_and(|orders| orders.insert.is_some()),
+        "`insert orders` names the whole table"
+    );
+    assert!(
+        narrow
+            .tables()
+            .table("archived")
+            .is_some_and(|archived| archived.delete),
+        "`delete archived` is a row grant"
+    );
+
+    let whole = manifest.effective_grants(1);
+    let whole = whole
+        .values()
+        .next()
+        .and_then(|grant| grant.as_postgresql())
+        .expect("the whole-table grant");
+    let select = whole
+        .tables()
+        .table("products")
+        .and_then(|grant| grant.select.as_ref())
+        .expect("a select grant");
+    assert_eq!(select, &Columns::All, "`select products` is every column");
+    assert!(
+        select.contains("password"),
+        "`All` covers a column added later"
+    );
+}
+
+/// §13.1: `query '…'` is stored after `normalize` — `$1` becomes `$?` — and an
+/// inlined literal is refused rather than granted.
+#[test]
+fn row_query_is_stored_normalised() {
+    let source = "postgres $DATABASE_URL\n\nview v \"/v\" {\n    postgres {\n        query 'SELECT 1 FROM products WHERE name = $1'\n    }\n}\n";
+    let manifest = lower_source(source);
+    let grant = manifest
+        .effective_grants(0)
+        .values()
+        .next()
+        .and_then(|grant| grant.as_postgresql())
+        .cloned()
+        .expect("the grant");
+    assert_eq!(
+        grant.queries(),
+        ["SELECT 1 FROM products WHERE name = $?"],
+        "the statement is stored normalised, without its quotes"
+    );
+
+    // Denied: an inlined literal is a value committed to the repository, so the
+    // grant is refused before it can be run.
+    let literal = "postgres $DATABASE_URL\n\nview v \"/v\" {\n    postgres {\n        query \"SELECT 1 FROM products WHERE name = 'bob'\"\n    }\n}\n";
+    let error = Manifest::parse_blastfile(literal, UidLayout::DEFAULT_BASE)
+        .expect_err("an inlined literal is refused");
+    assert!(
+        error.to_string().contains("inlines a quoted literal"),
+        "{error}"
+    );
 }
 
 /// §7.1 row 9, §10.1 and §10.3: the five `body` rows, one per endpoint.

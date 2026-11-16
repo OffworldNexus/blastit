@@ -145,12 +145,16 @@ fn a_wsgi_manifest_is_refused_by_the_capability_gate() {
         stdout, "",
         "a startup error writes nothing on stdout (§1.1)"
     );
-    assert!(stderr.contains("route \"web\""), "{stderr}");
+    assert!(stderr.contains("view \"web\""), "{stderr}");
     assert!(
         stderr.contains("this build has no Python support (built without feature \"python\")"),
         "{stderr}"
     );
     assert!(stderr.contains(INSTALL), "{stderr}");
+    assert!(
+        stderr.contains("`static` mount") && stderr.contains("`entrypoint php`"),
+        "the fix names the file's own executors: {stderr}"
+    );
     assert!(
         !stderr.contains(APP_RULE),
         "the capability gate answered, not `app_rule`: {stderr}"

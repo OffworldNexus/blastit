@@ -28,8 +28,7 @@ pub struct RouteInfo {
 }
 
 impl RouteInfo {
-    /// A route with this name, prefork flag and uid, no declared ingress and no
-    /// `[route.static]` policy.
+    /// A route with this name, prefork flag and uid, and no declared ingress.
     pub fn new(name: impl Into<String>, prefork: bool, uid: u32) -> Self {
         Self {
             name: name.into(),

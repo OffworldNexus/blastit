@@ -2201,3 +2201,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T10:36 [MB.21.4.6] (lead) commit 1cfdace
 - 2026-11-16T10:38 [MB.21.4.2] (planner) edited fields
 - 2026-11-16T10:39 [MB.21.4.2] (planner) re-scoped to what MB.21.4.1 (a3ac338) actually landed: 4.1 absorbed design 4.3's runtime half, so this leaf's removals work list is gone. Measured on the tree: 
+- 2026-11-16T10:39 [MB.21.4.2] (lead) status ready -> active
+- 2026-11-16T10:39 [MB.21.4.2] (lead) attempt 1/5 started
+- 2026-11-16T10:39 [MB.21.4.2] (lead) base e223753
+- 2026-11-16T11:09 [MB.21.4.2] (lead) status active -> review
+- 2026-11-16T11:15 [MB.21.4.2] (lead) REVIEW FAIL (attempt 1): [MAJOR] critical_blastfile_parity.rs claims every case boots through common::Options::blastfile but 5 of 14 rows (trait grants, unrestr
+- 2026-11-16T11:15 [MB.21.4.2] (lead) status review -> ready
+- 2026-11-16T11:15 [MB.21.4.2] (lead) attempt 2/5 started
+- 2026-11-16T11:31 [MB.21.4.2] (lead) status ready -> review
+- 2026-11-16T11:43 [MB.21.4.2] (lead) reviewer PASS (round 2). Gate flake noted: dev_boots_five_unprivileged_roles_and_strips_secrets failed once inside the full make check (POST /env answered 200 w
+- 2026-11-16T11:43 [MB.21.4.2] (lead) status review -> done

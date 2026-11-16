@@ -840,11 +840,14 @@ impl Manifest {
     /// the filesystem: no callable, no front controller, at least one mount
     /// (§9.5).
     ///
-    /// A `Blastfile`'s mounts are the file's, so a static-only file has mounts
-    /// and no views; the retired reader's static route is both a route and a
-    /// mount, which is why the route arm below is kept. `BLASTIT_APP` may still
-    /// supply an app, so this is the manifest-level answer and the boot decides
-    /// what to do with it.
+    /// A `Blastfile`'s mounts are the file's, so a static-only file is mounts and
+    /// **no views**, and the `routes.is_empty()` arm below is the whole answer
+    /// for it. The `route.static_policy()` arm is the retired reader's
+    /// compatibility path — that reader lowers a static route to both a route
+    /// and a mount, so its shape has routes where a `Blastfile` has none — and it
+    /// goes with that reader in `MB.21.4.5`. It is **not** a second definition:
+    /// a `Blastfile` never reaches it. `BLASTIT_APP` may still supply an app, so
+    /// this is the manifest-level answer and the boot decides what to do with it.
     pub fn is_all_static(&self) -> bool {
         if self.app.is_some() || self.php.is_some() {
             return false;
@@ -861,14 +864,19 @@ impl Manifest {
     /// controller answers every view (`entrypoint php`, §12.2), or the file is
     /// static mounts and no views (§9.5).
     ///
-    /// Such a manifest needs no `app` at all, so a boot may skip the WSGI
-    /// interpreter (and `check` may run an external suite instead of pytest).
-    /// The retired reader's per-route spelling is kept because one of its views
-    /// may still be a WSGI route while another declares `[route.php]`: the
-    /// manifest-level `php` field then means "the first such route's entry",
-    /// not "every view runs it". A file-level entrypoint is the case where no
-    /// route declares one at all. An empty manifest is not bootable without an
-    /// app.
+    /// This is the **one** answer to "does this file need a callable"; the boot's
+    /// `runs_own_executors` and `is_static_only` are this predicate under the
+    /// names the boot reads it by. An `entrypoint php` no view reaches is still
+    /// `true` here: §12.2 makes that the `EntrypointNotReached` warning, never a
+    /// missing app, so a static mount and a front controller can ship together
+    /// before the catch-all view exists.
+    ///
+    /// The per-route arms are the retired reader's compatibility path (it lowers
+    /// `[route.php]`/`[route.static]` onto the routes themselves, so its
+    /// manifest-level `php` may mean "the first such route's entry"), and they go
+    /// with that reader in `MB.21.4.5`. A `Blastfile` never sets `route.php()` or
+    /// `route.static_policy()`, so for it this reduces to §9.5's two shapes. An
+    /// empty manifest is not bootable without an app.
     pub fn can_boot_without_app(&self) -> bool {
         let any_route_declares = self
             .routes
