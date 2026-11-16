@@ -143,7 +143,9 @@ fn the_pages_manifest_parses_with_the_defaults_it_omits() {
             root: "public".to_string(),
             // Omitted by the page, so the default has to appear here.
             index: "index.html".to_string(),
-            spa: true,
+            // The page's `spa = true` lowered to the file it answers a miss
+            // with — the index it already answers a directory with (§9.3).
+            fallback: Some("index.html".to_string()),
             immutable: vec!["/assets/*".to_string()],
         }
     );
@@ -154,7 +156,7 @@ fn the_pages_manifest_parses_with_the_defaults_it_omits() {
         &StaticPolicy {
             root: "public".to_string(),
             index: "index.html".to_string(),
-            spa: false,
+            fallback: None,
             immutable: vec![],
         }
     );
@@ -506,7 +508,7 @@ fn only_a_route_that_can_reach_the_app_may_declare_them() {
         .expect("the front controller boots");
     assert_eq!(warnings, vec![]);
     let route = manifest.route(0).expect("route 0");
-    assert!(!route.static_policy().expect("policy").spa);
+    assert!(route.static_policy().expect("policy").fallback.is_none());
     assert!(route.ingress().is_some());
     assert!(route.prefork());
     assert_eq!(route.groups().len(), 1);

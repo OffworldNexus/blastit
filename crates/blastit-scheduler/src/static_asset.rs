@@ -250,7 +250,13 @@ pub struct StaticRoot {
     /// The `index` file, relative to `root` (validation guarantees no
     /// leading `/`, no `.`/`..` segment and no dotfile segment).
     pub(crate) index: String,
-    /// Whether a miss answers `index` instead of the app.
+    /// Whether a miss answers `index` instead of the app, derived from
+    /// [`StaticPolicy::fallback`] (§9.3).
+    ///
+    /// The retired reader lowers its flag to `fallback = Some(index)`, so the
+    /// two spellings agree on every document this build can parse. `MB.21.4.2`
+    /// reshapes the path to answer the declared `fallback` file itself, which
+    /// is why this stays a flag until then.
     pub(crate) spa: bool,
     /// The `/`-anchored patterns that earn the year-long cache.
     // Read by `static_response.rs`'s cache rule (`MB.2.4.2`).
@@ -317,7 +323,7 @@ impl StaticRoot {
             root: policy.root.clone(),
             dirfd,
             index: policy.index.clone(),
-            spa: policy.spa,
+            spa: policy.fallback.is_some(),
             immutable: policy
                 .immutable
                 .iter()

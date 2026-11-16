@@ -11,3 +11,7 @@ Re-ordered the chain from design-order to build-order: 3.3 (pattern.rs + HEAD no
 ## 2026-11-16T02:41 [lead]
 
 Also recorded: StaticPolicy's fallback field + spa removal moved from 3.0 to 3.7, because every StaticPolicy literal in the workspace lives in 3.7's file list (scheduler route.rs, static_fixture.rs, critical_rewrite.rs, the two manifest suites, critical_manifest_edit_executor.rs) and adding the field in 3.0 would leave the workspace red outside its paths. 3.0 stays additive; 3.7 (design 3.0b) lands fallback, drops spa, and moves the literals. 3.7 gained model.rs/parse.rs/validate.rs/static_fixture.rs for that. 3.1 gained the Makefile line for the check_manifest_purity.py gate (§20 R20/R24) and 3.5's critical_learn_executor_blocks.rs path was corrected to crates/blastit/tests/.
+
+## 2026-11-16T03:09 [lead]
+
+Design gap resolved without a human: §4.3's Consumers column assigns the per-view accessor removal, the StaticOutcome rename and §9.5/§9.6 to MB.21.4.2, and 3.7 cannot land them while blastit.toml still drives the product (four protected contracts read the route->mount link). 3.7 re-scoped; MB.21.4.2's paths need widening (model.rs, parse.rs, edit.rs, scheduler route/rewrite/static_asset/static_response + their suites, blastit src, tests/parse.rs). H-010 open for the conductor to close.

@@ -2005,3 +2005,23 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T03:04 [MB.21.3.7] (lead) edited fields
 - 2026-11-16T03:05 [MB.21.3.0] (lead) reviewer verdict PASS (attempt 1). 6 MINOR findings, no blocker: (1) lib.rs crate-doc links -> MB.21.3.7 now owns lib.rs; (2) parse.rs bridge is lossy for two s
 - 2026-11-16T03:05 [MB.21.3.0] (lead) status review -> done
+- 2026-11-16T03:05 [MB.21.3.0] (lead) commit ef783db
+- 2026-11-16T03:05 [MB.21.3.7] (lead) status ready -> active
+- 2026-11-16T03:05 [MB.21.3.7] (lead) attempt 1/3 started
+- 2026-11-16T03:05 [MB.21.3.7] (lead) base ef783db0c5c094a9f6aff5e2042e7955c40cadb5
+- 2026-11-16T03:08 HUMAN H-010 opened by implementer (node MB.21.3.7)
+- 2026-11-16T03:08 [MB.21.3.7] (implementer) blocked: the design drops the route->mount / route->php association that critical_rewrite.rs::an_app_route_matches_before_a_later_static_route, critical_static_
+- 2026-11-16T03:09 [MB.21.3.7] (lead) edited fields
+- 2026-11-16T03:09 [MB.21.3.7] (lead) edited fields
+- 2026-11-16T03:09 [MB.21.3.7] (lead) Re-scoped after attempt 1's blocked report (design gap, no code written): attempt 1 proved the four per-view accessors are the only route->mount / route->php as
+- 2026-11-16T03:09 [MB.21.3.7] (lead) status active -> ready
+- 2026-11-16T03:09 [MB.21.3] (lead) Design gap resolved without a human: §4.3's Consumers column assigns the per-view accessor removal, the StaticOutcome rename and §9.5/§9.6 to MB.21.4.2, and 3.7
+- 2026-11-16T03:10 [MB.21.3.7] (lead) status ready -> active
+- 2026-11-16T03:10 [MB.21.3.7] (lead) attempt 2/3 started
+- 2026-11-16T03:10 [MB.21.3.7] (lead) base ef783db0c5c094a9f6aff5e2042e7955c40cadb5
+- 2026-11-16T03:10 HUMAN H-010 closed by conductor
+- 2026-11-16T03:26 [MB.21.3.7] (lead) edited fields
+- 2026-11-16T03:26 [MB.21.3.7] (lead) Accepted attempt 2's two disclosed deviations: D1 (routing.rs/uid.rs in-crate test literals) by widening paths — mechanical one-line each, no assertion changed;
+- 2026-11-16T03:26 [MB.21.3.7] (lead) status active -> review
+- 2026-11-16T03:35 [MB.21.3.7] (lead) reviewer verdict PASS (attempt 2). 4 MINOR: (1) unrelated doc-comment rewordings in model.rs made only to satisfy the acceptance grep -> node grep tightened to 
+- 2026-11-16T03:35 [MB.21.3.7] (lead) status review -> done

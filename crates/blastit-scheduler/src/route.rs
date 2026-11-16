@@ -30,8 +30,8 @@ pub struct RouteInfo {
     /// as before.
     pub static_policy: Option<StaticPolicy>,
     /// Whether a request the static responder does not answer may reach the
-    /// app (static design §4.6): the policy is present, its `spa` is unset and
-    /// the manifest declares an `app`.
+    /// app (static design §4.6): the policy is present, its `fallback` is unset
+    /// and the manifest declares an `app`.
     pub static_forward: bool,
 }
 
@@ -60,17 +60,17 @@ impl RouteInfo {
     /// whether a miss may still reach the route's view (static design
     /// §4.2/§4.6).
     ///
-    /// `static_forward` is `policy.is_some() && !policy.spa && forwards`, where
-    /// `forwards` is **"this route has something to forward to"**: the
-    /// manifest's `BLASTIT_APP`, or the route's own executor. A
+    /// `static_forward` is `policy.is_some() && policy.fallback.is_none() &&
+    /// forwards`, where `forwards` is **"this route has something to forward
+    /// to"**: the manifest's `BLASTIT_APP`, or the route's own executor. A
     /// `[route.static]` + `[route.php]` page is the second case —
     /// `docs/frameworks/php.md` promises "every other path reaches the front
     /// controller", and `ADR-0010` §2 says a PHP route needs no `app` — so
     /// [`routes_from_manifest`] passes `has_app || route.php().is_some()`.
     ///
-    /// It is what stops a *pure* static route from ever spawning a view: with
-    /// `spa = true` the fallback answers first, and a route with no app and no
-    /// executor of its own has nothing to forward to.
+    /// It is what stops a *pure* static route from ever spawning a view: with a
+    /// `fallback` declared the fallback answers first (§9.3), and a route with
+    /// no app and no executor of its own has nothing to forward to.
     ///
     /// The parameter is named `forwards` rather than `has_app` because the
     /// second case is exactly what a reader used to mistake for "no app, no
@@ -78,7 +78,7 @@ impl RouteInfo {
     pub fn with_static(mut self, policy: Option<StaticPolicy>, forwards: bool) -> Self {
         self.static_forward = policy
             .as_ref()
-            .is_some_and(|policy| !policy.spa && forwards);
+            .is_some_and(|policy| policy.fallback.is_none() && forwards);
         self.static_policy = policy;
         self
     }
@@ -202,12 +202,14 @@ mod tests {
         );
     }
 
-    /// A `[route.static]` policy with `spa` set as given.
+    /// A `[route.static]` policy whose retired flag is set as given, lowered the
+    /// way the reader lowers it: the flag is the file a miss is answered with
+    /// (§9.3).
     fn static_policy(spa: bool) -> StaticPolicy {
         StaticPolicy {
             root: "public".to_string(),
             index: "index.html".to_string(),
-            spa,
+            fallback: spa.then(|| "index.html".to_string()),
             immutable: Vec::new(),
         }
     }

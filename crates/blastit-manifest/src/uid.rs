@@ -163,7 +163,7 @@ mod tests {
             policy: StaticPolicy {
                 root: "public".to_string(),
                 index: "index.html".to_string(),
-                spa: false,
+                fallback: None,
                 immutable: Vec::new(),
             },
         };

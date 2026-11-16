@@ -140,7 +140,9 @@ fn is_the_documented_static_site(manifest: &Manifest) -> bool {
                     == Some(&StaticPolicy {
                         root: "public".to_string(),
                         index: "index.html".to_string(),
-                        spa: true,
+                        // The page's `spa = true`, lowered to the file a miss
+                        // is answered with (§9.3).
+                        fallback: Some("index.html".to_string()),
                         immutable: vec!["/assets/*".to_string()],
                     })
         })

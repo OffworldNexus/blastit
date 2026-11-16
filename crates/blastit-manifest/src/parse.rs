@@ -58,6 +58,15 @@ const PATTERN_EXPECTED: &str = "a regex, or an array of them";
 const PRELOAD_EXPECTED: &str = "a module name, or an array of them";
 
 /// Parses a manifest document.
+///
+/// The retired reader fills the Blastfile model beside the per-route blocks it
+/// has always filled, so today's runtime reads one answer either way: every
+/// `[route.static]` block becomes a mount at `"/"`, and the first `[route.php]`
+/// block becomes the one manifest-level front controller. Both are **first
+/// block wins**: the retired format has no prefix to tell two static blocks
+/// apart and no second front controller to name, so a later block could never
+/// answer. The lists are bridges — nothing on the runtime path reads them yet,
+/// and `MB.21.4.5` deletes the reader.
 pub(crate) fn parse(source: &str) -> Result<Manifest, ManifestErrors> {
     let document: toml::Table = match source.parse() {
         Ok(document) => document,
@@ -123,19 +132,28 @@ pub(crate) fn parse(source: &str) -> Result<Manifest, ManifestErrors> {
 /// A `[route.static]` block is a mount at the URL root: the retired format has
 /// no prefix of its own, and its responder answers any path under `root`. The
 /// per-route field stays filled as well, so today's runtime reads one answer
-/// either way; `spa = true` keeps its `spa` flag here, and the `fallback` it
-/// becomes is the field `MB.21.3.7` adds. `MB.21.3.7` deletes the per-route
-/// accessor and `MB.21.4.5` deletes this reader.
+/// either way.
+///
+/// The list holds **one mount per prefix**, the first block winning — the same
+/// bridge [`php_of`] makes for the one front controller. Every block names the
+/// same prefix, so a second one would be a duplicate (§9.1) and could never
+/// answer; the retired format has no way to spell a second prefix. Nothing
+/// reads the list on the runtime path yet, and `MB.21.4.5` deletes this reader.
 fn mounts_of(routes: &[Route]) -> Vec<StaticMount> {
-    routes
-        .iter()
-        .filter_map(|route| {
-            route.static_policy().map(|policy| StaticMount {
-                prefix: ROOT_PREFIX.to_string(),
-                policy: policy.clone(),
-            })
-        })
-        .collect()
+    let mut mounts: Vec<StaticMount> = Vec::new();
+    for route in routes {
+        let Some(policy) = route.static_policy() else {
+            continue;
+        };
+        if mounts.iter().any(|mount| mount.prefix == ROOT_PREFIX) {
+            continue;
+        }
+        mounts.push(StaticMount {
+            prefix: ROOT_PREFIX.to_string(),
+            policy: policy.clone(),
+        });
+    }
+    mounts
 }
 
 /// The one front controller the retired reader's PHP routes become (§4.3,
@@ -938,12 +956,17 @@ impl Parser {
     /// Only the shape is read here. The rules a value has to obey — a relative
     /// `root`, an `index` beneath it, `/`-anchored patterns — belong to
     /// validation, so one bad value never hides the others.
+    ///
+    /// The retired `spa` key is one fact with the Blastfile's `fallback`
+    /// (§9.3): a miss answered by a named file. It is lowered to
+    /// `fallback = Some(index)`, because the index is the file the flag already
+    /// answers a directory with; `fallback` itself has no key in this format.
     fn static_policy(&mut self, value: &Value, path: &str) -> Option<StaticPolicy> {
         let table = self.as_table(value, path)?;
         let mut root = None;
         let mut has_root = false;
         let mut index = None;
-        let mut spa = false;
+        let mut answers_every_miss = false;
         let mut immutable = Vec::new();
         for (key, value) in table {
             let key_path = format!("{path}.{}", escape_control(key));
@@ -955,7 +978,7 @@ impl Parser {
                 "index" => index = self.as_str(value, &key_path),
                 "spa" => {
                     if let Some(value) = self.as_bool(value, &key_path) {
-                        spa = value;
+                        answers_every_miss = value;
                     }
                 }
                 "immutable" => {
@@ -973,10 +996,12 @@ impl Parser {
         }
 
         let root = root?;
+        let index = index.unwrap_or_else(|| DEFAULT_INDEX.to_string());
+        let fallback = answers_every_miss.then(|| index.clone());
         Some(StaticPolicy {
             root,
-            index: index.unwrap_or_else(|| DEFAULT_INDEX.to_string()),
-            spa,
+            index,
+            fallback,
             immutable,
         })
     }

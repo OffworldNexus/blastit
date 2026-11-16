@@ -70,6 +70,13 @@ pub enum Location {
         /// The route's name, empty when the name itself failed to parse.
         name: String,
     },
+    /// A top-level `static "<prefix>"` mount, by index and by prefix (§9.1).
+    Mount {
+        /// Index of the mount in the manifest.
+        index: usize,
+        /// The prefix as written.
+        prefix: String,
+    },
 }
 
 impl fmt::Display for Location {
@@ -79,6 +86,9 @@ impl fmt::Display for Location {
             Self::Group(group) => write!(f, "group {}", quoted(group)),
             Self::Route { index, name } => {
                 write!(f, "route {} (index {index})", quoted(name))
+            }
+            Self::Mount { index, prefix } => {
+                write!(f, "mount {} (index {index})", quoted(prefix))
             }
         }
     }
@@ -221,6 +231,19 @@ pub enum ManifestError {
         /// Index of the second one.
         second: usize,
     },
+    /// Two mounts share a prefix, so one of them could never answer (§9.1).
+    #[error(
+        "duplicate static mount {} (mounts {first} and {second})",
+        quoted(.prefix)
+    )]
+    DuplicateMount {
+        /// The duplicated prefix.
+        prefix: String,
+        /// Index of the first mount with that prefix.
+        first: usize,
+        /// Index of the second one.
+        second: usize,
+    },
     /// A route name does not match `[a-z0-9][a-z0-9_-]*`.
     #[error(
         "route {index}: invalid name {}; must match [a-z0-9][a-z0-9_-]*",
@@ -286,13 +309,18 @@ pub enum ManifestError {
         /// The route's name.
         route: String,
     },
-    /// The route's uid would leave the range blastit stays in (§2).
+    /// The route carrying the highest sandbox would leave the uid range blastit
+    /// stays in (§2, §7.3).
+    ///
+    /// Routes are numbered by **sandbox**, not by position, so the route that
+    /// overflows is the one with the highest sandbox id — which is not
+    /// necessarily the last route in the table.
     #[error(
-        "too many routes: route at index {index} would use uid {uid}, \
-         but uids must stay below {max} (base {base})"
+        "too many routes: the route carrying the highest sandbox (index {index}) would use \
+         uid {uid}, but uids must stay below {max} (base {base})"
     )]
     TooManyRoutes {
-        /// Index of the last route in the manifest.
+        /// Index of the route carrying the highest sandbox.
         index: usize,
         /// The uid that route would take.
         uid: u32,
@@ -413,6 +441,38 @@ pub enum ManifestError {
         proxy: ProxyName,
         /// Index of the entry in the grant's `queries` list.
         rule: usize,
+    },
+    /// A `static "<prefix>"` mount's prefix is not a URL prefix the router can
+    /// match (§9.1).
+    ///
+    /// `rule` is one of the fixed phrases the design pins — `must start with /`,
+    /// `must not end with /`, `must not contain ..`, `must not contain an empty
+    /// segment`, `must not contain \`, `must not contain a control byte`,
+    /// `must not contain ?`, `must not contain #`, `must not contain %` — so the
+    /// message reads the same on every host. The location carries the prefix, so
+    /// it is not printed twice.
+    #[error("{location}: {rule}")]
+    StaticMountPrefixInvalid {
+        /// Where the `static` block is written.
+        location: Location,
+        /// The fixed rule the prefix breaks.
+        rule: &'static str,
+    },
+    /// A mount's `fallback` is not a file name the responder can answer a miss
+    /// with (§9.1, §9.3).
+    ///
+    /// The rules are the `index`'s — a relative path of one or more segments,
+    /// no `..`, no `\`, no control byte — plus the one that matters here: no
+    /// dotfile segment, because the fallback answers a request the request-path
+    /// check never sees.
+    #[error("{location}: static fallback {}: {rule}", quoted(.fallback))]
+    StaticFallbackInvalid {
+        /// Where the `static` block is written.
+        location: Location,
+        /// The fallback as written.
+        fallback: String,
+        /// The fixed rule the fallback breaks.
+        rule: &'static str,
     },
     /// A `[route.static]` `root` is not a path the responder can serve (`R2`).
     ///

@@ -27,6 +27,19 @@ const ANCHORED_PATTERN: &str = "must start with /";
 const AT_MOST_PATTERNS: &str = "at most 32 patterns";
 const AT_MOST_PATTERN_BYTES: &str = "at most 256 bytes";
 
+/// The fixed rules a `static "<prefix>"` mount's prefix can break (§9.1).
+///
+/// The prefix is a URL prefix, not a filesystem path, so it carries the one
+/// rule a path does not: it is `/`-anchored and has no trailing `/` (unless it
+/// is `"/"`), and a query, a fragment or an escape is refused because a request
+/// path never carries one.
+const MOUNT_ANCHORED: &str = "must start with /";
+const MOUNT_NO_TRAILING_SLASH: &str = "must not end with /";
+const MOUNT_NO_EMPTY_SEGMENT: &str = "must not contain an empty segment";
+const MOUNT_NO_QUERY: &str = "must not contain ?";
+const MOUNT_NO_FRAGMENT: &str = "must not contain #";
+const MOUNT_NO_ESCAPE: &str = "must not contain %";
+
 /// The fixed rules a `[route.php]` value can break (`ADR-0010` §2; the shape
 /// rules of §4.1 transferred verbatim from the retired key).
 const MUST_END_IN_PHP: &str = "must end in .php";
@@ -68,6 +81,7 @@ pub(crate) fn validate(
     check_queries(manifest, &mut errors);
     check_routes(manifest, &mut errors);
     check_static(manifest, &mut errors);
+    check_mounts(manifest, &mut errors);
     check_php(manifest, &mut errors);
     check_uids(manifest, base, &mut errors);
 
@@ -300,8 +314,15 @@ fn check_queries(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
 }
 
 /// Route names, path regexes and method tokens.
+///
+/// Names are compared **by sandbox**, not by position (§10.3): one `view` with
+/// several endpoints lowers to several routes that share one name and one
+/// sandbox, and those are not duplicates. A name that reappears in a different
+/// sandbox is, and the message names the two routes so an operator can find
+/// them. A `blastit.toml` route is always its own sandbox, so the retired
+/// format keeps today's answer for every document it can express.
 fn check_routes(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
-    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut seen: BTreeMap<&str, (u32, usize)> = BTreeMap::new();
     for (index, route) in manifest.routes().iter().enumerate() {
         let name = route.name();
         if !valid_route_name(name) {
@@ -312,13 +333,18 @@ fn check_routes(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
         }
         match seen.entry(name) {
             Entry::Vacant(slot) => {
-                slot.insert(index);
+                slot.insert((route.sandbox(), index));
             }
-            Entry::Occupied(first) => errors.push(ManifestError::DuplicateRouteName {
-                name: name.to_string(),
-                first: *first.get(),
-                second: index,
-            }),
+            Entry::Occupied(first) => {
+                let (sandbox, first_index) = *first.get();
+                if sandbox != route.sandbox() {
+                    errors.push(ManifestError::DuplicateRouteName {
+                        name: name.to_string(),
+                        first: first_index,
+                        second: index,
+                    });
+                }
+            }
         }
 
         if route.path().is_empty() {
@@ -512,7 +538,7 @@ fn check_static_declarations(
     if route.php().is_some() {
         return;
     }
-    let why = if policy.spa {
+    let why = if policy.fallback.is_some() {
         "spa = true never reaches the app"
     } else if manifest.app().is_none() {
         "the manifest declares no app"
@@ -539,6 +565,120 @@ fn check_static_declarations(
     if !route.groups().is_empty() {
         dead("groups".to_string());
     }
+}
+
+/// The top-level `static "<prefix>"` mounts (§9.1): the prefix's shape, the
+/// `fallback`'s name, and the prefix's uniqueness.
+///
+/// `root` and `index` are checked where they are written — on a route's own
+/// block — because the retired reader fills both from that same document and
+/// one mistake must not be reported twice. `fallback` has no key in that
+/// format, so it is checked here. Nothing touches the filesystem: a mount has
+/// to validate on a machine that has not run the build yet.
+fn check_mounts(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for (index, mount) in manifest.mounts().iter().enumerate() {
+        let location = Location::Mount {
+            index,
+            prefix: mount.prefix.clone(),
+        };
+        if let Some(rule) = mount_prefix_rule(&mount.prefix) {
+            errors.push(ManifestError::StaticMountPrefixInvalid {
+                location: location.clone(),
+                rule,
+            });
+        }
+        // A `fallback` that is the `index` is the retired reader's lowering of
+        // its flag, and that name is already checked on the route's own block:
+        // one mistake is reported once. Every other name is this check's.
+        if let Some(fallback) = mount.policy.fallback.as_deref()
+            && fallback != mount.policy.index
+            && let Some(rule) = fallback_rule(fallback)
+        {
+            errors.push(ManifestError::StaticFallbackInvalid {
+                location: location.clone(),
+                fallback: fallback.to_string(),
+                rule,
+            });
+        }
+        match seen.entry(mount.prefix.as_str()) {
+            Entry::Vacant(slot) => {
+                slot.insert(index);
+            }
+            Entry::Occupied(first) => errors.push(ManifestError::DuplicateMount {
+                prefix: mount.prefix.clone(),
+                first: *first.get(),
+                second: index,
+            }),
+        }
+    }
+}
+
+/// The first rule a mount prefix breaks, or `None` (§9.1).
+///
+/// A prefix is a URL prefix, not a filesystem path: `/`-anchored, no trailing
+/// `/` unless it is `"/"`, no `..` and no empty segment, and no byte a request
+/// path cannot carry. A dotfile segment is **allowed** — `/.well-known` is a
+/// real prefix — because dotfiles stay refused by the resolver, on the request
+/// path (§9.2).
+fn mount_prefix_rule(prefix: &str) -> Option<&'static str> {
+    if !prefix.starts_with('/') {
+        return Some(MOUNT_ANCHORED);
+    }
+    if prefix != "/" && prefix.ends_with('/') {
+        return Some(MOUNT_NO_TRAILING_SLASH);
+    }
+    let rest = prefix.strip_prefix('/').unwrap_or(prefix);
+    if rest.is_empty() {
+        return None;
+    }
+    if rest.split('/').any(|segment| segment.is_empty()) {
+        Some(MOUNT_NO_EMPTY_SEGMENT)
+    } else if has_parent_segment(prefix) {
+        Some(NO_PARENT_SEGMENT)
+    } else if prefix.contains('\\') {
+        Some(NO_BACKSLASH)
+    } else if has_control_byte(prefix) {
+        Some(NO_CONTROL_BYTE)
+    } else if prefix.contains('?') {
+        Some(MOUNT_NO_QUERY)
+    } else if prefix.contains('#') {
+        Some(MOUNT_NO_FRAGMENT)
+    } else if prefix.contains('%') {
+        Some(MOUNT_NO_ESCAPE)
+    } else {
+        None
+    }
+}
+
+/// The first rule a mount's `fallback` breaks, or `None` (§9.1, §9.3).
+///
+/// The fallback is a file name below `root` that answers a request the
+/// request-path check never sees, so a dotfile segment is refused here: with
+/// `root "."`, `fallback ".env"` would answer every `GET` miss with the
+/// environment file. `root` itself may be `.` or a dot-directory — the author
+/// chose that directory, and the resolver still checks the request path.
+fn fallback_rule(fallback: &str) -> Option<&'static str> {
+    if fallback.starts_with('/') {
+        Some(RELATIVE_PATH)
+    } else if fallback.is_empty() || fallback.split('/').any(|segment| segment.is_empty()) {
+        Some(ONE_OR_MORE_SEGMENTS)
+    } else if has_parent_segment(fallback) {
+        Some(NO_PARENT_SEGMENT)
+    } else if fallback.split('/').any(is_dotfile_segment) {
+        Some(NO_DOTFILE_SEGMENT)
+    } else if fallback.contains('\\') {
+        Some(NO_BACKSLASH)
+    } else if has_control_byte(fallback) {
+        Some(NO_CONTROL_BYTE)
+    } else {
+        None
+    }
+}
+
+/// A `/`-separated segment that starts with `.` and is not exactly `.` (§9.1).
+fn is_dotfile_segment(segment: &str) -> bool {
+    segment.starts_with('.') && segment != "."
 }
 
 /// The `[route.php]` blocks: the block's rules and the declarations that can
@@ -662,7 +802,10 @@ fn check_php_declarations(route: &Route, location: &Location, errors: &mut Vec<M
             why,
         });
     };
-    if route.static_policy().is_some_and(|policy| policy.spa) {
+    if route
+        .static_policy()
+        .is_some_and(|policy| policy.fallback.is_some())
+    {
         dead("spa = true", SPA_NEVER_REACHES_FRONT_CONTROLLER);
     }
     if let Some(methods) = route.methods() {
@@ -879,8 +1022,241 @@ impl Manifest {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{valid_method, valid_route_name};
-    use crate::model::Manifest;
+    use std::collections::BTreeMap;
+
+    use super::{
+        MOUNT_ANCHORED, MOUNT_NO_EMPTY_SEGMENT, MOUNT_NO_ESCAPE, MOUNT_NO_FRAGMENT, MOUNT_NO_QUERY,
+        MOUNT_NO_TRAILING_SLASH, NO_BACKSLASH, NO_CONTROL_BYTE, NO_DOTFILE_SEGMENT,
+        NO_PARENT_SEGMENT, fallback_rule, mount_prefix_rule, valid_method, valid_route_name,
+    };
+    use crate::error::{Location, ManifestError, ManifestErrors};
+    use crate::model::{Manifest, Route, StaticMount, StaticPolicy};
+
+    /// A manifest with the given `(prefix, fallback)` mounts and no routes: the
+    /// static-only shape of §9.5, which is the only one a mount can be checked
+    /// on before the Blastfile lowering exists.
+    fn mounted(mounts: &[(&str, Option<&str>)]) -> Manifest {
+        let mounts = mounts
+            .iter()
+            .map(|(prefix, fallback)| StaticMount {
+                prefix: (*prefix).to_string(),
+                policy: StaticPolicy {
+                    root: "public".to_string(),
+                    index: "index.html".to_string(),
+                    fallback: fallback.map(|file| file.to_string()),
+                    immutable: Vec::new(),
+                },
+            })
+            .collect();
+        Manifest::assemble(
+            1,
+            Vec::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_mounts(mounts)
+    }
+
+    /// A retired-format manifest whose only route is static, with the given
+    /// `[route.static]` body.
+    fn retired_static(block: &str) -> Manifest {
+        Manifest::from_toml_str(&format!(
+            "version = 1\n[[route]]\nname = \"site\"\npath = ['.*']\n[route.static]\n{block}"
+        ))
+        .unwrap()
+    }
+
+    /// §9.1: a prefix is a URL prefix, not a filesystem path. Every rule has
+    /// its legal twin, and the two prefixes the retired format can produce —
+    /// `"/"` and nothing else — are accepted.
+    #[test]
+    fn a_mount_prefix_is_a_url_prefix() {
+        for prefix in ["/", "/assets", "/assets/v2", "/.well-known", "/a-b_c"] {
+            assert_eq!(mount_prefix_rule(prefix), None, "{prefix}");
+            assert_eq!(
+                mounted(&[(prefix, None)]).validate(20_000),
+                Ok(Vec::new()),
+                "{prefix}"
+            );
+        }
+
+        let cases = [
+            ("assets", MOUNT_ANCHORED),
+            ("", MOUNT_ANCHORED),
+            ("/assets/", MOUNT_NO_TRAILING_SLASH),
+            ("//assets", MOUNT_NO_EMPTY_SEGMENT),
+            ("/assets//v2", MOUNT_NO_EMPTY_SEGMENT),
+            ("/assets/../etc", NO_PARENT_SEGMENT),
+            ("/assets\\v2", NO_BACKSLASH),
+            ("/assets\0", NO_CONTROL_BYTE),
+            ("/assets?x=1", MOUNT_NO_QUERY),
+            ("/assets#top", MOUNT_NO_FRAGMENT),
+            ("/assets%2e", MOUNT_NO_ESCAPE),
+        ];
+        for (prefix, rule) in cases {
+            assert_eq!(mount_prefix_rule(prefix), Some(rule), "{prefix:?}");
+            assert_eq!(
+                mounted(&[(prefix, None)]).validate(20_000),
+                Err(ManifestErrors::from(
+                    ManifestError::StaticMountPrefixInvalid {
+                        location: Location::Mount {
+                            index: 0,
+                            prefix: prefix.to_string(),
+                        },
+                        rule,
+                    }
+                )),
+                "{prefix:?}"
+            );
+        }
+
+        // The line the operator reads: the mount, its prefix and the fix.
+        assert_eq!(
+            mounted(&[("/assets/", None)])
+                .validate(20_000)
+                .unwrap_err()
+                .to_string(),
+            "manifest has 1 error(s)\n  - mount \"/assets/\" (index 0): must not end with /"
+        );
+    }
+
+    /// §9.1: two mounts with one prefix, where the second could never answer.
+    #[test]
+    fn two_mounts_with_one_prefix_are_refused() {
+        let manifest = mounted(&[
+            ("/assets", None),
+            ("/", None),
+            ("/assets", Some("index.html")),
+        ]);
+        assert_eq!(
+            manifest.validate(20_000),
+            Err(ManifestErrors::from(ManifestError::DuplicateMount {
+                prefix: "/assets".to_string(),
+                first: 0,
+                second: 2,
+            }))
+        );
+        assert_eq!(
+            manifest.validate(20_000).unwrap_err().to_string(),
+            "manifest has 1 error(s)\n  - duplicate static mount \"/assets\" (mounts 0 and 2)"
+        );
+    }
+
+    /// §9.1: the two names answered *for a request* refuse a dotfile segment;
+    /// `root` keeps today's rules, so a dot-directory the author chose is legal
+    /// — the resolver still checks the request path.
+    #[test]
+    fn a_dotfile_fallback_is_refused_while_a_dot_directory_root_is_legal() {
+        for fallback in [".env", "shell/.env", ".output/index.html"] {
+            assert_eq!(
+                fallback_rule(fallback),
+                Some(NO_DOTFILE_SEGMENT),
+                "{fallback}"
+            );
+            assert_eq!(
+                mounted(&[("/", Some(fallback))]).validate(20_000),
+                Err(ManifestErrors::from(ManifestError::StaticFallbackInvalid {
+                    location: Location::Mount {
+                        index: 0,
+                        prefix: "/".to_string(),
+                    },
+                    fallback: fallback.to_string(),
+                    rule: NO_DOTFILE_SEGMENT,
+                })),
+                "{fallback}"
+            );
+        }
+        for fallback in ["index.html", "app/shell.html", "./index.html"] {
+            assert_eq!(fallback_rule(fallback), None, "{fallback}");
+            assert_eq!(
+                mounted(&[("/", Some(fallback))]).validate(20_000),
+                Ok(Vec::new()),
+                "{fallback}"
+            );
+        }
+
+        assert_eq!(
+            retired_static("root = '.output'\n").validate(20_000),
+            Ok(Vec::new()),
+            "a dot-directory root is the author's own choice"
+        );
+        assert_eq!(
+            retired_static("root = '.'\nindex = '.env'\n").validate(20_000),
+            Err(ManifestErrors::from(ManifestError::StaticIndexInvalid {
+                location: Location::Route {
+                    index: 0,
+                    name: "site".to_string(),
+                },
+                index: ".env".to_string(),
+                rule: NO_DOTFILE_SEGMENT,
+            }))
+        );
+    }
+
+    /// One mistake, one line: the retired reader lowers its flag to the index,
+    /// and a bad index is already refused on the route's own block, so the
+    /// mount check does not report the same name twice.
+    #[test]
+    fn a_bad_index_beside_the_retired_flag_is_reported_once() {
+        assert_eq!(
+            retired_static("root = '.'\nindex = '.env'\nspa = true\n").validate(20_000),
+            Err(ManifestErrors::from(ManifestError::StaticIndexInvalid {
+                location: Location::Route {
+                    index: 0,
+                    name: "site".to_string(),
+                },
+                index: ".env".to_string(),
+                rule: NO_DOTFILE_SEGMENT,
+            }))
+        );
+    }
+
+    /// §10.3: two routes of one sandbox are two endpoints of one view, so one
+    /// name is not a duplicate; a name that reappears in another sandbox is two
+    /// views with one name.
+    #[test]
+    fn two_endpoints_of_one_view_are_not_a_duplicate() {
+        let route = |name: &str, sandbox: u32| {
+            Route::new(
+                name.to_string(),
+                vec!["/cart".to_string()],
+                Some(vec!["GET".to_string()]),
+                Vec::new(),
+                false,
+                false,
+                BTreeMap::new(),
+            )
+            .with_sandbox(sandbox)
+        };
+        let manifest = |routes: Vec<Route>| {
+            Manifest::assemble(
+                1,
+                Vec::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                routes,
+                Vec::new(),
+            )
+        };
+
+        // One `view cart` with two endpoints: legal, and one uid.
+        assert_eq!(
+            manifest(vec![route("cart", 0), route("cart", 0)]).validate(20_000),
+            Ok(Vec::new())
+        );
+
+        // The same name in a second sandbox is two views called `cart`.
+        assert_eq!(
+            manifest(vec![route("cart", 0), route("cart", 1)]).validate(20_000),
+            Err(ManifestErrors::from(ManifestError::DuplicateRouteName {
+                name: "cart".to_string(),
+                first: 0,
+                second: 1,
+            }))
+        );
+    }
 
     /// A manifest with one route per `[route.ingress]` spelling this gate cares
     /// about (`MB.3.53`, `ADR-0011`).

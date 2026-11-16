@@ -94,7 +94,9 @@ impl Fixture {
         StaticPolicy {
             root: "root".to_string(),
             index: "index.html".to_string(),
-            spa,
+            // The retired reader's spelling of the same fact: a miss is
+            // answered by the index (§9.3).
+            fallback: spa.then(|| "index.html".to_string()),
             immutable: immutable
                 .iter()
                 .map(|pattern| (*pattern).to_string())

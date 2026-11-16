@@ -995,7 +995,11 @@ fn a_static_block_fills_the_mount_list_beside_the_route() {
     let mount = &manifest.mounts()[0];
     assert_eq!(mount.prefix, "/", "the retired format has no prefix");
     assert_eq!(&mount.policy, policy, "the two answers disagree");
-    assert!(mount.policy.spa, "spa is carried byte for byte");
+    assert_eq!(
+        mount.policy.fallback.as_deref(),
+        Some("app.html"),
+        "the flag is carried as the file it answers a miss with"
+    );
     assert_eq!(mount.policy.root, "public");
     assert_eq!(mount.policy.index, "app.html");
 }
@@ -1016,6 +1020,65 @@ fn a_php_block_fills_the_manifest_front_controller() {
     let php = manifest.php().expect("the front controller");
     assert_eq!(php.entry, "public/index.php");
     assert_eq!(php.workers, Some(4));
+}
+
+/// Two blocks of one kind, one bridge: the retired format can spell neither a
+/// second prefix nor a second front controller, so the **first** block wins and
+/// a later one could never answer (§4.3, §9.1, §12.2).
+#[test]
+fn a_second_block_of_the_same_kind_never_answers() {
+    let manifest = Manifest::from_toml_str(
+        "version = 1\n\
+         [[route]]\nname = \"site\"\npath = ['.*']\n\
+         [route.static]\nroot = \"public\"\n\n\
+         [[route]]\nname = \"other\"\npath = ['/other/.*']\n\
+         [route.static]\nroot = \"dist\"\nindex = \"shell.html\"\nspa = true\n",
+    )
+    .expect("the manifest parses");
+
+    // Both routes keep their own block, so today's runtime reads the same
+    // document it always did...
+    let second = manifest
+        .route(1)
+        .expect("route 1")
+        .static_policy()
+        .expect("the second block");
+    assert_eq!(second.root, "dist");
+    assert_eq!(second.fallback.as_deref(), Some("shell.html"));
+
+    // ...and the mount list holds one mount at the one prefix the format has,
+    // carrying the first block: a second mount at `"/"` could never answer, and
+    // §9.1 refuses two mounts with one prefix.
+    assert_eq!(manifest.mounts().len(), 1, "one mount per prefix");
+    let mount = manifest.mounts().first().expect("a mount");
+    assert_eq!(mount.prefix, "/");
+    assert_eq!(mount.policy.root, "public", "the first block wins");
+    assert_eq!(mount.policy.fallback, None);
+
+    // The same bridge for the one front controller.
+    let manifest = Manifest::from_toml_str(
+        "version = 1\n\
+         [[route]]\nname = \"first\"\npath = ['.*']\n\
+         [route.php]\nentry = \"public/index.php\"\n\n\
+         [[route]]\nname = \"second\"\npath = ['/b/.*']\n\
+         [route.php]\nentry = \"public/other.php\"\n",
+    )
+    .expect("the manifest parses");
+    assert_eq!(
+        manifest
+            .route(1)
+            .expect("route 1")
+            .php()
+            .expect("the second block")
+            .entry,
+        "public/other.php",
+        "the route keeps its own block"
+    );
+    assert_eq!(
+        manifest.php().expect("the front controller").entry,
+        "public/index.php",
+        "the first block wins"
+    );
 }
 
 /// A document with neither block fills neither field, and the retired format

@@ -619,7 +619,7 @@ fn an_app_route_matches_before_a_later_static_route() {
         Some(StaticPolicy {
             root: "public".to_string(),
             index: "index.html".to_string(),
-            spa: false,
+            fallback: None,
             immutable: Vec::new(),
         })
     );
@@ -648,7 +648,9 @@ fn a_static_policy_can_forward_only_without_spa_and_with_an_app() {
         StaticPolicy {
             root: "public".to_string(),
             index: "index.html".to_string(),
-            spa,
+            // The reader lowers the retired flag to the file a miss is answered
+            // with (§9.3).
+            fallback: spa.then(|| "index.html".to_string()),
             immutable: Vec::new(),
         }
     }

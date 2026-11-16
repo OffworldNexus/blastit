@@ -189,7 +189,7 @@ fn a_learned_query_keeps_php_and_static_blocks_byte_for_byte_on_disk() {
         Some(&StaticPolicy {
             root: "public".to_string(),
             index: "index.html".to_string(),
-            spa: false,
+            fallback: None,
             immutable: vec!["/assets/*".to_string(), "/build/*".to_string()],
         })
     );

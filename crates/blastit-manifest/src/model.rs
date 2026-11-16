@@ -308,11 +308,17 @@ impl Grant {
 pub struct StaticPolicy {
     /// The directory served, relative to the directory holding `blastit.toml`.
     pub root: String,
-    /// The file a directory or the SPA fallback answers with, relative to
-    /// `root`. `index.html` unless the manifest says otherwise.
+    /// The file a directory answers with, relative to `root`. `index.html`
+    /// unless the manifest says otherwise.
     pub index: String,
-    /// Whether a path that is no file answers `index` instead of the app.
-    pub spa: bool,
+    /// The file that answers a request no file and no view answered, relative
+    /// to `root` (§9.3), or `None` when such a request is a `404`.
+    ///
+    /// It is a different file from [`StaticPolicy::index`]: a deep link may be
+    /// answered by a shell that is not the directory's index. The retired
+    /// reader lowers the per-route flag that answered every miss with the index
+    /// to `fallback = Some(index)`, so the two spellings carry one fact.
+    pub fallback: Option<String>,
     /// `/`-anchored whole-match globs against the answering file's path; a
     /// match gets the year-long cache (`R5`).
     pub immutable: Vec<String>,
@@ -321,7 +327,7 @@ pub struct StaticPolicy {
 /// A top-level `static "<prefix>"` mount: one URL prefix answered from one
 /// directory (§9.1).
 ///
-/// A mount is not a route: it owns no uid, spawns no process and declares no
+/// A mount is not a route: it owns no uid, starts no process and declares no
 /// methods. The scheduler answers a matching request from
 /// [`StaticMount::policy`] and only then consults the view table (§9.2), so a
 /// mount can never shadow a view.
@@ -371,7 +377,7 @@ pub enum Executor {
     View,
     /// The route's embedded PHP workers; [`Executor::kind`] is `"php"`.
     ///
-    /// The policy travels with the plan, so a dispatcher never re-reads the
+    /// The policy comes with the plan, so the scheduler never re-reads the
     /// route to find out what it is running.
     Php(PhpPolicy),
 }
@@ -785,7 +791,7 @@ impl Manifest {
     /// The top-level static mounts, in file order (§9.1).
     ///
     /// Mounts are tried before views, longest prefix first, so a static mount
-    /// never shadows a view (§9.2). A mount owns no uid and spawns no process.
+    /// never shadows a view (§9.2). A mount owns no uid and starts no process.
     pub fn mounts(&self) -> &[StaticMount] {
         &self.mounts
     }
@@ -1409,7 +1415,7 @@ entry = \"public/index.php\"
             policy: StaticPolicy {
                 root: "public/assets".to_string(),
                 index: "index.html".to_string(),
-                spa: false,
+                fallback: None,
                 immutable: vec!["/assets/*".to_string()],
             },
         };

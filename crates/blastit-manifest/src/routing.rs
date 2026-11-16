@@ -274,7 +274,7 @@ mod tests {
                 policy: StaticPolicy {
                     root: format!("public{index}"),
                     index: "index.html".to_string(),
-                    spa: false,
+                    fallback: None,
                     immutable: Vec::new(),
                 },
             })
