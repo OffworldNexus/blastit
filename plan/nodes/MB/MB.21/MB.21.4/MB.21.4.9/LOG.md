@@ -23,3 +23,19 @@ attempt 1/4 started
 ## 2026-11-16T16:30 [lead]
 
 base eeccd9f
+
+## 2026-11-16T17:04 [lead]
+
+status active -> review
+
+## 2026-11-16T17:19 [lead]
+
+REVIEW FAIL: [MAJOR] the static mount-miss forward path still admits at the head with body_plan AllowEmptyOnly (scheduler.rs:1478 + forward_static:2728 -> admit_ready with end_seen false), so a chunked byte on POST /nope under static / still races the view's 200 (probe: view id before any byte, client 200). Fix in forward_static by treating a non-StreamPassthrough plan like begin_raw's waiting branch (body_ready=false, queued_since, bounded by awaiting_end_count/queue_size => 503), admitted by request_end and bounded by expire_queue; add the mount-miss+byte=>413 and mount-miss+empty REQ_END=>200 cases. [MINOR] RESULT's invariant claim and line numbers are stale.
+
+## 2026-11-16T17:19 [lead]
+
+status review -> ready
+
+## 2026-11-16T17:19 [lead]
+
+attempt 2/4 started

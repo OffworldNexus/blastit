@@ -2277,3 +2277,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T16:30 [MB.21.4.9] (lead) status ready -> active
 - 2026-11-16T16:30 [MB.21.4.9] (lead) attempt 1/4 started
 - 2026-11-16T16:30 [MB.21.4.9] (lead) base eeccd9f
+- 2026-11-16T16:53 [MB.21.4.5] (lead) edited fields
+- 2026-11-16T16:53 [MB.21.4.5] (lead) split: the leaf's planned remainder (src/{model,lib,edit,routing,validate} + tests/{parse,common/mod,mutation_gaps} + blastit-env) under-counted the v1 corpus s
+- 2026-11-16T16:57 [MB.21.4.5.1] (planner) created (task) Retire the v1 parser suite and translate the 0.1.1 schema suite to Blastfile, re-homing every refusal
+- 2026-11-16T16:57 [MB.21.4.5.2] (planner) created (task) Prove the static mount's and the php entrypoint's grammar in the two protected suites
+- 2026-11-16T16:57 [MB.21.4.5.3] (planner) created (task) Translate the last manifest suites and keep the docs-fence harness honest without the retired opening
+- 2026-11-16T16:58 [MB.21.4.5.4] (planner) created (task) Build the --learn routing table from the model and re-point the boot helpers and env/sqlpolicy examples at Blastfile
+- 2026-11-16T16:58 [MB.21.4.5.5] (planner) created (task) Translate the scheduler's manifest fixtures and delete its second reader
+- 2026-11-16T16:58 [MB.21.4.5.6] (planner) created (task) Delete the reader, the retired patcher and the model surface they filled, and drop the toml dependency - alone
+- 2026-11-16T16:58 [MB.21.4.5] (planner) edited fields
+- 2026-11-16T17:04 [MB.21.4.9] (lead) status active -> review
+- 2026-11-16T17:19 [MB.21.4.9] (lead) REVIEW FAIL: [MAJOR] the static mount-miss forward path still admits at the head with body_plan AllowEmptyOnly (scheduler.rs:1478 + forward_static:2728 -> admit
+- 2026-11-16T17:19 [MB.21.4.9] (lead) status review -> ready
+- 2026-11-16T17:19 [MB.21.4.9] (lead) attempt 2/4 started

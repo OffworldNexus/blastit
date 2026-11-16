@@ -1,9 +1,8 @@
 ---
 id: MB.21.4.5
 title: "Erase the retired manifest format from Rust: delete the reader, the TOML synthesis in stage1, the toml dependency and every remaining mention"
-kind: task
+kind: epic
 status: ready
-owner: implementer
 priority: 1
 depends_on: [MB.21.4.4]
 paths:
@@ -14,21 +13,38 @@ paths:
   - "crates/blastit-manifest/src/routing.rs"
   - "crates/blastit-manifest/src/validate.rs"
   - "crates/blastit-manifest/src/error.rs"
-  - "crates/blastit-manifest/tests/**"
+  - "crates/blastit-manifest/src/blastfile/mod.rs"
+  - "crates/blastit-manifest/tests/parse.rs"
+  - "crates/blastit-manifest/tests/common/mod.rs"
+  - "crates/blastit-manifest/tests/critical_manifest_011.rs"
+  - "crates/blastit-manifest/tests/critical_static_manifest.rs"
+  - "crates/blastit-manifest/tests/critical_php_manifest.rs"
+  - "crates/blastit-manifest/tests/blastfile_errors.rs"
+  - "crates/blastit-manifest/tests/validate.rs"
+  - "crates/blastit-manifest/tests/mutation_gaps.rs"
+  - "crates/blastit-manifest/tests/routing.rs"
+  - "crates/blastit-manifest/tests/grants.rs"
+  - "crates/blastit-manifest/tests/uid.rs"
+  - "crates/blastit-manifest/tests/docs_fences.rs"
+  - "crates/blastit-manifest/tests/static_mounts.rs"
+  - "crates/blastit-manifest/Cargo.toml"
   - crates/blastit/src/stage1.rs
-  - crates/blastit/src/audit_v1.rs
+  - crates/blastit/src/infer_routes.rs
+  - crates/blastit/src/php_view.rs
+  - crates/blastit/tests/critical_check_engine.rs
   - "crates/blastit-env/src/**"
   - "crates/blastit-env/tests/**"
-  - "crates/blastit-sqlpolicy/src/**"
-  - "crates/blastit-sqlpolicy/tests/**"
-  - "crates/blastit-manifest/Cargo.toml"
+  - "crates/blastit-sqlpolicy/src/learn.rs"
+  - "crates/blastit-sqlpolicy/src/tables.rs"
+  - "crates/blastit-scheduler/src/**"
+  - "crates/blastit-scheduler/tests/**"
   - Cargo.toml
   - Cargo.lock
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T02:16"
-updated: "2026-11-16T16:07"
+updated: "2026-11-16T16:58"
 ---
 
 # Goal
@@ -70,6 +86,34 @@ touch them**; nothing else may add, remove or bump a dependency. Run it strictly
 - `docs_fences.rs` still recognises the retired opening until `MB.21.5.2` flips it strict: build the
   opening from two fragments (the literal `"blastit"` and the literal `".toml"`, joined with `concat!`)
   so the tree never carries the contiguous name.
+
+## Children
+
+| Node | What | Depends |
+|---|---|---|
+| `MB.21.4.5.1` | Retire the v1 parser suite (delete it) and translate the protected 0.1.1 schema suite, one row per refusal re-homed | — |
+| `MB.21.4.5.2` | The protected static-mount and php-entrypoint suites prove the same grammar on `static` / `entrypoint php` | — |
+| `MB.21.4.5.3` | The last manifest suites (`validate`, `mutation_gaps`, `routing`, `grants`, `uid`, `common`) and `docs_fences` counting the retired opening instead of parsing it | `5.1` |
+| `MB.21.4.5.4` | `RoutingTable::for_learn(&manifest)` — no synthesised document — plus the boot helpers and the `blastit-env` / `blastit-sqlpolicy` examples | — |
+| `MB.21.4.5.5` | The scheduler's 45 fixtures on `Blastfile`, and the deletion of its `Source::{Toml, Blastfile}` switch | `MB.21.4.9` |
+| `MB.21.4.5.6` | The erasure, alone: the reader, the retired patcher, `from_toml_str`, the two version variants and the `toml` dependency | `5.1`–`5.5` |
+
+**Ordering.** `5.1`, `5.2` and `5.4` are path-disjoint and start immediately (three in flight); `5.3` waits
+for `5.1`, which deletes the third user of `tests/common/mod.rs`; `5.5` gates on `MB.21.4.9`, which is
+rewriting `crates/blastit-scheduler/tests/critical_ingress_enforcement.rs` today — `5.5` is the single leaf
+that owns that file, so the two can never collide. `5.6` is last and strictly alone: it is the only leaf
+that owns `crates/blastit-manifest/Cargo.toml`, `Cargo.toml` and `Cargo.lock`, so no other child may add,
+remove or bump a dependency. Deterministic order: `5.1` → (`5.2` ∥ `5.3` ∥ `5.4`, with `5.5` as soon as
+`MB.21.4.9` closes) → `5.6`.
+
+**Every child obeys:** zero new dependencies, zero compatibility shim, no fallback reader; a child whose
+`paths` name a protected file (`5.1`, `5.2`, `5.4`, `5.5`) says why in its `# Goal` and runs
+`critical_guard.py --node` before reporting; the `# Acceptance` above stays the epic gate and no child
+weakens an item of it (`5.6` is where the greps, `cargo tree` and the `Cargo.lock` diff are proven; `5.3`
+is the one child that narrows a check, because `docs_fences` can no longer execute the retired opening once
+the reader is gone — it keeps the counts pinned and `MB.21.5.1` restores them as executed fences, recorded
+in that child's `RESULT.md`). The per-route `static`/`php` model pair (§4.3) is *not* in this epic: it is a
+recorded follow-up blocked on `MB.21.5.1`, and `5.6` names it.
 
 # Acceptance
 

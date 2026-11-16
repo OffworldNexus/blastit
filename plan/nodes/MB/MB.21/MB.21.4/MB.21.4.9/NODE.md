@@ -2,7 +2,7 @@
 id: MB.21.4.9
 title: "Refuse an AllowEmptyOnly request from its head and never dispatch one before REQ_END: close the 413-vs-200 race behind the dev suite's flake"
 kind: task
-status: active
+status: ready
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.8]
@@ -14,11 +14,11 @@ paths:
   - crates/blastit/tests/critical_dev_and_fail_closed.rs
   - crates/blastit/tests/critical_raw_ingress.rs
   - docs/knowledge/LESSONS.md
-attempts: 1
+attempts: 2
 max_attempts: 4
 escalation: none
 created: "2026-11-16T16:30"
-updated: "2026-11-16T16:30"
+updated: "2026-11-16T17:19"
 ---
 
 # Goal
