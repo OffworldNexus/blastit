@@ -13,6 +13,7 @@
 
 mod common;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,81 @@ fn ingress_manifest(path: &str, body: &str, allow_raw: bool) -> String {
         "version = 1\n[[route]]\nname = \"upload\"\npath = ['{path}']\n\
          [route.ingress]\nbody = \"{body}\"\n{allow}"
     )
+}
+
+/// A one-route manifest with **no** `[route.ingress]`, so the route takes no
+/// body at all (`R12`).
+///
+/// The pattern covers the sub-paths the tests use to tell one request from
+/// another in the view's log: a view numbers its own requests from one, so the
+/// path is the only stable name for "this head, not that one".
+fn ingress_less_manifest() -> String {
+    format!("version = 1\n{}", route("app", "/app/.*"))
+}
+
+/// A `Blastfile` whose mount claims **every** path (`static "/"`) and whose view
+/// claims every one-segment path, so a request the mount cannot answer is a
+/// `Forward` to the view (`§9.2` steps 1–2).
+///
+/// This is the front-controller shape: the mount is consulted first for a head
+/// that a route also matched, and the route's own `R12` rule must still decide
+/// what the view is allowed to see.
+const MOUNT_BLASTFILE: &str = concat!(
+    "static \"/\" {\n",
+    "  root \"public\"\n",
+    "}\n",
+    "\n",
+    "view app GET, POST \"/*\" {\n",
+    "}\n",
+);
+
+/// A `public/` tree a `static "/"` mount can miss in, removed on drop.
+struct StaticTree {
+    base: PathBuf,
+}
+
+impl StaticTree {
+    /// `<base>/public/index.html` — one file, so the mount is real and every
+    /// other path is a genuine miss rather than an absent root.
+    fn build() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!(
+            "blastit-ingress-mount-{}-{nanos}",
+            std::process::id()
+        ));
+        let path = base.join("public/index.html");
+        std::fs::create_dir_all(path.parent().expect("the tree has a parent"))
+            .expect("create the fixture tree");
+        std::fs::write(&path, b"<title>fixture</title>\n").expect("write the fixture file");
+        let base = std::fs::canonicalize(&base).expect("canonical fixture base");
+        Self { base }
+    }
+
+    fn dir(&self) -> &Path {
+        &self.base
+    }
+}
+
+impl Drop for StaticTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+/// A world booting [`MOUNT_BLASTFILE`] over `tree`, with one view that answers
+/// every request it receives.
+fn mount_world(tree: &StaticTree) -> World {
+    let mut options = Options::new().blastfile(MOUNT_BLASTFILE).script(
+        0,
+        Script::Answer {
+            body: b"the-view".to_vec(),
+        },
+    );
+    options.cfg.manifest_dir = tree.dir().to_path_buf();
+    World::start(options)
 }
 
 /// A request head carrying `Content-Type`, with no `Content-Length` (the
@@ -316,6 +392,10 @@ async fn a_non_empty_body_on_an_ingress_less_route_is_413() {
 async fn a_non_empty_body_on_a_none_route_is_413() {
     // The same rule for an explicit `body = "none"`, on the chunked path where
     // the head alone cannot prove the body empty: the first byte is a `413`.
+    //
+    // No wait for the view here: the head is *not* dispatchable, so there is
+    // nothing to wait for. The byte alone must be the `413`, and the view must
+    // never have seen the head — that is the whole point of the gate.
     let mut world = World::start(
         Options::new()
             .manifest(&ingress_manifest("/none/", "none", false))
@@ -323,9 +403,6 @@ async fn a_non_empty_body_on_a_none_route_is_413() {
     );
 
     world.http.send_head(1, head("POST", "/none/")).await;
-    world
-        .until(|world| !world.log.lock().unwrap().request_ids(0).is_empty())
-        .await;
     world.http.send_body(1, b"x").await;
 
     let frames = world.http.response(1).await;
@@ -339,15 +416,313 @@ async fn a_non_empty_body_on_a_none_route_is_413() {
             .saw(0, |frame| matches!(frame, Frame::ReqBody(_))),
         "no body byte reached the view"
     );
+    assert!(
+        world.log.lock().unwrap().request_ids(0).is_empty(),
+        "the view was handed a head this route must refuse from the body's first byte"
+    );
+}
+
+#[tokio::test]
+async fn a_declared_body_on_an_ingress_less_route_is_413_from_the_head() {
+    // `R12`, and the race `MB.21.4.8` measured: a route that declared no
+    // `[route.ingress]` must refuse a body **from the head**, before any byte
+    // and before `REQ_END`. A view is already warm and answers on `REQ_HEAD`
+    // (the WSGI app really does), so a head that were dispatched would race the
+    // app's `200` against the required `413` — a 1 ms gap between head and body
+    // made the `200` win 5/5 against a real `blastit dev`.
+    let mut world = World::start(Options::new().manifest(&ingress_less_manifest()).script(
+        0,
+        Script::Answer {
+            body: b"ok".to_vec(),
+        },
+    ));
+
+    // A warm view: one request completed through the same route, so the app is
+    // running and answers a head the moment it sees one.
+    world
+        .http
+        .send_request(1, head("GET", "/app/warm"), b"")
+        .await;
+    assert_eq!(status_of(&world.http.response(1).await), 200);
+    assert_eq!(view_paths(&world, 0), vec!["/app/warm"]);
+
+    let mut request = head("POST", "/app/refused");
+    request
+        .headers
+        .push((b"Content-Length".to_vec(), b"5".to_vec()));
+    world.http.send_head(2, request).await;
+    // The gap the real race needed: with the head dispatched, the warm app
+    // answers `200` inside it. The `413` must already be complete here — before
+    // any body byte exists, and without a `REQ_END` at all.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    let frames = world.http.response(2).await;
+    assert_eq!(status_of(&frames), 413);
+    assert!(ended(&frames));
+
+    // The byte that used to win the race changes nothing now.
+    world.http.send_body(2, b"hello").await;
+    assert_eq!(
+        view_paths(&world, 0),
+        vec!["/app/warm"],
+        "the request that declared a body was dispatched to the view"
+    );
+    assert!(
+        !world
+            .log
+            .lock()
+            .unwrap()
+            .saw(0, |frame| matches!(frame, Frame::ReqBody(_))),
+        "a body byte reached the view"
+    );
+    // No second answer, and no byte counted: the request was over at its head.
+    assert!(
+        world.http.leftover().is_empty(),
+        "the late body byte produced another frame"
+    );
+    // The `request` event is written by the scheduler after the response, so
+    // wait for it instead of reading once: a count is a barrier, a lock is not.
     world
         .until(|world| {
             world
-                .log
-                .lock()
-                .unwrap()
-                .saw(0, |frame| matches!(frame, Frame::Cancel))
+                .requests()
+                .iter()
+                .any(|event| event.path() == "/app/refused" && event.bytes_in() == 0)
         })
         .await;
+    let events = world.requests();
+    let refused = events.last().expect("the refused request was reported");
+    assert_eq!(refused.path(), "/app/refused");
+    assert_eq!(refused.status(), 413);
+    assert_eq!(refused.bytes_in(), 0);
+}
+
+#[tokio::test]
+async fn an_ingress_less_request_is_served_only_after_req_end() {
+    // `Content-Length: 0` and a chunked head are the two shapes a route that
+    // takes no body may hold *empty*, and neither is provable from the head: an
+    // `AllowEmptyOnly` request that can reach a view becomes body-ready at its
+    // `REQ_END` and nowhere earlier. The proof is a barrier, not a sleep: a
+    // third request completes on the same `http.chan` (so the scheduler
+    // necessarily handled every earlier frame), and both heads are still
+    // unserved.
+    let mut world = World::start(Options::new().manifest(&ingress_less_manifest()).script(
+        0,
+        Script::Answer {
+            body: b"ok".to_vec(),
+        },
+    ));
+
+    let mut request = head("GET", "/app/gated");
+    request
+        .headers
+        .push((b"Content-Length".to_vec(), b"0".to_vec()));
+    world.http.send_head(1, request).await;
+    world
+        .http
+        .send_head(3, chunked_head("GET", "/app/chunked", "text/plain"))
+        .await;
+
+    world
+        .http
+        .send_request(2, head("GET", "/app/barrier"), b"")
+        .await;
+    assert_eq!(status_of(&world.http.response(2).await), 200);
+    // The barrier: the second request completed, so every frame before its
+    // `REQ_END` was handled — and neither head is at the view.
+    assert_eq!(
+        view_paths(&world, 0),
+        vec!["/app/barrier"],
+        "a head that has not ended was dispatched to the view"
+    );
+
+    // An empty `REQ_END` is the proof, and it is what admits each request.
+    world.http.send(1, &Frame::ReqEnd).await;
+    let frames = world.http.response(1).await;
+    assert_eq!(status_of(&frames), 200);
+    assert_eq!(body_of(&frames), b"ok");
+    world.http.send(3, &Frame::ReqEnd).await;
+    let frames = world.http.response(3).await;
+    assert_eq!(status_of(&frames), 200);
+    assert_eq!(
+        view_paths(&world, 0),
+        vec!["/app/barrier", "/app/gated", "/app/chunked"]
+    );
+}
+
+#[tokio::test]
+async fn a_chunked_ingress_less_head_cannot_reach_the_view_before_req_end() {
+    // A chunked head declares a body whose length is unknown, so the head
+    // cannot refuse it and cannot dispatch it either: the first byte is the
+    // `413`, and the view must never see the head — no `REQ_HEAD`, so no app
+    // response can win.
+    let mut world = World::start(Options::new().manifest(&ingress_less_manifest()).script(
+        0,
+        Script::Answer {
+            body: b"ok".to_vec(),
+        },
+    ));
+
+    world
+        .http
+        .send_head(
+            1,
+            chunked_head("POST", "/app/chunked", "application/octet-stream"),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    world.http.send_body(1, b"x").await;
+
+    let frames = world.http.response(1).await;
+    assert_eq!(status_of(&frames), 413);
+    assert!(ended(&frames));
+    assert!(
+        world.log.lock().unwrap().request_ids(0).is_empty(),
+        "a chunked head reached the view before its `REQ_END`"
+    );
+}
+
+#[tokio::test]
+async fn a_mount_miss_with_a_body_before_req_end_is_413_without_a_view() {
+    // The forward path: a mount that cannot answer hands the request to the
+    // view (`§9.2` step 2), and it must hand it over under the route's own
+    // `R12` rule. A chunked head whose first byte arrives here used to be
+    // dispatched at the head, so the app's `200` beat the byte's `413` — the
+    // same race, on the one path a front controller's mount fronts.
+    let tree = StaticTree::build();
+    let mut world = mount_world(&tree);
+
+    world
+        .http
+        .send_head(
+            1,
+            chunked_head("POST", "/gated-miss", "application/octet-stream"),
+        )
+        .await;
+    // The gap a forwarded head needs to be answered in.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    world.http.send_body(1, b"x").await;
+
+    let frames = world.http.response(1).await;
+    assert_eq!(status_of(&frames), 413);
+    assert!(ended(&frames));
+    assert!(
+        world.log.lock().unwrap().request_ids(0).is_empty(),
+        "the view was handed a head the mount could not answer, before its `REQ_END`"
+    );
+    assert!(
+        world.log.lock().unwrap().spawns.is_empty(),
+        "a view was started for a request that must be refused"
+    );
+}
+
+#[tokio::test]
+async fn a_mount_miss_reaches_the_view_only_after_an_empty_req_end() {
+    // The allowed twin of the case above: the same mount miss, the same route,
+    // no byte — and the view's `200`. The gate is the barrier request's answer,
+    // not a sleep: the second request completes on the same `http.chan`, so the
+    // scheduler has necessarily handled every earlier frame, and the first head
+    // is still not at the view.
+    let tree = StaticTree::build();
+    let mut world = mount_world(&tree);
+
+    world
+        .http
+        .send_head(1, chunked_head("POST", "/gated-miss", "text/plain"))
+        .await;
+    world
+        .http
+        .send_request(2, head("GET", "/barrier-miss"), b"")
+        .await;
+    assert_eq!(status_of(&world.http.response(2).await), 200);
+    assert_eq!(
+        view_paths(&world, 0),
+        vec!["/barrier-miss"],
+        "a forwarded head that has not ended was dispatched to the view"
+    );
+
+    world.http.send(1, &Frame::ReqEnd).await;
+    let frames = world.http.response(1).await;
+    assert_eq!(status_of(&frames), 200);
+    assert_eq!(body_of(&frames), b"the-view");
+    assert_eq!(view_paths(&world, 0), vec!["/barrier-miss", "/gated-miss"]);
+}
+
+#[tokio::test]
+async fn an_ingress_less_head_that_never_ends_is_a_bounded_503() {
+    tokio::time::pause();
+    // A head with no `REQ_END` at all must not park a request: the wait is the
+    // same `queue_timeout` bound a half-collected body has, so the client is
+    // told to come back instead of holding a stream forever.
+    let mut options = Options::new().manifest(&ingress_less_manifest()).script(
+        0,
+        Script::Answer {
+            body: b"ok".to_vec(),
+        },
+    );
+    options.cfg.queue_timeout = Duration::from_millis(50);
+    let mut world = World::start(options);
+
+    let mut request = head("GET", "/app/never");
+    request
+        .headers
+        .push((b"Content-Length".to_vec(), b"0".to_vec()));
+    world.http.send_head(1, request).await;
+
+    let frames = tokio::time::timeout(Duration::from_secs(5), world.http.awaited_response(1))
+        .await
+        .expect("a head with no REQ_END parked the request instead of timing it out");
+    assert_eq!(status_of(&frames), 503);
+    assert_eq!(body_of(&frames), b"queue timeout\n");
+    assert!(ended(&frames));
+    assert!(
+        world.log.lock().unwrap().request_ids(0).is_empty(),
+        "the view was handed a request that never ended"
+    );
+}
+
+#[tokio::test]
+async fn an_ingress_less_head_that_waits_holds_one_queue_slot_and_no_more() {
+    // A head waiting for its `REQ_END` keeps a stream open, so it is counted
+    // against `queue_size` exactly like a half-collected body: a peer cannot
+    // park an unbounded number of them, each holding its raw head. The barrier
+    // is the second head's own answer, not a sleep — `queue_size = 2` is
+    // already reached by the second waiting head, so it is the `503`.
+    let mut options = Options::new().manifest(&ingress_less_manifest()).script(
+        0,
+        Script::Answer {
+            body: b"ok".to_vec(),
+        },
+    );
+    options.cfg.queue_size = 2;
+    let mut world = World::start(options);
+
+    world
+        .http
+        .send_head(
+            1,
+            chunked_head("POST", "/app/held", "application/octet-stream"),
+        )
+        .await;
+    world
+        .http
+        .send_head(
+            2,
+            chunked_head("POST", "/app/over", "application/octet-stream"),
+        )
+        .await;
+
+    let frames = world.http.response(2).await;
+    assert_eq!(status_of(&frames), 503);
+    assert_eq!(body_of(&frames), b"queue full\n");
+    assert!(ended(&frames));
+
+    // The request inside the allowance is untouched by the refusal: its empty
+    // `REQ_END` still admits it.
+    world.http.send(1, &Frame::ReqEnd).await;
+    let frames = world.http.response(1).await;
+    assert_eq!(status_of(&frames), 200);
+    assert_eq!(body_of(&frames), b"ok");
+    assert_eq!(view_paths(&world, 0), vec!["/app/held"]);
 }
 
 #[tokio::test]
@@ -484,6 +859,25 @@ async fn a_full_learn_fallback_queue_answers_503_instead_of_growing() {
         .await;
     gate.add_permits(1);
     assert_eq!(body_of(&world.http.response(2).await), b"held");
+}
+
+/// The target of every request head view `route` was handed, in order.
+///
+/// The id in a view's frame is the view's own (`dispatch` numbers a view's
+/// requests from one), so a test that has to say *which* request reached the
+/// view names the path instead — and the paths here are distinct on purpose.
+fn view_paths(world: &World, route: usize) -> Vec<String> {
+    world
+        .log
+        .lock()
+        .unwrap()
+        .received_by(route)
+        .into_iter()
+        .filter_map(|(_, frame)| match frame {
+            Frame::ReqHead(head) => Some(String::from_utf8_lossy(&head.target).into_owned()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]

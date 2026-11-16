@@ -2290,3 +2290,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T17:19 [MB.21.4.9] (lead) REVIEW FAIL: [MAJOR] the static mount-miss forward path still admits at the head with body_plan AllowEmptyOnly (scheduler.rs:1478 + forward_static:2728 -> admit
 - 2026-11-16T17:19 [MB.21.4.9] (lead) status review -> ready
 - 2026-11-16T17:19 [MB.21.4.9] (lead) attempt 2/4 started
+- 2026-11-16T17:30 [MB.21.4.9] (lead) status ready -> review
+- 2026-11-16T17:38 [MB.21.4.9] (lead) reviewer PASS (round 2): the invariant holds at all six admit_ready sites, base proof from git archive 1d92c6a shows 7 failing cases, this tree 16/16. My gate: 
+- 2026-11-16T17:38 [MB.21.4.9] (lead) status review -> done

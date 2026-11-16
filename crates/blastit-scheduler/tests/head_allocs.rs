@@ -222,10 +222,15 @@ fn heads_received(world: &World, route: usize) -> usize {
         .count()
 }
 
-/// Sends one warm-up head and waits for the view to take it, which pays for
+/// Sends one warm-up request and waits for the view to take it, which pays for
 /// the fork and the socketpair outside every measurement.
+///
+/// The `REQ_END` goes with the head: a route that may hold no body is admitted
+/// only once its `REQ_END` proves the body empty (`R12`), so a head alone never
+/// reaches the view — and nothing here may wait for a frame that cannot come.
 async fn warm_up(world: &mut World, target: &str) {
     world.http.send_head(1000, head("GET", target)).await;
+    world.http.send(1000, &Frame::ReqEnd).await;
     world.until(|world| heads_received(world, 0) > 0).await;
 }
 
@@ -255,10 +260,11 @@ async fn per_head(world: &mut World, target: &str, iterations: usize) -> usize {
     arm();
     for iteration in 0..iterations {
         let want = start + iteration + 1;
-        world
-            .http
-            .send_head(FIRST_ID + iteration as u32, head.clone())
-            .await;
+        let id = FIRST_ID + iteration as u32;
+        world.http.send_head(id, head.clone()).await;
+        // A head that may be empty is not dispatchable until its `REQ_END`:
+        // the gate is the same in both arms, so the delta stays the head's.
+        world.http.send(id, &Frame::ReqEnd).await;
         world
             .until(move |world| completed(world, target) >= want)
             .await;

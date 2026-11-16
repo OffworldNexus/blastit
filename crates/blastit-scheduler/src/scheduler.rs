@@ -534,7 +534,11 @@ struct Request {
     /// `None` when the target could not be decoded at all.
     path_info: Option<String>,
     arrived: Instant,
-    /// Set while the request waits in the admission queue.
+    /// Set while the request waits in the admission queue, and while it waits
+    /// for the body that finishes it — a `Buffer` body still being collected,
+    /// or the `REQ_END` that proves an `AllowEmptyOnly` one empty. Either way
+    /// `expire_queue` answers it with `503 queue timeout` once
+    /// [`SchedulerConfig::queue_timeout`] elapses.
     queued_since: Option<Instant>,
     /// Set when the request was handed to a view; the timeout runs from here.
     dispatched_at: Option<Instant>,
@@ -554,8 +558,10 @@ struct Request {
     /// gate outranks a codec error on a path it answers, and only a `Forward`
     /// ever answers this.
     body_plan_error: Option<u16>,
-    /// The body is buffered and, for `json`/`form`, transcoded: the request may
-    /// be dispatched. A `Buffer` request waits here until its `REQ_END`.
+    /// Whether the request may be dispatched: an `AllowEmptyOnly` or `Buffer`
+    /// body sets it only when its `REQ_END` proved the body complete (a
+    /// `Buffer` one also transcoded), and a `StreamPassthrough` at its head
+    /// (`R12`, `R16`).
     body_ready: bool,
     /// The matched mount claims this path and the head passed §9.2 step 0:
     /// `dispatch_static` is what admits it, and no view is involved until the
@@ -1484,24 +1490,51 @@ impl Scheduler {
                     }
                 };
                 request.body_plan = plan;
-                request.body_ready = !matches!(plan, BodyPlan::Buffer { .. });
+                // `R12` from the other end: only a `raw` route may see its head
+                // before `REQ_END`, because it forwards every byte as it
+                // arrives (`R16`). An `AllowEmptyOnly` route that reaches a
+                // view holds no body at all, and nothing in the head can prove
+                // a chunked — or not yet arrived — body empty: `REQ_END` is the
+                // one proof. Until it arrives the request is not body-ready, so
+                // it cannot be dispatched and no view can answer the head this
+                // request must instead `413` on the first body byte. A
+                // `Buffer` body is collected until it transcodes or overflows.
+                // Both wait under `queued_since`, which bounds a body that
+                // never ends (`expire_queue`, `503 queue timeout`) instead of
+                // parking the request — and both are counted against
+                // `queue_size` here, because a request waiting for a body is a
+                // request a peer is holding open, exactly like one in the
+                // admission queue. Without that count a peer could park an
+                // unbounded number of heads, each holding its raw payload.
+                let waiting = !matches!(plan, BodyPlan::StreamPassthrough);
+                request.body_ready = !waiting;
+                if waiting {
+                    request.queued_since = Some(now);
+                }
                 self.requests.insert(stream_id, request);
-                if matches!(plan, BodyPlan::Buffer { .. }) {
-                    // A structured body is buffered up to `BLASTIT_MAX_BODY_BYTES`
-                    // and transcoded before the view sees a byte.
-                    if self.buffering_count() >= self.cfg.queue_size {
-                        return self.reject(
-                            stream_id,
-                            503,
-                            "Service Unavailable",
-                            "queue full\n",
-                            Outcome::QueueFull,
-                            Some(retry_after_seconds(self.cfg.queue_timeout)),
-                        );
-                    }
-                    if let Some(request) = self.requests.get_mut(&stream_id) {
-                        request.queued_since = Some(now);
-                    }
+                let over_capacity = if !waiting {
+                    false
+                } else if matches!(plan, BodyPlan::Buffer { .. }) {
+                    // A structured body is buffered up to
+                    // `BLASTIT_MAX_BODY_BYTES` and transcoded before the view
+                    // sees a byte.
+                    self.buffering_count() >= self.cfg.queue_size
+                } else {
+                    // An empty-only request holds no bytes, but it holds its
+                    // stream: the same bound, for the same reason.
+                    self.awaiting_end_count() >= self.cfg.queue_size
+                };
+                if over_capacity {
+                    return self.reject(
+                        stream_id,
+                        503,
+                        "Service Unavailable",
+                        "queue full\n",
+                        Outcome::QueueFull,
+                        Some(retry_after_seconds(self.cfg.queue_timeout)),
+                    );
+                }
+                if waiting {
                     return Ok(());
                 }
                 self.admit_ready(stream_id)
@@ -1551,6 +1584,11 @@ impl Scheduler {
     /// A request the scheduler answers itself never reaches a view, so it has
     /// no ingress to honour and may only ever hold an empty body.
     ///
+    /// A routed request whose head **declares** a body is refused here, before
+    /// it is dispatched: `Content-Length: 0` and a chunked head are the only
+    /// shapes that may still be empty, and only `REQ_END` proves it (see
+    /// [`Scheduler::begin_raw`]).
+    ///
     /// `Err` carries the status the scheduler answers with (`400` for a codec
     /// mismatch, `413` for a body on a route that takes none).
     fn plan_request_body(
@@ -1561,27 +1599,22 @@ impl Scheduler {
         let Resolution::Routed { route, .. } = resolution else {
             return Ok(BodyPlan::AllowEmptyOnly);
         };
-        // A route with no `[route.ingress]` may only ever hold an empty body,
-        // and `plan_body` says so from the policy alone: nothing in the head is
-        // read, so the method and the two header `String`s below are not built
-        // for the routes that do not declare ingress at all.
+        // A route with no `[route.ingress]` may only ever hold an empty body.
+        // `plan_body` already answers a declared non-zero length with
+        // `BodyNotAllowed` — the `413` of `R12` — and it is asked here, from
+        // the head, so that answer is synchronous: no view has the head yet,
+        // no body byte has arrived and no `REQ_END` is needed. Only the length
+        // is read, so none of the three header `String`s below is built for
+        // the routes that declare no ingress at all.
         let Some(policy) = self.routes.get(*route).and_then(|route| route.ingress) else {
-            return Ok(BodyPlan::AllowEmptyOnly);
+            let method = std::str::from_utf8(head.method()).unwrap_or_default();
+            return plan_body(method, None, None, None, declared_content_length(head))
+                .map_err(|reject| reject.status());
         };
         let method = String::from_utf8_lossy(head.method()).into_owned();
         let content_type = head_header_text(head, b"content-type");
         let content_encoding = head_header_text(head, b"content-encoding");
-        let content_length = head
-            .headers()
-            .find(|(name, _)| name.eq_ignore_ascii_case(b"content-length"))
-            .map(|(_, value)| {
-                std::str::from_utf8(value)
-                    .ok()
-                    .and_then(|text| text.trim().parse::<u64>().ok())
-                    // A length this build cannot read is treated as unbounded:
-                    // fail closed rather than let it look like zero.
-                    .unwrap_or(u64::MAX)
-            });
+        let content_length = declared_content_length(head);
         plan_body(
             &method,
             Some(policy),
@@ -1711,7 +1744,35 @@ impl Scheduler {
     fn buffering_count(&self) -> usize {
         self.requests
             .values()
-            .filter(|request| !request.body_ready && !request.complete && request.view.is_none())
+            .filter(|request| {
+                // Only a half-collected structured body holds bytes: an
+                // `AllowEmptyOnly` request waiting for its `REQ_END` holds
+                // none, so it must not take a buffer slot from a route that
+                // does buffer.
+                matches!(request.body_plan, BodyPlan::Buffer { .. })
+                    && !request.body_ready
+                    && !request.complete
+                    && request.view.is_none()
+            })
+            .count()
+    }
+
+    /// How many requests are held at their head, waiting for the `REQ_END` that
+    /// proves their body empty (`R12`).
+    ///
+    /// A request in this state has not been dispatched and holds no body byte,
+    /// but a peer is keeping its stream open, so it takes the same
+    /// `queue_size` allowance a half-collected body does: [`Scheduler::begin_raw`]
+    /// answers one over that with `503 queue full` instead of parking it.
+    fn awaiting_end_count(&self) -> usize {
+        self.requests
+            .values()
+            .filter(|request| {
+                !matches!(request.body_plan, BodyPlan::Buffer { .. })
+                    && !request.body_ready
+                    && !request.complete
+                    && request.view.is_none()
+            })
             .count()
     }
 
@@ -2039,13 +2100,32 @@ impl Scheduler {
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.end_seen = true;
         }
-        let view = self
+        let Some((view, held)) = self
             .requests
             .get(&stream_id)
-            .and_then(|request| request.view);
+            .map(|request| (request.view, !request.body_ready))
+        else {
+            self.dropped += 1;
+            return Ok(());
+        };
+        // An `AllowEmptyOnly` request was held back at its head precisely so a
+        // view could not answer it before the `413`: this empty `REQ_END` is the
+        // proof it is empty, so it is here — and nowhere earlier — that it
+        // becomes ready and joins admission. Its head-arrival stamp stops
+        // counting now: `enqueue` starts the queue clock for a request that has
+        // to wait for a slot.
         match view {
             Some((key, id)) => self.view_push(key, id, Frame::ReqEnd),
-            None => Ok(()),
+            None => {
+                if !held {
+                    return Ok(());
+                }
+                if let Some(request) = self.requests.get_mut(&stream_id) {
+                    request.body_ready = true;
+                    request.queued_since = None;
+                }
+                self.admit_ready(stream_id)
+            }
         }
     }
 
@@ -2588,9 +2668,18 @@ impl Scheduler {
     /// its static slot first: the view path takes its own, from its own queue
     /// dispatch. That is the only way a front controller's *first* request can
     /// spawn its view — a slot-holder that never entered the queue could not.
+    ///
+    /// A miss does **not** hand the head to a view just because the mount could
+    /// not answer it: `R12` is the route's rule, and it is decided here exactly
+    /// as in [`Scheduler::begin_raw`]. Only a `raw` route (`StreamPassthrough`)
+    /// is admitted at its head; a `Buffer` body is collected and transcoded, and
+    /// an `AllowEmptyOnly` one is proved empty by its `REQ_END` and nothing
+    /// else. Without that, a front controller's view would get `REQ_HEAD` for a
+    /// request whose first body byte is a `413` — the very race this file's
+    /// head-time refusal exists to close, on the one path a mount fronts.
     fn forward_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         self.release_static_slot(stream_id);
-        let (error, buffered_wait) = match self.requests.get_mut(&stream_id) {
+        let (error, waiting, buffered) = match self.requests.get_mut(&stream_id) {
             Some(request) => {
                 request.static_pending = false;
                 // The view queue measures its own timeout from its own
@@ -2599,13 +2688,15 @@ impl Scheduler {
                 request.deadline = None;
                 (
                     request.body_plan_error.take(),
-                    // Only a body that has NOT arrived yet is waited for: a
-                    // `REQ_END` that landed while the request was queued has
-                    // already transcoded it, so there is nothing left to wait
-                    // for and the request must fall through to `admit_ready`
-                    // (otherwise nothing would ever re-drive it and the queue
-                    // timeout would answer a request that was ready).
-                    matches!(request.body_plan, BodyPlan::Buffer { .. }) && !request.end_seen,
+                    // Only a body that has not ended is waited for: a `REQ_END`
+                    // that landed while the request was queued has already
+                    // proved the body complete (and, for `Buffer`, transcoded
+                    // it), so there is nothing left to wait for and the request
+                    // must fall through to `admit_ready` — otherwise nothing
+                    // would ever re-drive it and the queue timeout would answer
+                    // a request that was ready.
+                    !request.end_seen && !matches!(request.body_plan, BodyPlan::StreamPassthrough),
+                    matches!(request.body_plan, BodyPlan::Buffer { .. }),
                 )
             }
             None => return Ok(()),
@@ -2616,21 +2707,28 @@ impl Scheduler {
             // before this route gained a policy (design §4.4).
             return self.refuse_body(stream_id, status);
         }
-        if buffered_wait {
-            // A structured body is collected and transcoded before the view
-            // sees a byte; `expire_queue` bounds a client that never ends it,
-            // and the slot was handed back above. The count of half-bodies a
+        if waiting {
+            // `expire_queue` bounds a client that never ends the body, and the
+            // static slot was handed back above. The count of waiting bodies a
             // route may hold is the app path's own bound, so a static front
             // controller cannot admit more of them than any other route: that
             // path ([`Scheduler::begin_raw`]) marks the request
-            // `body_ready = false` *before* it asks `buffering_count()`, so the
-            // request being admitted counts itself and `queue_size = N` means
-            // `N - 1` others. Asking first and clearing after would admit one
-            // more here than on any other route.
+            // `body_ready = false` *before* it asks the count, so the request
+            // being admitted counts itself and `queue_size = N` means `N - 1`
+            // others. Asking first and clearing after would admit one more here
+            // than on any other route.
             if let Some(request) = self.requests.get_mut(&stream_id) {
                 request.body_ready = false;
             }
-            if self.buffering_count() >= self.cfg.queue_size {
+            let at_capacity = if buffered {
+                // A structured body is collected and transcoded before the view
+                // sees a byte.
+                self.buffering_count() >= self.cfg.queue_size
+            } else {
+                // An empty-only one holds no bytes, but it holds its stream.
+                self.awaiting_end_count() >= self.cfg.queue_size
+            };
+            if at_capacity {
                 return self.reject(
                     stream_id,
                     503,
@@ -4523,6 +4621,24 @@ fn head_header_text(head: &ReqHeadView<'_>, name: &[u8]) -> Option<String> {
         .find(|(header, _)| header.eq_ignore_ascii_case(name))
         .and_then(|(_, value)| std::str::from_utf8(value).ok())
         .map(str::to_owned)
+}
+
+/// The `Content-Length` a head still in its raw payload declares, if any.
+///
+/// The header list is walked in place, so no `String` is built for a route that
+/// declares no ingress and reads only this. A length this build cannot parse
+/// (a non-ASCII value, a sign, a bad digit) is `u64::MAX`: a declared body this
+/// build cannot size is treated as unbounded, so it fails closed instead of
+/// looking like zero.
+fn declared_content_length(head: &ReqHeadView<'_>) -> Option<u64> {
+    head.headers()
+        .find(|(name, _)| name.eq_ignore_ascii_case(b"content-length"))
+        .map(|(_, value)| {
+            std::str::from_utf8(value)
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .unwrap_or(u64::MAX)
+        })
 }
 
 /// Sleeps until `deadline`, or forever when there is none.

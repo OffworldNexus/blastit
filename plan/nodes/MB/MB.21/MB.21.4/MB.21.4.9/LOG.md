@@ -39,3 +39,15 @@ status review -> ready
 ## 2026-11-16T17:19 [lead]
 
 attempt 2/4 started
+
+## 2026-11-16T17:30 [lead]
+
+status ready -> review
+
+## 2026-11-16T17:38 [lead]
+
+reviewer PASS (round 2): the invariant holds at all six admit_ready sites, base proof from git archive 1d92c6a shows 7 failing cases, this tree 16/16. My gate: make check exit 0, 166 suites. One MINOR (two next_deadline/expire_queue comments still say 'a structured body') left for the 4.5.6 sweep.
+
+## 2026-11-16T17:38 [lead]
+
+status review -> done
