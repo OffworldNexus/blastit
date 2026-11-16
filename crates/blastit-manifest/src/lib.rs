@@ -93,7 +93,7 @@
 //! `php` is the embedded worker ([`PhpPolicy`]), not the retired pool.
 //!
 //! [`blastfile::read`] is the one reader of a `Blastfile`: a regular file of at
-//! most 1 MiB, refused by size from its metadata before a byte is read, and
+//! most 16 MiB, refused by size from its metadata before a byte is read, and
 //! never a FIFO or a device.
 
 #![deny(missing_docs)]

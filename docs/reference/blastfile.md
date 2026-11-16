@@ -564,13 +564,35 @@ It is lossless: every comment survives, and a `--learn` edit goes through the
 same tree, so a comment above a view stays above it. `blastit check` never
 rewrites the file: `blastit fmt --check` is its own CI step.
 
+## Limits
+
+A `Blastfile` is policy, not input, so these budgets exist to bound a generated
+file, never to refuse a real one. Each refusal is one line and names the budget.
+
+| Budget | Value | Refused with |
+|---|---|---|
+| file size | 16 MiB (16 777 216 bytes) | ``<file>: the file is <n> bytes; Blastfile is limited to 16777216 bytes — split the grants into a `trait`, or delete a generated block`` |
+| tokens | 4 194 304 | ``<file>: <n> tokens; Blastfile is limited to 4194304 — the file is too large: replace repeated `query '…'` lines with table or column grants (`select`, `insert`, `update`, `delete`), or fold the shared grants into a `trait` that many views `use` `` |
+| trivia runs (whitespace and comments) | 4 194 304 | ``<file>: <n> trivia runs; Blastfile is limited to 4194304 — the file is too large: delete the generated comments and blank lines, or fold the shared grants into a `trait` that many views `use` `` |
+| list items (methods, patterns, columns, preload, `immutable`, grants) | 4 096 | ``<file>:<line>:<col>: a list holds at most 4096 items`` |
+| pattern length | 4 096 bytes | ``<file>:<line>:<col>: a pattern holds at most 4096 bytes`` |
+| `app` name length | 256 characters | ``<file>:<line>:<col>: an `app` name is 1 to 256 characters with no control byte`` |
+
+Blocks nest two deep at most (`view { postgres { … } }`), and a value is printed
+at 120 characters in an error, cut with `…`. A 4 KiB pattern is a longer
+*pattern*, not a bigger *regex*: the program `regex '…'` compiles is still bounded
+by `REGEX_SIZE_LIMIT` (2^20 bytes) and the nest limit, so the source cap never
+widens what the scheduler will compile.
+
 ## Errors
 
 Every syntax or whole-file check error is one line,
 `<file>:<line>:<col>: <what is wrong and how to write it>`. A parse error names
 the token; a whole-file check names the view and the directive. A refusal with no
 position — an unset `$IDENT`, a missing `root`, a refused `body raw` — names the
-view and the fix instead.
+view and the fix instead. A file, token stream, list or pattern over a [limit
+above](#limits) is refused by that budget's sentence, and the advice it carries
+is an edit this one file can take.
 
 | Written | The message names |
 |---|---|

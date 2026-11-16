@@ -519,6 +519,7 @@ fn push_indent(out: &mut String, indent: usize) {
     clippy::indexing_slicing
 )]
 mod tests {
+    use super::super::MAX_SOURCE_BYTES;
     use super::super::syntax::{Cst, Element, NodeId, NodeKind};
     use super::super::tokens::TriviaKind;
     use super::{fmt, parse};
@@ -779,17 +780,20 @@ mod tests {
 
     /// A file whose canonical form would grow past the cap is refused, and the
     /// refusal names the cap (R25).
+    ///
+    /// The witness has to build a canonical form over 16 MiB — the formatter
+    /// indents every line, so the source is ~9 MiB of one-line grants.
     #[test]
     fn a_file_it_would_grow_past_the_cap_is_refused() {
         let mut source = String::from("view v \"/x\" {\npostgres {\n");
-        for _ in 0..80_000 {
+        for _ in 0..1_000_000 {
             source.push_str("delete t\n");
         }
         source.push_str("}\n}\n");
-        assert!(source.len() < 1_048_576, "{} bytes", source.len());
+        assert!(source.len() < MAX_SOURCE_BYTES, "{} bytes", source.len());
         let error = fmt(&source).expect_err("the canonical form is over the cap");
         assert!(
-            error.to_string().contains("1048576"),
+            error.to_string().contains(&MAX_SOURCE_BYTES.to_string()),
             "the refusal names the cap: {error}"
         );
     }

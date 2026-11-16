@@ -36,7 +36,7 @@ use crate::error::{ManifestError, ManifestErrors, Position, clipped};
 ///
 /// # Errors
 ///
-/// [`ManifestError::TooLarge`] over 1 MiB, the lexer's own refusals (§5.3), and
+/// [`ManifestError::TooLarge`] over 16 MiB, the lexer's own refusals (§5.3), and
 /// §6.7's parse refusals — each at the offending token's `line:col`.
 pub(crate) fn parse(text: &str) -> Result<Cst, ManifestErrors> {
     if text.len() > MAX_SOURCE_BYTES {
@@ -1404,7 +1404,7 @@ impl<'a> Parser<'a> {
 )]
 mod tests {
     use super::super::syntax::{Cst, NodeKind, print_lossless};
-    use super::super::{MAX_LIST_ITEMS, MAX_SOURCE_BYTES};
+    use super::super::{MAX_LIST_ITEMS, MAX_PATTERN_BYTES, MAX_SOURCE_BYTES};
     use super::parse;
 
     /// The tree of `text`, which must parse.
@@ -1739,8 +1739,8 @@ mod tests {
     }
 
     /// §8.3's rows are parse refusals, at the pattern's own `line:col` — the
-    /// hook is what makes "a pattern holds at most 256 bytes" a parse error
-    /// rather than a lowering error (§8.1).
+    /// hook is what makes "a pattern holds at most `MAX_PATTERN_BYTES` bytes" a
+    /// parse error rather than a lowering error (§8.1).
     #[test]
     fn a_bad_pattern_is_refused_where_it_is_written() {
         for (text, message) in [
@@ -1793,14 +1793,23 @@ mod tests {
             refusal("view v \"/a\", \"x\" {\n    body none\n}\n"),
             "1:14: a pattern starts with `/`: write `/x`"
         );
-        let over = format!("view v \"/{}\" {{\n    body none\n}}\n", "a".repeat(256));
-        assert_eq!(refusal(&over), "1:8: a pattern holds at most 256 bytes");
-        // The raw form is capped at the same 256 bytes.
+        let over = format!(
+            "view v \"/{}\" {{\n    body none\n}}\n",
+            "a".repeat(MAX_PATTERN_BYTES)
+        );
+        assert_eq!(
+            refusal(&over),
+            format!("1:8: a pattern holds at most {MAX_PATTERN_BYTES} bytes")
+        );
+        // The raw form is capped at the same `MAX_PATTERN_BYTES`.
         let raw = format!(
             "view v regex '/{}' {{\n    body none\n}}\n",
-            "a".repeat(256)
+            "a".repeat(MAX_PATTERN_BYTES)
         );
-        assert_eq!(refusal(&raw), "1:14: a pattern holds at most 256 bytes");
+        assert_eq!(
+            refusal(&raw),
+            format!("1:14: a pattern holds at most {MAX_PATTERN_BYTES} bytes")
+        );
     }
 
     #[test]
@@ -2308,7 +2317,7 @@ mod tests {
         }
         for text in documents(MAX_LIST_ITEMS + 1) {
             assert!(
-                refusal(&text).ends_with("a list holds at most 256 items"),
+                refusal(&text).ends_with(&format!("a list holds at most {MAX_LIST_ITEMS} items")),
                 "{:.80}",
                 text
             );
@@ -2354,7 +2363,7 @@ mod tests {
         assert_eq!(
             refusal(&over),
             format!(
-                "the file is {} bytes; Blastfile is limited to 1048576 bytes — split the grants into a `trait`, or delete a generated block",
+                "the file is {} bytes; Blastfile is limited to {MAX_SOURCE_BYTES} bytes — split the grants into a `trait`, or delete a generated block",
                 MAX_SOURCE_BYTES + 1
             )
         );

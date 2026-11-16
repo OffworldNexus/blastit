@@ -188,7 +188,7 @@ Two properties make this safe to build cheaply:
 
 | Change | Why | Consumers |
 |---|---|---|
-| `Manifest::name()`, backed by a new `name: Option<String>` (from `app "<name>"`) | the keyword must exist and must be carried | `fmt`/`--learn` preservation; validated (non-empty, ≤ 64 `char`s, no control byte). Carried in 0.2.0 with no other consumer — recorded as a named follow-up (`MB.21.4.3` may add it to the `--json` document when the schema moves). Dropping it would make the guide's first line a syntax error, which is worse than one carried label. |
+| `Manifest::name()`, backed by a new `name: Option<String>` (from `app "<name>"`) | the keyword must exist and must be carried | `fmt`/`--learn` preservation; validated in `lower::app` by `MAX_APP_NAME_CHARS` (non-empty, ≤ 256 `char`s, no control byte), refused as `AppNameInvalid` at the name's own `line:col` (§4.5). Carried in 0.2.0 with no other consumer — recorded as a named follow-up (`MB.21.4.3` may add it to the `--json` document when the schema moves). Dropping it would make the guide's first line a syntax error, which is worse than one carried label. |
 | `Manifest::mounts() -> &[StaticMount]` (`StaticMount { prefix, policy }`) | `static` is a top-level mount, not a route | `RoutingTable`, `static_asset` boots, `check`, `fmt` |
 | `StaticPolicy` gains `fallback: Option<String>` and loses `spa: bool` | `fallback "<file>"` is a different file from `index` | `static_asset::missed`, `route.rs` |
 | `Manifest::php() -> Option<&PhpPolicy>` | one `entrypoint php` for the whole file | `route.rs`, `stage0` |
@@ -222,23 +222,32 @@ the design says so here, and no file spelling exists for either.
 
 | Budget | Value | Where enforced | Refusal |
 |---|---|---|---|
-| `MAX_SOURCE_BYTES` | `1_048_576` (1 MiB) | `blastfile::read` (refuses a non-regular file, then `take(MAX_SOURCE_BYTES + 1)`, so a FIFO, `/dev/zero` or a growing file cannot exceed the cap) and `parse` (len before lexing) | `<path>: the file is <n> bytes; Blastfile is limited to 1048576 bytes — split the grants into a `trait`, or delete a generated block` |
-| `MAX_TOKENS` | `262_144` | `lexer::lex` as it pushes | `<path>: <n> tokens; Blastfile is limited to 262144 — split the file` |
-| `MAX_TRIVIA` | `262_144` (one node per whitespace/comment run) | `lexer::push_trivia` | `<path>: <n> trivia runs; Blastfile is limited to 262144 — split the file` |
+| `MAX_SOURCE_BYTES` | `16_777_216` (16 MiB) | `blastfile::read` (refuses a non-regular file, then `take(MAX_SOURCE_BYTES + 1)`, so a FIFO, `/dev/zero` or a growing file cannot exceed the cap) and `parse` (len before lexing) | ``<path>: the file is <n> bytes; Blastfile is limited to 16777216 bytes — split the grants into a `trait`, or delete a generated block`` |
+| `MAX_TOKENS` | `4_194_304` | `lexer::lex` as it pushes | ``<path>: <n> tokens; Blastfile is limited to 4194304 — the file is too large: replace repeated `query '…'` lines with table or column grants (`select`, `insert`, `update`, `delete`), or fold the shared grants into a `trait` that many views `use` `` |
+| `MAX_TRIVIA` | `4_194_304` (one node per whitespace/comment run) | `lexer::push_trivia` | ``<path>: <n> trivia runs; Blastfile is limited to 4194304 — the file is too large: delete the generated comments and blank lines, or fold the shared grants into a `trait` that many views `use` `` |
 | `MAX_BLOCK_DEPTH` | `2` nested block levels | `parser.rs` depth counter | `<path>:<l>:<c>: blocks nest two deep at most: a view's `postgres` block is the deepest` |
-| `MAX_LIST_ITEMS` | `256` | list loops (methods, patterns, columns, preload, immutable, table grants) | `<path>:<l>:<c>: a list holds at most 256 items` |
-| `MAX_PATTERN_BYTES` | `256` | `pattern.rs`, both the quoted form and `regex '…'` | `<path>:<l>:<c>: a pattern holds at most 256 bytes` |
+| `MAX_LIST_ITEMS` | `4_096` | list loops (methods, patterns, columns, preload, immutable, table grants) | `<path>:<l>:<c>: a list holds at most 4096 items` |
+| `MAX_PATTERN_BYTES` | `4_096` (4 KiB) | `pattern.rs`, both the quoted form and `regex '…'`; the compiled program stays bounded by `REGEX_SIZE_LIMIT` (`1 << 20`) and `REGEX_NEST_LIMIT` | `<path>:<l>:<c>: a pattern holds at most 4096 bytes` |
+| `MAX_APP_NAME_CHARS` | `256` | `lower::app` | ``<path>:<l>:<c>: an `app` name is 1 to 256 characters with no control byte`` |
 | `MAX_QUOTED_CHARS` | `120` (existing) | `error::quoted` | value cut with `…`, control bytes escaped |
 
 The file-size refusal is the answer to "the exact refusal for an unbounded
 input": a hostile or generated `Blastfile` can hold millions of `view` blocks, and
 a reader that agrees to lex them all is a denial of service against the
-developer's own machine and the deploy's boot budget. 1 MiB is ~40x the largest
-manifest this repository ships (`e2e/` fixtures are < 2 KB) and ~200x the
-reference's complete example. Every entry point — stage 0, stage 1, `dev`,
-`check`, `fmt`, `fold` — goes through `blastfile::read(path)`, which refuses a
-non-regular file and reads at most `MAX_SOURCE_BYTES + 1`, so the cap costs one
-`stat` and never a multi-megabyte allocation. `Manifest::from_blastfile_str` is
+developer's own machine and the deploy's boot budget. 16 MiB is ~50 000x the
+largest `Blastfile` this repository ships (320 bytes,
+`python/tests/runnable_docs/fixtures/findings/Blastfile`) and ~24 000x the
+reference's complete example (~700 bytes): the budget exists to bound a generated
+file, never to refuse a real one. A `--learn` run writes one `query '…'` line per
+distinct statement, so a six-hundred-statement app is tens of kilobytes, and the
+refusal it could still meet names an edit this one file can take — table or
+column grants instead of repeated `query` lines, or a `trait` many views `use` —
+never an "include" it does not have. Every entry point —
+stage 0, stage 1, `dev`, `check`, `fmt` and `fold` — goes through
+`blastfile::read(path)`, which refuses a non-regular file and reads at most
+`MAX_SOURCE_BYTES + 1`, so the cap costs one `stat` and, for a hostile 16 MiB
+boot, exactly one 16 MiB allocation followed by a token and trivia stream that
+`MAX_TOKENS`/`MAX_TRIVIA` (4 194 304 each) still bound. `Manifest::from_blastfile_str` is
 reachable only from `read` and from tests.
 ## 5. Tokens, Lexer and Input Bounds (item 1)
 
@@ -618,9 +627,11 @@ corpus, the anchoring corpus, the budgets).
 The fragment is compiled by the **existing** `routing::compile_pattern`:
 pre-compiled on its own (so an unbalanced `)` can never be rescued by the wrapper
 into a catch-all), then as `^(?:…)$`, with `REGEX_SIZE_LIMIT`,
-`REGEX_NEST_LIMIT`. Both pattern forms are capped at `MAX_PATTERN_BYTES` (256)
+`REGEX_NEST_LIMIT`. Both pattern forms are capped at `MAX_PATTERN_BYTES` (4 KiB)
 in the parser, so a `regex` cannot hide a megabyte pattern the quoted form would
-refuse.
+refuse. That cap is on the pattern's **source text** only: the compiled program is
+still bounded by `REGEX_SIZE_LIMIT` (`1 << 20`) and `REGEX_NEST_LIMIT`, unchanged,
+so a longer pattern never buys a bigger regex (§17.4).
 
 ### 8.2 Why a compiler, not "escape then replace"
 
@@ -650,7 +661,7 @@ character class or a quantifier of its own — the property §17.3 relies on.
 | `"/x/*/y"` | `` `*` is only valid at the end of a pattern; write `/x/*` `` |
 | `"/x/{a}/{a:int}"` | `` the parameter `{a}` appears twice; a pattern names each parameter once `` |
 | `"x"` (no leading `/`) | `` a pattern starts with `/`: write `/x` `` |
-| a pattern over 256 bytes | `` a pattern holds at most 256 bytes `` (both forms) |
+| a pattern over 4096 bytes | `` a pattern holds at most 4096 bytes `` (both forms; the compiled regex is still bounded by `REGEX_SIZE_LIMIT`) |
 | `regex "…"` (escaped string) | `` `regex` takes a raw string: write `regex '/v[0-9]+/items'` `` |
 | `regex` with lookaround/backreference | the `regex` crate's own message, escaped and cut: `` regex `/a(?=b)/` does not compile: look-around is not supported `` |
 
@@ -1532,10 +1543,12 @@ classification at request time.
 `regex '…'` is compiled by the existing `routing::compile_pattern`: the Rust
 `regex` crate (no backtracking, no lookaround, no backreferences) with
 `REGEX_SIZE_LIMIT`, `REGEX_NEST_LIMIT` and the double compile. The parser caps
-both pattern forms at 256 bytes (§4.5, §8.1), so the compile budget has a source
-bound as well as an output bound. A pattern the crate rejects produces a boot
-error naming it, not a panic. The raw-string form means a backslash reaches the
-compiler exactly as written; no escape layer can disagree with the compiler.
+both pattern forms at 4 KiB (§4.5, §8.1), so the compile budget has a source
+bound as well as an output bound — and `REGEX_SIZE_LIMIT` (`1 << 20`) still
+bounds the compiled program, so the source cap is not a wider compile budget. A
+pattern the crate rejects produces a boot error naming it, not a panic. The
+raw-string form means a backslash reaches the compiler exactly as written; no
+escape layer can disagree with the compiler.
 
 ### 17.5 No parser differentials
 
@@ -1665,7 +1678,7 @@ host (TS-25); a test that needs longer is an e2e test, not a critical one.
 
 | R | Unit test | Critical test | Other / `gate` |
 |---|---|---|---|
-| R1 | `lexer.rs` `mod tests` (one case per token kind, per §5.3 row) | `crates/blastit-manifest/tests/critical_blastfile_lexer.rs` (1 MiB input, token cap, `\r`, non-ASCII) | review for `i += 1` (code-shape claims are review + `gate`, never a fake test) |
+| R1 | `lexer.rs` `mod tests` (one case per token kind, per §5.3 row) | `crates/blastit-manifest/tests/critical_blastfile_lexer.rs` (16 MiB input, token cap, `\r`, non-ASCII) | review for `i += 1` (code-shape claims are review + `gate`, never a fake test) |
 | R2 | `blastfile_errors.rs` (one `line:col` case per parser production, not only the lexer — TS-9) | `critical_blastfile_errors.rs` (rendering, path escaping, the one-line property) | — |
 | R3a | `lexer.rs` `mod tests::caps` | `critical_blastfile_lexer.rs::the_size_cap_is_checked_without_reading` (a `set_len` regular file of exactly `MAX_SOURCE_BYTES + 1` bytes, refused; and a mode-`000` file of that size returns `TooLarge`, **not** `PermissionDenied` — the observable "the size was known before any read"), `::a_fifo_cannot_exceed_the_cap` | `blastfile_discovery.rs` (the `read` helper) |
 | R3b | `lexer.rs` `mod tests::caps` | `critical_blastfile_lexer.rs::the_token_cap_trips_while_pushing` (a file of exactly `MAX_TOKENS + 1` tokens) | — |
@@ -1791,7 +1804,7 @@ end (a MINOR is not a reason for another round).
 | S7 | `MAX_SOURCE_BYTES` cannot be enforced before allocation | **accepted** -> §4.5, R3: `blastfile::read(path)` stats before reading; `parse` re-checks `len()` first; the test uses a `set_len` file |
 | S8 | EBNF: grants unreachable, store block reused | **accepted** -> §6.1: `grant_block`/`grant` productions, `store_grant` |
 | S9 | `unrestricted` accepted in an endpoint body | **accepted** -> §6.1: an endpoint block holds `body` only (a grant is per view), so no grant form exists there; §6.7 names the refusal |
-| S10 | no source or compile budget for `regex` | **accepted** -> §4.5/§8.1: both pattern forms capped at 256 bytes; the existing size/nest limits unchanged |
+| S10 | no source or compile budget for `regex` | **accepted** -> §4.5/§8.1: both pattern forms capped at 4 KiB; the existing size/nest limits unchanged, and `REGEX_SIZE_LIMIT` still bounds the compiled program |
 | S11 | `fmt` may write a file the reader refuses | **accepted** -> §14.2/§14.4, R25: `fmt` re-parses and re-checks the cap before writing; a test refues a file it would grow past the cap |
 | S12 | view routing accepts `..`/empty segments; §17.3 over-claimed | **accepted** -> §9.2/§17.3: `resolve` refuses `..` and `//` with a `400` before any mount/view; the guarantee text is scoped to that |
 | S13 | `root` dotfile rule described as unchanged but does not exist | **accepted** -> §9.1: stated as a new hardening rule with a test |
@@ -1997,7 +2010,7 @@ the owner. Its seven findings are resolved here without another round:
 | `root`'s dotfile rule described as today's | **accepted** -> §9.1: stated as a **new** rule, with the `root ".git"` case named |
 | `bind_view_sockets`/`supervise` still key by route index | **accepted** -> §10.3: both become `sandbox`-keyed in `MB.21.3.0`, with the listener/worker assertion |
 | `TRACE` on a method-less view | **accepted** -> §8.4: `lookup` refuses `TRACE`/`CONNECT` for every view, method list or not |
-| the 1 MiB cap bypassed by boot readers | **accepted** -> §4.5: stage 0, stage 1, `dev`, `check`, `fmt` and `fold` all read through `blastfile::read`; `from_blastfile_str` is reachable only from `read` and tests |
+| the 16 MiB cap bypassed by boot readers | **accepted** -> §4.5: stage 0, stage 1, `dev`, `check`, `fmt` and `fold` all read through `blastfile::read`; `from_blastfile_str` is reachable only from `read` and tests |
 | `InvalidApp`/`PhpEntryInvalid` echo their value | **accepted** -> §18: both refuse without printing the callable/entry, because a pasted DSN or token can land in either slot |
 
 ### Per-ID ledger for the round-3/4 findings the summary tables omitted

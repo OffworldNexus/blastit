@@ -111,14 +111,14 @@ fn a_broken_file_is_refused() {
 #[test]
 fn over_cap_is_refused() {
     let mut source = String::from("view v \"/x\" {\npostgres {\n");
-    for _ in 0..80_000 {
+    for _ in 0..1_000_000 {
         source.push_str("delete t\n");
     }
     source.push_str("}\n}\n");
-    assert!(source.len() < 1_048_576, "{} bytes", source.len());
+    assert!(source.len() < 16_777_216, "{} bytes", source.len());
     let error = blastfile::fmt(&source).expect_err("the canonical form is over the cap");
     assert!(
-        error.to_string().contains("1048576"),
+        error.to_string().contains("16777216"),
         "the refusal names the cap: {error}"
     );
 }

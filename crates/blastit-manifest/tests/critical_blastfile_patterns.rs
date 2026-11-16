@@ -89,18 +89,19 @@ fn a_parameter_emits_only_its_fixed_fragment() {
     );
 }
 
-/// A 257-byte pattern is refused in both spellings (§4.5, §8.3).
+/// A pattern one byte over the 4 KiB cap is refused in both spellings (§4.5,
+/// §8.3).
 #[test]
-fn a_257_byte_pattern_is_refused() {
-    let long = format!("\"/{}\"", "a".repeat(256));
+fn a_4097_byte_pattern_is_refused() {
+    let long = format!("\"/{}\"", "a".repeat(4_096));
     assert_eq!(
         refusal(&format!("view v {long} {{\n}}\n")),
-        "1:8: a pattern holds at most 256 bytes"
+        "1:8: a pattern holds at most 4096 bytes"
     );
-    let long = format!("regex '/{}'", "a".repeat(256));
+    let long = format!("regex '/{}'", "a".repeat(4_096));
     assert_eq!(
         refusal(&format!("view v {long} {{\n}}\n")),
-        "1:14: a pattern holds at most 256 bytes"
+        "1:14: a pattern holds at most 4096 bytes"
     );
 }
 

@@ -25,7 +25,9 @@
 //! fragment is compiled by the existing `routing::compile_pattern` —
 //! pre-compiled on its own, so an unbalanced `)` can never be rescued by the
 //! wrapper into a catch-all, then wrapped as `^(?:…)$` so it has to match the
-//! whole path.
+//! whole path. The cap is on the pattern's text only: the compiled program is
+//! still bounded by `REGEX_SIZE_LIMIT` (`1 << 20`) and `REGEX_NEST_LIMIT`, so a
+//! longer source pattern never buys a bigger regex (§17.4).
 //!
 //! [`normalise_methods`] implements §8.4's table: `HEAD` is implied by `GET`,
 //! written order is kept, duplicates are deduplicated, and `CONNECT`/`TRACE`
@@ -36,12 +38,18 @@
 use crate::error::{ManifestError, Position, regex_message};
 use crate::routing::compile_pattern;
 
-/// Largest pattern either spelling may hold, in bytes (§4.5).
+/// Largest pattern either spelling may hold, in **bytes** (§4.5): 4 KiB.
 ///
 /// It lives here rather than beside the other budgets in `mod.rs` because this
 /// is the one place that sees the text of both forms (§8.1), and it is checked
 /// before either is scanned or compiled.
-pub(crate) const MAX_PATTERN_BYTES: usize = 256;
+///
+/// This is a cap on the *source* pattern, not on the compiled regex: the program
+/// `regex '…'` builds is still bounded by `REGEX_SIZE_LIMIT` (`routing.rs`,
+/// `1 << 20`) and `REGEX_NEST_LIMIT`, which are unchanged. A 4 KiB pattern is
+/// permission to write a longer pattern, never to compile a bigger program than
+/// 0.2.0 already allowed (§17.4).
+pub(crate) const MAX_PATTERN_BYTES: usize = 4_096;
 
 /// The fragment `{name}` emits: one non-empty segment (§8.1).
 const SEGMENT: &str = "[^/]+";
@@ -580,40 +588,43 @@ mod tests {
         );
     }
 
-    /// §4.5's cap, in bytes, for both spellings — and 256 bytes is still legal.
+    /// §4.5's cap, in bytes, for both spellings — and the cap itself is still
+    /// legal. The expected sentence is built from `MAX_PATTERN_BYTES`, so it
+    /// cannot drift from the constant `error.rs` interpolates.
     #[test]
-    fn a_pattern_holds_at_most_256_bytes() {
+    fn a_pattern_holds_at_most_max_pattern_bytes() {
         let at_cap = format!("/{}", "a".repeat(MAX_PATTERN_BYTES - 1));
         assert_eq!(at_cap.len(), MAX_PATTERN_BYTES);
         assert_eq!(fragment(&at_cap).len(), MAX_PATTERN_BYTES);
         assert_eq!(
             compile_regex(&at_cap, AT).expect("at the cap").fragment(),
             at_cap,
-            "the raw form is capped at the same 256 bytes"
+            "the raw form is capped at the same {MAX_PATTERN_BYTES} bytes"
         );
 
+        let sentence = format!("3:7: a pattern holds at most {MAX_PATTERN_BYTES} bytes");
         let over = format!("/{}", "a".repeat(MAX_PATTERN_BYTES));
         assert_eq!(over.len(), MAX_PATTERN_BYTES + 1);
-        assert_eq!(refused(&over), "3:7: a pattern holds at most 256 bytes");
+        assert_eq!(refused(&over), sentence);
         assert_eq!(
             compile_regex(&over, AT)
                 .expect_err("over the cap")
                 .to_string(),
-            "3:7: a pattern holds at most 256 bytes"
+            sentence
         );
 
-        // The cap is bytes, not characters: 127 two-byte characters after
-        // `/x` are 256 bytes and legal, 128 are not.
-        let two_byte = format!("/x{}", "é".repeat(127));
+        // The cap is bytes, not characters: 2047 two-byte characters after
+        // `/x` are 4096 bytes and legal, 2048 are not.
+        let two_byte = format!("/x{}", "é".repeat((MAX_PATTERN_BYTES - 2) / 2));
         assert_eq!(two_byte.len(), MAX_PATTERN_BYTES);
         assert!(compile(&two_byte, AT).is_ok());
-        let over_two_byte = format!("/x{}", "é".repeat(128));
+        let over_two_byte = format!("/x{}", "é".repeat((MAX_PATTERN_BYTES - 2) / 2 + 1));
         assert_eq!(over_two_byte.len(), MAX_PATTERN_BYTES + 2);
         assert_eq!(
             compile(&over_two_byte, AT)
                 .expect_err("over the cap")
                 .to_string(),
-            "3:7: a pattern holds at most 256 bytes"
+            sentence
         );
     }
 
@@ -841,19 +852,19 @@ mod tests {
         for (error, message) in [
             (
                 ManifestError::PatternNotAnchored { at: Position::NONE },
-                "a pattern starts with `/`: write `/x`",
+                "a pattern starts with `/`: write `/x`".to_owned(),
             ),
             (
                 ManifestError::PatternTooLong { at: Position::NONE },
-                "a pattern holds at most 256 bytes",
+                format!("a pattern holds at most {MAX_PATTERN_BYTES} bytes"),
             ),
             (
                 ManifestError::PatternStarPosition { at: Position::NONE },
-                "`*` is only valid at the end of a pattern; write `/x/*`",
+                "`*` is only valid at the end of a pattern; write `/x/*`".to_owned(),
             ),
             (
                 ManifestError::PatternParameterUnnamed { at: Position::NONE },
-                "`{}` has no name; write `{id}`, `{id:int}` or `{id:uuid}`",
+                "`{}` has no name; write `{id}`, `{id:int}` or `{id:uuid}`".to_owned(),
             ),
         ] {
             assert_eq!(error.to_string(), message);

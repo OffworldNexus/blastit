@@ -54,17 +54,17 @@ fn a_wall_of_braces_is_refused_without_recursion() {
     }
 }
 
-/// A 256 KiB file of views lowers: the size is bounded by the reader, and the
+/// A 512 KiB file of views lowers: the size is bounded by the reader, and the
 /// lowering is one pass (`R4`).
 #[test]
-fn a_quarter_megabyte_of_views_lowers() {
-    let mut source = String::with_capacity(262_144 + 32);
+fn a_half_megabyte_of_views_lowers() {
+    let mut source = String::with_capacity(512 * 1024 + 32);
     let mut views = 0u32;
-    while source.len() < 262_144 {
+    while source.len() < 512 * 1024 {
         source.push_str(&format!("view v{views} \"/v{views}\" {{\n}}\n"));
         views = views.saturating_add(1);
     }
-    assert!(source.len() >= 262_144);
+    assert!(source.len() >= 512 * 1024);
     let manifest = Manifest::from_blastfile_str(&source).expect("lowers");
     assert_eq!(manifest.route_count(), views as usize);
     // Every view is its own sandbox, in file order.

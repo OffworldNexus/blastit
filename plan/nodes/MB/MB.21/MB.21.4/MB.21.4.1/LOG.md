@@ -115,3 +115,7 @@ status active -> review
 ## 2026-11-16T10:10 [lead]
 
 status review -> done
+
+## 2026-11-16T10:10 [lead]
+
+commit a3ac338; reviewer PASS (own runs: make check exit 0, 164 ok, docs-test 49/49, critical_guard 14 authorized). Six MINOR findings handed to MB.21.4.2: escaped manifest path in the missing/empty sentences (config.rs:2413, check.rs:304, stage0.rs:2583/2879), fs::read_to_string -> blastfile::read at every call site (a FIFO at ./Blastfile currently blocks check), a real fmt-regression test (print.rs's test never calls fmt), RESULT.md's missing critical_rewrite behaviour note, docs/local.md:80,92 prose (MB.21.5.1), and the duplicated pattern_is_writable / is_all_static predicates.

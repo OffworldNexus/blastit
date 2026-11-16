@@ -29,6 +29,30 @@ pub(crate) fn lex(text: &str) -> Result<Lexed, ManifestError> {
     Lexer::new(text).run()
 }
 
+/// The two budgets one lexing pass enforces (§4.5).
+///
+/// Production has exactly one instance, [`Caps::PRODUCTION`], built from
+/// [`MAX_TOKENS`] and [`MAX_TRIVIA`]. The unit tests lower it so a cap witness
+/// trips the real `push`/`push_trivia` check with a handful of items instead of
+/// allocating in proportion to the production budget; the refusal sentence
+/// always names the production budget, and
+/// `tests/critical_blastfile_lexer.rs` proves that boundary end to end.
+#[derive(Clone, Copy)]
+struct Caps {
+    /// Most tokens this pass may push, excluding `Eof`.
+    tokens: usize,
+    /// Most trivia runs this pass may push.
+    trivia: usize,
+}
+
+impl Caps {
+    /// §4.5's budgets, which production always uses.
+    const PRODUCTION: Self = Self {
+        tokens: MAX_TOKENS,
+        trivia: MAX_TRIVIA,
+    };
+}
+
 /// One pass over one source: the cursor, the position, and the two buffers.
 struct Lexer<'a> {
     /// The whole source, kept so a cursor position can be derived from it.
@@ -45,11 +69,20 @@ struct Lexer<'a> {
     trivia: Vec<Trivia>,
     /// Index of the first trivia node no token has claimed yet.
     leading_start: usize,
+    /// The budgets this pass enforces (§4.5).
+    caps: Caps,
 }
 
 impl<'a> Lexer<'a> {
-    /// A cursor at the start of `text`.
+    /// A cursor at the start of `text`, with production's budgets.
     fn new(text: &'a str) -> Self {
+        Self::with_caps(text, Caps::PRODUCTION)
+    }
+
+    /// A cursor at the start of `text`, with `caps` (§4.5).
+    ///
+    /// Only the unit tests pass anything but [`Caps::PRODUCTION`].
+    fn with_caps(text: &'a str, caps: Caps) -> Self {
         Self {
             text,
             at: 0,
@@ -58,6 +91,7 @@ impl<'a> Lexer<'a> {
             tokens: Vec::new(),
             trivia: Vec::new(),
             leading_start: 0,
+            caps,
         }
     }
 
@@ -155,7 +189,7 @@ impl<'a> Lexer<'a> {
     /// `Eof` is exempt: the cap bounds the file's tokens, and the parser needs
     /// its terminator whatever the count.
     fn push(&mut self, kind: TokenKind, start: usize) -> Result<(), ManifestError> {
-        if kind != TokenKind::Eof && self.tokens.len() >= MAX_TOKENS {
+        if kind != TokenKind::Eof && self.tokens.len() >= self.caps.tokens {
             return Err(ManifestError::TooManyTokens {
                 tokens: self.tokens.len() + 1,
             });
@@ -172,7 +206,7 @@ impl<'a> Lexer<'a> {
 
     /// Pushes one trivia node, checking §4.5's trivia cap.
     fn push_trivia(&mut self, kind: TriviaKind, start: usize) -> Result<(), ManifestError> {
-        if self.trivia.len() >= MAX_TRIVIA {
+        if self.trivia.len() >= self.caps.trivia {
             return Err(ManifestError::TooManyTrivia {
                 runs: self.trivia.len() + 1,
             });
@@ -402,7 +436,7 @@ mod tests {
 
     use super::super::tokens::{Lexed, Token, TokenKind, TriviaKind};
     use super::super::{MAX_SOURCE_BYTES, MAX_TOKENS, MAX_TRIVIA};
-    use super::lex;
+    use super::{Caps, Lexer, lex};
     use crate::error::ManifestError;
 
     /// The tokens of `text`, which must lex.
@@ -749,47 +783,77 @@ mod tests {
 
     #[test]
     fn the_token_cap_trips_while_pushing() {
-        let over = "a ".repeat(MAX_TOKENS + 1);
-        match lex(&over) {
+        // `Caps` lowers the budget so this witness builds a handful of tokens,
+        // not 4 194 304 of them; `push` is the same check production runs, and
+        // `tests/critical_blastfile_lexer.rs` proves the real boundary end to
+        // end (`R3b`). The sentence keeps naming the production budget.
+        let caps = Caps {
+            tokens: 9,
+            trivia: usize::MAX,
+        };
+        let over = "a ".repeat(caps.tokens + 1);
+        match Lexer::with_caps(&over, caps).run() {
             Ok(_) => panic!("expected the token cap"),
             Err(error) => {
                 assert_eq!(
                     error.to_string(),
-                    "262145 tokens; Blastfile is limited to 262144 — split the file"
+                    format!(
+                        "{} tokens; Blastfile is limited to {MAX_TOKENS} — the file is too \
+                         large: replace repeated `query '…'` lines with table or column grants \
+                         (`select`, `insert`, `update`, `delete`), or fold the shared grants into \
+                         a `trait` that many views `use`",
+                        caps.tokens + 1
+                    )
                 );
                 assert!(matches!(
                     error,
-                    ManifestError::TooManyTokens { tokens } if tokens == MAX_TOKENS + 1
+                    ManifestError::TooManyTokens { tokens } if tokens == caps.tokens + 1
                 ));
             }
         }
 
         // Exactly the cap lexes; `Eof` is not counted against it.
-        let at_cap = "a ".repeat(MAX_TOKENS);
-        let lexed = lex(&at_cap).expect("exactly the cap lexes");
-        assert_eq!(lexed.tokens.len(), MAX_TOKENS + 1);
+        let at_cap = "a ".repeat(caps.tokens);
+        let lexed = Lexer::with_caps(&at_cap, caps)
+            .run()
+            .expect("at the cap lexes");
+        assert_eq!(lexed.tokens.len(), caps.tokens + 1);
+
+        // The production budget is the one `push` reads when nothing lowers it.
+        assert_eq!(Caps::PRODUCTION.tokens, MAX_TOKENS);
+        assert_eq!(Caps::PRODUCTION.trivia, MAX_TRIVIA);
     }
 
     #[test]
     fn the_trivia_cap_trips_while_pushing() {
         // A space and one comment per line, so two trivia runs per Newline
-        // token and the trivia cap trips before the token cap.
-        let over = " #x\n".repeat(MAX_TRIVIA / 2 + 1);
-        match lex(&over) {
+        // token and the trivia cap trips before the token cap. Lowered the same
+        // way as the token witness: the check is the production one.
+        let caps = Caps {
+            tokens: usize::MAX,
+            trivia: 2 * 9,
+        };
+        let over = " #x\n".repeat(caps.trivia / 2 + 1);
+        match Lexer::with_caps(&over, caps).run() {
             Ok(_) => panic!("expected the trivia cap"),
             Err(error) => {
                 assert_eq!(
                     error.to_string(),
-                    "262145 trivia runs; Blastfile is limited to 262144 — split the file"
+                    format!(
+                        "{} trivia runs; Blastfile is limited to {MAX_TRIVIA} — the file is too \
+                         large: delete the generated comments and blank lines, or fold the shared \
+                         grants into a `trait` that many views `use`",
+                        caps.trivia + 1
+                    )
                 );
                 assert!(matches!(
                     error,
-                    ManifestError::TooManyTrivia { runs } if runs == MAX_TRIVIA + 1
+                    ManifestError::TooManyTrivia { runs } if runs == caps.trivia + 1
                 ));
             }
         }
-        let at_cap = " #x\n".repeat(MAX_TRIVIA / 2);
-        assert!(lex(&at_cap).is_ok());
+        let at_cap = " #x\n".repeat(caps.trivia / 2);
+        assert!(Lexer::with_caps(&at_cap, caps).run().is_ok());
     }
 
     #[test]
@@ -805,26 +869,32 @@ mod tests {
     }
 
     #[test]
-    fn a_megabyte_of_hostile_input_is_refused_by_the_caps() {
-        let words = "a ".repeat(MAX_SOURCE_BYTES / 2);
+    fn a_hostile_source_at_the_size_cap_is_refused_by_the_caps() {
+        // The token and trivia walls are the `push` checks at a lowered budget
+        // (see `the_token_cap_trips_while_pushing`); a 16 MiB wall of one-byte
+        // tokens would cost four million `Token`s to prove the same sentence.
+        let wall = Caps {
+            tokens: 64,
+            trivia: 64,
+        };
         assert!(matches!(
-            lex(&words),
+            Lexer::with_caps(&"a ".repeat(wall.tokens + 1), wall).run(),
             Err(ManifestError::TooManyTokens { .. })
         ));
-
-        let comments = " #x\n".repeat(MAX_SOURCE_BYTES / 4);
         assert!(matches!(
-            lex(&comments),
+            Lexer::with_caps(&" #x\n".repeat(wall.trivia / 2 + 1), wall).run(),
             Err(ManifestError::TooManyTrivia { .. })
         ));
 
+        // Each of these is one allocation of exactly the size cap, which is the
+        // buffer the budget under test is named for.
         let unterminated = format!("\"{}", "a".repeat(MAX_SOURCE_BYTES));
         assert_eq!(
             refusal(&unterminated),
             "1:1: unterminated string: the opening `\"` is on line 1"
         );
 
-        // A megabyte of one run is one trivia node, not a megabyte of them.
+        // A whole source of one run is one trivia node, not a megabyte of them.
         let spaces = " ".repeat(MAX_SOURCE_BYTES);
         let lexed = lex(&spaces).expect("one run of spaces");
         assert_eq!(lexed.tokens.len(), 1);

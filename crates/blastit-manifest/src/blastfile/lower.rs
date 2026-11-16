@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_sqlpolicy::{Columns, TableGrant, TableGrants, normalize};
 
+use super::MAX_APP_NAME_CHARS;
 use super::parser::line_starts;
 use super::pattern::normalise_methods;
 use super::syntax::{Cst, Element, NodeId, NodeKind};
@@ -277,11 +278,31 @@ impl<'a> Lowering<'a> {
     // ---- 1. app and entrypoint (§12) ------------------------------------
 
     /// `app "shop"` → `Manifest.name` (§4.3, §7.1).
+    ///
+    /// The name is a label the guide writes first, so the cap is generous and
+    /// the rule is small: not empty, at most [`MAX_APP_NAME_CHARS`] `char`s, and
+    /// no control byte. The refusal points at the string, not at `app`, so the
+    /// caller's `<path>:<line>:<col>:` prefix lands on the value that broke the
+    /// rule (§18).
+    ///
+    /// [`MAX_APP_NAME_CHARS`]: super::MAX_APP_NAME_CHARS
     fn app(&self) -> Result<Option<String>, ManifestError> {
-        match self.cst.app() {
-            Some(node) => Ok(Some(self.string(node)?)),
-            None => Ok(None),
+        let Some(node) = self.cst.app() else {
+            return Ok(None);
+        };
+        let at = self
+            .cst
+            .child_tokens(node)
+            .find(|token| matches!(self.cst.token_kind(*token), Some(TokenKind::Str)))
+            .map_or_else(|| self.position(node), |token| self.token_position(token));
+        let name = self.string(node)?;
+        if name.is_empty()
+            || name.chars().count() > MAX_APP_NAME_CHARS
+            || name.chars().any(char::is_control)
+        {
+            return Err(ManifestError::AppNameInvalid { at });
         }
+        Ok(Some(name))
     }
 
     /// `entrypoint` → the callable, the preload list and the front controller.

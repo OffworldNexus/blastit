@@ -780,7 +780,7 @@ pub enum ManifestError {
         /// Where the `-` is.
         at: Position,
     },
-    /// A `Blastfile` over the 1 MiB cap (§4.5).
+    /// A `Blastfile` over the 16 MiB cap (§4.5).
     ///
     /// Position-less: the caller prefixes the path exactly once, giving
     /// `<path>: the file is <n> bytes; …` (§18).
@@ -809,11 +809,14 @@ pub enum ManifestError {
         /// The error as the operating system reported it, escaped.
         message: String,
     },
-    /// A token stream over the 262144-token cap (§4.5).
+    /// A token stream over §4.5's token cap.
     ///
-    /// Position-less: the caller prefixes the path exactly once (§18).
+    /// Position-less: the caller prefixes the path exactly once (§18). The
+    /// advice is something the author can actually do to this one file: a
+    /// `Blastfile` has no `include`, so "put the rest elsewhere" was never a
+    /// remedy.
     #[error(
-        "{} tokens; Blastfile is limited to {} — split the file",
+        "{} tokens; Blastfile is limited to {} — the file is too large: replace repeated `query '…'` lines with table or column grants (`select`, `insert`, `update`, `delete`), or fold the shared grants into a `trait` that many views `use`",
         tokens,
         crate::blastfile::MAX_TOKENS
     )]
@@ -821,11 +824,13 @@ pub enum ManifestError {
         /// The count that was refused: one past the cap.
         tokens: usize,
     },
-    /// A trivia stream over the 262144-run cap (§4.5).
+    /// A trivia stream over §4.5's trivia cap.
     ///
-    /// Position-less: the caller prefixes the path exactly once (§18).
+    /// Position-less like [`ManifestError::TooManyTokens`], with the same
+    /// remedy: the file is too large, and its comments and blank runs are what
+    /// this budget counts.
     #[error(
-        "{} trivia runs; Blastfile is limited to {} — split the file",
+        "{} trivia runs; Blastfile is limited to {} — the file is too large: delete the generated comments and blank lines, or fold the shared grants into a `trait` that many views `use`",
         runs,
         crate::blastfile::MAX_TRIVIA
     )]
@@ -1198,6 +1203,21 @@ pub enum ManifestError {
         /// Where the first item past the cap is.
         at: Position,
     },
+    /// An `app "<name>"` that is empty, over §4.5's cap, or holds a control
+    /// byte (§4.3).
+    ///
+    /// The name is a label, never a path or a callable, so the sentence is the
+    /// whole rule: the cap is interpolated from `MAX_APP_NAME_CHARS`, so it
+    /// cannot drift from the check, and nothing about the value is quoted.
+    #[error(
+        "{}an `app` name is 1 to {} characters with no control byte",
+        prefix(*at),
+        crate::blastfile::MAX_APP_NAME_CHARS
+    )]
+    AppNameInvalid {
+        /// Where the name's string is.
+        at: Position,
+    },
     /// `unrestricted` where a store name belongs (§6.3).
     #[error(
         "{}`unrestricted` is a grant keyword, not a store name; write `postgres unrestricted` for the default store",
@@ -1308,8 +1328,17 @@ pub enum ManifestError {
         /// Where the pattern is.
         at: Position,
     },
-    /// A pattern over §4.5's 256-byte cap, in either spelling.
-    #[error("{}a pattern holds at most 256 bytes", prefix(*at))]
+    /// A pattern over §4.5's `MAX_PATTERN_BYTES` cap, in either spelling.
+    ///
+    /// The cap is interpolated from `pattern::MAX_PATTERN_BYTES`, so the
+    /// sentence cannot drift from the check. It is a cap on the pattern's
+    /// source text: the compiled regex is still bounded by `REGEX_SIZE_LIMIT`
+    /// (§8.1, §17.4).
+    #[error(
+        "{}a pattern holds at most {} bytes",
+        prefix(*at),
+        crate::blastfile::MAX_PATTERN_BYTES
+    )]
     PatternTooLong {
         /// Where the pattern is.
         at: Position,

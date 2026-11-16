@@ -2,22 +2,28 @@
 id: MB.21.4.6
 title: "Raise the six Blastfile budgets (16 MiB source, 4M tokens/trivia, 4 KiB patterns, 4K list items, 256-char app name) and fix the token-cap sentence"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.1]
 paths:
-  - "crates/blastit-manifest/src/blastfile/**"
+  - "crates/blastit-manifest/src/blastfile/mod.rs"
+  - "crates/blastit-manifest/src/blastfile/lexer.rs"
+  - "crates/blastit-manifest/src/blastfile/lower.rs"
+  - "crates/blastit-manifest/src/blastfile/parser.rs"
+  - "crates/blastit-manifest/src/blastfile/pattern.rs"
+  - "crates/blastit-manifest/src/blastfile/print.rs"
   - "crates/blastit-manifest/src/error.rs"
   - "crates/blastit-manifest/src/lib.rs"
   - "crates/blastit-manifest/tests/**"
+  - crates/blastit/tests/critical_blastfile_fmt.rs
   - docs/reference/blastfile.md
   - "docs/design/blastfile-dsl.md"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-16T09:11"
-updated: "2026-11-16T09:11"
+updated: "2026-11-16T10:36"
 ---
 
 # Goal

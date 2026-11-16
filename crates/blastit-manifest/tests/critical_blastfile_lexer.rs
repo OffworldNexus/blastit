@@ -8,7 +8,7 @@
 //! or exhaust a boot.
 //!
 //! The lexer's own rows — every token kind, every §5.3 refusal, the token and
-//! trivia caps, the 1 MiB hostile corpus — live in `lexer.rs`'s `mod tests`,
+//! trivia caps, the 16 MiB hostile corpus — live in `lexer.rs`'s `mod tests`,
 //! because the tokens are `pub(crate)` and an integration test cannot see them
 //! (§4.1, TS-3). `MB.21.3.8` extends this file with the token-cap rows once the
 //! public parse entry point exists.
@@ -22,11 +22,11 @@ use blastit_manifest::ManifestError;
 use blastit_manifest::blastfile;
 
 /// The cap §4.5 pins, repeated here so a change to it fails this suite.
-const MAX_SOURCE_BYTES: u64 = 1_048_576;
+const MAX_SOURCE_BYTES: u64 = 16_777_216;
 
 /// The size refusal, verbatim: position-less, so the caller prefixes the path
 /// exactly once (§18).
-const TOO_LARGE: &str = "the file is 1048577 bytes; Blastfile is limited to 1048576 bytes — \
+const TOO_LARGE: &str = "the file is 16777217 bytes; Blastfile is limited to 16777216 bytes — \
                          split the grants into a `trait`, or delete a generated block";
 
 /// A unique directory under `$TMPDIR`, removed on drop.
@@ -174,10 +174,10 @@ fn a_missing_file_and_a_directory_are_refused() {
 /// while the lexer pushes rather than after the tree is built (`R3b`).
 #[test]
 fn the_token_cap_is_reachable_through_the_public_entry_point() {
-    // 262 145 words is one token past the cap, and well under the size cap, so
-    // the refusal is the token budget and not the file budget.
-    let source = "a ".repeat(262_145);
-    assert!(source.len() < 1_048_576, "the size cap is not what trips");
+    // One token past the cap, and well under the size cap, so the refusal is
+    // the token budget and not the file budget.
+    let source = "a ".repeat(4_194_305);
+    assert!(source.len() < 16_777_216, "the size cap is not what trips");
     let errors = blastit_manifest::Manifest::from_blastfile_str(&source)
         .expect_err("the token cap is a refusal");
     let rendered = errors
@@ -187,7 +187,9 @@ fn the_token_cap_is_reachable_through_the_public_entry_point() {
         .unwrap_or_default();
     assert_eq!(
         rendered,
-        "262145 tokens; Blastfile is limited to 262144 — split the file"
+        "4194305 tokens; Blastfile is limited to 4194304 — the file is too large: replace \
+         repeated `query '…'` lines with table or column grants (`select`, `insert`, `update`, \
+         `delete`), or fold the shared grants into a `trait` that many views `use`"
     );
 }
 
@@ -196,14 +198,14 @@ fn the_token_cap_is_reachable_through_the_public_entry_point() {
 #[test]
 fn a_hostile_document_is_refused_cleanly() {
     let hostile: &[(&str, String)] = &[
-        ("a wall of braces", "{".repeat(1_048_576)),
-        ("a wall of comments", "#x\n".repeat(262_145)),
+        ("a wall of braces", "{".repeat(4_194_305)),
+        ("a wall of comments", "#x\n".repeat(4_194_305)),
         (
             "an unterminated string",
-            format!("\"{}", "a".repeat(1_048_576 - 1)),
+            format!("\"{}", "a".repeat(16_777_215)),
         ),
         ("a wall of views", "view v { ".repeat(100_000)),
-        ("a file over the cap", "a".repeat(1_048_577)),
+        ("a file over the cap", "a".repeat(16_777_217)),
     ];
     for (label, source) in hostile {
         let errors = blastit_manifest::Manifest::from_blastfile_str(source)

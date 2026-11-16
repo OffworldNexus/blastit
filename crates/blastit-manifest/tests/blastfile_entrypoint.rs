@@ -36,6 +36,32 @@ fn python_without_a_block_preloads_nothing() {
     assert!(manifest.preload().is_empty());
 }
 
+/// `app "<name>"` is carried as `Manifest::name` and bounded by §4.5's cap
+/// (`MAX_APP_NAME_CHARS`, 256 `char`s), refused at the name's own `line:col`.
+#[test]
+fn the_app_name_is_carried_and_bounded() {
+    let manifest =
+        Manifest::from_blastfile_str("app \"shop\"\nview v \"/v\" {\n}\n").expect("lowers");
+    assert_eq!(manifest.name(), Some("shop"));
+
+    // The cap counts `char`s: 256 two-byte characters are 512 bytes and legal.
+    let at_cap = format!("app \"{}\"\nview v \"/v\" {{\n}}\n", "é".repeat(256));
+    assert_eq!(
+        Manifest::from_blastfile_str(&at_cap)
+            .expect("at the cap lowers")
+            .name()
+            .map(str::len),
+        Some(512)
+    );
+
+    // One past the cap, an empty name and a control byte are one sentence.
+    let sentence = "1:5: an `app` name is 1 to 256 characters with no control byte";
+    let over = format!("app \"{}\"\nview v \"/v\" {{\n}}\n", "a".repeat(257));
+    assert_eq!(refusal(&over), sentence);
+    assert_eq!(refusal("app \"\"\n"), sentence);
+    assert_eq!(refusal("app \"a\tb\"\n"), sentence);
+}
+
 /// A second `preload` statement appends to the list (the parser accepts it, and
 /// lowering concatenates in written order).
 #[test]

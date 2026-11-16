@@ -169,25 +169,25 @@ fn the_pattern_refusals() {
     }
 }
 
-/// A pattern over 256 bytes is refused in both spellings (§4.5, §8.3).
+/// A pattern over 4 KiB is refused in both spellings (§4.5, §8.3).
 #[test]
-fn a_pattern_is_capped_at_256_bytes() {
+fn a_pattern_is_capped_at_4096_bytes() {
     // The cap counts the pattern's bytes, without its quotes.
-    let legal = format!("\"/{}\"", "a".repeat(255));
-    assert_eq!(legal.len() - 2, 256, "256 bytes of pattern");
+    let legal = format!("\"/{}\"", "a".repeat(4_095));
+    assert_eq!(legal.len() - 2, 4_096, "4096 bytes of pattern");
     assert!(Manifest::from_blastfile_str(&format!("view v {legal} {{\n}}\n")).is_ok());
 
-    let long = format!("\"/{}\"", "a".repeat(256));
-    assert_eq!(long.len() - 2, 257, "257 bytes of pattern");
+    let long = format!("\"/{}\"", "a".repeat(4_096));
+    assert_eq!(long.len() - 2, 4_097, "4097 bytes of pattern");
     assert_eq!(
         refusal(&format!("view v {long} {{\n}}\n")),
-        "1:8: a pattern holds at most 256 bytes"
+        "1:8: a pattern holds at most 4096 bytes"
     );
 
-    let long = format!("regex '/{}'", "a".repeat(256));
+    let long = format!("regex '/{}'", "a".repeat(4_096));
     assert_eq!(
         refusal(&format!("view v {long} {{\n}}\n")),
-        "1:14: a pattern holds at most 256 bytes"
+        "1:14: a pattern holds at most 4096 bytes"
     );
 }
 

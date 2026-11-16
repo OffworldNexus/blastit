@@ -2186,3 +2186,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T09:52 [MB.21.4.1] (implementer) edited fields
 - 2026-11-16T09:56 [MB.21.4.1] (lead) status active -> review
 - 2026-11-16T10:10 [MB.21.4.1] (lead) status review -> done
+- 2026-11-16T10:10 [MB.21.4.1] (lead) commit a3ac338; reviewer PASS (own runs: make check exit 0, 164 ok, docs-test 49/49, critical_guard 14 authorized). Six MINOR findings handed to MB.21.4.2: esca
+- 2026-11-16T10:10 [MB.21.4] (lead) MB.21.4.1 closed at a3ac338 after 5 attempts and 5 sessions (this leaf grew into the whole atomic cutover: 74 files). Key outcome: the scheduler now serves stat
+- 2026-11-16T10:10 [MB.21.4.6] (lead) status ready -> active
+- 2026-11-16T10:10 [MB.21.4.6] (lead) attempt 1/3 started
+- 2026-11-16T10:10 [MB.21.4.6] (lead) base a3ac338
+- 2026-11-16T10:24 [MB.21.4.6] (implementer) six budgets + enforced app-name cap + new token/trivia sentences + docs landed; make check red only on crates/blastit/tests/critical_blastfile_fmt.rs (MB.21.4.2
+- 2026-11-16T10:25 [MB.21.4.6] (lead) edited fields
+- 2026-11-16T10:25 [MB.21.4.6] (lead) attempt 1 blocked on one protected fixture outside paths: crates/blastit/tests/critical_blastfile_fmt.rs builds an 80 000-line/1.36 MB file that fmt now correct
+- 2026-11-16T10:25 [MB.21.4.6] (lead) attempt 2/3 started
+- 2026-11-16T10:31 [MB.21.4.6] (lead) status active -> review
+- 2026-11-16T10:36 [MB.21.4.6] (lead) reviewer PASS. Three MINOR dispositions (recorded here because RESULT.md is the owner's): (1) docs/research/INDEX.md is another node's line and is not staged in
+- 2026-11-16T10:36 [MB.21.4.6] (lead) status review -> done

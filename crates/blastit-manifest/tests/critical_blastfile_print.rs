@@ -479,15 +479,15 @@ fn a_query_with_a_quote() {
 #[test]
 fn fmt_refuses_a_file_it_would_grow_past_the_cap() {
     let mut source = String::from("view v \"/x\" {\npostgres {\n");
-    for _ in 0..80_000 {
+    for _ in 0..1_000_000 {
         source.push_str("delete t\n");
     }
     source.push_str("}\n}\n");
-    assert!(source.len() < 1_048_576, "{} bytes", source.len());
+    assert!(source.len() < 16_777_216, "{} bytes", source.len());
     let error = blastfile::fmt(&source).expect_err("the canonical form is over the cap");
     let first = error.errors().first().expect("one refusal");
     assert!(
-        first.to_string().contains("1048576"),
+        first.to_string().contains("16777216"),
         "the refusal names the cap: {first}"
     );
 }

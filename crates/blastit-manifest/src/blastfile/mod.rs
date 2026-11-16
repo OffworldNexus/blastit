@@ -4,7 +4,7 @@
 //! A `Blastfile` is policy, not input: whoever can write it can already grant
 //! `unrestricted`, so the reader's job is to be total and cheap rather than to
 //! make a hostile file harmless (§17.1). [`read`] is the one reader: it refuses
-//! anything that is not a regular file, refuses a file over the 1 MiB cap from
+//! anything that is not a regular file, refuses a file over the 16 MiB cap from
 //! its metadata before reading a byte, and never allocates more than the cap.
 //!
 //! The lexer is one byte-indexed pass (§5.4). It emits every token and every
@@ -171,14 +171,14 @@ pub fn apply_edits(source: &str, edits: &BlastfileEdits) -> Result<String, EditE
     BlastfileEditor.apply(source, edits)
 }
 
-/// Largest `Blastfile` [`read`] accepts, in bytes (§4.5).
-pub(crate) const MAX_SOURCE_BYTES: usize = 1_048_576;
+/// Largest `Blastfile` [`read`] accepts, in bytes (§4.5): 16 MiB.
+pub(crate) const MAX_SOURCE_BYTES: usize = 16_777_216;
 
 /// Most tokens one `Blastfile` may hold (§4.5).
-pub(crate) const MAX_TOKENS: usize = 262_144;
+pub(crate) const MAX_TOKENS: usize = 4_194_304;
 
 /// Most trivia runs one `Blastfile` may hold (§4.5).
-pub(crate) const MAX_TRIVIA: usize = 262_144;
+pub(crate) const MAX_TRIVIA: usize = 4_194_304;
 
 /// Deepest block nesting the grammar allows (§4.5): `view { postgres { … } }`
 /// and `view { GET "…" { body … } }` are two, and a third is refused.
@@ -186,9 +186,19 @@ pub(crate) const MAX_BLOCK_DEPTH: u32 = 2;
 
 /// Most items one list may hold (§4.5): methods, patterns, columns, preload
 /// modules, `immutable` patterns and table grants.
-pub(crate) const MAX_LIST_ITEMS: usize = 256;
+pub(crate) const MAX_LIST_ITEMS: usize = 4_096;
 
-/// Reads a `Blastfile`: a regular file of at most 1 MiB.
+/// Most `char`s an `app "<name>"` may hold (§4.5).
+///
+/// The cap is on the name, not on the file: `app "shop"` is a label the guide
+/// writes first, and a generated name (a tenant, a branch, a deploy id) is
+/// long. `lower::app` refuses an empty name, a name over this cap, and a name
+/// holding a control byte, at the string's own `line:col`.
+pub(crate) const MAX_APP_NAME_CHARS: usize = 256;
+
+pub(crate) use pattern::MAX_PATTERN_BYTES;
+
+/// Reads a `Blastfile`: a regular file of at most 16 MiB.
 ///
 /// The size is known before anything is read, so a file one byte over the cap
 /// is refused from its metadata — a mode-`000` file of that size is

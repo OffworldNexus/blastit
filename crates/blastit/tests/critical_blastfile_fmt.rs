@@ -239,15 +239,18 @@ fn a_parse_error_writes_nothing() {
 
 /// A file that formatting would grow past the cap is refused with `2`, and the
 /// original is untouched (`R25`).
+///
+/// The witness has to build a canonical form over 16 MiB: the formatter indents
+/// every line, so the source is ~9 MiB of one-line grants.
 #[test]
 fn a_file_it_would_grow_past_the_cap_is_refused() {
     let dir = Dir::new("over-cap");
     let mut source = String::from("view v \"/x\" {\npostgres {\n");
-    for _ in 0..80_000 {
+    for _ in 0..1_000_000 {
         source.push_str("delete t\n");
     }
     source.push_str("}\n}\n");
-    assert!(source.len() < 1_048_576, "{} bytes", source.len());
+    assert!(source.len() < 16_777_216, "{} bytes", source.len());
     let file = dir.write("Blastfile", &source);
     let before = identity(&file);
 
@@ -255,7 +258,7 @@ fn a_file_it_would_grow_past_the_cap_is_refused() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.starts_with("./Blastfile: the file is ") && stderr.contains("1048576"),
+        stderr.starts_with("./Blastfile: the file is ") && stderr.contains("16777216"),
         "{stderr}"
     );
     assert_eq!(identity(&file), before, "an over-cap file was rewritten");

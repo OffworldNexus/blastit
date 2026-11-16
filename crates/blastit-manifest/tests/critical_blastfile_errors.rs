@@ -120,7 +120,7 @@ fn the_regex_message_is_escaped_and_cut() {
 fn a_positionless_refusal_renders_bare() {
     let directory = TempDir::new("too-large");
     let path = directory.path().join("Blastfile");
-    std::fs::write(&path, vec![b'#'; 1_048_577]).expect("a file over the cap");
+    std::fs::write(&path, vec![b'#'; 16_777_217]).expect("a file over the cap");
     let error = blastfile::read(&path).expect_err("refused");
     let rendered = error
         .errors()
@@ -128,7 +128,7 @@ fn a_positionless_refusal_renders_bare() {
         .map(ToString::to_string)
         .unwrap_or_default();
     assert!(
-        rendered.starts_with("the file is 1048577 bytes;"),
+        rendered.starts_with("the file is 16777217 bytes;"),
         "{rendered}"
     );
     assert!(!rendered.contains("0:0"), "{rendered}");
