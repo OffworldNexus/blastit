@@ -2126,3 +2126,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T07:32 [MB.21.3.5] (lead) attempt 2 done: both MAJORs fixed (per-shape emptiness + one-line separator; P4 no-write test via an undeclared store), four MINORs closed. Fresh review on base
 - 2026-11-16T07:36 [MB.21.3.5] (lead) reviewer verdict PASS (attempt 2), both MAJORs verified closed with non-tautological tests. 5 MINOR recorded: (1) first_difference has no unresolved_grants arm 
 - 2026-11-16T07:36 [MB.21.3.5] (lead) status review -> done
+- 2026-11-16T07:38 [MB.21.3.5] (lead) commit d652117
+- 2026-11-16T07:38 [MB.21.3.6] (lead) status ready -> active
+- 2026-11-16T07:38 [MB.21.3.6] (lead) attempt 1/3 started
+- 2026-11-16T07:38 [MB.21.3.6] (lead) base d652117ab658884d08e85e04d094333d2d62f20c
+- 2026-11-16T07:52 [MB.21.3.6] (lead) status active -> review
+- 2026-11-16T07:52 [MB.21.3.6] (lead) attempt 1 done: both openers read, pinned PAGES table with per-opening counts, one flip constant for 5.2, three deviations disclosed. Review on base d652117.
+- 2026-11-16T07:57 [MB.21.3.6] (lead) reviewer verdict PASS. 3 MINOR for MB.21.5.2: (1) no self-test parses a VALID blastfile fence through parse_fence (the shared branch implies it); (2) the "missi
+- 2026-11-16T07:57 [MB.21.3.6] (lead) status review -> done

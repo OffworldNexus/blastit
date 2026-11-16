@@ -2,16 +2,16 @@
 id: MB.21.3.6
 title: "Parse blastfile doc fences in docs_fences, reporting both openings until the strict flip"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.21.3.5]
 paths: ["crates/blastit-manifest/tests/docs_fences.rs", "crates/blastit-manifest/src/blastfile/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T00:38"
+updated: "2026-11-16T07:57"
 ---
 
 # Goal
