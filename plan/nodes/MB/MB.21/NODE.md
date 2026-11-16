@@ -239,3 +239,13 @@ $ for f in $(grep -rlE 'blastit[.]toml' plan/nodes --include=NODE.md); do \
 - Priority 1: this is release-blocking for v0.2.0. `MB.21.1.1` is independent (doc-only, zero code
   dependencies) and can run immediately; `MB.21.5.1` must not run concurrently with it, because both
   own `docs/blastfile.md`'s neighbourhood and `zensical.toml`.
+- **Human requests `H-010`–`H-013`** (`plan/HUMAN.md`; `H-010`–`H-012` are already marked closed
+  there, `H-013` is not): each was answered by a lead decision in the node logs — `MB.21.3.7`'s log for
+  `H-010` (the four per-view accessors, `SpaLost`, §9.5/§9.6 and the sentences move to `MB.21.4.2`),
+  `MB.21.3.1`'s for `H-011`, `MB.21.3.2`'s for `H-012`, and `MB.21.3.3`'s for `H-013` (`error.rs`
+  widened into 3.3 and 3.8) — so the conductor closes `H-013` with `plan.py human close`; none of them
+  is an open design question and no leaf should re-ask one.
+- **Out of scope for this epic:** the `blastit-view` flake in `crates/blastit-view/src/php.rs::wait_for`
+  (200 × 5 ms = 1 s budget for three frames, which failed 2 of 10 `make check` runs under load) needs its
+  own leaf in the milestone that owns that crate; no child of `MB.21` touches `blastit-view`, and this
+  epic must not absorb it.

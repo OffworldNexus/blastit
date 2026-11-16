@@ -2137,3 +2137,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T08:01 [MB.21.3] (lead) Gate: all 9 leaves done; epic acceptance 1-5 verified (tree, make check exit 0 with 161 ok/0 FAILED, cargo test -p blastit-manifest 32 suites/527 tests, blastfi
 - 2026-11-16T08:01 [MB.21.3] (lead) status ready -> done
 - 2026-11-16T08:01 [MB.21.3] (lead) commit 38d2b6b
+- 2026-11-16T08:04 [MB.21.4.1] (planner) edited fields
+- 2026-11-16T08:04 [MB.21.4.2] (planner) edited fields
+- 2026-11-16T08:04 [MB.21.4.3] (planner) edited fields
+- 2026-11-16T08:04 [MB.21.5.2] (planner) edited fields
+- 2026-11-16T08:04 [MB.21.5.3] (planner) edited fields

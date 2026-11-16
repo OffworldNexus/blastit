@@ -1,6 +1,6 @@
 ---
 id: MB.21.5.2
-title: "Execute Blastfile doc fences live, make docs_fences strict and guard the retired manifest name"
+title: "Execute Blastfile doc fences live, flip docs_fences strict (retired opening gone) and guard the retired manifest name"
 kind: task
 status: ready
 owner: implementer
@@ -14,16 +14,18 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T01:49"
+updated: "2026-11-16T08:04"
 ---
 
 # Goal
 
 Close the DX gate. Every `Blastfile` example on the site is executed by `make docs-test`,
-`docs_fences` fails on any complete-manifest fence that is not a `Blastfile`, and a test named
+`docs_fences` fails on any complete-manifest fence that is not a `Blastfile` — the strict flip is
+`THE_RETIRED_OPENING_IS_GONE = true` with the retired opening's reader deleted — and a test named
 `test_the_real_tree_carries_no_retired_toml_manifest` in `python/tests/test_docs_assets.py` makes the
 retired file name impossible to reintroduce — mechanically, on `make check`, with no allowlist that a
-lazy edit can widen.
+lazy edit can widen. The three self-test gaps the toolchain left in `docs_fences.rs` are closed here,
+because the flip is only trustworthy once they are.
 
 # Context
 
@@ -56,10 +58,33 @@ lazy edit can widen.
   passes. Anti-vacuity test: the tree has product pages, Rust sources, scripts and briefs; at least
   one brief is live and at least one is finished; and at least one record (the changelog or
   `ADR-0012`) still names it, so the allowlist has a subject.
-- Fences: `crates/blastit-manifest/tests/docs_fences.rs` drops the old opening constant (spelled from
-  two fragments by `MB.21.4.5`) and makes any complete-manifest fence whose opening is not the
-  `blastfile` one a **failure** naming the page and the expected opening; keep the per-file count
-  rule and the `docs/frameworks/django.md` static fragment.
+- Fences: `crates/blastit-manifest/tests/docs_fences.rs` flips `THE_RETIRED_OPENING_IS_GONE` to `true`
+  and drops the retired opening entirely — `MB.21.3.6`'s exact five-step hand-off:
+  1. `const THE_RETIRED_OPENING_IS_GONE: bool = false;` → `true`;
+  2. delete the TOML column: `OPENING` from `COMPLETE_OPENINGS` and `parse_fence`'s branch, the third
+     element of `Counts`, the `PAGES` rows and `TOTAL`, and `label`'s third term — after this the
+     retired opening has no reader at all, so no page can carry one;
+  3. replace `an_invalid_regex_is_refused` with a Blastfile-shaped refusal (a `view` whose path pattern
+     §8.3 refuses), since `InvalidRegex` is a retired-reader error;
+  4. add §16.2's exhaustive scan: every `*.md` under `docs/**` (excluding `docs/design`,
+     `docs/research`, `docs/decisions`, `docs/knowledge`, `docs/testing`, which quote the erasure) plus
+     `README.md`; a **document** fence on a page absent from `PAGES` fails, and an illustration outside
+     `PAGES` is reported by path;
+  5. add the third class (statement lists: `blastfile::parse` on the body, no lower, no validate) and
+     the illustration count — `docs/reference/blastfile.md` carries statement lists only and is
+     deliberately absent from `PAGES`.
+  Any complete-manifest fence whose opening is not ```` ```text title="Blastfile" ```` (or the
+  transitional `blastfile` alias) is a **failure** naming the page and the expected opening; keep the
+  per-file count rule and the `docs/frameworks/django.md` static fragment.
+- **The three self-test gaps the toolchain left** (a flip without these is a claim, not a proof):
+  1. a *valid* `blastfile`-opened document fence is collected, parsed and counted — today only the
+     alias is exercised, by inline fixtures;
+  2. the "missing document" direction: a pinned page whose document fence disappears fails, naming the
+     page (an absent fence must never read as a count of zero that still passes);
+  3. a plain ```` ```toml ```` **fragment** on a pinned page cannot slip through the retired-opening
+     rule: with the flip on, a fragment is still an illustration and passes, while a complete retired
+     document fails — assert both directions, because a rule that only looks at the opening would let
+     a fragment be reported as a retired document (or, worse, a retired document pass as a fragment).
 - `python/tests/runnable_docs/inventory.toml`: the two language pages' console fences move from
   `mode = "static"` (reason naming `MB.21.5.2`) to the live handler that proves them — `dev` against
   the `hello` fixture for the Local section, `check` against `shop` for CI, `presets` plus a `static`
@@ -74,6 +99,7 @@ lazy edit can widen.
 $ make docs-test
 $ make docs-unit
 $ grep -n '"static"' -A 2 python/tests/runnable_docs/inventory.toml | grep -c 'MB.21.5.2'
+$ grep -n 'THE_RETIRED_OPENING_IS_GONE: bool = true\|COMPLETE_OPENINGS' crates/blastit-manifest/tests/docs_fences.rs
 $ cargo test -p blastit-manifest --locked --test docs_fences
 $ UV_OFFLINE=1 uv run --no-project --with pytest==9.2.0 python -m pytest python/tests/test_docs_assets.py -q
 $ make check
@@ -82,13 +108,18 @@ $ make check
 1. `make docs-test` reports **0 accounted-but-unexecuted** fences on the two language pages; the
    per-page executed totals are in `RESULT.md`.
 2. The `MB.21.5.2` grep count is `0`: no reason says "the parser is missing" any more.
-3. A complete-manifest fence opened with anything but the `blastfile` opening fails `docs_fences`
-   naming the page (a fixture under `crates/blastit-manifest/tests/` proves it), and the per-file count
-   rule still catches a drifted page; the `django.md` static fragment is still parsed.
-4. `test_the_real_tree_carries_no_retired_toml_manifest` is green on the repository; the negative
+3. A complete-manifest fence opened with anything but the Blastfile opening fails `docs_fences` naming
+   the page (a fixture under `crates/blastit-manifest/tests/` proves it), the per-file count rule still
+   catches a drifted page, the `django.md` static fragment is still parsed, and the three self-test gaps
+   above have a named test each: a valid document fence collected, a missing document named, and a
+   `toml` fragment passing while a complete retired document fails.
+4. `THE_RETIRED_OPENING_IS_GONE` is `true`, `COMPLETE_OPENINGS` has one entry, `Counts` has two fields
+   and no `parse_fence` branch reads the retired opening — a grep for the retired opening in
+   `docs_fences.rs` prints nothing (the constant's name is the only survivor).
+5. `test_the_real_tree_carries_no_retired_toml_manifest` is green on the repository; the negative
    self-tests above fail/pass in both directions; the anti-vacuity test passes; and the test needs no
    allowlist entry for a product page, a crate, a script, a fixture or a live brief.
-5. `make check` exit 0. `RESULT.md` states, with the file and test names, that the guard runs inside
+6. `make check` exit 0. `RESULT.md` states, with the file and test names, that the guard runs inside
    `docs-unit` and therefore inside `make check`, and pastes the mutation proof: add the retired name
    to a scanned page, `make docs-unit` fails naming `file:line`; restore and it passes.
 
@@ -102,3 +133,9 @@ $ make check
   `static` with the *real* reason and name the `e2e/` scenario that proves it instead.
 - Keep the suite stdlib-only and fast: no network, no wheel, no subprocess beyond what the module
   already does.
+- The flip and the guard are two different mechanisms and both must be present: the flip makes a
+  retired **document fence** impossible (it has no reader), the guard makes the retired **file name**
+  impossible (no product text carries it). Neither replaces the other, and a green `docs_fences` with a
+  red guard is not a pass.
+- `docs_fences.rs` is a standard-tier suite (`MA.3` owns `docs/**`); do not protect it, and do not move
+  the guard into it — the guard belongs where `docs-unit` already runs it.
