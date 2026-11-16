@@ -3,3 +3,7 @@
 ## 2026-11-16T00:38 [planner]
 
 created (task) Discover ./Blastfile and refuse blastit.toml/TOML input with one migration sentence at every entry point
+
+## 2026-11-16T01:49 [planner]
+
+edited fields

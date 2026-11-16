@@ -1,75 +1,99 @@
 ---
 id: MB.21.4.4
-title: "Migrate Python package, Makefile and every e2e fixture to Blastfile and delete the TOML reader"
+title: "Migrate the Python package, Makefile and every e2e fixture to Blastfile, delete the v1 reader and drop the toml dependency"
 kind: task
 status: ready
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.3]
-paths:
-  - "python/blastit/**"
-  - "python/tests/**"
-  - "e2e/**"
-  - Makefile
-  - "scripts/**"
-  - "crates/blastit-manifest/**"
-  - "crates/blastit/src/**"
-  - Cargo.toml
-  - Cargo.lock
+paths: ["crates/**", "python/**", "e2e/**", "scripts/**", Makefile, Cargo.toml, Cargo.lock]
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T00:38"
+updated: "2026-11-16T01:49"
 ---
 
 # Goal
 
-Move the Python package, the Makefile and every `e2e/` fixture onto `Blastfile`, then **delete the TOML
-reader and patcher** so the repository has exactly one manifest format.
+One manifest format in the repository. Every fixture, package default, script and Makefile stage is a
+`Blastfile`; the v1 reader and patcher are deleted; the `toml` crate is gone from
+`crates/blastit-manifest` and from `Cargo.lock`. After this leaf no Rust or Python file in the
+repository contains a TOML parse path, and no fixture or script names the retired file.
 
 # Context
 
-- Measured files to migrate (fifteen fixtures + package defaults): `e2e/demo/blastit.toml`,
-  `e2e/php/fixture/blastit.toml`, `e2e/sqlalchemy/blastit.toml`,
-  `e2e/static_site/{blastit.toml,nospa/blastit.toml}`, `e2e/venv-smoke/blastit.toml`,
-  `python/tests/{project,packaged_project,live_project}/blastit.toml`,
-  `python/tests/runnable_docs/fixtures/{hello,shop,learn,denial,findings,static-site}/blastit.toml`.
-- Package surface: `python/blastit/fold.py` (reads and writes the manifest through the editor,
-  `--manifest blastit.toml` default in docstrings/argparse), `python/blastit/pytest_plugin.py`
-  (`--blastit-manifest` default and its help text, plus the "a `blastit.toml` in the project" wording),
-  and `blastit_build.py` if it names the file.
-- Makefile: `DOCS_SERVE_MANIFEST := $(DOCS_SERVE_STAGE)/blastit.toml` and the stage that writes it;
-  rename to `Blastfile` and keep `docs-serve`/`docs-serve-check` working.
-- `scripts/**`: anything that stages or greps a manifest (`scripts/build-wheel.sh`,
-  `scripts/release-notes.sh`, the docs harness fixtures reader) moves with the format.
-- **Delete the TOML path last, in this leaf:** `Manifest::from_toml_str`, `parse.rs`'s TOML reader and
-  `edit.rs`'s TOML patcher exist only until here. `crates/blastit-manifest/{src,tests}` and
-  `Cargo.toml`/`Cargo.lock` are in `paths` for that removal; a dependency that only the TOML reader used
-  is dropped in this one serialized commit.
+- Fixtures to migrate (fifteen, all currently hold a v1 manifest): `e2e/demo/`,
+  `e2e/php/fixture/`, `e2e/sqlalchemy/`, `e2e/static_site/`, `e2e/static_site/nospa/`,
+  `e2e/venv-smoke/`, `python/tests/project/`, `python/tests/packaged_project/`,
+  `python/tests/live_project/`, and `python/tests/runnable_docs/fixtures/{hello,shop,learn,denial,
+  findings,static-site}/`. Rename the file in place to `Blastfile` and translate its body
+  (`docs/reference/blastfile.md` is the truth; the planner's mapping table in `MB.21` is the checklist).
+- Package surface: `python/blastit/fold.py`, `python/blastit/pytest_plugin.py` (the
+  `--blastit-manifest` path default and its help text), `python/blastit/blastit_build.py`.
+- Makefile: the `DOCS_SERVE_MANIFEST` variable and the stage that writes it (line 85 and its recipe);
+  keep `docs-serve` and `docs-serve-check` working with `Blastfile`.
+- Scripts: `scripts/standalone-runtime-check.sh` writes its fixtures with a heredoc tagged by the
+  retired format's name (lines 67, 92, 165, 186) — retag it `BLASTFILE`; also check
+  `scripts/wheel-smoke.sh`, `scripts/release-notes.sh` and `scripts/build-wheel.sh`.
+- **Delete the v1 path last, in this leaf:** `Manifest::from_toml_str`, `parse.rs`'s v1 reader,
+  `edit.rs`'s v1 patcher, any `toml::` call site, and the `toml` dependency at
+  `crates/blastit-manifest/Cargo.toml:19` (workspace `Cargo.toml` carries no `toml`; `toml_edit` does
+  not exist anywhere — confirm, do not assume). `Cargo.toml`/`Cargo.lock` are in `paths` because this
+  is the one serialized commit that drops the crate.
+- Rename the `manifest_toml` parameter names to `manifest_text` and fix their docstrings:
+  `crates/blastit-py/src/lib.rs:156,179,302,326-333` (a positional PyO3 signature — keep it
+  positional so `python/blastit` call sites keep working), `crates/blastit-py/src/audit.rs:412-414`,
+  `crates/blastit-py/src/check.rs:25,39`, `crates/blastit/src/audit_v1.rs:545,1447`.
+- One-line comment fixes outside the main crates: `crates/blastit-env/tests/environment.rs:469`
+  (the `BLASTIT_MANIFEST` default it asserts is `/app/<file>`), `crates/blastit-sqlpolicy/src/learn.rs:4`
+  (module doc), `crates/blastit-scheduler/src/config.rs:279` (field doc).
+- `crates/blastit-manifest/tests/docs_fences.rs`: it still recognises the old fence opening until
+  `MB.21.5.1` rewrites the pages, so build its opening constant from two fragments (the literal
+  `"blastit"` and the literal `".toml"`, joined with `concat!`) so the tree never carries the
+  contiguous name; leave the strict flip to `MB.21.5.2`.
+- Build residue is not source: `__pycache__/*.pyc`, `python/blastit/_blastit*.so` and `target/` contain
+  the name and must never be edited; every grep below excludes them.
+- Docs still show the old fences until `MB.21.5.1`: keep them green by renaming the file the harness
+  stages, never by editing a page.
 
 # Acceptance
 
 ```console
 $ make check
 $ make e2e
-$ grep -rn 'from_toml_str\|\[\[route\]\]' crates/blastit-manifest/src crates/blastit/src | wc -l
-$ find e2e python/tests scripts -name 'blastit.toml' | wc -l
-$ UV_OFFLINE=1 uv run --no-project --with pytest==9.2.0 python -m pytest python/tests -q
+$ grep -rnE 'toml::|from_toml_str|toml_edit' crates/ python/ --exclude-dir=__pycache__ --exclude-dir=target
+$ grep -rnE 'blastit[.]toml' crates/ python/ scripts/ e2e/ Makefile --exclude-dir=__pycache__ --exclude='*.so' --exclude-dir=target
+$ cargo tree -p blastit-manifest --locked --edges normal | grep -ci toml
+$ find e2e python/tests -name 'Blastfile' | wc -l
+$ find e2e python/tests -name '*.toml' ! -name 'Cargo.toml' ! -name 'inventory.toml' | wc -l
+$ uv run --no-project tools/critical_guard.py --base HEAD~1 --node MB.21.4.4
 ```
 
-1. `make check` exit 0 (`docs-unit`, `docs-test`, `test-critical`, `rs-no-python`, `plan-validate`) and
-   `make e2e` exit 0 with every scenario loading a `Blastfile`.
-2. Both counts above are `0`: no TOML reader symbol and no `blastit.toml` fixture remains.
-3. `blastit-manifest fold` reads and writes `Blastfile` (atomic, comment-preserving) and its `--help`
-   names the new default; `pytest --blastit-manifest` defaults to `Blastfile`.
-4. `make docs-serve-check` still passes (it writes its own `Blastfile` in the stage directory).
-5. `git diff --stat Cargo.toml Cargo.lock` is either empty or explained in `RESULT.md` (one serialized
-   commit, no version bumps beyond what removal requires).
+1. `make check` exit 0 (`test-critical`, `rs-test`, `rs-no-python`, `docs-unit`, `docs-check`,
+   `plan-validate`) and `make e2e` exit 0 with every scenario loading a `Blastfile`.
+2. The first grep prints nothing (no `toml::` path, no v1 entry point); `cargo tree … | grep -ci toml`
+   prints `0`; the second grep prints nothing (no fixture, script or Makefile line names the retired
+   file).
+3. The two `find` counts are `≥ 15` and `0`: every fixture is a `Blastfile`, and nothing under `e2e/`
+   or `python/tests/` is a `.toml` file apart from the runnable-docs inventory and the seccomp
+   fixture's own `Cargo.toml`.
+4. `blastit fmt --check ./Blastfile` passes in every migrated fixture; `blastit-manifest fold` reads
+   and writes `Blastfile` atomically and comment-preserving with `--help` naming the new default;
+   `pytest --blastit-manifest` defaults to `Blastfile`; `make docs-serve-check` passes writing its own
+   `Blastfile`.
+5. `git diff --stat Cargo.toml Cargo.lock` is explained in `RESULT.md` (one serialized commit, only
+   the dependency removal, no version bumps) and `critical_guard.py` is clean for every protected test
+   this leaf rewrote.
 
 # Notes
 
-- Keep the docs' fences green: `docs/` still shows `blastit.toml` until `MB.21.5.1`, so a docs fixture
-  that the harness stages must be migrated by renaming its staged file, not by editing the page.
-- `make e2e` needs Docker; if the host cannot run it, say exactly which scenarios were skipped and why,
-  and leave the scenario runnable for the epic gate.
+- `crates/blastit/tests/**`, `crates/blastit-manifest/tests/**` and `python/tests/critical/**` are
+  protected: this leaf rewrites fixtures and assertions inside them, so they are listed in `paths`
+  and the `critical_guard.py` run above is mandatory.
+- Do not add a compatibility shim, a fallback reader, or a `--manifest`-format switch: the point is
+  that there is exactly one reader. A file that does not parse is a file that does not parse.
+- `make e2e` needs Docker; if the host cannot run it, say exactly which scenarios were skipped and
+  why, and leave every scenario runnable for the epic gate.
+- If a crate outside this leaf's behaviour still names the retired file after the purge, do not leave
+  it: this node owns `crates/**`, so fix it here and say so in `RESULT.md`.

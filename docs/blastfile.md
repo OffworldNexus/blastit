@@ -94,8 +94,5 @@ the same `Blastfile` runs in production and locally. A body sent to a view with
 no `body` is a `413` in `dev` and production, not a warning. The recipes are in
 [Deployments](deploy/index.md) (0.1.1 page, rewritten in this release).
 
-Coming from `blastit.toml`? The [key map](reference/blastfile.md#migration) is
-one page.
-
 Every keyword, directive and path pattern is in the
 [Blastfile reference](reference/blastfile.md).

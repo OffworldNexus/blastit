@@ -335,7 +335,6 @@ trait session {
 |---|---|
 | A trait holds store grants only (`postgres [name] { … }`) | `unrestricted` and `egress any` inside one are refused at boot |
 | A trait grants nothing until a view writes `use <name>` | a trait used nowhere warns at boot |
-| v1's global `groups` key | gone: every attach is written on the view |
 
 ```text
 view products GET "/products" {
@@ -586,46 +585,3 @@ view and the fix instead.
 ```text
 Blastfile:3:9: `=` is not Blastfile syntax; write the value after the keyword
 ```
-
-## Migration
-
-A `blastit.toml` — or any TOML — handed to any Blastit command
-(`BLASTIT_MANIFEST=blastit.toml blastit dev`) fails with one sentence naming
-`Blastfile`, `./Blastfile` and this page, not a parse trace. The v1 keys map as
-follows; [The manifest](manifest.md) documents the file being retired.
-
-| `blastit.toml` | `Blastfile` |
-|---|---|
-| `version = 1` | gone: no header |
-| `app = "mod:attr"` | `app "<name>"` for the name, `entrypoint python "mod:attr"` for the callable |
-| `preload = ["mod"]` | `entrypoint python "mod:attr" { preload "mod", "other" }` |
-| `[proxy.<name>]` `protocol`, `input`, `output` | `postgres $DATABASE_URL`, or `postgres <name> $ENV`, or `postgres <name> { host $DB_HOST; … }` |
-| `[group.<name>]` | `trait <name> { … }`, attached with `use <name>` |
-| top-level `groups` | gone: one `trait <name>` and `use <name>` in every view that needs it |
-| `[[route]]` `name`, `path`, `methods` | `view <name> [METHOD] "<pattern>"`, or the multi-endpoint form; a route-level `groups` list is `use <name>`, and a v1 `GET` now answers `HEAD` too |
-| `[route.ingress]` `body` | `body json`, `form`, `none` or `raw` |
-| `body = "raw"` with `allow_raw = true` | `body raw unvalidated` — the acknowledgement |
-| `body = "raw"` alone | `body raw`; `check` reports it and a production boot refuses the file |
-| `[route.static]` `root`, `index`, `immutable`, `spa` | `static "<prefix>" { root; index; immutable; fallback }` |
-| `[route.php]` `entry` | `entrypoint php "<relative/path.php>"` |
-| `[route.php]` `workers` | gone: the scheduler owns parallelism; omit it |
-| `prefork = true` | `prefork` |
-| `egress = true` | `egress any` |
-| `[route.<proxy>]` `queries`, `functions`, `transaction_control`, `tables`, `unrestricted` | `postgres { query '…'; functions …; transactions; select …; insert …; update …; delete … }`; a grant on a named proxy is `postgres analytics { … }`, and the proxy name becomes the store name. `unrestricted` is `postgres unrestricted` |
-
-The table maps keys. These bullets carry a route's shape, and a proxy's output
-names, across:
-
-* A v1 route's `path` becomes the `view` pattern, and a regex `path` becomes
-  `regex '<pattern>'`; `path = ['.*']` is `view <name> "/*"`. A list of paths is a
-  comma list, or the multi-endpoint form. A `[route.static]` route's `path`
-  becomes the mount's prefix instead.
-* `spa = true` becomes `fallback "<index>"`, usually `fallback "index.html"`.
-* A front controller's catch-all route becomes `view <name> "/*"`: the
-  `entrypoint` alone serves nothing.
-* `[proxy.<name>.output]` is gone: every input variable keeps its name. Rename the
-  input's variable to the name the app already reads, or update the app.
-
-> **Migration note** — the per-view concurrency cap is dropped by decision: it was
-> a per-view ceiling that duplicated what the scheduler already enforces. A v1
-> route that set `workers` loses it — delete the key and add nothing.

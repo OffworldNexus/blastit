@@ -1944,3 +1944,22 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T01:23 [MB.21.1] (lead) closing pass complete after 2 acceptance-round reviews; owner decisions enforced in text: workers REMOVED (not deferred), raw acknowledgement = 'body raw unvali
 - 2026-11-16T01:23 [MB.21.1] (lead) status active -> review
 - 2026-11-16T01:31 [MB.21.1] (lead) status review -> done
+- 2026-11-16T01:31 [MB.21.1] (lead) committing
+- 2026-11-16T01:32 [MB.21.2] (lead) status ready -> active
+- 2026-11-16T01:32 [MB.21.2] (lead) attempt 1/3 started
+- 2026-11-16T01:32 [MB.21.2] (lead) base c2d89e4de9e9bb22d9121e4df97ed9772acf2534
+- 2026-11-16T01:44 [MB.21] (conductor) OWNER MANDATE — TOTAL BURIAL OF blastit.toml (same rule as FastCGI): Delete 'Coming from blastit.toml?' from docs/blastfile.md and delete the entire '## Migrati
+- 2026-11-16T01:44 [MB.21] (lead) OWNER DIRECTIVE 2026-11-16: total burial of blastit.toml (same law as FastCGI MB.3.17/MB.3.30). No detector, no sniffer, no migration sentence, no toml/toml_edi
+- 2026-11-16T01:49 [MB.21.1.1] (planner) created (task) Purge the retired manifest format from the Blastfile pages
+- 2026-11-16T01:49 [MB.21] (planner) edited fields
+- 2026-11-16T01:49 [MB.21.4.1] (planner) edited fields
+- 2026-11-16T01:49 [MB.21.4.4] (planner) edited fields
+- 2026-11-16T01:49 [MB.21.5.1] (planner) edited fields
+- 2026-11-16T01:49 [MB.21.5.2] (planner) edited fields
+- 2026-11-16T01:49 [MB.21] (planner) Replan under the 2026-11-16 burial directive: MB.21.1.1 created (purge the two language pages, doc-only, ready); MB.21.4.1 rewritten to discovery + ordinary syn
+- 2026-11-16T01:50 [MB.21.1.1] (lead) status ready -> active
+- 2026-11-16T01:50 [MB.21.1.1] (lead) attempt 1/3 started
+- 2026-11-16T01:50 [MB.21.1.1] (lead) base c2d89e4de9e9bb22d9121e4df97ed9772acf2534
+- 2026-11-16T01:51 [MB.21.1.1] (lead) status active -> review
+- 2026-11-16T01:55 [MB.21.1.1] (lead) status review -> done
+- 2026-11-16T01:55 [MB.21.1.1] (lead) committing

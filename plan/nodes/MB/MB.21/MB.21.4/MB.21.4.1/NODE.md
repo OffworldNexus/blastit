@@ -1,6 +1,6 @@
 ---
 id: MB.21.4.1
-title: Discover ./Blastfile and refuse blastit.toml/TOML input with one migration sentence at every entry point
+title: Discover ./Blastfile at every entry point and fail a foreign body as an ordinary syntax error
 kind: task
 status: ready
 owner: implementer
@@ -12,60 +12,80 @@ paths:
   - crates/blastit/src/cli.rs
   - crates/blastit/src/check.rs
   - crates/blastit/tests/critical_config_and_presets.rs
-  - crates/blastit/tests/critical_manifest_migration.rs
+  - crates/blastit/tests/critical_blastfile_discovery.rs
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T00:38"
+updated: "2026-11-16T01:49"
 ---
 
 # Goal
 
-Discover `./Blastfile` (with `BLASTIT_MANIFEST` still overriding), keep "no upward search", and make
-every entry point answer a `blastit.toml` or TOML input with one sentence that names the new file.
+Discover `BLASTIT_MANIFEST` else `./Blastfile` at every entry point, name `./Blastfile` when nothing
+is there, and treat every other body as an ordinary `Blastfile:<line>:<col>` syntax error. There is no
+detector, no sniffer, no suffix test, no "migration" classifier and no second file name anywhere in
+the product.
 
 # Context
 
-- Design §10. Precedence is unchanged (`ADR-0002`): `BLASTIT_MANIFEST` else `./Blastfile` in the working
-  directory; a bare name means the working directory; nothing walks upwards.
-- Code sites measured today (`crates/blastit/src/`): `config.rs:2357-2386` (`manifest_path`, the
-  `./blastit.toml` default and the empty-variable message), `config.rs:1019` (the `Config` default),
-  `config.rs:3035-3042` (the doc comment), `stage0.rs` (the missing-file sentence surfaced by
-  `MB.1.6` — an `app.output` event on stdout in production, raw text on fd 2 for `dev`), `cli.rs:264`
-  and `cli.rs:331/357` (the `--manifest` refusal: keep the refusal, reword it), `check.rs:294-300`
-  (`read_manifest`'s "…blastit.toml, or set BLASTIT_MANIFEST").
-- The migration classifier is a small pure function tested in isolation: given the path and the first
-  bytes, a `.toml` suffix **or** TOML-shaped content (`version = 1`, `[[route]]`, a line starting `[`
-  with `]` on it) is `ManifestError::TomlManifest { path, line }`, whose sentence is
-  `"<path> is a TOML manifest; Blastit reads ./Blastfile now (or BLASTIT_MANIFEST): see docs/reference/blastfile.md"`.
-  It must never reach the lexer, so the message can never say "unknown keyword" or "expected `{`".
+- Design §10 is authoritative. Precedence is unchanged (`ADR-0002`): `BLASTIT_MANIFEST` else
+  `./Blastfile` in the working directory; a bare name means the working directory; nothing walks
+  upwards.
+- Owner directive (2026-11-16): the v1 format is buried exactly like the retired PHP transport
+  (`MB.3.17`/`MB.3.30`). Delete any classifier that recognises it. A v1 body is not a special case —
+  the lexer from `MB.21.3.1` meets `version = 1` and reports a syntax error like it would for any
+  other stray token.
+- Code sites measured today (`crates/blastit/src/`), listed by
+  `grep -rnE 'blastit[.]toml' crates/blastit/src`: `config.rs:2357-2386` (`manifest_path`, the
+  working-directory default and the empty-variable sentence), `config.rs:1019` (the `Config`
+  default), `config.rs:3035-3042` (the doc comment), `stage0.rs` (the missing-file sentence surfaced
+  by `MB.1.6` — an `app.output` event on stdout in production, raw text on fd 2 for `dev`),
+  `cli.rs:264` and `cli.rs:331/357` (the `--manifest` refusal: keep the refusal, reword it),
+  `check.rs:294-300` (`read_manifest`).
+- Sentences after this node (one shape each, so a reader can copy them):
+  * missing file, `dev`: `missing ./Blastfile in the working directory (or set BLASTIT_MANIFEST)`.
+  * missing file, production stage 0: the same sentence inside the `app.output` event on fd 1.
+  * `--manifest`: keep the refusal, and name `Blastfile` plus `BLASTIT_MANIFEST`.
+  * foreign body: whatever the parser says — for a v1 body that is the refusal
+    `docs/design/blastfile-dsl.md` §6.7 pins for its first offending token, e.g.
+    ``Blastfile:1:9: `=` is not Blastfile syntax; write the value after the keyword``, with no
+    second sentence and no mention of another format.
 - Tests: extend `crates/blastit/tests/critical_config_and_presets.rs` (path precedence + defaults) and
-  create `crates/blastit/tests/critical_manifest_migration.rs` for the refusal at each entry point
-  (boot, `dev`, `check`, and the production stage-0 message on **stdout** as a JSON `app.output`
-  event — see `LESSONS.md` on the two streams).
+  create `crates/blastit/tests/critical_blastfile_discovery.rs` for the missing-file sentence and the
+  syntax error at each entry point (boot, `dev`, `check`, `fmt`). The production stage-0 sentence is
+  asserted on **stdout** as a JSON `app.output` event (`LESSONS.md`, the two streams).
 
 # Acceptance
 
 ```console
-$ make test-critical      # includes critical_config_and_presets + critical_manifest_migration
+$ make test-critical
 $ make rs-test
 $ uv run --no-project tools/critical_guard.py --base HEAD~1 --node MB.21.4.1
+$ grep -rnE 'blastit[.]toml|TomlManifest|looks_like_toml|is_toml|strip_suffix\(".toml"\)' crates/blastit/src
 $ make check
 ```
 
-1. `BLASTIT_MANIFEST=other-blastfile blastit check` reads that file; with no variable, `./Blastfile` is
-   read; nothing is found above the working directory (a fixture with a parent `Blastfile` proves it).
-2. A `blastit.toml` given four ways — present in the directory, named by `BLASTIT_MANIFEST`, passed as a
-   path argument, TOML content in a file called `Blastfile` — produces the same one-sentence refusal
-   with the `Blastfile` name and the reference link, no parser vocabulary, and exit code 1.
-3. `blastit dev` in an empty directory names `./Blastfile` (not `BLASTIT_APP`) on fd 2; the production
-   boot names it inside the `app.output` event on fd 1.
-4. `--manifest`'s refusal sentence names `Blastfile` and `BLASTIT_MANIFEST`.
-5. `make check` exit 0; `critical_guard.py` clean.
+1. `BLASTIT_MANIFEST=other-blastfile blastit check` reads that file; with no variable, `./Blastfile`
+   is read; a fixture with a `Blastfile` in a parent directory proves nothing above the working
+   directory is read.
+2. In an empty directory `blastit dev` names `./Blastfile` on fd 2 and the production boot puts the
+   same sentence inside the `app.output` event on fd 1; neither sentence names a second file name.
+3. A file whose body is `version = 1` followed by a `[[route]]` table fails at boot, `dev`, `check`
+   and `fmt` with a single `line:col` syntax error naming the file and the position, exit code 1, no
+   migration wording and no second paragraph.
+4. The `grep` above prints nothing: no retired file-name default, no detector, no
+   `TomlManifest`/`is_toml` symbol, no `.toml` suffix test in `crates/blastit/src`.
+5. `make check` exit 0 and `critical_guard.py` clean.
 
 # Notes
 
-- `MB.21.3.5`/`MB.21.3.6` are ancestors, so `Manifest::from_toml_str` still exists — that is fine; this
-  leaf only refuses TOML **at the door**, it does not delete the reader (`MB.21.4.4` does).
+- The repository-wide emptiness of the retired name across every crate, `python/`, `e2e/`, `scripts/`
+  and `Makefile` is `MB.21.4.4`'s acceptance, and `MB.21.5.2` makes it permanent. This node leaves the
+  discovery and messaging surface clean and lists, in `RESULT.md`, every remaining hit it did not own
+  and which sibling owns it.
+- `MB.21.3.5`/`MB.21.3.6` are ancestors, so the v1 reader still exists in the tree — that is fine; the
+  reader is deleted by `MB.21.4.4`. This leaf only stops the product from ever reaching it.
 - Do not create a root `Blastfile` for the repository: it is not an app, and nothing boots it.
+- Never add a sentence that explains the change to a user. A file that does not parse is a file that
+  does not parse.

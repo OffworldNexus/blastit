@@ -41,7 +41,6 @@ nav = [
   { "Reference" = [
     "reference/cli.md",
     { "Blastfile reference" = "reference/blastfile.md" },
-    { "The manifest (0.1.1, retired)" = "reference/manifest.md" },
     { "Settings" = "reference/settings.md" },
     { "Log events" = "reference/log-events.md" },
   ] },
