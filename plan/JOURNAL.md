@@ -2293,3 +2293,30 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T17:30 [MB.21.4.9] (lead) status ready -> review
 - 2026-11-16T17:38 [MB.21.4.9] (lead) reviewer PASS (round 2): the invariant holds at all six admit_ready sites, base proof from git archive 1d92c6a shows 7 failing cases, this tree 16/16. My gate: 
 - 2026-11-16T17:38 [MB.21.4.9] (lead) status review -> done
+- 2026-11-16T17:38 [MB.21.4.5.1] (lead) status ready -> active
+- 2026-11-16T17:38 [MB.21.4.5.1] (lead) attempt 1/3 started
+- 2026-11-16T17:38 [MB.21.4.5.1] (lead) base 2ef786ce381dce05208d8d4d09a50f8eb4d7589b
+- 2026-11-16T17:38 [MB.21.4.5.2] (lead) status ready -> active
+- 2026-11-16T17:38 [MB.21.4.5.2] (lead) attempt 1/3 started
+- 2026-11-16T17:38 [MB.21.4.5.2] (lead) base 2ef786ce381dce05208d8d4d09a50f8eb4d7589b
+- 2026-11-16T17:44 [MB.21.4.5.5] (lead) status ready -> active
+- 2026-11-16T17:44 [MB.21.4.5.5] (lead) attempt 1/3 started
+- 2026-11-16T17:44 [MB.21.4.5.5] (lead) base 2ef786ce381dce05208d8d4d09a50f8eb4d7589b
+- 2026-11-16T17:46 [MB.21.4.5.2] (lead) REVIEW FAIL: (1 MAJOR) control-byte exemplars in critical_static_manifest.rs:211,215,386,426 + critical_php_manifest.rs:124 moved from NUL/0x1F boundaries to \n
+- 2026-11-16T17:46 [MB.21.4.5.2] (lead) status active -> ready
+- 2026-11-16T17:46 [MB.21.4.5.2] (lead) status ready -> active
+- 2026-11-16T17:46 [MB.21.4.5.2] (lead) attempt 2/3 started
+- 2026-11-16T17:49 [MB.21.4.5.1] (lead) REVIEW FAIL: (1 MAJOR) RESULT.md row 38 cites critical_blastfile_parity.rs::the_dropped_rows_are_absent, which never asserts empty mounts() or name()==None -> t
+- 2026-11-16T17:49 [MB.21.4.5.1] (lead) status active -> ready
+- 2026-11-16T17:49 [MB.21.4.5.1] (lead) status ready -> active
+- 2026-11-16T17:49 [MB.21.4.5.1] (lead) attempt 2/3 started
+- 2026-11-16T17:52 [MB.21.4.5.4] (lead) status ready -> active
+- 2026-11-16T17:52 [MB.21.4.5.4] (lead) attempt 1/3 started
+- 2026-11-16T17:52 [MB.21.4.5.4] (lead) base 2ef786ce381dce05208d8d4d09a50f8eb4d7589b
+- 2026-11-16T17:55 [MB.21] (lead) CONCURRENCY (epic gate): a sibling session (MB.22 / docs/research) is now writing inside this same worktree, so (a) every commit stages explicit node paths only
+- 2026-11-16T17:56 [MB.21.4.5.3] (lead) status ready -> active
+- 2026-11-16T17:56 [MB.21.4.5.3] (lead) attempt 1/3 started
+- 2026-11-16T17:56 [MB.21.4.5.3] (lead) base 2ef786ce381dce05208d8d4d09a50f8eb4d7589b (5.1 PASSed review; parse.rs already deleted on disk)
+- 2026-11-16T18:17 [MB.21.4.5.1] (lead) pre-commit gates: plan.py validate OK; guard.py OK; make check exit 0, 4619 lines (/tmp/opencode/mb2145-batch-makecheck.log). Tree QUIESCENT at commit time — no
+- 2026-11-16T18:17 [MB.21.4.5.1] (lead) status active -> review
+- 2026-11-16T18:17 [MB.21.4.5.1] (lead) status review -> done

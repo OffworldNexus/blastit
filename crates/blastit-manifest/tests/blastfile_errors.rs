@@ -39,6 +39,31 @@ fn every_refusal_is_one_line() {
     }
 }
 
+/// A document that opens with a `key = value` line is not detected, sniffed or
+/// converted: it is an ordinary Blastfile syntax error at its first offending
+/// byte, naming the sections the file takes (§15.1, `R16`). This is the one
+/// reader, so the first line is where every other document shape dies too.
+#[test]
+fn a_document_that_is_not_a_blastfile_gets_an_ordinary_syntax_error() {
+    // `version = 1` is not a header the parser recognises.
+    assert_eq!(
+        refusal("version = 1\n"),
+        "1:1: `version` is not a keyword; the sections are `app`, `entrypoint`, `postgres`, \
+         `trait`, `view`, `static`"
+    );
+    // The rest of such a document is never reached: there is no key map, no
+    // detection hook and no "looks like…" branch to reach it, so the refusal is
+    // one positioned line and the document yields no manifest.
+    let errors =
+        Manifest::from_blastfile_str("version = 1\n[proxy.db]\nprotocol = \"postgresql\"\n")
+            .expect_err("a document that is not a Blastfile is refused");
+    assert_eq!(errors.len(), 1, "{errors}");
+    assert!(
+        errors.errors()[0].to_string().starts_with("1:1: "),
+        "{errors}"
+    );
+}
+
 /// A value's control bytes are escaped, never printed raw (§18).
 #[test]
 fn a_control_byte_is_escaped() {
@@ -68,6 +93,35 @@ fn a_long_value_is_cut_at_120_characters() {
     let source = format!("view {name} \"/x\" {{\n}}\nview {name} \"/y\" {{\n}}\n");
     let rendered = refusal(&source);
     assert!(!rendered.contains('…'), "{rendered}");
+}
+
+/// The shortest document is a document: an empty file lowers to a manifest
+/// with nothing in it, and §7.1's three dropped rows stay absent — no mount, no
+/// front controller, no `app` name. A file that declares none of them cannot
+/// acquire one from nothing.
+#[test]
+fn an_empty_document_parses_with_no_mount_no_front_controller_and_no_name() {
+    let manifest = Manifest::from_blastfile_str("").expect("an empty file is a Blastfile");
+    assert_eq!(manifest.route_count(), 0);
+    assert!(manifest.mounts().is_empty(), "{:?}", manifest.mounts());
+    assert!(manifest.php().is_none());
+    assert_eq!(manifest.name(), None);
+}
+
+/// Two mounts may not share a prefix: the second could never answer, so the
+/// whole-file check refuses both indices (§9.1). This is where the retired
+/// "second `[route.static]` block never answers" fact lives now — the two
+/// blocks are one prefix, and the duplicate is the refusal.
+#[test]
+fn a_duplicate_mount_prefix_is_refused() {
+    let source = "static \"/x\" {\n  root \"a\"\n}\nstatic \"/x\" {\n  root \"b\"\n}\n";
+    let errors =
+        Manifest::parse_blastfile(source, 20_000).expect_err("the second mount cannot answer");
+    let error = errors.errors().first().expect("one error");
+    assert!(
+        matches!(error, ManifestError::DuplicateMount { prefix, first: 0, second: 1 } if prefix == "/x"),
+        "{error:?}"
+    );
 }
 
 /// A refused document never yields a manifest (R21).

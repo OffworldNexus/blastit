@@ -2,7 +2,7 @@
 id: MB.21.4.5.1
 title: "Retire the v1 parser suite and translate the 0.1.1 schema suite to Blastfile, re-homing every refusal"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
@@ -10,11 +10,11 @@ paths:
   - "crates/blastit-manifest/tests/parse.rs"
   - "crates/blastit-manifest/tests/critical_manifest_011.rs"
   - "crates/blastit-manifest/tests/blastfile_errors.rs"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-16T16:57"
-updated: "2026-11-16T16:57"
+updated: "2026-11-16T18:17"
 ---
 
 # Goal
