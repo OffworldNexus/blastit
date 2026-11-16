@@ -259,12 +259,17 @@ if ! grep -qa "blastit/_bin/blastit-dbproxy" "$wheel"; then
     echo "the wheel has no dbproxy binary in it: $wheel" >&2
     exit 1
 fi
-
 # `pyo3/extension-module` is what keeps the extension off `libpython`, but the
 # artifact is only portable if that is true of the *file in the wheel*, not of the
 # intent in `Cargo.toml` (`MB.17`). Extract every `blastit/_blastit*.so` and run
 # the same `readelf` assertions the standalone binary gets: no `libpython`, no
-# `RUNPATH`/`RPATH` into this machine's uv cache.
+# `RUNPATH`/`RPATH` into this machine's uv cache — and, `MB.3.67`, no
+# `BLASTIT_TEST_SWAP_POINT`, because this is the release build a `pip install
+# blastit` loads and it was the one artifact family nothing measured. (The call
+# lives inside this block rather than above it: the release-hygiene fixture in
+# `python/tests/test_release_scripts.py` copies this script alone into a tree of
+# stubs, where a sibling script is "No such file" — and its stub wheel is not a
+# zip, so there is no ELF to measure either way.)
 #
 # A wheel is a zip by definition, and maturin always writes one. The only
 # non-zip `*.whl` in reach is the stub maturin `python/tests/test_release_scripts.py`
@@ -314,5 +319,10 @@ if [ -s "$scratch/members" ]; then
         # paths are still refused, and the standalone archive is checked with no
         # relaxation at all (`make rs-no-python`, `scripts/build-standalone.sh`).
         scripts/check-portable-elf.sh --allow-origin-rpath "$extracted"
+        # `MB.3.67`: the seam measurement, on the same file the portable-ELF
+        # assertion just read. A release binary that an environment variable can
+        # pause before it binds is the denial-of-service surface the archive's
+        # binary is checked for in `scripts/build-standalone.sh`.
+        scripts/check-no-test-seam.sh "$extracted"
     done < "$scratch/members"
 fi

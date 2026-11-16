@@ -42,6 +42,15 @@
 #     checked, and the first one that is too old fails the run. A duplicate is
 #     inspected once.
 #
+# It does **not** decide an ELF whose own headers name no C library at all —
+# neither an `INTERP` nor a `NEEDED` `libc.*` (a static-pie build, for instance).
+# That file's libc cannot be read, so no version name in `.gnu.version_r` is
+# evidence of a glibc floor, and the verdict is 2 "cannot decide": a floor
+# compared from a name nobody attributed to glibc is the guess `MB.3.66` removed,
+# and exit 1 would print "a glibc ELF cannot start where there is no glibc" beside
+# "interpreter none" (`MB.3.67`). A file with musl evidence is still accepted, and
+# so is a glibc one; point this at a dynamically linked artifact otherwise.
+#
 # **A `GLIBC_*` name is not proof of a glibc dependency.** `.gnu.version_r` lists
 # the version nodes of *every* library the binary needs, including ones that are
 # not glibc: Alpine's aarch64 `libgcc_s` declares a node spelled `GLIBC_2.0`, so
@@ -70,8 +79,9 @@
 # user will actually get. Push it, or point the check at the public base image.
 #
 # Exit: 0 every image agrees, 1 an image is too old (or has no glibc for a glibc
-# binary), 2 usage, a missing tool, an image that could not be pulled, or an
-# image whose C library could not be read.
+# binary), 2 usage, a missing tool, an image that could not be pulled, an image
+# whose C library could not be read, or a binary whose own headers name no C
+# library to compare at all.
 #
 #   scripts/check-exec-env.sh --image debian:trixie-slim --binary target/debug/blastit
 #   scripts/check-exec-env.sh --image debian:bookworm-slim --image debian:trixie-slim \
@@ -148,9 +158,11 @@ done
 #   any other GLIBC_ABI_* -> refused: this check does not know that feature's
 #                            floor, and guessing it is how a gate goes vacuous.
 #
-# Both readings are glibc *floors*, so they are read only from an ELF whose loader
-# is glibc: on a musl file the whole block is skipped and the names are reported
-# as ignored (see the musl paragraph above).
+# Both readings are glibc *floors*, so they are read only from an ELF whose own
+# headers say glibc (`INTERP`, or `NEEDED libc.so.6`): on a musl file the whole
+# block is skipped and the names are reported as ignored (see the musl paragraph
+# above), and a file that names no libc at all never reaches it — that is exit 2
+# "cannot decide" (`MB.3.67`).
 #
 # **A file `readelf` cannot read is exit 2 ("cannot decide"), never exit 1
 # ("too old").** `readelf --version-info README.md` writes "Error: Not an ELF
@@ -244,6 +256,29 @@ if [ "$interp_musl" -eq 1 ]; then
     musl_evidence="interpreter $elf_interp"
 elif [ "$needs_musl_libc" -eq 1 ]; then
     musl_evidence="NEEDED $(printf '%s\n' "$elf_needed" | grep -m 1 '^libc\.musl-')"
+fi
+
+# A file whose own headers name no C library has no libc to compare, and so no
+# floor to read from any version name (`MB.3.67`). Without this, a static-pie ELF
+# (no `INTERP`, no `NEEDED libc.*`) fell through to the glibc branch below, took
+# its `GLIBC_ABI_DT_RELR` name as a 2.36 floor, and refused `alpine:3.21` with
+# "a glibc ELF cannot start where there is no glibc" printed beside "interpreter
+# none" — two sentences that cannot both be true, and a refusal about a libc the
+# file never loaded. Exit 2 says what the evidence supports: nothing.
+#
+# The check that follows is the evidence for the branch below: past this point a
+# floor is compared only for an ELF that names glibc (`INTERP`) or links it
+# (`NEEDED libc.so.6`), which is the gate `MB.3.66`'s ABI-node loop needs too.
+if [ -z "$musl_evidence" ] \
+    && [ "$interp_glibc" -eq 0 ] \
+    && [ "$needs_glibc" -eq 0 ]; then
+    echo "check-exec-env: FAIL — cannot decide which C library $(basename "$binary") needs, so no image can be judged:" >&2
+    echo "  its own headers name none: machine ${elf_machine:-unknown}, interpreter ${elf_interp:-none}, NEEDED: $(printf '%s ' $elf_needed)" >&2
+    echo "  a GLIBC_* or GLIBC_ABI_* name in .gnu.version_r is only a floor for a file whose" >&2
+    echo "  INTERP or NEEDED says glibc; with neither, comparing one would be a guess, and" >&2
+    echo "  refusing the file for a glibc it never named would be a false refusal." >&2
+    echo "  point this check at the dynamically linked artifact the image will actually exec" >&2
+    exit 2
 fi
 
 required=$(

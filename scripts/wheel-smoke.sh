@@ -12,6 +12,13 @@
 #      `docs/reference/cli.md`), i.e. the
 #      wheel matches this interpreter's ABI — the one thing a `cp3NN` tag
 #      promises and a wrongly-built wheel breaks;
+#   1b. the extension carries no test-only boot seam (`MB.3.67`): the wheel is the
+#      release artifact a `pip install blastit` gets, so the installed
+#      `_blastit*.so` is measured for `BLASTIT_TEST_SWAP_POINT` exactly as
+#      `scripts/build-standalone.sh` measures the archive's binary. This is the
+#      leg the published wheels go through (maturin-action builds them, not
+#      `scripts/build-wheel.sh`), so without it the shipped wheel is the one
+#      artifact nothing reads;
 #   2. `blastit-dbproxy` is present and executable, because stage 0 `execve`s it
 #      and a wheel without it refuses to boot (§2.2);
 #   3. one static route is served (`200` with `Cache-Control: no-cache`) and an
@@ -80,6 +87,33 @@ printf '%s\n' "$usage" | grep -q "stage 0" || {
     exit 1
 }
 echo "wheel-smoke: blastit --help ok"
+
+# 1b. The installed extension carries no test-only boot seam (`MB.3.67`).
+# `_blastit*.so` is a `--release` build, so `BLASTIT_TEST_SWAP_POINT` (compiled
+# under `debug_assertions` alone) must not be in it: a shipped binary that can be
+# paused by an environment variable before it binds a listener is a
+# denial-of-service surface. Measured on the file that was installed, not on the
+# flags the build was asked to use — `scripts/check-no-test-seam.sh` is the
+# two-direction reader the archive's binary goes through as well.
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+site_dir=$("$python" - <<'PY'
+import pathlib
+import blastit
+
+print(pathlib.Path(blastit.__file__).parent)
+PY
+)
+extensions=0
+for extension in "$site_dir"/_blastit*.so; do
+    [ -e "$extension" ] || continue
+    bash "$script_dir/check-no-test-seam.sh" "$extension"
+    extensions=$((extensions + 1))
+done
+if [ "$extensions" -eq 0 ]; then
+    echo "error: no _blastit*.so in $site_dir: the wheel's extension is not where" >&2
+    echo "  this smoke test looks, so the boot seam went unmeasured" >&2
+    exit 1
+fi
 
 # 2. dbproxy travels in the wheel and is executable.
 dbproxy=$("$python" - <<'PY'

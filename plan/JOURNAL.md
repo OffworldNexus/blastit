@@ -1900,3 +1900,40 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T00:28 [MB.3.66] (lead) the docs-unit red it reported was MY brief: plan/nodes/MB/MB.3/MB.3.68/NODE.md:31 quoted 'fall back' (a retired PHP vocabulary the guard bans in live briefs). R
 - 2026-11-16T00:28 [MB.3.66] (lead) status active -> review
 - 2026-11-16T00:33 [MB.3.66] (lead) status review -> done
+- 2026-11-16T00:33 [MB.3.67] (lead) edited fields
+- 2026-11-16T00:33 AUTOPILOT on by conductor owner mandated Blastfile DSL (guide + reference -> lexer/parser/runtime cutover) for 0.2.0
+- 2026-11-16T00:33 HUMAN H-005 closed by conductor
+- 2026-11-16T00:33 HUMAN H-008 closed by conductor
+- 2026-11-16T00:33 HUMAN H-009 closed by conductor
+- 2026-11-16T00:33 [MB.3.67] (lead) scope widened to the same family found in review: an ELF with no INTERP and no libc NEEDED must not read GLIBC_ABI_* as a floor (exit 2, not a refusal), plus th
+- 2026-11-16T00:33 [MB.3.67] (lead) status ready -> active
+- 2026-11-16T00:33 [MB.3.67] (lead) attempt 1/3 started
+- 2026-11-16T00:33 [MB.3.67] (lead) attempt 1/3 started; base f1f933a
+- 2026-11-16T00:38 [MB.21] (planner) created (epic) Replace blastit.toml with the purpose-built Blastfile DSL (docs first, then parser, fmt and cutover)
+- 2026-11-16T00:38 [MB.21.1] (planner) created (task) Write the Blastfile basic guide and complete language reference, register them, pass dx + ai-ergonomics critics
+- 2026-11-16T00:38 [MB.21.2] (planner) created (task) Design the Blastfile lexer, parser, CST and cutover (ADR-0012) with security/implementability/testability/consistency critics
+- 2026-11-16T00:38 [MB.21.3] (planner) created (epic) Blastfile toolchain: bounded lexer, LL(1) parser, path compiler, fmt, surgical editor, docs_fences
+- 2026-11-16T00:38 [MB.21.3.1] (planner) created (task) Bounded Blastfile lexer: tokens, $IDENT, raw and escaped strings, trivia, line:col errors
+- 2026-11-16T00:38 [MB.21.3.2] (planner) created (task) LL(1) Blastfile parser producing the existing Manifest, with the v1 model-equality oracle
+- 2026-11-16T00:38 [MB.21.3.3] (planner) created (task) Compile Blastfile path patterns and imply HEAD from GET at parse time
+- 2026-11-16T00:38 [MB.21.3.4] (planner) created (task) Lossless Blastfile CST, canonical printer and blastit fmt [--check] [PATH]
+- 2026-11-16T00:38 [MB.21.3.5] (planner) created (task) Surgical comment-preserving Blastfile editor for --learn (replaces the TOML patcher)
+- 2026-11-16T00:38 [MB.21.3.6] (planner) created (task) Parse blastfile doc fences in docs_fences, reporting both openings until the strict flip
+- 2026-11-16T00:38 [MB.21.4] (planner) created (epic) Cut the product over to Blastfile: discovery, migration refusal, runtime parity, check/--learn, Python, Makefile, e2e
+- 2026-11-16T00:38 [MB.21.5] (planner) created (epic) Docs migration and release proof: live fences, retired-TOML guard, mutation audit, visual check
+- 2026-11-16T00:38 [MB.21.4.1] (planner) created (task) Discover ./Blastfile and refuse blastit.toml/TOML input with one migration sentence at every entry point
+- 2026-11-16T00:38 [MB.21.4.2] (planner) created (task) Prove runtime parity on Blastfile: static precedence, ingress modes, entrypoint php, traits, grants
+- 2026-11-16T00:38 [MB.21.4.3] (planner) created (task) Map check, dev --learn, fold and --json fix actions onto Blastfile nodes
+- 2026-11-16T00:38 [MB.21.4.4] (planner) created (task) Migrate Python package, Makefile and every e2e fixture to Blastfile and delete the TOML reader
+- 2026-11-16T00:38 [MB.21.5.1] (planner) created (task) Rewrite the documentation site and README for Blastfile and retire reference/manifest.md
+- 2026-11-16T00:38 [MB.21.5.2] (planner) created (task) Execute Blastfile doc fences live, make docs_fences strict and guard the retired file
+- 2026-11-16T00:38 [MB.21.5.3] (planner) created (task) Audit and mutation-test the Blastfile parser, CST and editor (test-curator)
+- 2026-11-16T00:38 [MB.21.5.4] (planner) created (task) Browser proof of the Blastfile pages, nav and both colour schemes (visual-checker)
+- 2026-11-16T00:38 [MB.20] (planner) edited fields
+- 2026-11-16T00:38 [MB.21] (planner) Decomposed into 5 children (2 tasks + 3 epics, 19 nodes total): DX docs MB.21.1 -> design+ADR MB.21.2 -> toolchain MB.21.3.{1..6} -> cutover MB.21.4.{1..4} -> d
+- 2026-11-16T00:40 [MB.21] (conductor) Owner-settled decisions for Blastfile (mandatory for 0.2.0): (1) NO workers knob in Blastfile — scheduler owns parallelism, [route.php] workers is removed compl
+- 2026-11-16T00:40 [MB.21.2] (conductor) Settled up front (not open): [route.php] workers is removed (scheduler owns parallelism; no workers directive in Blastfile), global top-level groups are removed
+- 2026-11-16T00:40 [MB.21.1] (lead) status ready -> active
+- 2026-11-16T00:40 [MB.21.1] (lead) attempt 1/3 started
+- 2026-11-16T00:40 [MB.21.1] (lead) base f1f933a5edd55bf1e0f9a85f8c3705e45d295702
+- 2026-11-16T00:55 [MB.3.67] (lead) status active -> review

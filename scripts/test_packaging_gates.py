@@ -834,9 +834,9 @@ def _run_exec_env(env: dict[str, str], binary: Path, image: str = "alpine:3.21")
 
 
 def test_exec_env_cases() -> int:
-    """`MB.3.63`/`MB.3.66`: the judge reads the binary's own libc, and cannot decide is 2.
+    """`MB.3.63`/`MB.3.66`/`MB.3.67`: the judge reads the binary's own libc.
 
-    Ten cases, each one a verdict the gate used to get wrong in some shape:
+    Twelve cases, each one a verdict the gate used to get wrong in some shape:
 
     * a file `readelf` cannot parse is exit **2** (cannot decide), never 1 (too
       old) — the direction `MB.3.61` documented and this test pins;
@@ -852,7 +852,11 @@ def test_exec_env_cases() -> int:
     * a musl ELF whose only version needs are a non-glibc `GLIBC_ABI_DT_RELR`
       node passes in `alpine:3.21` rather than being read as a 2.36 floor, while
       the same node on a **glibc** ELF keeps its floor and is refused by 2.31
-      (`MB.3.66`).
+      (`MB.3.66`) — and **accepted** by a 2.36 image, so the refusal is a
+      comparison and not a constant (`MB.3.67` item 4);
+    * an ELF whose own headers name no C library at all — no `INTERP`, no
+      `NEEDED libc.*`, the static-pie shape — is exit **2** (cannot decide), not a
+      refusal built on a version name nothing attributed to glibc (`MB.3.67`).
     """
     cases_run = 0
     if shutil.which("readelf") is None:
@@ -1114,6 +1118,67 @@ def test_exec_env_cases() -> int:
         )
         cases_run += 1
 
+        #     ... and the accept side, so a future "always exit 1" cannot pass this
+        #     suite: the same 2.36-needing glibc ELF in a 2.36 image passes, and
+        #     says which floor it read (`MB.3.67` item 4).
+        glibc_abi_236_env = _fake_env(
+            root / "glibc-with-abi-node-236",
+            machine="Advanced Micro Devices X86-64",
+            interp="/lib64/ld-linux-x86-64.so.2",
+            needed="libgcc_s.so.1\nlibc.so.6",
+            version_info=MUSL_ABI_NODE_TRANSCRIPT,
+            image_libc="2.36",
+        )
+        res = _run_exec_env(glibc_abi_236_env, binary, image="debian:bookworm-slim")
+        _expect(
+            res.returncode == 0,
+            "the same glibc ELF needing 2.36 must pass in a 2.36 image, or the "
+            f"refusal above is a constant; got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "needs glibc 2.36" in res.stdout and "provides 2.36" in res.stdout,
+            "the pass must print the floor it read and the version it compared it to",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # (e) `MB.3.67` item 3: an ELF whose own headers name **no** C library — no
+        #     `INTERP`, no `NEEDED libc.*`, the shape a static-pie artefact has —
+        #     still carries whatever version script went into it, and this file
+        #     carries a `GLIBC_ABI_DT_RELR` name. The check took that name as a
+        #     2.36 floor and refused `alpine:3.21` with "a glibc ELF cannot start
+        #     where there is no glibc" printed beside "interpreter none": a floor
+        #     read from a libc the file never named. Without that evidence there is
+        #     no floor and no verdict — exit 2, never 1.
+        no_libc_env = _fake_env(
+            root / "no-c-library",
+            machine="Advanced Micro Devices X86-64",
+            interp="",
+            needed="",
+            version_info=MUSL_ABI_NODE_TRANSCRIPT,
+        )
+        res = _run_exec_env(no_libc_env, binary)
+        _expect(
+            res.returncode == 2,
+            "an ELF with no INTERP and no NEEDED libc.* cannot be classified, so it "
+            f"must be exit 2 (cannot decide), never 1 (too old); got {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        _expect(
+            "cannot decide which C library" in res.stderr
+            and "interpreter none" in res.stderr,
+            "the exit-2 refusal must say what it read (no interpreter, no libc) and "
+            "must not claim a glibc ELF where there is none",
+            res.stderr,
+        )
+        _expect(
+            "a glibc ELF cannot start where there is no glibc" not in res.stderr,
+            "a file that names no libc must not be refused as a glibc ELF",
+            res.stderr,
+        )
+        cases_run += 1
+
     return cases_run
 
 
@@ -1121,16 +1186,26 @@ def test_test_seam_cases() -> int:
     """`MB.3.64`: the shipped artifact's absence of the test-only boot seam.
 
     `#[cfg(debug_assertions)]` is an assertion until a check looks at a file, so
-    `scripts/check-no-test-seam.sh` is run here against four synthetic "binaries"
-    — real files, never a real build — to prove it is not vacuous:
+    `scripts/check-no-test-seam.sh` is run here against real files — never a real
+    build — to prove it is not vacuous:
 
     * the name present → `--absent` (the shipped direction) must exit **1**;
     * the name absent → `--absent` must exit **0**;
     * the name absent → `--present` (the debug direction) must exit **1**, so the
       absence check cannot pass by the seam having been deleted everywhere;
+    * a file this check cannot read (mode `000`) is exit **2** naming the path,
+      never `ok … absent` with 0 about a file nothing read (`MB.3.67`);
     * a path that does not exist, and no argument at all, are exit **2**.
     """
     cases_run = 0
+    # Mode 000 denies a read to a normal user only: as root the fixture would be
+    # read, the guard below would pass for the wrong reason, and the case would
+    # pin nothing. `make check` is unprivileged, so say so instead of skipping.
+    if os.geteuid() == 0:
+        raise AssertionError(
+            "the unreadable-artifact case needs a non-root user (mode 000 stays "
+            "readable as root): run scripts/test_packaging_gates.py unprivileged"
+        )
     with tempfile.TemporaryDirectory(prefix="blastit-seam-gate-") as tmp:
         root = Path(tmp)
         seam = "BLASTIT_TEST_SWAP_POINT"
@@ -1195,6 +1270,47 @@ def test_test_seam_cases() -> int:
             f"a missing artifact must be exit 2 (cannot decide); got {res.returncode}",
             res.stdout + res.stderr,
         )
+        cases_run += 1
+
+        # `MB.3.67` item 1: a file this check cannot read is not a file with zero
+        # occurrences. `grep` exits 2 on it and the pipeline still yields `0` hits,
+        # so `--absent` used to print `ok … absent` and exit 0 about a file nothing
+        # read — a shipped binary that failed to be measured passing as measured.
+        unreadable = root / "unreadable-release-blastit"
+        unreadable.write_bytes(with_name.read_bytes())
+        unreadable.chmod(0o000)
+        try:
+            _expect(
+                not os.access(unreadable, os.R_OK),
+                "the unreadable fixture is readable anyway, so this case would pin "
+                "nothing",
+            )
+            res = run("--absent", str(unreadable))
+            _expect(
+                res.returncode == 2,
+                "an unreadable artifact must be exit 2 (no verdict), never "
+                f"'absent' with 0; got exit {res.returncode}",
+                res.stdout + res.stderr,
+            )
+            _expect(
+                str(unreadable) in res.stderr
+                and "absent, as shipped" not in res.stdout,
+                "the exit-2 refusal must name the path it could not read and must "
+                "not print an absence verdict",
+                res.stdout + res.stderr,
+            )
+            # The other direction fails for the same reason, not as "the seam was
+            # deleted from the source": exit 2 says nothing was read, and exit 1
+            # would be a verdict about the file's contents.
+            res = run("--present", str(unreadable))
+            _expect(
+                res.returncode == 2,
+                "an unreadable artifact must be exit 2 in the debug direction too, "
+                f"not 1 'the seam is gone'; got exit {res.returncode}",
+                res.stdout + res.stderr,
+            )
+        finally:
+            unreadable.chmod(0o600)
         cases_run += 1
 
         res = run()
