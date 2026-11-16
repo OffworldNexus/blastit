@@ -56,15 +56,16 @@ fn views_are_numbered_in_manifest_order() {
 
 #[test]
 fn the_uid_range_is_checked_against_the_base() {
+    // The shortest document there is: an empty `Blastfile` declares nothing.
     assert_eq!(
-        validate_errors("version = 1\n", 65_533),
+        validate_errors("", 65_533),
         ManifestErrors::from(ManifestError::UidBaseTooHigh {
             base: 65_533,
             uid: 65_536,
             max: 65_536,
         })
     );
-    Manifest::from_toml_str("version = 1\n")
+    Manifest::from_blastfile_str("")
         .unwrap()
         .validate(65_532)
         .expect("dbproxy at 65535 is still in range");
@@ -72,9 +73,9 @@ fn the_uid_range_is_checked_against_the_base() {
 
 #[test]
 fn the_last_route_uid_is_the_boundary() {
-    let route = "version = 1\n[[route]]\nname = \"r\"\npath = ['.*']\n";
+    let route = "view r regex '.*' {\n}\n";
     // 64535 + 1000 = 65535: in range.
-    Manifest::from_toml_str(route)
+    Manifest::from_blastfile_str(route)
         .unwrap()
         .validate(64_535)
         .expect("in range");
@@ -91,10 +92,10 @@ fn the_last_route_uid_is_the_boundary() {
 }
 
 /// A route runs under the uid of its **sandbox**, not of its position in the
-/// table: the retired reader numbers one sandbox per route, so
-/// `sandbox(route.sandbox())` is the number today's table gives, and a
-/// Blastfile's two endpoints of one view both carry that view's sandbox and
-/// therefore one uid (§2.3, §7.3).
+/// table: `lower` numbers one sandbox per `view`, and the §6 application has one
+/// endpoint per view, so `sandbox(route.sandbox())` is the number today's table
+/// gives. A view with two endpoints carries that view's sandbox on both of its
+/// routes and therefore one uid (§2.3, §7.3).
 ///
 /// The shared-sandbox and range-check halves are `src/uid.rs`'s own tests: only
 /// the crate can build a `Route` with a chosen sandbox, and `tests/` never calls

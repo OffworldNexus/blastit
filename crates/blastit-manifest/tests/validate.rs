@@ -1,22 +1,86 @@
 //! Validation: every cross-reference check, warning and the uid cap (§6).
+//!
+//! A `Blastfile` cannot write some of the shapes these rules judge — a view name
+//! is a `Word` the parser checks, a pattern is compiled by the parser, an
+//! `unrestricted` block takes nothing — so those arms are exercised through the
+//! model's `#[doc(hidden)]` builder instead of a document. Design §20 R8 makes
+//! that builder the integration tests' own: the validator still runs on every
+//! manifest, and every rule keeps a test rather than becoming a dead letter. Each
+//! such test says in one line why a document cannot reach it.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use blastit_manifest::{
-    Location, Manifest, ManifestError, ManifestErrors, ManifestWarning, PgGrant, ProxyName,
+    Columns, Grant, Group, Location, Manifest, ManifestError, ManifestErrors, ManifestWarning,
+    PgGrant, ProxyName, Route, TableGrant, TableGrants,
 };
 
-use common::{SECTION_5_1, SECTION_6, section_6, texts, validate_errors, validate_warnings};
+use common::{
+    SECTION_5_1, SECTION_6, parse_errors, section_6, texts, validate_errors, validate_warnings,
+};
+
+/// A route built through the model builder, in its own sandbox.
+fn built_route(
+    sandbox: u32,
+    name: &str,
+    path: &[&str],
+    methods: Option<&[&str]>,
+    groups: &[&str],
+    grants: BTreeMap<ProxyName, Grant>,
+) -> Route {
+    Route::new(
+        name.to_string(),
+        path.iter().map(|rule| (*rule).to_string()).collect(),
+        methods.map(|methods| methods.iter().map(|method| (*method).to_string()).collect()),
+        groups.iter().map(|group| (*group).to_string()).collect(),
+        false,
+        false,
+        grants,
+    )
+    .with_sandbox(sandbox)
+}
+
+/// Validates one route built through the builder and returns its problems.
+fn built_errors(route: Route) -> ManifestErrors {
+    Manifest::from_parts(1, Vec::new(), BTreeMap::new(), BTreeMap::new(), vec![route])
+        .validate(20_000)
+        .expect_err("the route must not validate")
+}
+
+/// A plain route: no groups, no grants, one pattern.
+fn plain_route(sandbox: u32, name: &str) -> Route {
+    built_route(sandbox, name, &[".*"], None, &[], BTreeMap::new())
+}
+
+/// One postgresql grant, unrestricted and optionally carrying the content the
+/// rule forbids next to it.
+fn postgres_grant(unrestricted: bool, queries: &[&str], tables: TableGrants) -> Grant {
+    Grant::Postgresql(
+        PgGrant::new(
+            queries.iter().map(|query| (*query).to_string()).collect(),
+            false,
+        )
+        .with_tables(tables)
+        .with_unrestricted(unrestricted),
+    )
+}
+
+/// The stores map for one grant on `db`.
+fn on_db(grant: Grant) -> BTreeMap<ProxyName, Grant> {
+    [(ProxyName::from("db"), grant)].into_iter().collect()
+}
 
 #[test]
 fn the_section_6_example_validates_with_its_documented_warnings() {
-    // §7.3: the checkout route declares `egress = true`, and `R11` says every
-    // egress route is a `manifest.warning` at boot.
+    // §7.3: the checkout view declares `egress any`, and `R11` says every egress
+    // route is a `manifest.warning` at boot.
     let egress = vec![ManifestWarning::EgressRoute {
         route: "checkout".to_string(),
     }];
-    let (manifest, warnings) = Manifest::parse_and_validate(SECTION_6, 20_000).expect("valid");
+    let (manifest, warnings) = Manifest::parse_blastfile(SECTION_6, 20_000).expect("valid");
     assert_eq!(warnings, egress);
     assert_eq!(manifest.validate(20_000).expect("valid"), egress);
     assert_eq!(manifest.validate_default().expect("valid"), egress);
@@ -24,37 +88,55 @@ fn the_section_6_example_validates_with_its_documented_warnings() {
 }
 
 #[test]
-fn unknown_groups_are_reported_wherever_they_are_referenced() {
-    let source = "version = 1\n\
-                  groups = [\"nope\"]\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.demo.db]\nqueries = []\n\
-                  [[route]]\nname = \"about\"\npath = ['/about/']\ngroups = [\"alsonope\"]\n";
+fn an_unknown_use_is_refused_at_the_view_that_writes_it() {
+    // A `use` is resolved by lowering (§11.2), so the file never validates: the
+    // retired format's "unknown group" finding is a positioned refusal now.
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait demo {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n\
+                  \n\
+                  view about \"/about/\" {\n    use demo, alsonope\n}\n";
+    let errors = parse_errors(source);
+    assert_eq!(errors.len(), 1, "{errors}");
+    assert!(
+        matches!(
+            &errors.errors()[0],
+            ManifestError::UnknownTrait { view, name, .. } if view == "about" && name == "alsonope"
+        ),
+        "{errors}"
+    );
+    assert!(errors.to_string().contains("names no trait"), "{errors}");
+}
+
+/// The **global** group list still has a validator rule, and no `Blastfile` can
+/// fill it (§7.1, `ADR-0012`): `lower` always leaves `global_groups` empty, so
+/// the only way to reach this arm is to build the model. Kept so the rule the
+/// scheduler's `effective_grants` still honours has a test.
+#[test]
+fn a_global_group_reference_is_still_reported_by_validate() {
+    let manifest = Manifest::from_parts(
+        1,
+        vec!["nope".to_string()],
+        BTreeMap::new(),
+        BTreeMap::new(),
+        Vec::new(),
+    );
     assert_eq!(
-        validate_errors(source, 20_000),
-        ManifestErrors::new(vec![
-            ManifestError::UnknownGroup {
-                location: Location::Global,
-                group: "nope".to_string(),
-            },
-            ManifestError::UnknownGroup {
-                location: Location::Route {
-                    index: 0,
-                    name: "about".to_string(),
-                },
-                group: "alsonope".to_string(),
-            },
-        ])
+        manifest.validate(20_000).expect_err("the group is unknown"),
+        ManifestErrors::from(ManifestError::UnknownGroup {
+            location: Location::Global,
+            group: "nope".to_string(),
+        })
     );
 }
 
 #[test]
-fn a_group_that_exists_is_fine_wherever_it_is_referenced() {
-    let source = "version = 1\n\
-                  groups = [\"session\"]\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.session.db]\nqueries = []\n\
-                  [[route]]\nname = \"about\"\npath = ['/about/']\ngroups = [\"session\"]\n";
+fn a_trait_that_exists_is_fine_where_it_is_used() {
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait session {\n    postgres {\n        transactions\n    }\n}\n\
+                  \n\
+                  view about \"/about/\" {\n    use session\n}\n";
     assert_eq!(validate_warnings(source), vec![]);
 }
 
@@ -71,19 +153,21 @@ fn the_section_5_1_proxies_validate_with_ungranted_proxy_warnings() {
                 proxy: ProxyName::from("db"),
             },
         ],
-        "§5.1 declares proxies but no grants: nothing is allowed to use them yet"
+        "§5.1 declares stores but no grants: nothing is allowed to use them yet"
     );
 }
 
 #[test]
-fn grants_on_unknown_proxies_are_reported_with_their_place() {
-    let route = "version = 1\n\
-                 [[route]]\nname = \"about\"\npath = ['/about/']\n\
-                 [route.missing]\nqueries = []\n";
+fn grants_on_unknown_stores_are_reported_with_their_place() {
+    // A grant on a store nothing declares lowers to an unresolved grant, so the
+    // whole-file check reports it against the view that wrote it (§13.1).
+    let route = "postgres $DATABASE_URL\n\
+                 \n\
+                 view about \"/about/\" {\n    postgres missing {\n        query 'SELECT 1'\n    }\n}\n";
     assert_eq!(
         validate_errors(route, 20_000),
         ManifestErrors::from(ManifestError::GrantOnUnknownProxy {
-            location: Location::Route {
+            location: Location::View {
                 index: 0,
                 name: "about".to_string(),
             },
@@ -91,34 +175,61 @@ fn grants_on_unknown_proxies_are_reported_with_their_place() {
         })
     );
 
-    let group = "version = 1\n[group.session.nocache]\nqueries = []\n";
+    let trait_body = "postgres $DATABASE_URL\n\
+                      \n\
+                      trait session {\n    postgres nocache {\n        query 'SELECT 1'\n    }\n}\n\
+                      \n\
+                      view about \"/about/\" {\n    use session\n}\n";
     assert_eq!(
-        validate_errors(group, 20_000),
+        validate_errors(trait_body, 20_000),
         ManifestErrors::from(ManifestError::GrantOnUnknownProxy {
-            location: Location::Group("session".to_string()),
+            location: Location::Trait("session".to_string()),
             proxy: ProxyName::from("nocache"),
         })
     );
 }
 
 #[test]
-fn a_declared_proxy_needs_no_grant_to_be_known() {
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [[route]]\nname = \"about\"\npath = ['/about/']\n\
-                  [route.db]\nqueries = []\n";
-    // An empty grant is still a grant: no validation error, no warning.
+fn a_declared_store_needs_no_grant_to_be_known() {
+    // An empty grant block is still a grant: no validation error, no warning.
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  view about \"/about/\" {\n    postgres {\n    }\n}\n";
     assert_eq!(validate_warnings(source), vec![]);
 }
 
 #[test]
-fn duplicate_route_names_are_reported() {
-    let source = "version = 1\n\
-                  [[route]]\nname = \"about\"\npath = ['/a']\n\
-                  [[route]]\nname = \"checkout\"\npath = ['/b']\n\
-                  [[route]]\nname = \"about\"\npath = ['/c']\n";
+fn duplicate_view_names_are_refused_by_the_parser() {
+    // The document is refused where the second name is written, so it never
+    // reaches the validator (§6.7): `view` declares the name once for all of its
+    // endpoints.
+    let errors = parse_errors("view about \"/a\" {\n}\n\nview about \"/b\" {\n}\n");
+    assert_eq!(errors.len(), 1, "{errors}");
+    assert!(
+        matches!(
+            &errors.errors()[0],
+            ManifestError::DuplicateName { kind, name, .. } if *kind == "view" && name == "about"
+        ),
+        "{errors}"
+    );
+    assert!(errors.to_string().contains("declared twice"), "{errors}");
+
+    // The validator's own arm compares **sandboxes**, not positions (§10.3), so
+    // two routes named `about` in two sandboxes are a duplicate. No `Blastfile`
+    // can write it (its two names are refused above), so the model is built.
+    let manifest = Manifest::from_parts(
+        1,
+        Vec::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        vec![
+            plain_route(0, "about"),
+            plain_route(1, "checkout"),
+            plain_route(2, "about"),
+        ],
+    );
     assert_eq!(
-        validate_errors(source, 20_000),
+        manifest.validate(20_000).expect_err("the name repeats"),
         ManifestErrors::from(ManifestError::DuplicateRouteName {
             name: "about".to_string(),
             first: 0,
@@ -129,12 +240,22 @@ fn duplicate_route_names_are_reported() {
 
 #[test]
 fn duplicate_path_rules_and_patterns_are_fine() {
-    let source = "version = 1\n[[route]]\nname = \"about\"\npath = ['/about/', '/about/']\n";
+    let source = "view about \"/about/\", \"/about/\" {\n}\n";
     assert_eq!(validate_warnings(source), vec![]);
+    assert_eq!(
+        section_6()
+            .route(0)
+            .map(|route| route.path().len())
+            .expect("one view"),
+        1
+    );
 }
 
 #[test]
 fn route_names_must_match_the_documented_pattern() {
+    // The refused names are refused twice, on purpose: a document cannot even
+    // write them (`view` takes a `Word`, §6.3), and the validator refuses the
+    // model an editor could construct from anything else.
     for name in [
         "Product",
         "-leading",
@@ -144,9 +265,17 @@ fn route_names_must_match_the_documented_pattern() {
         "with/slash",
         "Ünicode",
     ] {
-        let source = format!("version = 1\n[[route]]\nname = \"{name}\"\npath = ['.*']\n");
+        let errors = parse_errors(&format!("view {name} regex '.*' {{\n}}\n"));
+        assert_eq!(errors.len(), 1, "name {name:?}: {errors}");
+        let rendered = errors.to_string();
+        assert!(
+            rendered.starts_with("1:"),
+            "name {name:?} is refused at its own line: {rendered}"
+        );
+        assert!(!rendered.contains('\n'), "one line: {rendered:?}");
+
         assert_eq!(
-            validate_errors(&source, 20_000),
+            built_errors(built_route(0, name, &[".*"], None, &[], BTreeMap::new())),
             ManifestErrors::from(ManifestError::InvalidRouteName {
                 index: 0,
                 name: name.to_string(),
@@ -156,38 +285,82 @@ fn route_names_must_match_the_documented_pattern() {
     }
 
     for name in ["about", "product-detail", "v2_api", "9lives", "a"] {
-        let source = format!("version = 1\n[[route]]\nname = \"{name}\"\npath = ['.*']\n");
         assert_eq!(
-            validate_warnings(&source),
+            validate_warnings(&format!("view {name} regex '.*' {{\n}}\n")),
             vec![],
             "route name {name:?} should be accepted"
+        );
+        assert_eq!(
+            Manifest::from_parts(
+                1,
+                Vec::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                vec![plain_route(0, name)]
+            )
+            .validate(20_000)
+            .expect("validates"),
+            vec![],
+            "route name {name:?} should pass the builder's route too"
         );
     }
 }
 
 #[test]
 fn a_route_without_usable_patterns_is_reported() {
-    let source = "version = 1\n\
-                  [[route]]\nname = \"empty\"\npath = []\n\
-                  [[route]]\nname = \"blank\"\npath = [\"\", '/real']\n";
+    // `view empty {}` has no endpoint at all: the parser refuses it before a
+    // route exists (§6.7).
+    let errors = parse_errors("view empty {\n}\n");
+    assert!(
+        matches!(
+            &errors.errors()[0],
+            ManifestError::ViewWithoutEndpoint { name, .. } if name == "empty"
+        ),
+        "{errors}"
+    );
+    // An empty pattern cannot be written either: every pattern has to start with
+    // `/` (§8.3).
+    assert!(matches!(
+        &parse_errors("view blank \"\", \"/real\" {\n}\n").errors()[0],
+        ManifestError::PatternNotAnchored { .. }
+    ));
+
+    // The validator's two arms judge a model an editor could still hand over, so
+    // they keep their exact assertions through the builder.
     assert_eq!(
-        validate_errors(source, 20_000),
-        ManifestErrors::new(vec![
-            ManifestError::EmptyPath {
-                route: "empty".to_string(),
-            },
-            ManifestError::EmptyPattern {
-                route: "blank".to_string(),
-                rule: 0,
-            },
-        ])
+        built_errors(built_route(0, "empty", &[], None, &[], BTreeMap::new())),
+        ManifestErrors::from(ManifestError::EmptyPath {
+            route: "empty".to_string(),
+        })
+    );
+    assert_eq!(
+        built_errors(built_route(
+            0,
+            "blank",
+            &["", "/real"],
+            None,
+            &[],
+            BTreeMap::new()
+        )),
+        ManifestErrors::from(ManifestError::EmptyPattern {
+            route: "blank".to_string(),
+            rule: 0,
+        })
     );
 }
 
 #[test]
 fn invalid_regexes_are_reported_with_their_rule() {
-    let source = "version = 1\n[[route]]\nname = \"about\"\npath = ['/ok', '[']\n";
-    let errors = validate_errors(source, 20_000);
+    // A document's `regex '…'` is compiled by the parser (§8.1), so the
+    // validator only sees a path an editor's model carries — asserted there.
+    let errors = built_errors(built_route(
+        0,
+        "about",
+        &["/ok", "["],
+        None,
+        &[],
+        BTreeMap::new(),
+    ));
     assert_eq!(errors.len(), 1, "{errors:?}");
     match &errors.errors()[0] {
         ManifestError::InvalidRegex {
@@ -203,14 +376,49 @@ fn invalid_regexes_are_reported_with_their_rule() {
         }
         other => panic!("unexpected error {other:?}"),
     }
+
+    // The document's own spelling of the same mistake is refused at the quote.
+    let errors = parse_errors("view about regex '/ok', regex '[' {\n}\n");
+    assert!(
+        matches!(
+            &errors.errors()[0],
+            ManifestError::PatternRegex { pattern, .. } if pattern == "["
+        ),
+        "{errors}"
+    );
 }
 
 #[test]
 fn methods_must_be_uppercase_http_tokens() {
-    let source = "version = 1\n\
-                  [[route]]\nname = \"about\"\npath = ['.*']\nmethods = [\"get\", \"GE T\", \"\"]\n";
+    // A `Blastfile` header takes `Method` tokens, so a lowercase word is a name
+    // where a method or a pattern belongs, and the parser says so.
+    let errors = parse_errors("view about get \"/about/\" {\n}\n");
+    assert!(
+        matches!(
+            &errors.errors()[0],
+            ManifestError::NotAMethod { word, .. } if word == "get"
+        ),
+        "{errors}"
+    );
+    // The upper-case methods a view may not declare are refused by lowering
+    // (§8.4), at the method's own position.
+    let errors = parse_errors("view about CONNECT \"/about/\" {\n}\n");
     assert_eq!(
-        validate_errors(source, 20_000),
+        errors.to_string(),
+        "1:12: `CONNECT` cannot reach a view; Blastit answers `GET`/`HEAD` static files and \
+         forwards the methods you declare"
+    );
+
+    // The validator's token rule judges a model, so it keeps its exact list.
+    assert_eq!(
+        built_errors(built_route(
+            0,
+            "about",
+            &[".*"],
+            Some(&["get", "GE T", ""]),
+            &[],
+            BTreeMap::new()
+        )),
         ManifestErrors::new(vec![
             ManifestError::InvalidMethod {
                 route: "about".to_string(),
@@ -230,10 +438,17 @@ fn methods_must_be_uppercase_http_tokens() {
 
 #[test]
 fn methods_must_not_be_an_empty_list() {
-    let source = "version = 1\n\
-                  [[route]]\nname = \"about\"\npath = ['.*']\nmethods = []\n";
+    // A view header's method list is non-empty by grammar, so an empty one only
+    // arrives through the model (an editor must not write it, §14.5).
     assert_eq!(
-        validate_errors(source, 20_000),
+        built_errors(built_route(
+            0,
+            "about",
+            &[".*"],
+            Some(&[]),
+            &[],
+            BTreeMap::new()
+        )),
         ManifestErrors::from(ManifestError::EmptyMethods {
             route: "about".to_string(),
         }),
@@ -243,22 +458,33 @@ fn methods_must_not_be_an_empty_list() {
 
 #[test]
 fn valid_methods_are_accepted() {
-    let source = "version = 1\n\
-                  [[route]]\nname = \"about\"\npath = ['.*']\nmethods = [\"GET\", \"HEAD\", \"MKCOL\", \"M-SEARCH\"]\n";
+    let source = "view about GET, MKCOL, M-SEARCH \"/about/\" {\n}\n";
     assert_eq!(validate_warnings(source), vec![]);
+    let manifest = Manifest::from_blastfile_str(source).expect("parses");
+    assert_eq!(
+        texts(
+            manifest
+                .route(0)
+                .expect("one route")
+                .methods()
+                .expect("the header lists them")
+        ),
+        ["GET", "HEAD", "MKCOL", "M-SEARCH"],
+        "`GET` implies `HEAD`; the written order is kept (§8.4)"
+    );
 }
 
 #[test]
 fn the_last_route_uid_must_stay_below_65536() {
     let manifest = |routes: usize| {
-        let mut source = String::from("version = 1\n");
+        let mut source = String::new();
         for index in 0..routes {
-            source.push_str(&format!("[[route]]\nname = \"r{index}\"\npath = ['.*']\n"));
+            source.push_str(&format!("view r{index} regex '.*' {{\n}}\n\n"));
         }
         source
     };
 
-    // uid = base + 1000 + index, and the §6 example has four routes.
+    // uid = base + 1000 + index, and the §6 example has four views.
     assert_eq!(
         section_6().validate(64_536).unwrap_err(),
         ManifestErrors::from(ManifestError::TooManyRoutes {
@@ -290,7 +516,7 @@ fn the_last_route_uid_must_stay_below_65536() {
 
     // A base that is already too high for dbproxy.
     assert_eq!(
-        Manifest::from_toml_str("version = 1\n")
+        Manifest::from_blastfile_str("")
             .unwrap()
             .validate(65_533)
             .unwrap_err(),
@@ -303,7 +529,7 @@ fn the_last_route_uid_must_stay_below_65536() {
 
     // No routes: nothing can overflow.
     assert_eq!(
-        Manifest::from_toml_str("version = 1\n")
+        Manifest::from_blastfile_str("")
             .unwrap()
             .validate(64_536)
             .expect("no routes"),
@@ -312,7 +538,7 @@ fn the_last_route_uid_must_stay_below_65536() {
 
     // The boundary of the count, not just the sample manifests.
     assert_eq!(
-        Manifest::from_toml_str(&manifest(1))
+        Manifest::from_blastfile_str(&manifest(1))
             .unwrap()
             .validate(64_536)
             .unwrap_err(),
@@ -323,19 +549,20 @@ fn the_last_route_uid_must_stay_below_65536() {
             max: 65_536,
         })
     );
-    Manifest::from_toml_str(&manifest(1))
+    Manifest::from_blastfile_str(&manifest(1))
         .unwrap()
         .validate(64_535)
         .expect("one route fits just below the cap");
 }
 
 #[test]
-fn warnings_report_unattached_groups_and_ungranted_proxies() {
-    let source = "version = 1\n\
-                  [proxy.used]\nprotocol = \"postgresql\"\n\
-                  [proxy.unused]\nprotocol = \"postgresql\"\n\
-                  [group.orphan.used]\nqueries = []\n\
-                  [[route]]\nname = \"about\"\npath = ['/about/']\n";
+fn warnings_report_unattached_traits_and_ungranted_stores() {
+    let source = "postgres $DATABASE_URL\n\
+                  postgres unused $UNUSED_URL\n\
+                  \n\
+                  trait orphan {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n\
+                  \n\
+                  view about \"/about/\" {\n}\n";
     assert_eq!(
         validate_warnings(source),
         vec![
@@ -350,74 +577,100 @@ fn warnings_report_unattached_groups_and_ungranted_proxies() {
 }
 
 #[test]
-fn attaching_a_group_and_granting_a_proxy_silences_its_warning() {
-    let source = "version = 1\n\
-                  groups = [\"orphan\"]\n\
-                  [proxy.used]\nprotocol = \"postgresql\"\n\
-                  [proxy.unused]\nprotocol = \"postgresql\"\n\
-                  [group.orphan.used]\nqueries = []\n\
-                  [[route]]\nname = \"about\"\npath = ['/about/']\n\
-                  [route.unused]\nqueries = []\n";
+fn attaching_a_trait_and_granting_a_store_silences_its_warning() {
+    let source = "postgres $DATABASE_URL\n\
+                  postgres unused $UNUSED_URL\n\
+                  \n\
+                  trait orphan {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n\
+                  \n\
+                  view about \"/about/\" {\n    use orphan\n    postgres unused {\n        query 'SELECT 2'\n    }\n}\n";
     assert_eq!(validate_warnings(source), vec![]);
 }
 
 #[test]
 fn every_validation_problem_is_collected() {
-    let source = "version = 1\n\
-                  groups = [\"ghost\"]\n\
-                  [[route]]\nname = \"Product\"\npath = ['[']\nmethods = [\"get\"]\n\
-                  [route.missing]\nqueries = []\n";
+    // Three rules of `validate` at once: a trait's `unrestricted`, a redacted
+    // `query`, and two mounts sharing a prefix. Each is refused on its own, so
+    // the list has to carry all three.
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait wide {\n    postgres unrestricted\n}\n\
+                  \n\
+                  static \"/assets\" {\n    root \"public/assets\"\n}\n\
+                  \n\
+                  static \"/assets\" {\n    root \"public/assets2\"\n}\n\
+                  \n\
+                  view about \"/about/\" {\n    use wide\n    postgres {\n        query 'SELECT … FROM cms_page'\n    }\n}\n";
     let errors = validate_errors(source, 20_000);
-    assert_eq!(errors.len(), 5, "{errors:?}");
+    assert_eq!(errors.len(), 3, "{errors:?}");
     assert!(errors.errors().iter().any(|error| matches!(
         error,
-        ManifestError::UnknownGroup {
-            location: Location::Global,
+        ManifestError::UnrestrictedGroup {
+            location: Location::Group(group),
             ..
-        }
+        } if group == "wide"
     )));
-    assert!(
-        errors
-            .errors()
-            .iter()
-            .any(|error| matches!(error, ManifestError::InvalidRouteName { .. }))
-    );
-    assert!(
-        errors
-            .errors()
-            .iter()
-            .any(|error| matches!(error, ManifestError::InvalidRegex { .. }))
-    );
-    assert!(
-        errors
-            .errors()
-            .iter()
-            .any(|error| matches!(error, ManifestError::InvalidMethod { .. }))
-    );
-    assert!(
-        errors
-            .errors()
-            .iter()
-            .any(|error| matches!(error, ManifestError::GrantOnUnknownProxy { .. }))
-    );
+    assert!(errors.errors().iter().any(|error| matches!(
+        error,
+        ManifestError::RedactedQueryPlaceholder {
+            location: Location::Route { name, .. },
+            ..
+        } if name == "about"
+    )));
+    assert!(errors.errors().iter().any(|error| matches!(
+        error,
+        ManifestError::DuplicateMount { prefix, .. } if prefix == "/assets"
+    )));
 
     let rendered = errors.to_string();
-    assert!(rendered.contains("unknown group \"ghost\""), "{rendered}");
-    assert!(rendered.contains("invalid name \"Product\""), "{rendered}");
     assert!(
-        rendered.contains("grant on unknown proxy \"missing\""),
+        rendered.contains("unrestricted is only allowed inline on a view"),
         "{rendered}"
+    );
+    assert!(
+        rendered.contains("holds a redacted `…` placeholder"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("duplicate static mount \"/assets\""),
+        "{rendered}"
+    );
+    assert_eq!(
+        rendered.lines().count(),
+        3,
+        "one line per problem: {rendered}"
     );
 }
 
 #[test]
-fn parse_errors_come_back_before_validation() {
-    let errors = Manifest::parse_and_validate("version = 2\n", 20_000).unwrap_err();
-    assert_eq!(
-        errors,
-        ManifestErrors::from(ManifestError::UnsupportedVersion {
-            found: "2".to_string(),
-        })
+fn a_refusal_comes_back_before_validation_runs() {
+    // `CONNECT` cannot reach a view (`§8.4`), and the file also declares a trait
+    // nothing may use (`§11.3`). Lowering fails, so validation never runs and its
+    // finding is not reported: no partial manifest, no second subject (R21).
+    let errors = Manifest::parse_blastfile(
+        "postgres $DATABASE_URL\n\
+         \n\
+         trait wide {\n    postgres unrestricted\n}\n\
+         \n\
+         view about CONNECT \"/about/\" {\n}\n",
+        20_000,
+    )
+    .expect_err("the file is refused");
+    assert_eq!(errors.len(), 1, "{errors}");
+    assert!(
+        matches!(
+            &errors.errors()[0],
+            ManifestError::MethodCannotReachView { method, .. } if method == "CONNECT"
+        ),
+        "{errors}"
+    );
+    assert!(
+        errors.to_string().starts_with("7:12: "),
+        "the refusal points at the method: {errors}"
+    );
+    assert!(
+        !errors.to_string().contains("unrestricted"),
+        "validation did not run: {errors}"
     );
 }
 
@@ -428,6 +681,12 @@ fn locations_read_well_in_errors() {
         Location::Group("session".to_string()).to_string(),
         "trait \"session\"",
         "a `[group.x]` and a `trait x` are one node, and it is spelled `trait` (§11.3)"
+    );
+    // A trait's grant is written in the trait, and both spellings of the
+    // location render as the noun a developer edits.
+    assert_eq!(
+        Location::Trait("session".to_string()).to_string(),
+        "trait \"session\""
     );
     assert_eq!(
         Location::Route {
@@ -464,18 +723,17 @@ fn a_view_refusal_names_the_view_and_no_index() {
     assert!(!errors.to_string().contains("(index"), "{errors}");
 }
 
-/// A manifest with one unrestricted inline grant, and a place to put more.
-const UNRESTRICTED: &str = "version = 1\n\
-                             [proxy.db]\nprotocol = \"postgresql\"\n\
-                             [proxy.analytics]\nprotocol = \"postgresql\"\n\
-                             [[route]]\nname = \"admin\"\npath = ['/admin/.*']\n\
-                             [route.db]\nunrestricted = true\n\
-                             [route.analytics]\nunrestricted = true\n\
-                             [[route]]\nname = \"about\"\npath = ['/about/']\n\
-                             [route.db]\nqueries = []\n";
+/// A manifest with one unrestricted inline grant per store, and a place to put
+/// more.
+const UNRESTRICTED: &str = "postgres $DATABASE_URL\n\
+                            postgres analytics $ANALYTICS_URL\n\
+                            \n\
+                            view admin regex '/admin/.*' {\n    postgres unrestricted\n    postgres analytics unrestricted\n}\n\
+                            \n\
+                            view about \"/about/\" {\n    postgres {\n    }\n}\n";
 
 #[test]
-fn an_unrestricted_route_warns_once_per_route_and_proxy() {
+fn an_unrestricted_view_warns_once_per_view_and_store() {
     assert_eq!(
         validate_warnings(UNRESTRICTED),
         vec![
@@ -488,16 +746,17 @@ fn an_unrestricted_route_warns_once_per_route_and_proxy() {
                 proxy: ProxyName::from("db"),
             },
         ],
-        "one warning per (route, proxy), in route then proxy order"
+        "one warning per (view, store), in view then store order"
     );
 }
 
 #[test]
-fn an_unrestricted_grant_in_a_group_is_refused_at_boot() {
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.backoffice.db]\nunrestricted = true\n\
-                  [[route]]\nname = \"admin\"\npath = ['/admin/.*']\ngroups = [\"backoffice\"]\n";
+fn an_unrestricted_grant_in_a_trait_is_refused_at_boot() {
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait backoffice {\n    postgres unrestricted\n}\n\
+                  \n\
+                  view admin regex '/admin/.*' {\n    use backoffice\n}\n";
     let errors = validate_errors(source, 20_000);
     assert_eq!(
         errors,
@@ -513,12 +772,13 @@ fn an_unrestricted_grant_in_a_group_is_refused_at_boot() {
     );
     assert!(rendered.contains("trait \"backoffice\""), "{rendered}");
 
-    // A group attached nowhere is refused too: it could be attached to every
-    // route at the next deploy, which is what the rule exists for.
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.backoffice.db]\nunrestricted = true\n\
-                  [[route]]\nname = \"about\"\npath = ['/about/']\n";
+    // A trait attached nowhere is refused too: it could be attached to every
+    // view at the next deploy, which is what the rule exists for.
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait backoffice {\n    postgres unrestricted\n}\n\
+                  \n\
+                  view about \"/about/\" {\n}\n";
     assert_eq!(
         validate_errors(source, 20_000),
         ManifestErrors::from(ManifestError::UnrestrictedGroup {
@@ -527,13 +787,15 @@ fn an_unrestricted_grant_in_a_group_is_refused_at_boot() {
         })
     );
 
-    // Attached globally: same refusal, and the global `groups` line does not
-    // hide it.
-    let source = "version = 1\n\
-                  groups = [\"backoffice\"]\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.backoffice.db]\nunrestricted = true\n\
-                  [[route]]\nname = \"about\"\npath = ['/about/']\n";
+    // Attached by two views: same refusal. `use` is the only attach a file has
+    // (§7.1), so "attached to every view at once" cannot be written at all.
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait backoffice {\n    postgres unrestricted\n}\n\
+                  \n\
+                  view admin regex '/admin/.*' {\n    use backoffice\n}\n\
+                  \n\
+                  view help \"/help/\" {\n    use backoffice\n}\n";
     assert_eq!(
         validate_errors(source, 20_000),
         ManifestErrors::from(ManifestError::UnrestrictedGroup {
@@ -542,24 +804,28 @@ fn an_unrestricted_grant_in_a_group_is_refused_at_boot() {
         })
     );
 
-    // `unrestricted = false` in a group is an ordinary grant.
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.backoffice.db]\nunrestricted = false\nqueries = [\"SELECT 1\"]\n\
-                  [[route]]\nname = \"admin\"\npath = ['/admin/.*']\ngroups = [\"backoffice\"]\n";
+    // An ordinary trait grant is an ordinary grant.
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait backoffice {\n    postgres {\n        transactions\n        query 'SELECT 1'\n    }\n}\n\
+                  \n\
+                  view admin regex '/admin/.*' {\n    use backoffice\n}\n";
     assert_eq!(validate_warnings(source), vec![]);
 }
 
 #[test]
 fn an_unrestricted_grant_takes_no_queries() {
-    // A query list next to `unrestricted = true` would read as a restriction
-    // and is not one: the route may run anything either way, so the boot is
-    // refused rather than left claiming more than it does.
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [[route]]\nname = \"admin\"\npath = ['/admin/.*']\n\
-                  [route.db]\nunrestricted = true\nqueries = [\"SELECT 1\"]\n";
-    let errors = validate_errors(source, 20_000);
+    // `postgres unrestricted` is a whole block and takes no directives (§13.1),
+    // so a file cannot write the contradiction; the model can, and an editor
+    // could propose it.
+    let errors = built_errors(built_route(
+        0,
+        "admin",
+        &["/admin/.*"],
+        None,
+        &[],
+        on_db(postgres_grant(true, &["SELECT 1"], TableGrants::default())),
+    ));
     assert_eq!(
         errors,
         ManifestErrors::from(ManifestError::UnrestrictedWithQueries {
@@ -577,30 +843,33 @@ fn an_unrestricted_grant_takes_no_queries() {
     );
     assert!(rendered.contains("route \"admin\""), "{rendered}");
 
-    // An empty list claims nothing, so it is allowed (with the boot warning).
-    let source = source.replace("queries = [\"SELECT 1\"]", "queries = []");
-    assert_eq!(
-        validate_warnings(&source),
-        vec![ManifestWarning::UnrestrictedRoute {
-            route: "admin".to_string(),
-            proxy: ProxyName::from("db"),
-        }]
+    // In a trait both rules are reported, and in the validator's fixed order.
+    let groups: BTreeMap<String, Group> = [(
+        "backoffice".to_string(),
+        Group::new(
+            "backoffice".to_string(),
+            on_db(postgres_grant(true, &["SELECT 1"], TableGrants::default())),
+        ),
+    )]
+    .into_iter()
+    .collect();
+    let manifest = Manifest::from_parts(
+        1,
+        Vec::new(),
+        BTreeMap::new(),
+        groups,
+        vec![built_route(
+            0,
+            "admin",
+            &["/admin/.*"],
+            None,
+            &["backoffice"],
+            BTreeMap::new(),
+        )],
     );
-
-    // ... and so is a list with `unrestricted = false`.
-    let source = source.replace("unrestricted = true", "unrestricted = false");
-    assert_eq!(validate_warnings(&source), vec![]);
-
-    // A grant that lists both and sits in a group breaks both rules, and both
-    // are reported.
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.backoffice.db]\nunrestricted = true\nqueries = [\"SELECT 1\"]\n\
-                  [[route]]\nname = \"admin\"\npath = ['/admin/.*']\ngroups = [\"backoffice\"]\n";
-    let errors = validate_errors(source, 20_000);
     assert_eq!(
-        errors.errors(),
-        [
+        manifest.validate(20_000).expect_err("refused"),
+        ManifestErrors::new(vec![
             ManifestError::UnrestrictedGroup {
                 location: Location::Group("backoffice".to_string()),
                 proxy: ProxyName::from("db"),
@@ -609,18 +878,18 @@ fn an_unrestricted_grant_takes_no_queries() {
                 location: Location::Group("backoffice".to_string()),
                 proxy: ProxyName::from("db"),
             },
-        ]
+        ])
     );
 }
 
 #[test]
-fn an_unrestricted_route_needs_no_query_and_gets_a_grant() {
-    let manifest = Manifest::from_toml_str(UNRESTRICTED).expect("parses");
+fn an_unrestricted_view_needs_no_query_and_gets_a_grant() {
+    let manifest = Manifest::from_blastfile_str(UNRESTRICTED).expect("parses");
     manifest
         .validate(20_000)
         .expect("validates despite the warning");
-    // The route gets a grant on both proxies, so init binds both listeners
-    // (§2.2, §6), and the second route's empty grant on `db` disappears.
+    // The view gets a grant on both stores, so init binds both listeners
+    // (§2.2, §6), and the second view's empty grant on `db` disappears.
     let admin = manifest.effective_grants(0);
     assert_eq!(admin.len(), 2);
     for (proxy, grant) in &admin {
@@ -636,16 +905,15 @@ fn an_unrestricted_route_needs_no_query_and_gets_a_grant() {
 }
 
 #[test]
-fn a_group_can_never_make_a_route_unrestricted() {
-    // The check is about groups, not about the union: nothing a group holds can
-    // turn a route into one that may run anything.
-    let source = "version = 1\n\
-                  groups = [\"wide\"]\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.wide.db]\nqueries = [\"SELECT 1\"]\ntransaction_control = true\n\
-                  [[route]]\nname = \"about\"\npath = ['/about/']\n\
-                  [route.db]\nqueries = [\"SELECT 2\"]\n";
-    let manifest = Manifest::from_toml_str(source).expect("parses");
+fn a_trait_can_never_make_a_view_unrestricted() {
+    // The check is about traits, not about the union: nothing a trait holds can
+    // turn a view into one that may run anything.
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait wide {\n    postgres {\n        transactions\n        query 'SELECT 1'\n    }\n}\n\
+                  \n\
+                  view about \"/about/\" {\n    use wide\n    postgres {\n        query 'SELECT 2'\n    }\n}\n";
+    let manifest = Manifest::from_blastfile_str(source).expect("parses");
     assert_eq!(manifest.validate(20_000).expect("validates"), vec![]);
     let mut grants = manifest.effective_grants(0);
     let grant = grants
@@ -677,105 +945,146 @@ fn merging_keeps_unrestricted_once_it_is_on() {
 // Table and column grants (§6, D7).
 //
 
-/// A manifest whose only route grants `grant` on `db`.
-fn notes_with(grant: &str) -> String {
-    format!(
-        "version = 1\n\
-         [proxy.db]\nprotocol = \"postgresql\"\n\
-         [[route]]\nname = \"notes\"\npath = ['/notes/']\n\
-         [route.db]\n{grant}"
+/// One table grant naming every column of `table`.
+fn all_columns_of(table: &str) -> TableGrants {
+    TableGrants::new(
+        [(
+            table.to_string(),
+            TableGrant {
+                select: Some(Columns::All),
+                ..TableGrant::default()
+            },
+        )],
+        [],
     )
 }
 
 #[test]
 fn an_unrestricted_grant_takes_no_tables() {
-    let errors = validate_errors(
-        &notes_with("unrestricted = true\n\n[route.db.tables]\nt = { select = \"*\" }\n"),
-        20_000,
-    );
-    assert_eq!(errors.len(), 1, "{errors}");
-    assert!(
-        errors.errors()[0].to_string().contains("take no tables"),
-        "{errors}"
-    );
+    // Same shape as the queries rule, and the same reason a file cannot write
+    // it: `postgres unrestricted` has no block to hold a directive (§13.1).
+    let built = |tables: TableGrants, what: &'static str| {
+        built_errors(built_route(
+            0,
+            "notes",
+            &["/notes/"],
+            None,
+            &[],
+            on_db(postgres_grant(true, &[], tables)),
+        ))
+        .errors()
+        .iter()
+        .any(|error| {
+            matches!(
+                error,
+                ManifestError::UnrestrictedWithContent { what: carried, .. } if *carried == what
+            )
+        })
+    };
+    assert!(built(all_columns_of("t"), "tables"), "tables are content");
 
-    let errors = validate_errors(
-        &notes_with("unrestricted = true\nfunctions = [\"unaccent\"]\n"),
-        20_000,
-    );
-    assert_eq!(errors.len(), 1, "{errors}");
-    assert!(
-        errors.errors()[0].to_string().contains("take no functions"),
-        "{errors}"
-    );
+    let functions = TableGrants::new(std::iter::empty(), ["unaccent".to_string()]);
+    assert!(built(functions, "functions"), "functions are content");
 
-    // ... and both at once, next to queries, is reported once per problem.
-    let errors = validate_errors(
-        &notes_with(
-            "unrestricted = true\nqueries = [\"SELECT 1\"]\nfunctions = [\"f\"]\n\n[route.db.tables]\nt = { select = \"*\" }\n",
-        ),
-        20_000,
+    // ... and both at once, next to a query, is reported once per problem.
+    let both = TableGrants::new(
+        [(
+            "t".to_string(),
+            TableGrant {
+                select: Some(Columns::All),
+                ..TableGrant::default()
+            },
+        )],
+        ["f".to_string()],
     );
+    let errors = built_errors(built_route(
+        0,
+        "notes",
+        &["/notes/"],
+        None,
+        &[],
+        on_db(postgres_grant(true, &["SELECT 1"], both)),
+    ));
     assert_eq!(errors.len(), 3, "{errors}");
 }
 
 #[test]
 fn a_system_catalogue_table_grant_is_refused() {
+    // A table name is a `Word` in a grant (§13.1), so the unqualified names of
+    // both catalogues are the ones a file can write.
     for table in [
-        "pg_catalog.pg_class",
-        "information_schema.tables",
         "pg_catalog",
         "information_schema",
         // An unqualified `pg_*` name resolves into `pg_catalog` (which is
-        // always first on the search path), so a key for it is refused too.
+        // always first on the search path), so a grant for it is refused too.
         "pg_class",
         "pg_type",
-        // ... and a key that is one of the `information_schema` views.
+        // ... and a name that is one of the `information_schema` views.
         "tables",
         "columns",
     ] {
-        let errors = validate_errors(
-            &notes_with(&format!("[route.db.tables.\"{table}\"]\nselect = \"*\"\n")),
-            20_000,
+        let source = format!(
+            "postgres $DATABASE_URL\n\nview notes \"/notes/\" {{\n    postgres {{\n        select {table}\n    }}\n}}\n"
         );
+        let errors = validate_errors(&source, 20_000);
         assert_eq!(errors.len(), 1, "{table}: {errors}");
         assert!(
             errors.errors()[0].to_string().contains("system catalogue"),
             "{table}: {errors}"
         );
     }
-    // A qualified name in a schema of the app's own is a table like any other:
-    // it keeps its schema and a grant can spell it out.
-    let warnings = validate_warnings(
-        "version = 1\n\
-         [proxy.db]\nprotocol = \"postgresql\"\n\
-         [[route]]\nname = \"notes\"\npath = ['/notes/']\n\
-         [route.db.tables.\"audit.pg_class\"]\nselect = \"*\"\n",
-    );
-    assert_eq!(warnings, vec![]);
-    // A group's table grants are checked too.
+
+    // A trait's table grants are checked too.
     let errors = validate_errors(
-        "version = 1\n\
-         [proxy.db]\nprotocol = \"postgresql\"\n\
-         [group.all.db.tables.\"pg_catalog.pg_class\"]\nselect = \"*\"\n\
-         [[route]]\nname = \"notes\"\npath = ['/notes/']\ngroups = [\"all\"]\n",
+        "postgres $DATABASE_URL\n\
+         \n\
+         trait all {\n    postgres {\n        select pg_catalog\n    }\n}\n\
+         \n\
+         view notes \"/notes/\" {\n    use all\n}\n",
         20_000,
     );
     assert_eq!(errors.len(), 1, "{errors}");
+    assert!(errors.to_string().contains("system catalogue"), "{errors}");
+
+    // A schema-qualified name is not a `Word`, so neither the refused
+    // `pg_catalog.pg_class` nor the accepted `audit.pg_class` can be written in
+    // a grant (§13.1 records the loss); the rule keeps both halves on the model.
+    let qualified = |table: &str| {
+        built_route(
+            0,
+            "notes",
+            &["/notes/"],
+            None,
+            &[],
+            on_db(postgres_grant(false, &[], all_columns_of(table))),
+        )
+    };
+    let errors = built_errors(qualified("pg_catalog.pg_class"));
+    assert!(errors.to_string().contains("system catalogue"), "{errors}");
+    assert_eq!(
+        Manifest::from_parts(
+            1,
+            Vec::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            vec![qualified("audit.pg_class")]
+        )
+        .validate(20_000)
+        .expect("a schema of the app's own is a table like any other"),
+        vec![]
+    );
 }
 
 #[test]
-fn table_grants_may_be_attached_to_a_group() {
-    // Only `unrestricted` is restricted to an inline grant: anything a group
-    // grants reaches every route it is attached to, which is what groups are
-    // for.
+fn table_grants_may_be_attached_to_a_trait() {
+    // Only `unrestricted` is restricted to an inline grant: anything a trait
+    // grants reaches every view that uses it, which is what traits are for.
     let warnings = validate_warnings(
-        "version = 1\n\
-         [proxy.db]\nprotocol = \"postgresql\"\n\
-         [group.catalog.db.tables]\n\
-         shop_product = { select = [\"id\", \"name\"] }\n\
-         [group.catalog.db]\nfunctions = [\"unaccent\"]\n\
-         [[route]]\nname = \"product-detail\"\npath = ['/products/.*']\ngroups = [\"catalog\"]\n",
+        "postgres $DATABASE_URL\n\
+         \n\
+         trait catalog {\n    postgres {\n        select shop_product(id, name)\n        functions unaccent\n    }\n}\n\
+         \n\
+         view product-detail regex '/products/.*' {\n    use catalog\n}\n",
     );
     assert_eq!(warnings, vec![]);
 }

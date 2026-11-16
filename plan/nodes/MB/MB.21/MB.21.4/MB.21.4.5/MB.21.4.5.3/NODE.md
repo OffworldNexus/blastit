@@ -2,7 +2,7 @@
 id: MB.21.4.5.3
 title: "Translate the last manifest suites and keep the docs-fence harness honest without the retired opening"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.21.4.5.1]
@@ -15,11 +15,11 @@ paths:
   - "crates/blastit-manifest/tests/uid.rs"
   - "crates/blastit-manifest/tests/docs_fences.rs"
   - "crates/blastit-manifest/tests/static_mounts.rs"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T16:57"
-updated: "2026-11-16T16:57"
+updated: "2026-11-16T18:17"
 ---
 
 # Goal

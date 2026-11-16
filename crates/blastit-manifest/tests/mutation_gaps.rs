@@ -3,17 +3,18 @@
 //!
 //! The `critical_*` suites prove the promises (a manifest boots, an edit is
 //! surgical, a CVE shape is refused). This file walks the model accessors, the
-//! flags the parser derives and the error rendering, so each one's real
+//! flags the lowering derives and the error rendering, so each one's real
 //! behaviour is pinned by a test instead of being assumed from the code.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
 use std::borrow::Borrow;
+use std::collections::BTreeMap;
 
 use blastit_manifest::{
     BodyCodec, Columns, Grant, Location, Manifest, ManifestError, ManifestErrors, ManifestWarning,
-    PgGrant, Protocol, ProxyName, TableGrant, TableGrants, UidLayout,
+    PgGrant, Position, Protocol, ProxyName, Route, TableGrant, TableGrants, UidLayout,
 };
 
 use common::{
@@ -35,7 +36,7 @@ fn all_columns_of_t() -> TableGrants {
 }
 
 //
-// Names, protocols and the raw proxy declaration.
+// Names, protocols and the raw store declaration.
 //
 
 #[test]
@@ -68,35 +69,57 @@ fn a_protocol_has_exactly_one_spelling() {
 }
 
 #[test]
-fn a_proxy_keeps_input_and_output_exactly_as_written() {
+fn a_store_keeps_its_input_exactly_as_written() {
     let manifest = section_5_1();
     assert_eq!(manifest.proxies().len(), 2);
 
-    let db = manifest.proxy("db").expect("proxy db");
+    let db = manifest.proxy("db").expect("store db");
     assert_eq!(db.name(), &ProxyName::from("db"));
     assert_eq!(db.protocol(), Protocol::Postgresql);
-    assert_eq!(
-        text_map(db.input()),
-        [("ca_cert", "DATABASE_CA_CERT"), ("url", "DATABASE_URL")]
-    );
-    assert!(
-        db.output().is_empty(),
-        "no output table: rewritten in place"
-    );
+    assert_eq!(text_map(db.input()), [("url", "DATABASE_URL")]);
 
-    let analytics = manifest.proxy("analytics").expect("proxy analytics");
+    let analytics = manifest.proxy("analytics").expect("store analytics");
     assert_eq!(text_map(analytics.input()), [("url", "ANALYTICS_URL")]);
-    assert_eq!(
-        text_map(analytics.output()),
-        [
-            ("ANALYTICS_DB_HOST", "{{ socket_dir }}"),
-            ("ANALYTICS_DB_NAME", "{{ database }}"),
-            ("ANALYTICS_DB_PORT", "{{ port }}"),
-            ("ANALYTICS_DB_USER", "{{ user }}"),
-        ]
-    );
+
+    // §7.5: the retired format could rename the variables the app receives, and
+    // this language cannot. Lowering writes the empty map, which is the
+    // protocol's default templates — the same behaviour as a store that
+    // declared no `output` at all. `ADR-0012` records the drop.
+    assert!(db.output().is_empty(), "an `output` map is not writable");
+    assert!(analytics.output().is_empty(), "nor for a named store");
 
     assert!(manifest.proxy("warehouse").is_none());
+}
+
+#[test]
+fn the_block_form_names_every_slot_variable() {
+    // §7.4: a slot's value is the variable's *name*, never its value, and the
+    // seven slots are the set `blastit-env` documents.
+    let source = "postgres {\n\
+                  \x20   host $DB_HOST\n\
+                  \x20   port $DB_PORT\n\
+                  \x20   user $DB_USERNAME\n\
+                  \x20   password $DB_PASSWORD\n\
+                  \x20   database $DB_DATABASE\n\
+                  \x20   sslmode $DB_SSLMODE\n\
+                  \x20   ca_cert $DB_CA_CERT\n\
+                  }\n\
+                  \n\
+                  view v \"/v\" {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n";
+    let manifest = Manifest::from_blastfile_str(source).expect("parses");
+    let store = manifest.proxy("db").expect("the unnamed store is db");
+    assert_eq!(
+        text_map(store.input()),
+        [
+            ("ca_cert", "DB_CA_CERT"),
+            ("database", "DB_DATABASE"),
+            ("host", "DB_HOST"),
+            ("password", "DB_PASSWORD"),
+            ("port", "DB_PORT"),
+            ("sslmode", "DB_SSLMODE"),
+            ("user", "DB_USERNAME"),
+        ]
+    );
 }
 
 //
@@ -204,7 +227,7 @@ fn a_grant_narrows_to_its_protocol() {
 }
 
 //
-// The parsed document: routes, groups and the top-level keys.
+// The lowered document: views, traits and the top-level keys.
 //
 
 #[test]
@@ -217,15 +240,15 @@ fn a_route_reports_what_was_written() {
     assert_eq!(product.name(), "product-detail");
     assert_eq!(texts(product.path()), ["/products/[0-9]+/"]);
     assert_eq!(product.methods().map(texts), Some(vec!["GET", "HEAD"]));
-    assert_eq!(texts(product.groups()), ["catalog"]);
+    assert_eq!(texts(product.groups()), ["session", "catalog"]);
     assert!(!product.egress());
     assert!(product.prefork());
     assert!(product.grant(&ProxyName::from("db")).is_none());
-    assert!(product.ingress().is_none(), "the route declared none");
+    assert!(product.ingress().is_none(), "the view declared none");
 
     let checkout = manifest.route(1).expect("route 1");
     assert_eq!(checkout.name(), "checkout");
-    assert_eq!(checkout.methods(), None, "no `methods` means any method");
+    assert_eq!(checkout.methods(), None, "no method means any method");
     assert!(checkout.egress());
     assert!(!checkout.prefork());
     assert!(checkout.ingress().is_none());
@@ -239,7 +262,7 @@ fn a_route_reports_what_was_written() {
     );
     let inline = checkout
         .grant(&ProxyName::from("db"))
-        .expect("the route's inline grant");
+        .expect("the view's inline grant");
     assert!(!inline.is_empty());
     assert!(checkout.grant(&ProxyName::from("warehouse")).is_none());
 
@@ -248,21 +271,46 @@ fn a_route_reports_what_was_written() {
     assert!(fallback.grants().is_empty());
     assert!(!fallback.egress());
     assert!(!fallback.prefork());
+    assert!(fallback.groups().is_empty(), "no `use`, no trait");
 
     assert!(manifest.route(4).is_none());
+
+    // §7.3: a view's sandbox is its own index, and both endpoints of one view
+    // share it — here every view has one.
+    for (index, route) in manifest.routes().iter().enumerate() {
+        assert_eq!(route.sandbox(), index as u32, "{}", route.name());
+    }
+}
+
+#[test]
+fn a_use_attaches_the_trait_and_no_global_list_exists() {
+    let manifest = section_6();
+    assert!(
+        manifest.global_groups().is_empty(),
+        "no document can attach a trait to every view (§7.1)"
+    );
+    // The written `use` is what reaches the route, in written order.
+    assert_eq!(
+        manifest
+            .route(0)
+            .expect("route 0")
+            .groups()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["session", "catalog"]
+    );
 }
 
 #[test]
 fn a_route_keeps_the_ingress_policy_it_declared() {
-    let source = "version = 1\n\
-                  [[route]]\nname = \"upload\"\npath = ['/upload/']\n\
-                  [route.ingress]\nbody = \"json\"\n";
-    let manifest = Manifest::from_toml_str(source).expect("parses");
+    let source = "view upload \"/upload/\" {\n    body json\n}\n";
+    let manifest = Manifest::from_blastfile_str(source).expect("parses");
     let ingress = manifest
         .route(0)
         .expect("route 0")
         .ingress()
-        .expect("the route declared one");
+        .expect("the view declared one");
     assert_eq!(ingress.body, BodyCodec::Json);
     assert!(!ingress.allow_raw);
 }
@@ -271,9 +319,8 @@ fn a_route_keeps_the_ingress_policy_it_declared() {
 fn a_group_reports_its_name_and_grants() {
     let manifest = section_6();
     assert_eq!(manifest.groups().len(), 2);
-    assert_eq!(texts(manifest.global_groups()), ["session"]);
 
-    let session = manifest.group("session").expect("group session");
+    let session = manifest.group("session").expect("trait session");
     assert_eq!(session.name(), "session");
     assert_eq!(session.grants().len(), 1);
     assert!(session.grant(&ProxyName::from("db")).is_some());
@@ -284,11 +331,14 @@ fn a_group_reports_its_name_and_grants() {
 
 #[test]
 fn the_top_level_keys_are_the_document() {
-    let manifest = Manifest::from_toml_str(
-        "version = 1\napp = \"shop.wsgi:application\"\npreload = [\"b\", \"a\"]\n",
+    let manifest = Manifest::from_blastfile_str(
+        "app \"shop\"\n\
+         \n\
+         entrypoint python \"shop.wsgi:application\" {\n    preload \"b\", \"a\"\n}\n",
     )
     .expect("parses");
     assert_eq!(manifest.version(), 1);
+    assert_eq!(manifest.name(), Some("shop"));
     assert_eq!(manifest.app(), Some("shop.wsgi:application"));
     assert_eq!(texts(manifest.preload()), ["b", "a"]);
     assert_eq!(manifest.route_count(), 0);
@@ -297,26 +347,29 @@ fn the_top_level_keys_are_the_document() {
     assert!(manifest.proxies().is_empty());
     assert!(manifest.groups().is_empty());
     assert!(manifest.global_groups().is_empty());
+    assert!(manifest.mounts().is_empty());
+    assert!(manifest.php().is_none());
 
-    let bare = Manifest::from_toml_str("version = 1\n").expect("parses");
+    let bare = Manifest::from_blastfile_str("").expect("parses");
     assert_eq!(bare.app(), None, "`BLASTIT_APP` has to name the callable");
+    assert_eq!(bare.name(), None);
     assert!(bare.preload().is_empty());
 }
 
 #[test]
 fn every_entry_point_returns_the_same_warnings() {
-    // The group is attached to nothing: it grants nothing.
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.lonely.db]\nqueries = ['SELECT 1']\n\
-                  [[route]]\nname = \"r\"\npath = ['/']\n\
-                  [route.db]\nqueries = ['SELECT 2']\n";
+    // The trait is used by no view: it grants nothing.
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait lonely {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n\
+                  \n\
+                  view r \"/\" {\n    postgres {\n        query 'SELECT 2'\n    }\n}\n";
     let expected = vec![ManifestWarning::UnattachedGroup {
         group: "lonely".to_string(),
     }];
     assert_eq!(validate_warnings(source), expected);
 
-    let manifest = Manifest::from_toml_str(source).expect("parses");
+    let manifest = Manifest::from_blastfile_str(source).expect("parses");
     assert_eq!(
         manifest
             .validate(UidLayout::DEFAULT_BASE)
@@ -326,7 +379,7 @@ fn every_entry_point_returns_the_same_warnings() {
     assert_eq!(manifest.validate_default().expect("validates"), expected);
 
     let (parsed, warnings) =
-        Manifest::parse_and_validate(source, UidLayout::DEFAULT_BASE).expect("validates");
+        Manifest::parse_blastfile(source, UidLayout::DEFAULT_BASE).expect("validates");
     assert_eq!(warnings, expected);
     assert_eq!(parsed.route_count(), 1);
 }
@@ -337,10 +390,9 @@ fn every_entry_point_returns_the_same_warnings() {
 
 #[test]
 fn a_grant_on_an_unknown_proxy_names_where_it_was_written() {
-    let route = "version = 1\n\
-                 [proxy.db]\nprotocol = \"postgresql\"\n\
-                 [[route]]\nname = \"orders\"\npath = ['/']\n\
-                 [route.warehouse]\nqueries = ['SELECT 1']\n";
+    let route = "postgres $DATABASE_URL\n\
+                 \n\
+                 view orders \"/\" {\n    postgres warehouse {\n        query 'SELECT 1'\n    }\n}\n";
     let errors = validate_errors(route, UidLayout::DEFAULT_BASE);
     assert_eq!(errors.len(), 1);
     assert!(matches!(
@@ -349,21 +401,23 @@ fn a_grant_on_an_unknown_proxy_names_where_it_was_written() {
     ));
     assert_eq!(
         errors.errors()[0].to_string(),
-        "route \"orders\" (index 0): grant on unknown proxy \"warehouse\""
+        "view \"orders\": grant on unknown proxy \"warehouse\"",
+        "§18: a view is named, not numbered"
     );
 
-    let group = "version = 1\n\
-                 [proxy.db]\nprotocol = \"postgresql\"\n\
-                 [group.catalog.warehouse]\nqueries = ['SELECT 1']\n\
-                 [[route]]\nname = \"r\"\npath = ['/']\n\
-                 [route.db]\nqueries = ['SELECT 2']\n";
-    let errors = validate_errors(group, UidLayout::DEFAULT_BASE);
+    let trait_body = "postgres $DATABASE_URL\n\
+                      \n\
+                      trait catalog {\n    postgres warehouse {\n        query 'SELECT 1'\n    }\n}\n\
+                      \n\
+                      view r \"/\" {\n    postgres {\n        query 'SELECT 2'\n    }\n}\n";
+    let errors = validate_errors(trait_body, UidLayout::DEFAULT_BASE);
     assert_eq!(
         errors.errors()[0].to_string(),
         "trait \"catalog\": grant on unknown proxy \"warehouse\""
     );
 
-    // The global list has its own spelling: it is not a group and not a route.
+    // The global list has its own spelling: it is not a trait and not a view.
+    // No document can fill it (§7.1), so the rendering is asserted directly.
     assert_eq!(
         ManifestError::UnknownGroup {
             location: Location::Global,
@@ -376,7 +430,7 @@ fn a_grant_on_an_unknown_proxy_names_where_it_was_written() {
 
 #[test]
 fn a_message_escapes_control_characters_and_cuts_long_values() {
-    // A value the sentence is allowed to quote: the codec a manifest named.
+    // A value the sentence is allowed to quote: the codec a view named.
     // (`InvalidApp` no longer quotes its value — §18, `a_refusal_never_carries`
     // below — so the escaping and cutting rule is pinned on a variant that does.)
     let bell = ManifestError::UnknownBodyCodec {
@@ -459,122 +513,119 @@ fn a_refusal_never_carries_the_app_it_refused() {
 
 #[test]
 fn an_invalid_regex_reports_the_engines_last_line() {
-    let source = "version = 1\n[[route]]\nname = \"r\"\npath = ['[']\n";
-    let errors = validate_errors(source, UidLayout::DEFAULT_BASE);
+    // A document's `regex '…'` is compiled by the parser (§8.1), so the
+    // validator only sees the regex of a path an editor's model carries — which
+    // is where this rendering is asserted.
+    let route = Route::new(
+        "r".to_string(),
+        vec!["[".to_string()],
+        None,
+        Vec::new(),
+        false,
+        false,
+        BTreeMap::new(),
+    );
+    let errors = Manifest::from_parts(1, Vec::new(), BTreeMap::new(), BTreeMap::new(), vec![route])
+        .validate(UidLayout::DEFAULT_BASE)
+        .expect_err("the regex does not compile");
     let message = errors.errors()[0].to_string();
     assert_eq!(
         message, "route \"r\" rule 0: invalid regex \"[\": error: unclosed character class",
         "the regex engine's excerpt is dropped; only the problem is kept"
     );
     assert!(!message.contains('\n'), "one error, one line");
+
+    // The document's spelling of the same mistake is refused at the quote.
+    let errors = parse_errors("view r regex '[' {\n}\n");
+    assert!(
+        errors
+            .to_string()
+            .starts_with("1:14: regex `[` does not compile:"),
+        "{errors}"
+    );
 }
 
 //
-// `R8`: where a reserved key is a name and where it is a field.
+// `R8`: where a reserved word is a name and where it is a directive.
 //
-// Three keys decide a refusal's identity here: whether a route key is a grant
-// (the proxy is declared *and* the value is a table), whether a grant key is
-// the `tables` map, and whether a key inside one table row is one of the
-// schema's operation names. Each test asserts the whole error list, because a
-// scan that reports the wrong one sends the operator to a line that is correct.
+// The retired format answered this by walking tables, which no longer exist. The
+// language answers it by position: a grant clause's argument is always a name,
+// a store's name may be any word but the one that starts the grant form, and a
+// directive is a directive only where the grammar has one.
 //
 
 #[test]
-fn a_declared_proxy_name_is_a_grant_only_when_it_holds_a_table() {
-    // `[proxy.app]` makes `app` a name the author chose, so a table under it is
-    // that proxy's grant and the route boots.
-    let granted = "version = 1\n\
-                   [proxy.app]\nprotocol = \"postgresql\"\n\
-                   [[route]]\nname = \"r\"\npath = ['/']\n\
-                   app = { queries = ['SELECT \"t\".\"a\" FROM \"t\"'] }\n";
-    let manifest = Manifest::from_toml_str(granted).expect("a declared proxy makes `app` a grant");
+fn a_reserved_word_is_a_name_inside_a_grant() {
+    // `select groups, app` names two tables the author chose: a table name is a
+    // `Word`, and no keyword is consulted for it (§13.1).
+    let named = "postgres $DATABASE_URL\n\
+                 \n\
+                 view v \"/v\" {\n    postgres {\n        select groups, app\n    }\n}\n";
+    let manifest = Manifest::from_blastfile_str(named).expect("a table named after a keyword");
     let grant = manifest
         .route(0)
         .expect("route 0")
-        .grant(&ProxyName::from("app"))
+        .grant(&ProxyName::from("db"))
         .and_then(Grant::as_postgresql)
-        .expect("the inline grant on the declared proxy");
-    assert_eq!(texts(grant.queries()), [r#"SELECT "t"."a" FROM "t""#]);
-
-    // The same key holding a string is not a grant: it is `app` written below
-    // the first `[table]`, which TOML attached to the proxy's own table. The
-    // refusal has to be that one, not "a table was expected".
-    let misplaced = "version = 1\n\
-                     [proxy.app]\nprotocol = \"postgresql\"\n\
-                     [[route]]\nname = \"r\"\npath = ['/']\n\
-                     app = \"shop.wsgi:application\"\n";
-    let errors = parse_errors(misplaced);
-    assert_eq!(
-        errors.errors(),
-        [ManifestError::NotTopLevel {
-            key: "app".to_string()
-        }],
-        "the declared name hid the misplaced top-level key: {errors}"
+        .expect("the inline grant on the declared store");
+    assert!(
+        grant.tables().table("groups").is_some(),
+        "the table named `groups` was dropped"
     );
-    assert_eq!(
-        errors.to_string(),
-        "app after a [table] is not top-level; move it above the first table"
-    );
-}
-
-#[test]
-fn a_reserved_key_inside_a_table_grant_row_is_a_misplaced_top_level_key() {
-    // The row `t` grants one operation; `groups` in it is not an operation and
-    // not the table named `groups` — it is the top-level key written after a
-    // `[table]`, and that is what the operator is told.
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [[route]]\nname = \"r\"\npath = ['/']\n\
-                  [route.db.tables]\nt = { select = [\"a\"], groups = [\"g\"] }\n";
-    let errors = parse_errors(source);
-    assert_eq!(
-        errors.errors(),
-        [ManifestError::NotTopLevel {
-            key: "groups".to_string()
-        }],
-        "the row's reserved key was reported as an unknown operation: {errors}"
-    );
-    assert_eq!(
-        errors.to_string(),
-        "groups after a [table] is not top-level; move it above the first table"
+    assert!(
+        grant.tables().table("app").is_some(),
+        "the table named `app` was dropped"
     );
 
-    // A table *named* `groups` is the author's, so the walk stops at the row:
-    // the legal shape has no error at all.
-    let named = "version = 1\n\
-                 [proxy.db]\nprotocol = \"postgresql\"\n\
-                 [[route]]\nname = \"r\"\npath = ['/']\n\
-                 [route.db.tables]\ngroups = { select = [\"a\"] }\n";
-    let manifest = Manifest::from_toml_str(named).expect("a table named groups is the author's");
+    // A *store* named `app` is a store too, and a grant on it is a grant.
+    let store = "postgres app $DATABASE_URL\n\
+                 \n\
+                 view v \"/v\" {\n    postgres app {\n        select t\n    }\n}\n";
+    let manifest = Manifest::from_blastfile_str(store).expect("a store named app");
     assert!(
         manifest
             .route(0)
             .expect("route 0")
-            .grant(&ProxyName::from("db"))
-            .and_then(Grant::as_postgresql)
-            .is_some_and(|grant| grant.tables().table("groups").is_some()),
-        "the table named `groups` was dropped"
+            .grant(&ProxyName::from("app"))
+            .is_some(),
+        "a declared store makes `app` a grant"
     );
 }
 
 #[test]
-fn an_unknown_grant_key_holding_a_table_is_reported_as_the_key_it_is() {
-    // `options` is not a grant key, and the nesting under it is the author's
-    // data: only `tables` owns a map of rows. Reporting the inner `groups` as a
-    // misplaced key would name a line that is not the mistake.
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [[route]]\nname = \"r\"\npath = ['/']\n\
-                  [route.db.options]\nfirst = { groups = [\"x\"] }\n";
-    let errors = parse_errors(source);
-    assert_eq!(
-        errors.errors(),
-        [ManifestError::UnknownKey {
-            path: "route[0].db.options".to_string()
-        }],
-        "the inner table was walked as if it were a grant row: {errors}"
+fn a_keyword_is_only_a_directive_where_the_grammar_has_one() {
+    // `tables` is the retired format's key and no directive at all: a grant
+    // block's clauses are the seven §13.1 names, and the refusal lists them.
+    let errors = parse_errors(
+        "postgres $DATABASE_URL\n\nview v \"/v\" {\n    postgres {\n        tables t\n    }\n}\n",
     );
-    assert_eq!(errors.to_string(), "route[0].db.options: unknown key");
+    assert!(
+        matches!(
+            &errors.errors()[0],
+            ManifestError::NotADirectiveHere { word, block, .. } if word == "tables" && *block == "a grant block"
+        ),
+        "{errors}"
+    );
+    assert!(
+        errors
+            .to_string()
+            .contains("`transactions`, `functions`, `select`"),
+        "{errors}"
+    );
+
+    // `unrestricted` is reserved in the store slot: `postgres unrestricted` is
+    // the grant form, so a store cannot be named it (§7.4).
+    let errors = parse_errors("postgres unrestricted $DATABASE_URL\n");
+    assert!(
+        matches!(&errors.errors()[0], ManifestError::StoreNameReserved { .. }),
+        "{errors}"
+    );
+
+    // The allowed twin: every one of the seven clauses, in one grant.
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  view v \"/v\" {\n    postgres {\n        transactions\n        functions unaccent\n        select t(a)\n        insert t\n        update t(b)\n        delete t\n        query 'SELECT 1'\n    }\n}\n";
+    assert!(Manifest::from_blastfile_str(source).is_ok());
 }
 
 //
@@ -583,22 +634,26 @@ fn an_unknown_grant_key_holding_a_table_is_reported_as_the_key_it_is() {
 
 #[test]
 fn the_error_list_counts_iterates_and_renders() {
-    let one: ManifestErrors = ManifestError::MissingVersion.into();
+    let unknown = ManifestError::UnknownKeyword {
+        at: Position::at(2, 1),
+        word: "not_a_directive".to_string(),
+    };
+    let one: ManifestErrors = unknown.clone().into();
     assert_eq!(one.len(), 1);
     assert!(!one.is_empty());
     assert_eq!(one.errors().len(), 1);
     assert_eq!(
         one.to_string(),
-        "version: missing `version = 1`",
+        "2:1: `not_a_directive` is not a keyword; the sections are `app`, `entrypoint`, \
+         `postgres`, `trait`, `view`, `static`",
         "§18: one line per problem, no header and no `  - ` prefix"
     );
 
-    let two = ManifestErrors::from(vec![
-        ManifestError::MissingVersion,
-        ManifestError::MissingKey {
-            path: "route[0].name".to_string(),
-        },
-    ]);
+    let named = ManifestError::InvalidName {
+        at: Position::at(1, 6),
+        name: "_leading".to_string(),
+    };
+    let two = ManifestErrors::from(vec![unknown, named]);
     assert_eq!(
         two.len(),
         2,
@@ -613,7 +668,10 @@ fn the_error_list_counts_iterates_and_renders() {
     );
     assert_eq!(rendered.lines().count(), 2, "{rendered}");
     assert_eq!(
-        rendered, "version: missing `version = 1`\nroute[0].name: missing required key",
+        rendered,
+        "2:1: `not_a_directive` is not a keyword; the sections are `app`, `entrypoint`, \
+         `postgres`, `trait`, `view`, `static`\n\
+         1:6: `_leading` is not a name; a view, trait or store name is `[a-z0-9][a-z0-9_-]*`",
         "{rendered}"
     );
     assert!(!rendered.ends_with('\n'), "{rendered:?}");
@@ -642,9 +700,13 @@ fn the_error_list_counts_iterates_and_renders() {
 
 #[test]
 fn a_parse_error_is_reported_as_a_list_of_one() {
-    let errors = parse_errors("version = 1\nunknown = true\n");
+    let errors = parse_errors("app \"shop\"\nnot_a_directive\n");
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors.errors()[0].to_string(), "unknown: unknown key");
+    assert_eq!(
+        errors.errors()[0].to_string(),
+        "2:1: `not_a_directive` is not a keyword; the sections are `app`, `entrypoint`, \
+         `postgres`, `trait`, `view`, `static`"
+    );
 }
 
 //
@@ -652,31 +714,26 @@ fn a_parse_error_is_reported_as_a_list_of_one() {
 // `queries` entry, and which may not.
 //
 
-/// One route per contributor: its own table grants, its own
-/// `transaction_control`, its own `unrestricted`, and a group's queries,
-/// `transaction_control` and `unrestricted`.
-const CONTRIBUTORS: &str = "version = 1\n\
-    [proxy.db]\nprotocol = \"postgresql\"\n\
-    [group.control.db]\ntransaction_control = true\n\
-    [group.open.db]\nunrestricted = true\n\
-    [group.listed.db]\nqueries = ['SELECT 1']\n\
-    [[route]]\nname = \"tables\"\npath = ['/tables/']\n\
-    [route.db]\nunrestricted = false\n\
-    [route.db.tables]\nt = { select = [\"a\", \"b\"] }\n\
-    [[route]]\nname = \"control\"\npath = ['/control/']\n\
-    [route.db]\ntransaction_control = true\n\
-    [[route]]\nname = \"any\"\npath = ['/any/']\n\
-    [route.db]\nunrestricted = true\n\
-    [[route]]\nname = \"grouped\"\npath = ['/grouped/']\ngroups = [\"control\", \"open\"]\n\
-    [[route]]\nname = \"listed\"\npath = ['/listed/']\ngroups = [\"listed\"]\n\
-    [[route]]\nname = \"controlled\"\npath = ['/controlled/']\ngroups = [\"control\"]\n";
+/// One view per contributor: its own table grants, its own `transactions`, its
+/// own `unrestricted`, and a trait's `transactions`, `unrestricted` and exact
+/// queries.
+const CONTRIBUTORS: &str = "postgres $DATABASE_URL\n\
+    trait control {\n    postgres {\n        transactions\n    }\n}\n\
+    trait open {\n    postgres unrestricted\n}\n\
+    trait listed {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n\
+    view tables \"/tables/\" {\n    postgres {\n        select t(a, b)\n    }\n}\n\
+    view control \"/control/\" {\n    postgres {\n        transactions\n    }\n}\n\
+    view any \"/any/\" {\n    postgres unrestricted\n}\n\
+    view grouped \"/grouped/\" {\n    use control, open\n}\n\
+    view listed \"/listed/\" {\n    use listed\n}\n\
+    view controlled \"/controlled/\" {\n    use control\n}\n";
 
 #[test]
-fn only_tables_and_groups_cover_a_query() {
-    let manifest = Manifest::from_toml_str(CONTRIBUTORS).expect("parses");
+fn only_tables_and_traits_cover_a_query() {
+    let manifest = Manifest::from_blastfile_str(CONTRIBUTORS).expect("parses");
     let db = ProxyName::from("db");
 
-    // The route's own table grants cover a statement the analysis can parse,
+    // The view's own table grants cover a statement the analysis can parse,
     // including one whose literal holds a doubled quote and a `$?`.
     assert!(manifest.is_query_covered_by_tables_or_groups(
         0,
@@ -685,26 +742,26 @@ fn only_tables_and_groups_cover_a_query() {
     ));
     assert!(!manifest.is_query_covered_by_tables_or_groups(0, &db, r#"SELECT "u"."a" FROM "u""#,));
 
-    // `transaction_control = true` inline covers BEGIN/COMMIT, and nothing else.
+    // `transactions` inline covers BEGIN/COMMIT, and nothing else.
     assert!(manifest.is_query_covered_by_tables_or_groups(1, &db, "BEGIN"));
     assert!(!manifest.is_query_covered_by_tables_or_groups(1, &db, "SELECT 1"));
 
-    // `unrestricted = true` inline covers everything.
+    // `unrestricted` inline covers everything.
     assert!(manifest.is_query_covered_by_tables_or_groups(2, &db, "DROP TABLE everything"));
 
-    // So does a group's, and a group's transaction control.
+    // So does a trait's, and a trait's transaction control.
     assert!(manifest.is_query_covered_by_tables_or_groups(3, &db, "COMMIT"));
     assert!(manifest.is_query_covered_by_tables_or_groups(3, &db, "DROP TABLE everything"));
 
-    // A group's exact query covers it.
+    // A trait's exact query covers it.
     assert!(manifest.is_query_covered_by_tables_or_groups(4, &db, "SELECT 1"));
 
-    // A group's transaction control covers COMMIT even when no group grants
+    // A trait's transaction control covers COMMIT even when no trait grants
     // anything else.
     assert!(manifest.is_query_covered_by_tables_or_groups(5, &db, "COMMIT"));
     assert!(!manifest.is_query_covered_by_tables_or_groups(5, &db, "SELECT 1"));
 
-    // Neither a proxy no grant names nor an index no route has covers anything.
+    // Neither a store no grant names nor an index no view has covers anything.
     assert!(!manifest.is_query_covered_by_tables_or_groups(9, &db, "SELECT 1"));
     assert!(!manifest.is_query_covered_by_tables_or_groups(
         4,

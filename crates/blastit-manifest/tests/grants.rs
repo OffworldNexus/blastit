@@ -1,22 +1,25 @@
-//! Effective grants: the union of global groups, route groups and inline
-//! grants, per proxy (§6).
+//! Effective grants: the union of the traits a view `use`s and its own inline
+//! grants, per store (§6, §11.1).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
 use std::collections::BTreeMap;
 
-use blastit_manifest::{Grant, Manifest, PgGrant, ProxyName};
+use blastit_manifest::{Grant, Manifest, ManifestError, PgGrant, ProxyName};
 
-use common::{section_6, texts};
+use common::{parse_errors, section_6, texts};
 
+// A `query` is stored through `blastit_sqlpolicy::normalize`, which writes every
+// bind placeholder as `$?` (§13.1), so the expected text below is the normalised
+// spelling and not the `$1` a document writes.
 const SET_TIME_ZONE: &str = "SET TIME ZONE 'UTC'";
-const SESSION_SELECT: &str = r#"SELECT "django_session"."session_key", "django_session"."session_data", "django_session"."expire_date" FROM "django_session" WHERE ("django_session"."expire_date" > $1 AND "django_session"."session_key" = $2) LIMIT 21"#;
-const CATALOG_SELECT: &str = r#"SELECT "shop_product"."id", "shop_product"."name" FROM "shop_product" WHERE "shop_product"."id" = $1 LIMIT 21"#;
+const SESSION_SELECT: &str = r#"SELECT "django_session"."session_key", "django_session"."session_data", "django_session"."expire_date" FROM "django_session" WHERE ("django_session"."expire_date" > $? AND "django_session"."session_key" = $?) LIMIT 21"#;
+const CATALOG_SELECT: &str = r#"SELECT "shop_product"."id", "shop_product"."name" FROM "shop_product" WHERE "shop_product"."id" = $? LIMIT 21"#;
 const CHECKOUT_INSERT: &str =
-    r#"INSERT INTO "shop_order" ("product_id", "qty") VALUES ($1, $2) RETURNING "shop_order"."id""#;
+    r#"INSERT INTO "shop_order" ("product_id", "qty") VALUES ($?, $?) RETURNING "shop_order"."id""#;
 const ABOUT_SELECT: &str =
-    r#"SELECT "cms_page"."body" FROM "cms_page" WHERE "cms_page"."slug" = $1 LIMIT 21"#;
+    r#"SELECT "cms_page"."body" FROM "cms_page" WHERE "cms_page"."slug" = $? LIMIT 21"#;
 
 /// The one grant in a single-proxy result, narrowed to `postgresql`.
 fn db_grant(grants: BTreeMap<ProxyName, Grant>) -> PgGrant {
@@ -27,14 +30,13 @@ fn db_grant(grants: BTreeMap<ProxyName, Grant>) -> PgGrant {
 }
 
 #[test]
-fn product_detail_unions_the_global_group_and_its_own_group() {
+fn product_detail_unions_the_traits_it_uses() {
     let manifest = section_6();
-    let grants = manifest.effective_grants(0);
-    let db = db_grant(grants);
+    let db = db_grant(manifest.effective_grants(0));
     assert_eq!(
         texts(db.queries()),
         [SET_TIME_ZONE, SESSION_SELECT, CATALOG_SELECT],
-        "global groups first, then the route's groups"
+        "`use session, catalog` contributes in written order"
     );
     assert!(
         db.transaction_control(),
@@ -54,13 +56,13 @@ fn checkout_adds_its_inline_grant_last() {
             CATALOG_SELECT,
             CHECKOUT_INSERT
         ],
-        "inline grants come after the groups"
+        "inline grants come after the traits"
     );
     assert!(db.transaction_control());
 }
 
 #[test]
-fn about_has_only_the_global_group_and_its_inline_grant() {
+fn about_has_only_its_trait_and_its_inline_grant() {
     let manifest = section_6();
     let db = db_grant(manifest.effective_grants(2));
     assert_eq!(
@@ -71,15 +73,21 @@ fn about_has_only_the_global_group_and_its_inline_grant() {
 }
 
 #[test]
-fn fallback_gets_the_global_groups_only() {
+fn a_view_that_writes_no_use_inherits_no_trait() {
+    // The retired format could attach a group to every route at once. A
+    // `Blastfile` cannot (§7.1, `ADR-0012`): the only attach is `use <trait>`,
+    // so the catch-all — which asks for nothing — receives nothing, even though
+    // the same file's other views use `session` and `catalog`.
     let manifest = section_6();
-    let db = db_grant(manifest.effective_grants(3));
-    assert_eq!(
-        texts(db.queries()),
-        [SET_TIME_ZONE, SESSION_SELECT],
-        "the top-level groups reach every route, fallback included"
+    assert!(
+        manifest.effective_grants(3).is_empty(),
+        "a view without `use` inherits nothing: {:?}",
+        manifest.effective_grants(3)
     );
-    assert!(db.transaction_control());
+    assert!(
+        manifest.global_groups().is_empty(),
+        "no document can fill the global list"
+    );
 }
 
 #[test]
@@ -91,14 +99,14 @@ fn an_out_of_range_route_has_no_grants() {
 
 #[test]
 fn queries_are_deduplicated_across_contributors() {
-    let source = "version = 1\n\
-                  groups = [\"g1\"]\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.g1.db]\nqueries = [\"SELECT 1\"]\n\
-                  [group.g2.db]\nqueries = [\"SELECT 1\", \"SELECT 2\"]\n\
-                  [[route]]\nname = \"r\"\npath = ['.*']\ngroups = [\"g2\"]\n\
-                  [route.db]\nqueries = [\"SELECT 2\", \"SELECT 3\"]\n";
-    let manifest = Manifest::from_toml_str(source).expect("parses");
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait g1 {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n\
+                  \n\
+                  trait g2 {\n    postgres {\n        query 'SELECT 1'\n        query 'SELECT 2'\n    }\n}\n\
+                  \n\
+                  view r regex '.*' {\n    use g1, g2\n    postgres {\n        query 'SELECT 2'\n        query 'SELECT 3'\n    }\n}\n";
+    let manifest = Manifest::from_blastfile_str(source).expect("parses");
     let db = db_grant(manifest.effective_grants(0));
     assert_eq!(
         texts(db.queries()),
@@ -110,22 +118,19 @@ fn queries_are_deduplicated_across_contributors() {
 
 #[test]
 fn transaction_control_is_or_ed() {
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.session.db]\ntransaction_control = true\n\
-                  [[route]]\nname = \"from-group\"\npath = ['/a']\ngroups = [\"session\"]\n\
-                  [route.db]\ntransaction_control = false\n\
-                  [[route]]\nname = \"from-inline\"\npath = ['/b']\n\
-                  [route.db]\ntransaction_control = true\nqueries = [\"SELECT 1\"]\n\
-                  [[route]]\nname = \"from-nothing\"\npath = ['/c']\n\
-                  [route.db]\ntransaction_control = false\n";
-    let manifest = Manifest::from_toml_str(source).expect("parses");
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait session {\n    postgres {\n        transactions\n    }\n}\n\
+                  \n\
+                  view from-trait \"/a\" {\n    use session\n}\n\
+                  \n\
+                  view from-inline \"/b\" {\n    postgres {\n        transactions\n        query 'SELECT 1'\n    }\n}\n\
+                  \n\
+                  view from-nothing \"/c\" {\n}\n";
+    let manifest = Manifest::from_blastfile_str(source).expect("parses");
 
     let db = db_grant(manifest.effective_grants(0));
-    assert!(
-        db.transaction_control(),
-        "the group wins over the inline false"
-    );
+    assert!(db.transaction_control(), "the trait turns it on");
     assert!(db.queries().is_empty());
 
     let db = db_grant(manifest.effective_grants(1));
@@ -140,27 +145,45 @@ fn transaction_control_is_or_ed() {
 
 #[test]
 fn an_empty_grant_leaves_the_proxy_out() {
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [[route]]\nname = \"quiet\"\npath = ['.*']\n\
-                  [route.db]\n";
-    let manifest = Manifest::from_toml_str(source).expect("parses");
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  view quiet regex '.*' {\n    postgres {\n    }\n}\n";
+    let manifest = Manifest::from_blastfile_str(source).expect("parses");
+    assert!(
+        manifest
+            .route(0)
+            .is_some_and(|route| !route.grants().is_empty()),
+        "the empty block is still a grant entry"
+    );
     assert!(manifest.effective_grants(0).is_empty());
 }
 
 #[test]
-fn a_group_that_does_not_exist_contributes_nothing() {
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.real.db]\nqueries = [\"SELECT 1\"]\n\
-                  [[route]]\nname = \"r\"\npath = ['.*']\ngroups = [\"ghost\", \"real\"]\n";
-    let manifest = Manifest::from_toml_str(source).expect("parses");
-    let db = db_grant(manifest.effective_grants(0));
-    assert_eq!(
-        texts(db.queries()),
-        ["SELECT 1"],
-        "validation reports the unknown group; merging just skips it"
+fn a_use_that_names_no_trait_is_refused() {
+    // The retired format's unknown group was a validation finding that merging
+    // silently skipped. A `use` is resolved while lowering (§11.2), so the file
+    // is refused before any merge can skip it.
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait real {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n\
+                  \n\
+                  view r regex '.*' {\n    use ghost, real\n}\n";
+    let errors = parse_errors(source);
+    assert_eq!(errors.len(), 1, "{errors}");
+    assert!(
+        matches!(
+            &errors.errors()[0],
+            ManifestError::UnknownTrait { view, name, .. } if view == "r" && name == "ghost"
+        ),
+        "{errors}"
     );
+    assert!(errors.to_string().contains("names no trait"), "{errors}");
+
+    // The allowed twin: the same view naming only the trait that exists.
+    let manifest = Manifest::from_blastfile_str(&source.replace("use ghost, real", "use real"))
+        .expect("lowers");
+    let db = db_grant(manifest.effective_grants(0));
+    assert_eq!(texts(db.queries()), ["SELECT 1"]);
 }
 
 #[test]
@@ -192,23 +215,19 @@ fn table(select: Option<Columns>) -> TableGrant {
 }
 
 #[test]
-fn table_grants_merge_across_groups_and_the_route() {
-    let source = "version = 1\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\n\
-                  [group.catalog.db.tables]\n\
-                  shop_product = { select = [\"id\", \"name\"] }\n\
-                  [group.catalog.db]\nfunctions = [\"unaccent\"]\n\
-                  [[route]]\nname = \"product-detail\"\npath = ['/products/.*']\n\
-                  groups = [\"catalog\"]\n\
-                  [route.db.tables.shop_product]\nselect = [\"slug\"]\n\
-                  [route.db.tables.shop_order]\ninsert = \"*\"\n";
-    let manifest = Manifest::from_toml_str(source).expect("parses");
+fn table_grants_merge_across_a_trait_and_the_view() {
+    let source = "postgres $DATABASE_URL\n\
+                  \n\
+                  trait catalog {\n    postgres {\n        select shop_product(id, name)\n        functions unaccent\n    }\n}\n\
+                  \n\
+                  view product-detail regex '/products/.*' {\n    use catalog\n    postgres {\n        select shop_product(slug)\n        insert shop_order\n    }\n}\n";
+    let manifest = Manifest::from_blastfile_str(source).expect("parses");
     let db = db_grant(manifest.effective_grants(0));
     let tables = db.tables();
     assert_eq!(
         tables.table("shop_product").unwrap().select,
         Some(Columns::list(["id", "name", "slug"])),
-        "the route's columns are added to the group's"
+        "the view's columns are added to the trait's"
     );
     assert_eq!(
         tables.table("shop_order").unwrap().insert,

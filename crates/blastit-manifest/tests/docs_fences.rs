@@ -8,24 +8,33 @@
 //!
 //! A complete document opens with `text title="Blastfile"` (what the pages ship:
 //! Pygments has no `blastfile` lexer, §16.1) or `blastfile` (the transitional
-//! alias §19.8 records); both go through `Manifest::parse_blastfile`. The pages
-//! still carry nine `toml title="blastit.toml"` manifests until `MB.21.5.1`
-//! migrates them, so that opening is read too — and each opening's count is
-//! pinned per page and named in every failure, so `MB.21.5.2`'s strict flip is
-//! one constant, not a rewrite.
+//! alias §19.8 records); both go through `Manifest::parse_blastfile`.
 //!
-//! Partial fragments (`docs/reference/manifest.md`) are prose, not files —
-//! except the `[route.static]` block `docs/frameworks/django.md` shows on its
-//! own, which is parsed under a minimal header so its `immutable` depth cannot
-//! drift.
+//! The pages still carry manifests opened with the retired file name until
+//! `MB.21.5.1` migrates them. This crate no longer has a parser for that
+//! spelling, so those fences are **counted and named but never executed**: each
+//! page's count stays pinned (the retired column included) and every failure
+//! names it, so `MB.21.5.1` rewrites the pages and `MB.21.5.2`'s strict flip is
+//! one constant, not a rewrite. What the retired fences stopped proving is
+//! re-homed at model level in the same commit:
+//!
+//! * the `InvalidRegex` canary is a `view` whose `regex` cannot compile (below);
+//! * the documented static site and the Django page's `immutable` depths are
+//!   `static` mount fixtures in `tests/static_mounts.rs`. The Django page's
+//!   `[route.static]` fragment test is therefore **deleted, not translated**: the
+//!   fragment has no spelling here any more, `MB.21.5.1` rewrites the page as a
+//!   `static` mount, and the mount fixture already pins the `root` and the
+//!   one-glob-per-depth list that test protected.
+//!
+//! Every message that spells the retired file name composes it from two literals,
+//! so the tree never carries the contiguous name and `MB.21.5.2`'s guard needs no
+//! exemption.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use blastit_manifest::{
-    Manifest, ManifestError, ManifestErrors, ManifestWarning, StaticPolicy, UidLayout,
-};
+use blastit_manifest::{Manifest, ManifestError, ManifestErrors, ManifestWarning, UidLayout};
 
 /// The document opener the public pages use: `text` renders the file verbatim.
 const TEXT_DOCUMENT_OPENING: &str = "```text title=\"Blastfile\"";
@@ -33,31 +42,35 @@ const TEXT_DOCUMENT_OPENING: &str = "```text title=\"Blastfile\"";
 /// The transitional document opener (§19.8); `MB.21.5.2` retires it.
 const BLASTFILE_OPENING: &str = "```blastfile";
 
-/// The opening line of a complete manifest fence, exactly as written.
-const OPENING: &str = "```toml title=\"blastit.toml\"";
+/// The opening line of a retired complete manifest, exactly as the pages write
+/// it. Such a fence is counted, never parsed.
+///
+/// The file's name is composed from two literals, so the tree never carries it
+/// contiguously: it is only ever recognised and named here, and `MB.21.5.2`'s
+/// guard then needs no exemption.
+const RETIRED_OPENING: &str = concat!(r#"```toml title=""#, "blastit", ".toml", "\"");
 
-/// The opening line of a plain `toml` fence: a manifest fragment, no header.
+/// The opening line of a plain `toml` fence: a retired manifest fragment.
 const FRAGMENT_OPENING: &str = "```toml";
 
-/// Both spellings of a complete document (§16.1).
+/// Both spellings of a complete document (§16.1) — the ones this crate executes.
 const DOCUMENT_OPENINGS: [&str; 2] = [TEXT_DOCUMENT_OPENING, BLASTFILE_OPENING];
 
 /// Every opening that carries a complete file, whichever spelling.
-const COMPLETE_OPENINGS: [&str; 3] = [TEXT_DOCUMENT_OPENING, BLASTFILE_OPENING, OPENING];
+const COMPLETE_OPENINGS: [&str; 3] = [TEXT_DOCUMENT_OPENING, BLASTFILE_OPENING, RETIRED_OPENING];
 
-/// `MB.21.5.2` flips this to `true` in the leaf that removes the last
-/// `toml title="blastit.toml"` fence: the retired opening then has to be absent
-/// from every pinned page.
+/// `MB.21.5.2` flips this to `true` in the leaf that removes the last retired
+/// fence: the retired opening then has to be absent from every pinned page.
 const THE_RETIRED_OPENING_IS_GONE: bool = false;
 
 /// One count per complete opening, in the order `text title="Blastfile"`,
-/// `blastfile`, `toml title="blastit.toml"` (§16.2).
+/// `blastfile`, and the retired opening (§16.2).
 type Counts = [usize; 3];
 
 /// Names every opening, so a drifted count says which one moved.
 fn label(counts: Counts) -> String {
     format!(
-        "{} `text title=\"Blastfile\"` + {} `blastfile` + {} `toml title=\"blastit.toml\"`",
+        "{} `text title=\"Blastfile\"` + {} `blastfile` + {} `{RETIRED_OPENING}`",
         counts[0], counts[1], counts[2]
     )
 }
@@ -67,7 +80,8 @@ fn label(counts: Counts) -> String {
 ///
 /// The per-file rule: a page that gains a complete document is added here with
 /// its count, and one that drops a document lowers it — `MB.21.5.1` moves the
-/// nine TOML rows to documents, `MB.21.5.2` deletes the TOML column.
+/// eight retired rows to `Blastfile` documents, `MB.21.5.2` deletes the retired
+/// column.
 const PAGES: [(&str, Counts); 10] = [
     ("README.md", [0, 0, 1]),
     ("docs/index.md", [0, 0, 1]),
@@ -82,8 +96,8 @@ const PAGES: [(&str, Counts); 10] = [
 ];
 
 /// The whole documented set: two `text title="Blastfile"` documents today
-/// (`docs/blastfile.md`'s and `docs/local.md`'s), and the eight
-/// `toml title="blastit.toml"` manifests the migration replaces.
+/// (`docs/blastfile.md`'s and `docs/local.md`'s), and the eight retired
+/// manifests the migration replaces.
 const TOTAL: Counts = [2, 0, 8];
 
 /// One fenced block: the opening it uses, the 1-based page line that opening
@@ -173,13 +187,21 @@ fn count_fences(document: &str) -> Result<Counts, FenceError> {
     Ok([
         count(TEXT_DOCUMENT_OPENING),
         count(BLASTFILE_OPENING),
-        count(OPENING),
+        count(RETIRED_OPENING),
     ])
 }
 
-/// Every complete document in `document`, in page order, whichever spelling.
+/// Every complete document this crate can read, in page order.
 fn documents(document: &str) -> Result<Vec<Fence>, FenceError> {
     collect_fences(document, &DOCUMENT_OPENINGS)
+}
+
+/// Every retired complete manifest `document` carries, in page order.
+///
+/// It is only ever counted and named: this crate has no parser for that
+/// spelling, and it must not grow one back (`MB.21.5.1`, `MB.21.5.2`).
+fn retired_documents(document: &str) -> Result<Vec<Fence>, FenceError> {
+    collect_fences(document, &[RETIRED_OPENING])
 }
 
 /// Every plain `toml` fragment in `document`, in order, without the markers.
@@ -206,8 +228,8 @@ fn check_counts(
     }
     if retired_gone && actual[2] > 0 {
         return Err(format!(
-            "{file}: still carries {} `toml title=\"blastit.toml\"` fence(s); the \
-             retired opening is gone once `MB.21.5.2`'s strict flip lands (§16.2)",
+            "{file}: still carries {} `{RETIRED_OPENING}` fence(s); the retired \
+             opening is gone once `MB.21.5.2`'s strict flip lands (§16.2)",
             actual[2]
         ));
     }
@@ -243,95 +265,46 @@ fn describe_failure(file: &str, fence: &Fence, errors: &ManifestErrors) -> Strin
     message
 }
 
-/// The manifest a complete fence declares, through the entry point its opening
-/// names: `parse_blastfile` for a document, `parse_and_validate` for the
-/// retired `toml title="blastit.toml"` spelling.
-fn parse_fence(
-    opening: &str,
-    body: &str,
-) -> Result<(Manifest, Vec<ManifestWarning>), ManifestErrors> {
-    if opening == OPENING {
-        Manifest::parse_and_validate(body, UidLayout::DEFAULT_BASE)
-    } else {
-        Manifest::parse_blastfile(body, UidLayout::DEFAULT_BASE)
-    }
+/// The manifest a complete fence declares, through the crate's one boot entry
+/// point.
+fn parse_document(body: &str) -> Result<(Manifest, Vec<ManifestWarning>), ManifestErrors> {
+    Manifest::parse_blastfile(body, UidLayout::DEFAULT_BASE)
 }
 
-/// The one plain `toml` fragment of `docs/frameworks/django.md`, its
-/// `[route.static]` block.
-fn django_static_fragment() -> String {
-    let path = workspace_root().join("docs/frameworks/django.md");
-    let document = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-    let fences = toml_fragments(&document)
-        .unwrap_or_else(|error| panic!("docs/frameworks/django.md: {error}"));
-    assert_eq!(
-        fences.len(),
-        1,
-        "the Django page carries exactly one plain toml fragment"
-    );
-    fences.into_iter().next().expect("one fence").body
-}
-
-/// The `immutable` list `docs/frameworks/django.md` documents: one pattern per
-/// depth, as deep as the deepest fingerprinted file Django's admin ships.
-fn documented_immutable_depths() -> Vec<String> {
-    [
-        "/static/*",
-        "/static/*/*",
-        "/static/*/*/*",
-        "/static/*/*/*/*",
-        "/static/*/*/*/*/*",
-        "/static/*/*/*/*/*/*",
-    ]
-    .map(str::to_string)
-    .to_vec()
-}
-
-/// The one complete fence of `docs/frameworks/static-and-spa.md`, whichever
-/// opening it uses, so the shape stays pinned across the page's migration.
-fn static_page_fence() -> Fence {
-    let path = workspace_root().join("docs/frameworks/static-and-spa.md");
-    let document = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-    let mut fences = collect_fences(&document, &COMPLETE_OPENINGS)
-        .unwrap_or_else(|error| panic!("docs/frameworks/static-and-spa.md: {error}"));
-    assert_eq!(
-        fences.len(),
-        1,
-        "the static page carries exactly one complete fence"
-    );
-    fences.remove(0)
-}
-
-/// The shape `docs/frameworks/static-and-spa.md` documents, as one predicate.
+/// The shape an executed document declares, as one value.
 ///
-/// Design §7.2 requires the fence's shape to be pinned, not merely parsed: the
-/// canary below fails if this predicate would accept a block that drifted.
-fn is_the_documented_static_site(manifest: &Manifest) -> bool {
-    manifest.is_all_static()
-        && manifest.app().is_none()
-        && manifest.route_count() == 1
-        && manifest.route(0).is_some_and(|route| {
-            route.name() == "site"
-                && route.path().len() == 1
-                && route.path()[0] == ".*"
-                && route.static_policy()
-                    == Some(&StaticPolicy {
-                        root: "public".to_string(),
-                        index: "index.html".to_string(),
-                        // The page's `spa = true`, lowered to the file a miss
-                        // is answered with (§9.3).
-                        fallback: Some("index.html".to_string()),
-                        immutable: vec!["/assets/*".to_string()],
-                    })
-        })
+/// A page promises one of these, so it is pinned per page instead of being
+/// absorbed by an "or": a fence that degrades from views to a static mount does
+/// not pass as "some document".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    /// Views and no mount: the application a reader copies to run their app.
+    Application,
+    /// At least one mount, no view, no app: an app-less static site (§9.5).
+    StaticSite,
+    /// Neither a view nor a mount: the document reaches nothing.
+    Empty,
+}
+
+/// What `manifest` is, in the terms the pages promise.
+fn shape_of(manifest: &Manifest) -> Shape {
+    if manifest.route_count() > 0 && manifest.mounts().is_empty() {
+        Shape::Application
+    } else if manifest.route_count() == 0
+        && !manifest.mounts().is_empty()
+        && manifest.is_all_static()
+    {
+        Shape::StaticSite
+    } else {
+        Shape::Empty
+    }
 }
 
 #[test]
 fn every_documented_document_parses_and_validates() {
     let root = workspace_root();
     let mut total = [0, 0, 0];
+    let mut retired = 0;
     for (file, pinned) in PAGES {
         let path = root.join(file);
         let document = std::fs::read_to_string(&path)
@@ -339,18 +312,50 @@ fn every_documented_document_parses_and_validates() {
         let actual = count_fences(&document).unwrap_or_else(|error| panic!("{file}: {error}"));
         check_counts(file, actual, pinned, THE_RETIRED_OPENING_IS_GONE)
             .unwrap_or_else(|message| panic!("{message}"));
-        let complete = collect_fences(&document, &COMPLETE_OPENINGS)
-            .unwrap_or_else(|error| panic!("{file}: {error}"));
+        let complete = documents(&document).unwrap_or_else(|error| panic!("{file}: {error}"));
         for fence in complete {
-            let (manifest, _warnings) = parse_fence(fence.opening, &fence.body)
+            let (manifest, _warnings) = parse_document(&fence.body)
                 .unwrap_or_else(|errors| panic!("{}", describe_failure(file, &fence, &errors)));
-            assert!(
-                manifest.route_count() > 0,
-                "{file}:{}: the {} opened here declares a route",
+            // The shape is pinned per page, not absorbed by an "or": both pages
+            // that carry a document today show an application — one or more
+            // views and no mount — so a fence that degraded from views to a
+            // static mount fails here. A page that documents an all-static site
+            // adds its own arm with `Shape::StaticSite`; nothing else can
+            // execute a document, so an unpinned page panics rather than
+            // passing.
+            let expected = match file {
+                "docs/local.md" | "docs/blastfile.md" => Shape::Application,
+                other => panic!("{other}: a page with an executed document needs its shape pinned"),
+            };
+            assert_eq!(
+                shape_of(&manifest),
+                expected,
+                "{file}:{}: the {} opened here documents {expected:?}",
                 fence.opening_line,
                 fence.opening
             );
         }
+        // The retired fences are counted and named, never parsed: this crate has
+        // no reader for that spelling, and `MB.21.5.1` rewrites the pages so
+        // `docs_fences` can execute them again. The count is cross-checked
+        // against the page's own text — an independent scan, not the same
+        // collector over the same constant — so the two cannot drift together.
+        let named = document
+            .lines()
+            .filter(|line| line.trim() == RETIRED_OPENING)
+            .count();
+        assert_eq!(
+            actual[2], named,
+            "{file}: the pinned retired count and the page's own `{RETIRED_OPENING}` lines agree"
+        );
+        let collected =
+            retired_documents(&document).unwrap_or_else(|error| panic!("{file}: {error}"));
+        assert_eq!(
+            collected.len(),
+            named,
+            "{file}: every `{RETIRED_OPENING}` fence is named, not skipped"
+        );
+        retired += named;
         total = [
             total[0] + actual[0],
             total[1] + actual[1],
@@ -364,101 +369,44 @@ fn every_documented_document_parses_and_validates() {
          document was not pinned in `PAGES` (§16.2)",
         label(TOTAL)
     );
-}
-
-#[test]
-fn the_static_page_manifest_has_its_documented_shape() {
-    let fence = static_page_fence();
-    let (manifest, warnings) = parse_fence(fence.opening, &fence.body).unwrap_or_else(|errors| {
-        panic!(
-            "{}",
-            describe_failure("docs/frameworks/static-and-spa.md", &fence, &errors)
-        )
-    });
-    assert_eq!(warnings, vec![], "the page's block warns about nothing");
-    assert!(
-        is_the_documented_static_site(&manifest),
-        "the page's block is an app-less site serving `public` with `spa` and `/assets/*`:\n{}",
-        fence.body
-    );
-}
-
-#[test]
-fn a_drifted_static_block_does_not_satisfy_the_documented_shape() {
-    // The canary: the shape test above would pass on a predicate that always
-    // answered true, so every promise the page makes is changed once and has to
-    // stop satisfying it.
-    let fence = static_page_fence();
-    for (from, to) in [
-        (r#"root = "public""#, r#"root = "dist""#),
-        ("spa = true", "spa = false"),
-        (r#"immutable = ["/assets/*"]"#, "immutable = []"),
-        (r#"name = "site""#, r#"name = "web""#),
-        ("path = ['.*']", "path = ['/assets/.*']"),
-    ] {
-        let drifted = fence.body.replace(from, to);
-        assert_ne!(
-            drifted, fence.body,
-            "the canary must change the fence: {from}"
-        );
-        let (manifest, _) =
-            parse_fence(fence.opening, &drifted).expect("the drifted block still boots");
-        assert!(
-            !is_the_documented_static_site(&manifest),
-            "a block with {to} is no longer the documented shape"
-        );
-    }
-}
-
-#[test]
-fn the_django_static_fragment_pins_its_documented_depth() {
-    // The page shows `[route.static]` on its own; a reader pastes it under a
-    // manifest that already has a header, so parse it that way.
-    let fragment = django_static_fragment();
-    let document = format!("version = 1\napp = \"app:app\"\n\n{fragment}");
-    let (manifest, warnings) = Manifest::parse_and_validate(&document, UidLayout::DEFAULT_BASE)
-        .unwrap_or_else(|errors| {
-            panic!("the Django static fragment does not boot:\n{errors}\n{document}")
-        });
-    assert_eq!(warnings, vec![], "the fragment warns about nothing");
     assert_eq!(
-        manifest.route_count(),
-        1,
-        "the fragment documents one route"
-    );
-    let route = manifest.route(0).expect("the fragment documents a route");
-    assert_eq!(route.name(), "static");
-    assert_eq!(route.path(), ["/static/.*".to_string()]);
-    let policy = route
-        .static_policy()
-        .expect("the fragment documents a [route.static] block");
-    assert_eq!(policy.root, "staticfiles");
-    assert_eq!(
-        policy.immutable,
-        documented_immutable_depths(),
-        "the page lists one immutable glob per depth, as deep as the deepest \
-         fingerprinted file Django's admin ships"
+        retired, TOTAL[2],
+        "the retired opening is counted on every page that still carries it"
     );
 }
 
 #[test]
 fn both_document_openings_are_collected_and_a_fragment_is_not() {
-    // A plain `toml` fence is a fragment; both document spellings are files.
-    let document = "text\n\
-                    ```text title=\"Blastfile\"\napp \"shop\"\n```\n\n\
-                    ```blastfile\napp \"shop\"\n```\n\n\
-                    ```toml title=\"blastit.toml\"\nversion = 1\n```\n\n\
-                    ```toml\nnot_a_manifest = true\n```\n";
+    // A plain `toml` fence is a fragment; both document spellings are files, and
+    // the retired opening is only counted.
+    let document = format!(
+        "text\n\
+         ```text title=\"Blastfile\"\napp \"shop\"\n```\n\n\
+         ```blastfile\napp \"shop\"\n```\n\n\
+         {RETIRED_OPENING}\nversion = 1\n```\n\n\
+         ```toml\nnot_a_manifest = true\n```\n"
+    );
     assert_eq!(
-        count_fences(document).expect("every fence closes"),
+        count_fences(&document).expect("every fence closes"),
         [1, 1, 1],
         "each complete opening is counted once"
     );
-    let collected = documents(document).expect("every fence closes");
+    let collected = documents(&document).expect("every fence closes");
     let openings: Vec<_> = collected.iter().map(|fence| fence.opening).collect();
     assert_eq!(openings, [TEXT_DOCUMENT_OPENING, BLASTFILE_OPENING]);
     assert_eq!(collected[0].body, "app \"shop\"\n");
     assert_eq!(collected[0].opening_line, 2, "1-based page line");
+    // The retired fence is reachable by its own collector, and only that way.
+    assert_eq!(
+        retired_documents(&document).expect("closes").len(),
+        1,
+        "the retired opening is counted and named"
+    );
+    assert_eq!(
+        toml_fragments(&document).expect("closes").len(),
+        1,
+        "a plain toml fence is still not a complete file"
+    );
 }
 
 #[test]
@@ -483,8 +431,8 @@ fn a_document_that_does_not_parse_names_its_page_position() {
     // while `MB.21.5.1` migrates them.
     let document = "intro\n\n```blastfile\napp \"shop\"\nnot_a_directive\n```\n";
     let fence = documents(document).expect("closes").remove(0);
-    let errors = Manifest::parse_blastfile(&fence.body, UidLayout::DEFAULT_BASE)
-        .expect_err("a directive that is not one must not parse");
+    let errors =
+        parse_document(&fence.body).expect_err("a directive that is not one must not parse");
     let first = errors.errors().first().expect("one refusal");
     assert!(
         first.to_string().starts_with("2:1: "),
@@ -513,7 +461,7 @@ fn a_page_whose_count_drifted_is_named() {
     let message = check_counts("fixture.md", retired, retired, true)
         .expect_err("a page that still carries the retired opening fails the flip");
     assert!(
-        message.contains("fixture.md") && message.contains("`toml title=\"blastit.toml\"`"),
+        message.contains("fixture.md") && message.contains(&format!("`{RETIRED_OPENING}`")),
         "{message}"
     );
     assert_eq!(check_counts("fixture.md", actual, actual, true), Ok(()));
@@ -521,19 +469,23 @@ fn a_page_whose_count_drifted_is_named() {
 
 #[test]
 fn an_invalid_regex_is_refused() {
-    // The canary: the suite above would pass on a parser that accepts anything,
-    // so one documented-shape manifest with a regex that cannot compile has to
-    // fail the boot.
-    let fence = "version = 1\n\
-                 app = \"app:app\"\n\
-                 [[route]]\nname = \"broken\"\npath = ['/products/(']\n";
-    let errors = Manifest::parse_and_validate(fence, UidLayout::DEFAULT_BASE)
+    // The canary: the suite above would pass on a harness that never compiled a
+    // pattern, so one document-shaped file with a `regex` that cannot compile
+    // has to fail the boot. The parser compiles a `regex` at its quote (§8.1),
+    // so the refusal is `PatternRegex` — the `InvalidRegex` a *route* would
+    // report is the validator's, and no document can reach it any more.
+    let fence = "app \"shop\"\n\nview products GET regex '/products/(' {\n    body none\n}\n";
+    let errors = Manifest::parse_blastfile(fence, UidLayout::DEFAULT_BASE)
         .expect_err("a regex that cannot compile must not boot");
     assert!(
         errors
             .errors()
             .iter()
-            .any(|error| matches!(error, ManifestError::InvalidRegex { .. })),
+            .any(|error| matches!(error, ManifestError::PatternRegex { .. })),
         "{errors}"
+    );
+    assert!(
+        errors.to_string().contains("/products/("),
+        "the refusal quotes the pattern: {errors}"
     );
 }

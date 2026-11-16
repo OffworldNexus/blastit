@@ -15,93 +15,97 @@ pub fn text_map(map: &std::collections::BTreeMap<String, String>) -> Vec<(&str, 
         .collect()
 }
 
-/// The example manifest from ARCHITECTURE.md §6, verbatim.
-pub const SECTION_6: &str = r#"version = 1
-groups = ["session"]                # attached to every route (top-level keys come before any [table])
+/// The application of ARCHITECTURE.md §6, written as a `Blastfile` (§7.2).
+///
+/// It is the same four views and the same grants as the section's example: one
+/// store, the shared `session` grant set, the shared `catalog` one, one inline
+/// grant per view, `prefork` on the hot view and `egress any` on checkout.
+///
+/// Two rows of the example cannot be carried over, and neither is a way of
+/// writing this file (§7.1): the example attaches `session` to every route with
+/// a top-level `groups` list, but a `Blastfile` has no spelling for "attach this
+/// trait to every view", so each view that wants `session` writes `use session`
+/// and `fallback` — the view the example leaves without grants — writes none.
+/// The other dropped row is the store's `ca_cert` slot, because `url` is the
+/// one-line form only (§7.4).
+pub const SECTION_6: &str = r#"app "shop"
 
-[proxy.db]                          # see §5 for proxies and their variables
-protocol = "postgresql"
-input = { url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }
+postgres $DATABASE_URL
 
 # Connection setup, plus what middleware does on every request.
-[group.session.db]                  # grant on proxy "db" (§5)
-transaction_control = true          # BEGIN/COMMIT/ROLLBACK, SAVEPOINT/RELEASE sp_*
-queries = [
-  "SET TIME ZONE 'UTC'",
-  'SELECT "django_session"."session_key", "django_session"."session_data", "django_session"."expire_date" FROM "django_session" WHERE ("django_session"."expire_date" > $1 AND "django_session"."session_key" = $2) LIMIT 21',
-]
+trait session {
+    postgres {
+        transactions
+        query "SET TIME ZONE 'UTC'"
+        query 'SELECT "django_session"."session_key", "django_session"."session_data", "django_session"."expire_date" FROM "django_session" WHERE ("django_session"."expire_date" > $1 AND "django_session"."session_key" = $2) LIMIT 21'
+    }
+}
 
-[group.catalog.db]
-queries = [
-  'SELECT "shop_product"."id", "shop_product"."name" FROM "shop_product" WHERE "shop_product"."id" = $1 LIMIT 21',
-]
+trait catalog {
+    postgres {
+        query 'SELECT "shop_product"."id", "shop_product"."name" FROM "shop_product" WHERE "shop_product"."id" = $1 LIMIT 21'
+    }
+}
 
-[[route]]
-name = "product-detail"
-path = ['/products/[0-9]+/']        # full match against PATH_INFO
-methods = ["GET", "HEAD"]           # optional; default: any method
-groups = ["catalog"]                # shared with checkout; nothing else needed here
-prefork = true                      # hot route: fork at startup, skip first-hit fork latency
+# Full match against PATH_INFO; the regex form is the one the section writes.
+view product-detail GET regex '/products/[0-9]+/' {
+    use session, catalog
+    prefork
+}
 
-[[route]]
-name = "checkout"
-path = ['/checkout/.*']
-groups = ["catalog"]
-egress = true                       # may open TCP connections (payment API); see §7.3
-[route.db]                          # inline grants, only for this route
-queries = [
-  'INSERT INTO "shop_order" ("product_id", "qty") VALUES ($1, $2) RETURNING "shop_order"."id"',
-]
+view checkout regex '/checkout/.*' {
+    use session, catalog
+    egress any
+    postgres {
+        query 'INSERT INTO "shop_order" ("product_id", "qty") VALUES ($1, $2) RETURNING "shop_order"."id"'
+    }
+}
 
-[[route]]
-name = "about"
-path = ['/about/']
-[route.db]                          # inline only: no group involved
-queries = ['SELECT "cms_page"."body" FROM "cms_page" WHERE "cms_page"."slug" = $1 LIMIT 21']
+view about "/about/" {
+    use session
+    postgres {
+        query 'SELECT "cms_page"."body" FROM "cms_page" WHERE "cms_page"."slug" = $1 LIMIT 21'
+    }
+}
 
-[[route]]
-name = "fallback"                   # catch-all: the app renders its own 404s
-path = ['.*']                       # without it, unmatched paths get blastit's own 404
-                                    # only the global groups; add grants if error pages need the DB
+# Catch-all: the app renders its own 404s. It writes no `use`: a view that does
+# not ask for a trait inherits nothing (§7.1).
+view fallback regex '.*' {
+}
 "#;
 
-/// The two-proxy example from ARCHITECTURE.md §5.1, plus the `version` line a
-/// whole manifest needs; §5.1 only shows the proxy sections.
-pub const SECTION_5_1: &str = r#"version = 1
+/// The two stores of ARCHITECTURE.md §5.1, as a `Blastfile` (§7.1, §7.4, §7.5).
+///
+/// §5.1's `db` also carried `ca_cert` and its `analytics` carried an `output`
+/// map. Neither has a spelling in this language: `url` is the one-line store
+/// form (§7.4), so a store cannot hold it beside a second slot, and the `output`
+/// map is dropped outright (§7.5, `ADR-0012`). The fixture therefore carries the
+/// one-line form the language has, and the model's `output` maps are asserted
+/// empty rather than absent.
+pub const SECTION_5_1: &str = r#"postgres $DATABASE_URL
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }
-# No output table: DATABASE_URL is rewritten in place, DATABASE_CA_CERT disappears.
-
-[proxy.analytics]
-protocol = "postgresql"
-input = { url = "ANALYTICS_URL" }
-[proxy.analytics.output]                # the app wants split variables for this one
-ANALYTICS_DB_HOST = "{{ socket_dir }}"
-ANALYTICS_DB_PORT = "{{ port }}"
-ANALYTICS_DB_NAME = "{{ database }}"
-ANALYTICS_DB_USER = "{{ user }}"
+postgres analytics $ANALYTICS_URL
 "#;
 
-/// The §6 example, parsed.
+/// The §6 application, parsed.
 pub fn section_6() -> Manifest {
-    Manifest::from_toml_str(SECTION_6).expect("§6 example should parse")
+    Manifest::from_blastfile_str(SECTION_6).expect("§6 example should parse")
 }
 
-/// The §5.1 example, parsed.
+/// The §5.1 stores, parsed.
 pub fn section_5_1() -> Manifest {
-    Manifest::from_toml_str(SECTION_5_1).expect("§5.1 example should parse")
+    Manifest::from_blastfile_str(SECTION_5_1).expect("§5.1 example should parse")
 }
 
-/// Parses a document that must not parse, and returns its problems.
+/// Parses a document that must be refused at parse or lower time, and returns
+/// its problems.
 pub fn parse_errors(source: &str) -> ManifestErrors {
-    Manifest::from_toml_str(source).expect_err("manifest should not parse")
+    Manifest::from_blastfile_str(source).expect_err("manifest should not parse")
 }
 
 /// Validates a document that parses but must not validate.
 pub fn validate_errors(source: &str, base: u32) -> ManifestErrors {
-    let manifest = Manifest::from_toml_str(source).expect("manifest should parse");
+    let manifest = Manifest::from_blastfile_str(source).expect("manifest should parse");
     manifest
         .validate(base)
         .expect_err("manifest should not validate")
@@ -109,7 +113,7 @@ pub fn validate_errors(source: &str, base: u32) -> ManifestErrors {
 
 /// Validates a document and returns its warnings.
 pub fn validate_warnings(source: &str) -> Vec<ManifestWarning> {
-    let manifest = Manifest::from_toml_str(source).expect("manifest should parse");
+    let manifest = Manifest::from_blastfile_str(source).expect("manifest should parse");
     manifest
         .validate(UidLayout::DEFAULT_BASE)
         .expect("manifest should validate")

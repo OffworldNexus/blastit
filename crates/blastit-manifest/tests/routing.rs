@@ -1,5 +1,12 @@
 //! The routing table: full match, manifest order, method filters, rule indices
 //! (§2.4, §6).
+//!
+//! A `Blastfile`'s pattern is compiled by the parser (a `"/x"` through the
+//! pattern compiler, a `regex '…'` by the `regex` crate itself, §8.1), so a
+//! document that reaches `RoutingTable` always holds rules that compile. The
+//! refusals the retired format reported from the table's constructor therefore
+//! live at the document's own position now — and they are asserted here, next to
+//! the matching they protect, rather than left to the parser's own suite.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -10,8 +17,13 @@ use common::{SECTION_6, section_6};
 
 /// Compiles a document that is assumed to be valid.
 fn routing_table(source: &str) -> RoutingTable {
-    let manifest = Manifest::from_toml_str(source).expect("parses");
+    let manifest = Manifest::from_blastfile_str(source).expect("parses");
     RoutingTable::new(&manifest).expect("compiles")
+}
+
+/// The one refusal `source` produces, rendered as the user sees it.
+fn refusal(source: &str) -> blastit_manifest::ManifestErrors {
+    Manifest::from_blastfile_str(source).expect_err("the document is refused")
 }
 
 #[test]
@@ -61,7 +73,7 @@ fn patterns_match_the_whole_path_info() {
 }
 
 #[test]
-fn methods_are_filtered_and_head_is_not_implied_by_get() {
+fn methods_are_filtered_and_head_is_implied_by_get() {
     let manifest = section_6();
     let table = RoutingTable::new(&manifest).expect("compiles");
 
@@ -72,35 +84,42 @@ fn methods_are_filtered_and_head_is_not_implied_by_get() {
     assert_eq!(
         table.route("HEAD", "/products/42/"),
         Some(Match { route: 0, rule: 0 }),
-        "HEAD is listed explicitly in the §6 example"
+        "`GET` in a view header implies `HEAD` when the file is lowered (§8.4)"
     );
     assert_eq!(
         table.route("POST", "/products/42/"),
         Some(Match { route: 3, rule: 0 }),
-        "a method the route does not list falls through to the next route"
+        "a method the view does not list falls through to the next one"
     );
 
-    let head_only = "version = 1\n\
-                     [[route]]\nname = \"get\"\npath = ['.*']\nmethods = [\"GET\"]\n\
-                     [[route]]\nname = \"head\"\npath = ['.*']\nmethods = [\"HEAD\"]\n\
-                     [[route]]\nname = \"rest\"\npath = ['.*']\n";
-    let table = routing_table(head_only);
+    // The implication is a lower-time decision, not a table one: a `GET` view
+    // answers `HEAD` itself, so a later `HEAD`-only view never sees one.
+    let implied = "view get GET regex '.*' {\n}\n\
+                   \n\
+                   view head HEAD regex '.*' {\n}\n\
+                   \n\
+                   view rest regex '.*' {\n}\n";
+    let table = routing_table(implied);
     assert_eq!(table.route("GET", "/x"), Some(Match { route: 0, rule: 0 }));
-    assert_eq!(table.route("HEAD", "/x"), Some(Match { route: 1, rule: 0 }));
+    assert_eq!(
+        table.route("HEAD", "/x"),
+        Some(Match { route: 0, rule: 0 }),
+        "the GET view implies HEAD, so the HEAD-only view is never reached"
+    );
     assert_eq!(table.route("PUT", "/x"), Some(Match { route: 2, rule: 0 }));
 
-    let uppercase_only = "version = 1\n\
-                          [[route]]\nname = \"upper\"\npath = ['.*']\nmethods = [\"GET\"]\n";
+    let uppercase_only = "view upper GET regex '.*' {\n}\n";
     let table = routing_table(uppercase_only);
     assert_eq!(table.route("get", "/x"), None, "methods are case-sensitive");
 }
 
 #[test]
 fn the_first_matching_route_wins() {
-    let source = "version = 1\n\
-                  [[route]]\nname = \"specific\"\npath = ['/a/.*']\n\
-                  [[route]]\nname = \"general\"\npath = ['/.*']\n\
-                  [[route]]\nname = \"everything\"\npath = ['.*']\n";
+    let source = "view specific regex '/a/.*' {\n}\n\
+                  \n\
+                  view general regex '/.*' {\n}\n\
+                  \n\
+                  view everything regex '.*' {\n}\n";
     let table = routing_table(source);
     assert_eq!(
         table.route("GET", "/a/b"),
@@ -112,8 +131,7 @@ fn the_first_matching_route_wins() {
 
 #[test]
 fn a_route_reports_which_of_its_rules_matched() {
-    let source = "version = 1\n\
-                  [[route]]\nname = \"many\"\npath = ['/a', '/b/[0-9]+', '/c']\n";
+    let source = "view many \"/a\", regex '/b/[0-9]+', \"/c\" {\n}\n";
     let table = routing_table(source);
     assert_eq!(table.route("GET", "/a"), Some(Match { route: 0, rule: 0 }));
     assert_eq!(
@@ -126,7 +144,7 @@ fn a_route_reports_which_of_its_rules_matched() {
 
 #[test]
 fn unmatched_requests_have_no_route() {
-    let source = "version = 1\n[[route]]\nname = \"about\"\npath = ['/about/']\n";
+    let source = "view about \"/about/\" {\n}\n";
     let table = routing_table(source);
     assert_eq!(
         table.route("GET", "/about/"),
@@ -135,7 +153,7 @@ fn unmatched_requests_have_no_route() {
     assert_eq!(table.route("GET", "/about/x"), None);
     assert_eq!(table.route("GET", "/"), None);
 
-    let manifest = Manifest::from_toml_str("version = 1\n").expect("parses");
+    let manifest = Manifest::from_blastfile_str("").expect("parses");
     let empty = RoutingTable::new(&manifest).expect("compiles");
     assert_eq!(empty.route("GET", "/"), None);
 }
@@ -144,9 +162,9 @@ fn unmatched_requests_have_no_route() {
 fn alternatives_stay_inside_the_anchor() {
     // A bare `a|ab` would match the prefix `a`; the wrapper turns a whole
     // pattern into one alternative group, so both branches are anchored.
-    let source = "version = 1\n\
-                  [[route]]\nname = \"either\"\npath = ['a|ab']\n\
-                  [[route]]\nname = \"fallback\"\npath = ['.*']\n";
+    let source = "view either regex 'a|ab' {\n}\n\
+                  \n\
+                  view fallback regex '.*' {\n}\n";
     let table = routing_table(source);
     assert_eq!(table.route("GET", "ab"), Some(Match { route: 0, rule: 0 }));
     assert_eq!(table.route("GET", "a"), Some(Match { route: 0, rule: 0 }));
@@ -159,99 +177,96 @@ fn alternatives_stay_inside_the_anchor() {
 }
 
 #[test]
-fn a_pattern_cannot_escape_the_anchor() {
+fn a_regex_pattern_cannot_escape_the_anchor() {
     // `x)|(.*` compiles to `^(?:x)|(.*)$` if it is wrapped blindly: a
     // catch-all, which would hand every request to that route. `a)|(b` is the
-    // same trick with a prefix and a suffix. Both are malformed on their own.
+    // same trick with a prefix and a suffix. Both are malformed on their own,
+    // and §8.1 pre-compiles a `regex` before it is wrapped — at the pattern's
+    // own quote, so the file never lowers and no table is ever built (R21).
     for pattern in ["x)|(.*", "a)|(b"] {
-        let source = format!(
-            "version = 1\n\
-             [[route]]\nname = \"hostile\"\npath = ['{pattern}']\n\
-             [[route]]\nname = \"fallback\"\npath = ['.*']\n"
-        );
-        let manifest = Manifest::from_toml_str(&source).expect("parses");
-
-        let errors = RoutingTable::new(&manifest).expect_err("must not compile");
-        assert_eq!(errors.len(), 1, "{pattern:?}");
+        let errors = refusal(&format!("view hostile regex '{pattern}' {{\n}}\n"));
+        assert_eq!(errors.len(), 1, "{pattern:?}: {errors}");
         match &errors.errors()[0] {
-            ManifestError::InvalidRegex {
-                route,
-                rule,
+            ManifestError::PatternRegex {
                 pattern: reported,
+                message,
                 ..
             } => {
-                assert_eq!(route, "hostile");
-                assert_eq!(*rule, 0);
                 assert_eq!(reported, pattern);
+                assert!(message.contains("group"), "{pattern:?}: {message}");
             }
             other => panic!("unexpected error {other:?}"),
         }
+        assert!(!errors.to_string().contains('\n'), "one line: {errors:?}");
 
-        let errors = manifest
-            .validate(20_000)
-            .expect_err("validation reports it too");
-        assert!(matches!(
-            errors.errors()[0],
-            ManifestError::InvalidRegex { .. }
-        ));
+        // The allowed twin: the same shape with every group closed.
+        assert!(Manifest::from_blastfile_str("view safe regex '(?:x)|(?:.*)' {\n}\n").is_ok());
+        assert!(Manifest::from_blastfile_str("view safe regex '/x/.*' {\n}\n").is_ok());
     }
 }
 
 #[test]
-fn every_broken_pattern_is_reported() {
-    let source = "version = 1\n\
-                  [[route]]\nname = \"first\"\npath = ['[', '/ok']\n\
-                  [[route]]\nname = \"second\"\npath = ['/fine', '(']\n";
-    let manifest = Manifest::from_toml_str(source).expect("parses");
-    let errors = RoutingTable::new(&manifest).expect_err("both are broken");
-    assert_eq!(errors.len(), 2, "{errors:?}");
+fn a_broken_pattern_is_refused_before_a_manifest_exists() {
+    // Two broken patterns in one file: the parser refuses the first and yields
+    // no manifest at all (R21), so nothing can report the second. The second
+    // statement is still checked the same way when it is the first one.
+    let source = "view first regex '[' {\n}\n\
+                  \n\
+                  view second regex '(' {\n}\n";
+    let errors = refusal(source);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        matches!(
+            &errors.errors()[0],
+            ManifestError::PatternRegex { pattern, .. } if pattern == "["
+        ),
+        "{errors:?}"
+    );
+
     assert!(matches!(
-        &errors.errors()[0],
-        ManifestError::InvalidRegex { route, rule: 0, .. } if route == "first"
-    ));
-    assert!(matches!(
-        &errors.errors()[1],
-        ManifestError::InvalidRegex { route, rule: 1, .. } if route == "second"
+        &refusal("view second regex '(' {\n}\n").errors()[0],
+        ManifestError::PatternRegex { pattern, .. } if pattern == "("
     ));
 
-    let manifest = Manifest::from_toml_str(SECTION_6).expect("parses");
+    // The allowed twin: the §6 application, whose every pattern compiles.
+    let manifest = Manifest::from_blastfile_str(SECTION_6).expect("parses");
     assert!(RoutingTable::new(&manifest).is_ok());
 }
 
 #[test]
-fn regexes_that_come_from_the_manifest_are_bounded() {
-    // A pattern whose automaton is far bigger than the compile budget: it is
-    // rejected rather than compiled. (The regex crate's own default budget
-    // would have accepted this one.)
+fn a_pattern_is_bounded_before_it_is_compiled() {
+    // §8.1: both pattern forms are capped at 4096 bytes of source, so a `regex`
+    // cannot hide a megabyte pattern the quoted form would refuse.
     let bomb = "a".repeat(100_000);
-    let source = format!("version = 1\n[[route]]\nname = \"huge\"\npath = ['{bomb}']\n");
-    let manifest = Manifest::from_toml_str(&source).expect("parses");
+    let errors = refusal(&format!("view huge regex '{bomb}' {{\n}}\n"));
+    assert!(
+        matches!(&errors.errors()[0], ManifestError::PatternTooLong { .. }),
+        "{errors:?}"
+    );
+    assert!(
+        errors.to_string().contains("at most 4096 bytes"),
+        "{errors}"
+    );
 
-    let errors = RoutingTable::new(&manifest).expect_err("the size limit is enforced");
-    match &errors.errors()[0] {
-        ManifestError::InvalidRegex { route, message, .. } => {
-            assert_eq!(route, "huge");
-            assert!(message.contains("size limit"), "{message}");
-        }
-        other => panic!("unexpected error {other:?}"),
-    }
-
-    // Validation reports the same problem before anything is compiled.
-    let errors = manifest.validate(20_000).expect_err("too big to compile");
-    assert!(matches!(
-        errors.errors()[0],
-        ManifestError::InvalidRegex { .. }
-    ));
+    // A short source can still build a program over the compile budget: the
+    // `regex` crate's own limit — `REGEX_SIZE_LIMIT`, unchanged — refuses it at
+    // the pattern's position rather than letting it balloon (§17.4).
+    let errors = refusal("view huge regex 'a{1000000}' {\n}\n");
+    assert!(
+        matches!(
+            &errors.errors()[0],
+            ManifestError::PatternRegex { message, .. } if message.contains("size limit")
+        ),
+        "{errors:?}"
+    );
 }
 
 #[test]
 fn deeply_nested_patterns_are_rejected() {
     let deep = format!("{}a{}", "(?:".repeat(200), ")".repeat(200));
-    let source = format!("version = 1\n[[route]]\nname = \"deep\"\npath = ['{deep}']\n");
-    let manifest = Manifest::from_toml_str(&source).expect("parses");
-    let errors = RoutingTable::new(&manifest).expect_err("nesting is bounded");
+    let errors = refusal(&format!("view deep regex '{deep}' {{\n}}\n"));
     match &errors.errors()[0] {
-        ManifestError::InvalidRegex { message, .. } => {
+        ManifestError::PatternRegex { message, .. } => {
             assert!(message.contains("nested parentheses"), "{message}");
         }
         other => panic!("unexpected error {other:?}"),
