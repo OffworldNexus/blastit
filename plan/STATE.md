@@ -3,7 +3,7 @@
 - generated: 2026-11-16T18:17
 - autopilot: on
 - current milestone: MB Modern 12-Factor Backends: Static, PHP (embedded libphp), Vite/Node, Tomcat (0.2.x) [ready]
-- tasks: proposed=1, ready=41, active=4, done=176, superseded=11
+- tasks: proposed=1, ready=41, active=3, done=177, superseded=11
 - open human requests: 1 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 11; expensive spent: $173.87 of $200.00 cap (87%)
 
@@ -36,9 +36,6 @@
 
 ## Recent journal
 
-- 2026-11-16T17:46 [MB.21.4.5.2] (lead) attempt 2/3 started
-- 2026-11-16T17:49 [MB.21.4.5.1] (lead) REVIEW FAIL: (1 MAJOR) RESULT.md row 38 cites critical_blastfile_parity.rs::the_dropped_rows_are_absent, which never asserts empty mounts() or name()==None -> t
-- 2026-11-16T17:49 [MB.21.4.5.1] (lead) status active -> ready
 - 2026-11-16T17:49 [MB.21.4.5.1] (lead) status ready -> active
 - 2026-11-16T17:49 [MB.21.4.5.1] (lead) attempt 2/3 started
 - 2026-11-16T17:52 [MB.21.4.5.4] (lead) status ready -> active
@@ -51,3 +48,6 @@
 - 2026-11-16T18:17 [MB.21.4.5.1] (lead) pre-commit gates: plan.py validate OK; guard.py OK; make check exit 0, 4619 lines (/tmp/opencode/mb2145-batch-makecheck.log). Tree QUIESCENT at commit time — no
 - 2026-11-16T18:17 [MB.21.4.5.1] (lead) status active -> review
 - 2026-11-16T18:17 [MB.21.4.5.1] (lead) status review -> done
+- 2026-11-16T18:17 [MB.21.4.5.2] (lead) pre-commit gates: plan.py validate OK; guard.py OK; make check exit 0, 4619 lines (/tmp/opencode/mb2145-batch-makecheck.log). Tree QUIESCENT at commit time — sh
+- 2026-11-16T18:17 [MB.21.4.5.2] (lead) status active -> review
+- 2026-11-16T18:17 [MB.21.4.5.2] (lead) status review -> done

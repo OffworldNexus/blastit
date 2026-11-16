@@ -2,18 +2,18 @@
 id: MB.21.4.5.2
 title: "Prove the static mount's and the php entrypoint's grammar in the two protected suites"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
 paths:
   - "crates/blastit-manifest/tests/critical_static_manifest.rs"
   - "crates/blastit-manifest/tests/critical_php_manifest.rs"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-16T16:57"
-updated: "2026-11-16T16:57"
+updated: "2026-11-16T18:17"
 ---
 
 # Goal

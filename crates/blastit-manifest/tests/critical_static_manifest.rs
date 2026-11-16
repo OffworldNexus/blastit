@@ -1,11 +1,18 @@
-//! The `[route.static]` grammar, its five fatal errors and the root audit
-//! (`R1`–`R5`, `R13`; design §7.2).
+//! The `static "<prefix>" { … }` mount's grammar, its fatal errors and the root
+//! audit (`R1`–`R5`, `R13`; design §7.2, §9.1).
 //!
-//! Protected (critical tier). A static root, an `index` or an `immutable`
-//! pattern decides which files a route serves, so a regression here would serve
-//! a directory the operator never declared — or publish a dotfile with every
-//! miss. Every accepted form has its denied twin, and each family asserts the
-//! exact boot message the design pins, not merely "an error".
+//! Protected (critical tier). A mount's `root`, `index`, `fallback` and
+//! `immutable` decide which files the responder serves, so a regression here
+//! would serve a directory the operator never declared — or publish a dotfile
+//! with every miss. Every accepted form has its denied twin, and each family
+//! asserts the exact boot message the design pins, not merely "an error".
+//!
+//! The subject moved and the promises did not: a static block is a top-level
+//! `static "<prefix>"` mount and no longer a route's table (§9.1), so every
+//! table-driven case asserts `manifest.mounts()[i].policy` and every refusal
+//! names `mount "<prefix>" (index <i>)`. A mount owns no uid, starts no process
+//! and reaches no app, so the four declarations a static route could never run
+//! are refused one step earlier, by the parser's own directive list.
 //!
 //! Existence is a separate call by design: [`Manifest::validate`] never touches
 //! the filesystem (the documentation fences are parsed from the repository root,
@@ -17,31 +24,23 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use blastit_manifest::{
-    Location, Manifest, ManifestError, ManifestWarning, ProxyName, StaticPolicy, UidLayout,
+    Location, Manifest, ManifestError, ManifestWarning, Position, ProxyName, StaticPolicy,
+    UidLayout,
 };
 
-/// The accepted page's complete manifest, verbatim (`docs/frameworks/static-and-spa.md`).
-const PAGE: &str = r#"version = 1
-
-[[route]]
-name = "site"
-path = ['.*']
-
-[route.static]
-root = "public"
-spa = true
-immutable = ["/assets/*"]
+/// The accepted page's complete `Blastfile` (`docs/frameworks/static-and-spa.md`
+/// still carries the retired spelling until `MB.21.5.1` rewrites it to this
+/// file; the four-step precedence walk is `critical_blastfile_parity.rs`'s, so
+/// this suite keeps the per-key grammar).
+const PAGE: &str = r#"static "/" {
+    root "public"
+    index "index.html"
+    fallback "index.html"
+    immutable "/assets/*"
+}
 "#;
 
-/// The one route every table-driven case declares.
-fn location() -> Location {
-    Location::Route {
-        index: 0,
-        name: "site".to_string(),
-    }
-}
-
-/// The one mount the retired reader lowers that route to: a `static "/"`.
+/// The one mount every table-driven case declares.
 fn mount_location() -> Location {
     Location::Mount {
         index: 0,
@@ -49,21 +48,14 @@ fn mount_location() -> Location {
     }
 }
 
-/// A manifest with one route named `site` and the given route-level keys.
-fn route_manifest(route_keys: &str, static_block: &str) -> String {
-    format!(
-        "version = 1\n\n[[route]]\nname = \"site\"\npath = ['.*']\n{route_keys}\n[route.static]\n{static_block}"
-    )
+/// A file with the one mount, holding `body` exactly as written.
+fn static_file(body: &str) -> String {
+    format!("static \"/\" {{\n{body}}}\n")
 }
 
-/// A manifest whose only route is static, with the given `[route.static]` body.
-fn static_manifest(block: &str) -> String {
-    route_manifest("", block)
-}
-
-/// Parses a document that must parse, and returns what validation refuses.
+/// Parses a file that must parse, and returns what validation refuses.
 fn errors_of(source: &str) -> Vec<ManifestError> {
-    let manifest = Manifest::from_toml_str(source)
+    let manifest = Manifest::from_blastfile_str(source)
         .unwrap_or_else(|errors| panic!("should parse:\n{errors}\n{source}"));
     manifest
         .validate(UidLayout::DEFAULT_BASE)
@@ -71,44 +63,57 @@ fn errors_of(source: &str) -> Vec<ManifestError> {
         .into_errors()
 }
 
-/// Parses a document that must not parse, and returns its problems.
+/// Parses a file that must not parse, and returns its problems.
 fn parse_errors(source: &str) -> Vec<ManifestError> {
-    Manifest::from_toml_str(source)
+    Manifest::from_blastfile_str(source)
         .expect_err("should not parse")
         .into_errors()
 }
 
-/// Validates a `[route.static]` body that must be refused.
-fn violations(block: &str) -> Vec<ManifestError> {
-    errors_of(&static_manifest(block))
+/// Everything a mount body is refused for, at whichever stage refuses it: the
+/// `root` and `index` rules belong to lowering, and `immutable`, `fallback` and
+/// the prefix to validation. Both stages render one line (§18), so the families
+/// below can assert the sentence without pinning the stage by accident.
+fn refusals(body: &str) -> Vec<ManifestError> {
+    let source = static_file(body);
+    match Manifest::from_blastfile_str(&source) {
+        Err(errors) => errors.into_errors(),
+        Ok(manifest) => manifest
+            .validate(UidLayout::DEFAULT_BASE)
+            .expect_err("should not validate")
+            .into_errors(),
+    }
 }
 
-/// Parses and validates a `[route.static]` body that must be accepted; a lone
-/// static route has no group, proxy or codec to warn about.
-fn accepted(block: &str) -> Manifest {
-    let source = static_manifest(block);
-    let (manifest, warnings) = Manifest::parse_and_validate(&source, UidLayout::DEFAULT_BASE)
+/// The refusals of a mount body, rendered exactly as the boot prints them.
+fn lines(body: &str) -> Vec<String> {
+    refusals(body).iter().map(ToString::to_string).collect()
+}
+
+/// Parses and validates a mount body that must be accepted; one mount alone has
+/// no view, group or store to warn about.
+fn accepted(body: &str) -> Manifest {
+    let source = static_file(body);
+    let (manifest, warnings) = Manifest::parse_blastfile(&source, UidLayout::DEFAULT_BASE)
         .unwrap_or_else(|errors| panic!("should boot:\n{errors}\n{source}"));
+    assert_eq!(warnings, vec![], "a mount on its own warns about nothing");
     assert_eq!(
-        warnings,
-        vec![],
-        "a static route on its own warns about nothing"
+        manifest.mounts().len(),
+        1,
+        "one `static` block is one mount"
     );
+    assert!(manifest.routes().is_empty(), "a mount is not a route");
     manifest
 }
 
-/// The static block of `site`.
+/// The policy of the one mount the file declares.
 fn policy(manifest: &Manifest) -> &StaticPolicy {
-    manifest
-        .route(0)
-        .expect("route 0")
-        .static_policy()
-        .expect("a static policy")
+    &manifest.mounts().first().expect("a mount").policy
 }
 
 fn root_invalid(root: &str, rule: &'static str) -> ManifestError {
     ManifestError::StaticRootInvalid {
-        location: location(),
+        location: mount_location(),
         root: root.to_string(),
         rule,
     }
@@ -116,51 +121,56 @@ fn root_invalid(root: &str, rule: &'static str) -> ManifestError {
 
 fn index_invalid(index: &str, rule: &'static str) -> ManifestError {
     ManifestError::StaticIndexInvalid {
-        location: location(),
+        location: mount_location(),
         index: index.to_string(),
+        rule,
+    }
+}
+
+fn fallback_invalid(fallback: &str, rule: &'static str) -> ManifestError {
+    ManifestError::StaticFallbackInvalid {
+        location: mount_location(),
+        fallback: fallback.to_string(),
         rule,
     }
 }
 
 fn bad_pattern(pattern: &str, rule: &'static str) -> ManifestError {
     ManifestError::StaticImmutablePattern {
-        location: location(),
+        location: mount_location(),
         pattern: pattern.to_string(),
         rule,
     }
 }
 
-fn dead(key: &str, why: &'static str) -> ManifestError {
-    ManifestError::StaticDeadDeclaration {
-        location: location(),
-        key: key.to_string(),
-        why,
-    }
-}
-
 #[test]
-fn the_pages_manifest_parses_with_the_defaults_it_omits() {
+fn the_pages_mount_parses_with_the_defaults_it_omits() {
     let (manifest, warnings) =
-        Manifest::parse_and_validate(PAGE, UidLayout::DEFAULT_BASE).expect("the page boots");
+        Manifest::parse_blastfile(PAGE, UidLayout::DEFAULT_BASE).expect("the page boots");
     assert_eq!(warnings, vec![]);
-    assert_eq!(manifest.app(), None, "the page's block needs no app");
+    assert_eq!(manifest.app(), None, "the page's mount needs no app");
     assert!(manifest.is_all_static());
+    assert!(manifest.routes().is_empty(), "a mount is not a route");
+    assert_eq!(manifest.mounts().len(), 1);
+    assert_eq!(manifest.mounts()[0].prefix, "/");
     assert_eq!(
         policy(&manifest),
         &StaticPolicy {
             root: "public".to_string(),
             // Omitted by the page, so the default has to appear here.
             index: "index.html".to_string(),
-            // The page's `spa = true` lowered to the file it answers a miss
-            // with — the index it already answers a directory with (§9.3).
+            // The page answers a miss with the file it answers a directory
+            // with (§9.3).
             fallback: Some("index.html".to_string()),
             immutable: vec!["/assets/*".to_string()],
         }
     );
 
-    // The accepted twin of every default: all three omitted, all three filled.
+    // The accepted twin of every default: the one required key, and the three
+    // omitted ones filled in. Omitting `fallback` is the retired `spa = false`
+    // (§9.3).
     assert_eq!(
-        policy(&accepted("root = 'public'\n")),
+        policy(&accepted("root \"public\"\n")),
         &StaticPolicy {
             root: "public".to_string(),
             index: "index.html".to_string(),
@@ -169,7 +179,7 @@ fn the_pages_manifest_parses_with_the_defaults_it_omits() {
         }
     );
     let explicit = accepted(
-        "root = 'public'\nindex = 'shell.html'\nspa = false\nimmutable = ['/assets/*/*', '/index.html']\n",
+        "root \"public\"\nindex \"shell.html\"\nimmutable \"/assets/*/*\", \"/index.html\"\n",
     );
     assert_eq!(policy(&explicit).index, "shell.html");
     assert_eq!(policy(&explicit).immutable, ["/assets/*/*", "/index.html"]);
@@ -178,154 +188,171 @@ fn the_pages_manifest_parses_with_the_defaults_it_omits() {
 #[test]
 fn every_bad_root_names_the_rule_it_breaks() {
     let cases = [
-        (r#"root = """#, root_invalid("", "must be a relative path")),
+        ("root \"\"\n", root_invalid("", "must be a relative path")),
         (
-            r#"root = "/srv/public""#,
+            "root \"/srv/public\"\n",
             root_invalid("/srv/public", "must be a relative path"),
         ),
+        ("root \"/\"\n", root_invalid("/", "must be a relative path")),
         (
-            r#"root = "/""#,
-            root_invalid("/", "must be a relative path"),
-        ),
-        (
-            r#"root = "../public""#,
+            "root \"../public\"\n",
             root_invalid("../public", "must not contain .."),
         ),
         (
-            r#"root = "current/../../public""#,
+            "root \"current/../../public\"\n",
             root_invalid("current/../../public", "must not contain .."),
         ),
         (
-            r#"root = 'pub\lic'"#,
+            "root \"pub\\\\lic\"\n",
             root_invalid(r"pub\lic", r"must not contain \"),
         ),
+        // `blastfile/lower.rs` `root_rule`'s inline copy is `byte < 0x20`; the
+        // lexer copies every byte that is neither a quote nor a backslash
+        // verbatim, so a raw NUL and a raw `0x1f` pin both ends of that range
+        // (and a predicate that only knew `\n`/`\t` fails on either).
         (
-            r#"root = "pub\u0000lic""#,
+            "root \"pub\u{0}lic\"\n",
             root_invalid("pub\u{0}lic", "must not contain a control byte"),
         ),
         (
-            r#"root = "pub\u001Flic""#,
+            "root \"pub\u{1f}lic\"\n",
             root_invalid("pub\u{1f}lic", "must not contain a control byte"),
         ),
     ];
-    for (block, expected) in cases {
-        assert_eq!(violations(block), vec![expected], "{block}");
+    for (body, expected) in cases {
+        assert_eq!(refusals(body), vec![expected], "{body}");
     }
 
-    // The message the operator reads: the route, the value and the fix.
+    // The message the operator reads: the mount, the value and the fix.
     assert_eq!(
-        violations(r#"root = "/srv/public""#)[0].to_string(),
-        r#"route "site" (index 0): static root "/srv/public": must be a relative path"#
+        lines("root \"/srv/public\"\n")[0],
+        r#"mount "/" (index 0): static root "/srv/public": must be a relative path"#
     );
 
     // Every relative spelling is fine, a space included.
     for root in ["public", "./public", "a/b", "current/public", "pub lic"] {
-        assert_eq!(policy(&accepted(&format!("root = '{root}'\n"))).root, root);
+        assert_eq!(policy(&accepted(&format!("root \"{root}\"\n"))).root, root);
     }
 }
 
 #[test]
-fn a_static_block_without_a_root_and_a_static_route_without_a_path_are_refused() {
+fn a_mount_without_a_root_and_a_mount_without_a_prefix_are_refused() {
+    // §9.1: `root` is required — a default would answer nothing and make the
+    // omission invisible.
     assert_eq!(
-        parse_errors(&static_manifest("spa = true\n")),
-        vec![ManifestError::MissingKey {
-            path: "route[0].static.root".to_string(),
+        parse_errors(&static_file("")),
+        vec![ManifestError::StaticRootMissing {
+            at: Position::at(1, 1),
         }]
     );
     assert_eq!(
-        parse_errors(
-            "version = 1\n\n[[route]]\nname = \"site\"\n\n[route.static]\nroot = 'public'\n"
-        ),
-        vec![ManifestError::MissingKey {
-            path: "route[0].path".to_string(),
-        }],
-        "a static route with no `path` can never be reached"
+        parse_errors(&static_file(""))
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![r#"1:1: a `static` block needs `root`: write `root "public"`"#]
+    );
+
+    // A mount that names no prefix can never be reached — the retired suite's
+    // "a static route with no `path`", on the construct that replaced it.
+    assert_eq!(
+        errors_of("static \"\" {\n    root \"public\"\n}\n"),
+        vec![ManifestError::StaticMountPrefixInvalid {
+            location: Location::Mount {
+                index: 0,
+                prefix: String::new(),
+            },
+            rule: "must start with /",
+        }]
+    );
+    assert_eq!(
+        errors_of("static \"\" {\n    root \"public\"\n}\n")[0].to_string(),
+        r#"mount "" (index 0): must start with /"#
+    );
+
+    // Neither half of the header may be omitted: the prefix is a string and
+    // the block is a block.
+    assert_eq!(
+        parse_errors("static {\n    root \"public\"\n}\n")
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![r#"1:8: expected a `"…"` prefix, found `{`"#]
+    );
+    assert_eq!(
+        parse_errors("static \"/\" \"public\"\n")
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["1:12: expected `{`, found a string"]
     );
 }
 
 #[test]
-fn an_unknown_static_key_is_an_error_not_a_silent_drop() {
-    // The design names this one: `[route.static]` is never a grant table.
-    let errors = parse_errors(&static_manifest(
-        "root = 'public'\nqueries = ['SELECT 1']\n",
-    ));
-    assert_eq!(
-        errors,
-        vec![ManifestError::UnknownKey {
-            path: "route[0].static.queries".to_string(),
-        }]
-    );
-    assert_eq!(
-        errors[0].to_string(),
-        "route[0].static.queries: unknown key"
-    );
-
-    assert_eq!(
-        parse_errors(&static_manifest(
-            "root = 'public'\n[route.static.tables]\nx = { select = '*' }\n"
-        )),
-        vec![ManifestError::UnknownKey {
-            path: "route[0].static.tables".to_string(),
-        }]
-    );
+fn an_unknown_static_directive_is_refused_not_dropped() {
+    // The design names this one: a `static` block is never a grant table, and
+    // its four directives are the whole list.
+    for (body, word) in [
+        ("queries \"SELECT 1\"\n", "queries"),
+        ("tables\n", "tables"),
+        ("listen \"run.sock\"\n", "listen"),
+    ] {
+        assert_eq!(
+            lines(body),
+            vec![format!(
+                "2:1: `{word}` is not a directive here; a `static` block takes \
+                 `root`, `index`, `fallback` and `immutable`"
+            )],
+            "{body}"
+        );
+    }
 }
 
 #[test]
-fn every_static_key_has_exactly_one_type() {
+fn every_static_directive_takes_one_string() {
+    // A value that is not a `"…"` string is named by its class, never coerced
+    // and never echoed (§18).
     let cases = [
+        ("root 1\n", "2:6", "a `\"…\"` path", "`1`"),
+        ("root 'public'\n", "2:6", "a `\"…\"` path", "a raw string"),
         (
-            "root = 1\n",
-            "route[0].static.root",
-            "a string",
-            "an integer",
+            "root \"public\"\nindex true\n",
+            "3:7",
+            "a `\"…\"` path",
+            "`true`",
         ),
         (
-            "root = 'public'\nindex = true\n",
-            "route[0].static.index",
-            "a string",
-            "a boolean",
+            "root \"public\"\nfallback 1\n",
+            "3:10",
+            "a `\"…\"` path",
+            "`1`",
         ),
         (
-            "root = 'public'\nspa = 'yes'\n",
-            "route[0].static.spa",
-            "a boolean",
-            "a string",
-        ),
-        (
-            "root = 'public'\nimmutable = '/assets/*'\n",
-            "route[0].static.immutable",
-            "an array",
-            "a string",
-        ),
-        (
-            "root = 'public'\nimmutable = ['/a', 2]\n",
-            "route[0].static.immutable[1]",
-            "a string",
-            "an integer",
+            "root \"public\"\nimmutable 1\n",
+            "3:11",
+            "a `\"…\"` pattern",
+            "`1`",
         ),
     ];
-    for (block, path, expected, found) in cases {
+    for (body, at, expected, found) in cases {
         assert_eq!(
-            parse_errors(&static_manifest(block)),
-            vec![ManifestError::WrongType {
-                path: path.to_string(),
-                expected,
-                found,
-            }],
-            "{block}"
+            lines(body),
+            vec![format!("{at}: expected {expected}, found {found}")],
+            "{body}"
         );
     }
 
-    // The block itself is a table, never a bare path.
+    // A second, non-string item is the list rule, and the sentence names the
+    // comma to delete rather than inventing a type for the value.
     assert_eq!(
-        parse_errors(
-            "version = 1\n\n[[route]]\nname = \"site\"\npath = ['.*']\nstatic = \"public\"\n"
-        ),
-        vec![ManifestError::WrongType {
-            path: "route[0].static".to_string(),
-            expected: "a table",
-            found: "a string",
-        }]
+        lines("root \"public\"\nimmutable \"/a\", 2\n"),
+        vec!["3:15: a list has no trailing comma; delete the `,`"]
+    );
+
+    // One item is a list, so the single-pattern spelling is legal.
+    assert_eq!(
+        policy(&accepted("root \"public\"\nimmutable \"/assets/*\"\n")).immutable,
+        ["/assets/*"]
     );
 }
 
@@ -333,56 +360,60 @@ fn every_static_key_has_exactly_one_type() {
 fn every_bad_index_names_the_rule_it_breaks() {
     let cases = [
         (
-            r#"index = """#,
+            "index \"\"\n",
             index_invalid("", "must be one or more segments"),
         ),
         (
-            r#"index = "a//b""#,
+            "index \"a//b\"\n",
             index_invalid("a//b", "must be one or more segments"),
         ),
         (
-            r#"index = "a/""#,
+            "index \"a/\"\n",
             index_invalid("a/", "must be one or more segments"),
         ),
         (
-            r#"index = "/index.html""#,
+            "index \"/index.html\"\n",
             index_invalid("/index.html", "must be a relative path"),
         ),
         (
-            r#"index = "../index.html""#,
+            "index \"../index.html\"\n",
             index_invalid("../index.html", "must not contain .."),
         ),
         (
-            r#"index = ".env""#,
+            "index \".env\"\n",
             index_invalid(".env", "must not contain a dotfile segment"),
         ),
         (
-            r#"index = "docs/.env""#,
+            "index \"docs/.env\"\n",
             index_invalid("docs/.env", "must not contain a dotfile segment"),
         ),
         (
-            r#"index = 'a\b'"#,
+            "index \"a\\\\b\"\n",
             index_invalid(r"a\b", r"must not contain \"),
         ),
         (
-            r#"index = "a\u0000b""#,
+            "index \"a\u{0}b\"\n",
             index_invalid("a\u{0}b", "must not contain a control byte"),
         ),
+        (
+            "index \"a\u{1f}b\"\n",
+            index_invalid("a\u{1f}b", "must not contain a control byte"),
+        ),
     ];
-    for (block, expected) in cases {
+    for (body, expected) in cases {
         assert_eq!(
-            violations(&format!("root = 'public'\n{block}\n")),
+            refusals(&format!("root \"public\"\n{body}")),
             vec![expected],
-            "{block}"
+            "{body}"
         );
     }
     assert_eq!(
-        violations("root = 'public'\nindex = '.env'\n")[0].to_string(),
-        r#"route "site" (index 0): static index ".env": must not contain a dotfile segment"#
+        lines("root \"public\"\nindex \".env\"\n")[0],
+        r#"mount "/" (index 0): static index ".env": must not contain a dotfile segment"#
     );
 
     for index in ["index.html", "shell.html", "docs/index.html", "a b.html"] {
-        let manifest = accepted(&format!("root = 'public'\nindex = '{index}'\n"));
+        let manifest = accepted(&format!("root \"public\"\nindex \"{index}\"\n"));
         assert_eq!(policy(&manifest).index, index);
     }
 }
@@ -390,54 +421,58 @@ fn every_bad_index_names_the_rule_it_breaks() {
 #[test]
 fn every_bad_immutable_pattern_names_the_rule_it_breaks() {
     let longest = format!("/{}", "a".repeat(257));
-    let thirty_three: Vec<String> = (0..33).map(|at| format!("'/a{at}'")).collect();
+    let thirty_three: Vec<String> = (0..33).map(|at| format!("\"/a{at}\"")).collect();
     let cases = [
         (
-            "immutable = ['assets/*']\n".to_string(),
+            "immutable \"assets/*\"\n".to_string(),
             bad_pattern("assets/*", "must start with /"),
         ),
         (
-            "immutable = ['']\n".to_string(),
+            "immutable \"\"\n".to_string(),
             bad_pattern("", "must start with /"),
         ),
         (
-            "immutable = ['/assets/../*']\n".to_string(),
+            "immutable \"/assets/../*\"\n".to_string(),
             bad_pattern("/assets/../*", "must not contain .."),
         ),
         (
-            r#"immutable = ["/assets/\u0000*"]"#.to_string(),
+            "immutable \"/assets/\u{0}*\"\n".to_string(),
             bad_pattern("/assets/\u{0}*", "must not contain a control byte"),
         ),
         (
-            format!("immutable = ['{longest}']\n"),
+            "immutable \"/assets/\u{1f}*\"\n".to_string(),
+            bad_pattern("/assets/\u{1f}*", "must not contain a control byte"),
+        ),
+        (
+            format!("immutable \"{longest}\"\n"),
             bad_pattern(&longest, "at most 256 bytes"),
         ),
         (
-            format!("immutable = [{}]\n", thirty_three.join(", ")),
+            format!("immutable {}\n", thirty_three.join(", ")),
             bad_pattern("/a32", "at most 32 patterns"),
         ),
     ];
-    for (block, expected) in cases {
+    for (body, expected) in cases {
         assert_eq!(
-            violations(&format!("root = 'public'\n{block}")),
+            refusals(&format!("root \"public\"\n{body}")),
             vec![expected],
-            "{block}"
+            "{body}"
         );
     }
     assert_eq!(
-        violations("root = 'public'\nimmutable = ['assets/*']\n")[0].to_string(),
-        r#"route "site" (index 0): static immutable "assets/*": must start with /"#
+        lines("root \"public\"\nimmutable \"assets/*\"\n")[0],
+        r#"mount "/" (index 0): static immutable "assets/*": must start with /"#
     );
 
     // A literal pattern is legal: the design's fixture D caches `/index.html`
     // itself, and the page documents `*` as the only metacharacter. Both limits
     // are inclusive.
-    let manifest = accepted("root = 'public'\nimmutable = ['/index.html', '/assets/*/*']\n");
+    let manifest = accepted("root \"public\"\nimmutable \"/index.html\", \"/assets/*/*\"\n");
     assert_eq!(policy(&manifest).immutable, ["/index.html", "/assets/*/*"]);
-    let boundary: Vec<String> = (0..32).map(|at| format!("'/a{at}'")).collect();
+    let boundary: Vec<String> = (0..32).map(|at| format!("\"/a{at}\"")).collect();
     assert_eq!(
         policy(&accepted(&format!(
-            "root = 'public'\nimmutable = [{}]\n",
+            "root \"public\"\nimmutable {}\n",
             boundary.join(", ")
         )))
         .immutable
@@ -447,7 +482,7 @@ fn every_bad_immutable_pattern_names_the_rule_it_breaks() {
     let longest = format!("/{}", "a".repeat(255));
     assert_eq!(
         policy(&accepted(&format!(
-            "root = 'public'\nimmutable = ['{longest}']\n"
+            "root \"public\"\nimmutable \"{longest}\"\n"
         )))
         .immutable,
         [longest]
@@ -455,68 +490,110 @@ fn every_bad_immutable_pattern_names_the_rule_it_breaks() {
 }
 
 #[test]
-fn a_spa_route_refuses_each_declaration_that_could_never_run() {
-    let spa_why = "spa = true never reaches the app";
-    let ingress = route_manifest(
-        "",
-        "root = 'public'\nspa = true\n\n[route.ingress]\nbody = \"json\"\n",
-    );
-    assert_eq!(errors_of(&ingress), vec![dead("[route.ingress]", spa_why)]);
-    assert_eq!(
-        errors_of(&ingress)[0].to_string(),
-        r#"route "site" (index 0): spa = true never reaches the app; [route.ingress] can never run"#
-    );
+fn a_fallback_is_its_own_file_and_a_dotfile_one_is_refused() {
+    // The `spa` key's replacement, both directions (§9.3): the file that
+    // answers a miss is a different file from the directory's index …
+    let deep = accepted("root \"public\"\nindex \"index.html\"\nfallback \"shell.html\"\n");
+    assert_eq!(policy(&deep).index, "index.html");
+    assert_eq!(policy(&deep).fallback.as_deref(), Some("shell.html"));
 
-    for (route_keys, block, key) in [
+    // … and it is a *file name*, so it carries the index's rules plus the one
+    // that matters: a dotfile segment is refused, because the fallback answers
+    // a request the request-path check never sees.
+    for (fallback, expected) in [
+        ("", fallback_invalid("", "must be one or more segments")),
         (
-            "prefork = true\n",
-            "root = 'public'\nspa = true\n",
-            "prefork = true",
+            "a//b",
+            fallback_invalid("a//b", "must be one or more segments"),
         ),
         (
-            "groups = [\"session\"]\n",
-            "root = 'public'\nspa = true\n",
-            "groups",
+            ".env",
+            fallback_invalid(".env", "must not contain a dotfile segment"),
+        ),
+        (
+            "docs/.env",
+            fallback_invalid("docs/.env", "must not contain a dotfile segment"),
+        ),
+        (
+            "/shell.html",
+            fallback_invalid("/shell.html", "must be a relative path"),
+        ),
+        (
+            "../shell.html",
+            fallback_invalid("../shell.html", "must not contain .."),
+        ),
+        ("a\\\\b", fallback_invalid(r"a\b", r"must not contain \")),
+        (
+            "a\u{0}b",
+            fallback_invalid("a\u{0}b", "must not contain a control byte"),
+        ),
+        (
+            "a\u{1f}b",
+            fallback_invalid("a\u{1f}b", "must not contain a control byte"),
         ),
     ] {
-        let group = "version = 1\n\n[proxy.db]\nprotocol = \"postgresql\"\n\
-                     input = { url = \"DATABASE_URL\" }\n\n[group.session.db]\nqueries = []\n\n\
-                     [[route]]\nname = \"site\"\npath = ['.*']\n";
-        let source = format!("{group}{route_keys}\n[route.static]\n{block}");
-        assert_eq!(errors_of(&source), vec![dead(key, spa_why)], "{key}");
+        assert_eq!(
+            refusals(&format!("root \".\"\nfallback \"{fallback}\"\n")),
+            vec![expected],
+            "{fallback}"
+        );
     }
+    assert_eq!(
+        lines("root \".\"\nfallback \".env\"\n")[0],
+        r#"mount "/" (index 0): static fallback ".env": must not contain a dotfile segment"#
+    );
 
-    // A grant is a dead declaration too, and the message names its table.
-    let grant = "version = 1\n\n[proxy.db]\nprotocol = \"postgresql\"\n\
-                 input = { url = \"DATABASE_URL\" }\n\n[[route]]\nname = \"site\"\npath = ['.*']\n\n\
-                 [route.static]\nroot = 'public'\nspa = true\n\n[route.db]\nqueries = []\n";
-    assert_eq!(errors_of(grant), vec![dead("[route.db]", spa_why)]);
+    // A dot-directory `root` stays legal — the author chose that directory, and
+    // the resolver still checks the request path (§9.1) — while the same
+    // spelling as an `index` is refused.
+    let dotted = accepted("root \".output\"\nfallback \"index.html\"\n");
+    assert_eq!(policy(&dotted).root, ".output");
+    assert_eq!(
+        refusals("root \".output\"\nindex \".env\"\n"),
+        vec![index_invalid(".env", "must not contain a dotfile segment")]
+    );
+
+    // A fallback that *is* the index is the page's own shape.
+    let page = accepted("root \"public\"\nindex \"index.html\"\nfallback \"index.html\"\n");
+    assert_eq!(
+        policy(&page).fallback.as_deref(),
+        Some(policy(&page).index.as_str())
+    );
 }
 
 #[test]
-fn only_a_route_that_can_reach_the_app_may_declare_them() {
-    // No app in the manifest: the same declarations are dead, for the other
-    // documented reason.
-    let ingress = route_manifest("", "root = 'public'\n\n[route.ingress]\nbody = \"json\"\n");
-    assert_eq!(
-        errors_of(&ingress),
-        vec![dead("[route.ingress]", "the manifest declares no app")]
-    );
+fn a_mount_that_never_reaches_the_app_may_not_declare_them() {
+    // The retired suite refused an ingress, a `prefork`, an inline group and a
+    // grant on a static route. A mount has no route, so the same four
+    // declarations are refused one step earlier, by the parser's own list.
+    for (body, word) in [
+        ("body json\n", "body"),
+        ("prefork\n", "prefork"),
+        ("use session\n", "use"),
+        ("postgres {\n", "postgres"),
+    ] {
+        assert_eq!(
+            lines(body),
+            vec![format!(
+                "2:1: `{word}` is not a directive here; a `static` block takes \
+                 `root`, `index`, `fallback` and `immutable`"
+            )],
+            "{body}"
+        );
+    }
 
-    // The front controller: one `.*` route, no `spa`, the app declared — every
-    // declaration is live and validates.
-    let source = "version = 1\napp = \"app:app\"\n\n\
-                  [proxy.db]\nprotocol = \"postgresql\"\ninput = { url = \"DATABASE_URL\" }\n\n\
-                  [group.session.db]\nqueries = []\n\n\
-                  [[route]]\nname = \"site\"\npath = ['.*']\nprefork = true\ngroups = [\"session\"]\n\n\
-                  [route.static]\nroot = 'public'\n\n\
-                  [route.ingress]\nbody = \"json\"\n\n\
-                  [route.db]\nqueries = []\n";
-    let (manifest, warnings) = Manifest::parse_and_validate(source, UidLayout::DEFAULT_BASE)
-        .expect("the front controller boots");
+    // The other side of the same rule: on the view that does reach the app,
+    // every one of them is live and the whole file validates.
+    let source = "postgres $DATABASE_URL\n\n\
+                  trait session {\n    postgres {\n        select products\n    }\n}\n\n\
+                  static \"/\" {\n    root \"public\"\n}\n\n\
+                  view site \"/*\" {\n    use session\n    body none\n    prefork\n    \
+                  postgres {\n        select products\n    }\n}\n";
+    let (manifest, warnings) = Manifest::parse_blastfile(source, UidLayout::DEFAULT_BASE)
+        .expect("the deployed file boots");
     assert_eq!(warnings, vec![]);
+    assert!(policy(&manifest).fallback.is_none());
     let route = manifest.route(0).expect("route 0");
-    assert!(route.static_policy().expect("policy").fallback.is_none());
     assert!(route.ingress().is_some());
     assert!(route.prefork());
     assert_eq!(route.groups().len(), 1);
@@ -526,60 +603,62 @@ fn only_a_route_that_can_reach_the_app_may_declare_them() {
 
 #[test]
 fn only_a_manifest_whose_every_route_is_static_needs_no_app() {
-    let page = Manifest::parse_and_validate(PAGE, UidLayout::DEFAULT_BASE)
+    let page = Manifest::parse_blastfile(PAGE, UidLayout::DEFAULT_BASE)
         .expect("the page boots")
         .0;
     assert!(page.is_all_static());
 
-    // An `app` makes it not all-static even when every route serves files: the
-    // app still answers what the routes do not.
-    let with_app = Manifest::parse_and_validate(
-        &format!("app = \"app:app\"\n{PAGE}"),
+    // A callable makes it not all-static even when every mount serves files:
+    // the app still answers what the mounts do not. `app "shop"` is only the
+    // application's *name* (§4.3); the callable is `entrypoint python`.
+    let with_app = Manifest::parse_blastfile(
+        &format!("entrypoint python \"shop.wsgi:application\"\n\n{PAGE}"),
         UidLayout::DEFAULT_BASE,
     )
-    .expect("the page plus an app boots")
+    .expect("the page plus a callable boots")
     .0;
+    assert_eq!(with_app.app(), Some("shop.wsgi:application"));
     assert!(!with_app.is_all_static());
 
-    // A static route next to a forwarding route, no `app`: the manifest is not
+    // A mount next to a forwarding view, no `app`: the manifest is not
     // all-static, so the boot still needs `BLASTIT_APP` (that check is the
-    // CLI's, `MB.2.6`), and the static route cannot reach an app either.
-    let mixed = "version = 1\n\n[[route]]\nname = \"site\"\npath = ['/assets/.*']\n\n\
-                 [route.static]\nroot = 'public'\n\n\
-                 [[route]]\nname = \"app\"\npath = ['.*']\n";
-    let (manifest, _) = Manifest::parse_and_validate(mixed, UidLayout::DEFAULT_BASE)
+    // CLI's, `MB.2.6`), and the mount cannot reach an app either.
+    let mixed = "static \"/assets\" {\n    root \"public/assets\"\n}\n\n\
+                 view app \"/*\" {\n    body none\n}\n";
+    let (manifest, _) = Manifest::parse_blastfile(mixed, UidLayout::DEFAULT_BASE)
         .expect("the mixed manifest validates");
     assert_eq!(manifest.app(), None);
-    assert!(!manifest.is_all_static(), "one route is not static");
+    assert_eq!(manifest.mounts().len(), 1);
+    assert_eq!(manifest.routes().len(), 1);
+    assert!(!manifest.is_all_static(), "one view is not static");
 
-    // Neither an empty document nor an app-only one is a static site.
+    // Neither an empty file nor a name-only one is a static site.
     assert!(
-        !Manifest::from_toml_str("version = 1\n")
-            .expect("empty parses")
+        !Manifest::from_blastfile_str("")
+            .expect("an empty file parses")
             .is_all_static()
     );
-    let app_only = "version = 1\n\n[[route]]\nname = \"app\"\npath = ['.*']\n\
-                    [route.ingress]\nbody = \"json\"\n";
     assert!(
-        !Manifest::from_toml_str(app_only)
-            .expect("app only parses")
+        !Manifest::from_blastfile_str("app \"shop\"\n")
+            .expect("a name-only file parses")
             .is_all_static()
     );
 }
 
 #[test]
-fn static_is_a_reserved_route_key_even_when_a_proxy_of_that_name_exists() {
-    // `[proxy.static]` stays legal to declare, but a route's `static` key is
-    // always the block, so the proxy can never be granted.
-    let source = "version = 1\napp = \"app:app\"\n\n\
-                  [proxy.static]\nprotocol = \"postgresql\"\ninput = { url = \"STATIC_URL\" }\n\n\
-                  [[route]]\nname = \"site\"\npath = ['.*']\nprefork = true\n\n\
-                  [route.static]\nroot = 'public'\n";
+fn a_store_named_static_can_never_be_granted_by_a_mount() {
+    // `postgres static $STATIC_URL` stays legal to declare, but the `static`
+    // keyword is a mount, so the store can never be granted — and the boot says
+    // so once, as an ungranted store.
+    let source = "postgres static $STATIC_URL\n\n\
+                  static \"/\" {\n    root \"public\"\n}\n\n\
+                  view site \"/*\" {\n    body none\n    prefork\n}\n";
     let (manifest, warnings) =
-        Manifest::parse_and_validate(source, UidLayout::DEFAULT_BASE).expect("the manifest boots");
-    let route = manifest.route(0).expect("route 0");
-    assert!(route.static_policy().is_some(), "the block, not a grant");
-    assert!(route.grants().is_empty());
+        Manifest::parse_blastfile(source, UidLayout::DEFAULT_BASE).expect("the manifest boots");
+    assert!(manifest.proxy("static").is_some(), "the store is declared");
+    assert_eq!(manifest.mounts().len(), 1, "the keyword is a mount");
+    assert_eq!(policy(&manifest).root, "public");
+    assert!(manifest.route(0).expect("route 0").grants().is_empty());
     assert_eq!(
         warnings,
         vec![ManifestWarning::UngrantedProxy {
@@ -590,11 +669,11 @@ fn static_is_a_reserved_route_key_even_when_a_proxy_of_that_name_exists() {
 
 #[test]
 fn validation_never_touches_the_filesystem() {
-    // The split the design requires: the page's block validates from a
+    // The split the design requires: the page's mount validates from a
     // directory with no `public/`, and the explicit probe then refuses it.
     let dir = Scratch::new("split");
     let (manifest, _) =
-        Manifest::parse_and_validate(PAGE, UidLayout::DEFAULT_BASE).expect("the page validates");
+        Manifest::parse_blastfile(PAGE, UidLayout::DEFAULT_BASE).expect("the page validates");
     let errors = manifest
         .check_static_roots(&dir.path)
         .expect_err("no public/ here");
@@ -617,16 +696,16 @@ fn a_listable_root_is_accepted_while_its_index_need_not_exist_yet() {
     let dir = Scratch::new("accept");
     std::fs::create_dir(dir.join("public")).expect("mkdir");
 
-    // The design audits the root only: a missing `index.html` with `spa = false`
-    // is a `404` at request time, never a boot error.
-    let manifest = accepted("root = 'public'\nindex = 'shell.html'\nspa = false\n");
+    // The design audits the root only: a missing `index.html` is a `404` at
+    // request time, never a boot error.
+    let manifest = accepted("root \"public\"\nindex \"shell.html\"\n");
     assert_eq!(manifest.check_static_roots(&dir.path), Ok(()));
     assert!(!dir.join("public/shell.html").exists());
 
     // A symlinked root is what a `current` deployment looks like, and symlinks
     // are followed.
     std::os::unix::fs::symlink(dir.join("public"), dir.join("current")).expect("symlink");
-    let manifest = accepted("root = 'current'\n");
+    let manifest = accepted("root \"current\"\n");
     assert_eq!(manifest.check_static_roots(&dir.path), Ok(()));
     assert_eq!(
         manifest.static_roots(&dir.path),
@@ -644,7 +723,7 @@ fn every_unusable_root_is_named_and_none_stops_the_list() {
     let source = "static \"/a\" {\n    root \"ok\"\n}\n\n\
                   static \"/b\" {\n    root \"afile\"\n}\n\n\
                   static \"/c\" {\n    root \"gone\"\n}\n";
-    let manifest = Manifest::from_blastfile_str(source).expect("the Blastfile parses");
+    let manifest = Manifest::from_blastfile_str(source).expect("the file parses");
     assert_eq!(
         manifest.static_roots(&dir.path),
         vec![
@@ -692,7 +771,7 @@ fn an_unlistable_root_is_permission_denied() {
     std::fs::create_dir(&root).expect("mkdir");
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).expect("chmod");
 
-    let manifest = accepted("root = 'locked'\n");
+    let manifest = accepted("root \"locked\"\n");
     let errors = manifest
         .check_static_roots(&dir.path)
         .expect_err("an unlistable root cannot be served");
