@@ -15,7 +15,7 @@ updated: "2026-11-14T19:57"
 
 # Goal
 
-Make Blastit first-class for coding agents: an agent-consumable publication (llms.txt, llms-full.txt, per-page raw markdown), a portable **manifest-writing skill**, and plugins/MCP tools for Claude Code, OpenCode, Codex and Junie — so an agent can adapt an app, fill `blastit.toml` and verify completeness without reading the HTML site or guessing at diagnostics.
+Make Blastit first-class for coding agents: an agent-consumable publication (llms.txt, llms-full.txt, per-page raw markdown), a portable **manifest-writing skill**, and plugins/MCP tools for Claude Code, OpenCode, Codex and Junie — so an agent can adapt an app, fill a `Blastfile` and verify completeness without reading the HTML site or guessing at diagnostics.
 
 # Context
 
