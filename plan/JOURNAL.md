@@ -2366,3 +2366,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T21:30 [MB.21.4.10] (lead) status ready -> review
 - 2026-11-16T21:41 [MB.21.4.10] (lead) reviewer PASS (round 2). Two MINORs recorded: (1) the DB-free _table_snippet tests run in CI's pytest job (.github/workflows/ci.yml:589), not in a make target —
 - 2026-11-16T21:41 [MB.21.4.10] (lead) status review -> done
+- 2026-11-16T21:41 [MB.21.4.10] (lead) commit 335f564
+- 2026-11-16T21:45 [MB.21.4] (lead) status ready -> done

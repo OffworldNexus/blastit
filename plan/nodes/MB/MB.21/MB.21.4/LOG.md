@@ -31,3 +31,7 @@ MB.21.4.10 created (⇠MB.21.4.5.6, a4): the last user-facing retired spellings 
 ## 2026-11-16T19:01 [planner]
 
 MB.21.4.10 amended twice before dispatch: (1) it renames the report key table_grants.toml to table_grants.blastfile per the owner rule, (2) measured surface folded in - TableGrants::to_toml becomes to_blastfile emitting select/insert/update/delete directives with a view/trait locator comment, audit.rs producers and 7 assertions, fold.py and pytest_plugin.py consumers, protected critical_policy_surface.rs explicitly authorized, ADR-0012 records the supersession of that single ADR-0003 field name; the BLOCK_CHECKS toml entry in runnable_docs harness is a fence language, not a field, and stays.
+
+## 2026-11-16T21:45 [lead]
+
+status ready -> done

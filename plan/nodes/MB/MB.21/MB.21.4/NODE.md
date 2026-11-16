@@ -2,7 +2,7 @@
 id: MB.21.4
 title: "Cut the product over to Blastfile: discovery, runtime parity, check/--learn, Python, Makefile, e2e, and the erasure of the retired reader"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.21.3]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T02:16"
+updated: "2026-11-16T21:45"
 ---
 
 # Goal

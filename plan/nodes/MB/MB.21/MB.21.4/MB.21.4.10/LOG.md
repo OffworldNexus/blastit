@@ -75,3 +75,7 @@ reviewer PASS (round 2). Two MINORs recorded: (1) the DB-free _table_snippet tes
 ## 2026-11-16T21:41 [lead]
 
 status review -> done
+
+## 2026-11-16T21:41 [lead]
+
+commit 335f564
