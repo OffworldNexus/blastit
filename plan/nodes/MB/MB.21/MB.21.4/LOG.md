@@ -19,3 +19,7 @@ MB.21.4.1 closed at a3ac338 after 5 attempts and 5 sessions (this leaf grew into
 ## 2026-11-16T14:44 [planner]
 
 flake now owned by MB.21.4.8: dev_boots_five_unprivileged_roles_and_strips_secrets read 200 where its own dev log says 413 unmatched, measured 2/4 full-gate runs on this host (plus one reviewer run); the protected 413 assertion stays untouched and the test client's response pairing is bounded after MB.21.4.4.
+
+## 2026-11-16T16:30 [planner]
+
+the residual dev-suite flake is a product race owned by MB.21.4.9: an AllowEmptyOnly request is dispatched from its head (scheduler.rs:1487/:1507) and blastit-view starts the app on REQ_HEAD (lib.rs:474/:501), so a body byte races 413 against the app's 200 (1 ms gap: 5/5 wrong); 4.8's client fix landed and its 413 assertion is untouched.

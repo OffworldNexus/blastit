@@ -2270,3 +2270,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T16:09 [MB.21] (lead) HOST CONDITION for the epic gate: the machine is at ~91% MemTotal used by another project, above BLASTIT_MEM_HIGH_WATERMARK=85, so every blastit-dev-booting cas
 - 2026-11-16T16:28 [MB.21.4.8] (lead) evidence: the client defect is real and fixed (regression test fails on the old reader), 20/20 under load; the residual 200-vs-413 is a PRODUCT race, hypothesis
 - 2026-11-16T16:28 [MB.21.4.8] (lead) status active -> done
+- 2026-11-16T16:30 [MB.21.4.9] (planner) created (task) Refuse an AllowEmptyOnly request from its head and never dispatch one before REQ_END: close the 413-vs-200 race behind the dev suite's flake
+- 2026-11-16T16:30 [MB.21.4.9] (planner) edited fields
+- 2026-11-16T16:30 [MB.21.4.9] (planner) why this leaf: 4.8 measured the residual 200-vs-413 as a product race, not a client defect — plan_request_body early-returns AllowEmptyOnly for a route with no 
+- 2026-11-16T16:30 [MB.21.4] (planner) the residual dev-suite flake is a product race owned by MB.21.4.9: an AllowEmptyOnly request is dispatched from its head (scheduler.rs:1487/:1507) and blastit-v
+- 2026-11-16T16:30 [MB.21.4.9] (lead) status ready -> active
+- 2026-11-16T16:30 [MB.21.4.9] (lead) attempt 1/4 started
+- 2026-11-16T16:30 [MB.21.4.9] (lead) base eeccd9f
