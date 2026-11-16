@@ -32,7 +32,7 @@ use crate::py::Python;
 use crate::stage0;
 use crate::stage1;
 
-/// The three command shapes `0.1.1` exposes (§1.1).
+/// The four command shapes `0.2.0` exposes (§1.1).
 ///
 /// A subcommand is the *first* argument; everything else is the unchanged
 /// stage-0/stage-1/`--role` grammar the process tree uses internally.
@@ -44,6 +44,8 @@ pub enum Command {
     Dev,
     /// `blastit check` and its exact alias `blastit test` (`R3`).
     Check,
+    /// `blastit fmt`: rewrite a `Blastfile` in the canonical layout (`R19`).
+    Fmt,
 }
 
 impl Command {
@@ -52,6 +54,7 @@ impl Command {
         match argv.first().map(String::as_str) {
             Some("dev") => Self::Dev,
             Some("check" | "test") => Self::Check,
+            Some("fmt") => Self::Fmt,
             _ => Self::Serve,
         }
     }
@@ -79,6 +82,15 @@ pub struct CheckOptions {
     pub dry_run: bool,
     /// Everything after `--`, passed to `pytest -q` verbatim.
     pub pytest_args: Vec<String>,
+}
+
+/// `blastit fmt`'s accepted arguments, validated (`R19`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FmtOptions {
+    /// `--check`: change nothing, and report a file that is not canonical.
+    pub check: bool,
+    /// The file to format; `None` means `./Blastfile`, or `BLASTIT_MANIFEST`.
+    pub path: Option<std::path::PathBuf>,
 }
 
 /// What a subcommand's parser decided: print its help, or run it.
@@ -139,6 +151,7 @@ usage:
                                             unprivileged single-UID simulation
   blastit check [--json] [--learn [--dry-run]] [-- ARGS...]
                                             audit a pytest suite (alias: test)
+  blastit fmt [--check] [PATH]              rewrite a Blastfile in canonical layout
   blastit --stage=1 --config-fd=N \\
           [--dbproxy-pid=P --dbproxy-events-fd=N \\
            --dbproxy-stdout-fd=N --dbproxy-stderr-fd=N]   stage 1
@@ -171,6 +184,22 @@ usage: blastit check [--json] [--learn [--dry-run]] [-- ARGS...]
 
 Exit codes: 0 clean, 1 completeness findings, 2 CLI/config error, 3 pytest
 failed (including exit 5, no tests collected).";
+
+/// `blastit fmt --help` (§14.4).
+const FMT_USAGE: &str = "\
+usage: blastit fmt [--check] [PATH]
+
+  --check       change nothing; name every file that is not in canonical
+                layout and exit 1
+  PATH          the file to format (default ./Blastfile, or BLASTIT_MANIFEST)
+  -h, --help    print this help
+
+`blastit fmt` rewrites the file in the canonical layout: one directive per line,
+four spaces per level, one blank line between sections. Comments are kept, and
+without --check the rewrite is atomic and keeps the file's mode.
+
+Exit codes: 0 clean or rewritten, 1 --check found a file that is not canonical,
+2 the file could not be read, parsed or written.";
 
 /// Runs the role the command line names, in the installation `host` describes.
 ///
@@ -210,6 +239,17 @@ pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
                 CHECK_FAILURE
             }
         },
+        Command::Fmt => match parse_fmt(&argv[1..]) {
+            Ok(Subcommand::Help) => {
+                println!("{FMT_USAGE}");
+                SUCCESS
+            }
+            Ok(Subcommand::Run(options)) => run_fmt(&options),
+            Err(message) => {
+                eprintln!("blastit fmt: {message}");
+                FMT_FAILURE
+            }
+        },
         Command::Serve => {
             // E1: the usage text lists the presets with their one-line
             // descriptions, which is the only way to find out what `--preset`
@@ -241,6 +281,12 @@ const SUCCESS: u8 = 0;
 /// `blastit check`'s CLI failure, distinct from a finding (`1`) and pytest
 /// (`3`) (`R4`).
 const CHECK_FAILURE: u8 = 2;
+
+/// `blastit fmt`'s "could not read, parse or write" failure (`R19`).
+const FMT_FAILURE: u8 = 2;
+
+/// `blastit fmt --check`'s "this file is not in canonical layout" (`R19`).
+const FMT_NOT_CANONICAL: u8 = 1;
 
 /// Parses and validates `blastit dev`'s arguments (`R2`).
 ///
@@ -373,6 +419,202 @@ fn parse_check(arguments: &[String]) -> Result<Subcommand<CheckOptions>, String>
         return Err("`--dry-run` is only valid with `--learn`".to_string());
     }
     Ok(Subcommand::Run(options))
+}
+
+/// Parses and validates `blastit fmt` (`R19`).
+///
+/// One file per invocation, so a second positional argument is a mistake named
+/// as one. `--help` wins wherever it appears, which is what makes
+/// `blastit fmt --check --help` print the help rather than format anything.
+///
+/// # Errors
+///
+/// A one-line message naming the argument and the fix. Every rejection is
+/// `exit 2` with nothing on stdout.
+fn parse_fmt(arguments: &[String]) -> Result<Subcommand<FmtOptions>, String> {
+    let mut check = false;
+    let mut path = None;
+    for argument in arguments {
+        match argument.as_str() {
+            "-h" | "--help" => return Ok(Subcommand::Help),
+            "--check" => check = true,
+            "--manifest" => {
+                return Err(
+                    "`--manifest` is not accepted: put `Blastfile` in the working \
+                     directory, or set BLASTIT_MANIFEST"
+                        .to_string(),
+                );
+            }
+            "--preset" => {
+                return Err(
+                    "`--preset` is only for `blastit` (production); `blastit fmt` \
+                     ignores BLASTIT_PRESET"
+                        .to_string(),
+                );
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown argument `{other}`"));
+            }
+            other => {
+                if path.is_some() {
+                    return Err(format!(
+                        "`{other}` is a second path: `blastit fmt` formats one file"
+                    ));
+                }
+                path = Some(std::path::PathBuf::from(other));
+            }
+        }
+    }
+    Ok(Subcommand::Run(FmtOptions { check, path }))
+}
+
+/// The file `blastit fmt` formats: `PATH`, else `BLASTIT_MANIFEST`, else
+/// `./Blastfile` (§15.1).
+///
+/// There is no upward search and no format detection: a path that holds
+/// anything but a `Blastfile` is an ordinary syntax error at its first
+/// offending byte.
+///
+/// # Errors
+///
+/// A set-but-empty `BLASTIT_MANIFEST`, which is a mistake rather than a
+/// fallback, and a value that is not UTF-8.
+fn fmt_path(requested: Option<&std::path::Path>) -> Result<std::path::PathBuf, String> {
+    if let Some(path) = requested {
+        return Ok(path.to_path_buf());
+    }
+    match std::env::var_os("BLASTIT_MANIFEST") {
+        Some(value) => {
+            let value = value
+                .into_string()
+                .map_err(|_| "BLASTIT_MANIFEST: the value is not valid UTF-8".to_string())?;
+            if value.is_empty() {
+                return Err(
+                    "BLASTIT_MANIFEST must not be empty: put ./Blastfile in the working \
+                     directory or name a file"
+                        .to_string(),
+                );
+            }
+            Ok(std::path::PathBuf::from(value))
+        }
+        None => Ok(std::path::PathBuf::from("./Blastfile")),
+    }
+}
+
+/// The `blastit fmt` command (§14.4).
+///
+/// `--check` reads, formats in memory and writes nothing at all — not even a
+/// temporary file — and prints `<path>: not in canonical layout` on stdout when
+/// the file would change. Without `--check` the rewrite goes through
+/// [`blastit_manifest::edit::write_atomic`], so the file keeps its mode and a
+/// failed write leaves the original in place.
+fn run_fmt(options: &FmtOptions) -> u8 {
+    let path = match fmt_path(options.path.as_deref()) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("blastit fmt: {message}");
+            return FMT_FAILURE;
+        }
+    };
+    let text = match blastit_manifest::blastfile::read(&path) {
+        Ok(text) => text,
+        Err(errors) => return report_manifest_errors(&path, &errors),
+    };
+    let formatted = match blastit_manifest::blastfile::fmt(&text) {
+        Ok(formatted) => formatted,
+        Err(errors) => return report_manifest_errors(&path, &errors),
+    };
+    if formatted == text {
+        return SUCCESS;
+    }
+    if options.check {
+        println!("{}: not in canonical layout", one_line(&path));
+        return FMT_NOT_CANONICAL;
+    }
+    match blastit_manifest::edit::write_atomic(&path, &formatted) {
+        Ok(()) => SUCCESS,
+        Err(error) => {
+            eprintln!(
+                "{}: the file could not be written: {}",
+                one_line(&path),
+                one_line_text(&error.to_string())
+            );
+            FMT_FAILURE
+        }
+    }
+}
+
+/// Prints one line per refusal, each prefixed with the manifest path exactly
+/// once (§18), and returns `fmt`'s failure status.
+///
+/// A positioned refusal renders `<line>:<col>: <message>`, so the path goes
+/// straight before it — `./Blastfile:2:10: …`; a position-less one renders only
+/// its message, and takes the `<path>: <message>` spelling.
+fn report_manifest_errors(path: &std::path::Path, errors: &blastit_manifest::ManifestErrors) -> u8 {
+    let path = one_line(path);
+    for error in errors.errors() {
+        let rendered = error.to_string();
+        if positioned(&rendered) {
+            eprintln!("{path}:{rendered}");
+        } else {
+            eprintln!("{path}: {rendered}");
+        }
+    }
+    FMT_FAILURE
+}
+
+/// True when a rendered refusal starts with §18's `<line>:<col>: ` prefix.
+///
+/// `ManifestError`'s `Display` is the documented rendering — a position, or
+/// nothing at all for a whole-file refusal — and the crate does not expose the
+/// position itself, so the caller reads the one spelling it has to prefix.
+fn positioned(rendered: &str) -> bool {
+    let mut parts = rendered.splitn(3, ':');
+    let (Some(line), Some(col), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !line.is_empty()
+        && !col.is_empty()
+        && line.bytes().all(|byte| byte.is_ascii_digit())
+        && col.bytes().all(|byte| byte.is_ascii_digit())
+        && rest.starts_with(' ')
+}
+
+/// Renders a path for a one-line message: control bytes escaped and the value
+/// cut at 120 characters (§18).
+///
+/// `blastit-manifest`'s own `clipped` does the same for a value, but it is
+/// crate-private; this is the CLI's copy for the one thing the crate never
+/// renders, the path a caller passed in.
+fn one_line(path: &std::path::Path) -> String {
+    one_line_text(&path.to_string_lossy())
+}
+
+/// The same for a string: control bytes escaped, cut at 120 characters.
+fn one_line_text(value: &str) -> String {
+    /// Longest path or message quoted before it is cut short (§18).
+    const MAX_CHARS: usize = 120;
+    let cut = value.char_indices().nth(MAX_CHARS).map(|(at, _)| at);
+    let mut out = String::with_capacity(value.len().saturating_add(1));
+    let (head, cut_short) = match cut {
+        Some(at) => (value.get(..at).unwrap_or(""), true),
+        None => (value, false),
+    };
+    for character in head.chars() {
+        match character {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            character if character.is_control() => {
+                out.push_str(&format!("\\u{{{:x}}}", character as u32));
+            }
+            character => out.push(character),
+        }
+    }
+    if cut_short {
+        out.push('…');
+    }
+    out
 }
 
 /// A `--port` / `PORT` value: `1..=65535` (`R2`).

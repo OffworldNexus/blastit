@@ -46,8 +46,11 @@ mod lexer;
 mod lower;
 mod parser;
 mod pattern;
+mod print;
 mod syntax;
 mod tokens;
+
+pub use print::fmt;
 
 use std::io::Read as _;
 use std::path::Path;

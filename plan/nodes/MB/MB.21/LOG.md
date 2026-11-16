@@ -27,3 +27,7 @@ edited fields
 ## 2026-11-16T01:49 [planner]
 
 Replan under the 2026-11-16 burial directive: MB.21.1.1 created (purge the two language pages, doc-only, ready); MB.21.4.1 rewritten to discovery + ordinary syntax error (no detector, no migration sentence); MB.21.4.4 widened to crates/** and now deletes the v1 reader and the toml dependency; MB.21.5.1 rescoped to the site/README/ARCHITECTURE/live-brief sweep plus deleting the v1 reference page, inventory block and 7 inbound links; MB.21.5.2 owns the permanent test_the_real_tree_carries_no_retired_toml_manifest guard in python/tests/test_docs_assets.py (runs in make check via docs-unit). Epic title, acceptance and notes purged of the retired name; settled units 5 (body raw / body raw unvalidated) and 6 (no workers keyword, ADR-0012 12.3) added.
+
+## 2026-11-16T06:05 [lead]
+
+FOLLOW-UP for conductor/strategist (out of this epic's paths): crates/blastit-view's 1s frame-budget test flakes under load — observed in 2 of 4 make check runs during MB.21.3 (a flake outside every MB.21.3 leaf's paths; the sub-lead re-ran rather than touching it). Needs its own node before the MB.21 epic gate can be trusted repeatedly. Also: design §13.2 assigns six boot-warning re-spellings to MB.21.3.0 but they change sentences pinned by crates/blastit/tests/*, so they belong to MB.21.4.3's re-spelling sweep

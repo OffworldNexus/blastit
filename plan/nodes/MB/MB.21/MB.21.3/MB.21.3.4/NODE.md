@@ -2,7 +2,7 @@
 id: MB.21.3.4
 title: "Lossless Blastfile CST, canonical printer and blastit fmt [--check] [PATH]"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.21.3.8]
@@ -10,15 +10,16 @@ paths:
   - "crates/blastit-manifest/src/blastfile/**"
   - "crates/blastit-manifest/tests/critical_blastfile_print.rs"
   - "crates/blastit-manifest/tests/blastfile_fmt.rs"
+  - "crates/blastit-manifest/tests/fixtures/**"
   - crates/blastit/src/cli.rs
   - crates/blastit/src/main.rs
   - crates/blastit/tests/critical_blastfile_fmt.rs
   - crates/blastit/tests/fmt_command.rs
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T05:23"
+updated: "2026-11-16T06:45"
 ---
 
 # Goal

@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use super::pattern::Compiled;
-use super::tokens::{Token, TokenKind, Trivia};
+use super::tokens::{Token, TokenKind, Trivia, TriviaKind};
 
 /// An index into [`Cst`]'s element arena.
 pub(crate) type NodeId = u32;
@@ -126,13 +126,11 @@ pub(crate) struct Cst {
 
 impl Cst {
     /// The source the tree was built from, byte for byte.
-    #[allow(dead_code)] // the printer reads it (`MB.21.3.4`)
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
     /// The `File` node.
-    #[allow(dead_code)] // the printer and the editor walk from it (`MB.21.3.4`, `MB.21.3.5`)
     pub(crate) fn root(&self) -> NodeId {
         self.root
     }
@@ -155,7 +153,7 @@ impl Cst {
     }
 
     /// The child nodes of `node`, in source order.
-    #[allow(dead_code)] // the printer and the editor walk it (`MB.21.3.4`, `MB.21.3.5`)
+    #[allow(dead_code)] // the editor walks it (`MB.21.3.5`)
     pub(crate) fn child_nodes(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         let range = self.child_range(node);
         let start = range.start;
@@ -306,6 +304,27 @@ impl Cst {
         self.tokens.get(token as usize).map(|token| token.kind)
     }
 
+    /// What a trivia run is, or `None` when `trivia` names no run.
+    pub(crate) fn trivia_kind(&self, trivia: TriviaId) -> Option<TriviaKind> {
+        self.trivia.get(trivia as usize).map(|trivia| trivia.kind)
+    }
+
+    /// The source text a trivia run spans: the spaces, or the `#` and the rest
+    /// of the comment line.
+    pub(crate) fn trivia_text(&self, trivia: TriviaId) -> &str {
+        self.trivia
+            .get(trivia as usize)
+            .and_then(|trivia| self.slice(trivia.span.clone()))
+            .unwrap_or("")
+    }
+
+    /// The byte range a trivia run spans.
+    pub(crate) fn trivia_span(&self, trivia: TriviaId) -> Option<Range<u32>> {
+        self.trivia
+            .get(trivia as usize)
+            .map(|trivia| trivia.span.clone())
+    }
+
     /// The compiled form of the `pattern` node `node` (§8.1).
     ///
     /// `None` when `node` is not a pattern node. The fragment is what a
@@ -356,7 +375,6 @@ impl Cst {
     }
 
     /// The last token of `node`'s subtree.
-    #[allow(dead_code)] // the printer and the editor read a node's span (`MB.21.3.4`, `MB.21.3.5`)
     pub(crate) fn last_token(&self, node: NodeId) -> Option<TokenId> {
         let mut current = node as usize;
         loop {
@@ -539,7 +557,7 @@ impl Builder {
 /// This is a byte-for-byte concatenation with no layout logic, so it proves the
 /// tree lost nothing: `print_lossless(&parse(text)?) == text` for every
 /// parseable text.
-#[allow(dead_code)] // `blastit fmt` and the editor's postcondition read it (`MB.21.3.4`)
+#[allow(dead_code)] // the P1 module tests are its only reader (§14.3)
 pub(crate) fn print_lossless(cst: &Cst) -> String {
     let mut out = String::with_capacity(cst.text.len());
     let mut stack: Vec<Element> = cst.children(cst.root).collect();
@@ -677,6 +695,29 @@ mod tests {
         ] {
             let cst = parse(text).expect("the form parses");
             assert_eq!(print_lossless(&cst), text, "{text:?}");
+        }
+    }
+
+    /// P1 over the corpus: every fixture prints back byte for byte, so the
+    /// tree the printer and the editor walk lost nothing.
+    #[test]
+    fn p1_lossless_over_the_corpus() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(directory)
+            .expect("the fixture directory is readable")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "blastfile")
+            })
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 15, "the corpus contract");
+        for path in files {
+            let text = std::fs::read_to_string(&path).expect("the fixture is readable");
+            let cst = parse(&text).expect("the fixture parses");
+            assert_eq!(print_lossless(&cst), text, "{}", path.display());
+            assert_eq!(cst.text(), text, "{}", path.display());
         }
     }
 

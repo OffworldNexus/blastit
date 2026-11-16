@@ -11,7 +11,9 @@ trait session {
 view cart {
     use session
     GET "/cart"
-    POST "/cart/items" { body json }
+    POST "/cart/items" {
+        body json
+    }
     postgres {
         select cart_items(id, product_id)
     }

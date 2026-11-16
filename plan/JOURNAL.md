@@ -2092,3 +2092,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T05:53 [MB.21.3.8] (lead) attempt 1 (code) + evidence session: all five acceptance commands green, RESULT.md written by a narrow follow-up session without touching code. Sending to goldf
 - 2026-11-16T06:01 [MB.21.3.8] (lead) reviewer verdict PASS (attempt 1). 7 MINOR, all recorded as epic follow-ups with owners: (1) validate.rs's `body raw` sentence still spells `[route.ingress]`/`a
 - 2026-11-16T06:01 [MB.21.3.8] (lead) status review -> done
+- 2026-11-16T06:04 [MB.21.3.8] (lead) commit 1d0d17b (second make check run: the first hit the recurring blastit-view php.rs 1s frame-budget flake again, 2 of 4 runs now)
+- 2026-11-16T06:04 [MB.21.3.4] (lead) status ready -> active
+- 2026-11-16T06:04 [MB.21.3.4] (lead) attempt 1/3 started
+- 2026-11-16T06:04 [MB.21.3.4] (lead) base 1d0d17b29ac852174a7da7b79f2166bfd236dfd1
+- 2026-11-16T06:05 [MB.21] (lead) FOLLOW-UP for conductor/strategist (out of this epic's paths): crates/blastit-view's 1s frame-budget test flakes under load — observed in 2 of 4 make check runs
+- 2026-11-16T06:24 [MB.21.3.4] (lead) status active -> review
+- 2026-11-16T06:24 [MB.21.3.4] (lead) attempt 1 done with 8 disclosed deviations (RESULT.md); goldfish review on base 1d0d17b.
+- 2026-11-16T06:28 [MB.21.3.4] (lead) edited fields
+- 2026-11-16T06:28 [MB.21.3.4] (lead) REVIEW FAIL (attempt 1): 2 MAJOR + 5 MINOR. MAJOR1: split_lines splits on every Newline, so a list continued after a comma (select a,/b) is emitted wrapped -- §
+- 2026-11-16T06:28 [MB.21.3.4] (lead) status review -> ready
+- 2026-11-16T06:28 [MB.21.3.4] (lead) status ready -> active
+- 2026-11-16T06:28 [MB.21.3.4] (lead) attempt 2/3 started
+- 2026-11-16T06:28 [MB.21.3.4] (lead) base 1d0d17b29ac852174a7da7b79f2166bfd236dfd1 (attempt 2)
+- 2026-11-16T06:40 [MB.21.3.4] (lead) status active -> review
+- 2026-11-16T06:40 [MB.21.3.4] (lead) attempt 2 reported done: both MAJORs fixed (split_lines honours §6.6; fixtures 06/07/15 reformatted + a corpus-canonicity test), deviation (b) corrected. Fresh 
+- 2026-11-16T06:45 [MB.21.3.4] (lead) reviewer verdict PASS (attempt 2), both MAJORs verified closed with non-tautological tests. 6 MINOR recorded: (1) fmt does not re-parse its output at runtime wh
+- 2026-11-16T06:45 [MB.21.3.4] (lead) status review -> done

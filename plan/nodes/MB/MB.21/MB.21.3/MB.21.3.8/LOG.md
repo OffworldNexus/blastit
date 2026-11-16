@@ -67,3 +67,7 @@ reviewer verdict PASS (attempt 1). 7 MINOR, all recorded as epic follow-ups with
 ## 2026-11-16T06:01 [lead]
 
 status review -> done
+
+## 2026-11-16T06:04 [lead]
+
+commit 1d0d17b (second make check run: the first hit the recurring blastit-view php.rs 1s frame-budget flake again, 2 of 4 runs now)
