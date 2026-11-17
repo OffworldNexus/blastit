@@ -723,3 +723,23 @@ fence 5 `dev-learn` wrote the added route and query in one pass).
 - **`MB.21.5.5` and `MB.21.5.11` committed after the rows above were measured** (`4b41522`, `2c2c9b3`),
   and the gate commit `ce7ed71` touches `plan/` only. Every row marked `06:14`/`06:19` was re-run at
   `ee8bfb7`; the mutation audit (§E6) and the live refusals (§E4) are from their own runs, as labelled.
+
+## Final gate status (post-close)
+
+Last measured state, after the gate commit `ce7ed71` and unchanged at `f6ec3cb` (three later commits touch
+only `plan/`, `docs/design/` and `docs/decisions/`): one `make check` with no other run in the worktree
+(`/tmp/opencode/mb21-final-check-alone.log`). This supersedes the per-cause detail above.
+
+- `make rs-fmt` and `make rs-lint`: **green** — the editor and warning-site sessions repaired their
+  untracked files in place. `make rs-doc` is green at this measurement too: the earlier rustdoc refusal
+  ("public documentation for `message` links to private item `prefix`", `error.rs:1523`) no longer
+  reports, and `crates/blastit-manifest/src/error.rs` is still modified-but-uncommitted by another
+  session (last commit `335f564`, this epic's own `MB.21.4.10`) — their in-flight edit, never this
+  epic's.
+- `make check`: **still exit 2**, now at `docs-test`, one failed fence — `docs/reference/cli.md` fence 1,
+  `blastit dev: unknown argument --no-reload`, while `crates/blastit/src/cli.rs` has no such flag. That
+  is the tree's only *committed* defect, and it is `MB.23`'s (the doc landed before the flag; `MB.23.2`
+  is the design node).
+- Every leg that measures this epic is green: `plan.py validate` (`plan OK`), `guard.py`, the manifest
+  crate's 34 suites, `docs-unit` (107 passed), `docs-check` (`No issues found`), `doc-tone`, the
+  retired-name guard and all epic acceptance greps — and `make e2e` passes end to end (311 checks).
