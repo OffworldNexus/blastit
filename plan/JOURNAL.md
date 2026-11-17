@@ -2699,3 +2699,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T07:34 [MB.24.3] (lead) status ready -> active
 - 2026-11-17T07:34 [MB.24.3] (lead) attempt 1/3 started
 - 2026-11-17T07:34 [MB.24.3] (lead) base 605d78583dabc420d121fce88ab13861963c76ae
+- 2026-11-17T07:34 [MB.22] (lead) gate committed aff46b1; epic done, six children done, audit PASS, gaps re-homed to MB.26.9-14
