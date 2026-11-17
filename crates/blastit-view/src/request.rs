@@ -14,6 +14,7 @@ use crate::environ;
 use crate::flow::Flow;
 use crate::input::{BodyMsg, Input};
 use crate::response::{RespError, Response, StartResponse, resp_error_to_py};
+use crate::runtime::LoadedReporter;
 use crate::wire::Writer;
 
 /// The shared state of one request.
@@ -108,6 +109,13 @@ pub(crate) struct AppContext {
     /// the per-request cost is measured by calling it, which is a plain
     /// function call, and the interpreter lookup would be the expensive part.
     pub(crate) clock: Option<Py<PyAny>>,
+    /// The dev-only loaded-file reporter, or `None` in production and under
+    /// `--no-reload` (`MB.23.4`).
+    ///
+    /// Shared by every request thread: each one reports what it loaded when it
+    /// finishes, which is the first-touch attribution the reload policy needs
+    /// (`docs/design/dev-fanotify-reload.md` §4.4).
+    pub(crate) loaded: Option<Arc<LoadedReporter>>,
 }
 
 impl AppContext {
@@ -200,7 +208,16 @@ impl Worker {
             state,
             ctx,
         } = self;
-        serve_request(py, &head, &ctx, &state, &writer, body, id)
+        let outcome = serve_request(py, &head, &ctx, &state, &writer, body, id);
+        // `MB.23.4`: first-touch attribution. What this request loaded is
+        // reported once it is over — after `close()`, before `DONE` — so the
+        // report names exactly the files the response depended on. Best effort
+        // by construction: nothing here can fail the request, and a view with
+        // no reporter does not even look.
+        if let Some(loaded) = &ctx.loaded {
+            loaded.report(py, false);
+        }
+        outcome
     }
 }
 
@@ -420,6 +437,7 @@ mod tests {
                 route_name: "web".to_string(),
                 script_name: String::new(),
                 clock: crate::thread_clock(py),
+                loaded: None,
             };
             let raw = ctx.clock.is_some();
             let span = Span::start(py, &ctx);
@@ -449,6 +467,7 @@ mod tests {
                 route_name: "web".to_string(),
                 script_name: String::new(),
                 clock: None,
+                loaded: None,
             };
             assert_eq!(blind.cpu_ns(py), None);
             let span = Span::start(py, &blind);

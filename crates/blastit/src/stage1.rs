@@ -1048,6 +1048,26 @@ fn load(
     }
 
     let spec = config.app.as_deref().unwrap_or_default();
+    // `MB.23.4`: the dev-only loaded-file report. Installed **before** the first
+    // import so the `preload` phase's modules and file opens are seen, and
+    // harvested once after `BLASTIT_WARMUP` so the cold `sys.modules` scan is
+    // paid here, in the immortal parent every view is forked from. That is why
+    // the preloaded closure reaches the supervisor by inheritance, with no
+    // second socket in this process (`ADR-0014` §2).
+    //
+    // A production boot, `check` and `test` are `dev == None` and never install
+    // it. The `--no-reload` switch (`MB.23.5`) clears this gate too; until it
+    // exists, `blastit dev` is the enabled case.
+    #[cfg(feature = "python")]
+    let loaded = if dev.is_some() {
+        config
+            .cwd
+            .as_deref()
+            .map(|cwd| PathBuf::from(std::ffi::OsString::from_vec(cwd.to_vec())))
+            .and_then(|root| blastit_view::LoadedTracker::install(py, &root))
+    } else {
+        None
+    };
     let app = match import_callable(py, spec) {
         Ok(app) => app,
         Err(err) => python_fail(py, emitter, dev, &format!("BLASTIT_APP ({spec})"), &err),
@@ -1083,6 +1103,13 @@ fn load(
                 &err,
             );
         }
+    }
+    // The baseline scan: every module the boot imported is now in
+    // `sys.modules`, so one cold harvest here means every view's first report
+    // is warm and the preloaded closure is part of it (`MB.23.4`). Best effort:
+    // instrumentation must never fail a boot.
+    if let Some(loaded) = &loaded {
+        let _ = loaded.harvest(py);
     }
     if let Err(err) = py.run(CLOSE_AND_COLLECT, None, None) {
         python_fail(py, emitter, dev, "close_all/gc.collect", &err);

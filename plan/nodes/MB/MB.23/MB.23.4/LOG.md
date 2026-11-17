@@ -19,3 +19,27 @@ edited fields
 ## 2026-11-17T09:17 [lead]
 
 edited fields
+
+## 2026-11-17T10:48 [lead]
+
+status ready -> active
+
+## 2026-11-17T10:48 [lead]
+
+attempt 1/3 started
+
+## 2026-11-17T10:48 [lead]
+
+base 9e23dc5
+
+## 2026-11-17T11:16 [lead]
+
+implementer needs_split after landing the codec + the whole Python leg (20 codec/unit legs, critical_loaded_files 1/1, make check green except the known --no-reload fence). PHP sink half is ~9 files; promoted to a 2-child epic rather than sprawled.
+
+## 2026-11-17T11:16 [lead]
+
+edited fields
+
+## 2026-11-17T11:16 [lead]
+
+status active -> ready

@@ -150,6 +150,12 @@ mod runtime;
 mod sync;
 mod wire;
 
+// The dev-only loaded-file report (`MB.23.4`, `ADR-0014`): one bounded,
+// versioned datagram codec shared by the Python and PHP workers. Compiled in
+// both builds — it is plain `std` — because the supervisor that consumes it
+// (`MB.23.5`) links the codec, not the runtimes.
+pub mod loaded;
+
 #[cfg(feature = "python")]
 use std::collections::{HashMap, VecDeque};
 #[cfg(feature = "python")]
@@ -176,9 +182,20 @@ use pyo3::prelude::*;
 
 pub use crate::config::ViewConfig;
 pub use crate::error::ViewError;
+// The dev-only loaded-file report: the codec and its bounds, so a consumer can
+// decode a datagram without guessing a number.
+pub use crate::loaded::{
+    Batch, DecodeError, EncodeError, FLAG_BOOT, FLAG_RESYNC, HEADER_BYTES, MAX_BATCH_BYTES,
+    MAX_PATH_BYTES, MAX_PATHS, PRELOAD_SOURCE, Reporter, Sent, Sequence, Step, VERSION, chunks,
+    decode,
+};
 // The worker-side runtime seam (`MB.3.23`, design §4.1): what a route worker
 // implements, so the scheduler never learns which language it is serving.
 pub use crate::runtime::{OUTPUT_LINE_CAP, OutputStream, RequestEnd, RequestIo, WorkerRuntime};
+// The Python half of the loaded-file report (`MB.23.4`): the module closure and
+// the `open` audit hook, installed once by the dev boot.
+#[cfg(feature = "python")]
+pub use crate::runtime::{LoadedReport, LoadedReporter, LoadedTracker};
 
 #[cfg(feature = "python")]
 use crate::input::BodyMsg;
@@ -245,12 +262,49 @@ pub fn serve(
     app: Py<PyAny>,
     cfg: ViewConfig,
 ) -> Result<(), ViewError> {
+    serve_reporting(py, chan, app, cfg, None)
+}
+
+/// [`serve`], with the dev-only loaded-file report.
+///
+/// `loaded` is the write end of this view's `SOCK_DGRAM` socketpair and the
+/// source id its batches name (`MB.23.4`, design §4.4). The view sends one
+/// `boot` batch — the module closure it inherited from the preload phase plus
+/// anything already opened — before it announces `READY`, and then one delta
+/// per request, from the request thread, through a non-blocking socket. A
+/// request never waits for reporting, and a reporting failure never fails a
+/// request: the socket is the only thing on this path that can fail, and it
+/// fails into `resync`.
+///
+/// `None` is the production path and `--no-reload`: no reader, no report, no
+/// work beyond the byte the tracker already records.
+///
+/// # Errors
+///
+/// Exactly what [`serve`] reports.
+#[cfg(feature = "python")]
+pub fn serve_reporting(
+    py: Python<'_>,
+    chan: UnixStream,
+    app: Py<PyAny>,
+    cfg: ViewConfig,
+    loaded: Option<LoadedReport>,
+) -> Result<(), ViewError> {
     // D5: the thread-CPU clock is resolved here, while the interpreter is
     // being held for the fork, and not per request.
     let clock = thread_clock(py);
+    // The boot batch goes out before `READY`: it is the inherited `preload`
+    // closure, and the supervisor must know it before a change could matter.
+    // Both calls take the GIL the caller already holds.
+    let loaded = loaded
+        .and_then(|report| LoadedReporter::adopt(py, report))
+        .map(Arc::new);
+    if let Some(reporter) = &loaded {
+        reporter.boot(py);
+    }
     // The caller may be holding the GIL (init is, §4); nothing below needs it,
     // and the request threads do.
-    py.detach(move || serve_detached(chan, app, cfg, clock))
+    py.detach(move || serve_detached(chan, app, cfg, clock, loaded))
 }
 
 /// `time.thread_time_ns`, the interpreter's name for
@@ -273,6 +327,7 @@ fn serve_detached(
     app: Py<PyAny>,
     cfg: ViewConfig,
     clock: Option<Py<PyAny>>,
+    loaded: Option<Arc<LoadedReporter>>,
 ) -> Result<(), ViewError> {
     cfg.validate().map_err(ViewError::Config)?;
     let limits = cfg.frame_limits;
@@ -292,6 +347,7 @@ fn serve_detached(
                 route_name: cfg.route_name,
                 script_name: cfg.script_name,
                 clock,
+                loaded,
             }),
         ),
         max_threads: cfg.max_threads,

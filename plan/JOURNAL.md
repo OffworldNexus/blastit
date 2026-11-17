@@ -2741,3 +2741,24 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T10:39 [MB.23.5] (lead) edited fields
 - 2026-11-17T10:48 [MB.23.3] (lead) make check after polish: 171 test targets ok, only the MB.23.5 --no-reload fence fails (docs-test runs before rs-no-python, so the guard was verified separately
 - 2026-11-17T10:48 [MB.23.3] (lead) status review -> done
+- 2026-11-17T10:48 [MB.23.4] (lead) status ready -> active
+- 2026-11-17T10:48 [MB.23.4] (lead) attempt 1/3 started
+- 2026-11-17T10:48 [MB.23.4] (lead) base 9e23dc5
+- 2026-11-17T11:16 [MB.23.4] (lead) implementer needs_split after landing the codec + the whole Python leg (20 codec/unit legs, critical_loaded_files 1/1, make check green except the known --no-re
+- 2026-11-17T11:16 [MB.23.4] (lead) edited fields
+- 2026-11-17T11:16 [MB.23.4] (lead) status active -> ready
+- 2026-11-17T11:17 [MB.23.4.1] (planner) created (task) The one loaded-file codec and the Python reporter: sys.modules closure + open audit hook, boot/preload harvest, per-request delta
+- 2026-11-17T11:17 [MB.23.4.2] (planner) created (task) The PHP loaded-file sink: EG(included_files) between execute and request_shutdown, optional dlsym sink with no ABI bump
+- 2026-11-17T11:17 [MB.23.4.1] (lead) status ready -> active
+- 2026-11-17T11:17 [MB.23.4.1] (lead) attempt 1/3 started
+- 2026-11-17T11:17 [MB.23.4.1] (lead) base 9e23dc5 (work already on disk from MB.23.4 attempt 1)
+- 2026-11-17T11:33 [MB.23.4.1] (lead) verified on disk; codec 21 legs, critical_loaded_files 2 legs, make check 173 targets ok (only the MB.23.5 fence). Added the missing EAGAIN/resync, no-I-O-in-ho
+- 2026-11-17T11:33 [MB.23.4.1] (lead) status active -> review
+- 2026-11-17T11:39 [MB.23.4.1] (lead) REVIEW FAIL (1 MAJOR, 3 MINOR): a boot set larger than MAX_PATHS goes out as several datagrams each flagged boot with seq 0,1,2, so a design-following consumer 
+- 2026-11-17T11:39 [MB.23.4.1] (lead) status review -> ready
+- 2026-11-17T11:39 [MB.23.4.1] (lead) status ready -> active
+- 2026-11-17T11:39 [MB.23.4.1] (lead) attempt 2/3 started
+- 2026-11-17T11:46 [MB.23.4.1] (lead) attempt 2: is_boot only on the first datagram (65-path boot -> 2 datagrams, one boot; the measured 458-file case -> 8, one boot, union complete), BootNotFirst r
+- 2026-11-17T11:46 [MB.23.4.1] (lead) status active -> review
+- 2026-11-17T11:53 [MB.23.4.1] (lead) reviewer attempt 2 VERDICT PASS (mutation-checked: split-boot, 32 KiB cap, nonblocking, hook ban list). Two MINORs carried to MB.23.5 (its adopting leaf): a deb
+- 2026-11-17T11:53 [MB.23.4.1] (lead) status review -> done

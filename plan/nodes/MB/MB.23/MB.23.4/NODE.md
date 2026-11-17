@@ -1,9 +1,8 @@
 ---
 id: MB.23.4
 title: "Report the preload phase's and each dev view's loaded files: Python sys.modules + open audit hook, PHP EG(included_files) via a dlsym sink, one bounded datagram codec, no route map"
-kind: task
+kind: epic
 status: ready
-owner: implementer
 priority: 1
 depends_on: [MB.23.2]
 paths:
@@ -29,7 +28,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:12"
-updated: "2026-11-17T09:17"
+updated: "2026-11-17T11:16"
 ---
 
 # Goal
