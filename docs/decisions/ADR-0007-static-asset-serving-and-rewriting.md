@@ -37,6 +37,10 @@ to delete or add a second supervisor, uid and budget for a read-only file.
    knob, and one glob metacharacter (`*`, which stops at `/`): the page's block is the
    whole grammar, and `app` being manifest-global makes one `.*` route plus one `app`
    the front-controller config.
+   *Amended 2026-11-17 by `ADR-0012` (Amendment, `MB.31`): `immutable` takes the
+   one pattern grammar — bare, a `view` pattern, or `regex '…'` — so this
+   metacharacter sentence and its `ImmutableGlob` matcher are history. The
+   `no-cache` rule for an `index` or `fallback` answer in decision 5 is unchanged.*
 3. **Path safety is structural, not string-based.** One dirfd per root opened at boot;
    every candidate is `openat2` with
    `RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS`, opened `O_PATH`,

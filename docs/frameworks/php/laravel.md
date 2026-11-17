@@ -33,9 +33,9 @@ view app {
 ```
 
 The split store is Laravel's `DB_*` wiring, and `immutable "/build/assets/*"` is Vite's hashed
-output; `*` stops at `/`, so this one pattern covers the files under `assets/`. [The
-connector](index.md) has the store slots, and [the reference](../../reference/blastfile.md#stores)
-has the directives.
+output; a trailing `/*` crosses `/`, so this one pattern covers the files under `assets/` at any
+depth. [The connector](index.md) has the store slots, and [the
+reference](../../reference/blastfile.md#stores) has the directives.
 
 ## Bind parameters in PDO
 

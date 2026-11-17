@@ -142,6 +142,35 @@ per-view `workers` cap.
     field's meaning, the directive syntax inside it, and `ADR-0003`'s
     atomic-write and redaction rules are unchanged.
 
+## Amendment 2026-11-17 (`MB.31`): one pattern grammar for `immutable`
+
+Decision 8's mount takes the pattern production a `view` takes, so a developer
+learns one grammar:
+
+```text
+static_directive → 'root' Str | 'index' Str | 'fallback' Str
+                 | 'immutable' (pattern (',' pattern)*)?
+pattern          → Str | 'regex' RawStr
+```
+
+- **Bare `immutable`** caches every **exact file** the mount serves. An `index`
+  answer and a `fallback` answer stay `no-cache` (`ADR-0007` decision 5, S3): a
+  year-long cache is never pinned on a shell that changes.
+- **`immutable <pattern>[, …]`** goes through `blastfile::pattern::compile`, and
+  `immutable regex '…'` through `compile_regex`; `routing::compile_pattern`
+  anchors both. So a trailing `/*` crosses `/` at any depth, `{id}`/`{id:int}`/
+  `{id:uuid}` and a literal dot behave as they do in a view, and the refused
+  sentences (`PatternNotAnchored`, `PatternStarPosition`, `PatternRegex`, …) are
+  the view's own. The per-pattern `StaticImmutablePattern` rows and the 256-byte
+  ceiling are deleted; only the list-length cap remains.
+- **Caps** are the compiler's: `MAX_PATTERN_BYTES = 4096` per pattern for both
+  spellings, `MAX_PATTERNS = 32` on one mount's list.
+- **`StaticPolicy.immutable` stops being `Vec<String>`** of unresolved globs: it
+  holds the compiler's output, so the scheduler has one matcher, not a second
+  `glob()`.
+- **Supersedes** `ADR-0007` decision 2's `ImmutableGlob` semantics; that record
+  keeps its text and carries the pointer.
+
 ## Consequences
 
 - **Positive:** a developer writes a Blastfile with no `=` and no version header,

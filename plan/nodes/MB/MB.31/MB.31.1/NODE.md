@@ -2,24 +2,27 @@
 id: MB.31.1
 title: "Document one immutable pattern grammar (bare, view-syntax, regex) and purge the six-glob staircase from every page"
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: [MB.25.2]
 paths:
   - docs/frameworks/python/django.md
   - "docs/frameworks/static-and-spa.md"
+  - docs/frameworks/php/laravel.md
   - docs/reference/blastfile.md
   - "docs/decisions/ADR-0012-blastfile-dsl.md"
   - "docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md"
   - "docs/design/static-and-spa.md"
   - "docs/design/blastfile-dsl.md"
   - "crates/blastit-manifest/tests/docs_fences.rs"
-attempts: 0
+  - "docs/design/immutable-pattern-grammar.review-dx.md"
+  - "docs/design/immutable-pattern-grammar.review-ai-ergonomics.md"
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:33"
-updated: "2026-11-17T12:33"
+updated: "2026-11-17T22:46"
 ---
 
 # Goal

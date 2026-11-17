@@ -382,7 +382,7 @@ static "/" {
 |---|---|---|
 | `root` | required | the directory served, relative to the `Blastfile`; no leading `/`, no `..` segment, no `\`, no control byte |
 | `index` | `index.html` | the file a directory answers with, relative to `root` |
-| `immutable` | none | `/`-anchored globs matched whole against the request path of the file it answers; `*` stops at `/`; a match gets `Cache-Control: public, max-age=31536000, immutable`; an `index` or `fallback` answer is always `no-cache` |
+| `immutable` | none | the files that never change: written alone it caches every exact file the mount serves, or it takes a pattern list; a match gets `Cache-Control: public, max-age=31536000, immutable`; an `index` or `fallback` answer is always `no-cache` |
 | `fallback` | none | the file a path that is no file answers with, relative to `root` |
 
 Several mounts may match; the longest prefix answers. A request under a prefix is
@@ -394,9 +394,21 @@ public only when its first segment is exactly `.well-known`:
 `/.well-known/acme-challenge/<token>` is served, `/.well-known/.env` is not. A missing
 or unreadable `root` stops the boot before a listener binds.
 
-`*` in `immutable` stops at `/`, so a nested tree needs one glob per depth:
-`immutable "/static/*", "/static/*/*", "/static/*/*/*"`. In a view pattern a `*`
-is a tail that crosses `/`.
+### What `immutable` caches
+
+`immutable` takes the same [patterns](#path-patterns) a `view` takes — `regex '…'`
+included — matched whole against the request path, mount prefix included: under
+`static "/static"`, write `immutable "/static/admin/*"`, not `"/admin/*"`.
+
+| Written | Cached for a year |
+|---|---|
+| `immutable` | every exact file the mount serves — only when each name changes with its bytes; a tree with unhashed originals uses a pattern or `regex` |
+| `immutable "/assets/*", "/fonts/*"` | each file whose request path matches a pattern; a trailing `/*` crosses `/`, so `"/assets/*"` reaches `/assets/chunks/x.js` |
+| `immutable regex '/static/.+\.[0-9a-f]{12}\.[^/]+'` | each file the expression matches, when only hashed names may be cached |
+
+A mount takes at most 32 patterns, each at most 4096 bytes, quoted or
+`regex '…'`; a misplaced `*` or an expression that does not compile is refused
+with the same sentence a `view` pattern gets.
 
 ### Request precedence
 
@@ -587,7 +599,7 @@ file, never to refuse a real one. Each refusal is one line and names the budget.
 | file size | 16 MiB (16 777 216 bytes) | ``<file>: the file is <n> bytes; Blastfile is limited to 16777216 bytes — split the grants into a `trait`, or delete a generated block`` |
 | tokens | 4 194 304 | ``<file>: <n> tokens; Blastfile is limited to 4194304 — the file is too large: replace repeated `query '…'` lines with table or column grants (`select`, `insert`, `update`, `delete`), or fold the shared grants into a `trait` that many views `use` `` |
 | trivia runs (whitespace and comments) | 4 194 304 | ``<file>: <n> trivia runs; Blastfile is limited to 4194304 — the file is too large: delete the generated comments and blank lines, or fold the shared grants into a `trait` that many views `use` `` |
-| list items (methods, patterns, columns, preload, `immutable`, grants) | 4 096 | ``<file>:<line>:<col>: a list holds at most 4096 items`` |
+| list items (methods, patterns, columns, preload, grants) | 4 096 | ``<file>:<line>:<col>: a list holds at most 4096 items`` |
 | pattern length | 4 096 bytes | ``<file>:<line>:<col>: a pattern holds at most 4096 bytes`` |
 | `app` name length | 256 characters | ``<file>:<line>:<col>: an `app` name is 1 to 256 characters with no control byte`` |
 

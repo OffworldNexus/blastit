@@ -226,7 +226,7 @@ the design says so here, and no file spelling exists for either.
 | `MAX_TOKENS` | `4_194_304` | `lexer::lex` as it pushes | ``<path>: <n> tokens; Blastfile is limited to 4194304 — the file is too large: replace repeated `query '…'` lines with table or column grants (`select`, `insert`, `update`, `delete`), or fold the shared grants into a `trait` that many views `use` `` |
 | `MAX_TRIVIA` | `4_194_304` (one node per whitespace/comment run) | `lexer::push_trivia` | ``<path>: <n> trivia runs; Blastfile is limited to 4194304 — the file is too large: delete the generated comments and blank lines, or fold the shared grants into a `trait` that many views `use` `` |
 | `MAX_BLOCK_DEPTH` | `2` nested block levels | `parser.rs` depth counter | `<path>:<l>:<c>: blocks nest two deep at most: a view's `postgres` block is the deepest` |
-| `MAX_LIST_ITEMS` | `4_096` | list loops (methods, patterns, columns, preload, immutable, table grants) | `<path>:<l>:<c>: a list holds at most 4096 items` |
+| `MAX_LIST_ITEMS` | `4_096` | list loops (methods, patterns, columns, preload, table grants) | `<path>:<l>:<c>: a list holds at most 4096 items` |
 | `MAX_PATTERN_BYTES` | `4_096` (4 KiB) | `pattern.rs`, both the quoted form and `regex '…'`; the compiled program stays bounded by `REGEX_SIZE_LIMIT` (`1 << 20`) and `REGEX_NEST_LIMIT` | `<path>:<l>:<c>: a pattern holds at most 4096 bytes` |
 | `MAX_APP_NAME_CHARS` | `256` | `lower::app` | ``<path>:<l>:<c>: an `app` name is 1 to 256 characters with no control byte`` |
 | `MAX_QUOTED_CHARS` | `120` (existing) | `error::quoted` | value cut with `…`, control bytes escaped |
@@ -380,7 +380,7 @@ table_grant  → Word ('(' Word (',' Word)* ')')?
 
 static       → 'static' Str '{' static_directive* '}'
 static_directive → 'root' Str | 'index' Str | 'fallback' Str
-                 | 'immutable' Str (',' Str)*
+                 | 'immutable' (pattern (',' pattern)*)?
 
 pattern      → Str | 'regex' RawStr
 Method       → an upper-case HTTP token (a `Word` whose every byte is an
@@ -829,6 +829,15 @@ decision stays in `static_response.rs` unchanged.
 byte, no `..` segment) and `validate`'s caps (≤ 32 patterns per mount, each ≤ 256
 bytes) are kept; they move from "per route" to "per mount" and the sentences name
 the mount.
+
+**Amended 2026-11-17 (`MB.31`):** `immutable` takes the §8.1 pattern production —
+bare (`'immutable' (pattern (',' pattern)*)?`), a quoted pattern, or
+`regex '…'` — compiled by `pattern::compile`/`compile_regex` and anchored by
+`routing::compile_pattern`. `ImmutableGlob` and the 256-byte ceiling are deleted;
+`StaticPolicy.immutable` stops being `Vec<String>`; the caps are
+`MAX_PATTERN_BYTES = 4096` (both spellings) and `MAX_PATTERNS = 32` per mount, and
+a refusal is the `view` pattern's own sentence. The §9.4 join above survives: a
+pattern still matches the path the client asked for.
 
 ### 9.5 A file with no views
 

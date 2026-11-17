@@ -82,8 +82,8 @@ actually answered; honest `dev`/`check` behaviour for a site with no app.
 (`ADR-0010`, §Front controller of the page); no directory listing; no redirects (`/docs`
 answers `200`); no `Range`/`206`, no `If-Modified-Since`, no `If-Match`, no `If-Range`,
 no `Accept-Encoding` negotiation or `.gz` siblings; no `fallback`, `cache_max_age`,
-`max_bytes` or `dotfiles` key (the page has four keys); no `**` recursive glob (the page
-documents one metacharacter, `*`, and says it stops at `/`); no top-level
+`max_bytes` or `dotfiles` key (the page has four keys); no `**` recursive glob (a
+trailing `/*` crosses `/`, §4.5); no top-level
 `[static.<name>]` block (`ADR-0007` decision 2); no WASM/CDR (Milestone C); no second process,
 role, uid or supervisor for static files.
 
@@ -113,6 +113,13 @@ role, uid or supervisor for static files.
   bytes except `/`; the only metacharacter is `*`. The year-long cache is given to an
   **exact-file** answer only; a directory `index` and an SPA fallback are always
   `no-cache`, whatever a pattern says.
+  **Superseded 2026-11-17 (`MB.31.2`):** the matcher is no longer the `glob()` helper.
+  `immutable` is compiled by `pattern::compile` + `routing::compile_pattern` — the pair
+  a `view` pattern uses — so a trailing `/*` crosses `/`, `{id}`/`{id:int}`/`{id:uuid}`
+  work, `regex '…'` is available, and bare `immutable` caches every exact file. It matches
+  `StaticFile::url_path` — the request path rebuilt as mount prefix + resolved remainder,
+  prefix included — not the root-relative remainder in R5's parenthetical. The
+  `no-cache` rule above and §4.5's vectors stay as the historical `glob()` record.
 - **R6 Rewrite precedence** is the total order in §4.3; two routes claiming one path
   keep today's rule (first matching route in manifest order wins) and `[static]` never
   changes matching.
@@ -608,7 +615,10 @@ inverse of days-from-civil (~30 lines, pure). Vectors: `0` →
 `1700000000` → `Tue, 14 Nov 2023 22:13:20 GMT`.
 
 `immutable` glob vectors (the matcher is ~30 lines, no regex; `MB.2.3` validates the
-same syntax and both suites use this table):
+same syntax and both suites use this table). **Superseded 2026-11-17 (`MB.31.2`):**
+these are the retired `glob()` semantics, kept as the record; the matcher is now
+`pattern::compile` + `routing::compile_pattern`, and the reference's
+[Path patterns](../../reference/blastfile.md#path-patterns) table is the contract.
 
 | Pattern | Answering path | Match |
 |---|---|---|
@@ -1011,6 +1021,8 @@ executable unprivileged; it is `MB.2.7`'s.
 7. **`**` recursive globs** — rejected for 0.2.0: the page documents one metacharacter
    and says `*` stops at `/`; a nested output directory uses one pattern per depth, and
    a later docs node can add `**` with the page change it needs.
+   *(Superseded 2026-11-17, `MB.31.2`: `immutable` uses the `view` pattern grammar, so a
+   trailing `/*` crosses `/` and no `**` was needed; §4.5's note names the replacement.)*
 
 ---
 

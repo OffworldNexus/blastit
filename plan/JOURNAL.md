@@ -3020,3 +3020,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T22:11 [MB.25.2] (lead) status review -> done
 - 2026-11-17T22:11 [MB.25] (lead) gate passed: MB.25.1 (docs) and MB.25.2 (the event) both done; blastit-events 97/5/1, php-sapi 5/8/15/1, critical_php_backend 9, critical_php_embed 27 (x4 incl.
 - 2026-11-17T22:11 [MB.25] (lead) status ready -> done
+- 2026-11-17T22:12 [MB.31.1] (lead) status ready -> active
+- 2026-11-17T22:12 [MB.31.1] (lead) attempt 1/3 started
+- 2026-11-17T22:12 [MB.31.1] (lead) base df44f98
+- 2026-11-17T22:32 [MB.31.1] (lead) edited fields
+- 2026-11-17T22:32 [MB.31.1] (lead) docs done: three shapes documented against pattern.rs, staircase purged from Django/reference/SPA/Laravel/ADR-0012/ADR-0007/designs, docs_fences pinned to the s
+- 2026-11-17T22:32 [MB.31.1] (lead) status active -> review
+- 2026-11-17T22:46 [MB.31.1] (lead) edited fields
+- 2026-11-17T22:46 [MB.31.1] (lead) reviewer VERDICT PASS (6 MINOR). Fixed the path names to the real critic files (immutable-pattern-grammar.review-*). The other five MINORs are doc-accuracy item
+- 2026-11-17T22:46 [MB.31.1] (lead) status review -> done

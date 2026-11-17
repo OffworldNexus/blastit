@@ -29,7 +29,7 @@ $ uvx blastit dev
 | `root` | the directory served, relative to the `Blastfile`; required |
 | `index` | the file a directory answers with, `index.html` by default |
 | `fallback` | the file a deep path that is no file answers with |
-| `immutable` | globs whose files never change, so a match gets the year-long cache |
+| `immutable` | files that never change; alone it caches every exact file, or list `"/assets/*"` patterns; a match gets the year-long cache |
 
 The reference has [the defaults and the matching rules](../reference/blastfile.md#static-mounts).
 
@@ -51,8 +51,9 @@ Content-Type: text/javascript
 Cache-Control: public, max-age=31536000, immutable
 ```
 
-The hashed asset's name changes when its bytes do, so `immutable` keeps it for a year. A deep path
-is no file, so `fallback` answers `public/index.html` with `no-cache`:
+The hashed asset's name changes when its bytes do, so `immutable` keeps it for a year.
+`"/assets/*"` crosses `/`, so `/assets/chunks/x.js` is cached too. A deep path is no file, so
+`fallback` answers `public/index.html` with `no-cache`:
 
 ```console
 $ curl -i http://127.0.0.1:8080/dashboard/settings

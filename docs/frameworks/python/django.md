@@ -48,8 +48,7 @@ view fallback "/*" {}
 
 static "/static" {
     root "staticfiles"
-    immutable "/static/*", "/static/*/*", "/static/*/*/*",
-              "/static/*/*/*/*", "/static/*/*/*/*/*", "/static/*/*/*/*/*/*"
+    immutable "/static/*"
 }
 ```
 
@@ -61,8 +60,10 @@ body sent to the catch-all is a `413`, so a body-taking view is declared above i
 
 Set `STATIC_ROOT = BASE_DIR / "staticfiles"` and `STATIC_URL = "/static/"`, then run
 `uv run python manage.py collectstatic --no-input` once: the mount's `root` must exist before
-`blastit dev` starts. The six `immutable` patterns are one per depth, because `*` stops at `/`; the
-deepest reaches the admin's `select2/i18n` files.
+`blastit dev` starts. One `immutable "/static/*"` reaches every depth, `select2/i18n` included: a
+trailing `/*` crosses `/`, exactly as in a `view` pattern. `collectstatic` leaves the unhashed
+copies beside the hashed ones, so that line pins both; to cache hashed names only, use
+`immutable regex '/static/.+\.[0-9a-f]{12}\.[^/]+'`.
 
 ## Database settings
 

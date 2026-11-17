@@ -797,8 +797,8 @@ fn a_page_whose_count_drifted_is_named() {
 #[test]
 fn the_django_page_static_fragment_still_parses() {
     // `docs/frameworks/python/django.md` carries the `static` mount inside its
-    // document; §16.1 keeps it parsed so the six-segment `immutable` list cannot
-    // drift into prose.
+    // document; §16.1 keeps it parsed so its one `immutable` pattern cannot drift
+    // into prose. `MB.31.2` strengthens this to the typed pattern form.
     let root = workspace_root();
     let document = std::fs::read_to_string(root.join("docs/frameworks/python/django.md"))
         .expect("the Django page exists");
@@ -810,7 +810,7 @@ fn the_django_page_static_fragment_still_parses() {
     let mount = &manifest.mounts()[0];
     assert_eq!(mount.prefix, "/static");
     assert_eq!(mount.policy.root, "staticfiles");
-    assert_eq!(mount.policy.immutable.len(), 6, "one pattern per depth");
+    assert_eq!(mount.policy.immutable, ["/static/*"]);
 }
 
 #[test]
