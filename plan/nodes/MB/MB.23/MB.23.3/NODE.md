@@ -2,7 +2,7 @@
 id: MB.23.3
 title: "blastit-sys unprivileged fanotify watcher (x86_64/aarch64 x gnu/musl) with AT_HANDLE_FID handle table, critical event tests and the zero-inotify binary guard"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.23.2]
@@ -13,11 +13,11 @@ paths:
   - "scripts/check-no-inotify.sh"
   - Makefile
   - docs/knowledge/LESSONS.md
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:12"
-updated: "2026-11-16T23:22"
+updated: "2026-11-17T10:48"
 ---
 
 # Goal

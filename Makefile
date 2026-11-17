@@ -112,6 +112,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 
 .PHONY: help check clean guard critical-guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python seam-check \
+        no-inotify \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
         rs-test-php rs-test-php-image platform-matrix-check standalone standalone-glibc workflow-check \
@@ -206,6 +207,9 @@ rs-no-python: ## Build + inspect the default (standalone) binary: no libpython, 
 	@echo "cargo build -p blastit --locked            # the default build is the standalone artifact"
 	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked
 	scripts/check-portable-elf.sh "$(CURDIR)/target/debug/blastit"
+	@echo "scripts/check-no-inotify.sh                # the only watcher is fanotify (ADR-0014)"
+	scripts/check-no-inotify.sh "$(CURDIR)/target/debug/blastit"
+	scripts/check-no-inotify.sh --self-test
 	@echo "cargo check -p blastit-view --no-default-features"
 	$(CARGO) check -p blastit-view --no-default-features --locked
 	@echo "cargo test  -p blastit --lib --locked      # the default configuration"
@@ -223,6 +227,24 @@ rs-no-python: ## Build + inspect the default (standalone) binary: no libpython, 
 		exit 1; \
 	fi; \
 	echo "default build: 0 pyo3 dependencies (no libpython linked)"
+
+# The one watcher (`MB.23.3`, ADR-0014): `inotify` is banned outright — not as a
+# fallback, not behind a flag, not in a dependency — and `scripts/check-no-inotify.sh`
+# is the mechanical proof, in three checks (dynamic symbols in a named ELF, the
+# default build's dependency graph, and every tracked **and untracked** source
+# file, including the group syscall and the watcher constructor outside their one
+# module). It builds the binary first so `make check` never scans a missing file,
+# and its `--self-test` plants a call in a scratch copy and in an untracked file,
+# a second constructor call, a symbol in a fake `readelf` dump and a crate in a
+# fake `cargo tree` dump, so a guard that cannot fail is itself a red gate.
+# `make check` runs both lines through `rs-no-python`, which builds the binary.
+no-inotify: ## Refuse an inotify symbol, crate or call site; prove the guard can fail
+	@if [ ! -x "$(CURDIR)/target/debug/blastit" ]; then \
+		echo "cargo build -p blastit --locked                    # the binary the symbol check reads"; \
+		$(STANDALONE_ENV) $(CARGO) build -p blastit --locked; \
+	fi
+	scripts/check-no-inotify.sh "$(CURDIR)/target/debug/blastit"
+	scripts/check-no-inotify.sh --self-test
 
 # The test-only boot seam (`MB.3.64`) is a debug build's: `#[cfg(debug_assertions)]`
 # compiles the rendezvous — and the variable's name — out of a release build, and

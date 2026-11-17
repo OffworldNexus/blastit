@@ -136,6 +136,7 @@ mod signal;
 mod sock;
 
 pub mod caps;
+pub mod fanotify;
 pub mod mem;
 
 #[cfg(any(test, feature = "testutil"))]
@@ -144,6 +145,7 @@ pub mod testutil;
 pub use crate::caps::{CapSet, Capabilities, Capability, Held, PrivilegeMode};
 pub use crate::error::Error;
 pub use crate::exec::{exe_path, exec};
+pub use crate::fanotify::{Event, Readout, Watcher, WatcherError};
 pub use crate::fd::{
     close_fds_except, close_fds_except_scan, dup_onto, fd_is_cloexec, set_cloexec,
 };

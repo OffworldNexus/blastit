@@ -26,6 +26,11 @@ paths:
   - "crates/blastit-dbproxy/src/config.rs"
   - "crates/blastit-dbproxy/src/learn.rs"
   - "crates/blastit-dbproxy/src/state.rs"
+  - crates/blastit/src/stage0.rs
+  - "crates/blastit-dbproxy/src/lib.rs"
+  - "crates/blastit-dbproxy/src/config.rs"
+  - "crates/blastit-dbproxy/src/learn.rs"
+  - "crates/blastit-dbproxy/src/state.rs"
   - "crates/blastit-dbproxy/src/server.rs"
   - ARCHITECTURE.md
   - crates/blastit/tests/critical_dev_reload.rs
@@ -33,11 +38,12 @@ paths:
   - Makefile
   - "scripts/check-no-test-seam.sh"
   - python/tests/runnable_docs/inventory.toml
+  - "docs/design/dev-fanotify-reload.md"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:13"
-updated: "2026-11-17T09:18"
+updated: "2026-11-17T10:39"
 ---
 
 # Goal

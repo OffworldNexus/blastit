@@ -2733,3 +2733,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T10:11 [MB.26.8] (lead) status review -> done
 - 2026-11-17T10:18 [MB.24] (lead) gate passed: all four children done; plan validate OK; blastit-scheduler + critical_parallel_views green; make check exit 2 only on the MB.23.5-owned --no-reloa
 - 2026-11-17T10:18 [MB.24] (lead) status ready -> done
+- 2026-11-17T10:18 [MB.23.3] (lead) status ready -> active
+- 2026-11-17T10:18 [MB.23.3] (lead) attempt 1/3 started
+- 2026-11-17T10:18 [MB.23.3] (lead) base b2196e8
+- 2026-11-17T10:34 [MB.23.3] (lead) implementer done: fanotify.rs (0x0c03, AT_HANDLE_FID handle table, no poll thread), critical_fanotify real-kernel suite 4/4, check-no-inotify.sh wired into make
+- 2026-11-17T10:34 [MB.23.3] (lead) status active -> review
+- 2026-11-17T10:39 [MB.23.5] (lead) edited fields
+- 2026-11-17T10:48 [MB.23.3] (lead) make check after polish: 171 test targets ok, only the MB.23.5 --no-reload fence fails (docs-test runs before rs-no-python, so the guard was verified separately
+- 2026-11-17T10:48 [MB.23.3] (lead) status review -> done
