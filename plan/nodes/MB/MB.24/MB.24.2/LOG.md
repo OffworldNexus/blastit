@@ -67,3 +67,7 @@ status review -> done
 ## 2026-11-17T06:31 [lead]
 
 reviewer PASS (attempt 3). Residual MINORs for the epic gate: (1) review-implementability.md:37 heading still says the residual MINORs are 'unchanged' although the round-5 annex marks m5/m6/m7/m10 fixed; (2) review-testability.md:41 still calls R14's isolation legs 'unmodified' while parallel-views.md:1241 says 'except the one widened leg R10 owns'; (3) the MB.23.5 order request should also ask that MB.23.5/NODE.md's Goal lose the sentence claiming Ctl::Reload 0x45 lives in blastit-frame.
+
+## 2026-11-17T06:31 [lead]
+
+committed 29fe7b4 on release/0.2.0
