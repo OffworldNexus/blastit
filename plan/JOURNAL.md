@@ -2588,3 +2588,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T06:13 [MB.21.7] (lead) verified: grep empty, only docs/frameworks/php/ dir, ONE clean make e2e on an idle host -> EXIT=0, 311 PASS/ok, 0 FAIL; make doc-tone ok; make docs-check No iss
 - 2026-11-17T06:13 [MB.21.7] (lead) status active -> done
 - 2026-11-17T06:13 [MB.23.2] (lead) status review -> done
+- 2026-11-17T06:13 [MB.23.2] (lead) committed 0c2c117 on release/0.2.0 after reviewer PASS + nine MINORs resolved.
+- 2026-11-17T06:13 [MB.25.1] (lead) status active -> done

@@ -15,6 +15,15 @@ $ uv run blastit dev
 
 It reads `./Blastfile` here (no parent search), binds `127.0.0.1:8080` only, and
 prints pretty logs (`BLASTIT_LOG_FORMAT` wins); the banner stays for the run.
+Startup prints one `runtime` line naming what it will run:
+
+| `Blastfile` | `blastit dev` prints |
+|---|---|
+| `entrypoint php "public/index.php"` | `00:11:36.867 INFO  runtime     php 8.5.4  libphp /usr/lib/libphp8.5.so  php.ini /etc/php/8.5/embed/php.ini` |
+| `entrypoint python "app:app"` | `00:11:36.867 INFO  runtime     python 3.14.0  environment /home/you/shop/.venv` |
+| no `entrypoint` | `00:11:36.867 INFO  runtime     static  serving static assets only` |
+
+`php.ini` is the file PHP actually loads; `none` means built-in defaults.
 
 Edits reload your views, all together. `--no-reload` turns that off.
 

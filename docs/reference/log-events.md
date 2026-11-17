@@ -34,6 +34,7 @@ and `parts`.
 | `process.cap` | the measured cost or the live cap changed | `estimate_bytes`, `cap` |
 | `app.output` | the app or a library printed something | `stream`, `line`, `part`, `parts` |
 | `boot`, `ready`, `shutdown` | the server's lifecycle | see below |
+| `runtime` | what the entrypoint resolved to, at boot and after a change that alters it | `entrypoint` (`php`, `python`, `static`), and only the fields its row lists — see below |
 | `manifest.warning` | the manifest is usable but has a problem | `message` |
 | `dev.reload` | `blastit dev` replaced every view after a save | `routes` (all of them), `files` (what changed), `reason` (`loaded`, `preload`, `blastfile`, `overflow`) |
 | `dev.reload.unavailable` | `blastit dev` could not watch anything at boot; the server serves | `errno`, `filesystem` |
@@ -42,7 +43,7 @@ and `parts`.
 change `routes` lists every route serving after the reload, `files` the absolute
 paths that triggered it, and `reason` is `loaded` (a file the app loaded), `preload`
 (a `preload` module), `blastfile` (the `Blastfile`) or `overflow` (changes were
-dropped, so it reloads all). `dev.reload.unavailable` is the one `warn` at boot:
+dropped, so it reloads all). `dev.reload.unavailable` is a `warn` at boot:
 watching is a dev convenience, so the server serves without it; `errno` is the
 symbolic name (`"EPERM"`), `filesystem` the filesystem type (`"overlayfs"`).
 `--no-reload` emits neither, `blastit check` and `blastit test` never watch, and
@@ -82,6 +83,32 @@ its own.
 the **names** of the output variables per proxy, never their values. `shutdown`
 reports the phase (`drain`, `stopped`, or `<component>-died`) and why a component
 went away.
+
+## The `runtime` line
+
+`runtime` is `info` (`component: "init"`), one line each time the entrypoint
+resolves: at boot in `blastit dev` and in server mode, and in `blastit dev` again
+after a `Blastfile` change that alters it, so the latest line names what is
+serving. A resolved runtime is not a problem.
+
+| `entrypoint` | Fields |
+|---|---|
+| `php` | `version` (`"8.5.4"`), `libphp` (the resolved path), `php_ini` (the file opened, or `null` when none is) |
+| `python` | `version` (`"3.14.0"`), `environment` (`VIRTUAL_ENV` when set, else `sys.prefix`) |
+| `static` | `entrypoint` only: no language runtime is loaded |
+
+A field a row does not list is absent from the object, never `null`. Blastit
+strips `PHPRC` and `PHP_INI_SCAN_DIR` from the view's environment, so `php_ini`
+is the file actually opened. `pretty` prints the entrypoint and `version`, then
+the labelled fields `libphp`, `php.ini` and `environment`, two spaces apart; a
+`null` `php_ini` prints `php.ini none`, and `static` is followed by
+`serving static assets only`.
+
+`runtime` is never `warn`: `warn` is a separate event and means something needs
+attention — `manifest.warning` (`unrestricted`, `egress any`, a `postgres` store
+that no view or trait reaches, a `raw` body — both shapes in `blastit dev`, only
+the acknowledged `body raw unvalidated` in production — an unused `trait`, an
+`entrypoint php` that no view reaches) and `dev.reload.unavailable`.
 
 ## What is never logged
 

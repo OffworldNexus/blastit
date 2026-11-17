@@ -3,7 +3,7 @@
 - generated: 2026-11-17T06:13
 - autopilot: on
 - current milestone: MB Modern 12-Factor Backends: Static, PHP (embedded libphp), Vite/Node, Tomcat (0.2.x) [ready]
-- tasks: proposed=4, ready=43, active=3, done=198, superseded=11
+- tasks: proposed=4, ready=43, active=2, done=199, superseded=11
 - open human requests: 2 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 11; expensive spent: $173.87 of $200.00 cap (87%)
 
@@ -23,12 +23,12 @@
 - execute: MB.21.8 A queued request must never be handed to a retired PHP view (502 view_died under 8-way concurrency)
 - execute: MB.23.3 blastit-sys unprivileged fanotify watcher (x86_64/aarch64 x gnu/musl) with AT_HANDLE_FID handle table, critical event tests and the zero-inotify binary guard
 - execute: MB.23.4 Report the preload phase's and each dev view's loaded files: Python sys.modules + open audit hook, PHP EG(included_files) via a dlsym sink, one bounded datagram codec, no route map
+- execute: MB.25.2 Emit the INFO runtime event: PHP version + php_ini_opened_path via the C SAPI, Python version + environment, static-only summary; retire the WARN line
 - execute: MB.3.5.2 Entry + libphp probes, boot predicates and the manifest reference entry for [route.php]
 - execute: MB.3.15 Protected critical_backend_capability suite: the design R12 refusal matrix in both build configurations
 - execute: MB.3.22 Close MB.3.5.4 review MINORs: PHP-only BLASTIT_APP refusal, check's pytest branch, Route::executor, dead key field
 - execute: MB.3.24 WsgiRuntime on WorkerRuntime + protected critical_view_transport.rs (no behaviour change)
 - execute: MB.3.26 Subreaper + WNOWAIT, BLASTIT_ALLOW_EGRESS=1 as a security switch, R4 budget and the 4x3 residue matrix
-- execute: MB.3.68 The unsupported-minor sentence must not fire on a supported library at an unprobed name
 
 ## Stuck / attention
 
@@ -36,8 +36,6 @@
 
 ## Recent journal
 
-- 2026-11-17T06:03 [MB.22.3] (lead) base 053b56e
-- 2026-11-17T06:05 [MB.24.2] (lead) status active -> review
 - 2026-11-17T06:08 [MB.21.7] (planner) created (task) Repoint the e2e harness at the moved PHP page and replay its two commands
 - 2026-11-17T06:08 [MB.21.8] (planner) created (task) A queued request must never be handed to a retired PHP view (502 view_died under 8-way concurrency)
 - 2026-11-17T06:09 [MB.21.8] (planner) edited fields
@@ -51,3 +49,5 @@
 - 2026-11-17T06:13 [MB.21.7] (lead) verified: grep empty, only docs/frameworks/php/ dir, ONE clean make e2e on an idle host -> EXIT=0, 311 PASS/ok, 0 FAIL; make doc-tone ok; make docs-check No iss
 - 2026-11-17T06:13 [MB.21.7] (lead) status active -> done
 - 2026-11-17T06:13 [MB.23.2] (lead) status review -> done
+- 2026-11-17T06:13 [MB.23.2] (lead) committed 0c2c117 on release/0.2.0 after reviewer PASS + nine MINORs resolved.
+- 2026-11-17T06:13 [MB.25.1] (lead) status active -> done

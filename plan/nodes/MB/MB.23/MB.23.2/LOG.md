@@ -35,3 +35,7 @@ STATUS done from designer (attempt 1): design + ADR-0014 + 4 lens critics all PA
 ## 2026-11-17T06:13 [lead]
 
 status review -> done
+
+## 2026-11-17T06:13 [lead]
+
+committed 0c2c117 on release/0.2.0 after reviewer PASS + nine MINORs resolved.
