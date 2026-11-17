@@ -46,6 +46,8 @@ pub enum Command {
     Check,
     /// `blastit fmt`: rewrite a `Blastfile` in the canonical layout (`R19`).
     Fmt,
+    /// `blastit lsp`: speak LSP on stdin/stdout for an editor (`MB.22.3`).
+    Lsp,
 }
 
 impl Command {
@@ -55,6 +57,7 @@ impl Command {
             Some("dev") => Self::Dev,
             Some("check" | "test") => Self::Check,
             Some("fmt") => Self::Fmt,
+            Some("lsp") => Self::Lsp,
             _ => Self::Serve,
         }
     }
@@ -153,6 +156,7 @@ usage:
   blastit check [--json] [--learn [--dry-run]] [-- ARGS...]
                                             audit a pytest suite (alias: test)
   blastit fmt [--check] [PATH]              rewrite a Blastfile in canonical layout
+  blastit lsp                               speak LSP on stdin/stdout (editors)
   blastit --stage=1 --config-fd=N \\
           [--dbproxy-pid=P --dbproxy-events-fd=N \\
            --dbproxy-stdout-fd=N --dbproxy-stderr-fd=N]   stage 1
@@ -210,6 +214,20 @@ fn fmt_usage() -> String {
     FMT_USAGE.replace("{env}", crate::config::MANIFEST_ENV)
 }
 
+/// `blastit lsp --help` (`MB.22.3`; `docs/reference/cli.md` `## blastit lsp`).
+const LSP_USAGE: &str = "\
+usage: blastit lsp
+
+Reads LSP messages on stdin and answers on stdout, for an editor to spawn:
+`blastit lsp` takes no argument and no file, reads no `BLASTIT_*` variable,
+opens no path and holds no privilege. Diagnostics, formatting and hover go to
+the editor, not to a terminal, so there is nothing else to print.
+
+  -h, --help    print this help
+
+Exit codes: 0 after the client said `shutdown`, 1 if it disappeared without
+one, 2 a command-line error.";
+
 /// Runs the role the command line names, in the installation `host` describes.
 ///
 /// `py` is the interpreter the caller is running in, when there is one:
@@ -259,6 +277,17 @@ pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
                 FMT_FAILURE
             }
         },
+        Command::Lsp => match parse_lsp(&argv[1..]) {
+            Ok(Subcommand::Help) => {
+                println!("{LSP_USAGE}");
+                SUCCESS
+            }
+            Ok(Subcommand::Run(())) => run_lsp(),
+            Err(message) => {
+                eprintln!("blastit lsp: {message}");
+                LSP_FAILURE
+            }
+        },
         Command::Serve => {
             // E1: the usage text lists the presets with their one-line
             // descriptions, which is the only way to find out what `--preset`
@@ -296,6 +325,10 @@ const FMT_FAILURE: u8 = 2;
 
 /// `blastit fmt --check`'s "this file is not in canonical layout" (`R19`).
 const FMT_NOT_CANONICAL: u8 = 1;
+
+/// `blastit lsp`'s command-line failure: an argument it does not take is a CLI
+/// error, not a session (`docs/design/blastfile-lsp-zed.md` §2.4).
+const LSP_FAILURE: u8 = 2;
 
 /// Parses and validates `blastit dev`'s arguments (`R2`).
 ///
@@ -475,6 +508,57 @@ fn parse_fmt(arguments: &[String]) -> Result<Subcommand<FmtOptions>, String> {
         }
     }
     Ok(Subcommand::Run(FmtOptions { check, path }))
+}
+
+/// Parses and validates `blastit lsp` (`MB.22.3`).
+///
+/// The session has no argument: the editor writes the protocol on stdin and
+/// reads it on stdout, so anything else on the command line is a CLI error
+/// (`exit 2`) rather than a flag this server half-understands. `--help` wins
+/// wherever it appears, as it does for `fmt`.
+///
+/// # Errors
+///
+/// A one-line message naming the argument. Every rejection is `exit 2` with
+/// nothing on stdout.
+fn parse_lsp(arguments: &[String]) -> Result<Subcommand<()>, String> {
+    // `--help` wins wherever it appears, which is what makes
+    // `blastit lsp --bogus --help` print the help rather than refuse.
+    if arguments
+        .iter()
+        .any(|argument| argument == "-h" || argument == "--help")
+    {
+        return Ok(Subcommand::Help);
+    }
+    match arguments.first() {
+        None => Ok(Subcommand::Run(())),
+        Some(argument) => Err(format!(
+            "`{argument}` is not an argument: `blastit lsp` speaks LSP on \
+             stdin/stdout and reads no file"
+        )),
+    }
+}
+
+/// The `blastit lsp` session (`MB.22.3`).
+///
+/// The capability check comes **first**, before a byte of the editor's input is
+/// read: a binary carrying `CAP_*` would grant them to this process image, and a
+/// `Blastfile` is policy, not input, so an editor's text tool holds nothing.
+/// `hold_none` is the check, not the drop — a plain install has nothing to drop.
+///
+/// # Returns
+///
+/// [`crate::lsp::run`]'s exit status: `0` only after the client said `shutdown`,
+/// `1` when it disappeared without one.
+fn run_lsp() -> u8 {
+    if blastit_sys::caps::hold_none().is_err() {
+        // §11.3's fourth fixed sentence: a failure here is not the client's
+        // fault, and the error's own words name capabilities of the process,
+        // never a document. It goes to stderr, because stdout is the protocol.
+        eprintln!("blastit lsp: internal error");
+        return FAILURE;
+    }
+    crate::lsp::run()
 }
 
 /// The `blastit fmt` command (§14.4).

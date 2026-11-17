@@ -2624,3 +2624,31 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T06:14 HUMAN H-013 closed by conductor
 - 2026-11-17T06:14 [MB.21] (lead) status ready -> done
 - 2026-11-17T06:14 HUMAN H-014 closed by conductor
+- 2026-11-17T06:16 [MB.24.2] (lead) status active -> review
+- 2026-11-17T06:19 [MB.24.2] (lead) REVIEW FAIL (attempt 2): MAJOR parallel-views.md:1031 — the printed view_gone body iterates queued_for_streams(key.route) (&self borrow) while calling self.queu
+- 2026-11-17T06:19 [MB.24.2] (lead) status review -> ready
+- 2026-11-17T06:19 [MB.24.2] (lead) status ready -> active
+- 2026-11-17T06:19 [MB.24.2] (lead) attempt 3/3 started
+- 2026-11-17T06:19 [MB.21] (lead) RESULT corrected to the final state (e2e PASS 311/0; make check BLOCKED BY EXTERNAL with three proven causes; children incl. 21.6/21.7/21.8 and the MB.26 re-hom
+- 2026-11-17T06:20 [MB.23] (lead) lead: 23.1+23.2 done (055607b, 0c2c117). Final gate: validate/guard green and every make check target green EXCEPT rs-doc, which fails on another node's uncommi
+- 2026-11-17T06:20 [MB.25] (lead) lead: 25.1 done (ee8bfb7). 25.2 must keep the frozen /info/init///// words and the pretty shape printed in docs/local.md; docs_fences.rs and inventory.toml need
+- 2026-11-17T06:20 [MB.23] (lead) lead: correction to the line above — the rs-doc failure is two broken intra-doc links on `prefix` and `Display` at `crates/blastit-manifest/src/error.rs:1523`, 
+- 2026-11-17T06:20 [MB.25] (lead) lead: correction — the frozen words are `runtime` (level info, component init) with `entrypoint` and, per entrypoint, `version` + `libphp` + `php_ini` (php) or 
+- 2026-11-17T06:20 [MB.21] (lead) FINAL: rs-fmt/rs-lint now green (other sessions repaired their untracked files). make check still exit 2, now at rs-doc: 'public documentation for message links
+- 2026-11-17T06:22 [MB.24.2] (lead) status active -> review
+- 2026-11-17T06:23 [MB.22.3] (implementer) implemented: ManifestError::message() + exhaustive position() (34 explicit arms, no wildcard), blastfile::sites + check()/Checked, tests/warning_sites.rs; new l
+- 2026-11-17T06:28 [MB.22.3] (lead) status active -> review
+- 2026-11-17T06:29 [MB.26.8] (planner) edited fields
+- 2026-11-17T06:29 [MB.26.8] (strategist) status proposed -> ready: mandatory for 0.2.0: queued requests behind a retiring PHP worker must respawn and return 200, never 502 view_died
+- 2026-11-17T06:29 [MB.24] (conductor) Mandatory 0.2.0 companion: execute MB.26.8 right after MB.24.4 (or fold its one-slot 8-concurrent-GETs x 20 regression test into MB.24.3/MB.24.4 and prove MB.26
+- 2026-11-17T06:31 [MB.24.2] (lead) status review -> done
+- 2026-11-17T06:31 [MB.24.2] (lead) reviewer PASS (attempt 3). Residual MINORs for the epic gate: (1) review-implementability.md:37 heading still says the residual MINORs are 'unchanged' although 
+- 2026-11-17T06:31 [MB.24.2] (lead) committed 29fe7b4 on release/0.2.0
+- 2026-11-17T06:31 [MB.24.3] (planner) edited fields
+- 2026-11-17T06:31 [MB.24.4] (planner) edited fields
+- 2026-11-17T06:31 [MB.23.4] (planner) edited fields
+- 2026-11-17T06:31 [MB.23.5] (planner) edited fields
+- 2026-11-17T06:39 [MB.22.3] (lead) edited fields
+- 2026-11-17T06:39 [MB.22.3] (lead) paths widened to crates/blastit/src/lsp/** so the 940-line lsp.rs can split its hover data out (§1's 750-line bound)
+- 2026-11-17T06:43 [MB.22.3] (implementer) minor round: removed the masking empty-body frames (over-cap and junk-header firings now each read their own -32700); Session::drain_stdout + empty-after-exit a
+- 2026-11-17T06:43 [MB.22.3] (lead) status review -> done

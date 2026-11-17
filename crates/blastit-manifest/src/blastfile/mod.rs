@@ -47,6 +47,7 @@ mod lower;
 mod parser;
 mod pattern;
 mod print;
+mod sites;
 mod syntax;
 mod tokens;
 pub(crate) mod write;
@@ -64,7 +65,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::edit::{BlastfileEditor, EditError, Editor as _};
-use crate::error::{ManifestError, ManifestErrors, ManifestWarning, escape_control};
+use crate::error::{ManifestError, ManifestErrors, ManifestWarning, Position, escape_control};
 use crate::model::Manifest;
 
 /// `TableGrant` is `blastit-sqlpolicy`'s (the crate the analysis and dbproxy
@@ -199,7 +200,12 @@ pub fn apply_edits(source: &str, edits: &BlastfileEdits) -> Result<String, EditE
 }
 
 /// Largest `Blastfile` [`read`] accepts, in bytes (§4.5): 16 MiB.
-pub(crate) const MAX_SOURCE_BYTES: usize = 16_777_216;
+///
+/// Public because an editor's own inbound bound is derived from it: a frame
+/// that can carry a legal `Blastfile` is `2 × MAX_SOURCE_BYTES + 65_536`
+/// (`docs/design/blastfile-lsp-zed.md` §3.1), and writing that constant from the
+/// parser's own cap is what keeps the two from drifting apart.
+pub const MAX_SOURCE_BYTES: usize = 16_777_216;
 
 /// Most tokens one `Blastfile` may hold (§4.5).
 pub(crate) const MAX_TOKENS: usize = 4_194_304;
@@ -275,6 +281,43 @@ fn unreadable(error: std::io::Error) -> ManifestErrors {
         message: escape_control(&error.to_string()),
     }
     .into()
+}
+
+/// One `Blastfile` read the way an editor needs it: the model, its warnings, and
+/// the source position of each warning, in the same order.
+///
+/// `sites.len() == warnings.len()` by construction, so a caller zips the two.
+#[derive(Debug, Clone)]
+pub struct Checked {
+    /// The lowered, validated manifest.
+    pub manifest: Manifest,
+    /// The non-fatal warnings, exactly as [`Manifest::validate`] emits them.
+    pub warnings: Vec<ManifestWarning>,
+    /// The 1-based site of each warning, or [`Position::NONE`] when the
+    /// declaration is not in the tree.
+    pub sites: Vec<Position>,
+}
+
+/// Parses, lowers, validates and locates each warning (§5.5).
+///
+/// This is [`Manifest::parse_blastfile`] plus the one CST walk that
+/// `parse_blastfile` drops: the tree has to stay in memory for the warning
+/// sites, and an editor is the only caller that wants them. Nothing else
+/// changes — the manifest, its warnings and their order are the boot's.
+///
+/// # Errors
+///
+/// Everything [`Manifest::parse_blastfile`] refuses.
+pub fn check(source: &str, base: u32) -> Result<Checked, ManifestErrors> {
+    let cst = parser::parse(source)?;
+    let manifest = lower::lower(&cst, source)?;
+    let warnings = manifest.validate(base)?;
+    let sites = sites::sites(&cst, source, &warnings);
+    Ok(Checked {
+        manifest,
+        warnings,
+        sites,
+    })
 }
 
 impl Manifest {

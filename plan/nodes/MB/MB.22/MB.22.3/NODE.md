@@ -2,7 +2,7 @@
 id: MB.22.3
 title: "Add structured manifest spans and implement blastit lsp (stdio JSON-RPC) with protected framing/UTF-16/diagnostics/formatting tests"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.22.2]
@@ -11,15 +11,16 @@ paths:
   - "crates/blastit-manifest/src/blastfile/**"
   - "crates/blastit-manifest/tests/**"
   - crates/blastit/src/lsp.rs
+  - "crates/blastit/src/lsp/**"
   - crates/blastit/src/cli.rs
   - crates/blastit/src/lib.rs
   - crates/blastit/src/main.rs
   - crates/blastit/tests/critical_lsp.rs
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T09:16"
-updated: "2026-11-16T09:16"
+updated: "2026-11-17T06:43"
 ---
 
 # Goal

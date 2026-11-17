@@ -37,6 +37,7 @@ pub mod cli;
 pub mod config;
 pub mod host;
 pub mod infer_routes;
+pub mod lsp;
 pub mod mem_usage;
 
 mod child;
