@@ -63,4 +63,4 @@ so a real request takes a real route. A path no view matches gets Blastit's own
   reading a denial.
 * [CI/CD](ci.md) — one command that proves nothing was forgotten.
 * [Deployments](deploy/index.md) — presets, and what production refuses.
-* [Django](frameworks/django.md) · [Flask and other WSGI apps](frameworks/flask.md).
+* [Django](frameworks/python/django.md) · [Flask, SQLAlchemy and raw WSGI](frameworks/python/flask.md).

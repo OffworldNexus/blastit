@@ -455,7 +455,7 @@ fn django_document(
         return Err(
             "pytest-django is installed but the Blastfile declares no postgresql proxy, \
              so its test database has nowhere to go; declare a `postgres` store: \
-             `postgres $DATABASE_URL` (see docs/frameworks/django.md), or remove \
+             `postgres $DATABASE_URL` (see docs/frameworks/python/django.md), or remove \
              pytest-django from the environment blastit audits"
                 .to_string(),
         );

@@ -2447,3 +2447,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T01:40 [MB.21.5.13] (test-curator) created (task) Close the printer and pattern-name survivors (four corpus cases, five mutants)
 - 2026-11-17T01:40 [MB.21.5.13] (test-curator) count in the title/acceptance corrected to six mutants (the paren row is three)
 - 2026-11-17T02:55 [MB.20] (lead) outline docs/design/frameworks-restructure.md written; goldfish critics on disk: dx VERDICT: PASS, ai-ergonomics VERDICT: PASS (both before any page prose). MIN
+- 2026-11-17T03:20 [MB.20] (lead) edited fields
+- 2026-11-17T03:20 [MB.20] (lead) edited fields
+- 2026-11-17T04:00 [MB.20] (lead) visual-checker VERDICT: PASS — 8 pages, light/dark/390x844, group drawer lists all 8, all 4 anchor jumps land, no clipping.
+- 2026-11-17T04:10 [MB.21.5.14] (test-curator) created (task) Close the surgical editor's thirteen testable survivors (names, cross-view patches, one-line empty blocks)
+- 2026-11-17T04:38 [MB.20] (lead) edited fields
+- 2026-11-17T04:38 [MB.20] (lead) reviewer VERDICT: PASS (7 MINOR). Applying 5 cheap MINORs (RESULT visual status, troubleshooting SSL row, laravel/symfony restatement, chooser mobile links, dup
+- 2026-11-17T04:44 [MB.20] (lead) make check EXIT=0 (166 suites, docs+rust+critical+plan green); validate OK; guard OK; critical-guard: no protected test touched.
+- 2026-11-17T04:44 [MB.20] (lead) status active -> done

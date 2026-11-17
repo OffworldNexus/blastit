@@ -10,7 +10,7 @@ that cannot fail is worse than no guard:
 2. **The guard names the hit.** A dirty fixture exits non-zero and prints
    `path:line: banned phrase "..."` for each phrase.
 3. **The covered set is the user-facing one.** `README.md` and
-   `docs/frameworks/php.md` are read; `docs/design/`, `docs/decisions/`,
+   `docs/frameworks/` are read; `docs/design/`, `docs/decisions/`,
    `docs/research/`, `docs/knowledge/`, `docs/testing/` and `docs/VISION.md` are
    not, even when they contain a banned phrase.
 
@@ -109,7 +109,7 @@ def test_the_repository_is_clean() -> None:
     assert findings == [], findings
     pages = guard.covered(REPO)
     assert REPO / "README.md" in pages
-    assert REPO / "docs" / "frameworks" / "php.md" in pages
+    assert REPO / "docs" / "frameworks" / "php" / "index.md" in pages
 
 
 @pytest.mark.parametrize(

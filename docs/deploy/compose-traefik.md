@@ -166,7 +166,7 @@ a deployment where a *shared* interpreter carries them
 
 ### 5. Compose
 
-Start from the [Django guide](../frameworks/django.md#manifest)'s `Blastfile` and
+Start from the [Django guide](../frameworks/python/django.md#manifest)'s `Blastfile` and
 change two things: the split `postgres` block with `$DATABASE_CA_CERT` beside
 `$DATABASE_URL` (`ca_cert` only for a network database, with `sslmode`
 `verify-full`), and the grants filled in — the guide's `postgres {}` denies every

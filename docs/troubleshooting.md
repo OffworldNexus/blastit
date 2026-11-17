@@ -67,7 +67,7 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `53300` | the upstream cap (`BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS`) is reached |
 | a `SAVEPOINT` refused | the view needs `transactions` in its `postgres` block |
 | `DECLARE "_django_curs_…"` refused | a named cursor, new per request: turn server-side cursors off |
-| everything is denied at once | the app inlines its parameters; [what an app must do](frameworks/index.md#bind-parameters-server-side) |
+| everything is denied at once | the app inlines its parameters; [what an app must do](frameworks/python/index.md#bind-parameters-server-side) |
 | the statement looks identical to the grant | `$1` compares as `$?`, whitespace collapses; a different column list misses |
 
 ## The app sees it differently
@@ -77,7 +77,7 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `REMOTE_ADDR` is the load balancer's | `BLASTIT_TRUSTED_PROXIES` does not name it; [measure it](deploy/index.md#measure-your-ingress) |
 | `REMOTE_ADDR` is forged | the header read is one the ingress passes through; read another |
 | `REMOTE_ADDR` carries a port | it is a bare IP; the peer's port is `REMOTE_PORT` |
-| `request.is_secure()` is false behind TLS | `X-Forwarded-Proto` is not from a trusted peer, or `SECURE_PROXY_SSL_HEADER` is missing |
+| `request.is_secure()` is false behind TLS | `BLASTIT_TRUSTED_PROXIES` does not name the edge |
 | a variable the app expected is gone | `BLASTIT_*`, the proxy inputs and `BLASTIT_ENV_STRIP` are removed |
 
 ## Rootless and memory

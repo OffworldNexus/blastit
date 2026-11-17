@@ -25,10 +25,11 @@
 //! * **illustration** — every other fence, whatever its language.
 //!
 //! The per-page table is the drift rule: `PAGES` pins documents + illustrations
-//! for every page that carries a document, `STATEMENT_LISTS` pins the pages that
-//! carry statement lists, and the exhaustive scan walks `README.md` and every
-//! `*.md` under `docs/**` (except the dated record) so a document fence on an
-//! unpinned page fails rather than silently joining the illustrations.
+//! for every pinned page (the `/frameworks` chooser included, at zero
+//! documents), `STATEMENT_LISTS` pins the pages that carry statement lists, and
+//! the exhaustive scan walks `README.md` and every `*.md` under `docs/**`
+//! (except the dated record) so a document fence on an unpinned page fails
+//! rather than silently joining the illustrations.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fmt;
@@ -58,38 +59,44 @@ const STATEMENT_KEYWORDS: [&str; 6] = ["app", "entrypoint", "postgres", "trait",
 /// asserts in both directions.
 const THE_RETIRED_OPENING_IS_GONE: bool = true;
 
-/// The pages the site publishes that carry a complete document, and how many
-/// documents and illustrations each carries (measured 2026-11-16, then pinned).
+/// The pages the site publishes whose fences are pinned, and how many documents
+/// and illustrations each carries (measured 2026-11-17 against the
+/// language-first `docs/frameworks/` tree, then pinned).
 ///
 /// A page that gains a document is added here with its count, and one that drops
-/// a document lowers it. The exhaustive scan below adds a second rule: a
-/// document on a page absent from this table fails rather than being absorbed by
-/// "some illustration".
-const PAGES: [(&str, Counts); 10] = [
+/// a document lowers it — `docs/frameworks/index.md` is pinned at zero documents
+/// because the chooser carries no fence at all and must never gain one
+/// unnoticed. The exhaustive scan below adds a second rule: a document on a page
+/// absent from this table fails rather than being absorbed by "some
+/// illustration".
+const PAGES: [(&str, Counts); 13] = [
     ("README.md", Counts::new(1, 4)),
     ("docs/index.md", Counts::new(1, 1)),
     ("docs/getting-started.md", Counts::new(1, 4)),
     ("docs/local.md", Counts::new(1, 6)),
-    ("docs/frameworks/index.md", Counts::new(1, 0)),
-    ("docs/frameworks/django.md", Counts::new(1, 2)),
-    ("docs/frameworks/flask.md", Counts::new(1, 3)),
-    ("docs/frameworks/php.md", Counts::new(1, 3)),
+    ("docs/frameworks/index.md", Counts::new(0, 0)),
+    ("docs/frameworks/python/index.md", Counts::new(1, 0)),
+    ("docs/frameworks/python/django.md", Counts::new(1, 2)),
+    ("docs/frameworks/python/flask.md", Counts::new(1, 2)),
+    ("docs/frameworks/php/index.md", Counts::new(1, 3)),
+    ("docs/frameworks/php/symfony.md", Counts::new(1, 0)),
+    ("docs/frameworks/php/laravel.md", Counts::new(1, 0)),
     ("docs/frameworks/static-and-spa.md", Counts::new(1, 6)),
     ("docs/blastfile.md", Counts::new(1, 3)),
 ];
 
-/// The whole pinned set: one `text title="Blastfile"` document per page, and
-/// every illustration on those ten pages.
-const TOTAL: Counts = Counts::new(10, 32);
+/// The whole pinned set: one `text title="Blastfile"` document on each of the
+/// twelve pages that carry one (the chooser carries none), and every
+/// illustration on those thirteen pages.
+const TOTAL: Counts = Counts::new(12, 31);
 
 /// Pages whose plain `text` fences are statement lists: syntax, not documents
 /// and not illustrations (§16.1). `docs/reference/blastfile.md` is deliberately
 /// absent from `PAGES` — it carries statement lists only — but its count is
 /// pinned here so a fence cannot vanish unnoticed.
-const STATEMENT_LISTS: [(&str, usize); 4] = [
+const STATEMENT_LISTS: [(&str, usize); 3] = [
     ("docs/ci.md", 1),
     ("docs/local.md", 1),
-    ("docs/frameworks/django.md", 1),
     ("docs/reference/blastfile.md", 14),
 ];
 
@@ -442,7 +449,8 @@ enum Shape {
     Application,
     /// At least one mount, no view, no app: an app-less static site (§9.5).
     StaticSite,
-    /// Views and a mount: a PHP app whose `public/` is served as files too.
+    /// Views and a mount: the Django page's `static` mount, and a PHP app whose
+    /// `public/` is served as files too.
     ViewsAndMount,
     /// Neither a view nor a mount: the document reaches nothing.
     Empty,
@@ -513,21 +521,24 @@ fn every_documented_document_parses_and_validates() {
                 .unwrap_or_else(|errors| panic!("{}", describe_failure(file, &fence, &errors)));
             // The shape is pinned per page, not absorbed by an "or": a fence
             // that degraded from views to a static mount fails here. A page
-            // that documents an all-static site pins `Shape::StaticSite`, and a
-            // PHP page whose `public/` is served as files too pins
-            // `Shape::ViewsAndMount`; nothing else can execute a document, so an
-            // unpinned page panics rather than passing.
+            // that documents an all-static site pins `Shape::StaticSite`; a page
+            // whose document has both views and a mount — the Django page's
+            // `static` mount, a PHP page whose `public/` is served as files too
+            // — pins `Shape::ViewsAndMount`; nothing else can execute a
+            // document, so an unpinned page panics rather than passing.
             let expected = match file {
                 "docs/frameworks/static-and-spa.md" => Shape::StaticSite,
-                "docs/frameworks/php.md" => Shape::ViewsAndMount,
+                "docs/frameworks/python/django.md"
+                | "docs/frameworks/php/index.md"
+                | "docs/frameworks/php/symfony.md"
+                | "docs/frameworks/php/laravel.md" => Shape::ViewsAndMount,
                 "README.md"
                 | "docs/index.md"
                 | "docs/getting-started.md"
                 | "docs/local.md"
                 | "docs/blastfile.md"
-                | "docs/frameworks/index.md"
-                | "docs/frameworks/django.md"
-                | "docs/frameworks/flask.md" => Shape::Application,
+                | "docs/frameworks/python/index.md"
+                | "docs/frameworks/python/flask.md" => Shape::Application,
                 other => panic!("{other}: a page with an executed document needs its shape pinned"),
             };
             assert_eq!(
@@ -785,22 +796,16 @@ fn a_page_whose_count_drifted_is_named() {
 
 #[test]
 fn the_django_page_static_fragment_still_parses() {
-    // `docs/frameworks/django.md` carries the `static` mount as a statement
-    // list; §16.1 keeps it parsed so the six-segment `immutable` list cannot
+    // `docs/frameworks/python/django.md` carries the `static` mount inside its
+    // document; §16.1 keeps it parsed so the six-segment `immutable` list cannot
     // drift into prose.
     let root = workspace_root();
-    let document = std::fs::read_to_string(root.join("docs/frameworks/django.md"))
+    let document = std::fs::read_to_string(root.join("docs/frameworks/python/django.md"))
         .expect("the Django page exists");
-    let fences = collect_fences(&document).expect("every fence closes");
-    let fragment = fences
-        .iter()
-        .find(|fence| {
-            class_of(fence) == FenceClass::StatementList
-                && first_statement(&fence.body).is_some_and(|line| line.starts_with("static "))
-        })
-        .expect("the Django page carries its static mount as a plain text fence");
-    let manifest = Manifest::from_blastfile_str(&fragment.body)
-        .unwrap_or_else(|errors| panic!("the static fragment parses: {errors}"));
+    let found = documents(&document).expect("every fence closes");
+    assert_eq!(found.len(), 1, "the Django page carries one document");
+    let manifest = Manifest::from_blastfile_str(&found[0].body)
+        .unwrap_or_else(|errors| panic!("the document carrying the static mount parses: {errors}"));
     assert_eq!(manifest.mounts().len(), 1, "one mount");
     let mount = &manifest.mounts()[0];
     assert_eq!(mount.prefix, "/static");

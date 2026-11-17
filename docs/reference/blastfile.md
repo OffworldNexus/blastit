@@ -389,7 +389,9 @@ Several mounts may match; the longest prefix answers. A request under a prefix i
 served from `root` with the prefix removed: `static "/assets" { root
 "public/assets" }` answers `/assets/app.js` from `public/assets/app.js`. The mount
 serves regular files only: `..`, NUL, absolute and backslash paths are `400`; a
-dotfile, any symlink, and a `.php`, `.phtml` or `.phar` file are `404`. A missing
+dotfile, any symlink, and a `.php`, `.phtml` or `.phar` file are `404`. A dotfile is
+public only when its first segment is exactly `.well-known`:
+`/.well-known/acme-challenge/<token>` is served, `/.well-known/.env` is not. A missing
 or unreadable `root` stops the boot before a listener binds.
 
 `*` in `immutable` stops at `/`, so a nested tree needs one glob per depth:

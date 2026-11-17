@@ -33,10 +33,17 @@ nav = [
   ] },
   { "Frameworks" = [
     "frameworks/index.md",
-    { "Django" = "frameworks/django.md" },
-    { "Flask, SQLAlchemy and raw WSGI" = "frameworks/flask.md" },
-    { "PHP (Symfony, Laravel)" = "frameworks/php.md" },
-    { "Static assets and SPAs" = "frameworks/static-and-spa.md" },
+    { "Python (WSGI)" = [
+      "frameworks/python/index.md",
+      { "Django" = "frameworks/python/django.md" },
+      { "Flask, SQLAlchemy and raw WSGI" = "frameworks/python/flask.md" },
+    ] },
+    { "PHP (embedded libphp)" = [
+      "frameworks/php/index.md",
+      { "Symfony" = "frameworks/php/symfony.md" },
+      { "Laravel" = "frameworks/php/laravel.md" },
+    ] },
+    { "Static sites and SPAs" = "frameworks/static-and-spa.md" },
   ] },
   { "Reference" = [
     "reference/cli.md",

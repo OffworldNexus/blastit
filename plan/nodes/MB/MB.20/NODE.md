@@ -2,7 +2,7 @@
 id: MB.20
 title: "Rework /frameworks for Blastfile: language/connector first, framework considerations inside (docs-only)"
 kind: task
-status: active
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: [MB.21.5.2]
@@ -17,11 +17,14 @@ paths:
   - docs/blastfile.md
   - zensical.toml
   - python/tests/runnable_docs/inventory.toml
+  - "crates/blastit-manifest/tests/docs_fences.rs"
+  - crates/blastit/src/check.rs
+  - scripts/test_doc_tone.py
 attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-15T21:50"
-updated: "2026-11-17T00:50"
+updated: "2026-11-17T04:44"
 ---
 
 # Goal

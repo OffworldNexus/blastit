@@ -219,7 +219,10 @@ path = "docs/deploy/fair-queuing.md"
 path = "docs/frameworks/index.md"
 
 [[page]]
-path = "docs/frameworks/django.md"
+path = "docs/frameworks/python/index.md"
+
+[[page]]
+path = "docs/frameworks/python/django.md"
 
 [[page.fence]]
 index = 1
@@ -227,7 +230,7 @@ mode = "check"
 fixture = "shop"
 
 [[page]]
-path = "docs/frameworks/flask.md"
+path = "docs/frameworks/python/flask.md"
 
 [[page.fence]]
 index = 1
@@ -235,21 +238,23 @@ mode = "install-external"
 reason = "Installs flask, psycopg and pytest from the package index; only blastit comes from this workspace. blastit's own install runs in README.md and Getting started."
 
 [[page]]
-path = "docs/frameworks/php.md"
+path = "docs/frameworks/php/index.md"
 
 [[page.fence]]
 index = 1
 mode = "static"
-reason = "A PHP project has no pyproject.toml, so `uv tool install blastit` reaches the package index, which this offline gate does not have: README.md and Getting started install the wheel this run built. This fence checks the documented `uv tool install` subcommand against the installed uv."
-
-[[page.fence]]
-index = 2
-mode = "static"
 reason = "The gate builds no PHP project fixture: an `entrypoint php` file needs a `public/index.php` app and a host NTS `libphp`, and this offline gate installs neither. It checks the documented `blastit dev --learn` command and its flags against the installed CLI, and parses the page's Blastfile block."
 
 [[page.fence]]
-index = 3
-mode = "presets"
+index = 2
+mode = "example"
+reason = "No PHP project fixture or host NTS `libphp` exists in this offline gate, so the `fmt --check` gate cannot run; the command is documented in docs/blastfile.md and the page's Blastfile block is parsed by the docs_fences gate."
+
+[[page]]
+path = "docs/frameworks/php/symfony.md"
+
+[[page]]
+path = "docs/frameworks/php/laravel.md"
 
 [[page]]
 path = "docs/frameworks/static-and-spa.md"
