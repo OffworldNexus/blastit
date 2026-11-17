@@ -63,3 +63,11 @@ CONCURRENCY HAZARD confirmed: another session's uncommitted MB.22.1 edit to docs
 ## 2026-11-17T05:21 [lead]
 
 EXTERNAL BLOCKER for the epic gate: uncommitted MB.23.1 docs (docs/reference/cli.md:20,28 and docs/local.md:19,32) document 'blastit dev --no-reload' while crates/blastit/src/cli.rs has no such flag, so make docs-test fails fence 1 in docs/reference/cli.md. MB.21.5.7's reviewer proved this is not MB.21 work. The MB.21 epic gate cannot pass make check until MB.23 lands the flag (MB.23.2) or those four lines are dropped
+
+## 2026-11-17T05:40 [planner]
+
+Acceptance item 1 reconciled with the MB.21.5.3 audit ruling (AUDIT-MB.21.md 5.5): pre-gate children listed explicitly as done with RESULT evidence; the seven post-0.2.0 coverage nodes MB.21.5.6/5.8/5.9/5.10/5.12/5.13/5.14 excluded by id from the no-ready/active clause and carried on the release backlog. Notes bullet records the same ids and reason. No other acceptance item changed; no deferred node body touched.
+
+## 2026-11-17T05:45 [lead]
+
+GATE METHOD: another session's UNCOMMITTED docs/reference/cli.md + docs/local.md carry 'blastit dev --no-reload' (absent from HEAD and from cli.rs), which is the only red leg of make check here. Since never cleaning another session's files is a hard rule, the epic gate is measured on a detached worktree at HEAD (committed artefact), with the dirty-tree caveat recorded

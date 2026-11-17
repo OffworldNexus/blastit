@@ -54,7 +54,7 @@ Everything inside the box is the [model](index.md#the-topology) unchanged.
 | roles | `app` logs in; `migrator` owns the schema | `app` never owns what it reads |
 | pool | `shop-pool`, user `app`, size `18`, transaction mode | each instance opens 16 client connections and a second one would exhaust the cluster's ~22 backends, so the pool holds 18 server connections and shares them |
 | URLs | web → `25061` (pool); `migrate` → `25060` (cluster) | DDL and session state do not survive transaction pooling; the pool logs in as `app` only |
-| TLS | DO's edge terminates it; `ca_cert` on the pool's `require` leg | naming a CA upgrades `require` to a verified leg, so the certificate is checked, not just the encryption |
+| TLS | the pool leg is `verify-full` with the cluster's CA | an unverified leg would accept any certificate the pool presented |
 | health | `/_blastit/health`, `initial_delay_seconds: 60` | the scheduler answers it without a view, and the first boot is slow |
 
 ## The steps
@@ -62,13 +62,30 @@ Everything inside the box is the [model](index.md#the-topology) unchanged.
 ### 1. Image and manifest
 
 Start from the [Django guide](../frameworks/python/django.md#manifest)'s `Blastfile` and
-change two things: the split `postgres` block with `$DATABASE_CA_CERT` beside
-`$DATABASE_URL` (only for a network database, with `sslmode` `verify-full`), and the
-grants filled in — the guide's `postgres {}` denies every statement. Deploy
-only a file `blastit check` passes ([CI/CD](../ci.md#what-it-fails-on)).
-`settings.py` must read the host the spec passes down:
-`ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]` — Django does not read
+change two things: the store, and the grants — the guide's `postgres {}` denies every
+statement. Only the split store carries a CA, and the platform hands out the pool as
+separate bindables, so name each slot the spec fills:
+
+```text title="Blastfile: the store block"
+postgres {
+    host $DATABASE_HOST
+    port $DATABASE_PORT
+    user $DATABASE_USERNAME
+    password $DATABASE_PASSWORD
+    database $DATABASE_DATABASE
+    sslmode $DATABASE_SSLMODE
+    ca_cert $DATABASE_CA_CERT
+}
+```
+
+A block gives the app `DATABASE_HOST` (its socket directory), `DATABASE_PORT`,
+`DATABASE_USERNAME` and `DATABASE_DATABASE` — never the password — and no `DATABASE_URL`,
+so `settings.py` builds `DATABASES` from those four (`sslmode` is `disable` there) and the
+`migrate` job keeps reading its own `DATABASE_URL`. `settings.py` reads the host the spec
+passes down: `ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]` — Django does not read
 `ALLOWED_HOST` on its own.
+
+Deploy only a file `blastit check` passes ([CI/CD](../ci.md#what-it-fails-on)).
 
 ```dockerfile title="Dockerfile"
 FROM python:3.13-slim
@@ -132,8 +149,8 @@ Transaction mode drops the session after each transaction: migrations and any
 locks or `LISTEN` wants **Session** mode, fixed at creation. Django sets
 `prepare_threshold=None`.
 
-**Databases → myshop-db → Connection Pools → Create pool**: name `shop-pool` (the
-spec's `${db.shop-pool.DATABASE_URL}` must match), user `app`, db `defaultdb`,
+**Databases → myshop-db → Connection Pools → Create pool**: name `shop-pool` (every
+`${db.shop-pool.*}` in the spec is this name), user `app`, db `defaultdb`,
 size `18`, mode **Transaction**.
 
 ```console
@@ -142,8 +159,10 @@ $ doctl databases pool create "$CLUSTER_ID" shop-pool --db defaultdb --size 18 -
 
 ### 5. The spec
 
-`web.DATABASE_URL` takes the pool bindable `${db.shop-pool.DATABASE_URL}` (25061)
-and `${db.CA_CERT}`; `migrate.DATABASE_URL` is the cluster's, as `migrator`.
+The web service's host, port, user, password and database are the pool's bindables (25061),
+so it logs in as `app` through the pool; `DATABASE_SSLMODE` is the literal `verify-full` and
+`DATABASE_CA_CERT` is the cluster's `${db.CA_CERT}` — the only value read from the cluster
+itself. `migrate.DATABASE_URL` is the cluster's direct port (25060), as `migrator`.
 `REPLACE_WITH_YOUR_TAG` below is this `$GIT_SHA`; `REPLACE_WITH_MIGRATOR_PASSWORD`
 is the hex from step 3, pasted literally (YAML does not expand it);
 `REPLACE_WITH_DB_HOST` is the private host on **Connection Details**; the two keys
@@ -174,10 +193,16 @@ services:
     instance_size_slug: apps-s-1vcpu-1gb
     health_check: { http_path: /_blastit/health, initial_delay_seconds: 60 }
     envs:
-      # The pool's URL (25061). `${db.DATABASE_URL}` is the cluster as `doadmin`.
-      - { key: DATABASE_URL, scope: RUN_TIME, value: "${db.shop-pool.DATABASE_URL}" }
-      - { key: ALLOWED_HOST, scope: RUN_TIME, value: "${APP_DOMAIN}" }
+      # The pool's bindables (25061) fill the store's slots: `app`, never `doadmin`.
+      - { key: DATABASE_HOST, scope: RUN_TIME, value: "${db.shop-pool.HOSTNAME}" }
+      - { key: DATABASE_PORT, scope: RUN_TIME, value: "${db.shop-pool.PORT}" }
+      - { key: DATABASE_USERNAME, scope: RUN_TIME, value: "${db.shop-pool.USERNAME}" }
+      - { key: DATABASE_PASSWORD, scope: RUN_TIME, value: "${db.shop-pool.PASSWORD}" }
+      - { key: DATABASE_DATABASE, scope: RUN_TIME, value: "${db.shop-pool.DATABASE}" }
+      - { key: DATABASE_SSLMODE, scope: RUN_TIME, value: verify-full }
+      # The one thing read from the cluster: the CA that signs the pool's certificate.
       - { key: DATABASE_CA_CERT, scope: RUN_TIME, value: "${db.CA_CERT}" }
+      - { key: ALLOWED_HOST, scope: RUN_TIME, value: "${APP_DOMAIN}" }
       - { key: DJANGO_SECRET_KEY, scope: RUN_TIME, type: SECRET, value: "REPLACE_WITH_50_CHAR_SECRET" }
       - { key: BLASTIT_PRESET, scope: RUN_TIME, value: digitalocean-paas }
       - { key: BLASTIT_VIEW_MEM_ESTIMATE, scope: RUN_TIME, value: "140MiB" }  # one view; ~7 in 1 GB

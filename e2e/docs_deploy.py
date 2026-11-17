@@ -4,8 +4,9 @@ Both presets now assume a connection pooler: DigitalOcean's managed pool in
 `docs/deploy/digitalocean-paas.md`, PgBouncer in `docs/deploy/compose-traefik.md`.
 The documented trap is a recipe that says "use a pooler" while its snippet still
 points the app at the database, or swaps the two URLs. This reads the pages' own
-`compose.yaml` / `app.yaml` blocks and asserts the wiring, so the recipe a
-developer copies matches what the page claims.
+`compose.yaml` / `app.yaml` blocks and the DigitalOcean page's `Blastfile` store
+block, and asserts the wiring, so the recipe a developer copies matches what the
+page claims.
 
 The session zone is the same trap one layer down, and `MB.18` moved it out of the
 index: `docs/deploy/index.md` sets the two-URL expectation, and
@@ -159,17 +160,31 @@ def digitalocean_checks(checks: Checks) -> None:
     manifest = block(DIGITALOCEAN, "app.yaml")
     jobs, services = manifest.split("services:", 1)
 
+    #: The store's variables and the pool bindable each must be filled from.
+    #: Asserted as an exact pair, not as two independent presences: a spec that
+    #: put `${db.shop-pool.USERNAME}` in the password slot (or the port in the
+    #: host slot) boots and fails on the first login.
+    pool = {
+        "DATABASE_HOST": "HOSTNAME",
+        "DATABASE_PORT": "PORT",
+        "DATABASE_USERNAME": "USERNAME",
+        "DATABASE_PASSWORD": "PASSWORD",
+        "DATABASE_DATABASE": "DATABASE",
+    }
     checks.that(
-        'value: "${db.shop-pool.DATABASE_URL}"' in services,
-        "digitalocean: the web service reads the pool's bindable URL",
+        all(f'value: "${{db.shop-pool.{bindable}}}"' in services for bindable in pool.values()),
+        "digitalocean: every connection value the web service gets is the pool's (25061)",
     )
+    # The two-URL rule with the web on the split form: no `${db.…}` connection
+    # value may reach a service, because the cluster's own are `doadmin`'s on
+    # 25060. (`${db.CA_CERT}` is the one cluster value allowed through.)
     checks.that(
         re.search(
-            r'key: DATABASE_URL, scope: RUN_TIME, value: "\$\{db\.DATABASE_URL\}"',
+            r"\$\{db\.(DATABASE_URL|HOSTNAME|PORT|USERNAME|PASSWORD|DATABASE)\}",
             services,
         )
         is None,
-        "digitalocean: no service reads the direct bindable as its DATABASE_URL",
+        "digitalocean: no service reads the cluster's connection values where the pool's belong",
     )
     checks.that(
         re.search(
@@ -188,9 +203,52 @@ def digitalocean_checks(checks: Checks) -> None:
         and "shop-pool --db defaultdb --size 18 --user app" in page,
         "digitalocean: the console step and the doctl step name the same pool for `app`",
     )
+    # The page used to describe the CA in prose while the harness grepped the
+    # retired TOML key, so the recipe and its guard had stopped meeting. Assert
+    # the block the reader writes, every slot's variable as an env the service
+    # sets, and the TLS pair (`sslmode` + `ca_cert`) against the values that
+    # fill them. A page that dropped the CA step loses the `ca_cert` line and
+    # the `DATABASE_CA_CERT` env together, and the retired `=` spelling cannot
+    # come back.
+    store = block(DIGITALOCEAN, "Blastfile: the store block")
+    slots = dict(re.findall(r"^[ \t]+(\w+) \$([A-Z_]+)$", store, re.M))
+    wanted = {
+        "host": "DATABASE_HOST",
+        "port": "DATABASE_PORT",
+        "user": "DATABASE_USERNAME",
+        "password": "DATABASE_PASSWORD",
+        "database": "DATABASE_DATABASE",
+        "sslmode": "DATABASE_SSLMODE",
+        "ca_cert": "DATABASE_CA_CERT",
+    }
+    #: Each store slot's variable, and the pool bindable that must fill it. The
+    #: pairing is asserted as one line, because a spec that names `USERNAME` for
+    #: the password slot is a login that fails closed at the worst moment.
+    unpaired = [
+        name
+        for name, bindable in pool.items()
+        if f'key: {name}, scope: RUN_TIME, value: "${{db.shop-pool.{bindable}}}"'
+        not in services
+    ]
+    gaps = []
+    if slots != wanted:
+        gaps.append(f"block is {slots or 'absent'}")
+    if unpaired:
+        gaps.append(f"not the pool's own bindable: {', '.join(unpaired)}")
+    if "key: DATABASE_SSLMODE, scope: RUN_TIME, value: verify-full" not in services:
+        gaps.append("`verify-full` is not the service's `DATABASE_SSLMODE`")
+    if 'key: DATABASE_CA_CERT, scope: RUN_TIME, value: "${db.CA_CERT}"' not in services:
+        gaps.append("`DATABASE_CA_CERT` is not the cluster's `${db.CA_CERT}`")
+    if 'ca_cert = "' in page:
+        gaps.append("the retired `ca_cert =` spelling is back")
     checks.that(
-        'ca_cert = "DATABASE_CA_CERT"' in page and "key: DATABASE_CA_CERT" in services,
-        "digitalocean: the proxy's `ca_cert` input and the service env agree",
+        not gaps,
+        "digitalocean: the proxy's `ca_cert` and `sslmode` inputs and the service env agree"
+        + (f" ({'; '.join(gaps)})" if gaps else ""),
+    )
+    checks.that(
+        'ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]' in page,
+        "digitalocean: the page tells Django to read the `ALLOWED_HOST` the spec passes down",
     )
     checks.that(
         'value: "${APP_DOMAIN}"' in services or '"${APP_DOMAIN}"' in services,

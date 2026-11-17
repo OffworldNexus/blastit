@@ -2536,3 +2536,25 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T05:36 [MB.21.5.5] (lead) attempt 4/4 started
 - 2026-11-17T05:36 [MB.21.5.5] (lead) status review -> review
 - 2026-11-17T05:39 [MB.21.5.5] (lead) status review -> done
+- 2026-11-17T05:39 [MB.22.2] (designer) done: design 2107 lines + ADR-0013 115 lines (Accepted, MB.22); four lenses three capped rounds, all VERDICT: PASS; docs-check + plan validate green; 13 sibling
+- 2026-11-17T05:39 [MB.22.4] (lead) status ready -> active
+- 2026-11-17T05:39 [MB.22.4] (lead) attempt 1/3 started
+- 2026-11-17T05:39 [MB.22.4] (lead) base 8f538ae
+- 2026-11-17T05:40 [MB.21] (planner) Acceptance item 1 reconciled with the MB.21.5.3 audit ruling (AUDIT-MB.21.md 5.5): pre-gate children listed explicitly as done with RESULT evidence; the seven p
+- 2026-11-17T05:40 [MB.24.1] (lead) status review -> done
+- 2026-11-17T05:40 [MB.24.1] (lead) committed bc0b492 on release/0.2.0 (reviewer PASS, attempt 1)
+- 2026-11-17T05:40 [MB.24.2] (lead) status ready -> active
+- 2026-11-17T05:40 [MB.24.2] (lead) attempt 1/3 started
+- 2026-11-17T05:40 [MB.24.2] (lead) base bc0b492569015729e4fd69ae96a54386f23aaad3
+- 2026-11-17T05:45 [MB.21] (lead) GATE METHOD: another session's UNCOMMITTED docs/reference/cli.md + docs/local.md carry 'blastit dev --no-reload' (absent from HEAD and from cli.rs), which is th
+- 2026-11-17T05:46 [MB.21.6] (planner) created (task) Make the DigitalOcean deploy page and its docs check agree on the Blastfile CA spelling
+- 2026-11-17T05:46 [MB.21.6] (lead) status ready -> active
+- 2026-11-17T05:46 [MB.21.6] (implementer) base bc0b492569015729e4fd69ae96a54386f23aaad3
+- 2026-11-17T05:46 [MB.22.4] (implementer) grammar + corpus + queries + zed extension shipped; dotted_name rule added for functions pg_catalog.unaccent; rev=all-zero placeholder for MB.22.5
+- 2026-11-17T05:47 [MB.22.4] (lead) status active -> review
+- 2026-11-17T05:52 [MB.21.6] (lead) attempt 1/3 started
+- 2026-11-17T05:52 [MB.21.6] (lead) status active -> review
+- 2026-11-17T05:52 [MB.21.6] (lead) implementer: page shows the split store (232 lines), check parses the fence and proves 7 slots + env keys (45/45); negative proofs (drop ca_cert / drop spec key
+- 2026-11-17T05:54 [MB.23.2] (lead) status active -> review
+- 2026-11-17T05:54 [MB.23.2] (lead) STATUS done from designer (attempt 1): design + ADR-0014 + 4 lens critics all PASS after one re-run each; index rows added.
+- 2026-11-17T05:56 [MB.21.6] (lead) status review -> done
