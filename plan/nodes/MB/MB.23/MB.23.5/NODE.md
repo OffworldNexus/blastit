@@ -2,7 +2,7 @@
 id: MB.23.5
 title: "Wire reload into blastit dev: Ctl::Reload 0x45 with no payload (all views retire together), supervisor fanotify loop, --no-reload, preload/Blastfile re-run with :8080 held open, Python+PHP live-reload critical tests"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.23.3, MB.23.4, MB.24.4]
 paths:
@@ -42,7 +42,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:13"
-updated: "2026-11-17T12:35"
+updated: "2026-11-17T19:48"
 ---
 
 # Goal

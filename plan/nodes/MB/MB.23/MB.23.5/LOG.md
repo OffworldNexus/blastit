@@ -39,3 +39,11 @@ edited fields
 ## 2026-11-17T12:35 [lead]
 
 status ready -> ready
+
+## 2026-11-17T19:48 [lead]
+
+gate passed: four descendants done (54ad5d9, 83c6bb9, bdd23c5, 81e603f); 23 critical reload legs x3 configs, lib 289, dbproxy 120, php_embed 27, make check EXIT=0, docs-test 48/30/0 with dev-flags executed, three seams absent from release, lock/seccomp identical. Open: policy_out_of_step not carried across the exec (filed to MB.23.6) and one unreproduced unread panic recorded as unknown.
+
+## 2026-11-17T19:48 [lead]
+
+status ready -> done

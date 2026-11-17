@@ -2945,3 +2945,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T19:48 [MB.23.5.3] (lead) reviewer attempt 3 VERDICT PASS (3 MINOR): the exec boundary loses the out-of-step taint (carry it in the adoption document -- filed for MB.23.6), a duplicated 
 - 2026-11-17T19:48 [MB.23.6] (lead) inherits three MB.23.5.3 MINORs: carry policy_out_of_step in the adoption document so a pre-existing taint survives the exec; drop the duplicated body assertion
 - 2026-11-17T19:48 [MB.23.5.3] (lead) status review -> done
+- 2026-11-17T19:48 [MB.23.5] (lead) gate passed: four descendants done (54ad5d9, 83c6bb9, bdd23c5, 81e603f); 23 critical reload legs x3 configs, lib 289, dbproxy 120, php_embed 27, make check EXIT
+- 2026-11-17T19:48 [MB.23.5] (lead) status ready -> done

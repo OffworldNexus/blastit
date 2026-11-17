@@ -17,10 +17,10 @@
 
 ## Next actionable (top 12)
 
-- gate: MB.23.5 Wire reload into blastit dev: Ctl::Reload 0x45 with no payload (all views retire together), supervisor fanotify loop, --no-reload, preload/Blastfile re-run with :8080 held open, Python+PHP live-reload critical tests
 - execute: MB.6 Static files beside a Python/PHP app + the hashed-asset caching contract
 - execute: MB.11 Rewrite the DigitalOcean roles/pooler section for clarity (backport to 0.2.0)
 - execute: MB.13 Rewrite the deployments index page for scannability
+- execute: MB.23.6 Verify MB.23 live: runnable-docs --no-reload fence, zero-inotify guard on standalone + wheel, production strace, all-worker reload determinism and dev_reload mutation audit
 - execute: MB.25.2 Emit the INFO runtime event: PHP version + php_ini_opened_path via the C SAPI, Python version + environment, static-only summary; retire the WARN line
 - execute: MB.3.5.2 Entry + libphp probes, boot predicates and the manifest reference entry for [route.php]
 - execute: MB.3.15 Protected critical_backend_capability suite: the design R12 refusal matrix in both build configurations
@@ -36,8 +36,6 @@
 
 ## Recent journal
 
-- 2026-11-17T18:10 [MB.23.5.3] (lead) attempt 1/3 started
-- 2026-11-17T18:10 [MB.23.5.3] (lead) base fde43da; row 8 (EPERM) already landed in MB.23.5.2.2 -- confirm it, do not duplicate
 - 2026-11-17T18:46 [MB.23.5.3] (lead) edited fields
 - 2026-11-17T18:46 [MB.23.5.3] (lead) attempt 1 landed the dbproxy half green (policy wire module, replace_route_policies with Arc<Allowlist> swap, ListenerPolicy cell, ack loop, stage-0 socketpair 
 - 2026-11-17T18:46 [MB.23.5.3] (lead) attempt 2/3 started
@@ -51,3 +49,5 @@
 - 2026-11-17T19:48 [MB.23.5.3] (lead) reviewer attempt 3 VERDICT PASS (3 MINOR): the exec boundary loses the out-of-step taint (carry it in the adoption document -- filed for MB.23.6), a duplicated 
 - 2026-11-17T19:48 [MB.23.6] (lead) inherits three MB.23.5.3 MINORs: carry policy_out_of_step in the adoption document so a pre-existing taint survives the exec; drop the duplicated body assertion
 - 2026-11-17T19:48 [MB.23.5.3] (lead) status review -> done
+- 2026-11-17T19:48 [MB.23.5] (lead) gate passed: four descendants done (54ad5d9, 83c6bb9, bdd23c5, 81e603f); 23 critical reload legs x3 configs, lib 289, dbproxy 120, php_embed 27, make check EXIT
+- 2026-11-17T19:48 [MB.23.5] (lead) status ready -> done
