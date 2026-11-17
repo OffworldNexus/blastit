@@ -2,7 +2,7 @@
 id: MB.21.5.12
 title: "Close the four message-only refusal-matrix survivors (lexer name_run, three parser guards)"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 4
 depends_on: []
@@ -14,7 +14,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:13"
-updated: "2026-11-17T01:13"
+updated: "2026-11-17T06:14"
 ---
 
 # Goal

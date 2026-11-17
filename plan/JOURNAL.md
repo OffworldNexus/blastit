@@ -2590,3 +2590,37 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T06:13 [MB.23.2] (lead) status review -> done
 - 2026-11-17T06:13 [MB.23.2] (lead) committed 0c2c117 on release/0.2.0 after reviewer PASS + nine MINORs resolved.
 - 2026-11-17T06:13 [MB.25.1] (lead) status active -> done
+- 2026-11-17T06:13 [MB.25.1] (lead) committed ee8bfb7 on release/0.2.0 (critics dx + ai-ergonomics PASS; docs_fences.rs and inventory.toml untouched).
+- 2026-11-17T06:14 [MB.26] (planner) created (epic) Post-0.2.0 Blastfile coverage hardening: the audit's remaining survivors and the PHP view-retire race
+- 2026-11-17T06:14 [MB.26] (planner) status proposed -> ready
+- 2026-11-17T06:14 [MB.26.1] (planner) created (task) Post-0.2.0 coverage: pin blastfile::read's accepted path so the read bound's mutants die in-crate
+- 2026-11-17T06:14 [MB.26.2] (planner) created (task) Give P4's postcondition oracle a direct test and a truthful section for unresolved grants
+- 2026-11-17T06:14 [MB.26.3] (planner) created (task) Pin EditError::source so the editor's error chain is walked by a test
+- 2026-11-17T06:14 [MB.26.4] (planner) created (task) Remove the uid-0 silent skip from critical_blastfile_fmt's write-failure case
+- 2026-11-17T06:14 [MB.26.5] (planner) created (task) Close the four message-only refusal-matrix survivors (lexer name_run, three parser guards)
+- 2026-11-17T06:14 [MB.26.6] (planner) created (task) Close the printer and pattern-name survivors (six mutants, four corpus cases)
+- 2026-11-17T06:14 [MB.26.7] (planner) created (task) Close the surgical editor's sixteen testable survivors (names, cross-view patches, one-line empty blocks, transactions bounding a directive)
+- 2026-11-17T06:14 [MB.26.8] (planner) created (task) A queued request must never be handed to a retired PHP view (502 view_died under 8-way concurrency)
+- 2026-11-17T06:14 [MB.21.5.6] (planner) status ready -> superseded
+- 2026-11-17T06:14 [MB.21.5.8] (planner) status ready -> superseded
+- 2026-11-17T06:14 [MB.21.5.9] (planner) status proposed -> superseded
+- 2026-11-17T06:14 [MB.21.5.10] (planner) status proposed -> superseded
+- 2026-11-17T06:14 [MB.21.5.12] (planner) status proposed -> superseded
+- 2026-11-17T06:14 [MB.21.5.13] (planner) status ready -> superseded
+- 2026-11-17T06:14 [MB.21.5.14] (planner) status ready -> superseded
+- 2026-11-17T06:14 [MB.21.8] (planner) status ready -> superseded
+- 2026-11-17T06:14 [MB.21.5.6] (planner) superseded by MB.26.1: re-homed to the post-0.2.0 epic MB.26 (the 0.2.0 release epic cannot close with this open); body, paths and priority copied verbatim
+- 2026-11-17T06:14 [MB.21.5.8] (planner) superseded by MB.26.2: re-homed to the post-0.2.0 epic MB.26 (the 0.2.0 release epic cannot close with this open); body, paths and priority copied verbatim
+- 2026-11-17T06:14 [MB.21.5.9] (planner) superseded by MB.26.3: re-homed to the post-0.2.0 epic MB.26 (the 0.2.0 release epic cannot close with this open); body, paths and priority copied verbatim
+- 2026-11-17T06:14 [MB.21.5.10] (planner) superseded by MB.26.4: re-homed to the post-0.2.0 epic MB.26 (the 0.2.0 release epic cannot close with this open); body, paths and priority copied verbatim
+- 2026-11-17T06:14 [MB.21.5.12] (planner) superseded by MB.26.5: re-homed to the post-0.2.0 epic MB.26 (the 0.2.0 release epic cannot close with this open); body, paths and priority copied verbatim
+- 2026-11-17T06:14 [MB.21.5.13] (planner) superseded by MB.26.6: re-homed to the post-0.2.0 epic MB.26 (the 0.2.0 release epic cannot close with this open); body, paths and priority copied verbatim
+- 2026-11-17T06:14 [MB.21.5.14] (planner) superseded by MB.26.7: re-homed to the post-0.2.0 epic MB.26 (the 0.2.0 release epic cannot close with this open); body, paths and priority copied verbatim
+- 2026-11-17T06:14 [MB.21.8] (planner) superseded by MB.26.8: re-homed to the post-0.2.0 epic MB.26 (the 0.2.0 release epic cannot close with this open); body, paths and priority copied verbatim
+- 2026-11-17T06:14 [MB.21.5] (lead) status ready -> done
+- 2026-11-17T06:14 [MB.21] (planner) post-0.2.0 re-home: the 7 audit survivors (MB.21.5.6/5.8/5.9/5.10/5.12/5.13/5.14) and the MB.21.8 PHP view-retire race are superseded and re-created verbatim as
+- 2026-11-17T06:14 [MB.21.5] (planner) closed: the 7 post-0.2.0 coverage children are superseded -> MB.26.1-7 (epic MB.26); no open children remain
+- 2026-11-17T06:14 [MB.26] (planner) decomposed into 8 leaves (MB.26.1-8), proposed: promote when the 0.2.0 Release PR is merged; MB.26.8 (the view-retire race) leads
+- 2026-11-17T06:14 HUMAN H-013 closed by conductor
+- 2026-11-17T06:14 [MB.21] (lead) status ready -> done
+- 2026-11-17T06:14 HUMAN H-014 closed by conductor

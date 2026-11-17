@@ -2,7 +2,7 @@
 id: MB.21.8
 title: "A queued request must never be handed to a retired PHP view (502 view_died under 8-way concurrency)"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 1
 depends_on: []
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T06:08"
-updated: "2026-11-17T06:09"
+updated: "2026-11-17T06:14"
 ---
 
 # Goal

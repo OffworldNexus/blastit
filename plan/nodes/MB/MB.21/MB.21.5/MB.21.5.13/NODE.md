@@ -2,7 +2,7 @@
 id: MB.21.5.13
 title: "Close the printer and pattern-name survivors (six mutants, four corpus cases)"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: []
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:40"
-updated: "2026-11-17T01:40"
+updated: "2026-11-17T06:14"
 ---
 
 # Goal

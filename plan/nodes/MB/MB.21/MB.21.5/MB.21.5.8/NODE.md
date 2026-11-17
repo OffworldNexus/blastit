@@ -2,7 +2,7 @@
 id: MB.21.5.8
 title: "Give P4's postcondition oracle a direct test and a truthful section for unresolved grants"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: []
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:04"
-updated: "2026-11-16T23:04"
+updated: "2026-11-17T06:14"
 ---
 
 # Goal

@@ -71,3 +71,15 @@ Acceptance item 1 reconciled with the MB.21.5.3 audit ruling (AUDIT-MB.21.md 5.5
 ## 2026-11-17T05:45 [lead]
 
 GATE METHOD: another session's UNCOMMITTED docs/reference/cli.md + docs/local.md carry 'blastit dev --no-reload' (absent from HEAD and from cli.rs), which is the only red leg of make check here. Since never cleaning another session's files is a hard rule, the epic gate is measured on a detached worktree at HEAD (committed artefact), with the dirty-tree caveat recorded
+
+## 2026-11-17T06:13 [lead]
+
+GATE STATUS: make e2e PASS (single clean run on an idle host: EXIT=0, 311 PASS/ok, 0 FAIL). make check BLOCKED BY EXTERNAL with three proven causes, none in MB.21: (1) crates/blastit/src/lsp.rs + tests/critical_lsp.rs untracked (other session's editor work) -> rs-fmt; (2) blastfile/sites.rs + tests/warning_sites.rs untracked (other session) -> rs-lint (2 clippy errors); (3) docs/reference/cli.md AT HEAD documents 'blastit dev --no-reload' twice while cli.rs has 0 -> docs-test fence 1. MB.21's own legs all verified: plan validate, guard, 33 manifest suites, docs-unit 107, docs-check, doc-tone, the guard and greps
+
+## 2026-11-17T06:14 [planner]
+
+post-0.2.0 re-home: the 7 audit survivors (MB.21.5.6/5.8/5.9/5.10/5.12/5.13/5.14) and the MB.21.8 PHP view-retire race are superseded and re-created verbatim as MB.26.1-MB.26.8 under the new post-0.2.0 epic MB.26, so this epic can close
+
+## 2026-11-17T06:14 [lead]
+
+status ready -> done

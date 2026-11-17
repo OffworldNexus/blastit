@@ -2,7 +2,7 @@
 id: MB.21.5.10
 title: "Remove the uid-0 silent skip from critical_blastfile_fmt's write-failure case"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 5
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:04"
-updated: "2026-11-16T23:04"
+updated: "2026-11-17T06:14"
 ---
 
 # Goal

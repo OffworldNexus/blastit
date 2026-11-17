@@ -2,7 +2,7 @@
 id: MB.21.5.9
 title: "Pin EditError::source so the editor's error chain is walked by a test"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 4
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:04"
-updated: "2026-11-16T23:04"
+updated: "2026-11-17T06:14"
 ---
 
 # Goal

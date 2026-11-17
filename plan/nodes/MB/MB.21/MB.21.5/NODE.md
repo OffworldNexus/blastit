@@ -2,7 +2,7 @@
 id: MB.21.5
 title: "Docs migration and release proof: live fences, retired-TOML guard, mutation audit, visual check"
 kind: epic
-status: ready
+status: done
 priority: 2
 depends_on: [MB.21.4]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T00:38"
+updated: "2026-11-17T06:14"
 ---
 
 # Goal

@@ -2,7 +2,7 @@
 id: MB.21
 title: "Replace the v1 manifest with the purpose-built Blastfile DSL (docs first, then parser, fmt and cutover)"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T01:49"
+updated: "2026-11-17T06:14"
 ---
 
 # Goal
@@ -184,9 +184,13 @@ $ for f in $(grep -rlE 'blastit[.]toml' plan/nodes --include=NODE.md); do \
     | grep -vE '^(done|superseded) '
 ```
 
-1. Every child of `MB.21` is `done` with a `RESULT.md` carrying command + output evidence — `MB.21.1`,
-   `MB.21.1.1`, `MB.21.2` and every child of `MB.21.{3,4,5}`; `plan.py tree --under MB.21` shows no
-   `ready`/`active` node and no `blocked`/`failed` one.
+1. Every child of `MB.21.{3,4}` and every child of `MB.21.5` that the `MB.21.5.3` audit rules pre-gate
+   (`MB.21.5.1`–`MB.21.5.5`, `MB.21.5.7`, `MB.21.5.11`) is `done` with a `RESULT.md` carrying command +
+   output evidence — as are `MB.21.1`, `MB.21.1.1` and `MB.21.2`. `plan.py tree --under MB.21` shows no
+   `blocked`/`failed` node and no `ready`/`active` one **except** the audit-created coverage nodes
+   `MB.21.5.6`, `MB.21.5.8`, `MB.21.5.9`, `MB.21.5.10`, `MB.21.5.12`, `MB.21.5.13`, `MB.21.5.14`, which
+   the epic lead ruled post-`0.2.0` (`docs/testing/AUDIT-MB.21.md` §5.5) and which are excluded from this
+   clause by id, carried on the release backlog as post-`0.2.0` work.
 2. The repository runs on `Blastfile`: the fixtures under `e2e/` and `python/tests/` are `Blastfile`
    (the two counts above are `≥ 15` and `0`), the Makefile's `docs-serve` stage writes one, and every
    Docker/rootless scenario loads one.
@@ -208,6 +212,17 @@ $ for f in $(grep -rlE 'blastit[.]toml' plan/nodes --include=NODE.md); do \
    render (nav, tables, code blocks) in both colour schemes.
 
 # Notes
+
+- **Post-`0.2.0` coverage nodes (epic-lead ruling, 2026-11-17).** `MB.21.5.3`'s `cargo-mutants` audit
+  measured 92.0 % kill (688 of 748 viable; 827 of 828 accounted) and split the 30 testable survivors
+  into three pre-gate leaves — `MB.21.5.5`, `MB.21.5.7`, `MB.21.5.11` — plus coverage-only refinements
+  that do not block the release: `MB.21.5.6`, `MB.21.5.8`, `MB.21.5.9`, `MB.21.5.10`, `MB.21.5.12`,
+  `MB.21.5.13`, `MB.21.5.14`. The ruling is recorded in `docs/testing/AUDIT-MB.21.md` §5.5 and in
+  `MB.21.5.3`'s `RESULT.md` (§Release judgement, same table); `MB.21.5.6` was already re-titled
+  "Post-0.2.0 coverage". Those seven are excluded by id from acceptance item 1 and stay on the release
+  backlog; none is a fail-closed defect — the shipped refusals are correct, the parser never reads the
+  environment, and what remains is message precision, an error-chain test, one uid-0 host and editor
+  branches no shipped input reaches untested.
 
 - **Burial law (owner, 2026-11-16).** The v1 manifest is erased, not migrated: no detector, no
   sniffer, no migration sentence, no migration page, no key map. Precedent `MB.3.30` (retired PHP

@@ -2,7 +2,7 @@
 id: MB.21.5.6
 title: "Post-0.2.0 coverage: pin blastfile::read's accepted path so the read bound's mutants die in-crate"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 4
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:03"
-updated: "2026-11-17T04:59"
+updated: "2026-11-17T06:14"
 ---
 
 # Goal
