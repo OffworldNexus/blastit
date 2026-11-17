@@ -1373,7 +1373,14 @@ impl<'a> Parser<'a> {
                 "immutable" => {
                     self.builder.start(NodeKind::StaticDirective);
                     self.bump()?;
-                    self.comma_list("a `\"…\"` pattern", starts_string, Parser::string_item)?;
+                    // Bare `immutable` is a statement on its own (§9.4): the
+                    // token that ends it is the separator, not an item.
+                    if !matches!(
+                        self.peek(),
+                        TokenKind::Newline | TokenKind::Semi | TokenKind::RBrace
+                    ) {
+                        self.pattern_list()?;
+                    }
                     self.builder.finish();
                 }
                 "workers" => return Err(ManifestError::WorkersRemoved { at: self.at() }),
@@ -1677,11 +1684,53 @@ mod tests {
             cst.words(directives[3]).collect::<Vec<_>>(),
             vec!["immutable"]
         );
+        let patterns: Vec<_> = cst.patterns(directives[3]).collect();
+        assert_eq!(patterns.len(), 2, "one `pattern` node per list item");
         assert_eq!(
-            cst.strings(directives[3]).collect::<Vec<_>>(),
-            vec!["\"/assets/*\"", "\"/fonts/*\""]
+            patterns
+                .iter()
+                .filter_map(|pattern| cst.pattern(*pattern))
+                .map(|compiled| compiled.text())
+                .collect::<Vec<_>>(),
+            vec!["/assets/*", "/fonts/*"]
         );
         assert_eq!(print_lossless(&cst), text);
+    }
+
+    /// `immutable` takes the three shapes §9.4 documents, and each is the CST
+    /// node a `view` pattern is: a quoted string, `regex '…'`, or nothing at
+    /// all. A bare one carries no `pattern` node, so it is the absence of a
+    /// list — not an empty list.
+    #[test]
+    fn a_static_immutable_takes_the_three_forms() {
+        let bare = parsed("static \"/a\" {\n    root \"public\"\n    immutable\n}\n");
+        let mount = bare.statics().next().expect("a mount");
+        let directive = bare
+            .of_kind(mount, NodeKind::StaticDirective)
+            .find(|directive| bare.words(*directive).any(|word| word == "immutable"))
+            .expect("the immutable directive");
+        assert_eq!(bare.patterns(directive).count(), 0, "bare has no item");
+
+        let regex =
+            parsed("static \"/a\" {\n    root \"public\"\n    immutable regex '/a/.*'\n}\n");
+        let mount = regex.statics().next().expect("a mount");
+        let directive = regex
+            .of_kind(mount, NodeKind::StaticDirective)
+            .find(|directive| regex.words(*directive).any(|word| word == "immutable"))
+            .expect("the immutable directive");
+        let pattern = regex.patterns(directive).next().expect("one pattern");
+        assert_eq!(
+            regex.pattern(pattern).map(|compiled| compiled.text()),
+            Some("/a/.*"),
+            "the raw form is kept verbatim"
+        );
+
+        // `regex` is the only word that starts an item, so a bare one followed
+        // by anything else is the list rule, not a silent drop.
+        assert_eq!(
+            refusal("static \"/a\" {\n    root \"public\"\n    immutable 1\n}\n"),
+            "3:15: expected a pattern, found `1`"
+        );
     }
 
     #[test]

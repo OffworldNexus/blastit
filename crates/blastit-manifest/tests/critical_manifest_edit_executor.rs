@@ -22,7 +22,9 @@
 
 use std::path::PathBuf;
 
-use blastit_manifest::blastfile::{BlastfileEdits, ProposedGrant, ProposedView, apply_edits};
+use blastit_manifest::blastfile::{
+    BlastfileEdits, ProposedGrant, ProposedView, StaticImmutable, StaticPattern, apply_edits,
+};
 use blastit_manifest::edit::{EditError, write_atomic};
 use blastit_manifest::{Manifest, PhpPolicy, StaticPolicy};
 
@@ -186,7 +188,10 @@ fn a_learned_query_keeps_static_and_entrypoint_byte_for_byte_on_disk() {
                 root: "public".to_string(),
                 index: "index.html".to_string(),
                 fallback: None,
-                immutable: vec!["/assets/*".to_string(), "/build/*".to_string()],
+                immutable: StaticImmutable::Patterns(vec![
+                    StaticPattern::quoted("/assets/*").expect("the manifest's first pattern"),
+                    StaticPattern::quoted("/build/*").expect("the manifest's second pattern"),
+                ]),
             },
         }]
     );

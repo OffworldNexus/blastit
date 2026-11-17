@@ -9,8 +9,11 @@ use std::path::{Path, PathBuf};
 
 use blastit_ingress::IngressPolicy;
 use blastit_sqlpolicy::{Allowlist, TableGrants};
+use regex::Regex;
 
-use crate::error::{Location, ManifestError, ManifestErrors, ManifestWarning};
+use crate::blastfile::{compile_pattern_text, compile_regex_text};
+use crate::error::{Location, ManifestError, ManifestErrors, ManifestWarning, Position};
+use crate::routing::compile_pattern as compile_anchored;
 use crate::validate;
 
 /// Name of a proxy declared as `[proxy.<name>]`.
@@ -306,6 +309,177 @@ impl Grant {
     }
 }
 
+/// What one `static` block's `immutable` directive names (`R5`, §9.4).
+///
+/// Three shapes, and the grammar of each is the one a `view` pattern already
+/// has (§8.1): bare `immutable` is [`Self::All`], `immutable <pattern>[,
+/// <pattern>…]` is [`Self::Patterns`], and a mount with no `immutable` is
+/// [`Self::None`]. There is no fourth spelling and no second matcher: every
+/// pattern was compiled by `blastfile::pattern` and anchored by
+/// `routing::compile_pattern` when the mount was lowered.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StaticImmutable {
+    /// No `immutable` directive: every answer revalidates.
+    #[default]
+    None,
+    /// Bare `immutable`: every **exact file** the mount serves is cached for a
+    /// year (§9.4).
+    ///
+    /// A directory `index` and a `fallback` answer are still `no-cache`
+    /// (§4.5, `S3`): the responder asks [`StaticImmutable::matches`] about an
+    /// exact-file answer only. It is a value of its own rather than a `"/*"`
+    /// pattern so the responder can tell the author's promise — "every name in
+    /// this tree changes with its bytes" — from a written catch-all.
+    All,
+    /// `immutable <pattern>[, …]`: the compiled patterns, in written order.
+    Patterns(Vec<StaticPattern>),
+}
+
+impl StaticImmutable {
+    /// True for bare `immutable`.
+    pub fn is_all(&self) -> bool {
+        matches!(self, Self::All)
+    }
+
+    /// The compiled patterns, in written order: empty for `None` and `All`.
+    pub fn patterns(&self) -> &[StaticPattern] {
+        match self {
+            Self::Patterns(patterns) => patterns,
+            Self::None | Self::All => &[],
+        }
+    }
+
+    /// The pattern texts, in written order — what `blastit fmt` prints, and
+    /// what a `--json` payload would carry.
+    pub fn texts(&self) -> impl Iterator<Item = &str> {
+        self.patterns().iter().map(StaticPattern::text)
+    }
+
+    /// Whether an **exact-file** answer whose path is `url_path` is cached for
+    /// a year (`R5`, §9.4).
+    ///
+    /// `url_path` is the path the client asked for, mount prefix included
+    /// (`StaticFile::url_path`), never the root-relative remainder. The match is
+    /// one anchored comparison: the program was compiled when the mount was
+    /// lowered, so a request never compiles a pattern.
+    pub fn matches(&self, url_path: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => true,
+            Self::Patterns(patterns) => patterns.iter().any(|pattern| pattern.matches(url_path)),
+        }
+    }
+}
+
+/// Which spelling a pattern was written in (§8.1).
+///
+/// It is recorded rather than re-derived from the text because the two
+/// spellings share a compiled form but not a meaning for a *consumer* that has
+/// not been taught the grammar: `regex '/assets/*'` is `/assets` followed by
+/// zero or more `/`, which is not what a stop-at-`/` glob reads it as. Only
+/// `MB.31.3`'s matcher may treat both alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spelling {
+    /// `"/assets/*"`: the compiled grammar (escaped literals, `{…}`, trailing `/*`).
+    Quoted,
+    /// `regex '…'`: the expression verbatim, the escape hatch.
+    Regex,
+}
+
+/// One `immutable` pattern: the text as written, the spelling it was written
+/// in, and the anchored matcher the one compiler built (§8.1).
+///
+/// Equality is the text's: two patterns written the same way are the same
+/// pattern, and a compiled program has no meaningful structural equality.
+#[derive(Clone, Debug)]
+pub struct StaticPattern {
+    /// The pattern's value, decoded for `"…"` and verbatim for `'…'`.
+    text: String,
+    /// The spelling the author wrote (§8.1).
+    spelling: Spelling,
+    /// `^(?:…)$` over the fragment `pattern.rs` emitted, built once.
+    matcher: Regex,
+}
+
+impl StaticPattern {
+    /// Compiles one quoted pattern — the same scan, caps and refusals a `view`
+    /// pattern gets (`/`-anchored, `*` only at the end after a `/`, `{name}`,
+    /// `{name:int}`, `{name:uuid}`, at most 4096 bytes).
+    ///
+    /// `None` for a pattern the compiler refuses. A `Blastfile` never reaches
+    /// this answer: the parser compiles the same text first and refuses it with
+    /// the sentence and `line:col`; this is the constructor for a policy built
+    /// by hand (tests, the retired reader).
+    pub fn quoted(pattern: &str) -> Option<Self> {
+        let compiled = compile_pattern_text(pattern, Position::NONE).ok()?;
+        Self::from_fragment(
+            compiled.text().to_owned(),
+            compiled.fragment(),
+            Spelling::Quoted,
+        )
+    }
+
+    /// Compiles one `regex '…'` pattern: the expression kept verbatim and
+    /// compiled as written (§8.1).
+    ///
+    /// `None` when the `regex` crate refuses it, or it is over the cap.
+    pub fn regex(expression: &str) -> Option<Self> {
+        let compiled = compile_regex_text(expression, Position::NONE).ok()?;
+        Self::from_fragment(
+            compiled.text().to_owned(),
+            compiled.fragment(),
+            Spelling::Regex,
+        )
+    }
+
+    /// A pattern from its text, its spelling and the anchored matcher the
+    /// caller compiled.
+    pub(crate) fn new(text: String, spelling: Spelling, matcher: Regex) -> Self {
+        Self {
+            text,
+            spelling,
+            matcher,
+        }
+    }
+
+    /// A pattern from the text and the fragment the one compiler emitted.
+    ///
+    /// `quoted`/`regex` build a policy by hand; `lower` compiles the fragment it
+    /// already has, so the anchor is compiled once and a request never pays for
+    /// it.
+    pub(crate) fn from_fragment(text: String, fragment: &str, spelling: Spelling) -> Option<Self> {
+        let matcher = compile_anchored(fragment).ok()?;
+        Some(Self::new(text, spelling, matcher))
+    }
+
+    /// The pattern as written.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// True for `regex '…'`, false for a quoted pattern (§8.1).
+    ///
+    /// A consumer that only understands the compiled *grammar* — the scheduler's
+    /// retired glob, until `MB.31.3` — must skip a `regex` entry rather than
+    /// re-read its text: the two spellings agree on nothing textual.
+    pub fn is_regex(&self) -> bool {
+        self.spelling == Spelling::Regex
+    }
+
+    /// Whether the pattern matches the whole of `url_path` (§8.1).
+    pub fn matches(&self, url_path: &str) -> bool {
+        self.matcher.is_match(url_path)
+    }
+}
+
+impl PartialEq for StaticPattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+    }
+}
+
+impl Eq for StaticPattern {}
+
 /// A `[route.static]` block: what the responder serves for one route (`R1`–`R5`).
 ///
 /// The values are kept exactly as written. Their syntax is checked by
@@ -327,9 +501,10 @@ pub struct StaticPolicy {
     /// reader lowers the per-route flag that answered every miss with the index
     /// to `fallback = Some(index)`, so the two spellings carry one fact.
     pub fallback: Option<String>,
-    /// `/`-anchored whole-match globs against the answering file's path; a
-    /// match gets the year-long cache (`R5`).
-    pub immutable: Vec<String>,
+    /// The files that never change: bare `immutable` caches every exact file
+    /// the mount serves, a pattern list caches the exact files it matches, and
+    /// no directive caches none (`R5`, §9.4).
+    pub immutable: StaticImmutable,
 }
 
 /// A top-level `static "<prefix>"` mount: one URL prefix answered from one
@@ -1346,7 +1521,7 @@ mod tests {
             root: "public".to_string(),
             index: "index.html".to_string(),
             fallback: None,
-            immutable: Vec::new(),
+            immutable: StaticImmutable::None,
         };
 
         let static_site = manifest(vec![route("site").with_static(Some(static_policy.clone()))]);
@@ -1542,7 +1717,9 @@ view app "/*" {
                 root: "public/assets".to_string(),
                 index: "index.html".to_string(),
                 fallback: None,
-                immutable: vec!["/assets/*".to_string()],
+                immutable: StaticImmutable::Patterns(vec![
+                    StaticPattern::quoted("/assets/*").expect("a legal pattern"),
+                ]),
             },
         };
         let unresolved = UnresolvedGrant::new(

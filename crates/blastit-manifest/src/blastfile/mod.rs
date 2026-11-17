@@ -57,6 +57,15 @@ pub use print::fmt;
 // a caller that renders a store the way a `Blastfile` writes it (§13.3) needs the
 // name to know it is the unnamed one.
 pub use lower::DEFAULT_STORE;
+// The typed `static` mount policy this grammar lowers to (§9.4). Re-exported
+// here because `model` is private to the crate; a caller of `fmt` or of the
+// scheduler's fixtures names the type beside the grammar that produces it.
+pub use crate::model::{StaticImmutable, StaticPattern};
+// The two entry points of the one pattern compiler (§8.1), so `model`'s
+// `StaticPattern` compiles a pattern with the scan a `view` uses instead of a
+// second copy of the rules. Renamed on the way out so a caller cannot mistake
+// them for a regex compiler: both return the compiled fragment.
+pub(crate) use pattern::{compile as compile_pattern_text, compile_regex as compile_regex_text};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
@@ -230,6 +239,15 @@ pub(crate) const MAX_LIST_ITEMS: usize = 4_096;
 pub(crate) const MAX_APP_NAME_CHARS: usize = 256;
 
 pub(crate) use pattern::MAX_PATTERN_BYTES;
+
+/// How many `immutable` patterns one `static` mount may declare (§9.4, `R5`).
+///
+/// The cap on the list, beside the compiler's cap on each pattern
+/// ([`MAX_PATTERN_BYTES`]). It is checked in `lower`, at the pattern that
+/// crosses it, so the refusal carries the `line:col` a developer can jump to;
+/// [`StaticImmutable`](crate::model::StaticImmutable) is only ever built from a
+/// list this has already bounded.
+pub(crate) const MAX_PATTERNS: usize = 32;
 
 /// Reads a `Blastfile`: a regular file of at most 16 MiB.
 ///

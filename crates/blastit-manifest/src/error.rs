@@ -516,19 +516,22 @@ pub enum ManifestError {
         /// The fixed rule the index breaks.
         rule: &'static str,
     },
-    /// An `immutable` pattern cannot be matched against an answering path
-    /// (`R5`).
+    /// A `static` mount declares more `immutable` patterns than a mount may
+    /// hold (`R5`, §9.4).
     ///
-    /// For the count rule the value is the first pattern past the limit, the
-    /// one an operator can delete.
-    #[error("{location}: static immutable {}: {rule}", quoted(.pattern))]
-    StaticImmutablePattern {
-        /// Where the `[route.static]` block is written.
-        location: Location,
-        /// The pattern as written.
-        pattern: String,
-        /// The fixed rule the pattern breaks.
-        rule: &'static str,
+    /// The cap is interpolated from `blastfile::MAX_PATTERNS`, so the sentence
+    /// cannot drift from the check, and the advice is the one edit that usually
+    /// replaces a per-depth list: a trailing `/*` crosses `/`, and `regex '…'`
+    /// matches a hashed name at any depth.
+    #[error(
+        "{}a mount holds at most {} `immutable` patterns; one pattern whose trailing \
+         `/*` crosses `/` reaches every depth, and `regex '…'` reaches a hashed name",
+        prefix(*at),
+        crate::blastfile::MAX_PATTERNS
+    )]
+    StaticImmutableTooManyPatterns {
+        /// Where the first pattern past the limit is written.
+        at: Position,
     },
     /// A static route that can never reach the app still declares something
     /// only the app could use (`R4`).
@@ -1447,6 +1450,7 @@ impl ManifestError {
             | Self::RegexNeedsRawString { at, .. }
             | Self::RegexWithoutRawString { at, .. }
             | Self::StaticRootMissing { at, .. }
+            | Self::StaticImmutableTooManyPatterns { at, .. }
             | Self::StoreNameReserved { at, .. }
             | Self::StoreTwoForms { at, .. }
             | Self::StrayCloseBrace { at, .. }
@@ -1507,7 +1511,6 @@ impl ManifestError {
             | Self::StaticRootInvalid { .. }
             | Self::StaticRootUnusable { .. }
             | Self::StaticIndexInvalid { .. }
-            | Self::StaticImmutablePattern { .. }
             | Self::StaticDeadDeclaration { .. }
             | Self::PhpEntryInvalid { .. }
             | Self::PhpWorkersInvalid { .. }

@@ -621,6 +621,66 @@ fn outcome<T, E>(result: &Result<T, E>) -> &'static str {
     }
 }
 
+/// `MB.31.2`: the three `immutable` shapes each format to one fixed point, and
+/// the formatted file lowers to the **same** policy — so `blastit fmt` can never
+/// turn a bare `immutable` into a pattern, wrap the list, or drop the raw
+/// spelling. A formatter that wrote `immutable "/*"` for the bare form, or one
+/// that lost `regex`, fails here.
+#[test]
+fn every_immutable_spelling_is_a_fixed_point() {
+    let cases = [
+        (
+            "static \"/\" { root \"public\"; immutable }",
+            "static \"/\" {\n    root \"public\"\n    immutable\n}\n",
+        ),
+        (
+            "static \"/\" {\nroot \"public\"\nimmutable \"/a/*\"\n}",
+            "static \"/\" {\n    root \"public\"\n    immutable \"/a/*\"\n}\n",
+        ),
+        (
+            "static \"/\" { root \"public\"; immutable \"/a/*\" ,\"/b/{id:int}\", regex '/c/.+' }",
+            "static \"/\" {\n    root \"public\"\n    immutable \"/a/*\", \"/b/{id:int}\", \
+             regex '/c/.+'\n}\n",
+        ),
+    ];
+    for (source, canonical) in cases {
+        let formatted = blastfile::fmt(source).expect("the document parses");
+        assert_eq!(formatted, canonical, "{source:?}");
+        assert_eq!(
+            blastfile::fmt(&formatted).expect("the canonical form parses"),
+            canonical,
+            "a second pass is byte-identical"
+        );
+        let before = Manifest::from_blastfile_str(source).expect("the source lowers");
+        let after = Manifest::from_blastfile_str(&formatted).expect("the layout lowers");
+        assert!(
+            after.equivalent(&before),
+            "{source:?}: layout changed the manifest"
+        );
+        assert_eq!(
+            after.mounts()[0].policy.immutable,
+            before.mounts()[0].policy.immutable,
+            "the spelled policy survives the layout"
+        );
+    }
+
+    // Both directions of the policy, through the formatted text: bare is `All`
+    // (caches anything), a pattern is not.
+    let bare =
+        Manifest::from_blastfile_str("static \"/\" {\n    root \"public\"\n    immutable\n}\n")
+            .expect("bare lowers");
+    assert!(bare.mounts()[0].policy.immutable.is_all());
+    assert!(
+        bare.mounts()[0]
+            .policy
+            .immutable
+            .matches("/deep/nested/app.js")
+    );
+    let listed = Manifest::from_blastfile_str(cases[1].1).expect("the list lowers");
+    assert!(!listed.mounts()[0].policy.immutable.is_all());
+    assert!(!listed.mounts()[0].policy.immutable.matches("/b/app.js"));
+}
+
 /// P3 over the whole grammar, and over the commented document: the layout is
 /// the only thing `fmt` changes.
 #[test]

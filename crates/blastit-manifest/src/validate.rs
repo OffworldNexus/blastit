@@ -23,9 +23,6 @@ const NO_BACKSLASH: &str = "must not contain \\";
 const NO_CONTROL_BYTE: &str = "must not contain a control byte";
 const ONE_OR_MORE_SEGMENTS: &str = "must be one or more segments";
 const NO_DOTFILE_SEGMENT: &str = "must not contain a dotfile segment";
-const ANCHORED_PATTERN: &str = "must start with /";
-const AT_MOST_PATTERNS: &str = "at most 32 patterns";
-const AT_MOST_PATTERN_BYTES: &str = "at most 256 bytes";
 
 /// The fixed rules a `static "<prefix>"` mount's prefix can break (§9.1).
 ///
@@ -59,12 +56,6 @@ const TRACE_CANNOT_REACH_WORKER: &str = "TRACE cannot reach a PHP worker";
 /// budget is a separate boot check that has a `Config` (and so is not
 /// `validate`'s, which must keep parsing on a machine with no deployment).
 const MAX_WORKERS: u32 = 64;
-
-/// How many `immutable` patterns one route may declare (`R5`).
-const MAX_PATTERNS: usize = 32;
-
-/// How long one `immutable` pattern may be, in bytes (`R5`).
-const MAX_PATTERN_BYTES: usize = 256;
 
 /// Validates a manifest and collects its warnings.
 pub(crate) fn validate(
@@ -404,7 +395,6 @@ fn check_static(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
         };
         check_static_root(&location, policy, errors);
         check_static_index(&location, policy, errors);
-        check_static_immutable(&location, policy, errors);
         check_static_declarations(manifest, route, policy, location, errors);
     }
 }
@@ -465,52 +455,6 @@ fn check_static_index(location: &Location, policy: &StaticPolicy, errors: &mut V
             index: policy.index.clone(),
             rule,
         });
-    }
-}
-
-/// Every `immutable` pattern is a `/`-anchored glob matched whole against the
-/// answering file's path (`R5`).
-///
-/// The limit is on the list as well as on each pattern: an unbounded list is an
-/// unbounded amount of work per answer, and a pattern longer than a path
-/// component cannot name a file's path on any filesystem blastit serves.
-fn check_static_immutable(
-    location: &Location,
-    policy: &StaticPolicy,
-    errors: &mut Vec<ManifestError>,
-) {
-    if policy.immutable.len() > MAX_PATTERNS {
-        // The first pattern past the limit is the one to delete.
-        let pattern = policy
-            .immutable
-            .get(MAX_PATTERNS)
-            .cloned()
-            .unwrap_or_default();
-        errors.push(ManifestError::StaticImmutablePattern {
-            location: location.clone(),
-            pattern,
-            rule: AT_MOST_PATTERNS,
-        });
-    }
-    for pattern in &policy.immutable {
-        let rule = if pattern.len() > MAX_PATTERN_BYTES {
-            Some(AT_MOST_PATTERN_BYTES)
-        } else if !pattern.starts_with('/') {
-            Some(ANCHORED_PATTERN)
-        } else if has_parent_segment(pattern) {
-            Some(NO_PARENT_SEGMENT)
-        } else if has_control_byte(pattern) {
-            Some(NO_CONTROL_BYTE)
-        } else {
-            None
-        };
-        if let Some(rule) = rule {
-            errors.push(ManifestError::StaticImmutablePattern {
-                location: location.clone(),
-                pattern: pattern.clone(),
-                rule,
-            });
-        }
     }
 }
 
@@ -622,7 +566,6 @@ fn check_mounts(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
         if !bridged(&mount.policy) {
             check_static_root(&location, &mount.policy, errors);
             check_static_index(&location, &mount.policy, errors);
-            check_static_immutable(&location, &mount.policy, errors);
         }
         if let Some(rule) = mount_prefix_rule(&mount.prefix) {
             errors.push(ManifestError::StaticMountPrefixInvalid {
@@ -1094,7 +1037,8 @@ mod tests {
     };
     use crate::error::{Location, ManifestError, ManifestErrors};
     use crate::model::{
-        Grant, Group, Manifest, PgGrant, PhpPolicy, ProxyName, Route, StaticMount, StaticPolicy,
+        Grant, Group, Manifest, PgGrant, PhpPolicy, ProxyName, Route, StaticImmutable, StaticMount,
+        StaticPolicy,
     };
     use blastit_ingress::{BodyCodec, IngressPolicy};
 
@@ -1110,7 +1054,7 @@ mod tests {
                     root: "public".to_string(),
                     index: "index.html".to_string(),
                     fallback: fallback.map(|file| file.to_string()),
-                    immutable: Vec::new(),
+                    immutable: StaticImmutable::None,
                 },
             })
             .collect();
@@ -1142,7 +1086,7 @@ mod tests {
             root: root.to_string(),
             index: index.to_string(),
             fallback: None,
-            immutable: Vec::new(),
+            immutable: StaticImmutable::None,
         }));
         Manifest::assemble(
             1,
@@ -1315,7 +1259,7 @@ mod tests {
             root: "public".to_string(),
             index: "index.html".to_string(),
             fallback: Some("index.html".to_string()),
-            immutable: Vec::new(),
+            immutable: StaticImmutable::None,
         }));
         let mut groups = BTreeMap::new();
         groups.insert(
@@ -1395,7 +1339,7 @@ mod tests {
             root: "public".to_string(),
             index: "index.html".to_string(),
             fallback: Some("index.html".to_string()),
-            immutable: Vec::new(),
+            immutable: StaticImmutable::None,
         }));
         let manifest = Manifest::assemble(
             1,

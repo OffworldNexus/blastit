@@ -353,7 +353,7 @@ mod tests {
 
     use super::{MountMatch, MountTable, RoutingTable, compile_pattern};
     use crate::error::ManifestError;
-    use crate::model::{Manifest, Route, StaticMount, StaticPolicy};
+    use crate::model::{Manifest, Route, StaticImmutable, StaticMount, StaticPolicy};
 
     /// A manifest with the given mount prefixes, in order, and no routes: a
     /// static-only file (§9.5).
@@ -367,7 +367,7 @@ mod tests {
                     root: format!("public{index}"),
                     index: "index.html".to_string(),
                     fallback: None,
-                    immutable: Vec::new(),
+                    immutable: StaticImmutable::None,
                 },
             })
             .collect();

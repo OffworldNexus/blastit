@@ -29,6 +29,7 @@ use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_manifest::{
     BodyOwner, Columns, Grant, Group, Manifest, ManifestWarning, PgGrant, PhpPolicy, Protocol,
     Proxy, ProxyName, Route, StaticMount, StaticPolicy, TableGrant, TableGrants, UidLayout,
+    blastfile::{StaticImmutable, StaticPattern},
 };
 
 // ---- builders ----------------------------------------------------------
@@ -210,7 +211,16 @@ fn mount(
             root: root.to_owned(),
             index: index.to_owned(),
             fallback: fallback.map(str::to_owned),
-            immutable: immutable.iter().map(|rule| (*rule).to_owned()).collect(),
+            immutable: if immutable.is_empty() {
+                StaticImmutable::None
+            } else {
+                StaticImmutable::Patterns(
+                    immutable
+                        .iter()
+                        .map(|rule| StaticPattern::quoted(rule).expect("a legal fixture pattern"))
+                        .collect(),
+                )
+            },
         },
     }
 }

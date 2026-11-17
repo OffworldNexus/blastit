@@ -28,15 +28,17 @@ use blastit_ingress::{BodyCodec, IngressPolicy};
 use blastit_sqlpolicy::{Columns, TableGrant, TableGrants, normalize};
 
 use super::MAX_APP_NAME_CHARS;
+use super::MAX_PATTERNS;
 use super::parser::line_starts;
 use super::pattern::normalise_methods;
 use super::syntax::{Cst, Element, NodeId, NodeKind};
 use super::tokens::{TokenKind, raw_value, str_value};
-use crate::error::{Location, ManifestError, Position};
+use crate::error::{Location, ManifestError, Position, regex_message};
 use crate::model::{
     BodyOwner, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route,
-    StaticMount, StaticPolicy, UnresolvedGrant,
+    Spelling, StaticImmutable, StaticMount, StaticPattern, StaticPolicy, UnresolvedGrant,
 };
+use crate::routing::compile_pattern;
 
 /// The name the unnamed `postgres $DATABASE_URL` takes (§7.3, §7.4).
 ///
@@ -277,6 +279,62 @@ impl<'a> Lowering<'a> {
             fragments.push(compiled.fragment().to_owned());
         }
         Ok(fragments)
+    }
+
+    /// A `static` block's `immutable` directive (§9.4).
+    ///
+    /// Bare `immutable` is [`StaticImmutable::All`]; a list is the same pattern
+    /// grammar a `view` takes, compiled by the one compiler at each pattern's own
+    /// position, so a misplaced `*` or a `regex` the crate refuses is refused
+    /// here with the sentence and `line:col` a `view` pattern gets (§8.1, §8.3).
+    ///
+    /// The list cap is checked at the pattern that crosses it, not after the
+    /// loop: the refusal names a place a developer can jump to (§4.5).
+    fn immutable(&self, directive: NodeId) -> Result<StaticImmutable, ManifestError> {
+        let patterns: Vec<NodeId> = self.cst.patterns(directive).collect();
+        if patterns.is_empty() {
+            return Ok(StaticImmutable::All);
+        }
+        let mut compiled = Vec::with_capacity(patterns.len());
+        for (index, node) in patterns.into_iter().enumerate() {
+            if index >= MAX_PATTERNS {
+                return Err(ManifestError::StaticImmutableTooManyPatterns {
+                    at: self.position(node),
+                });
+            }
+            let (text, fragment) = {
+                let pattern = self
+                    .cst
+                    .pattern(node)
+                    .ok_or_else(|| self.broken(node, "a compiled pattern"))?;
+                (pattern.text().to_owned(), pattern.fragment().to_owned())
+            };
+            // `regex '…'` and `"…"` compile to the same anchored form but mean
+            // different things to a reader that only knows the grammar, so the
+            // spelling travels with the pattern (§8.1). A `pattern` node is
+            // either one `Str` (quoted) or `regex` + one `RawStr`.
+            let spelling = if self
+                .cst
+                .child_tokens(node)
+                .any(|token| matches!(self.cst.token_kind(token), Some(TokenKind::Word)))
+            {
+                Spelling::Regex
+            } else {
+                Spelling::Quoted
+            };
+            // `pattern::compile` emits only escaped literals and its three fixed
+            // fragments, so this anchor always compiles; the refusal exists so a
+            // fragment that somehow did not would be a sentence rather than a
+            // panic.
+            let matcher =
+                compile_pattern(&fragment).map_err(|error| ManifestError::PatternRegex {
+                    at: self.position(node),
+                    pattern: text.clone(),
+                    message: regex_message(&error),
+                })?;
+            compiled.push(StaticPattern::new(text, spelling, matcher));
+        }
+        Ok(StaticImmutable::Patterns(compiled))
     }
 
     // ---- 1. app and entrypoint (§12) ------------------------------------
@@ -822,7 +880,7 @@ impl<'a> Lowering<'a> {
             let mut root: Option<String> = None;
             let mut index: Option<String> = None;
             let mut fallback: Option<String> = None;
-            let mut immutable: Vec<String> = Vec::new();
+            let mut immutable = StaticImmutable::None;
             let mut seen: BTreeMap<String, u32> = BTreeMap::new();
 
             let directives: Vec<NodeId> =
@@ -847,11 +905,7 @@ impl<'a> Lowering<'a> {
                     "root" => root = Some(self.string(directive)?),
                     "index" => index = Some(self.string(directive)?),
                     "fallback" => fallback = Some(self.string(directive)?),
-                    "immutable" => {
-                        for text in self.cst.strings(directive) {
-                            immutable.push(str_value(text));
-                        }
-                    }
+                    "immutable" => immutable = self.immutable(directive)?,
                     _ => return Err(self.broken(directive, "a `static` directive")),
                 }
             }

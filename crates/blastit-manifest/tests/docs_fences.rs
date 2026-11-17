@@ -810,7 +810,18 @@ fn the_django_page_static_fragment_still_parses() {
     let mount = &manifest.mounts()[0];
     assert_eq!(mount.prefix, "/static");
     assert_eq!(mount.policy.root, "staticfiles");
-    assert_eq!(mount.policy.immutable, ["/static/*"]);
+    // The page's one pattern, typed (`MB.31.2`): the fragment crosses `/`, so
+    // this single `"/static/*"` reaches the admin's deepest fingerprinted file.
+    let [pattern] = mount.policy.immutable.patterns() else {
+        panic!("the page declares one immutable pattern");
+    };
+    assert_eq!(pattern.text(), "/static/*");
+    assert!(pattern.matches("/static/admin/js/vendor/select2/i18n/de.js"));
+    assert!(!pattern.matches("/assets/app.js"));
+    assert!(
+        !pattern.matches("/staticfiles/app.js"),
+        "a pattern is `/`-anchored: no other prefix answers"
+    );
 }
 
 #[test]

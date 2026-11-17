@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use blastit_manifest::{
     Location, Manifest, ManifestError, ManifestWarning, Position, ProxyName, StaticPolicy,
     UidLayout,
+    blastfile::{StaticImmutable, StaticPattern},
 };
 
 /// The accepted page's complete `Blastfile` (`docs/frameworks/static-and-spa.md`
@@ -135,14 +136,6 @@ fn fallback_invalid(fallback: &str, rule: &'static str) -> ManifestError {
     }
 }
 
-fn bad_pattern(pattern: &str, rule: &'static str) -> ManifestError {
-    ManifestError::StaticImmutablePattern {
-        location: mount_location(),
-        pattern: pattern.to_string(),
-        rule,
-    }
-}
-
 #[test]
 fn the_pages_mount_parses_with_the_defaults_it_omits() {
     let (manifest, warnings) =
@@ -162,7 +155,9 @@ fn the_pages_mount_parses_with_the_defaults_it_omits() {
             // The page answers a miss with the file it answers a directory
             // with (§9.3).
             fallback: Some("index.html".to_string()),
-            immutable: vec!["/assets/*".to_string()],
+            immutable: StaticImmutable::Patterns(vec![
+                StaticPattern::quoted("/assets/*").expect("the page's pattern"),
+            ]),
         }
     );
 
@@ -175,14 +170,18 @@ fn the_pages_mount_parses_with_the_defaults_it_omits() {
             root: "public".to_string(),
             index: "index.html".to_string(),
             fallback: None,
-            immutable: vec![],
+            immutable: StaticImmutable::None,
         }
     );
     let explicit = accepted(
-        "root \"public\"\nindex \"shell.html\"\nimmutable \"/assets/*/*\", \"/index.html\"\n",
+        "root \"public\"\nindex \"shell.html\"\nimmutable \"/assets/*\", \"/index.html\"\n",
     );
     assert_eq!(policy(&explicit).index, "shell.html");
-    assert_eq!(policy(&explicit).immutable, ["/assets/*/*", "/index.html"]);
+    assert_eq!(
+        policy(&explicit).immutable.texts().collect::<Vec<_>>(),
+        ["/assets/*", "/index.html"],
+        "the list keeps written order"
+    );
 }
 
 #[test]
@@ -327,12 +326,7 @@ fn every_static_directive_takes_one_string() {
             "a `\"…\"` path",
             "`1`",
         ),
-        (
-            "root \"public\"\nimmutable 1\n",
-            "3:11",
-            "a `\"…\"` pattern",
-            "`1`",
-        ),
+        ("root \"public\"\nimmutable 1\n", "3:11", "a pattern", "`1`"),
     ];
     for (body, at, expected, found) in cases {
         assert_eq!(
@@ -351,7 +345,10 @@ fn every_static_directive_takes_one_string() {
 
     // One item is a list, so the single-pattern spelling is legal.
     assert_eq!(
-        policy(&accepted("root \"public\"\nimmutable \"/assets/*\"\n")).immutable,
+        policy(&accepted("root \"public\"\nimmutable \"/assets/*\"\n"))
+            .immutable
+            .texts()
+            .collect::<Vec<_>>(),
         ["/assets/*"]
     );
 }
@@ -419,74 +416,232 @@ fn every_bad_index_names_the_rule_it_breaks() {
 }
 
 #[test]
-fn every_bad_immutable_pattern_names_the_rule_it_breaks() {
-    let longest = format!("/{}", "a".repeat(257));
-    let thirty_three: Vec<String> = (0..33).map(|at| format!("\"/a{at}\"")).collect();
-    let cases = [
+fn every_bad_immutable_pattern_gets_the_view_pattern_sentence() {
+    // `immutable` takes the one pattern grammar (§8.1), so each refusal below
+    // is the sentence **and** the `line:col` a `view` pattern gets, at the
+    // pattern's own opening quote — never a `static immutable "…"` second
+    // vocabulary, and never the mount as the subject.
+    let over_cap = format!("/{}", "a".repeat(4096));
+    let cases: Vec<(String, String)> = vec![
         (
-            "immutable \"assets/*\"\n".to_string(),
-            bad_pattern("assets/*", "must start with /"),
+            "immutable \"assets/*\"\n".to_owned(),
+            "3:11: a pattern starts with `/`: write `/x`".to_owned(),
         ),
         (
-            "immutable \"\"\n".to_string(),
-            bad_pattern("", "must start with /"),
+            "immutable \"\"\n".to_owned(),
+            "3:11: a pattern starts with `/`: write `/x`".to_owned(),
         ),
         (
-            "immutable \"/assets/../*\"\n".to_string(),
-            bad_pattern("/assets/../*", "must not contain .."),
+            "immutable \"/a*b\"\n".to_owned(),
+            "3:11: `*` is only valid at the end of a pattern; write `/x/*`".to_owned(),
         ),
         (
-            "immutable \"/assets/\u{0}*\"\n".to_string(),
-            bad_pattern("/assets/\u{0}*", "must not contain a control byte"),
+            "immutable \"/a/*/b\"\n".to_owned(),
+            "3:11: `*` is only valid at the end of a pattern; write `/x/*`".to_owned(),
         ),
         (
-            "immutable \"/assets/\u{1f}*\"\n".to_string(),
-            bad_pattern("/assets/\u{1f}*", "must not contain a control byte"),
+            "immutable \"/x/{Id}\"\n".to_owned(),
+            "3:11: `{Id}` is not a parameter name; names start with a lower-case letter and \
+             are `[a-z][a-z0-9_]*`"
+                .to_owned(),
         ),
         (
-            format!("immutable \"{longest}\"\n"),
-            bad_pattern(&longest, "at most 256 bytes"),
+            "immutable \"/x/{id:str}\"\n".to_owned(),
+            "3:11: `{id:str}` is not a pattern type; the types are `int` and `uuid`".to_owned(),
         ),
         (
-            format!("immutable {}\n", thirty_three.join(", ")),
-            bad_pattern("/a32", "at most 32 patterns"),
+            "immutable \"/x/{a}/{a:int}\"\n".to_owned(),
+            "3:11: the parameter `{a}` appears twice; a pattern names each parameter once"
+                .to_owned(),
+        ),
+        (
+            format!("immutable \"{over_cap}\"\n"),
+            "3:11: a pattern holds at most 4096 bytes".to_owned(),
         ),
     ];
     for (body, expected) in cases {
         assert_eq!(
-            refusals(&format!("root \"public\"\n{body}")),
-            vec![expected],
+            lines(&format!("root \"public\"\n{body}")),
+            vec![expected.clone()],
             "{body}"
         );
     }
+    // The values are the pattern's own variants, so a caller never parses a
+    // message back into an error (`view`'s refusal set, reused).
     assert_eq!(
-        lines("root \"public\"\nimmutable \"assets/*\"\n")[0],
-        r#"mount "/" (index 0): static immutable "assets/*": must start with /"#
+        refusals("root \"public\"\nimmutable \"assets/*\"\n"),
+        vec![ManifestError::PatternNotAnchored {
+            at: Position::at(3, 11),
+        }]
+    );
+    assert_eq!(
+        refusals("root \"public\"\nimmutable \"/a/*/b\"\n"),
+        vec![ManifestError::PatternStarPosition {
+            at: Position::at(3, 11),
+        }]
+    );
+    assert_eq!(
+        refusals("root \"public\"\nimmutable \"/x/{a}/{a:int}\"\n"),
+        vec![ManifestError::PatternParameterDuplicate {
+            at: Position::at(3, 11),
+            name: "a".to_owned(),
+        }]
     );
 
-    // A literal pattern is legal: the design's fixture D caches `/index.html`
-    // itself, and the page documents `*` as the only metacharacter. Both limits
-    // are inclusive.
-    let manifest = accepted("root \"public\"\nimmutable \"/index.html\", \"/assets/*/*\"\n");
-    assert_eq!(policy(&manifest).immutable, ["/index.html", "/assets/*/*"]);
-    let boundary: Vec<String> = (0..32).map(|at| format!("\"/a{at}\"")).collect();
+    // An expression the crate refuses is refused at the raw string, with the
+    // crate's own message — not a `regex` that silently caches nothing.
+    let rendered = lines("root \"public\"\nimmutable regex '('\n");
+    assert_eq!(rendered.len(), 1);
+    assert!(
+        rendered[0].starts_with("3:17: regex `(` does not compile: "),
+        "{rendered:?}"
+    );
+    assert!(
+        matches!(
+            refusals("root \"public\"\nimmutable regex '('\n").as_slice(),
+            [ManifestError::PatternRegex { at, .. }] if *at == Position::at(3, 17)
+        ),
+        "the refusal points at the expression"
+    );
+}
+
+#[test]
+fn a_33rd_immutable_pattern_is_refused_at_its_own_pattern() {
+    // §9.4's list cap, refused where a developer can jump to it: the 33rd
+    // pattern, not the mount, and not after the fact.
+    let items: Vec<String> = (0..33).map(|at| format!("\"/a{at}\"")).collect();
+    let line = format!("immutable {}", items.join(", "));
+    // The 33rd item as written, quote included: its quote is where the refusal
+    // points, exactly as a `view` pattern's does.
+    let quote = line
+        .find(items.get(32).expect("33 items").as_str())
+        .expect("the 33rd item is in the list");
+    let body = format!("{line}\n");
+    let rendered = lines(&format!("root \"public\"\n{body}"));
     assert_eq!(
-        policy(&accepted(&format!(
-            "root \"public\"\nimmutable {}\n",
-            boundary.join(", ")
-        )))
-        .immutable
-        .len(),
+        rendered,
+        vec![format!(
+            "3:{}: a mount holds at most 32 `immutable` patterns; one pattern whose trailing \
+             `/*` crosses `/` reaches every depth, and `regex '…'` reaches a hashed name",
+            quote + 1
+        )],
+        "{line}"
+    );
+
+    // Exactly 32 is legal, and every one of them survives in written order.
+    let boundary: Vec<String> = (0..32).map(|at| format!("\"/a{at}\"")).collect();
+    let manifest = accepted(&format!(
+        "root \"public\"\nimmutable {}\n",
+        boundary.join(", ")
+    ));
+    assert_eq!(
+        policy(&manifest)
+            .immutable
+            .texts()
+            .collect::<Vec<_>>()
+            .len(),
         32
     );
-    let longest = format!("/{}", "a".repeat(255));
-    assert_eq!(
-        policy(&accepted(&format!(
-            "root \"public\"\nimmutable \"{longest}\"\n"
-        )))
-        .immutable,
-        [longest]
+}
+
+#[test]
+fn the_three_immutable_shapes_and_their_denied_twins() {
+    // Bare `immutable` is `All`, a value of its own — not "no patterns", and
+    // not a `"/*"` someone could mistake for a written catch-all.
+    let bare = accepted("root \"public\"\nimmutable\n");
+    assert_eq!(policy(&bare).immutable, StaticImmutable::All);
+    assert!(policy(&bare).immutable.is_all());
+    assert_eq!(policy(&bare).immutable.patterns().len(), 0);
+    for path in ["/", "/a", "/assets/app.js", "/static/admin/js/vendor/x.js"] {
+        assert!(policy(&bare).immutable.matches(path), "{path}");
+    }
+
+    // No directive is `None`, and it caches nothing.
+    let none = accepted("root \"public\"\n");
+    assert_eq!(policy(&none).immutable, StaticImmutable::None);
+    assert!(!policy(&none).immutable.is_all());
+    for path in ["/", "/assets/app.js"] {
+        assert!(!policy(&none).immutable.matches(path), "{path}");
+    }
+
+    // A trailing `/*` crosses `/` at any depth: the Django page's one line.
+    let deep = accepted("root \"public\"\nimmutable \"/static/*\"\n");
+    let immutable = &policy(&deep).immutable;
+    for path in [
+        "/static/app.js",
+        "/static/admin/js/vendor/select2/i18n/de.js",
+        "/static/",
+    ] {
+        assert!(immutable.matches(path), "{path} must match `/static/*`");
+    }
+    for path in ["/static", "/staticfiles/app.js", "/assets/app.js"] {
+        assert!(
+            !immutable.matches(path),
+            "{path} must not match `/static/*`"
+        );
+    }
+
+    // A literal dot and the two typed segments, each with its near miss.
+    let typed = accepted(
+        "root \"public\"\nimmutable \"/v1.0/app.css\", \"/orders/{id:int}/invoice.pdf\", \
+         \"/users/{id:uuid}.json\"\n",
     );
+    let immutable = &policy(&typed).immutable;
+    assert_eq!(
+        immutable.texts().collect::<Vec<_>>(),
+        [
+            "/v1.0/app.css",
+            "/orders/{id:int}/invoice.pdf",
+            "/users/{id:uuid}.json"
+        ],
+        "written order, text as compiled"
+    );
+    assert!(immutable.matches("/v1.0/app.css"));
+    assert!(!immutable.matches("/v1x0/app.css"));
+    assert!(immutable.matches("/orders/42/invoice.pdf"));
+    assert!(!immutable.matches("/orders/abc/invoice.pdf"));
+    assert!(immutable.matches("/users/6ba7b810-9dad-11d1-80b4-00c04fd430c8.json"));
+    assert!(!immutable.matches("/users/not-a-uuid.json"));
+
+    // The escape hatch: one expression for a hashed name at any depth.
+    let regex = accepted("root \"public\"\nimmutable regex '/static/.+\\.[0-9a-f]{12}\\.[^/]+'\n");
+    let immutable = &policy(&regex).immutable;
+    assert_eq!(
+        immutable.texts().collect::<Vec<_>>(),
+        ["/static/.+\\.[0-9a-f]{12}\\.[^/]+"],
+        "the raw form is kept verbatim"
+    );
+    assert!(
+        immutable.matches("/static/admin/js/vendor/select2/i18n/de.0123456789ab.js"),
+        "one expression reaches Django's deepest hashed file"
+    );
+    assert!(
+        !immutable.matches("/static/admin/js/vendor/select2/i18n/de.js"),
+        "an unhashed name is not matched"
+    );
+}
+
+/// The spelling travels with the pattern (`MB.31.2` review): a `regex '…'` entry
+/// is not a glob, so a consumer that only knows the compiled grammar can skip it
+/// instead of re-reading its text.
+#[test]
+fn an_immutable_pattern_records_its_spelling() {
+    let manifest = accepted("root \"public\"\nimmutable \"/a/*\", regex '/b/*'\n");
+    let patterns = policy(&manifest).immutable.patterns();
+    assert_eq!(patterns.len(), 2, "one entry per item, bare excluded");
+    assert_eq!(patterns[0].text(), "/a/*");
+    assert!(!patterns[0].is_regex(), "`\"/a/*\"` is the quoted grammar");
+    assert_eq!(patterns[1].text(), "/b/*");
+    assert!(patterns[1].is_regex(), "`regex '…'` keeps its spelling");
+
+    // `regex '/b/*'` is `/b` then zero or more `/`: it denies `/b/app.js`, which
+    // a stop-at-`/` glob reading the same text would accept.
+    assert!(patterns[1].matches("/b"));
+    assert!(!patterns[1].matches("/b/app.js"));
+    // And through the policy, both directions: the quoted entry caches, the
+    // regex entry does not.
+    assert!(policy(&manifest).immutable.matches("/a/app.js"));
+    assert!(!policy(&manifest).immutable.matches("/b/app.js"));
 }
 
 #[test]

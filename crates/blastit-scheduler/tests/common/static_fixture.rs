@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use blastit_manifest::StaticPolicy;
+use blastit_manifest::blastfile::{StaticImmutable, StaticPattern};
 use blastit_scheduler::static_asset::{Backend, STATIC_MAX_FILE_BYTES, StaticRoot};
 use rustix::fs::{CWD, Mode, chmod, mkfifoat};
 
@@ -98,10 +99,21 @@ impl Fixture {
             // The retired reader's spelling of the same fact: a miss is
             // answered by the index (§9.3).
             fallback: spa.then(|| "index.html".to_string()),
-            immutable: immutable
-                .iter()
-                .map(|pattern| (*pattern).to_string())
-                .collect(),
+            // The typed policy the one compiler builds: each fixture pattern is
+            // the `Blastfile` spelling, compiled once here so `open` reads a
+            // matcher rather than a string.
+            immutable: if immutable.is_empty() {
+                StaticImmutable::None
+            } else {
+                StaticImmutable::Patterns(
+                    immutable
+                        .iter()
+                        .map(|pattern| {
+                            StaticPattern::quoted(pattern).expect("a legal fixture pattern")
+                        })
+                        .collect(),
+                )
+            },
         }
     }
 }

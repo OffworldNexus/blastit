@@ -3029,3 +3029,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T22:46 [MB.31.1] (lead) edited fields
 - 2026-11-17T22:46 [MB.31.1] (lead) reviewer VERDICT PASS (6 MINOR). Fixed the path names to the real critic files (immutable-pattern-grammar.review-*). The other five MINORs are doc-accuracy item
 - 2026-11-17T22:46 [MB.31.1] (lead) status review -> done
+- 2026-11-17T22:46 [MB.31.2] (lead) status ready -> active
+- 2026-11-17T22:46 [MB.31.2] (lead) attempt 1/3 started
+- 2026-11-17T22:46 [MB.31.2] (lead) base 30b864f; inherits MB.31.1 review MINORs: document the pattern-name rule in the reference, the Django 'reaches every depth' sentence is only true once this 
+- 2026-11-17T22:48 [MB.31.2] (lead) edited fields
+- 2026-11-17T22:48 [MB.31.2] (lead) attempt 1 blocked honestly: a public field type change is source-breaking at every struct literal naming it, and six needed files were out of lane (including tw
+- 2026-11-17T22:48 [MB.31.2] (lead) attempt 2/3 started
+- 2026-11-17T23:06 [MB.31.2] (lead) attempt 2 done: immutable parses/lowers/validates/prints through pattern.rs (bare => All live end to end, patterns compiled once at lower, 32-cap refused at the
+- 2026-11-17T23:06 [MB.31.2] (lead) status active -> review
+- 2026-11-17T23:19 [MB.31.2] (lead) REVIEW FAIL attempt 2 (3 MAJOR, 2 MINOR): every Patterns entry -- quoted OR regex -- is handed to the retired glob(), so a regex's text is re-read as a glob and
+- 2026-11-17T23:19 [MB.31.2] (lead) attempt 3/3 started
+- 2026-11-17T23:31 [MB.31.2] (lead) attempt 3: Spelling on StaticPattern and ImmutableGlob built only from quoted entries; red proof captured (removing the filter yields left immutable / right no-
+- 2026-11-17T23:31 [MB.31.2] (lead) status review -> review
+- 2026-11-17T23:39 [MB.31.2] (lead) reviewer attempt 3 VERDICT PASS (3 MINOR: StaticPattern equality is text-only so a spelling flip compares equal -- handed to MB.31.3; the two public /*-crosses-
+- 2026-11-17T23:39 [MB.31.3] (lead) inherits from MB.31.2: make StaticPattern PartialEq compare text AND spelling; make cross-/ live by calling StaticImmutable::matches and delete ImmutableGlob/gl
+- 2026-11-17T23:39 [MB.31.2] (lead) status review -> done

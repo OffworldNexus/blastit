@@ -24,6 +24,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
+use blastit_manifest::blastfile::{StaticImmutable, StaticPattern};
 use blastit_scheduler::rewrite::{Rewrite, decide};
 use blastit_scheduler::static_asset::{
     AnswerKind, Backend, STATIC_MAX_FILE_BYTES, StaticFile, StaticMeta, StaticOutcome, StaticRoot,
@@ -618,7 +619,9 @@ fn the_cache_header_is_keyed_on_the_answering_file() {
     // *does* declare the page's pattern earns the year for the exact asset
     // (design §5.2 rows 32/33), while an index answer keeps `no-cache`.
     let mut front = Fixture::F.policy();
-    front.immutable = vec!["/assets/*".to_string()];
+    front.immutable = StaticImmutable::Patterns(vec![
+        StaticPattern::quoted("/assets/*").expect("a legal pattern"),
+    ]);
     let front_root =
         StaticRoot::open_with(&tree.base, &front, Backend::Openat2).expect("root opens");
     assert_eq!(
@@ -628,6 +631,104 @@ fn the_cache_header_is_keyed_on_the_answering_file() {
     assert_eq!(
         head(&serve(&front_root, "/", b"GET", None), "Cache-Control"),
         Some(NO_CACHE.as_bytes())
+    );
+}
+
+/// `MB.31.2`: bare `immutable` is `StaticImmutable::All`, the author's promise
+/// that every name in the tree changes with its bytes. It is **live** here —
+/// every exact file earns the year — while an `index` or `fallback` answer to
+/// the same bytes stays `no-cache` (`S3`), which is the half a matcher that
+/// answered "always immutable" would fail.
+///
+/// The typed matcher's own deny direction is asserted first, so neither half
+/// can pass on a policy that names nothing.
+#[test]
+fn bare_immutable_caches_every_exact_file_and_no_index_answer() {
+    let tree = StaticTree::build(Fixture::S);
+    let mut policy = Fixture::S.policy();
+
+    // The fixture's one pattern: the hashed asset matches, its neighbours do not.
+    assert!(
+        policy.immutable.matches(APP_URL),
+        "the fixture's `/assets/*` names the hashed asset"
+    );
+    assert!(
+        !policy.immutable.matches(INDEX_URL),
+        "and not the unhashed index"
+    );
+
+    // Bare `immutable`: no pattern at all, and every exact file is covered.
+    policy.immutable = StaticImmutable::All;
+    assert!(policy.immutable.is_all());
+    assert!(
+        policy.immutable.texts().next().is_none(),
+        "bare has no item"
+    );
+    let root = StaticRoot::open_with(&tree.base, &policy, Backend::Openat2).expect("root opens");
+
+    let index_etag = head(&serve(&root, INDEX_URL, b"GET", None), "ETag")
+        .map(<[u8]>::to_vec)
+        .expect("the index answers with an ETag");
+    for exact in [APP_URL, INDEX_URL, DOCS_URL, TOKEN_URL] {
+        let response = serve(&root, exact, b"GET", None);
+        assert_eq!(response.status, 200, "{exact}");
+        assert_eq!(
+            head(&response, "Cache-Control"),
+            Some(IMMUTABLE.as_bytes()),
+            "every exact file is cached under bare `immutable`: {exact}"
+        );
+    }
+    // The `S3` half: the directory index, and a fallback that answers a miss
+    // with the same bytes, are `no-cache` under `All` too.
+    let slash = serve(&root, "/", b"GET", None);
+    assert_eq!(slash.status, 200);
+    assert_eq!(head(&slash, "Cache-Control"), Some(NO_CACHE.as_bytes()));
+    assert_eq!(
+        head(&slash, "ETag").map(<[u8]>::to_vec),
+        Some(index_etag),
+        "`/` answers the index file, and only its cache header differs"
+    );
+    let fallback = serve(&root, "/assets/missing.js", b"GET", None);
+    assert_eq!(fallback.status, 200);
+    assert_eq!(
+        head(&fallback, "Cache-Control"),
+        Some(NO_CACHE.as_bytes()),
+        "a fallback answer is `no-cache` even under bare `immutable`"
+    );
+}
+
+/// `MB.31.2` review: `immutable regex '/assets/*'` is `/assets` followed by zero
+/// or more `/`, so the manifest's matcher **denies**
+/// `/assets/app.4f1c2a9b7d3e.js`. The retired glob, handed the same text, would
+/// accept it — two matchers disagreeing in the over-caching direction. A `regex`
+/// entry must be skipped, and the exact file answered `no-cache` (`S3`).
+///
+/// Red before the fix: `open_with` filtered only through `ImmutableGlob::new`,
+/// whose glob answered `true`, so this expectation failed with
+/// `public, max-age=31536000, immutable`.
+#[test]
+fn a_regex_immutable_entry_is_never_read_as_a_glob() {
+    let tree = StaticTree::build(Fixture::N);
+    let mut policy = Fixture::N.policy();
+
+    let pattern = StaticPattern::regex("/assets/*").expect("a legal expression");
+    assert!(
+        !pattern.matches(APP_URL),
+        "as a regex, `*` repeats `/`, so the hashed asset is denied"
+    );
+    assert!(
+        pattern.matches("/assets"),
+        "and `/assets` is the path it names"
+    );
+
+    policy.immutable = StaticImmutable::Patterns(vec![pattern]);
+    let root = StaticRoot::open_with(&tree.base, &policy, Backend::Openat2).expect("root opens");
+    let response = serve(&root, APP_URL, b"GET", None);
+    assert_eq!(response.status, 200, "the file is still served");
+    assert_eq!(
+        head(&response, "Cache-Control"),
+        Some(NO_CACHE.as_bytes()),
+        "a regex entry may never year-cache a path the manifest's matcher denies"
     );
 }
 

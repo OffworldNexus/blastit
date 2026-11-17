@@ -104,7 +104,7 @@ mod tests {
 
     use super::UidLayout;
     use crate::error::ManifestError;
-    use crate::model::{Manifest, Route, StaticMount, StaticPolicy};
+    use crate::model::{Manifest, Route, StaticImmutable, StaticMount, StaticPolicy};
 
     /// A route in one sandbox, with nothing else declared.
     fn route(name: &str, sandbox: u32) -> Route {
@@ -164,7 +164,7 @@ mod tests {
                 root: "public".to_string(),
                 index: "index.html".to_string(),
                 fallback: None,
-                immutable: Vec::new(),
+                immutable: StaticImmutable::None,
             },
         };
         let manifest = manifest(Vec::new()).with_mounts(vec![mount]);

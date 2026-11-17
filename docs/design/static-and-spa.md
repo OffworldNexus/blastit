@@ -92,8 +92,9 @@ role, uid or supervisor for static files.
 ## 3. Requirements
 
 - **R1 `[route.static]` grammar.** Exact keys `root` (required string), `index`
-  (string, default `index.html`), `spa` (bool, default `false`), `immutable` (array of
-  strings, default `[]`). Unknown key fatal; `static` is a reserved route sub-table
+  (string, default `index.html`), `spa` (bool, default `false`), `immutable` (a pattern
+  list, default none; a `Blastfile` mount also writes it **bare**, which caches every
+  exact file — `R5`). Unknown key fatal; `static` is a reserved route sub-table
   name.
 - **R2 `root` semantics.** Relative to the directory holding `blastit.toml`; must not
   be empty, absolute (a leading `/` is a boot error, `/` included), or contain a `..`
@@ -189,7 +190,7 @@ immutable = ["/assets/*"]     # default []
 | `root` | string | required | directory served, relative to `blastit.toml`'s directory | missing key, empty, leading `/`, `..` segment, `\`, control byte, not a directory, unlistable, unreadable by the responder uid |
 | `index` | string | `"index.html"` | file a directory or the SPA fallback answers with, relative to `root` | empty, empty segment, leading `/`, `..` segment, dotfile segment, `\`, control byte |
 | `spa` | bool | `false` | a path that is no file answers `index` instead of the app | non-bool |
-| `immutable` | array of strings | `[]` | `/`-anchored whole-match globs against the answering file's path | element not a string, not starting with `/`, `..` segment, control byte, > 32 patterns, > 256 bytes each |
+| `immutable` | pattern list, or bare | none | the files that never change: each entry is the `view` pattern grammar (`/`-anchored, `{name}`/`{name:int}`/`{name:uuid}`, a trailing `/*` crossing `/` at any depth, `regex '…'`), matched whole against the answering file's path; bare caches every exact file, and an `index` or `fallback` answer is always `no-cache` | a pattern the compiler refuses (not `/`-anchored, a misplaced `*`, a bad `{…}`, a `regex` that does not compile — the `view` sentences at the pattern's own `line:col`), > 32 patterns, > 4096 bytes each |
 
 Per-route, not a named top-level block: the page writes `[route.static]`, the keys
 belong to one route's rewrite policy like `[route.ingress]` does, and `app` is already
@@ -207,15 +208,20 @@ route; `quoted()` escapes the value):
 | `StaticRootInvalid { location, root, rule }` | `route "site" (index 0): static root "public": must be a relative path` |
 | `StaticRootUnusable { location, root, reason }` | `route "site" (index 0): static root "public": not a directory` |
 | `StaticIndexInvalid { location, index, rule }` | `route "site" (index 0): static index "index.html": must not contain ..` |
-| `StaticImmutablePattern { location, pattern, rule }` | `route "site" (index 0): static immutable "assets/*": must start with /` |
+| `StaticImmutableTooManyPatterns { at }` | `3:11: a mount holds at most 32 `immutable` patterns; one pattern whose trailing `/*` crosses `/` reaches every depth, and `regex '…'` reaches a hashed name` |
 | `StaticDeadDeclaration { location, key, why }` | `route "site" (index 0): spa = true never reaches the app; [route.ingress] can never run` |
 
 `rule` and `reason` are fixed phrases (`must be a relative path`,
 `must not contain ..`, `must not contain \`, `must not contain a control byte`,
 `must not contain a dotfile segment`, `must be one or more segments`,
-`must start with /`, `at most 32 patterns`, `at most 256 bytes`,
-`no such file or directory`, `not a directory`, `permission denied`) so tests never
-depend on `strerror`. `why` is `spa = true never reaches the app` or
+`must start with /` (a mount prefix), `no such file or directory`, `not a directory`,
+`permission denied`) so tests never
+depend on `strerror`. Neither `immutable` ceiling is a `rule` phrase any more: an
+`immutable` **pattern** is refused by the one pattern compiler with `PatternNotAnchored`,
+`PatternStarPosition`, `PatternParameter*`, `PatternRegex` or `PatternTooLong`, at the
+pattern's own `line:col` — the same sentence a `view` pattern gets (`MB.31.2`, §8.3) — and
+the list cap is `StaticImmutableTooManyPatterns` with the 33rd pattern's position.
+`why` is `spa = true never reaches the app` or
 `the manifest declares no app`; `key` is one of `[route.ingress]`, `prefork = true`,
 `groups`, `[route.<proxy>]`.
 
@@ -239,10 +245,27 @@ impl Route {
 pub struct StaticPolicy {   // parsed once, in blastit-manifest
     pub root: String,       // as written in the manifest
     pub index: String,      // default "index.html"
-    pub spa: bool,          // default false
-    pub immutable: Vec<String>,
+    pub spa: bool,          // default false; the `Blastfile` mount writes `fallback`
+    pub immutable: StaticImmutable,  // None · All (bare) · Patterns(Vec<StaticPattern>)
 }
 ```
+
+`StaticImmutable` is the typed `immutable` of `MB.31.2`: `None` is no directive, `All` is
+bare `immutable`, and `Patterns` holds one `StaticPattern` per written pattern. Each
+`StaticPattern` keeps its text (what `blastit fmt` prints), its spelling, **and** the
+anchored matcher `routing::compile_pattern` built at lower time, so
+`StaticImmutable::matches(url_path)` is one comparison per pattern and a request never
+compiles a pattern. Equality is on the text, because a compiled program has no structural
+equality worth asserting.
+
+**Interim (`MB.31.2`, replaced by `MB.31.3`):** `blastit-scheduler` does **not** call
+`StaticImmutable::matches` yet. `StaticRoot` still holds its own `ImmutableGlob` entries and
+matches them with the retired stop-at-`/` `glob()`, so only **quoted** patterns are honoured
+there (`*` stops at `/`); a `regex '…'` entry, and a quoted one over the retired 256-byte
+guard, caches nothing until `MB.31.3` deletes `ImmutableGlob`/`glob()` and matches with the
+manifest's compiled pattern. The scheduler deliberately skips rather than re-reads a regex
+entry: the two spellings share a compiled form, not a meaning, and two matchers disagreeing
+may never over-cache.
 
 `check_static_roots` uses `std::fs::metadata` (symlinks followed: `root = "current/public"`
 must work), requires `is_dir`, then `read_dir(root)` whose first `next()` must not be an
@@ -315,14 +338,16 @@ pub fn classify(kind: FileType, len: u64, max_bytes: u64) -> Result<(), StaticOu
 /// `SchedulerError::Protocol("static root <root>: <source>")`, which exits the role.
 pub struct StaticError { pub root: String, pub source: io::Error }
 
-/// One `/`-anchored pattern: literal bytes, `*` = any run without `/`.
-pub struct ImmutableGlob;
+/// One `immutable` entry (`MB.31.2`): `EveryFile` is bare `immutable`; `Pattern`
+/// is a written pattern, still matched by the retired stop-at-`/` glob until
+/// `MB.31.3` swaps it for the manifest's compiled pattern.
+pub enum ImmutableGlob { EveryFile, Pattern(String) }
 impl ImmutableGlob {
     pub fn new(pattern: &str) -> Option<Self>;   // `None` only if MB.2.3 let it through
-    pub fn matches(&self, url_path: &str) -> bool;
+    pub fn matches(&self, url_path: &str) -> bool;  // `EveryFile` matches every path
 }
 
-pub struct StaticRoot { /* dirfd, index segments, spa, immutable globs, max_bytes */ }
+pub struct StaticRoot { /* dirfd, index segments, spa, immutable entries, max_bytes */ }
 pub enum Backend { Openat2, Walk }   // `Walk` is selectable in tests
 
 impl StaticRoot {

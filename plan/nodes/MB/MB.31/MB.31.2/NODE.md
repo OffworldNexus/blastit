@@ -2,7 +2,7 @@
 id: MB.31.2
 title: "Lower, validate and print static immutable through pattern.rs: bare All, quoted patterns crossing /, regex '...', one refusal set"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.31.1]
@@ -16,16 +16,24 @@ paths:
   - "crates/blastit-manifest/src/model.rs"
   - "crates/blastit-manifest/src/validate.rs"
   - "crates/blastit-manifest/src/error.rs"
+  - "crates/blastit-manifest/src/routing.rs"
+  - "crates/blastit-manifest/src/uid.rs"
   - "crates/blastit-manifest/tests/critical_static_manifest.rs"
   - "crates/blastit-manifest/tests/static_mounts.rs"
   - "crates/blastit-manifest/tests/docs_fences.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_parity.rs"
   - "crates/blastit-manifest/tests/critical_blastfile_print.rs"
-attempts: 0
+  - "crates/blastit-manifest/tests/critical_manifest_edit_executor.rs"
+  - "crates/blastit-scheduler/tests/common/static_fixture.rs"
+  - "crates/blastit-scheduler/tests/critical_static_assets.rs"
+  - "crates/blastit-scheduler/src/static_asset.rs"
+  - "crates/blastit-scheduler/src/static_response.rs"
+  - "docs/design/static-and-spa.md"
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:33"
-updated: "2026-11-17T12:33"
+updated: "2026-11-17T23:39"
 ---
 
 # Goal

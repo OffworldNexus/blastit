@@ -1,23 +1,22 @@
 //! §9.4's `immutable` caps, per **mount**: more than 32 patterns in one mount,
-//! or one pattern longer than 256 bytes, is refused, and the sentence names the
-//! mount instead of a route.
+//! or one pattern over the pattern compiler's 4096-byte cap, is refused **at
+//! the pattern that breaks it**, with the sentence and `line:col` a `view`
+//! pattern gets (`MB.31.2`). There is one pattern grammar and one refusal set.
 //!
 //! The two static shapes the user documentation promises live here too, because
 //! the pages that show them still carry the retired opening and `docs_fences`
 //! counts those fences without executing them. Each is written as the `Blastfile`
 //! `MB.21.5.1` will put on the page, and each proves the fact the page makes:
 //! the app-less site's `root` / `index` / `fallback` / `immutable` (§9.1, §9.3),
-//! and the Django page's one cache glob per depth (§9.4).
+//! and the Django page's one pattern that reaches every depth (§9.4).
 //!
-//! `critical_static_manifest.rs` pins the two caps through the retired reader's
-//! `[route.static]` shape, where the subject was a route. That subject is gone: a
-//! `Blastfile` writes `immutable` inside `static "<prefix>" { … }` and nothing
-//! else declares it (§9.1), so a cap has to be provable against the declaration
-//! a user writes. The accepted twin is in each test, so a validator that refused
-//! every list would fail here.
+//! `critical_static_manifest.rs` pins the same caps through the mount's own
+//! grammar; this file pins them where the retired reader's `[route.static]`
+//! shape cannot reach them, and keeps the accepted twin beside every refusal so
+//! a validator that refused every list would fail here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use blastit_manifest::Manifest;
+use blastit_manifest::{Manifest, StaticMount};
 
 /// The first refusal `source` produces, rendered as one line (§18).
 ///
@@ -49,7 +48,12 @@ fn mount(prefix: &str, patterns: &[String]) -> String {
     format!("static {prefix:?} {{\n  root \"public\"\n  immutable {list}\n}}\n")
 }
 
-/// `count` distinct, valid globs: `/p0`, `/p1`, …
+/// The pattern texts a mount carries, in written order.
+fn texts(mount: &StaticMount) -> Vec<&str> {
+    mount.policy.immutable.texts().collect()
+}
+
+/// `count` distinct, legal patterns: `/p0`, `/p1`, …
 fn globs(count: usize) -> Vec<String> {
     (0..count).map(|index| format!("/p{index}")).collect()
 }
@@ -59,7 +63,23 @@ fn pattern_of(bytes: usize) -> String {
     format!("/{}", "a".repeat(bytes - 1))
 }
 
-/// 32 patterns are the documented ceiling: 32 parse, and the 33rd is refused.
+/// The `line:col` of the first occurrence of `needle` in `source`, counted from
+/// the needle's first byte (so a quoted needle points at its quote).
+fn position_of(source: &str, needle: &str) -> (u32, u32) {
+    let (line, text) = source
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains(needle))
+        .expect("the needle is written");
+    let col = text.find(needle).expect("the needle is in its line");
+    (
+        u32::try_from(line + 1).expect("a line number fits"),
+        u32::try_from(col + 1).expect("a column fits"),
+    )
+}
+
+/// 32 patterns are the documented ceiling: 32 lower, and the 33rd is refused at
+/// its own pattern.
 #[test]
 fn a_mount_may_declare_at_most_32_immutable_patterns() {
     // The accepted twin: exactly the cap.
@@ -67,54 +87,57 @@ fn a_mount_may_declare_at_most_32_immutable_patterns() {
     let manifest = accepted(&mount("/assets", &allowed));
     let declared = &manifest.mounts()[0];
     assert_eq!(declared.prefix, "/assets");
-    assert_eq!(declared.policy.immutable, allowed, "every pattern survives");
+    assert_eq!(texts(declared), allowed, "every pattern survives");
 
-    // One past the cap: the sentence names the mount and the pattern to delete.
-    let mut too_many = globs(33);
-    too_many.push("/p99".to_string());
-    let rendered = refusal(&mount("/assets", &too_many));
+    // One past the cap: the sentence names the 33rd pattern and where it is.
+    let source = mount("/assets", &globs(33));
+    let (line, col) = position_of(&source, "\"/p32\"");
+    let rendered = refusal(&source);
     assert_eq!(
-        rendered, "mount \"/assets\" (index 0): static immutable \"/p32\": at most 32 patterns",
-        "the first pattern past the limit is the one an operator deletes"
+        rendered,
+        format!(
+            "{line}:{col}: a mount holds at most 32 `immutable` patterns; one pattern whose \
+             trailing `/*` crosses `/` reaches every depth, and `regex '…'` reaches a hashed name"
+        ),
+        "the first pattern past the limit is the one to delete"
     );
     assert!(!rendered.contains('\n'), "{rendered:?}");
 }
 
-/// A pattern longer than a path component cannot name a file: 256 bytes is the
-/// ceiling and 257 is refused.
+/// A pattern's own cap is the compiler's 4096 bytes, not a second ceiling: 4096
+/// is legal and 4097 is refused with the pattern sentence.
 #[test]
-fn a_mount_may_declare_patterns_of_at_most_256_bytes() {
-    // The accepted twin: exactly the ceiling.
-    let longest = pattern_of(256);
+fn a_mount_may_declare_patterns_of_at_most_4096_bytes() {
+    // The accepted twin: exactly the cap.
+    let longest = pattern_of(4_096);
     let manifest = accepted(&mount("/assets", std::slice::from_ref(&longest)));
-    assert_eq!(manifest.mounts()[0].policy.immutable, [longest]);
+    assert_eq!(texts(&manifest.mounts()[0]), [longest.as_str()]);
 
-    // One byte over: refused, and the mount is the subject.
-    let rendered = refusal(&mount("/assets", &[pattern_of(257)]));
-    assert!(
-        rendered.starts_with("mount \"/assets\" (index 0): static immutable "),
-        "the mount is named: {rendered}"
-    );
-    assert!(
-        rendered.contains("at most 256 bytes"),
-        "the rule is named: {rendered}"
-    );
+    // One byte over: the pattern's own sentence, not a `static immutable` one.
+    let rendered = refusal(&mount("/assets", &[pattern_of(4_097)]));
+    assert_eq!(rendered, "3:13: a pattern holds at most 4096 bytes");
     assert!(!rendered.contains('\n'), "one line (§18): {rendered:?}");
 }
 
-/// The index is the mount's own, not a route's: with two mounts, the second
-/// one's refusal names `index 1` and its prefix.
+/// The cap blames the pattern in the **second** mount's list: with two mounts,
+/// the first one's two patterns are untouched and the refusal's `line:col` falls
+/// inside the second block.
 #[test]
-fn the_sentence_names_the_mount_that_broke_the_cap() {
+fn the_cap_names_the_pattern_in_the_mount_that_broke_it() {
     let source = format!(
         "{}{}",
         mount("/assets", &globs(2)),
         mount("/assets/v2", &globs(33))
     );
+    let (line, col) = position_of(&source, "\"/p32\"");
+    assert!(line > 4, "the 33rd pattern is in the second mount");
     let rendered = refusal(&source);
     assert_eq!(
         rendered,
-        "mount \"/assets/v2\" (index 1): static immutable \"/p32\": at most 32 patterns"
+        format!(
+            "{line}:{col}: a mount holds at most 32 `immutable` patterns; one pattern whose \
+             trailing `/*` crosses `/` reaches every depth, and `regex '…'` reaches a hashed name"
+        )
     );
 }
 
@@ -149,7 +172,7 @@ fn is_the_documented_static_site(manifest: &Manifest) -> bool {
         // The page's `spa = true`, lowered to the file a miss is answered with
         // (§9.3).
         && mount.policy.fallback.as_deref() == Some("index.html")
-        && mount.policy.immutable == ["/assets/*"]
+        && mount.policy.immutable.texts().collect::<Vec<_>>() == ["/assets/*"]
 }
 
 /// The documented site is one mount, and an all-static file needs no app.
@@ -196,11 +219,11 @@ fn a_drifted_static_site_is_not_the_documented_shape() {
     }
 }
 
-/// The `immutable` list `docs/frameworks/django.md` documents: one pattern per
-/// depth, as deep as the deepest fingerprinted file Django's admin ships —
-/// `admin/js/vendor/select2/i18n/<lang>.js` is six segments under `/static/`, so
-/// a depth left out revalidates those hashed files on every request.
-fn documented_immutable_depths() -> Vec<String> {
+/// The `immutable` list `docs/frameworks/python/django.md` documented before
+/// `MB.31.2`: one glob per depth, as deep as the deepest fingerprinted file
+/// Django's admin ships. It is kept here as the **canary** that a six-row list
+/// is not what the page carries any more.
+fn retired_immutable_depths() -> Vec<String> {
     [
         "/static/*",
         "/static/*/*",
@@ -213,37 +236,50 @@ fn documented_immutable_depths() -> Vec<String> {
     .to_vec()
 }
 
-/// The mount `docs/frameworks/django.md` documents once `MB.21.5.1` rewrites the
-/// page: its `[route.static]` fragment becomes this `static` block, and the depth
-/// list is the fact that has to survive the rewrite.
+/// The mount `docs/frameworks/python/django.md` documents: one pattern, not one
+/// glob per depth (`MB.31.2`), whose trailing `/*` crosses `/` at any depth.
 fn documented_django_mount() -> String {
-    let list = documented_immutable_depths()
-        .iter()
-        .map(|pattern| format!("{pattern:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("static \"/static\" {{\n  root \"staticfiles\"\n  immutable {list}\n}}\n")
+    "static \"/static\" {\n  root \"staticfiles\"\n  immutable \"/static/*\"\n}\n".to_owned()
 }
 
-/// The Django page's list is one glob per depth, and the mount keeps the two
-/// defaults the fragment omitted.
+/// The Django page's one pattern reaches the admin's deepest fingerprinted file,
+/// and the mount keeps the two defaults the fragment omitted.
 #[test]
-fn the_django_page_documents_one_glob_per_depth() {
+fn the_django_page_documents_one_pattern_that_reaches_every_depth() {
     let manifest = accepted(&documented_django_mount());
     assert_eq!(manifest.mounts().len(), 1, "one mount, not a route");
     let mount = &manifest.mounts()[0];
     assert_eq!(mount.prefix, "/static");
     assert_eq!(mount.policy.root, "staticfiles");
     assert_eq!(
-        mount.policy.immutable,
-        documented_immutable_depths(),
-        "the page lists one immutable glob per depth, as deep as the deepest \
-         fingerprinted file Django's admin ships"
+        texts(mount),
+        ["/static/*"],
+        "one pattern replaces the six-glob staircase"
     );
-    assert_eq!(
-        mount.policy.immutable.len(),
-        6,
-        "six segments under `/static/` is the deepest the admin ships"
+    // The deepest name Django's admin ships is six segments under `/static/`:
+    // `patterns` is the matcher, so this is the fact the page's sentence makes.
+    assert!(
+        mount
+            .policy
+            .immutable
+            .matches("/static/admin/js/vendor/select2/i18n/de.js"),
+        "a trailing `/*` crosses `/`, so one pattern reaches every depth"
+    );
+    assert!(
+        !mount.policy.immutable.matches("/staticfiles/app.js"),
+        "and it is `/`-anchored: it names no other tree"
+    );
+    // The page carries one pattern, and the retired six-row shape is not it: a
+    // list of the old per-depth spelling is still legal text, but it is not what
+    // a reader is told to write any more.
+    assert_ne!(
+        texts(mount),
+        retired_immutable_depths(),
+        "one pattern replaces the six-glob staircase"
+    );
+    assert!(
+        !mount.policy.immutable.matches("/static"),
+        "the mount's own prefix is not a file under it"
     );
     // The fragment declared neither, so both are the §9.1 defaults.
     assert_eq!(mount.policy.index, "index.html");
