@@ -53,17 +53,6 @@ pub const STATIC_CHUNK_BYTES: usize = 64 * 1024;
 /// manifest key.
 pub const STATIC_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The **retired** `immutable` pattern-length guard (`R5`).
-///
-/// It is the pre-`MB.31.2` 256-byte ceiling on the old glob spelling, kept only
-/// because `glob()` and `ImmutableGlob::Pattern` still need a bound until
-/// `MB.31.3` deletes all three and matches with
-/// [`StaticImmutable::matches`](blastit_manifest::blastfile::StaticImmutable).
-/// It is **not** what validation accepts: the manifest's cap is the one pattern
-/// compiler's 4096 bytes, so a legal 300-byte quoted pattern is dropped by this
-/// guard (no year is pinned, which is the safe direction) until MB.31.3.
-const MAX_IMMUTABLE_PATTERN_BYTES: usize = 256;
-
 /// Every pid/uid/control byte of a decoded path below this is refused
 /// (`R7`): NUL and the C0 range, exactly [`crate::path`]'s rule.
 const CONTROL_LIMIT: u8 = 0x20;
@@ -180,80 +169,6 @@ pub struct StaticError {
     pub source: io::Error,
 }
 
-/// One entry of a mount's `immutable` list (design §4.5, §9.4).
-///
-/// `EveryFile` is bare `immutable`: every exact file the mount serves earns the
-/// year-long cache, while an `index` or `fallback` answer stays `no-cache`
-/// (`S3`), because the response rule asks this only about an exact answer.
-///
-/// `Pattern` is still the **retired** stop-at-`/` glob (`glob()` below), not the
-/// manifest's compiled pattern: `MB.31.3` replaces this variant, `glob()` and
-/// `MAX_IMMUTABLE_PATTERN_BYTES` with `blastit_manifest`'s anchored matcher, so
-/// a trailing `/*` will cross `/` then.
-///
-/// Until it does, `open_with` builds a `Pattern` **only from a quoted**
-/// `immutable` entry: a `regex '…'` expression is not a glob
-/// (`regex '/assets/*'` is `/assets` then zero or more `/`), so reading its text
-/// with `glob()` would cache paths the manifest's own matcher denies. A `regex`
-/// entry, and a quoted one over the retired 256-byte guard, therefore caches
-/// nothing — the fail-closed direction.
-#[derive(Clone, Debug)]
-pub enum ImmutableGlob {
-    /// Bare `immutable`: every exact file this mount serves is cached.
-    EveryFile,
-    /// One `/`-anchored pattern: literal bytes, `*` = any run without `/`.
-    Pattern(String),
-}
-
-impl ImmutableGlob {
-    /// Compiles `pattern`, or `None` when the retired guard refuses it.
-    ///
-    /// `None` only if `MB.2.3` let the pattern through: not `/`-anchored,
-    /// empty, over the 256-byte ceiling, a control byte, or a `..` segment.
-    pub fn new(pattern: &str) -> Option<Self> {
-        if pattern.is_empty()
-            || pattern.len() > MAX_IMMUTABLE_PATTERN_BYTES
-            || !pattern.starts_with('/')
-            || pattern.bytes().any(|byte| byte < CONTROL_LIMIT)
-            || pattern.split('/').any(|segment| segment == "..")
-        {
-            return None;
-        }
-        Some(Self::Pattern(pattern.to_string()))
-    }
-
-    /// Whether `url_path` (the answering file's path) matches whole.
-    pub fn matches(&self, url_path: &str) -> bool {
-        match self {
-            Self::EveryFile => true,
-            Self::Pattern(pattern) => glob(pattern.as_bytes(), url_path.as_bytes()),
-        }
-    }
-}
-
-/// `glob`'s recursive whole-match: `*` is the only metacharacter and stops at
-/// `/`.
-fn glob(pattern: &[u8], path: &[u8]) -> bool {
-    match pattern.first() {
-        None => path.is_empty(),
-        Some(b'*') => {
-            let rest = &pattern[1..];
-            let mut end = 0usize;
-            loop {
-                if glob(rest, &path[end..]) {
-                    return true;
-                }
-                match path.get(end) {
-                    // `*` may be empty, and it never crosses a `/`.
-                    Some(b'/') | None => return false,
-                    Some(_) => end += 1,
-                }
-            }
-        }
-        Some(byte) => path.first() == Some(byte) && glob(&pattern[1..], &path[1..]),
-    }
-}
-
 /// The two ways a candidate is opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
@@ -289,13 +204,21 @@ pub struct StaticRoot {
     /// mount at the URL root).
     ///
     /// Only [`StaticFile::url_path`] reads it: a file's cache key and its
-    /// `immutable` glob are matched against the path the **client** asked for
-    /// (§9.4), so the prefix has to be put back after the strip.
+    /// `immutable` match are evaluated against the path the **client** asked
+    /// for (§9.4), so the prefix has to be put back after the strip.
     pub(crate) prefix: String,
-    /// The `/`-anchored patterns that earn the year-long cache.
+    /// The mount's `immutable` policy, exactly as the manifest lowered it: the
+    /// patterns were compiled by the one pattern compiler when the mount was
+    /// lowered, so a request matches without compiling anything (§4.5, §9.4).
+    ///
+    /// This is the manifest's **own** matcher — the same
+    /// [`StaticImmutable::matches`] a `view` path is matched with — so a
+    /// `static` mount and a `view` can never disagree about a pattern. Bare
+    /// `immutable` year-caches every exact file; an `index` or `fallback`
+    /// answer stays `no-cache` because the responder asks this only about an
+    /// exact answer (`S3`).
     // Read by `static_response.rs`'s cache rule (`MB.2.4.2`).
-    #[allow(dead_code)]
-    pub(crate) immutable: Vec<ImmutableGlob>,
+    pub(crate) immutable: StaticImmutable,
     /// The per-file ceiling, from `SchedulerConfig::static_max_bytes`
     /// ([`STATIC_MAX_FILE_BYTES`] until `run` overrides it).
     pub(crate) max_bytes: u64,
@@ -359,25 +282,13 @@ impl StaticRoot {
             index: policy.index.clone(),
             fallback: policy.fallback.clone(),
             prefix: "/".to_string(),
-            immutable: match &policy.immutable {
-                // Bare `immutable`: the author promises every name in this tree
-                // changes with its bytes, so every exact file is cached.
-                StaticImmutable::All => vec![ImmutableGlob::EveryFile],
-                StaticImmutable::None | StaticImmutable::Patterns(_) => policy
-                    .immutable
-                    .patterns()
-                    .iter()
-                    // A `regex '…'` entry is not a glob: `regex '/assets/*'` is
-                    // `/assets` then zero or more `/`, while `glob()` would read
-                    // the same text as `/assets/<one segment>` and cache
-                    // `/assets/app.js`, which the manifest's own matcher denies.
-                    // Two matchers disagreeing may never over-cache, so a regex
-                    // entry is skipped until `MB.31.3` calls
-                    // `StaticImmutable::matches` (which honours it).
-                    .filter(|pattern| !pattern.is_regex())
-                    .filter_map(|pattern| ImmutableGlob::new(pattern.text()))
-                    .collect(),
-            },
+            // The policy *is* the matcher: `StaticImmutable::{None, All,
+            // Patterns}` already holds the anchored programs `MB.31.2` built at
+            // lower time, so this clones a policy and compiles nothing else.
+            // There is no second matcher, and a `regex '…'` entry, a nested
+            // `"/assets/*"` or a quoted pattern over the old 256-byte guard all
+            // match exactly what the manifest's own matcher says.
+            immutable: policy.immutable.clone(),
             max_bytes: STATIC_MAX_FILE_BYTES,
             backend,
         })

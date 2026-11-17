@@ -2,7 +2,7 @@
 id: MB.31.3
 title: "Delete ImmutableGlob and glob(): static mounts consume the manifest's matcher, with bare-immutable S3 proof"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.31.2]
@@ -12,11 +12,12 @@ paths:
   - "crates/blastit-scheduler/tests/critical_static_resolve.rs"
   - "crates/blastit-scheduler/tests/critical_static_assets.rs"
   - "crates/blastit-scheduler/tests/common/static_fixture.rs"
-attempts: 0
+  - "crates/blastit-manifest/src/model.rs"
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:33"
-updated: "2026-11-17T12:33"
+updated: "2026-11-18T00:14"
 ---
 
 # Goal

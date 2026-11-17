@@ -3044,3 +3044,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T23:39 [MB.31.2] (lead) reviewer attempt 3 VERDICT PASS (3 MINOR: StaticPattern equality is text-only so a spelling flip compares equal -- handed to MB.31.3; the two public /*-crosses-
 - 2026-11-17T23:39 [MB.31.3] (lead) inherits from MB.31.2: make StaticPattern PartialEq compare text AND spelling; make cross-/ live by calling StaticImmutable::matches and delete ImmutableGlob/gl
 - 2026-11-17T23:39 [MB.31.2] (lead) status review -> done
+- 2026-11-17T23:39 [MB.31.3] (lead) status ready -> active
+- 2026-11-17T23:39 [MB.31.3] (lead) attempt 1/3 started
+- 2026-11-17T23:39 [MB.31.3] (lead) edited fields
+- 2026-11-17T23:39 [MB.31.3] (lead) base 942cb16; model.rs added to paths for the StaticPattern PartialEq spelling fix
+- 2026-11-18T00:06 [MB.31.3] (lead) done: ImmutableGlob/glob/MAX_IMMUTABLE_PATTERN_BYTES deleted, cache_control == StaticImmutable::matches (one matcher, no per-request compile), StaticPattern Par
+- 2026-11-18T00:06 [MB.31.3] (lead) status active -> review
+- 2026-11-18T00:14 [MB.31.3] (lead) reviewer VERDICT PASS (5 MINOR, all flags for the gate/MB.31.4): hover.rs still teaches stop-at-/, the design's interim paragraph is now false four ways, and th
+- 2026-11-18T00:14 [MB.31.3] (lead) status review -> done

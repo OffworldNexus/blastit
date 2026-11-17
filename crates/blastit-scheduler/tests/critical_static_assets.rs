@@ -695,17 +695,25 @@ fn bare_immutable_caches_every_exact_file_and_no_index_answer() {
         Some(NO_CACHE.as_bytes()),
         "a fallback answer is `no-cache` even under bare `immutable`"
     );
+    // The deep link the node names: one more fallback answer, same rule.
+    let deep = serve(&root, "/dashboard/settings", b"GET", None);
+    assert_eq!(deep.status, 200);
+    assert_eq!(
+        head(&deep, "Cache-Control"),
+        Some(NO_CACHE.as_bytes()),
+        "a deep-link fallback answer is `no-cache` even under bare `immutable`"
+    );
 }
 
-/// `MB.31.2` review: `immutable regex '/assets/*'` is `/assets` followed by zero
-/// or more `/`, so the manifest's matcher **denies**
+/// `MB.31.2` review, kept live by `MB.31.3`: `immutable regex '/assets/*'` is
+/// `/assets` followed by zero or more `/`, so the manifest's matcher **denies**
 /// `/assets/app.4f1c2a9b7d3e.js`. The retired glob, handed the same text, would
-/// accept it — two matchers disagreeing in the over-caching direction. A `regex`
-/// entry must be skipped, and the exact file answered `no-cache` (`S3`).
+/// accept it — two matchers disagreeing in the over-caching direction. Since
+/// `MB.31.3` the mount matches with the manifest's own policy, so the deny is
+/// the compiler's, and the exact file is answered `no-cache` (`S3`).
 ///
-/// Red before the fix: `open_with` filtered only through `ImmutableGlob::new`,
-/// whose glob answered `true`, so this expectation failed with
-/// `public, max-age=31536000, immutable`.
+/// Red if the mount ever re-read a pattern's text as a glob: the expectation
+/// then fails with `public, max-age=31536000, immutable`.
 #[test]
 fn a_regex_immutable_entry_is_never_read_as_a_glob() {
     let tree = StaticTree::build(Fixture::N);
@@ -729,6 +737,244 @@ fn a_regex_immutable_entry_is_never_read_as_a_glob() {
         head(&response, "Cache-Control"),
         Some(NO_CACHE.as_bytes()),
         "a regex entry may never year-cache a path the manifest's matcher denies"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `MB.31.3`: the mount's cache header is the manifest's own matcher.
+// ---------------------------------------------------------------------------
+
+/// `MB.31.3`: one quoted pattern crosses `/` at any depth, and the year is
+/// pinned only on a file the pattern names. The retired stop-at-`/` glob made a
+/// nested asset `no-cache`; `docs/reference/blastfile.md`'s `"/assets/*"` row is
+/// now literally true.
+///
+/// Both directions: the two named files earn the year, two files the pattern
+/// does not name stay `no-cache`, and the mount prefix itself is a directory
+/// (`404`), never a cached file.
+#[test]
+fn one_quoted_pattern_crosses_slash_at_any_depth() {
+    let tree = StaticTree::build(Fixture::N);
+    std::fs::create_dir_all(tree.path("assets/chunks/vendor")).expect("nested fixture dir");
+    std::fs::write(tree.path("assets/chunks/vendor/x.js"), b"vendor\n")
+        .expect("nested fixture file");
+
+    // Fixture N declares no `immutable`; this mount declares exactly one
+    // pattern, the one the docs tell a developer to write.
+    let mut policy = Fixture::N.policy();
+    policy.immutable = StaticImmutable::Patterns(vec![
+        StaticPattern::quoted("/assets/*").expect("a legal pattern"),
+    ]);
+    let root = StaticRoot::open_with(&tree.base, &policy, Backend::Openat2).expect("root opens");
+
+    for exact in [APP_URL, "/assets/chunks/vendor/x.js"] {
+        let response = serve(&root, exact, b"GET", None);
+        assert_eq!(response.status, 200, "{exact}");
+        assert_eq!(
+            head(&response, "Cache-Control"),
+            Some(IMMUTABLE.as_bytes()),
+            "one `\"/assets/*\"` crosses `/` at any depth: {exact}"
+        );
+    }
+    // …and nothing the pattern does not name. A sibling outside the prefix and
+    // an exact file under it that the pattern still covers are the two halves
+    // of the same check; `/docs/index.html` is outside `"/assets/*"`.
+    for other in [DOCS_URL, TOKEN_URL] {
+        let response = serve(&root, other, b"GET", None);
+        assert_eq!(response.status, 200, "{other}");
+        assert_eq!(
+            head(&response, "Cache-Control"),
+            Some(NO_CACHE.as_bytes()),
+            "a path `\"/assets/*\"` does not name stays revalidating: {other}"
+        );
+    }
+    // The prefix on its own is the served directory, not an exact file: the
+    // request is a `404`, so no header can year-cache it.
+    let prefix = decide(outcome(&root, "/assets"), b"GET", false, false);
+    assert!(
+        matches!(prefix, Rewrite::Reject { status: 404, .. }),
+        "`/assets` is a directory, never a cached file: {prefix:?}"
+    );
+
+    // The cache change moves no boundary: a pattern is matched only after the
+    // path was decoded and resolved, so `..`, a dotfile and a PHP source under
+    // the very prefix the pattern names stay refused — a `200` with a year
+    // would be the failure.
+    for (target, status) in [
+        ("/assets/../etc/passwd", 400),
+        ("/assets/.env", 404),
+        ("/assets/index.php", 404),
+    ] {
+        let refusal = decide(outcome(&root, target), b"GET", false, false);
+        assert!(
+            matches!(refusal, Rewrite::Reject { status: actual, .. } if actual == status),
+            "{target} is refused with {status}, never served: {refusal:?}"
+        );
+    }
+}
+
+/// `MB.31.3`: a `regex '…'` entry caches exactly what it compiles to. Its text is
+/// never re-read as a glob, and the pattern's own greedy tail is what decides a
+/// dotted neighbour — `[^/]+` admits a dot, so `.js.map` is matched by the
+/// documented expression and `[^/.]+` is the spelling that denies it.
+///
+/// The served half is asserted both ways for both expressions, so "always
+/// matched" and "never matched" both fail.
+#[test]
+fn a_regex_entry_caches_exactly_what_it_matches() {
+    let tree = StaticTree::build(Fixture::N);
+    for rel in [
+        "static/js/app.0123456789ab.js",
+        "static/js/app.js",
+        "static/js/app.0123456789ab.js.map",
+    ] {
+        let path = tree.path(rel);
+        std::fs::create_dir_all(path.parent().expect("a fixture file has a parent"))
+            .expect("regex fixture dir");
+        std::fs::write(&path, b"regex fixture\n").expect("regex fixture file");
+    }
+
+    // The documented expression, matched on the **client's** path (prefix
+    // restored: `static "/static"` over `root`).
+    let documented =
+        StaticPattern::regex(r"/static/.+\.[0-9a-f]{12}\.[^/]+").expect("a legal expression");
+    assert!(documented.matches("/static/js/app.0123456789ab.js"));
+    assert!(!documented.matches("/static/js/app.js"), "no hash segment");
+    assert!(
+        !documented.matches("/static/js/app.0123456789ab.js/x"),
+        "`[^/]+` never crosses `/`"
+    );
+
+    // "One hash segment, nothing after it" is `[^/.]+`: it denies the map.
+    let strict =
+        StaticPattern::regex(r"/static/.+\.[0-9a-f]{12}\.[^/.]+").expect("a legal expression");
+    assert!(strict.matches("/static/js/app.0123456789ab.js"));
+    assert!(!strict.matches("/static/js/app.0123456789ab.js.map"));
+    assert!(!strict.matches("/static/js/app.js"));
+
+    let mount = |pattern: StaticPattern| {
+        let mut policy = Fixture::N.policy();
+        policy.immutable = StaticImmutable::Patterns(vec![pattern]);
+        StaticRoot::open_with(&tree.base, &policy, Backend::Openat2).expect("root opens")
+    };
+
+    let served = mount(documented);
+    for (target, expected) in [
+        ("/static/js/app.0123456789ab.js", IMMUTABLE),
+        ("/static/js/app.js", NO_CACHE),
+        // The documented expression's `[^/]+` admits a dot: the map is a
+        // hash-named file too, so the year is what the expression says.
+        ("/static/js/app.0123456789ab.js.map", IMMUTABLE),
+    ] {
+        let response = serve(&served, target, b"GET", None);
+        assert_eq!(response.status, 200, "{target}");
+        assert_eq!(
+            head(&response, "Cache-Control"),
+            Some(expected.as_bytes()),
+            "{target}"
+        );
+    }
+
+    let served = mount(strict);
+    for (target, expected) in [
+        ("/static/js/app.0123456789ab.js", IMMUTABLE),
+        ("/static/js/app.js", NO_CACHE),
+        ("/static/js/app.0123456789ab.js.map", NO_CACHE),
+    ] {
+        let response = serve(&served, target, b"GET", None);
+        assert_eq!(response.status, 200, "{target}");
+        assert_eq!(
+            head(&response, "Cache-Control"),
+            Some(expected.as_bytes()),
+            "{target}"
+        );
+    }
+}
+
+/// `MB.31.3`: a two-pattern list is an **OR**, and the written order does not
+/// matter — either match earns the year, and a third path earns nothing.
+#[test]
+fn a_pattern_list_is_an_or_in_either_written_order() {
+    let tree = StaticTree::build(Fixture::N);
+    let quoted = |pattern: &str| StaticPattern::quoted(pattern).expect("a legal pattern");
+
+    for patterns in [
+        vec![quoted("/assets/*"), quoted("/index.html")],
+        vec![quoted("/index.html"), quoted("/assets/*")],
+    ] {
+        let mut policy = Fixture::N.policy();
+        policy.immutable = StaticImmutable::Patterns(patterns);
+        let root =
+            StaticRoot::open_with(&tree.base, &policy, Backend::Openat2).expect("root opens");
+
+        for earned in [APP_URL, INDEX_URL] {
+            let response = serve(&root, earned, b"GET", None);
+            assert_eq!(response.status, 200, "{earned}");
+            assert_eq!(
+                head(&response, "Cache-Control"),
+                Some(IMMUTABLE.as_bytes()),
+                "either pattern in the list earns the year: {earned}"
+            );
+        }
+        for denied in [DOCS_URL, TOKEN_URL] {
+            let response = serve(&root, denied, b"GET", None);
+            assert_eq!(response.status, 200, "{denied}");
+            assert_eq!(
+                head(&response, "Cache-Control"),
+                Some(NO_CACHE.as_bytes()),
+                "a path neither pattern names earns nothing: {denied}"
+            );
+        }
+    }
+}
+
+/// `MB.31.3` / design §9.4: `static "/assets" { root "public/assets" }` matches
+/// the **client's** path with the mount prefix restored, never the stripped
+/// remainder — the file's `url_path`, which is also its cache key.
+///
+/// The second half is the deny direction: a pattern written for the root-relative
+/// name (`"/app.*"`) names nothing under `/assets`.
+#[test]
+fn a_mount_prefix_is_restored_before_the_pattern_is_matched() {
+    let tree = StaticTree::build(Fixture::N);
+    // `root = "public/assets"` in the docs is fixture `root/assets` here, so the
+    // resolved remainder really is the stripped `app.4f1c2a9b7d3e.js`.
+    let mut policy = Fixture::N.policy();
+    policy.root = "root/assets".to_string();
+    policy.immutable = StaticImmutable::Patterns(vec![
+        StaticPattern::quoted("/assets/*").expect("a legal pattern"),
+    ]);
+    let root = StaticRoot::open_with(&tree.base, &policy, Backend::Openat2)
+        .expect("root opens")
+        .with_prefix("/assets");
+
+    let stripped = "/app.4f1c2a9b7d3e.js";
+    assert_eq!(
+        resolved(&root, stripped).url_path,
+        APP_URL,
+        "the mount prefix is put back before the key and the match"
+    );
+    let response = serve(&root, stripped, b"GET", None);
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        head(&response, "Cache-Control"),
+        Some(IMMUTABLE.as_bytes()),
+        "`/assets/*` matches the restored client path"
+    );
+
+    let mut remainder_only = policy.clone();
+    remainder_only.immutable = StaticImmutable::Patterns(vec![
+        StaticPattern::quoted("/app.4f1c2a9b7d3e.js").expect("a legal pattern"),
+    ]);
+    let root = StaticRoot::open_with(&tree.base, &remainder_only, Backend::Openat2)
+        .expect("root opens")
+        .with_prefix("/assets");
+    let response = serve(&root, stripped, b"GET", None);
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        head(&response, "Cache-Control"),
+        Some(NO_CACHE.as_bytes()),
+        "the root-relative remainder is never what a pattern is matched against"
     );
 }
 

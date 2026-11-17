@@ -374,10 +374,10 @@ impl StaticImmutable {
 /// Which spelling a pattern was written in (§8.1).
 ///
 /// It is recorded rather than re-derived from the text because the two
-/// spellings share a compiled form but not a meaning for a *consumer* that has
-/// not been taught the grammar: `regex '/assets/*'` is `/assets` followed by
-/// zero or more `/`, which is not what a stop-at-`/` glob reads it as. Only
-/// `MB.31.3`'s matcher may treat both alike.
+/// spellings share a compiled form but not a text meaning: `regex '/assets/*'`
+/// is `/assets` followed by zero or more `/`, which is not what the quoted
+/// grammar's trailing `/*` means. Matching is the compiled program either way;
+/// equality ([`StaticPattern`]) and a surface that shows a pattern read this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Spelling {
     /// `"/assets/*"`: the compiled grammar (escaped literals, `{…}`, trailing `/*`).
@@ -389,8 +389,12 @@ pub(crate) enum Spelling {
 /// One `immutable` pattern: the text as written, the spelling it was written
 /// in, and the anchored matcher the one compiler built (§8.1).
 ///
-/// Equality is the text's: two patterns written the same way are the same
-/// pattern, and a compiled program has no meaningful structural equality.
+/// Equality is `(text, spelling)`: a quoted `"/a/*"` and `regex '/a/*'` share a
+/// compiled form but not a meaning — `*` is a tail crossing `/` in one and a
+/// repeat of the previous atom in the other — so they cache different paths and
+/// must not compare equal, or [`Manifest::equivalent`] would accept a spelling
+/// flip that changes behaviour. A compiled program has no meaningful structural
+/// equality, so it is never compared.
 #[derive(Clone, Debug)]
 pub struct StaticPattern {
     /// The pattern's value, decoded for `"…"` and verbatim for `'…'`.
@@ -459,9 +463,11 @@ impl StaticPattern {
 
     /// True for `regex '…'`, false for a quoted pattern (§8.1).
     ///
-    /// A consumer that only understands the compiled *grammar* — the scheduler's
-    /// retired glob, until `MB.31.3` — must skip a `regex` entry rather than
-    /// re-read its text: the two spellings agree on nothing textual.
+    /// It is recorded because the two spellings share a compiled form but not a
+    /// text one: a consumer that shows, edits or equality-compares a pattern
+    /// must not read `regex '/assets/*'` with the quoted grammar's meaning.
+    /// Matching never consults it — [`StaticPattern::matches`] is the compiled
+    /// program, so both spellings are matched by the one matcher.
     pub fn is_regex(&self) -> bool {
         self.spelling == Spelling::Regex
     }
@@ -474,7 +480,7 @@ impl StaticPattern {
 
 impl PartialEq for StaticPattern {
     fn eq(&self, other: &Self) -> bool {
-        self.text == other.text
+        self.text == other.text && self.spelling == other.spelling
     }
 }
 
@@ -522,7 +528,7 @@ pub struct StaticMount {
     /// It is a URL prefix, not a filesystem path: the directory served is
     /// [`StaticPolicy::root`], relative to the manifest's own directory.
     pub prefix: String,
-    /// What the mount serves: the directory, its index and its cache globs.
+    /// What the mount serves: the directory, its index and its cache patterns.
     pub policy: StaticPolicy,
 }
 
@@ -1794,6 +1800,51 @@ view app "/*" {
                 "{field} is not compared, reversed"
             );
         }
+    }
+
+    /// `MB.31.3`: a pattern's equality is `(text, spelling)`. A quoted
+    /// `"/a/*"` and `regex '/a/*'` are the same characters but not the same
+    /// meaning — a tail crossing `/` versus a repeat of the previous atom — so
+    /// they cache different paths and must not compare equal. Equality on the
+    /// text alone would let `Manifest::equivalent` accept a flip that changes
+    /// which files get a year-long cache.
+    #[test]
+    fn a_pattern_spelling_flip_is_not_the_same_manifest() {
+        let lower = |directive: &str| {
+            Manifest::from_blastfile_str(&format!(
+                "static \"/\" {{\n  root \"public\"\n  {directive}\n}}\n"
+            ))
+            .expect("the manifest lowers")
+        };
+        let quoted = lower("immutable \"/a/*\"");
+        let regex = lower("immutable regex '/a/*'");
+
+        let quoted_pattern = quoted
+            .mounts()
+            .first()
+            .and_then(|mount| mount.policy.immutable.patterns().first())
+            .expect("the quoted run lowers one pattern");
+        let regex_pattern = regex
+            .mounts()
+            .first()
+            .and_then(|mount| mount.policy.immutable.patterns().first())
+            .expect("the regex run lowers one pattern");
+        assert_eq!(quoted_pattern.text(), regex_pattern.text());
+        assert!(!quoted_pattern.is_regex());
+        assert!(regex_pattern.is_regex());
+
+        // Same text, different spelling: not the same pattern, not the same
+        // mount list, not the same manifest. A hand-built quoted pattern with
+        // the same text *is* the lowered one.
+        assert_ne!(quoted_pattern, regex_pattern);
+        assert_ne!(quoted.mounts(), regex.mounts());
+        assert!(!quoted.equivalent(&regex));
+        assert!(!regex.equivalent(&quoted));
+        assert_eq!(
+            quoted_pattern,
+            &StaticPattern::quoted("/a/*").expect("a legal pattern")
+        );
+        assert!(quoted.equivalent(&quoted.clone()));
     }
 
     /// `normalize` writes every bind placeholder as `$?`, which no SQL parser

@@ -17,11 +17,11 @@
 //! file and no truncated body is ever sent under a promised `Content-Length`.
 //!
 //! The cache rule is keyed on the **answering** file: only an
-//! [`AnswerKind::Exact`] answer whose `url_path` matches an `immutable` glob
-//! earns the year; a directory `index` and a SPA fallback are always
-//! `no-cache`, whatever a pattern says. A hashed request path must therefore
-//! never be globbed on its own — `/dashboard/settings` answers `index.html`,
-//! and `index.html` is what the rule looks at.
+//! [`AnswerKind::Exact`] answer whose `url_path` matches the mount's
+//! `immutable` policy earns the year; a directory `index` and a SPA fallback
+//! are always `no-cache`, whatever a pattern says. A hashed request path must
+//! therefore never be matched on its own — `/dashboard/settings` answers
+//! `index.html`, and `index.html` is what the rule looks at.
 
 use std::os::fd::OwnedFd;
 
@@ -176,17 +176,16 @@ fn header(name: &[u8], value: impl Into<Vec<u8>>) -> (Vec<u8>, Vec<u8>) {
 
 /// The cache rule of §4.5, keyed on `(answer kind, answering path)`.
 ///
-/// Only an exact-file answer whose **answering** `url_path` matches an
-/// `immutable` glob gets the year. A directory `index` and the SPA fallback are
-/// always `no-cache`, however a pattern is written: `/` and `/dashboard`
+/// Only an exact-file answer whose **answering** `url_path` matches the mount's
+/// `immutable` policy gets the year. A directory `index` and the SPA fallback
+/// are always `no-cache`, however a pattern is written: `/` and `/dashboard`
 /// answer `index.html`, so a `/index.html` pattern must not year-cache them.
+///
+/// [`StaticImmutable::matches`](blastit_manifest::blastfile::StaticImmutable::matches)
+/// is the manifest's own matcher, built at lower time: admission and this header
+/// read one policy, so they cannot disagree.
 fn cache_control(root: &StaticRoot, file: &StaticFile) -> &'static str {
-    if file.kind == AnswerKind::Exact
-        && root
-            .immutable
-            .iter()
-            .any(|pattern| pattern.matches(&file.url_path))
-    {
+    if file.kind == AnswerKind::Exact && root.immutable.matches(&file.url_path) {
         IMMUTABLE_CACHE
     } else {
         REVALIDATE_CACHE

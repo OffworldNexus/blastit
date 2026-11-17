@@ -31,10 +31,11 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use blastit_manifest::blastfile::{StaticImmutable, StaticPattern};
 use blastit_scheduler::static_asset::{
-    AnswerKind, Backend, ImmutableGlob, MAX_SEGMENT_BYTES, MAX_STATIC_PATH_BYTES,
-    STATIC_CHUNK_BYTES, STATIC_MAX_FILE_BYTES, STATIC_RESOLVE_FLAGS, StaticOutcome, StaticRefusal,
-    StaticRoot, classify, head_segments, is_dotfile, same_inode, segments,
+    AnswerKind, Backend, MAX_SEGMENT_BYTES, MAX_STATIC_PATH_BYTES, STATIC_CHUNK_BYTES,
+    STATIC_MAX_FILE_BYTES, STATIC_RESOLVE_FLAGS, StaticOutcome, StaticRefusal, StaticRoot,
+    classify, head_segments, is_dotfile, same_inode, segments,
 };
 use rustix::fs::{FileType, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
@@ -746,39 +747,135 @@ fn same_inode_compares_device_and_inode() {
     assert!(!same_inode((0xfd, 42), (0xfe, 42)));
 }
 
+/// `MB.31.3`: the mount's `immutable` policy is matched by the manifest's own
+/// compiler — `static` keeps no matcher of its own, so a mount and a `view`
+/// answer a pattern identically, and the documented cross-`/` behaviour is
+/// live: one `"/assets/*"` reaches `/assets/chunks/vendor/x.js`.
+///
+/// Every row is asserted in both directions, so a matcher that always (or
+/// never) answered "immutable" fails. The retired 256-byte guard and the
+/// stop-at-`/` `*` are gone; the only cap is the one compiler's 4096 bytes.
 #[test]
-fn immutable_globs_match_the_design_vectors() {
-    let vectors: &[(&str, &str, bool)] = &[
-        ("/assets/*", "/assets/app.4f1c2a9b7d3e.js", true),
-        ("/assets/*", "/assets/", true),
-        ("/assets/*", "/assets/x/y.js", false),
-        ("/assets/*", "/x/assets/app.js", false),
-        ("/assets/*/*", "/assets/chunks/x.js", true),
-        ("/assets/*/*", "/assets/x.js", false),
-        ("/assets/app.*", "/assets/app.js", true),
-        ("/assets/app.*", "/assets/app.css", true),
-        ("/index.html", "/index.html", true),
-        ("/index.html", "/index.htm", false),
-        ("/index.html", "/x/index.html", false),
-        ("/assets/*", "", false),
+fn immutable_patterns_match_the_one_compiler() {
+    let quoted = |pattern: &str| StaticPattern::quoted(pattern).expect("a legal pattern");
+    let raw = |expression: &str| StaticPattern::regex(expression).expect("a legal expression");
+    let vectors: Vec<(StaticPattern, &str, bool)> = vec![
+        // One pattern, any depth: the promise `docs/reference/blastfile.md`
+        // makes. It names the prefix's children, never the prefix itself.
+        (quoted("/assets/*"), "/assets/app.4f1c2a9b7d3e.js", true),
+        (quoted("/assets/*"), "/assets/chunks/vendor/x.js", true),
+        (quoted("/assets/*"), "/assets/", true),
+        (quoted("/assets/*"), "/assets", false),
+        (quoted("/assets/*"), "/assets-secret/key.pem", false),
+        (quoted("/assets/*"), "/x/assets/app.js", false),
+        (quoted("/assets/*"), "", false),
+        // `{file}` is exactly one segment: a second one is denied. (A trailing
+        // `*` must follow `/`, so `/assets/app.*` is a refusal, not a pattern.)
+        (quoted("/assets/{file}"), "/assets/app.js", true),
+        (quoted("/assets/{file}"), "/assets/app.css", true),
+        (quoted("/assets/{file}"), "/assets/", false),
+        (quoted("/assets/{file}"), "/assets/a/b.js", false),
+        (quoted("/index.html"), "/index.html", true),
+        (quoted("/index.html"), "/index.htm", false),
+        (quoted("/index.html"), "/x/index.html", false),
+        // The escape hatch compiles as written. `[^/]+` is one segment, so a
+        // second segment is denied; the greedy `.+` before the hash absorbs the
+        // nested path. Note what that means for `.js.map`: `[^/]+` admits a
+        // dot, so the documented expression does match
+        // `/static/js/app.0123456789ab.js.map` — its deny direction is "no
+        // hash" and "nothing after the last segment", not "no second dot".
+        (
+            raw(r"/static/.+\.[0-9a-f]{12}\.[^/]+"),
+            "/static/js/app.0123456789ab.js",
+            true,
+        ),
+        (
+            raw(r"/static/.+\.[0-9a-f]{12}\.[^/]+"),
+            "/static/js/app.0123456789ab.js.map",
+            true,
+        ),
+        (
+            raw(r"/static/.+\.[0-9a-f]{12}\.[^/]+"),
+            "/static/js/app.js",
+            false,
+        ),
+        (
+            raw(r"/static/.+\.[0-9a-f]{12}\.[^/]+"),
+            "/static/js/app.0123456789ab.js/x",
+            false,
+        ),
+        // "One hash segment, nothing after it" is `[^/.]+`, and then a `.map`
+        // is denied as well; both directions on the same path.
+        (
+            raw(r"/static/.+\.[0-9a-f]{12}\.[^/.]+"),
+            "/static/js/app.0123456789ab.js",
+            true,
+        ),
+        (
+            raw(r"/static/.+\.[0-9a-f]{12}\.[^/.]+"),
+            "/static/js/app.0123456789ab.js.map",
+            false,
+        ),
     ];
-    for (pattern, url, expected) in vectors {
-        let glob = ImmutableGlob::new(pattern).expect("a validated pattern compiles");
-        assert_eq!(glob.matches(url), *expected, "{pattern} against {url:?}");
+    for (pattern, url, expected) in &vectors {
+        assert_eq!(
+            pattern.matches(url),
+            *expected,
+            "{:?} vs {url:?}",
+            pattern.text()
+        );
     }
 
-    // What MB.2.3 validation should have refused: `new` refuses it again.
-    assert!(ImmutableGlob::new("").is_none());
-    assert!(ImmutableGlob::new("assets/*").is_none(), "not /-anchored");
-    assert!(ImmutableGlob::new("/a/../b").is_none(), "a .. segment");
-    assert!(ImmutableGlob::new("/a\u{0}b").is_none(), "a control byte");
+    // The three policy shapes: no directive matches nothing, bare `immutable`
+    // matches every path, and a list is an OR whose written order is irrelevant.
+    assert!(!StaticImmutable::None.matches("/index.html"));
+    assert!(StaticImmutable::All.matches("/assets/chunks/vendor/x.js"));
+    let forward = StaticImmutable::Patterns(vec![quoted("/assets/*"), quoted("/index.html")]);
+    let reverse = StaticImmutable::Patterns(vec![quoted("/index.html"), quoted("/assets/*")]);
+    for policy in [&forward, &reverse] {
+        assert!(
+            policy.matches("/assets/chunks/vendor/x.js"),
+            "either match earns"
+        );
+        assert!(policy.matches("/index.html"), "either match earns");
+        assert!(!policy.matches("/docs/index.html"), "and nothing else does");
+    }
+
+    // The one compiler's refusals replace the retired guard: the same sentences
+    // a `view` pattern gets (§8.3).
+    assert!(StaticPattern::quoted("").is_none());
     assert!(
-        ImmutableGlob::new(&format!("/{}", "a".repeat(256))).is_none(),
-        "over 256 bytes"
+        StaticPattern::quoted("assets/*").is_none(),
+        "not /-anchored"
     );
-    assert!(ImmutableGlob::new(&format!("/{}", "a".repeat(255))).is_some());
-    // A space is a legal byte in a pattern too: the same `byte < 0x20` rule.
-    assert!(ImmutableGlob::new("/my file.css").is_some());
+    assert!(
+        StaticPattern::quoted("/a*b").is_none(),
+        "`*` only at the end after `/`"
+    );
+    assert!(
+        StaticPattern::quoted("/x/*/y").is_none(),
+        "`*` only at the end after `/`"
+    );
+    assert!(StaticPattern::regex("(").is_none(), "an unbalanced group");
+
+    // A pattern is not a filesystem path: `..` and a control byte are literal
+    // text in any pattern, and neither can reach a matcher because the request
+    // path is refused first (the `segments` rows above).
+    assert!(StaticPattern::quoted("/a/../b").is_some());
+    assert!(matches!(segments("/a/../b"), Err(StaticRefusal::Traversal)));
+    assert!(matches!(segments("/a\u{0}b"), Err(StaticRefusal::Control)));
+
+    // The retired 256-byte ceiling: 300 bytes is legal and matches its own
+    // path; the one compiler's 4096 is the only cap.
+    let long = format!("/{}", "a".repeat(300));
+    assert!(quoted(&long).matches(&long));
+    assert!(
+        StaticPattern::quoted(&format!("/{}", "a".repeat(4096))).is_none(),
+        "over 4096 bytes"
+    );
+    // A space is a legal byte in a pattern: the `byte < 0x20` rule is about
+    // control bytes, and a pattern is not a path.
+    assert!(quoted("/my file.css").matches("/my file.css"));
 }
 
 #[test]
