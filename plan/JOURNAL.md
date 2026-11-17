@@ -2705,3 +2705,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T08:06 [MB.24.3] (lead) reviewer VERDICT: PASS (matched mutants: reserve max_by_key, grow's other_route_starved, ViewSet::len's spawning term via memory.rs). Five MINOR findings, 1-4 f
 - 2026-11-17T08:10 [MB.24.4] (lead) edited fields
 - 2026-11-17T08:16 [MB.24.3] (lead) status review -> done
+- 2026-11-17T08:16 [MB.24.3] (lead) committed 9feb291 (make check green except MB.23.5's docs/reference/cli.md fence 1; every other target incl. rs-no-python/zed-check green).
+- 2026-11-17T08:16 [MB.24.4] (lead) status ready -> active
+- 2026-11-17T08:16 [MB.24.4] (lead) attempt 1/3 started
+- 2026-11-17T08:16 [MB.24.4] (lead) base 9feb291
+- 2026-11-17T08:31 [MB.24.4] (lead) status active -> review
+- 2026-11-17T08:31 [MB.24.4] (lead) implementer reports done with measurements: PHP 4-wide 206.7 ms (control 824.2 ms), WSGI 209.0 ms, cap 4 pids/8 requests 472.3 ms, idle retirement + fresh pid. 
+- 2026-11-17T08:41 [MB.27] (lead) created (task) Compile and run critical_parallel_views inside the php-sapi image, so CI proves the measured PHP promise
+- 2026-11-17T08:41 [MB.28] (lead) created (task) Apply the parallel-views documentation deltas: ARCHITECTURE §2.4/§2.6/§8/§8.2, settings.md and php.rs
+- 2026-11-17T08:41 [MB.29] (lead) created (task) Real-ulimit e2e: a refused view fork costs one backoff, never a request or the tree
+- 2026-11-17T08:41 [MB.30] (lead) created (task) One VIEW_PROCESS_MARGIN constant and a truthful view_gone paragraph in the design
+- 2026-11-17T08:42 [MB.24.4] (unknown) polish pass: reviewer PASS with 5 MINOR; fixed 1-4 (no-early-return wording, WSGI real spawn count + one-process assertion, WSGI per-request t0 span <= 100 ms, 
+- 2026-11-17T09:17 [MB.23.5] (planner) edited fields
+- 2026-11-17T09:18 [MB.23.4] (lead) edited fields
+- 2026-11-17T09:18 [MB.23.5] (lead) edited fields
+- 2026-11-17T09:22 [MB.24.4] (lead) status review -> done

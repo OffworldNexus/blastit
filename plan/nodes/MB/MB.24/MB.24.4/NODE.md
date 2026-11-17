@@ -2,7 +2,7 @@
 id: MB.24.4
 title: "Wire per_process_cap = 1 for entrypoint php and prove parallel routes end-to-end (protected critical_parallel_views)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.24.3]
@@ -11,11 +11,11 @@ paths:
   - crates/blastit/tests/critical_parallel_views.rs
   - "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md"
   - Makefile
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:27"
-updated: "2026-11-17T08:10"
+updated: "2026-11-17T09:22"
 ---
 
 # Goal

@@ -12,7 +12,8 @@
 #   make php-sapi       # build the per-minor C SAPI shims this host has headers for
 #   make php-sapi-e2e   # Docker: build one shim and prove it with the real-load probe
 #   make rs-test-php    # real-pair PHP legs: critical_php_backend + critical_php_embed
-#   make rs-test-php-image # those two legs inside the php-sapi-e2e image (what CI runs)
+#                       # + critical_parallel_views
+#   make rs-test-php-image # those legs inside the php-sapi-e2e image (what CI runs)
 #   make mutants-rust   # run cargo-mutants on critical crates (PKG=blastit-sqlpolicy), disk scratch + memory cap
 #   make mutants-clean  # delete mutants.out and every cargo-mutants scratch copy, report bytes freed
 
@@ -550,7 +551,7 @@ PHP_SAPI_CC ?= $(CC)
 PHP_SAPI_ARCH ?=
 PHP_SAPI_LIBC ?=
 # Keep the e2e image after the probe (`php_sapi_probe.py --keep`), because
-# `rs-test-php-image` runs the two protected suites against its pair (`MB.3.39`):
+# `rs-test-php-image` runs the protected PHP suites against its pair (`MB.3.39`):
 # it is the one environment with both the NTS `libphp8.4.so` and the shim.
 PHP_SAPI_KEEP ?=
 
@@ -626,26 +627,36 @@ php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (n
 		--image "$(PHP_SAPI_IMAGE)" \
 		$(if $(PHP_SAPI_KEEP),--keep)
 
-# The real-pair half of the two protected PHP suites (node MB.3.39).
+# The real-pair half of the three protected PHP suites (nodes MB.3.39, MB.24.4).
 #
-# `make check` runs both files on a host with **no** PHP, so every CI run of it
-# exercises their refusal branch only (`refused … install the PHP embed
-# package`). These targets run the same two suites against a real NTS `libphp`
+# `make check` runs all three files on a host with **no** PHP, so every CI run of
+# it exercises their refusal branch only (`refused … install the PHP embed
+# package`). `rs-test-php` runs the same three suites against a real NTS `libphp`
 # plus the shim built for it — the `[route.php]` page answering `200` through
 # `view.chan` with `cpu_ns`, the `exit()`/fatal containment and the slot
-# respawn, and the maps leg — which is what `MB.3.13`'s acceptance claims.
+# respawn, the maps leg, and `critical_parallel_views`' wall-clock promise (four
+# concurrent 200 ms requests to one PHP route under 450 ms against a serialized
+# control of at least 800 ms) — which is what `MB.3.13`'s and `MB.24.4`'s
+# acceptance claims.
+#
+# `rs-test-php-image` still runs only the **two** its image compiles
+# (`critical_php_backend` and `critical_php_embed`: `e2e/php-sapi/Dockerfile`
+# hardcodes them and this target requires exactly two recorded executables), so
+# `critical_parallel_views` does not reach that leg yet — a filed plan follow-up
+# (`MB.24.4`), not a claim of this variable.
 #
 # `--nocapture` is load-bearing, not decoration: the evidence lines
 # (`served: HTTP/1.1 200 OK  cpu_ns=…`, `retired pid … respawned pid …`) are
-# `println!`s of **passing** tests, which cargo captures and drops. Both suites
-# choose their branch from an independent `host_php()` probe, so on a host
+# `println!`s of **passing** tests, which cargo captures and drops. All three
+# suites choose their branch from an independent `host_php()` probe, so on a host
 # without the pair the same command is green and says `refused`: that is why
 # `.github/workflows/php-sapi.yml` greps the log for the refusal markers and for
 # the served ones instead of trusting the exit status.
 #
 # `BLASTIT_PHP_SHIM_DIR` is set here (not left to the suites' `target/php-sapi`
 # fallback) so the shim this host just built is the one the boot loads.
-PHP_SUITE_ARGS := --test critical_php_backend --test critical_php_embed
+PHP_SUITE_ARGS := --test critical_php_backend --test critical_php_embed \
+	--test critical_parallel_views
 # `php-sapi-e2e` builds this tag (forwarded to `php_sapi_probe.py --image`, so
 # the variable is the truth for both targets); `rs-test-php-image` runs the legs
 # against the pair inside it. Debian's `libphp8.4-embed` puts the library at
@@ -675,7 +686,7 @@ PHP_SAPI_IMAGE_LIBPHP ?= /usr/lib/libphp$(PHP_SAPI_IMAGE_MINOR).so
 # suites cannot be pointed at a shim from a different build.
 PHP_SAPI_IMAGE_SHIM_DIR ?= /src/target/php-sapi
 
-rs-test-php: php-sapi ## Real-pair PHP legs: critical_php_backend + critical_php_embed
+rs-test-php: php-sapi ## Real-pair PHP legs: critical_php_backend + critical_php_embed + critical_parallel_views
 	@echo "BLASTIT_PHP_SHIM_DIR=$(PHP_SAPI_OUT) cargo test -p blastit $(PHP_SUITE_ARGS) -- --nocapture"
 	BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_OUT)" \
 		$(RUST_ENV) $(CARGO) test -p blastit --locked $(PHP_SUITE_ARGS) -- --nocapture

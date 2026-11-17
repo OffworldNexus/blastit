@@ -304,7 +304,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     if let Some(message) = crate::stage0::no_python_support(&config, &manifest, learn) {
         fail(&emitter, dev.as_ref(), &message);
     }
-    let routes: Vec<blastit_scheduler::RouteInfo> = match (&dev, learn) {
+    let mut routes: Vec<blastit_scheduler::RouteInfo> = match (&dev, learn) {
         (Some(_), true) => std::iter::once(blastit_scheduler::RouteInfo::new(
             crate::dev_learn::LEARN_FALLBACK_ROUTE,
             false,
@@ -357,6 +357,26 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         Ok(bindings) => bindings,
         Err(message) => fail(&emitter, dev.as_ref(), &message),
     };
+    // `ADR-0015` decision 1 and 9: the composition root writes the provider's
+    // concurrency shape as boot data. An NTS `libphp` runs **one** request per
+    // process (`max_inflight() == 1`), so a route whose binding slot is bound —
+    // the same datum `spawn_now` reads — may own a pool and admits one request
+    // per worker; the scheduler then forks one worker per concurrent request
+    // under `BLASTIT_MAX_WORKERS` and the memory-derived cap. A route with no
+    // binding (a WSGI view, or the `--learn` fallback slot) keeps the threaded
+    // default. The slots are built from this same `routes`, so index alignment
+    // is what the binding vector promises.
+    //
+    // `#[cfg(feature = "php")]`: a build without the feature has no `php`
+    // vector and no PHP route can exist (`stage0::no_python_support`'s twin
+    // gate refuses one).
+    #[cfg(feature = "php")]
+    for (index, route) in routes.iter_mut().enumerate() {
+        if php.get(index).is_some_and(Option::is_some) {
+            route.per_process_cap = Some(1); // the provider's max_inflight(), as data
+            route.process_pool = true; // one request per process ⇒ a pool
+        }
+    }
     // `ADR-0010` §3: a contained probe child per `entrypoint php` file loads the
     // pair stage 0 inspected and starts the module **before** anything listens.
     // A shim that will not load, an ABI this build does not speak, a minor that

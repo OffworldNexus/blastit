@@ -54,3 +54,7 @@ Verified: fmt clean, `cargo clippy --workspace --all-targets --locked -- -D warn
 ## 2026-11-17T08:16 [lead]
 
 status review -> done
+
+## 2026-11-17T08:16 [lead]
+
+committed 9feb291 (make check green except MB.23.5's docs/reference/cli.md fence 1; every other target incl. rs-no-python/zed-check green).
