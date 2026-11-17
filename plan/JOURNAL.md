@@ -2696,3 +2696,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T07:23 [MB.22.12] (planner) status ready -> superseded: Moved to MB.26.14 (post-0.2.0).
 - 2026-11-17T07:23 [MB.22] (planner) status ready -> done
 - 2026-11-17T07:30 [MB.22] (lead) gate checks: plan OK, guard OK, docs-check OK, docs-assets 35 passed, rev+metadata+lsp smoke OK, root Cargo.* byte-identical, make check red only on MB.23.1's -
+- 2026-11-17T07:34 [MB.24.3] (lead) status ready -> active
+- 2026-11-17T07:34 [MB.24.3] (lead) attempt 1/3 started
+- 2026-11-17T07:34 [MB.24.3] (lead) base 605d78583dabc420d121fce88ab13861963c76ae
