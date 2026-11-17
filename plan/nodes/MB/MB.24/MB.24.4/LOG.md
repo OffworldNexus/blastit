@@ -43,3 +43,15 @@ polish pass: reviewer PASS with 5 MINOR; fixed 1-4 (no-early-return wording, WSG
 ## 2026-11-17T09:22 [lead]
 
 status review -> done
+
+## 2026-11-17T09:22 [lead]
+
+committed a4b930e. make check green except MB.23.5's docs/reference/cli.md fence 1; test-critical, rs-no-python, zed-check, seam/workflow/packaging/doc-tone/manifest-purity gates all green.
+
+## 2026-11-17T09:23 [lead]
+
+make check green (252+ tests, clippy/fmt/doc/python all pass) except the known pre-existing docs-test failure: docs/reference/cli.md fence 1 needs --no-reload, delivered by MB.23.5 (same external cause as MB.24.3 at 9feb291). Committing.
+
+## 2026-11-17T09:23 [lead]
+
+status done -> done

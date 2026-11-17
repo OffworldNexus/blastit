@@ -6,12 +6,30 @@ status: ready
 owner: implementer
 priority: 1
 depends_on: [MB.23.2]
-paths: ["e2e/php-sapi/Dockerfile"]
+paths:
+  - "crates/blastit-view/src/loaded.rs"
+  - "crates/blastit-view/src/lib.rs"
+  - "crates/blastit-view/src/runtime.rs"
+  - "crates/blastit-view/src/config.rs"
+  - "crates/blastit-view/src/request.rs"
+  - "crates/blastit-view/src/php.rs"
+  - crates/blastit/src/stage1.rs
+  - crates/blastit/src/php_view.rs
+  - "crates/blastit-php-sapi/c/blastit_php_sapi.c"
+  - "crates/blastit-php-sapi/c/include/blastit_php_abi_v1.h"
+  - "crates/blastit-php-sapi/src/lib.rs"
+  - "crates/blastit-php-sapi/src/request.rs"
+  - "crates/blastit-php-sapi/src/abi.rs"
+  - "crates/blastit-php-sapi/src/loader.rs"
+  - "crates/blastit-php-sapi/tests/critical_file_sink.rs"
+  - crates/blastit/tests/critical_loaded_files.rs
+  - Makefile
+  - "e2e/php-sapi/Dockerfile"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:12"
-updated: "2026-11-17T06:31"
+updated: "2026-11-17T09:17"
 ---
 
 # Goal

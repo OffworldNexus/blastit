@@ -2720,3 +2720,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T09:18 [MB.23.4] (lead) edited fields
 - 2026-11-17T09:18 [MB.23.5] (lead) edited fields
 - 2026-11-17T09:22 [MB.24.4] (lead) status review -> done
+- 2026-11-17T09:22 [MB.24.4] (lead) committed a4b930e. make check green except MB.23.5's docs/reference/cli.md fence 1; test-critical, rs-no-python, zed-check, seam/workflow/packaging/doc-tone/man
+- 2026-11-17T09:22 [MB.26.8] (lead) status ready -> active
+- 2026-11-17T09:22 [MB.26.8] (lead) attempt 1/3 started
+- 2026-11-17T09:22 [MB.26.8] (lead) base a4b930e (pool MB.24.3 + PHP shape MB.24.4 in place)
+- 2026-11-17T09:23 [MB.24.4] (lead) make check green (252+ tests, clippy/fmt/doc/python all pass) except the known pre-existing docs-test failure: docs/reference/cli.md fence 1 needs --no-reload, 
+- 2026-11-17T09:23 [MB.24.4] (lead) status done -> done

@@ -5,13 +5,39 @@ kind: task
 status: ready
 owner: implementer
 priority: 1
-depends_on: [MB.24.4]
-paths: [python/tests/runnable_docs/inventory.toml]
+depends_on: [MB.23.3, MB.23.4, MB.24.4]
+paths:
+  - "crates/blastit-frame/src/frame.rs"
+  - "crates/blastit-frame/src/ctl.rs"
+  - "crates/blastit-scheduler/src/ctl.rs"
+  - "crates/blastit-scheduler/src/scheduler.rs"
+  - "crates/blastit-events/src/lib.rs"
+  - "crates/blastit-events/src/json.rs"
+  - "crates/blastit-events/src/pretty.rs"
+  - crates/blastit/src/dev_reload.rs
+  - crates/blastit/src/cli.rs
+  - crates/blastit/src/supervise.rs
+  - crates/blastit/src/child.rs
+  - crates/blastit/src/zygote.rs
+  - crates/blastit/src/lib.rs
+  - crates/blastit/src/stage1.rs
+  - crates/blastit/src/stage0.rs
+  - "crates/blastit-dbproxy/src/lib.rs"
+  - "crates/blastit-dbproxy/src/config.rs"
+  - "crates/blastit-dbproxy/src/learn.rs"
+  - "crates/blastit-dbproxy/src/state.rs"
+  - "crates/blastit-dbproxy/src/server.rs"
+  - ARCHITECTURE.md
+  - crates/blastit/tests/critical_dev_reload.rs
+  - "crates/blastit/tests/common/**"
+  - Makefile
+  - "scripts/check-no-test-seam.sh"
+  - python/tests/runnable_docs/inventory.toml
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:13"
-updated: "2026-11-17T06:31"
+updated: "2026-11-17T09:18"
 ---
 
 # Goal

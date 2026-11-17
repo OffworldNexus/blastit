@@ -2,7 +2,7 @@
 id: MB.26.8
 title: "A queued request must never be handed to a retired PHP view (502 view_died under 8-way concurrency)"
 kind: task
-status: ready
+status: active
 owner: implementer
 priority: 1
 depends_on: [MB.24.4]
@@ -11,11 +11,11 @@ paths:
   - "crates/blastit-view/**"
   - "crates/blastit-php-sapi/**"
   - crates/blastit/tests/critical_php_embed.rs
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T06:14"
-updated: "2026-11-17T06:29"
+updated: "2026-11-17T09:22"
 ---
 
 Moved from `MB.21.8` (`MB.21`) to `MB.26.8` at the 0.2.0 release gate; scope, `paths`, owner and acceptance are unchanged. Ids quoted inside the text below keep their pre-move numbering — use this node's id in commands.
