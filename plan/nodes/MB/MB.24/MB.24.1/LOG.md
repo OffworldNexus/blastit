@@ -39,3 +39,7 @@ status active -> review
 ## 2026-11-17T05:40 [lead]
 
 status review -> done
+
+## 2026-11-17T05:40 [lead]
+
+committed bc0b492 on release/0.2.0 (reviewer PASS, attempt 1)
