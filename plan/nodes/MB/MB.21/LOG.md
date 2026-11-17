@@ -83,3 +83,11 @@ post-0.2.0 re-home: the 7 audit survivors (MB.21.5.6/5.8/5.9/5.10/5.12/5.13/5.14
 ## 2026-11-17T06:14 [lead]
 
 status ready -> done
+
+## 2026-11-17T06:19 [lead]
+
+RESULT corrected to the final state (e2e PASS 311/0; make check BLOCKED BY EXTERNAL with three proven causes; children incl. 21.6/21.7/21.8 and the MB.26 re-home). Commit ce7ed71 is the gate commit
+
+## 2026-11-17T06:20 [lead]
+
+FINAL: rs-fmt/rs-lint now green (other sessions repaired their untracked files). make check still exit 2, now at rs-doc: 'public documentation for message links to private item prefix' at crates/blastit-manifest/src/error.rs:1523 — that file is modified-but-uncommitted by another session (last commit 335f564 is this epic's). Only committed defect elsewhere: cli.md documents dev --no-reload, cli.rs has none (MB.23). All epic-measuring legs green; make e2e PASS 311/0
