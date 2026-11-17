@@ -2,7 +2,7 @@
 id: MB.9.3
 title: "Generalize the WSGI port into ViewUpstream serving Executor::Wsgi and Executor::Php over an injected WorkerRuntime"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.9.2]
@@ -16,7 +16,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:54"
-updated: "2026-11-14T14:39"
+updated: "2026-11-17T14:07"
 ---
 
 # Goal

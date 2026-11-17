@@ -2,7 +2,7 @@
 id: MB.9
 title: "Backend Upstream Contract (DI/IoC): one trait for static, WSGI and embedded PHP"
 kind: epic
-status: ready
+status: superseded
 priority: 2
 depends_on: [MB.3.3]
 paths: ["crates/**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:54"
-updated: "2026-11-14T22:18"
+updated: "2026-11-17T14:07"
 ---
 
 # Goal

@@ -11,17 +11,19 @@ paths:
   - "crates/blastit-view/src/**"
   - "crates/blastit-view/tests/**"
   - "crates/blastit-view/Cargo.toml"
+  - crates/blastit/src/zygote.rs
   - crates/blastit/src/stage1.rs
   - crates/blastit/src/supervise.rs
   - crates/blastit/src/cli.rs
   - crates/blastit/src/lib.rs
+  - crates/blastit/tests/critical_loaded_files.rs
   - crates/blastit/Cargo.toml
   - Cargo.lock
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T14:07"
+updated: "2026-11-17T15:57"
 ---
 
 # Goal
@@ -44,9 +46,11 @@ crate through its `python` feature.
   `gil.rs` is the one test that owns the interpreter (`pyo3` `auto-initialize`).
 - What **stays** in `blastit-view` for now: `wire.rs`, `flow.rs`, `loaded.rs`'s codec,
   `config.rs`, `error.rs`, `sync.rs`, and — until `MB.36.5` deletes the trait —
-  `runtime.rs` including `OutputStream`/`RequestIo`/`RequestEnd`/`OUTPUT_LINE_CAP` and the
-  Python `LoadedTracker`/`LoadedReporter`. Say so in the crate docs: this leaf moves the
-  *interpreter*, not the *wire*.
+  `runtime.rs` including `OutputStream`/`RequestIo`/`RequestEnd`/`OUTPUT_LINE_CAP`. The Python
+  `LoadedTracker`/`LoadedReporter` do **not** stay (they install a Python audit hook): they and
+  `crates/blastit/tests/critical_loaded_files.rs` move into `blastit-view-python` **in this
+  leaf**, which is what keeps its acceptance green. Say so in the crate docs: this leaf moves
+  the *interpreter*, not the *wire*.
 - `pyo3` rules: `blastit-view-python` owns `pyo3` **without** `auto-initialize` in
   `[dependencies]` (a view is forked from an interpreter `init` already initialised) and
   **with** `auto-initialize` in `[dev-dependencies]` (the tests attach themselves); keep
@@ -66,8 +70,8 @@ crate through its `python` feature.
 $ cargo test -p blastit-view-python --locked
 $ cargo test -p blastit-view --locked
 $ cargo test -p blastit --lib --locked
-$ cargo test -p blastit --test critical_loaded_files --locked
-$ make critical-guard BASE=develop NODE=MB.36.3
+$ cargo test -p blastit-view-python --test critical_loaded_files --locked
+$ make critical-guard NODE=MB.36.3
 $ test -d crates/blastit-view-python && echo "crate exists"
 $ test -f crates/blastit-view-python/src/serve.rs && echo "serve moved"
 $ test ! -e crates/blastit-view/src/environ.rs && test ! -e crates/blastit-view/src/input.rs && echo "no WSGI left behind"

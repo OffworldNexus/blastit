@@ -16,11 +16,14 @@ paths:
   - "scripts/build-standalone.sh"
   - ARCHITECTURE.md
   - docs/knowledge/LESSONS.md
+  - "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md"
+  - docs/decisions/README.md
+  - "docs/design/backend-runtimes.md"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T14:07"
+updated: "2026-11-17T15:57"
 ---
 
 # Goal
@@ -66,14 +69,15 @@ $ test -z "$(grep -rn 'blastit-view/python\|blastit-view/php' crates/*/Cargo.tom
 $ cargo build -p blastit --locked
 $ cargo check -p blastit-py --locked
 $ make rs-no-python
+$ make rs-no-default
 $ make standalone
 $ make platform-matrix-check
 $ grep -q 'blastit-view-python' ARCHITECTURE.md && grep -q 'blastit-view-php' ARCHITECTURE.md && grep -q 'blastit-view-static' ARCHITECTURE.md && echo "architecture names the crates"
-$ test -z "$(grep -rn 'WorkerRuntime' ARCHITECTURE.md docs/)" && echo "no trait claim left"
+$ test -z "$(grep -rn 'WorkerRuntime' ARCHITECTURE.md crates/)" && echo "no trait claim left"
 $ make check
 ```
-- `make rs-no-python` and `make standalone` prove the shipped artifact: no `libpython`, no
-  `libphp` `DT_NEEDED`, no `RUNPATH`, no test-only boot seam, no inotify symbol.
+- `make rs-no-python`, `make rs-no-default` and `make standalone` prove the shipped artifact: no
+  `libpython`, no `libphp` `DT_NEEDED`, no `RUNPATH`, no test-only boot seam, no inotify symbol.
 - `make platform-matrix-check` proves the declared artifact matrix still describes the build.
 - `RESULT.md` pastes `make check`, `make rs-no-python`, `make standalone`,
   `make platform-matrix-check` tails and the `cargo tree -p blastit --features …` lines for

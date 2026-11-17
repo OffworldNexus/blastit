@@ -17,7 +17,6 @@
 
 ## Next actionable (top 12)
 
-- gate: MB.25 Clean runtime startup diagnostics: INFO runtime line (PHP version + php.ini, or Python version + virtualenv) instead of WARN manifest.warning
 - execute: MB.6 Static files beside a Python/PHP app + the hashed-asset caching contract
 - execute: MB.11 Rewrite the DigitalOcean roles/pooler section for clarity (backport to 0.2.0)
 - execute: MB.13 Rewrite the deployments index page for scannability
@@ -29,6 +28,7 @@
 - execute: MB.3.68 The unsupported-minor sentence must not fire on a supported library at an unprobed name
 - execute: MB.3.69 Run the rewritten two-package witness, and correct the grepped-set list
 - execute: MB.8 e2e: Django collectstatic served by [static] beside the WSGI app
+- execute: MB.16 Deterministic ctl-write-to-gone-scheduler test (flake at supervise.rs:1045)
 
 ## Stuck / attention
 
@@ -36,8 +36,6 @@
 
 ## Recent journal
 
-- 2026-11-17T21:11 [MB.26.22] (planner) created (task) Repair MB.23.6's acceptance evidence commands (scripts/noop and the wheel .so path)
-- 2026-11-17T21:11 [MB.26.23] (planner) created (task) Prove the reload transaction is idempotent and a payload-carrying 0x45 is refused by the streaming Decoder
 - 2026-11-17T21:11 [MB.23.7] (planner) re-filed as MB.26.15 under MB.26 — superseded means re-filed here, not dropped
 - 2026-11-17T21:11 [MB.23.8] (planner) re-filed as MB.26.16 under MB.26 — superseded means re-filed here, not dropped
 - 2026-11-17T21:11 [MB.23.9] (planner) re-filed as MB.26.17 under MB.26 — superseded means re-filed here, not dropped
@@ -51,3 +49,5 @@
 - 2026-11-17T21:47 [MB.25.2] (lead) status active -> review
 - 2026-11-17T22:11 [MB.25.2] (lead) polish: hang-probe legs widened (250->2000 ms, 20->30 s wait, 20 s refusal bound) with every containment assertion kept -- that flake reproduced at the base com
 - 2026-11-17T22:11 [MB.25.2] (lead) status review -> done
+- 2026-11-17T22:11 [MB.25] (lead) gate passed: MB.25.1 (docs) and MB.25.2 (the event) both done; blastit-events 97/5/1, php-sapi 5/8/15/1, critical_php_backend 9, critical_php_embed 27 (x4 incl.
+- 2026-11-17T22:11 [MB.25] (lead) status ready -> done

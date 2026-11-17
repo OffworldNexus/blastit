@@ -2,7 +2,7 @@
 id: MB.9.2.1
 title: "UpstreamHead, RouteRuntime.stages, run_with and the Done slot rule - design MB.9.2a"
 kind: epic
-status: ready
+status: superseded
 priority: 2
 depends_on: [MB.9.1]
 paths:
@@ -22,7 +22,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T03:37"
-updated: "2026-11-14T10:51"
+updated: "2026-11-17T14:07"
 ---
 
 # Goal

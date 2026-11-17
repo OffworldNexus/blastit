@@ -8,6 +8,12 @@ priority: 2
 depends_on: [MB.36.3]
 paths:
   - "crates/blastit-view-python/**"
+  - "crates/blastit-view/src/spawn.rs"
+  - "crates/blastit-view/src/lib.rs"
+  - "crates/blastit-view/Cargo.toml"
+  - "crates/blastit-sys/**"
+  - crates/blastit/src/child.rs
+  - crates/blastit/src/forking.rs
   - crates/blastit/src/immortal.rs
   - crates/blastit/src/zygote.rs
   - crates/blastit/src/py.rs
@@ -21,7 +27,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T14:07"
+updated: "2026-11-17T15:57"
 ---
 
 # Goal
@@ -66,7 +72,7 @@ move** — same fork protocol, same GIL discipline, same `/proc/self/…` accoun
 $ cargo test -p blastit-view-python --locked
 $ cargo test -p blastit --lib --locked
 $ cargo test -p blastit --locked
-$ make critical-guard BASE=develop NODE=MB.36.4
+$ make critical-guard NODE=MB.36.4
 $ test ! -e crates/blastit/src/immortal.rs && test ! -e crates/blastit/src/zygote.rs && echo "fork left the composition root"
 $ test -z "$(grep -rn 'mod immortal\|mod zygote' crates/blastit/src)" && echo "no orphan modules"
 $ grep -q 'blastit_view_python::zygote' crates/blastit/src/supervise.rs && echo "supervisor calls the crate"

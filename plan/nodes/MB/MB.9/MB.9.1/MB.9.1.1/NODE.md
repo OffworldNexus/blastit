@@ -2,7 +2,7 @@
 id: MB.9.1.1
 title: "Add crates/blastit-backend: Upstream trait, contract types, PinnedSocket, Registry - design MB.9.1 part 1"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: [MB.3.3, MB.3.4, MB.3.5.1]
@@ -16,7 +16,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-17T14:07"
 ---
 
 # Goal

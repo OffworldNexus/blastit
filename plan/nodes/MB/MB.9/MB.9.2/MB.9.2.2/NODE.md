@@ -2,7 +2,7 @@
 id: MB.9.2.2
 title: "StaticUpstream adapter and deletion of the static dispatch branches - design MB.9.2b"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: [MB.9.2.1.3]
@@ -16,7 +16,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T03:37"
-updated: "2026-11-14T10:51"
+updated: "2026-11-17T14:07"
 ---
 
 # Goal

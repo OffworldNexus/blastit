@@ -115,7 +115,8 @@ $ cargo test -p blastit-view --locked
 $ cargo test -p blastit-view-python --locked
 $ cargo test -p blastit-view-php --locked
 $ cargo test -p blastit-view-static --locked
-$ make critical-guard BASE=develop NODE=MB.36
+$ uv run --no-project tools/critical_guard.py --base develop \
+    --node MB.36.2 --node MB.36.3 --node MB.36.4 --node MB.36.5
 $ test -d crates/blastit-view-python && test -d crates/blastit-view-php && test -d crates/blastit-view-static && echo "three view crates exist"
 $ test ! -e crates/blastit-view/src/runtime.rs && echo "WorkerRuntime trait deleted"
 $ test -z "$(grep -rn 'pyo3' crates/blastit-view/Cargo.toml)" && echo "transport crate links no interpreter"
@@ -133,8 +134,11 @@ $ make e2e
 - `Cargo.toml`/`Cargo.lock` edits belong to **one leaf at a time** (the chain above); never
   let two leaves add dependencies in parallel.
 - `crates/*/tests/critical_*.rs` moves are legal only because each leaf lists the old glob in
-  its `paths`; `make critical-guard BASE=develop NODE=<leaf>` is part of every implementation
-  acceptance. Deleting a case instead of relocating it is a failed leaf.
+  its `paths`; `make critical-guard NODE=MB.36.<leaf>` is part of every implementation
+  acceptance, run **before** that leaf's commit (the Makefile's `BASE` default is `HEAD`, so the
+  diff is exactly that leaf's deletions). The branch-wide proof is the `--node` list above: the
+  epic's own `NODE=MB.36` is vacuous, because `paths` is `crates/**` and every protected path
+  matches. Deleting a case instead of relocating it is a failed leaf.
 - `docs/knowledge/LESSONS.md` records the feature-unification trap (`cargo build --workspace`
   links `libpython` through `blastit-py`); the design must state the exact per-artifact build
   commands rather than leaving `--workspace` available to a reader.

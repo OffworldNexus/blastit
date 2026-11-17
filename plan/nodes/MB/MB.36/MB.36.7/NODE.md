@@ -51,9 +51,12 @@ crates.
 $ scripts/build-wheel.sh --manylinux 2_28
 $ E2E_DOCKERFILE=Dockerfile.prebuilt uv run --no-project e2e/run.py
 $ uv run --no-project e2e/rootless/run.py --local --dockerfile Dockerfile.prebuilt
-$ make critical-guard BASE=develop NODE=MB.36.7
+$ make critical-guard NODE=MB.36.7
 $ make rs-test-critical
+$ cargo test -p blastit --test dx_capture --locked
+$ cargo test -p blastit --test dx_invariance --locked
 $ make docs-check && make docs-test
+$ make check
 $ PKG=blastit-view make mutants-rust
 $ PKG=blastit-view-static make mutants-rust
 $ PKG=blastit-view-php make mutants-rust
@@ -67,8 +70,13 @@ $ uv run --no-project tools/plan.py validate
   route; the standalone leg proves the archive boots PHP with no interpreter.
 - The Docker and rootless e2e legs pass on the **refactored** tree, not on a cached prebuilt
   image (`E2E_DOCKERFILE=Dockerfile.prebuilt` against the wheel just built).
+- The DX-invariance replay is executable: the design's seven rows are captured verbatim on a
+  scratch `develop` checkout and on the epic head and diff **empty** after the documented mask;
+  `crates/blastit/tests/dx_capture.rs` carries that normaliser plus its two self-tests (a varying
+  `ts` is masked while a stable `status` is kept; an unparseable line is a failure, never
+  dropped), and `dx_invariance` asserts rows 1 and 3 in process.
 - `RESULT.md` pastes: wheel path + `sha256sum`, the three e2e tails, the mutants summaries,
-  `make docs-test`, and the audit's verdict line.
+  the empty capture diff, `make docs-test`, `make check`, and the audit's verdict line.
 
 # Notes
 

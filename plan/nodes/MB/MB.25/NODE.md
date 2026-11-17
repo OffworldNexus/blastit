@@ -2,7 +2,7 @@
 id: MB.25
 title: "Clean runtime startup diagnostics: INFO runtime line (PHP version + php.ini, or Python version + virtualenv) instead of WARN manifest.warning"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.21.5.2]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:28"
-updated: "2026-11-17T01:28"
+updated: "2026-11-17T22:11"
 ---
 
 # Goal

@@ -2,7 +2,7 @@
 id: MB.9.1.2
 title: "Conformance case table, IMPLEMENTATIONS and cases() in blastit-backend - design MB.9.1 part 2"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: [MB.9.1.1]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-17T14:07"
 ---
 
 # Goal

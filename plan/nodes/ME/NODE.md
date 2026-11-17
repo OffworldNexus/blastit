@@ -36,3 +36,14 @@ DX-first applies with the same force: the agent-facing documentation for each in
 
 - Depends on `MD` (proxies) for a complete backend story, but the publication and skill work can start earlier if prioritised.
 - The skill and plugins are thin: all intelligence stays in `check --json` and `edit.rs`; the integration must not fork manifest logic.
+
+## Deferred scope recorded for a later split (not planned here)
+
+- **First-party editor & IDE plugins (`editors/vscode/`, `editors/jetbrains/` for
+  IntelliJ/PhpStorm/PyCharm, and `editors/nvim/` + `editors/vim/`)**: thin `Blastfile` extensions
+  that share the cross-platform `blastit-lsp` binary introduced in `MB.35` — syntax highlighting,
+  SQL + `$?`/`...` diagnostics, Quick Fixes, hover and format-on-save — with the same ≤3-step,
+  zero-`sudo` install and the same "the editor resolves the server, the server holds no
+  privileges" boundary as the Zed extension. **Strictly out of `0.2.0` scope: Zed is the only
+  editor integration that release ships.** Recorded here so the portable server is not designed
+  as a Zed-only artifact; decomposed into its own sub-release when `ME` is planned.

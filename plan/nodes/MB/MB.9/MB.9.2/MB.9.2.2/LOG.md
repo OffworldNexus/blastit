@@ -19,3 +19,7 @@ Correction to the line above (shell ate the backticked names): the `.php`/`.phar
 ## 2026-11-14T21:10 [lead]
 
 SUPERSEDED IN PART (2026-11-14): the EntryScript behaviour lands EARLY as MB.3.33 (surgical, in the current static_asset/rewrite path, with protected critical_static_entry) because this node is blocked behind MB.9.2.1.3<-1.2<-1.1<-MB.9.1.1<-MB.9.1.2. When you land, port/preserve that gate in plan and keep the cases (or move them to conformance with identical assertions). Do not regress to serving source.
+
+## 2026-11-17T14:07 [planner]
+
+status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)

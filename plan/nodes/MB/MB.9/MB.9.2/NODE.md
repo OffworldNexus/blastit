@@ -2,7 +2,7 @@
 id: MB.9.2
 title: "Port static serving onto the injected Upstream trait without behaviour change (split: MB.9.2.1 head/stages, MB.9.2.2 StaticUpstream)"
 kind: epic
-status: ready
+status: superseded
 priority: 2
 depends_on: [MB.9.1]
 paths:
@@ -25,7 +25,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:54"
-updated: "2026-11-14T10:51"
+updated: "2026-11-17T14:07"
 ---
 
 # Goal

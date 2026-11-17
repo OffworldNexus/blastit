@@ -145,3 +145,11 @@ MB.22.2 design hand-offs (recorded in docs/design/blastfile-lsp-zed.md §12.8): 
 
 **Answer:**
 
+## H-015 [closed] (node MB)
+
+- asked: 2026-11-17T14:09 by conductor
+
+Expensive budget exhausted (60.74/00). Please raise expensive_cap_usd in plan/BUDGET.json (e.g. to 400) so the final 0.2.0 strategist milestone gate can run once cheap work completes.
+
+**Answer:**
+

@@ -8,14 +8,22 @@ priority: 2
 depends_on: [MB.36.1, MB.33, MB.23.5.2]
 paths:
   - "crates/blastit-view-static/**"
+  - "crates/blastit-view/src/path.rs"
+  - "crates/blastit-view/src/lib.rs"
+  - "crates/blastit-view/Cargo.toml"
   - "crates/blastit-scheduler/src/lib.rs"
   - "crates/blastit-scheduler/src/config.rs"
+  - "crates/blastit-scheduler/src/error.rs"
   - "crates/blastit-scheduler/src/rewrite.rs"
   - "crates/blastit-scheduler/src/scheduler.rs"
   - "crates/blastit-scheduler/src/path.rs"
+  - "crates/blastit-scheduler/src/static_asset.rs"
+  - "crates/blastit-scheduler/src/static_response.rs"
   - "crates/blastit-scheduler/tests/critical_static_assets.rs"
   - "crates/blastit-scheduler/tests/critical_static_resolve.rs"
   - "crates/blastit-scheduler/tests/critical_static_entry.rs"
+  - "crates/blastit-scheduler/tests/critical_rewrite.rs"
+  - "crates/blastit-scheduler/tests/common/static_fixture.rs"
   - "crates/blastit-scheduler/Cargo.toml"
   - crates/blastit/Cargo.toml
   - Cargo.lock
@@ -23,7 +31,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T14:08"
+updated: "2026-11-17T15:57"
 ---
 
 # Goal
@@ -67,7 +75,7 @@ closed MIME table, `ETag`/`Last-Modified`/`304`/`HEAD`, the `immutable` cache ru
 $ cargo test -p blastit-view-static --locked
 $ cargo test -p blastit-scheduler --locked
 $ cargo test -p blastit --test critical_static_cli --locked
-$ make critical-guard BASE=develop NODE=MB.36.2
+$ make critical-guard NODE=MB.36.2
 $ test -d crates/blastit-view-static && echo "crate exists"
 $ test -z "$(ls crates/blastit-scheduler/src/static_*.rs 2>/dev/null)" && echo "static left the scheduler"
 $ test -z "$(grep -rn 'openat2\|ResolveFlags' crates/blastit-scheduler/src)" && echo "no resolver left behind"

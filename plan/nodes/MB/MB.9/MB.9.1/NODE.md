@@ -2,7 +2,7 @@
 id: MB.9.1
 title: "Add crates/blastit-backend: the upstream contract trait, types, boot factory and conformance table"
 kind: epic
-status: ready
+status: superseded
 priority: 2
 depends_on: [MB.3.3, MB.3.4]
 paths: [Cargo.lock, "crates/blastit-backend/**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:54"
-updated: "2026-11-14T10:50"
+updated: "2026-11-17T14:07"
 ---
 
 # Goal

@@ -15,3 +15,7 @@ deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing n
 ## 2026-11-17T21:09 [lead]
 
 status proposed -> superseded
+
+## 2026-11-17T21:11 [planner]
+
+re-filed as MB.26.18 under MB.26 — superseded means re-filed here, not dropped

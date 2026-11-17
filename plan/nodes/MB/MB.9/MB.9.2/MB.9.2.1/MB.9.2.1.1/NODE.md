@@ -2,7 +2,7 @@
 id: MB.9.2.1.1
 title: "Scheduler config and head plumbing: UpstreamHead accessors, RouteInfo.executor, SchedulerConfig fields - design MB.9.2a part 1"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: [MB.9.1]
@@ -18,7 +18,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-17T14:07"
 ---
 
 # Goal

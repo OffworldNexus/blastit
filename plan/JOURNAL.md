@@ -3018,3 +3018,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T21:47 [MB.25.2] (lead) status active -> review
 - 2026-11-17T22:11 [MB.25.2] (lead) polish: hang-probe legs widened (250->2000 ms, 20->30 s wait, 20 s refusal bound) with every containment assertion kept -- that flake reproduced at the base com
 - 2026-11-17T22:11 [MB.25.2] (lead) status review -> done
+- 2026-11-17T22:11 [MB.25] (lead) gate passed: MB.25.1 (docs) and MB.25.2 (the event) both done; blastit-events 97/5/1, php-sapi 5/8/15/1, critical_php_backend 9, critical_php_embed 27 (x4 incl.
+- 2026-11-17T22:11 [MB.25] (lead) status ready -> done

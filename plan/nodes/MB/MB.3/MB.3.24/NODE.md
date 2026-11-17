@@ -2,7 +2,7 @@
 id: MB.3.24
 title: WsgiRuntime on WorkerRuntime + protected critical_view_transport.rs (no behaviour change)
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: [MB.3.23]
@@ -14,7 +14,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T17:04"
-updated: "2026-11-14T17:04"
+updated: "2026-11-17T14:07"
 ---
 
 # Goal

@@ -14,9 +14,14 @@ paths:
   - crates/blastit/src/php_view.rs
   - crates/blastit/src/stage0.rs
   - crates/blastit/src/stage1.rs
+  - crates/blastit/src/config.rs
+  - crates/blastit/src/supervise.rs
+  - crates/blastit/src/check.rs
   - crates/blastit/src/lib.rs
   - crates/blastit/tests/critical_php_backend.rs
   - crates/blastit/tests/critical_php_embed.rs
+  - "crates/blastit/tests/common/**"
+  - crates/blastit/tests/critical_parallel_views.rs
   - crates/blastit/tests/critical_loaded_files.rs
   - "crates/blastit-scheduler/src/scheduler.rs"
   - crates/blastit/Cargo.toml
@@ -25,7 +30,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T14:07"
+updated: "2026-11-17T15:57"
 ---
 
 # Goal
@@ -80,19 +85,19 @@ back to being an orchestrator.
 $ cargo test -p blastit-view --locked
 $ cargo test -p blastit-view-php --locked
 $ cargo test -p blastit-view-python --locked
-$ make critical-guard BASE=develop NODE=MB.36.5
+$ make critical-guard NODE=MB.36.5
 $ test ! -e crates/blastit-view/src/runtime.rs && echo "trait file deleted"
 $ test -z "$(grep -rn 'WorkerRuntime' --include=*.rs crates/)" && echo "no WorkerRuntime anywhere"
 $ test -z "$(grep -n 'pyo3\|blastit-php-sapi' crates/blastit-view/Cargo.toml)" && echo "transport crate is language-free"
 $ test ! -e crates/blastit-view/src/php.rs && test ! -e crates/blastit/src/php_view.rs && echo "PHP left"
-$ test -z "$(grep -rn 'libphp8\|LibphpProbe' crates/blastit/src/stage0.rs)" && echo "discovery left stage0"
+$ test -z "$(grep -nE '^(pub(\(crate\))? )?(fn|struct|enum|const) (LIBPHP_PROBES|PhpSearch|php_boot_in|discover_php)\b' crates/blastit/src/stage0.rs)" && echo "discovery left stage0"
 $ test -z "$(grep -rn 'blastit_view::php' crates/)" && echo "no old module path"
 $ make rs-no-python
 $ make check
 ```
-- `cargo tree -p blastit-view` is `blastit-frame` + `thiserror` only; `cargo tree -p
-  blastit-view` and `-p blastit-view-php` show no `pyo3`, and `blastit-view-php` carries
-  `blastit-php-sapi` with **no** link-time `libphp`.
+- `cargo tree -p blastit-view` is `blastit-frame` + `thiserror` + `blastit-sys`; its real oracle is
+  the negative — `cargo tree -p blastit-view` and `-p blastit-view-php` show no `pyo3` — and
+  `blastit-view-php` carries `blastit-php-sapi` with **no** link-time `libphp`.
 - `make rs-no-python` proves the standalone binary still carries no `libpython`/`libphp`
   `DT_NEEDED` and no `RUNPATH` after the moves.
 - `RESULT.md` pastes `make check`, `make rs-no-python`, `cargo tree` for both view crates,

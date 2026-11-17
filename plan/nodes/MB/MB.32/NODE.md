@@ -1,16 +1,16 @@
 ---
 id: MB.32
-title: "Blastfile syntax highlighting on the Zensical site: one offline lexer, an AA palette in light and dark, asset tests and a browser proof"
+title: "Blastfile + query-SQL syntax highlighting on the Zensical site: one offline lexer, an AA palette in light and dark, asset tests and a browser proof"
 kind: epic
 status: ready
 priority: 1
-depends_on: [MB.31]
+depends_on: [MB.34]
 paths: []
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:46"
-updated: "2026-11-17T12:46"
+updated: "2026-11-17T13:18"
 ---
 
 # Goal
@@ -20,6 +20,10 @@ directive keywords, HTTP methods, environment variables, raw SQL strings, route 
 punctuation are distinguishable at a glance — in **light** and **dark** scheme, on every page that
 carries one, with the copy button and the line anchors still working — because the site ships one
 small, offline, self-contained lexer instead of teaching readers raw greyscale text.
+
+The SQL **inside** a `query '…'` / `query "…"` string is coloured too — keywords, `$?`, `$1…$n`
+and the `...` variadic marker — so the parameter-replacement syntax the `MB.34` owner asked for
+reads as SQL on the page, not as one grey run inside one string.
 
 Pygments has no `blastfile` lexer, so today every `Blastfile` fence on the site is
 `language-text` (design §16.1): a complete manifest is indistinguishable from the one error sentence
