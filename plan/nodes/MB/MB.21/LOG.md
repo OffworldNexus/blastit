@@ -51,3 +51,7 @@ HOST CONDITION for the epic gate: the machine is at ~91% MemTotal used by anothe
 ## 2026-11-16T17:55 [lead]
 
 CONCURRENCY (epic gate): a sibling session (MB.22 / docs/research) is now writing inside this same worktree, so (a) every commit stages explicit node paths only and records the shared make check's suite count in the node LOG, (b) the MB.21 epic gate's make check is measured on a tree that may hold another epic's uncommitted files — the gate must record git status and note which non-MB.21 paths were present, and (c) no session may blindly stage or clean another's files
+
+## 2026-11-17T04:53 [lead]
+
+CONCURRENCY HAZARD confirmed: another session's uncommitted MB.22.1 edit to docs/local.md adds a 7th illustration, so docs_fences::every_documented_document_parses_and_validates fails on the shared tree and blocks any full make check here. The MB.21 epic gate must either wait for MB.22.1 to commit its docs_fences count or be measured on a tree where that node's files are committed. Do not update their count from MB.21

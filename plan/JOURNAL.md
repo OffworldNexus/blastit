@@ -2455,3 +2455,40 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T04:38 [MB.20] (lead) reviewer VERDICT: PASS (7 MINOR). Applying 5 cheap MINORs (RESULT visual status, troubleshooting SSL row, laravel/symfony restatement, chooser mobile links, dup
 - 2026-11-17T04:44 [MB.20] (lead) make check EXIT=0 (166 suites, docs+rust+critical+plan green); validate OK; guard OK; critical-guard: no protected test touched.
 - 2026-11-17T04:44 [MB.20] (lead) status active -> done
+- 2026-11-17T04:44 [MB.20] (lead) commit 7062ded
+- 2026-11-17T04:45 [MB.21.5.14] (test-curator) edited fields
+- 2026-11-17T04:46 [MB.21.5.3] (test-curator) audit written: 828 mutants, 748 viable, 688 caught (92.0%), every module >=84.6%; 45 misses -> 30 gaps filed as MB.21.5.5-14, 15 equivalents; R24 evasion and th
+- 2026-11-17T04:46 [MB.22.1] (lead) status ready -> active
+- 2026-11-17T04:46 [MB.22.1] (lead) attempt 1/3 started
+- 2026-11-17T04:46 [MB.22.1] (lead) base 7062ded22d6eb68ab74e764d719112894eaf6360
+- 2026-11-17T04:47 [MB.21.5.3] (lead) status active -> review
+- 2026-11-17T04:47 [MB.21.5.11] (lead) status ready -> active
+- 2026-11-17T04:47 [MB.21.5.11] (lead) attempt 1/3 started
+- 2026-11-17T04:47 [MB.21.5.11] (lead) base 7062ded22d6eb68ab74e764d719112894eaf6360
+- 2026-11-17T04:53 [MB.21.5.3] (lead) REVIEW FAIL (attempt 1): audit has 2 MAJOR misclassifications — (a) write.rs:1190:37 ('!=' -> '==') is NOT equivalent: it is the only place 'transactions' stops
+- 2026-11-17T04:53 [MB.21.5.3] (lead) edited fields
+- 2026-11-17T04:53 [MB.21.5.3] (lead) status review -> ready
+- 2026-11-17T04:53 [MB.21] (lead) CONCURRENCY HAZARD confirmed: another session's uncommitted MB.22.1 edit to docs/local.md adds a 7th illustration, so docs_fences::every_documented_document_par
+- 2026-11-17T04:53 [MB.21.5.5] (lead) status ready -> active
+- 2026-11-17T04:53 [MB.21.5.5] (lead) attempt 1/3 started
+- 2026-11-17T04:53 [MB.21.5.5] (lead) base 7062ded22d6eb68ab74e764d719112894eaf6360
+- 2026-11-17T04:54 [MB.21.5.11] (test-curator) edited fields
+- 2026-11-17T04:54 [MB.21.5.11] (test-curator) review MB.21.5.3 MAJOR 2: downgraded to coverage, post-0.2.0 — parser.rs:1267-1274 already refuses the typo; only the guard is unpinned
+- 2026-11-17T04:54 [MB.22.1] (doc-writer) editor DX written: docs/local.md ## Editors (20 lines) + docs/reference/cli.md blastit lsp; dx + ai-ergonomics goldfish PASS after one fix round; docs-check/doc
+- 2026-11-17T04:54 [MB.22.1] (lead) status active -> review
+- 2026-11-17T04:55 [MB.21.5.14] (test-curator) edited fields
+- 2026-11-17T04:55 [MB.22.1] (lead) edited fields
+- 2026-11-17T04:55 [MB.22.1] (lead) paths widened to crates/blastit-manifest/tests/docs_fences.rs: the new json illustration on docs/local.md moves the pinned PAGES census
+- 2026-11-17T04:55 [MC] (unknown) Owner mandate logged: MC goals 6-7 added (out of 0.2.0 scope) -- pooled inbound body-RAM byte permits replacing BLASTIT_MAX_BODY_BYTES x connections, plus resea
+- 2026-11-17T04:56 [MB.21.5.3] (lead) attempt 2/3 started
+- 2026-11-17T04:56 [MB.21.5.3] (lead) status ready -> review
+- 2026-11-17T04:57 [MB.22.1] (doc-writer) docs_fences census pinned: docs/local.md 1,6 -> 1,7 and TOTAL 12,31 -> 12,32 for the new json fence; cargo test -p blastit-manifest --test docs_fences --locked 
+- 2026-11-17T04:57 [MB.22.1] (lead) docs_fences census re-pinned (docs/local.md 1,7 / TOTAL 12,32); test green
+- 2026-11-17T04:58 [MB.21.5.7] (lead) status ready -> active
+- 2026-11-17T04:58 [MB.21.5.7] (lead) attempt 1/3 started
+- 2026-11-17T04:58 [MB.21.5.7] (lead) base 7062ded22d6eb68ab74e764d719112894eaf6360
+- 2026-11-17T04:59 [MB.21.5.6] (test-curator) edited fields
+- 2026-11-17T04:59 [MB.21.5.6] (test-curator) review ruling: post-0.2.0 coverage only — the bound is correct and crates/blastit's discovery suite covers the behaviour; audit §5.5 updated
+- 2026-11-17T04:59 [MB.21.5.3] (lead) attempt 3/3 started
+- 2026-11-17T04:59 [MB.21.5.3] (lead) status review -> review
+- 2026-11-17T05:00 [MB.21.5.3] (lead) status review -> done

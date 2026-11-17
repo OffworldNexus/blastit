@@ -2,16 +2,16 @@
 id: MB.21.5.3
 title: "Audit and mutation-test the Blastfile parser, CST and editor (test-curator)"
 kind: task
-status: ready
+status: done
 owner: "test-curator"
 priority: 3
 depends_on: [MB.21.4.4, MB.21.5.2]
-paths: ["docs/testing/AUDIT-MB.21.md"]
-attempts: 0
+paths: ["docs/testing/**", "docs/testing/AUDIT-MB.21.5.3.md", "plan/nodes/MB/MB.21/MB.21.5/**"]
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:38"
-updated: "2026-11-16T08:04"
+updated: "2026-11-17T05:00"
 ---
 
 # Goal
@@ -41,8 +41,8 @@ the documented nits) are part of the pass, not folklore to repeat.
 # Acceptance
 
 ```console
-$ make mutants-rust PKG=blastit-manifest
-$ wc -l $(find . -path '*mutants.out*' -name 'caught.txt' -o -path '*mutants.out*' -name 'missed.txt' | head -2)
+$ make mutants-rust PKG=blastit-manifest MUTANTS_TMP=$(make -s print-mutants-tmp)/MB.21.5.3
+$ wc -l $(make -s print-mutants-tmp)/MB.21.5.3/results-*/mutants.out/{caught,missed,timeout,unviable}.txt
 $ UV_OFFLINE=1 uv run --no-project python scripts/test_manifest_purity.py
 $ make test-critical
 $ uv run --no-project tools/plan.py tree --under MB.21.5
