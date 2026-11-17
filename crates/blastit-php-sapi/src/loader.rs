@@ -38,14 +38,16 @@
 #![allow(unsafe_code)]
 
 use core::ffi::{c_char, c_int, c_void};
+use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::abi::{
-    AbiVersionFn, ConfigV1, MinorFn, OUTCOME_BAILOUT, OUTCOME_OK, RequestFn, RequestV1, ResultV1,
-    SinkV1, WorkerInitFn, WorkerShutdownFn,
+    AbiVersionFn, ConfigV1, FileSinkInstallFn, MinorFn, OUTCOME_BAILOUT, OUTCOME_OK, RequestFn,
+    RequestV1, ResultV1, SinkV1, WorkerInitFn, WorkerShutdownFn,
 };
 use crate::toolchain::{Minor, SUPPORTED_MINORS};
 
@@ -225,6 +227,115 @@ pub trait Sink {
     fn log(&mut self, level: i32, line: &str);
 }
 
+/// The most paths one request's file sink buffers before it stops recording.
+///
+/// `EG(included_files)` holds one entry per included file; a request that
+/// loads more than this is beyond every real framework (`MB.23.4` measured a
+/// 458-file Django view) and the report is a hint, never a budget.
+pub const MAX_RECORDED_PATHS: usize = 4096;
+
+/// The longest path one request's file sink buffers: `PATH_MAX` including the
+/// NUL, which is also the loaded-file codec's per-path cap. A longer "path" is
+/// dropped, never truncated.
+pub const MAX_RECORDED_PATH_BYTES: usize = 4096;
+
+/// What one request's `EG(included_files)` snapshot collected.
+///
+/// A sink is **handed to** [`Loaded::install_file_sink`], which takes ownership
+/// of it (a `Box` it keeps for the loader's lifetime) and is therefore the only
+/// thing that can name the shim's `ctx`: the address the shim keeps is inside an
+/// allocation the loader owns, so no caller can drop, move or replace it behind
+/// the shim's back. The loader reuses that one cell for every request
+/// ([`FileSink::clear`]). Every normalisation lives here so a caller only ever
+/// sees paths the loaded-file codec can carry:
+///
+/// * **absolute** only (`EG(included_files)` is resolved, but a stream entry is
+///   not a file to watch),
+/// * **canonical** where the filesystem resolves it, so a symlinked include and
+///   its target are one file,
+/// * **deduplicated and sorted**, so a report is the same set however PHP
+///   ordered the include chain.
+///
+/// A path that does not resolve is kept as PHP reported it: the supervisor drops
+/// a path that no longer exists, and inventing one here would be worse than
+/// reporting a file that is gone.
+#[derive(Debug, Default)]
+pub struct FileSink {
+    /// The raw copies, in the order the shim reported them.
+    raw: Mutex<Vec<Vec<u8>>>,
+}
+
+impl FileSink {
+    /// An empty sink: no request has reported yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forgets the previous request's paths. Call it before each request.
+    pub fn clear(&self) {
+        lock(&self.raw).clear();
+    }
+
+    /// Records one path the shim reported; anything outside the bound is
+    /// dropped, never truncated.
+    ///
+    /// This is the shim's callback body, so it does nothing that can fail: an
+    /// empty path, a path longer than [`MAX_RECORDED_PATH_BYTES`] and a full
+    /// buffer are all silently ignored.
+    pub fn record(&self, path: &[u8]) {
+        if path.is_empty() || path.len() > MAX_RECORDED_PATH_BYTES {
+            return;
+        }
+        let mut raw = lock(&self.raw);
+        if raw.len() >= MAX_RECORDED_PATHS {
+            return;
+        }
+        raw.push(path.to_vec());
+    }
+
+    /// The request's paths, normalised and drained: absolute, canonical where
+    /// possible, deduplicated and sorted.
+    #[must_use]
+    pub fn take(&self) -> Vec<String> {
+        let recorded = std::mem::take(&mut *lock(&self.raw));
+        let mut out = BTreeSet::new();
+        for raw in recorded {
+            let Ok(text) = std::str::from_utf8(&raw) else {
+                // A path that is not UTF-8 cannot travel on the report, and
+                // cannot be watched either.
+                continue;
+            };
+            if text.is_empty() || text.contains('\0') || !Path::new(text).is_absolute() {
+                continue;
+            }
+            out.insert(canonical(text));
+        }
+        out.into_iter().collect()
+    }
+}
+
+/// `path` as the filesystem resolves it, or as it was.
+///
+/// `canonicalize` fails for a path PHP opened from a stream or one that was
+/// removed while the request ran; the report then keeps the absolute path the
+/// shim named, and the consumer's `Drop::Missing` is what speaks about it.
+fn canonical(path: &str) -> String {
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => resolved
+            .to_str()
+            .map_or_else(|| path.to_owned(), str::to_owned),
+        Err(_) => path.to_owned(),
+    }
+}
+
+/// Take a lock, treating a poisoned mutex as usable: the shim calls this from
+/// inside a request, and a poisoned report buffer must not become a panic on the
+/// reporting path.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A loaded `libphp` + shim pair with every frozen entry point resolved.
 pub struct Loaded {
     /// `libphp`'s handle. Never closed once a module startup has run.
@@ -241,6 +352,16 @@ pub struct Loaded {
     request: RequestFn,
     /// Set by [`Loaded::worker_init`]. A request before it is a caller bug.
     initialized: bool,
+    /// The file sink this process's shim was handed (`MB.23.4.2`), or `None`
+    /// when nothing is installed.
+    ///
+    /// **`Box`, and owned here rather than borrowed:** the shim's
+    /// `blastit_php_file_sink_install` keeps the pointee's address for the rest
+    /// of the process, so that address must not move when `Loaded` moves into a
+    /// `Mutex`, a `Box`, or an `Arc` — and nothing outside this struct may drop
+    /// or replace the sink it names. `Loaded::drop` and `worker_shutdown` clear
+    /// the shim's statics *before* this box goes away.
+    file_sink: Option<Box<FileSink>>,
     /// Set the instant `worker_init` is entered, whether or not it succeeds.
     ///
     /// The shim's `-2` means `sapi_startup` and `php_module_startup` *ran* and
@@ -257,6 +378,58 @@ pub struct Loaded {
 // `blastit_php_request` at once through safe code. `PhpEmbedRuntime` puts it
 // behind a `Mutex` for that reason.
 unsafe impl Send for Loaded {}
+
+/// Proof that this process's shim accepted a file sink.
+///
+/// Returned by [`Loaded::install_file_sink`] and constructible nowhere else, so
+/// "the shim is reporting into a sink this process still owns" is a value rather
+/// than a `bool` whose meaning a caller has to remember.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Installed(());
+
+/// Why a file sink was not installed — the two cases a `bool` used to conflate
+/// (`MB.23.4.2` review, finding 2).
+///
+/// [`NoSink::Absent`] is a property of the *shim* and permanent for this load: a
+/// PHP build or shim from before the addition reports no files and serves
+/// exactly as it always did. [`NoSink::NotInitialised`] is a property of the
+/// *caller* and transient: nothing is running yet, and the fix is to install
+/// after [`Loaded::worker_init`]. Treating the first as the second retries
+/// forever; treating the second as the first silently loses the report for the
+/// whole process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoSink {
+    /// This shim does not export `blastit_php_file_sink_install` at all.
+    Absent,
+    /// [`Loaded::worker_init`] has not run: install after it, before the first
+    /// request.
+    NotInitialised,
+    /// The shim exports the entry point and refused the install.
+    Refused {
+        /// The non-zero code the shim returned.
+        code: i32,
+    },
+}
+
+impl fmt::Display for NoSink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Absent => f.write_str(
+                "this shim has no `blastit_php_file_sink_install`, so it reports no loaded \
+                 files; it serves exactly as it did before the optional sink existed",
+            ),
+            Self::NotInitialised => f.write_str(
+                "the worker has not been initialised yet, so there is nothing to report for; \
+                 install the file sink after blastit_php_worker_init",
+            ),
+            Self::Refused { code } => {
+                write!(f, "the shim refused the file sink (code {code})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for NoSink {}
 
 impl Loaded {
     /// Loads `libphp` and then `shim`, and verifies the ABI and the minor.
@@ -354,6 +527,7 @@ impl Loaded {
                 worker_shutdown,
                 request,
                 initialized: false,
+                file_sink: None,
                 startup_attempted: false,
             })
         })();
@@ -388,6 +562,126 @@ impl Loaded {
     #[must_use]
     pub fn php_version(&self) -> &str {
         &self.host_version
+    }
+
+    /// Installs `sink` as this process's file sink and **takes ownership of
+    /// it**.
+    ///
+    /// `blastit_php_file_sink_install` is **not** part of the frozen required
+    /// surface: it is additive, so [`crate::ABI_VERSION`] stays 1 and a shim (or
+    /// a PHP build) without it is not a failure — [`NoSink::Absent`] means "this
+    /// shim reports no files", and the worker then serves exactly as it did
+    /// before.
+    ///
+    /// The symbol is resolved with `dlsym` on the **shim's own handle**, never
+    /// `RTLD_DEFAULT`: the shim is opened `RTLD_LOCAL`, so its symbols are
+    /// invisible to a default-scope lookup and only this handle sees them.
+    ///
+    /// # Why the sink is owned here
+    ///
+    /// The shim keeps `ctx` — the sink's address — in a file-scope static for
+    /// the rest of the process, and calls it from inside later requests. Taking
+    /// the sink **by value** is what makes that address sound: the `Box` below
+    /// is the only owner, its pointee never moves again (not even when `self`
+    /// moves into a `Mutex`/`Box`/`Arc`), and [`Loaded::worker_shutdown`] and
+    /// [`Loaded::drop`] clear the shim's statics before the box is dropped. A
+    /// caller that kept a reference and dropped it early — the shape the
+    /// `&FileSink` parameter used to allow — is no longer expressible.
+    ///
+    /// The shim's per-request state (`clear`/`take`) stays reachable through
+    /// [`Loaded::file_sink`], which borrows the same allocation.
+    ///
+    /// # Errors
+    ///
+    /// [`NoSink::NotInitialised`] before [`Loaded::worker_init`] (transient:
+    /// there is no worker to report for yet), [`NoSink::Absent`] when this shim
+    /// exports no install entry point (permanent for this load), and
+    /// [`NoSink::Refused`] when it exports one and refuses.
+    pub fn install_file_sink(&mut self, sink: FileSink) -> Result<Installed, NoSink> {
+        if self.shim.is_null() || !self.initialized {
+            return Err(NoSink::NotInitialised);
+        }
+        let Some(install) = self.file_sink_install() else {
+            return Err(NoSink::Absent);
+        };
+        // The heap allocation comes first and the address is taken from it: the
+        // value moved into `Box::new` is never the one the shim names.
+        let mut sink = Box::new(sink);
+        // A sink that already holds paths (one moved in from another loader)
+        // would report them as this process's first snapshot.
+        sink.clear();
+        let ctx = core::ptr::from_mut(sink.as_mut()).cast::<c_void>();
+        // SAFETY: `ctx` points into the box this function then keeps, so it
+        // stays valid until `clear_file_sink` takes it back; `file_included` has
+        // the signature the header declares.
+        let code = unsafe { install(ctx, Some(file_included)) };
+        if code != 0 {
+            // A shim that stored `ctx` and still refused would be left naming
+            // memory this function is about to drop, so the one thing that can
+            // undo that is asked for before the box goes: `(NULL, NULL)` is the
+            // header's uninstall, on the entry point already resolved above.
+            // SAFETY: the entry point came from this load's live handle, and
+            // `(NULL, NULL)` touches only the shim's own statics.
+            let _ = unsafe { install(core::ptr::null_mut(), None) };
+            return Err(NoSink::Refused { code });
+        }
+        // The shim now names `sink`; only after that may the previous one (if
+        // any) be dropped, which assigning the field does.
+        self.file_sink = Some(sink);
+        Ok(Installed(()))
+    }
+
+    /// The sink this process's shim reports into, or `None` when none is
+    /// installed.
+    ///
+    /// This is a borrow of the allocation the shim was handed — never a second
+    /// owner — so `clear`/`take` on it are the shim's own per-request state.
+    #[must_use]
+    pub fn file_sink(&self) -> Option<&FileSink> {
+        self.file_sink.as_deref()
+    }
+
+    /// Resolves `blastit_php_file_sink_install` on **this** shim's handle.
+    ///
+    /// `None` is the documented absence — a shim from before the addition — and
+    /// consumes `dlerror`'s state so a later real lookup failure is not reported
+    /// as this one.
+    fn file_sink_install(&self) -> Option<FileSinkInstallFn> {
+        if self.shim.is_null() {
+            return None;
+        }
+        // SAFETY: `self.shim` is a live `dlopen` handle until `Drop`, and the
+        // name is a `c"…"` literal.
+        let symbol = unsafe { dlsym(self.shim, c"blastit_php_file_sink_install".as_ptr()) };
+        if symbol.is_null() {
+            let _ = dl_error();
+            return None;
+        }
+        // SAFETY: the pointer comes from the shim's own `dlsym`, and its
+        // signature is the one `abi::FileSinkInstallFn` mirrors from the header;
+        // `transmute` checks only the pointer's size, which is the same for
+        // every function.
+        Some(unsafe { core::mem::transmute::<*mut c_void, FileSinkInstallFn>(symbol) })
+    }
+
+    /// Stops the shim naming our sink, then drops it — in that order.
+    ///
+    /// `blastit_php_file_sink_install(NULL, NULL)` is the header's uninstall
+    /// (the same entry point, so no second symbol and no ABI change): both of
+    /// the shim's statics go NULL and `bt_report_included_files` returns
+    /// immediately. Only then is the box released, so the shim can never read a
+    /// freed address even from a request driven by a later `Loaded` over the
+    /// same still-loaded image.
+    fn clear_file_sink(&mut self) {
+        let Some(sink) = self.file_sink.take() else {
+            return;
+        };
+        if let Some(install) = self.file_sink_install() {
+            // SAFETY: the shim's own entry point; `NULL` arguments are the
+            // documented uninstall, and no callback can run afterwards.
+            let _ = unsafe { install(core::ptr::null_mut(), None) };
+        }
+        drop(sink);
     }
 
     /// Runs `php_module_startup` with this worker's INI lockdown.
@@ -427,7 +721,11 @@ impl Loaded {
 
     /// `php_module_shutdown` + `sapi_shutdown`. Idempotent; the worker calls it
     /// on the way out, never between requests.
+    ///
+    /// The file sink is cleared first: after this call nothing reports, and
+    /// [`Loaded::drop`] must not find a sink the shim could still name.
     pub fn worker_shutdown(&mut self) {
+        self.clear_file_sink();
         if !self.initialized {
             return;
         }
@@ -485,6 +783,10 @@ impl Loaded {
 
 impl Drop for Loaded {
     fn drop(&mut self) {
+        // The shim image outlives this struct — a started module is never
+        // unloaded — so its statics must stop naming `self.file_sink` while that
+        // allocation is still alive: `install(NULL, NULL)` first, then the box.
+        self.clear_file_sink();
         // Once a module startup has been *attempted*, unloading `libphp` would
         // run PHP's own library destructors and every module's unload path on
         // a table that may be half-built (the shim's `-2`). The worker exits
@@ -654,6 +956,38 @@ unsafe extern "C" fn sink_log(ctx: *mut c_void, level: i32, line: *const c_char,
             });
         }
     }));
+}
+
+/// `blastit_php_file_sink_install`'s `included`: one file of a request's
+/// `EG(included_files)` snapshot.
+///
+/// The shim calls this for every included path, inside `blastit_php_request`,
+/// between `php_execute_script` and `php_request_shutdown`. Nothing here can
+/// fail a request: a panic is caught (a panic must never unwind into C, whose
+/// `zend_try` frames are not Rust frames), a `NULL`/zero-length path is simply
+/// not a file, and the return value the shim sees is always `0`.
+///
+/// # Safety
+///
+/// `ctx` must be the `Box<FileSink>` [`Loaded::install_file_sink`] handed the
+/// shim — alive until [`Loaded::clear_file_sink`], which the shim's own static
+/// is cleared before — and `path` must be readable for `len` bytes when
+/// non-`NULL`.
+unsafe extern "C" fn file_included(ctx: *mut c_void, path: *const c_char, len: usize) -> i32 {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // `len == 0` and a `NULL` pointer never form a slice:
+        // `from_raw_parts(NULL, 0)` is undefined behaviour even at length zero.
+        if ctx.is_null() || path.is_null() || len == 0 {
+            return;
+        }
+        // SAFETY: the caller guarantees `ctx` points at the live `FileSink` the
+        // loader owns, and the loader only drops it after clearing this static.
+        let sink: &FileSink = unsafe { &*ctx.cast::<FileSink>() };
+        // SAFETY: non-null and readable for `len` bytes, per the C ABI.
+        let bytes = unsafe { core::slice::from_raw_parts(path.cast::<u8>(), len) };
+        sink.record(bytes);
+    }));
+    0
 }
 
 /// A `(ptr, len)` pair as a slice, or `None` for the end-of-head marker.

@@ -148,6 +148,37 @@ int32_t blastit_php_request(const blastit_php_request_v1 *req,
                             const blastit_php_sink_v1 *sink,
                             blastit_php_result_v1 *out);
 
+/**
+ * Optional, process-wide file sink: what each request *included*.
+ *
+ * `included` is called once per entry of `EG(included_files)` once the script
+ * has run and **before** `php_request_shutdown` — next to
+ * `blastit_php_request`'s own `php_execute_script`/`BLASTIT_PHP_OUTCOME_BAILOUT`
+ * handling — so an `exit()`, a fatal or a `memory_limit` hit still reports the
+ * files the request had loaded. `path` is non-NULL, **not** NUL-terminated and
+ * valid for `len` bytes; a zero length is never passed. Its return value is
+ * ignored: a reporting failure must never fail a request, and the shim does not
+ * retry or buffer.
+ *
+ * This is **additive**, so `BLASTIT_PHP_ABI_VERSION` stays 1: the worker
+ * resolves it with `dlsym` through *this* shared object's handle and treats a
+ * missing symbol as "this shim reports no files" for the process lifetime — a
+ * shim, or a PHP build, without it behaves exactly as it did before. Passing
+ * `included == NULL` uninstalls; `blastit_php_worker_shutdown` clears the pair
+ * as well, so nothing reports after a shutdown.
+ *
+ * `ctx` belongs to the caller and the shim never allocates, frees or copies it:
+ * it must stay valid from this call until the pair is uninstalled (or the
+ * worker shuts down), which is what makes a single process-wide sink sound. The
+ * worker that installs one owns it and uninstalls *before* it releases the
+ * allocation.
+ *
+ * Returns 0 once the pair is stored; any other value is a refusal, after which
+ * this shim holds no `ctx` and calls nothing.
+ */
+int32_t blastit_php_file_sink_install(void *ctx,
+                                      int32_t (*included)(void *, const char *, size_t));
+
 #ifdef __cplusplus
 }
 #endif

@@ -26,6 +26,10 @@
  *   4. `log_message` truncates to `BLASTIT_LOG_LINE_MAX` and forwards one line.
  *   5. `CLOCK_PROCESS_CPUTIME_ID` is read around the whole request, outside
  *      PHP userland, so no script can forge `cpu_ns`.
+ *   6. `EG(included_files)` is snapshotted between `php_execute_script` and
+ *      `php_request_shutdown` and handed to the worker's *optional* file sink
+ *      (`blastit_php_file_sink_install`, resolved by `dlsym`): a dev-only
+ *      loaded-file report. Not installed means not called.
  *
  * The INI lockdown is *not* here: it arrives as `cfg->ini`, rendered by
  * `blastit_php_sapi::IniPolicy`, and is parsed by `php_init_config` at the
@@ -83,6 +87,13 @@ typedef struct blastit_request_ctx {
 static blastit_request_ctx *bt_current;
 static sapi_module_struct bt_sapi;
 static int bt_started;
+
+/* The worker's *optional* file sink (`blastit_php_file_sink_install`). Both
+ * stay NULL until a worker installs one, and NULL means "never call": a worker
+ * that never installs one behaves exactly as it did before, which is what keeps
+ * this addition out of the ABI version. */
+static void *bt_file_ctx;
+static int32_t (*bt_file_included)(void *ctx, const char *path, size_t len);
 
 /* ------------------------------------------------------------------------- */
 /* Helpers                                                                   */
@@ -398,6 +409,35 @@ static char *bt_getenv(const char *name, size_t name_len)
     return NULL;
 }
 
+/* Hand every file this request included to the worker's optional sink.
+ *
+ * `EG(included_files)` is a per-request table of absolute paths, initialised by
+ * `init_executor()` during `php_request_startup` and destroyed by
+ * `shutdown_executor()` inside `php_request_shutdown`. Reading it in between is
+ * what makes a *bailed* request report: a `zend_bailout()` does not invalidate
+ * the table, but the shutdown does. The values are `IS_NULL`, so only the keys
+ * carry information; `ZEND_HASH_FOREACH_STR_KEY` is the read that never hands a
+ * NULL key to `ZSTR_VAL` (the table holds string keys only, and a future change
+ * that added a numeric one must not become a crash here).
+ *
+ * Nothing in here may fail a request: the callback's return value is ignored,
+ * an empty table reports nothing, and the sink itself refuses to grow past its
+ * own bound. */
+static void bt_report_included_files(void)
+{
+    zend_string *key;
+
+    if (bt_file_included == NULL) {
+        return;
+    }
+    ZEND_HASH_FOREACH_STR_KEY(&EG(included_files), key) {
+        if (key == NULL || ZSTR_LEN(key) == 0) {
+            continue;
+        }
+        (void)bt_file_included(bt_file_ctx, ZSTR_VAL(key), ZSTR_LEN(key));
+    } ZEND_HASH_FOREACH_END();
+}
+
 /* ------------------------------------------------------------------------- */
 /* The frozen ABI                                                            */
 /* ------------------------------------------------------------------------- */
@@ -410,6 +450,25 @@ uint32_t blastit_php_abi_version(void)
 uint32_t blastit_php_minor(void)
 {
     return (uint32_t)(PHP_MAJOR_VERSION * 100 + PHP_MINOR_VERSION);
+}
+
+/* Additive and optional, so it does not move `BLASTIT_PHP_ABI_VERSION`: the
+ * worker resolves this symbol with `dlsym` on this object's own handle, and a
+ * shim (or PHP build) without it reports no files instead of failing. The
+ * install is process-wide because the SAPI callbacks have no per-request
+ * argument to carry it; the *worker* keeps the per-request state behind `ctx`.
+ *
+ * `ctx` is the caller's memory, never this shim's: it is stored as given and
+ * only ever handed back to `included`, so it must outlive the install. The
+ * caller that owns it uninstalls (`included == NULL`, which also clears `ctx`)
+ * before releasing it, so no request can reach a freed address. */
+int32_t blastit_php_file_sink_install(void *ctx,
+                                      int32_t (*included)(void *, const char *, size_t))
+{
+    bt_file_ctx = included != NULL ? ctx : NULL;
+    bt_file_included = included;
+
+    return 0;
 }
 
 int32_t blastit_php_worker_init(const blastit_php_config_v1 *cfg)
@@ -494,6 +553,10 @@ void blastit_php_worker_shutdown(void)
     }
     bt_started = 0;
     bt_current = NULL;
+    /* The worker's sink outlives this call (it is the worker's memory), but the
+     * shim stops calling it: nothing reports after shutdown. */
+    bt_file_ctx = NULL;
+    bt_file_included = NULL;
     /* RSHUTDOWN/`mshutdown` of every module runs here and can `zend_bailout`
      * too. `sapi_shutdown` must still run (it frees the SAPI globals), so the
      * trap is around the Zend half only. */
@@ -595,6 +658,13 @@ int32_t blastit_php_request(const blastit_php_request_v1 *req,
 
     if (!executed) {
         bailed = 1;
+    }
+    /* `MB.23.4.2`: what this request included, reported *here* — after the
+     * script, before `php_request_shutdown` destroys `EG(included_files)` — so
+     * an `exit()`/`die()`/fatal that came back above as `executed == 0` still
+     * reports. The sink is the worker's; an uninstalled one does nothing. */
+    if (started) {
+        bt_report_included_files();
     }
     /* A contained fatal on a response that never started is a 500, not PHP's
      * implicit 200. Three conditions must all hold: no head was sent, no body

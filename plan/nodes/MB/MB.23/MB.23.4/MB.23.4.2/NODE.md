@@ -2,7 +2,7 @@
 id: MB.23.4.2
 title: "The PHP loaded-file sink: EG(included_files) between execute and request_shutdown, optional dlsym sink with no ABI bump"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.23.4.1]
@@ -18,11 +18,11 @@ paths:
   - "crates/blastit-php-sapi/tests/critical_file_sink.rs"
   - Makefile
   - "e2e/php-sapi/Dockerfile"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T11:17"
-updated: "2026-11-17T11:17"
+updated: "2026-11-17T12:35"
 ---
 
 # Goal

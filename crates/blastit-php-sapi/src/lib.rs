@@ -78,7 +78,7 @@ pub mod loader;
 pub mod request;
 pub mod toolchain;
 
-pub use loader::{LoadError, Loaded, SharedObject, Sink};
+pub use loader::{FileSink, Installed, LoadError, Loaded, NoSink, SharedObject, Sink};
 pub use request::{
     DISABLED_FUNCTIONS, DropReason, Egress, HeaderOutcome, IniError, IniPolicy, PINNED_INI,
     ReservedVar, ServerVar, ServerVarError, ServerVars,

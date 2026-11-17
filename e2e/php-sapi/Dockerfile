@@ -41,12 +41,12 @@ ARG PHP_EMBED=libphp8.4-embed
 ARG PHP_CURL=php8.4-curl
 ARG LIBPHP=/usr/lib/libphp8.4.so
 ARG RUST_TOOLCHAIN=stable
-# Whether this image compiles the two protected suites (`MB.3.39`), driven by the
-# leg's `suites` field in `scripts/platform_matrix.py` (`e2e/php_sapi_probe.py`
-# passes it). 0 keeps a ~7-minute `blastit` build — and a leg that can never
-# serve, because its `libphp` exports no `php_version` — out of the image
-# entirely (`MB.3.58` review). The shim and the probe are built either way: they
-# are what the leg proves.
+# Whether this image compiles the protected suites (`MB.3.39`, `MB.23.4.2`),
+# driven by the leg's `suites` field in `scripts/platform_matrix.py`
+# (`e2e/php_sapi_probe.py` passes it). 0 keeps a ~7-minute `blastit` build — and
+# a leg that can never serve, because its `libphp` exports no `php_version` —
+# out of the image entirely (`MB.3.58` review). The shim and the probe are built
+# either way: they are what the leg proves.
 ARG PHP_SAPI_SUITES=1
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -59,7 +59,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # rather than declared so a leg cannot name the wrong one and still build.
 #
 # `clang`/`libclang-dev` are on the glibc branch, and Alpine's `clang`/
-# `llvm-dev`/`clang19-libclang` on the musl branch: the two protected suites
+# `llvm-dev`/`clang19-libclang` on the musl branch: the protected suites
 # (`MB.3.39`) are compiled in this image too, and `pg_query`'s bindgen needs
 # libclang by name. The Alpine legs now carry the suites as well (`MB.3.59`):
 # once the boot serves with Alpine's own package names, the worker-level proof
@@ -110,19 +110,19 @@ RUN extra=""; \
  && RUSTFLAGS="$extra" cargo build --locked -p blastit-php-sapi --features probe --bin php-sapi-probe \
  && RUSTFLAGS="$extra" cargo build --release --manifest-path e2e/php-sapi/seccomp-exec/Cargo.toml
 
-# The two protected suites (`MB.3.39`) are compiled **here**, and the binaries are
-# recorded where `make rs-test-php-image` runs them, because a container may only
-# execute a binary it built itself (`MB.3.58`): the runner is Ubuntu 24.04 (glibc
-# 2.39) and this leg is `debian:bookworm` (2.36), so a runner-built test binary
-# never even starts here —
+# The protected suites (`MB.3.39`, `MB.23.4.2`) are compiled **here**, and the
+# binaries are recorded where `make rs-test-php-image` runs them, because a
+# container may only execute a binary it built itself (`MB.3.58`): the runner is
+# Ubuntu 24.04 (glibc 2.39) and this leg is `debian:bookworm` (2.36), so a
+# runner-built test binary never even starts here —
 #
 #   /lib/x86_64-linux-gnu/libc.so.6: weak version 'GLIBC_2.39' not found
 #   (required by target/debug/blastit)
 #
 # — and raising the leg's base would prove nothing about the distros the shim is
-# shipped for. The musl legs compile and run the same two suites inside
+# shipped for. The musl legs compile and run the same suites inside
 # `alpine` (`MB.3.59`): `BLASTIT_LIBPHP` in this image names the distro's own
-# package path, so the served half of both suites is re-proved where the musl
+# package path, so the served half of all of them is re-proved where the musl
 # shim is built.
 #
 # `PHP_SAPI_SUITES=0` (`matrix.suites == "false"`) skips the build altogether:
@@ -151,9 +151,13 @@ RUN bash -euo pipefail -c '\
             2>&1 | tee /dev/stderr \
             | sed -n "s/^[[:space:]]*Executable [^(]*(\(.*\))\$/\\1/p" \
             > /src/target/php-suite-executables; \
+        RUSTFLAGS="$extra" cargo test --locked -p blastit-php-sapi --test critical_file_sink --no-run \
+            2>&1 | tee /dev/stderr \
+            | sed -n "s/^[[:space:]]*Executable [^(]*(\(.*\))\$/\\1/p" \
+            >> /src/target/php-suite-executables; \
         count=$(wc -l < /src/target/php-suite-executables); \
-        if [ "$count" -ne 2 ]; then \
-            echo "expected 2 suite executables, recorded $count:" >&2; \
+        if [ "$count" -ne 3 ]; then \
+            echo "expected 3 suite executables, recorded $count:" >&2; \
             cat /src/target/php-suite-executables >&2; \
             exit 1; \
         fi' \

@@ -2762,3 +2762,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T11:46 [MB.23.4.1] (lead) status active -> review
 - 2026-11-17T11:53 [MB.23.4.1] (lead) reviewer attempt 2 VERDICT PASS (mutation-checked: split-boot, 32 KiB cap, nonblocking, hook ban list). Two MINORs carried to MB.23.5 (its adopting leaf): a deb
 - 2026-11-17T11:53 [MB.23.4.1] (lead) status review -> done
+- 2026-11-17T11:53 [MB.23.4.2] (lead) status ready -> active
+- 2026-11-17T11:53 [MB.23.4.2] (lead) attempt 1/3 started
+- 2026-11-17T11:53 [MB.23.4.2] (lead) base 95b0db4
+- 2026-11-17T12:14 [MB.23.4.2] (lead) implementer done: optional dlsym sink (never RTLD_DEFAULT), EG(included_files) snapshotted before request_shutdown so bailouts report, bounded FileSink + compil
+- 2026-11-17T12:14 [MB.23.4.2] (lead) status active -> review
+- 2026-11-17T12:33 [MB.31] (planner) created (epic) One pattern grammar for static immutable: bare immutable, view-syntax patterns and regex '...' (kill the six-glob staircase)
+- 2026-11-17T12:33 [MB.31.1] (planner) created (task) Document one immutable pattern grammar (bare, view-syntax, regex) and purge the six-glob staircase from every page
+- 2026-11-17T12:33 [MB.31.2] (planner) created (task) Lower, validate and print static immutable through pattern.rs: bare All, quoted patterns crossing /, regex '...', one refusal set
+- 2026-11-17T12:33 [MB.31.3] (planner) created (task) Delete ImmutableGlob and glob(): static mounts consume the manifest's matcher, with bare-immutable S3 proof
+- 2026-11-17T12:33 [MB.31.4] (planner) created (task) Hover and tree-sitter teach bare immutable and regex: regenerate parser.c, then re-pin the Zed grammar rev
+- 2026-11-17T12:35 [MB.23.4.2] (lead) polish: sink moved into a loader-owned Box before C sees its address (NoSink::NotInitialised/Absent/Refused replaces the conflating bool), memo cap now real, va
+- 2026-11-17T12:35 [MB.23.4.2] (lead) status review -> done

@@ -33,9 +33,10 @@
 //! `"php"` kind is `ProcessExact`). A zero reading is reported as `None` — no
 //! claim at all — never as "free".
 
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::CString;
 use std::io::{self, ErrorKind, Read, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -45,10 +46,11 @@ use blastit_frame::{
 };
 use blastit_php_sapi::abi::{OUTCOME_BAILOUT, OUTCOME_OK, RequestV1, ServerVarV1};
 use blastit_php_sapi::loader::bailed_out;
-use blastit_php_sapi::{LoadError, Loaded, ServerVars, SharedObject, Sink};
+use blastit_php_sapi::{FileSink, LoadError, Loaded, ServerVars, SharedObject, Sink};
 
 use crate::error::ViewError;
 use crate::flow::Flow;
+use crate::loaded::Reporter;
 use crate::runtime::{OUTPUT_LINE_CAP, OutputStream, RequestEnd, RequestIo, WorkerRuntime};
 use crate::sync::lock;
 use crate::wire::Writer;
@@ -173,6 +175,98 @@ struct PhpWorker {
     bailed: bool,
 }
 
+/// The dev-only loaded-file report a PHP view is handed (`MB.23.4.2`,
+/// `ADR-0014`).
+///
+/// The socket is the write end of this view's own `AF_UNIX SOCK_DGRAM`
+/// socketpair: the supervisor keeps the read end, which is how a datagram is
+/// attributed (the `source` in the payload is a self-check for logging and the
+/// per-source `seq` space, never a route to restart). The socketpair is created
+/// before the fork and reaches the view as an inherited descriptor in the
+/// child's keep list, exactly like `view.chan` — never through the environment,
+/// which stage 0 strips and the application must not see anyway.
+#[derive(Debug)]
+pub struct PhpLoadedReport {
+    /// The write end of the view's report socketpair.
+    pub socket: UnixDatagram,
+    /// The id this view's batches name: its route index.
+    pub source: u16,
+}
+
+/// One PHP view's report (`MB.23.4.2`): the datagram sender and the
+/// compiled→source memo, over the sink the *loader* owns.
+///
+/// The `FileSink` is not a field here, on purpose: `Loaded::install_file_sink`
+/// takes it by value and keeps it in a `Box` for the process lifetime, which is
+/// what makes the address the shim holds sound. Every method below is handed a
+/// `&FileSink` borrowed from the loader (`Loaded::file_sink`), so there is
+/// exactly one owner and no address this struct could invalidate. Everything
+/// here is best effort — nothing returns an error, because a reporting failure
+/// must never fail a request.
+#[derive(Debug)]
+struct PhpFileReport {
+    /// The sender and the memo for the compiled→source map.
+    state: Mutex<FileReportState>,
+}
+
+/// The report's mutable half, kept under one lock so a request either sends
+/// its batch or does not, never half of it.
+#[derive(Debug)]
+struct FileReportState {
+    /// The view's datagram sender.
+    reporter: Reporter,
+    /// Whether this source's one `boot` datagram is still owed. A view's first
+    /// report replaces its set; an empty report sends nothing at all, so the
+    /// boot stays owed until there is something to replace it with.
+    boot_pending: bool,
+    /// Compiled artefact → the template sources it names. A compiled Blade or
+    /// Twig file never changes which template it was built from, so the read
+    /// happens once per file rather than once per request.
+    sources: HashMap<PathBuf, Vec<String>>,
+}
+
+impl PhpFileReport {
+    /// Wraps the view's socket, or `None` when it cannot be made non-blocking.
+    fn new(report: PhpLoadedReport) -> Option<Self> {
+        let reporter = Reporter::new(report.socket, report.source).ok()?;
+        Some(Self {
+            state: Mutex::new(FileReportState {
+                reporter,
+                boot_pending: true,
+                sources: HashMap::new(),
+            }),
+        })
+    }
+
+    /// Forgets the previous request's snapshot.
+    fn begin(&self, sink: &FileSink) {
+        sink.clear();
+    }
+
+    /// Sends what this request loaded, once it has run.
+    ///
+    /// Called after the response is on the wire and before `DONE`, so the batch
+    /// names exactly the files this request depended on. A batch with nothing in
+    /// it is not sent: an empty report is not news, and the codec's `send`
+    /// already treats it that way.
+    fn finish(&self, sink: &FileSink) {
+        let paths = sink.take();
+        if paths.is_empty() {
+            return;
+        }
+        let mut state = lock(&self.state);
+        let mut all: BTreeSet<String> = paths.iter().cloned().collect();
+        all.extend(template_sources(&paths, &mut state.sources));
+        let paths: Vec<String> = all.into_iter().collect();
+        let boot = state.boot_pending;
+        let sent = state.reporter.send(boot, &paths);
+        if sent.datagrams > 0 {
+            // The `boot` flag went out with the first datagram of this send.
+            state.boot_pending = false;
+        }
+    }
+}
+
 /// `[route.php]`'s [`WorkerRuntime`]: NTS `libphp` behind the shim's vtable.
 pub struct PhpEmbedRuntime {
     /// The process-wide handle. `Mutex` because the trait's `serve` is `&self`
@@ -180,11 +274,18 @@ pub struct PhpEmbedRuntime {
     worker: Mutex<PhpWorker>,
     /// What every request is built from.
     cfg: PhpRuntimeConfig,
+    /// The dev-only loaded-file report (`MB.23.4.2`). `None` in production,
+    /// with reload off, and for a shim whose optional file sink is absent — in
+    /// which case every request path below is the one it always was.
+    report: Option<PhpFileReport>,
 }
 
 impl PhpEmbedRuntime {
     /// Loads `libphp` and the shim, runs `php_module_startup`, and returns the
     /// ready runtime — or a boot refusal.
+    ///
+    /// This is the production boot: no loaded-file report, no datagram socket,
+    /// no reporting work on any request.
     ///
     /// # Errors
     ///
@@ -196,9 +297,47 @@ impl PhpEmbedRuntime {
         shim: SharedObject,
         cfg: PhpRuntimeConfig,
     ) -> Result<Self, PhpError> {
+        Self::load_reporting(libphp, shim, cfg, None)
+    }
+
+    /// [`PhpEmbedRuntime::load`], plus the dev-only loaded-file report
+    /// (`MB.23.4.2`, `ADR-0014`).
+    ///
+    /// `report` is the write end of this view's report socketpair — created
+    /// before the fork by whoever forks the view, `MB.23.5`'s job — and `None`
+    /// is production and `--no-reload`: no socket, no reader, no report, and not
+    /// one byte of extra work per request.
+    ///
+    /// A shim without the optional `blastit_php_file_sink_install` symbol, or
+    /// one that refuses it, keeps that `None` behaviour exactly: this is an
+    /// **addition** to the ABI, never a requirement of it, so a PHP build or
+    /// shim from before it must serve as it always did.
+    ///
+    /// # Errors
+    ///
+    /// Exactly what [`PhpEmbedRuntime::load`] returns.
+    pub fn load_reporting(
+        libphp: SharedObject,
+        shim: SharedObject,
+        cfg: PhpRuntimeConfig,
+        report: Option<PhpLoadedReport>,
+    ) -> Result<Self, PhpError> {
         cfg.validate().map_err(PhpError::Config)?;
         let mut handle = Loaded::load(libphp, shim)?;
         handle.worker_init(&cfg.ini, &cfg.view_tmp)?;
+        let report = report.and_then(|report| {
+            let report = PhpFileReport::new(report)?;
+            // The sink is handed to the loader, which owns it (a `Box` it keeps
+            // for the process) and is the only thing that can name the address
+            // the shim holds. Both `NoSink` cases are silent by design — a shim
+            // without the optional symbol, or one that refuses it — and neither
+            // is a load failure: the worker then runs exactly as a production
+            // one does.
+            handle
+                .install_file_sink(FileSink::new())
+                .ok()
+                .map(|_installed| report)
+        });
         Ok(Self {
             worker: Mutex::new(PhpWorker {
                 handle,
@@ -206,6 +345,7 @@ impl PhpEmbedRuntime {
                 bailed: false,
             }),
             cfg,
+            report,
         })
     }
 
@@ -263,6 +403,14 @@ impl WorkerRuntime for PhpEmbedRuntime {
         };
 
         let entries = prepared.entries();
+        // The shim's snapshot is per request; this drops the last one. The cell
+        // is the loader's, so this is the same address the shim was handed —
+        // never a second owner of it.
+        if let Some(report) = &self.report
+            && let Some(sink) = worker.handle.file_sink()
+        {
+            report.begin(sink);
+        }
         let mut sink = PhpSink {
             io,
             headers: Vec::new(),
@@ -295,6 +443,15 @@ impl WorkerRuntime for PhpEmbedRuntime {
         } else {
             outcome
         };
+        // `MB.23.4.2`: what this request loaded, reported after the response is
+        // on the wire and before `DONE` — so it names exactly the files the
+        // response depended on, and a reporting failure can only ever lose a
+        // report, never change this request's outcome.
+        if let Some(report) = &self.report
+            && let Some(sink) = worker.handle.file_sink()
+        {
+            report.finish(sink);
+        }
         worker.bailed |= retire;
         RequestEnd::new(outcome, cpu_ns)
     }
@@ -338,6 +495,172 @@ fn ended(result: &blastit_php_sapi::abi::ResultV1, head_sent: bool) -> (DoneOutc
 /// count, and nothing else.
 fn should_recycle(bailed: bool, served: u32, max_requests: u32) -> bool {
     bailed || served >= max_requests
+}
+
+/// How much of one reported file the compiled→source map scans.
+///
+/// Blade's `/**PATH … ENDPATH**/` header is the first line of the compiled
+/// file and Twig's `getSourceContext()` is within the first kilobyte; 4 KiB is
+/// far past both and keeps the read bounded for a huge bundled artefact.
+const MAP_READ_BYTES: u64 = 4096;
+
+/// How many reported files one request scans for a source marker. A memo hit
+/// costs no read and does not count, so a steady-state view scans nothing.
+const MAX_MAP_FILES: usize = 128;
+
+/// How many compiled→source entries the memo keeps at most.
+///
+/// The bound is on the **memo**, not on the results: once it holds this many
+/// entries nothing new is remembered, so a long-lived view's map cannot grow
+/// without limit even if every request names a fresh artefact. A miss past the
+/// bound still reports its sources — it is simply rescanned next time, and one
+/// request's rescan budget is [`MAX_MAP_FILES`].
+const MAX_MAP_ENTRIES: usize = 4096;
+
+/// The template sources named by the compiled artefacts among `paths`.
+///
+/// This is the compiled→source half of the report (`docs/research/
+/// 2026-11-16-dev-fanotify-reload.md` §2.3): a framework compiles a template to
+/// PHP and the artefact carries its source's absolute path, so the `.twig` /
+/// `.blade.php` a route actually used is reported too — without touching PHP's
+/// plain-file stream wrapper or `open_basedir`, both of which stay exactly as
+/// they are.
+///
+/// Every failure is "no source": an unreadable file, a non-UTF-8 name and a
+/// budget that is spent all contribute nothing, and nothing here can fail a
+/// request.
+fn template_sources(paths: &[String], memo: &mut HashMap<PathBuf, Vec<String>>) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    let mut scanned = 0usize;
+    for path in paths {
+        let key = PathBuf::from(path);
+        if let Some(sources) = memo.get(&key) {
+            out.extend(sources.iter().cloned());
+            continue;
+        }
+        if scanned >= MAX_MAP_FILES {
+            continue;
+        }
+        scanned += 1;
+        let sources = sources_in_file(&key);
+        // The memo is bounded, empties included: `!sources.is_empty() ||
+        // memo.len() < MAX_MAP_ENTRIES` kept inserting compiled artefacts past
+        // the cap (an empty entry is still an entry), so a view that met a new
+        // artefact on every request grew this map forever.
+        if memo.len() < MAX_MAP_ENTRIES {
+            memo.insert(key, sources.clone());
+        }
+        out.extend(sources);
+    }
+    out.into_iter().collect()
+}
+
+/// The template sources `path` names, or nothing when it is not a compiled
+/// artefact (the ordinary case: most included files are hand-written PHP).
+fn sources_in_file(path: &Path) -> Vec<String> {
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut prefix = Vec::new();
+    // `take` is the bound: a huge file is read to `MAP_READ_BYTES` and no more.
+    if file.take(MAP_READ_BYTES).read_to_end(&mut prefix).is_err() {
+        return Vec::new();
+    }
+    // The prefix may end in the middle of a codepoint; a lossy view is what a
+    // text scan wants, and it cannot panic.
+    let text = String::from_utf8_lossy(&prefix);
+    let mut out = BTreeSet::new();
+    for source in compiled_sources(&text) {
+        if let Some(source) = absolute(&source) {
+            out.insert(source);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The template source paths a compiled artefact's text names.
+///
+/// Two markers, because two frameworks:
+///
+/// * Blade writes `<?php /**PATH /app/resources/views/welcome.blade.php
+///   ENDPATH**/ ?>` as the artefact's first line;
+/// * Twig's `getSourceContext()` returns `new Source("", "<name>", "<absolute
+///   path>")`, so the absolute literals of that method are the template.
+fn compiled_sources(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let open = "/**PATH ";
+    let close = " ENDPATH**/";
+    let mut at = 0usize;
+    while let Some(offset) = text.get(at..).and_then(|rest| rest.find(open)) {
+        let start = at + offset + open.len();
+        let Some(end) = text.get(start..).and_then(|rest| rest.find(close)) else {
+            break;
+        };
+        out.push(text[start..start + end].to_owned());
+        at = start + end;
+    }
+    if let Some(method) = text.find("getSourceContext") {
+        // One method's worth of text, not the whole file: a compiled Twig
+        // template is a few kilobytes and the `Source` is at the top.
+        let window: String = text[method..].chars().take(1024).collect();
+        for literal in quoted(&window) {
+            if literal.starts_with('/') {
+                out.push(literal.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// The single- or double-quoted runs of `text`, in order.
+///
+/// A backslash escapes the next byte, so an escaped quote does not end a run;
+/// the scan works on bytes and each run is converted to `str` on its own, which
+/// keeps a non-UTF-8 byte from losing the rest of the text.
+fn quoted(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let quote = bytes[index];
+        if quote != b'"' && quote != b'\'' {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && bytes[end] != quote {
+            if bytes[end] == b'\\' {
+                end += 1;
+            }
+            end += 1;
+        }
+        if end >= bytes.len() {
+            break;
+        }
+        if let Ok(run) = std::str::from_utf8(&bytes[start..end]) {
+            out.push(run);
+        }
+        index = end + 1;
+    }
+    out
+}
+
+/// `path` as the filesystem resolves it, when it is an absolute path that
+/// resolves to a UTF-8 one — the same normalisation the sink applies, so a
+/// template and a file included through a symlink are one entry in the report.
+fn absolute(path: &str) -> Option<String> {
+    if path.is_empty() || path.contains('\0') || !Path::new(path).is_absolute() {
+        return None;
+    }
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => Some(
+            resolved
+                .to_str()
+                .map_or_else(|| path.to_owned(), str::to_owned),
+        ),
+        Err(_) => Some(path.to_owned()),
+    }
 }
 
 /// Why [`read_body`] stopped early.
@@ -1988,5 +2311,248 @@ mod tests {
         assert!(!sink.head(200, Some(b"X-Big"), &big));
         assert!(sink.abort);
         assert!(sink.headers.is_empty());
+    }
+
+    // ------------------------------------------------- the loaded-file report
+
+    /// A temp directory of fixture files, removed with the directory.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("blastit-php-report-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            Self(dir)
+        }
+
+        fn write(&self, name: &str, contents: &str) -> String {
+            let path = self.0.join(name);
+            std::fs::write(&path, contents).expect("fixture");
+            canonical(&path.display().to_string())
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The canonical spelling of a fixture path, which is what the report must
+    /// carry (the sink and the map both canonicalise).
+    fn canonical(path: &str) -> String {
+        std::fs::canonicalize(path)
+            .expect("the fixture exists")
+            .display()
+            .to_string()
+    }
+
+    fn report_datagrams(peer: &UnixDatagram) -> Vec<crate::loaded::Batch> {
+        peer.set_nonblocking(true).expect("non-blocking peer");
+        let mut out = Vec::new();
+        let mut buf = [0u8; crate::loaded::MAX_BATCH_BYTES];
+        loop {
+            match peer.recv(&mut buf) {
+                Ok(n) => out.push(crate::loaded::decode(&buf[..n]).expect("the codec's own wire")),
+                Err(err) if err.kind() == ErrorKind::WouldBlock => return out,
+                Err(err) => panic!("recv: {err}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_report_is_a_boot_then_one_delta_of_sorted_absolute_paths() {
+        let scratch = Scratch::new("report");
+        let included = scratch.write("included.php", "<?php\n");
+        let helper = scratch.write("helper.php", "<?php\n");
+        let (ours, peer) = UnixDatagram::pair().expect("socketpair");
+        let report = PhpFileReport::new(PhpLoadedReport {
+            socket: ours,
+            source: 7,
+        })
+        .expect("a non-blocking reporter");
+        // The sink the shim would report into. In a worker the loader owns it
+        // (`Loaded::install_file_sink` takes it by value); here it is simply the
+        // cell these requests fill.
+        let sink = FileSink::new();
+
+        // What the shim's snapshot looks like: one path per included file, in
+        // PHP's own order. The relative and non-UTF-8 entries are the refused
+        // half — `EG(included_files)` is resolved, but a future shim bug must
+        // not put a relative path on the wire, and the codec could not carry a
+        // path that is not UTF-8 at all.
+        report.begin(&sink);
+        sink.record(helper.as_bytes());
+        sink.record(b"relative/thing.php");
+        sink.record(b"/not/utf8/\xff.php");
+        sink.record(included.as_bytes());
+        sink.record(included.as_bytes());
+        report.finish(&sink);
+
+        let frames = report_datagrams(&peer);
+        assert_eq!(frames.len(), 1, "one boot datagram");
+        let batch = &frames[0];
+        assert!(batch.boot, "a view's first report replaces its set");
+        assert_eq!(batch.seq, 0);
+        assert_eq!(batch.source, 7);
+        assert!(batch.paths.iter().all(|path| path.starts_with('/')));
+        let mut sorted = batch.paths.clone();
+        sorted.sort();
+        assert_eq!(batch.paths, sorted, "the report is sorted");
+        let mut wanted = vec![included, helper.clone()];
+        wanted.sort();
+        assert_eq!(batch.paths, wanted, "each file once, deduplicated");
+
+        // The second request is a delta, and an empty one sends nothing.
+        report.begin(&sink);
+        report.finish(&sink);
+        assert!(
+            report_datagrams(&peer).is_empty(),
+            "nothing loaded is not a report"
+        );
+        report.begin(&sink);
+        sink.record(helper.as_bytes());
+        report.finish(&sink);
+        let frames = report_datagrams(&peer);
+        assert_eq!(frames.len(), 1);
+        assert!(!frames[0].boot, "only the first report is a boot");
+        assert_eq!(frames[0].seq, 1, "the stream continues");
+        assert_eq!(frames[0].paths, vec![helper]);
+    }
+
+    #[test]
+    fn a_compiled_artefact_reports_the_template_it_was_built_from() {
+        let scratch = Scratch::new("compiled");
+        let template = scratch.write("index.twig", "{{ x }}");
+        // A Twig-compiled artefact: the source path is a literal of
+        // `getSourceContext()`, which is the marker the map reads.
+        let compiled = scratch.write(
+            "compiled.php",
+            &format!(
+                "<?php\nclass __TwigTemplate_1 {{\n  public function getSourceContext(): Source\n  {{\n    return new Source(\"\", \"index.twig\", \"{template}\");\n  }}\n}}\n"
+            ),
+        );
+        let blade_template = scratch.write("welcome.blade.php", "<h1>hi</h1>");
+        let blade = scratch.write(
+            "blade.php",
+            &format!("<?php /**PATH {blade_template} ENDPATH**/ ?>\n<h1>hi</h1>\n"),
+        );
+        let plain = scratch.write("plain.php", "<?php echo 1;\n");
+
+        let (ours, peer) = UnixDatagram::pair().expect("socketpair");
+        let report = PhpFileReport::new(PhpLoadedReport {
+            socket: ours,
+            source: 3,
+        })
+        .expect("a non-blocking reporter");
+        let sink = FileSink::new();
+        report.begin(&sink);
+        for path in [&compiled, &blade, &plain] {
+            sink.record(path.as_bytes());
+        }
+        report.finish(&sink);
+
+        let frames = report_datagrams(&peer);
+        assert_eq!(frames.len(), 1);
+        let mut wanted = vec![compiled, blade, plain, template, blade_template];
+        wanted.sort();
+        assert_eq!(
+            frames[0].paths, wanted,
+            "a compiled artefact brings its template source, and plain PHP brings nothing"
+        );
+    }
+
+    #[test]
+    fn the_source_markers_are_read_from_the_artefacts_text() {
+        // Blade: the header of a compiled view.
+        assert_eq!(
+            compiled_sources("<?php /**PATH /srv/app/views/a.blade.php ENDPATH**/ ?>"),
+            vec!["/srv/app/views/a.blade.php".to_owned()]
+        );
+        // Twig: only the absolute literal of `getSourceContext()` counts; the
+        // template *name* is relative, and relative is never a file to watch.
+        let twig = "class T { public function getSourceContext(): Source { \
+                    return new Source(\"\", \"index.twig\", \"/srv/app/templates/index.twig\"); } }";
+        assert_eq!(
+            compiled_sources(twig),
+            vec!["/srv/app/templates/index.twig".to_owned()]
+        );
+        // Ordinary PHP names no template at all, which is the common case.
+        assert!(compiled_sources("<?php\nforeach ($rows as $row) { echo $row; }\n").is_empty());
+        // And an unterminated marker is not a path: the scan stops rather than
+        // taking the rest of the file.
+        assert!(compiled_sources("<?php /**PATH /srv/app/a.blade.php").is_empty());
+    }
+
+    /// The map reads each artefact once: a memo hit is still a report after the
+    /// file is gone, which is the only way a test can see the difference
+    /// without timing the read.
+    #[test]
+    fn the_compiled_to_source_map_is_memoised_per_artefact() {
+        let scratch = Scratch::new("memo");
+        let template = scratch.write("page.twig", "{{ y }}");
+        let compiled = scratch.write(
+            "compiled.php",
+            &format!(
+                "<?php // getSourceContext\nreturn new Source('', 'page.twig', '{template}');\n"
+            ),
+        );
+        let mut memo = HashMap::new();
+        let first = template_sources(std::slice::from_ref(&compiled), &mut memo);
+        assert_eq!(first, vec![template.clone()]);
+        assert_eq!(memo.len(), 1, "the artefact is remembered");
+
+        std::fs::remove_file(&compiled).expect("remove the artefact");
+        assert_eq!(
+            template_sources(&[compiled], &mut memo),
+            vec![template],
+            "a memo hit is still reported after the file is unreadable"
+        );
+    }
+
+    /// The bound is on the memo itself: a full map remembers nothing new, while
+    /// the artefact in hand is still reported.
+    ///
+    /// `!sources.is_empty() || memo.len() < MAX_MAP_ENTRIES` inserted compiled
+    /// artefacts past the cap (an empty entry is still an entry), so a
+    /// long-lived view grew this map for every artefact it ever met.
+    #[test]
+    fn the_compiled_to_source_map_memo_stops_at_its_bound() {
+        let scratch = Scratch::new("memo-bound");
+        let template = scratch.write("bounded.twig", "{{ z }}");
+        let compiled = scratch.write(
+            "compiled.php",
+            &format!("<?php /**PATH {template} ENDPATH**/ ?>\n<p>hi</p>\n"),
+        );
+
+        // A memo already at its bound: the miss is still reported, and the memo
+        // does not grow — with a compiled artefact in hand, which is exactly the
+        // case the old condition let through.
+        let mut memo: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        for index in 0..MAX_MAP_ENTRIES {
+            memo.insert(PathBuf::from(format!("/nonexistent/{index}")), Vec::new());
+        }
+        assert_eq!(memo.len(), MAX_MAP_ENTRIES);
+        assert_eq!(
+            template_sources(std::slice::from_ref(&compiled), &mut memo),
+            vec![template.clone()],
+            "a miss past the bound is still reported"
+        );
+        assert_eq!(
+            memo.len(),
+            MAX_MAP_ENTRIES,
+            "the memo never grows past its bound"
+        );
+        assert!(
+            !memo.contains_key(Path::new(&compiled)),
+            "nothing is remembered once the memo is full"
+        );
+
+        // Below the bound it still remembers, which is what keeps a steady-state
+        // view from rescanning.
+        let mut memo = HashMap::new();
+        template_sources(std::slice::from_ref(&compiled), &mut memo);
+        assert_eq!(memo.len(), 1, "there is room, so the artefact is memoised");
     }
 }

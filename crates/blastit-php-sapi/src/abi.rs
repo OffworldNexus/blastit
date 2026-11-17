@@ -143,6 +143,24 @@ pub type WorkerShutdownFn = unsafe extern "C" fn();
 pub type RequestFn =
     unsafe extern "C" fn(req: *const RequestV1, sink: *const SinkV1, out: *mut ResultV1) -> i32;
 
+/// `blastit_php_file_sink_install`'s `included` callback: one included file.
+///
+/// `path` is non-`NULL`, **not** NUL-terminated and readable for `len` bytes; a
+/// zero length is never passed. The return value is ignored by the shim.
+pub type FileIncludedFn =
+    unsafe extern "C" fn(ctx: *mut c_void, path: *const c_char, len: usize) -> i32;
+
+/// `int32_t blastit_php_file_sink_install(void *ctx, included)`.
+///
+/// **Optional and additive**: a shim that does not export it reports no files,
+/// and the worker treats its absence as "no report" for the process lifetime
+/// rather than as a load failure — which is why `BLASTIT_PHP_ABI_VERSION` is
+/// still 1. `None` uninstalls. Resolved with `dlsym` on the *shim's* handle,
+/// never `RTLD_DEFAULT`: the shim is opened `RTLD_LOCAL`, so only that handle
+/// sees it.
+pub type FileSinkInstallFn =
+    unsafe extern "C" fn(ctx: *mut c_void, included: Option<FileIncludedFn>) -> i32;
+
 // The C side asserts the same numbers with `_Static_assert`; a change to either
 // file that moves a field fails one build or the other, never a request.
 const _: () = assert!(core::mem::size_of::<ResultV1>() == 32);

@@ -649,11 +649,12 @@ php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (n
 		--image "$(PHP_SAPI_IMAGE)" \
 		$(if $(PHP_SAPI_KEEP),--keep)
 
-# The real-pair half of the three protected PHP suites (nodes MB.3.39, MB.24.4).
+# The real-pair half of the protected PHP suites (nodes MB.3.39, MB.24.4,
+# MB.23.4.2).
 #
-# `make check` runs all three files on a host with **no** PHP, so every CI run of
-# it exercises their refusal branch only (`refused … install the PHP embed
-# package`). `rs-test-php` runs the same three suites against a real NTS `libphp`
+# `make check` runs all of them on a host with **no** PHP, so every CI run of it
+# exercises their refusal branch only (`refused … install the PHP embed
+# package`). `rs-test-php` runs the same suites against a real NTS `libphp`
 # plus the shim built for it — the `[route.php]` page answering `200` through
 # `view.chan` with `cpu_ns`, the `exit()`/fatal containment and the slot
 # respawn, the maps leg, and `critical_parallel_views`' wall-clock promise (four
@@ -661,24 +662,30 @@ php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (n
 # control of at least 800 ms) — which is what `MB.3.13`'s and `MB.24.4`'s
 # acceptance claims.
 #
-# `rs-test-php-image` still runs only the **two** its image compiles
-# (`critical_php_backend` and `critical_php_embed`: `e2e/php-sapi/Dockerfile`
-# hardcodes them and this target requires exactly two recorded executables), so
-# `critical_parallel_views` does not reach that leg yet — a filed plan follow-up
-# (`MB.24.4`), not a claim of this variable.
+# `rs-test-php-image` still runs only the **three** its image compiles
+# (`critical_php_backend`, `critical_php_embed` and `critical_file_sink`:
+# `e2e/php-sapi/Dockerfile` hardcodes them and this target requires exactly three
+# recorded executables), so `critical_parallel_views` does not reach that leg yet
+# — a filed plan follow-up (`MB.24.4`), not a claim of this variable.
 #
 # `--nocapture` is load-bearing, not decoration: the evidence lines
 # (`served: HTTP/1.1 200 OK  cpu_ns=…`, `retired pid … respawned pid …`) are
-# `println!`s of **passing** tests, which cargo captures and drops. All three
-# suites choose their branch from an independent `host_php()` probe, so on a host
-# without the pair the same command is green and says `refused`: that is why
+# `println!`s of **passing** tests, which cargo captures and drops. Every suite
+# chooses its branch from an independent host probe, so on a host without the
+# pair the same command is green and says `refused`: that is why
 # `.github/workflows/php-sapi.yml` greps the log for the refusal markers and for
 # the served ones instead of trusting the exit status.
 #
 # `BLASTIT_PHP_SHIM_DIR` is set here (not left to the suites' `target/php-sapi`
 # fallback) so the shim this host just built is the one the boot loads.
+#
+# `PHP_SINK_SUITE_ARGS` is separate only because it lives in another crate: the
+# protected loaded-file sink suite (`MB.23.4.2`) asserts the shim's
+# `blastit_php_file_sink_install` contract directly (`blastit_php_sapi::Loaded`),
+# so it is `-p blastit-php-sapi`, and `cargo` resolves `--test` per package.
 PHP_SUITE_ARGS := --test critical_php_backend --test critical_php_embed \
 	--test critical_parallel_views
+PHP_SINK_SUITE_ARGS := --test critical_file_sink
 # `php-sapi-e2e` builds this tag (forwarded to `php_sapi_probe.py --image`, so
 # the variable is the truth for both targets); `rs-test-php-image` runs the legs
 # against the pair inside it. Debian's `libphp8.4-embed` puts the library at
@@ -697,7 +704,7 @@ PHP_SUITE_ARGS := --test critical_php_backend --test critical_php_embed \
 #
 # — and raising the leg's base would have proved nothing about the older distros
 # the shim is shipped for. `e2e/php-sapi/Dockerfile` now installs libclang and
-# compiles both suites, so the image executes what it built; it records the two
+# compiles the suites, so the image executes what it built; it records the three
 # executables in `/src/target/php-suite-executables` and this target runs exactly
 # those (a musl leg records none, and is refused by name instead of passing).
 PHP_SAPI_IMAGE ?= blastit-php-sapi-e2e:local
@@ -708,12 +715,15 @@ PHP_SAPI_IMAGE_LIBPHP ?= /usr/lib/libphp$(PHP_SAPI_IMAGE_MINOR).so
 # suites cannot be pointed at a shim from a different build.
 PHP_SAPI_IMAGE_SHIM_DIR ?= /src/target/php-sapi
 
-rs-test-php: php-sapi ## Real-pair PHP legs: critical_php_backend + critical_php_embed + critical_parallel_views
+rs-test-php: php-sapi ## Real-pair PHP legs: critical_php_backend + critical_php_embed + critical_parallel_views + critical_file_sink
 	@echo "BLASTIT_PHP_SHIM_DIR=$(PHP_SAPI_OUT) cargo test -p blastit $(PHP_SUITE_ARGS) -- --nocapture"
 	BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_OUT)" \
 		$(RUST_ENV) $(CARGO) test -p blastit --locked $(PHP_SUITE_ARGS) -- --nocapture
+	@echo "BLASTIT_PHP_SHIM_DIR=$(PHP_SAPI_OUT) cargo test -p blastit-php-sapi $(PHP_SINK_SUITE_ARGS) -- --nocapture"
+	BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_OUT)" \
+		$(RUST_ENV) $(CARGO) test -p blastit-php-sapi --locked $(PHP_SINK_SUITE_ARGS) -- --nocapture
 
-rs-test-php-image: ## Docker: the two PHP legs, in the image that built them (what CI runs)
+rs-test-php-image: ## Docker: all three PHP suites, in the image that built them (what CI runs)
 	@docker image inspect "$(PHP_SAPI_IMAGE)" >/dev/null 2>&1 || { \
 		echo "rs-test-php-image: no image '$(PHP_SAPI_IMAGE)'; build it first:" >&2; \
 		echo "  make php-sapi-e2e PHP_SAPI_KEEP=1" >&2; \
@@ -747,8 +757,8 @@ rs-test-php-image: ## Docker: the two PHP legs, in the image that built them (wh
 			set --; \
 			while IFS= read -r binary; do set -- "$$@" "$$binary"; done \
 				< /src/target/php-suite-executables; \
-			if [ "$$#" -ne 2 ]; then \
-				echo "rs-test-php-image: the image records $$# suite executable(s), expected 2" >&2; \
+			if [ "$$#" -ne 3 ]; then \
+				echo "rs-test-php-image: the image records $$# suite executable(s), expected 3" >&2; \
 				echo "  a musl leg or a leg with suites:false builds none (MB.3.39/MB.3.58)" >&2; \
 				exit 1; \
 			fi; \

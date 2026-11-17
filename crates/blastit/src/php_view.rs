@@ -1103,10 +1103,17 @@ fn serve(
     config: blastit_view::php::PhpRuntimeConfig,
     view_end: OwnedFd,
 ) -> Result<(), String> {
-    let runtime = blastit_view::php::PhpEmbedRuntime::load(
+    let runtime = blastit_view::php::PhpEmbedRuntime::load_reporting(
         SharedObject::Fd(spawn.binding.libphp.as_raw_fd()),
         SharedObject::Fd(spawn.binding.shim.as_raw_fd()),
         config,
+        // `MB.23.4.2`'s dev-only loaded-file report. `None` is production and
+        // `--no-reload`: no socket, no reader, and not one byte of extra work
+        // per request. `MB.23.5` passes this view's report socketpair here —
+        // it is the zygote that creates it before the fork and adds the write
+        // end to the child's keep list, exactly like `view.chan` — from the
+        // `PhpViewSpawn` field it owns.
+        None,
     )
     .map_err(|err| format!("{err}"))?;
     // `ADR-0010` §3 / `MB.3.56`: every request re-checks the resolved entry
