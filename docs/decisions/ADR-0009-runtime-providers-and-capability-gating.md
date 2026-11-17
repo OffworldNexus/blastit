@@ -1,6 +1,6 @@
 # ADR-0009: Runtime Providers, Capability-Gated Python, CPU Fair Queuing & Distribution
 
-- **Status:** Accepted
+- **Status:** Accepted — Superseded in part by ADR-0016 (Decision 1's `WorkerRuntime`/`Upstream` trait requirement and its `setpgid(0,0)` sentence, Decision 2's `Upstream::capacity()` parenthetical, and Decision 5's distribution command spelling and wheel feature list; everything else stands)
 - **Date:** 2026-11-14
 - **Node:** MB.12 (amends Decision 1 of [ADR-0008](ADR-0008-fastcgi-backend-and-param-lockdown.md); paired with [ADR-0010](ADR-0010-php-embedded-via-libphp-embed.md))
 - **Owner:** architect

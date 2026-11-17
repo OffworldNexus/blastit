@@ -2796,3 +2796,98 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T12:57 [MB.33] (planner) created (task) Resolve blastit lsp without uv: Zed LspSettings -> which(blastit) -> GitHub Release download, with the exact [[capabilities]] the host grants and
 - 2026-11-17T13:08 [MB.23.5.1] (lead) reviewer VERDICT PASS (4 MINOR: 2 proof gaps -- no idempotent double-reload / queued-request-served-by-fresh-view test, and the 0x45 refusals proven via Frame::
 - 2026-11-17T13:08 [MB.23.5.1] (lead) status review -> done
+- 2026-11-17T13:08 [MB.23.5.2] (lead) status ready -> active
+- 2026-11-17T13:08 [MB.23.5.2] (lead) attempt 1/3 started
+- 2026-11-17T13:08 [MB.23.5.2] (lead) base 54ad5d9
+- 2026-11-17T13:17 [MB.34] (planner) created (epic) SQL + $?/... template validation with exact inner line:col spans, Quick Fixes and highlighting across blastit-sqlpolicy, blastit-manifest, blasti
+- 2026-11-17T13:17 [MB.34.1] (planner) created (task) Document SQL template validation, the exact squiggle, the $? Quick Fix and $?/... hover on the reference, local, CI and troubleshooting pages
+- 2026-11-17T13:17 [MB.34.2] (planner) created (task) Design the template rewrite, the exact decoded-span contract, codeAction/hover and the SQL grammar boundary (ADR-0013 amendment)
+- 2026-11-17T13:17 [MB.34.1] (planner) edited fields
+- 2026-11-17T13:17 [MB.34.3] (planner) created (task) blastit-sqlpolicy: one deterministic template validator ($?, IN ($?, ...), VALUES rows) with exact character offsets and a protected suite
+- 2026-11-17T13:17 [MB.34.4] (planner) created (task) blastit-manifest: carry each query's raw text and string Position, validate the template, and put every query refusal at its exact inner line:col
+- 2026-11-17T13:17 [MB.34.5] (planner) created (task) blastit lsp: advertise codeAction, ship the Parameterize SQL Quick Fix and $?/... hover, and grow critical_lsp without losing a case
+- 2026-11-17T13:17 [MB.34.6] (planner) created (task) Tree-sitter: tokenize query SQL (keywords, $?/$n, ...), capture it in highlights.scm, regenerate parser.c and re-pin the Zed grammar rev
+- 2026-11-17T13:17 [MB.34.7] (planner) created (task) Prove MB.34 end to end: CLI/JSON/LSP agree on line:col, the Quick Fix round trip is clean, and the documented commands run verbatim
+- 2026-11-17T13:17 [MB.35] (planner) created (epic) Separate cross-platform blastit-lsp binary for Linux, macOS and Windows while blastit stays Linux-only
+- 2026-11-17T13:17 [MB.35.1] (planner) created (task) Verify pg_query on Windows MSVC and both Apple targets, plus the Zed download/Zip/which facts, with citations
+- 2026-11-17T13:17 [MB.35.1] (planner) edited fields
+- 2026-11-17T13:17 [MB.35.2] (planner) created (task) Document blastit-lsp for Linux, macOS and Windows: install, run, what the editor gets, and what stays Linux-only
+- 2026-11-17T13:17 [MB.35.3] (planner) created (task) Amend ADR-0013 and design 8.3: blastit-lsp crate boundary, portability invariant, three-step resolution and the five-target matrix table
+- 2026-11-17T13:17 [MB.35.4] (planner) created (task) Extract crates/blastit-lsp (bin blastit-lsp + thin blastit lsp delegation) with the protected critical_lsp suite unchanged
+- 2026-11-17T13:17 [MB.35.5] (planner) created (task) Build, smoke and release blastit-lsp on five targets from platform_matrix, with workflow and packaging gates kept honest
+- 2026-11-17T13:17 [MB.35.6] (planner) created (task) Enforce blastit-lsp portability in make check and prove the documented commands end to end
+- 2026-11-17T13:18 [MB.32] (planner) edited fields
+- 2026-11-17T13:18 [MB.32.1] (planner) edited fields
+- 2026-11-17T13:18 [MB.33] (planner) edited fields
+- 2026-11-17T13:18 [MB.32] (planner) edited fields
+- 2026-11-17T13:18 [ME] (planner) Recorded deferred scope: first-party VS Code, JetBrains (IntelliJ/PhpStorm/PyCharm), Neovim and Vim Blastfile plugins sharing the cross-platform blastit-lsp fro
+- 2026-11-17T13:18 [MB.35] (planner) edited fields
+- 2026-11-17T13:18 [MB.35.1] (planner) edited fields
+- 2026-11-17T13:18 [MB.35.2] (planner) edited fields
+- 2026-11-17T13:18 [MB.34] (planner) Decomposed MB.34 into 7 DX-first leaves: docs (34.1), design (34.2), sqlpolicy template engine (34.3), manifest spans (34.4), LSP codeAction+hover (34.5), tree-
+- 2026-11-17T13:18 [MB.35] (planner) Decomposed MB.35 into 6 leaves: research (35.1), docs (35.2), ADR-0013 design (35.3), crate extraction (35.4), CI/packaging (35.5), portability guard+e2e (35.6)
+- 2026-11-17T13:18 [MB.32.1] (planner) edited fields
+- 2026-11-17T13:43 [MB.23.5.2] (lead) implementer needs_split: dev_reload.rs (1905 lines, the seams/ReportTable/debounce/Fire ladder), cli --no-reload and the two bot design corrections landed, and 
+- 2026-11-17T13:43 [MB.23.5.2] (lead) edited fields
+- 2026-11-17T13:43 [MB.23.5.2] (lead) status active -> ready
+- 2026-11-17T13:43 [MB.23.5.3] (lead) edited fields
+- 2026-11-17T13:44 [MB.23.5.2.1] (planner) created (task) Supervise the reload: one dev Source, an armed deadline, fresh per-boot reporters, the boot line and the live-reload critical suite
+- 2026-11-17T13:45 [MB.23.5.2.2] (planner) created (task) Reload the preload cycle and the Blastfile without dropping :8080: the adoption document, the exec, stage-1 adoption and the two debug seams
+- 2026-11-17T13:45 [MB.23.5.2.1] (lead) status ready -> active
+- 2026-11-17T13:45 [MB.23.5.2.1] (lead) attempt 1/3 started
+- 2026-11-17T13:45 [MB.23.5.2.1] (lead) base 54ad5d9 (dev_reload.rs + cli --no-reload already on disk from MB.23.5.2 attempt 1; that attempt left make check at EXIT=0, keep it there)
+- 2026-11-17T14:07 [MB.36] (planner) created (epic) View crates architecture: blastit-view-{python,php,static} composed by Cargo features over view.chan, replacing the Upstream/WorkerRuntime trait 
+- 2026-11-17T14:07 [MB.36.1] (planner) created (task) Design the view-crate graph and write ADR-0016: blastit-view transport, blastit-view-{python,php,static}, a thin blastit, and the exact file-by-f
+- 2026-11-17T14:07 [MB.36.2] (planner) created (task) Extract crates/blastit-view-static: openat2 root resolution, MIME/ETag/immutable/fallback responder, and the three protected static suites, with 
+- 2026-11-17T14:07 [MB.36.3] (planner) created (task) Extract crates/blastit-view-python: environ, input, request, response and the serve worker pool out of blastit-view, wired through blastit's pyth
+- 2026-11-17T14:07 [MB.36.4] (planner) created (task) Move immortal preload and the zygote fork into blastit-view-python behind the design's spawn-context seam, with no cycle back into blastit
+- 2026-11-17T14:07 [MB.36.5] (planner) created (task) Extract crates/blastit-view-php (worker, SAPI, discovery, pinning, probe), delete WorkerRuntime/runtime.rs, and shrink stage0.rs by the PHP half
+- 2026-11-17T14:07 [MB.36.6] (planner) created (task) Finish the Cargo feature matrix (default php+static, wheel python+php+static), teach the guards the new members, and rewrite ARCHITECTURE.md's cr
+- 2026-11-17T14:07 [MB.36.7] (planner) created (task) Prove MB.36 end to end: wheel smoke, Docker + rootless e2e, the DX-invariance replay, relocated critical suites, and a per-crate mutation audit (
+- 2026-11-17T14:07 [MB.9] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.1] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.1.1] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.1.2] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.2] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.2.1] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.2.1.1] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.2.1.2] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.2.1.3] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.2.2] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.3] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.4] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.9.5] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:07 [MB.3.24] (planner) status ready -> superseded: Superseded by MB.36: the view crate boundary is the view.chan protocol, not an Upstream/WorkerRuntime trait (ADR-0016)
+- 2026-11-17T14:08 [MB.36.2] (planner) edited fields
+- 2026-11-17T14:08 [MB.36.2] (planner) edited fields
+- 2026-11-17T14:09 ESCALATION #12 -> architect for MB.36.1 by conductor: owner-mandated crate-boundary architecture: split blastit-view-{python,php,static} over view.chan wire protocol, retire 
+- 2026-11-17T14:09 [MB.36.1] (lead) status ready -> active
+- 2026-11-17T14:09 [MB.36.1] (lead) attempt 1/3 started
+- 2026-11-17T14:09 HUMAN H-015 opened by conductor (node MB)
+- 2026-11-17T14:09 [MB.36.1] (planner) edited fields
+- 2026-11-17T14:09 [MB.36.1] (lead) status active -> ready: switched owner to cheap designer + 4 goldfish critics while expensive budget cap is raised
+- 2026-11-17T14:10 [MB.36.1] (lead) status ready -> active
+- 2026-11-17T14:10 [MB.36.1] (lead) attempt 2/3 started
+- 2026-11-17T14:10 [MB.36.1] (lead) base 54ad5d9e75d17d5fb085b5f55af2d30fd3a96ddf
+- 2026-11-17T14:13 [MB.23.5.2.1] (lead) finisher done: 10/10 critical_dev_reload, make check EXIT=0 (0 FAIL/0 FAILED), make docs-test 48 fences 0 failed with the dev-flags fence EXECUTED, release chec
+- 2026-11-17T14:13 [MB.23.5.2.1] (lead) status active -> review
+- 2026-11-17T14:15 HUMAN H-015 closed by conductor
+- 2026-11-17T14:21 [MB.23.5.2.1] (lead) REVIEW FAIL (6 MAJOR, 3 MINOR): --no-reload parses and is read nowhere so the advertised flag is inert; register leaks a route's previous report read end and on
+- 2026-11-17T14:21 [MB.23.5.2.1] (lead) status review -> ready
+- 2026-11-17T14:21 [MB.23.5.2.1] (lead) status ready -> active
+- 2026-11-17T14:21 [MB.23.5.2.1] (lead) attempt 2/3 started
+- 2026-11-17T15:06 [MB.23.5.2.1] (lead) attempt 2 done: all 6 MAJOR + 3 MINOR fixed; --no-reload real end-to-end (0 fds/0 marks/0 hooks, old body), register/on_fd leak+spin fixed, Exhausted/ENOSPC/cap
+- 2026-11-17T15:06 [MB.23.5.2.1] (lead) status active -> review
+- 2026-11-17T15:16 [MB.23.5.2.1] (lead) edited fields
+- 2026-11-17T15:16 [MB.23.5.2.1] (lead) REVIEW FAIL attempt 2 (1 BLOCKER, 2 MAJOR, 3 MINOR): the same index-shift class survives in the LOG source loop -- it iterates 0..self.sources.len() while  only
+- 2026-11-17T15:16 [MB.23.5.2.1] (lead) attempt 3/3 started
+- 2026-11-17T15:16 [MB.23.5.2.1] (lead) REVIEW FAIL attempt 2: the same index-shift class survives in the log-source loop, which still iterates over every source while the ready array only holds polle
+- 2026-11-17T15:16 [MB.23.5.2.1] (lead) status review -> active
+- 2026-11-17T15:38 [MB.23.5.2.1] (lead) attempt 3: log-source loop bounded by polled_source_range (red when written 0..live_sources) with a spawn/report collision test; the reloading gate and Fire::cy
+- 2026-11-17T15:38 [MB.23.5.2.1] (lead) status active -> review
+- 2026-11-17T15:48 [MB.23.5.2.1] (lead) edited fields
+- 2026-11-17T15:48 [MB.23.5.2.1] (lead) attempt 3 FAIL on two defects confined to the NEW protected test (not the feature): a views.len()==2 wait that times out because a lazily-retired route never re
+- 2026-11-17T15:48 [MB.23.5.2.1] (lead) status review -> ready
+- 2026-11-17T15:48 [MB.23.5.2.1] (lead) status ready -> active
+- 2026-11-17T15:48 [MB.23.5.2.1] (lead) attempt 4/4 started
+- 2026-11-17T15:56 [MB.36.1] (lead) status active -> done
